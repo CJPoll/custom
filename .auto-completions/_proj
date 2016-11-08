@@ -1,0 +1,3 @@
+#compdef proj
+
+_arguments "1:First:($(find $HOME/dev -depth 1 | sed 's;/Users/.*/dev/;;g'))"

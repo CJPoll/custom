@@ -1,0 +1,5 @@
+#! /usr/bin/env bash
+
+PROGRAM=${1};
+
+ps aux | grep ${PROGRAM} | grep -v grep | grep -v cap | awk '{ print $2 }' | xargs -I {} echo "kill {}" | bash

@@ -1,0 +1,10 @@
+#! /usr/bin/env ruby
+
+raise "Requires a new command name" if ARGV.length < 1
+
+file_name = ARGV.first
+
+full_name = "~/.git-custom/git-#{ file_name }"
+
+system "$EDITOR #{ full_name }"
+system "chmod u+x #{ full_name }"

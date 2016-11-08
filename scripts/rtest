@@ -1,0 +1,8 @@
+#! /usr/bin/env bash
+
+FILE_NAME="$1";
+shift;
+REGEX="$@";
+
+
+ruby -Itest -Ilib "$FILE_NAME" --name /"$REGEX"/;

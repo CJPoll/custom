@@ -1,0 +1,131 @@
+#! /usr/bin/env ruby
+require 'thor'
+require 'cardlet'
+
+class QuestionBuilder
+  def self.run
+    print 'Question: '
+    prompt = STDIN.gets.chomp
+
+    print 'Answer: '
+    answer = STDIN.gets.chomp
+
+    {
+      'type' => 'question',
+      'prompt' => prompt,
+      'answer' => answer
+    }
+  end
+end
+
+class FacetedQuestionBuilder
+  def self.run
+    print 'Question: '
+    prompt = STDIN.gets.chomp
+
+    hash = {
+      'type' => 'faceted_question',
+      'prompt' => prompt,
+      'facets' => []
+    }
+
+    print 'Facet: '
+    facet = STDIN.gets.chomp
+
+    until facet.empty?
+      hash['facets'] << facet
+      print 'Facet: '
+      facet = STDIN.gets.chomp
+    end
+
+    hash
+  end
+end
+
+def create_card_hash type
+  card_builders = {
+    "question" => QuestionBuilder,
+    "faceted_question" => FacetedQuestionBuilder
+  }
+
+  card_builders[type].run
+end
+
+class Card < Thor
+  desc 'create', 'create a new card'
+  def create(deck=nil)
+    deck = get_deck unless deck
+    raise DeckNotFoundError unless Cardlet.exist?(deck)
+
+    print 'Type: '
+    type = STDIN.gets.chomp
+
+    hash = create_card_hash(type)
+
+    Cardlet.create_card(deck, hash)
+  end
+
+  desc 'list', 'list cards in a deck'
+  def list(deck=nil)
+    deck = get_deck unless deck
+    raise DeckNotFoundError unless Cardlet.exist?(deck)
+    cards = Cardlet.list_cards(deck)
+    puts cards.map &:as_json
+  end
+
+  desc 'tag [uuid uuid uuid]', 'tag a list of cards with a tag'
+  option :tag, required: true
+  option :deck
+  def tag(*cards)
+    deck = options[:deck] || get_deck
+    raise DeckNotFoundError unless Cardlet.exist?(deck)
+
+    Cardlet.tag(deck, cards, options[:tag])
+  end
+
+  private
+
+  def get_deck
+    puts 'Which deck?'
+    return STDIN.gets.chomp
+  end
+end
+
+class Flash < Thor
+  desc 'list', 'list your decks'
+  def list
+    puts Cardlet.list_decks
+  end
+
+  desc 'cards', 'batch create cards in a deck. Ctrl-C to quit'
+  def cards
+    config_dir = "#{Dir.home}/.cardlet/decks"
+
+    print 'Deck Name: '
+    deck_name = STDIN.gets.chomp
+
+    unless Cardlet::Persistence::Deck.exist?(deck_name, config_dir)
+      system "cardlet deck create --name #{deck_name}" 
+    end
+
+    while true do
+      print 'Type: '
+      type = STDIN.gets.chomp
+
+      hash = create_card_hash(type)
+
+      Cardlet.create_card(deck_name, hash)
+    end
+  end
+
+  option :tag
+  desc 'test', 'Test yourself with the given deck'
+  def test(deck)
+    Cardlet.test(deck, options[:tag])
+  end
+
+  desc 'card [ create ]', 'Do something with a card'
+  subcommand 'card', Card
+end
+
+Flash.start(ARGV)

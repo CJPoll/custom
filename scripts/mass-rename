@@ -1,0 +1,13 @@
+#! /usr/bin/env bash
+
+function main()
+{
+  PATTERN="$1";
+  SUBSTITUTION="$2";
+
+  for FILE in *.java.txt; do
+    echo "mv ${FILE} $(echo ${FILE} | gsed ${SUBSTITUTION})"
+  done
+}
+
+main "$@";

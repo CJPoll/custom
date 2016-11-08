@@ -1,0 +1,5 @@
+#! /usr/bin/env bash
+
+SEARCH_TERM=${1};
+
+docker ps  | grep "${SEARCH_TERM}" | awk '{ print $1  }' | xargs -o -I {} docker exec -it {} bash

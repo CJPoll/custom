@@ -1,0 +1,1 @@
+find -E . -name "*.sw[op]" | xargs rm

@@ -1,0 +1,12 @@
+#! /usr/bin/env ruby
+
+require 'git_command'
+
+command :current do
+	log = `git log -n 1`
+	match = /Author: (.*) <(.*)>/.match(log)
+	author = match[1]
+	email = match[2]
+
+	puts "The commit was written by #{ author }, whose email is #{ email }"
+end

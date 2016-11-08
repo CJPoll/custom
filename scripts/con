@@ -1,0 +1,224 @@
+#! /usr/bin/env ruby
+
+require 'git_command'
+
+module Redis
+  def self.parse_url(url)
+    match_data = /redis:\/\/(?<host>[^:]+):(?<port>\d+)\/(?<db_number>.*)/.match(url)
+  end
+end
+
+module Postgres
+  def self.append_pgpass(host:, port:, db_name:, user_name:, password:)
+    pass_line = "#{host}:#{port}:#{db_name}:#{user_name}:#{password}"
+    file_name = "#{Dir.home}/.pgpass"
+
+    unless (File.file?(file_name) && File.readlines(file_name).grep(pass_line + "\n").length > 0)
+      File.open(file_name, 'a') do |file|
+        file.puts(pass_line)
+      end
+
+      File.chmod(0600, file_name)
+    end
+  end
+
+  def self.login(host:, port:, db_name:, user_name:, password:)
+    system "psql --username #{user_name} --host #{host} --port #{port} #{db_name}"
+  end
+
+  def self.load_schema(host:, port:, db_name:, user_name:, password:)
+    system "psql --username #{user_name} --host #{host} --port #{port} #{db_name} < /tmp/pg_dump_file.sql"
+  end
+
+  def self.dump_local
+    system "pg_dump --data-only --exclude-table=\"schema_migrations\" --exclude-table=\"products\" review_rocket_development > /tmp/pg_dump_file.sql"
+  end
+
+  def self.parse_url(url)
+    match_data = /postgres:\/\/(?<user>[^:]+):(?<password>[^@]+)@(?<host>[^:]+):(?<port>\d+)\/(?<db_name>.*)/.match(url)
+    {
+      user_name: match_data[:user],
+      password: match_data[:password],
+      host: match_data[:host],
+      port: match_data[:port],
+      db_name: match_data[:db_name]
+    }
+  end
+end
+
+module Convox
+  def self.apps
+    result = `convox apps`
+    result
+  end
+
+  def self.app_running_yet?(app_name)
+    result = `convox apps info #{app_name} | grep "Status\s*running"`
+    !result.empty?
+  end
+
+  def self.create_service(app_name, service_type)
+    puts "Creating Service"
+    system "convox services create #{service_type} --name #{Convox.service_name(app_name, service_type)}"
+  end
+
+  def self.deploy(app_name)
+    puts "Deploying #{app_name}"
+    system "convox deploy --app #{app_name}"
+  end
+
+  def self.has_app?(app_name)
+    result = `convox apps | grep #{app_name}`
+    !result.empty?
+  end
+
+  def self.migrate_database!(app_name, language)
+    if language == :ruby
+      puts "Migrating DB for #{app_name}"
+      `convox run web "bundle exec rake db:migrate" --app #{app_name}`
+    else
+      raise "Unsupported language to migrate db [#{language}] [#{app_name}]"
+    end
+  end
+
+  def self.promote(app_name, key)
+    puts "Promoting #{app_name}"
+    `convox releases promote #{key} --app #{app_name}`
+  end
+
+  def self.promotion_key(resp)
+    resp.split(/\s/).last.chomp('`')
+  end
+
+  def self.proxy(service_name, port=nil)
+    if port
+      system "convox services proxy #{service_name} --listen #{port} &"
+    else
+      system "convox services proxy #{service_name} &"
+    end
+    puts "Sleeping for 5 seconds to give time to proxy"
+    sleep 5
+  end
+
+  def self.service_name(app_name, service_type)
+    "#{app_name}-#{service_type}"
+  end
+
+  def self.service_running_yet?(service_name)
+    result = `convox services info #{service_name} | grep "Status\s*running"`
+    !result.empty?
+  end
+
+  def self.set_env(app_name, map)
+    kv_pairs = map.map {|k, v| "#{k}=\"#{v.chomp}\""}
+    kv_pairs = kv_pairs.join(" ")
+    puts "Setting Env for #{app_name} (#{kv_pairs})"
+
+    `convox env set #{kv_pairs} --app #{app_name}`
+  end
+
+  def self.watch(&block)
+    until result = block.call
+      sleep(5)
+    end
+
+    result
+  end
+
+  def self.service_url(service_name)
+    `convox services info #{service_name} | grep URL | awk '{ print $2 }'`
+  end
+end
+
+module Setup
+  def self.review_rocket
+    app_name = 'review-rocket-dev'
+    dir_name = 'review_rocket'
+
+    #setup(app_name, dir_name)
+    pg_name = Convox.service_name(app_name, :postgres)
+
+    #system <<-EOC
+    #convox scale web --memory=1024 --app #{app_name}
+    #convox scale worker --memory=1024 --app #{app_name}
+    #convox ssl update web:443 PodiumSSL3 --app #{app_name}
+    #EOC
+
+    #Convox.create_service(app_name, :postgres)
+
+    #Convox.watch do
+    #  Convox.service_running_yet?(pg_name)
+    #end
+
+    pg_url = Convox.service_url(pg_name)
+    #resp = Convox.set_env(app_name, {'DATABASE_URL' => pg_url})
+    #promotion_key = Convox.promotion_key(resp)
+    #Convox.promote(app_name, promotion_key)
+
+    #Convox.create_service(app_name, :redis)
+
+    redis_name = Convox.service_name(app_name, :redis)
+
+    #Convox.watch do
+    #  Convox.service_running_yet?(redis_name)
+    #end
+
+    redis_url = Convox.service_url(redis_name)
+    #resp = Convox.set_env(app_name, {'REDIS_URL' => redis_url})
+    #promotion_key = Convox.promotion_key(resp)
+    #Convox.promote(app_name, promotion_key)
+
+    #Convox.migrate_database!(app_name, :ruby)
+
+    Postgres.dump_local
+
+    pg_url_data = Postgres.parse_url(pg_url)
+    pg_url_data[:host] = "127.0.0.1"
+
+    Convox.proxy(pg_name)
+
+    Postgres.append_pgpass(**pg_url_data)
+    Postgres.login(**pg_url_data)
+  end
+
+  def self.setup(app_name, dir_name)
+    unless Convox.app_running_yet?(app_name)
+      system <<-EOC
+      convox switch ${DEV_RACK};
+      convox apps create #{app_name}
+      EOC
+
+      Convox.watch do
+        Convox.app_running_yet?(app_name)
+      end
+    end
+
+    #Convox.deploy(app_name)
+  end
+end
+
+command :setup do |app_name|
+  unless Convox.has_app?(app_name)
+    Setup.send(app_name)
+  end
+end
+
+command :test do |app_name|
+  pg_name = Convox.service_name(app_name, :postgres)
+  pg_url = Convox.service_url(pg_name)
+  pg_url_data = Postgres.parse_url(pg_url)
+  Postgres.append_pgpass(**pg_url_data)
+end
+
+def url_data(app_name)
+  pg_name = Convox.service_name(app_name, :postgres)
+  pg_url = Convox.service_url(pg_name)
+  pg_url_data = Postgres.parse_url(pg_url)
+
+  pg_url_data[:host] = "127.0.0.1"
+  pg_url_data[:port] = "5433"
+
+  loca
+  Postgres.append_pgpass(**pg_url_data)
+  pg_url_data
+end

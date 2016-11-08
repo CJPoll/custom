@@ -1,0 +1,17 @@
+#! /usr/bin/env bash
+
+BRANCH_NAME=${1};
+
+echo "BRANCH: ${BRANCH_NAME}"
+
+if [ -z ${BRANCH_NAME} ]; then
+	echo "Exists"
+	git fetch origin --prune && clear && git branch -r | cut -d / -f 2 | pick | xargs git checkout;
+else
+	echo "NoExists"
+	git fetch origin --prune && git branch -r | git checkout --track "origin/${BRANCH_NAME}"
+fi
+
+echo "Checked out"
+
+git diff --name-status master..HEAD | awk '{ print $2  }' | xargs -o ${EDITOR} -p

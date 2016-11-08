@@ -1,0 +1,4 @@
+#! /usr/bin/env bash
+
+STATSD_DIR="${HOME}/dev/statsd";
+node "${STATSD_DIR}/stats.js" "${STATSD_DIR}/exampleConfig.js";

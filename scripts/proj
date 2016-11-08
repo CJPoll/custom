@@ -1,0 +1,30 @@
+#! /usr/bin/env bash
+
+PROGRAM="${1}";
+PROJ_DIR="";
+
+IFS=":"; read -ra DEVDIRS <<< "${DEVPATH}";
+
+for DIR in "${DEVDIRS[@]}"; do
+  APP_PATH="${DIR}/${PROGRAM}";
+
+  if [ -d ${APP_PATH} ]; then
+    PROJ_DIR=${APP_PATH}
+    break;
+  fi
+done
+
+if [ -z ${PROJ_DIR} ]; then
+  echo "Project ${PROGRAM} does not exist!";
+  exit 1;
+fi
+
+SESSIONS=$(tmux list-sessions | grep ${PROGRAM} | cut -d" " -f1 | wc -l);
+
+if [ "${SESSIONS}" -eq 0 ]; then
+  tmux new-session -d -n "Work" -c "${PROJ_DIR}" -s ${PROGRAM};
+  tmux send-keys -t "${PROGRAM}:0" "init-session ${PROGRAM} ${PROJ_DIR}" ENTER
+  tmux switch-client -t ${PROGRAM};
+else
+  tmux switch-client -t ${PROGRAM};
+fi
