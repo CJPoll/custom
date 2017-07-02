@@ -1,25 +1,48 @@
 #! /usr/bin/env ruby
 
+HOME_IP = '67.177.42.147'
+
 REGISTERED_SERVERS = {
-  "server" => {
-    "env" => {
-      host: "",
-      ports:  {
+  'server' => {
+    'env' => {
+      host: '',
+      ports: {
         9001 => 9001, # Packrat's Port
         4369 => 4369  # EPMD Port
       },
       ssh_forward: false
     },
   },
-  "home" => {
-    "root" => {
-      host: "root@50.160.4.247",
-      ports: [],
+  'home' => {
+    'root' => {
+      host: "root@#{HOME_IP}",
+      ports: {},
       ssh_forward: true
     },
-    "terraria" => {
-      host: "root@192.168.0.29",
-      ports: [],
+    'plex' => {
+      host: 'root@192.168.0.11',
+      ssh_forward: true,
+      ports: {
+        32400 => 32400
+      }
+    },
+    'terraria' => {
+      host: 'root@192.168.0.13',
+      ssh_forward: true,
+      ports: {
+        9001 => 9001
+      }
+    },
+    'dev' => {
+      host: HOME_IP,
+      port: 4150,
+      ports: {
+        3000 => 3000,
+        4369 => 4369,
+        9001 => 9001,
+        5672 => 5672,
+        15672 => 15672
+      },
       ssh_forward: true
     }
   }
@@ -30,27 +53,30 @@ env = ARGV[1]
 
 if service.nil? || env.nil?
   puts
-  puts "Usage:"
+  puts 'Usage:'
   puts
-  puts "shh <service> <env>"
+  puts 'shh <service> <env>'
   puts
   exit(1)
 end
 
 unless REGISTERED_SERVERS.key?(service) && REGISTERED_SERVERS[service].key?(env)
   puts
-  puts "Unknown service or env"
+  puts 'Unknown service or env'
   puts
   exit(1)
 end
 
-command = REGISTERED_SERVERS[service][env][:ports].map do |k,v|
+command = (REGISTERED_SERVERS[service][env][:ports] || {}).map do |k,v|
   "-L #{k}:localhost:#{v}"
 end
 
+port = REGISTERED_SERVERS[service][env][:port]
+
 command << REGISTERED_SERVERS[service][env][:host]
-command.unshift ' -A 'if REGISTERED_SERVERS[service][env][:ssh_forward]
-command.unshift("ssh")
+command.unshift << "-p #{port}" if port
+command.unshift '-A' if REGISTERED_SERVERS[service][env][:ssh_forward]
+command.unshift('ssh')
 
 command = command.join(" ")
 puts command

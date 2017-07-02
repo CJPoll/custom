@@ -19,10 +19,10 @@ if [ -z ${PROJ_DIR} ]; then
   exit 1;
 fi
 
-SESSIONS=$(tmux list-sessions | grep ${PROGRAM} | cut -d" " -f1 | wc -l);
+SESSIONS=$(tmux list-sessions | grep "${PROGRAM}\b" | cut -d" " -f1 | wc -l);
 
 if [ "${SESSIONS}" -eq 0 ]; then
-  tmux new-session -d -n "Work" -c "${PROJ_DIR}" -s ${PROGRAM};
+  tmux new-session -Add -n "Work" -c "${PROJ_DIR}" -s ${PROGRAM};
   tmux send-keys -t "${PROGRAM}:0" "init-session ${PROGRAM} ${PROJ_DIR}" ENTER
   tmux switch-client -t ${PROGRAM};
 else

@@ -3,8 +3,8 @@ require 'thor'
 
 class Hub < Thor
   desc 'clone', 'clones a repo from github'
-  def clone(id)
-    system "git clone git@github.com:#{ id }.git"
+  def clone(id, dest='')
+    system "git clone git@github.com:#{ id }.git #{dest}"
   end
 
   desc 'create', 'creates a repo on github'

@@ -1,4 +1,7 @@
 #! /usr/bin/env bash
 
-tmux switch-client -t 0;
-tmux send-keys -t 0:0 "tmux kill-session -a" ENTER
+SESSION=$(tmux list-sessions | head -n 1 | awk '{ print $1 }');
+SESSION=$(echo "puts '${SESSION}'.split(':').first" | ruby)
+
+tmux switch-client -t "${SESSION}";
+tmux send-keys -t "${SESSION}":0 "tmux kill-session -a" ENTER
