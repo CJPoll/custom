@@ -33,9 +33,21 @@ REGISTERED_SERVERS = {
         9001 => 9001
       }
     },
+    'devroot' => {
+      host: "root@#{HOME_IP}",
+      port: 83,
+      ports: {
+        3000 => 3000,
+        4369 => 4369,
+        9001 => 9001,
+        5672 => 5672,
+        15672 => 15672
+      },
+      ssh_forward: true
+    },
     'dev' => {
-      host: HOME_IP,
-      port: 4150,
+      host: "dev@#{HOME_IP}",
+      port: 83,
       ports: {
         3000 => 3000,
         4369 => 4369,
