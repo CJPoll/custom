@@ -1,51 +1,63 @@
 #! /usr/bin/env ruby
 
+HOME_IP='67.177.42.147'
+
 REGISTERED_SERVERS = {
-  "server" => {
-    "env" => {
-      host: "",
-      ports:  {
-        9001 => 9001, # Packrat's Port
-        4369 => 4369  # EPMD Port
-      },
-      ssh_forward: false
-    },
-  },
-  "home" => {
-    "root" => {
-      host: "root@50.160.4.247",
-      ports: [],
-      ssh_forward: true
-    },
-    "terraria" => {
-      host: "root@192.168.0.29",
-      ports: [],
-      ssh_forward: true
-    }
-  }
+	"server" => {
+		"env" => {
+			host: "",
+			ports:  {
+				9001 => 9001, # Packrat's Port
+				4369 => 4369  # EPMD Port
+			},
+			ssh_forward: false
+		},
+	},
+	"home" => {
+		"root" => {
+			host: "root@#{HOME_IP}",
+			ports: [],
+			ssh_forward: true
+		},
+		"terraria" => {
+			host: "root@#{HOME_IP}",
+			ports: [],
+			ssh_forward: true
+		},
+		"dev" => {
+			host: "dev@192.168.0.55",
+			ports: [],
+			ssh_forward: true
+		},
+		"devroot" => {
+			host: "root@192.168.0.55",
+			ports: [],
+			ssh_forward: true
+		}
+	}
 }
 
 service = ARGV[0]
 env = ARGV[1]
 
 if service.nil? || env.nil?
-  puts
-  puts "Usage:"
-  puts
-  puts "shh <service> <env>"
-  puts
-  exit(1)
+	puts
+	puts "Usage:"
+	puts
+	puts "shh <service> <env>"
+	puts
+	exit(1)
 end
 
 unless REGISTERED_SERVERS.key?(service) && REGISTERED_SERVERS[service].key?(env)
-  puts
-  puts "Unknown service or env"
-  puts
-  exit(1)
+	puts
+	puts "Unknown service or env"
+	puts
+	exit(1)
 end
 
 command = REGISTERED_SERVERS[service][env][:ports].map do |k,v|
-  "-L #{k}:localhost:#{v}"
+	"-L #{k}:localhost:#{v}"
 end
 
 command << REGISTERED_SERVERS[service][env][:host]
