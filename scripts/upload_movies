@@ -1,0 +1,30 @@
+#! /usr/bin/env ruby
+
+#NAME="${1}";
+#
+#if [ -z "${NAME}" ]; then
+#  >&2 echo "You need to specify a movie";
+#  exit 1;
+#fi
+
+movies =`find "./KID MOVIES" "./MOVIES"`.split("\n")
+
+
+uploads = movies.select do |movie|
+  puts movie
+
+  response = gets.chomp
+
+  if response.empty?
+    puts "Not uploading #{movie}"
+    false
+  else
+    puts "Will upload #{movie}"
+    true
+  end
+end
+
+uploads.each do |movie|
+  puts "uploading #{movie}"
+  system "upload \"#{movie}\" kids"
+end

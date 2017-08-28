@@ -60,9 +60,12 @@ command = REGISTERED_SERVERS[service][env][:ports].map do |k,v|
 	"-L #{k}:localhost:#{v}"
 end
 
+port = REGISTERED_SERVERS[service][env][:port]
+
 command << REGISTERED_SERVERS[service][env][:host]
-command.unshift ' -A 'if REGISTERED_SERVERS[service][env][:ssh_forward]
-command.unshift("ssh")
+command.unshift << "-p #{port}" if port
+command.unshift '-A' if REGISTERED_SERVERS[service][env][:ssh_forward]
+command.unshift('ssh')
 
 command = command.join(" ")
 puts command
