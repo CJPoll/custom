@@ -33,7 +33,12 @@ REGISTERED_SERVERS = {
 			host: "root@192.168.0.55",
 			ports: [],
 			ssh_forward: true
-		}
+		},
+		"docker" => {
+			host: "root@192.168.0.53",
+			ports: [],
+			ssh_forward: true
+		},
 	}
 }
 

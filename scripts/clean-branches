@@ -1,0 +1,19 @@
+#! /usr/bin/env bash
+
+(IFS='
+'
+
+for BRANCH in $(git branch | grep -v '\*' | grep -v '^\s*master$'); do
+	clear;
+	BRANCH_NAME=$(echo "${BRANCH}" | sed 's/^\s*//' | sed 's/\s*$//');
+	git --no-pager log --name-only -n 1 "${BRANCH_NAME}";
+
+	echo "Do you want to delete ${BRANCH_NAME}?";
+
+	select yn in "Yes" "No"; do
+		case $yn in
+			Yes ) git branch -D "${BRANCH_NAME}"; break;;
+			No ) break;;
+		esac
+	done
+done)
