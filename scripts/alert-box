@@ -1,0 +1,14 @@
+#! /usr/bin/env zsh
+
+MESSAGE="${1}";
+APP="${2}";
+
+if [ -z "${MESSAGE}" ]; then
+	MESSAGE="Done!"
+fi
+
+if [ -z "${APP}" ]; then
+	APP="iTerm2";
+fi
+
+osascript -e "tell app \"iTerm2\" to display dialog \"${MESSAGE}\" buttons {\"OK\"} with icon caution"

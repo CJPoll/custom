@@ -1,0 +1,25 @@
+#! /usr/bin/env zsh
+
+APP="${1}";
+
+if [ -z "${APP}" ]; then
+	>&2 echo;
+	>&2 echo "Please provide an application";
+	>&2 echo;
+	>&2 echo "Example:";
+	>&2 echo;
+	>&2 echo "wait-to-running black-mamba-prod";
+	>&2 echo;
+	exit 1;
+fi
+
+CURRENT_STATUS=$(convox apps info -a "${APP}" | grep Status | awk '{ print $2 }')
+
+while [[ "${CURRENT_STATUS}" != "running" ]]; do
+	DATE=$(date);
+	echo "${DATE} - Current Status is ${CURRENT_STATUS}"
+	sleep 30;
+	CURRENT_STATUS=$(convox apps info -a "${APP}" | grep Status | awk '{ print $2 }')
+done
+
+echo "Current Status is ${CURRENT_STATUS}"

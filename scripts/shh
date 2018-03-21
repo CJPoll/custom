@@ -19,6 +19,10 @@ REGISTERED_SERVERS = {
       ports: {},
       ssh_forward: true
     },
+    'docker' => {
+      host: 'dev@192.168.0.53',
+      ssh_forward: true
+    },
     'plex' => {
       host: 'root@192.168.0.11',
       ssh_forward: true,

@@ -1,6 +1,12 @@
 #! /usr/bin/env bash
 
 PROGRAM="${1}";
+
+if [ -z "${PROGRAM}" ]; then
+	>&2 echo "Oh noez! You didn't say which program 😱";
+	exit 1;
+fi
+
 PROJ_DIR="";
 
 IFS=":"; read -ra DEVDIRS <<< "${DEVPATH}";
@@ -15,7 +21,7 @@ for DIR in "${DEVDIRS[@]}"; do
 done
 
 if [ -z ${PROJ_DIR} ]; then
-  echo "Project ${PROGRAM} does not exist!";
+  >&2 echo "🚫 🔎  Project ${PROGRAM} does not exist!";
   exit 1;
 fi
 

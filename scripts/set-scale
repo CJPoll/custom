@@ -1,0 +1,33 @@
+#! /usr/bin/env zsh
+
+APP="${1}"
+DESIRED_COUNT="${2}";
+PROCESS_TYPE="${3}";
+
+if [ -z "${APP}" ]; then
+	>&2 echo "You need to specify which app.";
+	exit 1;
+fi
+
+if [ -z "${DESIRED_COUNT}" ]; then
+	DESIRED_COUNT=0;
+fi
+
+if [ -z "${PROCESS_TYPE}" ]; then
+	PROCESS_TYPE="kafka";
+fi
+
+CURRENT_RUNNING=$(convox scale -a mamba-kafka | grep "kafka" | awk '{ print $3 }');
+
+if [[ "${CURRENT_RUNNING}" != "${DESIRED_COUNT}" ]]; then
+	echo "Scaling number of kafka instances to ${DESIRED_COUNT}";
+	convox scale kafka --count "${DESIRED_COUNT}" -a mamba-kafka;
+fi
+
+until [[ "${CURRENT_RUNNING}" == "${DESIRED_COUNT}" ]]; do
+	echo "Currently has ${CURRENT_RUNNING} containers running. Waiting for app to scale.";
+	sleep 30;
+	CURRENT_RUNNING=$(convox scale -a mamba-kafka | grep "kafka" | awk '{ print $3 }');
+done
+
+echo "Currently has ${CURRENT_RUNNING} containers running. Done.";
