@@ -1,0 +1,8 @@
+#! /usr/bin/env bash
+
+NAME="${1}"
+
+docker-compose stop "${NAME}" &&\
+docker-compose rm -f "${NAME}" &&\
+docker-compose build "${NAME}" &&\
+docker-compose up -d "${NAME}"

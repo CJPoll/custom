@@ -1,0 +1,5 @@
+#! /usr/bin/env bash
+
+SERVICE=${1};
+
+docker-compose run ${SERVICE} bash;
