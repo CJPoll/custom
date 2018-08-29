@@ -1,0 +1,8 @@
+#! /usr/bin/env ruby
+
+total =
+  ARGF.reduce(0) do |sum, n|
+    n.to_i + sum
+  end
+
+puts total

@@ -1,5 +1,10 @@
 #! /usr/bin/env bash
 
-SERVICE=${1};
+SERVICE="${1}";
+OPTS="${*:2}"
 
-docker-compose run ${SERVICE} bash;
+if [ -z "${OPTS}" ]; then
+	docker-compose run --rm "${SERVICE}" bash;
+else
+	docker-compose run --rm "${OPTS}" "${SERVICE}" bash;
+fi

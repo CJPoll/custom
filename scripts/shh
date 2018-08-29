@@ -1,6 +1,6 @@
 #! /usr/bin/env ruby
 
-HOME_IP='67.177.42.147'
+HOME_IP='76.27.25.52'
 
 REGISTERED_SERVERS = {
 	"server" => {
@@ -24,18 +24,8 @@ REGISTERED_SERVERS = {
 			ports: [],
 			ssh_forward: true
 		},
-		"dev" => {
-			host: "dev@192.168.0.55",
-			ports: [],
-			ssh_forward: true
-		},
-		"devroot" => {
-			host: "root@192.168.0.55",
-			ports: [],
-			ssh_forward: true
-		},
 		"docker" => {
-			host: "root@192.168.0.53",
+			host: "root@#{HOME_IP}",
 			ports: [],
 			ssh_forward: true
 		},

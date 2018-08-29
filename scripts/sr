@@ -1,0 +1,6 @@
+#! /usr/bin/env bash
+
+file_pattern="${1}"
+pattern="${2}"
+
+find . -name ${file_pattern} |  xargs sed -i "${pattern}"
