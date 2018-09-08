@@ -8,7 +8,7 @@ command :clone do |id|
   system "git clone git@github.com:#{id}"
 end
 
-command :create do |username, repo_name|
+command :create do |username: nil, repo_name: nil|
   str = "curl -u '#{username}'-X POST -d '{\"name\": \"#{repo_name}\"}' -H 'Content-Type: application/json' https://api.github.com/user/repos"
   puts str
   resp = `#{str}`

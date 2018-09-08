@@ -1,0 +1,20 @@
+#! /usr/bin/env bash
+
+while test $# -gt 0
+do
+	case $1 in
+		--headers)
+			echo -e "FILES\tADD\tRM\tEMAIL"
+			echo "----------------------------------------"
+				;;
+		*) ;;
+	esac
+
+	shift
+done
+
+for AUTHOR in $(git log --format='%ae' | sort -u); do
+echo "$(git log --shortstat --author="${AUTHOR}" | \
+grep -E "fil(e|es) changed" | \
+awk '{files+=$1; inserted+=$4; deleted+=$6} END {printf "%d\t%d\t%d\t", files, inserted, deleted }') ${AUTHOR}"
+done | sort -k 4 -g

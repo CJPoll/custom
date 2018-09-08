@@ -1,0 +1,14 @@
+#! /usr/bin/env ruby
+
+require 'json'
+
+FILE="repos.json"
+
+file = File.read(FILE)
+
+json = JSON.parse(file)
+
+json.each do |repo|
+	system "git hub clone #{repo["full_name"]}"
+  sleep 5
+end
