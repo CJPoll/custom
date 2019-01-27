@@ -30,3 +30,22 @@ snippet def "def"
 	def ${1:name}(${2:args}) do
 		${3:contents}
 	end
+endsnippet
+
+snippet handle_call "handle_call"
+	def handle_call(${1:msg}, _from, %State{} = state) do
+		{:noreply, state}
+	end
+endsnippet
+
+snippet handle_cast "handle_cast"
+	def handle_call(${1:msg}, %State{} = state) do
+		{:noreply, state}
+	end
+endsnippet
+
+snippet handle_info "handle_info"
+	def handle_call(${1:msg}, %State{} = state) do
+		{:noreply, state}
+	end
+endsnippet
