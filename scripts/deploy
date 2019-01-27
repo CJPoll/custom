@@ -1,3 +1,0 @@
-#! /usr/bin/env zsh
-
-convox deploy --no-cache -a mamba-kafka --wait
