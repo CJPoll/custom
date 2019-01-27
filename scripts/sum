@@ -1,8 +1,0 @@
-#! /usr/bin/env ruby
-
-total =
-  ARGV.reduce(0) do |sum, n|
-    n.to_i + sum
-  end
-
-puts total
