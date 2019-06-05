@@ -3,16 +3,6 @@
 HOME_IP='76.27.25.52'
 
 REGISTERED_SERVERS = {
-	"server" => {
-		"env" => {
-			host: "",
-			ports:  {
-				9001 => 9001, # Packrat's Port
-				4369 => 4369  # EPMD Port
-			},
-			ssh_forward: false
-		},
-	},
 	"home" => {
 		"root" => {
 			host: "root@#{HOME_IP}",
@@ -25,7 +15,7 @@ REGISTERED_SERVERS = {
 			ssh_forward: true
 		},
 		"docker" => {
-			host: "root@#{HOME_IP}",
+      host: "root@192.168.0.53",
 			ports: [],
 			ssh_forward: true
 		},

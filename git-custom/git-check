@@ -1,0 +1,10 @@
+#! /usr/bin/env bash
+
+message="${1}"
+
+mix compile && \
+  mix test && \
+  mix dialyzer --halt-exit-status && \
+  git add . && \
+  git commit -m "${message}" && \
+  git push;

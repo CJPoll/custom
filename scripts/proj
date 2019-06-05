@@ -1,36 +1,55 @@
-#! /usr/bin/env bash
+#! /usr/bin/env ruby
 
-PROGRAM="${1}";
+def main(program)
+  unless program
+    puts "Oh noez! You didn't say which program 😱"
+    exit(1)
+  end
 
-if [ -z "${PROGRAM}" ]; then
-	>&2 echo "Oh noez! You didn't say which program 😱";
-	exit 1;
-fi
+  proj_dir = nil
 
-PROJ_DIR="";
+  devdirs = ENV['DEVPATH']
 
-IFS=":"; read -ra DEVDIRS <<< "${DEVPATH}";
+  devdirs.split(":").each do |devdir|
+    app_path = "#{devdir}/#{program}"
 
-for DIR in "${DEVDIRS[@]}"; do
-  APP_PATH="${DIR}/${PROGRAM}";
+    if File.exist?(app_path)
+      proj_dir=app_path
+      break
+    end
+  end
 
-  if [ -d ${APP_PATH} ]; then
-    PROJ_DIR=${APP_PATH}
-    break;
-  fi
-done
+  unless proj_dir
+    res = `find \"${GOPATH}\" -maxdepth 3 -mindepth 3 -type d`
 
-if [ -z ${PROJ_DIR} ]; then
-  >&2 echo "🚫 🔎  Project ${PROGRAM} does not exist!";
-  exit 1;
-fi
+    res.split.each do |devdir|
+      app_path = "#{devdir}/#{program}"
 
-SESSIONS=$(tmux list-sessions | egrep "\b${PROGRAM}" | cut -d" " -f1 | wc -l);
+      if File.exist?(app_path)
+        proj_dir=app_path
+        break
+      end
+    end
+  end
 
-if [ "${SESSIONS}" -eq 0 ]; then
-  tmux new-session -Add -n "Work" -c "${PROJ_DIR}" -s ${PROGRAM};
-  tmux send-keys -t "${PROGRAM}:0" "init-session ${PROGRAM} ${PROJ_DIR}" ENTER
-  tmux switch-client -t ${PROGRAM};
-else
-  tmux switch-client -t ${PROGRAM};
-fi
+  unless proj_dir
+    puts "🚫 🔎  Project #{program} does not exist!";
+    exit 1;
+  end
+
+  sessions=`tmux list-sessions | egrep "\\b#{program}" | cut -d" " -f1 | wc -l`
+
+  if sessions.nil? or sessions == "" or sessions.match?(/\A\s*0\n\z/)
+    `tmux new-session -Add -n "Work" -c "#{proj_dir}" -s "#{program}";`
+    `tmux send-keys -t "#{program}:0" "init-session #{program} #{proj_dir}" ENTER`
+    `tmux switch-client -t #{program};`
+  else
+    `tmux switch-client -t #{program};`
+  end
+
+  exit(0)
+end
+
+program = ARGV[0]
+
+main(program)

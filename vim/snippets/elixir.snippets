@@ -49,3 +49,8 @@ snippet handle_info "handle_info"
 		{:noreply, state}
 	end
 endsnippet
+
+snippet type "@type t"
+	@type t :: %__MODULE__{
+		${1:fields}
+	}

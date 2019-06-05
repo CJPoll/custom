@@ -16,7 +16,7 @@ function main()
 	docker-compose stop "${service}" &&\
 		docker-compose rm -f "${service}" &&\
 		docker-compose build "${service}" &&\
-		startService "${*}";
+		startService "${@}";
 }
 
 function startService()
@@ -36,4 +36,4 @@ function startService()
 	done
 }
 
-main "${*}";
+main ${*};

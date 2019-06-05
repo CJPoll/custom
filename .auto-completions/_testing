@@ -1,0 +1,4 @@
+#compdef proj
+
+echo "hi"
+_arguments "1: :($(find \"$HOME/dev\" -maxdepth 1 | xargs basename))"

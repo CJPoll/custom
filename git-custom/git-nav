@@ -1,0 +1,9 @@
+#! /usr/bin/env ruby
+
+require 'git_command'
+require 'net/http'
+require 'json'
+
+command :clone do |id|
+  system "git clone git@git.nav.com:#{id}"
+end
