@@ -23,8 +23,8 @@ function startService()
 {
 	local service="${1}";
 	local args="${*:2}"
-	while test "${args}" -gt 0
-	do
+
+  for var in args; do
 		case "${2}" in
 			--no-start)
 				;;
@@ -32,8 +32,7 @@ function startService()
 				docker-compose up -d "${service}"
 				;;
 		esac
-		shift
-	done
+  done
 }
 
 main ${*};
