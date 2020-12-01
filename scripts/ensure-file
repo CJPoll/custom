@@ -1,0 +1,14 @@
+#! /usr/bin/env bash
+
+function main()
+{
+  file="${1}"
+
+  if [ ! -f "${file}" ]; then
+    >&2 echo
+    >&2 echo "File \"${file}\" not found"
+    >&2 echo
+
+    exit 1
+  fi
+}

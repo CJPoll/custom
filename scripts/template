@@ -1,0 +1,39 @@
+#! /usr/bin/env bash
+
+function main()
+{
+  echo "Current Script: $(dirname $0)"
+}
+
+PARAMS="";
+
+while (( $# )); do
+  case "" in
+    -a|--my-boolean-flag)
+      MY_FLAG=0;
+      shift;
+      ;;
+    -b|--my-flag-with-argument)
+      if [ -n "" ] && [ 0:1 != "-" ]; then
+        MY_FLAG_ARG=""
+        shift 2
+      else
+        echo "Error: Argument for  is missing" >&2
+        exit 1
+      fi
+      ;;
+    -*|--*=) # unsupported flags
+      echo "Error: Unsupported flag " >&2
+      exit 1
+      ;;
+    *) # preserve positional arguments
+      echo "Preserve positional Arguments"
+      PARAMS="$PARAMS "
+      shift
+      ;;
+  esac
+done
+
+eval set -- "$PARAMS"
+
+main;

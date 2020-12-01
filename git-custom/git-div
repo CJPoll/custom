@@ -5,5 +5,5 @@ require 'net/http'
 require 'json'
 
 command :clone do |id|
-  system "git clone git@git.nav.com:#{id}"
+  system "git clone git@git-p1ap1.divvy.co:#{id}"
 end

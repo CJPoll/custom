@@ -1,0 +1,6 @@
+#! /usr/bin/env bash
+
+file="${1}"
+line="${2}"
+
+grep -Fxq "${line}" "${file}"

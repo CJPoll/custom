@@ -1,0 +1,4 @@
+#! /usr/bin/env bash
+
+git rm --cached "$@"
+ensure-line ".gitignore" "$@"

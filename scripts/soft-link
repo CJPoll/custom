@@ -1,0 +1,8 @@
+#! /usr/bin/env bash
+
+existing_file="${1}"
+link="${2}"
+
+if [ ! -f "${link}" ]; then
+  ln -s "${existing_file}" "${link}"
+fi

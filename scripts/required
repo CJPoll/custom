@@ -1,0 +1,10 @@
+#! /usr/bin/env bash
+
+ARG_NAME="${1}";
+ARG_VALUE="${2}";
+
+EXTRA_TEXT="${3}";
+
+if [ -z "${ARG_VALUE}" ]; then
+  echo "Required Argument \""${ARG_NAME}"\" is missing. ${EXTRA_TEXT}"
+fi

@@ -1,0 +1,11 @@
+#! /usr/bin/env bash
+
+MESSAGE="${1}"
+
+if [ -z "${MESSAGE}" ]; then
+  MESSAGE="Next Iteration"
+fi
+
+git add . && \
+  git commit -m "${MESSAGE}" && \
+  git push

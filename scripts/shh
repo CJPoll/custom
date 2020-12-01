@@ -1,12 +1,13 @@
 #! /usr/bin/env ruby
 
-HOME_IP='76.27.25.52'
+HOME_IP='98.202.148.249'
 
 REGISTERED_SERVERS = {
 	"home" => {
 		"root" => {
 			host: "root@#{HOME_IP}",
-			ports: [],
+      port: 23,
+      ports: [],
 			ssh_forward: true
 		},
 		"terraria" => {
@@ -14,6 +15,14 @@ REGISTERED_SERVERS = {
 			ports: [],
 			ssh_forward: true
 		},
+    "dev" => {
+      port: 22,
+      host: "cjpoll@192.168.1.139",
+      ports: {
+        4000 => 4000
+      },
+      ssh_forward: true
+    },
 		"docker" => {
       port: 23,
       host: "cjpoll@#{HOME_IP}",

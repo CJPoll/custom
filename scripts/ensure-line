@@ -1,0 +1,10 @@
+#! /usr/bin/env bash
+
+file="${1}"
+line="${2}"
+
+if line-in-file "${file}" "${line}"; then
+  : # noop
+else
+  echo "${line}" >> "${file}"
+fi

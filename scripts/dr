@@ -1,0 +1,14 @@
+#! /usr/bin/env ruby
+
+image = ARGV[0]
+
+# All elements starting at index 1
+command = ARGV.drop(1)
+
+if command.nil? or command.empty?
+  command = ["bash"]
+end
+
+docker_command = "docker run -it #{image} #{command.join(" ")}"
+
+system docker_command

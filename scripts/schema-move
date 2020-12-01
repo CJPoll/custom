@@ -1,0 +1,75 @@
+#! /usr/bin/env ruby
+
+require 'fileutils'
+require 'pathname'
+require 'set'
+
+# Find all files in core having a schema
+files =
+  `ack -l \"\\bschema \\"\" apps/core`
+  .split("\n")
+
+puts files.inspect
+puts
+
+puts "#{files.size} files found with a schema"
+puts
+
+modules = Set.new
+
+modules_to_not_alias = ["Ecto", "UUID", "Date", "DateTime", "America", "Denver", "Cloak", "EncryptedBinaryField"]
+
+
+files.each do |file|
+
+  # Convert path from `core` to `shared_db`
+  new_file =
+    file
+    .sub(/core/, 'shared_db')
+    .sub(/\/lib\//, '/lib/shared_db/')
+
+  new_path = Pathname.new(new_file)
+
+  FileUtils.mkdir_p new_path.dirname
+
+  # We're assuming:
+  #  - `defmodule` does not occur in a comment
+  #  - There is only a single module in the file
+  defmodule = `sed -n '/defmodule/p' #{file}`.chomp.sub(/Core/, "SharedDb")
+
+  # Extract the ecto schema itself
+  schema = `sed -n '/^\s*schema \\"/,/^\s*end$/p' '#{file}'`.chomp
+
+  related_modules =
+    schema
+    .split("\n")
+    .reject {|line| line.match?(/#/)}
+    .join("\n")
+    .scan(/\b[A-Z][a-zA-Z]*\b/)
+    .reject {|mod| modules_to_not_alias.include?(mod)}
+    .uniq
+
+  modules.merge(related_modules)
+
+  puts
+  puts "Extracting schema from #{file} -> #{new_file}"
+  puts "-----"
+  puts "Related Modules #{related_modules}"
+  puts "-----"
+  puts
+
+  contents = """#{defmodule}
+  use Ecto.Schema
+
+#{schema}
+end"""
+
+  puts contents
+
+  new_path.open("w") do |new_f|
+    new_f.write(contents)
+  end
+end
+
+puts "All related modules #{modules.to_a.sort.inspect}"
+#out = `sed -n '/\<schema \\"/,/^\s*end/p' '#{test_file}'`

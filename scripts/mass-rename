@@ -2,12 +2,14 @@
 
 function main()
 {
-  PATTERN="$1";
-  SUBSTITUTION="$2";
-
-  for FILE in *.java.txt; do
-    echo "mv ${FILE} $(echo ${FILE} | gsed ${SUBSTITUTION})"
+  for FILE in $(ack -l "use EctoEnum" apps/core | uniq); do
+    DEST=$(echo ${FILE} | sed "s/core/shared_db/")
+    echo "mkdir -p $(dirname "${DEST}") &&  cp ${FILE} ${DEST}" | bash
+    echo rm $FILE
+    rm $FILE
   done
+
+  #find apps/schemas -name "*.ex" | xargs gsed -i 's/Core/Schemas/'
 }
 
 main "$@";

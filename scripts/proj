@@ -1,55 +1,95 @@
 #! /usr/bin/env ruby
 
-def main(program)
-  unless program
+class Project
+  attr_reader :name
+
+  def initialize(project_name)
+    @name = project_name
+    @project_path = nil
+  end
+
+  def empty?
+    @name.nil?
+  end
+
+  def path
+    dev_path = DevPath.new(ENV['DEVPATH'])
+    @project_path ||= dev_path.path_for(name)
+    @project_path
+  end
+end
+
+class DevPath
+  def initialize(path)
+    @dev_directories = path.split(":")
+  end
+
+  def path_for(project_name)
+    @dev_directories.each do |dev_directory|
+      project_path = "#{dev_directory}/#{project_name}"
+
+      if File.exists?(project_path)
+        return project_path
+      end
+    end
+
+    return nil
+  end
+end
+
+class Session
+  def initialize(sessions)
+    @sessions = sessions
+  end
+
+  def missing?
+    @sessions.nil? or @sessions == "" or @sessions.match?(/\A\s*0\n\z/)
+  end
+
+  def self.for(project)
+    sessions = `tmux list-sessions | egrep "\\b#{project.name}\\b" | cut -d" " -f1 | wc -l`
+    new(sessions)
+  end
+
+  def self.open(project)
+    `tmux new-session -Add -n "Work" -c "#{project.path}" -s "#{project.name}";`
+  end
+
+  def self.init(project)
+    cmd = "tmux send-keys -t \"#{project.name}:0\" \"init-session #{project.name} #{project.path}\" ENTER"
+    `tmux send-keys -t "#{project.name}:0" "init-session #{project.name} #{project.path}" ENTER`
+  end
+
+  def self.switch_to(project)
+    `tmux switch-client -t #{project.name};`
+  end
+end
+
+def main(project_name)
+  project = Project.new(project_name)
+
+  if project.empty?
     puts "Oh noez! You didn't say which program 😱"
     exit(1)
   end
 
-  proj_dir = nil
-
-  devdirs = ENV['DEVPATH']
-
-  devdirs.split(":").each do |devdir|
-    app_path = "#{devdir}/#{program}"
-
-    if File.exist?(app_path)
-      proj_dir=app_path
-      break
-    end
-  end
-
-  unless proj_dir
-    res = `find \"${GOPATH}\" -maxdepth 3 -mindepth 3 -type d`
-
-    res.split.each do |devdir|
-      app_path = "#{devdir}/#{program}"
-
-      if File.exist?(app_path)
-        proj_dir=app_path
-        break
-      end
-    end
-  end
-
-  unless proj_dir
-    puts "🚫 🔎  Project #{program} does not exist!";
+  unless project.path
+    puts "🚫 🔎  Project #{project.name} does not exist!";
     exit 1;
   end
 
-  sessions=`tmux list-sessions | egrep "\\b#{program}" | cut -d" " -f1 | wc -l`
+  session = Session.for(project)
 
-  if sessions.nil? or sessions == "" or sessions.match?(/\A\s*0\n\z/)
-    `tmux new-session -Add -n "Work" -c "#{proj_dir}" -s "#{program}";`
-    `tmux send-keys -t "#{program}:0" "init-session #{program} #{proj_dir}" ENTER`
-    `tmux switch-client -t #{program};`
-  else
-    `tmux switch-client -t #{program};`
+  if session.missing?
+    Session.open(project)
+    Session.init(project)
   end
+
+  Session.switch_to(project)
 
   exit(0)
 end
 
-program = ARGV[0]
+project_name = ARGV[0]
 
-main(program)
+main(project_name)
