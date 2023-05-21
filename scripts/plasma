@@ -1,0 +1,56 @@
+#! /usr/bin/env bash
+
+set -e;
+
+function main()
+{
+  if [ ! -z "${STOP}" ]; then
+    kquitapp5 plasmashell
+  fi
+
+  if [ ! -z "${START}" ]; then
+    kstart5 plasmashell > /dev/null 2>&1
+  fi
+}
+
+PARAMS="";
+
+while (( $# )); do
+  case "${1}" in
+    --restart)
+      STOP=0
+      START=0
+      shift;
+      ;;
+    --start)
+      START=0
+      shift;
+      ;;
+    --stop)
+      STOP=0
+      shift;
+      ;;
+    #-b|--my-flag-with-argument)
+    #  if [ -n "${2}" ] && [ ${2:0:1} != "-" ]; then
+    #    MY_FLAG_ARG="${2}"
+    #    shift 2
+    #  else
+    #    echo "Error: Argument for ${1} is missing" >&2
+    #    exit 1
+    #  fi
+    #  ;;
+    -*|--*=) # unsupported flags
+      echo "Error: Unsupported flag ${1}" >&2
+      exit 1
+      ;;
+    *) # preserve positional arguments
+      echo "Preserve positional Arguments"
+      PARAMS="PARAMS ${1}"
+      shift
+      ;;
+  esac
+done
+
+eval set -- "PARAMS"
+
+main;

@@ -47,7 +47,7 @@ class Session
   end
 
   def self.for(project)
-    sessions = `tmux list-sessions | egrep "\\b#{project.name}\\b" | cut -d" " -f1 | wc -l`
+    sessions = `tmux list-sessions | egrep "^#{project.name}" | cut -d" " -f1 | wc -l`
     new(sessions)
   end
 
@@ -90,6 +90,26 @@ def main(project_name)
   exit(0)
 end
 
+def print_path(project_name)
+  project = Project.new(project_name)
+
+  if project.empty?
+    puts "Oh noez! You didn't say which program 😱"
+    exit(1)
+  end
+
+  unless project.path
+    puts "🚫 🔎  Project #{project.name} does not exist!";
+    exit 1;
+  end
+
+  puts project.path
+end
+
 project_name = ARGV[0]
 
-main(project_name)
+if ARGV[1] == "print"
+  print_path(project_name)
+else
+  main(project_name)
+end

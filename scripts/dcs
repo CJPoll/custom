@@ -1,10 +1,16 @@
 #! /usr/bin/env bash
 
+compose="docker-compose"
+
+if [ ! -z "${COMPOSE}" ]; then
+  compose="${COMPOSE}"
+fi
+
 SERVICE="${1}";
 OPTS="${*:2}"
 
 if [ -z "${OPTS}" ]; then
-	docker-compose run --rm "${SERVICE}" bash;
+	$compose run --rm "${SERVICE}" /bin/bash;
 else
-	docker-compose run --rm "${OPTS}" "${SERVICE}" bash;
+	$compose run --rm "${OPTS}" "${SERVICE}" /bin/bash;
 fi

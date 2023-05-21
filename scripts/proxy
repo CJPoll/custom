@@ -1,0 +1,3 @@
+#! /usr/bin/env bash
+
+export ALL_PROXY=socks5h://localhost:9090

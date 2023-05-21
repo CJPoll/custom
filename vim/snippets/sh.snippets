@@ -1,16 +1,16 @@
-snippet script "Basic Script Template"
+snippet script
 	#! /usr/bin/env bash
 
 	set -e;
 
 	function main()
 	{
-		echo "Current Script: $(dirname $0)"
+		echo "Current Script: \$(dirname \$0)"
 	}
 
 	PARAMS="";
 
-	while (( $# )); do
+	while (( \$# )); do
 		case "\${1}" in
 			-a|--my-boolean-flag)
 				MY_FLAG=0;
@@ -31,7 +31,7 @@ snippet script "Basic Script Template"
 				;;
 			*) # preserve positional arguments
 				echo "Preserve positional Arguments"
-				PARAMS="$PARAMS \${1}"
+				PARAMS="\$PARAMS \${1}"
 				shift
 				;;
 		esac

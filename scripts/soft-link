@@ -1,8 +1,21 @@
 #! /usr/bin/env bash
 
-existing_file="${1}"
-link="${2}"
+main() {
+  existing_file="${1}"
+  link="${2}"
 
-if [ ! -f "${link}" ]; then
-  ln -s "${existing_file}" "${link}"
+  if [ ! -f "${link}" ]; then
+    ln -s "${existing_file}" "${link}"
+  fi
+}
+
+printHelp() {
+  echo "soft-link <existing-file> <new-link-file>"
+}
+
+if [ "${1}" -eq "--help" ]
+then
+  printHelp
+else
+  main "${@}"
 fi

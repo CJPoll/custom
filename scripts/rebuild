@@ -1,8 +1,21 @@
 #! /usr/bin/env bash
 
+function cmd()
+{
+  echo
+  echo -------------------
+  echo "Running: $@"
+  echo -------------------
+  echo
+  $@
+}
+
+compose="docker-compose"
+
 function main()
 {
 	local service="${1}";
+
 
 	if [ -z "${service}" ]; then
 		>&2 echo "Service not specified"
@@ -13,9 +26,9 @@ function main()
 		>&2 echo
 	fi
 
-	docker-compose stop "${service}" &&\
-		docker-compose rm -f "${service}" &&\
-		docker-compose build "${service}" &&\
+	cmd ${compose} stop "${service}" &&\
+		cmd ${compose} rm -f "${service}" &&\
+		cmd ${compose} build "${service}" &&\
 		startService "${@}";
 }
 
@@ -29,10 +42,15 @@ function startService()
 			--no-start)
 				;;
 			*)
-				docker-compose up -d "${service}"
+				cmd ${compose} up -d "${service}"
 				;;
 		esac
   done
 }
 
+if [ ! -z "${COMPOSE}" ]; then
+  compose="${COMPOSE}"
+fi
+
 main ${*};
+
