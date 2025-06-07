@@ -1,0 +1,3 @@
+#! /usr/bin/env bash
+
+jq .choices[0].message.content | jq -r | sed 's/\\n/\n/g'

@@ -1,0 +1,9 @@
+#! /usr/bin/env bash
+
+arg="${1}"
+
+if [[ "${arg}" == "--run-dialyzer" ]]; then
+  mix dialyzer > dialyzer.txt 2>&1;
+fi
+
+ack '\.ex' dialyzer.txt | ack 'lib|test' | cut -d: -f1 | uniq

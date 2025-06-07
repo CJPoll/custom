@@ -1,0 +1,131 @@
+#! /usr/bin/env bash
+
+subcommand="${1}"
+
+case "${subcommand}" in
+  understand-diff)
+    chad-diff "origin/main" && \
+      chad-request "My teammate created this git diff in our project. Help me understand what's going on. \n$(cat diff.txt)" | chad-content
+    ;;
+
+  pr-description)
+    branch="${2}"
+
+    if [ -z "${branch}" ] ; then
+      branch="main"
+    fi
+
+    prompt="I've made a diff and want to create a PR for it. Generate a PR description to help the code reviewer be aware of what's going on. Don't try to explain why the MR itself is important - just explain how things work."
+    chad-diff "${branch}" && \
+      chad-request "${prompt}  \n\n$(cat diff.txt)" | chad-content
+    ;;
+
+  ask)
+      chad-request "${@:2}" | chad-content
+    ;;
+
+  review)
+    chad-diff && \
+      chad-request "I need to do code review on this diff. Help me look for any potential bugs or security issue. For the given file types, make sure to evaluate how well the code follows community style guides. Make any suggestions for code readability that would help. Look for untested code. \n$(cat diff.txt). Look for places where the code doesn't follow our internal style guide: \n\n$(cat knowledge.md)" | chad-content
+    ;;
+
+  review-files)
+    prompt="I'm looking at the following code and want to understand it better. Help me make sure I understand it correctly. \n"
+    chad prompt-files "${prompt}" ${@:2}
+    ;;
+
+  suggest-refactors)
+    prompt="I'm looking at the following code, particularly for opportunities to refactor. I mostly care about makeing sure there are good, solid boundaries and that a given function operates at a single level of abstraction. If a module is more than 100 lines, that suggests we might want to look at whether we should split it apart. If a module is over 250 lines, we absolutely should look at how to break it up. Line counts should ignore @doc strings, @moduledoc strings, and specs. \n"
+    chad prompt-files "${prompt}" ${@:2}
+
+    ;;
+
+  module-docs)
+    prompt="For each of the given modules, generate a helpful @moduledoc. Don't include information on specific functions - that should be included in the function @docs themselves. Instead, explain the purpose of the module and any nuances or gotchas, but only if there is something unusual to call out. \nFor schema modules, don't explain the schema itself unless it has something meaningfully and notably unusual. If there are multiple changeset functions, explain when they are used. Do not call out particular fields or relationships. Do describe the module's purpose in the overall domain model.\n No line should be longer than 100 characters in width."
+
+    chad prompt-files "${prompt}" ${@:2}
+    ;;
+
+  function-docs)
+    prompt="For each of the given public functions, generate a @spec and a helpful @doc. If two functions have the same name and argument count, only generate @docs or @specs for the first instance and include information for all instances. Do not include information on arguments that is explained by the @spec. If there is special logic that determines meaningfully different return values, explain it. If there are preconditions for arguments or side effects, explain it - but never explain typing that is explained by the @spec.\n"
+    chad prompt-files "${prompt}" ${@:2}
+    ;;
+
+  dialyzer)
+    dialyzer-files | xargs chad prompt-files "I'm running into some dialyzer issues. Help me understand what is causing them." dialyzer.txt
+    ;;
+
+  prompt-files)
+    prompt="${2}\n"
+    files=${@:3}
+
+    echo "PROMPT: ${prompt}"
+    echo "files: ${files}"
+
+
+    for file in ${files}; do
+      if [ -f "${file}" ]; then
+        prompt+="\n===== ${file}\n"
+        prompt+="$(cat "$file")\n\n\n"
+      else
+        echo "File not found: ${file}" 1>&2
+        exit 1
+      fi
+    done
+
+    chad-request "${prompt}\n\n" | chad-content
+    ;;
+
+  help|--help|-h)
+    echo """
+    chad
+
+    A cli helper for code that integrates with ChatGPT.
+
+    Usage:
+
+    chad understand-diff
+      - Generates a diff of the current code relative to main.
+      - Stores that diff in diff.txt in the current directory.
+      - Asks ChatGPT to explain what's going on in the diff.
+
+    chad pr-description <optional: branch>
+      - Generates a diff of the current code relative to the given branch (defaults to main).
+      - Stores that diff in diff.txt in the current directory.
+      - Asks ChatGPT to generate a helpful PR description to help the code reviewer.
+
+    chad ask <content>
+      - Sends the content to ChatGPT and displays the response.
+
+    chad review
+      - Generates a diff of the current code relative to main.
+      - Stores that diff in diff.txt in the current directory.
+      - Has ChatGPT do a review on the diff looking for potential bugs or security.
+        issues. Also requests to evaluate against community style guides.
+
+    chad review-files [files]
+      - Sends the content of given files up to ChatGPT.
+      - Requests an explanation of what's going on in the files.
+
+    chad suggest-refactors [files]
+      - Sends the content of given files up to ChatGPT.
+      - Asks ChatGPT to look for refactoring opportunities (with particular criteria listed).
+
+    chad module-docs [files]
+      - Sends the content of given files up to ChatGPT.
+      - Asks for a helpful @moduledoc for each module.
+
+    chad function-docs [files]
+      - Sends the content of given files up to ChatGPT.
+      - Asks for a helpful @doc for each public function.
+
+    chad prompt-files <prompt> [files]
+      - Sends the content of the given files.
+      - Prepends the content of the files with the given prompt.
+
+    chad help
+    chad -h
+    chad --help
+      - Generates this help message
+    """
+esac
