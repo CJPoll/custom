@@ -3,7 +3,7 @@
 content="${1}"
 
 # Encode the message using jq to ensure valid JSON
-json_payload=$(jq -n --arg msg "$content" '{
+json_payload=$(jq -Rn --arg msg "$content" '{
   "model": "gpt-4o",
   "messages": [{"role": "user", "content": $msg}],
   "temperature": 0

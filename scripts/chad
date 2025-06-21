@@ -9,7 +9,13 @@ case "${subcommand}" in
     ;;
 
   understand-diff)
-    chad-diff "origin/main" && \
+    branch="${2}"
+
+    if [ -z "${branch}" ] ; then
+      branch="origin/main"
+    fi
+
+    chad-diff "${branch}" && \
       chad-request "My teammate created this git diff in our project. Help me understand what's going on. \n$(cat diff.txt)" | chad-content
     ;;
 
@@ -26,7 +32,7 @@ case "${subcommand}" in
     ;;
 
   ask)
-      chad-request "${@:2}" | chad-content
+    chad-request "${@:2}" | chad-content
     ;;
 
   review)
@@ -52,7 +58,7 @@ case "${subcommand}" in
     ;;
 
   function-docs)
-    prompt="For each of the given public functions, generate a @spec and a helpful @doc. If two functions have the same name and argument count, only generate @docs or @specs for the first instance and include information for all instances. Do not include information on arguments that is explained by the @spec. If there is special logic that determines meaningfully different return values, explain it. If there are preconditions for arguments or side effects, explain it - but never explain typing that is explained by the @spec.\n"
+    prompt="For each of the given public functions, generate a @spec and a helpful @doc. If two functions have thhttps://github.com/CJPoll/custom/tree/master/scriptse same name and argument count, only generate @docs or @specs for the first instance and include information for all instances. Do not include information on arguments that is explained by the @spec. If there is special logic that determines meaningfully different return values, explain it. If there are preconditions for arguments or side effects, explain it - but never explain typing that is explained by the @spec.\n"
     chad prompt-files "${prompt}" ${@:2}
     ;;
 
@@ -63,9 +69,6 @@ case "${subcommand}" in
   prompt-files)
     prompt="${2}\n"
     files=${@:3}
-
-    echo "PROMPT: ${prompt}"
-    echo "files: ${files}"
 
     for file in ${files}; do
       if [ -f "${file}" ]; then
@@ -88,8 +91,8 @@ case "${subcommand}" in
 
     Usage:
 
-    chad understand-diff
-      - Generates a diff of the current code relative to main.
+    chad understand-diff <optional: branch>
+      - Generates a diff of the current code relative to the given branch (defaults to main).
       - Stores that diff in diff.txt in the current directory.
       - Asks ChatGPT to explain what's going on in the diff.
 
