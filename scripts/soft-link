@@ -13,7 +13,7 @@ printHelp() {
   echo "soft-link <existing-file> <new-link-file>"
 }
 
-if [ "${1}" -eq "--help" ]
+if [ "${1}" == "--help" ]
 then
   printHelp
 else

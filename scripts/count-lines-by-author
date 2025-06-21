@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# count-lines-by-author.sh
+set -euo pipefail
+
+REF="${1:-main}"   # default to main if no ref supplied
+
+git ls-tree -r --name-only "$REF" |
+  xargs -P"$(nproc)" -I{} \
+    git blame -w --line-porcelain "$REF" -- "{}" |
+  sed -n 's/^author //p' |
+  sort | uniq -c | sort -nr
+

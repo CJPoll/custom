@@ -3,6 +3,11 @@
 subcommand="${1}"
 
 case "${subcommand}" in
+  test-case-ideas)
+    prompt="In these files, I have code I want to write test cases for. Do not generate any code. Create an exhaustive list of test cases for each public function."
+    chad prompt-files "${prompt}" ${@:2}
+    ;;
+
   understand-diff)
     chad-diff "origin/main" && \
       chad-request "My teammate created this git diff in our project. Help me understand what's going on. \n$(cat diff.txt)" | chad-content
@@ -61,7 +66,6 @@ case "${subcommand}" in
 
     echo "PROMPT: ${prompt}"
     echo "files: ${files}"
-
 
     for file in ${files}; do
       if [ -f "${file}" ]; then
@@ -122,6 +126,10 @@ case "${subcommand}" in
     chad prompt-files <prompt> [files]
       - Sends the content of the given files.
       - Prepends the content of the files with the given prompt.
+
+    chad test-case-ideas [files]
+      - Sends the content of the given files.
+      - Asks for what test cases should be covered, but does not generate code.
 
     chad help
     chad -h
