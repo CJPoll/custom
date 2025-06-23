@@ -1,8 +1,0 @@
-I have a file for which I want to generate regression tests. Do not generate any code. Do not generate any test.
-
-Generate for me a comprehensive test matrix for the module. Do not include performance tests. Do cover failure cases. Ensure each code branch in the file is covered.
-Correct output is formatted in this way:
-- First is the full file name
-- Then for each public function output should be formatted as:
-  - First is the function name, including arity (e.g. `changeset/2`)
-  - Second is a table I can copy/paste into notion with each test case as a separate row

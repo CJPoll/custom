@@ -1,3 +1,22 @@
 #compdef proj
 
-_arguments "1: :($(find $(echo ${DEVPATH} | sed -r 's/:/ /g') -maxdepth 1 -type d | tail -n +2 |  xargs basename -a ))"
+# Get all immediate subdirectories from DEVPATH directories
+_proj_get_projects() {
+  local IFS=':'
+  local projects=()
+  
+  # Split DEVPATH and iterate through each directory
+  for dir in ${=DEVPATH}; do
+    if [[ -d "$dir" ]]; then
+      # Find immediate subdirectories (maxdepth 1)
+      for project in "$dir"/*(N/); do
+        projects+=(${project:t})  # :t gets the tail (basename)
+      done
+    fi
+  done
+  
+  # Remove duplicates and sort
+  echo ${(ou)projects}
+}
+
+_arguments "1:project:($(_proj_get_projects))"

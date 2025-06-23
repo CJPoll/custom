@@ -10,10 +10,10 @@ If I have asked you to fix broken tests, then here is how you reproduce the issu
 
 If I have asked you to fix linter issues, then here is how you reproduce the issue:
     | To run the linter for the entire application: `mix credo --strict`
-    | To run the linter for a single file: `mix credo --strict <file>
+    | To run the linter for a single file: `mix credo --strict <file>`
     |
     | It's important to always add the `--strict` flag.
-    | - If --strict isn't set, then credo will not detect certain issues that are important for code health.
+    | - If `--strict` isn't set, then credo will not detect certain issues that are important for code health.
 
 If I have asked you to fix dialyzer issues, then here is how you reproduce the issue:
     | To run dialyzer for the entire application: `mix dialyzer`
