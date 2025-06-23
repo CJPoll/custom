@@ -52,12 +52,28 @@ class Session
   end
 
   def self.open(project)
-    `tmux new-session -Add -n "Work" -c "#{project.path}" -s "#{project.name}";`
+    # Determine editor command
+    editor = ENV['EDITOR'] || 'vim'
+    editor_cmd = if editor == "vim" || editor == "nvim"
+      "#{editor} +NERDTree"
+    else
+      editor
+    end
+    
+    # Create session with editor running in the first window
+    `tmux new-session -d -n "Work" -c "#{project.path}" -s "#{project.name}" "#{editor_cmd}"`
   end
 
   def self.init(project)
-    cmd = "tmux send-keys -t \"#{project.name}:0\" \"init-session #{project.name} #{project.path}\" ENTER"
-    `tmux send-keys -t "#{project.name}:0" "init-session #{project.name} #{project.path}" ENTER`
+    # Create a 25% split window in the newly created session's first window
+    `tmux split-window -p 25 -c "#{project.path}" -t "#{project.name}:0"`
+    
+    # Create a new window named "Server" at index 3 in the new session
+    `tmux new-window -c "#{project.path}" -n "Server" -t "#{project.name}:3"`
+    
+    # Select the first window and pane in the new session
+    `tmux select-window -t "#{project.name}:0"`
+    `tmux select-pane -t "#{project.name}:0.0"`
   end
 
   def self.switch_to(project)
