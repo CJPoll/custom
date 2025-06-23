@@ -1,0 +1,21 @@
+#! /usr/bin/env bash
+
+main() {
+  existing_file="${1}"
+  link="${2}"
+
+  if [ ! -f "${link}" ]; then
+    ln "${existing_file}" "${link}"
+  fi
+}
+
+printHelp() {
+  echo "hard-link <existing-file> <new-link-file>"
+}
+
+if [ "${1}" == "--help" ]
+then
+  printHelp
+else
+  main "${@}"
+fi

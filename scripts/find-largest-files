@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# Default values
+N=5
+IGNORE_DIRS=()
+
+# Function to display help
+show_help() {
+    cat << EOF
+Usage: $0 [OPTIONS] [N]
+
+Find the N files with the most lines in the current directory and all subdirectories.
+
+ARGUMENTS:
+    N                   Number of files to show (default: 5)
+
+OPTIONS:
+    --ignore-dir DIR    Directory to ignore (can be used multiple times)
+    --help             Show this help message and exit
+
+EXAMPLES:
+    $0                 # Find top 5 files with most lines
+    $0 10              # Find top 10 files with most lines
+    $0 --ignore-dir node_modules --ignore-dir .git 3
+                       # Find top 3 files, ignoring node_modules and .git directories
+
+EOF
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --help)
+            show_help
+            exit 0
+            ;;
+        --ignore-dir)
+            if [[ -z "$2" ]]; then
+                echo "Error: --ignore-dir requires a directory argument" >&2
+                exit 1
+            fi
+            IGNORE_DIRS+=("$2")
+            shift 2
+            ;;
+        -*)
+            echo "Error: Unknown option $1" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
+            ;;
+        *)
+            if [[ "$1" =~ ^[0-9]+$ ]]; then
+                N="$1"
+            else
+                echo "Error: Invalid argument '$1'. Expected a number." >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Build find command with ignore directories
+FIND_CMD="find . -type f"
+
+# Add ignore patterns for each directory
+for dir in "${IGNORE_DIRS[@]}"; do
+    FIND_CMD+=" -not -path \"./$dir/*\""
+done
+
+# Execute the find command and process results
+eval "$FIND_CMD" | while IFS= read -r file; do
+    if [[ -r "$file" ]]; then
+        lines=$(wc -l < "$file" 2>/dev/null || echo "0")
+        printf "%d %s\n" "$lines" "$file"
+    fi
+done | sort -nr | head -n "$N" | while read -r lines file; do
+    printf "%6d lines: %s\n" "$lines" "$file"
+done
