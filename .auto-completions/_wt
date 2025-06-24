@@ -3,42 +3,36 @@
 # Completion function for wt command
 
 _wt() {
-    local state
-
+    local curcontext="$curcontext" state line
+    
     _arguments -C \
-        '1: :->command' \
-        '2: :->args' \
-        '--quiet[Suppress output from script and subcommands]' \
-        '--gitignore[Modify .gitignore to exclude worktrees directory (for init command)]' \
-        '(- *)'{-h,--help}'[Show help information]'
-
+        '1: :_wt_commands' \
+        '*::arg:->args'
+    
     case $state in
-        command)
-            local commands=(
-                'init:Set up the worktrees directory'
-                'list:List all worktrees for the current project'
-                'ls:List all worktrees for the current project'
-                'create:Create a worktree for the specified branch'
-                'rm:Remove the worktree for the specified branch'
-                'switch:Change to the worktree for the specified branch'
-            )
-            _describe 'command' commands
-            ;;
         args)
-            case $words[2] in
+            case $words[1] in
                 switch|rm)
                     _wt_worktrees
                     ;;
-                ls|list)
-                    # ls/list don't take arguments
-                    ;;
                 create)
-                    # For create, we could potentially complete branch names from git
-                    # but for now, just let the user type
+                    _wt_git_branches
                     ;;
             esac
             ;;
     esac
+}
+
+_wt_commands() {
+    local commands=(
+        'init:Set up the worktrees directory'
+        'list:List all worktrees for the current project'
+        'ls:List all worktrees for the current project'
+        'create:Create a worktree for the specified branch'
+        'rm:Remove the worktree for the specified branch'
+        'switch:Change to the worktree for the specified branch'
+    )
+    _describe -t commands 'wt command' commands
 }
 
 # Function to complete worktree names
@@ -73,6 +67,15 @@ _wt_worktrees() {
             compadd -a worktrees
         fi
     fi
+}
+
+# Function to complete git branch names
+_wt_git_branches() {
+    # Get all branches (local and remote)
+    local -a branches
+    branches=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>/dev/null | grep -v HEAD | sed 's|^origin/||' | sort -u)"})
+    
+    _multi_parts / branches
 }
 
 _wt "$@"
