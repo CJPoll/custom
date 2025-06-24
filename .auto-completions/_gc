@@ -1,0 +1,45 @@
+#compdef gc
+
+# Completion function for gc command
+
+_gc() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+    
+    # Define the options
+    local -a options
+    options=(
+        '--all[Stage all files before committing (git add -A)]'
+        '--push[Push to origin after successful commit]'
+        '--pr[Create a GitHub PR after pushing (implies --push)]'
+        '--base-branch[Specify base branch for PR (requires --pr)]:branch:_git_branch_names'
+        '(-h --help)'{-h,--help}'[Show help message]'
+    )
+    
+    # Handle options
+    _arguments -C \
+        $options \
+        '*: :->args'
+    
+    # If --base-branch was used, complete with branch names
+    case $state in
+        args)
+            # Check if the previous word was --base-branch
+            if [[ ${words[CURRENT-1]} == "--base-branch" ]]; then
+                _git_branch_names
+            fi
+            ;;
+    esac
+}
+
+# Function to complete git branch names (borrowed from git completion)
+_git_branch_names() {
+    local -a branches
+    branches=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>/dev/null | grep -v HEAD | sed 's|^origin/||' | sort -u)"})
+    
+    if (( ${#branches} > 0 )); then
+        _describe -t branches 'branch' branches
+    fi
+}
+
+_gc "$@"
