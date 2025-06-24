@@ -8,6 +8,7 @@ WORKTREES_DIR="$PROJECT_DIR/worktrees"
 QUIET=false
 MODIFY_GITIGNORE=false
 NO_SYMLINK=false
+CHECK_DIR=""
 
 usage() {
     cat << EOF
@@ -20,11 +21,13 @@ Commands:
                     (symlinks .claude/ directory from main project if present)
   rm <branch>       Remove the worktree for the specified branch
   switch <branch>   Change to the worktree for the specified branch
+  is-worktree       Check if a directory is a git worktree (exit 0 if true, 1 if false)
 
 Options:
   --quiet           Suppress output from script and subcommands
   --gitignore       Modify .gitignore to exclude worktrees directory (for init command)
   --no-symlink      Do not create symlink to .claude directory (for create command)
+  --dir <directory> Check the specified directory (for is-worktree command, defaults to current dir)
 
 Examples:
   wt init
@@ -35,6 +38,8 @@ Examples:
   wt switch feature/my-feature
   wt rm feature/my-feature
   wt create --quiet bugfix/issue-123
+  wt is-worktree
+  wt is-worktree --dir /path/to/directory
 EOF
 }
 
@@ -245,6 +250,30 @@ switch_worktree() {
     proj "$session_name" --path "$worktree_path"
 }
 
+is_worktree() {
+    local dir="${CHECK_DIR:-$(pwd)}"
+    
+    # Get the absolute path
+    dir="$(realpath "$dir" 2>/dev/null)" || exit 1
+    
+    # Find the git directory by traversing up from the target directory
+    local git_dir="$dir"
+    while [[ "$git_dir" != "/" ]]; do
+        if [[ -d "$git_dir/.git" ]] || [[ -f "$git_dir/.git" ]]; then
+            # Check if git worktree list contains this directory
+            if git -C "$git_dir" worktree list 2>/dev/null | grep -q "^$dir\s"; then
+                exit 0
+            else
+                exit 1
+            fi
+        fi
+        git_dir="$(dirname "$git_dir")"
+    done
+    
+    # Not in a git repository
+    exit 1
+}
+
 # Parse command line arguments
 COMMAND=""
 BRANCH=""
@@ -263,7 +292,16 @@ while [[ $# -gt 0 ]]; do
             NO_SYMLINK=true
             shift
             ;;
-        init|list|ls|create|rm|switch)
+        --dir)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "Error: --dir requires a directory path" >&2
+                exit 1
+            fi
+            CHECK_DIR="$1"
+            shift
+            ;;
+        init|list|ls|create|rm|switch|is-worktree)
             COMMAND="$1"
             shift
             if [[ "$COMMAND" == "create" || "$COMMAND" == "rm" || "$COMMAND" == "switch" ]] && [[ $# -gt 0 ]] && [[ ! "$1" =~ ^-- ]]; then
@@ -299,6 +337,9 @@ case "$COMMAND" in
         ;;
     switch)
         switch_worktree "$BRANCH"
+        ;;
+    is-worktree)
+        is_worktree
         ;;
     "")
         echo "Error: No command specified" >&2
