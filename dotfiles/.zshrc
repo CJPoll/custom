@@ -152,6 +152,17 @@ function edit()
   fi
 }
 
+# Worktree wrapper function
+function wt() {
+    if [[ "$1" == "switch" ]]; then
+        # For switch command, evaluate the output
+        eval "$($CUSTOM_DIR/scripts/_wt "$@")"
+    else
+        # For all other commands, just execute normally
+        $CUSTOM_DIR/scripts/_wt "$@"
+    fi
+}
+
 #[[ -n "${key[Up]}"  ]] && bindkey "${key[Up]}" up-line-or-beginning-search
 #[[ -n "${key[Down]}"  ]] && bindkey "${key[Down]}" down-line-or-beginning-search
 
@@ -171,14 +182,3 @@ export GPG_TTY;
 unalias gc;
 
 . "$HOME/.local/bin/env"
-
-# Worktree wrapper function
-function wt() {
-    if [[ "$1" == "switch" ]]; then
-        # For switch command, evaluate the output
-        eval "$(_wt "$@")"
-    else
-        # For all other commands, just execute normally
-        _wt "$@"
-    fi
-}

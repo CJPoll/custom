@@ -3,9 +3,9 @@
 class Project
   attr_reader :name
 
-  def initialize(project_name)
+  def initialize(project_name, explicit_path = nil)
     @name = project_name
-    @project_path = nil
+    @project_path = explicit_path
   end
 
   def empty?
@@ -81,8 +81,8 @@ class Session
   end
 end
 
-def main(project_name)
-  project = Project.new(project_name)
+def main(project_name, explicit_path = nil)
+  project = Project.new(project_name, explicit_path)
 
   if project.empty?
     puts "Oh noez! You didn't say which program 😱"
@@ -124,8 +124,18 @@ end
 
 project_name = ARGV[0]
 
-if ARGV[1] == "print"
+# Check if we have --path argument
+explicit_path = nil
+if ARGV[1] == "--path" && ARGV[2]
+  explicit_path = ARGV[2]
+  # If there's a 4th argument after path, check if it's "print"
+  if ARGV[3] == "print"
+    print_path(project_name)
+    exit
+  end
+elsif ARGV[1] == "print"
   print_path(project_name)
-else
-  main(project_name)
+  exit
 end
+
+main(project_name, explicit_path)

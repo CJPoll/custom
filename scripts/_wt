@@ -219,8 +219,16 @@ switch_worktree() {
     
     log "Switching to worktree: $branch"
     
-    # Output the cd command for the shell to evaluate
-    echo "cd \"$worktree_path\""
+    # Get the project name from the current directory
+    local project_name=$(basename "$PROJECT_DIR")
+    
+    # Create session name with worktree info
+    # Replace slashes in branch name with dashes to avoid tmux issues
+    local safe_branch=$(echo "$branch" | tr '/' '-')
+    local session_name="${project_name}-wt-${safe_branch}"
+    
+    # Output the proj command for the shell to evaluate
+    echo "proj \"$session_name\" --path \"$worktree_path\""
 }
 
 # Parse command line arguments
@@ -237,7 +245,7 @@ while [[ $# -gt 0 ]]; do
             MODIFY_GITIGNORE=true
             shift
             ;;
-        init|list|create|rm|switch)
+        init|list|ls|create|rm|switch)
             COMMAND="$1"
             shift
             if [[ "$COMMAND" == "create" || "$COMMAND" == "rm" || "$COMMAND" == "switch" ]] && [[ $# -gt 0 ]] && [[ ! "$1" =~ ^-- ]]; then
@@ -262,7 +270,7 @@ case "$COMMAND" in
     init)
         init_worktrees
         ;;
-    list)
+    list|ls)
         list_worktrees
         ;;
     create)

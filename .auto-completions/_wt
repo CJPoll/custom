@@ -1,0 +1,78 @@
+#compdef wt
+
+# Completion function for wt command
+
+_wt() {
+    local state
+
+    _arguments -C \
+        '1: :->command' \
+        '2: :->args' \
+        '--quiet[Suppress output from script and subcommands]' \
+        '--gitignore[Modify .gitignore to exclude worktrees directory (for init command)]' \
+        '(- *)'{-h,--help}'[Show help information]'
+
+    case $state in
+        command)
+            local commands=(
+                'init:Set up the worktrees directory'
+                'list:List all worktrees for the current project'
+                'ls:List all worktrees for the current project'
+                'create:Create a worktree for the specified branch'
+                'rm:Remove the worktree for the specified branch'
+                'switch:Change to the worktree for the specified branch'
+            )
+            _describe 'command' commands
+            ;;
+        args)
+            case $words[2] in
+                switch|rm)
+                    _wt_worktrees
+                    ;;
+                ls|list)
+                    # ls/list don't take arguments
+                    ;;
+                create)
+                    # For create, we could potentially complete branch names from git
+                    # but for now, just let the user type
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+# Function to complete worktree names
+_wt_worktrees() {
+    local worktrees_dir="$(pwd)/worktrees"
+    local worktrees=()
+    
+    if [[ -d "$worktrees_dir" ]]; then
+        # Get all worktrees from git that are under our worktrees directory
+        local git_output
+        git_output=$(git worktree list 2>/dev/null)
+        
+        if [[ -n "$git_output" ]]; then
+            while IFS= read -r line; do
+                # Extract the path from each line (first field)
+                local worktree_path="${line%% *}"
+                
+                # Check if this worktree is under our worktrees_dir
+                if [[ "$worktree_path" == "$worktrees_dir/"* ]]; then
+                    # Extract the branch name by removing the prefix
+                    local branch="${worktree_path#$worktrees_dir/}"
+                    if [[ -n "$branch" ]]; then
+                        # Quote the branch name if it contains special characters
+                        worktrees+=("${(q)branch}")
+                    fi
+                fi
+            done <<< "$git_output"
+        fi
+        
+        if (( ${#worktrees} > 0 )); then
+            # Use compadd directly for better control
+            compadd -a worktrees
+        fi
+    fi
+}
+
+_wt "$@"
