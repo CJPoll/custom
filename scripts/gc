@@ -12,6 +12,7 @@ Options:
   --all             Stage all files before committing (git add -A)
   --push            Push to origin after successful commit
   --pr              Create a GitHub PR after pushing (requires --push)
+  --base-branch <branch>  Specify base branch for PR (requires --pr)
   -h, --help        Show this help message
 
 Description:
@@ -28,6 +29,7 @@ Examples:
   gc --push         Create a commit and push to origin
   gc --all --push   Stage all files, commit, and push
   gc --push --pr    Commit, push, and create a GitHub PR
+  gc --push --pr --base-branch develop  Create PR against develop branch
 
 Requirements:
   - Claude Code CLI must be installed and available
@@ -41,6 +43,7 @@ EOF
 PUSH_FLAG=false
 ALL_FLAG=false
 PR_FLAG=false
+BASE_BRANCH=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --all)
@@ -54,6 +57,14 @@ while [[ $# -gt 0 ]]; do
         --pr)
             PR_FLAG=true
             shift
+            ;;
+        --base-branch)
+            if [[ -z "$2" || "$2" =~ ^-- ]]; then
+                echo "Error: --base-branch requires a branch name" >&2
+                exit 1
+            fi
+            BASE_BRANCH="$2"
+            shift 2
             ;;
         -h|--help)
             usage
@@ -70,6 +81,11 @@ done
 # Validate flag combinations
 if [ "$PR_FLAG" = true ] && [ "$PUSH_FLAG" = false ]; then
     echo "Error: --pr requires --push flag" >&2
+    exit 1
+fi
+
+if [ -n "$BASE_BRANCH" ] && [ "$PR_FLAG" = false ]; then
+    echo "Error: --base-branch requires --pr flag" >&2
     exit 1
 fi
 
@@ -130,8 +146,12 @@ if ! git diff --cached --quiet; then
                 # Get current branch name
                 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
                 
-                # Get base branch (default to main, but could be master or other)
-                BASE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+                # Use provided base branch or detect default
+                if [ -z "$BASE_BRANCH" ]; then
+                    BASE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+                fi
+                
+                echo "Creating PR from $CURRENT_BRANCH to $BASE_BRANCH"
                 
                 # Create a temporary file for PR description
                 PR_TEMP_FILE=$(mktemp)
