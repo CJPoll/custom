@@ -2,6 +2,22 @@
 
 # gc: Generate a git commit message using Claude Code and commit with it
 
+# Parse command line arguments
+PUSH_FLAG=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --push)
+            PUSH_FLAG=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: gc [--push]"
+            exit 1
+            ;;
+    esac
+done
+
 # Check if there are staged changes
 if ! git diff --cached --quiet; then
     # Create a temporary file for the commit message
@@ -35,9 +51,16 @@ if ! git diff --cached --quiet; then
         
         # Then commit with the edited message
         git commit -F "$TEMP_FILE"
+        COMMIT_STATUS=$?
         
         # Clean up the temporary file
         rm "$TEMP_FILE"
+        
+        # Push to origin if --push flag was provided and commit succeeded
+        if [ $COMMIT_STATUS -eq 0 ] && [ "$PUSH_FLAG" = true ]; then
+            echo "Pushing to origin..."
+            git push origin
+        fi
     else
         echo "Error: Claude Code did not generate a commit message"
         rm "$TEMP_FILE"
