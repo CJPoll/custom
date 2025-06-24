@@ -21,7 +21,8 @@ Commands:
                     (symlinks .claude/ directory from main project if present)
   rm <branch>       Remove the worktree for the specified branch
   switch <branch>   Change to the worktree for the specified branch
-  is-worktree       Check if a directory is a git worktree (exit 0 if true, 1 if false)
+  is-worktree       Check if a directory is a git worktree
+                    Exit codes: 0=worktree, 1=project root, 2=neither
 
 Options:
   --quiet           Suppress output from script and subcommands
@@ -254,7 +255,25 @@ is_worktree() {
     local dir="${CHECK_DIR:-$(pwd)}"
     
     # Get the absolute path
-    dir="$(realpath "$dir" 2>/dev/null)" || exit 1
+    dir="$(realpath "$dir" 2>/dev/null)" || exit 2
+    
+    # Check if directory is an immediate child of any DEVPATH directory
+    if [[ -n "$DEVPATH" ]]; then
+        # Split DEVPATH by colon
+        IFS=':' read -ra DEV_DIRS <<< "$DEVPATH"
+        for dev_dir in "${DEV_DIRS[@]}"; do
+            # Expand the dev_dir path (handle ~ and variables)
+            dev_dir="$(eval echo "$dev_dir")"
+            dev_dir="$(realpath "$dev_dir" 2>/dev/null)" || continue
+            
+            # Check if dir is an immediate child of this dev_dir
+            local parent_dir="$(dirname "$dir")"
+            if [[ "$parent_dir" == "$dev_dir" ]]; then
+                # This is a project root directory, not a worktree
+                exit 1
+            fi
+        done
+    fi
     
     # Find the git directory by traversing up from the target directory
     local git_dir="$dir"
@@ -264,14 +283,14 @@ is_worktree() {
             if git -C "$git_dir" worktree list 2>/dev/null | grep -q "^$dir\s"; then
                 exit 0
             else
-                exit 1
+                exit 2
             fi
         fi
         git_dir="$(dirname "$git_dir")"
     done
     
     # Not in a git repository
-    exit 1
+    exit 2
 }
 
 # Parse command line arguments
