@@ -2,6 +2,35 @@
 
 # gc: Generate a git commit message using Claude Code and commit with it
 
+usage() {
+    cat << EOF
+Usage: gc [options]
+
+Generate a git commit message using Claude Code and commit staged changes.
+
+Options:
+  --push            Push to origin after successful commit
+  -h, --help        Show this help message
+
+Description:
+  This script uses Claude Code to generate a conventional commit message
+  for your staged changes. The generated message is opened in your editor
+  for review and modification before committing.
+
+  The commit message follows the conventional commits specification and
+  includes Claude Code as a co-author.
+
+Examples:
+  gc                Create a commit with AI-generated message
+  gc --push         Create a commit and push to origin
+
+Requirements:
+  - Claude Code CLI must be installed and available
+  - Git repository with staged changes
+  - \$EDITOR environment variable set (defaults to vim)
+EOF
+}
+
 # Parse command line arguments
 PUSH_FLAG=false
 while [[ $# -gt 0 ]]; do
@@ -10,9 +39,13 @@ while [[ $# -gt 0 ]]; do
             PUSH_FLAG=true
             shift
             ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
         *)
-            echo "Unknown option: $1"
-            echo "Usage: gc [--push]"
+            echo "Error: Unknown option: $1" >&2
+            echo "Try 'gc --help' for more information." >&2
             exit 1
             ;;
     esac
