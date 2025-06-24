@@ -1,4 +1,4 @@
-THINK I have a ticket in Linear: $ARGUMENTS
+THINK I have a ticket: $ARGUMENTS
 
 Our goal is to complete the ticket in its entirety. We will start off by not
 generating any code or tests.
