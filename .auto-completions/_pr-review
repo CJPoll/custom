@@ -1,0 +1,34 @@
+#compdef pr-review
+
+# Completion function for pr-review command
+
+_pr-review() {
+    local curcontext="$curcontext" state line
+    
+    _arguments -C \
+        '1:branch:_pr_review_branches' \
+        '(- *)'{-h,--help}'[Show help message]'
+}
+
+# Function to complete git branch names (excluding current branch)
+_pr_review_branches() {
+    # Get all branches (local and remote), excluding HEAD
+    local -a branches
+    local current_branch
+    
+    # Get current branch name
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    
+    # Get all branches except the current one
+    branches=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>/dev/null | grep -v HEAD | sed 's|^origin/||' | sort -u)"})
+    
+    # Remove current branch from the list if present
+    if [[ -n "$current_branch" ]]; then
+        branches=(${branches:#$current_branch})
+    fi
+    
+    # Use _multi_parts for better branch completion with slashes
+    _multi_parts / branches
+}
+
+_pr-review "$@"
