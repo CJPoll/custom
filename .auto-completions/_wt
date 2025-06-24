@@ -18,6 +18,10 @@ _wt() {
                 create)
                     _wt_git_branches
                     ;;
+                is-worktree)
+                    _arguments \
+                        '--dir[Check the specified directory]:directory:_directories'
+                    ;;
             esac
             ;;
     esac
@@ -31,6 +35,7 @@ _wt_commands() {
         'create:Create a worktree for the specified branch'
         'rm:Remove the worktree for the specified branch'
         'switch:Change to the worktree for the specified branch'
+        'is-worktree:Check if a directory is a git worktree'
     )
     _describe -t commands 'wt command' commands
 }
