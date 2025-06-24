@@ -11,7 +11,7 @@ Generate a git commit message using Claude Code and commit staged changes.
 Options:
   --all             Stage all files before committing (git add -A)
   --push            Push to origin after successful commit
-  --pr              Create a GitHub PR after pushing (requires --push)
+  --pr              Create a GitHub PR after pushing (implies --push)
   --base-branch <branch>  Specify base branch for PR (requires --pr)
   -h, --help        Show this help message
 
@@ -28,8 +28,8 @@ Examples:
   gc --all          Stage all files and create a commit
   gc --push         Create a commit and push to origin
   gc --all --push   Stage all files, commit, and push
-  gc --push --pr    Commit, push, and create a GitHub PR
-  gc --push --pr --base-branch develop  Create PR against develop branch
+  gc --pr            Commit, push, and create a GitHub PR
+  gc --pr --base-branch develop  Create PR against develop branch
 
 Requirements:
   - Claude Code CLI must be installed and available
@@ -56,6 +56,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --pr)
             PR_FLAG=true
+            PUSH_FLAG=true  # --pr implies --push
             shift
             ;;
         --base-branch)
@@ -79,11 +80,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate flag combinations
-if [ "$PR_FLAG" = true ] && [ "$PUSH_FLAG" = false ]; then
-    echo "Error: --pr requires --push flag" >&2
-    exit 1
-fi
-
 if [ -n "$BASE_BRANCH" ] && [ "$PR_FLAG" = false ]; then
     echo "Error: --base-branch requires --pr flag" >&2
     exit 1
