@@ -14,6 +14,7 @@ Usage: wt <command> [options]
 
 Commands:
   init              Set up the worktrees directory
+  list              List all worktrees for the current project
   create <branch>   Create a worktree for the specified branch
   rm <branch>       Remove the worktree for the specified branch
   switch <branch>   Change to the worktree for the specified branch
@@ -25,6 +26,7 @@ Options:
 Examples:
   wt init
   wt init --gitignore
+  wt list
   wt create feature/my-feature
   wt switch feature/my-feature
   wt rm feature/my-feature
@@ -34,7 +36,7 @@ EOF
 
 log() {
     if [ "$QUIET" = false ]; then
-        echo "$@"
+        echo "$@" >&2
     fi
 }
 
@@ -70,6 +72,59 @@ init_worktrees() {
     fi
     
     log "Worktrees directory initialized at: $WORKTREES_DIR"
+}
+
+list_worktrees() {
+    if [ ! -d "$WORKTREES_DIR" ]; then
+        log "No worktrees directory found. Run 'wt init' first."
+        return 0
+    fi
+    
+    # Get list of directories in worktrees
+    local worktrees=()
+    if [ -d "$WORKTREES_DIR" ]; then
+        while IFS= read -r -d '' dir; do
+            worktrees+=("$(basename "$dir")")
+        done < <(find "$WORKTREES_DIR" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+    fi
+    
+    if [ ${#worktrees[@]} -eq 0 ]; then
+        log "No worktrees found."
+        return 0
+    fi
+    
+    # Get current branch for comparison
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    
+    log "Worktrees for this project:"
+    log ""
+    
+    # Use git worktree list to get more info
+    local git_worktrees
+    git_worktrees=$(git worktree list 2>/dev/null || echo "")
+    
+    for worktree in "${worktrees[@]}"; do
+        local marker=""
+        local worktree_path="$WORKTREES_DIR/$worktree"
+        
+        # Check if this is the current directory
+        if [[ "$(pwd)" == "$worktree_path" ]]; then
+            marker=" *"
+        fi
+        
+        # Try to get the commit info from git worktree list
+        local commit_info=""
+        if [[ -n "$git_worktrees" ]]; then
+            commit_info=$(echo "$git_worktrees" | grep "$worktree_path" | awk '{print $2, $3}' || echo "")
+        fi
+        
+        if [[ -n "$commit_info" ]]; then
+            echo "  $worktree$marker ($commit_info)"
+        else
+            echo "  $worktree$marker"
+        fi
+    done
 }
 
 create_worktree() {
@@ -182,7 +237,7 @@ while [[ $# -gt 0 ]]; do
             MODIFY_GITIGNORE=true
             shift
             ;;
-        init|create|rm|switch)
+        init|list|create|rm|switch)
             COMMAND="$1"
             shift
             if [[ "$COMMAND" == "create" || "$COMMAND" == "rm" || "$COMMAND" == "switch" ]] && [[ $# -gt 0 ]] && [[ ! "$1" =~ ^-- ]]; then
@@ -206,6 +261,9 @@ done
 case "$COMMAND" in
     init)
         init_worktrees
+        ;;
+    list)
+        list_worktrees
         ;;
     create)
         create_worktree "$BRANCH"
