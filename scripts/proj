@@ -8,6 +8,11 @@ class Project
     @project_path = explicit_path
   end
 
+  def session_name
+    # Tmux automatically converts dots to underscores in session names
+    @name.gsub('.', '_')
+  end
+
   def empty?
     @name.nil?
   end
@@ -47,7 +52,7 @@ class Session
   end
 
   def self.for(project)
-    sessions = `tmux list-sessions | egrep "^#{project.name}" | cut -d" " -f1 | wc -l`
+    sessions = `tmux list-sessions 2>/dev/null | egrep "^#{project.session_name}" | cut -d" " -f1 | wc -l`
     new(sessions)
   end
 
@@ -57,7 +62,7 @@ class Session
     
     if pr_review && (editor == "vim" || editor == "nvim")
       # Get list of changed files relative to origin/main
-      changed_files = `cd "#{project.path}" && git diff --name-only origin/main...HEAD`.strip.split("\n")
+      changed_files = `cd "#{project.path}" && git diff --name-only origin/main...HEAD 2>/dev/null`.strip.split("\n")
       
       if changed_files.empty? || changed_files == [""]
         # No changed files, open normally
@@ -74,23 +79,29 @@ class Session
     end
     
     # Create session with editor running in the first window
-    `tmux new-session -d -n "Work" -c "#{project.path}" -s "#{project.name}" "#{editor_cmd}"`
+    `tmux new-session -d -n "Work" -c "#{project.path}" -s "#{project.session_name}" "#{editor_cmd}"`
   end
 
   def self.init(project)
     # Create a 25% split window in the newly created session's first window
-    `tmux split-window -p 25 -c "#{project.path}" -t "#{project.name}:0"`
+    `tmux split-window -p 25 -c "#{project.path}" -t "#{project.session_name}:0"`
     
     # Create a new window named "Server" at index 3 in the new session
-    `tmux new-window -c "#{project.path}" -n "Server" -t "#{project.name}:3"`
+    `tmux new-window -c "#{project.path}" -n "Server" -t "#{project.session_name}:3"`
     
     # Select the first window and pane in the new session
-    `tmux select-window -t "#{project.name}:0"`
-    `tmux select-pane -t "#{project.name}:0.0"`
+    `tmux select-window -t "#{project.session_name}:0"`
+    `tmux select-pane -t "#{project.session_name}:0.0"`
   end
 
   def self.switch_to(project)
-    `tmux switch-client -t #{project.name};`
+    if ENV['TMUX']
+      # We're inside tmux, use switch-client
+      `tmux switch-client -t #{project.session_name};`
+    else
+      # We're outside tmux, attach to the session
+      exec "tmux attach-session -t #{project.session_name}"
+    end
   end
 end
 
