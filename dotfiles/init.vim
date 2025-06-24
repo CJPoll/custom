@@ -2,14 +2,6 @@
 "let &packpath=&runtimepath
 "source ~/.vimrc
 
-lua << EOF
--- require("claude-code").setup({
---  window = {
---    split_ratio = 0.3
---  }
--- })
-EOF
-
 call plug#begin()
 if has('nvim')
   set runtimepath+=~/.vim/
@@ -52,6 +44,14 @@ Plug 'elixir-tools/elixir-tools.nvim', { 'tag': 'stable' }
 call plug#end()
 
 
+
+lua << EOF
+require("claude-code").setup({
+ window = {
+   split_ratio = 0.4
+ }
+})
+EOF
 lua << EOF
 require('claude-code').setup({})
 require("elixir").setup()
@@ -219,6 +219,7 @@ nnoremap <C-j> <C-w>j
 if has('nvim')
 	nmap <BS> <C-W>h
 	tnoremap <Esc> <C-\><C-n>
+	tnoremap jk <C-\><C-n>
 endif
 
 " Easy move to the window to the left
