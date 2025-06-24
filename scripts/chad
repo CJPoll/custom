@@ -46,7 +46,7 @@ case "${subcommand}" in
     ;;
 
   suggest-refactors)
-    prompt="I'm looking at the following code, particularly for opportunities to refactor. I mostly care about makeing sure there are good, solid boundaries and that a given function operates at a single level of abstraction. If a module is more than 100 lines, that suggests we might want to look at whether we should split it apart. If a module is over 250 lines, we absolutely should look at how to break it up. Line counts should ignore @doc strings, @moduledoc strings, and specs. \n"
+    prompt="I'm looking at the following code, particularly for opportunities to refactor. I mostly care about making sure there are good, solid boundaries and that a given function operates at a single level of abstraction. If a module is more than 100 lines, that suggests we might want to look at whether we should split it apart. If a module is over 250 lines, we absolutely should look at how to break it up. Line counts should ignore @doc strings, @moduledoc strings, and specs. \n"
     chad prompt-files "${prompt}" ${@:2}
 
     ;;

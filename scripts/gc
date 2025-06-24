@@ -9,6 +9,7 @@ Usage: gc [options]
 Generate a git commit message using Claude Code and commit staged changes.
 
 Options:
+  --all             Stage all files before committing (git add -A)
   --push            Push to origin after successful commit
   -h, --help        Show this help message
 
@@ -22,19 +23,26 @@ Description:
 
 Examples:
   gc                Create a commit with AI-generated message
+  gc --all          Stage all files and create a commit
   gc --push         Create a commit and push to origin
+  gc --all --push   Stage all files, commit, and push
 
 Requirements:
   - Claude Code CLI must be installed and available
-  - Git repository with staged changes
+  - Git repository with staged changes (or use --all flag)
   - \$EDITOR environment variable set (defaults to vim)
 EOF
 }
 
 # Parse command line arguments
 PUSH_FLAG=false
+ALL_FLAG=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --all)
+            ALL_FLAG=true
+            shift
+            ;;
         --push)
             PUSH_FLAG=true
             shift
@@ -50,6 +58,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Stage all files if --all flag is set
+if [ "$ALL_FLAG" = true ]; then
+    echo "Staging all files..."
+    git add -A
+fi
 
 # Check if there are staged changes
 if ! git diff --cached --quiet; then
