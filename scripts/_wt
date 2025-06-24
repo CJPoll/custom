@@ -150,7 +150,7 @@ switch_worktree() {
     if [ -z "$branch" ]; then
         echo "Error: Branch name is required" >&2
         usage
-        exit 1
+        return 1
     fi
     
     if [ ! -d "$worktree_path" ]; then
@@ -159,13 +159,12 @@ switch_worktree() {
         if [ -d "$WORKTREES_DIR" ]; then
             ls -1 "$WORKTREES_DIR" 2>/dev/null | sed 's/^/  /' >&2
         fi
-        exit 1
+        return 1
     fi
     
     log "Switching to worktree: $branch"
     
-    # Note: We can't actually change the parent shell's directory from within this script
-    # So we'll output the path for the user to cd into
+    # Output the cd command for the shell to evaluate
     echo "cd \"$worktree_path\""
 }
 
@@ -229,4 +228,3 @@ case "$COMMAND" in
         ;;
 esac
 
-exit 0
