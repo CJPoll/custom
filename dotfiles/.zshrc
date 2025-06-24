@@ -83,7 +83,7 @@ source $ZSH/oh-my-zsh.sh;
 export CUSTOM_DIR="${HOME}/dev/custom"
 export DEV_DIR="${HOME}/dev"
 PATH="${CUSTOM_DIR}/scripts:$CUSTOM_DIR/git-custom:${PATH}"
-export DEVPATH="${CUSTOM_DIR}/scripts:${CUSTOM_DIR}/git-custom:${CUSTOM_DIR}/.auto-completions:${DEV_DIR}";
+export DEVPATH="${DEV_DIR}";
 export fpath=("${CUSTOM_DIR}/.auto-completions" $fpath)
 
 export LANG=en_US.UTF-8
