@@ -7,6 +7,7 @@ WORKTREES_DIR="$PROJECT_DIR/worktrees"
 
 QUIET=false
 MODIFY_GITIGNORE=false
+NO_SYMLINK=false
 
 usage() {
     cat << EOF
@@ -16,18 +17,21 @@ Commands:
   init              Set up the worktrees directory
   list              List all worktrees for the current project
   create <branch>   Create a worktree for the specified branch
+                    (symlinks .claude/ directory from main project if present)
   rm <branch>       Remove the worktree for the specified branch
   switch <branch>   Change to the worktree for the specified branch
 
 Options:
   --quiet           Suppress output from script and subcommands
   --gitignore       Modify .gitignore to exclude worktrees directory (for init command)
+  --no-symlink      Do not create symlink to .claude directory (for create command)
 
 Examples:
   wt init
   wt init --gitignore
   wt list
   wt create feature/my-feature
+  wt create --no-symlink experimental/test
   wt switch feature/my-feature
   wt rm feature/my-feature
   wt create --quiet bugfix/issue-123
@@ -165,6 +169,16 @@ create_worktree() {
     fi
     
     log "Worktree created at: $worktree_path"
+    
+    # Create symlink to .claude directory if it exists in the main project (unless --no-symlink is set)
+    if [ "$NO_SYMLINK" = false ] && [ -d "$PROJECT_DIR/.claude" ]; then
+        if [ ! -e "$worktree_path/.claude" ]; then
+            ln -s "$PROJECT_DIR/.claude" "$worktree_path/.claude"
+            log "Created symlink to .claude directory"
+        else
+            log "Warning: .claude already exists in worktree, skipping symlink"
+        fi
+    fi
 }
 
 remove_worktree() {
@@ -227,8 +241,8 @@ switch_worktree() {
     local safe_branch=$(echo "$branch" | tr '/' '-')
     local session_name="${project_name}-wt-${safe_branch}"
     
-    # Output the proj command for the shell to evaluate
-    echo "proj \"$session_name\" --path \"$worktree_path\""
+    # Call proj directly
+    proj "$session_name" --path "$worktree_path"
 }
 
 # Parse command line arguments
@@ -243,6 +257,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --gitignore)
             MODIFY_GITIGNORE=true
+            shift
+            ;;
+        --no-symlink)
+            NO_SYMLINK=true
             shift
             ;;
         init|list|ls|create|rm|switch)
