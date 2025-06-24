@@ -13,6 +13,7 @@ Options:
   --push            Push to origin after successful commit
   --pr              Create a GitHub PR after pushing (implies --push)
   --base-branch <branch>  Specify base branch for PR (requires --pr)
+  --yolo            Skip editor review and commit directly with AI message
   -h, --help        Show this help message
 
 Description:
@@ -30,6 +31,7 @@ Examples:
   gc --all --push   Stage all files, commit, and push
   gc --pr            Commit, push, and create a GitHub PR
   gc --pr --base-branch develop  Create PR against develop branch
+  gc --yolo          Commit directly without editor review
 
 Requirements:
   - Claude Code CLI must be installed and available
@@ -43,6 +45,7 @@ EOF
 PUSH_FLAG=false
 ALL_FLAG=false
 PR_FLAG=false
+YOLO_FLAG=false
 BASE_BRANCH=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -66,6 +69,10 @@ while [[ $# -gt 0 ]]; do
             fi
             BASE_BRANCH="$2"
             shift 2
+            ;;
+        --yolo)
+            YOLO_FLAG=true
+            shift
             ;;
         -h|--help)
             usage
@@ -119,8 +126,11 @@ if ! git diff --cached --quiet; then
     
     # Check if Claude Code produced output
     if [ -s "$TEMP_FILE" ]; then
-        # Open the message in the editor first
-        ${EDITOR:-vim} "$TEMP_FILE"
+        # Skip editor if --yolo flag is set
+        if [ "$YOLO_FLAG" = false ]; then
+            # Open the message in the editor first
+            ${EDITOR:-vim} "$TEMP_FILE"
+        fi
         
         # Then commit with the edited message
         git commit -F "$TEMP_FILE"
@@ -160,8 +170,11 @@ if ! git diff --cached --quiet; then
                 wait $CLAUDE_PR_PID
                 
                 if [ -s "$PR_TEMP_FILE" ]; then
-                    # Open PR description in editor for review
-                    ${EDITOR:-vim} "$PR_TEMP_FILE"
+                    # Skip editor if --yolo flag is set
+                    if [ "$YOLO_FLAG" = false ]; then
+                        # Open PR description in editor for review
+                        ${EDITOR:-vim} "$PR_TEMP_FILE"
+                    fi
                     
                     # Extract the first line for PR title (from commit message)
                     PR_TITLE=$(git log -1 --pretty=%s)
