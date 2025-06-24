@@ -272,4 +272,6 @@ augroup END
 set exrc
 set secure
 
+set diffopt+=vertical
+
 call SourceIfExists("$HOME/.vimrc.local")
