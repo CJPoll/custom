@@ -11,6 +11,7 @@ Generate a git commit message using Claude Code and commit staged changes.
 Options:
   --all             Stage all files before committing (git add -A)
   --push            Push to origin after successful commit
+  --pr              Create a GitHub PR after pushing (requires --push)
   -h, --help        Show this help message
 
 Description:
@@ -26,17 +27,20 @@ Examples:
   gc --all          Stage all files and create a commit
   gc --push         Create a commit and push to origin
   gc --all --push   Stage all files, commit, and push
+  gc --push --pr    Commit, push, and create a GitHub PR
 
 Requirements:
   - Claude Code CLI must be installed and available
   - Git repository with staged changes (or use --all flag)
   - \$EDITOR environment variable set (defaults to vim)
+  - gh CLI installed (for --pr flag)
 EOF
 }
 
 # Parse command line arguments
 PUSH_FLAG=false
 ALL_FLAG=false
+PR_FLAG=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --all)
@@ -45,6 +49,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --push)
             PUSH_FLAG=true
+            shift
+            ;;
+        --pr)
+            PR_FLAG=true
             shift
             ;;
         -h|--help)
@@ -58,6 +66,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Validate flag combinations
+if [ "$PR_FLAG" = true ] && [ "$PUSH_FLAG" = false ]; then
+    echo "Error: --pr requires --push flag" >&2
+    exit 1
+fi
 
 # Stage all files if --all flag is set
 if [ "$ALL_FLAG" = true ]; then
@@ -107,6 +121,45 @@ if ! git diff --cached --quiet; then
         if [ $COMMIT_STATUS -eq 0 ] && [ "$PUSH_FLAG" = true ]; then
             echo "Pushing to origin..."
             git push origin
+            PUSH_STATUS=$?
+            
+            # Create PR if --pr flag was provided and push succeeded
+            if [ $PUSH_STATUS -eq 0 ] && [ "$PR_FLAG" = true ]; then
+                echo "Creating GitHub PR..."
+                
+                # Get current branch name
+                CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+                
+                # Get base branch (default to main, but could be master or other)
+                BASE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+                
+                # Create a temporary file for PR description
+                PR_TEMP_FILE=$(mktemp)
+                
+                # Generate PR description using Claude Code
+                echo "Generating PR description..."
+                git diff "$BASE_BRANCH"..."$CURRENT_BRANCH" | claude "Generate a GitHub PR description based on the following diff. Include a summary of changes, any breaking changes, and testing suggestions. Format it with markdown. Give no additional output beyond the PR description." > "$PR_TEMP_FILE" &
+                CLAUDE_PR_PID=$!
+                spinner $CLAUDE_PR_PID
+                wait $CLAUDE_PR_PID
+                
+                if [ -s "$PR_TEMP_FILE" ]; then
+                    # Open PR description in editor for review
+                    ${EDITOR:-vim} "$PR_TEMP_FILE"
+                    
+                    # Extract the first line for PR title (from commit message)
+                    PR_TITLE=$(git log -1 --pretty=%s)
+                    
+                    # Create the PR
+                    gh pr create --base "$BASE_BRANCH" --title "$PR_TITLE" --body-file "$PR_TEMP_FILE"
+                    
+                    # Clean up
+                    rm "$PR_TEMP_FILE"
+                else
+                    echo "Error: Could not generate PR description"
+                    rm "$PR_TEMP_FILE"
+                fi
+            fi
         fi
     else
         echo "Error: Claude Code did not generate a commit message"
