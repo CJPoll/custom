@@ -24,8 +24,11 @@ Other functions should not have imperative names; they should instead be named
 after what they return. This aligns with the value of `Clarity of Intent`
 
 === Single Control-Flow Constructs
-A single function should only have a single control-flow mechanism. Pipe chains,
-cond, with, case, if, and unless are all examples of control flow mechanisms.
+A single function should only have a single control-flow structure. Pipe chains,
+cond, with, case, if, and unless are all examples of control flow structures.
+
+While pattern matching in function heads is technically a control-flow
+structure, we won't count it for the purpose of this principle.
 
 This means a single function should not nest control flow
 
@@ -151,6 +154,24 @@ Good:
     |> Multi.insert(:custom_styles, &create_custom_styles/1)
   end
 
+```
+
+=== No single-pipe chains
+Good:
+```elixir
+%{}
+|> Map.put(:one, 1)
+|> Map.put(:two, 2)
+```
+
+Good:
+```elixir
+Map.put(%{}, :one, 1)
+```
+
+Bad:
+```elixir
+%{} |> Map.put(:one, 1)
 ```
 
 === Consistent File Format

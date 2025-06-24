@@ -1,0 +1,185 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORKTREES_DIR="$PROJECT_ROOT/worktrees"
+
+QUIET=false
+
+usage() {
+    cat << EOF
+Usage: wt <command> [options]
+
+Commands:
+  init              Set up the worktrees directory
+  create <branch>   Create a worktree for the specified branch
+  rm <branch>       Remove the worktree for the specified branch
+
+Options:
+  --quiet           Suppress output from script and subcommands
+
+Examples:
+  wt init
+  wt create feature/my-feature
+  wt rm feature/my-feature
+  wt create --quiet bugfix/issue-123
+EOF
+}
+
+log() {
+    if [ "$QUIET" = false ]; then
+        echo "$@"
+    fi
+}
+
+run_cmd() {
+    if [ "$QUIET" = true ]; then
+        "$@" >/dev/null 2>&1
+    else
+        "$@"
+    fi
+}
+
+init_worktrees() {
+    log "Initializing worktrees directory..."
+    
+    if [ ! -d "$PROJECT_ROOT/.git" ]; then
+        echo "Error: Not in a git repository" >&2
+        exit 1
+    fi
+    
+    mkdir -p "$WORKTREES_DIR"
+    
+    if [ ! -f "$WORKTREES_DIR/.gitignore" ]; then
+        echo "*" > "$WORKTREES_DIR/.gitignore"
+        log "Created $WORKTREES_DIR/.gitignore"
+    fi
+    
+    log "Worktrees directory initialized at: $WORKTREES_DIR"
+}
+
+create_worktree() {
+    local branch="$1"
+    local worktree_path="$WORKTREES_DIR/$branch"
+    
+    if [ -z "$branch" ]; then
+        echo "Error: Branch name is required" >&2
+        usage
+        exit 1
+    fi
+    
+    if [ ! -d "$WORKTREES_DIR" ]; then
+        log "Worktrees directory not found. Running init first..."
+        init_worktrees
+    fi
+    
+    if [ -d "$worktree_path" ]; then
+        echo "Error: Worktree already exists at: $worktree_path" >&2
+        exit 1
+    fi
+    
+    log "Creating worktree for branch: $branch"
+    
+    # Check if branch exists
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+        log "Checking out existing branch: $branch"
+        run_cmd git worktree add "$worktree_path" "$branch"
+    else
+        # Check if it exists as a remote branch
+        if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+            log "Creating local branch from remote: origin/$branch"
+            run_cmd git worktree add "$worktree_path" -b "$branch" "origin/$branch"
+        else
+            log "Creating new branch: $branch"
+            run_cmd git worktree add "$worktree_path" -b "$branch"
+        fi
+    fi
+    
+    log "Worktree created at: $worktree_path"
+}
+
+remove_worktree() {
+    local branch="$1"
+    local worktree_path="$WORKTREES_DIR/$branch"
+    
+    if [ -z "$branch" ]; then
+        echo "Error: Branch name is required" >&2
+        usage
+        exit 1
+    fi
+    
+    if [ ! -d "$worktree_path" ]; then
+        echo "Error: Worktree not found at: $worktree_path" >&2
+        exit 1
+    fi
+    
+    log "Removing worktree for branch: $branch"
+    
+    # Remove the worktree
+    run_cmd git worktree remove "$worktree_path" --force
+    
+    # Clean up any remaining directory if it exists
+    if [ -d "$worktree_path" ]; then
+        rm -rf "$worktree_path"
+    fi
+    
+    # Prune worktree metadata
+    run_cmd git worktree prune
+    
+    log "Worktree removed: $branch"
+}
+
+# Parse command line arguments
+COMMAND=""
+BRANCH=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --quiet)
+            QUIET=true
+            shift
+            ;;
+        init|create|rm)
+            COMMAND="$1"
+            shift
+            if [[ "$COMMAND" == "create" || "$COMMAND" == "rm" ]] && [[ $# -gt 0 ]] && [[ ! "$1" =~ ^-- ]]; then
+                BRANCH="$1"
+                shift
+            fi
+            ;;
+        -h|--help|help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown argument: $1" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# Execute the appropriate command
+case "$COMMAND" in
+    init)
+        init_worktrees
+        ;;
+    create)
+        create_worktree "$BRANCH"
+        ;;
+    rm)
+        remove_worktree "$BRANCH"
+        ;;
+    "")
+        echo "Error: No command specified" >&2
+        usage
+        exit 1
+        ;;
+    *)
+        echo "Error: Unknown command: $COMMAND" >&2
+        usage
+        exit 1
+        ;;
+esac

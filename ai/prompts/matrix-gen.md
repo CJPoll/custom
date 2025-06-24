@@ -1,4 +1,4 @@
-I have a file for which I want to generate regression tests: $ARGUMENTS
+THINK I have a file for which I want to generate regression tests: $ARGUMENTS
 
 Do not generate any code. Do not generate any tests.
 
@@ -16,6 +16,8 @@ Correct output is formatted in this way:
     1. Test case description
     2. Inputs to the test case
     3. Expected outputs (return values, logs, raised exceptions, etc.)
+    4. Whether this is `Happy Path`, `Validation`, `Error Handling`, `Control
+       Flow Decisioning` or some other category of behavior testing
 
 The test matrices are put in a directory called `test-matrices/`
 `test-matrices/` has a subdirectory with the same name as the file under test.
