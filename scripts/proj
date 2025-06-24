@@ -51,13 +51,26 @@ class Session
     new(sessions)
   end
 
-  def self.open(project)
+  def self.open(project, pr_review = false)
     # Determine editor command
     editor = ENV['EDITOR'] || 'vim'
-    editor_cmd = if editor == "vim" || editor == "nvim"
-      "#{editor} +NERDTree"
+    
+    if pr_review && (editor == "vim" || editor == "nvim")
+      # Get list of changed files relative to origin/main
+      changed_files = `cd "#{project.path}" && git diff --name-only origin/main...HEAD`.strip.split("\n")
+      
+      if changed_files.empty? || changed_files == [""]
+        # No changed files, open normally
+        editor_cmd = "#{editor} +NERDTree"
+      else
+        # Open all changed files in tabs
+        files_list = changed_files.join(" ")
+        editor_cmd = "#{editor} -p #{files_list}"
+      end
+    elsif editor == "vim" || editor == "nvim"
+      editor_cmd = "#{editor} +NERDTree"
     else
-      editor
+      editor_cmd = editor
     end
     
     # Create session with editor running in the first window
@@ -81,7 +94,7 @@ class Session
   end
 end
 
-def main(project_name, explicit_path = nil)
+def main(project_name, explicit_path = nil, pr_review = false)
   project = Project.new(project_name, explicit_path)
 
   if project.empty?
@@ -97,7 +110,7 @@ def main(project_name, explicit_path = nil)
   session = Session.for(project)
 
   if session.missing?
-    Session.open(project)
+    Session.open(project, pr_review)
     Session.init(project)
   end
 
@@ -124,18 +137,25 @@ end
 
 project_name = ARGV[0]
 
-# Check if we have --path argument
+# Parse arguments
 explicit_path = nil
-if ARGV[1] == "--path" && ARGV[2]
-  explicit_path = ARGV[2]
-  # If there's a 4th argument after path, check if it's "print"
-  if ARGV[3] == "print"
+pr_review = false
+i = 1
+
+while i < ARGV.length
+  case ARGV[i]
+  when "--path"
+    if ARGV[i + 1]
+      explicit_path = ARGV[i + 1]
+      i += 1
+    end
+  when "--pr-review"
+    pr_review = true
+  when "print"
     print_path(project_name)
     exit
   end
-elsif ARGV[1] == "print"
-  print_path(project_name)
-  exit
+  i += 1
 end
 
-main(project_name, explicit_path)
+main(project_name, explicit_path, pr_review)

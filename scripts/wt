@@ -9,6 +9,7 @@ QUIET=false
 MODIFY_GITIGNORE=false
 NO_SYMLINK=false
 CHECK_DIR=""
+PR_REVIEW=false
 
 usage() {
     cat << EOF
@@ -29,6 +30,7 @@ Options:
   --gitignore       Modify .gitignore to exclude worktrees directory (for init command)
   --no-symlink      Do not create symlink to .claude directory (for create command)
   --dir <directory> Check the specified directory (for is-worktree command, defaults to current dir)
+  --pr-review       Open changed files in tabs for PR review (for switch command)
 
 Examples:
   wt init
@@ -37,6 +39,7 @@ Examples:
   wt create feature/my-feature
   wt create --no-symlink experimental/test
   wt switch feature/my-feature
+  wt switch feature/my-feature --pr-review
   wt rm feature/my-feature
   wt create --quiet bugfix/issue-123
   wt is-worktree
@@ -247,8 +250,12 @@ switch_worktree() {
     local safe_branch=$(echo "$branch" | tr '/' '-')
     local session_name="${project_name}-wt-${safe_branch}"
     
-    # Call proj directly
-    proj "$session_name" --path "$worktree_path"
+    # Call proj directly, with optional --pr-review flag
+    if [ "$PR_REVIEW" = true ]; then
+        proj "$session_name" --path "$worktree_path" --pr-review
+    else
+        proj "$session_name" --path "$worktree_path"
+    fi
 }
 
 is_worktree() {
@@ -309,6 +316,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-symlink)
             NO_SYMLINK=true
+            shift
+            ;;
+        --pr-review)
+            PR_REVIEW=true
             shift
             ;;
         --dir)

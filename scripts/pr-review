@@ -1,0 +1,62 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+    cat << EOF
+Usage: pr-review <branch>
+
+Automate PR review workflow by fetching latest changes and switching to a worktree
+for the review branch. Opens vim/nvim with all changed files in tabs.
+
+Arguments:
+  <branch>    The branch name to review
+
+Examples:
+  pr-review feature/new-feature
+  pr-review bugfix/issue-123
+
+EOF
+}
+
+# Check for required argument
+if [ $# -eq 0 ]; then
+    echo "Error: Branch name is required" >&2
+    usage
+    exit 1
+fi
+
+BRANCH="$1"
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Error: Not in a git repository" >&2
+    exit 1
+fi
+
+# Check if wt command exists
+if ! command -v wt >/dev/null 2>&1; then
+    echo "Error: 'wt' command not found. Please ensure it's in your PATH" >&2
+    exit 1
+fi
+
+echo "Fetching latest changes from origin..."
+if ! git fetch origin; then
+    echo "Error: Failed to fetch from origin" >&2
+    exit 1
+fi
+
+echo "Creating worktree for branch: $BRANCH"
+# Try to create the worktree, but don't fail if it already exists
+if ! wt create "$BRANCH" 2>/dev/null; then
+    # Check if the error is because worktree already exists
+    if wt list | grep -q "^  $BRANCH"; then
+        echo "Worktree already exists for branch: $BRANCH"
+    else
+        echo "Error: Failed to create worktree for branch: $BRANCH" >&2
+        exit 1
+    fi
+fi
+
+echo "Switching to worktree with PR review mode..."
+wt switch "$BRANCH" --pr-review
