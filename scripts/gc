@@ -28,11 +28,11 @@ Examples:
   gc                Create a commit with AI-generated message
   gc -a             Stage all files and create a commit
   gc -p             Create a commit and push to origin
-  gc -a -p          Stage all files, commit, and push
+  gc -ap            Stage all files, commit, and push
   gc --pr           Commit, push, and create a GitHub PR
   gc --pr --base-branch develop  Create PR against develop branch
   gc -y             Commit directly without editor review
-  gc -a -p -y       Stage all, push, and skip editor (YOLO mode)
+  gc -apy           Stage all, push, and skip editor (YOLO mode)
 
 Requirements:
   - Claude Code CLI must be installed and available
@@ -78,6 +78,40 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             exit 0
+            ;;
+        -*)
+            # Handle combined short flags (e.g., -apy)
+            if [[ ${#1} -gt 2 ]]; then
+                # Split combined flags
+                for (( i=1; i<${#1}; i++ )); do
+                    flag="${1:$i:1}"
+                    case "$flag" in
+                        a)
+                            ALL_FLAG=true
+                            ;;
+                        p)
+                            PUSH_FLAG=true
+                            ;;
+                        y)
+                            YOLO_FLAG=true
+                            ;;
+                        h)
+                            usage
+                            exit 0
+                            ;;
+                        *)
+                            echo "Error: Unknown flag: -$flag" >&2
+                            echo "Try 'gc --help' for more information." >&2
+                            exit 1
+                            ;;
+                    esac
+                done
+                shift
+            else
+                echo "Error: Unknown option: $1" >&2
+                echo "Try 'gc --help' for more information." >&2
+                exit 1
+            fi
             ;;
         *)
             echo "Error: Unknown option: $1" >&2
