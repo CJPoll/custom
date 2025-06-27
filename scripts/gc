@@ -9,12 +9,12 @@ Usage: gc [options]
 Generate a git commit message using Claude Code and commit staged changes.
 
 Options:
-  -a, --all         Stage all files before committing (git add -A)
-  -p, --push        Push to origin after successful commit
+  --all, -a         Stage all files before committing (git add -A)
+  --push, -p        Push to origin after successful commit
   --pr              Create a GitHub PR after pushing (implies --push)
   --base-branch <branch>  Specify base branch for PR (requires --pr)
-  -y, --yolo        Skip editor review and commit directly with AI message
-  -h, --help        Show this help message
+  --yolo, -y        Skip editor review and commit directly with AI message
+  --help, -h        Show this help message
 
 Description:
   This script uses Claude Code to generate a conventional commit message
@@ -26,12 +26,12 @@ Description:
 
 Examples:
   gc                Create a commit with AI-generated message
-  gc -a             Stage all files and create a commit
-  gc -p             Create a commit and push to origin
-  gc -ap            Stage all files, commit, and push
+  gc --all          Stage all files and create a commit
+  gc --push         Create a commit and push to origin
+  gc --all --push   Stage all files, commit, and push
   gc --pr           Commit, push, and create a GitHub PR
   gc --pr --base-branch develop  Create PR against develop branch
-  gc -y             Commit directly without editor review
+  gc --yolo         Commit directly without editor review
   gc -apy           Stage all, push, and skip editor (YOLO mode)
 
 Requirements:
