@@ -147,8 +147,6 @@ if ! git diff --cached --quiet; then
             
             # Create PR if --pr flag was provided and push succeeded
             if [ $PUSH_STATUS -eq 0 ] && [ "$PR_FLAG" = true ]; then
-                echo "Creating GitHub PR..."
-                
                 # Get current branch name
                 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
                 
@@ -157,36 +155,72 @@ if ! git diff --cached --quiet; then
                     BASE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
                 fi
                 
-                echo "Creating PR from $CURRENT_BRANCH to $BASE_BRANCH"
+                # Check if PR already exists for this branch
+                EXISTING_PR=$(gh pr list --head "$CURRENT_BRANCH" --base "$BASE_BRANCH" --json number --jq '.[0].number' 2>/dev/null)
                 
-                # Create a temporary file for PR description
-                PR_TEMP_FILE=$(mktemp)
-                
-                # Generate PR description using Claude Code
-                echo "Generating PR description..."
-                git diff "$BASE_BRANCH"..."$CURRENT_BRANCH" | claude "Generate a GitHub PR description based on the following diff. Include a summary of changes, any breaking changes, and testing suggestions. Format it with markdown. Give no additional output beyond the PR description." > "$PR_TEMP_FILE" &
-                CLAUDE_PR_PID=$!
-                spinner $CLAUDE_PR_PID
-                wait $CLAUDE_PR_PID
-                
-                if [ -s "$PR_TEMP_FILE" ]; then
-                    # Skip editor if --yolo flag is set
-                    if [ "$YOLO_FLAG" = false ]; then
-                        # Open PR description in editor for review
-                        ${EDITOR:-vim} "$PR_TEMP_FILE"
+                if [ -n "$EXISTING_PR" ]; then
+                    echo "PR #$EXISTING_PR already exists for $CURRENT_BRANCH -> $BASE_BRANCH"
+                    echo "Generating updated PR description based on full diff..."
+                    
+                    # Create a temporary file for PR description
+                    PR_TEMP_FILE=$(mktemp)
+                    
+                    # Generate PR description using Claude Code based on entire diff
+                    git diff "$BASE_BRANCH"..."$CURRENT_BRANCH" | claude "Generate a GitHub PR description based on the following diff. Include a summary of changes, any breaking changes, and testing suggestions. Format it with markdown. Give no additional output beyond the PR description." > "$PR_TEMP_FILE" &
+                    CLAUDE_PR_PID=$!
+                    spinner $CLAUDE_PR_PID
+                    wait $CLAUDE_PR_PID
+                    
+                    if [ -s "$PR_TEMP_FILE" ]; then
+                        # Skip editor if --yolo flag is set
+                        if [ "$YOLO_FLAG" = false ]; then
+                            # Open PR description in editor for review
+                            ${EDITOR:-vim} "$PR_TEMP_FILE"
+                        fi
+                        
+                        # Update the existing PR
+                        gh pr edit "$EXISTING_PR" --body-file "$PR_TEMP_FILE"
+                        echo "Updated PR #$EXISTING_PR with new description"
+                        
+                        # Clean up
+                        rm "$PR_TEMP_FILE"
+                    else
+                        echo "Error: Could not generate PR description"
+                        rm "$PR_TEMP_FILE"
                     fi
-                    
-                    # Extract the first line for PR title (from commit message)
-                    PR_TITLE=$(git log -1 --pretty=%s)
-                    
-                    # Create the PR
-                    gh pr create --base "$BASE_BRANCH" --title "$PR_TITLE" --body-file "$PR_TEMP_FILE"
-                    
-                    # Clean up
-                    rm "$PR_TEMP_FILE"
                 else
-                    echo "Error: Could not generate PR description"
-                    rm "$PR_TEMP_FILE"
+                    echo "Creating GitHub PR..."
+                    echo "Creating PR from $CURRENT_BRANCH to $BASE_BRANCH"
+                    
+                    # Create a temporary file for PR description
+                    PR_TEMP_FILE=$(mktemp)
+                    
+                    # Generate PR description using Claude Code
+                    echo "Generating PR description..."
+                    git diff "$BASE_BRANCH"..."$CURRENT_BRANCH" | claude "Generate a GitHub PR description based on the following diff. Include a summary of changes, any breaking changes, and testing suggestions. Format it with markdown. Give no additional output beyond the PR description." > "$PR_TEMP_FILE" &
+                    CLAUDE_PR_PID=$!
+                    spinner $CLAUDE_PR_PID
+                    wait $CLAUDE_PR_PID
+                    
+                    if [ -s "$PR_TEMP_FILE" ]; then
+                        # Skip editor if --yolo flag is set
+                        if [ "$YOLO_FLAG" = false ]; then
+                            # Open PR description in editor for review
+                            ${EDITOR:-vim} "$PR_TEMP_FILE"
+                        fi
+                        
+                        # Extract the first line for PR title (from commit message)
+                        PR_TITLE=$(git log -1 --pretty=%s)
+                        
+                        # Create the PR
+                        gh pr create --base "$BASE_BRANCH" --title "$PR_TITLE" --body-file "$PR_TEMP_FILE"
+                        
+                        # Clean up
+                        rm "$PR_TEMP_FILE"
+                    else
+                        echo "Error: Could not generate PR description"
+                        rm "$PR_TEMP_FILE"
+                    fi
                 fi
             fi
         fi
