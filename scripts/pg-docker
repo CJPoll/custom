@@ -1,3 +1,50 @@
-#! /usr/bin/env bash
-docker exec -i postgres-mcp-container npx @modelcontextprotocol/server-postgres
+#!/bin/bash
+
+# Default connection string
+POSTGRES_URL="postgresql://postgres:postgres@localhost:5432"
+
+usage() {
+    cat << EOF
+Usage: pg-docker [options]
+
+Description:
+  Run the MCP PostgreSQL Docker container with a specified connection string.
+
+Options:
+  --connection-string <string>  PostgreSQL connection string 
+                               (default: postgresql://postgres:postgres@localhost:5432)
+  --help                       Display this help message
+
+Examples:
+  pg-docker
+  pg-docker --connection-string "postgresql://user:pass@host:5432/mydb"
+
+Notes:
+  The connection string is passed to the Docker container via the POSTGRES_URL
+  environment variable and as a command argument.
+EOF
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --connection-string)
+      POSTGRES_URL="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      echo "" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Run the Docker container
+docker run -i --rm -e POSTGRES_URL mcp/postgres "$POSTGRES_URL"
 

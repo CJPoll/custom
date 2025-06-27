@@ -9,11 +9,11 @@ Usage: gc [options]
 Generate a git commit message using Claude Code and commit staged changes.
 
 Options:
-  --all             Stage all files before committing (git add -A)
-  --push            Push to origin after successful commit
+  -a, --all         Stage all files before committing (git add -A)
+  -p, --push        Push to origin after successful commit
   --pr              Create a GitHub PR after pushing (implies --push)
   --base-branch <branch>  Specify base branch for PR (requires --pr)
-  --yolo            Skip editor review and commit directly with AI message
+  -y, --yolo        Skip editor review and commit directly with AI message
   -h, --help        Show this help message
 
 Description:
@@ -26,12 +26,13 @@ Description:
 
 Examples:
   gc                Create a commit with AI-generated message
-  gc --all          Stage all files and create a commit
-  gc --push         Create a commit and push to origin
-  gc --all --push   Stage all files, commit, and push
-  gc --pr            Commit, push, and create a GitHub PR
+  gc -a             Stage all files and create a commit
+  gc -p             Create a commit and push to origin
+  gc -a -p          Stage all files, commit, and push
+  gc --pr           Commit, push, and create a GitHub PR
   gc --pr --base-branch develop  Create PR against develop branch
-  gc --yolo          Commit directly without editor review
+  gc -y             Commit directly without editor review
+  gc -a -p -y       Stage all, push, and skip editor (YOLO mode)
 
 Requirements:
   - Claude Code CLI must be installed and available
@@ -49,11 +50,11 @@ YOLO_FLAG=false
 BASE_BRANCH=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --all)
+        -a|--all)
             ALL_FLAG=true
             shift
             ;;
-        --push)
+        -p|--push)
             PUSH_FLAG=true
             shift
             ;;
@@ -70,7 +71,7 @@ while [[ $# -gt 0 ]]; do
             BASE_BRANCH="$2"
             shift 2
             ;;
-        --yolo)
+        -y|--yolo)
             YOLO_FLAG=true
             shift
             ;;
