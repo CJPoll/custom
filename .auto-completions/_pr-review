@@ -7,6 +7,7 @@ _pr-review() {
     
     _arguments -C \
         '1:branch:_pr_review_branches' \
+        '--base-branch[Base branch for comparison]:branch:_pr_review_branches' \
         '(- *)'{-h,--help}'[Show help message]'
 }
 

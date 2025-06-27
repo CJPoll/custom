@@ -56,22 +56,12 @@ class Session
     new(sessions)
   end
 
-  def self.open(project, pr_review = false)
+  def self.open(project, pr_review = false, base_branch = "main")
     # Determine editor command
     editor = ENV['EDITOR'] || 'vim'
     
-    if pr_review && (editor == "vim" || editor == "nvim")
-      # Get list of changed files relative to origin/main
-      changed_files = `cd "#{project.path}" && git diff --name-only origin/main...HEAD 2>/dev/null`.strip.split("\n")
-      
-      if changed_files.empty? || changed_files == [""]
-        # No changed files, open normally
-        editor_cmd = "#{editor} +NERDTree"
-      else
-        # Open all changed files in tabs
-        files_list = changed_files.join(" ")
-        editor_cmd = "#{editor} -p #{files_list}"
-      end
+    if pr_review
+      editor_cmd = "vim-review --base-branch #{base_branch}"
     elsif editor == "vim" || editor == "nvim"
       editor_cmd = "#{editor} +NERDTree"
     else
@@ -105,7 +95,7 @@ class Session
   end
 end
 
-def main(project_name, explicit_path = nil, pr_review = false)
+def main(project_name, explicit_path = nil, pr_review = false, base_branch = "main")
   project = Project.new(project_name, explicit_path)
 
   if project.empty?
@@ -121,7 +111,7 @@ def main(project_name, explicit_path = nil, pr_review = false)
   session = Session.for(project)
 
   if session.missing?
-    Session.open(project, pr_review)
+    Session.open(project, pr_review, base_branch)
     Session.init(project)
   end
 
@@ -151,6 +141,7 @@ project_name = ARGV[0]
 # Parse arguments
 explicit_path = nil
 pr_review = false
+base_branch = "main"
 i = 1
 
 while i < ARGV.length
@@ -162,6 +153,11 @@ while i < ARGV.length
     end
   when "--pr-review"
     pr_review = true
+  when "--base-branch"
+    if ARGV[i + 1]
+      base_branch = ARGV[i + 1]
+      i += 1
+    end
   when "print"
     print_path(project_name)
     exit
@@ -169,4 +165,4 @@ while i < ARGV.length
   i += 1
 end
 
-main(project_name, explicit_path, pr_review)
+main(project_name, explicit_path, pr_review, base_branch)

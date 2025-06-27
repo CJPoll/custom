@@ -10,6 +10,7 @@ MODIFY_GITIGNORE=false
 NO_SYMLINK=false
 CHECK_DIR=""
 PR_REVIEW=false
+BASE_BRANCH="main"
 
 usage() {
     cat << EOF
@@ -31,6 +32,7 @@ Options:
   --no-symlink      Do not create symlink to .claude directory (for create command)
   --dir <directory> Check the specified directory (for is-worktree command, defaults to current dir)
   --pr-review       Open changed files in tabs for PR review (for switch command)
+  --base-branch <branch> Base branch for PR review (for switch command, defaults to main)
 
 Examples:
   wt init
@@ -40,6 +42,7 @@ Examples:
   wt create --no-symlink experimental/test
   wt switch feature/my-feature
   wt switch feature/my-feature --pr-review
+  wt switch feature/my-feature --pr-review --base-branch develop
   wt rm feature/my-feature
   wt create --quiet bugfix/issue-123
   wt is-worktree
@@ -252,7 +255,7 @@ switch_worktree() {
     
     # Call proj directly, with optional --pr-review flag
     if [ "$PR_REVIEW" = true ]; then
-        proj "$session_name" --path "$worktree_path" --pr-review
+        proj "$session_name" --path "$worktree_path" --pr-review --base-branch "$BASE_BRANCH"
     else
         proj "$session_name" --path "$worktree_path"
     fi
@@ -320,6 +323,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         --pr-review)
             PR_REVIEW=true
+            shift
+            ;;
+        --base-branch)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "Error: --base-branch requires a branch name" >&2
+                exit 1
+            fi
+            BASE_BRANCH="$1"
             shift
             ;;
         --dir)

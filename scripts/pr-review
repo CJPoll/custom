@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
     cat << EOF
-Usage: pr-review <branch>
+Usage: pr-review <branch> [--base-branch <base-branch>]
 
 Automate PR review workflow by fetching latest changes and switching to a worktree
 for the review branch. Opens vim/nvim with all changed files in tabs.
@@ -12,9 +12,12 @@ for the review branch. Opens vim/nvim with all changed files in tabs.
 Arguments:
   <branch>    The branch name to review
 
+Options:
+  --base-branch <branch>    Base branch for comparison (default: main)
+
 Examples:
   pr-review feature/new-feature
-  pr-review bugfix/issue-123
+  pr-review bugfix/issue-123 --base-branch develop
 
 EOF
 }
@@ -27,6 +30,28 @@ if [ $# -eq 0 ]; then
 fi
 
 BRANCH="$1"
+BASE_BRANCH="main"
+
+# Parse optional arguments
+shift
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --base-branch)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --base-branch requires a branch name" >&2
+                usage
+                exit 1
+            fi
+            BASE_BRANCH="$2"
+            shift 2
+            ;;
+        *)
+            echo "Error: Unknown option: $1" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
 
 # Check if we're in a git repository
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
@@ -59,4 +84,4 @@ if ! wt create "$BRANCH" 2>/dev/null; then
 fi
 
 echo "Switching to worktree with PR review mode..."
-wt switch "$BRANCH" --pr-review
+wt switch "$BRANCH" --pr-review --base-branch "$BASE_BRANCH"

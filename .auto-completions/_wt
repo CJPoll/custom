@@ -7,16 +7,29 @@ _wt() {
     
     _arguments -C \
         '1: :_wt_commands' \
+        '--quiet[Suppress output from script and subcommands]' \
         '*::arg:->args'
     
     case $state in
         args)
             case $words[1] in
-                switch|rm)
+                switch)
+                    _arguments \
+                        '1:worktree:_wt_worktrees' \
+                        '--pr-review[Open changed files in tabs for PR review]' \
+                        '--base-branch[Base branch for PR review]:branch:_wt_git_branches'
+                    ;;
+                rm)
                     _wt_worktrees
                     ;;
                 create)
-                    _wt_git_branches
+                    _arguments \
+                        '1:branch:_wt_git_branches' \
+                        '--no-symlink[Do not create symlink to .claude directory]'
+                    ;;
+                init)
+                    _arguments \
+                        '--gitignore[Modify .gitignore to exclude worktrees directory]'
                     ;;
                 is-worktree)
                     _arguments \

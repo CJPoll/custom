@@ -1,0 +1,83 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+    cat << EOF
+Usage: vim-review [--base-branch <branch>]
+
+Opens vim with all files changed in the current branch relative to the base branch.
+Each changed file is opened in a separate tab.
+
+Options:
+  --base-branch <branch>    The base branch to compare against (default: main)
+
+Examples:
+  vim-review
+  vim-review --base-branch develop
+  vim-review --base-branch origin/main
+
+EOF
+}
+
+# Default values
+BASE_BRANCH="main"
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --base-branch)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --base-branch requires a branch name" >&2
+                usage
+                exit 1
+            fi
+            BASE_BRANCH="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown option: $1" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Error: Not in a git repository" >&2
+    exit 1
+fi
+
+# Determine editor command
+EDITOR="${EDITOR:-vim}"
+
+# Check if editor is vim or nvim
+if [[ "$EDITOR" != "vim" && "$EDITOR" != "nvim" ]]; then
+    echo "Error: This script only works with vim or nvim. Current EDITOR is: $EDITOR" >&2
+    exit 1
+fi
+
+# Get list of changed files relative to base branch
+echo "Getting changed files relative to $BASE_BRANCH..."
+changed_files=$(git diff --name-only "$BASE_BRANCH"...HEAD 2>/dev/null || git diff --name-only "$BASE_BRANCH" 2>/dev/null)
+
+if [[ -z "$changed_files" ]]; then
+    echo "No changed files found relative to $BASE_BRANCH"
+    exit 0
+fi
+
+# Count changed files
+file_count=$(echo "$changed_files" | wc -l)
+echo "Found $file_count changed file(s)"
+
+# Convert newlines to spaces for the vim command
+files_list=$(echo "$changed_files" | tr '\n' ' ')
+
+# Open all changed files in tabs
+echo "Opening $EDITOR with changed files in tabs..."
+exec $EDITOR -p $files_list -c "tabdo Gdiff main"
