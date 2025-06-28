@@ -1,0 +1,4 @@
+--color
+--ignore-dir=worktrees/
+--ignore-dir=deps/
+--ignore-dir=_build/
