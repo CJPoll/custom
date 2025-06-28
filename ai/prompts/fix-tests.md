@@ -22,6 +22,12 @@ If I have asked you to fix dialyzer issues, then here is how you reproduce the i
     |  - However, you should still only try to fix a single issue at a time.
     |  - That single issue must always be the first issue in the output.
 
+If I have asked you to fix compilation warnings, then here is how you reproduce the issue:
+    | To see compilation warnings for the entire application: `mix clean && mix compile`
+    | Compilation warnings can not be checked against just a single file.
+    |  - However, you should still only try to fix a single issue at a time.
+    |  - That single issue must always be the first issue in the output.
+
 If I have not specified what kinds of issues to fix, assume tests by default.
 
 Allow all commands to run to completion - DO NOT terminate or end them early. If a command doesn't give you output, you probably terminated or ended it early and need
