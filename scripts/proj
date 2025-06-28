@@ -74,7 +74,8 @@ class Session
 
   def self.init(project)
     # Create a 25% split window in the newly created session's first window
-    `tmux split-window -p 25 -c "#{project.path}" -t "#{project.session_name}:0"`
+    `tmux split-window -p 30 -c "#{project.path}" -t "#{project.session_name}:0" claude --dangerously-skip-permissions`
+    `tmux split-window -h -c "#{project.path}" -t "#{project.session_name}:0.1"`
     
     # Create a new window named "Server" at index 3 in the new session
     `tmux new-window -c "#{project.path}" -n "Server" -t "#{project.session_name}:3"`
