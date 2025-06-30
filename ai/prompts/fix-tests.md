@@ -1,12 +1,11 @@
 I have issues that I want you to fix. Help me debug these issues.
 
 If I have asked you to fix broken tests, then here is how you reproduce the issue:
-    | To run tests for the entire application: `mix test --max-cases 4 --max-failures 1`
-    | To run tests in a single test file: `mix test <file> --max-cases 4 --max-failures 1`
-    | 
-    | It's important to always add the flags to test commands.
-    | - If --max-cases isn't set or is set too high, we overwhelm the connection pool for tests.
-    | - If --max-failures isn't set or is set too high, we run the risk of filling up the ai context with too much information.
+    | To run tests for the entire application: `mix test --max-failures 1`
+    | To run tests in a single test file: `mix test <file> --max-failures 1`
+    |
+    | It's important to always add the flag to test commands.
+    | - If --max-failures isn't set or is set too high, we run the risk of filling up the ai context with unnecessary text.
 
 If I have asked you to fix linter issues, then here is how you reproduce the issue:
     | To run the linter for the entire application: `mix credo --strict`

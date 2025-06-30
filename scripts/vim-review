@@ -4,24 +4,27 @@ set -euo pipefail
 
 usage() {
     cat << EOF
-Usage: vim-review [--base-branch <branch>]
+Usage: vim-review [--base-branch <branch>] [--untracked]
 
 Opens vim with all files changed in the current branch relative to the base branch.
 Each changed file is opened in a separate tab.
 
 Options:
   --base-branch <branch>    The base branch to compare against (default: main)
+  --untracked               Open all untracked files instead of diff
 
 Examples:
   vim-review
   vim-review --base-branch develop
   vim-review --base-branch origin/main
+  vim-review --untracked
 
 EOF
 }
 
 # Default values
 BASE_BRANCH="main"
+UNTRACKED=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -34,6 +37,10 @@ while [[ $# -gt 0 ]]; do
             fi
             BASE_BRANCH="$2"
             shift 2
+            ;;
+        --untracked)
+            UNTRACKED=true
+            shift
             ;;
         -h|--help)
             usage
