@@ -69,22 +69,46 @@ if [[ "$EDITOR" != "vim" && "$EDITOR" != "nvim" ]]; then
     exit 1
 fi
 
-# Get list of changed files relative to base branch
-echo "Getting changed files relative to $BASE_BRANCH..."
-changed_files=$(git diff --name-only "$BASE_BRANCH"...HEAD 2>/dev/null || git diff --name-only "$BASE_BRANCH" 2>/dev/null)
+if [[ "$UNTRACKED" == true ]]; then
+    # Get list of untracked files (excluding directories)
+    echo "Getting untracked files..."
+    untracked_files=$(git ls-files --others --exclude-standard | while read -r file; do
+        [[ -f "$file" ]] && echo "$file"
+    done)
 
-if [[ -z "$changed_files" ]]; then
-    echo "No changed files found relative to $BASE_BRANCH"
-    exit 0
+    if [[ -z "$untracked_files" ]]; then
+        echo "No untracked files found"
+        exit 0
+    fi
+
+    # Count untracked files
+    file_count=$(echo "$untracked_files" | wc -l)
+    echo "Found $file_count untracked file(s)"
+
+    # Convert newlines to spaces for the vim command
+    files_list=$(echo "$untracked_files" | tr '\n' ' ')
+
+    # Open all untracked files in tabs
+    echo "Opening $EDITOR with untracked files in tabs..."
+    exec $EDITOR -p $files_list
+else
+    # Get list of changed files relative to base branch
+    echo "Getting changed files relative to $BASE_BRANCH..."
+    changed_files=$(git diff --name-only "$BASE_BRANCH"...HEAD 2>/dev/null || git diff --name-only "$BASE_BRANCH" 2>/dev/null)
+
+    if [[ -z "$changed_files" ]]; then
+        echo "No changed files found relative to $BASE_BRANCH"
+        exit 0
+    fi
+
+    # Count changed files
+    file_count=$(echo "$changed_files" | wc -l)
+    echo "Found $file_count changed file(s)"
+
+    # Convert newlines to spaces for the vim command
+    files_list=$(echo "$changed_files" | tr '\n' ' ')
+
+    # Open all changed files in tabs
+    echo "Opening $EDITOR with changed files in tabs..."
+    exec $EDITOR -p $files_list -c "tabdo Gdiff main"
 fi
-
-# Count changed files
-file_count=$(echo "$changed_files" | wc -l)
-echo "Found $file_count changed file(s)"
-
-# Convert newlines to spaces for the vim command
-files_list=$(echo "$changed_files" | tr '\n' ' ')
-
-# Open all changed files in tabs
-echo "Opening $EDITOR with changed files in tabs..."
-exec $EDITOR -p $files_list -c "tabdo Gdiff main"
