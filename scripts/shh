@@ -1,35 +1,18 @@
 #! /usr/bin/env ruby
 
-HOME_IP='98.202.148.249'
+HOME_IP='71.195.207.146'
 
 REGISTERED_SERVERS = {
 	"home" => {
-		"root" => {
-			host: "root@#{HOME_IP}",
-      port: 23,
-      ports: [],
-			ssh_forward: true
-		},
-		"terraria" => {
-			host: "root@#{HOME_IP}",
-			ports: [],
-			ssh_forward: true
-		},
     "dev" => {
-      port: 22,
+      port: 23,
       host: "cjpoll@192.168.1.139",
       ports: {
-        4000 => 4000
+        4003 => 4003
       },
       ssh_forward: true
-    },
-		"docker" => {
-      port: 23,
-      host: "cjpoll@#{HOME_IP}",
-			ports: [],
-			ssh_forward: true
-		},
-	}
+    }
+  }
 }
 
 service = ARGV[0]
