@@ -1,5 +1,9 @@
 = Claude
 
+== Hard Rule
+
+- NEVER EVER UNDER ANY CIRCUMSTANCE use Process.sleep in tests
+
 == Structure
 
 Projects are kept at "${HOME}/dev/<project-name>".
