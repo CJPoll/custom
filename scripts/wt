@@ -24,6 +24,7 @@ Commands:
                     (symlinks .claude/ directory from main project if present)
   rm <branch>       Remove the worktree for the specified branch
   switch <branch>   Change to the worktree for the specified branch
+  merge <branch>    Merge a worktree branch (must be run from parent repo)
   is-worktree       Check if a directory is a git worktree
                     Exit codes: 0=worktree, 1=project root, 2=neither
 
@@ -47,6 +48,7 @@ Examples:
   wt switch feature/my-feature --pr-review
   wt switch feature/my-feature --pr-review --base-branch develop
   wt rm feature/my-feature
+  wt merge feature/my-feature
   wt create --quiet bugfix/issue-123
   wt is-worktree
   wt is-worktree --dir /path/to/directory
@@ -278,6 +280,109 @@ switch_worktree() {
     fi
 }
 
+merge_worktree() {
+  echo 1
+    local branch="$1"
+    local worktree_path="$WORKTREES_DIR/$branch"
+    
+    if [ -z "$branch" ]; then
+        echo "Error: Branch name is required" >&2
+        usage
+        return 1
+    fi
+    
+  echo 2
+    # Check if we're in the parent worktree (not a worktree)
+    # Run is_worktree in a subshell to capture exit code
+    local is_wt_result
+  echo 3
+    # Run in a subshell to prevent exit from terminating our script
+    # Temporarily disable set -e for this check
+    set +e
+    (
+        CHECK_DIR="$(pwd)"
+        is_worktree
+    )
+    is_wt_result=$?
+    set -e
+  echo 4 "is_wt_result=$is_wt_result"
+    
+    if [ $is_wt_result -eq 0 ]; then
+        echo "Error: wt merge must be run from the parent repository, not a worktree" >&2
+        return 1
+    elif [ $is_wt_result -eq 2 ]; then
+        echo "Error: Not in a git repository" >&2
+        return 1
+    fi
+    # is_wt_result == 1 means we're in the project root, which is what we want
+    
+    echo "HERE"
+    # Check if worktree exists
+    if [ ! -d "$worktree_path" ]; then
+        echo "Error: No worktree found for branch: $branch" >&2
+        echo "Available worktrees:" >&2
+        if [ -d "$WORKTREES_DIR" ]; then
+            ls -1 "$WORKTREES_DIR" 2>/dev/null | sed 's/^/  /' >&2
+        fi
+        return 2
+    fi
+    echo "HERE2"
+    
+    log "Merging branch: $branch"
+    
+    # Get the merge base
+    local merge_base=$(git merge-base HEAD "$branch" 2>/dev/null)
+    if [ -z "$merge_base" ]; then
+        echo "Error: Could not find merge base for branch: $branch" >&2
+        return 1
+    fi
+    echo "HERE3"
+    
+    # Check if fast-forward is possible
+    if ! git merge-base --is-ancestor HEAD "$branch" 2>/dev/null; then
+        echo "Error: Cannot fast-forward merge. The branch has diverged." >&2
+        return 1
+    fi
+    
+    # Get the diff for the merge
+    local diff_output=$(git diff "$merge_base".."$branch" 2>/dev/null)
+    
+    if [ -z "$diff_output" ]; then
+        echo "No changes to merge from branch: $branch"
+        return 0
+    fi
+    
+    # Generate commit message using Claude
+    log "Generating merge commit message..."
+    local commit_message=$(echo "$diff_output" | claude -p "Generate a concise merge commit message based on this diff. The message should summarize what changes are being merged. Format: 'Merge <branch>: <summary of changes>'. Keep it under 72 characters for the first line, and add details below if needed. Give no additional output beyond the commit message. Format according to 'conventional commits' style, providing all information in teh 'conventional commit' specification which is currently avaialable. Include credit to Claude Code as co-author." 2>/dev/null)
+    
+    if [ -z "$commit_message" ]; then
+        # Fallback message if Claude fails
+        commit_message="Merge $branch"
+    fi
+    
+    # Perform the merge with squash
+    log "Performing merge..."
+    if git merge --ff-only --squash "$branch" 2>&1; then
+        # Commit with the generated message
+        if git commit -m "$commit_message" 2>&1; then
+            log "Merge completed successfully"
+            
+            # Remove the worktree
+            log "Removing merged worktree..."
+            remove_worktree "$branch"
+        else
+            echo "Error: Failed to commit merge" >&2
+            # Reset the merge
+            git merge --abort 2>/dev/null || git reset --hard HEAD 2>/dev/null
+            return 1
+        fi
+    else
+        echo "Error: Merge failed" >&2
+        return 1
+    fi
+}
+
 is_worktree() {
     local dir="${CHECK_DIR:-$(pwd)}"
     
@@ -364,7 +469,7 @@ while [[ $# -gt 0 ]]; do
             CHECK_DIR="$1"
             shift
             ;;
-        init|list|ls|create|rm|switch|is-worktree)
+        init|list|ls|create|rm|switch|merge|is-worktree)
             COMMAND="$1"
             shift
             ;;
@@ -375,7 +480,7 @@ while [[ $# -gt 0 ]]; do
         *)
             # If we have a command that expects a branch and no branch is set yet,
             # treat this as the branch name
-            if [[ -n "$COMMAND" ]] && [[ -z "$BRANCH" ]] && [[ "$COMMAND" =~ ^(create|rm|switch)$ ]]; then
+            if [[ -n "$COMMAND" ]] && [[ -z "$BRANCH" ]] && [[ "$COMMAND" =~ ^(create|rm|switch|merge)$ ]]; then
                 BRANCH="$1"
                 shift
             else
@@ -406,6 +511,9 @@ case "$COMMAND" in
         ;;
     switch)
         switch_worktree "$BRANCH"
+        ;;
+    merge)
+        merge_worktree "$BRANCH"
         ;;
     is-worktree)
         is_worktree

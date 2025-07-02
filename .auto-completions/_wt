@@ -19,7 +19,7 @@ _wt() {
                         '--pr-review[Open changed files in tabs for PR review]' \
                         '--base-branch[Base branch for PR review]:branch:_wt_git_branches'
                     ;;
-                rm)
+                rm|merge)
                     _wt_worktrees
                     ;;
                 create)
@@ -48,6 +48,7 @@ _wt_commands() {
         'create:Create a worktree for the specified branch'
         'rm:Remove the worktree for the specified branch'
         'switch:Change to the worktree for the specified branch'
+        'merge:Merge a worktree branch (must be run from parent repo)'
         'is-worktree:Check if a directory is a git worktree'
     )
     _describe -t commands 'wt command' commands
