@@ -210,6 +210,20 @@ remove_worktree() {
     
     log "Removing worktree for branch: $branch"
     
+    # Get the project name from the current directory
+    local project_name=$(basename "$PROJECT_DIR")
+    
+    # Create session name with worktree info (same format as in switch_worktree)
+    # Replace slashes in branch name with dashes to avoid tmux issues
+    local safe_branch=$(echo "$branch" | tr '/' '-')
+    local session_name="${project_name}-wt-${safe_branch}"
+    
+    # Check if tmux session exists and kill it
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        log "Killing tmux session: $session_name"
+        run_cmd tmux kill-session -t "$session_name"
+    fi
+    
     # Remove the worktree
     run_cmd git worktree remove "$worktree_path" --force
     
