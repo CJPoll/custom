@@ -1,0 +1,40 @@
+#compdef port-bound
+
+# Completion function for port-bound command
+
+_port-bound() {
+    local curcontext="$curcontext" state line
+    
+    _arguments -C \
+        '1:port:_port_numbers' \
+        '--kill[Kill the process bound to the port]' \
+        '(- *)'{-h,--help}'[Show help message]'
+}
+
+# Function to suggest common port numbers
+_port_numbers() {
+    local -a common_ports
+    common_ports=(
+        '22:SSH'
+        '80:HTTP'
+        '443:HTTPS'
+        '3000:Development server (Node.js, Rails)'
+        '3306:MySQL'
+        '4000:Phoenix/Elixir development'
+        '5432:PostgreSQL'
+        '5984:CouchDB'
+        '6379:Redis'
+        '8080:Alternative HTTP'
+        '8443:Alternative HTTPS'
+        '9000:PHP-FPM'
+        '27017:MongoDB'
+    )
+    
+    # Provide both port numbers and descriptions
+    _describe -t ports 'common ports' common_ports
+    
+    # Also allow arbitrary numbers
+    _message 'port number (1-65535)'
+}
+
+_port-bound "$@"

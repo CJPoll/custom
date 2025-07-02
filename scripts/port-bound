@@ -1,0 +1,137 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+    cat << EOF
+Usage: port-bound <port> [--kill]
+
+Identifies which program is bound to a given port.
+
+Arguments:
+  <port>    The port number to check
+
+Options:
+  --kill    Kill the process bound to the port
+
+Examples:
+  port-bound 4003
+  port-bound 8080
+  port-bound 3000 --kill
+
+EOF
+}
+
+# Check for required argument
+if [ $# -eq 0 ]; then
+    echo "Error: Port number is required" >&2
+    usage
+    exit 1
+fi
+
+PORT="$1"
+KILL_PROCESS=false
+
+# Check for --kill flag
+if [ $# -gt 1 ] && [ "$2" = "--kill" ]; then
+    KILL_PROCESS=true
+fi
+
+# Validate port number
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "Error: Invalid port number. Port must be between 1 and 65535" >&2
+    exit 1
+fi
+
+# Function to kill a process by PID
+kill_process() {
+    local pid="$1"
+    local port="$2"
+    
+    echo "Killing process $pid listening on port $port..."
+    if kill -TERM "$pid" 2>/dev/null; then
+        echo "Process $pid terminated successfully"
+    else
+        # Try with sudo if regular kill fails
+        echo "Regular kill failed, trying with sudo..."
+        if sudo kill -TERM "$pid" 2>/dev/null; then
+            echo "Process $pid terminated successfully with sudo"
+        else
+            echo "Error: Failed to kill process $pid" >&2
+            return 1
+        fi
+    fi
+}
+
+# Check if running on Linux or macOS and use appropriate command
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    # Linux - use ss or netstat
+    if command -v ss >/dev/null 2>&1; then
+        # Use ss (preferred on modern Linux)
+        result=$(ss -tlnp 2>/dev/null | grep ":$PORT " || true)
+        if [ -n "$result" ]; then
+            echo "Port $PORT is bound by:"
+            echo "$result"
+            # Try to extract process info
+            pid=$(echo "$result" | grep -o 'pid=[0-9]*' | cut -d= -f2 || true)
+            if [ -n "$pid" ] && [ -f "/proc/$pid/cmdline" ]; then
+                echo ""
+                echo "Process details:"
+                tr '\0' ' ' < "/proc/$pid/cmdline"
+                echo ""
+            fi
+            
+            # Kill process if requested
+            if [ "$KILL_PROCESS" = true ] && [ -n "$pid" ]; then
+                kill_process "$pid" "$PORT"
+            fi
+        else
+            echo "No process found listening on port $PORT"
+        fi
+    elif command -v netstat >/dev/null 2>&1; then
+        # Fall back to netstat
+        result=$(netstat -tlnp 2>/dev/null | grep ":$PORT " || true)
+        if [ -n "$result" ]; then
+            echo "Port $PORT is bound by:"
+            echo "$result"
+            
+            # Try to extract PID from netstat output
+            pid=$(echo "$result" | awk '{print $NF}' | cut -d'/' -f1 | grep -E '^[0-9]+$' || true)
+            
+            # Kill process if requested
+            if [ "$KILL_PROCESS" = true ] && [ -n "$pid" ]; then
+                kill_process "$pid" "$PORT"
+            fi
+        else
+            echo "No process found listening on port $PORT"
+        fi
+    else
+        echo "Error: Neither ss nor netstat command found" >&2
+        exit 1
+    fi
+elif [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS - use lsof
+    if command -v lsof >/dev/null 2>&1; then
+        result=$(lsof -iTCP:$PORT -sTCP:LISTEN 2>/dev/null || true)
+        if [ -n "$result" ]; then
+            echo "Port $PORT is bound by:"
+            echo "$result"
+            
+            # Extract PID from lsof output (second column, skip header)
+            pid=$(echo "$result" | awk 'NR>1 {print $2}' | head -1 || true)
+            
+            # Kill process if requested
+            if [ "$KILL_PROCESS" = true ] && [ -n "$pid" ]; then
+                kill_process "$pid" "$PORT"
+            fi
+        else
+            echo "No process found listening on port $PORT"
+        fi
+    else
+        echo "Error: lsof command not found" >&2
+        exit 1
+    fi
+else
+    echo "Error: Unsupported operating system: $OSTYPE" >&2
+    exit 1
+fi
