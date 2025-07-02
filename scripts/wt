@@ -11,6 +11,7 @@ NO_SYMLINK=false
 CHECK_DIR=""
 PR_REVIEW=false
 BASE_BRANCH="main"
+SWITCH_AFTER_CREATE=false
 
 usage() {
     cat << EOF
@@ -30,6 +31,7 @@ Options:
   --quiet           Suppress output from script and subcommands
   --gitignore       Modify .gitignore to exclude worktrees directory (for init command)
   --no-symlink      Do not create symlink to .claude directory (for create command)
+  --switch          Switch to the worktree after creating it (for create command)
   --dir <directory> Check the specified directory (for is-worktree command, defaults to current dir)
   --pr-review       Open changed files in tabs for PR review (for switch command)
   --base-branch <branch> Base branch for PR review (for switch command, defaults to main)
@@ -40,6 +42,7 @@ Examples:
   wt list
   wt create feature/my-feature
   wt create --no-symlink experimental/test
+  wt create --switch feature/my-feature
   wt switch feature/my-feature
   wt switch feature/my-feature --pr-review
   wt switch feature/my-feature --pr-review --base-branch develop
@@ -335,6 +338,10 @@ while [[ $# -gt 0 ]]; do
             NO_SYMLINK=true
             shift
             ;;
+        --switch)
+            SWITCH_AFTER_CREATE=true
+            shift
+            ;;
         --pr-review)
             PR_REVIEW=true
             shift
@@ -360,19 +367,22 @@ while [[ $# -gt 0 ]]; do
         init|list|ls|create|rm|switch|is-worktree)
             COMMAND="$1"
             shift
-            if [[ "$COMMAND" == "create" || "$COMMAND" == "rm" || "$COMMAND" == "switch" ]] && [[ $# -gt 0 ]] && [[ ! "$1" =~ ^-- ]]; then
-                BRANCH="$1"
-                shift
-            fi
             ;;
         -h|--help|help)
             usage
             exit 0
             ;;
         *)
-            echo "Error: Unknown argument: $1" >&2
-            usage
-            exit 1
+            # If we have a command that expects a branch and no branch is set yet,
+            # treat this as the branch name
+            if [[ -n "$COMMAND" ]] && [[ -z "$BRANCH" ]] && [[ "$COMMAND" =~ ^(create|rm|switch)$ ]]; then
+                BRANCH="$1"
+                shift
+            else
+                echo "Error: Unknown argument: $1" >&2
+                usage
+                exit 1
+            fi
             ;;
     esac
 done
@@ -387,6 +397,9 @@ case "$COMMAND" in
         ;;
     create)
         create_worktree "$BRANCH"
+        if [ "$SWITCH_AFTER_CREATE" = true ]; then
+            switch_worktree "$BRANCH"
+        fi
         ;;
     rm)
         remove_worktree "$BRANCH"
