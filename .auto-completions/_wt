@@ -27,10 +27,6 @@ _wt() {
                         '1:branch:_wt_git_branches' \
                         '--no-symlink[Do not create symlink to .claude directory]'
                     ;;
-                init)
-                    _arguments \
-                        '--gitignore[Modify .gitignore to exclude worktrees directory]'
-                    ;;
                 is-worktree)
                     _arguments \
                         '--dir[Check the specified directory]:directory:_directories'
@@ -56,9 +52,9 @@ _wt_commands() {
 
 # Function to complete worktree names
 _wt_worktrees() {
-    local worktrees_dir="$(pwd)/worktrees"
+    local worktrees_dir="$HOME/.local/worktrees/$(basename $(pwd))"
     local worktrees=()
-    
+
     if [[ -d "$worktrees_dir" ]]; then
         # Get all worktrees from git that are under our worktrees directory
         local git_output

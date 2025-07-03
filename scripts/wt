@@ -3,10 +3,9 @@
 set -euo pipefail
 
 PROJECT_DIR="$(pwd)"
-WORKTREES_DIR="$PROJECT_DIR/worktrees"
+WORKTREES_DIR="${HOME}/.local/worktrees/$(basename $PROJECT_DIR)"
 
 QUIET=false
-MODIFY_GITIGNORE=false
 NO_SYMLINK=false
 CHECK_DIR=""
 PR_REVIEW=false
@@ -30,7 +29,6 @@ Commands:
 
 Options:
   --quiet           Suppress output from script and subcommands
-  --gitignore       Modify .gitignore to exclude worktrees directory (for init command)
   --no-symlink      Do not create symlink to .claude directory (for create command)
   --switch          Switch to the worktree after creating it (for create command)
   --dir <directory> Check the specified directory (for is-worktree command, defaults to current dir)
@@ -39,7 +37,6 @@ Options:
 
 Examples:
   wt init
-  wt init --gitignore
   wt list
   wt create feature/my-feature
   wt create --no-symlink experimental/test
@@ -78,19 +75,6 @@ init_worktrees() {
     fi
     
     mkdir -p "$WORKTREES_DIR"
-    
-    if [ "$MODIFY_GITIGNORE" = true ]; then
-        if [ ! -f "$PROJECT_DIR/.gitignore" ]; then
-            echo "worktrees/" > "$PROJECT_DIR/.gitignore"
-            log "Created $PROJECT_DIR/.gitignore"
-        else
-            # Check if worktrees/ is already in .gitignore
-            if ! grep -q "^worktrees/$" "$PROJECT_DIR/.gitignore"; then
-                echo "worktrees/" >> "$PROJECT_DIR/.gitignore"
-                log "Added worktrees/ to $PROJECT_DIR/.gitignore"
-            fi
-        fi
-    fi
     
     log "Worktrees directory initialized at: $WORKTREES_DIR"
 }
@@ -433,10 +417,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --quiet)
             QUIET=true
-            shift
-            ;;
-        --gitignore)
-            MODIFY_GITIGNORE=true
             shift
             ;;
         --no-symlink)
