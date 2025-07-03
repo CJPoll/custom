@@ -154,7 +154,7 @@ if ! git diff --cached --quiet; then
     }
     
     # Get the commit message from Claude Code
-    claude -p "Generate a git commit message for staged changes. Give no additional output beyond the commit message. Format according to 'conventional commits' style, providing all information in the 'conventional commit' specification which is currently available. Include credit to Claude Code as co-author. Ensure that every line is at most 80 characters. The first line must be even shorter, maxing out at 72 characters." > "$TEMP_FILE" &
+    claude -p "Generate a git commit message for staged changes. Give no additional output beyond the commit message. Format according to 'conventional commits' style, providing all information in the 'conventional commit' specification which is currently available. Include credit to Claude Code as co-author. Ensure that every line is at most 80 characters. The first line must be even shorter, maxing out at 72 characters. Do not surround the commit message with quotes, backticks, or other symbols." > "$TEMP_FILE" &
     CLAUDE_PID=$!
     spinner $CLAUDE_PID
     wait $CLAUDE_PID

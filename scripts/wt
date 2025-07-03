@@ -354,7 +354,7 @@ merge_worktree() {
     
     # Generate commit message using Claude
     log "Generating merge commit message..."
-    local commit_message=$(echo "$diff_output" | claude -p "Generate a concise merge commit message based on this diff. The message should summarize what changes are being merged. Format: 'Merge <branch>: <summary of changes>'. Keep it under 72 characters for the first line, and add details below if needed. Give no additional output beyond the commit message. Format according to 'conventional commits' style, providing all information in teh 'conventional commit' specification which is currently avaialable. Include credit to Claude Code as co-author." 2>/dev/null)
+    local commit_message=$(echo "$diff_output" | claude -p "Generate a concise merge commit message based on this diff. The message should summarize what changes are being merged. Format: 'Merge <branch>: <summary of changes>'. Keep it under 72 characters for the first line, and add details below if needed. Give no additional output beyond the commit message. Format according to 'conventional commits' style, providing all information in teh 'conventional commit' specification which is currently avaialable. Include credit to Claude Code as co-author. Do not surround the commit message with quotes, backticks, or other symbols." 2>/dev/null)
     
     if [ -z "$commit_message" ]; then
         # Fallback message if Claude fails
