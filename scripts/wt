@@ -265,7 +265,6 @@ switch_worktree() {
 }
 
 merge_worktree() {
-  echo 1
     local branch="$1"
     local worktree_path="$WORKTREES_DIR/$branch"
     
@@ -275,11 +274,9 @@ merge_worktree() {
         return 1
     fi
     
-  echo 2
     # Check if we're in the parent worktree (not a worktree)
     # Run is_worktree in a subshell to capture exit code
     local is_wt_result
-  echo 3
     # Run in a subshell to prevent exit from terminating our script
     # Temporarily disable set -e for this check
     set +e
@@ -289,7 +286,6 @@ merge_worktree() {
     )
     is_wt_result=$?
     set -e
-  echo 4 "is_wt_result=$is_wt_result"
     
     if [ $is_wt_result -eq 0 ]; then
         echo "Error: wt merge must be run from the parent repository, not a worktree" >&2
@@ -300,7 +296,6 @@ merge_worktree() {
     fi
     # is_wt_result == 1 means we're in the project root, which is what we want
     
-    echo "HERE"
     # Check if worktree exists
     if [ ! -d "$worktree_path" ]; then
         echo "Error: No worktree found for branch: $branch" >&2
@@ -310,7 +305,6 @@ merge_worktree() {
         fi
         return 2
     fi
-    echo "HERE2"
     
     log "Merging branch: $branch"
     
@@ -320,7 +314,6 @@ merge_worktree() {
         echo "Error: Could not find merge base for branch: $branch" >&2
         return 1
     fi
-    echo "HERE3"
     
     # Check if fast-forward is possible
     if ! git merge-base --is-ancestor HEAD "$branch" 2>/dev/null; then
