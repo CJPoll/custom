@@ -11,16 +11,18 @@ Correct output is formatted in this way:
 - First is the full file name
 - Then for each public function output should be formatted as:
   - First is the function name, including arity (e.g. `changeset/2`)
-  - Second is a table I can copy/paste into notion with each test case as a
-    separate row. That table has the following fields:
+  - Second is a set of test cases with each test case as a separate entry in
+    markdown format. Each entry is a separate list-item (e.g. `- [test-case description]`)
+    Each test case has the following four elements nest under it as an ordered
+    list:
     1. Test case description
     2. Inputs to the test case
     3. Expected outputs (return values, logs, raised exceptions, etc.)
     4. Whether this is `Happy Path`, `Validation`, `Error Handling`, `Control
        Flow Decisioning` or some other category of behavior testing
 
-The test matrices are put in a directory called `test-matrices/`
-`test-matrices/` has a subdirectory with the same name as the file under test.
+The test matrices are put in a directory called `ai-artifacts/test-matrices/`.
+`ai-artifacts/test-matrices/` has a subdirectory with the same name as the file under test.
   - Any characters that cannot be used in a file name are converted to `---`
 Within the subdirectory, there is a test-matrix file for each public function name
   - Any characters that cannot be used in a file name are converted to `---`
@@ -32,7 +34,7 @@ following file structure:
 
 -- Project Root
  |
- - `test-matrices/`
+ - `ai-artifacts/test-matrices/`
    |
    - `lib---lms--courses---course.ex`
      |
