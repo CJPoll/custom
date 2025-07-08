@@ -1,0 +1,13 @@
+Correct output for test matrices is formatted in this way
+- First is the full file name
+- Then for each public function output should be formatted as:
+  - First is the function name, including arity (e.g. `changeset/2`)
+  - Second is a set of test cases with each test case as a separate entry in
+    markdown format. Each entry is a separate list-item (e.g. `- [test-case description]`)
+    Each test case has the following four elements nest under it as an ordered
+    list:
+    1. Test case description
+    2. Inputs to the test case. If there is more than one input, 
+    3. Expected outputs (return values, logs, raised exceptions, etc.)
+    4. Whether this is `Happy Path`, `Validation`, `Error Handling`, `Control
+       Flow Decisioning` or some other category of behavior testing

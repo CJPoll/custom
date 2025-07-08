@@ -38,7 +38,8 @@ Plug 'madox2/vim-ai'
 
 " Claude Code Dep (and elixir-tools)
 Plug 'nvim-lua/plenary.nvim'
-Plug 'greggh/claude-code.nvim'
+Plug 'folke/snacks.nvim'
+Plug 'coder/claudecode.nvim'
 Plug 'elixir-tools/elixir-tools.nvim', { 'tag': 'stable' }
 
 call plug#end()
@@ -46,15 +47,26 @@ call plug#end()
 
 
 lua << EOF
-require("claude-code").setup({
- window = {
-   split_ratio = 0.4
- }
+-- Claude Code setup
+require('claudecode').setup({
+  -- The plugin will use defaults if no config is provided
 })
-EOF
-lua << EOF
-require('claude-code').setup({})
+
+-- Elixir tools setup
 require("elixir").setup()
+
+-- Custom function to open Claude in bottom split
+function ClaudeCodeBottom()
+  vim.cmd('ClaudeCode')
+  -- Wait a moment for the window to open
+  vim.defer_fn(function()
+    -- Move the window to the bottom
+    vim.cmd('wincmd L')  -- Move to far right first
+    vim.cmd('wincmd J')  -- Then move to bottom
+    -- Optionally resize the height (adjust as needed)
+    vim.cmd('resize 25')
+  end, 100)
+end
 EOF
 
 filetype plugin indent on    " required
@@ -155,7 +167,9 @@ nnoremap ; :
 nnoremap <leader>p :set paste!<CR>
 
 " Claude!
-nnoremap <leader>c :ClaudeCode<CR>
+nnoremap <leader>c :lua ClaudeCodeBottom()<CR>
+nnoremap <leader>cf :ClaudeCodeFocus<CR>
+vnoremap <leader>cs :ClaudeCodeSend<CR>
 
 " Easy alignment
 nnoremap <leader>i gg=G
