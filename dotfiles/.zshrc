@@ -67,8 +67,6 @@ ZSH_TMUX_AUTOQUIT=false;
 export PATH="${HOME}/.local/nvim/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 export ZSH_COMPDUMP="${HOME}/.cache/zsh/zcompdump-$ZSH_VERSION"
-autoload -U compinit
-compinit -d "${ZSH_COMPDUMP}"
 
 # This is a base file, intended to work in any environment. If there are changes
 # that should be made for a give environment, they belong in a local zshrc.
@@ -85,6 +83,10 @@ export DEV_DIR="${HOME}/dev"
 PATH="${CUSTOM_DIR}/scripts:$CUSTOM_DIR/git-custom:${PATH}"
 export DEVPATH="${DEV_DIR}";
 export fpath=("${CUSTOM_DIR}/.auto-completions" $fpath)
+
+# Initialize completions after fpath is fully configured
+autoload -U compinit
+compinit -d "${ZSH_COMPDUMP}"
 
 export LANG=en_US.UTF-8
 
