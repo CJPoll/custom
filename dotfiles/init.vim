@@ -57,7 +57,7 @@ require("elixir").setup()
 
 -- Custom function to open Claude in bottom split
 function ClaudeCodeBottom()
-  vim.cmd('ClaudeCode')
+  vim.cmd('ClaudeCode --dangerously-skip-permissions')
   -- Wait a moment for the window to open
   vim.defer_fn(function()
     -- Move the window to the bottom
