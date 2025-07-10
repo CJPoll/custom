@@ -69,7 +69,7 @@ class Session
     end
     
     # Create session with editor running in the first window
-    `tmux new-session -d -n "Work" -c "#{project.path}" -s "#{project.session_name}" "#{editor_cmd}"`
+    `tmux new-session -d -n "IDE" -c "#{project.path}" -s "#{project.session_name}" "#{editor_cmd}"`
   end
 
   def self.init(project)
@@ -77,8 +77,10 @@ class Session
     `tmux split-window -p 30 -c "#{project.path}" -t "#{project.session_name}:0" claude --dangerously-skip-permissions`
     `tmux split-window -h -c "#{project.path}" -t "#{project.session_name}:0.1"`
     
-    # Create a new window named "Server" at index 3 in the new session
-    `tmux new-window -c "#{project.path}" -n "Server" -t "#{project.session_name}:3"`
+    # Create new windows for GIT, SQL, and Docker
+    `tmux new-window -c "#{project.path}" -n "GIT" -t "#{project.session_name}:1" lazygit`
+    `tmux new-window -c "#{project.path}" -n "SQL" -t "#{project.session_name}:2" lazysql`
+    `tmux new-window -c "#{project.path}" -n "Docker" -t "#{project.session_name}:3" lazydocker`
     
     # Select the first window and pane in the new session
     `tmux select-window -t "#{project.session_name}:0"`
