@@ -1,7 +1,3 @@
-"set runtimepath^=~/.vim runtimepath+=~/.vim/after
-"let &packpath=&runtimepath
-"source ~/.vimrc
-
 call plug#begin()
 if has('nvim')
   set runtimepath+=~/.vim/
@@ -20,7 +16,7 @@ endfunction
 " Vundle Packages {{{
 Plug 'bling/vim-airline'                 " Lightweight Powerline
 Plug 'christoomey/vim-tmux-navigator'    " TMUX integration
-Plug 'ctrlpvim/ctrlp.vim'
+"Plug 'ctrlpvim/ctrlp.vim'
 Plug 'jiangmiao/auto-pairs'              " Auto-pairs parens & others
 Plug 'majutsushi/tagbar'                 " View ctags info in pane
 Plug 'mileszs/ack.vim'                   " Ack integration
@@ -41,6 +37,8 @@ Plug 'nvim-lua/plenary.nvim'
 Plug 'folke/snacks.nvim'
 Plug 'coder/claudecode.nvim'
 Plug 'elixir-tools/elixir-tools.nvim', { 'tag': 'stable' }
+Plug 'junegunn/fzf', { 'do': { -> fzf#install() } }
+Plug 'junegunn/fzf.vim'
 
 call plug#end()
 
@@ -162,6 +160,8 @@ let localleader="\\"
 
 " Pinky saver
 nnoremap ; :
+
+nnoremap <C-p> :FZF<CR>
 
 " Toggle paste mode
 nnoremap <leader>p :set paste!<CR>

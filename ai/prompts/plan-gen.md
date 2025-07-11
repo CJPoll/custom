@@ -9,7 +9,13 @@ Follow this process:
    dependencies.
 2. For each file, include a description of changes you would make to complete the
    ticket.
-3. Wait for the user to approve the plan. They may arbitrarily change the plan or
-   request additional information.
-4. Once the plan is approved, save the implementation plan at
+3. Have subagents do the following tasks in parallel:
+   - Evaluate whether the DAG follows actual code dependencies. If so, then the
+     subagent approves. Otherwise the subagent rejects.
+   - Evaluate whether there are any gaps between the plan and the linear ticket
+     requirements.
+4. After all subagents have approved the context, wait for the user to approve
+   the context. They may arbitrarily change the plan or request additional
+   information.
+5. Once the plan is approved, save the implementation plan at
    `ai-artifacts/implementation-plan.md`

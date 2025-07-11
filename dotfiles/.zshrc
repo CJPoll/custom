@@ -69,7 +69,7 @@ export PATH="${HOME}/.local/nvim/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/u
 export ZSH_COMPDUMP="${HOME}/.cache/zsh/zcompdump-$ZSH_VERSION"
 
 # This is a base file, intended to work in any environment. If there are changes
-# that should be made for a give environment, they belong in a local zshrc.
+# that should be made for a given environment, they belong in a local zshrc.
 LOCAL_RC="${HOME}/.zshrc.local"
 
 if [[ -a "${LOCAL_RC}" ]]; then
@@ -103,8 +103,6 @@ fi
 # aliases
 
 alias dc='docker compose';
-alias kc='kubectl';
-alias m='make'
 alias resource="source ${HOME}/.zshrc";
 alias ta='tmux attach';
 alias tmuxrc="$EDITOR ${HOME}/.tmux.conf";
@@ -132,7 +130,7 @@ function script()
   SCRIPT_DIR="${CUSTOM_DIR}/scripts"
   FILE_NAME="${SCRIPT_DIR}/${SCRIPT_NAME}"
 
-  vim "${FILE_NAME}";
+  ${EDITOR} "${FILE_NAME}";
   chmod u+x "${FILE_NAME}";
 }
 
@@ -174,3 +172,5 @@ export GPG_TTY;
 unalias gc;
 
 . "$HOME/.local/bin/env"
+
+[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh

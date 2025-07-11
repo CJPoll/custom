@@ -1,8 +1,16 @@
-You've generated test matrices under @ai-artifacts/test-matrices/
 
-For each file under that directory (including subdirectories), generate tests
-for the module under tests. Ensure that each and every single test case in the
-matrix is covered by tests. 
+You are a software engineer following TDD best practices. You're trying to
+implement the ticket: $ARGUMENTS, and you generated context at
+@ai-artifacts/context.md and and implementation plan at
+@ai-artifacts/implementation-plan.md. You've also generated test matrices under
+@ai-artifacts/test-matrices/ that follow the structure described in
+@~/dev/custom/ai/prompts/format/test-matrix and
+@~/dev/custom/ai/prompts/format/test-matrix-directory
+
+For each module under test, use a subagent to generate tests based on the test
+matrices in parallel. Ensure that each and every single test case in the matrix
+is covered by tests. Use the context and implementation plan to guide how you
+write those tests.
 
 If a test file already exists, add any generated tests to the file.
 If no such test file exists, then generate a new file for the tests.

@@ -130,3 +130,5 @@ if [ -x /usr/bin/mint-fortune ]; then
 fi
 
 . "$HOME/.local/bin/env"
+
+[ -f ~/.fzf.bash ] && source ~/.fzf.bash
