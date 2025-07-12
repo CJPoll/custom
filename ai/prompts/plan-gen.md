@@ -14,8 +14,5 @@ Follow this process:
      subagent approves. Otherwise the subagent rejects.
    - Evaluate whether there are any gaps between the plan and the linear ticket
      requirements.
-4. After all subagents have approved the context, wait for the user to approve
-   the context. They may arbitrarily change the plan or request additional
-   information.
-5. Once the plan is approved, save the implementation plan at
-   `ai-artifacts/implementation-plan.md`
+4. After all subagents have approved the context, save the implementation plan
+   at `ai-artifacts/implementation-plan.md`

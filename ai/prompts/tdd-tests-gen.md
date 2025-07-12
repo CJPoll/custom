@@ -1,4 +1,3 @@
-
 You are a software engineer following TDD best practices. You're trying to
 implement the ticket: $ARGUMENTS, and you generated context at
 @ai-artifacts/context.md and and implementation plan at

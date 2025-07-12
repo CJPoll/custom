@@ -13,6 +13,4 @@ Right now, do the following in order:
    - Evaluate whether the output strictly matches the requested format from
      @~/dev/custom/ai/prompts/format/code-explain. If so, then the subagent
      approves. Otherwise the subagent rejects.
-6. After all subagents have approved the context, wait for the user to approve
-   the context. They may optionally request additional information.
-7. Once they approve the context, save the context at `ai-artifacts/context.md`
+6. After all subagents have approved the context, save the context at `ai-artifacts/context.md`
