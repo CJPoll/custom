@@ -449,49 +449,100 @@ show_worktree_stack() {
     log "Branch hierarchy for project: $(basename "$PROJECT_DIR")"
     log ""
     
-    # Run git-stack and annotate with worktree info
-    git stack 2>/dev/null | while IFS= read -r line; do
+    # Process git-stack output line by line
+    local first_worktree_seen=false
+    local start_extra_indent=false
+    local in_indented_section=false
+    
+    git stack 2>&1 | while IFS= read -r line; do
         # Skip empty lines
         if [[ -z "$line" ]]; then
             echo "$line"
             continue
         fi
         
-        local annotations=""
-        local found_any=false
+        # Check if we're starting/ending an indented section
+        if [[ "$line" =~ ^[[:space:]]*│ ]]; then
+            in_indented_section=true
+        else
+            # Reset when we leave an indented section
+            in_indented_section=false
+            first_worktree_seen=false
+            start_extra_indent=false
+        fi
         
-        # Check each known branch to see if it appears in this line
-        for branch in "${!branch_to_worktree[@]}"; do
-            # Check if this branch name appears in the line
-            # Use word boundaries to avoid partial matches
-            if [[ "$line" =~ (^|[[:space:],])${branch}([[:space:],\(]|$) ]]; then
-                found_any=true
-                local wt_path="${branch_to_worktree[$branch]}"
-                local marker=""
-                if [ ${worktree_to_current[$wt_path]+isset} ]; then
-                    marker="*"
-                fi
-                if [[ "$wt_path" == "$PROJECT_DIR" ]]; then
-                    if [ -n "$marker" ]; then
-                        annotations="${annotations} [${branch}:main*]"
+        # Look for worktree branches in indented sections
+        if [[ "$in_indented_section" == true ]]; then
+            for branch in "${!branch_to_worktree[@]}"; do
+                if [[ "$line" =~ (^|[[:space:],│├└─⌽])${branch}([[:space:],\(]|$) ]]; then
+                    if [[ "$first_worktree_seen" == false ]]; then
+                        # This is the first worktree in the section
+                        first_worktree_seen=true
+                        # Don't indent this line, but indent everything after
                     else
-                        annotations="${annotations} [${branch}:main]"
+                        # This is a second worktree - should already be indenting
+                        true
                     fi
+                    break
+                fi
+            done
+            
+            # Start indenting from the line AFTER the first worktree
+            if [[ "$first_worktree_seen" == true ]] && [[ "$start_extra_indent" == false ]]; then
+                # This line is after we saw the first worktree, so start indenting
+                start_extra_indent=true
+            fi
+        fi
+        
+        # Apply extra indentation if needed
+        local output_line="$line"
+        if [[ "$start_extra_indent" == true ]] && [[ "$in_indented_section" == true ]] && [[ "$line" =~ ^([[:space:]]*│[[:space:]]*) ]]; then
+            local prefix="${BASH_REMATCH[1]}"
+            local rest="${line#$prefix}"
+            # Add extra "│ " for indentation
+            prefix="${prefix}│ "
+            output_line="${prefix}${rest}"
+        fi
+        
+        # Add annotations to branch names
+        local modified_line="$output_line"
+        
+        # Process branches in order of length (longest first)
+        local sorted_branches=()
+        while IFS= read -r branch; do
+            sorted_branches+=("$branch")
+        done < <(printf '%s\n' "${!branch_to_worktree[@]}" | awk '{ print length, $0 }' | sort -nr | cut -d' ' -f2-)
+        
+        for branch in "${sorted_branches[@]}"; do
+            local wt_path="${branch_to_worktree[$branch]}"
+            local annotation=""
+            local marker=""
+            
+            if [ ${worktree_to_current[$wt_path]+isset} ]; then
+                marker="*"
+            fi
+            
+            if [[ "$wt_path" == "$PROJECT_DIR" ]]; then
+                if [ -n "$marker" ]; then
+                    annotation="[main*]"
                 else
-                    if [ -n "$marker" ]; then
-                        annotations="${annotations} [${branch}:wt*]"
-                    else
-                        annotations="${annotations} [${branch}:wt]"
-                    fi
+                    annotation="[main]"
                 fi
+            else
+                if [ -n "$marker" ]; then
+                    annotation="[wt*]"
+                else
+                    annotation="[wt]"
+                fi
+            fi
+            
+            # Check if branch appears in the line with proper boundaries
+            if [[ "$modified_line" =~ (^|[[:space:],│├└─⌽])${branch}([[:space:],\(]|$) ]]; then
+                modified_line="${modified_line//${branch}/${branch}${annotation}}"
             fi
         done
         
-        if [ "$found_any" = true ]; then
-            echo "${line}${annotations}"
-        else
-            echo "$line"
-        fi
+        echo "$modified_line"
     done
 }
 
