@@ -27,6 +27,7 @@ Commands:
   is-worktree       Check if a directory is a git worktree
                     Exit codes: 0=worktree, 1=project root, 2=neither
   stack             Show branch hierarchy for all worktrees in the project
+  sync [branch]     Sync the stack using git-stack for the current or specified branch
 
 Options:
   --quiet           Suppress output from script and subcommands
@@ -51,6 +52,9 @@ Examples:
   wt create --quiet bugfix/issue-123
   wt is-worktree
   wt is-worktree --dir /path/to/directory
+  wt stack
+  wt sync
+  wt sync feature/child
 EOF
 }
 
@@ -571,6 +575,55 @@ show_worktree_stack() {
     done
 }
 
+sync_worktree_stack() {
+    local branch="${1:-}"
+    
+    # Check if git-stack is available
+    if ! command -v git-stack &>/dev/null; then
+        echo "Error: git-stack not found. Install from https://github.com/gitext-rs/git-stack" >&2
+        return 1
+    fi
+    
+    # If branch is provided, switch to that worktree first
+    if [ -n "$branch" ]; then
+        local worktree_path="$WORKTREES_DIR/$branch"
+        
+        if [ ! -d "$worktree_path" ]; then
+            echo "Error: Worktree not found for branch: $branch" >&2
+            echo "Available worktrees:" >&2
+            if [ -d "$WORKTREES_DIR" ]; then
+                ls -1 "$WORKTREES_DIR" 2>/dev/null | sed 's/^/  /' >&2
+            fi
+            return 1
+        fi
+        
+        log "Syncing stack for branch: $branch"
+        
+        # Run git-stack sync in the worktree
+        cd "$worktree_path"
+        git stack sync
+        local result=$?
+        
+        # Return to original directory
+        cd - >/dev/null
+        
+        return $result
+    else
+        # No branch specified, sync in current directory
+        # First check if we're in a git repository
+        if ! git rev-parse --git-dir &>/dev/null; then
+            echo "Error: Not in a git repository" >&2
+            return 1
+        fi
+        
+        local current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+        log "Syncing stack for current branch: $current_branch"
+        
+        # Run git-stack sync
+        git stack sync
+    fi
+}
+
 # Parse command line arguments
 COMMAND=""
 BRANCH=""
@@ -611,7 +664,7 @@ while [[ $# -gt 0 ]]; do
             CHECK_DIR="$1"
             shift
             ;;
-        init|list|ls|create|rm|switch|merge|is-worktree|stack)
+        init|list|ls|create|rm|switch|merge|is-worktree|stack|sync)
             COMMAND="$1"
             shift
             ;;
@@ -622,7 +675,7 @@ while [[ $# -gt 0 ]]; do
         *)
             # If we have a command that expects a branch and no branch is set yet,
             # treat this as the branch name
-            if [[ -n "$COMMAND" ]] && [[ -z "$BRANCH" ]] && [[ "$COMMAND" =~ ^(create|rm|switch|merge)$ ]]; then
+            if [[ -n "$COMMAND" ]] && [[ -z "$BRANCH" ]] && [[ "$COMMAND" =~ ^(create|rm|switch|merge|sync)$ ]]; then
                 BRANCH="$1"
                 shift
             else
@@ -662,6 +715,9 @@ case "$COMMAND" in
         ;;
     stack)
         show_worktree_stack
+        ;;
+    sync)
+        sync_worktree_stack "$BRANCH"
         ;;
     "")
         echo "Error: No command specified" >&2
