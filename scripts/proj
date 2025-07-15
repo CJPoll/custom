@@ -87,6 +87,21 @@ class Session
     `tmux select-pane -t "#{project.session_name}:0.0"`
   end
 
+  def self.add_review_window(project, base_branch)
+    # Check if Review window already exists
+    review_window_exists = `tmux list-windows -t "#{project.session_name}" -F "#\{window_name\}" 2>/dev/null | grep -q "^Review$" && echo "yes" || echo "no"`.strip
+    
+    if review_window_exists == "yes"
+      # Review window exists, select it
+      `tmux select-window -t "#{project.session_name}:Review"`
+    else
+      # Create new Review window with vim-review
+      `tmux new-window -c "#{project.path}" -n "Review" -t "#{project.session_name}" "vim-review --base-branch #{base_branch}"`
+      # Select the Review window
+      `tmux select-window -t "#{project.session_name}:Review"`
+    end
+  end
+
   def self.switch_to(project)
     if ENV['TMUX']
       # We're inside tmux, use switch-client
@@ -116,6 +131,10 @@ def main(project_name, explicit_path = nil, pr_review = false, base_branch = "ma
   if session.missing?
     Session.open(project, pr_review, base_branch)
     Session.init(project)
+  elsif pr_review
+    # Session exists and we're in PR review mode
+    # Create a Review window in the existing session
+    Session.add_review_window(project, base_branch)
   end
 
   Session.switch_to(project)

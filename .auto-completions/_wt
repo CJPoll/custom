@@ -8,6 +8,10 @@ _wt() {
     _arguments -C \
         '1: :_wt_commands' \
         '--quiet[Suppress output from script and subcommands]' \
+        '--stack[Execute command for entire stack (for push/pr commands)]' \
+        '--all[Push all ready branches, not just new ones (for push --stack)]' \
+        '--dry-run[Show what would be done without actually doing it (for push/pr commands)]' \
+        '--draft[Create draft pull requests (for pr --stack)]' \
         '*::arg:->args'
     
     case $state in
@@ -17,19 +21,36 @@ _wt() {
                     _arguments \
                         '1:worktree:_wt_worktrees' \
                         '--pr-review[Open changed files in tabs for PR review]' \
-                        '--base-branch[Base branch for PR review]:branch:_wt_git_branches'
+                        '--parent[Parent branch for PR review]:branch:_wt_git_branches'
                     ;;
-                rm|merge)
+                rm|merge|sync)
                     _wt_worktrees
                     ;;
                 create)
                     _arguments \
                         '1:branch:_wt_git_branches' \
-                        '--no-symlink[Do not create symlink to .claude directory]'
+                        '--no-symlink[Do not create symlink to .claude directory]' \
+                        '--switch[Switch to the worktree after creating it]' \
+                        '--parent[Parent branch for stack creation]:branch:_wt_git_branches'
                     ;;
                 is-worktree)
                     _arguments \
                         '--dir[Check the specified directory]:directory:_directories'
+                    ;;
+                run)
+                    _message 'command to run across stack'
+                    ;;
+                push)
+                    _arguments \
+                        '--stack[Push all branches in the stack]' \
+                        '--all[Push all ready branches, not just new ones]' \
+                        '--dry-run[Show what would be pushed without actually pushing]'
+                    ;;
+                pr)
+                    _arguments \
+                        '--stack[Create pull requests for entire stack]' \
+                        '--draft[Create draft pull requests]' \
+                        '--dry-run[Show what PRs would be created without creating them]'
                     ;;
             esac
             ;;
@@ -46,6 +67,13 @@ _wt_commands() {
         'switch:Change to the worktree for the specified branch'
         'merge:Merge a worktree branch (must be run from parent repo)'
         'is-worktree:Check if a directory is a git worktree'
+        'stack:Show branch hierarchy for all worktrees in the project'
+        'sync:Sync the stack using git-stack for the current or specified branch'
+        'next:Navigate to a child branch in the stack (switch tmux session)'
+        'prev:Navigate to the parent branch in the stack (switch tmux session)'
+        'run:Execute a command across all branches in the stack'
+        'push:Push branches to origin (use --stack for entire stack)'
+        'pr:Create pull requests (use --stack for entire stack)'
     )
     _describe -t commands 'wt command' commands
 }
