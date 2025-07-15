@@ -26,6 +26,7 @@ Commands:
   merge <branch>    Merge a worktree branch (must be run from parent repo)
   is-worktree       Check if a directory is a git worktree
                     Exit codes: 0=worktree, 1=project root, 2=neither
+  stack             Show branch hierarchy for all worktrees in the project
 
 Options:
   --quiet           Suppress output from script and subcommands
@@ -402,6 +403,88 @@ is_worktree() {
     exit 2
 }
 
+show_worktree_stack() {
+    # Check if git-stack is available
+    if ! command -v git-stack &>/dev/null; then
+        echo "Error: git-stack not found. Install from https://github.com/gitext-rs/git-stack" >&2
+        return 1
+    fi
+    
+    # Check if we're in a git repository
+    if ! git rev-parse --git-dir &>/dev/null; then
+        echo "Error: Not in a git repository" >&2
+        return 1
+    fi
+    
+    # Build branch->worktree mapping
+    declare -A branch_to_worktree
+    declare -A worktree_to_current
+    
+    # Get current directory for comparison
+    local current_dir="$(pwd)"
+    
+    # Add main project directory
+    local main_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [ -n "$main_branch" ]; then
+        branch_to_worktree["$main_branch"]="$PROJECT_DIR"
+        if [[ "$current_dir" == "$PROJECT_DIR" ]]; then
+            worktree_to_current["$PROJECT_DIR"]="*"
+        fi
+    fi
+    
+    # Add worktrees
+    if [ -d "$WORKTREES_DIR" ]; then
+        for wt in "$WORKTREES_DIR"/*; do
+            [ -d "$wt" ] || continue
+            local branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
+            if [ -n "$branch" ]; then
+                branch_to_worktree["$branch"]="$wt"
+                if [[ "$current_dir" == "$wt" ]]; then
+                    worktree_to_current["$wt"]="*"
+                fi
+            fi
+        done
+    fi
+    
+    log "Branch hierarchy for project: $(basename "$PROJECT_DIR")"
+    log ""
+    
+    # Run git-stack and annotate with worktree info
+    local in_worktree_section=false
+    git stack 2>/dev/null | while IFS= read -r line; do
+        # Skip empty lines
+        if [[ -z "$line" ]]; then
+            echo "$line"
+            continue
+        fi
+        
+        # Check if this line contains a branch name
+        # git-stack output typically has branch names at the end of lines
+        local branch=""
+        if [[ "$line" =~ ^[[:space:]]*([^[:space:]]+)[[:space:]]*$ ]]; then
+            branch="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ [[:space:]]([^[:space:]]+)$ ]]; then
+            branch="${BASH_REMATCH[1]}"
+        fi
+        
+        # If we found a branch and it has a worktree, annotate it
+        if [ -n "$branch" ] && [ ${branch_to_worktree[$branch]+isset} ]; then
+            local wt_path="${branch_to_worktree[$branch]}"
+            local marker=""
+            if [ ${worktree_to_current[$wt_path]+isset} ]; then
+                marker="${worktree_to_current[$wt_path]}"
+            fi
+            if [[ "$wt_path" == "$PROJECT_DIR" ]]; then
+                echo "$line [main]$marker"
+            else
+                echo "$line [worktree]$marker"
+            fi
+        else
+            echo "$line"
+        fi
+    done
+}
+
 # Parse command line arguments
 COMMAND=""
 BRANCH=""
@@ -442,7 +525,7 @@ while [[ $# -gt 0 ]]; do
             CHECK_DIR="$1"
             shift
             ;;
-        init|list|ls|create|rm|switch|merge|is-worktree)
+        init|list|ls|create|rm|switch|merge|is-worktree|stack)
             COMMAND="$1"
             shift
             ;;
@@ -490,6 +573,9 @@ case "$COMMAND" in
         ;;
     is-worktree)
         is_worktree
+        ;;
+    stack)
+        show_worktree_stack
         ;;
     "")
         echo "Error: No command specified" >&2
