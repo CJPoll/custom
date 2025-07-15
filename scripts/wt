@@ -450,7 +450,6 @@ show_worktree_stack() {
     log ""
     
     # Run git-stack and annotate with worktree info
-    local in_worktree_section=false
     git stack 2>/dev/null | while IFS= read -r line; do
         # Skip empty lines
         if [[ -z "$line" ]]; then
@@ -458,27 +457,38 @@ show_worktree_stack() {
             continue
         fi
         
-        # Check if this line contains a branch name
-        # git-stack output typically has branch names at the end of lines
-        local branch=""
-        if [[ "$line" =~ ^[[:space:]]*([^[:space:]]+)[[:space:]]*$ ]]; then
-            branch="${BASH_REMATCH[1]}"
-        elif [[ "$line" =~ [[:space:]]([^[:space:]]+)$ ]]; then
-            branch="${BASH_REMATCH[1]}"
-        fi
+        local annotations=""
+        local found_any=false
         
-        # If we found a branch and it has a worktree, annotate it
-        if [ -n "$branch" ] && [ ${branch_to_worktree[$branch]+isset} ]; then
-            local wt_path="${branch_to_worktree[$branch]}"
-            local marker=""
-            if [ ${worktree_to_current[$wt_path]+isset} ]; then
-                marker="${worktree_to_current[$wt_path]}"
+        # Check each known branch to see if it appears in this line
+        for branch in "${!branch_to_worktree[@]}"; do
+            # Check if this branch name appears in the line
+            # Use word boundaries to avoid partial matches
+            if [[ "$line" =~ (^|[[:space:],])${branch}([[:space:],\(]|$) ]]; then
+                found_any=true
+                local wt_path="${branch_to_worktree[$branch]}"
+                local marker=""
+                if [ ${worktree_to_current[$wt_path]+isset} ]; then
+                    marker="*"
+                fi
+                if [[ "$wt_path" == "$PROJECT_DIR" ]]; then
+                    if [ -n "$marker" ]; then
+                        annotations="${annotations} [${branch}:main*]"
+                    else
+                        annotations="${annotations} [${branch}:main]"
+                    fi
+                else
+                    if [ -n "$marker" ]; then
+                        annotations="${annotations} [${branch}:wt*]"
+                    else
+                        annotations="${annotations} [${branch}:wt]"
+                    fi
+                fi
             fi
-            if [[ "$wt_path" == "$PROJECT_DIR" ]]; then
-                echo "$line [main]$marker"
-            else
-                echo "$line [worktree]$marker"
-            fi
+        done
+        
+        if [ "$found_any" = true ]; then
+            echo "${line}${annotations}"
         else
             echo "$line"
         fi
