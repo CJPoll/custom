@@ -472,13 +472,15 @@ show_worktree_stack() {
         fi
         
         # Look for worktree branches in indented sections
+        local found_worktree_on_this_line=false
         if [[ "$in_indented_section" == true ]]; then
             for branch in "${!branch_to_worktree[@]}"; do
                 if [[ "$line" =~ (^|[[:space:],│├└─⌽])${branch}([[:space:],\(]|$) ]]; then
+                    found_worktree_on_this_line=true
                     if [[ "$first_worktree_seen" == false ]]; then
                         # This is the first worktree in the section
                         first_worktree_seen=true
-                        # Don't indent this line, but indent everything after
+                        # Don't indent THIS line, but indent everything after
                     else
                         # This is a second worktree - should already be indenting
                         true
@@ -488,8 +490,8 @@ show_worktree_stack() {
             done
             
             # Start indenting from the line AFTER the first worktree
-            if [[ "$first_worktree_seen" == true ]] && [[ "$start_extra_indent" == false ]]; then
-                # This line is after we saw the first worktree, so start indenting
+            # Only if we've seen a worktree AND this line doesn't have the first worktree
+            if [[ "$first_worktree_seen" == true ]] && [[ "$found_worktree_on_this_line" == false ]]; then
                 start_extra_indent=true
             fi
         fi
