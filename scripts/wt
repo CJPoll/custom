@@ -9,7 +9,7 @@ QUIET=false
 NO_SYMLINK=false
 CHECK_DIR=""
 PR_REVIEW=false
-BASE_BRANCH="main"
+PARENT_BRANCH="main"
 SWITCH_AFTER_CREATE=false
 
 usage() {
@@ -34,17 +34,18 @@ Options:
   --switch          Switch to the worktree after creating it (for create command)
   --dir <directory> Check the specified directory (for is-worktree command, defaults to current dir)
   --pr-review       Open changed files in tabs for PR review (for switch command)
-  --base-branch <branch> Base branch for PR review (for switch command, defaults to main)
+  --parent <branch> Parent branch for PR review or stack creation (defaults to main)
 
 Examples:
   wt init
   wt list
   wt create feature/my-feature
+  wt create feature/child --parent feature/parent
   wt create --no-symlink experimental/test
   wt create --switch feature/my-feature
   wt switch feature/my-feature
   wt switch feature/my-feature --pr-review
-  wt switch feature/my-feature --pr-review --base-branch develop
+  wt switch feature/my-feature --pr-review --parent develop
   wt rm feature/my-feature
   wt merge feature/my-feature
   wt create --quiet bugfix/issue-123
@@ -155,6 +156,9 @@ create_worktree() {
     
     log "Creating worktree for branch: $branch"
     
+    # Determine the base branch for the new worktree
+    local base_branch="$PARENT_BRANCH"
+    
     # Check if branch exists
     if git show-ref --verify --quiet "refs/heads/$branch"; then
         log "Checking out existing branch: $branch"
@@ -165,12 +169,31 @@ create_worktree() {
             log "Creating local branch from remote: origin/$branch"
             run_cmd git worktree add "$worktree_path" -b "$branch" "origin/$branch"
         else
-            log "Creating new branch: $branch"
-            run_cmd git worktree add "$worktree_path" -b "$branch"
+            # Create new branch from the parent branch
+            if [ "$base_branch" != "main" ] && [ "$base_branch" != "master" ]; then
+                log "Creating new branch: $branch from parent: $base_branch"
+                # Ensure parent branch exists
+                if git show-ref --verify --quiet "refs/heads/$base_branch"; then
+                    run_cmd git worktree add "$worktree_path" -b "$branch" "$base_branch"
+                else
+                    echo "Error: Parent branch '$base_branch' does not exist" >&2
+                    exit 1
+                fi
+            else
+                log "Creating new branch: $branch"
+                run_cmd git worktree add "$worktree_path" -b "$branch"
+            fi
         fi
     fi
     
     log "Worktree created at: $worktree_path"
+    
+    # Configure git-stack parent relationship if parent was specified
+    if [ "$PARENT_BRANCH" != "main" ] && [ "$PARENT_BRANCH" != "master" ]; then
+        log "Configuring git-stack parent relationship: $branch -> $PARENT_BRANCH"
+        git -C "$worktree_path" config --add git-stack.auto-base "$PARENT_BRANCH"
+        git -C "$worktree_path" config --add "branch.$branch.stack-base" "$PARENT_BRANCH"
+    fi
     
     # Create symlink to .claude directory if it exists in the main project (unless --no-symlink is set)
     if [ "$NO_SYMLINK" = false ] && [ -d "$PROJECT_DIR/.claude" ]; then
@@ -259,7 +282,7 @@ switch_worktree() {
     
     # Call proj directly, with optional --pr-review flag
     if [ "$PR_REVIEW" = true ]; then
-        proj "$session_name" --path "$worktree_path" --pr-review --base-branch "$BASE_BRANCH"
+        proj "$session_name" --path "$worktree_path" --pr-review --base-branch "$PARENT_BRANCH"
     else
         proj "$session_name" --path "$worktree_path"
     fi
@@ -570,13 +593,13 @@ while [[ $# -gt 0 ]]; do
             PR_REVIEW=true
             shift
             ;;
-        --base-branch)
+        --parent)
             shift
             if [[ $# -eq 0 ]]; then
-                echo "Error: --base-branch requires a branch name" >&2
+                echo "Error: --parent requires a branch name" >&2
                 exit 1
             fi
-            BASE_BRANCH="$1"
+            PARENT_BRANCH="$1"
             shift
             ;;
         --dir)
