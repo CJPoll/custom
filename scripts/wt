@@ -2,6 +2,12 @@
 
 set -euo pipefail
 
+# Source the install_git_stack script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/../install_git_stack.sh" ]; then
+    source "${SCRIPT_DIR}/../install_git_stack.sh"
+fi
+
 # Determine if we're in a worktree and find the actual project root
 CURRENT_DIR="$(pwd)"
 PROJECT_DIR="$CURRENT_DIR"
@@ -24,6 +30,7 @@ NO_SYMLINK=false
 CHECK_DIR=""
 PR_REVIEW=false
 PARENT_BRANCH="main"
+PARENT_BRANCH_EXPLICIT=false
 SWITCH_AFTER_CREATE=false
 
 usage() {
@@ -41,6 +48,8 @@ Commands:
   is-worktree       Check if a directory is a git worktree
                     Exit codes: 0=worktree, 1=project root, 2=neither
   stack             Show branch hierarchy for all worktrees in the project
+  stack --install   Install git-stack if not already installed
+                    Downloads and installs git-stack from the official GitHub releases
   sync [branch]     Sync the stack by rebasing child branches onto updated parents
   sync --continue   Continue a sync operation after resolving conflicts
   next              Navigate to a child branch in the stack (switch tmux session)
@@ -77,6 +86,7 @@ Examples:
   wt is-worktree
   wt is-worktree --dir /path/to/directory
   wt stack
+  wt stack --install
   wt sync
   wt sync feature/child
   wt sync --continue
@@ -227,8 +237,10 @@ create_worktree() {
     
     log "Worktree created at: $worktree_path"
     
-    # Configure git-stack parent relationship if parent was specified
-    if [ "$PARENT_BRANCH" != "main" ] && [ "$PARENT_BRANCH" != "master" ]; then
+    # Configure git-stack parent relationship if parent was explicitly specified
+    # Note: We check if PARENT_BRANCH was changed from its default value (main)
+    # by checking if it matches the default or if --parent flag was used
+    if [ "$PARENT_BRANCH" != "main" ] || [[ "${PARENT_BRANCH_EXPLICIT:-false}" == "true" ]]; then
         log "Configuring git-stack parent relationship: $branch -> $PARENT_BRANCH"
         git -C "$worktree_path" config --add git-stack.auto-base "$PARENT_BRANCH"
         git -C "$worktree_path" config --add "branch.$branch.stack-base" "$PARENT_BRANCH"
@@ -497,9 +509,17 @@ is_worktree() {
 }
 
 show_worktree_stack() {
+    # Check if the --install flag is present
+    # This flag triggers automatic installation of git-stack from GitHub releases
+    # if it's not already installed on the system
+    if [ "${INSTALL_GIT_STACK:-false}" = true ]; then
+        install_git_stack
+        exit 0
+    fi
+
     # Check if git-stack is available
-    if ! command -v git-stack &>/dev/null; then
-        echo "Error: git-stack not found. Install from https://github.com/gitext-rs/git-stack" >&2
+    if ! command -v git-stack /dev/null; then
+        echo "Error: git-stack not found. Install from https://github.com/gitext-rs/git-stack" 2
         return 1
     fi
     
@@ -1538,6 +1558,7 @@ PUSH_ALL=false
 DRY_RUN=false
 PR_STACK=false
 PR_DRAFT=false
+INSTALL_GIT_STACK=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1581,6 +1602,7 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             PARENT_BRANCH="$1"
+            PARENT_BRANCH_EXPLICIT=true
             shift
             ;;
         --dir)
@@ -1590,6 +1612,11 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             CHECK_DIR="$1"
+            shift
+            ;;
+        --install)
+            # Flag to trigger git-stack installation if not already present
+            INSTALL_GIT_STACK=true
             shift
             ;;
         init|list|ls|create|rm|switch|merge|is-worktree|stack|sync|next|prev|run|push|pr)
