@@ -19,7 +19,7 @@ _wt() {
             case $words[1] in
                 switch)
                     _arguments \
-                        '1:worktree:_wt_worktrees' \
+                        '1:branch:_wt_switchable_branches' \
                         '--pr-review[Open changed files in tabs for PR review]' \
                         '--parent[Parent branch for PR review]:branch:_wt_git_branches'
                     ;;
@@ -119,6 +119,43 @@ _wt_git_branches() {
     branches=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>/dev/null | grep -v HEAD | sed 's|^origin/||' | sort -u)"})
     
     _multi_parts / branches
+}
+
+# Function to complete branches for switch command
+_wt_switchable_branches() {
+    # Get all local branches
+    local -a branches
+    branches=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)"})
+    
+    # Also get branches that have worktrees
+    local worktrees_dir="$HOME/.local/worktrees/$(basename $(pwd))"
+    if [[ -d "$worktrees_dir" ]]; then
+        local git_output
+        git_output=$(git worktree list 2>/dev/null)
+        
+        if [[ -n "$git_output" ]]; then
+            while IFS= read -r line; do
+                # Extract the path and branch from each line
+                local worktree_path="${line%% *}"
+                local branch_info="${line#* }"
+                # Extract branch name from format like "abc123 [branch-name]"
+                if [[ "$branch_info" =~ \[([^\]]+)\] ]]; then
+                    local branch="${match[1]}"
+                    # Add to branches if not already present
+                    if [[ ! " ${branches[@]} " =~ " ${branch} " ]]; then
+                        branches+=("$branch")
+                    fi
+                fi
+            done <<< "$git_output"
+        fi
+    fi
+    
+    # Sort and remove duplicates
+    branches=(${(u)branches})
+    
+    if (( ${#branches} > 0 )); then
+        _multi_parts / branches
+    fi
 }
 
 _wt "$@"

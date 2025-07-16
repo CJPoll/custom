@@ -4,4 +4,4 @@ Follow this process:
 3. Identify up to 5 files with issues
 4. Use up to 5 subagents, one for each of the 5 files. That subagent is
 responsible for fixing the issues in that file.
-5. Once the 5 identified files are all addressed, go back to step 1
+5. Once the 5 identified files are all addressed, go back to step 1 and repeat

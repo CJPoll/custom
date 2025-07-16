@@ -41,7 +41,8 @@ Commands:
   is-worktree       Check if a directory is a git worktree
                     Exit codes: 0=worktree, 1=project root, 2=neither
   stack             Show branch hierarchy for all worktrees in the project
-  sync [branch]     Sync the stack using git-stack for the current or specified branch
+  sync [branch]     Sync the stack by rebasing child branches onto updated parents
+  sync --continue   Continue a sync operation after resolving conflicts
   next              Navigate to a child branch in the stack (switch tmux session)
   prev              Navigate to the parent branch in the stack (switch tmux session)
   run <command>     Execute a command across all branches in the stack (in dependency order)
@@ -78,6 +79,7 @@ Examples:
   wt stack
   wt sync
   wt sync feature/child
+  wt sync --continue
   wt next
   wt prev
   wt run "npm test"
@@ -648,51 +650,208 @@ show_worktree_stack() {
 }
 
 sync_worktree_stack() {
-    local branch="${1:-}"
+    local start_branch="${1:-}"
+    local continue_sync=false
     
-    # Check if git-stack is available
-    if ! command -v git-stack &>/dev/null; then
-        echo "Error: git-stack not found. Install from https://github.com/gitext-rs/git-stack" >&2
-        return 1
+    # Check for --continue flag
+    if [ "$start_branch" = "--continue" ]; then
+        continue_sync=true
+        start_branch=""
     fi
     
-    # If branch is provided, switch to that worktree first
-    if [ -n "$branch" ]; then
-        local worktree_path="$WORKTREES_DIR/$branch"
-        
-        if [ ! -d "$worktree_path" ]; then
-            echo "Error: Worktree not found for branch: $branch" >&2
-            echo "Available worktrees:" >&2
-            if [ -d "$WORKTREES_DIR" ]; then
-                ls -1 "$WORKTREES_DIR" 2>/dev/null | sed 's/^/  /' >&2
-            fi
-            return 1
-        fi
-        
-        log "Syncing stack for branch: $branch"
-        
-        # Run git-stack sync in the worktree
-        cd "$worktree_path"
-        git stack sync
-        local result=$?
-        
-        # Return to original directory
-        cd - >/dev/null
-        
-        return $result
-    else
-        # No branch specified, sync in current directory
-        # First check if we're in a git repository
-        if ! git rev-parse --git-dir &>/dev/null; then
+    # Handle continue mode
+    if [ "$continue_sync" = true ]; then
+        sync_worktree_continue
+        return $?
+    fi
+    
+    # Get current branch if not specified
+    if [ -z "$start_branch" ]; then
+        start_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+        if [ -z "$start_branch" ]; then
             echo "Error: Not in a git repository" >&2
             return 1
         fi
+    fi
+    
+    log "Syncing stack containing branch: $start_branch"
+    
+    # First, fetch latest changes from origin
+    log "Fetching latest changes from origin..."
+    git fetch origin
+    
+    # Get all branches in the stack
+    local branches=($(get_stack_branches "$start_branch"))
+    if [ ${#branches[@]} -eq 0 ]; then
+        echo "Error: No branches found in stack" >&2
+        return 1
+    fi
+    
+    log "Found ${#branches[@]} branches in stack: ${branches[*]}"
+    log ""
+    
+    local failed_branch=""
+    local rebased_count=0
+    
+    # Process each branch in order (parent to child)
+    for branch in "${branches[@]}"; do
+        local worktree_path=""
         
-        local current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-        log "Syncing stack for current branch: $current_branch"
+        # Determine worktree path
+        if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+            worktree_path="$PROJECT_DIR"
+        else
+            worktree_path="$WORKTREES_DIR/$branch"
+        fi
         
-        # Run git-stack sync
+        if [ ! -d "$worktree_path" ]; then
+            log "⚠️  Skipping $branch - worktree not found"
+            continue
+        fi
+        
+        # Check if this branch has an in-progress rebase
+        if [ -d "$worktree_path/.git/rebase-merge" ] || [ -d "$worktree_path/.git/rebase-apply" ]; then
+            log "⚠️  $branch has an in-progress rebase. Resolve conflicts and run 'wt sync --continue'"
+            failed_branch="$branch"
+            break
+        fi
+        
+        # Get parent branch
+        local parent=$(get_branch_parent "$branch")
+        if [ -z "$parent" ] || [ "$parent" = "$branch" ]; then
+            log "✓ $branch - no parent branch, skipping"
+            continue
+        fi
+        
+        # Check if branch needs rebasing onto parent
+        local needs_rebase=false
+        local merge_base=$(git -C "$worktree_path" merge-base "$branch" "$parent" 2>/dev/null)
+        local parent_tip=$(git -C "$worktree_path" rev-parse "$parent" 2>/dev/null)
+        
+        if [ "$merge_base" != "$parent_tip" ]; then
+            needs_rebase=true
+        fi
+        
+        if [ "$needs_rebase" = true ]; then
+            log "🔄 Rebasing $branch onto $parent..."
+            
+            # Save current directory
+            local original_dir=$(pwd)
+            
+            # Switch to worktree and perform rebase
+            cd "$worktree_path"
+            
+            if git rebase "$parent"; then
+                log "✓ Successfully rebased $branch"
+                ((rebased_count++))
+            else
+                log ""
+                log "⚠️  Conflict detected while rebasing $branch"
+                log "📍 Worktree location: $worktree_path"
+                log ""
+                log "To resolve:"
+                log "  1. cd $worktree_path"
+                log "  2. Fix conflicts and stage changes"
+                log "  3. git rebase --continue"
+                log "  4. wt sync --continue"
+                log ""
+                failed_branch="$branch"
+                
+                # Show conflict status
+                git status --short
+                
+                cd "$original_dir"
+                break
+            fi
+            
+            cd "$original_dir"
+        else
+            log "✓ $branch - already up to date with $parent"
+        fi
+    done
+    
+    log ""
+    
+    if [ -n "$failed_branch" ]; then
+        return 1
+    elif [ $rebased_count -eq 0 ]; then
+        log "All branches are already up to date"
+    else
+        log "Successfully rebased $rebased_count branch(es)"
+    fi
+    
+    # Optionally run git-stack sync for any additional git-stack specific operations
+    if command -v git-stack &>/dev/null; then
+        log ""
+        log "Running git-stack sync for additional updates..."
         git stack sync
+    fi
+}
+
+sync_worktree_continue() {
+    log "Continuing sync operation..."
+    log ""
+    
+    # Find all worktrees with in-progress rebases
+    local found_rebase=false
+    local completed_rebases=0
+    
+    # Check main project
+    if [ -d "$PROJECT_DIR/.git/rebase-merge" ] || [ -d "$PROJECT_DIR/.git/rebase-apply" ]; then
+        local branch=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
+        log "Found in-progress rebase in main project (branch: $branch)"
+        log "Please complete the rebase manually in: $PROJECT_DIR"
+        found_rebase=true
+    fi
+    
+    # Check all worktrees
+    if [ -d "$WORKTREES_DIR" ]; then
+        for wt in "$WORKTREES_DIR"/*; do
+            [ -d "$wt" ] || continue
+            
+            if [ -d "$wt/.git/rebase-merge" ] || [ -d "$wt/.git/rebase-apply" ]; then
+                local branch=$(basename "$wt")
+                found_rebase=true
+                
+                log "Checking rebase status for $branch..."
+                
+                # Check if there are still conflicts
+                if git -C "$wt" status --porcelain | grep -q "^UU\|^AA\|^DD"; then
+                    log "⚠️  $branch still has unresolved conflicts"
+                    log "    Location: $wt"
+                    return 1
+                else
+                    # Try to continue the rebase
+                    log "Attempting to continue rebase for $branch..."
+                    if git -C "$wt" rebase --continue 2>&1; then
+                        log "✓ Successfully continued rebase for $branch"
+                        ((completed_rebases++))
+                    else
+                        log "⚠️  Failed to continue rebase for $branch"
+                        log "    Please resolve manually in: $wt"
+                        return 1
+                    fi
+                fi
+            fi
+        done
+    fi
+    
+    if [ "$found_rebase" = false ]; then
+        log "No in-progress rebases found."
+        log ""
+        log "Resuming normal sync..."
+        log ""
+        # Resume normal sync from current directory
+        sync_worktree_stack
+    else
+        if [ $completed_rebases -gt 0 ]; then
+            log ""
+            log "Completed $completed_rebases rebase(s)."
+            log "Resuming sync for remaining branches..."
+            log ""
+            # Resume sync
+            sync_worktree_stack
+        fi
     fi
 }
 
