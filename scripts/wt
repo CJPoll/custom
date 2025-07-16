@@ -50,6 +50,7 @@ Commands:
   stack             Show branch hierarchy for all worktrees in the project
   stack --install   Install git-stack if not already installed
                     Downloads and installs git-stack from the official GitHub releases
+  stack parent <branch>  Set or update the parent branch for the current branch
   sync [branch]     Sync the stack by rebasing child branches onto updated parents
   sync --continue   Continue a sync operation after resolving conflicts
   next              Navigate to a child branch in the stack (switch tmux session)
@@ -506,6 +507,49 @@ is_worktree() {
     
     # Not in a git repository
     exit 2
+}
+
+set_stack_parent() {
+    local parent_branch="$1"
+    
+    if [ -z "$parent_branch" ]; then
+        echo "Error: Parent branch name is required" >&2
+        echo "Usage: wt stack parent <parent-branch>" >&2
+        return 1
+    fi
+    
+    # Get current branch
+    local current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [ -z "$current_branch" ]; then
+        echo "Error: Not in a git repository" >&2
+        return 1
+    fi
+    
+    # Check if parent branch exists
+    if ! git show-ref --verify --quiet "refs/heads/$parent_branch" && \
+       ! git show-ref --verify --quiet "refs/remotes/origin/$parent_branch"; then
+        echo "Error: Parent branch '$parent_branch' does not exist locally or on origin" >&2
+        return 1
+    fi
+    
+    # Don't allow setting a branch as its own parent
+    if [ "$current_branch" = "$parent_branch" ]; then
+        echo "Error: Cannot set a branch as its own parent" >&2
+        return 1
+    fi
+    
+    log "Setting parent of '$current_branch' to '$parent_branch'"
+    
+    # Set the git config for stack parent
+    git config --add git-stack.auto-base "$parent_branch"
+    git config --add "branch.$current_branch.stack-base" "$parent_branch"
+    
+    log "✓ Parent relationship configured: $current_branch -> $parent_branch"
+    
+    # Show the updated stack structure
+    log ""
+    log "Updated stack structure:"
+    show_worktree_stack
 }
 
 show_worktree_stack() {
@@ -1559,6 +1603,8 @@ DRY_RUN=false
 PR_STACK=false
 PR_DRAFT=false
 INSTALL_GIT_STACK=false
+STACK_SUBCOMMAND=""
+STACK_PARENT_BRANCH=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1627,6 +1673,25 @@ while [[ $# -gt 0 ]]; do
                 RUN_COMMAND="$*"
                 break
             fi
+            # For 'stack' command, check if there's a subcommand
+            if [ "$COMMAND" = "stack" ] && [ $# -gt 0 ]; then
+                case "$1" in
+                    parent)
+                        STACK_SUBCOMMAND="parent"
+                        shift
+                        if [ $# -gt 0 ]; then
+                            STACK_PARENT_BRANCH="$1"
+                            shift
+                        fi
+                        ;;
+                    --install)
+                        # Already handled by the --install flag
+                        ;;
+                    *)
+                        # Not a recognized subcommand, might be a different argument
+                        ;;
+                esac
+            fi
             ;;
         -h|--help|help)
             usage
@@ -1674,7 +1739,17 @@ case "$COMMAND" in
         is_worktree
         ;;
     stack)
-        show_worktree_stack
+        # Check if there's a subcommand
+        if [ "$STACK_SUBCOMMAND" = "parent" ]; then
+            if [ -z "$STACK_PARENT_BRANCH" ]; then
+                echo "Error: Parent branch name is required" >&2
+                echo "Usage: wt stack parent <parent-branch>" >&2
+                exit 1
+            fi
+            set_stack_parent "$STACK_PARENT_BRANCH"
+        else
+            show_worktree_stack
+        fi
         ;;
     sync)
         sync_worktree_stack "$BRANCH"
