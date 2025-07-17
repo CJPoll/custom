@@ -152,6 +152,22 @@ function edit()
   fi
 }
 
+# Worktree switch function - handles cd outside tmux
+wts() {
+  # Wrapper for 'wt switch' that handles cd outside tmux
+  if [ -n "$TMUX" ]; then
+    # In tmux, just call wt switch normally
+    wt switch "$@"
+  else
+    # Outside tmux, use wt switch in quiet mode to get the path and cd to it
+    local target_path
+    target_path=$(wt switch --quiet "$@")
+    if [ $? -eq 0 ] && [ -n "$target_path" ]; then
+      cd "$target_path"
+    fi
+  fi
+}
+
 
 #[[ -n "${key[Up]}"  ]] && bindkey "${key[Up]}" up-line-or-beginning-search
 #[[ -n "${key[Down]}"  ]] && bindkey "${key[Down]}" down-line-or-beginning-search
@@ -173,4 +189,4 @@ unalias gc;
 
 . "$HOME/.local/bin/env"
 
-[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
+source <(fzf --zsh)

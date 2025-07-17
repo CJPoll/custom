@@ -44,6 +44,7 @@ Commands:
                     (symlinks .claude/ directory from main project if present)
   rm <branch>       Remove the worktree for the specified branch
   switch <branch>   Change to the worktree for the specified branch
+                    (In tmux: switches/creates session. Outside tmux: shows cd command)
   merge <branch>    Merge a worktree branch (must be run from parent repo)
   is-worktree       Check if a directory is a git worktree
                     Exit codes: 0=worktree, 1=project root, 2=neither
@@ -347,21 +348,36 @@ switch_worktree() {
         local session_name="${project_name}-wt-${safe_branch}"
     fi
     
-    # Call proj directly, with optional --pr-review flag
-    if [ "$PR_REVIEW" = true ]; then
-        # For stack-aware PR review, detect the actual parent branch
-        local review_base_branch="$PARENT_BRANCH"
-        if [ "$PARENT_BRANCH" = "main" ] || [ "$PARENT_BRANCH" = "master" ]; then
-            # If using default, try to detect the actual parent from git config
-            local detected_parent=$(get_branch_parent "$branch")
-            if [ -n "$detected_parent" ]; then
-                review_base_branch="$detected_parent"
-                log "Using detected parent branch for PR review: $review_base_branch"
+    # Check if we're in a tmux session
+    if [ -n "${TMUX:-}" ]; then
+        # We're in tmux, use proj to switch/create sessions
+        # Call proj directly, with optional --pr-review flag
+        if [ "$PR_REVIEW" = true ]; then
+            # For stack-aware PR review, detect the actual parent branch
+            local review_base_branch="$PARENT_BRANCH"
+            if [ "$PARENT_BRANCH" = "main" ] || [ "$PARENT_BRANCH" = "master" ]; then
+                # If using default, try to detect the actual parent from git config
+                local detected_parent=$(get_branch_parent "$branch")
+                if [ -n "$detected_parent" ]; then
+                    review_base_branch="$detected_parent"
+                    log "Using detected parent branch for PR review: $review_base_branch"
+                fi
             fi
+            proj "$session_name" --path "$worktree_path" --pr-review --base-branch "$review_base_branch"
+        else
+            proj "$session_name" --path "$worktree_path"
         fi
-        proj "$session_name" --path "$worktree_path" --pr-review --base-branch "$review_base_branch"
     else
-        proj "$session_name" --path "$worktree_path"
+        # Not in tmux, output the cd command for the user to execute
+        # Since we can't change the parent shell's directory from a script
+        if [ "$QUIET" = true ]; then
+            # In quiet mode, just output the path
+            echo "$worktree_path"
+        else
+            log "Not in tmux session. To switch to the worktree, run:"
+            log ""
+            echo "cd $worktree_path"
+        fi
     fi
 }
 
