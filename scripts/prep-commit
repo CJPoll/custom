@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# Create log file with timestamp
+LOG_FILE="prep-commit-$(date +%Y%m%d-%H%M%S).log"
+
+# Signal handling for clean exit
+trap 'echo "Interrupted" | tee -a "$LOG_FILE"; exit 130' INT
+
+# Check dependencies
+if ! command -v claude &> /dev/null; then
+  echo "Error: claude command not found" | tee -a "$LOG_FILE" >&2
+  exit 1
+fi
+
+echo "Starting pre-commit checks..." | tee -a "$LOG_FILE"
+echo "Logging to: $LOG_FILE" | tee -a "$LOG_FILE"
+
+# Start PLT generation in background to speed up later dialyzer run
+echo "Pre-building dialyzer PLT cache..." | tee -a "$LOG_FILE"
+mix dialyzer --plt &>/dev/null &
+PLT_PID=$!
+
+COMPLETE="false"
+until [[ "${COMPLETE}" == "true" ]]; do
+  COMPLETE="true"
+
+  echo "Formatting code..." | tee -a "$LOG_FILE"
+  if mix format 2>&1 | tee -a "$LOG_FILE"; then
+    echo "✓ Code formatted" | tee -a "$LOG_FILE"
+  fi
+
+  echo "Running credo..." | tee -a "$LOG_FILE"
+  if ! mix credo --strict 2>&1 | tee -a "$LOG_FILE"; then
+    echo "✗ Credo failed, requesting fixes..." | tee -a "$LOG_FILE"
+    if ! claude -p --dangerously-skip-permissions "/fix:credo" 2>&1 | tee -a "$LOG_FILE"; then
+      echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
+      exit 1
+    fi
+    COMPLETE="false"
+    continue
+  fi
+  echo "✓ Credo passed" | tee -a "$LOG_FILE"
+
+  echo "Running tests..." | tee -a "$LOG_FILE"
+  if ! mix test 2>&1 | tee -a "$LOG_FILE"; then
+    echo "✗ Tests failed, requesting fixes..." | tee -a "$LOG_FILE"
+    if ! claude -p --dangerously-skip-permissions "/fix:tests" 2>&1 | tee -a "$LOG_FILE"; then
+      echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
+      exit 1
+    fi
+    COMPLETE="false"
+    continue
+  fi
+  echo "✓ Tests passed" | tee -a "$LOG_FILE"
+
+  echo "Running dialyzer..." | tee -a "$LOG_FILE"
+  # Wait for PLT generation to complete if still running
+  if kill -0 "$PLT_PID" 2>/dev/null; then
+    echo "Waiting for PLT cache to finish..." | tee -a "$LOG_FILE"
+    wait "$PLT_PID"
+  fi
+  if ! mix dialyzer 2>&1 | tee -a "$LOG_FILE"; then
+    echo "✗ Dialyzer failed, requesting fixes..." | tee -a "$LOG_FILE"
+    if ! claude -p --dangerously-skip-permissions "/fix:dialyzer" 2>&1 | tee -a "$LOG_FILE"; then
+      echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
+      exit 1
+    fi
+    COMPLETE="false"
+    continue
+  fi
+  echo "✓ Dialyzer passed" | tee -a "$LOG_FILE"
+done
+
+echo "🎉 All checks passed!" | tee -a "$LOG_FILE"

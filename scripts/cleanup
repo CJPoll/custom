@@ -1,0 +1,83 @@
+#! /usr/bin/env bash
+
+set -euo pipefail
+
+LOG_DIR="ai-artifacts/vibe-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$LOG_DIR"
+
+# Function to run a command with logging and status
+run_command() {
+    local description="$1"
+    local command="$2"
+    local log_file="$3"
+    
+    echo -n "Running: $description... "
+    
+    if source "$command" &>"$log_file"; then
+        echo "✓"
+        return 0
+    else
+        echo "✗"
+        echo "  See log: $log_file" >&2
+        return 1
+    fi
+}
+
+# Function to display error and exit
+error_exit() {
+    echo "Error: $1" >&2
+    exit 1
+}
+
+# Get the directory of this script to find related scripts
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Run single-responsibility script
+if [[ -x "$SCRIPT_DIR/single-responsibility" ]]; then
+    log_file="$LOG_DIR/single-responsibility.log"
+    if ! run_command "single-responsibility --dir lib" "$SCRIPT_DIR/single-responsibility" "$log_file"; then
+        error_exit "single-responsibility script failed"
+    fi
+else
+    error_exit "single-responsibility script not found or not executable at: $SCRIPT_DIR/single-responsibility"
+fi
+
+# Run function-names script
+if [[ -x "$SCRIPT_DIR/function-names" ]]; then
+    log_file="$LOG_DIR/function-names.log"
+    if ! run_command "function-names --dir lib" "$SCRIPT_DIR/function-names --dir lib" "$log_file"; then
+        error_exit "function-names script failed"
+    fi
+else
+    error_exit "function-names script not found or not executable at: $SCRIPT_DIR/function-names"
+fi
+
+# Run split-module script
+if [[ -x "$SCRIPT_DIR/split-module" ]]; then
+    log_file="$LOG_DIR/split-module.log"
+    if ! run_command "split-module --dir lib" "$SCRIPT_DIR/split-module --dir lib" "$log_file"; then
+        error_exit "split-module script failed"
+    fi
+else
+    error_exit "split-module script not found or not executable at: $SCRIPT_DIR/split-module"
+fi
+
+# Run module-structure script
+if [[ -x "$SCRIPT_DIR/module-structure" ]]; then
+    log_file="$LOG_DIR/module-structure.log"
+    if ! run_command "module-structure --dir lib" "$SCRIPT_DIR/function-names --dir lib" "$log_file"; then
+        error_exit "module-structure script failed"
+    fi
+else
+    error_exit "module-structure script not found or not executable at: $SCRIPT_DIR/function-names"
+fi
+
+# Run prepare-commit script
+if [[ -x "$SCRIPT_DIR/prep-commit" ]]; then
+    log_file="$LOG_DIR/prep-commit.log"
+    if ! run_command "prep-commit" "$SCRIPT_DIR/prep-commit" "$log_file"; then
+        error_exit "prep-commit script failed"
+    fi
+else
+    error_exit "prep-commit script not found or not executable at: $SCRIPT_DIR/prep-commit"
+fi

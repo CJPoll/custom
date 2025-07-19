@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Script name for error messages
+SCRIPT_NAME=$(basename "$0")
+
+# Linear ticket ID
+LINEAR_TICKET=""
+SKIP_IMPL=false
+
+# Function to display usage
+usage() {
+    cat >&2 << EOF
+Usage: $SCRIPT_NAME --linear-ticket <ticket-id> [OPTIONS]
+
+Run a series of Claude prompts and scripts for a Linear ticket.
+
+OPTIONS:
+    --linear-ticket <id>    Linear ticket ID (required)
+    --skip-impl            Skip SWE prompts and commit, go straight to post-implementation scripts
+    -h, --help             Show this help message
+
+EOF
+    exit 1
+}
+
+# Function to display error and exit
+error_exit() {
+    echo "Error: $1" >&2
+    exit 1
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --linear-ticket)
+            if [[ -z "${2:-}" ]]; then
+                error_exit "--linear-ticket requires an argument"
+            fi
+            LINEAR_TICKET="$2"
+            shift 2
+            ;;
+        --skip-impl)
+            SKIP_IMPL=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            error_exit "Unknown option: $1"
+            ;;
+    esac
+done
+
+# Validate required arguments
+if [[ -z "$LINEAR_TICKET" ]]; then
+    error_exit "Missing required argument: --linear-ticket"
+fi
+
+# Create log directory with timestamp
+LOG_DIR="ai-artifacts/vibe-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$LOG_DIR"
+
+echo "Starting vibe process for Linear ticket: $LINEAR_TICKET"
+echo "Logs will be saved to: $LOG_DIR/"
+echo
+
+# Define Claude prompts
+CLAUDE_PROMPTS=(
+    "/swe:01-context Linear: ${LINEAR_TICKET}"
+    "/swe:02-plan"
+    "/swe:03-detailed-plan"
+    "/swe:04-implement.md"
+)
+
+# Function to run a command with logging and status
+run_command() {
+    local description="$1"
+    local command="$2"
+    local log_file="$3"
+    
+    echo -n "Running: $description... "
+    
+    if eval "$command" &>"$log_file"; then
+        echo "✓"
+        return 0
+    else
+        echo "✗"
+        echo "  See log: $log_file" >&2
+        return 1
+    fi
+}
+
+# Set Linear ticket in environment for Claude context
+export LINEAR_TICKET
+
+if [[ "$SKIP_IMPL" == "false" ]]; then
+    # Execute Claude prompts in sequence
+    echo "Executing Claude prompts:"
+    for i in "${!CLAUDE_PROMPTS[@]}"; do
+        prompt="${CLAUDE_PROMPTS[$i]}"
+        step=$((i + 1))
+        log_file="$LOG_DIR/step-${step}-$(echo "$prompt" | tr '/:' '-').log"
+        
+        if ! run_command "Step $step: $prompt" "claude -p --verbose --output-format stream-json --dangerously-skip-permissions '$prompt'" "$log_file"; then
+            error_exit "Failed at prompt: $prompt"
+        fi
+    done
+
+    # Committing the implementation
+    gc -ay
+else
+    echo "Skipping implementation prompts and commit (--skip-impl flag used)"
+fi
+
+echo
+echo "Running post-implementation scripts:"
+
+# Get the directory of this script to find related scripts
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Run single-responsibility script
+if [[ -x "$SCRIPT_DIR/single-responsibility" ]]; then
+    log_file="$LOG_DIR/single-responsibility.log"
+    if ! run_command "single-responsibility --dir lib --parent main" "$SCRIPT_DIR/single-responsibility --dir lib --parent main" "$log_file"; then
+        error_exit "single-responsibility script failed"
+    fi
+else
+    error_exit "single-responsibility script not found or not executable at: $SCRIPT_DIR/single-responsibility"
+fi
+
+# Run function-names script
+if [[ -x "$SCRIPT_DIR/function-names" ]]; then
+    log_file="$LOG_DIR/function-names.log"
+    if ! run_command "function-names --dir lib --parent main" "$SCRIPT_DIR/function-names --dir lib --parent main" "$log_file"; then
+        error_exit "function-names script failed"
+    fi
+else
+    error_exit "function-names script not found or not executable at: $SCRIPT_DIR/function-names"
+fi
+
+# Run split-module script
+if [[ -x "$SCRIPT_DIR/split-module" ]]; then
+    log_file="$LOG_DIR/split-module.log"
+    if ! run_command "split-module --dir lib --parent main" "$SCRIPT_DIR/split-module --dir lib --parent main" "$log_file"; then
+        error_exit "split-module script failed"
+    fi
+else
+    error_exit "split-module script not found or not executable at: $SCRIPT_DIR/split-module"
+fi
+
+# Run module-structure script
+if [[ -x "$SCRIPT_DIR/module-structure" ]]; then
+    log_file="$LOG_DIR/module-structure.log"
+    if ! run_command "module-structure --dir lib --parent main" "$SCRIPT_DIR/function-names --dir lib --parent main" "$log_file"; then
+        error_exit "module-structure script failed"
+    fi
+else
+    error_exit "module-structure script not found or not executable at: $SCRIPT_DIR/function-names"
+fi
+
+# Run prepare-commit script
+if [[ -x "$SCRIPT_DIR/prep-commit" ]]; then
+    log_file="$LOG_DIR/prep-commit.log"
+    if ! run_command "prep-commit" "$SCRIPT_DIR/prep-commit" "$log_file"; then
+        error_exit "prep-commit script failed"
+    fi
+else
+    error_exit "prep-commit script not found or not executable at: $SCRIPT_DIR/prep-commit"
+fi
+
+echo
+echo "🎉 Vibe process completed successfully!"
+echo "All logs saved to: $LOG_DIR/"
