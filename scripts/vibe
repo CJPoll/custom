@@ -103,8 +103,33 @@ if [[ "$SKIP_IMPL" == "false" ]]; then
         step=$((i + 1))
         log_file="$LOG_DIR/step-${step}-$(echo "$prompt" | tr '/:' '-').log"
         
-        if ! run_command "Step $step: $prompt" "claude -p --verbose --output-format stream-json --dangerously-skip-permissions '$prompt'" "$log_file"; then
-            error_exit "Failed at prompt: $prompt"
+        # Check if we should skip this prompt based on existing output files
+        skip_prompt=false
+        case "$prompt" in
+            *"/swe:01-context"*)
+                if [[ -f "ai-artifacts/context.md" ]]; then
+                    echo "Step $step: $prompt... ✓ (skipped - output file exists)"
+                    skip_prompt=true
+                fi
+                ;;
+            *"/swe:02-plan"*)
+                if [[ -f "ai-artifacts/implementation-plan.md" ]]; then
+                    echo "Step $step: $prompt... ✓ (skipped - output file exists)"
+                    skip_prompt=true
+                fi
+                ;;
+            *"/swe:03-detailed-plan"*)
+                if [[ -d "ai-artifacts/files/" ]]; then
+                    echo "Step $step: $prompt... ✓ (skipped - output directory exists)"
+                    skip_prompt=true
+                fi
+                ;;
+        esac
+        
+        if [[ "$skip_prompt" == "false" ]]; then
+            if ! run_command "Step $step: $prompt" "claude -p --verbose --output-format stream-json --dangerously-skip-permissions '$prompt'" "$log_file"; then
+                error_exit "Failed at prompt: $prompt"
+            fi
         fi
     done
 
@@ -153,11 +178,11 @@ fi
 # Run module-structure script
 if [[ -x "$SCRIPT_DIR/module-structure" ]]; then
     log_file="$LOG_DIR/module-structure.log"
-    if ! run_command "module-structure --dir lib --parent main" "$SCRIPT_DIR/function-names --dir lib --parent main" "$log_file"; then
+    if ! run_command "module-structure --dir lib --parent main" "$SCRIPT_DIR/module-structure --dir lib --parent main" "$log_file"; then
         error_exit "module-structure script failed"
     fi
 else
-    error_exit "module-structure script not found or not executable at: $SCRIPT_DIR/function-names"
+    error_exit "module-structure script not found or not executable at: $SCRIPT_DIR/module-structure"
 fi
 
 # Run prepare-commit script
