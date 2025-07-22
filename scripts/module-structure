@@ -4,6 +4,7 @@ set -euo pipefail
 # Default values
 PARENT_BRANCH="main"
 FILTER_DIR=""
+SPECIFIC_FILE=""
 
 # Function to display usage
 usage() {
@@ -15,6 +16,7 @@ Refactor module structure for modified files in a git repository.
 OPTIONS:
     --parent <branch>    Parent branch to compare against (default: main)
     --dir <directory>    Filter files to only those under specified directory
+    --file <filename>    Process only the specified file instead of modified files
     -h, --help          Show this help message
 
 EOF
@@ -59,6 +61,14 @@ while [[ $# -gt 0 ]]; do
             FILTER_DIR="$2"
             shift 2
             ;;
+        --file)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --file requires an argument" >&2
+                exit 1
+            fi
+            SPECIFIC_FILE="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             ;;
@@ -79,28 +89,38 @@ if ! git rev-parse --verify "$PARENT_BRANCH" &>/dev/null; then
     exit 1
 fi
 
-# Get list of modified files
-mapfile -t modified_files < <(git diff --name-only "$PARENT_BRANCH"...HEAD)
+# Get list of files to process
+if [[ -n "$SPECIFIC_FILE" ]]; then
+    # Process only the specified file
+    if [[ ! -f "$SPECIFIC_FILE" ]]; then
+        echo "Error: File '$SPECIFIC_FILE' does not exist" >&2
+        exit 1
+    fi
+    modified_files=("$SPECIFIC_FILE")
+else
+    # Get list of modified files
+    mapfile -t modified_files < <(git diff --name-only "$PARENT_BRANCH"...HEAD)
 
-# Filter files by directory if specified
-if [[ -n "$FILTER_DIR" ]]; then
-    filtered_files=()
-    # Normalize directory path (remove trailing slash)
-    FILTER_DIR="${FILTER_DIR%/}"
-    
-    for file in "${modified_files[@]}"; do
-        # Check if file is under the filter directory
-        if [[ "$file" == "$FILTER_DIR"/* ]] || [[ "$file" == "$FILTER_DIR" ]]; then
-            filtered_files+=("$file")
-        fi
-    done
-    modified_files=("${filtered_files[@]}")
-fi
+    # Filter files by directory if specified
+    if [[ -n "$FILTER_DIR" ]]; then
+        filtered_files=()
+        # Normalize directory path (remove trailing slash)
+        FILTER_DIR="${FILTER_DIR%/}"
+        
+        for file in "${modified_files[@]}"; do
+            # Check if file is under the filter directory
+            if [[ "$file" == "$FILTER_DIR"/* ]] || [[ "$file" == "$FILTER_DIR" ]]; then
+                filtered_files+=("$file")
+            fi
+        done
+        modified_files=("${filtered_files[@]}")
+    fi
 
-# Exit if no files to process
-if [[ ${#modified_files[@]} -eq 0 ]]; then
-    echo "No modified files found" >&2
-    exit 0
+    # Exit if no files to process
+    if [[ ${#modified_files[@]} -eq 0 ]]; then
+        echo "No modified files found" >&2
+        exit 0
+    fi
 fi
 
 # Create persistent log directory under ai-artifacts
@@ -109,10 +129,8 @@ mkdir -p "$LOG_DIR"
 
 # Create log files for each file
 declare -A log_files
-declare -A pids
-declare -A status
 
-# Show log files for monitoring
+# Show log files that will be created
 echo "Log files for monitoring:" >&2
 for file in "${modified_files[@]}"; do
     # Create safe filename for log
@@ -123,75 +141,20 @@ for file in "${modified_files[@]}"; do
 done
 echo >&2
 
-# Function to update progress display
-update_progress() {
-    local completed=0
-    local total=${#modified_files[@]}
-    
-    # Clear previous lines
-    tput cuu $((total + 1)) 2>/dev/null || true
-    
-    echo "Processing $total files:"
-    for file in "${modified_files[@]}"; do
-        case "${status[$file]:-pending}" in
-            completed)
-                echo "  ✓ $file"
-                ((completed++))
-                ;;
-            running)
-                echo "  ⟳ $file"
-                ;;
-            *)
-                echo "  ○ $file"
-                ;;
-        esac
-    done
-}
-
-# Initial progress display
+# Process files sequentially
 echo "Processing ${#modified_files[@]} files:"
 for file in "${modified_files[@]}"; do
-    echo "  ○ $file"
-done
-
-# Start claude processes in parallel
-for file in "${modified_files[@]}"; do
     log_file="${log_files[$file]}"
-    status["$file"]="running"
     
-    # Run claude command in background
-    (
-        claude --print --output-format stream-json --verbose --dangerously-skip-permissions "/refactor:module-structure $file" &>"$log_file"
-    ) &
+    echo -n "  Processing $file... "
     
-    pids["$file"]=$!
-done
-
-# Monitor progress
-while true; do
-    all_done=true
-    
-    for file in "${modified_files[@]}"; do
-        pid="${pids[$file]}"
-        
-        if [[ "${status[$file]}" == "running" ]]; then
-            if ! kill -0 "$pid" 2>/dev/null; then
-                # Process finished
-                wait "$pid"
-                status["$file"]="completed"
-            else
-                all_done=false
-            fi
-        fi
-    done
-    
-    update_progress
-    
-    if [[ "$all_done" == "true" ]]; then
-        break
+    # Run claude command
+    if claude --print --output-format stream-json --verbose --dangerously-skip-permissions "/refactor:module-structure $file" &>"$log_file"; then
+        echo "✓"
+    else
+        echo "✗"
+        echo "    See log: $log_file" >&2
     fi
-    
-    sleep 0.5
 done
 
 # Script completes silently as requested

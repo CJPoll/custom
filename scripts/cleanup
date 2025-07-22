@@ -1,8 +1,46 @@
-#! /usr/bin/env bash
-
+#!/usr/bin/env bash
 set -euo pipefail
 
-LOG_DIR="ai-artifacts/vibe-$(date +%Y%m%d-%H%M%S)"
+# Default values
+SPECIFIC_FILE=""
+
+# Function to display usage
+usage() {
+    cat >&2 << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Run cleanup refactoring scripts on files.
+
+OPTIONS:
+    --file <filename>    Process only the specified file instead of modified files
+    -h, --help          Show this help message
+
+EOF
+    exit 1
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --file)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --file requires an argument" >&2
+                exit 1
+            fi
+            SPECIFIC_FILE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Error: Unknown option: $1" >&2
+            usage
+            ;;
+    esac
+done
+
+LOG_DIR="ai-artifacts/cleanup-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG_DIR"
 
 # Function to run a command with logging and status
@@ -13,7 +51,7 @@ run_command() {
     
     echo -n "Running: $description... "
     
-    if source "$command" &>"$log_file"; then
+    if eval "$command" &>"$log_file"; then
         echo "✓"
         return 0
     else
@@ -32,11 +70,23 @@ error_exit() {
 # Get the directory of this script to find related scripts
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Build file argument if specified
+FILE_ARG=""
+if [[ -n "$SPECIFIC_FILE" ]]; then
+    FILE_ARG="--file $SPECIFIC_FILE"
+fi
+
 # Run single-responsibility script
 if [[ -x "$SCRIPT_DIR/single-responsibility" ]]; then
     log_file="$LOG_DIR/single-responsibility.log"
-    if ! run_command "single-responsibility --dir lib" "$SCRIPT_DIR/single-responsibility" "$log_file"; then
-        error_exit "single-responsibility script failed"
+    if [[ -n "$SPECIFIC_FILE" ]]; then
+        if ! run_command "single-responsibility $FILE_ARG" "$SCRIPT_DIR/single-responsibility $FILE_ARG" "$log_file"; then
+            error_exit "single-responsibility script failed"
+        fi
+    else
+        if ! run_command "single-responsibility --dir lib" "$SCRIPT_DIR/single-responsibility --dir lib" "$log_file"; then
+            error_exit "single-responsibility script failed"
+        fi
     fi
 else
     error_exit "single-responsibility script not found or not executable at: $SCRIPT_DIR/single-responsibility"
@@ -45,8 +95,14 @@ fi
 # Run function-names script
 if [[ -x "$SCRIPT_DIR/function-names" ]]; then
     log_file="$LOG_DIR/function-names.log"
-    if ! run_command "function-names --dir lib" "$SCRIPT_DIR/function-names --dir lib" "$log_file"; then
-        error_exit "function-names script failed"
+    if [[ -n "$SPECIFIC_FILE" ]]; then
+        if ! run_command "function-names $FILE_ARG" "$SCRIPT_DIR/function-names $FILE_ARG" "$log_file"; then
+            error_exit "function-names script failed"
+        fi
+    else
+        if ! run_command "function-names --dir lib" "$SCRIPT_DIR/function-names --dir lib" "$log_file"; then
+            error_exit "function-names script failed"
+        fi
     fi
 else
     error_exit "function-names script not found or not executable at: $SCRIPT_DIR/function-names"
@@ -55,8 +111,14 @@ fi
 # Run split-module script
 if [[ -x "$SCRIPT_DIR/split-module" ]]; then
     log_file="$LOG_DIR/split-module.log"
-    if ! run_command "split-module --dir lib" "$SCRIPT_DIR/split-module --dir lib" "$log_file"; then
-        error_exit "split-module script failed"
+    if [[ -n "$SPECIFIC_FILE" ]]; then
+        if ! run_command "split-module $FILE_ARG" "$SCRIPT_DIR/split-module $FILE_ARG" "$log_file"; then
+            error_exit "split-module script failed"
+        fi
+    else
+        if ! run_command "split-module --dir lib" "$SCRIPT_DIR/split-module --dir lib" "$log_file"; then
+            error_exit "split-module script failed"
+        fi
     fi
 else
     error_exit "split-module script not found or not executable at: $SCRIPT_DIR/split-module"
@@ -65,11 +127,17 @@ fi
 # Run module-structure script
 if [[ -x "$SCRIPT_DIR/module-structure" ]]; then
     log_file="$LOG_DIR/module-structure.log"
-    if ! run_command "module-structure --dir lib" "$SCRIPT_DIR/function-names --dir lib" "$log_file"; then
-        error_exit "module-structure script failed"
+    if [[ -n "$SPECIFIC_FILE" ]]; then
+        if ! run_command "module-structure $FILE_ARG" "$SCRIPT_DIR/module-structure $FILE_ARG" "$log_file"; then
+            error_exit "module-structure script failed"
+        fi
+    else
+        if ! run_command "module-structure --dir lib" "$SCRIPT_DIR/module-structure --dir lib" "$log_file"; then
+            error_exit "module-structure script failed"
+        fi
     fi
 else
-    error_exit "module-structure script not found or not executable at: $SCRIPT_DIR/function-names"
+    error_exit "module-structure script not found or not executable at: $SCRIPT_DIR/module-structure"
 fi
 
 # Run prepare-commit script

@@ -30,3 +30,4 @@ requirements.md
 priv/plts
 ai-artifacts
 *Zone.Identifier
+*.log
