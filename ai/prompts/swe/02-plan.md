@@ -28,9 +28,22 @@
       </violation_response>
     </critical_constraint>
     <input_specification>
-      <required_file>ai-artifacts/context.md</required_file>
-      <file_format>Markdown with structured ticket requirements, acceptance criteria, and technical constraints</file_format>
-      <validation_criteria>File must exist, be readable, and contain parseable ticket context</validation_criteria>
+      <primary_input>
+        <required_file>ai-artifacts/context.md</required_file>
+        <file_format>Markdown with structured ticket requirements, acceptance criteria, and technical constraints</file_format>
+        <validation_criteria>File must exist, be readable, and contain parseable ticket context including Linear ticket ID</validation_criteria>
+      </primary_input>
+      <secondary_input>
+        <description>Linear ticket data retrieved using ticket ID from context.md</description>
+        <source>Linear API via get_issue tool</source>
+        <required_fields>
+          <field>Title and description from Linear ticket</field>
+          <field>Current status and assignee</field>
+          <field>Comments and attachments if present</field>
+          <field>Labels and priority</field>
+          <field>Related issues and sub-issues</field>
+        </required_fields>
+      </secondary_input>
     </input_specification>
     <output_specification>
       <target_file>ai-artifacts/implementation-plan.md</target_file>
@@ -54,17 +67,29 @@
           <validation_command>Read-only parse: Extract context.md sections: ticket_id, requirements, acceptance_criteria, technical_constraints</validation_command>
           <error_handling>If incomplete, document missing sections and request completion (user responsibility)</error_handling>
         </prerequisite>
+        <prerequisite type="linear_ticket_retrieval">
+          <validation_command>Extract Linear ticket ID from context.md metadata section</validation_command>
+          <api_call>Use Linear:get_issue with extracted ticket ID to retrieve full ticket details</api_call>
+          <error_handling>If ticket retrieval fails, document error but continue with context.md data</error_handling>
+        </prerequisite>
       </prerequisites>
       <extraction_tasks>
+        <task>Extract Linear ticket ID from context.md metadata section</task>
+        <task>Retrieve full Linear ticket details including comments, attachments, and related issues</task>
+        <task>Merge requirements from both context.md and Linear ticket description</task>
         <task>Extract functional requirements with unique identifiers (REQ-001, REQ-002, etc.)</task>
         <task>Extract acceptance criteria with testable conditions (AC-001, AC-002, etc.)</task>
         <task>Extract technical constraints (performance, security, compatibility)</task>
         <task>Identify existing codebase context and affected systems</task>
+        <task>Analyze Linear ticket comments for additional requirements or clarifications</task>
+        <task>Review related Linear issues for dependency constraints</task>
       </extraction_tasks>
       <output_validation>
+        <criterion>Linear ticket ID successfully extracted and ticket retrieved</criterion>
         <criterion>All requirements have unique identifiers and clear descriptions</criterion>
         <criterion>All acceptance criteria are testable and measurable</criterion>
         <criterion>Technical constraints specify quantifiable limits</criterion>
+        <criterion>Requirements from both sources are reconciled and merged</criterion>
       </output_validation>
     </phase>
 
@@ -237,6 +262,7 @@
           <plan_structure>
             <section id="executive_summary">
               <content>High-level approach overview, timeline estimate, resource requirements</content>
+              <linear_reference>Linear ticket ID and title for traceability</linear_reference>
             </section>
             <section id="dependency_visualization">
               <content>ASCII art or Mermaid diagram of dependency graph with critical path highlighted</content>
@@ -291,6 +317,16 @@
         <detection>ai-artifacts/context.md does not exist or is not readable</detection>
         <response>Halt execution immediately, document expected file format and location</response>
         <recovery>Provide template context.md structure for user completion</recovery>
+      </error>
+      <error type="missing_linear_ticket_id">
+        <detection>Linear ticket ID not found in context.md metadata section</detection>
+        <response>Document missing ticket ID but continue with available context data</response>
+        <recovery>Suggest updating context.md to include Linear ticket ID in metadata</recovery>
+      </error>
+      <error type="linear_api_failure">
+        <detection>Linear API returns error when retrieving ticket details</detection>
+        <response>Log API error and continue with context.md data only</response>
+        <recovery>Document that plan is based on context.md without latest Linear updates</recovery>
       </error>
       <error type="circular_dependencies">
         <detection>Dependency graph contains cycles</detection>

@@ -240,13 +240,36 @@
             <create_directory>ai-artifacts/ (if not exists)</create_directory>
             <write_file>
               <path>ai-artifacts/context.md</path>
-              <content>Validated code analysis summary</content>
-              <format>Markdown with proper formatting</format>
+              <content>
+                <section name="metadata">
+                  <field>Linear Ticket ID: $ARGUMENTS</field>
+                  <field>Generated: {timestamp}</field>
+                </section>
+                <section name="ticket_details">
+                  <field>Title: {ticket.title}</field>
+                  <field>Description: {ticket.description}</field>
+                  <field>Status: In Progress</field>
+                  <field>Assignee: {current_user}</field>
+                </section>
+                <section name="requirements">
+                  <field>Extracted requirements from ticket</field>
+                </section>
+                <section name="acceptance_criteria">
+                  <field>Extracted acceptance criteria from ticket</field>
+                </section>
+                <section name="technical_constraints">
+                  <field>Extracted technical constraints from ticket</field>
+                </section>
+                <section name="code_analysis">
+                  <field>Validated code analysis summary following reference format</field>
+                </section>
+              </content>
+              <format>Structured markdown with sections for ticket metadata, requirements, and code analysis</format>
             </write_file>
           </file_operations>
           <validation>
             <item>File successfully created at specified path</item>
-            <item>Content matches validated analysis summary</item>
+            <item>Content includes Linear ticket ID and all required sections</item>
             <item>File is readable and properly formatted</item>
           </validation>
         </step>
