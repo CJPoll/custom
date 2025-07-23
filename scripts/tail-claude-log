@@ -1,0 +1,5 @@
+#! /usr/bin/env bash
+
+file="${1}"
+
+tail -f -n 200 "${file}" | jq -r '.message.content[]? | objects | .text // .content // empty'

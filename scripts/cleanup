@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Default values
 SPECIFIC_FILE=""
+PARENT_BRANCH="main"
 
 # Function to display usage
 usage() {
@@ -13,6 +14,7 @@ Run cleanup refactoring scripts on files.
 
 OPTIONS:
     --file <filename>    Process only the specified file instead of modified files
+    --parent <branch>    Parent branch to compare against (default: main)
     -h, --help          Show this help message
 
 EOF
@@ -28,6 +30,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             SPECIFIC_FILE="$2"
+            shift 2
+            ;;
+        --parent)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --parent requires an argument" >&2
+                exit 1
+            fi
+            PARENT_BRANCH="$2"
             shift 2
             ;;
         -h|--help)
@@ -80,11 +90,11 @@ fi
 if [[ -x "$SCRIPT_DIR/single-responsibility" ]]; then
     log_file="$LOG_DIR/single-responsibility.log"
     if [[ -n "$SPECIFIC_FILE" ]]; then
-        if ! run_command "single-responsibility $FILE_ARG" "$SCRIPT_DIR/single-responsibility $FILE_ARG" "$log_file"; then
+        if ! run_command "single-responsibility $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/single-responsibility $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
             error_exit "single-responsibility script failed"
         fi
     else
-        if ! run_command "single-responsibility --dir lib" "$SCRIPT_DIR/single-responsibility --dir lib" "$log_file"; then
+        if ! run_command "single-responsibility --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/single-responsibility --dir lib --parent $PARENT_BRANCH" "$log_file"; then
             error_exit "single-responsibility script failed"
         fi
     fi
@@ -96,11 +106,11 @@ fi
 if [[ -x "$SCRIPT_DIR/function-names" ]]; then
     log_file="$LOG_DIR/function-names.log"
     if [[ -n "$SPECIFIC_FILE" ]]; then
-        if ! run_command "function-names $FILE_ARG" "$SCRIPT_DIR/function-names $FILE_ARG" "$log_file"; then
+        if ! run_command "function-names $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/function-names $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
             error_exit "function-names script failed"
         fi
     else
-        if ! run_command "function-names --dir lib" "$SCRIPT_DIR/function-names --dir lib" "$log_file"; then
+        if ! run_command "function-names --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/function-names --dir lib --parent $PARENT_BRANCH" "$log_file"; then
             error_exit "function-names script failed"
         fi
     fi
@@ -112,11 +122,11 @@ fi
 if [[ -x "$SCRIPT_DIR/split-module" ]]; then
     log_file="$LOG_DIR/split-module.log"
     if [[ -n "$SPECIFIC_FILE" ]]; then
-        if ! run_command "split-module $FILE_ARG" "$SCRIPT_DIR/split-module $FILE_ARG" "$log_file"; then
+        if ! run_command "split-module $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/split-module $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
             error_exit "split-module script failed"
         fi
     else
-        if ! run_command "split-module --dir lib" "$SCRIPT_DIR/split-module --dir lib" "$log_file"; then
+        if ! run_command "split-module --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/split-module --dir lib --parent $PARENT_BRANCH" "$log_file"; then
             error_exit "split-module script failed"
         fi
     fi
@@ -128,11 +138,11 @@ fi
 if [[ -x "$SCRIPT_DIR/module-structure" ]]; then
     log_file="$LOG_DIR/module-structure.log"
     if [[ -n "$SPECIFIC_FILE" ]]; then
-        if ! run_command "module-structure $FILE_ARG" "$SCRIPT_DIR/module-structure $FILE_ARG" "$log_file"; then
+        if ! run_command "module-structure $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/module-structure $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
             error_exit "module-structure script failed"
         fi
     else
-        if ! run_command "module-structure --dir lib" "$SCRIPT_DIR/module-structure --dir lib" "$log_file"; then
+        if ! run_command "module-structure --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/module-structure --dir lib --parent $PARENT_BRANCH" "$log_file"; then
             error_exit "module-structure script failed"
         fi
     fi
