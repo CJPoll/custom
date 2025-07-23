@@ -145,10 +145,21 @@ echo "Running post-implementation scripts:"
 # Get the directory of this script to find related scripts
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Determine if this is an umbrella app or regular app
+if [[ -d "apps" ]]; then
+    CODE_DIR="apps"
+elif [[ -d "lib" ]]; then
+    CODE_DIR="lib"
+else
+    error_exit "Neither 'apps' nor 'lib' directory found in current directory"
+fi
+
+echo "Detected code directory: $CODE_DIR"
+
 # Run single-responsibility script
 if [[ -x "$SCRIPT_DIR/single-responsibility" ]]; then
     log_file="$LOG_DIR/single-responsibility.log"
-    if ! run_command "single-responsibility --dir lib --parent main" "$SCRIPT_DIR/single-responsibility --dir lib --parent main" "$log_file"; then
+    if ! run_command "single-responsibility --dir $CODE_DIR --parent main" "$SCRIPT_DIR/single-responsibility --dir $CODE_DIR --parent main" "$log_file"; then
         error_exit "single-responsibility script failed"
     fi
 else
@@ -158,7 +169,7 @@ fi
 # Run function-names script
 if [[ -x "$SCRIPT_DIR/function-names" ]]; then
     log_file="$LOG_DIR/function-names.log"
-    if ! run_command "function-names --dir lib --parent main" "$SCRIPT_DIR/function-names --dir lib --parent main" "$log_file"; then
+    if ! run_command "function-names --dir $CODE_DIR --parent main" "$SCRIPT_DIR/function-names --dir $CODE_DIR --parent main" "$log_file"; then
         error_exit "function-names script failed"
     fi
 else
@@ -168,7 +179,7 @@ fi
 # Run split-module script
 if [[ -x "$SCRIPT_DIR/split-module" ]]; then
     log_file="$LOG_DIR/split-module.log"
-    if ! run_command "split-module --dir lib --parent main" "$SCRIPT_DIR/split-module --dir lib --parent main" "$log_file"; then
+    if ! run_command "split-module --dir $CODE_DIR --parent main" "$SCRIPT_DIR/split-module --dir $CODE_DIR --parent main" "$log_file"; then
         error_exit "split-module script failed"
     fi
 else
@@ -178,7 +189,7 @@ fi
 # Run module-structure script
 if [[ -x "$SCRIPT_DIR/module-structure" ]]; then
     log_file="$LOG_DIR/module-structure.log"
-    if ! run_command "module-structure --dir lib --parent main" "$SCRIPT_DIR/module-structure --dir lib --parent main" "$log_file"; then
+    if ! run_command "module-structure --dir $CODE_DIR --parent main" "$SCRIPT_DIR/module-structure --dir $CODE_DIR --parent main" "$log_file"; then
         error_exit "module-structure script failed"
     fi
 else
