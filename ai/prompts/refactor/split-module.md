@@ -16,7 +16,7 @@
       <item>Each module has 1-3 clearly defined responsibilities (Single Responsibility Principle)</item>
       <item>No circular dependencies between new modules</item>
       <item>All modules follow Elixir naming conventions (Consistency of Naming)</item>
-      <item>Module size between 100-300 lines of code</item>
+      <item>Module size between 100-400 lines of code</item>
       <item>Clear intent and purpose for each module (Clarity of Intent)</item>
     </success_criteria>
   </task>
@@ -272,13 +272,13 @@
           <command>Analyze @moduledoc for clear purpose statement</command>
           <command>Evaluate function cohesion within each module</command>
           <command>Identify mixed concerns or unrelated functionality</command>
-          <command>Validate module size is within 100-300 line range</command>
+          <command>Validate module size is within 100-400 line range</command>
         </commands>
         <success_criteria>
           <criterion>Each module has 1-3 clearly related responsibilities</criterion>
           <criterion>All functions within module serve the module's stated purpose</criterion>
           <criterion>No mixing of unrelated concerns (data, business logic, side effects properly separated)</criterion>
-          <criterion>Module size within 100-300 lines</criterion>
+          <criterion>Module size within 100-400 lines</criterion>
           <criterion>Clear @moduledoc explaining module purpose</criterion>
         </success_criteria>
         <error_handling>
@@ -290,7 +290,7 @@
           <field>responsibility_status: PASS/FAIL</field>
           <field>modules_analyzed: integer</field>
           <field>responsibility_violations: list of modules with unclear or multiple responsibilities</field>
-          <field>size_violations: list of modules outside 100-300 line range</field>
+          <field>size_violations: list of modules outside 100-400 line range</field>
           <field>documentation_issues: list of modules with missing or unclear @moduledoc</field>
         </output_format>
       </validation_instruction>

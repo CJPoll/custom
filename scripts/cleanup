@@ -4,6 +4,7 @@ set -euo pipefail
 # Default values
 SPECIFIC_FILE=""
 PARENT_BRANCH="main"
+declare -A SKIP_SCRIPTS
 
 # Function to display usage
 usage() {
@@ -15,6 +16,9 @@ Run cleanup refactoring scripts on files.
 OPTIONS:
     --file <filename>    Process only the specified file instead of modified files
     --parent <branch>    Parent branch to compare against (default: main)
+    --skip <script>      Skip the specified script (can be used multiple times)
+                         Valid scripts: single-responsibility, function-names,
+                                       split-module, module-structure
     -h, --help          Show this help message
 
 EOF
@@ -38,6 +42,23 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             PARENT_BRANCH="$2"
+            shift 2
+            ;;
+        --skip)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --skip requires an argument" >&2
+                exit 1
+            fi
+            case "$2" in
+                single-responsibility|function-names|split-module|module-structure)
+                    SKIP_SCRIPTS["$2"]=1
+                    ;;
+                *)
+                    echo "Error: Invalid script name: $2" >&2
+                    echo "Valid scripts: single-responsibility, function-names, split-module, module-structure" >&2
+                    exit 1
+                    ;;
+            esac
             shift 2
             ;;
         -h|--help)
@@ -87,67 +108,83 @@ if [[ -n "$SPECIFIC_FILE" ]]; then
 fi
 
 # Run single-responsibility script
-if [[ -x "$SCRIPT_DIR/single-responsibility" ]]; then
-    log_file="$LOG_DIR/single-responsibility.log"
-    if [[ -n "$SPECIFIC_FILE" ]]; then
-        if ! run_command "single-responsibility $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/single-responsibility $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
-            error_exit "single-responsibility script failed"
+if [[ -z "${SKIP_SCRIPTS[single-responsibility]:-}" ]]; then
+    if [[ -x "$SCRIPT_DIR/single-responsibility" ]]; then
+        log_file="$LOG_DIR/single-responsibility.log"
+        if [[ -n "$SPECIFIC_FILE" ]]; then
+            if ! run_command "single-responsibility $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/single-responsibility $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
+                error_exit "single-responsibility script failed"
+            fi
+        else
+            if ! run_command "single-responsibility --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/single-responsibility --dir lib --parent $PARENT_BRANCH" "$log_file"; then
+                error_exit "single-responsibility script failed"
+            fi
         fi
     else
-        if ! run_command "single-responsibility --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/single-responsibility --dir lib --parent $PARENT_BRANCH" "$log_file"; then
-            error_exit "single-responsibility script failed"
-        fi
+        error_exit "single-responsibility script not found or not executable at: $SCRIPT_DIR/single-responsibility"
     fi
 else
-    error_exit "single-responsibility script not found or not executable at: $SCRIPT_DIR/single-responsibility"
+    echo "Skipping: single-responsibility (--skip flag)"
 fi
 
 # Run function-names script
-if [[ -x "$SCRIPT_DIR/function-names" ]]; then
-    log_file="$LOG_DIR/function-names.log"
-    if [[ -n "$SPECIFIC_FILE" ]]; then
-        if ! run_command "function-names $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/function-names $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
-            error_exit "function-names script failed"
+if [[ -z "${SKIP_SCRIPTS[function-names]:-}" ]]; then
+    if [[ -x "$SCRIPT_DIR/function-names" ]]; then
+        log_file="$LOG_DIR/function-names.log"
+        if [[ -n "$SPECIFIC_FILE" ]]; then
+            if ! run_command "function-names $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/function-names $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
+                error_exit "function-names script failed"
+            fi
+        else
+            if ! run_command "function-names --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/function-names --dir lib --parent $PARENT_BRANCH" "$log_file"; then
+                error_exit "function-names script failed"
+            fi
         fi
     else
-        if ! run_command "function-names --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/function-names --dir lib --parent $PARENT_BRANCH" "$log_file"; then
-            error_exit "function-names script failed"
-        fi
+        error_exit "function-names script not found or not executable at: $SCRIPT_DIR/function-names"
     fi
 else
-    error_exit "function-names script not found or not executable at: $SCRIPT_DIR/function-names"
+    echo "Skipping: function-names (--skip flag)"
 fi
 
 # Run split-module script
-if [[ -x "$SCRIPT_DIR/split-module" ]]; then
-    log_file="$LOG_DIR/split-module.log"
-    if [[ -n "$SPECIFIC_FILE" ]]; then
-        if ! run_command "split-module $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/split-module $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
-            error_exit "split-module script failed"
+if [[ -z "${SKIP_SCRIPTS[split-module]:-}" ]]; then
+    if [[ -x "$SCRIPT_DIR/split-module" ]]; then
+        log_file="$LOG_DIR/split-module.log"
+        if [[ -n "$SPECIFIC_FILE" ]]; then
+            if ! run_command "split-module $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/split-module $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
+                error_exit "split-module script failed"
+            fi
+        else
+            if ! run_command "split-module --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/split-module --dir lib --parent $PARENT_BRANCH" "$log_file"; then
+                error_exit "split-module script failed"
+            fi
         fi
     else
-        if ! run_command "split-module --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/split-module --dir lib --parent $PARENT_BRANCH" "$log_file"; then
-            error_exit "split-module script failed"
-        fi
+        error_exit "split-module script not found or not executable at: $SCRIPT_DIR/split-module"
     fi
 else
-    error_exit "split-module script not found or not executable at: $SCRIPT_DIR/split-module"
+    echo "Skipping: split-module (--skip flag)"
 fi
 
 # Run module-structure script
-if [[ -x "$SCRIPT_DIR/module-structure" ]]; then
-    log_file="$LOG_DIR/module-structure.log"
-    if [[ -n "$SPECIFIC_FILE" ]]; then
-        if ! run_command "module-structure $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/module-structure $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
-            error_exit "module-structure script failed"
+if [[ -z "${SKIP_SCRIPTS[module-structure]:-}" ]]; then
+    if [[ -x "$SCRIPT_DIR/module-structure" ]]; then
+        log_file="$LOG_DIR/module-structure.log"
+        if [[ -n "$SPECIFIC_FILE" ]]; then
+            if ! run_command "module-structure $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/module-structure $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
+                error_exit "module-structure script failed"
+            fi
+        else
+            if ! run_command "module-structure --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/module-structure --dir lib --parent $PARENT_BRANCH" "$log_file"; then
+                error_exit "module-structure script failed"
+            fi
         fi
     else
-        if ! run_command "module-structure --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/module-structure --dir lib --parent $PARENT_BRANCH" "$log_file"; then
-            error_exit "module-structure script failed"
-        fi
+        error_exit "module-structure script not found or not executable at: $SCRIPT_DIR/module-structure"
     fi
 else
-    error_exit "module-structure script not found or not executable at: $SCRIPT_DIR/module-structure"
+    echo "Skipping: module-structure (--skip flag)"
 fi
 
 # Run prepare-commit script

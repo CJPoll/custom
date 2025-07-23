@@ -148,12 +148,12 @@ for file in "${modified_files[@]}"; do
     
     echo -n "  Processing $file... "
     
-    # Check if file has fewer than 300 lines
+    # Check if file has fewer than 400 lines
     if [[ -f "$file" ]]; then
         line_count=$(wc -l < "$file" 2>/dev/null || echo 0)
-        if [[ $line_count -lt 300 ]]; then
-            echo "⊘ (skipped - $line_count lines, <300)"
-            echo "Skipped (file has $line_count lines, less than 300)" > "$log_file"
+        if [[ $line_count -lt 400 ]]; then
+            echo "⊘ (skipped - $line_count lines, <400)"
+            echo "Skipped (file has $line_count lines, less than 400)" > "$log_file"
             continue
         fi
     fi

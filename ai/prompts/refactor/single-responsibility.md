@@ -65,17 +65,17 @@
     </constraint>
 
     <constraint id="3" type="forbidden_bare_arg_case">
-      <description>Case statements cannot operate directly on bare function arguments</description>
+      <description>Case statements cannot operate directly on bare function arguments - ALL such cases are forbidden</description>
       <forbidden_patterns>
-        <pattern>case status do ... end where status is a function parameter</pattern>
-        <pattern>case arg_name do ... end where arg_name is directly from function signature</pattern>
+        <pattern>case arg do ... end where arg is a function parameter</pattern>
+        <pattern>def func(arg) do case arg do ... end - forbidden regardless of patterns</pattern>
       </forbidden_patterns>
-      <allowed_patterns>
-        <pattern>case validate(data) do ... end - case on expression result</pattern>
-        <pattern>case transform(input) do ... end - case on function call</pattern>
-        <pattern>Function head pattern matching: def process(:ok), def process(:error)</pattern>
-      </allowed_patterns>
-      <rationale>When case operates directly on function arguments, function head pattern matching is more idiomatic and clearer.</rationale>
+      <resolution>
+        <step>For :ok/:error tuple cases: trace back to caller and inline at side effect origin</step>
+        <step>For non-:ok/:error cases: convert to function head pattern matching</step>
+        <step>Delete functions that only handled :ok/:error patterns after inlining</step>
+      </resolution>
+      <rationale>Case statements on bare arguments violate idiomatic Elixir. For :ok/:error tuples, this indicates error handling separated from its source. For other patterns, function head pattern matching is clearer and more idiomatic.</rationale>
     </constraint>
   </constraints>
 
@@ -183,24 +183,55 @@
         </rule>
 
         <rule type="bare_arg_case_resolution">
-          <pattern>Convert case on bare arguments to function head pattern matching</pattern>
+          <pattern>Resolution depends on whether the bare argument case involves :ok/:error tuples</pattern>
           <requirements>
-            <requirement>Replace def func(arg) + case arg do with multiple function heads</requirement>
-            <requirement>Create def func(pattern1), def func(pattern2) for each case branch</requirement>
+            <requirement>For :ok/:error tuple cases: trace back to caller and inline at side effect origin</requirement>
+            <requirement>For non-:ok/:error cases: convert to function head pattern matching</requirement>
+            <requirement>Delete intermediate functions that only handled :ok/:error tuples</requirement>
             <requirement>Preserve all case clause logic and guards</requirement>
           </requirements>
           <example>
+            <title>Non-:ok/:error case - Convert to function heads</title>
             <before>
               def process(status) do
                 case status do
-                  :ok -> handle_success()
-                  :error -> handle_failure()
+                  :active -> handle_active()
+                  :inactive -> handle_inactive()
                 end
               end
             </before>
             <after>
-              def process(:ok), do: handle_success()
-              def process(:error), do: handle_failure()
+              def process(:active), do: handle_active()
+              def process(:inactive), do: handle_inactive()
+            </after>
+          </example>
+          <example>
+            <title>:ok/:error case - Inline at call site</title>
+            <before>
+              def handle_result(result) do
+                case result do
+                  {:ok, user} -> send_welcome_email(user)
+                  {:error, changeset} -> log_error(changeset)
+                end
+              end
+
+              def create_user(params) do
+                params
+                |> validate()
+                |> Repo.insert()
+                |> handle_result()
+              end
+            </before>
+            <after>
+              def create_user(params) do
+                validated = validate(params)
+                
+                case Repo.insert(validated) do
+                  {:ok, user} -> send_welcome_email(user)
+                  {:error, changeset} -> log_error(changeset)
+                end
+              end
+              # handle_result function deleted entirely
             </after>
           </example>
         </rule>
