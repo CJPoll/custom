@@ -1,4 +1,10 @@
-I have a file I'd like you to refactor: $ARGUMENTS
+I have files I'd like you to refactor: $ARGUMENTS
+
+**Parallel Processing Directive:**
+When multiple files are provided as arguments:
+- Process each file independently in parallel using separate subagents
+- Each subagent should apply the complete module structure refactoring protocol to its assigned file
+- Consolidate all results into a comprehensive report showing the refactoring status for each file
 
 I value these properties in code:
 1. Clarity of Intent

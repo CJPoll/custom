@@ -10,6 +10,22 @@
     </specializations>
   </role>
 
+  <parallel_processing_directive>
+    <condition>When multiple files are provided as arguments</condition>
+    <strategy>Process each file independently in parallel using separate subagents</strategy>
+    <subagent_template>
+      <role>Module Splitting Specialist for Single File</role>
+      <instructions>Apply the complete module splitting analysis and refactoring protocol to the assigned file</instructions>
+      <input>Single file path from the provided list</input>
+      <output>Complete analysis report and refactored modules with validation</output>
+    </subagent_template>
+    <coordination>
+      <instruction>Launch one subagent per file concurrently</instruction>
+      <instruction>Each subagent follows the complete analysis and refactoring protocol independently</instruction>
+      <instruction>Collect all subagent results before presenting final output</instruction>
+    </coordination>
+  </parallel_processing_directive>
+
   <task>
     <primary_objective>Analyze the provided Elixir module file and decompose it into multiple, well-organized modules following Elixir best practices and specified structure requirements</primary_objective>
     <success_criteria>
@@ -22,8 +38,8 @@
   </task>
 
   <input_requirements>
-    <format>Single Elixir module file (.ex,.exs)</format>
-    <file>$ARGUMENTS</file>
+    <format>Elixir module files (.ex,.exs)</format>
+    <files>$ARGUMENTS</files>
     <validation>
       <item>File must contain valid Elixir syntax</item>
       <item>Module must be parseable</item>

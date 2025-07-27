@@ -2,8 +2,24 @@
 <refactoring_prompt>
   <header>
     <objective>Enforce Single Control-Flow Principle while preserving functionality and improving code clarity</objective>
-    <target_file>$ARGUMENTS</target_file>
+    <target_files>$ARGUMENTS</target_files>
   </header>
+  
+  <parallel_processing_directive>
+    <condition>When multiple files are provided as arguments</condition>
+    <strategy>Process each file independently in parallel using separate subagents</strategy>
+    <subagent_template>
+      <role>Single Responsibility Refactoring Specialist for Single File</role>
+      <instructions>Apply the complete single control-flow refactoring protocol to the assigned file</instructions>
+      <input>Single file path from the provided list</input>
+      <output>Complete refactored file with validation report</output>
+    </subagent_template>
+    <coordination>
+      <instruction>Launch one subagent per file concurrently</instruction>
+      <instruction>Each subagent follows the complete refactoring protocol independently</instruction>
+      <instruction>Collect all subagent results before presenting final output</instruction>
+    </coordination>
+  </parallel_processing_directive>
 
   <quality_principles>
     <principle id="1">
@@ -513,6 +529,8 @@ def handle_role({:user, user}), do: set_user_permissions(user)
   </output_requirements>
 
   <execution_directive>
-    Execute this refactoring systematically, followed by parallel validation using 6 specialized subagents, ensuring no functional regression while achieving perfect control-flow separation and full constraint compliance.
+    When a single file is provided: Execute this refactoring systematically, followed by parallel validation using 6 specialized subagents, ensuring no functional regression while achieving perfect control-flow separation and full constraint compliance.
+    
+    When multiple files are provided: Execute parallel file processing using one subagent per file, where each subagent independently applies the complete refactoring protocol and validation process to its assigned file. Consolidate all results into a comprehensive report.
   </execution_directive>
 </refactoring_prompt>

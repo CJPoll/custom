@@ -2,8 +2,24 @@
 <function_naming_refactor_prompt>
  <header>
    <objective>Enforce function naming conventions that distinguish side-effect functions from pure functions</objective>
-   <target_file>$ARGUMENTS</target_file>
+   <target_files>$ARGUMENTS</target_files>
  </header>
+ 
+ <parallel_processing_directive>
+   <condition>When multiple files are provided as arguments</condition>
+   <strategy>Process each file independently in parallel using separate subagents</strategy>
+   <subagent_template>
+     <role>Function Naming Refactoring Specialist for Single File</role>
+     <instructions>Apply the complete function naming refactoring protocol to the assigned file</instructions>
+     <input>Single file path from the provided list</input>
+     <output>Complete refactored file with validation report</output>
+   </subagent_template>
+   <coordination>
+     <instruction>Launch one subagent per file concurrently</instruction>
+     <instruction>Each subagent follows the complete refactoring protocol independently</instruction>
+     <instruction>Collect all subagent results before presenting final output</instruction>
+   </coordination>
+ </parallel_processing_directive>
 
  <quality_principles>
    <principle id="1">
@@ -374,6 +390,8 @@ end
  </output_requirements>
 
  <execution_directive>
-   Execute this function naming refactoring systematically, followed by parallel validation using 5 specialized subagents, ensuring semantic preservation while achieving perfect naming convention compliance.
+   When a single file is provided: Execute this function naming refactoring systematically, followed by parallel validation using 5 specialized subagents, ensuring semantic preservation while achieving perfect naming convention compliance.
+   
+   When multiple files are provided: Execute parallel file processing using one subagent per file, where each subagent independently applies the complete refactoring protocol and validation process to its assigned file. Consolidate all results into a comprehensive report.
  </execution_directive>
 </function_naming_refactor_prompt>
