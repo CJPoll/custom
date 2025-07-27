@@ -84,6 +84,11 @@
                 <category name="readability">Code clarity and comprehension issues</category>
                 <category name="refactor">Code complexity and maintainability issues</category>
                 <category name="warning">Potential bugs and performance issues</category>
+                <category name="tuple_pattern_conflicts">
+                  <description>Conflicting rules about :ok/:error tuple handling and case statements</description>
+                  <resolution_priority>High - requires architectural refactoring of calling patterns</resolution_priority>
+                  <common_rules>NoTupleMatchInHead, CaseOnBareArg</common_rules>
+                </category>
               </categories>
             </target>
             <target name="auto_fixable_analysis">
@@ -254,6 +259,110 @@
               <description>Validate fixes don't degrade runtime characteristics</description>
               <benchmarking>Consider performance implications of proposed changes</benchmarking>
               <optimization>Prefer performance-neutral or performance-improving fixes</optimization>
+            </strategy>
+
+            <strategy type="ok_error_tuple_pattern_conflicts">
+              <description>Handle conflicts between NoTupleMatchInHead and CaseOnBareArg rules</description>
+              <pattern_recognition>
+                <trigger>When both violations appear for functions handling :ok/:error tuple responses</trigger>
+                <signature>Functions that immediately delegate to case statements on response arguments</signature>
+                <common_pattern>
+                  # Wrapper function with case-on-bare-arg violation
+                  defp handle_response(response) do
+                    case response do
+                      {:ok, data} -> process_success(data)
+                      {:error, err} -> handle_error(err)
+                    end
+                  end
+                  
+                  # OR pattern-matching functions with :ok/:error tuple heads (NoTupleMatchInHead violation)
+                  defp extract_customer_response({:ok, %{body: body}}) do
+                    extract_customer_id(body)
+                  end
+                  
+                  defp extract_customer_response({:error, err}) do
+                    {:error, handle_transport_error(err)}
+                  end
+                </common_pattern>
+              </pattern_recognition>
+              
+              <resolution_strategy>
+                <principle>Move case logic to the calling function and eliminate wrapper function</principle>
+                <steps>
+                  <step>Identify the calling function that invokes the wrapper</step>
+                  <step>Move the case statement from wrapper to the calling function</step>
+                  <step>Replace wrapper function call with inline case statement</step>
+                  <step>Remove the now-unused wrapper function entirely</step>
+                  <step>Extract any pipe chains to separate helper functions if SingleControlFlow violations result</step>
+                </steps>
+              </resolution_strategy>
+              
+              <example_transformation>
+                <before>
+                  defp do_api_call(params, opts) do
+                    response = make_request(params, opts)
+                    handle_response(response)  # Wrapper function call
+                  end
+                  
+                  # EITHER: Case-on-bare-arg pattern (CaseOnBareArg violation)
+                  defp handle_response(response) do
+                    case response do
+                      {:ok, data} -> process_success(data)
+                      {:error, err} -> handle_error(err)
+                    end
+                  end
+                  
+                  # OR: Pattern matching on :ok/:error tuples (NoTupleMatchInHead violation)
+                  defp extract_response({:ok, %{body: body}}) do
+                    process_success(body)
+                  end
+                  
+                  defp extract_response({:error, err}) do
+                    handle_error(err)
+                  end
+                </before>
+                <after>
+                  defp do_api_call(params, opts) do
+                    response = make_request(params, opts)
+                    
+                    case response do  # Case moved to caller
+                      {:ok, data} -> process_success(data)
+                      {:error, err} -> handle_error(err)
+                    end
+                  end
+                  
+                  # ALL wrapper/extraction functions removed entirely
+                </after>
+              </example_transformation>
+              
+              <validation>
+                <requirement>Calling function contains the case statement logic</requirement>
+                <requirement>Wrapper function is completely removed</requirement>
+                <requirement>No new SingleControlFlow violations introduced</requirement>
+                <requirement>Semantic behavior preserved exactly</requirement>
+              </validation>
+              
+              <follow_up_fixes>
+                <condition>If SingleControlFlow violations result from pipe + case combination</condition>
+                <action>Extract pipe chains to dedicated helper functions</action>
+                <pattern>
+                  defp do_api_call(params, opts) do
+                    response = make_api_request(params, opts)  # Extracted pipe chain
+                    
+                    case response do
+                      {:ok, data} -> process_success(data)
+                      {:error, err} -> handle_error(err)
+                    end
+                  end
+                  
+                  defp make_api_request(params, opts) do
+                    opts
+                    |> Keyword.get(:options, [])
+                    |> base_request()
+                    |> Req.post(url: "/endpoint", form: params)
+                  end
+                </pattern>
+              </follow_up_fixes>
             </strategy>
           </fix_strategies>
 

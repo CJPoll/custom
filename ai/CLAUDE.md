@@ -26,7 +26,7 @@ Functions are supposed to be reusable. Pattern-matching in a function head gives
 the appearance of reusability, but in reality it couples the function to
 whatever returned the ok tuple | error tuple.
 
-Instead, favor a case or with to handle them.
+Instead, refactor the _calling function_ to use a case statement
 
 Bad:
 ```elixir
@@ -85,100 +85,6 @@ Good:
   end
 
 ```
-
-=== No single-pipe chains
-Good:
-```elixir
-%{}
-|> Map.put(:one, 1)
-|> Map.put(:two, 2)
-```
-
-Good:
-```elixir
-Map.put(%{}, :one, 1)
-```
-
-Bad:
-```elixir
-%{} |> Map.put(:one, 1)
-```
-
-=== Consistent File Format
-All elixir modules should follow this pattern:
-- At the top of the module are any `use <Module>`
-- The `use` group must be ordered alphabetically (case insensitive)
-- Next are any `import <Module>`
-- The `import` group must be ordered alphabetically (case insensitive)
-- Next are any `require <Module>`
-- The `require` group must be ordered alphabetically (case insensitive)
-- Next are any `alias <Module>`
-- The `alias` group must be ordered alphabetically (case insensitive)
-- Next are any module attributes (example: `@default_value :default`)
-- The module attributes group must be ordered alphabetically (case insensitive)
-- In between each of these groups is an empty line.
-- Next is public functions
-- The public functions must be ordered alphabetically (case insensitive)
-- Next is private functions
-- The private functions must be ordered alphabetically (case insensitive)
-
-=== Transformation on Entity
-Transformations on an entity should be defined on the entity's module.
-This is "Implementation" level of abstraction.
-
-Good:
-
-```elixir
-defmodule MyApp.Customer do
-  use MyApp.Schema
-
-  schema "customers" do
-    field :name, :string
-    # ... Other fields here
-  end
-
-  def new do
-    %__MODULE__{}
-  end
-
-  def name(%__MODULE__{name: name}), do: name
-
-  def name(%__MODULE__{}, name) do
-    %__MODULE__{name: name}
-  end
-end
-
-defmodule MyApp.Customers do
-  alias MyApp.Customer
-
-  def update_customer_name(customer_id, name) do
-    Customer
-    |> Repo.get(customer_id)
-    |> Customer.name(name)
-    |> Repo.update()
-  end
-end
-```
-
-Bad:
-
-```elixir
-defmodule MyApp.Customers do
-  alias MyApp.Customer
-
-  def update_customer_name(customer_id, name) do
-    customer = Customers.get(Customer, customer_id)
-
-    customer = %Customer{customer | name: name}
-
-    Repo.update(customer)
-  end
-end
-```
-
-It's not 100% of the time, but you know you're hitting good abstraction levels
-when the language's control flow mechanisms flow nicely. In elixir, it's often
-pipe chains, clear `with` chains, etc.
 
 === Separate Composable Query Functions
 Ecto queries are composable. Make use of that with query fragments to express

@@ -13,6 +13,8 @@ function! SourceIfExists(file)
 	endif
 endfunction
 
+" <C-w>d shows diagnostic at cursor in a floating window. CTRL-W_d-default
+
 " Vundle Packages {{{
 Plug 'bling/vim-airline'                 " Lightweight Powerline
 Plug 'christoomey/vim-tmux-navigator'    " TMUX integration

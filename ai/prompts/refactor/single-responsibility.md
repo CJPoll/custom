@@ -46,23 +46,6 @@
           Single-Responsibility Principle
         </rationale>
     </constraint>
-    <constraint id="2" type="forbidden_ok_error_tuple_patterns">
-      <description>Function head pattern matching specifically on :ok and :error tuples is explicitly forbidden</description>
-      <forbidden_patterns>
-        <pattern>def function_name({:ok, data})</pattern>
-        <pattern>def function_name({:error, reason})</pattern>
-        <pattern>def function_name({:error, type, details})</pattern>
-        <pattern>defp function_name({:ok, data}) when guard</pattern>
-        <pattern>defp function_name({:error, reason}) when guard</pattern>
-      </forbidden_patterns>
-      <allowed_patterns>
-        <pattern>def function_name({:user, data}) - other atom tuples are fine</pattern>
-        <pattern>def function_name({status, message}) - variable patterns are fine</pattern>
-        <pattern>def function_name([{:ok, data} | rest]) - nested in collections</pattern>
-        <pattern>def function_name(%{result: {:error, reason}}) - nested in maps</pattern>
-      </allowed_patterns>
-      <rationale>Pattern matching specifically on :ok/:error result tuples in function heads artificially separates response handling from the operation that produced the response. The handling should occur at the call site where the side effect happens.</rationale>
-    </constraint>
 
     <constraint id="3" type="forbidden_bare_arg_case">
       <description>Case statements cannot operate directly on bare function arguments - ALL such cases are forbidden</description>
