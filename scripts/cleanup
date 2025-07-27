@@ -18,7 +18,7 @@ OPTIONS:
     --parent <branch>    Parent branch to compare against (default: main)
     --skip <script>      Skip the specified script (can be used multiple times)
                          Valid scripts: single-responsibility, function-names,
-                                       split-module, module-structure
+                                       split-module, module-structure, fix-credo
     -h, --help          Show this help message
 
 EOF
@@ -50,12 +50,12 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             case "$2" in
-                single-responsibility|function-names|split-module|module-structure)
+                single-responsibility|function-names|split-module|module-structure|fix-credo)
                     SKIP_SCRIPTS["$2"]=1
                     ;;
                 *)
                     echo "Error: Invalid script name: $2" >&2
-                    echo "Valid scripts: single-responsibility, function-names, split-module, module-structure" >&2
+                    echo "Valid scripts: single-responsibility, function-names, split-module, module-structure, fix-credo" >&2
                     exit 1
                     ;;
             esac
@@ -105,6 +105,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILE_ARG=""
 if [[ -n "$SPECIFIC_FILE" ]]; then
     FILE_ARG="--file $SPECIFIC_FILE"
+fi
+
+# Run fix-credo script
+if [[ -z "${SKIP_SCRIPTS[fix-credo]:-}" ]]; then
+    if [[ -x "$SCRIPT_DIR/fix-credo" ]]; then
+        log_file="$LOG_DIR/fix-credo.log"
+        if [[ -n "$SPECIFIC_FILE" ]]; then
+            if ! run_command "fix-credo $FILE_ARG --parent $PARENT_BRANCH" "$SCRIPT_DIR/fix-credo $FILE_ARG --parent $PARENT_BRANCH" "$log_file"; then
+                error_exit "fix-credo script failed"
+            fi
+        else
+            if ! run_command "fix-credo --dir lib --parent $PARENT_BRANCH" "$SCRIPT_DIR/fix-credo --dir lib --parent $PARENT_BRANCH" "$log_file"; then
+                error_exit "fix-credo script failed"
+            fi
+        fi
+    else
+        error_exit "fix-credo script not found or not executable at: $SCRIPT_DIR/fix-credo"
+    fi
+else
+    echo "Skipping: fix-credo (--skip flag)"
 fi
 
 ## Run single-responsibility script

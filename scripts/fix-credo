@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Default values
+PARENT_BRANCH="main"
+FILTER_DIR=""
+SPECIFIC_FILE=""
+
+# Function to display usage
+usage() {
+    cat >&2 << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Run credo fixes on modified files in a git repository.
+
+OPTIONS:
+    --parent <branch>    Parent branch to compare against (default: main)
+    --dir <directory>    Filter files to only those under specified directory
+    --file <filename>    Process only the specified file instead of modified files
+    -h, --help          Show this help message
+
+EOF
+    exit 1
+}
+
+# Function to check if we're in a git repository
+check_git_repo() {
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        echo "Error: Not inside a git repository" >&2
+        exit 1
+    fi
+}
+
+# Function to validate directory
+validate_directory() {
+    local dir="$1"
+    if [[ -n "$dir" ]]; then
+        if [[ ! -d "$dir" ]]; then
+            echo "Error: '$dir' is not a directory" >&2
+            exit 1
+        fi
+    fi
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --parent)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --parent requires an argument" >&2
+                exit 1
+            fi
+            PARENT_BRANCH="$2"
+            shift 2
+            ;;
+        --dir)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --dir requires an argument" >&2
+                exit 1
+            fi
+            FILTER_DIR="$2"
+            shift 2
+            ;;
+        --file)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --file requires an argument" >&2
+                exit 1
+            fi
+            SPECIFIC_FILE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Error: Unknown option: $1" >&2
+            usage
+            ;;
+    esac
+done
+
+# Validate environment
+check_git_repo
+validate_directory "$FILTER_DIR"
+
+# Check if parent branch exists
+if ! git rev-parse --verify "$PARENT_BRANCH" &>/dev/null; then
+    echo "Error: Parent branch '$PARENT_BRANCH' does not exist" >&2
+    exit 1
+fi
+
+# Get list of files to process
+if [[ -n "$SPECIFIC_FILE" ]]; then
+    # Process only the specified file
+    if [[ ! -f "$SPECIFIC_FILE" ]]; then
+        echo "Error: File '$SPECIFIC_FILE' does not exist" >&2
+        exit 1
+    fi
+    modified_files=("$SPECIFIC_FILE")
+else
+    # Get list of modified files
+    mapfile -t modified_files < <(git diff --name-only "$PARENT_BRANCH"...HEAD)
+
+    # Filter files by directory if specified
+    if [[ -n "$FILTER_DIR" ]]; then
+        filtered_files=()
+        # Normalize directory path (remove trailing slash)
+        FILTER_DIR="${FILTER_DIR%/}"
+        
+        for file in "${modified_files[@]}"; do
+            # Check if file is under the filter directory
+            if [[ "$file" == "$FILTER_DIR"/* ]] || [[ "$file" == "$FILTER_DIR" ]]; then
+                filtered_files+=("$file")
+            fi
+        done
+        modified_files=("${filtered_files[@]}")
+    fi
+
+    # Exit if no files to process
+    if [[ ${#modified_files[@]} -eq 0 ]]; then
+        echo "No modified files found" >&2
+        exit 0
+    fi
+fi
+
+# Create persistent log directory under ai-artifacts
+LOG_DIR="ai-artifacts/fix-credo-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$LOG_DIR"
+
+# Create log files for each file
+declare -A log_files
+
+# Show log files that will be created
+echo "Log files for monitoring:" >&2
+for file in "${modified_files[@]}"; do
+    # Create safe filename for log
+    safe_name=$(echo "$file" | tr '/' '_')
+    log_file="$LOG_DIR/${safe_name}.log"
+    log_files["$file"]="$log_file"
+    echo "  tail -f $log_file  # for $file" >&2
+done
+echo >&2
+
+# Process files sequentially
+echo "Processing ${#modified_files[@]} files:"
+for file in "${modified_files[@]}"; do
+    log_file="${log_files[$file]}"
+    
+    echo -n "  Processing $file... "
+    
+    # Run claude command
+    if claude --print --output-format stream-json --verbose --dangerously-skip-permissions "/fix:credo $file" &>"$log_file"; then
+        echo "✓"
+    else
+        echo "✗"
+        echo "    See log: $log_file" >&2
+    fi
+done
+
+# Script completes silently as requested
+# Log files are preserved in: $LOG_DIR

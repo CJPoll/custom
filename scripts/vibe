@@ -196,6 +196,16 @@ else
     error_exit "module-structure script not found or not executable at: $SCRIPT_DIR/module-structure"
 fi
 
+# Run fix-credo script
+if [[ -x "$SCRIPT_DIR/fix-credo" ]]; then
+    log_file="$LOG_DIR/fix-credo.log"
+    if ! run_command "fix-credo --dir $CODE_DIR --parent main" "$SCRIPT_DIR/fix-credo --dir $CODE_DIR --parent main" "$log_file"; then
+        error_exit "fix-credo script failed"
+    fi
+else
+    error_exit "fix-credo script not found or not executable at: $SCRIPT_DIR/fix-credo"
+fi
+
 # Run prepare-commit script
 if [[ -x "$SCRIPT_DIR/prep-commit" ]]; then
     log_file="$LOG_DIR/prep-commit.log"
