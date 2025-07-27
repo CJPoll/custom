@@ -22,7 +22,7 @@
 
  <naming_constraints>
    <constraint type="side_effect_functions">
-     <description>Functions with side effects (CRUD, I/O, state mutations) may use imperative names</description>
+     <description>Functions with side effects (CRUD, I/O, state mutations) may use imperative names but are not required to</description>
      <allowed_patterns>
        <pattern>get_* (database queries, API calls)</pattern>
        <pattern>list_* (collection retrieval operations)</pattern>
@@ -101,9 +101,9 @@
          <description>Pure function using imperative naming pattern</description>
          <example>get_user_age/1 that only calculates age from birthdate</example>
        </violation>
-       <violation type="side_effect_descriptive">
-         <description>Side-effect function using descriptive naming when imperative would be clearer</description>
-         <example>user_from_database/1 instead of get_user/1</example>
+       <violation type="side_effect_unclear">
+         <description>Side-effect function using unclear naming that doesn't indicate the side effect</description>
+         <example>user_from_database/1 could be clearer as get_user/1, but descriptive names are also acceptable</example>
        </violation>
        <violation type="vague_naming">
          <description>Function name doesn't clearly indicate return value or side effect</description>
@@ -124,13 +124,13 @@
          </examples>
        </rule>
 
-       <rule type="side_effect_to_imperative">
+       <rule type="side_effect_clarity">
          <condition>Side-effect function with unclear naming</condition>
-         <strategy>Use clear imperative verb indicating the side effect</strategy>
+         <strategy>Use clear naming that indicates the side effect (imperative or descriptive)</strategy>
          <examples>
-           <example>user_from_database/1 → get_user/1</example>
-           <example>persist_changes/1 → save_user/1</example>
-           <example>email_notification/1 → send_notification/1</example>
+           <example>user_from_database/1 → get_user/1 (imperative) or fetch_user/1 (imperative) or user_by_id/1 (descriptive)</example>
+           <example>persist_changes/1 → save_user/1 (imperative) or store_user/1 (imperative)</example>
+           <example>email_notification/1 → send_notification/1 (imperative) or deliver_email/1 (imperative)</example>
          </examples>
        </rule>
 
@@ -184,8 +184,13 @@ def full_name(user) do
  "#{user.first_name} #{user.last_name}"
 end
 
-# Correct: Side-effect function with imperative name
+# Correct: Side-effect function with clear name (imperative style)
 def get_user(id) do
+ Repo.get(User, id)
+end
+
+# Also correct: Side-effect function with clear name (descriptive style)
+def user_by_id(id) do
  Repo.get(User, id)
 end
 
@@ -239,7 +244,7 @@ end
          <command>Verify descriptive naming for pure functions</command>
        </commands>
        <success_criteria>
-         <criterion>All side-effect functions use imperative naming patterns</criterion>
+         <criterion>All side-effect functions use clear naming that indicates the side effect (imperative or descriptive patterns acceptable)</criterion>
          <criterion>All pure functions use descriptive naming patterns</criterion>
          <criterion>No forbidden naming patterns detected</criterion>
          <criterion>Function names clearly indicate return values or side effects</criterion>

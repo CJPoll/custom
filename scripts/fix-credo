@@ -89,73 +89,53 @@ if ! git rev-parse --verify "$PARENT_BRANCH" &>/dev/null; then
     exit 1
 fi
 
-# Get list of files to process
+# Create persistent log directory under ai-artifacts
+LOG_DIR="ai-artifacts/fix-credo-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$LOG_DIR"
+
+# Handle the case where a specific file is provided
 if [[ -n "$SPECIFIC_FILE" ]]; then
     # Process only the specified file
     if [[ ! -f "$SPECIFIC_FILE" ]]; then
         echo "Error: File '$SPECIFIC_FILE' does not exist" >&2
         exit 1
     fi
-    modified_files=("$SPECIFIC_FILE")
-else
-    # Get list of modified files
-    mapfile -t modified_files < <(git diff --name-only "$PARENT_BRANCH"...HEAD)
-
-    # Filter files by directory if specified
-    if [[ -n "$FILTER_DIR" ]]; then
-        filtered_files=()
-        # Normalize directory path (remove trailing slash)
-        FILTER_DIR="${FILTER_DIR%/}"
-        
-        for file in "${modified_files[@]}"; do
-            # Check if file is under the filter directory
-            if [[ "$file" == "$FILTER_DIR"/* ]] || [[ "$file" == "$FILTER_DIR" ]]; then
-                filtered_files+=("$file")
-            fi
-        done
-        modified_files=("${filtered_files[@]}")
-    fi
-
-    # Exit if no files to process
-    if [[ ${#modified_files[@]} -eq 0 ]]; then
-        echo "No modified files found" >&2
-        exit 0
-    fi
-fi
-
-# Create persistent log directory under ai-artifacts
-LOG_DIR="ai-artifacts/fix-credo-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$LOG_DIR"
-
-# Create log files for each file
-declare -A log_files
-
-# Show log files that will be created
-echo "Log files for monitoring:" >&2
-for file in "${modified_files[@]}"; do
-    # Create safe filename for log
-    safe_name=$(echo "$file" | tr '/' '_')
+    
+    # Create log file for the specific file
+    safe_name=$(echo "$SPECIFIC_FILE" | tr '/' '_')
     log_file="$LOG_DIR/${safe_name}.log"
-    log_files["$file"]="$log_file"
-    echo "  tail -f $log_file  # for $file" >&2
-done
-echo >&2
-
-# Process files sequentially
-echo "Processing ${#modified_files[@]} files:"
-for file in "${modified_files[@]}"; do
-    log_file="${log_files[$file]}"
     
-    echo -n "  Processing $file... "
+    echo "Log file for monitoring:" >&2
+    echo "  tail -f $log_file  # for $SPECIFIC_FILE" >&2
+    echo >&2
     
-    # Run claude command
-    if claude --print --output-format stream-json --verbose --dangerously-skip-permissions "/fix:credo $file" &>"$log_file"; then
+    echo -n "Processing $SPECIFIC_FILE... "
+    
+    # Run claude command with the specific file
+    if claude --print --output-format stream-json --verbose --dangerously-skip-permissions "/fix:credo $SPECIFIC_FILE" &>"$log_file"; then
         echo "✓"
     else
         echo "✗"
         echo "    See log: $log_file" >&2
     fi
-done
+else
+    # No specific file provided - run /fix:credo without file argument
+    log_file="$LOG_DIR/fix-credo-all.log"
+    
+    echo "Log file for monitoring:" >&2
+    echo "  tail -f $log_file" >&2
+    echo >&2
+    
+    echo -n "Running credo fixes on all files... "
+    
+    # Run claude command without specifying files
+    if claude --print --output-format stream-json --verbose --dangerously-skip-permissions "/fix:credo" &>"$log_file"; then
+        echo "✓"
+    else
+        echo "✗"
+        echo "    See log: $log_file" >&2
+    fi
+fi
 
 # Script completes silently as requested
 # Log files are preserved in: $LOG_DIR
