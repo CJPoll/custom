@@ -1073,14 +1073,21 @@ get_stack_branches() {
         fi
     fi
     
-    # Find the root of the stack by following parent links
-    local root_branch="$start_branch"
-    local parent=""
+    # Collect branches by following parent links up from start branch
+    local current_branch="$start_branch"
+    local stack_branches=()
+    
+    # Add the starting branch
+    stack_branches+=("$current_branch")
+    
+    # Follow parent links up to the root
     while true; do
-        parent=$(get_branch_parent "$root_branch")
-        if [ -z "$parent" ] || [ "$parent" = "$root_branch" ]; then
+        local parent=$(get_branch_parent "$current_branch")
+        if [ -z "$parent" ] || [ "$parent" = "$current_branch" ]; then
+            # No parent or self-parent means we've reached the root
             break
         fi
+        
         # Check if we've seen this branch before (cycle detection)
         for b in "${visited[@]}"; do
             if [ "$b" = "$parent" ]; then
@@ -1088,41 +1095,47 @@ get_stack_branches() {
                 return 1
             fi
         done
-        visited+=("$root_branch")
-        root_branch="$parent"
+        
+        visited+=("$current_branch")
+        stack_branches+=("$parent")
+        current_branch="$parent"
     done
     
-    # Now traverse from root down, collecting branches in order
-    local queue=("$root_branch")
-    local processed=()
+    # Reverse the array to get root-to-leaf order
+    local reversed_branches=()
+    for ((i=${#stack_branches[@]}-1; i>=0; i--)); do
+        reversed_branches+=("${stack_branches[$i]}")
+    done
+    
+    # Also include any children of the start branch (to handle the full stack)
+    local queue=("$start_branch")
+    local processed=("$start_branch")
     
     while [ ${#queue[@]} -gt 0 ]; do
         local current="${queue[0]}"
         queue=("${queue[@]:1}")  # Remove first element
         
-        # Skip if already processed
-        local skip=false
-        for p in "${processed[@]}"; do
-            if [ "$p" = "$current" ]; then
-                skip=true
-                break
-            fi
-        done
-        [ "$skip" = true ] && continue
-        
-        # Add to results
-        branches+=("$current")
-        processed+=("$current")
-        
-        # Add children to queue
+        # Get children of current branch
         local children=($(get_branch_children "$current"))
         for child in "${children[@]}"; do
-            queue+=("$child")
+            # Skip if already in our list
+            local skip=false
+            for b in "${reversed_branches[@]}"; do
+                if [ "$b" = "$child" ]; then
+                    skip=true
+                    break
+                fi
+            done
+            
+            if [ "$skip" = false ]; then
+                reversed_branches+=("$child")
+                queue+=("$child")
+            fi
         done
     done
     
     # Output branches
-    for branch in "${branches[@]}"; do
+    for branch in "${reversed_branches[@]}"; do
         echo "$branch"
     done
 }

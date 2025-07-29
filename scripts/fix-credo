@@ -93,6 +93,14 @@ fi
 LOG_DIR="ai-artifacts/fix-credo-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG_DIR"
 
+# Create main log file
+log_file="$LOG_DIR/fix-credo.log"
+
+# Show log file for monitoring
+echo "Log file for monitoring:" >&2
+echo "  tail -f $log_file" >&2
+echo >&2
+
 # Handle the case where a specific file is provided
 if [[ -n "$SPECIFIC_FILE" ]]; then
     # Process only the specified file
@@ -101,15 +109,7 @@ if [[ -n "$SPECIFIC_FILE" ]]; then
         exit 1
     fi
     
-    # Create log file for the specific file
-    safe_name=$(echo "$SPECIFIC_FILE" | tr '/' '_')
-    log_file="$LOG_DIR/${safe_name}.log"
-    
-    echo "Log file for monitoring:" >&2
-    echo "  tail -f $log_file  # for $SPECIFIC_FILE" >&2
-    echo >&2
-    
-    echo -n "Processing $SPECIFIC_FILE... "
+    echo -n "Running credo fixes on $SPECIFIC_FILE... "
     
     # Run claude command with the specific file
     if claude --print --output-format stream-json --verbose --dangerously-skip-permissions "/fix:credo $SPECIFIC_FILE" &>"$log_file"; then
@@ -120,12 +120,6 @@ if [[ -n "$SPECIFIC_FILE" ]]; then
     fi
 else
     # No specific file provided - run /fix:credo without file argument
-    log_file="$LOG_DIR/fix-credo-all.log"
-    
-    echo "Log file for monitoring:" >&2
-    echo "  tail -f $log_file" >&2
-    echo >&2
-    
     echo -n "Running credo fixes on all files... "
     
     # Run claude command without specifying files

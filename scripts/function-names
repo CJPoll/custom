@@ -127,35 +127,33 @@ fi
 LOG_DIR="ai-artifacts/function-names-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG_DIR"
 
-# Create log files for each file
-declare -A log_files
+# Create main log file
+log_file="$LOG_DIR/function-names.log"
 
-# Show log files that will be created
-echo "Log files for monitoring:" >&2
-for file in "${modified_files[@]}"; do
-    # Create safe filename for log
-    safe_name=$(echo "$file" | tr '/' '_')
-    log_file="$LOG_DIR/${safe_name}.log"
-    log_files["$file"]="$log_file"
-    echo "  tail -f $log_file  # for $file" >&2
-done
+# Show log file for monitoring
+echo "Log file for monitoring:" >&2
+echo "  tail -f $log_file" >&2
 echo >&2
 
-# Process files sequentially
+# Build file list string
+file_list="${modified_files[*]}"
+
+# Process all files at once
 echo "Processing ${#modified_files[@]} files:"
 for file in "${modified_files[@]}"; do
-    log_file="${log_files[$file]}"
-    
-    echo -n "  Processing $file... "
-    
-    # Run claude command
-    if claude --print --output-format stream-json --verbose --dangerously-skip-permissions "/refactor:function-names $file" &>"$log_file"; then
-        echo "✓"
-    else
-        echo "✗"
-        echo "    See log: $log_file" >&2
-    fi
+    echo "  - $file"
 done
+echo
+
+echo -n "Running function names refactoring... "
+
+# Run claude command with all files
+if claude --print --output-format stream-json --verbose --dangerously-skip-permissions "/refactor:function-names $file_list" &>"$log_file"; then
+    echo "✓"
+else
+    echo "✗"
+    echo "    See log: $log_file" >&2
+fi
 
 # Script completes silently as requested
 # Log files are preserved in: $LOG_DIR

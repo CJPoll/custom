@@ -127,45 +127,55 @@ fi
 LOG_DIR="ai-artifacts/split-module-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG_DIR"
 
-# Create log files for each file
-declare -A log_files
+# Create main log file
+log_file="$LOG_DIR/split-module.log"
 
-# Show log files that will be created
-echo "Log files for monitoring:" >&2
-for file in "${modified_files[@]}"; do
-    # Create safe filename for log
-    safe_name=$(echo "$file" | tr '/' '_')
-    log_file="$LOG_DIR/${safe_name}.log"
-    log_files["$file"]="$log_file"
-    echo "  tail -f $log_file  # for $file" >&2
-done
+# Show log file for monitoring
+echo "Log file for monitoring:" >&2
+echo "  tail -f $log_file" >&2
 echo >&2
 
-# Process files sequentially
-echo "Processing ${#modified_files[@]} files:"
+# Filter files to only include those with 400+ lines
+large_files=()
+echo "Checking file sizes:"
 for file in "${modified_files[@]}"; do
-    log_file="${log_files[$file]}"
-    
-    echo -n "  Processing $file... "
-    
-    # Check if file has fewer than 400 lines
     if [[ -f "$file" ]]; then
         line_count=$(wc -l < "$file" 2>/dev/null || echo 0)
         if [[ $line_count -lt 400 ]]; then
-            echo "⊘ (skipped - $line_count lines, <400)"
-            echo "Skipped (file has $line_count lines, less than 400)" > "$log_file"
-            continue
+            echo "  - $file: $line_count lines (skipped - <400)"
+        else
+            echo "  - $file: $line_count lines (included)"
+            large_files+=("$file")
         fi
     fi
-    
-    # Run claude command
-    if claude --print --output-format stream-json --verbose --dangerously-skip-permissions "/refactor:split-module $file" &>"$log_file"; then
-        echo "✓"
-    else
-        echo "✗"
-        echo "    See log: $log_file" >&2
-    fi
 done
+echo
+
+# Exit if no large files to process
+if [[ ${#large_files[@]} -eq 0 ]]; then
+    echo "No files with 400+ lines to process" >&2
+    exit 0
+fi
+
+# Build file list string
+file_list="${large_files[*]}"
+
+# Process all large files at once
+echo "Processing ${#large_files[@]} files with 400+ lines:"
+for file in "${large_files[@]}"; do
+    echo "  - $file"
+done
+echo
+
+echo -n "Running split module analysis... "
+
+# Run claude command with all files
+if claude --print --output-format stream-json --verbose --dangerously-skip-permissions "/refactor:split-module $file_list" &>"$log_file"; then
+    echo "✓"
+else
+    echo "✗"
+    echo "    See log: $log_file" >&2
+fi
 
 # Script completes silently as requested
 # Log files are preserved in: $LOG_DIR
