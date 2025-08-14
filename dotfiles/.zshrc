@@ -190,3 +190,7 @@ unalias gc;
 . "$HOME/.local/bin/env"
 
 source <(fzf --zsh)
+
+# opencode
+export PATH=/home/cjpoll/.opencode/bin:$PATH
+export DISPLAY=:0
