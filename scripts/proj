@@ -113,7 +113,7 @@ class Session
   end
 end
 
-def main(project_name, explicit_path = nil, pr_review = false, base_branch = "main")
+def main(project_name, explicit_path = nil, pr_review = false, base_branch = "main", no_switch = false)
   project = Project.new(project_name, explicit_path)
 
   if project.empty?
@@ -137,7 +137,9 @@ def main(project_name, explicit_path = nil, pr_review = false, base_branch = "ma
     Session.add_review_window(project, base_branch)
   end
 
-  Session.switch_to(project)
+  unless no_switch
+    Session.switch_to(project)
+  end
 
   exit(0)
 end
@@ -158,13 +160,13 @@ def print_path(project_name)
   puts project.path
 end
 
-project_name = ARGV[0]
-
 # Parse arguments
+project_name = nil
 explicit_path = nil
 pr_review = false
 base_branch = "main"
-i = 1
+no_switch = false
+i = 0
 
 while i < ARGV.length
   case ARGV[i]
@@ -180,11 +182,35 @@ while i < ARGV.length
       base_branch = ARGV[i + 1]
       i += 1
     end
+  when "--no-switch"
+    no_switch = true
   when "print"
-    print_path(project_name)
+    # Special case: "print" command with project name
+    if ARGV[i + 1]
+      print_path(ARGV[i + 1])
+    else
+      puts "Error: print command requires a project name"
+    end
     exit
+  else
+    # If it's not a flag, it's the project name
+    if ARGV[i] !~ /^--/
+      if project_name.nil?
+        project_name = ARGV[i]
+      else
+        puts "Error: Multiple project names provided: '#{project_name}' and '#{ARGV[i]}'"
+        puts "Only one project name is allowed."
+        exit(1)
+      end
+    end
   end
   i += 1
 end
 
-main(project_name, explicit_path, pr_review, base_branch)
+# Handle case where project name wasn't provided
+if project_name.nil?
+  puts "Oh noez! You didn't say which program 😱"
+  exit(1)
+end
+
+main(project_name, explicit_path, pr_review, base_branch, no_switch)

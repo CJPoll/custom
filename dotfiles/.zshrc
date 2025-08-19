@@ -68,14 +68,6 @@ export PATH="${HOME}/.local/nvim/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/u
 
 export ZSH_COMPDUMP="${HOME}/.cache/zsh/zcompdump-$ZSH_VERSION"
 
-# This is a base file, intended to work in any environment. If there are changes
-# that should be made for a given environment, they belong in a local zshrc.
-LOCAL_RC="${HOME}/.zshrc.local"
-
-if [[ -a "${LOCAL_RC}" ]]; then
-  source "${LOCAL_RC}"
-fi
-
 source $ZSH/oh-my-zsh.sh;
 
 export CUSTOM_DIR="${HOME}/dev/custom"
@@ -83,6 +75,14 @@ export DEV_DIR="${HOME}/dev"
 PATH="${CUSTOM_DIR}/scripts:$CUSTOM_DIR/git-custom:${PATH}"
 export DEVPATH="${DEV_DIR}";
 export fpath=("${CUSTOM_DIR}/.auto-completions" $fpath)
+
+# This is a base file, intended to work in any environment. If there are changes
+# that should be made for a given environment, they belong in a local zshrc.
+LOCAL_RC="${HOME}/.zshrc.local"
+
+if [[ -a "${LOCAL_RC}" ]]; then
+  source "${LOCAL_RC}"
+fi
 
 # Initialize completions after fpath is fully configured
 autoload -U compinit
