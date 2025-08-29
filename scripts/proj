@@ -69,7 +69,8 @@ class Session
     end
     
     # Create session with editor running in the first window
-    `tmux new-session -d -n "IDE" -c "#{project.path}" -s "#{project.session_name}" "#{editor_cmd}"`
+    "zsh -c 'source ~/.zshrc && vim +NERDTree'"
+    `tmux new-session -d -n "IDE" -c "#{project.path}" -s "#{project.session_name}" "zsh -c 'source ~/.zshrc && #{editor_cmd}'"`
   end
 
   def self.init(project)
