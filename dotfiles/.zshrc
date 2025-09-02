@@ -57,7 +57,7 @@ plugins=(git tmux docker mix ssh-agent)
 
 # Plugin Configuration
 export TERM="screen-256color";
-ZSH_TMUX_AUTOSTART=true;
+ZSH_TMUX_AUTOSTART=false;
 ZSH_TMUX_AUTOQUIT=false;
 
 # User configuration

@@ -57,9 +57,17 @@ _wt() {
                         '--draft[Create draft pull requests]' \
                         '--dry-run[Show what PRs would be created without creating them]'
                     ;;
-                stack)
+                ls|stack)
                     _arguments \
-                        '--install[Install git-stack if not already installed]'
+                        '--current[Show only the current branch stack]' \
+                        '--install[Install Graphite (gt) if not already installed]'
+                    if [[ ${#words[@]} -ge 3 && ${words[2]} == "parent" ]]; then
+                        _wt_git_branches
+                    fi
+                    ;;
+                migrate-to-gt)
+                    # No additional arguments needed for migration
+                    _message 'no more arguments'
                     ;;
             esac
             ;;
@@ -70,19 +78,20 @@ _wt_commands() {
     local commands=(
         'init:Set up the worktrees directory'
         'list:List all worktrees for the current project'
-        'ls:List all worktrees for the current project'
+        'ls:Show all tracked branches (alias for stack)'
         'create:Create a worktree for the specified branch'
         'rm:Remove the worktree for the specified branch'
         'switch:Change to the worktree for the specified branch'
         'merge:Merge a worktree branch (must be run from parent repo)'
         'is-worktree:Check if a directory is a git worktree'
-        'stack:Show branch hierarchy for all worktrees in the project'
+        'stack:Show branch hierarchy using Graphite (use --current for current stack only)'
         'sync:Sync the stack by rebasing child branches onto updated parents'
         'next:Navigate to a child branch in the stack (switch tmux session)'
         'prev:Navigate to the parent branch in the stack (switch tmux session)'
         'run:Execute a command across all branches in the stack'
         'push:Push branches to origin (use --stack for entire stack)'
         'pr:Create pull requests (use --stack for entire stack)'
+        'migrate-to-gt:Migrate existing git-stack metadata to Graphite format'
     )
     _describe -t commands 'wt command' commands
 }

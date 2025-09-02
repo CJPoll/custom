@@ -40,6 +40,7 @@ Usage: wt <command> [options]
 Commands:
   init              Set up the worktrees directory
   list              List all worktrees for the current project
+  ls                List all worktrees (alias for list)
   create <branch>   Create a worktree for the specified branch
                     (symlinks .claude/ directory from main project if present)
   rm <branch>       Remove the worktree for the specified branch
@@ -48,17 +49,21 @@ Commands:
   merge <branch>    Merge a worktree branch (must be run from parent repo)
   is-worktree       Check if a directory is a git worktree
                     Exit codes: 0=worktree, 1=project root, 2=neither
-  stack             Show branch hierarchy for all worktrees in the project
-  stack --install   Install git-stack if not already installed
-                    Downloads and installs git-stack from the official GitHub releases
+  stack             Show all tracked branches and their relationships (gt ls)
+  stack --current   Show only the current branch's stack (gt ls -s)
+  stack --install   Install Graphite (gt) if not already installed
+                    Downloads and installs Graphite from https://graphite.dev
   stack parent <branch>  Set or update the parent branch for the current branch
-  sync [branch]     Sync the stack by rebasing child branches onto updated parents
-  sync --continue   Continue a sync operation after resolving conflicts
+  sync              Sync the stack with remote changes using Graphite (gt sync)
+  sync --continue   Continue a sync operation after resolving conflicts (gt continue)
+  restack           Fix stack relationships and rebase onto correct parents (gt restack)
   next              Navigate to a child branch in the stack (switch tmux session)
   prev              Navigate to the parent branch in the stack (switch tmux session)
   run <command>     Execute a command across all branches in the stack (in dependency order)
-  push --stack      Push all ready branches in the stack to origin
-  pr --stack        Create pull requests for all branches in the stack
+  push --stack      Push all branches in the stack using Graphite (gt submit)
+  pr --stack        Create/update pull requests for the stack using Graphite
+  migrate-to-gt     Migrate existing git-stack metadata to Graphite format
+                    One-time migration for projects using git-stack
 
 Options:
   --quiet           Suppress output from script and subcommands
@@ -68,9 +73,10 @@ Options:
   --pr-review       Open changed files in tabs for PR review (for switch command)
   --parent <branch> Parent branch for PR review or stack creation (defaults to main)
   --stack           Execute command for entire stack (for push/pr commands)
-  --all             Push all ready branches, not just new ones (for push --stack)
   --dry-run         Show what would be done without actually doing it (for push/pr commands)
   --draft           Create draft pull requests (for pr --stack)
+  --publish         Publish draft PRs to ready state (for pr --stack)
+  --force|-f        Force push branches (for push --stack)
 
 Examples:
   wt init
@@ -90,18 +96,26 @@ Examples:
   wt stack
   wt stack --install
   wt sync
-  wt sync feature/child
   wt sync --continue
+  wt restack
   wt next
   wt prev
   wt run "npm test"
   wt run "git status"
   wt push --stack --dry-run
   wt push --stack
-  wt push --stack --all
+  wt push --stack --force
   wt pr --stack --dry-run
   wt pr --stack
   wt pr --stack --draft
+  wt pr --stack --publish
+  wt migrate-to-gt
+
+Notes:
+  - Requires Graphite (gt) for stack management features
+  - Install gt with: brew install graphite (macOS) or see https://graphite.dev
+  - For existing git-stack projects, run 'wt migrate-to-gt' once
+  - Stack metadata is shared between all worktrees via symlinks
 EOF
 }
 
@@ -138,51 +152,136 @@ list_worktrees() {
         return 0
     fi
     
-    # Get list of directories in worktrees
-    local worktrees=()
-    if [ -d "$WORKTREES_DIR" ]; then
-        while IFS= read -r -d '' dir; do
-            worktrees+=("$(basename "$dir")")
-        done < <(find "$WORKTREES_DIR" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
-    fi
+    log "Worktrees for $PROJECT_NAME:"
+    log ""
     
-    if [ ${#worktrees[@]} -eq 0 ]; then
+    # Get git worktree list output
+    local git_worktrees
+    git_worktrees=$(git worktree list --porcelain 2>/dev/null || echo "")
+    
+    if [ -z "$git_worktrees" ]; then
         log "No worktrees found."
         return 0
     fi
     
-    # Get current branch for comparison
-    local current_branch
-    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    # Parse porcelain output
+    local worktree_path=""
+    local branch=""
+    local commit=""
+    local is_detached=false
+    local is_current=false
+    local worktrees_found=false
     
-    log "Worktrees for this project:"
-    log ""
+    # Add header
+    printf "%-40s %-25s %s\n" "Branch/Worktree" "Status" "Location"
+    printf "%s\n" "$(printf '%.0s-' {1..90})"
     
-    # Use git worktree list to get more info
-    local git_worktrees
-    git_worktrees=$(git worktree list 2>/dev/null || echo "")
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^worktree[[:space:]](.+) ]]; then
+            # Process previous worktree if exists
+            if [ -n "$worktree_path" ]; then
+                # Only show worktrees in our worktrees directory or the main project
+                if [[ "$worktree_path" == "$WORKTREES_DIR/"* ]] || [[ "$worktree_path" == "$PROJECT_DIR" ]]; then
+                    local display_branch=""
+                    local display_path=""
+                    local status=""
+                    
+                    # Determine display path
+                    if [[ "$worktree_path" == "$PROJECT_DIR" ]]; then
+                        display_path="(main project)"
+                    else
+                        display_path="${worktree_path#$WORKTREES_DIR/}"
+                    fi
+                    
+                    # Build branch display and status
+                    if [ "$is_detached" = true ]; then
+                        # For detached HEAD, show the short commit SHA
+                        if [ -n "$commit" ]; then
+                            display_branch="${commit:0:8} (detached)"
+                        else
+                            display_branch="detached HEAD"
+                        fi
+                        status="detached"
+                    else
+                        display_branch="${branch:-unknown}"
+                        status="on branch"
+                    fi
+                    
+                    # Mark current
+                    if [ "$is_current" = true ]; then
+                        status="$status [current]"
+                        printf "► %-38s %-25s %s\n" "$display_branch" "$status" "$display_path"
+                    else
+                        printf "  %-38s %-25s %s\n" "$display_branch" "$status" "$display_path"
+                    fi
+                    
+                    worktrees_found=true
+                fi
+            fi
+            
+            # Reset for new worktree
+            worktree_path="${BASH_REMATCH[1]}"
+            branch=""
+            commit=""
+            is_detached=false
+            is_current=false
+            
+            # Check if this is the current directory
+            if [[ "$(pwd)" == "$worktree_path" ]]; then
+                is_current=true
+            fi
+        elif [[ "$line" =~ ^HEAD[[:space:]](.+) ]]; then
+            commit="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^branch[[:space:]]refs/heads/(.+) ]]; then
+            branch="${BASH_REMATCH[1]}"
+        elif [[ "$line" == "detached" ]]; then
+            is_detached=true
+        fi
+    done <<< "$git_worktrees"
     
-    for worktree in "${worktrees[@]}"; do
-        local marker=""
-        local worktree_path="$WORKTREES_DIR/$worktree"
-        
-        # Check if this is the current directory
-        if [[ "$(pwd)" == "$worktree_path" ]]; then
-            marker=" *"
+    # Process last worktree
+    if [ -n "$worktree_path" ]; then
+        if [[ "$worktree_path" == "$WORKTREES_DIR/"* ]] || [[ "$worktree_path" == "$PROJECT_DIR" ]]; then
+            local display_branch=""
+            local display_path=""
+            local status=""
+            
+            # Determine display path
+            if [[ "$worktree_path" == "$PROJECT_DIR" ]]; then
+                display_path="(main project)"
+            else
+                display_path="${worktree_path#$WORKTREES_DIR/}"
+            fi
+            
+            # Build branch display and status
+            if [ "$is_detached" = true ]; then
+                # For detached HEAD, show the short commit SHA
+                if [ -n "$commit" ]; then
+                    display_branch="${commit:0:8} (detached)"
+                else
+                    display_branch="detached HEAD"
+                fi
+                status="detached"
+            else
+                display_branch="${branch:-unknown}"
+                status="on branch"
+            fi
+            
+            # Mark current
+            if [ "$is_current" = true ]; then
+                status="$status [current]"
+                printf "► %-38s %-25s %s\n" "$display_branch" "$status" "$display_path"
+            else
+                printf "  %-38s %-25s %s\n" "$display_branch" "$status" "$display_path"
+            fi
+            
+            worktrees_found=true
         fi
-        
-        # Try to get the commit info from git worktree list
-        local commit_info=""
-        if [[ -n "$git_worktrees" ]]; then
-            commit_info=$(echo "$git_worktrees" | grep "$worktree_path" | awk '{print $2, $3}' || echo "")
-        fi
-        
-        if [[ -n "$commit_info" ]]; then
-            echo "  $worktree$marker ($commit_info)"
-        else
-            echo "  $worktree$marker"
-        fi
-    done
+    fi
+    
+    if [ "$worktrees_found" = false ]; then
+        log "No worktrees found in $WORKTREES_DIR"
+    fi
 }
 
 create_worktree() {
@@ -192,7 +291,7 @@ create_worktree() {
     if [ -z "$branch" ]; then
         echo "Error: Branch name is required" >&2
         usage
-        exit 1
+        return 1
     fi
     
     if [ ! -d "$WORKTREES_DIR" ]; then
@@ -202,7 +301,7 @@ create_worktree() {
     
     if [ -d "$worktree_path" ]; then
         echo "Error: Worktree already exists at: $worktree_path" >&2
-        exit 1
+        return 1
     fi
     
     log "Creating worktree for branch: $branch"
@@ -228,7 +327,7 @@ create_worktree() {
                     run_cmd git worktree add "$worktree_path" -b "$branch" "$base_branch"
                 else
                     echo "Error: Parent branch '$base_branch' does not exist" >&2
-                    exit 1
+                    return 1
                 fi
             else
                 log "Creating new branch: $branch"
@@ -239,24 +338,47 @@ create_worktree() {
     
     log "Worktree created at: $worktree_path"
     
-    # Configure git-stack parent relationship if parent was explicitly specified
+    # Initialize gt in the new worktree
+    if command -v gt &>/dev/null; then
+        log "Initializing Graphite in worktree..."
+        # Determine trunk branch (main or master)
+        local trunk_branch="main"
+        if ! git show-ref --verify --quiet "refs/heads/main"; then
+            if git show-ref --verify --quiet "refs/heads/master"; then
+                trunk_branch="master"
+            fi
+        fi
+        gt -C "$worktree_path" repo init --trunk "$trunk_branch" -q 2>/dev/null || log "Warning: gt init failed (may already be initialized)"
+        
+        # Symlink .graphite_repo_config if it exists in main project
+        if [ -f "$PROJECT_DIR/.git/.graphite_repo_config" ] && [ ! -e "$worktree_path/.git/.graphite_repo_config" ]; then
+            ln -s "$PROJECT_DIR/.git/.graphite_repo_config" "$worktree_path/.git/.graphite_repo_config" 2>/dev/null || log "Warning: Could not link Graphite configuration"
+        fi
+    fi
+    
+    # Configure Graphite parent relationship if parent was explicitly specified
     # Note: We check if PARENT_BRANCH was changed from its default value (main)
     # by checking if it matches the default or if --parent flag was used
     if [ "$PARENT_BRANCH" != "main" ] || [[ "${PARENT_BRANCH_EXPLICIT:-false}" == "true" ]]; then
-        log "Configuring git-stack parent relationship: $branch -> $PARENT_BRANCH"
-        git -C "$worktree_path" config --add git-stack.auto-base "$PARENT_BRANCH"
-        git -C "$worktree_path" config --add "branch.$branch.stack-base" "$PARENT_BRANCH"
+        log "Configuring Graphite parent relationship: $branch -> $PARENT_BRANCH"
+        if command -v gt &>/dev/null; then
+            gt -C "$worktree_path" track "$branch" --parent "$PARENT_BRANCH" -q 2>/dev/null || log "Warning: Failed to set parent relationship"
+        else
+            log "Warning: gt not available, parent relationship not configured"
+        fi
     fi
     
     # Create symlink to .claude directory if it exists in the main project (unless --no-symlink is set)
     if [ "$NO_SYMLINK" = false ] && [ -d "$PROJECT_DIR/.claude" ]; then
         if [ ! -e "$worktree_path/.claude" ]; then
-            ln -s "$PROJECT_DIR/.claude" "$worktree_path/.claude"
-            log "Created symlink to .claude directory"
+            ln -s "$PROJECT_DIR/.claude" "$worktree_path/.claude" 2>/dev/null && log "Created symlink to .claude directory" || log "Warning: Could not create .claude symlink"
         else
             log "Warning: .claude already exists in worktree, skipping symlink"
         fi
     fi
+    
+    # Explicitly return success
+    return 0
 }
 
 remove_worktree() {
@@ -556,9 +678,8 @@ set_stack_parent() {
     
     log "Setting parent of '$current_branch' to '$parent_branch'"
     
-    # Set the git config for stack parent
-    git config --add git-stack.auto-base "$parent_branch"
-    git config --add "branch.$current_branch.stack-base" "$parent_branch"
+    # Set the parent using gt track
+    gt track "$current_branch" --parent "$parent_branch" -q
     
     log "✓ Parent relationship configured: $current_branch -> $parent_branch"
     
@@ -577,9 +698,9 @@ show_worktree_stack() {
         exit 0
     fi
 
-    # Check if git-stack is available
-    if ! command -v git-stack /dev/null; then
-        echo "Error: git-stack not found. Install from https://github.com/gitext-rs/git-stack" 2
+    # Check if gt (Graphite) is available
+    if ! command -v gt &>/dev/null; then
+        echo "Error: gt (Graphite) not found. Install with: brew install graphite or visit https://graphite.dev" >&2
         return 1
     fi
     
@@ -589,351 +710,112 @@ show_worktree_stack() {
         return 1
     fi
     
-    # Build branch->worktree mapping
-    declare -A branch_to_worktree
-    declare -A worktree_to_current
-    declare -A branch_has_children
-    
-    # Get current directory for comparison
-    local current_dir="$(pwd)"
-    
-    # Add main project directory
-    local main_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-    if [ -n "$main_branch" ]; then
-        branch_to_worktree["$main_branch"]="$PROJECT_DIR"
-        if [[ "$current_dir" == "$PROJECT_DIR" ]]; then
-            worktree_to_current["$PROJECT_DIR"]="*"
-        fi
+    # Simply pass through to gt ls with color preservation
+    # Use --no-interactive to disable pager
+    # Check if --current flag is set
+    if [ "${STACK_CURRENT:-false}" = true ]; then
+        gt ls -s --no-interactive
+    else
+        gt ls --no-interactive
     fi
-    
-    # Add worktrees
-    if [ -d "$WORKTREES_DIR" ]; then
-        for wt in "$WORKTREES_DIR"/*; do
-            [ -d "$wt" ] || continue
-            local branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
-            if [ -n "$branch" ]; then
-                branch_to_worktree["$branch"]="$wt"
-                if [[ "$current_dir" == "$wt" ]]; then
-                    worktree_to_current["$wt"]="*"
-                fi
-            fi
-        done
-    fi
-    
-    # Find which branches have children
-    for branch in "${!branch_to_worktree[@]}"; do
-        local children=($(get_branch_children "$branch"))
-        if [ ${#children[@]} -gt 0 ]; then
-            branch_has_children["$branch"]=1
-        fi
-    done
-    
-    log "Branch hierarchy for project: $(basename "$PROJECT_DIR")"
-    log ""
-    
-    # Track stack structure
-    local current_stack_parent=""
-    local indent_next=false
-    
-    git stack 2>&1 | while IFS= read -r line; do
-        # Skip empty lines
-        if [[ -z "$line" ]]; then
-            echo "$line"
-            continue
-        fi
-        
-        # Determine if we need to indent based on parent-child relationships
-        local output_line="$line"
-        local line_has_worktree=false
-        local found_branch=""
-        
-        # Check if this line contains a worktree branch
-        for branch in "${!branch_to_worktree[@]}"; do
-            if [[ "$line" =~ (^|[[:space:],│├└─⌽])${branch}([[:space:],\[]|\[|$) ]]; then
-                line_has_worktree=true
-                found_branch="$branch"
-                break
-            fi
-        done
-        
-        # Apply indentation if this is a child of a worktree
-        if [ "$indent_next" = true ] && [[ "$line" =~ ^⌽ ]]; then
-            # Add indentation for children of worktrees
-            output_line="  $line"
-        fi
-        
-        # Update indentation flag based on whether this branch has children
-        if [ "$line_has_worktree" = true ] && [ ${branch_has_children[$found_branch]+isset} ]; then
-            indent_next=true
-        elif [ "$line_has_worktree" = true ]; then
-            indent_next=false
-        fi
-        
-        # Reset indentation on non-branch lines or stack boundaries
-        if [[ ! "$line" =~ ^⌽ ]] && [[ ! "$line" =~ ^[[:space:]]+⌽ ]]; then
-            indent_next=false
-        fi
-        
-        # Add annotations to branch names
-        local modified_line="$output_line"
-        
-        # Process branches in order of length (longest first)
-        local sorted_branches=()
-        while IFS= read -r branch; do
-            sorted_branches+=("$branch")
-        done < <(printf '%s\n' "${!branch_to_worktree[@]}" | awk '{ print length, $0 }' | sort -nr | cut -d' ' -f2-)
-        
-        for branch in "${sorted_branches[@]}"; do
-            local wt_path="${branch_to_worktree[$branch]}"
-            local annotation=""
-            local marker=""
-            
-            if [ ${worktree_to_current[$wt_path]+isset} ]; then
-                marker="*"
-            fi
-            
-            # Add green background with black text to annotations
-            local green_bg_black_text="\033[42;30m"
-            local green_fg=$'\033[32;49m\ue0b0\033[0m'  # Green arrow with default background
-            local reset="\033[0m"
-            
-            if [[ "$wt_path" == "$PROJECT_DIR" ]]; then
-                if [ -n "$marker" ]; then
-                    annotation="${green_bg_black_text} [main*] ${green_fg}"
-                else
-                    annotation="${green_bg_black_text} [main] ${green_fg}"
-                fi
-            else
-                if [ -n "$marker" ]; then
-                    annotation="${green_bg_black_text} [wt*] ${green_fg}"
-                else
-                    annotation="${green_bg_black_text} [wt] ${green_fg}"
-                fi
-            fi
-            
-            # Check if branch appears in the line with proper boundaries
-            if [[ "$modified_line" =~ (^|[[:space:],│├└─⌽])${branch}([[:space:],\[]|\[|$) ]]; then
-                # Only replace the first occurrence to avoid double-annotation
-                # Add tmux cyan (colour39) background with black text to branch name
-                local cyan_bg_black_text="\033[48;5;39;30m"
-                local reset="\033[0m"
-                # Arrow before branch: default foreground with tmux cyan background
-                local pre_arrow=$'\033[38;5;15;48;5;39m\ue0b0'
-                # Powerline arrow with tmux cyan foreground and green background for transition
-                local arrow=$'\033[38;5;39;42m\ue0b0'
-                modified_line="${modified_line/${branch}/${pre_arrow}${cyan_bg_black_text} ${branch} ${arrow}${annotation}}"
-            fi
-        done
-        
-        echo -e "$modified_line"
-    done
 }
 
 sync_worktree_stack() {
-    local start_branch="${1:-}"
     local continue_sync=false
     
     # Check for --continue flag
-    if [ "$start_branch" = "--continue" ]; then
+    if [ "$1" = "--continue" ]; then
         continue_sync=true
-        start_branch=""
     fi
     
-    # Handle continue mode
+    # Check if gt is available
+    if ! command -v gt &>/dev/null; then
+        echo "Error: Graphite (gt) is required for sync operations" >&2
+        echo "Install with: brew install graphite or visit https://graphite.dev" >&2
+        return 1
+    fi
+    
     if [ "$continue_sync" = true ]; then
-        sync_worktree_continue
-        return $?
-    fi
-    
-    # Get current branch if not specified
-    if [ -z "$start_branch" ]; then
-        start_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-        if [ -z "$start_branch" ]; then
-            echo "Error: Not in a git repository" >&2
+        log "Continuing sync operation..."
+        log ""
+        
+        # Use gt continue for resuming after conflict resolution
+        if gt continue; then
+            log ""
+            log "Sync continued successfully!"
+            log ""
+            log "Updated stack:"
+            gt ls --no-interactive
+        else
+            echo ""
+            echo "Error: Failed to continue sync" >&2
+            echo "Resolve any remaining conflicts and try again" >&2
+            return 1
+        fi
+    else
+        log "Syncing stack with remote changes..."
+        log ""
+        
+        # Show current stack before syncing
+        log "Current stack:"
+        gt ls --no-interactive
+        log ""
+        
+        # Run gt sync
+        # This will:
+        # - Fetch latest changes from remote
+        # - Rebase your stack onto the latest trunk
+        # - Update each branch in the stack
+        if gt sync; then
+            log ""
+            log "Sync completed successfully!"
+            log ""
+            log "Updated stack:"
+            gt ls --no-interactive
+        else
+            echo ""
+            echo "Error: Sync failed or was aborted" >&2
+            echo "You may need to resolve conflicts and run 'wt sync --continue'" >&2
             return 1
         fi
     fi
-    
-    log "Syncing stack containing branch: $start_branch"
-    
-    # First, fetch latest changes from origin
-    log "Fetching latest changes from origin..."
-    git fetch origin
-    
-    # Get all branches in the stack
-    local branches=($(get_stack_branches "$start_branch"))
-    if [ ${#branches[@]} -eq 0 ]; then
-        echo "Error: No branches found in stack" >&2
+}
+
+restack_worktree() {
+    # Check if gt is available
+    if ! command -v gt &>/dev/null; then
+        echo "Error: Graphite (gt) is required for restack operations" >&2
+        echo "Install with: brew install graphite or visit https://graphite.dev" >&2
         return 1
     fi
     
-    log "Found ${#branches[@]} branches in stack: ${branches[*]}"
+    log "Restacking branches to fix parent relationships..."
     log ""
     
-    local failed_branch=""
-    local rebased_count=0
-    
-    # Process each branch in order (parent to child)
-    for branch in "${branches[@]}"; do
-        local worktree_path=""
-        
-        # Determine worktree path
-        if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
-            worktree_path="$PROJECT_DIR"
-        else
-            worktree_path="$WORKTREES_DIR/$branch"
-        fi
-        
-        if [ ! -d "$worktree_path" ]; then
-            log "⚠️  Skipping $branch - worktree not found"
-            continue
-        fi
-        
-        # Check if this branch has an in-progress rebase
-        if [ -d "$worktree_path/.git/rebase-merge" ] || [ -d "$worktree_path/.git/rebase-apply" ]; then
-            log "⚠️  $branch has an in-progress rebase. Resolve conflicts and run 'wt sync --continue'"
-            failed_branch="$branch"
-            break
-        fi
-        
-        # Get parent branch
-        local parent=$(get_branch_parent "$branch")
-        if [ -z "$parent" ] || [ "$parent" = "$branch" ]; then
-            log "✓ $branch - no parent branch, skipping"
-            continue
-        fi
-        
-        # Check if branch needs rebasing onto parent
-        local needs_rebase=false
-        local merge_base=$(git -C "$worktree_path" merge-base "$branch" "$parent" 2>/dev/null)
-        local parent_tip=$(git -C "$worktree_path" rev-parse "$parent" 2>/dev/null)
-        
-        if [ "$merge_base" != "$parent_tip" ]; then
-            needs_rebase=true
-        fi
-        
-        if [ "$needs_rebase" = true ]; then
-            log "🔄 Rebasing $branch onto $parent..."
-            
-            # Save current directory
-            local original_dir=$(pwd)
-            
-            # Switch to worktree and perform rebase
-            cd "$worktree_path"
-            
-            if git rebase "$parent"; then
-                log "✓ Successfully rebased $branch"
-                ((rebased_count++))
-            else
-                log ""
-                log "⚠️  Conflict detected while rebasing $branch"
-                log "📍 Worktree location: $worktree_path"
-                log ""
-                log "To resolve:"
-                log "  1. cd $worktree_path"
-                log "  2. Fix conflicts and stage changes"
-                log "  3. git rebase --continue"
-                log "  4. wt sync --continue"
-                log ""
-                failed_branch="$branch"
-                
-                # Show conflict status
-                git status --short
-                
-                cd "$original_dir"
-                break
-            fi
-            
-            cd "$original_dir"
-        else
-            log "✓ $branch - already up to date with $parent"
-        fi
-    done
-    
+    # Show current stack before restacking
+    log "Current stack:"
+    gt ls --no-interactive
     log ""
     
-    if [ -n "$failed_branch" ]; then
-        return 1
-    elif [ $rebased_count -eq 0 ]; then
-        log "All branches are already up to date"
-    else
-        log "Successfully rebased $rebased_count branch(es)"
-    fi
-    
-    # Optionally run git-stack sync for any additional git-stack specific operations
-    if command -v git-stack &>/dev/null; then
+    # Run gt restack
+    # This will:
+    # - Fix any incorrect parent-child relationships
+    # - Rebase branches onto their correct parents
+    # - Handle any conflicts that arise
+    if gt restack; then
         log ""
-        log "Running git-stack sync for additional updates..."
-        git stack sync
+        log "Restack completed successfully!"
+        log ""
+        log "Updated stack:"
+        gt ls --no-interactive
+    else
+        echo ""
+        echo "Error: Restack failed or was aborted" >&2
+        echo "You may need to resolve conflicts and run 'gt continue'" >&2
+        return 1
     fi
 }
 
-sync_worktree_continue() {
-    log "Continuing sync operation..."
-    log ""
-    
-    # Find all worktrees with in-progress rebases
-    local found_rebase=false
-    local completed_rebases=0
-    
-    # Check main project
-    if [ -d "$PROJECT_DIR/.git/rebase-merge" ] || [ -d "$PROJECT_DIR/.git/rebase-apply" ]; then
-        local branch=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
-        log "Found in-progress rebase in main project (branch: $branch)"
-        log "Please complete the rebase manually in: $PROJECT_DIR"
-        found_rebase=true
-    fi
-    
-    # Check all worktrees
-    if [ -d "$WORKTREES_DIR" ]; then
-        for wt in "$WORKTREES_DIR"/*; do
-            [ -d "$wt" ] || continue
-            
-            if [ -d "$wt/.git/rebase-merge" ] || [ -d "$wt/.git/rebase-apply" ]; then
-                local branch=$(basename "$wt")
-                found_rebase=true
-                
-                log "Checking rebase status for $branch..."
-                
-                # Check if there are still conflicts
-                if git -C "$wt" status --porcelain | grep -q "^UU\|^AA\|^DD"; then
-                    log "⚠️  $branch still has unresolved conflicts"
-                    log "    Location: $wt"
-                    return 1
-                else
-                    # Try to continue the rebase
-                    log "Attempting to continue rebase for $branch..."
-                    if git -C "$wt" rebase --continue 2>&1; then
-                        log "✓ Successfully continued rebase for $branch"
-                        ((completed_rebases++))
-                    else
-                        log "⚠️  Failed to continue rebase for $branch"
-                        log "    Please resolve manually in: $wt"
-                        return 1
-                    fi
-                fi
-            fi
-        done
-    fi
-    
-    if [ "$found_rebase" = false ]; then
-        log "No in-progress rebases found."
-        log ""
-        log "Resuming normal sync..."
-        log ""
-        # Resume normal sync from current directory
-        sync_worktree_stack
-    else
-        if [ $completed_rebases -gt 0 ]; then
-            log ""
-            log "Completed $completed_rebases rebase(s)."
-            log "Resuming sync for remaining branches..."
-            log ""
-            # Resume sync
-            sync_worktree_stack
-        fi
-    fi
-}
 
 get_branch_parent() {
     local branch="$1"
@@ -941,28 +823,54 @@ get_branch_parent() {
     
     # Find the worktree path for this branch
     if [ -n "$branch" ]; then
-        # Check if it's a worktree branch
-        if [ -d "$WORKTREES_DIR/$branch" ]; then
-            worktree_path="$WORKTREES_DIR/$branch"
+        # Check if it's a worktree branch (handle branches with slashes)
+        local potential_worktree="$WORKTREES_DIR/$branch"
+        if [ -d "$potential_worktree" ] && [ -f "$potential_worktree/.git" ]; then
+            # Make sure it's actually a worktree (has .git file)
+            worktree_path="$potential_worktree"
         else
             # Check if we're in the main project and this is the current branch
             local current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-            if [ "$branch" = "$current_branch" ] && [ -d "$PROJECT_DIR/.git" ]; then
-                worktree_path="$PROJECT_DIR"
+            if [ "$branch" = "$current_branch" ]; then
+                if [ -d "$PROJECT_DIR/.git" ]; then
+                    worktree_path="$PROJECT_DIR"
+                else
+                    # We might be in a worktree ourselves, use current directory
+                    worktree_path="$(pwd)"
+                fi
             fi
         fi
     fi
     
+    # If we still don't have a worktree path, try to use current directory if branch matches
     if [ -z "$worktree_path" ]; then
-        return 1
+        local current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+        if [ "$branch" = "$current_branch" ]; then
+            worktree_path="$(pwd)"
+        else
+            # Can't find worktree, but we can still try to get parent from gt directly
+            worktree_path="."
+        fi
     fi
     
-    # Get the parent branch from git config
-    local parent=$(git -C "$worktree_path" config --get "branch.$branch.stack-base" 2>/dev/null)
-    if [ -z "$parent" ]; then
-        parent=$(git -C "$worktree_path" config --get "git-stack.auto-base" 2>/dev/null)
+    # Get the parent branch from Graphite
+    # Try using gt branch info first (faster if available)
+    local parent=""
+    if command -v gt &>/dev/null; then
+        # Parse gt branch info output for parent
+        # Note: gt branch info without arguments shows info for current branch
+        # We need to cd to the worktree path as gt -C doesn't work as expected
+        local gt_output=$(cd "$worktree_path" 2>/dev/null && gt branch info 2>&1)
+        parent=$(echo "$gt_output" | grep "^Parent:" | sed 's/^Parent:[[:space:]]*//')
     fi
-    
+
+    # Fallback to parsing .graphite_repo_config if gt command fails
+    if [ -z "$parent" ] && [ -f "$worktree_path/.git/.graphite_repo_config" ]; then
+        # Parse JSON config file for branch parent
+        # Using grep and sed for compatibility (jq might not be available)
+        parent=$(grep -A 10 "\"$branch\"" "$worktree_path/.git/.graphite_repo_config" 2>/dev/null | grep '"parentBranchName"' | head -1 | sed 's/.*"parentBranchName"[[:space:]]*:[[:space:]]*"//' | sed 's/".*//')
+    fi
+
     echo "$parent"
 }
 
@@ -970,27 +878,73 @@ get_branch_children() {
     local branch="$1"
     local children=()
     
-    # Check main project
-    local main_branch=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
-    if [ -n "$main_branch" ]; then
-        local main_parent=$(get_branch_parent "$main_branch")
-        if [ "$main_parent" = "$branch" ]; then
-            children+=("$main_branch")
-        fi
-    fi
-    
-    # Check all worktrees
-    if [ -d "$WORKTREES_DIR" ]; then
-        for wt in "$WORKTREES_DIR"/*; do
-            [ -d "$wt" ] || continue
-            local wt_branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
-            if [ -n "$wt_branch" ]; then
-                local wt_parent=$(get_branch_parent "$wt_branch")
-                if [ "$wt_parent" = "$branch" ]; then
-                    children+=("$wt_branch")
+    # Use gt metadata to find direct children of the branch
+    if command -v gt &>/dev/null; then
+        # Read parent metadata directly from git refs - much faster than calling gt branch info
+        local metadata_dir="$PROJECT_DIR/.git/refs/branch-metadata"
+        
+        if [ -d "$metadata_dir" ]; then
+            # Find all branches with metadata
+            find "$metadata_dir" -type f 2>/dev/null | while read -r metadata_file; do
+                # Get branch name from file path
+                local candidate="${metadata_file#$metadata_dir/}"
+                
+                # Skip the branch itself
+                [ "$candidate" = "$branch" ] && continue
+                
+                # Read the metadata blob
+                local blob_sha=$(cat "$metadata_file" 2>/dev/null)
+                if [ -n "$blob_sha" ]; then
+                    # Extract parent from the JSON blob
+                    local parent=$(git cat-file -p "$blob_sha" 2>/dev/null | grep '"parentBranchName"' | sed 's/.*"parentBranchName"[[:space:]]*:[[:space:]]*"//' | sed 's/".*//')
+                    
+                    if [ "$parent" = "$branch" ]; then
+                        echo "$candidate"
+                    fi
                 fi
+            done | while read -r child; do
+                [ -n "$child" ] && children+=("$child")
+                echo "$child"  # Pass through to parent shell
+            done
+        else
+            # Fallback to using gt branch info if metadata directory doesn't exist
+            local all_branches=$(git for-each-ref --format='%(refname:short)' refs/heads/)
+            
+            for candidate in $all_branches; do
+                # Skip the branch itself
+                [ "$candidate" = "$branch" ] && continue
+                
+                # Check if this branch's parent is our target branch
+                local parent=$(gt branch info "$candidate" 2>/dev/null | grep "Parent:" | sed 's/.*Parent: *//' | cut -d' ' -f1)
+                if [ "$parent" = "$branch" ]; then
+                    children+=("$candidate")
+                fi
+            done
+        fi
+    else
+        # Fallback to checking only worktrees if gt is not available
+        # Check main project
+        local main_branch=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
+        if [ -n "$main_branch" ]; then
+            local main_parent=$(get_branch_parent "$main_branch")
+            if [ "$main_parent" = "$branch" ]; then
+                children+=("$main_branch")
             fi
-        done
+        fi
+        
+        # Check all worktrees
+        if [ -d "$WORKTREES_DIR" ]; then
+            for wt in "$WORKTREES_DIR"/*; do
+                [ -d "$wt" ] || continue
+                local wt_branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
+                if [ -n "$wt_branch" ]; then
+                    local wt_parent=$(get_branch_parent "$wt_branch")
+                    if [ "$wt_parent" = "$branch" ]; then
+                        children+=("$wt_branch")
+                    fi
+                fi
+            done
+        fi
     fi
     
     # Output children one per line
@@ -1055,7 +1009,83 @@ navigate_stack() {
     # Switch to the target branch
     if [ -n "$target_branch" ]; then
         log "Navigating from $current_branch to $target_branch"
-        switch_worktree "$target_branch"
+        
+        # Check if worktree exists for the target branch
+        local worktree_path=""
+        if [ "$target_branch" = "main" ] || [ "$target_branch" = "master" ]; then
+            worktree_path="$PROJECT_DIR"
+        else
+            worktree_path="$WORKTREES_DIR/$target_branch"
+        fi
+        
+        # If worktree doesn't exist but branch does, create it
+        if [ ! -d "$worktree_path" ] && [ "$target_branch" != "main" ] && [ "$target_branch" != "master" ]; then
+            # Check if the branch exists
+            if git show-ref --verify --quiet "refs/heads/$target_branch" || \
+               git show-ref --verify --quiet "refs/remotes/origin/$target_branch"; then
+                log "Worktree doesn't exist for $target_branch, creating it..."
+                
+                # Determine parent branch for the new worktree
+                local parent_branch=$(get_branch_parent "$target_branch")
+                if [ -z "$parent_branch" ]; then
+                    parent_branch="$current_branch"  # Use current branch as parent if not found
+                fi
+                
+                # Save the original parent branch settings
+                local original_parent="$PARENT_BRANCH"
+                local original_explicit="$PARENT_BRANCH_EXPLICIT"
+                
+                # Set parent for create_worktree
+                PARENT_BRANCH="$parent_branch"
+                PARENT_BRANCH_EXPLICIT=true
+                
+                # Create the worktree
+                log "Calling create_worktree for $target_branch..."
+                create_worktree "$target_branch"
+                local create_result=$?
+                log "create_worktree returned with status: $create_result"
+                
+                # Restore original settings
+                PARENT_BRANCH="$original_parent"
+                PARENT_BRANCH_EXPLICIT="$original_explicit"
+                
+                if [ $create_result -eq 0 ]; then
+                    # Update worktree_path after creation (in case of slashes in branch name)
+                    worktree_path="$WORKTREES_DIR/$target_branch"
+                    
+                    log "Debug: Checking worktree at path: $worktree_path"
+                    
+                    # Wait for git to register the worktree and filesystem to settle
+                    sleep 0.5
+                    
+                    # Verify the worktree was created and registered
+                    # Use grep -F for literal string matching (handles slashes in paths)
+                    local dir_exists=$([ -d "$worktree_path" ] && echo "yes" || echo "no")
+                    local in_git_list=$(git worktree list | grep -F -q "$worktree_path" && echo "yes" || echo "no")
+                    
+                    log "Debug: Directory exists: $dir_exists, In git list: $in_git_list"
+                    
+                    if [ "$dir_exists" = "yes" ] && [ "$in_git_list" = "yes" ]; then
+                        # Now switch to it
+                        log "Switching to newly created worktree..."
+                        switch_worktree "$target_branch"
+                    else
+                        log "Warning: Worktree created but not ready yet. Please run the command again."
+                        log "Debug: worktree_path=$worktree_path, exists=$dir_exists, in_list=$in_git_list"
+                        return 0
+                    fi
+                else
+                    echo "Error: Failed to create worktree for $target_branch" >&2
+                    return 1
+                fi
+            else
+                echo "Error: Branch $target_branch does not exist" >&2
+                return 1
+            fi
+        else
+            # Worktree exists, just switch to it
+            switch_worktree "$target_branch"
+        fi
     fi
 }
 
@@ -1295,6 +1325,7 @@ rebase_children_after_merge() {
 create_stack_prs() {
     local dry_run=false
     local draft=false
+    local publish=false
     
     # Parse PR options
     while [[ $# -gt 0 ]]; do
@@ -1307,6 +1338,10 @@ create_stack_prs() {
                 draft=true
                 shift
                 ;;
+            --publish)
+                publish=true
+                shift
+                ;;
             *)
                 echo "Error: Unknown option for pr: $1" >&2
                 return 1
@@ -1314,176 +1349,78 @@ create_stack_prs() {
         esac
     done
     
-    # Check if gh CLI is available
-    if ! command -v gh &>/dev/null; then
-        echo "Error: GitHub CLI (gh) is required for PR creation" >&2
-        echo "Install from: https://cli.github.com/" >&2
+    # Check if gt is available
+    if ! command -v gt &>/dev/null; then
+        echo "Error: Graphite (gt) is required for stack operations" >&2
+        echo "Install with: brew install graphite or visit https://graphite.dev" >&2
         return 1
     fi
     
-    # Get all branches in the stack
-    local branches=($(get_stack_branches))
-    if [ ${#branches[@]} -eq 0 ]; then
-        echo "Error: No branches found in stack" >&2
-        return 1
-    fi
-    
-    log "Checking branches in stack for PR creation..."
+    log "Creating/updating pull requests for stack using Graphite..."
     log ""
-    
-    local prs_to_create=()
-    local all_ready=true
-    
-    # Check each branch
-    for branch in "${branches[@]}"; do
-        local worktree_path=""
-        if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
-            log "⚠ $branch - skipping default branch"
-            continue
-        else
-            worktree_path="$WORKTREES_DIR/$branch"
-        fi
-        
-        if [ ! -d "$worktree_path" ]; then
-            log "✗ $branch - worktree not found"
-            all_ready=false
-            continue
-        fi
-        
-        # Check if PR already exists
-        local existing_pr=$(gh pr list --head "$branch" --json number --jq '.[0].number' 2>/dev/null)
-        if [ -n "$existing_pr" ]; then
-            log "✓ $branch - PR already exists (#$existing_pr)"
-            continue
-        fi
-        
-        # Check if branch has been pushed
-        if ! git -C "$worktree_path" ls-remote --exit-code --heads origin "$branch" &>/dev/null; then
-            log "✗ $branch - not pushed to remote (use 'wt push --stack' first)"
-            all_ready=false
-            continue
-        fi
-        
-        # Check for uncommitted changes
-        if ! git -C "$worktree_path" diff-index --quiet HEAD -- 2>/dev/null; then
-            log "✗ $branch - has uncommitted changes"
-            all_ready=false
-            continue
-        fi
-        
-        # Branch is ready for PR
-        prs_to_create+=("$branch")
-        log "✓ $branch - ready for PR creation"
-    done
-    
-    if [ ${#prs_to_create[@]} -eq 0 ]; then
-        log ""
-        log "No PRs need to be created"
-        return 0
-    fi
-    
-    if [ "$all_ready" = false ]; then
-        log ""
-        log "Some branches have issues. Fix them before creating PRs."
-        return 1
-    fi
-    
-    log ""
-    log "Will create PRs for: ${prs_to_create[*]}"
     
     if [ "$dry_run" = true ]; then
+        log "Dry run mode - showing what PRs would be created/updated:"
         log ""
-        log "Dry run - no PRs were created"
+        # Show the current stack with PR status
+        gt ls --no-interactive
+        log ""
+        log "Would create/update PRs for all branches in the stack above"
         return 0
     fi
     
-    log ""
-    log "Creating PRs..."
+    # Prepare gt submit options
+    local gt_opts="--no-interactive"
+    
+    if [ "$draft" = true ]; then
+        gt_opts="$gt_opts --draft"
+    fi
+    
+    if [ "$publish" = true ]; then
+        gt_opts="$gt_opts --publish"
+    fi
+    
+    # Use gt submit to create/update PRs for the entire stack
+    # gt submit handles:
+    # - Creating PRs for branches without them
+    # - Updating existing PRs
+    # - Setting correct base branches automatically
+    # - Adding stack context to PR descriptions
+    
+    log "Running: gt submit $gt_opts"
     log ""
     
-    # Create PRs in order
-    local failed_pr=""
-    for branch in "${prs_to_create[@]}"; do
-        local worktree_path="$WORKTREES_DIR/$branch"
-        
-        # Determine the base branch (parent)
-        local base_branch=$(get_branch_parent "$branch")
-        if [ -z "$base_branch" ]; then
-            base_branch="main"  # Default to main if no parent
-        fi
-        
-        log "Creating PR for $branch (base: $base_branch)..."
-        
-        # Generate PR title and body
-        local pr_title="$branch"
-        local pr_body=""
-        
-        # Get the branch description from commits
-        local branch_commits=$(git -C "$worktree_path" log --oneline "$base_branch..$branch" 2>/dev/null)
-        local commit_count=$(echo "$branch_commits" | wc -l)
-        
-        pr_body="## Summary\n\n"
-        
-        # Add stack context if part of a stack
-        local stack_children=($(get_branch_children "$branch"))
-        if [ ${#stack_children[@]} -gt 0 ]; then
-            pr_body="${pr_body}**This PR is part of a stack:**\n"
-            pr_body="${pr_body}- Base: \`$base_branch\`\n"
-            pr_body="${pr_body}- This: \`$branch\`\n"
-            pr_body="${pr_body}- Children: "
-            for child in "${stack_children[@]}"; do
-                pr_body="${pr_body}\`$child\` "
-            done
-            pr_body="${pr_body}\n\n"
-        fi
-        
-        pr_body="${pr_body}### Commits ($commit_count):\n\`\`\`\n$branch_commits\n\`\`\`\n\n"
-        pr_body="${pr_body}## Test Plan\n\n[Describe testing approach]\n\n"
-        pr_body="${pr_body}---\n*Created with \`wt pr --stack\`*"
-        
-        # Create the PR
-        local pr_flags=""
-        [ "$draft" = true ] && pr_flags="--draft"
-        
-        if gh pr create \
-            --base "$base_branch" \
-            --head "$branch" \
-            --title "$pr_title" \
-            --body "$(echo -e "$pr_body")" \
-            $pr_flags \
-            --repo "$(git -C "$worktree_path" remote get-url origin)" \
-            2>&1; then
-            log "✓ Created PR for $branch"
-        else
-            log "✗ Failed to create PR for $branch"
-            failed_pr="$branch"
-            break
-        fi
+    if gt submit $gt_opts; then
         log ""
-    done
-    
-    if [ -n "$failed_pr" ]; then
-        echo ""
-        echo "Error: Failed to create PR for branch: $failed_pr" >&2
-        return 1
+        log "Pull requests created/updated successfully!"
+        log ""
+        log "View your PRs:"
+        gt ls --no-interactive
     else
-        log "All PRs created successfully!"
+        echo ""
+        echo "Error: Failed to create/update pull requests" >&2
+        echo "Run 'gt status' to see what went wrong" >&2
+        return 1
     fi
 }
 
 push_stack() {
-    local push_all=false
     local dry_run=false
+    local force=false
     
     # Parse push options
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --all)
-                push_all=true
-                shift
-                ;;
             --dry-run)
                 dry_run=true
+                shift
+                ;;
+            --force|-f)
+                force=true
+                shift
+                ;;
+            --all)
+                # For compatibility, but gt submit handles this automatically
                 shift
                 ;;
             *)
@@ -1493,132 +1430,43 @@ push_stack() {
         esac
     done
     
-    # Get all branches in the stack
-    local branches=($(get_stack_branches))
-    if [ ${#branches[@]} -eq 0 ]; then
-        echo "Error: No branches found in stack" >&2
+    # Check if gt is available
+    if ! command -v gt &>/dev/null; then
+        echo "Error: Graphite (gt) is required for stack operations" >&2
+        echo "Install with: brew install graphite or visit https://graphite.dev" >&2
         return 1
     fi
     
-    log "Checking branches in stack for push readiness..."
+    log "Pushing stack to remote using Graphite..."
     log ""
-    
-    local branches_to_push=()
-    local all_pass=true
-    
-    # Check each branch
-    for branch in "${branches[@]}"; do
-        local worktree_path=""
-        if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
-            worktree_path="$PROJECT_DIR"
-        else
-            worktree_path="$WORKTREES_DIR/$branch"
-        fi
-        
-        if [ ! -d "$worktree_path" ]; then
-            log "✗ $branch - worktree not found"
-            all_pass=false
-            continue
-        fi
-        
-        # Check if branch has commits not on remote
-        local needs_push=false
-        local remote_exists=false
-        
-        # Check if remote branch exists
-        if git -C "$worktree_path" ls-remote --exit-code --heads origin "$branch" &>/dev/null; then
-            remote_exists=true
-            # Check if local is ahead of remote
-            local ahead=$(git -C "$worktree_path" rev-list --count "origin/$branch..$branch" 2>/dev/null)
-            if [ "$ahead" -gt 0 ]; then
-                needs_push=true
-            fi
-        else
-            # No remote branch, needs push if there are any commits
-            if git -C "$worktree_path" rev-parse --verify "$branch" &>/dev/null; then
-                needs_push=true
-            fi
-        fi
-        
-        if [ "$needs_push" = true ]; then
-            # Check for uncommitted changes
-            if ! git -C "$worktree_path" diff-index --quiet HEAD -- 2>/dev/null; then
-                log "✗ $branch - has uncommitted changes"
-                all_pass=false
-                continue
-            fi
-            
-            if [ "$push_all" = true ] || [ "$remote_exists" = false ]; then
-                branches_to_push+=("$branch")
-                if [ "$remote_exists" = false ]; then
-                    log "✓ $branch - ready to push (new branch)"
-                else
-                    log "✓ $branch - ready to push ($ahead commits ahead)"
-                fi
-            else
-                log "⚠ $branch - has unpushed changes ($ahead commits ahead, use --all to include)"
-            fi
-        else
-            if [ "$remote_exists" = true ]; then
-                log "✓ $branch - up to date"
-            else
-                log "✗ $branch - no commits to push"
-            fi
-        fi
-    done
-    
-    if [ ${#branches_to_push[@]} -eq 0 ]; then
-        log ""
-        log "No branches need pushing"
-        return 0
-    fi
-    
-    if [ "$all_pass" = false ] && [ "$push_all" = false ]; then
-        log ""
-        log "Some branches have issues. Fix them or use --all to push ready branches only."
-        return 1
-    fi
-    
-    log ""
-    log "Branches to push: ${branches_to_push[*]}"
     
     if [ "$dry_run" = true ]; then
+        log "Dry run mode - showing what would be pushed:"
         log ""
-        log "Dry run - no branches were pushed"
+        # Show the current stack
+        gt ls --no-interactive
+        log ""
+        log "Would push all branches in the stack above"
         return 0
     fi
     
-    log ""
-    log "Pushing branches..."
-    log ""
+    # Use gt submit to push the stack
+    # gt submit pushes all branches in the stack
+    local gt_opts=""
+    if [ "$force" = true ]; then
+        gt_opts="--force"
+    fi
     
-    # Push each branch in order
-    local failed_branch=""
-    for branch in "${branches_to_push[@]}"; do
-        local worktree_path=""
-        if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
-            worktree_path="$PROJECT_DIR"
-        else
-            worktree_path="$WORKTREES_DIR/$branch"
-        fi
-        
-        log "Pushing $branch..."
-        if git -C "$worktree_path" push -u origin "$branch" 2>&1; then
-            log "✓ Pushed $branch"
-        else
-            log "✗ Failed to push $branch"
-            failed_branch="$branch"
-            break
-        fi
+    if gt submit --no-interactive --no-edit $gt_opts; then
         log ""
-    done
-    
-    if [ -n "$failed_branch" ]; then
-        echo ""
-        echo "Error: Failed to push branch: $failed_branch" >&2
-        return 1
+        log "Stack pushed successfully!"
+        log ""
+        log "View your PRs with: gt ls"
     else
-        log "All branches pushed successfully!"
+        echo ""
+        echo "Error: Failed to push stack" >&2
+        echo "Run 'gt status' to see what went wrong" >&2
+        return 1
     fi
 }
 
@@ -1628,12 +1476,15 @@ BRANCH=""
 RUN_COMMAND=""
 PUSH_STACK=false
 PUSH_ALL=false
+PUSH_FORCE=false
 DRY_RUN=false
 PR_STACK=false
 PR_DRAFT=false
+PR_PUBLISH=false
 INSTALL_GIT_STACK=false
 STACK_SUBCOMMAND=""
 STACK_PARENT_BRANCH=""
+STACK_CURRENT=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1656,6 +1507,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --draft)
             PR_DRAFT=true
+            shift
+            ;;
+        --publish)
+            PR_PUBLISH=true
+            shift
+            ;;
+        --force|-f)
+            PUSH_FORCE=true
             shift
             ;;
         --no-symlink)
@@ -1694,7 +1553,7 @@ while [[ $# -gt 0 ]]; do
             INSTALL_GIT_STACK=true
             shift
             ;;
-        init|list|ls|create|rm|switch|merge|is-worktree|stack|sync|next|prev|run|push|pr)
+        init|list|ls|create|rm|switch|merge|is-worktree|stack|sync|restack|next|prev|run|push|pr|migrate-to-gt)
             COMMAND="$1"
             shift
             # For 'run' command, capture everything else as the command to execute
@@ -1712,6 +1571,10 @@ while [[ $# -gt 0 ]]; do
                             STACK_PARENT_BRANCH="$1"
                             shift
                         fi
+                        ;;
+                    --current)
+                        STACK_CURRENT=true
+                        shift
                         ;;
                     --install)
                         # Already handled by the --install flag
@@ -1783,6 +1646,9 @@ case "$COMMAND" in
     sync)
         sync_worktree_stack "$BRANCH"
         ;;
+    restack)
+        restack_worktree
+        ;;
     next)
         navigate_stack "next"
         ;;
@@ -1797,11 +1663,12 @@ case "$COMMAND" in
             # Build options array
             push_opts=()
             [ "$PUSH_ALL" = true ] && push_opts+=("--all")
+            [ "$PUSH_FORCE" = true ] && push_opts+=("--force")
             [ "$DRY_RUN" = true ] && push_opts+=("--dry-run")
             push_stack "${push_opts[@]}"
         else
             echo "Error: push command requires --stack flag" >&2
-            echo "Usage: wt push --stack [--all] [--dry-run]" >&2
+            echo "Usage: wt push --stack [--force] [--dry-run]" >&2
             exit 1
         fi
         ;;
@@ -1811,10 +1678,20 @@ case "$COMMAND" in
             pr_opts=()
             [ "$DRY_RUN" = true ] && pr_opts+=("--dry-run")
             [ "$PR_DRAFT" = true ] && pr_opts+=("--draft")
+            [ "$PR_PUBLISH" = true ] && pr_opts+=("--publish")
             create_stack_prs "${pr_opts[@]}"
         else
             echo "Error: pr command requires --stack flag" >&2
-            echo "Usage: wt pr --stack [--draft] [--dry-run]" >&2
+            echo "Usage: wt pr --stack [--draft] [--publish] [--dry-run]" >&2
+            exit 1
+        fi
+        ;;
+    migrate-to-gt)
+        # Run the migration script
+        if [ -f "${SCRIPT_DIR}/wt-migrate-to-gt" ]; then
+            "${SCRIPT_DIR}/wt-migrate-to-gt" "$@"
+        else
+            echo "Error: Migration script not found at ${SCRIPT_DIR}/wt-migrate-to-gt" >&2
             exit 1
         fi
         ;;
