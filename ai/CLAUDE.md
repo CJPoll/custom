@@ -24,6 +24,12 @@ Never use IEx. Instead, run elixir commands with `mix run -e "<elixir code here>
 
 == Coding Principles
 
+=== Single-Responsibility
+
+Sometimes a linter will tell you a function has too many control-flow
+structures. When this happens, favor extracting pipe chains to other functions
+before extracting other control-flow structures like case, with, etc.
+
 === Never pattern match on :ok tuples or error tuples in a function head
 Functions are supposed to be reusable. Pattern-matching in a function head gives
 the appearance of reusability, but in reality it couples the function to

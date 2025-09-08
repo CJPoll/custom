@@ -47,6 +47,8 @@ Commands:
   switch <branch>   Change to the worktree for the specified branch
                     (In tmux: switches/creates session. Outside tmux: shows cd command)
   merge <branch>    Merge a worktree branch (must be run from parent repo)
+  worktree-dir <branch>  Get the directory path for a branch's worktree
+                    Exit codes: 0=found (prints path), 1=not found (no output)
   is-worktree       Check if a directory is a git worktree
                     Exit codes: 0=worktree, 1=project root, 2=neither
   stack             Show all tracked branches and their relationships (gt ls)
@@ -362,7 +364,10 @@ create_worktree() {
     if [ "$PARENT_BRANCH" != "main" ] || [[ "${PARENT_BRANCH_EXPLICIT:-false}" == "true" ]]; then
         log "Configuring Graphite parent relationship: $branch -> $PARENT_BRANCH"
         if command -v gt &>/dev/null; then
-            gt -C "$worktree_path" track "$branch" --parent "$PARENT_BRANCH" -q 2>/dev/null || log "Warning: Failed to set parent relationship"
+            # First ensure the parent branch is tracked
+            (cd "$worktree_path" && gt track "$PARENT_BRANCH" 2>/dev/null) || true
+            # Now track the current branch with its parent
+            (cd "$worktree_path" && gt track "$branch" --parent "$PARENT_BRANCH") || log "Warning: Failed to set parent relationship"
         else
             log "Warning: gt not available, parent relationship not configured"
         fi
@@ -603,6 +608,39 @@ merge_worktree() {
         echo "Error: Merge failed" >&2
         return 1
     fi
+}
+
+get_worktree_dir() {
+    local branch="$1"
+    
+    if [ -z "$branch" ]; then
+        exit 1
+    fi
+    
+    # Special handling for main/master branch - use project root
+    if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+        # Check if the branch matches what's actually in the project root
+        local project_branch=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
+        if [ "$project_branch" = "$branch" ]; then
+            echo "$PROJECT_DIR"
+            exit 0
+        else
+            exit 1
+        fi
+    fi
+    
+    # Check for worktree in the standard location
+    local worktree_path="$WORKTREES_DIR/$branch"
+    if [ -d "$worktree_path" ]; then
+        # Verify it's actually a worktree for this branch
+        local worktree_branch=$(git -C "$worktree_path" rev-parse --abbrev-ref HEAD 2>/dev/null)
+        if [ "$worktree_branch" = "$branch" ]; then
+            echo "$worktree_path"
+            exit 0
+        fi
+    fi
+    
+    exit 1
 }
 
 is_worktree() {
@@ -1553,7 +1591,7 @@ while [[ $# -gt 0 ]]; do
             INSTALL_GIT_STACK=true
             shift
             ;;
-        init|list|ls|create|rm|switch|merge|is-worktree|stack|sync|restack|next|prev|run|push|pr|migrate-to-gt)
+        init|list|ls|create|rm|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|push|pr|migrate-to-gt)
             COMMAND="$1"
             shift
             # For 'run' command, capture everything else as the command to execute
@@ -1592,7 +1630,7 @@ while [[ $# -gt 0 ]]; do
         *)
             # If we have a command that expects a branch and no branch is set yet,
             # treat this as the branch name
-            if [[ -n "$COMMAND" ]] && [[ -z "$BRANCH" ]] && [[ "$COMMAND" =~ ^(create|rm|switch|merge|sync)$ ]]; then
+            if [[ -n "$COMMAND" ]] && [[ -z "$BRANCH" ]] && [[ "$COMMAND" =~ ^(create|rm|switch|merge|worktree-dir|sync)$ ]]; then
                 BRANCH="$1"
                 shift
             else
@@ -1626,6 +1664,9 @@ case "$COMMAND" in
         ;;
     merge)
         merge_worktree "$BRANCH"
+        ;;
+    worktree-dir)
+        get_worktree_dir "$BRANCH"
         ;;
     is-worktree)
         is_worktree

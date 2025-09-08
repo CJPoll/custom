@@ -140,6 +140,18 @@ function dev()
   cd "${DEV_DIR}/${PROGRAM_NAME}";
 }
 
+function wt()
+{
+  local wt_command="${DEV_DIR}/custom/scripts/wt"
+
+  if [ "${1}" = "cd" ]; then
+    local dir=$("${wt_command}" "worktree-dir" "${@:2}")
+    cd "${dir}"
+  else
+    "${wt_command}" "${@:1}"
+  fi
+}
+
 function edit()
 {
   NAME="${1}";

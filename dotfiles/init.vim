@@ -82,8 +82,6 @@ set omnifunc=syntaxcomplete#Complete
 " Always show statusline
 set laststatus=2
 
-" Use 256 colours (Use this setting only if your terminal supports 256 colours)
-"set t_Co=256
 " }}}
 
 " Global variables {{{
@@ -100,7 +98,7 @@ set t_Co=256 					              " Explicitly tell Vim that the terminal supports
 
 set wildignore+=*/tmp/*,*.so,*swp,*.swo,*.zip,*.beam,*/deps/*,*/_build/*,*/node_modules/*,**/elm-stuff/*,**/doc/*,*.class,**/project/*,**/target/*
 
-set termguicolors
+"set termguicolors
 let base16colorspace=256  " Access colors present in 256 colorspace"
 set background=dark                 " Sets the background color (dark|light)
 

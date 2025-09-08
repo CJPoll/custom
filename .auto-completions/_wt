@@ -23,7 +23,7 @@ _wt() {
                         '--pr-review[Open changed files in tabs for PR review]' \
                         '--parent[Parent branch for PR review]:branch:_wt_git_branches'
                     ;;
-                rm|merge)
+                rm|merge|worktree-dir)
                     _wt_worktrees
                     ;;
                 sync)
@@ -83,9 +83,11 @@ _wt_commands() {
         'rm:Remove the worktree for the specified branch'
         'switch:Change to the worktree for the specified branch'
         'merge:Merge a worktree branch (must be run from parent repo)'
+        'worktree-dir:Get the directory path for a branch worktree'
         'is-worktree:Check if a directory is a git worktree'
         'stack:Show branch hierarchy using Graphite (use --current for current stack only)'
         'sync:Sync the stack by rebasing child branches onto updated parents'
+        'restack:Fix stack relationships and rebase onto correct parents'
         'next:Navigate to a child branch in the stack (switch tmux session)'
         'prev:Navigate to the parent branch in the stack (switch tmux session)'
         'run:Execute a command across all branches in the stack'
