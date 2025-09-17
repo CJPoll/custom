@@ -53,7 +53,11 @@ require('claudecode').setup({
 })
 
 -- Elixir tools setup
-require("elixir").setup()
+require("elixir").setup({
+  elixirls = {
+    tag = "v0.29.3", -- Use a version that supports Elixir 1.18 + OTP 28
+  }
+})
 
 -- Custom function to open Claude in bottom split
 function ClaudeCodeBottom()

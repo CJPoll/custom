@@ -71,7 +71,7 @@ CLAUDE_PROMPTS=(
     "/swe:01-context Linear: ${LINEAR_TICKET}"
     "/swe:02-plan"
     "/swe:03-detailed-plan"
-    "/swe:04-implement.md"
+    "/swe:04-implement"
 )
 
 # Function to run a command with logging and status
@@ -102,7 +102,7 @@ if [[ "$SKIP_IMPL" == "false" ]]; then
         prompt="${CLAUDE_PROMPTS[$i]}"
         step=$((i + 1))
         log_file="$LOG_DIR/step-${step}-$(echo "$prompt" | tr '/:' '-').log"
-        
+
         # Check if we should skip this prompt based on existing output files
         skip_prompt=false
         case "$prompt" in
@@ -164,17 +164,6 @@ echo "Detected code directory: $CODE_DIR"
 #    fi
 #else
 #    error_exit "prep-commit script not found or not executable at: $SCRIPT_DIR/prep-commit"
-#fi
-
-# This is now handled by a custom credo check
-## Run single-responsibility script
-#if [[ -x "$SCRIPT_DIR/single-responsibility" ]]; then
-#    log_file="$LOG_DIR/single-responsibility.log"
-#    if ! run_command "single-responsibility --dir $CODE_DIR --parent main" "$SCRIPT_DIR/single-responsibility --dir $CODE_DIR --parent main" "$log_file"; then
-#        error_exit "single-responsibility script failed"
-#    fi
-#else
-#    error_exit "single-responsibility script not found or not executable at: $SCRIPT_DIR/single-responsibility"
 #fi
 
 # Run function-names script

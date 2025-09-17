@@ -56,6 +56,8 @@ Commands:
   stack --install   Install Graphite (gt) if not already installed
                     Downloads and installs Graphite from https://graphite.dev
   stack parent <branch>  Set or update the parent branch for the current branch
+  stack open <branch>    Create worktrees for all branches in the stack up to the given branch
+                    Must be run from main branch worktree
   sync              Sync the stack with remote changes using Graphite (gt sync)
   sync --continue   Continue a sync operation after resolving conflicts (gt continue)
   restack           Fix stack relationships and rebase onto correct parents (gt restack)
@@ -111,6 +113,7 @@ Examples:
   wt pr --stack
   wt pr --stack --draft
   wt pr --stack --publish
+  wt stack open feature/child  # Creates worktrees for parent branches leading to child
   wt migrate-to-gt
 
 Notes:
@@ -685,9 +688,93 @@ is_worktree() {
     exit 2
 }
 
+open_stack_branches() {
+    local target_branch="$1"
+
+    if [ -z "$target_branch" ]; then
+        echo "Error: Branch name is required" >&2
+        echo "Usage: wt stack open <branch>" >&2
+        return 1
+    fi
+
+    # Check if we're running from the main branch worktree
+    set +e
+    (
+        CHECK_DIR="$(pwd)"
+        is_worktree
+    )
+    local is_wt_result=$?
+    set -e
+
+    if [ $is_wt_result -ne 1 ]; then
+        echo "Error: 'wt stack open' must be run from the main branch worktree" >&2
+        exit 1
+    fi
+
+    # Check if gt is available
+    if ! command -v gt &>/dev/null; then
+        echo "Error: Graphite (gt) is required for stack operations" >&2
+        echo "Install with: brew install graphite or visit https://graphite.dev" >&2
+        exit 2
+    fi
+
+    # Get the stack structure to verify the branch exists
+    local stack_output=$(gt ls --no-interactive 2>/dev/null || echo "")
+    if [ -z "$stack_output" ]; then
+        echo "Error: Could not retrieve stack information" >&2
+        exit 2
+    fi
+
+    # Check if the target branch exists in the stack
+    if ! echo "$stack_output" | grep -q "$target_branch"; then
+        echo "Error: Branch '$target_branch' not found in stack" >&2
+        exit 2
+    fi
+
+    # Build the chain of branches from main to target
+    local branches_to_create=()
+    local current="$target_branch"
+
+    while [ -n "$current" ] && [ "$current" != "main" ] && [ "$current" != "master" ]; do
+        branches_to_create=("$current" "${branches_to_create[@]}")
+        current=$(get_branch_parent "$current")
+    done
+
+    if [ ${#branches_to_create[@]} -eq 0 ]; then
+        log "No branches to create - target branch is main/master or has no parents"
+        return 0
+    fi
+
+    log "Creating worktrees for stack leading to $target_branch:"
+    for branch in "${branches_to_create[@]}"; do
+        log "  - $branch"
+    done
+    log ""
+
+    # Create worktrees for each branch in order
+    for branch in "${branches_to_create[@]}"; do
+        # Check if worktree already exists
+        local worktree_path="$WORKTREES_DIR/$branch"
+        if [ -d "$worktree_path" ]; then
+            log "✓ Worktree already exists for $branch"
+        else
+            log "Creating worktree for $branch..."
+            if ! create_worktree "$branch"; then
+                echo "Error: Failed to create worktree for branch '$branch'" >&2
+                exit 3
+            fi
+            log "✓ Created worktree for $branch"
+        fi
+    done
+
+    log ""
+    log "Successfully created all worktrees in stack leading to $target_branch"
+    return 0
+}
+
 set_stack_parent() {
     local parent_branch="$1"
-    
+
     if [ -z "$parent_branch" ]; then
         echo "Error: Parent branch name is required" >&2
         echo "Usage: wt stack parent <parent-branch>" >&2
@@ -1522,6 +1609,7 @@ PR_PUBLISH=false
 INSTALL_GIT_STACK=false
 STACK_SUBCOMMAND=""
 STACK_PARENT_BRANCH=""
+STACK_OPEN_BRANCH=""
 STACK_CURRENT=false
 
 while [[ $# -gt 0 ]]; do
@@ -1610,6 +1698,14 @@ while [[ $# -gt 0 ]]; do
                             shift
                         fi
                         ;;
+                    open)
+                        STACK_SUBCOMMAND="open"
+                        shift
+                        if [ $# -gt 0 ]; then
+                            STACK_OPEN_BRANCH="$1"
+                            shift
+                        fi
+                        ;;
                     --current)
                         STACK_CURRENT=true
                         shift
@@ -1680,6 +1776,13 @@ case "$COMMAND" in
                 exit 1
             fi
             set_stack_parent "$STACK_PARENT_BRANCH"
+        elif [ "$STACK_SUBCOMMAND" = "open" ]; then
+            if [ -z "$STACK_OPEN_BRANCH" ]; then
+                echo "Error: Branch name is required" >&2
+                echo "Usage: wt stack open <branch>" >&2
+                exit 1
+            fi
+            open_stack_branches "$STACK_OPEN_BRANCH"
         else
             show_worktree_stack
         fi

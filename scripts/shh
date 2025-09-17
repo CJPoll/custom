@@ -1,6 +1,6 @@
 #! /usr/bin/env ruby
 
-HOME_IP='71.195.207.146'
+HOME_IP='76.149.255.225'
 
 REGISTERED_SERVERS = {
 	"home" => {

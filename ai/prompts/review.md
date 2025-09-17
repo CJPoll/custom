@@ -1,4 +1,33 @@
-I need to do code review on this branch relative to main. Help me look for any
-potential bugs or security issue. For the given file types, make sure to
-evaluate how well the code follows community style guides. Make any suggestions
-for code readability that would help. Look for untested code.
+Perform a comprehensive code review with the following focus areas:
+
+1. **Code Quality**
+   - Clean code principles and best practices
+   - Proper error handling and edge cases
+   - Code readability and maintainability
+
+2. **Security**
+   - Check for potential security vulnerabilities
+   - Validate input sanitization
+   - Review authentication/authorization logic
+
+3. **Performance**
+   - Identify potential performance bottlenecks
+   - Review database queries for efficiency
+   - Check for memory leaks or resource issues
+
+4. **Testing**
+   - Verify adequate test coverage
+   - Review test quality and edge cases
+   - Check for missing test scenarios
+
+5. **Documentation**
+   - Ensure code is properly documented
+   - Verify README updates for new features
+   - Check API documentation accuracy
+
+6. **ADR Compliance**
+   - Ensure code follows standards defined in ./adrs/*.md
+
+Provide detailed feedback using inline comments for specific issues.
+Use top-level comments for general observations or praise.
+
