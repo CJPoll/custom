@@ -201,7 +201,7 @@ if ! git diff --cached --quiet; then
                     PR_TEMP_FILE=$(mktemp)
                     
                     # Generate PR description using Claude Code based on entire diff
-                    git diff "$BASE_BRANCH"..."$CURRENT_BRANCH" | claude "Generate a GitHub PR description based on the following diff. Include a summary of changes, any breaking changes, and testing suggestions. Format it with markdown. Give no additional output beyond the PR description." > "$PR_TEMP_FILE" &
+                    git diff --staged "$BASE_BRANCH"..."$CURRENT_BRANCH" | claude "Generate a GitHub PR description based on the following diff. Include a summary of changes, any breaking changes, and testing suggestions. Format it with markdown. Give no additional output beyond the PR description." > "$PR_TEMP_FILE" &
                     CLAUDE_PR_PID=$!
                     spinner $CLAUDE_PR_PID
                     wait $CLAUDE_PR_PID
@@ -232,7 +232,7 @@ if ! git diff --cached --quiet; then
                     
                     # Generate PR description using Claude Code
                     echo "Generating PR description..."
-                    git diff "$BASE_BRANCH"..."$CURRENT_BRANCH" | claude "Generate a GitHub PR description based on the following diff. Include a summary of changes, any breaking changes, and testing suggestions. Format it with markdown. Give no additional output beyond the PR description." > "$PR_TEMP_FILE" &
+                    git diff --staged "$BASE_BRANCH"..."$CURRENT_BRANCH" | claude "Generate a GitHub PR description based on the following diff. Include a summary of changes, any breaking changes, and testing suggestions. Format it with markdown. Give no additional output beyond the PR description." > "$PR_TEMP_FILE" &
                     CLAUDE_PR_PID=$!
                     spinner $CLAUDE_PR_PID
                     wait $CLAUDE_PR_PID
