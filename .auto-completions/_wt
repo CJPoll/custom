@@ -57,12 +57,43 @@ _wt() {
                         '--draft[Create draft pull requests]' \
                         '--dry-run[Show what PRs would be created without creating them]'
                     ;;
-                ls|stack)
+                ls)
                     _arguments \
                         '--current[Show only the current branch stack]' \
                         '--install[Install Graphite (gt) if not already installed]'
-                    if [[ ${#words[@]} -ge 3 && ${words[2]} == "parent" ]]; then
-                        _wt_git_branches
+                    ;;
+                stack)
+                    # Handle stack subcommands
+                    if [[ ${#words[@]} -eq 2 ]]; then
+                        # First argument after 'stack'
+                        local stack_subcommands=(
+                            '--current:Show only the current branch stack'
+                            '--install:Install Graphite (gt) if not already installed'
+                            'parent:Set or update the parent branch for the current branch'
+                            'open:Create worktrees for all branches in the stack up to the given branch'
+                        )
+                        _describe -t stack-subcommands 'stack subcommand' stack_subcommands
+                    elif [[ ${#words[@]} -ge 3 ]]; then
+                        case ${words[2]} in
+                            parent)
+                                # Complete branch names for parent subcommand
+                                if [[ ${#words[@]} -eq 3 ]]; then
+                                    _wt_git_branches
+                                fi
+                                ;;
+                            open)
+                                # Complete branch names and flags for open subcommand
+                                if [[ ${#words[@]} -eq 3 ]]; then
+                                    _wt_git_branches
+                                elif [[ ${#words[@]} -eq 4 ]]; then
+                                    # Offer --create-sessions flag if branch was provided
+                                    _arguments '--create-sessions[Also create tmux sessions for each worktree (without switching)]'
+                                fi
+                                ;;
+                            --current|--install)
+                                # No additional arguments for these flags
+                                ;;
+                        esac
                     fi
                     ;;
                 migrate-to-gt)
@@ -85,7 +116,7 @@ _wt_commands() {
         'merge:Merge a worktree branch (must be run from parent repo)'
         'worktree-dir:Get the directory path for a branch worktree'
         'is-worktree:Check if a directory is a git worktree'
-        'stack:Show branch hierarchy using Graphite (use --current for current stack only)'
+        'stack:Show branch hierarchy using Graphite (use --current for current stack only, open to create worktrees)'
         'sync:Sync the stack by rebasing child branches onto updated parents'
         'restack:Fix stack relationships and rebase onto correct parents'
         'next:Navigate to a child branch in the stack (switch tmux session)'

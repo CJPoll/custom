@@ -58,6 +58,7 @@ Commands:
   stack parent <branch>  Set or update the parent branch for the current branch
   stack open <branch>    Create worktrees for all branches in the stack up to the given branch
                     Must be run from main branch worktree
+  stack open --create-sessions  Also create tmux sessions for each worktree (without switching)
   sync              Sync the stack with remote changes using Graphite (gt sync)
   sync --continue   Continue a sync operation after resolving conflicts (gt continue)
   restack           Fix stack relationships and rebase onto correct parents (gt restack)
@@ -114,6 +115,7 @@ Examples:
   wt pr --stack --draft
   wt pr --stack --publish
   wt stack open feature/child  # Creates worktrees for parent branches leading to child
+  wt stack open feature/child --create-sessions  # Also creates tmux sessions
   wt migrate-to-gt
 
 Notes:
@@ -688,12 +690,53 @@ is_worktree() {
     exit 2
 }
 
+create_tmux_session_for_worktree() {
+    local branch="$1"
+    local worktree_path="$2"
+
+    # Get the project name from the current directory
+    local project_name=$(basename "$PROJECT_DIR")
+
+    # Create session name
+    if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+        # Main branch uses just the project name
+        local session_name="$project_name"
+    else
+        # Worktrees use project-wt-branch format
+        # Replace slashes in branch name with dashes to avoid tmux issues
+        local safe_branch=$(echo "$branch" | tr '/' '-')
+        local session_name="${project_name}-wt-${safe_branch}"
+    fi
+
+    # Check if tmux session already exists
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        log "  ✓ Tmux session already exists: $session_name"
+        return 0
+    fi
+
+    # Use proj script to create the session with all the proper setup, but don't switch
+    # The proj script expects the session name and path
+    if proj "$session_name" --path "$worktree_path" --no-switch 2>/dev/null; then
+        log "  ✓ Created tmux session with full setup: $session_name"
+        return 0
+    else
+        log "  ✗ Failed to create tmux session: $session_name"
+        return 1
+    fi
+}
+
 open_stack_branches() {
     local target_branch="$1"
+    local create_sessions=false
+
+    # Check for --create-sessions flag (passed via global variable)
+    if [ "${STACK_CREATE_SESSIONS:-false}" = true ]; then
+        create_sessions=true
+    fi
 
     if [ -z "$target_branch" ]; then
         echo "Error: Branch name is required" >&2
-        echo "Usage: wt stack open <branch>" >&2
+        echo "Usage: wt stack open <branch> [--create-sessions]" >&2
         return 1
     fi
 
@@ -765,10 +808,18 @@ open_stack_branches() {
             fi
             log "✓ Created worktree for $branch"
         fi
+
+        # Create tmux session if requested
+        if [ "$create_sessions" = true ]; then
+            create_tmux_session_for_worktree "$branch" "$worktree_path"
+        fi
     done
 
     log ""
     log "Successfully created all worktrees in stack leading to $target_branch"
+    if [ "$create_sessions" = true ]; then
+        log "Tmux sessions created for all branches in the stack"
+    fi
     return 0
 }
 
@@ -1610,6 +1661,7 @@ INSTALL_GIT_STACK=false
 STACK_SUBCOMMAND=""
 STACK_PARENT_BRANCH=""
 STACK_OPEN_BRANCH=""
+STACK_CREATE_SESSIONS=false
 STACK_CURRENT=false
 
 while [[ $# -gt 0 ]]; do
@@ -1701,10 +1753,39 @@ while [[ $# -gt 0 ]]; do
                     open)
                         STACK_SUBCOMMAND="open"
                         shift
-                        if [ $# -gt 0 ]; then
-                            STACK_OPEN_BRANCH="$1"
-                            shift
-                        fi
+                        # Parse remaining arguments for 'stack open'
+                        while [ $# -gt 0 ]; do
+                            case "$1" in
+                                --create-sessions)
+                                    STACK_CREATE_SESSIONS=true
+                                    shift
+                                    ;;
+                                --help|-h)
+                                    echo "Usage: wt stack open <branch> [--create-sessions]"
+                                    echo ""
+                                    echo "Create worktrees for all branches in the stack up to the given branch."
+                                    echo "Must be run from main branch worktree."
+                                    echo ""
+                                    echo "Options:"
+                                    echo "  --create-sessions  Also create tmux sessions for each worktree (without switching)"
+                                    exit 0
+                                    ;;
+                                --*)
+                                    echo "Error: Unknown option for 'stack open': $1" >&2
+                                    exit 1
+                                    ;;
+                                *)
+                                    # This is the branch name
+                                    if [ -z "$STACK_OPEN_BRANCH" ]; then
+                                        STACK_OPEN_BRANCH="$1"
+                                        shift
+                                    else
+                                        echo "Error: Multiple branch names specified" >&2
+                                        exit 1
+                                    fi
+                                    ;;
+                            esac
+                        done
                         ;;
                     --current)
                         STACK_CURRENT=true
@@ -1779,7 +1860,7 @@ case "$COMMAND" in
         elif [ "$STACK_SUBCOMMAND" = "open" ]; then
             if [ -z "$STACK_OPEN_BRANCH" ]; then
                 echo "Error: Branch name is required" >&2
-                echo "Usage: wt stack open <branch>" >&2
+                echo "Usage: wt stack open <branch> [--create-sessions]" >&2
                 exit 1
             fi
             open_stack_branches "$STACK_OPEN_BRANCH"
