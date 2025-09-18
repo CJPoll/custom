@@ -178,9 +178,21 @@ _wt_switchable_branches() {
     local -a branches
     branches=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)"})
     
-    # Also get branches that have worktrees
+    # Also get branches that have worktrees by checking the worktrees directory directly
     local worktrees_dir="$HOME/.local/worktrees/$(basename $(pwd))"
     if [[ -d "$worktrees_dir" ]]; then
+        # Get directories directly from the worktrees folder
+        local -a worktree_dirs
+        worktree_dirs=(${(f)"$(ls -1 "$worktrees_dir" 2>/dev/null)"})
+        
+        # Add each worktree directory as a potential branch
+        for dir in "${worktree_dirs[@]}"; do
+            if [[ -n "$dir" && ! " ${branches[@]} " =~ " ${dir} " ]]; then
+                branches+=("$dir")
+            fi
+        done
+        
+        # Also check git worktree list in case some are registered
         local git_output
         git_output=$(git worktree list 2>/dev/null)
         
