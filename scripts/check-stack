@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Script name for error messages
+SCRIPT_NAME=$(basename "$0")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Check that wt script exists
+if [ ! -x "${SCRIPT_DIR}/wt" ]; then
+    echo "Error: Cannot find executable wt script at ${SCRIPT_DIR}/wt" >&2
+    exit 1
+fi
+
+# Get project directory (similar to how wt determines it)
+CURRENT_DIR="$(pwd)"
+PROJECT_DIR="$CURRENT_DIR"
+
+# Check if we're in a worktree by looking for .git file (not directory)
+if [ -f "$CURRENT_DIR/.git" ]; then
+    # We're in a worktree, extract the actual project path
+    GIT_DIR=$(cat "$CURRENT_DIR/.git" | grep "gitdir:" | cut -d' ' -f2)
+    # Git dir for worktree looks like: /path/to/project/.git/worktrees/branch-name
+    # We need to go up 3 levels to get the project root
+    PROJECT_DIR=$(dirname $(dirname $(dirname "$GIT_DIR")))
+fi
+
+# Extract just the project name from the path
+PROJECT_NAME=$(basename "$PROJECT_DIR")
+WORKTREES_DIR="${HOME}/.local/worktrees/$PROJECT_NAME"
+
+# Parse command line arguments
+TARGET_BRANCH=""
+
+# Function to display usage
+usage() {
+    cat >&2 << EOF
+Usage: $SCRIPT_NAME [<branch-name>]
+
+Run 'mix check' on all branches in the stack from main to the target branch.
+
+Arguments:
+    branch-name    Target branch (defaults to current branch)
+
+The script will:
+1. Run 'wt stack open <branch>' to ensure worktrees exist
+2. Iterate through each branch from main to target
+3. Run 'mix check' in each worktree
+4. Stop on first failure with terminal bell and error message
+5. Report success if all checks pass
+
+EOF
+    exit 1
+}
+
+# Function to display error and exit
+error_exit() {
+    echo "Error: $1" >&2
+    # Ring terminal bell
+    echo -e "\a"
+    exit 1
+}
+
+# Function to log messages
+log() {
+    echo "$@" >&2
+}
+
+# Function to get parent branch using gt
+get_branch_parent() {
+    local branch="$1"
+    local parent=""
+
+    # Use gt to get parent branch info
+    if command -v gt &>/dev/null; then
+        # Get the worktree directory for the branch
+        local worktree_path=""
+        if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+            worktree_path="$PROJECT_DIR"
+        else
+            worktree_path="$WORKTREES_DIR/$branch"
+            if [ ! -d "$worktree_path" ]; then
+                # If worktree doesn't exist yet, try current directory
+                worktree_path="."
+            fi
+        fi
+
+        # Parse gt branch info output for parent
+        if [ -d "$worktree_path" ]; then
+            parent=$(cd "$worktree_path" 2>/dev/null && gt branch info 2>/dev/null | grep "^Parent:" | sed 's/^Parent:[[:space:]]*//' | cut -d' ' -f1)
+        fi
+    fi
+
+    echo "$parent"
+}
+
+# Function to get branches in stack from main to target
+get_stack_branches_to_target() {
+    local target_branch="$1"
+    local branches=()
+    local current="$target_branch"
+
+    # Build the chain of branches from target back to main
+    while [ -n "$current" ] && [ "$current" != "main" ] && [ "$current" != "master" ]; do
+        branches=("$current" "${branches[@]}")
+        current=$(get_branch_parent "$current")
+    done
+
+    # Output branches from main to target
+    for branch in "${branches[@]}"; do
+        echo "$branch"
+    done
+}
+
+# Function to run mix check in a worktree
+run_check_in_worktree() {
+    local branch="$1"
+    local worktree_path=""
+
+    # Determine worktree path
+    if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+        worktree_path="$PROJECT_DIR"
+    else
+        worktree_path="$WORKTREES_DIR/$branch"
+    fi
+
+    if [ ! -d "$worktree_path" ]; then
+        error_exit "Worktree not found for branch $branch at: $worktree_path"
+    fi
+
+    log "Checking branch: $branch"
+    log "  Path: $worktree_path"
+
+    # Change to worktree directory
+    cd "$worktree_path" || error_exit "Failed to change to worktree directory: $worktree_path"
+
+    # Initialize mise if available (this sets up PATH with shims)
+    if [ -x "${HOME}/.local/bin/mise" ]; then
+        log "  Initializing mise environment..."
+        eval "$("${HOME}/.local/bin/mise" activate bash)"
+
+        # Run mise trust to ensure the project's .mise.toml is trusted
+        log "  Running mise trust..."
+        mise trust 2>/dev/null || log "  Note: mise trust failed (continuing anyway)"
+    elif command -v mise &>/dev/null; then
+        # Mise is available in PATH already
+        log "  Running mise trust..."
+        mise trust 2>/dev/null || log "  Note: mise trust failed (continuing anyway)"
+    else
+        log "  Warning: mise not found, attempting to continue without it"
+    fi
+
+    # Run mix deps.get and mix compile
+    log "  Installing dependencies and compiling..."
+    if ! mix deps.get; then
+        error_exit "Failed to get dependencies for branch $branch"
+    fi
+
+    if ! mix compile; then
+        error_exit "Failed to compile branch $branch"
+    fi
+
+    # Run mix check
+    log "  Running mix check..."
+    if ! mix check; then
+        echo "" >&2
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+        echo "✗ Check failed for branch: $branch" >&2
+        echo "  Worktree path: $worktree_path" >&2
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+        # Ring terminal bell
+        echo -e "\a"
+        exit 1
+    fi
+
+    log "  ✓ Check passed for $branch"
+    log ""
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        -*)
+            echo "Error: Unknown option: $1" >&2
+            usage
+            ;;
+        *)
+            if [ -z "$TARGET_BRANCH" ]; then
+                TARGET_BRANCH="$1"
+            else
+                echo "Error: Multiple branch names provided" >&2
+                usage
+            fi
+            shift
+            ;;
+    esac
+done
+
+# If no branch specified, use current branch
+if [ -z "$TARGET_BRANCH" ]; then
+    TARGET_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [ -z "$TARGET_BRANCH" ]; then
+        error_exit "Not in a git repository and no branch specified"
+    fi
+    log "Using current branch: $TARGET_BRANCH"
+fi
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir &>/dev/null; then
+    error_exit "Not in a git repository"
+fi
+
+# Check if gt is available (required for stack operations)
+if ! command -v gt &>/dev/null; then
+    error_exit "Graphite (gt) is required for stack operations. Install with: brew install graphite or visit https://graphite.dev"
+fi
+
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log "Checking stack from main to $TARGET_BRANCH"
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log ""
+
+# First, ensure all worktrees exist
+log "Step 1: Ensuring worktrees exist for stack..."
+
+# Save current directory
+STARTING_DIR=$(pwd)
+
+# We need to be in the main project directory to run wt stack open
+cd "$PROJECT_DIR" || error_exit "Failed to change to project directory: $PROJECT_DIR"
+
+log "Running: wt stack open $TARGET_BRANCH (from main project directory)"
+if ! "${SCRIPT_DIR}/wt" stack open "$TARGET_BRANCH" 2>&1; then
+    # If it fails, it might be because worktrees already exist, which is fine
+    # Check if the worktrees we need actually exist
+    log "Note: wt stack open failed, checking if worktrees exist anyway..."
+fi
+log ""
+
+# Get the branches in the stack
+log "Step 2: Getting branches in stack..."
+branches=($(get_stack_branches_to_target "$TARGET_BRANCH"))
+
+if [ ${#branches[@]} -eq 0 ]; then
+    log "No branches to check (target branch is main/master or has no parents)"
+    echo "✓ Stack is ready to go!"
+    exit 0
+fi
+
+log "Branches to check (in order):"
+for branch in "${branches[@]}"; do
+    log "  - $branch"
+done
+log ""
+
+# Run mix check on each branch
+log "Step 3: Running checks on each branch..."
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log ""
+
+for branch in "${branches[@]}"; do
+    run_check_in_worktree "$branch"
+done
+
+# Return to starting directory
+cd "$STARTING_DIR"
+
+# Success message
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✓ Stack is ready to go!"
+echo "  All checks passed from main to $TARGET_BRANCH"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
