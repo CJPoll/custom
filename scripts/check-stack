@@ -31,23 +31,33 @@ WORKTREES_DIR="${HOME}/.local/worktrees/$PROJECT_NAME"
 
 # Parse command line arguments
 TARGET_BRANCH=""
+START_FROM_BRANCH="main"
 
 # Function to display usage
 usage() {
     cat >&2 << EOF
-Usage: $SCRIPT_NAME [<branch-name>]
+Usage: $SCRIPT_NAME [<branch-name>] [OPTIONS]
 
-Run 'mix check' on all branches in the stack from main to the target branch.
+Run 'mix check' on all branches in the stack from a starting branch to the target branch.
 
 Arguments:
-    branch-name    Target branch (defaults to current branch)
+    branch-name              Target branch (defaults to current branch)
+
+Options:
+    --start-from <branch>    Branch to start iteration from (defaults to main)
+    -h, --help               Show this help message
 
 The script will:
 1. Run 'wt stack open <branch>' to ensure worktrees exist
-2. Iterate through each branch from main to target
+2. Iterate through each branch from start branch to target
 3. Run 'mix check' in each worktree
 4. Stop on first failure with terminal bell and error message
 5. Report success if all checks pass
+
+Exit codes:
+    0 - All checks passed
+    1 - General error
+    4 - Start branch not in stack
 
 EOF
     exit 1
@@ -183,6 +193,14 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             ;;
+        --start-from)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --start-from requires a branch name" >&2
+                usage
+            fi
+            START_FROM_BRANCH="$2"
+            shift 2
+            ;;
         -*)
             echo "Error: Unknown option: $1" >&2
             usage
@@ -219,7 +237,7 @@ if ! command -v gt &>/dev/null; then
 fi
 
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-log "Checking stack from main to $TARGET_BRANCH"
+log "Checking stack from $START_FROM_BRANCH to $TARGET_BRANCH"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log ""
 
@@ -242,12 +260,42 @@ log ""
 
 # Get the branches in the stack
 log "Step 2: Getting branches in stack..."
-branches=($(get_stack_branches_to_target "$TARGET_BRANCH"))
+all_branches=($(get_stack_branches_to_target "$TARGET_BRANCH"))
 
-if [ ${#branches[@]} -eq 0 ]; then
+if [ ${#all_branches[@]} -eq 0 ]; then
     log "No branches to check (target branch is main/master or has no parents)"
     echo "✓ Stack is ready to go!"
     exit 0
+fi
+
+# Filter branches based on start-from
+branches=()
+found_start=false
+
+# If start-from is main/master, include all branches
+if [ "$START_FROM_BRANCH" = "main" ] || [ "$START_FROM_BRANCH" = "master" ]; then
+    branches=("${all_branches[@]}")
+    found_start=true
+else
+    # Filter to only include branches from start-from onwards
+    for branch in "${all_branches[@]}"; do
+        if [ "$branch" = "$START_FROM_BRANCH" ]; then
+            found_start=true
+        fi
+        if [ "$found_start" = true ]; then
+            branches+=("$branch")
+        fi
+    done
+fi
+
+# Validate that start-from branch is in the stack
+if [ "$found_start" = false ]; then
+    echo "Error: Start branch '$START_FROM_BRANCH' is not in the stack from main to '$TARGET_BRANCH'" >&2
+    echo "Available branches in stack:" >&2
+    for branch in "${all_branches[@]}"; do
+        echo "  - $branch" >&2
+    done
+    exit 4
 fi
 
 log "Branches to check (in order):"

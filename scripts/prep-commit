@@ -43,6 +43,7 @@ until [[ "${COMPLETE}" == "true" ]]; do
   echo "✓ Credo passed" | tee -a "$LOG_FILE"
 
   echo "Running tests..." | tee -a "$LOG_FILE"
+  MIX_ENV=test mix ecto.drop
   if ! mix test 2>&1 | tee -a "$LOG_FILE"; then
     echo "✗ Tests failed, requesting fixes..." | tee -a "$LOG_FILE"
     if ! claude -p --dangerously-skip-permissions "/fix:tests" 2>&1 | tee -a "$LOG_FILE"; then
