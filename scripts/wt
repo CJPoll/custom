@@ -29,7 +29,8 @@ QUIET=false
 NO_SYMLINK=false
 CHECK_DIR=""
 PR_REVIEW=false
-PARENT_BRANCH="main"
+# Default parent branch to current branch instead of main
+PARENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'main')"
 PARENT_BRANCH_EXPLICIT=false
 SWITCH_AFTER_CREATE=false
 
@@ -55,7 +56,7 @@ Commands:
   stack --current   Show only the current branch's stack (gt ls -s)
   stack --install   Install Graphite (gt) if not already installed
                     Downloads and installs Graphite from https://graphite.dev
-  stack parent <branch>  Set or update the parent branch for the current branch
+  stack parent [branch] Show or set the parent branch for the current branch
   stack open <branch>    Create worktrees for all branches in the stack up to the given branch
                     Must be run from main branch worktree
   stack open --create-sessions  Also create tmux sessions for each worktree (without switching)
@@ -826,39 +827,44 @@ open_stack_branches() {
 set_stack_parent() {
     local parent_branch="$1"
 
-    if [ -z "$parent_branch" ]; then
-        echo "Error: Parent branch name is required" >&2
-        echo "Usage: wt stack parent <parent-branch>" >&2
-        return 1
-    fi
-    
     # Get current branch
     local current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
     if [ -z "$current_branch" ]; then
         echo "Error: Not in a git repository" >&2
         return 1
     fi
-    
+
+    # If no parent branch specified, show the current parent
+    if [ -z "$parent_branch" ]; then
+        local current_parent=$(get_branch_parent "$current_branch")
+        if [ -n "$current_parent" ]; then
+            echo "Parent of '$current_branch': $current_parent"
+        else
+            echo "Branch '$current_branch' has no parent"
+        fi
+        return 0
+    fi
+
     # Check if parent branch exists
     if ! git show-ref --verify --quiet "refs/heads/$parent_branch" && \
        ! git show-ref --verify --quiet "refs/remotes/origin/$parent_branch"; then
         echo "Error: Parent branch '$parent_branch' does not exist locally or on origin" >&2
         return 1
     fi
-    
+
     # Don't allow setting a branch as its own parent
     if [ "$current_branch" = "$parent_branch" ]; then
         echo "Error: Cannot set a branch as its own parent" >&2
         return 1
     fi
-    
+
     log "Setting parent of '$current_branch' to '$parent_branch'"
-    
+
     # Set the parent using gt track
     gt track "$current_branch" --parent "$parent_branch" -q
-    
+
     log "✓ Parent relationship configured: $current_branch -> $parent_branch"
-    
+
     # Show the updated stack structure
     log ""
     log "Updated stack structure:"
@@ -1851,11 +1857,7 @@ case "$COMMAND" in
     stack)
         # Check if there's a subcommand
         if [ "$STACK_SUBCOMMAND" = "parent" ]; then
-            if [ -z "$STACK_PARENT_BRANCH" ]; then
-                echo "Error: Parent branch name is required" >&2
-                echo "Usage: wt stack parent <parent-branch>" >&2
-                exit 1
-            fi
+            # Parent branch is optional - if not provided, show current parent
             set_stack_parent "$STACK_PARENT_BRANCH"
         elif [ "$STACK_SUBCOMMAND" = "open" ]; then
             if [ -z "$STACK_OPEN_BRANCH" ]; then

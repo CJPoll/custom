@@ -83,12 +83,9 @@ _wt() {
                                 ;;
                             open)
                                 # Complete branch names and flags for open subcommand
-                                if [[ ${#words[@]} -eq 3 ]]; then
-                                    _wt_git_branches
-                                elif [[ ${#words[@]} -eq 4 ]]; then
-                                    # Offer --create-sessions flag if branch was provided
-                                    _arguments '--create-sessions[Also create tmux sessions for each worktree (without switching)]'
-                                fi
+                                _alternative \
+                                    'branches:branch:_wt_git_branches' \
+                                    'flags:flag:(--create-sessions)'
                                 ;;
                             --current|--install)
                                 # No additional arguments for these flags
