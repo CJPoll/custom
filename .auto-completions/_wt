@@ -23,7 +23,7 @@ _wt() {
                         '--pr-review[Open changed files in tabs for PR review]' \
                         '--parent[Parent branch for PR review]:branch:_wt_git_branches'
                     ;;
-                rm|merge|worktree-dir)
+                rm|close|merge|worktree-dir)
                     _wt_worktrees
                     ;;
                 sync)
@@ -109,6 +109,7 @@ _wt_commands() {
         'ls:Show all tracked branches (alias for stack)'
         'create:Create a worktree for the specified branch'
         'rm:Remove the worktree for the specified branch'
+        'close:Remove worktree and delete the local branch (cannot be used on main/master)'
         'switch:Change to the worktree for the specified branch'
         'merge:Merge a worktree branch (must be run from parent repo)'
         'worktree-dir:Get the directory path for a branch worktree'
