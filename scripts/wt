@@ -1324,6 +1324,24 @@ open_stack_branches() {
 }
 
 set_stack_parent() {
+    # Handle help first
+    if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+        echo "Usage: wt stack parent [<new-parent>] [--restack] [--switch]"
+        echo ""
+        echo "Show or set the parent branch of the current branch"
+        echo ""
+        echo "Options:"
+        echo "  --restack    Restack the branch hierarchy after setting parent"
+        echo "  --switch     Switch to the parent branch's worktree after setting"
+        echo "  --help, -h   Show this help message"
+        echo ""
+        echo "Examples:"
+        echo "  wt stack parent              # Show current parent"
+        echo "  wt stack parent main          # Set parent to main"
+        echo "  wt stack parent feat --restack # Set parent and restack"
+        return 0
+    fi
+
     local parent_branch=""
     local do_restack=false
     local do_switch=false
