@@ -45,7 +45,11 @@ _wt() {
                         '1:branch:_wt_git_branches' \
                         '--no-symlink[Do not create symlink to .claude directory]' \
                         '--switch[Switch to the worktree after creating it]' \
-                        '--parent[Parent branch for stack creation]:branch:_wt_git_branches'
+                        '--parent[Parent branch for stack creation]:branch:_wt_git_branches' \
+                        '--insert[Insert new branch between current and its children]' \
+                        '(-m --message)'{-m,--message}'[Commit message]:message:' \
+                        '(-a --all)'{-a,--all}'[Stage all changes before creating]' \
+                        '--no-verify[Skip git hooks]'
                     ;;
                 is-worktree)
                     _arguments \
@@ -128,6 +132,10 @@ _wt() {
                         '(-u --update)'{-u,--update}'[Stage updates to tracked files]' \
                         '(-p --patch)'{-p,--patch}'[Pick hunks to stage]'
                     ;;
+                continue)
+                    _arguments \
+                        '--abort[Abort the current operation]'
+                    ;;
             esac
             ;;
     esac
@@ -156,6 +164,7 @@ _wt_commands() {
         'pr:Create pull requests (use --stack for entire stack)'
         'migrate-to-gt:Migrate existing git-stack metadata to Graphite format'
         'modify:Amend current commit with auto-restacking (delegates to gt)'
+        'continue:Resume paused operation after resolving conflicts (delegates to gt)'
     )
     _describe -t commands 'wt command' commands
 }

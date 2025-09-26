@@ -33,6 +33,10 @@ PR_REVIEW=false
 PARENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'main')"
 PARENT_BRANCH_EXPLICIT=false
 SWITCH_AFTER_CREATE=false
+INSERT_BRANCH=false
+STAGE_ALL=false
+NO_VERIFY=false
+COMMIT_MESSAGE=""
 
 usage() {
     cat << EOF
@@ -44,6 +48,13 @@ Commands:
   ls                List all worktrees (alias for list)
   create <branch>   Create a worktree for the specified branch
                     (symlinks .claude/ directory from main project if present)
+                    --parent <branch>: specify parent branch (default: current branch)
+                    --insert: insert new branch between current and its children
+                    --switch: switch to the worktree after creating it
+                    --message, -m <msg>: commit message for initial commit
+                    --all, -a: stage all changes before creating
+                    --no-verify: skip git hooks
+                    --no-symlink: do not create symlink to .claude directory
   rm <branch>       Remove the worktree for the specified branch
   close <branch>    Remove worktree and delete the local branch
                     (Cannot be used on main/master branches)
@@ -82,11 +93,17 @@ Commands:
   migrate-to-gt     Migrate existing git-stack metadata to Graphite format
                     One-time migration for projects using git-stack
   modify [options]  Amend current commit with auto-restacking (delegates to gt)
+  continue          Resume paused operation after resolving conflicts (delegates to gt)
+                    --abort: abort the current operation
 
 Options:
   --quiet           Suppress output from script and subcommands
   --no-symlink      Do not create symlink to .claude directory (for create command)
   --switch          Switch to the worktree after creating it (for create command)
+  --insert          Insert new branch between current and its children (for create command)
+  --message, -m     Commit message for initial commit (for create --insert)
+  --all, -a         Stage all changes before creating (for create --insert)
+  --no-verify       Skip git hooks (for create --insert)
   --dir <directory> Check the specified directory (for is-worktree command, defaults to current dir)
   --pr-review       Open changed files in tabs for PR review (for switch command)
   --parent <branch> Parent branch for PR review or stack creation (defaults to main)
@@ -101,6 +118,9 @@ Examples:
   wt list
   wt create feature/my-feature
   wt create feature/child --parent feature/parent
+  wt create feature/middle --insert  # Insert between current branch and children
+  wt create feature/new --insert --switch  # Insert and switch
+  wt create feature/commit --insert -m "Initial commit"  # With commit message
   wt create --no-symlink experimental/test
   wt create --switch feature/my-feature
   wt switch feature/my-feature
@@ -140,6 +160,8 @@ Examples:
   wt modify  # Amend current commit
   wt modify --commit  # Create new commit
   wt modify --all --message "Fix bug"  # Stage all and amend with message
+  wt continue  # Resume after resolving conflicts
+  wt continue --abort  # Abort the current operation
 
 Notes:
   - Requires Graphite (gt) for stack management features
@@ -317,33 +339,117 @@ list_worktrees() {
 create_worktree() {
     local branch="$1"
     local worktree_path="$WORKTREES_DIR/$branch"
-    
+
     if [ -z "$branch" ]; then
         echo "Error: Branch name is required" >&2
         usage
         return 1
     fi
-    
-    if [ ! -d "$WORKTREES_DIR" ]; then
-        log "Worktrees directory not found. Running init first..."
-        init_worktrees
+
+    # Check for mutually exclusive flags
+    if [ "$INSERT_BRANCH" = true ] && [ "$PARENT_BRANCH_EXPLICIT" = true ]; then
+        echo "Error: --insert and --parent cannot be used together" >&2
+        return 1
     fi
-    
+
+    # Validate directory context for --insert
+    if [ "$INSERT_BRANCH" = true ]; then
+        # Must be in a worktree, not main project directory
+        set +e
+        (
+            CHECK_DIR="$(pwd)"
+            is_worktree
+        )
+        local is_wt_result=$?
+        set -e
+
+        if [ $is_wt_result -ne 0 ]; then
+            echo "Error: --insert must be run from a worktree branch, not the main project directory" >&2
+            echo "Current directory is the main project directory" >&2
+            echo "Switch to a worktree first: wt switch <branch>" >&2
+            return 3
+        fi
+
+        # Check for Graphite
+        if ! command -v gt &>/dev/null; then
+            echo "Error: Graphite (gt) is required for --insert operations" >&2
+            echo "Install with: brew install graphite or visit https://graphite.dev" >&2
+            return 2
+        fi
+
+        # Get current branch for context
+        local current_branch=$(git rev-parse --abbrev-ref HEAD)
+
+        # Check for uncommitted changes if no staging flag
+        if [ "$STAGE_ALL" != true ]; then
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+                echo "Error: You have uncommitted changes. Use -a to include them or commit/stash first" >&2
+                return 1
+            fi
+        fi
+    fi
+
+    # Check if branch already exists
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+        echo "Error: Branch '$branch' already exists locally" >&2
+        return 1
+    fi
+
+    if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+        echo "Error: Branch '$branch' already exists on remote" >&2
+        return 1
+    fi
+
+    # Check if worktree directory already exists
     if [ -d "$worktree_path" ]; then
         echo "Error: Worktree already exists at: $worktree_path" >&2
         return 1
     fi
-    
-    log "Setting up $branch..."
 
-    # Determine the base branch for the new worktree
-    local base_branch="$PARENT_BRANCH"
+    if [ ! -d "$WORKTREES_DIR" ]; then
+        log "Worktrees directory not found. Running init first..."
+        init_worktrees
+    fi
 
-    # Check if branch exists
-    if git show-ref --verify --quiet "refs/heads/$branch"; then
+    # Handle --insert flow
+    if [ "$INSERT_BRANCH" = true ]; then
+        log "Inserting '$branch' into the stack..."
+
+        # Build gt create command with appropriate flags
+        local gt_cmd="gt create '$branch' --insert --no-interactive"
+
+        # Add optional flags if provided
+        [ "$STAGE_ALL" = true ] && gt_cmd="$gt_cmd --all"
+        [ "$NO_VERIFY" = true ] && gt_cmd="$gt_cmd --no-verify"
+        [ -n "$COMMIT_MESSAGE" ] && gt_cmd="$gt_cmd --message '$COMMIT_MESSAGE'"
+
+        # Execute gt create --insert
+        if ! eval $gt_cmd; then
+            echo "Error: Failed to insert branch into stack" >&2
+            echo "If there are conflicts, resolve them and run 'wt continue'" >&2
+            return 1
+        fi
+
+        # Count children that were rebased (for user feedback)
+        local children_count=$(gt log --reverse | grep -c "^  " || echo "0")
+        if [ "$children_count" -gt 0 ]; then
+            log "✓ Rebased $children_count child branch(es) onto '$branch'"
+        fi
+
+        # Now create the worktree for the newly created branch
+        log "Creating worktree for '$branch'..."
         git worktree add "$worktree_path" "$branch" &>/dev/null
+
     else
-        # Check if it exists as a remote branch
+        # Original create flow (non-insert)
+        log "Setting up $branch..."
+
+        # Determine the base branch for the new worktree
+        local base_branch="$PARENT_BRANCH"
+
+        # Create branch and worktree based on existing logic
+        # Check if branch exists as remote, create from parent, etc.
+
         if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
             git worktree add "$worktree_path" -b "$branch" "origin/$branch" &>/dev/null
         else
@@ -379,13 +485,15 @@ create_worktree() {
         fi
     fi
 
-    # Configure Graphite parent relationship if parent was explicitly specified (silently)
-    if [ "$PARENT_BRANCH" != "main" ] || [[ "${PARENT_BRANCH_EXPLICIT:-false}" == "true" ]]; then
-        if command -v gt &>/dev/null; then
-            # First ensure the parent branch is tracked
-            (cd "$worktree_path" && gt track "$PARENT_BRANCH" &>/dev/null 2>&1) || true
-            # Now track the current branch with its parent
-            (cd "$worktree_path" && gt track "$branch" --parent "$PARENT_BRANCH" &>/dev/null 2>&1) || true
+    # Configure Graphite parent relationship (for non-insert flow)
+    if [ "$INSERT_BRANCH" != true ]; then
+        if [ "$PARENT_BRANCH" != "main" ] || [[ "${PARENT_BRANCH_EXPLICIT:-false}" == "true" ]]; then
+            if command -v gt &>/dev/null; then
+                # First ensure the parent branch is tracked
+                (cd "$worktree_path" && gt track "$PARENT_BRANCH" &>/dev/null 2>&1) || true
+                # Now track the current branch with its parent
+                (cd "$worktree_path" && gt track "$branch" --parent "$PARENT_BRANCH" &>/dev/null 2>&1) || true
+            fi
         fi
     fi
 
@@ -395,7 +503,14 @@ create_worktree() {
             ln -s "$PROJECT_DIR/.claude" "$worktree_path/.claude" &>/dev/null 2>&1 || true
         fi
     fi
-    
+
+    # Success message
+    if [ "$INSERT_BRANCH" = true ]; then
+        log "✓ Created and inserted branch '$branch' into the stack"
+    else
+        log "✓ Created worktree for branch '$branch'"
+    fi
+
     # Explicitly return success
     return 0
 }
@@ -2668,6 +2783,27 @@ while [[ $# -gt 0 ]]; do
             SWITCH_AFTER_CREATE=true
             shift
             ;;
+        --insert)
+            INSERT_BRANCH=true
+            shift
+            ;;
+        --message|-m)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "Error: --message requires a commit message" >&2
+                exit 1
+            fi
+            COMMIT_MESSAGE="$1"
+            shift
+            ;;
+        --all|-a)
+            STAGE_ALL=true
+            shift
+            ;;
+        --no-verify)
+            NO_VERIFY=true
+            shift
+            ;;
         --pr-review)
             PR_REVIEW=true
             shift
@@ -2709,6 +2845,9 @@ while [[ $# -gt 0 ]]; do
                 break
             # For 'modify' command, pass all remaining arguments to gt
             elif [ "$COMMAND" = "modify" ]; then
+                break
+            # For 'continue' command, pass all remaining arguments (including --abort) to gt
+            elif [ "$COMMAND" = "continue" ]; then
                 break
             fi
             # For 'stack' command, check if there's a subcommand
@@ -2939,6 +3078,32 @@ case "$COMMAND" in
         # Note: We don't process flags, just pass them through
         gt modify "$@"
         exit $?
+        ;;
+    continue)
+        # Check if gt is available
+        if ! command -v gt &>/dev/null; then
+            echo "Error: Graphite (gt) is required for continue operations" >&2
+            echo "Install with: brew install graphite or visit https://graphite.dev" >&2
+            exit 2
+        fi
+
+        # Check for --abort flag
+        if [ "${1:-}" = "--abort" ]; then
+            log "Aborting the current operation..."
+            # gt doesn't have continue --abort, use git rebase --abort
+            git rebase --abort
+            exit $?
+        else
+            log "Resuming the paused operation..."
+            gt continue "$@"
+            local result=$?
+            if [ $result -eq 0 ]; then
+                log "✓ Operation resumed successfully"
+            else
+                echo "Error: Failed to resume operation" >&2
+            fi
+            exit $result
+        fi
         ;;
     "")
         echo "Error: No command specified" >&2
