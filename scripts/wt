@@ -76,6 +76,7 @@ Commands:
   pr --stack        Create/update pull requests for the stack using Graphite
   migrate-to-gt     Migrate existing git-stack metadata to Graphite format
                     One-time migration for projects using git-stack
+  modify [options]  Amend current commit with auto-restacking (delegates to gt)
 
 Options:
   --quiet           Suppress output from script and subcommands
@@ -126,6 +127,9 @@ Examples:
   wt stack open feature/child  # Creates worktrees for parent branches leading to child
   wt stack open feature/child --create-sessions  # Also creates tmux sessions
   wt migrate-to-gt
+  wt modify  # Amend current commit
+  wt modify --commit  # Create new commit
+  wt modify --all --message "Fix bug"  # Stage all and amend with message
 
 Notes:
   - Requires Graphite (gt) for stack management features
@@ -1320,7 +1324,33 @@ open_stack_branches() {
 }
 
 set_stack_parent() {
-    local parent_branch="$1"
+    local parent_branch=""
+    local do_restack=false
+    local do_switch=false
+
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --restack)
+                do_restack=true
+                shift
+                ;;
+            --switch)
+                do_switch=true
+                shift
+                ;;
+            *)
+                if [ -z "$parent_branch" ]; then
+                    parent_branch="$1"
+                else
+                    echo "Error: Unexpected argument: $1" >&2
+                    echo "Usage: wt stack parent [<new-parent>] [--restack] [--switch]" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
 
     # Get current branch
     local current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
@@ -1331,6 +1361,13 @@ set_stack_parent() {
 
     # If no parent branch specified, show the current parent
     if [ -z "$parent_branch" ]; then
+        # Check if branch is tracked first
+        if ! gt ls --no-interactive 2>/dev/null | grep -q "^[◯◉][[:space:]]*$current_branch"; then
+            echo "Branch '$current_branch' is not tracked by Graphite"
+            echo "Run 'wt stack parent <parent-branch>' to track it and set a parent"
+            return 0
+        fi
+
         local current_parent=$(get_branch_parent "$current_branch")
         if [ -n "$current_parent" ]; then
             echo "Parent of '$current_branch': $current_parent"
@@ -1353,17 +1390,58 @@ set_stack_parent() {
         return 1
     fi
 
+    # Check if gt is available
+    if ! command -v gt &>/dev/null; then
+        echo "Error: Graphite (gt) is required for stack operations" >&2
+        echo "Install with: brew install graphite or visit https://graphite.dev" >&2
+        return 2
+    fi
+
     log "Setting parent of '$current_branch' to '$parent_branch'"
 
-    # Set the parent using gt track
-    gt track "$current_branch" --parent "$parent_branch" -q
+    # Check if branch is tracked by Graphite
+    local is_tracked=false
+    if gt ls --no-interactive 2>/dev/null | grep -q "^[◯◉][[:space:]]*$current_branch"; then
+        is_tracked=true
+    fi
+
+    if [ "$is_tracked" = false ]; then
+        # Branch is not tracked, use gt track
+        log "Branch is not tracked, tracking with Graphite..."
+        if ! gt track --parent "$parent_branch" -q; then
+            echo "Error: Failed to track branch and set parent" >&2
+            return 1
+        fi
+    else
+        # Branch is already tracked, use gt move --onto
+        log "Moving branch onto new parent..."
+        if ! gt move --onto "$parent_branch" --no-interactive; then
+            echo "Error: Failed to change parent" >&2
+            echo "If there are conflicts, resolve them and run 'wt continue'" >&2
+            return 1
+        fi
+    fi
 
     log "✓ Parent relationship configured: $current_branch -> $parent_branch"
 
-    # Show the updated stack structure
-    log ""
-    log "Updated stack structure:"
-    show_worktree_stack
+    # Handle --restack flag
+    if [ "$do_restack" = true ]; then
+        log "Restacking branches..."
+        if ! gt restack --no-interactive; then
+            echo "Error: Restack failed" >&2
+            echo "If there are conflicts, resolve them and run 'wt continue'" >&2
+            return 1
+        fi
+        log "✓ Stack restacked successfully"
+    fi
+
+    # Handle --switch flag
+    if [ "$do_switch" = true ]; then
+        log "Switching to parent worktree..."
+        switch_worktree "$parent_branch"
+    fi
+
+    return 0
 }
 
 show_worktree_stack() {
@@ -2305,7 +2383,7 @@ while [[ $# -gt 0 ]]; do
             INSTALL_GIT_STACK=true
             shift
             ;;
-        init|list|ls|create|rm|close|reset|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|push|pr|migrate-to-gt)
+        init|list|ls|create|rm|close|reset|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|push|pr|migrate-to-gt|modify)
             COMMAND="$1"
             shift
             # For 'close' command, check for --all flag
@@ -2316,6 +2394,9 @@ while [[ $# -gt 0 ]]; do
             elif [ "$COMMAND" = "run" ] && [ $# -gt 0 ]; then
                 RUN_COMMAND="$*"
                 break
+            # For 'modify' command, pass all remaining arguments to gt
+            elif [ "$COMMAND" = "modify" ]; then
+                break
             fi
             # For 'stack' command, check if there's a subcommand
             if [ "$COMMAND" = "stack" ] && [ $# -gt 0 ]; then
@@ -2323,10 +2404,9 @@ while [[ $# -gt 0 ]]; do
                     parent)
                         STACK_SUBCOMMAND="parent"
                         shift
-                        if [ $# -gt 0 ]; then
-                            STACK_PARENT_BRANCH="$1"
-                            shift
-                        fi
+                        # Collect all remaining arguments for set_stack_parent
+                        STACK_PARENT_ARGS=("$@")
+                        break  # Don't process further arguments
                         ;;
                     open)
                         STACK_SUBCOMMAND="open"
@@ -2440,8 +2520,8 @@ case "$COMMAND" in
     stack)
         # Check if there's a subcommand
         if [ "$STACK_SUBCOMMAND" = "parent" ]; then
-            # Parent branch is optional - if not provided, show current parent
-            set_stack_parent "$STACK_PARENT_BRANCH"
+            # Pass all collected arguments to set_stack_parent
+            set_stack_parent "${STACK_PARENT_ARGS[@]}"
         elif [ "$STACK_SUBCOMMAND" = "open" ]; then
             if [ -z "$STACK_OPEN_BRANCH" ]; then
                 echo "Error: Branch name is required" >&2
@@ -2504,6 +2584,19 @@ case "$COMMAND" in
             echo "Error: Migration script not found at ${SCRIPT_DIR}/wt-migrate-to-gt" >&2
             exit 1
         fi
+        ;;
+    modify)
+        # Check if gt is available
+        if ! command -v gt &>/dev/null; then
+            echo "Error: Graphite (gt) is required for modify operations" >&2
+            echo "Install with: brew install graphite or visit https://graphite.dev" >&2
+            exit 2
+        fi
+
+        # Pass all remaining arguments to gt modify
+        # Note: We don't process flags, just pass them through
+        gt modify "$@"
+        exit $?
         ;;
     "")
         echo "Error: No command specified" >&2

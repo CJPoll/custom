@@ -20,7 +20,7 @@ t.
    - Missing dependency information
 
 3. **Feedback** (if gaps exist):
-   - Write to `ai-artifacts/implementation-feedback/[ticket]-feedback.md`
+   - Write to `ai-artifacts/implementation-feedback/[ticket]-feedback.md` unless another location is specified in the ticket.
    - List observed gaps using bullet points
    - Ask clarifying questions about understanding the spec (not improving it)
    - Use passive, observational language

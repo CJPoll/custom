@@ -85,10 +85,10 @@ _wt() {
                     elif [[ ${#words[@]} -ge 3 ]]; then
                         case ${words[2]} in
                             parent)
-                                # Complete branch names for parent subcommand
-                                if [[ ${#words[@]} -eq 3 ]]; then
-                                    _wt_git_branches
-                                fi
+                                _arguments \
+                                    '1:parent branch:_wt_git_branches' \
+                                    '--restack[Restack after setting parent]' \
+                                    '--switch[Switch to parent worktree after setting]'
                                 ;;
                             open)
                                 # Complete branch names and flags for open subcommand
@@ -105,6 +105,16 @@ _wt() {
                 migrate-to-gt)
                     # No additional arguments needed for migration
                     _message 'no more arguments'
+                    ;;
+                modify)
+                    _arguments \
+                        '(-c --commit)'{-c,--commit}'[Create new commit instead of amending]' \
+                        '(-a --all)'{-a,--all}'[Stage all changes before committing]' \
+                        '(-m --message)'{-m,--message}'[Commit message]:message:' \
+                        '--interactive-rebase[Start interactive rebase]' \
+                        '(-e --edit)'{-e,--edit}'[Edit commit message]' \
+                        '(-u --update)'{-u,--update}'[Stage updates to tracked files]' \
+                        '(-p --patch)'{-p,--patch}'[Pick hunks to stage]'
                     ;;
             esac
             ;;
@@ -133,6 +143,7 @@ _wt_commands() {
         'push:Push branches to origin (use --stack for entire stack)'
         'pr:Create pull requests (use --stack for entire stack)'
         'migrate-to-gt:Migrate existing git-stack metadata to Graphite format'
+        'modify:Amend current commit with auto-restacking (delegates to gt)'
     )
     _describe -t commands 'wt command' commands
 }
