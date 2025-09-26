@@ -37,6 +37,7 @@ INSERT_BRANCH=false
 STAGE_ALL=false
 NO_VERIFY=false
 COMMIT_MESSAGE=""
+CHANGE_SUBCOMMAND=""
 
 usage() {
     cat << EOF
@@ -92,7 +93,11 @@ Commands:
   pr --stack        Create/update pull requests for the stack using Graphite
   migrate-to-gt     Migrate existing git-stack metadata to Graphite format
                     One-time migration for projects using git-stack
-  modify [options]  Amend current commit with auto-restacking (delegates to gt)
+  change modify     Amend current commit with auto-restacking (delegates to gt modify)
+  change absorb     Auto-apply changes to relevant commits in stack (delegates to gt absorb)
+                    --all, -a: stage all changes before absorbing
+                    --dry-run, -d: preview where changes would be absorbed
+                    --patch, -p: pick hunks to stage before absorbing
   continue          Resume paused operation after resolving conflicts (delegates to gt)
                     --abort: abort the current operation
 
@@ -389,21 +394,29 @@ create_worktree() {
         fi
     fi
 
-    # Check if branch already exists
-    if git show-ref --verify --quiet "refs/heads/$branch"; then
-        echo "Error: Branch '$branch' already exists locally" >&2
-        return 1
-    fi
-
-    if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-        echo "Error: Branch '$branch' already exists on remote" >&2
-        return 1
-    fi
-
     # Check if worktree directory already exists
     if [ -d "$worktree_path" ]; then
         echo "Error: Worktree already exists at: $worktree_path" >&2
         return 1
+    fi
+
+    # Check if branch exists locally
+    local branch_exists_locally=false
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+        branch_exists_locally=true
+    fi
+
+    # For non-insert operations, if branch exists locally, just create the worktree
+    # For insert operations, branch shouldn't exist yet
+    if [ "$INSERT_BRANCH" = true ]; then
+        if [ "$branch_exists_locally" = true ]; then
+            echo "Error: Branch '$branch' already exists locally (cannot insert)" >&2
+            return 1
+        fi
+        if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+            echo "Error: Branch '$branch' already exists on remote (cannot insert)" >&2
+            return 1
+        fi
     fi
 
     if [ ! -d "$WORKTREES_DIR" ]; then
@@ -444,26 +457,31 @@ create_worktree() {
         # Original create flow (non-insert)
         log "Setting up $branch..."
 
-        # Determine the base branch for the new worktree
-        local base_branch="$PARENT_BRANCH"
-
-        # Create branch and worktree based on existing logic
-        # Check if branch exists as remote, create from parent, etc.
-
-        if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-            git worktree add "$worktree_path" -b "$branch" "origin/$branch" &>/dev/null
+        # If branch already exists locally, just create the worktree for it
+        if [ "$branch_exists_locally" = true ]; then
+            git worktree add "$worktree_path" "$branch" &>/dev/null
         else
-            # Create new branch from the parent branch
-            if [ "$base_branch" != "main" ] && [ "$base_branch" != "master" ]; then
-                # Ensure parent branch exists
-                if git show-ref --verify --quiet "refs/heads/$base_branch"; then
-                    git worktree add "$worktree_path" -b "$branch" "$base_branch" &>/dev/null
-                else
-                    echo "Error: Parent branch '$base_branch' does not exist" >&2
-                    return 1
-                fi
+            # Determine the base branch for the new worktree
+            local base_branch="$PARENT_BRANCH"
+
+            # Create branch and worktree based on existing logic
+            # Check if branch exists as remote, create from parent, etc.
+
+            if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+                git worktree add "$worktree_path" -b "$branch" "origin/$branch" &>/dev/null
             else
-                git worktree add "$worktree_path" -b "$branch" &>/dev/null
+                # Create new branch from the parent branch
+                if [ "$base_branch" != "main" ] && [ "$base_branch" != "master" ]; then
+                    # Ensure parent branch exists
+                    if git show-ref --verify --quiet "refs/heads/$base_branch"; then
+                        git worktree add "$worktree_path" -b "$branch" "$base_branch" &>/dev/null
+                    else
+                        echo "Error: Parent branch '$base_branch' does not exist" >&2
+                        return 1
+                    fi
+                else
+                    git worktree add "$worktree_path" -b "$branch" &>/dev/null
+                fi
             fi
         fi
     fi
@@ -1171,17 +1189,17 @@ open_stack_branches() {
         gt repo init --trunk "$trunk_branch" -q 2>/dev/null || true
     fi
 
-    # Sync Graphite metadata from remote
-    log "Syncing Graphite metadata..."
-    gt repo sync 2>/dev/null || true
+    # Sync all Graphite metadata from remote
+    # This will fetch branch metadata and establish proper parent relationships
+    log "Syncing Graphite metadata from remote..."
+    gt repo sync --no-interactive 2>/dev/null || true
 
-    # Get the full stack structure from Graphite
-    # This will show all tracked branches, including remote-only ones
+    # Get the full stack structure from Graphite after fetching
     local stack_output=$(gt ls --no-interactive 2>/dev/null || echo "")
 
-    # If stack is still empty, try to track the target branch and its ancestors
+    # If stack is still empty, fall back to GitHub PR discovery
     if [ -z "$stack_output" ] || ! echo "$stack_output" | grep -q "$target_branch"; then
-        log "Stack information not available, attempting to discover stack from remote..."
+        log "Stack information not available from Graphite, attempting to discover stack from GitHub..."
 
         # Try to discover the stack from GitHub PR information if gh is available
         local branches_to_track=()
@@ -2832,7 +2850,7 @@ while [[ $# -gt 0 ]]; do
             INSTALL_GIT_STACK=true
             shift
             ;;
-        init|list|ls|create|rm|close|reset|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|push|pr|migrate-to-gt|modify|continue)
+        init|list|ls|create|rm|close|reset|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|push|pr|migrate-to-gt|change|continue)
             COMMAND="$1"
             shift
             # For 'close' command, check for --all flag
@@ -2843,11 +2861,15 @@ while [[ $# -gt 0 ]]; do
             elif [ "$COMMAND" = "run" ] && [ $# -gt 0 ]; then
                 RUN_COMMAND="$*"
                 break
-            # For 'modify' command, pass all remaining arguments to gt
-            elif [ "$COMMAND" = "modify" ]; then
-                break
             # For 'continue' command, pass all remaining arguments (including --abort) to gt
             elif [ "$COMMAND" = "continue" ]; then
+                break
+            # For 'change' command, capture subcommand and pass remaining args
+            elif [ "$COMMAND" = "change" ]; then
+                if [ $# -gt 0 ]; then
+                    CHANGE_SUBCOMMAND="$1"
+                    shift
+                fi
                 break
             fi
             # For 'stack' command, check if there's a subcommand
@@ -3066,18 +3088,16 @@ case "$COMMAND" in
             exit 1
         fi
         ;;
-    modify)
-        # Check if gt is available
-        if ! command -v gt &>/dev/null; then
-            echo "Error: Graphite (gt) is required for modify operations" >&2
-            echo "Install with: brew install graphite or visit https://graphite.dev" >&2
-            exit 2
+    change)
+        # Delegate to wt-change script
+        # First check if the script exists
+        if [ -f "${SCRIPT_DIR}/wt-change" ]; then
+            "${SCRIPT_DIR}/wt-change" "$CHANGE_SUBCOMMAND" "$@"
+            exit $?
+        else
+            echo "Error: wt-change script not found at ${SCRIPT_DIR}/wt-change" >&2
+            exit 1
         fi
-
-        # Pass all remaining arguments to gt modify
-        # Note: We don't process flags, just pass them through
-        gt modify "$@"
-        exit $?
         ;;
     continue)
         # Check if gt is available
