@@ -70,6 +70,7 @@ Commands:
                     --onto <parent>: move to new parent (delegates to gt)
                     --up/--down: reorder among siblings
                     --dry-run: preview changes without applying
+  stack reorder     Rearrange multiple branches in the stack interactively (delegates to gt)
   sync              Sync the stack with remote changes using Graphite (gt sync)
   sync --continue   Continue a sync operation after resolving conflicts (gt continue)
   restack           Fix stack relationships and rebase onto correct parents (gt restack)
@@ -118,6 +119,7 @@ Examples:
   wt stack move --onto main  # Move current branch onto main
   wt stack move --up  # Move branch up among siblings
   wt stack move --down --dry-run  # Preview moving branch down
+  wt stack reorder  # Interactive branch reordering
   wt sync
   wt sync --continue
   wt restack
@@ -2763,6 +2765,12 @@ while [[ $# -gt 0 ]]; do
                         STACK_MOVE_ARGS=("$@")
                         break  # Don't process further arguments
                         ;;
+                    reorder)
+                        STACK_SUBCOMMAND="reorder"
+                        shift
+                        # No additional arguments needed for reorder
+                        break
+                        ;;
                     --current)
                         STACK_CURRENT=true
                         shift
@@ -2849,6 +2857,20 @@ case "$COMMAND" in
             open_stack_branches "$STACK_OPEN_BRANCH"
         elif [ "$STACK_SUBCOMMAND" = "move" ]; then
             stack_move "${STACK_MOVE_ARGS[@]}"
+        elif [ "$STACK_SUBCOMMAND" = "reorder" ]; then
+            # Check if gt is available
+            if ! command -v gt &>/dev/null; then
+                echo "Error: Graphite (gt) is required for stack operations" >&2
+                echo "Install with: brew install graphite or visit https://graphite.dev" >&2
+                exit 2
+            fi
+            # Pure delegation to gt reorder
+            log "Opening interactive reorder mode..."
+            if ! gt reorder; then
+                echo "Error: Failed to reorder branches" >&2
+                echo "If there are conflicts, resolve them and run 'wt continue'" >&2
+                exit 1
+            fi
         else
             show_worktree_stack
         fi

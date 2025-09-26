@@ -81,6 +81,7 @@ _wt() {
                             'parent:Set or update the parent branch for the current branch'
                             'open:Create worktrees for all branches in the stack up to the given branch'
                             'move:Change parent or reorder branches in the stack'
+                            'reorder:Rearrange multiple branches in the stack interactively'
                         )
                         _describe -t stack-subcommands 'stack subcommand' stack_subcommands
                     elif [[ ${#words[@]} -ge 3 ]]; then
@@ -103,6 +104,9 @@ _wt() {
                                     '--up[Move branch up among siblings]' \
                                     '--down[Move branch down among siblings]' \
                                     '--dry-run[Preview changes without applying]'
+                                ;;
+                            reorder)
+                                # No additional arguments for reorder (interactive mode)
                                 ;;
                             --current|--install)
                                 # No additional arguments for these flags
