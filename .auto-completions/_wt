@@ -26,6 +26,10 @@ _wt() {
                 rm|close|merge|worktree-dir)
                     _wt_worktrees
                     ;;
+                reset)
+                    # No additional arguments for reset
+                    _message 'no more arguments'
+                    ;;
                 sync)
                     _arguments \
                         '1:branch:_wt_worktrees' \
@@ -110,6 +114,7 @@ _wt_commands() {
         'create:Create a worktree for the specified branch'
         'rm:Remove the worktree for the specified branch'
         'close:Remove worktree and delete the local branch (cannot be used on main/master)'
+        'reset:Remove all worktrees and delete their branches (skips main/master)'
         'switch:Change to the worktree for the specified branch'
         'merge:Merge a worktree branch (must be run from parent repo)'
         'worktree-dir:Get the directory path for a branch worktree'

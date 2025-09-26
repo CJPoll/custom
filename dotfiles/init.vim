@@ -53,11 +53,19 @@ require('claudecode').setup({
 })
 
 -- Elixir tools setup
-require("elixir").setup({
-  elixirls = {
-    tag = "v0.29.3", -- Use a version that supports Elixir 1.18 + OTP 28
-  }
+-- require("elixir").setup({
+--   elixirls = {
+--     tag = "v0.29.3", -- Use a version that supports Elixir 1.18 + OTP 28
+--   }
+-- })
+
+vim.lsp.config('expert', {
+  cmd = { 'expert' },
+  root_markers = { 'mix.exs', '.git' },
+  filetypes = { 'elixir', 'eelixir', 'heex' },
 })
+
+vim.lsp.enable 'expert'
 
 -- Custom function to open Claude in bottom split
 function ClaudeCodeBottom()

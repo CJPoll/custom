@@ -78,8 +78,14 @@ export fpath=("${CUSTOM_DIR}/.auto-completions" $fpath)
 
 # This is a base file, intended to work in any environment. If there are changes
 # that should be made for a given environment, they belong in a local zshrc.
-LOCAL_RC="${HOME}/.zshrc.local"
 
+# Source functions file first, so functions are available to local zshrc
+FUNCTIONS_FILE="${HOME}/dev/custom/dotfiles/.zshrc.functions"
+if [[ -a "${FUNCTIONS_FILE}" ]]; then
+  source "${FUNCTIONS_FILE}"
+fi
+
+LOCAL_RC="${HOME}/.zshrc.local"
 if [[ -a "${LOCAL_RC}" ]]; then
   source "${LOCAL_RC}"
 fi
@@ -165,7 +171,7 @@ function edit()
 }
 
 # Worktree switch function - handles cd outside tmux
-wts() {
+function wts() {
   # Wrapper for 'wt switch' that handles cd outside tmux
   if [ -n "$TMUX" ]; then
     # In tmux, just call wt switch normally

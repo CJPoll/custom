@@ -1,0 +1,18 @@
+#!/bin/zsh
+#===============================================================================
+#
+#          FILE: .zshrc.functions
+#
+#   DESCRIPTION: Common functions for zsh, sourced early in .zshrc
+#                This file should contain functions that may be needed
+#                by .zshrc.local or other files sourced later.
+#
+#===============================================================================
+
+function in-tmux-session() {
+  if [ -n "${TMUX}" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
