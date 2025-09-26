@@ -47,6 +47,8 @@ Commands:
   rm <branch>       Remove the worktree for the specified branch
   close <branch>    Remove worktree and delete the local branch
                     (Cannot be used on main/master branches)
+  close --all       Remove all worktrees and delete their branches
+                    (Must be run from main branch worktree, skips main/master)
   reset             Remove all worktrees and delete their branches
                     (Skips main/master branches)
   switch <branch>   Change to the worktree for the specified branch
@@ -100,6 +102,7 @@ Examples:
   wt switch feature/my-feature --pr-review --parent develop
   wt rm feature/my-feature
   wt close feature/my-feature  # Remove worktree AND delete branch
+  wt close --all  # Remove all worktrees AND delete branches (from main)
   wt merge feature/my-feature
   wt create --quiet bugfix/issue-123
   wt is-worktree
@@ -430,6 +433,79 @@ remove_worktree() {
 
 close_branch() {
     local branch="$1"
+    local close_all=false
+
+    # Check for --all flag
+    if [ "$branch" = "--all" ]; then
+        close_all=true
+    fi
+
+    if [ "$close_all" = true ]; then
+        # Check if we're in the main branch worktree
+        set +e
+        (
+            CHECK_DIR="$(pwd)"
+            is_worktree
+        )
+        local is_wt_result=$?
+        set -e
+
+        if [ $is_wt_result -ne 1 ]; then
+            echo "Error: 'wt close --all' must be run from the main branch worktree" >&2
+            exit 3
+        fi
+
+        # Get list of all worktrees
+        local git_worktrees=$(git worktree list --porcelain 2>/dev/null || echo "")
+        if [ -z "$git_worktrees" ]; then
+            # No worktrees, nothing to do - success with no output
+            exit 0
+        fi
+
+        local branches_to_close=()
+        local worktree_path=""
+        local branch=""
+
+        # Parse worktree list to get branches
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^worktree[[:space:]](.+) ]]; then
+                # Process previous worktree if exists
+                if [ -n "$worktree_path" ] && [ -n "$branch" ]; then
+                    # Only consider worktrees in our worktrees directory (not main project)
+                    if [[ "$worktree_path" == "$WORKTREES_DIR/"* ]]; then
+                        # Skip main/master branches
+                        if [ "$branch" != "main" ] && [ "$branch" != "master" ]; then
+                            branches_to_close+=("$branch")
+                        fi
+                    fi
+                fi
+
+                # Reset for new worktree
+                worktree_path="${BASH_REMATCH[1]}"
+                branch=""
+            elif [[ "$line" =~ ^branch[[:space:]]refs/heads/(.+) ]]; then
+                branch="${BASH_REMATCH[1]}"
+            fi
+        done <<< "$git_worktrees"
+
+        # Process last worktree
+        if [ -n "$worktree_path" ] && [ -n "$branch" ]; then
+            if [[ "$worktree_path" == "$WORKTREES_DIR/"* ]]; then
+                if [ "$branch" != "main" ] && [ "$branch" != "master" ]; then
+                    branches_to_close+=("$branch")
+                fi
+            fi
+        fi
+
+        # Close each branch silently
+        for branch_to_close in "${branches_to_close[@]}"; do
+            # Call the internal close logic directly
+            _close_single_branch "$branch_to_close"
+        done
+
+        # Success - no output
+        exit 0
+    fi
 
     if [ -z "$branch" ]; then
         echo "Error: Branch name is required" >&2
@@ -440,13 +516,20 @@ close_branch() {
     # Prevent closing main/master branches
     if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
         echo "Error: Cannot close main/master branch" >&2
-        exit 1
+        exit 2
     fi
+
+    # Use the internal function for single branch close
+    _close_single_branch "$branch"
+}
+
+_close_single_branch() {
+    local branch="$1"
 
     # Check if branch exists locally
     if ! git show-ref --verify --quiet "refs/heads/$branch"; then
         # Silently exit with success if branch doesn't exist
-        exit 0
+        return 0
     fi
 
     # Remove worktree if it exists (silently)
@@ -461,12 +544,15 @@ close_branch() {
 
     # Delete the local branch (silently)
     if ! git branch -D "$branch" >/dev/null 2>&1; then
-        echo "Error: Failed to delete branch '$branch'" >&2
-        echo "Branch may be checked out in current directory" >&2
-        exit 1
+        if [ "$QUIET" = false ]; then
+            echo "Error: Failed to delete branch '$branch'" >&2
+            echo "Branch may be checked out in current directory" >&2
+        fi
+        return 1
     fi
 
     # Success - no output
+    return 0
 }
 
 reset_worktrees() {
@@ -1184,7 +1270,15 @@ open_stack_branches() {
     # Create worktrees for each branch in order
     local created_count=0
     local existing_count=0
+    local skipped_count=0
     for branch in "${branches_to_create[@]}"; do
+        # Skip graphite-base branches (internal Graphite merge bases)
+        if [[ "$branch" =~ ^graphite-base/ ]]; then
+            log "Skipping Graphite internal branch: $branch"
+            skipped_count=$((skipped_count + 1))
+            continue
+        fi
+
         # Check if worktree already exists
         local worktree_path="$WORKTREES_DIR/$branch"
         if [ -d "$worktree_path" ]; then
@@ -1215,6 +1309,9 @@ open_stack_branches() {
     fi
     if [ $existing_count -gt 0 ]; then
         log "✓ $existing_count worktrees already existed"
+    fi
+    if [ $skipped_count -gt 0 ]; then
+        log "✓ Skipped $skipped_count Graphite internal branches"
     fi
     if [ "$create_sessions" = true ]; then
         log "✓ Created tmux sessions for all branches"
@@ -2211,8 +2308,12 @@ while [[ $# -gt 0 ]]; do
         init|list|ls|create|rm|close|reset|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|push|pr|migrate-to-gt)
             COMMAND="$1"
             shift
+            # For 'close' command, check for --all flag
+            if [ "$COMMAND" = "close" ] && [ $# -gt 0 ] && [ "$1" = "--all" ]; then
+                BRANCH="--all"
+                shift
             # For 'run' command, capture everything else as the command to execute
-            if [ "$COMMAND" = "run" ] && [ $# -gt 0 ]; then
+            elif [ "$COMMAND" = "run" ] && [ $# -gt 0 ]; then
                 RUN_COMMAND="$*"
                 break
             fi
@@ -2314,7 +2415,12 @@ case "$COMMAND" in
         remove_worktree "$BRANCH"
         ;;
     close)
-        close_branch "$BRANCH"
+        # Check if first argument is --all
+        if [ "$BRANCH" = "--all" ]; then
+            close_branch "--all"
+        else
+            close_branch "$BRANCH"
+        fi
         ;;
     reset)
         reset_worktrees
