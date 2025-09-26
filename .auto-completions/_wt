@@ -80,6 +80,7 @@ _wt() {
                             '--install:Install Graphite (gt) if not already installed'
                             'parent:Set or update the parent branch for the current branch'
                             'open:Create worktrees for all branches in the stack up to the given branch'
+                            'move:Change parent or reorder branches in the stack'
                         )
                         _describe -t stack-subcommands 'stack subcommand' stack_subcommands
                     elif [[ ${#words[@]} -ge 3 ]]; then
@@ -95,6 +96,13 @@ _wt() {
                                 _alternative \
                                     'branches:branch:_wt_git_branches' \
                                     'flags:flag:(--create-sessions)'
+                                ;;
+                            move)
+                                _arguments \
+                                    '--onto[Move branch onto new parent]:parent:_wt_git_branches' \
+                                    '--up[Move branch up among siblings]' \
+                                    '--down[Move branch down among siblings]' \
+                                    '--dry-run[Preview changes without applying]'
                                 ;;
                             --current|--install)
                                 # No additional arguments for these flags

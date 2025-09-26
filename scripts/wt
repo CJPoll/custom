@@ -66,6 +66,10 @@ Commands:
   stack open <branch>    Create worktrees for all branches in the stack up to the given branch
                     Must be run from main branch worktree
   stack open --create-sessions  Also create tmux sessions for each worktree (without switching)
+  stack move        Change a branch's parent or reorder siblings
+                    --onto <parent>: move to new parent (delegates to gt)
+                    --up/--down: reorder among siblings
+                    --dry-run: preview changes without applying
   sync              Sync the stack with remote changes using Graphite (gt sync)
   sync --continue   Continue a sync operation after resolving conflicts (gt continue)
   restack           Fix stack relationships and rebase onto correct parents (gt restack)
@@ -110,6 +114,10 @@ Examples:
   wt is-worktree --dir /path/to/directory
   wt stack
   wt stack --install
+  wt stack move  # Interactive mode
+  wt stack move --onto main  # Move current branch onto main
+  wt stack move --up  # Move branch up among siblings
+  wt stack move --down --dry-run  # Preview moving branch down
   wt sync
   wt sync --continue
   wt restack
@@ -1799,6 +1807,291 @@ get_branch_children() {
     done
 }
 
+stack_move() {
+    # Check for rebase/merge in progress before any operations
+    if [ -d "$(git rev-parse --git-dir 2>/dev/null)/rebase-merge" ] || \
+       [ -d "$(git rev-parse --git-dir 2>/dev/null)/rebase-apply" ] || \
+       [ -f "$(git rev-parse --git-dir 2>/dev/null)/MERGE_HEAD" ]; then
+        echo "Error: Cannot move branches while rebase or merge is in progress" >&2
+        echo "Complete or abort the current operation first" >&2
+        return 129
+    fi
+
+    local onto_parent=""
+    local move_up=false
+    local move_down=false
+    local dry_run=false
+    local interactive=true
+
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --onto)
+                shift
+                if [ $# -eq 0 ]; then
+                    echo "Error: --onto requires a parent branch name" >&2
+                    return 1
+                fi
+                onto_parent="$1"
+                interactive=false
+                shift
+                ;;
+            --up)
+                move_up=true
+                interactive=false
+                shift
+                ;;
+            --down)
+                move_down=true
+                interactive=false
+                shift
+                ;;
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            -h|--help)
+                echo "Usage: wt stack move [options]"
+                echo ""
+                echo "Options:"
+                echo "  --onto <parent>  Move current branch onto a new parent"
+                echo "  --up             Move branch up (earlier) among siblings"
+                echo "  --down           Move branch down (later) among siblings"
+                echo "  --dry-run        Show what would happen without making changes"
+                echo ""
+                echo "Without options, opens interactive mode (delegates to gt move)"
+                return 0
+                ;;
+            *)
+                # Unknown arguments - pass through to gt move
+                if [ "$interactive" = true ]; then
+                    # Pass unknown arguments to gt move
+                    gt move "$@"
+                    return $?
+                else
+                    echo "Error: Unknown option: $1" >&2
+                    return 1
+                fi
+                ;;
+        esac
+    done
+
+    # Check for conflicting options
+    local option_count=0
+    [ -n "$onto_parent" ] && option_count=$((option_count + 1))
+    [ "$move_up" = true ] && option_count=$((option_count + 1))
+    [ "$move_down" = true ] && option_count=$((option_count + 1))
+
+    if [ $option_count -gt 1 ]; then
+        echo "Error: Cannot combine --onto, --up, and --down options" >&2
+        return 1
+    fi
+
+    # Check if gt is available
+    if ! command -v gt &>/dev/null; then
+        echo "Error: Graphite (gt) is required for stack operations" >&2
+        echo "Install with: brew install graphite or visit https://graphite.dev" >&2
+        return 2
+    fi
+
+    # Get current branch
+    local current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [ -z "$current_branch" ]; then
+        echo "Error: Not in a git repository" >&2
+        return 1
+    fi
+
+    # Handle interactive mode (no options provided)
+    if [ "$interactive" = true ]; then
+        log "Opening interactive move mode..."
+        gt move
+        return $?
+    fi
+
+    # Handle --onto option (delegate to gt)
+    if [ -n "$onto_parent" ]; then
+        # Check if parent branch exists
+        if ! git show-ref --verify --quiet "refs/heads/$onto_parent" && \
+           ! git show-ref --verify --quiet "refs/remotes/origin/$onto_parent"; then
+            echo "Error: Parent branch '$onto_parent' does not exist" >&2
+            return 1
+        fi
+
+        if [ "$current_branch" = "$onto_parent" ]; then
+            echo "Error: Cannot move a branch onto itself" >&2
+            return 1
+        fi
+
+        if [ "$dry_run" = true ]; then
+            log "Dry-run: Would move '$current_branch' onto '$onto_parent'"
+            log ""
+            log "Current stack structure:"
+            gt ls --no-interactive
+            log ""
+            log "After move, '$current_branch' would have '$onto_parent' as its parent"
+            return 0
+        fi
+
+        log "Moving '$current_branch' onto '$onto_parent'..."
+        if gt move --onto "$onto_parent" --no-interactive; then
+            log "✓ Successfully moved '$current_branch' onto '$onto_parent'"
+            log ""
+            log "Updated stack structure:"
+            gt ls --no-interactive
+        else
+            echo "Error: Failed to move branch" >&2
+            echo "If there are conflicts, resolve them and run 'wt continue'" >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    # Handle --up/--down options (custom implementation)
+    if [ "$move_up" = true ] || [ "$move_down" = true ]; then
+        # Check if current branch is tracked
+        if ! gt ls --no-interactive 2>/dev/null | grep -q "^[◯◉][[:space:]]*$current_branch"; then
+            echo "Error: Branch '$current_branch' is not tracked by Graphite" >&2
+            echo "Track it first with: wt stack parent <parent-branch>" >&2
+            return 1
+        fi
+
+        # Get the parent of the current branch
+        local parent=$(get_branch_parent "$current_branch")
+        if [ -z "$parent" ]; then
+            echo "Error: Could not determine parent of '$current_branch'" >&2
+            return 1
+        fi
+
+        # Get all siblings (branches with the same parent)
+        # Use gt ls to get the stack structure and parse it
+        local siblings=()
+        local current_index=-1
+        local index=0
+
+        # Parse gt ls output to find siblings
+        # Format: ◯ branch-name [optional PR info]
+        while IFS= read -r line; do
+            # Skip empty lines and non-branch lines
+            if [[ ! "$line" =~ ^[◯◉][[:space:]]+ ]]; then
+                continue
+            fi
+
+            # Extract branch name (remove marker and PR info)
+            local branch_name=$(echo "$line" | sed 's/^[◯◉][[:space:]]*//; s/[[:space:]].*//')
+
+            # Skip graphite-base branches
+            if [[ "$branch_name" == graphite-base/* ]]; then
+                continue
+            fi
+
+            # Check if this branch has the same parent
+            local branch_parent=$(get_branch_parent "$branch_name")
+            if [ "$branch_parent" = "$parent" ]; then
+                siblings+=("$branch_name")
+                if [ "$branch_name" = "$current_branch" ]; then
+                    current_index=$index
+                fi
+                index=$((index + 1))
+            fi
+        done < <(gt ls --no-interactive 2>/dev/null)
+
+        if [ ${#siblings[@]} -le 1 ]; then
+            echo "Error: No siblings found (branches with parent '$parent')" >&2
+            return 1
+        fi
+
+        if [ $current_index -eq -1 ]; then
+            echo "Error: Current branch not found in sibling list" >&2
+            return 1
+        fi
+
+        # Determine new position
+        local new_index
+        if [ "$move_up" = true ]; then
+            if [ $current_index -eq 0 ]; then
+                echo "Error: Already at the top of siblings" >&2
+                return 1
+            fi
+            new_index=$((current_index - 1))
+        else  # move_down
+            if [ $current_index -eq $((${#siblings[@]} - 1)) ]; then
+                echo "Error: Already at the bottom of siblings" >&2
+                return 1
+            fi
+            new_index=$((current_index + 1))
+        fi
+
+        local swap_with="${siblings[$new_index]}"
+
+        if [ "$dry_run" = true ]; then
+            log "Dry-run: Would swap positions of '$current_branch' and '$swap_with'"
+            log ""
+            log "Current order of siblings under '$parent':"
+            for i in "${!siblings[@]}"; do
+                if [ $i -eq $current_index ]; then
+                    echo "  $(($i + 1)). ${siblings[$i]} <-- current"
+                else
+                    echo "  $(($i + 1)). ${siblings[$i]}"
+                fi
+            done
+            log ""
+            if [ "$move_up" = true ]; then
+                log "After move, '$current_branch' would be above '$swap_with'"
+            else
+                log "After move, '$current_branch' would be below '$swap_with'"
+            fi
+            return 0
+        fi
+
+        # Use gt reorder to change the order
+        # gt reorder expects the branch names in the new order
+        log "Reordering siblings under '$parent'..."
+
+        # Build new order array
+        local new_order=()
+        for i in "${!siblings[@]}"; do
+            if [ "$move_up" = true ]; then
+                if [ $i -eq $new_index ]; then
+                    new_order+=("$current_branch")
+                elif [ $i -eq $current_index ]; then
+                    new_order+=("$swap_with")
+                else
+                    new_order+=("${siblings[$i]}")
+                fi
+            else  # move_down
+                if [ $i -eq $current_index ]; then
+                    new_order+=("$swap_with")
+                elif [ $i -eq $new_index ]; then
+                    new_order+=("$current_branch")
+                else
+                    new_order+=("${siblings[$i]}")
+                fi
+            fi
+        done
+
+        # Execute the reorder
+        # Note: gt reorder expects branches in order from bottom to top of stack
+        # So we need to reverse the order
+        local reversed_order=()
+        for ((i=${#new_order[@]}-1; i>=0; i--)); do
+            reversed_order+=("${new_order[$i]}")
+        done
+
+        if gt reorder --parent "$parent" "${reversed_order[@]}" --no-interactive; then
+            log "✓ Successfully reordered branches"
+            log ""
+            log "Updated stack structure:"
+            gt ls --no-interactive
+        else
+            echo "Error: Failed to reorder branches" >&2
+            echo "If there are conflicts, resolve them and run 'wt continue'" >&2
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
 navigate_stack() {
     local direction="$1"
     local current_branch=""
@@ -2401,7 +2694,7 @@ while [[ $# -gt 0 ]]; do
             INSTALL_GIT_STACK=true
             shift
             ;;
-        init|list|ls|create|rm|close|reset|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|push|pr|migrate-to-gt|modify)
+        init|list|ls|create|rm|close|reset|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|push|pr|migrate-to-gt|modify|continue)
             COMMAND="$1"
             shift
             # For 'close' command, check for --all flag
@@ -2462,6 +2755,13 @@ while [[ $# -gt 0 ]]; do
                                     ;;
                             esac
                         done
+                        ;;
+                    move)
+                        STACK_SUBCOMMAND="move"
+                        shift
+                        # Collect all remaining arguments for stack_move
+                        STACK_MOVE_ARGS=("$@")
+                        break  # Don't process further arguments
                         ;;
                     --current)
                         STACK_CURRENT=true
@@ -2547,6 +2847,8 @@ case "$COMMAND" in
                 exit 1
             fi
             open_stack_branches "$STACK_OPEN_BRANCH"
+        elif [ "$STACK_SUBCOMMAND" = "move" ]; then
+            stack_move "${STACK_MOVE_ARGS[@]}"
         else
             show_worktree_stack
         fi
