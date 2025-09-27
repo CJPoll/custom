@@ -1,0 +1,139 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# wt-change - Handle 'wt change' subcommands
+# This script manages operations that modify commits in the current branch
+
+usage() {
+    cat << EOF
+Usage: wt change <subcommand> [options]
+
+Subcommands:
+  modify [options]  Amend current commit with auto-restacking (delegates to gt modify)
+                    --commit, -c: Create new commit instead of amending
+                    --all, -a: Stage all changes before committing
+                    --message, -m: Commit message
+                    --edit, -e: Edit commit message
+                    --update, -u: Stage updates to tracked files
+                    --patch, -p: Pick hunks to stage
+
+  absorb [options]  Auto-apply changes to relevant commits in stack (delegates to gt absorb)
+                    --all, -a: Stage all changes before absorbing
+                    --dry-run, -d: Preview where changes would be absorbed
+                    --patch, -p: Pick hunks to stage before absorbing
+                    --force, -f: Do not prompt for confirmation
+                    --show-worktrees: Show which worktrees will be affected (future enhancement)
+                    --test-affected: Run tests in affected worktrees (future enhancement)
+
+Examples:
+  wt change modify -a                # Stage all changes and amend current commit
+  wt change modify --commit -m "msg"  # Create new commit with message
+  wt change absorb -d                 # Preview where changes would be absorbed
+  wt change absorb -a                 # Stage all and absorb into stack
+  wt change absorb -p                 # Interactive patch mode before absorbing
+
+Notes:
+  - Both commands automatically restack upstack branches after modifications
+  - absorb is particularly useful for layered architecture stacks where each
+    file is only modified in a single branch of the stack
+EOF
+}
+
+log() {
+    if [ "${QUIET:-false}" = false ]; then
+        echo "$@" >&2
+    fi
+}
+
+# Parse command-line arguments
+SUBCOMMAND="${1:-}"
+shift || true
+
+# Handle help at the change level
+if [ -z "$SUBCOMMAND" ] || [ "$SUBCOMMAND" = "--help" ] || [ "$SUBCOMMAND" = "-h" ]; then
+    usage
+    exit 0
+fi
+
+# Check if gt is available
+if ! command -v gt &>/dev/null; then
+    echo "Error: Graphite (gt) is required for change operations" >&2
+    echo "Install with: brew install graphite or visit https://graphite.dev" >&2
+    exit 2
+fi
+
+case "$SUBCOMMAND" in
+    modify)
+        # Pass all remaining arguments to gt modify
+        # gt modify handles all its own flags
+        log "Modifying current commit..."
+        gt modify "$@"
+        exit $?
+        ;;
+
+    absorb)
+        # Enhanced absorb could parse --show-worktrees or --test-affected
+        # For now, just delegate to gt absorb
+
+        # Check for future enhancement flags
+        SHOW_WORKTREES=false
+        TEST_AFFECTED=""
+        GT_ARGS=()
+
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --show-worktrees)
+                    SHOW_WORKTREES=true
+                    shift
+                    ;;
+                --test-affected)
+                    shift
+                    if [ $# -eq 0 ]; then
+                        echo "Error: --test-affected requires a test command" >&2
+                        exit 1
+                    fi
+                    TEST_AFFECTED="$1"
+                    shift
+                    ;;
+                *)
+                    # Pass through to gt absorb
+                    GT_ARGS+=("$1")
+                    shift
+                    ;;
+            esac
+        done
+
+        # Future enhancement: if SHOW_WORKTREES is true, run with --dry-run first
+        # and parse output to show which worktrees would be affected
+        if [ "$SHOW_WORKTREES" = true ]; then
+            echo "Note: --show-worktrees is a planned feature" >&2
+            # In the future, this would:
+            # 1. Run gt absorb --dry-run
+            # 2. Parse output to identify affected branches
+            # 3. Map branches to worktrees
+            # 4. Display summary
+        fi
+
+        # Future enhancement: if TEST_AFFECTED is set, track affected branches
+        # and run tests in their worktrees after absorption
+        if [ -n "$TEST_AFFECTED" ]; then
+            echo "Note: --test-affected is a planned feature" >&2
+            # In the future, this would:
+            # 1. Track which branches were affected
+            # 2. Run the test command in each affected worktree
+            # 3. Report results
+        fi
+
+        log "Absorbing changes into stack..."
+        gt absorb "${GT_ARGS[@]}"
+        exit $?
+        ;;
+
+    *)
+        echo "Error: Unknown subcommand: $SUBCOMMAND" >&2
+        echo "" >&2
+        usage >&2
+        exit 1
+        ;;
+esac

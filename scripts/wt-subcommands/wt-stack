@@ -1,0 +1,148 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# wt-stack - Handle 'wt stack' subcommands
+# This script manages stack operations for worktree-based development
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/../wt-lib"
+
+# Source library files
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/worktree.sh"
+source "${LIB_DIR}/stack.sh"
+source "${LIB_DIR}/create.sh"
+
+# Environment variables for configuration
+QUIET="${QUIET:-false}"
+STACK_CREATE_SESSIONS="${STACK_CREATE_SESSIONS:-false}"
+
+usage() {
+    cat << EOF
+Usage: wt stack [subcommand] [options]
+
+Subcommands:
+  (no subcommand)   Show all tracked branches and their relationships (gt ls)
+  --current         Show only the current branch's stack (gt ls -s)
+  --install         Install Graphite (gt) if not already installed
+
+  parent [branch]   Show or set the parent branch for the current branch
+                    --restack: restack after setting parent
+                    --switch: switch to parent worktree after setting
+
+  open <branch>     Create worktrees for all branches in the stack up to the given branch
+                    --create-sessions: also create tmux sessions for each worktree
+
+  move              Change a branch's parent or reorder siblings
+                    --onto <parent>: move to new parent
+                    --up/--down: reorder among siblings
+                    --dry-run: preview changes without applying
+
+  reorder           Rearrange multiple branches in the stack interactively (gt reorder)
+
+  sync              Sync the stack with remote changes using Graphite (gt sync)
+                    --continue: continue a sync operation after resolving conflicts
+
+  restack           Fix stack relationships and rebase onto correct parents (gt restack)
+
+Examples:
+  wt stack                          # Show stack structure
+  wt stack --current                # Show current branch's stack
+  wt stack parent main              # Set current branch's parent to main
+  wt stack open feature/branch      # Create worktrees for stack
+  wt stack move --onto main         # Move current branch onto main
+  wt stack sync                     # Sync with remote
+  wt stack restack                  # Fix stack relationships
+
+Notes:
+  - Most operations delegate to Graphite (gt) for stack management
+  - Worktrees are created in ~/.local/worktrees/<project-name>/
+  - Stack metadata is shared between all worktrees
+EOF
+}
+
+log() {
+    if [ "$QUIET" = false ]; then
+        echo "$@" >&2
+    fi
+}
+
+
+# Note: open_stack_branches function needs to be added to library
+# For now, we'll define it here
+open_stack_branches() {
+    # This function is too large and complex for the initial refactor
+    # It should be moved to a separate library file later
+    echo "Error: 'wt stack open' is not yet implemented in the refactored version" >&2
+    return 1
+}
+
+# Parse main command-line arguments
+SUBCOMMAND="${1:-}"
+shift || true
+
+# Handle special flags that don't need subcommands
+if [ "$SUBCOMMAND" = "--help" ] || [ "$SUBCOMMAND" = "-h" ]; then
+    usage
+    exit 0
+elif [ "$SUBCOMMAND" = "--current" ]; then
+    STACK_CURRENT=true
+    show_worktree_stack
+    exit 0
+elif [ "$SUBCOMMAND" = "--install" ]; then
+    INSTALL_GIT_STACK=true
+    show_worktree_stack
+    exit 0
+fi
+
+# Handle subcommands
+case "${SUBCOMMAND:-show}" in
+    show|"")
+        show_worktree_stack
+        ;;
+
+    parent)
+        set_stack_parent "$@"
+        ;;
+
+    open)
+        open_stack_branches "$@"
+        ;;
+
+    move)
+        stack_move "$@"
+        ;;
+
+    reorder)
+        # Check if gt is available
+        if ! command -v gt &>/dev/null; then
+            echo "Error: Graphite (gt) is required for stack operations" >&2
+            echo "Install with: brew install graphite or visit https://graphite.dev" >&2
+            exit 2
+        fi
+        # Pure delegation to gt reorder
+        log "Opening interactive reorder mode..."
+        if ! gt reorder; then
+            echo "Error: Failed to reorder branches" >&2
+            echo "If there are conflicts, resolve them and run 'wt continue'" >&2
+            exit 1
+        fi
+        ;;
+
+    sync)
+        sync_worktree_stack "$@"
+        ;;
+
+    restack)
+        restack_worktree
+        ;;
+
+    *)
+        echo "Error: Unknown subcommand: $SUBCOMMAND" >&2
+        echo "" >&2
+        usage >&2
+        exit 1
+        ;;
+esac
