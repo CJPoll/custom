@@ -70,14 +70,9 @@ log() {
 }
 
 
-# Note: open_stack_branches function needs to be added to library
-# For now, we'll define it here
-open_stack_branches() {
-    # This function is too large and complex for the initial refactor
-    # It should be moved to a separate library file later
-    echo "Error: 'wt stack open' is not yet implemented in the refactored version" >&2
-    return 1
-}
+# The open_stack_branches function is defined in stack-advanced.sh
+# Just need to source it
+source "${LIB_DIR}/stack-advanced.sh"
 
 # Parse main command-line arguments
 SUBCOMMAND="${1:-}"

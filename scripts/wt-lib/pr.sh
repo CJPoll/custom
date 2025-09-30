@@ -45,12 +45,12 @@ if [[ -z "${WT_LIB_PR_SOURCED:-}" ]]; then
         log "Creating/updating PRs..."
         if [ "$open_in_browser" = "true" ]; then
             # Create PRs and open in browser
-            gt stack submit --no-interactive --open || {
+            gt submit --stack --no-interactive --open || {
                 error "Failed to create PRs. Please check the output above."
             }
         else
             # Create PRs without opening browser
-            gt stack submit --no-interactive || {
+            gt submit --stack --no-interactive || {
                 error "Failed to create PRs. Please check the output above."
             }
         fi
@@ -79,74 +79,25 @@ if [[ -z "${WT_LIB_PR_SOURCED:-}" ]]; then
 
         log "Pushing stack to remote..."
 
-        # Get all branches in the stack
-        local branches=($(get_stack_branches))
-        if [ ${#branches[@]} -eq 0 ]; then
-            error "No branches found in stack"
-        fi
-
-        log "Found ${#branches[@]} branches in stack to push:"
-        for branch in "${branches[@]}"; do
-            log "  - $branch"
-        done
-        log ""
-
-        local failed_pushes=()
-        local pushed_branches=()
-
-        # Push each branch in the stack
-        for branch in "${branches[@]}"; do
-            # Get the worktree for this branch
-            local worktree_path=$(get_worktree_dir "$branch")
-            if [ -z "$worktree_path" ]; then
-                log "⚠ No worktree for $branch, skipping..."
-                continue
-            fi
-
-            log "Pushing $branch..."
-
-            # Run git push in the worktree
-            if [ "$force" = "true" ]; then
-                if (cd "$worktree_path" && git push --force-with-lease origin "$branch"); then
-                    log "  ✓ Force pushed $branch"
-                    pushed_branches+=("$branch")
-                else
-                    log "  ✗ Failed to push $branch"
-                    failed_pushes+=("$branch")
-                fi
+        # Use gt submit to push the stack
+        if [ "$force" = "true" ]; then
+            # Force push the stack
+            if gt submit --stack --force --no-interactive; then
+                log "✓ Stack force-pushed successfully!"
             else
-                if (cd "$worktree_path" && git push origin "$branch"); then
-                    log "  ✓ Pushed $branch"
-                    pushed_branches+=("$branch")
-                else
-                    # Try with --set-upstream if this is the first push
-                    if (cd "$worktree_path" && git push --set-upstream origin "$branch"); then
-                        log "  ✓ Pushed $branch (with upstream set)"
-                        pushed_branches+=("$branch")
-                    else
-                        log "  ✗ Failed to push $branch"
-                        failed_pushes+=("$branch")
-                    fi
-                fi
+                log "✗ Failed to push stack"
+                return 1
             fi
-        done
-
-        # Summary
-        log ""
-        log "Push Summary:"
-        log "  Successful: ${#pushed_branches[@]} branches"
-        if [ ${#failed_pushes[@]} -gt 0 ]; then
-            log "  Failed: ${#failed_pushes[@]} branches"
-            for branch in "${failed_pushes[@]}"; do
-                log "    - $branch"
-            done
-            log ""
-            log "To force push failed branches, run: wt push-stack --force"
-            return 1
+        else
+            # Normal push
+            if gt submit --stack --no-interactive; then
+                log "✓ Stack pushed successfully!"
+            else
+                log "✗ Failed to push stack"
+                log "To force push, run: wt push --stack --force"
+                return 1
+            fi
         fi
-
-        log ""
-        log "✓ Stack pushed successfully!"
     }
 
     # Helper function to push a single branch

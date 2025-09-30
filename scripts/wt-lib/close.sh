@@ -41,47 +41,16 @@ if [[ -z "${WT_LIB_CLOSE_SOURCED:-}" ]]; then
                 exit 3
             fi
 
-            # Get list of all worktrees
-            local git_worktrees=$(git worktree list --porcelain 2>/dev/null || echo "")
-            if [ -z "$git_worktrees" ]; then
-                # No worktrees, nothing to do - success with no output
-                exit 0
-            fi
-
+            # Get ALL local branches (not just those with worktrees)
+            local all_branches=$(git for-each-ref --format='%(refname:short)' refs/heads/)
             local branches_to_close=()
-            local worktree_path=""
-            local branch=""
 
-            # Parse worktree list to get branches
-            while IFS= read -r line; do
-                if [[ "$line" =~ ^worktree[[:space:]](.+) ]]; then
-                    # Process previous worktree if exists
-                    if [ -n "$worktree_path" ] && [ -n "$branch" ]; then
-                        # Only consider worktrees in our worktrees directory (not main project)
-                        if [[ "$worktree_path" == "$WORKTREES_DIR/"* ]]; then
-                            # Skip main/master branches
-                            if [ "$branch" != "main" ] && [ "$branch" != "master" ]; then
-                                branches_to_close+=("$branch")
-                            fi
-                        fi
-                    fi
-
-                    # Reset for new worktree
-                    worktree_path="${BASH_REMATCH[1]}"
-                    branch=""
-                elif [[ "$line" =~ ^branch[[:space:]]refs/heads/(.+) ]]; then
-                    branch="${BASH_REMATCH[1]}"
+            # Filter out main/master branches
+            for branch in $all_branches; do
+                if [ "$branch" != "main" ] && [ "$branch" != "master" ]; then
+                    branches_to_close+=("$branch")
                 fi
-            done <<< "$git_worktrees"
-
-            # Process last worktree
-            if [ -n "$worktree_path" ] && [ -n "$branch" ]; then
-                if [[ "$worktree_path" == "$WORKTREES_DIR/"* ]]; then
-                    if [ "$branch" != "main" ] && [ "$branch" != "master" ]; then
-                        branches_to_close+=("$branch")
-                    fi
-                fi
-            fi
+            done
 
             # Close each branch silently
             for branch_to_close in "${branches_to_close[@]}"; do
@@ -115,6 +84,15 @@ if [[ -z "${WT_LIB_CLOSE_SOURCED:-}" ]]; then
         if ! branch_exists_locally "$branch"; then
             # Silently exit with success if branch doesn't exist
             return 0
+        fi
+
+        # Kill tmux session if it exists (even without worktree)
+        local project_name=$(basename "$PROJECT_DIR")
+        local safe_branch=$(echo "$branch" | tr '/' '-')
+        local session_name="${project_name}-wt-${safe_branch}"
+
+        if tmux has-session -t "$session_name" 2>/dev/null; then
+            tmux kill-session -t "$session_name" 2>/dev/null || true
         fi
 
         # Remove worktree if it exists (silently)

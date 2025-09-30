@@ -2,9 +2,10 @@
 
 set -euo pipefail
 
-# Get script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="${SCRIPT_DIR}/wt-lib"
+# Get script directory and preserve it
+MAIN_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="${MAIN_SCRIPT_DIR}"
+LIB_DIR="${MAIN_SCRIPT_DIR}/wt-lib"
 
 # Source library files
 source "${LIB_DIR}/common.sh"
@@ -18,8 +19,8 @@ source "${LIB_DIR}/tmux.sh"
 source "${LIB_DIR}/pr.sh"
 
 # Source the install_git_stack script if it exists
-if [ -f "${SCRIPT_DIR}/../install_git_stack.sh" ]; then
-    source "${SCRIPT_DIR}/../install_git_stack.sh"
+if [ -f "${MAIN_SCRIPT_DIR}/../install_git_stack.sh" ]; then
+    source "${MAIN_SCRIPT_DIR}/../install_git_stack.sh"
 fi
 
 # Initialize flags (these are used by library functions)
@@ -353,9 +354,10 @@ while [[ $# -gt 0 ]]; do
                 break
             # For 'change' command, capture subcommand and pass remaining args
             elif [ "$COMMAND" = "change" ]; then
+                # Don't consume the subcommand here - let wt-change handle it
                 if [ $# -gt 0 ]; then
                     CHANGE_SUBCOMMAND="$1"
-                    shift
+                    # Don't shift - we need to pass this to wt-change
                 fi
                 break
             fi
@@ -429,23 +431,23 @@ case "$COMMAND" in
         is_worktree
         ;;
     stack)
-        # Delegate to wt-stack script
-        if [ -f "${SCRIPT_DIR}/wt-subcommands/wt-stack" ]; then
+        # Delegate to wt-stack script (use MAIN_SCRIPT_DIR to avoid overwrite issues)
+        if [ -f "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-stack" ]; then
             # Pass QUIET environment variable if set
             export QUIET
             export STACK_CREATE_SESSIONS
-            "${SCRIPT_DIR}/wt-subcommands/wt-stack" "$@"
+            "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-stack" "$@"
             exit $?
         else
-            echo "Error: wt-stack script not found at ${SCRIPT_DIR}/wt-subcommands/wt-stack" >&2
+            echo "Error: wt-stack script not found at ${MAIN_SCRIPT_DIR}/wt-subcommands/wt-stack" >&2
             exit 1
         fi
         ;;
     sync)
         # Delegate to wt-stack for sync
-        if [ -f "${SCRIPT_DIR}/wt-subcommands/wt-stack" ]; then
+        if [ -f "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-stack" ]; then
             export QUIET
-            "${SCRIPT_DIR}/wt-subcommands/wt-stack" sync "$@"
+            "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-stack" sync "$@"
             exit $?
         else
             echo "Error: wt-stack script not found" >&2
@@ -454,9 +456,9 @@ case "$COMMAND" in
         ;;
     restack)
         # Delegate to wt-stack for restack
-        if [ -f "${SCRIPT_DIR}/wt-subcommands/wt-stack" ]; then
+        if [ -f "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-stack" ]; then
             export QUIET
-            "${SCRIPT_DIR}/wt-subcommands/wt-stack" restack "$@"
+            "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-stack" restack "$@"
             exit $?
         else
             echo "Error: wt-stack script not found" >&2
@@ -502,23 +504,23 @@ case "$COMMAND" in
         ;;
     migrate-to-gt)
         # Run the migration script
-        if [ -f "${SCRIPT_DIR}/wt-subcommands/wt-migrate-to-gt" ]; then
-            "${SCRIPT_DIR}/wt-subcommands/wt-migrate-to-gt" "$@"
+        if [ -f "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-migrate-to-gt" ]; then
+            "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-migrate-to-gt" "$@"
             exit $?
         else
-            echo "Error: Migration script not found at ${SCRIPT_DIR}/wt-subcommands/wt-migrate-to-gt" >&2
+            echo "Error: Migration script not found at ${MAIN_SCRIPT_DIR}/wt-subcommands/wt-migrate-to-gt" >&2
             exit 1
         fi
         ;;
     change)
-        # Delegate to wt-change script
-        if [ -f "${SCRIPT_DIR}/wt-subcommands/wt-change" ]; then
+        # Delegate to wt-change script in subcommands directory
+        if [ -f "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-change" ]; then
             # Pass QUIET environment variable if set
             export QUIET
-            "${SCRIPT_DIR}/wt-subcommands/wt-change" "$@"
+            "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-change" "$@"
             exit $?
         else
-            echo "Error: wt-change script not found at ${SCRIPT_DIR}/wt-subcommands/wt-change" >&2
+            echo "Error: wt-change script not found at ${MAIN_SCRIPT_DIR}/wt-subcommands/wt-change" >&2
             exit 1
         fi
         ;;
@@ -539,7 +541,7 @@ case "$COMMAND" in
         else
             log "Resuming the paused operation..."
             gt continue "$@"
-            local result=$?
+            result=$?
             if [ $result -eq 0 ]; then
                 log "✓ Operation resumed successfully"
             else

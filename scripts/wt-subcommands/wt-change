@@ -67,8 +67,14 @@ case "$SUBCOMMAND" in
     modify)
         # Pass all remaining arguments to gt modify
         # gt modify handles all its own flags
-        log "Modifying current commit..."
-        gt modify "$@"
+        # Default to --no-edit if no arguments provided
+        if [ $# -eq 0 ]; then
+            log "Modifying current commit (no edit)..."
+            gt modify --no-edit
+        else
+            log "Modifying current commit..."
+            gt modify "$@"
+        fi
         exit $?
         ;;
 
