@@ -38,7 +38,7 @@ if [[ -z "${WT_LIB_CLOSE_SOURCED:-}" ]]; then
 
             if [ $is_wt_result -ne 1 ]; then
                 echo "Error: 'wt close --all' must be run from the main branch worktree" >&2
-                exit 3
+                return 3
             fi
 
             # Get ALL local branches (not just those with worktrees)
@@ -54,12 +54,12 @@ if [[ -z "${WT_LIB_CLOSE_SOURCED:-}" ]]; then
 
             # Close each branch silently
             for branch_to_close in "${branches_to_close[@]}"; do
-                # Call the internal close logic directly
-                _close_single_branch "$branch_to_close"
+                # Call the internal close logic directly, ignore errors
+                _close_single_branch "$branch_to_close" || true
             done
 
             # Success - no output
-            exit 0
+            return 0
         fi
 
         if [ -z "$branch" ]; then
@@ -70,7 +70,7 @@ if [[ -z "${WT_LIB_CLOSE_SOURCED:-}" ]]; then
         # Prevent closing main/master branches
         if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
             echo "Error: Cannot close main/master branch" >&2
-            exit 2
+            return 2
         fi
 
         # Use the internal function for single branch close

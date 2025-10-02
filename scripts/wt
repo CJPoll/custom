@@ -82,21 +82,31 @@ Commands:
                     --up/--down: reorder among siblings
                     --dry-run: preview changes without applying
   stack reorder     Rearrange multiple branches in the stack interactively (delegates to gt)
+  stack rename      Rename the current branch (delegates to gt rename)
+                    --force, -f: allow renaming branch with open PR
+  stack push        Push all branches in the stack using Graphite (gt submit)
+                    --force, -f: force push branches
+                    --dry-run: show what would be pushed without pushing
   sync              Sync the stack with remote changes using Graphite (gt sync)
   sync --continue   Continue a sync operation after resolving conflicts (gt continue)
   restack           Fix stack relationships and rebase onto correct parents (gt restack)
   next              Navigate to a child branch in the stack (switch tmux session)
   prev              Navigate to the parent branch in the stack (switch tmux session)
   run <command>     Execute a command across all branches in the stack (in dependency order)
-  push --stack      Push all branches in the stack using Graphite (gt submit)
   pr --stack        Create/update pull requests for the stack using Graphite
   migrate-to-gt     Migrate existing git-stack metadata to Graphite format
                     One-time migration for projects using git-stack
-  change modify     Amend current commit with auto-restacking (delegates to gt modify)
+  change amend      Amend current commit with auto-restacking (delegates to gt modify)
   change absorb     Auto-apply changes to relevant commits in stack (delegates to gt absorb)
                     --all, -a: stage all changes before absorbing
                     --dry-run, -d: preview where changes would be absorbed
                     --patch, -p: pick hunks to stage before absorbing
+  change split      Split current branch into multiple branches (delegates to gt split)
+                    --by-commit, -c: split by existing commits
+                    --by-hunk, -h: interactively split by hunks
+  change squash     Squash all commits in branch into one (delegates to gt squash)
+                    --message, -m: updated message for squashed commit
+                    --no-edit, -n: don't modify commit message
   continue          Resume paused operation after resolving conflicts (delegates to gt)
                     --abort: abort the current operation
 
@@ -111,11 +121,10 @@ Options:
   --dir <directory> Check the specified directory (for is-worktree command, defaults to current dir)
   --pr-review       Open changed files in tabs for PR review (for switch command)
   --parent <branch> Parent branch for PR review or stack creation (defaults to main)
-  --stack           Execute command for entire stack (for push/pr commands)
-  --dry-run         Show what would be done without actually doing it (for push/pr commands)
+  --stack           Execute command for entire stack (for pr commands)
+  --dry-run         Show what would be done without actually doing it (for stack push/pr commands)
   --draft           Create draft pull requests (for pr --stack)
   --publish         Publish draft PRs to ready state (for pr --stack)
-  --force|-f        Force push branches (for push --stack)
 
 Examples:
   wt init
@@ -151,19 +160,24 @@ Examples:
   wt prev
   wt run "npm test"
   wt run "git status"
-  wt push --stack --dry-run
-  wt push --stack
-  wt push --stack --force
+  wt stack push --dry-run
+  wt stack push
+  wt stack push --force
   wt pr --stack --dry-run
   wt pr --stack
   wt pr --stack --draft
   wt pr --stack --publish
   wt stack open feature/child  # Creates worktrees for parent branches leading to child
   wt stack open feature/child --create-sessions  # Also creates tmux sessions
+  wt stack rename new-name  # Rename current branch
+  wt stack rename --force  # Force rename even with open PR
   wt migrate-to-gt
-  wt modify  # Amend current commit
-  wt modify --commit  # Create new commit
-  wt modify --all --message "Fix bug"  # Stage all and amend with message
+  wt change amend  # Amend current commit
+  wt change amend --commit  # Create new commit
+  wt change amend --all --message "Fix bug"  # Stage all and amend with message
+  wt change split --by-commit  # Split branch by commits
+  wt change split --by-hunk  # Interactively split by hunks
+  wt change squash -m "New message"  # Squash commits with new message
   wt continue  # Resume after resolving conflicts
   wt continue --abort  # Abort the current operation
 
@@ -236,9 +250,6 @@ EOF
 COMMAND=""
 BRANCH=""
 RUN_COMMAND=""
-PUSH_STACK=false
-PUSH_ALL=false
-PUSH_FORCE=false
 DRY_RUN=false
 PR_STACK=false
 PR_DRAFT=false
@@ -257,12 +268,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --stack)
-            PUSH_STACK=true
             PR_STACK=true
-            shift
-            ;;
-        --all)
-            PUSH_ALL=true
             shift
             ;;
         --dry-run)
@@ -275,10 +281,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --publish)
             PR_PUBLISH=true
-            shift
-            ;;
-        --force|-f)
-            PUSH_FORCE=true
             shift
             ;;
         --no-symlink)
@@ -338,7 +340,7 @@ while [[ $# -gt 0 ]]; do
             INSTALL_GIT_STACK=true
             shift
             ;;
-        init|list|ls|create|rm|close|reset|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|push|pr|migrate-to-gt|change|continue)
+        init|list|ls|create|rm|close|reset|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|pr|migrate-to-gt|change|continue)
             COMMAND="$1"
             shift
             # For 'close' command, check for --all flag
@@ -411,8 +413,10 @@ case "$COMMAND" in
         # Check if first argument is --all
         if [ "$BRANCH" = "--all" ]; then
             close_branch "--all"
+            exit $?
         else
             close_branch "$BRANCH"
+            exit $?
         fi
         ;;
     reset)
@@ -473,20 +477,6 @@ case "$COMMAND" in
         ;;
     run)
         run_across_stack "$RUN_COMMAND"
-        ;;
-    push)
-        if [ "$PUSH_STACK" = true ]; then
-            # Build options array
-            push_opts=()
-            [ "$PUSH_ALL" = true ] && push_opts+=("--all")
-            [ "$PUSH_FORCE" = true ] && push_opts+=("--force")
-            [ "$DRY_RUN" = true ] && push_opts+=("--dry-run")
-            push_stack "${push_opts[@]}"
-        else
-            echo "Error: push command requires --stack flag" >&2
-            echo "Usage: wt push --stack [--force] [--dry-run]" >&2
-            exit 1
-        fi
         ;;
     pr)
         if [ "$PR_STACK" = true ]; then

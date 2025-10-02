@@ -94,7 +94,7 @@ if [[ -z "${WT_LIB_PR_SOURCED:-}" ]]; then
                 log "✓ Stack pushed successfully!"
             else
                 log "✗ Failed to push stack"
-                log "To force push, run: wt push --stack --force"
+                log "To force push, run: wt stack push --force"
                 return 1
             fi
         fi

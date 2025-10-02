@@ -110,6 +110,9 @@ create_worktree() {
     if [ "$INSERT_BRANCH" = true ]; then
         log "Inserting '$branch' into the stack..."
 
+        # Save the current branch so we can return to it
+        local original_branch=$(get_current_branch)
+
         # Build gt create command with appropriate flags
         local gt_cmd="gt create '$branch' --insert --no-interactive"
 
@@ -129,6 +132,13 @@ create_worktree() {
         local children_count=$(gt log --reverse | grep -c "^  " || echo "0")
         if [ "$children_count" -gt 0 ]; then
             log "✓ Rebased $children_count child branch(es) onto '$branch'"
+        fi
+
+        # Return to the original branch before creating the worktree
+        # (gt create --insert checks out the new branch)
+        if [ "$(get_current_branch)" != "$original_branch" ]; then
+            log "Returning to '$original_branch'..."
+            git checkout "$original_branch" &>/dev/null
         fi
 
         # Now create the worktree for the newly created branch
@@ -172,7 +182,10 @@ create_worktree() {
     init_graphite_worktree "$worktree_path"
 
     # Configure Graphite parent relationship (for non-insert flow)
-    if [ "$INSERT_BRANCH" != true ]; then
+    # Only set parent if:
+    # 1. Branch didn't exist locally (we're creating it new), OR
+    # 2. User explicitly provided --parent flag
+    if [ "$INSERT_BRANCH" != true ] && [ "$branch_exists_locally" = false ]; then
         if [ "$PARENT_BRANCH" != "main" ] || [ "$PARENT_BRANCH_EXPLICIT" = true ]; then
             if command -v gt &>/dev/null; then
                 # First ensure the parent branch is tracked
@@ -180,6 +193,14 @@ create_worktree() {
                 # Now track the current branch with its parent
                 (cd "$worktree_path" && gt track "$branch" --parent "$PARENT_BRANCH" &>/dev/null 2>&1) || true
             fi
+        fi
+    elif [ "$INSERT_BRANCH" != true ] && [ "$PARENT_BRANCH_EXPLICIT" = true ]; then
+        # If branch existed but user explicitly set parent, update it
+        if command -v gt &>/dev/null; then
+            # First ensure the parent branch is tracked
+            (cd "$worktree_path" && gt track "$PARENT_BRANCH" &>/dev/null 2>&1) || true
+            # Now track the current branch with its parent
+            (cd "$worktree_path" && gt track "$branch" --parent "$PARENT_BRANCH" &>/dev/null 2>&1) || true
         fi
     fi
 

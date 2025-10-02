@@ -8,9 +8,8 @@ _wt() {
     _arguments -C \
         '1: :_wt_commands' \
         '--quiet[Suppress output from script and subcommands]' \
-        '--stack[Execute command for entire stack (for push/pr commands)]' \
-        '--all[Push all ready branches, not just new ones (for push --stack)]' \
-        '--dry-run[Show what would be done without actually doing it (for push/pr commands)]' \
+        '--stack[Execute command for entire stack (for pr commands)]' \
+        '--dry-run[Show what would be done without actually doing it (for stack push/pr commands)]' \
         '--draft[Create draft pull requests (for pr --stack)]' \
         '*::arg:->args'
     
@@ -58,12 +57,6 @@ _wt() {
                 run)
                     _message 'command to run across stack'
                     ;;
-                push)
-                    _arguments \
-                        '--stack[Push all branches in the stack]' \
-                        '--all[Push all ready branches, not just new ones]' \
-                        '--dry-run[Show what would be pushed without actually pushing]'
-                    ;;
                 pr)
                     _arguments \
                         '--stack[Create pull requests for entire stack]' \
@@ -86,6 +79,8 @@ _wt() {
                             'open:Create worktrees for all branches in the stack up to the given branch'
                             'move:Change parent or reorder branches in the stack'
                             'reorder:Rearrange multiple branches in the stack interactively'
+                            'rename:Rename the current branch'
+                            'push:Push all branches in the stack using Graphite'
                         )
                         _describe -t stack-subcommands 'stack subcommand' stack_subcommands
                     elif [[ ${#words[@]} -ge 3 ]]; then
@@ -112,6 +107,16 @@ _wt() {
                             reorder)
                                 # No additional arguments for reorder (interactive mode)
                                 ;;
+                            rename)
+                                _arguments \
+                                    '1:new name:' \
+                                    '(-f --force)'{-f,--force}'[Allow renaming branch with open PR]'
+                                ;;
+                            push)
+                                _arguments \
+                                    '(-f --force)'{-f,--force}'[Force push branches]' \
+                                    '--dry-run[Show what would be pushed without pushing]'
+                                ;;
                             --current|--install)
                                 # No additional arguments for these flags
                                 ;;
@@ -122,15 +127,48 @@ _wt() {
                     # No additional arguments needed for migration
                     _message 'no more arguments'
                     ;;
-                modify)
-                    _arguments \
-                        '(-c --commit)'{-c,--commit}'[Create new commit instead of amending]' \
-                        '(-a --all)'{-a,--all}'[Stage all changes before committing]' \
-                        '(-m --message)'{-m,--message}'[Commit message]:message:' \
-                        '--interactive-rebase[Start interactive rebase]' \
-                        '(-e --edit)'{-e,--edit}'[Edit commit message]' \
-                        '(-u --update)'{-u,--update}'[Stage updates to tracked files]' \
-                        '(-p --patch)'{-p,--patch}'[Pick hunks to stage]'
+                change)
+                    # Handle change subcommands
+                    if [[ ${#words[@]} -eq 2 ]]; then
+                        # First argument after 'change'
+                        local change_subcommands=(
+                            'amend:Amend current commit with auto-restacking'
+                            'absorb:Auto-apply changes to relevant commits in stack'
+                            'split:Split current branch into multiple branches'
+                            'squash:Squash all commits in branch into one'
+                        )
+                        _describe -t change-subcommands 'change subcommand' change_subcommands
+                    elif [[ ${#words[@]} -ge 3 ]]; then
+                        case ${words[2]} in
+                            amend)
+                                _arguments \
+                                    '(-c --commit)'{-c,--commit}'[Create new commit instead of amending]' \
+                                    '(-a --all)'{-a,--all}'[Stage all changes before committing]' \
+                                    '(-m --message)'{-m,--message}'[Commit message]:message:' \
+                                    '(-e --edit)'{-e,--edit}'[Edit commit message]' \
+                                    '(-u --update)'{-u,--update}'[Stage updates to tracked files]' \
+                                    '(-p --patch)'{-p,--patch}'[Pick hunks to stage]'
+                                ;;
+                            absorb)
+                                _arguments \
+                                    '(-a --all)'{-a,--all}'[Stage all changes before absorbing]' \
+                                    '(-d --dry-run)'{-d,--dry-run}'[Preview where changes would be absorbed]' \
+                                    '(-p --patch)'{-p,--patch}'[Pick hunks to stage before absorbing]' \
+                                    '(-f --force)'{-f,--force}'[Do not prompt for confirmation]'
+                                ;;
+                            split)
+                                _arguments \
+                                    '(-c --by-commit --commit)'{-c,--by-commit,--commit}'[Split by commit - slice up the history]' \
+                                    '(-h --by-hunk --hunk)'{-h,--by-hunk,--hunk}'[Split by hunk - interactively split into new branches]'
+                                ;;
+                            squash)
+                                _arguments \
+                                    '(-m --message)'{-m,--message}'[Updated message for the squashed commit]:message:' \
+                                    '--edit[Modify the existing commit message]' \
+                                    '(-n --no-edit)'{-n,--no-edit}'[Do not modify the commit message]'
+                                ;;
+                        esac
+                    fi
                     ;;
                 continue)
                     _arguments \
@@ -160,10 +198,9 @@ _wt_commands() {
         'next:Navigate to a child branch in the stack (switch tmux session)'
         'prev:Navigate to the parent branch in the stack (switch tmux session)'
         'run:Execute a command across all branches in the stack'
-        'push:Push branches to origin (use --stack for entire stack)'
         'pr:Create pull requests (use --stack for entire stack)'
         'migrate-to-gt:Migrate existing git-stack metadata to Graphite format'
-        'modify:Amend current commit with auto-restacking (delegates to gt)'
+        'change:Modify commits in the stack (amend, absorb, split)'
         'continue:Resume paused operation after resolving conflicts (delegates to gt)'
     )
     _describe -t commands 'wt command' commands

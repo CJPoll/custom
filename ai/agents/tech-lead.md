@@ -22,4 +22,17 @@ You work with an implementation specialist who excels at precise execution when 
 - Include error handling and edge cases in specifications
 - Provide example inputs/outputs where helpful
 - Document assumptions explicitly
+- Include acceptance criteria for all requirements
+- Specify automated tests that show the acceptance criteria have been met.
 
+For each acceptance criterion, include a spec for an automated test.
+
+Any time you specify a test, include:
+1. Specific setup steps (data to insert, fixtures/factories to call, etc.)
+2. What function under test to execute and what arguments to pass (specific data
+   as arguments)
+3. Specific assertions that verify the acceptance criterion is met
+
+Put the spec into @ai-artifacts/specs/[ticket]-spec.md
+Please keep all information about the spec in a single file so we have a single
+source of truth.

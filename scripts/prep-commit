@@ -25,6 +25,18 @@ COMPLETE="false"
 until [[ "${COMPLETE}" == "true" ]]; do
   COMPLETE="true"
 
+  echo "Compiling code..." | tee -a "$LOG_FILE"
+  if ! mix compile --warnings-as-errors --force 2>&1 | tee -a "$LOG_FILE"; then
+    echo "✗ Compilation failed, requesting fixes..." | tee -a "$LOG_FILE"
+    if ! claude -p --dangerously-skip-permissions "/fix:compilation" 2>&1 | tee -a "$LOG_FILE"; then
+      echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
+      exit 1
+    fi
+    COMPLETE="false"
+    continue
+  fi
+  echo "✓ Compilation passed" | tee -a "$LOG_FILE"
+
   echo "Formatting code..." | tee -a "$LOG_FILE"
   if mix format 2>&1 | tee -a "$LOG_FILE"; then
     echo "✓ Code formatted" | tee -a "$LOG_FILE"

@@ -51,3 +51,4 @@ ZSH completion definitions for custom commands, providing tab-completion support
 - Scripts should work well with existing tools
 - Prefer composition over monolithic scripts
 - Use environment variables for configuration where appropriate
+- When writing scripts, the ordering of positional parameters vs flags should not matter. `wt stack open --create-sessions my-branch` should be just as valid as `wt stack open my-branch --create-sessions`

@@ -1,0 +1,7 @@
+#! /usr/bin/env bash
+
+mix compile && \
+  mix format && \
+  mix credo --strict && \
+  mix test && \
+  mix dialyzer

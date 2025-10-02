@@ -106,7 +106,7 @@ class Session
   def self.switch_to(project)
     if ENV['TMUX']
       # We're inside tmux, use switch-client
-      `tmux switch-client -t #{project.session_name};`
+      `tmux switch-client -t #{project.session_name}`
     else
       # We're outside tmux, attach to the session
       exec "tmux attach-session -t #{project.session_name}"

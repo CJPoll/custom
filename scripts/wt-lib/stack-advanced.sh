@@ -277,8 +277,7 @@ if [[ -z "${WT_LIB_STACK_ADVANCED_SOURCED:-}" ]]; then
         return 0
     }
 
-    # Note: This is a very large and complex function
-    # It should be refactored into smaller functions in a future update
+    # Open worktrees for all branches in a stack leading up to the target branch
     open_stack_branches() {
         local target_branch="$1"
         local create_sessions=false
@@ -315,194 +314,29 @@ if [[ -z "${WT_LIB_STACK_ADVANCED_SOURCED:-}" ]]; then
             exit 2
         fi
 
-        log "Fetching latest branch information from remote..."
-        git fetch origin --quiet 2>/dev/null || log "Warning: Could not fetch from origin"
+        log "Fetching branch and its stack from remote..."
 
-        # First, ensure the target branch exists locally or remotely
-        if ! git show-ref --verify --quiet "refs/heads/$target_branch" && \
-           ! git show-ref --verify --quiet "refs/remotes/origin/$target_branch"; then
-            echo "Error: Branch '$target_branch' does not exist locally or on origin" >&2
+        # Save current branch to return to it after gt get
+        local original_branch=$(git rev-parse --abbrev-ref HEAD)
+
+        # Use gt get to fetch the branch and all its downstack dependencies
+        # Use --unfrozen to allow local edits
+        if ! gt get "$target_branch" --downstack --unfrozen 2>&1; then
+            echo "Error: Failed to fetch branch '$target_branch' and its stack" >&2
             exit 2
         fi
 
-        # If the branch exists on remote but not locally, fetch it to get its metadata
-        if ! git show-ref --verify --quiet "refs/heads/$target_branch" && \
-             git show-ref --verify --quiet "refs/remotes/origin/$target_branch"; then
-            log "Fetching remote branch and its metadata: $target_branch"
-            git fetch origin "$target_branch:$target_branch" 2>/dev/null || true
-
-            # Also fetch the graphite metadata
-            git fetch origin "refs/branch-metadata/$target_branch:refs/branch-metadata/$target_branch" 2>/dev/null || true
+        # Return to original branch since gt get checked out the target branch
+        if [ "$original_branch" != "$target_branch" ]; then
+            git checkout "$original_branch" --quiet
         fi
 
-        # Initialize gt if needed (this syncs metadata from remote)
-        local trunk_branch="main"
-        if ! git show-ref --verify --quiet "refs/heads/main"; then
-            if git show-ref --verify --quiet "refs/heads/master"; then
-                trunk_branch="master"
-            fi
-        fi
-
-        # Initialize graphite repo if not already done
-        if [ ! -f ".git/.graphite_repo_config" ]; then
-            log "Initializing Graphite repository..."
-            gt repo init --trunk "$trunk_branch" -q 2>/dev/null || true
-        fi
-
-        # Sync all Graphite metadata from remote
-        # This will fetch branch metadata and establish proper parent relationships
-        log "Syncing Graphite metadata from remote..."
-        gt repo sync --no-interactive 2>/dev/null || true
-
-        # Get the full stack structure from Graphite after fetching
-        local stack_output=$(gt ls --no-interactive 2>/dev/null || echo "")
-
-        # If stack is still empty, fall back to GitHub PR discovery
-        if [ -z "$stack_output" ] || ! echo "$stack_output" | grep -q "$target_branch"; then
-            log "Stack information not available from Graphite, attempting to discover stack from GitHub..."
-
-            # Try to discover the stack from GitHub PR information if gh is available
-            local branches_to_track=()
-
-            if command -v gh &>/dev/null; then
-                log "Checking GitHub for PR stack information..."
-
-                # First, discover all branches that are part of the stack
-                # We need to find not just ancestors but all related branches
-                declare -A all_stack_branches
-                declare -A branch_parent_map
-                local branches_to_process=("$target_branch")
-                local max_iterations=100
-                local iterations=0
-
-                # Process branches to discover the full stack
-                while [ ${#branches_to_process[@]} -gt 0 ] && [ $iterations -lt $max_iterations ]; do
-                    local current="${branches_to_process[0]}"
-                    branches_to_process=("${branches_to_process[@]:1}")  # Remove first element
-
-                    # Skip if we've already processed this branch
-                    if [ "${all_stack_branches[$current]:-}" = "1" ]; then
-                        continue
-                    fi
-
-                    all_stack_branches["$current"]=1
-
-                    # Fetch the branch if it doesn't exist locally
-                    if ! git show-ref --verify --quiet "refs/heads/$current"; then
-                        if git show-ref --verify --quiet "refs/remotes/origin/$current"; then
-                            git fetch origin "$current:$current" 2>/dev/null || true
-                        else
-                            continue  # Skip branches that don't exist
-                        fi
-                    fi
-
-                    # Find parent from GitHub PR
-                    local pr_info=$(gh pr list --head "$current" --json baseRefName --limit 1 2>/dev/null || echo "")
-                    if [ -n "$pr_info" ] && [ "$pr_info" != "[]" ]; then
-                        local parent=$(echo "$pr_info" | grep -o '"baseRefName":"[^"]*"' | sed 's/"baseRefName":"//' | sed 's/"//')
-                        if [ -n "$parent" ]; then
-                            branch_parent_map["$current"]="$parent"
-                            # Add parent to process list if it's not main/master
-                            if [ "$parent" != "main" ] && [ "$parent" != "master" ]; then
-                                branches_to_process+=("$parent")
-                            fi
-                        fi
-                    fi
-
-                    # Find children (other PRs based on this branch)
-                    local children_info=$(gh pr list --base "$current" --json headRefName 2>/dev/null || echo "")
-                    if [ -n "$children_info" ] && [ "$children_info" != "[]" ]; then
-                        while IFS= read -r child; do
-                            if [ -n "$child" ]; then
-                                branches_to_process+=("$child")
-                            fi
-                        done < <(echo "$children_info" | grep -o '"headRefName":"[^"]*"' | sed 's/"headRefName":"//' | sed 's/"//')
-                    fi
-
-                    iterations=$((iterations + 1))
-                done
-
-                # Build ordered list from target back to trunk
-                branches_to_track=()
-                current="$target_branch"
-                local visited_in_chain=()
-                local max_depth=50
-                local depth=0
-
-                while [ -n "$current" ] && [ "$current" != "main" ] && [ "$current" != "master" ] && [ $depth -lt $max_depth ]; do
-                    # Check for cycles
-                    for visited in "${visited_in_chain[@]}"; do
-                        if [ "$visited" = "$current" ]; then
-                            break 2
-                        fi
-                    done
-
-                    visited_in_chain+=("$current")
-                    branches_to_track=("$current" "${branches_to_track[@]}")
-                    current="${branch_parent_map[$current]:-}"
-                    depth=$((depth + 1))
-                done
-            else
-                # Fallback: just track the target branch with main as parent
-                log "GitHub CLI not available, tracking target branch only..."
-                branches_to_track=("$target_branch")
-
-                # Fetch the branch if it doesn't exist locally
-                if ! git show-ref --verify --quiet "refs/heads/$target_branch"; then
-                    if git show-ref --verify --quiet "refs/remotes/origin/$target_branch"; then
-                        log "  Fetching branch: $target_branch"
-                        git fetch origin "$target_branch:$target_branch" 2>/dev/null || true
-                    fi
-                fi
-            fi
-
-            log "Discovered ${#branches_to_track[@]} branches in stack"
-
-            # Track all branches with their discovered parent relationships
-            # First, ensure all branches in the parent map are tracked
-            for branch in "${!branch_parent_map[@]}"; do
-                if git show-ref --verify --quiet "refs/heads/$branch"; then
-                    gt track "$branch" -q 2>/dev/null || true
-                fi
-            done
-
-            # Now set the correct parent relationships
-            for branch in "${!branch_parent_map[@]}"; do
-                if git show-ref --verify --quiet "refs/heads/$branch"; then
-                    local parent="${branch_parent_map[$branch]}"
-                    if [ -n "$parent" ]; then
-                        gt track "$branch" --parent "$parent" -q 2>/dev/null || true
-                    fi
-                fi
-            done
-
-            log "Tracked all branches with Graphite"
-
-            # Get stack output again
-            stack_output=$(gt ls --no-interactive 2>/dev/null || echo "")
-        fi
-
-        # Check if the target branch exists in the stack
-        if ! echo "$stack_output" | grep -q "$target_branch"; then
-            echo "Error: Branch '$target_branch' not found in stack" >&2
-            echo "Available branches in stack:" >&2
-            echo "$stack_output" | grep -E "^[[:space:]]*[│├└]" | sed 's/^[[:space:]]*[│├└][─\s]*/  /' >&2
-            exit 2
-        fi
-
-        # Build the complete chain of branches from main to target
-        # We'll use gt to discover the full ancestry even for remote-only branches
+        # Get the list of branches in the stack from trunk to target
+        log "Discovering branches in stack..."
         local branches_to_create=()
         local current="$target_branch"
         local visited_branches=()
-        local max_depth=50  # Prevent infinite loops
-
-        # First, ensure the target branch exists locally or remotely
-        if ! git show-ref --verify --quiet "refs/heads/$target_branch" && \
-           ! git show-ref --verify --quiet "refs/remotes/origin/$target_branch"; then
-            echo "Error: Branch '$target_branch' does not exist locally or on origin" >&2
-            exit 2
-        fi
+        local max_depth=50
 
         # Build the stack by following parent relationships
         while [ -n "$current" ] && [ "$current" != "main" ] && [ "$current" != "master" ] && [ ${#visited_branches[@]} -lt $max_depth ]; do
@@ -517,53 +351,8 @@ if [[ -z "${WT_LIB_STACK_ADVANCED_SOURCED:-}" ]]; then
             visited_branches+=("$current")
             branches_to_create=("$current" "${branches_to_create[@]}")
 
-            # Try to get parent from gt metadata, even for remote-only branches
-            local parent=""
-
-            # First check if branch exists locally
-            if git show-ref --verify --quiet "refs/heads/$current"; then
-                # Branch exists locally, use normal get_branch_parent
-                parent=$(get_branch_parent "$current")
-            else
-                # Branch only exists on remote, try to extract parent from gt metadata
-                # Fetch the branch to make it available locally (but don't check it out)
-                log "Fetching remote branch: $current"
-                git fetch origin "$current:refs/remotes/origin/$current" 2>/dev/null || true
-
-                # Try to get parent info from gt by temporarily tracking the remote branch
-                # Create a temporary local ref to query gt
-                git update-ref "refs/heads/temp-stack-query-$current" "refs/remotes/origin/$current" 2>/dev/null || true
-
-                # Now try to get parent from gt metadata
-                parent=$(gt branch info "temp-stack-query-$current" 2>/dev/null | grep "^Parent:" | sed 's/^Parent:[[:space:]]*//' | cut -d' ' -f1) || true
-
-                # Clean up temporary ref
-                git update-ref -d "refs/heads/temp-stack-query-$current" 2>/dev/null || true
-
-                # If we still don't have a parent, try parsing the stack output directly
-                if [ -z "$parent" ]; then
-                    # Look for the current branch in the stack output and find its parent
-                    # The parent is the branch that appears directly above in the tree structure
-                    parent=$(echo "$stack_output" | awk -v branch="$current" '
-                        /^[[:space:]]*[│├└]/ {
-                            # Extract branch name from the line
-                            gsub(/^[[:space:]]*[│├└][─\s]*/, "")
-                            gsub(/[[:space:]]*\(.*\)[[:space:]]*$/, "")
-                            gsub(/^[[:space:]]*/, "")
-                            gsub(/[[:space:]]*$/, "")
-
-                            if (prev && $0 == branch) {
-                                print prev_branch
-                                exit
-                            }
-
-                            prev = 1
-                            prev_branch = $0
-                        }
-                    ')
-                fi
-            fi
-
+            # Get parent from gt metadata
+            local parent=$(get_branch_parent "$current")
             current="$parent"
         done
 
@@ -591,13 +380,6 @@ if [[ -z "${WT_LIB_STACK_ADVANCED_SOURCED:-}" ]]; then
             if [ -d "$worktree_path" ]; then
                 existing_count=$((existing_count + 1))
             else
-                # Ensure the branch exists locally before creating worktree
-                if ! git show-ref --verify --quiet "refs/heads/$branch"; then
-                    if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-                        git fetch origin "$branch:$branch" 2>/dev/null || true
-                    fi
-                fi
-
                 if ! create_worktree "$branch"; then
                     echo "Error: Failed to create worktree for branch '$branch'" >&2
                     exit 3
@@ -605,9 +387,9 @@ if [[ -z "${WT_LIB_STACK_ADVANCED_SOURCED:-}" ]]; then
                 created_count=$((created_count + 1))
             fi
 
-            # Create tmux session if requested
+            # Create tmux session if requested (without attaching)
             if [ "$create_sessions" = true ]; then
-                create_tmux_session_for_worktree "$branch" "$worktree_path" "$PROJECT_NAME"
+                create_tmux_session_for_worktree "$branch" "$worktree_path" "$PROJECT_NAME" false
             fi
         done
 

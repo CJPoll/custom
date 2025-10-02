@@ -21,6 +21,14 @@ if [[ -z "${WT_LIB_TMUX_SOURCED:-}" ]]; then
         local branch="$1"
         local worktree_dir="$2"
         local project_name="$3"
+        local attach="${4:-true}"  # Default to attaching unless explicitly told not to
+
+        # Check if proj command is available
+        if ! command -v proj &>/dev/null; then
+            echo "Error: proj command not found" >&2
+            echo "Make sure proj is in your PATH" >&2
+            return 1
+        fi
 
         # Replace slashes in branch name with dashes to avoid tmux issues
         local safe_branch=$(echo "$branch" | tr '/' '-')
@@ -28,67 +36,36 @@ if [[ -z "${WT_LIB_TMUX_SOURCED:-}" ]]; then
 
         # Check if session already exists
         if tmux has-session -t "$session_name" 2>/dev/null; then
-            # Attach to existing session
-            log "Attaching to existing tmux session: $session_name"
+            # Session exists, only attach if requested
+            if [ "$attach" = "true" ]; then
+                log "Attaching to existing tmux session: $session_name"
 
-            if [ -n "$TMUX" ]; then
-                # If we're inside tmux, switch to the session
-                tmux switch-client -t "$session_name"
+                if [ -n "$TMUX" ]; then
+                    # If we're inside tmux, switch to the session
+                    tmux switch-client -t "$session_name"
+                else
+                    # If we're outside tmux, attach
+                    tmux attach-session -t "$session_name"
+                fi
             else
-                # If we're outside tmux, attach
-                tmux attach-session -t "$session_name"
+                log "Tmux session already exists: $session_name"
             fi
         else
-            # Create new session
+            # Create new session using proj
             log "Creating new tmux session: $session_name"
 
-            # First, source bashrc or zshrc to ensure the session has proper env
-            local shell_config=""
-            if [ -n "$ZSH_VERSION" ]; then
-                shell_config="$HOME/.zshrc"
-            elif [ -n "$BASH_VERSION" ]; then
-                shell_config="$HOME/.bashrc"
-            fi
-
-            # Create the session detached, starting in the worktree directory
-            tmux new-session -d -s "$session_name" -c "$worktree_dir"
-
-            # Set up the initial window with a meaningful name
-            tmux rename-window -t "$session_name:0" "main"
-
-            # Create additional windows as needed
-            tmux new-window -t "$session_name:1" -n "git" -c "$worktree_dir"
-            tmux new-window -t "$session_name:2" -n "test" -c "$worktree_dir"
-
-            # Set some useful environment variables in the session
-            tmux send-keys -t "$session_name:0" "export WT_BRANCH='$branch'" C-m
-            tmux send-keys -t "$session_name:0" "export WT_PROJECT='$project_name'" C-m
-            tmux send-keys -t "$session_name:0" "clear" C-m
-
-            # Display branch info in the first window
-            tmux send-keys -t "$session_name:0" "echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'" C-m
-            tmux send-keys -t "$session_name:0" "echo 'Worktree: $branch'" C-m
-            tmux send-keys -t "$session_name:0" "echo 'Project:  $project_name'" C-m
-            tmux send-keys -t "$session_name:0" "echo 'Path:     $worktree_dir'" C-m
-            tmux send-keys -t "$session_name:0" "echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'" C-m
-            tmux send-keys -t "$session_name:0" "echo ''" C-m
-
-            # If we have graphite, show the stack
-            if command -v gt &>/dev/null; then
-                tmux send-keys -t "$session_name:0" "gt ls" C-m
-            fi
-
-            # Select the first window
-            tmux select-window -t "$session_name:0"
-
-            # Attach to the new session
-            if [ -n "$TMUX" ]; then
-                # If we're inside tmux, switch to the session
-                tmux switch-client -t "$session_name"
+            # Use proj to create the session with --no-switch to prevent attaching
+            # proj expects the session name to be derived from the project name
+            # We'll use --path to point to the worktree directory
+            if [ "$attach" = "true" ]; then
+                proj "$session_name" --path "$worktree_dir"
             else
-                # If we're outside tmux, attach
-                tmux attach-session -t "$session_name"
+                proj "$session_name" --path "$worktree_dir" --no-switch
             fi
+
+            # Set environment variables using tmux's setenv
+            tmux setenv -t "$session_name" WT_BRANCH "$branch"
+            tmux setenv -t "$session_name" WT_PROJECT "$project_name"
         fi
     }
 

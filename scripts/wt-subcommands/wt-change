@@ -10,7 +10,7 @@ usage() {
 Usage: wt change <subcommand> [options]
 
 Subcommands:
-  modify [options]  Amend current commit with auto-restacking (delegates to gt modify)
+  amend [options]   Amend current commit with auto-restacking (delegates to gt modify)
                     --commit, -c: Create new commit instead of amending
                     --all, -a: Stage all changes before committing
                     --message, -m: Commit message
@@ -26,17 +26,34 @@ Subcommands:
                     --show-worktrees: Show which worktrees will be affected (future enhancement)
                     --test-affected: Run tests in affected worktrees (future enhancement)
 
+  split [options]   Split current branch into multiple single-commit branches (delegates to gt split)
+                    --by-commit, -c: Split by commit - slice up the history
+                    --by-hunk, -h: Split by hunk - interactively split into new branches
+
+  squash [options]  Squash all commits in current branch into one (delegates to gt squash)
+                    --message, -m: Updated message for the squashed commit
+                    --edit: Modify the existing commit message (default)
+                    --no-edit, -n: Don't modify the commit message
+
 Examples:
-  wt change modify -a                # Stage all changes and amend current commit
-  wt change modify --commit -m "msg"  # Create new commit with message
+  wt change amend -a                # Stage all changes and amend current commit
+  wt change amend --commit -m "msg"  # Create new commit with message
   wt change absorb -d                 # Preview where changes would be absorbed
   wt change absorb -a                 # Stage all and absorb into stack
   wt change absorb -p                 # Interactive patch mode before absorbing
+  wt change split --by-commit         # Split branch by existing commits
+  wt change split --by-hunk           # Split branch interactively by hunks
+  wt change squash                    # Squash all commits with editor
+  wt change squash -m "New message"   # Squash with new message
+  wt change squash --no-edit          # Squash keeping first commit message
 
 Notes:
-  - Both commands automatically restack upstack branches after modifications
+  - amend, absorb, split, and squash automatically restack upstack branches after modifications
   - absorb is particularly useful for layered architecture stacks where each
     file is only modified in a single branch of the stack
+  - split is useful for breaking up a large feature branch into smaller,
+    reviewable chunks organized by commits or hunks
+  - squash is useful for combining multiple commits into one before merging
 EOF
 }
 
@@ -64,15 +81,15 @@ if ! command -v gt &>/dev/null; then
 fi
 
 case "$SUBCOMMAND" in
-    modify)
+    amend)
         # Pass all remaining arguments to gt modify
         # gt modify handles all its own flags
         # Default to --no-edit if no arguments provided
         if [ $# -eq 0 ]; then
-            log "Modifying current commit (no edit)..."
+            log "Amending current commit (no edit)..."
             gt modify --no-edit
         else
-            log "Modifying current commit..."
+            log "Amending current commit..."
             gt modify "$@"
         fi
         exit $?
@@ -133,6 +150,20 @@ case "$SUBCOMMAND" in
 
         log "Absorbing changes into stack..."
         gt absorb "${GT_ARGS[@]}"
+        exit $?
+        ;;
+
+    split)
+        # Pass all remaining arguments to gt split
+        log "Splitting current branch..."
+        gt split "$@"
+        exit $?
+        ;;
+
+    squash)
+        # Pass all remaining arguments to gt squash
+        log "Squashing commits in current branch..."
+        gt squash "$@"
         exit $?
         ;;
 
