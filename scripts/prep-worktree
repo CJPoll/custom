@@ -1,6 +1,10 @@
 #! /usr/bin/env bash
 
-cp ~/dev/surge/.tool-versions ./
+if [ -f ~/dev/surge/.tool-versions ]; then
+  cp ~/dev/surge/.tool-versions ./
+else
+  mise trust
+fi
 
 mix deps.get && \
   mix compile --warnings-as-errors &&

@@ -3,5 +3,6 @@
 mix compile && \
   mix format && \
   mix credo --strict && \
+  MIX_ENV=test mix ecto.drop && \
   mix test && \
   mix dialyzer
