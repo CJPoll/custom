@@ -1,6 +1,6 @@
 #! /usr/bin/env bash
 
-mix compile && \
+mix compile --force --warnings-as-errors && \
   mix format && \
   mix credo --strict && \
   MIX_ENV=test mix ecto.drop && \

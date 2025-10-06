@@ -24,65 +24,86 @@ PLT_PID=$!
 COMPLETE="false"
 until [[ "${COMPLETE}" == "true" ]]; do
   COMPLETE="true"
+  CHECK_FAILED="false"
 
+  # Compilation check with inner retry loop
   echo "Compiling code..." | tee -a "$LOG_FILE"
-  if ! mix compile --warnings-as-errors --force 2>&1 | tee -a "$LOG_FILE"; then
+  until mix compile --warnings-as-errors --force 2>&1 | tee -a "$LOG_FILE"; do
     echo "✗ Compilation failed, requesting fixes..." | tee -a "$LOG_FILE"
     if ! claude -p --dangerously-skip-permissions "/fix:compilation" 2>&1 | tee -a "$LOG_FILE"; then
       echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
       exit 1
     fi
-    COMPLETE="false"
+    echo "Retrying compilation..." | tee -a "$LOG_FILE"
+    CHECK_FAILED="true"
+  done
+  echo "✓ Compilation passed" | tee -a "$LOG_FILE"
+  if [[ "${CHECK_FAILED}" == "true" ]]; then
     continue
   fi
-  echo "✓ Compilation passed" | tee -a "$LOG_FILE"
 
   echo "Formatting code..." | tee -a "$LOG_FILE"
   if mix format 2>&1 | tee -a "$LOG_FILE"; then
     echo "✓ Code formatted" | tee -a "$LOG_FILE"
   fi
 
+  # Credo check with inner retry loop
+  CHECK_FAILED="false"
   echo "Running credo..." | tee -a "$LOG_FILE"
-  if ! mix credo --strict 2>&1 | tee -a "$LOG_FILE"; then
+  until mix credo --strict 2>&1 | tee -a "$LOG_FILE"; do
     echo "✗ Credo failed, requesting fixes..." | tee -a "$LOG_FILE"
     if ! claude -p --dangerously-skip-permissions "/fix:credo" 2>&1 | tee -a "$LOG_FILE"; then
       echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
       exit 1
     fi
-    COMPLETE="false"
+    echo "Retrying credo..." | tee -a "$LOG_FILE"
+    CHECK_FAILED="true"
+  done
+  echo "✓ Credo passed" | tee -a "$LOG_FILE"
+  if [[ "${CHECK_FAILED}" == "true" ]]; then
     continue
   fi
-  echo "✓ Credo passed" | tee -a "$LOG_FILE"
 
+  # Tests check with inner retry loop
+  CHECK_FAILED="false"
   echo "Running tests..." | tee -a "$LOG_FILE"
   MIX_ENV=test mix ecto.drop
-  if ! mix test 2>&1 | tee -a "$LOG_FILE"; then
+  until mix test 2>&1 | tee -a "$LOG_FILE"; do
     echo "✗ Tests failed, requesting fixes..." | tee -a "$LOG_FILE"
     if ! claude -p --dangerously-skip-permissions "/fix:tests" 2>&1 | tee -a "$LOG_FILE"; then
       echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
       exit 1
     fi
-    COMPLETE="false"
+    echo "Retrying tests..." | tee -a "$LOG_FILE"
+    MIX_ENV=test mix ecto.drop
+    CHECK_FAILED="true"
+  done
+  echo "✓ Tests passed" | tee -a "$LOG_FILE"
+  if [[ "${CHECK_FAILED}" == "true" ]]; then
     continue
   fi
-  echo "✓ Tests passed" | tee -a "$LOG_FILE"
 
+  # Dialyzer check with inner retry loop
+  CHECK_FAILED="false"
   echo "Running dialyzer..." | tee -a "$LOG_FILE"
   # Wait for PLT generation to complete if still running
   if kill -0 "$PLT_PID" 2>/dev/null; then
     echo "Waiting for PLT cache to finish..." | tee -a "$LOG_FILE"
     wait "$PLT_PID"
   fi
-  if ! mix dialyzer 2>&1 | tee -a "$LOG_FILE"; then
+  until mix dialyzer 2>&1 | tee -a "$LOG_FILE"; do
     echo "✗ Dialyzer failed, requesting fixes..." | tee -a "$LOG_FILE"
     if ! claude -p --dangerously-skip-permissions "/fix:dialyzer" 2>&1 | tee -a "$LOG_FILE"; then
       echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
       exit 1
     fi
-    COMPLETE="false"
+    echo "Retrying dialyzer..." | tee -a "$LOG_FILE"
+    CHECK_FAILED="true"
+  done
+  echo "✓ Dialyzer passed" | tee -a "$LOG_FILE"
+  if [[ "${CHECK_FAILED}" == "true" ]]; then
     continue
   fi
-  echo "✓ Dialyzer passed" | tee -a "$LOG_FILE"
 done
 
 echo "🎉 All checks passed!" | tee -a "$LOG_FILE"
