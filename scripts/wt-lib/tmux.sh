@@ -34,18 +34,18 @@ if [[ -z "${WT_LIB_TMUX_SOURCED:-}" ]]; then
         local safe_branch=$(echo "$branch" | tr '/' '-')
         local session_name="${project_name}-wt-${safe_branch}"
 
-        # Check if session already exists
-        if tmux has-session -t "$session_name" 2>/dev/null; then
+        # Check if session already exists (use exact matching with = prefix)
+        if tmux has-session -t "=$session_name" 2>/dev/null; then
             # Session exists, only attach if requested
             if [ "$attach" = "true" ]; then
                 log "Attaching to existing tmux session: $session_name"
 
                 if [ -n "$TMUX" ]; then
                     # If we're inside tmux, switch to the session
-                    tmux switch-client -t "$session_name"
+                    tmux switch-client -t "=$session_name"
                 else
                     # If we're outside tmux, attach
-                    tmux attach-session -t "$session_name"
+                    tmux attach-session -t "=$session_name"
                 fi
             else
                 log "Tmux session already exists: $session_name"
@@ -86,9 +86,9 @@ if [[ -z "${WT_LIB_TMUX_SOURCED:-}" ]]; then
         local safe_branch=$(echo "$branch" | tr '/' '-')
         local session_name="${project_name}-wt-${safe_branch}"
 
-        if tmux has-session -t "$session_name" 2>/dev/null; then
+        if tmux has-session -t "=$session_name" 2>/dev/null; then
             log "Killing tmux session: $session_name"
-            tmux kill-session -t "$session_name"
+            tmux kill-session -t "=$session_name"
         fi
     }
 

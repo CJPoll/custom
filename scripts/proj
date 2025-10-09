@@ -52,7 +52,8 @@ class Session
   end
 
   def self.for(project)
-    sessions = `tmux list-sessions 2>/dev/null | egrep "^#{project.session_name}" | cut -d" " -f1 | wc -l`
+    # Use exact matching by including the colon to avoid matching session name prefixes
+    sessions = `tmux list-sessions 2>/dev/null | egrep "^#{project.session_name}:" | cut -d" " -f1 | wc -l`
     new(sessions)
   end
 

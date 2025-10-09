@@ -32,6 +32,9 @@ Subcommands:
                     --restack: restack after setting parent
                     --switch: switch to parent worktree after setting
 
+  track [branch]    Track a branch with Graphite (delegates to gt track)
+                    --parent <branch>: set parent branch when tracking
+
   open <branch>     Create worktrees for all branches in the stack up to the given branch
                     --create-sessions: also create tmux sessions for each worktree
 
@@ -58,6 +61,7 @@ Examples:
   wt stack                          # Show stack structure
   wt stack --current                # Show current branch's stack
   wt stack parent main              # Set current branch's parent to main
+  wt stack track --parent main      # Track current branch with parent
   wt stack open feature/branch      # Create worktrees for stack
   wt stack move --onto main         # Move current branch onto main
   wt stack rename new-branch-name   # Rename current branch
@@ -111,6 +115,18 @@ case "${SUBCOMMAND:-show}" in
 
     parent)
         set_stack_parent "$@"
+        ;;
+
+    track)
+        # Check if gt is available
+        if ! command -v gt &>/dev/null; then
+            echo "Error: Graphite (gt) is required for stack operations" >&2
+            echo "Install with: brew install graphite or visit https://graphite.dev" >&2
+            exit 2
+        fi
+        # Pure delegation to gt track
+        log "Tracking branch with Graphite..."
+        gt track "$@"
         ;;
 
     open)

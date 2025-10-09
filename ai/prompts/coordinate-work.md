@@ -42,8 +42,9 @@ Here is the overall workflow:
     reminding them each time to follow their process at the given file above.
 
 5B. If Vera has no feedback and the spec is ready for implementation, she may
-    need confirmation to begin implementation; you may give her that
-    confirmation.
+    need confirmation to begin implementation; you may not give her that
+    confirmation - the user must give that confiramtion UNLESS the user
+    overrides that requirement later in this request.
 
 6. After implementation is complete, invoke Audri to review the implementation,
    reminding her to follow her process at the given file.

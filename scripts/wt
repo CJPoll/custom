@@ -74,6 +74,8 @@ Commands:
   stack --install   Install Graphite (gt) if not already installed
                     Downloads and installs Graphite from https://graphite.dev
   stack parent [branch] Show or set the parent branch for the current branch
+  stack track       Track a branch with Graphite (delegates to gt track)
+                    --parent <branch>: set parent branch when tracking
   stack open <branch>    Create worktrees for all branches in the stack up to the given branch
                     Must be run from main branch worktree
   stack open --create-sessions  Also create tmux sessions for each worktree (without switching)
@@ -148,6 +150,7 @@ Examples:
   wt is-worktree --dir /path/to/directory
   wt stack
   wt stack --install
+  wt stack track --parent main  # Track current branch with parent
   wt stack move  # Interactive mode
   wt stack move --onto main  # Move current branch onto main
   wt stack move --up  # Move branch up among siblings

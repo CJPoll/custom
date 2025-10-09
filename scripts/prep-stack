@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Get script directory and preserve it (libraries will overwrite SCRIPT_DIR)
+MAIN_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="${MAIN_SCRIPT_DIR}"
+LIB_DIR="${MAIN_SCRIPT_DIR}/wt-lib"
+
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/worktree.sh"
+source "${LIB_DIR}/stack.sh"
+
+usage() {
+  cat << 'EOF'
+Usage: prep-stack --stack-top <branch-name>
+       prep-stack <branch-name>
+
+Prepare a stack of branches by running checks on each branch in dependency order.
+When a check fails, run prep-commit on that branch to fix issues.
+
+Arguments:
+  --stack-top <branch>  The top-most branch of the stack to prepare (required)
+  -h, --help            Show this help message
+
+Example:
+  prep-stack --stack-top feature/my-feature
+  prep-stack feature/my-feature
+
+The script will:
+1. Find all branches between main and the specified branch (inclusive)
+2. For each branch (bottom-up):
+   - Navigate to its worktree (or checkout in main worktree if no dedicated worktree)
+   - Run scripts/check
+   - If check fails: run scripts/prep-commit and stop
+   - If check passes: continue to next branch
+
+Exit codes:
+  0 - Success (all checks passed or prep-commit started)
+  1 - Branch not tracked or missing argument
+  2 - Graphite (gt) not installed
+  3 - Cycle detected in stack
+  4 - Failed to navigate or checkout
+EOF
+}
+
+branch_in_array() {
+  local needle="$1"
+  shift
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+# Parse arguments
+STACK_TOP=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --stack-top)
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "Error: --stack-top requires a branch name" >&2
+        usage
+        exit 1
+      fi
+      STACK_TOP="$1"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      # Positional argument - treat as stack-top if not already set
+      if [[ -z "$STACK_TOP" ]]; then
+        STACK_TOP="$1"
+        shift
+      else
+        echo "Error: Unknown argument: $1" >&2
+        usage
+        exit 1
+      fi
+      ;;
+  esac
+done
+
+# Validate required argument
+if [[ -z "$STACK_TOP" ]]; then
+  echo "Error: --stack-top <branch-name> is required" >&2
+  usage
+  exit 1
+fi
+
+# Check Graphite is installed
+if ! check_graphite; then
+  exit 2
+fi
+
+# Validate branch is tracked
+if ! gt ls --no-interactive 2>/dev/null | grep -qE "[◯◉][[:space:]]+${STACK_TOP}$"; then
+  echo "Error: Branch '$STACK_TOP' is not tracked by Graphite" >&2
+  echo "Run 'wt stack track --parent <parent>' to track this branch" >&2
+  exit 1
+fi
+
+# Build branch list
+echo "Preparing stack up to '$STACK_TOP'..."
+branches=()
+current="$STACK_TOP"
+visited=()
+max_depth=50
+
+# Walk from stack-top down to trunk, building list in reverse order
+while [ -n "$current" ] &&
+      [ "$current" != "main" ] &&
+      [ "$current" != "master" ] &&
+      [ ${#visited[@]} -lt $max_depth ]; do
+
+  # Check for cycles (use visited array which tracks ALL seen branches)
+  if branch_in_array "$current" "${visited[@]}"; then
+    echo "Error: Cycle detected in stack at branch '$current'" >&2
+    exit 3
+  fi
+
+  # Track this branch in visited (for cycle detection)
+  visited+=("$current")
+
+  # Add to branches array only if not a Graphite internal branch
+  # The branches array contains only user-facing branches to check
+  if [[ ! "$current" =~ ^graphite-base/ ]]; then
+    branches=("$current" "${branches[@]}")
+  fi
+
+  # Get parent (returns empty string when reaching trunk)
+  parent=$(get_branch_parent "$current")
+  current="$parent"
+done
+
+# Show what we'll check
+echo "Found ${#branches[@]} branches to check: ${branches[*]}"
+echo ""
+
+# Process each branch
+for branch in "${branches[@]}"; do
+  echo "Checking $branch..."
+
+  # Navigate to worktree
+  worktree_path=$(get_worktree_dir "$branch" 2>/dev/null)
+  worktree_result=$?
+
+  if [ $worktree_result -eq 0 ] && [ -n "$worktree_path" ]; then
+    cd "$worktree_path" || {
+      echo "Error: Failed to navigate to worktree at $worktree_path" >&2
+      exit 4
+    }
+  else
+    # Use main worktree and checkout branch
+    main_worktree=$(get_worktree_dir "main" 2>/dev/null)
+    main_result=$?
+
+    if [ $main_result -ne 0 ] || [ -z "$main_worktree" ]; then
+      main_worktree=$(get_worktree_dir "master" 2>/dev/null)
+      main_result=$?
+
+      if [ $main_result -ne 0 ] || [ -z "$main_worktree" ]; then
+        echo "Error: Cannot find main/master worktree" >&2
+        exit 4
+      fi
+    fi
+
+    cd "$main_worktree" || {
+      echo "Error: Failed to navigate to main worktree at $main_worktree" >&2
+      exit 4
+    }
+
+    git checkout "$branch" --quiet || {
+      echo "Error: Failed to checkout branch '$branch'" >&2
+      exit 4
+    }
+  fi
+
+  echo "Running checks in $(pwd)"
+
+  # Run check
+  if "${MAIN_SCRIPT_DIR}/check"; then
+    echo "✓ $branch passed checks"
+    echo ""
+  else
+    echo "✗ $branch failed checks"
+    echo ""
+    echo "==============================================================================================="
+    echo "== Running prep-commit to fix issues in $branch..."
+    echo "==============================================================================================="
+    exec "${MAIN_SCRIPT_DIR}/prep-commit"
+    # exec replaces process, so no code after this runs
+  fi
+done
+
+# All checks passed
+echo "✓ All checks passed for stack up to '$STACK_TOP'"

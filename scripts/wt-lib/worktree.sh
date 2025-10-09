@@ -191,10 +191,10 @@ remove_worktree() {
     local safe_branch=$(echo "$branch" | tr '/' '-')
     local session_name="${project_name}-wt-${safe_branch}"
 
-    # Check if tmux session exists and kill it
-    if tmux has-session -t "$session_name" 2>/dev/null; then
+    # Check if tmux session exists and kill it (use exact matching)
+    if tmux has-session -t "=$session_name" 2>/dev/null; then
         log "Killing tmux session: $session_name"
-        run_cmd tmux kill-session -t "$session_name"
+        run_cmd tmux kill-session -t "=$session_name"
     fi
 
     # Remove the worktree

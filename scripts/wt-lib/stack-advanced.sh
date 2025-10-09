@@ -319,6 +319,12 @@ if [[ -z "${WT_LIB_STACK_ADVANCED_SOURCED:-}" ]]; then
         # Save current branch to return to it after gt get
         local original_branch=$(git rev-parse --abbrev-ref HEAD)
 
+        # Check if working directory is clean before proceeding
+        if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "Error: Working directory has uncommitted changes. Please commit or stash them first." >&2
+            exit 3
+        fi
+
         # Use gt get to fetch the branch and all its downstack dependencies
         # Use --unfrozen to allow local edits
         if ! gt get "$target_branch" --downstack --unfrozen 2>&1; then
@@ -329,6 +335,13 @@ if [[ -z "${WT_LIB_STACK_ADVANCED_SOURCED:-}" ]]; then
         # Return to original branch since gt get checked out the target branch
         if [ "$original_branch" != "$target_branch" ]; then
             git checkout "$original_branch" --quiet
+        fi
+
+        # Clean up any staged or unstaged changes left by gt get
+        # This prevents main from accumulating unwanted changes
+        if ! git diff --quiet || ! git diff --cached --quiet; then
+            log "Cleaning up changes left by gt get..."
+            git reset --hard HEAD --quiet
         fi
 
         # Get the list of branches in the stack from trunk to target

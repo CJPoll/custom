@@ -91,8 +91,8 @@ if [[ -z "${WT_LIB_CLOSE_SOURCED:-}" ]]; then
         local safe_branch=$(echo "$branch" | tr '/' '-')
         local session_name="${project_name}-wt-${safe_branch}"
 
-        if tmux has-session -t "$session_name" 2>/dev/null; then
-            tmux kill-session -t "$session_name" 2>/dev/null || true
+        if tmux has-session -t "=$session_name" 2>/dev/null; then
+            tmux kill-session -t "=$session_name" 2>/dev/null || true
         fi
 
         # Remove worktree if it exists (silently)
@@ -201,10 +201,10 @@ if [[ -z "${WT_LIB_CLOSE_SOURCED:-}" ]]; then
                 local safe_branch=$(echo "$branch" | tr '/' '-')
                 local session_name="${project_name}-wt-${safe_branch}"
 
-                # Check if tmux session exists and kill it
-                if tmux has-session -t "$session_name" 2>/dev/null; then
+                # Check if tmux session exists and kill it (use exact matching)
+                if tmux has-session -t "=$session_name" 2>/dev/null; then
                     log "  Killing tmux session: $session_name"
-                    tmux kill-session -t "$session_name" 2>/dev/null || true
+                    tmux kill-session -t "=$session_name" 2>/dev/null || true
                 fi
 
                 # Remove the worktree

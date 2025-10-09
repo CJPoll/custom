@@ -79,6 +79,13 @@ sync_worktree_stack() {
         log "Syncing stack with remote changes..."
         log ""
 
+        # Capture state before sync
+        local original_branch=$(git rev-parse --abbrev-ref HEAD)
+        local had_staged_changes=false
+        if ! git diff --cached --quiet; then
+            had_staged_changes=true
+        fi
+
         # Show current stack before syncing
         log "Current stack:"
         gt ls --no-interactive
@@ -86,6 +93,15 @@ sync_worktree_stack() {
 
         # Run gt sync
         if gt sync; then
+            # Clean up any staged changes left by gt sync on main/master branches
+            local current_branch=$(git rev-parse --abbrev-ref HEAD)
+            if [[ "$current_branch" == "$original_branch" ]] && [[ "$current_branch" =~ ^(main|master)$ ]]; then
+                if [[ "$had_staged_changes" == false ]] && ! git diff --cached --quiet; then
+                    log "⚠️  Cleaning up staged changes left by sync operation..."
+                    git reset HEAD -- . >/dev/null 2>&1
+                fi
+            fi
+
             log ""
             log "Sync completed successfully!"
             log ""

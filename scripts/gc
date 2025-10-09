@@ -10,6 +10,7 @@ Generate a git commit message using Claude Code and commit staged changes.
 
 Options:
   --all, -a         Stage all files before committing (git add -A)
+  --amend, -m       Amend the last commit with a new AI-generated message
   --push, -p        Push to origin after successful commit
   --pr              Create a GitHub PR after pushing (implies --push)
   --base-branch <branch>  Specify base branch for PR (requires --pr)
@@ -27,12 +28,14 @@ Description:
 Examples:
   gc                Create a commit with AI-generated message
   gc --all          Stage all files and create a commit
+  gc --amend        Amend the last commit with a new message
   gc --push         Create a commit and push to origin
   gc --all --push   Stage all files, commit, and push
   gc --pr           Commit, push, and create a GitHub PR
   gc --pr --base-branch develop  Create PR against develop branch
   gc --yolo         Commit directly without editor review
   gc -apy           Stage all, push, and skip editor (YOLO mode)
+  gc -my            Amend last commit, skip editor (YOLO mode)
 
 Requirements:
   - Claude Code CLI must be installed and available
@@ -45,6 +48,7 @@ EOF
 # Parse command line arguments
 PUSH_FLAG=false
 ALL_FLAG=false
+AMEND_FLAG=false
 PR_FLAG=false
 YOLO_FLAG=false
 BASE_BRANCH=""
@@ -52,6 +56,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -a|--all)
             ALL_FLAG=true
+            shift
+            ;;
+        -m|--amend)
+            AMEND_FLAG=true
             shift
             ;;
         -p|--push)
@@ -88,6 +96,9 @@ while [[ $# -gt 0 ]]; do
                     case "$flag" in
                         a)
                             ALL_FLAG=true
+                            ;;
+                        m)
+                            AMEND_FLAG=true
                             ;;
                         p)
                             PUSH_FLAG=true
@@ -133,11 +144,24 @@ if [ "$ALL_FLAG" = true ]; then
     git add -A
 fi
 
-# Check if there are staged changes
-if ! git diff --cached --quiet; then
+# Determine if we should proceed with commit
+SHOULD_COMMIT=false
+if [ "$AMEND_FLAG" = true ]; then
+    # For amend, we can proceed even without staged changes
+    SHOULD_COMMIT=true
+    DIFF_COMMAND="git diff HEAD"
+    COMMIT_TYPE="amended commit"
+elif ! git diff --cached --quiet; then
+    # For regular commit, we need staged changes
+    SHOULD_COMMIT=true
+    DIFF_COMMAND="git diff --staged"
+    COMMIT_TYPE="staged changes"
+fi
+
+if [ "$SHOULD_COMMIT" = true ]; then
     # Create a temporary file for the commit message
     TEMP_FILE=$(mktemp)
-    
+
     # Function to show spinner
     spinner() {
         local pid=$1
@@ -152,9 +176,9 @@ if ! git diff --cached --quiet; then
         done
         printf "\r%*s\r" $((${#msg}+3)) ""
     }
-    
+
     # Get the commit message from Claude Code
-    claude -p "Generate a git commit message for staged changes. Give no additional output beyond the commit message. Format according to 'conventional commits' style, providing all information in the 'conventional commit' specification which is currently available. Include credit to Claude Code as co-author. Ensure that every line is at most 80 characters. The first line must be even shorter, maxing out at 72 characters. Do not surround the commit message with quotes, backticks, or other symbols.  Changes: $(git diff --staged)" > "$TEMP_FILE" &
+    claude -p "Generate a git commit message for $COMMIT_TYPE. Give no additional output beyond the commit message. Format according to 'conventional commits' style, providing all information in the 'conventional commit' specification which is currently available. Include credit to Claude Code as co-author. Ensure that every line is at most 80 characters. The first line must be even shorter, maxing out at 72 characters. Do not surround the commit message with quotes, backticks, or other symbols.  Changes: $($DIFF_COMMAND)" > "$TEMP_FILE" &
     CLAUDE_PID=$!
     spinner $CLAUDE_PID
     wait $CLAUDE_PID
@@ -166,9 +190,13 @@ if ! git diff --cached --quiet; then
             # Open the message in the editor first
             ${EDITOR:-vim} "$TEMP_FILE"
         fi
-        
+
         # Then commit with the edited message
-        git commit -F "$TEMP_FILE"
+        if [ "$AMEND_FLAG" = true ]; then
+            git commit --amend -F "$TEMP_FILE"
+        else
+            git commit -F "$TEMP_FILE"
+        fi
         COMMIT_STATUS=$?
         
         # Clean up the temporary file
@@ -265,6 +293,10 @@ if ! git diff --cached --quiet; then
         exit 1
     fi
 else
-    echo "No staged changes to commit"
+    if [ "$AMEND_FLAG" = true ]; then
+        echo "No commit to amend"
+    else
+        echo "No staged changes to commit"
+    fi
     exit 1
 fi

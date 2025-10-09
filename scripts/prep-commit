@@ -24,9 +24,9 @@ PLT_PID=$!
 COMPLETE="false"
 until [[ "${COMPLETE}" == "true" ]]; do
   COMPLETE="true"
-  CHECK_FAILED="false"
 
   # Compilation check with inner retry loop
+  COMPILATION_FIXED="false"
   echo "Compiling code..." | tee -a "$LOG_FILE"
   until mix compile --warnings-as-errors --force 2>&1 | tee -a "$LOG_FILE"; do
     echo "✗ Compilation failed, requesting fixes..." | tee -a "$LOG_FILE"
@@ -35,10 +35,12 @@ until [[ "${COMPLETE}" == "true" ]]; do
       exit 1
     fi
     echo "Retrying compilation..." | tee -a "$LOG_FILE"
-    CHECK_FAILED="true"
+    COMPILATION_FIXED="true"
   done
   echo "✓ Compilation passed" | tee -a "$LOG_FILE"
-  if [[ "${CHECK_FAILED}" == "true" ]]; then
+  if [[ "${COMPILATION_FIXED}" == "true" ]]; then
+    echo "⟳ Restarting checks after compilation fixes..." | tee -a "$LOG_FILE"
+    COMPLETE="false"
     continue
   fi
 
@@ -48,7 +50,7 @@ until [[ "${COMPLETE}" == "true" ]]; do
   fi
 
   # Credo check with inner retry loop
-  CHECK_FAILED="false"
+  CREDO_FIXED="false"
   echo "Running credo..." | tee -a "$LOG_FILE"
   until mix credo --strict 2>&1 | tee -a "$LOG_FILE"; do
     echo "✗ Credo failed, requesting fixes..." | tee -a "$LOG_FILE"
@@ -57,15 +59,17 @@ until [[ "${COMPLETE}" == "true" ]]; do
       exit 1
     fi
     echo "Retrying credo..." | tee -a "$LOG_FILE"
-    CHECK_FAILED="true"
+    CREDO_FIXED="true"
   done
   echo "✓ Credo passed" | tee -a "$LOG_FILE"
-  if [[ "${CHECK_FAILED}" == "true" ]]; then
+  if [[ "${CREDO_FIXED}" == "true" ]]; then
+    echo "⟳ Restarting checks after credo fixes..." | tee -a "$LOG_FILE"
+    COMPLETE="false"
     continue
   fi
 
   # Tests check with inner retry loop
-  CHECK_FAILED="false"
+  TESTS_FIXED="false"
   echo "Running tests..." | tee -a "$LOG_FILE"
   MIX_ENV=test mix ecto.drop
   until mix test 2>&1 | tee -a "$LOG_FILE"; do
@@ -76,15 +80,17 @@ until [[ "${COMPLETE}" == "true" ]]; do
     fi
     echo "Retrying tests..." | tee -a "$LOG_FILE"
     MIX_ENV=test mix ecto.drop
-    CHECK_FAILED="true"
+    TESTS_FIXED="true"
   done
   echo "✓ Tests passed" | tee -a "$LOG_FILE"
-  if [[ "${CHECK_FAILED}" == "true" ]]; then
+  if [[ "${TESTS_FIXED}" == "true" ]]; then
+    echo "⟳ Restarting checks after test fixes..." | tee -a "$LOG_FILE"
+    COMPLETE="false"
     continue
   fi
 
   # Dialyzer check with inner retry loop
-  CHECK_FAILED="false"
+  DIALYZER_FIXED="false"
   echo "Running dialyzer..." | tee -a "$LOG_FILE"
   # Wait for PLT generation to complete if still running
   if kill -0 "$PLT_PID" 2>/dev/null; then
@@ -98,10 +104,12 @@ until [[ "${COMPLETE}" == "true" ]]; do
       exit 1
     fi
     echo "Retrying dialyzer..." | tee -a "$LOG_FILE"
-    CHECK_FAILED="true"
+    DIALYZER_FIXED="true"
   done
   echo "✓ Dialyzer passed" | tee -a "$LOG_FILE"
-  if [[ "${CHECK_FAILED}" == "true" ]]; then
+  if [[ "${DIALYZER_FIXED}" == "true" ]]; then
+    echo "⟳ Restarting checks after dialyzer fixes..." | tee -a "$LOG_FILE"
+    COMPLETE="false"
     continue
   fi
 done
