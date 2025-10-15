@@ -56,7 +56,7 @@ export DOCKER_CONFIG="${HOME}/.config/docker"
 plugins=(git tmux docker mix ssh-agent)
 
 # Plugin Configuration
-export TERM="screen-256color";
+export TERM="tmux-256color";
 ZSH_TMUX_AUTOSTART=false;
 ZSH_TMUX_AUTOQUIT=false;
 
@@ -103,9 +103,6 @@ else
   export EDITOR='vim'
 fi
 
-# ssh
-# export SSH_KEY_PATH="~/.ssh/dsa_id"
-
 # aliases
 
 alias dc='docker compose';
@@ -114,6 +111,7 @@ alias ta='tmux attach';
 alias tmuxrc="$EDITOR ${HOME}/.tmux.conf";
 alias vimrc="$EDITOR ${HOME}/.config/nvim/init.vim";
 alias nvimdiff="nvim -d"
+alias vimdiff="nvim -d"
 alias x='exit';
 alias xclip='xclip -selection clipboard';
 alias zshrc="$EDITOR ${HOME}/.zshrc";
@@ -204,8 +202,6 @@ GPG_TTY=$(tty);
 export GPG_TTY;
 
 unalias gc;
-
-. "$HOME/.local/bin/env"
 
 source <(fzf --zsh)
 

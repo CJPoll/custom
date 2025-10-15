@@ -28,8 +28,37 @@ _git_branch_names() {
   _multi_parts / branches
 }
 
-_arguments \
-  "1:project:($(_proj_get_projects))" \
-  "--path[Explicit path to project directory]:directory:_directories" \
-  "--pr-review[Open changed files in tabs for PR review]" \
-  "--base-branch[Base branch for PR review]:branch:_git_branch_names"
+_arguments -C \
+  '1: :->command_or_project' \
+  '--path[Explicit path to project directory]:directory:_directories' \
+  '--pr-review[Open changed files in tabs for PR review]' \
+  '--base-branch[Base branch for PR review]:branch:_git_branch_names' \
+  '--no-switch[Create/configure session but do not switch to it]' \
+  '(-h --help)'{-h,--help}'[Show help message]' \
+  '*::arg:->args'
+
+case $state in
+  command_or_project)
+    # Check if first word is 'print' command
+    if [[ ${words[CURRENT]} == "print" ]] || [[ $CURRENT -eq 1 ]]; then
+      local -a commands
+      commands=(
+        'print:Print the full path to the project directory'
+      )
+      _describe -t commands 'proj command' commands
+    fi
+
+    # Always offer projects as completion
+    local -a projects
+    projects=($(_proj_get_projects))
+    _describe -t projects 'project' projects
+    ;;
+  args)
+    # If first word was 'print', complete with project names
+    if [[ ${words[2]} == "print" ]]; then
+      local -a projects
+      projects=($(_proj_get_projects))
+      _describe -t projects 'project' projects
+    fi
+    ;;
+esac

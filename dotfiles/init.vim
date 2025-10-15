@@ -37,7 +37,7 @@ Plug 'madox2/vim-ai'
 " Claude Code Dep (and elixir-tools)
 Plug 'nvim-lua/plenary.nvim'
 Plug 'folke/snacks.nvim'
-Plug 'coder/claudecode.nvim'
+"Plug 'coder/claudecode.nvim'
 Plug 'elixir-tools/elixir-tools.nvim', { 'tag': 'stable' }
 Plug 'junegunn/fzf', { 'do': { -> fzf#install() } }
 Plug 'junegunn/fzf.vim'
@@ -47,11 +47,6 @@ call plug#end()
 
 
 lua << EOF
--- Claude Code setup
-require('claudecode').setup({
-  -- The plugin will use defaults if no config is provided
-})
-
 -- Elixir tools setup
 -- require("elixir").setup({
 --   elixirls = {
@@ -111,8 +106,8 @@ set t_Co=256 					              " Explicitly tell Vim that the terminal supports
 set wildignore+=*/tmp/*,*.so,*swp,*.swo,*.zip,*.beam,*/deps/*,*/_build/*,*/node_modules/*,**/elm-stuff/*,**/doc/*,*.class,**/project/*,**/target/*
 
 "set termguicolors
-let base16colorspace=256  " Access colors present in 256 colorspace"
-set background=dark                 " Sets the background color (dark|light)
+"let base16colorspace=256  " Access colors present in 256 colorspace"
+"set background=dark                 " Sets the background color (dark|light)
 
 " Load colorscheme after terminal settings
 colorscheme base16-bright

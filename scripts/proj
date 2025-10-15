@@ -1,5 +1,46 @@
 #! /usr/bin/env ruby
 
+def print_usage
+  puts <<~USAGE
+    Usage: proj <project-name> [options]
+           proj print <project-name>
+
+    Opens or switches to a tmux session for the specified project.
+
+    Commands:
+      print <project-name>  Print the full path to the project directory
+
+    Arguments:
+      <project-name>        Name of the project to open (searches DEVPATH directories)
+
+    Options:
+      --path <path>         Use an explicit path instead of searching DEVPATH
+      --pr-review           Open project in PR review mode with vim-review
+      --base-branch <name>  Base branch for PR review (default: main)
+      --no-switch           Create/configure session but don't switch to it
+      -h, --help            Show this help message
+
+    Environment:
+      DEVPATH              Colon-separated list of directories to search for projects
+      EDITOR               Editor to use (default: vim)
+      TMUX                 Automatically detected if running inside tmux
+
+    Examples:
+      proj myproject                           # Open myproject
+      proj myproject --pr-review               # Open in PR review mode
+      proj myproject --pr-review --base-branch develop
+      proj --path /custom/path myproject       # Use explicit path
+      proj print myproject                     # Print project path
+      proj myproject --no-switch               # Create session without switching
+
+    Notes:
+      - Creates a new tmux session if one doesn't exist
+      - Switches to existing session if already created
+      - In PR review mode, creates a Review window with vim-review
+      - Sessions include IDE, GIT (lazygit), SQL (lazysql), and Docker (lazydocker) windows
+  USAGE
+end
+
 class Project
   attr_reader :name
 
@@ -172,6 +213,9 @@ i = 0
 
 while i < ARGV.length
   case ARGV[i]
+  when "-h", "--help", "help"
+    print_usage
+    exit 0
   when "--path"
     if ARGV[i + 1]
       explicit_path = ARGV[i + 1]
