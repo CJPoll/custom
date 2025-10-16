@@ -12,23 +12,27 @@ source "${LIB_DIR}/stack.sh"
 
 usage() {
   cat << 'EOF'
-Usage: prep-stack --stack-top <branch-name>
-       prep-stack <branch-name>
+Usage: prep-stack --stack-top <branch-name> [--stack-bottom <branch-name>]
+       prep-stack <branch-name> [--stack-bottom <branch-name>]
 
 Prepare a stack of branches by running checks on each branch in dependency order.
 When a check fails, run prep-commit on that branch to fix issues.
 
 Arguments:
-  --stack-top <branch>  The top-most branch of the stack to prepare (required)
-  -h, --help            Show this help message
+  --stack-top <branch>     The top-most branch of the stack to prepare (required)
+  --stack-bottom <branch>  Only check branches from this branch onwards (inclusive)
+  -h, --help               Show this help message
 
 Example:
   prep-stack --stack-top feature/my-feature
   prep-stack feature/my-feature
+  prep-stack --stack-top feature-d --stack-bottom feature-b
+  prep-stack feature-d --stack-bottom feature-b
 
 The script will:
-1. Find all branches between main and the specified branch (inclusive)
-2. For each branch (bottom-up):
+1. Find all branches between main and stack-top (inclusive)
+2. If --stack-bottom is specified, discard branches before stack-bottom
+3. For each remaining branch (bottom-up):
    - Navigate to its worktree (or checkout in main worktree if no dedicated worktree)
    - Run scripts/check
    - If check fails: run scripts/prep-commit and stop
@@ -40,6 +44,7 @@ Exit codes:
   2 - Graphite (gt) not installed
   3 - Cycle detected in stack
   4 - Failed to navigate or checkout
+  5 - Stack-bottom branch not found in stack
 EOF
 }
 
@@ -55,6 +60,7 @@ branch_in_array() {
 
 # Parse arguments
 STACK_TOP=""
+STACK_BOTTOM=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -66,6 +72,16 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       STACK_TOP="$1"
+      shift
+      ;;
+    --stack-bottom)
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "Error: --stack-bottom requires a branch name" >&2
+        usage
+        exit 1
+      fi
+      STACK_BOTTOM="$1"
       shift
       ;;
     -h|--help)
@@ -137,6 +153,28 @@ while [ -n "$current" ] &&
   parent=$(get_branch_parent "$current")
   current="$parent"
 done
+
+# Handle --stack-bottom filtering
+if [ -n "$STACK_BOTTOM" ]; then
+  # Find index of stack-bottom in branches array
+  bottom_index=-1
+  for i in "${!branches[@]}"; do
+    if [ "${branches[$i]}" = "$STACK_BOTTOM" ]; then
+      bottom_index=$i
+      break
+    fi
+  done
+
+  # Validate stack-bottom was found
+  if [ $bottom_index -eq -1 ]; then
+    echo "Error: Branch '$STACK_BOTTOM' not found in stack" >&2
+    exit 5
+  fi
+
+  # Filter: keep from bottom_index onwards
+  echo "Filtering stack from '$STACK_BOTTOM' onwards..."
+  branches=("${branches[@]:$bottom_index}")
+fi
 
 # Show what we'll check
 echo "Found ${#branches[@]} branches to check: ${branches[*]}"

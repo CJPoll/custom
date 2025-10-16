@@ -3,6 +3,7 @@
 == Hard Rule
 
 - NEVER EVER UNDER ANY CIRCUMSTANCE use Process.sleep in tests
+- NEVER EVER UNDER ANY CIRCUMSTANCE use `Application.put_env`
 
 == Structure
 
