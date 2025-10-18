@@ -1,0 +1,128 @@
+# Cyberpunk Base16 Theme for Alacritty
+# Matches the Waybar/Hyprland cyberpunk aesthetic
+#
+# Color Palette:
+# - Deep Dark: #0a0e27 (background - matches Waybar)
+# - Dark Purple: #1a1b3d
+# - Neon Red: #ff0066
+# - Neon Green: #39ff14
+# - Neon Cyan: #00f3ff
+# - Neon Magenta: #ff00ff
+# - Electric Blue: #0066ff
+# - Neon Orange: #ff6b35
+# - Soft White: #e0e0ff
+
+[colors.primary]
+background = "#0a0e27"  # Deep Dark - matches Waybar background
+foreground = "#e0e0ff"  # Soft White - main text
+
+[colors.cursor]
+text = "#0a0e27"        # Deep Dark - text under cursor
+cursor = "#00f3ff"      # Neon Cyan - cursor color
+
+[colors.selection]
+text = "#e0e0ff"        # Soft White
+background = "#252847"  # Slightly lighter purple
+
+# Normal colors
+[colors.normal]
+black = "#0a0e27"       # Deep Dark
+red = "#ff0066"         # Neon Red - errors, deletions
+green = "#39ff14"       # Neon Green - success, additions
+yellow = "#ff6b35"      # Neon Orange - warnings
+blue = "#0066ff"        # Electric Blue - info
+magenta = "#ff00ff"     # Neon Magenta - special
+cyan = "#00f3ff"        # Neon Cyan - highlights
+white = "#e0e0ff"       # Soft White
+
+# Bright colors
+[colors.bright]
+black = "#5a5b7d"       # Medium purple-gray - bright black/comments
+red = "#ff3399"         # Brighter Neon Red
+green = "#66ff44"       # Brighter Neon Green
+yellow = "#ff8b5f"      # Brighter Orange
+blue = "#3d8bff"        # Brighter Electric Blue
+magenta = "#ff3dff"     # Brighter Magenta
+cyan = "#3dffff"        # Brighter Cyan
+white = "#f5f5ff"       # Brightest White
+
+# Dim colors (used in some applications)
+[colors.dim]
+black = "#050711"       # Darker than base
+red = "#cc0052"         # Dimmer Neon Red
+green = "#2dcc10"       # Dimmer Neon Green
+yellow = "#cc5629"      # Dimmer Orange
+blue = "#0052cc"        # Dimmer Electric Blue
+magenta = "#cc00cc"     # Dimmer Magenta
+cyan = "#00c2cc"        # Dimmer Cyan
+white = "#b3b3cc"       # Dimmer White
+
+# Base16 indexed colors (indexes 16-31 = base00-base0F)
+# Enables compatibility with base16-aware applications (Vim, Neovim, Helix, etc.)
+# See: https://github.com/chriskempson/base16
+
+# Monotones (base00-base07): Dark to Light progression
+[[colors.indexed_colors]]
+index = 16              # base00
+color = "#0a0e27"       # Deep Dark - default background
+
+[[colors.indexed_colors]]
+index = 17              # base01
+color = "#1a1b3d"       # Dark Purple - lighter background (status bars, line numbers)
+
+[[colors.indexed_colors]]
+index = 18              # base02
+color = "#252847"       # Lighter Purple - selection background
+
+[[colors.indexed_colors]]
+index = 19              # base03
+color = "#5a5b7d"       # Medium purple-gray - comments, invisibles
+
+[[colors.indexed_colors]]
+index = 20              # base04
+color = "#9b9dc7"       # Muted purple - dark foreground (status bar text)
+
+[[colors.indexed_colors]]
+index = 21              # base05
+color = "#e0e0ff"       # Soft White - default foreground, operators, delimiters
+
+[[colors.indexed_colors]]
+index = 22              # base06
+color = "#ebebff"       # Brighter White - light foreground
+
+[[colors.indexed_colors]]
+index = 23              # base07
+color = "#f5f5ff"       # Brightest White - light background (rarely used)
+
+# Accents (base08-base0F): Syntax highlighting semantics
+[[colors.indexed_colors]]
+index = 24              # base08
+color = "#ff0066"       # Neon Red - variables, XML tags, diff deleted
+
+[[colors.indexed_colors]]
+index = 25              # base09
+color = "#ff6b35"       # Neon Orange - integers, booleans, constants
+
+[[colors.indexed_colors]]
+index = 26              # base0A
+color = "#ff00ff"       # Neon Magenta - classes, search highlights
+
+[[colors.indexed_colors]]
+index = 27              # base0B
+color = "#39ff14"       # Neon Green - strings, diff inserted
+
+[[colors.indexed_colors]]
+index = 28              # base0C
+color = "#00f3ff"       # Neon Cyan - regex, escape chars, support
+
+[[colors.indexed_colors]]
+index = 29              # base0D
+color = "#0066ff"       # Electric Blue - functions, methods, headings
+
+[[colors.indexed_colors]]
+index = 30              # base0E
+color = "#bd93f9"       # Muted Purple - keywords, storage, selectors
+
+[[colors.indexed_colors]]
+index = 31              # base0F
+color = "#ff3399"       # Brighter Red - deprecated, embedded language tags

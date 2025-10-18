@@ -19,7 +19,7 @@
 # Path to your oh-my-zsh installation.
 export ZSH=$HOME/.oh-my-zsh;
 
-export EDITOR='vim';	# vim is the default editor
+export EDITOR='nvim';	# vim is the default editor
 export DISABLE_AUTO_TITLE=true;
 
 # Set name of the theme to load.
@@ -64,7 +64,7 @@ ZSH_TMUX_AUTOQUIT=false;
 
 # NVIM is installed by going to the github releases page, download it, extract
 # the tarball, and put the extracted directory at "${HOME}/.local/nvim"
-export PATH="${HOME}/.local/nvim/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin";
+export PATH="${HOME}/.local/nvim/bin:${HOME}/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 export ZSH_COMPDUMP="${HOME}/.cache/zsh/zcompdump-$ZSH_VERSION"
 
@@ -74,7 +74,7 @@ export CUSTOM_DIR="${HOME}/dev/custom"
 export DEV_DIR="${HOME}/dev"
 PATH="${CUSTOM_DIR}/scripts:$CUSTOM_DIR/git-custom:${PATH}"
 export DEVPATH="${DEV_DIR}";
-export fpath=("${CUSTOM_DIR}/.auto-completions" $fpath)
+export fpath=("${CUSTOM_DIR}/.auto-completions" "${ASDF_DATA_DIR:-$HOME/.asdf}/completions" $fpath)
 
 # This is a base file, intended to work in any environment. If there are changes
 # that should be made for a given environment, they belong in a local zshrc.
@@ -91,7 +91,7 @@ if [[ -a "${LOCAL_RC}" ]]; then
 fi
 
 # Initialize completions after fpath is fully configured
-autoload -U compinit
+autoload -Uz compinit
 compinit -d "${ZSH_COMPDUMP}"
 
 export LANG=en_US.UTF-8
@@ -106,6 +106,7 @@ fi
 # aliases
 
 alias dc='docker compose';
+alias hyperconf='nvim ~/.config/hypr/hyprland.conf'
 alias resource="source ${HOME}/.zshrc";
 alias ta='tmux attach';
 alias tmuxrc="$EDITOR ${HOME}/.tmux.conf";
@@ -205,6 +206,6 @@ unalias gc;
 
 source <(fzf --zsh)
 
-# opencode
-export PATH=/home/cjpoll/.opencode/bin:$PATH
 export DISPLAY=:0
+
+source ~/dev/custom/dotfiles/.zshrc.theme-override

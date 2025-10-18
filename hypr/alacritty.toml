@@ -1,0 +1,27 @@
+# Alacritty Configuration
+# Cyberpunk theme matching Waybar/Hyprland aesthetic
+
+[general]
+# Import cyberpunk color theme
+import = [
+    "~/dev/custom/hypr/alacritty-cyberpunk.toml"
+]
+
+[window]
+opacity = 0.95
+padding.x = 12
+padding.y = 12
+decorations = "None"
+
+[font]
+normal.family = "Inconsolata for Powerline"
+bold.family = "Inconsolata for Powerline"
+italic.family = "Inconsolata for Powerline"
+bold_italic.family = "Inconsolata for Powerline"
+size = 12.0
+
+[cursor]
+style.shape = "Block"
+style.blinking = "On"
+blink_interval = 750
+unfocused_hollow = true

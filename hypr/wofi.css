@@ -1,0 +1,133 @@
+/*
+ * Cyberpunk Theme for Wofi
+ * Dark theme with neon accents and generous padding
+ *
+ * Color Palette:
+ * - Deep Dark: #0a0e27 (background)
+ * - Dark Purple: #1a1b3d (containers)
+ * - Neon Cyan: #00f3ff (primary accent)
+ * - Neon Magenta: #ff00ff (secondary accent)
+ * - Electric Blue: #0066ff (highlights)
+ * - Soft White: #e0e0ff (text)
+ */
+
+/*
+ * SELECTORS
+ *
+ * window
+ * CSS Selector for the entire wofi window
+ *
+ * outer-box (#outer-box)
+ * Selector for a box that everything else sits inside of
+ *
+ * input (#input)
+ * Selector for the text box for filtering items
+ *
+ * scroll (#scroll)
+ * Selector for the scroll window containing inner-box
+ *
+ * inner-box (#inner-box)
+ * Selector for the box containing all entries
+ *
+ * entry (#entry)
+ * Selector for the box containing text and if present, images
+ *
+ * text (#text)
+ * Selector for the box containing the name of the program/option inserted
+ *
+ * img (#img)
+ * Selector for images displayed in entries
+*/
+
+/* Main window */
+window {
+    margin: 0px;
+    background-color: transparent;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 18px;
+}
+
+/* Outer container */
+#outer-box {
+    margin: 8px;
+    padding: 24px;
+    background-color: #0a0e27;
+    border: 2px solid #00f3ff;
+    border-radius: 12px;
+    box-shadow: 0 0 20px rgba(0, 243, 255, 0.3),
+                inset 0 0 30px rgba(0, 102, 255, 0.05);
+}
+
+/* Search input */
+#input {
+    margin: 0px 0px 20px 0px;
+    padding: 20px 24px;
+    background-color: #1a1b3d;
+    color: #e0e0ff;
+    border: 2px solid #0066ff;
+    border-radius: 8px;
+    outline: none;
+    caret-color: #00f3ff;
+    box-shadow: 0 0 10px rgba(0, 102, 255, 0.2);
+}
+
+#input:focus {
+    border-color: #00f3ff;
+    box-shadow: 0 0 15px rgba(0, 243, 255, 0.4);
+}
+
+/* Scroll container */
+#scroll {
+    margin: 0px;
+    padding: 0px;
+}
+
+/* Inner box containing entries */
+#inner-box {
+    margin: 0px;
+    padding: 16px;
+    background-color: transparent;
+}
+
+/* Individual entry */
+#entry {
+    padding: 16px 20px;
+    margin: 4px 0px;
+    background-color: #1a1b3d;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+}
+
+#entry:hover {
+    background-color: #252847;
+    border-color: #00f3ff;
+    box-shadow: 0 0 12px rgba(0, 243, 255, 0.2);
+}
+
+#entry:selected {
+    background: linear-gradient(135deg, #1a1b3d 0%, #2a2d5f 100%);
+    border-color: #ff00ff;
+    box-shadow: 0 0 15px rgba(255, 0, 255, 0.3),
+                inset 0 0 10px rgba(0, 243, 255, 0.1);
+}
+
+/* Entry text */
+#text {
+    padding: 2px 8px;
+    color: #e0e0ff;
+    font-weight: 500;
+}
+
+#entry:selected #text {
+    color: #00f3ff;
+    text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
+}
+
+/* Entry images */
+#img {
+    margin-right: 12px;
+    padding: 8px;
+    border-radius: 4px;
+    background-color: transparent;
+}

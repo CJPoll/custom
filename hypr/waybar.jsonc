@@ -1,0 +1,116 @@
+{
+    // Main bar configuration
+    "layer": "top",
+    "position": "top",
+    "height": 64,
+    "spacing": 8,
+    "margin": "0 0 0 0",
+
+    // Module layout
+    "modules-left": [
+        "hyprland/workspaces"
+    ],
+    "modules-center": [
+        "memory",
+        "cpu"
+    ],
+    "modules-right": [
+        "pulseaudio",
+        "clock",
+        "tray",
+        "custom/lock",
+        "custom/power"
+    ],
+
+    // Workspaces configuration
+    "hyprland/workspaces": {
+        "format": "{id}",
+        "on-click": "activate",
+        "persistent-workspaces": {
+            "HDMI-A-1": [1, 3],
+            "HDMI-A-2": [2, 4]
+        },
+        "sort-by-number": true,
+        "active-only": false,
+        "all-outputs": false
+    },
+
+    // CPU configuration
+    "cpu": {
+        "interval": 2,
+        "format": "{usage}% CPU",
+        "tooltip": true,
+        "tooltip-format": "CPU Load: {usage}%\nCores: {avg_frequency} GHz"
+    },
+
+    // Memory configuration
+    "memory": {
+        "interval": 2,
+        "format": "{used}Gb",
+        "tooltip": true,
+        "tooltip-format": "Memory: {used:0.1f}G / {total:0.1f}G\nSwap: {swapUsed:0.1f}G / {swapTotal:0.1f}G"
+    },
+
+    // PulseAudio configuration
+    "pulseaudio": {
+        "format": "{icon} {volume}%",
+        "format-muted": " {volume}%",
+        "on-click": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
+        "on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
+        "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%",
+        "format-icons": {
+            "default": ["", "", ""]
+        }
+    },
+
+    // Clock configuration
+    "clock": {
+        "interval": 1,
+        "format": "{:%A, %B %d, %Y  %I:%M %p}",
+        "format-alt": "{:%I:%M:%S %p}",
+        "tooltip-format": "<span font='JetBrains Mono 12'><tt>{calendar}</tt></span>",
+        "calendar": {
+            "mode": "month",
+            "mode-mon-col": 3,
+            "weeks-pos": "right",
+            "on-scroll": 1,
+            "format": {
+                "months": "<span color='#00f3ff'><b>{}</b></span>",
+                "days": "<span color='#e0e0ff'>{}</span>",
+                "weeks": "<span color='#ff00ff'><b>W{}</b></span>",
+                "weekdays": "<span color='#ff6b35'><b>{}</b></span>",
+                "today": "<span color='#ff00ff' background='#1a1b3d'><b><u>{}</u></b></span>"
+            }
+        },
+        "actions": {
+            "on-click-right": "mode",
+            "on-scroll-up": "shift_up",
+            "on-scroll-down": "shift_down"
+        }
+    },
+
+    // Tray configuration
+    "tray": {
+        "icon-size": 20,
+        "spacing": 12,
+        "show-passive-items": true
+    },
+
+    // Lock icon
+    "custom/lock": {
+        "format": "",
+        "tooltip": true,
+        "tooltip-format": "Lock Screen",
+        "on-click": "hyprlock",
+        "return-type": ""
+    },
+
+    // Power icon
+    "custom/power": {
+        "format": "�",
+        "tooltip": true,
+        "tooltip-format": "Shutdown",
+        "on-click": "shutdown now",
+        "return-type": ""
+    }
+}

@@ -1,0 +1,297 @@
+/*
+ * Cyberpunk Waybar Theme
+ *
+ * Color Palette:
+ * - Deep Dark: #0a0e27 (background)
+ * - Dark Purple: #1a1b3d (containers)
+ * - Neon Cyan: #00f3ff (primary accent)
+ * - Neon Magenta: #ff00ff (secondary accent)
+ * - Electric Blue: #0066ff (highlights)
+ * - Neon Orange: #ff6b35 (hover emphasis - from hyprlock)
+ * - Soft White: #e0e0ff (text)
+ */
+
+* {
+    border: none;
+    border-radius: 0;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 14px;
+    min-height: 0;
+}
+
+/* Main window */
+window#waybar {
+    background-color: rgba(10, 14, 39, 0.85);
+    border-bottom: 2px solid #00f3ff;
+    color: #e0e0ff;
+    padding: 12px 24px;
+    transition: background-color 0.2s ease;
+}
+
+/* Left module container */
+.modules-left {
+    margin: 4px 0;
+}
+
+/* Right module container */
+.modules-right {
+    margin: 4px 0;
+}
+
+/* Generic module styling */
+.module {
+    padding: 4px 12px;
+    margin: 4px 2px;
+    background-color: rgba(26, 27, 61, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(0, 102, 255, 0.3);
+    transition: all 0.3s ease;
+    min-height: 0;
+}
+
+.module:hover {
+    background-color: rgba(37, 40, 71, 0.9);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
+/* Workspaces */
+#workspaces {
+    background-color: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+}
+
+#workspaces button {
+    padding: 4px 14px;
+    margin: 4px 2px;
+    background-color: rgba(26, 27, 61, 0.6);
+    color: #e0e0ff;
+    border: 1px solid rgba(0, 102, 255, 0.3);
+    border-radius: 8px;
+    transition: all 0.3s ease;
+    min-width: 40px;
+}
+
+#workspaces button:hover {
+    background-color: rgba(37, 40, 71, 0.9);
+    border-color: #ff6b35;
+    color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+    text-shadow: 0 0 8px rgba(255, 107, 53, 0.6);
+}
+
+#workspaces button.active {
+    background: linear-gradient(135deg, rgba(0, 243, 255, 0.2) 0%, rgba(255, 0, 255, 0.2) 100%);
+    border-color: #00f3ff;
+    color: #00f3ff;
+    font-weight: bold;
+    box-shadow: 0 0 15px rgba(0, 243, 255, 0.5),
+                inset 0 0 10px rgba(0, 243, 255, 0.1);
+    text-shadow: 0 0 10px rgba(0, 243, 255, 0.8);
+}
+
+#workspaces button.urgent {
+    background-color: rgba(255, 0, 0, 0.3);
+    border-color: #ff0000;
+    color: #ff0000;
+    animation: urgent-blink 1s ease infinite;
+}
+
+@keyframes urgent-blink {
+    from {
+        opacity: 1;
+        box-shadow: 0 0 15px rgba(255, 0, 0, 0.6);
+    }
+    50% {
+        opacity: 0.7;
+        box-shadow: 0 0 5px rgba(255, 0, 0, 0.3);
+    }
+    to {
+        opacity: 1;
+        box-shadow: 0 0 15px rgba(255, 0, 0, 0.6);
+    }
+}
+
+/* CPU */
+#cpu {
+    color: #ff00ff;
+    font-weight: 600;
+    padding: 4px 16px;
+    text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
+    background-color: rgba(26, 27, 61, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(0, 102, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+#cpu:hover {
+    color: #ff6b35;
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    background-color: rgba(37, 40, 71, 0.9);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
+/* Memory */
+#memory {
+    color: #00f3ff;
+    font-weight: 600;
+    padding: 4px 16px;
+    text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
+    background-color: rgba(26, 27, 61, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(0, 102, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+#memory:hover {
+    color: #ff6b35;
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    background-color: rgba(37, 40, 71, 0.9);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
+/* PulseAudio */
+#pulseaudio {
+    color: #ff00ff;
+    font-weight: 600;
+    padding: 4px 16px;
+    text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
+    background-color: rgba(26, 27, 61, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(0, 102, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+#pulseaudio:hover {
+    color: #ff6b35;
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    background-color: rgba(37, 40, 71, 0.9);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
+#pulseaudio.muted {
+    color: rgba(255, 0, 255, 0.4);
+    text-shadow: 0 0 4px rgba(255, 0, 255, 0.2);
+}
+
+/* Clock */
+#clock {
+    color: #00f3ff;
+    font-weight: 600;
+    padding: 4px 16px;
+    text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
+    background-color: rgba(26, 27, 61, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(0, 102, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+#clock:hover {
+    color: #ff6b35;
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    background-color: rgba(37, 40, 71, 0.9);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
+/* Tray */
+#tray {
+    padding: 4px 12px;
+    background-color: rgba(26, 27, 61, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(0, 102, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+#tray:hover {
+    background-color: rgba(37, 40, 71, 0.9);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
+#tray > .passive {
+    opacity: 0.6;
+}
+
+#tray > .active {
+    color: #00f3ff;
+    text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
+}
+
+#tray > .needs-attention {
+    color: #ff6b35;
+    background-color: rgba(255, 107, 53, 0.15);
+    border-radius: 4px;
+    animation: attention-pulse 2s ease infinite;
+}
+
+@keyframes attention-pulse {
+    from {
+        box-shadow: 0 0 8px rgba(255, 107, 53, 0.6);
+    }
+    50% {
+        box-shadow: 0 0 15px rgba(255, 107, 53, 0.9);
+    }
+    to {
+        box-shadow: 0 0 8px rgba(255, 107, 53, 0.6);
+    }
+}
+
+#tray menu {
+    background-color: rgba(10, 14, 39, 0.95);
+    border: 2px solid #00f3ff;
+    border-radius: 8px;
+    padding: 8px;
+    box-shadow: 0 0 20px rgba(0, 243, 255, 0.4);
+}
+
+/* Custom lock button */
+#custom-lock {
+    color: #ff00ff;
+    font-size: 18px;
+    padding: 4px 14px;
+    text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
+}
+
+#custom-lock:hover {
+    color: #ff6b35;
+    background-color: rgba(255, 107, 53, 0.15);
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+}
+
+/* Custom power button */
+#custom-power {
+    color: #ff00ff;
+    font-size: 20px;
+    font-weight: bold;
+    padding: 4px 14px;
+    text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
+}
+
+#custom-power:hover {
+    color: #ff6b35;
+    background-color: rgba(255, 107, 53, 0.15);
+    border-color: #ff6b35;
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    box-shadow: 0 0 15px rgba(255, 107, 53, 0.5);
+}
+
+/* Tooltip styling */
+tooltip {
+    background-color: rgba(10, 14, 39, 0.95);
+    border: 2px solid #00f3ff;
+    border-radius: 8px;
+    padding: 12px;
+    color: #e0e0ff;
+    box-shadow: 0 0 20px rgba(0, 243, 255, 0.4);
+}
+
+tooltip label {
+    color: #e0e0ff;
+    font-family: "JetBrains Mono", monospace;
+}
