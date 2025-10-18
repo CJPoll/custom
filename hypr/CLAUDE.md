@@ -70,6 +70,31 @@ The desktop environment embraces a cyberpunk aesthetic with neon accents, dark b
 - Active states use brighter, more opaque colors
 - Border radius: 6-12px depending on element size
 
+## Theme Files and Integration
+
+### Theme File Locations
+All theme files are stored in `~/dev/custom/hypr/themes/`:
+- `base16-cyberpunk.vim` - Vim/Neovim color scheme
+- `base16-cyberpunk.sh` - Shell/terminal theme (sourced by ZSH)
+- `base16-cyberpunk.yaml` - Theme definition/specification
+- `alacritty-cyberpunk.toml` - Alacritty terminal color theme
+
+### System Integration via Symlinks
+The Vim color scheme is integrated via symlink:
+```bash
+~/.vim/colors/base16-cyberpunk.vim -> ~/dev/custom/hypr/themes/base16-cyberpunk.vim
+```
+
+This allows Vim/Neovim to find the color scheme without modifying the runtimepath. If the theme files are moved, update the symlink:
+```bash
+ln -sf ~/dev/custom/hypr/themes/base16-cyberpunk.vim ~/.vim/colors/base16-cyberpunk.vim
+```
+
+### Theme Loading
+- **Vim/Neovim**: `colorscheme base16-cyberpunk` in `init.vim`
+- **ZSH**: Sourced in `~/.zshrc.theme-override` via `source "${HOME}/dev/custom/hypr/themes/base16-cyberpunk.sh"`
+- **Alacritty**: Imported in `~/dev/custom/hypr/alacritty.toml` via `import` directive
+
 ## Wallpapers
 
 | Screen | Image | Theme |

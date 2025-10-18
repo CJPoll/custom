@@ -4,7 +4,7 @@
 [general]
 # Import cyberpunk color theme
 import = [
-    "~/dev/custom/hypr/alacritty-cyberpunk.toml"
+    "~/dev/custom/hypr/themes/alacritty-cyberpunk.toml"
 ]
 
 [window]

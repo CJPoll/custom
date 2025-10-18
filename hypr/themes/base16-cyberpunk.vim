@@ -299,6 +299,15 @@ call <sid>hi("SpellLocal",   "", "", "", "", "undercurl", s:gui0C)
 call <sid>hi("SpellCap",     "", "", "", "", "undercurl", s:gui0D)
 call <sid>hi("SpellRare",    "", "", "", "", "undercurl", s:gui0E)
 
+" Treesitter highlighting (Neovim)
+" Function definitions use gui0D (Neon Cyan) - inherited from Function group
+" Function calls use gui0C (Neon Magenta) - distinct from definitions
+call <sid>hi("@function.call",        s:gui0C, "", s:cterm0C, "", "", "")
+call <sid>hi("@function.method.call", s:gui0C, "", s:cterm0C, "", "", "")
+call <sid>hi("@function.builtin",     s:gui0D, "", s:cterm0D, "", "bold", "")
+call <sid>hi("@module",               s:gui0A, "", s:cterm0A, "", "", "")
+call <sid>hi("@namespace",            s:gui0A, "", s:cterm0A, "", "", "")
+
 " Remove functions
 delf <sid>hi
 

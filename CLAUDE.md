@@ -11,7 +11,23 @@ This repository contains personal development tools and configurations:
 ## Repository Structure
 
 ### dotfiles/
-Configuration files for various tools and applications. These are typically symlinked to their appropriate locations in the home directory.
+Configuration files for various tools and applications. These are symlinked to their appropriate locations in the home directory.
+
+**Active Symlinks:**
+```bash
+~/.tmux.conf -> ~/dev/custom/dotfiles/.tmux.conf
+~/.zshrc -> ~/dev/custom/dotfiles/.zshrc
+~/.config/nvim/init.vim -> ~/dev/custom/dotfiles/init.vim
+~/CLAUDE.md -> ~/dev/custom/ai/CLAUDE.md
+```
+
+To recreate symlinks if needed:
+```bash
+ln -sf ~/dev/custom/dotfiles/.tmux.conf ~/.tmux.conf
+ln -sf ~/dev/custom/dotfiles/.zshrc ~/.zshrc
+ln -sf ~/dev/custom/dotfiles/init.vim ~/.config/nvim/init.vim
+ln -sf ~/dev/custom/ai/CLAUDE.md ~/CLAUDE.md
+```
 
 ### git-custom/
 Custom git commands that extend git's functionality. These commands can be invoked as `git <command-name>`.

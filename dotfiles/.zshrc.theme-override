@@ -1,4 +1,4 @@
-source "${HOME}/dev/custom/themes/base16-cyberpunk.sh"
+source "${HOME}/dev/custom/hypr/themes/base16-cyberpunk.sh"
 
 export AGNOSTER_DIR_BG=blue
 export AGNOSTER_GIT_DIRTY_BG=magenta
