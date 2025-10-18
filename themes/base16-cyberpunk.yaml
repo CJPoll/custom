@@ -1,0 +1,26 @@
+# Base16 Cyberpunk Neon - Scheme definition
+# Author: cjpoll
+# Matches Hyprland/Waybar desktop theme
+
+scheme: "Cyberpunk Neon"
+author: "cjpoll"
+
+# Monotones (base00-base07): Dark to Light progression
+base00: "0a0e27" # Deep Dark - default background
+base01: "1a1b3d" # Dark Purple - lighter background (status bars, line numbers)
+base02: "252847" # Lighter Purple - selection background
+base03: "5a5b7d" # Medium purple-gray - comments, invisibles
+base04: "9b9dc7" # Muted purple - dark foreground (status bar text)
+base05: "e0e0ff" # Soft White - default foreground, operators, delimiters
+base06: "ebebff" # Brighter White - light foreground
+base07: "f5f5ff" # Brightest White - light background (rarely used)
+
+# Accents (base08-base0F): Syntax highlighting semantics
+base08: "ff0066" # Neon Red - variables, XML tags, diff deleted
+base09: "39ff14" # Neon Green - integers, booleans, constants
+base0A: "ff6b35" # Neon Orange - classes, search highlights
+base0B: "0066ff" # Electric Blue - strings, diff inserted
+base0C: "ff00ff" # Neon Magenta - regex, escape chars, support
+base0D: "00f3ff" # Neon Cyan - functions, methods, headings
+base0E: "bd93f9" # Muted Purple - keywords, storage, selectors - CONFIRM KEEP
+base0F: "ff3399" # Brighter Red - deprecated, embedded language tags

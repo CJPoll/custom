@@ -23,16 +23,16 @@ let s:gui07        = "f5f5ff"
 let g:base16_gui07 = "f5f5ff"
 let s:gui08        = "ff0066"
 let g:base16_gui08 = "ff0066"
-let s:gui09        = "ff6b35"
-let g:base16_gui09 = "ff6b35"
-let s:gui0A        = "ff00ff"
-let g:base16_gui0A = "ff00ff"
-let s:gui0B        = "39ff14"
-let g:base16_gui0B = "39ff14"
-let s:gui0C        = "00f3ff"
-let g:base16_gui0C = "00f3ff"
-let s:gui0D        = "0066ff"
-let g:base16_gui0D = "0066ff"
+let s:gui09        = "39ff14"
+let g:base16_gui09 = "39ff14"
+let s:gui0A        = "ff6b35"
+let g:base16_gui0A = "ff6b35"
+let s:gui0B        = "0066ff"
+let g:base16_gui0B = "0066ff"
+let s:gui0C        = "ff00ff"
+let g:base16_gui0C = "ff00ff"
+let s:gui0D        = "00f3ff"
+let g:base16_gui0D = "00f3ff"
 let s:gui0E        = "bd93f9"
 let g:base16_gui0E = "bd93f9"
 let s:gui0F        = "ff3399"
@@ -78,19 +78,19 @@ let g:base16_cterm0F = "17"
 if has("nvim")
   let g:terminal_color_0  = "#0a0e27"
   let g:terminal_color_1  = "#ff0066"
-  let g:terminal_color_2  = "#39ff14"
-  let g:terminal_color_3  = "#ff6b35"
-  let g:terminal_color_4  = "#0066ff"
-  let g:terminal_color_5  = "#ff00ff"
-  let g:terminal_color_6  = "#00f3ff"
+  let g:terminal_color_2  = "#0066ff"
+  let g:terminal_color_3  = "#39ff14"
+  let g:terminal_color_4  = "#00f3ff"
+  let g:terminal_color_5  = "#ff6b35"
+  let g:terminal_color_6  = "#ff00ff"
   let g:terminal_color_7  = "#e0e0ff"
   let g:terminal_color_8  = "#5a5b7d"
   let g:terminal_color_9  = "#ff0066"
-  let g:terminal_color_10 = "#39ff14"
-  let g:terminal_color_11 = "#ff6b35"
-  let g:terminal_color_12 = "#0066ff"
-  let g:terminal_color_13 = "#ff00ff"
-  let g:terminal_color_14 = "#00f3ff"
+  let g:terminal_color_10 = "#0066ff"
+  let g:terminal_color_11 = "#39ff14"
+  let g:terminal_color_12 = "#00f3ff"
+  let g:terminal_color_13 = "#ff6b35"
+  let g:terminal_color_14 = "#ff00ff"
   let g:terminal_color_15 = "#f5f5ff"
   let g:terminal_color_background = g:terminal_color_0
   let g:terminal_color_foreground = g:terminal_color_7
@@ -98,19 +98,19 @@ elseif has("terminal")
   let g:terminal_ansi_colors = [
         \ "#0a0e27",
         \ "#ff0066",
-        \ "#39ff14",
-        \ "#ff6b35",
         \ "#0066ff",
-        \ "#ff00ff",
+        \ "#39ff14",
         \ "#00f3ff",
+        \ "#ff6b35",
+        \ "#ff00ff",
         \ "#e0e0ff",
         \ "#5a5b7d",
         \ "#ff0066",
-        \ "#39ff14",
-        \ "#ff6b35",
         \ "#0066ff",
-        \ "#ff00ff",
+        \ "#39ff14",
         \ "#00f3ff",
+        \ "#ff6b35",
+        \ "#ff00ff",
         \ "#f5f5ff",
         \ ]
 endif
@@ -150,7 +150,7 @@ fun <sid>hi(group, guifg, guibg, ctermfg, ctermbg, attr, guisp)
 endfun
 
 " Vim editor colors
-call <sid>hi("Normal",        s:gui05, s:gui01, s:cterm05, s:cterm01, "", "")
+call <sid>hi("Normal",        s:gui05, s:gui00, s:cterm05, s:cterm00, "", "")
 call <sid>hi("Bold",          "", "", "", "", "bold", "")
 call <sid>hi("Debug",         s:gui08, "", s:cterm08, "", "", "")
 call <sid>hi("Directory",     s:gui0D, "", s:cterm0D, "", "", "")
@@ -206,7 +206,7 @@ call <sid>hi("Delimiter",    s:gui0F, "", s:cterm0F, "", "", "")
 call <sid>hi("Float",        s:gui0C, "", s:cterm0C, "", "", "")
 call <sid>hi("Function",     s:gui0D, "", s:cterm0D, "", "", "")
 call <sid>hi("Identifier",   s:gui08, "", s:cterm08, "", "none", "")
-call <sid>hi("Include",      s:gui0D, "", s:cterm0D, "", "", "")
+call <sid>hi("Include",      s:gui0E, "", s:cterm0E, "", "", "")
 call <sid>hi("Keyword",      s:gui0E, "", s:cterm0E, "", "", "")
 call <sid>hi("Label",        s:gui0A, "", s:cterm0A, "", "", "")
 call <sid>hi("Number",       s:gui0C, "", s:cterm0C, "", "", "")

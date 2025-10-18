@@ -1,3 +1,5 @@
-export AGNOSTER_DIR_BG=cyan
-export AGNOSTER_GIT_DIRTY_BG=12
-export AGNOSTER_GIT_CLEAN_BG=white
+source "${HOME}/dev/custom/themes/base16-cyberpunk.sh"
+
+export AGNOSTER_DIR_BG=blue
+export AGNOSTER_GIT_DIRTY_BG=magenta
+export AGNOSTER_GIT_CLEAN_BG=green

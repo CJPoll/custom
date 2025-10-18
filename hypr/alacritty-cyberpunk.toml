@@ -28,33 +28,33 @@ background = "#252847"  # Slightly lighter purple
 [colors.normal]
 black = "#0a0e27"       # Deep Dark
 red = "#ff0066"         # Neon Red - errors, deletions
-green = "#39ff14"       # Neon Green - success, additions
-yellow = "#ff6b35"      # Neon Orange - warnings
-blue = "#0066ff"        # Electric Blue - info
-magenta = "#ff00ff"     # Neon Magenta - special
-cyan = "#00f3ff"        # Neon Cyan - highlights
+green = "#0066ff"       # Electric Blue - success, additions
+yellow = "#39ff14"      # Neon Green - warnings
+blue = "#00f3ff"        # Neon Cyan - info
+magenta = "#ff6b35"     # Neon Orange - special
+cyan = "#ff00ff"        # Neon Magenta - highlights
 white = "#e0e0ff"       # Soft White
 
 # Bright colors
 [colors.bright]
 black = "#5a5b7d"       # Medium purple-gray - bright black/comments
 red = "#ff3399"         # Brighter Neon Red
-green = "#66ff44"       # Brighter Neon Green
-yellow = "#ff8b5f"      # Brighter Orange
-blue = "#3d8bff"        # Brighter Electric Blue
-magenta = "#ff3dff"     # Brighter Magenta
-cyan = "#3dffff"        # Brighter Cyan
+green = "#3d8bff"       # Brighter Electric Blue
+yellow = "#66ff44"      # Brighter Neon Green
+blue = "#3dffff"        # Brighter Cyan
+magenta = "#ff8b5f"     # Brighter Orange
+cyan = "#ff3dff"        # Brighter Magenta
 white = "#f5f5ff"       # Brightest White
 
 # Dim colors (used in some applications)
 [colors.dim]
 black = "#050711"       # Darker than base
 red = "#cc0052"         # Dimmer Neon Red
-green = "#2dcc10"       # Dimmer Neon Green
-yellow = "#cc5629"      # Dimmer Orange
-blue = "#0052cc"        # Dimmer Electric Blue
-magenta = "#cc00cc"     # Dimmer Magenta
-cyan = "#00c2cc"        # Dimmer Cyan
+green = "#0052cc"       # Dimmer Electric Blue
+yellow = "#2dcc10"      # Dimmer Neon Green
+blue = "#00c2cc"        # Dimmer Cyan
+magenta = "#cc5629"     # Dimmer Orange
+cyan = "#cc00cc"        # Dimmer Magenta
 white = "#b3b3cc"       # Dimmer White
 
 # Base16 indexed colors (indexes 16-31 = base00-base0F)
@@ -101,23 +101,23 @@ color = "#ff0066"       # Neon Red - variables, XML tags, diff deleted
 
 [[colors.indexed_colors]]
 index = 25              # base09
-color = "#ff6b35"       # Neon Orange - integers, booleans, constants
+color = "#39ff14"       # Neon Green - integers, booleans, constants
 
 [[colors.indexed_colors]]
 index = 26              # base0A
-color = "#ff00ff"       # Neon Magenta - classes, search highlights
+color = "#ff6b35"       # Neon Orange - classes, search highlights
 
 [[colors.indexed_colors]]
 index = 27              # base0B
-color = "#39ff14"       # Neon Green - strings, diff inserted
+color = "#0066ff"       # Electric Blue - strings, diff inserted
 
 [[colors.indexed_colors]]
 index = 28              # base0C
-color = "#00f3ff"       # Neon Cyan - regex, escape chars, support
+color = "#ff00ff"       # Neon Magenta - regex, escape chars, support
 
 [[colors.indexed_colors]]
 index = 29              # base0D
-color = "#0066ff"       # Electric Blue - functions, methods, headings
+color = "#00f3ff"       # Neon Cyan - functions, methods, headings
 
 [[colors.indexed_colors]]
 index = 30              # base0E
