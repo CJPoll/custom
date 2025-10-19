@@ -52,7 +52,7 @@ window {
     margin: 8px;
     padding: 24px;
     background-color: #0a0e27;
-    border: 2px solid #00f3ff;
+    border: 1px solid #00f3ff;
     border-radius: 12px;
     box-shadow: 0 0 20px rgba(0, 243, 255, 0.3),
                 inset 0 0 30px rgba(0, 102, 255, 0.05);
@@ -120,8 +120,8 @@ window {
 }
 
 #entry:selected #text {
-    color: #00f3ff;
-    text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
+    color: #e0e0ff;
+    text-shadow: 0 0 8px rgba(224, 224, 255, 0.5);
 }
 
 /* Entry images */
