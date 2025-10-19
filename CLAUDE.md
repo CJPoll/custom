@@ -21,12 +21,24 @@ Configuration files for various tools and applications. These are symlinked to t
 ~/CLAUDE.md -> ~/dev/custom/ai/CLAUDE.md
 ```
 
+**Theme Symlinks:**
+```bash
+~/.vim/colors/base16-cyberpunk.vim -> ~/dev/custom/hypr/themes/base16-cyberpunk.vim
+~/.config/btop/themes/base16-cyberpunk.theme -> ~/dev/custom/hypr/themes/base16-cyberpunk.theme
+```
+
 To recreate symlinks if needed:
 ```bash
+# Dotfiles
 ln -sf ~/dev/custom/dotfiles/.tmux.conf ~/.tmux.conf
 ln -sf ~/dev/custom/dotfiles/.zshrc ~/.zshrc
 ln -sf ~/dev/custom/dotfiles/init.vim ~/.config/nvim/init.vim
 ln -sf ~/dev/custom/ai/CLAUDE.md ~/CLAUDE.md
+
+# Themes
+ln -sf ~/dev/custom/hypr/themes/base16-cyberpunk.vim ~/.vim/colors/base16-cyberpunk.vim
+mkdir -p ~/.config/btop/themes
+ln -sf ~/dev/custom/hypr/themes/base16-cyberpunk.theme ~/.config/btop/themes/base16-cyberpunk.theme
 ```
 
 ### git-custom/

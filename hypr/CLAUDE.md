@@ -64,11 +64,23 @@ The desktop environment embraces a cyberpunk aesthetic with neon accents, dark b
 - Duration: 0.2-0.3s for standard transitions
 - Easing: `ease` for smooth, natural motion
 - Pulse animations: 1-2s duration for attention states
+- **Hyprland-specific**: Animation speed uses deciseconds (ds) where 1ds = 100ms
+  - IMPORTANT: Lower numbers = faster animations (3 = 300ms, 10 = 1000ms)
+  - Standard transitions: 2-3ds (200-300ms)
+  - Border color changes: 3ds (300ms)
+  - Gradient rotation (borderangle): 30-50ds (3-5 seconds per full rotation)
+
+**Gradients:**
+- Active window borders: Cyan → Magenta (rotating gradient at 45°)
+- Heat/usage metrics: Cool colors → Warm colors (Blue/Cyan → Orange → Red)
+- Process/performance: Cyan → Magenta → Purple for visual hierarchy
+- Use 2-3 color stops for smooth transitions
 
 **Borders:**
 - Standard: 1-2px solid with rgba colors
 - Active states use brighter, more opaque colors
 - Border radius: 6-12px depending on element size
+- **Hyprland**: Border colors defined in `general` section, NOT `decoration`
 
 ## Theme Files and Integration
 
@@ -78,22 +90,70 @@ All theme files are stored in `~/dev/custom/hypr/themes/`:
 - `base16-cyberpunk.sh` - Shell/terminal theme (sourced by ZSH)
 - `base16-cyberpunk.yaml` - Theme definition/specification
 - `alacritty-cyberpunk.toml` - Alacritty terminal color theme
+- `base16-cyberpunk.theme` - Btop system monitor theme
+- `base16-cyberpunk.tmuxtheme` - Tmux powerline theme
 
 ### System Integration via Symlinks
-The Vim color scheme is integrated via symlink:
+Theme files are integrated via symlinks to their respective application config directories:
 ```bash
 ~/.vim/colors/base16-cyberpunk.vim -> ~/dev/custom/hypr/themes/base16-cyberpunk.vim
+~/.config/btop/themes/base16-cyberpunk.theme -> ~/dev/custom/hypr/themes/base16-cyberpunk.theme
 ```
 
-This allows Vim/Neovim to find the color scheme without modifying the runtimepath. If the theme files are moved, update the symlink:
+This allows applications to find the themes without modifying search paths. If the theme files are moved, update the symlinks:
 ```bash
 ln -sf ~/dev/custom/hypr/themes/base16-cyberpunk.vim ~/.vim/colors/base16-cyberpunk.vim
+mkdir -p ~/.config/btop/themes
+ln -sf ~/dev/custom/hypr/themes/base16-cyberpunk.theme ~/.config/btop/themes/base16-cyberpunk.theme
 ```
 
 ### Theme Loading
 - **Vim/Neovim**: `colorscheme base16-cyberpunk` in `init.vim`
 - **ZSH**: Sourced in `~/.zshrc.theme-override` via `source "${HOME}/dev/custom/hypr/themes/base16-cyberpunk.sh"`
 - **Alacritty**: Imported in `~/dev/custom/hypr/alacritty.toml` via `import` directive
+- **Btop**: Select "base16-cyberpunk" in btop's theme menu (ESC → Options → Color theme)
+- **Tmux**: Sourced in `~/.tmux.conf` via `source-file ~/dev/custom/hypr/themes/base16-cyberpunk.tmuxtheme`
+
+### Known Limitations and Workarounds
+
+**Hyprland Borderangle Animation (Issue #9251)**
+- The `borderangle` loop animation only works on NEW windows created after the config is loaded
+- Existing windows will only animate once, then stop
+- Workaround: Open new windows to see continuous gradient rotation, or restart Hyprland to apply to all windows
+
+**Btop Theming Granularity**
+- Btop's `theme[process_start/mid/end]` controls ALL process list columns (Program, Threads, MemB, CPU%)
+- No way to style individual columns separately (e.g., can't make only program names orange while keeping metrics cyan)
+- Accept the limitation or use a gradient that works for all columns
+
+**General Theming Strategy**
+- When an application has limited theming support, prioritize the most visible/important elements
+- Use gradients strategically to maintain visual interest within limitations
+- Document workarounds and known issues for future reference
+
+## Hyprland Configuration Structure
+
+**Section Organization:**
+- `general { }` - Border colors, sizes, gaps, layout settings
+  - `col.active_border` - Active window border color/gradient
+  - `col.inactive_border` - Inactive window border color
+  - `border_size` - Border thickness in pixels
+  - `gaps_in` / `gaps_out` - Window gaps
+
+- `decoration { }` - Visual effects (blur, rounding, shadows)
+  - `rounding` - Corner radius for windows
+  - `blur { }` - Blur settings for transparency
+  - Shadow settings (if supported in your version)
+
+- `animations { }` - Animation definitions
+  - `bezier` - Define custom easing curves
+  - `animation = NAME, ENABLED, SPEED, CURVE, [STYLE]`
+  - Remember: SPEED is in deciseconds (ds), where 1ds = 100ms
+
+**Common Mistakes:**
+- ❌ Putting `col.active_border` in `decoration` (should be in `general`)
+- ❌ Using high numbers for fast animations (lower = faster)
+- ❌ Forgetting that `borderangle` loop only works on new windows
 
 ## Wallpapers
 
