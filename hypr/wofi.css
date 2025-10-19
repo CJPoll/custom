@@ -72,8 +72,8 @@ window {
 }
 
 #input:focus {
-    border-color: #00f3ff;
-    box-shadow: 0 0 15px rgba(0, 243, 255, 0.4);
+    border-color: #0066ff;
+    box-shadow: 0 0 15px rgba(0, 102, 255, 0.4);
 }
 
 /* Scroll container */
@@ -101,15 +101,15 @@ window {
 
 #entry:hover {
     background-color: #252847;
-    border-color: #00f3ff;
-    box-shadow: 0 0 12px rgba(0, 243, 255, 0.2);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.2);
 }
 
 #entry:selected {
     background: linear-gradient(135deg, #1a1b3d 0%, #2a2d5f 100%);
-    border-color: #ff00ff;
-    box-shadow: 0 0 15px rgba(255, 0, 255, 0.3),
-                inset 0 0 10px rgba(0, 243, 255, 0.1);
+    border-color: #ff6b35;
+    box-shadow: 0 0 15px rgba(255, 107, 53, 0.3),
+                inset 0 0 10px rgba(255, 107, 53, 0.1);
 }
 
 /* Entry text */

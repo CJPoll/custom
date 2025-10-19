@@ -40,18 +40,29 @@ The desktop environment embraces a cyberpunk aesthetic with neon accents, dark b
 2. Dark Purple (#1a1b3d) - Module containers, input fields
 3. Lighter variants (rgba with adjusted alpha) - Hover states
 
-**Accent Colors:**
+**Semantic Color Roles:**
+
+- **Cyan (#00f3ff) - Navigation, Layout, and Hierarchy**: Use cyan to represent structural organization and navigation elements. This includes headings, directory paths, module/class names (which represent hierarchy in code), active pane separators (layout), and the tmux session path. Cyan indicates "where you are" or "how things are organized."
+  - Examples: Directory names, headings, function names (navigation within code), active pane borders, session paths
+
+- **Magenta (#ff00ff) - Highlighting Details**: Use magenta to draw attention to specific details and metadata within content. This includes vocabulary words, command-line flags, the current tmux session name, and other important identifiers that need to stand out from surrounding text.
+  - Examples: Session names, command flags, vocabulary words, special identifiers
+
+- **Electric Blue (#0066ff) - Active Element (Non-Picking)**: Use electric blue to indicate the currently active or focused element when NOT in a picker/selector context. This represents "what's currently active" during normal operation.
+  - Examples: Active window in tmux, focused input fields, string contents in code, informational borders
+
+- **Orange (#ff6b35) - Selection & Action Emphasis**: Use orange for items being actively selected in pickers/selectors, hover states (potential actions), and cases requiring very strong emphasis on what will be affected by user action.
+  - Examples: Selected item in pickers (wofi, tmux session picker), active window borders in Hyprland (strongest emphasis), hover states, dirty git indicators (prompting action)
+
+- **Muted Purple (#bd93f9) - Visual Distinction Without Emphasis**: Use muted purple to create visual separation for elements that don't need strong emphasis. This is ideal for keywords and structural elements that need to be distinguishable but shouldn't draw the eye.
+  - Examples: Keywords in code, secondary structural elements
+
+- **Soft White (#e0e0ff) - Minimal Emphasis Information**: Use white for information that should be readable but not emphasized. This includes timestamps, usernames, and other metadata that's present but not the primary focus.
+  - Examples: Usernames, timestamps, default text content
+
+**State and Feedback Colors:**
 - **Red (#ff0066)**: Errors, deletions, critical warnings, urgent states
 - **Green (#39ff14)**: Success messages, additions, confirmations, completed states
-- **Cyan (#00f3ff)**: Primary brand color, active workspaces, clock, memory stats, important borders
-- **Magenta (#ff00ff)**: CPU stats, audio controls, lock icon, secondary highlights
-- **Orange (#ff6b35)**: Hover states, attention required, warnings, lock screen emphasis
-- **Blue (#0066ff)**: Information, directories, secondary elements
-
-**Text Colors:**
-- **Soft White (#e0e0ff)**: Default text
-- **Cyan (#00f3ff)**: Active/selected text with glow effects
-- **Orange (#ff6b35)**: Hover text with glow effects
 
 ### Visual Effects
 
