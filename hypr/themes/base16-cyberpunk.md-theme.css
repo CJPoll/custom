@@ -1,0 +1,305 @@
+/* Base16 Cyberpunk Theme for Markdown Viewer
+ * Matches the base16-cyberpunk.vim theme
+ * Author: cjpoll
+ * Dark cyberpunk aesthetic with neon accents
+ */
+
+body {
+  font-family: 'JetBrains Mono', 'Inconsolata', 'Fira Code', monospace;
+  line-height: 1.6;
+}
+
+/* Headings - Cyan for navigation/hierarchy */
+h1, h2, h3, h4, h5, h6 {
+  color: #00f3ff;
+  font-weight: 600;
+  margin-top: 24px;
+  margin-bottom: 16px;
+  line-height: 1.25;
+}
+
+h1 { font-size: 2em; border-bottom: 2px solid #00f3ff; padding-bottom: 0.3em; }
+h2 { font-size: 1.5em; border-bottom: 1px solid #00f3ff80; padding-bottom: 0.3em; }
+h3 { font-size: 1.25em; }
+
+/* Links */
+a {
+  color: #0066ff;
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+a:hover {
+  color: #ff6b35;
+  text-shadow: 0 0 8px rgba(255, 107, 53, 0.4);
+}
+
+/* Inline code */
+code:not([class^=language-]):not([class=mermaid]) {
+  background: #1a1b3d;
+  color: #0066ff;
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9em;
+}
+
+/* Keyboard keys */
+kbd {
+  background: #252847;
+  color: #ff6b35;
+  border: 1px solid #5a5b7d;
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9em;
+}
+
+/* Mark/highlight */
+mark {
+  background: #ff6b35;
+  color: #0a0e27;
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+/* Tables */
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 16px 0;
+}
+table th {
+  color: #00f3ff;
+  background: #1a1b3d;
+  border-bottom: 2px solid #00f3ff;
+  padding: 8px 12px;
+  font-weight: 600;
+}
+table td {
+  color: #e0e0ff;
+  border-right: 1px solid #5a5b7d;
+  padding: 8px 12px;
+}
+table tr td:last-of-type {
+  border-right: none;
+}
+table tr:nth-child(even) td {
+  background: #1a1b3d80;
+}
+table tr:hover td {
+  background: #252847;
+}
+
+/* Blockquotes */
+blockquote {
+  background: #1a1b3d;
+  border-left: 4px solid #bd93f9;
+  color: #9b9dc7;
+  padding: 8px 16px;
+  margin: 16px 0;
+  border-radius: 0 4px 4px 0;
+}
+
+/* Horizontal rule */
+hr {
+  border: none;
+  border-top: 2px solid #5a5b7d;
+  margin: 24px 0;
+}
+
+/* Lists */
+ul, ol {
+  padding-left: 2em;
+}
+li {
+  margin: 4px 0;
+}
+
+/* Task lists */
+input[type="checkbox"] {
+  accent-color: #39ff14;
+}
+
+/* Strong/bold */
+strong {
+  color: #ff6b35;
+  font-weight: 600;
+}
+
+/* Emphasis/italic */
+em {
+  color: #bd93f9;
+  font-style: italic;
+}
+
+/* Strikethrough */
+del {
+  color: #ff0066;
+  text-decoration: line-through;
+}
+
+/* Code blocks */
+pre {
+  background: #0a0e27;
+  border: 1px solid #252847;
+  border-radius: 6px;
+  padding: 16px;
+  margin: 16px 0;
+  overflow-x: auto;
+}
+pre code {
+  background: none;
+  color: #e0e0ff;
+  padding: 0;
+}
+
+/* Prism syntax highlighting */
+[class^=language-] .token.comment,
+[class^=language-] .token.prolog,
+[class^=language-] .token.doctype,
+[class^=language-] .token.cdata {
+  color: #5a5b7d;
+  font-style: italic;
+}
+
+[class^=language-] .token.punctuation {
+  color: #ff3399;
+}
+
+[class^=language-] .token.property,
+[class^=language-] .token.tag,
+[class^=language-] .token.boolean,
+[class^=language-] .token.number,
+[class^=language-] .token.constant,
+[class^=language-] .token.symbol {
+  color: #ff00ff;
+}
+
+[class^=language-] .token.selector,
+[class^=language-] .token.attr-name,
+[class^=language-] .token.string,
+[class^=language-] .token.char,
+[class^=language-] .token.builtin {
+  color: #0066ff;
+}
+
+[class^=language-] .token.operator,
+[class^=language-] .token.entity,
+[class^=language-] .token.url,
+.language-css .token.string,
+.style .token.string {
+  color: #e0e0ff;
+}
+
+[class^=language-] .token.atrule,
+[class^=language-] .token.attr-value,
+[class^=language-] .token.keyword {
+  color: #bd93f9;
+}
+
+[class^=language-] .token.function,
+[class^=language-] .token.function-variable {
+  color: #00f3ff;
+}
+
+[class^=language-] .token.class-name {
+  color: #ff6b35;
+}
+
+[class^=language-] .token.regex,
+[class^=language-] .token.important,
+[class^=language-] .token.variable {
+  color: #39ff14;
+}
+
+[class^=language-] .token.parameter {
+  color: #ff6b35;
+}
+
+[class^=language-] .token.literal-property {
+  color: #ff00ff;
+}
+
+/* Dark mode (default) */
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #0a0e27;
+    color: #e0e0ff;
+  }
+}
+
+/* Light mode override - maintain cyberpunk aesthetic with adjusted contrast */
+@media (prefers-color-scheme: light) {
+  body {
+    background: #f5f5ff;
+    color: #1a1b3d;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    color: #0066ff;
+  }
+
+  h1 { border-bottom-color: #0066ff; }
+  h2 { border-bottom-color: #0066ff80; }
+
+  a {
+    color: #0066ff;
+  }
+  a:hover {
+    color: #ff6b35;
+  }
+
+  code:not([class^=language-]):not([class=mermaid]) {
+    background: #ebebff;
+    color: #0066ff;
+  }
+
+  kbd {
+    background: #ebebff;
+    color: #ff6b35;
+    border-color: #9b9dc7;
+  }
+
+  mark {
+    background: #ff6b35;
+    color: #ffffff;
+  }
+
+  table th {
+    color: #0066ff;
+    background: #ebebff;
+    border-bottom-color: #0066ff;
+  }
+
+  table td {
+    color: #1a1b3d;
+    border-right-color: #9b9dc7;
+  }
+
+  table tr:nth-child(even) td {
+    background: #ebebff80;
+  }
+
+  table tr:hover td {
+    background: #e0e0ff;
+  }
+
+  blockquote {
+    background: #ebebff;
+    border-left-color: #bd93f9;
+    color: #5a5b7d;
+  }
+
+  hr {
+    border-top-color: #9b9dc7;
+  }
+
+  pre {
+    background: #ebebff;
+    border-color: #9b9dc7;
+  }
+
+  pre code {
+    color: #1a1b3d;
+  }
+}

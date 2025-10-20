@@ -16,3 +16,13 @@ function in-tmux-session() {
     return 1
   fi
 }
+
+function ensure-tmux-session() {
+  # Start tmux server if not running
+  tmux start-server 2>/dev/null
+
+  # Create default session if no sessions exist
+  if ! tmux has-session 2>/dev/null; then
+    tmux new-session -d -s default -c "${HOME}/dev"
+  fi
+}

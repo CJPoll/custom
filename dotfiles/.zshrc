@@ -85,6 +85,9 @@ if [[ -a "${FUNCTIONS_FILE}" ]]; then
   source "${FUNCTIONS_FILE}"
 fi
 
+# From .zshrc.functions
+ensure-tmux-session;
+
 LOCAL_RC="${HOME}/.zshrc.local"
 if [[ -a "${LOCAL_RC}" ]]; then
   source "${LOCAL_RC}"
