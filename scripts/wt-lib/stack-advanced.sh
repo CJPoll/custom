@@ -326,8 +326,7 @@ if [[ -z "${WT_LIB_STACK_ADVANCED_SOURCED:-}" ]]; then
         fi
 
         # Use gt get to fetch the branch and all its downstack dependencies
-        # Use --unfrozen to allow local edits
-        if ! gt get "$target_branch" --downstack --unfrozen 2>&1; then
+        if ! gt get "$target_branch" --downstack 2>&1; then
             echo "Error: Failed to fetch branch '$target_branch' and its stack" >&2
             exit 2
         fi
