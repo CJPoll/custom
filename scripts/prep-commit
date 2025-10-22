@@ -72,7 +72,7 @@ until [[ "${COMPLETE}" == "true" ]]; do
   TESTS_FIXED="false"
   echo "Running tests..." | tee -a "$LOG_FILE"
   MIX_ENV=test mix ecto.drop
-  until mix test 2>&1 | tee -a "$LOG_FILE"; do
+  until mix test --warnings-as-errors 2>&1 | tee -a "$LOG_FILE"; do
     echo "✗ Tests failed, requesting fixes..." | tee -a "$LOG_FILE"
     if ! claude -p --dangerously-skip-permissions "/fix:tests" 2>&1 | tee -a "$LOG_FILE"; then
       echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2

@@ -18,13 +18,21 @@
         "pulseaudio",
         "clock",
         "tray",
+        "network",
         "custom/lock",
         "custom/power"
     ],
 
     // Workspaces configuration
     "hyprland/workspaces": {
-        "format": "{id}",
+        "format": "<span>{icon}</span>",
+        "format-icons": {
+            "1": "1",
+            "2": "2",
+            "3": "3",
+            "4": "4",
+            "5": "GAMES"
+        },
         "on-click": "activate",
         "persistent-workspaces": {
             "HDMI-A-1": [1, 3],
@@ -94,6 +102,19 @@
         "icon-size": 20,
         "spacing": 12,
         "show-passive-items": true
+    },
+
+    // Network configuration
+    "network": {
+        "interval": 2,
+        "format-wifi": " {essid} ({signalStrength}%)",
+        "format-ethernet": " {ifname}",
+        "format-disconnected": "󰌙 Disconnected",
+        "tooltip-format": "{ifname}: {ipaddr}/{cidr}\nUp: {bandwidthUpBytes} | Down: {bandwidthDownBytes}",
+        "tooltip-format-wifi": "{essid} ({signalStrength}%)\n{ifname}: {ipaddr}/{cidr}\nFrequency: {frequency}MHz\nUp: {bandwidthUpBytes} | Down: {bandwidthDownBytes}",
+        "tooltip-format-ethernet": "{ifname}: {ipaddr}/{cidr}\nUp: {bandwidthUpBytes} | Down: {bandwidthDownBytes}",
+        "tooltip-format-disconnected": "Network Disconnected",
+        "on-click": "nm-connection-editor"
     },
 
     // Lock icon

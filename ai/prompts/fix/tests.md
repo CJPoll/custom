@@ -16,14 +16,14 @@
       <language>Elixir</language>
       <test_framework>ExUnit via Mix</test_framework>
       <primary_commands>
-        <command name="full_suite">mix test</command>
-        <command name="single_file">mix test &lt;file&gt; --max-failures 1</command>
+        <command name="full_suite">mix test --warnings-as-errors</command>
+        <command name="single_file">mix test &lt;file&gt; --max-failures 1 --warnings-as-errors</command>
         <command name="compilation_check">mix compile</command>
       </primary_commands>
       <process_documentation>~/dev/custom/ai/prompts/processes/fix.md</process_documentation>
     </execution_environment>
     <success_criteria>
-      <item>Mix test returns exit code 0</item>
+      <item>Mix test --warnings-as-errors returns exit code 0</item>
       <item>All tests passing with zero failures</item>
       <item>No compilation errors</item>
       <item>No regression introduced to previously passing tests</item>
@@ -35,7 +35,7 @@
     <convergence_requirement>Each iteration must reduce total failure count</convergence_requirement>
     <regression_prevention>No subagent may introduce failures to previously passing tests</regression_prevention>
     <termination_conditions>
-      <success_condition>mix test returns exit code 0 with all tests passing</success_condition>
+      <success_condition>mix test --warnings-as-errors returns exit code 0 with all tests passing</success_condition>
       <failure_condition>No progress after 3 consecutive iterations</failure_condition>
       <error_condition>System-level issues preventing test execution</error_condition>
     </termination_conditions>
@@ -47,7 +47,7 @@
       <steps>
         <step number="1">
           <action>Execute full test suite to establish baseline</action>
-          <command>mix test</command>
+          <command>mix test --warnings-as-errors</command>
           <capture_requirements>
             <item>Exit code</item>
             <item>Complete stdout and stderr output</item>
@@ -182,8 +182,8 @@
         <validation_requirements>
           <requirement>Verify file exists and is readable before modification</requirement>
           <requirement>Confirm test file syntax validity before changes</requirement>
-          <requirement>Execute mix test &lt;file&gt; --max-failures 1 before modification</requirement>
-          <requirement>Execute mix test &lt;file&gt; --max-failures 1 after each change</requirement>
+          <requirement>Execute mix test &lt;file&gt; --warnings-as-errors --max-failures 1 before modification</requirement>
+          <requirement>Execute mix test &lt;file&gt; --warnings-as-errors --max-failures 1 after each change</requirement>
           <requirement>Validate no compilation errors introduced</requirement>
         </validation_requirements>
 
@@ -253,7 +253,7 @@
       <steps>
         <step number="5">
           <action>Execute full test suite to assess aggregate progress</action>
-          <command>mix test</command>
+          <command>mix test --warnings-as-errors</command>
           <metrics_collection>
             <metric name="total_test_count">Total number of tests executed</metric>
             <metric name="passing_test_count">Number of tests that passed</metric>

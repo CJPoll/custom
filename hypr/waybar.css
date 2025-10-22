@@ -199,6 +199,38 @@ window#waybar {
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
+/* Network */
+#network {
+    color: #00f3ff;
+    font-weight: 600;
+    padding: 4px 16px;
+    text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
+    background-color: rgba(26, 27, 61, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(0, 102, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+#network:hover {
+    color: #ff6b35;
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    background-color: rgba(37, 40, 71, 0.9);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
+#network.disconnected {
+    color: #ff0066;
+    text-shadow: 0 0 8px rgba(255, 0, 102, 0.5);
+    border-color: rgba(255, 0, 102, 0.3);
+}
+
+#network.disconnected:hover {
+    color: #ff6b35;
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    border-color: #ff6b35;
+}
+
 /* Tray */
 #tray {
     padding: 4px 12px;
