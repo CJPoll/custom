@@ -42,8 +42,19 @@ fi
 
 # Toggle logic
 if pgrep -f "alacritty.*${NAME}" > /dev/null; then
-  # Kill the process - window closes and workspace auto-hides
-  pkill -f "alacritty.*${NAME}"
+  # Process exists - check if this window is currently focused
+  ACTIVE_TITLE=$(hyprctl activewindow -j | jq -r '.title')
+
+  if [[ "$ACTIVE_TITLE" == "$NAME" ]]; then
+    # This window is focused - hide it
+    hyprctl dispatch togglespecialworkspace "${NAME}"
+  else
+    # Workspace exists but not focused - show and focus it
+    hyprctl dispatch togglespecialworkspace "${NAME}"
+    # Give it a moment to appear, then focus
+    sleep 0.05
+    hyprctl dispatch focuswindow "title:${NAME}"
+  fi
 else
   # Launch app - window rules put it in special:${NAME} (hidden)
   if [[ "$INTERACTIVE" == "true" ]]; then
@@ -53,6 +64,11 @@ else
     # Direct execution (faster, no .zshrc overhead)
     alacritty --title "${NAME}" -e "${EXECUTABLE}" &
   fi
-  # Show the special workspace
+
+  # Wait for window to be created
+  sleep 0.1
+
+  # Show the special workspace and focus the window
   hyprctl dispatch togglespecialworkspace "${NAME}"
+  hyprctl dispatch focuswindow "title:${NAME}"
 fi

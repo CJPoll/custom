@@ -16,6 +16,7 @@
 #       CREATED: 04/23/2013 13:02:19 MDT
 #      REVISION:  ---
 #===============================================================================
+
 # Path to your oh-my-zsh installation.
 export ZSH=$HOME/.oh-my-zsh;
 
@@ -53,10 +54,9 @@ export DOCKER_CONFIG="${HOME}/.config/docker"
 # Which plugins would you like to load? (plugins can be found in ~/.oh-my-zsh/plugins/*)
 # Example format: plugins=(rails git textmate ruby lighthouse)
 # Add wisely, as too many plugins slow down shell startup.
-plugins=(git tmux docker mix ssh-agent)
+plugins=(git tmux docker ssh-agent)
 
 # Plugin Configuration
-export TERM="tmux-256color";
 ZSH_TMUX_AUTOSTART=false;
 ZSH_TMUX_AUTOQUIT=false;
 
@@ -94,8 +94,9 @@ if [[ -a "${LOCAL_RC}" ]]; then
 fi
 
 # Initialize completions after fpath is fully configured
+# Backgrounded to not block shell startup - completions load in ~170ms
 autoload -Uz compinit
-compinit -d "${ZSH_COMPDUMP}"
+compinit -d "${ZSH_COMPDUMP}" &!
 
 export LANG=en_US.UTF-8
 
