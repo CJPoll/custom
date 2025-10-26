@@ -1,26 +1,26 @@
 #!/bin/sh
 # base16-shell (https://github.com/chriskempson/base16-shell)
 # Base16 Shell template by Chris Kempson (http://chriskempson.com)
-# Cyberpunk Neon scheme by cjpoll
+# Cyberpunk Neon (Base16) scheme by cjpoll
 
 color00="0a/0e/27" # Base 00 - Black
-color01="ff/00/66" # Base 08 - Red
+color01="f1/fa/8c" # Base 08 - Red
 color02="59/9c/ff" # Base 0B - Green
-color03="39/ff/14" # Base 09 - Yellow
+color03="ff/00/ff" # Base 09 - Yellow
 color04="00/f3/ff" # Base 0D - Blue
 color05="ff/6b/35" # Base 0A - Magenta
-color06="ff/00/ff" # Base 0C - Cyan
+color06="39/ff/14" # Base 0C - Cyan
 color07="e0/e0/ff" # Base 05 - White
 color08="5a/5b/7d" # Base 03 - Bright Black
-color09="ff/00/66" # Base 08 - Bright Red
+color09="f1/fa/8c" # Base 08 - Bright Red
 color10="59/9c/ff" # Base 0B - Bright Green
-color11="39/ff/14" # Base 09 - Bright Yellow
+color11="ff/00/ff" # Base 09 - Bright Yellow
 color12="00/f3/ff" # Base 0D - Bright Blue
 color13="ff/6b/35" # Base 0A - Bright Magenta
-color14="ff/00/ff" # Base 0C - Bright Cyan
+color14="39/ff/14" # Base 0C - Bright Cyan
 color15="f5/f5/ff" # Base 07 - Bright White
-color16="39/ff/14" # Base 09
-color17="f1/fa/8c" # Base 0F
+color16="ff/00/ff" # Base 09
+color17="ff/00/66" # Base 0F
 color18="1a/1b/3d" # Base 01
 color19="25/28/47" # Base 02
 color20="9b/9d/c7" # Base 04

@@ -1,4 +1,4 @@
-/* Base16 Cyberpunk Neon Theme for Markdown Viewer
+/* Base16 Cyberpunk Neon (Base16) Theme for Markdown Viewer
  * Author: cjpoll
  * Dark cyberpunk aesthetic with neon accents
  */
@@ -116,7 +116,7 @@ li {
 
 /* Task lists */
 input[type="checkbox"] {
-  accent-color: #39ff14;
+  accent-color: #ff00ff;
 }
 
 /* Strong/bold */
@@ -133,7 +133,7 @@ em {
 
 /* Strikethrough */
 del {
-  color: #ff0066;
+  color: #f1fa8c;
   text-decoration: line-through;
 }
 
@@ -162,7 +162,7 @@ pre code {
 }
 
 [class^=language-] .token.punctuation {
-  color: #f1fa8c;
+  color: #ff0066;
 }
 
 [class^=language-] .token.property,
@@ -171,7 +171,7 @@ pre code {
 [class^=language-] .token.number,
 [class^=language-] .token.constant,
 [class^=language-] .token.symbol {
-  color: #ff00ff;
+  color: #39ff14;
 }
 
 [class^=language-] .token.selector,
@@ -208,7 +208,7 @@ pre code {
 [class^=language-] .token.regex,
 [class^=language-] .token.important,
 [class^=language-] .token.variable {
-  color: #39ff14;
+  color: #ff00ff;
 }
 
 [class^=language-] .token.parameter {
@@ -216,7 +216,7 @@ pre code {
 }
 
 [class^=language-] .token.literal-property {
-  color: #ff00ff;
+  color: #39ff14;
 }
 
 /* Dark mode (default) */

@@ -23,7 +23,7 @@ Configuration files for various tools and applications. These are symlinked to t
 
 **Theme Symlinks:**
 ```bash
-~/.vim/colors/base16-cyberpunk.vim -> ~/dev/custom/hypr/themes/base16-cyberpunk.vim
+~/.vim/colors/cyberpunk.vim -> ~/dev/custom/hypr/themes/cyberpunk.vim
 ~/.config/btop/themes/base16-cyberpunk.theme -> ~/dev/custom/hypr/themes/base16-cyberpunk.theme
 ```
 
@@ -36,7 +36,7 @@ ln -sf ~/dev/custom/dotfiles/init.vim ~/.config/nvim/init.vim
 ln -sf ~/dev/custom/ai/CLAUDE.md ~/CLAUDE.md
 
 # Themes
-ln -sf ~/dev/custom/hypr/themes/base16-cyberpunk.vim ~/.vim/colors/base16-cyberpunk.vim
+ln -sf ~/dev/custom/hypr/themes/cyberpunk.vim ~/.vim/colors/cyberpunk.vim
 mkdir -p ~/.config/btop/themes
 ln -sf ~/dev/custom/hypr/themes/base16-cyberpunk.theme ~/.config/btop/themes/base16-cyberpunk.theme
 ```

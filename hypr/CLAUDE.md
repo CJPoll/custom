@@ -97,33 +97,48 @@ The desktop environment embraces a cyberpunk aesthetic with neon accents, dark b
 
 ### Theme File Locations
 All theme files are stored in `~/dev/custom/hypr/themes/`:
-- `base16-cyberpunk.vim` - Vim/Neovim color scheme
+- `cyberpunk.vim` - Vim/Neovim color scheme (custom, not base16-compliant)
 - `base16-cyberpunk.sh` - Shell/terminal theme (sourced by ZSH)
-- `base16-cyberpunk.yaml` - Theme definition/specification
 - `alacritty-cyberpunk.toml` - Alacritty terminal color theme
 - `base16-cyberpunk.theme` - Btop system monitor theme
 - `base16-cyberpunk.tmuxtheme` - Tmux powerline theme
 
+Theme source files:
+- `~/dev/custom/themes/base16-cyberpunk/scheme/cyberpunk.yaml` - Custom color mappings
+- `~/dev/custom/themes/base16-cyberpunk/scheme/base16-cyberpunk.yaml` - Base16-compliant color mappings
+
 ### System Integration via Symlinks
 Theme files are integrated via symlinks to their respective application config directories:
 ```bash
-~/.vim/colors/base16-cyberpunk.vim -> ~/dev/custom/hypr/themes/base16-cyberpunk.vim
+~/.vim/colors/cyberpunk.vim -> ~/dev/custom/hypr/themes/cyberpunk.vim
 ~/.config/btop/themes/base16-cyberpunk.theme -> ~/dev/custom/hypr/themes/base16-cyberpunk.theme
 ```
 
 This allows applications to find the themes without modifying search paths. If the theme files are moved, update the symlinks:
 ```bash
-ln -sf ~/dev/custom/hypr/themes/base16-cyberpunk.vim ~/.vim/colors/base16-cyberpunk.vim
+ln -sf ~/dev/custom/hypr/themes/cyberpunk.vim ~/.vim/colors/cyberpunk.vim
 mkdir -p ~/.config/btop/themes
 ln -sf ~/dev/custom/hypr/themes/base16-cyberpunk.theme ~/.config/btop/themes/base16-cyberpunk.theme
 ```
 
 ### Theme Loading
-- **Vim/Neovim**: `colorscheme base16-cyberpunk` in `init.vim`
+- **Vim/Neovim**: `colorscheme cyberpunk` in `init.vim`
 - **ZSH**: Sourced in `~/.zshrc.theme-override` via `source "${HOME}/dev/custom/hypr/themes/base16-cyberpunk.sh"`
 - **Alacritty**: Imported in `~/dev/custom/hypr/alacritty.toml` via `import` directive
 - **Btop**: Select "base16-cyberpunk" in btop's theme menu (ESC → Options → Color theme)
 - **Tmux**: Sourced in `~/.tmux.conf` via `source-file ~/dev/custom/hypr/themes/base16-cyberpunk.tmuxtheme`
+
+### Theme Generation
+Themes are generated from templates using the `apply-themes` script:
+```bash
+# Generate themes with default base16-compliant scheme
+./scripts/apply-themes
+
+# Generate themes with custom (non-compliant) scheme
+./scripts/apply-themes --scheme cyberpunk
+```
+
+The vim template uses custom color mappings that produce the same visual result with both schemes, while other templates follow standard base16 mappings.
 
 ### Known Limitations and Workarounds
 

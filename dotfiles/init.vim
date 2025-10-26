@@ -137,7 +137,7 @@ let base16colorspace=256  " Access colors present in 256 colorspace"
 "set background=dark                 " Sets the background color (dark|light)
 
 " Load colorscheme after terminal settings
-colorscheme base16-cyberpunk
+colorscheme cyberpunk
 set backspace=indent,eol,start      " Backspace works correctly
 set cursorline                      " Highlights the current line
 set exrc

@@ -117,7 +117,7 @@ endif
 " Theme setup
 hi clear
 syntax reset
-let g:colors_name = "base16-{{scheme-slug}}"
+let g:colors_name = "cyberpunk"
 
 " Highlighting function
 function! g:Base16hi(group, guifg, guibg, ctermfg, ctermbg, ...)
@@ -307,8 +307,15 @@ call <sid>hi("@module",               s:gui0A, "", s:cterm0A, "", "", "")
 call <sid>hi("@namespace",            s:gui0A, "", s:cterm0A, "", "", "")
 call <sid>hi("@variable",             s:gui08, "", s:cterm08, "", "", "")
 call <sid>hi("@variable.parameter",   s:gui08, "", s:cterm08, "", "", "")
+call <sid>hi("@variable.builtin",     s:gui09, "", s:cterm09, "", "", "")
+call <sid>hi("@attribute",            s:gui09, "", s:cterm09, "", "", "")
+call <sid>hi("@keyword.directive",    s:gui09, "", s:cterm09, "", "", "")
 call <sid>hi("@string.special.symbol", s:gui09, "", s:cterm09, "", "", "")
 call <sid>hi("@string.special",       s:gui0C, "", s:cterm0C, "", "", "")
+" Elixir-specific
+call <sid>hi("@operator.elixir",      s:gui09, "", s:cterm09, "", "", "")
+call <sid>hi("@constant.elixir",      s:gui09, "", s:cterm09, "", "", "")
+call <sid>hi("@string.elixir",        s:gui03, "", s:cterm03, "", "", "")
 " Markdown (Treesitter)
 call <sid>hi("@markup.raw",           s:gui0A, "", s:cterm0A, "", "", "")
 call <sid>hi("@markup.raw.markdown_inline", s:gui0A, "", s:cterm0A, "", "", "")

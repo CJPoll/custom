@@ -1,5 +1,5 @@
 #
-# Powerline Cyberpunk Neon - Custom Tmux Theme
+# Powerline Cyberpunk Neon (Base16) - Custom Tmux Theme
 # Based on tmux-themepack powerline/block style
 # Author: cjpoll
 #
@@ -45,13 +45,13 @@ set -gqF @themepack-status-right-area-right-format "#{@themepack-status-right-ar
 set -gqF @themepack-window-status-current-format "#{@themepack-window-status-current-prefix}#{@themepack-window-status-current-format}#{@themepack-window-status-current-suffix}"
 set -gqF @themepack-window-status-format "#{@themepack-window-status-prefix}#{@themepack-window-status-format}#{@themepack-window-status-suffix}"
 
-# Cyberpunk Neon color palette
+# Cyberpunk Neon (Base16) color palette
 # Using hex colors for true color support
 set -goq @powerline-color-deep-dark "#0a0e27"       # Main background
 set -goq @powerline-color-dark-purple "#1a1b3d"     # Secondary background
 set -goq @powerline-color-medium-purple "#252847"   # Tertiary background
 set -goq @powerline-color-neon-cyan "#00f3ff"       # Primary brand color
-set -goq @powerline-color-neon-magenta "#ff00ff"    # Secondary accent
+set -goq @powerline-color-neon-magenta "#39ff14"    # Secondary accent
 set -goq @powerline-color-neon-orange "#ff6b35"     # Hover/attention color
 set -goq @powerline-color-electric-blue "#599cff"   # Information color
 set -goq @powerline-color-soft-white "#e0e0ff"      # Text color
