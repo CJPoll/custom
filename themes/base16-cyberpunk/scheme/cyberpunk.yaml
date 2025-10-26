@@ -19,8 +19,8 @@ base07: "f5f5ff" # Brightest White - light background (rarely used)
 base08: "ff0066" # Neon Red - variables, XML tags, diff deleted
 base09: "39ff14" # Neon Green - integers, booleans, constants
 base0A: "ff6b35" # Neon Orange - classes, search highlights
-base0B: "0066ff" # Electric Blue - strings, diff inserted
+base0B: "599cff" # Electric Blue - strings, diff inserted
 base0C: "ff00ff" # Neon Magenta - regex, escape chars, support
 base0D: "00f3ff" # Neon Cyan - functions, methods, headings
 base0E: "bd93f9" # Muted Purple - keywords, storage, selectors - CONFIRM KEEP
-base0F: "ff3399" # Brighter Red - deprecated, embedded language tags
+base0F: "ff5ce4" # Brighter Red - deprecated, embedded language tags

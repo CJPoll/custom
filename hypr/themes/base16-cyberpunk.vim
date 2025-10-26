@@ -34,8 +34,8 @@ let s:gui0D        = "00f3ff"
 let g:base16_gui0D = "00f3ff"
 let s:gui0E        = "bd93f9"
 let g:base16_gui0E = "bd93f9"
-let s:gui0F        = "ff3399"
-let g:base16_gui0F = "ff3399"
+let s:gui0F        = "ff5ce4"
+let g:base16_gui0F = "ff5ce4"
 
 " Terminal color definitions (using base16 indexed colors 16-31)
 let s:cterm00        = "00"
