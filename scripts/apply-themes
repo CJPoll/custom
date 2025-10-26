@@ -5,8 +5,10 @@
 # This script uses base16-builder to generate theme files from mustache templates
 # and outputs them to the appropriate locations.
 #
-# Usage: apply-themes [--check-only]
-#   --check-only: Only check if base16-builder is installed, don't apply themes
+# Usage: apply-themes [OPTIONS]
+#   --check-only        Only check if base16-builder is installed, don't apply themes
+#   --scheme <name>     Use specified scheme (default: cyberpunk)
+#                       Available: cyberpunk, base16-cyberpunk
 #
 
 set -euo pipefail
@@ -22,10 +24,12 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUSTOM_DIR="$(dirname "$SCRIPT_DIR")"
 THEME_BASE_DIR="${CUSTOM_DIR}/themes/base16-cyberpunk"
-SCHEME_FILE="${THEME_BASE_DIR}/scheme/cyberpunk.yaml"
 TEMPLATES_DIR="${THEME_BASE_DIR}/templates"
 OUTPUT_DIR_THEMES="${CUSTOM_DIR}/hypr/themes"
 OUTPUT_DIR_HYPR="${CUSTOM_DIR}/hypr"
+
+# Default scheme
+SCHEME_NAME="cyberpunk"
 
 # Check if base16-builder is installed
 check_base16_builder() {
@@ -44,6 +48,7 @@ check_base16_builder() {
 apply_template() {
     local template_file="$1"
     local output_file="$2"
+    local scheme_file="$3"
     local template_name="$(basename "$template_file")"
 
     echo -e "${CYAN}Applying template: ${template_name}${NC}"
@@ -53,8 +58,8 @@ apply_template() {
         return 1
     fi
 
-    if [[ ! -f "$SCHEME_FILE" ]]; then
-        echo -e "${RED}  Error: Scheme file not found: ${SCHEME_FILE}${NC}"
+    if [[ ! -f "$scheme_file" ]]; then
+        echo -e "${RED}  Error: Scheme file not found: ${scheme_file}${NC}"
         return 1
     fi
 
@@ -63,7 +68,7 @@ apply_template() {
     mkdir -p "$output_dir"
 
     # Run base16-builder
-    if base16-builder --scheme "$SCHEME_FILE" --template "$template_file" > "$output_file"; then
+    if base16-builder --scheme "$scheme_file" --template "$template_file" > "$output_file"; then
         echo -e "${GREEN}  ✓ Generated: ${output_file}${NC}"
 
         # Make shell scripts executable
@@ -89,18 +94,39 @@ main() {
                 check_only=true
                 shift
                 ;;
+            --scheme)
+                if [[ -z "${2:-}" ]]; then
+                    echo -e "${RED}Error: --scheme requires a scheme name${NC}"
+                    echo "Usage: apply-themes [--check-only] [--scheme <name>]"
+                    exit 1
+                fi
+                SCHEME_NAME="$2"
+                shift 2
+                ;;
             *)
                 echo "Unknown option: $1"
-                echo "Usage: apply-themes [--check-only]"
+                echo "Usage: apply-themes [--check-only] [--scheme <name>]"
                 exit 1
                 ;;
         esac
     done
 
+    # Set scheme file based on scheme name
+    local SCHEME_FILE="${THEME_BASE_DIR}/scheme/${SCHEME_NAME}.yaml"
+
     echo -e "${CYAN}=== Base16 Cyberpunk Theme Applicator ===${NC}\n"
+    echo -e "Using scheme: ${YELLOW}${SCHEME_NAME}${NC}"
 
     # Check if base16-builder is installed
     if ! check_base16_builder; then
+        exit 1
+    fi
+
+    # Check if scheme file exists
+    if [[ ! -f "$SCHEME_FILE" ]]; then
+        echo -e "${RED}Error: Scheme file not found: ${SCHEME_FILE}${NC}"
+        echo -e "${YELLOW}Available schemes in ${THEME_BASE_DIR}/scheme/:${NC}"
+        ls -1 "${THEME_BASE_DIR}/scheme/" | sed 's/\.yaml$//' | sed 's/^/  - /'
         exit 1
     fi
 
@@ -117,46 +143,55 @@ main() {
     apply_template \
         "${TEMPLATES_DIR}/alacritty.toml.ejs" \
         "${OUTPUT_DIR_THEMES}/alacritty-cyberpunk.toml" \
+        "$SCHEME_FILE" \
         || ((failed++))
 
     apply_template \
         "${TEMPLATES_DIR}/hyprlock.conf.ejs" \
         "${OUTPUT_DIR_HYPR}/hyprlock.conf" \
+        "$SCHEME_FILE" \
         || ((failed++))
 
     apply_template \
         "${TEMPLATES_DIR}/shell.sh.ejs" \
         "${OUTPUT_DIR_THEMES}/base16-cyberpunk.sh" \
+        "$SCHEME_FILE" \
         || ((failed++))
 
     apply_template \
         "${TEMPLATES_DIR}/btop.theme.ejs" \
         "${OUTPUT_DIR_THEMES}/base16-cyberpunk.theme" \
+        "$SCHEME_FILE" \
         || ((failed++))
 
     apply_template \
         "${TEMPLATES_DIR}/vim.ejs" \
         "${OUTPUT_DIR_THEMES}/base16-cyberpunk.vim" \
+        "$SCHEME_FILE" \
         || ((failed++))
 
     apply_template \
         "${TEMPLATES_DIR}/tmux.tmuxtheme.ejs" \
         "${OUTPUT_DIR_THEMES}/base16-cyberpunk.tmuxtheme" \
+        "$SCHEME_FILE" \
         || ((failed++))
 
     apply_template \
         "${TEMPLATES_DIR}/waybar.css.ejs" \
         "${OUTPUT_DIR_HYPR}/waybar.css" \
+        "$SCHEME_FILE" \
         || ((failed++))
 
     apply_template \
         "${TEMPLATES_DIR}/wofi.css.ejs" \
         "${OUTPUT_DIR_HYPR}/wofi.css" \
+        "$SCHEME_FILE" \
         || ((failed++))
 
     apply_template \
         "${TEMPLATES_DIR}/markdown.css.ejs" \
         "${OUTPUT_DIR_THEMES}/base16-cyberpunk.md-theme.css" \
+        "$SCHEME_FILE" \
         || ((failed++))
 
     echo ""

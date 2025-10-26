@@ -1,0 +1,27 @@
+# Base16 Cyberpunk Neon - Base16 Spec Compliant
+# Author: cjpoll
+# Base16 specification compliant version
+
+scheme: "Cyberpunk Neon (Base16)"
+author: "cjpoll"
+
+# Monotones (base00-base07): Dark to Light progression
+# Spec: "variations of a shade and run from darkest to lightest"
+base00: "0a0e27" # Deep Dark - default background
+base01: "1a1b3d" # Dark Purple - lighter background (status bars, line numbers, folding marks)
+base02: "252847" # Lighter Purple - selection background
+base03: "5a5b7d" # Medium purple-gray - comments, invisibles, line highlighting
+base04: "9b9dc7" # Muted purple - dark foreground (used for status bars)
+base05: "e0e0ff" # Soft White - default foreground, caret, delimiters, operators
+base06: "ebebff" # Brighter White - light foreground (not often used)
+base07: "f5f5ff" # Brightest White - light background (not often used)
+
+# Accents (base08-base0F): Base16 Spec Semantic Mappings
+base08: "f1fa8c" # Neon Yellow - variables, XML tags, markup link text, markup lists, diff deleted
+base09: "ff00ff" # Neon Magenta - integers, boolean, constants, XML attributes, markup link url
+base0A: "ff6b35" # Neon Orange - classes, markup bold, search text background
+base0B: "599cff" # Electric Blue - strings, inherited class, markup code, diff inserted
+base0C: "39ff14" # Neon Green - support, regular expressions, escape characters, markup quotes
+base0D: "00f3ff" # Neon Cyan - functions, methods, attribute IDs, headings
+base0E: "bd93f9" # Muted Purple - keywords, storage, selector, markup italic, diff changed
+base0F: "ff0066" # Neon Red - deprecated, opening/closing embedded language tags (e.g. <?php ?>)
