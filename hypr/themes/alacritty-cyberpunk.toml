@@ -17,7 +17,7 @@
 # - base0C: ff00ff (cyan/magenta)
 # - base0D: 00f3ff (blue/cyan)
 # - base0E: bd93f9 (purple)
-# - base0F: ff5ce4
+# - base0F: f1fa8c
 
 [colors.primary]
 background = "#0a0e27"  # Deep Dark - main background
@@ -45,7 +45,7 @@ white = "#e0e0ff"       # Soft White
 # Bright colors
 [colors.bright]
 black = "#5a5b7d"       # Medium purple-gray - bright black/comments
-red = "#ff5ce4"         # Brighter Neon Red
+red = "#f1fa8c"         # Brighter Neon Red
 green = "#599cff"       # Electric Blue (brighter variant)
 yellow = "#39ff14"      # Neon Green (brighter variant)
 blue = "#00f3ff"        # Cyan (brighter variant)
@@ -132,5 +132,5 @@ color = "#bd93f9"       # Muted Purple - keywords, storage, selectors
 
 [[colors.indexed_colors]]
 index = 31              # base0F
-color = "#ff5ce4"       # Brighter Red - deprecated, embedded language tags
+color = "#f1fa8c"       # Brighter Red - deprecated, embedded language tags
 

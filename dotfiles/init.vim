@@ -42,6 +42,9 @@ Plug 'elixir-tools/elixir-tools.nvim', { 'tag': 'stable' }
 Plug 'junegunn/fzf', { 'do': { -> fzf#install() } }
 Plug 'junegunn/fzf.vim'
 
+" Treesitter for better syntax highlighting
+Plug 'nvim-treesitter/nvim-treesitter', {'do': ':TSUpdate'}
+
 call plug#end()
 
 
@@ -61,6 +64,30 @@ vim.lsp.config('expert', {
 })
 
 vim.lsp.enable 'expert'
+
+-- Treesitter configuration
+require('nvim-treesitter.configs').setup {
+  -- Install parsers for these languages
+  ensure_installed = { "elixir", "heex", "eex", "lua", "vim", "vimdoc" },
+
+  -- Install parsers synchronously (only applied to `ensure_installed`)
+  sync_install = false,
+
+  -- Automatically install missing parsers when entering buffer
+  auto_install = true,
+
+  highlight = {
+    enable = true,
+    -- Disable for very large files
+    disable = function(lang, buf)
+      local max_filesize = 100 * 1024 -- 100 KB
+      local ok, stats = pcall(vim.loop.fs_stat, vim.api.nvim_buf_get_name(buf))
+      if ok and stats and stats.size > max_filesize then
+        return true
+      end
+    end,
+  },
+}
 
 -- Custom function to open Claude in bottom split
 function ClaudeCodeBottom()

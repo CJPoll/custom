@@ -23,4 +23,4 @@ base0B: "599cff" # Electric Blue - strings, diff inserted
 base0C: "ff00ff" # Neon Magenta - regex, escape chars, support
 base0D: "00f3ff" # Neon Cyan - functions, methods, headings
 base0E: "bd93f9" # Muted Purple - keywords, storage, selectors - CONFIRM KEEP
-base0F: "ff5ce4" # Brighter Red - deprecated, embedded language tags
+base0F: "f1fa8c" # Neon Yellow - module attributes, sigils, special markers
