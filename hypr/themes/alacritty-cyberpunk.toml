@@ -1,19 +1,26 @@
-# Cyberpunk Base16 Theme for Alacritty
-# Matches the Waybar/Hyprland cyberpunk aesthetic
+# Cyberpunk Neon Base16 Theme for Alacritty
+# Author: cjpoll
 #
 # Color Palette:
-# - Deep Dark: #0a0e27 (background - matches Waybar)
-# - Dark Purple: #1a1b3d
-# - Neon Red: #ff0066
-# - Neon Green: #39ff14
-# - Neon Cyan: #00f3ff
-# - Neon Magenta: #ff00ff
-# - Electric Blue: #0066ff
-# - Neon Orange: #ff6b35
-# - Soft White: #e0e0ff
+# - base00: 0a0e27 (background)
+# - base01: 1a1b3d
+# - base02: 252847
+# - base03: 5a5b7d (comments)
+# - base04: 9b9dc7
+# - base05: e0e0ff (foreground)
+# - base06: ebebff
+# - base07: f5f5ff
+# - base08: ff0066 (red)
+# - base09: 39ff14 (orange/green)
+# - base0A: ff6b35 (yellow/orange)
+# - base0B: 599cff (green/blue)
+# - base0C: ff00ff (cyan/magenta)
+# - base0D: 00f3ff (blue/cyan)
+# - base0E: bd93f9 (purple)
+# - base0F: ff3399
 
 [colors.primary]
-background = "#0a0e27"  # Deep Dark - matches Waybar background
+background = "#0a0e27"  # Deep Dark - main background
 foreground = "#e0e0ff"  # Soft White - main text
 
 [colors.cursor]
@@ -28,7 +35,7 @@ background = "#252847"  # Slightly lighter purple
 [colors.normal]
 black = "#0a0e27"       # Deep Dark
 red = "#ff0066"         # Neon Red - errors, deletions
-green = "#0066ff"       # Electric Blue - success, additions
+green = "#599cff"       # Electric Blue - success, additions
 yellow = "#39ff14"      # Neon Green - warnings
 blue = "#00f3ff"        # Neon Cyan - info
 magenta = "#ff6b35"     # Neon Orange - special
@@ -39,23 +46,23 @@ white = "#e0e0ff"       # Soft White
 [colors.bright]
 black = "#5a5b7d"       # Medium purple-gray - bright black/comments
 red = "#ff3399"         # Brighter Neon Red
-green = "#3d8bff"       # Brighter Electric Blue
-yellow = "#66ff44"      # Brighter Neon Green
-blue = "#3dffff"        # Brighter Cyan
-magenta = "#ff8b5f"     # Brighter Orange
-cyan = "#ff3dff"        # Brighter Magenta
+green = "#599cff"       # Electric Blue (brighter variant)
+yellow = "#39ff14"      # Neon Green (brighter variant)
+blue = "#00f3ff"        # Cyan (brighter variant)
+magenta = "#ff6b35"     # Orange (brighter variant)
+cyan = "#ff00ff"        # Magenta (brighter variant)
 white = "#f5f5ff"       # Brightest White
 
 # Dim colors (used in some applications)
 [colors.dim]
-black = "#050711"       # Darker than base
-red = "#cc0052"         # Dimmer Neon Red
-green = "#0052cc"       # Dimmer Electric Blue
-yellow = "#2dcc10"      # Dimmer Neon Green
-blue = "#00c2cc"        # Dimmer Cyan
-magenta = "#cc5629"     # Dimmer Orange
-cyan = "#cc00cc"        # Dimmer Magenta
-white = "#b3b3cc"       # Dimmer White
+black = "#0a0e27"       # Darker than base
+red = "#ff0066"         # Dimmer Neon Red
+green = "#599cff"       # Dimmer Electric Blue
+yellow = "#39ff14"      # Dimmer Neon Green
+blue = "#00f3ff"        # Dimmer Cyan
+magenta = "#ff6b35"     # Dimmer Orange
+cyan = "#ff00ff"        # Dimmer Magenta
+white = "#9b9dc7"       # Dimmer White
 
 # Base16 indexed colors (indexes 16-31 = base00-base0F)
 # Enables compatibility with base16-aware applications (Vim, Neovim, Helix, etc.)
@@ -109,7 +116,7 @@ color = "#ff6b35"       # Neon Orange - classes, search highlights
 
 [[colors.indexed_colors]]
 index = 27              # base0B
-color = "#0066ff"       # Electric Blue - strings, diff inserted
+color = "#599cff"       # Electric Blue - strings, diff inserted
 
 [[colors.indexed_colors]]
 index = 28              # base0C
@@ -126,3 +133,4 @@ color = "#bd93f9"       # Muted Purple - keywords, storage, selectors
 [[colors.indexed_colors]]
 index = 31              # base0F
 color = "#ff3399"       # Brighter Red - deprecated, embedded language tags
+

@@ -1,5 +1,6 @@
 /*
- * Cyberpunk Theme for Wofi
+ * Cyberpunk Neon Theme for Wofi
+ * Author: cjpoll
  * Dark theme with neon accents and generous padding
  *
  * Color Palette:
@@ -7,7 +8,7 @@
  * - Dark Purple: #1a1b3d (containers)
  * - Neon Cyan: #00f3ff (primary accent)
  * - Neon Magenta: #ff00ff (secondary accent)
- * - Electric Blue: #0066ff (highlights)
+ * - Electric Blue: #599cff (highlights)
  * - Soft White: #e0e0ff (text)
  */
 
@@ -55,7 +56,7 @@ window {
     border: 1px solid #00f3ff;
     border-radius: 12px;
     box-shadow: 0 0 20px rgba(0, 243, 255, 0.3),
-                inset 0 0 30px rgba(0, 102, 255, 0.05);
+                inset 0 0 30px rgba(89, 156, 255, 0.05);
 }
 
 /* Search input */
@@ -64,16 +65,16 @@ window {
     padding: 20px 24px;
     background-color: #1a1b3d;
     color: #e0e0ff;
-    border: 2px solid #0066ff;
+    border: 2px solid #599cff;
     border-radius: 8px;
     outline: none;
     caret-color: #00f3ff;
-    box-shadow: 0 0 10px rgba(0, 102, 255, 0.2);
+    box-shadow: 0 0 10px rgba(89, 156, 255, 0.2);
 }
 
 #input:focus {
-    border-color: #0066ff;
-    box-shadow: 0 0 15px rgba(0, 102, 255, 0.4);
+    border-color: #599cff;
+    box-shadow: 0 0 15px rgba(89, 156, 255, 0.4);
 }
 
 /* Scroll container */
@@ -106,7 +107,7 @@ window {
 }
 
 #entry:selected {
-    background: linear-gradient(135deg, #1a1b3d 0%, #2a2d5f 100%);
+    background: linear-gradient(135deg, #1a1b3d 0%, #252847 100%);
     border-color: #ff6b35;
     box-shadow: 0 0 15px rgba(255, 107, 53, 0.3),
                 inset 0 0 10px rgba(255, 107, 53, 0.1);
@@ -131,3 +132,4 @@ window {
     border-radius: 4px;
     background-color: transparent;
 }
+

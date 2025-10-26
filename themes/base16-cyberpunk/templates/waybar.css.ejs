@@ -1,0 +1,330 @@
+/*
+ * <%- scheme %> Waybar Theme
+ * Author: <%- author %>
+ *
+ * Color Palette:
+ * - Deep Dark: #<%- base["00"]["hex"] %> (background)
+ * - Dark Purple: #<%- base["01"]["hex"] %> (containers)
+ * - Neon Cyan: #<%- base["0D"]["hex"] %> (primary accent)
+ * - Neon Magenta: #<%- base["0C"]["hex"] %> (secondary accent)
+ * - Electric Blue: #<%- base["0B"]["hex"] %> (highlights)
+ * - Neon Orange: #<%- base["0A"]["hex"] %> (hover emphasis)
+ * - Soft White: #<%- base["05"]["hex"] %> (text)
+ */
+
+* {
+    border: none;
+    border-radius: 0;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 14px;
+    min-height: 0;
+}
+
+/* Main window */
+window#waybar {
+    background-color: rgba(<%- base["00"]["rgb"][0] %>, <%- base["00"]["rgb"][1] %>, <%- base["00"]["rgb"][2] %>, 0.85);
+    border-bottom: 2px solid #<%- base["0D"]["hex"] %>;
+    color: #<%- base["05"]["hex"] %>;
+    padding: 12px 24px;
+    transition: background-color 0.2s ease;
+}
+
+/* Left module container */
+.modules-left {
+    margin: 4px 0;
+}
+
+/* Right module container */
+.modules-right {
+    margin: 4px 0;
+}
+
+/* Generic module styling */
+.module {
+    padding: 4px 12px;
+    margin: 4px 2px;
+    background-color: rgba(<%- base["01"]["rgb"][0] %>, <%- base["01"]["rgb"][1] %>, <%- base["01"]["rgb"][2] %>, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(<%- base["0B"]["rgb"][0] %>, <%- base["0B"]["rgb"][1] %>, <%- base["0B"]["rgb"][2] %>, 0.3);
+    transition: all 0.3s ease;
+    min-height: 0;
+}
+
+.module:hover {
+    background-color: rgba(<%- base["02"]["rgb"][0] %>, <%- base["02"]["rgb"][1] %>, <%- base["02"]["rgb"][2] %>, 0.9);
+    border-color: #<%- base["0A"]["hex"] %>;
+    box-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.4);
+}
+
+/* Workspaces */
+#workspaces {
+    background-color: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+}
+
+#workspaces button {
+    padding: 4px 14px;
+    margin: 4px 2px;
+    background-color: rgba(<%- base["01"]["rgb"][0] %>, <%- base["01"]["rgb"][1] %>, <%- base["01"]["rgb"][2] %>, 0.8);
+    color: #<%- base["05"]["hex"] %>;
+    border: 1px solid rgba(<%- base["0B"]["rgb"][0] %>, <%- base["0B"]["rgb"][1] %>, <%- base["0B"]["rgb"][2] %>, 0.3);
+    border-radius: 8px;
+    transition: all 0.3s ease;
+    min-width: 40px;
+}
+
+#workspaces button:hover {
+    color: #<%- base["0A"]["hex"] %>;
+    text-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.8);
+    background-color: rgba(<%- base["02"]["rgb"][0] %>, <%- base["02"]["rgb"][1] %>, <%- base["02"]["rgb"][2] %>, 0.9);
+    border-color: #<%- base["0A"]["hex"] %>;
+    box-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.4);
+}
+
+#workspaces button.active {
+    background: linear-gradient(135deg, rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.2) 0%, rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.2) 100%);
+    border-color: #<%- base["0D"]["hex"] %>;
+    color: #<%- base["0D"]["hex"] %>;
+    font-weight: bold;
+    box-shadow: 0 0 15px rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.5),
+                inset 0 0 10px rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.1);
+    text-shadow: 0 0 10px rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.8);
+}
+
+#workspaces button.urgent {
+    background-color: rgba(<%- base["08"]["rgb"][0] %>, <%- base["08"]["rgb"][1] %>, <%- base["08"]["rgb"][2] %>, 0.3);
+    border-color: #<%- base["08"]["hex"] %>;
+    color: #<%- base["08"]["hex"] %>;
+    animation: urgent-blink 1s ease infinite;
+}
+
+@keyframes urgent-blink {
+    from {
+        opacity: 1;
+        box-shadow: 0 0 15px rgba(<%- base["08"]["rgb"][0] %>, <%- base["08"]["rgb"][1] %>, <%- base["08"]["rgb"][2] %>, 0.6);
+    }
+    50% {
+        opacity: 0.7;
+        box-shadow: 0 0 5px rgba(<%- base["08"]["rgb"][0] %>, <%- base["08"]["rgb"][1] %>, <%- base["08"]["rgb"][2] %>, 0.3);
+    }
+    to {
+        opacity: 1;
+        box-shadow: 0 0 15px rgba(<%- base["08"]["rgb"][0] %>, <%- base["08"]["rgb"][1] %>, <%- base["08"]["rgb"][2] %>, 0.6);
+    }
+}
+
+/* CPU */
+#cpu {
+    color: #<%- base["0C"]["hex"] %>;
+    font-weight: 600;
+    padding: 4px 16px;
+    text-shadow: 0 0 8px rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.5);
+    background-color: rgba(<%- base["01"]["rgb"][0] %>, <%- base["01"]["rgb"][1] %>, <%- base["01"]["rgb"][2] %>, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(<%- base["0B"]["rgb"][0] %>, <%- base["0B"]["rgb"][1] %>, <%- base["0B"]["rgb"][2] %>, 0.3);
+    transition: all 0.3s ease;
+}
+
+#cpu:hover {
+    color: #<%- base["0A"]["hex"] %>;
+    text-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.8);
+    background-color: rgba(<%- base["02"]["rgb"][0] %>, <%- base["02"]["rgb"][1] %>, <%- base["02"]["rgb"][2] %>, 0.9);
+    border-color: #<%- base["0A"]["hex"] %>;
+    box-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.4);
+}
+
+/* Memory */
+#memory {
+    color: #<%- base["0D"]["hex"] %>;
+    font-weight: 600;
+    padding: 4px 16px;
+    text-shadow: 0 0 8px rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.5);
+    background-color: rgba(<%- base["01"]["rgb"][0] %>, <%- base["01"]["rgb"][1] %>, <%- base["01"]["rgb"][2] %>, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(<%- base["0B"]["rgb"][0] %>, <%- base["0B"]["rgb"][1] %>, <%- base["0B"]["rgb"][2] %>, 0.3);
+    transition: all 0.3s ease;
+}
+
+#memory:hover {
+    color: #<%- base["0A"]["hex"] %>;
+    text-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.8);
+    background-color: rgba(<%- base["02"]["rgb"][0] %>, <%- base["02"]["rgb"][1] %>, <%- base["02"]["rgb"][2] %>, 0.9);
+    border-color: #<%- base["0A"]["hex"] %>;
+    box-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.4);
+}
+
+/* PulseAudio */
+#pulseaudio {
+    color: #<%- base["0C"]["hex"] %>;
+    font-weight: 600;
+    padding: 4px 16px;
+    text-shadow: 0 0 8px rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.5);
+    background-color: rgba(<%- base["01"]["rgb"][0] %>, <%- base["01"]["rgb"][1] %>, <%- base["01"]["rgb"][2] %>, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(<%- base["0B"]["rgb"][0] %>, <%- base["0B"]["rgb"][1] %>, <%- base["0B"]["rgb"][2] %>, 0.3);
+    transition: all 0.3s ease;
+}
+
+#pulseaudio:hover {
+    color: #<%- base["0A"]["hex"] %>;
+    text-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.8);
+    background-color: rgba(<%- base["02"]["rgb"][0] %>, <%- base["02"]["rgb"][1] %>, <%- base["02"]["rgb"][2] %>, 0.9);
+    border-color: #<%- base["0A"]["hex"] %>;
+    box-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.4);
+}
+
+#pulseaudio.muted {
+    color: rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.4);
+    text-shadow: 0 0 4px rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.2);
+}
+
+/* Clock */
+#clock {
+    color: #<%- base["0D"]["hex"] %>;
+    font-weight: 600;
+    padding: 4px 16px;
+    text-shadow: 0 0 8px rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.5);
+    background-color: rgba(<%- base["01"]["rgb"][0] %>, <%- base["01"]["rgb"][1] %>, <%- base["01"]["rgb"][2] %>, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(<%- base["0B"]["rgb"][0] %>, <%- base["0B"]["rgb"][1] %>, <%- base["0B"]["rgb"][2] %>, 0.3);
+    transition: all 0.3s ease;
+}
+
+#clock:hover {
+    color: #<%- base["0A"]["hex"] %>;
+    text-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.8);
+    background-color: rgba(<%- base["02"]["rgb"][0] %>, <%- base["02"]["rgb"][1] %>, <%- base["02"]["rgb"][2] %>, 0.9);
+    border-color: #<%- base["0A"]["hex"] %>;
+    box-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.4);
+}
+
+/* Network */
+#network {
+    color: #<%- base["0D"]["hex"] %>;
+    font-weight: 600;
+    padding: 4px 16px;
+    text-shadow: 0 0 8px rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.5);
+    background-color: rgba(<%- base["01"]["rgb"][0] %>, <%- base["01"]["rgb"][1] %>, <%- base["01"]["rgb"][2] %>, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(<%- base["0B"]["rgb"][0] %>, <%- base["0B"]["rgb"][1] %>, <%- base["0B"]["rgb"][2] %>, 0.3);
+    transition: all 0.3s ease;
+}
+
+#network:hover {
+    color: #<%- base["0A"]["hex"] %>;
+    text-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.8);
+    background-color: rgba(<%- base["02"]["rgb"][0] %>, <%- base["02"]["rgb"][1] %>, <%- base["02"]["rgb"][2] %>, 0.9);
+    border-color: #<%- base["0A"]["hex"] %>;
+    box-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.4);
+}
+
+#network.disconnected {
+    color: #<%- base["08"]["hex"] %>;
+    text-shadow: 0 0 8px rgba(<%- base["08"]["rgb"][0] %>, <%- base["08"]["rgb"][1] %>, <%- base["08"]["rgb"][2] %>, 0.5);
+    border-color: rgba(<%- base["08"]["rgb"][0] %>, <%- base["08"]["rgb"][1] %>, <%- base["08"]["rgb"][2] %>, 0.3);
+}
+
+#network.disconnected:hover {
+    color: #<%- base["0A"]["hex"] %>;
+    text-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.8);
+    border-color: #<%- base["0A"]["hex"] %>;
+}
+
+/* Tray */
+#tray {
+    padding: 4px 12px;
+    background-color: rgba(<%- base["01"]["rgb"][0] %>, <%- base["01"]["rgb"][1] %>, <%- base["01"]["rgb"][2] %>, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(<%- base["0B"]["rgb"][0] %>, <%- base["0B"]["rgb"][1] %>, <%- base["0B"]["rgb"][2] %>, 0.3);
+    transition: all 0.3s ease;
+}
+
+#tray:hover {
+    background-color: rgba(<%- base["02"]["rgb"][0] %>, <%- base["02"]["rgb"][1] %>, <%- base["02"]["rgb"][2] %>, 0.9);
+    border-color: #<%- base["0A"]["hex"] %>;
+    box-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.4);
+}
+
+#tray > .passive {
+    opacity: 0.6;
+}
+
+#tray > .active {
+    color: #<%- base["0D"]["hex"] %>;
+    text-shadow: 0 0 8px rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.5);
+}
+
+#tray > .needs-attention {
+    color: #<%- base["0A"]["hex"] %>;
+    background-color: rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.15);
+    border-radius: 4px;
+    animation: attention-pulse 2s ease infinite;
+}
+
+@keyframes attention-pulse {
+    from {
+        box-shadow: 0 0 8px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.6);
+    }
+    50% {
+        box-shadow: 0 0 15px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.9);
+    }
+    to {
+        box-shadow: 0 0 8px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.6);
+    }
+}
+
+#tray menu {
+    background-color: rgba(<%- base["00"]["rgb"][0] %>, <%- base["00"]["rgb"][1] %>, <%- base["00"]["rgb"][2] %>, 0.95);
+    border: 2px solid #<%- base["0D"]["hex"] %>;
+    border-radius: 8px;
+    padding: 8px;
+    box-shadow: 0 0 20px rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.4);
+}
+
+/* Custom lock button */
+#custom-lock {
+    color: #<%- base["0C"]["hex"] %>;
+    font-size: 18px;
+    padding: 4px 14px;
+    text-shadow: 0 0 8px rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.5);
+}
+
+#custom-lock:hover {
+    color: #<%- base["0A"]["hex"] %>;
+    background-color: rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.15);
+    text-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.8);
+}
+
+/* Custom power button */
+#custom-power {
+    color: #<%- base["0C"]["hex"] %>;
+    font-size: 20px;
+    font-weight: bold;
+    padding: 4px 14px;
+    text-shadow: 0 0 8px rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.5);
+}
+
+#custom-power:hover {
+    color: #<%- base["0A"]["hex"] %>;
+    background-color: rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.15);
+    border-color: #<%- base["0A"]["hex"] %>;
+    text-shadow: 0 0 12px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.8);
+    box-shadow: 0 0 15px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.5);
+}
+
+/* Tooltip styling */
+tooltip {
+    background-color: rgba(<%- base["00"]["rgb"][0] %>, <%- base["00"]["rgb"][1] %>, <%- base["00"]["rgb"][2] %>, 0.95);
+    border: 2px solid #<%- base["0D"]["hex"] %>;
+    border-radius: 8px;
+    padding: 12px;
+    color: #<%- base["05"]["hex"] %>;
+    box-shadow: 0 0 20px rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.4);
+}
+
+tooltip label {
+    color: #<%- base["05"]["hex"] %>;
+    font-family: "JetBrains Mono", monospace;
+}

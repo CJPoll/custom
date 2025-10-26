@@ -4,6 +4,9 @@
 
 - NEVER EVER UNDER ANY CIRCUMSTANCE use Process.sleep in tests
 - NEVER EVER UNDER ANY CIRCUMSTANCE use `Application.put_env`
+- NEVER make system-level changes (especially daemons, system services, /etc files, sudo commands) without the user's express direction
+- It's OK to make changes to files under ~/dev or ~/.local/worktrees without asking
+- For system changes: provide instructions for the user to execute, do NOT execute them yourself
 
 == Structure
 

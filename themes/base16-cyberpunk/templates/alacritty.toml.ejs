@@ -1,0 +1,135 @@
+# <%- scheme %> Base16 Theme for Alacritty
+# Author: <%- author %>
+#
+# Color Palette:
+# - base00: <%- base["00"]["hex"] %> (background)
+# - base01: <%- base["01"]["hex"] %>
+# - base02: <%- base["02"]["hex"] %>
+# - base03: <%- base["03"]["hex"] %> (comments)
+# - base04: <%- base["04"]["hex"] %>
+# - base05: <%- base["05"]["hex"] %> (foreground)
+# - base06: <%- base["06"]["hex"] %>
+# - base07: <%- base["07"]["hex"] %>
+# - base08: <%- base["08"]["hex"] %> (red)
+# - base09: <%- base["09"]["hex"] %> (orange/green)
+# - base0A: <%- base["0A"]["hex"] %> (yellow/orange)
+# - base0B: <%- base["0B"]["hex"] %> (green/blue)
+# - base0C: <%- base["0C"]["hex"] %> (cyan/magenta)
+# - base0D: <%- base["0D"]["hex"] %> (blue/cyan)
+# - base0E: <%- base["0E"]["hex"] %> (purple)
+# - base0F: <%- base["0F"]["hex"] %>
+
+[colors.primary]
+background = "#<%- base["00"]["hex"] %>"  # Deep Dark - main background
+foreground = "#<%- base["05"]["hex"] %>"  # Soft White - main text
+
+[colors.cursor]
+text = "#<%- base["00"]["hex"] %>"        # Deep Dark - text under cursor
+cursor = "#<%- base["0D"]["hex"] %>"      # Neon Cyan - cursor color
+
+[colors.selection]
+text = "#<%- base["05"]["hex"] %>"        # Soft White
+background = "#<%- base["02"]["hex"] %>"  # Slightly lighter purple
+
+# Normal colors
+[colors.normal]
+black = "#<%- base["00"]["hex"] %>"       # Deep Dark
+red = "#<%- base["08"]["hex"] %>"         # Neon Red - errors, deletions
+green = "#<%- base["0B"]["hex"] %>"       # Electric Blue - success, additions
+yellow = "#<%- base["09"]["hex"] %>"      # Neon Green - warnings
+blue = "#<%- base["0D"]["hex"] %>"        # Neon Cyan - info
+magenta = "#<%- base["0A"]["hex"] %>"     # Neon Orange - special
+cyan = "#<%- base["0C"]["hex"] %>"        # Neon Magenta - highlights
+white = "#<%- base["05"]["hex"] %>"       # Soft White
+
+# Bright colors
+[colors.bright]
+black = "#<%- base["03"]["hex"] %>"       # Medium purple-gray - bright black/comments
+red = "#<%- base["0F"]["hex"] %>"         # Brighter Neon Red
+green = "#<%- base["0B"]["hex"] %>"       # Electric Blue (brighter variant)
+yellow = "#<%- base["09"]["hex"] %>"      # Neon Green (brighter variant)
+blue = "#<%- base["0D"]["hex"] %>"        # Cyan (brighter variant)
+magenta = "#<%- base["0A"]["hex"] %>"     # Orange (brighter variant)
+cyan = "#<%- base["0C"]["hex"] %>"        # Magenta (brighter variant)
+white = "#<%- base["07"]["hex"] %>"       # Brightest White
+
+# Dim colors (used in some applications)
+[colors.dim]
+black = "#<%- base["00"]["hex"] %>"       # Darker than base
+red = "#<%- base["08"]["hex"] %>"         # Dimmer Neon Red
+green = "#<%- base["0B"]["hex"] %>"       # Dimmer Electric Blue
+yellow = "#<%- base["09"]["hex"] %>"      # Dimmer Neon Green
+blue = "#<%- base["0D"]["hex"] %>"        # Dimmer Cyan
+magenta = "#<%- base["0A"]["hex"] %>"     # Dimmer Orange
+cyan = "#<%- base["0C"]["hex"] %>"        # Dimmer Magenta
+white = "#<%- base["04"]["hex"] %>"       # Dimmer White
+
+# Base16 indexed colors (indexes 16-31 = base00-base0F)
+# Enables compatibility with base16-aware applications (Vim, Neovim, Helix, etc.)
+# See: https://github.com/chriskempson/base16
+
+# Monotones (base00-base07): Dark to Light progression
+[[colors.indexed_colors]]
+index = 16              # base00
+color = "#<%- base["00"]["hex"] %>"       # Deep Dark - default background
+
+[[colors.indexed_colors]]
+index = 17              # base01
+color = "#<%- base["01"]["hex"] %>"       # Dark Purple - lighter background (status bars, line numbers)
+
+[[colors.indexed_colors]]
+index = 18              # base02
+color = "#<%- base["02"]["hex"] %>"       # Lighter Purple - selection background
+
+[[colors.indexed_colors]]
+index = 19              # base03
+color = "#<%- base["03"]["hex"] %>"       # Medium purple-gray - comments, invisibles
+
+[[colors.indexed_colors]]
+index = 20              # base04
+color = "#<%- base["04"]["hex"] %>"       # Muted purple - dark foreground (status bar text)
+
+[[colors.indexed_colors]]
+index = 21              # base05
+color = "#<%- base["05"]["hex"] %>"       # Soft White - default foreground, operators, delimiters
+
+[[colors.indexed_colors]]
+index = 22              # base06
+color = "#<%- base["06"]["hex"] %>"       # Brighter White - light foreground
+
+[[colors.indexed_colors]]
+index = 23              # base07
+color = "#<%- base["07"]["hex"] %>"       # Brightest White - light background (rarely used)
+
+# Accents (base08-base0F): Syntax highlighting semantics
+[[colors.indexed_colors]]
+index = 24              # base08
+color = "#<%- base["08"]["hex"] %>"       # Neon Red - variables, XML tags, diff deleted
+
+[[colors.indexed_colors]]
+index = 25              # base09
+color = "#<%- base["09"]["hex"] %>"       # Neon Green - integers, booleans, constants
+
+[[colors.indexed_colors]]
+index = 26              # base0A
+color = "#<%- base["0A"]["hex"] %>"       # Neon Orange - classes, search highlights
+
+[[colors.indexed_colors]]
+index = 27              # base0B
+color = "#<%- base["0B"]["hex"] %>"       # Electric Blue - strings, diff inserted
+
+[[colors.indexed_colors]]
+index = 28              # base0C
+color = "#<%- base["0C"]["hex"] %>"       # Neon Magenta - regex, escape chars, support
+
+[[colors.indexed_colors]]
+index = 29              # base0D
+color = "#<%- base["0D"]["hex"] %>"       # Neon Cyan - functions, methods, headings
+
+[[colors.indexed_colors]]
+index = 30              # base0E
+color = "#<%- base["0E"]["hex"] %>"       # Muted Purple - keywords, storage, selectors
+
+[[colors.indexed_colors]]
+index = 31              # base0F
+color = "#<%- base["0F"]["hex"] %>"       # Brighter Red - deprecated, embedded language tags

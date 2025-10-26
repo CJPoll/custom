@@ -1,7 +1,7 @@
 #
-# Powerline Cyberpunk Neon - Custom Tmux Theme
+# Powerline <%- scheme %> - Custom Tmux Theme
 # Based on tmux-themepack powerline/block style
-# Author: cjpoll
+# Author: <%- author %>
 #
 # Requires terminal to be using a powerline compatible font
 # Using Inconsolata for Powerline
@@ -45,17 +45,17 @@ set -gqF @themepack-status-right-area-right-format "#{@themepack-status-right-ar
 set -gqF @themepack-window-status-current-format "#{@themepack-window-status-current-prefix}#{@themepack-window-status-current-format}#{@themepack-window-status-current-suffix}"
 set -gqF @themepack-window-status-format "#{@themepack-window-status-prefix}#{@themepack-window-status-format}#{@themepack-window-status-suffix}"
 
-# Cyberpunk Neon color palette
+# <%- scheme %> color palette
 # Using hex colors for true color support
-set -goq @powerline-color-deep-dark "#0a0e27"       # Main background
-set -goq @powerline-color-dark-purple "#1a1b3d"     # Secondary background
-set -goq @powerline-color-medium-purple "#252847"   # Tertiary background
-set -goq @powerline-color-neon-cyan "#00f3ff"       # Primary brand color
-set -goq @powerline-color-neon-magenta "#ff00ff"    # Secondary accent
-set -goq @powerline-color-neon-orange "#ff6b35"     # Hover/attention color
-set -goq @powerline-color-electric-blue "#599cff"   # Information color
-set -goq @powerline-color-soft-white "#e0e0ff"      # Text color
-set -goq @powerline-color-muted-purple "#bd93f9"    # Muted accent
+set -goq @powerline-color-deep-dark "#<%- base["00"]["hex"] %>"       # Main background
+set -goq @powerline-color-dark-purple "#<%- base["01"]["hex"] %>"     # Secondary background
+set -goq @powerline-color-medium-purple "#<%- base["02"]["hex"] %>"   # Tertiary background
+set -goq @powerline-color-neon-cyan "#<%- base["0D"]["hex"] %>"       # Primary brand color
+set -goq @powerline-color-neon-magenta "#<%- base["0C"]["hex"] %>"    # Secondary accent
+set -goq @powerline-color-neon-orange "#<%- base["0A"]["hex"] %>"     # Hover/attention color
+set -goq @powerline-color-electric-blue "#<%- base["0B"]["hex"] %>"   # Information color
+set -goq @powerline-color-soft-white "#<%- base["05"]["hex"] %>"      # Text color
+set -goq @powerline-color-muted-purple "#<%- base["0E"]["hex"] %>"    # Muted accent
 
 # Powerline Block color assignments
 set -gqF @powerline-color-main-1 "#{@powerline-color-neon-magenta}"   # Session name
@@ -167,4 +167,3 @@ set -gwF window-status-current-format "#{@theme-window-status-current-format}"
 set -gwF window-status-current-style "fg=#{@theme-window-status-current-fg},bg=#{@theme-window-status-current-bg}"
 set -gwF window-status-format "#{@theme-window-status-format}"
 set -gwF window-status-separator "#{@theme-window-status-separator}"
-

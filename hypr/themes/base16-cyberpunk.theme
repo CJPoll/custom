@@ -1,6 +1,6 @@
 # Btop theme - Cyberpunk Neon
 # Author: cjpoll
-# Matches Hyprland/Waybar desktop theme with neon cyberpunk aesthetic
+# Base16 color scheme
 
 # Colors should be in 6 or 2 character hexadecimal or single spaced rgb decimal: "#RRGGBB", "#BW" or "0-255 0-255 0-255"
 # example for white: "#ffffff", "#ff" or "255 255 255".
@@ -10,44 +10,43 @@
 # Use "start" and "end" variables for two color gradient
 # Use "start", "mid" and "end" for three color gradient
 
-# Main background - Deep Dark
+# Main background
 theme[main_bg]="#0a0e27"
 
-# Main text color - Soft White
+# Main text color
 theme[main_fg]="#e0e0ff"
 
-# Title color for boxes - Neon Cyan (brand color)
+# Title color for boxes
 theme[title]="#00f3ff"
 
-# Highlight color for keyboard shortcuts - Neon Orange
+# Highlight color for keyboard shortcuts
 theme[hi_fg]="#ff6b35"
 
-# Background color of selected item in processes box - Dark Purple
+# Background color of selected item in processes box
 theme[selected_bg]="#1a1b3d"
 
-# Foreground color of selected item in processes box - Neon Cyan
+# Foreground color of selected item in processes box
 theme[selected_fg]="#00f3ff"
 
-# Color of inactive/disabled text - Medium purple-gray
+# Color of inactive/disabled text
 theme[inactive_fg]="#5a5b7d"
 
 # Misc colors for processes box including mini cpu graphs, details memory graph and details status text
-# Also affects program name column
 theme[proc_misc]="#ff6b35"
 
-# Cpu box outline color - Electric Blue
-theme[cpu_box]="#0066ff"
+# Cpu box outline color
+theme[cpu_box]="#599cff"
 
-# Memory/disks box outline color - Neon Magenta
+# Memory/disks box outline color
 theme[mem_box]="#ff00ff"
 
-# Net up/down box outline color - Neon Cyan
+# Net up/down box outline color
 theme[net_box]="#00f3ff"
 
-# Processes box outline color - Muted Purple
+# Processes box outline color
 theme[proc_box]="#bd93f9"
 
-# Box divider line and small boxes line color - Dark Purple
+# Box divider line and small boxes line color
 theme[div_line]="#1a1b3d"
 
 # Temperature graph colors - Cool Green -> Orange -> Hot Red
@@ -55,13 +54,13 @@ theme[temp_start]="#39ff14"
 theme[temp_mid]="#ff6b35"
 theme[temp_end]="#ff0066"
 
-# CPU graph colors - Neon Cyan -> Magenta -> Electric Blue
+# CPU graph colors - Cyan -> Magenta -> Blue
 theme[cpu_start]="#00f3ff"
 theme[cpu_mid]="#ff00ff"
-theme[cpu_end]="#0066ff"
+theme[cpu_end]="#599cff"
 
-# Mem/Disk free meter - Electric Blue gradient
-theme[free_start]="#0066ff"
+# Mem/Disk free meter - Blue gradient
+theme[free_start]="#599cff"
 theme[free_mid]="#00f3ff"
 theme[free_end]="#39ff14"
 
@@ -73,7 +72,7 @@ theme[cached_end]="#e0e0ff"
 # Mem/Disk available meter - Green gradient
 theme[available_start]="#39ff14"
 theme[available_mid]="#00f3ff"
-theme[available_end]="#0066ff"
+theme[available_end]="#599cff"
 
 # Mem/Disk used meter - Magenta -> Red -> Orange (hot colors for usage)
 theme[used_start]="#ff00ff"
@@ -81,7 +80,7 @@ theme[used_mid]="#ff0066"
 theme[used_end]="#ff6b35"
 
 # Download graph colors - Cool Blue/Cyan
-theme[download_start]="#0066ff"
+theme[download_start]="#599cff"
 theme[download_mid]="#00f3ff"
 theme[download_end]="#39ff14"
 
@@ -90,13 +89,13 @@ theme[upload_start]="#39ff14"
 theme[upload_mid]="#ff6b35"
 theme[upload_end]="#ff0066"
 
-# Process box gradient colors - Cyan/Magenta gradient for threads, mem and cpu usage columns
+# Process box gradient colors - Cyan/Magenta gradient
 theme[process_start]="#00f3ff"
 theme[process_mid]="#ff00ff"
 theme[process_end]="#bd93f9"
 
 # Pressure box gradient colors - Blue gradient
-theme[pressure_start]="#0066ff"
+theme[pressure_start]="#599cff"
 theme[pressure_mid]="#00f3ff"
 theme[pressure_end]="#39ff14"
 
@@ -104,3 +103,4 @@ theme[pressure_end]="#39ff14"
 theme[battery_start]="#39ff14"
 theme[battery_mid]="#ff6b35"
 theme[battery_end]="#ff0066"
+

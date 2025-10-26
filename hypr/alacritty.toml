@@ -14,11 +14,12 @@ padding.y = 12
 decorations = "None"
 
 [font]
-normal.family = "Inconsolata for Powerline"
-bold.family = "Inconsolata for Powerline"
-italic.family = "Inconsolata for Powerline"
-bold_italic.family = "Inconsolata for Powerline"
+normal.family = "Inconsolata Nerd Font Mono"
+bold.family = "Inconsolata Nerd Font Mono"
+italic.family = "Inconsolata Nerd Font Mono"
+bold_italic.family = "Inconsolata Nerd Font Mono"
 size = 12.0
+builtin_box_drawing = true
 
 [cursor]
 style.shape = "Block"

@@ -11,11 +11,11 @@ The desktop environment embraces a cyberpunk aesthetic with neon accents, dark b
 - **Consistent margins**: All modules maintain uniform spacing (typically 4px-24px depending on context)
 
 ### Typography
-- **Primary font**: Inconsolata for Powerline
-- **Fallback**: Inconsolata, JetBrains Mono, Fira Code
+- **Primary font**: Inconsolata Nerd Font Mono
+- **Fallback**: Inconsolata, Symbols Nerd Font Mono, JetBrains Mono, Fira Code
 - **Style**: Monospace for consistency and technical aesthetic
 - **Sizes**: 14-18px base, with specific modules using larger sizes for emphasis
-- **Powerline support**: Includes special glyphs for status lines and prompts
+- **Nerd Font support**: Includes Powerline glyphs and thousands of additional icons for status lines and prompts
 
 ## Color Palette
 
@@ -141,6 +141,58 @@ ln -sf ~/dev/custom/hypr/themes/base16-cyberpunk.theme ~/.config/btop/themes/bas
 - When an application has limited theming support, prioritize the most visible/important elements
 - Use gradients strategically to maintain visual interest within limitations
 - Document workarounds and known issues for future reference
+
+## Configuration Files and Symlinks
+
+The Hyprland ecosystem uses multiple configuration files, all stored in `~/dev/custom/hypr/`:
+
+**Main Configuration Files:**
+- `hyprland.conf` - Main Hyprland window manager configuration
+- `hyprlock.conf` - Lock screen appearance and behavior
+- `hypridle.conf` - Idle timeout management and auto-lock
+- `hyprpaper.conf` - Wallpaper configuration
+- `alacritty.toml` - Terminal emulator configuration
+- `waybar.jsonc` - Status bar modules and layout
+- `waybar.css` - Status bar styling
+- `wofi.css` - Application launcher styling
+
+**Symlink Integration:**
+These configs are symlinked to their expected locations:
+```bash
+~/.config/hypr/hypridle.conf -> ~/dev/custom/hypr/hypridle.conf
+```
+
+To recreate the symlink if needed:
+```bash
+ln -sf ~/dev/custom/hypr/hypridle.conf ~/.config/hypr/hypridle.conf
+```
+
+## Idle Management (Hypridle)
+
+Hypridle manages idle timeouts and automatic actions:
+
+**Configuration:** `~/dev/custom/hypr/hypridle.conf`
+
+**Timeout Behaviors:**
+1. **5 minutes idle** → Lock screen (hyprlock)
+2. **30 minutes idle** → Turn off monitors (dpms off)
+3. **Resume activity** → Turn monitors back on, show welcome notification
+
+**Key Settings:**
+- `lock_cmd` - Prevents multiple hyprlock instances
+- `before_sleep_cmd` - Locks session before system sleep (lid close)
+- `ignore_dbus_inhibit = false` - Respects media playback (prevents locking during videos)
+
+**Starting Hypridle:**
+Hypridle should be started automatically by your Hyprland config. To start manually:
+```bash
+hypridle &
+```
+
+To prevent system sleep entirely (if needed):
+```bash
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+```
 
 ## Hyprland Configuration Structure
 

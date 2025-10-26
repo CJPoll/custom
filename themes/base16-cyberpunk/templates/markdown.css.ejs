@@ -1,5 +1,5 @@
-/* Base16 Cyberpunk Neon Theme for Markdown Viewer
- * Author: cjpoll
+/* Base16 <%- scheme %> Theme for Markdown Viewer
+ * Author: <%- author %>
  * Dark cyberpunk aesthetic with neon accents
  */
 
@@ -10,32 +10,32 @@ body {
 
 /* Headings - Cyan for navigation/hierarchy */
 h1, h2, h3, h4, h5, h6 {
-  color: #00f3ff;
+  color: #<%- base["0D"]["hex"] %>;
   font-weight: 600;
   margin-top: 24px;
   margin-bottom: 16px;
   line-height: 1.25;
 }
 
-h1 { font-size: 2em; border-bottom: 2px solid #00f3ff; padding-bottom: 0.3em; }
-h2 { font-size: 1.5em; border-bottom: 1px solid #00f3ff80; padding-bottom: 0.3em; }
+h1 { font-size: 2em; border-bottom: 2px solid #<%- base["0D"]["hex"] %>; padding-bottom: 0.3em; }
+h2 { font-size: 1.5em; border-bottom: 1px solid #<%- base["0D"]["hex"] %>80; padding-bottom: 0.3em; }
 h3 { font-size: 1.25em; }
 
 /* Links */
 a {
-  color: #599cff;
+  color: #<%- base["0B"]["hex"] %>;
   text-decoration: none;
   transition: color 0.2s ease;
 }
 a:hover {
-  color: #ff6b35;
-  text-shadow: 0 0 8px rgba(255, 107, 53, 0.4);
+  color: #<%- base["0A"]["hex"] %>;
+  text-shadow: 0 0 8px rgba(<%- base["0A"]["rgb"][0] %>, <%- base["0A"]["rgb"][1] %>, <%- base["0A"]["rgb"][2] %>, 0.4);
 }
 
 /* Inline code */
 code:not([class^=language-]):not([class=mermaid]) {
-  background: #1a1b3d;
-  color: #599cff;
+  background: #<%- base["01"]["hex"] %>;
+  color: #<%- base["0B"]["hex"] %>;
   border-radius: 3px;
   padding: 2px 6px;
   font-family: 'JetBrains Mono', monospace;
@@ -44,9 +44,9 @@ code:not([class^=language-]):not([class=mermaid]) {
 
 /* Keyboard keys */
 kbd {
-  background: #252847;
-  color: #ff6b35;
-  border: 1px solid #5a5b7d;
+  background: #<%- base["02"]["hex"] %>;
+  color: #<%- base["0A"]["hex"] %>;
+  border: 1px solid #<%- base["03"]["hex"] %>;
   border-radius: 3px;
   padding: 2px 6px;
   font-family: 'JetBrains Mono', monospace;
@@ -55,8 +55,8 @@ kbd {
 
 /* Mark/highlight */
 mark {
-  background: #ff6b35;
-  color: #0a0e27;
+  background: #<%- base["0A"]["hex"] %>;
+  color: #<%- base["00"]["hex"] %>;
   border-radius: 3px;
   padding: 0 4px;
 }
@@ -68,32 +68,32 @@ table {
   margin: 16px 0;
 }
 table th {
-  color: #00f3ff;
-  background: #1a1b3d;
-  border-bottom: 2px solid #00f3ff;
+  color: #<%- base["0D"]["hex"] %>;
+  background: #<%- base["01"]["hex"] %>;
+  border-bottom: 2px solid #<%- base["0D"]["hex"] %>;
   padding: 8px 12px;
   font-weight: 600;
 }
 table td {
-  color: #e0e0ff;
-  border-right: 1px solid #5a5b7d;
+  color: #<%- base["05"]["hex"] %>;
+  border-right: 1px solid #<%- base["03"]["hex"] %>;
   padding: 8px 12px;
 }
 table tr td:last-of-type {
   border-right: none;
 }
 table tr:nth-child(even) td {
-  background: #1a1b3d80;
+  background: #<%- base["01"]["hex"] %>80;
 }
 table tr:hover td {
-  background: #252847;
+  background: #<%- base["02"]["hex"] %>;
 }
 
 /* Blockquotes */
 blockquote {
-  background: #1a1b3d;
-  border-left: 4px solid #bd93f9;
-  color: #9b9dc7;
+  background: #<%- base["01"]["hex"] %>;
+  border-left: 4px solid #<%- base["0E"]["hex"] %>;
+  color: #<%- base["04"]["hex"] %>;
   padding: 8px 16px;
   margin: 16px 0;
   border-radius: 0 4px 4px 0;
@@ -102,7 +102,7 @@ blockquote {
 /* Horizontal rule */
 hr {
   border: none;
-  border-top: 2px solid #5a5b7d;
+  border-top: 2px solid #<%- base["03"]["hex"] %>;
   margin: 24px 0;
 }
 
@@ -116,31 +116,31 @@ li {
 
 /* Task lists */
 input[type="checkbox"] {
-  accent-color: #39ff14;
+  accent-color: #<%- base["09"]["hex"] %>;
 }
 
 /* Strong/bold */
 strong {
-  color: #ff6b35;
+  color: #<%- base["0A"]["hex"] %>;
   font-weight: 600;
 }
 
 /* Emphasis/italic */
 em {
-  color: #bd93f9;
+  color: #<%- base["0E"]["hex"] %>;
   font-style: italic;
 }
 
 /* Strikethrough */
 del {
-  color: #ff0066;
+  color: #<%- base["08"]["hex"] %>;
   text-decoration: line-through;
 }
 
 /* Code blocks */
 pre {
-  background: #0a0e27;
-  border: 1px solid #252847;
+  background: #<%- base["00"]["hex"] %>;
+  border: 1px solid #<%- base["02"]["hex"] %>;
   border-radius: 6px;
   padding: 16px;
   margin: 16px 0;
@@ -148,7 +148,7 @@ pre {
 }
 pre code {
   background: none;
-  color: #e0e0ff;
+  color: #<%- base["05"]["hex"] %>;
   padding: 0;
 }
 
@@ -157,12 +157,12 @@ pre code {
 [class^=language-] .token.prolog,
 [class^=language-] .token.doctype,
 [class^=language-] .token.cdata {
-  color: #5a5b7d;
+  color: #<%- base["03"]["hex"] %>;
   font-style: italic;
 }
 
 [class^=language-] .token.punctuation {
-  color: #ff3399;
+  color: #<%- base["0F"]["hex"] %>;
 }
 
 [class^=language-] .token.property,
@@ -171,7 +171,7 @@ pre code {
 [class^=language-] .token.number,
 [class^=language-] .token.constant,
 [class^=language-] .token.symbol {
-  color: #ff00ff;
+  color: #<%- base["0C"]["hex"] %>;
 }
 
 [class^=language-] .token.selector,
@@ -179,7 +179,7 @@ pre code {
 [class^=language-] .token.string,
 [class^=language-] .token.char,
 [class^=language-] .token.builtin {
-  color: #599cff;
+  color: #<%- base["0B"]["hex"] %>;
 }
 
 [class^=language-] .token.operator,
@@ -187,119 +187,118 @@ pre code {
 [class^=language-] .token.url,
 .language-css .token.string,
 .style .token.string {
-  color: #e0e0ff;
+  color: #<%- base["05"]["hex"] %>;
 }
 
 [class^=language-] .token.atrule,
 [class^=language-] .token.attr-value,
 [class^=language-] .token.keyword {
-  color: #bd93f9;
+  color: #<%- base["0E"]["hex"] %>;
 }
 
 [class^=language-] .token.function,
 [class^=language-] .token.function-variable {
-  color: #00f3ff;
+  color: #<%- base["0D"]["hex"] %>;
 }
 
 [class^=language-] .token.class-name {
-  color: #ff6b35;
+  color: #<%- base["0A"]["hex"] %>;
 }
 
 [class^=language-] .token.regex,
 [class^=language-] .token.important,
 [class^=language-] .token.variable {
-  color: #39ff14;
+  color: #<%- base["09"]["hex"] %>;
 }
 
 [class^=language-] .token.parameter {
-  color: #ff6b35;
+  color: #<%- base["0A"]["hex"] %>;
 }
 
 [class^=language-] .token.literal-property {
-  color: #ff00ff;
+  color: #<%- base["0C"]["hex"] %>;
 }
 
 /* Dark mode (default) */
 @media (prefers-color-scheme: dark) {
   body {
-    background: #0a0e27;
-    color: #e0e0ff;
+    background: #<%- base["00"]["hex"] %>;
+    color: #<%- base["05"]["hex"] %>;
   }
 }
 
 /* Light mode override - maintain cyberpunk aesthetic with adjusted contrast */
 @media (prefers-color-scheme: light) {
   body {
-    background: #f5f5ff;
-    color: #1a1b3d;
+    background: #<%- base["07"]["hex"] %>;
+    color: #<%- base["01"]["hex"] %>;
   }
 
   h1, h2, h3, h4, h5, h6 {
-    color: #599cff;
+    color: #<%- base["0B"]["hex"] %>;
   }
 
-  h1 { border-bottom-color: #599cff; }
-  h2 { border-bottom-color: #599cff80; }
+  h1 { border-bottom-color: #<%- base["0B"]["hex"] %>; }
+  h2 { border-bottom-color: #<%- base["0B"]["hex"] %>80; }
 
   a {
-    color: #599cff;
+    color: #<%- base["0B"]["hex"] %>;
   }
   a:hover {
-    color: #ff6b35;
+    color: #<%- base["0A"]["hex"] %>;
   }
 
   code:not([class^=language-]):not([class=mermaid]) {
-    background: #ebebff;
-    color: #599cff;
+    background: #<%- base["06"]["hex"] %>;
+    color: #<%- base["0B"]["hex"] %>;
   }
 
   kbd {
-    background: #ebebff;
-    color: #ff6b35;
-    border-color: #9b9dc7;
+    background: #<%- base["06"]["hex"] %>;
+    color: #<%- base["0A"]["hex"] %>;
+    border-color: #<%- base["04"]["hex"] %>;
   }
 
   mark {
-    background: #ff6b35;
+    background: #<%- base["0A"]["hex"] %>;
     color: #ffffff;
   }
 
   table th {
-    color: #599cff;
-    background: #ebebff;
-    border-bottom-color: #599cff;
+    color: #<%- base["0B"]["hex"] %>;
+    background: #<%- base["06"]["hex"] %>;
+    border-bottom-color: #<%- base["0B"]["hex"] %>;
   }
 
   table td {
-    color: #1a1b3d;
-    border-right-color: #9b9dc7;
+    color: #<%- base["01"]["hex"] %>;
+    border-right-color: #<%- base["04"]["hex"] %>;
   }
 
   table tr:nth-child(even) td {
-    background: #ebebff80;
+    background: #<%- base["06"]["hex"] %>80;
   }
 
   table tr:hover td {
-    background: #e0e0ff;
+    background: #<%- base["05"]["hex"] %>;
   }
 
   blockquote {
-    background: #ebebff;
-    border-left-color: #bd93f9;
-    color: #5a5b7d;
+    background: #<%- base["06"]["hex"] %>;
+    border-left-color: #<%- base["0E"]["hex"] %>;
+    color: #<%- base["03"]["hex"] %>;
   }
 
   hr {
-    border-top-color: #9b9dc7;
+    border-top-color: #<%- base["04"]["hex"] %>;
   }
 
   pre {
-    background: #ebebff;
-    border-color: #9b9dc7;
+    background: #<%- base["06"]["hex"] %>;
+    border-color: #<%- base["04"]["hex"] %>;
   }
 
   pre code {
-    color: #1a1b3d;
+    color: #<%- base["01"]["hex"] %>;
   }
 }
-

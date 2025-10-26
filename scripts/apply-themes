@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+#
+# apply-themes - Apply base16-cyberpunk theme using base16-builder
+#
+# This script uses base16-builder to generate theme files from mustache templates
+# and outputs them to the appropriate locations.
+#
+# Usage: apply-themes [--check-only]
+#   --check-only: Only check if base16-builder is installed, don't apply themes
+#
+
+set -euo pipefail
+
+# Color output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Directories
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CUSTOM_DIR="$(dirname "$SCRIPT_DIR")"
+THEME_BASE_DIR="${CUSTOM_DIR}/themes/base16-cyberpunk"
+SCHEME_FILE="${THEME_BASE_DIR}/scheme/cyberpunk.yaml"
+TEMPLATES_DIR="${THEME_BASE_DIR}/templates"
+OUTPUT_DIR_THEMES="${CUSTOM_DIR}/hypr/themes"
+OUTPUT_DIR_HYPR="${CUSTOM_DIR}/hypr"
+
+# Check if base16-builder is installed
+check_base16_builder() {
+    if ! command -v base16-builder &> /dev/null; then
+        echo -e "${RED}Error: base16-builder is not installed${NC}"
+        echo -e "${YELLOW}Install it with: npm install --global base16-builder${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}✓ base16-builder is installed${NC}"
+    base16-builder --version
+    return 0
+}
+
+# Apply a single template
+apply_template() {
+    local template_file="$1"
+    local output_file="$2"
+    local template_name="$(basename "$template_file")"
+
+    echo -e "${CYAN}Applying template: ${template_name}${NC}"
+
+    if [[ ! -f "$template_file" ]]; then
+        echo -e "${RED}  Error: Template file not found: ${template_file}${NC}"
+        return 1
+    fi
+
+    if [[ ! -f "$SCHEME_FILE" ]]; then
+        echo -e "${RED}  Error: Scheme file not found: ${SCHEME_FILE}${NC}"
+        return 1
+    fi
+
+    # Create output directory if it doesn't exist
+    local output_dir="$(dirname "$output_file")"
+    mkdir -p "$output_dir"
+
+    # Run base16-builder
+    if base16-builder --scheme "$SCHEME_FILE" --template "$template_file" > "$output_file"; then
+        echo -e "${GREEN}  ✓ Generated: ${output_file}${NC}"
+
+        # Make shell scripts executable
+        if [[ "$output_file" == *.sh ]]; then
+            chmod +x "$output_file"
+            echo -e "${GREEN}  ✓ Made executable${NC}"
+        fi
+        return 0
+    else
+        echo -e "${RED}  ✗ Failed to generate theme${NC}"
+        return 1
+    fi
+}
+
+# Main function
+main() {
+    local check_only=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --check-only)
+                check_only=true
+                shift
+                ;;
+            *)
+                echo "Unknown option: $1"
+                echo "Usage: apply-themes [--check-only]"
+                exit 1
+                ;;
+        esac
+    done
+
+    echo -e "${CYAN}=== Base16 Cyberpunk Theme Applicator ===${NC}\n"
+
+    # Check if base16-builder is installed
+    if ! check_base16_builder; then
+        exit 1
+    fi
+
+    if [[ "$check_only" == true ]]; then
+        echo -e "\n${GREEN}Check complete. Ready to apply themes.${NC}"
+        exit 0
+    fi
+
+    echo -e "\n${CYAN}Applying themes...${NC}\n"
+
+    local failed=0
+
+    # Apply each template
+    apply_template \
+        "${TEMPLATES_DIR}/alacritty.toml.ejs" \
+        "${OUTPUT_DIR_THEMES}/alacritty-cyberpunk.toml" \
+        || ((failed++))
+
+    apply_template \
+        "${TEMPLATES_DIR}/hyprlock.conf.ejs" \
+        "${OUTPUT_DIR_HYPR}/hyprlock.conf" \
+        || ((failed++))
+
+    apply_template \
+        "${TEMPLATES_DIR}/shell.sh.ejs" \
+        "${OUTPUT_DIR_THEMES}/base16-cyberpunk.sh" \
+        || ((failed++))
+
+    apply_template \
+        "${TEMPLATES_DIR}/btop.theme.ejs" \
+        "${OUTPUT_DIR_THEMES}/base16-cyberpunk.theme" \
+        || ((failed++))
+
+    apply_template \
+        "${TEMPLATES_DIR}/vim.ejs" \
+        "${OUTPUT_DIR_THEMES}/base16-cyberpunk.vim" \
+        || ((failed++))
+
+    apply_template \
+        "${TEMPLATES_DIR}/tmux.tmuxtheme.ejs" \
+        "${OUTPUT_DIR_THEMES}/base16-cyberpunk.tmuxtheme" \
+        || ((failed++))
+
+    apply_template \
+        "${TEMPLATES_DIR}/waybar.css.ejs" \
+        "${OUTPUT_DIR_HYPR}/waybar.css" \
+        || ((failed++))
+
+    apply_template \
+        "${TEMPLATES_DIR}/wofi.css.ejs" \
+        "${OUTPUT_DIR_HYPR}/wofi.css" \
+        || ((failed++))
+
+    apply_template \
+        "${TEMPLATES_DIR}/markdown.css.ejs" \
+        "${OUTPUT_DIR_THEMES}/base16-cyberpunk.md-theme.css" \
+        || ((failed++))
+
+    echo ""
+    if [[ $failed -eq 0 ]]; then
+        echo -e "${GREEN}✓ All themes applied successfully!${NC}"
+        echo -e "\n${CYAN}Next steps:${NC}"
+        echo "  1. Reload your terminal or source the shell theme"
+        echo "  2. Restart tmux or reload tmux config"
+        echo "  3. Restart applications using the themes"
+    else
+        echo -e "${RED}✗ Failed to apply $failed theme(s)${NC}"
+        exit 1
+    fi
+}
+
+main "$@"
