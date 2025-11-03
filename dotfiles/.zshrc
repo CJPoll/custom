@@ -107,6 +107,8 @@ else
   export EDITOR='vim'
 fi
 
+export MANPAGER='nvim Man!'
+
 # aliases
 
 alias dc='docker compose';
