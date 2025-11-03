@@ -15,9 +15,13 @@ decorations = "None"
 
 [font]
 normal.family = "Inconsolata Nerd Font Mono"
+normal.style = "Regular"
 bold.family = "Inconsolata Nerd Font Mono"
+bold.style = "Bold"
 italic.family = "Inconsolata Nerd Font Mono"
+italic.style = "Italic"
 bold_italic.family = "Inconsolata Nerd Font Mono"
+bold_italic.style = "Bold Italic"
 size = 12.0
 builtin_box_drawing = true
 

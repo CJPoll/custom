@@ -62,7 +62,7 @@ else
     alacritty --title "${NAME}" -e zsh -ic "${EXECUTABLE}" &
   else
     # Direct execution (faster, no .zshrc overhead)
-    alacritty --title "${NAME}" -e "${EXECUTABLE}" &
+    EDITOR="vim" alacritty --title "${NAME}" -e "${EXECUTABLE}" &
   fi
 
   # Wait for window to be created

@@ -33,6 +33,9 @@ Any time you specify a test, include:
    as arguments)
 3. Specific assertions that verify the acceptance criterion is met
 
+If @./adrs/ exists, ensure that your spec complies with those Architecture
+Decision Records.
+
 Put the spec into @ai-artifacts/specs/[ticket]-spec.md
 Please keep all information about the spec in a single file so we have a single
 source of truth.

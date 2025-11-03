@@ -18,6 +18,7 @@ Configuration files for various tools and applications. These are symlinked to t
 ~/.tmux.conf -> ~/dev/custom/dotfiles/.tmux.conf
 ~/.zshrc -> ~/dev/custom/dotfiles/.zshrc
 ~/.config/nvim/init.vim -> ~/dev/custom/dotfiles/init.vim
+~/.config/yazi -> ~/dev/custom/dotfiles/yazi
 ~/CLAUDE.md -> ~/dev/custom/ai/CLAUDE.md
 ```
 
@@ -33,6 +34,7 @@ To recreate symlinks if needed:
 ln -sf ~/dev/custom/dotfiles/.tmux.conf ~/.tmux.conf
 ln -sf ~/dev/custom/dotfiles/.zshrc ~/.zshrc
 ln -sf ~/dev/custom/dotfiles/init.vim ~/.config/nvim/init.vim
+ln -sf ~/dev/custom/dotfiles/yazi ~/.config/yazi
 ln -sf ~/dev/custom/ai/CLAUDE.md ~/CLAUDE.md
 
 # Themes

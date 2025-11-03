@@ -16,6 +16,7 @@ endfunction
 " <C-w>d shows diagnostic at cursor in a floating window. CTRL-W_d-default
 
 " Vundle Packages {{{
+Plug 'ryanoasis/vim-devicons'
 Plug 'bling/vim-airline'                 " Lightweight Powerline
 Plug 'christoomey/vim-tmux-navigator'    " TMUX integration
 "Plug 'ctrlpvim/ctrlp.vim'
@@ -88,19 +89,6 @@ require('nvim-treesitter.configs').setup {
     end,
   },
 }
-
--- Custom function to open Claude in bottom split
-function ClaudeCodeBottom()
-  vim.cmd('ClaudeCode --dangerously-skip-permissions')
-  -- Wait a moment for the window to open
-  vim.defer_fn(function()
-    -- Move the window to the bottom
-    vim.cmd('wincmd L')  -- Move to far right first
-    vim.cmd('wincmd J')  -- Then move to bottom
-    -- Optionally resize the height (adjust as needed)
-    vim.cmd('resize 25')
-  end, 100)
-end
 EOF
 
 filetype plugin indent on    " required

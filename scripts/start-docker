@@ -1,0 +1,9 @@
+#! /usr/bin/env bash
+
+if ! rc-service containerd status &>/dev/null; then
+    sudo rc-service containerd start &>/dev/null & disown
+fi
+
+if ! rc-service docker status &>/dev/null; then
+    sudo rc-service docker start &>/dev/null & disown
+fi

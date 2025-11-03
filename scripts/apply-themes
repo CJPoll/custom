@@ -190,9 +190,24 @@ main() {
 
     apply_template \
         "${TEMPLATES_DIR}/markdown.css.ejs" \
-        "${OUTPUT_DIR_THEMES}/base16-cyberpunk.md-theme.css" \
+        "${OUTPUT_DIR_THEMES}/cyberpunk.md-theme.css" \
         "$SCHEME_FILE" \
         || ((failed++))
+
+    apply_template \
+        "${TEMPLATES_DIR}/monkeytype.json.ejs" \
+        "${OUTPUT_DIR_THEMES}/monkeytype-cyberpunk.json" \
+        "$SCHEME_FILE" \
+        || ((failed++))
+
+    # Generate monkeytype URL with base64-encoded theme
+    if [[ -f "${OUTPUT_DIR_THEMES}/monkeytype-cyberpunk.json" ]]; then
+        echo -e "${CYAN}Generating monkeytype URL...${NC}"
+        local base64_theme=$(cat "${OUTPUT_DIR_THEMES}/monkeytype-cyberpunk.json" | base64 -w 0)
+        local monkeytype_url="https://monkeytype.com?customTheme=${base64_theme}"
+        echo "$monkeytype_url" > "${CUSTOM_DIR}/monkeytype-url"
+        echo -e "${GREEN}  ✓ Saved URL to ${CUSTOM_DIR}/monkeytype-url${NC}"
+    fi
 
     echo ""
     if [[ $failed -eq 0 ]]; then

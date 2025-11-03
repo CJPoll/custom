@@ -1,0 +1,18 @@
+# Yazi Keymap Configuration
+# Dragon-drop integration for drag-and-drop file operations
+
+# Drag and drop single selected file
+[[mgr.prepend_keymap]]
+on = [ "<C-d>" ]
+run = '''
+    shell 'dragon -a -x -i -T "$1"' --confirm
+'''
+desc = "Drag and drop file with dragon"
+
+# Drag and drop all selected files
+[[mgr.prepend_keymap]]
+on = [ "<C-D>" ]
+run = '''
+    shell 'dragon -a -x -i -T "$@"' --confirm
+'''
+desc = "Drag and drop all selected files with dragon"

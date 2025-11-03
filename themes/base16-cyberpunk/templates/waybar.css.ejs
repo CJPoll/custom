@@ -6,7 +6,7 @@
  * - Deep Dark: #<%- base["00"]["hex"] %> (background)
  * - Dark Purple: #<%- base["01"]["hex"] %> (containers)
  * - Neon Cyan: #<%- base["0D"]["hex"] %> (primary accent)
- * - Neon Magenta: #<%- base["0C"]["hex"] %> (secondary accent)
+ * - Neon Magenta: #<%- base["09"]["hex"] %> (secondary accent)
  * - Electric Blue: #<%- base["0B"]["hex"] %> (highlights)
  * - Neon Orange: #<%- base["0A"]["hex"] %> (hover emphasis)
  * - Soft White: #<%- base["05"]["hex"] %> (text)
@@ -84,7 +84,7 @@ window#waybar {
 }
 
 #workspaces button.active {
-    background: linear-gradient(135deg, rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.2) 0%, rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.2) 100%);
+    background: linear-gradient(135deg, rgba(<%- base["0D"]["rgb"][0] %>, <%- base["0D"]["rgb"][1] %>, <%- base["0D"]["rgb"][2] %>, 0.2) 0%, rgba(<%- base["09"]["rgb"][0] %>, <%- base["09"]["rgb"][1] %>, <%- base["09"]["rgb"][2] %>, 0.2) 100%);
     border-color: #<%- base["0D"]["hex"] %>;
     color: #<%- base["0D"]["hex"] %>;
     font-weight: bold;
@@ -117,10 +117,10 @@ window#waybar {
 
 /* CPU */
 #cpu {
-    color: #<%- base["0C"]["hex"] %>;
+    color: #<%- base["09"]["hex"] %>;
     font-weight: 600;
     padding: 4px 16px;
-    text-shadow: 0 0 8px rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.5);
+    text-shadow: 0 0 8px rgba(<%- base["09"]["rgb"][0] %>, <%- base["09"]["rgb"][1] %>, <%- base["09"]["rgb"][2] %>, 0.5);
     background-color: rgba(<%- base["01"]["rgb"][0] %>, <%- base["01"]["rgb"][1] %>, <%- base["01"]["rgb"][2] %>, 0.8);
     border-radius: 8px;
     border: 1px solid rgba(<%- base["0B"]["rgb"][0] %>, <%- base["0B"]["rgb"][1] %>, <%- base["0B"]["rgb"][2] %>, 0.3);
@@ -157,10 +157,10 @@ window#waybar {
 
 /* PulseAudio */
 #pulseaudio {
-    color: #<%- base["0C"]["hex"] %>;
+    color: #<%- base["09"]["hex"] %>;
     font-weight: 600;
     padding: 4px 16px;
-    text-shadow: 0 0 8px rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.5);
+    text-shadow: 0 0 8px rgba(<%- base["09"]["rgb"][0] %>, <%- base["09"]["rgb"][1] %>, <%- base["09"]["rgb"][2] %>, 0.5);
     background-color: rgba(<%- base["01"]["rgb"][0] %>, <%- base["01"]["rgb"][1] %>, <%- base["01"]["rgb"][2] %>, 0.8);
     border-radius: 8px;
     border: 1px solid rgba(<%- base["0B"]["rgb"][0] %>, <%- base["0B"]["rgb"][1] %>, <%- base["0B"]["rgb"][2] %>, 0.3);
@@ -176,8 +176,8 @@ window#waybar {
 }
 
 #pulseaudio.muted {
-    color: rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.4);
-    text-shadow: 0 0 4px rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.2);
+    color: rgba(<%- base["09"]["rgb"][0] %>, <%- base["09"]["rgb"][1] %>, <%- base["09"]["rgb"][2] %>, 0.4);
+    text-shadow: 0 0 4px rgba(<%- base["09"]["rgb"][0] %>, <%- base["09"]["rgb"][1] %>, <%- base["09"]["rgb"][2] %>, 0.2);
 }
 
 /* Clock */
@@ -285,10 +285,10 @@ window#waybar {
 
 /* Custom lock button */
 #custom-lock {
-    color: #<%- base["0C"]["hex"] %>;
+    color: #<%- base["09"]["hex"] %>;
     font-size: 18px;
     padding: 4px 14px;
-    text-shadow: 0 0 8px rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.5);
+    text-shadow: 0 0 8px rgba(<%- base["09"]["rgb"][0] %>, <%- base["09"]["rgb"][1] %>, <%- base["09"]["rgb"][2] %>, 0.5);
 }
 
 #custom-lock:hover {
@@ -299,11 +299,11 @@ window#waybar {
 
 /* Custom power button */
 #custom-power {
-    color: #<%- base["0C"]["hex"] %>;
+    color: #<%- base["09"]["hex"] %>;
     font-size: 20px;
     font-weight: bold;
     padding: 4px 14px;
-    text-shadow: 0 0 8px rgba(<%- base["0C"]["rgb"][0] %>, <%- base["0C"]["rgb"][1] %>, <%- base["0C"]["rgb"][2] %>, 0.5);
+    text-shadow: 0 0 8px rgba(<%- base["09"]["rgb"][0] %>, <%- base["09"]["rgb"][1] %>, <%- base["09"]["rgb"][2] %>, 0.5);
 }
 
 #custom-power:hover {

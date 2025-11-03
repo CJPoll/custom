@@ -1,6 +1,6 @@
 {
     // Main bar configuration
-    "layer": "top",
+    "layer": "bottom",
     "position": "top",
     "height": 64,
     "spacing": 8,
@@ -8,7 +8,9 @@
 
     // Module layout
     "modules-left": [
-        "hyprland/workspaces"
+        "hyprland/workspaces",
+        "custom/discord",
+        "custom/spotify"
     ],
     "modules-center": [
         "memory",
@@ -117,9 +119,27 @@
         "on-click": "nm-connection-editor"
     },
 
+    // Discord launcher
+    "custom/discord": {
+        "format": "",
+        "tooltip": true,
+        "tooltip-format": "Discord",
+        "on-click": "discord",
+        "return-type": ""
+    },
+
+    // Spotify launcher
+    "custom/spotify": {
+        "format": "",
+        "tooltip": true,
+        "tooltip-format": "Spotify",
+        "on-click": "spotify",
+        "return-type": ""
+    },
+
     // Lock icon
     "custom/lock": {
-        "format": "",
+        "format": "🔒",
         "tooltip": true,
         "tooltip-format": "Lock Screen",
         "on-click": "hyprlock",
@@ -128,10 +148,10 @@
 
     // Power icon
     "custom/power": {
-        "format": "�",
+        "format": "⏻",
         "tooltip": true,
         "tooltip-format": "Shutdown",
-        "on-click": "shutdown now",
+        "on-click": "loginctl poweroff",
         "return-type": ""
     }
 }

@@ -20,11 +20,12 @@ Every time an agent is invoked, please remind them of their process.
 
 Here is the overall workflow:
 
-1. Athena plans the work, creating a spec. She needs to THINK HARD when
+1. Athena plans the work, creating a spec. She needs to THINK HARDER when
    planning.
 
 2. Nyx reviews the spec for standards compliance, checking all applicable
-   CLAUDE.md files and ADRs in `./adrs/`.
+   CLAUDE.md files and ADRs in `./adrs/`. She needs to THINK HARD while
+   reviewing the spec.
 
 3A. If Nyx detects conflicting standards (CLAUDE.md vs ADR, or between
     different standards), STOP and request HUMAN REVIEW to resolve the
@@ -46,7 +47,7 @@ Here is the overall workflow:
     Vera-Reviewer, reminding them each time to follow their process at the given
     file above.
 
-5B. If Vera-Reviewer has no feedback and the spec is ready for implementation, 
+5B. If Vera-Reviewer has no feedback and the spec is ready for implementation,
     then Vera-Implementor may need confirmation to begin implementation; you may
     not give her that confirmation - the user must give that confiramtion UNLESS
     the user overrides that requirement later in this request.
@@ -59,6 +60,10 @@ Here is the overall workflow:
     corrections, return to step 6 (Audri must re-review).
 
 7B. If Audri finds no gaps in the implementation, then we are done.
+
+One exception: If Nyx has previously approved the spec and Vera-Reviewer has
+requested feedback, steps 2 and 4 may be done in parallel. This means that Nyx
+and Vera-Reviewer may review the same spec in parallel in that case.
 
 Work to be done in this coordination:
 $ARGUMENTS

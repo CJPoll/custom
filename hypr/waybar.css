@@ -6,7 +6,7 @@
  * - Deep Dark: #0a0e27 (background)
  * - Dark Purple: #1a1b3d (containers)
  * - Neon Cyan: #00f3ff (primary accent)
- * - Neon Magenta: #39ff14 (secondary accent)
+ * - Neon Magenta: #ff00ff (secondary accent)
  * - Electric Blue: #599cff (highlights)
  * - Neon Orange: #ff6b35 (hover emphasis)
  * - Soft White: #e0e0ff (text)
@@ -84,7 +84,7 @@ window#waybar {
 }
 
 #workspaces button.active {
-    background: linear-gradient(135deg, rgba(0, 243, 255, 0.2) 0%, rgba(57, 255, 20, 0.2) 100%);
+    background: linear-gradient(135deg, rgba(0, 243, 255, 0.2) 0%, rgba(255, 0, 255, 0.2) 100%);
     border-color: #00f3ff;
     color: #00f3ff;
     font-weight: bold;
@@ -117,10 +117,10 @@ window#waybar {
 
 /* CPU */
 #cpu {
-    color: #39ff14;
+    color: #ff00ff;
     font-weight: 600;
     padding: 4px 16px;
-    text-shadow: 0 0 8px rgba(57, 255, 20, 0.5);
+    text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
     background-color: rgba(26, 27, 61, 0.8);
     border-radius: 8px;
     border: 1px solid rgba(89, 156, 255, 0.3);
@@ -157,10 +157,10 @@ window#waybar {
 
 /* PulseAudio */
 #pulseaudio {
-    color: #39ff14;
+    color: #ff00ff;
     font-weight: 600;
     padding: 4px 16px;
-    text-shadow: 0 0 8px rgba(57, 255, 20, 0.5);
+    text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
     background-color: rgba(26, 27, 61, 0.8);
     border-radius: 8px;
     border: 1px solid rgba(89, 156, 255, 0.3);
@@ -176,8 +176,8 @@ window#waybar {
 }
 
 #pulseaudio.muted {
-    color: rgba(57, 255, 20, 0.4);
-    text-shadow: 0 0 4px rgba(57, 255, 20, 0.2);
+    color: rgba(255, 0, 255, 0.4);
+    text-shadow: 0 0 4px rgba(255, 0, 255, 0.2);
 }
 
 /* Clock */
@@ -285,10 +285,10 @@ window#waybar {
 
 /* Custom lock button */
 #custom-lock {
-    color: #39ff14;
+    color: #ff00ff;
     font-size: 18px;
     padding: 4px 14px;
-    text-shadow: 0 0 8px rgba(57, 255, 20, 0.5);
+    text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
 }
 
 #custom-lock:hover {
@@ -299,11 +299,11 @@ window#waybar {
 
 /* Custom power button */
 #custom-power {
-    color: #39ff14;
+    color: #ff00ff;
     font-size: 20px;
     font-weight: bold;
     padding: 4px 14px;
-    text-shadow: 0 0 8px rgba(57, 255, 20, 0.5);
+    text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
 }
 
 #custom-power:hover {

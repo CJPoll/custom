@@ -97,15 +97,24 @@ The desktop environment embraces a cyberpunk aesthetic with neon accents, dark b
 
 ### Theme File Locations
 All theme files are stored in `~/dev/custom/hypr/themes/`:
-- `cyberpunk.vim` - Vim/Neovim color scheme (custom, not base16-compliant)
-- `base16-cyberpunk.sh` - Shell/terminal theme (sourced by ZSH)
+- `cyberpunk.vim` - Vim/Neovim color scheme (custom color mappings)
+- `cyberpunk.md-theme.css` - Markdown viewer theme (matches vim markdown styling)
+- `base16-cyberpunk.sh` - Shell/terminal theme
 - `alacritty-cyberpunk.toml` - Alacritty terminal color theme
 - `base16-cyberpunk.theme` - Btop system monitor theme
 - `base16-cyberpunk.tmuxtheme` - Tmux powerline theme
+- `monkeytype-cyberpunk.json` - Monkeytype custom theme (JSON with color array, base64-encoded in URL)
+
+Theme URLs (generated files):
+- `~/dev/custom/monkeytype-url` - Monkeytype theme URL with base64-encoded theme data
 
 Theme source files:
-- `~/dev/custom/themes/base16-cyberpunk/scheme/cyberpunk.yaml` - Custom color mappings
-- `~/dev/custom/themes/base16-cyberpunk/scheme/base16-cyberpunk.yaml` - Base16-compliant color mappings
+- `~/dev/custom/themes/base16-cyberpunk/scheme/base16-cyberpunk.yaml` - Base16-compliant scheme (default)
+- `~/dev/custom/themes/base16-cyberpunk/scheme/cyberpunk.yaml` - Original custom scheme
+- `~/dev/custom/themes/base16-cyberpunk/templates/` - EJS templates for generating theme files
+
+Note: The vim and markdown templates use custom color mappings optimized for readability, while other
+templates follow standard base16 semantic mappings.
 
 ### System Integration via Symlinks
 Theme files are integrated via symlinks to their respective application config directories:
@@ -123,10 +132,12 @@ ln -sf ~/dev/custom/hypr/themes/base16-cyberpunk.theme ~/.config/btop/themes/bas
 
 ### Theme Loading
 - **Vim/Neovim**: `colorscheme cyberpunk` in `init.vim`
+- **Markdown Viewer**: Reference `cyberpunk.md-theme.css` in your markdown viewer configuration
 - **ZSH**: Sourced in `~/.zshrc.theme-override` via `source "${HOME}/dev/custom/hypr/themes/base16-cyberpunk.sh"`
 - **Alacritty**: Imported in `~/dev/custom/hypr/alacritty.toml` via `import` directive
 - **Btop**: Select "base16-cyberpunk" in btop's theme menu (ESC → Options → Color theme)
 - **Tmux**: Sourced in `~/.tmux.conf` via `source-file ~/dev/custom/hypr/themes/base16-cyberpunk.tmuxtheme`
+- **Monkeytype**: Open the URL saved in `~/dev/custom/monkeytype-url` to automatically load the custom theme
 
 ### Theme Generation
 Themes are generated from templates using the `apply-themes` script:
@@ -138,7 +149,9 @@ Themes are generated from templates using the `apply-themes` script:
 ./scripts/apply-themes --scheme cyberpunk
 ```
 
-The vim template uses custom color mappings that produce the same visual result with both schemes, while other templates follow standard base16 mappings.
+The vim and markdown CSS templates use custom color mappings optimized for readability and visual
+consistency with vim's markdown highlighting, while other templates follow standard base16 semantic
+mappings.
 
 ### Known Limitations and Workarounds
 
