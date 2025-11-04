@@ -15,7 +15,7 @@
 * {
     border: none;
     border-radius: 0;
-    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-family: "Inconsolata Nerd Font Mono", "Inconsolata", "Symbols Nerd Font Mono", "JetBrains Mono", "Fira Code", monospace;
     font-size: 14px;
     min-height: 0;
 }
@@ -283,10 +283,50 @@ window#waybar {
     box-shadow: 0 0 20px rgba(0, 243, 255, 0.4);
 }
 
+/* Custom Discord button */
+#custom-discord {
+    color: #ff00ff;
+    font-size: 32px;
+    padding: 4px 14px;
+    text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
+    background-color: rgba(26, 27, 61, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(89, 156, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+#custom-discord:hover {
+    color: #ff6b35;
+    background-color: rgba(255, 107, 53, 0.15);
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
+/* Custom Spotify button */
+#custom-spotify {
+    color: #00f3ff;
+    font-size: 32px;
+    padding: 4px 14px;
+    text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
+    background-color: rgba(26, 27, 61, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(89, 156, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+#custom-spotify:hover {
+    color: #ff6b35;
+    background-color: rgba(255, 107, 53, 0.15);
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
 /* Custom lock button */
 #custom-lock {
     color: #ff00ff;
-    font-size: 18px;
+    font-size: 20px;
     padding: 4px 14px;
     text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
 }
@@ -300,7 +340,7 @@ window#waybar {
 /* Custom power button */
 #custom-power {
     color: #ff00ff;
-    font-size: 20px;
+    font-size: 32px;
     font-weight: bold;
     padding: 4px 14px;
     text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
@@ -326,6 +366,6 @@ tooltip {
 
 tooltip label {
     color: #e0e0ff;
-    font-family: "JetBrains Mono", monospace;
+    font-family: "Inconsolata Nerd Font Mono", "Inconsolata", monospace;
 }
 

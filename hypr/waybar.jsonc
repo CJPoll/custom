@@ -1,6 +1,6 @@
 {
     // Main bar configuration
-    "layer": "bottom",
+    "layer": "top",
     "position": "top",
     "height": 64,
     "spacing": 8,
