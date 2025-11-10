@@ -323,6 +323,46 @@ window#waybar {
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
+/* Custom Steam button */
+#custom-steam {
+    color: #00f3ff;
+    font-size: 32px;
+    padding: 4px 14px;
+    text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
+    background-color: rgba(26, 27, 61, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(89, 156, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+#custom-steam:hover {
+    color: #ff6b35;
+    background-color: rgba(255, 107, 53, 0.15);
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
+/* Custom Slack button */
+#custom-slack {
+    color: #39ff14;
+    font-size: 32px;
+    padding: 4px 14px;
+    text-shadow: 0 0 8px rgba(57, 255, 20, 0.5);
+    background-color: rgba(26, 27, 61, 0.8);
+    border-radius: 8px;
+    border: 1px solid rgba(89, 156, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+#custom-slack:hover {
+    color: #ff6b35;
+    background-color: rgba(255, 107, 53, 0.15);
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    border-color: #ff6b35;
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
 /* Custom lock button */
 #custom-lock {
     color: #ff00ff;

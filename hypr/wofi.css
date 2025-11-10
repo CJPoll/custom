@@ -118,6 +118,10 @@ window {
     padding: 2px 8px;
     color: #e0e0ff;
     font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
 }
 
 #entry:selected #text {

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# emoji-picker - Emoji and Nerd Font icon picker using wofi
+#
+# Usage: emoji-picker [--clipboard-only]
+#
+# Options:
+#   --clipboard-only    Only copy to clipboard, don't type the character
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EMOJI_LIST="${SCRIPT_DIR}/emoji-list.txt"
+
+# Check if emoji list exists
+if [[ ! -f "${EMOJI_LIST}" ]]; then
+    notify-send "Emoji Picker" "Error: emoji-list.txt not found" -u critical
+    exit 1
+fi
+
+# Parse arguments
+CLIPBOARD_ONLY=false
+if [[ "${1:-}" == "--clipboard-only" ]]; then
+    CLIPBOARD_ONLY=true
+fi
+
+# Show wofi picker and get selection
+selected=$(cat "${EMOJI_LIST}" | wofi --dmenu --insensitive --prompt "Pick emoji/icon" --width 800 --height 500 --style /home/cjpoll/.config/hypr/wofi.css)
+
+# Exit if nothing selected
+if [[ -z "${selected}" ]]; then
+    exit 0
+fi
+
+# Extract just the emoji/icon (first field)
+emoji=$(echo "${selected}" | awk '{print $1}')
+
+# Copy to clipboard
+echo -n "${emoji}" | wl-copy
+
+# Type the character unless clipboard-only mode
+if [[ "${CLIPBOARD_ONLY}" == false ]]; then
+    # Small delay to ensure the picker closes
+    sleep 0.1
+    wtype "${emoji}"
+fi
+
+# Show notification
+description=$(echo "${selected}" | cut -d' ' -f2-)
+notify-send "Emoji Picker" "Copied: ${emoji} (${description})" -t 2000

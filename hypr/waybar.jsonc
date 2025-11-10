@@ -1,6 +1,6 @@
 {
     // Main bar configuration
-    "layer": "top",
+    "layer": "bottom",
     "position": "top",
     "height": 64,
     "spacing": 8,
@@ -10,7 +10,9 @@
     "modules-left": [
         "hyprland/workspaces",
         "custom/discord",
-        "custom/spotify"
+        "custom/spotify",
+        "custom/slack",
+        "custom/steam"
     ],
     "modules-center": [
         "memory",
@@ -134,6 +136,24 @@
         "tooltip": true,
         "tooltip-format": "Spotify",
         "on-click": "spotify",
+        "return-type": ""
+    },
+
+    // Steam launcher
+    "custom/steam": {
+        "format": "󰓓",
+        "tooltip": true,
+        "tooltip-format": "Steam",
+        "on-click": "steam",
+        "return-type": ""
+    },
+
+    // Slack launcher
+    "custom/slack": {
+        "format": "󰒱",
+        "tooltip": true,
+        "tooltip-format": "Slack",
+        "on-click": "slack",
         "return-type": ""
     },
 
