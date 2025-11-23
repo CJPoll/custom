@@ -30,3 +30,11 @@ style.shape = "Block"
 style.blinking = "On"
 blink_interval = 750
 unfocused_hollow = true
+
+[[hints.enabled]]
+# URL hints - Ctrl+Click to open URLs
+regex = "(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file:|git://|ssh:|ftp://)[^\u0000-\u001f\u007f-\u009f<>\"\\s{-}\\^⟨⟩`]+"
+command = "xdg-open"
+post_processing = true
+mouse.enabled = true
+mouse.mods = "Control"
