@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# Get memory usage percentage and values
+mem_info=$(free -b | awk '/^Mem:/ {printf "%.0f %.1f %.1f %.1f", $3/$2 * 100, $3/1024/1024/1024, $2/1024/1024/1024, $6/1024/1024/1024}')
+read -r mem_percent mem_used mem_total mem_cache <<< "$mem_info"
+
+# Get swap usage
+swap_info=$(free -b | awk '/^Swap:/ {printf "%.1f %.1f", $3/1024/1024/1024, $2/1024/1024/1024}')
+read -r swap_used swap_total <<< "$swap_info"
+
+# Get GPU memory (VRAM + GTT for AMD)
+vram_total=$(cat /sys/class/drm/card*/device/mem_info_vram_total 2>/dev/null | head -1)
+vram_used=$(cat /sys/class/drm/card*/device/mem_info_vram_used 2>/dev/null | head -1)
+gtt_total=$(cat /sys/class/drm/card*/device/mem_info_gtt_total 2>/dev/null | head -1)
+gtt_used=$(cat /sys/class/drm/card*/device/mem_info_gtt_used 2>/dev/null | head -1)
+
+if [[ -n "$vram_total" ]]; then
+    vram_used_mb=$(awk "BEGIN {printf \"%.0f\", ${vram_used:-0}/1024/1024}")
+    vram_total_mb=$(awk "BEGIN {printf \"%.0f\", ${vram_total}/1024/1024}")
+    gtt_used_gb=$(awk "BEGIN {printf \"%.1f\", ${gtt_used:-0}/1024/1024/1024}")
+    gpu_info="VRAM: ${vram_used_mb}M / ${vram_total_mb}M | GPU Shared: ${gtt_used_gb}G"
+else
+    gpu_info=""
+fi
+
+# Get top 10 memory-consuming processes
+# Format: PID, Memory in MB, Command name
+top_procs=$(ps axo pid,rss,comm --sort=-rss | head -11 | tail -10 | awk '{printf "%5s  %7.1fM  %s\\n", $1, $2/1024, $3}')
+
+# Get RAM hogs summary (grouped by app name)
+# Groups related processes: steam*, discord, claude, firefox, chrom*, etc.
+ram_hogs=$(ps axo rss,comm --sort=-rss | awk '
+NR > 1 {
+    cmd = tolower($2)
+    mem = $1 / 1024  # Convert to MB
+
+    # Group related processes
+    if (cmd ~ /^steam/) app = "Steam"
+    else if (cmd ~ /discord/) app = "Discord"
+    else if (cmd ~ /claude/) app = "Claude"
+    else if (cmd ~ /firefox/) app = "Firefox"
+    else if (cmd ~ /chrom/) app = "Chrome"
+    else if (cmd ~ /electron/) app = "Electron"
+    else if (cmd ~ /slack/) app = "Slack"
+    else if (cmd ~ /spotify/) app = "Spotify"
+    else if (cmd ~ /code/) app = "VS Code"
+    else if (cmd ~ /^browser/ || cmd ~ /webkit/) app = "Browser"
+    else app = ""
+
+    if (app != "") {
+        apps[app] += mem
+    }
+}
+END {
+    for (app in apps) {
+        mem = apps[app]
+        if (mem >= 50) {  # Skip apps using less than 50MB
+            printf "%012.1f %s\n", mem, app
+        }
+    }
+}' | sort -rn | head -5 | awk '{
+    mem = $1 + 0
+    app = $2
+    if (mem >= 1024) {
+        printf "%6.1fG  %s\\n", mem/1024, app
+    } else {
+        printf "%6.0fM  %s\\n", mem, app
+    }
+}')
+
+# Build tooltip with header
+tooltip="Memory: ${mem_percent}% (${mem_used}G / ${mem_total}G)\\nCache: ${mem_cache}G | Swap: ${swap_used}G / ${swap_total}G"
+if [[ -n "$gpu_info" ]]; then
+    tooltip="${tooltip}\\n${gpu_info}"
+fi
+tooltip="${tooltip}\\n\\n=== RAM Hogs ===\\n${ram_hogs}\\n\\n=== Top Processes ===\\n  PID      MEM  PROCESS\\n${top_procs}"
+
+# Output JSON for waybar
+printf '{"text": "%.1fG", "tooltip": "%s", "percentage": %s}\n' "$mem_used" "$tooltip" "$mem_percent"

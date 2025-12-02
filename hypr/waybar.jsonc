@@ -2,8 +2,8 @@
     // Main bar configuration
     "layer": "bottom",
     "position": "top",
-    "height": 64,
-    "spacing": 8,
+    "height": 10,
+    "spacing": 4,
     "margin": "0 0 0 0",
 
     // Module layout
@@ -15,8 +15,9 @@
         "custom/steam"
     ],
     "modules-center": [
-        "memory",
-        "cpu"
+        "custom/memory-procs",
+        "cpu",
+        "custom/battery"
     ],
     "modules-right": [
         "pulseaudio",
@@ -61,6 +62,22 @@
         "format": "{used}Gb",
         "tooltip": true,
         "tooltip-format": "Memory: {used:0.1f}G / {total:0.1f}G\nSwap: {swapUsed:0.1f}G / {swapTotal:0.1f}G"
+    },
+
+    // Memory with top processes in tooltip
+    "custom/memory-procs": {
+        "exec": "~/dev/custom/scripts/waybar-memory-procs",
+        "return-type": "json",
+        "interval": 5,
+        "tooltip": true
+    },
+
+    // Battery configuration (custom script for TLP profile in tooltip)
+    "custom/battery": {
+        "exec": "~/dev/custom/scripts/waybar-battery",
+        "return-type": "json",
+        "interval": 10,
+        "tooltip": true
     },
 
     // PulseAudio configuration

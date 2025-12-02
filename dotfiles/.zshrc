@@ -102,9 +102,9 @@ export LANG=en_US.UTF-8
 
 # Preferred editor for local and remote sessions
 if [[ -n $SSH_CONNECTION ]]; then
-  export EDITOR='vim'
+  export EDITOR='nvim'
 else
-  export EDITOR='vim'
+  export EDITOR='nvim'
 fi
 
 export MANPAGER='nvim Man!'
@@ -119,6 +119,7 @@ alias tmuxrc="$EDITOR ${HOME}/.tmux.conf";
 alias vimrc="$EDITOR ${HOME}/.config/nvim/init.vim";
 alias nvimdiff="nvim -d"
 alias vimdiff="nvim -d"
+alias vim="nvim"
 alias x='exit';
 alias xclip='xclip -selection clipboard';
 alias zshrc="$EDITOR ${HOME}/.zshrc";

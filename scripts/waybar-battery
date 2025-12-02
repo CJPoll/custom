@@ -1,0 +1,64 @@
+#!/bin/bash
+# Waybar battery module with TLP profile in tooltip
+
+# Get battery info
+capacity=$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -1)
+status=$(cat /sys/class/power_supply/BAT*/status 2>/dev/null | head -1)
+
+# Get TLP profile
+tlp_mode=$(tlp-stat -s 2>/dev/null | grep "Mode" | awk '{print $3}')
+[ -z "$tlp_mode" ] && tlp_mode="unknown"
+
+# Get power draw if available
+power=$(cat /sys/class/power_supply/BAT*/power_now 2>/dev/null | head -1)
+if [ -n "$power" ]; then
+    power_watts=$(echo "scale=1; $power / 1000000" | bc)
+    power_text="${power_watts}W"
+else
+    power_text="N/A"
+fi
+
+# Determine icon based on status and capacity
+if [ "$status" = "Charging" ]; then
+    icon="󰂄"
+elif [ "$status" = "Full" ]; then
+    icon="󰁹"
+elif [ "$capacity" -ge 90 ]; then
+    icon="󰁹"
+elif [ "$capacity" -ge 80 ]; then
+    icon="󰂂"
+elif [ "$capacity" -ge 70 ]; then
+    icon="󰂁"
+elif [ "$capacity" -ge 60 ]; then
+    icon="󰂀"
+elif [ "$capacity" -ge 50 ]; then
+    icon="󰁿"
+elif [ "$capacity" -ge 40 ]; then
+    icon="󰁾"
+elif [ "$capacity" -ge 30 ]; then
+    icon="󰁽"
+elif [ "$capacity" -ge 20 ]; then
+    icon="󰁼"
+elif [ "$capacity" -ge 10 ]; then
+    icon="󰁻"
+else
+    icon="󰁺"
+fi
+
+# Determine class for styling
+if [ "$status" = "Charging" ]; then
+    class="charging"
+elif [ "$status" = "Full" ] || [ "$status" = "Not charging" ]; then
+    class="plugged"
+elif [ "$capacity" -le 15 ]; then
+    class="critical"
+elif [ "$capacity" -le 30 ]; then
+    class="warning"
+else
+    class=""
+fi
+
+# Output JSON for waybar
+tooltip="Battery: ${capacity}%\nStatus: ${status}\nPower: ${power_text}\nTLP Profile: ${tlp_mode}"
+
+echo "{\"text\": \"${icon} ${capacity}%\", \"tooltip\": \"${tooltip}\", \"class\": \"${class}\"}"

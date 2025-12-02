@@ -187,12 +187,27 @@ The Hyprland ecosystem uses multiple configuration files, all stored in `~/dev/c
 **Symlink Integration:**
 These configs are symlinked to their expected locations:
 ```bash
+~/.config/hypr/hyprland.conf -> ~/dev/custom/hypr/hyprland.conf
 ~/.config/hypr/hypridle.conf -> ~/dev/custom/hypr/hypridle.conf
+~/.config/hypr/hyprlock.conf -> ~/dev/custom/hypr/hyprlock.conf
+~/.config/hypr/hyprpaper.conf -> ~/dev/custom/hypr/hyprpaper.conf
+~/.config/alacritty/alacritty.toml -> ~/dev/custom/hypr/alacritty.toml
+~/.config/waybar/config.jsonc -> ~/dev/custom/hypr/waybar.jsonc
+~/.config/waybar/style.css -> ~/dev/custom/hypr/waybar.css
+~/.config/wofi/style.css -> ~/dev/custom/hypr/wofi.css
 ```
 
-To recreate the symlink if needed:
+To recreate symlinks if needed:
 ```bash
+mkdir -p ~/.config/hypr ~/.config/waybar ~/.config/wofi ~/.config/alacritty
+ln -sf ~/dev/custom/hypr/hyprland.conf ~/.config/hypr/hyprland.conf
 ln -sf ~/dev/custom/hypr/hypridle.conf ~/.config/hypr/hypridle.conf
+ln -sf ~/dev/custom/hypr/hyprlock.conf ~/.config/hypr/hyprlock.conf
+ln -sf ~/dev/custom/hypr/hyprpaper.conf ~/.config/hypr/hyprpaper.conf
+ln -sf ~/dev/custom/hypr/alacritty.toml ~/.config/alacritty/alacritty.toml
+ln -sf ~/dev/custom/hypr/waybar.jsonc ~/.config/waybar/config.jsonc
+ln -sf ~/dev/custom/hypr/waybar.css ~/.config/waybar/style.css
+ln -sf ~/dev/custom/hypr/wofi.css ~/.config/wofi/style.css
 ```
 
 ## Idle Management (Hypridle)
