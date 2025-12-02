@@ -22,8 +22,8 @@
 
 /* Main window */
 window#waybar {
-    background-color: rgba(10, 14, 39, 0.85);
-    border-bottom: 2px solid #00f3ff;
+    background-color: transparent;
+    border-bottom: none;
     color: #e0e0ff;
     padding: 2px 24px;
     transition: background-color 0.2s ease;
@@ -48,14 +48,14 @@ window#waybar {
 .module {
     padding: 2px 12px;
     margin: 2px 2px;
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
     min-height: 0;
 }
 
 .module:hover {
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
@@ -70,7 +70,7 @@ window#waybar {
 #workspaces button {
     padding: 2px 14px;
     margin: 2px 2px;
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     color: #e0e0ff;
     border: 1px solid rgba(89, 156, 255, 0.3);
     border-radius: 9999px;
@@ -81,7 +81,7 @@ window#waybar {
 #workspaces button:hover {
     color: #ff6b35;
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     border-color: #ff6b35;
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
@@ -125,7 +125,7 @@ window#waybar {
     padding: 2px 16px;
     margin: 2px 2px;
     text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
     min-height: 0;
@@ -134,7 +134,7 @@ window#waybar {
 #cpu:hover {
     color: #ff6b35;
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
@@ -145,7 +145,7 @@ window#waybar {
     padding: 2px 16px;
     margin: 2px 2px;
     text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
     min-height: 0;
@@ -154,7 +154,7 @@ window#waybar {
 #memory:hover {
     color: #ff6b35;
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
@@ -165,7 +165,7 @@ window#waybar {
     padding: 2px 16px;
     margin: 4px 2px;
     text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
     min-height: 0;
@@ -174,7 +174,7 @@ window#waybar {
 #custom-memory-procs:hover {
     color: #ff6b35;
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
@@ -185,7 +185,7 @@ window#waybar {
     padding: 2px 16px;
     margin: 2px 2px;
     text-shadow: 0 0 8px rgba(57, 255, 20, 0.5);
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
     min-height: 0;
@@ -194,7 +194,7 @@ window#waybar {
 #custom-battery:hover {
     color: #ff6b35;
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
@@ -240,7 +240,7 @@ window#waybar {
     font-weight: 600;
     padding: 2px 16px;
     text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
 }
@@ -248,7 +248,7 @@ window#waybar {
 #pulseaudio:hover {
     color: #ff6b35;
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
@@ -263,7 +263,7 @@ window#waybar {
     font-weight: 600;
     padding: 2px 16px;
     text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
 }
@@ -271,7 +271,7 @@ window#waybar {
 #clock:hover {
     color: #ff6b35;
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
@@ -281,7 +281,7 @@ window#waybar {
     font-weight: 600;
     padding: 2px 16px;
     text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
 }
@@ -289,7 +289,7 @@ window#waybar {
 #network:hover {
     color: #ff6b35;
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
@@ -306,13 +306,13 @@ window#waybar {
 /* Tray */
 #tray {
     padding: 2px 12px;
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
 }
 
 #tray:hover {
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
@@ -358,14 +358,14 @@ window#waybar {
     font-size: 32px;
     padding: 2px 14px;
     text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
 }
 
 #custom-discord:hover {
     color: #ff6b35;
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
@@ -376,14 +376,14 @@ window#waybar {
     font-size: 32px;
     padding: 2px 14px;
     text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
 }
 
 #custom-spotify:hover {
     color: #ff6b35;
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
@@ -394,14 +394,14 @@ window#waybar {
     font-size: 32px;
     padding: 2px 14px;
     text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
 }
 
 #custom-steam:hover {
     color: #ff6b35;
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
@@ -412,14 +412,14 @@ window#waybar {
     font-size: 32px;
     padding: 2px 14px;
     text-shadow: 0 0 8px rgba(57, 255, 20, 0.5);
-    background-color: rgba(26, 27, 61, 0.8);
+    background-color: rgba(10, 14, 39, 0.85);
     border-radius: 9999px;
     transition: all 0.3s ease;
 }
 
 #custom-slack:hover {
     color: #ff6b35;
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
@@ -434,7 +434,7 @@ window#waybar {
 
 #custom-lock:hover {
     color: #ff6b35;
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
@@ -450,7 +450,7 @@ window#waybar {
 
 #custom-power:hover {
     color: #ff6b35;
-    background-color: rgba(37, 40, 71, 0.9);
+    background-color: rgba(10, 14, 39, 0.95);
     text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
@@ -459,7 +459,7 @@ window#waybar {
 tooltip {
     background-color: rgba(10, 14, 39, 0.95);
     border: 2px solid #00f3ff;
-    border-radius: 9999px;
+    border-radius: 8px;
     padding: 12px;
     color: #e0e0ff;
     box-shadow: 0 0 20px rgba(0, 243, 255, 0.4);
