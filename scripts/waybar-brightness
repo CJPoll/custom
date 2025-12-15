@@ -1,6 +1,12 @@
 #!/bin/bash
 # Waybar brightness module
 
+# Exit early if no backlight exists (desktop machines)
+if ! ls /sys/class/backlight/* >/dev/null 2>&1; then
+    echo '{"text": "", "tooltip": "", "class": "hidden"}'
+    exit 0
+fi
+
 # Get brightness info
 brightness=$(xbacklight -get 2>/dev/null | cut -d. -f1)
 [ -z "$brightness" ] && brightness="0"

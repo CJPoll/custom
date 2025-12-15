@@ -1,6 +1,12 @@
 #!/bin/bash
 # Waybar battery module with TLP profile in tooltip
 
+# Exit early if no battery exists (desktop machines)
+if ! ls /sys/class/power_supply/BAT* >/dev/null 2>&1; then
+    echo '{"text": "", "tooltip": "", "class": "hidden"}'
+    exit 0
+fi
+
 # Get battery info
 capacity=$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -1)
 status=$(cat /sys/class/power_supply/BAT*/status 2>/dev/null | head -1)
