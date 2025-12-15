@@ -234,6 +234,26 @@ window#waybar {
     }
 }
 
+/* Brightness */
+#custom-brightness {
+    color: #f1fa8c;
+    font-weight: 600;
+    padding: 2px 16px;
+    margin: 2px 2px;
+    text-shadow: 0 0 8px rgba(241, 250, 140, 0.5);
+    background-color: rgba(10, 14, 39, 0.85);
+    border-radius: 9999px;
+    transition: all 0.3s ease;
+    min-height: 0;
+}
+
+#custom-brightness:hover {
+    color: #ff6b35;
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    background-color: rgba(10, 14, 39, 0.95);
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
 /* PulseAudio */
 #pulseaudio {
     color: #ff00ff;
@@ -347,7 +367,7 @@ window#waybar {
 #tray menu {
     background-color: rgba(10, 14, 39, 0.95);
     border: 2px solid #00f3ff;
-    border-radius: 9999px;
+    border-radius: 8px;
     padding: 8px;
     box-shadow: 0 0 20px rgba(0, 243, 255, 0.4);
 }
@@ -426,10 +446,10 @@ window#waybar {
 
 /* Custom lock button */
 #custom-lock {
-    color: #ff00ff;
-    font-size: 20px;
+    color: #f1fa8c;
+    font-size: 32px;
     padding: 2px 14px;
-    text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
+    text-shadow: 0 0 8px rgba(241, 250, 140, 0.5);
 }
 
 #custom-lock:hover {
@@ -439,13 +459,28 @@ window#waybar {
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
+/* Custom logout button */
+#custom-logout {
+    color: #ff6b35;
+    font-size: 32px;
+    padding: 2px 14px;
+    text-shadow: 0 0 8px rgba(255, 107, 53, 0.5);
+}
+
+#custom-logout:hover {
+    color: #ff6b35;
+    background-color: rgba(10, 14, 39, 0.95);
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
 /* Custom power button */
 #custom-power {
-    color: #ff00ff;
+    color: #ff0066;
     font-size: 32px;
     font-weight: bold;
     padding: 2px 14px;
-    text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
+    text-shadow: 0 0 8px rgba(255, 0, 102, 0.5);
 }
 
 #custom-power:hover {

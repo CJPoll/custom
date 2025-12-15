@@ -68,10 +68,7 @@ echo
 
 # Define Claude prompts
 CLAUDE_PROMPTS=(
-    "/swe:01-context Linear: ${LINEAR_TICKET}"
-    "/swe:02-plan"
-    "/swe:03-detailed-plan"
-    "/swe:04-implement"
+    "/coordinate-work Linear: ${LINEAR_TICKET} - you are approved to have Vera begin implementation as soon as Nyx and Vera both give their approval."
 )
 
 # Function to run a command with logging and status

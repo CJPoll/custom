@@ -5,17 +5,58 @@
 capacity=$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -1)
 status=$(cat /sys/class/power_supply/BAT*/status 2>/dev/null | head -1)
 
+# Try energy_* first, fall back to charge_*
+charge_now=$(cat /sys/class/power_supply/BAT*/energy_now 2>/dev/null | head -1)
+charge_full=$(cat /sys/class/power_supply/BAT*/energy_full 2>/dev/null | head -1)
+current=$(cat /sys/class/power_supply/BAT*/power_now 2>/dev/null | head -1)
+
+# Fall back to charge_*/current_now if energy_*/power_now not available
+if [ -z "$charge_now" ]; then
+    charge_now=$(cat /sys/class/power_supply/BAT*/charge_now 2>/dev/null | head -1)
+    charge_full=$(cat /sys/class/power_supply/BAT*/charge_full 2>/dev/null | head -1)
+    current=$(cat /sys/class/power_supply/BAT*/current_now 2>/dev/null | head -1)
+fi
+
 # Get TLP profile
 tlp_mode=$(tlp-stat -s 2>/dev/null | grep "Mode" | awk '{print $3}')
 [ -z "$tlp_mode" ] && tlp_mode="unknown"
 
-# Get power draw if available
-power=$(cat /sys/class/power_supply/BAT*/power_now 2>/dev/null | head -1)
-if [ -n "$power" ]; then
-    power_watts=$(echo "scale=1; $power / 1000000" | bc)
-    power_text="${power_watts}W"
+# Calculate power and time remaining
+if [ -n "$current" ] && [ "$current" -gt 0 ]; then
+    # Get voltage to calculate watts (voltage_now is in microvolts)
+    voltage=$(cat /sys/class/power_supply/BAT*/voltage_now 2>/dev/null | head -1)
+    if [ -n "$voltage" ]; then
+        # Power in watts = (current in µA * voltage in µV) / 10^12
+        power_watts=$(echo "scale=1; ($current * $voltage) / 1000000000000" | bc)
+        power_text="${power_watts}W"
+    else
+        power_text="N/A"
+    fi
+
+    # Calculate time remaining (charge/current gives hours)
+    if [ "$status" = "Discharging" ] && [ -n "$charge_now" ]; then
+        # Time to empty (in hours)
+        hours=$(echo "scale=2; $charge_now / $current" | bc)
+        hours_int=$(echo "$hours" | cut -d. -f1)
+        minutes=$(echo "scale=0; ($hours - $hours_int) * 60" | bc | cut -d. -f1)
+        [ -z "$hours_int" ] && hours_int=0
+        [ -z "$minutes" ] && minutes=0
+        time_remaining="${hours_int}h ${minutes}m remaining"
+    elif [ "$status" = "Charging" ] && [ -n "$charge_now" ] && [ -n "$charge_full" ]; then
+        # Time to full (in hours)
+        charge_needed=$((charge_full - charge_now))
+        hours=$(echo "scale=2; $charge_needed / $current" | bc)
+        hours_int=$(echo "$hours" | cut -d. -f1)
+        minutes=$(echo "scale=0; ($hours - $hours_int) * 60" | bc | cut -d. -f1)
+        [ -z "$hours_int" ] && hours_int=0
+        [ -z "$minutes" ] && minutes=0
+        time_remaining="${hours_int}h ${minutes}m until full"
+    else
+        time_remaining="N/A"
+    fi
 else
     power_text="N/A"
+    time_remaining="N/A"
 fi
 
 # Determine icon based on status and capacity
@@ -59,6 +100,6 @@ else
 fi
 
 # Output JSON for waybar
-tooltip="Battery: ${capacity}%\nStatus: ${status}\nPower: ${power_text}\nTLP Profile: ${tlp_mode}"
+tooltip="Battery: ${capacity}%\nStatus: ${status}\nTime: ${time_remaining}\nPower: ${power_text}\nTLP Profile: ${tlp_mode}"
 
 echo "{\"text\": \"${icon} ${capacity}%\", \"tooltip\": \"${tooltip}\", \"class\": \"${class}\"}"

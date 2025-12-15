@@ -17,7 +17,8 @@
     "modules-center": [
         "custom/memory-procs",
         "cpu",
-        "custom/battery"
+        "custom/battery",
+        "custom/brightness"
     ],
     "modules-right": [
         "pulseaudio",
@@ -25,6 +26,7 @@
         "tray",
         "network",
         "custom/lock",
+        "custom/logout",
         "custom/power"
     ],
 
@@ -77,6 +79,14 @@
         "exec": "~/dev/custom/scripts/waybar-battery",
         "return-type": "json",
         "interval": 10,
+        "tooltip": true
+    },
+
+    // Brightness configuration
+    "custom/brightness": {
+        "exec": "~/dev/custom/scripts/waybar-brightness",
+        "return-type": "json",
+        "interval": 2,
         "tooltip": true
     },
 
@@ -176,10 +186,19 @@
 
     // Lock icon
     "custom/lock": {
-        "format": "🔒",
+        "format": "󰌾",
         "tooltip": true,
         "tooltip-format": "Lock Screen",
         "on-click": "hyprlock",
+        "return-type": ""
+    },
+
+    // Logout icon
+    "custom/logout": {
+        "format": "󰍃",
+        "tooltip": true,
+        "tooltip-format": "Log Out",
+        "on-click": "hyprctl dispatch exit",
         "return-type": ""
     },
 

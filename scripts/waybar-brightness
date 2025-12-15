@@ -1,0 +1,22 @@
+#!/bin/bash
+# Waybar brightness module
+
+# Get brightness info
+brightness=$(xbacklight -get 2>/dev/null | cut -d. -f1)
+[ -z "$brightness" ] && brightness="0"
+
+# Determine icon based on brightness level
+if [ "$brightness" -ge 75 ]; then
+    icon="󰃠"
+elif [ "$brightness" -ge 50 ]; then
+    icon="󰃟"
+elif [ "$brightness" -ge 25 ]; then
+    icon="󰃞"
+else
+    icon="󰃝"
+fi
+
+# Output JSON for waybar
+tooltip="Brightness: ${brightness}%"
+
+echo "{\"text\": \"${icon} ${brightness}%\", \"tooltip\": \"${tooltip}\"}"

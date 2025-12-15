@@ -8,7 +8,7 @@ REGISTERED_SERVERS = {
       port: 4444,
       host: "cjpoll@#{HOME_IP}",
       ports: {
-        4003 => 4003
+        #4003 => 4003
       },
       ssh_forward: false
     }
