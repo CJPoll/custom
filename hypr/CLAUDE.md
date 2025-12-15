@@ -187,26 +187,44 @@ The Hyprland ecosystem uses multiple configuration files, all stored in `~/dev/c
 **Symlink Integration:**
 These configs are symlinked to their expected locations:
 ```bash
+# Hyprland configs
 ~/.config/hypr/hyprland.conf -> ~/dev/custom/hypr/hyprland.conf
-~/.config/hypr/hypridle.conf -> ~/dev/custom/hypr/hypridle.conf
 ~/.config/hypr/hyprlock.conf -> ~/dev/custom/hypr/hyprlock.conf
+~/.config/hypr/hypridle.conf -> ~/dev/custom/hypr/hypridle.conf
 ~/.config/hypr/hyprpaper.conf -> ~/dev/custom/hypr/hyprpaper.conf
+~/.config/hypr/wofi.css -> ~/dev/custom/hypr/wofi.css
+
+# Terminal
 ~/.config/alacritty/alacritty.toml -> ~/dev/custom/hypr/alacritty.toml
+
+# Status bar
 ~/.config/waybar/config.jsonc -> ~/dev/custom/hypr/waybar.jsonc
 ~/.config/waybar/style.css -> ~/dev/custom/hypr/waybar.css
+
+# Wofi
 ~/.config/wofi/style.css -> ~/dev/custom/hypr/wofi.css
 ```
 
 To recreate symlinks if needed:
 ```bash
+# Create directories
 mkdir -p ~/.config/hypr ~/.config/waybar ~/.config/wofi ~/.config/alacritty
+
+# Hyprland configs
 ln -sf ~/dev/custom/hypr/hyprland.conf ~/.config/hypr/hyprland.conf
-ln -sf ~/dev/custom/hypr/hypridle.conf ~/.config/hypr/hypridle.conf
 ln -sf ~/dev/custom/hypr/hyprlock.conf ~/.config/hypr/hyprlock.conf
+ln -sf ~/dev/custom/hypr/hypridle.conf ~/.config/hypr/hypridle.conf
 ln -sf ~/dev/custom/hypr/hyprpaper.conf ~/.config/hypr/hyprpaper.conf
+ln -sf ~/dev/custom/hypr/wofi.css ~/.config/hypr/wofi.css
+
+# Terminal
 ln -sf ~/dev/custom/hypr/alacritty.toml ~/.config/alacritty/alacritty.toml
+
+# Status bar
 ln -sf ~/dev/custom/hypr/waybar.jsonc ~/.config/waybar/config.jsonc
 ln -sf ~/dev/custom/hypr/waybar.css ~/.config/waybar/style.css
+
+# Wofi
 ln -sf ~/dev/custom/hypr/wofi.css ~/.config/wofi/style.css
 ```
 

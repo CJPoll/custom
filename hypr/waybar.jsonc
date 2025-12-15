@@ -38,7 +38,8 @@
             "2": "2",
             "3": "3",
             "4": "4",
-            "5": "GAMES"
+            "5": "GAMES",
+            "6": "MEDIA"
         },
         "on-click": "activate",
         "persistent-workspaces": {

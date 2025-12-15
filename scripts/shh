@@ -4,12 +4,20 @@ HOME_IP='76.149.255.225'
 
 REGISTERED_SERVERS = {
 	"home" => {
-    "dev" => {
+    "office" => {
       port: 4444,
       host: "cjpoll@#{HOME_IP}",
       ports: {
         #4003 => 4003
       },
+      ssh_forward: false
+    },
+    "laptop" => {
+      port: 22,
+      ports: {
+        4004 => 4004
+      },
+      host: "cjpoll@192.168.4.190",
       ssh_forward: false
     }
   }
