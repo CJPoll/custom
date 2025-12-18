@@ -1,0 +1,5 @@
+#!/bin/bash
+# Wrapper script to start Hyprland with a proper D-Bus session
+# Used by greetd: command = "tuigreet --cmd '/home/cjpoll/dev/custom/scripts/start-hyprland'"
+
+exec dbus-run-session hyprland

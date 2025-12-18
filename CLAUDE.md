@@ -7,6 +7,7 @@ This repository contains personal development tools and configurations:
 - **scripts/**: Custom shell scripts and tools (including `wt` for worktree management)
 - **ai/**: Stored AI prompts and default CLAUDE.md templates for projects
 - **ai-artifacts/**: Working documents and plans for tool development
+- **system-files/**: System-level configuration files (requires root to install)
 
 ## Repository Structure
 
@@ -57,6 +58,19 @@ Contains AI-related resources:
 
 ### .auto-completions/
 ZSH completion definitions for custom commands, providing tab-completion support.
+
+### system-files/
+System-level configuration files that require root privileges to install.
+
+**Symlinks (requires sudo):**
+```bash
+/etc/greetd/config.toml -> ~/dev/custom/system-files/greetd-config.toml
+```
+
+To create symlinks:
+```bash
+sudo ln -sf ~/dev/custom/system-files/greetd-config.toml /etc/greetd/config.toml
+```
 
 ## Development Guidelines
 
