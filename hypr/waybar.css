@@ -444,6 +444,24 @@ window#waybar {
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
+/* Custom Pyrope button */
+#custom-pyrope {
+    color: #A52A35;
+    font-size: 32px;
+    padding: 2px 14px;
+    text-shadow: 0 0 8px rgba(165, 42, 53, 0.5);
+    background-color: rgba(10, 14, 39, 0.85);
+    border-radius: 9999px;
+    transition: all 0.3s ease;
+}
+
+#custom-pyrope:hover {
+    color: #E36C74;
+    background-color: rgba(10, 14, 39, 0.95);
+    text-shadow: 0 0 12px rgba(227, 108, 116, 0.8);
+    box-shadow: 0 0 12px rgba(227, 108, 116, 0.4);
+}
+
 /* Custom lock button */
 #custom-lock {
     color: #f1fa8c;

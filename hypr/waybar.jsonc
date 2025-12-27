@@ -12,7 +12,8 @@
         "custom/discord",
         "custom/spotify",
         "custom/slack",
-        "custom/steam"
+        "custom/steam",
+        "custom/pyrope"
     ],
     "modules-center": [
         "custom/memory-procs",
@@ -182,6 +183,15 @@
         "tooltip": true,
         "tooltip-format": "Slack",
         "on-click": "slack",
+        "return-type": ""
+    },
+
+    // Pyrope browser launcher
+    "custom/pyrope": {
+        "format": "󰫢",
+        "tooltip": true,
+        "tooltip-format": "Pyrope (Browser)",
+        "on-click": "~/dev/custom/scripts/browser",
         "return-type": ""
     },
 

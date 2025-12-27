@@ -1,0 +1,29 @@
+# Cyberpunk Neon - Warp Terminal Theme
+# Author: cjpoll
+# Based on base16-cyberpunk scheme
+# Matches Alacritty ANSI color mapping
+name: Cyberpunk Neon
+accent: '#00f3ff'
+cursor: '#00f3ff'
+background: '#0a0e27'
+foreground: '#e0e0ff'
+details: darker
+terminal_colors:
+  normal:
+    black: '#0a0e27'   # Deep Dark
+    red: '#f1fa8c'     # Neon Yellow (base08 slot)
+    green: '#599cff'   # Electric Blue
+    yellow: '#ff00ff'  # Neon Magenta
+    blue: '#00f3ff'    # Neon Cyan
+    magenta: '#ff6b35' # Neon Orange
+    cyan: '#39ff14'    # Neon Green
+    white: '#e0e0ff'   # Soft White
+  bright:
+    black: '#5a5b7d'   # Medium purple-gray
+    red: '#ff0066'     # Neon Red
+    green: '#599cff'   # Electric Blue
+    yellow: '#ff00ff'  # Neon Magenta
+    blue: '#00f3ff'    # Neon Cyan
+    magenta: '#ff6b35' # Neon Orange
+    cyan: '#39ff14'    # Neon Green
+    white: '#f5f5ff'   # Brightest White
