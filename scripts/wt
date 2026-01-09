@@ -121,6 +121,8 @@ Options:
   --all, -a         Stage all changes before creating (for create --insert)
   --no-verify       Skip git hooks (for create --insert)
   --dir <directory> Check the specified directory (for is-worktree command, defaults to current dir)
+  --project-dir <path> Override project directory for worktree location
+                    (worktrees go to ~/.local/worktrees/<project-name>/)
   --pr-review       Open changed files in tabs for PR review (for switch command)
   --parent <branch> Parent branch for PR review or stack creation (defaults to main)
   --stack           Execute command for entire stack (for pr commands)
@@ -338,6 +340,18 @@ while [[ $# -gt 0 ]]; do
             CHECK_DIR="$1"
             shift
             ;;
+        --project-dir)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "Error: --project-dir requires a directory path" >&2
+                exit 1
+            fi
+            # Override PROJECT_DIR from common.sh
+            PROJECT_DIR="$1"
+            PROJECT_NAME="$(basename "$PROJECT_DIR")"
+            WORKTREES_DIR="${HOME}/.local/worktrees/$PROJECT_NAME"
+            shift
+            ;;
         --install)
             # Flag to trigger git-stack installation if not already present
             INSTALL_GIT_STACK=true
@@ -393,6 +407,17 @@ done
 # Skip execution if being sourced by another script
 if [ "${WT_SOURCED_ONLY:-false}" = true ]; then
     return 0 2>/dev/null || true
+fi
+
+# If --project-dir was provided, change to that directory for git operations
+# This ensures git commands operate on the correct repository
+if [ -n "${PROJECT_DIR:-}" ] && [ "$PROJECT_DIR" != "$(pwd)" ]; then
+    if [ -d "$PROJECT_DIR" ]; then
+        cd "$PROJECT_DIR" || { echo "Error: Cannot change to project directory: $PROJECT_DIR" >&2; exit 1; }
+    else
+        echo "Error: Project directory does not exist: $PROJECT_DIR" >&2
+        exit 1
+    fi
 fi
 
 # Execute the appropriate command

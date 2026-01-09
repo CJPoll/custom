@@ -22,6 +22,7 @@
         "custom/brightness"
     ],
     "modules-right": [
+        "custom/audio-sink",
         "pulseaudio",
         "clock",
         "tray",
@@ -92,16 +93,22 @@
         "tooltip": true
     },
 
+    // Audio sink picker
+    "custom/audio-sink": {
+        "exec": "~/dev/custom/scripts/waybar-audio-sink",
+        "return-type": "json",
+        "interval": 2,
+        "on-click": "~/dev/custom/scripts/waybar-audio-sink --pick",
+        "tooltip": true
+    },
+
     // PulseAudio configuration
     "pulseaudio": {
-        "format": "{icon} {volume}%",
-        "format-muted": " {volume}%",
+        "format": "<span size='large'>󰕾</span> {volume}%",
+        "format-muted": "<span size='xx-large'>󰝟</span>",
         "on-click": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
         "on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
-        "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%",
-        "format-icons": {
-            "default": ["", "", ""]
-        }
+        "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%"
     },
 
     // Clock configuration

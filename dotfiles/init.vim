@@ -33,7 +33,6 @@ Plug 'tpope/vim-surround'                " Auto-surround text (quotes, html, etc
 Plug 'vim-scripts/zoomwintab.vim'        " Zooms a tab into a specific pane
 Plug 'chriskempson/base16-vim'
 Plug 'elixir-editors/vim-elixir'
-Plug 'madox2/vim-ai'
 
 " Claude Code Dep (and elixir-tools)
 Plug 'nvim-lua/plenary.nvim'

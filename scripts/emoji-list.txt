@@ -627,6 +627,176 @@
 8 digit eight 8
 9 digit nine 9
 🔟 keycap 10 ten
+🤔 thinking face ponder wonder
+🤐 zipper mouth face secret quiet
+🤑 money mouth face rich dollar
+🤒 face thermometer sick ill fever
+🤓 nerd face glasses geek smart
+🤕 face head bandage injured hurt
+🤖 robot face bot android
+🤗 hugging face hug embrace
+🤠 cowboy hat face western
+🤡 clown face circus joker
+🤢 nauseated face sick gross
+🤣 rolling floor laughing rofl lmao
+🤤 drooling face hungry yum
+🤥 lying face pinocchio liar
+🤦 facepalm frustrated doh
+🤧 sneezing face achoo sick
+🤨 face raised eyebrow skeptical suspicious
+🤩 star struck excited amazed
+🤪 zany face crazy wild goofy
+🤫 shushing face quiet secret
+🤬 face symbols mouth swearing cursing
+🤭 face hand over mouth oops giggle
+🤮 face vomiting sick puke barf
+🤯 exploding head mind blown shocked
+🥰 smiling face hearts love affection
+🥱 yawning face tired sleepy bored
+🥲 smiling face tear happy sad
+🥳 partying face celebration birthday
+🥴 woozy face drunk dizzy
+🥵 hot face sweating heat
+🥶 cold face freezing frozen
+🥸 disguised face glasses mustache incognito
+🥹 face holding back tears emotional touched
+🥺 pleading face puppy eyes begging
+🫠 melting face hot disappear
+🫡 saluting face respect military
+🫢 face open eyes hand over mouth surprised
+🫣 face peeking eye shy nervous
+🫤 face diagonal mouth skeptical meh
+🫥 dotted line face invisible hidden
+🫦 biting lip nervous flirty
+🫨 shaking face震 vibrating
+🤌 pinched fingers italian gesture
+🤏 pinching hand small tiny
+🫰 hand index finger thumb crossed money snap
+🫱 rightward hand push
+🫲 leftward hand push
+🫳 palm down hand stop
+🫴 palm up hand offer give
+🫵 index pointing at viewer you
+🫶 heart hands love gesture
+🤲 palms up together pray receive
+🖐 hand fingers splayed high five
+🖖 vulcan salute spock
+🖕 middle finger rude flip off
+🦤 dodo bird extinct
+🦣 mammoth woolly prehistoric
+🦫 beaver dam wood
+🦭 seal marine animal
+🪿 goose honk bird
+🫎 moose elk antlers
+🪼 jellyfish ocean sea
+🪻 hyacinth flower purple
+🪺 nest eggs bird
+🪹 empty nest bird
+🪸 coral reef ocean
+🦩 flamingo pink bird
+🦚 peacock feathers bird
+🦜 parrot tropical bird
+🦢 swan elegant bird
+🦧 orangutan ape primate
+🦥 sloth slow lazy
+🦦 otter cute water
+🦨 skunk stink spray
+🦬 bison buffalo
+🦮 guide dog service blind
+🐕‍🦺 service dog assistance
+🦝 raccoon trash panda
+🦙 llama alpaca
+🦛 hippopotamus hippo
+🦘 kangaroo australia joey
+🦡 badger animal
+🦔 hedgehog spiky cute
+🫐 blueberries fruit berries
+🧋 bubble tea boba milk tea
+🫒 olive green mediterranean
+🫑 bell pepper vegetable capsicum
+🫓 flatbread pita naan
+🫔 tamale mexican food
+🫕 fondue cheese pot
+🫖 teapot tea kettle
+🧃 juice box beverage drink
+🧊 ice cube frozen cold
+🥯 bagel bread breakfast
+🥮 mooncake chinese dessert
+🧆 falafel middle eastern food
+🧇 waffle breakfast
+🥟 dumpling asian food
+🥠 fortune cookie chinese
+🥡 takeout box container chinese
+🥢 chopsticks asian utensils
+🥣 bowl spoon cereal
+🥤 cup straw drink beverage
+🥫 canned food tin
+🫗 pouring liquid drink
+🫘 beans legume
+🫙 jar container preserve
+🪴 potted plant houseplant
+🪙 coin money gold
+🪤 mouse trap catch
+🪜 ladder climb steps
+🛗 elevator lift
+🪞 mirror reflection
+🪟 window glass pane
+🪠 plunger toilet unclog
+🪢 knot rope tied
+🪣 bucket pail container
+🪥 toothbrush dental hygiene
+🪦 headstone grave tombstone
+🪧 placard sign protest
+🛖 hut shelter cabin
+🛻 pickup truck vehicle
+🛼 roller skate skating
+🩴 thong sandal flip flop
+🩱 one piece swimsuit
+🩲 briefs underwear
+🩳 shorts pants
+🪖 military helmet army
+🪗 accordion music instrument
+🪘 long drum percussion
+🪕 banjo music instrument
+🪔 diya lamp oil light
+🪓 axe chop wood tool
+🪚 saw carpentry tool
+🪛 screwdriver tool fix
+🪝 hook fishing catch
+🪆 nesting dolls matryoshka russian
+🪅 pinata party candy
+🪄 magic wand wizard spell
+🪃 boomerang throw return
+🪂 parachute skydiving fall
+🪁 kite flying wind
+🩸 drop blood red
+🩻 x-ray medical scan bones
+🩼 crutch injury mobility
+🫀 anatomical heart organ
+🫁 lungs organ breathing
+🦷 tooth dental teeth
+🦴 bone skeleton
+🧠 brain think mind smart
+🧶 yarn knitting craft
+🧵 thread sewing needle
+🧿 nazar amulet evil eye protection
+🪬 hamsa hand protection
+👨‍💻 man technologist developer programmer coder
+👩‍💻 woman technologist developer programmer coder
+🧑‍💻 technologist developer programmer coder
+👨‍🔬 man scientist research lab
+👩‍🔬 woman scientist research lab
+🧑‍🔬 scientist research lab
+👨‍🎨 man artist painter creative
+👩‍🎨 woman artist painter creative
+👨‍🍳 man cook chef kitchen
+👩‍🍳 woman cook chef kitchen
+👨‍🏫 man teacher professor education
+👩‍🏫 woman teacher professor education
+👨‍⚕️ man health worker doctor nurse medical
+👩‍⚕️ woman health worker doctor nurse medical
+👨‍🚀 man astronaut space
+👩‍🚀 woman astronaut space
 󰑹 nf-md-sd sd material design
 󰦙 nf-md-qi qi material design
 󱟅 nf-md-ph ph material design
@@ -1611,3 +1781,203 @@
 󰻀 nf-md-penguin penguin material design
 󰢂 nf-md-patreon patreon material design
 󰏣 nf-md-parking parking material design
+󰀄 nf-md-account account user profile person
+󰋜 nf-md-home home house
+󰉋 nf-md-folder folder directory
+󰈙 nf-md-file file document
+󰒓 nf-md-cog cog gear settings
+󰍉 nf-md-magnify search magnify find
+󰅖 nf-md-close close x cancel
+󰄬 nf-md-check check checkmark done tick
+󰐕 nf-md-plus plus add new
+󰍴 nf-md-minus minus subtract remove
+󰍜 nf-md-menu menu hamburger
+󰇙 nf-md-dots-vertical dots vertical more options
+󰇘 nf-md-dots-horizontal dots horizontal more options
+󰂞 nf-md-bell bell notification alert
+󰃭 nf-md-calendar calendar date schedule
+󰅐 nf-md-clock clock time
+󰇮 nf-md-email email mail envelope
+󰏲 nf-md-phone phone call telephone
+󰄀 nf-md-camera camera photo
+󰈟 nf-md-image image picture photo
+󰕧 nf-md-video video movie film
+󰝚 nf-md-music music audio song
+󰇚 nf-md-download download save
+󰕒 nf-md-upload upload send
+󰅟 nf-md-cloud cloud storage
+󰌾 nf-md-lock lock secure locked
+󰌿 nf-md-lock-open unlock unlocked open
+󰌋 nf-md-key key password unlock
+󰞀 nf-md-shield shield security protect
+󰓎 nf-md-star star favorite rating
+󰓏 nf-md-star-outline star outline empty
+󰋑 nf-md-heart heart love favorite
+󰃀 nf-md-bookmark bookmark save later
+󰒖 nf-md-share share send social
+󰌷 nf-md-link link url chain
+󰆏 nf-md-content-copy copy duplicate clipboard
+󰐌 nf-md-content-paste paste clipboard
+󰆐 nf-md-content-cut cut scissors
+󰕌 nf-md-undo undo back revert
+󰑎 nf-md-redo redo forward
+󰑓 nf-md-refresh refresh reload
+󰓦 nf-md-sync sync synchronize
+󰀦 nf-md-alert alert warning attention
+󰋼 nf-md-information information info circle
+󰋗 nf-md-help-circle help question circle
+󰘥 nf-md-alert-circle warning alert error circle
+󰀨 nf-md-alert-octagon error alert stop
+󰖩 nf-md-wifi wifi wireless network
+󰂯 nf-md-bluetooth bluetooth wireless
+󰁹 nf-md-battery battery power charge
+󰂄 nf-md-battery-charging battery charging power
+󰐥 nf-md-power power on off
+󰆍 nf-md-console terminal console command
+󰞷 nf-md-code-braces code braces programming
+󰆼 nf-md-database database storage sql
+󰒋 nf-md-server server hosting machine
+󰌥 nf-md-laptop laptop computer notebook
+󰍹 nf-md-monitor monitor display screen
+󰄝 nf-md-cellphone cellphone mobile phone
+󰓥 nf-md-swap-horizontal swap horizontal exchange
+󰒪 nf-md-sort sort order arrange
+󰈲 nf-md-filter filter funnel
+󰯈 nf-md-table table grid data
+󰊭 nf-md-graph graph chart analytics
+󰈴 nf-md-fire fire flame hot
+󰢿 nf-md-lightbulb lightbulb idea bright
+󰛨 nf-md-moon-waning-crescent moon night dark
+󰖨 nf-md-white-balance-sunny sun sunny bright day
+󰃞 nf-md-brightness-6 brightness theme light dark
+󰸉 nf-md-format-list-bulleted list bulleted
+󰸋 nf-md-format-list-numbered list numbered ordered
+󰐃 nf-md-pin pin location marker
+󰆦 nf-md-map-marker map marker location pin
+󰦑 nf-md-navigation navigation compass direction
+󰀳 nf-md-arrow-left arrow left back
+󰀵 nf-md-arrow-right arrow right forward next
+󰀸 nf-md-arrow-up arrow up
+󰀯 nf-md-arrow-down arrow down
+󰅁 nf-md-chevron-left chevron left
+󰅂 nf-md-chevron-right chevron right
+󰅃 nf-md-chevron-up chevron up
+󰅀 nf-md-chevron-down chevron down
+󰁍 nf-md-arrow-expand expand fullscreen
+󰁌 nf-md-arrow-collapse collapse minimize
+󰏫 nf-md-pencil pencil edit write
+󰷉 nf-md-trash-can trash delete remove bin
+󰊄 nf-md-eye eye view visible show
+󰛑 nf-md-eye-off eye off hidden invisible
+󰐊 nf-md-play play start media
+󰏤 nf-md-pause pause stop media
+󰓛 nf-md-stop stop media end
+󰒭 nf-md-skip-next skip next forward media
+󰒮 nf-md-skip-previous skip previous back media
+󰕾 nf-md-volume-high volume high loud speaker
+󰖀 nf-md-volume-low volume low quiet speaker
+󰝟 nf-md-volume-off volume off mute silent
+󰄊 nf-md-cart cart shopping basket
+󰄑 nf-md-cash cash money payment
+󰁯 nf-md-credit-card credit card payment
+ nf-dev-python python programming language
+ nf-dev-javascript javascript js programming language
+ nf-dev-typescript typescript ts programming language
+ nf-dev-rust rust programming language
+ nf-dev-go golang go programming language
+ nf-dev-ruby ruby programming language
+ nf-dev-elixir elixir programming language erlang
+ nf-dev-java java programming language
+ nf-dev-kotlin kotlin programming language android
+ nf-dev-swift swift programming language apple ios
+ nf-dev-php php programming language web
+ nf-dev-csharp csharp c# dotnet programming language
+ nf-dev-cplusplus c++ cpp programming language
+ nf-dev-c c programming language
+ nf-dev-html5 html5 html web markup
+ nf-dev-css3 css3 css stylesheet web
+ nf-dev-react react reactjs javascript library
+ nf-dev-vue vue vuejs javascript framework
+ nf-dev-angular angular javascript framework
+ nf-dev-nodejs nodejs node javascript runtime
+ nf-dev-npm npm package manager javascript
+ nf-dev-docker docker container devops
+ nf-dev-kubernetes kubernetes k8s container orchestration
+ nf-dev-git git version control
+ nf-dev-github github git hosting
+ nf-dev-gitlab gitlab git hosting ci
+ nf-dev-linux linux penguin operating system
+ nf-dev-apple apple macos ios
+ nf-dev-windows windows microsoft os
+ nf-dev-vim vim editor text
+ nf-dev-neovim neovim nvim editor
+ nf-dev-visualstudio vscode visual studio code editor
+ nf-dev-postgresql postgresql postgres database sql
+ nf-dev-mysql mysql database sql
+ nf-dev-mongodb mongodb database nosql
+ nf-dev-redis redis database cache
+ nf-dev-nginx nginx web server
+ nf-dev-aws aws amazon web services cloud
+ nf-dev-terraform terraform infrastructure devops
+ nf-dev-markdown markdown md documentation
+ nf-dev-sass sass scss css preprocessor
+ nf-dev-less less css preprocessor
+ nf-dev-webpack webpack bundler javascript
+ nf-dev-gulp gulp task runner javascript
+ nf-dev-grunt grunt task runner javascript
+ nf-dev-firebase firebase google backend
+ nf-dev-heroku heroku hosting platform
+ nf-dev-jenkins jenkins ci cd devops
+ nf-dev-graphql graphql api query
+ nf-dev-haskell haskell programming language functional
+ nf-dev-scala scala programming language jvm
+ nf-dev-clojure clojure programming language lisp jvm
+ nf-dev-erlang erlang programming language functional
+ nf-dev-lua lua programming language scripting
+ nf-dev-perl perl programming language scripting
+ nf-dev-bash bash shell scripting terminal
+ nf-pl-branch powerline branch git
+ nf-pl-line-number powerline line number
+ nf-pl-lock powerline lock readonly
+ nf-pl-right-arrow powerline right arrow separator
+ nf-pl-right-arrow-thin powerline right arrow thin separator
+ nf-pl-left-arrow powerline left arrow separator
+ nf-pl-left-arrow-thin powerline left arrow thin separator
+ nf-cod-terminal codicon terminal console shell
+ nf-cod-debug codicon debug breakpoint
+ nf-cod-folder codicon folder directory
+ nf-cod-file codicon file document
+ nf-cod-git-branch codicon git branch version
+ nf-cod-git-commit codicon git commit save
+ nf-cod-git-merge codicon git merge combine
+ nf-cod-extensions codicon extensions plugins addons
+ nf-cod-settings-gear codicon settings gear cog
+ nf-cod-search codicon search find magnify
+ nf-cod-source-control codicon source control git version
+ nf-cod-run codicon run execute play
+ nf-cod-debug-start codicon debug start play
+ nf-cod-split-horizontal codicon split horizontal panes
+ nf-cod-split-vertical codicon split vertical panes
+ nf-weather-day-sunny weather sunny day clear sun
+ nf-weather-night-clear weather night clear moon stars
+ nf-weather-day-cloudy weather cloudy day clouds
+ nf-weather-rain weather rain rainy precipitation
+ nf-weather-snow weather snow snowy winter
+ nf-weather-thunderstorm weather thunderstorm lightning storm
+ nf-weather-fog weather fog foggy mist
+ nf-weather-windy weather windy wind
+ nf-weather-day-rain weather day rain rainy
+ nf-weather-night-rain weather night rain rainy
+ nf-weather-snowflake-cold weather snowflake cold frozen
+ nf-weather-hot weather hot temperature heat
+ nf-weather-celsius weather celsius temperature degrees
+ nf-weather-fahrenheit weather fahrenheit temperature degrees
+ nf-weather-humidity weather humidity moisture water
+ nf-weather-barometer weather barometer pressure
+ nf-linux-archlinux linux arch archlinux distro
+ nf-linux-ubuntu linux ubuntu distro
+ nf-linux-debian linux debian distro
+ nf-linux-fedora linux fedora distro
+ nf-linux-gentoo linux gentoo distro
+ nf-linux-nixos linux nixos nix distro
+ nf-linux-raspberry-pi linux raspberry pi arm

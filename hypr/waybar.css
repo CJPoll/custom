@@ -254,6 +254,24 @@ window#waybar {
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
+/* Audio Sink Picker */
+#custom-audio-sink {
+    color: #00f3ff;
+    font-weight: 600;
+    padding: 2px 16px;
+    text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
+    background-color: rgba(10, 14, 39, 0.85);
+    border-radius: 9999px;
+    transition: all 0.3s ease;
+}
+
+#custom-audio-sink:hover {
+    color: #ff6b35;
+    text-shadow: 0 0 12px rgba(255, 107, 53, 0.8);
+    background-color: rgba(10, 14, 39, 0.95);
+    box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+}
+
 /* PulseAudio */
 #pulseaudio {
     color: #ff00ff;
@@ -272,10 +290,6 @@ window#waybar {
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
 }
 
-#pulseaudio.muted {
-    color: rgba(255, 0, 255, 0.4);
-    text-shadow: 0 0 4px rgba(255, 0, 255, 0.2);
-}
 
 /* Clock */
 #clock {

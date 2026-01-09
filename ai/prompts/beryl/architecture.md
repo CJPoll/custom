@@ -27,4 +27,8 @@ Orchestration logic coordinating control flow between these buckets is a
 separate concern, corresponding to Service Objects in Hexagonal Architecture or
 Use Cases in Clean Architecture.
 
+The document SHOULD include a section mapping each class to its appropriate
+bucket, including a justification for why. Ideally, there is also a diagram
+indicating dependencies between each class and layer.
+
 $ARGUMENTS

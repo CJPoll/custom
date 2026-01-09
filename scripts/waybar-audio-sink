@@ -1,0 +1,86 @@
+#!/bin/bash
+# Waybar audio sink picker module
+# Shows current sink, click to switch
+
+get_current_sink() {
+    wpctl status 2>/dev/null | grep -A 20 "Audio" | grep -A 10 "Sinks:" | grep '\*' | head -1 | sed 's/.*\*\s*[0-9]*\.\s*//' | sed 's/\s*\[vol:.*$//'
+}
+
+get_sink_icon() {
+    local sink="$1"
+    case "$sink" in
+        *WH-1000XM5*|*bluez*|*Bluetooth*|*headset*|*Headphones*)
+            echo "󰋋"  # Headphones icon
+            ;;
+        *HDMI*|*hdmi*)
+            echo "󰡁"  # HDMI/Display icon
+            ;;
+        *Yeti*|*USB*|*usb*)
+            echo "󰍬"  # Microphone/USB audio icon
+            ;;
+        *)
+            echo "󰓃"  # Speaker icon
+            ;;
+    esac
+}
+
+short_name() {
+    local name="$1"
+    # Shorten common device names
+    case "$name" in
+        *WH-1000XM5*)
+            echo "XM5"
+            ;;
+        *"Family 17h"*|*"HD Audio Controller Analog"*)
+            echo "Speakers"
+            ;;
+        *HDMI*|*"Digital Stereo"*)
+            echo "HDMI"
+            ;;
+        *Yeti*)
+            echo "Yeti"
+            ;;
+        *)
+            # Truncate to first 12 chars if too long
+            echo "${name:0:12}"
+            ;;
+    esac
+}
+
+pick_sink() {
+    # Get sinks using awk for reliable parsing
+    local menu
+    menu=$(wpctl status 2>/dev/null | \
+        sed -n '/Audio/,/Video/p' | \
+        sed -n '/Sinks:/,/Sources:/p' | \
+        grep '\[vol:' | \
+        awk -F'\\. ' '{split($1, a, / /); id=a[length(a)]; gsub(/\*/, "", id); name=$2; gsub(/ *\[vol:.*/, "", name); print id": "name}')
+
+    # Show wofi picker with cyberpunk theme
+    local selection
+    selection=$(echo "$menu" | wofi --dmenu \
+        --prompt "Audio Output" \
+        --style ~/.config/hypr/wofi.css \
+        2>/dev/null)
+
+    if [[ -n "$selection" ]]; then
+        local selected_id
+        selected_id=$(echo "$selection" | cut -d':' -f1)
+        wpctl set-default "$selected_id" 2>/dev/null
+    fi
+}
+
+case "$1" in
+    --pick)
+        pick_sink
+        ;;
+    *)
+        # Default: output JSON for waybar
+        current=$(get_current_sink)
+        icon=$(get_sink_icon "$current")
+        short=$(short_name "$current")
+
+        # Output JSON
+        echo "{\"text\": \"${icon} ${short}\", \"tooltip\": \"Audio: ${current}\", \"class\": \"audio-sink\"}"
+        ;;
+esac
