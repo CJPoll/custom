@@ -1,0 +1,164 @@
+# Gentoo System Packages
+
+## System Administration
+app-admin/sudo                  - Allows users to run commands with elevated privileges.
+app-admin/sysklogd              - System logging daemon for recording system messages.
+
+## Containers
+app-containers/docker           - Container runtime platform for building and running containerized applications.
+app-containers/docker-cli       - Command-line interface for interacting with Docker.
+app-containers/docker-compose   - Tool for defining and running multi-container Docker applications.
+
+## Editors
+app-editors/nano                - Simple, beginner-friendly terminal-based text editor.
+app-editors/neovim              - Modern, extensible fork of the Vim text editor.
+
+## Portage/Gentoo Tools
+app-eselect/eselect-repository  - Gentoo tool for managing ebuild repository configurations.
+app-portage/gentoolkit          - Collection of administration utilities for Gentoo systems.
+
+## Terminal Utilities
+app-misc/dragon                 - Lightweight drag-and-drop source/target for X11 and Wayland.
+app-misc/fastfetch              - Fast system information fetcher similar to neofetch.
+app-misc/tmux                   - Terminal multiplexer for managing multiple terminal sessions.
+app-misc/yazi                   - Blazing fast terminal file manager with image preview support.
+
+## Shells
+app-shells/fzf                  - General-purpose command-line fuzzy finder.
+app-shells/zsh                  - Powerful shell with advanced scripting and completion features.
+
+## Documentation
+app-text/tldr                   - Simplified, community-driven man pages with practical examples.
+
+## Development - Build Tools
+dev-build/cmake                 - Cross-platform build system generator.
+dev-util/pkgconf                - Package compiler and linker metadata toolkit (pkg-config replacement).
+kde-frameworks/extra-cmake-modules - Additional CMake modules used by KDE projects.
+
+## Development - Languages
+dev-lang/nasm                   - Netwide Assembler for x86/x64 assembly language.
+dev-lang/python:3.8             - Python programming language interpreter version 3.8.
+dev-lang/yasm                   - Modular assembler supporting multiple object formats.
+
+## Development - Python
+dev-python/pip                  - Python package installer for installing packages from PyPI.
+dev-python/pynvim               - Python client library for Neovim's remote plugin API.
+
+## Development - Utilities
+dev-util/cloc                   - Tool for counting lines of code in source files.
+dev-util/github-cli             - GitHub's official command-line tool for repository management.
+
+## Development - Compilers
+llvm-core/clang                 - C/C++/Objective-C compiler based on LLVM infrastructure.
+llvm-core/libclc                - OpenCL C library implementations for LLVM.
+
+## Version Control
+dev-vcs/git                     - Distributed version control system for tracking code changes.
+
+## Database
+dev-db/postgresql               - Advanced open-source relational database server.
+
+## Gaming
+games-util/steam-launcher       - Launcher for the Steam gaming platform.
+
+## Hyprland Ecosystem
+gui-wm/hyprland                 - Dynamic tiling Wayland compositor with animations and effects.
+gui-apps/hypridle               - Idle daemon for triggering actions after inactivity in Hyprland.
+gui-apps/hyprlock               - Screen locker designed for the Hyprland compositor.
+gui-apps/hyprpaper              - Wallpaper utility for setting backgrounds in Hyprland.
+gui-apps/hyprshot               - Screenshot utility designed for Hyprland.
+gui-libs/xdg-desktop-portal-hyprland - XDG desktop portal backend enabling screen sharing in Hyprland.
+
+## Display/Login Management
+gui-apps/tuigreet               - Text-based user interface greeter for greetd.
+gui-libs/display-manager-init   - OpenRC init script for starting display managers.
+gui-libs/greetd                 - Minimal and flexible login manager daemon.
+
+## Wayland Utilities
+gui-apps/waybar                 - Highly customizable status bar for Wayland compositors.
+gui-apps/wofi                   - Application launcher and dmenu replacement for Wayland.
+gui-libs/gtk-layer-shell        - GTK library for creating panels and overlays on Wayland.
+
+## Fonts
+media-fonts/inconsolata         - Clean monospace font designed for programming.
+media-fonts/nerdfonts           - Developer-targeted fonts patched with icons and symbols.
+media-fonts/noto                - Google's font family covering all Unicode scripts.
+media-fonts/noto-emoji          - Google's color emoji font for Unicode emoji support.
+media-fonts/symbols-nerd-font   - Standalone Nerd Font symbols for icon support.
+
+## Graphics
+media-gfx/bambustudio-bin       - Slicer software for Bambu Lab 3D printers.
+media-gfx/ueberzugpp            - Image display library for terminal emulators.
+media-libs/libglvnd             - Vendor-neutral OpenGL dispatch library.
+media-libs/mesa                 - Open-source OpenGL and Vulkan implementation.
+media-libs/vulkan-loader        - Vulkan API loader for graphics applications.
+x11-drivers/nvidia-drivers      - Proprietary NVIDIA graphics drivers with CUDA support.
+media-libs/nvidia-vaapi-driver  - VA-API implementation using NVIDIA's NVDEC for hardware video decoding.
+
+## Audio/Video Libraries
+media-libs/libpulse             - PulseAudio client library for audio applications.
+media-libs/libva                - Video Acceleration API for hardware video decoding.
+media-libs/x264                 - H.264/AVC video encoder library.
+media-plugins/gst-plugins-meta  - Meta package for installing GStreamer multimedia plugins.
+
+## Audio Applications
+media-sound/cava                - Console-based audio visualizer for ALSA/PulseAudio/PipeWire.
+media-sound/playerctl           - Command-line utility for controlling MPRIS media players.
+media-sound/spotify             - Spotify music streaming desktop client.
+
+## Video/Multimedia
+media-video/ffmpeg              - Complete multimedia framework for encoding, decoding, and streaming.
+media-video/libva-utils         - Collection of utilities and tests for VA-API.
+media-video/pipewire            - Modern multimedia server handling audio and video routing.
+media-video/vlc                 - Cross-platform multimedia player supporting most formats.
+media-video/wireplumber         - Session and policy manager for PipeWire.
+
+## Networking
+net-analyzer/netperf            - Network performance measurement and benchmarking tool.
+net-libs/libsoup                - HTTP client/server library for GNOME.
+net-libs/webkit-gtk             - WebKit rendering engine with GTK integration.
+net-misc/chrony                 - Versatile NTP client and server for time synchronization.
+net-misc/dhcpcd                 - DHCP client daemon for automatic network configuration.
+
+## Communication
+net-im/discord                  - Voice, video, and text communication platform.
+net-im/slack                    - Team collaboration and messaging platform.
+
+## Wireless/Bluetooth
+net-wireless/bluetui            - Terminal user interface for managing Bluetooth devices.
+net-wireless/bluez              - Official Linux Bluetooth protocol stack.
+net-wireless/iw                 - Command-line tool for configuring wireless devices.
+net-wireless/wpa_supplicant     - WPA/WPA2/WPA3 supplicant for wireless network authentication.
+
+## System Utilities
+sys-apps/ack                    - Grep-like source code search tool optimized for programmers.
+sys-apps/ripgrep                - Extremely fast recursive grep alternative.
+sys-fs/fuse:0                   - Filesystem in Userspace for mounting custom filesystems.
+sys-fs/inotify-tools            - Command-line tools for monitoring filesystem events.
+sys-libs/readline               - Library for command-line editing and history.
+
+## Authentication/Session
+sys-auth/elogind                - Standalone logind extracted from systemd for session management.
+sys-auth/rtkit                  - Realtime policy daemon for giving processes realtime priority.
+
+## Boot/Kernel
+sys-boot/efibootmgr             - Tool for modifying UEFI boot manager entries.
+sys-boot/grub                   - GNU GRUB bootloader for loading operating systems.
+sys-boot/mokutil                - Utility for managing Machine Owner Keys for Secure Boot.
+sys-boot/shim                   - UEFI shim loader for Secure Boot chain of trust.
+sys-kernel/gentoo-kernel        - Gentoo's distribution kernel with default configuration.
+sys-kernel/installkernel        - Utility for automating kernel installation.
+sys-kernel/linux-firmware       - Collection of firmware files for Linux kernel drivers.
+
+## Process Management
+sys-process/btop                - Resource monitor with an interactive terminal interface.
+sys-process/cronie              - Cron daemon for scheduling recurring tasks.
+
+## Web Browsers
+www-client/firefox              - Open-source web browser focused on privacy and standards.
+www-client/lynx                 - Text-mode web browser for terminal use.
+
+## Display/Input
+x11-libs/libxkbcommon           - Library for handling keyboard descriptions and keymaps.
+x11-misc/gammastep              - Adjusts screen color temperature based on time of day.
+x11-terms/alacritty             - GPU-accelerated terminal emulator written in Rust.

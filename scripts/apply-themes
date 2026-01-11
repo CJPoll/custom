@@ -28,8 +28,8 @@ TEMPLATES_DIR="${THEME_BASE_DIR}/templates"
 OUTPUT_DIR_THEMES="${CUSTOM_DIR}/hypr/themes"
 OUTPUT_DIR_HYPR="${CUSTOM_DIR}/hypr"
 
-# Default scheme (base16-compliant)
-SCHEME_NAME="base16-cyberpunk"
+# Default scheme
+SCHEME_NAME="cyberpunk"
 
 # Check if base16-builder is installed
 check_base16_builder() {
@@ -197,6 +197,12 @@ main() {
     apply_template \
         "${TEMPLATES_DIR}/monkeytype.json.ejs" \
         "${OUTPUT_DIR_THEMES}/monkeytype-cyberpunk.json" \
+        "$SCHEME_FILE" \
+        || ((failed++))
+
+    apply_template \
+        "${TEMPLATES_DIR}/grub-theme.txt.ejs" \
+        "${OUTPUT_DIR_THEMES}/grub/theme.txt" \
         "$SCHEME_FILE" \
         || ((failed++))
 
