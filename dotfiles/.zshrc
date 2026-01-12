@@ -64,7 +64,7 @@ ZSH_TMUX_AUTOQUIT=false;
 
 # NVIM is installed by going to the github releases page, download it, extract
 # the tarball, and put the extracted directory at "${HOME}/.local/nvim"
-export PATH="${HOME}/.local/nvim/bin:${HOME}/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin";
+export PATH="${HOME}/.local/bin:${HOME}/.local/nvim/bin:${HOME}/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 export ZSH_COMPDUMP="${HOME}/.cache/zsh/zcompdump-$ZSH_VERSION"
 
