@@ -1,5 +1,7 @@
 # architecture
 
+IMPORTANT: Before proceeding, check if there is a project-specific skill for feature architecture in the available Skill tool list. If a skill matching "*feature*architecture*" exists, invoke it using the Skill tool instead of proceeding manually. These skills contain project-specific patterns and best practices.
+
 Let's define any mermaid diagrams that would be useful for implementation or communication of that implementation to other engineers in this feature's `architecture.md`, the path to which is in context.
 
 The system should be organized into 4 different "buckets":

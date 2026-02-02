@@ -1,7 +1,20 @@
 #!/bin/bash
 
 # Get memory usage percentage and values
-mem_info=$(free -b | awk '/^Mem:/ {printf "%.0f %.1f %.1f %.1f", $3/$2 * 100, $3/1024/1024/1024, $2/1024/1024/1024, $6/1024/1024/1024}')
+# Use AnonPages for actual application memory (excludes all cache)
+mem_info=$(awk '
+  /^MemTotal:/ {total=$2}
+  /^AnonPages:/ {anon=$2}
+  /^Buffers:/ {buffers=$2}
+  /^Cached:/ {cached=$2}
+  END {
+    total_gb = total/1024/1024
+    anon_gb = anon/1024/1024
+    cache_gb = (buffers + cached)/1024/1024
+    percent = (anon/total) * 100
+    printf "%.0f %.1f %.1f %.1f", percent, anon_gb, total_gb, cache_gb
+  }
+' /proc/meminfo)
 read -r mem_percent mem_used mem_total mem_cache <<< "$mem_info"
 
 # Get swap usage

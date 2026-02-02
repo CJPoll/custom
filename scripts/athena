@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+if [ "$1" = "--claude" ]; then
+  claude --verbose --system-prompt "$(cat ~/.agents/athena.md)" --dangerously-skip-permissions "${@:2}"
+else
+  ~/dev/navigator/bin/tui
+fi

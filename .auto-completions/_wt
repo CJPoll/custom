@@ -30,8 +30,8 @@ _wt() {
                         'worktrees:worktree:_wt_worktrees' \
                         'flags:flag:(--all)'
                     ;;
-                reset)
-                    # No additional arguments for reset
+                init|list|reset|restack|next|prev)
+                    # No additional arguments for these commands
                     _message 'no more arguments'
                     ;;
                 sync)
@@ -61,12 +61,12 @@ _wt() {
                     _arguments \
                         '--stack[Create pull requests for entire stack]' \
                         '--draft[Create draft pull requests]' \
+                        '--publish[Publish draft PRs to ready state]' \
                         '--dry-run[Show what PRs would be created without creating them]'
                     ;;
                 ls)
-                    _arguments \
-                        '--current[Show only the current branch stack]' \
-                        '--install[Install Graphite (gt) if not already installed]'
+                    # ls is an alias for list, no additional arguments
+                    _message 'no more arguments'
                     ;;
                 stack)
                     # Handle stack subcommands
@@ -76,6 +76,7 @@ _wt() {
                             '--current:Show only the current branch stack'
                             '--install:Install Graphite (gt) if not already installed'
                             'parent:Set or update the parent branch for the current branch'
+                            'track:Track a branch with Graphite (delegates to gt track)'
                             'open:Create worktrees for all branches in the stack up to the given branch'
                             'move:Change parent or reorder branches in the stack'
                             'reorder:Rearrange multiple branches in the stack interactively'
@@ -87,9 +88,11 @@ _wt() {
                         case ${words[2]} in
                             parent)
                                 _arguments \
-                                    '1:parent branch:_wt_git_branches' \
-                                    '--restack[Restack after setting parent]' \
-                                    '--switch[Switch to parent worktree after setting]'
+                                    '1:parent branch:_wt_git_branches'
+                                ;;
+                            track)
+                                _arguments \
+                                    '--parent[Set parent branch when tracking]:branch:_wt_git_branches'
                                 ;;
                             open)
                                 # Complete branch names and flags for open subcommand
@@ -183,7 +186,7 @@ _wt_commands() {
     local commands=(
         'init:Set up the worktrees directory'
         'list:List all worktrees for the current project'
-        'ls:Show all tracked branches (alias for stack)'
+        'ls:List all worktrees for the current project (alias for list)'
         'create:Create a worktree for the specified branch'
         'rm:Remove the worktree for the specified branch'
         'close:Remove worktree and delete the local branch (use --all for all branches)'
@@ -206,36 +209,63 @@ _wt_commands() {
     _describe -t commands 'wt command' commands
 }
 
+# Helper function to get the project name (handles being inside a worktree)
+_wt_get_project_name() {
+    local current_dir="$(pwd)"
+    local project_dir="$current_dir"
+
+    # Check if we're in a worktree by looking for .git file (not directory)
+    if [[ -f "$current_dir/.git" ]]; then
+        # We're in a worktree, extract the actual project path
+        local git_dir=$(grep "gitdir:" "$current_dir/.git" | cut -d' ' -f2)
+        # Git dir for worktree looks like: /path/to/project/.git/worktrees/branch-name
+        # We need to go up 3 levels to get the project root
+        project_dir=$(dirname $(dirname $(dirname "$git_dir")))
+    fi
+
+    basename "$project_dir"
+}
+
 # Function to complete worktree names
 _wt_worktrees() {
-    local worktrees_dir="$HOME/.local/worktrees/$(basename $(pwd))"
-    local worktrees=()
+    local project_name="$(_wt_get_project_name)"
+    local worktrees_dir="$HOME/.local/worktrees/$project_name"
+    local -a worktrees
 
     if [[ -d "$worktrees_dir" ]]; then
-        # Get all worktrees from git that are under our worktrees directory
+        # Get worktrees by listing directories in the worktrees folder
+        # This is more reliable than parsing git worktree list
+        local dir
+        for dir in "$worktrees_dir"/*(/N); do
+            if [[ -n "$dir" ]]; then
+                local branch="${dir#$worktrees_dir/}"
+                if [[ -n "$branch" ]]; then
+                    worktrees+=("$branch")
+                fi
+            fi
+        done
+
+        # Also check git worktree list for any we might have missed
         local git_output
         git_output=$(git worktree list 2>/dev/null)
-        
+
         if [[ -n "$git_output" ]]; then
             while IFS= read -r line; do
-                # Extract the path from each line (first field)
                 local worktree_path="${line%% *}"
-                
-                # Check if this worktree is under our worktrees_dir
                 if [[ "$worktree_path" == "$worktrees_dir/"* ]]; then
-                    # Extract the branch name by removing the prefix
                     local branch="${worktree_path#$worktrees_dir/}"
-                    if [[ -n "$branch" ]]; then
-                        # Quote the branch name if it contains special characters
-                        worktrees+=("${(q)branch}")
+                    if [[ -n "$branch" ]] && (( ! ${worktrees[(Ie)$branch]} )); then
+                        worktrees+=("$branch")
                     fi
                 fi
             done <<< "$git_output"
         fi
-        
+
+        # Remove duplicates and use _multi_parts for slash-separated completion
+        worktrees=(${(u)worktrees})
+
         if (( ${#worktrees} > 0 )); then
-            # Use compadd directly for better control
-            compadd -a worktrees
+            _multi_parts / worktrees
         fi
     fi
 }
@@ -254,25 +284,26 @@ _wt_switchable_branches() {
     # Get all local branches
     local -a branches
     branches=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)"})
-    
+
     # Also get branches that have worktrees by checking the worktrees directory directly
-    local worktrees_dir="$HOME/.local/worktrees/$(basename $(pwd))"
+    local project_name="$(_wt_get_project_name)"
+    local worktrees_dir="$HOME/.local/worktrees/$project_name"
     if [[ -d "$worktrees_dir" ]]; then
         # Get directories directly from the worktrees folder
         local -a worktree_dirs
         worktree_dirs=(${(f)"$(ls -1 "$worktrees_dir" 2>/dev/null)"})
-        
+
         # Add each worktree directory as a potential branch
         for dir in "${worktree_dirs[@]}"; do
-            if [[ -n "$dir" && ! " ${branches[@]} " =~ " ${dir} " ]]; then
+            if [[ -n "$dir" ]] && (( ! ${branches[(Ie)$dir]} )); then
                 branches+=("$dir")
             fi
         done
-        
+
         # Also check git worktree list in case some are registered
         local git_output
         git_output=$(git worktree list 2>/dev/null)
-        
+
         if [[ -n "$git_output" ]]; then
             while IFS= read -r line; do
                 # Extract the path and branch from each line
@@ -281,18 +312,18 @@ _wt_switchable_branches() {
                 # Extract branch name from format like "abc123 [branch-name]"
                 if [[ "$branch_info" =~ \[([^\]]+)\] ]]; then
                     local branch="${match[1]}"
-                    # Add to branches if not already present
-                    if [[ ! " ${branches[@]} " =~ " ${branch} " ]]; then
+                    # Add to branches if not already present (using zsh array search)
+                    if (( ! ${branches[(Ie)$branch]} )); then
                         branches+=("$branch")
                     fi
                 fi
             done <<< "$git_output"
         fi
     fi
-    
+
     # Sort and remove duplicates
     branches=(${(u)branches})
-    
+
     if (( ${#branches} > 0 )); then
         _multi_parts / branches
     fi
