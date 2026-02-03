@@ -1,0 +1,20 @@
+# Yazi Configuration
+
+[mgr]
+# Show hidden files
+show_hidden = false
+
+[preview]
+# Maximum width for preview
+max_width = 600
+# Maximum height for preview
+max_height = 900
+
+# Image preview settings
+image_filter = "lanczos3"  # Options: nearest, triangle, catmull-rom, gaussian, lanczos3
+image_quality = 75
+
+# Ueberzugpp is the best option for most terminals including tmux
+# If you install chafa instead, change this to "chafa"
+ueberzug_scale = 1
+ueberzug_offset = [0, 0, 0, 0]
