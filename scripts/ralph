@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+
+set -e
+
+# Ralph: Autonomous implementation agent loop
+# Iteratively invokes Athena agent until completion or max iterations reached
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLAUDE_CMD="${HOME}/.local/bin/claude"
+RALPH_PROMPT="${HOME}/.claude/commands/ralph.md"
+ATHENA_SYSTEM_PROMPT="${HOME}/.agents/athena.md"
+
+# Configuration
+MAX_ITERATIONS="${1:-10}"
+PLAN_FILE="./ai-artifacts/plan.md"
+PROGRESS_FILE="./ai-artifacts/progress.md"
+ARCHIVE_DIR="./ai-artifacts/archives"
+
+# Colors for output
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Validate max iterations is a number
+if ! [[ "$MAX_ITERATIONS" =~ ^[0-9]+$ ]]; then
+    echo -e "${RED}Error: max_iterations must be a positive integer${NC}" >&2
+    echo "Usage: ralph [max_iterations]" >&2
+    echo "  max_iterations: Maximum number of iterations (default: 10)" >&2
+    exit 1
+fi
+
+# Check if plan file exists
+if [[ ! -f "$PLAN_FILE" ]]; then
+    echo -e "${RED}Error: Plan file not found at $PLAN_FILE${NC}" >&2
+    echo "Ralph requires a plan file at ./ai-artifacts/plan.md" >&2
+    exit 1
+fi
+
+# Check if claude command exists
+if [[ ! -x "$CLAUDE_CMD" ]]; then
+    echo -e "${RED}Error: Claude command not found or not executable at $CLAUDE_CMD${NC}" >&2
+    exit 1
+fi
+
+# Check if athena system prompt exists
+if [[ ! -f "$ATHENA_SYSTEM_PROMPT" ]]; then
+    echo -e "${RED}Error: Athena system prompt not found at $ATHENA_SYSTEM_PROMPT${NC}" >&2
+    exit 1
+fi
+
+# Check if ralph prompt exists
+if [[ ! -f "$RALPH_PROMPT" ]]; then
+    echo -e "${RED}Error: Ralph prompt not found at $RALPH_PROMPT${NC}" >&2
+    echo "Expected to find ralph.md symlinked in ~/.claude/commands/" >&2
+    exit 1
+fi
+
+# Function to get current branch from plan file
+get_plan_branch() {
+    local current_branch
+    current_branch=$(git branch --show-current 2>/dev/null || echo "unknown")
+    echo "$current_branch"
+}
+
+# Function to archive previous run if branch changed
+archive_previous_run() {
+    if [[ -f "$PROGRESS_FILE" ]]; then
+        local last_branch
+        last_branch=$(head -n 1 "$PROGRESS_FILE" 2>/dev/null | grep -oP '(?<=Branch: ).*' || echo "")
+        local current_branch
+        current_branch=$(get_plan_branch)
+
+        if [[ -n "$last_branch" && "$last_branch" != "$current_branch" ]]; then
+            mkdir -p "$ARCHIVE_DIR"
+            local timestamp
+            timestamp=$(date +%Y%m%d_%H%M%S)
+            local archive_name="${ARCHIVE_DIR}/progress_${last_branch}_${timestamp}.md"
+
+            echo -e "${YELLOW}Branch changed from '$last_branch' to '$current_branch'${NC}"
+            echo -e "${YELLOW}Archiving previous progress to: $archive_name${NC}"
+
+            mv "$PROGRESS_FILE" "$archive_name"
+        fi
+    fi
+}
+
+# Initialize progress file if it doesn't exist
+initialize_progress() {
+    if [[ ! -f "$PROGRESS_FILE" ]]; then
+        local current_branch
+        current_branch=$(get_plan_branch)
+        mkdir -p "$(dirname "$PROGRESS_FILE")"
+        cat > "$PROGRESS_FILE" <<EOF
+# Ralph Progress Log
+Branch: $current_branch
+Started: $(date '+%Y-%m-%d %H:%M:%S')
+
+---
+
+EOF
+    fi
+}
+
+# Check for completion signal
+check_completion() {
+    if [[ -f "$PROGRESS_FILE" ]]; then
+        if grep -q '<promise>COMPLETE</promise>' "$PROGRESS_FILE"; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Main execution
+main() {
+    echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║  Ralph: Autonomous Implementation      ║${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${GREEN}Configuration:${NC}"
+    echo -e "  Max Iterations: $MAX_ITERATIONS"
+    echo -e "  Plan File: $PLAN_FILE"
+    echo -e "  Progress File: $PROGRESS_FILE"
+    echo -e "  Current Branch: $(get_plan_branch)"
+    echo ""
+
+    # Archive previous run if branch changed
+    archive_previous_run
+
+    # Initialize progress file
+    initialize_progress
+
+    # Main iteration loop
+    for ((i=1; i<=MAX_ITERATIONS; i++)); do
+        echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
+        echo -e "${BLUE}║  Iteration $i of $MAX_ITERATIONS$(printf ' %.0s' $(seq 1 $((27 - ${#i} - ${#MAX_ITERATIONS}))))║${NC}"
+        echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
+        echo ""
+
+        # Check for completion before iteration
+        if check_completion; then
+            echo -e "${GREEN}✓ Completion signal detected!${NC}"
+            echo -e "${GREEN}All tasks complete. Ralph is done!${NC}"
+            exit 0
+        fi
+
+        # Run claude with combined system prompts (Athena + Ralph)
+        echo -e "${YELLOW}Invoking Athena agent with Ralph workflow...${NC}"
+        echo ""
+
+        "$CLAUDE_CMD" \
+            --print \
+            --verbose \
+            --output-format stream-json \
+            --dangerously-skip-permissions \
+            --system-prompt "$(cat "$ATHENA_SYSTEM_PROMPT")" \
+            --append-system-prompt "$(cat "$RALPH_PROMPT")" \
+            "Continue implementing the plan. Follow the Ralph workflow to select and complete the next task." \
+            2>&1 | while IFS= read -r line; do
+                # Parse JSON and extract relevant info
+                type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
+
+                if [[ "$type" == "assistant" ]]; then
+                    # Extract text content from assistant messages
+                    text=$(echo "$line" | jq -r '.message.content[]? | select(.type == "text") | .text // empty' 2>/dev/null)
+                    if [[ -n "$text" ]]; then
+                        echo "$text"
+                    fi
+
+                    # Extract and display tool use
+                    tool_name=$(echo "$line" | jq -r '.message.content[]? | select(.type == "tool_use") | .name // empty' 2>/dev/null)
+                    if [[ -n "$tool_name" ]]; then
+                        echo -e "\n${BLUE}[Using tool: $tool_name]${NC}"
+                    fi
+                elif [[ "$type" == "system" ]]; then
+                    # Show system init messages
+                    subtype=$(echo "$line" | jq -r '.subtype // empty' 2>/dev/null)
+                    if [[ "$subtype" == "init" ]]; then
+                        echo -e "${YELLOW}[Session initialized]${NC}"
+                    fi
+                fi
+            done
+
+        echo ""
+        echo -e "${GREEN}✓ Iteration $i complete${NC}"
+        echo ""
+
+        # Check for completion after iteration
+        if check_completion; then
+            echo -e "${GREEN}✓ Completion signal detected!${NC}"
+            echo -e "${GREEN}All tasks complete. Ralph is done!${NC}"
+            exit 0
+        fi
+
+        # Pause between iterations
+        if [[ $i -lt $MAX_ITERATIONS ]]; then
+            echo -e "${YELLOW}Waiting 2 seconds before next iteration...${NC}"
+            sleep 2
+        fi
+    done
+
+    echo ""
+    echo -e "${YELLOW}⚠ Maximum iterations ($MAX_ITERATIONS) reached${NC}"
+    echo -e "${YELLOW}Work may not be complete. Check progress.md for status.${NC}"
+    exit 0
+}
+
+# Run main
+main
