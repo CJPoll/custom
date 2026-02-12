@@ -12,9 +12,9 @@ ATHENA_SYSTEM_PROMPT="${HOME}/.agents/athena.md"
 
 # Configuration
 MAX_ITERATIONS="${1:-10}"
-PLAN_FILE="./ai-artifacts/plan.md"
-PROGRESS_FILE="./ai-artifacts/progress.md"
-ARCHIVE_DIR="./ai-artifacts/archives"
+PLAN_FILE="./ai-artifacts/ralph/plan.md"
+PROGRESS_FILE="./ai-artifacts/ralph/progress.md"
+ARCHIVE_DIR="./ai-artifacts/ralph/archives"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -34,7 +34,7 @@ fi
 # Check if plan file exists
 if [[ ! -f "$PLAN_FILE" ]]; then
     echo -e "${RED}Error: Plan file not found at $PLAN_FILE${NC}" >&2
-    echo "Ralph requires a plan file at ./ai-artifacts/plan.md" >&2
+    echo "Ralph requires a plan file at ./ai-artifacts/ralph/plan.md" >&2
     exit 1
 fi
 
@@ -169,10 +169,50 @@ main() {
                         echo "$text"
                     fi
 
-                    # Extract and display tool use
-                    tool_name=$(echo "$line" | jq -r '.message.content[]? | select(.type == "tool_use") | .name // empty' 2>/dev/null)
-                    if [[ -n "$tool_name" ]]; then
-                        echo -e "\n${BLUE}[Using tool: $tool_name]${NC}"
+                    # Extract and display tool use with details
+                    tool_json=$(echo "$line" | jq -c '.message.content[]? | select(.type == "tool_use")' 2>/dev/null)
+                    if [[ -n "$tool_json" ]]; then
+                        tool_name=$(echo "$tool_json" | jq -r '.name // empty')
+                        tool_input=$(echo "$tool_json" | jq -c '.input // {}')
+
+                        case "$tool_name" in
+                            Read)
+                                file_path=$(echo "$tool_input" | jq -r '.file_path // empty')
+                                echo -e "\n${BLUE}[Read]${NC} ${file_path}"
+                                ;;
+                            Write)
+                                file_path=$(echo "$tool_input" | jq -r '.file_path // empty')
+                                echo -e "\n${YELLOW}[Write]${NC} ${file_path}"
+                                ;;
+                            Edit)
+                                file_path=$(echo "$tool_input" | jq -r '.file_path // empty')
+                                echo -e "\n${YELLOW}[Edit]${NC} ${file_path}"
+                                ;;
+                            Bash)
+                                command=$(echo "$tool_input" | jq -r '.command // empty')
+                                description=$(echo "$tool_input" | jq -r '.description // empty')
+                                if [[ -n "$description" ]]; then
+                                    echo -e "\n${GREEN}[Bash]${NC} ${description}"
+                                fi
+                                echo -e "  ${GREEN}\$${NC} ${command}"
+                                ;;
+                            Glob)
+                                pattern=$(echo "$tool_input" | jq -r '.pattern // empty')
+                                echo -e "\n${BLUE}[Glob]${NC} ${pattern}"
+                                ;;
+                            Grep)
+                                pattern=$(echo "$tool_input" | jq -r '.pattern // empty')
+                                path=$(echo "$tool_input" | jq -r '.path // "."')
+                                echo -e "\n${BLUE}[Grep]${NC} ${pattern} in ${path}"
+                                ;;
+                            Task)
+                                desc=$(echo "$tool_input" | jq -r '.description // empty')
+                                echo -e "\n${YELLOW}[Task]${NC} ${desc}"
+                                ;;
+                            *)
+                                echo -e "\n${BLUE}[${tool_name}]${NC}"
+                                ;;
+                        esac
                     fi
                 elif [[ "$type" == "system" ]]; then
                     # Show system init messages
