@@ -3,3 +3,20 @@ source "${HOME}/dev/custom/hypr/themes/base16-cyberpunk.sh"
 export AGNOSTER_DIR_BG=blue
 export AGNOSTER_GIT_DIRTY_BG=magenta
 export AGNOSTER_GIT_CLEAN_BG=green
+
+# Override prompt_dir to show worktree-aware paths
+# When cwd is under ~/.local/worktrees/<project>/, display "wt:<project>"
+# and let the git info segment handle showing the branch.
+prompt_dir() {
+  local worktree_base="${HOME}/.local/worktrees/"
+
+  if [[ "$PWD" == ${worktree_base}* ]]; then
+    local relative="${PWD#${worktree_base}}"
+    local project_name="${relative%%/*}"
+    prompt_segment "$AGNOSTER_DIR_BG" "$AGNOSTER_DIR_FG" "wt:${project_name}"
+  elif [[ $AGNOSTER_GIT_INLINE == 'true' ]] && $(git rev-parse --is-inside-work-tree >/dev/null 2>&1); then
+    prompt_segment "$AGNOSTER_DIR_BG" "$AGNOSTER_DIR_FG" "$(git_toplevel | sed "s:^$HOME:~:")"
+  else
+    prompt_segment "$AGNOSTER_DIR_BG" "$AGNOSTER_DIR_FG" '%~'
+  fi
+}
