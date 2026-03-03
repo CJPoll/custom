@@ -1,6 +1,6 @@
 ---
 name: ralph:plan
-description: Create and refine an implementation plan for Ralph autonomous agent. Takes a feature description and iteratively clarifies requirements through questions, maintaining ./ai-artifacts/plan.md
+description: Create and refine an implementation plan for Ralph autonomous agent. Takes a feature description and iteratively clarifies requirements through questions, maintaining ./ai-artifacts/ralph/plan.md
 argument-hint: [feature description]
 disable-model-invocation: true
 ---
@@ -15,7 +15,7 @@ You work iteratively to build a comprehensive plan:
 
 1. **Understand the Feature**: Start with the user's feature description
 2. **Ask Clarifying Questions**: Identify ambiguities and missing details
-3. **Update the Plan**: Maintain `./ai-artifacts/plan.md` as you learn more
+3. **Update the Plan**: Maintain `./ai-artifacts/ralph/plan.md` as you learn more
 4. **Iterate Until Complete**: Continue until all ambiguities are resolved
 
 ## Feature Description
@@ -81,7 +81,7 @@ Focus on questions that affect implementation decisions:
 
 ## Plan Format
 
-Maintain the plan at `./ai-artifacts/plan.md` with this structure:
+Maintain the plan at `./ai-artifacts/ralph/plan.md` with this structure:
 
 ```markdown
 # Feature: [Feature Name]
@@ -225,7 +225,7 @@ Before creating the plan, ensure the directory exists:
 mkdir -p ./ai-artifacts
 ```
 
-Then create or update `./ai-artifacts/plan.md` with each iteration.
+Then create or update `./ai-artifacts/ralph/plan.md` with each iteration.
 
 ## Example Interaction
 

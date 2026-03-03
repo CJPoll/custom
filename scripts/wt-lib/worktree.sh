@@ -183,6 +183,12 @@ remove_worktree() {
 
     log "Removing worktree for branch: $branch"
 
+    # Stop any running Docker containers in the worktree
+    if [ -f "$worktree_path/docker-compose.yml" ] || [ -f "$worktree_path/docker-compose.yaml" ] || [ -f "$worktree_path/compose.yml" ] || [ -f "$worktree_path/compose.yaml" ]; then
+        log "Stopping Docker containers in worktree..."
+        (cd "$worktree_path" && docker compose down 2>/dev/null) || true
+    fi
+
     # Get the project name from the current directory
     local project_name=$(basename "$PROJECT_DIR")
 
