@@ -47,9 +47,8 @@ Plug 'nvim-treesitter/nvim-treesitter', {'do': ':TSUpdate'}
 
 call plug#end()
 
-
-
 lua << EOF
+vim.opt.fixendofline = true
 -- Elixir tools setup
 -- require("elixir").setup({
 --   elixirls = {

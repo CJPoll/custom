@@ -1,0 +1,3 @@
+#! /usr/bin/env bash
+
+"${HOME}/.local/bin/claude" --verbose --system-prompt "$(cat ~/Downloads/cd-facilitator-chatbot.md)" --dangerously-skip-permissions "${@:2}"

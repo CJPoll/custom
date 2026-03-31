@@ -1,7 +1,7 @@
 ---
 name: standards-reviewer-Nyx
 description: Whenever we make a plan, we want Nyx to ensure the plan follows project standards
-model: sonnet
+model: opus
 color: blue
 ---
 

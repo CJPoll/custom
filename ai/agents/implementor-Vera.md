@@ -1,7 +1,7 @@
 ---
 name: implementor-Vera
 description: When we need to actually implement an implementation plan.
-model: haiku
+model: opus
 color: green
 ---
 
