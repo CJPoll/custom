@@ -17,8 +17,8 @@ Projects are kept at "${HOME}/dev/<project-name>".
 Worktrees for those projects are kept at
 "${HOME}/.local/worktrees/<project-name>/<git-branch-name>"
 
-Custom commands are saved at "${HOME}/dev/custom/ai/prompts" and symlinked into
-"${HOME}/.claude/commands".
+Custom skills are saved at "${HOME}/dev/custom/ai/skills" and symlinked into
+"${HOME}/.claude/skills".
 
 == Running things
 Never use IEx. Instead, run elixir commands with `mix run -e "<elixir code here>"`

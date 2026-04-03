@@ -52,7 +52,8 @@ Standalone shell scripts and tools. The most significant is `wt` (worktree manag
 
 ### ai/
 Contains AI-related resources:
-- **prompts/**: Reusable prompts for various tasks
+- **skills/**: Claude Code skills (symlinked to `~/.claude/skills`)
+- **prompts/**: Legacy prompts (deprecated, migrated to skills)
 - Default `CLAUDE.md` template for Elixir projects
 - Other AI workflow configurations
 

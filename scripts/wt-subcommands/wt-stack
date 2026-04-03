@@ -51,6 +51,8 @@ Subcommands:
   push              Push all branches in the stack using Graphite (gt submit)
                     --force, -f: force push branches
                     --dry-run: show what would be pushed without pushing
+                    --publish: publish draft PRs to ready for review
+                    --draft: create new PRs as drafts
 
   sync              Sync the stack with remote changes using Graphite (gt sync)
                     --continue: continue a sync operation after resolving conflicts
@@ -68,6 +70,8 @@ Examples:
   wt stack rename                   # Interactive rename prompt
   wt stack push                     # Push stack to remote
   wt stack push --force             # Force push stack
+  wt stack push --publish           # Push and publish draft PRs
+  wt stack push --draft             # Push and mark PRs as draft
   wt stack sync                     # Sync with remote
   wt stack restack                  # Fix stack relationships
 
@@ -195,6 +199,8 @@ case "${SUBCOMMAND:-show}" in
         # Parse flags for push command
         force=false
         dry_run=false
+        publish=false
+        draft=false
         while [ $# -gt 0 ]; do
             case "$1" in
                 --force|-f)
@@ -205,9 +211,17 @@ case "${SUBCOMMAND:-show}" in
                     dry_run=true
                     shift
                     ;;
+                --publish)
+                    publish=true
+                    shift
+                    ;;
+                --draft)
+                    draft=true
+                    shift
+                    ;;
                 *)
                     echo "Error: Unknown argument for push: $1" >&2
-                    echo "Usage: wt stack push [--force|-f] [--dry-run]" >&2
+                    echo "Usage: wt stack push [--force|-f] [--dry-run] [--publish] [--draft]" >&2
                     exit 1
                     ;;
             esac
@@ -219,6 +233,8 @@ case "${SUBCOMMAND:-show}" in
         gt_args=(submit --stack --no-interactive)
         [ "$force" = true ] && gt_args+=(--force)
         [ "$dry_run" = true ] && gt_args+=(--dry-run)
+        [ "$publish" = true ] && gt_args+=(--publish)
+        [ "$draft" = true ] && gt_args+=(--draft)
 
         if gt "${gt_args[@]}"; then
             if [ "$dry_run" = false ]; then

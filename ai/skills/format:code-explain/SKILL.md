@@ -1,0 +1,20 @@
+---
+name: format:code-explain
+description: Output format specification for explaining code areas with relevance, changes, and test coverage.
+user-invocable: false
+---
+
+I have some code I'd like you to explain for me: $ARGUMENTS
+
+For each bit of code to explain, let's structure the format according to this:
+
+- Each code area to explain is in an ordered list, with the file (and any other
+  differentiating description) as the text with the number.
+- Nested under that number, each as an unordered list item:
+  - The file the code is in
+  - The reason it's relevant
+  - Changes we may want to make to support the project
+    - Each change should be a nested list item (10 list items maximum)
+  - The level of test coverage of the identified code, with an emphasis on how
+    much risk there is of causing a breakage if we modify the code (2 sentences
+    maximum)

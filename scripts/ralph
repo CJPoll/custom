@@ -7,7 +7,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_CMD="${HOME}/.local/bin/claude"
-RALPH_PROMPT="${HOME}/.claude/commands/ralph.md"
+RALPH_PROMPT="${HOME}/.claude/skills/ralph/SKILL.md"
 ATHENA_SYSTEM_PROMPT="${HOME}/.agents/athena.md"
 
 # Configuration
@@ -53,7 +53,7 @@ fi
 # Check if ralph prompt exists
 if [[ ! -f "$RALPH_PROMPT" ]]; then
     echo -e "${RED}Error: Ralph prompt not found at $RALPH_PROMPT${NC}" >&2
-    echo "Expected to find ralph.md symlinked in ~/.claude/commands/" >&2
+    echo "Expected to find ralph skill at ~/.claude/skills/ralph/SKILL.md" >&2
     exit 1
 fi
 

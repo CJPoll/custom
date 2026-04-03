@@ -89,6 +89,8 @@ Commands:
   stack push        Push all branches in the stack using Graphite (gt submit)
                     --force, -f: force push branches
                     --dry-run: show what would be pushed without pushing
+                    --publish: publish draft PRs to ready for review
+                    --draft: create new PRs as drafts
   sync              Sync the stack with remote changes using Graphite (gt sync)
   sync --continue   Continue a sync operation after resolving conflicts (gt continue)
   restack           Fix stack relationships and rebase onto correct parents (gt restack)
@@ -109,6 +111,10 @@ Commands:
   change squash     Squash all commits in branch into one (delegates to gt squash)
                     --message, -m: updated message for squashed commit
                     --no-edit, -n: don't modify commit message
+  clean             Remove worktrees for branches with merged or closed PRs
+                    Detects GitHub or GitLab from the origin remote URL
+                    --dry-run: show what would be cleaned without removing
+                    --force: remove worktrees even with uncommitted changes
   continue          Resume paused operation after resolving conflicts (delegates to gt)
                     --abort: abort the current operation
 
@@ -168,6 +174,8 @@ Examples:
   wt stack push --dry-run
   wt stack push
   wt stack push --force
+  wt stack push --publish
+  wt stack push --draft
   wt pr --stack --dry-run
   wt pr --stack
   wt pr --stack --draft
@@ -176,6 +184,9 @@ Examples:
   wt stack open feature/child --create-sessions  # Also creates tmux sessions
   wt stack rename new-name  # Rename current branch
   wt stack rename --force  # Force rename even with open PR
+  wt clean
+  wt clean --dry-run
+  wt clean --force
   wt migrate-to-gt
   wt change amend  # Amend current commit
   wt change amend --commit  # Create new commit
@@ -357,7 +368,7 @@ while [[ $# -gt 0 ]]; do
             INSTALL_GIT_STACK=true
             shift
             ;;
-        init|list|ls|create|rm|close|reset|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|pr|migrate-to-gt|change|continue)
+        init|list|ls|create|rm|close|reset|switch|merge|worktree-dir|is-worktree|stack|sync|restack|next|prev|run|pr|migrate-to-gt|change|clean|continue)
             COMMAND="$1"
             shift
             # For 'close' command, check for --all flag
@@ -378,6 +389,9 @@ while [[ $# -gt 0 ]]; do
                     CHANGE_SUBCOMMAND="$1"
                     # Don't shift - we need to pass this to wt-change
                 fi
+                break
+            # For 'clean' command, pass remaining args (--dry-run, --force) to wt-clean
+            elif [ "$COMMAND" = "clean" ]; then
                 break
             fi
             # For 'stack' command, pass all remaining arguments to wt-stack
@@ -539,6 +553,19 @@ case "$COMMAND" in
             exit $?
         else
             echo "Error: wt-change script not found at ${MAIN_SCRIPT_DIR}/wt-subcommands/wt-change" >&2
+            exit 1
+        fi
+        ;;
+    clean)
+        # Delegate to wt-clean script in subcommands directory
+        if [ -f "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-clean" ]; then
+            export QUIET
+            # Forward --dry-run if it was parsed by the main script before the command
+            export DRY_RUN
+            "${MAIN_SCRIPT_DIR}/wt-subcommands/wt-clean" "$@"
+            exit $?
+        else
+            echo "Error: wt-clean script not found at ${MAIN_SCRIPT_DIR}/wt-subcommands/wt-clean" >&2
             exit 1
         fi
         ;;

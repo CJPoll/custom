@@ -1,0 +1,311 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# wt-clean - Clean up worktrees whose branches have merged or closed PRs
+# This script checks the remote (GitHub or GitLab) for PR/MR status and
+# removes worktrees for branches that are no longer active.
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/../wt-lib"
+
+# Source library files for project detection and worktree management
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/worktree.sh"
+
+# Environment variables
+QUIET="${QUIET:-false}"
+
+usage() {
+    cat << EOF
+Usage: wt clean [options]
+
+Removes worktrees whose branches have merged or closed PRs/MRs on the remote.
+Automatically detects GitHub or GitLab from the origin remote URL.
+
+Options:
+  --dry-run   Show what would be cleaned without actually removing anything
+  --force     Remove worktrees even if they have uncommitted changes
+  --help, -h  Show this help message
+
+Notes:
+  - Only removes worktrees (equivalent to 'wt rm'). Does not delete branches.
+  - Skips main/master branches.
+  - Skips branches that have no PR/MR on the remote.
+  - Requires 'gh' CLI for GitHub repos or 'glab' CLI for GitLab repos.
+
+Examples:
+  wt clean              # Remove worktrees for merged/closed PRs
+  wt clean --dry-run    # Preview what would be removed
+  wt clean --force      # Remove even if worktrees have uncommitted changes
+EOF
+}
+
+# --- Argument parsing ---
+
+# Inherit DRY_RUN from parent wt script if --dry-run was parsed there
+DRY_RUN="${DRY_RUN:-false}"
+FORCE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --force)
+            FORCE=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+# --- Remote type detection ---
+
+detect_remote_type() {
+    local remote_url
+    remote_url=$(git remote get-url origin 2>/dev/null) || {
+        echo "Error: No 'origin' remote found" >&2
+        return 1
+    }
+
+    if [[ "$remote_url" == *"github.com"* ]]; then
+        echo "github"
+    elif [[ "$remote_url" == *"gitlab"* ]]; then
+        echo "gitlab"
+    else
+        echo "Error: Could not determine remote type from URL: $remote_url" >&2
+        echo "Expected a GitHub (github.com) or GitLab (gitlab) remote." >&2
+        return 1
+    fi
+}
+
+# --- PR/MR status checking ---
+
+# Returns "merged", "closed", "open", or "none" (no PR found)
+check_pr_status_github() {
+    local branch="$1"
+    local state
+
+    state=$(gh pr view "$branch" --json state --jq '.state' 2>/dev/null) || {
+        echo "none"
+        return 0
+    }
+
+    case "$state" in
+        MERGED) echo "merged" ;;
+        CLOSED) echo "closed" ;;
+        OPEN)   echo "open" ;;
+        *)      echo "none" ;;
+    esac
+}
+
+check_pr_status_gitlab() {
+    local branch="$1"
+    local count
+
+    # Check for merged MRs
+    count=$(glab mr list --source-branch "$branch" --state merged 2>/dev/null | grep -c '!' || true)
+    if [[ "$count" -gt 0 ]]; then
+        echo "merged"
+        return 0
+    fi
+
+    # Check for closed MRs
+    count=$(glab mr list --source-branch "$branch" --state closed 2>/dev/null | grep -c '!' || true)
+    if [[ "$count" -gt 0 ]]; then
+        echo "closed"
+        return 0
+    fi
+
+    # Check if any MR exists at all (open)
+    count=$(glab mr list --source-branch "$branch" --state opened 2>/dev/null | grep -c '!' || true)
+    if [[ "$count" -gt 0 ]]; then
+        echo "open"
+        return 0
+    fi
+
+    echo "none"
+}
+
+# --- Dirty worktree detection ---
+
+worktree_has_uncommitted_changes() {
+    local worktree_path="$1"
+    local status
+    status=$(git -C "$worktree_path" status --porcelain 2>/dev/null) || return 1
+    [[ -n "$status" ]]
+}
+
+# --- Worktree enumeration ---
+
+# Returns branch names for all worktrees (excluding main project dir)
+get_worktree_branches() {
+    local git_worktrees
+    git_worktrees=$(git worktree list --porcelain 2>/dev/null) || {
+        echo ""
+        return 0
+    }
+
+    local worktree_path=""
+    local branch=""
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^worktree[[:space:]](.+) ]]; then
+            # Emit previous worktree's branch if valid
+            if [[ -n "$worktree_path" ]] && [[ -n "$branch" ]]; then
+                if [[ "$worktree_path" == "$WORKTREES_DIR/"* ]]; then
+                    if [[ "$branch" != "main" ]] && [[ "$branch" != "master" ]]; then
+                        echo "$branch"
+                    fi
+                fi
+            fi
+
+            worktree_path="${BASH_REMATCH[1]}"
+            branch=""
+        elif [[ "$line" =~ ^branch[[:space:]]refs/heads/(.+) ]]; then
+            branch="${BASH_REMATCH[1]}"
+        fi
+    done <<< "$git_worktrees"
+
+    # Process last entry
+    if [[ -n "$worktree_path" ]] && [[ -n "$branch" ]]; then
+        if [[ "$worktree_path" == "$WORKTREES_DIR/"* ]]; then
+            if [[ "$branch" != "main" ]] && [[ "$branch" != "master" ]]; then
+                echo "$branch"
+            fi
+        fi
+    fi
+}
+
+# --- Main ---
+
+main() {
+    local remote_type
+    remote_type=$(detect_remote_type) || exit 1
+
+    # Verify required CLI tool is available
+    case "$remote_type" in
+        github)
+            if ! command -v gh &>/dev/null; then
+                echo "Error: 'gh' CLI is required for GitHub repositories" >&2
+                echo "Install with: brew install gh or visit https://cli.github.com" >&2
+                exit 2
+            fi
+            ;;
+        gitlab)
+            if ! command -v glab &>/dev/null; then
+                echo "Error: 'glab' CLI is required for GitLab repositories" >&2
+                echo "Install with: brew install glab or visit https://gitlab.com/gitlab-org/cli" >&2
+                exit 2
+            fi
+            ;;
+    esac
+
+    # Enumerate worktree branches
+    local branches
+    branches=$(get_worktree_branches)
+
+    if [[ -z "$branches" ]]; then
+        log "No worktrees found to clean."
+        return 0
+    fi
+
+    local cleaned=0
+    local skipped_dirty=0
+    local skipped_active=0
+    local skipped_no_pr=0
+    local failed=0
+    local total=0
+
+    log "Checking worktrees for $PROJECT_NAME (remote: $remote_type)..."
+    log ""
+
+    while IFS= read -r branch; do
+        [[ -z "$branch" ]] && continue
+        total=$((total + 1))
+
+        # Check PR/MR status
+        local status
+        case "$remote_type" in
+            github) status=$(check_pr_status_github "$branch") ;;
+            gitlab) status=$(check_pr_status_gitlab "$branch") ;;
+        esac
+
+        case "$status" in
+            merged|closed)
+                local worktree_path="$WORKTREES_DIR/$branch"
+
+                # Check for uncommitted changes unless --force
+                if [[ "$FORCE" = false ]] && worktree_has_uncommitted_changes "$worktree_path"; then
+                    log "  SKIP $branch (PR $status, but has uncommitted changes — use --force to override)"
+                    skipped_dirty=$((skipped_dirty + 1))
+                    continue
+                fi
+
+                if [[ "$DRY_RUN" = true ]]; then
+                    log "  WOULD REMOVE $branch (PR $status)"
+                    cleaned=$((cleaned + 1))
+                else
+                    log "  REMOVING $branch (PR $status)"
+                    # Call wt rm as a subprocess to reuse all cleanup logic
+                    local rm_result=0
+                    if [[ "$QUIET" = true ]]; then
+                        "${SCRIPT_DIR}/../wt" --quiet rm "$branch" 2>/dev/null || rm_result=$?
+                    else
+                        "${SCRIPT_DIR}/../wt" rm "$branch" || rm_result=$?
+                    fi
+
+                    if [[ $rm_result -eq 0 ]]; then
+                        cleaned=$((cleaned + 1))
+                    else
+                        log "    ✗ Failed to remove worktree for $branch"
+                        failed=$((failed + 1))
+                    fi
+                fi
+                ;;
+            open)
+                log "  SKIP $branch (PR open)"
+                skipped_active=$((skipped_active + 1))
+                ;;
+            none)
+                log "  SKIP $branch (no PR found)"
+                skipped_no_pr=$((skipped_no_pr + 1))
+                ;;
+        esac
+    done <<< "$branches"
+
+    # Summary
+    log ""
+    if [[ "$DRY_RUN" = true ]]; then
+        log "Dry run complete. $cleaned worktree(s) would be removed."
+    else
+        log "Clean complete. $cleaned worktree(s) removed."
+    fi
+
+    if [[ $skipped_dirty -gt 0 ]]; then
+        log "  $skipped_dirty skipped (uncommitted changes)"
+    fi
+    if [[ $skipped_active -gt 0 ]]; then
+        log "  $skipped_active skipped (PR still open)"
+    fi
+    if [[ $skipped_no_pr -gt 0 ]]; then
+        log "  $skipped_no_pr skipped (no PR found)"
+    fi
+    if [[ $failed -gt 0 ]]; then
+        log "  $failed failed to remove"
+        return 1
+    fi
+}
+
+main
