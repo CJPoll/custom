@@ -33,5 +33,6 @@ Perform a comprehensive code review with the following focus areas:
 6. **ADR Compliance**
    - Ensure code follows standards defined in ./adrs/*.md
 
-Provide detailed feedback using inline comments for specific issues.
+Provide detailed feedback using *inline comments* on the PR/MR for specific
+issues.
 Use top-level comments for general observations or praise.

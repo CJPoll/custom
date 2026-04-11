@@ -1,0 +1,300 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+    cat << 'EOF'
+Usage: mr-review --mr <number|url> [options]
+       mr-review --branch <branch-name> [options]
+
+Review a merge request or pull request using Claude Code.
+
+Resolves the branch from an MR/PR number or URL, creates (or updates) a
+worktree for it, then runs Claude's /review skill with inline commenting.
+
+Options:
+  --mr <number|url>         MR/PR number or full URL
+  --branch <branch-name>    Review a branch directly (no MR lookup)
+  --base-branch <branch>    Base branch for comparison (auto-detected from MR)
+  --help, -h                Show this help message
+
+Examples:
+  mr-review --mr 45
+  mr-review --mr https://gitlab.com/group/project/-/merge_requests/50
+  mr-review --mr https://github.com/owner/repo/pull/123
+  mr-review --branch jd/p-209-post-release-improvements
+  mr-review --base-branch develop --mr 45
+
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Forge detection
+# ---------------------------------------------------------------------------
+
+detect_forge() {
+    local remote_url
+    remote_url=$(git remote get-url origin 2>/dev/null) || { echo "unknown"; return; }
+    case "$remote_url" in
+        *github.com*) echo "github" ;;
+        *gitlab*)     echo "gitlab" ;;
+        *)            echo "unknown" ;;
+    esac
+}
+
+detect_forge_from_url() {
+    local url="$1"
+    case "$url" in
+        *github.com*) echo "github" ;;
+        *gitlab*)     echo "gitlab" ;;
+        *)            echo "unknown" ;;
+    esac
+}
+
+forge_cli() {
+    case "$1" in
+        gitlab) echo "glab" ;;
+        *)      echo "gh" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# MR / PR resolution
+# ---------------------------------------------------------------------------
+
+parse_mr_number_from_url() {
+    local url="$1"
+    local forge="$2"
+    case "$forge" in
+        gitlab) echo "$url" | sed -n 's|.*merge_requests/\([0-9]*\).*|\1|p' ;;
+        github) echo "$url" | sed -n 's|.*pull/\([0-9]*\).*|\1|p' ;;
+        *)      return 1 ;;
+    esac
+}
+
+# Fetches MR/PR metadata in a single API call and sets:
+#   MR_BRANCH       - source branch name
+#   MR_BASE_BRANCH  - target / base branch name
+resolve_mr_info() {
+    local mr_number="$1"
+    local forge="$2"
+    local json
+
+    case "$forge" in
+        gitlab)
+            json=$(glab mr view "$mr_number" -F json 2>/dev/null) || return 1
+            MR_BRANCH=$(echo "$json" | jq -r '.source_branch')
+            MR_BASE_BRANCH=$(echo "$json" | jq -r '.target_branch')
+            ;;
+        github)
+            json=$(gh pr view "$mr_number" --json headRefName,baseRefName 2>/dev/null) || return 1
+            MR_BRANCH=$(echo "$json" | jq -r '.headRefName')
+            MR_BASE_BRANCH=$(echo "$json" | jq -r '.baseRefName')
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Project / worktree helpers
+# ---------------------------------------------------------------------------
+
+# Resolve the real project root even when called from inside a worktree.
+get_project_root() {
+    local toplevel
+    toplevel=$(git rev-parse --show-toplevel 2>/dev/null)
+
+    if [[ -f "$toplevel/.git" ]]; then
+        # Inside a worktree — .git is a file pointing to the real git dir.
+        local git_dir
+        git_dir=$(sed -n 's/^gitdir: //p' "$toplevel/.git")
+        # git_dir looks like: /path/to/project/.git/worktrees/<branch>
+        dirname "$(dirname "$(dirname "$git_dir")")"
+    else
+        echo "$toplevel"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+main() {
+    local mr_input="" branch="" base_branch=""
+
+    # -- Parse arguments (flag order doesn't matter) -----------------------
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mr)
+                [[ $# -lt 2 ]] && { echo "Error: --mr requires a value (number or URL)" >&2; exit 1; }
+                mr_input="$2"; shift 2
+                ;;
+            --branch)
+                [[ $# -lt 2 ]] && { echo "Error: --branch requires a branch name" >&2; exit 1; }
+                branch="$2"; shift 2
+                ;;
+            --base-branch)
+                [[ $# -lt 2 ]] && { echo "Error: --base-branch requires a branch name" >&2; exit 1; }
+                base_branch="$2"; shift 2
+                ;;
+            --help|-h)
+                usage; exit 0
+                ;;
+            *)
+                echo "Error: Unknown option: $1" >&2
+                usage
+                exit 1
+                ;;
+        esac
+    done
+
+    # -- Validate input ----------------------------------------------------
+    if [[ -z "$mr_input" && -z "$branch" ]]; then
+        echo "Error: Either --mr or --branch is required" >&2
+        usage
+        exit 1
+    fi
+
+    if [[ -n "$mr_input" && -n "$branch" ]]; then
+        echo "Error: --mr and --branch are mutually exclusive" >&2
+        exit 1
+    fi
+
+    # -- Prerequisite checks -----------------------------------------------
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        echo "Error: Not in a git repository" >&2
+        exit 1
+    fi
+
+    if ! command -v wt >/dev/null 2>&1; then
+        echo "Error: 'wt' command not found" >&2
+        exit 1
+    fi
+
+    if ! command -v claude >/dev/null 2>&1; then
+        echo "Error: 'claude' command not found" >&2
+        exit 1
+    fi
+
+    local forge mr_number=""
+    forge=$(detect_forge)
+
+    # -- Resolve branch from --mr input ------------------------------------
+    if [[ -n "$mr_input" ]]; then
+        if [[ "$mr_input" =~ ^https?:// ]]; then
+            # URL — detect forge from the URL itself
+            local url_forge
+            url_forge=$(detect_forge_from_url "$mr_input")
+            [[ "$url_forge" == "unknown" ]] && {
+                echo "Error: Cannot determine forge (GitHub/GitLab) from URL: $mr_input" >&2
+                exit 1
+            }
+            forge="$url_forge"
+
+            mr_number=$(parse_mr_number_from_url "$mr_input" "$forge")
+            [[ -z "$mr_number" ]] && {
+                echo "Error: Could not extract MR/PR number from URL: $mr_input" >&2
+                exit 1
+            }
+        elif [[ "$mr_input" =~ ^[0-9]+$ ]]; then
+            # Plain number — rely on the current repo's remote
+            mr_number="$mr_input"
+            [[ "$forge" == "unknown" ]] && {
+                echo "Error: Cannot determine forge from git remote. Use a full URL instead." >&2
+                exit 1
+            }
+        else
+            echo "Error: Invalid --mr value: '$mr_input' (expected a number or URL)" >&2
+            exit 1
+        fi
+
+        # Ensure the right CLI tool and jq are available
+        local cli_tool
+        cli_tool=$(forge_cli "$forge")
+        command -v "$cli_tool" >/dev/null 2>&1 || {
+            echo "Error: '$cli_tool' is required but not found" >&2; exit 1
+        }
+        command -v jq >/dev/null 2>&1 || {
+            echo "Error: 'jq' is required but not found" >&2; exit 1
+        }
+
+        echo "Fetching MR/PR #${mr_number} info..."
+        MR_BRANCH="" MR_BASE_BRANCH=""
+        resolve_mr_info "$mr_number" "$forge" || {
+            echo "Error: Failed to fetch MR/PR #${mr_number}" >&2
+            exit 1
+        }
+
+        branch="$MR_BRANCH"
+        [[ -z "$branch" || "$branch" == "null" ]] && {
+            echo "Error: Could not determine source branch for MR/PR #${mr_number}" >&2
+            exit 1
+        }
+        echo "  Branch: $branch"
+
+        # Auto-detect base branch from the MR if not explicitly provided
+        if [[ -z "$base_branch" && -n "$MR_BASE_BRANCH" && "$MR_BASE_BRANCH" != "null" ]]; then
+            base_branch="$MR_BASE_BRANCH"
+            echo "  Base:   $base_branch"
+        fi
+    fi
+
+    # Fall back to main if base branch is still unset
+    [[ -z "$base_branch" || "$base_branch" == "null" ]] && base_branch="main"
+
+    # -- Compute worktree path ---------------------------------------------
+    local project_root project_name worktree_path
+    project_root=$(get_project_root)
+    project_name=$(basename "$project_root")
+    worktree_path="${HOME}/.local/worktrees/${project_name}/${branch}"
+
+    # -- Fetch latest refs -------------------------------------------------
+    echo "Fetching latest changes from origin..."
+    git fetch origin || {
+        echo "Error: Failed to fetch from origin" >&2
+        exit 1
+    }
+
+    # -- Update base branch locally ----------------------------------------
+    echo "Updating local $base_branch to match origin..."
+    git update-ref "refs/heads/$base_branch" "origin/$base_branch" 2>/dev/null || {
+        echo "Warning: Could not update local $base_branch" >&2
+    }
+
+    # -- Create or update worktree -----------------------------------------
+    if [[ -d "$worktree_path" ]]; then
+        echo "Worktree already exists for branch: $branch"
+        echo "Updating to match origin..."
+        if git -C "$worktree_path" rev-parse --verify "origin/$branch" >/dev/null 2>&1; then
+            git -C "$worktree_path" reset --hard "origin/$branch" 2>/dev/null || {
+                echo "Warning: Could not hard-reset worktree to origin/$branch" >&2
+            }
+        else
+            echo "Warning: origin/$branch not found — keeping worktree as-is" >&2
+        fi
+    else
+        echo "Creating worktree for branch: $branch"
+        wt create "$branch" || {
+            echo "Error: Failed to create worktree for branch: $branch" >&2
+            exit 1
+        }
+    fi
+
+    # -- Run Claude review -------------------------------------------------
+    local cli_tool
+    cli_tool=$(forge_cli "$forge")
+
+    echo ""
+    echo "Starting Claude review..."
+    echo "  Worktree: $worktree_path"
+    echo "  Branch:   $branch"
+    echo "  Base:     $base_branch"
+    echo ""
+
+    cd "$worktree_path"
+    exec claude -p "/review Post inline review comments on the MR/PR using \`${cli_tool}\`. The base branch is \`${base_branch}\`." \
+        --allowedTools "Bash(git:*)" "Bash(${cli_tool}:*)"
+}
+
+main "$@"
