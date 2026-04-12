@@ -176,16 +176,27 @@ function edit()
   fi
 }
 
-# Worktree switch function - handles cd outside tmux
 function wts() {
   # Wrapper for 'wt switch' that handles cd outside tmux
-  if [ -n "$TMUX" ]; then
-    # In tmux, just call wt switch normally
-    wt switch "$@"
+  # --cd flag forces cd behavior even inside tmux
+  local use_cd=false
+  local args=()
+
+  for arg in "$@"; do
+    if [ "$arg" = "--cd" ]; then
+      use_cd=true
+    else
+      args+=("$arg")
+    fi
+  done
+
+  if [ -n "$TMUX" ] && [ "$use_cd" = false ]; then
+    # In tmux without --cd, just call wt switch normally
+    wt switch "${args[@]}"
   else
-    # Outside tmux, use wt switch in quiet mode to get the path and cd to it
+    # Outside tmux or --cd flag: resolve the worktree path and cd to it
     local target_path
-    target_path=$(wt switch --quiet "$@")
+    target_path=$(wt worktree-dir "${args[@]}")
     if [ $? -eq 0 ] && [ -n "$target_path" ]; then
       cd "$target_path"
     fi

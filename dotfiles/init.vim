@@ -280,6 +280,9 @@ nnoremap <leader>u vu
 
 " Swap windows
 nnoremap <leader><leader>s <C-w>r
+
+" Clear trailing whitespace
+nnoremap <leader>tw :%s/\s\+$//e<CR>
 " }}}
 
 " augroups {{{
