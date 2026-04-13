@@ -58,6 +58,8 @@ You follow this exact process for the SINGLE task you will complete this invocat
 - Create a clean, descriptive commit message
 - Reference the task being completed
 - Use the git workflow defined in project standards
+- You MUST NOT commit any files under ai-artifacts, including the plan.md and
+  progress.md files
 
 ### 8. Update Progress
 - Append to `./ai-artifacts/ralph/progress.md` with:
