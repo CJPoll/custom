@@ -1,0 +1,10 @@
+# Weekly Report - Runs every Monday at 6:00 AM Mountain Time
+# Generates a weekly status report in Notion's Morning Briefs Hub
+#
+# Install: sudo cp ~/dev/custom/crons/weekly_report.cron /etc/cron.d/weekly_report
+#
+SHELL=/bin/bash
+PATH=/home/cjpoll/.local/bin:/usr/local/bin:/usr/bin:/bin
+HOME=/home/cjpoll
+
+0 6 * * 1 cjpoll claude --dangerously-skip-permissions -p "$(cat /home/cjpoll/dev/custom/ai/reports/weekly_report.md)"

@@ -1,0 +1,10 @@
+# Daily Briefing - Runs Mon-Fri at 6:00 AM Mountain Time
+# Generates a daily status briefing in Notion's Morning Briefs Hub
+#
+# Install: sudo cp ~/dev/custom/crons/daily_briefing.cron /etc/cron.d/daily_briefing
+#
+SHELL=/bin/bash
+PATH=/home/cjpoll/.local/bin:/usr/local/bin:/usr/bin:/bin
+HOME=/home/cjpoll
+
+0 6 * * 1-5 cjpoll claude --dangerously-skip-permissions -p "$(cat /home/cjpoll/dev/custom/ai/reports/daily_briefing.md)"
