@@ -176,7 +176,9 @@ Flag these issues when found:
 
 ## Phase 5: Report Generation
 
-Write the report to `ai-artifacts/architecture-report-[code_area_name]-[YYYY-MM-DD-HHMMSS].md`.
+If no other output location is specified, write the report to
+`ai-artifacts/architecture-report-[code_area_name]-[YYYY-MM-DD-HHMMSS].md`. If
+another location is specified, write the report to that location.
 
 Sanitize the code area name for use in the filename (replace `/` and invalid characters with `-`).
 

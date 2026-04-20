@@ -127,3 +127,8 @@ and event title.
 
 List Notion tasks with a due date of today, sorted by priority (highest
 first). Include task name and priority level.
+
+#### Linear Tickets
+
+List Linear tickets that are assigned to Cody. EXCLUDE: Backlog, Done. Group by
+status.

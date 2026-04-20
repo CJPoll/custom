@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 
-cd ~/dev/admiral && mix chat --agent athena --permission-mode bypassPermissions
+cd ~/dev/admiral && elixir --sname admiral --cookie admiral_debug -S mix chat --agent athena --permission-mode bypassPermissions

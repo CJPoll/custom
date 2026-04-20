@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+cd ~/dev/admiral
+
+node="admiral@$(hostname -s)"
+iex --sname admiral_remote --cookie admiral_debug \
+  --eval "true = Node.connect(:\"${node}\")" \
+  --eval "IO.puts(\"Connected to ${node}. Run :observer.start() then use Nodes menu.\")"

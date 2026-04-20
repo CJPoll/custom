@@ -37,7 +37,7 @@ def print_usage
       - Creates a new tmux session if one doesn't exist
       - Switches to existing session if already created
       - In PR review mode, creates a Review window with vim-review
-      - Sessions include IDE, GIT (lazygit), SQL (lazysql), and Docker (lazydocker) windows
+      - Sessions include an IDE window
   USAGE
 end
 
@@ -119,11 +119,6 @@ class Session
     # Create a 25% split window in the newly created session's first window
     `tmux split-window -p 30 -c "#{project.path}" -t "#{project.session_name}:0" "bash -c 'athena --claude --resume'"`
     `tmux split-window -h -c "#{project.path}" -t "#{project.session_name}:0.1"`
-    
-    # Create new windows for GIT, SQL, and Docker
-    `tmux new-window -c "#{project.path}" -n "GIT" -t "#{project.session_name}:1" lazygit`
-    `tmux new-window -c "#{project.path}" -n "SQL" -t "#{project.session_name}:2" lazysql`
-    `tmux new-window -c "#{project.path}" -n "Docker" -t "#{project.session_name}:3" lazydocker`
     
     # Select the first window and pane in the new session
     `tmux select-window -t "#{project.session_name}:0"`

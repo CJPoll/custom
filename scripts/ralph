@@ -11,7 +11,7 @@ RALPH_PROMPT="${HOME}/.claude/skills/ralph/SKILL.md"
 ATHENA_SYSTEM_PROMPT="${HOME}/.agents/athena.md"
 
 # Configuration
-MAX_ITERATIONS="${1:-10}"
+MAX_ITERATIONS="${1:-25}"
 PLAN_FILE="./ai-artifacts/ralph/plan.md"
 PROGRESS_FILE="./ai-artifacts/ralph/progress.md"
 ARCHIVE_DIR="./ai-artifacts/ralph/archives"
@@ -150,6 +150,28 @@ main() {
         echo -e "${YELLOW}Invoking Athena agent with Ralph workflow...${NC}"
         echo ""
 
+        # Always preserve Claude's raw stdout+stderr to a file so the
+        # (lossy) stream-json filter below doesn't hide diagnostics.
+        # Defaults to /dev/null (no-op passthrough). Callers can set
+        # RALPH_RAW_LOG in the environment to capture it, e.g. codebot
+        # sets this per ralph invocation to a per-ticket path.
+        raw_log="${RALPH_RAW_LOG:-/dev/null}"
+        if [[ "$raw_log" != "/dev/null" ]]; then
+            echo -e "${YELLOW}Raw Claude stdout → ${raw_log}${NC}"
+        fi
+
+        # `|| true` on the pipeline: claude always emits a non-JSON
+        # "Warning: no stdin data received in 3s…" line on stderr
+        # before its stream-json events, which makes `jq` inside the
+        # while-read filter exit with status 5. Under the outer
+        # `set -e`, that non-zero pipeline exit would terminate
+        # ralph before post-iteration logic (check_completion, the
+        # next iteration banner) ever runs. Swallowing the pipeline
+        # status here is safe: the loop's purpose is purely to echo
+        # parsed events for humans; the real "did Claude do
+        # anything?" signal is whether progress.md gained a
+        # <promise>COMPLETE</promise> marker by the next
+        # check_completion call.
         "$CLAUDE_CMD" \
             --print \
             --verbose \
@@ -158,7 +180,7 @@ main() {
             --system-prompt "$(cat "$ATHENA_SYSTEM_PROMPT")" \
             --append-system-prompt "$(cat "$RALPH_PROMPT")" \
             "Continue implementing the plan. Follow the Ralph workflow to select and complete the next task." \
-            2>&1 | while IFS= read -r line; do
+            2>&1 | tee -a "$raw_log" | while IFS= read -r line; do
                 # Parse JSON and extract relevant info
                 type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null)
 
@@ -221,7 +243,7 @@ main() {
                         echo -e "${YELLOW}[Session initialized]${NC}"
                     fi
                 fi
-            done
+            done || true
 
         echo ""
         echo -e "${GREEN}✓ Iteration $i complete${NC}"
