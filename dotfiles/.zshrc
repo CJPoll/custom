@@ -86,7 +86,7 @@ if [[ -a "${FUNCTIONS_FILE}" ]]; then
 fi
 
 # From .zshrc.functions
-ensure-tmux-session;
+[[ -o interactive ]] && ensure-tmux-session;
 
 LOCAL_RC="${HOME}/.zshrc.local"
 if [[ -a "${LOCAL_RC}" ]]; then

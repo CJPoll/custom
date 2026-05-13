@@ -1,9 +1,10 @@
 # Daily Briefing
 
-Generate a daily status briefing for Cody Poll covering the previous
-business day and today's schedule.
+Generate a daily status briefing for Cody Poll covering work completed
+since 6:00 AM the previous business day through now, plus today's
+schedule.
 
-On Mondays, the "previous business day" is Friday. Include any work
+On Mondays, the window starts at 6:00 AM Friday. Include any work
 accomplished over the weekend (Saturday and Sunday) as well.
 
 ## Data Sources
@@ -17,9 +18,9 @@ accomplished over the weekend (Saturday and Sunday) as well.
 
 ### GitLab MRs
 
-Find all GitLab MRs that Cody Poll authored or updated during the
-previous business day (and weekend, if today is Monday). Include both
-merged/closed and still-open MRs.
+Find all GitLab MRs that Cody Poll authored or updated since 6:00 AM
+the previous business day through now (and weekend, if today is Monday).
+Include both merged/closed and still-open MRs.
 
 Do NOT search for MRs that Cody reviewed. Automated reviews use Cody's
 credentials, which would introduce significant noise.
@@ -39,12 +40,14 @@ If no Linear ticket exists for an MR, create one with appropriate status,
 owner, and description.
 
 Also collect any other open Linear tickets assigned to Cody that are not in
-a backlog status.
+a backlog status, as well as any tickets completed since 6:00 AM the
+previous business day through now.
 
 ### Notion Tasks
 
 Query the "Tasks Tracker" database for:
-- Tasks completed during the previous business day (and weekend if Monday)
+- Tasks completed since 6:00 AM the previous business day through now
+  (and weekend if Monday)
 - Tasks with a due date on the previous business day that are not complete
 - Tasks with a due date of today
 
@@ -79,7 +82,9 @@ Output the report using the following structure.
 
 Header: `MM/DD/YYYY (Completed)` using the previous business day's date.
 On Mondays, if there is weekend work, use `MM/DD – MM/DD/YYYY (Completed)`
-spanning Friday through Sunday.
+spanning Friday through Sunday. If work was completed early today (between
+midnight and now), include it in this section with a note that it was
+completed today.
 
 Group completed work across all three systems. Related items from Notion,
 Linear, and GitLab should be combined into a single entry. Not every entry
@@ -107,7 +112,8 @@ Links:
 Header: `MM/DD/YYYY (Incomplete)` using the same date logic as Section 1.
 
 Collect:
-1. Open MRs authored by Cody, summarized in 1-2 sentences each.
+1. Open MRs authored by Cody that were created or updated since 6:00 AM
+   the previous business day, summarized in 1-2 sentences each.
 2. Notion tasks with a due date on the previous business day that are not
    complete.
 3. Open Linear tickets assigned to Cody (exclude backlog status).

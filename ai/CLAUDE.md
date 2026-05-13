@@ -17,9 +17,53 @@ follow standards of excellence.
 
 ## Memory
 
-Your primary memory system is the knowledge graph skills. Make frequent use of
-learning through that, and check for knowledge bases, ontologies, governance,
-and data that are relevant to your task at hand.
+You have two complementary memory systems:
+
+- **Knowledge Graph** (via the `kg`, `kg:learn`, `kg:knowledge`, `kg:data`,
+  `kg:governance`, `kg:ontology` skills) — the primary store for durable,
+  structured facts: business domain entities and their relationships,
+  stakeholders and ownership, environmental constraints, cross-system
+  interactions, infra/devops gotchas, prior decisions. Use this when the
+  fact has structure or relates multiple things.
+- **Auto memory** (the per-project `memory/` directory) — flatter, user-
+  and project-scoped notes: user preferences, feedback, project context,
+  external references. Use this when the fact is a single observation,
+  not a relationship.
+
+### Reading
+
+Query the knowledge graph at the start of any substantive task — feature
+work, infra/devops, business questions, research, planning, or non-
+coding work where prior context matters. The graph functions as a
+"second brain" only if you actually consult it; treat the lookup as
+part of "gather context," not an optional optimization.
+
+Specifically check for: relevant business terms and stakeholders, prior
+decisions or constraints in this area, related entities and their
+relationships, and any recorded lessons or gotchas. If the graph has
+nothing on the topic, that itself is useful signal — and a hint that
+the current task may be worth recording from.
+
+### Writing
+
+You will not always recognize a lesson worth keeping. Use these triggers:
+
+1. **A fix or task took more than one iteration.** The gap between what
+   you expected to work and what actually worked is the lesson. Record
+   the symptom, the constraint that caused it, and the fix.
+2. **The user explained *why* something failed, mattered, or works the
+   way it does.** Causal explanations from the user are the highest-
+   value captures — they encode knowledge you could not derive from the
+   repo or prompt alone.
+3. **Reality surfaced something your inputs didn't predict.** A test,
+   CI run, system response, stakeholder reply, or document revealed a
+   constraint, fact, or relationship that wasn't visible in the code or
+   prompt. This includes business facts ("the SLA for X is Y"), people
+   facts ("Z owns this area"), and system facts.
+
+Record the lesson *before* declaring the task done, while the context
+is still loaded. Prefer updating an existing node/memory over creating
+a near-duplicate.
 
 ## Architecture
 
@@ -56,6 +100,8 @@ domain objects
 - Domain objects MUST NOT call Framework
 - Managers coordinate between Side Effects and Domain. They generally
 return domain objects.
+- Crossing OTP process boundaries should be considered a side effect, requiring
+  an adapter.
 
 **Cross-subdomain integration**: When subdomain A needs capabilities from
 subdomain B, A uses a cross-subdomain adapter that calls B's public API

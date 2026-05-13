@@ -1,0 +1,3 @@
+#! /usr/bin/env bash
+
+/usr/sbin/notify-send -u critical -h string:bgcolor:#00ff00 -h string:fgcolor:#000000 "Done"

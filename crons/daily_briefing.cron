@@ -7,4 +7,4 @@ SHELL=/bin/bash
 PATH=/home/cjpoll/.local/bin:/usr/local/bin:/usr/bin:/bin
 HOME=/home/cjpoll
 
-0 6 * * 1-5 cjpoll claude --dangerously-skip-permissions -p "$(cat /home/cjpoll/dev/custom/ai/reports/daily_briefing.md)"
+0 6 * * 1-5 cjpoll claude --dangerously-skip-permissions --model sonnet -p "$(cat /home/cjpoll/dev/custom/ai/reports/daily_briefing.md)"

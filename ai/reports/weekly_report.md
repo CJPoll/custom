@@ -68,6 +68,9 @@ and put it in the entry's "tl;dr" field.
 Section 4 (Team Progress Report) should be created as a nested page inside
 the weekly brief entry, titled `Team Progress Report DD/MM/YYYY`.
 
+IFF the report is successfully created in Notion, send a link to the Team
+Progress Report in Slack to Mike Peregrina.
+
 ---
 
 ## Report Format
