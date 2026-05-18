@@ -9,9 +9,17 @@ Achieve 100% test suite success rate through systematic issue identification and
 
 ## Commands
 
-- **Full suite**: `mix test --warnings-as-errors`
-- **Single file**: `mix test <file> --max-failures 1 --warnings-as-errors`
-- **Compilation check**: `mix compile`
+Tests must run inside the Docker `app` service container — running `mix test`
+directly on the host connects to the wrong Postgres instance (`walt-ui-db`
+instead of `gen_saas-postgres-1`) and hits its 300-connection limit.
+
+- **Full suite**: `./bin/checks/test.sh`
+- **Single file**: `./bin/checks/test.sh <file>`
+- **Compilation check**: `docker compose run --rm -e MIX_ENV=test app mix compile`
+
+`./bin/checks/test.sh` wraps `docker compose run --rm -e MIX_ENV=test app mix test --max-failures 5`.
+The `MIX_ENV=test` flag is required — the `app` service defaults to `MIX_ENV=dev`,
+and omitting it causes sandbox pool errors in umbrella child apps.
 
 ## Process
 
@@ -41,7 +49,7 @@ For each failing test file:
 1. Analyze specific error messages and failure patterns
 2. Identify root cause (missing imports, incorrect assertions, fixture issues)
 3. Apply minimal fix addressing root cause
-4. Test fix in isolation: `mix test <file> --max-failures 1 --warnings-as-errors`
+4. Test fix in isolation: `./bin/checks/test.sh <file>`
 5. If fix successful, validate no side effects introduced
 6. If fix fails, revert changes and try alternative approach
 

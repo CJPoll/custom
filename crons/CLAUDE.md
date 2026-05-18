@@ -30,3 +30,4 @@ sudo cp ~/dev/custom/crons/<name>.cron /etc/cron.d/<name>
 |------|-------------|----------|-------------|
 | `weekly_report.cron` | `/etc/cron.d/weekly_report` | Mon 6:00 AM | Generates weekly status report in Notion Morning Briefs Hub |
 | `daily_briefing.cron` | `/etc/cron.d/daily_briefing` | Mon–Fri 6:00 AM | Generates daily status briefing in Notion Morning Briefs Hub |
+| `experiment.cron` | `/etc/cron.d/experiment` | Every 10 min | Free agent experiment recording findings in "Agents with Agency" knowledge graph |

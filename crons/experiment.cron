@@ -1,0 +1,11 @@
+# Experiment - Runs every 10 minutes
+# Free agent experiment: explores, researches, and records findings in the "Agents with Agency" knowledge graph
+#
+# Install: sudo cp ~/dev/custom/crons/experiment.cron /etc/cron.d/experiment
+#
+SHELL=/bin/bash
+PATH=/home/cjpoll/.local/bin:/usr/local/bin:/usr/bin:/bin
+HOME=/home/cjpoll
+
+# DISABLED
+# */30 * * * * cjpoll claude --dangerously-skip-permissions --model sonnet -p "$(cat /home/cjpoll/dev/custom/ai/reports/experiment.md)"
