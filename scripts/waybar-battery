@@ -27,36 +27,35 @@ fi
 tlp_mode=$(tlp-stat -s 2>/dev/null | grep "Mode" | awk '{print $3}')
 [ -z "$tlp_mode" ] && tlp_mode="unknown"
 
-# Calculate power and time remaining
+# Calculate power and time remaining.
+#
+# This is all integer arithmetic on purpose. bc prints values below 1 without a
+# leading zero (".42"), so taking the whole-hours part with `cut -d. -f1` used to
+# yield an empty string, which both broke the expression that consumed it and
+# silently reported "0h 0m" for anything under an hour.
 if [ -n "$current" ] && [ "$current" -gt 0 ]; then
     # Get voltage to calculate watts (voltage_now is in microvolts)
     voltage=$(cat /sys/class/power_supply/BAT*/voltage_now 2>/dev/null | head -1)
     if [ -n "$voltage" ]; then
-        # Power in watts = (current in µA * voltage in µV) / 10^12
-        power_watts=$(echo "scale=1; ($current * $voltage) / 1000000000000" | bc)
-        power_text="${power_watts}W"
+        # Power in watts = (current in µA * voltage in µV) / 10^12. Scale to
+        # tenths of a watt first so one decimal survives integer division.
+        power_tenths=$(((current * voltage + 50000000000) / 100000000000))
+        power_text="$((power_tenths / 10)).$((power_tenths % 10))W"
     else
         power_text="N/A"
     fi
 
-    # Calculate time remaining (charge/current gives hours)
+    # charge (µAh) / current (µA) gives hours, so scale by 60 before dividing
+    # to land on whole minutes.
     if [ "$status" = "Discharging" ] && [ -n "$charge_now" ]; then
-        # Time to empty (in hours)
-        hours=$(echo "scale=2; $charge_now / $current" | bc)
-        hours_int=$(echo "$hours" | cut -d. -f1)
-        minutes=$(echo "scale=0; ($hours - $hours_int) * 60" | bc | cut -d. -f1)
-        [ -z "$hours_int" ] && hours_int=0
-        [ -z "$minutes" ] && minutes=0
-        time_remaining="${hours_int}h ${minutes}m remaining"
+        total_minutes=$((charge_now * 60 / current))
+        time_remaining="$((total_minutes / 60))h $((total_minutes % 60))m remaining"
     elif [ "$status" = "Charging" ] && [ -n "$charge_now" ] && [ -n "$charge_full" ]; then
-        # Time to full (in hours)
         charge_needed=$((charge_full - charge_now))
-        hours=$(echo "scale=2; $charge_needed / $current" | bc)
-        hours_int=$(echo "$hours" | cut -d. -f1)
-        minutes=$(echo "scale=0; ($hours - $hours_int) * 60" | bc | cut -d. -f1)
-        [ -z "$hours_int" ] && hours_int=0
-        [ -z "$minutes" ] && minutes=0
-        time_remaining="${hours_int}h ${minutes}m until full"
+        # A worn or recalibrating battery can report charge_now above charge_full.
+        [ "$charge_needed" -lt 0 ] && charge_needed=0
+        total_minutes=$((charge_needed * 60 / current))
+        time_remaining="$((total_minutes / 60))h $((total_minutes % 60))m until full"
     else
         time_remaining="N/A"
     fi
