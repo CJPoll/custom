@@ -283,7 +283,7 @@ sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.ta
 
 | Screen | Image | Theme |
 |--------|-------|-------|
-| Main Display | `~/Pictures/cyberpunk-main.jpg` | Blue/cyan cityscape with silhouette |
+| Main Display | `~/Pictures/cyberpunk-main.png` | Blue/cyan cityscape with silhouette |
 | Secondary Display (Rotated) | `~/Pictures/cyberpunk-rotated.jpg` | Rotated variant |
 | Lock Screen | `~/Pictures/cyberpunk-lock.jpg` | Orange-dominant futuristic cityscape |
 
