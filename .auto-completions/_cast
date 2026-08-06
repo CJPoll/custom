@@ -1,0 +1,60 @@
+#compdef cast
+
+# Completion function for cast command
+
+_cast() {
+    local curcontext="$curcontext" state line
+
+    _arguments -C \
+        '1:roku:_cast_rokus' \
+        '--roku[Roku hostname or IP]:roku:_cast_rokus' \
+        '--output[Wayland output to capture]:output:_cast_outputs' \
+        '--port[Port to serve HLS on]:port:(8099)' \
+        '--bitrate[Video bitrate]:bitrate:(4M 8M 12M 20M)' \
+        '--latency[HLS segment duration in seconds]:seconds:(1 2 4)' \
+        '--audio[Capture audio]::source:_cast_audio_sources' \
+        '--device[VAAPI render node]:device:_files -g "/dev/dri/renderD*"' \
+        '--software[Encode with libx264 instead of VAAPI]' \
+        '--list[List Rokus on the LAN and exit]' \
+        '--stop[Return the Roku to its home screen and exit]' \
+        '--dry-run[Print the commands, then exit]' \
+        '(- *)'{-h,--help}'[Show help message]'
+}
+
+# Rokus currently answering SSDP on the LAN
+_cast_rokus() {
+    local -a rokus
+    rokus=(${(f)"$(cast --list 2>/dev/null | awk -F'\t' '{print $1":"$2}')"})
+
+    if (( ${#rokus} )); then
+        _describe -t rokus 'rokus' rokus
+    else
+        _message 'roku hostname or IP'
+    fi
+}
+
+# Wayland outputs reported by Hyprland
+_cast_outputs() {
+    local -a outputs
+    outputs=(${(f)"$(hyprctl monitors -j 2>/dev/null | jq -r '.[].name')"})
+
+    if (( ${#outputs} )); then
+        _describe -t outputs 'outputs' outputs
+    else
+        _message 'wayland output name'
+    fi
+}
+
+# PipeWire capture sources
+_cast_audio_sources() {
+    local -a sources
+    sources=(${(f)"$(pactl list short sources 2>/dev/null | awk '{print $2}')"})
+
+    if (( ${#sources} )); then
+        _describe -t sources 'audio sources' sources
+    else
+        _message 'pipewire source name'
+    fi
+}
+
+_cast "$@"

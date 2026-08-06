@@ -1,0 +1,352 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROKU_MEDIA_PLAYER_APP_ID=2213
+DEFAULT_HTTP_PORT=8099
+DEFAULT_SEGMENT_SECONDS=1
+DEFAULT_BITRATE=8M
+DEFAULT_RESOLUTION=1920x1080
+DEFAULT_RENDER_DEVICE=/dev/dri/renderD128
+
+usage() {
+    cat << EOF
+Usage: cast [<roku>] [options]
+
+Mirrors a Wayland output to a Roku by capturing the screen, segmenting it as
+HLS, serving it over HTTP, and deep-linking the Roku Media Player at it.
+
+Expect 3-10s of latency. This is for watching content on the TV, not for
+interacting with a mirrored desktop.
+
+Arguments:
+  <roku>                 Roku hostname or IP. Defaults to \$ROKU_HOST, then to
+                         the only Roku found on the LAN.
+
+Options:
+  --roku <host>          Same as the positional argument
+  --output <name>        Wayland output to capture (default: wf-recorder's own)
+  --port <port>          Port to serve HLS on (default: $DEFAULT_HTTP_PORT)
+  --bitrate <rate>       Video bitrate (default: $DEFAULT_BITRATE)
+  --resolution <WxH>     Scale the stream before sending. "native" sends the
+                         output untouched with no re-encode.
+                         (default: $DEFAULT_RESOLUTION)
+  --latency <seconds>    HLS segment duration (default: $DEFAULT_SEGMENT_SECONDS)
+  --audio [<source>]     Mux system audio into the stream so it plays from the
+                         TV. Bare flag uses the default sink's monitor; pass a
+                         source name to override.
+  --software             Encode with libx264 instead of VAAPI
+  --device <path>        VAAPI render node (default: $DEFAULT_RENDER_DEVICE)
+  --list                 List Rokus on the LAN and exit
+  --stop                 Return the Roku to its home screen and exit
+  --dry-run              Print the capture and launch commands, then exit
+  -h, --help             Show this help
+
+Environment:
+  ROKU_HOST              Default Roku host
+
+Examples:
+  cast
+  cast 192.168.4.34
+  cast --output DP-1 --audio
+  cast 192.168.4.34 --latency 2 --bitrate 12M
+  cast --stop
+EOF
+}
+
+die() {
+    echo "Error: $*" >&2
+    exit 1
+}
+
+# --- argument parsing (flags and positionals in any order) ------------------
+
+ROKU="${ROKU_HOST:-}"
+OUTPUT=""
+HTTP_PORT="$DEFAULT_HTTP_PORT"
+BITRATE="$DEFAULT_BITRATE"
+RESOLUTION="$DEFAULT_RESOLUTION"
+SEGMENT_SECONDS="$DEFAULT_SEGMENT_SECONDS"
+RENDER_DEVICE="$DEFAULT_RENDER_DEVICE"
+AUDIO_SOURCE=""
+CAPTURE_AUDIO=false
+USE_SOFTWARE_ENCODER=false
+ACTION=cast
+DRY_RUN=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --list)     ACTION=list; shift ;;
+        --stop)     ACTION=stop; shift ;;
+        --dry-run)  DRY_RUN=true; shift ;;
+        --software) USE_SOFTWARE_ENCODER=true; shift ;;
+        --roku)     [ $# -ge 2 ] || die "--roku requires a value"; ROKU="$2"; shift 2 ;;
+        --output)   [ $# -ge 2 ] || die "--output requires a value"; OUTPUT="$2"; shift 2 ;;
+        --port)     [ $# -ge 2 ] || die "--port requires a value"; HTTP_PORT="$2"; shift 2 ;;
+        --bitrate)  [ $# -ge 2 ] || die "--bitrate requires a value"; BITRATE="$2"; shift 2 ;;
+        --resolution) [ $# -ge 2 ] || die "--resolution requires a value"; RESOLUTION="$2"; shift 2 ;;
+        --latency)  [ $# -ge 2 ] || die "--latency requires a value"; SEGMENT_SECONDS="$2"; shift 2 ;;
+        --device)   [ $# -ge 2 ] || die "--device requires a value"; RENDER_DEVICE="$2"; shift 2 ;;
+        --audio)
+            CAPTURE_AUDIO=true
+            # Bare --audio is valid; only consume a following non-flag token.
+            if [ $# -ge 2 ] && [[ "$2" != -* ]]; then
+                AUDIO_SOURCE="$2"
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        -*) die "Unknown option: $1" ;;
+        *)
+            [ -z "$ROKU" ] || die "Unexpected argument: $1"
+            ROKU="$1"
+            shift
+            ;;
+    esac
+done
+
+[[ "$HTTP_PORT" =~ ^[0-9]+$ ]] || die "--port must be a number"
+[[ "$SEGMENT_SECONDS" =~ ^[0-9]+$ ]] || die "--latency must be a whole number of seconds"
+[ "$RESOLUTION" = native ] || [[ "$RESOLUTION" =~ ^[0-9]+x[0-9]+$ ]] \
+    || die "--resolution must look like 1920x1080, or be 'native'"
+
+# --- discovery -------------------------------------------------------------
+
+discover_rokus() {
+    python3 - << 'PY'
+import socket, time
+
+message = (
+    "M-SEARCH * HTTP/1.1\r\n"
+    "HOST: 239.255.255.250:1900\r\n"
+    'MAN: "ssdp:discover"\r\n'
+    "MX: 2\r\n"
+    "ST: roku:ecp\r\n\r\n"
+).encode()
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+sock.settimeout(1.0)
+for _ in range(2):
+    sock.sendto(message, ("239.255.255.250", 1900))
+    time.sleep(0.2)
+
+found = set()
+deadline = time.time() + 4
+while time.time() < deadline:
+    try:
+        _, addr = sock.recvfrom(65507)
+    except socket.timeout:
+        continue
+    found.add(addr[0])
+
+for ip in sorted(found):
+    print(ip)
+PY
+}
+
+roku_name() {
+    curl -s --max-time 5 "http://$1:8060/query/device-info" \
+        | tr '<' '\n' \
+        | sed -n 's|^friendly-model-name>||p' \
+        | head -1
+}
+
+if [ "$ACTION" = list ]; then
+    rokus=$(discover_rokus)
+    [ -n "$rokus" ] || die "No Rokus found on the LAN"
+    while read -r ip; do
+        printf '%s\t%s\n' "$ip" "$(roku_name "$ip")"
+    done <<< "$rokus"
+    exit 0
+fi
+
+if [ -z "$ROKU" ]; then
+    rokus=$(discover_rokus)
+    [ -n "$rokus" ] || die "No Roku found. Pass one explicitly or set ROKU_HOST."
+    if [ "$(wc -l <<< "$rokus")" -gt 1 ]; then
+        echo "Multiple Rokus found; pick one:" >&2
+        while read -r ip; do
+            printf '  %s\t%s\n' "$ip" "$(roku_name "$ip")" >&2
+        done <<< "$rokus"
+        exit 1
+    fi
+    ROKU="$rokus"
+fi
+
+curl -sf --max-time 5 "http://$ROKU:8060/query/device-info" >/dev/null \
+    || die "No Roku ECP endpoint at $ROKU:8060"
+
+if [ "$ACTION" = stop ]; then
+    curl -sf -X POST --max-time 5 "http://$ROKU:8060/keypress/Home" >/dev/null \
+        || die "Could not send Home to $ROKU (is ECP set to Permissive?)"
+    echo "Sent $ROKU back to its home screen."
+    exit 0
+fi
+
+# --- preflight -------------------------------------------------------------
+
+# --dry-run only prints commands, so it does not need the capture stack present.
+if [ "$DRY_RUN" = false ]; then
+    for tool in wf-recorder ffmpeg curl python3; do
+        command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
+    done
+
+    if [ "$CAPTURE_AUDIO" = true ]; then
+        command -v pactl >/dev/null 2>&1 || die "pactl is not installed (media-video/pipewire[sound-server])"
+    fi
+
+    [ -n "${WAYLAND_DISPLAY:-}" ] || die "No WAYLAND_DISPLAY; cast must run inside your Wayland session"
+fi
+
+# No -f here: Limited mode answers 403 with the explanation in the body, and
+# -f would discard it.
+apps_response=$(curl -s --max-time 5 "http://$ROKU:8060/query/apps" || true)
+if grep -q 'Limited mode' <<< "$apps_response"; then
+    ecp_message="$ROKU has ECP locked down. On the Roku, set:
+  Settings > System > Advanced system settings > Control by mobile apps
+  > Network access > Permissive"
+    # Under --dry-run this is worth knowing but should not stop the preview.
+    if [ "$DRY_RUN" = true ]; then
+        echo "Warning: $ecp_message" >&2
+    else
+        die "$ecp_message"
+    fi
+fi
+
+if [ "$USE_SOFTWARE_ENCODER" = false ] && [ ! -e "$RENDER_DEVICE" ]; then
+    die "VAAPI device $RENDER_DEVICE not found (use --software to encode on CPU)"
+fi
+
+LOCAL_IP=$(ip -4 route get "$ROKU" 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+[ -n "$LOCAL_IP" ] || die "Could not determine a local IP with a route to $ROKU"
+
+# --- build the capture pipeline -------------------------------------------
+
+# The FIFO deliberately lives outside SERVE_DIR so the HTTP server never
+# offers a path that would block forever on read.
+WORK_DIR=$(mktemp -d -t cast-XXXXXX)
+SERVE_DIR="$WORK_DIR/hls"
+mkdir -p "$SERVE_DIR"
+FIFO="$WORK_DIR/capture.ts"
+PLAYLIST="$SERVE_DIR/stream.m3u8"
+STREAM_URL="http://$LOCAL_IP:$HTTP_PORT/stream.m3u8"
+
+recorder_command=(wf-recorder --muxer=mpegts --file="$FIFO")
+[ -n "$OUTPUT" ] && recorder_command+=(--output="$OUTPUT")
+
+if [ "$USE_SOFTWARE_ENCODER" = true ]; then
+    recorder_command+=(--codec=libx264 --codec-param=preset=veryfast --codec-param=tune=zerolatency)
+else
+    recorder_command+=(--codec=h264_vaapi --device="$RENDER_DEVICE")
+fi
+recorder_command+=(--codec-param="b=$BITRATE")
+
+if [ "$CAPTURE_AUDIO" = true ]; then
+    # A bare --audio would make wf-recorder grab the default *source*, which is
+    # the microphone. System audio is the default sink's monitor.
+    if [ -z "$AUDIO_SOURCE" ]; then
+        default_sink=$(pactl get-default-sink 2>/dev/null || true)
+        [ -n "$default_sink" ] || die "Could not determine the default sink; pass a source to --audio"
+        AUDIO_SOURCE="$default_sink.monitor"
+    fi
+    recorder_command+=(--audio="$AUDIO_SOURCE" --audio-codec=aac)
+fi
+
+ffmpeg_command=(ffmpeg -hide_banner -loglevel error -fflags nobuffer)
+
+if [ "$RESOLUTION" = native ]; then
+    # Nothing to change, so pass the recorder's stream straight through.
+    ffmpeg_command+=(-i "$FIFO" -c copy)
+else
+    # Scale on the GPU and normalise to limited-range yuv420p at Main@L4.1,
+    # which is what set-top decoders actually accept.
+    # Decode, scale and re-encode entirely on the GPU; a software decode of a
+    # 2560x1600 feed is enough to starve the pipeline on its own. The forced
+    # keyframes matter because HLS can only cut a segment on one.
+    ffmpeg_command+=(
+        -hwaccel vaapi -hwaccel_device "$RENDER_DEVICE" -hwaccel_output_format vaapi
+        -i "$FIFO"
+        -vf "scale_vaapi=w=${RESOLUTION%x*}:h=${RESOLUTION#*x}:force_original_aspect_ratio=decrease:force_divisible_by=2:out_range=tv"
+        -c:v h264_vaapi -profile:v main -level 41 -b:v "$BITRATE"
+        -g "$((SEGMENT_SECONDS * 30))"
+        -force_key_frames "expr:gte(t,n_forced*$SEGMENT_SECONDS)"
+        -c:a copy
+    )
+fi
+
+ffmpeg_command+=(
+    -f hls
+    -hls_time "$SEGMENT_SECONDS"
+    -hls_list_size 6
+    -hls_flags "delete_segments+omit_endlist+independent_segments"
+    -hls_segment_filename "$SERVE_DIR/segment%05d.ts"
+    "$PLAYLIST"
+)
+
+launch_url="http://$ROKU:8060/launch/$ROKU_MEDIA_PLAYER_APP_ID?t=v&videoFormat=hls&videoName=Desktop&u=$(
+    python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$STREAM_URL"
+)"
+
+if [ "$DRY_RUN" = true ]; then
+    echo "Capture:  ${recorder_command[*]}"
+    echo "Segment:  ${ffmpeg_command[*]}"
+    echo "Serve:    python3 -m http.server $HTTP_PORT --bind $LOCAL_IP --directory $SERVE_DIR"
+    echo "Launch:   POST $launch_url"
+    rm -rf "$WORK_DIR"
+    exit 0
+fi
+
+# --- run -------------------------------------------------------------------
+
+RECORDER_PID=""
+FFMPEG_PID=""
+SERVER_PID=""
+
+cleanup() {
+    for pid in "$RECORDER_PID" "$FFMPEG_PID" "$SERVER_PID"; do
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
+    wait 2>/dev/null || true
+    rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT INT TERM
+
+mkfifo "$FIFO"
+
+python3 -m http.server "$HTTP_PORT" --bind "$LOCAL_IP" --directory "$SERVE_DIR" >/dev/null 2>&1 &
+SERVER_PID=$!
+
+"${recorder_command[@]}" >/dev/null 2>&1 &
+RECORDER_PID=$!
+
+"${ffmpeg_command[@]}" &
+FFMPEG_PID=$!
+
+# Wait for the playlist to name at least one segment before handing the Roku a
+# URL, otherwise Roku Media Player gives up on an empty manifest.
+echo "Starting capture..."
+ready=false
+for _ in $(seq 1 300); do
+    if [ -f "$PLAYLIST" ] && grep -q '\.ts$' "$PLAYLIST" 2>/dev/null; then
+        ready=true
+        break
+    fi
+    if ! kill -0 "$RECORDER_PID" 2>/dev/null; then
+        die "wf-recorder exited before producing a stream"
+    fi
+    if ! kill -0 "$FFMPEG_PID" 2>/dev/null; then
+        die "ffmpeg exited before producing a stream"
+    fi
+    sleep 0.1
+done
+[ "$ready" = true ] || die "Timed out waiting for the HLS playlist to fill"
+
+curl -sf -X POST --max-time 10 "$launch_url" >/dev/null \
+    || die "Roku rejected the launch request. Is Roku Media Player installed?"
+
+echo "Casting $STREAM_URL -> $ROKU"
+echo "Press Ctrl-C to stop."
+wait "$RECORDER_PID"
