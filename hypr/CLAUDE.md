@@ -228,6 +228,32 @@ ln -sf ~/dev/custom/hypr/waybar.css ~/.config/waybar/style.css
 ln -sf ~/dev/custom/hypr/wofi.css ~/.config/wofi/style.css
 ```
 
+## Machine-Specific Configuration
+
+The configs in this repo are shared across every machine, so anything that
+depends on a particular machine's hardware belongs in a local override file in
+`$HOME` (untracked), sourced from the top of the base config:
+
+| Base config | Local override | Holds |
+|-------------|----------------|-------|
+| `hyprland.conf` | `~/hyprland.local.conf` | Monitors, workspace pinning, per-machine `exec-once` |
+| `hyprlock.conf` | `~/hyprlock.local.conf` | Fingerprint reader (`auth:fingerprint`) |
+
+This mirrors the `~/.zshrc` → `~/.zshrc.local` pattern.
+
+**The local file must exist on every machine**, even when it has nothing to say
+— `source =` on a missing path is an error in hyprlang, and for `hyprlock.conf`
+a config error means the screen may fail to lock. When setting up a new
+machine, create a stub with just a header comment.
+
+Guidelines:
+
+- Never put machine-specific values in the base config, even commented out.
+- Never put theming or layout in a local file; those are shared by definition.
+- Keep the override minimal — set only what actually differs. Options that are
+  correct everywhere (e.g. `auth:pam:enabled`, which defaults to true) stay out
+  of both files.
+
 ## Idle Management (Hypridle)
 
 Hypridle manages idle timeouts and automatic actions:

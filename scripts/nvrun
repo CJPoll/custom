@@ -1,0 +1,27 @@
+#!/bin/sh
+# nvrun - run a program on the NVIDIA dGPU via PRIME render offload
+#
+# Usage: nvrun <command> [args...]
+# Examples:
+#   nvrun glxinfo | grep 'OpenGL renderer'
+#   nvrun vulkaninfo --summary
+#   nvrun steam
+#
+# Exit codes:
+#   1 - no command given
+#   Otherwise exits with the wrapped command's exit code.
+
+if [ $# -eq 0 ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  echo "Usage: nvrun <command> [args...]" >&2
+  echo "Runs the given command on the NVIDIA dGPU via PRIME render offload." >&2
+  exit 1
+fi
+
+# OpenGL (GLX and EGL) offload
+export __NV_PRIME_RENDER_OFFLOAD=1
+export __GLX_VENDOR_LIBRARY_NAME=nvidia
+
+# Vulkan: prefer the NVIDIA device
+export __VK_LAYER_NV_optimus=NVIDIA_only
+
+exec "$@"

@@ -2,4 +2,14 @@
 # Wrapper script to start Hyprland with a proper D-Bus session
 # Used by greetd: command = "tuigreet --cmd '/home/cjpoll/dev/custom/scripts/start-hyprland'"
 
+# Pin Hyprland's renderer to the AMD iGPU (PRIME offload setup).
+# Resolve via by-path because card0/card1 numbering can change between boots,
+# and AQ_DRM_DEVICES cannot take by-path symlinks directly (':' is its list
+# separator, and PCI by-path names contain colons).
+AMD_CARD_BY_PATH="/dev/dri/by-path/pci-0000:c3:00.0-card"
+if [ -e "${AMD_CARD_BY_PATH}" ]; then
+  AQ_DRM_DEVICES="$(readlink -f "${AMD_CARD_BY_PATH}")"
+  export AQ_DRM_DEVICES
+fi
+
 exec dbus-run-session hyprland
