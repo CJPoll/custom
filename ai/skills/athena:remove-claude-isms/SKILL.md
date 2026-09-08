@@ -2,6 +2,7 @@
 name: athena:remove-claude-isms
 description: Edit prose to strip "AI-isms" / "claude-isms" — the tics that make writing read as machine-generated (em-dash overuse, "it's not X, it's Y" negative parallelism, rule-of-three padding, slop vocabulary like "delve/tapestry/robust", filler openers and closers, over-formatting, and sycophantic tone). Use when asked to remove AI-isms/claude-isms, de-slop, "humanize", or make a draft not sound like AI — or to self-check the agent's own draft before sending. Rewrites to preserve meaning and voice; it does not blanket-ban punctuation.
 argument-hint: "[file-or-text | nothing = clean your own last draft]"
+allowed-tools: Read Edit Write
 ---
 
 # athena:remove-claude-isms
@@ -31,18 +32,38 @@ Corollary rules:
 - **Leave code, quotes, and cited text alone.** Only edit the prose you were
   asked to edit. Never rewrite someone else's quoted words.
 
+## Default: just fix it
+
+The default is to **apply the edits, not describe them.** Don't ask for
+confirmation, don't present a plan, don't narrate each change — clean the text
+and hand back the result. The only time you pause first is when a "fix" would
+require dropping or altering a fact (see step 4); prefer keeping the fact.
+
+- **A file** → edit it **in place** with Edit/Write, then give a one-line
+  confirmation (path + a rough count, e.g. "cleaned; thinned ~9 em dashes, cut 3
+  filler openers"). Don't paste the whole rewritten file back.
+- **Pasted text** → return only the cleaned text, nothing wrapped around it.
+- **Your own last draft** → silently apply the passes before sending; no
+  meta-commentary about having done so.
+
+Produce a categorized change summary **only if the user explicitly asks** what
+changed (or says "show me the diff" / "explain the edits"). "Just fix it" is the
+contract; the explanation is opt-in.
+
 ## Process
 
-1. **Determine the target.** If given a file or pasted text, edit that. If given
-   nothing, apply the passes to *your own* most recent draft before sending it.
+1. **Determine the target.** A file or pasted text → edit that. Nothing → clean
+   *your own* most recent draft before sending it.
 2. **Scan for clusters, not single instances.** Read the whole piece first and
    note where tells pile up. A lone tell in an otherwise clean page is usually
    fine; leave it.
 3. **Run the passes** (below). Fix the densest offenders first.
 4. **Read it back aloud in your head.** If a fix made a sentence stilted or
-   changed its meaning, revert or re-do it. Natural beats "clean."
-5. **Report.** Return the edited text. If the user asked what changed, give a
-   short bulleted summary of the categories you touched — don't over-explain.
+   changed its meaning, revert or re-do it. Natural beats "clean." If the only
+   way to remove a tell is to drop a fact, caveat, or number — keep the fact and
+   leave the tell.
+5. **Apply and confirm.** Write the result (in place for a file), then give the
+   one-line confirmation. No change log unless asked.
 
 ## The passes
 
