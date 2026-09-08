@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# add-notion - Register a Notion MCP server (personal or work) for the CURRENT
+#              project, at local scope, using the Athena API-key wrapper.
+#
+# Each mode maps to a fixed server name + token file:
+#   --personal  ->  notion-personal   (~/.claude/notion-personal-token, "Cody" ws)
+#   --work      ->  notion-work        (~/.claude/notion-amby-token,     "Amby AI" ws)
+#
+# With no mode flag, an interactive menu lets you pick (arrow keys / j-k / d-e,
+# Enter to choose, q to cancel).
+#
+# Local scope keys off the current directory, so run this from the project's
+# MAIN checkout (where you start `claude`), not from a worktree.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WRAPPER="$SCRIPT_DIR/../ai/bin/notion-athena-mcp"
+if command -v realpath >/dev/null 2>&1; then
+    WRAPPER="$(realpath "$WRAPPER" 2>/dev/null || echo "$WRAPPER")"
+fi
+
+PERSONAL_TOKEN="$HOME/.claude/notion-personal-token"
+WORK_TOKEN="$HOME/.claude/notion-amby-token"
+
+MODE=""
+DRY_RUN=false
+
+die() { echo "add-notion: $*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+add-notion - add a Notion MCP server (personal or work) to the current project
+
+Usage:
+  add-notion [--work | --personal] [--dry-run] [-h|--help]
+
+Modes:
+  --personal, -p   Personal "Cody" workspace   -> server "notion-personal"
+  --work,     -w   Work "Amby AI" workspace     -> server "notion-work"
+
+With no mode flag, an interactive menu lets you pick
+(↑/↓ or j/k or d/e to move, Enter to choose, q to cancel).
+
+Options:
+  --dry-run   Print the claude mcp command that would run, without running it.
+  -h, --help  Show this help.
+
+Notes:
+  * Adds the server at LOCAL scope (this project only), keyed by current dir.
+    Run it from the project's MAIN checkout, not a worktree.
+  * Re-running replaces the existing local entry (safe to run again to update).
+  * A running Claude session must be restarted to pick up the new server.
+
+Exit codes:
+  0  success        1  usage / missing token / setup error        130  cancelled
+EOF
+}
+
+# ---- parse args (order-independent) ----
+set_mode() {
+    [ -z "$MODE" ] || die "specify only one of --work/--personal"
+    MODE="$1"
+}
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --work|-w)      set_mode work ;;
+        --personal|-p)  set_mode personal ;;
+        --dry-run)      DRY_RUN=true ;;
+        -h|--help)      usage; exit 0 ;;
+        *)              die "unknown argument: $1 (see --help)" ;;
+    esac
+    shift
+done
+
+# ---- interactive selection when no mode flag was given ----
+select_mode() {
+    local options=("personal" "work")
+    local labels=(
+        "Personal  (Cody workspace)     -> notion-personal"
+        "Work      (Amby AI workspace)  -> notion-work"
+    )
+    local n=${#options[@]}
+    local sel=0
+
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        die "no --work/--personal given and not an interactive terminal"
+    fi
+
+    local restore_done=false
+    _restore() { $restore_done && return; restore_done=true; tput cnorm 2>/dev/null || true; }
+    trap '_restore' EXIT INT TERM
+
+    tput civis 2>/dev/null || true
+    echo "Which Notion account for this project?" >&2
+    echo "(↑/↓ or j/k or d/e to move, Enter to choose, q to cancel)" >&2
+
+    _render() {
+        local i
+        for i in "${!labels[@]}"; do
+            if [ "$i" -eq "$sel" ]; then
+                printf '\033[7m  %s  \033[0m\n' "${labels[$i]}" >&2
+            else
+                printf '  %s  \n' "${labels[$i]}" >&2
+            fi
+        done
+    }
+    _render
+
+    local key rest
+    while true; do
+        if ! IFS= read -rsn1 key; then _restore; die "input closed; cancelled"; fi
+        case "$key" in
+            $'\x1b')
+                read -rsn2 -t 0.05 rest || true
+                case "$rest" in
+                    '[A') sel=$(( (sel - 1 + n) % n )) ;;
+                    '[B') sel=$(( (sel + 1) % n )) ;;
+                esac ;;
+            k|e|K|E) sel=$(( (sel - 1 + n) % n )) ;;
+            j|d|J|D) sel=$(( (sel + 1) % n )) ;;
+            q|Q)     _restore; echo "Cancelled." >&2; exit 130 ;;
+            '')      break ;;   # Enter
+        esac
+        printf '\033[%dA' "$n" >&2   # move cursor back up over the menu
+        _render
+    done
+    _restore
+    MODE="${options[$sel]}"
+}
+
+[ -z "$MODE" ] && select_mode
+
+# ---- resolve mode -> server / token / workspace label ----
+case "$MODE" in
+    personal) SERVER="notion-personal"; TOKEN="$PERSONAL_TOKEN"; WS="Cody (personal)" ;;
+    work)     SERVER="notion-work";     TOKEN="$WORK_TOKEN";     WS="Amby AI (work)" ;;
+    *)        die "internal error: bad mode '$MODE'" ;;
+esac
+
+# ---- sanity checks ----
+[ -x "$WRAPPER" ] || die "wrapper not found or not executable: $WRAPPER"
+command -v claude >/dev/null 2>&1 || die "'claude' CLI not found on PATH"
+[ -r "$TOKEN" ] || die "token file missing/unreadable: $TOKEN
+  Create the Notion internal-integration Connection for the $WS workspace,
+  share the relevant pages/databases with it, and save its secret to that file."
+
+if [ -f .git ]; then
+    echo "add-notion: warning: current directory looks like a git worktree." >&2
+    echo "            Local scope keys off this path; sessions usually launch" >&2
+    echo "            from the MAIN checkout. Continuing anyway." >&2
+fi
+
+# ---- dry run ----
+if $DRY_RUN; then
+    echo "# would run (in $(pwd)):"
+    echo "claude mcp remove $SERVER -s local        # ignore error if not present"
+    echo "claude mcp add $SERVER -s local -e NOTION_ATHENA_TOKEN_FILE=$TOKEN -- $WRAPPER"
+    exit 0
+fi
+
+# ---- apply (idempotent: drop any existing local entry, then add fresh) ----
+claude mcp remove "$SERVER" -s local >/dev/null 2>&1 || true
+claude mcp add "$SERVER" -s local \
+    -e "NOTION_ATHENA_TOKEN_FILE=$TOKEN" \
+    -- "$WRAPPER"
+
+echo
+echo "Added '$SERVER' -> $WS"
+echo "  project: $(pwd)"
+echo "  token:   $TOKEN"
+echo
+echo "Status:"
+claude mcp get "$SERVER" 2>&1 | sed 's/^/  /' || true
+echo
+echo "Note: restart a running Claude session to load the new server."

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Launch Notion's official MCP server as the "Athena" integration.
+# Reads the token at launch so it never sits in ~/.claude.json or argv.
+set -eu
+TOKEN_FILE="${NOTION_ATHENA_TOKEN_FILE:-$HOME/.claude/notion-api-token}"
+[ -r "$TOKEN_FILE" ] || { echo "notion-athena-mcp: token file $TOKEN_FILE missing/unreadable" >&2; exit 1; }
+NOTION_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+export NOTION_TOKEN
+exec npx -y @notionhq/notion-mcp-server

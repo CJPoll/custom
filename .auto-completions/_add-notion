@@ -1,0 +1,10 @@
+#compdef add-notion
+
+# Completion for add-notion - add a Notion MCP server (personal or work) to the
+# current project. --work and --personal are mutually exclusive.
+
+_arguments \
+  '(--work -w --personal -p)'{--work,-w}'[Work "Amby AI" workspace -> notion-work]' \
+  '(--work -w --personal -p)'{--personal,-p}'[Personal "Cody" workspace -> notion-personal]' \
+  '--dry-run[Print the claude mcp command without running it]' \
+  '(-h --help)'{-h,--help}'[Show help message]'

@@ -101,6 +101,35 @@ Examples:
 
 ## Other Scripts
 
+### add-notion
+Registers a Notion MCP server for the **current project** at local scope, using
+the shared Athena API-key wrapper (`ai/bin/notion-athena-mcp`). Each mode maps
+to a fixed server name and token file:
+
+| Mode | Server | Token file | Workspace |
+|------|--------|-----------|-----------|
+| `--personal` / `-p` | `notion-personal` | `~/.claude/notion-personal-token` | "Cody" (personal) |
+| `--work` / `-w` | `notion-work` | `~/.claude/notion-amby-token` | "Amby AI" (work) |
+
+With no mode flag it shows an interactive menu (↑/↓, `j`/`k`, `d`/`e`, Enter;
+`q` cancels). It's a thin, idempotent wrapper over `claude mcp add <server> -s
+local` — safe to re-run to update an entry. `--dry-run` prints the command
+without running it.
+
+**Design rationale.** Personal and work Notion are separate Athena bot
+Connections (distinct names, never one shadowing the other). Nothing is set at
+user scope: each project explicitly adds only the Notion it needs. Distinct
+names fail safe — a project missing its server makes a call fail loudly rather
+than silently hitting the wrong workspace.
+
+**Launch-dir rule.** Local-scope MCP servers resolve from the directory where
+`claude` was started; subagents/coordinators operating in worktrees still use
+the launching session's servers. So run `add-notion` from the project's **main
+checkout** (where you start `claude`), not a worktree — a warning fires if it
+detects a worktree. Onboarding a new work account: create its Notion
+Connection, share pages with it, save the secret to a token file, then extend
+the mode map near the top of the script.
+
 ### General Guidelines
 - Scripts should be self-documenting with clear usage information
 - Use consistent error handling and exit codes
