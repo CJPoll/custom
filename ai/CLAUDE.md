@@ -131,6 +131,29 @@ questions.
 - NEVER EVER UNDER ANY CIRCUMSTANCE use Process.sleep in tests for arbitrary timing delays
   - ❌ BAD: `Process.sleep(2000); assert something` (hoping 2s is enough)
   - ✅ OK: Polling loops with condition checking and timeout (e.g., `for i in 1..100; do if [condition]; then break; fi; sleep 0.1; done`)
+- NEVER write a shell wait-loop that spins. Any loop that waits for something
+  MUST follow the safe-wait pattern, in priority order:
+  1. **Let the harness wake you.** If the thing being waited on is observable by
+     the harness (a spawned task/subagent finishing, a message arriving, a watched
+     file changing), rely on the task-notification, `SendMessage`, or a `Monitor`
+     primitive instead of hand-rolling a shell poll.
+  2. **Block, don't spin.** To wait on a child process, block on it —
+     `timeout N tail --pid=<pid> -f /dev/null` — never a loop that re-checks it.
+  3. **A legitimate external poll** (CI/GitLab pipeline, a queue, a host coming
+     up — state the harness genuinely cannot observe) MUST: (a) `sleep` between
+     iterations at a cadence matched to how fast the state changes — never
+     `while :; do :; done` / `until cond; do :; done` and never sub-second
+     hammering; (b) carry a max-iteration or `timeout` bound so it cannot loop
+     forever; (c) if backgrounded with `&`, install
+     `trap 'kill "$child" 2>/dev/null' EXIT INT TERM` so a crashed or
+     rate-limited parent cannot orphan it. An orphaned `(while :; do :; done) &`
+     reparented to PID 1 pinned load ~290 for an hour and flaked neighboring
+     ExUnit suites into Postgres `57014` timeouts (PT-919) — this is the class
+     we are eliminating.
+  4. **A `pgrep -f "<pattern>"` wait self-matches** the grep/waiting shell,
+     so it never exits: exclude the waiter (`pgrep -f pattern | grep -v $$`, or
+     match a pattern specific enough — e.g. a full worktree path — to miss the
+     grep's own argv).
 - NEVER EVER UNDER ANY CIRCUMSTANCE use `Application.put_env`
 - NEVER make system-level changes (especially daemons, system services, /etc files, sudo commands) without the user's express direction
 - It's OK to make changes to files under ~/dev or ~/.local/worktrees without asking
