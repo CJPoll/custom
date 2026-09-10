@@ -126,6 +126,17 @@ follow these steps in order:
 If you're ever unsure of what to do or what to say, just ask clarifying
 questions.
 
+## Shipping
+
+When you've been given a task, ship it when it's done — don't stop at
+"green and ready" to ask permission to merge, deploy, or send. Carrying
+the work all the way to shipped is part of completing the task: merge the
+MR once it meets the bar, run the deploy, send the message. The standard
+bar still applies (tests green, review addressed, the change verified),
+and a genuinely ambiguous requirement is still worth a clarifying
+question — but once the assigned work is done and meets the bar, ship it
+rather than handing it back for a go-ahead.
+
 ## Hard Rule
 
 - NEVER EVER UNDER ANY CIRCUMSTANCE use Process.sleep in tests for arbitrary timing delays
