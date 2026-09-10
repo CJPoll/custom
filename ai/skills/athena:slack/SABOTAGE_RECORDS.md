@@ -1,4 +1,4 @@
-# Sabotage records — `slack-athena`
+# Sabotage records — `athena:slack`
 
 A test is not finished until you have watched it fail: delete the thing it
 exists to prove, run it, confirm the failure names the right criterion, and
@@ -28,10 +28,10 @@ not yet committed.
 
 ## 2026-09-01 — building the skill
 
-- **Domain:** slack-athena
+- **Domain:** athena:slack
 - **Date:** 2026-09-01
 - **Code under test:** `lib/slack.sh`, `lib/inbox.sh`,
-  `hooks/slack-athena-poll.sh`, `bin/post`, `bin/reply`, `bin/dm`,
+  `hooks/athena-slack-poll.sh`, `bin/post`, `bin/reply`, `bin/dm`,
   `bin/react`, `bin/read-inbox`, `bin/upload`
 - **Suite run:** `bash test/self-test.sh` (no network — curl is a PATH shim; ~7s)
 - **Baseline:** `VERDICT: PASS (55 cases)` (47 at the first pass; 5 added after
@@ -167,7 +167,7 @@ returns the `USLACKBOT` conversation; `conversations.history` on it answers
 `channel_not_found`. The first live `read-inbox` therefore aborted:
 
 ```
-slack-athena: conversations.history failed: channel_not_found
+athena-slack: conversations.history failed: channel_not_found
 ```
 
 Eleven readable DMs went unexamined behind one unreadable one. Fixed twice
@@ -199,7 +199,7 @@ to the pre-signed upload PUT. The suite reddened — but on the **wrong case**:
 ```
 FAIL  upload: exact byte length, bytes PUT to upload_url, then completed onto the channel
       rc=1 … err='bin/upload: line 52: SLACK_TOKEN_VALUE: unbound variable
-                   slack-athena: network error uploading bytes'
+                   athena-slack: network error uploading bytes'
   ok  upload: the bot token is not sent to the pre-signed upload URL
 ```
 

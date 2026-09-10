@@ -12,11 +12,11 @@ standup, reported by Athena — matching the team convention (Margie posts
 
 ## Post AS Athena, never as Cody
 
-Use the **`slack-athena`** bot scripts (Athena's own `xoxb-` token) — NOT the
+Use the **`athena:slack`** bot scripts (Athena's own `xoxb-` token) — NOT the
 `claude.ai Slack` MCP plugin, which posts under Cody's OAuth (his name on
 Athena's words) and is frequently 404-down. See [[athena-slack-bot-integration]].
 
-- Scripts: `~/.claude/skills/slack-athena/bin/…` (`whoami`, `read-channel`, `reply`).
+- Scripts: `~/.claude/skills/athena:slack/bin/…` (`whoami`, `read-channel`, `reply`).
 - If anything is confusing, run `bin/whoami` first — expect user `athena`,
   `U0BU75F8EUR`, team Amby AI. If it shows Cody, stop: you're on the wrong path.
 
@@ -29,7 +29,7 @@ Athena's words) and is frequently 404-down. See [[athena-slack-bot-integration]]
 - Read recent history and take the **latest** such prompt whose thread Athena
   has not already replied to:
   ```sh
-  ~/.claude/skills/slack-athena/bin/read-channel C074G1DDUV8 --limit 15
+  ~/.claude/skills/athena:slack/bin/read-channel C074G1DDUV8 --limit 15
   ```
   Use that message's `ts` as the parent `thread_ts`. (A Slack URL ending
   `p1788531151081349` → ts `1788531151.081349` — insert the decimal point six
@@ -91,7 +91,7 @@ Scope strictly to Athena/Cody work. Other people's MRs (`tom888`/`johnnyt1`/
 - Write the body to a scratch file and pipe it in via stdin (keeps it out of
   argv, dodges quoting):
   ```sh
-  ~/.claude/skills/slack-athena/bin/reply C074G1DDUV8 <thread_ts> < /path/to/standup.txt
+  ~/.claude/skills/athena:slack/bin/reply C074G1DDUV8 <thread_ts> < /path/to/standup.txt
   ```
 - The script prints the resulting `ts` + permalink. Report the permalink to Cody.
 

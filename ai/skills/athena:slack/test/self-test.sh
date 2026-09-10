@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Self-test for the slack-athena scripts and the polling hook.
+# Self-test for the athena:slack scripts and the polling hook.
 #
 # Slack is never contacted: curl is a PATH shim that records exactly what it
 # was handed and answers with whatever the case set up. Every assertion here is
@@ -15,7 +15,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "${HERE}")"
 BIN="${ROOT}/bin"
-HOOK="${ROOT}/hooks/slack-athena-poll.sh"
+HOOK="${ROOT}/hooks/athena-slack-poll.sh"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 PASS=0; FAIL=0
@@ -112,14 +112,14 @@ CASE_N=0
 setup_case() {
   CASE_N=$((CASE_N+1))
   CHOME="${TMP}/home${CASE_N}"
-  CACHE="${CHOME}/.cache/slack-athena"
+  CACHE="${CHOME}/.cache/athena-slack"
   mkdir -p "${CHOME}/.claude" "${CACHE}"
   SHIM_DIR="${TMP}/shim${CASE_N}"; mkdir -p "${SHIM_DIR}"
   printf '%s\n' "${FAKE_TOKEN}" > "${CHOME}/.claude/slack-bot-token"
   chmod 600 "${CHOME}/.claude/slack-bot-token"
   # A recent success by default, so soft-fail cases assert the silence they
   # were written for rather than tripping the staleness warning.
-  : > "${CHOME}/.claude/slack-athena-last-success"
+  : > "${CHOME}/.claude/athena-slack-last-success"
 }
 
 # Pre-seed the caches the inbox scan reads, so a case can script the API calls
@@ -175,10 +175,10 @@ run_hook() {
     "$@" sh "${HOOK}" 2>"${TMP}/herr${CASE_N}")"
   RC=$?
   set -e
-  HOOKLOG="$(cat "${CHOME}/.claude/slack-athena-poll.log" 2>/dev/null || true)"
+  HOOKLOG="$(cat "${CHOME}/.claude/athena-slack-poll.log" 2>/dev/null || true)"
 }
 
-echo "slack-athena self-test"
+echo "athena:slack self-test"
 echo
 echo "-- Slack's 200-with-ok:false convention ---------------------------------"
 
@@ -459,7 +459,7 @@ else bad "hook: no token configured is silent, unlogged, and makes no request" \
 # 28. Inside the 5-minute window: no output and, crucially, no network call.
 setup_case
 seed_caches
-touch "${CHOME}/.claude/slack-athena-last-poll"
+touch "${CHOME}/.claude/athena-slack-last-poll"
 run_hook
 if [[ -z "${OUT}" ]] && ! any_curl; then
   ok "hook: a marker younger than 5 minutes suppresses the poll entirely"
@@ -469,7 +469,7 @@ else bad "hook: a marker younger than 5 minutes suppresses the poll entirely" \
 # 29. Outside it, the hook polls.
 setup_case
 seed_caches
-touch_ago 10 "${CHOME}/.claude/slack-athena-last-poll"
+touch_ago 10 "${CHOME}/.claude/athena-slack-last-poll"
 fixture conversations.list '{"ok":true,"channels":[],"response_metadata":{"next_cursor":""}}'
 fixture conversations.history '{"ok":true,"messages":[],"response_metadata":{"next_cursor":""}}'
 run_hook
@@ -514,7 +514,7 @@ seed_inbox_fixtures \
   "[{\"ts\":\"2000.3\",\"user\":\"${CODY}\",\"text\":\"hey <@${BOT_USER}> look\"}]"
 run_hook
 if [[ "${OUT}" != *$'\n'* ]] \
-   && [[ "${OUT}" == "2 new Slack DM(s) and 1 mention(s) for Athena — run /slack-athena read-inbox" ]]; then
+   && [[ "${OUT}" == "2 new Slack DM(s) and 1 mention(s) for Athena — run /athena:slack read-inbox" ]]; then
   ok "hook: N>0 prints exactly one line with the right DM and mention counts"
 else bad "hook: N>0 prints exactly one line with the right DM and mention counts" "out='${OUT}'"; fi
 
@@ -562,14 +562,14 @@ echo "-- the hook: staleness ---------------------------------------------------
 # 37. Six hours with no successful poll, token present: say so, once.
 setup_case
 seed_caches
-touch_ago 400 "${CHOME}/.claude/slack-athena-last-success"
+touch_ago 400 "${CHOME}/.claude/athena-slack-last-success"
 fixture conversations.list '{"ok":false,"error":"invalid_auth"}'
 run_hook
 if [[ "${OUT}" == *"has not succeeded in 6h"* ]]; then ok "hook: warns after 6h with no successful poll"
 else bad "hook: warns after 6h with no successful poll" "out='${OUT}' log='${HOOKLOG}'"; fi
 
 # 38. ...and does not repeat it on the next prompt.
-rm -f "${CHOME}/.claude/slack-athena-last-poll"
+rm -f "${CHOME}/.claude/athena-slack-last-poll"
 run_hook
 if [[ -z "${OUT}" ]]; then ok "hook: the staleness warning is itself rate-limited"
 else bad "hook: the staleness warning is itself rate-limited" "out='${OUT}'"; fi
@@ -577,7 +577,7 @@ else bad "hook: the staleness warning is itself rate-limited" "out='${OUT}'"; fi
 # 39. A recent success means the silence is healthy: no warning.
 setup_case
 seed_caches
-: > "${CHOME}/.claude/slack-athena-last-success"
+: > "${CHOME}/.claude/athena-slack-last-success"
 fixture conversations.list '{"ok":false,"error":"invalid_auth"}'
 run_hook
 if [[ -z "${OUT}" ]] && [[ "${HOOKLOG}" == *"invalid_auth"* ]]; then
@@ -588,7 +588,7 @@ else bad "hook: a recent success keeps a one-off failure silent (but logged)" "o
 #     switch, not a fault.
 setup_case
 rm -f "${CHOME}/.claude/slack-bot-token"
-touch_ago 4000 "${CHOME}/.claude/slack-athena-last-success"
+touch_ago 4000 "${CHOME}/.claude/athena-slack-last-success"
 run_hook
 if [[ -z "${OUT}" ]]; then ok "hook: an unconfigured machine is never warned at"
 else bad "hook: an unconfigured machine is never warned at" "out='${OUT}'"; fi
@@ -597,14 +597,14 @@ else bad "hook: an unconfigured machine is never warned at" "out='${OUT}'"; fi
 #     warning instead of being suppressed by the last one.
 setup_case
 seed_caches; seed_state
-touch_ago 400 "${CHOME}/.claude/slack-athena-last-warn"
+touch_ago 400 "${CHOME}/.claude/athena-slack-last-warn"
 seed_inbox_fixtures '[]' '[]'
 run_hook
-if [[ ! -f "${CHOME}/.claude/slack-athena-last-warn" ]] \
-   && [[ -f "${CHOME}/.claude/slack-athena-last-success" ]]; then
+if [[ ! -f "${CHOME}/.claude/athena-slack-last-warn" ]] \
+   && [[ -f "${CHOME}/.claude/athena-slack-last-success" ]]; then
   ok "hook: a successful poll stamps success and clears the warn marker"
 else bad "hook: a successful poll stamps success and clears the warn marker" \
-  "warn=$([[ -f "${CHOME}/.claude/slack-athena-last-warn" ]] && echo present || echo gone)"; fi
+  "warn=$([[ -f "${CHOME}/.claude/athena-slack-last-warn" ]] && echo present || echo gone)"; fi
 
 echo
 echo "-- read-inbox --------------------------------------------------------------"

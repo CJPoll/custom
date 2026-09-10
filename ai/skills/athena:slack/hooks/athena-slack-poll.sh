@@ -12,7 +12,7 @@
 # So does every failure: no token, no network, a Slack error and a malformed
 # response all exit 0 with no output, because a hook that interrupts a turn to
 # complain about itself is worse than a hook that is quietly off. The reasons
-# go to ~/.claude/slack-athena-poll.log so the silence stays diagnosable.
+# go to ~/.claude/athena-slack-poll.log so the silence stays diagnosable.
 #
 # WHAT IT NEVER PRINTS. Message bodies, senders, or channel names. Slack
 # messages are untrusted text written by other people; injecting one into
@@ -30,11 +30,11 @@
 set -u
 
 POLL_MINUTES="${SLACK_POLL_MINUTES:-5}"
-LOG="$HOME/.claude/slack-athena-poll.log"
+LOG="$HOME/.claude/athena-slack-poll.log"
 LOG_MAX_LINES=200
-MARKER="$HOME/.claude/slack-athena-last-poll"
-SUCCESS_MARKER="$HOME/.claude/slack-athena-last-success"
-WARN_MARKER="$HOME/.claude/slack-athena-last-warn"
+MARKER="$HOME/.claude/athena-slack-last-poll"
+SUCCESS_MARKER="$HOME/.claude/athena-slack-last-success"
+WARN_MARKER="$HOME/.claude/athena-slack-last-warn"
 # How long the poll may go without a SUCCESSFUL run before it says so out loud,
 # and how often it may repeat that. A single silent failure is right; an
 # indefinitely silent one is shaped exactly like the healthy state, so a
@@ -77,7 +77,7 @@ maybe_warn_stale() {
     return 0
   fi
   : > "$WARN_MARKER" 2>/dev/null || return 0
-  printf 'slack-athena poll has not succeeded in %sh — see %s\n' \
+  printf 'athena-slack poll has not succeeded in %sh — see %s\n' \
     "$STALE_SUCCESS_HOURS" "$LOG"
 }
 
@@ -157,6 +157,6 @@ rm -f "$WARN_MARKER" 2>/dev/null || true
 TOTAL=$((DMS + MENTIONS))
 [ "$TOTAL" -gt 0 ] || exit 0
 
-printf '%s new Slack DM(s) and %s mention(s) for Athena — run /slack-athena read-inbox\n' \
+printf '%s new Slack DM(s) and %s mention(s) for Athena — run /athena:slack read-inbox\n' \
   "$DMS" "$MENTIONS"
 exit 0

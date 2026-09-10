@@ -1,9 +1,9 @@
 ---
-name: slack-athena
+name: athena:slack
 description: Act in Slack as Athena's own bot identity (not Cody's account) — post, reply in threads, DM, react, upload, and read channels, threads and the bot's own inbox of DMs and mentions. Use whenever the task is to say something in Slack as the agent, to check what Slack has sent Athena, or to follow up on the one-line "new Slack DM(s)/mention(s)" notice from the polling hook.
 ---
 
-# slack-athena
+# athena:slack
 
 Shell scripts over the Slack Web API, authenticated with **Athena's own bot
 token**. No MCP, no daemon, no Socket Mode.
@@ -31,13 +31,13 @@ anything is confusing.
   in a URL: it reaches curl as an `Authorization: Bearer` header inside a 0600
   config file.
 - Requires `curl` and `jq`. POSIX `sh`; no GNU-only flags.
-- Caches live in `~/.cache/slack-athena/` (`users.json`, `channels.json`,
+- Caches live in `~/.cache/athena-slack/` (`users.json`, `channels.json`,
   `identity.json`, `inbox-state.json`). All are disposable — delete any of them
   to force a refresh.
 
 ## The scripts
 
-Run them from the skill directory (`~/.claude/skills/slack-athena/bin/…`).
+Run them from the skill directory (`~/.claude/skills/athena:slack/bin/…`).
 Every one exits non-zero with the Slack error on stderr when something fails,
 and the write scripts print the resulting `ts` (and permalink) so a follow-up
 can thread onto it.
@@ -114,17 +114,17 @@ only be mentioned in those. `channels --member` shows which those are.
 
 ## The polling hook
 
-`hooks/slack-athena-poll.sh` is a `UserPromptSubmit` hook. At most once every
+`hooks/athena-slack-poll.sh` is a `UserPromptSubmit` hook. At most once every
 five minutes it scans for DMs and mentions and, only when something is waiting,
 prints exactly one line:
 
 ```
-2 new Slack DM(s) and 1 mention(s) for Athena — run /slack-athena read-inbox
+2 new Slack DM(s) and 1 mention(s) for Athena — run /athena:slack read-inbox
 ```
 
 Everything else about it is silence: zero new prints nothing, and so does every
 failure (no token, no network, a Slack error), with the reason appended to
-`~/.claude/slack-athena-poll.log`. If it goes six hours without a **successful**
+`~/.claude/athena-slack-poll.log`. If it goes six hours without a **successful**
 poll while a token is present, it says so once — a silently broken poll is
 shaped exactly like a healthy quiet one, and that is the failure worth naming.
 

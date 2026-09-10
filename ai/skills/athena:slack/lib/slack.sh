@@ -1,4 +1,4 @@
-# lib/slack.sh -- shared Slack Web API plumbing for the slack-athena scripts.
+# lib/slack.sh -- shared Slack Web API plumbing for the athena:slack scripts.
 # Sourced, never run. Callers set `set -eu` themselves.
 #
 # WHY A SHARED LIB. Every script here has the same four ways to go wrong, and
@@ -18,7 +18,7 @@
 #      follows response_metadata.next_cursor.
 
 SLACK_API_BASE="${SLACK_API_BASE:-https://slack.com/api}"
-SLACK_CACHE_DIR="${SLACK_CACHE_DIR:-$HOME/.cache/slack-athena}"
+SLACK_CACHE_DIR="${SLACK_CACHE_DIR:-$HOME/.cache/athena-slack}"
 SLACK_TOKEN_FILE="${SLACK_TOKEN_FILE:-$HOME/.claude/slack-bot-token}"
 SLACK_TIMEOUT="${SLACK_TIMEOUT:-20}"
 SLACK_MAX_RETRIES="${SLACK_MAX_RETRIES:-3}"
@@ -34,7 +34,7 @@ SLACK_IDENTITY_TTL_MIN="${SLACK_IDENTITY_TTL_MIN:-10080}"
 # interpolate the token or a message body -- callers pass a fixed reason plus,
 # at most, an API method name and Slack's own error code.
 slack_die() {
-  printf 'slack-athena: %s\n' "$1" >&2
+  printf 'athena-slack: %s\n' "$1" >&2
   exit 1
 }
 
@@ -142,7 +142,7 @@ _slack_request() {
       _rq_wait="$(sed -n 's/^[Rr]etry-[Aa]fter:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_rq_hdr" 2>/dev/null | head -n1)"
       if [ -z "$_rq_wait" ]; then _rq_wait=1; fi
       if [ "$_rq_try" -le "$SLACK_MAX_RETRIES" ]; then
-        printf 'slack-athena: rate limited on %s, waiting %ss (attempt %s)\n' \
+        printf 'athena-slack: rate limited on %s, waiting %ss (attempt %s)\n' \
           "$_rq_api" "$_rq_wait" "$_rq_try" >&2
         sleep "$_rq_wait"
         continue
