@@ -1,0 +1,36 @@
+#!/bin/sh
+# update <channel_id|#name> <ts> [text] [--blocks <json>]
+#
+# chat.update works ONLY on messages this bot authored. Pointed at anyone
+# else's message it returns cant_update_message -- caught by the .ok check, so
+# it surfaces as a non-zero exit rather than a silent no-op.
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SELF_DIR/../lib/slack.sh"
+slack_need_tools
+
+usage() { printf 'usage: update <channel_id|#name> <ts> [text] [--blocks <json>]\n' >&2; exit 2; }
+
+[ "$#" -ge 2 ] || usage
+CHAN_ARG="$1"; shift
+TS="$1"; shift
+TEXT=""; BLOCKS=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --blocks) [ "$#" -ge 2 ] || usage; BLOCKS="$2"; shift 2 ;;
+    --) shift; TEXT="${1:-}"; break ;;
+    -*) usage ;;
+    *) TEXT="$1"; shift ;;
+  esac
+done
+if [ -z "$TEXT" ]; then TEXT="$(cat)"; fi
+[ -n "$TEXT" ] || { printf 'update: refusing to set an empty message\n' >&2; exit 2; }
+
+CHANNEL="$(slack_resolve_channel "$CHAN_ARG")"
+BODY="$(jq -n --arg c "$CHANNEL" --arg t "$TEXT" --arg ts "$TS" '{channel: $c, ts: $ts, text: $t}')"
+if [ -n "$BLOCKS" ]; then
+  BODY="$(printf '%s' "$BODY" | jq --argjson b "$BLOCKS" '. + {blocks: $b}')"
+fi
+RESP="$(slack_post chat.update "$BODY")"
+printf 'ts=%s channel=%s updated\n' \
+  "$(printf '%s' "$RESP" | jq -r '.ts')" "$(printf '%s' "$RESP" | jq -r '.channel')"

@@ -1,0 +1,53 @@
+#!/bin/sh
+# dm <user_id> [text] [--thread_ts <ts>]
+#
+# Opens (or reuses) the bot's IM with one user and posts to it. Slack has no
+# "post to a user"; conversations.open is what turns a U... into a D... .
+#
+# ETIQUETTE, NOT A FLAG: do not DM anyone Cody has not cleared. A DM from a bot
+# is a notification on someone's phone with no channel context around it, and
+# Athena is acting on Cody's behalf -- an unexpected one reads as Cody pinging
+# them. Post in a channel or thread by default; DM by exception.
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SELF_DIR/../lib/slack.sh"
+slack_need_tools
+
+usage() {
+  printf 'usage: dm <user_id> [text] [--thread_ts <ts>]\n' >&2
+  exit 2
+}
+
+[ "$#" -ge 1 ] || usage
+USER_ID="$1"; shift
+TEXT=""
+THREAD_TS=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --thread_ts) [ "$#" -ge 2 ] || usage; THREAD_TS="$2"; shift 2 ;;
+    --) shift; TEXT="${1:-}"; break ;;
+    -*) usage ;;
+    *) TEXT="$1"; shift ;;
+  esac
+done
+if [ -z "$TEXT" ]; then TEXT="$(cat)"; fi
+[ -n "$TEXT" ] || { printf 'dm: refusing to send an empty message\n' >&2; exit 2; }
+
+case "$USER_ID" in
+  U*|W*) ;;
+  *) printf 'dm: first argument must be a user id (U...), not a name\n' >&2; exit 2 ;;
+esac
+
+OPEN="$(slack_post conversations.open "$(jq -n --arg u "$USER_ID" '{users: $u}')")"
+CHANNEL="$(printf '%s' "$OPEN" | jq -r '.channel.id')"
+[ -n "$CHANNEL" ] || slack_die "conversations.open returned no channel id"
+
+BODY="$(jq -n --arg c "$CHANNEL" --arg t "$TEXT" '{channel: $c, text: $t}')"
+if [ -n "$THREAD_TS" ]; then
+  BODY="$(printf '%s' "$BODY" | jq --arg tt "$THREAD_TS" '. + {thread_ts: $tt}')"
+fi
+RESP="$(slack_post chat.postMessage "$BODY")"
+TS="$(printf '%s' "$RESP" | jq -r '.ts')"
+printf 'ts=%s channel=%s user=%s\n' "$TS" "$CHANNEL" "$USER_ID"
+PERMALINK="$(slack_permalink "$CHANNEL" "$TS" || printf '')"
+if [ -n "$PERMALINK" ]; then printf 'permalink=%s\n' "$PERMALINK"; fi

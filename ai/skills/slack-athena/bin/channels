@@ -1,0 +1,44 @@
+#!/bin/sh
+# channels [--types <csv>] [--member] [--json]
+#
+# Default types are public_channel,private_channel. Pass --types im,mpim to see
+# DM conversations: conversations.list defaults to public_channel ONLY, so a
+# DM will never appear in a default listing however many pages you read.
+#
+# --member filters to channels this bot has joined -- the only ones it can read
+# history from or be mentioned in.
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SELF_DIR/../lib/slack.sh"
+slack_need_tools
+slack_tmp_init
+
+TYPES="public_channel,private_channel"
+MEMBER_ONLY=false
+AS_JSON=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --types) [ "$#" -ge 2 ] || { printf 'channels: --types needs a value\n' >&2; exit 2; }; TYPES="$2"; shift 2 ;;
+    --member) MEMBER_ONLY=true; shift ;;
+    --json) AS_JSON=true; shift ;;
+    *) printf 'usage: channels [--types <csv>] [--member] [--json]\n' >&2; exit 2 ;;
+  esac
+done
+
+ROWS="$(slack_paginate conversations.list \
+  "limit=200&exclude_archived=true&types=$(slack_urlencode "$TYPES")" '.channels')"
+
+printf '%s\n' "$ROWS" \
+  | jq -c --argjson m "$MEMBER_ONLY" '
+      select(. != null)
+      | select(($m | not) or (.is_member == true))
+      | {id, name: (.name // (if .is_im then "(im)" else "(mpim)" end)),
+         is_member: (.is_member // false), is_private: (.is_private // false)}' \
+  > "$SLACK_TMPDIR/chan.jsonl"
+
+if [ "$AS_JSON" = "true" ]; then
+  cat "$SLACK_TMPDIR/chan.jsonl"
+else
+  jq -r '[.id, .name, (if .is_member then "member" else "-" end)] | @tsv' \
+    "$SLACK_TMPDIR/chan.jsonl"
+fi

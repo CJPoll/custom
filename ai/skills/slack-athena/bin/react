@@ -1,0 +1,25 @@
+#!/bin/sh
+# react <channel_id|#name> <ts> <emoji_name> [--remove]
+#
+# emoji_name is the bare name -- `eyes`, not `:eyes:`. Slack accepts the colon
+# form in some clients and rejects it here as invalid_name.
+#
+# A reaction is the cheapest correct answer to "I saw this and I am on it", and
+# it costs nobody a notification. Prefer it to a message that says only that.
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SELF_DIR/../lib/slack.sh"
+slack_need_tools
+
+usage() { printf 'usage: react <channel_id|#name> <ts> <emoji_name> [--remove]\n' >&2; exit 2; }
+[ "$#" -ge 3 ] || usage
+CHAN_ARG="$1"; TS="$2"; NAME="$3"; shift 3
+METHOD=reactions.add
+if [ "${1:-}" = "--remove" ]; then METHOD=reactions.remove; fi
+
+NAME="${NAME#:}"; NAME="${NAME%:}"
+CHANNEL="$(slack_resolve_channel "$CHAN_ARG")"
+slack_post "$METHOD" \
+  "$(jq -n --arg c "$CHANNEL" --arg ts "$TS" --arg n "$NAME" \
+     '{channel: $c, timestamp: $ts, name: $n}')" >/dev/null
+printf '%s %s on %s/%s\n' "${METHOD#reactions.}" "$NAME" "$CHANNEL" "$TS"

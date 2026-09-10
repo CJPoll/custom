@@ -1,0 +1,65 @@
+#!/bin/sh
+# upload <channel_id|#name> <file> [--title T] [--thread_ts TS] [--comment C]
+#
+# files.upload was sunset on 2025-11-12 and now fails outright. The replacement
+# is three steps and every one of them can fail on its own:
+#   1. files.getUploadURLExternal -- needs filename AND length (the exact byte
+#      count; a wrong length is rejected at step 2, not step 1).
+#   2. PUT the bytes to the returned upload_url. This URL is pre-signed --
+#      the bot token is deliberately NOT sent with it.
+#   3. files.completeUploadExternal -- the only step that attaches the file to
+#      a channel. Skip it and the upload exists but is visible to nobody.
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SELF_DIR/../lib/slack.sh"
+slack_need_tools
+slack_tmp_init
+
+usage() {
+  printf 'usage: upload <channel_id|#name> <file> [--title T] [--thread_ts TS] [--comment C]\n' >&2
+  exit 2
+}
+[ "$#" -ge 2 ] || usage
+CHAN_ARG="$1"; FILE="$2"; shift 2
+TITLE=""; THREAD_TS=""; COMMENT=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --title) [ "$#" -ge 2 ] || usage; TITLE="$2"; shift 2 ;;
+    --thread_ts) [ "$#" -ge 2 ] || usage; THREAD_TS="$2"; shift 2 ;;
+    --comment) [ "$#" -ge 2 ] || usage; COMMENT="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+[ -f "$FILE" ] || { printf 'upload: no such file: %s\n' "$FILE" >&2; exit 2; }
+
+BASENAME="$(basename "$FILE")"
+if [ -z "$TITLE" ]; then TITLE="$BASENAME"; fi
+# `wc -c` is POSIX; `stat` differs between GNU and BSD, which is exactly the
+# kind of difference that would only show up on someone else's laptop.
+LENGTH="$(wc -c < "$FILE" | tr -d ' ')"
+[ "$LENGTH" -gt 0 ] || { printf 'upload: refusing to upload an empty file\n' >&2; exit 2; }
+
+CHANNEL="$(slack_resolve_channel "$CHAN_ARG")"
+
+STEP1="$(slack_get files.getUploadURLExternal \
+  "filename=$(slack_urlencode "$BASENAME")&length=$LENGTH")"
+UPLOAD_URL="$(printf '%s' "$STEP1" | jq -r '.upload_url')"
+FILE_ID="$(printf '%s' "$STEP1" | jq -r '.file_id')"
+[ -n "$UPLOAD_URL" ] && [ -n "$FILE_ID" ] || slack_die "getUploadURLExternal returned no upload_url/file_id"
+
+HTTP="$(curl --silent --show-error --request POST --data-binary "@$FILE" \
+  --max-time "$SLACK_TIMEOUT" --output /dev/null --write-out '%{http_code}' \
+  "$UPLOAD_URL" 2>/dev/null)" || slack_die "network error uploading bytes"
+case "$HTTP" in 2??) ;; *) slack_die "upload_url returned HTTP $HTTP" ;; esac
+
+BODY="$(jq -n --arg id "$FILE_ID" --arg t "$TITLE" --arg c "$CHANNEL" \
+  '{files: [{id: $id, title: $t}], channel_id: $c}')"
+if [ -n "$THREAD_TS" ]; then
+  BODY="$(printf '%s' "$BODY" | jq --arg tt "$THREAD_TS" '. + {thread_ts: $tt}')"
+fi
+if [ -n "$COMMENT" ]; then
+  BODY="$(printf '%s' "$BODY" | jq --arg ic "$COMMENT" '. + {initial_comment: $ic}')"
+fi
+RESP="$(slack_post files.completeUploadExternal "$BODY")"
+printf 'file_id=%s channel=%s permalink=%s\n' \
+  "$FILE_ID" "$CHANNEL" "$(printf '%s' "$RESP" | jq -r '.files[0].permalink // "-"')"

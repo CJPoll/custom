@@ -1,0 +1,15 @@
+#!/bin/sh
+# delete <channel_id|#name> <ts>
+#
+# chat.delete, like chat.update, is limited to this bot's own messages. There
+# is no undo and no draft state: the message is gone for everyone who had it.
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SELF_DIR/../lib/slack.sh"
+slack_need_tools
+
+[ "$#" -eq 2 ] || { printf 'usage: delete <channel_id|#name> <ts>\n' >&2; exit 2; }
+CHANNEL="$(slack_resolve_channel "$1")"
+RESP="$(slack_post chat.delete "$(jq -n --arg c "$CHANNEL" --arg ts "$2" '{channel: $c, ts: $ts}')")"
+printf 'ts=%s channel=%s deleted\n' \
+  "$(printf '%s' "$RESP" | jq -r '.ts')" "$(printf '%s' "$RESP" | jq -r '.channel')"

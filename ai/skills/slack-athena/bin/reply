@@ -1,0 +1,49 @@
+#!/bin/sh
+# reply <channel_id|#name> <thread_ts> [text] [--broadcast]
+#
+# thread_ts MUST be the ts of the thread's PARENT message. Slack does not
+# accept a reply's ts there; passing one either starts a second thread or is
+# rejected, and neither failure is obvious from the posted result. Take the
+# value from `read-thread`, from `post`'s output, or from a message's
+# thread_ts field -- never from a reply's own ts.
+#
+# --broadcast also shows the reply in the channel (reply_broadcast). Use it
+# sparingly: it is a notification to everyone in the channel, not a formatting
+# choice.
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SELF_DIR/../lib/slack.sh"
+slack_need_tools
+
+usage() {
+  printf 'usage: reply <channel_id|#name> <thread_ts> [text] [--broadcast]\n' >&2
+  exit 2
+}
+
+[ "$#" -ge 2 ] || usage
+CHAN_ARG="$1"; shift
+THREAD_TS="$1"; shift
+TEXT=""
+BROADCAST=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --broadcast) BROADCAST=true; shift ;;
+    --) shift; TEXT="${1:-}"; break ;;
+    -*) usage ;;
+    *) TEXT="$1"; shift ;;
+  esac
+done
+if [ -z "$TEXT" ]; then TEXT="$(cat)"; fi
+[ -n "$TEXT" ] || { printf 'reply: refusing to send an empty message\n' >&2; exit 2; }
+
+CHANNEL="$(slack_resolve_channel "$CHAN_ARG")"
+BODY="$(jq -n --arg c "$CHANNEL" --arg t "$TEXT" --arg tt "$THREAD_TS" \
+  --argjson b "$BROADCAST" \
+  '{channel: $c, text: $t, thread_ts: $tt} + (if $b then {reply_broadcast: true} else {} end)')"
+
+RESP="$(slack_post chat.postMessage "$BODY")"
+TS="$(printf '%s' "$RESP" | jq -r '.ts')"
+OUT_CHAN="$(printf '%s' "$RESP" | jq -r '.channel')"
+printf 'ts=%s channel=%s thread_ts=%s\n' "$TS" "$OUT_CHAN" "$THREAD_TS"
+PERMALINK="$(slack_permalink "$OUT_CHAN" "$TS" || printf '')"
+if [ -n "$PERMALINK" ]; then printf 'permalink=%s\n' "$PERMALINK"; fi

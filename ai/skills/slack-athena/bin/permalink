@@ -1,0 +1,11 @@
+#!/bin/sh
+# permalink <channel_id|#name> <ts> -- the shareable URL for one message.
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SELF_DIR/../lib/slack.sh"
+slack_need_tools
+
+[ "$#" -eq 2 ] || { printf 'usage: permalink <channel_id|#name> <ts>\n' >&2; exit 2; }
+CHANNEL="$(slack_resolve_channel "$1")"
+RESP="$(slack_get chat.getPermalink "channel=$(slack_urlencode "$CHANNEL")&message_ts=$(slack_urlencode "$2")")"
+printf '%s\n' "$(printf '%s' "$RESP" | jq -r '.permalink')"

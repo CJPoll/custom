@@ -1,0 +1,18 @@
+#!/bin/sh
+# whoami -- confirm which Slack identity this token actually is.
+#
+# Run this first when anything is confusing. The whole point of the skill is
+# that Athena posts as ITSELF and not as Cody, and a token quietly swapped for
+# a user token would look identical everywhere else.
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SELF_DIR/../lib/slack.sh"
+slack_need_tools
+
+RESP="$(slack_post_empty auth.test)"
+printf 'user:    %s\n' "$(printf '%s' "$RESP" | jq -r '.user // "?"')"
+printf 'user_id: %s\n' "$(printf '%s' "$RESP" | jq -r '.user_id // "?"')"
+printf 'bot_id:  %s\n' "$(printf '%s' "$RESP" | jq -r '.bot_id // "-"')"
+printf 'team:    %s (%s)\n' \
+  "$(printf '%s' "$RESP" | jq -r '.team // "?"')" \
+  "$(printf '%s' "$RESP" | jq -r '.team_id // "?"')"

@@ -1,0 +1,47 @@
+#!/bin/sh
+# post <channel_id|#name> [text] [--blocks <json>]
+#
+# Posts a NEW top-level message. Text may be the trailing argument or stdin --
+# stdin is the one to reach for with anything multi-line, because argv quoting
+# is where shell-composed Slack messages usually lose their newlines.
+#
+# Prints ts/channel/permalink so a follow-up `reply` can thread onto it. The ts
+# printed here is the parent ts: that is the ONLY value chat.postMessage's
+# thread_ts accepts.
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SELF_DIR/../lib/slack.sh"
+slack_need_tools
+
+usage() {
+  printf 'usage: post <channel_id|#name> [text] [--blocks <json>]\n' >&2
+  exit 2
+}
+
+[ "$#" -ge 1 ] || usage
+CHAN_ARG="$1"; shift
+TEXT=""
+BLOCKS=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --blocks) [ "$#" -ge 2 ] || usage; BLOCKS="$2"; shift 2 ;;
+    --) shift; TEXT="${1:-}"; break ;;
+    -*) usage ;;
+    *) TEXT="$1"; shift ;;
+  esac
+done
+if [ -z "$TEXT" ]; then TEXT="$(cat)"; fi
+[ -n "$TEXT" ] || { printf 'post: refusing to send an empty message\n' >&2; exit 2; }
+
+CHANNEL="$(slack_resolve_channel "$CHAN_ARG")"
+BODY="$(jq -n --arg c "$CHANNEL" --arg t "$TEXT" '{channel: $c, text: $t}')"
+if [ -n "$BLOCKS" ]; then
+  BODY="$(printf '%s' "$BODY" | jq --argjson b "$BLOCKS" '. + {blocks: $b}')"
+fi
+
+RESP="$(slack_post chat.postMessage "$BODY")"
+TS="$(printf '%s' "$RESP" | jq -r '.ts')"
+OUT_CHAN="$(printf '%s' "$RESP" | jq -r '.channel')"
+printf 'ts=%s channel=%s\n' "$TS" "$OUT_CHAN"
+PERMALINK="$(slack_permalink "$OUT_CHAN" "$TS" || printf '')"
+if [ -n "$PERMALINK" ]; then printf 'permalink=%s\n' "$PERMALINK"; fi
