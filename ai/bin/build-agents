@@ -1,0 +1,169 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# build-agents — expand shared blocks into the athena-* agent definitions.
+#
+# Source of truth:
+#   ai/agents/athena-<Name>.md.in   — per-agent template (own content + @include lines)
+#   ai/blocks/**/*.md               — shared blocks (each fact in exactly one place)
+#   ai/blocks/routing.yml           — which agent MUST carry which block / preloaded skill
+#
+# Output:
+#   ai/agents/athena-<Name>.md      — GENERATED; do not hand-edit
+#
+# Deliberately gem-free (stdlib yaml/set only) and run with bare `ruby`, so it
+# never touches a Bundler environment.
+#
+# Usage:
+#   ai/bin/build-agents            build + lint into ai/agents/
+#   ai/bin/build-agents --install  also copy generated defs to ~/.claude/agents/
+#   ai/bin/build-agents --check    lint + verify ai/agents/ is up to date (writes nothing)
+
+require "yaml"
+require "set"
+require "fileutils"
+
+AI_DIR      = File.expand_path("..", __dir__)
+BLOCKS_DIR  = File.join(AI_DIR, "blocks")
+AGENTS_DIR  = File.join(AI_DIR, "agents")
+ROUTING     = File.join(BLOCKS_DIR, "routing.yml")
+INSTALL_DIR = File.expand_path("~/.claude/agents")
+
+INCLUDE_RE = /^@include[ \t]+(\S+)[ \t]*$/.freeze
+
+install = ARGV.include?("--install")
+check   = ARGV.include?("--check")
+
+errors = []
+def die(errors)
+  warn "build-agents: FAILED"
+  errors.each { |e| warn "  - #{e}" }
+  exit 1
+end
+
+# ---- load routing manifest --------------------------------------------------
+manifest = YAML.safe_load(File.read(ROUTING))
+block_consumers = manifest.fetch("blocks", {})   # "arch/5-bucket" => ["Architect", ...]
+skill_consumers = manifest.fetch("skills", {}) || {}
+
+# name => "ai/agents/athena-<name>.md.in"
+template_path = ->(name) { File.join(AGENTS_DIR, "athena-#{name}.md.in") }
+
+# ---- read every template, capturing frontmatter, body, and its @includes ----
+templates = {} # name => {fm_raw:, fm:, body:, includes:[]}
+Dir[File.join(AGENTS_DIR, "athena-*.md.in")].sort.each do |path|
+  name = File.basename(path).sub(/\Aathena-/, "").sub(/\.md\.in\z/, "")
+  raw  = File.read(path)
+  m = raw.match(/\A---\n(.*?)\n---\n(.*)\z/m)
+  unless m
+    errors << "#{File.basename(path)}: missing or malformed YAML frontmatter"
+    next
+  end
+  fm_raw, body = m[1], m[2]
+  fm = begin
+    YAML.safe_load(fm_raw) || {}
+  rescue Psych::SyntaxError => e
+    errors << "#{File.basename(path)}: frontmatter is not valid YAML (#{e.message})"
+    {}
+  end
+  includes = body.scan(INCLUDE_RE).flatten
+  templates[name] = { path: path, fm_raw: fm_raw, fm: fm, body: body, includes: includes }
+end
+
+die(errors) unless errors.empty?
+die(["no templates found in #{AGENTS_DIR} (expected athena-*.md.in)"]) if templates.empty?
+
+# ---- lint: includes resolve, routing is honored exactly ---------------------
+block_files = Dir[File.join(BLOCKS_DIR, "**", "*.md")]
+              .map { |p| p.sub("#{BLOCKS_DIR}/", "").sub(/\.md\z/, "") }
+              .to_set
+
+# dangling @includes + duplicate @includes within a template
+templates.each do |name, t|
+  t[:includes].each do |blk|
+    errors << "#{name}: @include #{blk} — no such block (ai/blocks/#{blk}.md)" unless block_files.include?(blk)
+  end
+  dups = t[:includes].group_by(&:itself).select { |_, v| v.size > 1 }.keys
+  dups.each { |blk| errors << "#{name}: @include #{blk} appears more than once" }
+end
+
+# routing: required vs actual includes
+actual = Hash.new { |h, k| h[k] = Set.new }
+templates.each { |name, t| t[:includes].each { |blk| actual[name] << blk } }
+
+block_consumers.each do |blk, agents|
+  errors << "routing.yml: block '#{blk}' has no block file (ai/blocks/#{blk}.md)" unless block_files.include?(blk)
+  Array(agents).each do |agent|
+    unless templates.key?(agent)
+      errors << "routing.yml: block '#{blk}' lists unknown agent '#{agent}' (no #{File.basename(template_path.call(agent))})"
+      next
+    end
+    errors << "#{agent}: routing.yml requires @include #{blk}, but the template does not include it" unless actual[agent].include?(blk)
+  end
+end
+
+# no template may include a block it is not listed for
+expected = Hash.new { |h, k| h[k] = Set.new }
+block_consumers.each { |blk, agents| Array(agents).each { |a| expected[a] << blk } }
+templates.each do |name, _t|
+  (actual[name] - expected[name]).each do |blk|
+    errors << "#{name}: @include #{blk} is not authorized by routing.yml (add it there, or remove the include)"
+  end
+end
+
+# orphan blocks: a block file no manifest entry consumes
+(block_files - block_consumers.keys.to_set).each do |blk|
+  errors << "orphan block ai/blocks/#{blk}.md — nothing in routing.yml consumes it"
+end
+
+# preloaded-skill coverage (no-op until skills: is populated)
+skill_consumers.each do |skill, agents|
+  Array(agents).each do |agent|
+    next unless templates.key?(agent)
+    listed = Array(templates[agent][:fm]["skills"])
+    errors << "#{agent}: routing.yml requires preloaded skill '#{skill}' in its skills: frontmatter" unless listed.include?(skill)
+  end
+end
+
+die(errors) unless errors.empty?
+
+# ---- expand + write ---------------------------------------------------------
+def warning(name)
+  <<~HTML.chomp
+    <!-- GENERATED by ai/bin/build-agents — DO NOT EDIT.
+         Edit the template ai/agents/athena-#{name}.md.in or the shared blocks in
+         ai/blocks/**, then re-run ai/bin/build-agents. -->
+  HTML
+end
+
+stale = []
+templates.each do |name, t|
+  expanded = t[:body].gsub(INCLUDE_RE) { File.read(File.join(BLOCKS_DIR, "#{Regexp.last_match(1)}.md")).chomp }
+  out = "---\n#{t[:fm_raw]}\n---\n\n#{warning(name)}\n\n#{expanded.sub(/\A\n+/, '')}"
+  out += "\n" unless out.end_with?("\n")
+
+  dest = File.join(AGENTS_DIR, "athena-#{name}.md")
+  current = File.exist?(dest) ? File.read(dest) : nil
+  if current == out
+    puts "  = athena-#{name}.md (up to date)"
+  elsif check
+    stale << "athena-#{name}.md is out of date — run ai/bin/build-agents"
+  else
+    File.write(dest, out)
+    puts "  ✓ wrote athena-#{name}.md"
+  end
+end
+
+die(stale) unless stale.empty?
+
+# ---- install ----------------------------------------------------------------
+if install
+  FileUtils.mkdir_p(INSTALL_DIR)
+  templates.each_key do |name|
+    src = File.join(AGENTS_DIR, "athena-#{name}.md")
+    FileUtils.cp(src, File.join(INSTALL_DIR, "athena-#{name}.md"))
+    puts "  → installed athena-#{name}.md to #{INSTALL_DIR}"
+  end
+end
+
+puts "build-agents: OK (#{templates.size} agents, #{block_files.size} blocks)"

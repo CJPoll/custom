@@ -1,0 +1,20 @@
+# Routing manifest — the single source of truth for which shared block and
+# which preloaded skill each agent definition is REQUIRED to carry.
+#
+# build-agents enforces this exactly:
+#   - every agent listed under a block MUST `@include` that block
+#   - no agent may `@include` a block it is not listed for
+#   - every agent listed under a skill MUST declare it in its `skills:` frontmatter
+#   - blocks with no consumer, and `@include`s with no block file, fail the build
+#
+# Agent names are the short form; the file is `ai/agents/athena-<name>.md.in`.
+
+blocks:
+  arch/5-bucket:              [architect, captain]
+  arch/tdd-workflow:          [architect, captain]
+  arch/access-control:        [architect, captain]
+  ops/never-end-turn-waiting: [architect, captain, admiral]
+
+# Preloaded skills each agent must list in `skills:` frontmatter (deterministic
+# full-body preload). Empty for now; flaky-ticket-filing lands here next.
+skills: {}
