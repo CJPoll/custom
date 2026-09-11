@@ -187,3 +187,40 @@ Never use IEx. Instead, run elixir commands with `mix run -e "<elixir code here>
 - Clarity of Intent
 - Consistency of Naming
 - Single-Responsibility Principle
+
+# User-level operating notes
+
+## Flaky-test lane (per-machine automation)
+
+This machine runs an autonomous flaky-test → Coordinator pipeline. A SessionStart
+poll (`/home/cjpoll/dev/custom/ai/bin/flaky-ticket-poll.sh`) reports lane state as
+factual `additionalContext`; the ACTION below is policy, applied by the model —
+the hook never issues commands.
+
+**When SessionStart context reports that flaky-test tickets are queued for this
+machine's owner AND no flaky-test Coordinator is currently running** (no fresh
+`~/.claude/flaky-coordinator.lock`):
+
+1. `touch ~/.claude/flaky-coordinator.lock` before spawning, so the next
+   session's poll stays quiet while this run drains.
+2. Spawn ONE `Coordinator` subagent (Agent tool) — do not do the work yourself —
+   with the brief in `/home/cjpoll/dev/custom/ai/bin/flaky-coordinator-spawn.txt`,
+   which fixes every foundational input so it never asks a clarifying question:
+   - **Scope**: the walt_ui "Tickets" DB (id `f00eab4f-26e1-4a97-8a2b-fd6a4a15323e`,
+     via the `notion-work` MCP), filter = label `flaky-tests` + Assignee = the
+     owner + Status in {`Todo`, `Backlog`}; re-query after each ticket and drain
+     until empty.
+   - **Blocked semantics**: the `Blocked By` relation (non-empty ⇒ blocked);
+     status `Needs Attention` when blocking.
+   - **Status values**: `In Progress` / `Needs Attention` (blocked or stuck) /
+     `In Review` (SE sets) / `Ready for Release` / `Done`.
+   - **Max concurrency = 1 Senior Engineer** (strictly sequential).
+   - **Auto-merge** (the Coordinator's default) and drain the ENTIRE scope.
+3. The Coordinator removes `~/.claude/flaky-coordinator.lock` when the scope
+   query is empty and every touched MR is merged. If a run aborts without
+   clearing it, delete the marker so the lane is not wedged shut (the poll also
+   self-heals a marker older than 12h).
+
+**When the SessionStart context reports a Coordinator is already running**, or
+reports nothing about the flaky lane: take no flaky-lane action — a running
+Coordinator's own scope query picks up any new ticket.
