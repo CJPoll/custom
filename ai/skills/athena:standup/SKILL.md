@@ -70,7 +70,7 @@ Scope strictly to Athena/Cody work. Other people's MRs (`tom888`/`johnnyt1`/
   prod HEALTHY.
 - **Q2 — today:** In-Progress + next-queued work. Query the Notion Tickets DB
   (data source `305c55b5-3ca5-4087-8b12-852007d38182`) for Athena's
-  `Status = In Progress`, and read the Admiral ledgers for what's queued:
+  `Status = In Progress`, and read the athena:Admiral ledgers for what's queued:
   `~/dev/custom/ai-artifacts/coordination/*/state.md`.
 - **Q3 — blockers:** anything blocked, awaiting a Cody decision, or an infra
   issue (a deploy hang, a down integration). Be honest; "none hard" is a fine
