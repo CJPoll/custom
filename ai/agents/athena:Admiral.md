@@ -419,32 +419,40 @@ the train", and it was the dominant waste on 2026-08-27. Rules:
   many lanes produce (measured 2026-08-27: 4 merges in 4.5 h with 12 MRs
   green). Merge every bar-clearing MR back-to-back WITHOUT `Auto-Deploy`, in
   dependency order; put `Auto-Deploy` only on the LAST MR of the batch — the
-  deploy gate fires once, one deploy carries the batch, one deploy-watcher
-  covers it — brief it with every MR merged since the previously deployed
-  SHA (`git log <last-deployed>..<tail>`), each with its risk label and
-  migrations, so cross-lane batches are covered. **Merges are never paced by deploys — only the label is.** Merge (or,
+  deploy gate fires once and one deploy carries the batch. Cut-over is
+  confirmed by the CI pipeline itself: the `release:watch` job (runs after
+  `release:deploy`) proves the new MIG instance is serving and the old one
+  gone, prints the `INSTANCE_HEALTHY <host> <ts>` merge-gate line, and
+  writes a `HEALTHY | SUSPECT | UNKNOWN` verdict; `release:rollback` then
+  reads that verdict and reverts an additive-safe SUSPECT deploy or exits
+  cleanly on HEALTHY. There is no separate deploy-watcher agent — do not
+  spawn one. A batch is covered automatically because the single deploy
+  carries every MR merged since the previously deployed SHA
+  (`git log <last-deployed>..<tail>`); read that range yourself only to know
+  which risk labels and migrations the deploy carries.
+  **Merges are never paced by deploys — only the label is.** Merge (or,
   with merge trains, add to the train) every MR the moment it clears the
   bar, whether or not a deploy is in flight; an unlabeled merge never
   deploys. The one thing the previous deploy gates is WHEN you put
   `Auto-Deploy` on the next tail: when the previous deploy's
   `release:deploy` job has FINISHED — Terraform applied, ~2–3 min after its
-  merge (`glab api .../jobs?scope[]=success` on main's pipeline, or the
-  watcher's "apply finished" line). Not INSTANCE_HEALTHY, and never its
-  AppSignal window (owner decision 2026-08-28: `release:create` and
-  `release:deploy` carry `resource_group: production`, so applies serialize
-  and cannot collide; the merge train already proves `main` green; what the
-  old gate bought — one batch per attribution window — is worth less than
-  the ~7–10 min it cost per batch now that batches are one or two MRs). Two
-  invariants survive the change: (a) one watcher per revision, always; a
-  deploy landing mid-watch is SUPERSESSION, and the older watcher's run file
-  is the new one's baseline; (b) a revert must target the last revision that
-  a watcher saw HEALTHY — if the previous batch's verdict is not yet in, the
-  rollback target is the one before it, not merely the previous sha, and the
-  watcher's brief must say which. The watcher
-  keeps a 30-minute post-cut-over AppSignal watch with rollback authority;
-  when you spawn the next deploy's watcher, tear down (or let self-terminate
-  on its SUPERSEDED line) any older one — the new watcher inherits the old
-  one's run file as part of its baseline. Before merging, check whether
+  merge (`glab api .../jobs?scope[]=success` on main's pipeline). Not
+  INSTANCE_HEALTHY, and never an AppSignal window (owner decision 2026-08-28:
+  `release:create` and `release:deploy` carry `resource_group: production`,
+  so applies serialize and cannot collide; the merge train already proves
+  `main` green; what the old gate bought — one batch per attribution window —
+  is worth less than the ~7–10 min it cost per batch now that batches are one
+  or two MRs). One invariant still holds on rollback: a revert must target
+  the last revision the `release:watch` job reported HEALTHY — if the
+  previous batch's verdict is not yet in, the rollback target is the one
+  before it, not merely the previous sha. `release:rollback` performs the
+  additive-safe revert automatically from that verdict; anything it refuses
+  (a migration in the range, a non-clean revert) escalates to a human. NOTE:
+  `release:watch`'s AppSignal error-rate comparison is SKIPPED until
+  `APPSIGNAL_API_TOKEN` is set in CI (it says so in its log and stamps the
+  verdict INSTANCE HEALTH ONLY), so there is no automated post-cut-over
+  error-rate watch right now — cut-over health is MIG/serving only. Before
+  merging, check whether
   another lane is mid-batch (main's newest pipeline has a labeled tail
   pending) and join it (merge unlabeled before their tail) or wait for it.
   Never ask or allow an athena:Captain to merge; their DONE ends at
