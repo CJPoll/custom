@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Detect a crashed/degraded dhcpcd and restart it cleanly.
+#   usage: dhcpcd-watchdog [iface ...]   (default: enp7s0 wlo1)
+# dhcpcd 10.x privsep forks a worker process per interface (`dhcpcd: <iface> ...`).
+# When the manager segfaults, already-forked workers get reparented to PID 1 and
+# keep running on stale state instead of dying with it — so a plain
+# `rc-service dhcpcd restart` isn't enough; the leftover workers must be killed
+# first or the new manager can end up fighting them for the interface.
+# Must run as root (rc-service + killing root-owned dhcpcd workers).
+set -uo pipefail
+
+LOCK=/tmp/dhcpcd-watchdog.lock
+exec 9>"$LOCK"; flock -n 9 || exit 0
+
+if [ "$#" -gt 0 ]; then
+  IFACES=("$@")
+else
+  IFACES=(enp7s0 wlo1)
+fi
+
+log() { logger -t dhcpcd-watchdog "$1"; }
+
+healthy=true
+
+if ! rc-service dhcpcd status 2>/dev/null | grep -q started; then
+  healthy=false
+  log "rc-service dhcpcd not in 'started' state"
+fi
+
+for iface in "${IFACES[@]}"; do
+  if ! ip -4 addr show dev "$iface" 2>/dev/null | grep -q 'inet '; then
+    healthy=false
+    log "$iface has no IPv4 address"
+  fi
+done
+
+$healthy && exit 0
+
+log "unhealthy — restarting dhcpcd"
+
+# Kill any leftover per-interface privsep workers; the crashed manager doesn't
+# clean these up, and a fresh manager will not adopt them. These workers don't
+# die on SIGTERM (observed: pkill's default signal left them running and the
+# new manager then failed with "failed to acquire lock"), so go straight to
+# SIGKILL and confirm the process is actually gone.
+for iface in "${IFACES[@]}"; do
+  pattern="^dhcpcd: ${iface} "
+  if pgrep -f "$pattern" >/dev/null; then
+    pkill -9 -f "$pattern"
+    for _ in 1 2 3 4 5; do
+      pgrep -f "$pattern" >/dev/null || break
+      sleep 1
+    done
+    if pgrep -f "$pattern" >/dev/null; then
+      log "FAILED to kill orphaned dhcpcd worker for $iface"
+    else
+      log "killed orphaned dhcpcd worker for $iface"
+    fi
+  fi
+done
+
+rc-service dhcpcd zap 2>/dev/null
+if rc-service dhcpcd restart >/tmp/dhcpcd-watchdog.restart.log 2>&1; then
+  log "dhcpcd restarted successfully"
+else
+  log "dhcpcd restart FAILED (see /tmp/dhcpcd-watchdog.restart.log)"
+  exit 1
+fi
