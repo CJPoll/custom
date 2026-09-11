@@ -1,10 +1,10 @@
 ---
-name: analysis:context
+name: athena:analyze-code
 description: Generate comprehensive Elixir architectural reports analyzing module dependencies, control flow, and structural patterns. Use when analyzing architecture, mapping dependencies, or understanding how a code area is structured.
 argument-hint: <code-area-path> [--depth shallow|moderate|deep] [--focus data_flow,otp,phoenix,genserver,database,integrations]
 ---
 
-# Elixir Architecture Analysis
+# athena:analyze-code — Elixir Architecture Analysis
 
 Generate a comprehensive architectural report for the specified code area.
 
@@ -182,68 +182,203 @@ another location is specified, write the report to that location.
 
 Sanitize the code area name for use in the filename (replace `/` and invalid characters with `-`).
 
+### Format rules (apply to every section)
+
+**Prose explains; structure answers.** Lead every section with something
+scannable — a table, a rated list, a diagram — and reserve prose for rationale.
+A fact that could be a table cell is a table cell.
+
+- **Findings have IDs and a fixed shape.** ID by section prefix and sequence
+  (`DEP-01`, `OTP-02`, `FLOW-03`, `AP-04`). Every finding, wherever it appears,
+  is the same four lines: **What** / **Where** (`Module` + `file:line`) / **Why
+  it matters** / **Action**. The full detail lives once, in the §5 register;
+  §1–4 reference IDs rather than restating.
+- **Severity and confidence on every finding.** Severity: `CRIT` / `HIGH` /
+  `MED` / `LOW` / `INFO`. Confidence: `high` / `med` / `low` — static analysis
+  guesses; say when it is guessing.
+- **Ratings name their driver.** A 🟢 / 🟡 / 🔴 cell must cite the finding ID
+  (or "—") that earned it.
+- **Numbers carry a signal.** Any metrics table has a `Signal` column that
+  turns the number into a judgment (e.g. "max fan-out >8 → god-module
+  candidate") or "—".
+- **Prose is labelled and bounded.** Free text appears only under a bold label
+  — `**Why:**`, `**Rationale:**`, `**Deviation:**`, `**Consequence:**` — and is
+  at most 3 lines per label. No unlabelled paragraphs inside §2–5.
+- **Long material folds.** Full catalogs, matrices, message tables and code
+  examples go in `<details><summary>…</summary>` blocks. Code examples are
+  never inline in a finding; they fold beneath it.
+- **Diagrams are indexed.** Every Mermaid/ASCII diagram is preceded by a table
+  row that names it, so the reader can choose to open it.
+
 ### Report Structure
 
-#### Header Metadata
+#### Header
 
-Include at the top:
-- Analysis date, code area analyzed, depth setting, focus areas
-- Module count, analysis duration
+A two-column table, not a list:
+
+```markdown
+| | |
+|---|---|
+| **Area** | `lib/my_app/accounts` (`MyApp.Accounts.*`) |
+| **Depth / Focus** | moderate / database, phoenix |
+| **Modules** | 23 (7 OTP · 4 contexts · 5 schemas · 3 controllers · 4 utility) |
+| **Findings** | 2 CRIT · 5 HIGH · 9 MED · 6 LOW |
+| **Analyzed** | YYYY-MM-DD · duration |
+```
+
+Follow with a **Reading map** (≤5 lines): which section to read for a 2-minute
+overview (§1), for planning a refactor (§5 then §2), for on-call / debugging
+(§3 flow index).
 
 #### 1. Executive Summary
 
-- Overall architectural approach and patterns
-- Module organization and namespace structure
-- Key strengths and well-designed aspects
-- Critical issues requiring attention
-- Complexity and maintainability assessment
+Three blocks, no paragraphs.
+
+```markdown
+### Verdict
+> One sentence: the architecture in a clause, and its single biggest risk by ID.
+
+### Health at a glance
+| Dimension | Rating | Driver |
+|---|---|---|
+| Layering / dependency direction | 🟢 | 0 cycles, no upward deps |
+| OTP design | 🟡 | OTP-02 |
+| Separation of concerns | 🟢 | — |
+| Coupling | 🟡 | DEP-04 |
+| Test coverage of critical paths | 🔴 | FLOW-02 path untested |
+
+### Top findings
+1. **[CRIT] OTP-02** one-line finding → §3.2
+2. **[HIGH] DEP-04** one-line finding → §2.3
+(≤5 entries, severity-ordered)
+```
 
 #### 2. Dependency Analysis
 
-- Module count with classification breakdown
-- Dependency metrics (avg fan-in/fan-out, max depth)
-- Circular dependency report with impact assessment
-- **Mermaid diagram**: `graph TD` with color-coded nodes by module type, weighted edges, clustered related modules
-- Critical path highlighting
+```markdown
+### Metrics
+| Metric | Value | Signal |
+|---|---|---|
+| Modules | n | — |
+| Avg / max fan-out | x / y (`Module`) | max >8 → god-module candidate |
+| Avg / max fan-in | x / y (`Module`) | high fan-in + pure → healthy hub |
+| Cycles | n | any → see Boundary violations |
+| Max dependency depth | n | — |
+
+### Layer map
+(Mermaid `graph TD`: nodes clustered by bucket/layer, colored by module
+classification, direction-violating edges drawn red. Split into sub-graphs
+above ~25 nodes.)
+
+### Hotspots
+| Module | Fan-in | Fan-out | Bucket | Why it matters |
+|---|---|---|---|---|
+
+### Boundary violations
+| ID | From → To | Kind | Rule broken | Sev | Conf |
+|---|---|---|---|---|---|
+(`Kind` = import / alias / use / direct call. `Rule broken` = the 5-bucket
+rule or layer rule, e.g. "Domain → Side Effect".)
+```
+
+Transitive/impact analysis (moderate/deep depth): one table, `Module | Direct
+dependents | Transitive dependents | Change blast radius (S/M/L)`.
 
 #### 3. Control Flow
 
-- Request processing flows (if Phoenix) with **Mermaid sequence diagrams** for key user journeys
-- **Mermaid diagram**: supervision tree (`graph TD`) with restart strategies and process types
-- Key message passing patterns
-- State mutation and coordination patterns
-- Performance bottleneck identification
+Open with a **Flow index**; every flow gets one row, then one subsection.
+
+```markdown
+### Flow index
+| Flow | Trigger | Path (hops) | Sync/Async | Diagram | Risk |
+|---|---|---|---|---|---|
+| Session start | user action | A → B → C (3) | call | §3.1 | — |
+| Crash recovery | Port EXIT | B ⇢ A (trap) → B' (2) | info | §3.2 | OTP-02 |
+
+### 3.n <Flow name>
+(Mermaid `sequenceDiagram` for request/message flows; `graph TD` or ASCII for
+the supervision tree, annotated with restart strategy and child type.)
+**Why:** ≤3 lines of rationale for the shape.
+
+### Message contracts (OTP)
+<details><summary>n messages</summary>
+| Message | Direction | Kind | Handler | State touched |
+|---|---|---|---|---|
+</details>
+
+### Bottlenecks
+| ID | Path | Evidence | Sev | Conf |
+|---|---|---|---|---|
+```
 
 #### 4. Architectural Patterns
 
-- Catalog of detected patterns with code examples
-- Pattern implementation quality assessment
-- Pattern usage consistency evaluation
-- Single responsibility adherence
-- Separation of concerns assessment
-- OTP principle compliance
+A catalog table, then one fixed-shape card per pattern that is inconsistent
+or low quality. Uniform, healthy patterns get a table row only.
 
-#### 5. Issues and Recommendations
+```markdown
+### Pattern catalog
+| Pattern | Instances | Consistency | Quality | Notes |
+|---|---|---|---|---|
+| Observer | 3 | ✅ uniform | 🟢 | — |
+| PID-guard stale filtering | 4 | ⚠️ 1 outlier | 🟡 | AP-02 |
 
-- **Critical issues**: architectural debt, security concerns, performance risks
-- **Refactoring opportunities**: specific recommendations with rationale
-- **Pattern improvements**: suggestions for better implementations
-- **Dependency optimization**: structural improvement recommendations
-- **Future guidance**: development guidelines, testing strategy, monitoring suggestions
+### AP-nn · <Pattern> — <one-word verdict>
+- **Where:** conforming sites ✅ · deviating sites ❌ (module + line)
+- **Intent:** one line
+- **Deviation:** ≤3 lines
+- **Consequence:** ≤3 lines
+<details><summary>Example</summary> (good and/or bad code) </details>
+
+### Bucket classification
+| Module | Bucket | Conf | Violations |
+|---|---|---|---|
+(Bucket = Framework / UI Component / Side Effect / Domain / Manager, per the
+5-bucket architecture. `Violations` cites finding IDs or "—".)
+
+### Anti-patterns
+| ID | Anti-pattern | Module | Evidence | Sev | Conf |
+|---|---|---|---|---|---|
+```
+
+#### 5. Findings & Recommendations
+
+The single source of truth for every finding. Earlier sections link here.
+
+```markdown
+### Findings register
+| ID | Sev | Conf | Finding | Location | Action | Effort |
+|---|---|---|---|---|---|---|
+| OTP-02 | CRIT | high | … | `Mod` L77 | … | M |
+(sorted by severity, then ID; Effort = S / M / L)
+
+### Suggested sequence
+1. **ID** — why first (dependency on / unlocks other IDs).
+2. …
+(≤6 entries; state the ordering rationale, not just the order)
+
+### Guidance going forward
+- **Testing:** ≤3 bullets
+- **Monitoring:** ≤2 bullets
+- **Do not add:** patterns to avoid introducing, each tied to an ID
+```
 
 #### Appendices
 
-- Complete module catalog with classifications
-- Detailed dependency matrix
-- Representative code examples for key patterns
-- Quantitative metrics summary
+Each in its own `<details>` block:
+
+- Module catalog — `Module | Classification | Bucket | Public fns | OTP behaviour`
+- Dependency matrix
+- Quantitative metrics dump
+- Representative code examples not already folded under a finding
 
 ### Diagram Guidelines
 
-- Break large dependency graphs into focused sub-graphs for readability
-- Use color-coding consistently: OTP processes, Phoenix contexts, schemas, controllers, utilities
-- Annotate supervision trees with restart strategies
-- Focus sequence diagrams on critical interaction patterns
+- Break large dependency graphs into focused sub-graphs (~25 nodes max each)
+- Color-code consistently: OTP processes, Phoenix contexts, schemas, controllers, utilities; draw rule-violating edges red
+- Annotate supervision trees with restart strategies and child types
+- Focus sequence diagrams on the flows in the Flow index; one diagram per flow
+- Every diagram is preceded by the table row that indexes it
 
 ---
 
