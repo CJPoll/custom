@@ -185,22 +185,33 @@ create_worktree() {
     # Only set parent if:
     # 1. Branch didn't exist locally (we're creating it new), OR
     # 2. User explicitly provided --parent flag
+    #
+    # Always pass --parent to gt track: a bare `gt track <branch>` makes
+    # Graphite INFER the parent by walking commit ancestry against every
+    # local branch, which can spin at full CPU for minutes on branches
+    # with long histories. When the parent's own parent is unknown we
+    # fall back to trunk, which is what gt's interactive selector would
+    # default to. Timeouts are a backstop so bookkeeping can never block
+    # worktree creation.
+    local gt_trunk="main"
+    branch_exists_locally "main" || gt_trunk="master"
+
     if [ "$INSERT_BRANCH" != true ] && [ "$branch_exists_locally" = false ]; then
         if [ "$PARENT_BRANCH" != "main" ] || [ "$PARENT_BRANCH_EXPLICIT" = true ]; then
             if command -v gt &>/dev/null; then
-                # First ensure the parent branch is tracked
-                (cd "$worktree_path" && gt track "$PARENT_BRANCH" &>/dev/null 2>&1) || true
+                # First ensure the parent branch is tracked (against trunk)
+                git show-ref --quiet "refs/branch-metadata/$PARENT_BRANCH" || (cd "$worktree_path" && timeout 10 gt track "$PARENT_BRANCH" --parent "$gt_trunk" --no-interactive </dev/null &>/dev/null 2>&1) || true
                 # Now track the current branch with its parent
-                (cd "$worktree_path" && gt track "$branch" --parent "$PARENT_BRANCH" &>/dev/null 2>&1) || true
+                (cd "$worktree_path" && timeout 10 gt track "$branch" --parent "$PARENT_BRANCH" --no-interactive </dev/null &>/dev/null 2>&1) || true
             fi
         fi
     elif [ "$INSERT_BRANCH" != true ] && [ "$PARENT_BRANCH_EXPLICIT" = true ]; then
         # If branch existed but user explicitly set parent, update it
         if command -v gt &>/dev/null; then
-            # First ensure the parent branch is tracked
-            (cd "$worktree_path" && gt track "$PARENT_BRANCH" &>/dev/null 2>&1) || true
+            # First ensure the parent branch is tracked (against trunk)
+            git show-ref --quiet "refs/branch-metadata/$PARENT_BRANCH" || (cd "$worktree_path" && timeout 10 gt track "$PARENT_BRANCH" --parent "$gt_trunk" --no-interactive </dev/null &>/dev/null 2>&1) || true
             # Now track the current branch with its parent
-            (cd "$worktree_path" && gt track "$branch" --parent "$PARENT_BRANCH" &>/dev/null 2>&1) || true
+            (cd "$worktree_path" && timeout 10 gt track "$branch" --parent "$PARENT_BRANCH" --no-interactive </dev/null &>/dev/null 2>&1) || true
         fi
     fi
 
