@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run glab (or curl via `glab-athena api ...`) AS the Athena GitLab service
+# account (athena-amby, amby_ai group). Token read at call time from a 600
+# file; never in argv or config. Use for writes that should be attributed to
+# Athena (MR create/comment/approve, merge-train boarding, merges). Reads may
+# keep using the owner's OAuth glab.
+set -eu
+TOKEN_FILE="${GITLAB_ATHENA_TOKEN_FILE:-$HOME/.claude/gitlab-athena-token}"
+[ -r "$TOKEN_FILE" ] || { echo "glab-athena: token file $TOKEN_FILE missing/unreadable" >&2; exit 1; }
+GITLAB_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+export GITLAB_TOKEN GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 GLAB_SKIP_UPDATE_CHECK=1
+exec glab "$@"
