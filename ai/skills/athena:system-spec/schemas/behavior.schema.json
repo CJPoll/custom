@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/behavior.schema.json",
+  "title": "SpecMaker Behavior aggregate",
+  "description": "Use cases and the steps that realize them.",
+  "$defs": {
+    "UseCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "actor": { "type": "string" },
+        "goal": { "type": "string" },
+        "preconditions": { "type": "string" },
+        "postconditions": { "type": "string" },
+        "description": { "type": "string" },
+        "subdomain_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name"]
+    },
+    "Step": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "position": { "type": "integer" },
+        "actor": { "type": "string" },
+        "action": { "type": "string" },
+        "description": { "type": "string" },
+        "use_case_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "function_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "position", "action", "use_case_id"]
+    }
+  }
+}

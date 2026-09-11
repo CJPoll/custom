@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/rules.schema.json",
+  "title": "SpecMaker Rules aggregate",
+  "description": "Invariants and the edges where they are exercised.",
+  "$defs": {
+    "Constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "description": "e.g. validation, unique, foreign_key, check, invariant."
+        },
+        "expression": { "type": "string" },
+        "enforcement": { "type": "string", "default": "changeset" },
+        "description": { "type": "string" },
+        "entity_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "field_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "function_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "kind", "expression"]
+    },
+    "BoundaryCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "category": {
+          "type": "string",
+          "description": "e.g. edge_case, error, happy_path, nil_input."
+        },
+        "input_description": { "type": "string" },
+        "expected_behavior": { "type": "string" },
+        "function_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "constraint_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "field_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "category", "expected_behavior"]
+    }
+  }
+}

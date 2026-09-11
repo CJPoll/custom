@@ -1,0 +1,81 @@
+{
+  "$schema": "../schemas/spec.schema.json",
+  "name": "Demo Spec",
+  "description": "A tiny illustrative spec exercising several aggregates, cross-collection references, and the exactly-one-parent rule on parameters and message fields.",
+  "status": "draft",
+  "target_app": "demo",
+
+  "buckets": [
+    { "id": "b_domain", "name": "Domain", "kind": "domain" }
+  ],
+  "subdomains": [
+    { "id": "sd_courses", "name": "Courses" }
+  ],
+
+  "modules": [
+    { "id": "m_course", "name": "Course", "bucket_id": "b_domain", "subdomain_id": "sd_courses" }
+  ],
+  "functions": [
+    { "id": "f_create", "name": "create", "arity": 1, "module_id": "m_course", "purity": "pure" }
+  ],
+  "parameters": [
+    { "id": "p_attrs", "name": "attrs", "type_expression": "map()", "position": 0, "function_id": "f_create" }
+  ],
+  "return_values": [
+    { "id": "rv_ok", "type_expression": "{:ok, Course.t()}", "kind": "success", "function_id": "f_create" },
+    { "id": "rv_err", "type_expression": "{:error, Changeset.t()}", "kind": "error", "position": 1, "function_id": "f_create" }
+  ],
+
+  "entities": [
+    { "id": "e_course", "name": "Course", "subdomain_id": "sd_courses" }
+  ],
+  "fields": [
+    { "id": "fld_title", "name": "title", "ecto_type": "string", "required": true, "entity_id": "e_course" }
+  ],
+
+  "authz_models": [
+    { "id": "az_default", "name": "Default", "style": "entity_delegated" }
+  ],
+  "capabilities": [
+    { "id": "cap_view", "action": "course.view", "authz_model_id": "az_default", "entity_id": "e_course" }
+  ],
+  "permission_delegations": [
+    { "id": "pd_course", "chain": ["spec"], "authz_model_id": "az_default", "entity_id": "e_course" }
+  ],
+
+  "commanded_aggregates": [
+    { "id": "ca_course", "name": "CourseAggregate", "entity_id": "e_course" }
+  ],
+  "commands": [
+    { "id": "cmd_create", "name": "CreateCourse", "commanded_aggregate_id": "ca_course" }
+  ],
+  "domain_events": [
+    { "id": "de_created", "name": "CourseCreated", "commanded_aggregate_id": "ca_course" }
+  ],
+  "message_fields": [
+    { "id": "mf_title", "name": "title", "type_expression": "String.t()", "required": true, "command_id": "cmd_create" }
+  ],
+  "command_emissions": [
+    { "id": "ce_create", "command_id": "cmd_create", "domain_event_id": "de_created" }
+  ],
+
+  "use_cases": [
+    { "id": "uc_enroll", "name": "Create a course", "actor": "instructor", "goal": "add a course to the catalog", "subdomain_id": "sd_courses" }
+  ],
+  "steps": [
+    { "id": "st_1", "position": 0, "actor": "instructor", "action": "submits course details", "use_case_id": "uc_enroll", "function_id": "f_create" }
+  ],
+
+  "test_cases": [
+    {
+      "id": "tc_create",
+      "name": "creates a course",
+      "kind": "unit",
+      "given_context": "valid attrs",
+      "when_action": "create/1 is called",
+      "then_expectation": "returns {:ok, course}",
+      "function_id": "f_create",
+      "use_case_id": "uc_enroll"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/verification.schema.json",
+  "title": "SpecMaker Verification aggregate",
+  "description": "The tests the generated code must satisfy.",
+  "$defs": {
+    "TestCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "description": "e.g. unit, integration, property, doctest."
+        },
+        "given_context": { "type": "string" },
+        "when_action": { "type": "string" },
+        "then_expectation": { "type": "string" },
+        "async": { "type": "boolean", "default": true },
+        "module_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "function_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "use_case_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "constraint_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "boundary_condition_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "kind", "when_action", "then_expectation"]
+    }
+  }
+}

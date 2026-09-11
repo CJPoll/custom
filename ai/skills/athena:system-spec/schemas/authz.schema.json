@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/authz.schema.json",
+  "title": "SpecMaker Authz aggregate",
+  "description": "How the specified system decides who may do what. Deliberately wider than any one framework; an AuthzModel's `style` selects the shape.",
+  "$defs": {
+    "AuthzModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "style": {
+          "type": "string",
+          "description": "The authorization shape, e.g. entity_delegated, scoped_role_bundle."
+        },
+        "deny_by_default": { "type": "boolean", "default": true },
+        "additive_only": { "type": "boolean", "default": true },
+        "description": { "type": "string" }
+      },
+      "required": ["id", "name", "style"]
+    },
+    "Capability": {
+      "type": "object",
+      "description": "One entry in the capability catalog. Identity is the triple (action, applies, via). Entries are retired, never deleted.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "action": {
+          "type": "string",
+          "description": "A dotted action string, e.g. \"contact.view\"."
+        },
+        "label": { "type": "string" },
+        "applies": {
+          "type": "string",
+          "default": "entity",
+          "description": "Positional reach from the scope node."
+        },
+        "via": {
+          "type": "string",
+          "description": "Narrows to resources the actor is related to; can never widen."
+        },
+        "retired": { "type": "boolean", "default": false },
+        "description": { "type": "string" },
+        "authz_model_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "entity_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "function_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "action", "authz_model_id"]
+    },
+    "AuthzRole": {
+      "type": "object",
+      "description": "A named capability bundle. `entity_id` is set when the role is declared on an entity and left absent when it is tenant-owned and assignable anywhere.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "seeded": { "type": "boolean", "default": false },
+        "system": { "type": "boolean", "default": false },
+        "is_default": { "type": "boolean", "default": false },
+        "description": { "type": "string" },
+        "authz_model_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "entity_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "owner_entity_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "authz_model_id"]
+    },
+    "RoleCapability": {
+      "type": "object",
+      "description": "Binds a capability into a role. `applies`/`via` override the catalog entry when a role holds a narrower form of the same action.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "applies": { "type": "string" },
+        "via": { "type": "string" },
+        "authz_role_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "capability_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "authz_role_id", "capability_id"]
+    },
+    "ScopeHierarchy": {
+      "type": "object",
+      "description": "The tree a scoped role reaches over, and how reach is resolved.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "parent_field": { "type": "string", "default": "parent_id" },
+        "resolution": { "type": "string", "default": "recursive_cte" },
+        "root_field": { "type": "string" },
+        "max_depth": { "type": "integer" },
+        "description": { "type": "string" },
+        "authz_model_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "node_entity_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "authz_model_id", "node_entity_id"]
+    },
+    "RoleAssignmentRule": {
+      "type": "object",
+      "description": "How a role gets granted: the principal axis (who holds it) and the scope axis (how far it reaches).",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "principal_kinds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "additive_only": { "type": "boolean", "default": true },
+        "inherited_by_descendants": { "type": "boolean", "default": true },
+        "description": { "type": "string" },
+        "authz_model_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "authz_role_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "scope_entity_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "scope_hierarchy_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "authz_model_id"]
+    },
+    "ResourceAssignmentKind": {
+      "type": "object",
+      "description": "A member of the closed routing-kind set a capability's `via` may name. A bare assignment confers no visibility on its own.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "subject_kinds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "confers_visibility": { "type": "boolean", "default": false },
+        "user_authorable": { "type": "boolean", "default": false },
+        "description": { "type": "string" },
+        "authz_model_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "resource_entity_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "authz_model_id"]
+    },
+    "PermissionDelegation": {
+      "type": "object",
+      "description": "The entity-delegated style. An absent `permission` delegates every permission through the chain.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "permission": { "type": "string" },
+        "chain": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": []
+        },
+        "authz_model_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "entity_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "authz_model_id", "entity_id"]
+    }
+  }
+}

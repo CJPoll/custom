@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/spec.schema.json",
+  "title": "SpecMaker Spec",
+  "description": "A Spec describes a codebase (or a slice of one) precisely enough to generate it: its architectural placement, module and function structure, persisted entities, rules, use cases, CQRS message flow, and tests. This is the JSON encoding of the SpecMaker.DomainModel DSL. The whole document is one Spec (the only RBAC root in the DSL); the Spec's own fields sit at the root, and every other entity lives in a top-level collection keyed by its plural name. Each entity carries a document-unique `id`; DSL `belongs_to(:assoc)` relations are encoded as `assoc_id` references, and `has_many` relations are simply the inverse of those references (not stored separately). The implicit `belongs_to(:spec)` present on every entity is omitted here because the document itself is the spec.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "status": { "type": "string", "default": "draft" },
+    "target_app": { "type": "string" },
+    "target_repo_path": { "type": "string" },
+
+    "buckets": {
+      "type": "array",
+      "items": { "$ref": "specs.schema.json#/$defs/Bucket" }
+    },
+    "subdomains": {
+      "type": "array",
+      "items": { "$ref": "specs.schema.json#/$defs/Subdomain" }
+    },
+
+    "modules": {
+      "type": "array",
+      "items": { "$ref": "structure.schema.json#/$defs/Module" }
+    },
+    "functions": {
+      "type": "array",
+      "items": { "$ref": "structure.schema.json#/$defs/Function" }
+    },
+    "parameters": {
+      "type": "array",
+      "items": { "$ref": "structure.schema.json#/$defs/Parameter" }
+    },
+    "return_values": {
+      "type": "array",
+      "items": { "$ref": "structure.schema.json#/$defs/ReturnValue" }
+    },
+    "contracts": {
+      "type": "array",
+      "items": { "$ref": "structure.schema.json#/$defs/Contract" }
+    },
+    "callbacks": {
+      "type": "array",
+      "items": { "$ref": "structure.schema.json#/$defs/Callback" }
+    },
+    "implementations": {
+      "type": "array",
+      "items": { "$ref": "structure.schema.json#/$defs/Implementation" }
+    },
+
+    "entities": {
+      "type": "array",
+      "items": { "$ref": "data.schema.json#/$defs/Entity" }
+    },
+    "fields": {
+      "type": "array",
+      "items": { "$ref": "data.schema.json#/$defs/Field" }
+    },
+    "entity_relationships": {
+      "type": "array",
+      "items": { "$ref": "data.schema.json#/$defs/EntityRelationship" }
+    },
+
+    "authz_models": {
+      "type": "array",
+      "items": { "$ref": "authz.schema.json#/$defs/AuthzModel" }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "$ref": "authz.schema.json#/$defs/Capability" }
+    },
+    "authz_roles": {
+      "type": "array",
+      "items": { "$ref": "authz.schema.json#/$defs/AuthzRole" }
+    },
+    "role_capabilities": {
+      "type": "array",
+      "items": { "$ref": "authz.schema.json#/$defs/RoleCapability" }
+    },
+    "scope_hierarchies": {
+      "type": "array",
+      "items": { "$ref": "authz.schema.json#/$defs/ScopeHierarchy" }
+    },
+    "role_assignment_rules": {
+      "type": "array",
+      "items": { "$ref": "authz.schema.json#/$defs/RoleAssignmentRule" }
+    },
+    "resource_assignment_kinds": {
+      "type": "array",
+      "items": { "$ref": "authz.schema.json#/$defs/ResourceAssignmentKind" }
+    },
+    "permission_delegations": {
+      "type": "array",
+      "items": { "$ref": "authz.schema.json#/$defs/PermissionDelegation" }
+    },
+
+    "tenancy_models": {
+      "type": "array",
+      "items": { "$ref": "tenancy.schema.json#/$defs/TenancyModel" }
+    },
+    "data_planes": {
+      "type": "array",
+      "items": { "$ref": "tenancy.schema.json#/$defs/DataPlane" }
+    },
+    "ownership_rules": {
+      "type": "array",
+      "items": { "$ref": "tenancy.schema.json#/$defs/OwnershipRule" }
+    },
+
+    "constraints": {
+      "type": "array",
+      "items": { "$ref": "rules.schema.json#/$defs/Constraint" }
+    },
+    "boundary_conditions": {
+      "type": "array",
+      "items": { "$ref": "rules.schema.json#/$defs/BoundaryCondition" }
+    },
+
+    "use_cases": {
+      "type": "array",
+      "items": { "$ref": "behavior.schema.json#/$defs/UseCase" }
+    },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "behavior.schema.json#/$defs/Step" }
+    },
+
+    "commanded_aggregates": {
+      "type": "array",
+      "items": { "$ref": "cqrs.schema.json#/$defs/CommandedAggregate" }
+    },
+    "commands": {
+      "type": "array",
+      "items": { "$ref": "cqrs.schema.json#/$defs/Command" }
+    },
+    "domain_events": {
+      "type": "array",
+      "items": { "$ref": "cqrs.schema.json#/$defs/DomainEvent" }
+    },
+    "message_fields": {
+      "type": "array",
+      "items": { "$ref": "cqrs.schema.json#/$defs/MessageField" }
+    },
+    "command_emissions": {
+      "type": "array",
+      "items": { "$ref": "cqrs.schema.json#/$defs/CommandEmission" }
+    },
+    "event_handlers": {
+      "type": "array",
+      "items": { "$ref": "cqrs.schema.json#/$defs/EventHandler" }
+    },
+    "event_subscriptions": {
+      "type": "array",
+      "items": { "$ref": "cqrs.schema.json#/$defs/EventSubscription" }
+    },
+    "projections": {
+      "type": "array",
+      "items": { "$ref": "cqrs.schema.json#/$defs/Projection" }
+    },
+    "process_managers": {
+      "type": "array",
+      "items": { "$ref": "cqrs.schema.json#/$defs/ProcessManager" }
+    },
+    "command_dispatches": {
+      "type": "array",
+      "items": { "$ref": "cqrs.schema.json#/$defs/CommandDispatch" }
+    },
+
+    "test_cases": {
+      "type": "array",
+      "items": { "$ref": "verification.schema.json#/$defs/TestCase" }
+    }
+  },
+  "required": ["name"]
+}

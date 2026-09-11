@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/common.schema.json",
+  "title": "SpecMaker common definitions",
+  "description": "Shared primitives for the SpecMaker JSON representation. A spec document is a flat, relational encoding of the SpecMaker.DomainModel DSL: every entity is an object in a top-level collection, carries a document-unique `id`, and expresses each DSL `belongs_to(:assoc)` as an `assoc_id` reference to another object's `id`. The implicit `belongs_to(:spec)` on every entity is omitted because the whole document is one Spec.",
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A document-unique identifier for this object. Author-assigned; referenced by *_id fields on other objects. Uniqueness and referential integrity are conventions this schema cannot enforce structurally."
+    },
+    "Ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A reference to the `id` of another object in this document (an encoded `belongs_to` foreign key)."
+    }
+  }
+}

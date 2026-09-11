@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/cqrs.schema.json",
+  "title": "SpecMaker Cqrs aggregate",
+  "description": "Commanded vocabulary: aggregates, messages, and their wiring.",
+  "$defs": {
+    "CommandedAggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "identity_field": { "type": "string" },
+        "identity_prefix": { "type": "string" },
+        "purpose": { "type": "string" },
+        "entity_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "subdomain_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name"]
+    },
+    "Command": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "purpose": { "type": "string" },
+        "routing_identity": { "type": "string" },
+        "commanded_aggregate_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "commanded_aggregate_id"]
+    },
+    "DomainEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "version": { "type": "integer", "default": 1 },
+        "purpose": { "type": "string" },
+        "commanded_aggregate_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "commanded_aggregate_id"]
+    },
+    "MessageField": {
+      "type": "object",
+      "description": "Belongs to a command or a domain event — exactly one of the two.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "type_expression": { "type": "string" },
+        "required": { "type": "boolean", "default": false },
+        "description": { "type": "string" },
+        "command_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "domain_event_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "type_expression"],
+      "oneOf": [
+        { "required": ["command_id"] },
+        { "required": ["domain_event_id"] }
+      ]
+    },
+    "CommandEmission": {
+      "type": "object",
+      "description": "\"Handling this command emits this event.\" Many-to-many between commands and domain events.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "condition": { "type": "string" },
+        "command_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "domain_event_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "command_id", "domain_event_id"]
+    },
+    "EventHandler": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "handler_kind": { "type": "string", "default": "event_handler" },
+        "consistency": { "type": "string", "default": "eventual" },
+        "purpose": { "type": "string" },
+        "module_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name"]
+    },
+    "EventSubscription": {
+      "type": "object",
+      "description": "Subscribes an event handler or a process manager to a domain event — exactly one of the two subscribers.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "notes": { "type": "string" },
+        "domain_event_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "event_handler_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "process_manager_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "domain_event_id"],
+      "oneOf": [
+        { "required": ["event_handler_id"] },
+        { "required": ["process_manager_id"] }
+      ]
+    },
+    "Projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "purpose": { "type": "string" },
+        "entity_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "event_handler_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name"]
+    },
+    "ProcessManager": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "identity_field": { "type": "string" },
+        "purpose": { "type": "string" },
+        "module_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name"]
+    },
+    "CommandDispatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "condition": { "type": "string" },
+        "process_manager_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "command_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "process_manager_id", "command_id"]
+    }
+  }
+}

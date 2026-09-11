@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/data.schema.json",
+  "title": "SpecMaker Data aggregate",
+  "description": "Persisted entities, their fields, and their associations.",
+  "$defs": {
+    "Entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "plural": { "type": "string" },
+        "aggregate_name": { "type": "string" },
+        "table_name": { "type": "string" },
+        "purpose": { "type": "string" },
+        "subdomain_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "data_plane_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name"]
+    },
+    "Field": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "ecto_type": { "type": "string" },
+        "column_type": { "type": "string" },
+        "required": { "type": "boolean", "default": false },
+        "unique": { "type": "boolean", "default": false },
+        "default_value": { "type": "string" },
+        "description": { "type": "string" },
+        "entity_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "ecto_type", "entity_id"]
+    },
+    "EntityRelationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "description": "e.g. has_many, has_one, belongs_to, many_to_many."
+        },
+        "required": { "type": "boolean", "default": false },
+        "cascade_delete": { "type": "boolean", "default": false },
+        "join_through": { "type": "string" },
+        "foreign_key": { "type": "string" },
+        "source_entity_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "target_entity_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "kind", "source_entity_id", "target_entity_id"]
+    }
+  }
+}

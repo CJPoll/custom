@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/specs.schema.json",
+  "title": "SpecMaker Specs aggregate",
+  "description": "The spec root's architectural vocabulary: buckets and subdomains. The Spec entity's own fields live at the root of a spec document (see spec.schema.json), not here.",
+  "$defs": {
+    "Bucket": {
+      "type": "object",
+      "description": "One of the five architecture buckets. Modelled as rows rather than an enum so a spec can declare sub-buckets (e.g. \"Side Effects / HTTP adapters\") without a schema change.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "description": "The architecture bucket this belongs to, e.g. framework, ui_component, side_effect, domain, manager."
+        },
+        "description": { "type": "string" },
+        "parent_bucket_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "kind"]
+    },
+    "Subdomain": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "description": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    }
+  }
+}

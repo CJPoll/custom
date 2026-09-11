@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/structure.schema.json",
+  "title": "SpecMaker Structure aggregate",
+  "description": "Modules, functions, and the contracts between them.",
+  "$defs": {
+    "Module": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "purpose": { "type": "string" },
+        "moduledoc": { "type": "string" },
+        "file_path": { "type": "string" },
+        "bucket_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "subdomain_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name"]
+    },
+    "Function": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "arity": { "type": "integer" },
+        "visibility": {
+          "type": "string",
+          "default": "public",
+          "description": "e.g. public, private."
+        },
+        "purity": {
+          "type": "string",
+          "default": "pure",
+          "description": "e.g. pure, impure."
+        },
+        "purpose": { "type": "string" },
+        "doc": { "type": "string" },
+        "guard": { "type": "string" },
+        "module_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "arity", "module_id"]
+    },
+    "Parameter": {
+      "type": "object",
+      "description": "Belongs to a function or a callback — exactly one of the two.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "type_expression": { "type": "string" },
+        "position": { "type": "integer" },
+        "optional": { "type": "boolean", "default": false },
+        "default_value": { "type": "string" },
+        "description": { "type": "string" },
+        "function_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "callback_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "type_expression", "position"],
+      "oneOf": [
+        { "required": ["function_id"] },
+        { "required": ["callback_id"] }
+      ]
+    },
+    "ReturnValue": {
+      "type": "object",
+      "description": "One row per branch of the return union. Belongs to a function or a callback — exactly one of the two.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "type_expression": { "type": "string" },
+        "kind": { "type": "string", "default": "success" },
+        "position": { "type": "integer", "default": 0 },
+        "description": { "type": "string" },
+        "function_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "callback_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "type_expression"],
+      "oneOf": [
+        { "required": ["function_id"] },
+        { "required": ["callback_id"] }
+      ]
+    },
+    "Contract": {
+      "type": "object",
+      "description": "A behaviour or a protocol.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "description": "e.g. behaviour, protocol."
+        },
+        "purpose": { "type": "string" },
+        "module_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "kind"]
+    },
+    "Callback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "arity": { "type": "integer" },
+        "optional": { "type": "boolean", "default": false },
+        "doc": { "type": "string" },
+        "contract_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "arity", "contract_id"]
+    },
+    "Implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "notes": { "type": "string" },
+        "module_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "contract_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "module_id", "contract_id"]
+    }
+  }
+}

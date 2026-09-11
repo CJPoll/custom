@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/tenancy.schema.json",
+  "title": "SpecMaker Tenancy aggregate",
+  "description": "The coarse blast-radius boundary — which tenant's data is even in play — kept separate from Authz.",
+  "$defs": {
+    "TenancyModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "strategy": {
+          "type": "string",
+          "description": "e.g. shared_tenant_key, separate_planes, none."
+        },
+        "tenant_key_field": { "type": "string" },
+        "node_key_field": { "type": "string" },
+        "description": { "type": "string" },
+        "tenant_root_entity_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "strategy"]
+    },
+    "DataPlane": {
+      "type": "object",
+      "description": "Which partition an entity lives in — e.g. a tenant plane (rows carrying a tenant key) vs a reference plane (global, cross-tenant tables).",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "carries_tenant_key": { "type": "boolean", "default": false },
+        "cross_tenant_references": { "type": "boolean", "default": false },
+        "description": { "type": "string" },
+        "tenancy_model_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "name", "tenancy_model_id"]
+    },
+    "OwnershipRule": {
+      "type": "object",
+      "description": "Who a row belongs to, and what happens when a second tenant claims the same real-world thing.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "owner_field": { "type": "string" },
+        "immutable": { "type": "boolean", "default": true },
+        "on_conflict": { "type": "string", "default": "copy_with_provenance" },
+        "description": { "type": "string" },
+        "tenancy_model_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "entity_id": { "$ref": "common.schema.json#/$defs/Ref" }
+      },
+      "required": ["id", "owner_field", "tenancy_model_id", "entity_id"]
+    }
+  }
+}
