@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Refresh the local walt_ui dev stack after a merge to main:
+#   git pull (ff-only) in ~/dev/walt_ui, then `rebuild app` and run migrations.
+# Safe to run repeatedly; serialized by a lock so overlapping triggers queue.
+set -uo pipefail
+LOCK=/tmp/refresh-walt-dev.lock
+exec 9>"$LOCK"; flock 9
+
+cd ~/dev/walt_ui || exit 2
+before=$(git rev-parse HEAD)
+# wt-preflight also pulls this checkout; two concurrent pulls can race
+# ("Cannot fast-forward to multiple branches"), so retry once after a pause.
+if ! git pull --ff-only -q 2>/tmp/refresh-walt-dev.pull.err; then
+  sleep 20
+  if ! git pull --ff-only -q 2>/tmp/refresh-walt-dev.pull.err; then
+    echo "REFRESH FAILED: git pull --ff-only refused ($(head -c 200 /tmp/refresh-walt-dev.pull.err))"; exit 3
+  fi
+fi
+after=$(git rev-parse HEAD)
+echo "pulled $before -> $after"
+
+cd backend || exit 2
+source bin/_compose-env.sh
+export PATH="$HOME/dev/custom/scripts:$PATH"
+if ! rebuild app >/tmp/refresh-walt-dev.rebuild.log 2>&1; then
+  echo "REFRESH FAILED: rebuild app (see /tmp/refresh-walt-dev.rebuild.log tail: $(tail -3 /tmp/refresh-walt-dev.rebuild.log | tr '\n' ' '))"; exit 4
+fi
+until docker compose exec -T db pg_isready -q -U postgres 2>/dev/null; do sleep 2; done
+# Wait for the rebuilt app to finish its boot compile BEFORE migrating: a
+# `compose run` compiling against the same _build while the server boots
+# races phoenix-colocated asset cleanup (File.rm! ... colocated.css). Then
+# retry once, since the race is transient.
+until curl -sf localhost:4000/api/health-check >/dev/null 2>&1; do sleep 3; done
+migrate() { docker compose run --rm -T app mix ecto.migrate >/tmp/refresh-walt-dev.migrate.log 2>&1; }
+if ! migrate; then sleep 10; if ! migrate; then
+  echo "REFRESH FAILED: ecto.migrate (tail: $(grep -v 'level=warning' /tmp/refresh-walt-dev.migrate.log | tail -3 | tr '\n' ' '))"; exit 5
+fi; fi
+migrated=$(grep -c 'Migrating\|== Migrated' /tmp/refresh-walt-dev.migrate.log)
+until curl -sf localhost:4000/api/health-check >/dev/null 2>&1; do sleep 3; done
+echo "REFRESH OK: dev at $(git -C ~/dev/walt_ui log -1 --format='%h %s' | cut -c1-70); migrations applied: $migrated; app healthy"

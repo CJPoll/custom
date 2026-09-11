@@ -1,0 +1,46 @@
+#!/bin/bash
+# Dispatch preflight for the phase2-backlog lane.
+#   usage: dispatch-preflight.sh <branch-name>
+# Refuses to leave a worktree branched off a STALE local main.
+# Fleet rule (Vanta-lane incident, 2026-08-27): `wt create` branches from the LOCAL
+# main, which can be two merges behind origin. Verified, not assumed.
+set -uo pipefail
+REPO=/home/cjpoll/dev/walt_ui
+BRANCH="${1:?usage: dispatch-preflight.sh <branch-name>}"
+
+echo "== 1. refresh local main =="
+git -C "$REPO" pull --ff-only || { echo "FAIL: pull --ff-only refused (local main diverged?) — resolve before dispatching"; exit 1; }
+git -C "$REPO" fetch origin --quiet
+ORIGIN=$(git -C "$REPO" rev-parse origin/main)
+LOCAL=$(git -C "$REPO" rev-parse main)
+echo "   origin/main $ORIGIN"
+echo "   local  main $LOCAL"
+[ "$ORIGIN" = "$LOCAL" ] || { echo "FAIL: local main != origin/main after ff-only pull"; exit 1; }
+
+echo "== 2. create worktree =="
+cd "$REPO" || exit 2  # wt defaults --parent to the CALLER's current branch; never run it from another worktree
+"$HOME/dev/custom/scripts/wt" create "$BRANCH" --parent main || { echo "FAIL: wt create"; exit 1; }
+WT="$HOME/.local/worktrees/walt_ui/$BRANCH"
+[ -d "$WT" ] || { echo "FAIL: worktree not at $WT"; exit 1; }
+
+echo "== 3. VERIFY the new branch descends from origin/main =="
+git -C "$REPO" fetch origin --quiet
+if git -C "$WT" merge-base --is-ancestor origin/main HEAD; then
+  echo "   OK: origin/main is an ancestor of $BRANCH"
+else
+  echo "   STALE BASE DETECTED — repairing"
+  OWN=$(git -C "$WT" rev-list --count origin/main..HEAD 2>/dev/null || echo "?")
+  echo "   own commits on branch: $OWN"
+  if [ "$OWN" = "0" ]; then
+    git -C "$WT" reset --hard origin/main || { echo "FAIL: reset"; exit 1; }
+    echo "   repaired by reset --hard origin/main (branch had no own commits)"
+  else
+    echo "   FAIL: branch has $OWN own commits — do NOT reset. Merge main forward instead."; exit 1
+  fi
+  git -C "$WT" merge-base --is-ancestor origin/main HEAD || { echo "FAIL: still not descended"; exit 1; }
+fi
+
+echo "== 4. report =="
+echo "   worktree: $WT"
+echo "   HEAD:     $(git -C "$WT" log --oneline -1)"
+echo "PREFLIGHT OK"
