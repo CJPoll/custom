@@ -17,6 +17,25 @@
 #      REVISION:  ---
 #===============================================================================
 
+# Undo any leaked `bundle exec` environment inherited from a parent process
+# (e.g. a tmux server that was first launched from inside `bundle exec`).
+# Bundler saves the pre-exec values in BUNDLER_ORIG_* so it can restore them;
+# if that restore never ran, RUBYOPT points every `ruby` at a bundler that may
+# not match the asdf-selected ruby, crashing new shells on startup.
+if [[ -n "$BUNDLE_GEMFILE" || "$RUBYOPT" == *bundler/setup* ]]; then
+  for __v in RUBYOPT RUBYLIB GEM_HOME GEM_PATH BUNDLE_GEMFILE BUNDLE_BIN_PATH \
+             BUNDLER_SETUP BUNDLER_VERSION RB_USER_INSTALL; do
+    __orig="BUNDLER_ORIG_${__v}"
+    if [[ ${(P)+__orig} -eq 1 && "${(P)__orig}" != "BUNDLER_ENVIRONMENT_PRESERVER_INTENTIONALLY_NIL" ]]; then
+      export "$__v"="${(P)__orig}"
+    else
+      unset "$__v"
+    fi
+    unset "$__orig"
+  done
+  unset __v __orig
+fi
+
 # Path to your oh-my-zsh installation.
 export ZSH=$HOME/.oh-my-zsh;
 
