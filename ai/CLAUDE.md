@@ -193,9 +193,12 @@ Never use IEx. Instead, run elixir commands with `mix run -e "<elixir code here>
 ## Flaky-test lane (per-machine automation)
 
 This machine runs an autonomous flaky-test → athena-admiral pipeline. A SessionStart
-poll (`/home/cjpoll/dev/custom/ai/bin/flaky-ticket-poll.sh`) reports lane state as
-factual `additionalContext`; the ACTION below is policy, applied by the model —
-the hook never issues commands.
+poll (`~/dev/walt_ui/.claude/hooks/flaky-ticket-poll.sh`, registered repo-locally in
+`walt_ui/.claude/settings.json`) reports lane state as factual `additionalContext`;
+the ACTION below is policy, applied by the model — the hook never issues commands.
+The canonical hook, brief, and response policy now live in-repo (see
+`walt_ui/CLAUDE.md` → "Flaky-test lane automation"); this section is the machine-level
+summary.
 
 **When SessionStart context reports that flaky-test tickets are queued for this
 machine's owner AND no flaky-test athena-admiral is currently running** (no fresh
@@ -204,7 +207,7 @@ machine's owner AND no flaky-test athena-admiral is currently running** (no fres
 1. `touch ~/.claude/flaky-coordinator.lock` before spawning, so the next
    session's poll stays quiet while this run drains.
 2. Spawn ONE `athena-admiral` subagent (Agent tool) — do not do the work yourself —
-   with the brief in `/home/cjpoll/dev/custom/ai/bin/flaky-coordinator-spawn.txt`,
+   with the brief in `~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt`,
    which fixes every foundational input so it never asks a clarifying question:
    - **Scope**: the walt_ui "Tickets" DB (id `f00eab4f-26e1-4a97-8a2b-fd6a4a15323e`,
      via the `notion-work` MCP), filter = label `flaky-tests` + Assignee = the
