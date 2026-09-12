@@ -19,6 +19,28 @@ If the path doesn't exist or contains no `.ex`/`.exs` files, HALT and suggest va
 
 ---
 
+## Phase 0: Ground in the domain model (if one exists)
+
+Before cataloging code, load the project's *intended* domain model so the
+analysis has something to measure the code against. Invoke
+**`athena:domain-grounding`** — it reads the project's athena:system-spec model
+(`ai-artifacts/domain/<app>/*.spec.json`, when present): the intended entities,
+relationships, constraints, the access-control model, and the **bucket** each
+module was specced into.
+
+Use it two ways:
+
+- **Bucket classification (Phase 1 Module Classification):** prefer the bucket
+  the model assigns a module; infer a bucket only where the model is silent.
+- **Drift detection:** where the code's actual structure, dependencies, or
+  authorization enforcement diverges from the model, that gap is a finding —
+  record it with an ID, severity, and confidence like any other.
+
+If no model exists, note its absence in the report header and analyze from the
+code alone.
+
+---
+
 ## Phase 1: Code Discovery
 
 Discover and catalog all Elixir modules within the specified code area.
@@ -38,13 +60,22 @@ For each module found:
 
 ### Module Classification
 
-Classify each module into one of:
-- **OTP Processes**: GenServers, Agents, Tasks, Supervisors
-- **Phoenix Contexts**: Business logic boundary modules
-- **Schemas**: Ecto schemas and data structures
-- **Controllers**: Phoenix controllers and LiveViews
-- **Utilities**: Helper modules and shared functions
-- **Interfaces**: Protocol implementations and API modules
+Classify every module by its **architectural bucket** — the 5-bucket
+architecture (see your architecture doctrine). Assign each module exactly one
+bucket; this is the categorization the rest of the report is built on:
+
+- **Framework** — controllers, routers, middleware, LiveViews: the entry-point
+  layer receiving external requests.
+- **UI Components** — views, templates, presentation components.
+- **Side Effects** — adapters/repositories: databases, external APIs, the file
+  system, message queues, other OTP processes.
+- **Domain** — pure, side-effect-free business logic.
+- **Managers** — orchestration between Side Effects and Domain to fulfil a use
+  case.
+
+Where a module's bucket is ambiguous or it spans two buckets, record it with
+lowered confidence and say why — a module that straddles buckets is itself a
+finding.
 
 ### Dependency Extraction
 
@@ -81,10 +112,14 @@ Build the dependency graph and analyze structural relationships. Run these analy
 - Detect shared state patterns and potential bottlenecks
 - Validate OTP design principle compliance
 
-### Phoenix Context Analysis (if Phoenix detected)
+### Context Analysis (if the app uses contexts)
+
+Contexts are a general Elixir boundary pattern, not Phoenix-specific — analyze
+them wherever the app defines business-logic boundary modules.
 
 - Map context boundaries and their public APIs
-- Analyze controller-to-context dependency patterns
+- Analyze caller-to-context dependency patterns (controllers, LiveViews, other
+  contexts, background jobs)
 - Validate context encapsulation and boundary integrity
 - Identify cross-context dependencies and boundary violations
 - Assess schema organization and Ecto relationship patterns
@@ -148,10 +183,13 @@ Map control flow patterns and data processing paths.
 - **GenServer design**: state organization, callback implementations, timeout/hibernation usage
 - **"Let it crash"**: evaluate failure handling philosophy implementation
 
-### Phoenix Patterns (if Phoenix detected)
+### Context Patterns (if the app uses contexts)
 
 - **Context design**: boundary definitions, encapsulation quality, API consistency
 - **Cross-context communication**: inter-context patterns and violations
+
+### Phoenix Patterns (if Phoenix detected)
+
 - **Controller design**: action organization, Plug pipeline composition, response handling
 
 ### Functional Programming Patterns
@@ -221,7 +259,7 @@ A two-column table, not a list:
 |---|---|
 | **Area** | `lib/my_app/accounts` (`MyApp.Accounts.*`) |
 | **Depth / Focus** | moderate / database, phoenix |
-| **Modules** | 23 (7 OTP · 4 contexts · 5 schemas · 3 controllers · 4 utility) |
+| **Modules** | 23 (Framework 3 · UI 1 · Side Effects 5 · Domain 8 · Managers 6) |
 | **Findings** | 2 CRIT · 5 HIGH · 9 MED · 6 LOW |
 | **Analyzed** | YYYY-MM-DD · duration |
 ```
@@ -266,9 +304,8 @@ Three blocks, no paragraphs.
 | Max dependency depth | n | — |
 
 ### Layer map
-(Mermaid `graph TD`: nodes clustered by bucket/layer, colored by module
-classification, direction-violating edges drawn red. Split into sub-graphs
-above ~25 nodes.)
+(Mermaid `graph TD`: nodes clustered and colored by bucket, direction-violating
+edges drawn red. Split into sub-graphs above ~25 nodes.)
 
 ### Hotspots
 | Module | Fan-in | Fan-out | Bucket | Why it matters |
@@ -367,7 +404,7 @@ The single source of truth for every finding. Earlier sections link here.
 
 Each in its own `<details>` block:
 
-- Module catalog — `Module | Classification | Bucket | Public fns | OTP behaviour`
+- Module catalog — `Module | Bucket | Public fns | OTP behaviour`
 - Dependency matrix
 - Quantitative metrics dump
 - Representative code examples not already folded under a finding
@@ -375,7 +412,7 @@ Each in its own `<details>` block:
 ### Diagram Guidelines
 
 - Break large dependency graphs into focused sub-graphs (~25 nodes max each)
-- Color-code consistently: OTP processes, Phoenix contexts, schemas, controllers, utilities; draw rule-violating edges red
+- Color-code consistently by bucket: Framework, UI Components, Side Effects, Domain, Managers; draw rule-violating edges red
 - Annotate supervision trees with restart strategies and child types
 - Focus sequence diagrams on the flows in the Flow index; one diagram per flow
 - Every diagram is preceded by the table row that indexes it
