@@ -150,6 +150,11 @@ set tabpagemax=30
 set tw=80 						              " Text Width = 80 characters
 set undofile
 set undodir=/home/cjpoll/.vimundo/
+
+" Disable ShaDa. Many concurrent nvim instances (worktree tmux sessions) share a
+" single main.shada and corrupt it on abrupt exit, causing E576 on startup.
+" Persistent undo (above) is a separate feature and is unaffected.
+set shadafile=NONE
 set wildmenu					              " Autocomplete done right
 set wildmode=full			              " Autocomplete done right
 syntax on						                " Syntax highlighting
