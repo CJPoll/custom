@@ -169,3 +169,13 @@ Three scripts for tracking Bluetooth disconnects and their cause. They read
   `--restore` to undo), `bt-setup status` shows what is loaded and running.
   `--dry-run` prints the commands instead.
 
+### desktop
+
+Mounts the desktop's (`home-office-linux`, ssh alias `desktop`) home directory
+at `~/mnt/desktop` over sshfs on demand — `desktop mount` / `desktop unmount`
+— and `desktop open <path>` mounts if needed and opens the file in Firefox.
+The mount sits under `$HOME` so the flatpak Firefox sandbox can read it — but
+only a Firefox started *after* the mount: a sandbox snapshots the mount table
+at launch. `desktop status`/`mount`/`open` warn when the running Firefox
+predates the mount; `--restart-firefox` restarts it.
+Requires `net-fs/sshfs`.

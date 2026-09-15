@@ -1,0 +1,25 @@
+#compdef desktop
+
+# Completion function for desktop
+
+_desktop() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    _arguments -C \
+        '--force[Lazy unmount even if files are open]' \
+        '--restart-firefox[Restart a Firefox that predates the mount]' \
+        '(- *)'{-h,--help}'[Show help message]' \
+        '1:command:((mount\:"Mount the desktop home over sshfs" unmount\:"Unmount it" status\:"Show mount and host state" open\:"Open a desktop file in Firefox"))' \
+        '*::arg:->args'
+
+    case $state in
+        args)
+            if [[ ${line[1]} == open ]]; then
+                _files -W "${DESKTOP_MOUNT_DIR:-$HOME/mnt/desktop}"
+            fi
+            ;;
+    esac
+}
+
+_desktop "$@"

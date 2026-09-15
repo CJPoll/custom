@@ -1,0 +1,242 @@
+#!/bin/bash
+# desktop - mount the desktop's home directory here over sshfs when you want
+# it, unmount it when you don't, and open its files in Firefox.
+#
+# Relies on the "desktop" alias in ~/.ssh/config (host, port 4444, user, key
+# auth) and on net-fs/sshfs. The mount lives under $HOME so the flatpak
+# Firefox sandbox can read it like any other folder.
+
+set -euo pipefail
+
+DEFAULT_HOST=desktop
+DEFAULT_REMOTE_DIR=/home/cjpoll
+DEFAULT_MOUNT_DIR="$HOME/mnt/desktop"
+SSHFS_OPTS=reconnect,idmap=user,follow_symlinks,ServerAliveInterval=15,ServerAliveCountMax=4
+
+HOST=${DESKTOP_HOST:-$DEFAULT_HOST}
+REMOTE_DIR=${DESKTOP_REMOTE_DIR:-$DEFAULT_REMOTE_DIR}
+MOUNT_DIR=${DESKTOP_MOUNT_DIR:-$DEFAULT_MOUNT_DIR}
+
+usage() {
+    cat << USAGE
+Usage: desktop <command> [options]
+
+Commands:
+  mount               Mount $HOST:$REMOTE_DIR at $MOUNT_DIR
+  unmount, umount     Unmount it (--force for a lazy unmount if something
+                      still has a file open)
+  status              Show whether it is mounted and whether the host answers
+  open <path>         Mount if needed, then open <path> in Firefox. <path> is
+                      relative to the desktop's home unless it starts with /.
+
+Options:
+  --force             With unmount: lazy unmount (fusermount -z)
+  --restart-firefox   With mount/open: restart a running flatpak Firefox that
+                      was started before the mount and so cannot see it
+  -h, --help          Show this help
+
+Environment:
+  DESKTOP_HOST        ssh host alias (default: $DEFAULT_HOST)
+  DESKTOP_REMOTE_DIR  directory to mount (default: $DEFAULT_REMOTE_DIR)
+  DESKTOP_MOUNT_DIR   local mount point (default: $DEFAULT_MOUNT_DIR)
+
+Exit codes:
+  0  success
+  1  usage error or missing tool
+  2  mount/unmount failed
+  3  host unreachable
+USAGE
+}
+
+die() {
+    echo "desktop: $1" >&2
+    exit "${2:-1}"
+}
+
+is_mounted() {
+    mountpoint -q "$MOUNT_DIR"
+}
+
+require_tool() {
+    command -v "$1" > /dev/null 2>&1 || die "$1 not found${2:+ ($2)}"
+}
+
+host_reachable() {
+    ssh -o BatchMode=yes -o ConnectTimeout=6 "$HOST" true 2> /dev/null
+}
+
+cmd_mount() {
+    require_tool sshfs "install with: sudo emerge --ask net-fs/sshfs"
+    if is_mounted; then
+        echo "already mounted at $MOUNT_DIR"
+        return 0
+    fi
+    host_reachable || die "cannot reach $HOST over ssh (check network / ~/.ssh/config)" 3
+    mkdir -p "$MOUNT_DIR"
+    if [ -n "$(ls -A "$MOUNT_DIR")" ]; then
+        die "$MOUNT_DIR is not empty and not a mount; refusing to mount over it" 2
+    fi
+    sshfs "$HOST:$REMOTE_DIR" "$MOUNT_DIR" -o "$SSHFS_OPTS" || die "sshfs failed" 2
+    echo "mounted $HOST:$REMOTE_DIR at $MOUNT_DIR"
+    reconcile_firefox "$RESTART_FIREFOX"
+}
+
+cmd_unmount() {
+    local force=$1
+    if ! is_mounted; then
+        echo "not mounted ($MOUNT_DIR)"
+        return 0
+    fi
+    local -a args=(-u)
+    [ "$force" = true ] && args=(-u -z)
+    if fusermount3 "${args[@]}" "$MOUNT_DIR" 2> /dev/null || fusermount "${args[@]}" "$MOUNT_DIR" 2> /dev/null; then
+        echo "unmounted $MOUNT_DIR"
+    else
+        die "unmount failed; something may still have a file open (try --force)" 2
+    fi
+}
+
+cmd_status() {
+    if is_mounted; then
+        echo "mounted:   $HOST:$REMOTE_DIR at $MOUNT_DIR"
+        local entries
+        entries=$(timeout 5 ls "$MOUNT_DIR" 2> /dev/null | wc -l) || entries="?"
+        echo "listing:   $entries entries in $MOUNT_DIR"
+        local pid
+        pid=$(firefox_pid) || true
+        if [ -n "$pid" ]; then
+            if firefox_sees_mount "$pid"; then echo "firefox:   running, sees the mount"
+            else echo "firefox:   running since before the mount — cannot see it (restart it, or --restart-firefox)"; fi
+        fi
+    else
+        echo "mounted:   no ($MOUNT_DIR)"
+    fi
+    if host_reachable; then
+        echo "host:      $HOST reachable"
+    else
+        echo "host:      $HOST NOT reachable"
+    fi
+}
+
+# A flatpak sandbox takes its view of the filesystem when it launches; a mount
+# made afterwards is invisible inside it (the file dialog then reports the
+# directory as unreadable). Detect that case for the flatpak Firefox.
+firefox_pid() {
+    pgrep -o -f '/app/lib/firefox/firefox' 2> /dev/null | head -1
+}
+
+firefox_sees_mount() {
+    local pid=$1
+    grep -qF " $MOUNT_DIR " "/proc/$pid/mountinfo" 2> /dev/null
+}
+
+# Warns, or restarts Firefox when asked, if a running Firefox predates the mount.
+reconcile_firefox() {
+    local restart=$1 pid
+    pid=$(firefox_pid) || true
+    [ -n "$pid" ] || return 0
+    firefox_sees_mount "$pid" && return 0
+    if [ "$restart" = true ]; then
+        echo "restarting Firefox so it can see $MOUNT_DIR"
+        flatpak kill org.mozilla.firefox 2> /dev/null || true
+        local i
+        for i in $(seq 1 50); do pgrep -f '/app/lib/firefox/firefox' > /dev/null || break; sleep 0.2; done
+        flatpak run org.mozilla.firefox > /dev/null 2>&1 < /dev/null &
+        disown
+        sleep 2
+    else
+        cat >&2 << WARN
+desktop: Firefox (pid $pid) was started before $MOUNT_DIR was mounted and
+         cannot see it. Quit and reopen Firefox, or re-run with --restart-firefox.
+WARN
+    fi
+}
+
+open_in_firefox() {
+    local url=$1
+    if flatpak info org.mozilla.firefox > /dev/null 2>&1; then
+        flatpak run org.mozilla.firefox "$url" > /dev/null 2>&1 &
+    elif command -v firefox > /dev/null 2>&1; then
+        firefox "$url" > /dev/null 2>&1 &
+    else
+        xdg-open "$url" > /dev/null 2>&1 &
+    fi
+    disown
+}
+
+cmd_open() {
+    local path=$1 local_path
+    [ -n "$path" ] || die "open needs a <path>"
+    is_mounted || cmd_mount
+    case "$path" in
+        /*)
+            case "$path" in
+                "$REMOTE_DIR"/*) local_path="$MOUNT_DIR${path#"$REMOTE_DIR"}" ;;
+                *) die "$path is outside the mounted directory $REMOTE_DIR" ;;
+            esac
+            ;;
+        *)
+            local_path="$MOUNT_DIR/$path"
+            ;;
+    esac
+    [ -e "$local_path" ] || die "no such file on the desktop: $path"
+    reconcile_firefox "$RESTART_FIREFOX"
+    open_in_firefox "file://$local_path"
+    echo "opening $local_path"
+}
+
+main() {
+    local command="" force=false
+    RESTART_FIREFOX=false
+    local -a rest=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force)
+                force=true
+                ;;
+            --restart-firefox)
+                RESTART_FIREFOX=true
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            mount|unmount|umount|status|open)
+                [ -z "$command" ] || die "only one command may be given"
+                command=$1
+                ;;
+            -*)
+                usage >&2
+                die "unknown option: $1"
+                ;;
+            *)
+                rest+=("$1")
+                ;;
+        esac
+        shift
+    done
+
+    [ -n "$command" ] || { usage >&2; die "a command is required"; }
+
+    case "$command" in
+        mount)
+            [ ${#rest[@]} -eq 0 ] || die "mount takes no arguments: ${rest[*]}"
+            cmd_mount
+            ;;
+        unmount|umount)
+            [ ${#rest[@]} -eq 0 ] || die "unmount takes no arguments: ${rest[*]}"
+            cmd_unmount "$force"
+            ;;
+        status)
+            [ ${#rest[@]} -eq 0 ] || die "status takes no arguments: ${rest[*]}"
+            cmd_status
+            ;;
+        open)
+            [ ${#rest[@]} -eq 1 ] || die "open takes exactly one <path>"
+            cmd_open "${rest[0]}"
+            ;;
+    esac
+}
+
+main "$@"
