@@ -1,0 +1,351 @@
+#!/bin/bash
+# bt-setup - install the Bluetooth diagnostics pieces that need root, switch
+# the Intel AX210 Bluetooth firmware between known builds, and report status.
+#
+# This is the user-invoked front end for the manual steps documented in
+# system-files/CLAUDE.md. It shells out to sudo only when the target location
+# is not writable, and --dry-run prints every command instead of running it.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SYSTEM_FILES=$(cd "$SCRIPT_DIR/../system-files" && pwd)
+
+FIRMWARE_DIR=${BT_FIRMWARE_DIR:-/lib/firmware/intel}
+FIRMWARE_STEM=ibt-0041-0041
+FIRMWARE_RAW_URL=https://gitlab.com/kernel-firmware/linux-firmware/-/raw
+KERN_LOG=${BT_KERN_LOG:-/var/log/kern.log}
+SERVICE_NAME=btmon
+CAPTURE_BIN=/usr/local/sbin/bt-hci-capture
+DRY_RUN=false
+TMP_DIR=""
+
+cleanup() {
+    [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"
+}
+trap cleanup EXIT
+
+# Intel "Solar" (AX210) Bluetooth firmware builds and the linux-firmware
+# commit that introduced each. Newest first.
+KNOWN_BUILDS=(
+    "82122  87972e13  2026-02-02"
+    "82053  40c52dd2  2025-07-13"
+    "82008  e2d7a179  2025-05-29"
+    "81864  127ac452  2025-01-10"
+    "81755  bf24e495  2024-09-12"
+)
+
+usage() {
+    cat << USAGE
+Usage: bt-setup <command> [options]
+
+Commands:
+  service               Install (or update) and start the btmon HCI capture
+                        service from system-files/. Safe to re-run.
+  firmware <build>      Switch the AX210 Bluetooth firmware ($FIRMWARE_STEM) to
+                        Intel build <build>. The first switch backs up the
+                        distro files as *.dist. Takes effect after a full
+                        power-off (a warm reboot may keep the old firmware).
+  firmware --restore    Put the distro firmware back from the *.dist backup.
+  firmware --list       List the builds this script knows how to fetch.
+  status                Show the capture service, bt-watch, loaded vs
+                        installed firmware, and crashes in the last 24h.
+
+Options:
+  --dry-run             Print the commands instead of running them
+  -h, --help            Show this help
+
+Environment:
+  BT_FIRMWARE_DIR       Firmware directory (default: /lib/firmware/intel)
+  BT_KERN_LOG           Kernel log used by status (default: /var/log/kern.log)
+
+Exit codes:
+  0  success
+  1  usage error or missing tool
+  2  command failed
+USAGE
+}
+
+die() {
+    echo "bt-setup: $1" >&2
+    exit "${2:-1}"
+}
+
+require_tool() {
+    command -v "$1" > /dev/null 2>&1 || die "required tool not found: $1"
+}
+
+# Runs a command, prefixing sudo when the given path is not writable by us.
+# With --dry-run, prints it instead.
+run_as_owner_of() {
+    local path=$1
+    shift
+    local -a cmd=("$@")
+    if [ ! -w "$path" ]; then
+        cmd=(sudo "${cmd[@]}")
+    fi
+    if [ "$DRY_RUN" = true ]; then
+        printf '  %q' "${cmd[@]}"
+        printf '\n'
+    else
+        "${cmd[@]}"
+    fi
+}
+
+# ---------------------------------------------------------------- service --
+
+cmd_service() {
+    local f
+    for f in bt-hci-capture btmon.initd btmon.confd; do
+        [ -e "$SYSTEM_FILES/$f" ] || die "missing $SYSTEM_FILES/$f"
+    done
+    command -v btmon > /dev/null 2>&1 || die "btmon not found (net-wireless/bluez)"
+
+    echo "Installing the $SERVICE_NAME capture service"
+    run_as_owner_of /usr/local/sbin install -m 755 "$SYSTEM_FILES/bt-hci-capture" "$CAPTURE_BIN"
+    run_as_owner_of /etc/init.d install -m 755 "$SYSTEM_FILES/btmon.initd" "/etc/init.d/$SERVICE_NAME"
+    if [ -e "/etc/conf.d/$SERVICE_NAME" ]; then
+        echo "  keeping existing /etc/conf.d/$SERVICE_NAME"
+    else
+        run_as_owner_of /etc/conf.d install -m 644 "$SYSTEM_FILES/btmon.confd" "/etc/conf.d/$SERVICE_NAME"
+    fi
+    run_as_owner_of /etc/runlevels/default rc-update add "$SERVICE_NAME" default
+    if [ "$DRY_RUN" = false ] && rc-service "$SERVICE_NAME" status > /dev/null 2>&1; then
+        run_as_owner_of /run rc-service "$SERVICE_NAME" restart
+    else
+        run_as_owner_of /run rc-service "$SERVICE_NAME" start
+    fi
+    [ "$DRY_RUN" = true ] || echo "Done. Captures go to /var/log/btmon/; read them with bt-trace."
+}
+
+# --------------------------------------------------------------- firmware --
+
+build_commit() {
+    local entry
+    for entry in "${KNOWN_BUILDS[@]}"; do
+        set -- $entry
+        if [ "$1" = "$BUILD_WANTED" ]; then
+            printf '%s' "$2"
+            return 0
+        fi
+    done
+    return 1
+}
+
+firmware_list() {
+    local entry installed loaded
+    installed=$(firmware_installed_build)
+    loaded=$(firmware_loaded_build)
+    printf '%-7s %-9s %-11s %s\n' build commit released ''
+    for entry in "${KNOWN_BUILDS[@]}"; do
+        set -- $entry
+        printf '%-7s %-9s %-11s %s%s\n' "$1" "$2" "$3" \
+            "$([ "$1" = "$installed" ] && printf 'installed ')" \
+            "$([ "$1" = "$loaded" ] && printf 'loaded')"
+    done
+}
+
+# Build number recorded by the last `firmware <build>`; "dist" when the
+# distro files are in place; "?" when there is no record.
+firmware_installed_build() {
+    local marker=$FIRMWARE_DIR/$FIRMWARE_STEM.build
+    if [ -r "$marker" ]; then
+        cat "$marker"
+    elif [ -e "$FIRMWARE_DIR/$FIRMWARE_STEM.sfi" ]; then
+        printf 'dist'
+    else
+        printf '?'
+    fi
+}
+
+# Build number the controller booted with, from the kernel log.
+firmware_loaded_build() {
+    grep -E 'Bluetooth: hci0: Firmware timestamp' "$KERN_LOG" 2>/dev/null \
+        | tail -n 1 | grep -oE 'build [0-9]+' | awk '{print $2}'
+}
+
+firmware_backup_dist() {
+    local ext
+    for ext in sfi ddc; do
+        local src=$FIRMWARE_DIR/$FIRMWARE_STEM.$ext
+        local dst=$src.dist
+        [ -e "$src" ] || die "no $src to back up"
+        if [ -e "$dst" ]; then
+            echo "  backup $dst already exists; keeping it"
+        else
+            run_as_owner_of "$FIRMWARE_DIR" cp -p "$src" "$dst"
+        fi
+    done
+}
+
+firmware_switch() {
+    local build=$1 commit ext
+    BUILD_WANTED=$build
+    commit=$(build_commit) || die "unknown build $build; see: bt-setup firmware --list"
+    require_tool curl
+
+    TMP_DIR=$(mktemp -d)
+
+    echo "Fetching $FIRMWARE_STEM build $build (linux-firmware $commit)"
+    for ext in sfi ddc; do
+        local url=$FIRMWARE_RAW_URL/$commit/intel/$FIRMWARE_STEM.$ext
+        if [ "$DRY_RUN" = true ]; then
+            printf '  curl -fsSL -o %q %q\n' "$TMP_DIR/$FIRMWARE_STEM.$ext" "$url"
+            continue
+        fi
+        curl -fsSL -o "$TMP_DIR/$FIRMWARE_STEM.$ext" "$url" || die "download failed: $url" 2
+        [ -s "$TMP_DIR/$FIRMWARE_STEM.$ext" ] || die "downloaded an empty $FIRMWARE_STEM.$ext" 2
+    done
+    if [ "$DRY_RUN" = false ]; then
+        # A real .sfi is hundreds of KB; anything tiny is an error page.
+        local size
+        size=$(stat -c %s "$TMP_DIR/$FIRMWARE_STEM.sfi")
+        [ "$size" -gt 100000 ] || die "$FIRMWARE_STEM.sfi is only $size bytes; refusing to install it" 2
+    fi
+
+    echo "Backing up the distro firmware"
+    firmware_backup_dist
+
+    echo "Installing build $build into $FIRMWARE_DIR"
+    for ext in sfi ddc; do
+        run_as_owner_of "$FIRMWARE_DIR" install -m 644 "$TMP_DIR/$FIRMWARE_STEM.$ext" "$FIRMWARE_DIR/$FIRMWARE_STEM.$ext"
+    done
+    firmware_write_marker "$build"
+
+    [ "$DRY_RUN" = true ] || cat << DONE
+Done. The controller only loads firmware when it powers up, so shut down
+fully (not a warm reboot), start again, then confirm with: bt-setup status
+DONE
+}
+
+firmware_restore() {
+    local ext
+    for ext in sfi ddc; do
+        [ -e "$FIRMWARE_DIR/$FIRMWARE_STEM.$ext.dist" ] || die "no backup at $FIRMWARE_DIR/$FIRMWARE_STEM.$ext.dist"
+    done
+    echo "Restoring the distro firmware in $FIRMWARE_DIR"
+    for ext in sfi ddc; do
+        run_as_owner_of "$FIRMWARE_DIR" cp -p "$FIRMWARE_DIR/$FIRMWARE_STEM.$ext.dist" "$FIRMWARE_DIR/$FIRMWARE_STEM.$ext"
+    done
+    run_as_owner_of "$FIRMWARE_DIR" rm -f "$FIRMWARE_DIR/$FIRMWARE_STEM.build"
+    [ "$DRY_RUN" = true ] || echo "Done. Takes effect after a full power-off; confirm with: bt-setup status"
+}
+
+firmware_write_marker() {
+    local marker=$FIRMWARE_DIR/$FIRMWARE_STEM.build
+    if [ "$DRY_RUN" = true ]; then
+        printf '  echo %q > %q\n' "$1" "$marker"
+    elif [ -w "$FIRMWARE_DIR" ]; then
+        printf '%s\n' "$1" > "$marker"
+    else
+        printf '%s\n' "$1" | sudo tee "$marker" > /dev/null
+    fi
+}
+
+cmd_firmware() {
+    case "${1:-}" in
+        "")
+            usage >&2
+            die "firmware needs a <build>, --restore or --list"
+            ;;
+        --list)
+            firmware_list
+            ;;
+        --restore)
+            firmware_restore
+            ;;
+        -*)
+            die "unknown firmware option: $1"
+            ;;
+        *)
+            [[ $1 =~ ^[0-9]+$ ]] || die "build must be a number, e.g. 82053"
+            firmware_switch "$1"
+            ;;
+    esac
+}
+
+# ----------------------------------------------------------------- status --
+
+cmd_status() {
+    local loaded installed crashes
+
+    printf '%-22s' "capture service:"
+    if [ -e "/etc/init.d/$SERVICE_NAME" ]; then
+        rc-service "$SERVICE_NAME" status 2>&1 | sed -E 's/^ *\* *//' | head -n 1
+    else
+        echo "not installed (bt-setup service)"
+    fi
+
+    printf '%-22s' "captures:"
+    if [ -d /var/log/btmon ] && [ -r /var/log/btmon ]; then
+        echo "$(ls /var/log/btmon/hci-*.log 2>/dev/null | wc -l) files, $(du -sh /var/log/btmon 2>/dev/null | cut -f1)"
+    else
+        echo "none readable"
+    fi
+
+    printf '%-22s' "bt-watch:"
+    if pgrep -f '(^|/)bt-watch( |$)' > /dev/null 2>&1; then
+        echo "running"
+    else
+        echo "not running (exec-once = bt-watch --notify --quiet)"
+    fi
+
+    loaded=$(firmware_loaded_build)
+    installed=$(firmware_installed_build)
+    printf '%-22s%s\n' "firmware loaded:" "${loaded:-?}  (controller, from $KERN_LOG)"
+    printf '%-22s%s\n' "firmware installed:" "$installed  ($FIRMWARE_DIR/$FIRMWARE_STEM.sfi)"
+    if [ -n "$loaded" ] && [ "$installed" != "dist" ] && [ "$installed" != "?" ] && [ "$installed" != "$loaded" ]; then
+        echo "                      -> installed build not loaded yet; power off fully and start again"
+    fi
+
+    if command -v bt-crash-report > /dev/null 2>&1 || [ -x "$SCRIPT_DIR/bt-crash-report" ]; then
+        crashes=$("$SCRIPT_DIR/bt-crash-report" --days 1 --last 0 2>/dev/null | awk '/^  crashes /{print $2}')
+        printf '%-22s%s\n' "crashes, last 24h:" "${crashes:-0}"
+    fi
+}
+
+# ------------------------------------------------------------------- main --
+
+main() {
+    local command="" arg=""
+    local -a rest=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run)
+                DRY_RUN=true
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            service|firmware|status)
+                [ -z "$command" ] || die "only one command may be given"
+                command=$1
+                ;;
+            *)
+                rest+=("$1")
+                ;;
+        esac
+        shift
+    done
+
+    [ -n "$command" ] || { usage >&2; die "a command is required"; }
+
+    case "$command" in
+        service)
+            [ ${#rest[@]} -eq 0 ] || die "service takes no arguments: ${rest[*]}"
+            cmd_service
+            ;;
+        firmware)
+            [ ${#rest[@]} -le 1 ] || die "firmware takes one argument: ${rest[*]}"
+            cmd_firmware "${rest[@]:-}"
+            ;;
+        status)
+            [ ${#rest[@]} -eq 0 ] || die "status takes no arguments: ${rest[*]}"
+            cmd_status
+            ;;
+    esac
+}
+
+main "$@"

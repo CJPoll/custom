@@ -1,0 +1,14 @@
+#compdef bt-watch
+
+# Completion function for bt-watch
+
+_bt-watch() {
+    _arguments \
+        '--log[Where to append events]:log file:_files' \
+        '--notify[Raise a desktop notification for crash-caused disconnects]' \
+        '--quiet[Do not echo events to stdout]' \
+        '--tail[Print the last N events and exit]::count:(10 20 50 100)' \
+        '(- *)'{-h,--help}'[Show help message]'
+}
+
+_bt-watch "$@"

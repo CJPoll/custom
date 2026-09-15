@@ -1,0 +1,258 @@
+#!/bin/bash
+# bt-watch - log Bluetooth connects and disconnects as they happen, attributing
+# each disconnect to a controller firmware crash when the kernel reports one.
+#
+# Two sources feed one log:
+#   - org.bluez on the system D-Bus (device Connected, adapter Discovering/Powered)
+#   - /var/log/kern.log ("Bluetooth: hci0: Hardware error", suspend exit,
+#     iwlwifi firmware restarts)
+# A disconnect that lands within a few seconds of a kernel hardware-error line
+# is tagged cause=firmware-crash; anything else is cause=normal.
+
+set -euo pipefail
+
+DEFAULT_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/bt-watch/events.log"
+KERN_LOG=${BT_KERN_LOG:-/var/log/kern.log}
+CRASH_WINDOW_SECONDS=5
+DEFAULT_TAIL=20
+
+LOG_FILE=$DEFAULT_LOG
+NOTIFY=false
+QUIET=false
+
+usage() {
+    cat << USAGE
+Usage: bt-watch [options]
+
+Watches BlueZ and the kernel log and appends one line per event to a log:
+
+  2026-09-12 20:26:26  CRASH       Hardware error 0x0c
+  2026-09-12 20:26:26  DISCONNECT  80:99:E7:F3:40:16 "WH-1000XM5" cause=firmware-crash (Hardware error 0x0c)
+  2026-09-12 20:27:48  CONNECT     80:99:E7:F3:40:16 "WH-1000XM5"
+
+Runs until interrupted; meant to be started once per session, e.g. from
+Hyprland: exec-once = bt-watch --notify --quiet
+
+Options:
+  --log <file>     Where to append events (default: $DEFAULT_LOG)
+  --notify         Raise a desktop notification for crash-caused disconnects
+  --quiet          Don't echo events to stdout
+  --tail [<n>]     Print the last <n> events from the log and exit (default: $DEFAULT_TAIL)
+  -h, --help       Show this help
+
+Environment:
+  BT_KERN_LOG      Kernel log to follow (default: /var/log/kern.log)
+
+Exit codes:
+  0  success
+  1  usage error or missing tool
+  2  another bt-watch is already writing to the same log
+  3  the kernel log is not readable
+USAGE
+}
+
+die() {
+    echo "bt-watch: $*" >&2
+    exit 1
+}
+
+timestamp() {
+    date '+%Y-%m-%d %H:%M:%S'
+}
+
+log_event() {
+    local kind=$1
+    shift
+    local line
+    line=$(printf '%s  %-11s %s' "$(timestamp)" "$kind" "$*")
+    printf '%s\n' "$line" >> "$LOG_FILE"
+    [ "$QUIET" = true ] || printf '%s\n' "$line"
+}
+
+device_name() {
+    # Never fails (the adapter may be mid-reset) and never reads our stdin,
+    # which inside the watchers is the signal pipe.
+    bluetoothctl info "$1" < /dev/null 2> /dev/null | awk -F': ' '/^\tName: /{print $2; exit}' || true
+}
+
+# Prints the kernel's hardware-error text if one was logged within the crash
+# window; fails otherwise.
+recent_crash() {
+    local now line ts
+    now=$(date +%s)
+    line=$(tail -n 40 "$KERN_LOG" < /dev/null 2> /dev/null | grep -E 'Bluetooth: hci0: Hardware error' | tail -n 1) || true
+    [ -n "$line" ] || return 1
+    ts=$(date -d "${line:0:15}" +%s 2>/dev/null) || return 1
+    (( now - ts <= CRASH_WINDOW_SECONDS && now - ts >= -1 )) || return 1
+    printf '%s' "${line##*Bluetooth: hci0: }"
+}
+
+mac_from_path() {
+    local mac=${1##*/dev_}
+    printf '%s' "${mac//_/:}"
+}
+
+# One line of `gdbus monitor` output, e.g.
+#   /org/bluez/hci0/dev_80_99_E7_F3_40_16: org.freedesktop.DBus.Properties.PropertiesChanged ('org.bluez.Device1', {'Connected': <false>}, @as [])
+handle_signal() {
+    local line=$1 path mac name cause
+    path=${line%%:*}
+    case "$line" in
+        *"('org.bluez.Device1'"*"'Connected': <true>"*)
+            mac=$(mac_from_path "$path")
+            log_event CONNECT "$mac \"$(device_name "$mac")\""
+            ;;
+        *"('org.bluez.Device1'"*"'Connected': <false>"*)
+            mac=$(mac_from_path "$path")
+            name=$(device_name "$mac")
+            if cause=$(recent_crash); then
+                log_event DISCONNECT "$mac \"$name\" cause=firmware-crash ($cause)"
+                if [ "$NOTIFY" = true ]; then
+                    notify-send -u critical -a bt-watch "Bluetooth firmware crash" "$name disconnected: $cause" < /dev/null 2> /dev/null || true
+                fi
+            else
+                log_event DISCONNECT "$mac \"$name\" cause=normal"
+            fi
+            ;;
+        *"('org.bluez.Adapter1'"*"'Discovering': <true>"*)
+            log_event DISCOVERY "start"
+            ;;
+        *"('org.bluez.Adapter1'"*"'Discovering': <false>"*)
+            log_event DISCOVERY "stop"
+            ;;
+        *"('org.bluez.Adapter1'"*"'Powered': <true>"*)
+            log_event POWER "on"
+            ;;
+        *"('org.bluez.Adapter1'"*"'Powered': <false>"*)
+            log_event POWER "off"
+            ;;
+    esac
+}
+
+# One line of the kernel log.
+handle_kernel_line() {
+    local line=$1
+    case "$line" in
+        *"Bluetooth: hci0: Hardware error"*)
+            log_event CRASH "${line##*Bluetooth: hci0: }"
+            ;;
+        *"PM: suspend exit"*)
+            log_event RESUME ""
+            ;;
+        *"iwlwifi"*"Microcode SW error"*)
+            log_event WIFI-RESET "iwlwifi firmware restart"
+            ;;
+    esac
+}
+
+watch_bluez() {
+    local line
+    gdbus monitor --system --dest org.bluez 2>/dev/null | while IFS= read -r line; do
+        handle_signal "$line" || true
+    done
+}
+
+watch_kernel() {
+    local line
+    tail -n 0 -F "$KERN_LOG" 2>/dev/null \
+        | grep --line-buffered -E 'Bluetooth: hci0: Hardware error|PM: suspend exit|iwlwifi.*Microcode SW error' \
+        | while IFS= read -r line; do
+            handle_kernel_line "$line" || true
+        done
+}
+
+watchers=()
+
+stop_watchers() {
+    local pid
+    for pid in "${watchers[@]:-}"; do
+        [ -n "$pid" ] || continue
+        pkill -TERM -P "$pid" 2>/dev/null || true
+        kill "$pid" 2>/dev/null || true
+    done
+}
+
+require_tool() {
+    command -v "$1" > /dev/null 2>&1 || die "required tool not found: $1"
+}
+
+show_tail() {
+    if [ ! -e "$LOG_FILE" ]; then
+        echo "bt-watch: no events logged yet at $LOG_FILE" >&2
+        exit 0
+    fi
+    tail -n "$1" "$LOG_FILE"
+}
+
+main() {
+    local tail_count=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --log)
+                [ $# -ge 2 ] || die "--log needs a value"
+                LOG_FILE=$2
+                shift 2
+                ;;
+            --notify)
+                NOTIFY=true
+                shift
+                ;;
+            --quiet)
+                QUIET=true
+                shift
+                ;;
+            --tail)
+                tail_count=$DEFAULT_TAIL
+                if [ $# -ge 2 ] && [[ $2 =~ ^[0-9]+$ ]]; then
+                    tail_count=$2
+                    shift
+                fi
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                usage >&2
+                die "unknown argument: $1"
+                ;;
+        esac
+    done
+
+    if [ -n "$tail_count" ]; then
+        show_tail "$tail_count"
+        exit 0
+    fi
+
+    require_tool gdbus
+    require_tool bluetoothctl
+    [ "$NOTIFY" = false ] || require_tool notify-send
+
+    if [ ! -r "$KERN_LOG" ]; then
+        echo "bt-watch: cannot read $KERN_LOG (are you in the 'log' group?)" >&2
+        exit 3
+    fi
+
+    mkdir -p "$(dirname "$LOG_FILE")"
+    exec 9>> "$LOG_FILE.lock"
+    if ! flock -n 9; then
+        echo "bt-watch: already running for $LOG_FILE" >&2
+        exit 2
+    fi
+
+    trap 'stop_watchers; exit 0' INT TERM
+    trap 'stop_watchers' EXIT
+
+    log_event START "watching org.bluez and $KERN_LOG"
+    watch_bluez &
+    watchers+=("$!")
+    watch_kernel &
+    watchers+=("$!")
+    wait
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi

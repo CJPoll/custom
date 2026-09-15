@@ -1,0 +1,33 @@
+#compdef bt-setup
+
+# Completion function for bt-setup
+
+_bt-setup() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    _arguments -C \
+        '--dry-run[Print the commands instead of running them]' \
+        '(- *)'{-h,--help}'[Show help message]' \
+        '1:command:(service firmware status)' \
+        '*::arg:->args'
+
+    case $state in
+        args)
+            if [[ ${line[1]} == firmware ]]; then
+                _alternatives \
+                    'options:option:((--list\:"List known builds" --restore\:"Restore the distro firmware"))' \
+                    'builds:build:_bt_setup_builds'
+            fi
+            ;;
+    esac
+}
+
+# Firmware builds bt-setup knows how to fetch
+_bt_setup_builds() {
+    local -a builds
+    builds=(${(f)"$(bt-setup firmware --list 2>/dev/null | awk 'NR>1 {print $1":released "$3}')"})
+    _describe -t builds 'firmware builds' builds
+}
+
+_bt-setup "$@"

@@ -1,0 +1,245 @@
+#!/bin/bash
+# bt-crash-report - summarize Bluetooth controller firmware crashes and the
+# disconnects they cause, from the system logs.
+#
+# Reads /var/log/kern.log* (kernel: "Bluetooth: hci0: Hardware error ...",
+# suspend/resume, device re-binds) and /var/log/syslog* (bluetoothd), joins
+# them on time, and prints crash counts, resume correlation and per-crash
+# context. Membership in the "log" group is enough to read those files.
+
+set -euo pipefail
+
+DEFAULT_DAYS=14
+DEFAULT_LAST=10
+LOG_DIR=${BT_LOG_DIR:-/var/log}
+
+usage() {
+    cat << USAGE
+Usage: bt-crash-report [options]
+
+Summarizes Bluetooth controller firmware crashes ("Bluetooth: hci0: Hardware
+error") and the disconnects they cause, from $LOG_DIR/kern.log* and
+$LOG_DIR/syslog*. Reading those files needs membership in the "log" group.
+
+Options:
+  --days <n>       Only consider the last <n> days (default: $DEFAULT_DAYS)
+  --all            Consider everything in the logs, however old
+  --last <n>       Show the <n> most recent crashes in detail (default: $DEFAULT_LAST)
+  -h, --help       Show this help
+
+Environment:
+  BT_LOG_DIR       Directory holding kern.log* and syslog* (default: /var/log)
+
+Exit codes:
+  0  success
+  1  usage error
+  3  the logs are not readable
+USAGE
+}
+
+die() {
+    echo "bt-crash-report: $*" >&2
+    exit 1
+}
+
+days=$DEFAULT_DAYS
+last=$DEFAULT_LAST
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --days)
+            [ $# -ge 2 ] || die "--days needs a value"
+            [[ $2 =~ ^[0-9]+$ ]] || die "--days must be a whole number"
+            days=$2
+            shift 2
+            ;;
+        --all)
+            days=0
+            shift
+            ;;
+        --last)
+            [ $# -ge 2 ] || die "--last needs a value"
+            [[ $2 =~ ^[0-9]+$ ]] || die "--last must be a whole number"
+            last=$2
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            die "unknown argument: $1"
+            ;;
+    esac
+done
+
+if [ ! -r "$LOG_DIR/kern.log" ]; then
+    echo "bt-crash-report: cannot read $LOG_DIR/kern.log (are you in the 'log' group?)" >&2
+    exit 3
+fi
+
+# Rotated logs first (their names sort by date), then the live one, so the
+# stream is chronological.
+cat_logs() {
+    local base=$1 f
+    for f in "$LOG_DIR/$base"-*.gz; do
+        [ -e "$f" ] && zcat "$f"
+    done
+    cat "$LOG_DIR/$base"
+}
+
+now=$(date +%s)
+cutoff=0
+if [ "$days" -gt 0 ]; then
+    cutoff=$(( now - days * 86400 ))
+fi
+
+kern_filtered=$(mktemp)
+syslog_filtered=$(mktemp)
+trap 'rm -f "$kern_filtered" "$syslog_filtered"' EXIT
+
+cat_logs kern.log \
+    | grep -E 'Bluetooth: hci0: (Hardware error|Firmware Version|Firmware timestamp)|PM: suspend exit|BLUETOOTH HID|\(AVRCP\)|usb 1-5: New USB device found' \
+    > "$kern_filtered" || true
+
+if [ -r "$LOG_DIR/syslog" ]; then
+    cat_logs syslog \
+        | grep 'bluetoothd\[' \
+        | grep -vE 'Endpoint (un)?registered' \
+        > "$syslog_filtered" || true
+fi
+
+gawk -v NOW="$now" -v CUTOFF="$cutoff" -v LAST="$last" -v DAYS="$days" '
+function epoch(line,    parts, y, t) {
+    if (!match(line, /^([A-Z][a-z][a-z]) +([0-9]+) ([0-9][0-9]):([0-9][0-9]):([0-9][0-9]) /, parts))
+        return -1
+    y = YEAR
+    t = mktime(y " " MON[parts[1]] " " parts[2] " " parts[3] " " parts[4] " " parts[5] " -1")
+    # Syslog stamps carry no year; anything "in the future" is from last year.
+    if (t > NOW + 86400)
+        t = mktime((y - 1) " " MON[parts[1]] " " parts[2] " " parts[3] " " parts[4] " " parts[5] " -1")
+    return t
+}
+
+function stamp(t) { return strftime("%Y-%m-%d %H:%M:%S", t) }
+function day(t)   { return strftime("%Y-%m-%d", t) }
+
+function device_from_bind(line,    m) {
+    if (match(line, /input: (.*) \(AVRCP\)/, m)) return m[1]
+    if (match(line, /BLUETOOTH HID [^[]*\[([^]]*)\]/, m)) return m[1]
+    return "?"
+}
+
+BEGIN {
+    YEAR = strftime("%Y", NOW) + 0
+    split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", names, " ")
+    for (i in names) MON[names[i]] = i
+    ncrash = nres = nbind = nbd = 0
+}
+
+FNR == 1 { file++ }
+
+file == 1 {
+    t = epoch($0)
+    if (t < 0) next
+    if (index($0, "Hardware error")) {
+        if (t < CUTOFF) next
+        ncrash++
+        crash_t[ncrash] = t
+        match($0, /Hardware error (0x[0-9a-f]+)/, m)
+        crash_code[ncrash] = m[1]
+        codes[m[1]]++
+        per_day[day(t)]++
+    } else if (index($0, "PM: suspend exit")) {
+        nres++; res_t[nres] = t
+    } else if (index($0, "Firmware Version")) {
+        match($0, /Firmware Version: (.*)$/, m); fw_version = m[1]
+    } else if (index($0, "Firmware timestamp")) {
+        match($0, /Firmware timestamp (.*)$/, m); fw_stamp = m[1]
+    } else if (index($0, "New USB device found")) {
+        match($0, /idVendor=([0-9a-f]+), idProduct=([0-9a-f]+)/, m); usb_id = m[1] ":" m[2]
+    } else {
+        nbind++; bind_t[nbind] = t; bind_dev[nbind] = device_from_bind($0)
+    }
+    next
+}
+
+file == 2 {
+    t = epoch($0)
+    if (t < 0 || t < CUTOFF - 60) next
+    nbd++; bd_t[nbd] = t
+    sub(/^.*bluetoothd\[[0-9]+\]: /, "")
+    bd_msg[nbd] = $0
+}
+
+END {
+    print "Controller"
+    printf "  USB id            %s\n", (usb_id ? usb_id : "?")
+    printf "  Firmware          %s  (%s)\n", (fw_version ? fw_version : "?"), (fw_stamp ? fw_stamp : "?")
+    printf "  Window            %s\n", (DAYS > 0 ? "last " DAYS " days" : "everything in the logs")
+    print ""
+
+    if (ncrash == 0) {
+        print "No controller hardware errors found."
+        exit 0
+    }
+
+    print "Crashes by day"
+    n = asorti(per_day, days_sorted)
+    for (i = 1; i <= n; i++)
+        printf "  %s  %4d  %s\n", days_sorted[i], per_day[days_sorted[i]], substr(bar, 1, per_day[days_sorted[i]] > 60 ? 60 : per_day[days_sorted[i]])
+    print ""
+
+    # Gaps between consecutive crashes, ignoring idle stretches over 3h.
+    ngap = 0
+    for (i = 2; i <= ncrash; i++) {
+        g = crash_t[i] - crash_t[i - 1]
+        if (g > 0 && g <= 3 * 3600) gaps[++ngap] = g
+    }
+    after_resume = 0
+    for (i = 1; i <= ncrash; i++)
+        for (j = nres; j >= 1; j--) {
+            d = crash_t[i] - res_t[j]
+            if (d >= 0) { if (d <= 120) after_resume++; break }
+        }
+
+    print "Totals"
+    printf "  crashes           %d\n", ncrash
+    for (c in codes) printf "    %-6s          %d\n", c, codes[c]
+    printf "  active days       %d  (%.1f crashes/day)\n", n, ncrash / n
+    if (ngap) {
+        asort(gaps)
+        printf "  median gap        %.1f min  (min %.1f min)\n", gaps[int((ngap + 1) / 2)] / 60, gaps[1] / 60
+    }
+    printf "  within 2m/resume  %d  (%.0f%%)\n", after_resume, 100 * after_resume / ncrash
+    printf "  first / last      %s  /  %s\n", stamp(crash_t[1]), stamp(crash_t[ncrash])
+    print ""
+
+    if (LAST == 0) exit 0
+    first = ncrash - LAST + 1
+    if (first < 1) first = 1
+    printf "Last %d crashes\n", ncrash - first + 1
+    for (i = first; i <= ncrash; i++) {
+        t = crash_t[i]
+        printf "  %s  %s\n", stamp(t), crash_code[i]
+        for (j = nres; j >= 1; j--) {
+            d = t - res_t[j]
+            if (d >= 0) { if (d <= 300) printf "      %ds after resume\n", d; break }
+        }
+        delete seen
+        for (j = 1; j <= nbd; j++) {
+            if (bd_t[j] < t - 5) continue
+            if (bd_t[j] > t + 5) break
+            if (seen[bd_msg[j]]++) continue
+            printf "      bluetoothd: %s\n", bd_msg[j]
+        }
+        for (j = 1; j <= nbind; j++) {
+            if (bind_t[j] < t) continue
+            if (bind_t[j] > t + 120) break
+            printf "      reconnected: %s (+%ds)\n", bind_dev[j], bind_t[j] - t
+            break
+        }
+    }
+}
+' bar="$(printf '#%.0s' $(seq 1 60))" "$kern_filtered" "$syslog_filtered"

@@ -1,0 +1,3 @@
+# Options for the btmon capture service (/etc/init.d/btmon).
+# See `bt-hci-capture --help`. Defaults: --dir /var/log/btmon --rotate 3600 --keep 48
+#BTMON_OPTS="--rotate 3600 --keep 48"

@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+# Rotating Bluetooth HCI trace capture. Source: ~/dev/custom/system-files/
+
+description="Rotating Bluetooth HCI trace capture (btmon)"
+
+command="/usr/local/sbin/bt-hci-capture"
+command_args="${BTMON_OPTS:-}"
+command_background=1
+pidfile="/run/btmon.pid"
+
+depend() {
+	need localmount
+	use bluetooth
+	after bluetooth
+}

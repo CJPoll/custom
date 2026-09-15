@@ -1,0 +1,13 @@
+#compdef bt-crash-report
+
+# Completion function for bt-crash-report
+
+_bt-crash-report() {
+    _arguments \
+        '--days[Only consider the last N days]:days:(1 3 7 14 30)' \
+        '--all[Consider everything in the logs]' \
+        '--last[Show the N most recent crashes in detail]:count:(0 5 10 25 50)' \
+        '(- *)'{-h,--help}'[Show help message]'
+}
+
+_bt-crash-report "$@"

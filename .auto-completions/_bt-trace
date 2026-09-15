@@ -1,0 +1,28 @@
+#compdef bt-trace
+
+# Completion function for bt-trace
+
+_bt-trace() {
+    _arguments \
+        '1:time:_bt_trace_times' \
+        '--before[Seconds of trace to show before the time]:seconds:(5 20 60)' \
+        '--after[Seconds of trace to show after the time]:seconds:(5 20 60)' \
+        '--dir[Capture directory]:directory:_directories' \
+        '--list[List the capture files and exit]' \
+        '--exceptions[List every controller exception in the captures]' \
+        '(- *)'{-h,--help}'[Show help message]'
+}
+
+# Recent crash times from the kernel log
+_bt_trace_times() {
+    local -a times
+    times=(${(f)"$(grep -E 'Bluetooth: hci0: Hardware error' /var/log/kern.log 2>/dev/null | tail -n 10 | cut -c8-15)"})
+
+    if (( ${#times} )); then
+        _describe -t times 'recent crashes' times
+    else
+        _message 'time (anything date -d understands)'
+    fi
+}
+
+_bt-trace "$@"

@@ -140,3 +140,32 @@ the mode map near the top of the script.
 - Scripts can call each other but should handle missing dependencies gracefully
 - Use absolute paths when calling other scripts from this directory
 - Check for required tools at startup and provide helpful error messages
+
+### Bluetooth Diagnostics
+
+Three scripts for tracking Bluetooth disconnects and their cause. They read
+`/var/log/kern.log*` and `/var/log/syslog*`, which needs the `log` group.
+
+- `bt-crash-report` - Summarizes controller firmware crashes
+  (`Bluetooth: hci0: Hardware error`) from the logs: counts per day, resume
+  correlation, and per-crash context (bluetoothd messages, which device
+  reconnected). Use it to compare crash rates before/after a firmware or
+  kernel change: `bt-crash-report --days 2`.
+- `bt-watch` - Long-running watcher that logs every connect/disconnect from
+  BlueZ (system D-Bus) plus kernel crash/resume/WiFi-reset lines to
+  `~/.local/state/bt-watch/events.log`, tagging disconnects as
+  `cause=firmware-crash` or `cause=normal`. Start from Hyprland with
+  `exec-once = bt-watch --notify --quiet`; read with `bt-watch --tail`.
+- `bt-trace` - Prints the HCI trace around a moment (default: the latest
+  crash) from the captures written by the `btmon` OpenRC service in
+  `system-files/`. `bt-trace --exceptions` tabulates every captured
+  crash with its exception words, for comparing crashes across firmware
+  builds. This is the only view of *what the controller was doing*
+  right before it crashed, since the btintel driver fails to fetch the
+  firmware's exception record.
+- `bt-setup` - Runs the root-needing steps for you: `bt-setup service`
+  installs and starts the btmon capture service, `bt-setup firmware <build>`
+  swaps the AX210 Bluetooth firmware between known Intel builds (with
+  `--restore` to undo), `bt-setup status` shows what is loaded and running.
+  `--dry-run` prints the commands instead.
+

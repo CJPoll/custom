@@ -1,0 +1,221 @@
+#!/bin/bash
+# bt-trace - print the Bluetooth HCI trace captured by the btmon service
+# around a moment in time; by default, the most recent controller firmware
+# crash reported in the kernel log.
+#
+# The btmon service (system-files/btmon.initd) writes `btmon -T` text captures
+# to /var/log/btmon/hci-<start stamp>.log, rotating on a schedule. Each packet
+# starts a line that ends in "YYYY-MM-DD HH:MM:SS.ffffff"; the decoded fields
+# follow on indented lines.
+
+set -euo pipefail
+
+DEFAULT_DIR=${BT_HCI_CAPTURE_DIR:-/var/log/btmon}
+DEFAULT_BEFORE=20
+DEFAULT_AFTER=5
+KERN_LOG=${BT_KERN_LOG:-/var/log/kern.log}
+
+usage() {
+    cat << USAGE
+Usage: bt-trace [<time>] [options]
+
+Prints the HCI trace captured by the btmon service around <time>. Without a
+<time>, uses the most recent "Bluetooth: hci0: Hardware error" in $KERN_LOG.
+
+Arguments:
+  <time>             Anything \`date -d\` understands: "20:26:26",
+                     "2026-09-12 20:26:26", "10 minutes ago", ...
+
+Options:
+  --before <s>       Seconds of trace to show before <time> (default: $DEFAULT_BEFORE)
+  --after <s>        Seconds of trace to show after <time> (default: $DEFAULT_AFTER)
+  --dir <dir>        Capture directory (default: $DEFAULT_DIR)
+  --list             List the capture files and exit
+  --exceptions       List every controller exception found in the captures
+                     (time, reset reason, hardware error code, and the raw
+                     exception words so crashes can be compared) and exit
+  -h, --help         Show this help
+
+Exit codes:
+  0  success
+  1  usage error
+  2  no capture covers that time
+  3  the capture directory is not readable
+USAGE
+}
+
+die() {
+    echo "bt-trace: $*" >&2
+    exit 1
+}
+
+last_crash_time() {
+    local line
+    line=$(grep -E 'Bluetooth: hci0: Hardware error' "$KERN_LOG" 2>/dev/null | tail -n 1) || true
+    [ -n "$line" ] || return 1
+    date -d "${line:0:15}" +%s
+}
+
+# Start time of a capture file, from its name: hci-2026-09-12_202626.log
+file_start() {
+    local stem=${1##*/hci-} hms
+    stem=${stem%.log}
+    hms=${stem##*_}
+    date -d "${stem%_*} ${hms:0:2}:${hms:2:2}:${hms:4:2}" +%s 2>/dev/null
+}
+
+# Prints one line per Intel Bootup event that followed an exception, with the
+# undecoded telemetry subevents 0x05 and 0x06 (exception record words) and
+# the Hardware Error code the kernel saw. Identical words across crashes mean
+# the firmware is faulting at the same place.
+list_exceptions() {
+    [ $# -gt 0 ] || { echo "bt-trace: no capture files in $dir" >&2; return 0; }
+    printf '%-19s  %-18s  %-5s  %s\n' "time" "reset reason" "code" "exception words (subevent 0x05 | 0x06)"
+    gawk '
+    function flush() {
+        if (stamp != "") printf "%-19s  %-18s  %-5s  %s | %s\n", stamp, reason, code, w05, w06
+        stamp = reason = code = w05 = w06 = ""; sub_id = ""; collecting = 0
+    }
+    /^> HCI Event: Vendor/ { pending = $0; next }
+    /Intel Bootup/ && pending != "" {
+        flush()
+        match(pending, /([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})\.[0-9]+$/, m)
+        stamp = m[1]; collecting = 1; pending = ""; next
+    }
+    !collecting { next }
+    /Reset reason:/ { sub(/^ *Reset reason: /, ""); sub(/ \(0x[0-9a-f]+\)$/, ""); reason = $0; next }
+    /Unknown extended subevent 0x0[56]/ { sub_id = substr($0, length($0) - 3); next }
+    /^ +Unknown extended subevent/ { sub_id = ""; next }
+    sub_id != "" && /^ +([0-9a-f]{2} )+/ {
+        hex = $0; sub(/^ +/, "", hex); hex = substr(hex, 1, 47); sub(/ +$/, "", hex)
+        if (sub_id == "0x05") w05 = (w05 == "" ? hex : w05 " " hex)
+        else w06 = (w06 == "" ? hex : w06 " " hex)
+        next
+    }
+    /Hardware Error/ { hw = 1; next }
+    hw && /Code:/ { code = $2; hw = 0; flush(); next }
+    /^[<>@=] / { sub_id = "" }
+    END { flush() }
+    ' "$@"
+}
+
+dir=$DEFAULT_DIR
+before=$DEFAULT_BEFORE
+after=$DEFAULT_AFTER
+list=false
+exceptions=false
+when=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --before)
+            [ $# -ge 2 ] || die "--before needs a value"
+            [[ $2 =~ ^[0-9]+$ ]] || die "--before must be a whole number of seconds"
+            before=$2
+            shift 2
+            ;;
+        --after)
+            [ $# -ge 2 ] || die "--after needs a value"
+            [[ $2 =~ ^[0-9]+$ ]] || die "--after must be a whole number of seconds"
+            after=$2
+            shift 2
+            ;;
+        --dir)
+            [ $# -ge 2 ] || die "--dir needs a value"
+            dir=$2
+            shift 2
+            ;;
+        --list)
+            list=true
+            shift
+            ;;
+        --exceptions)
+            exceptions=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -*)
+            usage >&2
+            die "unknown option: $1"
+            ;;
+        *)
+            [ -z "$when" ] || die "only one <time> may be given"
+            when=$1
+            shift
+            ;;
+    esac
+done
+
+if [ ! -d "$dir" ] || [ ! -r "$dir" ]; then
+    echo "bt-trace: cannot read $dir (is the btmon service installed and are you in the 'log' group?)" >&2
+    exit 3
+fi
+
+shopt -s nullglob
+files=("$dir"/hci-*.log)
+shopt -u nullglob
+
+if [ "$exceptions" = true ]; then
+    list_exceptions "${files[@]}"
+    exit 0
+fi
+
+if [ "$list" = true ]; then
+    for f in "${files[@]}"; do
+        printf '%s  %s\n' "$(du -h "$f" | cut -f1)" "$f"
+    done
+    exit 0
+fi
+
+if [ -n "$when" ]; then
+    target=$(date -d "$when" +%s 2>/dev/null) || die "cannot parse time: $when"
+else
+    target=$(last_crash_time) || die "no hardware error found in $KERN_LOG; pass a <time>"
+fi
+
+from=$(( target - before ))
+to=$(( target + after ))
+
+# Capture files whose span can overlap the window: the last one starting at or
+# before the window, plus any later ones starting inside it.
+selected=()
+candidate=""
+for f in "${files[@]}"; do
+    start=$(file_start "$f") || continue
+    if [ "$start" -le "$from" ]; then
+        candidate=$f
+    elif [ "$start" -le "$to" ]; then
+        [ -z "$candidate" ] || { selected+=("$candidate"); candidate=""; }
+        selected+=("$f")
+    fi
+done
+[ -z "$candidate" ] || selected+=("$candidate")
+
+if [ ${#selected[@]} -eq 0 ]; then
+    echo "bt-trace: no capture covers $(date -d "@$target" '+%Y-%m-%d %H:%M:%S')" >&2
+    exit 2
+fi
+
+echo "# HCI trace $(date -d "@$from" '+%Y-%m-%d %H:%M:%S') .. $(date -d "@$to" '+%H:%M:%S')  (target $(date -d "@$target" '+%H:%M:%S'))"
+for f in "${selected[@]}"; do
+    echo "# $f"
+done
+
+gawk -v FROM="$from" -v TO="$to" '
+function header_epoch(line,    m) {
+    if (!match(line, / ([0-9][0-9][0-9][0-9])-([0-9][0-9])-([0-9][0-9]) ([0-9][0-9]):([0-9][0-9]):([0-9][0-9])\.[0-9]+$/, m))
+        return -1
+    return mktime(m[1] " " m[2] " " m[3] " " m[4] " " m[5] " " m[6])
+}
+{
+    t = header_epoch($0)
+    if (t >= 0) {
+        inside = (t >= FROM && t <= TO)
+        if (t > TO) exit
+    }
+    if (inside) print
+}
+' "${selected[@]}"

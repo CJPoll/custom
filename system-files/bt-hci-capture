@@ -1,0 +1,120 @@
+#!/bin/bash
+# bt-hci-capture - keep a rotating text capture of Bluetooth HCI traffic.
+#
+# Runs `btmon -T` (timestamped, decoded, A2DP/SCO media omitted so files stay
+# small) into /var/log/btmon/hci-<start stamp>.log, starting a new file every
+# --rotate seconds and keeping the newest --keep files. Files are readable by
+# the "log" group so `bt-trace` can be used without root.
+#
+# Installed to /usr/local/sbin (copied, not symlinked, since root runs it) and
+# started by the btmon OpenRC service. See system-files/CLAUDE.md.
+
+set -euo pipefail
+
+DEFAULT_DIR=/var/log/btmon
+DEFAULT_ROTATE=3600
+DEFAULT_KEEP=48
+LOG_GROUP=log
+MIN_RUN_SECONDS=5
+BTMON=${BTMON_BIN:-btmon}
+
+usage() {
+    cat << USAGE
+Usage: bt-hci-capture [options]
+
+Captures Bluetooth HCI traffic with btmon into rotating text files.
+
+Options:
+  --dir <dir>          Capture directory (default: $DEFAULT_DIR)
+  --rotate <seconds>   Start a new file this often (default: $DEFAULT_ROTATE)
+  --keep <n>           Keep the newest <n> files (default: $DEFAULT_KEEP)
+  -h, --help           Show this help
+
+Environment:
+  BTMON_BIN            btmon executable to run (default: btmon on PATH)
+USAGE
+}
+
+die() {
+    echo "bt-hci-capture: $*" >&2
+    exit 1
+}
+
+dir=$DEFAULT_DIR
+rotate=$DEFAULT_ROTATE
+keep=$DEFAULT_KEEP
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dir)
+            [ $# -ge 2 ] || die "--dir needs a value"
+            dir=$2
+            shift 2
+            ;;
+        --rotate)
+            [ $# -ge 2 ] || die "--rotate needs a value"
+            [[ $2 =~ ^[1-9][0-9]*$ ]] || die "--rotate must be a positive number of seconds"
+            rotate=$2
+            shift 2
+            ;;
+        --keep)
+            [ $# -ge 2 ] || die "--keep needs a value"
+            [[ $2 =~ ^[1-9][0-9]*$ ]] || die "--keep must be a positive number"
+            keep=$2
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            die "unknown argument: $1"
+            ;;
+    esac
+done
+
+command -v "$BTMON" > /dev/null 2>&1 || die "btmon not found (install net-wireless/bluez)"
+
+mkdir -p "$dir"
+chgrp "$LOG_GROUP" "$dir" 2>/dev/null || true
+chmod 750 "$dir"
+
+running=true
+child=""
+
+stop() {
+    running=false
+    [ -z "$child" ] || kill "$child" 2>/dev/null || true
+}
+trap stop INT TERM
+
+prune() {
+    ls -1t "$dir"/hci-*.log 2>/dev/null | tail -n +$(( keep + 1 )) | xargs -r rm -f
+}
+
+while [ "$running" = true ]; do
+    file="$dir/hci-$(date +%F_%H%M%S).log"
+    started=$(date +%s)
+
+    # `timeout` ends this capture segment; `stdbuf -oL` keeps the file current
+    # line by line so a crash is on disk the moment btmon decodes it.
+    timeout "$rotate" stdbuf -oL "$BTMON" -T -P -C 160 > "$file" 2>&1 &
+    child=$!
+    chmod 640 "$file"
+    chgrp "$LOG_GROUP" "$file" 2>/dev/null || true
+
+    wait "$child" || true
+    child=""
+    prune
+
+    # If btmon is exiting immediately (no permission, no adapter), back off
+    # instead of spinning. The sleep is a child so a stop signal ends it too.
+    elapsed=$(( $(date +%s) - started ))
+    if [ "$running" = true ] && (( elapsed < MIN_RUN_SECONDS && elapsed < rotate )); then
+        sleep "$MIN_RUN_SECONDS" &
+        child=$!
+        wait "$child" || true
+        child=""
+    fi
+done
