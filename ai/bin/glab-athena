@@ -4,9 +4,106 @@
 # file; never in argv or config. Use for writes that should be attributed to
 # Athena (MR create/comment/approve, merge-train boarding, merges). Reads may
 # keep using the owner's OAuth glab.
+#
+# Self-healing: `glab-athena refresh` mints a fresh PAT for the athena-amby
+# service account and writes it to the token file. It uses the OWNER's plain
+# `glab` (Cody's OAuth session, group owner of amby_ai) to mint, so it works
+# even when the current Athena token is expired/revoked (chicken-and-egg).
 set -eu
 TOKEN_FILE="${GITLAB_ATHENA_TOKEN_FILE:-$HOME/.claude/gitlab-athena-token}"
-[ -r "$TOKEN_FILE" ] || { echo "glab-athena: token file $TOKEN_FILE missing/unreadable" >&2; exit 1; }
+
+# --- refresh subcommand: intercepted before exec so it never reaches glab ----
+if [ "${1:-}" = refresh ]; then
+	SA_USERNAME=athena-amby
+	SA_TOKEN_NAME=glab-athena
+
+	# Resolve group + service-account ids dynamically (owner OAuth glab, not the
+	# Athena token) so a renamed/renumbered account doesn't brick the script.
+	GROUP_ID="$(glab api "groups/amby_ai" | jq -r '.id')"
+	[ -n "$GROUP_ID" ] && [ "$GROUP_ID" != null ] || {
+		echo "glab-athena refresh: could not resolve amby_ai group id (is the owner glab logged in?)" >&2
+		exit 1
+	}
+	SA_ID="$(glab api "groups/$GROUP_ID/service_accounts" \
+		| jq -r --arg u "$SA_USERNAME" '.[] | select(.username==$u) | .id' | head -n1)"
+	[ -n "$SA_ID" ] && [ "$SA_ID" != null ] || {
+		echo "glab-athena refresh: no service account named $SA_USERNAME in group $GROUP_ID" >&2
+		exit 1
+	}
+
+	# GitLab caps service-account PAT lifetime at 1 year; stay just under.
+	EXPIRES_AT="$(date -d "+364 days" +%F)"
+
+	# Secrets are piped straight from each API response into the token file under
+	# a tight umask; never echoed to stdout/argv. Only non-secret metadata prints.
+	umask 077
+	NEW_ID=""
+	minted=""
+
+	# --- fast path: rotate the current token if it still authenticates ---------
+	if [ -r "$TOKEN_FILE" ]; then
+		CUR_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE" 2>/dev/null || true)"
+		if [ -n "${CUR_TOKEN:-}" ] \
+			&& GITLAB_TOKEN="$CUR_TOKEN" GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 \
+				glab api user >/dev/null 2>&1; then
+			if RESP="$(GITLAB_TOKEN="$CUR_TOKEN" GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 \
+				glab api --method POST "personal_access_tokens/self/rotate?expires_at=$EXPIRES_AT" 2>/dev/null)" \
+				&& printf '%s' "$RESP" | jq -e 'has("token")' >/dev/null 2>&1; then
+				printf '%s' "$RESP" | jq -r '.token' > "$TOKEN_FILE"
+				chmod 600 "$TOKEN_FILE"
+				NEW_ID="$(printf '%s' "$RESP" | jq -r '.id')"
+				echo "glab-athena refresh: rotated existing token (fast path)."
+				printf '%s' "$RESP" | jq '{id, name, scopes, active, expires_at}'
+				minted=1
+			fi
+		fi
+	fi
+
+	# --- reliable path: owner-mint a fresh PAT for the service account ---------
+	if [ -z "$minted" ]; then
+		RESP="$(glab api --method POST \
+			"groups/$GROUP_ID/service_accounts/$SA_ID/personal_access_tokens?name=$SA_TOKEN_NAME&scopes[]=api&expires_at=$EXPIRES_AT")"
+		printf '%s' "$RESP" | jq -e 'has("token")' >/dev/null 2>&1 || {
+			echo "glab-athena refresh: mint failed:" >&2
+			printf '%s\n' "$RESP" | jq -c '{message, error}' >&2 2>/dev/null || printf '%s\n' "$RESP" >&2
+			exit 1
+		}
+		printf '%s' "$RESP" | jq -r '.token' > "$TOKEN_FILE"
+		chmod 600 "$TOKEN_FILE"
+		NEW_ID="$(printf '%s' "$RESP" | jq -r '.id')"
+		echo "glab-athena refresh: minted a fresh token for $SA_USERNAME."
+		printf '%s' "$RESP" | jq '{id, name, scopes, active, expires_at}'
+	fi
+
+	# --- verify via the wrapper's own auth path --------------------------------
+	VER_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+	WHOAMI="$(GITLAB_TOKEN="$VER_TOKEN" GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 glab api user)"
+	echo "glab-athena refresh: whoami ->"
+	printf '%s' "$WHOAMI" | jq '{username, state}'
+	printf '%s' "$WHOAMI" | jq -e '.username=="athena-amby" and .state=="active"' >/dev/null 2>&1 || {
+		echo "glab-athena refresh: verification FAILED (token does not resolve to an active athena-amby)" >&2
+		exit 1
+	}
+
+	# --- tidy: best-effort revoke older glab-athena PATs to avoid pile-up ------
+	if [ -n "${NEW_ID:-}" ] && [ "$NEW_ID" != null ]; then
+		OLD_IDS="$(glab api "groups/$GROUP_ID/service_accounts/$SA_ID/personal_access_tokens" 2>/dev/null \
+			| jq -r --arg n "$SA_TOKEN_NAME" --argjson keep "$NEW_ID" \
+				'.[] | select(.name==$n and .active==true and .id!=$keep) | .id' 2>/dev/null || true)"
+		for id in $OLD_IDS; do
+			if glab api --method DELETE \
+				"groups/$GROUP_ID/service_accounts/$SA_ID/personal_access_tokens/$id" >/dev/null 2>&1; then
+				echo "glab-athena refresh: revoked older token id $id"
+			fi
+		done
+	fi
+
+	echo "glab-athena refresh: OK."
+	exit 0
+fi
+
+# --- normal path: run glab as the Athena service account -------------------
+[ -r "$TOKEN_FILE" ] || { echo "glab-athena: token file $TOKEN_FILE missing/unreadable (run: glab-athena refresh)" >&2; exit 1; }
 GITLAB_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
 export GITLAB_TOKEN GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 GLAB_SKIP_UPDATE_CHECK=1
 exec glab "$@"
