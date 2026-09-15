@@ -1,7 +1,6 @@
 #! /usr/bin/env ruby
 
-#HOME_IP='76.149.255.225'
-HOME_IP='192.168.4.179'
+HOME_IP='161.13.170.8'
 
 REGISTERED_SERVERS = {
 	"home" => {
@@ -16,11 +15,11 @@ REGISTERED_SERVERS = {
       ssh_forward: false
     },
     "laptop" => {
-      port: 22,
+      port: 4445,
+      host: "cjpoll@#{HOME_IP}",
       ports: {
         4004 => 4004
       },
-      host: "cjpoll@192.168.4.190",
       ssh_forward: false
     }
   }
