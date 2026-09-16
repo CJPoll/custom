@@ -24,7 +24,10 @@ error_log="/var/log/${RC_SVCNAME}.log"
 
 export HOME="/home/${DOCKER_ROOTLESS_USER}"
 export XDG_RUNTIME_DIR="/run/user/${_uid}"
-export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+# Prepend standard dirs but KEEP OpenRC's PATH (it holds the rc helper bin dir,
+# e.g. /usr/libexec/rc/bin, where start-stop-daemon/mountinfo/shell_var live).
+# Replacing it made those "command not found" and broke the start wrapper.
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:${PATH}}"
 
 depend() {
 	need net
