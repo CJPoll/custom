@@ -8,6 +8,8 @@ This directory contains system-level configuration files that require root privi
 - `bt-hci-capture` - Rotating `btmon` HCI capture loop, run by the btmon service
 - `btmon.initd` - OpenRC service running `bt-hci-capture`
 - `btmon.confd` - Options for that service (`BTMON_OPTS`)
+- `docker-rootless-athena.initd` - OpenRC service running rootless `dockerd` as a non-root user
+- `docker-rootless-athena.confd` - Options for that service (`DOCKER_ROOTLESS_USER`, `DOCKERD_ROOTLESS_OPTS`)
 
 ## Symlink Integration
 
@@ -58,3 +60,17 @@ sudo rc-service btmon start
 
 After a change to `bt-hci-capture`, re-run the first `install` line and
 `sudo rc-service btmon restart`.
+
+### docker-rootless-athena service (docker-rootless-athena.initd/.confd)
+
+Runs a **rootless** Docker daemon as the `athena` user (default), so athena
+gets Docker without being in the root-equivalent `docker` group. The daemon
+runs under her UID with its own socket (`$XDG_RUNTIME_DIR/docker.sock`) and
+data root (`~/.local/share/docker`), fully isolated from the system docker
+daemon. Requires `rootlesskit`, `slirp4netns`, `fuse-overlayfs`, subuid/subgid
+ranges, and lingering (`loginctl enable-linger athena`) so `/run/user/<uid>`
+exists at boot.
+
+`scripts/setup-athena-docker` installs and starts it (copy, not symlink, for
+the same run-as-root safety reason as btmon). Override the target user via
+`DOCKER_ROOTLESS_USER` in `/etc/conf.d/docker-rootless-athena`.

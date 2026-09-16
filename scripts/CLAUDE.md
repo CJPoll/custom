@@ -179,3 +179,20 @@ only a Firefox started *after* the mount: a sandbox snapshots the mount table
 at launch. `desktop status`/`mount`/`open` warn when the running Firefox
 predates the mount; `--restart-firefox` restarts it.
 Requires `net-fs/sshfs`.
+
+### Athena user provisioning
+
+Two root-run, idempotent scripts that stand up the `athena` system user (a
+non-root user with no sudo/wheel). Provide instructions/execution for the
+system-level steps; safe to re-run.
+
+- `setup-athena-user` - Creates `athena` (home `/home/athena` on a dedicated
+  btrfs subvolume, bash shell, no sudo), applies a 250 GB btrfs qgroup quota to
+  her home, and caps her total RAM at 16 GB via cgroup v2 + libcgroup
+  `cgrulesengd`. Asserts she is never in `wheel`/`sudo`.
+- `setup-athena-docker` - Gives athena **rootless** Docker (deliberately NOT the
+  root-equivalent `docker` group). Accepts the `~amd64` keyword for
+  `sys-apps/rootlesskit`, emerges `rootlesskit` + `slirp4netns` +
+  `fuse-overlayfs`, enables lingering, and installs the
+  `docker-rootless-athena` OpenRC service (from `system-files/`) that runs her
+  daemon at boot. Run `setup-athena-user` first. `--dry-run` previews.
