@@ -1,0 +1,58 @@
+#!/sbin/openrc-run
+# Self-hosted GitHub Actions runner for a non-root user (default: github-runner).
+# Source: ~/dev/custom/system-files/ — installed to /etc/init.d/ by
+# scripts/setup-github-runner. Runs the runner's ./run.sh as the user, after
+# that user's rootless Docker is up, so jobs use the rootless daemon.
+
+# Overridable in /etc/conf.d/github-runner
+: "${RUNNER_USER:=github-runner}"
+: "${RUNNER_DIR:=/home/github-runner/actions-runner}"
+: "${RUNNER_OPTS:=}"
+
+_uid="$(id -u "${RUNNER_USER}" 2>/dev/null || true)"
+
+description="GitHub Actions self-hosted runner (user: ${RUNNER_USER})"
+
+command="${RUNNER_DIR}/run.sh"
+command_args="${RUNNER_OPTS}"
+command_user="${RUNNER_USER}:${RUNNER_USER}"
+command_background=1
+directory="${RUNNER_DIR}"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+
+# The runner and its jobs need the user's HOME, rootless Docker socket, and a
+# sane PATH. The bundled .NET uses invariant globalization to avoid an ICU
+# dependency on Gentoo.
+export HOME="/home/${RUNNER_USER}"
+export XDG_RUNTIME_DIR="/run/user/${_uid}"
+export DOCKER_HOST="unix:///run/user/${_uid}/docker.sock"
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT="${DOTNET_SYSTEM_GLOBALIZATION_INVARIANT:-1}"
+
+depend() {
+	need net
+	after elogind firewall docker-rootless-github-runner
+}
+
+start_pre() {
+	if [ -z "${_uid}" ]; then
+		eerror "user ${RUNNER_USER} does not exist — run setup-github-runner-user"
+		return 1
+	fi
+	if [ ! -x "${command}" ]; then
+		eerror "${command} not found — run scripts/setup-github-runner first"
+		return 1
+	fi
+	if [ ! -f "${RUNNER_DIR}/.runner" ]; then
+		eerror "runner not registered. As ${RUNNER_USER}, run:"
+		eerror "  ${RUNNER_DIR}/config.sh --url https://github.com/CJPoll/gen_saas \\"
+		eerror "    --token <TOKEN> --labels self-hosted,linux,x64 --unattended"
+		return 1
+	fi
+	if [ ! -d "${XDG_RUNTIME_DIR}" ]; then
+		eerror "${XDG_RUNTIME_DIR} missing — enable linger: loginctl enable-linger ${RUNNER_USER}"
+		return 1
+	fi
+}

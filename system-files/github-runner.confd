@@ -1,0 +1,16 @@
+# Options for the self-hosted GitHub Actions runner (/etc/init.d/github-runner).
+#
+# Which user runs the runner. Must exist, have rootless Docker
+# (docker-rootless-github-runner), and lingering enabled. Default: github-runner.
+#RUNNER_USER="github-runner"
+
+# Where the runner was unpacked + registered (contains run.sh, config.sh, .runner).
+#RUNNER_DIR="/home/github-runner/actions-runner"
+
+# Extra args to run.sh (rarely needed).
+#RUNNER_OPTS=""
+
+# The runner's bundled .NET runs in globalization-invariant mode to avoid an
+# ICU dependency on Gentoo. If a job needs full ICU behavior, install
+# dev-libs/icu and set this to 0.
+#DOTNET_SYSTEM_GLOBALIZATION_INVARIANT="1"
