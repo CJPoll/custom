@@ -84,18 +84,30 @@ if [ "$REMOVE" -eq 1 ]; then
   exit 0
 fi
 
-# ---- 1. ensure the crontab spool dir exists --------------------------------
+# ---- 1. ensure the crontab spool dir is present AND usable -----------------
+# Probe by actually asking crontab. "no crontab for user" (empty) is usable;
+# "is not a directory, bailing out" means the spool tree is broken.
 step "Crontab spool dir ($SPOOL_DIR)"
-if [ -d "$SPOOL_DIR" ]; then
-  say "  present."
-else
-  say "  missing — creating (needs root)."
-  cron_group=root
-  getent group cron >/dev/null 2>&1 && cron_group=cron
-  run_root mkdir -p "$SPOOL_DIR"
-  run_root chown "root:${cron_group}" "$SPOOL_DIR"
-  run_root chmod 1730 "$SPOOL_DIR"
-fi
+spool_err="$(crontab -l 2>&1 >/dev/null || true)"
+case "$spool_err" in
+  *"not a directory"*|*"bailing out"*|*"No such file"*|*[Cc]"annot"*)
+    say "  spool not usable — repairing (needs root)."
+    # The crontab binary is setgid to a group (often "crontab", NOT "cron"):
+    # the spool dir must belong to THAT group for the setgid client to write
+    # it, and every parent must be traversable by it.
+    crontab_bin="$(command -v crontab)"
+    spool_group="$(stat -c '%G' "$crontab_bin" 2>/dev/null || echo crontab)"
+    parent="$(dirname "$SPOOL_DIR")"
+    run_root mkdir -p "$SPOOL_DIR"
+    run_root chown "root:${spool_group}" "$SPOOL_DIR"
+    run_root chmod 1730 "$SPOOL_DIR"
+    run_root chmod o+x "$parent"   # let the setgid-crontab client traverse in
+    say "  set $SPOOL_DIR to root:${spool_group} 1730; made $parent traversable."
+    ;;
+  *)
+    say "  usable."
+    ;;
+esac
 
 # ---- 2. check the cron daemon ----------------------------------------------
 step "Cron daemon"
