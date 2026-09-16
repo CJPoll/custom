@@ -1,14 +1,69 @@
 #!/bin/bash
-# Dispatch preflight for the phase2-backlog lane.
-#   usage: dispatch-preflight.sh <branch-name>
+# Worktree-from-fresh-main preflight for a fleet lane.
+#   usage: wt-preflight [--repo <path-or-name>] [--dry-run] <branch-name>
+#          wt-preflight <branch-name> [<repo-path-or-name>]
 # Refuses to leave a worktree branched off a STALE local main.
 # Fleet rule (Vanta-lane incident, 2026-08-27): `wt create` branches from the LOCAL
 # main, which can be two merges behind origin. Verified, not assumed.
+#
+# Repo selection (SHIP-2026-09-16: was hardcoded to walt_ui; a gen_saas admiral run
+# had to replicate this logic by hand — parameterized so any fleet can call it):
+#   - default is /home/cjpoll/dev/walt_ui, so `wt-preflight <branch>` is unchanged.
+#   - override with `--repo <val>`, a 2nd positional, or $WT_PREFLIGHT_REPO.
+#   - a value with no `/` is treated as a project name under $HOME/dev/<name>.
+#   - the worktree lands at $HOME/.local/worktrees/<basename REPO>/<branch>.
 set -uo pipefail
-REPO=/home/cjpoll/dev/walt_ui
-BRANCH="${1:?usage: dispatch-preflight.sh <branch-name>}"
 
-echo "== 1. refresh local main =="
+usage() {
+  sed -n '2,4p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+DRYRUN=0
+BRANCH=""
+REPO_ARG="${WT_PREFLIGHT_REPO:-}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) REPO_ARG="${2:?--repo needs a value}"; shift 2 ;;
+    --repo=*) REPO_ARG="${1#--repo=}"; shift ;;
+    --dry-run) DRYRUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "FAIL: unknown flag $1"; usage; exit 1 ;;
+    *)
+      if [ -z "$BRANCH" ]; then BRANCH="$1"
+      elif [ -z "$REPO_ARG" ]; then REPO_ARG="$1"
+      else echo "FAIL: unexpected extra argument $1"; usage; exit 1
+      fi
+      shift ;;
+  esac
+done
+
+[ -n "$BRANCH" ] || { echo "FAIL: missing <branch-name>"; usage; exit 1; }
+
+# Resolve the repo: bare name -> $HOME/dev/<name>; path -> as given; default walt_ui.
+if [ -z "$REPO_ARG" ]; then
+  REPO=/home/cjpoll/dev/walt_ui
+elif [ "${REPO_ARG#*/}" = "$REPO_ARG" ]; then
+  REPO="$HOME/dev/$REPO_ARG"
+else
+  REPO="$REPO_ARG"
+fi
+PROJECT=$(basename "$REPO")
+WT="$HOME/.local/worktrees/$PROJECT/$BRANCH"
+
+if [ "$DRYRUN" = "1" ]; then
+  echo "DRY RUN — resolution only, no git operations"
+  echo "  repo:     $REPO"
+  echo "  project:  $PROJECT"
+  echo "  branch:   $BRANCH"
+  echo "  worktree: $WT"
+  [ -d "$REPO/.git" ] || [ -f "$REPO/.git" ] || echo "  WARN: $REPO is not a git repo"
+  exit 0
+fi
+
+[ -d "$REPO/.git" ] || [ -f "$REPO/.git" ] || { echo "FAIL: $REPO is not a git repo"; exit 1; }
+
+echo "== 1. refresh local main ($PROJECT) =="
 git -C "$REPO" pull --ff-only || { echo "FAIL: pull --ff-only refused (local main diverged?) — resolve before dispatching"; exit 1; }
 git -C "$REPO" fetch origin --quiet
 ORIGIN=$(git -C "$REPO" rev-parse origin/main)
@@ -20,7 +75,6 @@ echo "   local  main $LOCAL"
 echo "== 2. create worktree =="
 cd "$REPO" || exit 2  # wt defaults --parent to the CALLER's current branch; never run it from another worktree
 "$HOME/dev/custom/scripts/wt" create "$BRANCH" --parent main || { echo "FAIL: wt create"; exit 1; }
-WT="$HOME/.local/worktrees/walt_ui/$BRANCH"
 [ -d "$WT" ] || { echo "FAIL: worktree not at $WT"; exit 1; }
 
 echo "== 3. VERIFY the new branch descends from origin/main =="

@@ -159,7 +159,11 @@ Two concrete defenses, both required:
 ### 4. Create worktrees and dispatch work
 
 **Create every worktree with `~/dev/custom/scripts/wt-preflight <branch>`**, never
-bare `wt create`. `wt create --parent main` branches from the LOCAL `main`, which
+bare `wt create`. That default targets `walt_ui`; for any other repo pass it —
+`wt-preflight <branch> <repo>` (a bare name resolves under `~/dev/`, e.g.
+`wt-preflight dnd-152 gen_saas`), or `--repo <path>`. Do NOT hand-roll a
+per-repo copy of this logic — the script places the worktree at
+`~/.local/worktrees/<repo>/<branch>` and runs the same staleness checks. `wt create --parent main` branches from the LOCAL `main`, which
 is stale the moment any fleet's first MR lands — measured 2026-08-27: branches
 forked two and three merges behind, one of which would have rebuilt a sibling's
 just-merged work, and a terraform plan on another read every newer resource as
