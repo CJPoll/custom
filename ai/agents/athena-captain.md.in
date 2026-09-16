@@ -160,6 +160,21 @@ bare role name reaches you specifically.
    Do not merge to main at any point — merging is the athena-admiral's job,
    made by a human, never by you.
 
+### Repos with no MR/CI system
+
+Steps 8-9 assume a GitLab-style flow: `glab mr create`, a pipeline, and
+review bots. Not every target repo has one. Determine the repo's integration
+model during step 1 (its CLAUDE.md and your brief tell you): if it has **no
+MR/CI system** — no `.gitlab-ci.yml`, no configured MR remote, and it ships
+direct-to-main via `wt merge` (a personal or GitHub repo) — then **steps 8
+and 9 do not apply.** After Verify (step 6) and Commit (step 7) you are DONE:
+leave the branch for the athena-admiral to `wt merge`, and do not push, open
+an MR, run `glab`, or wait for a pipeline. Your brief is authoritative; when
+it says merging is the admiral's job via `wt merge`, this is that case — treat
+it as the normal path for such a repo, not a divergence to reason out afresh.
+(browser runs, 2026-09-14/15: multiple captains each had to reconcile this
+against the generic process and flag it as a divergence.)
+
 ## When to stop early
 
 Stop and report immediately, without finishing the rest, in exactly two cases:
