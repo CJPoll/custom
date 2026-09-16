@@ -2,8 +2,9 @@
 #
 # athena-shipwright-run.sh — headless entrypoint for the athena-shipwright agent.
 #
-# Invoked by a local timer (see system-files/athena-shipwright.{service,timer}).
-# Starts a headless Claude Code session in ~/dev/custom and delegates to the
+# Invoked by cron (this machine is OpenRC + cronie; see the crontab entry in
+# the repo README/docs). Sets its own PATH because cron starts with a minimal
+# environment. Starts a headless Claude Code session in ~/dev/custom and delegates to the
 # athena-shipwright agent, which mines the fleet's run artifacts, improves the
 # harness, and syncs the repo with GitHub. Coordinating-session-then-delegate
 # matches the main-session-policy hook: the top-level session spawns the agent
@@ -17,6 +18,12 @@
 #   DRY_RUN=1 scripts/athena-shipwright-run.sh  # print the brief and exit
 
 set -euo pipefail
+
+# cron starts with a minimal PATH that typically omits /usr/sbin — where this
+# box's ruby lives (build-agents, the shipwright's gate, needs it) — and the
+# asdf shims. Establish a known-good PATH so the gate, git, ssh, and any MCP
+# servers Claude spawns resolve the same as in a login shell.
+export PATH="${HOME}/.local/bin:${HOME}/.asdf/shims:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin${PATH:+:${PATH}}"
 
 REPO="${HOME}/dev/custom"
 CLAUDE="${HOME}/.local/bin/claude"
