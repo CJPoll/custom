@@ -63,6 +63,19 @@ bare role name reaches you specifically.
    Check the knowledge graph and auto-memory for this domain. Confirm the
    Mission's acceptance criteria are concrete; resolve any ambiguity yourself
    and note the assumption.
+   **Bootstrap the worktree's ignored dependencies before you run anything.**
+   A worktree created by `git worktree add` does NOT carry gitignored
+   build/dependency artifacts — `vendor/bundle` and `.bundle/config` for
+   Ruby/Bundler, `node_modules` for JS, `_build`/`deps` for Elixir — so the
+   suite fails with errors like `Bundler::GemNotFound` until they exist. When
+   the worktree's lockfile is byte-identical to the main checkout's
+   (`~/dev/<project>`), restore them from there rather than re-resolving and
+   recompiling native extensions for an unchanged lockfile: either copy the
+   dirs across, or point the tool at the main checkout (e.g.
+   `BUNDLE_PATH=~/dev/<project>/vendor/bundle bundle exec …`). Re-resolve from
+   scratch only when the lockfile actually differs. (browser runs,
+   2026-09-14/15: three captains each hit this and each improvised a different
+   workaround.)
 2. **Plan briefly.** Work out the approach before writing code: the flow,
    which modules it touches and the bucket each belongs in (Framework / UI /
    Side Effects / Domain / Managers, per this project's architecture rules),
