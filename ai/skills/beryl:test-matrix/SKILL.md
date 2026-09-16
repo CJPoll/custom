@@ -7,10 +7,10 @@ disable-model-invocation: true
 
 # Test Matrix
 
-IMPORTANT: Before creating the test matrix, invoke the `ruby-testing-pyramid` skill to understand the testing strategy:
+IMPORTANT: Before creating the test matrix, invoke the `beryl:ruby-testing-pyramid` skill to understand the testing strategy:
 
 ```
-Skill(skill: "ruby-testing-pyramid")
+Skill(skill: "beryl:ruby-testing-pyramid")
 ```
 
 In @~/dev/beryl/lib/schemas/test_matrix.json, we define a JSON schema that this feature's `tests.yaml` (the path to which is in context) MUST conform to.
@@ -99,6 +99,6 @@ For each manager, provide:
    - Assert: Handles correctly, returns expected result
 ```
 
-Use the manager layer examples from the ruby-testing-pyramid skill as reference for mock setup, expectation, and verification patterns.
+Use the manager layer examples from the beryl:ruby-testing-pyramid skill as reference for mock setup, expectation, and verification patterns.
 
 $ARGUMENTS

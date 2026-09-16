@@ -7,10 +7,10 @@ disable-model-invocation: true
 
 # Implement
 
-IMPORTANT: Before implementing, invoke the `ruby-testing-pyramid` skill to understand the testing and implementation order:
+IMPORTANT: Before implementing, invoke the `beryl:ruby-testing-pyramid` skill to understand the testing and implementation order:
 
 ```
-Skill(skill: "ruby-testing-pyramid")
+Skill(skill: "beryl:ruby-testing-pyramid")
 ```
 
 Based on the spec files defined for this feature, let's implement the feature following TDD and the testing pyramid.
