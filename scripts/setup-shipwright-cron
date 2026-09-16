@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+#
+# setup-shipwright-cron — install (or remove) the athena-shipwright cron job.
+#
+# This machine is OpenRC + cronie. This script:
+#   1. ensures the per-user crontab spool dir exists (one root step, via sudo)
+#   2. checks the cron daemon is running
+#   3. installs an idempotent crontab entry that runs athena-shipwright-run.sh
+#
+# Idempotent: re-running updates the schedule in place (never duplicates the
+# line). The only root-needing step is creating the spool dir the first time;
+# once it exists, no root is needed again.
+#
+# Usage:
+#   setup-shipwright-cron [--schedule "<cron expr>"] [--dry-run]
+#   setup-shipwright-cron --remove [--dry-run]
+#   setup-shipwright-cron --help
+#
+# Options:
+#   --schedule "<expr>"  Five-field cron schedule (default: "0 * * * *" = hourly)
+#   --remove             Remove the shipwright crontab entry and exit
+#   --dry-run            Print what would happen; change nothing
+#   --help               Show this help
+#
+# Exit codes: 0 ok · 1 usage/arg error · 2 missing prerequisite · 3 need root
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+RUNNER="${SCRIPT_DIR}/athena-shipwright-run.sh"
+SPOOL_DIR="${CRON_SPOOL_DIR:-/var/spool/cron/crontabs}"
+SCHEDULE="0 * * * *"   # hourly
+DRY_RUN=0
+REMOVE=0
+
+# Print the leading comment block (everything from line 2 up to the first
+# non-comment line), with the leading "# " stripped.
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
+
+# ---- args (order-independent) ----------------------------------------------
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --schedule) shift; [ $# -gt 0 ] || { echo "error: --schedule needs a value" >&2; exit 1; }; SCHEDULE="$1" ;;
+    --schedule=*) SCHEDULE="${1#*=}" ;;
+    --remove)  REMOVE=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2; usage >&2; exit 1 ;;
+  esac
+  shift
+done
+
+say()  { printf '%s\n' "$*"; }
+step() { printf '\n== %s\n' "$*"; }
+
+# Run a command that needs root, honoring --dry-run.
+run_root() {
+  if [ "$DRY_RUN" -eq 1 ]; then say "  [dry-run] would run (root): $*"; return 0; fi
+  if [ "$(id -u)" -eq 0 ]; then "$@"; return; fi
+  if command -v sudo >/dev/null 2>&1; then say "  (sudo) $*"; sudo "$@"; return; fi
+  echo "error: this step needs root and sudo is not available: $*" >&2; exit 3
+}
+
+# Replace the current crontab with $1 (or preview it under --dry-run).
+put_crontab() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  [dry-run] resulting crontab would be:"; printf '%s\n' "$1" | sed 's/^/    /'
+    return 0
+  fi
+  printf '%s\n' "$1" | crontab -
+}
+
+# ---- preflight -------------------------------------------------------------
+[ -x "$RUNNER" ] || { echo "error: runner not found or not executable: $RUNNER" >&2; exit 2; }
+command -v crontab >/dev/null 2>&1 || { echo "error: crontab not installed (need cronie/dcron)" >&2; exit 2; }
+
+# ---- remove path -----------------------------------------------------------
+if [ "$REMOVE" -eq 1 ]; then
+  step "Removing the athena-shipwright crontab entry"
+  current="$(crontab -l 2>/dev/null || true)"
+  kept="$(printf '%s\n' "$current" | grep -vF -- "$RUNNER" | sed '/^[[:space:]]*$/d' || true)"
+  put_crontab "$kept"
+  say "Done. (Any spool dir and the cron daemon are left as-is.)"
+  exit 0
+fi
+
+# ---- 1. ensure the crontab spool dir exists --------------------------------
+step "Crontab spool dir ($SPOOL_DIR)"
+if [ -d "$SPOOL_DIR" ]; then
+  say "  present."
+else
+  say "  missing — creating (needs root)."
+  cron_group=root
+  getent group cron >/dev/null 2>&1 && cron_group=cron
+  run_root mkdir -p "$SPOOL_DIR"
+  run_root chown "root:${cron_group}" "$SPOOL_DIR"
+  run_root chmod 1730 "$SPOOL_DIR"
+fi
+
+# ---- 2. check the cron daemon ----------------------------------------------
+step "Cron daemon"
+if pgrep -x crond >/dev/null 2>&1 || pgrep -x cron >/dev/null 2>&1; then
+  say "  running."
+else
+  say "  NOT running. Start it (root), e.g. on OpenRC:"
+  say "    sudo rc-update add cronie default && sudo rc-service cronie start"
+fi
+
+# ---- 3. install the crontab entry (idempotent) -----------------------------
+step "Crontab entry ($SCHEDULE)"
+line="${SCHEDULE} ${RUNNER}"
+current="$(crontab -l 2>/dev/null || true)"
+kept="$(printf '%s\n' "$current" | grep -vF -- "$RUNNER" | sed '/^[[:space:]]*$/d' || true)"
+if [ -n "$kept" ]; then
+  new_crontab="$(printf '%s\n%s' "$kept" "$line")"
+else
+  new_crontab="$line"
+fi
+put_crontab "$new_crontab"
+if [ "$DRY_RUN" -eq 1 ]; then say "  [dry-run] would install: $line"; else say "  installed: $line"; fi
+
+# ---- next steps ------------------------------------------------------------
+step "Done"
+say "Verify:      crontab -l"
+say "Smoke-test:  env -i HOME=\"\$HOME\" SHELL=/bin/sh $RUNNER"
+say "             then read the newest ~/dev/custom/ai-artifacts/shipwright/runs/*.log"
+say "Note: git push under cron uses SSH with no agent — a passphraseless key at a"
+say "      default path just works; otherwise the run still commits locally and journals."
