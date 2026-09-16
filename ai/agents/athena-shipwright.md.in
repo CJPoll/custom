@@ -97,7 +97,13 @@ Everything you learn from is local, under `~/dev/custom/`:
 7. **Commit and journal.** One `git commit` per concern, in `~/dev/custom`, with
    a message stating the pattern, the evidence (run-ids), and the fix. Append a
    journal entry (format below). Advance `cursor.txt` only after all of a run's
-   qualifying patterns are handled.
+   qualifying patterns are handled — write it as the newest processed artifact's
+   **full mtime including sub-second precision** (e.g.
+   `date -d "$(stat -c %y <file>)" +%Y-%m-%dT%H:%M:%S.%N%:z`), or a timestamp
+   strictly after it. `find -newer` compares sub-second mtimes, so a
+   whole-second cursor re-selects the last artifact on every future run
+   (harmless — the journal dedups it — but it makes each run re-open a file it
+   already mined).
 8. **Sync up.** After the run's commits are in and the gate is green, `git push`
    to the remote. If the push is rejected because the remote moved under you,
    `git pull --rebase --autostash` and push again (bounded: at most a couple of
