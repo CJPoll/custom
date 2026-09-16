@@ -37,6 +37,10 @@ depend() {
 }
 
 start_pre() {
+	# start_pre runs as root; pre-create the logfile owned by the runner user,
+	# because start-stop-daemon opens stdout/stderr AFTER dropping to that user
+	# and /var/log is not user-writable.
+	checkpath -f -m 0644 -o "${RUNNER_USER}:${RUNNER_USER}" "/var/log/${RC_SVCNAME}.log"
 	if [ -z "${_uid}" ]; then
 		eerror "user ${RUNNER_USER} does not exist — run setup-github-runner-user"
 		return 1

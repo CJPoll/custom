@@ -32,6 +32,10 @@ depend() {
 }
 
 start_pre() {
+	# start_pre runs as root; pre-create the logfile owned by the daemon user,
+	# because start-stop-daemon opens stdout/stderr AFTER dropping to that user
+	# and /var/log is not user-writable.
+	checkpath -f -m 0644 -o "${DOCKER_ROOTLESS_USER}:${DOCKER_ROOTLESS_USER}" "/var/log/${RC_SVCNAME}.log"
 	if [ -z "${_uid}" ]; then
 		eerror "user ${DOCKER_ROOTLESS_USER} does not exist"
 		return 1
