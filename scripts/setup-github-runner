@@ -47,6 +47,22 @@ getent passwd "$USER_NAME" >/dev/null \
 command -v curl >/dev/null || die "curl not found"
 command -v tar  >/dev/null || die "tar not found"
 
+# --- runner toolchain --------------------------------------------------------
+# Self-hosted runners must provide what GitHub-hosted runners preinstall. Many
+# JS action wrappers (e.g. setup-terraform's terraform wrapper) exec `node` from
+# PATH, and workflows commonly use `jq`. Install them system-wide so the runner
+# service PATH (/usr/bin) finds them. Extend this list as jobs reveal more needs
+# (e.g. app-admin/awscli if a run-step calls `aws` on the runner itself).
+tc_missing=()
+command -v node >/dev/null || tc_missing+=("net-libs/nodejs")
+command -v jq   >/dev/null || tc_missing+=("app-misc/jq")
+if [ "${#tc_missing[@]}" -eq 0 ]; then
+  log "runner toolchain present (node, jq)"
+else
+  log "emerging runner toolchain: ${tc_missing[*]}"
+  run emerge --verbose --noreplace "${tc_missing[@]}"
+fi
+
 # --- 1. resolve latest linux-x64 runner release ------------------------------
 log "resolving latest actions/runner release"
 json="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest)" \
