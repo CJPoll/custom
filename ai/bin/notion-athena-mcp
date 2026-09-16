@@ -6,4 +6,18 @@ TOKEN_FILE="${NOTION_ATHENA_TOKEN_FILE:-$HOME/.claude/notion-api-token}"
 [ -r "$TOKEN_FILE" ] || { echo "notion-athena-mcp: token file $TOKEN_FILE missing/unreadable" >&2; exit 1; }
 NOTION_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
 export NOTION_TOKEN
+
+# node/npx here are asdf shims. When Claude Code launches this MCP server there
+# is no .tool-versions in scope, so the shim aborts with "No version is set" and
+# the server dies at startup — surfaced as CONNECTION_CLOSED. If nothing has
+# selected a Node, pin the newest asdf-installed nodejs so the shim resolves.
+# An inherited ASDF_NODEJS_VERSION or a .tool-versions in scope still wins.
+if [ -z "${ASDF_NODEJS_VERSION:-}" ] && ! npx -v >/dev/null 2>&1; then
+  _nodedir="${ASDF_DATA_DIR:-$HOME/.asdf}/installs/nodejs"
+  if [ -d "$_nodedir" ]; then
+    _ver="$(for _d in "$_nodedir"/*/; do [ -d "$_d" ] && basename "$_d"; done | sort -V | tail -n1)"
+    [ -n "$_ver" ] && export ASDF_NODEJS_VERSION="$_ver"
+  fi
+fi
+
 exec npx -y @notionhq/notion-mcp-server
