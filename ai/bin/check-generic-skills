@@ -38,6 +38,8 @@ GENERIC_SKILL_GLOBS = [
   "fix:*",
   "processes:fix",
   "review",
+  "review-impact",
+  "review-loop",
   "refactor:*",
 ].freeze
 
