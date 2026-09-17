@@ -143,8 +143,14 @@ you do not commit:
   self-test — the flag is ignored and it blocks on (or empties) stdin, a false
   green. Always invoke the `.self-test.sh` files.
 - `ai/bin/check-generic-skills` — project-agnostic skills (the `fix:*` family,
-  `processes:fix`, `review`, `refactor:*`) carry no consumer-project constants;
-  run its `--self-test` too if you touched the checker.
+  `processes:fix`, `review`/`review-impact`/`review-loop`, `refactor:*`) carry no
+  consumer-project constants; run its `--self-test` too if you touched the checker.
+- `ai/bin/check-hooks-registered` (+ its `--self-test`) — the hooks in
+  `ai/hooks/registry.json` are actually wired into the live Claude Code settings,
+  not just present on disk. Catches the 2026-09-17 class where a settings rewrite
+  silently dropped safe-wait-guard + pronoun-guard. Environment-safe: passes with
+  a note when no settings file exists (CI/agent env), so it never false-fails.
+  Recover drift with `scripts/setup-hooks --install` (merges, never clobbers).
 - `ai/bin/check-guard-messages` — every first-party guard/hook/check emits an
   actionable `Fix:` message on failure (LLM-facing errors); run its `--self-test`
   too if you touched the checker.

@@ -45,8 +45,10 @@ EXEMPT = {
 GUARD_BINS = %w[
   build-agents
   check-generic-skills
+  check-hooks-registered
   harness-eval
   critic-review
+  critic-eval
 ].freeze
 
 def hook_guards

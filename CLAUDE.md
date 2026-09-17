@@ -156,3 +156,28 @@ across sessions — it is not a one-shot queue drain.
   entry is live (read-only); `--backup <file>` snapshots the current crontab to a
   local (gitignored) file. The committed installer is the canonical source, so
   the loop is always restorable even without the snapshot.
+
+## Hook registration (`~/.claude/settings.json` is not in git)
+
+The `ai/hooks/*.sh` guards only run if they are *registered* in the live Claude
+Code settings — a hook file can exist, pass its own `--self-test`, and still
+never fire because nothing wires it. That file lives outside the repo and is not
+version-controlled, so a bad edit has no diff and no `git` undo. On 2026-09-17 a
+telemetry change rewrote the `hooks` block and silently dropped safe-wait-guard
+and pronoun-guard; nothing detected it. The durable fix:
+
+- **Source of truth:** `ai/hooks/registry.json` — which hook is registered on
+  which event/matcher. Committed, greppable, the one place the expected wiring
+  is declared.
+- **Detect drift:** `ai/bin/check-hooks-registered` (in the shipwright gate)
+  fails, naming each hook, if a registry entry is not live. Environment-safe: it
+  passes with a note when no settings file exists (CI/agent env), so it never
+  false-fails a harness commit; it only fails on a real drift in a real config.
+- **Recover:** `scripts/setup-hooks --install` MERGES the registry into
+  `settings.json` (backing it up first, idempotent) — it never rewrites the whole
+  block, because a full rewrite is exactly what caused the outage. `--check`
+  delegates to the gate check, `--dry-run` previews, `--remove` unwires,
+  `--self-test` verifies install/idempotency/merge-safety on a temp file.
+- **Editing hooks:** change `registry.json` and run `scripts/setup-hooks
+  --install`; do not hand-write the `settings.json` hooks block (that is the
+  clobber path). Hooks load at session start, so reload a session to activate.

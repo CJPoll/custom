@@ -1,0 +1,150 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# check-hooks-registered — assert the harness hooks are actually wired into the
+# live Claude Code settings, not just present on disk.
+#
+# The motivating outage (2026-09-17): a telemetry change rewrote the "hooks"
+# block of ~/.claude/settings.json and dropped the existing entries, silently
+# disabling safe-wait-guard and pronoun-guard. Nothing detected it — a guard
+# file can exist, pass its own --self-test, and still never run because it is
+# registered nowhere. This check closes that blind spot: it compares the
+# committed source of truth (ai/hooks/registry.json) against the live settings
+# and fails, naming each drift, if a registered hook is missing.
+#
+# Environment-safe by design: if the target settings file does not exist (a
+# fresh machine, a CI/agent env with a different HOME, a container), there is
+# nothing to assert, so it PASSES with a note rather than false-failing every
+# harness commit. It only fails when a settings file exists AND a registry hook
+# is absent from it.
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/check-hooks-registered            assert registry hooks are live
+#   ai/bin/check-hooks-registered --self-test  verify the checker's own logic
+#
+# Override the target settings file with HOOKS_SETTINGS_FILE (used by the
+# self-test and by scripts/setup-hooks --check; defaults to ~/.claude/settings.json).
+#
+# Exit codes: 0 ok / not-this-env · 1 drift (a registry hook is not registered)
+
+require "json"
+
+AI_DIR       = File.expand_path("..", __dir__)          # .../ai
+REPO_DIR     = File.expand_path("..", AI_DIR)           # repo root
+REGISTRY     = File.join(AI_DIR, "hooks", "registry.json")
+
+def settings_path
+  ENV["HOOKS_SETTINGS_FILE"] || File.join(Dir.home, ".claude", "settings.json")
+end
+
+# Expand a registry (repo-relative) script path to the absolute command string
+# settings.json stores.
+def abs_script(rel)
+  File.join(REPO_DIR, rel)
+end
+
+def load_registry
+  JSON.parse(File.read(REGISTRY)).fetch("hooks")
+end
+
+# All {event, command} pairs registered in a parsed settings hash.
+def registered_pairs(settings)
+  out = []
+  (settings["hooks"] || {}).each do |event, matchers|
+    Array(matchers).each do |m|
+      Array(m["hooks"]).each { |h| out << [event, h["command"]] }
+    end
+  end
+  out
+end
+
+# Compare registry against a parsed settings hash. Returns a list of
+# human-readable drift strings (empty == all registered).
+def drift_for(settings, registry)
+  have = registered_pairs(settings)
+  registry.reject { |e| have.include?([e["event"], abs_script(e["script"])]) }
+          .map { |e| "#{e['event']} -> #{e['script']}" }
+end
+
+def run
+  registry = load_registry
+  path = settings_path
+  unless File.exist?(path)
+    puts "check-hooks-registered: no settings file at #{path} — nothing to assert (not this environment). OK."
+    return 0
+  end
+
+  settings = JSON.parse(File.read(path))
+  missing  = drift_for(settings, registry)
+  if missing.empty?
+    puts "check-hooks-registered: all #{registry.size} registry hooks are wired in #{path}. OK."
+    return 0
+  end
+
+  warn "check-hooks-registered: FAIL — #{missing.size} registered hook(s) are NOT wired in #{path}:"
+  missing.each { |m| warn "  - #{m}" }
+  warn "Fix: re-wire them by running `scripts/setup-hooks --install` (it MERGES into " \
+       "settings.json, backing it up first — it never clobbers the existing block). " \
+       "If a hook was intentionally retired, remove it from ai/hooks/registry.json instead."
+  1
+end
+
+# ---------------------------------------------------------------------------
+def self_test
+  require "tmpdir"
+  registry = load_registry
+  ok = true
+  check = lambda do |name, cond|
+    puts "  #{cond ? 'ok  ' : 'FAIL'} #{name}"
+    ok &&= cond
+  end
+
+  # A settings hash with every registry hook wired -> no drift.
+  full = { "hooks" => {} }
+  registry.each do |e|
+    (full["hooks"][e["event"]] ||= []) << {
+      "matcher" => e["matcher"], "hooks" => [{ "type" => "command", "command" => abs_script(e["script"]) }]
+    }
+  end
+  check.call("complete settings -> no drift", drift_for(full, registry).empty?)
+
+  # Drop one hook -> exactly that one drifts.
+  partial = JSON.parse(JSON.generate(full))
+  dropped = registry.first
+  partial["hooks"][dropped["event"]].reject! { |m| m["hooks"].any? { |h| h["command"] == abs_script(dropped["script"]) } }
+  d = drift_for(partial, registry)
+  check.call("missing one hook -> one drift", d.size == 1 && d.first.include?(dropped["script"]))
+
+  # Empty settings -> everything drifts.
+  check.call("empty settings -> all drift", drift_for({ "hooks" => {} }, registry).size == registry.size)
+
+  # Run the real entry point but silence its (expected) diagnostic output so the
+  # gate log stays clean — we assert on the exit code only.
+  quiet = lambda do |&blk|
+    o, e = $stdout, $stderr
+    $stdout = $stderr = File.open(File::NULL, "w")
+    begin; blk.call; ensure; $stdout.close; $stdout, $stderr = o, e; end
+  end
+  # Absent settings file -> run returns 0 (not this environment).
+  Dir.mktmpdir do |dir|
+    ENV["HOOKS_SETTINGS_FILE"] = File.join(dir, "nope.json")
+    check.call("absent settings file -> exit 0", quiet.call { run } == 0)
+    # Present-but-drifted file -> run returns 1.
+    f = File.join(dir, "settings.json")
+    File.write(f, JSON.generate({ "hooks" => {} }))
+    ENV["HOOKS_SETTINGS_FILE"] = f
+    check.call("present drifted file -> exit 1", quiet.call { run } == 1)
+  end
+  ENV.delete("HOOKS_SETTINGS_FILE")
+
+  puts(ok ? "ALL CASES PASS" : "SELF-TEST FAILED")
+  ok ? 0 : 1
+end
+
+if ARGV.include?("--self-test")
+  exit self_test
+else
+  exit run
+end

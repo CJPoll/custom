@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+#
+# setup-hooks — wire the harness hooks into ~/.claude/settings.json.
+#
+# Source of truth is ai/hooks/registry.json. This installer MERGES those entries
+# into the existing settings (adding any that are missing, de-duplicated),
+# NEVER rewriting the whole "hooks" block — a full rewrite is exactly what
+# silently dropped safe-wait-guard + pronoun-guard on 2026-09-17. It backs up
+# settings.json (timestamped) before any change, so there is always an undo path
+# for a file that is not in git.
+#
+# Idempotent: re-running adds only what is missing and reports "already wired"
+# otherwise. `--check` delegates to ai/bin/check-hooks-registered (the single
+# source of the compare logic, also run by the shipwright gate).
+#
+# Usage:
+#   setup-hooks [--install] [--dry-run]   merge registry hooks into settings (default)
+#   setup-hooks --check                   assert registry hooks are wired (gate check)
+#   setup-hooks --remove [--dry-run]      remove the registry hooks from settings
+#   setup-hooks --self-test               verify install/check/idempotency on a temp file
+#   setup-hooks --help
+#
+# Override the target file with HOOKS_SETTINGS_FILE (used by --self-test; default
+# ~/.claude/settings.json).
+#
+# Exit codes: 0 ok · 1 usage/arg error · 2 missing prerequisite (no python3/registry)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+REGISTRY="${REPO_DIR}/ai/hooks/registry.json"
+CHECKER="${REPO_DIR}/ai/bin/check-hooks-registered"
+SETTINGS="${HOOKS_SETTINGS_FILE:-${HOME}/.claude/settings.json}"
+
+ACTION="install"
+DRY_RUN=0
+
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
+say()   { printf '%s\n' "$*"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --install)  ACTION="install" ;;
+    --check)    ACTION="check" ;;
+    --remove)   ACTION="remove" ;;
+    --self-test) ACTION="self-test" ;;
+    --dry-run)  DRY_RUN=1 ;;
+    -h|--help)  usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2; usage >&2; exit 1 ;;
+  esac
+  shift
+done
+
+command -v python3 >/dev/null 2>&1 || { echo "error: python3 required. Fix: install python3 or wire hooks by hand from ai/hooks/registry.json." >&2; exit 2; }
+[ -f "$REGISTRY" ] || { echo "error: registry not found at $REGISTRY. Fix: restore ai/hooks/registry.json from git." >&2; exit 2; }
+
+# Merge (or remove) the registry hooks into a settings file. Emits, on stdout,
+# a one-line-per-change report; exits 10 (no change) or 0 (changed) via the
+# trailing marker the caller reads. All JSON work is done in python for safety.
+apply() {
+  local mode="$1"        # "install" | "remove"
+  local settings="$2"
+  local dry="$3"
+  REPO_DIR="$REPO_DIR" REGISTRY="$REGISTRY" SETTINGS="$settings" MODE="$mode" DRY="$dry" python3 - <<'PY'
+import json, os, sys
+
+repo   = os.environ["REPO_DIR"]
+reg    = json.load(open(os.environ["REGISTRY"]))["hooks"]
+path   = os.environ["SETTINGS"]
+mode   = os.environ["MODE"]
+dry    = os.environ["DRY"] == "1"
+
+def absscript(rel): return os.path.join(repo, rel)
+
+try:
+    with open(path) as f: settings = json.load(f)
+except FileNotFoundError:
+    settings = {}
+except json.JSONDecodeError as e:
+    print(f"error: {path} is not valid JSON ({e}).", file=sys.stderr)
+    print("Fix: repair or restore the file, then re-run setup-hooks.", file=sys.stderr)
+    sys.exit(3)
+
+hooks = settings.setdefault("hooks", {})
+
+def has(event, cmd):
+    for m in hooks.get(event, []):
+        for h in m.get("hooks", []):
+            if h.get("command") == cmd:
+                return True
+    return False
+
+changes = []
+if mode == "install":
+    for e in reg:
+        cmd = absscript(e["script"])
+        if has(e["event"], cmd):
+            continue
+        changes.append(f'+ {e["event"]:13} {e["matcher"]!r} -> {e["script"]}')
+        hooks.setdefault(e["event"], []).append(
+            {"matcher": e["matcher"], "hooks": [{"type": "command", "command": cmd}]}
+        )
+else:  # remove
+    for e in reg:
+        cmd = absscript(e["script"])
+        if not has(e["event"], cmd):
+            continue
+        changes.append(f'- {e["event"]:13} {e["matcher"]!r} -> {e["script"]}')
+        for m in hooks.get(e["event"], []):
+            m["hooks"] = [h for h in m.get("hooks", []) if h.get("command") != cmd]
+        hooks[e["event"]] = [m for m in hooks.get(e["event"], []) if m.get("hooks")]
+        if not hooks[e["event"]]:
+            del hooks[e["event"]]
+
+for c in changes:
+    print(c)
+
+if not changes:
+    print("MARKER:nochange")
+    sys.exit(0)
+
+if dry:
+    print("MARKER:wouldchange")
+    sys.exit(0)
+
+with open(path, "w") as f:
+    json.dump(settings, f, indent=4)
+    f.write("\n")
+print("MARKER:changed")
+PY
+}
+
+case "$ACTION" in
+  check)
+    exec "$CHECKER"
+    ;;
+
+  self-test)
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    export HOOKS_SETTINGS_FILE="${tmp}/settings.json"
+    printf '{\n    "model": "x"\n}\n' > "$HOOKS_SETTINGS_FILE"
+    ok=1
+    r1="$(apply install "$HOOKS_SETTINGS_FILE" 0)"
+    echo "$r1" | grep -q "MARKER:changed" || { echo "  FAIL first install should change"; ok=0; }
+    python3 -c "import json;json.load(open('$HOOKS_SETTINGS_FILE'))" || { echo "  FAIL result not valid JSON"; ok=0; }
+    "$CHECKER" >/dev/null 2>&1 && echo "  ok   check passes after install" || { echo "  FAIL check should pass after install"; ok=0; }
+    r2="$(apply install "$HOOKS_SETTINGS_FILE" 0)"
+    echo "$r2" | grep -q "MARKER:nochange" || { echo "  FAIL second install should be a no-op (idempotent)"; ok=0; }
+    r3="$(apply remove "$HOOKS_SETTINGS_FILE" 0)"
+    echo "$r3" | grep -q "MARKER:changed" || { echo "  FAIL remove should change"; ok=0; }
+    "$CHECKER" >/dev/null 2>&1 && { echo "  FAIL check should fail after remove"; ok=0; } || echo "  ok   check fails after remove"
+    # The original "model" key must survive install+remove (merge, not clobber).
+    python3 -c "import json,sys; sys.exit(0 if json.load(open('$HOOKS_SETTINGS_FILE')).get('model')=='x' else 1)" \
+      && echo "  ok   unrelated keys preserved" || { echo "  FAIL merge clobbered unrelated keys"; ok=0; }
+    [ "$ok" = 1 ] && { echo "ALL CASES PASS"; exit 0; } || { echo "SELF-TEST FAILED"; exit 1; }
+    ;;
+
+  install|remove)
+    if [ "$DRY_RUN" = 0 ] && [ -f "$SETTINGS" ]; then
+      bak="${SETTINGS}.bak-$(date +%Y%m%d-%H%M%S)"
+      cp -p "$SETTINGS" "$bak"
+      say "backed up ${SETTINGS} -> ${bak}"
+    fi
+    out="$(apply "$ACTION" "$SETTINGS" "$DRY_RUN")"
+    echo "$out" | grep -v '^MARKER:' || true
+    if echo "$out" | grep -q "MARKER:nochange"; then
+      say "setup-hooks: nothing to do — all registry hooks already ${ACTION%e}ed."
+    elif echo "$out" | grep -q "MARKER:wouldchange"; then
+      say "setup-hooks: (dry-run) the above would be applied to ${SETTINGS}."
+    else
+      say "setup-hooks: ${ACTION} applied to ${SETTINGS}. Hooks load at session start — reload to activate."
+    fi
+    ;;
+esac

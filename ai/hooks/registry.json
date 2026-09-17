@@ -1,0 +1,10 @@
+{
+  "_meta": "Source of truth for which ai/hooks/*.sh are registered in ~/.claude/settings.json, and on which event/matcher. `ai/bin/check-hooks-registered` asserts these are live (drift is the bug that silently disabled safe-wait-guard + pronoun-guard on 2026-09-17); `scripts/setup-hooks --install` writes them by MERGING (never clobbering the existing block — the clobber is what caused the outage). Paths are repo-relative and expanded to absolute against this repo's location. Matchers are Claude Code tool-name regexes; \"\" matches all (used for non-tool events).",
+  "hooks": [
+    { "event": "PreToolUse", "matcher": "Bash", "script": "ai/hooks/safe-wait-guard.sh" },
+    { "event": "PreToolUse", "matcher": "Bash|SendMessage|mcp__notion.*", "script": "ai/hooks/pronoun-guard.sh" },
+    { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/harness-event.sh" },
+    { "event": "Stop", "matcher": "", "script": "ai/hooks/notify-idle.sh" },
+    { "event": "SessionStart", "matcher": "", "script": "ai/hooks/main-session-policy.sh" }
+  ]
+}
