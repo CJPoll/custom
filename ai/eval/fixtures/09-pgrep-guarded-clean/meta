@@ -1,0 +1,5 @@
+regression=false-positive control — a pgrep -f wait that excludes the waiter with grep -v $$ must NOT be denied
+guard=safe-wait-guard
+mode=hook-stdin
+input=input.json
+expect=clean

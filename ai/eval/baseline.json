@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-17T05:05:01Z",
+  "generated": "2026-09-17T19:33:36Z",
   "cases": [
     {
       "name": "01-spin-loop-fires",
@@ -27,6 +27,22 @@
     },
     {
       "name": "07-bare-guard-message-guarded",
+      "pass": true
+    },
+    {
+      "name": "08-pgrep-self-match-fires",
+      "pass": true
+    },
+    {
+      "name": "09-pgrep-guarded-clean",
+      "pass": true
+    },
+    {
+      "name": "10-until-spin-fires",
+      "pass": true
+    },
+    {
+      "name": "11-bounded-poll-clean",
       "pass": true
     }
   ]

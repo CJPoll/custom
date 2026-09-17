@@ -1,0 +1,5 @@
+regression=until-loop busy-spin with no sleep in the body — pins the CPU (safe-wait rule 3)
+guard=safe-wait-guard
+mode=hook-stdin
+input=input.json
+expect=fires

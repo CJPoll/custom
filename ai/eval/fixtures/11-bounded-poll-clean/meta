@@ -1,0 +1,5 @@
+regression=false-positive control — a legit bounded external poll (sleep cadence + max-iteration bound) must NOT be denied
+guard=safe-wait-guard
+mode=hook-stdin
+input=input.json
+expect=clean
