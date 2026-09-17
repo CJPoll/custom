@@ -72,13 +72,33 @@ rescue StandardError
   {}
 end
 
+# A sub-ceiling gap that ENDS at a fresh user turn is idle-between-turns, not an
+# in-session stall: the agent had finished its work and was waiting for the next
+# instruction to arrive (a coordinator SendMessage, a new task, or an injected
+# system notification). The harness cannot act on that wait, so it must not
+# inflate agent_stall_gaps. A user-role record carrying tool_result blocks is
+# mid-turn (the agent is blocked awaiting a tool it invoked) — that IS a stall
+# candidate, so it is NOT a new turn. (Shipwright runs 18-19: 13 of 14
+# agent-session gaps were exactly this — a persistent subagent sitting between a
+# completed turn and the coordinator's next message; only 1 was within-turn.)
+def new_user_turn?(o)
+  m = o["message"]
+  return false unless m.is_a?(Hash) && m["role"] == "user"
+  c = m["content"]
+  return true if c.is_a?(String)
+  return c.none? { |b| b.is_a?(Hash) && b["type"] == "tool_result" } if c.is_a?(Array)
+  true
+end
+
 # Fold one parsed JSONL record into the accumulator.
 # `agent` marks records from an agent-session transcript (agent-*.jsonl) vs an
 # interactive (UUID-named) session: an in-band gap in an interactive session is
 # human think/idle time the shipwright can never act on, so only agent-session
 # gaps feed the actionable `agent_stall_gaps` metric. (Shipwright runs 16-18:
 # ~88% of in-band gaps were benign interactive idle, which made the total-count
-# stall signal effectively always-on.)
+# stall signal effectively always-on.) Runs 18-19 refined it further: even in an
+# agent transcript, a gap ending at a fresh user turn (see new_user_turn?) is
+# idle-between-turns, so only within-turn gaps feed agent_stall_gaps.
 def fold(acc, o, prev_ts, agent = false)
   ts = o["timestamp"]
   if ts && prev_ts
@@ -88,7 +108,7 @@ def fold(acc, o, prev_ts, agent = false)
         acc[:session_idle_gaps] += 1 # human closed/resumed the session, not a stall
       elsif gap >= STALL_GAP_S
         acc[:stall_gaps] += 1
-        acc[:agent_stall_gaps] += 1 if agent
+        acc[:agent_stall_gaps] += 1 if agent && !new_user_turn?(o)
       end
     rescue StandardError
       # unparseable timestamp -> ignore for gap accounting
@@ -297,7 +317,21 @@ def run_self_test
     ]
     File.write(af, agent_lines.map { |l| JSON.generate(l) }.join("\n") + "\n")
 
-    acc = parse_files([f, af])
+    # A third agent transcript whose sub-ceiling gap ENDS at a fresh user turn
+    # (a coordinator SendMessage injected as a string user message). It must
+    # count toward stall_gaps (total) but NOT agent_stall_gaps: idle-between-
+    # turns is not an in-session stall (runs 18-19). Without the new_user_turn?
+    # guard this would push agent_stall_gaps to 2.
+    tf = File.join(dir, "agent-turnboundary.jsonl")
+    turn_lines = [
+      { "type" => "assistant", "timestamp" => "2026-09-16T00:00:00.000Z", "message" => {} },
+      { "type" => "user", "timestamp" => "2026-09-16T01:00:00.000Z",
+        "message" => { "role" => "user",
+                       "content" => "The coordinator sent a message while you were working: do X" } },
+    ]
+    File.write(tf, turn_lines.map { |l| JSON.generate(l) }.join("\n") + "\n")
+
+    acc = parse_files([f, af, tf])
     r = build_report(acc, { "test-model" => {
       "input_per_mtok" => 1.0, "output_per_mtok" => 2.0,
       "cache_read_per_mtok" => 0.1, "cache_write_per_mtok" => 0.5 } })
@@ -310,11 +344,21 @@ def run_self_test
       "skill fire counted"  => (r["skills"]["review"] == 1),
       "input tokens == 10"  => (r["tokens"]["input"] == 10),
       "thinking == 3"       => (r["tokens"]["thinking"] == 3),
-      "stall gap == 2"        => (r["stall_gaps"] == 2),
-      "agent stall gap == 1"  => (r["agent_stall_gaps"] == 1),
+      "stall gap == 3"        => (r["stall_gaps"] == 3),
+      "agent stall gap == 1 (turn-boundary excluded)" => (r["agent_stall_gaps"] == 1),
       "session-idle == 1"     => (r["session_idle_gaps"] == 1),
       # cost = 10/1e6*1 + 20/1e6*2 + 5/1e6*0.1 + 7/1e6*0.5 = 0.0000000535
       "cost derived"        => (r["cost"]["usd"] >= 0.0 && r["cost"]["priced"] == true),
+      # new_user_turn? edge cases: string user msg is a fresh turn; a user record
+      # of tool_result blocks is mid-turn (a stall candidate), not a new turn;
+      # an assistant record is never a new turn.
+      "string user is new turn"  =>
+        new_user_turn?({ "message" => { "role" => "user", "content" => "hi" } }),
+      "tool_result is mid-turn"  =>
+        !new_user_turn?({ "message" => { "role" => "user",
+                                         "content" => [{ "type" => "tool_result" }] } }),
+      "assistant is not new turn" =>
+        !new_user_turn?({ "message" => { "role" => "assistant", "content" => [] } }),
     }
     checks.each do |name, pass|
       next if pass
