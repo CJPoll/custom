@@ -160,9 +160,18 @@ die(stale) unless stale.empty?
 if install
   FileUtils.mkdir_p(INSTALL_DIR)
   templates.each_key do |name|
-    src = File.join(AGENTS_DIR, "athena-#{name}.md")
-    FileUtils.cp(src, File.join(INSTALL_DIR, "athena-#{name}.md"))
-    puts "  → installed athena-#{name}.md to #{INSTALL_DIR}"
+    src  = File.join(AGENTS_DIR, "athena-#{name}.md")
+    dest = File.join(INSTALL_DIR, "athena-#{name}.md")
+    # The install target is hardlinked to the source here (same device+inode),
+    # so a copy would be onto itself — FileUtils.cp raises "same file". When
+    # they already resolve to the same file the install is a no-op: the build
+    # that just rewrote src also updated dest. Only copy when they differ.
+    if File.identical?(src, dest)
+      puts "  = athena-#{name}.md already installed (same file)"
+    else
+      FileUtils.cp(src, dest)
+      puts "  → installed athena-#{name}.md to #{INSTALL_DIR}"
+    end
   end
 end
 
