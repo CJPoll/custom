@@ -3,16 +3,17 @@
     "purpose": "Per-model $/MTok rates so harness-metrics derives dollar cost from token usage (there is no dollar-cost field in the session JSONL).",
     "schema": "each model id maps to {input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok} in USD per 1,000,000 tokens",
     "model_ids_from": "enumerated from real ~/.claude/projects/**/*.jsonl transcripts (message.model)",
-    "STATUS": "SCAFFOLD — EXAMPLE VALUES, NOT VERIFIED. These are placeholder rates in the shape of historical Claude tier pricing; several ids (opus-5, fable-5, fable-5-1, opus-4-8, sonnet-5) are current models whose list pricing I could not verify. VERIFY every rate against current published Claude pricing before trusting any dollar figure.",
-    "verify": "Replace with current list pricing; cache_read is typically ~0.1x input and cache_write ~1.25x input, but confirm per model.",
-    "scaffolded_on": "2026-09-17",
+    "STATUS": "input/output rates VERIFIED 2026-06-24 against the first-party Anthropic price table (via the claude-api skill's Current Models table). cache_read/cache_write are DERIVED from Anthropic's standard ratio (cache_read = 0.1x input, cache_write(5m) = 1.25x input) EXCEPT the Fable cache_read, which the skill states directly as $0.25/MTok; confirm the exact cache rates per model if cache-heavy cost precision matters.",
+    "verified_source": "claude-api skill — Current Models table (Anthropic first-party API rates), cached 2026-06-24",
+    "caveats": "First-party rates only (Bedrock/Vertex differ). Opus 5/4.8 fast mode is billed at $10/$50 but shares the same model id, so fast-mode sessions are under-costed here. Batch API is ~50% of these rates.",
+    "verified_on": "2026-09-17",
     "note_keys": "keys beginning with _ are metadata and are ignored by the parser (it only looks up real model ids seen in transcripts)."
   },
-  "claude-opus-4-8": { "input_per_mtok": 15.0, "output_per_mtok": 75.0, "cache_read_per_mtok": 1.5, "cache_write_per_mtok": 18.75, "_verified": false },
-  "claude-opus-5":   { "input_per_mtok": 15.0, "output_per_mtok": 75.0, "cache_read_per_mtok": 1.5, "cache_write_per_mtok": 18.75, "_verified": false },
-  "claude-opus-4-6": { "input_per_mtok": 15.0, "output_per_mtok": 75.0, "cache_read_per_mtok": 1.5, "cache_write_per_mtok": 18.75, "_verified": false },
-  "claude-sonnet-5": { "input_per_mtok": 3.0, "output_per_mtok": 15.0, "cache_read_per_mtok": 0.3, "cache_write_per_mtok": 3.75, "_verified": false },
-  "claude-haiku-4-5-20251001": { "input_per_mtok": 0.8, "output_per_mtok": 4.0, "cache_read_per_mtok": 0.08, "cache_write_per_mtok": 1.0, "_verified": false },
-  "claude-fable-5":   { "input_per_mtok": 3.0, "output_per_mtok": 15.0, "cache_read_per_mtok": 0.3, "cache_write_per_mtok": 3.75, "_verified": false, "_note": "Fable tier pricing unknown to me — placeholder mirrors a mid tier; verify." },
-  "claude-fable-5-1": { "input_per_mtok": 3.0, "output_per_mtok": 15.0, "cache_read_per_mtok": 0.3, "cache_write_per_mtok": 3.75, "_verified": false, "_note": "Fable tier pricing unknown to me — placeholder mirrors a mid tier; verify." }
+  "claude-opus-5":   { "input_per_mtok": 5.0, "output_per_mtok": 25.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 6.25, "_verified": true, "_cache_basis": "derived 0.1x/1.25x" },
+  "claude-opus-4-8": { "input_per_mtok": 5.0, "output_per_mtok": 25.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 6.25, "_verified": true, "_cache_basis": "derived 0.1x/1.25x" },
+  "claude-opus-4-6": { "input_per_mtok": 5.0, "output_per_mtok": 25.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 6.25, "_verified": true, "_cache_basis": "derived 0.1x/1.25x" },
+  "claude-sonnet-5": { "input_per_mtok": 2.0, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.2, "cache_write_per_mtok": 2.5, "_verified": true, "_cache_basis": "derived 0.1x/1.25x" },
+  "claude-haiku-4-5-20251001": { "input_per_mtok": 1.0, "output_per_mtok": 5.0, "cache_read_per_mtok": 0.1, "cache_write_per_mtok": 1.25, "_verified": true, "_cache_basis": "derived 0.1x/1.25x" },
+  "claude-fable-5":   { "input_per_mtok": 10.0, "output_per_mtok": 50.0, "cache_read_per_mtok": 0.25, "cache_write_per_mtok": 12.5, "_verified": true, "_cache_basis": "read $0.25 per skill; write derived 1.25x" },
+  "claude-fable-5-1": { "input_per_mtok": 10.0, "output_per_mtok": 50.0, "cache_read_per_mtok": 0.25, "cache_write_per_mtok": 12.5, "_verified": true, "_cache_basis": "read $0.25 per skill; write derived 1.25x" }
 }
