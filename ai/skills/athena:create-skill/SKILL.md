@@ -57,6 +57,15 @@ functional namespace like `fix:` — do **not** prepend another. Examples:
 Detection rule: if the name matches `^[a-z0-9-]+:` it already carries a prefix;
 leave it alone. Otherwise prepend `athena:` (or the user's requested prefix).
 
+## First: is a skill the right home?
+
+A skill is the home for **task-triggered** procedures and long reference
+material. If the content is really a machine- or repo-wide rule (→ CLAUDE.md),
+doctrine several agents must carry (→ a block), one agent's own prose (→ its
+template), a deterministically-checkable mistake (→ a hook), or a durable fact
+about the world (→ memory / the KG), it does not belong in a skill. When in
+doubt, consult the **[[athena:harness-placement]]** skill before scaffolding.
+
 ## Steps
 
 1. **Resolve the final name** per the rules above.

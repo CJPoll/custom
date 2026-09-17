@@ -81,37 +81,28 @@ machine where that symlink is absent (it copies the rendered files into a real
 `~/.claude/agents/` directory). Check with `ls -ld ~/.claude/agents` before
 assuming either.
 
-## Blocks vs skills vs CLAUDE.md vs template prose
+## Is it even a block or template prose?
 
-Four places can hold instruction text. They differ in *who* reads them and
-*when*.
+Before you build, decide *where the text belongs at all* — a block and template
+prose are only two of six homes (skill, CLAUDE.md, hook, and memory are the
+others). That decision has one canonical home: the **[[athena:harness-placement]]**
+skill. Consult it whenever you are unsure; this section covers only the two
+homes this build mechanism owns.
 
-| Mechanism | Read by | Loaded | Use for |
-| --- | --- | --- | --- |
-| **Block** (`ai/blocks/**`) | Only the agents `routing.yml` routes it to | Baked into the agent's system prompt at build time — always present, no decision to load | Doctrine two or more agents must carry identically and unconditionally: architecture rules, TDD order, access-control policy, the never-end-turn-waiting rule. |
-| **Template prose** (`.md.in` body) | That one agent | Baked in at build time | The agent's identity, inputs, workflow, reporting format — anything true of exactly one agent. |
-| **Skill** (`ai/skills/<name>/SKILL.md`) | Any session or agent, on demand | Pulled in when the model decides the task matches the skill description, or when listed in an agent's `skills:` frontmatter for deterministic preload | Procedures that are task-triggered rather than always-on: how to post a standup, how to validate a spec, how to scaffold an agent. Anything with reference material too long to carry in every prompt. |
-| **CLAUDE.md** (`~/CLAUDE.md`, `<repo>/CLAUDE.md`) | Every session in scope, main and subagents alike | Injected at session start | Machine- or repo-wide facts and hard rules that apply regardless of which agent is running: identity, memory policy, project layout, hard rules, per-machine automation. |
+- **Block** (`ai/blocks/**`, routed in `routing.yml`) — doctrine two or more
+  agents must carry **word-for-word and unconditionally**. Baked into each
+  routed agent's prompt at build time.
+- **Template prose** (`.md.in` body) — anything true of **exactly one agent**:
+  its identity, inputs, workflow, reporting format, role-specific doctrine.
 
-Decision procedure:
+Two rules of thumb this build encodes:
 
-1. Does it apply to every session on this machine / in this repo? →
-   **CLAUDE.md**.
-2. Is it only needed when a specific kind of task comes up, or is it long
-   reference material? → **Skill**. If a particular agent must always have it
-   loaded, list it in that agent's `skills:` frontmatter and add the routing
-   entry under `skills:` in `routing.yml`.
-3. Must two or more agents carry it word-for-word, always? → **Block**, routed
-   to exactly those agents.
-4. Otherwise it is that one agent's own text → **template prose**.
-
-Two rules of thumb the build encodes:
-
-- A block with one consumer is a smell (the build allows it, but if only one
-  agent needs it, it is template prose). A block with zero consumers is an
-  error.
-- Never restate a block's content in a template or a skill. The point of the
-  block is that the fact exists once.
+- **A block with one consumer is a smell** — the build allows it, but if only
+  one agent needs it, it is template prose. A block with zero consumers is a
+  build error.
+- **Never restate a block's content** in a template or a skill. The point of
+  the block is that the fact exists once; a short pointer is fine, a copy that
+  can drift is not.
 
 ## Workflows
 

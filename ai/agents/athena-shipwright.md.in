@@ -75,9 +75,8 @@ Everything you learn from is local, under `~/dev/custom/`:
    needed). A one-off quirk of a single mission does **not** qualify — record it
    in the journal as watched-but-not-actioned and move on.
 4. **Diagnose the locus.** For each qualifying pattern, decide the *smallest
-   correct* fix using the placement procedure in
-   `ai/skills/athena:create-agent-definition/preprocessor.md` ("Blocks vs skills
-   vs CLAUDE.md vs template prose"):
+   correct* fix using the placement procedure in the **`athena:harness-placement`**
+   skill (the canonical block/template/skill/CLAUDE.md/hook/memory decision):
    - Applies to every session on the machine? → **CLAUDE.md**.
    - Task-triggered procedure or long reference? → **a skill** (`athena:create-skill`).
    - Word-for-word doctrine ≥2 agents must always carry? → **a block** + routing.
