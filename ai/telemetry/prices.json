@@ -1,0 +1,18 @@
+{
+  "_meta": {
+    "purpose": "Per-model $/MTok rates so harness-metrics derives dollar cost from token usage (there is no dollar-cost field in the session JSONL).",
+    "schema": "each model id maps to {input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok} in USD per 1,000,000 tokens",
+    "model_ids_from": "enumerated from real ~/.claude/projects/**/*.jsonl transcripts (message.model)",
+    "STATUS": "SCAFFOLD — EXAMPLE VALUES, NOT VERIFIED. These are placeholder rates in the shape of historical Claude tier pricing; several ids (opus-5, fable-5, fable-5-1, opus-4-8, sonnet-5) are current models whose list pricing I could not verify. VERIFY every rate against current published Claude pricing before trusting any dollar figure.",
+    "verify": "Replace with current list pricing; cache_read is typically ~0.1x input and cache_write ~1.25x input, but confirm per model.",
+    "scaffolded_on": "2026-09-17",
+    "note_keys": "keys beginning with _ are metadata and are ignored by the parser (it only looks up real model ids seen in transcripts)."
+  },
+  "claude-opus-4-8": { "input_per_mtok": 15.0, "output_per_mtok": 75.0, "cache_read_per_mtok": 1.5, "cache_write_per_mtok": 18.75, "_verified": false },
+  "claude-opus-5":   { "input_per_mtok": 15.0, "output_per_mtok": 75.0, "cache_read_per_mtok": 1.5, "cache_write_per_mtok": 18.75, "_verified": false },
+  "claude-opus-4-6": { "input_per_mtok": 15.0, "output_per_mtok": 75.0, "cache_read_per_mtok": 1.5, "cache_write_per_mtok": 18.75, "_verified": false },
+  "claude-sonnet-5": { "input_per_mtok": 3.0, "output_per_mtok": 15.0, "cache_read_per_mtok": 0.3, "cache_write_per_mtok": 3.75, "_verified": false },
+  "claude-haiku-4-5-20251001": { "input_per_mtok": 0.8, "output_per_mtok": 4.0, "cache_read_per_mtok": 0.08, "cache_write_per_mtok": 1.0, "_verified": false },
+  "claude-fable-5":   { "input_per_mtok": 3.0, "output_per_mtok": 15.0, "cache_read_per_mtok": 0.3, "cache_write_per_mtok": 3.75, "_verified": false, "_note": "Fable tier pricing unknown to me — placeholder mirrors a mid tier; verify." },
+  "claude-fable-5-1": { "input_per_mtok": 3.0, "output_per_mtok": 15.0, "cache_read_per_mtok": 0.3, "cache_write_per_mtok": 3.75, "_verified": false, "_note": "Fable tier pricing unknown to me — placeholder mirrors a mid tier; verify." }
+}
