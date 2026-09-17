@@ -1,0 +1,152 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# critic-eval — measure a standing LLM-judge critic (athena-diff-critic) against
+# a LABELED fixture set, so the critic is trusted in the loop only once it clears
+# a stated precision/recall bar. These fixtures are the LLM-JUDGED tier, kept
+# SEPARATE from harness-eval's deterministic corpus (A1): scoring a judge needs a
+# model in the loop, which is exactly what the deterministic corpus excludes.
+#
+# Fixtures: ai/eval/critic-fixtures/<NN-name>/meta (label=bad|good, expect=<kind>
+# for bad) + input.diff. A bad case is DETECTED when the critic's FINDINGS
+# trailer contains the expected kind; a good case is a FALSE POSITIVE when the
+# critic reports any finding.
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/critic-eval --self-test   verify the precision/recall scorer (no model)
+#   ai/bin/critic-eval --run         invoke the critic per fixture (MODEL IN LOOP;
+#                                    NOT part of the deterministic gate) and print
+#                                    the precision/recall report vs the trust bar
+#   ai/bin/critic-eval               list fixtures + the trust bar + how to run
+#
+# Trust bar: recall >= 0.8 AND precision >= 0.8 over the labeled set before the
+# critic is wired as a BLOCKING step. Until then it runs advisory-only.
+
+require "json"
+
+AI_DIR       = File.expand_path("..", __dir__)
+FIXTURES_DIR = File.join(AI_DIR, "eval", "critic-fixtures")
+CRITIC       = "athena-diff-critic"
+RECALL_BAR   = 0.8
+PRECISION_BAR = 0.8
+
+def parse_meta(path)
+  m = {}
+  File.foreach(path) { |l| l = l.strip; next if l.empty? || l.start_with?("#"); k, _, v = l.partition("="); m[k.strip] = v.strip }
+  m
+end
+
+def fixtures
+  Dir.glob(File.join(FIXTURES_DIR, "*")).select { |d| File.file?(File.join(d, "meta")) }.sort
+end
+
+# Score a list of result rows into precision/recall.
+# row = {label: "bad"|"good", expect: kind, flagged: [kinds]}
+def score(rows)
+  bad  = rows.select { |r| r[:label] == "bad" }
+  good = rows.select { |r| r[:label] == "good" }
+  detected = bad.count { |r| r[:flagged].include?(r[:expect]) }
+  false_pos = good.count { |r| !r[:flagged].empty? }
+  recall    = bad.empty? ? 1.0 : (detected.to_f / bad.size).round(3)
+  # precision over the "bad" signal: true positives / (true positives + false positives)
+  precision = (detected + false_pos).zero? ? 1.0 : (detected.to_f / (detected + false_pos)).round(3)
+  { bad: bad.size, good: good.size, detected: detected, false_pos: false_pos,
+    recall: recall, precision: precision,
+    pass: (recall >= RECALL_BAR && precision >= PRECISION_BAR) }
+end
+
+# Parse the critic's FINDINGS trailer from its output.
+def parse_findings(text)
+  line = text.lines.reverse.find { |l| l =~ /^\s*FINDINGS:/i }
+  return [] unless line
+  body = line.sub(/^\s*FINDINGS:/i, "").strip
+  return [] if body.empty? || body.casecmp?("none")
+  body.split(",").map { |s| s.strip.downcase }.reject(&:empty?)
+end
+
+def run_model
+  rows = fixtures.map do |dir|
+    m = parse_meta(File.join(dir, "meta"))
+    input = File.read(File.join(dir, "input.diff"))
+    prompt = "Review this change against your rubric and end with the FINDINGS trailer.\n\n```diff\n#{input}\n```"
+    out, _e, st = require_open3 { Open3.capture3("claude", "-p", "--agent", CRITIC, stdin_data: prompt) }
+    flagged = st&.success? ? parse_findings(out.to_s) : []
+    warn "  ! critic invocation failed for #{File.basename(dir)} (is `claude` on PATH?)" unless st&.success?
+    { name: File.basename(dir), label: m["label"], expect: m["expect"], flagged: flagged }
+  end
+  rows.each { |r| puts "#{r[:label] == 'bad' ? (r[:flagged].include?(r[:expect]) ? 'HIT ' : 'MISS') : (r[:flagged].empty? ? 'OK  ' : 'FP  ')}  #{r[:name]}  expect=#{r[:expect]} got=#{r[:flagged].join('|')}" }
+  s = score(rows)
+  puts "critic-eval: recall=#{s[:recall]} precision=#{s[:precision]} " \
+       "(detected #{s[:detected]}/#{s[:bad]} bad, #{s[:false_pos]} false pos over #{s[:good]} good)"
+  if s[:pass]
+    puts "critic-eval: PASS — clears the trust bar (recall>=#{RECALL_BAR}, precision>=#{PRECISION_BAR}); OK to wire as a blocking step."
+    0
+  else
+    warn "critic-eval: BELOW BAR — keep athena-diff-critic advisory-only for now."
+    warn "  Fix: improve the critic's rubric/prompt (or the fixtures if mislabeled) until recall>=#{RECALL_BAR} and precision>=#{PRECISION_BAR}; do not wire it as blocking below the bar."
+    1
+  end
+end
+
+def require_open3
+  require "open3"
+  yield
+rescue StandardError => e
+  [nil, e.message, nil]
+end
+
+def list
+  fx = fixtures
+  puts "critic-eval: #{fx.size} labeled fixture(s) for #{CRITIC}:"
+  fx.each { |d| m = parse_meta(File.join(d, "meta")); puts "  - #{File.basename(d)} [#{m['label']}] expect=#{m['expect']}" }
+  puts "Trust bar: recall>=#{RECALL_BAR} AND precision>=#{PRECISION_BAR} before wiring as a blocking step."
+  puts "Run the model-in-loop evaluation with: ai/bin/critic-eval --run"
+  0
+end
+
+def run_self_test
+  ok = true
+  # perfect: 3 bad all detected, 2 good clean -> recall 1, precision 1, pass
+  perfect = [
+    { label: "bad", expect: "a", flagged: ["a"] },
+    { label: "bad", expect: "b", flagged: ["b", "c"] },
+    { label: "bad", expect: "c", flagged: ["c"] },
+    { label: "good", expect: "none", flagged: [] },
+    { label: "good", expect: "none", flagged: [] },
+  ]
+  sp = score(perfect)
+  ok = false unless sp[:recall] == 1.0 && sp[:precision] == 1.0 && sp[:pass]
+
+  # one miss + one false positive -> recall 2/3, precision 2/3, below bar
+  mixed = [
+    { label: "bad", expect: "a", flagged: ["a"] },
+    { label: "bad", expect: "b", flagged: [] },        # miss
+    { label: "bad", expect: "c", flagged: ["c"] },
+    { label: "good", expect: "none", flagged: ["x"] }, # false positive
+    { label: "good", expect: "none", flagged: [] },
+  ]
+  sm = score(mixed)
+  ok = false unless sm[:detected] == 2 && sm[:false_pos] == 1 && sm[:recall] == 0.667 && !sm[:pass]
+
+  # trailer parsing
+  ok = false unless parse_findings("...\nFINDINGS: access-control, tests\n") == ["access-control", "tests"]
+  ok = false unless parse_findings("all good\nFINDINGS: none\n") == []
+
+  if ok
+    puts "critic-eval: self-test OK"
+    0
+  else
+    warn "critic-eval: self-test FAILED"
+    warn "  Fix: the precision/recall scorer or FINDINGS parser is wrong — a miss must lower recall, a good-case finding must lower precision."
+    1
+  end
+end
+
+exit(
+  if ARGV.include?("--self-test") then run_self_test
+  elsif ARGV.include?("--run") then run_model
+  else list
+  end
+)

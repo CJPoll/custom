@@ -1,0 +1,5 @@
++def delete_account(conn, %{"id" => id}) do
++  account = Accounts.get!(id)
++  Accounts.delete(account)
++  json(conn, %{ok: true})
++end

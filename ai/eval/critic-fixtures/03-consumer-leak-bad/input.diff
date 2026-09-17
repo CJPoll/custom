@@ -1,0 +1,3 @@
+--- a/ai/skills/fix:tests/SKILL.md
++++ b/ai/skills/fix:tests/SKILL.md
++Run tests inside the gen_saas-postgres-1 container via ./bin/checks/test.sh.

@@ -1,0 +1,4 @@
+-def calc_total(items), do: Enum.sum(items)
++def total(items), do: Enum.sum(items)
+-  assert calc_total([1,2]) == 3
++  assert total([1,2]) == 3

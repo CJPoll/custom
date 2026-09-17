@@ -1,0 +1,5 @@
++def full_name(%User{first: f, last: l}), do: "#{f} #{l}"
++
++test "full_name joins first and last" do
++  assert User.full_name(%User{first: "Ada", last: "L"}) == "Ada L"
++end

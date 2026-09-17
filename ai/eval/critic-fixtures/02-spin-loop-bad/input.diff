@@ -1,0 +1,4 @@
++  # wait for the pipeline
++  while true; do
++    check_status && break
++  done
