@@ -47,6 +47,6 @@ fi
 # First time for this message: record it and block with a reminder to Athena.
 : > "$MARK" 2>/dev/null
 cat <<'JSON'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"PRONOUN CHECK: this outgoing message contains \"he\", \"him\", or \"his\". Before it sends, confirm that NONE of those pronouns refer to Cody, who uses they/them. If any refer to Cody, rewrite them to they/them. Then re-send: this check is one-time per message, so re-sending the identical message (or the corrected version, which will be re-confirmed once) will pass."}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"PRONOUN CHECK: this outgoing message contains \"he\", \"him\", or \"his\". Before it sends, confirm that NONE of those pronouns refer to Cody, who uses they/them. Fix: if any refer to Cody, rewrite them to they/them. Then re-send: this check is one-time per message, so re-sending the identical message (or the corrected version, which will be re-confirmed once) will pass."}}
 JSON
 exit 0

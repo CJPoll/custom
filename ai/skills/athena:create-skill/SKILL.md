@@ -99,3 +99,7 @@ doubt, consult the **[[athena:harness-placement]]** skill before scaffolding.
   concrete examples over abstract description.
 - Prefer one dense `SKILL.md` over sprawling files; split into supporting files
   only when the content genuinely warrants it.
+- **If the skill ships a guard/check/hook that can fail**, its failure output
+  must carry an actionable `Fix:` clause (what to change to pass), per CLAUDE.md's
+  "Guard/error messages are written for the LLM" — `check-guard-messages` enforces
+  it in the gate.

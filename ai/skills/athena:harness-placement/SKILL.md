@@ -64,6 +64,11 @@ Ask in this order; take the first that fits:
   template — a walt_ui docker/emulator quirk belongs in `walt_ui/CLAUDE.md` or
   the KG, never in the shared Captain/Admiral prose (wrong altitude: true of one
   repo). Putting it in a generic template taxes every unrelated run.
+- **A hook/check you author writes its failure output FOR the LLM.** When the
+  home is a hook or a check script, its deny/failure message must carry an
+  actionable `Fix:` clause (what to change so the next attempt passes), per
+  CLAUDE.md's "Guard/error messages are written for the LLM"; `check-guard-messages`
+  enforces it.
 
 ## Generic skill that must vary per repo
 

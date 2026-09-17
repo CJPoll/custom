@@ -121,3 +121,18 @@ skills/agents. (Conventions adapted from riddler's howie/wurk harness.)
   identifier — with the pointer inline at the definitional mention (that is where
   the grep lands), one pointer per document. Do not sweep dangling step numbers
   or line ranges through old documents; that is the rewriting this forbids.
+
+## Guard/error messages are written for the LLM
+
+Every first-party guard, hook, check, or gate-wrapper that can DENY or FAIL must
+tell the agent HOW TO SELF-CORRECT, not just that it failed. (Convention adapted
+from riddler's howie/wurk harness — "errors written for the LLM.")
+
+- The failure/deny output carries the greppable marker **`Fix:`** followed by an
+  actionable instruction: what to change so the next attempt passes. Exemplars:
+  `ai/bin/check-generic-skills`, `ai/hooks/safe-wait-guard.sh`,
+  `ai/hooks/pronoun-guard.sh`.
+- A script with no deny/failure path (a context injector, a notifier) is exempt;
+  record it in `EXEMPT` in `ai/bin/check-guard-messages` with a reason.
+- `ai/bin/check-guard-messages` enforces this (part of the shipwright gate); a
+  new hook is covered by default, so a bare failure message turns the gate red.

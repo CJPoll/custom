@@ -38,6 +38,9 @@ errors = []
 def die(errors)
   warn "build-agents: FAILED"
   errors.each { |e| warn "  - #{e}" }
+  warn "  Fix: edit the offending ai/agents/*.md.in template or ai/blocks/** " \
+       "(and ai/agents/routing.yml if it is a routing error), then rerun " \
+       "ai/bin/build-agents to regenerate the .md files."
   exit 1
 end
 

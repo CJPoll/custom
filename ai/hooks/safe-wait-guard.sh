@@ -79,7 +79,7 @@ if [ "$HAS_WHILE_UNTIL" = true ] || has_word 'for'; then HAS_LOOP_KW=true; fi
 if [ "$HAS_WHILE_UNTIL" = true ] \
   && has 'pgrep[[:space:]]+-[[:alnum:]]*f' \
   && ! has '\$\$'; then
-  deny 'SAFE-WAIT (pgrep -f self-match): `pgrep -f "<pattern>"` inside a wait loop matches the waiting shell'"'"'s own argv, so the loop never exits. Exclude the waiter: `pgrep -f "<pattern>" | grep -v $$`, or block on the known PID instead: `timeout N tail --pid=<pid> -f /dev/null`. (A foreground `sleep` used to pace a poll can also return immediately in this harness — prefer blocking on the child or a harness wakeup.)'
+  deny 'SAFE-WAIT (pgrep -f self-match): `pgrep -f "<pattern>"` inside a wait loop matches the waiting shell'"'"'s own argv, so the loop never exits. Fix: exclude the waiter — `pgrep -f "<pattern>" | grep -v $$`, or block on the known PID instead: `timeout N tail --pid=<pid> -f /dev/null`. (A foreground `sleep` used to pace a poll can also return immediately in this harness — prefer blocking on the child or a harness wakeup.)'
 fi
 
 # ---- Shape 1: busy-spin loop (while/until with no sleep) -------------------
@@ -88,7 +88,7 @@ fi
 if [ "$HAS_WHILE_UNTIL" = true ] && [ "$HAS_DO_DONE" = true ] \
   && ! has_word 'sleep' \
   && ! has_word 'read'; then
-  deny 'SAFE-WAIT (busy-spin loop): this while/until loop has no `sleep` in its body — it pins the CPU (PT-919: an orphaned spin loop pinned load ~290 and flaked ExUnit into Postgres 57014 timeouts). Prefer letting the harness wake you (task-notification / SendMessage / Monitor), or block on the child with `timeout N tail --pid=<pid> -f /dev/null`. If it must be a poll, add a `sleep N` per iteration (cadence matched to the state) plus a max-iteration/`timeout` bound.'
+  deny 'SAFE-WAIT (busy-spin loop): this while/until loop has no `sleep` in its body — it pins the CPU (PT-919: an orphaned spin loop pinned load ~290 and flaked ExUnit into Postgres 57014 timeouts). Fix: prefer letting the harness wake you (task-notification / SendMessage / Monitor), or block on the child with `timeout N tail --pid=<pid> -f /dev/null`. If it must be a poll, add a `sleep N` per iteration (cadence matched to the state) plus a max-iteration/`timeout` bound.'
 fi
 
 # ---- Shape 2: unreaped backgrounded loop ----------------------------------
@@ -97,7 +97,7 @@ fi
 if [ "$HAS_LOOP_KW" = true ] && [ "$HAS_DO_DONE" = true ] \
   && has 'done[[:space:];)}]*&([^&]|$)' \
   && ! has_word 'p?kill|trap'; then
-  deny 'SAFE-WAIT (unreaped background loop): this loop is backgrounded (`done &` / `( … ) &`) with no reaper, so a crashed or rate-limited parent orphans it to PID 1 (PT-919: pinned load ~290 for an hour, flaked ExUnit into Postgres 57014 timeouts). Install a reaper — `child=$!; trap '"'"'kill "$child" 2>/dev/null'"'"' EXIT INT TERM` — or do not background it: block in the foreground with `timeout N tail --pid=<pid> -f /dev/null`, or let the harness wake you.'
+  deny 'SAFE-WAIT (unreaped background loop): this loop is backgrounded (`done &` / `( … ) &`) with no reaper, so a crashed or rate-limited parent orphans it to PID 1 (PT-919: pinned load ~290 for an hour, flaked ExUnit into Postgres 57014 timeouts). Fix: install a reaper — `child=$!; trap '"'"'kill "$child" 2>/dev/null'"'"' EXIT INT TERM` — or do not background it: block in the foreground with `timeout N tail --pid=<pid> -f /dev/null`, or let the harness wake you.'
 fi
 
 # No dangerous construct detected -> allow silently.

@@ -1,0 +1,128 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# check-guard-messages — enforce the LLM-facing guard-message convention.
+#
+# Every first-party guard / hook / check / gate-wrapper that can DENY or FAIL
+# must tell the agent HOW TO SELF-CORRECT, not just that it failed. The
+# convention (see ~/dev/custom/CLAUDE.md -> "Guard/error messages are written
+# for the LLM") is: such output carries the greppable marker `Fix:` followed by
+# an actionable instruction. `check-generic-skills` and the safe-wait /
+# pronoun guards are the exemplars.
+#
+# This meta-check asserts every guard in scope carries the marker, and fails
+# (naming the guard) on a bare failure message. Deny-by-default: any hook under
+# ai/hooks/ is treated as a guard unless it is EXEMPT here with a reason.
+#
+# Convention idea adapted from riddler's howie/wurk harness ("errors written for
+# the LLM"), reimplemented in our conventions.
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/check-guard-messages            scan guards; exit 1 if any lacks Fix:
+#   ai/bin/check-guard-messages --self-test  verify the checker's own logic
+#
+# Extending: a new hook is covered automatically. A new guard-type bin goes in
+# GUARD_BINS. A hook with no deny/failure path goes in EXEMPT with a reason.
+
+require "fileutils"
+require "tmpdir"
+
+AI_DIR    = File.expand_path("..", __dir__)
+HOOKS_DIR = File.join(AI_DIR, "hooks")
+
+MARKER = "Fix:"
+
+# Hooks that legitimately have NO deny/failure path -> nothing to self-correct.
+EXEMPT = {
+  "main-session-policy.sh" => "SessionStart context injector; emits guidance, never denies/fails",
+  "notify-idle.sh"         => "idle notifier; emits a notification, never denies/fails",
+}.freeze
+
+# Guard-type scripts under ai/bin/ (not every bin is a guard).
+GUARD_BINS = %w[
+  build-agents
+  check-generic-skills
+].freeze
+
+def hook_guards
+  Dir.glob(File.join(HOOKS_DIR, "*.sh"))
+     .reject { |p| p.end_with?(".self-test.sh") }
+     .reject { |p| EXEMPT.key?(File.basename(p)) }
+     .sort
+end
+
+def bin_guards
+  GUARD_BINS.map { |b| File.join(AI_DIR, "bin", b) }.select { |p| File.file?(p) }
+end
+
+# A guard is compliant if its source contains the Fix: marker somewhere in its
+# output. (Static heuristic: the actionable clause is present to be emitted.)
+def compliant?(path)
+  File.read(path).include?(MARKER)
+end
+
+def scan(paths)
+  paths.reject { |p| compliant?(p) }
+end
+
+def run_check
+  guards = hook_guards + bin_guards
+  if guards.empty?
+    warn "check-guard-messages: FAILED — no guards found under ai/hooks or GUARD_BINS"
+    warn "  Fix: confirm ai/hooks/*.sh exist and GUARD_BINS names real ai/bin scripts."
+    return 1
+  end
+
+  missing = scan(guards)
+  if missing.empty?
+    puts "check-guard-messages: OK — #{guards.size} guard(s) carry an actionable " \
+         "'#{MARKER}' message (#{EXEMPT.size} exempt: #{EXEMPT.keys.join(', ')})"
+    return 0
+  end
+
+  warn "check-guard-messages: FAILED — guard(s) with a bare failure message " \
+       "(no '#{MARKER}' self-correction):"
+  missing.each do |p|
+    rel = p.start_with?(AI_DIR) ? p.sub("#{AI_DIR}/", "") : p
+    warn "  - #{rel}"
+  end
+  warn "  Fix: add a '#{MARKER} <what to change to pass>' clause to each guard's " \
+       "deny/failure output; or, if the script has no failure path, add it to " \
+       "EXEMPT in ai/bin/check-guard-messages with a reason."
+  1
+end
+
+def run_self_test
+  dir = File.join(Dir.tmpdir, "check-guard-messages-selftest-#{Process.pid}")
+  FileUtils.mkdir_p(dir)
+  ok = true
+  begin
+    good = File.join(dir, "good.sh")
+    bad  = File.join(dir, "bad.sh")
+    File.write(good, "#!/bin/sh\necho 'DENY: bad thing. Fix: do the good thing.'\n")
+    File.write(bad,  "#!/bin/sh\necho 'failed'\n")
+
+    if scan([good]).any?
+      warn "self-test: FAIL — a guard WITH '#{MARKER}' was flagged"; ok = false
+    end
+    if scan([bad]).empty?
+      warn "self-test: FAIL — a guard WITHOUT '#{MARKER}' was not flagged"; ok = false
+    end
+  ensure
+    FileUtils.rm_rf(dir)
+  end
+
+  if ok
+    puts "check-guard-messages: self-test OK"
+    0
+  else
+    warn "check-guard-messages: self-test FAILED"
+    warn "  Fix: the scan predicate is broken — it must flag a bare-failure guard " \
+         "and pass a guard carrying '#{MARKER}'."
+    1
+  end
+end
+
+exit(ARGV.include?("--self-test") ? run_self_test : run_check)
