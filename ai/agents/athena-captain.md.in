@@ -142,6 +142,21 @@ bare role name reaches you specifically.
      skill do the equivalent by hand. Your report names each bot round that
      had findings and that the skill was invoked for it — the athena-admiral
      checks for that line before boarding.
+   - **When the CI review bots did NOT actually review, run the local pair.**
+     The `claude-review`/`adr-review` bots are often unavailable: they auto-run
+     only on a branch's FIRST pipeline (a force-push right after `mr create`,
+     or any later pipeline, skips them), and they have repeatedly been out of
+     credit — a job that fails with "Credit balance is too low" or a billing
+     error is an INFRA OUTAGE, not a review round; never read it as "no
+     findings". Some paths (e.g. this repo's `ui/` MRs) run no review bots at
+     all. Whenever no bot genuinely produced findings for the current head, the
+     sanctioned review round is a fresh `code-reviewer` + `adr-reviewer`
+     subagent pair, spawned together for ONE round against your MR's diff over
+     its merge-base: fix their must-fix items with TDD and resolve nits by
+     reply, exactly as for bot findings. That local pair IS your one review
+     round — name it in your report (e.g. "review round: local code-reviewer +
+     adr-reviewer, bots creditless") so the athena-admiral can board on it. Do
+     NOT force or replay the `*:request` bot jobs to manufacture a bot round.
    - ONE review round, then move forward (owner policy, 2026-09-09). There is
      **no expectation of multiple review-bot rounds.** Address the FIRST round
      of findings once — fix genuine/must-fix items with TDD; resolve nits by
