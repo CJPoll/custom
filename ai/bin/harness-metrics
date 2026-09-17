@@ -35,7 +35,12 @@ AI_DIR      = File.expand_path("..", __dir__)
 OUT_JSON    = File.join(AI_DIR, "telemetry", "metrics.json")
 PRICES_FILE = File.join(AI_DIR, "telemetry", "prices.json")
 DEFAULT_DIR = File.expand_path("~/.claude/projects")
-STALL_GAP_S = 300 # inter-record gap (s) counted as an idle/stall gap
+STALL_GAP_S = 300 # inter-record gap (s): floor for a plausible in-session stall
+# Ceiling: a gap this long is a human closing/resuming the session, not an agent
+# stall the harness could act on. Without it a 21-day session-resume gap was
+# miscounted as a "stall" (observed 2026-09-17: gaps up to 1,807,179s). Gaps at
+# or above the ceiling are reported separately as session_idle_gaps, not stalls.
+STALL_GAP_CEILING_S = 14400 # 4h
 
 # Roll the harness-event.sh PostToolUse sink (A4) into the summary, if present.
 # Complements the JSONL parse with real-time-emitted events.
@@ -73,7 +78,11 @@ def fold(acc, o, prev_ts)
   if ts && prev_ts
     begin
       gap = Time.parse(ts) - Time.parse(prev_ts)
-      acc[:stall_gaps] += 1 if gap >= STALL_GAP_S
+      if gap >= STALL_GAP_CEILING_S
+        acc[:session_idle_gaps] += 1 # human closed/resumed the session, not a stall
+      elsif gap >= STALL_GAP_S
+        acc[:stall_gaps] += 1
+      end
     rescue StandardError
       # unparseable timestamp -> ignore for gap accounting
     end
@@ -124,7 +133,7 @@ end
 def parse_files(files)
   acc = {
     files: 0, records: 0, malformed: 0,
-    tool_calls: 0, tool_results: 0, tool_errors: 0, stall_gaps: 0,
+    tool_calls: 0, tool_results: 0, tool_errors: 0, stall_gaps: 0, session_idle_gaps: 0,
     tools: Hash.new(0), skills: Hash.new(0), models: Hash.new(0),
     tokens: Hash.new(0), by_model: {},
   }
@@ -176,6 +185,7 @@ def build_report(acc, prices)
     "tool_calls" => acc[:tool_calls], "tool_results" => acc[:tool_results],
     "tool_errors" => acc[:tool_errors], "tool_failure_rate" => rate,
     "stall_gaps" => acc[:stall_gaps], "stall_gap_threshold_s" => STALL_GAP_S,
+    "stall_gap_ceiling_s" => STALL_GAP_CEILING_S, "session_idle_gaps" => acc[:session_idle_gaps],
     "tools" => acc[:tools], "skills" => acc[:skills], "models" => acc[:models],
     "tokens" => acc[:tokens].transform_keys(&:to_s),
     "cost" => cost.transform_keys(&:to_s),
@@ -187,7 +197,8 @@ def print_human(r)
        "(#{r['malformed_lines']} malformed skipped)"
   puts "  tool calls: #{r['tool_calls']}  results: #{r['tool_results']}  " \
        "errors: #{r['tool_errors']}  failure-rate: #{r['tool_failure_rate']}"
-  puts "  idle/stall gaps (>#{r['stall_gap_threshold_s']}s): #{r['stall_gaps']}"
+  puts "  idle/stall gaps (#{r['stall_gap_threshold_s']}-#{r['stall_gap_ceiling_s']}s): #{r['stall_gaps']}" \
+       "  (session-idle gaps >=#{r['stall_gap_ceiling_s']}s, excluded: #{r['session_idle_gaps']})"
   tk = r["tokens"]
   puts "  tokens: in=#{tk['input']} out=#{tk['output']} cache_read=#{tk['cache_read']} " \
        "cache_write=#{tk['cache_write']} thinking=#{tk['thinking']}"
@@ -257,8 +268,10 @@ def run_self_test
         "message" => { "content" => [
           { "type" => "tool_result", "is_error" => false },
           { "type" => "tool_result", "is_error" => true } ] } },
-      # a big gap -> one stall gap
+      # a 1h gap (< ceiling) -> one stall gap
       { "type" => "assistant", "timestamp" => "2026-09-16T01:00:00.000Z", "message" => {} },
+      # a multi-day gap (>= ceiling) -> session-idle, NOT a stall
+      { "type" => "assistant", "timestamp" => "2026-09-19T01:00:00.000Z", "message" => {} },
     ]
     File.write(f, lines.map { |l| JSON.generate(l) }.join("\n") + "\n" + "{ not json\n")
 
@@ -276,6 +289,7 @@ def run_self_test
       "input tokens == 10"  => (r["tokens"]["input"] == 10),
       "thinking == 3"       => (r["tokens"]["thinking"] == 3),
       "stall gap == 1"      => (r["stall_gaps"] == 1),
+      "session-idle == 1"   => (r["session_idle_gaps"] == 1),
       # cost = 10/1e6*1 + 20/1e6*2 + 5/1e6*0.1 + 7/1e6*0.5 = 0.0000000535
       "cost derived"        => (r["cost"]["usd"] >= 0.0 && r["cost"]["priced"] == true),
     }
