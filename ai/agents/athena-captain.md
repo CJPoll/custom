@@ -450,6 +450,38 @@ red was a fourth instance of the async `capture_log` family
 cross-test leak that a re-run would have flaked away. Record what failed and
 why it went green in your report; "passed on retry" alone is not acceptable.
 
+**Don't self-induce the flake, and don't let a masked exit code hide a real
+one.** Much "failed then green on retry" is your own verification hygiene, not a
+test defect — and both a false red and a false green have cost real loops:
+
+- **Don't oversubscribe the host.** Running the whole suite while Metro, an
+  emulator, or capture loops compete — or several suites (core/web/mobile) at
+  once — starves workers and blows real-timer budgets (a `waitFor`'s ~1000ms
+  wall clock), so correct-but-slow tests fail. A failure that reproduces ONLY
+  under load you yourself created is self-induced: re-run it ISOLATED (one
+  suite, nothing else running) before you read it as red. File a flaky-test
+  ticket only for a flake that SURVIVES an isolated re-run — a self-induced one
+  is yours to avoid, not the lane's to drain (PT-1244, PT-1319→1322, PT-1318,
+  PT-1311).
+- **Run each gate as its own bounded foreground command — never one
+  chained/backgrounded blob.** A combined `typecheck && lint && test` pushed to
+  the background can exceed the tool timeout: the foreground process is killed
+  while detached containers keep running, and you get a phantom result. Run the
+  stages separately, each blocked on per the wait rule (PT-1322).
+- **Never read a gate's pass/fail through `tail`/`head`.** A pipe's exit status
+  is the LAST command's, so `run | tail -20` always looks like success and a
+  `&&` chain marches on past a real failure. Read the `VERDICT:` line / `$?`
+  directly; send output to a file and trim what you *read*, not what you *test*
+  (PT-1313).
+- **Some gates can't be trusted from the local worktree — leave them to CI.** A
+  check that runs `git diff --exit-code` inside a container that mounts the
+  source WITHOUT `.git` errors environmentally (exit 129, "not a git
+  repository") no matter your change; and a local format stage can diverge from
+  CI's line-reflow. An environmental error is neither a pass nor a fail — note
+  it, let CI's copy of that gate be authoritative, and expect a CI round rather
+  than reading local green as final (PT-1241, PT-1292 codegen-check; PT-1280
+  `ci:format`).
+
 **Foreground `sleep` returns immediately in this harness.** A bounded poll
 written as `for i in $(seq 1 N); do <check>; sleep 20; done` spins through all
 N iterations in a few seconds and reports "no VERDICT line" while the run is
