@@ -43,6 +43,9 @@ while [ $# -gt 0 ]; do
     --schedule) shift; [ $# -gt 0 ] || { echo "error: --schedule needs a value" >&2; exit 1; }; SCHEDULE="$1" ;;
     --schedule=*) SCHEDULE="${1#*=}" ;;
     --remove)  REMOVE=1 ;;
+    --check)   CHECK=1 ;;
+    --backup)  shift; [ $# -gt 0 ] || { echo "error: --backup needs a file path" >&2; exit 1; }; BACKUP_FILE="$1" ;;
+    --backup=*) BACKUP_FILE="${1#*=}" ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -71,8 +74,38 @@ put_crontab() {
 }
 
 # ---- preflight -------------------------------------------------------------
-[ -x "$RUNNER" ] || { echo "error: runner not found or not executable: $RUNNER" >&2; exit 2; }
 command -v crontab >/dev/null 2>&1 || { echo "error: crontab not installed (need cronie/dcron)" >&2; exit 2; }
+
+# ---- check path (read-only): is the shipwright entry live? ------------------
+# Read-only; safe for an agent/CI to run. Exit 0 if the entry is present, 1 if
+# missing, with an actionable Fix.
+if [ "${CHECK:-0}" -eq 1 ]; then
+  if crontab -l 2>/dev/null | grep -qF -- "$RUNNER"; then
+    say "OK — the athena-shipwright cron entry is installed:"
+    crontab -l 2>/dev/null | grep -F -- "$RUNNER" | sed 's/^/  /'
+    exit 0
+  fi
+  echo "MISSING — no crontab entry runs $RUNNER; the hourly cross-session loop is not scheduled." >&2
+  echo "  Fix: run 'scripts/setup-shipwright-cron' (or restore from your --backup file) to reinstall it." >&2
+  exit 1
+fi
+
+# ---- backup path (read-only snapshot of the live crontab) -------------------
+# Writes the CURRENT crontab to a file so a spool reset can be restored. The
+# committed installer is the canonical source of the entry; this snapshots the
+# live state (which may hold other personal entries) for the operator, so keep
+# the target OUT of git (a local/gitignored path).
+if [ -n "${BACKUP_FILE:-}" ]; then
+  if crontab -l >"$BACKUP_FILE" 2>/dev/null; then
+    say "Backed up current crontab to $BACKUP_FILE"
+    exit 0
+  fi
+  echo "error: could not read the current crontab to back up." >&2
+  echo "  Fix: ensure a crontab exists (crontab -l) and the target dir is writable." >&2
+  exit 1
+fi
+
+[ -x "$RUNNER" ] || { echo "error: runner not found or not executable: $RUNNER" >&2; exit 2; }
 
 # ---- remove path -----------------------------------------------------------
 if [ "$REMOVE" -eq 1 ]; then

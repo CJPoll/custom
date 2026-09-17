@@ -136,3 +136,23 @@ from riddler's howie/wurk harness — "errors written for the LLM.")
   record it in `EXEMPT` in `ai/bin/check-guard-messages` with a reason.
 - `ai/bin/check-guard-messages` enforces this (part of the shipwright gate); a
   new hook is covered by default, so a bare failure message turns the gate red.
+
+## Cross-session reflection loop (athena-shipwright cron)
+
+The shipwright's cross-session reflection runs on an hourly cron and aggregates
+across sessions — it is not a one-shot queue drain.
+
+- **Schedule:** a USER crontab entry, `0 * * * * scripts/athena-shipwright-run.sh`.
+  Fragility: this is a per-user crontab (cronie/OpenRC on this box), NOT an
+  OpenRC/systemd service — if the user crontab is reset, the loop silently stops.
+- **Durable state** (`ai-artifacts/shipwright/`, gitignored local runtime):
+  `cursor.txt` (timestamp of the last processed artifact), `journal.md` (durable
+  record + Decisions/Won't-change), `runs/` (per-run logs). The cursor makes it
+  incremental; it mines `ai-artifacts/coordination/*/reports/*` newer than the
+  cursor and clusters a pattern only when it recurs in ≥2 independent runs.
+- **Install / restore / verify:** `scripts/setup-shipwright-cron` is the
+  committed, idempotent source of the entry — re-run it to reinstall after a
+  reset (`--dry-run` to preview, `--remove` to uninstall). `--check` asserts the
+  entry is live (read-only); `--backup <file>` snapshots the current crontab to a
+  local (gitignored) file. The committed installer is the canonical source, so
+  the loop is always restorable even without the snapshot.
