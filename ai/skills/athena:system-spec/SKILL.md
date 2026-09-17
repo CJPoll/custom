@@ -5,13 +5,37 @@ description: JSON Schema encoding of the SpecMaker domain-model DSL (spec_maker/
 
 # athena:system-spec
 
-`schemas/` is a JSON Schema (Draft 2020-12) that encodes the SpecMaker ontology
-defined by the Elixir DSL in
-`~/dev/gen_saas/apps/spec_maker/lib/spec_maker/domain_model.ex`. It lets a spec
-be authored and validated as a single JSON document instead of Elixir.
+`schemas/` is a self-contained JSON Schema (Draft 2020-12) for authoring and
+validating a system/domain model as JSON. **Authoring a model has no external
+dependency** — everything you need is this skill's `schemas/` and `examples/`.
 
-Validate the root document against **`schemas/spec.schema.json`**. A worked
-example lives in `examples/demo.spec.json`.
+> **Provenance (origin only, not a live dependency).** The ontology these
+> schemas encode was originally derived from the Elixir DSL at
+> `spec_maker/lib/spec_maker/domain_model.ex` in the `gen_saas` project. That is
+> a note on where the vocabulary came from — nothing about authoring or
+> validating a model reads, requires, or touches `gen_saas`. Do **not** go read
+> that file to author a model; read these schemas and `examples/`.
+
+Validate a single-system document against **`schemas/spec.schema.json`**. A
+worked example lives in `examples/demo.spec.json`. A multi-layer model
+(subsystems/supersystems) adds a **`schemas/composition.schema.json`** manifest —
+see *Multi-layer models* below.
+
+## Where the model lives
+
+The model is a project artifact, authored **in the target project's own
+`ai-artifacts/` tree** (not this repo, and not inside any per-Mission worktree —
+commit it to the project's main checkout so every worktree can read it):
+
+- **Per-system spec** → `ai-artifacts/domain/<app>/<app>.spec.json` (one
+  directory per target app; split by subdomain/aggregate into several
+  `*.spec.json` files there if a single system is large).
+- **Supersystem manifest** (multi-layer only) →
+  `ai-artifacts/domain/<composition>.composition.json`, at the `domain/` root
+  above the per-app directories.
+
+This is the same path `athena:domain-grounding` and `athena:analyze-code` read
+from, so authoring and grounding meet at one convention.
 
 ## The encoding
 
@@ -64,13 +88,48 @@ derivable boilerplate — so they are not part of this instance schema.
 express cross-array foreign keys. A generator/importer must check these
 separately.
 
+## Multi-layer models (subsystems / supersystems)
+
+A `Spec` describes **one** system (one codebase) and is the DSL's only RBAC root —
+every entity `belongs_to(:spec)`. So a single system is exactly one `*.spec.json`
+document, and **a single-system model needs nothing else** — author one Spec and
+stop (the whole single-system path is unchanged by the multi-layer support).
+
+A **multi-layer** model composes systems *by reference*, never by cramming
+several systems into one document (which would break the one-RBAC-root
+invariant). A supersystem is a separate, tiny **composition manifest**
+(`composition.schema.json`, a `*.composition.json` document) that:
+
+- names each member system and points at its document by **relative path** —
+  `spec_path` for a leaf system (a `*.spec.json`), or `composition_path` for a
+  nested composition (another `*.composition.json`). Exactly one of the two per
+  member (`oneOf`). `composition_path` is what lets a model nest to N layers
+  (supersystem → subsystem → sub-subsystem) with no schema change.
+- optionally records **`system_relationships`** — supersystem-level edges
+  between members (e.g. `calls_public_api`, `publishes_event_to`,
+  `shares_database_with`) that no single member's Spec can express.
+
+Each member system stays a standalone, independently valid `*.spec.json`, so the
+single-system authoring path and `examples/demo.spec.json` are untouched. Worked
+multi-layer example: `examples/platform.composition.json` composing
+`examples/identity.spec.json` and `examples/billing.spec.json`.
+
+As with `*_id` references inside a Spec, a composition's referential integrity
+(each `*_path` resolves to an existing document, member `id`s are unique, and
+each relationship endpoint names a member `id`) is a **convention** JSON Schema
+cannot express — a generator/importer checks it separately.
+
 ## File layout
 
 ```
 schemas/
-  spec.schema.json          root — Spec fields + every top-level collection
+  spec.schema.json          root of ONE system — Spec fields + every collection
+  composition.schema.json   multi-layer manifest — SystemComposition,
+                            MemberSystem, SystemRelationship (references specs
+                            and nested compositions by path)
   common.schema.json        shared Id / Ref primitives
-  specs.schema.json         Bucket, Subdomain
+  specs.schema.json         Bucket, Subdomain (a Spec's architectural vocabulary,
+                            within one spec — not about multiple specs)
   structure.schema.json     Module, Function, Parameter, ReturnValue,
                             Contract, Callback, Implementation
   data.schema.json          Entity, Field, EntityRelationship
@@ -106,6 +165,14 @@ docs = [json.load(open(p)) for p in glob.glob(os.path.join(d, "*.json"))]
 reg = Registry().with_resources(
     (doc["$id"], Resource.from_contents(doc)) for doc in docs
 )
-root = json.load(open(os.path.join(d, "spec.schema.json")))
-Draft202012Validator(root, registry=reg).validate(json.load(open("examples/demo.spec.json")))
+spec_root = json.load(open(os.path.join(d, "spec.schema.json")))
+Draft202012Validator(spec_root, registry=reg).validate(json.load(open("examples/demo.spec.json")))
+
+# A multi-layer manifest validates against composition.schema.json (same registry):
+comp_root = json.load(open(os.path.join(d, "composition.schema.json")))
+Draft202012Validator(comp_root, registry=reg).validate(json.load(open("examples/platform.composition.json")))
 ```
+
+A composition only structurally validates the manifest itself; validate each
+member `*.spec.json` (resolved from its `spec_path`) as a Spec too, and check the
+referential-integrity conventions above.

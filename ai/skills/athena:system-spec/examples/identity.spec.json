@@ -1,0 +1,17 @@
+{
+  "$schema": "../schemas/spec.schema.json",
+  "name": "Identity",
+  "description": "A subsystem Spec — user accounts and authentication. Referenced by platform.composition.json as a leaf member.",
+  "status": "draft",
+  "target_app": "identity",
+
+  "subdomains": [
+    { "id": "sd_accounts", "name": "Accounts" }
+  ],
+  "entities": [
+    { "id": "e_user", "name": "User", "subdomain_id": "sd_accounts" }
+  ],
+  "fields": [
+    { "id": "fld_email", "name": "email", "ecto_type": "string", "required": true, "entity_id": "e_user" }
+  ]
+}

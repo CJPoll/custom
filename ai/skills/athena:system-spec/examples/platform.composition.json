@@ -1,0 +1,21 @@
+{
+  "$schema": "../schemas/composition.schema.json",
+  "name": "Acme Platform",
+  "description": "A worked multi-layer model: the platform supersystem composed of the Identity and Billing subsystems, each a standalone Spec referenced by path. Swap either spec_path for composition_path to nest a deeper layer.",
+  "kind": "supersystem",
+
+  "systems": [
+    { "id": "sys_identity", "name": "Identity", "role": "subsystem", "spec_path": "./identity.spec.json" },
+    { "id": "sys_billing", "name": "Billing", "role": "subsystem", "spec_path": "./billing.spec.json" }
+  ],
+
+  "system_relationships": [
+    {
+      "id": "rel_billing_calls_identity",
+      "from_system_id": "sys_billing",
+      "to_system_id": "sys_identity",
+      "kind": "calls_public_api",
+      "description": "Billing resolves the account owner of a subscription through Identity's public API."
+    }
+  ]
+}

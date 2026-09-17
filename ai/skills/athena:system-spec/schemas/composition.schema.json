@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.dev/spec-maker/composition.schema.json",
+  "title": "SpecMaker System Composition",
+  "description": "A System Composition models a MULTI-LAYER system: a supersystem composed of member subsystems (and, recursively, nested sub-compositions). It is a SEPARATE document type from a Spec (spec.schema.json): a Spec describes ONE codebase and is the DSL's only RBAC root, so each member system stays a standalone, independently valid *.spec.json. A composition adds no per-system content — it only names the members, points at each member's document by relative path, and optionally records supersystem-level edges between them. A single-system model needs no composition document at all; author one Spec and stop.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "kind": {
+      "type": "string",
+      "description": "Free-text classifier for this layer, e.g. \"supersystem\", \"platform\", \"product\". Documentation only; the schema does not invent an enum."
+    },
+
+    "systems": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/MemberSystem" }
+    },
+    "system_relationships": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/SystemRelationship" }
+    }
+  },
+  "required": ["name", "systems"],
+
+  "$defs": {
+    "MemberSystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One member of this composition. A member is EITHER a leaf system (references a Spec document via `spec_path`) OR a nested composition (references another composition document via `composition_path`) — exactly one of the two, enforced with oneOf. Nesting via `composition_path` is what makes an N-layer (supersystem → subsystem → sub-subsystem) model possible without changing the schema.",
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "role": {
+          "type": "string",
+          "description": "Free-text role hint for this member, e.g. \"subsystem\", \"shared-kernel\", \"gateway\". Documentation only."
+        },
+        "spec_path": {
+          "type": "string",
+          "description": "Relative path (from this composition document) to the member's Spec document — a leaf system, validating against spec.schema.json."
+        },
+        "composition_path": {
+          "type": "string",
+          "description": "Relative path (from this composition document) to a nested composition document, validating against composition.schema.json. Use instead of spec_path when the member is itself a multi-layer system."
+        }
+      },
+      "required": ["id", "name"],
+      "oneOf": [
+        { "required": ["spec_path"] },
+        { "required": ["composition_path"] }
+      ]
+    },
+
+    "SystemRelationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A supersystem-level edge between two member systems of this composition (e.g. one subsystem calls another's public API, or publishes an event the other consumes). Cross-system wiring the individual Specs cannot express because it lives above any one of them.",
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/Id" },
+        "from_system_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "to_system_id": { "$ref": "common.schema.json#/$defs/Ref" },
+        "kind": {
+          "type": "string",
+          "description": "Free-text edge kind, e.g. \"calls_public_api\", \"publishes_event_to\", \"shares_database_with\", \"depends_on\". Documentation only; the schema does not invent an enum."
+        },
+        "description": { "type": "string" }
+      },
+      "required": ["id", "from_system_id", "to_system_id"]
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "../schemas/spec.schema.json",
+  "name": "Billing",
+  "description": "A subsystem Spec — subscriptions and invoicing. Referenced by platform.composition.json as a leaf member.",
+  "status": "draft",
+  "target_app": "billing",
+
+  "subdomains": [
+    { "id": "sd_subscriptions", "name": "Subscriptions" }
+  ],
+  "entities": [
+    { "id": "e_subscription", "name": "Subscription", "subdomain_id": "sd_subscriptions" }
+  ],
+  "fields": [
+    { "id": "fld_plan", "name": "plan", "ecto_type": "string", "required": true, "entity_id": "e_subscription" }
+  ]
+}
