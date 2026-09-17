@@ -14,7 +14,7 @@ standup, reported by Athena — matching the team convention (Margie posts
 
 Use the **`athena:slack`** bot scripts (Athena's own `xoxb-` token) — NOT the
 `claude.ai Slack` MCP plugin, which posts under Cody's OAuth (his name on
-Athena's words) and is frequently 404-down. See [[athena-slack-bot-integration]].
+Athena's words) and is frequently 404-down. See [[athena:slack]].
 
 - Scripts: `~/.claude/skills/athena:slack/bin/…` (`whoami`, `read-channel`, `reply`).
 - If anything is confusing, run `bin/whoami` first — expect user `athena`,
