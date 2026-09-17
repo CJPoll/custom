@@ -99,8 +99,11 @@ bare role name reaches you specifically.
    criteria, architecture-bucket violations, unscoped queries, missing
    authorization tests. Fix what you find yourself — no one downstream is
    going to catch it for you. Then run the standing judge:
-   **`ai/bin/critic-review`** (the read-only `athena-diff-critic` over your
-   diff). It is a **blocking** step — if it reports findings (exit 2), address
+   **`~/dev/custom/ai/bin/critic-review`** (the read-only `athena-diff-critic`
+   over your diff). Use the absolute path — you run from a product worktree
+   (e.g. `~/.local/worktrees/<project>/…`), where a bare `ai/bin/critic-review`
+   resolves against the worktree cwd and does not exist, silently fail-opening
+   the judge on every run. It is a **blocking** step — if it reports findings (exit 2), address
    each before you commit/open the MR (or, if a finding is wrong, note why).
    **Fail-open on infra error:** if the critic cannot run (no `claude`, model
    error — exit 0 with a loud `Fix:` note), do not let it wedge you; proceed,
