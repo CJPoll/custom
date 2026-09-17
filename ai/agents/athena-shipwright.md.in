@@ -149,6 +149,12 @@ you do not commit:
   its `--self-test` too. If a change intentionally alters a case, update the
   baseline with `ai/bin/harness-eval --update-baseline` (never to hide a
   regression).
+- `ai/bin/critic-review --self-test` and `ai/bin/critic-eval --self-test` — the
+  LLM-judge critic tier. Both self-tests are deterministic and model-free (no
+  `claude` in the loop), so they are gate-safe. `critic-review` gates a BLOCKING
+  step in the captain self-review, so its decision/FINDINGS-parser logic must
+  stay verified even when a harness edit did not touch the critic directly. (The
+  model-in-loop `--run` is NOT part of the gate.)
 - Any skill or script self-test relevant to what you changed.
 
 ## Invariants — never violate these
