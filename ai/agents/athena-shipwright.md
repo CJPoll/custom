@@ -51,6 +51,12 @@ Everything you learn from is local, under `~/dev/custom/`:
   local runtime state, created on your first run). The journal records what you
   changed, the evidence, and — critically — a **Decisions / Won't-change**
   section you must honor so you never thrash.
+- **Telemetry** — `ai/bin/harness-metrics` parses the session JSONL under
+  `~/.claude/projects/` into metrics (tool-failure rate, idle/stall gaps, token
+  cost, which skills/tools fire); `ai/bin/harness-signals` distills those into
+  the short list of over-threshold signals worth acting on. This is
+  **metric-backed** evidence to corroborate (or challenge) the prose-derived
+  friction from the reports.
 
 ## Method
 
@@ -71,13 +77,20 @@ Everything you learn from is local, under `~/dev/custom/`:
    missing context, a tool that was named but absent (e.g.
    `bin/prep-commit.sh`), a repeated manual workaround, a wrong process
    assumption, a flaky/blocked/stuck cause, wasted or redone effort. Quote the
-   source and note its run-id.
+   source and note its run-id. Then run `ai/bin/harness-metrics` followed by
+   `ai/bin/harness-signals` and fold any surfaced signal into this list as
+   **metric-backed** friction — telemetry aggregates across all sessions, so a
+   surfaced signal is already cross-session evidence. If no telemetry exists,
+   harness-signals reports nothing and you proceed report-only (never a failure).
 3. **Cluster and qualify.** Group friction across runs. A pattern **qualifies
    for a change** only if either (a) it appears in **two or more independent
-   runs**, or (b) it is a **single unambiguous factual gap** in the harness (an
-   instruction that is simply wrong, or missing information the crew provably
+   runs** (a metric-backed signal from `harness-signals` counts as cross-session
+   evidence), or (b) it is a **single unambiguous factual gap** in the harness
+   (an instruction that is simply wrong, or missing information the crew provably
    needed). A one-off quirk of a single mission does **not** qualify — record it
-   in the journal as watched-but-not-actioned and move on.
+   in the journal as watched-but-not-actioned and move on. When a qualifying
+   pattern is telemetry-backed, **cite the metric** (the `harness-signals` line)
+   in the journal entry.
 4. **Diagnose the locus.** For each qualifying pattern, decide the *smallest
    correct* fix using the placement procedure in the **`athena:harness-placement`**
    skill (the canonical block/template/skill/CLAUDE.md/hook/memory decision):

@@ -1,0 +1,107 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# harness-signals — turn harness-metrics output into the short list of
+# telemetry-evidenced signals worth the shipwright's attention, so cross-session
+# clustering is metric-backed rather than prose-only (gap 5 / A6). The shipwright
+# run folds these into its aggregation alongside the coordination reports and
+# cites the metric in the journal.
+#
+# Reads a metrics JSON (ai/telemetry/metrics.json by default, or --file PATH, or
+# the aggregate over ~/.claude/projects via `harness-metrics --json`). Emits only
+# signals that clear a threshold — the metric equivalent of the shipwright's
+# "recurs in >= 2 runs" bar — so a quiet, healthy harness produces nothing.
+# Degrades gracefully: if no metrics exist, it reports "no telemetry" and exits 0
+# (the shipwright then falls back to report-only, never breaking the loop).
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/harness-signals [--file metrics.json] [--json]
+#   ai/bin/harness-signals --self-test
+#
+# Thresholds (tunable): a tool with failure_rate >= 0.20 over >= 5 results; any
+# idle/stall gaps; any runtime error events.
+
+require "json"
+
+AI_DIR       = File.expand_path("..", __dir__)
+DEFAULT_FILE = File.join(AI_DIR, "telemetry", "metrics.json")
+FAIL_RATE    = 0.20
+MIN_RESULTS  = 5
+
+def signals_from(m)
+  out = []
+  rate = m["tool_failure_rate"].to_f
+  results = m["tool_results"].to_i
+  if rate >= FAIL_RATE && results >= MIN_RESULTS
+    out << { "kind" => "tool_failure_rate", "metric" => rate, "detail" =>
+             "tool failure rate #{rate} over #{results} results (>= #{FAIL_RATE})" }
+  end
+  gaps = m["stall_gaps"].to_i
+  out << { "kind" => "stall_gaps", "metric" => gaps, "detail" =>
+           "#{gaps} idle/stall gap(s) over the window" } if gaps.positive?
+  ev = m["runtime_events"]
+  if ev.is_a?(Hash) && ev["present"] && ev["error_events"].to_i.positive?
+    out << { "kind" => "runtime_error_events", "metric" => ev["error_events"],
+             "detail" => "#{ev['error_events']} runtime error event(s) from the hook sink" }
+  end
+  out
+end
+
+def load_metrics(path)
+  return nil unless File.file?(path)
+  JSON.parse(File.read(path))
+rescue StandardError
+  nil
+end
+
+def run(argv)
+  json = argv.include?("--json")
+  path = (i = argv.index("--file")) ? argv[i + 1] : DEFAULT_FILE
+  m = load_metrics(path)
+  if m.nil?
+    warn "harness-signals: no telemetry at #{path}"
+    warn "  Note: run ai/bin/harness-metrics first (writes ai/telemetry/metrics.json); " \
+         "absent telemetry is not an error — the shipwright falls back to report-only."
+    puts(json ? "[]" : "no telemetry — nothing to surface")
+    return 0
+  end
+  sig = signals_from(m)
+  if json
+    puts JSON.pretty_generate(sig)
+  elsif sig.empty?
+    puts "harness-signals: no signals over threshold (healthy window)"
+  else
+    puts "harness-signals: #{sig.size} signal(s) for the shipwright to cluster:"
+    sig.each { |s| puts "  - [#{s['kind']}] #{s['detail']}" }
+  end
+  0
+end
+
+def run_self_test
+  ok = true
+  hot = { "tool_failure_rate" => 0.5, "tool_results" => 20, "stall_gaps" => 3,
+          "runtime_events" => { "present" => true, "error_events" => 2 } }
+  cold = { "tool_failure_rate" => 0.0, "tool_results" => 100, "stall_gaps" => 0,
+           "runtime_events" => { "present" => true, "error_events" => 0 } }
+  below = { "tool_failure_rate" => 0.5, "tool_results" => 2, "stall_gaps" => 0,
+            "runtime_events" => { "present" => false } }
+
+  checks = {
+    "hot surfaces 3 signals"       => (signals_from(hot).size == 3),
+    "cold surfaces none"           => (signals_from(cold).empty?),
+    "below min_results suppressed" => (signals_from(below).none? { |s| s["kind"] == "tool_failure_rate" }),
+  }
+  checks.each { |n, pass| (warn "self-test: FAIL — #{n}"; ok = false) unless pass }
+  if ok
+    puts "harness-signals: self-test OK"
+    0
+  else
+    warn "harness-signals: self-test FAILED"
+    warn "  Fix: align signals_from thresholds with the fixtures — hot must surface, cold must not."
+    1
+  end
+end
+
+exit(ARGV.include?("--self-test") ? run_self_test : run(ARGV))
