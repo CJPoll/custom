@@ -1,0 +1,271 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# harness-metrics — parse Claude Code session-JSONL transcripts into harness
+# metrics: which tools/skills fire, tool-failure rate, idle/stall gaps, and token
+# usage (with dollar cost DERIVED from a price table when the model is known).
+# Real signal for the learning-loop gaps (recurrence detection, graduation,
+# variant selection) instead of anecdote.
+#
+# Read-only. Parses DEFENSIVELY: unknown/extra fields ignored, malformed lines
+# skipped and counted, never crashes, fail-open. Verified JSONL schema (this
+# harness, 2026-09): assistant records carry message.usage.{input_tokens,
+# output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+# output_tokens_details.thinking_tokens} and message.model; every record carries
+# a `timestamp`; tool calls are content blocks type "tool_use" (name) and results
+# type "tool_result" (is_error). There is NO dollar-cost field — cost is derived
+# from tokens x a per-model price table (ai/telemetry/prices.json if present;
+# absent -> tokens still reported, cost marked N/A).
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/harness-metrics [--dir DIR] [--session FILE] [--json]
+#   ai/bin/harness-metrics --self-test
+#
+# Default DIR: ~/.claude/projects. Default output: human summary to stdout AND a
+# machine-readable ai/telemetry/metrics.json (for A4/A6). --json prints the JSON
+# to stdout instead.
+
+require "json"
+require "fileutils"
+require "time"
+
+AI_DIR      = File.expand_path("..", __dir__)
+OUT_JSON    = File.join(AI_DIR, "telemetry", "metrics.json")
+PRICES_FILE = File.join(AI_DIR, "telemetry", "prices.json")
+DEFAULT_DIR = File.expand_path("~/.claude/projects")
+STALL_GAP_S = 300 # inter-record gap (s) counted as an idle/stall gap
+
+def load_prices
+  return {} unless File.file?(PRICES_FILE)
+  JSON.parse(File.read(PRICES_FILE))
+rescue StandardError
+  {}
+end
+
+# Fold one parsed JSONL record into the accumulator.
+def fold(acc, o, prev_ts)
+  ts = o["timestamp"]
+  if ts && prev_ts
+    begin
+      gap = Time.parse(ts) - Time.parse(prev_ts)
+      acc[:stall_gaps] += 1 if gap >= STALL_GAP_S
+    rescue StandardError
+      # unparseable timestamp -> ignore for gap accounting
+    end
+  end
+
+  msg = o["message"].is_a?(Hash) ? o["message"] : nil
+  if msg
+    acc[:models][msg["model"]] += 1 if msg["model"]
+    u = msg["usage"]
+    if u.is_a?(Hash)
+      acc[:tokens][:input]   += (u["input_tokens"] || 0)
+      acc[:tokens][:output]  += (u["output_tokens"] || 0)
+      acc[:tokens][:cache_read]  += (u["cache_read_input_tokens"] || 0)
+      acc[:tokens][:cache_write] += (u["cache_creation_input_tokens"] || 0)
+      det = u["output_tokens_details"]
+      acc[:tokens][:thinking] += (det["thinking_tokens"] || 0) if det.is_a?(Hash)
+      # per-model token tally for cost derivation
+      m = msg["model"] || "unknown"
+      acc[:by_model][m] ||= Hash.new(0)
+      acc[:by_model][m][:input]  += (u["input_tokens"] || 0)
+      acc[:by_model][m][:output] += (u["output_tokens"] || 0)
+      acc[:by_model][m][:cache_read]  += (u["cache_read_input_tokens"] || 0)
+      acc[:by_model][m][:cache_write] += (u["cache_creation_input_tokens"] || 0)
+    end
+    content = msg["content"]
+    if content.is_a?(Array)
+      content.each do |b|
+        next unless b.is_a?(Hash)
+        case b["type"]
+        when "tool_use"
+          name = b["name"] || "unknown"
+          acc[:tools][name] += 1
+          acc[:tool_calls] += 1
+          if name == "Skill"
+            skill = (b["input"] || {})["skill"] rescue nil
+            acc[:skills][skill || "unknown"] += 1 if b["input"].is_a?(Hash)
+          end
+        when "tool_result"
+          acc[:tool_results] += 1
+          acc[:tool_errors] += 1 if b["is_error"]
+        end
+      end
+    end
+  end
+  ts || prev_ts
+end
+
+def parse_files(files)
+  acc = {
+    files: 0, records: 0, malformed: 0,
+    tool_calls: 0, tool_results: 0, tool_errors: 0, stall_gaps: 0,
+    tools: Hash.new(0), skills: Hash.new(0), models: Hash.new(0),
+    tokens: Hash.new(0), by_model: {},
+  }
+  files.each do |f|
+    acc[:files] += 1
+    prev_ts = nil
+    File.foreach(f) do |line|
+      line = line.strip
+      next if line.empty?
+      begin
+        o = JSON.parse(line)
+      rescue StandardError
+        acc[:malformed] += 1
+        next
+      end
+      acc[:records] += 1
+      prev_ts = fold(acc, o, prev_ts)
+    end
+  rescue StandardError
+    # unreadable file -> skip, fail-open
+    next
+  end
+  acc
+end
+
+def derive_cost(by_model, prices)
+  known = 0.0
+  unpriced = []
+  by_model.each do |model, t|
+    p = prices[model]
+    if p.nil?
+      unpriced << model unless model == "unknown"
+      next
+    end
+    known += (t[:input].to_f      / 1_000_000) * (p["input_per_mtok"]      || 0)
+    known += (t[:output].to_f     / 1_000_000) * (p["output_per_mtok"]     || 0)
+    known += (t[:cache_read].to_f / 1_000_000) * (p["cache_read_per_mtok"] || 0)
+    known += (t[:cache_write].to_f/ 1_000_000) * (p["cache_write_per_mtok"]|| 0)
+  end
+  { usd: known.round(4), priced: !prices.empty?, unpriced_models: unpriced.uniq }
+end
+
+def build_report(acc, prices)
+  cost = derive_cost(acc[:by_model], prices)
+  rate = acc[:tool_results].zero? ? 0.0 : (acc[:tool_errors].to_f / acc[:tool_results]).round(4)
+  {
+    "generated" => Time.now.utc.iso8601,
+    "files" => acc[:files], "records" => acc[:records], "malformed_lines" => acc[:malformed],
+    "tool_calls" => acc[:tool_calls], "tool_results" => acc[:tool_results],
+    "tool_errors" => acc[:tool_errors], "tool_failure_rate" => rate,
+    "stall_gaps" => acc[:stall_gaps], "stall_gap_threshold_s" => STALL_GAP_S,
+    "tools" => acc[:tools], "skills" => acc[:skills], "models" => acc[:models],
+    "tokens" => acc[:tokens].transform_keys(&:to_s),
+    "cost" => cost.transform_keys(&:to_s),
+  }
+end
+
+def print_human(r)
+  puts "harness-metrics: #{r['files']} file(s), #{r['records']} records " \
+       "(#{r['malformed_lines']} malformed skipped)"
+  puts "  tool calls: #{r['tool_calls']}  results: #{r['tool_results']}  " \
+       "errors: #{r['tool_errors']}  failure-rate: #{r['tool_failure_rate']}"
+  puts "  idle/stall gaps (>#{r['stall_gap_threshold_s']}s): #{r['stall_gaps']}"
+  tk = r["tokens"]
+  puts "  tokens: in=#{tk['input']} out=#{tk['output']} cache_read=#{tk['cache_read']} " \
+       "cache_write=#{tk['cache_write']} thinking=#{tk['thinking']}"
+  c = r["cost"]
+  if c["priced"]
+    note = c["unpriced_models"].empty? ? "" : " (unpriced: #{c['unpriced_models'].join(', ')})"
+    puts "  est. cost: $#{c['usd']}#{note}"
+  else
+    puts "  est. cost: N/A (Note: no ai/telemetry/prices.json — tokens reported, dollar cost not derived)"
+  end
+  top = r["tools"].sort_by { |_, n| -n }.first(5)
+  puts "  top tools: #{top.map { |k, v| "#{k}=#{v}" }.join(', ')}" unless top.empty?
+end
+
+def run(argv)
+  json_out = argv.include?("--json")
+  dir = (i = argv.index("--dir")) ? argv[i + 1] : DEFAULT_DIR
+  session = (i = argv.index("--session")) ? argv[i + 1] : nil
+
+  files = session ? [session] : Dir.glob(File.join(dir, "**", "*.jsonl"))
+  if files.empty?
+    warn "harness-metrics: no sessions found under #{session || dir}"
+    warn "  Note: nothing to report; this is not an error (fail-open)."
+    puts(json_out ? JSON.pretty_generate("files" => 0, "records" => 0) : "no sessions")
+    return 0
+  end
+
+  acc = parse_files(files)
+  report = build_report(acc, load_prices)
+
+  FileUtils.mkdir_p(File.dirname(OUT_JSON))
+  begin
+    File.write(OUT_JSON, JSON.pretty_generate(report))
+  rescue StandardError => e
+    warn "harness-metrics: Note: could not write #{OUT_JSON} (#{e.message}); continuing."
+  end
+
+  if json_out
+    puts JSON.pretty_generate(report)
+  else
+    print_human(report)
+  end
+  0
+end
+
+def run_self_test
+  require "tmpdir"
+  ok = true
+  Dir.mktmpdir("harness-metrics-selftest-") do |dir|
+    f = File.join(dir, "s.jsonl")
+    lines = [
+      { "type" => "user", "timestamp" => "2026-09-16T00:00:00.000Z" },
+      { "type" => "assistant", "timestamp" => "2026-09-16T00:00:01.000Z",
+        "message" => { "model" => "test-model", "usage" => {
+          "input_tokens" => 10, "output_tokens" => 20,
+          "cache_read_input_tokens" => 5, "cache_creation_input_tokens" => 7,
+          "output_tokens_details" => { "thinking_tokens" => 3 } },
+          "content" => [
+            { "type" => "tool_use", "name" => "Bash" },
+            { "type" => "tool_use", "name" => "Skill", "input" => { "skill" => "review" } } ] } },
+      { "type" => "user", "timestamp" => "2026-09-16T00:00:02.000Z",
+        "message" => { "content" => [
+          { "type" => "tool_result", "is_error" => false },
+          { "type" => "tool_result", "is_error" => true } ] } },
+      # a big gap -> one stall gap
+      { "type" => "assistant", "timestamp" => "2026-09-16T01:00:00.000Z", "message" => {} },
+    ]
+    File.write(f, lines.map { |l| JSON.generate(l) }.join("\n") + "\n" + "{ not json\n")
+
+    acc = parse_files([f])
+    r = build_report(acc, { "test-model" => {
+      "input_per_mtok" => 1.0, "output_per_mtok" => 2.0,
+      "cache_read_per_mtok" => 0.1, "cache_write_per_mtok" => 0.5 } })
+
+    checks = {
+      "malformed counted"   => (r["malformed_lines"] == 1),
+      "tool_calls == 2"     => (r["tool_calls"] == 2),
+      "tool_errors == 1"    => (r["tool_errors"] == 1),
+      "failure_rate == 0.5" => (r["tool_failure_rate"] == 0.5),
+      "skill fire counted"  => (r["skills"]["review"] == 1),
+      "input tokens == 10"  => (r["tokens"]["input"] == 10),
+      "thinking == 3"       => (r["tokens"]["thinking"] == 3),
+      "stall gap == 1"      => (r["stall_gaps"] == 1),
+      # cost = 10/1e6*1 + 20/1e6*2 + 5/1e6*0.1 + 7/1e6*0.5 = 0.0000000535
+      "cost derived"        => (r["cost"]["usd"] >= 0.0 && r["cost"]["priced"] == true),
+    }
+    checks.each do |name, pass|
+      next if pass
+      warn "self-test: FAIL — #{name}"
+      ok = false
+    end
+  end
+  if ok
+    puts "harness-metrics: self-test OK"
+    0
+  else
+    warn "harness-metrics: self-test FAILED"
+    warn "  Fix: a metric no longer matches the synthetic fixture — align the parser " \
+         "with the verified JSONL schema (message.usage.*, content[].tool_use/tool_result)."
+    1
+  end
+end
+
+exit(ARGV.include?("--self-test") ? run_self_test : run(ARGV))

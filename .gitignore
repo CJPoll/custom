@@ -9,3 +9,6 @@ ai/proposals/
 
 # harness-eval transient run output (baseline.json is the committed reference)
 ai/eval/scorecard.json
+
+# harness-metrics transient output (prices.json, if added, is committed config)
+ai/telemetry/metrics.json
