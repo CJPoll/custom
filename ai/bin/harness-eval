@@ -53,13 +53,20 @@ def parse_meta(path)
 end
 
 # Run a hook with the fixture JSON on stdin; return true iff it denied.
+# Invoke with an ISOLATED HOME so any per-invocation hook state (e.g.
+# pronoun-guard's ${HOME}/.claude/.pronoun-checked dedup markers, which make an
+# identical re-send pass) is fresh every run — otherwise a "fires" case would
+# only fire the first time and the eval would be non-deterministic.
 def hook_fires?(guard, input_path)
   hook = File.join(HOOKS_DIR, "#{guard}.sh")
   return [false, "hook not found: #{hook}"] unless File.executable?(hook)
 
   input = File.read(input_path)
-  out, _err, _st = Open3.capture3(hook, stdin_data: input)
-  [out.include?('"permissionDecision":"deny"'), out]
+  Dir.mktmpdir("harness-eval-home-") do |home|
+    env = { "HOME" => home }
+    out, _err, _st = Open3.capture3(env, hook, stdin_data: input)
+    return [out.include?('"permissionDecision":"deny"'), out]
+  end
 rescue StandardError => e
   [false, "hook error: #{e.message}"]
 end
