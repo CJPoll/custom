@@ -1,1 +1,4 @@
 .claude
+
+# Claude Code managed-skills sync cache (vendored plugin skills; not harness source)
+ai/skills/synced/
