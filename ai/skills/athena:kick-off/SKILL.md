@@ -41,10 +41,13 @@ DB or a semantics.
 - **athena-architect (planning).** Owns the Notion **epics/tickets** — it
   creates or refines them from the requirements conversation via
   [[athena:ticket-management]], sequences them with dependency edges, and takes
-  scope (assign Athena; `Backlog`→`Todo`). It then produces one spec per ticket
-  at `ai-artifacts/specs/[ticket]-spec.md` in dependency order. The local spec is
-  an intermediate artifact; the **Notion tickets are the durable scope** handed
-  to the admiral.
+  scope (assign Athena; `Backlog`→`Todo`). It also authors the shared,
+  whole-system **domain model** as an athena:system-spec JSON document under
+  `ai-artifacts/domain/` — a distinct, broader artifact than the per-ticket
+  specs, the source of truth every ticket grounds against. It then produces one
+  spec per ticket at `ai-artifacts/specs/[ticket]-spec.md` in dependency order.
+  The local spec is an intermediate artifact; the **Notion tickets are the
+  durable scope** handed to the admiral.
 - **athena-admiral (implementation).** Consumes that ticket scope, reviews it for
   implementability (below), then drives the fleet of captains, merges, and ships.
   It never writes production code and never plans — it sequences and lands.

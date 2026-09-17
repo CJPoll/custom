@@ -20,6 +20,11 @@ so you know what each collection means.
 - Look for the project's spec document(s): `*.spec.json` files, typically under
   `ai-artifacts/domain/<app>/` (this is where athena:system-spec models are
   saved). There may be one file or several, split by subdomain/aggregate.
+- **If it is a multi-layer model**, a `*.composition.json` manifest sits at the
+  `ai-artifacts/domain/` root and references each member system's spec by path.
+  Read the manifest first to see the whole system's shape, then read the member
+  `*.spec.json` your task touches (and its `system_relationships` for how the
+  members wire together).
 - **If a model exists**, it is your primary source. Read it in full.
 - **If no model exists**, that absence is itself signal: note it. Fall back to
   the code's Ecto schemas, `seeds.exs`, and context modules to reconstruct the
