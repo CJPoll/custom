@@ -1,6 +1,6 @@
 ---
 name: athena:system-spec
-description: JSON Schema encoding of the SpecMaker domain-model DSL (spec_maker/lib/spec_maker/domain_model.ex). Use when authoring, validating, or generating a system/domain spec as JSON instead of the Elixir DSL — a Spec describing a target codebase's architecture, modules, functions, data entities, authz/tenancy, rules, use cases, CQRS message flow, and tests.
+description: Author or validate a system/domain model as a self-contained JSON document — a single system, or a multi-layer sub/supersystem model — with no external dependency. Use when authoring, validating, or generating a spec as JSON instead of an Elixir DSL: architecture, modules, functions, data entities and relationships, authz/tenancy, rules, use cases, CQRS message flow, and tests.
 ---
 
 # athena:system-spec
@@ -8,13 +8,9 @@ description: JSON Schema encoding of the SpecMaker domain-model DSL (spec_maker/
 `schemas/` is a self-contained JSON Schema (Draft 2020-12) for authoring and
 validating a system/domain model as JSON. **Authoring a model has no external
 dependency** — everything you need is this skill's `schemas/` and `examples/`.
-
-> **Provenance (origin only, not a live dependency).** The ontology these
-> schemas encode was originally derived from the Elixir DSL at
-> `spec_maker/lib/spec_maker/domain_model.ex` in the `gen_saas` project. That is
-> a note on where the vocabulary came from — nothing about authoring or
-> validating a model reads, requires, or touches `gen_saas`. Do **not** go read
-> that file to author a model; read these schemas and `examples/`.
+The ontology is a faithful encoding of an existing Elixir domain-model DSL, but
+that origin is only where the vocabulary came from: this skill defines the whole
+model itself, and nothing to author or validate reads any other project.
 
 Validate a single-system document against **`schemas/spec.schema.json`**. A
 worked example lives in `examples/demo.spec.json`. A multi-layer model
