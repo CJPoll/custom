@@ -97,3 +97,27 @@ sudo ln -sf ~/dev/custom/system-files/greetd-config.toml /etc/greetd/config.toml
 - Prefer composition over monolithic scripts
 - Use environment variables for configuration where appropriate
 - When writing scripts, the ordering of positional parameters vs flags should not matter. `wt stack open --create-sessions my-branch` should be just as valid as `wt stack open my-branch --create-sessions`
+
+## Documentation conventions
+
+These apply to harness docs in this repo — `ai/proposals/`,
+`ai-artifacts/shipwright/journal.md`, specs, ADRs, and cross-references between
+skills/agents. (Conventions adapted from riddler's howie/wurk harness.)
+
+- **Cite a skill's or document's steps by NAME, not by number.** Write
+  "`processes:fix`'s command-resolution step", not "`processes:fix` step 2". A
+  number is a position: insert a step above it and every external citation below
+  silently points at the wrong place, and nothing checks it. A name survives
+  renumbering and a stale one is greppable. Numbers inside a file's own body are
+  fine (a renumber edits that file anyway); a number outside follows the name as
+  decoration only ("the command-resolution step, currently step 2").
+- **Never rewrite a dated document to match later reality; ANNOTATE it.** A
+  reader who lands in a 2026-09-16 proposal or journal entry must learn what was
+  true then. Corrections are added as a new paragraph whose first token is a
+  bold dated label — `**Later (2026-10-01):** …` — the same shape as an existing
+  entry. The label's date against the document's own date is how a reader tells
+  an addition from the original, so an addition never appears as unmarked prose.
+- **Annotate only what a reader will grep for** — a renamed or removed
+  identifier — with the pointer inline at the definitional mention (that is where
+  the grep lands), one pointer per document. Do not sweep dangling step numbers
+  or line ranges through old documents; that is the rewriting this forbids.
