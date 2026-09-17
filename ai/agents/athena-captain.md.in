@@ -96,7 +96,14 @@ bare role name reaches you specifically.
    criteria before calling it done. Check specifically for: omitted
    criteria, architecture-bucket violations, unscoped queries, missing
    authorization tests. Fix what you find yourself — no one downstream is
-   going to catch it for you.
+   going to catch it for you. Then run the standing judge:
+   **`ai/bin/critic-review`** (the read-only `athena-diff-critic` over your
+   diff). It is a **blocking** step — if it reports findings (exit 2), address
+   each before you commit/open the MR (or, if a finding is wrong, note why).
+   **Fail-open on infra error:** if the critic cannot run (no `claude`, model
+   error — exit 0 with a loud `Fix:` note), do not let it wedge you; proceed,
+   but surface that the judge did not run so it gets a human eye. A `PASS`
+   (no findings) is required to consider self-review done when the critic ran.
 6. **Verify.** Run `bin/prep-commit.sh` (or this project's equivalent). It
    MUST pass — this is a hard gate before the next step, not something to
    catch later in CI. If it fails, fix it and re-run.

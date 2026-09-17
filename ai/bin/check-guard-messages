@@ -46,6 +46,7 @@ GUARD_BINS = %w[
   build-agents
   check-generic-skills
   harness-eval
+  critic-review
 ].freeze
 
 def hook_guards

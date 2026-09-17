@@ -1,0 +1,135 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# critic-review — run the standing read-only judge (athena-diff-critic) over the
+# current change as a BLOCKING review step, and decide pass / block / fail-open.
+#
+# Promoted from advisory to blocking on 2026-09-16 after `critic-eval --run`
+# cleared the trust bar (recall=1.0, precision=1.0 over 5 labeled fixtures; see
+# ai/eval/critic-baseline.json).
+#
+# Decision semantics (the load-bearing part):
+#   - critic reports FINDINGS -> BLOCK (exit 2): real issues must be addressed
+#     before the change ships.
+#   - critic reports "FINDINGS: none" -> PASS (exit 0).
+#   - critic INFRA error (no `claude`, non-zero exit, or no FINDINGS trailer) ->
+#     FAIL-OPEN (exit 0) with a LOUD Fix: note. A critic crash / model-call
+#     failure must NEVER wedge an autonomous merge; it is surfaced, not silently
+#     passed and not hard-blocked.
+#
+# The critic is READ-ONLY (as built): it inspects and reports, never edits.
+#
+# Model-in-loop: invoking the critic requires `claude`, so this is NOT part of
+# the deterministic gate. Its --self-test (the decision + FINDINGS parser) IS
+# deterministic and gate-safe.
+#
+# Usage:
+#   ai/bin/critic-review [--base BRANCH]   review HEAD's diff vs BRANCH (default
+#                                          origin/HEAD or main); exit 0 pass /
+#                                          2 block / 0 fail-open(loud)
+#   ai/bin/critic-review --self-test       verify the decision + parser (no model)
+#
+# Testing hook: CRITIC_REVIEW_STUB=<file> uses that file as the critic output
+# instead of invoking `claude` (used by --self-test; also handy for a dry run).
+
+require "open3"
+
+CRITIC = "athena-diff-critic"
+
+def parse_findings(text)
+  line = text.to_s.lines.reverse.find { |l| l =~ /^\s*FINDINGS:/i }
+  return [nil, false] unless line # no trailer -> not a valid critic result
+  body = line.sub(/^\s*FINDINGS:/i, "").strip
+  return [[], true] if body.empty? || body.casecmp?("none")
+  [body.split(",").map { |s| s.strip.downcase }.reject(&:empty?), true]
+end
+
+# decide -> [action, exit_code]
+#   action: "pass" | "block" | "fail-open"
+def decide(findings, trailer_ok, invoke_ok)
+  return ["fail-open", 0] unless invoke_ok && trailer_ok
+  return ["pass", 0] if findings.empty?
+  ["block", 2]
+end
+
+def critic_output(base)
+  stub = ENV["CRITIC_REVIEW_STUB"]
+  return [File.read(stub), true] if stub && File.file?(stub)
+
+  return ["", false] unless system("command -v claude >/dev/null 2>&1")
+  diff, _e, dst = Open3.capture3("git", "diff", "#{base}...HEAD")
+  diff = Open3.capture3("git", "diff", base)[0] if !dst.success? || diff.strip.empty?
+  prompt = "Review this change against your rubric and end with the FINDINGS trailer.\n\n```diff\n#{diff}\n```"
+  out, _err, st = Open3.capture3("claude", "-p", "--agent", CRITIC, stdin_data: prompt)
+  [out, st.success?]
+rescue StandardError => e
+  [+"error: #{e.message}", false]
+end
+
+def default_base
+  out, _e, st = Open3.capture3("git", "symbolic-ref", "refs/remotes/origin/HEAD")
+  return out.strip.sub(%r{^refs/remotes/}, "") if st.success? && !out.strip.empty?
+  "main"
+end
+
+def run(argv)
+  base = (i = argv.index("--base")) ? argv[i + 1] : default_base
+  raw, invoke_ok = critic_output(base)
+  findings, trailer_ok = parse_findings(raw)
+  action, code = decide(findings || [], trailer_ok, invoke_ok)
+
+  case action
+  when "pass"
+    puts "critic-review: PASS — athena-diff-critic reported no findings on the diff vs #{base}."
+  when "block"
+    warn "critic-review: BLOCKED — athena-diff-critic found: #{findings.join(', ')}"
+    warn raw.lines.grep(/^\s*-\s*\[/).join
+    warn "  Fix: address each finding above (or, if a finding is wrong, say why in the MR) before this change ships."
+  when "fail-open"
+    warn "critic-review: FAIL-OPEN — the critic did not return a usable verdict (infra/model error); NOT blocking."
+    warn "  Fix: re-run ai/bin/critic-review once `claude` is reachable; a human should eyeball this diff since the judge did not run."
+  end
+  code
+end
+
+def run_self_test
+  require "tmpdir"
+  ok = true
+  Dir.mktmpdir("critic-review-selftest-") do |d|
+    findings_out = File.join(d, "f"); File.write(findings_out, "- [access-control] x.ex:1 — no authz\nFINDINGS: access-control\n")
+    clean_out    = File.join(d, "c"); File.write(clean_out, "looks good\nFINDINGS: none\n")
+    broken_out   = File.join(d, "b"); File.write(broken_out, "the model crashed, no trailer here\n")
+
+    # parser
+    ok &&= (parse_findings(File.read(findings_out)) == [["access-control"], true])
+    ok &&= (parse_findings(File.read(clean_out)) == [[], true])
+    ok &&= (parse_findings(File.read(broken_out)) == [nil, false])
+
+    # decision matrix
+    ok &&= (decide(["access-control"], true, true) == ["block", 2])
+    ok &&= (decide([], true, true) == ["pass", 0])
+    ok &&= (decide([], false, true) == ["fail-open", 0])   # no trailer -> fail-open
+    ok &&= (decide([], true, false) == ["fail-open", 0])   # invoke failed -> fail-open
+
+    # end-to-end via stub (findings -> block exit 2)
+    code = nil
+    ENV["CRITIC_REVIEW_STUB"] = findings_out
+    code = run(["--base", "main"])
+    ok &&= (code == 2)
+    ENV["CRITIC_REVIEW_STUB"] = clean_out
+    ok &&= (run(["--base", "main"]) == 0)
+    ENV["CRITIC_REVIEW_STUB"] = broken_out
+    ok &&= (run(["--base", "main"]) == 0) # fail-open, not block
+    ENV.delete("CRITIC_REVIEW_STUB")
+  end
+  if ok
+    puts "critic-review: self-test OK"
+    0
+  else
+    warn "critic-review: self-test FAILED"
+    warn "  Fix: keep the semantics exact — findings BLOCK (exit 2), none PASSES, any infra/no-trailer error FAILS OPEN (exit 0, loud)."
+    1
+  end
+end
+
+exit(ARGV.include?("--self-test") ? run_self_test : run(ARGV))

@@ -1,0 +1,15 @@
+{
+  "critic": "athena-diff-critic",
+  "promoted": "advisory -> blocking",
+  "promoted_on": "2026-09-16",
+  "evidence": "critic-eval --run (model-in-loop)",
+  "recall": 1.0,
+  "precision": 1.0,
+  "bad_detected": 3,
+  "bad_total": 3,
+  "false_positives": 0,
+  "good_total": 2,
+  "fixture_count": 5,
+  "trust_bar": { "recall": 0.8, "precision": 0.8 },
+  "note": "Small corpus (5 fixtures) — meets the bar; grow the fixture set from the eval corpus / journal and re-baseline via `ai/bin/critic-eval --run`."
+}
