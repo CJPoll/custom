@@ -319,15 +319,22 @@ the flake against YOUR current Mission's scope:
   inline balloons your diff and blast radius; the standing flaky-test lane
   drains it separately.
 
-**How to file the flaky-test ticket.** Create a page in the "Tickets" Notion
-database via the **notion-work** MCP connector (database id
-`f00eab4f-26e1-4a97-8a2b-fd6a4a15323e`), with:
+**How to file the flaky-test ticket.** First resolve THIS repo's flaky-lane
+target from `<repo-root>/.claude/flaky-lane.json` — a JSON object with
+`connector` (the Notion MCP connector to use), `database_id`, `label`, and
+`queued_status`. Do NOT hardcode a database id: the flaky lane is a per-repo
+automation, and a captain in a different repo must never file into another
+repo's tracker. **If that file is absent, this repo has no flaky lane:** do not
+file anywhere — record the surviving flake (module, symptom, run reference,
+suspected mechanism) in your report and move on. When it is present, create a
+page in its `database_id` via its `connector`, with:
 
 - **Title**: `Flaky: <module> — <symptom>` (include the failure string, the run
   reference, and the suspected mechanism in the description).
-- **Labels** (multi_select): add `flaky-tests` — this is what makes the flaky
-  lane's dispatch poll see it.
-- **Status**: `Todo` — the queued state the lane drains from.
+- **Labels** (multi_select): add the config's `label` (e.g. `flaky-tests`) —
+  this is what makes the flaky lane's dispatch poll see it.
+- **Status**: the config's `queued_status` (e.g. `Todo`) — the queued state the
+  lane drains from.
 - **Assignee** (people): the **human OWNER of this machine's harness**, resolved
   dynamically — never hardcode a person:
   1. Read your agent identity, first hit wins: `$AGENT_MESSAGES_IDENTITY`, then
