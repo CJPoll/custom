@@ -28,10 +28,16 @@ it. See Access Control below — not optional, not a follow-up ticket.
   The Notion tickets are the durable scope handed to the admiral; the local spec
   files are intermediate artifacts.
 - **Own the shared domain/data model** the tickets build against — your domain
-  grounding (step *Ground yourself in the domain model*) plus the project's
-  shared source of truth for it (its seeds/fixtures). This is planning, so it is
-  yours, not the admiral's; produce it alongside the first specs so early tickets
-  have it to build against.
+  grounding (step *Ground yourself in the domain model*) plus authoring the
+  project's shared source of truth for it as an **athena:system-spec JSON
+  document** under `ai-artifacts/domain/` (a single system, or a multi-layer
+  composition — follow the `athena:system-spec` skill; authoring needs only that
+  skill's schemas, never gen_saas). This is a **different, broader artifact than
+  the per-ticket specs**: the domain model is the whole-system source of truth
+  every ticket grounds against, while each `ai-artifacts/specs/[ticket]-spec.md`
+  is one ticket's implementation design built on top of it. This is planning, so
+  it is yours, not the admiral's; produce it alongside the first specs so early
+  tickets have it to build against.
 - **Produce one spec per ticket in dependency order**, and `SendMessage` the
   admiral "spec for `TICKET` ready" as each one lands — that signal is what lets
   the admiral pipeline. Send "planning complete" when the last spec is done.

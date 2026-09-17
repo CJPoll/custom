@@ -154,10 +154,14 @@ model and you verify it in your up-front implementability review instead of
 authoring it. When you are invoked directly on a Notion scope with no sibling
 architect:
 
-Before touching the project, work through the in-scope Missions and do the
-data modeling for them in `~/dev/gen_saas/apps/spec_maker/priv/repo/seeds.exs`
-— the shared source of truth every Mission's work will assume. Commit this
-directly (it lives outside any per-Mission worktree).
+Before touching the project, work through the in-scope Missions and author the
+shared domain model as an **athena:system-spec JSON document** in the target
+project's `ai-artifacts/domain/` tree — a single system as
+`<app>/<app>.spec.json`, or a multi-layer system as per-subsystem specs plus a
+`*.composition.json` manifest (follow the `athena:system-spec` skill; authoring
+needs only that skill's schemas, never gen_saas). This is the shared source of
+truth every Mission's work will assume. Commit it directly to the project's main
+checkout (it lives outside any per-Mission worktree, so every worktree reads it).
 
 ### 2. Pull and triage the Missions
 
@@ -288,8 +292,9 @@ For each currently-unblocked Mission, once it has a free slot:
   `athena-captain-PT-398`) — never the bare role name. Several run
   concurrently; `ListAgents` can't disambiguate identical bare names, and a
   report aimed at one can silently misroute. Give it: the worktree path, the
-  Mission, domain context (prior decisions, related Missions, the seeds.exs
-  modeling, pointers into the codebase), the absolute reports-directory path
+  Mission, domain context (prior decisions, related Missions, the
+  athena:system-spec domain model under `ai-artifacts/domain/`, pointers into
+  the codebase), the absolute reports-directory path
   from step 3, the **MR target branch** (from your dependency map — the
   repo's default branch if this Mission has no unmerged dependency, otherwise
   the dependency's branch), and the **Notion status values** it needs
