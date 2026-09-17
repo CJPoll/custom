@@ -38,6 +38,7 @@ MARKER = "Fix:"
 EXEMPT = {
   "main-session-policy.sh" => "SessionStart context injector; emits guidance, never denies/fails",
   "notify-idle.sh"         => "idle notifier; emits a notification, never denies/fails",
+  "harness-event.sh"       => "PostToolUse telemetry emitter; fail-open, never denies/fails",
 }.freeze
 
 # Guard-type scripts under ai/bin/ (not every bin is a guard).

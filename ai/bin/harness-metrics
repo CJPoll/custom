@@ -37,6 +37,29 @@ PRICES_FILE = File.join(AI_DIR, "telemetry", "prices.json")
 DEFAULT_DIR = File.expand_path("~/.claude/projects")
 STALL_GAP_S = 300 # inter-record gap (s) counted as an idle/stall gap
 
+# Roll the harness-event.sh PostToolUse sink (A4) into the summary, if present.
+# Complements the JSONL parse with real-time-emitted events.
+EVENT_SINK = File.expand_path(File.join(AI_DIR, "..", "ai-artifacts", "telemetry", "events.jsonl"))
+def read_event_sink
+  path = ENV["HARNESS_EVENT_SINK"] || EVENT_SINK
+  return { "present" => false } unless File.file?(path)
+  total = 0
+  errors = 0
+  File.foreach(path) do |line|
+    line = line.strip
+    next if line.empty?
+    total += 1
+    begin
+      errors += 1 if JSON.parse(line)["ok"] == false
+    rescue StandardError
+      # malformed sink line -> ignore
+    end
+  end
+  { "present" => true, "events" => total, "error_events" => errors }
+rescue StandardError
+  { "present" => false }
+end
+
 def load_prices
   return {} unless File.file?(PRICES_FILE)
   JSON.parse(File.read(PRICES_FILE))
@@ -175,6 +198,10 @@ def print_human(r)
   else
     puts "  est. cost: N/A (Note: no ai/telemetry/prices.json — tokens reported, dollar cost not derived)"
   end
+  ev = r["runtime_events"]
+  if ev && ev["present"]
+    puts "  runtime events (hook sink): #{ev['events']} (#{ev['error_events']} error)"
+  end
   top = r["tools"].sort_by { |_, n| -n }.first(5)
   puts "  top tools: #{top.map { |k, v| "#{k}=#{v}" }.join(', ')}" unless top.empty?
 end
@@ -194,6 +221,7 @@ def run(argv)
 
   acc = parse_files(files)
   report = build_report(acc, load_prices)
+  report["runtime_events"] = read_event_sink
 
   FileUtils.mkdir_p(File.dirname(OUT_JSON))
   begin
