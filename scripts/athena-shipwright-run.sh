@@ -23,7 +23,15 @@ set -euo pipefail
 # box's ruby lives (build-agents, the shipwright's gate, needs it) — and the
 # asdf shims. Establish a known-good PATH so the gate, git, ssh, and any MCP
 # servers Claude spawns resolve the same as in a login shell.
-export PATH="${HOME}/.local/bin:${HOME}/.asdf/shims:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin${PATH:+:${PATH}}"
+#
+# ${HOME}/bin is REQUIRED and easy to forget: the asdf ruby shim
+# (${HOME}/.asdf/shims/ruby) is a thin wrapper that does `exec asdf exec ruby`,
+# so it needs the asdf launcher binary (${HOME}/bin/asdf) on PATH. Omit
+# ${HOME}/bin and every `#!/usr/bin/env ruby` gate tool (build-agents,
+# harness-metrics/signals/eval, check-generic-skills, check-guard-messages)
+# dies with "asdf: not found" — the shipwright then cannot run its own gate and
+# telemetry silently drops out. The login shell's PATH (.zshrc) includes it.
+export PATH="${HOME}/.local/bin:${HOME}/bin:${HOME}/.asdf/shims:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin${PATH:+:${PATH}}"
 
 # The shipwright's real work (mining + subagent) runs in background tasks that a
 # headless `claude -p` session waits on. The default background-wait ceiling is
