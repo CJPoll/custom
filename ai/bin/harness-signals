@@ -21,7 +21,8 @@
 #   ai/bin/harness-signals --self-test
 #
 # Thresholds (tunable): a tool with failure_rate >= 0.20 over >= 5 results; any
-# idle/stall gaps; any runtime error events.
+# agent-session idle/stall gaps (interactive-session gaps are human idle, not
+# shipwright-actionable, so they are excluded); any runtime error events.
 
 require "json"
 
@@ -38,9 +39,13 @@ def signals_from(m)
     out << { "kind" => "tool_failure_rate", "metric" => rate, "detail" =>
              "tool failure rate #{rate} over #{results} results (>= #{FAIL_RATE})" }
   end
-  gaps = m["stall_gaps"].to_i
+  # Only agent-session gaps are shipwright-actionable; interactive (UUID-named)
+  # session gaps are human think/idle time. Runs 16-18 showed ~88% of in-band
+  # gaps were benign interactive idle, which made a total-count signal always-on.
+  # Fall back to the total when the metric predates agent attribution.
+  gaps = (m.key?("agent_stall_gaps") ? m["agent_stall_gaps"] : m["stall_gaps"]).to_i
   out << { "kind" => "stall_gaps", "metric" => gaps, "detail" =>
-           "#{gaps} idle/stall gap(s) over the window" } if gaps.positive?
+           "#{gaps} agent-session idle/stall gap(s) over the window" } if gaps.positive?
   ev = m["runtime_events"]
   if ev.is_a?(Hash) && ev["present"] && ev["error_events"].to_i.positive?
     out << { "kind" => "runtime_error_events", "metric" => ev["error_events"],
@@ -82,16 +87,26 @@ end
 def run_self_test
   ok = true
   hot = { "tool_failure_rate" => 0.5, "tool_results" => 20, "stall_gaps" => 3,
+          "agent_stall_gaps" => 3,
           "runtime_events" => { "present" => true, "error_events" => 2 } }
   cold = { "tool_failure_rate" => 0.0, "tool_results" => 100, "stall_gaps" => 0,
+           "agent_stall_gaps" => 0,
            "runtime_events" => { "present" => true, "error_events" => 0 } }
   below = { "tool_failure_rate" => 0.5, "tool_results" => 2, "stall_gaps" => 0,
-            "runtime_events" => { "present" => false } }
+            "agent_stall_gaps" => 0, "runtime_events" => { "present" => false } }
+  # interactive-only idle: total gaps present, but none in agent sessions -> no signal
+  idle_only = { "tool_failure_rate" => 0.0, "tool_results" => 100, "stall_gaps" => 98,
+                "agent_stall_gaps" => 0, "runtime_events" => { "present" => false } }
+  # legacy metrics (pre-attribution): fall back to total stall_gaps
+  legacy = { "tool_failure_rate" => 0.0, "tool_results" => 100, "stall_gaps" => 4,
+             "runtime_events" => { "present" => false } }
 
   checks = {
     "hot surfaces 3 signals"       => (signals_from(hot).size == 3),
     "cold surfaces none"           => (signals_from(cold).empty?),
     "below min_results suppressed" => (signals_from(below).none? { |s| s["kind"] == "tool_failure_rate" }),
+    "interactive idle suppressed"  => (signals_from(idle_only).none? { |s| s["kind"] == "stall_gaps" }),
+    "legacy falls back to total"   => (signals_from(legacy).any? { |s| s["kind"] == "stall_gaps" }),
   }
   checks.each { |n, pass| (warn "self-test: FAIL — #{n}"; ok = false) unless pass }
   if ok

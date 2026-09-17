@@ -73,7 +73,13 @@ rescue StandardError
 end
 
 # Fold one parsed JSONL record into the accumulator.
-def fold(acc, o, prev_ts)
+# `agent` marks records from an agent-session transcript (agent-*.jsonl) vs an
+# interactive (UUID-named) session: an in-band gap in an interactive session is
+# human think/idle time the shipwright can never act on, so only agent-session
+# gaps feed the actionable `agent_stall_gaps` metric. (Shipwright runs 16-18:
+# ~88% of in-band gaps were benign interactive idle, which made the total-count
+# stall signal effectively always-on.)
+def fold(acc, o, prev_ts, agent = false)
   ts = o["timestamp"]
   if ts && prev_ts
     begin
@@ -82,6 +88,7 @@ def fold(acc, o, prev_ts)
         acc[:session_idle_gaps] += 1 # human closed/resumed the session, not a stall
       elsif gap >= STALL_GAP_S
         acc[:stall_gaps] += 1
+        acc[:agent_stall_gaps] += 1 if agent
       end
     rescue StandardError
       # unparseable timestamp -> ignore for gap accounting
@@ -133,12 +140,14 @@ end
 def parse_files(files)
   acc = {
     files: 0, records: 0, malformed: 0,
-    tool_calls: 0, tool_results: 0, tool_errors: 0, stall_gaps: 0, session_idle_gaps: 0,
+    tool_calls: 0, tool_results: 0, tool_errors: 0, stall_gaps: 0,
+    agent_stall_gaps: 0, session_idle_gaps: 0,
     tools: Hash.new(0), skills: Hash.new(0), models: Hash.new(0),
     tokens: Hash.new(0), by_model: {},
   }
   files.each do |f|
     acc[:files] += 1
+    agent = File.basename(f).start_with?("agent-")
     prev_ts = nil
     File.foreach(f) do |line|
       line = line.strip
@@ -150,7 +159,7 @@ def parse_files(files)
         next
       end
       acc[:records] += 1
-      prev_ts = fold(acc, o, prev_ts)
+      prev_ts = fold(acc, o, prev_ts, agent)
     end
   rescue StandardError
     # unreadable file -> skip, fail-open
@@ -184,7 +193,8 @@ def build_report(acc, prices)
     "files" => acc[:files], "records" => acc[:records], "malformed_lines" => acc[:malformed],
     "tool_calls" => acc[:tool_calls], "tool_results" => acc[:tool_results],
     "tool_errors" => acc[:tool_errors], "tool_failure_rate" => rate,
-    "stall_gaps" => acc[:stall_gaps], "stall_gap_threshold_s" => STALL_GAP_S,
+    "stall_gaps" => acc[:stall_gaps], "agent_stall_gaps" => acc[:agent_stall_gaps],
+    "stall_gap_threshold_s" => STALL_GAP_S,
     "stall_gap_ceiling_s" => STALL_GAP_CEILING_S, "session_idle_gaps" => acc[:session_idle_gaps],
     "tools" => acc[:tools], "skills" => acc[:skills], "models" => acc[:models],
     "tokens" => acc[:tokens].transform_keys(&:to_s),
@@ -198,6 +208,7 @@ def print_human(r)
   puts "  tool calls: #{r['tool_calls']}  results: #{r['tool_results']}  " \
        "errors: #{r['tool_errors']}  failure-rate: #{r['tool_failure_rate']}"
   puts "  idle/stall gaps (#{r['stall_gap_threshold_s']}-#{r['stall_gap_ceiling_s']}s): #{r['stall_gaps']}" \
+       " (agent-session: #{r['agent_stall_gaps']})" \
        "  (session-idle gaps >=#{r['stall_gap_ceiling_s']}s, excluded: #{r['session_idle_gaps']})"
   tk = r["tokens"]
   puts "  tokens: in=#{tk['input']} out=#{tk['output']} cache_read=#{tk['cache_read']} " \
@@ -275,7 +286,18 @@ def run_self_test
     ]
     File.write(f, lines.map { |l| JSON.generate(l) }.join("\n") + "\n" + "{ not json\n")
 
-    acc = parse_files([f])
+    # A second, agent-session transcript (agent-*.jsonl) with one sub-ceiling gap:
+    # it must add to BOTH stall_gaps and agent_stall_gaps, while the interactive
+    # file above adds only to stall_gaps.
+    af = File.join(dir, "agent-selftest.jsonl")
+    agent_lines = [
+      { "type" => "assistant", "timestamp" => "2026-09-16T00:00:00.000Z", "message" => {} },
+      # a 1h gap (< ceiling) -> one stall gap, attributed to the agent session
+      { "type" => "assistant", "timestamp" => "2026-09-16T01:00:00.000Z", "message" => {} },
+    ]
+    File.write(af, agent_lines.map { |l| JSON.generate(l) }.join("\n") + "\n")
+
+    acc = parse_files([f, af])
     r = build_report(acc, { "test-model" => {
       "input_per_mtok" => 1.0, "output_per_mtok" => 2.0,
       "cache_read_per_mtok" => 0.1, "cache_write_per_mtok" => 0.5 } })
@@ -288,8 +310,9 @@ def run_self_test
       "skill fire counted"  => (r["skills"]["review"] == 1),
       "input tokens == 10"  => (r["tokens"]["input"] == 10),
       "thinking == 3"       => (r["tokens"]["thinking"] == 3),
-      "stall gap == 1"      => (r["stall_gaps"] == 1),
-      "session-idle == 1"   => (r["session_idle_gaps"] == 1),
+      "stall gap == 2"        => (r["stall_gaps"] == 2),
+      "agent stall gap == 1"  => (r["agent_stall_gaps"] == 1),
+      "session-idle == 1"     => (r["session_idle_gaps"] == 1),
       # cost = 10/1e6*1 + 20/1e6*2 + 5/1e6*0.1 + 7/1e6*0.5 = 0.0000000535
       "cost derived"        => (r["cost"]["usd"] >= 0.0 && r["cost"]["priced"] == true),
     }
