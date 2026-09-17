@@ -123,10 +123,12 @@ you do not commit:
 - `ai/bin/build-agents --check` — agent templates rebuild clean and the
   rendered `.md` files are current. If you edited a template or block, run
   `ai/bin/build-agents` first so the render is regenerated, then `--check`.
-- Every hook self-test: `ai/hooks/safe-wait-guard.sh --self-test`,
-  `ai/hooks/pronoun-guard.sh --self-test`, `ai/hooks/main-session-policy.sh
-  --self-test` (run whichever exist), plus the `--self-test` of any hook you
-  touched or added.
+- Every hook self-test — run each dedicated `ai/hooks/*.self-test.sh` script
+  with stdin closed: `ai/hooks/safe-wait-guard.self-test.sh </dev/null`,
+  `ai/hooks/pronoun-guard.self-test.sh </dev/null` (and any you add). NOTE: the
+  hooks read their input from stdin, so `ai/hooks/<hook>.sh --self-test` is NOT a
+  self-test — the flag is ignored and it blocks on (or empties) stdin, a false
+  green. Always invoke the `.self-test.sh` files.
 - `ai/bin/check-generic-skills` — project-agnostic skills (the `fix:*` family,
   `processes:fix`, `review`, `refactor:*`) carry no consumer-project constants;
   run its `--self-test` too if you touched the checker.

@@ -1,0 +1,4 @@
+regression=a guard emits a bare failure with no LLM-facing Fix: instruction (gap 7)
+guard=check-guard-messages
+mode=guard-health
+expect=pass

@@ -1,0 +1,5 @@
+regression=false-positive control — a bounded block-on-pid wait must NOT be denied
+guard=safe-wait-guard
+mode=hook-stdin
+input=input.json
+expect=clean

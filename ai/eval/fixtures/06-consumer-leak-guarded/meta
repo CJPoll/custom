@@ -1,0 +1,4 @@
+regression=a generic skill (fix:*) hardcoding a consumer-project constant — the fix:tests leak
+guard=check-generic-skills
+mode=guard-health
+expect=pass

@@ -1,0 +1,5 @@
+regression=outgoing message uses he/him/his that may refer to Cody (they/them)
+guard=pronoun-guard
+mode=hook-stdin
+input=input.json
+expect=fires

@@ -1,0 +1,5 @@
+regression=unreaped backgrounded loop (done &) with no trap reaper — orphans to PID 1 (PT-919)
+guard=safe-wait-guard
+mode=hook-stdin
+input=input.json
+expect=fires

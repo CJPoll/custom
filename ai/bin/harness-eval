@@ -1,0 +1,185 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# harness-eval — the deterministic core of the harness self-improvement eval
+# loop. It replays a curated corpus of PAST regressions (ai/eval/fixtures/) and
+# asserts that each one is still CAUGHT by its guard — the "did a harness change
+# help / did it regress?" substrate the rest of the program depends on.
+#
+# Deterministic ONLY: every case asserts a checkable artifact (a guard fires or
+# does not fire on a fixture; a guard's health check + self-test pass). There is
+# NO model in the loop and NO free-form replay — the LLM-judged tier is a
+# separate concern (B4 critics). Seeded by ai/bin/check-generic-skills (a
+# one-case micro-eval) and the shipwright journal's labeled incidents.
+#
+# A case is DATA: ai/eval/fixtures/<NN-name>/meta (key=value) plus, for stdin
+# cases, an input file. Modes:
+#   hook-stdin    pipe <input> into ai/hooks/<guard>.sh; verdict "fires" iff the
+#                 hook emits a PreToolUse deny; compared to expect (fires|clean).
+#   guard-health  run ai/bin/<guard> AND ai/bin/<guard> --self-test; the case
+#                 passes iff both exit 0 (the guard both catches its regression,
+#                 via its self-test, and passes clean on the current tree).
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/harness-eval             run the corpus; exit 0 iff every case matches
+#   ai/bin/harness-eval --self-test verify the runner's own mechanics
+#
+# Adding a case: create ai/eval/fixtures/<NN-name>/meta with regression=, guard=,
+# mode=, expect= (and input= for hook-stdin), plus the input file. Keep it
+# deterministic — assert a guard verdict, never a model judgement.
+
+require "json"
+require "open3"
+require "fileutils"
+require "tmpdir"
+
+AI_DIR       = File.expand_path("..", __dir__)
+FIXTURES_DIR = File.join(AI_DIR, "eval", "fixtures")
+SCORECARD    = File.join(AI_DIR, "eval", "scorecard.json")
+HOOKS_DIR    = File.join(AI_DIR, "hooks")
+BIN_DIR      = File.join(AI_DIR, "bin")
+
+def parse_meta(path)
+  meta = {}
+  File.foreach(path) do |line|
+    line = line.strip
+    next if line.empty? || line.start_with?("#")
+    k, _, v = line.partition("=")
+    meta[k.strip] = v.strip
+  end
+  meta
+end
+
+# Run a hook with the fixture JSON on stdin; return true iff it denied.
+def hook_fires?(guard, input_path)
+  hook = File.join(HOOKS_DIR, "#{guard}.sh")
+  return [false, "hook not found: #{hook}"] unless File.executable?(hook)
+
+  input = File.read(input_path)
+  out, _err, _st = Open3.capture3(hook, stdin_data: input)
+  [out.include?('"permissionDecision":"deny"'), out]
+rescue StandardError => e
+  [false, "hook error: #{e.message}"]
+end
+
+# Run a bin guard's real check AND its self-test; both must exit 0.
+def guard_healthy?(guard)
+  bin = File.join(BIN_DIR, guard)
+  return [false, "bin not found: #{bin}"] unless File.executable?(bin)
+
+  _o1, _e1, st1 = Open3.capture3(bin)
+  _o2, _e2, st2 = Open3.capture3(bin, "--self-test")
+  ok = st1.success? && st2.success?
+  [ok, "real=#{st1.exitstatus} self-test=#{st2.exitstatus}"]
+rescue StandardError => e
+  [false, "guard error: #{e.message}"]
+end
+
+# Evaluate one case dir -> {name, regression, guard, expect, verdict, pass, detail}
+def evaluate(dir)
+  meta = parse_meta(File.join(dir, "meta"))
+  name = File.basename(dir)
+  mode = meta["mode"]
+  expect = meta["expect"]
+  base = { name: name, regression: meta["regression"], guard: meta["guard"], expect: expect }
+
+  case mode
+  when "hook-stdin"
+    fired, detail = hook_fires?(meta["guard"], File.join(dir, meta["input"]))
+    verdict = fired ? "fires" : "clean"
+    base.merge(verdict: verdict, pass: (verdict == expect), detail: detail[0, 200])
+  when "guard-health"
+    healthy, detail = guard_healthy?(meta["guard"])
+    verdict = healthy ? "pass" : "fail"
+    base.merge(verdict: verdict, pass: (healthy && expect == "pass"), detail: detail)
+  else
+    base.merge(verdict: "error", pass: false, detail: "unknown mode: #{mode.inspect}")
+  end
+end
+
+def run_corpus(fixtures_dir, write_scorecard:)
+  dirs = Dir.glob(File.join(fixtures_dir, "*")).select { |d| File.file?(File.join(d, "meta")) }.sort
+  if dirs.empty?
+    warn "harness-eval: FAILED — no fixtures with a meta file under #{fixtures_dir}"
+    warn "  Fix: add ai/eval/fixtures/<NN-name>/meta (regression=, guard=, mode=, expect=)."
+    return 1
+  end
+
+  results = dirs.map { |d| evaluate(d) }
+  passed = results.count { |r| r[:pass] }
+  total  = results.size
+
+  results.each do |r|
+    mark = r[:pass] ? "PASS" : "FAIL"
+    puts "#{mark}  #{r[:name]}  [guard=#{r[:guard]} expect=#{r[:expect]} got=#{r[:verdict]}]"
+    puts "      #{r[:regression]}" if r[:regression]
+  end
+  puts "harness-eval: #{passed}/#{total} cases pass"
+
+  if write_scorecard
+    FileUtils.mkdir_p(File.dirname(SCORECARD))
+    File.write(SCORECARD, JSON.pretty_generate(
+      "generated" => Time.now.utc.iso8601,
+      "passed" => passed, "total" => total,
+      "cases" => results.map { |r| r.transform_keys(&:to_s) }
+    ))
+  end
+
+  failures = results.reject { |r| r[:pass] }
+  return 0 if failures.empty?
+
+  warn ""
+  warn "harness-eval: FAILED — #{failures.size} case(s) did not match expectation:"
+  failures.each { |r| warn "  - #{r[:name]}: expected #{r[:expect]}, got #{r[:verdict]} (#{r[:detail]})" }
+  warn "  Fix: a regression is no longer caught by its guard (or a guard now false-fires). " \
+       "Restore the guard so the case matches its expected verdict; never weaken a guard to go green."
+  1
+end
+
+require "time"
+
+def run_self_test
+  dir = File.join(Dir.tmpdir, "harness-eval-selftest-#{Process.pid}")
+  FileUtils.mkdir_p(dir)
+  ok = true
+  begin
+    # Synthetic guard-health cases pointing at a known-good and known-bad bin via
+    # a stubbed evaluate: here we exercise the pass/fail accounting directly.
+    good = { name: "good", pass: true }
+    bad  = { name: "bad", pass: false }
+    results = [good, bad]
+    passed = results.count { |r| r[:pass] }
+    unless passed == 1 && results.size == 2
+      warn "self-test: FAIL — accounting wrong (#{passed}/2)"; ok = false
+    end
+    # meta parser round-trips
+    m = File.join(dir, "meta")
+    File.write(m, "regression=x\nguard=g\nmode=guard-health\nexpect=pass\n")
+    parsed = parse_meta(m)
+    unless parsed["guard"] == "g" && parsed["expect"] == "pass" && parsed["mode"] == "guard-health"
+      warn "self-test: FAIL — meta parse: #{parsed.inspect}"; ok = false
+    end
+    # a failing case must make the corpus fail: run over a synthetic fixture set
+    fx = File.join(dir, "fixtures")
+    FileUtils.mkdir_p(File.join(fx, "01-bad"))
+    File.write(File.join(fx, "01-bad", "meta"), "regression=r\nguard=nope\nmode=guard-health\nexpect=pass\n")
+    code = run_corpus(fx, write_scorecard: false)
+    unless code == 1
+      warn "self-test: FAIL — a bogus guard case should fail the corpus (got #{code})"; ok = false
+    end
+  ensure
+    FileUtils.rm_rf(dir)
+  end
+  if ok
+    puts "harness-eval: self-test OK"
+    0
+  else
+    warn "harness-eval: self-test FAILED"
+    warn "  Fix: the runner's accounting/parse/exit logic is broken — a failing case must exit 1."
+    1
+  end
+end
+
+exit(ARGV.include?("--self-test") ? run_self_test : run_corpus(FIXTURES_DIR, write_scorecard: true))

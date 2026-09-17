@@ -1,0 +1,5 @@
+regression=false-positive control — a message with no gendered pronoun must NOT be denied
+guard=pronoun-guard
+mode=hook-stdin
+input=input.json
+expect=clean

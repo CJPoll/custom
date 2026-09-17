@@ -6,3 +6,6 @@ ai/skills/synced/
 # Shipwright working notes: proposals/analyses kept as local durable scratch,
 # not committed harness source.
 ai/proposals/
+
+# harness-eval transient run output (baseline.json is the committed reference)
+ai/eval/scorecard.json

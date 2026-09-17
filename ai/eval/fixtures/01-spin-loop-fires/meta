@@ -1,0 +1,5 @@
+regression=busy-spin wait loop with no sleep — orphaned, pinned load ~290 (PT-919)
+guard=safe-wait-guard
+mode=hook-stdin
+input=input.json
+expect=fires
