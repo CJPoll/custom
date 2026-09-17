@@ -510,6 +510,21 @@ unblocked work left, or `STUCK`, produce a summary:
   recover with an API retry of release:create (its gate accepts a manual
   trigger), which plays release:deploy itself.
 
+## Confirm a merge actually landed (before the DM and before Done)
+
+`glab mr merge` prints `✓ Merged!`, and a merge train can report a car done,
+BEFORE the MR is actually merged — under a train the MR `state` stays `opened`
+for a while after that success line. Treat neither the CLI line nor a train
+notification as proof. Before you DM the owner, move the ticket to `Done` /
+`Ready for Release`, or tear a stack down, CONFIRM the merge landed: the MR's
+`state` is `merged` and `merged_at` is set (or, after `git fetch`, the target
+branch's tip is a descendant of the MR head — `git merge-base --is-ancestor`).
+Re-verify on the CURRENT head after any merge-forward, and reconcile on every
+wake — a dropped train-monitor notification is not evidence the merge failed,
+so re-read state rather than trusting silence. Premature "Merged!" set Notion
+Done and the DM too early on ui-bg, pt1124, ui-phase1/2/5, aggregate-alignment,
+mobile-parity, and pt1280.
+
 ## Merge notification DM to the owner (owner rule, 2026-09-01)
 
 Every time you merge an MR — and ONLY a merge you yourself performed (your
