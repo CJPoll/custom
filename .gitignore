@@ -2,3 +2,7 @@
 
 # Claude Code managed-skills sync cache (vendored plugin skills; not harness source)
 ai/skills/synced/
+
+# Shipwright working notes: proposals/analyses kept as local durable scratch,
+# not committed harness source.
+ai/proposals/
