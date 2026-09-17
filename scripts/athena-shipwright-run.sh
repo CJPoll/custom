@@ -25,6 +25,19 @@ set -euo pipefail
 # servers Claude spawns resolve the same as in a login shell.
 export PATH="${HOME}/.local/bin:${HOME}/.asdf/shims:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin${PATH:+:${PATH}}"
 
+# The shipwright's real work (mining + subagent) runs in background tasks that a
+# headless `claude -p` session waits on. The default background-wait ceiling is
+# 600s, after which the parent kills those tasks and exits 0 mid-run — leaving
+# commits unpushed and the journal/cursor unwritten (observed on a smoke test).
+# Raise the ceiling to a generous but BOUNDED 50 minutes so a normal run
+# finishes. We deliberately do NOT use 0 ("wait indefinitely"): with no outer
+# timeout and an flock single-run guard, an indefinitely-hung run would hold the
+# lock forever and silently wedge every future hourly tick. 50 min sits
+# comfortably under the hourly cadence; the `timeout` wrapper on the claude call
+# below is the hard backstop that guarantees the lock is released before the
+# next tick even if the session itself hangs.
+export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=3000000
+
 REPO="${HOME}/dev/custom"
 CLAUDE="${HOME}/.local/bin/claude"
 STATE_DIR="${REPO}/ai-artifacts/shipwright"
@@ -60,8 +73,15 @@ ts="$(date +%Y-%m-%dT%H%M%S)"
 log="${LOG_DIR}/${ts}.log"
 
 # House pattern for unattended Claude Code (see scripts/athena).
-"${CLAUDE}" --dangerously-skip-permissions -p "${BRIEF}" >"${log}" 2>&1
-status=$?
+# Hard backstop: cap the whole invocation at 55 minutes (under the hourly tick)
+# so a hung session is killed and the flock is released before the next run,
+# rather than wedging the lane forever. `timeout` exits 124 on expiry; capture
+# the status either way instead of letting `set -e` abort before we log it.
+if timeout 55m "${CLAUDE}" --dangerously-skip-permissions -p "${BRIEF}" >"${log}" 2>&1; then
+  status=0
+else
+  status=$?
+fi
 
 echo "athena-shipwright: run ${ts} exited ${status}; log: ${log}" >&2
 exit "${status}"
