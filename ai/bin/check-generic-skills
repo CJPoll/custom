@@ -1,0 +1,149 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# check-generic-skills — guard that project-agnostic ("generic") skills carry
+# no consumer-project constants.
+#
+# A generic skill (the fix:* family, processes:fix, review, refactor:*) is meant
+# to run in ANY consumer repo. When one hardcodes a specific project's
+# identifiers — a repo slug, a container name, a DB name — that project's detail
+# leaks into every other repo's run. The canonical example this guard exists to
+# catch: fix:tests once hardcoded `gen_saas-postgres-1` / `walt-ui-db` /
+# `./bin/checks/test.sh`, which is wrong for every non-gen_saas repo. The fix is
+# the consumer seam (see athena:harness-placement → "Generic skill that must
+# vary per repo", and processes:fix → "Resolving the project's command"): the
+# generic skill names a generic default and resolves the real value from the
+# consumer repo. This check keeps that discipline from silently regressing.
+#
+# Guard idea adapted from riddler's howie/wurk harness (its contract test over
+# skills/wurk:*/SKILL.md), reimplemented in our conventions.
+#
+# Deliberately gem-free (stdlib only) and run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/check-generic-skills            scan the generic skills; exit 1 on any leak
+#   ai/bin/check-generic-skills --self-test  verify the checker's own logic; exit 1 on failure
+#
+# Extending: add a skill's directory basename to GENERIC_SKILL_GLOBS when it is
+# meant to be project-agnostic. Add a consumer identifier to DENY when a new
+# managed project would leak its name into a generic skill.
+
+require "fileutils"
+
+AI_DIR     = File.expand_path("..", __dir__)
+SKILLS_DIR = File.join(AI_DIR, "skills")
+
+# Directory basenames (globs) under ai/skills whose content MUST stay generic.
+GENERIC_SKILL_GLOBS = [
+  "fix:*",
+  "processes:fix",
+  "review",
+  "refactor:*",
+].freeze
+
+# Consumer-project identifiers that must never appear in a generic skill.
+# Each entry: [regex, human label]. Case-insensitive. These are specific
+# project/infra names — NOT generic conventions (a generic mention of a
+# `./bin/checks/<check>.sh` wrapper as an EXAMPLE is fine; a hardcoded
+# `gen_saas-postgres-1` is not).
+DENY = [
+  [/gen[_-]saas/i,  "gen_saas (consumer project identifier)"],
+  [/walt[_-]ui/i,   "walt_ui (consumer project identifier)"],
+].freeze
+
+# A line carrying this marker is exempted (escape hatch for a legitimate,
+# reviewed mention — e.g. naming a project as historical provenance).
+ALLOW_MARKER = "generic-skills-ok"
+
+# Scan a set of *.md files, return an array of violation strings.
+def scan(files)
+  violations = []
+  files.each do |path|
+    File.foreach(path).with_index(1) do |line, lineno|
+      next if line.include?(ALLOW_MARKER)
+
+      DENY.each do |re, label|
+        next unless line =~ re
+
+        rel = path.start_with?(AI_DIR) ? path.sub("#{AI_DIR}/", "") : path
+        violations << "#{rel}:#{lineno}: #{label} — #{line.strip}"
+      end
+    end
+  end
+  violations
+end
+
+def generic_skill_files
+  GENERIC_SKILL_GLOBS.flat_map do |glob|
+    Dir.glob(File.join(SKILLS_DIR, glob, "**", "*.md"))
+  end.uniq.sort
+end
+
+def run_check
+  files = generic_skill_files
+  if files.empty?
+    warn "check-generic-skills: FAILED — no generic skills matched #{GENERIC_SKILL_GLOBS.inspect}"
+    return 1
+  end
+
+  violations = scan(files)
+  if violations.empty?
+    puts "check-generic-skills: OK — #{files.size} file(s) across " \
+         "#{GENERIC_SKILL_GLOBS.size} skill glob(s), no consumer constants"
+    return 0
+  end
+
+  warn "check-generic-skills: FAILED — consumer constants in generic skills:"
+  violations.each { |v| warn "  - #{v}" }
+  warn ""
+  warn "Fix: move the project-specific value to the consumer repo and let the"
+  warn "skill resolve it via the consumer seam (processes:fix → \"Resolving the"
+  warn "project's command\"). If the mention is legitimately generic/historical,"
+  warn "add the marker `#{ALLOW_MARKER}` on that line."
+  1
+end
+
+def run_self_test
+  dir = File.join(Dir.tmpdir, "check-generic-skills-selftest-#{Process.pid}")
+  FileUtils.mkdir_p(dir)
+  ok = true
+  begin
+    bad = File.join(dir, "bad.md")
+    good = File.join(dir, "good.md")
+    exempt = File.join(dir, "exempt.md")
+    File.write(bad, "Run it inside the gen_saas-postgres-1 container.\n")
+    File.write(good, "Prefer the repo's ./bin/checks/test.sh wrapper, else `mix test`.\n")
+    File.write(exempt, "Historically leaked from gen_saas. #{ALLOW_MARKER}\n")
+
+    bad_hits = scan([bad])
+    good_hits = scan([good])
+    exempt_hits = scan([exempt])
+
+    unless bad_hits.size == 1
+      warn "self-test: FAIL — expected 1 hit in bad.md, got #{bad_hits.size}"
+      ok = false
+    end
+    unless good_hits.empty?
+      warn "self-test: FAIL — expected 0 hits in good.md, got #{good_hits.inspect}"
+      ok = false
+    end
+    unless exempt_hits.empty?
+      warn "self-test: FAIL — expected the #{ALLOW_MARKER} marker to exempt the line"
+      ok = false
+    end
+  ensure
+    FileUtils.rm_rf(dir)
+  end
+
+  if ok
+    puts "check-generic-skills: self-test OK"
+    0
+  else
+    warn "check-generic-skills: self-test FAILED"
+    1
+  end
+end
+
+require "tmpdir"
+
+exit(ARGV.include?("--self-test") ? run_self_test : run_check)

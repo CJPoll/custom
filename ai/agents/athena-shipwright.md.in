@@ -123,6 +123,9 @@ you do not commit:
   `ai/hooks/pronoun-guard.sh --self-test`, `ai/hooks/main-session-policy.sh
   --self-test` (run whichever exist), plus the `--self-test` of any hook you
   touched or added.
+- `ai/bin/check-generic-skills` — project-agnostic skills (the `fix:*` family,
+  `processes:fix`, `review`, `refactor:*`) carry no consumer-project constants;
+  run its `--self-test` too if you touched the checker.
 - Any skill or script self-test relevant to what you changed.
 
 ## Invariants — never violate these
