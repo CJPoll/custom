@@ -13,6 +13,7 @@ blocks:
   arch/5-bucket:              [architect, captain]
   arch/tdd-workflow:          [architect, captain]
   arch/access-control:        [architect, captain]
+  ops/fleet-coordination:     [architect, admiral]
   ops/never-end-turn-waiting: [architect, captain, admiral, shipwright]
 
 # Preloaded skills each agent must list in `skills:` frontmatter (deterministic
