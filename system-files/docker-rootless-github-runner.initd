@@ -17,7 +17,12 @@ description="Rootless Docker daemon (user: ${DOCKER_ROOTLESS_USER})"
 command="/usr/bin/dockerd-rootless.sh"
 command_args="${DOCKERD_ROOTLESS_OPTS}"
 command_user="${DOCKER_ROOTLESS_USER}:${DOCKER_ROOTLESS_USER}"
-command_background=1
+# supervise-daemon watches the daemon and respawns it if it exits/crashes
+# (not just at boot). respawn_delay spaces retries so a hard failure backs off
+# instead of tight-looping; respawn_max=0 = retry indefinitely.
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=0
 pidfile="/run/${RC_SVCNAME}.pid"
 output_log="/var/log/${RC_SVCNAME}.log"
 error_log="/var/log/${RC_SVCNAME}.log"

@@ -16,7 +16,12 @@ description="GitHub Actions self-hosted runner (user: ${RUNNER_USER})"
 command="${RUNNER_DIR}/run.sh"
 command_args="${RUNNER_OPTS}"
 command_user="${RUNNER_USER}:${RUNNER_USER}"
-command_background=1
+# supervise-daemon watches run.sh and respawns it if it exits/crashes (not just
+# at boot). respawn_delay spaces retries so a hard failure backs off instead of
+# tight-looping; respawn_max=0 = retry indefinitely.
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=0
 directory="${RUNNER_DIR}"
 pidfile="/run/${RC_SVCNAME}.pid"
 output_log="/var/log/${RC_SVCNAME}.log"
