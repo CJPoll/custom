@@ -13,11 +13,15 @@ Achieve zero Credo violations in strict mode while maintaining code functionalit
 - **Single file**: `mix credo --strict <file>`
 - **Compilation check**: `mix compile`
 
-The `--strict` flag is mandatory for comprehensive violation detection.
+The `--strict` flag is mandatory for comprehensive violation detection. The
+commands above are generic defaults; if the consumer repo documents a wrapper
+(e.g. `./bin/checks/credo.sh` in its `CLAUDE.md`, often required for a
+containerized toolchain), use that instead — see the resolution step in the
+delegated process.
 
 ## Process
 
-Follow the iterative resolution process at @~/.claude/skills/processes:fix/SKILL.md using the commands above.
+Follow the iterative resolution process at @~/.claude/skills/processes:fix/SKILL.md — including its "Resolving the project's command" step — using the commands above.
 
 ## Credo-Specific Guidance
 

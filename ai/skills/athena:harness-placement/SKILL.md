@@ -65,6 +65,37 @@ Ask in this order; take the first that fits:
   the KG, never in the shared Captain/Admiral prose (wrong altitude: true of one
   repo). Putting it in a generic template taxes every unrelated run.
 
+## Generic skill that must vary per repo
+
+The six homes decide where a piece of harness content lives. A separate question
+comes up for a **skill meant to be generic across projects** (the `fix:*` family,
+`review`, `processes:fix`): what happens to the values that legitimately differ
+per consumer repo — the test command, a wrapper script, a container name, a DB
+name?
+
+This is **not** a seventh home. The rule of thumb above already answers *where
+those values belong*: **in the consumer repo**, never baked into the generic
+skill (a hardcoded `gen_saas-postgres-1` in a global skill is the same
+wrong-altitude mistake as a repo quirk in a shared agent template). What is left
+is *how a generic skill reaches them at runtime* — the **consumer seam**:
+
+- **Data** (commands, paths, names) → the consumer repo's `CLAUDE.md` (its
+  "Commands" section) or, if it outgrows prose, an optional `.claude/athena.json`
+  manifest. The generic skill names a *generic default* and resolves the real
+  value from the repo first.
+- **Extra steps / domain prose** → an optional per-skill extension the generic
+  skill names a read-point for, e.g. `<repo>/.claude/athena/<skill>.md`.
+  **Extensions add; they never override** the generic skill — a consumer that
+  needs to change generic *behavior* is a signal the seam is missing a field, not
+  a reason to fork the skill.
+
+Precedence makes this safe: a user/global skill shadows a same-named project
+skill (global wins), so the generic skill stays global and *reads* the project's
+values — no project-scoped fork to drift. `processes:fix`'s "Resolving the
+project's command" step is the worked example; `fix:tests` uses it. Seam model
+adapted from riddler's howie/wurk (manifest + "extensions add, never override"),
+reimplemented in our conventions.
+
 ## Related
 
 - [[athena:create-agent-definition]] — how the block/template/`routing.yml`

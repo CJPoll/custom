@@ -8,6 +8,37 @@ user-invocable: false
 
 Systematically resolve issues across an entire application using parallel subagent processing. This is a generic process — the calling skill provides the specific tool commands.
 
+## Resolving the project's command
+
+The calling skill (`fix:tests`, `fix:credo`, …) names a **generic default**
+command such as `mix test` or `mix credo --strict`. That default is a fallback,
+not an assumption: before running it, resolve the command the **consumer repo**
+actually uses, in this order — take the first that applies:
+
+1. **The repo's `CLAUDE.md`.** If it documents a canonical command for this
+   check (a "Commands" / "Running tests" / "Code Quality" section — often a
+   `./bin/…` or `./bin/checks/<check>.sh` wrapper), use exactly that. Many repos
+   *require* their wrapper (a containerized toolchain, a mandatory `MIX_ENV`, a
+   database only reachable inside a service) and the bare tool run on the host
+   fails or hits the wrong resource. Honor the repo's stated rule over the
+   default every time.
+2. **A conventional wrapper at the repo root** — `./bin/checks/<check>.sh`,
+   `./bin/<check>`, or the equivalent the repo ships — if one exists, even when
+   `CLAUDE.md` does not spell it out.
+3. **The generic default** the calling skill names, when the repo documents and
+   ships nothing more specific.
+
+If the consumer repo ships a per-skill extension file at
+`.claude/athena/<skill>.md` (for example `.claude/athena/fix-tests.md`), read it
+first and treat its content as **additional required steps**. Extensions add;
+they never override this process or the calling skill.
+
+This "generic skill + per-repo command/extension" seam keeps every skill in this
+family free of any one project's constants (paths, container names, DB names);
+the project-specific values live in the consumer repo, where they belong. Seam
+model adapted from riddler's howie/wurk harness (manifest + "extensions add,
+never override"), reimplemented in our conventions.
+
 ## Iterative Workflow
 
 Repeat this cycle until zero issues remain or stagnation is detected:

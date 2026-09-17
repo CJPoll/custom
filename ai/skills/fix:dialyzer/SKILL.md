@@ -16,9 +16,13 @@ Systematically resolve Dialyzer type analysis issues while maintaining code func
 - Dialyzer cannot be run against single files — always analyzes the entire application
 - Fix maximum **5 issues per iteration** — always the **first 5 issues** in output order
 
+The commands above are generic defaults; if the consumer repo documents a
+wrapper (e.g. `./bin/checks/dialyzer.sh` in its `CLAUDE.md`), use that instead —
+see the resolution step in the delegated process.
+
 ## Process
 
-Follow the iterative resolution process at @~/.claude/skills/processes:fix/SKILL.md using the commands above, with these Dialyzer-specific overrides:
+Follow the iterative resolution process at @~/.claude/skills/processes:fix/SKILL.md — including its "Resolving the project's command" step — using the commands above, with these Dialyzer-specific overrides:
 
 - **Max iterations**: 20 (Dialyzer issues can cascade)
 - **Batch size**: 5 (first 5 issues in Dialyzer output order — no reordering)
