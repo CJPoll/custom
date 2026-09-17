@@ -38,6 +38,7 @@ require "tmpdir"
 AI_DIR       = File.expand_path("..", __dir__)
 FIXTURES_DIR = File.join(AI_DIR, "eval", "fixtures")
 SCORECARD    = File.join(AI_DIR, "eval", "scorecard.json")
+BASELINE     = File.join(AI_DIR, "eval", "baseline.json")
 HOOKS_DIR    = File.join(AI_DIR, "hooks")
 BIN_DIR      = File.join(AI_DIR, "bin")
 
@@ -106,7 +107,7 @@ def evaluate(dir)
   end
 end
 
-def run_corpus(fixtures_dir, write_scorecard:)
+def run_corpus(fixtures_dir, write_scorecard:, baseline_path: BASELINE)
   dirs = Dir.glob(File.join(fixtures_dir, "*")).select { |d| File.file?(File.join(d, "meta")) }.sort
   if dirs.empty?
     warn "harness-eval: FAILED — no fixtures with a meta file under #{fixtures_dir}"
@@ -134,6 +135,30 @@ def run_corpus(fixtures_dir, write_scorecard:)
     ))
   end
 
+  # Baseline diff (A2): compare this run to the committed known-good baseline.
+  # A REGRESSION (a case the baseline passes but this run fails) is the fail
+  # signal — never trade a known regression for an unproven gain. A newly-fixed
+  # case is an improvement (reported, not a failure).
+  baseline = load_baseline(baseline_path)
+  if baseline
+    now = results.each_with_object({}) { |r, h| h[r[:name]] = r[:pass] }
+    regressed = baseline.select { |name, was| was && now[name] == false }.keys
+    fixed     = baseline.select { |name, was| !was && now[name] == true }.keys
+    new_cases = now.keys - baseline.keys
+    puts ""
+    puts "baseline diff: #{regressed.size} regressed, #{fixed.size} fixed, #{new_cases.size} new case(s)"
+    fixed.each { |n| puts "  + fixed: #{n}" }
+    new_cases.each { |n| puts "  · new:   #{n} (#{now[n] ? 'pass' : 'fail'})" }
+    unless regressed.empty?
+      warn "harness-eval: FAILED — regression vs baseline:"
+      regressed.each { |n| warn "  - #{n}: baseline pass -> now fail" }
+      warn "  Fix: a harness change broke a case the baseline caught. Restore the guard/behavior; " \
+           "do NOT run --update-baseline to hide it. Update the baseline only for an intended change."
+      return 1
+    end
+    return 0
+  end
+
   failures = results.reject { |r| r[:pass] }
   return 0 if failures.empty?
 
@@ -143,6 +168,27 @@ def run_corpus(fixtures_dir, write_scorecard:)
   warn "  Fix: a regression is no longer caught by its guard (or a guard now false-fires). " \
        "Restore the guard so the case matches its expected verdict; never weaken a guard to go green."
   1
+end
+
+def load_baseline(path = BASELINE)
+  return nil unless path && File.file?(path)
+  data = JSON.parse(File.read(path))
+  data["cases"].each_with_object({}) { |c, h| h[c["name"]] = c["pass"] }
+rescue StandardError => e
+  warn "harness-eval: Note: baseline unreadable (#{e.message}); running without baseline diff."
+  nil
+end
+
+def update_baseline(fixtures_dir)
+  dirs = Dir.glob(File.join(fixtures_dir, "*")).select { |d| File.file?(File.join(d, "meta")) }.sort
+  results = dirs.map { |d| evaluate(d) }
+  FileUtils.mkdir_p(File.dirname(BASELINE))
+  File.write(BASELINE, JSON.pretty_generate(
+    "generated" => Time.now.utc.iso8601,
+    "cases" => results.map { |r| { "name" => r[:name], "pass" => r[:pass] } }
+  ))
+  puts "harness-eval: baseline written to #{BASELINE} (#{results.count { |r| r[:pass] }}/#{results.size} pass)"
+  0
 end
 
 require "time"
@@ -172,7 +218,7 @@ def run_self_test
     fx = File.join(dir, "fixtures")
     FileUtils.mkdir_p(File.join(fx, "01-bad"))
     File.write(File.join(fx, "01-bad", "meta"), "regression=r\nguard=nope\nmode=guard-health\nexpect=pass\n")
-    code = run_corpus(fx, write_scorecard: false)
+    code = run_corpus(fx, write_scorecard: false, baseline_path: nil)
     unless code == 1
       warn "self-test: FAIL — a bogus guard case should fail the corpus (got #{code})"; ok = false
     end
@@ -189,4 +235,12 @@ def run_self_test
   end
 end
 
-exit(ARGV.include?("--self-test") ? run_self_test : run_corpus(FIXTURES_DIR, write_scorecard: true))
+exit(
+  if ARGV.include?("--self-test")
+    run_self_test
+  elsif ARGV.include?("--update-baseline")
+    update_baseline(FIXTURES_DIR)
+  else
+    run_corpus(FIXTURES_DIR, write_scorecard: true)
+  end
+)

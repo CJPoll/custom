@@ -1,0 +1,33 @@
+{
+  "generated": "2026-09-17T05:05:01Z",
+  "cases": [
+    {
+      "name": "01-spin-loop-fires",
+      "pass": true
+    },
+    {
+      "name": "02-safe-wait-clean",
+      "pass": true
+    },
+    {
+      "name": "03-unreaped-bg-loop-fires",
+      "pass": true
+    },
+    {
+      "name": "04-pronoun-slip-fires",
+      "pass": true
+    },
+    {
+      "name": "05-pronoun-clean",
+      "pass": true
+    },
+    {
+      "name": "06-consumer-leak-guarded",
+      "pass": true
+    },
+    {
+      "name": "07-bare-guard-message-guarded",
+      "pass": true
+    }
+  ]
+}

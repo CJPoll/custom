@@ -135,6 +135,11 @@ you do not commit:
 - `ai/bin/check-guard-messages` — every first-party guard/hook/check emits an
   actionable `Fix:` message on failure (LLM-facing errors); run its `--self-test`
   too if you touched the checker.
+- `ai/bin/harness-eval` — the regression corpus still passes and nothing
+  regressed vs `ai/eval/baseline.json` (it writes `ai/eval/scorecard.json`); run
+  its `--self-test` too. If a change intentionally alters a case, update the
+  baseline with `ai/bin/harness-eval --update-baseline` (never to hide a
+  regression).
 - Any skill or script self-test relevant to what you changed.
 
 ## Invariants — never violate these
