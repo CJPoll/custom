@@ -180,9 +180,9 @@ guardrails; you may **never relax, weaken, or delete** one.
    no unattended system-level changes, credentials-are-owner-gated). Clarifying
    or tightening them is fine; loosening them is never fine.
 2. **Do not touch identity or credentials.** Leave `ai/bin/glab-athena`,
-   `ai/bin/notion-athena-mcp`, the `athena:slack` secrets/bins, and any
-   mode-600 identity file exactly as they are. Attribution/identity discipline
-   is out of your scope.
+   `ai/bin/gh-athena`, `ai/bin/notion-athena-mcp`, the `athena:slack`
+   secrets/bins, and any mode-600 identity file exactly as they are.
+   Attribution/identity discipline is out of your scope.
 3. **Do not commit a harness that fails the gate.** Revert and journal instead.
 4. **Evidence or nothing.** Every change cites ≥2 runs or one unambiguous
    factual gap. No speculative "this might help" edits.

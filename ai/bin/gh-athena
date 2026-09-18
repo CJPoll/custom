@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+#
+# gh-athena — run `gh` (or an authenticated `git`) as the Athena GitHub App
+# identity (athena-harness[bot]) instead of the repo owner. The GitHub mirror of
+# `glab-athena`: writes (PRs, comments, merges, pushes) are attributed to the
+# agent, not the owner, so the audit trail shows Athena.
+#
+# Auth uses NO personal access token. It signs a short-lived JWT with the App's
+# private key, mints an installation access token (valid ~1h), and runs `gh`
+# with GH_TOKEN set to it. The key is read from disk at call time, never passed
+# in argv; the minted token is cached mode-0600 and re-minted when it expires.
+#
+# Config (create these once — see the athena GitHub App setup):
+#   ~/.claude/github-athena-app-id    the App's numeric App ID
+#   ~/.claude/github-athena-key.pem   the App's private key (chmod 600)
+#
+# Usage — exactly like `gh`, plus a `git` passthrough:
+#   gh-athena pr create ...           # opens the PR as athena-harness[bot]
+#   gh-athena pr merge ... / pr comment ... / api ...
+#   gh-athena git push origin HEAD    # pushes over HTTPS authed as the app
+#   gh-athena --check                 # verify config + mint a token + print the bot slug
+#
+# Reads may use plain `gh`; use gh-athena for anything that should be attributed
+# to Athena. Pass this rule to athena-captains for PR creation and review replies.
+
+set -euo pipefail
+
+APP_ID_FILE="${GH_ATHENA_APP_ID_FILE:-$HOME/.claude/github-athena-app-id}"
+KEY="${GH_ATHENA_KEY:-$HOME/.claude/github-athena-key.pem}"
+CACHE="${GH_ATHENA_TOKEN_CACHE:-$HOME/.claude/.github-athena-token}"
+
+die() { echo "gh-athena: $*" >&2; exit 3; }
+
+command -v gh      >/dev/null 2>&1 || die "gh not found. Fix: install the GitHub CLI (\`gh\`)."
+command -v openssl >/dev/null 2>&1 || die "openssl not found. Fix: install openssl."
+command -v curl    >/dev/null 2>&1 || die "curl not found. Fix: install curl."
+command -v jq      >/dev/null 2>&1 || die "jq not found. Fix: install jq."
+[ -r "$APP_ID_FILE" ] || die "missing App ID at $APP_ID_FILE. Fix: echo <app-id> > $APP_ID_FILE"
+[ -r "$KEY" ]         || die "missing private key at $KEY. Fix: place the GitHub App private key there and \`chmod 600\` it."
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+mint_token() {
+  local app_id now iat exp header payload sig jwt inst_id resp tok exp_at exp_epoch
+  app_id="$(cat "$APP_ID_FILE")"
+  now=$(date +%s); iat=$((now - 60)); exp=$((now + 540))   # <=10min per GitHub
+  header="$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)"
+  payload="$(printf '%s' "{\"iat\":$iat,\"exp\":$exp,\"iss\":\"$app_id\"}" | b64url)"
+  sig="$(printf '%s' "$header.$payload" | openssl dgst -sha256 -sign "$KEY" -binary | b64url)" \
+    || die "JWT signing failed — is $KEY a valid RSA private key?"
+  jwt="$header.$payload.$sig"
+
+  inst_id="$(curl -sS -H "Authorization: Bearer $jwt" -H "Accept: application/vnd.github+json" \
+    https://api.github.com/app/installations | jq -r '.[0].id')" \
+    || die "could not reach the GitHub API to list installations."
+  [ -n "$inst_id" ] && [ "$inst_id" != "null" ] \
+    || die "the App has no installation. Fix: install the athena GitHub App on your account/repos."
+
+  resp="$(curl -sS -X POST -H "Authorization: Bearer $jwt" -H "Accept: application/vnd.github+json" \
+    https://api.github.com/app/installations/"$inst_id"/access_tokens)"
+  tok="$(printf '%s' "$resp" | jq -r '.token')"
+  exp_at="$(printf '%s' "$resp" | jq -r '.expires_at')"
+  [ -n "$tok" ] && [ "$tok" != "null" ] \
+    || die "installation token mint failed: $(printf '%s' "$resp" | jq -r '.message // "unknown error"')"
+
+  exp_epoch="$(date -d "$exp_at" +%s 2>/dev/null || echo $((now + 3000)))"
+  ( umask 077; printf '%s\t%s\n' "$tok" "$exp_epoch" > "$CACHE" )
+  printf '%s' "$tok"
+}
+
+get_token() {
+  if [ -r "$CACHE" ]; then
+    local line tok exp
+    line="$(cat "$CACHE")"; tok="${line%%$'\t'*}"; exp="${line##*$'\t'}"
+    if [ -n "$tok" ] && [ "$tok" != "$exp" ] \
+       && printf '%s' "$exp" | grep -Eq '^[0-9]+$' \
+       && [ "$exp" -gt "$(( $(date +%s) + 300 ))" ]; then
+      printf '%s' "$tok"; return
+    fi
+  fi
+  mint_token
+}
+
+if [ "${1:-}" = "--check" ]; then
+  tok="$(get_token)"
+  slug="$(GH_TOKEN="$tok" gh api /app -q .slug 2>/dev/null || true)"
+  # /app requires the JWT, not the installation token; confirm identity via the
+  # installation instead (the token acting on a repo is the real proof).
+  who="$(GH_TOKEN="$tok" gh api /installation/repositories -q '.repositories[0].full_name' 2>/dev/null || true)"
+  [ -n "$who" ] || die "token minted but could not reach installation repositories."
+  echo "gh-athena: OK — authenticated as the App; installation reaches e.g. $who."
+  exit 0
+fi
+
+TOKEN="$(get_token)"
+
+if [ "${1:-}" = "git" ]; then
+  shift
+  # HTTPS git authenticated as the app: x-access-token:<token> basic auth.
+  exec git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | openssl base64 -A)" "$@"
+fi
+
+exec env GH_TOKEN="$TOKEN" GH_HOST=github.com gh "$@"

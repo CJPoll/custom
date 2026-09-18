@@ -601,7 +601,7 @@ mobile-parity, and pt1280.
 ## Merge notification DM to the owner (owner rule, 2026-09-01)
 
 Every time you merge an MR — and ONLY a merge you yourself performed (your
-own glab/glab-athena call, or your engineer's under your direction); never a
+own glab-athena/gh-athena call, or your engineer's under your direction); never a
 merge by a human or another harness that you merely observed while watching
 main or pipelines — DM Cody (U0AHNV4RJGP) as Athena via the
 athena:slack skill (`~/.claude/skills/athena:slack/bin/dm`), exactly this
@@ -615,16 +615,26 @@ is the Notion ticket page; when an MR has no ticket, use the MR title and URL
 in place of the Mission link. Send it immediately after the train reports the
 merge, before boarding the next car.
 
-## Act in GitLab as Athena (owner rule, 2026-09-01)
+## Act as Athena, not the owner (owner rule, 2026-09-01)
 
-Writes that should be attributed to the agent — creating MRs, posting MR
-comments/replies, approving, boarding merge trains, merging — go through
-`~/dev/custom/ai/bin/glab-athena` (a `glab` wrapper that authenticates as the
-`athena-amby` service account, Maintainer on walt_ui; token read from
-~/.claude/gitlab-athena-token at call time, never in argv). Use it exactly
-like `glab` (`glab-athena api --method POST ...`, `glab-athena mr create ...`).
-Reads may use plain `glab`. Pass this rule to athena-captains for MR creation
-and review replies so the audit trail shows Athena, not the owner.
+Writes that should be attributed to the agent — creating MRs/PRs, posting
+comments/replies, approving, boarding merge trains, merging — go through Athena's
+own forge identity, not your account, so the audit trail shows Athena. The
+wrapper is **per-forge**; resolve it by the repo's remote host. Each reads its
+credential at call time (never in argv) and is used exactly like the underlying
+CLI. Reads may use the plain CLI. Pass this rule to athena-captains for MR/PR
+creation and review replies.
+
+- **GitLab** (e.g. walt_ui): `~/dev/custom/ai/bin/glab-athena` — a `glab` wrapper
+  authenticating as the `athena-amby` service account (Maintainer on the walt_ui
+  GitLab project; token from `~/.claude/gitlab-athena-token`). Use like `glab`:
+  `glab-athena mr create ...`, `glab-athena api --method POST ...`.
+- **GitHub** (e.g. gen_saas): `~/dev/custom/ai/bin/gh-athena` — a `gh` wrapper
+  authenticating as the `athena-harness` GitHub App (shows as `athena-harness[bot]`;
+  it signs a JWT with `~/.claude/github-athena-key.pem` and mints a short-lived
+  installation token — no PAT). Use like `gh`: `gh-athena pr create ...`,
+  `gh-athena pr merge ...`, `gh-athena api ...`; `gh-athena git push ...` for an
+  authenticated push. `gh-athena --check` verifies it can authenticate.
 
 ## Worker renames ship their queue migration in the same MR (incident #473, 2026-09-02)
 

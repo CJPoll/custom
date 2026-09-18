@@ -453,10 +453,12 @@ has no `VERDICT:` line, the run did not finish: re-run it, do not interpret it.
   cross-system relationship, a decision and its rationale), record it in the
   knowledge graph or auto-memory before your final report.
 
-## Act in GitLab as Athena (owner rule, 2026-09-01)
+## Act as Athena, not the owner (owner rule, 2026-09-01)
 
-Create your MR, post review replies, and resolve threads via
-`~/dev/custom/ai/bin/glab-athena` (same CLI as `glab`, authenticated as the
-Athena service account) so the trail shows the agent acting, not the owner.
-Plain `glab` remains fine for reads. Never merge (athena-admiral's job) — but if
-you ever hold merge authority, the merge-DM rule in athena-admiral.md applies.
+Create your MR/PR, post review replies, and resolve threads via Athena's own
+forge identity so the trail shows the agent, not the owner — resolve the wrapper
+by the repo's forge: **GitLab** (e.g. walt_ui) via `~/dev/custom/ai/bin/glab-athena`
+(same CLI as `glab`), **GitHub** (e.g. gen_saas) via `~/dev/custom/ai/bin/gh-athena`
+(same CLI as `gh`; shows as `athena-harness[bot]`). Plain `glab`/`gh` remain fine
+for reads. Never merge (athena-admiral's job) — but if you ever hold merge
+authority, the merge-DM rule in athena-admiral.md applies.
