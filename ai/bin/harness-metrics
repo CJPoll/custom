@@ -112,6 +112,40 @@ def safe_wait_block?(prev_o)
   end
 end
 
+# A within-turn gap that measures the wall-clock of a SYNCHRONOUS tool/command
+# the agent invoked is tool-execution time, NOT agent idle: the agent cannot act
+# while a synchronous Bash command runs (a full Docker `./bin/test` umbrella run,
+# a synchronous `claude -p --agent athena-diff-critic` review-floor pass, a gated
+# `git commit --amend`), because it is blocked in the harness awaiting the result
+# it asked for. Counting these as agent_stall_gaps penalizes prescribed
+# synchronous work; the genuine spin-loop/hang risk is guarded at the source by
+# safe-wait-guard.sh + the CLAUDE.md Hard Rule, not by this diagnostic. Two
+# transcript shapes carry a synchronous-execution gap, BOTH observed in the
+# 2026-09-18 kg-mcp-auth captains:
+#   (a) the CURRENT record is the tool's RETURN — a `tool_result` content block,
+#       or a top-level `toolUseResult` key on a user record (ab00fa2c: a gated
+#       `git commit --amend` (339s) and a synchronous diff-critic run (356s)).
+#   (b) the PRECEDING record is a `queued_command` attachment — a queued
+#       synchronous command whose ~600s execution lands as the gap to the next
+#       system attachment (a42541d5: repeated queued test/critic commands near
+#       the 10-min Bash ceiling). Attachment timestamps are system-injected, so a
+#       gap bracketed by a queued command is command runtime, not agent idle.
+# Generalizes the earlier `tail --pid` safe_wait_block? special case.
+def synchronous_tool_gap?(prev_o, o)
+  if o.is_a?(Hash)
+    return true if o["toolUseResult"]
+    m = o["message"]
+    if m.is_a?(Hash) && m["content"].is_a?(Array)
+      return true if m["content"].any? { |b| b.is_a?(Hash) && b["type"] == "tool_result" }
+    end
+  end
+  if prev_o.is_a?(Hash) && prev_o["type"] == "attachment"
+    a = prev_o["attachment"]
+    return true if a.is_a?(Hash) && a["type"] == "queued_command"
+  end
+  false
+end
+
 # Fold one parsed JSONL record into the accumulator.
 # `agent` marks records from an agent-session transcript (agent-*.jsonl) vs an
 # interactive (UUID-named) session: an in-band gap in an interactive session is
@@ -120,7 +154,10 @@ end
 # ~88% of in-band gaps were benign interactive idle, which made the total-count
 # stall signal effectively always-on.) Runs 18-19 refined it further: even in an
 # agent transcript, a gap ending at a fresh user turn (see new_user_turn?) is
-# idle-between-turns, so only within-turn gaps feed agent_stall_gaps.
+# idle-between-turns, so only within-turn gaps feed agent_stall_gaps. Run 20
+# refined it once more: a within-turn gap that is the wall-clock of a synchronous
+# tool the agent invoked (see synchronous_tool_gap?) is tool runtime, not idle,
+# so it is excluded too.
 def fold(acc, o, prev_ts, agent = false, prev_o = nil)
   ts = o["timestamp"]
   if ts && prev_ts
@@ -130,7 +167,7 @@ def fold(acc, o, prev_ts, agent = false, prev_o = nil)
         acc[:session_idle_gaps] += 1 # human closed/resumed the session, not a stall
       elsif gap >= STALL_GAP_S
         acc[:stall_gaps] += 1
-        acc[:agent_stall_gaps] += 1 if agent && !new_user_turn?(o) && !safe_wait_block?(prev_o)
+        acc[:agent_stall_gaps] += 1 if agent && !new_user_turn?(o) && !safe_wait_block?(prev_o) && !synchronous_tool_gap?(prev_o, o)
       end
     rescue StandardError
       # unparseable timestamp -> ignore for gap accounting
@@ -371,21 +408,54 @@ def run_self_test
     ]
     File.write(sf, safe_lines.map { |l| JSON.generate(l) }.join("\n") + "\n")
 
-    acc = parse_files([f, af, tf, sf])
+    # A fifth agent transcript whose sub-ceiling gap ENDS at the RETURN of a
+    # synchronous tool the agent invoked (assistant tool_use -> user tool_result).
+    # The gap is the tool's own execution time (a full Docker test run, a
+    # synchronous `claude -p --agent` critic), not agent idle: it must count
+    # toward stall_gaps (total) but NOT agent_stall_gaps (observed 2026-09-18,
+    # kg-mcp-auth captain ab00fa2c). Without synchronous_tool_gap? this would push
+    # agent_stall_gaps to 2.
+    syncf = File.join(dir, "agent-synctool.jsonl")
+    sync_lines = [
+      { "type" => "assistant", "timestamp" => "2026-09-16T00:00:00.000Z",
+        "message" => { "role" => "assistant", "content" => [
+          { "type" => "tool_use", "name" => "Bash",
+            "input" => { "command" => "./bin/test" } }] } },
+      { "type" => "user", "timestamp" => "2026-09-16T01:00:00.000Z",
+        "message" => { "role" => "user", "content" => [
+          { "type" => "tool_result", "is_error" => false }] } },
+    ]
+    File.write(syncf, sync_lines.map { |l| JSON.generate(l) }.join("\n") + "\n")
+
+    # A sixth agent transcript whose sub-ceiling gap is PRECEDED by a
+    # `queued_command` attachment — a queued synchronous command whose runtime
+    # lands as the gap to the next system attachment (observed 2026-09-18,
+    # kg-mcp-auth captain a42541d5). Command runtime, not agent idle: count toward
+    # stall_gaps (total) but NOT agent_stall_gaps.
+    qcf = File.join(dir, "agent-queuedcmd.jsonl")
+    qc_lines = [
+      { "type" => "attachment", "timestamp" => "2026-09-16T00:00:00.000Z",
+        "attachment" => { "type" => "queued_command" } },
+      { "type" => "attachment", "timestamp" => "2026-09-16T01:00:00.000Z",
+        "attachment" => { "type" => "total_tokens_reminder" } },
+    ]
+    File.write(qcf, qc_lines.map { |l| JSON.generate(l) }.join("\n") + "\n")
+
+    acc = parse_files([f, af, tf, sf, syncf, qcf])
     r = build_report(acc, { "test-model" => {
       "input_per_mtok" => 1.0, "output_per_mtok" => 2.0,
       "cache_read_per_mtok" => 0.1, "cache_write_per_mtok" => 0.5 } })
 
     checks = {
       "malformed counted"   => (r["malformed_lines"] == 1),
-      "tool_calls == 3"     => (r["tool_calls"] == 3),
+      "tool_calls == 4"     => (r["tool_calls"] == 4),
       "tool_errors == 1"    => (r["tool_errors"] == 1),
-      "failure_rate == 0.5" => (r["tool_failure_rate"] == 0.5),
+      "failure_rate == 0.3333 (1 err / 3 results)" => (r["tool_failure_rate"] == 0.3333),
       "skill fire counted"  => (r["skills"]["review"] == 1),
       "input tokens == 10"  => (r["tokens"]["input"] == 10),
       "thinking == 3"       => (r["tokens"]["thinking"] == 3),
-      "stall gap == 4"        => (r["stall_gaps"] == 4),
-      "agent stall gap == 1 (turn-boundary + safe-wait excluded)" => (r["agent_stall_gaps"] == 1),
+      "stall gap == 6"        => (r["stall_gaps"] == 6),
+      "agent stall gap == 1 (turn-boundary + safe-wait + sync-tool excluded)" => (r["agent_stall_gaps"] == 1),
       "session-idle == 1"     => (r["session_idle_gaps"] == 1),
       # safe_wait_block? edge cases: a preceding Bash `tail --pid` block is a
       # prescribed safe-wait (excluded from agent stalls); a plain Bash command
@@ -399,6 +469,25 @@ def run_self_test
           [{ "type" => "tool_use", "name" => "Bash",
              "input" => { "command" => "mix test" } }] } }),
       "nil prior is not safe-wait"   => !safe_wait_block?(nil),
+      # synchronous_tool_gap? edge cases: a gap ending at a tool_result return
+      # (message-content block or top-level toolUseResult key) or preceded by a
+      # queued_command attachment is synchronous tool-execution time, not idle; a
+      # plain assistant->assistant gap is not.
+      "tool_result return is sync-tool gap" =>
+        synchronous_tool_gap?({ "type" => "assistant" },
+          { "type" => "user", "message" => { "content" => [{ "type" => "tool_result" }] } }),
+      "toolUseResult key is sync-tool gap" =>
+        synchronous_tool_gap?({ "type" => "assistant" },
+          { "type" => "user", "toolUseResult" => {}, "message" => { "content" => "done" } }),
+      "queued_command prior is sync-tool gap" =>
+        synchronous_tool_gap?(
+          { "type" => "attachment", "attachment" => { "type" => "queued_command" } },
+          { "type" => "attachment", "attachment" => { "type" => "total_tokens_reminder" } }),
+      "plain assistant gap is not sync-tool" =>
+        !synchronous_tool_gap?({ "type" => "assistant", "message" => {} },
+          { "type" => "assistant", "message" => {} }),
+      "nil prior tolerated by sync-tool" =>
+        !synchronous_tool_gap?(nil, { "type" => "assistant", "message" => {} }),
       # cost = 10/1e6*1 + 20/1e6*2 + 5/1e6*0.1 + 7/1e6*0.5 = 0.0000000535
       "cost derived"        => (r["cost"]["usd"] >= 0.0 && r["cost"]["priced"] == true),
       # new_user_turn? edge cases: string user msg is a fresh turn; a user record
