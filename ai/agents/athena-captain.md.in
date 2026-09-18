@@ -492,5 +492,6 @@ by the repo's forge: **GitLab** (e.g. walt_ui) via `~/dev/custom/ai/bin/glab-ath
 (same CLI as `gh`; shows as `athena-harness[bot]`). Plain `glab`/`gh` remain fine
 for reads. For the full per-forge operational playbook (open, watch CI, review,
 merge), see **athena:gitlab** (default) / **athena:github**. Never merge
-(athena-admiral's job) — but if you ever hold merge authority, the merge-DM rule
-in athena-admiral.md applies.
+(athena-admiral's job) — but if you ever hold merge authority, the owner-
+notification rules in athena-admiral.md apply (the epic-progress DM at merge
+time; the `Needs Attention` DM rides the ticket-lifecycle transition).
