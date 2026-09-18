@@ -90,6 +90,28 @@ def new_user_turn?(o)
   true
 end
 
+# A within-turn gap whose PRECEDING record is the agent correctly BLOCKING on a
+# bounded safe-wait command — the `timeout N tail --pid=<pid> -f /dev/null`
+# pattern the CLAUDE.md Hard Rule and the ops:never-end-turn-waiting block
+# MANDATE (rule 2: "block, don't spin") — is not a stall; it is the prescribed
+# alternative to one. Counting it as an agent_stall_gap inverts the canary: it
+# flags the exact behavior the harness requires. Detect it from the previous
+# record (the assistant Bash tool_use that spawned the block). (Observed
+# 2026-09-18, kg-mcp-auth captain a81c4b66 blocking on a spawned critic agent:
+# a full-300s `timeout 300 tail --pid=$(pgrep -f …) -f /dev/null` was counted as
+# a false stall — the shipwright's own tooling penalizing prescribed behavior.)
+def safe_wait_block?(prev_o)
+  return false unless prev_o.is_a?(Hash)
+  m = prev_o["message"]
+  return false unless m.is_a?(Hash)
+  c = m["content"]
+  return false unless c.is_a?(Array)
+  c.any? do |b|
+    b.is_a?(Hash) && b["type"] == "tool_use" && b["name"] == "Bash" &&
+      (b["input"].is_a?(Hash) ? b["input"]["command"].to_s : "").match?(/tail\s+--pid/)
+  end
+end
+
 # Fold one parsed JSONL record into the accumulator.
 # `agent` marks records from an agent-session transcript (agent-*.jsonl) vs an
 # interactive (UUID-named) session: an in-band gap in an interactive session is
@@ -99,7 +121,7 @@ end
 # stall signal effectively always-on.) Runs 18-19 refined it further: even in an
 # agent transcript, a gap ending at a fresh user turn (see new_user_turn?) is
 # idle-between-turns, so only within-turn gaps feed agent_stall_gaps.
-def fold(acc, o, prev_ts, agent = false)
+def fold(acc, o, prev_ts, agent = false, prev_o = nil)
   ts = o["timestamp"]
   if ts && prev_ts
     begin
@@ -108,7 +130,7 @@ def fold(acc, o, prev_ts, agent = false)
         acc[:session_idle_gaps] += 1 # human closed/resumed the session, not a stall
       elsif gap >= STALL_GAP_S
         acc[:stall_gaps] += 1
-        acc[:agent_stall_gaps] += 1 if agent && !new_user_turn?(o)
+        acc[:agent_stall_gaps] += 1 if agent && !new_user_turn?(o) && !safe_wait_block?(prev_o)
       end
     rescue StandardError
       # unparseable timestamp -> ignore for gap accounting
@@ -169,6 +191,7 @@ def parse_files(files)
     acc[:files] += 1
     agent = File.basename(f).start_with?("agent-")
     prev_ts = nil
+    prev_o = nil
     File.foreach(f) do |line|
       line = line.strip
       next if line.empty?
@@ -179,7 +202,8 @@ def parse_files(files)
         next
       end
       acc[:records] += 1
-      prev_ts = fold(acc, o, prev_ts, agent)
+      prev_ts = fold(acc, o, prev_ts, agent, prev_o)
+      prev_o = o
     end
   rescue StandardError
     # unreadable file -> skip, fail-open
@@ -331,22 +355,50 @@ def run_self_test
     ]
     File.write(tf, turn_lines.map { |l| JSON.generate(l) }.join("\n") + "\n")
 
-    acc = parse_files([f, af, tf])
+    # A fourth agent transcript whose sub-ceiling gap is PRECEDED by the agent
+    # correctly blocking on a bounded safe-wait command (`timeout N tail --pid`,
+    # the CLAUDE.md Hard Rule / ops:never-end-turn-waiting rule-2 pattern). It
+    # must count toward stall_gaps (total) but NOT agent_stall_gaps — flagging
+    # prescribed safe-wait behavior as a stall inverts the canary (observed
+    # 2026-09-18, kg-mcp-auth captain a81c4b66 blocking on a spawned critic).
+    sf = File.join(dir, "agent-safewait.jsonl")
+    safe_lines = [
+      { "type" => "assistant", "timestamp" => "2026-09-16T00:00:00.000Z",
+        "message" => { "role" => "assistant", "content" => [
+          { "type" => "tool_use", "name" => "Bash",
+            "input" => { "command" => "timeout 300 tail --pid=$(pgrep -f foo | head -1) -f /dev/null" } } ] } },
+      { "type" => "assistant", "timestamp" => "2026-09-16T01:00:00.000Z", "message" => {} },
+    ]
+    File.write(sf, safe_lines.map { |l| JSON.generate(l) }.join("\n") + "\n")
+
+    acc = parse_files([f, af, tf, sf])
     r = build_report(acc, { "test-model" => {
       "input_per_mtok" => 1.0, "output_per_mtok" => 2.0,
       "cache_read_per_mtok" => 0.1, "cache_write_per_mtok" => 0.5 } })
 
     checks = {
       "malformed counted"   => (r["malformed_lines"] == 1),
-      "tool_calls == 2"     => (r["tool_calls"] == 2),
+      "tool_calls == 3"     => (r["tool_calls"] == 3),
       "tool_errors == 1"    => (r["tool_errors"] == 1),
       "failure_rate == 0.5" => (r["tool_failure_rate"] == 0.5),
       "skill fire counted"  => (r["skills"]["review"] == 1),
       "input tokens == 10"  => (r["tokens"]["input"] == 10),
       "thinking == 3"       => (r["tokens"]["thinking"] == 3),
-      "stall gap == 3"        => (r["stall_gaps"] == 3),
-      "agent stall gap == 1 (turn-boundary excluded)" => (r["agent_stall_gaps"] == 1),
+      "stall gap == 4"        => (r["stall_gaps"] == 4),
+      "agent stall gap == 1 (turn-boundary + safe-wait excluded)" => (r["agent_stall_gaps"] == 1),
       "session-idle == 1"     => (r["session_idle_gaps"] == 1),
+      # safe_wait_block? edge cases: a preceding Bash `tail --pid` block is a
+      # prescribed safe-wait (excluded from agent stalls); a plain Bash command
+      # or a nil/non-Bash prior record is not.
+      "safe-wait block detected"    =>
+        safe_wait_block?({ "message" => { "role" => "assistant", "content" =>
+          [{ "type" => "tool_use", "name" => "Bash",
+             "input" => { "command" => "timeout 300 tail --pid=1234 -f /dev/null" } }] } }),
+      "plain bash is not safe-wait"  =>
+        !safe_wait_block?({ "message" => { "role" => "assistant", "content" =>
+          [{ "type" => "tool_use", "name" => "Bash",
+             "input" => { "command" => "mix test" } }] } }),
+      "nil prior is not safe-wait"   => !safe_wait_block?(nil),
       # cost = 10/1e6*1 + 20/1e6*2 + 5/1e6*0.1 + 7/1e6*0.5 = 0.0000000535
       "cost derived"        => (r["cost"]["usd"] >= 0.0 && r["cost"]["priced"] == true),
       # new_user_turn? edge cases: string user msg is a fresh turn; a user record
