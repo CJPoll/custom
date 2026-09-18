@@ -382,24 +382,37 @@ terminated by then, so this is yours to do, not a redispatch.
 
 ### 6a. Tear down a Mission's docker stack once its MR is merged
 
-Every worktree gets its own isolated docker-compose stack (project name
-derived from the worktree basename — see `backend/bin/_compose-env.sh`), and
-idle stacks hold real capacity: postgres memory/connections, typesense, SQS,
-volumes, and an address-pool network. Leaving them up after the Mission lands
-is how the box drifts into pool starvation and "all predefined address pools
-have been fully subnetted".
+Every worktree gets its own isolated docker-compose stack(s), and idle stacks
+hold real capacity: database memory/connections, service containers, volumes,
+and an address-pool network. Leaving them up after the Mission lands is how the
+box drifts into pool starvation and "all predefined address pools have been
+fully subnetted".
 
-As soon as a Mission's MR is **merged** (not merely green — a green-but-open
-MR may still need its stack for review follow-ups), tear its stack down,
-including volumes and the network:
+As soon as a Mission's MR is **merged** (not merely green — a green-but-open MR
+may still need its stack for review follow-ups), tear its stack down — every
+per-worktree stack the repo runs, including volumes, orphans, and the network.
 
-    cd <worktree>/backend
-    source bin/_compose-env.sh
-    docker compose down -v --remove-orphans
+**How the teardown command is resolved is per-repo** (the project-name
+derivation and working directory are repo-specific, and a bare `down -v` in the
+wrong repo destroys the wrong stack's volumes). Resolve it in order:
 
-If the worktree is already gone, tear down by project name instead:
-`docker compose -p walt-ui-<sanitized-worktree-basename> down -v
---remove-orphans` (sanitize: lowercase, non-alphanumerics to `-`).
+1. **Repo-provided teardown script (preferred).** If the repo has
+   `bin/teardown-worktree-stack.sh` (or `.claude/teardown-worktree-stack.sh`),
+   run it with the worktree path: `<repo>/bin/teardown-worktree-stack.sh
+   <worktree>`. Its contract: tear down *every* stack that worktree runs —
+   containers, volumes, orphans, and network — and exit nonzero if it cannot.
+   The repo owns the project-name derivation and cwd, so this cannot mis-target
+   a destructive `-v`; prefer it whenever it exists.
+2. **Generic default — ONLY when the compose project name is docker's default
+   (the worktree-directory basename): compose at the repo/worktree root, no
+   sourced env var and no explicit `name:`/`-p`.** Then, from the worktree root:
+   `docker compose down -v --remove-orphans`. Do **not** use this for a repo
+   whose project name comes from a sourced env var or a prefix — a bare `down`
+   there targets the wrong (often shared) stack and `-v` wipes its volumes.
+3. **Documented prose fallback.** If a repo isolates stacks non-standardly but
+   ships no script, follow its documented teardown (its CLAUDE.md) exactly, and
+   note in your report that this hand-assembled destructive path is the least
+   safe — a repo that lacks a step-1 script should get one.
 
 Rules:
 - This is yours, not the athena-captain's — they may have terminated before
