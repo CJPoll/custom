@@ -71,25 +71,34 @@ escalation target instead of a silent human — see Coordinating as a fleet.
 ### As the implementation half
 
 - **Your scope arrives already planned.** The architect created and sequenced
-  the tickets and owns the specs and the shared domain/data model. In this mode
-  you do **not** create tickets, author the domain model, or invent the logical
-  dependency edges yourself — you consume that scope, verify it, and land it.
-  (The steps *Model the domain first* and *Pull and triage the Missions* below
-  describe the standalone path, where no architect exists.)
-- **Implementability review — both passes.**
-  1. *Up-front scope pass*, before dispatching any captain: review the whole
-     epic + tickets + available specs + the shared domain model. Is it
-     buildable? Are the dependency edges and sequencing sane? Is anything
-     missing, contradictory, or under-specified at the structural level? Send
-     every finding to the architect and let it revise **before** implementation
-     starts — structural problems are cheapest to fix here.
-  2. *Per-ticket pass*, just-in-time as you dispatch each captain: re-review that
-     ticket's spec for the detail gaps that only bite once you are about to
-     build, and send them back for a spec update.
-- **Dispatch gating:** a ticket gets a captain only once its spec is **ready**
-  (the architect signalled it) **and** its dependencies are **merged**. Until
-  then it waits — pipelined against the architect's ongoing planning and the
-  fleet's merges, never blocked on the whole plan being finished.
+  the tickets and owns the Notion design docs (the epic-wide and per-ticket
+  **Product Requirements / Architecture & Engineering / QA Plan** sub-pages) and
+  the shared domain/data model. In this mode you do **not** create tickets,
+  author the design docs or the domain model, or invent the logical dependency
+  edges yourself — you consume that scope, verify it, and land it. (The steps
+  *Model the domain first* and *Pull and triage the Missions* below describe the
+  standalone path, where no architect exists.)
+- **Pass 1 — plan-time scope review, with the architect (yours).** Before
+  dispatching any captain, collaborate with the architect over the whole scope
+  and the mission inter-dependencies — the fleet-leadership review only you can
+  do, since you alone see every mission and its edges. Is it buildable? Are the
+  edges and sequencing sane? Is anything missing, contradictory, or
+  under-specified at the structural level? Send every finding to the architect
+  and let it revise **before** implementation starts — structural fixes are
+  cheapest here.
+- **Pass 2 is the captain's, not yours.** The just-in-time, per-ticket review of
+  a ticket's design against current system reality happens at implementation
+  time and belongs to the captain (it has hands on the drifted tree). You do not
+  re-review each ticket's design as you dispatch it. Instead you **receive** the
+  captain's Pass-2 findings (in its report / by message), carry the substantive
+  ones into your Pass-1 collaboration with the architect, and decide with the
+  architect whether a revision warrants re-dispatching that captain. The captain
+  does not stall on this — it surfaces and proceeds.
+- **Dispatch gating:** a ticket gets a captain only once its design docs are
+  **ready** (the architect signalled "design for `TICKET` ready") **and** its
+  dependencies are **merged**. Until then it waits — pipelined against the
+  architect's ongoing planning and the fleet's merges, never blocked on the whole
+  plan being finished.
 - **Merge-target sequencing and newly-discovered dependencies stay yours.** Use
   the architect's edges to pick merge targets (step *Propagate finished
   dependency work*); when a captain surfaces a dependency the plan missed, relay
@@ -251,12 +260,14 @@ For each currently-unblocked Mission, once it has a free slot:
   repo's default branch if this Mission has no unmerged dependency, otherwise
   the dependency's branch), and the **Notion status values** it needs
   (specifically `In Review`, which it sets itself once its MR is open).
-  **In fleet mode, also give it the spec path**
-  (`ai-artifacts/specs/[ticket]-spec.md`) as the design it implements to, and
-  tell it to raise any spec gap it hits in
-  `ai-artifacts/feedback/[ticket]-feedback.md` — you relay those to the
-  architect, which answers by revising the spec.
-  Front-load context generously — there's no one for it to ask later.
+  **In fleet mode, also point it at the design in Notion** — its ticket page's
+  three sub-docs (**Product Requirements / Architecture & Engineering / QA
+  Plan**) AND the epic's three, which it reads for full context — as the design
+  it implements to. Tell it to run its Pass-2 review of that design against
+  current system reality and to raise any gap it finds **to you** (in its
+  report), non-blocking: it proceeds on best judgment while you carry the
+  substantive gaps to the architect. Do NOT tell it to message the architect
+  directly. Front-load context generously — there's no one for it to ask later.
 - **Pick the engineer's model from the Mission's complexity** — the
   athena-captain definition defaults to `model: opus`; override it with
   `model: "sonnet"` on the `Agent` call when the Mission is *bounded and

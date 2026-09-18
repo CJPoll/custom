@@ -39,9 +39,13 @@ Everything you learn from is local, under `~/dev/custom/`:
 - **State logs** — `ai-artifacts/coordination/*/state.md`. Per-Mission model
   choice + rationale, blocked/stuck narratives, notes on process mismatches
   (e.g. "this repo ships via `wt merge`, not GitLab").
-- **Specs & feedback** — `ai-artifacts/specs/*` and `ai-artifacts/feedback/*`.
-  A `[ticket]-feedback.md` is an athena-captain telling an athena-architect the
-  spec had a gap — a candidate to fix in the architect's process.
+- **Design docs & feedback** — a fleet's design artifacts are now **Notion
+  sub-pages** (per-epic and per-ticket **Product Requirements / Architecture &
+  Engineering / QA Plan**), not local files, and captains' design gaps flow
+  captain→admiral→architect rather than into a local feedback file. When a run's
+  reports surface a design gap a captain hit, that is a candidate to fix in the
+  architect's process. (Older runs may still carry `ai-artifacts/specs/*` /
+  `ai-artifacts/feedback/*` — read them where present.)
 - **Recorded lessons** — the Knowledge Graph (`kg:*`) and auto-memory
   (`~/.claude/projects/-home-cjpoll-dev-custom/memory/MEMORY.md`). A lesson
   captured more than once, or a gotcha that keeps recurring, is a signal a

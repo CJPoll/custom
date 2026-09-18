@@ -1,6 +1,6 @@
 ---
 name: athena:kick-off
-description: Turn a finished conversation about work-to-be-done or requirements into a running fleet — stand up an athena-architect (planning: it owns the Notion epics/tickets AND the specs) and an athena-admiral (implementation), wired to coordinate live via a bidirectional review/feedback loop. Invoke (by user or model) at the seam between "we've agreed what to build" and "go build it," once requirements are settled enough to plan against.
+description: Turn a finished conversation about work-to-be-done or requirements into a running fleet — stand up an athena-architect (planning: it owns the Notion epics/tickets AND the design docs) and an athena-admiral (implementation), wired to coordinate live via a bidirectional review/feedback loop. Invoke (by user or model) at the seam between "we've agreed what to build" and "go build it," once requirements are settled enough to plan against.
 ---
 
 # athena:kick-off
@@ -41,16 +41,17 @@ DB or a semantics.
 - **athena-architect (planning).** Owns the Notion **epics/tickets** — it
   creates or refines them from the requirements conversation via
   [[athena:ticket-management]], sequences them with dependency edges, and takes
-  scope (assign Athena; `Backlog`→`Todo`). It also authors the shared,
-  whole-system **domain model** as an athena:system-spec JSON document under
-  `ai-artifacts/domain/` — a distinct, broader artifact than the per-ticket
-  specs, the source of truth every ticket grounds against. It then produces one
-  spec per ticket at `ai-artifacts/specs/[ticket]-spec.md` in dependency order.
-  The local spec is an intermediate artifact; the **Notion tickets are the
-  durable scope** handed to the admiral.
-- **athena-admiral (implementation).** Consumes that ticket scope, reviews it for
-  implementability (below), then drives the fleet of captains, merges, and ships.
-  It never writes production code and never plans — it sequences and lands.
+  scope (assign Athena; `Backlog`→`Todo`). It authors the **design docs in
+  Notion** (never authoritative local files): for the epic, and for each ticket,
+  three sub-pages — **Product Requirements**, **Architecture & Engineering**,
+  **QA Plan**. It also authors the shared, whole-system **domain model** as an
+  athena:system-spec JSON document under `ai-artifacts/domain/` — a
+  schema-validated tooling artifact the Architecture & Engineering docs build on.
+  The **Notion epic/tickets are the durable scope** handed to the admiral.
+- **athena-admiral (implementation).** Consumes that scope, runs the plan-time
+  scope review with the architect (Pass 1, below), then drives the fleet of
+  captains, merges, and ships. It never writes production code and never plans —
+  it sequences and lands.
 
 ## Coordination contract (the bidirectional loop)
 
@@ -63,37 +64,40 @@ The two run **concurrently and pipelined** — the admiral starts landing early
 tickets while the architect is still planning later ones — and coordinate over
 two channels:
 
-**Durable channel (files + Notion):**
-- Specs: architect writes `ai-artifacts/specs/[ticket]-spec.md`.
-- Feedback: captains (and the admiral) write gaps to
-  `ai-artifacts/feedback/[ticket]-feedback.md`; the architect answers by
-  **updating the spec**, never by editing the feedback file.
+**Durable channel — Notion is the source of truth:**
+- Design docs: the architect writes the epic-wide and per-ticket **Product
+  Requirements / Architecture & Engineering / QA Plan** Notion sub-pages. There
+  are no authoritative local spec files; a captain reads BOTH its ticket's three
+  sub-docs AND the epic's three.
+- Feedback: a captain raises its findings **up to the admiral**, which carries
+  them to the architect; the architect answers by **revising the Notion
+  sub-doc/ticket**. Local `.md` is only ephemeral agent scratch.
 - Notion epic/tickets: the shared scope and the decision log.
 
 **Live channel (`SendMessage` between the two sibling agents):**
-- Architect → admiral: "epic/tickets are up, here is the scope"; then "spec for
-  `TICKET` is ready" as each one lands (this is what lets the admiral pipeline);
-  finally "planning complete."
-- Admiral → architect: its **up-front scope review** findings, its
-  **per-ticket** spec-review gaps, captain-surfaced gaps it is relaying, and —
-  when running autonomously — the genuinely hard/security-sensitive calls the
-  admiral escalates rather than deciding itself.
-- Architect → admiral: revised specs / tickets in response, and answers to
+- Architect → admiral: "epic/tickets are up, here is the scope"; then "design
+  for `TICKET` is ready" as each ticket's sub-docs land (this is what lets the
+  admiral pipeline); finally "planning complete."
+- Admiral → architect: its **Pass-1 scope-review** findings, the captains'
+  **Pass-2** gaps it is relaying, and — when running autonomously — the genuinely
+  hard/security-sensitive calls the admiral escalates rather than deciding
+  itself.
+- Architect → admiral: revised sub-docs / tickets in response, and answers to
   escalations.
 
-### The admiral's implementability review — both passes
+### Two review points, two owners
 
-1. **Up-front scope pass** (before dispatching any captain): the admiral reviews
-   the whole epic + tickets + available specs. Is the scope buildable? Are the
-   dependency edges and sequencing sane? Is anything missing, contradictory, or
-   under-specified at the structural level? It feeds every finding back to the
-   architect and lets the architect revise **before** implementation starts.
-   Structural problems are cheapest to fix here.
-2. **Per-ticket pass** (just-in-time, as it dispatches each captain): the admiral
-   re-reviews that ticket's spec for the detail gaps that only matter once you're
-   about to build it, feeding them back to the architect for a spec update. A
-   ticket does not get a captain until its spec is ready **and** its dependencies
-   are merged.
+1. **Pass 1 — plan time (admiral ↔ architect).** Before any captain is
+   dispatched, the admiral collaborates with the architect over the whole scope
+   and the mission inter-dependencies — the fleet-leadership review only the
+   admiral can do (it alone sees every mission and its edges). Structural fixes
+   are cheapest here, before implementation starts.
+2. **Pass 2 — assignment/implementation time (the captain).** When a captain is
+   dispatched to a ticket, IT reviews that ticket's design against **current
+   system reality** (sibling missions merged, the tree drifted, hands on the
+   code). It raises gaps up to the admiral and proceeds on best judgment — it
+   does not stall. A ticket gets a captain only once its design docs are ready
+   **and** its dependencies are merged.
 
 ## Steps
 
@@ -101,12 +105,13 @@ two channels:
    blocked semantics (above). Block and ask if unknown.
 2. **Spawn the athena-architect** with: the requirements from this conversation,
    the Notion connection + target Epics/Tickets DB, and its mandate — own the
-   epic/tickets in Notion, sequence them, and produce specs in dependency order,
-   signalling the admiral as each spec lands.
+   epic/tickets in Notion, sequence them, and produce each ticket's design
+   sub-docs (Product Requirements / Architecture & Engineering / QA Plan) in
+   dependency order, signalling the admiral as each ticket's docs land.
 3. **Spawn the athena-admiral** with: the same Notion connection + DB + blocked
-   semantics (its required inputs), and its mandate — run the up-front scope
-   review first and both review passes throughout, then drive captains, merge,
-   and ship.
+   semantics (its required inputs), and its mandate — run the Pass-1 plan-time
+   scope review with the architect first, then drive captains (each of which
+   runs its own Pass-2 design review), merge, and ship.
 4. **Wire their identities to each other.** After both are up, give the admiral
    the architect's agent name and the architect the admiral's agent name (relay
    the names, or tell each to locate the other by role via `ListAgents`) so they

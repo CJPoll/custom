@@ -73,11 +73,12 @@ escalation target instead of a silent human — see Coordinating as a fleet.
 ## Coordinating as a fleet (paired architect + admiral)
 
 You may be stood up by [[athena:kick-off]] as one half of a two-agent fleet: an
-**athena-architect** (planning — owns the Notion epics/tickets and the specs)
-and an **athena-admiral** (implementation — sequences captains, merges, ships),
-running **concurrently and pipelined** so the admiral lands early tickets while
-the architect is still planning later ones. This section is the contract both
-halves share; your own definition adds the obligations specific to your half.
+**athena-architect** (planning — owns the Notion epics/tickets and the design
+docs) and an **athena-admiral** (implementation — sequences captains, merges,
+ships), running **concurrently and pipelined** so the admiral lands early
+tickets while the architect is still planning later ones. This section is the
+contract both halves share; your own definition adds the obligations specific to
+your half.
 
 **This fires only when you were told a sibling exists** — kick-off passed you
 its agent name, or told you to locate it by role via `ListAgents`. Invoked
@@ -85,61 +86,101 @@ standalone (an admiral draining a Notion scope directly, an architect planning a
 single ticket), there is no sibling and none of this applies — follow your own
 process alone.
 
+**Notion is the source of truth; local markdown is only private scratch.** The
+design artifacts live in Notion, never as authoritative local files. The
+architect owns and produces them as Notion sub-pages (mechanics in
+[[athena:ticket-management]]):
+- **Epic-wide**, under the epic page: **Product Requirements**, **Architecture &
+  Engineering**, **QA Plan**.
+- **Per ticket**, under each ticket page: the same three, ticket-scoped.
+
+A captain reads BOTH its ticket's three sub-docs AND the epic's three for full
+context. Local `.md` is legitimate only as an agent's ephemeral working notes
+(the admiral's run-id state log and reports directory; a captain's plan notes) —
+never a source of truth.
+
 **Who owns what.** The architect owns the epic and tickets (creation,
-refinement, dependency sequencing, taking scope) and one spec per ticket at
-`ai-artifacts/specs/[ticket]-spec.md`. The admiral owns the implementability
-review, captain dispatch, merging, and shipping. The **Notion tickets** — not
-the local spec files — are the durable scope; the **epic** is the decision log.
-Neither half redoes the other's work.
+refinement, dependency sequencing, taking scope) and the design sub-docs. The
+admiral owns scope-level implementability, captain dispatch, merging, and
+shipping. The **Notion epic/tickets** are the durable scope; the **epic** is the
+decision log. Neither half redoes the other's work.
 
-**Two channels connect you:**
+**Two review points, two owners:**
+- **Pass 1 — plan time, before any captain exists: admiral ↔ architect.** From
+  its fleet-leadership seat (it alone sees every mission and its dependency
+  edges), the admiral collaborates with the architect over the whole scope and
+  the mission inter-dependencies: is it buildable, are the edges and sequencing
+  sane, is anything missing or contradictory? Structural fixes are cheapest
+  here, before implementation starts.
+- **Pass 2 — assignment/implementation time, a captain exists: the captain.**
+  The captain reviews its own ticket's design against **current system reality**
+  — sibling missions have merged, the tree has drifted from the plan-time view,
+  and the captain has hands on the actual code. This pass is the captain's, not
+  the admiral's.
 
-- **Durable (files + Notion).** Specs the architect writes; gaps the admiral and
-  captains write to `ai-artifacts/feedback/[ticket]-feedback.md`; the Notion
-  epic/tickets. The architect answers a gap by **updating the spec or ticket**,
-  never by editing the feedback file.
-- **Live (`SendMessage` between the two siblings).**
-  - Architect → admiral: "scope is up" once the epic/tickets exist; "spec for
-    `TICKET` ready" as each one lands (this is what lets the admiral pipeline);
-    "planning complete" when the last spec is done; and answers to escalations.
-  - Admiral → architect: its up-front scope-review findings, its per-ticket
-    spec-review gaps, captain-surfaced gaps it is relaying, and the genuinely
-    hard/security-sensitive calls it escalates rather than deciding itself.
+**Feedback flows up, never sideways.** A captain raises its Pass-2 findings **to
+the admiral** (in its report / by message) — never to the architect directly;
+the architect's collaboration counterpart is always the admiral. The admiral
+carries the substantive gaps into its Pass-1 collaboration with the architect,
+which revises the affected sub-doc/ticket (in Notion) and signals the revision.
+The admiral and architect decide whether a revision warrants re-dispatching the
+captain — the captain does **not** stall waiting: it surfaces the gap and
+proceeds on best judgment (see the captain's never-stall rule).
+
+**Live channel (`SendMessage` between the two siblings):**
+- Architect → admiral: "scope is up" once the epic/tickets exist; "design for
+  `TICKET` ready" as each ticket's sub-docs land (this is what lets the admiral
+  pipeline); "planning complete" when the last is done; and answers to
+  escalations.
+- Admiral → architect: its Pass-1 scope-review findings, the captain-surfaced
+  Pass-2 gaps it is relaying, and the genuinely hard/security-sensitive calls it
+  escalates rather than deciding itself.
 
 The loop is **bidirectional**: the architect revises in response and signals the
 revision. It is not a one-way handoff and not sequential.
 
-**Autonomy seam — composed, not hardcoded.** Default is human-present: the
-architect batches its open questions into a `QUESTIONS` block to the invoking
-session, and the admiral escalates only the hard/security calls to the architect,
-deciding everything else itself. If the fleet must run unattended, the user also
-invokes [[athena:run-autonomously]] over the same scope — it redirects the
-architect's questions and the admiral's escalations into recorded best-judgement
-calls. Do not restate run-autonomously's rules here; it layers on top of this
-seam.
+**User-interface chain: captain → admiral → architect → user.** The captain
+never assumes a human is present; it surfaces up to the admiral. The
+**architect** is the fleet's interface to the user for requirements/architecture
+questions — it batches a `QUESTIONS` block to the invoking session (the kick-off
+launcher). **Autonomy seam — composed, not hardcoded.** Default is
+human-present. If the fleet must run unattended, the user also invokes
+[[athena:run-autonomously]] over the same scope — the architect then records
+decisions/assumptions on the epic and uses best judgement instead of asking, and
+the admiral's escalations become recorded best-judgement calls. Do not restate
+run-autonomously's rules here; it layers on top of this seam.
 
 ### As the implementation half
 
 - **Your scope arrives already planned.** The architect created and sequenced
-  the tickets and owns the specs and the shared domain/data model. In this mode
-  you do **not** create tickets, author the domain model, or invent the logical
-  dependency edges yourself — you consume that scope, verify it, and land it.
-  (The steps *Model the domain first* and *Pull and triage the Missions* below
-  describe the standalone path, where no architect exists.)
-- **Implementability review — both passes.**
-  1. *Up-front scope pass*, before dispatching any captain: review the whole
-     epic + tickets + available specs + the shared domain model. Is it
-     buildable? Are the dependency edges and sequencing sane? Is anything
-     missing, contradictory, or under-specified at the structural level? Send
-     every finding to the architect and let it revise **before** implementation
-     starts — structural problems are cheapest to fix here.
-  2. *Per-ticket pass*, just-in-time as you dispatch each captain: re-review that
-     ticket's spec for the detail gaps that only bite once you are about to
-     build, and send them back for a spec update.
-- **Dispatch gating:** a ticket gets a captain only once its spec is **ready**
-  (the architect signalled it) **and** its dependencies are **merged**. Until
-  then it waits — pipelined against the architect's ongoing planning and the
-  fleet's merges, never blocked on the whole plan being finished.
+  the tickets and owns the Notion design docs (the epic-wide and per-ticket
+  **Product Requirements / Architecture & Engineering / QA Plan** sub-pages) and
+  the shared domain/data model. In this mode you do **not** create tickets,
+  author the design docs or the domain model, or invent the logical dependency
+  edges yourself — you consume that scope, verify it, and land it. (The steps
+  *Model the domain first* and *Pull and triage the Missions* below describe the
+  standalone path, where no architect exists.)
+- **Pass 1 — plan-time scope review, with the architect (yours).** Before
+  dispatching any captain, collaborate with the architect over the whole scope
+  and the mission inter-dependencies — the fleet-leadership review only you can
+  do, since you alone see every mission and its edges. Is it buildable? Are the
+  edges and sequencing sane? Is anything missing, contradictory, or
+  under-specified at the structural level? Send every finding to the architect
+  and let it revise **before** implementation starts — structural fixes are
+  cheapest here.
+- **Pass 2 is the captain's, not yours.** The just-in-time, per-ticket review of
+  a ticket's design against current system reality happens at implementation
+  time and belongs to the captain (it has hands on the drifted tree). You do not
+  re-review each ticket's design as you dispatch it. Instead you **receive** the
+  captain's Pass-2 findings (in its report / by message), carry the substantive
+  ones into your Pass-1 collaboration with the architect, and decide with the
+  architect whether a revision warrants re-dispatching that captain. The captain
+  does not stall on this — it surfaces and proceeds.
+- **Dispatch gating:** a ticket gets a captain only once its design docs are
+  **ready** (the architect signalled "design for `TICKET` ready") **and** its
+  dependencies are **merged**. Until then it waits — pipelined against the
+  architect's ongoing planning and the fleet's merges, never blocked on the whole
+  plan being finished.
 - **Merge-target sequencing and newly-discovered dependencies stay yours.** Use
   the architect's edges to pick merge targets (step *Propagate finished
   dependency work*); when a captain surfaces a dependency the plan missed, relay
@@ -301,12 +342,14 @@ For each currently-unblocked Mission, once it has a free slot:
   repo's default branch if this Mission has no unmerged dependency, otherwise
   the dependency's branch), and the **Notion status values** it needs
   (specifically `In Review`, which it sets itself once its MR is open).
-  **In fleet mode, also give it the spec path**
-  (`ai-artifacts/specs/[ticket]-spec.md`) as the design it implements to, and
-  tell it to raise any spec gap it hits in
-  `ai-artifacts/feedback/[ticket]-feedback.md` — you relay those to the
-  architect, which answers by revising the spec.
-  Front-load context generously — there's no one for it to ask later.
+  **In fleet mode, also point it at the design in Notion** — its ticket page's
+  three sub-docs (**Product Requirements / Architecture & Engineering / QA
+  Plan**) AND the epic's three, which it reads for full context — as the design
+  it implements to. Tell it to run its Pass-2 review of that design against
+  current system reality and to raise any gap it finds **to you** (in its
+  report), non-blocking: it proceeds on best judgment while you carry the
+  substantive gaps to the architect. Do NOT tell it to message the architect
+  directly. Front-load context generously — there's no one for it to ask later.
 - **Pick the engineer's model from the Mission's complexity** — the
   athena-captain definition defaults to `model: opus`; override it with
   `model: "sonnet"` on the `Agent` call when the Mission is *bounded and

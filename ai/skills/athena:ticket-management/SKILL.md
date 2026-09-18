@@ -83,10 +83,42 @@ as `notion_person_id`; the flaky-lane tooling already resolves it that way.
   the Athena integration yet — it must be shared (Connections → add Athena) before you can
   read or write it.
 
+## Design sub-docs (the architect's deliverables live in Notion)
+
+A fleet's design artifacts are **Notion sub-pages, not local files**. The
+athena-architect creates three under the **epic** page and three under **each
+ticket** page:
+
+- **Product Requirements** — what the work must satisfy.
+- **Architecture & Engineering** — domain grounding, the feature-model diagrams,
+  the 5-bucket structure, and access control.
+- **QA Plan** — the functional test specification (`athena:format:test-matrix`).
+
+The epic-wide trio is the whole-scope context every ticket shares; the
+per-ticket trio is that one ticket's design. A captain reads BOTH its ticket's
+three sub-docs AND the epic's three.
+
+Mechanics (raw Notion API via the connection's tools):
+
+- **Create a sub-page** with `API-post-page`, `parent` = `{"page_id": "<epic or
+  ticket page id>"}`, title set to the sub-doc name — this nests it under the
+  epic/ticket page.
+- **Write its body** with `API-update-page-markdown` (whole-page markdown) or
+  `API-patch-block-children` (append blocks); **read** it back with
+  `API-retrieve-page-markdown` or `API-get-block-children`.
+- **Find them** by listing the parent page's children (`API-get-block-children`
+  on the epic/ticket page id) and matching titles; reuse an existing sub-page
+  rather than creating a duplicate.
+
+Local markdown (a `ai-artifacts/specs/…` or `…/feedback/…` file) is NOT a source
+of truth — at most an agent's ephemeral scratch. The Notion sub-docs are
+authoritative.
+
 ## Notes
 
-- The Epics DB holds one epic per athena-admiral scope; tickets link to it via the `Epic`
-  relation, and carry `Depends On`↔`Blocks` edges for sequencing.
+- The Epics DB holds one epic per athena-admiral scope; the architect creates the
+  epic and its design sub-docs, and tickets link to it via the `Epic` relation
+  and carry `Depends On`↔`Blocks` edges for sequencing.
 - Put the *why* on the ticket, not just in chat — a `Needs Attention` ticket must carry
   the context Cody needs to decide, in its body.
 - **Ping Cody in Slack on every athena-admiral merge (owner rule).** Whenever an athena-admiral
