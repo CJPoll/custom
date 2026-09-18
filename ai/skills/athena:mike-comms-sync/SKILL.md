@@ -64,6 +64,8 @@ those are not Mike.
 | `Ask` | text | What Mike is asking for / the actionable gist. |
 | `Owner` | multi_select | Who **on our side** owns the reply: `Cody`, `David Tolman`, `Erich`, `Athena`, `Sarah Edelman`, `Faraday (Robbie/Michael)`, `Engineering`, `Unassigned`, `Tom Hester`. (Mike is the sender — there is **no** sender field; the DB is implicitly all-Mike.) |
 | `Status` | select | `Needs Reply` \| `Action Needed` \| `Replied` \| `Not Needed`. |
+| `Status Changed On` | date | Timestamp of the last `Status` change. **The skill sets this whenever IT changes `Status`** (see "The status-timer contract"). Set via expanded columns `date:Status Changed On:start` (ISO-8601), `date:Status Changed On:is_datetime`=1, `:end` NULL. |
+| `Days in Status` | formula | **Read-only — never write it.** Derives days since `Status Changed On`. |
 | `Conversations` | relation → Mike Conversations | Many-to-many. A message may link to **more than one** conversation. |
 
 **Mike Conversations** — groups multiple follow-ups. Data source
@@ -76,6 +78,8 @@ those are not Mike.
 | `Communications` | relation → Mike Communications | Reverse of `Communications.Conversations`; many-to-many. |
 | `Medium` | multi_select | `Slack` and/or `Email` (a conversation can span both). |
 | `Status` | select | `Open` \| `Active` \| `Resolved`. |
+| `Status Changed On` | date | Timestamp of the last `Status` change. Same contract as Communications — the skill stamps it when IT changes `Status`. Set via `date:Status Changed On:start` (ISO-8601), `date:Status Changed On:is_datetime`=1, `:end` NULL. |
+| `Days in Status` | formula | **Read-only — never write it.** Derives days since `Status Changed On`. |
 | `Topic Summary` | text | Rolling one-liner of what the thread is about. |
 
 **What differs from a naive reading — encode these:**
@@ -88,6 +92,38 @@ those are not Mike.
   construction; there is no "From" field to populate.
 - The Communications↔Conversations relation is **genuinely many-to-many** on
   both sides — exactly the "one message, multiple follow-ups" semantic.
+
+## The status-timer contract (`Status Changed On` / `Days in Status`)
+
+Both DBs carry a `Status Changed On` (date) and a `Days in Status` (formula).
+The intent is a "how long has this been sitting in its current status" timer. A
+UI automation ("when `Status` changes → set `Status Changed On` = Now") covers
+changes a **human** makes in the Notion UI — **that automation is the user's
+responsibility, not this skill's** (the API cannot create Notion automations).
+But this skill writes `Status` **programmatically** during reconcile, and a
+programmatic write may or may not trip the UI automation, so the skill must keep
+the timer honest on its own writes. The rules:
+
+1. **Stamp on change.** Whenever the skill writes a `Status` value that differs
+   from the row's current `Status` (either DB), it MUST in the SAME
+   `notion-update-page` call also set `Status Changed On` to **now**. In this
+   MCP that means the expanded date columns:
+   - `date:Status Changed On:start` = current ISO-8601 datetime,
+   - `date:Status Changed On:is_datetime` = `1`,
+   - `date:Status Changed On:end` = NULL (single instant, not a range).
+2. **Only on a real change.** If reconcile leaves `Status` unchanged, do NOT
+   touch `Status Changed On`. Stamping it every run resets the timer to zero
+   each time and makes `Days in Status` meaningless. So: read the current
+   `Status` first, compare, and stamp only when old ≠ new.
+3. **On insert.** A brand-new row (Communications or Conversations) is born with
+   an initial `Status`, so set `Status Changed On` to that **same insert
+   moment** in the create call.
+4. **Never write `Days in Status`.** It is a read-only **formula**
+   (`if(empty(prop("Status Changed On")), "—", format(dateBetween(now(),
+   prop("Status Changed On"), "days")) + " days")`) — writing it is rejected.
+   Also note Notion's `now()` is **not** real-time: it refreshes when the page
+   is opened or edited, so `Days in Status` can lag until the row is next
+   touched. That is expected; do not try to "fix" it by rewriting the timer.
 
 ## Procedure
 
@@ -156,10 +192,14 @@ ts/message-id, matching on `Source` alone is the correct identity check; use
   Communications data source. Fill `Name`, `Source`, `Date` (datetime),
   `Medium`, `Channel`, and best-effort `Type`/`Scope`/`Ask`/`Owner`. Default
   `Status` = `Needs Reply` for an inbound that plausibly wants a response, else
-  `Action Needed`/`FYI`→`Not Needed` per judgement.
+  `Action Needed`/`FYI`→`Not Needed` per judgement. **Because the row is born
+  with a Status, stamp `Status Changed On` to the same insert moment** (see "The
+  status-timer contract").
 - **Existing** (`Source` seen): update in place with `notion-update-page` only
   if a field materially changed (e.g. edited text, a thread that now has a
-  reply). Never create a second row for an existing `Source`.
+  reply). Never create a second row for an existing `Source`. If that update
+  changes `Status`, also stamp `Status Changed On` (contract below); if `Status`
+  is unchanged, leave `Status Changed On` alone.
 
 ### 7. Group / link into Conversations (many-to-many)
 
@@ -172,13 +212,17 @@ ts/message-id, matching on `Source` alone is the correct identity check; use
   its member messages.
 - Reuse an existing conversation when the topic matches; only
   `notion-create-pages` a new Conversations row when the message starts a
-  genuinely new topic. Set the conversation's `Medium` multi-select to the union
-  of its members' mediums (a thread that moved Slack→email carries both), and
-  keep `Topic Summary` a current one-liner.
+  genuinely new topic. A new conversation is born `Status`=`Open`, so **stamp
+  its `Status Changed On` to the create moment** (contract below). Set the
+  conversation's `Medium` multi-select to the union of its members' mediums (a
+  thread that moved Slack→email carries both), and keep `Topic Summary` a
+  current one-liner.
 
-### 8. Reconcile Status on every touched row
+### 8. Reconcile Status on every touched row (stamp the timer on real changes)
 
-Do this each run — it is the "keep it up to date" half of the job:
+Do this each run — it is the "keep it up to date" half of the job. **Every time
+you change a row's `Status` here, you MUST also stamp `Status Changed On` per
+"The status-timer contract" — and only when the value actually changes.**
 
 - **Communications** (`Needs Reply` / `Action Needed` / `Replied` / `Not
   Needed`): if our side has since replied (a later message from us in the same
@@ -206,7 +250,7 @@ a Source that appeared twice, an email you were unsure was Mike).
 | Gmail search | `mcp__claude_ai_Gmail__search_threads` | **`query`** (not `q`); dates `YYYY/MM/DD` |
 | Read Notion rows | `mcp__notion__notion-query-data-sources` (or via notion-reader) | the `collection://…` data-source URL + filter |
 | Create Notion rows | `mcp__notion__notion-create-pages` | parent = data source URL |
-| Update Notion row | `mcp__notion__notion-update-page` | page URL/ID + changed props |
+| Update Notion row | `mcp__notion__notion-update-page` | page URL/ID + changed props; on a `Status` change also set `date:Status Changed On:start`/`:is_datetime`=1/`:end`=NULL (never write `Days in Status`) |
 
 ## Idempotency invariant
 
