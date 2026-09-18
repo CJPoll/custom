@@ -34,8 +34,11 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
    `Todo` (or keeps `In Progress` if it was already there).
 2. **Assigning an engineer** — when an athena-captain is dispatched to the ticket, move
    the status to `In Progress`; the assignee stays **Athena**.
-3. **→ `Needs Attention`** — set `Assignee` = **Cody**, and write the decision/context
-   Cody needs onto the ticket body (that is the whole point of the status).
+3. **→ `Needs Attention`** — set `Assignee` = **Cody**, write the decision/context
+   Cody needs onto the ticket body (that is the whole point of the status), and
+   **DM Cody** as Athena that the ticket needs him (see the Notes "Needs Attention
+   DM" rule). This is one of the three owner-notification events; it fires on the
+   transition itself and applies to ANY ticket, epic or not.
 4. **→ `Done`** — set `Assignee` = **Cody**.
 5. **→ `Ready for Release`** (work workspace only) — set `Assignee` = **Cody**.
 6. **`Attention Given` → `In Progress`** — a ticket in `Attention Given` is still
@@ -121,12 +124,14 @@ authoritative.
   and carry `Depends On`↔`Blocks` edges for sequencing.
 - Put the *why* on the ticket, not just in chat — a `Needs Attention` ticket must carry
   the context Cody needs to decide, in its body.
-- **Ping Cody in Slack on every athena-admiral merge (owner rule).** Whenever an athena-admiral
-  merges a ticket's MR — a merge it performed itself, never one it merely observed — DM
-  Cody as Athena via the `athena:slack` skill (`~/.claude/skills/athena:slack/bin/dm`,
-  Cody = `U0AHNV4RJGP`): one DM per merged MR, sent immediately after the merge. Use the
-  Slack-mrkdwn format `(:gitlab: :merged:) :notion: <TICKET_URL|PT-NNN - Ticket Name> is
-  Merged.` (append ` Deploying to Production` when the MR carried `Auto-Deploy`). The
-  canonical rule + exact format lives in the **athena-admiral** agent def's "Merge
-  notification DM to the owner" section — follow that; this bullet only ensures the
-  ticket lifecycle records the obligation so it isn't missed.
+- **Needs Attention DM to Cody (owner rule).** When a ticket moves to `Needs Attention`,
+  DM Cody as Athena via the `athena:slack` skill (`~/.claude/skills/athena:slack/bin/dm`,
+  Cody = `U0AHNV4RJGP`) on that same transition — the one that already assigns Cody and
+  writes the context onto the ticket body, so the DM rides on it. Applies to ANY ticket,
+  epic or not. Slack-mrkdwn format (`<url|label>`, NOT markdown; `:notion:` + the ticket
+  PAGE url):
+  `:warning: :notion: <TICKET_URL|PT-NNN - Ticket Name> needs your attention — <one-line why>.`
+  where `<one-line why>` is the same reason you wrote onto the ticket body. This is one of
+  the three owner-notification events; the other two — an epic crossing 50% and an epic
+  reaching 100% — are the **athena-admiral**'s, computed at merge time (see that agent
+  def's "Epic-progress DM to the owner"). Athena no longer DMs on every merge.
