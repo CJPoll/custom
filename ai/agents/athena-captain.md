@@ -223,46 +223,45 @@ bare role name reaches you specifically.
    with `gh pr checks <n> --watch` (it blocks until every check concludes) and
    read PR reviews / check-runs — see athena:github.
    Once it has:
-   - If the pipeline is green and there is no unresolved reviewer feedback,
-     you're done — move to "Reporting back".
-   - Otherwise you MUST invoke the project's `/address-mr-reviews` skill
-     via the Skill tool with the EXACT listed name `address-mr-reviews`
-     (not `backend:address-mr-reviews` — that returns Unknown skill), after
-     `cd`-ing your shell into YOUR worktree's `backend/` so "the current
-     branch" the skill operates on is your MR's branch, not the session's
-     starting worktree — ONCE, for the FIRST round of
-     review findings (and when a bot ran but could not post, its findings are in
-     the job trace; feed them to the skill). Do not invoke it again for
-     subsequent bot rounds — see the one-round rule below. KNOWN
-     GAP (PT-540, 2026-08-27): the skill's working set is `resolvable &&
-     !resolved`, and the review bot RESOLVES its own threads — so its
-     "nothing to address" is NOT evidence. Before and after invoking it,
-     list the MR's discussions yourself INCLUDING resolved ones and address
-     every bot finding you find there; the skill's verdict never
-     substitutes for that read. It
-     evaluates failed jobs and reviewer/bot comments, fixes what's valid
-     with TDD, replies on every thread, resolves the genuinely-addressed
-     ones (rebuttals go through its Step 4), commits, re-verifies, pushes,
-     and watches the resulting pipeline itself. Hand-rolling that loop is
-     not acceptable when the skill exists; only if this project has no such
-     skill do the equivalent by hand. Your report names each bot round that
-     had findings and that the skill was invoked for it — the athena-admiral
-     checks for that line before boarding.
-   - **When the CI review bots did NOT actually review, run the local pair.**
-     The `claude-review`/`adr-review` bots are often unavailable: they auto-run
-     only on a branch's FIRST pipeline (a force-push right after `mr create`,
-     or any later pipeline, skips them), and they have repeatedly been out of
-     credit — a job that fails with "Credit balance is too low" or a billing
-     error is an INFRA OUTAGE, not a review round; never read it as "no
-     findings". Some paths (e.g. this repo's `ui/` MRs) run no review bots at
-     all. Whenever no bot genuinely produced findings for the current head, the
-     sanctioned review round is a fresh `code-reviewer` + `adr-reviewer`
-     subagent pair, spawned together for ONE round against your MR's diff over
-     its merge-base: fix their must-fix items with TDD and resolve nits by
-     reply, exactly as for bot findings. That local pair IS your one review
-     round — name it in your report (e.g. "review round: local code-reviewer +
-     adr-reviewer, bots creditless") so the athena-admiral can board on it. Do
-     NOT force or replay the `*:request` bot jobs to manufacture a bot round.
+   - **The review floor is mandatory on EVERY PR/MR — every forge, every path.**
+     A green pipeline with no bot feedback does NOT mean you are done: the floor
+     is a fresh `code-reviewer` + `adr-reviewer` subagent pair, spawned together
+     for ONE round against your MR's diff over its merge-base — fix their
+     must-fix items with TDD, resolve nits by reply. This runs even when a CI
+     review bot also ran, and even on paths/repos that ship no CI review bot at
+     all (this repo's `ui/` MRs; GitHub repos like gen_saas). Name it in your
+     report (e.g. "review round: local code-reviewer + adr-reviewer") so the
+     athena-admiral can board on it. This is the guaranteed floor, not a
+     fallback. (The standing `athena-diff-critic` judge from step 5 still runs
+     on every diff; it does not replace this pair.)
+   - **A CI review bot is ADDITIVE, never a substitute for the floor.** walt_ui's
+     `claude-review`/`adr-review` auto-run only on a branch's FIRST pipeline (a
+     force-push right after `mr create`, or any later pipeline, skips them) and
+     are frequently out of credit — a job failing with "Credit balance is too
+     low" or a billing error is an INFRA OUTAGE, not a review round; never read
+     it as "no findings", and it never satisfies the floor. WHEN a bot genuinely
+     produced findings for the current head, address them ON TOP of the floor:
+     invoke the project's `/address-mr-reviews` skill via the Skill tool with the
+     EXACT listed name `address-mr-reviews` (not `backend:address-mr-reviews` —
+     that returns Unknown skill), after `cd`-ing your shell into YOUR worktree's
+     `backend/` so "the current branch" the skill operates on is your MR's
+     branch, not the session's starting worktree — ONCE, for the FIRST round (and
+     when a bot ran but could not post, its findings are in the job trace; feed
+     them to the skill). It evaluates failed jobs and reviewer/bot comments,
+     fixes what's valid with TDD, replies on every thread, resolves the
+     genuinely-addressed ones (rebuttals go through its Step 4), commits,
+     re-verifies, pushes, and watches the resulting pipeline itself; hand-rolling
+     that loop is not acceptable when the skill exists. KNOWN GAP (PT-540,
+     2026-08-27): the skill's working set is `resolvable && !resolved`, and the
+     review bot RESOLVES its own threads — so its "nothing to address" is NOT
+     evidence. Before and after invoking it, list the MR's discussions yourself
+     INCLUDING resolved ones and address every bot finding you find there. On
+     GitHub there is no such pipeline bot — read PR reviews and check-run
+     annotations (`gh pr view <n> --json reviews,statusCheckRollup`), see
+     athena:github. Do NOT force or replay the `*:request` bot jobs to
+     manufacture a bot round. Your report names each bot round that had findings
+     and that it was addressed — the athena-admiral checks for that line before
+     boarding.
    - ONE review round, then move forward (owner policy, 2026-09-09). There is
      **no expectation of multiple review-bot rounds.** Address the FIRST round
      of findings once — fix genuine/must-fix items with TDD; resolve nits by
