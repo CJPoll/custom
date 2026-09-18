@@ -20,18 +20,30 @@
 set -euo pipefail
 
 # cron starts with a minimal PATH that typically omits /usr/sbin — where this
-# box's ruby lives (build-agents, the shipwright's gate, needs it) — and the
-# asdf shims. Establish a known-good PATH so the gate, git, ssh, and any MCP
-# servers Claude spawns resolve the same as in a login shell.
+# box's system tooling lives. Establish a known-good PATH so the gate, git, ssh,
+# and any MCP servers Claude spawns resolve reliably from a minimal environment.
 #
-# ${HOME}/bin is REQUIRED and easy to forget: the asdf ruby shim
-# (${HOME}/.asdf/shims/ruby) is a thin wrapper that does `exec asdf exec ruby`,
-# so it needs the asdf launcher binary (${HOME}/bin/asdf) on PATH. Omit
-# ${HOME}/bin and every `#!/usr/bin/env ruby` gate tool (build-agents,
-# harness-metrics/signals/eval, check-generic-skills, check-guard-messages)
-# dies with "asdf: not found" — the shipwright then cannot run its own gate and
-# telemetry silently drops out. The login shell's PATH (.zshrc) includes it.
-export PATH="${HOME}/.local/bin:${HOME}/bin:${HOME}/.asdf/shims:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin${PATH:+:${PATH}}"
+# This cron MUST NOT depend on asdf or the login shell. Cron does not source
+# .zshrc, so the asdf launcher setup is unavailable here; an earlier version
+# front-loaded ${HOME}/.asdf/shims (making `ruby` resolve to the asdf shim,
+# which does `exec asdf exec ruby` and needs ${HOME}/bin/asdf + .zshrc), and
+# cron runs died with "asdf: not found" while the gate/telemetry fail-opened
+# and ran blind. The ruby gate tools (build-agents, harness-metrics/signals/eval,
+# check-generic-skills, check-guard-messages) are all deliberately gem-free
+# `#!/usr/bin/env ruby` stdlib scripts, so the system ruby at /usr/bin/ruby
+# (the eselect default, currently ruby34 / 3.4.10) satisfies them completely.
+# We therefore deliberately EXCLUDE the asdf shims from PATH so `ruby` resolves
+# to /usr/bin/ruby. ${HOME}/bin held only the asdf launcher, so it is dropped too.
+export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin${PATH:+:${PATH}}"
+
+# Same reason we can't lean on the login shell for PATH, we can't lean on it for
+# the locale. Ruby derives a script's default external/internal encoding from
+# the locale env vars; cron starts with none, so ruby falls back to US-ASCII and
+# every gem-free gate tool blows up with "invalid byte sequence in US-ASCII" the
+# instant it reads a UTF-8 agent/skill file — a fresh way for the gate to fail
+# and run blind. Pin an explicit UTF-8 locale so `ruby` reads these files as UTF-8.
+export LANG="C.UTF-8"
+export LC_ALL="C.UTF-8"
 
 # The shipwright's real work (mining + subagent) runs in background tasks that a
 # headless `claude -p` session waits on. The default background-wait ceiling is
