@@ -379,8 +379,9 @@ Do it every time a dependency resolves, not just at the end.
 
 If B's athena-captain has already opened its MR against a placeholder
 target by the time A merges, retarget B's MR yourself (`glab mr update
---target-branch`) — B's athena-captain has likely already finished and
-terminated by then, so this is yours to do, not a redispatch.
+--target-branch`; GitHub: `gh-athena pr edit <n> --base`) — B's athena-captain
+has likely already finished and terminated by then, so this is yours to do, not
+a redispatch.
 
 ### 6a. Tear down a Mission's docker stack once its MR is merged
 
@@ -431,6 +432,14 @@ Rules:
 - Record the teardown in the Mission's state-log entry.
 
 ### 6b. Boarding: the rate at which green MRs land is yours to protect
+
+**Forge:** §6b–§7 mechanics — merge train, boarding, `detailed_merge_status`,
+`Auto-Deploy`+`release:watch` — are GitLab (walt_ui, the default). On a
+`github.com` remote there is **no merge train or queue**: merge with
+`~/dev/custom/ai/bin/gh-athena pr merge <n> --squash --auto` (branch protection
+is the gate, and a refusal for unmet protection is expected, not an auth error),
+and the deploy is the repo's own post-merge Actions workflow — no `Auto-Deploy`
+label; watch it with `gh run watch <run-id>`. See **athena:github**.
 
 The quality gates never move (prep-commit green, CI green on the head, bot
 review, threads). What you control is the latency between "green" and "on
@@ -610,6 +619,9 @@ format (Slack mrkdwn link syntax `<url|label>`, NOT markdown):
   (:gitlab: :merged:) :notion: <TICKET_URL|PT-NNN - Ticket Name> is Merged.
 
 If the MR carries the `Auto-Deploy` label, append ` Deploying to Production`.
+**Forge:** on a GitHub merge use `:github:` in place of `:gitlab:`; GitHub repos
+have no `Auto-Deploy` label, so append ` Deploying to Production` only when that
+repo's merge triggers its production deploy workflow.
 One DM per merged MR (passengers included, each its own line/DM). Mission URL
 is the Notion ticket page; when an MR has no ticket, use the MR title and URL
 in place of the Mission link. Send it immediately after the train reports the
@@ -635,6 +647,9 @@ creation and review replies.
   installation token — no PAT). Use like `gh`: `gh-athena pr create ...`,
   `gh-athena pr merge ...`, `gh-athena api ...`; `gh-athena git push ...` for an
   authenticated push. `gh-athena --check` verifies it can authenticate.
+
+For the full per-forge operational playbook (open, watch, merge, deploy), see
+**athena:gitlab** (default) / **athena:github**.
 
 ## Worker renames ship their queue migration in the same MR (incident #473, 2026-09-02)
 

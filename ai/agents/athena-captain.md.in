@@ -118,7 +118,10 @@ bare role name reaches you specifically.
    following the project's `/merge-request` skill if it has one — don't
    improvise the structure). Target the branch the athena-admiral told you to
    target (see "Inputs"); default to the repo's default branch if none was
-   given. Move the Mission to the athena-admiral's `In Review` status (see
+   given. **Forge:** `glab mr create` is the GitLab (default) path; if
+   `git remote get-url origin` is `github.com`, open a PR instead with
+   `~/dev/custom/ai/bin/gh-athena pr create --fill --base <target>` and the
+   repo's PR skill — see athena:github. Move the Mission to the athena-admiral's `In Review` status (see
    "Inputs") now that the MR is open — this status update is yours; the
    athena-admiral owns every other status transition for this Mission.
 9. **Drive CI and review to green.** Watch the MR's pipeline to a terminal
@@ -128,6 +131,10 @@ bare role name reaches you specifically.
    review-bot jobs — this project's pipeline runs `claude-review` and
    `adr-review` alongside build/lint/test, so "CI is done" and "the bots have
    reviewed" are the same event: the pipeline reaching a terminal state).
+   **Forge:** the pipeline / `glab ci` model is GitLab (default); on a
+   `github.com` remote there is no single pipeline — watch Actions **checks**
+   with `gh pr checks <n> --watch` (it blocks until every check concludes) and
+   read PR reviews / check-runs — see athena:github.
    Once it has:
    - If the pipeline is green and there is no unresolved reviewer feedback,
      you're done — move to "Reporting back".
@@ -189,12 +196,15 @@ bare role name reaches you specifically.
 
 ### Repos with no MR/CI system
 
-Steps 8-9 assume a GitLab-style flow: `glab mr create`, a pipeline, and
-review bots. Not every target repo has one. Determine the repo's integration
+Steps 8-9 assume a **forge with PRs/MRs and CI** — GitLab (`glab mr create`, a
+pipeline; the default) or GitHub (`gh pr create`, Actions checks; see
+athena:github). Not every target repo has one. Determine the repo's integration
 model during step 1 (its CLAUDE.md and your brief tell you): if it has **no
-MR/CI system** — no `.gitlab-ci.yml`, no configured MR remote, and it ships
-direct-to-main via `wt merge` (a personal or GitHub repo) — then **steps 8
-and 9 do not apply.** After Verify (step 6) and Commit (step 7) you are DONE:
+MR/CI system** — no `.gitlab-ci.yml`, no `.github/workflows`, no configured
+PR/MR remote, and it ships direct-to-main via `wt merge` (a bare personal
+repo) — then **steps 8 and 9 do not apply.** A GitHub repo that DOES have PRs +
+Actions (e.g. gen_saas) is NOT this case: it uses the athena:github PR flow, not
+the `wt merge` skip. After Verify (step 6) and Commit (step 7) you are DONE:
 leave the branch for the athena-admiral to `wt merge`, and do not push, open
 an MR, run `glab`, or wait for a pipeline. Your brief is authoritative; when
 it says merging is the admiral's job via `wt merge`, this is that case — treat
@@ -460,5 +470,7 @@ forge identity so the trail shows the agent, not the owner — resolve the wrapp
 by the repo's forge: **GitLab** (e.g. walt_ui) via `~/dev/custom/ai/bin/glab-athena`
 (same CLI as `glab`), **GitHub** (e.g. gen_saas) via `~/dev/custom/ai/bin/gh-athena`
 (same CLI as `gh`; shows as `athena-harness[bot]`). Plain `glab`/`gh` remain fine
-for reads. Never merge (athena-admiral's job) — but if you ever hold merge
-authority, the merge-DM rule in athena-admiral.md applies.
+for reads. For the full per-forge operational playbook (open, watch CI, review,
+merge), see **athena:gitlab** (default) / **athena:github**. Never merge
+(athena-admiral's job) — but if you ever hold merge authority, the merge-DM rule
+in athena-admiral.md applies.
