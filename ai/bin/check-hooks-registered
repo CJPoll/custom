@@ -45,6 +45,19 @@ def abs_script(rel)
   File.join(REPO_DIR, rel)
 end
 
+# Resolve a command's path through symlinks so two spellings of the same script
+# compare equal. On this machine ~/.claude/hooks is a symlink to the repo's
+# ai/hooks/, so a live entry spelled `~/.claude/hooks/foo.sh` is the SAME file as
+# the registry's `<repo>/ai/hooks/foo.sh` — comparing raw strings falsely reports
+# drift (and makes setup-hooks append a duplicate). Realpath both sides. Falls
+# back to the literal string when the path does not exist (e.g. a retired hook or
+# a command that is not a bare path), so this never raises.
+def norm(cmd)
+  File.exist?(cmd) ? File.realpath(cmd) : cmd
+rescue StandardError
+  cmd
+end
+
 def load_registry
   JSON.parse(File.read(REGISTRY)).fetch("hooks")
 end
@@ -54,7 +67,7 @@ def registered_pairs(settings)
   out = []
   (settings["hooks"] || {}).each do |event, matchers|
     Array(matchers).each do |m|
-      Array(m["hooks"]).each { |h| out << [event, h["command"]] }
+      Array(m["hooks"]).each { |h| out << [event, norm(h["command"])] }
     end
   end
   out
@@ -64,7 +77,7 @@ end
 # human-readable drift strings (empty == all registered).
 def drift_for(settings, registry)
   have = registered_pairs(settings)
-  registry.reject { |e| have.include?([e["event"], abs_script(e["script"])]) }
+  registry.reject { |e| have.include?([e["event"], norm(abs_script(e["script"]))]) }
           .map { |e| "#{e['event']} -> #{e['script']}" }
 end
 
@@ -119,6 +132,22 @@ def self_test
 
   # Empty settings -> everything drifts.
   check.call("empty settings -> all drift", drift_for({ "hooks" => {} }, registry).size == registry.size)
+
+  # A live entry that reaches the same script through a symlink counts as wired
+  # (this machine's ~/.claude/hooks -> repo ai/hooks). Build a settings hash whose
+  # commands point at a symlinked copy of the repo hooks dir and assert no drift.
+  Dir.mktmpdir do |dir|
+    link = File.join(dir, "hooks-link")
+    File.symlink(File.join(REPO_DIR, "ai", "hooks"), link)
+    linked = { "hooks" => {} }
+    registry.each do |e|
+      base = File.basename(e["script"])
+      (linked["hooks"][e["event"]] ||= []) << {
+        "matcher" => e["matcher"], "hooks" => [{ "type" => "command", "command" => File.join(link, base) }]
+      }
+    end
+    check.call("symlinked script path -> no drift", drift_for(linked, registry).empty?)
+  end
 
   # Run the real entry point but silence its (expected) diagnostic output so the
   # gate log stays clean — we assert on the exit code only.

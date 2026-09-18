@@ -73,6 +73,18 @@ dry    = os.environ["DRY"] == "1"
 
 def absscript(rel): return os.path.join(repo, rel)
 
+def norm(cmd):
+    # Resolve symlinks so two spellings of the same script compare equal — on
+    # this machine ~/.claude/hooks is a symlink to the repo's ai/hooks/, so a live
+    # entry `~/.claude/hooks/foo.sh` is the SAME file as `<repo>/ai/hooks/foo.sh`.
+    # Without this, a raw-string compare treats them as distinct and install
+    # appends a duplicate wiring (double-firing the guard). Falls back to the
+    # literal string when the path does not exist, so it never raises.
+    try:
+        return os.path.realpath(cmd) if os.path.exists(cmd) else cmd
+    except OSError:
+        return cmd
+
 try:
     with open(path) as f: settings = json.load(f)
 except FileNotFoundError:
@@ -85,9 +97,10 @@ except json.JSONDecodeError as e:
 hooks = settings.setdefault("hooks", {})
 
 def has(event, cmd):
+    target = norm(cmd)
     for m in hooks.get(event, []):
         for h in m.get("hooks", []):
-            if h.get("command") == cmd:
+            if norm(h.get("command")) == target:
                 return True
     return False
 
@@ -107,8 +120,9 @@ else:  # remove
         if not has(e["event"], cmd):
             continue
         changes.append(f'- {e["event"]:13} {e["matcher"]!r} -> {e["script"]}')
+        target = norm(cmd)
         for m in hooks.get(e["event"], []):
-            m["hooks"] = [h for h in m.get("hooks", []) if h.get("command") != cmd]
+            m["hooks"] = [h for h in m.get("hooks", []) if norm(h.get("command")) != target]
         hooks[e["event"]] = [m for m in hooks.get(e["event"], []) if m.get("hooks")]
         if not hooks[e["event"]]:
             del hooks[e["event"]]
@@ -148,6 +162,27 @@ case "$ACTION" in
     "$CHECKER" >/dev/null 2>&1 && echo "  ok   check passes after install" || { echo "  FAIL check should pass after install"; ok=0; }
     r2="$(apply install "$HOOKS_SETTINGS_FILE" 0)"
     echo "$r2" | grep -q "MARKER:nochange" || { echo "  FAIL second install should be a no-op (idempotent)"; ok=0; }
+    # Symlink dedup: a settings file that references the hooks through a symlinked
+    # dir (mirrors this machine's ~/.claude/hooks -> repo ai/hooks) must be seen as
+    # already wired — install must NOT append duplicate entries.
+    slink="${tmp}/settings-symlink.json"
+    hlink="${tmp}/hlink"
+    ln -s "${REPO_DIR}/ai/hooks" "$hlink"
+    REGISTRY="$REGISTRY" HLINK="$hlink" SLINK="$slink" python3 - <<'PY'
+import json, os
+reg = json.load(open(os.environ["REGISTRY"]))["hooks"]
+hlink = os.environ["HLINK"]
+hooks = {}
+for e in reg:
+    cmd = os.path.join(hlink, os.path.basename(e["script"]))
+    hooks.setdefault(e["event"], []).append(
+        {"matcher": e["matcher"], "hooks": [{"type": "command", "command": cmd}]})
+json.dump({"hooks": hooks}, open(os.environ["SLINK"], "w"), indent=4)
+PY
+    rs="$(apply install "$slink" 0)"
+    echo "$rs" | grep -q "MARKER:nochange" || { echo "  FAIL symlink-spelled hooks should be seen as wired (no duplicate install)"; ok=0; }
+    HOOKS_SETTINGS_FILE="$slink" "$CHECKER" >/dev/null 2>&1 && echo "  ok   symlink-spelled hooks recognized as wired" || { echo "  FAIL check should pass on symlink-spelled hooks"; ok=0; }
+
     r3="$(apply remove "$HOOKS_SETTINGS_FILE" 0)"
     echo "$r3" | grep -q "MARKER:changed" || { echo "  FAIL remove should change"; ok=0; }
     "$CHECKER" >/dev/null 2>&1 && { echo "  FAIL check should fail after remove"; ok=0; } || echo "  ok   check fails after remove"
