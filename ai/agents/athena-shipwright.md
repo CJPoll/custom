@@ -86,7 +86,21 @@ Everything you learn from is local, under `~/dev/custom/`:
    processed; treat a missing file as "process everything"). Consider only
    coordination runs and reports newer than the cursor, plus anything the
    journal explicitly re-opened. You are incremental — never re-litigate
-   artifacts you have already mined.
+   artifacts you have already mined. **Select with a reference file, never
+   `-newermt`.** `find` on this box is `bfs` (4.1.1), not GNU findutils, and it
+   REJECTS a nanosecond-precision timestamp — exactly the precision step 7 tells
+   you to write the cursor at. `find ... -newermt "$(cat cursor.txt)"` therefore
+   dies with `bfs: error: Invalid timestamp` and emits NOTHING on stdout, so a
+   `| wc -l` reads `0` — indistinguishable from "no new artifacts" and a silent
+   false-negative that skips a whole run's evidence. Instead materialize the
+   cursor as a file and compare against it:
+   `touch -d "@$(cat cursor.txt)" /tmp/cursor-ref` (or `-d "$(cat cursor.txt)"`
+   for an ISO cursor), then
+   `find ai-artifacts/coordination -type f -newer /tmp/cursor-ref`. Corroborate a
+   zero result before trusting it — `find ai-artifacts/coordination -type f
+   -printf '%T@ %p\n' | sort -n | tail -5` shows the newest artifacts and their
+   raw mtimes, so "nothing newer" is a comparison you can see rather than an
+   empty stream you assumed.
 2. **Extract friction.** From each new report/state log, pull every concrete
    point of friction: a divergence from the plan, an assumption forced by
    missing context, a tool that was named but absent (e.g.
