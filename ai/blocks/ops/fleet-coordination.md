@@ -27,6 +27,12 @@ context. Local `.md` is legitimate only as an agent's ephemeral working notes
 (the admiral's run-id state log and reports directory; a captain's plan notes) —
 never a source of truth.
 
+The architect's **domain model** (an on-disk athena:system-spec file under
+`ai-artifacts/domain/`) is its **private grounding context, not a fleet
+artifact**: the architect grounds in it to derive the sub-docs. The admiral and
+captain consume only the Notion sub-docs, **never the raw model**; and the
+admiral never authors a model — modeling is always the architect's.
+
 **Who owns what.** The architect owns the epic and tickets (creation,
 refinement, dependency sequencing, taking scope) and the design sub-docs. The
 admiral owns scope-level implementability, captain dispatch, merging, and

@@ -10,6 +10,15 @@ and let it — not your reading of the tickets — be the source of truth. When 
 ticket and the model disagree, the model wins; record the conflict rather than
 silently following one.
 
+**Whose grounding this is.** Reading the raw athena:system-spec domain model is
+**planning-time work — the architect's**. In a fleet the domain model is the
+architect's *private* grounding context: it grounds here, then derives the Notion
+design sub-docs (Product Requirements / Architecture & Engineering / QA Plan)
+that the admiral and captain consume. Downstream implementers ground in those
+**sub-docs, not the raw model**. Outside a fleet (a standalone analysis, or an
+admiral grounding in a model already on disk) you may still read whatever model
+exists — you just never *author* one unless you are the architect.
+
 The domain model is encoded with **athena:system-spec** — a JSON document (or a
 set of them) validating against that skill's `spec.schema.json`. Read the
 `athena:system-spec` SKILL first if you are not already fluent in the encoding,

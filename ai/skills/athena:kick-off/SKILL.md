@@ -44,9 +44,12 @@ DB or a semantics.
   scope (assign Athena; `Backlog`→`Todo`). It authors the **design docs in
   Notion** (never authoritative local files): for the epic, and for each ticket,
   three sub-pages — **Product Requirements**, **Architecture & Engineering**,
-  **QA Plan**. It also authors the shared, whole-system **domain model** as an
-  athena:system-spec JSON document under `ai-artifacts/domain/` — a
-  schema-validated tooling artifact the Architecture & Engineering docs build on.
+  **QA Plan**. To do this it first authors its own **domain model** as an
+  athena:system-spec JSON document under `ai-artifacts/domain/` — its **private
+  grounding context** (a schema-validated file on disk, never Notion), used
+  solely so it grounds well enough to write the sub-docs. The domain model is
+  NOT shared with the admiral or captain — they consume only the Notion
+  sub-docs the architect derived from it.
   The **Notion epic/tickets are the durable scope** handed to the admiral.
 - **athena-admiral (implementation).** Consumes that scope, runs the plan-time
   scope review with the architect (Pass 1, below), then drives the fleet of

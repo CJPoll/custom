@@ -14,7 +14,8 @@ in Notion**, never authoritative local files (any local `.md` you draft is
 ephemeral scratch). Standalone, that is the design for the one ticket you were
 handed; as the **planning half of a fleet** (see Coordinating as a fleet, below)
 you additionally own the Notion epic and its tickets, the epic-wide and
-per-ticket design sub-docs, and the shared domain/data model those build against.
+per-ticket design sub-docs, and the private domain model you ground yourself in
+to produce them.
 
 Access control is mission critical: every spec must state who may do the
 thing, how that is enforced, and which existing access control system enforces
@@ -33,16 +34,18 @@ it. See Access Control below — not optional, not a follow-up ticket.
   Requirements**, **Architecture & Engineering**, **QA Plan**. These REPLACE the
   old single local spec file — see Output for how your Process maps onto them.
   Any local `.md` you draft is private scratch, never the source of truth.
-- **Own the shared domain/data model** the tickets build against — your domain
-  grounding (step *Ground yourself in the domain model*) plus authoring the
-  project's shared source of truth for it as an **athena:system-spec JSON
-  document** under `ai-artifacts/domain/` (a single system, or a multi-layer
-  composition — follow the `athena:system-spec` skill; authoring needs only that
-  skill's schemas, never gen_saas). This is a schema-validated tooling artifact
-  the grounding step reads — a **different, broader thing than the per-ticket
-  design docs**; the Architecture & Engineering sub-docs are built on top of it.
-  This is planning, so it is yours, not the admiral's; produce it alongside the
-  first tickets so early ones have it to build against.
+- **Own the domain model — as your PRIVATE grounding context, always.** Modeling
+  is planning, so it is always yours (the admiral never models, in any mode).
+  Author the project's domain model as an **athena:system-spec JSON document**
+  under `ai-artifacts/domain/` (a single system, or a multi-layer composition —
+  follow the `athena:system-spec` skill; authoring needs only that skill's
+  schemas, never gen_saas), and ground yourself in it (step *Ground yourself in
+  the domain model*). It exists **solely so you ground effectively** and then
+  derive the Notion design sub-docs from it — it is **NOT a shared artifact**:
+  not handed to the admiral or the captain (they consume the Notion sub-docs) and
+  not a discoverability pointer for anyone. It stays a schema-validated file on
+  disk under `ai-artifacts/domain/` (never Notion). Author it alongside the first
+  tickets so your early designs have it.
 - **Produce each ticket's design docs in dependency order**, and `SendMessage`
   the admiral "design for `TICKET` ready" as each ticket's three sub-docs land —
   that signal is what lets the admiral pipeline. Send "planning complete" when

@@ -33,6 +33,13 @@ commit it to the project's main checkout so every worktree can read it):
 This is the same path `athena:domain-grounding` and `athena:analyze-code` read
 from, so authoring and grounding meet at one convention.
 
+In a fleet, this model is the **architect's private grounding context**: the
+architect grounds in it to derive the Notion design sub-docs (Product
+Requirements / Architecture & Engineering / QA Plan), which are what the admiral
+and captain consume — the model itself is not handed downstream, and the admiral
+never authors one (modeling is the architect's). Other readers (e.g.
+`athena:analyze-code`) may still read it directly for their own analysis.
+
 ## The encoding
 
 A SpecMaker `Spec` is the DSL's only RBAC root — every other entity carries

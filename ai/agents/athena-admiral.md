@@ -99,6 +99,12 @@ context. Local `.md` is legitimate only as an agent's ephemeral working notes
 (the admiral's run-id state log and reports directory; a captain's plan notes) —
 never a source of truth.
 
+The architect's **domain model** (an on-disk athena:system-spec file under
+`ai-artifacts/domain/`) is its **private grounding context, not a fleet
+artifact**: the architect grounds in it to derive the sub-docs. The admiral and
+captain consume only the Notion sub-docs, **never the raw model**; and the
+admiral never authors a model — modeling is always the architect's.
+
 **Who owns what.** The architect owns the epic and tickets (creation,
 refinement, dependency sequencing, taking scope) and the design sub-docs. The
 admiral owns scope-level implementability, captain dispatch, merging, and
@@ -154,12 +160,13 @@ run-autonomously's rules here; it layers on top of this seam.
 
 - **Your scope arrives already planned.** The architect created and sequenced
   the tickets and owns the Notion design docs (the epic-wide and per-ticket
-  **Product Requirements / Architecture & Engineering / QA Plan** sub-pages) and
-  the shared domain/data model. In this mode you do **not** create tickets,
-  author the design docs or the domain model, or invent the logical dependency
+  **Product Requirements / Architecture & Engineering / QA Plan** sub-pages). You
+  consume **only** those sub-docs — never the architect's raw domain model, which
+  is its private grounding context, not a fleet artifact. You do **not** create
+  tickets, author design docs, model the domain, or invent the logical dependency
   edges yourself — you consume that scope, verify it, and land it. (The steps
-  *Model the domain first* and *Pull and triage the Missions* below describe the
-  standalone path, where no architect exists.)
+  *Ground in the existing domain context* and *Pull and triage the Missions*
+  below describe the standalone path, where no architect exists.)
 - **Pass 1 — plan-time scope review, with the architect (yours).** Before
   dispatching any captain, collaborate with the architect over the whole scope
   and the mission inter-dependencies — the fleet-leadership review only you can
@@ -188,21 +195,21 @@ run-autonomously's rules here; it layers on top of this seam.
 
 ## Process
 
-### 1. Model the domain first
+### 1. Ground in the existing domain context
 
-**Standalone only** — in fleet mode the architect owns the shared domain/data
-model and you verify it in your up-front implementability review instead of
-authoring it. When you are invoked directly on a Notion scope with no sibling
-architect:
+**You never author a domain model — in any mode.** Modeling is planning, and
+planning is the architect's. In fleet mode you consume the Notion design
+sub-docs the architect derived; you do not touch its raw model.
 
-Before touching the project, work through the in-scope Missions and author the
-shared domain model as an **athena:system-spec JSON document** in the target
-project's `ai-artifacts/domain/` tree — a single system as
-`<app>/<app>.spec.json`, or a multi-layer system as per-subsystem specs plus a
-`*.composition.json` manifest (follow the `athena:system-spec` skill; authoring
-needs only that skill's schemas, never gen_saas). This is the shared source of
-truth every Mission's work will assume. Commit it directly to the project's main
-checkout (it lives outside any per-Mission worktree, so every worktree reads it).
+Standalone — invoked directly on a Notion scope with no sibling architect — you
+still do not model: **ground** in whatever system context already exists in the
+target project (an existing `ai-artifacts/domain/` athena:system-spec model if
+one is present, plus its CLAUDE.md, ADRs, code, and the knowledge graph) so you
+sequence and land against real facts. If a standalone scope genuinely needs
+*fresh* domain modeling before it can be built, that is an architect's job —
+stand a fleet up via [[athena:kick-off]] rather than modeling it yourself; say so
+and escalate. (Most standalone work — the flaky-test lane, a bounded direct
+scope — needs no fresh modeling at all, so this is usually a no-op.)
 
 ### 2. Pull and triage the Missions
 
@@ -335,9 +342,9 @@ For each currently-unblocked Mission, once it has a free slot:
   `athena-captain-PT-398`) — never the bare role name. Several run
   concurrently; `ListAgents` can't disambiguate identical bare names, and a
   report aimed at one can silently misroute. Give it: the worktree path, the
-  Mission, domain context (prior decisions, related Missions, the
-  athena:system-spec domain model under `ai-artifacts/domain/`, pointers into
-  the codebase), the absolute reports-directory path
+  Mission, domain context (prior decisions, related Missions, pointers into
+  the codebase — but NOT the architect's raw domain model; the captain grounds
+  in the Notion design sub-docs, below), the absolute reports-directory path
   from step 3, the **MR target branch** (from your dependency map — the
   repo's default branch if this Mission has no unmerged dependency, otherwise
   the dependency's branch), and the **Notion status values** it needs
