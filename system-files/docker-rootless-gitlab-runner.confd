@@ -1,0 +1,10 @@
+# Options for the rootless Docker service (/etc/init.d/docker-rootless-gitlab-runner).
+#
+# Which user's rootless daemon this service manages. The user must exist, have
+# /etc/subuid + /etc/subgid ranges, and lingering enabled
+# (loginctl enable-linger <user>). Default: gitlab-runner.
+#DOCKER_ROOTLESS_USER="gitlab-runner"
+
+# Extra args passed through to dockerd (inside dockerd-rootless.sh).
+# Example: pin the storage driver.
+#DOCKERD_ROOTLESS_OPTS="--storage-driver=fuse-overlayfs"

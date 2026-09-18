@@ -1,0 +1,62 @@
+#!/sbin/openrc-run
+# Rootless Docker daemon for a non-root user (default: gitlab-runner).
+# Source: ~/dev/custom/system-files/ — installed to /etc/init.d/ by
+# scripts/setup-gitlab-runner-docker. Runs dockerd as the user with NO host
+# root: separate socket ($XDG_RUNTIME_DIR/docker.sock) and data root
+# (~/.local/share/docker), isolated from the system docker daemon AND from the
+# github-runner user's rootless daemon. This is the Docker the self-hosted GitLab
+# Runner's docker-executor jobs use.
+
+# Overridable in /etc/conf.d/docker-rootless-gitlab-runner
+: "${DOCKER_ROOTLESS_USER:=gitlab-runner}"
+: "${DOCKERD_ROOTLESS_OPTS:=}"
+
+_uid="$(id -u "${DOCKER_ROOTLESS_USER}" 2>/dev/null || true)"
+
+description="Rootless Docker daemon (user: ${DOCKER_ROOTLESS_USER})"
+
+command="/usr/bin/dockerd-rootless.sh"
+command_args="${DOCKERD_ROOTLESS_OPTS}"
+command_user="${DOCKER_ROOTLESS_USER}:${DOCKER_ROOTLESS_USER}"
+# supervise-daemon watches the daemon and respawns it if it exits/crashes
+# (not just at boot). respawn_delay spaces retries so a hard failure backs off
+# instead of tight-looping; respawn_max=0 = retry indefinitely.
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=0
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+
+export HOME="/home/${DOCKER_ROOTLESS_USER}"
+export XDG_RUNTIME_DIR="/run/user/${_uid}"
+# Prepend standard dirs but KEEP OpenRC's PATH (it holds the rc helper bin dir,
+# e.g. /usr/libexec/rc/bin, where start-stop-daemon/mountinfo/shell_var live).
+# Replacing it made those "command not found" and broke the start wrapper.
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:${PATH}}"
+
+depend() {
+	need net
+	after elogind firewall
+}
+
+start_pre() {
+	# start_pre runs as root; pre-create the logfile owned by the daemon user,
+	# because start-stop-daemon opens stdout/stderr AFTER dropping to that user
+	# and /var/log is not user-writable. Uses coreutils only (not checkpath),
+	# since this box's OpenRC helper env is unreliable.
+	_log="/var/log/${RC_SVCNAME}.log"
+	[ -e "${_log}" ] || : > "${_log}"
+	chown "${DOCKER_ROOTLESS_USER}:${DOCKER_ROOTLESS_USER}" "${_log}" 2>/dev/null || true
+	chmod 0644 "${_log}" 2>/dev/null || true
+	if [ -z "${_uid}" ]; then
+		eerror "user ${DOCKER_ROOTLESS_USER} does not exist"
+		return 1
+	fi
+	# Linger makes elogind create ${XDG_RUNTIME_DIR} at boot without a login.
+	if [ ! -d "${XDG_RUNTIME_DIR}" ]; then
+		eerror "${XDG_RUNTIME_DIR} is missing — enable lingering so it"
+		eerror "persists at boot:  loginctl enable-linger ${DOCKER_ROOTLESS_USER}"
+		return 1
+	fi
+}

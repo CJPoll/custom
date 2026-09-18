@@ -196,3 +196,28 @@ system-level steps; safe to re-run.
   `fuse-overlayfs`, enables lingering, and installs the
   `docker-rootless-athena` OpenRC service (from `system-files/`) that runs her
   daemon at boot. Run `setup-athena-user` first. `--dry-run` previews.
+
+### Self-hosted CI runner provisioning (`setup-{github,gitlab}-runner*`)
+
+Two parallel families of root-run, idempotent scripts stand up a self-hosted CI
+runner as its **own** non-root user with its **own** rootless Docker, isolated
+from your account and from each other. Run them in order; each `--dry-run`
+previews.
+
+- **GitHub Actions** (serves the `gen_saas` GitHub repo): `setup-github-runner-user`
+  → `setup-github-runner-docker` → `setup-github-runner`.
+- **GitLab CI** (serves the `walt_ui` gitlab.com project, with gitlab.com shared
+  runners as fallback): `setup-gitlab-runner-user` → `setup-gitlab-runner-docker`
+  → `setup-gitlab-runner`. The GitLab runner uses the **docker executor** (each
+  job runs in a container, so the host needs no node/jq toolchain and no .NET/ICU
+  workaround), `privileged = false`, and builds images with **rootless BuildKit**
+  (`moby/buildkit:rootless`, no privileged) so the same untagged job runs on both
+  the self-hosted runner and gitlab.com SaaS. Architecture + the Cody-runs enable
+  steps + the walt_ui `.gitlab-ci.yml` `buildctl` rewrite spec live in
+  **`system-files/gitlab-runner-runbook.md`** (DND-177).
+
+Both runner users get a non-overlapping subuid/subgid block (athena `165536`,
+github-runner `231072`, gitlab-runner `296608`, each `:65536`). Neither is ever in
+`wheel`/`sudo`/`docker` — the setup scripts assert it. Registration (a repo/project
+token) and the actual `sudo` install are **yours to run**; the scripts install the
+OpenRC service but never start it until a runner is registered.

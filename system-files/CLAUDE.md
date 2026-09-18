@@ -10,6 +10,10 @@ This directory contains system-level configuration files that require root privi
 - `btmon.confd` - Options for that service (`BTMON_OPTS`)
 - `docker-rootless-athena.initd` - OpenRC service running rootless `dockerd` as a non-root user
 - `docker-rootless-athena.confd` - Options for that service (`DOCKER_ROOTLESS_USER`, `DOCKERD_ROOTLESS_OPTS`)
+- `docker-rootless-gitlab-runner.initd` / `.confd` - rootless `dockerd` for the `gitlab-runner` user
+- `gitlab-runner.initd` / `.confd` - supervise-daemon OpenRC service running `gitlab-runner run` as that user
+- `gitlab-runner-config.toml.example` - non-secret reference shape for the registered `config.toml` (the live token-bearing one is never committed)
+- `gitlab-runner-runbook.md` - the Cody-runs enable steps + the walt_ui `.gitlab-ci.yml` `buildctl` rewrite spec (DND-177)
 
 ## Symlink Integration
 
@@ -74,3 +78,21 @@ exists at boot.
 `scripts/setup-athena-docker` installs and starts it (copy, not symlink, for
 the same run-as-root safety reason as btmon). Override the target user via
 `DOCKER_ROOTLESS_USER` in `/etc/conf.d/docker-rootless-athena`.
+
+### Self-hosted GitLab Runner (docker-rootless-gitlab-runner + gitlab-runner)
+
+The GitLab mirror of the self-hosted GitHub runner (DND-177): a dedicated
+`gitlab-runner` user with its **own** rootless dockerd
+(`docker-rootless-gitlab-runner`, isolated from athena's and github-runner's),
+and a supervise-daemon service (`gitlab-runner`) running `gitlab-runner run` **as
+that user** — a deliberate divergence from GitLab's default root packaging,
+required so the docker executor hits the user's rootless socket. It's a **project
+runner** on `gitlab.com/amby_ai/walt_ui` with gitlab.com shared runners as
+fallback; `privileged = false`; image builds run via rootless BuildKit
+(`moby/buildkit:rootless`) so the same untagged job runs on both the self-hosted
+runner and SaaS. `scripts/setup-gitlab-runner{-user,-docker,}` install these
+(copy, not symlink, for the run-as-root safety reason). The full enable runbook —
+register steps, the `keep-stopped-until-the-walt_ui-MR-merges` ordering, the
+`.gitlab-ci.yml` `buildctl` rewrite spec, and enable-time validation — is in
+**`gitlab-runner-runbook.md`**. The live `config.toml` holds the `glrt-` token and
+is never committed; `gitlab-runner-config.toml.example` is the non-secret shape.

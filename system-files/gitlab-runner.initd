@@ -1,0 +1,78 @@
+#!/sbin/openrc-run
+# Self-hosted GitLab Runner for a non-root user (default: gitlab-runner).
+# Source: ~/dev/custom/system-files/ — installed to /etc/init.d/ by
+# scripts/setup-gitlab-runner. Runs `gitlab-runner run` AS the user (a deliberate
+# divergence from GitLab's default root-service packaging), after that user's
+# rootless Docker is up, so the docker executor's jobs use the rootless daemon
+# on the user's own socket.
+
+# Overridable in /etc/conf.d/gitlab-runner
+: "${RUNNER_USER:=gitlab-runner}"
+: "${RUNNER_HOME:=/home/gitlab-runner}"
+: "${RUNNER_CONFIG:=/home/gitlab-runner/.gitlab-runner/config.toml}"
+: "${RUNNER_BIN:=/usr/local/bin/gitlab-runner}"
+: "${RUNNER_OPTS:=}"
+
+_uid="$(id -u "${RUNNER_USER}" 2>/dev/null || true)"
+
+description="GitLab Runner self-hosted (user: ${RUNNER_USER})"
+
+command="${RUNNER_BIN}"
+command_args="run --config ${RUNNER_CONFIG} --working-directory ${RUNNER_HOME} ${RUNNER_OPTS}"
+command_user="${RUNNER_USER}:${RUNNER_USER}"
+# supervise-daemon watches `gitlab-runner run` and respawns it if it exits/crashes
+# (not just at boot). respawn_delay spaces retries so a hard failure backs off
+# instead of tight-looping; respawn_max=0 = retry indefinitely.
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=0
+directory="${RUNNER_HOME}"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+
+# The runner and its docker executor need the user's HOME, rootless Docker
+# socket, and a sane PATH.
+export HOME="${RUNNER_HOME}"
+export XDG_RUNTIME_DIR="/run/user/${_uid}"
+export DOCKER_HOST="unix:///run/user/${_uid}/docker.sock"
+# Prepend standard dirs but KEEP OpenRC's PATH (it holds the rc helper bin dir,
+# e.g. /usr/libexec/rc/bin, where start-stop-daemon/mountinfo/shell_var live).
+# Replacing it made those "command not found" and broke the start wrapper.
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:${PATH}}"
+
+depend() {
+	need net
+	after elogind firewall docker-rootless-gitlab-runner
+}
+
+start_pre() {
+	# start_pre runs as root; pre-create the logfile owned by the runner user,
+	# because start-stop-daemon opens stdout/stderr AFTER dropping to that user
+	# and /var/log is not user-writable. Uses coreutils only (not checkpath),
+	# since this box's OpenRC helper env is unreliable.
+	_log="/var/log/${RC_SVCNAME}.log"
+	[ -e "${_log}" ] || : > "${_log}"
+	chown "${RUNNER_USER}:${RUNNER_USER}" "${_log}" 2>/dev/null || true
+	chmod 0644 "${_log}" 2>/dev/null || true
+	if [ -z "${_uid}" ]; then
+		eerror "user ${RUNNER_USER} does not exist — run setup-gitlab-runner-user"
+		return 1
+	fi
+	if [ ! -x "${command}" ]; then
+		eerror "${command} not found — run scripts/setup-gitlab-runner first"
+		return 1
+	fi
+	if [ ! -f "${RUNNER_CONFIG}" ] || ! grep -q '\[\[runners\]\]' "${RUNNER_CONFIG}" 2>/dev/null; then
+		eerror "runner not registered (${RUNNER_CONFIG} has no [[runners]]). As ${RUNNER_USER}, run:"
+		eerror "  ${command} register --non-interactive --url https://gitlab.com \\"
+		eerror "    --token glrt-<TOKEN> --executor docker --docker-image alpine:3.20 \\"
+		eerror "    --docker-security-opt seccomp:unconfined --docker-security-opt apparmor:unconfined \\"
+		eerror "    --docker-volumes /cache --config ${RUNNER_CONFIG}"
+		return 1
+	fi
+	if [ ! -d "${XDG_RUNTIME_DIR}" ]; then
+		eerror "${XDG_RUNTIME_DIR} missing — enable linger: loginctl enable-linger ${RUNNER_USER}"
+		return 1
+	fi
+}
