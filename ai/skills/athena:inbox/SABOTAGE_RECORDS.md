@@ -552,13 +552,19 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
   and its own `git init` repo under one `mktemp -d`; ~5s wall)
 - **Baseline:** `VERDICT: PASS (170 cases)` (91 at the first pass; 21 added
   after the sabotage run, 46 more across eight critic rounds — see *The four
-  zeros* and *What the critic found that sabotage did not*)
+  zeros* and *What the critic found that sabotage did not*). **These totals are
+  the pre-merge state.** The two merge-forward rounds (DND-185, then
+  DND-187) grew the suites to **176 hook / 543 skill cases** and added
+  **S43–S50** — see the `**Later (2026-09-19)**` notes below, which carry the
+  final figures; this headline and table are left at their original values, per
+  the dated-record convention.
 - **Runner:** 42 mutations, one at a time, full suite after each, restored by
   `cp` from a backup taken before the run. S24–S42 were added after the review
   rounds (see *What the critic found that sabotage did not*). **42 mutations,
   42 reddened, no measured zeros** — S1–S35 in one full pass, S36–S38 in a
   second (after a sibling captain's run clobbered the shared runner, below),
-  S39–S42 in a third.
+  S39–S42 in a third. (S43–S50 followed in the merge rounds; see the Later
+  notes.)
 
 The mutations were applied by an exact-substring replace that asserts the
 anchor occurs **exactly once** before writing, as DND-183's run did. That
