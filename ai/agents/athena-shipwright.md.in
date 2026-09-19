@@ -555,6 +555,8 @@ handed to the fleet.
 
 @include ops/safety-checks
 
+@include ops/forge-identity
+
 ## Journal format
 
 Append to `journal.md` in `$SHIPWRIGHT_STATE_DIR` (the main checkout's

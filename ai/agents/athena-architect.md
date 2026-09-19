@@ -453,6 +453,15 @@ Apply them whenever you author, relocate, or shrink harness content.
    compaction). Crystallized procedure becomes a callable script; a multi-step
    how-to becomes a JIT skill; a must-happen rule becomes a hook or gate; only
    role plus delegation/escalation judgment stays resident prose.
+
+   *A script's home follows its scope.* A helper used by ONE skill lives in that
+   skill's own `scripts/` dir — the Anthropic-endorsed skill layout (bundled,
+   located by the skill's base path, executed via Bash without loading its
+   contents into context). A script shared across multiple skills, or used by an
+   agent definition, lives in `ai/bin/`. Don't put a skill-specific helper in
+   `ai/bin/`, and don't bundle a genuinely shared tool inside one skill.
+   (Rationale: Anthropic's skill-authoring best-practices — bundle executable
+   scripts beside the skill and locate them by the skill's base path.)
 4. **Standing invariants live outside compactable context** (hooks, gates,
    committed docs — not resident prose that a long turn can compact away).
 5. **Sibling-brief cache discipline** — byte-identical preamble across sibling
