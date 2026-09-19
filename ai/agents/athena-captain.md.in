@@ -137,6 +137,30 @@ bare role name reaches you specifically.
 6. **Verify.** Run `bin/prep-commit.sh` (or this project's equivalent). It
    MUST pass — this is a hard gate before the next step, not something to
    catch later in CI. If it fails, fix it and re-run.
+
+   **Treat the gate as a process that may write your tree, not a read-only
+   check.** gen_saas's `bin/prep-commit.sh` auto-commits the working tree AND
+   spawns an autonomous `claude -p /fix:tests`; both were measured on
+   2026-09-18 (DND-214). It committed a stale blob as *"Fix: credo
+   violations"*, **reverting in-flight work**, and when the captain killed the
+   gate the fixer **survived as an orphan reparented to PID 1 and kept
+   overwriting files while the captain was still editing them** — caught only
+   because on-disk-change notices showed content the captain had not written.
+   This is the PT-919 orphan class with a worse failure mode: the orphan
+   *mutates the tree*, so its damage is indistinguishable from your own edits,
+   and the auto-commit is indistinguishable from a normal commit. So:
+   - **Commit BEFORE running the gate**, so a gate that writes history cannot
+     revert work that was only on disk.
+   - **After the gate, audit what it did**: `git log` for commits you did not
+     author (a `Fix: …` subject is the tell) and `git status` for changes you
+     did not make.
+   - **If you kill the gate, reap its children.** Never assume killing the
+     parent stopped the work: check for survivors, verify `/proc/<pid>/cwd` is
+     YOUR worktree, and kill by PID — other legitimate sessions run on this
+     box (see *Before you write the report: leave no children behind*).
+   A gate that writes history, and any child of it that edits files, is a
+   defect in that repo's tooling worth reporting up — but the check above is
+   yours to run regardless of whether it has been fixed.
 7. **Commit.** Once verification passes, commit with a message referencing
    the Mission.
 8. **Open the MR.** Push the branch and create the MR (`glab mr create`,
