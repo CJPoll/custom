@@ -979,6 +979,26 @@ setup-hooks=[…/definitely-not-on-disk.sh] checker=[./definitely-not-on-disk.sh
 mutation's reddening may now belong to the skill's own `test/self-test.sh`
 rather than this hook suite.)
 
+**Later (2026-09-19) — the same merge round found `inbox_repo_key` swallowed
+"could not tell" as an empty key.** The critic caught that `inbox_repo_key` was
+`fs_git_common_dir … 2>/dev/null || printf ''` — so **git missing, the cwd gone,
+and realpath failing all collapsed to the same empty key with exit 0**, which
+the hook reads as "a cwd in no git repository, nothing to report" and stays
+silent. That is the exact missing-vs-unknown conflation the ticket's standing
+review question forbids, and the user rule *a failed lookup must never look like
+an empty one*. **Every existing degraded-key case kept `git` on the stripped
+PATH**, so none of them exercised it — a measured zero the sabotage run had
+missed because its fixtures never dropped `git`. Fixed: `inbox_repo_key` now
+returns **non-zero on "could not tell"** and empty-with-exit-0 **only** for a
+cwd `git` itself reports as no work tree; `bin/inbox-status --repo-key`
+propagates the non-zero instead of swallowing it; the hook logs
+`inbox-status could not name this project's repo identity …` on that path and
+falls back to the shared markers, never stamping success. New case **S43** —
+*a real `inbox-status`, `git` stripped from PATH* — reddens under the old body:
+`FAIL R16 git absent is 'could not tell', LOGGED not silently shared` (the old
+body logged instead `no registry entry declares a channel … left untouched`,
+i.e. false-healthy silence). Restored: `VERDICT: PASS (173 cases)`.
+
 The fourth: an entry that is **present but declares an empty `channels`** is
 byte-identical to a missing one — `descriptor_validate` accepts a zero-key
 object, and `inbox_status_json` then emits the same `{"channels":[]}`. The hook

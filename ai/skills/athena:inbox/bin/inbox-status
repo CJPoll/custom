@@ -94,8 +94,16 @@ done
 # the one question that still has an answer when everything else has failed,
 # and a caller asks it precisely then.
 if [ "${REPO_KEY_ONLY}" -eq 1 ]; then
-  printf '%s\n' "$(inbox_repo_key ".")"
-  exit 0
+  # An empty key with exit 0 is a genuine non-repo cwd. A NON-ZERO from
+  # inbox_repo_key is "could not tell" (git missing, cwd gone, realpath failed)
+  # and MUST propagate -- swallowing it with `|| printf ''` was exactly the
+  # collapse that let a git-less environment read as "no repo, nothing to
+  # report" (DND-188 merge-round critic).
+  if key="$(inbox_repo_key ".")"; then
+    printf '%s\n' "${key}"
+    exit 0
+  fi
+  exit 1
 fi
 
 if ! command -v jq >/dev/null 2>&1; then

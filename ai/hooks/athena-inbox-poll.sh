@@ -264,11 +264,14 @@ if [ ! -x "${STATUS_BIN}" ]; then
 elif ! command -v sha256sum >/dev/null 2>&1; then
   log_reason "sha256sum is not on PATH, so this project's markers cannot be named and its inbox state would be shared with every other project on this machine. Fix: install coreutils' sha256sum and start a new session."
 else
-  # --repo-key touches no registry and cannot fail, so a non-zero status or an
-  # error here means the inbox-status beside this hook PREDATES the option --
-  # hook/skill version skew, reachable because settings.json wires one tree's
-  # hook path and STATUS_BIN resolves from that tree. Logged rather than
-  # silently falling back, because the fallback is shared state.
+  # --repo-key touches no registry, so a non-zero status here is one of two
+  # things, and BOTH are logged rather than silently falling back (the fallback
+  # is shared state): either the inbox-status beside this hook PREDATES the
+  # option (hook/skill version skew, reachable because settings.json wires one
+  # tree's hook path while STATUS_BIN resolves from that tree), or it supports
+  # --repo-key but COULD NOT TELL the repo identity (git missing, the cwd gone,
+  # or realpath failing). What is NOT logged is an exit 0 with an empty key:
+  # that is a genuine non-git cwd, the ordinary case, and it stays silent.
   PROJECT_KEY="$(timeout "${STATUS_TIMEOUT_SECONDS}" "${STATUS_BIN}" --repo-key 2>/dev/null)"
   REPO_KEY_RC=$?
   if [ "${REPO_KEY_RC}" -eq 124 ] || [ "${REPO_KEY_RC}" -eq 137 ]; then
@@ -297,7 +300,7 @@ else
     # had channels, so there is nothing to remember and nothing to report --
     # the ordinary case for most directories on this machine.
   else
-    log_reason "inbox-status does not support --repo-key, so this project's markers cannot be named and its inbox state would be shared with every other project on this machine. Fix: check that ai/skills/athena:inbox and ai/hooks come from the same checkout."
+    log_reason "inbox-status could not name this project's repo identity, so its markers cannot be named and its inbox state would be shared with every other project on this machine. Fix: either the inbox-status beside this hook predates --repo-key (check that ai/skills/athena:inbox and ai/hooks come from the same checkout), or git/realpath could not run in this session (check that git is on PATH and the cwd still exists)."
   fi
 fi
 

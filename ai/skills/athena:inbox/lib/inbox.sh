@@ -312,7 +312,22 @@ _inbox_count_maildir() {
 
 # inbox_repo_key [cwd]
 #
-# The session's repo identity, or an empty string outside a git repository.
+# The session's repo identity. THREE outcomes, deliberately distinct:
+#   * a non-empty key + exit 0 -- the realpath of the git common dir;
+#   * an EMPTY key + exit 0    -- the cwd is DEFINITIVELY in no git work tree
+#                                 (git ran, the cwd was reachable, git said so):
+#                                 nothing to remember, a caller stays silent;
+#   * exit NON-ZERO            -- COULD NOT TELL: git is missing, the cwd is
+#                                 gone, or realpath failed on a common dir that
+#                                 does exist. This is NOT the same as "no repo",
+#                                 and a caller must log it rather than treat an
+#                                 empty key as "nothing here". (User rule: a
+#                                 failed lookup must never look like an empty
+#                                 one.) The previous `|| printf ''` collapsed
+#                                 all three failure modes into the silent empty
+#                                 key, so a git-less environment read as "not a
+#                                 repo, nothing to report" -- caught by the
+#                                 DND-188 merge-round critic.
 # MANAGER, so that `bin/` never reaches into the adapter itself: every other
 # path in bin/ goes through an `inbox_*`, and the one exception was the exact
 # Framework-calls-an-adapter violation this facility had already moved once.
@@ -322,7 +337,14 @@ _inbox_count_maildir() {
 # and recomputing it there would be a second implementation of the identity
 # rule, free to drift from the contract.
 inbox_repo_key() {
-  fs_git_common_dir "${1:-.}" 2>/dev/null || printf ''
+  local dir="${1:-.}"
+  command -v git >/dev/null 2>&1 || return 1          # could not tell: no git
+  ( cd "${dir}" 2>/dev/null ) || return 1             # could not tell: cwd gone
+  if ( cd "${dir}" 2>/dev/null && git rev-parse --is-inside-work-tree >/dev/null 2>&1 ); then
+    fs_git_common_dir "${dir}" 2>/dev/null || return 1  # in a tree, but realpath failed
+    return 0
+  fi
+  return 0                                            # git said "not a work tree": empty key
 }
 
 # inbox_status_json [cwd]

@@ -784,7 +784,7 @@ printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidat
 exit 0'
 run_stub_hook
 assert_contains "R16 an inbox-status without --repo-key is logged, not silently shared" \
-  "does not support --repo-key" "$(hook_log)"
+  "could not name this project's repo identity" "$(hook_log)"
 assert_contains "R16 ...and the count is still reported" "2 new in slack" \
   "$(context_of "${OUT}")"
 
@@ -798,7 +798,7 @@ printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidat
 exit 0'
 run_stub_hook
 assert_not_contains "R16 an EMPTY repo key is the quiet no-git-repo case, not a fault" \
-  "does not support --repo-key" "$(hook_log)"
+  "could not name this project's repo identity" "$(hook_log)"
 
 # A repo that NEVER opted in must stay silent. Without this, the warning above
 # would fire in every unrelated repo on the machine -- the noise this hook
@@ -865,7 +865,7 @@ unset ATHENA_INBOX_STATUS_TIMEOUT_SECONDS
 assert_contains "R16 a --repo-key timeout is reported as an expiry" \
   "did not finish within" "$(hook_log)"
 assert_not_contains "R16 ...and not misdiagnosed as version skew" \
-  "does not support --repo-key" "$(hook_log)"
+  "could not name this project's repo identity" "$(hook_log)"
 
 # The THIRD route to an empty hash: sha256sum present but its output unusable
 # (here, `cut` removed). It must log like the other two, because the fallback
@@ -893,6 +893,37 @@ run_hook
 assert_not_contains "R16 a cwd in no git repo is not reported as a degraded key" \
   "markers cannot be named" "$(hook_log)"
 assert_eq "R16 a cwd in no git repo still exits 0" "0" "${RC}"
+
+# GIT ABSENT is "could not tell", NOT "no git repository". inbox-status here is
+# the real one and supports --repo-key, but with git off PATH inbox_repo_key
+# cannot DETERMINE the identity and exits non-zero -- which the hook must LOG
+# (and fall back to shared markers) rather than read an empty key as "no repo,
+# nothing to report". The previous `|| printf ''` collapsed the two, so a
+# git-less session looked healthy-and-empty. EVERY other degraded-key case above
+# keeps git on the stripped PATH, so none of them covered this input class
+# (DND-188 merge-round critic). PATH rebuilt from scratch, deliberately WITHOUT
+# git, the way F-4a rebuilds it to drop jq.
+setup_case
+register "${LOG_CHANNEL}"
+run_hook                                    # session 1 (git present) opts in
+NOGITBIN="${CASE_DIR}/nogitbin"; mkdir -p "${NOGITBIN}"
+for b in bash dirname date mkdir wc tail mv rm stat sed grep cat timeout jq cut realpath awk sha256sum; do
+  src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${NOGITBIN}/${b}"
+done                                        # NOTE: git is intentionally omitted
+OLD_PATH="${PATH}"
+PATH="${NOGITBIN}" run_hook
+PATH="${OLD_PATH}"
+assert_contains "R16 git absent is 'could not tell', LOGGED not silently shared" \
+  "could not name this project's repo identity" "$(hook_log)"
+assert_eq "R16 the git-absent run still exits 0" "0" "${RC}"
+# The ticket's binding invariant: a run that could not even name the project is
+# a FAILURE and must NEVER stamp success -- here the shared success marker, since
+# the per-project one cannot be named.
+if [ ! -e "${HOME}/.claude/athena-inbox-last-success" ]; then
+  ok "R16 git absent (could-not-tell) stamps no shared success marker"
+else
+  bad "R16 git absent (could-not-tell) stamps no shared success marker" "shared success marker was stamped on a failed identity resolution"
+fi
 
 echo "== R12: a registry entry that could not be read is surfaced, not skipped =="
 
