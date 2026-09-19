@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# inbox-doctor -- FRAMEWORK. The owner-invoked liveness check for the whole
+# Slack -> Athena delivery chain: one check per link, each reporting a state and
+# a `Fix:` clause.
+#
+#   inbox-doctor            human-readable report, one line per finding
+#   inbox-doctor --json     the same findings as one JSON object (for the hook)
+#   inbox-doctor -h         this header
+#
+# FOUR STATES, not three: ok | warn | fail | na.
+#
+#   ok    the link is healthy.
+#   warn  a fault the owner should see; does not set the exit code.
+#   fail  a fault; makes the exit code non-zero.
+#   na    COULD NOT RUN -- no root, no projects/, no client config, a channel
+#         never provisioned, no API token. `na` is NEVER counted as ok, and a
+#         doctor that reported `ok` because an input was missing would be the
+#         silence this tool exists to break, wearing a diagnostic's coat.
+#
+# EXIT: 0 when nothing failed, 1 when any check is `fail`. A `warn` or an `na`
+# alone does not set a non-zero exit -- `warn` is advisory and `na` means the
+# check did not run.
+#
+# READ-ONLY. It never acks, advances an offset, rotates, sweeps, fixes a mode,
+# or reaps a lock. It never prints a message body, subject, sender or slug --
+# only channel and registry FACTS, which is the exemption a PROMPTED tool has
+# from the counts-only rule.
+#
+# THE SERVER CHECK IS OPTIONAL and degrades to `na` when no API token is
+# configured -- an opt-out, not a breakage. It never mints, stores, or logs a
+# token, and never mutates server state.
+#
+# Tests: test/doctor/self-test.sh. Every probe is stubbed there; the suite never
+# opens a socket or reads a real pidfile.
+#--- end usage ---
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB="$(dirname "${HERE}")/lib"
+# The repo root: bin -> athena:inbox -> skills -> ai -> <repo>. Handed to
+# doctor.sh so it can find the cron installer and the committed registry list
+# WITHOUT the skill libraries themselves knowing either exists (RULE C).
+DOCTOR_REPO_DIR="$(cd "${HERE}/../../../.." && pwd)"
+export DOCTOR_REPO_DIR
+
+# shellcheck source=/dev/null
+. "${LIB}/err.sh"
+# shellcheck source=/dev/null
+. "${LIB}/names.sh"
+# shellcheck source=/dev/null
+. "${LIB}/descriptor.sh"
+# shellcheck source=/dev/null
+. "${LIB}/logchan.sh"
+# shellcheck source=/dev/null
+. "${LIB}/maildir.sh"
+# shellcheck source=/dev/null
+. "${LIB}/fence.sh"
+# shellcheck source=/dev/null
+. "${LIB}/session.sh"
+# shellcheck source=/dev/null
+. "${LIB}/fs.sh"
+# shellcheck source=/dev/null
+. "${LIB}/lock.sh"
+# shellcheck source=/dev/null
+. "${LIB}/inbox.sh"
+# shellcheck source=/dev/null
+. "${LIB}/doctor.sh"
+
+usage() { sed -n '2,/^#--- end usage ---$/p' "${BASH_SOURCE[0]}" | grep -v '^#--- end usage ---$' | sed 's/^# \{0,1\}//'; }
+
+JSON=0
+for arg in "$@"; do
+  case "${arg}" in
+    --json) JSON=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      inbox_fail "unknown argument \"${arg}\"" "run: inbox-doctor [--json]"
+      exit 2
+      ;;
+  esac
+done
+
+if ! command -v jq >/dev/null 2>&1; then
+  inbox_fail "jq is required and was not found on PATH" \
+    "install jq (it is already a dependency of the athena:slack skill), then re-run."
+  exit 2
+fi
+
+# --- gather every finding ---------------------------------------------------
+# Each check prints "<state>\t<check>\t<message>\t<fix>" lines. The matched
+# entry is threaded from doctor_check_entry into the per-channel checks.
+
+collect_findings() {
+  doctor_check_root
+  doctor_check_projects_dir
+  doctor_check_skipped_files
+  doctor_check_undeclared_live
+  doctor_check_collisions
+  doctor_check_client_config
+  if doctor_check_client_stopped; then STOPPED=0; else STOPPED=1; fi
+  doctor_check_client_running "${STOPPED}"
+  doctor_check_cron
+  doctor_check_entry "."
+  doctor_check_channels "${DOCTOR_MATCHED_ENTRY}" "."
+  doctor_check_server "."
+}
+
+FINDINGS="$(collect_findings)"
+
+# --- summary and exit code --------------------------------------------------
+# `na` is counted in its own bucket, never folded into `ok`. The exit code is
+# driven by `fail` alone.
+
+count_state() { printf '%s\n' "${FINDINGS}" | awk -F'\t' -v s="$1" '$1==s{n++} END{print n+0}'; }
+N_OK="$(count_state ok)"
+N_WARN="$(count_state warn)"
+N_FAIL="$(count_state fail)"
+N_NA="$(count_state na)"
+
+if [ "${JSON}" -eq 1 ]; then
+  printf '%s\n' "${FINDINGS}" | jq -R -s --argjson ok "${N_OK}" --argjson warn "${N_WARN}" \
+    --argjson fail "${N_FAIL}" --argjson na "${N_NA}" '
+    {
+      summary: {ok: $ok, warn: $warn, fail: $fail, na: $na,
+                healthy: ($warn == 0 and $fail == 0)},
+      findings: [ split("\n")[] | select(length > 0) | split("\t")
+                  | {state: .[0], check: .[1], message: .[2], fix: .[3]} ]
+    }'
+else
+  # One line per finding; the Fix on its own indented line when present. Zero
+  # findings cannot happen (root always reports), so there is always output.
+  printf '%s\n' "${FINDINGS}" | while IFS=$'\t' read -r state check msg fix; do
+    [ -n "${state}" ] || continue
+    printf '  %-4s %s: %s\n' "${state}" "${check}" "${msg}"
+    [ -n "${fix}" ] && printf '        Fix: %s\n' "${fix}"
+  done
+  printf 'inbox-doctor: %s ok, %s warn, %s fail, %s n-a\n' "${N_OK}" "${N_WARN}" "${N_FAIL}" "${N_NA}"
+fi
+
+[ "${N_FAIL}" -eq 0 ] || exit 1
+exit 0
