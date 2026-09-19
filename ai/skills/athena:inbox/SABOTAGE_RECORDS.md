@@ -255,13 +255,14 @@ without it. Its header says so.
 - **Suite run:** `bash ai/hooks/athena-inbox-poll.self-test.sh </dev/null`
   (no network; every case gets a fake `$HOME`, a private `ATHENA_INBOX_ROOT`
   and its own `git init` repo under one `mktemp -d`; ~5s wall)
-- **Baseline:** `VERDICT: PASS (148 cases)` (91 at the first pass; 21 added
-  after the sabotage run, 36 more across five critic rounds — see *The four
+- **Baseline:** `VERDICT: PASS (158 cases)` (91 at the first pass; 21 added
+  after the sabotage run, 46 more across eight critic rounds — see *The four
   zeros* and *What the critic found that sabotage did not*)
-- **Runner:** 35 mutations, one at a time, full suite after each, restored by
-  `cp` from a backup taken before the run. S24–S35 were added after the review
-  rounds (see *What the critic found that sabotage did not*). Final pass: **35
-  mutations, 35 reddened, no measured zeros.**
+- **Runner:** 38 mutations, one at a time, full suite after each, restored by
+  `cp` from a backup taken before the run. S24–S38 were added after the review
+  rounds (see *What the critic found that sabotage did not*). **38 mutations,
+  38 reddened, no measured zeros** — S1–S35 in one full pass, S36–S38 in a
+  second, after a sibling captain's run clobbered the shared runner (below).
 
 The mutations were applied by an exact-substring replace that asserts the
 anchor occurs **exactly once** before writing, as DND-183's run did. That
@@ -312,6 +313,9 @@ produces 23 green runs, which reads as "this suite is dead".
 | S33 | the inflated-count caveat moves back behind the rate limit | 1 | `FAIL  R17 the inflated count still carries its caveat` |
 | S34 | a key that cannot be hashed disables the detector in silence | 1 | `FAIL  R16 a key that cannot be hashed is LOGGED, not silently inert` |
 | S35 | `inbox_status_json` stops naming the session's repo | 5 | `FAIL  R16 a vanished entry is announced, not silently treated as opt-out` |
+| S36 | the other-projects clause claims the doubt is unresolved again | 2 | `FAIL  R12 an unreadable registry entry is surfaced` |
+| S37 | a repair never clears the vanished-entry rate limit | 2 | `FAIL  R16 a repair clears the vanished-entry rate limit` |
+| S38 | an ABSENT `repo_key` collapses into the quiet no-git-repo case | 1 | `FAIL  R16 a status document with NO repo_key is logged, not silently inert` |
 
 ### The four zeros
 
@@ -532,6 +536,45 @@ silent-dark registry speak. Each failure now logs a `Fix:`; the one case that
 legitimately has nothing to remember — a cwd in no git repository — stays quiet,
 and a case asserts that too, so the logging cannot be satisfied by logging
 always. Pinned by S34.
+
+**Rounds seven and eight, the last three findings.** The
+`failed_candidates` clause rendered **only** on the branch where its own wording
+was false: `inbox_entry` makes no-match-plus-unparseable-candidate a hard
+refusal (empty stdout, exit 1), which reaches the hook as a *failed poll*, so by
+the time a health clause can render at all this project's entry has been found
+and the unreadable ones provably belong to somebody else. It said "one of which
+may be this project's" anyway, and every R12/R15 fixture called `register` first
+— so no fixture ever visited the branch the wording was written for, and nothing
+could contradict it. Reworded, and the hard-refusal branch now has a case of its
+own. **S36.**
+
+`SEEN_WARN_MARKER` was exempt from the S21 clear-on-success discipline the other
+two markers follow, so an entry restored and clobbered *again* inside the window
+was silenced by a warning about the fault that had already been repaired —
+skipping the rule at the one failure with no diff and no undo. The existing
+rate-limit case passed either way; a case now asserts the **repair** re-arms it.
+**S37.**
+
+And `.repo_key // ""` collapsed *absent* into *empty*. Empty means "no git
+repository here", which legitimately has nothing to remember and stays quiet;
+absent means the `inbox-status` beside this hook predates the field — reachable
+through hook/skill version skew, since `settings.json` wires one tree's hook
+path and `STATUS_BIN` resolves from that tree — and it silently made the whole
+vanished-entry detector inert while looking exactly like a healthy project. That
+is the round-five claim ("every way of failing to derive that marker name is
+LOGGED") escaping through its last door. **S38.**
+
+### A harness hazard this run measured
+
+**The session scratchpad is shared between concurrently running captains**, and
+a sibling's `sabotage.sh` overwrote this one's mid-ticket, at the same path. The
+overwritten runner then executed against *this* worktree under a `nohup`, and
+the only reason nothing was corrupted is that the sibling's runner also installs
+a restoring `trap`. Two agents, one directory, generic filenames. A sabotage
+runner writes mutations into a real tree, so this is the one class of shared file
+where a collision can silently corrupt another agent's work. Namespace the
+runner (`<scratchpad>/<ticket>/`), and treat a generic filename in the session
+scratchpad as unsafe.
 
 ### Not exercised by this run
 
