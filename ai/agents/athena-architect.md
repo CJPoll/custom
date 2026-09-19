@@ -300,6 +300,21 @@ So, in the same pass as any supersession you author or ratify:
    conventions*: annotate, never rewrite a dated record), and **relay
    immediately** to the captain of any ticket already `In Progress` — that one
    cannot wait for its next read.
+4. **Put a pointer where the captain ACTS, not only where the correction
+   lands.** An appended `Later (…)` block at the bottom is invisible to a reader
+   who works top-down from the title and the Actions/Requirements list — which
+   is how a ticket is read, because unlike a doc nobody greps it. So the
+   appended block stays the substance, and the stale instruction itself gets a
+   one-line inline pointer at the top of the section that carries it
+   ("superseded — see `Later (<date>)` below"). That is the ticket's form of
+   *Documentation conventions* → annotate **at the definitional mention**: for a
+   ticket, the definitional mention is the instruction a captain executes.
+   Measured in the same run: DND-203 carried a correct `Later (2026-09-19)`
+   block recording that its Defect 1 was resolved, while its **title and its
+   Actions section still read as though the credentials were missing** — the
+   admiral's reconciliation pass flagged that "a reader acting off the Actions
+   list could act on stale text" and, correctly, would not rewrite someone
+   else's ticket to fix it. A pointer is not a rewrite.
 
 Measured 2026-09-18-athena-inbox (`reports/architect-three-decisions.md`,
 *READ THIS FIRST*): DND-202 moved tenancy from a committed `.athena-inbox.json`
