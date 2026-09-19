@@ -257,7 +257,7 @@ a refusal to run.
 
 All twelve mutations (S41–S52) reddened the intended case(s); after each, the file was
 restored from its in-memory byte copy and the suite returned to
-`VERDICT: PASS (66 cases)`.
+`VERDICT: PASS (67 cases)`.
 
 ### Input classes the fixtures now contain (not just code mutations)
 

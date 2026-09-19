@@ -36,8 +36,16 @@ anything is confusing.
 - The inbox **seen-state** is not a cache: it lives in the shared inbox-root file
   `${ATHENA_INBOX_ROOT:-~/.local/share/athena}/slack-inbox.state.json`, one state
   for both Slack sources (this Web API backstop and the athena:inbox file
-  channel), so they cannot double-report each other. `$SLACK_INBOX_STATE`
-  overrides the path. See "The backstop, and one dedupe set" below.
+  channel), so they cannot double-report each other. See "The backstop, and one
+  dedupe set" below.
+  - **To share state with a per-project file channel, name it.** The state file
+    is derived from the channel's `.jsonl` by the same suffix swap the
+    `athena:inbox` reader uses, so set `SLACK_INBOX_JSONL` to that channel (e.g.
+    `walt_ui-slack.jsonl`) and both sources use `walt_ui-slack.state.json`;
+    `$SLACK_INBOX_STATE` overrides the path outright. The **default**
+    (`slack-inbox.jsonl`) is the flat in-root channel — correct where the
+    session has no per-project file channel, but it will **not** dedupe against a
+    `<project>-slack.jsonl` reader unless pointed at it.
 
 ## The scripts
 
@@ -191,7 +199,7 @@ out of scope here.
 
 ## Tests
 
-`bash test/self-test.sh` — 66 cases, no network (curl is a PATH shim). Covers
+`bash test/self-test.sh` — 67 cases, no network (curl is a PATH shim). Covers
 the ok:false convention, the token never reaching argv or a URL, request shapes,
 pagination, 429 backoff, the users cache, unreadable conversations, every branch
 of the hook and the inbox scan, the cross-source `seen_keys` dedupe (drop + add),

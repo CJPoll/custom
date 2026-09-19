@@ -50,6 +50,14 @@
 
 set -u
 
+# Nowhere to record anything -- including the fact that there was nowhere -- so
+# the only honest move is the silent one. This MUST come before the first use of
+# $HOME below: under `set -u` an assignment of "$HOME" with HOME unset aborts the
+# script non-zero, which would both skip this guard and break the exit-0
+# contract. Umask is set here too so it applies to every path.
+if [ -z "${HOME:-}" ]; then exit 0; fi
+umask 077
+
 POLL_MINUTES="${SLACK_POLL_MINUTES:-5}"
 LOG="$HOME/.claude/athena-slack-poll.log"
 LOG_MAX_LINES=200
@@ -73,14 +81,6 @@ WARN_INTERVAL_MINUTES=$((STALE_SUCCESS_HOURS * 60))
 HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 AI_DIR="$(CDPATH= cd -- "$HOOK_DIR/.." && pwd)"
 LIB_DIR="$AI_DIR/skills/athena:slack/lib"
-
-# Private state, 0600/0700 by construction rather than a chmod a later edit can
-# forget.
-umask 077
-
-# Nowhere to record anything -- including the fact that there was nowhere -- so
-# the only honest move is the silent one.
-if [ -z "${HOME:-}" ]; then exit 0; fi
 
 # emit <text> -- the ONE well-formed object, and nothing else, ever. Reached
 # only after the jq check below, so jq is always present here.
