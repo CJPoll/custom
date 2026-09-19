@@ -65,10 +65,16 @@
 
 set -uo pipefail
 
-# cron's PATH is minimal and typically omits /usr/sbin, which is where THIS
-# box's flock(1) lives — the same shape of failure as the asdf-shim bug above,
-# and it would silently defeat the single-instance guarantee. Pin a known-good
-# PATH. Deliberately no asdf shims: the launcher pins its own absolute ruby.
+# cron's PATH is minimal, so pin a known-good one rather than inheriting
+# whatever the daemon offers: losing flock(1) would silently defeat the
+# single-instance guarantee, the same shape of failure as the asdf-shim bug
+# above. Deliberately no asdf shims — the launcher pins its own absolute ruby.
+#
+# /usr/sbin is listed for portability, not because this box needs it: Gentoo's
+# usrmerge makes /usr/sbin a symlink to bin here, so flock resolves through
+# /usr/bin either way. That is why the suite's minimal-PATH case cannot be
+# reddened by dropping /usr/sbin from this line (SABOTAGE_RECORDS S28, a
+# measured zero) — the pin still matters on a host where the two differ.
 export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
@@ -248,7 +254,17 @@ while :; do
   fi
 
   say "client exited ${rc} after ${ran}s; restart ${restarts} in ${backoff}s"
-  sleep "$backoff"
+
+  # Backgrounded, not a plain `sleep "$backoff"`. Bash defers a trapped signal
+  # until the current FOREGROUND command finishes, so a foreground sleep would
+  # swallow SIGTERM for up to MAX_BACKOFF (300s by default) and the documented
+  # recovery — "kill the pid in the pidfile" — would appear to do nothing for
+  # five minutes. Parking the pid in `child` also means the existing reaper
+  # cleans the sleep up, so nothing is left behind.
+  sleep "$backoff" &
+  child=$!
+  wait "$child"
+  child=""
 
   backoff=$(( backoff * 2 ))
   [ "$backoff" -gt "$MAX_BACKOFF" ] && backoff="$MAX_BACKOFF"

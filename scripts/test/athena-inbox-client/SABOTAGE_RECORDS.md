@@ -36,8 +36,9 @@ not yet committed.
   (equivalently `scripts/setup-athena-inbox-client --self-test`). No network —
   the client is a stub script; no live crontab — `crontab(1)` is a PATH shim
   over a tmpfile. ~25s.
-- **Baseline:** `VERDICT: PASS (32 cases)`
-- **Runner:** 22 mutations, one at a time, full suite after each.
+- **Baseline:** `VERDICT: PASS (37 cases)`
+- **Runner:** 27 mutations, one at a time, full suite after each. Rows S24–S28
+  cover the four guarantees added after the `athena-diff-critic` review.
 
 ### What the suite proves
 
@@ -65,8 +66,13 @@ not yet committed.
 | S20 | runner: the restart bound `if [ "$MAX_RESTARTS" -gt 0 ] && [ "$restarts" -ge "$MAX_RESTARTS" ]` → `if true` (gives up after the first crash) | 4 | `FAIL  exit 1 relaunches the client until the restart bound is reached` / `FAIL  the backoff grows exponentially (1s then 2s)` / `FAIL  the backoff is capped…` / `FAIL  a run lasting at least BACKOFF_RESET resets…` |
 | S21 | runner: `backoff=$(( backoff * 2 ))` → `* 1` (a fixed short retry wearing a supervisor's clothes) | 2 | `FAIL  the backoff grows exponentially (1s then 2s)` / `FAIL  the backoff is capped at MAX_BACKOFF and never exceeds it` |
 | S22 | runner: the locked-out branch made chatty (`echo "another supervisor holds the lock" >&2`) | 1 | `FAIL  the locked-out invocation prints nothing (cron mails any output)` |
+| S24 | installer: `RUNNER_DIR` resolved from `$SCRIPT_DIR` instead of `main_checkout_dir` (the vanishing-worktree-path bug) | 1 | `FAIL  installing from a worktree schedules the MAIN checkout's runner path` |
+| S25 | runner: `sleep "$backoff" &` + `wait` → a FOREGROUND `sleep "$backoff"`, so bash defers TERM until it ends | 1 | `FAIL  SIGTERM is honoured during the backoff sleep, not deferred until it ends` |
+| S26 | runner: `trim_log`'s bound check → unconditional `return 0` (the log grows forever) | 1 | `FAIL  the log is trimmed to its bound between client runs` |
+| S27 | runner: `trim_log`'s `tail -n "$keep"` → `head -n "$keep"` (keeps the oldest lines, drops the newest) | 1 | `FAIL  the trim keeps the tail of the log, not the head` |
+| S28 | runner: the pinned `PATH` gutted to `${HOME}/.local/bin` alone, so `flock(1)` is unreachable | 10 | `FAIL  the runner finds flock under a cron-like minimal PATH` (+ 9 others: with no lock and no launcher resolution, most supervisor cases collapse) |
 
-### Two zeros found, and closed rather than recorded
+### Four zeros found, and closed rather than recorded
 
 The first pass measured **two** zeros. Both turned out to be dead assertions in
 the suite rather than untestable claims, so both were repaired and re-measured:
@@ -81,15 +87,40 @@ the suite rather than untestable claims, so both were repaired and re-measured:
   opportunity — a broken rate limiter counts the same as a working one. A third
   invocation was added. **Now reddens.**
 
-Both are worth noting beyond this file: each is the same species of mistake, a
-bound in the *test* that masks the behaviour the test claims to measure, and
-neither was visible from a green run.
+The second pass, on the cases added after the critic review, produced two more
+of the same species:
+
+- **S27** (`the trim keeps the tail of the log, not the head`) reddened nothing
+  because the assertion was `tail -n 5 … | grep 'filler line 60' || grep
+  'SUPERVISOR' "$LOG"` — and the right-hand side is true on every run, so the
+  case could not fail. Replaced with exact-line matches (`grep -qxF 'filler line
+  60'` present, `grep -qxF 'filler line 1'` absent; the `-x` matters, since
+  `filler line 1` is a substring of `filler line 10`). **Now reddens.**
+- **S28**, see the measured-zero table below for the part that stayed zero.
+
+All four are worth noting beyond this file: each is the same species of mistake,
+a bound or a disjunction in the *test* that masks the behaviour the test claims
+to measure, and none was visible from a green run. Three of the four were found
+only by sabotage, which is the argument for the practice in one line.
 
 ### Measured zero
 
 | # | Claim | Status |
 |---|---|---|
 | S23 | `--check does not modify the crontab` | **Measured zero — no mutation reddens it.** |
+| S28a | the `/usr/sbin` component specifically of the runner's pinned `PATH` | **Measured zero on THIS host.** |
+
+**S28a.** Dropping `/usr/sbin` (and even `/usr/bin`) from the pin reddens
+nothing here, because Gentoo's usrmerge makes `/usr/sbin` a symlink to `bin` —
+`flock(1)` exists at both `/usr/sbin/flock` and `/usr/bin/flock` and resolves
+through `/bin` as well. Only gutting the pin entirely (S28) reddens the case.
+
+So the *mechanism* is protected and the *specific component* is not, on this
+machine. The component stays in the pin because it is correct on a host where
+the two directories genuinely differ, and the runner's comment was corrected to
+say so — it previously claimed `/usr/sbin` was "where THIS box's flock lives",
+which is true but reads as load-bearing when it is not. Recorded here so nobody
+later treats the green as proof that dropping it is safe everywhere.
 
 `--check` reaches no write path at all: it calls `read_crontab` and returns, so
 there is nothing to delete that would make it start writing. Every mutation
@@ -102,12 +133,34 @@ read-only and safe for an agent or CI to run unattended, and the whole point of
 writing that down is that a future edit must not quietly make it false. Recorded
 here as a zero so nobody later reads its green as evidence of anything.
 
-### Defect this pass found in the code under test
+### Defects this pass found in the code under test
 
-S7's mutation is not hypothetical — it is the **original** salvaged code. The
+Three rows are not hypothetical mutations — they are the code as it stood.
+
+**S7 — SIGTERM restarted what it was meant to stop.** The
 supervisor shipped with a single `trap … EXIT INT TERM` that killed the child
 and returned, leaving `wait` interrupted with status 143, which the loop read as
 "the client crashed" and relaunched. The documented recovery ("kill the pid in
 the pidfile") would therefore have restarted the very client the operator had
 just stopped, with the pidfile still looking correct. Fixed by splitting the
-handlers so INT/TERM reap **and exit**; case 29 and row S7 hold it.
+handlers so INT/TERM reap **and exit**; the SIGTERM case and row S7 hold it.
+
+**S25 — SIGTERM was then swallowed for up to five minutes anyway.** The backoff
+was a foreground `sleep "$backoff"`, and bash defers a trapped signal until the
+current foreground command completes. With the production `MAX_BACKOFF=300` the
+documented recovery appeared to do nothing for five minutes — which reads as a
+wedged supervisor and invites a `kill -9` that skips the reaper and orphans the
+client. The sleep is now backgrounded with its pid parked in `child`, so the
+trap fires at once and the existing reaper cleans it up.
+
+**S24 — the crontab entry pointed into a worktree.** `RUNNER` was derived from
+`$0`'s directory. Captains run this installer from
+`~/.local/worktrees/custom/<branch>`, which `wt` deletes on cleanup; cron would
+then go on firing a job pointing at a file that no longer exists — silently,
+forever, with nothing supervising the client, and with `--check` run from that
+same worktree reporting `OK` on the doomed entries. It resolves through the
+main checkout now, the same way `scripts/setup-hooks` does after the
+2026-09-17 outage.
+
+S24 and S25 were found by the standing `athena-diff-critic` judge rather than
+by this suite; the cases and rows exist because of those findings.

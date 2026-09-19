@@ -61,7 +61,7 @@ UNRELATED='0 * * * * /home/cjpoll/dev/custom/scripts/athena-shipwright-run.sh'
 
 CASE_N=0
 CASE_DIR=""; FAKE_CRONTAB=""; STATE_DIR=""; STUB=""; CALLS=""; LOG=""
-STOPFILE=""; SHIMBIN=""; STUB_PID=""
+STOPFILE=""; SHIMBIN=""; STUB_PID=""; EXP_RUNNER_DIR=""; EXP_RUNNER=""
 
 # setup_case <name> — a fresh tmpdir, a fresh fake crontab, a fresh PATH shim.
 setup_case() {
@@ -76,7 +76,15 @@ setup_case() {
   LOG="${STATE_DIR}/athena-inbox-client.log"
   STOPFILE="${STATE_DIR}/athena-inbox-client.stopped"
   SHIMBIN="${CASE_DIR}/shimbin"
-  mkdir -p "${STATE_DIR}" "${SHIMBIN}"
+  # The installer schedules the MAIN CHECKOUT's runner (see the worktree case),
+  # which in a pre-merge tree does not exist yet — so the installer would
+  # rightly refuse. Point it at a case-local copy instead, and assert the
+  # crontab against THAT. The worktree case deliberately does not use this
+  # override: it is the one case that must exercise the real resolver.
+  EXP_RUNNER_DIR="${CASE_DIR}/bin"
+  EXP_RUNNER="${EXP_RUNNER_DIR}/athena-inbox-client-run.sh"
+  mkdir -p "${STATE_DIR}" "${SHIMBIN}" "${EXP_RUNNER_DIR}"
+  cp "${RUNNER}" "${EXP_RUNNER}"
   : > "${CALLS}"
 
   cat > "${SHIMBIN}/crontab" <<SHIM
@@ -116,6 +124,7 @@ calls() { wc -l < "${CALLS}" 2>/dev/null | tr -d ' '; }
 run_installer() {
   PATH="${SHIMBIN}:${PATH}" \
   ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+  ATHENA_INBOX_CLIENT_RUNNER_DIR="${EXP_RUNNER_DIR}" \
     bash "${INSTALLER}" "$@"
 }
 
@@ -161,8 +170,8 @@ rc=$?
 after="$(cat "${FAKE_CRONTAB}" 2>/dev/null)"
 if [ "$rc" -eq 0 ] \
    && printf '%s\n' "$after" | grep -qxF -- "$UNRELATED" \
-   && printf '%s\n' "$after" | grep -qxF -- "@reboot ${RUNNER}" \
-   && printf '%s\n' "$after" | grep -qxF -- "*/5 * * * * ${RUNNER}"; then
+   && printf '%s\n' "$after" | grep -qxF -- "@reboot ${EXP_RUNNER}" \
+   && printf '%s\n' "$after" | grep -qxF -- "*/5 * * * * ${EXP_RUNNER}"; then
   ok "install adds @reboot and */5 and preserves the unrelated entry"
 else
   bad "install adds @reboot and */5 and preserves the unrelated entry" \
@@ -183,8 +192,8 @@ else
 fi
 
 # 3. Exactly one of each line, not merely "at least one".
-n_reboot="$(grep -cxF -- "@reboot ${RUNNER}" "${FAKE_CRONTAB}")"
-n_relaunch="$(grep -cxF -- "*/5 * * * * ${RUNNER}" "${FAKE_CRONTAB}")"
+n_reboot="$(grep -cxF -- "@reboot ${EXP_RUNNER}" "${FAKE_CRONTAB}")"
+n_relaunch="$(grep -cxF -- "*/5 * * * * ${EXP_RUNNER}" "${FAKE_CRONTAB}")"
 if [ "$n_reboot" = "1" ] && [ "$n_relaunch" = "1" ]; then
   ok "each entry appears exactly once after two installs"
 else
@@ -245,7 +254,7 @@ rc=$?
 after="$(cat "${FAKE_CRONTAB}" 2>/dev/null)"
 if [ "$rc" -eq 0 ] \
    && printf '%s\n' "$after" | grep -qxF -- "$UNRELATED" \
-   && ! printf '%s\n' "$after" | grep -qF -- "${RUNNER}"; then
+   && ! printf '%s\n' "$after" | grep -qF -- "${EXP_RUNNER}"; then
   ok "--remove deletes both of our entries and keeps the unrelated one"
 else
   bad "--remove deletes both of our entries and keeps the unrelated one" \
@@ -313,12 +322,55 @@ fi
 setup_case nolauncher
 printf '%s\n' "$UNRELATED" > "${FAKE_CRONTAB}"
 err="$(PATH="${SHIMBIN}:${PATH}" ATHENA_INBOX_CLIENT_LAUNCHER="${CASE_DIR}/absent" \
+        ATHENA_INBOX_CLIENT_RUNNER_DIR="${EXP_RUNNER_DIR}" \
         bash "${INSTALLER}" --install 2>&1 >/dev/null)"; rc=$?
-if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q 'Fix:'; then
+# ...and the message must name the LAUNCHER, so this cannot pass by exiting 2
+# for some other missing prerequisite.
+if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q 'Fix:' \
+   && printf '%s' "$err" | grep -q 'launcher'; then
   ok "install refuses a missing client launcher with exit 2 and a Fix: line"
 else
   bad "install refuses a missing client launcher with exit 2 and a Fix: line" \
       "rc=$rc stderr=${err}"
+fi
+
+# 14. The scheduled command must name the MAIN CHECKOUT's runner, never the
+#     worktree the installer happened to be run from. Captains run from
+#     ~/.local/worktrees/custom/<branch>, and `wt` deletes that path on cleanup
+#     — cron would then fire a job pointing at a file that no longer exists,
+#     silently, with nothing supervising the client. This is the 2026-09-17
+#     outage class that `scripts/setup-hooks` already fixed for hook wiring.
+#     Exercised against a REAL git repo with a REAL `git worktree`, built in the
+#     tmpdir, so the assertion is about the resolver and not about wherever this
+#     suite happens to be checked out.
+setup_case worktree_path
+make_stub 0 0
+printf '%s\n' "$UNRELATED" > "${FAKE_CRONTAB}"
+MAIN="${CASE_DIR}/main"
+mkdir -p "${MAIN}/scripts"
+cp "${RUNNER}" "${INSTALLER}" "${MAIN}/scripts/"
+git -C "${MAIN}" init -q 2>/dev/null
+git -C "${MAIN}" -c user.email=t@t -c user.name=t add -A >/dev/null 2>&1
+git -C "${MAIN}" -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+git -C "${MAIN}" worktree add -q -b wt-branch "${CASE_DIR}/wt" >/dev/null 2>&1
+WT_INSTALLER="${CASE_DIR}/wt/scripts/setup-athena-inbox-client"
+MAIN_REAL="$(cd -- "${MAIN}" && pwd -P)"
+WT_REAL="$(cd -- "${CASE_DIR}/wt" && pwd -P)"
+
+if [ -x "${WT_INSTALLER}" ]; then
+  PATH="${SHIMBIN}:${PATH}" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+    bash "${WT_INSTALLER}" --install >/dev/null 2>&1
+  after="$(cat "${FAKE_CRONTAB}" 2>/dev/null)"
+  if printf '%s\n' "$after" | grep -qF -- "${MAIN_REAL}/scripts/athena-inbox-client-run.sh" \
+     && ! printf '%s\n' "$after" | grep -qF -- "${WT_REAL}/scripts/"; then
+    ok "installing from a worktree schedules the MAIN checkout's runner path"
+  else
+    bad "installing from a worktree schedules the MAIN checkout's runner path" \
+        "crontab now: ${after}"
+  fi
+else
+  bad "installing from a worktree schedules the MAIN checkout's runner path" \
+      "could not create a git worktree fixture at ${CASE_DIR}/wt"
 fi
 
 # ---------------------------------------------------------------------------
@@ -393,7 +445,10 @@ if grep -q 'Fix:' "${LOG}" 2>/dev/null; then
 else
   bad "the refusal is logged with a Fix: line" "log: $(cat "${LOG}" 2>/dev/null)"
 fi
-n_refusals="$(grep -c 'refusing to start' "${LOG}" 2>/dev/null || echo 0)"
+# NOT `$(grep -c … || echo 0)`: with no matches grep -c prints 0 AND exits 1, so
+# the fallback appends a second 0 and the diagnostic reads "0\n0 time(s)" — a
+# broken-looking test instead of a legible failure.
+n_refusals="$(grep -c 'refusing to start' "${LOG}" 2>/dev/null)" || n_refusals=0
 if [ "$n_refusals" = "1" ]; then
   ok "the refusal notice is rate-limited to once per marker, not once per tick"
 else
@@ -498,6 +553,63 @@ else
       "rc=$rc stderr=${err}"
 fi
 
+# 26. The log must stay bounded. This is a @reboot-forever process writing to
+#     one file; an unbounded log is a slow disk-filling bug that surfaces months
+#     later as something else entirely. The trim replaces the inode, so it is
+#     only ever safe BETWEEN client runs — a trim racing a live client's held fd
+#     would send the client's output into an unlinked file, which looks exactly
+#     like a client that has gone quiet.
+setup_case trim_log
+make_stub 1 0
+for i in $(seq 1 60); do
+  printf 'filler line %s\n' "$i" >> "${LOG}"
+done
+env ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+    ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
+    ATHENA_INBOX_CLIENT_MAX_LOG_LINES=20 \
+    ATHENA_INBOX_CLIENT_MIN_BACKOFF=1 \
+    ATHENA_INBOX_CLIENT_MAX_BACKOFF=1 \
+    ATHENA_INBOX_CLIENT_MAX_RESTARTS=2 \
+    bash "${RUNNER}" >/dev/null 2>&1
+n_lines="$(wc -l < "${LOG}" | tr -d ' ')"
+if [ "$n_lines" -lt 60 ]; then
+  ok "the log is trimmed to its bound between client runs"
+else
+  bad "the log is trimmed to its bound between client runs" \
+      "log still has ${n_lines} lines with MAX_LOG_LINES=20"
+fi
+
+# 27. The trim must not lose the NEWEST lines — a bound that kept the oldest
+#     would discard exactly the diagnostics an operator came for.
+# Exact-line matches: 'filler line 1' is a substring of 'filler line 10', and a
+# substring match here would pass whichever end the trim kept.
+if grep -qxF 'filler line 60' "${LOG}" && ! grep -qxF 'filler line 1' "${LOG}"; then
+  ok "the trim keeps the tail of the log, not the head"
+else
+  bad "the trim keeps the tail of the log, not the head" \
+      "first log line: $(head -n 1 "${LOG}")"
+fi
+
+# 28. cron's PATH is minimal and on this box flock(1) lives in /usr/sbin, which
+#     a login PATH has and cron's does not. The runner pins its own PATH for
+#     exactly that reason; if the pin regressed, the single-instance guarantee
+#     would fail open under cron while every interactive test still passed —
+#     invisible in development, load-bearing in production.
+setup_case minimal_path
+make_stub 0 0
+out="$(env -i HOME="${HOME}" PATH=/bin:/usr/bin \
+        ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+        ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
+        ATHENA_INBOX_CLIENT_MAX_RESTARTS=1 \
+        bash "${RUNNER}" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(calls)" = "1" ] \
+   && ! printf '%s' "$out" | grep -q 'flock'; then
+  ok "the runner finds flock under a cron-like minimal PATH"
+else
+  bad "the runner finds flock under a cron-like minimal PATH" \
+      "rc=$rc ran $(calls) time(s) out=${out}"
+fi
+
 # ---------------------------------------------------------------------------
 # I-11 — the flock is what keeps ONE writer on the inbox
 # ---------------------------------------------------------------------------
@@ -593,6 +705,49 @@ if wait_for_nonempty "${CALLS}" 100; then
 else
   bad "a second invocation exits 0 without starting a duplicate client" \
       "the backgrounded supervisor never started the stub client"
+  kill "$SUPERVISOR_PID" 2>/dev/null; wait "$SUPERVISOR_PID" 2>/dev/null
+  SUPERVISOR_PID=""
+fi
+
+# 34. SIGTERM must be honoured DURING the backoff sleep, not just while the
+#     client is running. Bash defers a trapped signal until the current
+#     FOREGROUND command completes, so a plain `sleep "$backoff"` swallows TERM
+#     for up to MAX_BACKOFF — 300s in production. The operator's documented
+#     recovery would appear to do nothing for five minutes, which reads as a
+#     wedged supervisor and invites a kill -9 that skips the reaper entirely.
+setup_case term_during_backoff
+make_stub 1 0
+env ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+    ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
+    ATHENA_INBOX_CLIENT_MIN_BACKOFF=30 \
+    ATHENA_INBOX_CLIENT_MAX_BACKOFF=30 \
+    ATHENA_INBOX_CLIENT_BACKOFF_RESET=120 \
+    ATHENA_INBOX_CLIENT_MAX_RESTARTS=9 \
+    bash "${RUNNER}" >/dev/null 2>&1 &
+SUPERVISOR_PID=$!
+
+# The stub exits 1 immediately, so once it has run once the supervisor is in
+# its 30s backoff — the window under test.
+if wait_for_nonempty "${CALLS}" 100; then
+  sleep 1
+  started="$(date +%s)"
+  kill "$SUPERVISOR_PID" 2>/dev/null
+  # Bounded: if TERM is being swallowed this returns when the timeout lapses
+  # rather than hanging the suite.
+  timeout 10 tail --pid="$SUPERVISOR_PID" -f /dev/null >/dev/null 2>&1
+  elapsed=$(( $(date +%s) - started ))
+  if kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
+    bad "SIGTERM is honoured during the backoff sleep, not deferred until it ends" \
+        "still alive ${elapsed}s after TERM (MIN_BACKOFF was 30s)"
+    kill -9 "$SUPERVISOR_PID" 2>/dev/null
+  else
+    ok "SIGTERM is honoured during the backoff sleep, not deferred until it ends"
+  fi
+  wait "$SUPERVISOR_PID" 2>/dev/null
+  SUPERVISOR_PID=""
+else
+  bad "SIGTERM is honoured during the backoff sleep, not deferred until it ends" \
+      "the backgrounded supervisor never ran the stub client"
   kill "$SUPERVISOR_PID" 2>/dev/null; wait "$SUPERVISOR_PID" 2>/dev/null
   SUPERVISOR_PID=""
 fi

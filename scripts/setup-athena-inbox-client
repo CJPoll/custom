@@ -9,7 +9,17 @@
 # scripts/athena-shipwright-run.sh is kept alive — this script mirrors
 # scripts/setup-shipwright-cron deliberately.
 #
-# Two entries are installed, both pointing at scripts/athena-inbox-client-run.sh:
+# Two entries are installed, both pointing at the MAIN CHECKOUT's
+# scripts/athena-inbox-client-run.sh — never at a worktree's copy, even when
+# this installer is run from one. A worktree path vanishes when `wt` cleans the
+# branch up, and cron would go on firing a job pointing at a file that no longer
+# exists: silently, forever, with nothing supervising the client. Same failure
+# class, same resolver, as scripts/setup-hooks.
+#
+# Consequence worth knowing before you run it: on a branch whose runner has not
+# merged yet, install correctly REFUSES (exit 2) because the main checkout has
+# no runner to schedule. Install after the merge, from anywhere.
+#
 #
 #   @reboot          <runner>   start the supervisor when the box comes up
 #   */5 * * * *      <runner>   relaunch it if it ever died
@@ -44,13 +54,51 @@
 #
 # Options are order-independent.
 #
+# Environment (both optional; the defaults are the production values):
+#   ATHENA_INBOX_CLIENT_LAUNCHER    the client launcher to require and schedule
+#                                   around (~/.local/bin/athena-inbox-client)
+#   ATHENA_INBOX_CLIENT_RUNNER_DIR  the directory holding the runner to
+#                                   schedule. Defaults to the MAIN CHECKOUT's
+#                                   scripts/ (see above); exists so the
+#                                   self-test can install against a fixture,
+#                                   and is not something an operator should
+#                                   need — pointing it at a worktree
+#                                   reintroduces the vanishing-path bug.
+#
 # Exit codes: 0 ok · 1 usage/arg error, or --check found the entries missing
 #             · 2 missing prerequisite
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
-RUNNER="${SCRIPT_DIR}/athena-inbox-client-run.sh"
+
+# The crontab entry must name the MAIN checkout's runner, never a worktree's.
+# Captains run this from `~/.local/worktrees/custom/<branch>`; `wt` deletes that
+# path on cleanup, and cron would then fire a job pointing at a file that no
+# longer exists — silently, forever, with nothing supervising the inbox client
+# and no artifact anywhere. That is the 2026-09-17 outage class, which
+# `scripts/setup-hooks` already fixed for hook wiring; the resolver below is
+# deliberately the same one (a worktree's --git-common-dir IS the main
+# checkout's .git). Falls back to SCRIPT_DIR outside git.
+#
+# `--check` inherits this, which is the point: run from a worktree it reports
+# on the entries that are actually installed, rather than reporting OK on
+# doomed ones.
+main_checkout_dir() {
+  local common parent
+  common="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)" \
+    || { printf '%s\n' "$SCRIPT_DIR"; return 0; }
+  [ -n "$common" ] || { printf '%s\n' "$SCRIPT_DIR"; return 0; }
+  case "$common" in /*) ;; *) common="${SCRIPT_DIR}/${common}" ;; esac
+  parent="$(dirname -- "$common")"
+  if [ -d "${parent}/scripts" ]; then
+    (cd -- "${parent}/scripts" && pwd -P)
+  else
+    printf '%s\n' "$SCRIPT_DIR"
+  fi
+}
+RUNNER_DIR="${ATHENA_INBOX_CLIENT_RUNNER_DIR:-$(main_checkout_dir)}"
+RUNNER="${RUNNER_DIR}/athena-inbox-client-run.sh"
 SELF_TEST="${SCRIPT_DIR}/test/athena-inbox-client/self-test.sh"
 LAUNCHER="${ATHENA_INBOX_CLIENT_LAUNCHER:-${HOME}/.local/bin/athena-inbox-client}"
 
