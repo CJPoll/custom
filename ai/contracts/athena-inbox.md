@@ -395,6 +395,15 @@ normal.
   reader enumerates `$ATHENA_INBOX_ROOT/projects/*.json` and selects the single
   entry whose `repo`, after realpath, equals the session's repo identity.
 - **Exactly one match is required.** Zero matches is zero channels and exit 0.
+
+  **Later (2026-09-19):** this "exit 0" was written as unconditional and is now
+  **scoped to counting and enumeration**. A *waiter* with nothing to watch
+  refuses instead — see *Waiter rules*, which states the rule and why, and is
+  the only place this is qualified. Raised by DND-185, which could not
+  implement `inbox-wait` conformantly otherwise: a waiter that exits 0 on "no
+  entry" is indistinguishable from one that exits 0 on "nothing arrived", which
+  is the silent loss this document exists to prevent.
+
   **Two or more entries claiming one repo identity is a hard error** naming the
   duplicate: silently picking one is how a session ends up consuming a surface
   its own entry never declared. Naming it is consistent with the disclosure
@@ -661,6 +670,7 @@ maildir  read dir     R/<namespace>/<read>/
                       R/<namespace>/<write>/.event  (my deliveries, and the
                                                      peer's acks of them)
          lock         R/<namespace>/<read>/.consumer.lock
+         sender lock  R/<namespace>/<write>/.sender.lock
 ```
 
 **A directory's `.event` means "this directory changed" — nothing narrower.**
@@ -1000,6 +1010,24 @@ lenient about what I receive.
 - **Exactly one writer per `write` directory per identity**, mirroring the
   `log` kind's one-writer rule. Two concurrent senders sharing an identity race
   on `<seq>` allocation, which is a read-then-create with no interlock.
+- **The write lock is `<write>/.sender.lock`, and it is NOT a consumer lock.**
+  *Message filename* requires a sender to hold "its `write` directory's lock"
+  across *scan, build name, deliver*, and left the file unnamed; this names it,
+  because an interop surface a peer cannot read about is one the peer will
+  implement differently. Two independent reasons fix the name:
+  - a writer MUST NOT create a `*.consumer.lock` anywhere under the root
+    (*Derived paths*, and the *Conformance checklist*) — those are the
+    reader's and the owner's;
+  - under the mirrored-declaration model **my `write` directory is the peer's
+    `read` directory**, so `<write>/.consumer.lock` is the lock the *peer*
+    takes to read and ack. A sender taking it would deny an ordinary peer read
+    and be denied by one — two correct operations blocking each other over a
+    lock neither is contending for.
+
+  It is held with `flock -n`, released by the kernel on close like every other
+  lock here, and its content is diagnostics that MUST NEVER be read to decide
+  availability (*The designated consumer*). Being a dotfile, it is excluded
+  from a reader's unread enumeration by the same rule that excludes `.event`.
 - Write into **`tmp/` inside the same directory you are delivering to**, then
   move it into place. A rename within one filesystem is atomic, so a reader
   never sees a partial file and never needs a lock or a size heuristic.
@@ -1141,6 +1169,17 @@ timeout "$BUDGET" inotifywait -qq -e attrib,modify,close_write,move_self,delete_
   bare override. An unbounded override reintroduces the
   killed-subagent bug in a form that looks like configuration. A session that
   has raised `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` may raise this to match.
+- **A waiter with nothing to watch REFUSES; it does not arm and does not exit
+  0.** A session whose repo identity matches no entry, or whose entry declares
+  no channels, gets a non-zero exit and a `Fix:` clause. This is the one place
+  the "zero channels, exit 0" rule of *Finding the entry* does not carry over:
+  that rule is about **counting**, where having nothing to report is a complete
+  and correct answer. A waiter has no such answer available. Its only two
+  alternatives are to exit 0, which the caller reads as "I checked", or to
+  block on nothing for the whole budget, which is indistinguishable from
+  waiting quietly for mail — and both report "no mail arrived" for a session
+  that was never going to hear about mail at all. Refusing is what makes an
+  unknown distinguishable from a negative.
 - **A timeout means re-arm, not all-clear.** Treating a timeout as "nothing to
   do" turns a quiet hour into a lost message.
 
@@ -1581,7 +1620,10 @@ could.
 ## Conformance checklist
 
 **A writer is conformant when it:** writes only inside the root, at `0600` under
-`0700` directories, through `O_NOFOLLOW`; is the only writer of its path;
+`0700` directories — **every** directory it creates, not only the last
+component of a path it creates in one step — through `O_NOFOLLOW`; is the only
+writer of its path; holds `<write>/.sender.lock` (never a `*.consumer.lock`)
+across scan, build and deliver on a `maildir` channel;
 appends complete newline-terminated lines with `O_APPEND` (`log`) or renames out
 of `tmp/` in the same directory (`maildir`); bumps the doorbell **after** the
 data lands; never rewrites, truncates, rotates, or deletes; never creates a

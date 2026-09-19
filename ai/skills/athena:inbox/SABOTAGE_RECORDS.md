@@ -543,13 +543,14 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
 
 # DND-187 — `bin/send-mail`, the writer's half
 
-**30 mutations, 25 red, 5 measured green** — in the FINAL state of the branch.
+**35 mutations, 30 red, 5 measured green** — in the FINAL state of the branch.
 The numbers moved twice and both movements are recorded rather than smoothed
 over, because a sabotage record whose header disagrees with its own table is a
 record a reader cannot use: the first pass was **18 red / 6 green** over 24
 mutations; closing the two real gaps it found (S10, S13) made it 20/4; the
 review round added six more mutations (S25 … S30) over the checks written to
-answer it, of which five reddened.
+answer it, of which five reddened; a second review round added five more
+(S31 … S35), all of which reddened.
 
 Each mutation was an
 exact-substring replace whose anchor was asserted present before writing, run
@@ -613,6 +614,30 @@ round trip pipes through `sed '/^$/d'` — which deletes precisely the line in
 question. Found by the review round, not by a mutation: no mutation of the
 existing code could have found it, because the code and every assertion over it
 agreed with each other and disagreed only with the document.
+
+### Added in the second review round
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S31 | the NUL check on a captured body removed | **RED** (5) | *M-10 a `--body-file` containing a NUL is refused* — and the stdin twin |
+| S32 | `$EDITOR` invoked as a single word | **RED** (2) | *M-10 `$EDITOR`'s own arguments are passed through* |
+| S33 | an `$EDITOR` that exited non-zero is delivered anyway | **RED** (2) | *M-10 the half-written draft is not delivered* |
+| S34 | `--body-file` accepts a symlink | **RED** (1) | *M-10 a symlinked `--body-file` is refused* |
+| S35 | the unset-`$EDITOR` refusal removed | **RED** (1) | *M-10 `--edit` with `$EDITOR` unset is refused* |
+
+**S31 is the one that was shipped.** A body containing a NUL was delivered
+**silently altered**, with `delivered <name>` printed and exit 0: shell drops a
+NUL on assignment, so the bytes that arrived were not the bytes that were
+passed — immutably, in the peer's transcript, with nothing recording the edit.
+It is the same class the frontmatter round trip was added to close, and the
+round trip could not see it, because it compares the header and never the body.
+The capture now lands every body on disk before it reaches a variable, which is
+what makes the check possible at all.
+
+**The `$EDITOR` rows exist because the branch was unreachable.** It was selected
+only by "stdin is a terminal", so no test could enter it and no mutation over it
+could redden anything — four checks that would have broken silently. `--edit`
+makes it selectable, which is the whole reason that flag exists.
 
 **S27 — the ack's `mkdir` is unreachable in its differing form.** The two
 `mkdir` forms differ only when an INTERMEDIATE directory has to be created, and
@@ -679,3 +704,158 @@ collision a cheap `return 2` on the retry path rather than an error branch.
 - **S27 — the ack's `fs_mkdir_0700`.** Written up with its row above: the form
   difference is unobservable because the consumer lock has already created the
   parent by the time an ack runs.
+# DND-185 — `bin/inbox-wait`, the `.event` waiter
+
+Every mutation below was applied to a clean tree, measured, and reverted. A
+mutation that leaves the suite GREEN is recorded as green — that is the whole
+point of running them.
+
+**The counts in the table are from the 511-case tree** (455 → 511), which is
+what S1…S11 were measured against. The review round then added cases and the
+suite is now larger; S1, S7 and S8 were re-measured against the current tree
+and hold. The older counts are left as they were rather than restated, because
+a number carried forward without being re-run is a claim nobody made.
+
+| # | Mutation | Result |
+|---|---|---|
+| S1 | drop `attrib` from the watch set | **RED** — one case |
+| S1b | watch `modify` only (the contract's named failure) | **RED** — 11 cases |
+| S2 | map the elapsed-budget status to `0` | **RED** |
+| S3 | clamp an over-ceiling budget instead of refusing | **RED** |
+| S4 | do not pre-create missing doorbells before arming | **RED** — 5 cases |
+| S5 | zero channels → exit 0 with no doorbells instead of refusing | **RED** |
+| S6 | drop the not-a-subagent check | **RED** |
+| S7 | drop the maildir **write** doorbell | **RED** — 13 cases |
+| S8 | drop `delete_self` from the watch set | **GREEN — a measured zero** |
+| S9 | silence the never-delivered notice | **RED** |
+| S11 | the three-cause no-entry refusal collapses to exit 0 | **RED** |
+| S12 | `fs_ensure_doorbell` chmods an existing doorbell unconditionally | **RED** (the review round's defect, W-11) |
+| S13 | unknown arguments silently ignored (`*) : ;;`) | **GREEN at first — the second measured zero** |
+
+## The second measured zero, also fixed: W-9 proved nothing
+
+A reviewer mutated the argument parser's `*)` arm to ignore unknown arguments —
+the exact regression W-9 is named after — and the suite stayed green.
+
+`assert_refused` asks for two things: a non-zero status, and a literal `Fix:`
+on stderr. Under the mutation `inbox-wait` armed a real waiter, `timeout 10`
+killed it (non-zero ✓), and the fixture's never-delivered `log` channel had
+already printed its notice, which contains `Fix:` (✓). Both conditions met, for
+reasons having nothing to do with argument parsing.
+
+Worse, the hardening applied earlier in this same round *moved the case into*
+the fixture that guarantees the stray `Fix:`. It now asserts the refusal's own
+exit code and its own words. **A refusal's evidence is what it SAID and the
+status IT chose** — never "something failed and something mentioned `Fix:`.
+
+## The review round's defect: provisioning rang every bell it listened to
+
+Both reviewers found it independently, and one measured it. `fs_ensure_doorbell`
+re-asserted `chmod 0600` on an **existing** doorbell, on the reasoning that
+setting a mode a file already has is a no-op. `chmod(2)` emits `IN_ATTRIB`
+regardless — verified here by watching all three of a fixture channel's
+doorbells while a second `inbox-wait --dry-run` ran, and getting `ATTRIB` on
+every one.
+
+Within one process it was invisible, because provisioning precedes the arm.
+Across processes it was a **mutual wake loop**: a maildir `.event` is shared
+with the peer, and a repo's main checkout and all its worktrees resolve to one
+repo identity and therefore one set of doorbells. A re-arm wakes the other
+session, which finds nothing, re-arms, and wakes the first. Every cycle costs
+both a full read-and-report turn — and every one reports zero new, which the
+contract calls a *normal* wake, so nothing would ever have named it a fault.
+Not one of the eleven mutations could have found it: every waiter case arms
+exactly one waiter.
+
+**And a third defect in the sabotage harness, found while confirming the fix.**
+S12 reverted with `git checkout -- lib/fs.sh`, which discarded the *uncommitted
+review fix* along with the mutation. The next run then measured the unfixed
+code and W-11 failed for real — a red that looked exactly like the fix not
+working. **Commit before sabotaging**: a mutation harness that reverts through
+git cannot tell your work from its own.
+
+**S10 is deliberately absent from this series.** It was "maildir `tmp/`
+provisioning skipped", dropped before the batch ran to keep the wall clock down
+while a sibling captain's suite shared the box. The gap is recorded rather than
+renumbered, because a missing number in a mutation series is exactly what a
+later reader cannot distinguish from an omitted red result.
+
+## The measured zero that was FIXED: `attrib` (S1, first pass)
+
+The first version of I-1 bumped the doorbell with `touch(1)` and asserted the
+wake — the case the ticket calls "the single most important". **Deleting
+`attrib` from the watch set left it green.**
+
+`touch(1)` emits `ATTRIB` **and `CLOSE_WRITE`**, so `modify,close_write` alone
+still wakes for it. The contract's table says exactly this and the test was
+written as though `touch` were ATTRIB-only. The case proved the union worked;
+it proved nothing about `attrib`.
+
+The fix is a `chmod`-only bump — the one mechanism that emits `ATTRIB` and
+nothing else. With it, S1 reddens. **A test that passes is not a test that
+discriminates**, and nothing but the mutation would have told the difference:
+the original case was correct, meaningful, and load-bearing for the union,
+while being worthless for the claim it was named after.
+
+## The measured zero that STANDS: `delete_self` (S8)
+
+Removing `delete_self` does not redden the delete-mid-wait case, because on
+this kernel an `unlink(2)` also changes the link count and therefore emits
+`ATTRIB`, which is already watched. It is kept for two reasons and neither is a
+passing test: the contract requires it, and the `ATTRIB`-on-unlink overlap is a
+kernel implementation detail this facility must not depend on — the same
+argument that puts the whole union in the watch set. **Recorded as defence in
+depth, not as a tested check.**
+
+## A fixture that tried to overwrite a system binary
+
+Building the W-13 fault-path case, the shim `PATH` directory is filled with
+**symlinks** to the real binaries, and the fake `inotifywait` was then written
+with `> "${SHIM_DIR}/inotifywait"`. A redirect **follows a symlink**: that wrote
+a three-line shell script into `/usr/sbin/inotifywait` — the system binary,
+for every process on this machine.
+
+It was refused, because the target is root-owned and the suite does not run as
+root, and the file was verified byte-identical afterwards. **A test that is
+safe only because of who happens to be running it is not safe.** The fix is an
+`rm -f` before the redirect. It is the same lesson `fs_assert_regular` exists
+for — `realpath` and `>` follow, `lstat` does not — arriving in the fixture
+rather than the code, which is exactly where nobody was looking for it.
+
+The symptom that led here was W-13 returning 75 instead of 1: the failed write
+left the symlink intact, so the REAL `inotifywait` ran and timed out. A
+fixture that silently does not take effect reports the code as broken.
+
+## Three defects in the SABOTAGE/TEST HARNESS itself, all measured
+
+Neither was in the product, and both produced *false verdicts* — which is worse
+than no verdict, because a false one is acted on.
+
+1. **`run() { … | head -10; }` leaked concurrent suites.** When a mutation
+   produced more than ten `FAIL` lines, `head` exited, `grep` took `SIGPIPE`,
+   and the **suite kept running** while the batch moved on and applied the next
+   mutation. Two suites then raced on the same files. Observed directly:
+   two `bash test/self-test.sh` processes alive at once, and a `run.log` `grep`
+   reported as "binary file matches" because two writers were interleaving into
+   it. The run's output now goes to a file and the **file** is filtered; this is
+   `~/dev/custom/CLAUDE.md` → *never read a gate's pass/fail through
+   `tail`/`head`*, arriving through the reader's side effect rather than its
+   exit status.
+2. **Killing the batch left a mutation on disk.** The next "baseline" then
+   measured the leftover mutation and reported five failures with no regression
+   behind them — a red run that reads exactly like a real one. The batch now
+   carries `trap 'git checkout -- bin lib' EXIT INT TERM`, and takes an
+   **`flock`** so a second instance is impossible rather than unlikely.
+
+The general shape is the one this epic keeps finding: **a verification step
+whose own failure is indistinguishable from the thing it verifies.**
+
+## A test that would have hung for ten minutes
+
+The "a budget just under the ceiling is accepted" case originally armed a real
+`ATHENA_INBOX_WAIT_BUDGET=599` waiter and bumped it. Under the S1 mutation the
+bump stopped waking it, and the case sat on a **599-second** budget — observed
+live, with `inotifywait -qq -e modify` blocked on a doorbell nothing would ever
+ring. It is now proven through `--dry-run`, which cannot block. A test whose
+failure mode is a ten-minute hang teaches the next person to shorten the
+timeout instead of reading the failure.

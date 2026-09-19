@@ -442,6 +442,88 @@ fs_sweep_generation() {
 
 # --- the doorbell -----------------------------------------------------------
 
+# fs_ensure_dir <path>
+# 0700, idempotent, never destructive. Provisioning "creates what is missing
+# and adjusts modes on what it created; it never truncates, replaces, or
+# re-creates an existing surface" -- so an existing directory is left exactly
+# as it is, including its mode.
+fs_ensure_dir() {
+  local path="$1"
+  fs_assert_contained "$(fs_inbox_root)" "${path}" || return 1
+  if [ -L "${path}" ]; then
+    inbox_fail "refusing to provision through a symlink at \"${path}\"" \
+      "replace \"${path}\" with a real directory; containment follows symlinks, so a symlinked mail directory inside the root passes every path check and still points somewhere else."
+    return 1
+  fi
+  [ -d "${path}" ] && return 0
+  if [ -e "${path}" ]; then
+    inbox_fail "\"${path}\" exists and is not a directory" \
+      "remove or rename it; this channel's mail directories cannot be provisioned while a file sits at that path."
+    return 1
+  fi
+  mkdir -p -m 0700 "${path}" 2>/dev/null && return 0
+  inbox_fail "cannot create \"${path}\"" \
+    "check that \$ATHENA_INBOX_ROOT exists and is writable (mode 0700), then re-run."
+  return 1
+}
+
+# fs_ensure_doorbell <path>
+# A zero-byte 0600 doorbell, created ONLY when absent.
+#
+# THIS IS A WAITER MUST, NOT THE COUNTER'S MAY. `inotifywait` on a missing
+# path prints `Couldn't watch ...` and exits 1 IMMEDIATELY -- and because one
+# invocation watches every doorbell this session owns, a single missing
+# `.event` takes down the wake for ALL channels at once. A counting tool may
+# shrug at an absent doorbell; a waiter must create it before it arms.
+#
+# IT MUST NOT RING THE BELL IT IS ABOUT TO LISTEN TO, AND `chmod` IS A RING.
+#
+# This branch used to `chmod 0600` an existing doorbell unconditionally, on the
+# reasoning that re-asserting a mode the file already has is a no-op. It is not:
+# `chmod(2)` emits `IN_ATTRIB` **even when the mode does not change** —
+# measured on this machine against the waiter's own watch set, which woke and
+# exited 0 on all three doorbells. The contract says as much from the other
+# direction: the `ATTRIB` that rings the log doorbell comes from the client's
+# `fchmod(0600)` on a file already at 0600, not from the `ftruncate`.
+#
+# Within one process that was harmless, because it precedes the arm. ACROSS
+# processes it was a self-sustaining wake loop with no mail in it: a maildir
+# `.event` is shared with the peer, and a repo's main checkout and all its
+# worktrees resolve to the SAME repo identity and therefore the same doorbells.
+# Session A re-arms, chmods, wakes B; B reads, finds nothing, re-arms, chmods,
+# wakes A. Every cycle costs both sessions a full read-and-report turn, and
+# every one of them reports zero new — which *Reader obligations* calls a
+# normal wake, so nothing anywhere would have called this a fault.
+#
+# So the mode is adjusted only when it is actually WRONG. The contract's
+# *Provisioning* rule is the same rule: provisioning "creates what is missing
+# and adjusts modes on what it created; it never truncates, replaces, or
+# re-creates an existing surface". A one-time correction of a genuinely `0644`
+# doorbell rings it once, which is an explicitly normal wake; re-asserting a
+# correct mode rings it forever.
+fs_ensure_doorbell() {
+  local path="$1" mode
+  fs_assert_contained "$(fs_inbox_root)" "${path}" || return 1
+  fs_assert_regular "${path}" || return 1
+  if [ -e "${path}" ]; then
+    # If the mode cannot be read, do NOTHING. An unreadable mode is not
+    # evidence the mode is wrong, and guessing costs a spurious wake on every
+    # arm for the rest of the session's life.
+    mode="$(stat -c '%a' "${path}" 2>/dev/null)" || return 0
+    [ -n "${mode}" ] || return 0
+    [ "${mode}" = "600" ] || chmod 0600 "${path}" 2>/dev/null || true
+    return 0
+  fi
+  fs_ensure_dir "${path%/*}" || return 1
+  ( umask 077; : > "${path}" ) 2>/dev/null || {
+    inbox_fail "cannot create the doorbell \"${path}\"" \
+      "check that \$ATHENA_INBOX_ROOT exists and is writable (mode 0700), then re-run. Without the doorbell there is nothing to block on, and a waiter armed on a missing path exits at once instead of waiting."
+    return 1
+  }
+  chmod 0600 "${path}" 2>/dev/null || true
+  return 0
+}
+
 # fs_bump_doorbell <path>
 # Zero bytes, 0600, mtime bumped. The contract: it is a bell, not a letter --
 # it MUST stay zero bytes and carry no count, payload or hint.
