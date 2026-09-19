@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# logchan.sh -- the counting rules for a `log` channel. DOMAIN (the one effect
+# available to it is a refusal on stderr via err.sh; it does not use one).
+#
+# It takes a BYTE SLICE on stdin and returns JSON. It never opens the inbox, so
+# every rule below is provable without a fixture on disk -- which matters more
+# here than anywhere else in the skill, because each of these failures looks
+# exactly like the healthy state from the outside:
+#
+#   * a partial final line parsed as a record   -> a truncated event invented
+#   * an offset advanced past that fragment     -> the completion lost forever
+#   * an unknown line `v` failing the run       -> a schema bump takes the
+#                                                  reader down instead of
+#                                                  degrading
+#   * a duplicate counted                       -> at-least-once delivery read
+#                                                  as new mail
+#
+# Source order: err.sh, names.sh, then this file. Requires jq.
+
+LOGCHAN_RING_CAP=500
+
+# logchan_dedupe_key <channel> <ts>
+#
+# `channel + ":" + ts` is the CROSS-SOURCE key, and it has to be: the Slack Web
+# API backstop carries no `event_id`, so `event_id` cannot be the identity that
+# spans sources. `event_id` remains the INTRA-FILE key that absorbs an
+# at-least-once re-append of the same line.
+logchan_dedupe_key() {
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  printf '%s:%s\n' "$1" "$2"
+}
+
+# logchan_split_complete
+# Reads a byte slice on stdin, writes back ONLY the complete (newline-
+# terminated) prefix. The trailing fragment of a writer that died mid-write is
+# dropped whole.
+#
+# The `printf X` dance is not a flourish: `$(...)` strips trailing newlines, and
+# the count of trailing newlines is exactly the fact this function exists to
+# preserve.
+logchan_split_complete() {
+  local data
+  data="$(cat; printf X)"; data="${data%X}"
+  case "${data}" in
+    *$'\n'*) printf '%s\n' "${data%$'\n'*}" ;;
+    *) : ;;
+  esac
+}
+
+# logchan_scan <offset> <schema_v_csv> <seen_event_ids> <seen_keys>
+#
+# Byte slice on stdin (the file from <offset> to EOF). Emits one JSON object:
+#   {"new":N,"unreadable":U,"next_offset":O,
+#    "messages":[{"ts":…,"channel":…,"event_id":…}, …]}
+#
+# `next_offset` advances over COMPLETE LINES ONLY (D-13). That is the whole
+# crash-safety guarantee: the fragment is neither parsed nor counted, and the
+# offset stops in front of it, so when the writer completes that line it is
+# counted exactly once (D-14) rather than zero times or twice.
+#
+# `messages` is ordered by `ts`, NOT by file position (D-19). File order is
+# DELIVERY order and the two disagree: a client draining a backlog after an
+# outage appends older messages after newer ones. `received_at` is monotonic;
+# `ts` is not, and `ts` is what recency means to a human.
+logchan_scan() {
+  local offset="$1" schema_csv="${2:-1}" seen_ev="${3:-}" seen_ky="${4:-}"
+  local complete bytes sv_json ev_json ky_json
+
+  # The offset is validated HERE, not only by the caller. It reaches an
+  # arithmetic context below, and bash EXECUTES a command substitution inside
+  # an array subscript in that context -- `a[$(...)]` runs. The manager does
+  # sanitize it today, but this function is documented as a strings-in domain
+  # primitive with no stated precondition, and its taint source is a state
+  # file that becomes writable the moment the ack ticket lands. A primitive
+  # that is only safe because of its current caller is not safe.
+  case "${offset}" in
+    ''|*[!0-9]*)
+      inbox_fail "refusing a non-numeric byte offset" \
+        "pass logchan_scan a decimal byte offset; a state file whose \"offset\" is not a plain number is corrupt and should be reset to 0."
+      return 1
+      ;;
+  esac
+
+  complete="$(logchan_split_complete; printf X)"; complete="${complete%X}"
+  bytes="$(LC_ALL=C printf '%s' "${complete}" | wc -c | tr -d ' ')"
+
+  sv_json="$(printf '%s' "${schema_csv}" | jq -R 'split(",") | map(select(length>0) | tonumber)')"
+  ev_json="$(printf '%s' "${seen_ev}" | jq -R -s 'split("\n") | map(select(length>0))')"
+  ky_json="$(printf '%s' "${seen_ky}" | jq -R -s 'split("\n") | map(select(length>0))')"
+
+  printf '%s' "${complete}" | jq -R -s \
+    --argjson sv "${sv_json}" \
+    --argjson ev "${ev_json}" \
+    --argjson ky "${ky_json}" \
+    --argjson next "$((offset + bytes))" '
+    def parse: try fromjson catch null;
+
+    reduce (split("\n") | map(select(length > 0)) | .[]) as $line
+      ({new: [], unreadable: 0, ev: ($ev | map({(.): true}) | add // {}),
+        ky: ($ky | map({(.): true}) | add // {})};
+        ($line | parse) as $o
+        | if ($o | type) != "object" then
+            # Not JSON at all, or a bare scalar: unreadable, never fatal.
+            .unreadable += 1
+          elif ($sv | index($o.v) | not) then
+            # D-15: an unknown line `v` DEGRADES. It is counted separately and
+            # never fails the run -- the deliberate opposite of an unknown `v`
+            # on the registry entry, which is a hard error. A schema bump on
+            # the writer must not take the reader down.
+            .unreadable += 1
+          else
+            # Both keys are forced to STRINGS before they are used as object
+            # keys. A line is JSON written by other people: nothing guarantees
+            # `event_id` is a string, and `.ev[7]` is not a lookup that misses,
+            # it is `Cannot index object with number` -- a jq FATAL that aborts
+            # the scan of every remaining line in the slice. A malformed line
+            # must cost one `unreadable`, never the whole channel.
+            (if ($o.channel // "") != "" and ($o.ts // "") != ""
+             then "\($o.channel):\($o.ts)" else null end) as $key
+            | (if ($o.event_id | type) == "null" then null
+               else ($o.event_id | tostring) end) as $eid
+            | if $eid == null and $key == null then
+                # A line carrying NEITHER key cannot be deduped, so counting it
+                # would mean deduping on nothing and re-reporting it forever.
+                .unreadable += 1
+              elif ($eid != null and (.ev[$eid] // false))
+                or ($key != null and (.ky[$key] // false)) then
+                # D-16 / D-17: already seen. At-least-once delivery makes a
+                # re-append NORMAL, not an anomaly.
+                .
+              else
+                .new += [{ts: ($o.ts // ""), channel: ($o.channel // ""), event_id: ($eid // "")}]
+                | (if $eid != null then .ev[$eid] = true else . end)
+                | (if $key != null then .ky[$key] = true else . end)
+              end
+          end
+      )
+    | {new: (.new | length),
+       unreadable: .unreadable,
+       next_offset: $next,
+       messages: (.new | sort_by((.ts | tonumber? // 0), .ts))}
+  '
+}
+
+# logchan_state_merge <existing-state-json> <updates-json>
+#
+# The channel state file, rewritten. PURE: it merges two documents and returns
+# a third; the atomic write is fs.sh's job (and lands with the ack ticket,
+# DND-184 -- nothing in THIS slice writes state).
+#
+# UNRECOGNISED KEYS ARE PRESERVED VERBATIM. This is the deliberate OPPOSITE of
+# the registry parser's rule in descriptor.sh, and both parsers live in this
+# one library, so the asymmetry looks like an inconsistency unless it is
+# written down:
+#
+#   * registry entry (descriptor.sh) -- an unknown key is a HARD ERROR (D-8).
+#     It is MY OWN CONFIGURATION, hand-written, so a typo is a bug I want
+#     reported loudly rather than defaulted silently.
+#   * state file (here) -- an unknown key is PRESERVED. It is MACHINE-WRITTEN
+#     state, and the machine that wrote it may be a NEWER version of this
+#     tooling than the one reading it. Emitting a fixed key set would discard
+#     that writer's data on the very next ack.
+#
+# The concrete failure this exists to prevent: the retention policy (DND-184)
+# adds a `rotated_at` key. An ack that rewrote a fixed key set would drop it,
+# rotation would then never fire again, the log would grow forever -- which is
+# exactly the defect retention exists to fix -- and nothing would report it.
+# A discarded key is invisible in production by construction.
+# The defaults are assigned rather than written as `${1:-\{\}}`: inside double
+# quotes a backslash before `{` is LITERAL, so that spelling defaults to the
+# string `\{}` and jq dies on it. The first-run case -- no state file yet, so
+# an empty or absent existing document -- is precisely the one the ack ticket
+# will hit first, and jq given empty input never reaches the `// {}` guard in
+# the program, so the guard alone is not enough.
+logchan_state_merge() {
+  local existing="${1:-}" updates="${2:-}"
+  [ -n "${existing}" ] || existing='{}'
+  [ -n "${updates}" ] || updates='{}'
+  printf '%s' "${existing}" | jq -c --argjson u "${updates}" '(. // {}) * $u'
+}
+
+# logchan_ring_append <cap> <existing> <additions>
+#
+# Both lists newline-separated, oldest first; prints the capped result. The
+# seen-sets live in a state file rewritten on every ack, so unbounded growth is
+# its own failure mode -- a state file that grows without limit eventually
+# costs more to rewrite than the messages are worth.
+logchan_ring_append() {
+  local cap="${1:-${LOGCHAN_RING_CAP}}" existing="${2:-}" additions="${3:-}"
+  printf '%s\n%s\n' "${existing}" "${additions}" \
+    | grep -v '^$' \
+    | awk '!seen[$0]++' \
+    | tail -n "${cap}"
+}
