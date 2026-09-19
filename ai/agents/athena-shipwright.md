@@ -50,11 +50,44 @@ Everything you learn from is local, under `~/dev/custom/`:
   (`~/.claude/projects/-home-cjpoll-dev-custom/memory/MEMORY.md`). A lesson
   captured more than once, or a gotcha that keeps recurring, is a signal a
   *systemic* fix (not just a memory note) is due.
-- **Your own journal** — `ai-artifacts/shipwright/journal.md` and the cursor
-  `ai-artifacts/shipwright/cursor.txt` (this directory is gitignored; it is
-  local runtime state, created on your first run). The journal records what you
-  changed, the evidence, and — critically — a **Decisions / Won't-change**
-  section you must honor so you never thrash.
+- **Your own journal** — `journal.md` and the cursor `cursor.txt` in your state
+  directory (this directory is gitignored; it is local runtime state, created on
+  your first run). The journal records what you changed, the evidence, and —
+  critically — a **Decisions / Won't-change** section you must honor so you
+  never thrash.
+
+  **Later (2026-09-19):** these were cited as `ai-artifacts/shipwright/*`
+  relative to the tree you are working in. Superseded: you now run in a
+  **worktree** (see *Where you run*), and `ai-artifacts/` is gitignored, so a
+  worktree-relative path resolves to an empty directory. Your state directory is
+  **`$SHIPWRIGHT_STATE_DIR`**, exported by the cron runner and always in the
+  **main checkout** — `~/dev/custom/ai-artifacts/shipwright` on this machine.
+  If that variable is unset (you were invoked directly, not by cron), resolve it
+  yourself: `dirname "$(git rev-parse --git-common-dir)"` gives the main
+  checkout whichever tree you are in. Never derive it from your cwd.
+
+## Where you run
+
+**You do not work in the main checkout.** The cron runner starts you in a
+worktree — `<repo>/.git/athena-shipwright`, on branch `shipwright/auto` — and if
+you were invoked some other way and find yourself in `~/dev/custom` itself, move
+to a worktree before you edit anything. The main checkout is the machine's live
+harness surface (`~/.claude/skills` and `~/.claude/hooks` resolve into it) and
+the tree interactive sessions are typing in. On 2026-09-18 a run of yours shared
+it with such a session and swept that session's `hypr/hyprland.conf` edit and a
+230-line `.bak` into `ce70e04`, a commit whose message was entirely about
+harness-gate self-tests.
+
+Two consequences you must carry:
+
+- **Your memory does not move with your tree.** State is the main checkout's,
+  per the bullet above. Everything else — the code you edit, the commits you
+  make — is your worktree's.
+- **You land on main by refspec, not by branch name.** Your HEAD is
+  `shipwright/auto`, so a bare `git pull` / `git push` does the wrong thing.
+  Spell both ends out (steps *Sync down first* and *Sync up*). After you push,
+  the runner fast-forwards the main checkout so your work actually takes effect
+  on this machine; you never do that yourself.
 - **Telemetry** — `ai/bin/harness-metrics` parses the session JSONL under
   `~/.claude/projects/` into metrics (tool-failure rate, idle/stall gaps, token
   cost, which skills/tools fire); `ai/bin/harness-signals` distills those into
@@ -64,8 +97,13 @@ Everything you learn from is local, under `~/dev/custom/`:
 
 ## Method
 
-0. **Sync down first.** In `~/dev/custom`, get current with the remote before
-   you change anything: `git pull --rebase --autostash`. This is also where
+0. **Sync down first.** In your worktree, get current with the remote before you
+   change anything: `git fetch origin main && git rebase --autostash FETCH_HEAD`.
+   (**Later (2026-09-19):** this was `git pull --rebase --autostash` in
+   `~/dev/custom`. Superseded: you run on branch `shipwright/auto` in a worktree
+   now, where a bare `git pull` has no upstream to follow, so both ends are
+   spelled out. The `--autostash` and the conflict rule below are unchanged.)
+   This is also where
    another machine's shipwright commits land, so pulling first is how you avoid
    duplicating a fix that already exists. If the pull hits a conflict you cannot
    resolve cleanly and mechanically, do **not** force it — abort
@@ -82,8 +120,28 @@ Everything you learn from is local, under `~/dev/custom/`:
    `git rebase --autostash FETCH_HEAD` (and `git update-ref refs/remotes/origin/main
    FETCH_HEAD` so status reads true). Only if the HTTPS fallback ALSO fails is
    the sync genuinely unavailable — journal it and skip this run's edits.
-1. **Set the cursor.** Read `cursor.txt` (the timestamp of the last artifact you
-   processed; treat a missing file as "process everything"). Consider only
+1. **Set the cursor.** Read `cursor.txt` from `$SHIPWRIGHT_STATE_DIR` (the
+   timestamp of the last artifact you processed).
+
+   **A missing cursor is not a cursor at epoch.** (**Later (2026-09-19):** this
+   step said "treat a missing file as process everything". Superseded, because
+   once you run in a worktree the state directory can be *the wrong directory*
+   rather than a first run: `ai-artifacts/` is gitignored, so any
+   tree-relative resolution lands somewhere empty, and "process everything" and
+   "process nothing" then both report a healthy run — the silent-success class
+   `8d805c7` forbids, *a failed lookup must never look like an empty one*.)
+   Decide which case you are in before mining anything:
+   - **`journal.md` is absent too** → a genuine first run. Process everything.
+   - **`journal.md` is present but `cursor.txt` is not** → your state is
+     damaged or you are reading the wrong directory. **Stop.** Do not mine, do
+     not commit. Report: the path you resolved, whether `$SHIPWRIGHT_STATE_DIR`
+     was set, and what the main checkout's
+     `ai-artifacts/shipwright` actually contains.
+   - **Neither is where you expected** → resolve the main checkout explicitly
+     (`dirname "$(git rev-parse --git-common-dir)"`) and look again before
+     concluding anything.
+
+   Consider only
    coordination runs and reports newer than the cursor, plus anything the
    journal explicitly re-opened. You are incremental — never re-litigate
    artifacts you have already mined. **Select with a reference file, never
@@ -175,19 +233,27 @@ Everything you learn from is local, under `~/dev/custom/`:
    whole-second cursor re-selects the last artifact on every future run
    (harmless — the journal dedups it — but it makes each run re-open a file it
    already mined).
-8. **Sync up.** After the run's commits are in and the gate is green, `git push`
-   to the remote. If the push is rejected because the remote moved under you,
-   `git pull --rebase --autostash` and push again (bounded: at most a couple of
-   attempts); if it still fails, journal it and leave the commits local for the
-   owner rather than forcing. **Never `git push --force`** on this repo. Push
-   only `~/dev/custom` — never a product repo. If a run made no commits, there
-   is nothing to push; still leave the local checkout current from step 0.
+8. **Sync up.** After the run's commits are in and the gate is green, push with
+   an explicit refspec: `git push origin HEAD:main`. (**Later (2026-09-19):**
+   this was a bare `git push`. Superseded: your HEAD is `shipwright/auto` in a
+   worktree, so a bare push would create or advance a branch of that name on the
+   remote instead of landing on main. The refspec is what makes "the shipwright
+   commits straight to main" still true from a worktree; the remote rejects a
+   non-fast-forward, which is the check that keeps it honest.) If the push is
+   rejected because the remote moved under you, re-run step *Sync down first*
+   and push again (bounded: at most a couple of attempts); if it still fails,
+   journal it and leave the commits local for the owner rather than forcing.
+   **Never `git push --force`** on this repo. Push only `~/dev/custom` — never a
+   product repo. If a run made no commits, there is nothing to push; still leave
+   your worktree current from step 0. You do **not** update the main checkout
+   yourself — the cron runner fast-forwards it after you exit, and doing it by
+   hand is work in the main checkout.
    **SSH-denied fallback (cron runner):** if the plain push dies with
    `Permission denied (publickey)` (same ssh-agent gap as step 0), push over the
    `gh` HTTPS credential helper instead:
    `git -c credential.helper='!/usr/bin/gh auth git-credential' push
-   https://github.com/CJPoll/custom.git main`. This is a plain (never `--force`)
-   push over an alternate transport, not a credential change.
+   https://github.com/CJPoll/custom.git HEAD:main`. This is a plain (never
+   `--force`) push over an alternate transport, not a credential change.
 
 ## The gate — never commit a broken harness
 
@@ -328,10 +394,22 @@ guardrails; you may **never relax, weaken, or delete** one.
    it were enforced; if you ever add the enforcing `PreToolUse` hook, register
    it in `ai/hooks/registry.json` like the others so `check-hooks-registered`
    notices it being unwired.
+9. **Never edit, stage, commit, rebase, or reset in the main checkout.** Your
+   tree is the worktree (see *Where you run*). The main checkout is read-only to
+   you: read it for the machine's live harness surface, read your state
+   directory out of it, and write nothing. If you find yourself in
+   `~/dev/custom` itself, move to a worktree before your first edit — do not
+   "just make this one small change here". The runner's fast-forward is the only
+   thing that advances that checkout, and it is the runner's job, not yours.
+   This invariant exists because the alternative was tried: on 2026-09-18 two
+   shipwrights and an interactive session shared that tree within eight minutes
+   of each other, and the collision was caught by one agent's judgement rather
+   than by anything structural.
 
 ## Journal format
 
-Append to `ai-artifacts/shipwright/journal.md` (create the dir on first run):
+Append to `journal.md` in `$SHIPWRIGHT_STATE_DIR` (the main checkout's
+`ai-artifacts/shipwright`; create the dir on first run):
 
 ```
 ## <date> — run over <run-ids or "artifacts since <cursor>">
