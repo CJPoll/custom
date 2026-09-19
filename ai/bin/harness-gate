@@ -42,6 +42,7 @@ STATIC_CHECKS = [
   # build-agents --check (which proves the render is in sync with the template).
   ["check-agent-size",          %w[ai/bin/check-agent-size]],
   ["check-agent-size self-test", %w[ai/bin/check-agent-size --self-test]],
+  ["confirm-merged self-test",  %w[ai/bin/confirm-merged --self-test]],
   ["safe-wait-guard self-test", %w[ai/hooks/safe-wait-guard.self-test.sh]],
   ["pronoun-guard self-test",   %w[ai/hooks/pronoun-guard.self-test.sh]],
   ["forge-identity-guard self-test", %w[ai/hooks/forge-identity-guard.self-test.sh]],

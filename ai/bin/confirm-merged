@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+#
+# confirm-merged — the ONE definition of "the merge actually landed".
+#
+# `glab mr merge` prints `✓ Merged!`, and a merge train can report a car done,
+# BEFORE the MR is actually merged (under a train the MR `state` stays `opened`
+# for a while after that success line). Treating that line as proof set Notion
+# `Done` and DM'd the owner too early on ui-bg, pt1124, ui-phase1/2/5,
+# aggregate-alignment, mobile-parity and pt1280. This script is the single,
+# scripted definition the athena-admiral (and the athena:merge-boarding skill)
+# call BEFORE moving a ticket to Done/Ready-for-Release, DMing the owner, or
+# tearing a stack down — so "confirmed" means one thing, not a prose paraphrase
+# each caller re-derives (admiral-500 design, ai/docs/admiral-500-design.md §2).
+#
+# CONFIRMED (exit 0) iff AT LEAST ONE requested probe says merged:
+#   * FORGE probe (`--pr N` GitHub / `--mr N` GitLab): the MR/PR `state` is
+#     merged AND its merge timestamp (`mergedAt` / `merged_at`) is set. State
+#     alone is not enough — an opened-but-merging train car has a merge line but
+#     no timestamp.
+#   * GIT-ANCESTRY probe (`--sha HEAD --target REF`): after an optional
+#     `--fetch`, the MR head commit is an ancestor of the target branch tip
+#     (`git merge-base --is-ancestor HEAD REF`) — i.e. the commits are provably
+#     in the target, which holds even while the forge state lags under a train.
+# The two are an OR: either one confirming is proof the work landed.
+#
+# Reads only — uses PLAIN `gh`/`glab` (Cody's OAuth), never the Athena identity
+# wrappers, per the reads-stay-on-plain-CLI convention.
+#
+# Exit codes (a FAILED lookup must never read as a clean not-merged — repo
+# doctrine, ~/dev/custom/CLAUDE.md "A failed lookup must never look like an
+# empty one"):
+#   0  CONFIRMED merged
+#   1  probes ran cleanly and NONE confirms merged (genuinely not merged yet)
+#   2  usage / prerequisite error (bad args, no jq, bad repo)
+#   3  a probe could NOT complete (forge/git error) and nothing else confirmed —
+#      cannot determine; do NOT treat as not-merged
+#
+# Test seams (used only by --self-test; never in prod):
+#   CONFIRM_MERGED_GH   / CONFIRM_MERGED_GLAB   path to a stub gh/glab
+
+set -uo pipefail
+
+GH_BIN="${CONFIRM_MERGED_GH:-gh}"
+GLAB_BIN="${CONFIRM_MERGED_GLAB:-glab}"
+
+# --------------------------------------------------------------------------
+# Self-test: hermetic (throwaway git repo + stub gh/glab; no network, no state).
+# Dispatched BEFORE the main flow because that flow runs unconditionally.
+# --------------------------------------------------------------------------
+run_self_test() {
+  command -v jq >/dev/null 2>&1 || { echo "self-test: jq required"; return 1; }
+  local dir repo pass=0 fail=0
+  dir="$(mktemp -d)"
+  trap 'rm -rf "$dir"' RETURN
+  repo="$dir/repo"
+
+  # A git repo: main = A -> B; an unmerged branch off A with commit C.
+  (
+    set -e
+    mkdir -p "$repo"; cd "$repo"
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+    git init -q
+    git config user.email t@t; git config user.name t; git config commit.gpgsign false
+    echo a > f; git add f; git commit -qm A
+    echo b >> f; git add f; git commit -qm B
+  )
+  local sha_A sha_C sha_main
+  sha_A="$(git -C "$repo" rev-parse HEAD~1)"
+  sha_main="$(git -C "$repo" rev-parse HEAD)"
+  (
+    set -e; cd "$repo"
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+    git checkout -q -b feat "$sha_A"
+    echo c >> f; git add f; git commit -qm C
+    git checkout -q master 2>/dev/null || git checkout -q main 2>/dev/null || git checkout -q "$sha_main"
+  )
+  sha_C="$(git -C "$repo" rev-parse feat)"
+  local target; target="$(git -C "$repo" rev-parse HEAD)"  # main tip (B)
+
+  # Stub gh: `pr view <id> --json …`. id 1 merged, 2 open, 9 errors.
+  local ghstub="$dir/gh"
+  cat > "$ghstub" <<'SH'
+#!/bin/sh
+[ "$1" = pr ] && [ "$2" = view ] || { echo "unexpected: $*" >&2; exit 3; }
+case "$3" in
+  1) echo '{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z"}' ;;
+  2) echo '{"state":"OPEN","mergedAt":null}' ;;
+  *) echo "no such PR $3" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$ghstub"
+
+  # Stub glab: `mr view <id> -F json`. id 1 merged, 2 open.
+  local glabstub="$dir/glab"
+  cat > "$glabstub" <<'SH'
+#!/bin/sh
+[ "$1" = mr ] && [ "$2" = view ] || { echo "unexpected: $*" >&2; exit 3; }
+case "$3" in
+  1) echo '{"state":"merged","merged_at":"2026-01-01T00:00:00Z"}' ;;
+  2) echo '{"state":"opened","merged_at":null}' ;;
+  *) echo "no such MR $3" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$glabstub"
+
+  # expect <label> <expected-exit> -- <args...>
+  expect() {
+    local label="$1" want="$2"; shift 3
+    CONFIRM_MERGED_GH="$ghstub" CONFIRM_MERGED_GLAB="$glabstub" \
+      "$0" "$@" >/dev/null 2>&1
+    local got=$?
+    if [ "$got" -eq "$want" ]; then
+      pass=$((pass+1)); printf '  PASS  %s (exit %s)\n' "$label" "$got"
+    else
+      fail=$((fail+1)); printf '  FAIL  %s (want %s, got %s)\n' "$label" "$want" "$got"
+    fi
+  }
+
+  echo "confirm-merged self-test"
+  expect "forge PR merged"                 0 -- --pr 1 --repo "$repo"
+  expect "forge PR open -> not merged"      1 -- --pr 2 --repo "$repo"
+  expect "forge MR merged"                 0 -- --mr 1 --repo "$repo"
+  expect "forge MR opened -> not merged"    1 -- --mr 2 --repo "$repo"
+  expect "ancestry: head IS ancestor"       0 -- --sha "$sha_A" --target "$target" --repo "$repo"
+  expect "ancestry: head NOT ancestor"      1 -- --sha "$sha_C" --target "$target" --repo "$repo"
+  expect "OR: forge open but ancestry ok"   0 -- --pr 2 --sha "$sha_A" --target "$target" --repo "$repo"
+  expect "forge error alone -> undetermined" 3 -- --pr 9 --repo "$repo"
+  expect "clean-not-merged + bad sha -> undetermined" 3 -- --pr 2 --sha deadbeef --target "$target" --repo "$repo"
+  expect "no probe -> usage error"          2 -- --repo "$repo"
+  expect "both --pr and --mr -> usage"      2 -- --pr 1 --mr 1 --repo "$repo"
+  expect "half git probe (sha, no target)"  2 -- --sha "$sha_A" --repo "$repo"
+
+  echo "RESULT: $pass passed, $fail failed"
+  [ "$fail" -eq 0 ] || {
+    echo "  Fix: repair the probe/verdict logic so a merged state+timestamp OR an ancestor head confirms," >&2
+    echo "  a clean non-merge exits 1, a probe error exits 3, and bad args exit 2." >&2
+    return 1
+  }
+  return 0
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  run_self_test; exit $?
+fi
+
+usage() {
+  cat <<'EOF'
+confirm-merged — confirm an MR/PR actually landed (one shared definition).
+
+Usage:
+  confirm-merged --pr <id>  [--repo DIR] [--sha HEAD --target REF] [--fetch] [--json]
+  confirm-merged --mr <id>  [--repo DIR] [--sha HEAD --target REF] [--fetch] [--json]
+  confirm-merged --sha HEAD --target REF [--repo DIR] [--fetch]   # git-ancestry only
+
+At least one probe is required (a --pr/--mr forge probe, or a --sha+--target
+git-ancestry probe). --repo sets the git working dir for both the forge read
+(gh/glab resolve the project from its remote) and the ancestry check (default:
+cwd). --fetch runs `git fetch` first so the ancestry probe sees the latest tip.
+
+Exit: 0 confirmed · 1 not merged · 2 usage/prereq · 3 could-not-determine.
+EOF
+}
+
+PR_ID=""; MR_ID=""; SHA=""; TARGET=""; REPO="."; FETCH=0; JSON=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pr)     PR_ID="${2:-}"; shift 2 || { echo "error: --pr needs an id" >&2; exit 2; } ;;
+    --mr)     MR_ID="${2:-}"; shift 2 || { echo "error: --mr needs an id" >&2; exit 2; } ;;
+    --sha)    SHA="${2:-}"; shift 2 || { echo "error: --sha needs a value" >&2; exit 2; } ;;
+    --target) TARGET="${2:-}"; shift 2 || { echo "error: --target needs a ref" >&2; exit 2; } ;;
+    --repo)   REPO="${2:-}"; shift 2 || { echo "error: --repo needs a dir" >&2; exit 2; } ;;
+    --fetch)  FETCH=1; shift ;;
+    --json)   JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+fail_usage() {
+  echo "confirm-merged: $1" >&2
+  echo "  Fix: $2" >&2
+  exit 2
+}
+
+[ -n "$PR_ID" ] && [ -n "$MR_ID" ] && \
+  fail_usage "both --pr and --mr given; a repo is one forge" \
+    "pass --pr for a GitHub PR OR --mr for a GitLab MR, not both."
+
+if [ -n "$SHA$TARGET" ] && { [ -z "$SHA" ] || [ -z "$TARGET" ]; }; then
+  fail_usage "the git-ancestry probe needs BOTH --sha and --target" \
+    "pass --sha <MR head SHA> --target <branch, e.g. origin/main>, or drop both."
+fi
+
+if [ -z "$PR_ID" ] && [ -z "$MR_ID" ] && [ -z "$SHA" ]; then
+  fail_usage "no probe requested" \
+    "give a forge probe (--pr <id> or --mr <id>) and/or a git-ancestry probe (--sha HEAD --target REF)."
+fi
+
+[ -d "$REPO" ] || fail_usage "--repo '$REPO' is not a directory" \
+  "point --repo at the MR/PR's git worktree (default: cwd)."
+
+if [ -n "$PR_ID" ] || [ -n "$MR_ID" ]; then
+  command -v jq >/dev/null 2>&1 || fail_usage "jq not found (needed to parse forge JSON)" \
+    "install jq, or use the git-ancestry probe (--sha --target) instead."
+fi
+
+# Accumulators. confirmed=1 once any probe proves merged; errored=1 if any probe
+# could not complete (so a NON-confirmed result can distinguish 1 from 3).
+CONFIRMED=0
+ERRORED=0
+REASONS=""
+note() { REASONS="${REASONS}${REASONS:+; }$1"; }
+
+# ---- forge probe -----------------------------------------------------------
+# GitHub: state==MERGED && mergedAt!=null.  GitLab: state==merged && merged_at!=null.
+forge_probe() {
+  local kind="$1" id="$2" out rc
+  if [ "$kind" = pr ]; then
+    out="$( ( cd "$REPO" && "$GH_BIN" pr view "$id" --json state,mergedAt ) 2>&1 )"; rc=$?
+    if [ "$rc" -ne 0 ]; then ERRORED=1; note "gh pr view $id failed: $(printf '%s' "$out" | head -1)"; return; fi
+    if printf '%s' "$out" | jq -e '.state=="MERGED" and (.mergedAt // null)!=null' >/dev/null 2>&1; then
+      CONFIRMED=1; note "PR #$id state=MERGED with mergedAt set"
+    else
+      note "PR #$id not merged (state/mergedAt: $(printf '%s' "$out" | jq -c '{state,mergedAt}' 2>/dev/null))"
+    fi
+  else
+    out="$( ( cd "$REPO" && "$GLAB_BIN" mr view "$id" -F json ) 2>&1 )"; rc=$?
+    if [ "$rc" -ne 0 ]; then ERRORED=1; note "glab mr view $id failed: $(printf '%s' "$out" | head -1)"; return; fi
+    if printf '%s' "$out" | jq -e '.state=="merged" and (.merged_at // null)!=null' >/dev/null 2>&1; then
+      CONFIRMED=1; note "MR !$id state=merged with merged_at set"
+    else
+      note "MR !$id not merged (state/merged_at: $(printf '%s' "$out" | jq -c '{state,merged_at}' 2>/dev/null))"
+    fi
+  fi
+}
+
+# ---- git-ancestry probe ----------------------------------------------------
+git_probe() {
+  local out rc
+  if ! git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
+    ERRORED=1; note "--repo '$REPO' is not a git repo (ancestry probe skipped)"; return
+  fi
+  if [ "$FETCH" -eq 1 ]; then
+    if ! out="$(git -C "$REPO" fetch --quiet 2>&1)"; then
+      ERRORED=1; note "git fetch failed: $(printf '%s' "$out" | head -1)"; return
+    fi
+  fi
+  if ! git -C "$REPO" rev-parse --verify --quiet "$SHA^{commit}" >/dev/null 2>&1; then
+    ERRORED=1; note "head SHA '$SHA' not found in --repo (fetch first?)"; return
+  fi
+  if ! git -C "$REPO" rev-parse --verify --quiet "$TARGET^{commit}" >/dev/null 2>&1; then
+    ERRORED=1; note "target ref '$TARGET' not found in --repo (fetch first?)"; return
+  fi
+  if git -C "$REPO" merge-base --is-ancestor "$SHA" "$TARGET" >/dev/null 2>&1; then
+    CONFIRMED=1; note "head $SHA is an ancestor of $TARGET"
+  else
+    note "head $SHA is NOT an ancestor of $TARGET"
+  fi
+}
+
+[ -n "$PR_ID" ] && forge_probe pr "$PR_ID"
+[ -n "$MR_ID" ] && forge_probe mr "$MR_ID"
+[ -n "$SHA" ]   && git_probe
+
+if [ "$JSON" -eq 1 ]; then
+  verdict="not-merged"; [ "$CONFIRMED" -eq 1 ] && verdict="merged"
+  [ "$CONFIRMED" -eq 0 ] && [ "$ERRORED" -eq 1 ] && verdict="undetermined"
+  if command -v jq >/dev/null 2>&1; then
+    jq -cn --arg v "$verdict" --arg r "$REASONS" '{verdict:$v,reasons:$r}'
+  else
+    printf '{"verdict":"%s","reasons":"%s"}\n' "$verdict" "$REASONS"
+  fi
+fi
+
+if [ "$CONFIRMED" -eq 1 ]; then
+  [ "$JSON" -eq 1 ] || echo "confirm-merged: CONFIRMED — $REASONS"
+  exit 0
+fi
+
+if [ "$ERRORED" -eq 1 ]; then
+  {
+    echo "confirm-merged: COULD NOT DETERMINE — no probe confirmed the merge and one errored: $REASONS"
+    echo "  Fix: this is NOT proof the merge failed. Do NOT move the ticket to Done / DM / tear down."
+    echo "  Re-run after \`git fetch\` (or pass --fetch), or once the forge is reachable; if under a"
+    echo "  merge train, wait and re-verify on the current head rather than trusting the '✓ Merged!' line."
+  } >&2
+  exit 3
+fi
+
+{
+  echo "confirm-merged: NOT MERGED — $REASONS"
+  echo "  Fix: the merge has not landed. Do NOT move the ticket to Done/Ready-for-Release, DM the owner,"
+  echo "  or tear the stack down yet. Wait for the merge to complete (a train can lag the '✓ Merged!'"
+  echo "  line), then re-run confirm-merged on the current head."
+} >&2
+exit 1
