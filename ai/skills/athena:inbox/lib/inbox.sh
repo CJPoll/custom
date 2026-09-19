@@ -434,9 +434,18 @@ _inbox_sweep_due() {
 
   inbox_is_subagent "${hook_json}" && return 0          # R-9
   lock="$(_inbox_path lock "${resolved}")"
-  inbox_lock_try "${lock}" || return 0                  # R-8, and the contract
-  fs_sweep_generation "${gen}" || true
-  inbox_lock_release
+
+  # ONLY THE ACQUIRER RELEASES. Status 2 means this process already holds the
+  # lock for the advance in progress (the ack path sweeps on its way out), and
+  # releasing it here would drop the channel's lock mid-advance -- see
+  # inbox_lock_try. Status 1 means another session holds it, which for a COUNT
+  # is not an error: the contract says a count neither advances state nor needs
+  # the lock, so it attempts flock -n for the sweep alone and skips it.
+  inbox_lock_try "${lock}"; case $? in
+    0) fs_sweep_generation "${gen}" || true; inbox_lock_release ;;
+    2) fs_sweep_generation "${gen}" || true ;;           # ours already; do NOT release
+    *) return 0 ;;                                      # R-8, and the contract
+  esac
   return 0
 }
 
@@ -607,8 +616,51 @@ _inbox_offset_of() {
   printf '%s\n' "${offset}"
 }
 
+# THE CONTRACT'S MESSAGE RULES ARE ENFORCED HERE, ON THE READ PATH.
+#
+# `maildir_validate_message` used to have no production caller: the reader
+# parsed frontmatter and rendered, the acker checked only the filename and
+# "never ack your own", and so D-22/D-23 -- `from`/`to`/`sent_at` required,
+# `sent_at` agreeing with the filename -- held in the domain and nowhere a
+# message actually travels. A message with no `from` was rendered and then
+# acked, because the ack filter reads an empty `from` as "not mine". The
+# domain cases stayed green throughout, which is the mirror of this repo's own
+# recorded lesson: enforced-but-untested and untested-at-the-boundary look
+# identical from the outside.
+#
+# A NON-CONFORMANT MESSAGE IS COUNTED, NOT RENDERED, AND NOT ACKABLE.
+#
+# The alternative that suggests itself -- render it and let the ack refuse --
+# WEDGES THE CHANNEL: `maildir_is_unread` admits any non-dot, non-`tmp` name,
+# so a peer-delivered `notes.md` would be read, rendered, then refused by the
+# ack's grammar check. read-inbox exits 1, the file never reaches `.acked/`,
+# and it is re-reported on EVERY subsequent read forever. That is precisely
+# the "listed every single read, forever, with nothing ever saying why"
+# failure this skill refuses to ship elsewhere.
+#
+# Dropping it silently is the other wrong answer -- that is message loss the
+# peer can choose by malforming one field.
+#
+# So it is neither rendered nor dropped: it is reported as a COUNT, exactly as
+# logchan_scan reports `unreadable`. The count is the honest surface, and
+# conformant mail in the same channel keeps flowing past it.
+#
+# THE FILENAME IS NOT PRINTED. The slug is prose the PEER chose, and relaying
+# peer-chosen bytes into a position the reader reads as its own narration is
+# the disclosure this skill refuses by name. The operator is told how to look
+# for themselves instead, which needs no peer bytes to cross the boundary.
+_inbox_maildir_conformant() {
+  local read_dir="$1" name="$2" content fm
+  maildir_valid_message_name "${name}" || return 1
+  content="$(fs_read_message "${read_dir}/${name}"; printf X)" || return 1
+  content="${content%X}"
+  fm="$(printf '%s' "${content}" | maildir_parse_frontmatter)"
+  maildir_validate_message "${name}" "${fm}" >/dev/null 2>&1
+}
+
 _inbox_read_maildir() {
   local resolved="$1" chan="$2" read_dir identity name out="[]" content fm body
+  local malformed=0
 
   read_dir="$(_inbox_path read_dir "${resolved}")"
   identity="$(_inbox_path identity "${resolved}")"
@@ -623,6 +675,9 @@ _inbox_read_maildir() {
     maildir_is_unread "${name}" || continue
     [ -f "${read_dir}/${name}" ] || continue
     [ -L "${read_dir}/${name}" ] && continue
+    if ! _inbox_maildir_conformant "${read_dir}" "${name}"; then
+      malformed=$((malformed + 1)); continue
+    fi
     content="$(fs_read_message "${read_dir}/${name}"; printf X)" || continue
     content="${content%X}"
     fm="$(printf '%s' "${content}" | maildir_parse_frontmatter)"
@@ -636,7 +691,8 @@ _inbox_read_maildir() {
   done < <(fs_list_dir_z "${read_dir}" | sort -z)
 
   printf '%s' "${out}" | jq -c --arg c "${chan}" --arg id "${identity}" \
-    '{kind: "maildir", channel: $c, identity: $id, messages: .}'
+    --argjson m "${malformed}" \
+    '{kind: "maildir", channel: $c, identity: $id, malformed: $m, messages: .}'
 }
 
 # --- ack --------------------------------------------------------------------

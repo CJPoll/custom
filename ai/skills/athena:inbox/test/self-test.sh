@@ -1326,20 +1326,6 @@ else
   ok "D-20 a 49-character slug is rejected (<= 48)"
 fi
 
-# D-21: one past the highest seq present, zero-padded. The caller feeds BOTH
-# the live listing and `.acked/`, which is why this is a fold over names.
-assert_eq "D-21 next seq after 001 and 002 is 003, zero-padded" "003" \
-  "$(printf '20260901T232215Z-001-a.md\n20260901T232216Z-002-b.md\n' | maildir_next_seq)"
-assert_eq "D-21 an empty directory allocates 001" "001" \
-  "$(printf '' | maildir_next_seq)"
-# Past 999 the field WIDENS rather than wrapping: wrapping would reorder the
-# directory, and the timestamp prefix is what carries chronological order.
-assert_eq "D-21 past 999 the seq field widens rather than wrapping" "1000" \
-  "$(printf '20260901T232215Z-999-a.md\n' | maildir_next_seq)"
-# A non-conformant legacy name must not make the directory unwritable.
-assert_eq "D-21 a non-conformant legacy name is skipped, not fatal" "003" \
-  "$(printf 'notes.md\n20260901T232215Z-002-b.md\n' | maildir_next_seq)"
-
 echo
 echo "== DND-184 / 2. Domain: frontmatter =="
 
@@ -1582,6 +1568,34 @@ SAME="$(timeout 20 bash -c '
   printf "rc=%s\n" "$?"
 ' 2>&1)"
 assert_eq "A-6 re-acquiring the same channel's lock is a no-op" "rc=0" "${SAME}"
+
+# ONLY THE ACQUIRER RELEASES. `inbox_lock_try` used to answer 0 both for
+# "newly acquired" and for "already ours", and the sweep released
+# unconditionally -- so the sweep that runs at the END of an ack released a
+# lock it never took, clearing INBOX_LOCK_PATH and closing fd 9 MID-ADVANCE.
+# It was harmless only because that sweep happens to sit after the state
+# write, which made "hold the descriptor across the whole advance" a property
+# of call ordering rather than of the lock code. Invariants that live in call
+# ordering break when someone reorders two lines for an unrelated reason.
+TRY="$(timeout 20 bash -c '
+  . "'"${LIB}"'/err.sh"; . "'"${LIB}"'/fs.sh"; . "'"${LIB}"'/lock.sh"
+  inbox_lock_try "'"${LOCK_A}"'" >/dev/null 2>&1; first=$?
+  inbox_lock_try "'"${LOCK_A}"'" >/dev/null 2>&1; second=$?
+  printf "first=%s second=%s still=%s\n" "${first}" "${second}" "${INBOX_LOCK_PATH}"
+' 2>&1)"
+assert_contains "the FIRST try reports it newly acquired (0: caller must release)" \
+  "first=0" "${TRY}"
+assert_contains "the SECOND reports already-ours (2: caller must NOT release)" \
+  "second=2" "${TRY}"
+assert_contains "and the lock is still held either way" "still=${LOCK_A}" "${TRY}"
+# The consequence, at the manager: a sweep on the ACK path must leave the
+# advance's lock held. Asserted on the real ack, not on the primitive.
+setup_log_case
+printf '%s' '{"v":1,"offset":0,"seen_event_ids":[],"seen_keys":[]}' > "${LSTATE}"
+HELD="$( cd "${LPROJ}" && inbox_ack_log slack 10 "" "" "." >/dev/null 2>&1
+         printf '%s\n' "${INBOX_LOCK_PATH:-RELEASED}" )"
+assert_eq "an ack's trailing sweep does not release the advance's own lock" \
+  "${LLOCK}" "${HELD}"
 
 # M-3: a lock file whose recorded pid is DEAD. The ack proceeds -- and it
 # proceeds for a better reason than a staleness check: flock(2) is released by
@@ -1882,6 +1896,83 @@ assert_eq "I-5 the read directory's doorbell is bumped after the move (the peer'
   "$(ls "${MDIR}/.event" 2>/dev/null | wc -l | tr -d ' ')"
 assert_eq "I-5 the cycle ends at zero unread" "0" \
   "$(cd "${MPROJ}" && "${BIN}/inbox-status" --json 2>/dev/null | jq -r '.channels[0].unread')"
+
+# ===========================================================================
+# D-22/D-23 ENFORCED WHERE MESSAGES TRAVEL, not only in the domain.
+#
+# maildir_validate_message had NO production caller: the reader parsed
+# frontmatter and rendered, the acker checked only the filename, and so the
+# contract's required-frontmatter and sent_at/filename-agreement rules held
+# nowhere a message actually goes. The domain cases stayed green throughout --
+# untested-at-the-boundary looks exactly like enforced from the outside.
+#
+# Asserted here through bin/read-inbox, the real entry point.
+# ===========================================================================
+
+# A file that is NOT a conformant message name. maildir_is_unread admits any
+# non-dot, non-tmp name, so without the read-path check this would be read,
+# rendered, and then refused by the ack's grammar check -- read-inbox exits 1,
+# the file never reaches .acked/, and it is re-reported EVERY read forever
+# while the refusal names no filename, so the operator cannot tell what is
+# wedging the channel. That is the exact failure this skill refuses to ship
+# for self-addressed mail, arriving one branch over.
+setup_mail_case
+printf 'not a conformant message at all\n' > "${MDIR}/notes.md"
+OUT="$(cd "${MPROJ}" && "${BIN}/read-inbox" mail 2>&1)"; RC=$?
+assert_contains "D-22 a non-conformant file is REPORTED, not silently skipped" \
+  "not conformant messages" "${OUT}"
+assert_not_contains "D-22 and its body never reaches the output" \
+  "not a conformant message at all" "${OUT}"
+assert_not_contains "D-22 and its peer-chosen name is not relayed either" \
+  "notes.md" "${OUT}"
+assert_contains "D-22 the report carries a Fix: clause" "Fix:" "${OUT}"
+# THE CHANNEL IS NOT WEDGED: the conformant message beside it still flows.
+assert_contains "D-22 a conformant message in the same channel is still delivered" \
+  "Hello from the peer." "${OUT}"
+assert_eq "D-22 and it is still acked" "1" \
+  "$(ls "${MDIR}/.acked/20260901T232215Z-001-a-real-message.md" 2>/dev/null | wc -l | tr -d ' ')"
+# The non-conformant file is left alone -- never acked, never deleted.
+assert_eq "D-22 the non-conformant file is neither acked nor deleted" "1" \
+  "$(ls "${MDIR}/notes.md" 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "D-22 and it was not moved into .acked/" "0" \
+  "$(ls "${MDIR}/.acked/notes.md" 2>/dev/null | wc -l | tr -d ' ')"
+
+# ALL-MALFORMED MUST NOT READ AS "nothing new". That is the silent-failure
+# shape this epic exists to stamp out: mail is sitting undelivered and the
+# channel looks healthy.
+setup_mail_case
+rm -f "${MDIR}/20260901T232215Z-001-a-real-message.md"
+printf 'junk\n' > "${MDIR}/notes.md"
+OUT="$(cd "${MPROJ}" && "${BIN}/read-inbox" mail 2>&1)"
+assert_not_contains "D-22 an all-malformed channel does NOT report 'nothing new'" \
+  "nothing new" "${OUT}"
+assert_contains "D-22 it reports the non-conformant count instead" \
+  "not conformant messages" "${OUT}"
+
+# D-23: MISSING REQUIRED FRONTMATTER, through the read path. The name is
+# perfectly conformant, so only the frontmatter rule can catch this one --
+# which is what makes it the case that proves the rule is wired in.
+setup_mail_case
+printf -- '---\nto: athena\nsent_at: 2026-09-03T10:00:00Z\n---\n\nno from key\n' \
+  > "${MDIR}/20260903T100000Z-003-no-from-key.md"
+OUT="$(cd "${MPROJ}" && "${BIN}/read-inbox" mail 2>&1)"
+assert_not_contains "D-23 a message with no \"from\" is not rendered" \
+  "no from key" "${OUT}"
+assert_eq "D-23 and it is NOT acked -- an unattributable message is not consumed" "0" \
+  "$(ls "${MDIR}/.acked/20260903T100000Z-003-no-from-key.md" 2>/dev/null | wc -l | tr -d ' ')"
+assert_contains "D-23 it is reported as non-conformant" "not conformant messages" "${OUT}"
+
+# D-23: sent_at DISAGREEING with the filename, through the read path. Two
+# copies of one fact that disagree cannot both be believed, and there is no
+# way to tell which is wrong.
+setup_mail_case
+printf -- '---\nfrom: peer\nto: athena\nsent_at: 2026-01-01T00:00:00Z\n---\n\nmismatched stamp\n' \
+  > "${MDIR}/20260904T100000Z-004-mismatched.md"
+OUT="$(cd "${MPROJ}" && "${BIN}/read-inbox" mail 2>&1)"
+assert_not_contains "D-23 a sent_at disagreeing with the filename is not rendered" \
+  "mismatched stamp" "${OUT}"
+assert_eq "D-23 and it is NOT acked" "0" \
+  "$(ls "${MDIR}/.acked/20260904T100000Z-004-mismatched.md" 2>/dev/null | wc -l | tr -d ' ')"
 
 # M-12 (the ack-side half): NEVER ACK A MESSAGE YOU WROTE. A message carrying
 # my own identity, sitting in the directory the PEER delivers into, is not

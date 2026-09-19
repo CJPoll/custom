@@ -3,15 +3,18 @@
 #
 # SCOPE. DND-183 shipped only the unread predicate, because counting was all
 # `bin/inbox-status` needed. DND-184 adds the rest of the reader's half: the
-# filename grammar, `<seq>` allocation, frontmatter parse/validate, and the
+# filename grammar, frontmatter parse/validate, and the
 # "never ack your own message" rule (QA D-20 … D-25).
 #
 # What is deliberately still absent is the WRITER's half. QA M-11 and M-12 are
 # `send-mail` cases -- stage in `tmp/`, deliver without clobbering, bump the
 # doorbell after -- and this ticket ships no send entry point, so writing that
 # machinery here would mean shipping an untested writer to satisfy a row in a
-# matrix. `maildir_next_seq` is here because the READER needs to understand
-# the grammar it enumerates, not because anything here allocates a name.
+# matrix. `<seq>` ALLOCATION went the same way: it is writer-side, it had no
+# reader calling it, and the justification once given for the exception (that
+# the reader needs to understand the grammar it enumerates) is discharged by
+# `maildir_valid_message_name`, which the reader does call. It lands with
+# `send-mail`, beside the caller that gives it a reason to be correct.
 #
 # Source order: err.sh, names.sh, then this file. `maildir_parse_frontmatter`
 # requires jq (it emits JSON); everything else is shell-only.
@@ -113,35 +116,6 @@ maildir_message_stamp() {
   t="${name%%Z-*}"
   printf '%s-%s-%sT%s:%s:%sZ\n' \
     "${t:0:4}" "${t:4:2}" "${t:6:2}" "${t:9:2}" "${t:11:2}" "${t:13:2}"
-}
-
-# maildir_next_seq   (directory listing on stdin, one bare name per line)
-#
-# D-21: one past the highest `<seq>` present, zero-padded to at least 3. The
-# contract requires the scan to include `.acked/`, so the CALLER feeds both
-# listings in -- keeping this function a pure fold over names rather than a
-# directory walk that would have to know the layout.
-#
-# Names that are not conformant messages are ignored rather than refused: the
-# deployed corpus predates the grammar, and a seq allocator that died on a
-# legacy filename would make the directory unwritable.
-maildir_next_seq() {
-  local name seq max=0 width=3 n
-  while IFS= read -r name; do
-    maildir_valid_message_name "${name}" || continue
-    seq="${name#*Z-}"; seq="${seq%%-*}"
-    # 10# forces base 10: bash reads a leading-zero literal as OCTAL, so "008"
-    # is a syntax error and "010" is 8. A seq field is zero-padded by
-    # definition, which makes this the normal case, not the edge case.
-    n=$(( 10#${seq} ))
-    if [ "${n}" -gt "${max}" ]; then max="${n}"; fi
-    if [ "${#seq}" -gt "${width}" ]; then width="${#seq}"; fi
-  done
-  n=$(( max + 1 ))
-  # WIDENS rather than wraps (contract): once the value needs more digits than
-  # the current width, the field grows. printf's minimum width does exactly
-  # that on its own -- 1000 with %03d is "1000", not "000".
-  printf "%0${width}d\n" "${n}"
 }
 
 # --- frontmatter (D-22, D-23) -----------------------------------------------

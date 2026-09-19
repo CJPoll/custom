@@ -155,10 +155,27 @@ inbox_lock_holder_hint() {
 # normally. Without that, an implementer either breaks the status command
 # whenever a reading session holds the lock, or never sweeps on a count at all
 # and turns the every-count rule into dead letter.
+# Status 0 = NEWLY acquired: the caller took it and MUST release it.
+# Status 2 = already held by this process: the caller did NOT take it and MUST
+#            NOT release it.
+# Status 1 = not acquired.
+#
+# The three-way status is not fussiness. Collapsing "newly acquired" and
+# "already ours" into 0 is exactly the shape that makes a caller release a
+# lock it never took: the ack path takes the lock for the whole advance and
+# then sweeps, and a sweep that released on its way out would drop the
+# channel's lock MID-ADVANCE -- `INBOX_LOCK_PATH` cleared, fd 9 closed, the
+# EXIT trap in bin/read-inbox a no-op, and another session free to take the
+# channel while this one still believes it is the designated consumer. That
+# it is currently harmless rests on the sweep happening to run after the state
+# write, which makes the "hold the descriptor across the whole advance"
+# invariant a property of CALL ORDERING rather than of this file. Invariants
+# that live in call ordering are the ones that break when someone reorders
+# two lines for an unrelated reason.
 inbox_lock_try() {
   local path="$1"
   if [ -n "${INBOX_LOCK_PATH}" ] && [ "${INBOX_LOCK_PATH}" = "${path}" ]; then
-    return 0
+    return 2
   fi
   [ -n "${INBOX_LOCK_PATH}" ] && return 1
   fs_assert_regular "${path}" >/dev/null 2>&1 || return 1
