@@ -1,6 +1,6 @@
 ---
 name: athena:inbox
-description: Read and write Athena's own machine-local message inboxes — the Slack delivery log and the agent-mail maildirs — scoped to the project the session is rooted in. Use to check whether anything has arrived for THIS project, to understand why a channel is silent, to reply on an agent-mail channel, or whenever a session-start notice reports a count of unread inbox messages. Counting (inbox-status), reading + acking (read-inbox, behind a designated-consumer lock, with bodies fenced as untrusted), blocking until a doorbell rings (inbox-wait) and sending (send-mail, on a maildir channel) all work.
+description: Read and write Athena's own machine-local message inboxes — the Slack delivery log and the agent-mail maildirs — scoped to the project the session is rooted in. Use to check whether anything has arrived for THIS project, to understand why a channel is silent, to reply on an agent-mail channel, or whenever a session-start notice reports a count of unread inbox messages. Counting (inbox-status), reading + acking (read-inbox, behind a designated-consumer lock, with bodies fenced as untrusted), blocking until a doorbell rings (inbox-wait), sending (send-mail, on a maildir channel), and diagnosing why the whole Slack->Athena delivery chain is silent (inbox-doctor) all work.
 ---
 
 # athena:inbox
@@ -468,6 +468,16 @@ that guarantee: `fs.sh` now holds the atomic state writer, rotation, the sweep
 and the maildir ack. What replaces it is the **designated-consumer gate** — a
 subagent or a session that does not hold the channel's `flock` may count and
 may `--peek`, and neither advances anything.
+
+**Later (2026-09-19):** the table's Side-effects row previously read
+"`lib/fs.sh` (the only file I/O, and the only `git` call)", and the paragraph
+above named `lib/fence.sh` as "the one declared deviation". DND-190 added
+`bin/inbox-doctor`, a diagnostic that necessarily probes subsystems `fs.sh` does
+not own (a pidfile, the crontab, an HTTP endpoint, `ruby`), so both claims are
+narrowed here: `fs.sh` is the only file I/O *on the message-handling path*, and
+`doctor.sh`'s `doctor_check_*` is a *second* declared deviation (documented just
+above). The guarantee `fs.sh` still carries in full — that nothing on the
+read/count/ack path does I/O outside it — is unchanged.
 
 ## Tests
 

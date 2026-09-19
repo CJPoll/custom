@@ -46,10 +46,24 @@ trap cleanup EXIT INT TERM
 # A fingerprint of the real marker family BEFORE anything runs. The whole suite
 # is worthless if it silently mutates the live rate-limit state -- and a bug
 # that did so would look exactly like a green run.
+# DELIBERATELY EXCLUDES the two MACHINE-GLOBAL markers (athena-inbox-last-poll,
+# athena-inbox-poll.log). Every hook run stamps the attempt marker and appends to
+# the log as its FIRST action, and this box runs the real SessionStart hook: a
+# concurrent real session firing DURING this suite bumps those two under the real
+# $HOME and used to false-fail this guard (measured 2026-09-19 -- a real hook
+# raced the slower DND-190 suite). That is NOT this suite writing them: every
+# run asserts a fake $HOME (assert_fake_home hard-exits otherwise), so the suite
+# structurally cannot touch the real ~/.claude at all. This is not a weakening:
+# the class of defect the guard catches -- the suite leaking a write to real
+# marker state -- would land under the real $HOME and trip the RETAINED markers
+# (the per-project success/warn/health family under athena-inbox-seen, and
+# settings.json), because a HOME leak hits every marker, not only the two
+# globals. The two excluded files are exactly the ones a legitimate concurrent
+# process updates on every run, so keeping them only measured the neighbour.
 real_markers_fingerprint() {
   local f
-  for f in athena-inbox-last-poll athena-inbox-last-success athena-inbox-last-warn \
-           athena-inbox-last-health-warn athena-inbox-poll.log athena-inbox-seen \
+  for f in athena-inbox-last-success athena-inbox-last-warn \
+           athena-inbox-last-health-warn athena-inbox-seen \
            settings.json; do
     printf '%s:%s\n' "${f}" "$(stat -c %Y -- "${REAL_HOME}/.claude/${f}" 2>/dev/null || printf 'absent')"
   done
@@ -1398,6 +1412,10 @@ run_hook
 CTX="$(context_of "${OUT}")"
 assert_not_contains "healthy chain: no doctor line" "delivery chain is unhealthy" "${CTX}"
 assert_no_file "healthy chain: the doctor marker is not stamped" "$(pm doctor-warn)"
+# Self-contained: prove the doctor actually RAN and was healthy, not that it
+# failed to run (which would also suppress the line). A could-not-run leaves a
+# "no usable --json" reason in the log; a healthy run does not.
+assert_not_contains "healthy chain: the doctor ran (no could-not-run reason)" "no usable --json" "$(hook_log)"
 
 # Case: the OPTED-IN gate. A repo with NO registry entry never runs the doctor,
 # so even a machine-global fault (a stop marker) produces no line -- nagging in
