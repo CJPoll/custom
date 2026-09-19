@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Self-test for ai/hooks/athena-inbox-poll.sh — QA Plan §4, cases F-1 … F-12,
+# Self-test for ai/hooks/athena-inbox-poll.sh — the QA Plan's hook section,
+# cases F-1 … F-12,
 # plus the hardening cases the sabotage run added.
 #
 # Every case here is about a decision that is INVISIBLE in production until it
@@ -211,7 +212,7 @@ assert_one_json_object "F-1 exactly one JSON object on stdout and nothing else" 
 assert_eq "F-1 the hook exits 0 on the actionable path" "0" "${RC}"
 assert_eq "F-1 hookEventName is SessionStart" "SessionStart" \
   "$(printf '%s' "${OUT}" | jq -r '.hookSpecificOutput.hookEventName' 2>/dev/null)"
-assert_eq "F-1 the object carries exactly the two contract keys" "hookSpecificOutput" \
+assert_eq "F-1 the object carries exactly one top-level key" "hookSpecificOutput" \
   "$(printf '%s' "${OUT}" | jq -r 'keys | join(",")' 2>/dev/null)"
 assert_eq "F-1 hookSpecificOutput carries exactly hookEventName + additionalContext" \
   "additionalContext,hookEventName" \
