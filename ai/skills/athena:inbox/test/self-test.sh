@@ -1351,6 +1351,30 @@ assert_eq "D-26 two renders use different nonces" "2" \
 assert_refused "D-26 a caller-supplied nonce present in the body is refused" \
   try_fence "deadbeefdeadbeef" "contains deadbeefdeadbeef"
 
+# THE GENERATED-NONCE ARM'S ATTEMPT CEILING. Unreachable against a working
+# /dev/urandom (a body would have to contain all eight independent 64-bit
+# draws), so the sabotage run measured a ZERO for it: `if false` on the
+# ceiling left the suite green. That is not proof the ceiling is dead weight
+# -- it is proof the fixture could not reach it. A broken entropy source CAN
+# reach it, and without the ceiling the `while :` loop does not terminate:
+# the failure mode is a HANG, which in production is a read-inbox that never
+# returns rather than one that refuses.
+#
+# Reached here by stubbing fence_nonce to a constant the body contains -- the
+# same thing a wedged urandom does. Run in a subshell so the stub does not
+# outlive the case, and under `timeout` so a regression is a FAIL rather than
+# a hung suite.
+FENCE_STUB="$(timeout 20 bash -c '
+  . "'"${LIB}"'/err.sh"; . "'"${LIB}"'/fence.sh"
+  fence_nonce() { printf "cafef00dcafef00d\n"; }
+  printf "body holds cafef00dcafef00d\n" | fence_render >/dev/null 2>&1
+  printf "rc=%s\n" "$?"
+')"; FENCE_STUB_RC=$?
+assert_eq "D-26 an exhausted nonce search TERMINATES rather than spinning" "0" \
+  "$([ "${FENCE_STUB_RC}" -ne 124 ] && echo 0 || echo 124)"
+assert_eq "D-26 and it refuses rather than emitting a fence the body can forge" "rc=1" \
+  "${FENCE_STUB}"
+
 # A-2 / D-27: an imperative is rendered VERBATIM inside the fence. Nothing is
 # escaped or stripped -- a renderer that sanitised it would be editing
 # evidence -- and nothing about the rendering treats it as a request.
@@ -1469,6 +1493,37 @@ release_lock
 ( cd "${LPROJ}" && inbox_ack_log slack 10 "" "" "." ) >/dev/null 2>&1
 assert_eq "M-2 the ack succeeds once the holder has released" "10" \
   "$(jq -r '.offset' < "${LSTATE}")"
+
+# ONE ADVANCE AT A TIME, PER PROCESS. Acquiring a second channel's lock on the
+# same fd would `exec 9<>` the new path, and that RELEASES the first channel's
+# lock mid-advance with nothing saying so: the process believes it is the
+# designated consumer of channel A while another session is free to take it.
+# The sabotage run measured a ZERO here -- deleting the refusal left the suite
+# green -- because every fixture locked exactly one channel, which is the
+# single-channel assumption the guard exists to break.
+LOCK_A="${ATHENA_INBOX_ROOT}/chan-a.consumer.lock"
+LOCK_B="${ATHENA_INBOX_ROOT}/chan-b.consumer.lock"
+SECOND="$(timeout 20 bash -c '
+  . "'"${LIB}"'/err.sh"; . "'"${LIB}"'/fs.sh"; . "'"${LIB}"'/lock.sh"
+  inbox_lock_acquire "'"${LOCK_A}"'" "channel a" >/dev/null 2>&1 || { echo "setup-failed"; exit 0; }
+  err="$(inbox_lock_acquire "'"${LOCK_B}"'" "channel b" 2>&1 >/dev/null)"; rc=$?
+  printf "rc=%s held=%s\n" "${rc}" "${INBOX_LOCK_PATH}"
+  printf "%s\n" "${err}"
+' 2>&1)"
+assert_contains "A-6 a second channel's lock is refused while one is held" \
+  "rc=1" "${SECOND}"
+assert_contains "A-6 and the FIRST channel's lock is still the one held" \
+  "held=${LOCK_A}" "${SECOND}"
+assert_contains "A-6 the refusal carries a Fix: clause" "Fix:" "${SECOND}"
+# Re-acquiring the SAME lock is a no-op, not a refusal -- otherwise a read
+# followed by its own ack would refuse itself.
+SAME="$(timeout 20 bash -c '
+  . "'"${LIB}"'/err.sh"; . "'"${LIB}"'/fs.sh"; . "'"${LIB}"'/lock.sh"
+  inbox_lock_acquire "'"${LOCK_A}"'" "channel a" >/dev/null 2>&1 || { echo "setup-failed"; exit 0; }
+  inbox_lock_acquire "'"${LOCK_A}"'" "channel a" >/dev/null 2>&1
+  printf "rc=%s\n" "$?"
+' 2>&1)"
+assert_eq "A-6 re-acquiring the same channel's lock is a no-op" "rc=0" "${SAME}"
 
 # M-3: a lock file whose recorded pid is DEAD. The ack proceeds -- and it
 # proceeds for a better reason than a staleness check: flock(2) is released by

@@ -44,6 +44,8 @@ CHECKS = [
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
   ["check-inbox-registry",      %w[ai/bin/check-inbox-registry]],
   ["inbox-registry self-test",  %w[ai/inbox/test/self-test.sh]],
+  ["athena:inbox self-test",    ["ai/skills/athena:inbox/test/self-test.sh"]],
+  ["athena:slack self-test",    ["ai/skills/athena:slack/test/self-test.sh"]],
   ["check-guard-messages",      %w[ai/bin/check-guard-messages]],
   ["harness-eval",              %w[ai/bin/harness-eval]],
   ["critic-review self-test",   %w[ai/bin/critic-review --self-test]],
@@ -139,14 +141,23 @@ def run_self_test
     ok = false
   end
 
-  # 3. Every ai/hooks/*.self-test.sh on disk is actually declared (a new hook
-  #    must not be able to ship untested by the gate).
-  on_disk = Dir.glob(File.join(CUSTOM_DIR, "ai/hooks/*.self-test.sh"))
-               .map { |p| p.sub("#{CUSTOM_DIR}/", "") }.sort
+  # 3. Every self-test on disk is actually declared — a suite that exists but
+  #    is not in CHECKS never runs unprompted, and an absent check is
+  #    indistinguishable from a passing one. This started as a hooks-only rule;
+  #    DND-184 found the same hole one directory over, where a 370-case suite
+  #    covering the whole athena:inbox skill had shipped and nothing ran it, so
+  #    the rule now covers every place this repo puts a self-test.
+  patterns = [
+    "ai/hooks/*.self-test.sh",
+    "ai/*/test/self-test.sh",
+    "ai/skills/*/test/self-test.sh",
+  ]
+  on_disk = patterns.flat_map { |g| Dir.glob(File.join(CUSTOM_DIR, g)) }
+                    .map { |p| p.sub("#{CUSTOM_DIR}/", "") }.uniq.sort
   declared = CHECKS.map { |(_, argv)| argv.first }
   undeclared = on_disk - declared
   unless undeclared.empty?
-    warn "self-test: FAIL — hook self-test(s) on disk but not in CHECKS: " \
+    warn "self-test: FAIL — self-test(s) on disk but not in CHECKS: " \
          "#{undeclared.join(', ')}"
     ok = false
   end
@@ -188,7 +199,9 @@ def run_self_test
   else
     warn "harness-gate: self-test FAILED"
     warn "  Fix: repair CHECKS in ai/bin/harness-gate so every declared check is " \
-         "executable and every hook is invoked via its dedicated .self-test.sh " \
+         "executable, every self-test on disk (ai/hooks/*.self-test.sh, " \
+         "ai/*/test/self-test.sh, ai/skills/*/test/self-test.sh) is declared " \
+         "there, every hook is invoked via its dedicated .self-test.sh " \
          "script (never `<hook>.sh --self-test`, which is a false green), and " \
          "keep run_one reporting the child's exit status with stdin closed."
     1
