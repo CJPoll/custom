@@ -550,7 +550,7 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
 - **Suite run:** `bash ai/hooks/athena-inbox-poll.self-test.sh </dev/null`
   (no network; every case gets a fake `$HOME`, a private `ATHENA_INBOX_ROOT`
   and its own `git init` repo under one `mktemp -d`; ~5s wall)
-- **Baseline:** `VERDICT: PASS (164 cases)` (91 at the first pass; 21 added
+- **Baseline:** `VERDICT: PASS (165 cases)` (91 at the first pass; 21 added
   after the sabotage run, 46 more across eight critic rounds — see *The four
   zeros* and *What the critic found that sabotage did not*)
 - **Runner:** 42 mutations, one at a time, full suite after each, restored by
@@ -895,6 +895,21 @@ reads no registry, cannot fail, and answers the one question that still has an
 answer when everything else has failed. The degraded route — an `inbox-status`
 too old to know the option — falls back to the shared names and **logs a `Fix:`
 first**, because silently sharing this state is the defect being closed. S39–S42.
+
+**The floor's nits, two of which had a wrong failure direction.**
+`STALE_SECONDS` and `WARN_INTERVAL_SECONDS` were read from the environment
+without the `case ''|*[!0-9]*)` guard every other number in the file carries.
+Unguarded, `[ "${age}" -ge "abc" ]` errors, `marker_is_stale` reads that error
+as **not stale**, and a typo in an environment variable therefore **suppressed**
+the warning instead of failing loudly — the wrong direction for the one
+mechanism whose job is to break a silence. And `F-4a`'s stripped `PATH` omitted
+`dirname`, without which the hook cannot locate itself at all, so that case was
+measuring a different failure than the one it names.
+
+**Left as raised, not fixed:** nothing prunes `athena-inbox-seen/`, so a repo
+that is deleted or moved leaves its markers behind forever. Harmless — a stale
+hash is never consulted again — but there is no reaper and nothing documents
+one.
 
 ### A harness hazard this run measured
 

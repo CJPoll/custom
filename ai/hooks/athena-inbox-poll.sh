@@ -137,9 +137,17 @@ LOG_MAX_LINES=200
 # Six hours: D6's window. Overridable for the self-test, which cannot wait.
 STALE_SECONDS="${ATHENA_INBOX_STALE_SECONDS:-21600}"
 WARN_INTERVAL_SECONDS="${ATHENA_INBOX_WARN_INTERVAL_SECONDS:-21600}"
+# Guarded like every other number read from outside this file. Unguarded, a
+# non-numeric value made `[ "${age}" -ge "$2" ]` error, which marker_is_stale
+# reports as NOT STALE -- so a typo in an environment variable silently
+# SUPPRESSED the warning instead of failing loudly. That is the wrong failure
+# direction for the one mechanism whose job is to break a silence.
+case "${STALE_SECONDS}" in ''|*[!0-9]*) STALE_SECONDS=21600 ;; esac
+case "${WARN_INTERVAL_SECONDS}" in ''|*[!0-9]*) WARN_INTERVAL_SECONDS=21600 ;; esac
 # The ceiling on the wrapped command. Generous for a file scan, and far below
 # any delay a person would tolerate at session start.
 STATUS_TIMEOUT_SECONDS="${ATHENA_INBOX_STATUS_TIMEOUT_SECONDS:-10}"
+case "${STATUS_TIMEOUT_SECONDS}" in ''|*[!0-9]*) STATUS_TIMEOUT_SECONDS=10 ;; esac
 
 usage() {
   sed -n '2,/^#--- end usage ---$/p' "${BASH_SOURCE[0]}" \

@@ -269,7 +269,7 @@ setup_case
 register "${LOG_CHANNEL}"
 plant_log_lines
 NOBIN="${CASE_DIR}/nobin"; mkdir -p "${NOBIN}"
-for b in bash date mkdir wc tail mv rm stat sed grep cat timeout; do
+for b in bash dirname date mkdir wc tail mv rm stat sed grep cat timeout; do
   src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${NOBIN}/${b}"
 done
 OLD_PATH="${PATH}"
@@ -356,6 +356,7 @@ assert_eq "F-4 an unreadable root logs exactly one reason line" "1" \
 
 echo "== F-5 · F-6 · F-9: the stale warning, and its own rate limit =="
 
+
 # A FAILING poll, built from a real failure: a malformed registry entry makes
 # inbox-status exit 1 with empty stdout.
 break_registry() { printf 'not json at all' > "${ATHENA_INBOX_ROOT}/projects/p.json"; }
@@ -431,6 +432,19 @@ run_hook
 assert_contains "F-6 a session in another repo does not suppress this project's outage warning" \
   "has not succeeded recently" "$(context_of "${OUT}")"
 
+# A non-numeric window is a typo, and the unguarded form failed in the WRONG
+# DIRECTION: `[ "${age}" -ge "abc" ]` errors, marker_is_stale reads the error as
+# NOT STALE, and the typo silently suppresses the one mechanism whose job is to
+# break a silence. It now falls back to the documented six hours.
+setup_case
+register "${LOG_CHANNEL}"
+break_registry
+export ATHENA_INBOX_STALE_SECONDS=not-a-number
+run_hook
+export ATHENA_INBOX_STALE_SECONDS=3600
+assert_contains "F-5 a non-numeric staleness window falls back, it does not silence" \
+  "has not succeeded recently" "$(context_of "${OUT}")"
+
 # TWO REGISTERED PROJECTS, ONE $HOME. The case above covers a repo that never
 # opted in; this covers the one the suite could not see, and the one that is
 # reachable on this machine today -- its registry holds several entries. The
@@ -493,7 +507,7 @@ assert_no_file "F-7 a failing run does NOT stamp the success marker" "$(pm succe
 setup_case
 register "${LOG_CHANNEL}"
 NOBIN="${CASE_DIR}/nobin"; mkdir -p "${NOBIN}"
-for b in bash date mkdir wc tail mv rm stat sed grep cat timeout; do
+for b in bash dirname date mkdir wc tail mv rm stat sed grep cat timeout; do
   src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${NOBIN}/${b}"
 done
 OLD_PATH="${PATH}"
