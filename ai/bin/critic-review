@@ -83,7 +83,26 @@ def run(argv)
     puts "critic-review: PASS — athena-diff-critic reported no findings on the diff vs #{base}."
   when "block"
     warn "critic-review: BLOCKED — athena-diff-critic found: #{findings.join(', ')}"
-    warn raw.lines.grep(/^\s*-\s*\[/).join
+    # PRINT THE BODY, NOT A GREP OF IT.
+    #
+    # This was `raw.lines.grep(/^\s*-\s*\[/)`, which printed NOTHING whenever
+    # the critic formatted a finding any other way -- a numbered list, a
+    # "**MUST-FIX**" heading, a table. The caller was then told the judge had
+    # found things in three categories and shown none of them. Measured on
+    # DND-184: three consecutive BLOCKED runs whose findings were dropped
+    # here, and the work could only continue by invoking the critic by hand.
+    #
+    # A filter that silently discards the only content that matters, and
+    # reports success at doing so, is the defect class this judge exists to
+    # catch, sitting in the judge's own runner.
+    #
+    # Everything above the FINDINGS trailer is the report, printed whole. The
+    # trailer is dropped because the line above already names the categories.
+    body = raw.to_s.lines
+    trailer = body.rindex { |l| l =~ /^\s*FINDINGS:/i }
+    body = body[0...trailer] if trailer
+    text = body.join.strip
+    warn(text.empty? ? "  (the critic returned a verdict with no body -- re-run to see it)" : text)
     warn "  Fix: address each finding above (or, if a finding is wrong, say why in the MR) before this change ships."
   when "fail-open"
     warn "critic-review: FAIL-OPEN — the critic did not return a usable verdict (infra/model error); NOT blocking."
@@ -120,6 +139,24 @@ def run_self_test
     ok &&= (run(["--base", "main"]) == 0)
     ENV["CRITIC_REVIEW_STUB"] = broken_out
     ok &&= (run(["--base", "main"]) == 0) # fail-open, not block
+
+    # THE BODY REACHES THE CALLER even when it is not a "- [cat]" bullet list.
+    # A blocked run that shows no findings is unactionable, and the previous
+    # grep produced exactly that for any other format.
+    odd_out = File.join(d, "o")
+    File.write(odd_out, "**MUST-FIX**\n1. foo.sh:12 drops the status\nFINDINGS: correctness\n")
+    ENV["CRITIC_REVIEW_STUB"] = odd_out
+    shown = +""
+    begin
+      require "stringio"
+      prev = $stderr; $stderr = StringIO.new
+      ok &&= (run(["--base", "main"]) == 2)
+      shown = $stderr.string
+    ensure
+      $stderr = prev
+    end
+    ok &&= shown.include?("foo.sh:12 drops the status")
+    ok &&= !shown.include?("FINDINGS: correctness")   # the trailer is not echoed
     ENV.delete("CRITIC_REVIEW_STUB")
   end
   if ok
