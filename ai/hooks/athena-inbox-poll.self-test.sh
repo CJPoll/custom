@@ -46,15 +46,39 @@ trap cleanup EXIT INT TERM
 # A fingerprint of the real marker family BEFORE anything runs. The whole suite
 # is worthless if it silently mutates the live rate-limit state -- and a bug
 # that did so would look exactly like a green run.
+#
+# This fingerprints ONLY the members of the family that the live SessionStart
+# poll never writes on a healthy machine: the top-level FALLBACK markers (the
+# hook writes athena-inbox-last-success / -warn / -health-warn solely on its
+# degraded, hash-unresolvable path, which the real poll on this machine never
+# takes because git resolves its repo hash) and settings.json (the hook only
+# ever READS it). Three former members are DELIBERATELY excluded --
+# athena-inbox-last-poll (the attempt marker, stamped first on every run),
+# athena-inbox-poll.log (appended on every run) and the athena-inbox-seen
+# DIRECTORY (whose mtime moves whenever the poll adds a marker under the real
+# repo's hash). The live poll rewrites all three on EVERY new session, so
+# fingerprinting their mtime conflated "the suite leaked into real $HOME" with
+# "an unrelated concurrent live poll wrote its own markers": solo the suite
+# finished before a live write landed, but inside the sequential harness gate a
+# legitimate poll write landed mid-run and the guard cried wolf (DND-224). A
+# genuine leak into those files is caught instead by the fake-project-hash check
+# at the end of the run, which the live poll can NEVER trip -- a precise
+# signature in place of a racy mtime.
 real_markers_fingerprint() {
   local f
-  for f in athena-inbox-last-poll athena-inbox-last-success athena-inbox-last-warn \
-           athena-inbox-last-health-warn athena-inbox-poll.log athena-inbox-seen \
-           settings.json; do
+  for f in athena-inbox-last-success athena-inbox-last-warn \
+           athena-inbox-last-health-warn settings.json; do
     printf '%s:%s\n' "${f}" "$(stat -c %Y -- "${REAL_HOME}/.claude/${f}" 2>/dev/null || printf 'absent')"
   done
 }
 REAL_MARKERS_BEFORE="$(real_markers_fingerprint)"
+
+# The set of real-$HOME seen markers that already exist BEFORE the suite runs.
+# The live poll may ADD one keyed to the REAL repo hash while the suite runs --
+# that is allowed and must not fail the guard. Only a marker keyed to one of the
+# FAKE project hashes this suite fabricates is a leak (see the check at the end).
+# Recorded for context in the failure message, not asserted against.
+REAL_SEEN_DIR="${REAL_HOME}/.claude/athena-inbox-seen"
 
 PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
@@ -1316,9 +1340,52 @@ assert_contains "-h states the counts-only rule" "WHAT IT NEVER PRINTS" "${OUT}"
 if [ -x "${STATUS_BIN}" ]; then ok "the wrapped command exists where the hook resolves it"
 else bad "the wrapped command exists where the hook resolves it" "not executable: ${STATUS_BIN}"; fi
 
-# The real HOME was never a target — by fingerprint, not by inspection.
+# The real HOME was never a target. Two independent checks, because the live
+# machine writes into ~/.claude on its own cadence and the guard must tell a
+# genuine suite leak apart from an unrelated concurrent live poll write.
 HOME="${REAL_HOME}"
 export HOME
+
+# (1) The PRECISE leak signature. A genuine suite leak means a case ran the hook
+# with HOME pointing at the real $HOME instead of its per-case tmp home; the hook
+# then resolves this suite's FAKE repo (every fake project lives under ${TMP}, so
+# its repo-key -- and thus the marker hash -- is unique to this run) and writes
+# a marker under ${REAL_HOME}/.claude/athena-inbox-seen/<fake-hash>.*. The live
+# poll only ever writes under the REAL repo's hash, so this signature is one it
+# can NEVER produce. The fake hashes are recomputed the SAME way the hook names
+# them -- inbox-status --repo-key, hashed -- so a divergence between suite and
+# hook cannot hide a leak.
+leaked=""
+for _proj in "${TMP}"/case-*/proj; do
+  [ -d "${_proj}" ] || continue
+  _fkey="$(cd "${_proj}" 2>/dev/null && "${STATUS_BIN}" --repo-key 2>/dev/null)" || continue
+  [ -n "${_fkey}" ] || continue
+  _fhash="$(printf '%s' "${_fkey}" | sha256sum 2>/dev/null | cut -c1-32)"
+  case "${_fhash}" in ''|*[!0-9a-f]*) continue ;; esac
+  for _m in "${REAL_SEEN_DIR}/${_fhash}."*; do
+    [ -e "${_m}" ] || continue
+    leaked="${leaked}
+        ${_fhash}.$(basename "${_m}" | sed "s/^${_fhash}\.//")  (fake project: ${_fkey})"
+  done
+done
+if [ -z "${leaked}" ]; then
+  ok "no fake-project marker leaked into the real \$HOME seen dir"
+else
+  bad "no fake-project marker leaked into the real \$HOME seen dir" \
+"the suite wrote per-project marker(s) into ${REAL_SEEN_DIR} keyed to a FAKE
+        project it fabricated under ${TMP} -- so a case ran the hook against the
+        real \$HOME rather than its per-case tmp home:${leaked}
+        Fix: find the case that reached run_hook/run_stub_hook without a
+        preceding setup_case (so HOME still pointed at ${REAL_HOME}), or a helper
+        that built a marker path from \${REAL_HOME} instead of \${HOME}. Every
+        marker the hook writes must land under the per-case \${HOME} beneath
+        ${TMP}. Remove the leaked file(s) named above from ${REAL_SEEN_DIR}."
+fi
+
+# (2) The daemon-untouched members of the family, byte-for-byte unmoved. See
+# real_markers_fingerprint for why last-poll / poll.log / the seen dir are NOT
+# in this set (the live poll owns them; asserting them unchanged is asserting a
+# falsehood whenever a session coincides).
 assert_eq "the suite left the real \$HOME marker family untouched" \
   "${REAL_MARKERS_BEFORE}" "$(real_markers_fingerprint)"
 
