@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+#
+# setup-athena-inbox-client — install (or remove) the user-crontab entries that
+# keep the Athena inbox client alive on this OpenRC host.
+#
+# There is no `systemd --user` here, and an /etc/init.d service is a
+# system-level change that belongs to Cody, not to an agent. The user crontab
+# (cronie) is the only user-level scheduler available, and it is exactly how
+# scripts/athena-shipwright-run.sh is kept alive — this script mirrors
+# scripts/setup-shipwright-cron deliberately.
+#
+# Two entries are installed, both pointing at the MAIN CHECKOUT's
+# scripts/athena-inbox-client-run.sh — never at a worktree's copy, even when
+# this installer is run from one. A worktree path vanishes when `wt` cleans the
+# branch up, and cron would go on firing a job pointing at a file that no longer
+# exists: silently, forever, with nothing supervising the client. Same failure
+# class, same resolver, as scripts/setup-hooks.
+#
+# Consequence worth knowing before you run it: on a branch whose runner has not
+# merged yet, install correctly REFUSES (exit 2) because the main checkout has
+# no runner to schedule. Install after the merge, from anywhere.
+#
+# The two entries are:
+#
+#   @reboot          <runner>   start the supervisor when the box comes up
+#   */5 * * * *      <runner>   relaunch it if it ever died
+#
+# The second entry costs nothing while the client is healthy: the runner takes
+# an flock on its pidfile and a second invocation exits immediately without
+# starting anything. It is a paced, bounded external poll — not a spin loop,
+# and nothing it starts can be orphaned (PT-919).
+#
+# Idempotent. The crontab is edited read-modify-write: every line mentioning the
+# runner's absolute path is filtered out and the two canonical entries are
+# re-appended. Unrelated entries — notably the shipwright's hourly line — are
+# preserved verbatim, with one documented exception: blank lines are dropped,
+# because the filter normalises whitespace-only lines away. Comments and every
+# real entry survive unchanged.
+#
+# Usage:
+#   setup-athena-inbox-client [--install] [--dry-run]
+#   setup-athena-inbox-client --check
+#   setup-athena-inbox-client --remove [--dry-run]
+#   setup-athena-inbox-client --self-test
+#   setup-athena-inbox-client --help
+#
+# Options:
+#   --install    Install both crontab entries (the default when no mode is given)
+#   --check      Read-only: report whether both entries are live. Safe for an
+#                agent or CI to run. Prints OK plus the matching lines, or
+#                MISSING plus a Fix: line naming the exact command, exit 1.
+#   --dry-run    Print what would happen; change nothing
+#   --remove     Remove this script's crontab entries and exit
+#   --self-test  Run the suite in scripts/test/athena-inbox-client/. It works on
+#                a temporary crontab behind a PATH shim, never the live one.
+#   --help       Show this help
+#
+# Options are order-independent.
+#
+# Environment (both optional; the defaults are the production values):
+#   ATHENA_INBOX_CLIENT_LAUNCHER    the client launcher to require and schedule
+#                                   around (~/.local/bin/athena-inbox-client)
+#   ATHENA_INBOX_CLIENT_RUNNER_DIR  the directory holding the runner to
+#                                   schedule. Defaults to the MAIN CHECKOUT's
+#                                   scripts/ (see above); exists so the
+#                                   self-test can install against a fixture,
+#                                   and is not something an operator should
+#                                   need — pointing it at a worktree
+#                                   reintroduces the vanishing-path bug.
+#
+# Exit codes: 0 ok · 1 usage/arg error, or --check found the entries missing
+#             · 2 missing prerequisite
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+
+# The crontab entry must name the MAIN checkout's runner, never a worktree's.
+# Captains run this from `~/.local/worktrees/custom/<branch>`; `wt` deletes that
+# path on cleanup, and cron would then fire a job pointing at a file that no
+# longer exists — silently, forever, with nothing supervising the inbox client
+# and no artifact anywhere. That is the 2026-09-17 outage class, which
+# `scripts/setup-hooks` already fixed for hook wiring; the resolver below is
+# deliberately the same one (a worktree's --git-common-dir IS the main
+# checkout's .git). Falls back to SCRIPT_DIR outside git.
+#
+# `--check` inherits this, which is the point: run from a worktree it reports
+# on the entries that are actually installed, rather than reporting OK on
+# doomed ones.
+main_checkout_dir() {
+  local common parent
+  common="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)" \
+    || { printf '%s\n' "$SCRIPT_DIR"; return 0; }
+  [ -n "$common" ] || { printf '%s\n' "$SCRIPT_DIR"; return 0; }
+  case "$common" in /*) ;; *) common="${SCRIPT_DIR}/${common}" ;; esac
+  parent="$(dirname -- "$common")"
+  if [ -d "${parent}/scripts" ]; then
+    (cd -- "${parent}/scripts" && pwd -P)
+  else
+    printf '%s\n' "$SCRIPT_DIR"
+  fi
+}
+RUNNER_DIR="${ATHENA_INBOX_CLIENT_RUNNER_DIR:-$(main_checkout_dir)}"
+RUNNER="${RUNNER_DIR}/athena-inbox-client-run.sh"
+SELF_TEST="${SCRIPT_DIR}/test/athena-inbox-client/self-test.sh"
+LAUNCHER="${ATHENA_INBOX_CLIENT_LAUNCHER:-${HOME}/.local/bin/athena-inbox-client}"
+
+REBOOT_SCHEDULE="@reboot"
+RELAUNCH_SCHEDULE="*/5 * * * *"
+
+MODE="install"
+DRY_RUN=0
+
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
+
+# ---- args (order-independent) ----------------------------------------------
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --install)   MODE="install" ;;
+    --check)     MODE="check" ;;
+    --remove)    MODE="remove" ;;
+    --self-test) MODE="self-test" ;;
+    --dry-run)   DRY_RUN=1 ;;
+    -h|--help)   usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2
+       echo "  Fix: use one of --install (default), --check, --remove, --self-test," \
+            "--dry-run, --help." >&2
+       exit 1 ;;
+  esac
+  shift
+done
+
+say()  { printf '%s\n' "$*"; }
+step() { printf '\n== %s\n' "$*"; }
+
+# ---- self-test path (delegates to the suite) -------------------------------
+if [ "$MODE" = "self-test" ]; then
+  if [ ! -x "$SELF_TEST" ]; then
+    echo "error: self-test suite not found or not executable: $SELF_TEST" >&2
+    echo "  Fix: restore scripts/test/athena-inbox-client/self-test.sh and chmod +x it." >&2
+    exit 2
+  fi
+  if bash "$SELF_TEST"; then
+    say "ALL CASES PASS"
+    exit 0
+  fi
+  echo "SELF-TEST FAILED" >&2
+  echo "  Fix: read the failing case above — each names the behaviour it protects —" \
+       "repair scripts/athena-inbox-client-run.sh or this installer, then re-run" \
+       "'scripts/setup-athena-inbox-client --self-test'." >&2
+  exit 1
+fi
+
+# ---- crontab access --------------------------------------------------------
+command -v crontab >/dev/null 2>&1 || {
+  echo "error: crontab not installed (need cronie/dcron)." >&2
+  echo "  Fix: install cronie (Cody, as root: sudo emerge sys-process/cronie)," \
+       "then re-run this script." >&2
+  exit 2
+}
+
+# The current crontab, or empty when the user has none. "no crontab for user"
+# goes to stderr and is not an error here.
+read_crontab() { crontab -l 2>/dev/null || true; }
+
+# Replace the crontab with $1 (or preview it under --dry-run).
+put_crontab() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  [dry-run] resulting crontab would be:"
+    printf '%s\n' "$1" | sed 's/^/    /'
+    return 0
+  fi
+  # The status MUST be checked. This script runs without `set -e` (so a failed
+  # probe does not abort a report), which means an unchecked `crontab -` failure
+  # would fall straight through to the "installed:" message and exit 0 — the
+  # installer would claim success while leaving the client unscheduled. That is
+  # the exact silent-failure class this facility exists to close, and it is the
+  # LIKELY failure here: the per-user spool dir being missing or wrong is the
+  # known breakage on this box, and this script deliberately does not carry
+  # setup-shipwright-cron's root repair for it.
+  if printf '%s\n' "$1" | crontab -; then
+    return 0
+  fi
+  echo "error: writing the crontab failed — nothing was installed or removed." >&2
+  echo "  Fix: the per-user spool dir is the usual cause (crontab says something like" \
+       "'\"/var/spool/cron/crontabs\" is not a directory, bailing out')." \
+       "scripts/setup-shipwright-cron owns the root repair for that spool dir — run it" \
+       "once (it needs sudo, so it is Cody's to run), then re-run this script and" \
+       "confirm with 'scripts/setup-athena-inbox-client --check'." >&2
+  exit 2
+}
+
+# Everything in the crontab that is NOT one of our entries, blank lines dropped.
+# Matching is on the runner's ABSOLUTE PATH, which is what makes install
+# idempotent and remove exact: no other job can mention it.
+without_our_entries() {
+  printf '%s\n' "$1" | grep -vF -- "$RUNNER" | sed '/^[[:space:]]*$/d'
+}
+
+REBOOT_LINE="${REBOOT_SCHEDULE} ${RUNNER}"
+RELAUNCH_LINE="${RELAUNCH_SCHEDULE} ${RUNNER}"
+
+# ---- check path (read-only) ------------------------------------------------
+if [ "$MODE" = "check" ]; then
+  current="$(read_crontab)"
+  have_reboot=0; have_relaunch=0
+  printf '%s\n' "$current" | grep -qxF -- "$REBOOT_LINE"   && have_reboot=1
+  printf '%s\n' "$current" | grep -qxF -- "$RELAUNCH_LINE" && have_relaunch=1
+
+  if [ "$have_reboot" -eq 1 ] && [ "$have_relaunch" -eq 1 ]; then
+    say "OK — both Athena inbox client crontab entries are installed:"
+    printf '%s\n' "$current" | grep -F -- "$RUNNER" | sed 's/^/  /'
+    exit 0
+  fi
+
+  {
+    echo "MISSING — the Athena inbox client is not durably scheduled; nothing restarts it."
+    [ "$have_reboot" -eq 1 ]   || echo "  missing: ${REBOOT_LINE}"
+    [ "$have_relaunch" -eq 1 ] || echo "  missing: ${RELAUNCH_LINE}"
+    echo "  Fix: run 'scripts/setup-athena-inbox-client' to install both entries."
+  } >&2
+  exit 1
+fi
+
+# ---- remove path -----------------------------------------------------------
+if [ "$MODE" = "remove" ]; then
+  step "Removing the Athena inbox client crontab entries"
+  current="$(read_crontab)"
+  put_crontab "$(without_our_entries "$current")"
+  say "Done. Any client already running is left alone; it simply will not be relaunched."
+  say "Stop a running supervisor by killing the pid in ~/.local/state/athena-inbox-client.pid."
+  exit 0
+fi
+
+# ---- install path ----------------------------------------------------------
+[ -x "$RUNNER" ] || {
+  echo "error: runner not found or not executable: $RUNNER" >&2
+  echo "  Fix: restore scripts/athena-inbox-client-run.sh and chmod +x it, then re-run." >&2
+  exit 2
+}
+
+[ -x "$LAUNCHER" ] || {
+  echo "error: client launcher not found or not executable: $LAUNCHER" >&2
+  echo "  Fix: install ~/.local/bin/athena-inbox-client (it must exec the ABSOLUTE ruby" \
+       "3.3.0 path and the client's --config, never the asdf shim), chmod +x it, then re-run." >&2
+  exit 2
+}
+
+step "Cron daemon"
+if pgrep -x crond >/dev/null 2>&1 || pgrep -x cron >/dev/null 2>&1; then
+  say "  running."
+else
+  say "  NOT running — the entries will install but nothing will fire them."
+  say "  These need root, so they are Cody's to run, not an agent's:"
+  say "    sudo rc-update add cronie default && sudo rc-service cronie start"
+fi
+
+step "Crontab entries"
+current="$(read_crontab)"
+kept="$(without_our_entries "$current")"
+if [ -n "$kept" ]; then
+  new_crontab="$(printf '%s\n%s\n%s' "$kept" "$REBOOT_LINE" "$RELAUNCH_LINE")"
+else
+  new_crontab="$(printf '%s\n%s' "$REBOOT_LINE" "$RELAUNCH_LINE")"
+fi
+put_crontab "$new_crontab"
+if [ "$DRY_RUN" -eq 1 ]; then
+  say "  [dry-run] would install:"
+else
+  say "  installed:"
+fi
+say "    ${REBOOT_LINE}"
+say "    ${RELAUNCH_LINE}"
+if [ -n "$kept" ]; then
+  say "  preserved $(printf '%s\n' "$kept" | wc -l | tr -d ' ') unrelated crontab entr(y/ies)."
+fi
+
+step "Done"
+say "Verify:      scripts/setup-athena-inbox-client --check"
+say "Start now:   ${RUNNER}    (blocks; it is the supervisor)"
+say "             or wait for the */5 entry to pick it up."
+say "Watch:       tail -f ~/.local/state/athena-inbox-client.log"
+say "Stopped?     ~/.local/state/athena-inbox-client.stopped means the client hit a"
+say "             partial write (exit 2). Fix the inbox fragment first; removing the"
+say "             marker alone re-corrupts the file on the next append."

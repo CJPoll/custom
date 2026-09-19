@@ -115,7 +115,10 @@ gh api repos/<owner>/<repo>/check-runs/<id>/annotations   # a bot that ran but c
 
 The review **floor is universal and forge-independent** (see the athena-captain
 definition): a local `code-reviewer` + `adr-reviewer` pair, one round, runs on
-**every** PR — it is the guaranteed floor, not a fallback. A repo's CI review
+**every** PR — it is the guaranteed floor, not a fallback. Those are role
+names, not agent types: the definitions ship only in `walt_ui/.claude/agents/`,
+so on a GitHub repo you generally spawn two general-purpose subagents briefed
+to the two roles. A repo's CI review
 bot is **additive**: address it on top when it actually ran; it never satisfies
 the floor by itself. Most GitHub repos (gen_saas included) ship no CI review
 bot, so on GitHub the local pair is typically the whole review round. Self-review

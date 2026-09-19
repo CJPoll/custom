@@ -1,5 +1,8 @@
 # Custom Tools Repository
 
+**Kind: living normative document.** Amended in place, per *Documentation
+conventions* → the living/dated rule below.
+
 ## Project Overview
 This repository contains personal development tools and configurations:
 - **dotfiles/**: Personal dotfiles and configurations
@@ -55,7 +58,11 @@ Contains AI-related resources:
 - **skills/**: Claude Code skills (symlinked to `~/.claude/skills`)
 - **contracts/**: normative cross-project contracts — interfaces this machine's
   projects implement against, owned here rather than by any one consumer (e.g.
-  `athena-inbox.md`, the local multi-tenant message facility)
+  `athena-inbox.md`, the local multi-tenant message facility). A project opts
+  into the inbox through a machine-local registry entry under
+  `$ATHENA_INBOX_ROOT/projects/` (default `~/.local/share/athena`), keyed by the
+  realpath of the repo's git common dir — **never** a file committed to the
+  consumer repo
 - **prompts/**: Legacy prompts (deprecated, migrated to skills)
 - Default `CLAUDE.md` template for Elixir projects
 - Other AI workflow configurations
@@ -104,8 +111,13 @@ sudo ln -sf ~/dev/custom/system-files/greetd-config.toml /etc/greetd/config.toml
 ## Documentation conventions
 
 These apply to harness docs in this repo — `ai/contracts/`, `ai/proposals/`,
-`ai-artifacts/shipwright/journal.md`, specs, ADRs, and cross-references between
-skills/agents. (Conventions adapted from riddler's howie/wurk harness.)
+`ai-artifacts/shipwright/journal.md`, this file, `ai/CLAUDE.md`, specs, ADRs,
+and cross-references between skills/agents. (Conventions adapted from riddler's
+howie/wurk harness.)
+
+**Dates in every dated label below are UTC**, whichever kind of document
+carries it, so a label can legitimately read one day ahead of the local date it
+was written on.
 
 - **Cite a skill's or document's steps by NAME, not by number.** Write
   "`processes:fix`'s command-resolution step", not "`processes:fix` step 2". A
@@ -114,7 +126,30 @@ skills/agents. (Conventions adapted from riddler's howie/wurk harness.)
   renumbering and a stale one is greppable. Numbers inside a file's own body are
   fine (a renumber edits that file anyway); a number outside follows the name as
   decoration only ("the command-resolution step, currently step 2").
-- **Never rewrite a dated document to match later reality; ANNOTATE it.** A
+- **A living normative document is amended in place; a dated record is not.**
+  The two rules below govern **dated records** — a proposal, a journal entry,
+  an ADR, a design page, anything whose value is that it says what was true on
+  its date. A **living normative document** is the opposite: a reader
+  implements from its current text, so a superseded rule is replaced rather
+  than left standing beside its replacement. Such a document announces each
+  amendment **that supersedes an existing rule** with **one** bold dated label
+  at the definitional mention — the place a reader grepping the superseded term
+  lands — saying what the rule was, what replaced it, and why. The unit here is
+  the **amendment**, not the document: a living document accumulates one label
+  per supersession, which is the difference from the per-document rule for
+  dated records below. **Purely additive content — a new section, a rule where
+  there was none — carries no label**; there is no superseded text for a reader
+  to be warned about, and labelling additions turns the marker into noise that
+  hides the supersessions.
+
+  **Which kind a document is, it says in its own header**; absent a header,
+  treat it as a dated record. That declaration is the rule — any list of
+  current living documents here would go stale the first time one is added.
+- **Never rewrite a dated document to match later reality; ANNOTATE it.**
+  (**Later (2026-09-19):** this rule and the one after it once governed every
+  harness doc listed above, `ai/contracts/` included. They now govern **dated
+  records only** — a living normative document is amended in place, per the
+  bullet above. Nothing about how a dated record is treated changed.) A
   reader who lands in a 2026-09-16 proposal or journal entry must learn what was
   true then. Corrections are added as a new paragraph whose first token is a
   bold dated label — `**Later (2026-10-01):** …` — the same shape as an existing
