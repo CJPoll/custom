@@ -28,7 +28,10 @@ the inbox lives in a consumer repo any more.
 **Counts are unprompted; bodies are not.**
 
 `inbox-status` is built to be injected by a SessionStart hook — before Cody has
-spoken. Anything it prints occupies the position where instructions normally
+spoken. That hook is `ai/hooks/athena-inbox-poll.sh` (DND-188), which wraps this
+command and owns the output contract; it is what produces the one-line notice a
+session opens with, and it is where the counts-only rule is enforced
+structurally. Anything it prints occupies the position where instructions normally
 live, and it is describing text written by arbitrary other people. So it prints
 counts and nothing else: no body, no subject, no sender, no filename, no token.
 
