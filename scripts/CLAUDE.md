@@ -130,6 +130,42 @@ detects a worktree. Onboarding a new work account: create its Notion
 Connection, share pages with it, save the secret to a token file, then extend
 the mode map near the top of the script.
 
+### Athena inbox client supervision
+
+Keeps the Athena inbox client (the process that appends Slack/agent-mail
+deliveries to `~/.local/share/athena/*.jsonl`) alive on this OpenRC host. There
+is no `systemd --user` here and `/etc/init.d` needs root, so the arrangement is
+**user crontab + a supervising wrapper** — the same shape as the shipwright
+loop above.
+
+- `athena-inbox-client-run.sh` — the supervisor. Holds an `flock` on its pidfile
+  for the whole supervised lifetime, so a second invocation exits 0 silently;
+  that is what makes the `*/5` relaunch entry a free safety net rather than a
+  machine for creating a second writer on an inbox the delivery contract says
+  has exactly one consumer. It runs `~/.local/bin/athena-inbox-client`, which
+  pins the **absolute** Ruby 3.3.0 path — never the asdf shim, which cron's
+  minimal environment cannot resolve (the bug `b5073fc` fixed for the shipwright
+  runner).
+  **Exit 2 is a full stop, not a retry.** It is the client's deliberate
+  partial-write exit: an inbox file ends in a fragment and the un-acked event is
+  re-pushed in full on reconnect, so relaunching appends a complete line after
+  the fragment and corrupts the file. The supervisor writes
+  `~/.local/state/athena-inbox-client.stopped` and refuses to start — on this
+  and every later invocation — until a human deletes the fragment and removes
+  the marker. Any other non-zero exit relaunches with capped exponential
+  backoff. SIGTERM/SIGINT reap the client and stop the supervisor.
+- `setup-athena-inbox-client` — the committed idempotent installer:
+  `--install` (default) · `--check` · `--dry-run` · `--remove` · `--self-test` ·
+  `-h`, order-independent. It installs `@reboot` and `*/5 * * * *` entries,
+  editing the crontab read-modify-write and filtering its own runner path out
+  before re-appending, so unrelated entries (notably the shipwright's hourly
+  line) survive install and remove. `--check` is read-only and safe for an agent
+  or CI: `OK` and exit 0, or `MISSING` plus a `Fix:` line and exit 1.
+- `test/athena-inbox-client/` — the self-test (QA plan I-8 … I-11) and its
+  `SABOTAGE_RECORDS.md`. The suite never opens a socket (the client is a stub)
+  and never touches the real crontab (`crontab(1)` is a PATH shim over a
+  tmpfile).
+
 ### General Guidelines
 - Scripts should be self-documenting with clear usage information
 - Use consistent error handling and exit codes

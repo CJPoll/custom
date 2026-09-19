@@ -54,9 +54,14 @@
 #   ATHENA_INBOX_CLIENT_MAX_LOG_LINES trim the log to this many lines between
 #                                     client runs (2000)
 #
+# Stopping it: kill the pid in ~/.local/state/athena-inbox-client.pid. SIGTERM
+# and SIGINT reap the client and stop the SUPERVISOR — they do not fall back
+# into the relaunch loop, or "stop" would mean "restart".
+#
 # Exit codes: 0 ok (client exited cleanly, or another instance holds the lock,
 #             or the stop marker is present) · 1 usage/arg error
 #             · 2 missing prerequisite (no launcher, no flock, unusable state dir)
+#             · 130 interrupted (SIGINT) · 143 terminated (SIGTERM)
 
 set -uo pipefail
 
@@ -182,7 +187,18 @@ child=""
 # A reaper is mandatory: the client is backgrounded so this shell can own the
 # signal handling, and a crashed or killed supervisor must never orphan it
 # (the PT-919 class of failure).
-trap 'if [ -n "$child" ]; then kill "$child" 2>/dev/null; fi' EXIT INT TERM
+reap_child() { if [ -n "$child" ]; then kill "$child" 2>/dev/null; fi; }
+trap reap_child EXIT
+
+# INT/TERM must stop the SUPERVISOR, not merely its current client. A handler
+# that only reaps and returns leaves `wait` interrupted with status 128+n,
+# which the loop below reads as "the client crashed" and dutifully RELAUNCHES —
+# so the documented recovery ("kill the pid in the pidfile") would restart the
+# very process the operator just stopped, with the pidfile still looking right.
+# Exiting here is what makes the stop a stop. The EXIT trap still fires, so the
+# child is reaped exactly once either way.
+trap 'reap_child; say "terminated by signal; supervisor stopping"; exit 143' TERM
+trap 'reap_child; say "interrupted; supervisor stopping"; exit 130' INT
 
 while :; do
   trim_log
