@@ -14,6 +14,27 @@ standalone (an admiral draining a Notion scope directly, an architect planning a
 single ticket), there is no sibling and none of this applies — follow your own
 process alone.
 
+**The agent directory is not reliably available — files are.** In most fleet
+sessions `ListAgents` is simply absent (an admiral or architect is itself a
+subagent, and a leaf session has no directory at all), and a `SendMessage`
+addressed to a sibling's *role* — or to a name you were handed rather than one
+you watched register — can bounce with nothing reachable. Measured repeatedly:
+2026-08-25 canvas-integration (a captain's `SendMessage` to "Coordinator"
+bounced, and its report file was the only delivery), 2026-08-27 workflow-builder
+and phase2-backlog, the 2026-09-08/09/10 flaky-lane runs, 2026-09-09 ecs-build,
+2026-09-10 graphql-feature, and 2026-09-18 athena-inbox — where the architect's
+retention decision reached the admiral only as a file, "because `SendMessage`
+could not reach you by name".
+
+So try the directory if you have it, but never make it your only path. The
+**admiral's run-id coordination directory is the channel both halves are
+guaranteed to share** — its state log (`.../[run-id]/state.md`) and its reports
+directory (`.../[run-id]/reports/`). Write what the sibling must know as a file
+there, named for what it carries, and say in your own report that you did. A
+file survives a missing directory, a bounced name, a dropped notification and a
+killed session; a message survives none of those. Treat an unavailable
+`ListAgents` as the normal case, not an incident to report.
+
 **Notion is the source of truth; local markdown is only private scratch.** The
 design artifacts live in Notion, never as authoritative local files. The
 architect owns and produces them as Notion sub-pages (mechanics in
