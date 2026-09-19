@@ -141,7 +141,7 @@ N_NA="$(count_state na)"
 # mix-up, not bookkeeping -- so it counts against `healthy` and the hook does
 # surface it. (The contract lists collision as a separate "MAY report" case, not
 # under the informational carve-out.)
-INFO_SET=" undeclared-entry server-instance "
+INFO_SET=" undeclared-entry server-instance never-delivered "
 N_INFO="$(printf '%s\n' "${FINDINGS}" | awk -F'\t' -v set="${INFO_SET}" '$1=="warn" && index(set," "$2" ")>0{n++} END{print n+0}')"
 
 if [ "${JSON}" -eq 1 ]; then

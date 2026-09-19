@@ -87,7 +87,11 @@ doctor_state_mode() {
 # it is not, na when either input is not a plain integer.
 doctor_state_future() {
   local ts="$1" now="$2"
-  case "${ts}" in ''|*[!0-9-]*) printf 'na\n'; return 0 ;; esac
+  # Plain digits only. Epochs here are non-negative (fs_epoch_of_rfc3339), and
+  # allowing a stray `-` let a value like `1-2` past the guard and into `[ -gt ]`,
+  # which errors and then falls to the `|| ok` branch -- printing `ok` where
+  # `na` is the honest answer.
+  case "${ts}" in ''|*[!0-9]*) printf 'na\n'; return 0 ;; esac
   case "${now}" in ''|*[!0-9]*) printf 'na\n'; return 0 ;; esac
   [ "${ts}" -gt "${now}" ] && printf 'warn\n' || printf 'ok\n'
 }
@@ -203,8 +207,11 @@ doctor_check_client_config() {
 # The partial-write stop marker. Its presence means the supervisor stopped the
 # client DELIBERATELY and a human is needed -- it does NOT recommend a blind
 # restart, because the marker exists precisely because restarting would re-hit a
-# partial line. Returns 0 always; prints the reason it carries (its first line),
-# which is the supervisor's own text about an inbox file, never message content.
+# partial line. Status 0 (and a warn finding) when the marker is present;
+# status 1 and NO finding when it is absent -- the caller uses that to decide
+# whether the running check is subsumed. The reason it prints is the marker's
+# first line, the supervisor's own text about an inbox file, never message
+# content.
 doctor_check_client_stopped() {
   local sf reason
   sf="$(doctor_stopfile)"
@@ -404,7 +411,9 @@ doctor_check_undeclared_live() {
 # Tenancy validates containment, not exclusivity, so a collision resolves for
 # both and neither is warned. A DIAGNOSTIC may report it (this is prompted); a
 # refusal still must not (that would enumerate a tenant's namespaces on a denial
-# path). INFORMATIONAL.
+# path). A collision is ACTIONABLE, not informational -- one tenant's mail lands
+# in the other's file -- so it is a `warn` that counts against `healthy` (it is
+# deliberately NOT in bin/inbox-doctor's INFO_SET).
 doctor_check_collisions() {
   local records surfaces dupes
   records="$(fs_registry_records 2>/dev/null)" || return 0
@@ -518,7 +527,12 @@ doctor_check_log_channel() {
   # rotated channel needs. So the never-delivered warning fires only when
   # neither file exists.
   if [ ! -e "${inbox}" ] && [ ! -e "${one}" ]; then
-    doctor_finding warn "channel:${chan}" "log channel \"${chan}\" has never received anything (${inbox##*/} does not exist)" \
+    # Its OWN check name, and informational for the hook's verdict (see
+    # INFO_SET in bin/inbox-doctor): the count path already surfaces
+    # never-delivered via inbox-status's HEALTH_TEXT, so letting THIS finding
+    # flip `healthy` too would double-nag one fault on two separate rate limits.
+    # A hand run still shows it as a warn with the producer-registration Fix.
+    doctor_finding warn "never-delivered" "log channel \"${chan}\" has never received anything (${inbox##*/} does not exist)" \
       "register this channel's producer -- a server-side agent instance mapped to ${inbox##*/} in the client config; an unregistered producer and an empty channel look identical on disk."
     return 0
   fi
@@ -783,7 +797,8 @@ doctor_check_overrides() {
       # INFORMATIONAL (its own check name), not an override error: an unclaimed
       # instance is bookkeeping, not a broken running chain, and must not flip
       # the chain's health or nag every session. Same class as an undeclared
-      # committed-list entry and a collision.
+      # committed-list entry (a collision, by contrast, IS actionable and
+      # counts against healthy).
       doctor_finding warn "server-instance" "server instance inbox_name \"${inbox_name}\" is claimed by no registry entry" \
         "no project declares a log channel with path \"${inbox_name}\", so mail delivered there is consumed by nobody. Declare it in a \$ATHENA_INBOX_ROOT/projects/<project>.json, or retire the server instance."
       unclaimed=1

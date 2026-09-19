@@ -54,6 +54,7 @@ assert_eq "mode empty -> na"        na   "$(doctor_state_mode '' 700)"
 assert_eq "future stamp -> warn"    warn "$(doctor_state_future 2000 1000)"
 assert_eq "past stamp -> ok"        ok   "$(doctor_state_future 500 1000)"
 assert_eq "junk stamp -> na"        na   "$(doctor_state_future abc 1000)"
+assert_eq "dash-in-stamp -> na"     na   "$(doctor_state_future 1-2 1000)"
 assert_eq "connected true -> ok"    ok   "$(doctor_state_connected true)"
 assert_eq "connected false -> warn" warn "$(doctor_state_connected false)"
 assert_eq "connected null -> na"    na   "$(doctor_state_connected null)"
@@ -193,7 +194,7 @@ ENTRY='{"v":1,"repo":"'"${C2}"'","channels":{"slack":{"kind":"log","path":"ch-sl
 printf '%s' "${ENTRY}" > "${ATHENA_INBOX_ROOT}/projects/ch.json"; chmod 600 "${ATHENA_INBOX_ROOT}/projects/ch.json"
 # never delivered (no file)
 CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"
-assert_finding "log never delivered -> warn" "${CH}" warn "channel:slack" "never received"
+assert_finding "log never delivered -> warn (own check)" "${CH}" warn "never-delivered" "never received"
 # deliver, good mode, fresh
 printf '{"v":1,"ts":"1","channel":"c","event_id":"e"}\n' > "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"; chmod 600 "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"
 CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"
@@ -348,6 +349,20 @@ assert_eq "channel file unchanged by a run" "${BEFORE}" "${AFTER}"
 [ ! -e "${ATHENA_INBOX_ROOT}/bin-slack.state.json" ] && ok "no state file written by a run" || bad "no state file written" "state.json created"
 
 # ============================================================================
+echo "== which states flip 'healthy' (the INFO_SET carve-out) =="
+# A COLLISION is actionable -> healthy false. Two entries on one surface.
+export ATHENA_INBOX_ROOT="${TMP}/hc"; mkdir -p -m 700 "${ATHENA_INBOX_ROOT}/projects"; chmod 700 "${ATHENA_INBOX_ROOT}"
+RH="${TMP}/repohc"; CH2="$(make_repo "${RH}")"
+printf '{"v":1,"repo":"%s","channels":{"s":{"kind":"log","path":"dup.jsonl"}}}' "${CH2}" > "${ATHENA_INBOX_ROOT}/projects/hc.json"; chmod 600 "${ATHENA_INBOX_ROOT}/projects/hc.json"
+printf '{"v":1,"repo":"/other/.git","channels":{"s":{"kind":"log","path":"dup.jsonl"}}}' > "${ATHENA_INBOX_ROOT}/projects/other.json"; chmod 600 "${ATHENA_INBOX_ROOT}/projects/other.json"
+printf '{"v":1,"ts":"1","channel":"c","event_id":"e"}\n' > "${ATHENA_INBOX_ROOT}/dup.jsonl"; chmod 600 "${ATHENA_INBOX_ROOT}/dup.jsonl"
+DECLHC="${TMP}/hc-committed.json"
+jq -n --arg r "${CH2}" '{v:1,projects:[{file:"hc.json",entry:{v:1,repo:$r,channels:{s:{kind:"log",path:"dup.jsonl"}}}},{file:"other.json",entry:{v:1,repo:"/other/.git",channels:{s:{kind:"log",path:"dup.jsonl"}}}}]}' > "${DECLHC}"
+JHC="$(cd "${RH}" && ATHENA_INBOX_REGISTRY="${DECLHC}" ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" ATHENA_INBOX_DOCTOR_CRON_CHECK=true bash "${BIN}" --json)"
+assert_eq "collision present" true "$(printf '%s' "${JHC}" | jq -r '[.findings[]|select(.check=="collision" and .state=="warn")]|length >= 1')"
+assert_eq "collision flips healthy to false" false "$(printf '%s' "${JHC}" | jq -r '.summary.healthy')"
+assert_eq "collision is not in the info bucket" 0 "$(printf '%s' "${JHC}" | jq -r '.summary.info')"
+
 printf '\n'
 if [ "${FAIL}" -eq 0 ]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0
 else echo "VERDICT: FAIL (${FAIL} failed, ${PASS} passed)"; exit 1; fi
