@@ -55,6 +55,39 @@ diff/context:
    to the diff.
 3. Prefer precision: only raise a finding you can defend from the evidence. A
    maybe goes in "notes", not "findings".
+4. **Before raising a finding that something is MISSING, name what would make
+   the absence benign — then check it.** Every rubric kind has an absence form
+   ("no authz check", "no test", "nothing validates X"), and an absence is the
+   one finding your method cannot establish by seeing it. The question to answer
+   out loud is: *what would I expect to see if this were present but invisible
+   to how I looked?* If you cannot answer it, the finding is a note, not a
+   finding.
+
+   The benign explanations that actually occurred, each of which was reported as
+   a defect and was wrong:
+
+   - **Enforced somewhere your grep does not reach.** PKCE was rated unenforced
+     from a grep that found only field definitions; enforcement was fail-closed
+     at both ends (a catch-all clause returning `{:error, :missing_code_verifier}`,
+     and `:code_challenge` inside `validate_required`). **Enforced-but-untested
+     and unenforced produce near-identical grep output**, because every existing
+     test supplies the value — so a missing NEGATIVE test is the real finding,
+     and it is a *tests* finding, not an *access-control* one.
+   - **Covered under a different name.** A completeness rule that scans for the
+     filename prefix `scripts/setup-*` was read as "the gate runs no `scripts/`
+     tests"; it ran two, and anything spelled differently escaped the rule by
+     name. A name-based rule cannot express a semantic property — which is
+     itself the finding worth raising, in place of the absence you assumed.
+   - **The instruction is unsatisfiable, so compliance is impossible.** Captains
+     were reported as failing to set a ticket status the tracker has no option
+     for. The absent behaviour was correct behaviour, and "fixing" it would have
+     been the regression.
+
+   So a defensible absence finding carries the negative evidence with it: the
+   probe you ran, what it would have shown had the thing been present, and why
+   the benign readings above do not apply. Absent that, write it as `unable to
+   assess` — which costs a reader one check, where a wrong absence finding costs
+   them a fix they did not need, or a real defect ruled out by your confidence.
 
 ## Output format
 
