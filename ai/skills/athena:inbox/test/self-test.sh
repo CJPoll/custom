@@ -819,6 +819,17 @@ printf '%s\n' '{ broken' > "${ATHENA_INBOX_ROOT}/projects/uproj2.json"
 assert_refused "an unparseable registry FILE is fatal to inbox_channels, not silent zero" \
   bash -c "cd '${uproj2}' && $(_in_libs) && inbox_channels"
 
+# A DANGLING SYMLINK registry file is a failed candidate too, not an absent one.
+# `-e` follows the link and is false, so it used to be skipped before the `-L`
+# test -- so a broken `<name>.json -> deleted` counted as nothing, no entry
+# matched, and inbox_channels reported zero channels ("not opted in") instead of
+# refusing. This is the same S35-class silence, via a symlink.
+setup_case
+uproj3="$(make_repo uproj3)"
+ln -s "${ATHENA_INBOX_ROOT}/projects/gone-target.json" "${ATHENA_INBOX_ROOT}/projects/uproj3.json"
+assert_refused "a DANGLING SYMLINK registry file is a failed candidate, not silent zero" \
+  bash -c "cd '${uproj3}' && $(_in_libs) && inbox_channels"
+
 # Ambiguous ownership must be fatal at EVERY entry point, not only in the
 # domain. Proven at the domain alone, the manager's "nothing owned, exit 0"
 # branch swallowed it and inbox-status printed nothing and exited 0 -- a

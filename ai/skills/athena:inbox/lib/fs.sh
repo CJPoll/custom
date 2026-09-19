@@ -185,7 +185,11 @@ fs_registry_records() {
 
   local base
   for file in "${dir}"/*.json; do
-    [ -e "${file}" ] || continue
+    # `-e` follows symlinks; a dangling symlink named `<name>.json` would be
+    # false and skipped, so a broken entry would go uncounted (a failed lookup
+    # masquerading as an empty one). `-L` keeps it, and the `[ -L ]` test below
+    # counts it as a failed candidate.
+    [ -e "${file}" ] || [ -L "${file}" ] || continue
     # NOT A CANDIDATE vs. A CANDIDATE THAT FAILED. Only a grammar-conformant
     # `*.json` was ever a registry entry, so only it can have been the one
     # claiming this session. A stray `walt_ui.json.bak` or `.walt_ui.json.swp`
