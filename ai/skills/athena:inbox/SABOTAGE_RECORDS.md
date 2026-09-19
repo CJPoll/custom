@@ -255,13 +255,13 @@ without it. Its header says so.
 - **Suite run:** `bash ai/hooks/athena-inbox-poll.self-test.sh </dev/null`
   (no network; every case gets a fake `$HOME`, a private `ATHENA_INBOX_ROOT`
   and its own `git init` repo under one `mktemp -d`; ~5s wall)
-- **Baseline:** `VERDICT: PASS (127 cases)` (91 at the first pass; 21 added
-  after the sabotage run, 15 more after the critic round — see *The four zeros*
-  and *What the critic found that sabotage did not*)
-- **Runner:** 27 mutations, one at a time, full suite after each, restored by
-  `cp` from a backup taken before the run. S24–S27 were added after the review
-  round (see *What the critic found that sabotage did not*). Final pass: **27
-  mutations, 27 reddened, no measured zeros.**
+- **Baseline:** `VERDICT: PASS (134 cases)` (91 at the first pass; 21 added
+  after the sabotage run, 22 more across three critic rounds — see *The four
+  zeros* and *What the critic found that sabotage did not*)
+- **Runner:** 29 mutations, one at a time, full suite after each, restored by
+  `cp` from a backup taken before the run. S24–S29 were added after the review
+  rounds (see *What the critic found that sabotage did not*). Final pass: **29
+  mutations, 29 reddened, no measured zeros.**
 
 The mutations were applied by an exact-substring replace that asserts the
 anchor occurs **exactly once** before writing, as DND-183's run did. That
@@ -304,6 +304,8 @@ produces 23 green runs, which reads as "this suite is dead".
 | S25 | the wrapped command loses its `timeout` ceiling | 2 | `FAIL  R14 a hanging inbox-status does not hang session start` |
 | S26 | the unreadable-entry `Fix:` collapses back into the generic one | 3 | `FAIL  R15 the unreadable-entry Fix names something actually actionable` |
 | S27 | the two warnings share one rate-limit marker again | 2 | `FAIL  R8 a fresh OUTAGE warning does not suppress a HEALTH warning` |
+| S28 | a non-opted-in repo counts as a successful poll again | 5 | `FAIL  F-4 a non-opted-in repo does NOT stamp success` |
+| S29 | a non-opted-in repo clears the other project's warn markers again | 2 | `FAIL  F-4 a non-opted-in repo does not clear the outage marker` |
 
 ### The four zeros
 
@@ -435,6 +437,38 @@ read-step pointer. The clause now names what the reader can actually check, and
 says outright that inbox-status cannot narrow it. **R15**, pinned by S26, with a
 companion case proving the channel-level clauses kept their pointer rather than
 both being flattened into one vague sentence.
+
+**The worst of them, found in the third round: "not opted in" was recorded as a
+SUCCESSFUL POLL**, which made the outage warning this hook exists to raise
+structurally unreachable.
+
+`inbox-status` answers `{"channels":[],"failed_candidates":0}` and exits 0 for
+any project with no matching registry entry — correctly, per the contract: *not
+opting in is not a fault*. The hook's `POLL_OK` test asked only whether
+`.channels` was an array, so that answer stamped `SUCCESS_MARKER` and cleared
+both warn markers. But the marker family is **per-`$HOME`** while the poll
+outcome is **per-cwd**, and the hook is registered with the `""` matcher — it
+runs in *every* repo on the machine. One session in walt_ui or gen_saas
+refreshed the success marker, so the six-hour staleness test could never come
+due, however broken the opted-in project's poll was. The same door made a
+**deleted or clobbered registry entry** — the silent-dark failure `CLAUDE.md`
+names for this registry — look exactly like never having opted in, in the one
+piece of state that could have told the difference.
+
+The fix is a third state. Not opted in is **neither** success nor failure:
+nothing stamped, nothing cleared, nothing printed, one line in the log. The
+opted-in project's markers are then only ever moved by that project's own
+sessions, which is what makes them mean anything — and a project whose entry
+vanishes stops stamping success, so its own next session crosses the staleness
+window and warns.
+
+**Why 27 mutations missed it.** `F-4c` was the only no-entry fixture, and it
+asserted stdout, rc and stderr — everything about that path *except* the marker
+state, which is the one thing it changes. And no case in the suite ever ran two
+different repos against one fake `$HOME`, so the cross-project mechanism had no
+fixture at all. Again a hole in the fixture space rather than the mutation set.
+Closed by the new `F-4` marker assertions and a two-repos-one-`$HOME` case;
+pinned by S28 and S29.
 
 ### Not exercised by this run
 

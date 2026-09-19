@@ -261,11 +261,34 @@ if [ -n "${STATUS_JSON}" ] \
   POLL_OK=1
 fi
 
-if [ "${POLL_OK}" -eq 1 ]; then
+# A THIRD STATE, and the one that matters most on this machine.
+#
+# `{"channels":[]}` is the answer for a project that never opted in -- and this
+# hook is registered with the "" matcher, so it runs in EVERY repo on the
+# machine, while the marker family lives under $HOME and is shared by all of
+# them. Counting that answer as a successful poll made the outage warning
+# STRUCTURALLY UNREACHABLE: one session in any unrelated repo refreshed
+# SUCCESS_MARKER and cleared the warn markers, so the six-hour staleness test
+# could never come due no matter how broken the opted-in project's poll was.
+#
+# It is not a failure either -- not opting in is not a fault, and warning about
+# it in every repo is exactly the noise that makes a real notice invisible. So
+# it is NEITHER: nothing stamped, nothing cleared, nothing printed, one line in
+# the log. The opted-in project's markers are then only ever moved by that
+# project's own sessions, which is what makes them mean anything.
+OPTED_IN=1
+if [ "${POLL_OK}" -eq 1 ] \
+   && printf '%s' "${STATUS_JSON}" | jq -e '(.channels | length) == 0' >/dev/null 2>&1; then
+  OPTED_IN=0
+fi
+
+if [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 1 ]; then
   stamp "${SUCCESS_MARKER}"
-else
+elif [ "${POLL_OK}" -eq 0 ]; then
   # NEVER the success marker here (S17).
   log_reason "inbox-status produced no usable status document (exit ${STATUS_RC}), so this session has no count. Fix: run ai/skills/athena:inbox/bin/inbox-status --json from this project to see the refusal it printed."
+else
+  log_reason "no registry entry declares a channel for this project, so there is nothing to poll here; the marker family was left untouched."
 fi
 
 # --- what to say -----------------------------------------------------------
@@ -322,7 +345,7 @@ if [ "${POLL_OK}" -eq 0 ]; then
     WARN_TEXT="athena:inbox: the session-start inbox check has not succeeded recently, so new mail may be arriving unreported. Fix: run ai/skills/athena:inbox/bin/inbox-status --json from this project and read the refusal; ~/.claude/athena-inbox-poll.log has the reason strings."
     WARN_TEXT_MARKER="${WARN_MARKER}"
   fi
-elif [ -n "${HEALTH_TEXT}" ]; then
+elif [ "${OPTED_IN}" -eq 1 ] && [ -n "${HEALTH_TEXT}" ]; then
   # The Fix: must answer the question it promises. inbox-status CAN name the
   # channel behind every clause here except one: it is counts-only for tenant
   # privacy, so it can say how many registry entries failed to parse but never
@@ -351,7 +374,9 @@ fi
 # health fault is not evidence that the poll is broken, and leaving the outage
 # marker stamped through a chronic health fault is how the next real outage gets
 # rate-limited by a fault that is already over.
-if [ "${POLL_OK}" -eq 1 ]; then
+# ...and only a poll that actually polled something. A non-opted-in repo clears
+# nothing, for the same reason it stamps nothing.
+if [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 1 ]; then
   unstamp "${WARN_MARKER}"
   # ...and a clean bill of health clears the health marker, so the next health
   # fault gets its own warning rather than inheriting this one's rate limit.
@@ -381,7 +406,10 @@ fi
 # "nothing new" every session is noise, and noise is what makes a real notice
 # invisible.
 if [ -z "${MESSAGE}" ]; then
-  [ "${POLL_OK}" -eq 1 ] && log_reason "polled; nothing to report."
+  # Only a run that actually polled something says so. A non-opted-in repo has
+  # already logged its own one line, and two lines per session in every repo on
+  # the machine is how a 200-line reason log becomes useless.
+  [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 1 ] && log_reason "polled; nothing to report."
   exit 0
 fi
 

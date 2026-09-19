@@ -295,6 +295,33 @@ assert_eq "F-4 no registry entry produces no stdout" "" "${OUT}"
 assert_eq "F-4 no registry entry still exits 0" "0" "${RC}"
 assert_eq "F-4 no registry entry is not an error on stderr" "" "${ERR}"
 
+# ...and it is not a SUCCESS either. This is the third state, and F-4c used to
+# assert everything about it EXCEPT the one thing it changes: marker state.
+# `{"channels":[]}` is the answer in every repo that never opted in, and this
+# hook runs in all of them off one shared marker family under $HOME. Stamping
+# success here let a session in any unrelated repo refresh SUCCESS_MARKER and
+# clear the warn markers, so the six-hour staleness test could never come due --
+# the outage warning this hook exists to raise was structurally unreachable, and
+# no mutation could show it because no fixture ever asserted these files.
+assert_no_file "F-4 a non-opted-in repo does NOT stamp success" \
+  "${HOME}/.claude/athena-inbox-last-success"
+assert_file "F-4 a non-opted-in repo still stamps the ATTEMPT marker" \
+  "${HOME}/.claude/athena-inbox-last-poll"
+assert_contains "F-4 a non-opted-in repo records why it did nothing" \
+  "nothing to poll here" "$(hook_log)"
+
+# Nor does it CLEAR what an opted-in session recorded. Same claim from the other
+# side: a warning raised by the project that OWNS these markers must survive a
+# session in an unrelated repo.
+setup_case
+touch "${HOME}/.claude/athena-inbox-last-warn"
+touch "${HOME}/.claude/athena-inbox-last-health-warn"
+run_hook
+assert_file "F-4 a non-opted-in repo does not clear the outage marker" \
+  "${HOME}/.claude/athena-inbox-last-warn"
+assert_file "F-4 a non-opted-in repo does not clear the health marker" \
+  "${HOME}/.claude/athena-inbox-last-health-warn"
+
 # F-4d: an unreadable root. Whatever inbox-status makes of it, the hook's
 # contract is unchanged: nothing on stdout, exit 0, one line in the log.
 setup_case
@@ -305,6 +332,9 @@ run_hook
 chmod 700 "${ATHENA_INBOX_ROOT}"
 assert_eq "F-4 an unreadable root produces no stdout" "" "${OUT}"
 assert_eq "F-4 an unreadable root still exits 0" "0" "${RC}"
+# One line, not two. (What that line SAYS depends on how far inbox-status got,
+# which is its business, not this hook's -- the contract here is that a failure
+# is recorded once and silently.)
 assert_eq "F-4 an unreadable root logs exactly one reason line" "1" \
   "$(hook_log | wc -l | tr -d ' ')"
 
@@ -363,6 +393,27 @@ break_registry
 touch "${HOME}/.claude/athena-inbox-last-success"
 run_hook
 assert_eq "F-6 a fresh success marker makes one failed poll silent" "" "${OUT}"
+
+# TWO REPOS, ONE $HOME -- the shape every other case in this suite is blind to,
+# because every other case has exactly one repo. The marker family is per-$HOME
+# and the poll outcome is per-cwd, and this hook is registered with the ""
+# matcher, so it runs in every repo on the machine. A stale, broken opted-in
+# project must still warn even though the last session was somewhere else
+# entirely.
+setup_case
+register "${LOG_CHANNEL}"
+OTHER="${CASE_DIR}/other"
+mkdir -p "${OTHER}"
+( cd "${OTHER}" && git init -q . && git config user.email t@t && git config user.name t )
+OTHER_SAVED="${REPO}"; REPO="${OTHER}"
+run_hook                                  # a session in the unrelated repo...
+assert_no_file "F-6 an unrelated repo's session leaves no success marker behind" \
+  "${HOME}/.claude/athena-inbox-last-success"
+REPO="${OTHER_SAVED}"
+break_registry                            # ...and now the opted-in project's poll is broken
+run_hook
+assert_contains "F-6 a session in another repo does not suppress this project's outage warning" \
+  "has not succeeded recently" "$(context_of "${OUT}")"
 
 echo "== F-7 · F-8: marker discipline =="
 
