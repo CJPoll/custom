@@ -140,7 +140,19 @@ Everything you learn from is local, under `~/dev/custom/`:
    `git checkout --` the touched files), journal the failure, and move to the
    next pattern. Never leave the tree dirty or broken.
 7. **Commit and journal.** One `git commit` per concern, in `~/dev/custom`, with
-   a message stating the pattern, the evidence (run-ids), and the fix. Append a
+   a message stating the pattern, the evidence (run-ids), and the fix.
+   **Stage the files YOU changed, by path — never `git add -A` / `git add .`.**
+   This repo is shared with live interactive sessions and with the owner's own
+   editing; `-A` stages whatever else happens to be dirty at that instant and
+   silently lands it under your commit message and your evidence. Measured
+   2026-09-18 (21:00 run): my first commit swept in a concurrent session's
+   `hypr/hyprland.conf` edit AND a 230-line `hyprland.conf.bak-*` the backup had
+   just dropped, and that session had to push a corrective commit to untrack it.
+   `git add -A` is also how an unrelated in-flight change gets attributed to the
+   shipwright in `git log`, which is the one audit trail invariant 3 relies on.
+   So: `git add <the exact paths>`, then `git status --porcelain` BEFORE
+   committing and confirm every staged path is one you touched (a rendered
+   `.md` from `ai/bin/build-agents` counts as yours). Append a
    journal entry (format below). Advance `cursor.txt` only after all of a run's
    qualifying patterns are handled — write it as the newest processed artifact's
    **full mtime including sub-second precision** (e.g.
