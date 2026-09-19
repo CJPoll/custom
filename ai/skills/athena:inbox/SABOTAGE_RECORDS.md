@@ -39,7 +39,7 @@ corrected and re-run.
   `bin/inbox-status`
 - **Suite run:** `bash test/self-test.sh` (no network — nothing here makes one;
   the inbox root is always a `mktemp -d`; ~2s wall)
-- **Baseline:** `VERDICT: PASS (188 cases)` (131 at the first pass; 11 added
+- **Baseline:** `VERDICT: PASS (200 cases)` (131 at the first pass; 11 added
   after the sabotage run found six checks the suite did not actually protect,
   plus the state-rewrite rule that arrived mid-build, plus 46 more from the
   `athena-diff-critic` round and the `code-reviewer`/`adr-reviewer` pair — see
@@ -137,10 +137,26 @@ suite:
 | The maildir count was **peer-controllable**: `ls -A` + a line filter counted a filename containing a newline twice, and a subdirectory as a message. The slug is prose the sender chose, so the sender decided how many messages it had sent. | Every fixture used conformant filenames. The count is the only number this command publishes. |
 | `$((offset + bytes))` and `tail -c "+$(( $2 + 1 ))"` are arithmetic contexts, and bash **executes a command substitution inside an array subscript** there. Confirmed: `logchan_scan 'a[$(touch /tmp/PWNED)]'` created the file. Unreachable through the manager, which sanitizes — but both are documented as strings-in primitives with no stated precondition, and their taint source becomes writable the moment the ack ticket lands. | A primitive that is only safe because of its current caller is not safe, and no mutation expresses "safe for the wrong reason". |
 | `fs_registry_records` hard-failed on **every** file in `projects/`, so one project's typo wedged `inbox-status` for every project on the machine — and the refusal printed another tenant's registry **filename**, the same disclosure `descriptor_select` refuses by name. | Every fixture had one registry file. Multi-tenancy is the whole point of the directory. |
+| A corrupt state file reset the offset to 0 AND emptied the seen-sets, silently disabling dedupe, with no flag — so every acked message was re-announced as new. | Every state fixture was well-formed. The failure produced a *larger* count, which looks exactly like a busy morning. |
 | `inbox_status_json` returned on any single channel's failure, so one symlinked inbox suppressed the counts for every other channel — contradicting `err.sh`'s own contract, which returns a status rather than exiting *"so a caller can refuse one channel without killing a multi-channel run"*. | No fixture had a broken channel and a healthy one at the same time. |
 
-The pattern across both rounds is worth naming, because it is the argument for
-running a reader alongside the mutations: **sabotage proves a check that exists
+A third round found the worst one of all: a **corrupt state file degraded into
+silence**. An unparseable state document, or a non-numeric `offset`, or a
+`seen_event_ids` that is not an array of strings, fell through every
+`2>/dev/null` into `offset=0` with EMPTY seen-sets — so the channel re-read the
+whole file AND had deduping silently switched off, and every message ever acked
+came back as `new`. Unlike the offset-past-EOF path one line below it, nothing
+set a flag, so the inflated count was indistinguishable from real mail in the
+pre-prompt position: the tool appearing to work perfectly while announcing a
+month of old messages as this morning's. It is now recovered (re-reading
+over-reports, which is recoverable; refusing would wedge the channel) and
+**reported** — `state_unreadable`, a refusal with a `Fix:` clause, and a line
+on the count itself saying the numbers include messages already read. Twelve
+cases, including the two that keep the warning honest: a healthy state file and
+an absent one must not raise it.
+
+The pattern across all three rounds is worth naming, because it is the argument
+for running a reader alongside the mutations: **sabotage proves a check that exists
 is load-bearing; it cannot find a check that was never written, one that is
 safe only by accident of its caller, or one whose failure is indistinguishable
 from success one layer up.**

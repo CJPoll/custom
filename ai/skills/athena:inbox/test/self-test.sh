@@ -352,8 +352,9 @@ assert_eq "an entry is selected by repo identity" "a-chan" "$(descriptor_channel
 tabrec="$(printf '%s\t%s\n' \
   '{"v":1,"repo":"/home/x/dev/a/.git","channels":{"a-chan":{"kind":"log","path":"a.jsonl"}}}' \
   "$(printf '/reg/we\tird.json')")"
+tabsel="$(printf '%s\n' "${tabrec}" | descriptor_select "/home/x/dev/a/.git")"
 assert_eq "a registry filename containing a tab does not silently drop the entry" "a-chan" \
-  "$(printf '%s\n' "${tabrec}" | descriptor_select "/home/x/dev/a/.git" | descriptor_channel_names /dev/stdin 2>/dev/null || printf '%s\n' "${tabrec}" | descriptor_select "/home/x/dev/a/.git" | { read -r j; descriptor_channel_names "${j}"; })"
+  "$(descriptor_channel_names "${tabsel}")"
 out="$(printf '%s\n' "${RECORDS}" | descriptor_select "/home/x/dev/c/.git" 2>&1)"; rc=$?
 assert_eq "A-8 an unregistered repo selects NOTHING -- there is no fallback" "" "${out}"
 assert_eq "A-8 an unregistered repo is not a fault, it is simply no match" "1" "${rc}"
@@ -938,6 +939,46 @@ else ok "a partial failure still exits non-zero"; fi
 out="$(cd "${pproj}" && "${BIN}/inbox-status" 2>/dev/null)"
 assert_contains "the text output still reports the healthy channel" "good — 1 new" "${out}"
 assert_contains "the text output names the channel that could not be counted" "broken" "${out}"
+
+# A CORRUPT STATE FILE. The worst of the swallowed failures: an unparseable
+# state document fell through every `2>/dev/null` into offset=0 with EMPTY
+# seen-sets, so the whole file was re-read AND deduping was silently switched
+# off -- every message ever acked came back as `new`. Unlike the stale-offset
+# path it set no flag, so the inflated count was indistinguishable from real
+# mail in the pre-prompt position.
+setup_case
+cproj="$(make_repo cproj)"
+register cproj "${cproj}" '{"c":{"kind":"log","path":"c.jsonl"}}'
+printf '%s\n%s\n' "${L1}" "${L2}" > "${ATHENA_INBOX_ROOT}/c.jsonl"
+for corrupt in '{ not json' '[]' '{"offset":"twelve","seen_event_ids":[],"seen_keys":[]}' '{"offset":0,"seen_event_ids":"Ev1","seen_keys":[]}' '{"offset":0,"seen_event_ids":[7],"seen_keys":[]}'; do
+  printf '%s' "${corrupt}" > "${ATHENA_INBOX_ROOT}/c.state.json"
+  jout="$(cd "${cproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+  assert_eq "a corrupt state file is REPORTED, not silently absorbed: [$(printf '%s' "${corrupt}" | cut -c1-26)…]" "true" \
+    "$(jq -r '.channels[] | select(.name=="c") | .state_unreadable' <<<"${jout}")"
+done
+# It recovers rather than refusing -- re-reading over-reports, which is
+# recoverable; refusing would wedge the channel entirely.
+assert_eq "a corrupt state file still yields a count rather than wedging the channel" "2" \
+  "$(jq -r '.channels[] | select(.name=="c") | .new' <<<"${jout}")"
+err="$(cd "${cproj}" && "${BIN}/inbox-status" 2>&1 >/dev/null)"
+assert_contains "the corrupt-state refusal carries a Fix: clause" "Fix:" "${err}"
+assert_contains "the refusal says plainly that the counts are not deduped" "not deduped" "${err}"
+out="$(cd "${cproj}" && "${BIN}/inbox-status" 2>/dev/null)"
+assert_contains "the count line itself warns that it includes already-read messages" \
+  "already read" "${out}"
+# A HEALTHY state file must not trip the flag -- otherwise the warning is
+# noise and stops being read.
+printf '%s' '{"v":1,"offset":0,"seen_event_ids":["Ev1"],"seen_keys":[]}' > "${ATHENA_INBOX_ROOT}/c.state.json"
+jout="$(cd "${cproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "a healthy state file does not raise the corruption flag" "false" \
+  "$(jq -r '.channels[] | select(.name=="c") | .state_unreadable' <<<"${jout}")"
+assert_eq "a healthy state file still dedupes" "1" \
+  "$(jq -r '.channels[] | select(.name=="c") | .new' <<<"${jout}")"
+# An ABSENT state file is the first run, which is normal and not corruption.
+rm -f "${ATHENA_INBOX_ROOT}/c.state.json"
+jout="$(cd "${cproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "an absent state file is first-run, not corruption" "false" \
+  "$(jq -r '.channels[] | select(.name=="c") | .state_unreadable' <<<"${jout}")"
 
 # A SUBDIRECTORY is not a message. The name predicate is name-only by design,
 # so the "is it actually a file" half has to happen where the filesystem is.

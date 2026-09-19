@@ -127,14 +127,47 @@ _inbox_count_log() {
   [ -e "${inbox}" ] || never="true"
   size="$(fs_size "${inbox}")"
 
-  local state_json
+  # A CORRUPT STATE FILE IS RECOVERED AND REPORTED, never silently absorbed.
+  #
+  # This was the worst of the swallowed failures. An unparseable state
+  # document, or an `offset` that is not a number, used to fall through every
+  # `2>/dev/null` into offset=0 with EMPTY seen-sets -- so the whole file was
+  # re-read AND deduping was silently switched off, and every message ever
+  # acked came back as `new`. Unlike the offset-past-EOF path below it set no
+  # flag, so the inflated count was indistinguishable from real mail in the
+  # pre-prompt position: the tool appearing to work perfectly while announcing
+  # a month of old messages as this morning's.
+  #
+  # Recovering rather than refusing is deliberate -- re-reading over-reports,
+  # which is recoverable, where refusing would wedge the channel entirely. But
+  # it is reported, because a silent recovery is how this stays invisible.
+  local state_json state_bad="false"
   state_json="$(fs_read_state "${state}")" || return 1
-  offset="$(printf '%s' "${state_json}" | jq -r '.offset // 0' 2>/dev/null)" || offset=0
-  case "${offset}" in ''|*[!0-9]*) offset=0 ;; esac
+  if ! printf '%s' "${state_json}" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    state_bad="true"; state_json='{}'
+  fi
+
+  offset="$(printf '%s' "${state_json}" | jq -r '(.offset // 0) | tostring' 2>/dev/null)" || offset=0
+  case "${offset}" in
+    ''|*[!0-9]*) offset=0; state_bad="true" ;;
+  esac
   if [ "${offset}" -gt "${size}" ]; then offset=0; stale="true"; fi
 
-  seen_ev="$(printf '%s' "${state_json}" | jq -r '(.seen_event_ids // [])[]' 2>/dev/null)"
-  seen_ky="$(printf '%s' "${state_json}" | jq -r '(.seen_keys // [])[]' 2>/dev/null)"
+  # The seen-sets must be an array of strings, or dedupe is silently a no-op.
+  if ! printf '%s' "${state_json}" | jq -e \
+       '((.seen_event_ids // []) | type == "array" and all(type == "string"))
+        and ((.seen_keys // []) | type == "array" and all(type == "string"))' >/dev/null 2>&1; then
+    state_bad="true"
+    seen_ev=""; seen_ky=""
+  else
+    seen_ev="$(printf '%s' "${state_json}" | jq -r '(.seen_event_ids // [])[]' 2>/dev/null)"
+    seen_ky="$(printf '%s' "${state_json}" | jq -r '(.seen_keys // [])[]' 2>/dev/null)"
+  fi
+
+  if [ "${state_bad}" = "true" ]; then
+    inbox_fail "channel \"${chan_label:-$(_inbox_path inbox "${resolved}" | sed 's|.*/||')}\" has an unreadable state file, so its counts are not deduped and include messages already read" \
+      "inspect ${state} (check it with: jq . \"${state}\"). Until it is valid JSON with a numeric \"offset\" and string arrays for \"seen_event_ids\"/\"seen_keys\", this channel re-reports everything; delete the file to start cleanly from offset 0."
+  fi
 
   slice="$(fs_slice_from "${inbox}" "${offset}"; printf X)"; slice="${slice%X}"
 
@@ -160,8 +193,9 @@ _inbox_count_log() {
   # not exist in the manager's return value at all, so no future renderer can
   # print one by accident.
   printf '%s' "${scan}" | jq -e -c \
-    --argjson never "${never}" --argjson stale "${stale}" \
-    '{new: .new, unreadable: .unreadable, never_delivered: $never, offset_reset: $stale}'
+    --argjson never "${never}" --argjson stale "${stale}" --argjson sbad "${state_bad}" \
+    '{new: .new, unreadable: .unreadable, never_delivered: $never,
+      offset_reset: $stale, state_unreadable: $sbad}'
 }
 
 # _inbox_count_maildir <resolved-paths>

@@ -14,8 +14,19 @@
 #     file it protects legitimately may not exist yet (first run).
 #   * fs_assert_regular is an lstat job. `realpath` FOLLOWS symlinks, so a
 #     symlink inside the root pointing inside the root passes containment and
-#     is still a symlink. This mirrors the deployed Ruby client's O_NOFOLLOW +
-#     regular-file fstat, rather than inventing a second mechanism.
+#     is still a symlink.
+#
+# A DELIBERATE, NAMED DEVIATION: the contract requires `O_NOFOLLOW` plus an
+# `fstat` on the descriptor actually held, which is atomic. This is
+# lstat-then-open, which is NOT: between `fs_assert_regular` and the `wc` /
+# `tail` / `cat` that follows, the path can be replaced by a symlink and is
+# then followed. Shell has no way to hold a descriptor across those commands,
+# so the check is the strongest available here rather than an equivalent one,
+# and the earlier wording claiming it "mirrors" the client's was overstating
+# it. The exposure is bounded -- the root is 0700 and single-user, so winning
+# the race requires the access an attacker would already need -- and it is
+# recorded here rather than argued away, because the other deliberate
+# deviations in this skill are.
 #
 # Source order: err.sh, names.sh, then this file. Requires jq.
 

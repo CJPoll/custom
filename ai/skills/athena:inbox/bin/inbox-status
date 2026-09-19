@@ -110,13 +110,15 @@ printf '%s' "${STATUS}" | jq -r --argjson have_read "${HAVE_READ}" '
   | (if .kind == "log" then (.new // 0) else (.unread // 0) end) as $n
   | (if .kind == "log" and ((.unreadable // 0) > 0)
      then " (+\(.unreadable) unreadable)" else "" end) as $u
+  | (if (.state_unreadable // false)
+     then "\n  Fix: this channel'"'"'s .state.json is unreadable, so these counts are NOT deduped and include messages already read — see the refusal above." else "" end) as $sbad
   | if (.error // false) then
       # Already refused on stderr with its own Fix: clause. Named here so the
       # reader can see WHICH channel is missing from the counts below, rather
       # than wondering whether it simply had nothing.
       "athena:inbox: \($c.name) — could not be counted; see the refusal above."
     elif $n > 0 then
-      "athena:inbox: \($c.name) — \($n) new\($u). \($read_hint)"
+      "athena:inbox: \($c.name) — \($n) new\($u). \($read_hint)\($sbad)"
     elif .kind == "log" and (.never_delivered // false) then
       "athena:inbox: \($c.name) is declared, but nothing has EVER been delivered to it.\n  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json — then re-check. An unregistered producer and an empty channel look identical on disk."
     else empty end
