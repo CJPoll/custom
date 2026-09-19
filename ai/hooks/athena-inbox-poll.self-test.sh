@@ -1356,11 +1356,14 @@ export HOME
 # hook cannot hide a leak.
 #
 # Every fake repo is enumerated by FINDING every git dir under ${TMP}, not by
-# path name: cases fabricate repos at proj/, other/, sibling/ and stubrepo/, so
-# a name-based list ("case-*/proj") would silently miss the others. And this
-# check refuses to read "found nothing to look at" as "no leak" (the repo's
-# "a failed lookup must never look like an empty one" rule): checking zero
-# projects, or being unable to compute any fake project's hash, is a FAILURE.
+# path name: cases fabricate repos at proj/, other/ and sibling/, so a name-based
+# list ("case-*/proj") would silently miss the others. (stubrepo/ is never
+# git-inited, so it has no key of its own -- the stub hook runs with cwd ${REPO},
+# i.e. proj/, so any leak it caused would be keyed to proj's hash, which IS
+# enumerated.) And this check refuses to read "found nothing to look at" as
+# "no leak" (the repo's "a failed lookup must never look like an empty one"
+# rule): checking zero projects, or being unable to compute any fake project's
+# hash, is a FAILURE.
 leaked=""
 checked=0
 uncomputable=""
@@ -1391,14 +1394,9 @@ if [ "${checked}" -eq 0 ]; then
         yet ${CASE_N} cases ran and every one fabricates a git repo. Either find(1)
         failed or the per-case repos are gone. Fix: confirm find is on PATH and
         the fake repos still exist under ${TMP} when this check runs."
-elif [ -n "${uncomputable}" ]; then
-  bad "no fake-project marker leaked into the real \$HOME seen dir" \
-"could not compute the marker hash for fake project(s), so a leak keyed to them
-        could not be ruled out (a failed lookup must never read as 'no leak'):${uncomputable}
-        Fix: check that ${STATUS_BIN} --repo-key, sha256sum and cut work in this session."
-elif [ -z "${leaked}" ]; then
-  ok "no fake-project marker leaked into the real \$HOME seen dir (${checked} fake projects checked)"
-else
+elif [ -n "${leaked}" ]; then
+  # A real leak is the most actionable outcome, so it is reported ahead of the
+  # uncomputable diagnostic when a run happens to have both.
   bad "no fake-project marker leaked into the real \$HOME seen dir" \
 "the suite wrote per-project marker(s) into ${REAL_SEEN_DIR} keyed to a FAKE
         project it fabricated under ${TMP} (${checked} projects checked) -- so a
@@ -1408,6 +1406,13 @@ else
         (the hook itself cannot -- assert_fake_home FATAL-exits every run_hook /
         run_stub_hook against the real \$HOME); it must build the path from
         \${HOME} beneath ${TMP}. Remove the leaked file(s) named above from ${REAL_SEEN_DIR}."
+elif [ -n "${uncomputable}" ]; then
+  bad "no fake-project marker leaked into the real \$HOME seen dir" \
+"could not compute the marker hash for fake project(s), so a leak keyed to them
+        could not be ruled out (a failed lookup must never read as 'no leak'):${uncomputable}
+        Fix: check that ${STATUS_BIN} --repo-key, sha256sum and cut work in this session."
+else
+  ok "no fake-project marker leaked into the real \$HOME seen dir (${checked} fake projects checked)"
 fi
 
 # (2) The daemon-UNTOUCHED members of the family, byte-for-byte unmoved. These

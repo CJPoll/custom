@@ -106,6 +106,8 @@ instead.
 - **Observed:** `checked ZERO fake projects … so this check vouches for
   nothing` (`VERDICT: FAIL (1 of 178)`). A green run that examined nothing is
   now impossible — "a failed lookup must never look like an empty one".
+- **Cleanup:** none — the mutation writes nothing under the real `$HOME`;
+  restored the suite with `git checkout --`.
 
 ### S-DND224-5 — check (1) fails when a fake hash can't be computed
 
@@ -114,6 +116,8 @@ instead.
 - **Observed:** `could not compute the marker hash for fake project(s) …`
   (`VERDICT: FAIL (1 of 178)`). An uncomputable key reddens rather than silently
   skipping the project it could not vet.
+- **Cleanup:** none — the mutation writes nothing under the real `$HOME`;
+  restored the suite with `git checkout --`.
 
 ### Z-DND224-1 — MEASURED LIMITATION: `athena-inbox-last-poll` is unguarded
 
