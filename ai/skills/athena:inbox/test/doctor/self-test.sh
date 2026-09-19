@@ -238,14 +238,14 @@ echo "== lock: dead-pid reapable, READ-ONLY (never reaped) =="
 LOCK="${ATHENA_INBOX_ROOT}/ch-slack.consumer.lock"
 printf '{"session_id":"s","pid":2147483646,"started_at":"x"}' > "${LOCK}"; chmod 600 "${LOCK}"
 LK="$(doctor_check_lock slack "${LOCK}")"
-assert_finding "dead-pid lock -> warn reapable" "${LK}" warn "channel:slack" "reapable residue"
+assert_finding "dead-pid lock -> warn reapable" "${LK}" warn "stale-lock" "reapable residue"
 [ -f "${LOCK}" ] && ok "lock NOT reaped (still present)" || bad "lock NOT reaped" "file was removed"
 # a LIVE recorded pid -> no reapable finding (a live holder). The doctor reads
 # the pid; it NEVER acquires the lock, so a real consumer is never denied -- the
 # read-only-that-can-deny-a-consumer defect the critic caught.
 printf '{"session_id":"s","pid":%s,"started_at":"x"}' "$$" > "${LOCK}"; chmod 600 "${LOCK}"
 LK="$(doctor_check_lock slack "${LOCK}")"
-assert_no_finding "live-pid lock -> no reapable finding" "${LK}" warn "channel:slack" "reapable residue"
+assert_no_finding "live-pid lock -> no reapable finding" "${LK}" warn "stale-lock" "reapable residue"
 # READ-ONLY PROOF: a real consumer holds the flock (fd 8, separate open) while
 # the doctor checks the lock; the consumer must STILL hold it afterward (a
 # second, independent open cannot take it), proving the doctor did not acquire.

@@ -578,7 +578,9 @@ fi
 # read for exactly one boolean (`summary.healthy`) and one severity, both
 # integers -- a peer-chosen string never reaches this file. `na` findings are
 # NOT "worse than ok": a check that could not run is not a fault to announce.
-# Bounded by the same timeout as the status read.
+# Bounded by its OWN copy of the status timeout -- so on the actionable path
+# SessionStart can spend up to two of these budgets back to back (the status
+# read, then the doctor), still bounded and far under any human-noticed delay.
 #
 # --no-server IS LOAD-BEARING, not a tidiness flag. Without it, a machine that
 # has enabled the server check (ATHENA_INBOX_DOCTOR_API_* set) would fire an

@@ -45,8 +45,11 @@
 # unambiguous. `fix` is empty for `ok`; every warn/fail/na carries one, per the
 # repo's guard-message convention.
 #
-# Source order: err.sh, names.sh, descriptor.sh, logchan.sh, fs.sh, inbox.sh,
-# then this file. Requires jq; curl only when the server check is enabled.
+# Source order: err.sh, names.sh, descriptor.sh, logchan.sh, maildir.sh,
+# fence.sh, session.sh, fs.sh, lock.sh, inbox.sh, then this file (the full set
+# bin/inbox-doctor sources, since doctor_check_* reuse inbox.sh's resolvers).
+# Requires jq; curl only when the server check is enabled; ruby only for the
+# undeclared-entry cross-check.
 
 # --- defaults / seams -------------------------------------------------------
 # Each is overridable so the suite can point the whole tool at temp state.
@@ -646,8 +649,16 @@ doctor_check_lock() {
   pid="$(jq -r '.pid // empty' <"${lock}" 2>/dev/null)"
   [ -n "${pid}" ] || return 0
   doctor_pid_alive "${pid}" && return 0
-  doctor_finding warn "channel:${chan}" "channel \"${chan}\" has a consumer lock whose recorded pid ${pid} is dead -- it is reapable residue" \
-    "safe to remove ${lock} by hand; the kernel released the flock when that process died, so it blocks nothing. The doctor never reaps it for you."
+  # INFORMATIONAL (its own check, in INFO_SET): a dead-pid lock file is the
+  # NORMAL steady state, not a fault. lock.sh deliberately LEAVES the file behind
+  # on release ("the file is the diagnostics, and an unlink would race a
+  # waiter"), so every channel ever read carries a .consumer.lock with the last
+  # reader's now-dead pid. The ticket asks the doctor to report it as reapable;
+  # it does -- but it must NOT flip `healthy`, or every previously-read channel
+  # would nag every session. The kernel already released the flock on that pid's
+  # death, so nothing is actually blocked.
+  doctor_finding warn "stale-lock" "channel \"${chan}\" has a consumer lock whose recorded pid ${pid} is dead -- it is reapable residue (a normal leftover)" \
+    "safe to remove ${lock} by hand; the kernel released the flock when that process died, so it blocks nothing and nothing needs it removed. The doctor never reaps it for you."
 }
 
 # --- server checks (opt-in) -------------------------------------------------
