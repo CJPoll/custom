@@ -142,11 +142,27 @@ maildir_message_stamp() {
 # A message with no frontmatter at all yields `{}` rather than a refusal: the
 # body is still deliverable text, and refusing would let a malformed header
 # make a message unreadable forever.
+# AN UNTERMINATED `---` BLOCK YIELDS NOTHING, and that is the whole point of
+# buffering rather than streaming.
+#
+# The contract fixes the shape as fenced by `---` on the first line AND A
+# MATCHING `---`. Without the closing fence this parser used to harvest every
+# `key: value` line to EOF while `maildir_body` emitted nothing -- so a message
+# whose body happened to be `key: value`-shaped parsed as perfectly good
+# frontmatter, passed validation, RENDERED WITH AN EMPTY BODY, and was then
+# ACKED INTO `.acked/`. Peer content silently destroyed and recorded as
+# ingested, in the skill whose entire purpose is that mail is never lost
+# quietly. Reproduced end to end before this was written.
+#
+# So the pairs are collected and emitted ONLY once the closing `---` is seen.
+# An unterminated block yields `{}`, which fails the required-key check in
+# `maildir_validate_message`, which routes the file down the non-conformant
+# path: counted, not rendered, not acked, and left on disk intact.
 maildir_parse_frontmatter() {
   awk '
     NR == 1 && $0 != "---" { exit }       # no frontmatter block at all
     NR == 1 { inside = 1; next }
-    inside && $0 == "---" { exit }
+    inside && $0 == "---" { closed = 1; exit }
     inside {
       i = index($0, ":")
       if (i > 1) {
@@ -157,8 +173,12 @@ maildir_parse_frontmatter() {
         # A comment is stripped only when it follows whitespace, so a "#" that
         # is part of a value (a channel name, a fragment in a URL) survives.
         sub(/[ \t]+#.*$/, "", v)
-        if (k ~ /^[A-Za-z_][A-Za-z0-9_-]*$/) printf "%s\t%s\n", k, v
+        if (k ~ /^[A-Za-z_][A-Za-z0-9_-]*$/) buf[++n] = k "\t" v
       }
+    }
+    END {
+      if (!closed) exit               # unterminated: emit NOTHING
+      for (j = 1; j <= n; j++) print buf[j]
     }
   ' | _maildir_fm_to_json
 }

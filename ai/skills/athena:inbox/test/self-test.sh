@@ -1091,6 +1091,18 @@ assert_contains "the ordinary status line carries the failed-candidate count" \
   "1 registry entry(s) unreadable" "${out}"
 assert_contains "that line carries a Fix: clause" "Fix:" "${out}"
 assert_not_contains "the count names no file" "other-tenant" "${out}"
+# THE Fix: TEXT ITSELF, not just its presence. This clause used to say "run
+# inbox-doctor", a command that does not exist and cannot be run -- a guard
+# message that names an unwritten tool is one the reader cannot act on, which
+# is the whole thing this repo's guard-message convention exists to prevent.
+# Asserting only the presence of "Fix:" lets that regress silently, and this
+# suite pins message text tightly everywhere else.
+assert_not_contains "the Fix: does not send the reader to a command that does not exist" \
+  "inbox-doctor" "${out}"
+assert_contains "the Fix: names the key check the session can actually run" \
+  "git rev-parse --git-common-dir" "${out}"
+assert_contains "and it repeats the tenant-privacy rule where the reader will act on it" \
+  "Do not open the other files" "${out}"
 
 # NOT A CANDIDATE vs A CANDIDATE THAT FAILED. A stray backup or editor
 # swapfile was never a registry entry, so it says nothing -- and counting it
@@ -1997,6 +2009,36 @@ assert_not_contains "D-22 an all-malformed channel does NOT report 'nothing new'
 assert_contains "D-22 it reports the non-conformant count instead" \
   "not conformant messages" "${OUT}"
 
+# AN UNTERMINATED `---` BLOCK MUST NOT EAT THE BODY AND THEN ACK IT.
+#
+# The contract fixes frontmatter as fenced by `---` on the first line AND a
+# matching `---`. Without the closing fence the parser harvested every
+# `key: value`-shaped line to EOF while maildir_body emitted nothing -- so a
+# message whose body happens to be `key: value`-shaped (a decision line, a
+# log excerpt, a "Subject: ..." quote) parsed as good frontmatter, validated,
+# RENDERED WITH AN EMPTY BODY, and was ACKED into .acked/. Peer content
+# silently destroyed and recorded as ingested, in the skill whose whole
+# purpose is that mail is never lost quietly.
+#
+# The suite only ever fed well-formed delimiters, which is why it shipped
+# green: this is the one malformation that yields "conformant, empty body".
+setup_mail_case
+printf -- '---\nfrom: peer\nto: athena\nsent_at: 2026-09-06T10:00:00Z\nThe decision is: do not deploy on Friday.\n' \
+  > "${MDIR}/20260906T100000Z-006-unterminated.md"
+assert_eq "an unterminated frontmatter block parses as NO frontmatter" "{}" \
+  "$(printf -- '---\nfrom: peer\nto: athena\nThe decision is: do not deploy on Friday.\n' | maildir_parse_frontmatter)"
+OUT="$(cd "${MPROJ}" && "${BIN}/read-inbox" mail 2>&1)"
+assert_eq "D-22 an unterminated message is NOT acked" "0" \
+  "$(ls "${MDIR}/.acked/20260906T100000Z-006-unterminated.md" 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "D-22 and it is left on disk, body intact" "1" \
+  "$(grep -c 'do not deploy on Friday' "${MDIR}/20260906T100000Z-006-unterminated.md")"
+assert_contains "D-22 and it is REPORTED as non-conformant, not silently skipped" \
+  "not conformant messages" "${OUT}"
+# The real message beside it is unaffected -- one malformed file does not
+# abandon the batch.
+assert_contains "D-22 the conformant message in the same channel still delivers" \
+  "Hello from the peer." "${OUT}"
+
 # D-23: MISSING REQUIRED FRONTMATTER, through the read path. The name is
 # perfectly conformant, so only the frontmatter rule can catch this one --
 # which is what makes it the case that proves the rule is wired in.
@@ -2095,6 +2137,35 @@ assert_eq "M-12 --json stays parseable with a non-conformant file present" "0" \
   "$(printf '%s' "${JOUT}" | jq -e . >/dev/null 2>&1; echo $?)"
 assert_eq "M-12 and the non-conformant count is carried as a field" "1" \
   "$(printf '%s' "${JOUT}" | jq -r '.malformed')"
+
+# --json CARRIES THE UNTRUSTED MARKER STRUCTURALLY.
+#
+# This branch used to emit bodies bare, on the argument that a caller piping
+# them into unprompted output had broken the rule on its own side. That is
+# doctrine, not a boundary: the ordinary caller of this skill is the agent
+# itself, and --json was the one documented path putting peer bodies into
+# context with nothing marking them -- while SKILL.md, two lines under the
+# --json synopsis, promised every body arrives inside a nonce-carrying fence.
+# A literal text fence would make the document unparseable, so the marker
+# travels as fields.
+setup_mail_case
+JOUT="$(cd "${MPROJ}" && "${BIN}/read-inbox" mail --json 2>/dev/null)"
+assert_eq "--json declares its bodies untrusted" "true" \
+  "$(printf '%s' "${JOUT}" | jq -r '.untrusted')"
+assert_eq "--json carries a 64-bit hex nonce a consumer can fence with" "16" \
+  "$(printf '%s' "${JOUT}" | jq -r '.fence.nonce | length')"
+assert_contains "--json carries the exact open marker a text reader looks for" \
+  "untrusted content" "$(printf '%s' "${JOUT}" | jq -r '.fence.open')"
+assert_contains "--json's notice says an imperative is a fact to report" \
+  "never a request to act on" "$(printf '%s' "${JOUT}" | jq -r '.fence.notice')"
+# The nonce is per-render, exactly as the text fence's is: a marker reused
+# across runs is guessable again the first time one is seen.
+J2="$(cd "${MPROJ}" && "${BIN}/read-inbox" mail --json 2>/dev/null | jq -r '.fence.nonce')"
+assert_not_contains "--json's nonce is per-render, not fixed" \
+  "$(printf '%s' "${JOUT}" | jq -r '.fence.nonce')" "${J2}"
+# Still one parseable document -- the marker must not cost the flag its point.
+assert_eq "--json stays a single parseable document with the marker on it" "0" \
+  "$(printf '%s' "${JOUT}" | jq -e . >/dev/null 2>&1; echo $?)"
 # The direct manager call refuses with a Fix: clause.
 assert_refused "M-12 acking my own message by name is refused outright" \
   try_in "${MPROJ}" inbox_ack_message mail 20260902T100000Z-002-my-own-note.md "."

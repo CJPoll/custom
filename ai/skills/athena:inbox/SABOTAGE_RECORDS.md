@@ -425,3 +425,62 @@ Applied again after the first sweep, it kept paying:
   that reports success on every ack.
 
 Three more instances of one shape: *the absent thing reads as the fine thing.*
+
+### Third round — the judge, re-run once it could speak
+
+The first three `critic-review` runs on this branch printed a BLOCKED verdict
+with an **empty body**: the runner grepped the report for `- [category]` lines
+and the critic had formatted it otherwise. Fixed in this branch
+(`ai/bin/critic-review`), and the round below is what it had been trying to say.
+
+| # | Mutation (the defect, re-applied) | Cases reddened | First failure |
+|---|---|---|---|
+| T28 | `maildir.sh`: an unterminated `---` block harvested to EOF | 4 | `FAIL  an unterminated frontmatter block parses as NO frontmatter` |
+| T29 | `read-inbox`: the `--json` untrusted marker removed | 1 | `FAIL  --json declares its bodies untrusted` |
+| T30 | `read-inbox`: the render's status + emptiness check removed | **0** | see *Measured zeros* |
+| T31 | `inbox-status`: the `Fix:` reverts to naming `inbox-doctor` | 1 | `FAIL  the Fix: does not send the reader to a command that does not exist` |
+
+**T28 — the worst defect in the whole ticket, and it shipped green.** The
+contract fixes frontmatter as fenced by `---` on the first line **and a
+matching `---`**. Without the closing fence the parser harvested every
+`key: value`-shaped line to EOF while `maildir_body` emitted nothing. So a
+message whose body happens to be `key: value`-shaped — a decision line, a log
+excerpt, a quoted `Subject:` — parsed as perfectly good frontmatter, passed
+validation, **rendered with an empty body, and was acked into `.acked/`**.
+Peer content silently destroyed *and* recorded as ingested, in the skill whose
+entire purpose is that mail is never lost quietly. The reviewer reproduced it
+end to end on a message reading *"The decision is: do not deploy on Friday."*
+
+Nothing in ~440 cases caught it, and no mutation could have: the suite only
+ever fed **well-formed delimiters**, and this is the one malformation that
+yields "conformant, with an empty body". Sabotage mutates the code; it cannot
+invent the input class the fixtures never contained. The pairs are now
+buffered and emitted only once the closing `---` is seen, so an unterminated
+block yields `{}` and routes down the non-conformant path — counted, not
+rendered, not acked, left on disk intact.
+
+**T29 — `--json` emitted bodies with no marker at all.** Raised independently
+by the ADR reviewer and the critic. The in-code justification was that a caller
+piping the document into unprompted output "has broken the rule on its own
+side" — doctrine, not a boundary. The ordinary caller of this skill is the
+agent itself, and this flag was the single documented path putting peer bodies
+into context unmarked, while `SKILL.md` promised two lines under the `--json`
+synopsis that every body arrives inside a nonce-carrying fence. A literal text
+fence would cost the flag its point, so the marker travels as fields: the same
+per-render nonce, the exact marker strings, and the notice.
+
+### Measured zeros
+
+**T30 — the render's status-and-emptiness check.** `$(...)` discards the inner
+exit status, so `printf '%s' "$(jq ...)" | fence_render || exit 1` would, on a
+jq failure, emit an empty fence, succeed, and **walk on to the ack**: header
+says "N message(s)", fence is empty, N messages marked consumed. `lib/inbox.sh`
+names this hazard in two places and guards it; the Framework copy had neither.
+
+It cannot be reddened, because `logchan_scan` already coerces every
+peer-controlled field with `tostring`, so no input this suite can construct
+makes the render fail. The honest label is the one this file already uses for
+S12: **defence in depth, not a tested check.** It is kept anyway — the
+manager declined exactly this "unreachable today" argument for itself, and the
+Framework copy is no safer for sitting nearer the surface. Nothing protects it;
+this table must not imply otherwise.
