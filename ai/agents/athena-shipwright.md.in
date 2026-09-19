@@ -333,9 +333,17 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
 - `ai/bin/build-agents --check` — agent templates rebuild clean and the
   rendered `.md` files are current. If you edited a template or block, run
   `ai/bin/build-agents` first so the render is regenerated, then `--check`.
+- `ai/bin/check-agent-size` (+ its `--self-test`) — every rendered
+  `ai/agents/athena-*.md` is within its per-agent line budget in `BUDGETS`, and
+  no rendered agent is missing a budget entry. Runs AFTER `build-agents --check`
+  (it reads the rendered files). Caps the fan-out baseline (harness-IA #2) and
+  stops a shrunk agent silently regrowing (#8). Ratchet a budget down as an
+  agent is optimized; a new agent needs a new entry at its current count or lower.
 - Every hook self-test — run each dedicated `ai/hooks/*.self-test.sh` script
   with stdin closed: `ai/hooks/safe-wait-guard.self-test.sh </dev/null`,
   `ai/hooks/pronoun-guard.self-test.sh </dev/null`,
+  `ai/hooks/forge-identity-guard.self-test.sh </dev/null`,
+  `ai/hooks/forge-auth-guard.self-test.sh </dev/null`,
   `ai/hooks/harness-event.self-test.sh </dev/null`,
   `ai/hooks/athena-inbox-poll.self-test.sh </dev/null` (and any you add — the
   runner's `--self-test` fails if a `*.self-test.sh` on disk is not declared,

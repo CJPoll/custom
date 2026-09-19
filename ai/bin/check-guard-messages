@@ -47,6 +47,7 @@ EXEMPT = {
 GUARD_BINS = %w[
   build-agents
   forge-preflight
+  check-agent-size
   check-generic-skills
   check-hooks-registered
   check-inbox-registry

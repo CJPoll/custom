@@ -9,11 +9,16 @@
 # silence, and silence goes unnoticed for days.
 #
 # SCOPE: this surfaces the authorship-ESTABLISHING write — `pr create` /
-# `mr create` (DND-206 scope). Other attributed writes (`pr merge`, `pr
-# comment`, `mr approve`, `api --method POST`) are NOT matched here; they rely
-# on the captain's wrapper discipline and the forge-preflight assertion. This is
-# deliberate, not full write coverage — broadening the subcommand alternation is
-# a follow-up if a bare non-create write is ever observed mis-attributing.
+# `mr create` — AND the MERGE write the athena-admiral performs (`pr merge` /
+# `mr merge`), which stamps the merge commit / merge event with an author. The
+# admiral-500 design (ai/docs/admiral-500-design.md §2) strengthens the
+# "attributed writes go through the wrapper" invariant by extending this guard
+# from create to also cover merge. Other attributed writes (`pr comment`, `mr
+# approve`, `api --method POST`) are still NOT matched here; they rely on the
+# captain's wrapper discipline and the forge-preflight assertion. This is
+# deliberate, not full write coverage — broadening the subcommand alternation
+# further is a follow-up if a bare non-create/merge write is ever observed
+# mis-attributing.
 #
 # WARN, NEVER BLOCK — deliberate (DND-206 scope 2). A hard block is how the
 # OTHER half of the outage happened: an over-eager guard that refuses when the
@@ -68,10 +73,23 @@ if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])gh[[:space:]]+([^;|&]* )?pr
   warn 'forge-identity: this is a bare `gh pr create`, which attributes the PR to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: open it through the wrapper — `~/dev/custom/ai/bin/gh-athena pr create …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `gh`; writes (create/comment/review/merge) go through gh-athena.'
 fi
 
+# Bare `gh pr merge`: the MERGE write the admiral performs. Same command-word
+# shape and flag tolerance; `gh-athena pr merge` still does NOT match (after
+# `gh` comes `-`, not whitespace).
+if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])gh[[:space:]]+([^;|&]* )?pr[[:space:]]+merge'; then
+  warn 'forge-identity: this is a bare `gh pr merge`, which stamps the merge to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: merge through the wrapper — `~/dev/custom/ai/bin/gh-athena pr merge …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `gh`; writes (create/comment/review/merge) go through gh-athena.'
+fi
+
 # Bare `glab mr create`: same shape, same tolerance for flags before the
 # subcommand (`glab -R x mr create`); `glab-athena mr create` does NOT match.
 if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])glab[[:space:]]+([^;|&]* )?mr[[:space:]]+create'; then
   warn 'forge-identity: this is a bare `glab mr create`, which attributes the MR to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: open it through the wrapper — `~/dev/custom/ai/bin/glab-athena mr create …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `glab`; writes go through glab-athena.'
+fi
+
+# Bare `glab mr merge`: the MERGE write the admiral performs. Same shape;
+# `glab-athena mr merge` does NOT match.
+if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])glab[[:space:]]+([^;|&]* )?mr[[:space:]]+merge'; then
+  warn 'forge-identity: this is a bare `glab mr merge`, which stamps the merge to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: merge through the wrapper — `~/dev/custom/ai/bin/glab-athena mr merge …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `glab`; writes go through glab-athena.'
 fi
 
 # No bypass detected → allow silently.
