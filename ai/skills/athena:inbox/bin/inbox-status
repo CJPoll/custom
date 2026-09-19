@@ -108,6 +108,17 @@ fi
 HAVE_READ=false
 [ -x "${HERE}/read-inbox" ] && HAVE_READ=true
 
+# The failed-candidate count is part of ORDINARY status output, by contract:
+# a skipped candidate might have been this session's own entry, and a reader
+# that mentions it only when nothing matched drops the warning in precisely
+# the case where the session cannot tell it was dropped. A COUNT, never a
+# name -- every other file in projects/ belongs to a different tenant.
+printf '%s' "${STATUS}" | jq -r '
+  (.failed_candidates // 0) as $f
+  | if $f > 0 then
+      "athena:inbox: \($f) registry entry(s) unreadable.\n  Fix: run inbox-doctor to see which — one of them may be this project'"'"'s, in which case this session is seeing fewer channels than it owns."
+    else empty end'
+
 printf '%s' "${STATUS}" | jq -r --argjson have_read "${HAVE_READ}" '
   .channels[]
   | . as $c

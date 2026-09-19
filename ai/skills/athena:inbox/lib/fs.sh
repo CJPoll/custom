@@ -181,10 +181,24 @@ fs_registry_records() {
   dir="$(fs_registry_dir)"
   [ -d "${dir}" ] || return 0
 
+  local base
   for file in "${dir}"/*.json; do
     [ -e "${file}" ] || continue
+    # NOT A CANDIDATE vs. A CANDIDATE THAT FAILED. Only a grammar-conformant
+    # `*.json` was ever a registry entry, so only it can have been the one
+    # claiming this session. A stray `walt_ui.json.bak` or `.walt_ui.json.swp`
+    # says nothing -- and counting it would pin the warning on every status
+    # line forever, and a counter that is always on is a counter the owner
+    # stops reading, which reopens the silence it was added to close.
+    base="${file##*/}"
+    names_valid_segment "${base%.json}" || continue
     if [ -L "${file}" ] || [ ! -f "${file}" ]; then bad=$((bad + 1)); continue; fi
     if ! json="$(jq -c . < "${file}" 2>/dev/null)"; then bad=$((bad + 1)); continue; fi
+    # `repo` missing or unreadable also makes it a FAILED candidate: it is a
+    # well-formed file that could still have been this session's entry.
+    if ! printf '%s' "${json}" | jq -e 'type == "object" and (.repo | type == "string")' >/dev/null 2>&1; then
+      bad=$((bad + 1)); continue
+    fi
     printf '%s\t%s\n' "${json}" "${file}"
   done
   [ "${bad}" -eq 0 ] || printf '#unparseable\t%s\n' "${bad}"

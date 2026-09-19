@@ -274,6 +274,24 @@ assert_refused "D-10 / A-4 a log path escaping the root is rejected with a Fix: 
 assert_refused "A-4 a maildir namespace escaping the root is rejected too" \
   descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"m":{"kind":"maildir","namespace":"../../etc","read":"a","write":"b","identity":"athena"}}}'
 
+# `projects/` IS RESERVED. Containment cannot catch this one -- projects/ is
+# INSIDE the root -- so a channel declaring it passes every containment test
+# and still points a MESSAGE surface at the TENANCY directory. In this
+# counting slice that would count other tenants' registry entries as unread
+# mail; once a reader exists it would render them. Configuration and message
+# surfaces share a root; they do not share a namespace.
+for p in "projects/x.jsonl" "projects/nested/x.jsonl"; do
+  assert_refused "a log path inside the reserved projects/ is rejected: [${p}]" \
+    descriptor_validate "{\"v\":1,\"repo\":\"/r/.git\",\"channels\":{\"a\":{\"kind\":\"log\",\"path\":\"${p}\"}}}"
+done
+for ns in "projects" "projects/sub"; do
+  assert_refused "a maildir namespace inside the reserved projects/ is rejected: [${ns}]" \
+    descriptor_validate "{\"v\":1,\"repo\":\"/r/.git\",\"channels\":{\"m\":{\"kind\":\"maildir\",\"namespace\":\"${ns}\",\"read\":\"a\",\"write\":\"b\",\"identity\":\"athena\"}}}"
+done
+# A name that merely STARTS with the reserved word is not inside it.
+assert_ok "a path that merely starts with the reserved word is still allowed" \
+  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"projects-digest.jsonl"}}}'
+
 # The path GRAMMAR does work containment does not: these paths stay inside the
 # root and are still illegal. Without them the grammar check can be deleted
 # and D-10 stays green on the containment check alone (measured: S11).
@@ -1007,6 +1025,59 @@ rm -f "${ATHENA_INBOX_ROOT}/c.state.json"
 jout="$(cd "${cproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
 assert_eq "an absent state file is first-run, not corruption" "false" \
   "$(jq -r '.channels[] | select(.name=="c") | .state_unreadable' <<<"${jout}")"
+
+# THE FAILED-CANDIDATE COUNT is part of ORDINARY status output, by contract --
+# not only when nothing matched. A skipped candidate might have been this
+# session's own entry, so a reader that mentions it only on the no-match path
+# drops the warning in exactly the case where the session cannot tell.
+setup_case
+fcproj="$(make_repo fcproj)"
+register fcproj "${fcproj}" '{"mine":{"kind":"log","path":"mine.jsonl"}}'
+printf '%s\n' '{ broken' > "${ATHENA_INBOX_ROOT}/projects/other-tenant.json"
+jout="$(cd "${fcproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "the failed-candidate count is reported even when this session's entry DID match" "1" \
+  "$(jq -r '.failed_candidates' <<<"${jout}")"
+out="$(cd "${fcproj}" && "${BIN}/inbox-status" 2>/dev/null)"
+assert_contains "the ordinary status line carries the failed-candidate count" \
+  "1 registry entry(s) unreadable" "${out}"
+assert_contains "that line carries a Fix: clause" "Fix:" "${out}"
+assert_not_contains "the count names no file" "other-tenant" "${out}"
+
+# NOT A CANDIDATE vs A CANDIDATE THAT FAILED. A stray backup or editor
+# swapfile was never a registry entry, so it says nothing -- and counting it
+# would pin the warning on every status line forever. A counter that is always
+# on is a counter the owner stops reading, which reopens the silence it was
+# added to close.
+rm -f "${ATHENA_INBOX_ROOT}/projects/other-tenant.json"
+printf '%s\n' '{ broken' > "${ATHENA_INBOX_ROOT}/projects/fcproj.json.bak"
+printf '%s\n' '{ broken' > "${ATHENA_INBOX_ROOT}/projects/.fcproj.json.swp"
+printf '%s\n' 'not even json' > "${ATHENA_INBOX_ROOT}/projects/README"
+jout="$(cd "${fcproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "a backup, a swapfile and a README were never candidates and are not counted" "0" \
+  "$(jq -r '.failed_candidates' <<<"${jout}")"
+out="$(cd "${fcproj}" && "${BIN}/inbox-status" 2>/dev/null)"
+assert_not_contains "and they raise no warning at all" "unreadable" "${out}"
+
+# A well-formed *.json whose `repo` is missing IS a failed candidate: it is a
+# file that could still have been the entry claiming this session.
+printf '%s\n' '{"v":1,"channels":{}}' > "${ATHENA_INBOX_ROOT}/projects/norepo.json"
+jout="$(cd "${fcproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "a candidate whose repo key is missing is counted as failed" "1" \
+  "$(jq -r '.failed_candidates' <<<"${jout}")"
+
+# The Fix: clause must be RUNNABLE, not merely present. It previously globbed
+# <dirname of root>/athena/projects/*.json, which resolves only when the
+# root's basename happens to be `athena` -- so under any custom root, the
+# agent reading the refusal was sent somewhere empty.
+setup_case
+runproj="$(make_repo runproj)"
+printf '%s\n' '{ broken' > "${ATHENA_INBOX_ROOT}/projects/runproj.json"
+err="$(cd "${runproj}" && "${BIN}/inbox-status" 2>&1 >/dev/null)"
+fixcmd="$(printf '%s\n' "${err}" | sed -n 's/^ *Fix: run: //p')"
+assert_eq "the Fix: clause names a runnable command" "1" \
+  "$(if [ -n "${fixcmd}" ]; then echo 1; else echo 0; fi)"
+assert_contains "and running it actually names the broken file" "runproj.json" \
+  "$(cd "${runproj}" && eval "${fixcmd%% -- then*}" 2>/dev/null)"
 
 # A SUBDIRECTORY is not a message. The name predicate is name-only by design,
 # so the "is it actually a file" half has to happen where the filesystem is.
