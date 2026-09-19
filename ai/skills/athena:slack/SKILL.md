@@ -32,8 +32,12 @@ anything is confusing.
   config file.
 - Requires `curl` and `jq`. POSIX `sh`; no GNU-only flags.
 - Caches live in `~/.cache/athena-slack/` (`users.json`, `channels.json`,
-  `identity.json`, `inbox-state.json`). All are disposable — delete any of them
-  to force a refresh.
+  `identity.json`). All are disposable — delete any of them to force a refresh.
+- The inbox **seen-state** is not a cache: it lives in the shared inbox-root file
+  `${ATHENA_INBOX_ROOT:-~/.local/share/athena}/slack-inbox.state.json`, one state
+  for both Slack sources (this Web API backstop and the athena:inbox file
+  channel), so they cannot double-report each other. `$SLACK_INBOX_STATE`
+  overrides the path. See "The backstop, and one dedupe set" below.
 
 ## The scripts
 
@@ -112,27 +116,57 @@ source of truth; that list is a convenience.
 The bot can only read history in channels it has been **invited to**, and can
 only be mentioned in those. `channels --member` shows which those are.
 
-## The polling hook
+## The backstop, and one dedupe set
 
-`hooks/athena-slack-poll.sh` is a `UserPromptSubmit` hook. At most once every
-five minutes it scans for DMs and mentions and, only when something is waiting,
-prints exactly one line:
+The Slack Web API poll is the **disaster backstop**, not the normal delivery
+path. Slack normally reaches Athena through the **file channel** — the server
+pushes events to a local client that appends them to a JSONL the `athena:inbox`
+skill reads. This poll scans Slack directly with the bot token and exists to
+**recover DMs and mentions after an outage of that path**, and to notice when
+the file channel has gone silent.
+
+The two sources carry the same messages under different identities — the file
+line has an `event_id` (`Ev…`), the API poll does not; both have `channel` and
+`ts`. So the cross-source dedupe key is **`channel + ":" + ts`**, held in one
+shared `seen_keys` set in `slack-inbox.state.json` (see Setup). The API scan
+drops anything whose `channel:ts` is already there, and `read-inbox` adds what
+it reports — so **neither source re-reports the other's message**. (`event_id`
+stays the file channel's intra-file key for at-least-once re-appends; the API
+poll never touches it.)
+
+**`thread_reply` has no backstop.** The API poll recovers **DMs and mentions
+only**. A `thread_reply` the file channel misses is simply lost: it depends on
+`slack_thread_participations`, which only the receiver populates, and there is
+no second path to it. If a threaded reply to Athena seems to have gone
+unheard, it will not turn up here.
+
+### The polling hook
+
+`ai/hooks/athena-slack-poll.sh` is a **`SessionStart`** hook (registered in
+`ai/hooks/registry.json`; wire it with `scripts/setup-hooks --install`, which
+merges — never hand-edit `~/.claude/settings.json`). At most once every five
+minutes it scans for DMs and mentions and, only when something is waiting, emits
+exactly one `SessionStart` object whose `additionalContext` reads:
 
 ```
 2 new Slack DM(s) and 1 mention(s) for Athena — run /athena:slack read-inbox
 ```
 
-Everything else about it is silence: zero new prints nothing, and so does every
+It is on `SessionStart`, not `UserPromptSubmit`: the harness abandoned the
+per-prompt cadence on 2026-09-11 because it does not compose with a Monitor loop
+and couples a network call to the user typing. Mid-session coverage comes from a
+Monitor loop, not this hook.
+
+Everything else about it is silence: zero new emits nothing, and so does every
 failure (no token, no network, a Slack error), with the reason appended to
 `~/.claude/athena-slack-poll.log`. If it goes six hours without a **successful**
-poll while a token is present, it says so once — a silently broken poll is
-shaped exactly like a healthy quiet one, and that is the failure worth naming.
+poll while a token is present, it says so once — as the same `SessionStart`
+object, never a bare line — because a silently broken backstop is shaped exactly
+like a healthy quiet one, and that is the failure worth naming.
 
-The hook never advances the seen-state. It is the doorbell; `read-inbox` is the
-door.
-
-**Install it yourself** — see `install-hook.md` for the exact JSON block to add
-to `~/.claude/settings.json`. These scripts do not edit your settings.
+The hook never advances the seen-state (it only reads `seen_keys` to avoid
+counting what the file channel already delivered). It is the doorbell;
+`read-inbox` is the door.
 
 ### Mechanism 3 (documented, not built)
 

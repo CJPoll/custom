@@ -1,34 +1,24 @@
 # Installing the athena:slack polling hook
 
-These scripts do not edit `~/.claude/settings.json`. Add the block below
-yourself.
+The hook is a **`SessionStart`** hook, declared in `ai/hooks/registry.json` (the
+committed source of truth for which hooks are wired) and installed by merging
+that registry into `~/.claude/settings.json`:
 
-## The block
-
-`hooks.UserPromptSubmit` is an array of matcher groups. If you already have one
-(the agent-messages poll lives there), **add this hook to the existing group's
-`hooks` array** rather than adding a second group.
-
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/skills/athena:slack/hooks/athena-slack-poll.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
+```sh
+scripts/setup-hooks --install   # MERGES; never rewrites the hooks block
+scripts/setup-hooks --check     # asserts it is wired (== ai/bin/check-hooks-registered)
 ```
 
-`~/.claude/skills` is a symlink to `~/dev/custom/ai/skills`, so that path
-resolves for every project and every worktree, and there is one hook for the
-machine rather than one per checkout.
+Do **not** hand-edit `~/.claude/settings.json` — a full rewrite of the hooks
+block is what silently dropped two guards on 2026-09-17, which is why the
+installer merges. `setup-hooks` wires the command at the **main checkout's**
+path (resolved through git's common dir), so it survives a worktree being
+cleaned up.
+
+It is on `SessionStart`, not `UserPromptSubmit`: the harness abandoned the
+per-prompt cadence on 2026-09-11 (it does not compose with a Monitor loop and
+couples a network call to the user typing). Mid-session coverage comes from a
+Monitor loop.
 
 ## Check it
 
@@ -63,16 +53,22 @@ State it keeps, all safe to delete:
 | `~/.claude/athena-slack-last-poll` | when did it last **attempt**? (the 5-minute limit) |
 | `~/.claude/athena-slack-last-success` | when did it last **succeed**? (is the silence healthy?) |
 | `~/.claude/athena-slack-last-warn` | when did it last **say** so? (rate limit on the warning) |
-| `~/.cache/athena-slack/inbox-state.json` | last-seen ts per conversation |
+| `${ATHENA_INBOX_ROOT:-~/.local/share/athena}/slack-inbox.state.json` | the shared seen-state: per-conversation watermark + the cross-source `seen_keys` |
 
-Merging any two of the first three breaks one of the three answers.
+Merging any two of the first three markers breaks one of the three answers.
 
-Deleting `inbox-state.json` does **not** replay the backlog: a conversation with
-no entry is treated as first sight, which records where it is and reports
+The seen-state is **shared with the `athena:inbox` file channel** — one file, so
+the two Slack sources cannot double-report each other (`$SLACK_INBOX_STATE`
+overrides its path). Deleting it does **not** replay the backlog: a conversation
+with no entry is treated as first sight, which records where it is and reports
 nothing. That is deliberate — the alternative is announcing every DM in the
-workspace at once.
+workspace at once. A pre-existing `~/.cache/athena-slack/inbox-state.json` is
+migrated into it on the first run.
 
 ## Removing it
 
-Delete the entry from `settings.json`. Nothing else runs on a timer; the
-scripts are inert until called.
+```sh
+scripts/setup-hooks --remove
+```
+
+Nothing else runs on a timer; the scripts are inert until called.
