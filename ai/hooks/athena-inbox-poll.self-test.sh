@@ -197,6 +197,14 @@ stub_repo() { # <inbox-status script body>  [--with-read-inbox]
   STUB_HOOK="${stub}/ai/hooks/athena-inbox-poll.sh"
 }
 
+# stub_doctor <body>  -- drop a stub inbox-doctor into the current stub tree, so
+# the hook's DOCTOR_BIN (resolved relative to the copied tree) runs it. Used to
+# exercise the "doctor could not run" branch, which the real doctor never takes.
+stub_doctor() {
+  local d="${CASE_DIR}/stubrepo/ai/skills/athena:inbox/bin/inbox-doctor"
+  printf '%s\n' "$1" > "${d}"; chmod +x "${d}"
+}
+
 run_stub_hook() {
   assert_fake_home
   OUT="$(cd "${REPO}" && printf '%s' "${HOOK_STDIN}" | "${STUB_HOOK}" "$@" 2>"${CASE_DIR}/stderr")"
@@ -1428,6 +1436,21 @@ printf '{"instances":{}}' > "${ATHENA_INBOX_CLIENT_CONFIG}"; chmod 600 "${ATHENA
 run_hook
 CTX="$(context_of "${OUT}")"
 assert_contains "fail wording: 'a link is broken'" "a link is broken" "${CTX}"
+
+# Case: the doctor could NOT run (timed out / errored / non-JSON). The hook must
+# emit NO health line (missing is not "healthy") AND log a reason, so the
+# silence has a trail. Driven through a stub tree: inbox-status reports an
+# opted-in count, inbox-doctor exits 1 with non-JSON garbage.
+setup_case
+export ATHENA_INBOX_DOCTOR_LINE=1
+stub_repo "${STUB_OK}"
+stub_doctor '#!/usr/bin/env bash
+echo "not json at all"; exit 1'
+run_stub_hook
+CTX="$(context_of "${OUT}")"
+assert_not_contains "doctor could-not-run: no health line" "delivery chain" "${CTX}"
+assert_contains "doctor could-not-run: the count line still shows" "new in" "${CTX}"
+assert_contains "doctor could-not-run: a reason is logged" "no usable --json" "$(hook_log)"
 
 unset ATHENA_INBOX_REGISTRY ATHENA_INBOX_DOCTOR_CRON_CHECK ATHENA_INBOX_CLIENT_STATE_DIR ATHENA_INBOX_CLIENT_CONFIG ATHENA_INBOX_DOCTOR_LINE
 

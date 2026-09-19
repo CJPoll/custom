@@ -126,12 +126,24 @@ N_WARN="$(count_state warn)"
 N_FAIL="$(count_state fail)"
 N_NA="$(count_state na)"
 
+# INFORMATIONAL findings are surfaced (they stay `warn` in the report and in
+# N_WARN) but they do NOT flip the chain's health. They are bookkeeping the owner
+# should eventually act on -- a committed-list entry behind the live registry, a
+# cross-tenant surface collision, a server instance no descriptor claims -- not a
+# degraded RUNNING chain. Folding them into `healthy` would make the SessionStart
+# hook nag every opted-in repo, every window, forever, about a benign steady
+# state -- exactly the noise the hook's opted-in gate exists to prevent. The
+# exit code is unaffected either way (it is `fail`-driven), and a hand run still
+# prints them.
+INFO_SET=" undeclared-entry collision server-instance "
+N_INFO="$(printf '%s\n' "${FINDINGS}" | awk -F'\t' -v set="${INFO_SET}" '$1=="warn" && index(set," "$2" ")>0{n++} END{print n+0}')"
+
 if [ "${JSON}" -eq 1 ]; then
   printf '%s\n' "${FINDINGS}" | jq -R -s --argjson ok "${N_OK}" --argjson warn "${N_WARN}" \
-    --argjson fail "${N_FAIL}" --argjson na "${N_NA}" '
+    --argjson fail "${N_FAIL}" --argjson na "${N_NA}" --argjson info "${N_INFO}" '
     {
-      summary: {ok: $ok, warn: $warn, fail: $fail, na: $na,
-                healthy: ($warn == 0 and $fail == 0)},
+      summary: {ok: $ok, warn: $warn, fail: $fail, na: $na, info: $info,
+                healthy: ($fail == 0 and ($warn - $info) == 0)},
       findings: [ split("\n")[] | select(length > 0) | split("\t")
                   | {state: .[0], check: .[1], message: .[2], fix: .[3]} ]
     }'
@@ -143,7 +155,8 @@ else
     printf '  %-4s %s: %s\n' "${state}" "${check}" "${msg}"
     [ -n "${fix}" ] && printf '        Fix: %s\n' "${fix}"
   done
-  printf 'inbox-doctor: %s ok, %s warn, %s fail, %s n-a\n' "${N_OK}" "${N_WARN}" "${N_FAIL}" "${N_NA}"
+  printf 'inbox-doctor: %s ok, %s warn (%s informational), %s fail, %s n-a\n' \
+    "${N_OK}" "${N_WARN}" "${N_INFO}" "${N_FAIL}" "${N_NA}"
 fi
 
 [ "${N_FAIL}" -eq 0 ] || exit 1

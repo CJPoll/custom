@@ -261,6 +261,16 @@ doctor_check_client_running() {
 doctor_check_cron() {
   local cmd rc
   cmd="${ATHENA_INBOX_DOCTOR_CRON_CHECK:-}"
+  # No client config -> this machine only READS mail delivered by another; there
+  # is no client to keep alive, so the crontab entries are not expected and
+  # their absence is `na`, not a fault. Same reasoning as client-running. The
+  # test seam (ATHENA_INBOX_DOCTOR_CRON_CHECK) overrides this so a client-machine
+  # cron case can still be driven.
+  if [ -z "${cmd}" ] && [ ! -e "$(doctor_client_config_path)" ]; then
+    doctor_finding na "cron" "no client config, so the inbox-client crontab entries are not expected here" \
+      "if this machine should run the inbox client, install it with scripts/setup-athena-inbox-client; if it only reads delivered mail, this is expected."
+    return 0
+  fi
   if [ -z "${cmd}" ]; then
     local repo script
     repo="${DOCTOR_REPO_DIR:-}"
@@ -749,7 +759,11 @@ doctor_check_overrides() {
   while IFS= read -r inbox_name; do
     [ -n "${inbox_name}" ] || continue
     if ! printf '%s\n' "${claimed}" | grep -qxF "${inbox_name}"; then
-      doctor_finding warn "server-override" "server instance inbox_name \"${inbox_name}\" is claimed by no registry entry" \
+      # INFORMATIONAL (its own check name), not an override error: an unclaimed
+      # instance is bookkeeping, not a broken running chain, and must not flip
+      # the chain's health or nag every session. Same class as an undeclared
+      # committed-list entry and a collision.
+      doctor_finding warn "server-instance" "server instance inbox_name \"${inbox_name}\" is claimed by no registry entry" \
         "no project declares a log channel with path \"${inbox_name}\", so mail delivered there is consumed by nobody. Declare it in a \$ATHENA_INBOX_ROOT/projects/<project>.json, or retire the server instance."
       unclaimed=1
     fi

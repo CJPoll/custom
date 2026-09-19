@@ -352,8 +352,9 @@ from the outside, and only one of them is working.
 ### `bin/inbox-doctor`
 
 ```
-inbox-doctor            human-readable report, one line per link
-inbox-doctor --json     the same findings as one object (for the SessionStart hook)
+inbox-doctor              human-readable report, one line per link
+inbox-doctor --json       the same findings as one object (for the SessionStart hook)
+inbox-doctor --no-server  force the server check to n-a (no network) — the hook uses this
 ```
 
 The one tool that LOOKS at every link rather than counting what arrived: the

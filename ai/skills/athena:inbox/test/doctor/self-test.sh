@@ -252,7 +252,7 @@ printf '{"data":{"machine":{"connected":true},"instances":[{"name":"slack","inbo
 SV="$(cd "${R2}" && doctor_check_server ".")"
 assert_finding "override mismatch -> fail" "${SV}" fail server-override "WRONG.jsonl"
 assert_finding "typo key -> warn"          "${SV}" warn server-override "typo"
-assert_finding "unclaimed inbox_name -> warn" "${SV}" warn server-override "nobody.jsonl"
+assert_finding "unclaimed inbox_name -> informational (server-instance)" "${SV}" warn server-instance "nobody.jsonl"
 # undelivered > 0 -> warn ("server holding events")
 printf '{"data":{"machine":{"connected":true},"instances":[{"name":"slack","inbox_name":"ch-slack.jsonl","undelivered":2}]}}' > "${HJ}"
 printf '{"instances":{}}' > "${CFG2}"; chmod 600 "${CFG2}"
@@ -281,6 +281,7 @@ unset ATHENA_INBOX_DOCTOR_API_BASE ATHENA_INBOX_DOCTOR_MACHINE_ID ATHENA_INBOX_D
 # ============================================================================
 echo "== bin: exit code, --json, na-never-ok =="
 export ATHENA_INBOX_ROOT="${TMP}/bin"; mkdir -p -m 700 "${ATHENA_INBOX_ROOT}/projects"
+chmod 700 "${ATHENA_INBOX_ROOT}"   # -m 700 above modes only the last component
 R3="${TMP}/repo3"; C3="$(make_repo "${R3}")"
 printf '{"v":1,"repo":"%s","channels":{"slack":{"kind":"log","path":"bin-slack.jsonl"}}}' "${C3}" > "${ATHENA_INBOX_ROOT}/projects/bin.json"; chmod 600 "${ATHENA_INBOX_ROOT}/projects/bin.json"
 printf '{"v":1,"ts":"1","channel":"c","event_id":"e"}\n' > "${ATHENA_INBOX_ROOT}/bin-slack.jsonl"; chmod 600 "${ATHENA_INBOX_ROOT}/bin-slack.jsonl"
@@ -302,6 +303,12 @@ assert_eq "summary.na equals the na-findings tally" "${NA_FINDINGS}" "$(printf '
 assert_eq "there ARE na findings to mis-count" true "$([ "${NA_FINDINGS}" -ge 1 ] && echo true || echo false)"
 assert_eq "na alone keeps healthy true" true \
   "$(printf '%s' "${JSON}" | jq -r 'if (.summary.warn==0 and .summary.fail==0) then (.summary.healthy==true) else true end')"
+# INFORMATIONAL warns (this fixture's entry is undeclared in the committed list)
+# are surfaced as warn AND counted in info, but DO NOT flip healthy -- otherwise
+# the hook would nag every opted-in repo forever about a benign steady state.
+assert_eq "there IS an informational warn here" true "$(printf '%s' "${JSON}" | jq -r '(.summary.info >= 1) and (.summary.warn >= 1)')"
+assert_eq "an informational-only chain is healthy" true "$(printf '%s' "${JSON}" | jq -r 'if (.summary.fail==0 and (.summary.warn - .summary.info)==0) then (.summary.healthy==true) else "SKIP" end')"
+assert_eq "informational warn does not set exit non-zero" 0 "$( ( cd "${R3}" && bash "${BIN}" >/dev/null 2>&1 ); echo $? )"
 # force a fail (invalid entry) -> exit 1
 printf '{"v":1,"repo":"%s","channels":{"slack":{"kind":"bogus"}}}' "${C3}" > "${ATHENA_INBOX_ROOT}/projects/bin.json"; chmod 600 "${ATHENA_INBOX_ROOT}/projects/bin.json"
 ( cd "${R3}" && bash "${BIN}" >/dev/null 2>&1 ); assert_eq "a fail -> exit 1" 1 "$?"
