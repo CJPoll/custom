@@ -255,11 +255,13 @@ without it. Its header says so.
 - **Suite run:** `bash ai/hooks/athena-inbox-poll.self-test.sh </dev/null`
   (no network; every case gets a fake `$HOME`, a private `ATHENA_INBOX_ROOT`
   and its own `git init` repo under one `mktemp -d`; ~5s wall)
-- **Baseline:** `VERDICT: PASS (112 cases)` (91 at the first pass; 21 added
-  after this run — see *The four zeros*)
-- **Runner:** 24 mutations, one at a time, full suite after each, restored by
-  `cp` from a backup taken before the run. S24 was added after the review round
-  (see *What the critic found that sabotage did not*).
+- **Baseline:** `VERDICT: PASS (127 cases)` (91 at the first pass; 21 added
+  after the sabotage run, 15 more after the critic round — see *The four zeros*
+  and *What the critic found that sabotage did not*)
+- **Runner:** 27 mutations, one at a time, full suite after each, restored by
+  `cp` from a backup taken before the run. S24–S27 were added after the review
+  round (see *What the critic found that sabotage did not*). Final pass: **27
+  mutations, 27 reddened, no measured zeros.**
 
 The mutations were applied by an exact-substring replace that asserts the
 anchor occurs **exactly once** before writing, as DND-183's run did. That
@@ -299,6 +301,9 @@ produces 23 green runs, which reads as "this suite is dead".
 | S22 | a `UserPromptSubmit` entry is added for the hook | 2 | `FAIL  F-11 no UserPromptSubmit entry is registered for any hook` |
 | S23 | `inbox-status`'s stderr is relayed into the hook's reason log | 1 | `FAIL  R10 the wrapped command's stderr does not reach the reason log` |
 | S24 | the never-delivered clause drops its `.kind == "log"` filter | 2 | `FAIL  R13 an unwritten-to maildir is not announced as a missing producer` |
+| S25 | the wrapped command loses its `timeout` ceiling | 2 | `FAIL  R14 a hanging inbox-status does not hang session start` |
+| S26 | the unreadable-entry `Fix:` collapses back into the generic one | 3 | `FAIL  R15 the unreadable-entry Fix names something actually actionable` |
+| S27 | the two warnings share one rate-limit marker again | 2 | `FAIL  R8 a fresh OUTAGE warning does not suppress a HEALTH warning` |
 
 ### The four zeros
 
@@ -394,6 +399,42 @@ anywhere in 116 cases. The gap was in the fixture space, not the mutation set,
 which is the one class a mutation run is structurally blind to. Closed by
 **R13**, with a control asserting a never-delivered *log* channel still warns,
 and pinned by S24 above.
+
+The second critic round found three more of the same species -- claims no
+fixture reached, so no mutation could reach them either:
+
+**The wrapped command had no ceiling.** The hook bounds its stdin read with
+`timeout 2 cat` and states why (an inherited open pipe never sees EOF), but ran
+`inbox-status` unbounded. `inbox-status` scans channel files with no timeout of
+its own, so a very large `.jsonl` or an inbox root on a stale mount blocks
+SessionStart for as long as it takes -- the same hazard class, on the other of
+the hook's two blocking inputs, with `timeout` already in hand. Now
+`STATUS_TIMEOUT_SECONDS` (10s); an expiry is just another failed poll, which the
+existing path already handles. **R14**, pinned by S25.
+
+**One marker rate-limited two concerns.** `WARN_MARKER` gated both "the poll is
+not working" and "the poll works and found a fault downstream". Those have
+different owners and very different lifetimes: a benign health fault (a declared
+log channel whose producer was never registered) is a state the reader may live
+with for weeks, re-stamping every six hours, and a real outage beginning shortly
+after one of those stamps was rate-limited into silence by a warning about
+something else. That is this file's own S14 doctrine violated from the inside.
+Split into `athena-inbox-last-warn` and `athena-inbox-last-health-warn`. **R8**
+gains both directions of the independence claim -- the door 24 mutations left
+open, because S4 only ever exercised poll-vs-warn, never warn-vs-warn. Pinned by
+S27.
+
+**A `Fix:` that could not answer the question it promised.** The health warning
+ended "run inbox-status from this project to see which" for every clause. True
+for the channel-level ones; false for `failed_candidates`, because inbox-status
+is counts-only for tenant privacy and can never say *which* registry entry
+failed to parse -- naming them would enumerate other tenants. An agent following
+it re-ran a command that returned the same number. That is the defect **R11**
+exists to prevent, arriving through the guard-message convention instead of the
+read-step pointer. The clause now names what the reader can actually check, and
+says outright that inbox-status cannot narrow it. **R15**, pinned by S26, with a
+companion case proving the channel-level clauses kept their pointer rather than
+both being flattened into one vague sentence.
 
 ### Not exercised by this run
 

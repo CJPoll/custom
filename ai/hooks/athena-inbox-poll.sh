@@ -57,17 +57,26 @@
 # ---------------------------------------------------------------------
 #   athena-inbox-last-poll     when did we last ATTEMPT
 #   athena-inbox-last-success  when did we last SUCCEED (is the silence healthy?)
-#   athena-inbox-last-warn     when did we last SAY SO (rate-limits the warning)
+#   athena-inbox-last-warn     when did we last say THE POLL IS BROKEN
+#   athena-inbox-last-health-warn  when did we last say THE POLL FOUND A FAULT
 #   athena-inbox-poll.log      last 200 lines, fixed reason strings only
 #
-# Merging any two of the first three breaks one of the three answers, and they
-# are namespaced separately from the athena-slack-* family: a shared marker once
-# let a fresh CHECK silently suppress a POLL (walt_ui sabotage S14).
+# Merging any two of these breaks one of the answers, and they are namespaced
+# separately from the athena-slack-* family: a shared marker once let a fresh
+# CHECK silently suppress a POLL (walt_ui sabotage S14).
+#
+# THE TWO WARNINGS HAVE SEPARATE MARKERS for that same reason. "The poll is not
+# working" and "the poll works and found a fault downstream" have different
+# owners and very different lifetimes: a benign health fault is a state the
+# reader may live with for weeks, re-stamping on its own cadence, while an
+# outage is urgent and new. Sharing one marker lets the chronic one rate-limit
+# the urgent one into silence for a whole window.
 #
 # The attempt marker is stamped BEFORE the work, never after (S1/S4) -- an
 # after-the-fact stamp turns every session into a retry storm. A failure MUST
-# NEVER stamp the success marker (S17). A clean success stamps success AND
-# clears the warn marker, so the next outage gets its own warning (S21).
+# NEVER stamp the success marker (S17). A run that SUCCEEDED clears the outage
+# marker whatever it found downstream, so the next outage gets its own warning
+# (S21); a clean bill of health additionally clears the health marker.
 #
 # STALENESS IS JUDGED AFTER THE ATTEMPT. A run that succeeded is not stale, by
 # construction, so the warning only ever fires on a run that FAILED (or on a run
@@ -106,6 +115,9 @@ LOG_MAX_LINES=200
 # Six hours: D6's window. Overridable for the self-test, which cannot wait.
 STALE_SECONDS="${ATHENA_INBOX_STALE_SECONDS:-21600}"
 WARN_INTERVAL_SECONDS="${ATHENA_INBOX_WARN_INTERVAL_SECONDS:-21600}"
+# The ceiling on the wrapped command. Generous for a file scan, and far below
+# any delay a person would tolerate at session start.
+STATUS_TIMEOUT_SECONDS="${ATHENA_INBOX_STATUS_TIMEOUT_SECONDS:-10}"
 
 usage() {
   sed -n '2,/^#--- end usage ---$/p' "${BASH_SOURCE[0]}" \
@@ -136,6 +148,7 @@ MARKER_DIR="${HOME}/.claude"
 POLL_MARKER="${MARKER_DIR}/athena-inbox-last-poll"
 SUCCESS_MARKER="${MARKER_DIR}/athena-inbox-last-success"
 WARN_MARKER="${MARKER_DIR}/athena-inbox-last-warn"
+HEALTH_WARN_MARKER="${MARKER_DIR}/athena-inbox-last-health-warn"
 LOG_FILE="${MARKER_DIR}/athena-inbox-poll.log"
 
 # --- markers ---------------------------------------------------------------
@@ -229,7 +242,14 @@ fi
 # paths and channel names in the clause; none of that belongs in this hook's log
 # or its notice, and discarding it is the structural guarantee that it cannot
 # leak. A caller wanting the refusal runs inbox-status directly.
-STATUS_JSON="$("${STATUS_BIN}" --json 2>/dev/null)"; STATUS_RC=$?
+#
+# BOUNDED, for the same reason the stdin read is. This hook has two blocking
+# inputs and had a ceiling on only one of them: inbox-status scans channel files
+# with no timeout, so a very large .jsonl or an inbox root on a stale or slow
+# mount would block SessionStart for as long as it took. An expiry is just
+# another failed poll, which the path below already handles correctly -- the
+# success marker stays unstamped and the staleness warning can eventually fire.
+STATUS_JSON="$(timeout "${STATUS_TIMEOUT_SECONDS}" "${STATUS_BIN}" --json 2>/dev/null)"; STATUS_RC=$?
 
 # A non-zero rc with a WELL-FORMED document is a partial success: inbox-status
 # emits the counts it could produce and signals per-channel failure by status.
@@ -252,6 +272,10 @@ fi
 
 COUNTS_TEXT=""
 HEALTH_TEXT=""
+# How many registry entries could not be parsed. Kept as its own integer
+# because it is the one health clause inbox-status cannot elaborate on, so it
+# selects a different Fix: sentence below.
+HEALTH_CANDIDATES=0
 if [ "${POLL_OK}" -eq 1 ]; then
   # Counts only. `new`/`unread`/`unreadable` are integers; `name` is this
   # machine's own registry key, written by the owner, never by a peer.
@@ -276,30 +300,62 @@ if [ "${POLL_OK}" -eq 1 ]; then
       ([.channels[] | select(.state_unreadable // false)] | length
        | if . > 0 then "\(.) channel(s) have an unreadable state file, so their counts are not deduped" else empty end)
     ] | join("; ")' 2>/dev/null)" || HEALTH_TEXT=""
+
+  HEALTH_CANDIDATES="$(printf '%s' "${STATUS_JSON}" | jq -r '.failed_candidates // 0' 2>/dev/null)"
+  case "${HEALTH_CANDIDATES}" in ''|*[!0-9]*) HEALTH_CANDIDATES=0 ;; esac
 fi
 
+# TWO CONCERNS, TWO MARKERS. "The poll is not working" and "the poll works and
+# found something wrong downstream" are different faults with different owners
+# and very different lifetimes: a benign health fault (a declared log channel
+# whose producer was never registered) is a state the reader may live with for
+# weeks, re-stamping on its own cadence, while an OUTAGE is urgent and new. One
+# shared marker lets the chronic one rate-limit the urgent one into silence for
+# a whole window -- the exact cross-concern suppression this file's header
+# argues against (walt_ui S14), reached from the other side.
 WARN_TEXT=""
+WARN_TEXT_MARKER=""
 if [ "${POLL_OK}" -eq 0 ]; then
   # Only worth saying when the silence has actually lasted. A single transient
   # failure with a fresh success marker is not an outage.
   if marker_is_stale "${SUCCESS_MARKER}" "${STALE_SECONDS}"; then
     WARN_TEXT="athena:inbox: the session-start inbox check has not succeeded recently, so new mail may be arriving unreported. Fix: run ai/skills/athena:inbox/bin/inbox-status --json from this project and read the refusal; ~/.claude/athena-inbox-poll.log has the reason strings."
+    WARN_TEXT_MARKER="${WARN_MARKER}"
   fi
 elif [ -n "${HEALTH_TEXT}" ]; then
-  WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: run ai/skills/athena:inbox/bin/inbox-status from this project to see which."
+  # The Fix: must answer the question it promises. inbox-status CAN name the
+  # channel behind every clause here except one: it is counts-only for tenant
+  # privacy, so it can say how many registry entries failed to parse but never
+  # which -- naming them would enumerate other tenants. Pointing at it anyway
+  # would send an agent to re-run a command that returns the same number, which
+  # is the "instruction an agent cannot act on" this file refuses elsewhere.
+  if [ "${HEALTH_CANDIDATES}" -gt 0 ]; then
+    WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: check that every file under \${ATHENA_INBOX_ROOT:-~/.local/share/athena}/projects/ is valid JSON — one that is not is dropped from the candidate set, which makes its project look like it never opted in. inbox-status cannot say which, by design. For the channel-level clauses, run ai/skills/athena:inbox/bin/inbox-status from this project."
+  else
+    WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: run ai/skills/athena:inbox/bin/inbox-status from this project to see which."
+  fi
+  WARN_TEXT_MARKER="${HEALTH_WARN_MARKER}"
 fi
 
-# The warning is itself rate-limited -- by its OWN marker, never by the poll's.
-if [ -n "${WARN_TEXT}" ] && ! marker_is_stale "${WARN_MARKER}" "${WARN_INTERVAL_SECONDS}"; then
+# Each warning is rate-limited by the marker for ITS OWN concern, never by the
+# poll's and never by the other's.
+if [ -n "${WARN_TEXT}" ] && ! marker_is_stale "${WARN_TEXT_MARKER}" "${WARN_INTERVAL_SECONDS}"; then
   WARN_TEXT=""
 fi
 
 if [ -n "${WARN_TEXT}" ]; then
-  stamp "${WARN_MARKER}"
-elif [ "${POLL_OK}" -eq 1 ] && [ -z "${HEALTH_TEXT}" ]; then
-  # A clean run clears the warn marker, so the NEXT outage gets its own warning
-  # instead of being rate-limited by one from a fault that is already fixed.
+  stamp "${WARN_TEXT_MARKER}"
+fi
+
+# A run that SUCCEEDED clears the outage marker whatever it found downstream: a
+# health fault is not evidence that the poll is broken, and leaving the outage
+# marker stamped through a chronic health fault is how the next real outage gets
+# rate-limited by a fault that is already over.
+if [ "${POLL_OK}" -eq 1 ]; then
   unstamp "${WARN_MARKER}"
+  # ...and a clean bill of health clears the health marker, so the next health
+  # fault gets its own warning rather than inheriting this one's rate limit.
+  [ -z "${HEALTH_TEXT}" ] && unstamp "${HEALTH_WARN_MARKER}"
 fi
 
 MESSAGE=""

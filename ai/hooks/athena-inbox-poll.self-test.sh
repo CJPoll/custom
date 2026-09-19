@@ -48,7 +48,7 @@ trap cleanup EXIT INT TERM
 real_markers_fingerprint() {
   local f
   for f in athena-inbox-last-poll athena-inbox-last-success athena-inbox-last-warn \
-           athena-inbox-poll.log settings.json; do
+           athena-inbox-last-health-warn athena-inbox-poll.log settings.json; do
     printf '%s:%s\n' "${f}" "$(stat -c %Y -- "${REAL_HOME}/.claude/${f}" 2>/dev/null || printf 'absent')"
   done
 }
@@ -433,7 +433,8 @@ if grep -q 'athena-slack-last' "${HOOK}"; then
 else
   ok "F-10 the hook shares no marker path with the athena-slack-* family"
 fi
-for m in athena-inbox-last-poll athena-inbox-last-success athena-inbox-last-warn; do
+for m in athena-inbox-last-poll athena-inbox-last-success athena-inbox-last-warn \
+         athena-inbox-last-health-warn; do
   if grep -q "${m}" "${HOOK}"; then ok "F-10 marker [${m}] has its own path"
   else bad "F-10 marker [${m}] has its own path" "not referenced by the hook"; fi
 done
@@ -463,22 +464,54 @@ run_hook
 assert_contains "R8 a channel that has NEVER received anything is surfaced" \
   "never received anything" "$(context_of "${OUT}")"
 
-# A run that succeeded but found a broken channel must NOT clear the warn
+# A run that succeeded but found a broken channel must NOT clear the HEALTH warn
 # marker: clearing it would defeat the rate limit for the fault that is still
 # happening, and re-warn at every session start.
 setup_case
 register "${LOG_CHANNEL}"
-touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "${HOME}/.claude/athena-inbox-last-warn"
+touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "${HOME}/.claude/athena-inbox-last-health-warn"
 run_hook
-assert_file "R8 a successful-but-unhealthy run does not clear the warn marker" \
-  "${HOME}/.claude/athena-inbox-last-warn"
+assert_file "R8 a successful-but-unhealthy run does not clear the health-warn marker" \
+  "${HOME}/.claude/athena-inbox-last-health-warn"
 
-# ...and is itself rate-limited, by the same marker.
+# ...and is itself rate-limited, by that same marker.
+setup_case
+register "${LOG_CHANNEL}"
+touch "${HOME}/.claude/athena-inbox-last-health-warn"
+run_hook
+assert_eq "R8 the health warning is rate-limited like any other warning" "" "${OUT}"
+
+# THE TWO WARNINGS DO NOT RATE-LIMIT EACH OTHER. This is the marker-per-concern
+# rule applied warn-to-warn rather than poll-to-warn, and it is the one door
+# 24 mutations left open: a chronic, benign health fault re-stamps on its own
+# six-hour cadence, and an OUTAGE beginning shortly afterwards would be
+# swallowed for a whole window by a warning about something else entirely.
+setup_case
+register "${LOG_CHANNEL}"
+touch "${HOME}/.claude/athena-inbox-last-health-warn"   # health warned just now
+break_registry                                          # ...and now the poll breaks
+run_hook
+assert_contains "R8 a fresh HEALTH warning does not suppress an OUTAGE warning" \
+  "has not succeeded recently" "$(context_of "${OUT}")"
+
+# ...and the converse, so the split is not merely one-directional.
+setup_case
+register "${LOG_CHANNEL}"
+touch "${HOME}/.claude/athena-inbox-last-warn"          # outage warned just now
+run_hook
+assert_contains "R8 a fresh OUTAGE warning does not suppress a HEALTH warning" \
+  "never received anything" "$(context_of "${OUT}")"
+
+# A run that SUCCEEDED clears the outage marker whatever it found downstream: a
+# health fault is not evidence that the poll itself is broken, and leaving the
+# outage marker stamped through a weeks-long health fault is how the next real
+# outage gets rate-limited by one that is already over.
 setup_case
 register "${LOG_CHANNEL}"
 touch "${HOME}/.claude/athena-inbox-last-warn"
 run_hook
-assert_eq "R8 the health warning is rate-limited like any other warning" "" "${OUT}"
+assert_no_file "R8 a successful-but-unhealthy run DOES clear the outage marker" \
+  "${HOME}/.claude/athena-inbox-last-warn"
 
 # Private state, by construction. A 0644 marker or reason log under ~/.claude is
 # not a disaster, but the inbox family's whole discipline is 0600/0700 and a
@@ -526,8 +559,8 @@ CTX="$(context_of "${OUT}")"
 assert_not_contains "R13 an unwritten-to maildir is not announced as a missing producer" \
   "never received anything" "${CTX}"
 assert_contains "R13 the log channel's real mail is still counted" "2 new in slack" "${CTX}"
-assert_no_file "R13 an unwritten-to maildir does not leave the warn marker stamped" \
-  "${HOME}/.claude/athena-inbox-last-warn"
+assert_no_file "R13 an unwritten-to maildir does not leave the health-warn marker stamped" \
+  "${HOME}/.claude/athena-inbox-last-health-warn"
 
 # The control, so the case above cannot pass by the clause being dead: the same
 # fixture with a LOG channel that has never been delivered to DOES warn.
@@ -622,6 +655,63 @@ assert_contains "R9 the control: a well-formed document IS counted" "2 new in sl
   "$(context_of "${OUT}")"
 assert_file "R9 the control: a usable answer stamps success" \
   "${HOME}/.claude/athena-inbox-last-success"
+
+echo "== R14: the wrapped command is bounded too =="
+
+# This hook has TWO blocking inputs and had a ceiling on only one. The stdin
+# read is bounded because an inherited open pipe never sees EOF; inbox-status
+# scans channel files with no timeout of its own, so a very large .jsonl or an
+# inbox root on a stale mount blocks SessionStart for as long as it takes. An
+# expiry is just another failed poll -- the success marker stays unstamped, so
+# the staleness warning can still eventually fire.
+setup_case
+register "${LOG_CHANNEL}"
+export ATHENA_INBOX_STATUS_TIMEOUT_SECONDS=1
+stub_repo '#!/usr/bin/env bash
+sleep 30
+printf '"'"'{"channels":[]}'"'"''
+START="$(date +%s)"
+run_stub_hook
+ELAPSED=$(( $(date +%s) - START ))
+unset ATHENA_INBOX_STATUS_TIMEOUT_SECONDS
+if [ "${ELAPSED}" -lt 10 ]; then
+  ok "R14 a hanging inbox-status does not hang session start (${ELAPSED}s)"
+else
+  bad "R14 a hanging inbox-status does not hang session start" "took ${ELAPSED}s"
+fi
+assert_eq "R14 the expiry still exits 0" "0" "${RC}"
+assert_no_file "R14 an expired poll does NOT stamp success" \
+  "${HOME}/.claude/athena-inbox-last-success"
+
+echo "== R15: a Fix: must answer the question it promises =="
+
+# inbox-status is counts-only for tenant privacy: it can say HOW MANY registry
+# entries failed to parse, and by design never WHICH -- naming them would
+# enumerate other tenants. So the health warning's generic "run inbox-status to
+# see which" is a true instruction for the channel-level clauses and a FALSE one
+# for this clause, sending an agent to re-run a command that returns the same
+# number. That is the same defect R11 exists to prevent, arriving through the
+# guard-message convention instead of the read-step pointer.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+printf 'not json at all' > "${ATHENA_INBOX_ROOT}/projects/${SENTINEL_LC}.json"
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "R15 the unreadable-entry Fix names something actually actionable" \
+  "is valid JSON" "${CTX}"
+assert_contains "R15 the unreadable-entry Fix admits inbox-status cannot say which" \
+  "cannot say which" "${CTX}"
+assert_not_contains "R15 and does not point at a command that returns the same number" \
+  "inbox-status from this project to see which" "${CTX}"
+
+# The channel-level clauses keep the pointer, because inbox-status CAN answer
+# for them -- the fix above must not flatten both into one vague sentence.
+setup_case
+register "${LOG_CHANNEL}"
+run_hook
+assert_contains "R15 a channel-level clause still points at inbox-status" \
+  "inbox-status from this project to see which" "$(context_of "${OUT}")"
 
 echo "== R10: the wrapped command's stderr is discarded, never relayed =="
 
