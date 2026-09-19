@@ -768,16 +768,14 @@ run_hook
 assert_contains "R16 a second disappearance warns again rather than being rate-limited" \
   "declares none now" "$(context_of "${OUT}")"
 
-# ABSENT repo_key and EMPTY repo_key are different answers. Empty means "no git
+# ABSENT and EMPTY --repo-key are different answers. Empty means "no git
 # repository here", which legitimately has nothing to remember. ABSENT means the
-# inbox-status beside this hook predates the field -- hook/skill version skew,
-# which settings.json makes reachable by wiring one tree's hook path -- and that
-# silently makes the detector inert. `// ""` collapsed the two.
-# An inbox-status that predates --repo-key -- hook/skill version skew, which
-# settings.json makes reachable by wiring one tree's hook path while STATUS_BIN
-# resolves from that tree. Falling back to the shared $HOME markers silently
-# would put this project's inbox state back in the pool with every other
-# project's, which is the defect the per-project keying exists to close.
+# inbox-status beside this hook predates `--repo-key` -- hook/skill version skew,
+# which settings.json makes reachable by wiring one tree's hook path while
+# STATUS_BIN resolves from that tree. Collapsing the two would fall back to the
+# shared $HOME markers silently, putting this project's inbox state back in the
+# pool with every other project's -- the defect the per-project keying exists to
+# close.
 setup_case
 register "${LOG_CHANNEL}"
 stub_repo '#!/usr/bin/env bash

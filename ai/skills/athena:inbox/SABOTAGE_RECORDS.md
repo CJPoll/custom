@@ -607,7 +607,7 @@ produces 23 green runs, which reads as "this suite is dead".
 | S31 | the per-project seen marker is never recorded | 4 | `FAIL  R16 a vanished entry is announced, not silently treated as opt-out` |
 | S32 | the vanished-entry warning shares the `$HOME`-level health rate limit | 1 | `FAIL  R16 another project's health warning does not silence this one` |
 | S33 | the inflated-count caveat moves back behind the rate limit | 1 | `FAIL  R17 the inflated count still carries its caveat` |
-| S34 | a key that cannot be hashed disables the detector in silence | 1 | `FAIL  R16 a key that cannot be hashed is LOGGED, not silently inert` |
+| S34 | a key that cannot be hashed disables the detector in silence | 1 | `FAIL  R16 a key that cannot be hashed is LOGGED, not silently shared` |
 | S35 | `inbox_status_json` stops naming the session's repo | 5 | `FAIL  R16 a vanished entry is announced, not silently treated as opt-out` |
 | S36 | the other-projects clause claims the doubt is unresolved again | 2 | `FAIL  R12 an unreadable registry entry is surfaced` |
 | S37 | a repair never clears the vanished-entry rate limit | 2 | `FAIL  R16 a repair clears the vanished-entry rate limit` |
@@ -961,6 +961,24 @@ were the same violation or the same false claim recurring one layer down:
   reintroducing the divergence: `FAIL the two norm() implementations disagree on
   [./definitely-not-on-disk.sh]`.
 
+**Later (2026-09-19) — the merge round found the `--norm` claim above was still
+false.** Merging `origin/main` (DND-185) forward, the standing diff-critic
+caught that `setup-hooks --norm` did **not** drive the shipped install `norm()`:
+it ran a *second copy* inside `norm_path`'s own `PYNORM` heredoc, while
+`apply`/install used the `norm()` in the `PY` heredoc. So sabotaging the
+install-path `norm()` left the agreement case green — the third time this case
+passed for the wrong reason. Truly fixed now: `setup-hooks` carries **one**
+`norm()`, in a single `$MERGE_PY` program; `apply` runs it, and `--norm` runs
+the same program with `NORM_ONLY=1` (which prints `norm(NORM_IN)` and exits
+before any settings read). Re-verified by sabotage on the single shipped
+`norm()` — dropping its `head == os.curdir` guard reddened the case:
+`FAIL the two norm() implementations disagree on [./definitely-not-on-disk.sh]:
+setup-hooks=[…/definitely-not-on-disk.sh] checker=[./definitely-not-on-disk.sh]`.
+(Caveat left standing, not re-run: row **S35** was measured when the hook read a
+`.repo_key` JSON field; the hook now calls `inbox-status --repo-key`, so that
+mutation's reddening may now belong to the skill's own `test/self-test.sh`
+rather than this hook suite.)
+
 The fourth: an entry that is **present but declares an empty `channels`** is
 byte-identical to a missing one — `descriptor_validate` accepts a zero-key
 object, and `inbox_status_json` then emits the same `{"channels":[]}`. The hook
@@ -991,6 +1009,9 @@ The hook is a thin wrapper; everything below it — name grammar, descriptor
 validation, dedupe, offsets, maildir rules — belongs to DND-183's run above.
 Still unexercised anywhere: the fence renderer, the consumer lock, the atomic
 state writer, the doorbell waiter, and `read-inbox` itself.
+
+---
+
 # DND-185 — `bin/inbox-wait`, the `.event` waiter
 
 Every mutation below was applied to a clean tree, measured, and reverted. A

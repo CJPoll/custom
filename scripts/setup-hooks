@@ -79,23 +79,17 @@ done
 command -v python3 >/dev/null 2>&1 || { echo "error: python3 required. Fix: install python3 or wire hooks by hand from ai/hooks/registry.json." >&2; exit 2; }
 [ -f "$REGISTRY" ] || { echo "error: registry not found at $REGISTRY. Fix: restore ai/hooks/registry.json from git." >&2; exit 2; }
 
-# Merge (or remove) the registry hooks into a settings file. Emits, on stdout,
-# a one-line-per-change report; exits 10 (no change) or 0 (changed) via the
-# trailing marker the caller reads. All JSON work is done in python for safety.
-apply() {
-  local mode="$1"        # "install" | "remove"
-  local settings="$2"
-  local dry="$3"
-  REPO_DIR="$HOOKS_REPO_DIR" REGISTRY="$REGISTRY" SETTINGS="$settings" MODE="$mode" DRY="$dry" python3 - <<'PY'
+# The path normalizer AND the merge/remove logic, as ONE python program with a
+# SINGLE norm(). `apply` runs the whole program; `norm_path` runs it with
+# NORM_ONLY=1, which prints norm(NORM_IN) and exits BEFORE any registry/settings
+# read — so the agreement case drives the EXACT norm() the installer uses, not a
+# second copy of it. (setup-hooks and check-hooks-registered stay two
+# INDEPENDENT norm()s that must agree; what this removes is the duplicate copy
+# that used to live inside setup-hooks itself — which let the agreement case
+# pass green while the shipped install-path norm() drifted, the critic finding
+# of the DND-188 merge round.)
+MERGE_PY="$(cat <<'PY'
 import json, os, sys
-
-repo   = os.environ["REPO_DIR"]
-reg    = json.load(open(os.environ["REGISTRY"]))["hooks"]
-path   = os.environ["SETTINGS"]
-mode   = os.environ["MODE"]
-dry    = os.environ["DRY"] == "1"
-
-def absscript(rel): return os.path.join(repo, rel)
 
 def norm(cmd):
     # Resolve symlinks so two spellings of the same script compare equal — on
@@ -131,6 +125,21 @@ def norm(cmd):
         return os.path.join(os.path.realpath(head), tail)
     except OSError:
         return cmd
+
+# NORM_ONLY: print this tool's norm() of NORM_IN and exit, BEFORE reading any
+# registry or settings file. This is the entry the agreement case reaches
+# through `--norm`, so it drives the very function `apply` uses below.
+if os.environ.get("NORM_ONLY"):
+    sys.stdout.write(norm(os.environ.get("NORM_IN", "")) + "\n")
+    sys.exit(0)
+
+repo   = os.environ["REPO_DIR"]
+reg    = json.load(open(os.environ["REGISTRY"]))["hooks"]
+path   = os.environ["SETTINGS"]
+mode   = os.environ["MODE"]
+dry    = os.environ["DRY"] == "1"
+
+def absscript(rel): return os.path.join(repo, rel)
 
 try:
     with open(path) as f: settings = json.load(f)
@@ -190,31 +199,26 @@ with open(path, "w") as f:
     f.write("\n")
 print("MARKER:changed")
 PY
+)"
+
+# Merge (or remove) the registry hooks into a settings file. Emits, on stdout,
+# a one-line-per-change report and a trailing MARKER line the caller reads.
+# All JSON work is done in python for safety, through the SINGLE norm() above.
+apply() {
+  local mode="$1"        # "install" | "remove"
+  local settings="$2"
+  local dry="$3"
+  REPO_DIR="$HOOKS_REPO_DIR" REGISTRY="$REGISTRY" SETTINGS="$settings" MODE="$mode" DRY="$dry" python3 -c "$MERGE_PY"
 }
 
-# norm_path <path>  -- print the SHIPPED norm() of one path.
-#
-# Exists so the agreement case drives this implementation instead of a copy of
-# it. A case that re-implements the thing it is pinning cannot fail for the
-# reason it names, which is exactly what the previous version of that case did.
+# norm_path <path>  -- print the SHIPPED norm() of one path, by running the
+# SAME program `apply` runs, with NORM_ONLY=1 (which prints norm(NORM_IN) and
+# exits before any settings read). Exists so the agreement case drives the
+# installer's OWN norm(), not a copy of it: a case that re-implements the thing
+# it pins cannot fail for the reason it names, which is exactly how the previous
+# version of that case passed green while the two norm()s had drifted.
 norm_path() {
-  NORM_IN="$1" python3 - <<'PYNORM'
-import os, sys
-cmd = os.environ["NORM_IN"]
-def norm(cmd):
-    if not cmd:
-        return cmd
-    try:
-        if os.path.exists(cmd):
-            return os.path.realpath(cmd)
-        head, tail = os.path.split(cmd)
-        if not head or head == os.curdir or not os.path.isdir(head):
-            return cmd
-        return os.path.join(os.path.realpath(head), tail)
-    except OSError:
-        return cmd
-sys.stdout.write(norm(cmd) + "\n")
-PYNORM
+  NORM_ONLY=1 NORM_IN="$1" python3 -c "$MERGE_PY"
 }
 
 case "$ACTION" in
