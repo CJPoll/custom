@@ -77,6 +77,10 @@ _inbox_state_read() {
       # exists to recover). So fold the legacy per-conversation watermark into
       # any channel the shared file does not already carry. `$lc + current`
       # means a watermark already advanced here WINS; legacy only fills gaps.
+      # This fold is a PERMANENT gap-filler, not a one-shot: the legacy cache is
+      # left in place, so it runs on every read while both files exist. That is
+      # idempotent (current always wins for known channels) and cheap; it costs
+      # one extra file read until the legacy cache is deleted by hand.
       jq -c --slurpfile leg "$SLACK_INBOX_LEGACY_STATE" '
         (($leg[0].channels) // {}) as $lc
         | .channels = ($lc + (.channels // {}))
