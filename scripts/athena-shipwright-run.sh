@@ -168,14 +168,20 @@ esac
 
 mkdir -p "${LOG_DIR}"
 
+# The brief deliberately says "your tree" and never names a path. The agent
+# template owns where the run happens (a worktree, never the main checkout), and
+# a path restated here is a second source of truth that drifts from it — which
+# is exactly what happened: this string still read `~/dev/custom` after the
+# worktree change landed, so the runner handed the agent a brief its own
+# template had to override with a supersession label, every hour.
 BRIEF="You are coordinating; do the work by delegating. Spawn exactly one \
 athena-shipwright agent (Agent tool, subagent_type: athena-shipwright) with \
 this brief, and do nothing else yourself: 'Run your full retrospective now. \
-Sync ~/dev/custom with its remote first (pull), mine every coordination \
-artifact newer than your cursor, apply harness improvements per your Method, \
-gate, and invariants, commit each change locally, push your commits, and \
-update your journal and cursor.' When it finishes, relay its one-line summary \
-verbatim and stop."
+Sync your tree with its remote first (pull, per your own Method), mine every \
+coordination artifact newer than your cursor, apply harness improvements per \
+your Method, gate, and invariants, commit each change locally, push your \
+commits, and update your journal and cursor.' When it finishes, relay its \
+one-line summary verbatim and stop."
 
 # A human reading a cron-mailed `Fix:` line is exactly the reader who then runs
 # this by hand, so the knobs those messages mention are discoverable here.

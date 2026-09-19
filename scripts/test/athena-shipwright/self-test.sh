@@ -627,6 +627,20 @@ else
   bad "DRY_RUN from a dirty tree" "rc=$rc out=$o"
 fi
 
+# The brief must not name a checkout path. The agent template owns where the run
+# happens; a path restated in the brief is a second source of truth, and it DID
+# drift — after the worktree change landed the brief still said `~/dev/custom`,
+# the main checkout the change exists to keep the run out of, and only the
+# template's supersession label stopped an agent following it literally.
+o="$(env DRY_RUN=1 SHIPWRIGHT_REPO="$r" SHIPWRIGHT_CLAUDE="$a/stub-claude" "$RUNNER" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] \
+   && ! printf '%s' "$o" | grep -q 'dev/custom' \
+   && printf '%s' "$o" | grep -q 'Sync your tree'; then
+  ok "the brief names no checkout path (it cannot contradict the template)"
+else
+  bad "brief names a checkout path" "rc=$rc out=$o"
+fi
+
 # ---------------------------------------------------------------------------
 case_ 'athena-shipwright-run.sh — the single-run lock still holds'
 
