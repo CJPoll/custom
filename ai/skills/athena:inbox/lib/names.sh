@@ -53,6 +53,18 @@ names_valid_inbox_name() {
     .*) return 1 ;;                    # no leading dot
     */*|*\\*) return 1 ;;              # no separator of either flavour
     *..*) return 1 ;;                  # no traversal, anywhere in the string
+    # A DELIBERATE, NAMED DEVIATION -- stricter than the contract's grammar,
+    # in the safe direction. The contract bars only `/ \ NUL ..`, a leading dot
+    # and >128 bytes, so a TAB or NEWLINE in a log `path` is contract-legal.
+    # But `descriptor_resolve` emits `<label>\t<path>` lines that `_inbox_path`
+    # splits on tab and newline, so such a name collides with BOTH delimiters:
+    # the path truncates, real mail reports as "nothing has EVER been
+    # delivered", and `inbox` and `state` resolve to the SAME truncated path --
+    # which the ack ticket's state writer would then write over the channel
+    # file. This is the delimiter-collision class already fixed once for the
+    # registry filename (the "JSON first" ordering in fs_registry_records);
+    # refusing the name is the cheaper half of the same lesson.
+    *$'\t'*|*$'\n'*|*$'\r'*) return 1 ;;
   esac
   # The client's grammar also rejects a NUL. There is deliberately NO arm for
   # it here, and the omission is the safe direction: bash cannot hold a NUL in

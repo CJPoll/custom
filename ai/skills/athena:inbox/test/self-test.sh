@@ -1079,6 +1079,66 @@ assert_eq "the Fix: clause names a runnable command" "1" \
 assert_contains "and running it actually names the broken file" "runproj.json" \
   "$(cd "${runproj}" && eval "${fixcmd%% -- then*}" 2>/dev/null)"
 
+# THE ENTRY'S `repo` MUST BE CANONICALISED BEFORE COMPARISON. The contract
+# makes the match bilateral -- "Matched exactly, AFTER REALPATH, against the
+# session's own" -- and the session's side is already canonical. Comparing a
+# raw string against a canonical one meant a grammatically fine entry whose
+# `repo` carried a trailing slash, a `..`, or a symlinked-but-equivalent prefix
+# NEVER matched, was never validated, and was not even a failed candidate (it
+# parses and has a string `repo`). The session reported zero channels and
+# exit 0: a dark channel indistinguishable from "not opted in".
+setup_case
+cnproj="$(make_repo cnproj)"
+cncommon="$(cd "${cnproj}" && realpath "$(git rev-parse --git-common-dir)")"
+printf '%s\n' "${L1}" > "${ATHENA_INBOX_ROOT}/c.jsonl"
+for variant in "${cncommon}/" "${cncommon}/." "$(dirname "${cncommon}")/../$(basename "${cnproj}")/.git"; do
+  jq -n --arg r "${variant}" '{v:1,repo:$r,channels:{c:{kind:"log",path:"c.jsonl"}}}' \
+    > "${ATHENA_INBOX_ROOT}/projects/cnproj.json"
+  assert_eq "a non-canonical repo path still matches its session: [${variant##*/custom}]" "c" \
+    "$(cd "${cnproj}" && inbox_channels 2>/dev/null)"
+done
+# And canonicalising must NOT make an unrelated repo match: quiet stays quiet.
+unrelated="$(make_repo unrelated)"
+assert_eq "canonicalisation does not make an unregistered repo match something" "" \
+  "$(cd "${unrelated}" && inbox_channels 2>/dev/null)"
+# An entry naming a repo that does not exist normalises lexically and simply
+# matches nobody -- correct, and quiet.
+jq -n '{v:1,repo:"/nope/deleted/../deleted/.git",channels:{c:{kind:"log",path:"c.jsonl"}}}' \
+  > "${ATHENA_INBOX_ROOT}/projects/cnproj.json"
+out="$(cd "${cnproj}" && inbox_channels 2>&1)"; rc=$?
+assert_eq "an entry naming a nonexistent repo matches nobody, quietly" "" "${out}"
+assert_eq "and that is not a fault" "0" "${rc}"
+
+# A TAB OR NEWLINE IN A LOG PATH collides with the `<label>\t<path>` protocol
+# that descriptor_resolve emits and _inbox_path parses. The contract's grammar
+# permits both, so this is a deliberate deviation in the SAFE direction:
+# without it the path truncates, real mail reports as "nothing has EVER been
+# delivered", and `inbox` and `state` resolve to the SAME truncated path --
+# which the ack ticket's state writer would write over the channel file.
+for bad in "$(printf 'a\tb.jsonl')" "$(printf 'a\nb.jsonl')" "$(printf 'a\rb.jsonl')"; do
+  if names_valid_inbox_name "${bad}"; then
+    bad "a name carrying a resolve-protocol delimiter is rejected" "accepted"
+  else ok "a name carrying a resolve-protocol delimiter is rejected"; fi
+done
+setup_case
+tnproj="$(make_repo tnproj)"
+tncommon="$(cd "${tnproj}" && realpath "$(git rev-parse --git-common-dir)")"
+jq -n --arg r "${tncommon}" --arg p "$(printf 'a\nb.jsonl')" \
+  '{v:1,repo:$r,channels:{n:{kind:"log",path:$p}}}' > "${ATHENA_INBOX_ROOT}/projects/tnproj.json"
+printf '%s\n' "${L1}" > "${ATHENA_INBOX_ROOT}/$(printf 'a\nb.jsonl')"
+err="$(cd "${tnproj}" && "${BIN}/inbox-status" 2>&1 >/dev/null)"; rc=$?
+if [ "${rc}" -eq 0 ]; then bad "a delimiter in a log path is refused, not silently truncated" "exited 0"
+else assert_contains "a delimiter in a log path is refused with a Fix: clause" "Fix:" "${err}"; fi
+assert_not_contains "and real mail is never reported as never-delivered" "EVER been delivered" \
+  "$(cd "${tnproj}" && "${BIN}/inbox-status" 2>/dev/null)"
+
+# The ring buffer must not fail on the FIRST-RUN case: under pipefail a grep
+# matching nothing exits 1 and takes the pipeline with it, so appending
+# nothing to an empty ring would look like a failure. DND-184 hits this first.
+ring_rc=0; logchan_ring_append 500 "" "" >/dev/null 2>&1 || ring_rc=$?
+assert_eq "appending nothing to an empty ring is not a failure" "0" "${ring_rc}"
+assert_eq "and it yields an empty ring" "" "$(logchan_ring_append 500 "" "" 2>/dev/null)"
+
 # A SUBDIRECTORY is not a message. The name predicate is name-only by design,
 # so the "is it actually a file" half has to happen where the filesystem is.
 setup_case

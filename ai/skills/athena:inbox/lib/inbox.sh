@@ -182,7 +182,7 @@ _inbox_count_log() {
   fi
 
   if [ "${state_bad}" = "true" ]; then
-    inbox_fail "channel \"${chan_label:-$(_inbox_path inbox "${resolved}" | sed 's|.*/||')}\" has an unreadable state file, so its counts are not deduped and include messages already read" \
+    inbox_fail "channel file \"$(_inbox_path inbox "${resolved}" | sed 's|.*/||')\" has an unreadable state file, so its counts are not deduped and include messages already read" \
       "inspect ${state} (check it with: jq . \"${state}\"). Until it is valid JSON with a numeric \"offset\" and string arrays for \"seen_event_ids\"/\"seen_keys\", this channel re-reports everything; delete the file to start cleanly from offset 0."
   fi
 
