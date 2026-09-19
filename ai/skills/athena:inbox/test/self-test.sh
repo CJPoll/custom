@@ -3309,6 +3309,19 @@ assert_eq "M-12 ... and nothing was delivered" "0" "$(ls "${SWRITE}"/*.md 2>/dev
 # the mirrored model this directory is the PEER's read directory -- so its
 # consumer lock belongs to the peer, and a send taking it would deny an
 # ordinary peer read, and be denied by one.
+#
+# OBSERVED OVER A SEND THAT ACTUALLY TOOK A LOCK. The self-send and contended
+# cases above are refused BEFORE any lock is taken or any directory created, so
+# asserting the absence of a lock there proves nothing -- it holds no matter
+# which file a real send would use. So run a genuine successful send first, then
+# assert BOTH halves: the writer's lock (`.sender.lock`, which flock never
+# unlinks) is present, and the peer's (`.consumer.lock`) is absent.
+setup_send_case
+( cd "${SPROJ}" && printf 'lock-shape check\n' | "${BIN}/send-mail" mail lock-shape --to peer >/dev/null 2>&1 )
+assert_ok "M-11 the send this case observes actually delivered" \
+  test -n "$(ls "${SWRITE}"/*.md 2>/dev/null)"
+assert_ok "M-11 the writer took its own .sender.lock (present after the send)" \
+  test -e "${SWRITE}/.sender.lock"
 if [ -e "${SWRITE}/.consumer.lock" ]; then
   bad "M-11 a send creates no .consumer.lock in the directory the peer reads" "it did"
 else
@@ -3356,6 +3369,14 @@ assert_contains "M-10 a flag with no value is refused rather than swallowing a w
 OUT="$( cd "${SPROJ}" && printf 'x\n' | "${BIN}/send-mail" mail slug --to peer --body-file /nonexistent 2>&1 )"
 assert_contains "M-10 a missing --body-file is refused, not read as an empty body" \
   "not a readable regular file" "${OUT}"
+# THE ACCURATE REFUSAL IS THE LAST WORD. The capture uses `$(cap && printf X)`,
+# not `$(cap; printf X)`: a `;` would take the substitution's status from the
+# trailing printf (always 0), so the `|| exit 1` never fired, the body stayed
+# empty, and the run fell through to the DOWNSTREAM "empty message" refusal --
+# which names the wrong cause for a file that existed and was rejected. This
+# asserts that misleading second refusal is absent.
+assert_not_contains "M-10 ... and NOT with the misleading downstream empty-body refusal" \
+  "refusing to send an empty message" "${OUT}"
 assert_eq "M-10 ... and nothing was delivered" "0" "$(ls "${SWRITE}"/*.md 2>/dev/null | wc -l)"
 
 # THE OTHER TWO BODY SOURCES. Only stdin was exercised, and the sabotage pass
@@ -3417,9 +3438,13 @@ printf 'before\0after\n' > "${CASE_DIR}/nul-body.bin"
 ERR="$( cd "${SPROJ}" && "${BIN}/send-mail" mail nul-file --to peer --body-file "${CASE_DIR}/nul-body.bin" 2>&1 >/dev/null </dev/null )"; RC=$?
 assert_eq "M-10 a --body-file containing a NUL is refused" "1" "${RC}"
 assert_contains "M-10 ... naming the NUL as the reason" "NUL byte" "${ERR}"
+assert_not_contains "M-10 ... and not with the misleading empty-body refusal (the && capture guard held)" \
+  "refusing to send an empty message" "${ERR}"
 ERR="$( cd "${SPROJ}" && printf 'before\0after\n' | "${BIN}/send-mail" mail nul-stdin --to peer 2>&1 >/dev/null )"; RC=$?
 assert_eq "M-10 a body piped on stdin containing a NUL is refused too" "1" "${RC}"
 assert_contains "M-10 ... naming the NUL there as well" "NUL byte" "${ERR}"
+assert_not_contains "M-10 ... and not the misleading empty-body refusal on the stdin source either" \
+  "refusing to send an empty message" "${ERR}"
 assert_eq "M-10 ... and neither was delivered" "0" "$(ls "${SWRITE}"/*.md 2>/dev/null | wc -l)"
 
 echo

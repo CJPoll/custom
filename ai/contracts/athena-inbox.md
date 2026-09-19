@@ -1627,9 +1627,16 @@ across scan, build and deliver on a `maildir` channel;
 appends complete newline-terminated lines with `O_APPEND` (`log`) or renames out
 of `tmp/` in the same directory (`maildir`); bumps the doorbell **after** the
 data lands; never rewrites, truncates, rotates, or deletes; never creates a
-state file, a lock file, a rotated generation, or anything under `projects/`;
-puts no credential in a message; and stops permanently on a
+state file, a `*.consumer.lock`, a rotated generation, or anything under
+`projects/`; puts no credential in a message; and stops permanently on a
 partial write rather than resuming.
+
+**Later (2026-09-19):** this clause read "never creates a state file, **a lock
+file**, a rotated generation …", which a maildir sender cannot honour — it holds
+`<write>/.sender.lock` across scan/build/deliver (see *Writer obligations*). The
+prohibition is narrowed to a `*.consumer.lock`, matching *Derived paths*: the
+`*.consumer.lock` is the reader's and the owner's, never the writer's, but
+`.sender.lock` is exactly the writer's and is now named as such.
 
 **A reader is conformant when it:** resolves channels only from the registry
 entry matching its own repo identity — resolved against the session's cwd, and

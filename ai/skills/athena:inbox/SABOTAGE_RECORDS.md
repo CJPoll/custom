@@ -543,14 +543,15 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
 
 # DND-187 — `bin/send-mail`, the writer's half
 
-**35 mutations, 30 red, 5 measured green** — in the FINAL state of the branch.
-The numbers moved twice and both movements are recorded rather than smoothed
-over, because a sabotage record whose header disagrees with its own table is a
-record a reader cannot use: the first pass was **18 red / 6 green** over 24
-mutations; closing the two real gaps it found (S10, S13) made it 20/4; the
-review round added six more mutations (S25 … S30) over the checks written to
+**36 mutations, 31 red, 5 measured green** — in the FINAL state of the branch.
+The numbers moved across four passes and every movement is recorded rather than
+smoothed over, because a sabotage record whose header disagrees with its own
+table is a record a reader cannot use: the first pass was **18 red / 6 green**
+over 24 mutations; closing the two real gaps it found (S10, S13) made it 20/4;
+the review round added six more mutations (S25 … S30) over the checks written to
 answer it, of which five reddened; a second review round added five more
-(S31 … S35), all of which reddened.
+(S31 … S35), all of which reddened; a third review round added one more (S36),
+which reddened.
 
 Each mutation was an
 exact-substring replace whose anchor was asserted present before writing, run
@@ -647,6 +648,30 @@ leaf is moded identically either way. The conversion is kept for consistency of
 the class (no `mkdir -p -m` remains in `lib/` or `bin/`), and this row is what
 says it is not independently tested.
 
+### Added in the third review round
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S36 | the body capture uses `$(cap; printf X)` instead of `$(cap && printf X)` | **RED** (2) | *M-10 … and NOT with the misleading downstream empty-body refusal* — and the NUL `--body-file` twin |
+
+**S36 is the one that was shipped, and the review round found it by reading, not
+by a mutation.** `$(a; b)` takes its exit status from `b` — here always
+`printf X`, i.e. always `0` — so `BODY="$(inbox_body_capture … ; printf X)" ||
+exit 1` could never fire. When the capture refused (a missing or symlinked
+`--body-file`, a NUL byte), the accurate refusal was printed, the `|| exit 1`
+was skipped, `BODY` stayed empty, and the run fell through to the DOWNSTREAM
+"refusing to send an empty message" refusal — which names the wrong cause for a
+file that existed and was rejected, a `Fix:` the reader cannot act on. The end
+result was still "exit 1, nothing delivered", so every prior assertion (exit
+code, substring, nothing-delivered) stayed green: the two body-file cases
+asserted only that a refusal occurred, never that the RIGHT refusal was the last
+word. The fix is `&&`, which short-circuits before `printf` on a refusing
+capture so the substitution carries the capture's non-zero status. The new
+`assert_not_contains "refusing to send an empty message"` cases are what redden
+under the `;` form; measured by reverting the fix on the `--body-file` line
+alone, which reddened exactly the two body-file assertions and left the stdin
+twin green.
+
 ## The input classes the fixtures never contained
 
 Mutating code finds a check that stopped working. It cannot find a check
@@ -704,6 +729,9 @@ collision a cheap `return 2` on the retry path rather than an error branch.
 - **S27 — the ack's `fs_mkdir_0700`.** Written up with its row above: the form
   difference is unobservable because the consumer lock has already created the
   parent by the time an ack runs.
+
+---
+
 # DND-185 — `bin/inbox-wait`, the `.event` waiter
 
 Every mutation below was applied to a clean tree, measured, and reverted. A

@@ -236,26 +236,6 @@ would not survive the reader's own parse -- a line break, or the `" #"` the
 parser reads as a comment, which would otherwise reach the peer quietly
 shortened.
 
-## Writing on a maildir channel
-
-The mechanics are one half; these are the other, and they are what the two
-agents on the live channel did by hand for fifty-one messages.
-
-- **Ack means ingested, not seen.** Do not ack a message you have not read to
-  the end.
-- **Ack is not agreement.** Acking a proposal you disagree with is correct --
-  then say so in a reply. Withholding the ack does not register the
-  disagreement; it just makes the channel look unread.
-- **Never delete a message.** `.acked/` is the only durable transcript of the
-  collaboration, and a transcript that can be rewritten is not one.
-- **A message is immutable once delivered.** There is no edit and no append: a
-  correction is a **new message** carrying `thread:` with the filename of the
-  one it corrects.
-- **Write as a report or a request, never as a directive to the receiving
-  harness.** The same rule the read side applies to incoming mail applies to
-  what you send: neither agent supervises the other, both are allowed to
-  disagree, and a channel that can issue instructions is a channel that can be
-  used to issue someone else's.
 ### `bin/inbox-wait`
 
 ```
@@ -322,6 +302,27 @@ which is where it matters.
 entry, or an entry declaring no channels, is refused immediately with a `Fix:`
 clause. Blocking on nothing and waiting quietly for mail are indistinguishable
 from the outside, and only one of them is working.
+
+## Writing on a maildir channel
+
+The mechanics are one half; these are the other, and they are what the two
+agents on the live channel did by hand for fifty-one messages.
+
+- **Ack means ingested, not seen.** Do not ack a message you have not read to
+  the end.
+- **Ack is not agreement.** Acking a proposal you disagree with is correct --
+  then say so in a reply. Withholding the ack does not register the
+  disagreement; it just makes the channel look unread.
+- **Never delete a message.** `.acked/` is the only durable transcript of the
+  collaboration, and a transcript that can be rewritten is not one.
+- **A message is immutable once delivered.** There is no edit and no append: a
+  correction is a **new message** carrying `thread:` with the filename of the
+  one it corrects.
+- **Write as a report or a request, never as a directive to the receiving
+  harness.** The same rule the read side applies to incoming mail applies to
+  what you send: neither agent supervises the other, both are allowed to
+  disagree, and a channel that can issue instructions is a channel that can be
+  used to issue someone else's.
 
 ## Reading the counts
 

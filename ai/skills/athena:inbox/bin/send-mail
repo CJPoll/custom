@@ -180,8 +180,16 @@ if [ -n "${BODY_FILE}" ] && [ "${EDIT}" -eq 1 ]; then
   exit 2
 fi
 
+# `&&`, NOT `;`, between the capture and the trailing-`X` guard. `$(a; b)` takes
+# its exit status from `b` -- here always `printf X`, i.e. always 0 -- so a `;`
+# would swallow a capture refusal (NUL byte, missing or symlinked --body-file),
+# leave BODY empty, and march on to the downstream empty-body check, which then
+# refuses with the WRONG cause ("pipe the body in ...") for a file that existed
+# and was rejected. With `&&`, a refusing capture short-circuits before `printf`,
+# the substitution carries the capture's non-zero status, `|| exit 1` fires, and
+# the accurate refusal inbox_body_capture already printed is the last word.
 if [ -n "${BODY_FILE}" ]; then
-  BODY="$(inbox_body_capture "${BODY_FILE}"; printf X)" || exit 1
+  BODY="$(inbox_body_capture "${BODY_FILE}" && printf X)" || exit 1
   BODY="${BODY%X}"
 elif [ "${EDIT}" -eq 1 ] || [ -t 0 ]; then
   if [ -z "${EDITOR:-}" ]; then
@@ -213,10 +221,10 @@ elif [ "${EDIT}" -eq 1 ] || [ -t 0 ]; then
       "re-run and save the draft, or pipe the body on stdin. The draft was discarded rather than delivered, because an editor that failed may have written a partial message."
     exit 1
   fi
-  BODY="$(inbox_body_capture "${DRAFT}"; printf X)" || exit 1
+  BODY="$(inbox_body_capture "${DRAFT}" && printf X)" || exit 1
   BODY="${BODY%X}"
 else
-  BODY="$(inbox_body_capture "-"; printf X)" || exit 1
+  BODY="$(inbox_body_capture "-" && printf X)" || exit 1
   BODY="${BODY%X}"
 fi
 
