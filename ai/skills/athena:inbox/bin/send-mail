@@ -183,7 +183,11 @@ else
   }
   trap 'rm -f "${DRAFT}"' EXIT
   chmod 0600 "${DRAFT}" 2>/dev/null || true
-  if ! "${EDITOR}" "${DRAFT}"; then
+  # Through `sh -c` because $EDITOR routinely CARRIES ARGUMENTS -- `code -w`,
+  # `emacsclient -nw`. Invoked as a single word those fail with "not found",
+  # surfacing here as the editor having exited non-zero, which sends the reader
+  # looking at their draft instead of at their environment.
+  if ! sh -c '"$@"' _ ${EDITOR} "${DRAFT}"; then
     inbox_fail "\$EDITOR exited non-zero; nothing was sent" \
       "re-run and save the draft, or pipe the body on stdin. The draft was discarded rather than delivered, because an editor that failed may have written a partial message."
     exit 1
@@ -192,8 +196,15 @@ else
 fi
 
 # --- send -------------------------------------------------------------------
-# The lock is released on every exit path, including a failure between the scan
-# and the delivery. Left held, it would deny the next send in this shell.
+# THE LOCK IS RELEASED BY THE KERNEL, AND THIS TRAP IS BELT, NOT BRACES.
+# `inbox_send_mail` runs inside a command substitution at the end of a pipeline,
+# so it executes in a SUBSHELL: this shell's INBOX_LOCK_PATH is never set, and
+# the release below is a no-op on the ordinary path. What actually releases the
+# lock is the subshell exiting, which closes the descriptor -- `flock(2)` is
+# released on close, including on process death, which is the same property
+# that makes the contract forbid reaping a "stale" lock. The trap is kept for
+# the library caller that sources these files and calls the manager in-process,
+# and the draft is removed on every exit path either way.
 trap 'inbox_release_consumer; rm -f "${DRAFT:-}" 2>/dev/null || true' EXIT
 
 NAME="$(printf '%s' "${BODY}" | inbox_send_mail "${CHANNEL}" "${SLUG}" "${TO}" "." "${RE}" "${THREAD}")" || exit 1

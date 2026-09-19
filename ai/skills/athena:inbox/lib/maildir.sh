@@ -453,6 +453,20 @@ maildir_render_message() {
       'pass sent_at as YYYY-MM-DDTHH:MM:SSZ; it must agree with the filename stamp, and the reader refuses a message whose two copies disagree.'
     return 1
   fi
+  # The contract's frontmatter table says `re` is "an absolute path or URL".
+  # A RELATIVE path is the one shape that silently means something different
+  # on the other side: it resolves against the PEER's cwd, which is a different
+  # repo on a different clock, and neither side is told the reference moved.
+  if [ -n "${re}" ]; then
+    case "${re}" in
+      /*|*://*) ;;
+      *)
+        inbox_fail "refusing to send: \"re\" is neither an absolute path nor a URL" \
+          "pass --re an absolute path (/home/...) or a URL (https://...). A relative path resolves against the PEER's working directory, so the reference would quietly point somewhere else on the other side."
+        return 1
+        ;;
+    esac
+  fi
   case "${re}" in
     *$'\n'*|*$'\r'*)
       inbox_fail "refusing to send: the \"re\" value contains a line break" \
@@ -471,24 +485,43 @@ maildir_render_message() {
   # pipeline that produced nothing, an $EDITOR abandoned -- and delivering it
   # would put an empty message in the peer's transcript, immutably, with a
   # successful exit telling the sender their text went out.
-  body="$(cat; printf X)"; body="${body%X}"
+  # SLURPED IN PURE BASH, not through `cat`. This is a domain file, and forking
+  # for something the shell can do is the smaller reason: the larger one is
+  # that a `cat` makes the renderer depend on PATH, so a broken environment
+  # produced an EMPTY body and the refusal said "refusing to send an empty
+  # message" -- a true statement about a body that was never read, pointing the
+  # sender at their own text instead of at their environment. Found by the case
+  # that strips PATH to prove the jq refusal names jq.
+  #
+  # The loop reproduces `cat` exactly at the one edge that matters: a final
+  # line with no trailing newline is still part of the body, and `read` returns
+  # non-zero having set it.
+  local line
+  body=""
+  while IFS= read -r line; do body+="${line}"$'\n'; done
+  [ -z "${line}" ] || body+="${line}"
   if [ -z "${body//[[:space:]]/}" ]; then
     inbox_fail "refusing to send an empty message" \
       "pipe the body in on stdin, or use --body-file. A message is immutable once delivered, so an empty one cannot be corrected -- only followed by another message with a thread: pointer."
     return 1
   fi
 
-  local msg header
-  header="$(
-    printf -- '---\n'
-    printf 'from: %s\n' "${from}"
-    printf 'to: %s\n' "${to}"
-    printf 'sent_at: %s\n' "${sent_at}"
-    [ -n "${re}" ]     && printf 're: %s\n' "${re}"
-    [ -n "${thread}" ] && printf 'thread: %s\n' "${thread}"
-    printf -- '---\n\n'
-  )"
-  msg="${header}"$'\n'"${body}"
+  # ASSEMBLED BY CONCATENATION, NOT IN A COMMAND SUBSTITUTION. `$( )` strips
+  # ALL trailing newlines, so a header built that way loses the blank line
+  # between the closing `---` and the body -- the separator this function's
+  # own docstring, bin/send-mail's header and the contract's example all show.
+  # Our reader tolerates either shape, so the cost would land entirely on the
+  # OTHER implementation of this contract: the peer this channel exists to
+  # talk to, which is not ours to assume about.
+  local msg
+  msg="---"$'\n'
+  msg+="from: ${from}"$'\n'
+  msg+="to: ${to}"$'\n'
+  msg+="sent_at: ${sent_at}"$'\n'
+  [ -n "${re}" ]     && msg+="re: ${re}"$'\n'
+  [ -n "${thread}" ] && msg+="thread: ${thread}"$'\n'
+  msg+="---"$'\n\n'
+  msg+="${body}"
   # A trailing newline, always: the last line of the body is a line.
   case "${body}" in *$'\n') ;; *) msg="${msg}"$'\n' ;; esac
 
@@ -510,6 +543,17 @@ maildir_render_message() {
   # reader learned a new one. Asking the actual parser what it would read costs
   # one pass over a header I have just built, and it cannot drift.
   local fm k got want
+  # A MISSING CAPABILITY MUST NOT BE REPORTED AS A BAD VALUE. Without jq the
+  # parse yields nothing, every value "does not survive", and the sender is
+  # told its `re` carries whitespace or a `#` -- a refusal naming a cause that
+  # is not the cause, which is the standing missing-vs-wrong rule arriving
+  # inside the check written to honour it. `bin/send-mail` checks jq first, so
+  # this is unreachable from the command; the library API is not the command.
+  if ! command -v jq >/dev/null 2>&1; then
+    inbox_fail "jq is required to render a message and was not found on PATH" \
+      "install jq. The renderer parses its own output back to prove no value was silently changed in transit, and it cannot do that without jq -- so it refuses rather than sending unverified."
+    return 1
+  fi
   fm="$(printf '%s' "${msg}" | maildir_parse_frontmatter)"
   for k in from to sent_at re thread; do
     case "${k}" in

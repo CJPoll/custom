@@ -73,8 +73,14 @@ inbox_lock_acquire() {
     # One advance at a time, per process. Swapping fd 9 to a second channel
     # would RELEASE the first channel's lock mid-advance without anything
     # saying so.
-    inbox_fail "this process already holds a consumer lock for another channel" \
-      "advance one channel at a time: finish (or abandon) the current read/ack before acquiring ${label}'s lock."
+    # The wording names BOTH advances this lock guards. `inbox_send_mail` takes
+    # a sender lock through this same function, so a message about "the current
+    # read/ack" described an operation the caller may not be performing --
+    # a refusal that misnames what is in progress is one the reader cannot act
+    # on. Unreachable through the commands (each runs in a fresh process) and
+    # reachable through the library API the send manager exposes.
+    inbox_fail "this process already holds an inbox lock for another channel" \
+      "work one channel at a time: finish (or abandon) the read/ack or send in progress before acquiring ${label}'s lock."
     return 1
   fi
 

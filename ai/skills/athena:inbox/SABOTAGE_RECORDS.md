@@ -543,16 +543,25 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
 
 # DND-187 — `bin/send-mail`, the writer's half
 
-**24 mutations, 21 red, 3 measured green.** Each mutation was an
+**30 mutations, 25 red, 5 measured green** — in the FINAL state of the branch.
+The numbers moved twice and both movements are recorded rather than smoothed
+over, because a sabotage record whose header disagrees with its own table is a
+record a reader cannot use: the first pass was **18 red / 6 green** over 24
+mutations; closing the two real gaps it found (S10, S13) made it 20/4; the
+review round added six more mutations (S25 … S30) over the checks written to
+answer it, of which five reddened.
+
+Each mutation was an
 exact-substring replace whose anchor was asserted present before writing, run
 against the whole suite, and reverted from the original bytes held in memory —
 never `git checkout`, which cannot restore work that is not yet committed.
 Every row below names the case that reddened and what it says.
 
-Two of the three greens are genuine unreachability and are written up rather
-than dropped; the third was a **real gap** and was closed, and the two rows
-that were green on the first pass and are red now (**S10**, **S13**) carry that
-history in place.
+Of the five surviving greens, **two are redundancy** (S2/S3 — one claim with
+two independent guards, reddened together as S1) and **three are genuine
+unreachability** (S16, S20, S27), all written up below rather than dropped. The
+two rows that were green on the first pass and are red now (**S10**, **S13**)
+carry that history in place; **S13 was a real gap**, not a redundancy.
 
 | # | Mutation | Verdict | The case that names it |
 |---|---|---|---|
@@ -580,6 +589,38 @@ history in place.
 | S22 | `thread` accepted without the message-name grammar | **RED** (2) | *A-3 a `thread` that is a PATH is refused* |
 | S23 | the delivery primitive drops its own filename re-check | **RED** (2) | *A-3 the delivery primitive refuses a non-conformant filename* |
 | S24 | the doorbell bump failure swallowed with `|| true` | **RED** (3) | *M-12 an undeliverable send exits non-zero* — and the bump refusal's own text |
+
+### Added in the review round (the critic's findings, and the checks written for them)
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S25 | the header is assembled in a `$( )` again, eating the blank separator | **RED** (2) | *M-10 the closing `---` is followed by a blank line* — see below |
+| S26 | `lock.sh` reverts to `mkdir -p -m 0700` | **RED** (4) | *M-11 lock.sh creates its directory at 0700 … and every intermediate* |
+| S27 | the maildir ack reverts to `mkdir -p -m 0700` | GREEN | unreachable — see below |
+| S28 | the renderer's `jq` guard removed | **RED** (2) | *M-11 a missing jq is named as the missing capability it is* |
+| S29 | the body is slurped with `cat` again | **RED** (1) | same case — a PATH-less environment made the body EMPTY and the refusal blamed the sender's text |
+| S30 | `--re` no longer required to be absolute or a URL | **RED** (1) | *M-11 a relative `--re` is refused* |
+
+**S25 is the one that matters, and it was shipped.** `$( )` strips *all*
+trailing newlines, so the header's deliberate `\n\n` contributed nothing and
+the delivered bytes were `---\nBody`, not `---\n\nBody` — while this
+function's docstring, `bin/send-mail`'s header and the contract's own example
+all show the blank line. Our reader tolerates either shape, so **the entire
+cost would have landed on the other implementation of this contract**: the peer
+this channel exists to talk to, whose parser is not ours to assume about. The
+suite was green with the separator and green without it, because the only body
+round trip pipes through `sed '/^$/d'` — which deletes precisely the line in
+question. Found by the review round, not by a mutation: no mutation of the
+existing code could have found it, because the code and every assertion over it
+agreed with each other and disagreed only with the document.
+
+**S27 — the ack's `mkdir` is unreachable in its differing form.** The two
+`mkdir` forms differ only when an INTERMEDIATE directory has to be created, and
+by the time the ack runs, `read-inbox` has already taken the consumer lock —
+which creates the read directory. So `.acked/`'s parent always exists and the
+leaf is moded identically either way. The conversion is kept for consistency of
+the class (no `mkdir -p -m` remains in `lib/` or `bin/`), and this row is what
+says it is not independently tested.
 
 ## The input classes the fixtures never contained
 
@@ -610,7 +651,7 @@ from the writing side:
    its own claim at all: `$(...)` strips trailing newlines, so the obvious form
    of that case reports a missing newline whether or not one was emitted.
 
-## The two greens that are redundancy, not a zero
+## The green that is redundancy, not a zero
 
 **S2 and S3 are one claim with two independent guards.** Delivery must not
 clobber; the `ln` and the destination pre-check each enforce it alone, so
@@ -619,7 +660,7 @@ cases. The claim is tested — S1 is the proof — and the redundancy is kept: `
 is the contract's named mechanism, and the pre-check is what makes the
 collision a cheap `return 2` on the retry path rather than an error branch.
 
-## The two genuine unreachables, recorded rather than dropped
+## The genuine unreachables, recorded rather than dropped
 
 - **S16 — the post-delivery existence confirmation.** `ln` returning 0 already
   means the link exists, so no input reaches the branch. It is kept anyway, for
@@ -635,3 +676,6 @@ collision a cheap `return 2` on the retry path rather than an error branch.
   directory this session reads, so the sender would ingest its own outgoing
   mail and the peer would never see any of it — and because it is the last
   point before I/O at which both values are in scope. Same standing as S16.
+- **S27 — the ack's `fs_mkdir_0700`.** Written up with its row above: the form
+  difference is unobservable because the consumer lock has already created the
+  parent by the time an ack runs.

@@ -2533,7 +2533,7 @@ render_with() {
   printf '%s' "${body}" | maildir_render_message "$@"
 }
 assert_refused "M-11 a newline in \"re\" is refused (it would forge a header line)" \
-  render_with "body" athena peer 2026-09-01T23:22:15Z "$(printf 'a\n---\nfrom: someone-else')" ""
+  render_with "body" athena peer 2026-09-01T23:22:15Z "$(printf '/home/x\n---\nfrom: someone-else')" ""
 # The REFUSAL ITSELF is asserted, not just the non-zero exit. The round-trip
 # check below would also catch a newline -- the parsed value comes back
 # different -- so without this the explicit arm could be deleted with the suite
@@ -2542,7 +2542,7 @@ assert_refused "M-11 a newline in \"re\" is refused (it would forge a header lin
 # that misnames the problem is a Fix: clause the reader cannot act on.
 assert_contains "M-11 ... and the refusal names the line break, not a parse mismatch" \
   "contains a line break" \
-  "$(render_with "body" athena peer 2026-09-01T23:22:15Z "$(printf 'a\n---\nfrom: someone-else')" "" 2>&1 >/dev/null)"
+  "$(render_with "body" athena peer 2026-09-01T23:22:15Z "$(printf '/home/x\n---\nfrom: someone-else')" "" 2>&1 >/dev/null)"
 assert_refused "M-11 a \"thread\" that is a PATH is refused (A-3: a name is data, never a path)" \
   render_with "body" athena peer 2026-09-01T23:22:15Z "" "../../etc/passwd"
 assert_refused "M-11 a \"thread\" that is not a conformant message name is refused" \
@@ -2615,6 +2615,50 @@ assert_eq "M-10 round trip: the body arrives intact" "Hello peer." \
   "$(printf '%s' "${RT}" | maildir_body | sed '/^$/d')"
 assert_ok "M-10 round trip: the reader VALIDATES the message the sender built" \
   maildir_validate_message "$(maildir_message_name 2026-09-01T23:22:15Z 001 x)" "${FM}"
+
+# THE BLANK LINE BETWEEN THE HEADER AND THE BODY IS ASSERTED, and it needs its
+# own case because every other body assertion is blind to it: the round trip
+# above pipes through `sed '/^$/d'`, which deletes precisely the line in
+# question, and `assert_contains` on the body cannot see a separator that is
+# not part of the body. The suite was green with the separator and green
+# without it -- and it WAS without it, because the header was assembled in a
+# `$( )`, which strips every trailing newline. Our own reader tolerates either
+# shape, so the whole cost of that would have landed on the OTHER
+# implementation of this contract: the peer this channel exists to talk to,
+# whose parser we do not own and whose example (contract -> "Frontmatter")
+# shows the blank line.
+RT="$(render_with "the body" athena peer 2026-09-01T23:22:15Z "" ""; printf X)"; RT="${RT%X}"
+case "${RT}" in
+  *"---"$'\n\n'"the body"*) ok "M-10 the closing --- is followed by a blank line, as the contract's example shows" ;;
+  *) bad "M-10 the closing --- is followed by a blank line, as the contract's example shows" \
+       "got [$(printf '%s' "${RT}" | tr '\n' '~')]" ;;
+esac
+# Lines 1..5 are `---`, from, to, sent_at, `---`; 6 is the blank separator, so
+# the body starts on 7. Spelled out because an off-by-one here would make the
+# case above look like it had verified the separator when it had verified
+# nothing.
+assert_eq "M-10 ... and the body still starts on the line after it" "the body" \
+  "$(printf '%s' "${RT}" | sed -n '7p')"
+
+# --re is an absolute path or a URL (contract -> "Frontmatter"). A RELATIVE
+# path is the one shape that silently means something else on the other side:
+# it resolves against the PEER's working directory.
+assert_refused "M-11 a relative --re is refused (it would resolve against the peer's cwd)" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "ai-artifacts/notes.md" ""
+assert_ok "M-11 an absolute --re is accepted" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "/home/cjpoll/x.md" ""
+assert_ok "M-11 a URL --re is accepted" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "https://example.invalid/a" ""
+
+# A MISSING CAPABILITY MUST NOT BE REPORTED AS A BAD VALUE. Without jq the
+# round-trip check reads every value as "would not survive the reader's parse"
+# and names whitespace or " #" as the cause -- a refusal whose Fix: sends the
+# sender to edit a value that was never the problem. This is the repo's
+# standing missing-vs-wrong rule arriving INSIDE the check written to honour
+# it, so it gets its own case rather than a comment.
+ERR="$( PATH=/nonexistent-for-this-case render_with "body" athena peer 2026-09-01T23:22:15Z "/home/x.md" "" 2>&1 >/dev/null )"
+assert_contains "M-11 a missing jq is named as the missing capability it is" "jq is required" "${ERR}"
+assert_not_contains "M-11 ... and is NOT reported as a bad value" "would not survive" "${ERR}"
 
 # THE INPUT CLASS THE READER'S OWN FIXTURES NEVER CONTAINED. DND-184's worst
 # defect was an unterminated `---` block harvesting a `key: value`-shaped BODY
@@ -2797,6 +2841,33 @@ chmod 0700 "${SWRITE}/tmp"
 assert_eq "M-12 an undeliverable send exits non-zero" "1" "${RC}"
 assert_eq "M-12 ... and the doorbell was NOT bumped" "${BEFORE}" "$(stat -c %Y "${SWRITE}/.event")"
 assert_eq "M-12 ... and nothing was delivered" "0" "$(ls "${SWRITE}"/*.md 2>/dev/null | wc -l)"
+
+# THE OTHER TWO fs_mkdir_0700 CALL SITES. The mode defect was swept as a class
+# -- no `mkdir -p -m` remains in lib/ or bin/ -- but a swept class with one
+# assertion is a class that can quietly come back at the two sites nobody
+# looked at. Reverting either of these to `mkdir -p -m 0700` left the suite
+# green; S8 mutated the send path only. Both are asserted on a namespace whose
+# intermediates DO NOT EXIST beforehand, which is the only state in which the
+# difference between the two forms is observable at all.
+setup_case
+KPROJ="$(make_repo kproj)"
+register kproj "${KPROJ}" '{"mail":{"kind":"maildir","namespace":"agent-mail/fresh/deeper","read":"from-peer","write":"to-peer","identity":"athena"}}'
+KNS="${ATHENA_INBOX_ROOT}/agent-mail/fresh/deeper"
+
+# (a) the consumer lock's directory, created by lock.sh on first acquire.
+assert_ok "M-11 the consumer lock is acquirable in a namespace that does not exist yet" \
+  inbox_lock_acquire "${KNS}/from-peer/.consumer.lock" "the test"
+inbox_release_consumer
+assert_eq "M-11 lock.sh creates its directory at 0700" "700" "$(stat -c %a "${KNS}/from-peer")"
+assert_eq "M-11 ... and every intermediate it had to create too" "700" "$(stat -c %a "${KNS}")"
+assert_eq "M-11 ... all the way up" "700" "$(stat -c %a "${ATHENA_INBOX_ROOT}/agent-mail/fresh")"
+
+# (b) `.acked/`, created by the maildir ack.
+printf -- '---\nfrom: peer\nto: athena\nsent_at: 2026-09-01T23:22:15Z\n---\n\nhi\n' \
+  > "${KNS}/from-peer/20260901T232215Z-001-hello.md"
+assert_ok "M-11 the ack moves a message into a .acked/ that did not exist" \
+  bash -c "cd '${KPROJ}' && '${BIN}/read-inbox' mail >/dev/null 2>&1"
+assert_eq "M-11 the ack creates .acked/ at 0700" "700" "$(stat -c %a "${KNS}/from-peer/.acked")"
 
 echo
 echo "== DND-187 / 4b. The sender lock is actually taken =="
