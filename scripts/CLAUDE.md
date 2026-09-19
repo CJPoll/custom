@@ -130,6 +130,98 @@ detects a worktree. Onboarding a new work account: create its Notion
 Connection, share pages with it, save the secret to a token file, then extend
 the mode map near the top of the script.
 
+### Shipwright commit discipline (`athena-shipwright-commit.sh`)
+
+The shipwright is an autonomous committer on an hourly cron, in a checkout a
+human or another agent may be typing in. Two guards keep it from absorbing
+somebody else's work, and **neither may be weakened**:
+
+- `athena-shipwright-commit.sh` is the only sanctioned way the shipwright
+  commits. It takes an explicit list of individual **files** after `--`, and
+  refuses every other shape **as a class**, never by enumerating spellings:
+  the plain catch-alls (`.`, `-A`, absolute paths, `..` escapes), any magic
+  pathspec (anything starting with `:` — `:/`, `:(top)`, `:(glob)**`, `:!x` all
+  mean "everything" to git), any **glob** (`*`, `?`, `[` — `ai/*` passes every
+  other check and stages the whole subtree), and any **directory** (`git add --
+  hypr` reproduces the original incident exactly). Paths and the `-F` message
+  file resolve against the **caller's** cwd, not the repo root. It stages only those
+  paths, then commits **pathspec-limited** (`git commit -- <paths>`) so even
+  content another session staged into the index between the `add` and the
+  `commit` cannot ride along. Foreign dirt is reported by **path-set
+  difference** — never a line-count subtraction, which an untracked directory
+  silently zeroes out — and is never touched and never a reason to abort:
+  aborting would discard a run's real work, while the pathspec limit already
+  makes the commit safe. Exit codes: `1` git refused, `2` bad arguments, `3` the
+  named paths contain nothing to commit.
+- `athena-shipwright-run.sh` **yields the tick** when the worktree is dirty:
+  exit 0, a `Fix:` line on stderr (cron mails it) and a `.skipped` record beside
+  the run logs. This exists for a hazard narrowed staging does *not* cover — the
+  run's first act is `git pull --rebase --autostash`, which stashes and re-applies
+  a concurrent editor's work underneath them. Untracked strays count as dirt (the
+  file swept in the real incident was untracked). Override with
+  `SHIPWRIGHT_ALLOW_DIRTY=1` when you know the dirt is inert.
+  **A wedged lane does not look like a quiet one**: after
+  `SHIPWRIGHT_SKIP_ESCALATE` consecutive skips (default 6, i.e. six hours) the
+  skip exits **75** instead of 0, so a stray file nobody clears becomes a loud
+  cron failure rather than an hourly silence indistinguishable from "nothing to
+  do". Any run that actually starts resets the counter, so a passing editor
+  never accumulates into a false alarm. `ai-artifacts/` is excluded from the
+  dirt check **explicitly**, not via an ignore rule — it holds the runner's own
+  logs, `run.lock` and `.skipped` records, and is gitignored only by the user's
+  machine-local `~/.config/git/gitignore`, which is not in this repository.
+
+**The repository-scoped lock is NOT in place, and that is a decision.** What
+exists is: a runner `flock` (cron-vs-cron), and a commit helper whose
+pathspec limit makes a concurrent writer's work unreachable whichever entry
+point started the agent. What does **not** exist is a lock every writer takes
+for the length of a run. Building one means choosing where it is taken, and
+there is no honest choice available today: the runner is the wrong place (a
+directly-invoked agent skips it), and the commit helper can only cover its own
+stage-and-commit critical section, not the `pull --rebase --autostash → edit →
+commit → push` span where the real interleaving happens. Covering that span
+requires the agent's cooperation — which is prose, i.e. advisory — or a
+`PreToolUse` hook, which is the same enforcement mechanism invariant 8 is
+waiting on. So it is one ticket: **a repo-scoped lock and the hook that makes
+it unavoidable**, together. A lock shipped before that hook would serialise the
+paths that already do not fail and read, to anyone glancing at it, as "this is
+handled".
+
+**Which guard covers which entry point.** The commit helper is
+entry-point-independent: the shipwright uses it whether cron started it or a
+human invoked the agent directly. The runner's two guards — the `flock` and the
+dirty-tree yield — cover the **cron path only**, because a directly-invoked
+agent never runs that script. On 2026-09-18 at 21:00 exactly that happened: a
+directly-invoked shipwright ran alongside the cron run, and nothing in the
+harness serialised them (the second agent blocked on the first by its own
+judgement). **A repository-level lock — one every writer takes, not one per
+entry point — is the real fix, and is deliberately left to its own ticket**; a
+half-measure lock on the runner would look like coverage while leaving the agent
+path open. Related: `run.lock` is held via `flock(2)` on an open descriptor, so
+an empty, apparently-stale `run.lock` on disk is normal and proves nothing about
+whether a run is live. Never delete it to "clean up" — that hands the next
+invocation a fresh inode and a lock that excludes nobody.
+
+Why: on 2026-09-18T21:03:07 a run staged the whole worktree while another agent
+was mid-edit and swept an unrelated `hypr/hyprland.conf` change plus a 230-line
+`.bak` into `ce70e04`, a commit whose message is entirely about harness-gate
+self-tests. The other agent caught it by hand.
+
+`scripts/test/athena-shipwright/self-test.sh` covers both guards (run it
+directly, or `scripts/athena-shipwright-commit.sh --self-test`). It builds
+throwaway repos and stubs `claude`, so no real repo, crontab, network or token
+is touched.
+
+`harness-gate` runs it automatically and needs **no wiring**: since DND-209
+(`880fe12`) the gate DISCOVERS every tracked `**/self-test.sh` — globbed and
+intersected with `git ls-files` — instead of requiring a declaration. This
+suite is at `scripts/test/athena-shipwright/self-test.sh`, so it matches by
+being what it is rather than by being registered. Verified: 17/17 PASS, 5
+suites discovered, this one among them.
+
+The discovery contract is that exact filename. A suite named anything else is
+invisible to the gate — so if you add cases here, add them to this file rather
+than beside it.
+
 ### Athena inbox client supervision
 
 Keeps the Athena inbox client (the process that appends Slack/agent-mail

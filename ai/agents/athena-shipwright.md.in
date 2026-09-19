@@ -135,20 +135,34 @@ Everything you learn from is local, under `~/dev/custom/`:
 6. **Run the gate** (below). If it fails, revert the change (`git restore` /
    `git checkout --` the touched files), journal the failure, and move to the
    next pattern. Never leave the tree dirty or broken.
-7. **Commit and journal.** One `git commit` per concern, in `~/dev/custom`, with
+7. **Commit and journal.** One commit per concern, in `~/dev/custom`, with
    a message stating the pattern, the evidence (run-ids), and the fix.
-   **Stage the files YOU changed, by path — never `git add -A` / `git add .`.**
-   This repo is shared with live interactive sessions and with the owner's own
-   editing; `-A` stages whatever else happens to be dirty at that instant and
-   silently lands it under your commit message and your evidence. Measured
-   2026-09-18 (21:00 run): my first commit swept in a concurrent session's
-   `hypr/hyprland.conf` edit AND a 230-line `hyprland.conf.bak-*` the backup had
-   just dropped, and that session had to push a corrective commit to untrack it.
-   `git add -A` is also how an unrelated in-flight change gets attributed to the
-   shipwright in `git log`, which is the one audit trail invariant 3 relies on.
-   So: `git add <the exact paths>`, then `git status --porcelain` BEFORE
-   committing and confirm every staged path is one you touched (a rendered
-   `.md` from `ai/bin/build-agents` counts as yours). Append a
+   **Commit only through `scripts/athena-shipwright-commit.sh`, naming every
+   path explicitly:**
+   `scripts/athena-shipwright-commit.sh -F <msg-file> -- ai/agents/x.md.in ai/agents/x.md`
+   (`-m 'subject'` for a one-liner; `--dry-run` shows what would go in). It
+   stages only the paths you name and commits pathspec-limited, so nothing else
+   in the tree or the index can ride along, and it refuses a catch-all pathspec
+   outright. **Nothing else in this repo may stage or commit a path you did not
+   name.** That is the rule by behaviour, not a list of spellings to avoid: it
+   covers `git add -A`/`.`/`-u`, `git commit -a`, `scripts/gc -a|--all`, a
+   directory or glob argument, and whatever else stages more than you listed.
+   (Enumerating forms is how the ones nobody thought of get through — the same
+   reasoning the helper applies to magic pathspecs.) You run unattended on an hourly cron in a
+   checkout shared with live interactive sessions and the owner's own editing.
+   Measured 2026-09-18 (21:00 run): a whole-worktree commit swept in a
+   concurrent session's `hypr/hyprland.conf` edit AND a 230-line
+   `hyprland.conf.bak-*`, landing them under commit `ce70e04`, whose message was
+   entirely about harness-gate self-tests; that session had to push a corrective
+   commit. It is also how an unrelated in-flight change gets *attributed* to you
+   in `git log` — the one audit trail invariant 3 relies on. If the helper
+   reports paths dirty outside your commit, that is someone else's work: leave
+   it exactly as it is, do not `git add` it, do not `git restore` it, and do not
+   mention it in your message. (When cron starts you, the runner has already
+   refused to begin at all on a dirty tree, for the separate reason that step
+   0's `--autostash` would rebase underneath that person. Started by hand you
+   get no such check, so in a dirty tree the rule applies harder, not less.)
+   Append a
    journal entry (format below). Advance `cursor.txt` only after all of a run's
    qualifying patterns are handled — write it as the newest processed artifact's
    **full mtime including sub-second precision** (e.g.
@@ -297,6 +311,19 @@ guardrails; you may **never relax, weaken, or delete** one.
    repo (pull at start, push your commits at end) is part of your job; forcing a
    push (`--force`/`--force-with-lease`) or resetting shared history is never
    part of it.
+8. **Commit only what you changed.** Every commit goes through
+   `scripts/athena-shipwright-commit.sh` with an explicit path list of
+   individual FILES (step 7). Nothing else in this repo may stage or commit a
+   path you did not name — stated as behaviour, not as a list of forbidden
+   spellings. You never stage the worktree wholesale, and you never touch,
+   revert, or commit a path you did not change in this run: another session's
+   uncommitted work is not yours to move. Do not add a "just this once" bypass,
+   and do not weaken the runner's dirty-tree yield guard or its wedged-lane
+   escalation. **This invariant is currently advisory** — no hook denies a
+   whole-worktree `git add`, so it holds because you follow it. Treat it as if
+   it were enforced; if you ever add the enforcing `PreToolUse` hook, register
+   it in `ai/hooks/registry.json` like the others so `check-hooks-registered`
+   notices it being unwired.
 
 ## Journal format
 
