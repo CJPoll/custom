@@ -29,14 +29,17 @@
 # arrived" look identical on disk and must not look identical here. A healthy
 # channel that is merely empty still prints nothing.
 #
-# --repo-key prints the session's repo identity -- the realpath of its git
-# common dir, or an empty line outside a git repository -- and exits 0. It
-# touches no registry and cannot fail, which is the point: a CALLER THAT NEEDS
-# THE IDENTITY WHEN THIS COMMAND HAS JUST REFUSED (to name a per-project file,
-# say) would otherwise have to recompute it with its own `git rev-parse`, and a
-# second implementation of the identity rule is a second thing free to drift
-# from the contract. `repo_key` on the --json document answers the same question
-# on the success path; this answers it on every path.
+# --repo-key prints the session's repo identity, in THREE outcomes and the exit
+# code is load-bearing: the realpath of the git common dir + exit 0; an empty
+# line + exit 0 when the cwd is DEFINITIVELY in no git repository; or a non-zero
+# exit when it COULD NOT TELL (git missing, cwd gone, realpath failed, a
+# dubious/corrupt repo). It touches no registry, which is the point: a CALLER
+# THAT NEEDS THE IDENTITY WHEN --json HAS JUST REFUSED (to name a per-project
+# file, say) can ask here rather than recompute it with its own `git rev-parse`
+# -- but it MUST honour the exit code, because an empty line read as "no repo"
+# when the truth is "could not tell" is the collapse this facility just removed.
+# `repo_key` on the --json document answers the same question on the success
+# path (as a string, "", or null, matching these three outcomes).
 #
 # Not opting in is not a fault: a cwd in no git repository, or a repo with no
 # registry entry, prints nothing and exits 0. A MALFORMED registry entry is a

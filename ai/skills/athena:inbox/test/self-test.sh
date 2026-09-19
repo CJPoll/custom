@@ -1164,10 +1164,12 @@ assert_eq "...and empty, never missing" "" \
 #
 # A refusal prints NOTHING on stdout, so a caller that needs the repo identity
 # exactly when this command has just refused (to name a per-project file, say)
-# cannot read it off the status document. --repo-key touches no registry and
-# cannot fail, which is the whole point: without it that caller reimplements
-# the identity rule with its own `git rev-parse`, and a second implementation
-# is a second thing free to drift from the contract.
+# cannot read it off the status document. --repo-key touches no registry, which
+# is the whole point: without it that caller reimplements the identity rule with
+# its own `git rev-parse`, and a second implementation is a second thing free to
+# drift from the contract. It CAN still exit non-zero -- when it could not tell
+# the identity (git missing, cwd gone, a dubious/corrupt repo) -- and a caller
+# must honour that exit code rather than read the empty output as "no repo".
 setup_case
 rkproj2="$(make_repo rkproj2)"
 assert_eq "--repo-key prints the same key --json carries" \
@@ -1196,6 +1198,50 @@ assert_eq "--repo-key is empty outside a git repo" "" \
   "$(cd "${nogit2}" && "${BIN}/inbox-status" --repo-key 2>/dev/null)"
 ( cd "${nogit2}" && "${BIN}/inbox-status" --repo-key >/dev/null 2>&1 )
 assert_eq "--repo-key exits 0 outside a git repo" "0" "$?"
+
+# GIT ABSENT is "could not tell", NOT "no git repository". With git off PATH,
+# --repo-key must EXIT NON-ZERO (not empty-and-0), and --json must carry
+# repo_key: null (not ""), so a consumer reading the exit code or the field is
+# never told "no repo, nothing here" when the truth is unknown. inbox_repo_key's
+# `... || printf ''` used to collapse exactly this, and EVERY repo_key case above
+# keeps git on PATH, so none of them caught it (DND-188 merge-round critic).
+setup_case
+rkg="$(make_repo rkgit)"
+register rkgit "${rkg}" '{"mine":{"kind":"log","path":"mine.jsonl"}}'
+NOGITBIN="${CASE_DIR}/nogitbin"; mkdir -p "${NOGITBIN}"
+for b in bash sh env jq sha256sum cut realpath dirname date stat wc tail mv rm mkdir cat sed grep awk timeout printf; do
+  src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${NOGITBIN}/${b}"
+done   # git DELIBERATELY omitted
+( cd "${rkg}" && PATH="${NOGITBIN}" "${BIN}/inbox-status" --repo-key >/dev/null 2>&1 )
+assert_eq "--repo-key exits non-zero when git is absent (could not tell, not empty-and-0)" "1" "$?"
+jout="$(cd "${rkg}" && PATH="${NOGITBIN}" "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "--json repo_key is null when git is absent, never \"\"" "null" \
+  "$(jq -r '.repo_key' <<<"${jout}")"
+assert_eq "...and the field is still present, never dropped" "true" \
+  "$(jq -r 'has("repo_key")' <<<"${jout}")"
+
+# A git 128 that is NOT "not a git repository" (dubious ownership, a corrupt
+# repo) is ALSO "could not tell", never a genuine non-repo -- git 128 is not a
+# synonym for "no repo". Proven with a git shim that fails the way safe.directory
+# does, because triggering the real thing needs a cross-owner repo.
+setup_case
+rkd="$(make_repo rkdubious)"
+register rkdubious "${rkd}" '{"mine":{"kind":"log","path":"mine.jsonl"}}'
+SHIMBIN="${CASE_DIR}/shimbin"; mkdir -p "${SHIMBIN}"
+for b in bash sh env jq sha256sum cut realpath dirname date stat wc tail mv rm mkdir cat sed grep awk timeout printf; do
+  src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${SHIMBIN}/${b}"
+done
+cat > "${SHIMBIN}/git" <<'GITSHIM'
+#!/usr/bin/env bash
+echo "fatal: detected dubious ownership in repository at '/x'" >&2
+exit 128
+GITSHIM
+chmod +x "${SHIMBIN}/git"
+( cd "${rkd}" && PATH="${SHIMBIN}" "${BIN}/inbox-status" --repo-key >/dev/null 2>&1 )
+assert_eq "--repo-key exits non-zero on a git 128 that is not 'not a git repository'" "1" "$?"
+jout="$(cd "${rkd}" && PATH="${SHIMBIN}" "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "--json repo_key is null on a dubious-ownership git failure, never \"\"" "null" \
+  "$(jq -r '.repo_key' <<<"${jout}")"
 
 # Back to the failed-candidate fixture for the cases that follow.
 setup_case

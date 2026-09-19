@@ -337,14 +337,25 @@ _inbox_count_maildir() {
 # and recomputing it there would be a second implementation of the identity
 # rule, free to drift from the contract.
 inbox_repo_key() {
-  local dir="${1:-.}"
+  local dir="${1:-.}" msg rc
   command -v git >/dev/null 2>&1 || return 1          # could not tell: no git
   ( cd "${dir}" 2>/dev/null ) || return 1             # could not tell: cwd gone
-  if ( cd "${dir}" 2>/dev/null && git rev-parse --is-inside-work-tree >/dev/null 2>&1 ); then
-    fs_git_common_dir "${dir}" 2>/dev/null || return 1  # in a tree, but realpath failed
+  # Ask git directly, capturing its message. Exit 0 => inside a repo: resolve the
+  # common dir. Exit non-zero must be CLASSIFIED, because git 128 is NOT a synonym
+  # for "not a repo": it is also "detected dubious ownership" (safe.directory),
+  # a corrupt `.git`, and other fatals. Only git's own "not a git repository"
+  # is a genuine non-repo (empty key, exit 0); EVERYTHING else is "could not
+  # tell" and must surface as non-zero so the caller logs it rather than reading
+  # an empty key as "no repo, nothing here".
+  msg="$( ( cd "${dir}" 2>/dev/null && git rev-parse --git-common-dir ) 2>&1 1>/dev/null )"; rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    fs_git_common_dir "${dir}" 2>/dev/null || return 1  # in a repo, but realpath failed
     return 0
   fi
-  return 0                                            # git said "not a work tree": empty key
+  case "${msg}" in
+    *"not a git repository"*) return 0 ;;             # genuine non-repo: empty key, success
+    *) return 1 ;;                                    # could not tell
+  esac
 }
 
 # inbox_status_json [cwd]
@@ -363,8 +374,15 @@ inbox_repo_key() {
 # already gone to stderr with its `Fix:` clause; the overall exit stays
 # non-zero, so the failure is still loud.
 #
-# The document also carries `repo_key`: the session's own repo identity, the
-# realpath of its git common dir, or "" when the cwd is in no git repository.
+# The document also carries `repo_key`, with THREE distinct values, matching
+# inbox_repo_key's own three outcomes:
+#   * a string  -- the realpath of the session's git common dir;
+#   * ""        -- the cwd is DEFINITIVELY in no git repository;
+#   * null      -- COULD NOT TELL (git missing, cwd gone, realpath failed, a
+#                  dubious-ownership or corrupt repo). A caller must NOT read
+#                  this as "no repo, nothing here" -- that is the very collapse
+#                  the DND-188 merge-round critic caught on the --repo-key path,
+#                  and emitting "" here too would bring it back on --json.
 # It is here because this is the layer that already computes it, and a CALLER
 # THAT NEEDS IT MUST NOT RECOMPUTE IT -- a second implementation of the identity
 # rule is a second thing that can drift from the contract, and the one bug this
@@ -375,14 +393,19 @@ inbox_repo_key() {
 # because a caller distinguishing "never opted in" from "my entry vanished"
 # needs it precisely when there is no entry.
 inbox_status_json() {
-  local entry rc chan kind resolved counts schema_csv out="[]" failed=0 repo_key
+  local entry rc chan kind resolved counts schema_csv out="[]" failed=0 repo_key repo_key_json
 
-  repo_key="$(inbox_repo_key "${1:-.}")" || repo_key=""
+  # "" + exit 0 = genuine non-repo; non-zero = could not tell -> null on the doc.
+  if repo_key="$(inbox_repo_key "${1:-.}")"; then
+    repo_key_json="$(jq -n --arg r "${repo_key}" '$r')"
+  else
+    repo_key_json='null'
+  fi
 
   entry="$(inbox_entry "${1:-.}")"; rc=$?
   [ "${rc}" -ne 2 ] || return 1
   if [ -z "${entry}" ]; then
-    jq -n -c --argjson f "$(inbox_failed_candidates)" --arg r "${repo_key}" \
+    jq -n -c --argjson f "$(inbox_failed_candidates)" --argjson r "${repo_key_json}" \
       '{channels: [], failed_candidates: $f, repo_key: $r}'
     return 0
   fi
@@ -426,7 +449,7 @@ inbox_status_json() {
       --argjson c "${counts}" '. + [{name: $n, kind: $k} + $c]')"
   done < <(descriptor_channel_names "${entry}")
 
-  printf '%s' "${out}" | jq -c --argjson f "$(inbox_failed_candidates)" --arg r "${repo_key}" \
+  printf '%s' "${out}" | jq -c --argjson f "$(inbox_failed_candidates)" --argjson r "${repo_key_json}" \
     '{channels: ., failed_candidates: $f, repo_key: $r}' || return 1
   # The JSON is emitted FIRST and the failure is signalled by the status, so a
   # caller gets the counts it CAN have plus an honest non-zero.

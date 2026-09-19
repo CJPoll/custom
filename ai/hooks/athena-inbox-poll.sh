@@ -275,10 +275,12 @@ else
   PROJECT_KEY="$(timeout "${STATUS_TIMEOUT_SECONDS}" "${STATUS_BIN}" --repo-key 2>/dev/null)"
   REPO_KEY_RC=$?
   if [ "${REPO_KEY_RC}" -eq 124 ] || [ "${REPO_KEY_RC}" -eq 137 ]; then
-    # An EXPIRY, not a version mismatch. --repo-key itself cannot fail, but the
-    # `timeout` wrapping it can -- which is the whole reason that wrapper is
-    # here (an inbox root on a slow or stale mount). Diagnosing it as skew
-    # would send the reader to compare checkouts over a transient condition.
+    # An EXPIRY, handled apart from the other non-zero exits above. --repo-key
+    # CAN exit non-zero (version skew, or it could-not-tell the identity), but a
+    # 124/137 is specifically the `timeout` wrapping it firing -- which is the
+    # whole reason that wrapper is here (an inbox root on a slow or stale mount).
+    # Diagnosing it as skew or a git failure would send the reader chasing a
+    # transient condition, so it gets its own reason string.
     log_reason "inbox-status --repo-key did not finish within ${STATUS_TIMEOUT_SECONDS}s, so this project's markers cannot be named and its inbox state would be shared with every other project on this machine. Fix: something under \${ATHENA_INBOX_ROOT:-~/.local/share/athena} or this repo's .git is slow to stat — check for a stale network mount, or raise ATHENA_INBOX_STATUS_TIMEOUT_SECONDS."
     PROJECT_KEY=""
   elif [ "${REPO_KEY_RC}" -eq 0 ]; then

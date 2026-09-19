@@ -142,12 +142,21 @@ inbox-status --json       the same counts as one object
 inbox-status --repo-key   this session's repo identity, and nothing else
 ```
 
-`--repo-key` prints the realpath of the session's git common dir (an empty line
-outside a git repository) and exits 0. It reads no registry and cannot fail,
-which is the point: a caller needing the identity **on a path where this command
-has just refused** — to name a per-project file, say — would otherwise
-reimplement the identity rule with its own `git rev-parse`. `repo_key` on the
-`--json` document answers the same question on the success path.
+`--repo-key` reads no registry, so a caller needing the identity **on a path
+where `--json` has just refused** — to name a per-project file, say — can ask
+for it here rather than reimplementing the identity rule with its own `git
+rev-parse`. It has **three outcomes, and the exit code matters**:
+
+- a line + **exit 0** — the realpath of the session's git common dir;
+- an empty line + **exit 0** — the cwd is **definitively** in no git repository;
+- **exit non-zero** — it **could not tell** (git missing, the cwd gone, realpath
+  failed, a dubious-ownership or corrupt repo). This is **not** "no repo": a
+  caller must check the exit code and treat this as unknown, never as an empty
+  key meaning "nothing here". Reading the empty output without the exit code is
+  the exact collapse this contract used to have.
+
+`repo_key` on the `--json` document answers the same question on the success
+path.
 
 Zero across the board prints **nothing** and exits 0. Unprompted output that
 says "nothing new" every session is noise, and noise is what makes a real
@@ -170,7 +179,7 @@ level**, beside `channels`:
 | field | meaning |
 |---|---|
 | `failed_candidates` | how many files under `projects/` could not be parsed. A count, never names — every other entry belongs to a different tenant |
-| `repo_key` | the session's own repo identity: the realpath of its git common dir, or `""` in no git repository. Present on every `--json` answer, including the one with no channels |
+| `repo_key` | the session's own repo identity, with three values: the **realpath** of its git common dir; **`""`** when the cwd is definitively in no git repository; or **`null`** when the identity **could not be determined** (git missing, cwd gone, realpath failed, a dubious/corrupt repo). `null` is not `""` — do not read it as "no repo". Present on every `--json` answer, including the one with no channels |
 
 **If you need the repo identity, take it from here — `repo_key` on `--json`, or
 `--repo-key` when `--json` may have refused — never recompute it.** `inbox-status` has already resolved it by the contract's rule, and a
