@@ -84,3 +84,48 @@ a hook defect.
     `LEAK:…success`, reddens and names the file.
 - This is the exact conflation the change removes: a concurrent live write no
   longer reads as a suite leak, while a real leak still reddens.
+
+### S-DND224-3 — the shared poll.log is still guarded (by content)
+
+Dropping `athena-inbox-poll.log` from the mtime fingerprint (it races the live
+poll's appends) must not open a leak hole for it. Check (3) guards it by content
+instead.
+
+- **Mutation:** a suite helper appends a line mentioning the tmp root to the
+  REAL log — `printf … "${TMP}" >> "${REAL_HOME}/.claude/athena-inbox-poll.log"`.
+- **Observed:** `FAIL  the suite left no trace in the real $HOME poll log`
+  (`VERDICT: FAIL (1 of 178 cases)`). The live poll never logs a `${TMP}` path
+  nor the sentinel, so the check cannot be tripped by a concurrent live write.
+- **Cleanup:** restored the suite with `git checkout --`; restored the real log
+  from a byte-for-byte `cp -a` backup taken before the run.
+
+### S-DND224-4 — check (1) fails when it looked at NOTHING
+
+- **Mutation:** point the repo-enumerating `find` at a non-existent dir
+  (`find "${TMP}/nope" …`), so the loop checks zero projects.
+- **Observed:** `checked ZERO fake projects … so this check vouches for
+  nothing` (`VERDICT: FAIL (1 of 178)`). A green run that examined nothing is
+  now impossible — "a failed lookup must never look like an empty one".
+
+### S-DND224-5 — check (1) fails when a fake hash can't be computed
+
+- **Mutation:** truncate the hash to zero chars (`cut -c1-0`), so every fake
+  project yields an empty/bad hash.
+- **Observed:** `could not compute the marker hash for fake project(s) …`
+  (`VERDICT: FAIL (1 of 178)`). An uncomputable key reddens rather than silently
+  skipping the project it could not vet.
+
+### Z-DND224-1 — MEASURED LIMITATION: `athena-inbox-last-poll` is unguarded
+
+`athena-inbox-last-poll` is a shared, 0-byte attempt marker that the live
+SessionStart poll stamps on EVERY session. A spurious touch of it by a suite
+helper is byte-for-byte indistinguishable from the daemon's own touch (no
+project key, no content, only an mtime the daemon moves anyway), so no guard can
+tell the two apart without racing the daemon — the very false positive this
+ticket removed. It is therefore intentionally left unguarded. This is safe
+because a stray touch of the attempt marker changes NO rate-limit decision (it
+records only "when did this machine last attempt"); the rate-limit state that
+actually gates warnings is the per-project seen markers (check 1), the top-level
+fallback markers and settings.json (check 2), and the log's content (check 3),
+all of which remain guarded. No test protects `last-poll`; this row records that
+gap deliberately rather than leaving it silent.
