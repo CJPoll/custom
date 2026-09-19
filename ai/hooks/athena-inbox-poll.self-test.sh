@@ -691,6 +691,38 @@ assert_contains "R17 the precondition: the warning itself IS rate-limited here" 
 assert_not_contains "R17 ...and the rate-limited warning really is absent" \
   "unreadable state file" "${CTX}"
 
+# THE DEGRADED-KEY PATH. Without sha256sum the marker cannot be named, so R16
+# is inert -- and an inert detector looks exactly like a healthy project. Every
+# other R16 case runs with the tool present, so a change that emptied the hash
+# would keep the whole suite green while the round-4 fix did nothing. Closed the
+# way F-4a closes the missing-jq path: PATH rebuilt from scratch, not filtered.
+setup_case
+register "${LOG_CHANNEL}"
+run_hook                                    # session 1 records the seen marker
+rm -f "${ATHENA_INBOX_ROOT}/projects/p.json"
+NOBIN2="${CASE_DIR}/nobin2"; mkdir -p "${NOBIN2}"
+for b in bash dirname date mkdir wc tail mv rm stat sed grep cat timeout jq cut git realpath awk; do
+  src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${NOBIN2}/${b}"
+done
+OLD_PATH="${PATH}"
+PATH="${NOBIN2}" run_hook
+PATH="${OLD_PATH}"
+assert_contains "R16 a key that cannot be hashed is LOGGED, not silently inert" \
+  "would go unnoticed here" "$(hook_log)"
+assert_eq "R16 the degraded run still exits 0" "0" "${RC}"
+
+# ...and the converse: a cwd in NO git repository has no identity to remember
+# and legitimately logs nothing about it, because there is nothing there that
+# could ever have had channels.
+setup_case
+NOGIT="${CASE_DIR}/nogit"
+mkdir -p "${NOGIT}"
+REPO="${NOGIT}"
+run_hook
+assert_not_contains "R16 a cwd in no git repo is not reported as a degraded key" \
+  "would go unnoticed here" "$(hook_log)"
+assert_eq "R16 a cwd in no git repo still exits 0" "0" "${RC}"
+
 echo "== R12: a registry entry that could not be read is surfaced, not skipped =="
 
 # The sharpest form of the standing question. `projects/` is multi-tenant: an

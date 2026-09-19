@@ -255,13 +255,13 @@ without it. Its header says so.
 - **Suite run:** `bash ai/hooks/athena-inbox-poll.self-test.sh </dev/null`
   (no network; every case gets a fake `$HOME`, a private `ATHENA_INBOX_ROOT`
   and its own `git init` repo under one `mktemp -d`; ~5s wall)
-- **Baseline:** `VERDICT: PASS (144 cases)` (91 at the first pass; 21 added
-  after the sabotage run, 32 more across four critic rounds — see *The four
+- **Baseline:** `VERDICT: PASS (148 cases)` (91 at the first pass; 21 added
+  after the sabotage run, 36 more across five critic rounds — see *The four
   zeros* and *What the critic found that sabotage did not*)
-- **Runner:** 33 mutations, one at a time, full suite after each, restored by
-  `cp` from a backup taken before the run. S24–S33 were added after the review
-  rounds (see *What the critic found that sabotage did not*). Final pass: **33
-  mutations, 33 reddened, no measured zeros.**
+- **Runner:** 35 mutations, one at a time, full suite after each, restored by
+  `cp` from a backup taken before the run. S24–S35 were added after the review
+  rounds (see *What the critic found that sabotage did not*). Final pass: **35
+  mutations, 35 reddened, no measured zeros.**
 
 The mutations were applied by an exact-substring replace that asserts the
 anchor occurs **exactly once** before writing, as DND-183's run did. That
@@ -310,6 +310,8 @@ produces 23 green runs, which reads as "this suite is dead".
 | S31 | the per-project seen marker is never recorded | 4 | `FAIL  R16 a vanished entry is announced, not silently treated as opt-out` |
 | S32 | the vanished-entry warning shares the `$HOME`-level health rate limit | 1 | `FAIL  R16 another project's health warning does not silence this one` |
 | S33 | the inflated-count caveat moves back behind the rate limit | 1 | `FAIL  R17 the inflated count still carries its caveat` |
+| S34 | a key that cannot be hashed disables the detector in silence | 1 | `FAIL  R16 a key that cannot be hashed is LOGGED, not silently inert` |
+| S35 | `inbox_status_json` stops naming the session's repo | 5 | `FAIL  R16 a vanished entry is announced, not silently treated as opt-out` |
 
 ### The four zeros
 
@@ -507,6 +509,29 @@ marking it as inflated. The rate limit on the *warning* was laundering the
 *number*. The caveat now rides the number, where no rate limit can strip it,
 the way `bin/inbox-status` attaches its own per-channel `Fix:` unconditionally.
 **R17**, pinned by S33.
+
+**Round five: the detector could disable itself in silence, and it reached
+below the skill's public surface to do it.** Two findings on one mechanism.
+
+The per-project key was derived in the hook by sourcing `lib/fs.sh` and calling
+`fs_git_common_dir`. That is a **Framework-bucket file calling an adapter
+directly** — `lib/fs.sh`'s own header reads "SIDE EFFECTS. The only file I/O in
+the skill, plus the one `git` call" — and it left two independent computations
+of the identity rule free to drift from each other and from the contract, which
+is the bug this facility has already paid for twice. `inbox_status_json` now
+emits `repo_key` on **both** branches (including the not-opted-in one, which is
+exactly when a caller needs it), and the hook reads it out of the public
+surface like every other field. Pinned by S35.
+
+And every way of failing to derive that marker name disabled R16 **silently**:
+no `sha256sum`, a failed sourcing, an unhashable key — all produced an empty
+marker path, whose `stamp` no-ops, so the vanished-entry warning could never
+fire and nothing anywhere said so. An inert detector is indistinguishable from a
+healthy project, and this is the detector whose whole purpose is to make a
+silent-dark registry speak. Each failure now logs a `Fix:`; the one case that
+legitimately has nothing to remember — a cwd in no git repository — stays quiet,
+and a case asserts that too, so the logging cannot be satisfied by logging
+always. Pinned by S34.
 
 ### Not exercised by this run
 

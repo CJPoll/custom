@@ -258,13 +258,28 @@ _inbox_count_maildir() {
 # without killing a multi-channel run". The refusal for the broken channel has
 # already gone to stderr with its `Fix:` clause; the overall exit stays
 # non-zero, so the failure is still loud.
+#
+# The document also carries `repo_key`: the session's own repo identity, the
+# realpath of its git common dir, or "" when the cwd is in no git repository.
+# It is here because this is the layer that already computes it, and a CALLER
+# THAT NEEDS IT MUST NOT RECOMPUTE IT -- a second implementation of the identity
+# rule is a second thing that can drift from the contract, and the one bug this
+# facility has already paid for twice is exactly an identity that did not match
+# the way the contract says. It is the session's OWN key, which the caller
+# already knows because it is standing in it, so it discloses nothing about any
+# other tenant. It is emitted on BOTH branches, including the not-opted-in one,
+# because a caller distinguishing "never opted in" from "my entry vanished"
+# needs it precisely when there is no entry.
 inbox_status_json() {
-  local entry rc chan kind resolved counts schema_csv out="[]" failed=0
+  local entry rc chan kind resolved counts schema_csv out="[]" failed=0 repo_key
+
+  repo_key="$(fs_git_common_dir "${1:-.}")" || repo_key=""
 
   entry="$(inbox_entry "${1:-.}")"; rc=$?
   [ "${rc}" -ne 2 ] || return 1
   if [ -z "${entry}" ]; then
-    jq -n -c --argjson f "$(inbox_failed_candidates)" '{channels: [], failed_candidates: $f}'
+    jq -n -c --argjson f "$(inbox_failed_candidates)" --arg r "${repo_key}" \
+      '{channels: [], failed_candidates: $f, repo_key: $r}'
     return 0
   fi
   descriptor_validate "${entry}" || return 1
@@ -296,8 +311,8 @@ inbox_status_json() {
       --argjson c "${counts}" '. + [{name: $n, kind: $k} + $c]')"
   done < <(descriptor_channel_names "${entry}")
 
-  printf '%s' "${out}" | jq -c --argjson f "$(inbox_failed_candidates)" \
-    '{channels: ., failed_candidates: $f}' || return 1
+  printf '%s' "${out}" | jq -c --argjson f "$(inbox_failed_candidates)" --arg r "${repo_key}" \
+    '{channels: ., failed_candidates: $f, repo_key: $r}' || return 1
   # The JSON is emitted FIRST and the failure is signalled by the status, so a
   # caller gets the counts it CAN have plus an honest non-zero.
   [ "${failed}" -eq 0 ]

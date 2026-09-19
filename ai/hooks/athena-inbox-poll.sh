@@ -164,36 +164,15 @@ LOG_FILE="${MARKER_DIR}/athena-inbox-poll.log"
 # channels, and the session standing in the project is the only one who can.
 #
 # The identity is the contract's own key -- the realpath of the git common dir,
-# identical for a repo's main checkout and all its worktrees -- taken from the
-# skill's `fs_git_common_dir` rather than reimplemented, and in a SUBSHELL so
-# the library's names never enter this file's namespace. The path is hashed
-# because a marker filename must not be a filesystem path, and because the
-# filename would otherwise disclose which projects this machine has registered.
+# identical for a repo's main checkout and all its worktrees. It is READ OUT OF
+# `inbox-status --json` (`repo_key`), not computed here: that command already
+# resolves it, and a hook that recomputed it would be a second implementation of
+# the identity rule, free to drift from the contract. This file calls the
+# skill's public surface and nothing below it. The key is hashed for the marker
+# filename, because a filename must not be a filesystem path.
 SEEN_DIR="${MARKER_DIR}/athena-inbox-seen"
-PROJECT_KEY=""
-PROJECT_HASH=""
-if command -v sha256sum >/dev/null 2>&1; then
-  _lib="${REPO_DIR}/ai/skills/athena:inbox/lib"
-  PROJECT_KEY="$(
-    . "${_lib}/err.sh" >/dev/null 2>&1 \
-      && . "${_lib}/names.sh" >/dev/null 2>&1 \
-      && . "${_lib}/fs.sh" >/dev/null 2>&1 \
-      && fs_git_common_dir "$(pwd)" 2>/dev/null
-  )" || PROJECT_KEY=""
-  if [ -n "${PROJECT_KEY}" ]; then
-    PROJECT_HASH="$(printf '%s' "${PROJECT_KEY}" | sha256sum 2>/dev/null | cut -c1-32)"
-    case "${PROJECT_HASH}" in ''|*[!0-9a-f]*) PROJECT_HASH="" ;; esac
-  fi
-fi
 SEEN_MARKER=""
 SEEN_WARN_MARKER=""
-if [ -n "${PROJECT_HASH}" ]; then
-  SEEN_MARKER="${SEEN_DIR}/${PROJECT_HASH}"
-  # Rate-limited by a marker of its OWN, beside the fact it is about. A
-  # per-project fault must not be silenced by another project's warning, which
-  # is what a shared $HOME-level marker would do.
-  SEEN_WARN_MARKER="${SEEN_DIR}/${PROJECT_HASH}.warn"
-fi
 
 # --- markers ---------------------------------------------------------------
 
@@ -328,6 +307,36 @@ OPTED_IN=1
 if [ "${POLL_OK}" -eq 1 ] \
    && printf '%s' "${STATUS_JSON}" | jq -e '(.channels | length) == 0' >/dev/null 2>&1; then
   OPTED_IN=0
+fi
+
+# The per-project marker paths, now that the status document can name this
+# repo. Every way of failing to derive them is LOGGED rather than silently
+# disabling the detector: an inert R16 looks exactly like a healthy project, and
+# a lookup that finds nothing must still leave something a later reader can see.
+if [ "${POLL_OK}" -eq 1 ]; then
+  PROJECT_KEY="$(printf '%s' "${STATUS_JSON}" | jq -r '.repo_key // ""' 2>/dev/null)" || PROJECT_KEY=""
+  if [ -z "${PROJECT_KEY}" ]; then
+    # A cwd in no git repository has no identity to remember, and legitimately
+    # so -- there is nothing here that could ever have had channels. Not logged,
+    # because it is the ordinary case for most directories on this machine.
+    :
+  elif ! command -v sha256sum >/dev/null 2>&1; then
+    log_reason "sha256sum is not on PATH, so this project's inbox-seen marker could not be named and a vanished registry entry would go unnoticed here. Fix: install coreutils' sha256sum and start a new session."
+  else
+    PROJECT_HASH="$(printf '%s' "${PROJECT_KEY}" | sha256sum 2>/dev/null | cut -c1-32)"
+    case "${PROJECT_HASH}" in
+      ''|*[!0-9a-f]*)
+        log_reason "this project's identity could not be hashed, so its inbox-seen marker could not be named and a vanished registry entry would go unnoticed here. Fix: check that sha256sum and cut behave normally on this machine."
+        ;;
+      *)
+        SEEN_MARKER="${SEEN_DIR}/${PROJECT_HASH}"
+        # Rate-limited by a marker of its OWN, beside the fact it is about. A
+        # per-project fault must not be silenced by another project's warning,
+        # which is what a shared $HOME-level marker would do.
+        SEEN_WARN_MARKER="${SEEN_DIR}/${PROJECT_HASH}.warn"
+        ;;
+    esac
+  fi
 fi
 
 if [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 1 ]; then
