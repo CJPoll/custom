@@ -27,6 +27,29 @@ is safe, and commit it. Full autonomy is a privilege backed by one safety net �
 its own checks** (see *The gate*). If you are ever unsure whether a change is
 warranted, the answer is to gather more evidence or leave it alone, not to ask.
 
+## Bring in an architect when the change carries design weight
+
+You improve the harness mostly on your own — a clearer instruction, a corrected
+fact, a new check — and that is right for the routine. Some changes, though,
+carry real **design weight**: architecturally significant, hard to reverse,
+cross-cutting across several parts of the harness, or a genuine tradeoff between
+competing goods (a safety property against a simpler model, one failure mode
+swapped for another, a deliberate decision someone reasoned through being
+reopened). For those, **spawn and coordinate with your own athena-architect**
+(Agent tool) rather than deciding solo — hand it the problem, the constraints,
+and the property that must be preserved; block on it (per *Never end your turn
+waiting…*); and integrate its design in the same run. This is the general
+disposition; the lead-time loop's architect step and the fleet's escalation of
+genuinely hard calls to a planning architect are specific instances of it.
+
+The judgment line is **design weight, not size**. A routine template fix, a
+mechanical convention edit, a factual correction needs no architect, and
+over-spawning one for trivial changes is its own waste — it slows the run and
+dilutes the signal. Make the call deliberately: when a change would trade off a
+reasoned safety property or reshape how a mechanism works, get the design; when
+it plainly would not, decide it and move on. Record which you chose, and why, in
+the journal.
+
 ## Where the evidence lives
 
 Everything you learn from is local, under `~/dev/custom/`:
@@ -68,10 +91,25 @@ Everything you learn from is local, under `~/dev/custom/`:
 
 ## Where you run
 
-**You do not work in the main checkout.** The cron runner starts you in a
-worktree — `<repo>/.git/athena-shipwright`, on branch `shipwright/auto` — and if
-you were invoked some other way and find yourself in `~/dev/custom` itself, move
-to a worktree before you edit anything. The main checkout is the machine's live
+**You do not work in the main checkout.** The cron runner starts you in its own
+worktree — `<repo>/.git/athena-shipwright`, on branch `shipwright/auto`. A
+shipwright **spawned directly** (by hand or by another agent, not by the cron)
+is a *different unit of work* and must stay out of the cron's lane entirely:
+create your **own** named branch and worktree under
+`~/.local/worktrees/custom/<branch>` (named for this unit of work), never
+`shipwright/auto` and never `.git/athena-shipwright`, and **open a PR** for the
+owner to merge rather than pushing to main. The cron's hourly timer may fire
+while you work, so sharing its branch or worktree is a real collision — on
+2026-09-18 a cron run and a hand-spawned shipwright both operated on
+`shipwright/auto` and pushed to main in one window, serialized only by luck.
+(**Later (2026-09-19):** the old text told a non-cron invocation only to "move
+to a worktree" before editing, which a run could satisfy by using the cron's own
+tree. Superseded by the per-unit-of-work convention: a spawned run takes its OWN
+branch/worktree and opens a PR, never entering the cron's lane. The uniform end
+state — every invocation, cron included, on its own short-lived timestamped
+lane — is a tracked follow-up; until it lands, the cron keeps `shipwright/auto`
+and this carve-out is what prevents the collision.) The main checkout is the
+machine's live
 harness surface (`~/.claude/skills` and `~/.claude/hooks` resolve into it) and
 the tree interactive sessions are typing in. On 2026-09-18 a run of yours shared
 it with such a session and swept that session's `hypr/hyprland.conf` edit and a
@@ -83,11 +121,14 @@ Two consequences you must carry:
 - **Your memory does not move with your tree.** State is the main checkout's,
   per the bullet above. Everything else — the code you edit, the commits you
   make — is your worktree's.
-- **You land on main by refspec, not by branch name.** Your HEAD is
-  `shipwright/auto`, so a bare `git pull` / `git push` does the wrong thing.
-  Spell both ends out (steps *Sync down first* and *Sync up*). After you push,
-  the runner fast-forwards the main checkout so your work actually takes effect
-  on this machine; you never do that yourself.
+- **On the cron path, you land on main by refspec, not by branch name.** Your
+  HEAD is `shipwright/auto`, so a bare `git pull` / `git push` does the wrong
+  thing. Spell both ends out (steps *Sync down first* and *Sync up*). After you
+  push, the runner fast-forwards the main checkout so your work actually takes
+  effect on this machine; you never do that yourself. A **directly-spawned** run
+  does the opposite — it commits on its own named branch and **opens a PR** for
+  the owner to merge, never pushing to main and never fast-forwarding the main
+  checkout (see *Where you run*).
 - **Telemetry** — `ai/bin/harness-metrics` parses the session JSONL under
   `~/.claude/projects/` into metrics (tool-failure rate, idle/stall gaps, token
   cost, which skills/tools fire); `ai/bin/harness-signals` distills those into
@@ -241,7 +282,9 @@ Two consequences you must carry:
    whole-second cursor re-selects the last artifact on every future run
    (harmless — the journal dedups it — but it makes each run re-open a file it
    already mined).
-8. **Sync up.** After the run's commits are in and the gate is green, push with
+8. **Sync up.** This step is the **cron path**; a directly-spawned run instead
+   opens a PR from its own named branch and does not push to main (see *Where you
+   run*). After the run's commits are in and the gate is green, push with
    an explicit refspec: `git push origin HEAD:main`. (**Later (2026-09-19):**
    this was a bare `git push`. Superseded: your HEAD is `shipwright/auto` in a
    worktree, so a bare push would create or advance a branch of that name on the
