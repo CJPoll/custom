@@ -1,0 +1,469 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# lead-time — derive a fleet ticket's LEAD TIME from durable artifacts only.
+#
+# Lead time = interval from when a captain STARTS working a ticket to when that
+# ticket is FULLY DEPLOYED (or, for a ticket that does not deploy, when its
+# post-merge pipeline completes; or, for a repo with no CI at all, the merge).
+#
+# The whole point of this tool is that it CAPTURES NOTHING and asks NOTHING of
+# any agent. Every timestamp is recovered on demand from git + the forge's CI,
+# which retain history independently of whether an agent set a Notion status.
+# See ai/docs/lead-time-tracking.md for the design and the rejected markers
+# (chiefly: the Notion API exposes no per-property transition time).
+#
+# CROSS-FORGE: the repo's `origin` remote selects the backend —
+#   github.com -> gh   (gen_saas, custom)
+#   gitlab.com -> glab (walt_ui)
+# Nothing about a specific repo is hardcoded; deploy detection is per-ticket.
+#
+# Markers (derived, durable):
+#   START = earliest commit on the ticket's branch (min commit time over the
+#           PR/MR commits; survives squash merge). It LAGS true dispatch by the
+#           first work chunk, so lead time computed this way slightly
+#           UNDER-reports. It is the honest durable floor.
+#   END   = 3-tier, matching Cody's definition exactly:
+#           (1) DEPLOY completed  -> the deploy step's completion time
+#                 github: completion of the deploy workflow run for the merge sha
+#                 gitlab: max finished_at over successful `deploy`-stage jobs
+#           (2) else POST-MERGE PIPELINE completed -> its completion time
+#                 (a ticket that ran CI on main but shipped no deploy job)
+#           (3) else MERGE time (no post-merge CI at all, e.g. ~/dev/custom)
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   lead-time --repo DIR --pr N [--json]      # --pr / --mr are synonyms
+#   lead-time --repo DIR --since ISO8601 [--json]
+#   lead-time --self-test                     # pure logic, no network
+#
+# Exit: 0 ok, 1 usage/tool error, 2 a requested PR/MR is missing.
+
+require "time"
+require "json"
+require "open3"
+
+# Which workflow/stage counts as "the deploy" (overridable, not hardcoded to a
+# repo). GitHub: workflow name matches this regex. GitLab: job stage equals the
+# gitlab value.
+DEPLOY_NAME_RE   = Regexp.new(ENV.fetch("LEAD_TIME_DEPLOY_RE", "deploy"), Regexp::IGNORECASE)
+DEPLOY_GL_STAGE  = ENV.fetch("LEAD_TIME_DEPLOY_STAGE", "deploy")
+
+# ---------------------------------------------------------------------------
+# Pure core (self-tested; no network, no git)
+# ---------------------------------------------------------------------------
+
+module LeadTime
+  module_function
+
+  # Earliest commit is the start. nil if there are no commits yet.
+  def pick_start(commit_iso_times)
+    times = commit_iso_times.compact.map { |t| Time.iso8601(t) }
+    times.min
+  end
+
+  # 3-tier END rule (forge-independent). Each argument is an ISO string or nil.
+  def pick_end(deploy_at:, pipeline_at:, merged_at:)
+    if present?(deploy_at)
+      [Time.iso8601(deploy_at), :deploy]
+    elsif present?(pipeline_at)
+      [Time.iso8601(pipeline_at), :pipeline]
+    elsif present?(merged_at)
+      [Time.iso8601(merged_at), :merge]
+    else
+      [nil, :open]
+    end
+  end
+
+  def present?(v)
+    v && !v.to_s.empty?
+  end
+
+  # Latest finished_at among the given iso strings, as an ISO string (ignoring
+  # blanks). nil if none. Returns a string so it composes with pick_end.
+  def latest(iso_times)
+    ts = iso_times.compact.reject { |t| t.to_s.empty? }.map { |t| Time.iso8601(t) }
+    ts.max&.utc&.iso8601
+  end
+
+  # Whole-number, human-scaled duration; the two most-significant non-zero units.
+  def duration_human(seconds)
+    return "n/a" if seconds.nil?
+    return "0s" if seconds <= 0
+
+    s = seconds.to_i
+    d = s / 86_400; s -= d * 86_400
+    h = s / 3_600;  s -= h * 3_600
+    m = s / 60;     s -= m * 60
+    parts = []
+    parts << "#{d}d" if d.positive?
+    parts << "#{h}h" if h.positive?
+    parts << "#{m}m" if m.positive?
+    parts << "#{s}s" if s.positive?
+    parts.first(2).join(" ")
+  end
+
+  # Full computation from already-gathered facts. Returns a result Hash.
+  #
+  # Lead time splits into two phases with DIFFERENT improvement levers, so the
+  # result reports both so an improver can target the right one:
+  #   code = start -> merge   (development + review; a HARNESS/process lever)
+  #   tail = merge -> end      (CI + deploy; a PIPELINE-EFFICIENCY lever, which
+  #                             must never be sped up by weakening a check)
+  def compute(start_iso_times:, deploy_at:, pipeline_at:, merged_at:)
+    start = pick_start(start_iso_times)
+    finish, end_kind = pick_end(deploy_at: deploy_at, pipeline_at: pipeline_at,
+                                merged_at: merged_at)
+    merged = present?(merged_at) ? Time.iso8601(merged_at) : nil
+    secs      = (start && finish) ? (finish - start).to_i : nil
+    code_secs = (start && merged) ? (merged - start).to_i : nil
+    tail_secs = (merged && finish) ? [(finish - merged).to_i, 0].max : nil
+    {
+      start: start&.utc&.iso8601,
+      merged: merged&.utc&.iso8601,
+      end: finish&.utc&.iso8601,
+      end_kind: end_kind,
+      lead_seconds: secs,
+      lead_human: duration_human(secs),
+      code_seconds: code_secs,
+      code_human: duration_human(code_secs),
+      tail_seconds: tail_secs,
+      tail_human: duration_human(tail_secs),
+    }
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Impure shell — forge backends (not exercised by --self-test)
+# ---------------------------------------------------------------------------
+
+def run_json(cmd, dir)
+  out, err, st = Open3.capture3(*cmd, chdir: dir)
+  unless st.success?
+    warn "lead-time: #{cmd.first} #{cmd[1..].join(' ')} failed: #{err.strip}"
+    warn "Fix: run against a repo whose forge you can read (`gh auth status` / `glab auth status`)."
+    return nil
+  end
+  JSON.parse(out)
+rescue JSON::ParserError => e
+  warn "lead-time: could not parse #{cmd.first} output: #{e.message}"
+  nil
+end
+
+def origin_url(dir)
+  out, _err, st = Open3.capture3("git", "-C", dir, "remote", "get-url", "origin")
+  st.success? ? out.strip : ""
+end
+
+def detect_forge(dir)
+  url = origin_url(dir)
+  return :github if url.include?("github.com")
+  return :gitlab if url.include?("gitlab.com") || url.include?("gitlab")
+
+  nil
+end
+
+# ---- GitHub (gh) ----------------------------------------------------------
+
+class GitHubForge
+  def initialize(dir)
+    @dir = dir
+  end
+
+  def name
+    "github (gh)"
+  end
+
+  def merged_since(since_iso)
+    since = Time.iso8601(since_iso)
+    prs = run_json(%w[gh pr list --state merged --limit 100 --json number,mergedAt], @dir) || []
+    prs.select { |p| p["mergedAt"] && Time.iso8601(p["mergedAt"]) >= since }
+       .sort_by { |p| p["mergedAt"] }.map { |p| p["number"] }
+  end
+
+  def facts(id)
+    d = run_json(["gh", "pr", "view", id.to_s, "--json",
+                  "number,title,mergedAt,headRefName,commits,mergeCommit"], @dir)
+    return nil unless d
+
+    merge_sha = d.dig("mergeCommit", "oid")
+    deploy_at, pipeline_at = ci_ends(merge_sha)
+    {
+      number: d["number"], title: d["title"], branch: d["headRefName"],
+      merged_at: d["mergedAt"], merge_sha: merge_sha,
+      commit_times: (d["commits"] || []).map { |c| c["committedDate"] },
+      deploy_at: deploy_at, pipeline_at: pipeline_at,
+    }
+  end
+
+  # Returns [deploy_completed_at, pipeline_completed_at] for the merge sha.
+  # A completed run whose workflow name matches the deploy regex and concluded
+  # success -> deploy end; any other successful completed run -> pipeline end.
+  def ci_ends(merge_sha)
+    return [nil, nil] unless merge_sha
+
+    runs = run_json(["gh", "run", "list", "--limit", "300", "--json",
+                     "headSha,updatedAt,conclusion,status,name"], @dir) || []
+    mine = runs.select { |r| r["headSha"] == merge_sha && r["status"] == "completed" && r["conclusion"] == "success" }
+    deploy = mine.select { |r| r["name"].to_s.match?(DEPLOY_NAME_RE) }
+    other  = mine.reject { |r| r["name"].to_s.match?(DEPLOY_NAME_RE) }
+    [LeadTime.latest(deploy.map { |r| r["updatedAt"] }),
+     LeadTime.latest(other.map { |r| r["updatedAt"] })]
+  end
+end
+
+# ---- GitLab (glab) --------------------------------------------------------
+
+class GitLabForge
+  def initialize(dir)
+    @dir = dir
+    @proj = project_path(dir)
+  end
+
+  def name
+    "gitlab (glab)"
+  end
+
+  def project_path(dir)
+    # git@gitlab.com:group/sub/repo.git  OR  https://gitlab.com/group/repo.git
+    require "uri"
+    url = origin_url(dir)
+    path = url.sub(%r{^git@[^:]+:}, "").sub(%r{^https?://[^/]+/}, "").sub(/\.git$/, "")
+    path.split("/").map { |seg| URI.encode_www_form_component(seg) }.join("%2F")
+  end
+
+  def api(path)
+    run_json(["glab", "api", path], @dir)
+  end
+
+  def merged_since(since_iso)
+    since = Time.iso8601(since_iso)
+    mrs = api("projects/#{@proj}/merge_requests?state=merged&order_by=updated_at&per_page=100") || []
+    mrs.select { |m| m["merged_at"] && Time.iso8601(m["merged_at"]) >= since }
+       .sort_by { |m| m["merged_at"] }.map { |m| m["iid"] }
+  end
+
+  def facts(id)
+    d = api("projects/#{@proj}/merge_requests/#{id}")
+    return nil unless d
+
+    commits = api("projects/#{@proj}/merge_requests/#{id}/commits") || []
+    merge_sha = d["merge_commit_sha"] || d["squash_commit_sha"] || d["sha"]
+    deploy_at, pipeline_at = ci_ends(d)
+    {
+      number: d["iid"], title: d["title"], branch: d["source_branch"],
+      merged_at: d["merged_at"], merge_sha: merge_sha,
+      commit_times: commits.map { |c| c["created_at"] },
+      deploy_at: deploy_at, pipeline_at: pipeline_at,
+    }
+  end
+
+  # Find the post-merge pipeline on the default branch for the merge and read
+  # its deploy-stage job completions.
+  def ci_ends(mr)
+    shas = [mr["merge_commit_sha"], mr["squash_commit_sha"], mr["sha"]].compact.uniq
+    pipeline = nil
+    shas.each do |sha|
+      ps = api("projects/#{@proj}/pipelines?sha=#{sha}")
+      pipeline = ps&.first
+      break if pipeline
+    end
+    return [nil, nil] unless pipeline
+
+    jobs = api("projects/#{@proj}/pipelines/#{pipeline['id']}/jobs?per_page=100") || []
+    succeeded = jobs.select { |j| j["status"] == "success" }
+    deploy_jobs = succeeded.select { |j| j["stage"] == DEPLOY_GL_STAGE }
+    deploy_at   = LeadTime.latest(deploy_jobs.map { |j| j["finished_at"] })
+    pipeline_at = LeadTime.latest(succeeded.map { |j| j["finished_at"] })
+    [deploy_at, pipeline_at]
+  end
+end
+
+def forge_for(dir)
+  case detect_forge(dir)
+  when :github then GitHubForge.new(dir)
+  when :gitlab then GitLabForge.new(dir)
+  end
+end
+
+def analyze(forge, id)
+  f = forge.facts(id)
+  return nil unless f
+
+  LeadTime.compute(start_iso_times: f[:commit_times], deploy_at: f[:deploy_at],
+                   pipeline_at: f[:pipeline_at], merged_at: f[:merged_at])
+          .merge(pr: f[:number], title: f[:title], branch: f[:branch])
+end
+
+# ---------------------------------------------------------------------------
+# --self-test (pure logic only)
+# ---------------------------------------------------------------------------
+
+def self_test
+  failures = []
+  check = lambda do |name, got, want|
+    failures << "#{name}: got #{got.inspect}, want #{want.inspect}" unless got == want
+  end
+
+  # duration_human
+  check.call("dur 47m", LeadTime.duration_human(47 * 60), "47m")
+  check.call("dur 2h14m", LeadTime.duration_human(2 * 3600 + 14 * 60), "2h 14m")
+  check.call("dur 3d5h", LeadTime.duration_human(3 * 86_400 + 5 * 3600 + 9 * 60), "3d 5h")
+  check.call("dur 18s", LeadTime.duration_human(18), "18s")
+  check.call("dur 0", LeadTime.duration_human(0), "0s")
+  check.call("dur neg", LeadTime.duration_human(-5), "0s")
+  check.call("dur nil", LeadTime.duration_human(nil), "n/a")
+  check.call("dur 5m0s->5m", LeadTime.duration_human(5 * 60), "5m")
+
+  # pick_start / latest
+  check.call("start earliest",
+             LeadTime.pick_start(["2026-09-19T05:00:00Z", "2026-09-19T04:42:00Z",
+                                  "2026-09-19T04:55:00Z"]).utc.iso8601,
+             "2026-09-19T04:42:00Z")
+  check.call("start empty", LeadTime.pick_start([]), nil)
+  check.call("latest max",
+             LeadTime.latest(["2026-09-19T06:55:25Z", "2026-09-19T06:58:17Z", nil, ""]),
+             "2026-09-19T06:58:17Z")
+  check.call("latest none", LeadTime.latest([nil, ""]), nil)
+
+  # pick_end 3-tier
+  e, k = LeadTime.pick_end(deploy_at: "2026-09-19T06:06:39Z",
+                           pipeline_at: "2026-09-19T05:55:00Z",
+                           merged_at: "2026-09-19T05:46:40Z")
+  check.call("end deploy time", e.utc.iso8601, "2026-09-19T06:06:39Z")
+  check.call("end deploy kind", k, :deploy)
+
+  e2, k2 = LeadTime.pick_end(deploy_at: nil, pipeline_at: "2026-09-19T05:55:00Z",
+                             merged_at: "2026-09-19T05:46:40Z")
+  check.call("end pipeline time", e2.utc.iso8601, "2026-09-19T05:55:00Z")
+  check.call("end pipeline kind", k2, :pipeline)
+
+  e3, k3 = LeadTime.pick_end(deploy_at: nil, pipeline_at: nil,
+                             merged_at: "2026-09-19T05:41:21Z")
+  check.call("end merge time", e3.utc.iso8601, "2026-09-19T05:41:21Z")
+  check.call("end merge kind", k3, :merge)
+
+  e4, k4 = LeadTime.pick_end(deploy_at: "", pipeline_at: "", merged_at: nil)
+  check.call("end open", e4, nil)
+  check.call("end open kind", k4, :open)
+
+  # compute end-to-end: custom PR14 shape (no CI -> merge)
+  r = LeadTime.compute(
+    start_iso_times: ["2026-09-19T04:42:59Z", "2026-09-19T05:35:44Z"],
+    deploy_at: nil, pipeline_at: nil, merged_at: "2026-09-19T05:41:21Z")
+  check.call("compute pr14 seconds", r[:lead_seconds], 3502)
+  check.call("compute pr14 human", r[:lead_human], "58m 22s")
+  check.call("compute pr14 kind", r[:end_kind], :merge)
+  check.call("compute pr14 code", r[:code_seconds], 3502)  # start->merge
+  check.call("compute pr14 tail", r[:tail_seconds], 0)     # merge->end (=merge)
+
+  # compute deploy shape (gitlab walt_ui MR1188: 05:05:41Z -> 06:58:17Z)
+  r2 = LeadTime.compute(
+    start_iso_times: ["2026-09-19T05:12:05Z", "2026-09-19T05:05:41Z"],
+    deploy_at: "2026-09-19T06:58:17Z", pipeline_at: "2026-09-19T07:07:37Z",
+    merged_at: "2026-09-19T06:47:40Z")
+  check.call("compute deploy kind", r2[:end_kind], :deploy)
+  check.call("compute deploy seconds", r2[:lead_seconds], 6756) # 05:05:41 -> 06:58:17
+  check.call("compute deploy code", r2[:code_seconds], 6119)    # start -> merge
+  check.call("compute deploy tail", r2[:tail_seconds], 637)     # merge -> deploy
+
+  if failures.empty?
+    puts "lead-time --self-test: PASS (pure-logic assertions)"
+    0
+  else
+    warn "lead-time --self-test: FAIL"
+    failures.each { |f| warn "  - #{f}" }
+    warn "Fix: reconcile module LeadTime with the expected marker/date math above."
+    1
+  end
+end
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def usage
+  warn <<~USAGE
+    lead-time — derive a fleet ticket's lead time from git + the forge's CI.
+
+      lead-time --repo DIR --pr N [--json]     # --mr is a synonym for --pr
+      lead-time --repo DIR --since ISO8601 [--json]
+      lead-time --self-test
+
+    Fix: pass --self-test, or --repo with either --pr/--mr or --since.
+  USAGE
+  1
+end
+
+def print_row(r)
+  kind = { deploy: "deploy", pipeline: "pipeline", merge: "merge", open: "open" }[r[:end_kind]] || r[:end_kind].to_s
+  printf("#%-5s  lead=%-9s (code %-8s + tail %-8s)  via=%-8s %s\n",
+         r[:pr], r[:lead_human], r[:code_human], r[:tail_human], kind,
+         (r[:title] || "")[0, 46])
+end
+
+def main(argv)
+  return self_test if argv.include?("--self-test")
+
+  repo = nil
+  id = nil
+  since = nil
+  slow_min = nil
+  as_json = argv.include?("--json")
+  i = 0
+  while i < argv.length
+    case argv[i]
+    when "--repo"        then repo = argv[i += 1]
+    when "--pr", "--mr"  then id = argv[i += 1]
+    when "--since"       then since = argv[i += 1]
+    when "--slow"        then slow_min = Integer(argv[i += 1], exception: false)
+    when "--json"        then nil
+    else
+      warn "lead-time: unknown argument #{argv[i].inspect}"
+      return usage
+    end
+    i += 1
+  end
+
+  return usage unless repo && (id || since)
+  unless File.exist?(File.join(repo, ".git"))
+    warn "lead-time: #{repo} is not a git worktree/checkout"
+    warn "Fix: pass --repo pointing at a git checkout (e.g. ~/dev/custom, ~/dev/gen_saas, ~/dev/walt_ui)."
+    return 1
+  end
+
+  forge = forge_for(repo)
+  unless forge
+    warn "lead-time: could not detect a supported forge from #{repo}'s origin remote"
+    warn "Fix: this tool supports github.com (gh) and gitlab.com (glab) origins."
+    return 1
+  end
+
+  ids = id ? [id] : forge.merged_since(since)
+  rows = ids.map { |n| analyze(forge, n) }.compact
+  if id && rows.empty?
+    warn "lead-time: #{id} not found or unreadable in #{repo}"
+    warn "Fix: check the PR/MR number and that the forge CLI can read this repo."
+    return 2
+  end
+
+  # --slow N: keep only tickets whose lead time is >= N minutes (the feedback
+  # loop's outlier filter). Rows without a computable lead are dropped.
+  if slow_min
+    threshold = slow_min * 60
+    rows = rows.select { |r| r[:lead_seconds] && r[:lead_seconds] >= threshold }
+               .each { |r| r[:slow_threshold_min] = slow_min }
+    rows.sort_by! { |r| -(r[:lead_seconds] || 0) }
+  end
+
+  if as_json
+    puts JSON.pretty_generate(rows)
+  else
+    warn "repo=#{repo}  forge=#{forge.name}#{slow_min ? "  slow>=#{slow_min}m: #{rows.size}" : ''}"
+    rows.each { |r| print_row(r) }
+  end
+  0
+end
+
+exit main(ARGV) if $PROGRAM_NAME == __FILE__

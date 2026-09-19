@@ -1066,6 +1066,250 @@ state writer, the doorbell waiter, and `read-inbox` itself.
 
 ---
 
+# DND-187 — `bin/send-mail`, the writer's half
+
+**39 mutations, 34 red, 5 measured green** — in the FINAL state of the branch.
+The numbers moved across six passes and every movement is recorded rather than
+smoothed over, because a sabotage record whose header disagrees with its own
+table is a record a reader cannot use: the first pass was **18 red / 6 green**
+over 24 mutations; closing the two real gaps it found (S10, S13) made it 20/4;
+the review round added six more mutations (S25 … S30) over the checks written to
+answer it, of which five reddened; a second review round added five more
+(S31 … S35), all of which reddened; a third review round added one more (S36),
+which reddened; a fourth added one more (S37), which reddened; a fifth added two
+more (S38, S39), both of which reddened.
+
+Each mutation was an
+exact-substring replace whose anchor was asserted present before writing, run
+against the whole suite, and reverted from the original bytes held in memory —
+never `git checkout`, which cannot restore work that is not yet committed.
+Every row below names the case that reddened and what it says.
+
+Of the five surviving greens, **two are redundancy** (S2/S3 — one claim with
+two independent guards, reddened together as S1) and **three are genuine
+unreachability** (S16, S20, S27), all written up below rather than dropped. The
+two rows that were green on the first pass and are red now (**S10**, **S13**)
+carry that history in place; **S13 was a real gap**, not a redundancy.
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S1 | delivery uses `mv` **and** the destination pre-check is removed | **RED** (7) | *M-11 delivery onto an existing name returns 2 (collision), not 0* — `mv` silently replaces, so the earlier message is destroyed with no error |
+| S2 | `ln` → `mv`, pre-check kept | GREEN | redundancy, not a zero — see *The green that is redundancy, not a zero* |
+| S3 | pre-check removed, `ln` kept | GREEN | same pair |
+| S4 | the doorbell is bumped **before** the delivery | **RED** (3) | *M-12 the message is ALREADY in place when the bell rings* |
+| S5 | the `<seq>` scan skips `.acked/` | **RED** (1) | *I-5 the next send allocates 002 even though .acked/ holds 001* |
+| S6 | `<seq>` printed with `%d` instead of `%03d` | **RED** (28) | the whole grammar — `-1-` sorts after `-10-` |
+| S7 | `<seq>` parsed without `10#` | **RED** (1) | *M-10 a zero-padded seq is read base 10, not octal* — `008` aborts the arithmetic, on names the allocator wrote itself |
+| S8 | `fs_mkdir_0700` → `mkdir -p -m 0700` | **RED** (2) | *M-11 every intermediate directory is 0700 too* — the defect this ticket shipped and then fixed |
+| S9 | the render's round-trip self-check removed | **RED** (2) | *M-11 a `re` whose fragment the reader's parser would strip is refused* |
+| S10 | the explicit newline-in-`re` arm removed | GREEN → **RED** (1) | green at first (the round trip also catches it) — a case asserting the refusal **names the line break** makes the arm load-bearing for its own message. A refusal that misnames the problem is a `Fix:` the reader cannot act on |
+| S11 | the empty-body refusal removed | **RED** (2) | *M-11 an empty body is refused — the MISSING-input shape of a send* |
+| S12 | the builder skips re-validating through the reader's grammar | **RED** (1) | *M-10 a `<seq>` shorter than 3 digits is refused at build time* |
+| S13 | the manager stops calling `maildir_refuse_self_send` | GREEN → **RED** (3) | **a real gap.** The domain predicate was asserted; the production call was not — so a message addressed to my own identity was delivered into the directory the peer reads, where the peer's never-ack-your-own filter does not fire and it sits unread forever. Verbatim DND-184's lesson (the contract's message rules held in the domain and nowhere a message travels), found again by sabotage. Closed with an end-to-end case |
+| S14 | a `<seq>` collision aborts instead of retrying | **RED** (1) | *M-11 a collision is retried with a fresh sequence number* |
+| S15 | the sender lock is not taken | **RED** (3) | *M-11 a second sender is refused while the lock is held* |
+| S16 | the post-delivery existence confirmation removed | GREEN | unreachable today — see below |
+| S17 | `send-mail` echoes the body back | **RED** (1) | *M-11 send-mail never prints the body back* |
+| S18 | the send also provisions the directory it **reads** from | **RED** (1) | *M-11 a send does NOT create the directory it reads from* — fabricating it invents a channel the peer never declared |
+| S19 | a `log` channel is allowed to be sent on | **RED** (1) | *M-10 sending on a log channel is refused* |
+| S20 | the manager's `write == read` guard removed | GREEN | unreachable today — see below |
+| S21 | the slug grammar accepts anything | **RED** (8) | the slug block, and the assembled-name check behind it |
+| S22 | `thread` accepted without the message-name grammar | **RED** (2) | *A-3 a `thread` that is a PATH is refused* |
+| S23 | the delivery primitive drops its own filename re-check | **RED** (2) | *A-3 the delivery primitive refuses a non-conformant filename* |
+| S24 | the doorbell bump failure swallowed with `|| true` | **RED** (3) | *M-12 an undeliverable send exits non-zero* — and the bump refusal's own text |
+
+### Added in the review round (the critic's findings, and the checks written for them)
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S25 | the header is assembled in a `$( )` again, eating the blank separator | **RED** (2) | *M-10 the closing `---` is followed by a blank line* — see below |
+| S26 | `lock.sh` reverts to `mkdir -p -m 0700` | **RED** (4) | *M-11 lock.sh creates its directory at 0700 … and every intermediate* |
+| S27 | the maildir ack reverts to `mkdir -p -m 0700` | GREEN | unreachable — see below |
+| S28 | the renderer's `jq` guard removed | **RED** (2) | *M-11 a missing jq is named as the missing capability it is* |
+| S29 | the body is slurped with `cat` again | **RED** (1) | same case — a PATH-less environment made the body EMPTY and the refusal blamed the sender's text |
+| S30 | `--re` no longer required to be absolute or a URL | **RED** (1) | *M-11 a relative `--re` is refused* |
+
+**S25 is the one that matters, and it was shipped.** `$( )` strips *all*
+trailing newlines, so the header's deliberate `\n\n` contributed nothing and
+the delivered bytes were `---\nBody`, not `---\n\nBody` — while this
+function's docstring, `bin/send-mail`'s header and the contract's own example
+all show the blank line. Our reader tolerates either shape, so **the entire
+cost would have landed on the other implementation of this contract**: the peer
+this channel exists to talk to, whose parser is not ours to assume about. The
+suite was green with the separator and green without it, because the only body
+round trip pipes through `sed '/^$/d'` — which deletes precisely the line in
+question. Found by the review round, not by a mutation: no mutation of the
+existing code could have found it, because the code and every assertion over it
+agreed with each other and disagreed only with the document.
+
+### Added in the second review round
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S31 | the NUL check on a captured body removed | **RED** (5) | *M-10 a `--body-file` containing a NUL is refused* — and the stdin twin |
+| S32 | `$EDITOR` invoked as a single word | **RED** (2) | *M-10 `$EDITOR`'s own arguments are passed through* |
+| S33 | an `$EDITOR` that exited non-zero is delivered anyway | **RED** (2) | *M-10 the half-written draft is not delivered* |
+| S34 | `--body-file` accepts a symlink | **RED** (1) | *M-10 a symlinked `--body-file` is refused* |
+| S35 | the unset-`$EDITOR` refusal removed | **RED** (1) | *M-10 `--edit` with `$EDITOR` unset is refused* |
+
+**S31 is the one that was shipped.** A body containing a NUL was delivered
+**silently altered**, with `delivered <name>` printed and exit 0: shell drops a
+NUL on assignment, so the bytes that arrived were not the bytes that were
+passed — immutably, in the peer's transcript, with nothing recording the edit.
+It is the same class the frontmatter round trip was added to close, and the
+round trip could not see it, because it compares the header and never the body.
+The capture now lands every body on disk before it reaches a variable, which is
+what makes the check possible at all.
+
+**The `$EDITOR` rows exist because the branch was unreachable.** It was selected
+only by "stdin is a terminal", so no test could enter it and no mutation over it
+could redden anything — four checks that would have broken silently. `--edit`
+makes it selectable, which is the whole reason that flag exists.
+
+**S27 — the ack's `mkdir` is unreachable in its differing form.** The two
+`mkdir` forms differ only when an INTERMEDIATE directory has to be created, and
+by the time the ack runs, `read-inbox` has already taken the consumer lock —
+which creates the read directory. So `.acked/`'s parent always exists and the
+leaf is moded identically either way. The conversion is kept for consistency of
+the class (no `mkdir -p -m` remains in `lib/` or `bin/`), and this row is what
+says it is not independently tested.
+
+### Added in the third review round
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S36 | the body capture uses `$(cap; printf X)` instead of `$(cap && printf X)` | **RED** (2) | *M-10 … and NOT with the misleading downstream empty-body refusal* — and the NUL `--body-file` twin |
+
+**S36 is the one that was shipped, and the review round found it by reading, not
+by a mutation.** `$(a; b)` takes its exit status from `b` — here always
+`printf X`, i.e. always `0` — so `BODY="$(inbox_body_capture … ; printf X)" ||
+exit 1` could never fire. When the capture refused (a missing or symlinked
+`--body-file`, a NUL byte), the accurate refusal was printed, the `|| exit 1`
+was skipped, `BODY` stayed empty, and the run fell through to the DOWNSTREAM
+"refusing to send an empty message" refusal — which names the wrong cause for a
+file that existed and was rejected, a `Fix:` the reader cannot act on. The end
+result was still "exit 1, nothing delivered", so every prior assertion (exit
+code, substring, nothing-delivered) stayed green: the two body-file cases
+asserted only that a refusal occurred, never that the RIGHT refusal was the last
+word. The fix is `&&`, which short-circuits before `printf` on a refusing
+capture so the substitution carries the capture's non-zero status. The new
+`assert_not_contains "refusing to send an empty message"` cases are what redden
+under the `;` form; measured by reverting the fix on the `--body-file` line
+alone, which reddened exactly the two body-file assertions and left the stdin
+twin green.
+
+### Added in the fourth review round
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S37 | the send path drops the `sender` role arg to `inbox_lock_acquire` | **RED** (3) | *M-11 … naming the contention as a concurrent SEND, not a consumer* — and the two twins that a sender's refusal never says "designated consumer" or "--peek" |
+
+**S37 is a refusal that misnamed what a sender was doing, and it was shipped.**
+`inbox_lock_acquire` guards two operations — a read/ack advance on
+`<channel>.consumer.lock`, and a send on `<write>/.sender.lock` — and its refusal
+was written only for the reader: a send blocked on a busy `.sender.lock` reported
+"another session is the designated consumer" and told the user to "re-run with
+`--peek`", a flag `send-mail` does not have, over a lock that is not the
+consumer's. It is the same class the review round opened with (a refusal whose
+`Fix:` the reader cannot act on), one level deeper: `bin/send-mail`'s own
+"already holds another lock" message had been reworded for a sender, but the one
+refusal a real, correctly-configured send can actually hit had not. Fixed by
+threading a `role` through `inbox_lock_acquire` (patch the class, not the site),
+defaulting to `consumer` so every existing caller is unchanged, and branching the
+`flock -n` refusal on it. The section-4b contention case asserted only that
+*some* refusal appeared; it now asserts the refusal names a concurrent send and
+mentions neither `--peek` nor "designated consumer".
+
+### Added in the fifth review round
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S38 | the send takes the sender lock **before** the write dir is symlink-checked | **RED** (1) | *A-5 … and no .sender.lock was created in the directory the symlink pointed at* |
+| S39 | the post-delivery bump failure is swallowed with `\|\| true` | **RED** (1) | *M-12 … and warns that the bell did not ring, not silently* |
+
+**S38 is a cross-namespace write, and it was shipped.** `fs_assert_contained`
+resolves the write directory through `realpath`, which FOLLOWS symlinks, so a
+write dir that is a symlink to another directory INSIDE the root — another
+tenant's namespace, or the peer's read directory — passes containment. The send
+then took its `.sender.lock` (carrying this session's id and pid) *first*, which
+created that file through the symlink in a directory this identity does not own;
+only afterwards, inside `fs_maildir_deliver`, did `fs_assert_not_symlink` refuse.
+The refusal happened; it happened one write too late. Fixed by calling
+`fs_maildir_provision_write` (which symlink-checks the write dir) before the
+lock, after the self-send and slug refusals so neither creates a directory on its
+way to refusing. Measured by removing the reorder: the send still refused, but
+the `.sender.lock` appeared in the decoy directory the symlink pointed at.
+
+**S39 keeps the doorbell-bump failure from going silent.** A delivered message
+whose `.event` cannot be rung must still exit 0 — the message is linked and
+durable, so failing would report a loss that did not happen — but the warning
+must be printed, or the peer waits on a signal that never comes and the
+no-polling rule is broken in silence. The branch had no send-side case (S24
+covered the read/ack side), so `|| true` over the bump would have left it green.
+Measured by planting `.event` as a directory (`fs_bump_doorbell` refuses a
+non-regular doorbell) and asserting the send exits 0, reports the filename, and
+prints "could not be rung".
+
+## The input classes the fixtures never contained
+
+Mutating code finds a check that stopped working. It cannot find a check
+nobody thought to write, because a fixture is built the way the code already
+expects — which is how DND-184's worst defect (an unterminated `---` block
+destroying peer content and acking it) survived every mutation and was found
+by feeding the parser a shape no fixture contained. So the same hunt was run
+from the writing side:
+
+1. **A `re` value containing `" #"`.** `maildir_parse_frontmatter` strips a `#`
+   comment that follows whitespace, so `re: /home/x/design.md #section-3`
+   reached the peer as `/home/x/design.md` — the fragment gone, **both sides
+   reporting success, nothing anywhere saying a value had been edited in
+   transit**. A URL fragment or a line anchor is exactly the kind of thing a
+   `re:` carries. Fixed by parsing the rendered message back and refusing any
+   value that does not survive — a **round trip**, not a second copy of the
+   parser's grammar, because that copy would go stale the first time the
+   reader learned a new rule.
+2. **A value with leading or trailing whitespace**, trimmed by the same parser.
+   Same fix, same case.
+3. **A body containing `---` lines and `key: value` lines** — the shape that
+   produced DND-184's destroyed message, now written by this sender rather
+   than a peer. Asserted to round trip with the sender unforged and the body
+   intact.
+4. **A body with no trailing newline**, which would run into whatever a reader
+   concatenated after it. The assertion needed `printf X` to be able to observe
+   its own claim at all: `$(...)` strips trailing newlines, so the obvious form
+   of that case reports a missing newline whether or not one was emitted.
+
+## The green that is redundancy, not a zero
+
+**S2 and S3 are one claim with two independent guards.** Delivery must not
+clobber; the `ln` and the destination pre-check each enforce it alone, so
+removing either leaves the suite green and removing **both** (S1) reddens seven
+cases. The claim is tested — S1 is the proof — and the redundancy is kept: `ln`
+is the contract's named mechanism, and the pre-check is what makes the
+collision a cheap `return 2` on the retry path rather than an error branch.
+
+## The genuine unreachables, recorded rather than dropped
+
+- **S16 — the post-delivery existence confirmation.** `ln` returning 0 already
+  means the link exists, so no input reaches the branch. It is kept anyway, for
+  the reason DND-184 kept its own unreachable check: this facility exists
+  because *"it looked like it worked"* is the failure mode, and a send that
+  reports success with nothing at the destination is the worst instance of it a
+  sender can produce. It is **defence in depth, not a tested check**, and this
+  row is what says so.
+- **S20 — the manager's `write == read` guard.** `descriptor_validate` refuses
+  an entry whose `read` and `write` are equal, so the manager's copy cannot
+  fire through any registry entry a session can load. Kept because the
+  consequence of being wrong is total — every message sent would land in the
+  directory this session reads, so the sender would ingest its own outgoing
+  mail and the peer would never see any of it — and because it is the last
+  point before I/O at which both values are in scope. Same standing as S16.
+- **S27 — the ack's `fs_mkdir_0700`.** Written up with its row above: the form
+  difference is unobservable because the consumer lock has already created the
+  parent by the time an ack runs.
+
+---
+
 # DND-185 — `bin/inbox-wait`, the `.event` waiter
 
 Every mutation below was applied to a clean tree, measured, and reverted. A

@@ -194,6 +194,21 @@ across sessions — it is not a one-shot queue drain.
   entry is live (read-only); `--backup <file>` snapshots the current crontab to a
   local (gitignored) file. The committed installer is the canonical source, so
   the loop is always restorable even without the snapshot.
+- **Lead-time feedback loop.** The same cron also drives fleet **lead time**
+  (earliest branch commit → fully deployed) down over time. `ai/bin/lead-time`
+  derives it per ticket from git + the forge's CI (GitHub `gh` / GitLab `glab`,
+  auto-detected) — capturing nothing, so no agent has to remember a status; the
+  design and the rejected markers are in `ai/docs/lead-time-tracking.md`. Each
+  run scans `--slow 90` outliers newer than a second cursor (`lead-cursor.txt`),
+  splits each into `code` (start→merge, a harness/process lever) and `tail`
+  (merge→deploy, a pipeline-efficiency lever), and when a slow shape qualifies
+  spawns an **athena-architect** for a **safety-preserving** improvement. The
+  **hard constraint** is `ai/blocks/ops/safety-checks.md`, carried verbatim by
+  the shipwright/architect/admiral/captain: **make a safety check faster, never
+  weaker** — never drop, skip, downgrade, or path-exclude tests, linters, type
+  checks, scanners, coverage/mutation gates, deploy watchers, or review gates.
+  The shipwright applies harness changes to `~/dev/custom` and files product-repo
+  changes as Notion tickets for the fleet (it never touches a product repo).
 
 ## Hook registration (`~/.claude/settings.json` is not in git)
 

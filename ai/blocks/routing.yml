@@ -15,6 +15,7 @@ blocks:
   arch/access-control:        [architect, captain]
   ops/fleet-coordination:     [architect, admiral]
   ops/never-end-turn-waiting: [architect, captain, admiral, shipwright]
+  ops/safety-checks:          [architect, admiral, captain, shipwright]
 
 # Preloaded skills each agent must list in `skills:` frontmatter (deterministic
 # full-body preload). Empty for now; flaky-ticket-filing lands here next.

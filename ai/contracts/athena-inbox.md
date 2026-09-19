@@ -670,6 +670,7 @@ maildir  read dir     R/<namespace>/<read>/
                       R/<namespace>/<write>/.event  (my deliveries, and the
                                                      peer's acks of them)
          lock         R/<namespace>/<read>/.consumer.lock
+         sender lock  R/<namespace>/<write>/.sender.lock
 ```
 
 **A directory's `.event` means "this directory changed" — nothing narrower.**
@@ -1009,6 +1010,24 @@ lenient about what I receive.
 - **Exactly one writer per `write` directory per identity**, mirroring the
   `log` kind's one-writer rule. Two concurrent senders sharing an identity race
   on `<seq>` allocation, which is a read-then-create with no interlock.
+- **The write lock is `<write>/.sender.lock`, and it is NOT a consumer lock.**
+  *Message filename* requires a sender to hold "its `write` directory's lock"
+  across *scan, build name, deliver*, and left the file unnamed; this names it,
+  because an interop surface a peer cannot read about is one the peer will
+  implement differently. Two independent reasons fix the name:
+  - a writer MUST NOT create a `*.consumer.lock` anywhere under the root
+    (*Derived paths*, and the *Conformance checklist*) — those are the
+    reader's and the owner's;
+  - under the mirrored-declaration model **my `write` directory is the peer's
+    `read` directory**, so `<write>/.consumer.lock` is the lock the *peer*
+    takes to read and ack. A sender taking it would deny an ordinary peer read
+    and be denied by one — two correct operations blocking each other over a
+    lock neither is contending for.
+
+  It is held with `flock -n`, released by the kernel on close like every other
+  lock here, and its content is diagnostics that MUST NEVER be read to decide
+  availability (*The designated consumer*). Being a dotfile, it is excluded
+  from a reader's unread enumeration by the same rule that excludes `.event`.
 - Write into **`tmp/` inside the same directory you are delivering to**, then
   move it into place. A rename within one filesystem is atomic, so a reader
   never sees a partial file and never needs a lock or a size heuristic.
@@ -1601,13 +1620,23 @@ could.
 ## Conformance checklist
 
 **A writer is conformant when it:** writes only inside the root, at `0600` under
-`0700` directories, through `O_NOFOLLOW`; is the only writer of its path;
+`0700` directories — **every** directory it creates, not only the last
+component of a path it creates in one step — through `O_NOFOLLOW`; is the only
+writer of its path; holds `<write>/.sender.lock` (never a `*.consumer.lock`)
+across scan, build and deliver on a `maildir` channel;
 appends complete newline-terminated lines with `O_APPEND` (`log`) or renames out
 of `tmp/` in the same directory (`maildir`); bumps the doorbell **after** the
 data lands; never rewrites, truncates, rotates, or deletes; never creates a
-state file, a lock file, a rotated generation, or anything under `projects/`;
-puts no credential in a message; and stops permanently on a
+state file, a `*.consumer.lock`, a rotated generation, or anything under
+`projects/`; puts no credential in a message; and stops permanently on a
 partial write rather than resuming.
+
+**Later (2026-09-19):** this clause read "never creates a state file, **a lock
+file**, a rotated generation …", which a maildir sender cannot honour — it holds
+`<write>/.sender.lock` across scan/build/deliver (see *Writer obligations*). The
+prohibition is narrowed to a `*.consumer.lock`, matching *Derived paths*: the
+`*.consumer.lock` is the reader's and the owner's, never the writer's, but
+`.sender.lock` is exactly the writer's and is now named as such.
 
 **A reader is conformant when it:** resolves channels only from the registry
 entry matching its own repo identity — resolved against the session's cwd, and

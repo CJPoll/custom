@@ -827,6 +827,8 @@ carries it as Running/`In Progress` (L471-472); and DND-203's remediation was
 recorded done (L133) while the ticket stayed `Needs Attention`, assigned to
 Cody, still asking for it (L533).
 
+@include ops/safety-checks
+
 @include ops/never-end-turn-waiting
 
 - **Label assertion before the batch tail boards:** a batch where NO MR
