@@ -232,6 +232,12 @@ round-trips). Return a proposal that names the change, the repo it lands in, and
 the guarantee it preserves. Harness changes to `~/dev/custom` the shipwright
 applies; anything in a product repo you file as Notion tickets for the fleet.
 
+When the shipwright brings you a harness information-architecture problem — a
+block to shape, a definition to shrink, a mechanism split to design — the
+principles below govern the design you return.
+
+@include ops/harness-ia
+
 @include ops/safety-checks
 
 @include ops/never-end-turn-waiting
