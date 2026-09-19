@@ -1617,6 +1617,83 @@ could.
 
 ---
 
+## The diagnostic: `inbox-doctor`
+
+`ai/skills/athena:inbox/bin/inbox-doctor` is the owner-invoked, read-only
+liveness check for the whole chain. Where a reader answers "how much mail is
+waiting for THIS project", the doctor answers "is every link between Slack and a
+session actually up" — the one place that LOOKS at the client, its config, its
+cron, the tenancy registry and the server, rather than counting what happened to
+arrive. It exists because this chain fails by silence: a dead client and a quiet
+Slack are indistinguishable from inside a session, an unrouted event is dropped
+without a row, and a config override that names an instance the server never
+sends is looked up, missed, and delivered elsewhere with no error.
+
+**Four states, never three.** Every check reports `ok`, `warn`, `fail`, or
+`n-a`. `n-a` means the check COULD NOT RUN — no root, no `projects/`, no client
+config, a channel never provisioned, no API token — and it is **never counted as
+`ok`**. A diagnostic that printed `ok` because an input was missing would be the
+silence it exists to break, wearing a diagnostic's coat. The exit code is `0`
+unless some check is `fail`; a `warn` or an `n-a` alone never makes it non-zero.
+`--json` emits `{summary:{ok,warn,fail,na,healthy},findings:[…]}` for the
+SessionStart hook, which folds one rate-limited sentence into its own JSON object
+when the chain is anything worse than `ok`.
+
+**Read-only, absolutely.** The doctor never acks, advances an offset, rotates,
+sweeps, fixes a mode, or reaps a lock — a dead-pid `*.consumer.lock` is reported
+as **reapable** and left exactly where it is (`flock` released it at process
+death; nothing needs reaping). It prints no message body, subject, sender, or
+slug: the counts-only exemption a **prompted** tool has covers channel and
+registry FACTS (paths, modes, ages, instance names, inbox filenames), never
+message content.
+
+**It discharges the obligations this contract assigns a diagnostic**, which a
+drift check on the owner side deliberately does not — a check that runs unprompted
+must not enumerate `projects/`, but the tool someone runs to look may:
+
+- it reports **every skipped registry file by name with the reason** (*Finding
+  the entry*), both kinds — not-a-candidate and a-candidate-that-failed;
+- it reports a **`rotated_at` in the future** (a clock set back blocks rotation
+  indefinitely and is otherwise invisible), and a **`<channel>.jsonl.1` past its
+  14-day sweep window** — the residue a channel whose designated consumer never
+  runs again leaves behind, which the ack-path sweep structurally cannot reach
+  (*Retention → The sweep*);
+- it MAY report a **path/namespace collision** across registry entries
+  (*What tenancy does and does not guarantee*) — a diagnostic MAY, a refusal
+  still MUST NOT;
+- it reports, as an **informational** finding, a **live registry entry the
+  committed source of truth does not declare** (the installer merges at the
+  directory level, so the committed list can silently fall behind reality) and,
+  when the server is reachable, an agent instance with no route pointing at it —
+  neither is an error, and neither is ever deleted.
+
+  The committed list is consulted by invoking the tool that owns it
+  (`ai/inbox`'s `InboxRegistry`), never by the skill's reader libraries parsing
+  it — those read the LIVE registry only, and the seam that keeps the two homes
+  from drifting is that committed entries are validated by the skill's own
+  `descriptor_validate`, not a second copy of its rules. This prompted check is
+  the richer twin of the unprompted `ai/bin/check-inbox-registry`; neither
+  collapses into the other, because a diagnostic somebody has to think of running
+  is not a check that runs on every gate.
+
+**The silent-override cross-check** is the reason this tool exists. The client
+resolves a config override **by the instance name the server sends**, so a
+config `instances` key that matches no live instance is never looked up and its
+override is inert. With a server token configured, the doctor therefore checks:
+every config `instances` key matches a live instance name (unmatched is a
+**warning** naming both sides); every override's `inbox` equals the server's
+`inbox_name` for that instance (a mismatch is an **error**, because deliveries
+land where the descriptor does not point); and every live `inbox_name` is claimed
+by some registry entry (unclaimed means mail written to a file no session
+consumes).
+
+**The server check is optional and opts out silently.** With no API token
+configured it is `n-a`, not `fail` — an opt-out, not a breakage. When enabled it
+reads `GET /api/machines/:id/health` (DND-192) for the connection verdict and
+per-instance `undelivered`/`last_delivered_at`; the token reaches `curl` only
+through a `umask 077` config file as an `Authorization` header, never in argv and
+never logged, and the doctor mints, stores, and mutates nothing.
+
 ## Conformance checklist
 
 **A writer is conformant when it:** writes only inside the root, at `0600` under

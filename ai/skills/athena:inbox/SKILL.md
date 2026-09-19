@@ -17,8 +17,9 @@ sitting in, and how many are unread.
 
 **Status: every command described here exists.** `bin/inbox-status` (counting,
 DND-183), `bin/read-inbox` (read + ack + the consumer lock, DND-184),
-`bin/inbox-wait` (the doorbell waiter, DND-185) and `bin/send-mail` (the
-writer's half of a maildir channel, DND-187) all work.
+`bin/inbox-wait` (the doorbell waiter, DND-185), `bin/send-mail` (the
+writer's half of a maildir channel, DND-187) and `bin/inbox-doctor` (the
+read-only chain-liveness diagnostic, DND-190) all work.
 
 **Later (2026-09-19):** this paragraph, and the `description` in the
 frontmatter above, previously said `inbox-wait` and then `send-mail` did
@@ -348,6 +349,43 @@ entry, or an entry declaring no channels, is refused immediately with a `Fix:`
 clause. Blocking on nothing and waiting quietly for mail are indistinguishable
 from the outside, and only one of them is working.
 
+### `bin/inbox-doctor`
+
+```
+inbox-doctor            human-readable report, one line per link
+inbox-doctor --json     the same findings as one object (for the SessionStart hook)
+```
+
+The one tool that LOOKS at every link rather than counting what arrived: the
+client and its supervisor, the config, the cron, the tenancy registry, and — when
+a token is configured — the server. Run it when a channel is silent and you need
+to know whether the silence is "nothing arrived" or "a link is down". It is
+read-only: it never acks, rotates, sweeps, fixes a mode, or reaps a lock, and it
+prints only channel and registry FACTS, never a message body.
+
+**Four states, and `n-a` is not `ok`.** Each check reports `ok` / `warn` /
+`fail` / `n-a`. `n-a` means the check could not run — no root, no `projects/`, no
+client config, a channel never provisioned, no API token — and it is never folded
+into `ok`. The exit code is `0` unless something is `fail`; a `warn` or an `n-a`
+alone keeps it `0`.
+
+**The silent-override check is why it exists.** The client resolves a config
+`instances` override by the instance name the server sends, so a key that matches
+no live instance is never looked up and its override is inert, with no error
+anywhere. With a server token configured, the doctor cross-checks the config
+against the server's live instances and flags exactly that.
+
+**The server check is opt-in.** Set `ATHENA_INBOX_DOCTOR_API_BASE`,
+`ATHENA_INBOX_DOCTOR_MACHINE_ID` and `ATHENA_INBOX_DOCTOR_API_TOKEN_FILE` (a 0600
+file holding a user API token) to enable it; without them it is `n-a`, not a
+failure. The token reaches `curl` only through a `umask 077` config file, never
+in argv and never logged. The doctor mints and stores nothing.
+
+The SessionStart hook runs `inbox-doctor --json` and, when the chain is worse
+than `ok`, folds one rate-limited sentence into its notice; set
+`ATHENA_INBOX_DOCTOR_LINE=0` to opt out of that line (the command still works by
+hand).
+
 ## Writing on a maildir channel
 
 The mechanics are one half; these are the other, and they are what the two
@@ -390,8 +428,8 @@ agents on the live channel did by hand for fifty-one messages.
 |---|---|
 | Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` |
 | Side effects | `lib/fs.sh` (the only file I/O, and the only `git` call) · `lib/lock.sh` · `lib/session.sh` |
-| Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes |
-| Framework | `bin/inbox-status` · `bin/read-inbox` |
+| Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes · `lib/doctor.sh` — the chain-liveness checks (pure `doctor_state_*` decisions over probed facts) |
+| Framework | `bin/inbox-status` · `bin/read-inbox` · `bin/inbox-doctor` |
 
 The domain files take strings and return strings. That is what makes the
 counting and parsing rules provable with no fixtures on disk, which is the
