@@ -57,9 +57,36 @@ trap cleanup EXIT INT TERM
 # the class of defect the guard catches -- the suite leaking a write to real
 # marker state -- would land under the real $HOME and trip the RETAINED markers
 # (the per-project success/warn/health family under athena-inbox-seen, and
-# settings.json), because a HOME leak hits every marker, not only the two
-# globals. The two excluded files are exactly the ones a legitimate concurrent
-# process updates on every run, so keeping them only measured the neighbour.
+# settings.json). The two excluded files are exactly the ones a legitimate
+# concurrent process updates on every run, so keeping them only measured the
+# neighbour.
+#
+# WHY EXCLUDING THESE TWO IS NOT A WEAKENING (the doctrine's behavioural test:
+# is the same class of defect -- the suite mutating real rate-limit state --
+# still caught, and does it still block?). Yes, and by a STRICTLY stronger guard:
+#   1. EVERY hook invocation in this suite is preceded by assert_fake_home: the
+#      two wrappers run_hook (line ~152) and run_stub_hook (line ~237) call it
+#      first, and the one direct invocation (the FIFO/bounded-stdin case) calls
+#      it on the line above the run. assert_fake_home hard-exits (the whole suite
+#      FAILS) unless $HOME is a tmpdir and != the real HOME. Grep confirms there
+#      is no other path to ${HOOK}/${STUB_HOOK}.
+#   2. The hook only ever writes under ${HOME}/.claude (MARKER_DIR, hook:186);
+#      there is no absolute real-HOME path anywhere in it.
+#   So a leak to the real markers CANNOT happen without assert_fake_home aborting
+#   first -- the primary guard is comprehensive (every marker, incl. these two)
+#   and fires before any write. The `assert_fake_home hard-exits ...` case below
+#   proves that guard actually fails the suite; that is what protects real state.
+# The fingerprint is only a redundant backstop, and on THESE TWO files it is a
+# useless one: a legitimate concurrent real SessionStart hook stamps the poll
+# marker and appends to the log on EVERY run (hook:266 stamps the attempt marker
+# unconditionally, before any branch), and its bytes are indistinguishable from
+# what a (impossible, per above) suite leak would write to the same files -- so
+# watching them could never ATTRIBUTE a change to the suite, only flake on the
+# neighbour (measured 2026-09-19: a real hook raced the slower DND-190 suite and
+# false-failed this guard). The retained markers (the per-project family under
+# athena-inbox-seen, the legacy $HOME fallbacks, settings.json) keep the backstop
+# for the create/remove case; the two excluded globals gave it zero attributable
+# signal and only a false-positive, so removing them subtracts no coverage.
 real_markers_fingerprint() {
   local f
   for f in athena-inbox-last-success athena-inbox-last-warn \
@@ -1471,6 +1498,16 @@ assert_contains "doctor could-not-run: the count line still shows" "new in" "${C
 assert_contains "doctor could-not-run: a reason is logged" "no usable --json" "$(hook_log)"
 
 unset ATHENA_INBOX_REGISTRY ATHENA_INBOX_DOCTOR_CRON_CHECK ATHENA_INBOX_CLIENT_STATE_DIR ATHENA_INBOX_CLIENT_CONFIG ATHENA_INBOX_DOCTOR_LINE
+
+# The PRIMARY guard against a real-$HOME leak: assert_fake_home hard-exits when
+# $HOME is not a fresh tmpdir. This is what actually protects the real markers
+# (the fingerprint below is only a redundant backstop, per its own comment), so
+# prove it fails the run rather than trusting the comment. A subshell with $HOME
+# forced to a non-tmpdir, and again to the real $HOME, must both exit non-zero.
+( HOME="/etc"; assert_fake_home ) >/dev/null 2>&1
+assert_eq "assert_fake_home hard-exits when \$HOME is not a tmpdir" "1" "$?"
+( HOME="${REAL_HOME}"; assert_fake_home ) >/dev/null 2>&1
+assert_eq "assert_fake_home hard-exits when \$HOME is the real HOME" "1" "$?"
 
 # The real HOME was never a target — by fingerprint, not by inspection.
 HOME="${REAL_HOME}"

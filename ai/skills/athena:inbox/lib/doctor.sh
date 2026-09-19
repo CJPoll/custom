@@ -317,7 +317,11 @@ doctor_check_skipped_files() {
   [ -d "${dir}" ] || return 0
 
   for f in "${dir}"/* "${dir}"/.*; do
-    [ -e "${f}" ] || continue
+    # `-e` FOLLOWS symlinks, so a dangling symlink (entry pointing at a deleted
+    # target) is false here and would be skipped silently -- the "a failed
+    # lookup must never look like an empty one" trap. `-L` catches it as a
+    # present-but-broken entry so the `[ -L ]` branch below reports it by name.
+    [ -e "${f}" ] || [ -L "${f}" ] || continue
     base="${f##*/}"
     case "${base}" in .|..) continue ;; esac
     # A well-formed, parseable, repo-bearing *.json is a usable entry -- not a
@@ -396,7 +400,7 @@ doctor_check_undeclared_live() {
   [ -d "${dir}" ] || return 0
   if ! declared="$(doctor_declared_files)"; then
     doctor_finding na "undeclared-entry" "cannot consult the committed registry list, so live entries cannot be reconciled against it" \
-      "run ai/bin/check-inbox-registry from the main checkout (it owns the committed source of truth); this cross-check needs ruby and ai/inbox/registry.rb."
+      "run ai/bin/check-inbox-registry from the main checkout (it owns the committed source of truth); this cross-check needs ruby and ai/inbox/lib/registry.rb."
     return 0
   fi
   local f

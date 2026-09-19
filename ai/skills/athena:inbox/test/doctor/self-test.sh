@@ -135,11 +135,13 @@ printf '{}' > "${P}/UpperCase.json"   # stem fails ^[a-z0-9]... -> not a candida
 ln -s /etc/hosts "${P}/linked.json"               # symlink candidate
 printf '{ this is not json' > "${P}/broken.json"  # unterminated JSON (SABOTAGE)
 printf '{"v":1,"channels":{}}' > "${P}/norepo.json" # candidate, no repo
+ln -s "${TMP}/does-not-exist" "${P}/dangling.json" # DANGLING symlink candidate -- -e is false, must not be skipped silently
 printf '{"v":1,"repo":"/x/.git","channels":{}}' > "${P}/good.json"; chmod 600 "${P}/good.json"
 SK="$(doctor_check_skipped_files)"
 assert_finding "backup named (informational stray-file)" "${SK}" warn stray-file "walt_ui.json.bak"
 assert_finding "bad-stem .json named (informational stray-file)" "${SK}" warn stray-file "UpperCase.json"
 assert_finding "symlink entry fail"  "${SK}" fail skipped-file "linked.json"
+assert_finding "dangling symlink entry fail (not skipped)" "${SK}" fail skipped-file "dangling.json"
 assert_finding "unterminated json fail" "${SK}" fail skipped-file "broken.json"
 assert_finding "no-repo candidate fail" "${SK}" fail skipped-file "norepo.json"
 # a clean projects/ reports ok
@@ -374,6 +376,30 @@ JHC="$(cd "${RH}" && ATHENA_INBOX_REGISTRY="${DECLHC}" ATHENA_INBOX_CLIENT_CONFI
 assert_eq "collision present" true "$(printf '%s' "${JHC}" | jq -r '[.findings[]|select(.check=="collision" and .state=="warn")]|length >= 1')"
 assert_eq "collision flips healthy to false" false "$(printf '%s' "${JHC}" | jq -r '.summary.healthy')"
 assert_eq "collision is not in the info bucket" 0 "$(printf '%s' "${JHC}" | jq -r '.summary.info')"
+
+# ============================================================================
+echo "== repo-root resolves through a symlinked skills dir (bin uses -P) =="
+# SKILL.md tells a session to run the tool from ~/.claude/skills/athena:inbox/bin,
+# and ~/.claude/skills is a symlink to ~/dev/custom/ai/skills. The bin must
+# resolve its OWN real location (cd -P / pwd -P) so DOCTOR_REPO_DIR is the repo,
+# not $HOME. With a plain `cd && pwd`, `bin/../../../..` walks the symlinked path
+# and lands in $HOME, so doctor_check_undeclared_live goes `na "cannot consult
+# the committed registry list"` on a wrongly computed root -- the
+# missing-looks-empty trap. We invoke through a symlink that replaces the
+# `skills` segment, with DOCTOR_REPO_DIR UNSET so the bin must compute it.
+if command -v ruby >/dev/null 2>&1 && [ -f "${REPO}/ai/inbox/lib/registry.rb" ]; then
+  export ATHENA_INBOX_ROOT="${TMP}/slroot"; mkdir -p -m 700 "${ATHENA_INBOX_ROOT}/projects"; chmod 700 "${ATHENA_INBOX_ROOT}"
+  SLINK="${TMP}/skills"; ln -sfn "${REPO}/ai/skills" "${SLINK}"
+  SLCOMMIT="${TMP}/sl-committed.json"; printf '{"v":1,"projects":[]}' > "${SLCOMMIT}"
+  SLOUT="$( env -u DOCTOR_REPO_DIR ATHENA_INBOX_REGISTRY="${SLCOMMIT}" ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" bash "${SLINK}/athena:inbox/bin/inbox-doctor" --json --no-server 2>/dev/null )"
+  assert_not_contains "symlinked-skills run: root resolved (no 'cannot consult' na)" \
+    "cannot consult the committed registry list" "${SLOUT}"
+  assert_eq "symlinked-skills run: undeclared-entry is not na (declared list was consulted)" 0 \
+    "$(printf '%s' "${SLOUT}" | jq -r '[.findings[]|select(.check=="undeclared-entry" and .state=="na")]|length')"
+  export DOCTOR_REPO_DIR="${REPO}"
+else
+  ok "symlinked-skills root test skipped (no ruby or no registry.rb in this checkout)"
+fi
 
 printf '\n'
 if [ "${FAIL}" -eq 0 ]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0

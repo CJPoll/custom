@@ -599,7 +599,7 @@ DOCTOR_HEALTHY=""
 if [ "${DOCTOR_LINE_ENABLED}" -eq 1 ] && [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 1 ] && [ -x "${DOCTOR_BIN}" ]; then
   DOCTOR_JSON="$(timeout "${STATUS_TIMEOUT_SECONDS}" "${DOCTOR_BIN}" --json --no-server 2>/dev/null)"
   if [ -n "${DOCTOR_JSON}" ] \
-     && printf '%s' "${DOCTOR_JSON}" | jq -e 'type == "object" and (.summary | type == "object")' >/dev/null 2>&1; then
+     && printf '%s' "${DOCTOR_JSON}" | jq -e 'type == "object" and (.summary | type == "object") and (.summary.healthy | type == "boolean")' >/dev/null 2>&1; then
     if printf '%s' "${DOCTOR_JSON}" | jq -e '.summary.healthy == false' >/dev/null 2>&1; then
       # The reason is fixed and chosen from the WORST state only -- a fail reads
       # differently from a warn, and neither names the link (that is the

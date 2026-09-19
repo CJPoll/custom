@@ -38,12 +38,19 @@
 #--- end usage ---
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# `-P` resolves symlinked path segments. SKILL.md tells a session to run this
+# tool from ~/.claude/skills/athena:inbox/bin, and ~/.claude/skills is a symlink
+# to ~/dev/custom/ai/skills. Without `-P`, `bin/../../../..` walks the symlinked
+# path and lands in $HOME, not the repo -- so doctor_check_cron and
+# doctor_check_undeclared_live would go `na` on a wrongly computed root and blame
+# the wrong thing (the missing-looks-empty trap). Resolving to the real path
+# makes the repo root correct from either the symlink or the real location.
+HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 LIB="$(dirname "${HERE}")/lib"
 # The repo root: bin -> athena:inbox -> skills -> ai -> <repo>. Handed to
 # doctor.sh so it can find the cron installer and the committed registry list
 # WITHOUT the skill libraries themselves knowing either exists (RULE C).
-DOCTOR_REPO_DIR="$(cd "${HERE}/../../../.." && pwd)"
+DOCTOR_REPO_DIR="$(cd -P "${HERE}/../../../.." && pwd -P)"
 export DOCTOR_REPO_DIR
 
 # shellcheck source=/dev/null

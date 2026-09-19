@@ -1530,3 +1530,40 @@ lock side.
 | # | Mutation | Case that reddened | What it proves |
 |---|---|---|---|
 | S7 | `bin/inbox-doctor` `count_state`: fold `na` into the `ok` tally (`$1==s \|\| ($1=="na" && s=="ok")`) | `summary.ok equals the ok-findings tally` | the ticket's crux -- `na` is never counted as `ok`. The original assertion (`state=="ok" and state=="na"`) was a tautology and caught nothing; the replacement compares `summary.ok`/`summary.na` against the actual per-state finding tallies, and reddens the moment a count folds one state into another. |
+
+### Added on the round-9 critic's finding (dangling-symlink skip)
+
+A dangling symlink registry entry (`<name>.json -> deleted target`) was silently
+skipped by the `[ -e "${f}" ] || continue` loop head in BOTH
+`doctor_check_skipped_files` (`lib/doctor.sh`) and `fs_registry_records`
+(`lib/fs.sh`), because `-e` follows the link and is false for a broken one. So a
+broken entry counted as nothing: the doctor reported `ok skipped-file "every file
+… is a usable registry entry"` and `inbox_channels` reported zero channels
+("not opted in") -- a failed lookup masquerading as an empty one, the exact class
+this ticket exists to prevent.
+
+| # | Mutation / input class | Case that reddened | What it proves |
+|---|---|---|---|
+| S8 | revert the `\|\| [ -L "${f}" ]` guard in `doctor_check_skipped_files` | `dangling symlink entry fail (not skipped)` | the doctor names a dangling-symlink entry as a `fail skipped-file`, never swallows it into a false `ok`. |
+| S9 | revert the `\|\| [ -L "${file}" ]` guard in `fs_registry_records` | `a DANGLING SYMLINK registry file is a failed candidate, not silent zero` | `inbox_channels` refuses (failed candidate, no match) instead of reporting a well-formed zero. |
+
+Both mutations were applied by editing the source in place, the suites run red
+(each 1 failed), then the source restored from an in-memory byte copy (never
+`git checkout` over the working tree) and both suites returned to green
+(doctor 92, status 705).
+
+### Added on the round-10 critic's findings (symlinked repo-root + primary-guard proof)
+
+| # | Mutation | Case that reddened | What it proves |
+|---|---|---|---|
+| S10 | `bin/inbox-doctor`: revert `cd -P … && pwd -P` back to `cd … && pwd` in both `HERE` and `DOCTOR_REPO_DIR` | `symlinked-skills run: root resolved (no 'cannot consult' na)` + `undeclared-entry is not na` | run through a `skills`-segment symlink (as SKILL.md instructs), the bin resolves its own real location so `DOCTOR_REPO_DIR` is the repo, not `$HOME`; without `-P`, `undeclared-live` goes `na "cannot consult"` on a wrongly computed root (missing-looks-empty). |
+
+Round 10 also converted the hook self-test's real-`$HOME` leak guard from an
+implicit backstop to an explicit, tested one: two new cases assert
+`assert_fake_home` hard-exits when `$HOME` is not a fresh tmpdir and when it is
+the real `$HOME`. That is the PRIMARY guard against a real-marker leak (it runs
+before every hook invocation and covers every marker, including the two globals
+the fingerprint excludes); the exclusion of the two globals from the fingerprint
+is therefore not a coverage loss -- see the rationale block above
+`real_markers_fingerprint`. S10 restored from an in-memory byte copy; doctor
+returned to green (94).
