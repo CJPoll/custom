@@ -137,7 +137,7 @@ KIND="$(printf '%s\n' "${RESOLVED}" | awk -F'\t' '$1=="kind"{print $2; exit}')"
 if [ "${PEEK}" -eq 0 ]; then
   case "${KIND}" in
     log)     LOCK="$(printf '%s\n' "${RESOLVED}" | awk -F'\t' '$1=="lock"{print $2; exit}')" ;;
-    maildir) LOCK="$(printf '%s\n' "${RESOLVED}" | awk -F'\t' '$1=="read_dir"{print $2; exit}')/.consumer.lock" ;;
+    maildir) LOCK="$(printf '%s\n' "${RESOLVED}" | awk -F'\t' '$1=="lock"{print $2; exit}')" ;;
     *)       LOCK="" ;;
   esac
   [ -n "${LOCK}" ] || { inbox_fail "channel \"${CHANNEL}\" has a kind this reader cannot ack" \

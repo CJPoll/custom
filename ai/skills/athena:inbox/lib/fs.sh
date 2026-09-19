@@ -443,6 +443,17 @@ fs_bump_doorbell() {
 fs_maildir_ack() {
   local read_dir="$1" name="$2" ack_dir="$3" src="$1/$2" dst
 
+  # The grammar is re-checked HERE, not only in the manager that calls this.
+  # The manager does validate today, but this function takes a bare name and
+  # joins it onto a directory: a primitive that is safe only because of its
+  # current caller is not safe, and the next caller inherits nothing. Same
+  # reasoning as logchan_scan re-validating its own offset.
+  if ! maildir_valid_message_name "${name}"; then
+    inbox_fail "refusing to move a message whose filename does not match the contract's grammar" \
+      'a message filename is <YYYYMMDD>T<HHMMSS>Z-<seq>-<slug>.md; a name from another party is data, never a path.'
+    return 1
+  fi
+
   fs_assert_not_symlink "${read_dir}" || return 1
   if [ ! -f "${src}" ] || [ -L "${src}" ]; then
     inbox_fail "there is no such message to ack in this channel's read directory" \

@@ -717,9 +717,10 @@ inbox_ack_message() {
   identity="$(_inbox_path identity "${resolved}")"
   fs_assert_contained "$(fs_inbox_root)" "${read_dir}" || return 1
 
-  # The lock lives beside the channel; for a maildir it is derived from the
-  # read directory, so the two directions of one conversation lock separately.
-  lock="${read_dir}/.consumer.lock"
+  # The lock lives beside the channel; for a maildir it sits in the read
+  # directory, so the two directions of one conversation lock separately.
+  # Resolved, not re-derived -- see descriptor_resolve.
+  lock="$(_inbox_path lock "${resolved}")"
   inbox_require_consumer "${lock}" "channel \"${chan}\"" "${hook_json}" || return 1
 
   content="$(fs_read_message "${read_dir}/${name}")" || {

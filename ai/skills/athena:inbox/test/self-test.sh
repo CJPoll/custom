@@ -1792,13 +1792,34 @@ assert_refused "M-12 acking my own message by name is refused outright" \
 # refused before any I/O.
 assert_refused "A-3 a message name carrying a traversal is refused before any I/O" \
   try_in "${MPROJ}" inbox_ack_message mail "../../../etc/passwd" "."
+# THE ADAPTER'S OWN COPY, called directly. Through the manager the refusal
+# above comes from the manager's check, so the adapter's re-check is shadowed
+# and the sabotage run measured a ZERO for it. The re-check exists precisely
+# because the NEXT caller inherits nothing from this one -- so it is asserted
+# against a direct call rather than trusted to be there.
+# The fixture is a file that EXISTS and is grammatically invalid. A traversal
+# name would be refused by the "no such message" branch instead, so the case
+# would pass with the grammar check deleted -- proving nothing. (That is
+# exactly what the first attempt measured: a zero.)
+printf 'not a conformant message\n' > "${MDIR}/notes.md"
+assert_refused "A-3 fs_maildir_ack re-checks the grammar itself, for the next caller" \
+  fs_maildir_ack "${MDIR}" "notes.md" "${MDIR}/.acked"
+assert_eq "A-3 and the non-conformant file is left where it was" "1" \
+  "$(ls "${MDIR}/notes.md" | wc -l | tr -d ' ')"
 
 # I-6 / A-5: a `.jsonl` replaced by a SYMLINK. Refused -- the mode and
 # ownership you checked are not the ones you read, and `realpath` cannot catch
 # it because it FOLLOWS symlinks.
+# THE TARGET IS INSIDE THE ROOT, deliberately. Pointed OUTSIDE it, this case
+# passes on the CONTAINMENT check alone and proves nothing about the symlink
+# defence -- which is exactly what the sabotage run measured: disabling the
+# ack path's fs_assert_regular reddened NOTHING until this fixture moved.
+# `realpath` FOLLOWS symlinks, so a link inside the root pointing inside the
+# root is contained and is still a redirect; only the lstat catches it. Same
+# shape as DND-183's S11.
 setup_log_case
-mv "${LINBOX}" "${CASE_DIR}/elsewhere.jsonl"
-ln -s "${CASE_DIR}/elsewhere.jsonl" "${LINBOX}"
+mv "${LINBOX}" "${ATHENA_INBOX_ROOT}/elsewhere.jsonl"
+ln -s "${ATHENA_INBOX_ROOT}/elsewhere.jsonl" "${LINBOX}"
 assert_refused "I-6/A-5 a symlinked .jsonl is refused on read" \
   try_in "${LPROJ}" inbox_read_json slack "."
 assert_refused "I-6/A-5 a symlinked .jsonl is refused on ack too" \
@@ -1807,12 +1828,21 @@ assert_refused "I-6/A-5 a symlinked .jsonl is refused on ack too" \
 # I-7 / A-5: a symlinked `.state.json`. Without the lstat, the state write
 # follows the link and lands wherever it points.
 setup_log_case
-printf '{}' > "${CASE_DIR}/elsewhere.state.json"
-ln -s "${CASE_DIR}/elsewhere.state.json" "${LSTATE}"
+printf '{}' > "${ATHENA_INBOX_ROOT}/elsewhere.state.json"
+ln -s "${ATHENA_INBOX_ROOT}/elsewhere.state.json" "${LSTATE}"
 assert_refused "I-7/A-5 a symlinked .state.json is refused on the state write" \
   try_in "${LPROJ}" inbox_ack_log slack 10 "" "" "."
 assert_eq "I-7/A-5 and the link target is left untouched" "{}" \
-  "$(cat "${CASE_DIR}/elsewhere.state.json")"
+  "$(cat "${ATHENA_INBOX_ROOT}/elsewhere.state.json")"
+# THE WRITER'S OWN CHECK, exercised directly. Through the ack the refusal
+# above comes from the state READ, which reaches the link first -- so the
+# write-side defence was shadowed and the sabotage run measured a ZERO for it.
+# A check whose only proof is another check firing first is not proven: the
+# read could be reordered, or a future caller could write without reading.
+assert_refused "I-7/A-5 fs_write_state itself refuses a symlinked target" \
+  fs_write_state "${LSTATE}" '{"v":1,"offset":7}'
+assert_eq "I-7/A-5 and it wrote nothing through the link" "{}" \
+  "$(cat "${ATHENA_INBOX_ROOT}/elsewhere.state.json")"
 # The lock file gets the same defence: `exec 9>` follows a symlink and would
 # lock -- then rewrite -- a file somewhere else entirely.
 setup_log_case
@@ -1856,6 +1886,42 @@ RPROJ2="$(make_repo rproj2)"
 register rproj2 "${RPROJ2}" '{"sneaky":{"kind":"log","path":"projects/rproj2.jsonl"}}'
 assert_refused "a log channel whose path resolves inside projects/ is refused on read" \
   try_in "${RPROJ2}" inbox_read_json sneaky "."
+
+# A PEER-CHOSEN DEDUPE KEY CANNOT INJECT A SECOND SEEN-SET ENTRY.
+#
+# The seen-sets travel as newline-delimited lists, and `event_id` is written by
+# whoever wrote the line. Without the guard, "event_id":"a\nEv-victim" adds
+# `Ev-victim` to the seen-set, and the next GENUINE message carrying that id is
+# suppressed as already-seen -- message loss chosen by the sender, reported
+# nowhere. Third instance of one class in this skill (a tab in a registry
+# filename; a tab in a channel path; this).
+SCAN="$(printf '{"v":1,"ts":"1","channel":"D1","event_id":"a\\nEv-victim"}\n' | logchan_scan 0 1 "" "")"
+assert_not_contains "a poisoned event_id never reaches the seen-set or the messages list" \
+  "Ev-victim" "${SCAN}"
+# THE BAD KEY IS DISCARDED, THE MESSAGE IS NOT. This line still has a clean
+# channel:ts key, so it is still delivered on that -- dropping the message
+# would let a sender suppress its OWN message by malforming one field, which
+# is the same silent loss from the other direction.
+assert_eq "the line is still delivered on its clean channel:ts key" "1" \
+  "$(jq -r '.new' <<<"${SCAN}")"
+assert_eq "and it carries no event_id at all rather than the poisoned one" "" \
+  "$(jq -r '.messages[0].event_id' <<<"${SCAN}")"
+# The tab spelling of the same attack, because the resolve protocol is
+# tab-delimited and the two travel together.
+SCAN="$(printf '{"v":1,"ts":"1","channel":"D1","event_id":"a\\tb"}\n' | logchan_scan 0 1 "" "")"
+assert_eq "a dedupe key carrying a tab is discarded the same way" "" \
+  "$(jq -r '.messages[0].event_id' <<<"${SCAN}")"
+# BOTH keys poisoned: there is now no usable key at all, so the line falls
+# through to the branch that already existed for a line carrying neither --
+# counting it would mean deduping on nothing and re-reporting it forever.
+SCAN="$(printf '{"v":1,"ts":"1\\nx","channel":"D1","event_id":"a\\nb"}\n' | logchan_scan 0 1 "" "")"
+assert_eq "a line with NO usable key is unreadable, not deduped on nothing" "1" \
+  "$(jq -r '.unreadable' <<<"${SCAN}")"
+assert_eq "and it is not counted as new" "0" "$(jq -r '.new' <<<"${SCAN}")"
+# The clean case, so the guard is not quietly rejecting everything.
+SCAN="$(printf '{"v":1,"ts":"1","channel":"D1","event_id":"Ev-clean"}\n' | logchan_scan 0 1 "" "")"
+assert_eq "an ordinary event_id is still usable (the guard is not a blanket reject)" "Ev-clean" \
+  "$(jq -r '.messages[0].event_id' <<<"${SCAN}")"
 
 echo
 echo "== DND-184 / 8. A-10: no token ever reaches the read output =="

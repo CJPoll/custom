@@ -125,10 +125,34 @@ logchan_scan() {
             # it is `Cannot index object with number` -- a jq FATAL that aborts
             # the scan of every remaining line in the slice. A malformed line
             # must cost one `unreadable`, never the whole channel.
+            # A DEDUPE KEY CARRYING A NEWLINE OR TAB IS NOT A KEY.
+            #
+            # The seen-sets travel as NEWLINE-delimited lists (see
+            # logchan_ring_append) and these fields are PEER-CONTROLLED: a line
+            # with "event_id":"a\nEv-victim" would inject a SECOND entry into
+            # the seen-set, and the next genuine message carrying `Ev-victim`
+            # would be silently suppressed as already-seen. That is message
+            # loss chosen by the sender, with nothing reported anywhere.
+            #
+            # This is the third instance of one class in this skill -- the
+            # first was a tab in a registry FILENAME shifting the JSON out of
+            # the record emitted by fs_registry_records, the second a tab in a channel
+            # `path` colliding with the `<label>\t<path>` resolve protocol
+            # (both fixed on main). The lesson recorded there was to grep for
+            # every other place the protocol is used rather than patch the
+            # instance; this is the result of that grep.
+            #
+            # Such a key is DISCARDED rather than sanitised, and a line left
+            # with no usable key falls through to the `unreadable` branch
+            # below -- the same treatment as a line carrying no key at all,
+            # for the same reason: deduping on nothing means re-reporting
+            # forever, and a rule that says so once should not grow a second
+            # spelling.
+            def usable: if type == "string" and (test("[\n\t]") | not) then . else null end;
             (if ($o.channel // "") != "" and ($o.ts // "") != ""
-             then "\($o.channel):\($o.ts)" else null end) as $key
+             then ("\($o.channel):\($o.ts)" | usable) else null end) as $key
             | (if ($o.event_id | type) == "null" then null
-               else ($o.event_id | tostring) end) as $eid
+               else ($o.event_id | tostring | usable) end) as $eid
             | if $eid == null and $key == null then
                 # A line carrying NEITHER key cannot be deduped, so counting it
                 # would mean deduping on nothing and re-reporting it forever.

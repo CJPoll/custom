@@ -368,6 +368,12 @@ descriptor_resolve() {
       printf 'read_dir\t%s/%s\n'  "${base}" "$(descriptor_channel_field "${doc}" "${chan}" read)"
       printf 'write_dir\t%s/%s\n' "${base}" "$(descriptor_channel_field "${doc}" "${chan}" write)"
       printf 'ack_dir\t%s/%s/.acked\n' "${base}" "$(descriptor_channel_field "${doc}" "${chan}" read)"
+      # Derived HERE, once. It was previously spelled out in both the ack
+      # manager and bin/read-inbox: two copies of a path that must be the same
+      # file, where a divergence would mean the reader takes one lock and the
+      # acker takes another, and the mutual exclusion the lock exists for
+      # quietly stops existing.
+      printf 'lock\t%s/%s/.consumer.lock\n' "${base}" "$(descriptor_channel_field "${doc}" "${chan}" read)"
       printf 'identity\t%s\n' "$(descriptor_channel_field "${doc}" "${chan}" identity)"
       ;;
   esac
