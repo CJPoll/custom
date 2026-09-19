@@ -243,3 +243,122 @@ SessionStart hook (F-1…F-12, A-9, A-10).
 `maildir.sh` here contains exactly one function — the unread filter — because
 `bin/inbox-status` cannot produce an honest count for a maildir channel
 without it. Its header says so.
+
+---
+
+## 2026-09-18 — DND-184, read-inbox, ack, and the consumer lock
+
+- **Domain:** the Athena Inbox read/ack path (`ai/contracts/athena-inbox.md`
+  → *The designated consumer*, *Untrusted input*, *Lifetimes*)
+- **Date:** 2026-09-18
+- **Code under test:** `lib/fence.sh`, `lib/lock.sh`, `lib/session.sh`, the
+  retention predicates in `lib/logchan.sh`, the maildir grammar and frontmatter
+  rules in `lib/maildir.sh`, the ack/gate/sweep managers in `lib/inbox.sh`,
+  `bin/read-inbox`
+- **Suite run:** `bash ai/skills/athena:inbox/test/self-test.sh` (no network;
+  inbox root always a `mktemp -d`; the live delivery path is never touched)
+- **Baseline:** `VERDICT: PASS (393 cases)` — 373 at the start of this run,
+  379 after two measured zeros were closed, 381 after a retention boundary,
+  393 after the missing-input sweep.
+- **Runner:** same discipline as DND-208 — every mutation an exact-substring
+  replace that asserts the anchor occurs **exactly once** before writing, and
+  a restore by `cp` from a backup taken before the run.
+
+### Mutations
+
+| # | Mutation | Cases reddened | First failure |
+|---|---|---|---|
+| T1 | `lock.sh`: `flock -n` in `acquire` always succeeds | 5 | `FAIL  M-2/A-6 a non-holder's ack exits non-zero` |
+| T2 | `inbox.sh`: the subagent check removed from the consumer gate | 4 | `FAIL  M-4/A-7 a subagent's ack is refused (CLAUDE_AGENT_TYPE)` |
+| T3 | `inbox.sh`: the gate never acquires the lock | 6 | `FAIL  M-2/A-6 a non-holder's ack exits non-zero` |
+| T4 | `session.sh`: the `CLAUDE_AGENT_*` env signal ignored | 5 | `FAIL  M-4/A-7 a subagent's ack is refused (CLAUDE_AGENT_TYPE)` |
+| T5 | `lock.sh`: a second channel's lock allowed while one is held | **0 → 3** | see *Measured zeros* |
+| T6 | `lock.sh`: a symlinked `.consumer.lock` accepted | 1 | `FAIL  A-5 a symlinked .consumer.lock is refused before flock` |
+| T7 | `lock.sh`: `flock -n` in `try` always succeeds (count-path sweep steals) | 1 | `FAIL  R-8 a non-holder does not sweep another session's evidence` |
+| T8 | `fence.sh`: the generated-nonce attempt ceiling removed | **0 → 2** | see *Measured zeros* |
+| T9 | `fence.sh`: the caller-supplied-nonce-in-body refusal removed | 1 | `FAIL  D-26 a caller-supplied nonce present in the body is refused` |
+| T10 | `maildir.sh`: never-ack-your-own removed | 2 | `FAIL  D-25 a message whose from is my own identity is never acked` |
+| T11 | `maildir.sh`: frontmatter `sent_at` need not agree with the filename | 1 | `FAIL  D-23 frontmatter sent_at disagreeing with the filename is refused` |
+| T12 | `maildir.sh`: a required frontmatter key is not required | 1 | `FAIL  D-23 a message missing "from" is refused (it cannot be attributed)` |
+| T13 | `maildir.sh`: the seq grammar accepts any digits | 1 | `FAIL  D-20 message filename [20260901T232215Z-1-slug.md] is rejected` |
+| T14 | `maildir.sh`: the 48-byte slug ceiling removed | 1 | `FAIL  D-20 a 49-character slug is rejected (<= 48)` |
+| T15 | `logchan.sh`: rotation ignores the EOF gate (age overrides) | 1 | `FAIL  R-1 offset < EOF is not rotated however old rotated_at is` |
+| T16 | `logchan.sh`: an ABSENT `rotated_at` treated as infinitely old | 1 | `FAIL  R-6 a generation with no rotated_at is never swept on mtime alone` |
+| T17 | `logchan.sh`: the sweep boundary `-gt` → `-ge` (sweeps a day early) | **0 → 1** | see *Measured zeros* |
+| T18 | `logchan.sh`: the rotation size threshold ignored | 2 | `FAIL  R-3 offset == EOF, rotated_at 1 day old, 9 MiB -> rotated` |
+| T19 | `inbox.sh`: the three no-entry causes collapsed back into one message | 7 | `FAIL  and it names the real cause: no git repository` |
+| T20 | `inbox.sh`: the absent-registry-root branch removed | 3 | `FAIL  and it says the registry DIRECTORY does not exist` |
+| T21 | `inbox.sh`: the no-git-repository branch removed | 2 | `FAIL  and it names the real cause: no git repository` |
+
+Four further mutations re-ran the previous captain's own sabotage pass, whose
+four subjects had each measured a zero before it and each redden now:
+`fs_maildir_ack`'s grammar re-check (2), `fs_write_state`'s symlink lstat (1),
+the `logchan_scan` dedupe-key delimiter guard (56), and the once-derived
+consumer lock path in `descriptor_resolve` (7).
+
+### Measured zeros
+
+**T5 — one advance at a time, per process.** `inbox_lock_acquire` refuses a
+second channel's lock while it holds one, because acquiring it re-execs fd 9
+and **releases the first channel's lock mid-advance** with nothing saying so:
+the process goes on believing it is the designated consumer of a channel
+another session is now free to take. Deleting the refusal left the suite green,
+because every fixture locked exactly one channel — the single-channel
+assumption the guard exists to break. Closed by three cases (refused, the
+FIRST lock still held, a `Fix:` clause) plus one asserting that re-acquiring
+the **same** lock is still a no-op, since a read followed by its own ack would
+otherwise refuse itself.
+
+**T8 — the fence's attempt ceiling.** Unreachable against a working
+`/dev/urandom` (a body would have to contain all eight independent 64-bit
+draws), so no fixture could reach it. That is not evidence the ceiling is dead
+weight: a wedged entropy source reaches it, and without the ceiling the
+`while :` loop does not terminate. The failure mode is a **hang** — a
+`read-inbox` that never returns rather than one that refuses — which is worse
+than the thing the ceiling is usually described as preventing. Reached by
+stubbing `fence_nonce` to a constant the body contains, run under `timeout` so
+a regression is a FAIL and not a hung suite.
+
+**T17 — the sweep boundary.** The R-6/R-7 fixtures (15 days, 13 days) sit far
+enough either side of the window that `-gt` and `-ge` are indistinguishable, so
+the flip measured a zero: a retention window silently one day short, which
+destroys evidence early and looks like nothing. Closed by pinning the boundary
+itself — at exactly the window the generation is **kept**, one second past it
+is swept. Deleting a day late is recoverable; a day early is not.
+
+### The standing review question, applied to this diff
+
+*"What does this do when the input is MISSING rather than wrong?"* — the
+defect class this epic has now produced four times. Applied to the read path
+it found a live instance, not in a check but in a **message**: all three causes
+of "nothing resolved" printed *"this project declares no inbox channels"*.
+
+| Cause | Was | Now |
+|---|---|---|
+| cwd is in no git repository | "this project declares no inbox channels" | names the real cause; a Fix: that can work |
+| the registry **directory** is absent | same message, and a Fix: naming a file to add under a directory that does not exist | says the directory does not exist, names it, and says **MACHINE-level** |
+| the directory exists, nothing claims this repo | same message | the one case that really is "not opted in" |
+
+An operator whose delivery **was** healthy and whose root was lost or unmounted
+was being told their project had never been set up, and sent looking for a
+missing entry under a missing directory. All three still refuse with an
+identical non-zero status — a reader asked for a named channel and did not get
+it — so this is a diagnosis, never a decision.
+
+The **count** path is deliberately the opposite and was left alone: the
+contract says *"No entry is not a fault — zero channels, exit 0"*, and an
+unprovisioned root is caught there by `check-inbox-registry`, which runs
+unprompted in the harness gate rather than waiting to be thought of.
+
+### What sabotage could not have found
+
+**This suite was not run by anything.** The harness gate declared twelve
+checks and none of them was this file, and the repo has no CI — so 373 cases
+covering the whole skill were verified only by whoever remembered to type the
+command. No mutation of the code can reveal that nobody runs the tests: an
+absent check is indistinguishable from a passing one, which is this epic's
+standing defect class appearing in the gate itself rather than in the code.
+Closed by declaring the suite, and by generalizing the gate's own
+"every self-test on disk is declared" rule from `ai/hooks/*.self-test.sh` to
+every place this repo puts a suite. That rule immediately found a second dark
+suite — `athena:slack`'s 55 cases — which is now declared too.

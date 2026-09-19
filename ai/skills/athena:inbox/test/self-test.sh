@@ -696,6 +696,55 @@ else
     "theirs-slack" "${err}"
 fi
 
+# "NOTHING RESOLVED" HAS THREE CAUSES, AND THEY GET THREE MESSAGES.
+#
+# The epic's standing defect class in its quiet form: a MISSING input reported
+# as a benign "not this environment". All three refuse -- the status is
+# identical and non-zero, because a reader asked for a named channel and did
+# not get it -- but a lost registry ROOT told as "this project declares no
+# channels" sends an operator whose delivery WAS healthy looking for a missing
+# entry under a directory that does not exist.
+NOENT_TMP="$(mktemp -d)"
+# (a) no git repository at all -- the repo identity cannot be computed, so
+# there is nothing to key on. Not a registry problem, and saying "add an
+# entry" would be advice that cannot work.
+err="$(cd "${NOENT_TMP}" && inbox_resolve_channel "slack" 2>&1)"; rc=$?
+assert_eq "a cwd in no git repository is refused, not reported as 'no channels'" "1" \
+  "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+assert_contains "and it names the real cause: no git repository" \
+  "no git repository" "${err}"
+assert_not_contains "and it does NOT blame the project for declaring nothing" \
+  "declares no inbox channels" "${err}"
+# (b) the registry DIRECTORY is absent. A machine-level condition: no project
+# on this machine has channels while it is missing.
+mkdir -p "${NOENT_TMP}/repo" && ( cd "${NOENT_TMP}/repo" && git init -q . )
+err="$( cd "${NOENT_TMP}/repo" \
+        && ATHENA_INBOX_ROOT="${NOENT_TMP}/absent-root" inbox_resolve_channel "slack" 2>&1 )"; rc=$?
+assert_eq "an ABSENT registry root is refused" "1" \
+  "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+assert_contains "and it says the registry DIRECTORY does not exist" \
+  "registry directory does not exist" "${err}"
+assert_contains "and it names the directory it looked for" \
+  "${NOENT_TMP}/absent-root/projects" "${err}"
+assert_contains "and it says MACHINE-level, so this is not read as 'not opted in'" \
+  "MACHINE-level" "${err}"
+assert_not_contains "and an absent root is NOT reported as the project declaring nothing" \
+  "declares no inbox channels" "${err}"
+# (c) the directory exists and nothing claims this repo -- the one case that
+# really IS "this project is not opted in".
+mkdir -p "${NOENT_TMP}/root/projects"
+err="$( cd "${NOENT_TMP}/repo" \
+        && ATHENA_INBOX_ROOT="${NOENT_TMP}/root" inbox_resolve_channel "slack" 2>&1 )"; rc=$?
+assert_eq "a present-but-empty registry is refused too" "1" \
+  "$([ "${rc}" -ne 0 ] && echo 1 || echo 0)"
+assert_contains "and THAT is the case that says the project declares no channels" \
+  "declares no inbox channels" "${err}"
+assert_contains "and its Fix: names the directory to add the entry to" \
+  "${NOENT_TMP}/root/projects" "${err}"
+# All three carry a Fix:, per this repo's guard-message convention.
+assert_contains "the not-opted-in refusal carries a Fix: clause" "Fix:" "${err}"
+rm -rf "${NOENT_TMP}"
+
 # A log channel whose inbox file has NEVER existed must not look like "nothing
 # new": "nobody registered the writer" and "nothing arrived" are identical on
 # disk and must not be identical in the data.
@@ -1426,6 +1475,15 @@ assert_eq "R-6 a generation rotated 15 days ago is sweepable" "yes" \
   "$(logchan_should_sweep "$((NOW - D15))" "${NOW}")"
 assert_eq "R-7 a generation rotated 13 days ago is NOT sweepable" "no" \
   "$(logchan_should_sweep "$((NOW - D13))" "${NOW}")"
+# THE BOUNDARY ITSELF. 15-vs-13 leaves the comparison free to be `-ge`, and
+# the sabotage run measured a ZERO for exactly that flip -- a retention window
+# silently one day short, which destroys evidence early and looks like nothing.
+# The window is "OLDER than", so at exactly the window the generation is KEPT:
+# deleting a day late is recoverable, a day early is not.
+assert_eq "R-7 at EXACTLY the window a generation is kept, not swept" "no" \
+  "$(logchan_should_sweep "$((NOW - LOGCHAN_SWEEP_AGE_S))" "${NOW}")"
+assert_eq "R-6 one second past the window it is swept" "yes" \
+  "$(logchan_should_sweep "$((NOW - LOGCHAN_SWEEP_AGE_S - 1))" "${NOW}")"
 # `rotated_at` absent -- a `.1` left by an older reader. The reader does NOT
 # compute a window from mtime; it treats the generation as not yet sweepable.
 # Keeping evidence a fortnight too long is recoverable; destroying it early is

@@ -9,10 +9,10 @@ A machine-local message facility. Other people's words arrive as files under an
 inbox root; this skill decides which of them belong to the project you are
 sitting in, and how many are unread.
 
-**Status: partial.** This is the counting slice (DND-183). `bin/inbox-status`
-works. `read-inbox`, `send-mail`, `inbox-wait` and `inbox-doctor` do not exist
-yet — where this document describes them, it is describing the shape they must
-fit, not a command you can run.
+**Status: partial.** `bin/inbox-status` (counting, DND-183) and
+`bin/read-inbox` (read + ack + the consumer lock, DND-184) work. `send-mail`
+and `inbox-wait` do not exist yet — where this document describes them, it is
+describing the shape they must fit, not a command you can run.
 
 Normative contract: `ai/contracts/athena-inbox.md`, specifically *Tenancy: the
 registry*. Where this file and the contract disagree, **the contract wins** —

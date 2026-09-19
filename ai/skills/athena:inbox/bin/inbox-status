@@ -116,7 +116,7 @@ HAVE_READ=false
 printf '%s' "${STATUS}" | jq -r '
   (.failed_candidates // 0) as $f
   | if $f > 0 then
-      "athena:inbox: \($f) registry entry(s) unreadable.\n  Fix: run inbox-doctor to see which — one of them may be this project'"'"'s, in which case this session is seeing fewer channels than it owns."
+      "athena:inbox: \($f) registry entry(s) unreadable.\n  Fix: one of them may be THIS project'"'"'s, in which case this session is seeing fewer channels than it owns. Check your own entry parses and is keyed correctly: its \"repo\" must equal `realpath \"$(git rev-parse --git-common-dir)\"` run in this repo. Do not open the other files in projects/ — they belong to other tenants."
     else empty end'
 
 printf '%s' "${STATUS}" | jq -r --argjson have_read "${HAVE_READ}" '

@@ -87,13 +87,58 @@ inbox_channels() {
 # channel: echoing an unknown name turns the denial into an oracle that
 # confirms what a caller guessed, and listing another project's channels would
 # hand over the namespace outright.
+# _inbox_no_entry_refusal <cwd>
+#
+# "Nothing resolved" has THREE causes, and collapsing them into one message is
+# the epic's standing defect class in its quiet form: a MISSING input reported
+# as a benign "not this environment".
+#
+#   * cwd is in no git repository      -> the repo identity cannot be computed
+#   * the registry DIRECTORY is absent -> the root is not provisioned, or
+#                                         $ATHENA_INBOX_ROOT points at nothing
+#   * the directory exists, nothing claims this repo -> genuinely not opted in
+#
+# Only the third is "this project declares no channels". Told the third when
+# the truth is the second, an operator whose delivery WAS healthy goes looking
+# for a missing entry under a directory that does not exist, and a lost or
+# unmounted root reads as a project that was never set up. The three get three
+# messages.
+#
+# NOTE ON DISCLOSURE: this names only the registry directory (read from this
+# session's own environment) and this repo's own common dir. It never names,
+# counts, or implies another tenant's entry -- see *Finding the entry*.
+#
+# This is a diagnosis, never a decision: all three are refusals, and the
+# NON-ZERO status is identical. A reader asked for a named channel and did not
+# get it; that is a failure whichever cause produced it. (The COUNT path is
+# the opposite by contract -- "no entry is not a fault, zero channels, exit 0"
+# -- and an unprovisioned root is caught there by check-inbox-registry, which
+# runs unprompted in the harness gate rather than waiting to be thought of.)
+_inbox_no_entry_refusal() {
+  local cwd="${1:-.}" regdir
+  regdir="$(fs_registry_dir)"
+
+  if ! fs_git_common_dir "${cwd}" >/dev/null 2>&1; then
+    inbox_fail "this directory is in no git repository, so it has no inbox identity" \
+      "a project's channels are keyed by the realpath of its git common dir. Run this from inside the repo whose mail you want."
+    return 1
+  fi
+  if [ ! -d "${regdir}" ]; then
+    inbox_fail "the inbox registry directory does not exist: ${regdir}" \
+      "this is a MACHINE-level condition, not a project one -- no project on this machine has channels while that directory is missing. Check \$ATHENA_INBOX_ROOT points where you think (default: \$HOME/.local/share/athena) and that the root is present, before concluding this project is not opted in."
+    return 1
+  fi
+  inbox_fail "this project declares no inbox channels" \
+    "add ${regdir}/<project>.json with a \"repo\" naming this repo's git common dir (realpath \"\$(git rev-parse --git-common-dir)\"), or run from a project that has one."
+  return 1
+}
+
 inbox_resolve_channel() {
   local chan="$1" entry rc declared
   entry="$(inbox_entry "${2:-.}")"; rc=$?
   if [ "${rc}" -eq 2 ]; then return 1; fi
   if [ -z "${entry}" ]; then
-    inbox_fail "this project declares no inbox channels" \
-      "add \$ATHENA_INBOX_ROOT/projects/<project>.json with a \"repo\" naming this repo's git common dir, or run from a project that has one."
+    _inbox_no_entry_refusal "${2:-.}"
     return 1
   fi
   descriptor_validate "${entry}" || return 1
