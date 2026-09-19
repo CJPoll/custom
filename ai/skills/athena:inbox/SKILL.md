@@ -14,17 +14,14 @@ works. `read-inbox`, `send-mail`, `inbox-wait` and `inbox-doctor` do not exist
 yet — where this document describes them, it is describing the shape they must
 fit, not a command you can run.
 
-Normative contract: `ai/contracts/athena-inbox.md`. Where this file and the
-contract disagree, the contract wins — with **one dated exception**, currently
-being amended in the contract itself by DND-202:
+Normative contract: `ai/contracts/athena-inbox.md`, specifically *Tenancy: the
+registry*. Where this file and the contract disagree, **the contract wins** —
+no exceptions, and this file claims none.
 
-> **Superseded design, as of 2026-09-18:** the contract's *Tenancy: the descriptor* section
-> still describes a `.athena-inbox.json` **committed at each repo's root**,
-> resolved from the **git toplevel**. The owner reversed that on 2026-09-18
-> (option B, DND-202): the config is harness-side and keyed by the **git
-> common dir**, as described below. This code implements the decision, not the
-> superseded prose. DND-202 carries the contract amendment; until it lands,
-> the contract's repo-root wording is stale and this section supersedes it.
+If you are looking for `.athena-inbox.json`, a file each repo committed at its
+root: that design was reversed by the owner on 2026-09-18 (option B, DND-202),
+and both the contract and this skill describe the replacement. Nothing about
+the inbox lives in a consumer repo any more.
 
 ## The one rule that matters
 

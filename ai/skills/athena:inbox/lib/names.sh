@@ -136,6 +136,23 @@ names_valid_log_path() {
   return 0
 }
 
+# names_reserved_prefix <relative-path>
+# True when the path resolves inside the reserved `projects/` directory.
+#
+# CONTAINMENT CANNOT CATCH THIS ONE, which is the whole reason it is a separate
+# check: `projects/` is INSIDE the root, so a channel declaring
+# `"namespace": "projects"` passes every containment test and still points a
+# MESSAGE surface at the TENANCY directory. In a counting slice that would
+# count other tenants' registry entries as unread mail; once a reader exists it
+# would render them. Configuration and message surfaces share a root; they do
+# not share a namespace.
+names_reserved_prefix() {
+  case "${1}" in
+    projects|projects/*) return 0 ;;
+  esac
+  return 1
+}
+
 # --- derived paths ----------------------------------------------------------
 # Contract -> "Derived paths". Suffix substitution on the inbox name, which is
 # the whole reason `.jsonl` is mandatory.

@@ -185,6 +185,11 @@ _descriptor_validate_log() {
   # Belt and braces: the grammar already excludes "..", but containment is the
   # check the contract names, so it runs too and on the same text.
   names_resolve_in_root "/" "${path}" >/dev/null || return 1
+  if names_reserved_prefix "${path}"; then
+    inbox_fail "log channel \"${chan}\" declares a path inside the reserved projects/ directory" \
+      "move channel \"${chan}\"'s \"path\" out of projects/; that directory holds the tenancy registry, and a message surface there would read and be read as configuration."
+    return 1
+  fi
 
   if printf '%s' "${doc}" | jq -e --arg c "${chan}" 'has("channels") and (.channels[$c] | has("dedupe"))' >/dev/null 2>&1; then
     if [ "$(printf '%s' "${doc}" | jq -r --arg c "${chan}" '.channels[$c].dedupe | type')" != "array" ]; then
@@ -232,6 +237,11 @@ _descriptor_validate_maildir() {
     return 1
   fi
   names_resolve_in_root "/" "${val}" >/dev/null || return 1
+  if names_reserved_prefix "${val}"; then
+    inbox_fail "maildir channel \"${chan}\" declares a namespace inside the reserved projects/ directory" \
+      "move channel \"${chan}\"'s \"namespace\" out of projects/; that directory holds the tenancy registry, and pointing a maildir at it would count other projects' registry entries as unread mail."
+    return 1
+  fi
 
   read_dir="$(printf '%s' "${doc}" | jq -r --arg c "${chan}" '.channels[$c].read')"
   write_dir="$(printf '%s' "${doc}" | jq -r --arg c "${chan}" '.channels[$c].write')"
