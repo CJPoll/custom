@@ -55,20 +55,15 @@ and report their assumptions; they do not escalate routine calls to you.
   state log and report the vocabulary gap to the architect — do NOT invent a
   new `In Review` option in someone's DB to satisfy the default.
 
-**Assignee lifecycle — follow the `athena:ticket-management` skill.** The
-`Assignee` always names whoever currently holds the Mission, so every status
-move also reconciles the assignee:
-- Taking a Mission into scope → assign **Athena** (the active Notion
-  connection's bot; resolve via `get-self`, never hardcode across workspaces),
-  and if it's in `Backlog` move it to `Todo`. A scoped Mission with no engineer
-  on it yet sits at `Todo`.
-- Dispatching an athena-captain to a Mission → move it to `In Progress`
-  (assignee stays **Athena**).
-- Any move to a waiting-on-the-human status — `Needs Attention`, `Done`, and
-  (work workspace) `Ready for Release` → assign **Cody**. For `Needs Attention`
-  also write the context Cody needs onto the Mission body.
-- A Mission in `Attention Given` stays assigned to **Cody**; when you resume it
-  and move it back to `In Progress`, reassign to **Athena**.
+**Assignee lifecycle — follow the [[athena:ticket-management]] skill**, which
+owns it. The `Assignee` always names whoever currently holds the Mission, so
+reconcile it on every status move: take scope → **Athena** (the active
+connection's bot, resolved via `get-self`, and `Backlog`→`Todo`); dispatch a
+captain → `In Progress` (still Athena); any waiting-on-the-human status
+(`Needs Attention`, `Done`, work-workspace `Ready for Release`) → **Cody** (for
+`Needs Attention` also write the context Cody needs onto the Mission body);
+`Attention Given` stays Cody until you resume it (back to `In Progress` →
+Athena).
 
 If either required input is missing, ask one clarifying question up front
 and wait — everything else in this process is designed for you to resolve
@@ -351,44 +346,15 @@ For each currently-unblocked Mission, once it has a free slot:
   only place that `agentId` can come from. Carry it next to the
   reports-directory path, and keep the precedence straight: the **file write is
   the delivery**, the message is the latency optimization (3b).
-- **Pick the engineer's model from the Mission's complexity** — the
-  athena-captain definition defaults to `model: opus`; override it with
-  `model: "sonnet"` on the `Agent` call when the Mission is *bounded and
-  mechanical*, and leave Opus for anything that needs judgment. Decide on
-  the Mission as it actually is (read it and the code it names), not on its
-  label, and write the choice and the one-line reason into the state log
-  next to the dispatch. Default to Opus whenever unsure — a Sonnet engineer
-  that goes STUCK gets re-dispatched once under Opus into the same worktree,
-  and that costs more than the tokens Sonnet saved.
-
-  **Sonnet** when *all* of these hold: the change is fully specified before
-  dispatch (an exact recipe, a landed sibling to copy, a lab commit to
-  cherry-pick, a rename/sweep/config-key change); it touches test, config,
-  CI, or docs only — or a small, well-covered runtime surface (≤ ~3 files,
-  no new module, no new seam); it needs no design decision, no access-control
-  interpretation, and no investigation of *why* something behaves as it does;
-  and success is checkable by a tool (the suite is green, a count matches,
-  a grep is empty). Examples from this fleet: a `pool_size` config change
-  with the lab's evidence already in hand; a tenant-fixture sweep across
-  files whose pattern is already landed; an ADR 017 record move; a CI
-  variable rename.
-
-  **Opus** when *any* of these hold: the Mission asks for a design or a
-  mechanism (a new case template, a new adapter/seam, a process manager, an
-  authorization rule); it touches prod topology or restart/leader-election
-  behaviour, migrations, or anything schema-destructive; it needs root-cause
-  work (a flake, a race, "why is this sync", a regression hunt); the
-  acceptance criteria leave room to interpret (access control, cross-
-  subdomain boundaries, what "done" means); it must reconcile with another
-  open MR or a colleague's work; or its blast radius is > ~3 runtime files.
-  Examples: PT-582's per-process Commanded instance, an async tranche that
-  must *find* each file's real reason for being sync, a deploy-gating CI
-  change, anything the athena-captain doctrine calls "stop early and
-  report".
-
-  A tranche of look-alike Missions is not automatically Sonnet: the *first*
-  of a series (the one that establishes the pattern) is Opus; the follow-ups
-  that copy a landed pattern are Sonnet candidates.
+- **Pick the engineer's model from the Mission's real complexity** — read the
+  Mission and the code it names, not its label. The athena-captain defaults to
+  `model: opus`; override to `model: "sonnet"` on the `Agent` call **only** for
+  bounded, fully-specified, tool-checkable work. Invoke [[athena:model-tiering]]
+  for the Sonnet-when-*all* / Opus-when-*any* criteria, the worked examples, and
+  the first-of-a-series rule. **Default to Opus whenever unsure** — a Sonnet
+  engineer that goes STUCK is re-dispatched once under Opus into the same
+  worktree, which costs more than the tokens Sonnet saved — and **write the
+  choice and its one-line reason into the state log** next to the dispatch.
 
 ### 4a. An environment fact you put in a brief must be VERIFIED, not inferred
 
@@ -511,32 +477,16 @@ inbound message or nudge as "go check now," never as the report itself.
 
 **Listen with a background watcher, and treat it as a fast path, not the
 only path (see 3b).** Once per run, right after your first dispatch batch,
-start a single `Monitor` on the reports directory instead of hand-polling on
-every turn:
-
-```
-mkdir -p ~/dev/custom/ai-artifacts/coordination/[run-id]/reports
-: > /tmp/admiral-[run-id]-seen
-last_sweep=$(date +%s)
-while true; do
-  find ~/dev/custom/ai-artifacts/coordination/[run-id]/reports \
-    -name '*-report.md' -newer /tmp/admiral-[run-id]-seen -print
-  touch /tmp/admiral-[run-id]-seen
-  now=$(date +%s)
-  if [ $((now - last_sweep)) -ge 2700 ]; then
-    echo "STALENESS SWEEP DUE: $(date -u +%FT%TZ) — reconcile every IN_PROGRESS Mission"
-    last_sweep=$now
-  fi
-  sleep 20
-done
-```
-
-Run with `Monitor`, `persistent: true`. Each new/updated report file is a
-notification, and the loop also forces one heartbeat notification roughly
-every 45 minutes even if nothing changed — that heartbeat is what makes the
-staleness rule (3b) actually fire on a quiet run instead of only in theory.
-When notified — by a report line or by the heartbeat — do a full sweep per
-3b, not just a check of whatever the notification mentioned.
+start a single `Monitor` (`persistent: true`) on
+`~/dev/custom/ai/bin/admiral-report-watch [run-id]` instead of hand-polling on
+every turn. That script emits one line per new/updated report file under the
+run's reports directory, and forces one staleness heartbeat roughly every 45
+minutes even when nothing changed — the heartbeat is what makes the staleness
+rule (3b) actually fire on a quiet run instead of only in theory. Run it **only**
+under `Monitor` — never via a bare `Bash` call — since its poll loop is the
+harness-wakeup path, not a hand-rolled shell spin. When notified — by a report
+line or by the heartbeat — do a full sweep per 3b, not just a check of whatever
+the notification mentioned.
 
 Before re-dispatching or "waking" an athena-captain, read its report file
 first — if a fresh terminal report is already there, it needs reading and
@@ -590,50 +540,27 @@ a redispatch.
 ### 6a. Tear down a Mission's docker stack once its MR is merged
 
 Every worktree gets its own isolated docker-compose stack(s), and idle stacks
-hold real capacity: database memory/connections, service containers, volumes,
-and an address-pool network. Leaving them up after the Mission lands is how the
-box drifts into pool starvation and "all predefined address pools have been
-fully subnetted".
+hold real capacity (database memory/connections, containers, volumes, an
+address-pool network); leaving them up after a Mission lands is how the box
+drifts into pool starvation. **As soon as a Mission's MR is CONFIRMED merged**
+(not merely green — a green-but-open MR may still need its stack for review
+follow-ups), tear its stack down. Invoke [[athena:teardown-worktree-stack]] for
+the per-repo resolution — the project-name derivation is repo-specific and a bare
+`down -v` in the wrong repo destroys the wrong stack's volumes, so the three-tier
+resolution (repo teardown script → generic default only when the compose project
+name is docker's default → documented prose fallback) lives there.
 
-As soon as a Mission's MR is **merged** (not merely green — a green-but-open MR
-may still need its stack for review follow-ups), tear its stack down — every
-per-worktree stack the repo runs, including volumes, orphans, and the network.
-
-**How the teardown command is resolved is per-repo** (the project-name
-derivation and working directory are repo-specific, and a bare `down -v` in the
-wrong repo destroys the wrong stack's volumes). Resolve it in order:
-
-1. **Repo-provided teardown script (preferred).** If the repo has
-   `bin/teardown-worktree-stack.sh` (or `.claude/teardown-worktree-stack.sh`),
-   run it with the worktree path: `<repo>/bin/teardown-worktree-stack.sh
-   <worktree>`. Its contract: tear down *every* stack that worktree runs —
-   containers, volumes, orphans, and network — and exit nonzero if it cannot.
-   The repo owns the project-name derivation and cwd, so this cannot mis-target
-   a destructive `-v`; prefer it whenever it exists.
-2. **Generic default — ONLY when the compose project name is docker's default
-   (the worktree-directory basename): compose at the repo/worktree root, no
-   sourced env var and no explicit `name:`/`-p`.** Then, from the worktree root:
-   `docker compose down -v --remove-orphans`. Do **not** use this for a repo
-   whose project name comes from a sourced env var or a prefix — a bare `down`
-   there targets the wrong (often shared) stack and `-v` wipes its volumes.
-3. **Documented prose fallback.** If a repo isolates stacks non-standardly but
-   ships no script, follow its documented teardown (its CLAUDE.md) exactly, and
-   note in your report that this hand-assembled destructive path is the least
-   safe — a repo that lacks a step-1 script should get one.
-
-Rules:
-- This is yours, not the athena-captain's — they may have terminated before
-  the merge happened, and their DONE must not depend on a merge they don't
-  perform.
-- Only ever tear down stacks belonging to YOUR fleet's Missions, and only
-  after verifying the merge (`merged_at` set, or the branch an ancestor of
-  the target) — never on a closed-unmerged MR whose work may be revived,
-  and never another fleet's stack.
-- Confirm afterwards that the stack's containers, volumes, and network are
-  gone (`docker ps -a`, `docker volume ls`, `docker network ls`, filtered by
-  the project name). A `down` that only removed containers leaves the
-  network holding an address-pool slot.
-- Record the teardown in the Mission's state-log entry.
+These orchestration rules stay yours and do not move:
+- This is the admiral's, not the athena-captain's — they may have terminated
+  before the merge happened, and their DONE must not depend on a merge they
+  don't perform.
+- Only ever tear down stacks belonging to YOUR fleet's Missions, and only after
+  verifying the merge (`merged_at` set, or the branch an ancestor of the target)
+  — never on a closed-unmerged MR whose work may be revived, and never another
+  fleet's stack.
+- Confirm afterwards (`docker ps -a`, `docker volume ls`, `docker network ls`,
+  filtered by the project name) that containers, volumes, and network are gone,
+  and record the teardown in the Mission's state-log entry.
 
 ### 6b. Boarding: the rate at which green MRs land is yours to protect
 
@@ -858,78 +785,20 @@ mobile-parity, and pt1280.
 
 You do NOT DM on every merge. Owner notifications are exactly three events: an
 epic crossing **50%** complete, an epic reaching **100%**, and any ticket moving
-to **`Needs Attention`**. The first two are yours, computed at merge time (below);
-the third rides the ticket-lifecycle transition and is owned by
-**athena:ticket-management** (its "Needs Attention" DM rule) — not here. Merging
-an MR, on its own, pings nobody.
+to **`Needs Attention`**. The first two are yours, computed at merge time; the
+third rides the ticket-lifecycle transition and is owned by
+**[[athena:ticket-management]]** (its "Needs Attention" DM rule) — not here.
+Merging an MR, on its own, pings nobody.
 
-**When you compute the epic DMs:** after you merge a ticket's MR and move that
-ticket to its terminal status (having CONFIRMED the merge landed — see "Confirm a
-merge actually landed"), if the just-merged ticket belongs to an epic (it has a
-non-empty `Epic` relation), recompute the epic's completion from Notion and DM
-Cody if this merge just crossed a threshold. A ticket **not** in an epic cannot
-trigger these — per-epic only.
-
-**Completed definition:** a ticket counts as completed when its status is `Done`
-**OR** `Ready for Release` (the work-workspace pre-release terminal). `M` (total) =
-every ticket linked to the epic via the `Epic`↔tickets relation; `N` (completed) =
-those in a completed status. Recompute both by re-reading Notion (the `Epic`
-relation on the just-merged ticket → the epic's linked tickets and their current
-statuses), never from a running tally — a missed wake or a parallel merge must not
-desync the count. Because you serialize your own merges, the recompute-after-each
-is race-free.
-
-**Crossing semantics — fire ONCE per boundary, never spam.** Frame it as a
-before/after comparison around THIS merge: `after` = completed count now (includes
-the ticket you just moved to terminal); `before` = the completed count computed
-with that ticket's PRIOR (non-terminal) status — i.e. `after - 1` in the normal
-case, or `before == after` if the ticket was already terminal (then nothing
-fires).
-- **50%:** DM only when `before/M < 0.5` **and** `after/M >= 0.5` — the merge moved
-  the epic from under half to at least half. It never re-fires while the epic
-  stays ≥50%.
-- **100%:** DM only when `after == M` **and** `before < M` — this merge completed
-  the epic's final ticket.
-A single merge can cross both boundaries at once (e.g. a 1-of-2-ticket epic going
-0→100%); send one DM per boundary this merge actually crossed, at most one each.
-
-**Formats** (Slack mrkdwn link syntax `<url|label>`, NOT markdown; `:notion:` +
-the epic PAGE url), DM'd to Cody (U0AHNV4RJGP) as Athena via the athena:slack
-skill (`~/.claude/skills/athena:slack/bin/dm`):
-
-  :chart_with_upwards_trend: :notion: <EPIC_URL|Epic Name> is 50% complete (N/M tickets).
-  :tada: :notion: <EPIC_URL|Epic Name> is complete (M/M).
-
-Only a merge you yourself performed counts (your own glab-athena/gh-athena call,
-or your engineer's under your direction); never a merge by a human or another
-harness you merely observed while watching main or pipelines.
-
-**Milestone DMs carry a decisions digest.** The 50%/100% DMs (NOT the `Needs
-Attention` DM, which already carries its own one-line why) double as a "here's
-what we decided on your behalf, take a look" checkpoint. When running under
-**athena:run-autonomously**, the fleet records every judgement call and
-assumption on the work item — per that skill, on the parent **epic** first (the
-ticket only when there is no parent). So when you compose a milestone DM, gather
-those recorded decisions from the epic page (its decisions/assumptions section),
-falling back to the epic's ticket bodies, and append a short digest. This is the
-running, partial form of run-autonomously's "when the user returns, report all
-decisions" — at 50% it covers the calls made so far, at 100% the complete set;
-keep the two in sync so they don't drift.
-
-Keep it digestible — SUMMARIZE, never dump every raw assumption:
-- List at most the **5 highest-judgement** calls, one terse bullet each (the
-  consequential / hard-to-reverse ones, not routine choices).
-- If more were recorded, add a final line `…and K more — see the epic.`
-- Always end with the epic link so Cody can read the full record; if NO decisions
-  were recorded, send the one-line milestone message alone (no digest block).
-
-Shape (newlines in one DM; Slack mrkdwn):
-
-  :chart_with_upwards_trend: :notion: <EPIC_URL|Epic Name> is 50% complete (N/M tickets).
-  Decisions made on your behalf so far:
-  • <highest-judgement call 1>
-  • <highest-judgement call 2>
-  …and K more — see <EPIC_URL|the epic>.
+**The trigger is welded to your always-run merge step:** after you merge a
+ticket's MR and move that ticket to its terminal status (having CONFIRMED the
+merge landed — see "Confirm a merge actually landed"), if the just-merged ticket
+has a non-empty `Epic` relation, invoke [[athena:epic-progress-dm]] to recompute
+the epic's completion from Notion and DM Cody on any boundary this merge crossed.
+A ticket **not** in an epic cannot trigger these — per-epic only. That skill owns
+the crossing math (fire once per boundary, recompute from Notion never a running
+tally), the Slack mrkdwn formats, the only-a-merge-you-performed rule, and the
+decisions-digest shaping under [[athena:run-autonomously]].
 
 ## Act as Athena, not the owner (owner rule, 2026-09-01)
 
