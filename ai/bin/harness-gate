@@ -35,7 +35,7 @@ require "tmpdir"
 CUSTOM_DIR = File.expand_path("../..", __dir__)
 
 # Each entry: [label, argv]. argv[0] is repo-relative.
-CHECKS = [
+STATIC_CHECKS = [
   ["build-agents --check",      %w[ai/bin/build-agents --check]],
   ["safe-wait-guard self-test", %w[ai/hooks/safe-wait-guard.self-test.sh]],
   ["pronoun-guard self-test",   %w[ai/hooks/pronoun-guard.self-test.sh]],
@@ -48,17 +48,48 @@ CHECKS = [
   ["harness-eval",              %w[ai/bin/harness-eval]],
   ["critic-review self-test",   %w[ai/bin/critic-review --self-test]],
   ["critic-eval self-test",     %w[ai/bin/critic-eval --self-test]],
+  # setup-hooks' --self-test is INLINE in the installer (no dedicated
+  # scripts/test/**/self-test.sh backs it), so it stays hand-declared here.
   ["setup-hooks self-test",     %w[scripts/setup-hooks --self-test]],
-  ["inbox-client self-test",    %w[scripts/setup-athena-inbox-client --self-test]],
 ].freeze
 
-# A `scripts/setup-*` installer whose own --self-test is ALREADY declared above
-# under a different name. Maps script -> the declared check that runs it, so the
-# self-test's "no committed self-test goes unrun" assertion stays true without
-# running the same suite twice.
+# A `scripts/setup-*` installer whose own --self-test is ALREADY covered above
+# under a different name — either a STATIC_CHECKS entry or a discovered
+# scripts/test/**/self-test.sh (see below). Maps script -> the check that
+# covers it, so run_self_test's "no committed self-test goes unrun" assertion
+# stays true without running the same suite twice under two labels.
 SELF_TEST_DELEGATES = {
-  "scripts/setup-inbox-registry" => "ai/inbox/test/self-test.sh",
+  "scripts/setup-inbox-registry"       => "ai/inbox/test/self-test.sh",
+  "scripts/setup-athena-inbox-client"  => "scripts/test/athena-inbox-client/self-test.sh",
 }.freeze
+
+# DND-209: scripts/ has real self-tests (e.g. scripts/test/athena-inbox-client/
+# self-test.sh, 42 cases) that nothing ran automatically — harness-gate was
+# 10/10 green and would have stayed green with every scripts/ suite deleted.
+# DISCOVER them (glob), don't hand-declare them, so a future suite under
+# scripts/test/ is covered with zero manual wiring step — the same shape as
+# check-hooks-registered's coverage of hooks, but here the check LIST itself is
+# derived, not just diffed against disk.
+#
+# root is overridable so --self-test can prove discovery against a throwaway
+# fixture tree instead of mutating the real scripts/test/ directory.
+def discover_scripts_self_tests(root = CUSTOM_DIR)
+  Dir.glob(File.join(root, "scripts/test/**/self-test.sh"))
+     .map { |p| p.sub("#{root}/", "") }
+     .sort
+end
+
+def scripts_self_test_checks(root = CUSTOM_DIR)
+  discover_scripts_self_tests(root).map do |relpath|
+    # Full path segment between scripts/test/ and /self-test.sh, so two
+    # suites that share a leaf directory name (a/x, b/x) get distinct labels
+    # instead of colliding on File.basename alone.
+    name = relpath.sub(%r{\Ascripts/test/}, "").sub(%r{/self-test\.sh\z}, "")
+    ["scripts self-test: #{name}", [relpath]]
+  end
+end
+
+CHECKS = (STATIC_CHECKS + scripts_self_test_checks).freeze
 
 FAIL_TAIL_LINES = 20
 
@@ -85,13 +116,20 @@ def false_green_entries
 end
 
 def run_gate
+  scripts_found = discover_scripts_self_tests
+  puts "scripts/test self-tests discovered: #{scripts_found.size}" \
+       "#{scripts_found.empty? ? ' (none on disk — verify the glob, not just the count)' : ''}"
+
   missing = missing_executables
   unless missing.empty?
     warn "harness-gate: FAILED — declared check(s) missing or not executable:"
     missing.each { |(label, argv)| warn "  - #{label} (#{argv.first})" }
-    warn "  Fix: restore the script, `chmod +x` it, or remove its entry from " \
-         "CHECKS in ai/bin/harness-gate (and from the gate list in " \
-         "ai/agents/athena-shipwright.md.in)."
+    warn "  Fix: restore the script and `chmod +x` it. For a STATIC_CHECKS " \
+         "entry you can also remove it from CHECKS in ai/bin/harness-gate (and " \
+         "from the gate list in ai/agents/athena-shipwright.md.in); a " \
+         "discovered scripts/test/**/self-test.sh entry is NOT removable from " \
+         "CHECKS by hand (it is derived from disk) — either chmod +x it or " \
+         "delete the file from scripts/test/."
     return 1
   end
 
@@ -125,7 +163,9 @@ end
 
 def run_list
   CHECKS.each { |(label, argv)| printf("%-28s %s\n", label, argv.join(" ")) }
-  puts "harness-gate: #{CHECKS.size} declared check(s)"
+  scripts_found = discover_scripts_self_tests
+  puts "harness-gate: #{CHECKS.size} declared check(s) " \
+       "(#{scripts_found.size} of them discovered under scripts/test/**/self-test.sh)"
   0
 end
 
@@ -162,10 +202,11 @@ def run_self_test
   end
 
   # 4. Every scripts/setup-* installer that ADVERTISES a --self-test is either
-  #    declared in CHECKS or delegates to a declared check. Same class as (3):
-  #    a committed self-test the gate never runs is a suite that cannot go red.
-  #    DND-189 shipped 42 cases nothing invoked; setup-hooks' merge-safety cases
-  #    had been equally unrun since the 2026-09-17 hook-clobber fix.
+  #    declared in CHECKS or delegates (SELF_TEST_DELEGATES) to a check that IS
+  #    declared/discovered. Same class as (3): a committed self-test the gate
+  #    never runs is a suite that cannot go red. DND-189 shipped 42 cases
+  #    nothing invoked; setup-hooks' merge-safety cases had been equally unrun
+  #    since the 2026-09-17 hook-clobber fix.
   installers = Dir.glob(File.join(CUSTOM_DIR, "scripts/setup-*"))
                   .select { |p| File.file?(p) && File.executable?(p) }
                   .select { |p| File.read(p).include?("--self-test") }
@@ -180,7 +221,84 @@ def run_self_test
     ok = false
   end
 
-  # 5. run_one reports PASS/FAIL correctly and closes stdin.
+  # 5. Discovery itself actually discovers and actually runs — proven against a
+  #    THROWAWAY fixture tree, never the real scripts/test/, per the ticket's
+  #    required case: "a deliberately failing stub suite under scripts/test/
+  #    must turn the gate red, and removing it must turn it green again." (A
+  #    plain "on-disk == declared" comparison here would be tautological, since
+  #    CHECKS is built FROM discover_scripts_self_tests — this fixture instead
+  #    exercises the actual discover -> run -> pass/fail behavior end to end.)
+  Dir.mktmpdir("harness-gate-selftest-scripts") do |fixture_root|
+    suite_dir = File.join(fixture_root, "scripts/test/fixture-suite")
+    FileUtils.mkdir_p(suite_dir)
+    suite_path = File.join(suite_dir, "self-test.sh")
+
+    # Nothing discovered yet -> zero dynamic checks, not a crash and not a
+    # false PASS masquerading as "found nothing to run".
+    if discover_scripts_self_tests(fixture_root) != []
+      warn "self-test: FAIL — discover_scripts_self_tests found something in " \
+           "a fixture tree that has no suite yet"
+      ok = false
+    end
+
+    File.write(suite_path, "#!/bin/sh\necho 'fixture failing on purpose'\nexit 1\n")
+    FileUtils.chmod(0o755, suite_path)
+
+    found = discover_scripts_self_tests(fixture_root)
+    unless found == ["scripts/test/fixture-suite/self-test.sh"]
+      warn "self-test: FAIL — discover_scripts_self_tests did not find the " \
+           "fixture suite (found: #{found.inspect})"
+      ok = false
+    end
+
+    red_ok, red_out = run_one([found.first], chdir: fixture_root)
+    if red_ok
+      warn "self-test: FAIL — a deliberately failing scripts/test stub was " \
+           "reported as PASS (the exact silent-success class this ticket " \
+           "exists to fix)"
+      ok = false
+    end
+    unless red_out.to_s.include?("fixture failing on purpose")
+      warn "self-test: FAIL — the failing fixture suite's output was not captured"
+      ok = false
+    end
+
+    File.write(suite_path, "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o755, suite_path)
+    green_ok, = run_one([found.first], chdir: fixture_root)
+    unless green_ok
+      warn "self-test: FAIL — fixing the fixture suite to exit 0 did not turn " \
+           "it green"
+      ok = false
+    end
+
+    FileUtils.rm_f(suite_path)
+    unless discover_scripts_self_tests(fixture_root).empty?
+      warn "self-test: FAIL — removing the fixture suite did not make " \
+           "discovery report zero again"
+      ok = false
+    end
+  end
+
+  # 6. Two suites that share a leaf directory name must not collide on label
+  #    (scripts_self_test_checks must key off the full a/x vs b/x segment).
+  Dir.mktmpdir("harness-gate-selftest-labels") do |fixture_root|
+    %w[groupA/x groupB/x].each do |rel|
+      dir = File.join(fixture_root, "scripts/test", rel)
+      FileUtils.mkdir_p(dir)
+      path = File.join(dir, "self-test.sh")
+      File.write(path, "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o755, path)
+    end
+    labels = scripts_self_test_checks(fixture_root).map(&:first)
+    if labels.uniq.size != labels.size
+      warn "self-test: FAIL — two distinct scripts/test suites produced the " \
+           "same label: #{labels.inspect}"
+      ok = false
+    end
+  end
+
+  # 7. run_one reports PASS/FAIL correctly and closes stdin.
   Dir.mktmpdir("harness-gate-selftest") do |dir|
     passing = File.join(dir, "pass.sh")
     failing = File.join(dir, "fail.sh")
@@ -212,16 +330,20 @@ def run_self_test
   end
 
   if ok
-    puts "harness-gate: self-test OK (#{CHECKS.size} checks declared)"
+    puts "harness-gate: self-test OK (#{CHECKS.size} checks declared, " \
+         "#{discover_scripts_self_tests.size} of them discovered scripts/test suites)"
     0
   else
     warn "harness-gate: self-test FAILED"
     warn "  Fix: repair CHECKS in ai/bin/harness-gate so every declared check is " \
          "executable and every hook is invoked via its dedicated .self-test.sh " \
-         "script (never `<hook>.sh --self-test`, which is a false green), every " \
-         "scripts/setup-* installer that advertises a --self-test is declared " \
-         "(or listed in SELF_TEST_DELEGATES as running under another entry), " \
-         "and run_one reports the child's exit status with stdin closed."
+         "script (never `<hook>.sh --self-test`, which is a false green); keep " \
+         "every scripts/setup-* installer's --self-test declared or delegated " \
+         "(SELF_TEST_DELEGATES); keep discover_scripts_self_tests/" \
+         "scripts_self_test_checks finding every real scripts/test/**/" \
+         "self-test.sh, flipping a fixture suite red/green, and labeling " \
+         "distinct suites uniquely; and keep run_one reporting the child's " \
+         "exit status with stdin closed."
     1
   end
 end
