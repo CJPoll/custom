@@ -231,45 +231,58 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   stay verified even when a harness edit did not touch the critic directly. (The
   model-in-loop `--run` is NOT part of the gate.)
 - `scripts/setup-hooks --self-test` — the installer's --self-test is INLINE
-  (no dedicated `**/test/self-test.sh` file backs it), so it stays a
-  hand-declared `CHECKS` entry. Its install / idempotency / merge-safety cases
-  are the ONLY verification of the recovery path for the 2026-09-17 hook
-  clobber, and were unrun by the gate until DND-209.
-- Every `**/test/**/self-test.sh` in the repo — DISCOVERED (globbed), never
-  hand-declared, so a future suite anywhere under a `test/` directory is
-  covered with zero manual wiring step, **provided its entry point is named
-  exactly `self-test.sh`** — that filename is the whole discovery contract; a
-  suite shipped as e.g. `scripts/test/foo/tests.sh` is NOT discovered by the
-  glob. This patches the CLASS, not one site: DND-209 started from
+  (no dedicated `self-test.sh` file backs it), so it stays a hand-declared
+  `CHECKS` entry. Its install / idempotency / merge-safety cases are the ONLY
+  verification of the recovery path for the 2026-09-17 hook clobber, and were
+  unrun by the gate until DND-209.
+- Every tracked `**/self-test.sh` in the repo — DISCOVERED (globbed, then
+  intersected with `git ls-files` so an untracked/vendored/ignored tree can
+  never be silently promoted into the blocking gate — this repo's own
+  `ai/skills/synced/`, ".gitignore: vendored plugin skills; NOT harness
+  source", is exactly that shape), never hand-declared, so a future suite
+  ANYWHERE in the repo is covered with zero manual wiring step, **provided its
+  entry point is named exactly `self-test.sh`** — that filename is the whole
+  discovery contract; a suite shipped as e.g. `scripts/test/foo/tests.sh` is
+  NOT discovered by the glob. This patches the CLASS, not one site, and not
+  even one *shape* of site: DND-209 started from
   `scripts/test/athena-inbox-client/self-test.sh` (42 cases + a sabotage run,
   shipped by DND-189 and ran automatically nowhere — `harness-gate` was 10/10
-  green and would have stayed green with it deleted), and a review pass found
-  the same gap already existed for `ai/inbox/test/self-test.sh`,
+  green and would have stayed green with it deleted); a first review pass
+  found the same gap already existed for `ai/inbox/test/self-test.sh`,
   `ai/skills/athena:inbox/test/self-test.sh` and
-  `ai/skills/athena:slack/test/self-test.sh` — so the glob covers the whole
-  repo, not just `scripts/test/`. This is also how
-  `scripts/setup-athena-inbox-client --self-test` and `scripts/setup-inbox-registry
-  --self-test` end up covered: each runs a file the glob already discovers
-  (`scripts/test/athena-inbox-client/self-test.sh`,
+  `ai/skills/athena:slack/test/self-test.sh`, so the glob was widened from
+  `scripts/test/**` to the whole repo; a second review pass then found that
+  requiring a directory literally named `test/` in the path was itself still
+  site-specific (a suite could ship as e.g. `ai/foo/self-test.sh`, no `test/`
+  dir at all), so the glob is unconditional (`**/self-test.sh`) — only the
+  *misnamed-suite warning* below stays scoped to `test/` directories, since
+  widening THAT to every `.sh` in the repo would flag effectively every helper
+  script. This is also how `scripts/setup-athena-inbox-client --self-test` and
+  `scripts/setup-inbox-registry --self-test` end up covered: each runs a file
+  the glob already discovers (`scripts/test/athena-inbox-client/self-test.sh`,
   `ai/inbox/test/self-test.sh` respectively), declared in the runner's
   `SELF_TEST_DELEGATES` map so neither is ALSO run as a separate installer
   entry (same suite, one label). The runner prints the discovered count in its
   normal output (`self-tests discovered: N`) and FAILS outright on zero (this
-  repo always has committed suites, so zero means the glob broke, not that
-  there is nothing to run); it also WARNS (non-blocking, since a helper script
-  may legitimately live under a `test/` directory too, and the check does NOT
-  filter on the executable bit — a suite committed without `+x` is the likelier
-  real mistake) about any other `.sh` file under a `test/` directory not named
-  `self-test.sh`, so a misnamed suite is at least visible. Its `--self-test`
-  proves the discovery mechanism itself works — against a throwaway fixture
-  tree, never a real `test/` directory — by planting a deliberately failing
-  stub, confirming it turns red, then fixing/removing it and confirming it
-  turns green again, exercising the zero-discovery and stray-suite guards the
-  same way, PLUS an end-to-end check that `harness-gate --list` actually lists
-  every real discovered suite (catching a regression in the `CHECKS =
-  STATIC_CHECKS + self_test_checks` composition itself); and it FAILS if any
-  `scripts/setup-*` advertising a `--self-test` is neither declared nor
-  delegated, so a future installer cannot ship an unrun suite either.
+  repo always has committed suites, so zero means the glob or the tracked-file
+  filter broke, not that there is nothing to run); it also WARNS (non-blocking,
+  since a helper script may legitimately live under a `test/` directory too,
+  and the check does NOT filter on the executable bit — a suite committed
+  without `+x` is the likelier real mistake) about any other `.sh` file under a
+  `test/` directory not named `self-test.sh`, so a misnamed suite is at least
+  visible. Its `--self-test` proves the discovery mechanism itself works —
+  against a throwaway fixture tree, never a real directory in this repo — by
+  planting a deliberately failing stub, confirming it turns red, then
+  fixing/removing it and confirming it turns green again; exercises
+  `run_gate`'s own zero-discovery and stray-suite branches directly (not just
+  their extracted predicates) via a `root:`/`dry_run:` parameter meant only for
+  this; proves a real git fixture repo's untracked file is excluded while its
+  tracked one is not; PLUS an end-to-end check that `harness-gate --list`
+  actually lists every real discovered suite (catching a regression in the
+  `CHECKS = STATIC_CHECKS + self_test_checks` composition itself); and it
+  FAILS if any `scripts/setup-*` advertising a `--self-test` is neither
+  declared nor delegated, so a future installer cannot ship an unrun suite
+  either.
 - `ai/bin/harness-gate --self-test` — the runner itself (not in its own CHECKS;
   it would recurse). Run it when you touch the gate's composition.
 - Any skill or script self-test relevant to what you changed.
