@@ -621,6 +621,76 @@ run_hook
 assert_contains "R13 the control: a never-delivered LOG channel is still a fault" \
   "never received anything" "$(context_of "${OUT}")"
 
+echo "== R16: an entry that VANISHED is not the same as one that never existed =="
+
+# The two are byte-identical to inbox-status -- {"channels":[],...}, exit 0 --
+# and correctly so: it cannot know a project's history. But a registry entry is
+# an untracked file outside git, so its deletion leaves no diff and no undo,
+# and every other signal in this hook is silent by design. Somebody has to
+# remember that this project once had channels, and the session standing in the
+# project is the only one who can.
+#
+# Round 3 made "not opted in" stamp nothing, which stopped the hook LYING about
+# success; it did not make the resulting absence of success SPEAK. Nothing in
+# the suite reached the state, because every no-entry fixture builds a repo that
+# never had an entry and every case starts from an empty $HOME.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+run_hook                                    # session 1: opted in, mail counted
+assert_contains "R16 the precondition: session 1 sees this project's channels" \
+  "2 new in slack" "$(context_of "${OUT}")"
+rm -f "${ATHENA_INBOX_ROOT}/projects/p.json" # ...and now the entry is gone
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "R16 a vanished entry is announced, not silently treated as opt-out" \
+  "had inbox channels on an earlier session and has none now" "${CTX}"
+assert_contains "R16 the Fix names where to restore it" "projects/" "${CTX}"
+assert_contains "R16 ...and how to silence it if the project was retired on purpose" \
+  "delete" "${CTX}"
+
+# It is rate-limited by a marker of its OWN, beside the project it is about --
+# not by the $HOME-level health marker, which another project could hold.
+setup_case
+register "${LOG_CHANNEL}"
+run_hook
+rm -f "${ATHENA_INBOX_ROOT}/projects/p.json"
+touch "${HOME}/.claude/athena-inbox-last-health-warn"   # another project warned
+run_hook
+assert_contains "R16 another project's health warning does not silence this one" \
+  "has none now" "$(context_of "${OUT}")"
+run_hook                                                 # ...but its own does
+assert_eq "R16 the vanished-entry warning is rate-limited by its own marker" "" "${OUT}"
+
+# A repo that NEVER opted in must stay silent. Without this, the warning above
+# would fire in every unrelated repo on the machine -- the noise this hook
+# refuses everywhere else.
+setup_case
+run_hook
+assert_eq "R16 a repo that never opted in says nothing" "" "${OUT}"
+
+echo "== R17: a count known to be inflated is never announced as plain fact =="
+
+# `state_unreadable` means the channel was re-read from offset 0 with empty
+# seen-sets, so the number includes messages already acked. The caveat used to
+# live in HEALTH_TEXT, which the warn-marker rate limit blanks -- so for up to a
+# whole six-hour window the pre-prompt notice read "N new in slack" as fact.
+# The caveat now rides the NUMBER, which no rate limit can strip, exactly as
+# inbox-status attaches its own per-channel Fix: unconditionally.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+printf 'not json' > "${ATHENA_INBOX_ROOT}/p-slack.state.json"
+touch "${HOME}/.claude/athena-inbox-last-health-warn"    # the warning is silenced...
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "R17 the inflated count still carries its caveat" \
+  "not deduped" "${CTX}"
+assert_contains "R17 the precondition: the warning itself IS rate-limited here" \
+  "2 new in slack" "${CTX}"
+assert_not_contains "R17 ...and the rate-limited warning really is absent" \
+  "unreadable state file" "${CTX}"
+
 echo "== R12: a registry entry that could not be read is surfaced, not skipped =="
 
 # The sharpest form of the standing question. `projects/` is multi-tenant: an

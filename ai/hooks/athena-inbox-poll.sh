@@ -60,6 +60,8 @@
 #   athena-inbox-last-warn     when did we last say THE POLL IS BROKEN
 #   athena-inbox-last-health-warn  when did we last say THE POLL FOUND A FAULT
 #   athena-inbox-poll.log      last 200 lines, fixed reason strings only
+#   athena-inbox-seen/<hash>   this project HAD channels once (per-project)
+#   athena-inbox-seen/<hash>.warn  when we last said they had vanished
 #
 # Merging any two of these breaks one of the answers, and they are namespaced
 # separately from the athena-slack-* family: a shared marker once let a fresh
@@ -151,6 +153,48 @@ WARN_MARKER="${MARKER_DIR}/athena-inbox-last-warn"
 HEALTH_WARN_MARKER="${MARKER_DIR}/athena-inbox-last-health-warn"
 LOG_FILE="${MARKER_DIR}/athena-inbox-poll.log"
 
+# PER-PROJECT state, and the only state here that is not per-$HOME.
+#
+# "This project never opted in" and "this project's registry entry was deleted
+# or clobbered" are BYTE-IDENTICAL on disk -- inbox-status answers
+# {"channels":[],"failed_candidates":0} and exits 0 for both, correctly, since
+# it cannot know a project's history. The second is the silent-dark failure
+# CLAUDE.md names for this registry: an untracked file outside git, so its loss
+# has no diff and no undo. Somebody has to remember that this project once had
+# channels, and the session standing in the project is the only one who can.
+#
+# The identity is the contract's own key -- the realpath of the git common dir,
+# identical for a repo's main checkout and all its worktrees -- taken from the
+# skill's `fs_git_common_dir` rather than reimplemented, and in a SUBSHELL so
+# the library's names never enter this file's namespace. The path is hashed
+# because a marker filename must not be a filesystem path, and because the
+# filename would otherwise disclose which projects this machine has registered.
+SEEN_DIR="${MARKER_DIR}/athena-inbox-seen"
+PROJECT_KEY=""
+PROJECT_HASH=""
+if command -v sha256sum >/dev/null 2>&1; then
+  _lib="${REPO_DIR}/ai/skills/athena:inbox/lib"
+  PROJECT_KEY="$(
+    . "${_lib}/err.sh" >/dev/null 2>&1 \
+      && . "${_lib}/names.sh" >/dev/null 2>&1 \
+      && . "${_lib}/fs.sh" >/dev/null 2>&1 \
+      && fs_git_common_dir "$(pwd)" 2>/dev/null
+  )" || PROJECT_KEY=""
+  if [ -n "${PROJECT_KEY}" ]; then
+    PROJECT_HASH="$(printf '%s' "${PROJECT_KEY}" | sha256sum 2>/dev/null | cut -c1-32)"
+    case "${PROJECT_HASH}" in ''|*[!0-9a-f]*) PROJECT_HASH="" ;; esac
+  fi
+fi
+SEEN_MARKER=""
+SEEN_WARN_MARKER=""
+if [ -n "${PROJECT_HASH}" ]; then
+  SEEN_MARKER="${SEEN_DIR}/${PROJECT_HASH}"
+  # Rate-limited by a marker of its OWN, beside the fact it is about. A
+  # per-project fault must not be silenced by another project's warning, which
+  # is what a shared $HOME-level marker would do.
+  SEEN_WARN_MARKER="${SEEN_DIR}/${PROJECT_HASH}.warn"
+fi
+
 # --- markers ---------------------------------------------------------------
 
 # log_reason <fixed-string>
@@ -172,8 +216,12 @@ log_reason() {
   fi
 }
 
-stamp()   { [ "${DRY_RUN}" -eq 1 ] && return 0; mkdir -p -- "${MARKER_DIR}" 2>/dev/null && : > "$1" 2>/dev/null; return 0; }
-unstamp() { [ "${DRY_RUN}" -eq 1 ] && return 0; rm -f -- "$1" 2>/dev/null; return 0; }
+# `${1%/*}` rather than `dirname`: the attempt marker must be stampable by a run
+# that can do nothing else, and the F-7 fixture proves that by stripping PATH to
+# a handful of binaries. A marker writer that reaches for one more external
+# command is a marker writer that stops working exactly when it matters most.
+stamp()   { [ "${DRY_RUN}" -eq 1 ] && return 0; [ -n "$1" ] || return 0; mkdir -p -- "${1%/*}" 2>/dev/null && : > "$1" 2>/dev/null; return 0; }
+unstamp() { [ "${DRY_RUN}" -eq 1 ] && return 0; [ -n "$1" ] || return 0; rm -f -- "$1" 2>/dev/null; return 0; }
 
 # marker_age_seconds <path> -> seconds, or nothing at all when the marker is
 # absent. Both sides are epoch seconds from the same clock, so this is immune to
@@ -181,7 +229,7 @@ unstamp() { [ "${DRY_RUN}" -eq 1 ] && return 0; rm -f -- "$1" 2>/dev/null; retur
 # nothing.
 marker_age_seconds() {
   local mtime now
-  [ -e "$1" ] || return 1
+  [ -n "$1" ] && [ -e "$1" ] || return 1
   mtime="$(stat -c %Y -- "$1" 2>/dev/null)" || return 1
   case "${mtime}" in ''|*[!0-9]*) return 1 ;; esac
   now="$(date +%s)"
@@ -284,6 +332,9 @@ fi
 
 if [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 1 ]; then
   stamp "${SUCCESS_MARKER}"
+  # This project HAS channels. Remembered so that their later disappearance can
+  # be told apart from never having had any.
+  stamp "${SEEN_MARKER}"
 elif [ "${POLL_OK}" -eq 0 ]; then
   # NEVER the success marker here (S17).
   log_reason "inbox-status produced no usable status document (exit ${STATUS_RC}), so this session has no count. Fix: run ai/skills/athena:inbox/bin/inbox-status --json from this project to see the refusal it printed."
@@ -309,6 +360,13 @@ if [ "${POLL_OK}" -eq 1 ]; then
       | select($n > 0)
       | "\($n) new in \(.name)"
         + (if (.unreadable // 0) > 0 then " (+\(.unreadable) unreadable)" else "" end)
+        # The caveat rides the NUMBER, not the warning. state_unreadable means
+        # the channel was re-read from offset 0 with empty seen-sets, so this
+        # count includes messages already acked. Leaving that in HEALTH_TEXT
+        # meant the rate limit on the warning laundered the figure: for up to a
+        # whole window the notice read "12 new" as plain fact. inbox-status
+        # attaches its own per-channel Fix: unconditionally, for this reason.
+        + (if (.state_unreadable // false) then " (not deduped — includes already-read messages)" else "" end)
     ] | join(", ")' 2>/dev/null)" || COUNTS_TEXT=""
 
   # Counts, never names -- see the disclosure note in the header.
@@ -338,7 +396,15 @@ fi
 # argues against (walt_ui S14), reached from the other side.
 WARN_TEXT=""
 WARN_TEXT_MARKER=""
-if [ "${POLL_OK}" -eq 0 ]; then
+if [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 0 ] \
+   && [ -n "${SEEN_MARKER}" ] && [ -e "${SEEN_MARKER}" ]; then
+  # THE VANISHED ENTRY. This project declared channels on some earlier session
+  # and declares none now. The registry lives outside git, untracked, so its
+  # loss leaves no diff and no undo -- and every other signal here is silent by
+  # design, which is exactly what makes this the one worth interrupting for.
+  WARN_TEXT="athena:inbox: this project had inbox channels on an earlier session and has none now, so its mail is going unread. Fix: its registry entry under \${ATHENA_INBOX_ROOT:-~/.local/share/athena}/projects/ is missing or no longer names this repo — restore it, or, if the project was retired deliberately, delete ${SEEN_MARKER} to stop this notice."
+  WARN_TEXT_MARKER="${SEEN_WARN_MARKER}"
+elif [ "${POLL_OK}" -eq 0 ]; then
   # Only worth saying when the silence has actually lasted. A single transient
   # failure with a fresh success marker is not an outage.
   if marker_is_stale "${SUCCESS_MARKER}" "${STALE_SECONDS}"; then

@@ -255,13 +255,13 @@ without it. Its header says so.
 - **Suite run:** `bash ai/hooks/athena-inbox-poll.self-test.sh </dev/null`
   (no network; every case gets a fake `$HOME`, a private `ATHENA_INBOX_ROOT`
   and its own `git init` repo under one `mktemp -d`; ~5s wall)
-- **Baseline:** `VERDICT: PASS (134 cases)` (91 at the first pass; 21 added
-  after the sabotage run, 22 more across three critic rounds — see *The four
+- **Baseline:** `VERDICT: PASS (144 cases)` (91 at the first pass; 21 added
+  after the sabotage run, 32 more across four critic rounds — see *The four
   zeros* and *What the critic found that sabotage did not*)
-- **Runner:** 29 mutations, one at a time, full suite after each, restored by
-  `cp` from a backup taken before the run. S24–S29 were added after the review
-  rounds (see *What the critic found that sabotage did not*). Final pass: **29
-  mutations, 29 reddened, no measured zeros.**
+- **Runner:** 33 mutations, one at a time, full suite after each, restored by
+  `cp` from a backup taken before the run. S24–S33 were added after the review
+  rounds (see *What the critic found that sabotage did not*). Final pass: **33
+  mutations, 33 reddened, no measured zeros.**
 
 The mutations were applied by an exact-substring replace that asserts the
 anchor occurs **exactly once** before writing, as DND-183's run did. That
@@ -306,6 +306,10 @@ produces 23 green runs, which reads as "this suite is dead".
 | S27 | the two warnings share one rate-limit marker again | 2 | `FAIL  R8 a fresh OUTAGE warning does not suppress a HEALTH warning` |
 | S28 | a non-opted-in repo counts as a successful poll again | 5 | `FAIL  F-4 a non-opted-in repo does NOT stamp success` |
 | S29 | a non-opted-in repo clears the other project's warn markers again | 2 | `FAIL  F-4 a non-opted-in repo does not clear the outage marker` |
+| S30 | the vanished-entry warning is dropped | 4 | `FAIL  R16 a vanished entry is announced, not silently treated as opt-out` |
+| S31 | the per-project seen marker is never recorded | 4 | `FAIL  R16 a vanished entry is announced, not silently treated as opt-out` |
+| S32 | the vanished-entry warning shares the `$HOME`-level health rate limit | 1 | `FAIL  R16 another project's health warning does not silence this one` |
+| S33 | the inflated-count caveat moves back behind the rate limit | 1 | `FAIL  R17 the inflated count still carries its caveat` |
 
 ### The four zeros
 
@@ -469,6 +473,40 @@ different repos against one fake `$HOME`, so the cross-project mechanism had no
 fixture at all. Again a hole in the fixture space rather than the mutation set.
 Closed by the new `F-4` marker assertions and a two-repos-one-`$HOME` case;
 pinned by S28 and S29.
+
+**Round four closed the other half of the same door, which round three had
+opened without noticing.** Making "not opted in" stamp nothing stopped the hook
+*lying* about success; it did not make the resulting absence of success
+**speak**. A project whose registry entry is deleted or clobbered answers
+`{"channels":[]}` exactly like one that never opted in, so the hook stamped
+nothing, cleared nothing and printed nothing — forever. The staleness warning is
+reachable only under `POLL_OK=0`, and that path is `POLL_OK=1`. Worse, the
+record written in round three asserted the fix had this property ("a project
+whose entry vanishes stops stamping success, so its own next session crosses the
+staleness window and warns"), which the code did not do — **a dated record
+claiming a behaviour the code lacks is worse than no record**, and it is
+corrected here rather than quietly dropped.
+
+The fix needs memory that `inbox-status` cannot have, because it cannot know a
+project's history: a **per-project** marker, `athena-inbox-seen/<hash>`, stamped
+whenever a session does resolve channels. Channels once, none now, is then a
+distinguishable state and gets a warning naming both repairs — restore the
+entry, or delete the marker if the project was retired on purpose. The identity
+is the contract's own key taken from the skill's `fs_git_common_dir` (in a
+subshell, so the library's names never enter the hook), hashed so the filename
+neither is a path nor discloses which projects this machine has registered. Its
+rate limit sits beside it, per project: a fault about one project must not be
+silenced by a warning about another. **R16**, pinned by S30–S32.
+
+**And a count known to be wrong was being announced as fact.**
+`state_unreadable` means the channel was re-read from offset 0 with empty
+seen-sets, so `new` includes messages already acked. The caveat lived in
+`HEALTH_TEXT` → `WARN_TEXT`, which the warn rate limit blanks — so for up to a
+whole six-hour window the pre-prompt notice read "12 new in slack" with nothing
+marking it as inflated. The rate limit on the *warning* was laundering the
+*number*. The caveat now rides the number, where no rate limit can strip it,
+the way `bin/inbox-status` attaches its own per-channel `Fix:` unconditionally.
+**R17**, pinned by S33.
 
 ### Not exercised by this run
 
