@@ -33,6 +33,7 @@ RUNNER="${SCRIPTS}/athena-shipwright-run.sh"
 PASS=0; FAIL=0
 TMP="$(mktemp -d)"
 RUNNER_PID=""
+HOLDER_PID=""
 
 cleanup() {
   # Reap by PID only. A `pkill -f` here could match a real shipwright run or a
@@ -40,6 +41,12 @@ cleanup() {
   if [ -n "$RUNNER_PID" ]; then
     kill "$RUNNER_PID" 2>/dev/null
     wait "$RUNNER_PID" 2>/dev/null
+  fi
+  # The live-lane-never-reaped case holds an flock in a background process; make
+  # sure a failed case never leaves it running past the suite.
+  if [ -n "$HOLDER_PID" ]; then
+    kill "$HOLDER_PID" 2>/dev/null
+    wait "$HOLDER_PID" 2>/dev/null
   fi
   rm -rf -- "$TMP"
 }
@@ -409,7 +416,7 @@ else
   bad "--help is complete" "rc=$rc out=$o"
 fi
 o="$("$RUNNER" --help 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'SHIPWRIGHT_SKIP_ESCALATE'; then
+if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'SHIPWRIGHT_FAIL_ESCALATE'; then
   ok "the runner's --help lists the environment knobs its Fix: lines mention"
 else
   bad "runner --help" "rc=$rc out=$o"
@@ -464,9 +471,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-case_ 'athena-shipwright-run.sh — the yield guard'
+# Shared helpers for the runner (per-invocation-lane) sections below.
 
-run_runner() { # run_runner <repo> [env...] ; echoes rc
+run_runner() { # run_runner <repo> [env...] ; echoes rc, out/err beside the repo
   local repo="$1"; shift
   local a; a="$(aux "$repo")"
   env "$@" SHIPWRIGHT_REPO="$repo" SHIPWRIGHT_CLAUDE="${a}/stub-claude" \
@@ -474,15 +481,55 @@ run_runner() { # run_runner <repo> [env...] ; echoes rc
   echo $?
 }
 
+# A probe stub that records WHERE it ran, WHICH lane branch it was on, and WHAT
+# state directory it was handed. "Where/which" is the whole point of these
+# sections: a session started in the main checkout shares an index and working
+# files with whoever else is typing there (the class ce70e04 came from), and two
+# invocations must never share a lane. claude-was-invoked and claude-branch are
+# APPENDED so a case can run the runner more than once and count/compare.
+stub_claude_probe() { # $1 = path, $2 = exit code, $3 = extra shell line
+  cat >"$1" <<EOF
+#!/usr/bin/env bash
+d="\$(dirname "\$0")"
+echo "\$@" >>"\$d/claude-was-invoked"
+pwd -P >"\$d/claude-cwd"
+git rev-parse --abbrev-ref HEAD 2>/dev/null >>"\$d/claude-branch"
+printf '%s\n' "\${SHIPWRIGHT_STATE_DIR:-<unset>}" >"\$d/claude-state-dir"
+${3:-:}
+exit $2
+EOF
+  chmod +x "$1"
+}
+
+real() { ( cd "$1" 2>/dev/null && pwd -P ); }
+lanes_dir() { echo "$1/.git/shipwright-lanes"; }
+# Registered lane worktrees still present (should be empty after any teardown).
+run_worktrees() { git -C "$1" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}' | grep '/shipwright-lanes/run-' || true; }
+# Lane branches still present.
+run_branches() { git -C "$1" for-each-ref --format='%(refname:short)' refs/heads/shipwright 2>/dev/null || true; }
+# A dead corpse: a real lane worktree + meta (origin) + a FREE lock file.
+make_corpse() { # <repo> <run-id> <origin>
+  local repo="$1" rid="$2" origin="$3" ld; ld="$(lanes_dir "$repo")"
+  mkdir -p "$ld"
+  git -C "$repo" worktree add -q -b "shipwright/${rid}" "${ld}/${rid}" HEAD >/dev/null 2>&1
+  printf 'origin=%s\n' "$origin" >"${ld}/${rid}.meta"
+  : >"${ld}/${rid}.lock"
+}
+
+# ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — the yield guard (main-checkout dirt, ECONOMY, decoupled from the wedge counter)'
+
+# A dirty MAIN CHECKOUT yields the tick: a human/agent is mid-change there and
+# the end-of-run fast-forward would refuse anyway, so do not spawn a session.
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
 printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
 rc="$(run_runner "$r")"
-if [ "$rc" -eq 0 ]; then ok "a dirty tree skips the tick with exit 0 (a skip is not a failure)"
-else bad "dirty tree exits 0" "rc=$rc $(cat "$a/runner.err")"; fi
+if [ "$rc" -eq 0 ]; then ok "a dirty main checkout skips the tick with exit 0 (a yield is not a failure)"
+else bad "dirty main checkout exits 0" "rc=$rc $(cat "$a/runner.err")"; fi
 if [ ! -e "$a/claude-was-invoked" ]; then
   ok "and no headless session is started at all"
 else
-  bad "no claude on a dirty tree" "stub ran: $(cat "$a/claude-was-invoked")"
+  bad "no claude on a dirty main checkout" "stub ran: $(cat "$a/claude-was-invoked")"
 fi
 if grep -q 'Fix:' "$a/runner.err" && grep -q 'bystander.conf' "$a/runner.err"; then
   ok "the skip names the offending paths and carries a Fix: line"
@@ -494,110 +541,42 @@ if ls "$r"/ai-artifacts/shipwright/runs/*.skipped >/dev/null 2>&1; then
 else
   bad "skip leaves a record" "$(ls -R "$r/ai-artifacts" 2>&1)"
 fi
+if [ -z "$(run_worktrees "$r")" ] && [ -z "$(run_branches "$r")" ]; then
+  ok "a yield provisions no lane (it happens before any worktree is created)"
+else
+  bad "yield creates no lane" "worktrees='$(run_worktrees "$r")' branches='$(run_branches "$r")'"
+fi
 
-# An UNTRACKED stray alone is dirt too — the .bak in the real incident was
-# untracked, and a guard that only looked at tracked files would have missed it.
+# THE DECOUPLING. The old counter escalated on consecutive dirty-tree skips; the
+# new one must NOT — a human editing for hours is economy, not a wedge. Many
+# yields in a row stay exit 0 and never write the failure counter.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
+codes=""
+for _ in 1 2 3 4 5; do codes="${codes}$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2) "; done
+if [ "$codes" = "0 0 0 0 0 " ]; then
+  ok "consecutive main-checkout yields never escalate (got: ${codes% }) — the yield is decoupled from the wedge counter"
+else
+  bad "yields do not escalate" "exit codes '${codes% }', want all 0"
+fi
+if [ ! -e "$r/ai-artifacts/shipwright/consecutive-failures" ]; then
+  ok "and a yield never touches the failure counter"
+else
+  bad "yield leaves the counter untouched" "counter=$(cat "$r/ai-artifacts/shipwright/consecutive-failures")"
+fi
+
+# An UNTRACKED stray in the main checkout is dirt too — the .bak in the real
+# incident was untracked.
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
 printf 'stray\n' >"$r/somebody.bak"
 rc="$(run_runner "$r")"
 if [ "$rc" -eq 0 ] && [ ! -e "$a/claude-was-invoked" ]; then
-  ok "an untracked-only stray also yields the tick"
+  ok "an untracked-only stray in the main checkout also yields the tick"
 else
   bad "untracked stray yields" "rc=$rc"
 fi
 
-# Clean tree: the run proceeds.
-r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
-rc="$(run_runner "$r")"
-if [ "$rc" -eq 0 ] && [ -e "$a/claude-was-invoked" ]; then
-  ok "a clean tree runs normally (the guard is not a blanket stop)"
-else
-  bad "clean tree runs" "rc=$rc err=$(cat "$a/runner.err")"
-fi
-
-# The shipwright's OWN state must never trip its successor. These fixtures carry
-# no ignore rule for ai-artifacts/ on purpose (see new_repo): the real repo is
-# covered only by a machine-local ~/.config/git/gitignore that is not in the
-# repository, so a runner that leaned on it would yield forever — silently, at
-# exit 0 — on any checkout without that rule. A second run after a first is the
-# real shape of this.
-r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
-rc="$(run_runner "$r")"
-rm -f "$a/claude-was-invoked"
-rc2="$(run_runner "$r")"
-if [ "$rc" -eq 0 ] && [ "$rc2" -eq 0 ] && [ -e "$a/claude-was-invoked" ]; then
-  ok "a run's own logs/lock/.skipped records do not make the NEXT run yield, with no ignore rule in play"
-else
-  bad "shipwright state does not trip its successor" "rc=$rc rc2=$rc2 err=$(cat "$a/runner.err")"
-fi
-if [ -n "$(git -C "$r" status --porcelain -uall | grep '^?? ai-artifacts/')" ]; then
-  ok "and that state really is untracked in the fixture (so the case is not vacuous)"
-else
-  bad "fixture actually exercises the exclusion" "$(git -C "$r" status --porcelain -uall)"
-fi
-
-# A WEDGED lane must not read as a quiet one. A stray file nobody clears stops
-# the shipwright indefinitely, and an hourly exit 0 is exactly what a healthy
-# idle lane looks like. After the threshold the skip becomes a non-zero exit.
-r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
-printf 'abandoned stray\n' >"$r/somebody.bak"
-codes=""
-for _ in 1 2 3; do codes="${codes}$(run_runner "$r" SHIPWRIGHT_SKIP_ESCALATE=3) "; done
-if [ "$codes" = "0 0 75 " ]; then
-  ok "consecutive skips escalate to a non-zero exit at the threshold (got: ${codes% })"
-else
-  bad "wedged lane escalates" "exit codes were '${codes% }', want '0 0 75'"
-fi
-if grep -q 'WEDGED' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
-  ok "and the escalation says it is wedged, with a Fix: line"
-else
-  bad "escalation message" "$(cat "$a/runner.err")"
-fi
-if [ ! -e "$a/claude-was-invoked" ]; then
-  ok "and still never started a session on the dirty tree"
-else
-  bad "escalation does not imply running anyway" "stub ran"
-fi
-
-# The counter measures CONSECUTIVE skips: a run that actually starts resets it,
-# so an occasional passing editor never accumulates into a false wedge alarm.
-r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
-printf 'transient\n' >"$r/somebody.bak"
-run_runner "$r" SHIPWRIGHT_SKIP_ESCALATE=3 >/dev/null
-run_runner "$r" SHIPWRIGHT_SKIP_ESCALATE=3 >/dev/null
-rm "$r/somebody.bak"
-run_runner "$r" SHIPWRIGHT_SKIP_ESCALATE=3 >/dev/null     # a real run: resets
-printf 'transient again\n' >"$r/somebody.bak"
-codes=""
-for _ in 1 2; do codes="${codes}$(run_runner "$r" SHIPWRIGHT_SKIP_ESCALATE=3) "; done
-if [ "$codes" = "0 0 " ]; then
-  ok "a successful run resets the counter (two skips after it do not escalate)"
-else
-  bad "counter counts consecutive skips only" "exit codes '${codes% }', want '0 0'"
-fi
-
-# A non-numeric threshold must not silently disable the escalation. The `-ge`
-# test sits in an `if` condition, which exempts its error from `set -e`, so the
-# script would fall through to the quiet exit 0 forever — the wedged-lane
-# invariant defeated by a typo, with only a shell diagnostic to show for it.
-r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
-printf 'abandoned stray\n' >"$r/somebody.bak"
-codes=""
-for _ in 1 2 3 4 5 6 7; do
-  codes="${codes}$(run_runner "$r" SHIPWRIGHT_SKIP_ESCALATE=notanumber) "
-done
-if printf '%s' "$codes" | grep -q '75'; then
-  ok "a non-numeric SHIPWRIGHT_SKIP_ESCALATE falls back to the default and still escalates (got: ${codes% })"
-else
-  bad "bad SHIPWRIGHT_SKIP_ESCALATE does not disable escalation" "exit codes '${codes% }' — none was 75"
-fi
-if grep -q 'not a positive integer' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
-  ok "and says so with a Fix: line rather than degrading silently"
-else
-  bad "bad threshold is reported" "$(cat "$a/runner.err")"
-fi
-
-# The documented override.
+# The documented override runs anyway.
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
 printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
 rc="$(run_runner "$r" SHIPWRIGHT_ALLOW_DIRTY=1)"
@@ -607,51 +586,342 @@ else
   bad "override works" "rc=$rc err=$(cat "$a/runner.err")"
 fi
 
-# The guard must not swallow the session's own failure.
+# The shipwright's OWN state in the main checkout must never trip the yield. The
+# fixtures carry no ignore rule for ai-artifacts/ (see new_repo), so a runner
+# leaning on the machine-local rule would yield forever on any checkout without
+# it. A second run after a first is the real shape of this.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+rc="$(run_runner "$r")"
+rm -f "$a/claude-was-invoked"
+rc2="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && [ "$rc2" -eq 0 ] && [ -e "$a/claude-was-invoked" ]; then
+  ok "a run's own logs/lock/records do not make the NEXT run yield, with no ignore rule in play"
+else
+  bad "shipwright state does not trip its successor" "rc=$rc rc2=$rc2 err=$(cat "$a/runner.err")"
+fi
+
+# DRY_RUN prints the brief without consulting git — it must work from a dirty
+# tree, since that is when a human is most likely inspecting it. And the brief
+# must name no checkout path (the agent template owns where the run happens).
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
+o="$(env DRY_RUN=1 SHIPWRIGHT_REPO="$r" SHIPWRIGHT_CLAUDE="$a/stub-claude" "$RUNNER" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'athena-shipwright agent' \
+   && ! printf '%s' "$o" | grep -q 'dev/custom' \
+   && printf '%s' "$o" | grep -q 'Sync your tree'; then
+  ok "DRY_RUN=1 prints the brief from a dirty tree and names no checkout path"
+else
+  bad "DRY_RUN brief" "rc=$rc out=$o"
+fi
+
+# ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — the per-invocation lane: unique, in a worktree, torn down'
+
+# A clean tree runs in a FRESH lane worktree (inside .git/shipwright-lanes),
+# never the main checkout, and lands its commits on the main checkout by
+# fast-forward — then removes the worktree and deletes the (landed) branch.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm "run work"'
+before="$(git -C "$r" rev-parse HEAD)"
+rc="$(run_runner "$r")"
+after="$(git -C "$r" rev-parse HEAD)"
+if [ "$rc" -eq 0 ] && [ -e "$a/claude-was-invoked" ]; then
+  ok "a clean tree runs normally (the guard is not a blanket stop)"
+else
+  bad "clean tree runs" "rc=$rc err=$(cat "$a/runner.err")"
+fi
+case "$(cat "$a/claude-cwd" 2>/dev/null)" in
+  */.git/shipwright-lanes/run-*) ok "the session runs in a per-invocation lane worktree inside .git, not the main checkout" ;;
+  *) bad "session runs in a lane worktree" "cwd=$(cat "$a/claude-cwd" 2>/dev/null)" ;;
+esac
+if [ "$(cat "$a/claude-cwd" 2>/dev/null)" != "$(real "$r")" ]; then
+  ok "and that cwd is NOT the main checkout"
+else
+  bad "lane is not the main checkout" "cwd=$(cat "$a/claude-cwd" 2>/dev/null)"
+fi
+if [ "$rc" -eq 0 ] && [ "$after" != "$before" ] && [ "$after" = "$(git -C "$r" rev-parse main)" ]; then
+  ok "the run's commits reach the main checkout by fast-forward"
+else
+  bad "main checkout fast-forwards" "rc=$rc before=$before after=$after $(cat "$a/runner.err")"
+fi
+if [ -z "$(run_worktrees "$r")" ]; then
+  ok "and the lane worktree is torn down after the run (no standing shared lane)"
+else
+  bad "worktree torn down" "$(run_worktrees "$r")"
+fi
+if [ -z "$(run_branches "$r")" ]; then
+  ok "and the landed lane branch is deleted (its commits are on main)"
+else
+  bad "landed branch deleted" "$(run_branches "$r")"
+fi
+
+# THE STATE GOTCHA. ai-artifacts/ is gitignored, so a lane starts with no
+# cursor.txt/journal.md. State must resolve to the MAIN checkout however the run
+# is invoked, or an absent cursor reads the same as a cursor at epoch.
+if [ "$(cat "$a/claude-state-dir" 2>/dev/null)" = "$r/ai-artifacts/shipwright" ]; then
+  ok "the session is handed SHIPWRIGHT_STATE_DIR in the MAIN checkout, not its own lane"
+else
+  bad "state dir is anchored" "got=$(cat "$a/claude-state-dir" 2>/dev/null) wanted=$r/ai-artifacts/shipwright"
+fi
+if ls "$r"/ai-artifacts/shipwright/runs/*.log >/dev/null 2>&1; then
+  ok "and the run log lands in the main checkout too"
+else
+  bad "logs land in the main checkout" "$(ls -R "$r/ai-artifacts" 2>&1 | head -20)"
+fi
+
+# UNIQUE LANE PER INVOCATION. Two runs must never share a branch/worktree — each
+# invocation is its own unit of work. The probe records the branch it was on.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm "run work"'
+run_runner "$r" >/dev/null
+run_runner "$r" >/dev/null
+n="$(wc -l <"$a/claude-branch" | tr -d ' ')"
+u="$(sort -u "$a/claude-branch" | wc -l | tr -d ' ')"
+if [ "$n" = "2" ] && [ "$u" = "2" ] && ! grep -qv '^shipwright/run-' "$a/claude-branch"; then
+  ok "two invocations get two DIFFERENT lane branches, both shipwright/run-* ($(tr '\n' ' ' <"$a/claude-branch"))"
+else
+  bad "unique lane per invocation" "branches: $(tr '\n' ' ' <"$a/claude-branch") (n=$n unique=$u)"
+fi
+
+# NO-NETWORK FALLBACK. The fixtures have no remote, so `git fetch origin main`
+# fails and the lane must fall back to the main checkout HEAD — the run still
+# works and still lands locally.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm "offline work"'
+before="$(git -C "$r" rev-parse HEAD)"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && [ -e "$a/claude-was-invoked" ] \
+   && [ "$(git -C "$r" rev-parse HEAD)" != "$before" ] \
+   && grep -q 'no-network fallback' "$a/runner.err"; then
+  ok "with no reachable remote the lane falls back to HEAD, runs, and lands (says so on stderr)"
+else
+  bad "no-network fallback" "rc=$rc err=$(cat "$a/runner.err")"
+fi
+
+# ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — stranded commits are KEPT, never discarded'
+
+# A session whose commits cannot land on main (here: the fast-forward is refused
+# because the main checkout has a conflicting live edit) leaves a STRANDED
+# branch. The worktree is removed but the branch is KEPT, with a Fix: line, and
+# the outcome counts as unsuccessful.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 0 'printf "shipwright\n" > bystander.conf; git commit -qam "conflicting work"'
+printf 'HUMAN MID-EDIT\n' >"$r/bystander.conf"
+before="$(git -C "$r" rev-parse HEAD)"
+rc="$(run_runner "$r" SHIPWRIGHT_ALLOW_DIRTY=1)"
+if [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] && [ "$(cat "$r/bystander.conf")" = "HUMAN MID-EDIT" ]; then
+  ok "a fast-forward that would overwrite a live edit is refused, and the edit survives"
+else
+  bad "ff-only protects live work" "rc=$rc head=$(git -C "$r" rev-parse HEAD) file=$(cat "$r/bystander.conf")"
+fi
+if grep -q 'could not be fast-forwarded' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+  ok "the un-landed fast-forward is reported with a Fix:, not swallowed"
+else
+  bad "ff failure is reported" "$(cat "$a/runner.err")"
+fi
+if [ -z "$(run_worktrees "$r")" ]; then
+  ok "the lane worktree is still torn down (teardown always removes the tree)"
+else
+  bad "worktree removed even when stranded" "$(run_worktrees "$r")"
+fi
+kept="$(run_branches "$r")"
+case "$kept" in
+  shipwright/run-*) ok "but the STRANDED branch is kept for recovery ($kept)" ;;
+  *) bad "stranded branch kept" "branches='$kept'" ;;
+esac
+if grep -q 'kept stranded branch' "$a/runner.err"; then
+  ok "and the stranded branch is announced with how to recover it"
+else
+  bad "stranded branch announced" "$(cat "$a/runner.err")"
+fi
+if [ "$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null)" = "1" ]; then
+  ok "a stranded push counts as an unsuccessful outcome (failure counter = 1)"
+else
+  bad "stranded counts as failure" "counter=$(cat "$r/ai-artifacts/shipwright/consecutive-failures" 2>/dev/null)"
+fi
+
+# ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — the wedge counter escalates on FAILURES (what the old skip counter missed)'
+
+# The headline superset: a session that RUNS and FAILS on a clean tree is
+# exactly what the old dirty-tree skip counter never saw. N failing sessions in
+# a row must escalate to a refuse-to-spawn (exit 75) BEFORE the (N+1)th session.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 7
+codes=""
+for _ in 1 2 3 4; do codes="${codes}$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=3) "; done
+if [ "$codes" = "7 7 7 75 " ]; then
+  ok "three failing sessions then a refuse-to-spawn at the threshold (got: ${codes% })"
+else
+  bad "failing sessions escalate" "exit codes '${codes% }', want '7 7 7 75'"
+fi
+n="$(wc -l <"$a/claude-was-invoked" 2>/dev/null | tr -d ' ')"
+if [ "$n" = "3" ]; then
+  ok "the escalating 75 run does NOT spawn a session (3 sessions ran, not 4)"
+else
+  bad "escalation refuses to spawn" "sessions started: $n (want 3)"
+fi
+if grep -q 'WEDGED' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+  ok "and the escalation says it is wedged, with a Fix: line naming the re-arm step"
+else
+  bad "escalation message" "$(cat "$a/runner.err")"
+fi
+if [ -z "$(run_worktrees "$r")" ]; then
+  ok "and every failing run still tore its lane down (no leftover worktrees)"
+else
+  bad "failing runs teardown" "$(run_worktrees "$r")"
+fi
+
+# A clean landing RESETS the counter: an occasional failure never accumulates
+# into a false wedge.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 7
+run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=3 >/dev/null   # fail -> counter 1
+run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=3 >/dev/null   # fail -> counter 2
+stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm ok'
+run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=3 >/dev/null   # clean landing -> reset
+if [ ! -e "$r/ai-artifacts/shipwright/consecutive-failures" ]; then
+  ok "a clean landing resets the failure counter (occasional failures do not accumulate)"
+else
+  bad "clean landing resets counter" "counter=$(cat "$r/ai-artifacts/shipwright/consecutive-failures")"
+fi
+
+# A non-numeric threshold must not silently disable the escalation (the `-ge`
+# test sits in an `if`, so its error is exempt from set -e).
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 7
+codes=""
+for _ in 1 2 3 4 5 6 7; do codes="${codes}$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=notanumber) "; done
+if printf '%s' "$codes" | grep -q '75'; then
+  ok "a non-numeric SHIPWRIGHT_FAIL_ESCALATE falls back to the default and still escalates"
+else
+  bad "bad SHIPWRIGHT_FAIL_ESCALATE does not disable escalation" "exit codes '${codes% }' — none was 75"
+fi
+if grep -q 'not a positive integer' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+  ok "and says so with a Fix: line rather than degrading silently"
+else
+  bad "bad threshold is reported" "$(cat "$a/runner.err")"
+fi
+
+# The guard must not swallow the session's own failure code.
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 7
 rc="$(run_runner "$r")"
 if [ "$rc" -eq 7 ]; then
-  ok "a failing session still propagates its exit code (the guard adds no false green)"
+  ok "a failing session still propagates its exit code (no false green)"
 else
   bad "session exit code propagates" "rc=$rc"
 fi
 
-# DRY_RUN prints the brief without consulting git at all — it must work from a
-# dirty tree, since that is when a human is most likely to be inspecting it.
-r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
-printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
-o="$(env DRY_RUN=1 SHIPWRIGHT_REPO="$r" SHIPWRIGHT_CLAUDE="$a/stub-claude" "$RUNNER" 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'athena-shipwright agent'; then
-  ok "DRY_RUN=1 still prints the brief from a dirty tree"
+# ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — crash reaping (liveness by held flock, not pid)'
+
+# DEAD-PREDECESSOR REAP. A crashed run leaves a lane worktree + a FREE lock. The
+# next run reaps it (removes the worktree) for hygiene.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+make_corpse "$r" "run-dead" "cron"
+ld="$(lanes_dir "$r")"
+rc="$(run_runner "$r")"
+if [ ! -e "$ld/run-dead/.git" ] && [ ! -e "$ld/run-dead.lock" ]; then
+  ok "a dead predecessor lane (free lock) is reaped — worktree and lock removed"
 else
-  bad "DRY_RUN from a dirty tree" "rc=$rc out=$o"
+  bad "dead predecessor reaped" "wt=$([ -e "$ld/run-dead/.git" ] && echo present) lock=$([ -e "$ld/run-dead.lock" ] && echo present)"
+fi
+if grep -q 'reaped dead cron lane run-dead' "$a/runner.err"; then
+  ok "and the reap is announced"
+else
+  bad "reap announced" "$(cat "$a/runner.err")"
 fi
 
-# The brief must not name a checkout path. The agent template owns where the run
-# happens; a path restated in the brief is a second source of truth, and it DID
-# drift — after the worktree change landed the brief still said `~/dev/custom`,
-# the main checkout the change exists to keep the run out of, and only the
-# template's supersession label stopped an agent following it literally.
-o="$(env DRY_RUN=1 SHIPWRIGHT_REPO="$r" SHIPWRIGHT_CLAUDE="$a/stub-claude" "$RUNNER" 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] \
-   && ! printf '%s' "$o" | grep -q 'dev/custom' \
-   && printf '%s' "$o" | grep -q 'Sync your tree'; then
-  ok "the brief names no checkout path (it cannot contradict the template)"
+# THE CRITICAL CASE: a LIVE lane is NEVER reaped. Liveness is a held flock(2), so
+# a concurrent run (cron or hand-spawned) that holds its lane lock is left
+# strictly alone — reaping only ever removes a lane whose lock it can acquire.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+cat >"$a/holder.sh" <<'EOF'
+#!/usr/bin/env bash
+# Hold an flock on $1, signal that it is held, then self-terminate after a
+# bounded wait (never a spin). The suite kills it well before that.
+exec 5>>"$1"
+flock 5
+: >"$1.held"
+sleep 30
+EOF
+chmod +x "$a/holder.sh"
+make_corpse "$r" "run-live" "cron"
+ld="$(lanes_dir "$r")"
+"$a/holder.sh" "$ld/run-live.lock" &
+HOLDER_PID=$!
+for _ in $(seq 1 100); do [ -e "$ld/run-live.lock.held" ] && break; sleep 0.1; done
+if [ -e "$ld/run-live.lock.held" ]; then
+  rc="$(run_runner "$r")"
+  if [ -e "$ld/run-live/.git" ] && git -C "$r" show-ref --verify --quiet refs/heads/shipwright/run-live; then
+    ok "a LIVE lane (lock held by a concurrent process) is NEVER reaped — worktree and branch survive"
+  else
+    bad "live lane never reaped" "wt=$([ -e "$ld/run-live/.git" ] && echo present || echo GONE) branch=$(git -C "$r" show-ref --verify --quiet refs/heads/shipwright/run-live && echo present || echo GONE) err=$(cat "$a/runner.err")"
+  fi
 else
-  bad "brief names a checkout path" "rc=$rc out=$o"
+  bad "holder acquired the lock" "no .held marker appeared"
+fi
+kill "$HOLDER_PID" 2>/dev/null; wait "$HOLDER_PID" 2>/dev/null; HOLDER_PID=""
+
+# ONLY dead CRON corpses count toward the wedge. Three dead cron corpses push the
+# counter to the threshold, so the run refuses to spawn (exit 75) at the top.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+make_corpse "$r" "run-c1" "cron"; make_corpse "$r" "run-c2" "cron"; make_corpse "$r" "run-c3" "cron"
+rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=3)"
+if [ "$rc" -eq 75 ] && [ ! -e "$a/claude-was-invoked" ]; then
+  ok "reaped dead CRON corpses count toward the wedge (3 corpses + threshold 3 → refuse to spawn)"
+else
+  bad "cron corpses count" "rc=$rc invoked=$([ -e "$a/claude-was-invoked" ] && echo yes)"
+fi
+
+# ...but dead SPAWNED (hand-invoked agent) corpses are reaped for hygiene and do
+# NOT count. Three of them do not wedge the lane; the run proceeds.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+make_corpse "$r" "run-s1" "spawned"; make_corpse "$r" "run-s2" "spawned"; make_corpse "$r" "run-s3" "spawned"
+ld="$(lanes_dir "$r")"
+rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=3)"
+if [ "$rc" -eq 0 ] && [ -e "$a/claude-was-invoked" ]; then
+  ok "dead SPAWNED corpses are reaped but NOT counted (3 corpses + threshold 3 → run still proceeds)"
+else
+  bad "spawned corpses not counted" "rc=$rc invoked=$([ -e "$a/claude-was-invoked" ] && echo yes) err=$(cat "$a/runner.err")"
+fi
+if [ ! -e "$ld/run-s1/.git" ] && [ ! -e "$ld/run-s2/.git" ] && [ ! -e "$ld/run-s3/.git" ]; then
+  ok "and they were still reaped for hygiene"
+else
+  bad "spawned corpses reaped" "$(run_worktrees "$r")"
+fi
+
+# ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — a branch-name collision fails LOUD, no fallback to the main checkout'
+
+# `-b` (create), never `-B` (force): if the lane branch already exists, the run
+# must fail loudly rather than move an existing branch or run in the main
+# checkout. A forced run-id lets us reproduce the collision deterministically.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+git -C "$r" branch "shipwright/run-collide" HEAD >/dev/null 2>&1
+rc="$(run_runner "$r" SHIPWRIGHT_RUN_ID=run-collide)"
+if [ "$rc" -ne 0 ] && [ ! -e "$a/claude-was-invoked" ]; then
+  ok "a branch-name collision fails the run (non-zero) and starts no session"
+else
+  bad "collision fails loud" "rc=$rc invoked=$([ -e "$a/claude-was-invoked" ] && echo yes) err=$(cat "$a/runner.err")"
+fi
+if grep -q 'collision' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+  ok "and says how to clear it, naming the collision as fatal by design"
+else
+  bad "collision message is actionable" "$(cat "$a/runner.err")"
+fi
+if [ "$(cat "$a/claude-cwd" 2>/dev/null)" != "$(real "$r")" ]; then
+  ok "and never fell back to running in the main checkout"
+else
+  bad "no main-checkout fallback on collision" "cwd=$(cat "$a/claude-cwd" 2>/dev/null)"
 fi
 
 # ---------------------------------------------------------------------------
 case_ 'athena-shipwright-run.sh — the single-run lock still holds'
 
 # Two runs must not interleave: the second skips rather than queueing. The first
-# is held open by a stub that blocks on a fifo, so the overlap is deterministic
-# rather than timing-dependent.
+# is held open by a stub that blocks on a marker, so the overlap is
+# deterministic. A concurrent LIVE run's lane must also survive (the second run
+# skips before reaping; even if it reached the reaper, the live lock protects it).
 r="$(new_repo)"; a="$(aux "$r")"
-# This stub holds the first run open until the suite releases it, so the overlap
-# is deterministic rather than timing-dependent. Its wait is a bounded poll with
-# a real sleep (never a spin) and it gives up on its own, so a failed case can
-# never leave a stub running past the suite.
 cat >"$a/stub-claude" <<'EOF'
 #!/usr/bin/env bash
 A="$(dirname "$0")"
@@ -665,7 +935,6 @@ EOF
 chmod +x "$a/stub-claude"
 env SHIPWRIGHT_REPO="$r" SHIPWRIGHT_CLAUDE="$a/stub-claude" "$RUNNER" >/dev/null 2>&1 &
 RUNNER_PID=$!
-# Wait for the first run to actually hold the lock — bounded, with a real sleep.
 for _ in $(seq 1 100); do
   [ -e "$a/claude-was-invoked" ] && break
   sleep 0.1
@@ -683,9 +952,6 @@ if [ -e "$a/claude-was-invoked" ]; then
   else
     bad "overlap message" "$(cat "$a/runner.err")"
   fi
-  # The lock must say WHO holds it. A zero-byte lock with no pid is
-  # indistinguishable from a leftover file, and on 2026-09-18 one was deleted by
-  # hand for exactly that reason — which is the one way to actually get two runs.
   if grep -q "holder: pid=$RUNNER_PID " "$a/runner.err"; then
     ok "and names the holding pid, so a live lock is distinguishable from a stale file"
   else
@@ -702,152 +968,6 @@ fi
 : >"$a/release"
 wait "$RUNNER_PID" 2>/dev/null
 RUNNER_PID=""
-
-# ---------------------------------------------------------------------------
-case_ 'athena-shipwright-run.sh — the run happens in a worktree, the memory does not'
-
-# A stub that records where it was run and what state directory it was handed.
-# "Where" is the whole point of this section: a session started in the main
-# checkout shares an index and a set of working files with whoever else is
-# typing there, which is the class ce70e04 came from.
-stub_claude_probe() { # $1 = path, $2 = exit code, $3 = extra shell line
-  cat >"$1" <<EOF
-#!/usr/bin/env bash
-d="\$(dirname "\$0")"
-echo "\$@" >"\$d/claude-was-invoked"
-pwd -P >"\$d/claude-cwd"
-printf '%s\n' "\${SHIPWRIGHT_STATE_DIR:-<unset>}" >"\$d/claude-state-dir"
-${3:-:}
-exit $2
-EOF
-  chmod +x "$1"
-}
-
-real() { ( cd "$1" 2>/dev/null && pwd -P ); }
-
-r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
-rc="$(run_runner "$r")"
-wt="$r/.git/athena-shipwright"
-if [ "$rc" -eq 0 ] && [ -e "$wt/.git" ]; then
-  ok "the runner provisions a worktree inside the repo's own .git"
-else
-  bad "worktree provisioned" "rc=$rc $(cat "$a/runner.err" 2>&1)"
-fi
-if [ "$(cat "$a/claude-cwd" 2>/dev/null)" = "$(real "$wt")" ]; then
-  ok "and starts the session THERE, not in the main checkout"
-else
-  bad "session runs in the worktree" "cwd=$(cat "$a/claude-cwd" 2>/dev/null) wanted=$(real "$wt")"
-fi
-# The worktree living inside .git is what makes this hold with no dependence on
-# a gitignore rule — the machine-local one is neutralised in this fixture.
-if [ -z "$(git -C "$r" status --porcelain -uall | grep -v '^?? ai-artifacts/')" ]; then
-  ok "and the main checkout does not see the worktree as dirt (no ignore rule in play)"
-else
-  bad "main checkout stays clean" "$(git -C "$r" status --porcelain -uall)"
-fi
-if [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "shipwright/auto" ]; then
-  ok "on its own branch, so it never contends for main with the checkout that holds it"
-else
-  bad "worktree branch" "$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>&1)"
-fi
-
-# THE STATE GOTCHA. ai-artifacts/ is gitignored, so a worktree starts with no
-# cursor.txt and no journal.md. If the state directory were derived from the
-# tree the run executes in, every run would see an empty one — and an absent
-# cursor reads the same as a cursor at epoch, so the run either re-mines
-# everything or mines nothing, and both report success. State must resolve to
-# the main checkout however the run is invoked.
-if [ "$(cat "$a/claude-state-dir" 2>/dev/null)" = "$r/ai-artifacts/shipwright" ]; then
-  ok "the session is handed SHIPWRIGHT_STATE_DIR in the MAIN checkout, not its own tree"
-else
-  bad "state dir is anchored" "got=$(cat "$a/claude-state-dir" 2>/dev/null) wanted=$r/ai-artifacts/shipwright"
-fi
-if ls "$r"/ai-artifacts/shipwright/runs/*.log >/dev/null 2>&1 \
-   && [ ! -e "$wt/ai-artifacts" ]; then
-  ok "and the run log lands there too — no state is written into the worktree"
-else
-  bad "logs land in the main checkout" "$(ls -R "$r/ai-artifacts" "$wt/ai-artifacts" 2>&1 | head -20)"
-fi
-
-# Landing on main: the agent pushes, but the MAIN CHECKOUT must also advance.
-# ~/.claude/skills and ~/.claude/hooks resolve into it, so a harness change that
-# never reaches it never takes effect — every run would report success while
-# nothing on the machine changed.
-r="$(new_repo)"; a="$(aux "$r")"
-stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm "run work"'
-before="$(git -C "$r" rev-parse HEAD)"
-rc="$(run_runner "$r")"
-after="$(git -C "$r" rev-parse HEAD)"
-if [ "$rc" -eq 0 ] && [ "$after" != "$before" ] \
-   && [ "$after" = "$(git -C "$r/.git/athena-shipwright" rev-parse HEAD)" ]; then
-  ok "a run's commits reach the main checkout by fast-forward"
-else
-  bad "main checkout fast-forwards" "rc=$rc before=$before after=$after $(cat "$a/runner.err" 2>&1)"
-fi
-
-# ...but never by overwriting a bystander. --ff-only is what makes the one
-# main-checkout action safe: git refuses it rather than clobbering live work.
-r="$(new_repo)"; a="$(aux "$r")"
-stub_claude_probe "$a/stub-claude" 0 'printf "shipwright\n" > bystander.conf; git commit -qam "conflicting work"'
-printf 'HUMAN MID-EDIT\n' >"$r/bystander.conf"
-before="$(git -C "$r" rev-parse HEAD)"
-rc="$(run_runner "$r" SHIPWRIGHT_ALLOW_DIRTY=1)"
-if [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] \
-   && [ "$(cat "$r/bystander.conf")" = "HUMAN MID-EDIT" ]; then
-  ok "a fast-forward that would overwrite a live edit is refused, and the edit survives"
-else
-  bad "ff-only protects live work" "rc=$rc head=$(git -C "$r" rev-parse HEAD) file=$(cat "$r/bystander.conf")"
-fi
-if grep -q 'Fix:' "$a/runner.err" && grep -q 'could not be fast-forwarded' "$a/runner.err"; then
-  ok "and the refusal is reported with a Fix:, not swallowed"
-else
-  bad "ff failure is reported" "$(cat "$a/runner.err")"
-fi
-
-# Dirt in the RUN WORKTREE is not a bystander — nobody else works there — so it
-# is a previous run that died between editing and committing. It must yield and
-# escalate like any other wedge, NEVER be reset away: a lane that discards its
-# own tree every tick destroys real work and can never accumulate a skip, so the
-# wedge escalation would be unreachable.
-r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
-rc="$(run_runner "$r")"              # first run creates the worktree
-wt="$r/.git/athena-shipwright"
-printf 'LEFTOVER\n' >"$wt/ai/agents/ours.md"
-rm -f "$a/claude-was-invoked"
-rc="$(run_runner "$r")"
-if [ "$rc" -eq 0 ] && [ ! -e "$a/claude-was-invoked" ] \
-   && grep -q 'ai/agents/ours.md' "$a/runner.err"; then
-  ok "a previous run's leftovers in the worktree yield the tick"
-else
-  bad "worktree dirt yields" "rc=$rc invoked=$([ -e "$a/claude-was-invoked" ] && echo yes) $(cat "$a/runner.err")"
-fi
-if [ "$(cat "$wt/ai/agents/ours.md")" = "LEFTOVER" ]; then
-  ok "and they are left intact — the runner never resets its own tree out from under a crashed run"
-else
-  bad "leftovers survive" "$(cat "$wt/ai/agents/ours.md")"
-fi
-if grep -q "PREVIOUS RUN's leftovers" "$a/runner.err" && grep -q "$wt" "$a/runner.err"; then
-  ok "and the message says which tree they are in and whose they are"
-else
-  bad "dirt message distinguishes the trees" "$(cat "$a/runner.err")"
-fi
-
-# There is no fallback to the main checkout. An unusable worktree path must be a
-# loud failure, because "run in the main checkout instead" is precisely the
-# behaviour this section exists to remove.
-r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
-printf 'not a worktree\n' >"$a/blocked"
-rc="$(run_runner "$r" SHIPWRIGHT_WORKTREE="$a/blocked")"
-if [ "$rc" -ne 0 ] && [ ! -e "$a/claude-was-invoked" ]; then
-  ok "an unusable worktree path fails the run instead of falling back to the main checkout"
-else
-  bad "no main-checkout fallback" "rc=$rc invoked=$([ -e "$a/claude-was-invoked" ] && echo yes) $(cat "$a/runner.err")"
-fi
-if grep -q 'Fix:' "$a/runner.err"; then
-  ok "and says how to clear it"
-else
-  bad "worktree failure is actionable" "$(cat "$a/runner.err")"
-fi
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

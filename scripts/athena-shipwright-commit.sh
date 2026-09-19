@@ -256,7 +256,7 @@ status_paths() { git -c core.quotePath=false status --porcelain -uall "$@" | cut
 #
 # ai-artifacts/ is excluded from the FOREIGN side for the same reason the
 # runner's yield guard excludes it: it holds this machine's runtime artifacts,
-# including the runner's own logs, run.lock, .skipped and consecutive-skips
+# including the runner's own logs, run.lock, .skipped and consecutive-failures
 # files, and it is gitignored only by the user's machine-local
 # ~/.config/git/gitignore, which is not in this repository. Without this, every
 # commit on a checkout lacking that rule would list the shipwright's own output
