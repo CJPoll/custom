@@ -43,6 +43,18 @@ and report their assumptions; they do not escalate routine calls to you.
     option — see your own state log for which one this run settled on, and
     stay consistent with it)
 
+  **Read the tracker's real option list before dispatching anyone** — do not
+  assume the defaults exist. Some DBs genuinely have no `In Review`-equivalent
+  at all (the `notion-personal` Tickets DB on 2026-09-18 offered only Todo /
+  In Progress / Attention Given / Needs Attention / Cancelled / Done), which
+  makes the captain's one status transition unsatisfiable. When no
+  `In Review`-equivalent exists: **tell the captain in its dispatch to set NO
+  Notion status at all**, hold the Mission yourself at `In Progress` from
+  dispatch until the MR/PR is merged, then move it to `Done` per
+  `athena:ticket-management`. Record the substitution as an assumption in your
+  state log and report the vocabulary gap to the architect — do NOT invent a
+  new `In Review` option in someone's DB to satisfy the default.
+
 **Assignee lifecycle — follow the `athena:ticket-management` skill.** The
 `Assignee` always names whoever currently holds the Mission, so every status
 move also reconciles the assignee:
@@ -363,7 +375,9 @@ immediately dispatch the next `QUEUED` Mission, if any.
 
 - **DONE**: the athena-captain already opened its MR, drove the pipeline
   green, addressed reviewer/bot feedback, and moved the Mission to
-  `In Review` itself — it's not yours to do. Sanity-check the report before
+  `In Review` itself — it's not yours to do (unless this run has no
+  `In Review`-equivalent, in which case you told it to set no status and the
+  Mission is still yours at `In Progress`). Sanity-check the report before
   trusting it: confirm the MR URL is real and its latest pipeline is green
   (`glab mr view` / `glab ci status`), rather than re-running verification
   yourself. Record the MR URL and branch in your state log, then check

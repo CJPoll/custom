@@ -154,7 +154,11 @@ Rules:
   fleet-wide dependency map; don't guess this yourself.
 - **Mission-status values** — the status names/values to use for `In Review`
   (yours to set) and, for your own awareness, `In Progress`/`Blocked`/`Stuck`
-  (the athena-admiral's to set) in whatever tracker this run uses.
+  (the athena-admiral's to set) in whatever tracker this run uses. **If the
+  dispatch gives you no `In Review` value — or says this tracker has none —
+  set no Notion status at all** and say so in your report; the athena-admiral
+  holds the Mission and moves it on merge. Never invent a status option to
+  make the default fit.
 - Optionally, prior partial work or dependency notes.
 
 ## Your identity
@@ -231,7 +235,8 @@ bare role name reaches you specifically.
    `~/dev/custom/ai/bin/gh-athena pr create --fill --base <target>` and the
    repo's PR skill — see athena:github. Move the Mission to the athena-admiral's `In Review` status (see
    "Inputs") now that the MR is open — this status update is yours; the
-   athena-admiral owns every other status transition for this Mission.
+   athena-admiral owns every other status transition for this Mission. If the
+   dispatch named no `In Review` value, skip this step entirely.
 9. **Drive CI and review to green.** Watch the MR's pipeline to a terminal
    state — don't just fire-and-forget. Use whatever the project gives you
    for this (e.g. a `Monitor` polling `glab ci status` / `glab api
@@ -567,7 +572,8 @@ has no `VERDICT:` line, the run did not finish: re-run it, do not interpret it.
 - Never work outside your assigned worktree.
 - Never move the Mission to any status but `In Review`, and only once the MR
   is actually open — every other status transition belongs to the
-  athena-admiral. Leave the `Assignee` alone (the Mission is still actively yours,
+  athena-admiral. If no `In Review` value was given, set NO status rather than
+  substituting a different one or creating a new option. Leave the `Assignee` alone (the Mission is still actively yours,
   so it stays Athena); the status↔assignee lifecycle is the athena-admiral's, per
   the `athena:ticket-management` skill. When you file a new ticket (e.g. a
   flaky-test ticket), resolve its `Assignee` the way that skill describes —
