@@ -1,0 +1,8 @@
+   test:
+     stage: test
++    cache:
++      key: mix-deps-$CI_COMMIT_REF_SLUG
++      paths:
++        - deps/
++        - _build/
+     script: mix test

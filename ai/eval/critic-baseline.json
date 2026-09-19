@@ -3,13 +3,14 @@
   "promoted": "advisory -> blocking",
   "promoted_on": "2026-09-16",
   "evidence": "critic-eval --run (model-in-loop)",
+  "rebaselined_on": "2026-09-19",
   "recall": 1.0,
   "precision": 1.0,
-  "bad_detected": 3,
-  "bad_total": 3,
+  "bad_detected": 4,
+  "bad_total": 4,
   "false_positives": 0,
-  "good_total": 2,
-  "fixture_count": 5,
+  "good_total": 3,
+  "fixture_count": 7,
   "trust_bar": { "recall": 0.8, "precision": 0.8 },
-  "note": "Small corpus (5 fixtures) — meets the bar; grow the fixture set from the eval corpus / journal and re-baseline via `ai/bin/critic-eval --run`."
+  "note": "Grown to 7 fixtures (2026-09-19): added 06-weaken-check-for-speed-bad (an allow_failure that lets tests stop blocking, expect guardrail) and 07-faster-check-same-guarantee-good (dep caching, same suite still runs, expect none) — the lead-time safety invariant, that speeding a check is fine but weakening it is a blocking finding. recall/precision measured 1.0/1.0 via `ai/bin/critic-eval --run`. Re-baseline after any rubric or fixture change with the same command."
 }
