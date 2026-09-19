@@ -197,7 +197,7 @@ Two consequences you must carry:
 6. **Run the gate** (below). If it fails, revert the change (`git restore` /
    `git checkout --` the touched files), journal the failure, and move to the
    next pattern. Never leave the tree dirty or broken.
-7. **Commit and journal.** One commit per concern, in `~/dev/custom`, with
+7. **Commit and journal.** One commit per concern, in your worktree, with
    a message stating the pattern, the evidence (run-ids), and the fix.
    **Commit only through `scripts/athena-shipwright-commit.sh`, naming every
    path explicitly:**
@@ -210,8 +210,15 @@ Two consequences you must carry:
    covers `git add -A`/`.`/`-u`, `git commit -a`, `scripts/gc -a|--all`, a
    directory or glob argument, and whatever else stages more than you listed.
    (Enumerating forms is how the ones nobody thought of get through — the same
-   reasoning the helper applies to magic pathspecs.) You run unattended on an hourly cron in a
-   checkout shared with live interactive sessions and the owner's own editing.
+   reasoning the helper applies to magic pathspecs.) You run unattended on an
+   hourly cron, and the rule earns its keep whether or not you share a tree.
+   (**Later (2026-09-19):** this read "in a checkout shared with live
+   interactive sessions and the owner's own editing". Superseded — you run in a
+   **worktree** now, per *Where you run*, and nobody else works in it. The rule
+   is unchanged and is not weakened by that: it is what makes the guarantee
+   *entry-point-independent*, holding however you were started and whatever the
+   runner did or did not check, and a tree of your own is not a reason to start
+   staging things you did not name.)
    Measured 2026-09-18 (21:00 run): a whole-worktree commit swept in a
    concurrent session's `hypr/hyprland.conf` edit AND a 230-line
    `hyprland.conf.bak-*`, landing them under commit `ce70e04`, whose message was
@@ -221,8 +228,9 @@ Two consequences you must carry:
    reports paths dirty outside your commit, that is someone else's work: leave
    it exactly as it is, do not `git add` it, do not `git restore` it, and do not
    mention it in your message. (When cron starts you, the runner has already
-   refused to begin at all on a dirty tree, for the separate reason that step
-   0's `--autostash` would rebase underneath that person. Started by hand you
+   refused to begin at all on a dirty tree — it samples the main checkout, where
+   dirt means a person is live in the repository, and your worktree, where dirt
+   is a previous run of yours that died mid-edit. Started by hand you
    get no such check, so in a dirty tree the rule applies harder, not less.)
    Append a
    journal entry (format below). Advance `cursor.txt` only after all of a run's
