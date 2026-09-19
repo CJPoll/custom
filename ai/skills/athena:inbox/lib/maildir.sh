@@ -478,15 +478,56 @@ maildir_render_message() {
     return 1
   fi
 
-  printf -- '---\n'
-  printf 'from: %s\n' "${from}"
-  printf 'to: %s\n' "${to}"
-  printf 'sent_at: %s\n' "${sent_at}"
-  [ -n "${re}" ]     && printf 're: %s\n' "${re}"
-  [ -n "${thread}" ] && printf 'thread: %s\n' "${thread}"
-  printf -- '---\n\n'
-  printf '%s' "${body}"
+  local msg header
+  header="$(
+    printf -- '---\n'
+    printf 'from: %s\n' "${from}"
+    printf 'to: %s\n' "${to}"
+    printf 'sent_at: %s\n' "${sent_at}"
+    [ -n "${re}" ]     && printf 're: %s\n' "${re}"
+    [ -n "${thread}" ] && printf 'thread: %s\n' "${thread}"
+    printf -- '---\n\n'
+  )"
+  msg="${header}"$'\n'"${body}"
   # A trailing newline, always: the last line of the body is a line.
-  case "${body}" in *$'\n') ;; *) printf '\n' ;; esac
+  case "${body}" in *$'\n') ;; *) msg="${msg}"$'\n' ;; esac
+
+  # THE RENDER IS PARSED BACK BEFORE IT IS EMITTED, and refused if any value
+  # does not survive.
+  #
+  # The checks above refuse a value that would break the FORMAT. This refuses
+  # one the reader would silently CHANGE, which is the quieter half of the same
+  # problem and was a live defect: `maildir_parse_frontmatter` strips a `#`
+  # comment that follows whitespace and trims the ends of every value, so
+  # `re: /home/x/design.md #section-3` arrives at the peer as
+  # `/home/x/design.md` -- the fragment gone, both sides reporting success,
+  # nothing anywhere saying a value was edited in transit. Measured, not
+  # theorised.
+  #
+  # It is a ROUND TRIP rather than a list of forbidden characters on purpose:
+  # enumerating today's parser rules here would put two copies of that grammar
+  # in the tree, and the copy in the writer would go stale the first time the
+  # reader learned a new one. Asking the actual parser what it would read costs
+  # one pass over a header I have just built, and it cannot drift.
+  local fm k got want
+  fm="$(printf '%s' "${msg}" | maildir_parse_frontmatter)"
+  for k in from to sent_at re thread; do
+    case "${k}" in
+      re)     want="${re}" ;;
+      thread) want="${thread}" ;;
+      from)   want="${from}" ;;
+      to)     want="${to}" ;;
+      *)      want="${sent_at}" ;;
+    esac
+    [ -n "${want}" ] || continue
+    got="$(printf '%s' "${fm}" | jq -r --arg k "${k}" '.[$k] // ""' 2>/dev/null)"
+    if [ "${got}" != "${want}" ]; then
+      inbox_fail "refusing to send: the \"${k}\" value would not survive the reader's own parse of this message" \
+        "give \"${k}\" a value with no leading or trailing whitespace and no \" #\" sequence -- the message format treats a \"#\" following whitespace as a comment and trims the ends of every value, so the peer would have received something other than what you passed, with nothing reporting the difference."
+      return 1
+    fi
+  done
+
+  printf '%s' "${msg}"
   return 0
 }
