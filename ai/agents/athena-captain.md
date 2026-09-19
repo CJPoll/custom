@@ -224,6 +224,30 @@ bare role name reaches you specifically.
 6. **Verify.** Run `bin/prep-commit.sh` (or this project's equivalent). It
    MUST pass — this is a hard gate before the next step, not something to
    catch later in CI. If it fails, fix it and re-run.
+
+   **Treat the gate as a process that may write your tree, not a read-only
+   check.** gen_saas's `bin/prep-commit.sh` auto-commits the working tree AND
+   spawns an autonomous `claude -p /fix:tests`; both were measured on
+   2026-09-18 (DND-214). It committed a stale blob as *"Fix: credo
+   violations"*, **reverting in-flight work**, and when the captain killed the
+   gate the fixer **survived as an orphan reparented to PID 1 and kept
+   overwriting files while the captain was still editing them** — caught only
+   because on-disk-change notices showed content the captain had not written.
+   This is the PT-919 orphan class with a worse failure mode: the orphan
+   *mutates the tree*, so its damage is indistinguishable from your own edits,
+   and the auto-commit is indistinguishable from a normal commit. So:
+   - **Commit BEFORE running the gate**, so a gate that writes history cannot
+     revert work that was only on disk.
+   - **After the gate, audit what it did**: `git log` for commits you did not
+     author (a `Fix: …` subject is the tell) and `git status` for changes you
+     did not make.
+   - **If you kill the gate, reap its children.** Never assume killing the
+     parent stopped the work: check for survivors, verify `/proc/<pid>/cwd` is
+     YOUR worktree, and kill by PID — other legitimate sessions run on this
+     box (see *Before you write the report: leave no children behind*).
+   A gate that writes history, and any child of it that edits files, is a
+   defect in that repo's tooling worth reporting up — but the check above is
+   yours to run regardless of whether it has been fixed.
 7. **Commit.** Once verification passes, commit with a message referencing
    the Mission.
 8. **Open the MR.** Push the branch and create the MR (`glab mr create`,
@@ -379,6 +403,47 @@ Every run — success or early stop — ends with a report:
 - **MR** (if you got far enough to open one): URL, target branch, final
   pipeline status, and a one-line summary of reviewer/bot feedback addressed
 - **Files changed**: a short list, for the athena-admiral's dependency tracking
+- **True as-of**: the mutable observations your conclusions rest on (below)
+
+### True as-of: name the observations that can expire
+
+Your report is prose in the present tense, and by the time the athena-admiral
+acts on it — minutes or hours later, with four other captains and an hourly
+cron writing to the same repos — several of its sentences may have stopped
+being true. Nothing in the shape of a report tells a reader *which* ones. So
+say it yourself, in a short list at the end:
+
+> **True as-of 2026-09-19 04:50Z. Re-check before acting:** PR #244 state
+> (OPEN, MERGEABLE); head `ea359422`; CI run 35419946617 (`queued`, never
+> started); ticket status `In Progress`; the self-hosted runner `online
+> busy=false`.
+
+A bare timestamp does not do this — it tells a reader the report is old without
+telling them what to re-read. Name the specific mutable things: a head SHA, a
+PR number and state, a ticket status, a pid, a file mtime, a `main` SHA you
+branched from, a service you found up or down. Whatever *your particular
+conclusions* actually rest on.
+
+**Only you can write this list.** The athena-admiral cannot infer from your
+prose that "the fix is still needed" rested on a `git log` you ran at 20:40, or
+that "delivery is down" rested on pid 16317 being the live client. That is not
+hypothetical: a captain who wrote *"re-verify 16317 is still that client first
+— the report may be hours old by then"* into its report, unprompted, is the
+only reason a false outage was not reported the next morning — a supervisor had
+taken over at `02:12:40Z` and delivery was healthy. In the same week a report
+describing a live defect was acted on after a peer agent had already fixed and
+pushed it, and a captain spent about forty-five minutes on a solved problem.
+
+Two rules for writing it:
+
+- **A fact is mutable if anyone but you can change it.** Your own diff is not
+  mutable by others; `origin/main`, a PR's mergeability, a pipeline's state, a
+  ticket's status, and any process or host you probed all are.
+- **Include the probe, not just the fact.** "`gh pr checks` at 04:50Z: all
+  green" can be re-run by the reader. "CI was green" cannot.
+
+If nothing in your report is mutable, say so explicitly — an empty list and a
+forgotten one must not read the same.
 
 ### Before you write the report: leave no children behind
 

@@ -76,11 +76,25 @@ end
 # compare equal. On this machine ~/.claude/hooks is a symlink to the repo's
 # ai/hooks/, so a live entry spelled `~/.claude/hooks/foo.sh` is the SAME file as
 # the registry's `<repo>/ai/hooks/foo.sh` — comparing raw strings falsely reports
-# drift (and makes setup-hooks append a duplicate). Realpath both sides. Falls
-# back to the literal string when the path does not exist (e.g. a retired hook or
-# a command that is not a bare path), so this never raises.
+# drift (and makes setup-hooks append a duplicate).
+#
+# The DIRECTORY is resolved even when the file does not exist, and it must stay
+# in step with setup-hooks' own `norm` — these two answer the same question and
+# a divergence between them is drift reported by one tool and not the other.
+# Falling back to the literal string made the comparison depend on whether the
+# script is on disk right now, which is irrelevant to "are these two spellings
+# the same location": a wired hook whose file is temporarily absent read as
+# drift, and a hook being added on a branch read as drift against the main
+# checkout it is not in yet. Resolving `dirname` needs no file. A command that
+# is not a bare path has no directory component and is returned unchanged.
 def norm(cmd)
-  File.exist?(cmd) ? File.realpath(cmd) : cmd
+  return cmd if cmd.nil? || cmd.empty?
+  return File.realpath(cmd) if File.exist?(cmd)
+
+  dir = File.dirname(cmd)
+  return cmd if dir == "." || !File.exist?(dir)
+
+  File.join(File.realpath(dir), File.basename(cmd))
 rescue StandardError
   cmd
 end

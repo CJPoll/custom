@@ -266,3 +266,66 @@ failure, no diff, no `git` undo. The same three artifacts answer it:
   validator cannot run (no `jq`, no skill in this checkout) both tools say so in
   their output — "validated" and "silently not validated" must never read the
   same.
+
+## Agents work in worktrees, not the main checkout
+
+**Default rule: an agent doing work in a git repo does it in a worktree.** The
+main checkout of every repo under `~/dev` is a *shared surface*, not a spare
+copy — the human types in it, several agents can be dispatched into it at once,
+and for `~/dev/custom` specifically `~/.claude/skills` and `~/.claude/hooks`
+resolve into it, so it is also the machine's live harness. A working tree has
+one index and one set of files; two writers sharing it is not a race that
+careful agents avoid, it is a race with no lock in it.
+
+Measured on 2026-09-18 in `~/dev/custom`, all within eight minutes: the hourly
+shipwright staged the whole tree and swept an interactive session's
+`hypr/hyprland.conf` edit and a 230-line `.bak` into `ce70e04`, a commit whose
+message was entirely about harness-gate self-tests (repaired by `7afc5a0`); two
+shipwrights ran in that one tree at once, and the second yielded because it
+*chose* to, having noticed the first, not because anything stopped it; and the
+`run.lock` meant to serialise them was a zero-byte file that nothing could tell
+apart from a corpse. A worktree makes all three structurally impossible instead
+of caught by luck.
+
+So: an agent that will edit, stage, commit, rebase, or reset **works in a
+worktree** (`wt`, or `git worktree add`; house convention puts human-facing ones
+at `~/.local/worktrees/<project>/<branch>`, while a robot's own persistent tree
+belongs somewhere nobody will wander into — the shipwright's lives inside
+`.git/`). This is the same discipline captains have always had; it is now the
+rule for every agent, including the unattended ones that had quietly been
+exempt.
+
+**This is a rule about writes, and specifically about git work.** Reading the
+main checkout is normal and often necessary. Four things are genuine exceptions,
+and they are exceptions because each one is *safe by construction* or has
+nowhere else to happen — not because the agent judged it fine:
+
+- **Publishing by fast-forward.** Work committed in a worktree has to reach the
+  main checkout or it never takes effect on this machine. `git merge --ff-only`
+  is the sanctioned way: it cannot create a commit or rewrite history, and git
+  refuses it outright rather than overwrite a locally-modified file, so a
+  bystander is protected by git and not by timing. Never `--force`, never a
+  `reset --hard`, and a refusal is reported rather than worked around.
+- **Machine-local state that is deliberately singular.** Runtime state under
+  `ai-artifacts/` (the shipwright's `cursor.txt`, `journal.md`, `runs/`) is
+  gitignored and must resolve to ONE location regardless of which tree is
+  executing, so it is anchored to the main checkout and written there from a
+  worktree. It is untracked, so it is not git work and it cannot collide with a
+  commit.
+- **Repairing the main checkout itself** — a wedged index, a stale worktree
+  registration, a fast-forward that did not land. It is the patient; there is
+  nowhere else to do it.
+- **A human present and asking.** An interactive session where the user says
+  "fix this and commit" is a human choosing where their own work happens. The
+  rule binds *unattended and spawned* agents, which is where nobody is watching
+  the collision.
+
+The rule holds for every other case we could find, and it is deliberately stated
+as a default with named exceptions rather than an absolute: an absolute that
+everyone knows is violated hourly by the publish step teaches people to ignore
+the rule, while four named exceptions can be checked.
+
+**It is currently doctrine, not enforcement.** Nothing denies a write to a main
+checkout — the honest choke point is a `PreToolUse` hook, which is separately
+ticketed alongside the repository-scoped lock. Until that exists this holds
+because agents follow it, so treat it as if it were enforced.

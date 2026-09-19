@@ -2,11 +2,13 @@
 # fs.sh -- SIDE EFFECTS. The only file I/O in the skill, plus the one `git`
 # call. Everything else in lib/ takes strings and returns strings.
 #
-# This slice (DND-183) is READ-ONLY on purpose. There is no state writer in
-# this file at all, because `inbox-status` counts and must never consume: the
-# strongest available guarantee that counting does not advance an offset is
-# that the code which could advance it does not exist yet. The atomic state
-# writer arrives with the ack ticket.
+# **Later (2026-09-18):** This file was READ-ONLY through DND-183: `inbox-status`
+# counts and must never consume, and the strongest available guarantee that
+# counting does not advance an offset was that the code which could advance it
+# did not exist yet. The ack ticket is DND-184, so that guarantee has been
+# spent: the writes now live here, under the WRITES banner below, and the
+# counting path's guarantee is the designated-consumer gate instead -- a
+# subagent or a non-holder may count and may peek, and neither advances.
 #
 # ON CONTAINMENT vs. THE SYMLINK DEFENCE -- two different jobs, and one does
 # not do the other's:
@@ -253,4 +255,272 @@ fs_assert_not_symlink() {
     return 1
   fi
   return 0
+}
+
+# ============================================================================
+# WRITES (DND-184). Everything above this line is read-only; everything below
+# it can change something on disk, and each one carries the crash story that
+# decided its ordering.
+# ============================================================================
+
+# --- clocks -----------------------------------------------------------------
+# Local wall time, always. The contract is explicit that `received_at` is a
+# SERVER stamp with a measured ~2.5s skew against this machine, and that
+# "staleness, latency, and liveness checks MUST use local file mtimes, never a
+# `received_at` differenced against local `now`". Retention is a liveness
+# question, so every clock it uses is local.
+
+fs_now_epoch()    { date -u +%s; }
+fs_now_rfc3339()  { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# fs_epoch_of_rfc3339 <stamp> -- empty + status 1 on anything unparseable.
+# An unparseable `rotated_at` must not become epoch 0, which would read as
+# "1970" and make every channel instantly sweepable. Empty is the input
+# logchan_should_rotate/sweep both answer "no" to.
+fs_epoch_of_rfc3339() {
+  local s="$1" out
+  [ -n "${s}" ] || return 1
+  fs_require_date_d || return 1
+  out="$(date -u -d "${s}" +%s 2>/dev/null)" || return 1
+  case "${out}" in ''|*[!0-9-]*) return 1 ;; esac
+  printf '%s\n' "${out}"
+}
+
+# fs_require_date_d
+#
+# `date -u -d <rfc3339>` is a GNU extension. Without it this function fails for
+# EVERY input, and the failure is indistinguishable from "this generation has
+# no rotated_at": `_inbox_retain` takes the absent/unparseable branch, re-stamps
+# `rotated_at` to now on every ack, and rotation therefore NEVER FIRES. The
+# inbox grows forever, every ack still reports success, and nothing anywhere
+# says the retention policy stopped existing.
+#
+# That is the standing missing-input shape -- an absent capability reading as a
+# benign "nothing to do" -- in the one subsystem whose whole job is to delete
+# things on a schedule. It gets reported once per process rather than silently.
+#
+# Reported, NOT fatal: mail still delivers without retention, and taking the
+# reader down over a missing date(1) flag would turn a disk-growth problem into
+# an outage.
+_INBOX_DATE_D_OK=""
+fs_require_date_d() {
+  if [ -z "${_INBOX_DATE_D_OK}" ]; then
+    if date -u -d "2026-01-01T00:00:00Z" +%s >/dev/null 2>&1; then
+      _INBOX_DATE_D_OK=yes
+    else
+      _INBOX_DATE_D_OK=no
+      inbox_fail "this date(1) does not support -d, so retention cannot run" \
+        "install GNU coreutils (on macOS: brew install coreutils, and put gnubin on PATH). Mail still delivers; what stops is ROTATION AND THE SWEEP, so the channel file grows without bound and nothing else would have told you."
+    fi
+  fi
+  [ "${_INBOX_DATE_D_OK}" = "yes" ]
+}
+
+# fs_mtime_epoch <path>
+fs_mtime_epoch() {
+  [ -e "$1" ] || return 1
+  stat -c %Y "$1" 2>/dev/null || return 1
+}
+
+# --- atomic state write -----------------------------------------------------
+
+# fs_write_state <path> <json>
+#
+# Contract: "write a sibling temp file, fsync, then rename(2) into place. A
+# state file truncated by a crash loses the offset and re-reports everything."
+#
+# The temp file is a SIBLING, not something under /tmp: rename(2) is only
+# atomic within one filesystem, and a cross-device rename degrades into
+# copy-then-unlink, which is exactly the non-atomic write this exists to avoid.
+#
+# `sync` rather than a true per-file fsync, because shell has no fsync(2).
+# Named rather than glossed: this is weaker than the contract's letter (it
+# flushes more than this file and guarantees less about ordering than fsync on
+# a held descriptor would), and it is the strongest form available here. The
+# rename is still atomic, which is the half that protects a reader from ever
+# seeing a truncated state file.
+fs_write_state() {
+  local path="$1" json="$2" tmp
+
+  # I-7: a symlinked state file is refused. Without this, `> "${path}"` (and
+  # even the rename's target resolution) follows the link and the state lands
+  # wherever it points -- and the mode you checked is not the mode you wrote.
+  fs_assert_regular "${path}" || return 1
+
+  if ! printf '%s' "${json}" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    inbox_fail "refusing to write a state file that is not a JSON object" \
+      "this is a bug in the reader, not in your setup: the state writer was handed a non-object. Re-run; if it recurs, inspect ${path} and report it."
+    return 1
+  fi
+
+  tmp="${path}.tmp.$$"
+  ( umask 077; printf '%s\n' "${json}" > "${tmp}" ) || {
+    inbox_fail "cannot write the state file beside \"${path}\"" \
+      "check that the directory is writable and mode 0700; the state file is written as a sibling temp file and renamed into place."
+    return 1
+  }
+  chmod 0600 "${tmp}" 2>/dev/null || true
+  sync "${tmp}" 2>/dev/null || sync 2>/dev/null || true
+  if ! mv -f "${tmp}" "${path}"; then
+    rm -f "${tmp}" 2>/dev/null || true
+    inbox_fail "cannot atomically replace the state file \"${path}\"" \
+      "check the permissions on the directory holding it; the reader writes a sibling temp file and renames it into place, and the rename failed."
+    return 1
+  fi
+  return 0
+}
+
+# --- retention: rotate and sweep --------------------------------------------
+
+# fs_rotated_name <inbox-path>  -- exactly one generation, `<channel>.jsonl.1`.
+fs_rotated_name() { printf '%s.1\n' "$1"; }
+
+# fs_rotate_log <inbox-path> <offset>
+#
+# MUST be called with the consumer lock held. Status 0 = rotated; status 2 =
+# ABANDONED because the file moved; status 1 = a real failure.
+#
+# THE RE-CHECK IS THE WHOLE FUNCTION. The lock excludes other READERS, not the
+# writer, which appends at any moment -- so a line landing between the trigger
+# evaluation and the rename is carried into `.1`, and NOTHING EVER READS `.1`.
+# Those bytes are lost with no error, no doorbell anomaly and no way to notice.
+# It is the same defect the contract forbids when it says ack MUST NOT
+# recompute EOF, arriving from the other direction. Abandoning costs one
+# deferred rotation; the trigger will still hold next time.
+#
+# ABANDONED IS STATUS 2, NOT 1: a deferred rotation is the system working, and
+# a caller that treated it as a failure would print a refusal on an ordinary
+# healthy path.
+fs_rotate_log() {
+  local inbox="$1" offset="$2" size target
+
+  case "${offset}" in ''|*[!0-9]*) return 1 ;; esac
+  [ -f "${inbox}" ] || return 2
+  fs_assert_regular "${inbox}" || return 1
+
+  size="$(fs_size "${inbox}")"
+  if [ "${size}" != "${offset}" ]; then
+    return 2                    # bytes arrived; abandon, do not carry them off
+  fi
+
+  target="$(fs_rotated_name "${inbox}")"
+  fs_assert_regular "${target}" || return 1
+  # The ONE place a destructive rename is correct: exactly one generation is
+  # kept, and renaming over the older one is the entire point. The contract's
+  # non-clobbering rules govern DELIVERY, where an overwrite loses a message.
+  if ! mv -f "${inbox}" "${target}"; then
+    inbox_fail "cannot rotate the channel file \"${inbox}\"" \
+      "check the permissions on \$ATHENA_INBOX_ROOT; rotation renames the live file over its single kept generation."
+    return 1
+  fi
+  chmod 0600 "${target}" 2>/dev/null || true
+  # The mtime stamp is a CONVENIENCE for a human running `ls -l`, not the
+  # retention clock -- rename(2) preserves mtime, so without this the `.1`
+  # carries the timestamp of its last append. `rotated_at` in the state file is
+  # the authority (see logchan_should_sweep).
+  touch "${target}" 2>/dev/null || true
+  return 0
+}
+
+# fs_sweep_generation <rotated-path>
+#
+# `unlink` ONLY. A reader MUST NOT attempt a secure erase: on a copy-on-write
+# or SSD-backed filesystem it does not do what its name claims, and offering it
+# invites the false belief that the content is unrecoverable. Status 0 whether
+# or not the file was there -- the sweep is idempotent by nature.
+fs_sweep_generation() {
+  local path="$1"
+  [ -e "${path}" ] || return 0
+  fs_assert_regular "${path}" || return 1
+  rm -f "${path}" || {
+    inbox_fail "cannot delete the rotated generation \"${path}\"" \
+      "check the permissions on \$ATHENA_INBOX_ROOT; the rotated generation is deleted 14 days after the rotation that created it."
+    return 1
+  }
+  return 0
+}
+
+# --- the doorbell -----------------------------------------------------------
+
+# fs_bump_doorbell <path>
+# Zero bytes, 0600, mtime bumped. The contract: it is a bell, not a letter --
+# it MUST stay zero bytes and carry no count, payload or hint.
+#
+# `touch` is an ATTRIB-only change on an existing file, which is precisely why
+# a waiter MUST watch `attrib` as well as `modify`. Creating it when absent is
+# allowed for a reader ("a waiter MAY create a zero-byte 0600 doorbell").
+fs_bump_doorbell() {
+  local path="$1"
+  fs_assert_regular "${path}" || return 1
+  ( umask 077; : > "${path}" ) 2>/dev/null || return 1
+  chmod 0600 "${path}" 2>/dev/null || true
+  touch "${path}" 2>/dev/null || return 1
+  return 0
+}
+
+# --- maildir ack ------------------------------------------------------------
+
+# fs_maildir_ack <read-dir> <name> <ack-dir>
+#
+# A MOVE IS THE ACK. Never a delete, never a copy:
+#   * delete -- `.acked/` is the only durable transcript of the collaboration,
+#     and the contract forbids deleting a message outright;
+#   * copy -- would leave the original in place, so the message stays unread
+#     forever while looking acked, and the pair can silently diverge.
+#
+# NON-CLOBBERING. `mv` over an existing destination silently replaces it, so a
+# re-ack of a name already in `.acked/` would destroy the earlier message with
+# no error. Refused instead: two different messages sharing a name is a fact
+# worth surfacing, and an idempotent re-ack of the SAME message cannot arise
+# here because the source no longer exists after the first one.
+fs_maildir_ack() {
+  local read_dir="$1" name="$2" ack_dir="$3" src="$1/$2" dst
+
+  # The grammar is re-checked HERE, not only in the manager that calls this.
+  # The manager does validate today, but this function takes a bare name and
+  # joins it onto a directory: a primitive that is safe only because of its
+  # current caller is not safe, and the next caller inherits nothing. Same
+  # reasoning as logchan_scan re-validating its own offset.
+  if ! maildir_valid_message_name "${name}"; then
+    inbox_fail "refusing to move a message whose filename does not match the contract's grammar" \
+      'a message filename is <YYYYMMDD>T<HHMMSS>Z-<seq>-<slug>.md; a name from another party is data, never a path.'
+    return 1
+  fi
+
+  fs_assert_not_symlink "${read_dir}" || return 1
+  if [ ! -f "${src}" ] || [ -L "${src}" ]; then
+    inbox_fail "there is no such message to ack in this channel's read directory" \
+      "list the channel again with read-inbox --peek; the message may already have been acked, or it may never have been a regular file."
+    return 1
+  fi
+
+  if [ ! -d "${ack_dir}" ]; then
+    mkdir -p -m 0700 "${ack_dir}" 2>/dev/null || {
+      inbox_fail "cannot create this channel's .acked directory" \
+        "check that the read directory is writable and mode 0700; a maildir ack moves the message into .acked/ beside it."
+      return 1
+    }
+  fi
+  fs_assert_not_symlink "${ack_dir}" || return 1
+
+  dst="${ack_dir}/${name}"
+  if [ -e "${dst}" ]; then
+    inbox_fail "a different message with this name is already in .acked/" \
+      "move the existing file aside by hand and re-run; the ack refuses to rename over it, because .acked/ is the only durable transcript of this collaboration."
+    return 1
+  fi
+  if ! mv "${src}" "${dst}"; then
+    inbox_fail "cannot move the message into .acked/" \
+      "check the permissions on the read directory and on .acked/ (both 0700); a maildir ack is a move, never a delete."
+    return 1
+  fi
+  return 0
+}
+
+# fs_read_message <path>  -- one maildir message's content, symlink refused.
+fs_read_message() {
+  local path="$1"
+  fs_assert_regular "${path}" || return 1
+  [ -f "${path}" ] || return 1
+  cat "${path}"
 }

@@ -292,10 +292,29 @@ as a resume trigger, not a fresh run:
   and its message reaching you, and the file survives that gap. A Mission
   with a fresh terminal report is already done; process it per step 5.
   Restart your `Monitor` watcher (step 5) if it didn't survive the pause.
+- **Snapshot every worktree's UNCOMMITTED work before you dispatch anything.**
+  A usage limit does not degrade a fleet gracefully — it kills the admiral and
+  every captain at once, against one shared quota, leaving whatever was not
+  committed sitting in the worktrees. Committed work is safe; uncommitted work
+  is the only thing at risk, and the incoming captain is what threatens it,
+  because it starts editing the same files. So before any re-dispatch, copy
+  each worktree's dirty state (`git status --porcelain` + the modified files,
+  or a `git stash create` object you record the sha of) to
+  `.../[run-id]/salvage/[mission]/`, and note in your state log what each
+  worktree held. It is insurance you can delete, and it costs one pass.
+  Measured 2026-09-18-athena-inbox, which took TWO fleet-wide kills: the first
+  admiral's successor took this snapshot (state.md L6-10) and later recorded
+  "Both salvage objectives are met — DND-183's and DND-189's previously
+  uncommitted work is now in git" (L161); the second, after the rate-limit kill
+  of an admiral plus three captains, inspected the worktrees but took no copy,
+  with DND-184 sitting on "4 commits + 6 modified files (mid-sabotage-pass),
+  most at-risk work" (L501). Adopt worktrees and branches, never recreate them.
 - For what's left, check `ListAgents` for the Mission-qualified name. Alive →
   don't duplicate, just check status. Gone → re-dispatch under the same
   name, into the same worktree, told explicitly this is a resume (it should
-  reconstruct progress from disk, per its own "Resuming after a pause").
+  reconstruct progress from disk, per its own "Resuming after a pause") and
+  told what the salvage snapshot holds, so it reconciles against it rather
+  than overwriting it.
 - Sweep every in-flight Mission, not just the one that happened to page
   you — a partial resume is the same failure mode as no resume.
 - The concurrency cap below still applies during a resume: resume 5, queue
@@ -416,8 +435,12 @@ For each currently-unblocked Mission, once it has a free slot:
   in the Notion design sub-docs, below), the absolute reports-directory path
   from step 3, the **MR target branch** (from your dependency map — the
   repo's default branch if this Mission has no unmerged dependency, otherwise
-  the dependency's branch), and the **Notion status values** it needs
-  (specifically `In Review`, which it sets itself once its MR is open).
+  the dependency's branch), **your own `agentId` as the explicit reply-to**
+  (below), and the **Notion status values** it needs (specifically `In Review`,
+  which it sets itself once its MR is open — and see the substitution under
+  *Inputs*: where the tracker has no `In Review`-equivalent, what the brief
+  must say is "set NO Notion status at all", never a value the DB cannot
+  accept).
   **In fleet mode, also point it at the design in Notion** — its ticket page's
   three sub-docs (**Product Requirements / Architecture & Engineering / QA
   Plan**) AND the epic's three, which it reads for full context — as the design
@@ -426,6 +449,17 @@ For each currently-unblocked Mission, once it has a free slot:
   report), non-blocking: it proceeds on best judgment while you carry the
   substantive gaps to the architect. Do NOT tell it to message the architect
   directly. Front-load context generously — there's no one for it to ask later.
+- **Name yourself as the reply-to, by `agentId`, in the brief itself.** A
+  captain never told who dispatched it addresses its terminal report to the
+  main session, which then has to relay it by hand. Measured 2026-09-18
+  (`2026-09-18-athena-inbox/state.md` L511, "the 4x misroute to the main
+  session"): four captains in one run, and the admiral corrected it only in its
+  own state log, so the fix would otherwise have died with the run. The captain
+  definition already tells it to message "your athena-admiral by its agentId
+  (it is in your brief)" — the bare role name bounces — so the brief is the
+  only place that `agentId` can come from. Carry it next to the
+  reports-directory path, and keep the precedence straight: the **file write is
+  the delivery**, the message is the latency optimization (3b).
 - **Pick the engineer's model from the Mission's complexity** — the
   athena-captain definition defaults to `model: opus`; override it with
   `model: "sonnet"` on the `Agent` call when the Mission is *bounded and
@@ -464,6 +498,114 @@ For each currently-unblocked Mission, once it has a free slot:
   A tranche of look-alike Missions is not automatically Sonnet: the *first*
   of a series (the one that establishes the pattern) is Opus; the follow-ups
   that copy a landed pattern are Sonnet candidates.
+
+### 4a. An environment fact you put in a brief must be VERIFIED, not inferred
+
+A brief is where your conclusions become every captain's premises, so a wrong
+environment fact does not stay wrong in one place — it is copied into five.
+
+**A tool's failure output frequently cannot distinguish "absent" from
+"misconfigured", and the default reading is the wrong one.** Measured twice:
+
+- 2026-09-18-athena-inbox state.md, lesson 2 — bare `tmux` printed
+  `command not found: _zsh_tmux_plugin_run`, a *broken zsh wrapper*, which
+  reads as "tmux is not installed". The admiral concluded absence, **put it in
+  a brief, and a captain "confirmed" it with the same broken tool.**
+  *Agreement between two agents using one broken tool is not corroboration.*
+  The verifying form is `command tmux` — bypass the shell's function/alias
+  layer.
+- The same run's `gh-athena` — `gh-athena api user` returns 403 for a GitHub
+  App installation token, which makes a perfectly HEALTHY wrapper look broken
+  to any naive probe. The wrapper's own `gh-athena --check` is the verifying
+  form; a captain that took the 403 at face value would have fallen back to
+  plain `gh` and mis-attributed the PR.
+
+So: before an "X is not available / X is broken" claim enters a brief, a state
+log, or a merge decision, **confirm it with a second, independent probe** —
+the tool's own `--check`/`--version`, `command <name>`, `type -a <name>`, the
+package/file on disk — and write down WHICH probe you used. When you dispatch
+the claim, dispatch the probe with it, so a captain can re-verify rather than
+re-assert. If you cannot find a second probe, mark the fact **unverified** in
+the brief rather than stating it.
+
+**A fact you INHERITED is not a verified fact** — a handoff note, a predecessor
+admiral's state log, a prior brief. It is someone else's conclusion with the
+probe missing, and a resume is exactly when you are most likely to copy it into
+five briefs without noticing you never checked it. **And a subordinate's report
+that an instruction is unsatisfiable IS a probe result** — the captain ran into
+the real system, which you did not. Weigh it as evidence about the environment,
+not as an excuse to be graded.
+
+Measured 2026-09-18-athena-inbox: the handoff listed "captains skip the Notion
+status transition" as a known problem framed as laziness, so admiral #2 put
+`In Review` into all five dispatch briefs. The Tickets DB has no such option —
+its Status set is only `Todo` / `Attention Given` / `Needs Attention` /
+`Cancelled` / `In Progress` / `Done`. **Four captains had independently
+reported that same instruction as unsatisfiable across earlier missions and
+were disbelieved**; the admiral's own mid-run correction reads "THE PRIOR
+CAPTAINS WERE RIGHT, not evasive." Every brief in the run had to be corrected
+in flight.
+
+So, before an inherited fact enters a brief:
+
+- **Query the authority, not the note.** For a tracker's status/label/assignee
+  vocabulary that authority is the DB schema itself — read the property's
+  options directly and paste the actual option set. This is one API call and it
+  is cheaper than correcting five live captains.
+- **Two independent subordinates reporting the same constraint outrank a
+  handoff sentence.** Before you conclude they are evading an instruction,
+  verify the instruction is satisfiable at all. An agent that reports a rule as
+  impossible is doing its job; the expensive failure is a fleet that silently
+  fakes compliance instead.
+- **When the authority cannot satisfy the instruction, write down the
+  substitution** in the brief rather than dropping the requirement — for this
+  tracker: leave Status at `In Progress`, append an "Implementation status"
+  block to the ticket BODY (PR URL, head SHA, CI state, scope boundary), and the
+  terminal move stays yours. Record it as an assumption and report it; changing
+  the schema is the owner's call, not yours.
+
+### 4b. Re-read the defect immediately before you dispatch it
+
+4a is about a fact you never verified. This is about one you verified
+**correctly**, which then changed. With five concurrent captains, peer agents on
+other machines, and an hourly cron all writing to the same repos and trackers,
+every report you hold is a claim about the past by the time you act on it.
+Staleness here is not bad luck; it is the normal condition.
+
+So: **before you spawn anyone to fix X, re-read X's current state.** The probe
+is whatever makes the defect observable — `git log`/`git show` on the file or
+the fix's own commit message, the ticket's current status, `gh pr view`, the
+file itself. One call. Record in the state log what you re-read, what it said,
+and when.
+
+The expensive instance, 2026-09-18: a captain report described a whole-worktree
+staging sweep; the admiral judged it live and dispatched a captain to fix it. A
+peer cron shipwright had **already fixed it**, at 21:07:42, in `17b93c2`
+("athena-shipwright: stage by path, never `git add -A`") — merged to main and
+pushed *before* the dispatch. Both `git log` and the tracker said so. Nobody
+looked, and a captain worked a solved problem for about forty-five minutes.
+Two more the same night: an epic asserted to have run on this machine when the
+PR author and session directory both said the other one, and an outage about to
+be reported from three dead pids that a supervisor had already replaced at
+`02:12:40Z` — caught only because the DND-189 captain had written *"re-verify
+16317 is still that client first — the report may be hours old by then"* into
+its report, unprompted.
+
+That warning is the reader side of the same discipline, and it survived exactly
+one report because nothing carried it forward. Two rules make it durable:
+
+- **A subordinate's report is evidence about the moment it was written, not
+  about now.** Read its as-of fingerprint (the captain template requires one);
+  re-check the mutable facts it names. A report with no fingerprint is not
+  thereby current — treat every mutable claim in it as needing the probe.
+- **"I already know this" is the state that produces it.** All three instances
+  were confident, and two had a plausible rationalisation ready — worktrees
+  "cleaned up post-merge", pids "dead means down". A rationalisation that
+  explains away missing evidence is the signal to run the probe, not the reason
+  you can skip it.
+
+This is a step, not a virtue: the cost is one command, and skipping it is
+visible in the state log as a dispatch with no recorded probe.
 
 ### 5. Handle what comes back from an athena-captain
 
@@ -660,6 +802,26 @@ the train", and it was the dominant waste on 2026-08-27. Rules:
   not persisted, and the whole fleet lost API access until the owner logged in
   again. An auth failure is OWNER-GATED: stop, report it, and wait.
 
+- **A merge criterion is scoped to its evidence model — in a repo with NO CI,
+  "green" proves nothing and the report IS the gate.** Every readiness rule
+  below ("full pipeline green on the current head", "confirm its latest
+  pipeline is green", `detailed_merge_status == mergeable`) assumes a forge
+  that runs CI and review bots. `~/dev/custom` has no `.github/workflows` at
+  all, so `gh pr checks` reports no checks and **`MERGEABLE` means only that
+  git can apply the diff** — a vacuous bar that will merge a branch whose
+  author is still committing to it. Measured (2026-09-18-athena-inbox,
+  dnd-183-report.md → *Process finding for the athena-admiral*): PR #3 was
+  squash-merged while the captain's final commit was in flight, and `main`
+  briefly carried everything EXCEPT an access-control fix; the remainder had
+  to land as a second PR. In such a repo the bar is **the captain's explicit
+  `DONE` plus its report file** — both, not either — and the local gate it
+  names (here `ai/bin/harness-gate`, this repo's `bin/prep-commit.sh`
+  equivalent) green on the head it reports. Generalising past the no-CI case:
+  **an actively-committing captain is positive evidence of NOT-ready in either
+  kind of repo** — before merging, confirm the head SHA you are landing is the
+  one the report names, and never infer readiness from forge state alone while
+  the captain's worktree is still moving.
+
 - Merging is YOURS, never an athena-captain's. You merge a Mission's MR
   yourself — with the `Auto-Deploy` label — only once ALL completion
   criteria hold: local gate green, full pipeline green on the current head,
@@ -752,6 +914,27 @@ unblocked work left, or `STUCK`, produce a summary:
 - New Missions created for discovered dependencies
 - Assumptions you made unassisted, and why
 - Location of the full state log for anyone picking this up later
+
+**Before you write it, reconcile the tracker against the forge.** Take the list
+of MRs/PRs you confirmed merged and the list of Missions at a terminal status,
+and diff them in both directions. Every merged MR must have its Mission at
+`Done` / `Ready for Release`; every Mission still at `In Progress` must have
+unmerged work. Do the same for the human-waiting statuses: a Mission sitting at
+`Needs Attention` whose blocking condition you later resolved is asking the
+owner for work that is already finished, so clear it or restate it.
+
+This is not covered by the per-merge transition under *Confirm a merge actually
+landed*. That transition fires on an event, and two things routinely break the
+event: a fleet-wide kill between the merge and the status move, and the
+no-`In Review`-option substitution under *Inputs*, which deliberately decouples
+the ticket from the captain and makes the terminal move **yours alone**. Both
+leave the tracker behind the repos silently — nothing errors, and your own
+state log holds both lists without ever comparing them. Measured
+2026-09-18-athena-inbox: DND-208 appears under "Confirmed MERGED" (state.md
+L496, `custom` PR #7) while the last completion roll-up omits it and still
+carries it as Running/`In Progress` (L471-472); and DND-203's remediation was
+recorded done (L133) while the ticket stayed `Needs Attention`, assigned to
+Cody, still asking for it (L533).
 
 ## Never end your turn waiting on your own background task
 

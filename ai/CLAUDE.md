@@ -191,6 +191,61 @@ Never use IEx. Instead, run elixir commands with `mix run -e "<elixir code here>
 - Consistency of Naming
 - Single-Responsibility Principle
 
+## A failed lookup must never look like an empty one
+
+Whenever code computes a **key** — a path, an id, a hostname, a monitor
+description, a config name — and uses it to select something, a key computed
+*wrongly* and a key that correctly matches *nothing* produce the same empty
+result. Returning "empty, exit 0" is right for one and catastrophic for the
+other, and the caller cannot tell which it got. Nothing raises, nothing is
+logged, and the wrongness reads as working. Tests do not catch it, because a
+fixture builds its input the way the code already expects.
+
+Four independent instances measured on 2026-09-18, three of them inside code
+written specifically to eliminate silent message loss:
+- `git rev-parse --git-common-dir` returns a **cwd-relative** path in a main
+  checkout and an absolute one only in a worktree; realpath'd after a chdir it
+  matched no inbox registry entry — zero channels, exit 0, the channel dark, no
+  error and no skip count (DND-183 / DND-202).
+- A lost registry root read as "not this environment, fine" (DND-208).
+- A canonical-repo mismatch, and a delimiter occurring *inside* a path, each
+  reproducing the same silent dark channel (`custom` PR #6) — after the first
+  fix had already shipped.
+- Outside any of that: Hyprland workspace rules pinned to **another machine's**
+  monitor descriptions silently overrode the correct local bindings, because a
+  rule matching no connected monitor raises nothing.
+
+So when writing or reviewing such a lookup:
+
+- **Resolving the key is its own step, with its own outcome.** A key that
+  cannot be computed, or that is malformed *for its type* — a relative path
+  where the contract says absolute, an empty string, a value containing the
+  delimiter it will later be split on — is an **error**, not an empty result.
+  Reject it where it is produced, not where it fails to match.
+- **Make every miss observable.** A lookup that legitimately finds nothing must
+  still leave something a human or a later check can read: how many candidates
+  were considered versus matched, or a logged line naming the key it searched
+  for. "Zero channels" has to be able to say *which key* found zero. Where that
+  surfaces through a guard or check, it carries `Fix:` per this repo's
+  *Guard/error messages are written for the LLM*.
+- **Validate both sides of the comparison.** Every normalisation the lookup
+  side applies (realpath, case-folding, trailing-slash stripping) must provably
+  have been applied to the stored side too — asserted, not assumed.
+- **Test the miss, not just the hit.** The regression test that matters feeds a
+  *wrongly computed* key and asserts the code says so. A suite that only ever
+  supplies well-formed keys proves nothing about this class.
+- **Patch the class, not the site.** A delimiter collision or a canonicalisation
+  asymmetry is never one call site — grep every other use of that key,
+  comparison, or protocol in the same change. The third instance above is two
+  further dark channels found only *after* the first fix shipped.
+
+The standing question to ask of any such code, in review or while writing it,
+is **"what does this do when the input is MISSING rather than wrong?"** — the
+wrong input usually raises; the missing one is what exits 0.
+
+(The inbox-specific application of this, with its verification table, lives in
+`~/dev/custom/CLAUDE.md` → *Inbox tenancy registry* and the contract it cites.)
+
 # User-level operating notes
 
 ## The Athena Inbox (machine-wide message facility)

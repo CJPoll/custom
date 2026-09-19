@@ -450,7 +450,12 @@ elif [ "${OPTED_IN}" -eq 1 ] && [ -n "${HEALTH_TEXT}" ]; then
   if [ "${HEALTH_CANDIDATES}" -gt 0 ]; then
     WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: check that every file under \${ATHENA_INBOX_ROOT:-~/.local/share/athena}/projects/ is valid JSON — one that is not is dropped from the candidate set, which makes ITS project look like it never opted in. inbox-status cannot say which, by design. For the channel-level clauses, run ai/skills/athena:inbox/bin/inbox-status from this project."
   else
-    WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: run ai/skills/athena:inbox/bin/inbox-status from this project to see which."
+    # Names the CORRECTIVE ACTION, not only the diagnostic. The contract
+    # requires a never-delivered channel to be reported "with a Fix: clause
+    # naming producer registration"; pointing only at inbox-status discharged
+    # that by one indirection, which is a hop an agent reading a pre-prompt
+    # line should not have to take.
+    WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a channel nothing has ever been delivered to usually means its producer was never registered — map this inbox filename to a server-side agent instance in ~/.config/athena-inbox-client/config.json. Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel."
   fi
   WARN_TEXT_MARKER="${HEALTH_WARN_MARKER}"
 fi

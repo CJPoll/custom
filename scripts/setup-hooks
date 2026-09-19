@@ -94,10 +94,26 @@ def norm(cmd):
     # this machine ~/.claude/hooks is a symlink to the repo's ai/hooks/, so a live
     # entry `~/.claude/hooks/foo.sh` is the SAME file as `<repo>/ai/hooks/foo.sh`.
     # Without this, a raw-string compare treats them as distinct and install
-    # appends a duplicate wiring (double-firing the guard). Falls back to the
-    # literal string when the path does not exist, so it never raises.
+    # appends a duplicate wiring (double-firing the guard).
+    #
+    # THE DIRECTORY IS RESOLVED EVEN WHEN THE FILE DOES NOT EXIST. Falling back
+    # to the literal string for a missing file made the comparison depend on
+    # something irrelevant to it — whether the script happens to be on disk
+    # right now. Two cases hit that: a hook that is ALREADY WIRED but whose file
+    # is temporarily absent (a moved checkout, a half-finished edit) was seen as
+    # unwired and duplicated, which is the exact double-firing this function
+    # exists to prevent; and a hook being ADDED on a branch, where `--self-test`
+    # resolves the repo dir to the MAIN checkout by design, so the file is not
+    # there yet and a correct registry entry reported a false failure. Resolving
+    # only `dirname` answers the question actually being asked — are these two
+    # spellings the same location — and needs no file to do it.
+    if not cmd:
+        return cmd
     try:
-        return os.path.realpath(cmd) if os.path.exists(cmd) else cmd
+        if os.path.exists(cmd):
+            return os.path.realpath(cmd)
+        head, tail = os.path.split(cmd)
+        return os.path.join(os.path.realpath(head), tail) if head else cmd
     except OSError:
         return cmd
 
@@ -198,6 +214,35 @@ PY
     rs="$(apply install "$slink" 0)"
     echo "$rs" | grep -q "MARKER:nochange" || { echo "  FAIL symlink-spelled hooks should be seen as wired (no duplicate install)"; ok=0; }
     HOOKS_SETTINGS_FILE="$slink" "$CHECKER" >/dev/null 2>&1 && echo "  ok   symlink-spelled hooks recognized as wired" || { echo "  FAIL check should pass on symlink-spelled hooks"; ok=0; }
+    # ...and the same, for a hook whose FILE IS NOT THERE. `norm` resolves the
+    # directory rather than the whole path, so "are these two spellings the same
+    # location" does not depend on whether the script is on disk right now.
+    # Without that, a wired hook whose file is temporarily absent reads as
+    # unwired and install DUPLICATES it (double-firing the guard on restore),
+    # and a hook being added on a branch reddens this suite against the main
+    # checkout it is not in yet. The case above only covers this incidentally,
+    # and stops covering it the moment every registry hook exists in main.
+    ghost="${tmp}/settings-ghost.json"
+    HLINK="$hlink" SLINK="$ghost" python3 - <<'PY2'
+import json, os
+cmd = os.path.join(os.environ["HLINK"], "definitely-not-on-disk.sh")
+json.dump({"hooks": {"SessionStart": [
+    {"matcher": "", "hooks": [{"type": "command", "command": cmd}]}]}},
+    open(os.environ["SLINK"], "w"), indent=4)
+PY2
+    GHOST_ABS="${HOOKS_REPO_DIR}/ai/hooks/definitely-not-on-disk.sh" \
+    GHOST="$ghost" REPO_DIR="$HOOKS_REPO_DIR" python3 - <<'PY2' \
+      && echo "  ok   a symlink-spelled hook whose file is absent is still seen as wired" \
+      || { echo "  FAIL an absent hook file must not make two spellings compare unequal"; ok=0; }
+import json, os, sys
+def norm(cmd):
+    if not cmd: return cmd
+    if os.path.exists(cmd): return os.path.realpath(cmd)
+    head, tail = os.path.split(cmd)
+    return os.path.join(os.path.realpath(head), tail) if head else cmd
+live = json.load(open(os.environ["GHOST"]))["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+sys.exit(0 if norm(live) == norm(os.environ["GHOST_ABS"]) else 1)
+PY2
 
     # Worktree safety: the wired commands must point at the MAIN checkout, so
     # they survive `wt` cleanup of whatever worktree this was run from.
