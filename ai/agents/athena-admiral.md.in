@@ -551,6 +551,26 @@ the train", and it was the dominant waste on 2026-08-27. Rules:
   not persisted, and the whole fleet lost API access until the owner logged in
   again. An auth failure is OWNER-GATED: stop, report it, and wait.
 
+- **A merge criterion is scoped to its evidence model — in a repo with NO CI,
+  "green" proves nothing and the report IS the gate.** Every readiness rule
+  below ("full pipeline green on the current head", "confirm its latest
+  pipeline is green", `detailed_merge_status == mergeable`) assumes a forge
+  that runs CI and review bots. `~/dev/custom` has no `.github/workflows` at
+  all, so `gh pr checks` reports no checks and **`MERGEABLE` means only that
+  git can apply the diff** — a vacuous bar that will merge a branch whose
+  author is still committing to it. Measured (2026-09-18-athena-inbox,
+  dnd-183-report.md → *Process finding for the athena-admiral*): PR #3 was
+  squash-merged while the captain's final commit was in flight, and `main`
+  briefly carried everything EXCEPT an access-control fix; the remainder had
+  to land as a second PR. In such a repo the bar is **the captain's explicit
+  `DONE` plus its report file** — both, not either — and the local gate it
+  names (here `ai/bin/harness-gate`, this repo's `bin/prep-commit.sh`
+  equivalent) green on the head it reports. Generalising past the no-CI case:
+  **an actively-committing captain is positive evidence of NOT-ready in either
+  kind of repo** — before merging, confirm the head SHA you are landing is the
+  one the report names, and never infer readiness from forge state alone while
+  the captain's worktree is still moving.
+
 - Merging is YOURS, never an athena-captain's. You merge a Mission's MR
   yourself — with the `Auto-Deploy` label — only once ALL completion
   criteria hold: local gate green, full pipeline green on the current head,
