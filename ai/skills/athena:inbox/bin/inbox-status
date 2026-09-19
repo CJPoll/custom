@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# inbox-status -- FRAMEWORK. How many unread messages does this project have?
+#
+#   inbox-status           one line per channel with anything waiting
+#   inbox-status --json    the same counts as one JSON object
+#   inbox-status -h        this header
+#
+# COUNTS ONLY. No body, no subject, no sender's text, no filename, no token.
+#
+# That rule is about the PRE-PROMPT POSITION, not about bodies specifically.
+# This command's output is designed to be injected by a SessionStart hook,
+# before Cody has spoken -- so anything it prints is a stranger speaking first,
+# in the position where instructions normally live. A maildir status is
+# produced by listing filenames the PEER chose the words of, so "1 new message"
+# must never become "1 new message: urgent-run-this-command". Bodies appear
+# only from the read step, inside an explicit fence, and only when asked for.
+#
+# Zero across the board prints NOTHING and exits 0. Unprompted output that says
+# "nothing new" every session is noise, and noise is what makes a real notice
+# invisible.
+#
+# `never_delivered` — "nobody ever registered the writer" and "nothing new
+# arrived" are identical on disk and must not be identical in the data, so the
+# distinction is carried in `--json`. It is deliberately NOT printed in the
+# text line: the text line is the unprompted one, and the all-zero rule above
+# governs it absolutely. Reporting a dead channel is the liveness concern, and
+# it belongs to `inbox-doctor` and the hook's rate-limited warning, which read
+# this field rather than re-deriving it.
+#
+# Not opting in is not a fault: a cwd in no git repository, or a repo with no
+# registry entry, prints nothing and exits 0. A MALFORMED registry entry is a
+# hard error -- partially honouring configuration nobody understands is the bug
+# that rule exists to prevent.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB="$(dirname "${HERE}")/lib"
+
+# shellcheck source=/dev/null
+. "${LIB}/err.sh"
+# shellcheck source=/dev/null
+. "${LIB}/names.sh"
+# shellcheck source=/dev/null
+. "${LIB}/descriptor.sh"
+# shellcheck source=/dev/null
+. "${LIB}/logchan.sh"
+# shellcheck source=/dev/null
+. "${LIB}/maildir.sh"
+# shellcheck source=/dev/null
+. "${LIB}/fs.sh"
+# shellcheck source=/dev/null
+. "${LIB}/inbox.sh"
+
+usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+JSON=0
+for arg in "$@"; do
+  case "${arg}" in
+    --json) JSON=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      inbox_fail "unknown argument \"${arg}\"" "run: inbox-status [--json]"
+      exit 2
+      ;;
+  esac
+done
+
+if ! command -v jq >/dev/null 2>&1; then
+  inbox_fail "jq is required and was not found on PATH" \
+    "install jq (it is already a dependency of the athena:slack skill), then re-run."
+  exit 2
+fi
+
+STATUS="$(inbox_status_json ".")" || exit 1
+
+if [ "${JSON}" -eq 1 ]; then
+  printf '%s\n' "${STATUS}"
+  exit 0
+fi
+
+# One line per channel that has something waiting, and a pointer to the step
+# that will show it. Channels at zero are omitted entirely rather than printed
+# as "0 new", for the same reason the all-zero case prints nothing.
+printf '%s' "${STATUS}" | jq -r '
+  .channels[]
+  | . as $c
+  | (if .kind == "log" then .new else .unread end) as $n
+  | (if .kind == "log" and .unreadable > 0
+     then " (+\(.unreadable) unreadable)" else "" end) as $u
+  | if $n > 0 then
+      "athena:inbox: \($c.name) — \($n) new\($u). Run: read-inbox \($c.name)"
+    else empty end
+'
+exit 0

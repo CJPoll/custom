@@ -47,9 +47,15 @@ names_valid_inbox_name() {
     .*) return 1 ;;                    # no leading dot
     */*|*\\*) return 1 ;;              # no separator of either flavour
     *..*) return 1 ;;                  # no traversal, anywhere in the string
-    *$'\0'*) return 1 ;;               # unreachable via a bash variable; see
-                                       # SABOTAGE_RECORDS.md (measured zero)
   esac
+  # The client's grammar also rejects a NUL. There is deliberately NO arm for
+  # it here, and the omission is the safe direction: bash cannot hold a NUL in
+  # a variable at all (the assignment truncates), so a NUL is unreachable
+  # before this function is ever entered. Writing the arm anyway is actively
+  # DANGEROUS -- `*$'\0'*` expands to the pattern `**`, which matches every
+  # string, so the arm rejects everything and the whole grammar inverts. That
+  # is not hypothetical: it is the defect this line replaced, and it reddened
+  # D-1 and D-4 on the first run. See SABOTAGE_RECORDS.md (measured zero).
   [ "$(names_byte_length "${name}")" -le 128 ] || return 1
   return 0
 }
@@ -79,6 +85,38 @@ names_valid_namespace() {
   for seg in ${ns}; do
     names_valid_segment "${seg}" || return 1
   done
+  return 0
+}
+
+# names_valid_log_path <relative-path>
+# A `log` channel's `path`, relative to ATHENA_INBOX_ROOT.
+#
+# The deployed Ruby writer only ever produces a BARE filename directly in the
+# root (its `Inbox.resolve` asserts `File.dirname(path) == root`), and the
+# legacy flat paths are declared as-is rather than migrated. A `<namespace>/`
+# prefix is nevertheless allowed here, because the design says new channels
+# SHOULD use one and nothing forces it -- so this grammar is the union: zero or
+# more namespace segments, then a name that passes the writer's own grammar.
+#
+# Anything a bare-name reader would accept, this accepts identically; the extra
+# freedom is only in the directory part, and every segment of it is checked.
+names_valid_log_path() {
+  local rel="$1" base dir
+
+  [ -n "${rel}" ] || return 1
+  case "${rel}" in
+    */) return 1 ;;
+  esac
+
+  base="${rel##*/}"
+  names_valid_inbox_name "${base}" || return 1
+
+  case "${rel}" in
+    */*)
+      dir="${rel%/*}"
+      names_valid_namespace "${dir}" || return 1
+      ;;
+  esac
   return 0
 }
 
