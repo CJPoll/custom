@@ -100,9 +100,10 @@ inbox_lock_acquire() {
 
   dir="${path%/*}"
   if [ ! -d "${dir}" ]; then
-    # The reader creates its own lock file (the contract's conformance
-    # checklist forbids a WRITER from creating one, not a reader), so it may
-    # need the directory. 0700, like the root.
+    # Either role may need its lock's directory created. A reader creates its
+    # `.consumer.lock`; a sender creates its `.sender.lock` (the conformance
+    # checklist forbids a writer creating a `*.consumer.lock` -- the reader's and
+    # owner's -- not a lock file of its own). 0700, like the root.
     # fs_mkdir_0700, not `mkdir -p -m 0700`: the `-m` form modes only the
     # LAST component, so a lock in a namespace that did not exist yet left its
     # parents at the process umask (0755) inside a root the contract holds at

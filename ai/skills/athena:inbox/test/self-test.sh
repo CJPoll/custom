@@ -3339,6 +3339,46 @@ else
   ok "M-11 a send creates no .consumer.lock in the directory the peer reads"
 fi
 
+# A SYMLINKED WRITE DIRECTORY IS REFUSED BEFORE ANY FILE IS CREATED THROUGH IT.
+# fs_assert_contained resolves through realpath, which FOLLOWS symlinks, so a
+# write dir that is a symlink to another place INSIDE the root passes
+# containment. If the sender lock were taken first, a .sender.lock carrying this
+# session's id and pid would be written into that other directory -- another
+# tenant's namespace, or the peer's read directory -- before the send refused.
+# So the write dir is symlink-checked (fs_maildir_provision_write) BEFORE the
+# lock. This plants the write dir as a symlink to a decoy and proves nothing is
+# created there.
+setup_send_case
+DECOY="${ATHENA_INBOX_ROOT}/agent-mail/peer/decoy"
+fs_mkdir_0700 "${SNS}" >/dev/null 2>&1 || mkdir -p "${SNS}"
+mkdir -p "${DECOY}"
+ln -s "${DECOY}" "${SWRITE}"
+ERR="$( cd "${SPROJ}" && printf 'through a symlink\n' | "${BIN}/send-mail" mail via-symlink --to peer 2>&1 >/dev/null )"; RC=$?
+assert_eq "A-5 a send through a symlinked write directory is refused" "1" "${RC}"
+assert_contains "A-5 ... naming the symlink, with a Fix:" "Fix:" "${ERR}"
+if [ -e "${DECOY}/.sender.lock" ]; then
+  bad "A-5 ... and no .sender.lock was created in the directory the symlink pointed at" "it was"
+else
+  ok "A-5 ... and no .sender.lock was created in the directory the symlink pointed at"
+fi
+assert_eq "A-5 ... and nothing was delivered through it" "0" "$(ls "${DECOY}"/*.md 2>/dev/null | wc -l)"
+
+# THE DOORBELL-BUMP-FAILURE BRANCH: delivered, but the bell could not ring. The
+# message is linked and durable, so failing the send would report a loss that
+# did not happen -- but the failure must never be SILENT, or the peer waits on a
+# signal that never comes. Made unbumpable by planting `.event` as a directory
+# (fs_bump_doorbell refuses a non-regular doorbell). The send must still exit 0,
+# still report the filename, and print the "could not be rung" warning.
+setup_send_case
+mkdir -p "${SWRITE}"
+mkdir -p "${SWRITE}/.event"
+OUT="$( cd "${SPROJ}" && printf 'bell wont ring\n' | "${BIN}/send-mail" mail bell-fail --to peer 2>&1 )"; RC=$?
+assert_eq "M-12 a send whose doorbell cannot ring still exits 0 (the message is durable)" "0" "${RC}"
+assert_contains "M-12 ... and still reports the delivered filename" "delivered" "${OUT}"
+assert_contains "M-12 ... and warns that the bell did not ring, not silently" "could not be rung" "${OUT}"
+assert_contains "M-12 ... with a Fix: clause the reader can act on" "Fix:" "${OUT}"
+assert_eq "M-12 ... and the message really is in place" "1" "$(ls "${SWRITE}"/*bell-fail.md 2>/dev/null | wc -l)"
+
 echo
 echo "== DND-187 / 5. The send path's refusals (A-3, A-8, and missing input) =="
 

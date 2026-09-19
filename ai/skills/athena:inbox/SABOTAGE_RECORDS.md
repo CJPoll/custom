@@ -543,15 +543,16 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
 
 # DND-187 — `bin/send-mail`, the writer's half
 
-**37 mutations, 32 red, 5 measured green** — in the FINAL state of the branch.
-The numbers moved across five passes and every movement is recorded rather than
+**39 mutations, 34 red, 5 measured green** — in the FINAL state of the branch.
+The numbers moved across six passes and every movement is recorded rather than
 smoothed over, because a sabotage record whose header disagrees with its own
 table is a record a reader cannot use: the first pass was **18 red / 6 green**
 over 24 mutations; closing the two real gaps it found (S10, S13) made it 20/4;
 the review round added six more mutations (S25 … S30) over the checks written to
 answer it, of which five reddened; a second review round added five more
 (S31 … S35), all of which reddened; a third review round added one more (S36),
-which reddened; a fourth added one more (S37), which reddened.
+which reddened; a fourth added one more (S37), which reddened; a fifth added two
+more (S38, S39), both of which reddened.
 
 Each mutation was an
 exact-substring replace whose anchor was asserted present before writing, run
@@ -693,6 +694,38 @@ defaulting to `consumer` so every existing caller is unchanged, and branching th
 `flock -n` refusal on it. The section-4b contention case asserted only that
 *some* refusal appeared; it now asserts the refusal names a concurrent send and
 mentions neither `--peek` nor "designated consumer".
+
+### Added in the fifth review round
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S38 | the send takes the sender lock **before** the write dir is symlink-checked | **RED** (1) | *A-5 … and no .sender.lock was created in the directory the symlink pointed at* |
+| S39 | the post-delivery bump failure is swallowed with `\|\| true` | **RED** (1) | *M-12 … and warns that the bell did not ring, not silently* |
+
+**S38 is a cross-namespace write, and it was shipped.** `fs_assert_contained`
+resolves the write directory through `realpath`, which FOLLOWS symlinks, so a
+write dir that is a symlink to another directory INSIDE the root — another
+tenant's namespace, or the peer's read directory — passes containment. The send
+then took its `.sender.lock` (carrying this session's id and pid) *first*, which
+created that file through the symlink in a directory this identity does not own;
+only afterwards, inside `fs_maildir_deliver`, did `fs_assert_not_symlink` refuse.
+The refusal happened; it happened one write too late. Fixed by calling
+`fs_maildir_provision_write` (which symlink-checks the write dir) before the
+lock, after the self-send and slug refusals so neither creates a directory on its
+way to refusing. Measured by removing the reorder: the send still refused, but
+the `.sender.lock` appeared in the decoy directory the symlink pointed at.
+
+**S39 keeps the doorbell-bump failure from going silent.** A delivered message
+whose `.event` cannot be rung must still exit 0 — the message is linked and
+durable, so failing would report a loss that did not happen — but the warning
+must be printed, or the peer waits on a signal that never comes and the
+no-polling rule is broken in silence. The branch had no send-side case (S24
+covered the read/ack side), so `|| true` over the bump would have left it green.
+Measured by planting `.event` as a directory (`fs_bump_doorbell` refuses a
+non-regular doorbell) and asserting the send exits 0, reports the filename, and
+prints "could not be rung".
+
+## The input classes the fixtures never contained
 
 Mutating code finds a check that stopped working. It cannot find a check
 nobody thought to write, because a fixture is built the way the code already

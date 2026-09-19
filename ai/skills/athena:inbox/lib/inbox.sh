@@ -1028,6 +1028,19 @@ inbox_send_mail() {
   # message" and the real cause would never be printed.
   body="$(cat; printf X)"; body="${body%X}"
 
+  # PROVISION -- AND SYMLINK-CHECK -- THE WRITE DIRECTORY BEFORE TAKING THE LOCK
+  # INSIDE IT. `fs_assert_contained` above resolves through `realpath`, which
+  # FOLLOWS symlinks, so a write directory that is a symlink to ANOTHER place
+  # inside the root (another tenant's namespace, or the peer's read directory)
+  # passes containment. Acquiring the lock first would then create a
+  # `.sender.lock` -- carrying this session's id and pid -- through that symlink,
+  # in a directory this identity does not own, and only afterwards refuse the
+  # send. `fs_maildir_provision_write` runs `fs_assert_not_symlink` on the write
+  # dir (and its `tmp/`) first; it is idempotent, so the later call inside
+  # `fs_maildir_deliver` is a no-op. Placed after the self-send and slug refusals
+  # so neither of those creates a directory on its way to refusing.
+  fs_maildir_provision_write "${write_dir}" || return 1
+
   lock="${write_dir}/.sender.lock"
   inbox_require_sender "${lock}" "channel \"${chan}\"" || return 1
 
