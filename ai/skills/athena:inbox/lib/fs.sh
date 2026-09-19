@@ -664,3 +664,49 @@ fs_maildir_deliver() {
   fi
   return 0
 }
+
+# --- capturing a body to send (DND-187) -------------------------------------
+
+# fs_mktemp_private   -- a 0600 temp file, path on stdout.
+fs_mktemp_private() {
+  local t
+  t="$(mktemp "${TMPDIR:-/tmp}/athena-inbox.XXXXXX")" || {
+    inbox_fail "cannot create a temporary file to hold the message body" \
+      "check that \$TMPDIR (default /tmp) exists and is writable."
+    return 1
+  }
+  chmod 0600 "${t}" 2>/dev/null || true
+  printf '%s\n' "${t}"
+}
+
+# fs_capture_stdin <path>   -- stdin, verbatim, into an existing 0600 file.
+#
+# THE BYTES GO TO A FILE BEFORE THEY GO TO A VARIABLE. A shell variable cannot
+# hold a NUL: the assignment drops it, so a body read straight into one is
+# silently altered and there is nothing left to compare against. Landing it on
+# disk first is what makes the NUL check below possible at all.
+fs_capture_stdin() {
+  cat > "$1" || {
+    inbox_fail "cannot read the message body" \
+      "check that \$TMPDIR is writable; the body is captured to a private temporary file so it can be checked before it is sent."
+    return 1
+  }
+  return 0
+}
+
+# fs_assert_no_nul_text <path>
+#
+# The message-body counterpart of `fs_assert_no_nul`, which speaks about a
+# corrupt `.jsonl` and tells the operator to let the producer recreate it --
+# advice that means nothing about a file the sender chose. Same measurement,
+# a refusal the sender can act on.
+fs_assert_no_nul_text() {
+  local path="$1" raw stripped
+  [ -f "${path}" ] || return 0
+  raw="$(wc -c < "${path}" | tr -d ' ')"
+  stripped="$(tr -d '\0' < "${path}" | wc -c | tr -d ' ')"
+  [ "${raw}" = "${stripped}" ] && return 0
+  inbox_fail "refusing to send a message body containing a NUL byte" \
+    "remove the NUL, or send the file as an attachment reference (--re) instead of as the body. A message body is carried through the shell, which DROPS a NUL on assignment -- so this message would have been delivered altered, immutably, with nothing reporting the difference."
+  return 1
+}

@@ -1091,3 +1091,38 @@ inbox_send_mail() {
   printf '%s\n' "${name}"
   return 0
 }
+
+# inbox_body_capture <source>   -- "-" for stdin, or a path.
+#
+# One path for all three body sources (stdin, `--body-file`, the `$EDITOR`
+# draft), so the checks below cannot apply to two of them and miss the third.
+#
+# A NUL IN THE BODY IS REFUSED, NOT CARRIED. Shell drops a NUL on assignment,
+# so a body containing one would be delivered SILENTLY ALTERED, immutably, into
+# the peer's transcript -- with `delivered <name>` printed and exit 0. That is
+# the same class the frontmatter round trip was added to close (a value changed
+# in transit while both sides report success), and the round trip cannot see it
+# because it compares the header, never the body. The message is the sender's
+# own content, so refusing is safe in the way refusing a peer's message would
+# not be: nothing is lost, and the sender is told before anything is written.
+inbox_body_capture() {
+  local src="$1" path tmp rc=0
+
+  if [ "${src}" = "-" ]; then
+    tmp="$(fs_mktemp_private)" || return 1
+    path="${tmp}"
+    fs_capture_stdin "${path}" || { rm -f "${tmp}"; return 1; }
+  else
+    path="${src}"
+    if [ ! -f "${path}" ] || [ -L "${path}" ]; then
+      inbox_fail "the message body file is not a readable regular file" \
+        "pass an existing regular file, or pipe the body on stdin instead. Nothing was sent."
+      return 1
+    fi
+  fi
+
+  if ! fs_assert_no_nul_text "${path}"; then rc=1; fi
+  if [ "${rc}" -eq 0 ]; then fs_read_message "${path}" || rc=1; fi
+  [ -z "${tmp:-}" ] || rm -f "${tmp}"
+  return "${rc}"
+}

@@ -2,11 +2,13 @@
 # send-mail -- FRAMEWORK. Say something back, on a maildir channel.
 #
 #   send-mail <channel> <slug> --to <identity> [--re <path-or-url>]
-#                              [--thread <message-filename>] [--body-file <path>]
+#                              [--thread <message-filename>]
+#                              [--body-file <path> | --edit]
 #   send-mail -h                 this header
 #
-# The body comes from stdin, from --body-file, or from $EDITOR when stdin is a
-# terminal. The delivered FILENAME is printed; the body is never printed back.
+# The body comes from stdin, from --body-file, or from $EDITOR (--edit, or by
+# default when stdin is a terminal). The delivered FILENAME is printed; the
+# body is never printed back.
 #
 # ============================ WHAT A SEND IS ===============================
 #
@@ -74,6 +76,7 @@ TO=""
 RE=""
 THREAD=""
 BODY_FILE=""
+EDIT=0
 
 # The option parser refuses a flag with no value rather than swallowing the
 # next positional. `--to --re x` would otherwise set TO="--re" and then fail
@@ -96,10 +99,11 @@ while [ "$#" -gt 0 ]; do
     --re)        need_value --re "${2:-}";        RE="$2";        shift 2 ;;
     --thread)    need_value --thread "${2:-}";    THREAD="$2";    shift 2 ;;
     --body-file) need_value --body-file "${2:-}"; BODY_FILE="$2"; shift 2 ;;
+    --edit)      EDIT=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     -*)
       inbox_fail "unknown option \"$1\"" \
-        "run: send-mail <channel> <slug> --to <identity> [--re <path-or-url>] [--thread <message-filename>] [--body-file <path>]"
+        "run: send-mail <channel> <slug> --to <identity> [--re <path-or-url>] [--thread <message-filename>] [--body-file <path> | --edit]"
       exit 2
       ;;
     *)
@@ -156,24 +160,32 @@ if ! command -v flock >/dev/null 2>&1; then
 fi
 
 # --- the body ---------------------------------------------------------------
-# Three sources, one of which is interactive. Whichever is used, an EMPTY body
-# is refused downstream: an empty message is the missing-input shape of this
-# command (a pipeline that produced nothing, an $EDITOR abandoned), and it
-# would be delivered into the peer's transcript immutably while the sender was
-# told their text went out.
+# Three sources, and ONE capture path through the manager, so the NUL check and
+# the regular-file check cannot apply to two of them and miss the third.
+#
+# Whichever source is used, an EMPTY body is refused downstream: an empty
+# message is the missing-input shape of this command (a pipeline that produced
+# nothing, an $EDITOR abandoned), and it would be delivered into the peer's
+# transcript immutably while the sender was told their text went out.
+#
+# `--edit` exists so the interactive branch is REACHABLE WITHOUT A TERMINAL.
+# Selecting it only by "stdin is a tty" made it untestable by construction, and
+# a branch no test can enter is a branch that breaks silently -- which is the
+# whole subject of this skill. The tty check remains as the FALLBACK for
+# someone who typed the command by hand and passed neither.
 BODY=""
+if [ -n "${BODY_FILE}" ] && [ "${EDIT}" -eq 1 ]; then
+  inbox_fail "both --body-file and --edit were given" \
+    "choose one source for the body: --body-file <path>, --edit, or stdin."
+  exit 2
+fi
+
 if [ -n "${BODY_FILE}" ]; then
-  if [ ! -f "${BODY_FILE}" ] || [ -L "${BODY_FILE}" ]; then
-    inbox_fail "the --body-file is not a readable regular file" \
-      "pass --body-file an existing regular file, or pipe the body on stdin instead. Nothing was sent."
-    exit 2
-  fi
-  BODY="$(cat -- "${BODY_FILE}"; printf X)"; BODY="${BODY%X}"
-elif [ ! -t 0 ]; then
-  BODY="$(cat; printf X)"; BODY="${BODY%X}"
-else
+  BODY="$(inbox_body_capture "${BODY_FILE}"; printf X)" || exit 1
+  BODY="${BODY%X}"
+elif [ "${EDIT}" -eq 1 ] || [ -t 0 ]; then
   if [ -z "${EDITOR:-}" ]; then
-    inbox_fail "no body: stdin is a terminal, no --body-file was given, and \$EDITOR is unset" \
+    inbox_fail "no body: no --body-file was given, and \$EDITOR is unset" \
       "pipe the body in (printf '%s\\n' \"...\" | send-mail ...), pass --body-file <path>, or set \$EDITOR to compose interactively."
     exit 2
   fi
@@ -183,16 +195,29 @@ else
   }
   trap 'rm -f "${DRAFT}"' EXIT
   chmod 0600 "${DRAFT}" 2>/dev/null || true
-  # Through `sh -c` because $EDITOR routinely CARRIES ARGUMENTS -- `code -w`,
-  # `emacsclient -nw`. Invoked as a single word those fail with "not found",
-  # surfacing here as the editor having exited non-zero, which sends the reader
-  # looking at their draft instead of at their environment.
-  if ! sh -c '"$@"' _ ${EDITOR} "${DRAFT}"; then
+  # Word-split on purpose -- $EDITOR routinely CARRIES ARGUMENTS (`code -w`,
+  # `emacsclient -nw`), and invoked as a single word those fail with "not
+  # found", surfacing here as the editor having exited non-zero and sending
+  # the reader to look at their draft instead of at their environment.
+  #
+  # `set -f` around it because an unquoted expansion is word-split AND
+  # PATHNAME-EXPANDED: without it an $EDITOR containing a glob character would
+  # be expanded against the caller's current directory, so the command run is
+  # not the command configured. That is the second half of this repo's own
+  # `custom` PR #6 lesson, and it costs one line to close.
+  set -f
+  sh -c '"$@"' _ ${EDITOR} "${DRAFT}"; EDIT_RC=$?
+  set +f
+  if [ "${EDIT_RC}" -ne 0 ]; then
     inbox_fail "\$EDITOR exited non-zero; nothing was sent" \
       "re-run and save the draft, or pipe the body on stdin. The draft was discarded rather than delivered, because an editor that failed may have written a partial message."
     exit 1
   fi
-  BODY="$(cat -- "${DRAFT}"; printf X)"; BODY="${BODY%X}"
+  BODY="$(inbox_body_capture "${DRAFT}"; printf X)" || exit 1
+  BODY="${BODY%X}"
+else
+  BODY="$(inbox_body_capture "-"; printf X)" || exit 1
+  BODY="${BODY%X}"
 fi
 
 # --- send -------------------------------------------------------------------
