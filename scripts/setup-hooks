@@ -68,7 +68,9 @@ while [ $# -gt 0 ]; do
     # Internal: print this tool's normalized form of one path. Used by the
     # self-test to compare against check-hooks-registered's, driving both
     # SHIPPED implementations rather than copies of them.
-    --norm) ACTION="norm"; NORM_ARG="${2:-}"; shift ;;
+    # Consume the value only if there IS one, so `--norm` as the last argument
+    # does not `shift` an empty stack and trip `set -e` with a bare exit.
+    --norm) ACTION="norm"; NORM_ARG="${2:-}"; if [ $# -ge 2 ]; then shift; fi ;;
     --dry-run)  DRY_RUN=1 ;;
     -h|--help)  usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 1 ;;

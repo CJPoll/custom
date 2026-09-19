@@ -1200,9 +1200,9 @@ assert_eq "--repo-key is empty outside a git repo" "" \
 assert_eq "--repo-key exits 0 outside a git repo" "0" "$?"
 
 # GIT ABSENT is "could not tell", NOT "no git repository". With git off PATH,
-# --repo-key must EXIT NON-ZERO (not empty-and-0), and --json must carry
-# repo_key: null (not ""), so a consumer reading the exit code or the field is
-# never told "no repo, nothing here" when the truth is unknown. inbox_repo_key's
+# --repo-key must EXIT NON-ZERO (not empty-and-0), and --json must REFUSE (no
+# document, non-zero, a Fix: clause) rather than emit a healthy-looking empty
+# doc a caller reads as "not opted in, nothing here". inbox_repo_key's
 # `... || printf ''` used to collapse exactly this, and EVERY repo_key case above
 # keeps git on PATH, so none of them caught it (DND-188 merge-round critic).
 setup_case
@@ -1214,11 +1214,12 @@ for b in bash sh env jq sha256sum cut realpath dirname date stat wc tail mv rm m
 done   # git DELIBERATELY omitted
 ( cd "${rkg}" && PATH="${NOGITBIN}" "${BIN}/inbox-status" --repo-key >/dev/null 2>&1 )
 assert_eq "--repo-key exits non-zero when git is absent (could not tell, not empty-and-0)" "1" "$?"
+( cd "${rkg}" && PATH="${NOGITBIN}" "${BIN}/inbox-status" --json >/dev/null 2>&1 )
+assert_eq "--json REFUSES (non-zero) when git is absent, not a healthy-empty doc" "1" "$?"
 jout="$(cd "${rkg}" && PATH="${NOGITBIN}" "${BIN}/inbox-status" --json 2>/dev/null)"
-assert_eq "--json repo_key is null when git is absent, never \"\"" "null" \
-  "$(jq -r '.repo_key' <<<"${jout}")"
-assert_eq "...and the field is still present, never dropped" "true" \
-  "$(jq -r 'has("repo_key")' <<<"${jout}")"
+assert_eq "--json emits NO document when it cannot tell the repo identity" "" "${jout}"
+err="$(cd "${rkg}" && PATH="${NOGITBIN}" "${BIN}/inbox-status" --json 2>&1 >/dev/null)"
+assert_contains "...and its refusal carries a Fix: clause" "Fix:" "${err}"
 
 # A git 128 that is NOT "not a git repository" (dubious ownership, a corrupt
 # repo) is ALSO "could not tell", never a genuine non-repo -- git 128 is not a
@@ -1239,9 +1240,8 @@ GITSHIM
 chmod +x "${SHIMBIN}/git"
 ( cd "${rkd}" && PATH="${SHIMBIN}" "${BIN}/inbox-status" --repo-key >/dev/null 2>&1 )
 assert_eq "--repo-key exits non-zero on a git 128 that is not 'not a git repository'" "1" "$?"
-jout="$(cd "${rkd}" && PATH="${SHIMBIN}" "${BIN}/inbox-status" --json 2>/dev/null)"
-assert_eq "--json repo_key is null on a dubious-ownership git failure, never \"\"" "null" \
-  "$(jq -r '.repo_key' <<<"${jout}")"
+( cd "${rkd}" && PATH="${SHIMBIN}" "${BIN}/inbox-status" --json >/dev/null 2>&1 )
+assert_eq "--json REFUSES on a dubious-ownership git failure, never a healthy-empty doc" "1" "$?"
 
 # Back to the failed-candidate fixture for the cases that follow.
 setup_case

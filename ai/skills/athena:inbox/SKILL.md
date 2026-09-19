@@ -156,7 +156,11 @@ rev-parse`. It has **three outcomes, and the exit code matters**:
   the exact collapse this contract used to have.
 
 `repo_key` on the `--json` document answers the same question on the success
-path.
+path — as the realpath or `""`. There is **no `null`**: on the could-not-tell
+outcome `--json` itself **refuses** (non-zero, no document), because if it can't
+name the repo it can't resolve or count the channels either. So a caller that
+needs the identity when `--json` refused reaches for `--repo-key` (which then
+also exits non-zero, distinguishing could-not-tell from a genuine non-repo).
 
 Zero across the board prints **nothing** and exits 0. Unprompted output that
 says "nothing new" every session is noise, and noise is what makes a real
@@ -179,7 +183,7 @@ level**, beside `channels`:
 | field | meaning |
 |---|---|
 | `failed_candidates` | how many files under `projects/` could not be parsed. A count, never names — every other entry belongs to a different tenant |
-| `repo_key` | the session's own repo identity, with three values: the **realpath** of its git common dir; **`""`** when the cwd is definitively in no git repository; or **`null`** when the identity **could not be determined** (git missing, cwd gone, realpath failed, a dubious/corrupt repo). `null` is not `""` — do not read it as "no repo". Present on every `--json` answer, including the one with no channels |
+| `repo_key` | the session's own repo identity: the **realpath** of its git common dir, or **`""`** when the cwd is definitively in no git repository. Present on every `--json` answer, including the one with no channels. It is never `null`: when the identity **could not be determined** (git missing, cwd gone, a dubious/corrupt repo) `--json` refuses outright rather than emit a document — use `--repo-key` and honour its exit code there |
 
 **If you need the repo identity, take it from here — `repo_key` on `--json`, or
 `--repo-key` when `--json` may have refused — never recompute it.** `inbox-status` has already resolved it by the contract's rule, and a

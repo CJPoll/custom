@@ -999,26 +999,37 @@ falls back to the shared markers, never stamping success. New case **S43** —
 body logged instead `no registry entry declares a channel … left untouched`,
 i.e. false-healthy silence). Restored: `VERDICT: PASS (173 cases)`.
 
-**Later (2026-09-19) — the next critic round found the fix was incomplete.**
-Three follow-on defects, all fixed and reddened at the skill level
-(`ai/skills/athena:inbox/test/self-test.sh`, 538 → 542 cases):
-- **The `--json` path still collapsed "could not tell" into `repo_key: ""`.**
-  Only `--repo-key` had been fixed; SKILL.md tells callers to read `repo_key`
-  off `--json` too. Now `inbox_status_json` emits **`null`** on could-not-tell,
-  **`""`** only on a definitive non-repo, and the key otherwise. **S44/S45**
-  (git stripped from PATH): `--repo-key` exits non-zero, `--json` `repo_key` is
-  `null` — both `RED` under the old `|| printf ''` (`--repo-key` exited 0,
-  `repo_key` was `""`).
+**Later (2026-09-19) — two further critic rounds carried the fix to its root.**
+The `--repo-key` fix above was necessary but not sufficient; the following
+landed on top, all reddened (hook suite 173 → 176, skill suite 538 → 543):
+- **"Could not tell" still exited as "not opted in" on the deciding path.** The
+  hook never reads `repo_key`; on a git-less session `--json` still answered a
+  healthy-looking `{channels:[], …}` and the hook logged the FALSE line *"no
+  registry entry declares a channel … nothing to poll here"* while staying
+  silent. Root fix: `inbox_status_json` now **REFUSES** (non-zero, no document,
+  a `Fix:` clause) when `inbox_repo_key` cannot tell — it cannot resolve the
+  entry, so it cannot count — and the hook then treats it as a **failed poll**
+  (`POLL_OK=0`), logging *"no usable status document"* and **surfacing the
+  outage warning** rather than silence. `--json` therefore has no `null`
+  `repo_key`: the field is a string or `""`, and could-not-tell is a refusal.
+  **S48–S50** (hook, git stripped): the false "nothing to poll" line is absent,
+  the failed-poll line present, the outage warning emitted — all `RED` if
+  `inbox_status_json` is reverted to emit an empty doc instead of refusing.
 - **git exit 128 was treated as "not a repo" wholesale.** 128 is also
   dubious-ownership (`safe.directory`) and a corrupt `.git`, which are
-  could-not-tell, not non-repo. `inbox_repo_key` now classifies by git's own
-  message: only *"not a git repository"* is a genuine non-repo, everything else
-  is non-zero. **S46/S47** (a `git` shim exiting 128 with a dubious-ownership
-  message): `--repo-key` exits non-zero and `repo_key` is `null` — both `RED`
-  when the classification arm is widened to treat every 128 as a non-repo.
+  could-not-tell. `inbox_repo_key` classifies by git's own **`LC_ALL=C`**
+  message (locale-pinned, so a translated "not a git repository" cannot flip an
+  ordinary non-repo into could-not-tell): only *"not a git repository"* is a
+  genuine non-repo; everything else is non-zero. **S44/S45** (git stripped) and
+  **S46/S47** (a `git` shim exiting 128 with a dubious-ownership message):
+  `--repo-key` exits non-zero and `--json` refuses — `RED` under the old
+  `|| printf ''`, and `RED` again when the classification arm is widened to
+  treat every 128 as a non-repo.
 - **Stale "cannot fail" contract text** in `SKILL.md`, `bin/inbox-status`, the
   hook and this suite's own comment — corrected in place (living documents), so
   the next consumer is not taught to ignore `--repo-key`'s exit code.
+- A latent `setup-hooks --norm` **double-`shift` under `set -e`** (a bare exit,
+  no `Fix:`, when `--norm` is the last argument) was guarded.
 The dubious-ownership branch is proven by shim only; the real `safe.directory`
 trigger needs a cross-owner repo (root), so it is not fixtured live.
 

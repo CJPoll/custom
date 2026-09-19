@@ -916,6 +916,19 @@ PATH="${OLD_PATH}"
 assert_contains "R16 git absent is 'could not tell', LOGGED not silently shared" \
   "could not name this project's repo identity" "$(hook_log)"
 assert_eq "R16 the git-absent run still exits 0" "0" "${RC}"
+# And it must NOT be mislabelled as a project that never opted in: because
+# inbox-status --json now REFUSES on could-not-tell (no document), the poll fails
+# (POLL_OK=0) instead of reading as OPTED_IN=0, so the false "nothing to poll
+# here" line never appears and the failed-poll line does.
+assert_not_contains "R16 git absent is not misreported as 'never opted in'" \
+  "nothing to poll here" "$(hook_log)"
+assert_contains "R16 ...it is recorded as a failed poll instead" \
+  "no usable status document" "$(hook_log)"
+# The session is NOT silent: a failed poll with a stale success marker surfaces
+# the outage warning, so a git-broken environment is visible in-session rather
+# than looking like a quiet morning.
+assert_contains "R16 git absent surfaces the outage warning, not silence" \
+  "has not succeeded recently" "$(context_of "${OUT}")"
 # The ticket's binding invariant: a run that could not even name the project is
 # a FAILURE and must NEVER stamp success -- here the shared success marker, since
 # the per-project one cannot be named.
