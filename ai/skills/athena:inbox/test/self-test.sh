@@ -2788,8 +2788,65 @@ assert_eq "A-13 and is handed no doorbell at all" "" "${OUT}"
 # HANG the gate rather than redden it. It also runs from a fixture repo, so a
 # refusal arriving from tenancy resolution instead of argument parsing cannot
 # satisfy it by accident.
-assert_refused "W-9 an unknown argument is refused, naming the whole-session rule" \
-  env -C "${BREPO}" timeout 10 "${BIN}/inbox-wait" --channel slack
+W9_ERR="$(cd "${BREPO}" && timeout 10 "${BIN}/inbox-wait" --channel slack 2>&1 >/dev/null)"; W9_RC=$?
+# ASSERTED ON ITS OWN WORDS AND ITS OWN EXIT CODE, because `assert_refused`
+# CANNOT SEE THIS ONE. That helper wants non-zero plus a literal `Fix:`, and
+# under the regression it names -- an unknown argument silently ignored -- a
+# real waiter is armed, `timeout` kills it (non-zero), and this fixture's
+# never-delivered log channel has already printed a notice containing `Fix:`.
+# Both conditions satisfied for entirely unrelated reasons; MEASURED green
+# against `*) : ;;` by a reviewer. A refusal's evidence is what it SAID and the
+# status IT chose, never "something failed and something mentioned Fix:".
+assert_eq "W-9 an unknown argument is refused with the refusal's own exit code" "2" "${W9_RC}"
+assert_contains "W-9 and names the argument it refused" "unknown argument" "${W9_ERR}"
+assert_contains "W-9 and names the whole-session rule rather than suggesting a flag" \
+  "no way to wait on one channel" "${W9_ERR}"
+
+# THE BINARY THAT DOES THE BLOCKING IS GONE -- the standing question asked of
+# the one dependency without which this command has no mechanism at all. The
+# tempting degradation is a polling loop, which the Hard Rule forbids outright,
+# so both prerequisites must REFUSE and name their package.
+SHIM_DIR="$(mktemp -d)"
+# bash and env are in the list because the script is `#!/usr/bin/env bash`:
+# without them the shim PATH makes every case fail with `env: bash: No such
+# file or directory` and exit 127 -- a failure of the FIXTURE that looks
+# exactly like the refusal under test failing to happen.
+for c in bash env dirname basename mktemp head cut seq sleep ln jq awk sed date stat mv rm mkdir touch cat printf ls find sort wc tr grep cp chmod realpath git flock paste timeout inotifywait; do
+  cp_p="$(command -v "$c" 2>/dev/null)" && ln -sf "${cp_p}" "${SHIM_DIR}/$c"
+done
+for missing in inotifywait timeout; do
+  rm -f "${SHIM_DIR}/${missing}"
+  ERR="$(cd "${BREPO}" && PATH="${SHIM_DIR}" "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+  assert_eq "W-12 an absent ${missing} is REFUSED, never degraded to a poll" "2" "${RC}"
+  assert_contains "W-12 and the refusal names the package to install" "install" "${ERR}"
+  assert_contains "W-12 and carries a Fix:" "Fix:" "${ERR}"
+  cp_p="$(command -v "${missing}" 2>/dev/null)" && ln -sf "${cp_p}" "${SHIM_DIR}/${missing}"
+done
+
+# THE FAULT PATH, which nothing else in this file reaches. A waiter that cannot
+# watch must report ONE reason line and a non-zero status that is neither "a
+# doorbell rang" nor "re-arm forever" -- and it must not read a temp file that
+# is gone, which is what the signal path used to do.
+# `rm -f` FIRST, AND IT IS NOT TIDINESS. Every entry in this shim directory is
+# a SYMLINK to the real binary, and `> "${SHIM_DIR}/inotifywait"` FOLLOWS a
+# symlink -- so without this the redirect writes a three-line shell script
+# straight into `/usr/sbin/inotifywait`, the system binary, for every process
+# on this machine. It was attempted during this ticket and refused only because
+# the target is root-owned and the suite does not run as root. A test that is
+# safe solely because of who is running it is not safe; this is the same
+# "`realpath` follows, `lstat` does not" lesson `fs_assert_regular` exists for,
+# arriving in the fixture instead of the code.
+rm -f "${SHIM_DIR}/inotifywait"
+printf '#!/bin/sh\necho "inotifywait: Failed to watch; upper limit on inotify watches reached!" >&2\nexit 1\n' \
+  > "${SHIM_DIR}/inotifywait"
+chmod +x "${SHIM_DIR}/inotifywait"
+ERR="$(cd "${BREPO}" && PATH="${SHIM_DIR}" ATHENA_INBOX_WAIT_BUDGET=5 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+assert_eq "W-13 a faulting inotifywait exits 1 -- not 0, and not the re-arm status" "1" "${RC}"
+assert_contains "W-13 and relays the machine's own reason verbatim" "upper limit on inotify watches" "${ERR}"
+assert_contains "W-13 and says re-arm ONCE rather than forever" "re-arm ONCE" "${ERR}"
+assert_not_contains "W-13 and never leaks a bare shell error with no Fix: behind it" \
+  "No such file or directory" "${ERR}"
+rm -rf "${SHIM_DIR}"
 
 # A declared log channel whose file has NEVER existed can never ring. The
 # waiter arms anyway (refusing would take the other channels down with it) but

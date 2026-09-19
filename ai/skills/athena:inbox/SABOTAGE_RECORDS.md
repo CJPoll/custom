@@ -543,9 +543,15 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
 
 # DND-185 — `bin/inbox-wait`, the `.event` waiter
 
-Baseline and final: **PASS (511 cases)**, up from 455. Every mutation below was
-applied to a clean tree, measured, and reverted. A mutation that leaves the
-suite GREEN is recorded as green — that is the whole point of running them.
+Every mutation below was applied to a clean tree, measured, and reverted. A
+mutation that leaves the suite GREEN is recorded as green — that is the whole
+point of running them.
+
+**The counts in the table are from the 511-case tree** (455 → 511), which is
+what S1…S11 were measured against. The review round then added cases and the
+suite is now larger; S1, S7 and S8 were re-measured against the current tree
+and hold. The older counts are left as they were rather than restated, because
+a number carried forward without being re-run is a claim nobody made.
 
 | # | Mutation | Result |
 |---|---|---|
@@ -561,6 +567,23 @@ suite GREEN is recorded as green — that is the whole point of running them.
 | S9 | silence the never-delivered notice | **RED** |
 | S11 | the three-cause no-entry refusal collapses to exit 0 | **RED** |
 | S12 | `fs_ensure_doorbell` chmods an existing doorbell unconditionally | **RED** (the review round's defect, W-11) |
+| S13 | unknown arguments silently ignored (`*) : ;;`) | **GREEN at first — the second measured zero** |
+
+## The second measured zero, also fixed: W-9 proved nothing
+
+A reviewer mutated the argument parser's `*)` arm to ignore unknown arguments —
+the exact regression W-9 is named after — and the suite stayed green.
+
+`assert_refused` asks for two things: a non-zero status, and a literal `Fix:`
+on stderr. Under the mutation `inbox-wait` armed a real waiter, `timeout 10`
+killed it (non-zero ✓), and the fixture's never-delivered `log` channel had
+already printed its notice, which contains `Fix:` (✓). Both conditions met, for
+reasons having nothing to do with argument parsing.
+
+Worse, the hardening applied earlier in this same round *moved the case into*
+the fixture that guarantees the stray `Fix:`. It now asserts the refusal's own
+exit code and its own words. **A refusal's evidence is what it SAID and the
+status IT chose** — never "something failed and something mentioned `Fix:`.
 
 ## The review round's defect: provisioning rang every bell it listened to
 
@@ -621,7 +644,26 @@ kernel implementation detail this facility must not depend on — the same
 argument that puts the whole union in the watch set. **Recorded as defence in
 depth, not as a tested check.**
 
-## Two defects in the SABOTAGE HARNESS itself, both measured
+## A fixture that tried to overwrite a system binary
+
+Building the W-13 fault-path case, the shim `PATH` directory is filled with
+**symlinks** to the real binaries, and the fake `inotifywait` was then written
+with `> "${SHIM_DIR}/inotifywait"`. A redirect **follows a symlink**: that wrote
+a three-line shell script into `/usr/sbin/inotifywait` — the system binary,
+for every process on this machine.
+
+It was refused, because the target is root-owned and the suite does not run as
+root, and the file was verified byte-identical afterwards. **A test that is
+safe only because of who happens to be running it is not safe.** The fix is an
+`rm -f` before the redirect. It is the same lesson `fs_assert_regular` exists
+for — `realpath` and `>` follow, `lstat` does not — arriving in the fixture
+rather than the code, which is exactly where nobody was looking for it.
+
+The symptom that led here was W-13 returning 75 instead of 1: the failed write
+left the symlink intact, so the REAL `inotifywait` ran and timed out. A
+fixture that silently does not take effect reports the code as broken.
+
+## Three defects in the SABOTAGE/TEST HARNESS itself, all measured
 
 Neither was in the product, and both produced *false verdicts* — which is worse
 than no verdict, because a false one is acted on.

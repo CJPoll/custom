@@ -207,7 +207,29 @@ fi
 
 ERRF="$(mktemp)" || { inbox_fail "could not create a temporary file for inotifywait's stderr" \
   "check that \$TMPDIR is writable, then re-run."; exit "${EX_REFUSED}"; }
-trap 'rm -f "${ERRF}"' EXIT
+
+# ============================================================================
+# CLEANUP AND SIGNALS.
+#
+# `child` is initialised BEFORE the trap is installed, and the trap BEFORE the
+# `&`, because both orderings were wrong and each has a failure:
+#
+#   * a trap installed after the `&` leaves a window in which a signal orphans
+#     the waiter -- the PT-919 class, through the gap in its own guard;
+#   * a trap referencing an unset `child` under `set -u` ABORTS INSIDE THE
+#     TRAP. The `2>/dev/null` silences `kill`, not the unbound-variable error.
+#
+# INT AND TERM GET THEIR OWN HANDLERS, AND THEY EXIT. A bare
+# `trap ... EXIT INT TERM` runs the handler and then RESUMES after `wait`, so a
+# deliberate teardown fell through to the fault arm: `RC=143`, a read of the
+# temp file the handler had just deleted (a bare bash error carrying no
+# `Fix:`), and a refusal telling the caller to re-arm. SKILL.md tells the agent
+# to launch this with `run_in_background`, so every stop produced that.
+# ============================================================================
+child=""
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}"' EXIT
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}"; exit 130' INT
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}"; exit 143' TERM
 
 # ============================================================================
 # THE ARM.
@@ -236,7 +258,6 @@ timeout "${BUDGET}" inotifywait -qq \
   -e attrib,modify,close_write,move_self,delete_self \
   -- "${EVENT_FILES[@]}" 2>"${ERRF}" &
 child=$!
-trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}"' EXIT INT TERM
 wait "${child}"; RC=$?
 
 case "${RC}" in
@@ -257,11 +278,20 @@ case "${RC}" in
     exit "${EX_REARM}"
     ;;
   *)
+    # A SIGNAL IS NOT A FAULT. `wait` reports a signalled child as 128+n, and
+    # reading that as "inotifywait faulted, re-arm once" turns every deliberate
+    # teardown into a spurious error with advice to try again.
+    if [ "${RC}" -ge 128 ]; then
+      printf 'athena:inbox: the waiter was terminated by signal %s. Nothing was read and nothing was acked.\n' \
+        "$(( RC - 128 ))" >&2
+      exit "${RC}"
+    fi
     # ONE fixed reason line. inotifywait's own stderr is relayed because it is
     # this machine's diagnostic (a watch limit reached, a vanished path), not
     # anybody else's content -- but it is relayed verbatim and never parsed
     # into a decision.
-    REASON="$(tr -d '\000' < "${ERRF}" | head -n 3)"
+    REASON=""
+    [ -f "${ERRF}" ] && REASON="$(tr -d '\000' < "${ERRF}" | head -n 3)"
     inbox_fail "the waiter faulted (exit ${RC})${REASON:+: ${REASON}}" \
       "re-arm ONCE. If it faults again, stop and surface it rather than looping: the usual causes are the inotify watch limit (/proc/sys/fs/inotify/max_user_watches) and a doorbell that vanished between provisioning and the arm. A waiter that re-arms forever on a hard fault is a spin loop with extra steps."
     exit "${EX_FAULT}"
