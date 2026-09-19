@@ -942,3 +942,128 @@ inbox_ack_message() {
   fi
   return 0
 }
+
+# inbox_refuse_subagent_arm [hook-json]
+#
+# THE MANAGER'S COPY OF THE SUBAGENT GATE, so the Framework has something to
+# call. `bin/inbox-wait` invoked `inbox_is_subagent` directly -- and
+# `lib/session.sh` declares itself SIDE EFFECTS, which "Framework MUST NOT call
+# adapters directly" forbids. It is the same inversion `inbox_release_consumer`
+# was added to close for `bin/read-inbox`, in the one bin that had not been
+# routed through this layer yet.
+#
+# Status 0 = this session may arm. Status 1 = refused, already reported.
+inbox_refuse_subagent_arm() {
+  inbox_is_subagent "${1:-}" || return 0
+  inbox_fail "a subagent may not arm an inbox waiter" \
+    "let the main session arm it. A subagent that woke on the doorbell would read and ack the mail, then finish -- and the session that actually reports to Cody would find a clean inbox and say nothing. Run inbox-status to see the counts without arming anything."
+  return 1
+}
+
+# --- the waiter's targets ---------------------------------------------------
+
+# inbox_doorbells [cwd]
+#
+# EVERY doorbell this session owns, of BOTH kinds, one absolute path per line,
+# provisioned and ready to be armed on. The one path `bin/inbox-wait` takes.
+#
+# It RESOLVES, PROVISIONS, and REFUSES. Those three are together on purpose:
+# a waiter that armed on the doorbells it managed to resolve, and quietly
+# dropped the ones it did not, is a channel gone dark with a healthy-looking
+# waiter sitting in front of it. So any failure here refuses the whole arm.
+#
+# WHY THE WHOLE SET, ALWAYS. The contract: "One waiter watches ALL the
+# session's doorbells, of BOTH kinds." There is deliberately no --channel flag
+# above this: a waiter narrowed to one channel is indistinguishable, from the
+# outside, from a waiter watching everything -- it blocks, it looks healthy,
+# and the channels it is not watching never wake anybody.
+#
+# ZERO CHANNELS IS A REFUSAL HERE, and it is the single most important line in
+# this function. For a COUNT, "no entry, zero channels, exit 0" is the
+# contract's own answer and not a fault. For a WAIT it is the opposite: there
+# is nothing to block on, and the only two things a waiter could do instead --
+# exit 0, or block forever on nothing -- both report "no mail arrived" for a
+# session that was never going to hear about mail at all. An unknown must be
+# distinguishable from a negative.
+inbox_doorbells() {
+  local cwd="${1:-.}" entry rc chan resolved kind bell inbox_path
+  local -a bells=()
+
+  entry="$(inbox_entry "${cwd}")"; rc=$?
+  [ "${rc}" -ne 2 ] || return 1             # already refused, by name-free count
+  if [ -z "${entry}" ]; then
+    _inbox_no_entry_refusal "${cwd}"        # three causes, three messages
+    return 1
+  fi
+  descriptor_validate "${entry}" || return 1
+
+  while IFS= read -r chan; do
+    [ -n "${chan}" ] || continue
+    resolved="$(descriptor_resolve "$(fs_inbox_root)" "${entry}" "${chan}")" || return 1
+    kind="$(_inbox_path kind "${resolved}")"
+    case "${kind}" in
+      log)
+        # The doorbell is provisioned; the INBOX FILE IS NOT. That file is the
+        # writer's, and fabricating it would invent a delivered-nothing channel
+        # that reads as healthy. Its absence is reported instead, below.
+        bell="$(_inbox_path doorbell "${resolved}")"
+        fs_ensure_doorbell "${bell}" || return 1
+        bells+=("${bell}")
+
+        inbox_path="$(_inbox_path inbox "${resolved}")"
+        if [ ! -e "${inbox_path}" ]; then
+          # NOT a refusal: an empty channel is normal, and a waiter that
+          # refused to arm over one would take the OTHER channels down with
+          # it. But it is not silence either. A `log` channel whose file has
+          # never existed has no registered producer, so this waiter will
+          # block for its whole budget, every budget, forever, and look
+          # perfectly healthy doing it.
+          printf 'athena:inbox: %s is declared, but nothing has EVER been delivered to it — arming anyway.\n' "${chan}" >&2
+          printf '  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json. Until then this doorbell can never ring, and a waiter blocked on it is indistinguishable from a quiet week.\n' >&2
+        fi
+        ;;
+      maildir)
+        # Provisioning, per the contract: the designated consumer creates the
+        # missing directories and doorbell idempotently -- both mail
+        # directories, their tmp/ and .acked/, and both .event files -- BEFORE
+        # arming a waiter on them.
+        # Every path comes from a LABEL, never from a string built here. The
+        # `.acked` directories especially: `fs_maildir_ack` moves messages into
+        # the one `descriptor_resolve` labels `ack_dir`, and a waiter that
+        # provisioned a directory it spelled itself could silently create a
+        # second one beside it.
+        local rdir wdir
+        rdir="$(_inbox_path read_dir "${resolved}")"
+        wdir="$(_inbox_path write_dir "${resolved}")"
+        fs_ensure_dir "${rdir}"                                  || return 1
+        fs_ensure_dir "${rdir}/tmp"                              || return 1
+        fs_ensure_dir "$(_inbox_path ack_dir "${resolved}")"     || return 1
+        fs_ensure_dir "${wdir}"                                  || return 1
+        fs_ensure_dir "${wdir}/tmp"                              || return 1
+        fs_ensure_dir "$(_inbox_path write_ack_dir "${resolved}")" || return 1
+        # BOTH bells. The write-side one is how this identity learns the peer
+        # ACKED what it sent; dropping it loses half the conversation and
+        # nothing would ever say so.
+        for bell in "$(_inbox_path read_doorbell "${resolved}")" \
+                    "$(_inbox_path write_doorbell "${resolved}")"; do
+          fs_ensure_doorbell "${bell}" || return 1
+          bells+=("${bell}")
+        done
+        ;;
+      *)
+        inbox_fail "channel \"${chan}\" has a kind this waiter cannot watch" \
+          "set the channel's \"kind\" to \"log\" or \"maildir\" in this project's registry entry."
+        return 1
+        ;;
+    esac
+  done < <(descriptor_channel_names "${entry}")
+
+  if [ "${#bells[@]}" -eq 0 ]; then
+    inbox_fail "this project's registry entry declares no channels, so there is nothing to wait for" \
+      "add a channel to this project's entry under \$ATHENA_INBOX_ROOT/projects/. A waiter with nothing to watch is refused rather than left blocking: blocking on nothing and waiting quietly for mail are indistinguishable from the outside, and only one of them is working."
+    return 1
+  fi
+
+  printf '%s\n' "${bells[@]}"
+  return 0
+}

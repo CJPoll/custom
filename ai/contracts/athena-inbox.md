@@ -395,6 +395,15 @@ normal.
   reader enumerates `$ATHENA_INBOX_ROOT/projects/*.json` and selects the single
   entry whose `repo`, after realpath, equals the session's repo identity.
 - **Exactly one match is required.** Zero matches is zero channels and exit 0.
+
+  **Later (2026-09-19):** this "exit 0" was written as unconditional and is now
+  **scoped to counting and enumeration**. A *waiter* with nothing to watch
+  refuses instead — see *Waiter rules*, which states the rule and why, and is
+  the only place this is qualified. Raised by DND-185, which could not
+  implement `inbox-wait` conformantly otherwise: a waiter that exits 0 on "no
+  entry" is indistinguishable from one that exits 0 on "nothing arrived", which
+  is the silent loss this document exists to prevent.
+
   **Two or more entries claiming one repo identity is a hard error** naming the
   duplicate: silently picking one is how a session ends up consuming a surface
   its own entry never declared. Naming it is consistent with the disclosure
@@ -1141,6 +1150,17 @@ timeout "$BUDGET" inotifywait -qq -e attrib,modify,close_write,move_self,delete_
   bare override. An unbounded override reintroduces the
   killed-subagent bug in a form that looks like configuration. A session that
   has raised `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` may raise this to match.
+- **A waiter with nothing to watch REFUSES; it does not arm and does not exit
+  0.** A session whose repo identity matches no entry, or whose entry declares
+  no channels, gets a non-zero exit and a `Fix:` clause. This is the one place
+  the "zero channels, exit 0" rule of *Finding the entry* does not carry over:
+  that rule is about **counting**, where having nothing to report is a complete
+  and correct answer. A waiter has no such answer available. Its only two
+  alternatives are to exit 0, which the caller reads as "I checked", or to
+  block on nothing for the whole budget, which is indistinguishable from
+  waiting quietly for mail — and both report "no mail arrived" for a session
+  that was never going to hear about mail at all. Refusing is what makes an
+  unknown distinguishable from a negative.
 - **A timeout means re-arm, not all-clear.** Treating a timeout as "nothing to
   do" turns a quiet hour into a lost message.
 
