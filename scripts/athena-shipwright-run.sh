@@ -70,6 +70,9 @@
 #       liveness receipt, so it never reached the model (usually a provider
 #       usage limit, credits, or auth). Reported every tick and never silent,
 #       but the lane is NOT gated and self-heals; nothing to re-arm.
+#       Every tick that DID reach the model leaves <ts>.receipt in the state
+#       dir's runs/ and it is kept, so `ls runs/*.receipt` answers "which past
+#       ticks reported for duty?" directly — do not infer it from a log's size.
 #   *   whatever the headless session exited with (124 if the 55m timeout fired);
 #       a session that exits non-zero, or one whose commits could not be landed
 #       on main (a "stranded" branch), counts as an unsuccessful outcome
@@ -335,6 +338,11 @@ log="${LOG_DIR}/${ts}.log"
 # were measured and cannot separate the two cases: the blocked log of
 # 2026-09-19T00:00 is 68 bytes / 1 line and the healthy no-op log of
 # 2026-09-17T20:00 is 71 bytes / 1 line.
+# The receipt is RETAINED after a healthy tick (see the success path below), so
+# `runs/` answers "which past ticks reached the model?" by `ls` rather than by
+# inference. The clear below is a key reset for THIS tick only: it guarantees a
+# re-run reusing the same second-resolution ts cannot inherit a stale file and
+# be scored on its predecessor's liveness.
 RECEIPT="${LOG_DIR}/${ts}.receipt"
 export SHIPWRIGHT_RECEIPT="${RECEIPT}"
 rm -f "${RECEIPT}"
@@ -641,7 +649,28 @@ if [ "${blocked}" -eq 1 ]; then
   exit 69
 fi
 
-rm -f "${RECEIPT}"
+# The receipt is deliberately NOT deleted here. It is retained as this tick's
+# durable, per-tick evidence that the session reached the model, sitting beside
+# its log. Deleting it on the success path made the detector destroy its own
+# evidence: one hour later "did tick N report for duty?" was unanswerable, and
+# an absent receipt for a past tick read identically whether the tick was
+# healthy (receipt made, then unlinked here) or blocked (receipt never made).
+# On 2026-09-19 that cost a shipwright run a confident, WRONG outage report
+# about the outage detector itself — it read "only one receipt exists on disk"
+# as a prose-disobedience rate rather than as the working system's expected
+# output, and only an architect review caught it before it was journaled.
+# This is ~/dev/custom/CLAUDE.md's "make every miss observable", owed on the
+# HIT side too: a successful probe must leave something a human can read.
+#
+# Retention cannot weaken the detector. The test above is `[ ! -e "${RECEIPT}" ]`
+# against THIS tick's ts-keyed path, and the `rm -f "${RECEIPT}"` at setup
+# clears exactly that path before the session starts, so a retained receipt from
+# an earlier tick can never answer for a later one. Nothing anywhere globs
+# `*.receipt`; the exact-path test is its only consumer.
+#
+# Growth is one empty file per tick, beside the one log file per tick that
+# `runs/` already accumulates. Do not "tidy" these away while keeping the logs:
+# that re-creates precisely the blind spot described above.
 reset_count "${BLOCK_COUNT}"   # the session reached the model; the streak ends
 # A clean landing (session exited 0 AND its commits reached main/origin/main, or
 # it made no commits at all) resets the counter. Anything else — a failing/timed

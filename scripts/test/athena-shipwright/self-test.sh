@@ -1104,6 +1104,80 @@ else
   bad "signature cannot downgrade a failure" "rc=$rc counter=$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)"
 fi
 
+# --- receipt RETENTION ------------------------------------------------------
+#
+# The receipt is this tick's durable evidence that the session reached the
+# model. It used to be unlinked on the success path, which made a healthy past
+# tick indistinguishable from a blocked one an hour later (both: no receipt on
+# disk) and cost a run a wrong outage report about the outage detector. These
+# cases pin retention, and pin that retention did not weaken the detector.
+
+# The exact shape of the 2026-09-19 misreading: a HEALTHY NO-OP — reached the
+# model, mined nothing, committed nothing. It must stay unblocked AND leave its
+# receipt behind, because a no-commit tick has no other trace of liveness.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 0 'printf "no harness changes warranted.\n"'
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1 \
+   && ls "$(sd "$r")/runs/"*.receipt >/dev/null 2>&1; then
+  ok "a healthy NO-OP tick RETAINS its receipt (a past healthy tick stays auditable)"
+else
+  bad "healthy no-op retains its receipt" \
+      "rc=$rc runs=$(ls "$(sd "$r")/runs/" 2>&1)"
+fi
+
+# Retention must not be a special case of the no-op path.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm "run work"'
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && ls "$(sd "$r")/runs/"*.receipt >/dev/null 2>&1; then
+  ok "a healthy COMMITTING tick also retains its receipt (retention is unconditional)"
+else
+  bad "committing tick retains its receipt" \
+      "rc=$rc runs=$(ls "$(sd "$r")/runs/" 2>&1)"
+fi
+
+# The negative side: a blocked tick must leave NO receipt, or a later reader
+# would misread the retained file as evidence of liveness.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked "$a/stub-claude" "You've hit your weekly limit"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 69 ] && ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1 \
+   && ! ls "$(sd "$r")/runs/"*.receipt >/dev/null 2>&1; then
+  ok "a BLOCKED tick leaves no receipt (retention did not blur blocked vs healthy)"
+else
+  bad "blocked tick leaves no receipt" \
+      "rc=$rc runs=$(ls "$(sd "$r")/runs/" 2>&1)"
+fi
+
+# Retention must not turn the detector into a directory-wide `ls`. A retained
+# receipt from an EARLIER tick is planted directly (no timing dependence), and
+# the current blocked tick must still be scored on its OWN ts-keyed path.
+r="$(new_repo)"; a="$(aux "$r")"
+mkdir -p "$(sd "$r")/runs"
+: >"$(sd "$r")/runs/1999-01-01T000000.receipt"
+stub_claude_blocked "$a/stub-claude" "You've hit your weekly limit"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 69 ] && ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1 \
+   && [ -e "$(sd "$r")/runs/1999-01-01T000000.receipt" ]; then
+  ok "an earlier tick's retained receipt cannot rescue a later BLOCKED tick (per-tick key)"
+else
+  bad "receipt is per-tick, not directory-wide" \
+      "rc=$rc runs=$(ls "$(sd "$r")/runs/" 2>&1)"
+fi
+
+# A receipt must not reach into the failure path and soften a real failure.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 7 'printf "exploded\n"'
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 7 ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "1" ] \
+   && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1; then
+  ok "a receipt does not rescue a FAILING session (it still fails and still feeds the wedge)"
+else
+  bad "receipt cannot rescue a failure" \
+      "rc=$rc counter=$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)"
+fi
+
 # No receipt but commits landed => the session plainly did work. The
 # conservative tip==BASE_COMMIT guard keeps that a success.
 r="$(new_repo)"; a="$(aux "$r")"
