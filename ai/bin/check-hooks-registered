@@ -30,19 +30,46 @@
 # Exit codes: 0 ok / not-this-env · 1 drift (a registry hook is not registered)
 
 require "json"
+require "shellwords"
 
 AI_DIR       = File.expand_path("..", __dir__)          # .../ai
-REPO_DIR     = File.expand_path("..", AI_DIR)           # repo root
+REPO_DIR     = File.expand_path("..", AI_DIR)           # repo root (may be a worktree)
 REGISTRY     = File.join(AI_DIR, "hooks", "registry.json")
+
+# The MAIN checkout for this repo. Hooks are always wired at the main checkout's
+# path, because a worktree path vanishes when the worktree is cleaned up. But
+# captains run the gate FROM a worktree, where REPO_DIR is that worktree — so
+# comparing only REPO_DIR-based paths reported all 5 hooks as drifted in every
+# worktree (observed 2026-09-18, DND-182). That false failure is worse than
+# cosmetic: the documented recovery is `setup-hooks --install`, which would then
+# rewire the live settings to a path that disappears — the 2026-09-17 outage
+# class. Resolve the main checkout through git's common dir (a worktree's
+# --git-common-dir IS the main checkout's .git) and accept either spelling.
+def main_checkout_dir(dir = REPO_DIR)
+  common = `git -C #{dir.shellescape} rev-parse --git-common-dir 2>/dev/null`.strip
+  return dir if common.empty?
+
+  common = File.expand_path(common, dir) unless common.start_with?("/")
+  parent = File.dirname(common)
+  File.directory?(parent) ? parent : dir
+rescue StandardError
+  dir
+end
+
+# Every checkout whose hook paths count as "this repo's hooks", most-canonical
+# first. In the main checkout this is a single entry.
+def checkout_dirs
+  [main_checkout_dir, REPO_DIR].uniq
+end
 
 def settings_path
   ENV["HOOKS_SETTINGS_FILE"] || File.join(Dir.home, ".claude", "settings.json")
 end
 
 # Expand a registry (repo-relative) script path to the absolute command string
-# settings.json stores.
-def abs_script(rel)
-  File.join(REPO_DIR, rel)
+# settings.json stores, for the canonical (main) checkout.
+def abs_script(rel, dir = main_checkout_dir)
+  File.join(dir, rel)
 end
 
 # Resolve a command's path through symlinks so two spellings of the same script
@@ -75,10 +102,11 @@ end
 
 # Compare registry against a parsed settings hash. Returns a list of
 # human-readable drift strings (empty == all registered).
-def drift_for(settings, registry)
+def drift_for(settings, registry, dirs = checkout_dirs)
   have = registered_pairs(settings)
-  registry.reject { |e| have.include?([e["event"], norm(abs_script(e["script"]))]) }
-          .map { |e| "#{e['event']} -> #{e['script']}" }
+  registry.reject do |e|
+    dirs.any? { |d| have.include?([e["event"], norm(abs_script(e["script"], d))]) }
+  end.map { |e| "#{e['event']} -> #{e['script']}" }
 end
 
 def run
@@ -148,6 +176,22 @@ def self_test
     end
     check.call("symlinked script path -> no drift", drift_for(linked, registry).empty?)
   end
+
+  # WORKTREE EQUIVALENCE (the 2026-09-18 DND-182 false-fail). Settings wired at
+  # the MAIN checkout must read as wired when the check runs from a worktree,
+  # whose REPO_DIR is the worktree. Simulate with an explicit `dirs` list: a
+  # (non-existent, so norm() passes it through literally) worktree dir plus the
+  # main checkout.
+  fake_worktree = "/nonexistent/worktrees/custom/some-branch"
+  check.call("settings wired at main + running from a worktree -> no drift",
+             drift_for(full, registry, [REPO_DIR, fake_worktree]).empty?)
+  check.call("worktree dir ALONE does not satisfy main-wired settings",
+             drift_for(full, registry, [fake_worktree]).size == registry.size)
+
+  # main_checkout_dir resolves to the main checkout from inside the repo, and
+  # degrades to its argument outside a git repo rather than raising.
+  check.call("main_checkout_dir(repo) == repo", main_checkout_dir(REPO_DIR) == REPO_DIR)
+  Dir.mktmpdir { |d| check.call("main_checkout_dir(non-git) == arg", main_checkout_dir(d) == d) }
 
   # Run the real entry point but silence its (expected) diagnostic output so the
   # gate log stays clean — we assert on the exit code only.

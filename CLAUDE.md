@@ -181,6 +181,11 @@ and pronoun-guard; nothing detected it. The durable fix:
   block, because a full rewrite is exactly what caused the outage. `--check`
   delegates to the gate check, `--dry-run` previews, `--remove` unwires,
   `--self-test` verifies install/idempotency/merge-safety on a temp file.
+- **Worktrees:** hooks are always wired at the MAIN checkout's path, never a
+  worktree's — a worktree path vanishes on cleanup and silently disables the
+  guard. Both tools resolve the main checkout through `git rev-parse
+  --git-common-dir`, so `check-hooks-registered` passes from a worktree and
+  `setup-hooks --install` wires main-checkout paths wherever it is run from.
 - **Editing hooks:** change `registry.json` and run `scripts/setup-hooks
   --install`; do not hand-write the `settings.json` hooks block (that is the
   clobber path). Hooks load at session start, so reload a session to activate.
