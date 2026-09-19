@@ -1,6 +1,6 @@
 ---
 name: athena:inbox
-description: Read Athena's own machine-local message inboxes — the Slack delivery log and the agent-mail maildirs — scoped to the project the session is rooted in. Use to check whether anything has arrived for THIS project, to understand why a channel is silent, or whenever a session-start notice reports a count of unread inbox messages. Counting (inbox-status) and reading + acking (read-inbox, behind a designated-consumer lock, with bodies fenced as untrusted) both work; send-mail and inbox-wait land with later tickets.
+description: Read Athena's own machine-local message inboxes — the Slack delivery log and the agent-mail maildirs — scoped to the project the session is rooted in. Use to check whether anything has arrived for THIS project, to understand why a channel is silent, or whenever a session-start notice reports a count of unread inbox messages. Counting (inbox-status), reading + acking (read-inbox, behind a designated-consumer lock, with bodies fenced as untrusted), and blocking until a doorbell rings (inbox-wait) all work; send-mail lands with a later ticket.
 ---
 
 # athena:inbox
@@ -15,10 +15,19 @@ A machine-local message facility. Other people's words arrive as files under an
 inbox root; this skill decides which of them belong to the project you are
 sitting in, and how many are unread.
 
-**Status: partial.** `bin/inbox-status` (counting, DND-183) and
-`bin/read-inbox` (read + ack + the consumer lock, DND-184) work. `send-mail`
-and `inbox-wait` do not exist yet — where this document describes them, it is
-describing the shape they must fit, not a command you can run.
+**Status: partial.** `bin/inbox-status` (counting, DND-183), `bin/read-inbox`
+(read + ack + the consumer lock, DND-184) and `bin/inbox-wait` (the doorbell
+waiter, DND-185) work. `send-mail` does not exist yet — where this document
+describes it, it is describing the shape it must fit, not a command you can
+run.
+
+**Later (2026-09-19):** this paragraph, and the `description` in the
+frontmatter above, previously said `inbox-wait` did **not** exist and would
+"land with a later ticket". DND-185 shipped it; both are corrected here and
+there rather than annotated in place, per this file's living-document rule.
+The frontmatter is called out because it is the skill-SELECTION surface: a
+model choosing a skill reads the description and never reaches this section, so
+a stale claim there hides a working command no matter what the body says.
 
 Normative contract: `ai/contracts/athena-inbox.md`, specifically *Tenancy: the
 registry*. Where this file and the contract disagree, **the contract wins** —
@@ -100,6 +109,13 @@ most directories on this machine have not opted in. A resolver that instead
 scanned the inbox root would satisfy almost every test and would show one
 project another project's mail.
 
+**That silence is for COUNTING. A waiter refuses instead**, and so does a read
+that named a channel. `inbox-status` with nothing to count has nothing to say;
+`inbox-wait` with nothing to watch cannot block on it, and its only two
+alternatives — exit 0, or block on nothing for the whole budget — both report
+"no mail arrived" for a session that was never going to hear about mail at all.
+See the contract, *Waiter rules*.
+
 ## Channel kinds
 
 | | `log` | `maildir` |
@@ -169,6 +185,73 @@ Three things this command refuses to let look like "nothing new":
   chose. Conformant mail in the same channel keeps flowing past them,
 - messages carrying **your own identity** as `from`, sitting in the directory
   the peer delivers into.
+
+### `bin/inbox-wait`
+
+```
+inbox-wait              block until a doorbell rings, or the budget elapses
+inbox-wait --dry-run    resolve and provision the doorbells, print them, exit
+```
+
+The hop that turns the chain from pull into push. Everything before it is push
+by construction — the workspace to the server, the server to the client, the
+client's append and its bell. Without this, the last hop is a session happening
+to look.
+
+**How to arm it.** Launch it with `run_in_background`. **The completion
+notification is the wake**: when it arrives, handle it exactly as you would a
+SessionStart count — run `inbox-status`, then `read-inbox <channel>` for each
+channel that has something — and then **arm it again**. One waiter covers every
+channel this project declares, of both kinds; there is no way to wait on one
+channel, because a narrowed waiter is indistinguishable from a complete one and
+the channels it left out never wake anybody.
+
+| exit | meaning | what to do |
+|---|---|---|
+| `0` | a doorbell rang | read, then **re-arm** |
+| `75` | the budget elapsed, nothing rang | **re-arm** — this is *not* "all clear" |
+| `2` | refused (bad usage, no `inotifywait`, an unusable budget, nothing to watch) | fix what the `Fix:` line names; re-arming will not help |
+| `1` | `inotifywait` faulted; one reason line is printed | re-arm **once**, then surface it rather than looping |
+
+**75, not 0, for a quiet budget.** `0` is what a caller reads as "mail is
+waiting", so the one status that can never be reused is the one that means
+nothing arrived. A waiter that reported success for "nothing ever arrived"
+would turn a quiet hour into a lost message with nothing anywhere saying so.
+
+**A wake does not imply unread mail.** A peer acking a message *you* sent rings
+the same bell — the ack happens inside your `read` directory, which is the
+directory the peer delivers into. Waking to find zero unread is normal.
+
+**The budget, and the ceiling it pairs with.** 540s by default, under the 600s
+ceiling at which an unattended `claude -p` kills background subagents — a
+waiter killed at the ceiling does not report a timeout, it *vanishes*, and the
+session waiting on it is never told. `ATHENA_INBOX_WAIT_BUDGET` overrides it,
+bounded: a value at or over 600 is **refused, not clamped**, so you learn the
+budget you asked for is not the budget you would have got. A session that has
+raised `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` may raise this to match, and must
+raise **both** — raising one alone is the failure the pairing exists to
+prevent.
+
+**`attrib` is in the watch set and is not decoration.** The two bump mechanisms
+do not emit the same events: `touch(1)` (the maildir side) sets atime and mtime
+together, which the kernel reports as `ATTRIB` and `CLOSE_WRITE` but **not** as
+`MODIFY`. Watching a subset fails *silently* — the waiter arms, blocks, and
+never fires, which looks exactly like a healthy idle waiter for the rest of
+time. The set is the union, and the suite has a `chmod`-only case because that
+is the one bump that discriminates `attrib` from the rest.
+
+**Who may arm.** Tenancy and not-a-subagent. A subagent never arms a waiter: it
+would wake, read, ack and finish, and the session that reports to Cody would
+find a clean inbox and say nothing. The consumer `flock` is deliberately *not*
+taken — arming advances nothing, and a waiter holding the lock would deny every
+other session's read and ack for the whole budget (and could not hold the locks
+of more than one channel anyway). The lock settles contention at the *read*,
+which is where it matters.
+
+**Nothing to watch is a refusal, not a wait.** A session with no registry
+entry, or an entry declaring no channels, is refused immediately with a `Fix:`
+clause. Blocking on nothing and waiting quietly for mail are indistinguishable
+from the outside, and only one of them is working.
 
 ## Reading the counts
 

@@ -2463,6 +2463,400 @@ SCAN="$(printf '{"v":1,"ts":"1","channel":"D1","event_id":"E1","text":"SECRET-BO
 assert_contains "A-10 the READ scan does carry it -- the difference is the parameter, not a filter" \
   "SECRET-BODY-TEXT" "${SCAN}"
 
+echo "== 9. The waiter: bin/inbox-wait (QA I-1, I-2, I-3) =="
+
+# The waiter is the only component here whose failure mode is INDISTINGUISHABLE
+# FROM SUCCESS while it is happening: it arms, it blocks, and it never fires.
+# A healthy idle waiter and a waiter watching the wrong event set look exactly
+# alike from outside, for the whole budget, forever. Every case below exists
+# because eyeballing "it seems to be waiting" proves nothing.
+#
+# NO SPINNING ANYWHERE IN THIS SECTION. Where a case has to wait, it blocks on
+# the pid (`wait`), and where it has to know the waiter is actually armed
+# before bumping, it asks the kernel -- /proc/<pid>/fdinfo carries an
+# `inotify wd:` line once a watch is registered. Guessing a delay instead is
+# what makes an integration test flake, and a flake that goes green on retry is
+# how a real defect gets retried away.
+
+WAIT_CHILD=""
+cleanup_waiter() { [ -n "${WAIT_CHILD}" ] && kill "${WAIT_CHILD}" 2>/dev/null; rm -rf "${TMP}"; }
+trap 'cleanup_waiter' EXIT INT TERM
+
+# arm_waiter <repo> <budget>  -- backgrounds the waiter, sets WAIT_CHILD.
+# Its streams land in files so a case can assert on what the wake SAID as well
+# as on what it returned.
+WAIT_OUT=""; WAIT_ERR=""
+arm_waiter() {
+  WAIT_OUT="${TMP}/waiter-out"; WAIT_ERR="${TMP}/waiter-err"
+  ( cd "$1" && ATHENA_INBOX_WAIT_BUDGET="$2" exec "${BIN}/inbox-wait" ) \
+    >"${WAIT_OUT}" 2>"${WAIT_ERR}" &
+  WAIT_CHILD=$!
+}
+
+# await_armed -- blocks until the waiter has a live inotify watch, bounded.
+# 0.2s cadence, at most 30 iterations (6s): a real interval and a hard bound,
+# never a re-check with no sleep.
+#
+# It asks the KERNEL whether the watch exists rather than guessing a delay.
+# /proc/<pid>/fdinfo carries an `inotify wd:` line once a watch is registered,
+# so the bump can be made at a moment when missing it is impossible. A test
+# that instead sleeps "long enough" before bumping is the flake this avoids --
+# and a flake that goes green on retry is how a real defect gets retried away.
+#
+# The process tree is inbox-wait -> timeout -> inotifywait, so the descendants
+# are walked two levels. `pgrep -P` matches by PARENT pid, which cannot
+# self-match the way `pgrep -f <pattern>` does.
+# It counts the registered watches against the number of doorbells the waiter
+# is arming on, because being satisfied by the FIRST one leaves exactly the
+# race it was written to close: `inotifywait` registers its paths in turn, so a
+# bump issued after the log bell's watch lands but before the maildir one does
+# is still missed -- and the case then sits out its whole budget and fails with
+# 75, looking like a broken waiter rather than a mistimed test.
+await_armed() {
+  local want="${1:-1}" i p gc n
+  for i in $(seq 1 30); do
+    kill -0 "${WAIT_CHILD}" 2>/dev/null || return 1     # already exited
+    n=0
+    for p in $(pgrep -P "${WAIT_CHILD}" 2>/dev/null); do
+      for gc in "${p}" $(pgrep -P "${p}" 2>/dev/null); do
+        n=$(( n + $(grep -h '^inotify wd:' /proc/"${gc}"/fdinfo/* 2>/dev/null | wc -l) ))
+      done
+    done
+    [ "${n}" -ge "${want}" ] && return 0
+    sleep 0.2
+  done
+  return 0            # unobservable here; bump anyway rather than fail blind
+}
+
+# reap_waiter -- blocks on the pid and leaves its status in WAIT_RC.
+#
+# IT SETS A GLOBAL RATHER THAN PRINTING, and that is not a style choice: called
+# as `$(reap_waiter)` it would run in a SUBSHELL, where the backgrounded waiter
+# is not a child at all. bash then refuses the `wait` and hands back 127 -- a
+# status that has nothing to do with the waiter, on a case that would look like
+# a real failure while proving nothing. Measured here on the first run.
+WAIT_RC=""
+reap_waiter() {
+  wait "${WAIT_CHILD}"; WAIT_RC=$?
+  WAIT_CHILD=""
+}
+
+# --- fixtures ---------------------------------------------------------------
+
+setup_case
+WREPO="$(make_repo proj)"
+register proj "${WREPO}" '{
+  "slack": {"kind":"log","path":"proj-slack.jsonl"},
+  "peer-mail": {"kind":"maildir","namespace":"agent-mail/peer","read":"from-server","write":"to-server","identity":"athena"}
+}'
+LOG_BELL="${ATHENA_INBOX_ROOT}/proj-slack.event"
+MAIL_R_BELL="${ATHENA_INBOX_ROOT}/agent-mail/peer/from-server/.event"
+MAIL_W_BELL="${ATHENA_INBOX_ROOT}/agent-mail/peer/to-server/.event"
+
+DRY="$(cd "${WREPO}" && "${BIN}/inbox-wait" --dry-run 2>/dev/null)"
+assert_eq "W-1 one waiter covers every channel of BOTH kinds (3 doorbells, not 1)" \
+  "3" "$(printf '%s\n' "${DRY}" | grep -c .)"
+assert_contains "W-1 the log channel's doorbell is watched"        "${LOG_BELL}"    "${DRY}"
+assert_contains "W-1 the maildir READ doorbell is watched"         "${MAIL_R_BELL}" "${DRY}"
+# The WRITE doorbell is not decoration: my ack happens inside MY read
+# directory, so the peer's ack of what I sent rings the doorbell of MY write
+# directory. Drop it and half the conversation stops waking anybody, silently.
+assert_contains "W-1 the maildir WRITE doorbell is watched (that is how a peer's ACK wakes me)" \
+  "${MAIL_W_BELL}" "${DRY}"
+
+# EVERY DOORBELL THE WAITER ARMS ON MUST EXIST FIRST. `inotifywait` on a
+# missing path exits 1 IMMEDIATELY -- and one invocation watches every
+# doorbell, so a single absent .event takes down the wake for ALL channels.
+assert_ok "W-2 a missing doorbell is provisioned before arming (log)"     test -f "${LOG_BELL}"
+assert_ok "W-2 a missing doorbell is provisioned before arming (maildir)" test -f "${MAIL_R_BELL}"
+assert_eq "W-2 the doorbell is 0600" "600" "$(stat -c '%a' "${LOG_BELL}")"
+assert_eq "W-2 provisioned mail directories are 0700" \
+  "700" "$(stat -c '%a' "${ATHENA_INBOX_ROOT}/agent-mail/peer/from-server")"
+for d in from-server/tmp from-server/.acked to-server/tmp to-server/.acked; do
+  assert_ok "W-2 the designated consumer provisions ${d} before arming" \
+    test -d "${ATHENA_INBOX_ROOT}/agent-mail/peer/${d}"
+done
+assert_eq "W-2 provisioning never creates the INBOX file -- that is the writer's" \
+  "absent" "$([ -e "${ATHENA_INBOX_ROOT}/proj-slack.jsonl" ] && echo present || echo absent)"
+
+# I-1, THE CASE THIS TICKET EXISTS FOR. `touch(1)` sets atime and mtime
+# together, which the kernel reports as ATTRIB and NOT as MODIFY. A waiter
+# watching only `modify` never fires for a maildir channel -- it arms, blocks,
+# and looks exactly like a healthy idle waiter for the rest of time. This is
+# the mutation that must redden, and it is the only case in the file that
+# proves `attrib` is in the watch set.
+arm_waiter "${WREPO}" 20
+await_armed 3
+touch "${MAIL_R_BELL}"
+reap_waiter
+assert_eq "I-1 a touch(1) bump (the maildir mechanism) wakes the waiter" "0" "${WAIT_RC}"
+
+# I-1, THE CASE THAT ACTUALLY DISCRIMINATES `attrib`. The one above does not,
+# and that was MEASURED, not assumed: `touch(1)` emits ATTRIB *and*
+# CLOSE_WRITE, so a waiter watching `modify,close_write` alone still wakes for
+# it and the mutation that deletes `attrib` from the watch set stays green.
+# A test that passes is not the same as a test that discriminates.
+#
+# `chmod` is the one bump mechanism that emits ATTRIB and NOTHING ELSE -- no
+# open, no close, no modify. It is exactly the shape the contract warns about
+# when it says no single event type is reliable across a future client
+# refactor, and it is the only case in this file whose failure means `attrib`
+# has left the watch set.
+arm_waiter "${WREPO}" 20
+await_armed 3
+chmod 0644 "${MAIL_R_BELL}"
+reap_waiter
+assert_eq "I-1 an ATTRIB-ONLY bump (chmod) wakes the waiter -- the case that proves attrib is watched" \
+  "0" "${WAIT_RC}"
+chmod 0600 "${MAIL_R_BELL}"
+
+# I-1b, the log side: the client bumps by open + fchmod + ftruncate on a
+# descriptor it holds. `truncate -s 0` + `chmod` replicates that pair of
+# syscalls (MODIFY from the ftruncate, ATTRIB from the fchmod) rather than
+# going through touch(1), so this case is not a second copy of the one above.
+arm_waiter "${WREPO}" 20
+await_armed 3
+truncate -s 0 "${LOG_BELL}"; chmod 0600 "${LOG_BELL}"
+reap_waiter
+assert_eq "I-1 the client's own bump mechanism (ftruncate + fchmod) wakes the waiter" "0" "${WAIT_RC}"
+
+# I-3: ONE waiter, two channel kinds, either one wakes it. Already shown for
+# the log bell and the maildir read bell; the write bell is the third, and the
+# one an implementation is most likely to leave out.
+arm_waiter "${WREPO}" 20
+await_armed 3
+touch "${MAIL_W_BELL}"
+reap_waiter
+assert_eq "I-3 one waiter covers both kinds -- the maildir WRITE bell wakes it too" "0" "${WAIT_RC}"
+
+# A doorbell unlinked mid-wait must not leave the waiter blocked forever on a
+# dead inode. It is recreated in the same breath so the next arm has something
+# to watch, which is also what the waiter itself does on re-arm.
+arm_waiter "${WREPO}" 20
+await_armed 3
+rm -f "${MAIL_R_BELL}"; ( umask 077; : > "${MAIL_R_BELL}" )
+reap_waiter
+assert_eq "W-3 a doorbell deleted mid-wait wakes the waiter instead of stranding it" "0" "${WAIT_RC}"
+
+# PROVISIONING MUST NOT RING THE BELL IT IS ABOUT TO LISTEN TO -- and the
+# failure is a MUTUAL one, invisible to every case above, because each of them
+# arms exactly one waiter.
+#
+# `chmod(2)` emits IN_ATTRIB even when the mode does not change, and `attrib`
+# is in the watch set (it must be). So a provisioning step that re-asserts
+# 0600 on an existing doorbell rings it. A maildir `.event` is SHARED with the
+# peer, and a repo's main checkout and every one of its worktrees resolve to
+# the same repo identity and therefore the same doorbells -- so session A's
+# re-arm wakes session B, B reads nothing, re-arms, and wakes A. A wake with
+# no mail in it is a NORMAL wake by contract, so nothing would ever have
+# called this a fault; it would just cost both sessions a turn, forever.
+#
+# The case is deterministic without a sleep: a second session provisions while
+# this waiter is armed, and the waiter must then time out (75) rather than
+# wake (0).
+arm_waiter "${WREPO}" 10
+await_armed 3
+# The waiter must still be BLOCKED when the second session provisions, or the
+# case would pass on a waiter that had already timed out -- green for the
+# wrong reason, which is the shape this whole ticket is about.
+ALIVE=no; kill -0 "${WAIT_CHILD}" 2>/dev/null && ALIVE=yes
+assert_eq "W-11 the waiter is still armed when the second session provisions" "yes" "${ALIVE}"
+( cd "${WREPO}" && "${BIN}/inbox-wait" --dry-run ) >/dev/null 2>&1
+reap_waiter
+assert_eq "W-11 a second session provisioning the same doorbells does NOT wake an armed waiter" \
+  "75" "${WAIT_RC}"
+
+# I-2: THE QUIET BUDGET. The single most dangerous status this command could
+# return is 0, because 0 is what the caller reads as "mail is waiting". A
+# waiter that reports success for "nothing ever arrived" has converted a quiet
+# hour into a lost message with no error anywhere.
+QUIET_OUT="$(cd "${WREPO}" && ATHENA_INBOX_WAIT_BUDGET=1 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; QUIET_RC=$?
+assert_eq "I-2 a budget that elapses with no doorbell exits 75 (re-arm), NEVER 0" \
+  "75" "${QUIET_RC}"
+assert_contains "I-2 and says so, in the words that stop it being read as all-clear" \
+  "not \"all clear\"" "${QUIET_OUT}"
+
+# The wake line is the reader's OWN narration. Counts only: no filename, no
+# slug, no path, nothing anybody else chose.
+arm_waiter "${WREPO}" 20
+await_armed 3
+touch "${MAIL_R_BELL}"
+reap_waiter
+assert_eq "A-11 the wake returns 0" "0" "${WAIT_RC}"
+WAKE_OUT="$(cat "${WAIT_OUT}")"
+assert_not_contains "A-11 the wake line carries a count, never a path anyone else could have chosen" \
+  "${ATHENA_INBOX_ROOT}" "${WAKE_OUT}"
+assert_contains "A-11 the wake says a wake does not imply unread mail (an ack rings the same bell)" \
+  "does not imply unread mail" "${WAKE_OUT}"
+
+# --- the refusals: every one of these must NOT block -------------------------
+#
+# The standing question, asked of a waiter: what happens when the input is
+# MISSING rather than wrong? Every answer below is a refusal that returns
+# immediately. The two alternatives -- exit 0, or block on nothing for the
+# whole budget -- are both "no mail arrived" for a session that was never going
+# to hear about mail at all. Each case runs under `timeout 10` so a regression
+# to blocking fails the suite instead of hanging it.
+
+setup_case
+EREPO="$(make_repo empty-proj)"
+register empty-proj "${EREPO}" '{}'
+ERR="$(cd "${EREPO}" && timeout 10 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+assert_eq "W-4 an entry declaring NO channels is refused, not armed on nothing" "2" "${RC}"
+assert_contains "W-4 and the refusal carries a Fix:" "Fix:" "${ERR}"
+assert_contains "W-4 and says why blocking would have been worse" "nothing to wait for" "${ERR}"
+
+setup_case
+NREPO="$(make_repo unregistered)"          # a real repo, no registry entry
+ERR="$(cd "${NREPO}" && timeout 10 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+assert_eq "W-5 a repo with no registry entry is refused, not armed" "2" "${RC}"
+assert_contains "W-5 with the 'declares no inbox channels' diagnosis" "declares no inbox channels" "${ERR}"
+
+setup_case
+RREPO="$(make_repo lost-root)"
+register lost-root "${RREPO}" '{"slack":{"kind":"log","path":"x.jsonl"}}'
+rm -rf "${ATHENA_INBOX_ROOT}/projects"
+ERR="$(cd "${RREPO}" && timeout 10 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+# A LOST ROOT IS NOT "this project was never set up". An operator whose
+# delivery was healthy yesterday must not be sent looking for an entry under a
+# directory that does not exist.
+assert_eq "W-6 a missing registry DIRECTORY is refused, not armed" "2" "${RC}"
+assert_contains "W-6 and is diagnosed as a MACHINE condition, not a project one" \
+  "MACHINE-level" "${ERR}"
+
+setup_case
+BREPO="$(make_repo budget)"
+register budget "${BREPO}" '{"slack":{"kind":"log","path":"b-slack.jsonl"}}'
+# THE OVERRIDE IS BOUNDED, AND REFUSED RATHER THAN CLAMPED. A caller that asked
+# for 900 and silently got 540 has configuration that does something else than
+# it says -- and above the 600s ceiling an unattended `claude -p` kills the
+# background subagent outright, so the waiter does not time out, it vanishes.
+for b in 600 601 900; do
+  ERR="$(cd "${BREPO}" && ATHENA_INBOX_WAIT_BUDGET="${b}" timeout 10 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+  assert_eq "W-7 a budget of ${b}s (at/over the 600s ceiling) is REFUSED, not clamped" "2" "${RC}"
+  assert_contains "W-7 and the refusal names the ceiling" "600" "${ERR}"
+done
+# 599 is ACCEPTED -- the bound is the ceiling, not a mood, and a case that only
+# ever asserted refusals would stay green against a tightening that refused
+# everything.
+#
+# IT IS PROVEN THROUGH --dry-run, DELIBERATELY. Arming a real 599s waiter here
+# would be a test that blocks for TEN MINUTES the moment a mutation stops the
+# bump waking it -- measured during this ticket's sabotage pass, where dropping
+# `attrib` from the watch set left exactly this case sitting on a 599s budget.
+# A test whose failure mode is a ten-minute hang is a test nobody can afford to
+# run, and it teaches the next person to shorten the timeout rather than read
+# the failure.
+DRC=0
+( cd "${BREPO}" && ATHENA_INBOX_WAIT_BUDGET=599 timeout 10 "${BIN}/inbox-wait" --dry-run ) >/dev/null 2>&1 || DRC=$?
+assert_eq "W-7 a budget just under the ceiling is accepted" "0" "${DRC}"
+for b in 0 "" "abc" "-5" "12.5" "5s"; do
+  ERR="$(cd "${BREPO}" && ATHENA_INBOX_WAIT_BUDGET="${b}" timeout 10 "${BIN}/inbox-wait" --dry-run 2>&1 >/dev/null)"; RC=$?
+  if [ -z "${b}" ]; then
+    # An EMPTY override is "unset", not an error: `${VAR:-}` cannot tell them
+    # apart and refusing here would break a caller that exported it blank.
+    assert_eq "W-8 an empty budget override falls back to the default" "0" "${RC}"
+  else
+    assert_eq "W-8 a budget of [${b}] is refused before anything is armed" "2" "${RC}"
+    assert_contains "W-8 and carries a Fix:" "Fix:" "${ERR}"
+  fi
+done
+
+# A SUBAGENT NEVER ARMS A WAITER. It would wake, read, ack and finish -- and
+# the session that actually reports to Cody would find a clean inbox and say
+# nothing. Same predicate as the ack path's, fail-open to main.
+ERR="$(cd "${BREPO}" && CLAUDE_AGENT_ID=sub timeout 10 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+assert_eq "A-12 a subagent is refused before it can arm a waiter" "2" "${RC}"
+assert_contains "A-12 and the refusal explains the theft it prevents" "reports to Cody" "${ERR}"
+ERR="$(cd "${BREPO}" && CLAUDE_AGENT_TYPE=explorer timeout 10 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+assert_eq "A-12 CLAUDE_AGENT_TYPE alone is signal enough" "2" "${RC}"
+
+# A session in ANOTHER project never gets this project's doorbells. A waiter
+# that fell back to scanning the root would satisfy every other case in this
+# section and cross-wire two tenants.
+OTHER="$(make_repo other-proj)"
+OUT="$(cd "${OTHER}" && timeout 10 "${BIN}/inbox-wait" --dry-run 2>/dev/null)"; RC=$?
+assert_eq "A-13 a session in an unregistered repo is refused, not handed the root's doorbells" "2" "${RC}"
+assert_eq "A-13 and is handed no doorbell at all" "" "${OUT}"
+
+# Unknown arguments are refused rather than ignored: a caller reaching for a
+# --channel flag must be told there isn't one, not silently given a waiter
+# that watches everything under a name suggesting it doesn't.
+# BOUNDED LIKE THE REST. This is the one refusal whose plausible regression --
+# an unknown argument ignored instead of refused -- ARMS A REAL 540s WAITER,
+# and this suite runs inside the harness gate, so an unbounded version would
+# HANG the gate rather than redden it. It also runs from a fixture repo, so a
+# refusal arriving from tenancy resolution instead of argument parsing cannot
+# satisfy it by accident.
+W9_ERR="$(cd "${BREPO}" && timeout 10 "${BIN}/inbox-wait" --channel slack 2>&1 >/dev/null)"; W9_RC=$?
+# ASSERTED ON ITS OWN WORDS AND ITS OWN EXIT CODE, because `assert_refused`
+# CANNOT SEE THIS ONE. That helper wants non-zero plus a literal `Fix:`, and
+# under the regression it names -- an unknown argument silently ignored -- a
+# real waiter is armed, `timeout` kills it (non-zero), and this fixture's
+# never-delivered log channel has already printed a notice containing `Fix:`.
+# Both conditions satisfied for entirely unrelated reasons; MEASURED green
+# against `*) : ;;` by a reviewer. A refusal's evidence is what it SAID and the
+# status IT chose, never "something failed and something mentioned Fix:".
+assert_eq "W-9 an unknown argument is refused with the refusal's own exit code" "2" "${W9_RC}"
+assert_contains "W-9 and names the argument it refused" "unknown argument" "${W9_ERR}"
+assert_contains "W-9 and names the whole-session rule rather than suggesting a flag" \
+  "no way to wait on one channel" "${W9_ERR}"
+
+# THE BINARY THAT DOES THE BLOCKING IS GONE -- the standing question asked of
+# the one dependency without which this command has no mechanism at all. The
+# tempting degradation is a polling loop, which the Hard Rule forbids outright,
+# so both prerequisites must REFUSE and name their package.
+SHIM_DIR="$(mktemp -d)"
+# bash and env are in the list because the script is `#!/usr/bin/env bash`:
+# without them the shim PATH makes every case fail with `env: bash: No such
+# file or directory` and exit 127 -- a failure of the FIXTURE that looks
+# exactly like the refusal under test failing to happen.
+for c in bash env dirname basename mktemp head cut seq sleep ln jq awk sed date stat mv rm mkdir touch cat printf ls find sort wc tr grep cp chmod realpath git flock paste timeout inotifywait; do
+  cp_p="$(command -v "$c" 2>/dev/null)" && ln -sf "${cp_p}" "${SHIM_DIR}/$c"
+done
+for missing in inotifywait timeout; do
+  rm -f "${SHIM_DIR}/${missing}"
+  ERR="$(cd "${BREPO}" && PATH="${SHIM_DIR}" "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+  assert_eq "W-12 an absent ${missing} is REFUSED, never degraded to a poll" "2" "${RC}"
+  assert_contains "W-12 and the refusal names the package to install" "install" "${ERR}"
+  assert_contains "W-12 and carries a Fix:" "Fix:" "${ERR}"
+  cp_p="$(command -v "${missing}" 2>/dev/null)" && ln -sf "${cp_p}" "${SHIM_DIR}/${missing}"
+done
+
+# THE FAULT PATH, which nothing else in this file reaches. A waiter that cannot
+# watch must report ONE reason line and a non-zero status that is neither "a
+# doorbell rang" nor "re-arm forever" -- and it must not read a temp file that
+# is gone, which is what the signal path used to do.
+# `rm -f` FIRST, AND IT IS NOT TIDINESS. Every entry in this shim directory is
+# a SYMLINK to the real binary, and `> "${SHIM_DIR}/inotifywait"` FOLLOWS a
+# symlink -- so without this the redirect writes a three-line shell script
+# straight into `/usr/sbin/inotifywait`, the system binary, for every process
+# on this machine. It was attempted during this ticket and refused only because
+# the target is root-owned and the suite does not run as root. A test that is
+# safe solely because of who is running it is not safe; this is the same
+# "`realpath` follows, `lstat` does not" lesson `fs_assert_regular` exists for,
+# arriving in the fixture instead of the code.
+rm -f "${SHIM_DIR}/inotifywait"
+printf '#!/bin/sh\necho "inotifywait: Failed to watch; upper limit on inotify watches reached!" >&2\nexit 1\n' \
+  > "${SHIM_DIR}/inotifywait"
+chmod +x "${SHIM_DIR}/inotifywait"
+ERR="$(cd "${BREPO}" && PATH="${SHIM_DIR}" ATHENA_INBOX_WAIT_BUDGET=5 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+assert_eq "W-13 a faulting inotifywait exits 1 -- not 0, and not the re-arm status" "1" "${RC}"
+assert_contains "W-13 and relays the machine's own reason verbatim" "upper limit on inotify watches" "${ERR}"
+assert_contains "W-13 and says re-arm ONCE rather than forever" "re-arm ONCE" "${ERR}"
+assert_not_contains "W-13 and never leaks a bare shell error with no Fix: behind it" \
+  "No such file or directory" "${ERR}"
+rm -rf "${SHIM_DIR}"
+
+# A declared log channel whose file has NEVER existed can never ring. The
+# waiter arms anyway (refusing would take the other channels down with it) but
+# it must not be silent: a permanently unregistered producer and a quiet week
+# are identical from a blocked waiter.
+ERR="$(cd "${BREPO}" && timeout 10 "${BIN}/inbox-wait" --dry-run 2>&1 >/dev/null)"
+assert_contains "W-10 a log channel that has NEVER been delivered to is reported, not silently armed on" \
+  "nothing has EVER been delivered" "${ERR}"
+assert_contains "W-10 and the notice names producer registration" "register this channel's producer" "${ERR}"
+
 echo
 if [ "${FAIL}" -eq 0 ]; then
   echo "VERDICT: PASS (${PASS} cases)"

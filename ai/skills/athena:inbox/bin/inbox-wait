@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# inbox-wait -- FRAMEWORK. Block until something arrives, on every channel this
+# session owns, in ONE process.
+#
+#   inbox-wait              block until a doorbell rings, or the budget elapses
+#   inbox-wait --dry-run    resolve and provision the doorbells, print them, exit
+#   inbox-wait -h           this header
+#
+# THIS IS THE HOP THAT TURNS THE CHAIN FROM PULL INTO PUSH. Everything else in
+# the delivery path is push by construction: the workspace pushes to the
+# server, the server pushes to the client, the client appends and rings the
+# bell. Without this command the last hop is a session happening to look.
+#
+# ============================ EXIT STATUS ==================================
+#
+#   0   a doorbell rang. Run inbox-status, then read-inbox <channel>, then
+#       RE-ARM. A wake does NOT imply unread mail: an ack by the peer rings
+#       the same bell, and so does a doorbell being deleted and recreated.
+#   75  the budget elapsed and nothing rang. RE-ARM. This is NOT "all clear" --
+#       treating it as one turns a quiet hour into a lost message.
+#   2   refused: bad usage, no inotifywait, an unusable budget, or nothing to
+#       watch. Fix what the `Fix:` line names; re-arming will not help.
+#   1   inotifywait faulted. One reason line is printed. Re-arm ONCE; if it
+#       faults again, surface it rather than looping.
+#
+# **75, NOT 0, FOR A QUIET BUDGET.** A waiter that exits 0 on "nothing ever
+# arrived" is the worst shape this facility can take: success is what the
+# caller reads as "I checked", so the one status that must never be reused is
+# the one that means mail is waiting.
+#
+# **THE TICKET'S TABLE DESCRIBED THE OTHER ARMING FORM, and the two differ.**
+# `inotifywait -qq -t "$BUDGET"` exits **2** when the budget elapses;
+# `timeout "$BUDGET" inotifywait -qq` -- the form the contract prints, and the
+# one used below -- exits **124**. An implementer who writes
+# `case $? in 0) read;; 2) rearm;; *) die;; esac` against the `timeout` form
+# gets a waiter that dies on its first quiet window. Both are mapped to 75
+# here so no caller ever has to know which form was used.
+#
+# ============================ WHO MAY ARM ==================================
+#
+# Tenancy and not-a-subagent, both enforced. A subagent never arms a waiter:
+# it would wake, consume, finish, and the session that actually reports to
+# Cody would find a clean inbox and say nothing.
+#
+# **THE CONSUMER `flock` IS DELIBERATELY NOT TAKEN, and that is a divergence
+# from the ticket, resolved against the contract.** The contract gates
+# ADVANCING a channel's consumption state on the lock and requires the holder
+# to "hold the descriptor across the whole advance". Arming a waiter advances
+# nothing -- it reads no body, moves no message, writes no offset. Holding the
+# lock across a wait would break two things outright:
+#
+#   * it would deny every other session's read and ack for the FULL BUDGET --
+#     nine minutes of a channel refusing to drain because somebody is
+#     listening to it;
+#   * one process cannot hold the locks of N channels. `inbox_lock_acquire`
+#     refuses a second lock by design, because swapping the descriptor would
+#     release the first mid-advance. A waiter watches EVERY channel, so a
+#     lock-holding waiter is impossible for any session owning more than one.
+#
+# Nothing is lost by omitting it: if two sessions both arm and both wake, the
+# READ is where the lock settles it, and the loser is refused before a single
+# body is printed.
+#
+# ============================ SAFE WAIT ====================================
+#
+# One blocking call. No `while`, no `until`, no poll, no sleep. The child is
+# backgrounded only so its pid can be trapped -- an orphaned waiter is the
+# PT-919 class (a spin loop reparented to PID 1 pinned this box's load at ~290
+# for an hour and flaked neighbouring suites into Postgres 57014 timeouts).
+# `wait` blocks on the pid; it does not re-check it.
+#--- end usage ---
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB="$(dirname "${HERE}")/lib"
+
+# shellcheck source=/dev/null
+. "${LIB}/err.sh"
+# shellcheck source=/dev/null
+. "${LIB}/names.sh"
+# shellcheck source=/dev/null
+. "${LIB}/descriptor.sh"
+# shellcheck source=/dev/null
+. "${LIB}/logchan.sh"
+# shellcheck source=/dev/null
+. "${LIB}/maildir.sh"
+# shellcheck source=/dev/null
+. "${LIB}/fence.sh"
+# shellcheck source=/dev/null
+. "${LIB}/session.sh"
+# shellcheck source=/dev/null
+. "${LIB}/fs.sh"
+# shellcheck source=/dev/null
+. "${LIB}/lock.sh"
+# shellcheck source=/dev/null
+. "${LIB}/inbox.sh"
+
+usage() { sed -n '2,/^#--- end usage ---$/p' "${BASH_SOURCE[0]}" | grep -v '^#--- end usage ---$' | sed 's/^# \{0,1\}//'; }
+
+EX_RANG=0
+EX_FAULT=1
+EX_REFUSED=2
+EX_REARM=75
+
+DRY_RUN=0
+for arg in "$@"; do
+  case "${arg}" in
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      # NO --channel FLAG, and no positional channel. One waiter watches all of
+      # this session's doorbells, of both kinds; a narrowed waiter looks
+      # identical to a complete one and leaves the channels it dropped with
+      # nobody listening.
+      inbox_fail "unknown argument \"${arg}\"" \
+        "run: inbox-wait [--dry-run]. There is no way to wait on one channel: a waiter covers every channel this project declares, because a narrowed one is indistinguishable from a complete one and the channels it left out never wake anybody."
+      exit "${EX_REFUSED}"
+      ;;
+  esac
+done
+
+if ! command -v jq >/dev/null 2>&1; then
+  inbox_fail "jq is required and was not found on PATH" \
+    "install jq (it is already a dependency of the athena:slack skill), then re-run."
+  exit "${EX_REFUSED}"
+fi
+
+# ============================================================================
+# THE BUDGET.
+#
+# 540s by default, under the 600s ceiling at which an unattended `claude -p`
+# kills background subagents. A waiter killed at the ceiling does not report a
+# timeout -- it vanishes, and the session that armed it waits forever for a
+# notification that is never coming.
+#
+# THE OVERRIDE IS BOUNDED, NOT FREE, and a value at or over the ceiling is
+# REFUSED rather than clamped. Clamping would mean the caller asked for 900,
+# got 540, and was told nothing -- configuration that silently does something
+# else is the same silent-failure shape in its quietest form. A session that
+# has raised CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS may raise this to match, and
+# must raise BOTH: raising one alone is exactly the failure this pairing
+# exists to prevent.
+# ============================================================================
+BUDGET_DEFAULT=540
+BUDGET_CEILING=600
+BUDGET="${BUDGET_DEFAULT}"
+if [ -n "${ATHENA_INBOX_WAIT_BUDGET:-}" ]; then
+  case "${ATHENA_INBOX_WAIT_BUDGET}" in
+    ''|*[!0-9]*)
+      inbox_fail "ATHENA_INBOX_WAIT_BUDGET is not a positive integer number of seconds (got \"${ATHENA_INBOX_WAIT_BUDGET}\")" \
+        "set it to a whole number of seconds below ${BUDGET_CEILING}, or unset it to use the ${BUDGET_DEFAULT}s default."
+      exit "${EX_REFUSED}"
+      ;;
+  esac
+  if [ "${ATHENA_INBOX_WAIT_BUDGET}" -eq 0 ]; then
+    inbox_fail "ATHENA_INBOX_WAIT_BUDGET is 0, which would arm a waiter that returns immediately" \
+      "set it to a whole number of seconds below ${BUDGET_CEILING}, or unset it to use the ${BUDGET_DEFAULT}s default."
+    exit "${EX_REFUSED}"
+  fi
+  if [ "${ATHENA_INBOX_WAIT_BUDGET}" -ge "${BUDGET_CEILING}" ]; then
+    inbox_fail "ATHENA_INBOX_WAIT_BUDGET is ${ATHENA_INBOX_WAIT_BUDGET}s, at or over the ${BUDGET_CEILING}s ceiling at which an unattended \`claude -p\` kills background subagents" \
+      "set it below ${BUDGET_CEILING}. It is refused rather than clamped so you learn the budget you asked for is not the budget you would have got. A waiter killed at the ceiling does not report a timeout -- it disappears, and the session waiting on it is never told."
+    exit "${EX_REFUSED}"
+  fi
+  BUDGET="${ATHENA_INBOX_WAIT_BUDGET}"
+fi
+
+# ============================================================================
+# THE PREREQUISITE. Probed, and named when absent.
+#
+# Without inotifywait there is no blocking wake at all, and the alternative a
+# missing binary invites -- a polling loop -- is the one thing the Hard Rule
+# forbids outright. So this refuses and names the package; it never degrades
+# to a poll.
+# ============================================================================
+if ! command -v inotifywait >/dev/null 2>&1; then
+  inbox_fail "inotifywait was not found on PATH, so this session cannot be woken by a doorbell" \
+    "install inotify-tools (it provides inotifywait; on this machine it lives at /usr/sbin/inotifywait). Do NOT substitute a polling loop: without a blocking waiter the delivery chain's last hop is a session happening to look, and a spin loop is what this harness forbids outright."
+  exit "${EX_REFUSED}"
+fi
+if ! command -v timeout >/dev/null 2>&1; then
+  inbox_fail "timeout(1) was not found on PATH, so the waiter's budget cannot be bounded" \
+    "install coreutils (it provides timeout). The budget is what keeps the waiter under the ${BUDGET_CEILING}s ceiling at which an unattended \`claude -p\` kills background subagents; arming without it would be an unbounded wait, which this harness forbids."
+  exit "${EX_REFUSED}"
+fi
+
+# Tenancy, provisioning, and the refusals -- all in the manager. A zero-channel
+# session is refused there rather than armed on nothing.
+DOORBELLS="$(inbox_doorbells ".")" || exit "${EX_REFUSED}"
+mapfile -t EVENT_FILES <<< "${DOORBELLS}"
+
+# NOT-A-SUBAGENT. It runs AFTER the step above, which both resolves and
+# PROVISIONS -- so a subagent's refused invocation does create this channel's
+# missing directories and doorbells on its way to being told no. That ordering
+# is deliberate: a misconfigured registry is reported to whoever ran the
+# command, whatever kind of session they are, rather than being masked by the
+# subagent refusal. The provisioning is idempotent, correctly moded, and no
+# longer rings anything (see fs_ensure_doorbell), so the only thing a subagent
+# leaves behind is the empty structure the contract says the channel should
+# have had. It never reaches the arm.
+inbox_refuse_subagent_arm || exit "${EX_REFUSED}"
+
+if [ "${DRY_RUN}" -eq 1 ]; then
+  printf '%s\n' "${EVENT_FILES[@]}"
+  exit "${EX_RANG}"
+fi
+
+ERRF="$(mktemp)" || { inbox_fail "could not create a temporary file for inotifywait's stderr" \
+  "check that \$TMPDIR is writable, then re-run."; exit "${EX_REFUSED}"; }
+
+# ============================================================================
+# CLEANUP AND SIGNALS.
+#
+# `child` is initialised BEFORE the trap is installed, and the trap BEFORE the
+# `&`, because both orderings were wrong and each has a failure:
+#
+#   * a trap installed after the `&` leaves a window in which a signal orphans
+#     the waiter -- the PT-919 class, through the gap in its own guard;
+#   * a trap referencing an unset `child` under `set -u` ABORTS INSIDE THE
+#     TRAP. The `2>/dev/null` silences `kill`, not the unbound-variable error.
+#
+# INT AND TERM GET THEIR OWN HANDLERS, AND THEY EXIT. A bare
+# `trap ... EXIT INT TERM` runs the handler and then RESUMES after `wait`, so a
+# deliberate teardown fell through to the fault arm: `RC=143`, a read of the
+# temp file the handler had just deleted (a bare bash error carrying no
+# `Fix:`), and a refusal telling the caller to re-arm. SKILL.md tells the agent
+# to launch this with `run_in_background`, so every stop produced that.
+# ============================================================================
+child=""
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}"' EXIT
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}"; exit 130' INT
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}"; exit 143' TERM
+
+# ============================================================================
+# THE ARM.
+#
+# `attrib` IS MANDATORY, and leaving it out fails SILENTLY -- the waiter arms,
+# blocks, and simply never fires, which is indistinguishable from a healthy
+# idle waiter. The two bump mechanisms do not emit the same events:
+#
+#   touch(1)                    -> ATTRIB, CLOSE_WRITE          (no MODIFY)
+#   open+fchmod+ftruncate       -> ATTRIB, MODIFY, CLOSE_WRITE
+#
+# `touch(1)` sets atime and mtime together, which the kernel reports as ATTRIB
+# and not as MODIFY -- so a waiter watching only `modify` never fires for a
+# maildir channel, and since ONE waiter serves both kinds, that breaks
+# agent-mail outright. No single event type is reliable across a future client
+# refactor either, which is the real argument: watch the union.
+#
+# `delete_self` is in the set because `move_self` covers a rename of the
+# watched inode but NOT an unlink-and-recreate -- a manual repair, an `rm`
+# during rotation -- which would otherwise leave the waiter blocked forever on
+# a dead inode with no further events. (On this kernel an unlink also bumps
+# link count and therefore emits ATTRIB, so the two overlap today; the overlap
+# is not a guarantee and is not what the waiter relies on.)
+# ============================================================================
+timeout "${BUDGET}" inotifywait -qq \
+  -e attrib,modify,close_write,move_self,delete_self \
+  -- "${EVENT_FILES[@]}" 2>"${ERRF}" &
+child=$!
+wait "${child}"; RC=$?
+
+case "${RC}" in
+  0)
+    # COUNTS ONLY, and not even a count here: this line is the reader's own
+    # narration and never carries a byte anybody else wrote. The bodies come
+    # later, from read-inbox, inside fences.
+    printf 'athena:inbox: a doorbell rang (%s watched). Run inbox-status, then read-inbox <channel>, then re-arm.\n' "${#EVENT_FILES[@]}"
+    printf '  Note: a wake does not imply unread mail — a peer acking a message you sent rings the same bell. Zero new is a normal wake, not a fault.\n'
+    exit "${EX_RANG}"
+    ;;
+  124|2)
+    # 124 is `timeout`'s; 2 is `inotifywait -t`'s. Both mean the same thing and
+    # both are mapped, so a future change of arming form cannot turn a quiet
+    # window into a dead waiter.
+    printf 'athena:inbox: %ss elapsed with no doorbell (%s watched). Re-arm — this is not "all clear".\n' \
+      "${BUDGET}" "${#EVENT_FILES[@]}" >&2
+    exit "${EX_REARM}"
+    ;;
+  *)
+    # A SIGNAL IS NOT A FAULT. `wait` reports a signalled child as 128+n, and
+    # reading that as "inotifywait faulted, re-arm once" turns every deliberate
+    # teardown into a spurious error with advice to try again.
+    if [ "${RC}" -ge 128 ]; then
+      printf 'athena:inbox: the waiter was terminated by signal %s. Nothing was read and nothing was acked.\n' \
+        "$(( RC - 128 ))" >&2
+      exit "${RC}"
+    fi
+    # ONE fixed reason line. inotifywait's own stderr is relayed because it is
+    # this machine's diagnostic (a watch limit reached, a vanished path), not
+    # anybody else's content -- but it is relayed verbatim and never parsed
+    # into a decision.
+    REASON=""
+    [ -f "${ERRF}" ] && REASON="$(tr -d '\000' < "${ERRF}" | head -n 3)"
+    inbox_fail "the waiter faulted (exit ${RC})${REASON:+: ${REASON}}" \
+      "re-arm ONCE. If it faults again, stop and surface it rather than looping: the usual causes are the inotify watch limit (/proc/sys/fs/inotify/max_user_watches) and a doorbell that vanished between provisioning and the arm. A waiter that re-arms forever on a hard fault is a spin loop with extra steps."
+    exit "${EX_FAULT}"
+    ;;
+esac
