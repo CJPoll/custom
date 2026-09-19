@@ -176,7 +176,8 @@ remaining content declares it explicitly; nothing will find it otherwise.
 The contract would be ambiguous without saying who creates what, so:
 
 - The **root** is created at `0700` on first use, by whichever tool touches it
-  first. `projects/` is created the same way, at `0700`.
+  first. `projects/` is created at `0700` by a reader or by the owner's setup
+  script — never by a writer, which is prohibited from touching it.
 - A **registry entry is never created implicitly.** The owner (or a setup
   script run on the owner's behalf) authors it; a reader that finds no entry
   reports zero channels and creates nothing, because a fabricated entry would
@@ -196,10 +197,11 @@ The contract would be ambiguous without saying who creates what, so:
   those exist, a clobbered entry is silent by contract and unrecoverable from
   git. **This is a MUST on the tooling that implements this contract, not a
   suggestion**, and `inbox-doctor` does not discharge it: a diagnostic somebody
-  has to think of running is not a check that runs unprompted. It is tracked on
-  the **Athena Inbox epic** alongside the rest of that tooling; the hook
-  precedent this bullet leans on earns its authority partly by naming its own
-  three artifacts, and this one names its home for the same reason.
+  has to think of running is not a check that runs unprompted. The obligation
+  was raised by **DND-202**, which wrote this bullet and could not discharge
+  it; whichever ticket lands the tooling is named here at that point, because
+  the hook precedent this bullet leans on earns its authority partly by naming
+  its own three artifacts.
 - The **designated consumer** creates a declared channel's missing directories
   and doorbell idempotently — `<namespace>/`, both mail directories, their
   `tmp/` and `.acked/`, and `.event` — at `0700` for directories and `0600` for
@@ -240,11 +242,24 @@ repo root**, with `<project-root>` resolved as the git toplevel of the session's
 cwd. That is **superseded**, and it is the only such pointer in this document —
 the prose around it is amended in place rather than duplicated. Owner decision,
 2026-09-18, on seeing walt_ui MR 1185: inbox configuration stays untracked, and
-**nothing about the inbox may land in a consumer repo** — no
+**nothing about the inbox may land in a tenant repo** — no
 `.athena-inbox.json`, no `.gitignore` entry, no `.git/info/exclude` entry, no
-`CLAUDE.md` section. Excluding a repo-root file via `.git/info/exclude` was
-considered and explicitly rejected; keeping the file out of the repo entirely
-was chosen instead. The harm this removes is concrete: MR 1185 would have added
+`CLAUDE.md` section. "Tenant repo" means **any repo other than the harness that
+owns this contract** (`~/dev/custom`). The distinction is load-bearing in both
+directions: the harness necessarily documents the facility it owns and will
+carry the registry's committed source of truth required under *Provisioning*,
+while a tenant carries nothing at all. The stated harm is specific to
+tenants — a shared work repo, a file coworkers read, a personal path hardcoded
+into it — and the harness's own declaration was moved to the registry anyway,
+for the plainer reason that **one resolution mechanism is the point**; two
+would be the second mechanism this document forbids everywhere else.
+
+Excluding a repo-root file via `.git/info/exclude` was considered and
+explicitly rejected. An excluded file still sits in the working tree, where a
+coworker's tooling, a grep, or a container build reads it like any other file;
+and `.git/info/exclude` is **per-clone**, so the exclusion does not exist on a
+fresh checkout and the file is committed by the first person to run
+`git add -A`. Keeping it out of the repo entirely was chosen instead. The harm this removes is concrete: MR 1185 would have added
 a descriptor plus a seven-line `CLAUDE.md` section to a **shared Amby AI work
 repo**, and that section hardcoded the personal path
 `~/dev/custom/ai/contracts/athena-inbox.md` into a file coworkers read. The
@@ -290,7 +305,27 @@ cwd → realpath of `git rev-parse --git-common-dir` → the registry entry
       whose `repo` is that path → that entry's declared channels
 ```
 
-**Repo identity is the realpath of `git rev-parse --git-common-dir`.** It is
+**Repo identity is the realpath of `git rev-parse --git-common-dir`.**
+
+**That command returns a *cwd-relative* path in a main checkout, and the
+realpath MUST be taken against the session's cwd.** Verified on this machine
+(2026-09-19 UTC):
+
+| cwd | raw `git rev-parse --git-common-dir` |
+|---|---|
+| `~/dev/custom` | `.git` |
+| `~/dev/custom/ai/contracts` | `../../.git` |
+| `~/.local/worktrees/custom/dnd-202` | `/home/cjpoll/dev/custom/.git` |
+
+Only the worktree case is absolute. An implementation that captures the raw
+string and resolves it later — after a `chdir`, or inside a helper running
+somewhere else — produces a path that exists nowhere, matches no entry, and
+therefore reports **zero channels and exit 0**, because that is what this
+contract says an unmatched identity means. The channel goes dark with no error
+and no skip count, since nothing was skipped. Resolve it at the point of
+capture, in the session's cwd, or do not capture it.
+
+The identity so resolved is
 identical across a repo's main checkout and every one of its worktrees, and
 distinct per repo — which is exactly the property required, and which no other
 candidate had. Verified on this machine (2026-09-19 UTC):
@@ -343,23 +378,36 @@ normal.
 - **Validation is applied to the matched entry, never to the others.** *Validation
   rules* below — unknown key, missing key, bad `v`, structural error — are hard
   errors **for the entry this session matched**, because that is this session's
-  own configuration. A file in `projects/` that does not end in `.json`, whose
-  name fails the grammar, that does not parse, or whose `repo` is missing or
-  unreadable is **skipped during matching and is not fatal**. One malformed
-  entry belonging to another project MUST NOT wedge every other session, and a
-  reader MUST NOT print its name in a refusal.
+  own configuration. Everything else in `projects/` is **skipped during
+  matching and is not fatal** — one malformed entry belonging to another
+  project MUST NOT wedge every other session, and a reader MUST NOT print its
+  name in a refusal. Skips come in two kinds, and the difference decides what
+  gets reported:
+
+  - **Not a candidate** — the file does not end in `.json`, or its name fails
+    the grammar: `walt_ui.json.bak`, `.walt_ui.json.swp`, `README`. It was
+    never a registry entry and its presence says nothing.
+  - **A candidate that failed** — a grammar-conformant `*.json` that does not
+    parse, or whose `repo` is missing or unreadable. This one *might* have been
+    the entry claiming this session's identity.
 - **A skipped entry is reported, not swallowed.** Skipping is why the failure
   would otherwise be silent: a malformed file *might* be the entry that claims
   this session's repo identity, in which case the session degrades to "no
   entry" — zero channels, exit 0 — which is indistinguishable from not opting
   in. So:
 
-  - a reader's ordinary status output MUST carry a **count** whenever any entry
-    was skipped — `1 registry entry skipped; run inbox-doctor` — naming no
-    file. A count is not a disclosure, and it is what makes the
+  - a reader's ordinary status output MUST carry a **count of failed
+    candidates only** — `1 registry entry unreadable. Fix: run inbox-doctor to
+    see which` — naming no file. Files that were never candidates are **not**
+    counted: a stray backup or editor swapfile would otherwise pin the warning
+    on every status line forever, and a counter that is always on is a counter
+    the owner stops reading, which reopens the very silence it was added to
+    close. A count is not a disclosure, and it is what makes a real
     misconfiguration visible without someone first thinking to run a
     diagnostic;
-  - `inbox-doctor` MUST report each skipped file **by name with the reason**.
+  - `inbox-doctor` MUST report **every** skipped file, of either kind, **by
+    name with the reason**, and MUST report a `rotated_at` in the future (a
+    clock set back blocks rotation indefinitely and is otherwise invisible).
     That is a diagnostic the owner asked for rather than a denial path, which
     is what makes naming the file legitimate there and illegitimate in a
     refusal.
@@ -379,6 +427,16 @@ normal.
 - **`projects/` is reserved.** No channel `path` or `namespace` may resolve
   inside it. Configuration and message surfaces share a root; they do not share
   a namespace.
+
+  **Why the registry lives inside the root at all**, when the machine token
+  does not (`~/.config/athena-inbox-client/config.json`): the root is the one
+  directory this facility already owns end to end, already holds at `0700`,
+  already creates on first use, and already hands `inbox-doctor` as the single
+  place to look. Splitting tenancy into a second location would mean two
+  permission stories, two provisioning paths, and two things to find. The cost
+  is this reservation and the writer's prohibition below — two rules that a
+  location outside the root would not need. That trade was taken knowingly; it
+  is the smaller of the two.
 
 ### Schema
 
@@ -1238,6 +1296,15 @@ A new state-file key, RFC 3339 UTC with a `Z` suffix, following
 when the channel last rotated, and is absent until the first state write, which
 initialises it to `now` so a new channel does not rotate an almost-empty file.
 
+**A state file that already exists but carries no `rotated_at` is stamped to
+`now`, not treated as infinitely old.** This is the upgrade case, and it is the
+very first case any implementation meets: today's deployed state files carry
+`offset` and the seen-sets and nothing else, so `now - rotated_at` has no value
+to compute. Absent means "unknown", and the conservative branch is the same one
+*Lifetimes* takes for an orphaned `.1` — wait out a full window from here
+rather than rotate on the first drain. The cost is one deferred rotation; the
+alternative silently rotates a file nobody meant to rotate yet.
+
 This is a new optional field, so per *Versioning and amendment* it does **not**
 bump `v`.
 
@@ -1260,6 +1327,19 @@ After rotation the offset resets to `0`, `rotated_at` becomes `now`, the
 doorbell is preserved, and the **seen-set ring buffers are kept** — they are
 what suppresses a re-report when a stale offset later forces a full re-read.
 
+**Rename first, then write the state — never the other way round.** Every
+other multi-step mutation here has its crash story written out, and this one
+matters. A crash after a state write but before the rename leaves `offset = 0`
+against a still-full live file, so the reader re-reads the whole thing; the
+seen-sets are ring buffers of ≤ 500, so an 8 MiB file re-reports far more than
+they can absorb, and a mass duplicate report is exactly what the counts-only
+surface must never produce. A crash the other way — rename done, state not yet
+written — leaves a stale offset past EOF, which *A stale offset is recovered,
+not trusted* already handles cleanly. The only cost is that the next rotation
+may clobber the generation just created, which is a lost `.1`, not lost mail.
+Between losing evidence and flooding the owner with duplicates, take the
+former.
+
 **Nothing ever reads `.jsonl.1`.** It is not counted, not deduped against, and
 never resumed from. It exists so a human can answer *"did that message actually
 arrive?"* after the fact — cheap insurance against a reader that acked past
@@ -1276,6 +1356,15 @@ The sweep is an **ack-path** operation and is gated by *The designated
 consumer*: a non-holder of the lock, or a subagent, may read and may peek, but
 MUST NOT sweep. Deleting content is at least as privileged as advancing past
 it, and it reuses that rule rather than introducing a second one.
+
+**On the count path, take the lock for the sweep alone.** A count neither
+advances state nor otherwise needs the lock — *The designated consumer* is
+explicit that reading is open — so a count that wants to sweep MUST attempt
+`flock -n` for that one operation, and **failing to acquire it is not an error
+for the count**: the count proceeds and reports normally, the sweep is simply
+skipped this time. Without that sentence an implementer either makes
+`inbox-status` fail whenever a reading session holds the lock, or never sweeps
+on a count at all and turns the rule below into dead letter.
 
 Within that gate, the sweep runs on **every count and every read the designated
 consumer performs** — **not only inside rotation**. A channel that rotated once
@@ -1329,8 +1418,8 @@ file in a refusal — are what stands in for that structure, and nothing enforce
 them but the implementation's own care. Say it plainly rather than let the
 registry be read as structurally as tight as what it replaced; the same
 permissions (`0700`/`0600`, one OS user) bound the exposure, and this is the
-cost the option-B decision accepted in exchange for keeping every trace of the
-inbox out of consumer repos. Given the incident recorded
+cost the tenancy amendment accepted in exchange for keeping every trace of the
+inbox out of tenant repos. Given the incident recorded
 below, a guard for them is worth building; until one exists, that half is
 doctrine, and this document says so rather than claiming a control it does not
 have.
@@ -1471,17 +1560,21 @@ puts no credential in a message; and stops permanently on a
 partial write rather than resuming.
 
 **A reader is conformant when it:** resolves channels only from the registry
-entry matching its own repo identity, and never from a scan of the root for
-surfaces; refuses a `path` or `namespace` resolving inside `projects/`;
+entry matching its own repo identity — resolved against the session's cwd, and
+treating two entries claiming that identity as a hard error — and never from a
+scan of the root for surfaces; refuses a `path` or `namespace` resolving inside
+`projects/`;
 **retains and surfaces nothing from a non-matching entry**, **names
 no foreign file or channel in any refusal**, and **reports a count when it
 skipped an entry** — the three rules that stand in for the tenant isolation the
-registry no longer provides structurally; refuses any path escaping the root,
-any name failing the grammar, and any non-regular file; never parses, counts,
+registry no longer provides structurally; refuses any channel path escaping the root,
+any channel or message name failing its grammar, and any non-regular file
+(a *registry filename* failing its grammar is skipped, not refused); never parses, counts,
 or advances past a partial final line; counts unknown `v` separately without
 failing; dedupes on `channel:ts` across sources through one shared state file;
-rotates only at EOF, re-checking `size == offset` under the lock before the
-rename; sweeps a rotated generation more than 14 days past its `rotated_at`;
+rotates only at EOF, only when the live file is non-empty, and only after
+re-checking `size == offset` under the lock immediately before the rename;
+sweeps a rotated generation more than 14 days past its `rotated_at`;
 never rotates or sweeps unread content; writes state atomically, preserving
 state keys it does not recognise; advances state only as the designated consumer; watches
 `attrib` on every doorbell; emits **counts only** unprompted; and renders bodies
