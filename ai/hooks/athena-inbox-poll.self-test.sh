@@ -747,13 +747,36 @@ printf 'not json at all' > "${ATHENA_INBOX_ROOT}/projects/${SENTINEL_LC}.json"
 run_hook
 CTX="$(context_of "${OUT}")"
 assert_contains "R12 an unreadable registry entry is surfaced" \
-  "1 registry entry(s) unreadable" "${CTX}"
-assert_contains "R12 the notice says it may be this project's" \
-  "may be this project" "${CTX}"
+  "1 other registry entry(s) could not be parsed" "${CTX}"
+assert_contains "R12 ...as somebody else's dark project, which is what it is here" \
+  "those projects are dark" "${CTX}"
 assert_not_contains "R12 the clause counts and does not name the other tenant" \
   "${SENTINEL_LC}" "${OUT}"
 assert_contains "R12 the real mail is still counted alongside the health clause" \
   "2 new in slack" "${CTX}"
+
+# ...and the state the OLD wording described -- NO matching entry plus an
+# unparseable candidate, where "one of them may be this project's" really is
+# true -- never reaches a health clause at all. `inbox_entry` treats it as a
+# HARD REFUSAL, so inbox-status exits 1 with empty stdout and it arrives here as
+# a FAILED POLL. That is the correct handling (a possibly-mine unreadable entry
+# must not be shrugged off as a healthy machine with someone else's problem),
+# and it is why the clause above can honestly say "other". No fixture reached
+# this branch before, so nothing contradicted the wording it was written for.
+setup_case
+printf 'not json at all' > "${ATHENA_INBOX_ROOT}/projects/${SENTINEL_LC}.json"
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "R12 an unreadable candidate with NO match is a failed poll, not a health note" \
+  "has not succeeded recently" "${CTX}"
+assert_not_contains "R12 ...so it never renders the other-projects clause" \
+  "those projects are dark" "${CTX}"
+assert_no_file "R12 ...and it does not stamp success" \
+  "${HOME}/.claude/athena-inbox-last-success"
+assert_contains "R12 ...and the refusal is recorded" \
+  "no usable status document" "$(hook_log)"
+assert_not_contains "R12 ...without relaying the refusal's own text" \
+  "${SENTINEL_LC}" "$(hook_log)"
 
 echo "== R9: an ANSWER THAT CANNOT BE READ is a failed poll, not an empty one =="
 

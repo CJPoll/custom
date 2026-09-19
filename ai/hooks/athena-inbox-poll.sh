@@ -35,6 +35,16 @@
 # which. Every other entry under projects/ belongs to a different tenant, and a
 # notice must not enumerate them.
 #
+# The failed-candidate clause says "OTHER projects are dark", not "one of these
+# may be mine", and the difference is load-bearing. `inbox_entry` makes the
+# no-match-plus-unparseable-candidate case a HARD REFUSAL -- inbox-status exits
+# 1 with empty stdout, which arrives here as a failed poll and the outage
+# warning. So by the time a health clause can render at all, this project's own
+# entry HAS been found and the unreadable ones provably belong to somebody
+# else. The clause is still worth printing, because no session of theirs is
+# going to notice their registry rotted; it just must not claim a doubt that
+# has already been resolved.
+#
 # And a health clause must describe a FAULT. `never_delivered` is a fault for a
 # LOG channel only: the contract makes a missing maildir read directory normal
 # ("a tool that SENDS mail creates <write>/"), so an unwritten-to peer mailbox
@@ -381,7 +391,7 @@ if [ "${POLL_OK}" -eq 1 ]; then
   # Counts, never names -- see the disclosure note in the header.
   HEALTH_TEXT="$(printf '%s' "${STATUS_JSON}" | jq -r '
     [ (if (.failed_candidates // 0) > 0
-       then "\(.failed_candidates) registry entry(s) unreadable, one of which may be this project'"'"'s"
+       then "\(.failed_candidates) other registry entry(s) could not be parsed, so those projects are dark"
        else empty end),
       ([.channels[] | select(.error // false)] | length
        | if . > 0 then "\(.) declared channel(s) could not be counted" else empty end),
@@ -428,7 +438,7 @@ elif [ "${OPTED_IN}" -eq 1 ] && [ -n "${HEALTH_TEXT}" ]; then
   # would send an agent to re-run a command that returns the same number, which
   # is the "instruction an agent cannot act on" this file refuses elsewhere.
   if [ "${HEALTH_CANDIDATES}" -gt 0 ]; then
-    WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: check that every file under \${ATHENA_INBOX_ROOT:-~/.local/share/athena}/projects/ is valid JSON — one that is not is dropped from the candidate set, which makes its project look like it never opted in. inbox-status cannot say which, by design. For the channel-level clauses, run ai/skills/athena:inbox/bin/inbox-status from this project."
+    WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: check that every file under \${ATHENA_INBOX_ROOT:-~/.local/share/athena}/projects/ is valid JSON — one that is not is dropped from the candidate set, which makes ITS project look like it never opted in. inbox-status cannot say which, by design. For the channel-level clauses, run ai/skills/athena:inbox/bin/inbox-status from this project."
   else
     WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: run ai/skills/athena:inbox/bin/inbox-status from this project to see which."
   fi

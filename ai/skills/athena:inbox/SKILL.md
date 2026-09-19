@@ -133,7 +133,14 @@ only:
 | `error` | this channel could not be counted. The refusal, with its `Fix:` clause, has already gone to stderr; the other channels still report, because one misconfigured channel must not hide real mail on the rest |
 | `never_delivered` | nothing has **ever** arrived here. Not the same as "nothing new" — the file exists only if a producer was separately registered, so this is a broken setup, not a quiet morning. It **is** reported in the text line, with a `Fix:` clause naming producer registration, because the contract makes that a MUST; the all-zero silence rule covers healthy-but-empty channels, not broken ones |
 | `offset_reset` | a stored offset past EOF was recovered by re-reading from 0 |
-| `repo_key` | **the session's own repo identity** — the realpath of its git common dir, or `""` in no git repository. Present on every `--json` answer, including the one with no channels |
+
+Those are **per-channel**, under `.channels[]`. Two more sit at the **top
+level**, beside `channels`:
+
+| field | meaning |
+|---|---|
+| `failed_candidates` | how many files under `projects/` could not be parsed. A count, never names — every other entry belongs to a different tenant |
+| `repo_key` | the session's own repo identity: the realpath of its git common dir, or `""` in no git repository. Present on every `--json` answer, including the one with no channels |
 
 **If you need the repo identity, take `repo_key` from here — never recompute
 it.** `inbox-status` has already resolved it by the contract's rule, and a
