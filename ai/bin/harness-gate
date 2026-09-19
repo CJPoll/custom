@@ -31,11 +31,12 @@
 require "open3"
 require "fileutils"
 require "tmpdir"
+require "stringio"
 
 CUSTOM_DIR = File.expand_path("../..", __dir__)
 
 # Each entry: [label, argv]. argv[0] is repo-relative.
-CHECKS = [
+STATIC_CHECKS = [
   ["build-agents --check",      %w[ai/bin/build-agents --check]],
   ["safe-wait-guard self-test", %w[ai/hooks/safe-wait-guard.self-test.sh]],
   ["pronoun-guard self-test",   %w[ai/hooks/pronoun-guard.self-test.sh]],
@@ -43,24 +44,143 @@ CHECKS = [
   ["check-generic-skills",      %w[ai/bin/check-generic-skills]],
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
   ["check-inbox-registry",      %w[ai/bin/check-inbox-registry]],
-  ["inbox-registry self-test",  %w[ai/inbox/test/self-test.sh]],
-  ["athena:inbox self-test",    ["ai/skills/athena:inbox/test/self-test.sh"]],
-  ["athena:slack self-test",    ["ai/skills/athena:slack/test/self-test.sh"]],
   ["check-guard-messages",      %w[ai/bin/check-guard-messages]],
   ["harness-eval",              %w[ai/bin/harness-eval]],
   ["critic-review self-test",   %w[ai/bin/critic-review --self-test]],
   ["critic-eval self-test",     %w[ai/bin/critic-eval --self-test]],
+  # setup-hooks' --self-test is INLINE in the installer (no dedicated
+  # **/test/self-test.sh file backs it), so it stays hand-declared here.
   ["setup-hooks self-test",     %w[scripts/setup-hooks --self-test]],
-  ["inbox-client self-test",    %w[scripts/setup-athena-inbox-client --self-test]],
 ].freeze
 
-# A `scripts/setup-*` installer whose own --self-test is ALREADY declared above
-# under a different name. Maps script -> the declared check that runs it, so the
-# self-test's "no committed self-test goes unrun" assertion stays true without
-# running the same suite twice.
+# A `scripts/setup-*` installer whose own --self-test is ALREADY covered above
+# under a different name — either a STATIC_CHECKS entry or a discovered
+# **/self-test.sh (see below). Maps script -> the check that covers
+# it, so run_self_test's "no committed self-test goes unrun" assertion stays
+# true without running the same suite twice under two labels.
 SELF_TEST_DELEGATES = {
-  "scripts/setup-inbox-registry" => "ai/inbox/test/self-test.sh",
+  "scripts/setup-inbox-registry"       => "ai/inbox/test/self-test.sh",
+  "scripts/setup-athena-inbox-client"  => "scripts/test/athena-inbox-client/self-test.sh",
 }.freeze
+
+# `git ls-files` under root, or nil if root isn't a git worktree (a --self-test
+# fixture root, deliberately never a git repo). Used to keep discovery scoped
+# to committed source: a raw Dir.glob would also pick up an untracked/ignored
+# tree that happens to exist in this checkout — e.g. this repo's own
+# `ai/skills/synced/` (".gitignore: vendored plugin skills; NOT harness
+# source") — silently promoting vendored third-party code into the blocking
+# gate, with a `Fix: chmod +x it` for code we don't own if it isn't executable.
+# It would also make the check LIST itself a property of the checkout rather
+# than the commit. When root has no git metadata (a fixture tmpdir), this
+# returns nil and callers skip the filter, so the existing fixture-based
+# --self-test cases are unaffected.
+# Raised only when root IS a confirmed git worktree but `git ls-files` itself
+# failed — never for "this isn't a repo" (see below). Left uncaught, this must
+# never surface as a bare Ruby backtrace (CLAUDE.md -> "Guard/error messages
+# are written for the LLM"); the top-level dispatch below rescues it into a
+# Fix:-carrying message.
+GitTrackingError = Class.new(StandardError)
+
+def tracked_files(root)
+  # Two DISTINCT questions, on purpose, so failure can never look like "not a
+  # repo" (fail nil/skip-filter — the fixture-root case) when it is actually
+  # "a repo git itself couldn't read" (fail LOUD — the ai/skills/synced/ case
+  # this filter exists to guard, if it ever went wrong). Collapsing them was a
+  # prior version's bug: both a fixture root AND a `git`/`.git` error returned
+  # nil, so a genuine git failure on the REAL repo would have silently skipped
+  # the filter and let an untracked/vendored self-test.sh straight into the
+  # blocking gate — the exact failure this filter exists to prevent.
+  _out, _err, probe = Open3.capture3("git", "-C", root, "rev-parse", "--is-inside-work-tree")
+  return nil unless probe.success? # not a git worktree at all -> a fixture root; skip the filter
+
+  out, err, status = Open3.capture3("git", "-C", root, "ls-files")
+  raise GitTrackingError, "git -C #{root} ls-files failed: #{err.strip}" unless status.success?
+
+  out.split("\n")
+rescue Errno::ENOENT
+  raise GitTrackingError, "git executable not found on PATH"
+end
+
+# DND-209: this repo has real self-tests (e.g. scripts/test/athena-inbox-client/
+# self-test.sh, 42 cases; ai/skills/athena:inbox/test/self-test.sh;
+# ai/skills/athena:slack/test/self-test.sh) that nothing ran automatically —
+# harness-gate was 10/10 green and would have stayed green with every one of
+# them deleted. DISCOVER them (glob), don't hand-declare them, so a future
+# suite anywhere in the repo is covered with zero manual wiring step. Patch the
+# class (every committed `self-test.sh`, wherever it lives), not the one site
+# (scripts/test/) that happened to surface it, and not just the ones that
+# happen to sit under a directory literally named `test/` (the earlier draft
+# of this glob) — the same shape as check-hooks-registered's coverage of
+# hooks, but here the check LIST itself is derived, not just diffed against
+# disk.
+#
+# root is overridable so --self-test can prove discovery against a throwaway
+# fixture tree instead of mutating any real directory in this repo.
+def discover_self_tests(root = CUSTOM_DIR)
+  candidates = Dir.glob(File.join(root, "**/self-test.sh")).map { |p| p.sub("#{root}/", "") }
+  tracked = tracked_files(root)
+  candidates = candidates.select { |p| tracked.include?(p) } if tracked
+  candidates.sort
+end
+
+def self_test_checks(root = CUSTOM_DIR)
+  discover_self_tests(root).map do |relpath|
+    # The full relative path (minus the trailing filename) makes the label,
+    # so distinct suites can never collide the way a leaf-basename-only label
+    # would (e.g. two suites both living in a directory literally named `x`).
+    ["self-test: #{relpath.sub(%r{/self-test\.sh\z}, '')}", [relpath]]
+  end
+end
+
+# self_test_checks -> discover_self_tests -> tracked_files can raise
+# GitTrackingError (see above) while this constant is evaluated at file load
+# time, for EVERY invocation (including --list/--self-test), before the
+# ARGV dispatch at the bottom of this file ever runs. Fall back to
+# STATIC_CHECKS-only here so the file finishes loading; the SAME call is made
+# again inside run_gate/run_list/run_self_test (they all call
+# discover_self_tests(root) directly, not just through this constant), and
+# THAT raise is caught by the rescue around the dispatch below, which reports
+# it with a Fix: line instead of a bare Ruby backtrace.
+CHECKS =
+  begin
+    (STATIC_CHECKS + self_test_checks).freeze
+  rescue GitTrackingError
+    STATIC_CHECKS
+  end
+
+# The discovery CONTRACT is the exact filename `self-test.sh` — anything else
+# (a suite named tests.sh, foo_test.sh, ...) is invisible to the glob with no
+# count change to notice. discover_self_tests above is deliberately
+# UNSCOPED (any `self-test.sh` anywhere is discovered), but this heuristic
+# stays scoped to directories literally named `test/` — the established
+# convention every real suite in this repo already follows — because widening
+# it to "any misnamed .sh anywhere" would flag effectively every helper script
+# in the repo, drowning the signal. So the two checks are intentionally
+# asymmetric: discovery is unconditional, "did you probably mean this to be a
+# suite" is a scoped heuristic. Flag it so a misnamed suite is at least visible
+# instead of silently unrun (helper scripts a real self-test.sh `source`s or
+# execs are expected to live in a test/ dir too, so this WARNS rather than
+# fails the gate — it cannot tell a stray suite from a deliberate helper).
+# Deliberately NOT filtered to executable files: a suite committed without its
+# `+x` bit (invoked as `bash foo.sh`, say) is the exact case this exists to
+# catch — filtering it out would leave the contract's most likely violation
+# invisible to its own detector.
+def stray_test_scripts(root = CUSTOM_DIR)
+  candidates = Dir.glob(File.join(root, "**/test/**/*.sh"))
+                  .reject { |p| File.basename(p) == "self-test.sh" }
+                  .map { |p| p.sub("#{root}/", "") }
+  tracked = tracked_files(root)
+  candidates = candidates.select { |p| tracked.include?(p) } if tracked
+  candidates.sort
+end
+
+# Pure predicate so --self-test can exercise run_gate's zero-discovery
+# decision directly, against a fixture root, instead of only asserting on
+# discover_self_tests (which case 5 already covers) or having to run the
+# whole gate to reach the branch.
+def self_tests_found?(root = CUSTOM_DIR)
+  !discover_self_tests(root).empty?
+end
 
 FAIL_TAIL_LINES = 20
 
@@ -86,14 +206,64 @@ def false_green_entries
   end
 end
 
-def run_gate
+# root/dry_run exist for --self-test: a fixture root can drive this exact
+# decision logic (not just the discover_self_tests/self_tests_found? predicates
+# case 5/6b already cover) without the run actually mutating anything, and
+# dry_run stops before executing the real CHECKS list so testing the
+# zero-discovery/stray-suite branches against a fixture never spends the time
+# (or risk) of re-running the whole real gate as a side effect.
+def run_gate(root: CUSTOM_DIR, dry_run: false)
+  # `root` only ever governs the discovery reporting below (found/self_tests_
+  # found?/stray_test_scripts) — missing_executables and the CHECKS execution
+  # loop past `return 0 if dry_run` always use the real CUSTOM_DIR/CHECKS,
+  # never `root`. A non-default root with dry_run: false would therefore
+  # report on one tree and execute another with no failure — make that
+  # misuse impossible to construct rather than merely undocumented.
+  raise ArgumentError, "run_gate: root: only supported together with dry_run: true" \
+    if root != CUSTOM_DIR && !dry_run
+
+  found = discover_self_tests(root)
+  puts "self-tests discovered: #{found.size}"
+
+  # A DROP TO ZERO is exactly the failure mode this ticket exists to close —
+  # this repo has committed self-test.sh suites in every checkout (they are
+  # source, not environment-dependent config), so finding none means the glob
+  # or root resolution broke, not that there is legitimately nothing to run.
+  # Fail loud instead of a silently-shorter PASS.
+  unless self_tests_found?(root)
+    warn "harness-gate: FAILED — discovered ZERO **/self-test.sh, but this " \
+         "repo has committed suites."
+    warn "  Fix: this means discover_self_tests (ai/bin/harness-gate) or " \
+         "CUSTOM_DIR resolution is broken, or every suite was moved/renamed " \
+         "without updating the glob — a real gap, not something to " \
+         "suppress. Restore the suites or the glob before committing."
+    return 1
+  end
+
+  strays = stray_test_scripts(root)
+  unless strays.empty?
+    warn "harness-gate: NOTE — .sh file(s) under a test/ directory not named " \
+         "self-test.sh, so NOT discovered/run: #{strays.join(', ')}"
+    warn "  Fix: if any of these is meant to be a self-test entry point, " \
+         "rename it to self-test.sh (the only name harness-gate discovers), " \
+         "and make sure it is executable; if it's a helper another " \
+         "self-test.sh sources/execs, no action needed."
+  end
+
+  return 0 if dry_run
+
   missing = missing_executables
   unless missing.empty?
     warn "harness-gate: FAILED — declared check(s) missing or not executable:"
     missing.each { |(label, argv)| warn "  - #{label} (#{argv.first})" }
-    warn "  Fix: restore the script, `chmod +x` it, or remove its entry from " \
-         "CHECKS in ai/bin/harness-gate (and from the gate list in " \
-         "ai/agents/athena-shipwright.md.in)."
+    warn "  Fix: restore the script and `chmod +x` it. For a STATIC_CHECKS " \
+         "entry you can also remove it from CHECKS in ai/bin/harness-gate (and " \
+         "from the gate list in ai/agents/athena-shipwright.md.in) instead, if " \
+         "the check no longer applies. A discovered **/self-test.sh " \
+         "entry is NOT removable from CHECKS by hand (it is derived from " \
+         "disk) — `chmod +x` it. Do NOT delete it to make this pass: with " \
+         "only a handful of self-test suites on disk today, deleting one " \
+         "just risks trading this failure for the zero-discovery failure above."
     return 1
   end
 
@@ -127,7 +297,9 @@ end
 
 def run_list
   CHECKS.each { |(label, argv)| printf("%-28s %s\n", label, argv.join(" ")) }
-  puts "harness-gate: #{CHECKS.size} declared check(s)"
+  found = discover_self_tests
+  puts "harness-gate: #{CHECKS.size} declared check(s) " \
+       "(#{found.size} of them discovered under **/self-test.sh)"
   0
 end
 
@@ -151,32 +323,40 @@ def run_self_test
     ok = false
   end
 
-  # 3. Every self-test on disk is actually declared — a suite that exists but
-  #    is not in CHECKS never runs unprompted, and an absent check is
-  #    indistinguishable from a passing one. This started as a hooks-only rule;
-  #    DND-184 found the same hole one directory over, where a 370-case suite
-  #    covering the whole athena:inbox skill had shipped and nothing ran it, so
-  #    the rule now covers every place this repo puts a self-test.
-  patterns = [
-    "ai/hooks/*.self-test.sh",
-    "ai/*/test/self-test.sh",
-    "ai/skills/*/test/self-test.sh",
-  ]
-  on_disk = patterns.flat_map { |g| Dir.glob(File.join(CUSTOM_DIR, g)) }
-                    .map { |p| p.sub("#{CUSTOM_DIR}/", "") }.uniq.sort
+  # 3. Every ai/hooks/*.self-test.sh on disk is actually declared (a new hook
+  #    must not be able to ship untested by the gate).
+  on_disk = Dir.glob(File.join(CUSTOM_DIR, "ai/hooks/*.self-test.sh"))
+               .map { |p| p.sub("#{CUSTOM_DIR}/", "") }.sort
   declared = CHECKS.map { |(_, argv)| argv.first }
   undeclared = on_disk - declared
   unless undeclared.empty?
-    warn "self-test: FAIL — self-test(s) on disk but not in CHECKS: " \
+    warn "self-test: FAIL — hook self-test(s) on disk but not in CHECKS: " \
          "#{undeclared.join(', ')}"
     ok = false
   end
 
+  # 3b. STATIC_CHECKS must never ALSO hand-declare a path that discovery
+  #     already finds — that would run the same suite twice under two labels,
+  #     silently, with no failure. SELF_TEST_DELEGATES documents each case
+  #     that already had this collision fixed (ai/inbox/test/self-test.sh
+  #     moved out of STATIC_CHECKS in favor of discovery); this assertion is
+  #     what stops it from creeping back in on any FUTURE STATIC_CHECKS entry.
+  overlap = STATIC_CHECKS.map { |(_, argv)| argv.first } & discover_self_tests
+  unless overlap.empty?
+    warn "self-test: FAIL — STATIC_CHECKS hand-declares #{overlap.join(', ')}, " \
+         "which discover_self_tests ALSO finds — the suite would run twice " \
+         "under two labels. Remove the STATIC_CHECKS entry and let discovery " \
+         "cover it (add a SELF_TEST_DELEGATES entry if some installer's " \
+         "--self-test also wraps it)."
+    ok = false
+  end
+
   # 4. Every scripts/setup-* installer that ADVERTISES a --self-test is either
-  #    declared in CHECKS or delegates to a declared check. Same class as (3):
-  #    a committed self-test the gate never runs is a suite that cannot go red.
-  #    DND-189 shipped 42 cases nothing invoked; setup-hooks' merge-safety cases
-  #    had been equally unrun since the 2026-09-17 hook-clobber fix.
+  #    declared in CHECKS or delegates (SELF_TEST_DELEGATES) to a check that IS
+  #    declared/discovered. Same class as (3): a committed self-test the gate
+  #    never runs is a suite that cannot go red. DND-189 shipped 42 cases
+  #    nothing invoked; setup-hooks' merge-safety cases had been equally unrun
+  #    since the 2026-09-17 hook-clobber fix.
   installers = Dir.glob(File.join(CUSTOM_DIR, "scripts/setup-*"))
                   .select { |p| File.file?(p) && File.executable?(p) }
                   .select { |p| File.read(p).include?("--self-test") }
@@ -191,7 +371,363 @@ def run_self_test
     ok = false
   end
 
-  # 5. run_one reports PASS/FAIL correctly and closes stdin.
+  # 4b. A SELF_TEST_DELEGATES value must be the suite the installer ACTUALLY
+  #     execs, not merely some other path that happens to be covered — case 4
+  #     only checks "the named path is covered by something", so a delegate
+  #     entry pointing at a real-but-wrong suite would read as "installer
+  #     covered" while the installer's own suite silently goes unrun. That is
+  #     this ticket's exact class, one level up in its own bookkeeping.
+  SELF_TEST_DELEGATES.each do |script, delegate|
+    script_path = File.join(CUSTOM_DIR, script)
+    next unless File.file?(script_path) # case 4 already flags a missing installer
+
+    contents = File.read(script_path)
+    unless contents.include?(delegate)
+      warn "self-test: FAIL — SELF_TEST_DELEGATES[#{script.inspect}] = " \
+           "#{delegate.inspect}, but #{script} does not reference that path " \
+           "anywhere in its source — the delegate is unverified, so the " \
+           "installer's real self-test suite could be going unrun"
+      ok = false
+    end
+  end
+
+  # Cases 5, 6, 6b and 6c below all plant a fixture suite under a
+  # Dir.mktmpdir tree and assume it is NOT itself inside a git worktree — that
+  # is what makes discover_self_tests(fixture_root) return exactly what was
+  # planted. `Dir.mktmpdir` honours $TMPDIR, so if TMPDIR is ever pointed
+  # inside a repo (a plausible CI/agent/sandbox setup), `tracked_files` would
+  # treat the fixture as a real repo, the planted suite would look untracked,
+  # and every one of those cases would report a FALSE red that blames
+  # discovery for an environment property instead of a real bug. Verify the
+  # assumption instead of stating it: probe once, and if it doesn't hold, skip
+  # those specific cases with a clear NOTE rather than a false failure (6d and
+  # 6e are unaffected — 6d creates its own real repo on purpose, 6e's `git` is
+  # a PATH-shimmed fake that never touches the real filesystem check).
+  fixtures_isolated =
+    Dir.mktmpdir("harness-gate-selftest-probe") do |probe|
+      _out, _err, probe_status = Open3.capture3("git", "-C", probe, "rev-parse", "--is-inside-work-tree")
+      !probe_status.success?
+    end
+  unless fixtures_isolated
+    warn "self-test: NOTE — skipping cases 5/6/6b/6c: Dir.mktmpdir resolves " \
+         "inside a git worktree in this environment (check $TMPDIR), so the " \
+         "tracked-file filter would treat every fixture there as a real repo " \
+         "and produce false reds unrelated to this code. Not counted as a " \
+         "failure."
+  end
+
+  # 5. Discovery itself actually discovers and actually runs — proven against a
+  #    THROWAWAY fixture tree, never a real test/ directory, per the ticket's
+  #    required case: "a deliberately failing stub suite under scripts/test/
+  #    must turn the gate red, and removing it must turn it green again." (A
+  #    plain "on-disk == declared" comparison here would be tautological, since
+  #    CHECKS is built FROM discover_self_tests — this fixture instead
+  #    exercises the actual discover -> run -> pass/fail behavior end to end.)
+  if fixtures_isolated
+  Dir.mktmpdir("harness-gate-selftest-scripts") do |fixture_root|
+    suite_dir = File.join(fixture_root, "scripts/test/fixture-suite")
+    FileUtils.mkdir_p(suite_dir)
+    suite_path = File.join(suite_dir, "self-test.sh")
+
+    # Nothing discovered yet -> zero dynamic checks, not a crash and not a
+    # false PASS masquerading as "found nothing to run".
+    if discover_self_tests(fixture_root) != []
+      warn "self-test: FAIL — discover_self_tests found something in a " \
+           "fixture tree that has no suite yet"
+      ok = false
+    end
+
+    File.write(suite_path, "#!/bin/sh\necho 'fixture failing on purpose'\nexit 1\n")
+    FileUtils.chmod(0o755, suite_path)
+
+    found = discover_self_tests(fixture_root)
+    unless found == ["scripts/test/fixture-suite/self-test.sh"]
+      warn "self-test: FAIL — discover_self_tests did not find the fixture " \
+           "suite (found: #{found.inspect})"
+      ok = false
+    end
+
+    red_ok, red_out = run_one([found.first], chdir: fixture_root)
+    if red_ok
+      warn "self-test: FAIL — a deliberately failing self-test stub was " \
+           "reported as PASS (the exact silent-success class this ticket " \
+           "exists to fix)"
+      ok = false
+    end
+    unless red_out.to_s.include?("fixture failing on purpose")
+      warn "self-test: FAIL — the failing fixture suite's output was not captured"
+      ok = false
+    end
+
+    File.write(suite_path, "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o755, suite_path)
+    green_ok, = run_one([found.first], chdir: fixture_root)
+    unless green_ok
+      warn "self-test: FAIL — fixing the fixture suite to exit 0 did not turn " \
+           "it green"
+      ok = false
+    end
+
+    FileUtils.rm_f(suite_path)
+    unless discover_self_tests(fixture_root).empty?
+      warn "self-test: FAIL — removing the fixture suite did not make " \
+           "discovery report zero again"
+      ok = false
+    end
+  end
+  end
+
+  # 6. Two suites that share a leaf directory name must not collide on label
+  #    (self_test_checks must key off the full relative path, not a basename).
+  if fixtures_isolated
+  Dir.mktmpdir("harness-gate-selftest-labels") do |fixture_root|
+    %w[groupA/test groupB/test].each do |rel|
+      dir = File.join(fixture_root, rel)
+      FileUtils.mkdir_p(dir)
+      path = File.join(dir, "self-test.sh")
+      File.write(path, "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o755, path)
+    end
+    labels = self_test_checks(fixture_root).map(&:first)
+    if labels.uniq.size != labels.size
+      warn "self-test: FAIL — two distinct suites produced the same label: " \
+           "#{labels.inspect}"
+      ok = false
+    end
+  end
+  end
+
+  # 6b. run_gate's own guards, exercised as predicates/helpers against fixture
+  #     roots — the zero-discovery hard-fail and the stray-suite-name warning
+  #     each need their own case; nothing above reaches either branch.
+  if fixtures_isolated
+  Dir.mktmpdir("harness-gate-selftest-guards") do |fixture_root|
+    # self_tests_found? must be false with nothing on disk, and true again
+    # once a real self-test.sh exists.
+    if self_tests_found?(fixture_root)
+      warn "self-test: FAIL — self_tests_found? was true for a fixture root " \
+           "with nothing on disk"
+      ok = false
+    end
+
+    suite_dir = File.join(fixture_root, "scripts/test/only-suite")
+    FileUtils.mkdir_p(suite_dir)
+    suite_path = File.join(suite_dir, "self-test.sh")
+    File.write(suite_path, "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o755, suite_path)
+    unless self_tests_found?(fixture_root)
+      warn "self-test: FAIL — self_tests_found? was false for a fixture root " \
+           "that has a real self-test.sh"
+      ok = false
+    end
+
+    # stray_test_scripts must catch a misnamed suite EVEN WITHOUT the
+    # executable bit (the case a suite is most likely to be committed in) and
+    # must never flag the correctly-named self-test.sh sitting right next to it.
+    stray_dir = File.join(fixture_root, "scripts/test/misnamed")
+    FileUtils.mkdir_p(stray_dir)
+    stray_path = File.join(stray_dir, "tests.sh")
+    File.write(stray_path, "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o644, stray_path) # deliberately NOT executable
+
+    strays = stray_test_scripts(fixture_root)
+    unless strays.include?("scripts/test/misnamed/tests.sh")
+      warn "self-test: FAIL — stray_test_scripts did not flag a non-executable " \
+           "misnamed suite (found: #{strays.inspect})"
+      ok = false
+    end
+    if strays.include?("scripts/test/only-suite/self-test.sh")
+      warn "self-test: FAIL — stray_test_scripts flagged a correctly-named " \
+           "self-test.sh as stray"
+      ok = false
+    end
+  end
+  end
+
+  # 6c. run_gate's OWN zero-discovery and stray-suite branches, not just the
+  #     extracted predicates 6b already covers — a bug in the branch itself
+  #     (e.g. the wrong predicate called, or a message with no Fix: line)
+  #     would pass 6b and still slip through. dry_run: true stops run_gate
+  #     before it would execute the real CHECKS list as a side effect.
+  capture = lambda do |&block|
+    old_out, old_err = $stdout, $stderr
+    out, err = StringIO.new, StringIO.new
+    $stdout, $stderr = out, err
+    code = block.call
+    [code, out.string, err.string]
+  ensure
+    $stdout, $stderr = old_out, old_err
+  end
+
+  if fixtures_isolated
+  Dir.mktmpdir("harness-gate-selftest-rungate") do |fixture_root|
+    code, _out, err = capture.call { run_gate(root: fixture_root, dry_run: true) }
+    if code != 1
+      warn "self-test: FAIL — run_gate(root: <empty fixture>) returned " \
+           "#{code.inspect}, expected 1 (zero-discovery must hard-fail)"
+      ok = false
+    end
+    unless err.include?("Fix:")
+      warn "self-test: FAIL — run_gate's zero-discovery failure carried no " \
+           "Fix: line"
+      ok = false
+    end
+
+    suite_dir = File.join(fixture_root, "scripts/test/x")
+    FileUtils.mkdir_p(suite_dir)
+    File.write(File.join(suite_dir, "self-test.sh"), "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o755, File.join(suite_dir, "self-test.sh"))
+    File.write(File.join(suite_dir, "helper_tests.sh"), "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o755, File.join(suite_dir, "helper_tests.sh"))
+
+    code2, _out2, err2 = capture.call { run_gate(root: fixture_root, dry_run: true) }
+    if code2 != 0
+      warn "self-test: FAIL — run_gate(root: <fixture with a real suite>, " \
+           "dry_run: true) returned #{code2.inspect}, expected 0"
+      ok = false
+    end
+    unless err2.include?("helper_tests.sh") && err2.include?("Fix:")
+      warn "self-test: FAIL — run_gate did not warn about the stray suite " \
+           "with a Fix: line (stderr: #{err2.inspect})"
+      ok = false
+    end
+  end
+  end
+
+  # 6d. discover_self_tests/stray_test_scripts must not promote an UNTRACKED
+  #     file into the gate — a vendored/ignored tree that happens to contain a
+  #     self-test.sh (this repo's own ai/skills/synced/ is exactly this shape)
+  #     must never be silently executed or hard-fail the gate over its
+  #     permissions. Needs a REAL git repo (tracked_files returns nil, and the
+  #     filter is skipped, for a fixture root with no .git at all).
+  Dir.mktmpdir("harness-gate-selftest-tracked") do |fixture_root|
+    Open3.capture3("git", "-C", fixture_root, "init", "-q")
+    Open3.capture3("git", "-C", fixture_root, "config", "user.email", "a@b.c")
+    Open3.capture3("git", "-C", fixture_root, "config", "user.name", "test")
+
+    tracked_dir = File.join(fixture_root, "scripts/test/tracked")
+    FileUtils.mkdir_p(tracked_dir)
+    tracked_path = File.join(tracked_dir, "self-test.sh")
+    File.write(tracked_path, "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o755, tracked_path)
+    Open3.capture3("git", "-C", fixture_root, "add", "scripts/test/tracked/self-test.sh")
+    Open3.capture3("git", "-C", fixture_root, "commit", "-q", "-m", "tracked suite")
+
+    untracked_dir = File.join(fixture_root, "vendor/untracked")
+    FileUtils.mkdir_p(untracked_dir)
+    untracked_path = File.join(untracked_dir, "self-test.sh")
+    File.write(untracked_path, "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o755, untracked_path)
+    # deliberately never `git add`ed — simulates a vendored/ignored tree.
+
+    found_tracked = discover_self_tests(fixture_root)
+    if found_tracked.include?("vendor/untracked/self-test.sh")
+      warn "self-test: FAIL — discover_self_tests promoted an UNTRACKED " \
+           "self-test.sh into the gate: #{found_tracked.inspect}"
+      ok = false
+    end
+    unless found_tracked.include?("scripts/test/tracked/self-test.sh")
+      warn "self-test: FAIL — discover_self_tests dropped a TRACKED " \
+           "self-test.sh when a git repo is present: #{found_tracked.inspect}"
+      ok = false
+    end
+  end
+
+  # 6e. tracked_files must FAIL LOUD (GitTrackingError), never silently skip
+  #     the filter, when root IS a confirmed git worktree but `git ls-files`
+  #     itself errors — the ambiguity a prior version of this code collapsed
+  #     (both "not a repo" and "repo, but git errored" returned nil, so a real
+  #     git failure on the REAL repo would have silently let an
+  #     untracked/vendored self-test.sh straight into the gate). Proven with a
+  #     fake `git` on PATH that answers `rev-parse` normally but fails
+  #     `ls-files`, so this exercises the exact branch, not just its shape.
+  Dir.mktmpdir("harness-gate-selftest-git-fail") do |fixture_root|
+    fake_bin = File.join(fixture_root, "fakebin")
+    FileUtils.mkdir_p(fake_bin)
+    fake_git = File.join(fake_bin, "git")
+    File.write(fake_git, <<~SH)
+      #!/bin/sh
+      if [ "$3" = "rev-parse" ]; then exit 0; fi
+      if [ "$3" = "ls-files" ]; then echo "boom: simulated git failure" >&2; exit 128; fi
+      exit 1
+    SH
+    FileUtils.chmod(0o755, fake_git)
+
+    old_path = ENV["PATH"]
+    raised = nil
+    begin
+      ENV["PATH"] = "#{fake_bin}:#{old_path}"
+      begin
+        tracked_files(fixture_root)
+        raised = false
+      rescue GitTrackingError => e
+        raised = true
+        unless e.message.include?("ls-files") && e.message.include?("simulated git failure")
+          warn "self-test: FAIL — GitTrackingError's message didn't carry the " \
+               "underlying git error: #{e.message.inspect}"
+          ok = false
+        end
+      end
+    ensure
+      ENV["PATH"] = old_path
+    end
+    unless raised
+      warn "self-test: FAIL — tracked_files did not raise GitTrackingError " \
+           "when a confirmed git worktree's ls-files failed (it must never " \
+           "fail open into skipping the filter)"
+      ok = false
+    end
+
+    # And the dispatch-level rescue turns that into a Fix:-carrying failure,
+    # not a bare Ruby backtrace, end to end via a real subprocess.
+    env = { "PATH" => "#{fake_bin}:#{old_path}" }
+    out, status = Open3.capture2e(env, "ruby", File.join(CUSTOM_DIR, "ai/bin/harness-gate"),
+                                   "--list", chdir: CUSTOM_DIR, stdin_data: "")
+    if status.success?
+      warn "self-test: FAIL — harness-gate --list exited 0 despite a " \
+           "simulated git ls-files failure"
+      ok = false
+    end
+    unless out.include?("Fix:") && !out.include?(":in `")
+      warn "self-test: FAIL — a git-failure exit did not carry a clean Fix: " \
+           "message (looks like a raw, unhandled backtrace instead): " \
+           "#{out.inspect}"
+      ok = false
+    end
+  end
+
+  # 7. Composition, end to end: invoke the REAL `harness-gate --list` as a
+  #    subprocess against the real repo (safe — it only lists, never runs the
+  #    checks) and assert every real discovered suite actually reaches
+  #    `CHECKS` and its printed output. This is the non-tautological check
+  #    case 5 can't be: case 5 proves discover_self_tests works in isolation,
+  #    but nothing there would notice `CHECKS = (STATIC_CHECKS +
+  #    self_test_checks).freeze` losing its `+ self_test_checks` term, since
+  #    CHECKS and the fixture calls are otherwise independent of that line. A
+  #    real subprocess exercises the actual composition.
+  list_ok, list_out = run_one(%w[ai/bin/harness-gate --list])
+  unless list_ok
+    warn "self-test: FAIL — `harness-gate --list` itself exited non-zero"
+    ok = false
+  end
+  real_suites = discover_self_tests
+  real_suites.each do |relpath|
+    name = relpath.sub(%r{/self-test\.sh\z}, "")
+    unless list_out.include?("self-test: #{name}")
+      warn "self-test: FAIL — `harness-gate --list` did not list the real " \
+           "discovered suite #{relpath.inspect} (composition at CHECKS = " \
+           "STATIC_CHECKS + self_test_checks may be broken)"
+      ok = false
+    end
+  end
+  unless list_out.include?("(#{real_suites.size} of them discovered under " \
+                            "**/self-test.sh)")
+    warn "self-test: FAIL — `harness-gate --list`'s discovered-count summary " \
+         "does not match discover_self_tests"
+    ok = false
+  end
+
+  # 8. run_one reports PASS/FAIL correctly and closes stdin.
   Dir.mktmpdir("harness-gate-selftest") do |dir|
     passing = File.join(dir, "pass.sh")
     failing = File.join(dir, "fail.sh")
@@ -223,25 +759,41 @@ def run_self_test
   end
 
   if ok
-    puts "harness-gate: self-test OK (#{CHECKS.size} checks declared)"
+    puts "harness-gate: self-test OK (#{CHECKS.size} checks declared, " \
+         "#{discover_self_tests.size} of them discovered self-test suites)"
     0
   else
     warn "harness-gate: self-test FAILED"
     warn "  Fix: repair CHECKS in ai/bin/harness-gate so every declared check is " \
-         "executable, every self-test on disk (ai/hooks/*.self-test.sh, " \
-         "ai/*/test/self-test.sh, ai/skills/*/test/self-test.sh) is declared " \
-         "there, every hook is invoked via its dedicated .self-test.sh " \
-         "script (never `<hook>.sh --self-test`, which is a false green), every " \
-         "scripts/setup-* installer that advertises a --self-test is declared " \
-         "(or listed in SELF_TEST_DELEGATES as running under another entry), " \
-         "and run_one reports the child's exit status with stdin closed."
+         "executable and every hook is invoked via its dedicated .self-test.sh " \
+         "script (never `<hook>.sh --self-test`, which is a false green); keep " \
+         "every scripts/setup-* installer's --self-test declared or delegated " \
+         "(SELF_TEST_DELEGATES); keep discover_self_tests/self_test_checks " \
+         "finding every real **/self-test.sh, flipping a fixture " \
+         "suite red/green, and labeling distinct suites uniquely; keep " \
+         "self_tests_found?/stray_test_scripts correct against a fixture " \
+         "root; and keep run_one reporting the child's exit status with " \
+         "stdin closed."
     1
   end
 end
 
-exit(
-  if ARGV.include?("--self-test") then run_self_test
-  elsif ARGV.include?("--list") then run_list
-  else run_gate
-  end
-)
+begin
+  exit(
+    if ARGV.include?("--self-test") then run_self_test
+    elsif ARGV.include?("--list") then run_list
+    else run_gate
+    end
+  )
+rescue GitTrackingError => e
+  # A confirmed git worktree whose `ls-files` itself failed (never raised for
+  # "this isn't a repo" — see tracked_files). Must never surface as a bare
+  # Ruby backtrace.
+  warn "harness-gate: FAILED — #{e.message}"
+  warn "  Fix: ensure `git` is on PATH and #{CUSTOM_DIR} is a readable git " \
+       "worktree (try `git -C #{CUSTOM_DIR} status`), then re-run " \
+       "ai/bin/harness-gate. Discovery refuses to silently skip its " \
+       "tracked-file filter here, since that could promote an " \
+       "untracked/vendored self-test.sh into the blocking gate."
+  exit 1
+end
