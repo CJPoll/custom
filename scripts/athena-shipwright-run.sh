@@ -45,6 +45,10 @@
 #   SHIPWRIGHT_ALLOW_DIRTY=1  run even though the main checkout is dirty (below)
 #   SHIPWRIGHT_FAIL_ESCALATE  consecutive UNSUCCESSFUL outcomes before a run
 #                             exits 75 without spawning a session (default 6)
+#   SHIPWRIGHT_BLOCK_ESCALATE how often the full blocked-tick explanation
+#                             repeats during a blocked streak (default 3). Mail
+#                             volume only: it never changes the exit code and
+#                             never silences the class.
 #   SHIPWRIGHT_REPO           repo to operate on   (default ~/dev/custom)
 #   SHIPWRIGHT_CLAUDE         claude binary to run (default ~/.local/bin/claude)
 #   SHIPWRIGHT_LANES_DIR      dir the per-run lanes live in
@@ -62,6 +66,10 @@
 #   75  EX_TEMPFAIL: refused to spawn because the lane is WEDGED — this was the
 #       SKIP_ESCALATE'th consecutive UNSUCCESSFUL outcome (a failing session, a
 #       stranded push, or reaped dead cron corpses)
+#   69  EX_UNAVAILABLE: the session exited 0 but did NO work — it never left its
+#       liveness receipt, so it never reached the model (usually a provider
+#       usage limit, credits, or auth). Reported every tick and never silent,
+#       but the lane is NOT gated and self-heals; nothing to re-arm.
 #   *   whatever the headless session exited with (124 if the 55m timeout fired);
 #       a session that exits non-zero, or one whose commits could not be landed
 #       on main (a "stranded" branch), counts as an unsuccessful outcome
@@ -197,20 +205,45 @@ case "${FAIL_ESCALATE}" in
     FAIL_ESCALATE=6 ;;
 esac
 
+# The BLOCKED streak. Counts consecutive ticks whose session never reported for
+# duty (see "8. classify the outcome"). Deliberately a SEPARATE counter from the
+# wedge: a blocked tick must be loud but must never gate the next spawn.
+BLOCK_COUNT="${STATE_DIR}/consecutive-blocked"
+# How often the full Fix: paragraph repeats during a blocked streak. Mail volume
+# only — it never changes the exit code and never silences the class.
+BLOCK_ESCALATE="${SHIPWRIGHT_BLOCK_ESCALATE:-3}"
+case "${BLOCK_ESCALATE}" in
+  ''|*[!0-9]*|0)
+    echo "athena-shipwright: SHIPWRIGHT_BLOCK_ESCALATE='${BLOCK_ESCALATE}' is not a positive integer; using 3." >&2
+    echo "  Fix: set SHIPWRIGHT_BLOCK_ESCALATE to a positive whole number of ticks (or unset it to accept the default 3). It controls only how often the blocked-tick explanation repeats; a blocked tick is reported and exits 69 either way." >&2
+    BLOCK_ESCALATE=3 ;;
+esac
+
+# Known block signatures. This list is a CLASSIFIER, NEVER the detector — the
+# detector is the missing receipt in section 8. A signature the vendor reworded
+# away therefore CANNOT make a blocked tick read as healthy; it can only
+# downgrade it to "blocked, UNCLASSIFIED", which prints MORE, not less.
+BLOCK_PATTERNS='usage limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|429|authentication|unauthorized|invalid api key'
+classify_block() { # <log> -> the matched signature, or nothing
+  [ -r "$1" ] || return 0
+  grep -m1 -i -E -o "${BLOCK_PATTERNS}" -- "$1" 2>/dev/null || true
+}
+
 mkdir -p "${LOG_DIR}"
 
 # --- failure-counter helpers -------------------------------------------------
-read_fail() {
+read_count() { # <path>
   local n=0
-  [ -r "${FAIL_COUNT}" ] && n="$(cat "${FAIL_COUNT}" 2>/dev/null || echo 0)"
+  [ -r "$1" ] && n="$(cat "$1" 2>/dev/null || echo 0)"
   case "${n}" in ''|*[!0-9]*) n=0 ;; esac
   printf '%s' "${n}"
 }
-bump_fail() {
-  local n; n="$(read_fail)"; n=$(( n + 1 ))
-  printf '%s\n' "${n}" >"${FAIL_COUNT}"
-}
-reset_fail() { rm -f "${FAIL_COUNT}"; }
+bump_count()  { local n; n="$(read_count "$1")"; printf '%s\n' "$(( n + 1 ))" >"$1"; }
+reset_count() { rm -f "$1"; }
+
+read_fail()  { read_count  "${FAIL_COUNT}"; }
+bump_fail()  { bump_count  "${FAIL_COUNT}"; }
+reset_fail() { reset_count "${FAIL_COUNT}"; }
 
 # The brief deliberately says "your tree" and never names a path. The agent
 # template owns where the run happens (a per-invocation worktree, never the main
@@ -218,7 +251,10 @@ reset_fail() { rm -f "${FAIL_COUNT}"; }
 # from it — which is exactly what happened once: this string still read
 # `~/dev/custom` after the worktree change landed, so the runner handed the agent
 # a brief its own template had to override with a supersession label, every hour.
-BRIEF="You are coordinating; do the work by delegating. Spawn exactly one \
+BRIEF="First, before anything else, run exactly this one Bash command: \
+touch \"\$SHIPWRIGHT_RECEIPT\" — it is the runner's liveness receipt, and a tick \
+with no receipt is reported as BLOCKED. Then you are coordinating; do the work \
+by delegating. Spawn exactly one \
 athena-shipwright agent (Agent tool, subagent_type: athena-shipwright) with \
 this brief, and do nothing else yourself: 'Run your full retrospective now. \
 Sync your tree with its remote first (pull, per your own Method), mine every \
@@ -276,6 +312,11 @@ if ! flock -n 9; then
     echo "  holder: ${holder}" >&2
   fi
   echo "  Fix: nothing to do — the in-flight run finishes on its own and the next tick proceeds. To confirm the holder is alive, check the pid above (or 'fuser -v ${LOCK}'). Do NOT delete the lock file: it is held on an open descriptor, so its presence alone never means stale, and removing it while a run holds it hands the next tick a fresh inode and a lock that excludes nobody." >&2
+  # Leave a record, so that "no artifact at all for an hour" means exactly one
+  # thing — cron or the machine did not fire — instead of three.
+  lts="$(date +%Y-%m-%dT%H%M%S)"
+  printf 'athena-shipwright: tick %s skipped — a run was already in flight.\nholder: %s\n' \
+    "${lts}" "${holder:-unknown}" >"${LOG_DIR}/${lts}.locked"
   exit 0
 fi
 
@@ -287,6 +328,16 @@ printf 'pid=%s host=%s started=%s\n' "$$" "$(hostname 2>/dev/null || echo '?')" 
 
 ts="$(date +%Y-%m-%dT%H%M%S)"
 log="${LOG_DIR}/${ts}.log"
+
+# The liveness receipt. The session's FIRST instruction is to touch this; a
+# session that dies before reaching the model cannot. Its ABSENCE is the
+# detector in section 8 — deliberately NOT the log's size or line count, which
+# were measured and cannot separate the two cases: the blocked log of
+# 2026-09-19T00:00 is 68 bytes / 1 line and the healthy no-op log of
+# 2026-09-17T20:00 is 71 bytes / 1 line.
+RECEIPT="${LOG_DIR}/${ts}.receipt"
+export SHIPWRIGHT_RECEIPT="${RECEIPT}"
+rm -f "${RECEIPT}"
 
 # --- reachability + reaping helpers -----------------------------------------
 #
@@ -525,10 +576,73 @@ else
 fi
 
 # Release + remove this lane's liveness lock and meta.
-exec 8>&- 2>/dev/null || true
+# NOTE the braces. `exec 8>&- 2>/dev/null` would apply the 2>/dev/null to the
+# `exec` BUILTIN ITSELF, and an `exec` with no command makes its redirections
+# PERMANENT — silently sending the rest of the script's stderr to /dev/null,
+# including every message and Fix: line below. Scope it to a group instead.
+{ exec 8>&-; } 2>/dev/null || true
 rm -f "${LANE_LOCK}" "${LANE_META}"
 
-# --- 8. update the wedge counter --------------------------------------------
+# --- 8. classify the outcome: success, BLOCKED, or failure -------------------
+#
+# THREE outcomes, not two, because of a measured defect. On 2026-09-19 nine
+# consecutive ticks (00:00..08:00) died instantly on the provider's weekly usage
+# limit, exited 0, made no commits — and were therefore classified as CLEAN
+# SUCCESSES that RESET the wedge counter. Zero retrospective work happened and
+# nothing on disk could tell those ticks from a healthy run that mined artifacts
+# and found nothing worth changing. That is this machine's own "a failed lookup
+# must never look like an empty one", reproduced inside the counter whose stated
+# job is "A WEDGED LANE MUST NOT LOOK LIKE A QUIET ONE".
+#
+# SCOPE: only status==0 can be blocked. A non-zero exit already fails loudly and
+# already feeds the wedge, so there is no silence there to fix; confining the new
+# class to the exit-0 path leaves every existing guarantee byte-identical.
+#
+# BLOCKED NEVER GATES THE NEXT SPAWN. The wedge exists to stop a broken lane
+# burning tokens; a blocked tick burns none and the cause is transient and
+# self-resolving, so gating would turn a provider outage into a human-gated one.
+# Blocked is made LOUD instead (exit 69, a marker, its own streak counter) and
+# the lane self-heals with no human action. It also does NOT reset the wedge
+# counter: the old reset_fail on this path silently erased a real accumulating
+# failure streak, which is strictly weaker than leaving it alone.
+blocked=0
+block_sig=""
+if [ "${status}" -eq 0 ] && [ ! -e "${RECEIPT}" ] && [ "${tip}" = "${BASE_COMMIT}" ]; then
+  blocked=1
+  block_sig="$(classify_block "${log}")"
+fi
+
+if [ "${blocked}" -eq 1 ]; then
+  bump_count "${BLOCK_COUNT}"
+  streak="$(read_count "${BLOCK_COUNT}")"
+  marker="${LOG_DIR}/${ts}.blocked"
+  {
+    echo "athena-shipwright: run ${ts} did NO retrospective work — the session never reported for duty."
+    echo "receipt=${RECEIPT} (absent)"
+    echo "session_exit=${status}"
+    echo "consecutive_blocked=${streak}"
+    if [ -n "${block_sig}" ]; then
+      echo "classification=blocked (signature: ${block_sig})"
+    else
+      echo "classification=UNCLASSIFIED (no known block signature matched)"
+    fi
+    echo "log=${log}"
+  } >"${marker}"
+
+  if [ -n "${block_sig}" ]; then
+    echo "athena-shipwright: run ${ts} BLOCKED (${block_sig}) — the session did no work; ${streak} consecutive blocked tick(s). Record: ${marker}" >&2
+  else
+    echo "athena-shipwright: run ${ts} BLOCKED, UNCLASSIFIED — the session did no work and NO known block signature matched ${log}. The signature list is probably stale. Record: ${marker}" >&2
+  fi
+  if [ -z "${block_sig}" ] || [ "${streak}" -eq 1 ] || [ $(( streak % BLOCK_ESCALATE )) -eq 0 ]; then
+    echo "  Fix: read ${log} (it holds whatever the session managed to print) and ${marker}. This tick did ZERO retrospective work — no artifact mined, no journal entry, no cursor advance — so read the matching gap in ${STATE_DIR}/journal.md as an OUTAGE, not a quiet period. Nothing is wedged and nothing needs re-arming: the lane keeps trying every hour and recovers by itself the moment the block clears; do NOT delete ${FAIL_COUNT} or ${BLOCK_COUNT}. If this says UNCLASSIFIED, the provider reworded its message — add the new wording to BLOCK_PATTERNS in $0 and add a case to scripts/test/athena-shipwright/self-test.sh so the list cannot rot silently again. If ticks stay blocked past the reset time the log states, the cause is NOT transient: check account, billing and auth for ${CLAUDE}. SHIPWRIGHT_BLOCK_ESCALATE only changes how often this paragraph repeats; it never silences the class." >&2
+  fi
+  echo "athena-shipwright: run ${ts} session exited ${status} but did no work; reporting BLOCKED (exit 69); log: ${log}" >&2
+  exit 69
+fi
+
+rm -f "${RECEIPT}"
+reset_count "${BLOCK_COUNT}"   # the session reached the model; the streak ends
 # A clean landing (session exited 0 AND its commits reached main/origin/main, or
 # it made no commits at all) resets the counter. Anything else — a failing/timed
 # out session, or a stranded push — is an unsuccessful outcome and increments it.

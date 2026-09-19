@@ -96,12 +96,29 @@ new_repo() {
 # Aux directory for a repo: where the suite's own fixtures live.
 aux() { dirname -- "$1"; }
 
+# Every HEALTHY stub must leave the runner's liveness receipt, exactly as a real
+# session does on its first instruction. A stub that does not is — correctly — a
+# session that never reported for duty, and the runner classifies it BLOCKED
+# (exit 69). stub_claude_blocked below is the stub that deliberately omits it.
 stub_claude() {
   # $1 = path to create, $2 = exit code. Records that it ran.
   cat >"$1" <<EOF
 #!/usr/bin/env bash
 echo "\$@" >"\$(dirname "\$0")/claude-was-invoked"
+[ -n "\${SHIPWRIGHT_RECEIPT:-}" ] && : >"\$SHIPWRIGHT_RECEIPT"
 exit $2
+EOF
+  chmod +x "$1"
+}
+
+# A session that dies before it ever reaches the model: prints whatever the
+# provider said, exits 0, and touches NOTHING. This is the 2026-09-19 shape.
+stub_claude_blocked() { # $1 = path, $2 = message
+  cat >"$1" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >>"\$(dirname "\$0")/claude-was-invoked"
+printf '%s\n' "$2"
+exit 0
 EOF
   chmod +x "$1"
 }
@@ -495,6 +512,7 @@ echo "\$@" >>"\$d/claude-was-invoked"
 pwd -P >"\$d/claude-cwd"
 git rev-parse --abbrev-ref HEAD 2>/dev/null >>"\$d/claude-branch"
 printf '%s\n' "\${SHIPWRIGHT_STATE_DIR:-<unset>}" >"\$d/claude-state-dir"
+[ -n "\${SHIPWRIGHT_RECEIPT:-}" ] && : >"\$SHIPWRIGHT_RECEIPT"
 ${3:-:}
 exit $2
 EOF
@@ -926,6 +944,7 @@ cat >"$a/stub-claude" <<'EOF'
 #!/usr/bin/env bash
 A="$(dirname "$0")"
 echo ran >>"$A/claude-was-invoked"
+[ -n "${SHIPWRIGHT_RECEIPT:-}" ] && : >"$SHIPWRIGHT_RECEIPT"
 for _ in $(seq 1 300); do
   [ -e "$A/release" ] && exit 0
   sleep 0.1
@@ -962,12 +981,181 @@ if [ -e "$a/claude-was-invoked" ]; then
   else
     bad "lock message warns against deletion" "$(cat "$a/runner.err")"
   fi
+  # The skipped tick must leave a record, so that "no artifact at all for an
+  # hour" means exactly one thing (cron/the machine did not fire).
+  if ls "$r/ai-artifacts/shipwright/runs/"*.locked >/dev/null 2>&1; then
+    ok "and the skipped tick leaves a .locked record, so an absent hour has ONE meaning"
+  else
+    bad "flock skip leaves a record" "no .locked in $(ls "$r/ai-artifacts/shipwright/runs/" 2>&1)"
+  fi
 else
   bad "first run reached the stub" "$(ls -a "$a")"
 fi
 : >"$a/release"
 wait "$RUNNER_PID" 2>/dev/null
 RUNNER_PID=""
+
+# ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — a session that never reported for duty is BLOCKED, not a clean success'
+
+# THE HEADLINE REGRESSION. On 2026-09-19 nine consecutive ticks (00:00..08:00)
+# died instantly on the provider's weekly limit, exited 0, made no commits, and
+# were classified as CLEAN SUCCESSES that RESET the wedge counter — zero
+# retrospective work, indistinguishable on disk from a healthy quiet run.
+sd() { echo "$1/ai-artifacts/shipwright"; }
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked "$a/stub-claude" "You've hit your weekly limit · resets Sep 22, 4am (America/Denver)"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 69 ]; then
+  ok "the verbatim weekly-limit tick exits 69 (was 0 — a clean success)"
+else
+  bad "blocked tick exits 69" "rc=$rc err=$(cat "$a/runner.err")"
+fi
+if ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1; then
+  ok "and leaves a .blocked marker"
+else
+  bad "blocked marker written" "runs/: $(ls "$(sd "$r")/runs/" 2>&1)"
+fi
+if [ "$(cat "$(sd "$r")/consecutive-blocked" 2>/dev/null)" = "1" ]; then
+  ok "and starts its own blocked streak"
+else
+  bad "blocked streak counted" "got '$(cat "$(sd "$r")/consecutive-blocked" 2>/dev/null)'"
+fi
+if grep -q 'BLOCKED' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+  ok "and reports BLOCKED with an actionable Fix:"
+else
+  bad "blocked message" "$(cat "$a/runner.err")"
+fi
+
+# A blocked tick must not ERASE a real, accumulating failure streak. The old
+# code's reset_fail on this path did exactly that — strictly weaker.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 7
+run_runner "$r" >/dev/null; run_runner "$r" >/dev/null
+stub_claude_blocked "$a/stub-claude" "You've hit your weekly limit"
+run_runner "$r" >/dev/null
+if [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "2" ]; then
+  ok "a blocked tick leaves an accumulating FAILURE streak intact (it no longer erases it)"
+else
+  bad "blocked does not reset the wedge counter" "counter='$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)', want 2"
+fi
+
+# BLOCKED NEVER WEDGES. The wedge exists to stop a lane burning tokens; a
+# blocked tick burns none and self-resolves, so it must never gate the spawn.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked "$a/stub-claude" "You've hit your weekly limit"
+codes=""
+for _ in 1 2 3 4 5 6 7 8 9; do codes="${codes}$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=3) "; done
+n="$(wc -l <"$a/claude-was-invoked" 2>/dev/null | tr -d ' ')"
+if [ "$codes" = "69 69 69 69 69 69 69 69 69 " ] && [ "$n" = "9" ] \
+   && [ ! -e "$(sd "$r")/consecutive-failures" ]; then
+  ok "nine blocked ticks: all 69, a session spawned every single time, lane never wedged"
+else
+  bad "blocked never wedges" "codes='${codes% }' spawns=$n counter=$([ -e "$(sd "$r")/consecutive-failures" ] && echo present || echo absent)"
+fi
+
+# ...and it self-heals with ZERO human action (no counter to delete).
+stub_claude_probe "$a/stub-claude" 0
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && [ ! -e "$(sd "$r")/consecutive-blocked" ]; then
+  ok "and the lane recovers by itself the moment the block clears — nothing to re-arm"
+else
+  bad "blocked self-heals" "rc=$rc streak=$(cat "$(sd "$r")/consecutive-blocked" 2>/dev/null)"
+fi
+
+# THE MISS CASE. The vendor reworded its message and NO signature matches. A
+# detector that quietly matches nothing must not read as "no problem": the miss
+# is LOUDER than a hit, never quieter.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked "$a/stub-claude" "Zorptastic overcapacity glorp"
+rc="$(run_runner "$r")"
+m="$(cat "$(sd "$r")/runs/"*.blocked 2>/dev/null || true)"
+if [ "$rc" -eq 69 ] && grep -q 'UNCLASSIFIED' "$a/runner.err" \
+   && grep -q 'Fix:' "$a/runner.err" \
+   && grep -q 'BLOCK_PATTERNS' "$a/runner.err" \
+   && printf '%s' "$m" | grep -q 'classification=UNCLASSIFIED'; then
+  ok "an UNMATCHED block signature still exits 69, says UNCLASSIFIED, and names BLOCK_PATTERNS to fix"
+else
+  bad "detector miss is loud" "rc=$rc err=$(cat "$a/runner.err") marker=$m"
+fi
+
+# THE ANTI-FALSE-POSITIVE a size/line-count detector would have failed. The
+# blocked log above is 68 bytes / 1 line; this healthy no-op log is 71 bytes /
+# 1 line. They differ by three bytes and zero lines — never detect on size.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 0 'printf "Retrospective complete — steady state, no harness changes warranted.\n"'
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1 \
+   && [ ! -e "$(sd "$r")/consecutive-failures" ]; then
+  ok "a HEALTHY no-op run (71 bytes, 1 line — vs the blocked 68 bytes, 1 line) stays a clean success"
+else
+  bad "healthy no-op not misread as blocked" "rc=$rc err=$(cat "$a/runner.err")"
+fi
+
+# A signature must never be able to DOWNGRADE a real failure: only status==0
+# can be blocked, so a failing session that happens to mention a rate limit
+# still fails and still feeds the wedge.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 7 'printf "hit the rate limit\n"'
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 7 ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "1" ] \
+   && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1; then
+  ok "a FAILING session mentioning a block signature stays a failure (a signature cannot downgrade it)"
+else
+  bad "signature cannot downgrade a failure" "rc=$rc counter=$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)"
+fi
+
+# No receipt but commits landed => the session plainly did work. The
+# conservative tip==BASE_COMMIT guard keeps that a success.
+r="$(new_repo)"; a="$(aux "$r")"
+cat >"$a/stub-claude" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >>"$(dirname "$0")/claude-was-invoked"
+git commit --allow-empty -qm "work without a receipt"
+exit 0
+EOF
+chmod +x "$a/stub-claude"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1; then
+  ok "a receipt-less session that COMMITTED is not blocked (it demonstrably did work)"
+else
+  bad "commits override a missing receipt" "rc=$rc err=$(cat "$a/runner.err")"
+fi
+
+# A bad threshold fails loudly and still classifies.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked "$a/stub-claude" "You've hit your weekly limit"
+rc="$(run_runner "$r" SHIPWRIGHT_BLOCK_ESCALATE=notanumber)"
+if [ "$rc" -eq 69 ] && grep -q 'not a positive integer' "$a/runner.err" \
+   && grep -q 'Fix:' "$a/runner.err"; then
+  ok "a non-numeric SHIPWRIGHT_BLOCK_ESCALATE falls back loudly and the tick still classifies"
+else
+  bad "bad block threshold" "rc=$rc err=$(cat "$a/runner.err")"
+fi
+
+# The marker vocabularies must stay disjoint: a dirty-tree yield precedes the
+# session entirely, so it can never look like a blocked tick.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && ls "$(sd "$r")/runs/"*.skipped >/dev/null 2>&1 \
+   && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1 \
+   && [ ! -e "$(sd "$r")/consecutive-blocked" ]; then
+  ok "a dirty-tree yield writes .skipped only — never .blocked, and never a blocked streak"
+else
+  bad "marker vocabularies disjoint" "rc=$rc runs=$(ls "$(sd "$r")/runs/" 2>&1)"
+fi
+
+# The brief must still name no checkout path, and must carry the receipt
+# instruction UNEXPANDED (an expanded one would leak the path into the brief).
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+o="$(env DRY_RUN=1 SHIPWRIGHT_REPO="$r" SHIPWRIGHT_CLAUDE="$a/stub-claude" "$RUNNER" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'SHIPWRIGHT_RECEIPT' \
+   && ! printf '%s' "$o" | grep -q 'dev/custom' \
+   && printf '%s' "$o" | grep -q 'Sync your tree'; then
+  ok "the brief carries the receipt instruction unexpanded and still names no checkout path"
+else
+  bad "brief receipt instruction" "rc=$rc out=$o"
+fi
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
