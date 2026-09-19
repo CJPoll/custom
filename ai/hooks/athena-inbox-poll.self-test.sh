@@ -719,10 +719,26 @@ rm -f "${ATHENA_INBOX_ROOT}/projects/p.json" # ...and now the entry is gone
 run_hook
 CTX="$(context_of "${OUT}")"
 assert_contains "R16 a vanished entry is announced, not silently treated as opt-out" \
-  "had inbox channels on an earlier session and has none now" "${CTX}"
+  "had inbox channels on an earlier session and declares none now" "${CTX}"
 assert_contains "R16 the Fix names where to restore it" "projects/" "${CTX}"
 assert_contains "R16 ...and how to silence it if the project was retired on purpose" \
   "delete" "${CTX}"
+assert_contains "R16 ...and names the empty-channels repair, which looks identical on disk" \
+  "empty" "${CTX}"
+
+# An entry that is PRESENT but declares no channels is byte-identical to a
+# missing one -- descriptor_validate accepts an empty channels object, and
+# inbox_status_json then emits the same {"channels":[]}. The hook cannot tell
+# them apart, so its Fix must name that repair too rather than sending the
+# reader to look for a file that is sitting right there.
+setup_case
+register "${LOG_CHANNEL}"
+run_hook
+jq '.channels = {}' "${ATHENA_INBOX_ROOT}/projects/p.json" > "${CASE_DIR}/p.json" \
+  && mv "${CASE_DIR}/p.json" "${ATHENA_INBOX_ROOT}/projects/p.json"
+run_hook
+assert_contains "R16 an entry emptied of channels raises the same notice" \
+  "declares none now" "$(context_of "${OUT}")"
 
 # It is rate-limited by a marker of its OWN, beside the project it is about --
 # not by the $HOME-level health marker, which another project could hold.
@@ -733,7 +749,7 @@ rm -f "${ATHENA_INBOX_ROOT}/projects/p.json"
 touch "$(pm health-warn)"   # another project warned
 run_hook
 assert_contains "R16 another project's health warning does not silence this one" \
-  "has none now" "$(context_of "${OUT}")"
+  "declares none now" "$(context_of "${OUT}")"
 run_hook                                                 # ...but its own does
 assert_eq "R16 the vanished-entry warning is rate-limited by its own marker" "" "${OUT}"
 
@@ -750,7 +766,7 @@ assert_no_file "R16 a repair clears the vanished-entry rate limit" \
 rm -f "${ATHENA_INBOX_ROOT}/projects/p.json"             # ...and clobbered again
 run_hook
 assert_contains "R16 a second disappearance warns again rather than being rate-limited" \
-  "has none now" "$(context_of "${OUT}")"
+  "declares none now" "$(context_of "${OUT}")"
 
 # ABSENT repo_key and EMPTY repo_key are different answers. Empty means "no git
 # repository here", which legitimately has nothing to remember. ABSENT means the

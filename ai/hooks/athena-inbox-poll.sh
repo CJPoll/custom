@@ -474,7 +474,12 @@ if [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 0 ] \
   # and declares none now. The registry lives outside git, untracked, so its
   # loss leaves no diff and no undo -- and every other signal here is silent by
   # design, which is exactly what makes this the one worth interrupting for.
-  WARN_TEXT="athena:inbox: this project had inbox channels on an earlier session and has none now, so its mail is going unread. Fix: its registry entry under \${ATHENA_INBOX_ROOT:-~/.local/share/athena}/projects/ is missing or no longer names this repo — restore it, or, if the project was retired deliberately, delete ${SEEN_MARKER} to stop this notice."
+  # The Fix names all THREE repairs, because the hook genuinely cannot tell
+  # them apart: an entry that is gone, an entry whose `repo` no longer matches,
+  # and an entry that is present with an EMPTY `channels` object all produce the
+  # same `{"channels":[]}`. Naming only the first two would send the reader
+  # looking for a missing file that is sitting right there.
+  WARN_TEXT="athena:inbox: this project had inbox channels on an earlier session and declares none now, so its mail is going unread. Fix: its registry entry under \${ATHENA_INBOX_ROOT:-~/.local/share/athena}/projects/ is missing, no longer names this repo, or declares an empty \"channels\" — restore it, or, if the project was retired deliberately, delete ${SEEN_MARKER} to stop this notice."
   WARN_TEXT_MARKER="${SEEN_WARN_MARKER}"
 elif [ "${POLL_OK}" -eq 0 ]; then
   # Only worth saying when the silence has actually lasted. A single transient

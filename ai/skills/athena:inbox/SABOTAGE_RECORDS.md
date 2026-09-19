@@ -550,7 +550,7 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
 - **Suite run:** `bash ai/hooks/athena-inbox-poll.self-test.sh </dev/null`
   (no network; every case gets a fake `$HOME`, a private `ATHENA_INBOX_ROOT`
   and its own `git init` repo under one `mktemp -d`; ~5s wall)
-- **Baseline:** `VERDICT: PASS (168 cases)` (91 at the first pass; 21 added
+- **Baseline:** `VERDICT: PASS (170 cases)` (91 at the first pass; 21 added
   after the sabotage run, 46 more across eight critic rounds — see *The four
   zeros* and *What the critic found that sabotage did not*)
 - **Runner:** 42 mutations, one at a time, full suite after each, restored by
@@ -940,6 +940,33 @@ And the two `norm`s, whose step-lock the comment asserts as an invariant, had
 **diverged as written** on a relative command whose head does not exist — one
 returned the literal string, the other invented a CWD-relative absolute path.
 They now make the same choice.
+
+**The final round, on the fixes the round before it made.** Three of the four
+were the same violation or the same false claim recurring one layer down:
+
+- **`bin/inbox-status --repo-key` called `fs_git_common_dir` directly.** Round
+  five had moved exactly this violation — Framework calling an adapter — off the
+  hook; the fix relocated it into `bin/` rather than removing it. Every other
+  path in `bin/` goes through an `inbox_*`; this one did not. Now
+  `inbox_repo_key`, a manager, which `inbox_status_json` also uses, so the key
+  has one derivation and one caller shape.
+- **The two `norm`s still diverged**, on a `.`-headed relative command: one
+  returned the literal string, the other a CWD-absolute path — precisely the
+  divergence the previous round's record claimed to have fixed and both comment
+  blocks assert as an invariant.
+- **And the case pinning that invariant compared two COPIES of `norm`**, not the
+  shipped ones, so it stayed green while the divergence was live. This is the
+  second time in two rounds the same case failed for this reason. Both tools now
+  expose their own `--norm`, the case drives those, and it was verified by
+  reintroducing the divergence: `FAIL the two norm() implementations disagree on
+  [./definitely-not-on-disk.sh]`.
+
+The fourth: an entry that is **present but declares an empty `channels`** is
+byte-identical to a missing one — `descriptor_validate` accepts a zero-key
+object, and `inbox_status_json` then emits the same `{"channels":[]}`. The hook
+cannot tell them apart, so the vanished-entry `Fix:` named two repairs, neither
+of which was the actual one. It now names all three, and a case raises the
+notice from an emptied entry.
 
 **Left as raised, not fixed:** nothing prunes `athena-inbox-seen/`, so a repo
 that is deleted or moved leaves its markers behind forever. Harmless — a stale

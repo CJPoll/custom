@@ -238,7 +238,14 @@ def self_test
   ok ? 0 : 1
 end
 
-if ARGV.include?("--self-test")
+# Internal: print this tool's normalized form of one path, so setup-hooks'
+# self-test can compare the two SHIPPED implementations rather than copies of
+# them. The step-lock between them is asserted as an invariant in both comment
+# blocks; an invariant nothing checks is the thing the next reader relies on.
+if (i = ARGV.index("--norm"))
+  puts norm(ARGV[i + 1].to_s)
+  exit 0
+elsif ARGV.include?("--self-test")
   exit self_test
 else
   exit run

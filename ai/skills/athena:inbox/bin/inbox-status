@@ -94,7 +94,7 @@ done
 # the one question that still has an answer when everything else has failed,
 # and a caller asks it precisely then.
 if [ "${REPO_KEY_ONLY}" -eq 1 ]; then
-  fs_git_common_dir "." 2>/dev/null || printf '\n'
+  printf '%s\n' "$(inbox_repo_key ".")"
   exit 0
 fi
 

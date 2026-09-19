@@ -65,6 +65,10 @@ while [ $# -gt 0 ]; do
     --check)    ACTION="check" ;;
     --remove)   ACTION="remove" ;;
     --self-test) ACTION="self-test" ;;
+    # Internal: print this tool's normalized form of one path. Used by the
+    # self-test to compare against check-hooks-registered's, driving both
+    # SHIPPED implementations rather than copies of them.
+    --norm) ACTION="norm"; NORM_ARG="${2:-}"; shift ;;
     --dry-run)  DRY_RUN=1 ;;
     -h|--help)  usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -122,7 +126,7 @@ def norm(cmd):
         # invent an absolute path for a command that names no location this
         # process can see. The two must agree, or drift is reported by one tool
         # and not the other.
-        if not head or not os.path.isdir(head):
+        if not head or head == os.curdir or not os.path.isdir(head):
             return cmd
         return os.path.join(os.path.realpath(head), tail)
     except OSError:
@@ -188,7 +192,36 @@ print("MARKER:changed")
 PY
 }
 
+# norm_path <path>  -- print the SHIPPED norm() of one path.
+#
+# Exists so the agreement case drives this implementation instead of a copy of
+# it. A case that re-implements the thing it is pinning cannot fail for the
+# reason it names, which is exactly what the previous version of that case did.
+norm_path() {
+  NORM_IN="$1" python3 - <<'PYNORM'
+import os, sys
+cmd = os.environ["NORM_IN"]
+def norm(cmd):
+    if not cmd:
+        return cmd
+    try:
+        if os.path.exists(cmd):
+            return os.path.realpath(cmd)
+        head, tail = os.path.split(cmd)
+        if not head or head == os.curdir or not os.path.isdir(head):
+            return cmd
+        return os.path.join(os.path.realpath(head), tail)
+    except OSError:
+        return cmd
+sys.stdout.write(norm(cmd) + "\n")
+PYNORM
+}
+
 case "$ACTION" in
+  norm)
+    norm_path "${NORM_ARG:-}"
+    ;;
+
   check)
     exec "$CHECKER"
     ;;
@@ -253,6 +286,23 @@ PY2
     HOOKS_REGISTRY_FILE="$ghostreg" HOOKS_SETTINGS_FILE="$ghost" "$CHECKER" >/dev/null 2>&1 \
       && echo "  ok   the checker agrees on an absent hook file" \
       || { echo "  FAIL setup-hooks and check-hooks-registered must agree on an absent file"; ok=0; }
+    # The two norm()s must agree on the input class that SEPARATES them, not
+    # only on the absolute paths the installer happens to write. A `.`-headed
+    # relative command is that class: one implementation returned the literal
+    # string and the other invented a CWD-absolute path, while both comments
+    # asserted step-lock as an invariant. Both sides here are the SHIPPED
+    # implementations, reached through each tool's --norm: a case that compares
+    # two copies cannot fail for the reason it names, which is how the previous
+    # version of this case passed while the divergence was live.
+    norm_agrees=1
+    for probe in "./definitely-not-on-disk.sh" "definitely-not-on-disk.sh" \
+                 "/nonexistent/dir/x.sh" "${hlink}/definitely-not-on-disk.sh" \
+                 "${HOOKS_REPO_DIR}/ai/hooks/registry.json"; do
+      py="$("$0" --norm "$probe")"
+      rb="$("$CHECKER" --norm "$probe")"
+      [ "$py" = "$rb" ] || { echo "  FAIL the two norm() implementations disagree on [$probe]: setup-hooks=[$py] checker=[$rb]"; ok=0; norm_agrees=0; }
+    done
+    [ "$norm_agrees" -eq 1 ] && echo "  ok   setup-hooks and check-hooks-registered normalize a path identically"
 
     # Worktree safety: the wired commands must point at the MAIN checkout, so
     # they survive `wt` cleanup of whatever worktree this was run from.

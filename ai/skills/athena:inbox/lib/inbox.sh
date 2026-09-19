@@ -310,6 +310,21 @@ _inbox_count_maildir() {
     '{unread: $n, never_delivered: $never}'
 }
 
+# inbox_repo_key [cwd]
+#
+# The session's repo identity, or an empty string outside a git repository.
+# MANAGER, so that `bin/` never reaches into the adapter itself: every other
+# path in bin/ goes through an `inbox_*`, and the one exception was the exact
+# Framework-calls-an-adapter violation this facility had already moved once.
+#
+# It exists as its own entry point because a CALLER NEEDS THE IDENTITY ON THE
+# PATH WHERE THE STATUS DOCUMENT DOES NOT EXIST -- a refusal prints nothing --
+# and recomputing it there would be a second implementation of the identity
+# rule, free to drift from the contract.
+inbox_repo_key() {
+  fs_git_common_dir "${1:-.}" 2>/dev/null || printf ''
+}
+
 # inbox_status_json [cwd]
 # {"channels":[{"name":…,"kind":…,"new":…}…]} -- counts only, for every channel
 # this session owns. An empty channel list is a legitimate, silent result.
@@ -340,7 +355,7 @@ _inbox_count_maildir() {
 inbox_status_json() {
   local entry rc chan kind resolved counts schema_csv out="[]" failed=0 repo_key
 
-  repo_key="$(fs_git_common_dir "${1:-.}")" || repo_key=""
+  repo_key="$(inbox_repo_key "${1:-.}")" || repo_key=""
 
   entry="$(inbox_entry "${1:-.}")"; rc=$?
   [ "${rc}" -ne 2 ] || return 1
