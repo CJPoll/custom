@@ -663,6 +663,46 @@ assert_contains "R16 another project's health warning does not silence this one"
 run_hook                                                 # ...but its own does
 assert_eq "R16 the vanished-entry warning is rate-limited by its own marker" "" "${OUT}"
 
+# ...and a REPAIR re-arms it. Same S21 discipline as the other two markers: an
+# entry restored and then clobbered again inside the window must warn again,
+# not be silenced by a warning about the fault that was already fixed. This is
+# the failure with no diff and no undo, so it is the most expensive place to
+# skip the rule -- and the rate-limit case above would pass whether or not the
+# repair cleared anything.
+register "${LOG_CHANNEL}"                                # the entry is restored
+run_hook
+assert_no_file "R16 a repair clears the vanished-entry rate limit" \
+  "$(ls -d "${HOME}/.claude/athena-inbox-seen"/*.warn 2>/dev/null | head -1)"
+rm -f "${ATHENA_INBOX_ROOT}/projects/p.json"             # ...and clobbered again
+run_hook
+assert_contains "R16 a second disappearance warns again rather than being rate-limited" \
+  "has none now" "$(context_of "${OUT}")"
+
+# ABSENT repo_key and EMPTY repo_key are different answers. Empty means "no git
+# repository here", which legitimately has nothing to remember. ABSENT means the
+# inbox-status beside this hook predates the field -- hook/skill version skew,
+# which settings.json makes reachable by wiring one tree's hook path -- and that
+# silently makes the detector inert. `// ""` collapsed the two.
+setup_case
+register "${LOG_CHANNEL}"
+stub_repo '#!/usr/bin/env bash
+printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidates":0}'"'"'
+exit 0'
+run_stub_hook
+assert_contains "R16 a status document with NO repo_key is logged, not silently inert" \
+  "carries no repo_key" "$(hook_log)"
+assert_contains "R16 ...and the count is still reported" "2 new in slack" \
+  "$(context_of "${OUT}")"
+
+setup_case
+register "${LOG_CHANNEL}"
+stub_repo '#!/usr/bin/env bash
+printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidates":0,"repo_key":""}'"'"'
+exit 0'
+run_stub_hook
+assert_not_contains "R16 an EMPTY repo_key is the quiet no-git-repo case, not a fault" \
+  "carries no repo_key" "$(hook_log)"
+
 # A repo that NEVER opted in must stay silent. Without this, the warning above
 # would fire in every unrelated repo on the machine -- the noise this hook
 # refuses everywhere else.

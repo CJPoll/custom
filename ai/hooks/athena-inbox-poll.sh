@@ -324,11 +324,21 @@ fi
 # disabling the detector: an inert R16 looks exactly like a healthy project, and
 # a lookup that finds nothing must still leave something a later reader can see.
 if [ "${POLL_OK}" -eq 1 ]; then
-  PROJECT_KEY="$(printf '%s' "${STATUS_JSON}" | jq -r '.repo_key // ""' 2>/dev/null)" || PROJECT_KEY=""
+  # ABSENT and EMPTY are different answers and must not collapse. An empty
+  # `repo_key` means "this cwd is in no git repository", which legitimately has
+  # no identity to remember and is the ordinary case for most directories on
+  # this machine -- quiet. NO `repo_key` at all means the inbox-status beside
+  # this hook predates the field (hook/skill version skew: settings.json wires
+  # one tree's hook, which resolves STATUS_BIN from whatever tree that is), and
+  # that silently makes the vanished-entry detector inert while looking exactly
+  # like a healthy project. `// ""` would have made those two indistinguishable.
+  if ! printf '%s' "${STATUS_JSON}" | jq -e 'has("repo_key")' >/dev/null 2>&1; then
+    log_reason "the status document carries no repo_key, so this project's inbox-seen marker could not be named and a vanished registry entry would go unnoticed here. Fix: the inbox-status beside this hook predates the field — check that ai/skills/athena:inbox and ai/hooks come from the same checkout."
+    PROJECT_KEY=""
+  else
+    PROJECT_KEY="$(printf '%s' "${STATUS_JSON}" | jq -r '.repo_key' 2>/dev/null)" || PROJECT_KEY=""
+  fi
   if [ -z "${PROJECT_KEY}" ]; then
-    # A cwd in no git repository has no identity to remember, and legitimately
-    # so -- there is nothing here that could ever have had channels. Not logged,
-    # because it is the ordinary case for most directories on this machine.
     :
   elif ! command -v sha256sum >/dev/null 2>&1; then
     log_reason "sha256sum is not on PATH, so this project's inbox-seen marker could not be named and a vanished registry entry would go unnoticed here. Fix: install coreutils' sha256sum and start a new session."
@@ -463,6 +473,12 @@ fi
 # nothing, for the same reason it stamps nothing.
 if [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 1 ]; then
   unstamp "${WARN_MARKER}"
+  # The vanished-entry marker gets the same S21 discipline as the other two.
+  # Without it, an entry restored and then clobbered AGAIN inside the window is
+  # silenced by a warning about the fault that was already repaired -- and this
+  # is the one failure with no diff and no undo, so silencing it is the most
+  # expensive place to skip the rule.
+  unstamp "${SEEN_WARN_MARKER}"
   # ...and a clean bill of health clears the health marker, so the next health
   # fault gets its own warning rather than inheriting this one's rate limit.
   [ -z "${HEALTH_TEXT}" ] && unstamp "${HEALTH_WARN_MARKER}"

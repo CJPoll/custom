@@ -1037,6 +1037,67 @@ assert_contains "the ordinary status line carries the failed-candidate count" \
 assert_contains "that line carries a Fix: clause" "Fix:" "${out}"
 assert_not_contains "the count names no file" "other-tenant" "${out}"
 
+# `repo_key` -- the session's own identity, carried on EVERY --json answer.
+#
+# SKILL.md makes three promises about it to callers, whose whole point is that a
+# consumer needing the repo identity takes it from here instead of re-deriving
+# it with its own `git rev-parse`. A second implementation of the identity rule
+# is a second thing free to drift from the contract, and an identity that did
+# not match the way the contract says is the bug this facility has already paid
+# for twice (D-5's raw-string comparison, and DND-202's model change). So the
+# promises are asserted here, where they are owned, and not only through the
+# consumer that happens to read them today.
+# Its own case: the fixture above deliberately leaves unparseable candidates in
+# projects/, and no-match-plus-unparseable is a HARD REFUSAL with empty stdout,
+# so these assertions would read nothing and pass for the wrong reason.
+setup_case
+rkproj="$(make_repo rkproj)"
+register rkproj "${rkproj}" '{"mine":{"kind":"log","path":"mine.jsonl"}}'
+jout="$(cd "${rkproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "repo_key is the realpath of this session's git common dir" \
+  "$(cd "${rkproj}" && realpath "$(git rev-parse --git-common-dir)")" \
+  "$(jq -r '.repo_key' <<<"${jout}")"
+
+# ...on the NO-CHANNELS answer too, which is exactly when a caller telling
+# "never opted in" apart from "my entry vanished" needs it. Asserted with
+# `has`, not `// ""`: a field that is ABSENT and a field that is EMPTY are
+# different answers, and the consumer distinguishes them.
+unregistered="$(make_repo unregistered)"
+jout="$(cd "${unregistered}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "the no-channels answer still carries repo_key" "true" \
+  "$(jq -r 'has("repo_key")' <<<"${jout}")"
+assert_eq "...and it names that repo, not the last one looked at" \
+  "$(cd "${unregistered}" && realpath "$(git rev-parse --git-common-dir)")" \
+  "$(jq -r '.repo_key' <<<"${jout}")"
+
+# A WORKTREE resolves to its parent repo's key. This is the property the whole
+# tenancy model rests on -- one entry serves a repo and all its worktrees -- and
+# it had no assertion on this field.
+wt_parent="$(make_repo wtparent)"
+( cd "${wt_parent}" && git commit -q --allow-empty -m init >/dev/null 2>&1 \
+  && git worktree add -q "${wt_parent}-wt" -b wtbranch >/dev/null 2>&1 )
+if [ -d "${wt_parent}-wt" ]; then
+  assert_eq "a worktree reports its PARENT repo's key, which is what makes one entry serve both" \
+    "$(cd "${wt_parent}" && realpath "$(git rev-parse --git-common-dir)")" \
+    "$(cd "${wt_parent}-wt" && "${BIN}/inbox-status" --json 2>/dev/null | jq -r '.repo_key')"
+else
+  bad "a worktree reports its PARENT repo's key" "could not create the worktree fixture"
+fi
+
+# Empty, not absent, when there is no git repository at all -- the state a
+# consumer is told means "nothing here could ever have had channels".
+nogit="${CASE_DIR}/nogit"; mkdir -p "${nogit}"
+jout="$(cd "${nogit}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "outside a git repo the field is present..." "true" \
+  "$(jq -r 'has("repo_key")' <<<"${jout}")"
+assert_eq "...and empty, never missing" "" \
+  "$(jq -r '.repo_key' <<<"${jout}")"
+
+# Back to the failed-candidate fixture for the cases that follow.
+setup_case
+fcproj="$(make_repo fcproj)"
+register fcproj "${fcproj}" '{"mine":{"kind":"log","path":"mine.jsonl"}}'
+
 # NOT A CANDIDATE vs A CANDIDATE THAT FAILED. A stray backup or editor
 # swapfile was never a registry entry, so it says nothing -- and counting it
 # would pin the warning on every status line forever. A counter that is always
