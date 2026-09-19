@@ -362,12 +362,24 @@ descriptor_resolve() {
       printf 'lock\t%s\n'     "$(names_lock_name "${inbox}")"
       ;;
     maildir)
-      local ns base
+      local ns base rd wr
       ns="$(descriptor_channel_field "${doc}" "${chan}" namespace)"
       base="$(names_resolve_in_root "${root}" "${ns}")" || return 1
-      printf 'read_dir\t%s/%s\n'  "${base}" "$(descriptor_channel_field "${doc}" "${chan}" read)"
-      printf 'write_dir\t%s/%s\n' "${base}" "$(descriptor_channel_field "${doc}" "${chan}" write)"
-      printf 'ack_dir\t%s/%s/.acked\n' "${base}" "$(descriptor_channel_field "${doc}" "${chan}" read)"
+      rd="$(descriptor_channel_field "${doc}" "${chan}" read)"
+      wr="$(descriptor_channel_field "${doc}" "${chan}" write)"
+      printf 'read_dir\t%s/%s\n'  "${base}" "${rd}"
+      printf 'write_dir\t%s/%s\n' "${base}" "${wr}"
+      printf 'ack_dir\t%s/%s/.acked\n' "${base}" "${rd}"
+      # BOTH doorbells, derived HERE, for the same reason `lock` is: a path
+      # spelled out at its point of use is a path that can diverge from the
+      # one the other caller spells. A waiter watches both -- the `read` bell
+      # for incoming mail, the `write` bell for the peer's acks of what this
+      # identity sent. Labelling one watch-only and the other bump-only breaks
+      # the ack notification outright: my ack happens inside MY read directory,
+      # which is the directory the PEER delivers into, so the peer learns of it
+      # only by watching that same bell from its own side.
+      printf 'read_doorbell\t%s/%s/.event\n'  "${base}" "${rd}"
+      printf 'write_doorbell\t%s/%s/.event\n' "${base}" "${wr}"
       # Derived HERE, once. It was previously spelled out in both the ack
       # manager and bin/read-inbox: two copies of a path that must be the same
       # file, where a divergence would mean the reader takes one lock and the

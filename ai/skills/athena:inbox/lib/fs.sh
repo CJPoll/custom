@@ -442,6 +442,61 @@ fs_sweep_generation() {
 
 # --- the doorbell -----------------------------------------------------------
 
+# fs_ensure_dir <path>
+# 0700, idempotent, never destructive. Provisioning "creates what is missing
+# and adjusts modes on what it created; it never truncates, replaces, or
+# re-creates an existing surface" -- so an existing directory is left exactly
+# as it is, including its mode.
+fs_ensure_dir() {
+  local path="$1"
+  fs_assert_contained "$(fs_inbox_root)" "${path}" || return 1
+  if [ -L "${path}" ]; then
+    inbox_fail "refusing to provision through a symlink at \"${path}\"" \
+      "replace \"${path}\" with a real directory; containment follows symlinks, so a symlinked mail directory inside the root passes every path check and still points somewhere else."
+    return 1
+  fi
+  [ -d "${path}" ] && return 0
+  if [ -e "${path}" ]; then
+    inbox_fail "\"${path}\" exists and is not a directory" \
+      "remove or rename it; this channel's mail directories cannot be provisioned while a file sits at that path."
+    return 1
+  fi
+  mkdir -p -m 0700 "${path}" 2>/dev/null && return 0
+  inbox_fail "cannot create \"${path}\"" \
+    "check that \$ATHENA_INBOX_ROOT exists and is writable (mode 0700), then re-run."
+  return 1
+}
+
+# fs_ensure_doorbell <path>
+# A zero-byte 0600 doorbell, created ONLY when absent.
+#
+# THIS IS A WAITER MUST, NOT THE COUNTER'S MAY. `inotifywait` on a missing
+# path prints `Couldn't watch ...` and exits 1 IMMEDIATELY -- and because one
+# invocation watches every doorbell this session owns, a single missing
+# `.event` takes down the wake for ALL channels at once. A counting tool may
+# shrug at an absent doorbell; a waiter must create it before it arms.
+#
+# It does NOT bump an existing one. Creating is provisioning; bumping is
+# signalling, and a waiter that rang the bell it is about to listen to would
+# wake itself on every arm and report mail that never came.
+fs_ensure_doorbell() {
+  local path="$1"
+  fs_assert_contained "$(fs_inbox_root)" "${path}" || return 1
+  fs_assert_regular "${path}" || return 1
+  if [ -e "${path}" ]; then
+    chmod 0600 "${path}" 2>/dev/null || true
+    return 0
+  fi
+  fs_ensure_dir "${path%/*}" || return 1
+  ( umask 077; : > "${path}" ) 2>/dev/null || {
+    inbox_fail "cannot create the doorbell \"${path}\"" \
+      "check that \$ATHENA_INBOX_ROOT exists and is writable (mode 0700), then re-run. Without the doorbell there is nothing to block on, and a waiter armed on a missing path exits at once instead of waiting."
+    return 1
+  }
+  chmod 0600 "${path}" 2>/dev/null || true
+  return 0
+}
+
 # fs_bump_doorbell <path>
 # Zero bytes, 0600, mtime bumped. The contract: it is a bell, not a letter --
 # it MUST stay zero bytes and carry no count, payload or hint.
