@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Self-test for scripts/setup-athena-inbox-client and
-# scripts/athena-inbox-client-run.sh (Athena Inbox QA plan §3, I-8 … I-11).
+# scripts/athena-inbox-client-run.sh.
+#
+# Covers the Integration cases labelled I-8 … I-11 in the Athena Inbox epic's QA
+# Plan, which lives in Notion (see ticket DND-189), NOT in this repo — so the
+# labels are quoted for traceability only, and every case below restates in full
+# what it protects rather than leaning on that document.
 #
 # Nothing real is touched:
 #   * the CLIENT is a stub shell script whose exit code, run time and call log
@@ -94,7 +99,11 @@ set -u
 f='${FAKE_CRONTAB}'
 case "\${1:-}" in
   -l) if [ -s "\$f" ]; then cat "\$f"; else echo "no crontab for user" >&2; exit 1; fi ;;
-  -)  cat > "\$f" ;;
+  -)  if [ -n "\${CRONTAB_SHIM_FAIL:-}" ]; then
+        echo "crontab: installing new crontab: Permission denied" >&2
+        exit 1
+      fi
+      cat > "\$f" ;;
   -r) rm -f "\$f" ;;
   *)  echo "crontab shim: unsupported invocation: \$*" >&2; exit 64 ;;
 esac
@@ -373,12 +382,34 @@ else
       "could not create a git worktree fixture at ${CASE_DIR}/wt"
 fi
 
+# A FAILED crontab write must fail the install loudly. Without a status check
+# the script (which runs without `set -e`) falls through to "installed:" and
+# exits 0 — claiming success while leaving the client unscheduled, which is the
+# very silent-failure class this facility exists to close. It is also the
+# LIKELY failure on this box: the per-user spool dir being missing or wrong,
+# which this installer deliberately does not repair (that needs root).
+setup_case write_fails
+make_stub 0 0
+printf '%s\n' "$UNRELATED" > "${FAKE_CRONTAB}"
+snapshot="$(cat "${FAKE_CRONTAB}")"
+out="$(CRONTAB_SHIM_FAIL=1 run_installer --install 2>/dev/null)"; rc=$?
+err="$(CRONTAB_SHIM_FAIL=1 run_installer --install 2>&1 >/dev/null)"
+if [ "$rc" -eq 2 ] \
+   && printf '%s' "$err" | grep -q 'Fix:' \
+   && ! printf '%s' "$out" | grep -q 'installed:' \
+   && [ "$(cat "${FAKE_CRONTAB}")" = "$snapshot" ]; then
+  ok "a failed crontab write exits 2 with a Fix: and never claims 'installed'"
+else
+  bad "a failed crontab write exits 2 with a Fix: and never claims 'installed'" \
+      "rc=$rc stdout=${out} stderr=${err}"
+fi
+
 # ---------------------------------------------------------------------------
 # I-9 — exit 2 is a FULL STOP
 # ---------------------------------------------------------------------------
 printf '\nI-9  supervisor: exit 2 stops permanently and leaves a marker\n'
 
-# 14. THE case this supervisor exists for. Exit 2 is the client's deliberate
+# 15. THE case this supervisor exists for. Exit 2 is the client's deliberate
 #     partial-write stop: bytes landed, the line is a fragment, and the un-acked
 #     event is re-pushed IN FULL on reconnect. Relaunching appends that full
 #     line after the fragment and corrupts the inbox — the bug PR #18 fixed in
@@ -399,7 +430,7 @@ else
       "rc=$rc client ran ${n} time(s)"
 fi
 
-# 15. The stop must leave a durable, human-readable reason. A supervisor that
+# 16. The stop must leave a durable, human-readable reason. A supervisor that
 #     stops silently is indistinguishable from one that was never started.
 if [ -s "${STOPFILE}" ] && grep -qi 'partial write' "${STOPFILE}"; then
   ok "exit 2 writes athena-inbox-client.stopped naming the partial write"
@@ -408,7 +439,7 @@ else
       "stopfile: $(cat "${STOPFILE}" 2>/dev/null || echo '<absent>')"
 fi
 
-# 16. The marker must carry the RECOVERY steps, not just the diagnosis —
+# 17. The marker must carry the RECOVERY steps, not just the diagnosis —
 #     removing the marker alone re-corrupts the file on the next append.
 if grep -qi 'fragment' "${STOPFILE}" 2>/dev/null; then
   ok "the stop marker tells the operator to delete the trailing fragment first"
@@ -417,7 +448,7 @@ else
       "stopfile: $(cat "${STOPFILE}" 2>/dev/null || echo '<absent>')"
 fi
 
-# 17. The refusal has to SURVIVE the process. The */5 cron entry fires again
+# 18. The refusal has to SURVIVE the process. The */5 cron entry fires again
 #     five minutes later; if the marker is not honoured on a fresh invocation,
 #     the permanent stop lasts exactly until the next tick.
 MIN_BACKOFF=1 MAX_BACKOFF=1 BACKOFF_RESET=120 MAX_RESTARTS=3 \
@@ -438,7 +469,7 @@ fi
 MIN_BACKOFF=1 MAX_BACKOFF=1 BACKOFF_RESET=120 MAX_RESTARTS=3 \
   run_supervisor >/dev/null 2>&1
 
-# 18. The refusal is logged with a Fix:, and rate-limited — the */5 entry would
+# 19. The refusal is logged with a Fix:, and rate-limited — the */5 entry would
 #     otherwise write 288 identical lines a day into the log.
 if grep -q 'Fix:' "${LOG}" 2>/dev/null; then
   ok "the refusal is logged with a Fix: line"
@@ -456,7 +487,7 @@ else
       "logged the refusal ${n_refusals} time(s)"
 fi
 
-# 19. Clearing the marker must actually restore service. A stop that cannot be
+# 20. Clearing the marker must actually restore service. A stop that cannot be
 #     undone by the documented recovery is a different bug.
 rm -f "${STOPFILE}"
 make_stub 0 0
@@ -474,7 +505,7 @@ fi
 # ---------------------------------------------------------------------------
 printf '\nI-10 supervisor: non-2 exits relaunch with capped exponential backoff\n'
 
-# 20. Any other non-zero exit is a transient fault and must be retried — a
+# 21. Any other non-zero exit is a transient fault and must be retried — a
 #     supervisor that gives up on the first crash is no supervisor.
 setup_case exit1
 make_stub 1 0
@@ -489,7 +520,7 @@ else
       "rc=$rc client ran ${n} time(s), expected 4"
 fi
 
-# 21. The delay must GROW — a fixed short retry against a persistently failing
+# 22. The delay must GROW — a fixed short retry against a persistently failing
 #     dependency is a hot loop wearing a supervisor's clothes.
 if grep -q 'restart 1 in 1s' "${LOG}" && grep -q 'restart 2 in 2s' "${LOG}"; then
   ok "the backoff grows exponentially (1s then 2s)"
@@ -498,7 +529,7 @@ else
       "log: $(grep 'restart' "${LOG}" | tr '\n' '|')"
 fi
 
-# 22. …and must CAP. Uncapped doubling reaches hours, so a client that recovers
+# 23. …and must CAP. Uncapped doubling reaches hours, so a client that recovers
 #     is not picked up until long after the fault cleared — the silent-outage
 #     failure mode again.
 if grep -q 'restart 3 in 2s' "${LOG}" && ! grep -q 'in 4s' "${LOG}"; then
@@ -508,7 +539,7 @@ else
       "log: $(grep 'restart' "${LOG}" | tr '\n' '|')"
 fi
 
-# 23. A run that STAYED UP is evidence the fault was transient, so the next
+# 24. A run that STAYED UP is evidence the fault was transient, so the next
 #     failure must start from the short delay rather than the cap. Without
 #     this, one bad day pins the retry interval at the cap for the life of the
 #     supervisor.
@@ -525,7 +556,7 @@ else
       "log: $(grep 'restart' "${LOG}" | tr '\n' '|')"
 fi
 
-# 24. A CLEAN exit is not a fault. The client exiting 0 means it was asked to
+# 25. A CLEAN exit is not a fault. The client exiting 0 means it was asked to
 #     stop; relaunching it would make a deliberate shutdown impossible.
 setup_case exit0
 make_stub 0 0
@@ -539,7 +570,7 @@ else
       "rc=$rc client ran $(calls) time(s)"
 fi
 
-# 25. Missing prerequisites must be refused with exit 2 and a Fix:, not
+# 26. Missing prerequisites must be refused with exit 2 and a Fix:, not
 #     "supervised" into an endless relaunch of a binary that is not there.
 setup_case nolauncher_run
 : > "${CALLS}"
@@ -553,7 +584,7 @@ else
       "rc=$rc stderr=${err}"
 fi
 
-# 26. The log must stay bounded. This is a @reboot-forever process writing to
+# 27. The log must stay bounded. This is a @reboot-forever process writing to
 #     one file; an unbounded log is a slow disk-filling bug that surfaces months
 #     later as something else entirely. The trim replaces the inode, so it is
 #     only ever safe BETWEEN client runs — a trim racing a live client's held fd
@@ -579,7 +610,7 @@ else
       "log still has ${n_lines} lines with MAX_LOG_LINES=20"
 fi
 
-# 27. The trim must not lose the NEWEST lines — a bound that kept the oldest
+# 28. The trim must not lose the NEWEST lines — a bound that kept the oldest
 #     would discard exactly the diagnostics an operator came for.
 # Exact-line matches: 'filler line 1' is a substring of 'filler line 10', and a
 # substring match here would pass whichever end the trim kept.
@@ -590,11 +621,14 @@ else
       "first log line: $(head -n 1 "${LOG}")"
 fi
 
-# 28. cron's PATH is minimal and on this box flock(1) lives in /usr/sbin, which
-#     a login PATH has and cron's does not. The runner pins its own PATH for
-#     exactly that reason; if the pin regressed, the single-instance guarantee
-#     would fail open under cron while every interactive test still passed —
-#     invisible in development, load-bearing in production.
+# 29. cron's PATH is minimal, and losing flock(1) would make the single-instance
+#     guarantee fail open under cron while every interactive test still passed
+#     — invisible in development, load-bearing in production. The runner pins
+#     its own PATH for that reason.
+#     Note this case can only be reddened by gutting the pin: usrmerge on this
+#     box makes /usr/sbin a symlink to bin, so flock resolves through /usr/bin
+#     and /bin too. Dropping /usr/sbin alone changes nothing here — recorded as
+#     SABOTAGE_RECORDS S28a, a measured zero.
 setup_case minimal_path
 make_stub 0 0
 out="$(env -i HOME="${HOME}" PATH=/bin:/usr/bin \
@@ -615,7 +649,7 @@ fi
 # ---------------------------------------------------------------------------
 printf '\nI-11 supervisor: the flock prevents a duplicate client\n'
 
-# 26. The */5 relaunch entry fires while the client is healthy, every five
+# 30. The */5 relaunch entry fires while the client is healthy, every five
 #     minutes, forever. If the lock does not hold, that entry is not a safety
 #     net — it is a machine for creating a second writer on a file the delivery
 #     contract says has exactly one designated consumer.
@@ -633,7 +667,8 @@ env ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
     ATHENA_INBOX_CLIENT_MAX_RESTARTS=5 \
     bash "${RUNNER}" >/dev/null 2>&1 &
 SUPERVISOR_PID=$!
-# MAX_RESTARTS is 5, not 1, and that is load-bearing for case 29: with a bound
+# MAX_RESTARTS is 5, not 1, and that is load-bearing for the SIGTERM case
+# below ("SIGTERM stops the supervisor without relaunching the client"): with a bound
 # of 1 the supervisor stops after reaping its client no matter how the TERM
 # handler behaves, so a handler that reaps-and-relaunches would pass. Sabotage
 # S7 measured that zero on the first pass. With headroom to restart, only a
@@ -653,7 +688,7 @@ if wait_for_nonempty "${CALLS}" 100; then
         "rc=$rc client ran ${n} time(s); rc=124 would mean it blocked, 2 means it started"
   fi
 
-  # 27. The no-op path must be SILENT. cron mails any output a job produces, so
+  # 31. The no-op path must be SILENT. cron mails any output a job produces, so
   #     a chatty healthy path turns the safety net into 288 mails a day and the
   #     operator stops reading them — including the one that matters.
   if [ -z "$out" ]; then
@@ -663,7 +698,7 @@ if wait_for_nonempty "${CALLS}" 100; then
         "printed: ${out}"
   fi
 
-  # 28. The pidfile must name the LIVE supervisor, so the documented "kill the
+  # 32. The pidfile must name the LIVE supervisor, so the documented "kill the
   #     pid in the pidfile" recovery targets the right process.
   recorded="$(cat "${STATE_DIR}/athena-inbox-client.pid" 2>/dev/null | tr -d ' ')"
   if [ "$recorded" = "$SUPERVISOR_PID" ]; then
@@ -673,7 +708,7 @@ if wait_for_nonempty "${CALLS}" 100; then
         "pidfile=${recorded} supervisor=${SUPERVISOR_PID}"
   fi
 
-  # 29. SIGTERM must stop the SUPERVISOR, not just its current client. A TERM
+  # 33. SIGTERM must stop the SUPERVISOR, not just its current client. A TERM
   #     handler that reaps the child and falls back into the supervise loop
   #     relaunches the client the operator just stopped — and the operator has
   #     no way to tell, because the pidfile still looks right.
@@ -691,7 +726,7 @@ if wait_for_nonempty "${CALLS}" 100; then
         "client ran ${n} time(s) after the supervisor was terminated"
   fi
 
-  # 30. And the child must not outlive it. An orphaned client reparented to
+  # 34. And the child must not outlive it. An orphaned client reparented to
   #     init keeps writing to the inbox with nothing supervising it, and the
   #     next supervisor takes the lock and becomes a second writer (PT-919 is
   #     the same species of failure).
@@ -709,7 +744,7 @@ else
   SUPERVISOR_PID=""
 fi
 
-# 34. SIGTERM must be honoured DURING the backoff sleep, not just while the
+# 35. SIGTERM must be honoured DURING the backoff sleep, not just while the
 #     client is running. Bash defers a trapped signal until the current
 #     FOREGROUND command completes, so a plain `sleep "$backoff"` swallows TERM
 #     for up to MAX_BACKOFF — 300s in production. The operator's documented
@@ -749,6 +784,82 @@ else
   bad "SIGTERM is honoured during the backoff sleep, not deferred until it ends" \
       "the backgrounded supervisor never ran the stub client"
   kill "$SUPERVISOR_PID" 2>/dev/null; wait "$SUPERVISOR_PID" 2>/dev/null
+  SUPERVISOR_PID=""
+fi
+
+# A SIGKILLed supervisor leaves the client running, because SIGKILL skips the
+# reaper by design — and `kill -9` is exactly what an operator reaches for when
+# a stop appears not to work. Two things must then hold, and they pull against
+# each other:
+#
+#   * the next invocation must NOT be locked out. If the client inherited the
+#     lock descriptor it would hold the flock for its whole life, every later
+#     cron tick would exit 0 in silence, and nothing would ever supervise
+#     again — the unsupervised-client state the facility exists to prevent.
+#   * and it must NOT simply start a second client alongside the orphan, which
+#     would put two writers on an inbox the contract says has one consumer.
+#
+# So: the client is started with fd 9 closed, and the orphan is terminated
+# before a new one starts.
+setup_case orphan_after_sigkill
+make_stub 0 30
+env ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+    ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
+    ATHENA_INBOX_CLIENT_MAX_RESTARTS=1 \
+    bash "${RUNNER}" >/dev/null 2>&1 &
+SUPERVISOR_PID=$!
+
+if wait_for_nonempty "${STUB_PID}" 100; then
+  orphan="$(tr -d '[:space:]' < "${STUB_PID}")"
+  kill -9 "$SUPERVISOR_PID" 2>/dev/null
+  wait "$SUPERVISOR_PID" 2>/dev/null
+  SUPERVISOR_PID=""
+
+  if kill -0 "$orphan" 2>/dev/null; then
+    ok "SIGKILLing the supervisor leaves the client orphaned (the premise)"
+  else
+    bad "SIGKILLing the supervisor leaves the client orphaned (the premise)" \
+        "client ${orphan} died with the supervisor; the case proves nothing"
+  fi
+
+  # A fresh invocation, exactly as the */5 cron entry would make it. The stub is
+  # regenerated to exit at once: the orphan is still running the 30s one, and a
+  # second long client would only make this case measure the timeout.
+  make_stub 0 0
+  out="$(timeout 30 env \
+          ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+          ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
+          ATHENA_INBOX_CLIENT_MAX_RESTARTS=1 \
+          bash "${RUNNER}" 2>&1)"; rc=$?
+  new_client="$(tr -d '[:space:]' < "${STUB_PID}" 2>/dev/null)"
+
+  if [ "$rc" -ne 0 ] || [ "$(calls)" = "1" ]; then
+    bad "an orphaned client does not lock out the next supervisor forever" \
+        "rc=$rc ran $(calls) time(s) — the orphan still holds the lock"
+  else
+    ok "an orphaned client does not lock out the next supervisor forever"
+  fi
+
+  if ! kill -0 "$orphan" 2>/dev/null; then
+    ok "the orphaned client is terminated, never left running beside a new one"
+  else
+    bad "the orphaned client is terminated, never left running beside a new one" \
+        "orphan ${orphan} and new client ${new_client} are both alive — two writers"
+    kill -9 "$orphan" 2>/dev/null
+  fi
+
+  # Asserted against the LOG, not stdout/stderr: `say` only echoes to stderr
+  # when a human is watching (`[ -t 2 ]`), and under cron nothing is.
+  if grep -q 'orphaned client' "${LOG}" 2>/dev/null; then
+    ok "the orphan takeover is recorded in the log rather than done silently"
+  else
+    bad "the orphan takeover is recorded in the log rather than done silently" \
+        "log: $(tail -n 3 "${LOG}" 2>/dev/null | tr '\n' '|')"
+  fi
+else
+  bad "an orphaned client does not lock out the next supervisor forever" \
+      "the backgrounded supervisor never recorded a client pid"
+  kill -9 "$SUPERVISOR_PID" 2>/dev/null; wait "$SUPERVISOR_PID" 2>/dev/null
   SUPERVISOR_PID=""
 fi
 

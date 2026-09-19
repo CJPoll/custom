@@ -13,8 +13,8 @@ string. If it still passes, the check it protects has stopped being
 load-bearing and the row is now a bug report.
 
 Rows recording a **measured zero** are the important ones — they mark a claim
-no mutation reddens. This run produced one (S23), and it is written up below
-rather than quietly dropped.
+no mutation reddens. This run produced **two** (S23 and S28a), and both are
+written up below rather than quietly dropped.
 
 Every mutation was applied by an exact-substring replace that asserted the
 anchor occurs **exactly once** before writing (a sabotage applied by substring
@@ -36,9 +36,11 @@ not yet committed.
   (equivalently `scripts/setup-athena-inbox-client --self-test`). No network —
   the client is a stub script; no live crontab — `crontab(1)` is a PATH shim
   over a tmpfile. ~25s.
-- **Baseline:** `VERDICT: PASS (37 cases)`
-- **Runner:** 27 mutations, one at a time, full suite after each. Rows S24–S28
-  cover the four guarantees added after the `athena-diff-critic` review.
+- **Baseline:** `VERDICT: PASS (42 cases)`
+- **Runner:** 29 mutations, one at a time, full suite after each. Rows S24–S28
+  cover the five guarantees added after the standing `athena-diff-critic`
+  judge's first round; S29–S31 cover the three added after the review round
+  (a fresh `athena-diff-critic` pass plus a conventions/ADR reviewer).
 
 ### What the suite proves
 
@@ -71,8 +73,11 @@ not yet committed.
 | S26 | runner: `trim_log`'s bound check → unconditional `return 0` (the log grows forever) | 1 | `FAIL  the log is trimmed to its bound between client runs` |
 | S27 | runner: `trim_log`'s `tail -n "$keep"` → `head -n "$keep"` (keeps the oldest lines, drops the newest) | 1 | `FAIL  the trim keeps the tail of the log, not the head` |
 | S28 | runner: the pinned `PATH` gutted to `${HOME}/.local/bin` alone, so `flock(1)` is unreachable | 10 | `FAIL  the runner finds flock under a cron-like minimal PATH` (+ 9 others: with no lock and no launcher resolution, most supervisor cases collapse) |
+| S29 | runner: `"$LAUNCHER" 9>&- …` → `"$LAUNCHER" …`, so the client inherits the open lock descriptor | 3 | `FAIL  an orphaned client does not lock out the next supervisor forever` / `FAIL  the orphaned client is terminated, never left running beside a new one` / `FAIL  the orphan takeover is recorded in the log rather than done silently` |
+| S30 | installer: `put_crontab`'s status check → `if true` (a failed `crontab -` falls through to "installed:") | 1 | `FAIL  a failed crontab write exits 2 with a Fix: and never claims 'installed'` |
+| S31 | runner: `reap_orphaned_client()` → an immediate `return 0` (a new client starts beside the orphan) | 2 | `FAIL  the orphaned client is terminated, never left running beside a new one` / `FAIL  the orphan takeover is recorded in the log rather than done silently` |
 
-### Four zeros found, and closed rather than recorded
+### Five zeros found, four closed and one recorded
 
 The first pass measured **two** zeros. Both turned out to be dead assertions in
 the suite rather than untestable claims, so both were repaired and re-measured:
@@ -110,6 +115,17 @@ only by sabotage, which is the argument for the practice in one line.
 | S23 | `--check does not modify the crontab` | **Measured zero — no mutation reddens it.** |
 | S28a | the `/usr/sbin` component specifically of the runner's pinned `PATH` | **Measured zero on THIS host.** |
 
+**S23.** `--check` reaches no write path at all: it calls `read_crontab` and returns, so
+there is nothing to delete that would make it start writing. Every mutation
+that could redden this case would have to *add* a `put_crontab` call, which is
+not sabotage of an existing guarantee but authorship of a new defect.
+
+The case is kept deliberately. It is a **regression guard on a property the
+callers depend on**, not a test of current behaviour: `--check` is documented as
+read-only and safe for an agent or CI to run unattended, and the whole point of
+writing that down is that a future edit must not quietly make it false. Recorded
+here as a zero so nobody later reads its green as evidence of anything.
+
 **S28a.** Dropping `/usr/sbin` (and even `/usr/bin`) from the pin reddens
 nothing here, because Gentoo's usrmerge makes `/usr/sbin` a symlink to `bin` —
 `flock(1)` exists at both `/usr/sbin/flock` and `/usr/bin/flock` and resolves
@@ -122,16 +138,6 @@ say so — it previously claimed `/usr/sbin` was "where THIS box's flock lives",
 which is true but reads as load-bearing when it is not. Recorded here so nobody
 later treats the green as proof that dropping it is safe everywhere.
 
-`--check` reaches no write path at all: it calls `read_crontab` and returns, so
-there is nothing to delete that would make it start writing. Every mutation
-that could redden this case would have to *add* a `put_crontab` call, which is
-not sabotage of an existing guarantee but authorship of a new defect.
-
-The case is kept deliberately. It is a **regression guard on a property the
-callers depend on**, not a test of current behaviour: `--check` is documented as
-read-only and safe for an agent or CI to run unattended, and the whole point of
-writing that down is that a future edit must not quietly make it false. Recorded
-here as a zero so nobody later reads its green as evidence of anything.
 
 ### Defects this pass found in the code under test
 

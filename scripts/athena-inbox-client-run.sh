@@ -34,9 +34,18 @@
 #     Recovery is manual: fix the disk, delete the trailing fragment, remove the
 #     marker, then run this script again.
 #
-# Output discipline: cron mails ANY output a job produces, so the normal paths
-# write to the log file and say nothing on stdout/stderr. When stderr is a
-# terminal (a human running this by hand) the same lines are echoed there too.
+# Output discipline: cron mails ANY output a job produces, so the STEADY-STATE
+# paths — supervising, restarting, and the locked-out no-op that the */5 entry
+# hits while healthy — write to the log file and say nothing on stdout/stderr.
+# When stderr is a terminal (a human running this by hand) the same lines are
+# echoed there too.
+#
+# The exception is deliberate: a missing prerequisite (exit 2 — no launcher, no
+# flock, an unusable state dir) DOES write to stderr, so cron mails it. That is
+# a fault which never resolves itself and which no log nobody reads will
+# surface; a daily mail is the cheapest way for it to reach a human. The
+# installer refuses to schedule a missing launcher in the first place, so this
+# should only fire when something was removed out from under a working setup.
 #
 # Usage:
 #   athena-inbox-client-run.sh            supervise the client (blocks)
@@ -52,11 +61,28 @@
 #   ATHENA_INBOX_CLIENT_MAX_RESTARTS  stop after N restarts; 0 = unlimited (0).
 #                                     Exists so the self-test can bound a run.
 #   ATHENA_INBOX_CLIENT_MAX_LOG_LINES trim the log to this many lines between
-#                                     client runs (2000)
+#                                     client runs (2000). See the caveat under
+#                                     "Log size" below.
 #
 # Stopping it: kill the pid in ~/.local/state/athena-inbox-client.pid. SIGTERM
 # and SIGINT reap the client and stop the SUPERVISOR — they do not fall back
 # into the relaunch loop, or "stop" would mean "restart".
+#
+# But that stops THIS supervisor, not the service: once the crontab entries are
+# installed, the `*/5` line starts a new one within five minutes. The same goes
+# for the client exiting 0. To stop the service durably, remove the entries
+# first — `scripts/setup-athena-inbox-client --remove` — and then kill the pid.
+# (The `.stopped` marker also blocks a start, but it means "an inbox file is
+# corrupt"; do not repurpose it as an off switch, or a real partial write later
+# becomes indistinguishable from a deliberate stop.)
+#
+# Log size: the log is trimmed only BETWEEN client runs (the rewrite replaces
+# the inode, so trimming under a live client would send its output into an
+# unlinked file). A healthy client never exits, so a long-lived deployment does
+# not reach the trim and MAX_LOG_LINES does not bound it — the trim bounds a
+# crash-looping client, which is the case that actually produces volume. If the
+# steady-state log ever needs bounding, rotate it out of band (logrotate with
+# copytruncate) rather than trimming from in here.
 #
 # Exit codes: 0 ok (client exited cleanly, or another instance holds the lock,
 #             or the stop marker is present) · 1 usage/arg error
@@ -73,7 +99,7 @@ set -uo pipefail
 # /usr/sbin is listed for portability, not because this box needs it: Gentoo's
 # usrmerge makes /usr/sbin a symlink to bin here, so flock resolves through
 # /usr/bin either way. That is why the suite's minimal-PATH case cannot be
-# reddened by dropping /usr/sbin from this line (SABOTAGE_RECORDS S28, a
+# reddened by dropping /usr/sbin from this line (SABOTAGE_RECORDS S28a, a
 # measured zero) — the pin still matters on a host where the two differ.
 export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 export LANG="${LANG:-C.UTF-8}"
@@ -99,6 +125,7 @@ MAX_LOG_LINES="${ATHENA_INBOX_CLIENT_MAX_LOG_LINES:-2000}"
 
 LOG="${STATE_DIR}/athena-inbox-client.log"
 PIDFILE="${STATE_DIR}/athena-inbox-client.pid"
+CLIENT_PIDFILE="${STATE_DIR}/athena-inbox-client.client.pid"
 STOPFILE="${STATE_DIR}/athena-inbox-client.stopped"
 STOP_NOTICE="${STATE_DIR}/athena-inbox-client.stopped.notified"
 
@@ -185,6 +212,42 @@ printf '%s\n' "$$" >"$PIDFILE" 2>/dev/null || true
 
 say "supervising $LAUNCHER (pid $$)"
 
+# ---- adopt the wreckage of a SIGKILLed supervisor --------------------------
+# The lock says "a supervisor is alive" (the client is started with fd 9 closed
+# so it cannot hold the lock itself — otherwise an orphan would keep the lock
+# forever and every later cron tick would no-op in silence, which is precisely
+# the unsupervised-client state this whole facility exists to prevent).
+#
+# But closing fd 9 alone trades one failure for a worse one: after `kill -9` of
+# the supervisor the orphaned client keeps running AND the next invocation is
+# free to take the lock and start a SECOND client — two writers on an inbox the
+# delivery contract says has exactly one designated consumer. So the client's
+# own pid is tracked separately, and a live orphan is terminated before a new
+# client is started. Safe to do unconditionally here: we hold the exclusive
+# lock, so no other supervisor can be racing us for it.
+#
+# SIGKILL is the realistic way to get here — it skips the reaper by design.
+reap_orphaned_client() {
+  local opid
+  [ -f "$CLIENT_PIDFILE" ] || return 0
+  opid="$(tr -d '[:space:]' <"$CLIENT_PIDFILE" 2>/dev/null)"
+  rm -f "$CLIENT_PIDFILE" 2>/dev/null
+  case "$opid" in ''|*[!0-9]*) return 0 ;; esac
+  kill -0 "$opid" 2>/dev/null || return 0
+  say "found an orphaned client (pid ${opid}) left by a supervisor that died without reaping;" \
+      "terminating it before starting a new one, so the inbox never has two writers"
+  kill "$opid" 2>/dev/null
+  # Block on it rather than polling, bounded so a wedged client cannot hang the
+  # supervisor; if it outlives the grace period, SIGKILL it.
+  timeout 10 tail --pid="$opid" -f /dev/null >/dev/null 2>&1
+  if kill -0 "$opid" 2>/dev/null; then
+    say "orphaned client ${opid} ignored SIGTERM; sending SIGKILL"
+    kill -9 "$opid" 2>/dev/null
+  fi
+  return 0
+}
+reap_orphaned_client
+
 # ---- supervise -------------------------------------------------------------
 backoff="$MIN_BACKOFF"
 restarts=0
@@ -210,11 +273,17 @@ while :; do
   trim_log
   started="$(date +%s)"
 
-  "$LAUNCHER" >>"$LOG" 2>&1 &
+  # 9>&- is load-bearing, not hygiene: without it the client inherits the open
+  # lock descriptor and an orphan would hold the flock for its whole life, so
+  # every later invocation would exit 0 in silence and nothing would ever
+  # supervise again. See reap_orphaned_client above for the other half.
+  "$LAUNCHER" 9>&- >>"$LOG" 2>&1 &
   child=$!
+  printf '%s\n' "$child" >"$CLIENT_PIDFILE" 2>/dev/null || true
   wait "$child"
   rc=$?
   child=""
+  rm -f "$CLIENT_PIDFILE" 2>/dev/null || true
 
   ran=$(( $(date +%s) - started ))
 
@@ -261,7 +330,7 @@ while :; do
   # recovery — "kill the pid in the pidfile" — would appear to do nothing for
   # five minutes. Parking the pid in `child` also means the existing reaper
   # cleans the sleep up, so nothing is left behind.
-  sleep "$backoff" &
+  sleep "$backoff" 9>&- &
   child=$!
   wait "$child"
   child=""

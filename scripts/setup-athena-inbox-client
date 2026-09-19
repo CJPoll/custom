@@ -20,6 +20,7 @@
 # merged yet, install correctly REFUSES (exit 2) because the main checkout has
 # no runner to schedule. Install after the merge, from anywhere.
 #
+# The two entries are:
 #
 #   @reboot          <runner>   start the supervisor when the box comes up
 #   */5 * * * *      <runner>   relaunch it if it ever died
@@ -32,7 +33,9 @@
 # Idempotent. The crontab is edited read-modify-write: every line mentioning the
 # runner's absolute path is filtered out and the two canonical entries are
 # re-appended. Unrelated entries — notably the shipwright's hourly line — are
-# preserved byte for byte.
+# preserved verbatim, with one documented exception: blank lines are dropped,
+# because the filter normalises whitespace-only lines away. Comments and every
+# real entry survive unchanged.
 #
 # Usage:
 #   setup-athena-inbox-client [--install] [--dry-run]
@@ -167,7 +170,24 @@ put_crontab() {
     printf '%s\n' "$1" | sed 's/^/    /'
     return 0
   fi
-  printf '%s\n' "$1" | crontab -
+  # The status MUST be checked. This script runs without `set -e` (so a failed
+  # probe does not abort a report), which means an unchecked `crontab -` failure
+  # would fall straight through to the "installed:" message and exit 0 — the
+  # installer would claim success while leaving the client unscheduled. That is
+  # the exact silent-failure class this facility exists to close, and it is the
+  # LIKELY failure here: the per-user spool dir being missing or wrong is the
+  # known breakage on this box, and this script deliberately does not carry
+  # setup-shipwright-cron's root repair for it.
+  if printf '%s\n' "$1" | crontab -; then
+    return 0
+  fi
+  echo "error: writing the crontab failed — nothing was installed or removed." >&2
+  echo "  Fix: the per-user spool dir is the usual cause (crontab says something like" \
+       "'\"/var/spool/cron/crontabs\" is not a directory, bailing out')." \
+       "scripts/setup-shipwright-cron owns the root repair for that spool dir — run it" \
+       "once (it needs sudo, so it is Cody's to run), then re-run this script and" \
+       "confirm with 'scripts/setup-athena-inbox-client --check'." >&2
+  exit 2
 }
 
 # Everything in the crontab that is NOT one of our entries, blank lines dropped.

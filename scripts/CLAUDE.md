@@ -153,7 +153,19 @@ loop above.
   `~/.local/state/athena-inbox-client.stopped` and refuses to start — on this
   and every later invocation — until a human deletes the fragment and removes
   the marker. Any other non-zero exit relaunches with capped exponential
-  backoff. SIGTERM/SIGINT reap the client and stop the supervisor.
+  backoff. SIGTERM/SIGINT reap the client and stop the supervisor — but once the
+  crontab entries are installed that stops only *that* supervisor, since the
+  `*/5` line starts a new one within five minutes. **To stop the service, run
+  `--remove` first, then kill the pid.** Do not repurpose the `.stopped` marker
+  as an off switch: it means "an inbox file is corrupt", and overloading it
+  makes a real partial write indistinguishable from a deliberate stop.
+  A `kill -9` skips the reaper and orphans the client; the next supervisor
+  detects the orphan by its recorded pid and terminates it before starting a
+  new one, so the inbox never gets a second writer.
+  The log is trimmed only *between* client runs — a healthy client never exits,
+  so `MAX_LOG_LINES` bounds a crash-looping client rather than the steady state.
+  Rotate out of band (logrotate `copytruncate`) if the steady-state log ever
+  needs bounding.
 - `setup-athena-inbox-client` — the committed idempotent installer:
   `--install` (default) · `--check` · `--dry-run` · `--remove` · `--self-test` ·
   `-h`, order-independent. It installs `@reboot` and `*/5 * * * *` entries,
