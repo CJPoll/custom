@@ -530,3 +530,11 @@ asking what happens when the input is missing rather than wrong.
   and was load-bearing for this very review — three BLOCKED verdicts printed
   no findings before it — so it is left here and flagged to the admiral as a
   split-or-keep call at merge time rather than decided unilaterally.
+
+**Later (2026-09-19):** the gate change this record describes — declaring the
+two dark suites by hand and widening the "every self-test on disk is declared"
+rule to three globs — was **superseded by DND-209** (`harness-gate` discovers
+and runs every `**/test/self-test.sh` repo-wide, scoped to committed source).
+DND-209 landed on main while this branch was in review and its discovery
+already covers both suites, so the hand-declaration was dropped in the merge.
+The finding that produced it stands: this suite was dark, and nothing ran it.
