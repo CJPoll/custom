@@ -132,6 +132,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd -- "${HERE}/../.." && pwd -P)"
 STATUS_BIN="${REPO_DIR}/ai/skills/athena:inbox/bin/inbox-status"
 READ_BIN="${REPO_DIR}/ai/skills/athena:inbox/bin/read-inbox"
+DOCTOR_BIN="${REPO_DIR}/ai/skills/athena:inbox/bin/inbox-doctor"
 
 LOG_MAX_LINES=200
 # Six hours: D6's window. Overridable for the self-test, which cannot wait.
@@ -148,6 +149,14 @@ case "${WARN_INTERVAL_SECONDS}" in ''|*[!0-9]*) WARN_INTERVAL_SECONDS=21600 ;; e
 # any delay a person would tolerate at session start.
 STATUS_TIMEOUT_SECONDS="${ATHENA_INBOX_STATUS_TIMEOUT_SECONDS:-10}"
 case "${STATUS_TIMEOUT_SECONDS}" in ''|*[!0-9]*) STATUS_TIMEOUT_SECONDS=10 ;; esac
+# The delivery-chain health line (DND-190) is ON by default; set
+# ATHENA_INBOX_DOCTOR_LINE=0 to opt out (the doctor still runs when invoked by
+# hand -- this only suppresses the unprompted SessionStart sentence). The
+# doctor's own suite drives every fault case directly; a repo's unrelated hook
+# tests set this to 0 so a fault in the doctor's minimal fixture cannot leak a
+# line into a case asserting "no stdout".
+DOCTOR_LINE_ENABLED=1
+case "${ATHENA_INBOX_DOCTOR_LINE:-1}" in 0|off|no) DOCTOR_LINE_ENABLED=0 ;; esac
 
 usage() {
   sed -n '2,/^#--- end usage ---$/p' "${BASH_SOURCE[0]}" \
@@ -310,6 +319,14 @@ if [ -n "${PROJECT_HASH}" ]; then
   SUCCESS_MARKER="${SEEN_DIR}/${PROJECT_HASH}.success"
   WARN_MARKER="${SEEN_DIR}/${PROJECT_HASH}.warn"
   HEALTH_WARN_MARKER="${SEEN_DIR}/${PROJECT_HASH}.health-warn"
+  # A THIRD downstream concern with its OWN rate limit: "inbox-doctor found the
+  # delivery chain unhealthy" is neither "the poll is broken" (WARN_MARKER) nor
+  # "a declared channel has never received" (HEALTH_WARN_MARKER). A client the
+  # supervisor stopped, a config override that names no live instance, a cron
+  # entry that fell out -- those are chain faults the doctor sees and the count
+  # cannot, and merging their marker with either of the others lets one chronic
+  # concern rate-limit the other into silence for a whole window (walt_ui S14).
+  DOCTOR_WARN_MARKER="${SEEN_DIR}/${PROJECT_HASH}.doctor-warn"
   SEEN_MARKER="${SEEN_DIR}/${PROJECT_HASH}.seen"
 else
   # Degraded, and said so above. The $HOME-level names are the old shared ones:
@@ -318,6 +335,7 @@ else
   SUCCESS_MARKER="${MARKER_DIR}/athena-inbox-last-success"
   WARN_MARKER="${MARKER_DIR}/athena-inbox-last-warn"
   HEALTH_WARN_MARKER="${MARKER_DIR}/athena-inbox-last-health-warn"
+  DOCTOR_WARN_MARKER="${MARKER_DIR}/athena-inbox-last-doctor-warn"
   SEEN_MARKER=""
 fi
 # The vanished-entry warning is a DIFFERENT CONCERN from the outage warning
@@ -542,6 +560,74 @@ if [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 1 ]; then
   [ -z "${HEALTH_TEXT}" ] && unstamp "${HEALTH_WARN_MARKER}"
 fi
 
+# --- the delivery-chain health line ----------------------------------------
+#
+# inbox-doctor (DND-190) is the one tool that LOOKS at every link -- the client,
+# its config, its cron, the server override -- rather than just counting what
+# arrived. When it reports anything worse than `ok`, this hook folds ONE fixed
+# sentence into the SAME JSON object (never a bare text line into a JSON channel
+# -- walt_ui M7), rate-limited by its OWN marker.
+#
+# ONLY ON THE OPTED-IN PATH. The doctor's machine-global findings (a stopped
+# client, a broken override) are real, but nagging about them in every repo on
+# the machine is the noise that makes a real notice invisible -- the same reason
+# the count line is gated. A repo that never opted in stays silent.
+#
+# COUNTS ONLY, NO NAMES. The sentence is fixed; it carries no channel name, no
+# message body, no token, and no server hostname. The doctor's own --json is
+# read for exactly one boolean (`summary.healthy`) and one severity, both
+# integers -- a peer-chosen string never reaches this file. `na` findings are
+# NOT "worse than ok": a check that could not run is not a fault to announce.
+# Bounded by its OWN copy of the status timeout -- so on the actionable path
+# SessionStart can spend up to two of these budgets back to back (the status
+# read, then the doctor), still bounded and far under any human-noticed delay.
+#
+# --no-server IS LOAD-BEARING, not a tidiness flag. Without it, a machine that
+# has enabled the server check (ATHENA_INBOX_DOCTOR_API_* set) would fire an
+# authenticated curl on EVERY session start -- the exact unprompted network
+# coupling this facility must not have -- and a slow server would eat the whole
+# timeout budget. With it the SessionStart path is guaranteed local-only (file
+# stats, a crontab read, one ruby); the server picture is for the owner running
+# the doctor by hand.
+#
+# A DOCTOR THAT COULD NOT RUN IS LOGGED, NOT SILENT (missing-looks-empty). A
+# killed or garbled run leaves DOCTOR_JSON unusable; that is a different fact
+# from "healthy", and it goes to the reason log so a silence has a trail --
+# never to the pre-prompt notice, which stays counts-only.
+DOCTOR_TEXT=""
+DOCTOR_HEALTHY=""
+if [ "${DOCTOR_LINE_ENABLED}" -eq 1 ] && [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 1 ] && [ -x "${DOCTOR_BIN}" ]; then
+  DOCTOR_JSON="$(timeout "${STATUS_TIMEOUT_SECONDS}" "${DOCTOR_BIN}" --json --no-server 2>/dev/null)"
+  if [ -n "${DOCTOR_JSON}" ] \
+     && printf '%s' "${DOCTOR_JSON}" | jq -e 'type == "object" and (.summary | type == "object") and (.summary.healthy | type == "boolean")' >/dev/null 2>&1; then
+    if printf '%s' "${DOCTOR_JSON}" | jq -e '.summary.healthy == false' >/dev/null 2>&1; then
+      # The reason is fixed and chosen from the WORST state only -- a fail reads
+      # differently from a warn, and neither names the link (that is the
+      # doctor's job when the reader runs it).
+      if printf '%s' "${DOCTOR_JSON}" | jq -e '.summary.fail > 0' >/dev/null 2>&1; then
+        DOCTOR_TEXT="athena:inbox: the delivery chain is unhealthy: a link is broken — run inbox-doctor."
+      else
+        DOCTOR_TEXT="athena:inbox: the delivery chain is unhealthy: a link needs attention — run inbox-doctor."
+      fi
+    else
+      DOCTOR_HEALTHY=1
+    fi
+  else
+    log_reason "inbox-doctor produced no usable --json (timed out or errored), so the delivery-chain health line was skipped this session. Fix: run ai/skills/athena:inbox/bin/inbox-doctor from this project to see why."
+  fi
+fi
+
+# Rate-limited by ITS OWN marker, never the poll's and never the count's.
+if [ -n "${DOCTOR_TEXT}" ] && ! marker_is_stale "${DOCTOR_WARN_MARKER}" "${WARN_INTERVAL_SECONDS}"; then
+  DOCTOR_TEXT=""
+fi
+[ -n "${DOCTOR_TEXT}" ] && stamp "${DOCTOR_WARN_MARKER}"
+# S21 discipline: a chain that came back healthy clears its own marker, so the
+# next unhealthy period earns a fresh warning rather than inheriting this one's
+# rate limit. Cleared only on a genuine healthy verdict, never on a rate-limited
+# suppression (DOCTOR_TEXT empty because throttled is not the same as healthy).
+[ -n "${DOCTOR_HEALTHY}" ] && unstamp "${DOCTOR_WARN_MARKER}"
+
 MESSAGE=""
 if [ -n "${COUNTS_TEXT}" ]; then
   # The pointer names a step that EXISTS. read-inbox ships with a later ticket;
@@ -559,6 +645,13 @@ if [ -n "${WARN_TEXT}" ]; then
   # channel is exactly the malformed stdout this contract refuses.
   MESSAGE="${MESSAGE:+${MESSAGE}
 }${WARN_TEXT}"
+fi
+if [ -n "${DOCTOR_TEXT}" ]; then
+  # Same JSON object, its own line -- and its own rate-limit marker, stamped
+  # above, so it neither suppresses nor is suppressed by the count's or the
+  # poll's markers.
+  MESSAGE="${MESSAGE:+${MESSAGE}
+}${DOCTOR_TEXT}"
 fi
 
 # Zero unread and nothing wrong: NO STDOUT AT ALL. Unprompted output that says

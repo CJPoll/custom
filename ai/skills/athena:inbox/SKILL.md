@@ -1,6 +1,6 @@
 ---
 name: athena:inbox
-description: Read and write Athena's own machine-local message inboxes — the Slack delivery log and the agent-mail maildirs — scoped to the project the session is rooted in. Use to check whether anything has arrived for THIS project, to understand why a channel is silent, to reply on an agent-mail channel, or whenever a session-start notice reports a count of unread inbox messages. Counting (inbox-status), reading + acking (read-inbox, behind a designated-consumer lock, with bodies fenced as untrusted), blocking until a doorbell rings (inbox-wait) and sending (send-mail, on a maildir channel) all work.
+description: Read and write Athena's own machine-local message inboxes — the Slack delivery log and the agent-mail maildirs — scoped to the project the session is rooted in. Use to check whether anything has arrived for THIS project, to understand why a channel is silent, to reply on an agent-mail channel, or whenever a session-start notice reports a count of unread inbox messages. Counting (inbox-status), reading + acking (read-inbox, behind a designated-consumer lock, with bodies fenced as untrusted), blocking until a doorbell rings (inbox-wait), sending (send-mail, on a maildir channel), and diagnosing why the whole Slack->Athena delivery chain is silent (inbox-doctor) all work.
 ---
 
 # athena:inbox
@@ -17,8 +17,9 @@ sitting in, and how many are unread.
 
 **Status: every command described here exists.** `bin/inbox-status` (counting,
 DND-183), `bin/read-inbox` (read + ack + the consumer lock, DND-184),
-`bin/inbox-wait` (the doorbell waiter, DND-185) and `bin/send-mail` (the
-writer's half of a maildir channel, DND-187) all work.
+`bin/inbox-wait` (the doorbell waiter, DND-185), `bin/send-mail` (the
+writer's half of a maildir channel, DND-187) and `bin/inbox-doctor` (the
+read-only chain-liveness diagnostic, DND-190) all work.
 
 **Later (2026-09-19):** this paragraph, and the `description` in the
 frontmatter above, previously said `inbox-wait` and then `send-mail` did
@@ -348,6 +349,44 @@ entry, or an entry declaring no channels, is refused immediately with a `Fix:`
 clause. Blocking on nothing and waiting quietly for mail are indistinguishable
 from the outside, and only one of them is working.
 
+### `bin/inbox-doctor`
+
+```
+inbox-doctor              human-readable report, one line per link
+inbox-doctor --json       the same findings as one object (for the SessionStart hook)
+inbox-doctor --no-server  force the server check to n-a (no network) — the hook uses this
+```
+
+The one tool that LOOKS at every link rather than counting what arrived: the
+client and its supervisor, the config, the cron, the tenancy registry, and — when
+a token is configured — the server. Run it when a channel is silent and you need
+to know whether the silence is "nothing arrived" or "a link is down". It is
+read-only: it never acks, rotates, sweeps, fixes a mode, or reaps a lock, and it
+prints only channel and registry FACTS, never a message body.
+
+**Four states, and `n-a` is not `ok`.** Each check reports `ok` / `warn` /
+`fail` / `n-a`. `n-a` means the check could not run — no root, no `projects/`, no
+client config, a channel never provisioned, no API token — and it is never folded
+into `ok`. The exit code is `0` unless something is `fail`; a `warn` or an `n-a`
+alone keeps it `0`.
+
+**The silent-override check is why it exists.** The client resolves a config
+`instances` override by the instance name the server sends, so a key that matches
+no live instance is never looked up and its override is inert, with no error
+anywhere. With a server token configured, the doctor cross-checks the config
+against the server's live instances and flags exactly that.
+
+**The server check is opt-in.** Set `ATHENA_INBOX_DOCTOR_API_BASE`,
+`ATHENA_INBOX_DOCTOR_MACHINE_ID` and `ATHENA_INBOX_DOCTOR_API_TOKEN_FILE` (a 0600
+file holding a user API token) to enable it; without them it is `n-a`, not a
+failure. The token reaches `curl` only through a `umask 077` config file, never
+in argv and never logged. The doctor mints and stores nothing.
+
+The SessionStart hook runs `inbox-doctor --json --no-server` (never a network
+request on that path) and, when the chain is not `healthy`, folds one
+rate-limited sentence into its notice; set `ATHENA_INBOX_DOCTOR_LINE=0` to opt
+out of that line (the command still works by hand).
+
 ## Writing on a maildir channel
 
 The mechanics are one half; these are the other, and they are what the two
@@ -388,16 +427,39 @@ agents on the live channel did by hand for fifty-one messages.
 
 | Bucket | Files |
 |---|---|
-| Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` |
-| Side effects | `lib/fs.sh` (the only file I/O, and the only `git` call) · `lib/lock.sh` · `lib/session.sh` |
-| Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes |
-| Framework | `bin/inbox-status` · `bin/read-inbox` |
+| Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` · `lib/doctor.sh`'s `doctor_state_*` decisions |
+| Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the message-handling path**) · `lib/lock.sh` · `lib/session.sh` |
+| Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes · `lib/doctor.sh`'s `doctor_check_*` — the diagnostic orchestration (a **declared deviation** — see below) |
+| Framework | `bin/inbox-status` · `bin/read-inbox` · `bin/inbox-doctor` |
 
 The domain files take strings and return strings. That is what makes the
 counting and parsing rules provable with no fixtures on disk, which is the
-whole reason for splitting shell this way. `lib/fence.sh` is the one declared
+whole reason for splitting shell this way. `lib/fence.sh` is one declared
 deviation: it reads `/dev/urandom` for its nonce, and takes an injected one so
 a caller that needs determinism has a way to get it.
+
+`lib/doctor.sh`'s `doctor_check_*` layer is the other, and the deviation is
+twofold and deliberate. It is the doctor's **manager** — it orchestrates the
+checks — and a manager normally coordinates side effects through an adapter. The
+doctor does two things a strict reading forbids, both because a diagnostic's job
+is to reach across every layer:
+
+1. **It performs its own read-only probes** rather than routing them through
+   `fs.sh` — a supervisor pidfile, the crontab, an HTTP health endpoint, `ruby`
+   for the committed registry list. These are subsystems `fs.sh` has no business
+   knowing about, and folding them into the message-handling adapter would bloat
+   it with concerns no reader or writer shares.
+2. **It calls back into `lib/inbox.sh` (the manager)** — `inbox_entry`,
+   `inbox_field` — to resolve the matched entry and its channel paths. Reusing
+   the exact resolution every other command takes is the point: a second
+   resolver is how the diagnostic would drift from the tool it diagnoses.
+
+What is kept clean is the DECISION layer: the pure `doctor_state_*` functions
+(mode, future stamp, connection verdict, override match) take facts and return a
+state with no I/O, and are what the suite proves branch-by-branch. Every probe
+is steerable by an environment override, which is what lets the suite drive the
+whole tool against temp dirs and canned JSON without opening a socket or reading
+a real pidfile.
 
 **Later (2026-09-18):** This section previously read "*this slice writes
 nothing* — `lib/fs.sh` contains no state writer at all, so 'counting never
@@ -406,6 +468,16 @@ that guarantee: `fs.sh` now holds the atomic state writer, rotation, the sweep
 and the maildir ack. What replaces it is the **designated-consumer gate** — a
 subagent or a session that does not hold the channel's `flock` may count and
 may `--peek`, and neither advances anything.
+
+**Later (2026-09-19):** the table's Side-effects row previously read
+"`lib/fs.sh` (the only file I/O, and the only `git` call)", and the paragraph
+above named `lib/fence.sh` as "the one declared deviation". DND-190 added
+`bin/inbox-doctor`, a diagnostic that necessarily probes subsystems `fs.sh` does
+not own (a pidfile, the crontab, an HTTP endpoint, `ruby`), so both claims are
+narrowed here: `fs.sh` is the only file I/O *on the message-handling path*, and
+`doctor.sh`'s `doctor_check_*` is a *second* declared deviation (documented just
+above). The guarantee `fs.sh` still carries in full — that nothing on the
+read/count/ack path does I/O outside it — is unchanged.
 
 ## Tests
 

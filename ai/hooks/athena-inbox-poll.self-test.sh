@@ -46,10 +46,51 @@ trap cleanup EXIT INT TERM
 # A fingerprint of the real marker family BEFORE anything runs. The whole suite
 # is worthless if it silently mutates the live rate-limit state -- and a bug
 # that did so would look exactly like a green run.
+# DELIBERATELY EXCLUDES the two MACHINE-GLOBAL markers (athena-inbox-last-poll,
+# athena-inbox-poll.log). Every hook run stamps the attempt marker and appends to
+# the log as its FIRST action, and this box runs the real SessionStart hook: a
+# concurrent real session firing DURING this suite bumps those two under the real
+# $HOME and used to false-fail this guard (measured 2026-09-19 -- a real hook
+# raced the slower DND-190 suite). That is NOT this suite writing them: every
+# run asserts a fake $HOME (assert_fake_home hard-exits otherwise), so the suite
+# structurally cannot touch the real ~/.claude at all. This is not a weakening:
+# the class of defect the guard catches -- the suite leaking a write to real
+# marker state -- would land under the real $HOME and trip the RETAINED markers
+# (the per-project success/warn/health family under athena-inbox-seen, and
+# settings.json). The two excluded files are exactly the ones a legitimate
+# concurrent process updates on every run, so keeping them only measured the
+# neighbour.
+#
+# WHY EXCLUDING THESE TWO IS NOT A WEAKENING (the doctrine's behavioural test:
+# is the same class of defect -- the suite mutating real rate-limit state --
+# still caught, and does it still block?). Yes, and by a STRICTLY stronger guard:
+#   1. EVERY hook invocation in this suite is preceded by assert_fake_home: the
+#      two wrappers run_hook (line ~152) and run_stub_hook (line ~237) call it
+#      first, and the one direct invocation (the FIFO/bounded-stdin case) calls
+#      it on the line above the run. assert_fake_home hard-exits (the whole suite
+#      FAILS) unless $HOME is a tmpdir and != the real HOME. Grep confirms there
+#      is no other path to ${HOOK}/${STUB_HOOK}.
+#   2. The hook only ever writes under ${HOME}/.claude (MARKER_DIR, hook:186);
+#      there is no absolute real-HOME path anywhere in it.
+#   So a leak to the real markers CANNOT happen without assert_fake_home aborting
+#   first -- the primary guard is comprehensive (every marker, incl. these two)
+#   and fires before any write. The `assert_fake_home hard-exits ...` case below
+#   proves that guard actually fails the suite; that is what protects real state.
+# The fingerprint is only a redundant backstop, and on THESE TWO files it is a
+# useless one: a legitimate concurrent real SessionStart hook stamps the poll
+# marker and appends to the log on EVERY run (hook:266 stamps the attempt marker
+# unconditionally, before any branch), and its bytes are indistinguishable from
+# what a (impossible, per above) suite leak would write to the same files -- so
+# watching them could never ATTRIBUTE a change to the suite, only flake on the
+# neighbour (measured 2026-09-19: a real hook raced the slower DND-190 suite and
+# false-failed this guard). The retained markers (the per-project family under
+# athena-inbox-seen, the legacy $HOME fallbacks, settings.json) keep the backstop
+# for the create/remove case; the two excluded globals gave it zero attributable
+# signal and only a false-positive, so removing them subtracts no coverage.
 real_markers_fingerprint() {
   local f
-  for f in athena-inbox-last-poll athena-inbox-last-success athena-inbox-last-warn \
-           athena-inbox-last-health-warn athena-inbox-poll.log athena-inbox-seen \
+  for f in athena-inbox-last-success athena-inbox-last-warn \
+           athena-inbox-last-health-warn athena-inbox-seen \
            settings.json; do
     printf '%s:%s\n' "${f}" "$(stat -c %Y -- "${REAL_HOME}/.claude/${f}" 2>/dev/null || printf 'absent')"
   done
@@ -85,6 +126,12 @@ setup_case() {
   # not silently test nothing instead.
   export ATHENA_INBOX_STALE_SECONDS=3600
   export ATHENA_INBOX_WARN_INTERVAL_SECONDS=3600
+  # The delivery-chain health line is OFF by default in these cases: they test
+  # the COUNT/marker plumbing against minimal fixtures the doctor would rightly
+  # call unhealthy (an undeclared entry, a 0755 projects/), and a line leaking
+  # into a "no stdout" assertion would be a false failure of THIS suite, not of
+  # the hook. The DND-190 cases below turn it on explicitly.
+  export ATHENA_INBOX_DOCTOR_LINE=0
 }
 
 # The one assertion that makes every other case safe to run.
@@ -189,6 +236,14 @@ stub_repo() { # <inbox-status script body>  [--with-read-inbox]
     chmod +x "${stub}/ai/skills/athena:inbox/bin/read-inbox"
   fi
   STUB_HOOK="${stub}/ai/hooks/athena-inbox-poll.sh"
+}
+
+# stub_doctor <body>  -- drop a stub inbox-doctor into the current stub tree, so
+# the hook's DOCTOR_BIN (resolved relative to the copied tree) runs it. Used to
+# exercise the "doctor could not run" branch, which the real doctor never takes.
+stub_doctor() {
+  local d="${CASE_DIR}/stubrepo/ai/skills/athena:inbox/bin/inbox-doctor"
+  printf '%s\n' "$1" > "${d}"; chmod +x "${d}"
 }
 
 run_stub_hook() {
@@ -1315,6 +1370,144 @@ assert_contains "-h states the counts-only rule" "WHAT IT NEVER PRINTS" "${OUT}"
 # otherwise degrade into permanent, contract-conformant silence.
 if [ -x "${STATUS_BIN}" ]; then ok "the wrapped command exists where the hook resolves it"
 else bad "the wrapped command exists where the hook resolves it" "not executable: ${STATUS_BIN}"; fi
+
+# ---------------------------------------------------------------------------
+# DND-190: the delivery-chain health line.
+#
+# The hook runs inbox-doctor and, when it reports worse than `ok`, folds ONE
+# fixed sentence into the SAME JSON object, rate-limited by its own marker,
+# separate from the count's and the poll's. The doctor's probes are stubbed
+# here exactly as its own suite stubs them, so no socket is opened and the real
+# client/state is never read.
+# ---------------------------------------------------------------------------
+
+# Make the doctor see an otherwise-HEALTHY chain, so a single deliberate fault
+# is what flips it -- and the assertions are about the hook's plumbing, not the
+# doctor's verdict logic (that is doctor/self-test.sh's job).
+doctor_healthy_env() {
+  export ATHENA_INBOX_DOCTOR_LINE=1   # this is the feature under test here
+  chmod 700 "${ATHENA_INBOX_ROOT}" "${ATHENA_INBOX_ROOT}/projects"
+  register "${LOG_CHANNEL}"
+  local common; common="$(cd "${REPO}" && realpath "$(git rev-parse --git-common-dir)")"
+  jq -n --arg r "${common}" \
+    '{v:1,projects:[{file:"p.json",entry:{v:1,repo:$r,channels:{slack:{kind:"log",path:"p-slack.jsonl",dedupe:["event_id","channel+ts"],schema_v:[1]}}}}]}' \
+    > "${CASE_DIR}/committed.json"
+  export ATHENA_INBOX_REGISTRY="${CASE_DIR}/committed.json"
+  export ATHENA_INBOX_DOCTOR_CRON_CHECK="true"
+  export ATHENA_INBOX_CLIENT_STATE_DIR="${CASE_DIR}/cstate"; mkdir -p "${ATHENA_INBOX_CLIENT_STATE_DIR}"
+  # No client config: this machine only READS delivered mail, so client-config
+  # and client-running are `na` -- which never breaks `healthy`. That keeps the
+  # baseline healthy and lets ONE deliberate fault (a stop marker) flip it.
+  export ATHENA_INBOX_CLIENT_CONFIG="${CASE_DIR}/no-config.json"
+  # A delivered line so the channel is not "never delivered".
+  printf '{"v":1,"event_id":"Ev1","channel":"D01","ts":"1700000001.1"}\n' > "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
+  chmod 600 "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
+}
+
+# Case: client stopped deliberately -> exactly one unhealthy line, same object.
+setup_case
+doctor_healthy_env
+printf 'p-slack.jsonl ends in a partial line\n' > "${ATHENA_INBOX_CLIENT_STATE_DIR}/athena-inbox-client.stopped"
+plant_log_lines   # so the count line is present too
+run_hook
+assert_one_json_object "stopped chain: still exactly one JSON object" "${OUT}"
+CTX="$(context_of "${OUT}")"
+assert_contains "stopped chain: the doctor line is present" "delivery chain is unhealthy" "${CTX}"
+assert_contains "stopped chain: it points at inbox-doctor" "run inbox-doctor" "${CTX}"
+assert_not_contains "stopped chain: no body/name leaks (only the fixed sentence)" "partial line" "${CTX}"
+assert_contains "stopped chain: the COUNT line still shows (not suppressed)" "new in" "${CTX}"
+assert_file "stopped chain: the doctor marker was stamped" "$(pm doctor-warn)"
+
+# Case: the doctor's marker rate-limits its OWN line, and does NOT suppress the
+# count's line. Second run in the SAME home, marker fresh -> doctor line gone.
+setup_case
+doctor_healthy_env
+printf 'p-slack.jsonl ends in a partial line\n' > "${ATHENA_INBOX_CLIENT_STATE_DIR}/athena-inbox-client.stopped"
+plant_log_lines
+run_hook
+CTX1="$(context_of "${OUT}")"
+assert_contains "rate-limit: first run has the doctor line" "delivery chain is unhealthy" "${CTX1}"
+run_hook
+CTX2="$(context_of "${OUT}")"
+assert_not_contains "rate-limit: second run suppresses the doctor line" "delivery chain is unhealthy" "${CTX2}"
+assert_contains "rate-limit: second run STILL shows the count line" "new in" "${CTX2}"
+
+# Case: a healthy chain emits no doctor line and clears the doctor marker.
+setup_case
+doctor_healthy_env
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_not_contains "healthy chain: no doctor line" "delivery chain is unhealthy" "${CTX}"
+assert_no_file "healthy chain: the doctor marker is not stamped" "$(pm doctor-warn)"
+# Self-contained: prove the doctor actually RAN and was healthy, not that it
+# failed to run (which would also suppress the line). A could-not-run leaves a
+# "no usable --json" reason in the log; a healthy run does not.
+assert_not_contains "healthy chain: the doctor ran (no could-not-run reason)" "no usable --json" "$(hook_log)"
+
+# Case: the OPTED-IN gate. A repo with NO registry entry never runs the doctor,
+# so even a machine-global fault (a stop marker) produces no line -- nagging in
+# every repo is the noise the gate exists to prevent. Dropping the OPTED_IN
+# guard would surface a line here (the temp root's 0755 projects/ alone makes
+# the doctor unhealthy), so this is the case that proves the gate.
+setup_case
+export ATHENA_INBOX_DOCTOR_LINE=1
+export ATHENA_INBOX_DOCTOR_CRON_CHECK="true"
+export ATHENA_INBOX_CLIENT_STATE_DIR="${CASE_DIR}/cstate"; mkdir -p "${ATHENA_INBOX_CLIENT_STATE_DIR}"
+printf 'partial line\n' > "${ATHENA_INBOX_CLIENT_STATE_DIR}/athena-inbox-client.stopped"
+# deliberately DO NOT register an entry -> this repo is not opted in
+run_hook
+assert_eq "not opted in: no stdout at all (doctor never runs)" "" "${OUT}"
+
+# Case: the opt-out. ATHENA_INBOX_DOCTOR_LINE=0 suppresses the line even on an
+# unhealthy chain (the doctor still works by hand).
+setup_case
+doctor_healthy_env
+export ATHENA_INBOX_DOCTOR_LINE=0
+printf 'partial line\n' > "${ATHENA_INBOX_CLIENT_STATE_DIR}/athena-inbox-client.stopped"
+plant_log_lines
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_not_contains "opt-out: no doctor line" "delivery chain is unhealthy" "${CTX}"
+assert_contains "opt-out: the count line still shows" "new in" "${CTX}"
+
+# Case: the fail wording. A client config present with NO pidfile -> the doctor
+# reports client-running FAIL -> the line reads "a link is broken", not
+# "needs attention".
+setup_case
+doctor_healthy_env
+export ATHENA_INBOX_CLIENT_CONFIG="${CASE_DIR}/present-config.json"
+printf '{"instances":{}}' > "${ATHENA_INBOX_CLIENT_CONFIG}"; chmod 600 "${ATHENA_INBOX_CLIENT_CONFIG}"
+# state dir exists but holds no pidfile -> client-running fail
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "fail wording: 'a link is broken'" "a link is broken" "${CTX}"
+
+# Case: the doctor could NOT run (timed out / errored / non-JSON). The hook must
+# emit NO health line (missing is not "healthy") AND log a reason, so the
+# silence has a trail. Driven through a stub tree: inbox-status reports an
+# opted-in count, inbox-doctor exits 1 with non-JSON garbage.
+setup_case
+export ATHENA_INBOX_DOCTOR_LINE=1
+stub_repo "${STUB_OK}"
+stub_doctor '#!/usr/bin/env bash
+echo "not json at all"; exit 1'
+run_stub_hook
+CTX="$(context_of "${OUT}")"
+assert_not_contains "doctor could-not-run: no health line" "delivery chain" "${CTX}"
+assert_contains "doctor could-not-run: the count line still shows" "new in" "${CTX}"
+assert_contains "doctor could-not-run: a reason is logged" "no usable --json" "$(hook_log)"
+
+unset ATHENA_INBOX_REGISTRY ATHENA_INBOX_DOCTOR_CRON_CHECK ATHENA_INBOX_CLIENT_STATE_DIR ATHENA_INBOX_CLIENT_CONFIG ATHENA_INBOX_DOCTOR_LINE
+
+# The PRIMARY guard against a real-$HOME leak: assert_fake_home hard-exits when
+# $HOME is not a fresh tmpdir. This is what actually protects the real markers
+# (the fingerprint below is only a redundant backstop, per its own comment), so
+# prove it fails the run rather than trusting the comment. A subshell with $HOME
+# forced to a non-tmpdir, and again to the real $HOME, must both exit non-zero.
+( HOME="/etc"; assert_fake_home ) >/dev/null 2>&1
+assert_eq "assert_fake_home hard-exits when \$HOME is not a tmpdir" "1" "$?"
+( HOME="${REAL_HOME}"; assert_fake_home ) >/dev/null 2>&1
+assert_eq "assert_fake_home hard-exits when \$HOME is the real HOME" "1" "$?"
 
 # The real HOME was never a target — by fingerprint, not by inspection.
 HOME="${REAL_HOME}"

@@ -1471,3 +1471,99 @@ live, with `inotifywait -qq -e modify` blocked on a doorbell nothing would ever
 ring. It is now proven through `--dry-run`, which cannot block. A test whose
 failure mode is a ten-minute hang teaches the next person to shorten the
 timeout instead of reading the failure.
+
+## 2026-09-19 — DND-190: inbox-doctor (the chain-liveness diagnostic)
+
+- **Domain:** athena:inbox (the read-only whole-chain diagnostic)
+- **Code under test:** `lib/doctor.sh`, `bin/inbox-doctor`, and the hook's
+  delivery-chain line in `ai/hooks/athena-inbox-poll.sh`
+- **Suite run:** `bash test/doctor/self-test.sh` (70 cases) and
+  `bash ai/hooks/athena-inbox-poll.self-test.sh` (187 cases). No network:
+  the server probe is fed canned JSON through `ATHENA_INBOX_DOCTOR_HEALTH_FILE`,
+  and every other probe is pointed at a `mktemp -d` under the test's control.
+- **Restore:** `git checkout -- <file>` — `lib/doctor.sh` was committed clean
+  before the run, and only that one file was mutated per row, so the checkout
+  could not touch the still-uncommitted contract/SKILL edits. (This is the
+  opposite of DND-183's constraint, where the file was not yet committed and
+  `cp`-from-backup was the only safe restore; here the file IS committed.)
+
+Every row below was applied, run, and confirmed to redden the NAMED case, then
+reverted. Measured zero: **none** — every mutation was caught.
+
+### Code mutations
+
+| # | Mutation | Case that reddened | What it proves |
+|---|---|---|---|
+| S1 | `doctor_state_future`: `-gt` → `-lt` (a future stamp no longer warns) | `future stamp -> warn`, `past stamp -> ok`, `future rotated_at -> warn` | the future-`rotated_at` obligation (a clock set back blocks rotation invisibly) is load-bearing through the pure helper AND its channel caller |
+| S2 | `doctor_state_connected`: `false) -> ok` | `connected false -> warn` (helper and server-check) | a disconnected machine is not reported healthy |
+| S3 | `client-running`: dead pid treated as alive (`if true \|\| doctor_pid_alive`) | `pidfile dead -> fail` | a supervisor pidfile naming a dead pid is a down client, not a running one |
+| S4 | server `connected` extraction reverted to `.connected // empty` | `connected false -> warn` | jq's `//` treats boolean `false` as absent — the bug this line was written to avoid — turning a genuine disconnect into `na` (a false clean) |
+| S5 | `skipped-file`: unparseable-JSON branch `fail` → `ok` | `unterminated json fail` | a failed candidate (which might be a project's own entry) must be reported, not swallowed — the contract's skipped-file obligation |
+| S6 | `doctor_check_lock`: insert `rm -f "${lock}"` before the reapable finding | `lock NOT reaped` | the READ-ONLY hard constraint — a dead-pid lock is reported reapable and left in place, NEVER reaped by the doctor |
+
+### Input classes the fixtures carry (not code mutations — data the tool must survive)
+
+These are asserted directly by the suite rather than by mutating code, because
+each is an input class the fixtures the first pass would otherwise never have
+contained:
+
+- **an unterminated JSON block** — `projects/broken.json` (`{ this is not json`)
+  → `skipped-file` `fail`, named;
+- **a symlinked path** — `projects/linked.json` → `skipped-file` `fail`, named
+  (an entry opened with `O_NOFOLLOW` and a symlink there would silently give the
+  project no channels);
+- **a future timestamp** — `rotated_at: 2099-01-01` → `channel` `warn`
+  ("rotated_at in the future");
+- **git-128-not-a-repo** — the doctor run from a cwd in no git repository →
+  `registry-entry` `na`, never a false `ok` and never a crash.
+
+### Read-only, proven not asserted
+
+After a full `bin/inbox-doctor` run over a delivered channel, the suite checks
+the channel file's md5 is unchanged and no `.state.json` was created — a run
+that advanced an offset or wrote state would redden `channel file unchanged by a
+run` / `no state file written by a run`. S6 above is the same guarantee from the
+lock side.
+
+### Added on the merge-round critic's finding
+
+| # | Mutation | Case that reddened | What it proves |
+|---|---|---|---|
+| S7 | `bin/inbox-doctor` `count_state`: fold `na` into the `ok` tally (`$1==s \|\| ($1=="na" && s=="ok")`) | `summary.ok equals the ok-findings tally` | the ticket's crux -- `na` is never counted as `ok`. The original assertion (`state=="ok" and state=="na"`) was a tautology and caught nothing; the replacement compares `summary.ok`/`summary.na` against the actual per-state finding tallies, and reddens the moment a count folds one state into another. |
+
+### Added on the round-9 critic's finding (dangling-symlink skip)
+
+A dangling symlink registry entry (`<name>.json -> deleted target`) was silently
+skipped by the `[ -e "${f}" ] || continue` loop head in BOTH
+`doctor_check_skipped_files` (`lib/doctor.sh`) and `fs_registry_records`
+(`lib/fs.sh`), because `-e` follows the link and is false for a broken one. So a
+broken entry counted as nothing: the doctor reported `ok skipped-file "every file
+… is a usable registry entry"` and `inbox_channels` reported zero channels
+("not opted in") -- a failed lookup masquerading as an empty one, the exact class
+this ticket exists to prevent.
+
+| # | Mutation / input class | Case that reddened | What it proves |
+|---|---|---|---|
+| S8 | revert the `\|\| [ -L "${f}" ]` guard in `doctor_check_skipped_files` | `dangling symlink entry fail (not skipped)` | the doctor names a dangling-symlink entry as a `fail skipped-file`, never swallows it into a false `ok`. |
+| S9 | revert the `\|\| [ -L "${file}" ]` guard in `fs_registry_records` | `a DANGLING SYMLINK registry file is a failed candidate, not silent zero` | `inbox_channels` refuses (failed candidate, no match) instead of reporting a well-formed zero. |
+
+Both mutations were applied by editing the source in place, the suites run red
+(each 1 failed), then the source restored from an in-memory byte copy (never
+`git checkout` over the working tree) and both suites returned to green
+(doctor 92, status 705).
+
+### Added on the round-10 critic's findings (symlinked repo-root + primary-guard proof)
+
+| # | Mutation | Case that reddened | What it proves |
+|---|---|---|---|
+| S10 | `bin/inbox-doctor`: revert `cd -P … && pwd -P` back to `cd … && pwd` in both `HERE` and `DOCTOR_REPO_DIR` | `symlinked-skills run: root resolved (no 'cannot consult' na)` + `undeclared-entry is not na` | run through a `skills`-segment symlink (as SKILL.md instructs), the bin resolves its own real location so `DOCTOR_REPO_DIR` is the repo, not `$HOME`; without `-P`, `undeclared-live` goes `na "cannot consult"` on a wrongly computed root (missing-looks-empty). |
+
+Round 10 also converted the hook self-test's real-`$HOME` leak guard from an
+implicit backstop to an explicit, tested one: two new cases assert
+`assert_fake_home` hard-exits when `$HOME` is not a fresh tmpdir and when it is
+the real `$HOME`. That is the PRIMARY guard against a real-marker leak (it runs
+before every hook invocation and covers every marker, including the two globals
+the fingerprint excludes); the exclusion of the two globals from the fingerprint
+is therefore not a coverage loss -- see the rationale block above
+`real_markers_fingerprint`. S10 restored from an in-memory byte copy; doctor
+returned to green (94).
