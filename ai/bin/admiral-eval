@@ -1,0 +1,648 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# admiral-eval — a BEHAVIORAL regression eval for the athena-admiral definition.
+# It asserts that a post-shrink admiral still MAKES the right decision at a
+# scripted fleet-state decision point — not merely that an invariant's words are
+# still present somewhere (that is the faithfulness proxy T0/build-agents/
+# check-agent-size already give). The gap this closes: a stage-4 trim can
+# faithfully relocate an invariant's text into a JIT skill whose TRIGGER no
+# longer fires — the words exist, the behavior is gone. See the design at
+# ai/docs/admiral-eval-design.md.
+#
+# Two tiers, ONE runner, ONE baseline:
+#   T1 (deterministic, no model) — hook-stdin cases: pipe a crafted PreToolUse
+#     JSON into ai/hooks/<guard>.sh and assert the deny/allow, exactly like
+#     harness-eval. Reused verbatim for the auth-hook deny (AE-13a).
+#   T2 (model-in-loop) — present the admiral (its real definition, via
+#     `claude -p --agent athena-admiral`) with ONE scripted scenario at a
+#     decision point; it emits a structured decision trailer (NEXT_ACTIONS: /
+#     labeled answer); a DETERMINISTIC scorer asserts the decision. There is NO
+#     LLM-judge scoring tier — the model only PRODUCES a decision; the SCORING is
+#     a deterministic predicate, so a red case is attributable to the admiral's
+#     decision, not to a judge.
+#
+# HERMETICITY (design §2.1) — the eval must NEVER mutate real state. Two guards,
+# both required and both proven in --self-test:
+#   1. Plan-only framing (primary): every scenario ends with an explicit
+#      instruction to output ONLY the decision trailer and call no tool / run no
+#      command / spawn no agent. The admiral is scored on stated intent.
+#   2. Inert sandbox (belt-and-suspenders): the model runs with an isolated HOME
+#      (no MCP config -> Slack/Notion/Agent surfaces unreachable) and a PATH
+#      front-loaded with no-op stubs for gh/glab/gh-athena/glab-athena/docker and
+#      a git wrapper that blocks `push`, so even a model that ignores the framing
+#      cannot merge/DM/teardown/push/spawn.
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/admiral-eval                 list fixtures + the trust model + how to run (no model)
+#   ai/bin/admiral-eval --self-test     verify the scorer/parser/sampling/baseline/sandbox (no model; GATE-WIRED)
+#   ai/bin/admiral-eval --run           execute cases (T1 deterministic; T2 model-in-loop), score, diff
+#                                       vs baseline, exit 1 on regression  (MODEL IN LOOP; NOT in the gate)
+#   ai/bin/admiral-eval --run --runs K          samples-per-T2-case (default 3; majority scores the case)
+#   ai/bin/admiral-eval --run --update-baseline  rewrite ai/eval/admiral-baseline.json (deliberate only)
+#   ai/bin/admiral-eval --run --only AE-05       run one case (local iteration)
+#
+# Adding a case: create ai/eval/admiral-fixtures/<AE-NN-name>/meta plus scenario.md
+# (T2) or an input.json (T1 hook-stdin). Keep the scorer deterministic — assert a
+# parsed decision token / labeled answer / guard verdict, never a model judgement.
+
+require "json"
+require "open3"
+require "fileutils"
+require "tmpdir"
+require "time"
+
+AI_DIR       = File.expand_path("..", __dir__)
+FIXTURES_DIR = File.join(AI_DIR, "eval", "admiral-fixtures")
+BASELINE     = File.join(AI_DIR, "eval", "admiral-baseline.json")
+HOOKS_DIR    = File.join(AI_DIR, "hooks")
+AGENT        = "athena-admiral"
+DEFAULT_RUNS = 3
+
+# The fixed action vocabulary shown to the admiral in next-action scenarios. It
+# is deliberately BROAD so its mere presence never reveals which invariant is
+# under test (design §3.1).
+ACTION_VOCABULARY = %w[
+  confirm-merged notion.set-status:<value> slack.dm-owner agent.spawn-captain:<mission>
+  merge-mr board-merge-train retarget-mr docker.compose-down invoke:teardown-worktree-stack
+  invoke:epic-progress-dm sweep-fleet probe-worktree:<mission> list-agents
+  wt-preflight:<branch> wait report-and-wait end-turn
+].freeze
+
+# Appended to every T2 scenario. Plan-only framing (guard 1) + the required
+# output shape the deterministic scorer parses.
+def trailer_instructions(mode)
+  common = <<~TXT
+    ---
+    This is an EVALUATION. Do NOT call any tool, do NOT run any command, do NOT
+    spawn any agent, do NOT edit any file. Read the scenario and output ONLY the
+    decision trailer specified below. You are scored on the next action(s) you
+    DECLARE, not on execution.
+  TXT
+  case mode
+  when "next-action"
+    common + <<~TXT
+
+      Output a single line naming the ordered action(s) you would perform NEXT,
+      using ONLY tokens from this vocabulary (comma-separated, in order; extra
+      prose above the line is ignored):
+
+        #{ACTION_VOCABULARY.join(' ')}
+
+      NEXT_ACTIONS: <token>, <token>, ...
+    TXT
+  when "structured-answer"
+    common + <<~TXT
+
+      Answer the labeled question(s) the scenario asks with a single line each,
+      of the form `LABEL: value` (e.g. `MODEL_CHOICE: opus`). Output only those
+      labeled line(s); extra prose above them is ignored.
+    TXT
+  else
+    common
+  end
+end
+
+# ---------------------------------------------------------------------------
+# meta parsing — shared key=value reader; REPEATABLE keys accumulate into a list
+# (expect_action, forbid_action, expect_order can each appear many times).
+# ---------------------------------------------------------------------------
+REPEATABLE = %w[expect_action forbid_action expect_order].freeze
+
+def parse_meta(path)
+  m = {}
+  File.foreach(path) do |line|
+    line = line.strip
+    next if line.empty? || line.start_with?("#")
+    k, _, v = line.partition("=")
+    k = k.strip
+    v = v.strip
+    if REPEATABLE.include?(k)
+      (m[k] ||= []) << v
+    else
+      m[k] = v
+    end
+  end
+  m
+end
+
+def fixtures
+  Dir.glob(File.join(FIXTURES_DIR, "*")).select { |d| File.file?(File.join(d, "meta")) }.sort
+end
+
+# ---------------------------------------------------------------------------
+# Trailer parsing — extract the ordered NEXT_ACTIONS token list and the labeled
+# answer lines from the admiral's output. A garbled/absent trailer parses to
+# empty; scoring treats a missing decision as a FAIL (never a pass).
+# ---------------------------------------------------------------------------
+def parse_trailer(text)
+  actions = []
+  na = text.to_s.lines.reverse.find { |l| l =~ /^\s*NEXT_ACTIONS\s*:/i }
+  if na
+    body = na.sub(/^\s*NEXT_ACTIONS\s*:/i, "").strip
+    actions = body.split(",").map(&:strip).reject(&:empty?) unless body.casecmp?("none")
+  end
+  answers = {}
+  text.to_s.lines.each do |l|
+    if (mm = l.match(/^\s*([A-Z][A-Z0-9_]+)\s*:\s*(.+?)\s*$/))
+      answers[mm[1]] = mm[2] # last occurrence wins
+    end
+  end
+  { actions: actions, answers: answers }
+end
+
+# Does an expected/forbidden spec match an emitted action token?
+# head must match (case-insensitive); if the spec carries an arg (`head:arg`),
+# the token's arg must match too — a bare spec matches any arg.
+def action_matches?(spec, token)
+  s_head, _, s_arg = spec.partition(":")
+  t_head, _, t_arg = token.partition(":")
+  return false unless s_head.casecmp?(t_head)
+  s_arg.empty? || s_arg.casecmp?(t_arg)
+end
+
+def norm(s)
+  s.to_s.strip.downcase
+end
+
+# ---------------------------------------------------------------------------
+# Scorer — deterministic predicate over (meta, parsed decision).
+# Returns [pass?, reasons]. Reasons are for the human/LLM reader on a fail.
+# ---------------------------------------------------------------------------
+def score_decision(meta, parsed)
+  reasons = []
+  mode = meta["mode"]
+
+  # A missing decision is never a pass (design §8).
+  if mode == "next-action" && parsed[:actions].empty?
+    return [false, ["no NEXT_ACTIONS trailer emitted (missing decision is a fail, not a pass)"]]
+  end
+  if mode == "structured-answer" && meta["answer_field"] && !parsed[:answers].key?(meta["answer_field"])
+    return [false, ["no `#{meta['answer_field']}:` answer line emitted (missing decision is a fail)"]]
+  end
+
+  Array(meta["expect_action"]).each do |a|
+    reasons << "expected action #{a.inspect} not in #{parsed[:actions].inspect}" \
+      unless parsed[:actions].any? { |t| action_matches?(a, t) }
+  end
+
+  Array(meta["forbid_action"]).each do |a|
+    reasons << "forbidden action #{a.inspect} present in #{parsed[:actions].inspect}" \
+      if parsed[:actions].any? { |t| action_matches?(a, t) }
+  end
+
+  Array(meta["expect_order"]).each do |spec|
+    a, b = spec.split("<", 2).map(&:strip)
+    ia = parsed[:actions].index { |t| action_matches?(a, t) }
+    ib = parsed[:actions].index { |t| action_matches?(b, t) }
+    if ia.nil? || ib.nil?
+      reasons << "order #{spec.inspect}: both must be present (#{a}=#{ia.inspect}, #{b}=#{ib.inspect})"
+    elsif ia >= ib
+      reasons << "order #{spec.inspect} violated: #{a}@#{ia} must precede #{b}@#{ib}"
+    end
+  end
+
+  if meta["answer_field"]
+    got = parsed[:answers][meta["answer_field"]]
+    want = meta["expect_answer"]
+    reasons << "answer #{meta['answer_field']}=#{got.inspect} != expected #{want.inspect}" \
+      unless got && want && norm(got) == norm(want)
+  end
+
+  [reasons.empty?, reasons]
+end
+
+# strict majority true (design §4.3)
+def majority(bools)
+  bools.count(true) * 2 > bools.size
+end
+
+# ---------------------------------------------------------------------------
+# T1 hook-stdin primitive — reused verbatim from harness-eval. Isolated HOME so
+# per-invocation hook dedup state can never make a "fires" case fire only once.
+# ---------------------------------------------------------------------------
+def hook_fires?(guard, input_path)
+  hook = File.join(HOOKS_DIR, "#{guard}.sh")
+  return [false, "hook not found: #{hook}"] unless File.executable?(hook)
+
+  input = File.read(input_path)
+  Dir.mktmpdir("admiral-eval-home-") do |home|
+    out, _err, _st = Open3.capture3({ "HOME" => home }, hook, stdin_data: input)
+    [out.include?('"permissionDecision":"deny"'), out]
+  end
+rescue StandardError => e
+  [false, "hook error: #{e.message}"]
+end
+
+# ---------------------------------------------------------------------------
+# Inert sandbox (guard 2). build_sandbox writes the no-op stubs into <dir>/bin
+# and returns [home, bin]. model_env front-loads that bin on PATH and points HOME
+# at the isolated dir (so no MCP config -> no Slack/Notion/Agent surface).
+# ---------------------------------------------------------------------------
+INERT_STUBS = %w[gh glab gh-athena glab-athena docker].freeze
+INERT_EXIT  = 97
+
+def build_sandbox(dir)
+  home = File.join(dir, "home")
+  bin  = File.join(dir, "bin")
+  FileUtils.mkdir_p([home, bin])
+
+  INERT_STUBS.each do |name|
+    path = File.join(bin, name)
+    File.write(path, <<~SH)
+      #!/bin/sh
+      echo "admiral-eval: INERT STUB '#{name}' — the eval sandbox blocks all real forge/comms/container actions (merge/DM/teardown/spawn). No real action taken. Args: $*" >&2
+      exit #{INERT_EXIT}
+    SH
+    FileUtils.chmod(0o755, path)
+  end
+
+  # git: forward reads to the real git, but BLOCK `push` (the one git mutation
+  # that could escape the sandbox). Scans only the first positional token so a
+  # commit message containing "push" is not blocked.
+  real_git = which("git") || "/usr/bin/git"
+  gitpath = File.join(bin, "git")
+  # NOTE: do NOT `shift` here — `for a in "$@"` iterates a snapshot, but `shift`
+  # mutates "$@", so the trailing `exec real_git "$@"` would forward corrupted
+  # args. Find the first positional (the git subcommand) non-destructively.
+  File.write(gitpath, <<~SH)
+    #!/bin/sh
+    sub=""
+    skip=0
+    for a in "$@"; do
+      if [ "$skip" = 1 ]; then skip=0; continue; fi
+      case "$a" in
+        -C|-c) skip=1; continue;;
+        -*) continue;;
+        *) sub="$a"; break;;
+      esac
+    done
+    if [ "$sub" = "push" ]; then
+      echo "admiral-eval: INERT STUB 'git push' blocked in the eval sandbox. No real action taken." >&2
+      exit #{INERT_EXIT}
+    fi
+    exec #{real_git} "$@"
+  SH
+  FileUtils.chmod(0o755, gitpath)
+
+  [home, bin]
+end
+
+def which(cmd)
+  ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |d|
+    p = File.join(d, cmd)
+    return p if File.executable?(p) && !File.directory?(p)
+  end
+  nil
+end
+
+# The env the model child runs under: isolated HOME, stub bin prepended.
+def model_env(home, bin)
+  { "HOME" => home, "PATH" => "#{bin}:#{ENV['PATH']}" }
+end
+
+def model_argv
+  ["claude", "-p", "--agent", AGENT]
+end
+
+# Invoke the admiral once for a T2 fixture, return its raw output (or nil on
+# failure). The scenario body + the mode's trailer instructions form the prompt.
+def invoke_admiral(scenario, mode, home, bin)
+  prompt = "#{scenario}\n\n#{trailer_instructions(mode)}"
+  out, _err, st = Open3.capture3(model_env(home, bin), *model_argv, stdin_data: prompt)
+  st&.success? ? out : nil
+rescue StandardError => e
+  warn "  ! admiral invocation failed: #{e.message} (is `claude` on PATH?)"
+  nil
+end
+
+# ---------------------------------------------------------------------------
+# Evaluate one fixture directory. T1 runs once (deterministic); T2 samples K
+# times and scores by majority. Returns {name, mode, pass, rate, detail}.
+# ---------------------------------------------------------------------------
+def evaluate(dir, runs:)
+  meta = parse_meta(File.join(dir, "meta"))
+  name = File.basename(dir)
+  mode = meta["mode"]
+
+  case mode
+  when "hook-stdin"
+    fired, detail = hook_fires?(meta["guard"], File.join(dir, meta["input"]))
+    verdict = fired ? "fires" : "clean"
+    pass = (verdict == meta["expect"])
+    { name: name, mode: mode, pass: pass, rate: "1/1",
+      detail: "guard=#{meta['guard']} expect=#{meta['expect']} got=#{verdict} #{detail.to_s[0, 120]}" }
+  when "next-action", "structured-answer"
+    scenario = File.read(File.join(dir, "scenario.md"))
+    Dir.mktmpdir("admiral-eval-sandbox-") do |sb|
+      home, bin = build_sandbox(sb)
+      samples = Array.new(runs) do
+        out = invoke_admiral(scenario, mode, home, bin)
+        next false if out.nil?
+        ok, = score_decision(meta, parse_trailer(out))
+        ok
+      end
+      passes = samples.count(true)
+      pass = majority(samples)
+      { name: name, mode: mode, pass: pass, rate: "#{passes}/#{samples.size}",
+        detail: "invariant=#{meta['invariant']}" }
+    end
+  else
+    { name: name, mode: mode, pass: false, rate: "0/0", detail: "unknown mode: #{mode.inspect}" }
+  end
+end
+
+# ---------------------------------------------------------------------------
+# baseline load / diff — byte-for-byte the harness-eval semantics: a case the
+# baseline passed but this run fails is the FAIL signal; a newly-fixed case is
+# reported, not failed. --update-baseline is never used to hide a regression.
+# ---------------------------------------------------------------------------
+def load_baseline(path = BASELINE)
+  return nil unless path && File.file?(path)
+  data = JSON.parse(File.read(path))
+  data["cases"].each_with_object({}) { |c, h| h[c["name"]] = c["pass"] }
+rescue StandardError => e
+  warn "admiral-eval: Note: baseline unreadable (#{e.message}); running without baseline diff."
+  nil
+end
+
+def diff_baseline(results, baseline)
+  now = results.each_with_object({}) { |r, h| h[r[:name]] = r[:pass] }
+  regressed = baseline.select { |name, was| was && now[name] == false }.keys
+  fixed     = baseline.select { |name, was| !was && now[name] == true }.keys
+  new_cases = now.keys - baseline.keys
+  puts ""
+  puts "baseline diff: #{regressed.size} regressed, #{fixed.size} fixed, #{new_cases.size} new case(s)"
+  fixed.each { |n| puts "  + fixed: #{n}" }
+  new_cases.each { |n| puts "  · new:   #{n} (#{now[n] ? 'pass' : 'fail'})" }
+  unless regressed.empty?
+    warn "admiral-eval: FAILED — regression vs baseline:"
+    regressed.each { |n| warn "  - #{n}: baseline pass -> now fail" }
+    warn "  Fix: a change (likely the admiral trim) broke a behavioral case the baseline caught. " \
+         "Restore the invariant's TRIGGER (the resident one-liner / JIT-skill pointer that fires it), " \
+         "not just its words; do NOT run --update-baseline to hide it. If a 2/3->1/3 case looks like " \
+         "sampling noise, re-run --run --only <case> to confirm before attributing it to the trim."
+    return 1
+  end
+  0
+end
+
+def run_model(runs:, only:, update:)
+  dirs = fixtures
+  dirs = dirs.select { |d| File.basename(d).start_with?(only) } if only
+  if dirs.empty?
+    warn "admiral-eval: no fixtures#{only ? " matching #{only.inspect}" : ''} under #{FIXTURES_DIR}"
+    warn "  Fix: add ai/eval/admiral-fixtures/<AE-NN-name>/meta (+ scenario.md or input.json)."
+    return 1
+  end
+
+  results = dirs.map { |d| evaluate(d, runs: runs) }
+  results.each do |r|
+    printf("%-4s %-34s %-6s [%s] %s\n", r[:pass] ? "PASS" : "FAIL", r[:name], r[:rate], r[:mode], r[:detail])
+  end
+  puts "admiral-eval: #{results.count { |r| r[:pass] }}/#{results.size} cases pass (runs/T2 case = #{runs})"
+
+  if update
+    FileUtils.mkdir_p(File.dirname(BASELINE))
+    File.write(BASELINE, JSON.pretty_generate(
+      "generated" => Time.now.utc.iso8601,
+      "cases" => results.map { |r| { "name" => r[:name], "pass" => r[:pass], "rate" => r[:rate] } }
+    ))
+    puts "admiral-eval: baseline written to #{BASELINE}"
+    return 0
+  end
+
+  baseline = load_baseline
+  if baseline
+    return diff_baseline(results, baseline)
+  end
+
+  failures = results.reject { |r| r[:pass] }
+  return 0 if failures.empty?
+  warn ""
+  warn "admiral-eval: #{failures.size} case(s) failed (no baseline committed yet — reporting only):"
+  failures.each { |r| warn "  - #{r[:name]}: #{r[:detail]}" }
+  warn "  Fix: this run has no ai/eval/admiral-baseline.json to diff against. Capture the baseline " \
+       "against the CURRENT admiral with `ai/bin/admiral-eval --run --update-baseline` once the cases " \
+       "pass on today's admiral; never baseline a case that cannot pass reliably (mark it advisory)."
+  1
+end
+
+def list
+  fx = fixtures
+  puts "admiral-eval: #{fx.size} fixture(s) for #{AGENT}:"
+  fx.each do |d|
+    m = parse_meta(File.join(d, "meta"))
+    puts "  - #{File.basename(d)} [#{m['mode']}] #{m['invariant']}"
+  end
+  puts ""
+  puts "Trust model: model PRODUCES a decision; a DETERMINISTIC scorer scores it. Hermetic by design —"
+  puts "  plan-only framing + an inert sandbox (no-op gh/glab/docker/git-push stubs, isolated HOME)"
+  puts "  mean the eval can never merge/DM/teardown/push/spawn. --run is model-in-loop and NOT in the gate;"
+  puts "  the deterministic --self-test IS gate-wired."
+  puts "Run the model-in-loop evaluation with: ai/bin/admiral-eval --run"
+  0
+end
+
+# ---------------------------------------------------------------------------
+# --self-test — proves the scorer / parser / sampling / baseline diff / T1
+# primitive / inert sandbox, with NO model in the loop.
+# ---------------------------------------------------------------------------
+def self_test
+  ok = true
+  fail = ->(msg) { warn "self-test: FAIL — #{msg}"; ok = false }
+
+  # -- 1. trailer parser ---------------------------------------------------
+  p = parse_trailer("intro prose\nNEXT_ACTIONS: confirm-merged, notion.set-status:Done\ntrailing")
+  fail.("actions parse wrong: #{p[:actions].inspect}") \
+    unless p[:actions] == ["confirm-merged", "notion.set-status:Done"]
+  fail.("labeled answer parse wrong") \
+    unless parse_trailer("MODEL_CHOICE: opus\n")[:answers]["MODEL_CHOICE"] == "opus"
+  fail.("`NEXT_ACTIONS: none` must be empty") unless parse_trailer("NEXT_ACTIONS: none")[:actions].empty?
+  fail.("absent trailer must be empty") unless parse_trailer("no trailer at all")[:actions].empty?
+
+  # -- 2. action matcher ---------------------------------------------------
+  fail.("bare spec must match any arg") unless action_matches?("notion.set-status", "notion.set-status:Done")
+  fail.("arg spec must match exact arg") unless action_matches?("notion.set-status:Done", "notion.set-status:Done")
+  fail.("arg spec must reject other arg") if action_matches?("notion.set-status:Done", "notion.set-status:InReview")
+  fail.("head mismatch must not match") if action_matches?("merge-mr", "confirm-merged")
+
+  # -- 3. scorer primitives ------------------------------------------------
+  # expect_action hit / miss
+  hit = score_decision({ "mode" => "next-action", "expect_action" => ["confirm-merged"] },
+                       { actions: ["confirm-merged"], answers: {} })
+  fail.("expect_action hit should pass") unless hit[0]
+  miss = score_decision({ "mode" => "next-action", "expect_action" => ["confirm-merged"] },
+                        { actions: ["wait"], answers: {} })
+  fail.("expect_action miss should fail") if miss[0]
+
+  # forbid_action absent (pass) / present (fail)
+  fb_ok = score_decision({ "mode" => "next-action", "expect_action" => ["wait"], "forbid_action" => ["merge-mr"] },
+                         { actions: ["wait"], answers: {} })
+  fail.("forbid_action absent should pass") unless fb_ok[0]
+  fb_bad = score_decision({ "mode" => "next-action", "expect_action" => ["wait"], "forbid_action" => ["merge-mr"] },
+                          { actions: ["wait", "merge-mr"], answers: {} })
+  fail.("forbid_action present should fail") if fb_bad[0]
+
+  # expect_order satisfied / violated / missing
+  ord_ok = score_decision({ "mode" => "next-action", "expect_order" => ["confirm-merged < notion.set-status:Done"] },
+                          { actions: ["confirm-merged", "notion.set-status:Done"], answers: {} })
+  fail.("order satisfied should pass") unless ord_ok[0]
+  ord_bad = score_decision({ "mode" => "next-action", "expect_order" => ["confirm-merged < notion.set-status:Done"] },
+                           { actions: ["notion.set-status:Done", "confirm-merged"], answers: {} })
+  fail.("order violated should fail") if ord_bad[0]
+  ord_missing = score_decision({ "mode" => "next-action", "expect_order" => ["confirm-merged < notion.set-status:Done"] },
+                               { actions: ["confirm-merged"], answers: {} })
+  fail.("order with a missing side should fail") if ord_missing[0]
+
+  # answer_field match / mismatch
+  ans_ok = score_decision({ "mode" => "structured-answer", "answer_field" => "MODEL_CHOICE", "expect_answer" => "opus" },
+                          { actions: [], answers: { "MODEL_CHOICE" => "Opus" } })
+  fail.("answer match (case-insensitive) should pass") unless ans_ok[0]
+  ans_bad = score_decision({ "mode" => "structured-answer", "answer_field" => "MODEL_CHOICE", "expect_answer" => "opus" },
+                           { actions: [], answers: { "MODEL_CHOICE" => "sonnet" } })
+  fail.("answer mismatch should fail") if ans_bad[0]
+
+  # -- 4. missing decision is a fail (not a pass) --------------------------
+  # a forbid-only next-action case with an EMPTY trailer must fail, not vacuously pass.
+  empty_na = score_decision({ "mode" => "next-action", "forbid_action" => ["slack.dm-owner"] },
+                            { actions: [], answers: {} })
+  fail.("empty NEXT_ACTIONS must fail even for a forbid-only case") if empty_na[0]
+  empty_sa = score_decision({ "mode" => "structured-answer", "answer_field" => "MODEL_CHOICE", "expect_answer" => "opus" },
+                            { actions: [], answers: {} })
+  fail.("missing answer line must fail") if empty_sa[0]
+
+  # -- 5. majority sampling ------------------------------------------------
+  fail.("{pass,pass,fail} must be a majority pass") unless majority([true, true, false])
+  fail.("{pass,fail,fail} must be a majority fail") if majority([true, false, false])
+
+  # -- 6. meta parser: repeatable keys accumulate -------------------------
+  Dir.mktmpdir("admiral-eval-meta-") do |d|
+    mp = File.join(d, "meta")
+    File.write(mp, "mode=next-action\nexpect_action=confirm-merged\nexpect_action=sweep-fleet\nforbid_action=merge-mr\n")
+    m = parse_meta(mp)
+    fail.("repeatable expect_action should be a 2-list: #{m['expect_action'].inspect}") \
+      unless m["expect_action"] == %w[confirm-merged sweep-fleet]
+    fail.("scalar mode should be a string") unless m["mode"] == "next-action"
+  end
+
+  # -- 7. baseline diff ----------------------------------------------------
+  base = { "AE-01" => true, "AE-02" => true }
+  regressed_run = [{ name: "AE-01", pass: true }, { name: "AE-02", pass: false }]
+  code, out, err = capture_io { diff_baseline(regressed_run, base) }
+  fail.("a baseline pass->fail must exit 1") unless code == 1
+  fail.("regression must name the regressed case") unless err.include?("AE-02")
+  fail.("regression Fix: line missing") unless err.include?("Fix:")
+  # a case the baseline FAILED that now passes is a fix (reported, exit 0)
+  base_fixed = { "AE-01" => true, "AE-02" => false }
+  fixed_run = [{ name: "AE-01", pass: true }, { name: "AE-02", pass: true }]
+  code2, out2, = capture_io { diff_baseline(fixed_run, base_fixed) }
+  fail.("a newly-fixed case must exit 0") unless code2 == 0
+  fail.("fixed case must be reported") unless out2.include?("+ fixed: AE-02")
+
+  # -- 8. T1 hook-stdin primitive against STUB hooks (no model, no real hook)
+  Dir.mktmpdir("admiral-eval-hook-") do |d|
+    hooks = File.join(d, "hooks")
+    FileUtils.mkdir_p(hooks)
+    denier = File.join(hooks, "denier.sh")
+    allower = File.join(hooks, "allower.sh")
+    File.write(denier, %(#!/bin/sh\necho '{"hookSpecificOutput":{"permissionDecision":"deny"}}'\n))
+    File.write(allower, "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o755, denier)
+    FileUtils.chmod(0o755, allower)
+    inp = File.join(d, "in.json")
+    File.write(inp, "{}")
+    # temporarily point HOOKS_DIR resolution at our stub dir by calling the
+    # low-level primitive with an absolute-guard path via a shim.
+    fired_d, = stub_hook_fires(denier, inp)
+    fail.("stub denier hook must fire") unless fired_d
+    fired_a, = stub_hook_fires(allower, inp)
+    fail.("stub allower hook must be clean") if fired_a
+  end
+
+  # -- 9. inert sandbox: stubs are inert; git push blocked; git read forwarded
+  Dir.mktmpdir("admiral-eval-sb-") do |d|
+    home, bin = build_sandbox(d)
+    env = model_env(home, bin)
+    fail.("model HOME must be the sandbox home") unless env["HOME"] == home
+    fail.("model PATH must front-load the stub bin") unless env["PATH"].start_with?("#{bin}:")
+    INERT_STUBS.each do |name|
+      out, st = Open3.capture2e(env, name, "whatever", "args", stdin_data: "")
+      fail.("stub #{name} must be inert (nonzero exit)") if st.success?
+      fail.("stub #{name} must announce INERT STUB") unless out.include?("INERT STUB")
+    end
+    # git read forwarded (git --version works), git push blocked.
+    ver_out, ver_st = Open3.capture2e(env, "git", "--version", stdin_data: "")
+    fail.("git --version must be forwarded (got: #{ver_out.inspect})") unless ver_st.success? && ver_out =~ /git version/
+    push_out, push_st = Open3.capture2e(env, "git", "push", "origin", "main", stdin_data: "")
+    fail.("git push must be blocked by the sandbox") if push_st.success?
+    fail.("git push block must announce INERT STUB") unless push_out.include?("INERT STUB 'git push'")
+  end
+
+  # -- 10. plan-only framing is appended for T2 modes ----------------------
+  fail.("next-action framing must forbid tool use") \
+    unless trailer_instructions("next-action").include?("Do NOT call any tool")
+  fail.("next-action framing must ask for NEXT_ACTIONS") \
+    unless trailer_instructions("next-action").include?("NEXT_ACTIONS:")
+  fail.("structured-answer framing must forbid tool use") \
+    unless trailer_instructions("structured-answer").include?("Do NOT call any tool")
+  fail.("model argv must invoke the admiral agent, no mutating flags") \
+    unless model_argv == ["claude", "-p", "--agent", AGENT]
+
+  if ok
+    puts "admiral-eval: self-test OK"
+    0
+  else
+    warn "admiral-eval: self-test FAILED"
+    warn "  Fix: the scorer/parser/sampling/baseline/T1/sandbox logic is broken. A missing decision must " \
+         "fail, a forbidden action present must fail, an out-of-order or one-sided order must fail, a " \
+         "baseline pass->fail must exit 1, the T1 hook primitive must report deny as `fires`, and the " \
+         "inert sandbox must block every real forge/comms/container action AND `git push`."
+    1
+  end
+end
+
+# Score a hook-stdin case against an ARBITRARY hook path (for the self-test's
+# stub hooks; the real T1 path uses hook_fires? with HOOKS_DIR).
+def stub_hook_fires(hook_path, input_path)
+  input = File.read(input_path)
+  Dir.mktmpdir("admiral-eval-stubhome-") do |home|
+    out, _e, _st = Open3.capture3({ "HOME" => home }, hook_path, stdin_data: input)
+    [out.include?('"permissionDecision":"deny"'), out]
+  end
+end
+
+# Capture $stdout/$stderr of a block; return [return_value, out, err].
+require "stringio"
+def capture_io
+  old_out, old_err = $stdout, $stderr
+  o, e = StringIO.new, StringIO.new
+  $stdout, $stderr = o, e
+  rv = yield
+  [rv, o.string, e.string]
+ensure
+  $stdout, $stderr = old_out, old_err
+end
+
+# ---------------------------------------------------------------------------
+def arg_value(flag, default = nil)
+  i = ARGV.index(flag)
+  return default unless i && ARGV[i + 1]
+  ARGV[i + 1]
+end
+
+exit(
+  if ARGV.include?("--self-test")
+    self_test
+  elsif ARGV.include?("--run")
+    run_model(
+      runs: (arg_value("--runs", DEFAULT_RUNS).to_i.clamp(1, 99)),
+      only: arg_value("--only"),
+      update: ARGV.include?("--update-baseline")
+    )
+  else
+    list
+  end
+)

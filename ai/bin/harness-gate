@@ -56,6 +56,11 @@ STATIC_CHECKS = [
   ["harness-eval",              %w[ai/bin/harness-eval]],
   ["critic-review self-test",   %w[ai/bin/critic-review --self-test]],
   ["critic-eval self-test",     %w[ai/bin/critic-eval --self-test]],
+  # admiral-eval's deterministic scorer/parser/sampling/baseline/sandbox
+  # self-test is gate-safe; its model-in-loop `--run` is NOT declared here
+  # (same rule that keeps critic-eval --run out — a model call pre-commit is
+  # wrong on latency, cost, and determinism).
+  ["admiral-eval self-test",    %w[ai/bin/admiral-eval --self-test]],
   # setup-hooks' --self-test is INLINE in the installer (no dedicated
   # **/test/self-test.sh file backs it), so it stays hand-declared here.
   ["setup-hooks self-test",     %w[scripts/setup-hooks --self-test]],

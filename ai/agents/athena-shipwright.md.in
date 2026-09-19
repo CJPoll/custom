@@ -390,6 +390,13 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   step in the captain self-review, so its decision/FINDINGS-parser logic must
   stay verified even when a harness edit did not touch the critic directly. (The
   model-in-loop `--run` is NOT part of the gate.)
+- `ai/bin/admiral-eval --self-test` — the admiral behavioral-eval runner's
+  deterministic scorer/parser/majority-sampling/baseline-diff/T1-hook-primitive
+  and its inert-sandbox self-test (model-free, gate-safe). It proves a stage-4
+  admiral trim still makes the right DECISION, not merely that the invariant's
+  words survived. The model-in-loop `admiral-eval --run` is NOT part of the gate
+  (same rule as `critic-eval --run`); it runs to capture/verify the baseline and
+  on the shipwright cron cadence.
 - `scripts/setup-hooks --self-test` — the installer's --self-test is INLINE
   (no dedicated `self-test.sh` file backs it), so it stays a hand-declared
   `CHECKS` entry. Its install / idempotency / merge-safety cases are the ONLY
