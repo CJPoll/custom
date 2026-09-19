@@ -85,6 +85,12 @@ setup_case() {
   # not silently test nothing instead.
   export ATHENA_INBOX_STALE_SECONDS=3600
   export ATHENA_INBOX_WARN_INTERVAL_SECONDS=3600
+  # The delivery-chain health line is OFF by default in these cases: they test
+  # the COUNT/marker plumbing against minimal fixtures the doctor would rightly
+  # call unhealthy (an undeclared entry, a 0755 projects/), and a line leaking
+  # into a "no stdout" assertion would be a false failure of THIS suite, not of
+  # the hook. The DND-190 cases below turn it on explicitly.
+  export ATHENA_INBOX_DOCTOR_LINE=0
 }
 
 # The one assertion that makes every other case safe to run.
@@ -1315,6 +1321,77 @@ assert_contains "-h states the counts-only rule" "WHAT IT NEVER PRINTS" "${OUT}"
 # otherwise degrade into permanent, contract-conformant silence.
 if [ -x "${STATUS_BIN}" ]; then ok "the wrapped command exists where the hook resolves it"
 else bad "the wrapped command exists where the hook resolves it" "not executable: ${STATUS_BIN}"; fi
+
+# ---------------------------------------------------------------------------
+# DND-190: the delivery-chain health line.
+#
+# The hook runs inbox-doctor and, when it reports worse than `ok`, folds ONE
+# fixed sentence into the SAME JSON object, rate-limited by its own marker,
+# separate from the count's and the poll's. The doctor's probes are stubbed
+# here exactly as its own suite stubs them, so no socket is opened and the real
+# client/state is never read.
+# ---------------------------------------------------------------------------
+
+# Make the doctor see an otherwise-HEALTHY chain, so a single deliberate fault
+# is what flips it -- and the assertions are about the hook's plumbing, not the
+# doctor's verdict logic (that is doctor/self-test.sh's job).
+doctor_healthy_env() {
+  export ATHENA_INBOX_DOCTOR_LINE=1   # this is the feature under test here
+  chmod 700 "${ATHENA_INBOX_ROOT}" "${ATHENA_INBOX_ROOT}/projects"
+  register "${LOG_CHANNEL}"
+  local common; common="$(cd "${REPO}" && realpath "$(git rev-parse --git-common-dir)")"
+  jq -n --arg r "${common}" \
+    '{v:1,projects:[{file:"p.json",entry:{v:1,repo:$r,channels:{slack:{kind:"log",path:"p-slack.jsonl",dedupe:["event_id","channel+ts"],schema_v:[1]}}}}]}' \
+    > "${CASE_DIR}/committed.json"
+  export ATHENA_INBOX_REGISTRY="${CASE_DIR}/committed.json"
+  export ATHENA_INBOX_DOCTOR_CRON_CHECK="true"
+  export ATHENA_INBOX_CLIENT_STATE_DIR="${CASE_DIR}/cstate"; mkdir -p "${ATHENA_INBOX_CLIENT_STATE_DIR}"
+  # No client config: this machine only READS delivered mail, so client-config
+  # and client-running are `na` -- which never breaks `healthy`. That keeps the
+  # baseline healthy and lets ONE deliberate fault (a stop marker) flip it.
+  export ATHENA_INBOX_CLIENT_CONFIG="${CASE_DIR}/no-config.json"
+  # A delivered line so the channel is not "never delivered".
+  printf '{"v":1,"event_id":"Ev1","channel":"D01","ts":"1700000001.1"}\n' > "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
+  chmod 600 "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
+}
+
+# Case: client stopped deliberately -> exactly one unhealthy line, same object.
+setup_case
+doctor_healthy_env
+printf 'p-slack.jsonl ends in a partial line\n' > "${ATHENA_INBOX_CLIENT_STATE_DIR}/athena-inbox-client.stopped"
+plant_log_lines   # so the count line is present too
+run_hook
+assert_one_json_object "stopped chain: still exactly one JSON object" "${OUT}"
+CTX="$(context_of "${OUT}")"
+assert_contains "stopped chain: the doctor line is present" "delivery chain is unhealthy" "${CTX}"
+assert_contains "stopped chain: it points at inbox-doctor" "run inbox-doctor" "${CTX}"
+assert_not_contains "stopped chain: no body/name leaks (only the fixed sentence)" "partial line" "${CTX}"
+assert_contains "stopped chain: the COUNT line still shows (not suppressed)" "new in" "${CTX}"
+assert_file "stopped chain: the doctor marker was stamped" "$(pm doctor-warn)"
+
+# Case: the doctor's marker rate-limits its OWN line, and does NOT suppress the
+# count's line. Second run in the SAME home, marker fresh -> doctor line gone.
+setup_case
+doctor_healthy_env
+printf 'p-slack.jsonl ends in a partial line\n' > "${ATHENA_INBOX_CLIENT_STATE_DIR}/athena-inbox-client.stopped"
+plant_log_lines
+run_hook
+CTX1="$(context_of "${OUT}")"
+assert_contains "rate-limit: first run has the doctor line" "delivery chain is unhealthy" "${CTX1}"
+run_hook
+CTX2="$(context_of "${OUT}")"
+assert_not_contains "rate-limit: second run suppresses the doctor line" "delivery chain is unhealthy" "${CTX2}"
+assert_contains "rate-limit: second run STILL shows the count line" "new in" "${CTX2}"
+
+# Case: a healthy chain emits no doctor line and clears the doctor marker.
+setup_case
+doctor_healthy_env
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_not_contains "healthy chain: no doctor line" "delivery chain is unhealthy" "${CTX}"
+assert_no_file "healthy chain: the doctor marker is not stamped" "$(pm doctor-warn)"
+
+unset ATHENA_INBOX_REGISTRY ATHENA_INBOX_DOCTOR_CRON_CHECK ATHENA_INBOX_CLIENT_STATE_DIR ATHENA_INBOX_CLIENT_CONFIG
 
 # The real HOME was never a target — by fingerprint, not by inspection.
 HOME="${REAL_HOME}"
