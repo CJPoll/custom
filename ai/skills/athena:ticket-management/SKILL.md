@@ -50,6 +50,44 @@ A scoped ticket is Athena's from the moment it enters scope (`Backlog`→`Todo`�
 waiting-on-Cody state (`Needs Attention`, `Attention Given`, `Done`,
 `Ready for Release`).
 
+## When the tracker lacks a status this skill names
+
+**The option set is per-tracker, and the statuses above are not guaranteed to
+exist in the one you are on.** The personal DND tracker has no `In Review` and no
+`Ready for Release`; the walt_ui work tracker has both. So the status you are
+about to set is a *lookup*, and it can miss.
+
+**Resolve the options before you set a status** — read the `Status` property's
+option list off the data source (`API-retrieve-a-data-source`) rather than
+assuming this skill's vocabulary. Do it once when you take scope, and record the
+available set in the run's state log so every captain dispatched into that
+tracker inherits it instead of rediscovering it.
+
+When the status you would set does not exist:
+
+1. **Never invent one.** Do not create an option and do not substitute a
+   differently-meaning status (a captain's finished-but-unmerged work is not
+   `Done`). Notion rejects an unknown option, but a *plausible wrong* one is
+   accepted silently, which is worse.
+2. **Hold at the nearest earlier status that does exist, and make the hold
+   explicit.** On a tracker with no `In Review`: a captain finishing its work
+   sets **no** status and leaves the ticket at `In Progress`; the **athena-admiral**
+   makes the terminal move (`Done`) on confirmed merge. The captain says so in
+   its report — "left at `In Progress`, no `In Review` on this tracker, terminal
+   move is the admiral's" — so the holder is stated rather than inferred from
+   silence.
+3. **The assignee rule still binds.** `Assignee` always names whoever holds the
+   ticket, even when the status cannot move to say so. If work is genuinely
+   waiting on Cody and there is no status that expresses it, set `Assignee` =
+   **Cody** and write the reason on the body — the assignee is the load-bearing
+   signal, the status is the label.
+4. **A missing option is a fact to report, never a silent skip.** A rejected
+   status write, or an option list that comes back empty, is an error: surface it
+   (report + state log) naming the tracker and the option you looked for. "I set
+   no status" and "this tracker has no such status" must never read the same —
+   per `~/.claude/CLAUDE.md` → *A failed lookup must never look like an empty
+   one*.
+
 ## Resolving the two accounts (per active connection)
 
 Match the **active Notion connection** — use the `notion-personal` tools in the personal
