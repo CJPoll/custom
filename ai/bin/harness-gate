@@ -38,8 +38,14 @@ CUSTOM_DIR = File.expand_path("../..", __dir__)
 # Each entry: [label, argv]. argv[0] is repo-relative.
 STATIC_CHECKS = [
   ["build-agents --check",      %w[ai/bin/build-agents --check]],
+  # check-agent-size reads the RENDERED agent files, so it MUST run after
+  # build-agents --check (which proves the render is in sync with the template).
+  ["check-agent-size",          %w[ai/bin/check-agent-size]],
+  ["check-agent-size self-test", %w[ai/bin/check-agent-size --self-test]],
   ["safe-wait-guard self-test", %w[ai/hooks/safe-wait-guard.self-test.sh]],
   ["pronoun-guard self-test",   %w[ai/hooks/pronoun-guard.self-test.sh]],
+  ["forge-identity-guard self-test", %w[ai/hooks/forge-identity-guard.self-test.sh]],
+  ["forge-auth-guard self-test", %w[ai/hooks/forge-auth-guard.self-test.sh]],
   ["harness-event self-test",   %w[ai/hooks/harness-event.self-test.sh]],
   ["athena-inbox-poll self-test", %w[ai/hooks/athena-inbox-poll.self-test.sh]],
   ["check-generic-skills",      %w[ai/bin/check-generic-skills]],

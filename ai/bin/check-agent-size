@@ -1,0 +1,164 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# check-agent-size — cap the RENDERED size of every agent definition.
+#
+# The fan-out token tax (harness-IA principle #2) is paid per turn, per
+# subagent, fleet-multiplied: a bloated agent baseline is re-carried on every
+# dispatch. This gate enforces a per-agent line budget on the BUILT artifact
+# (`ai/agents/athena-<name>.md`), so an agent cannot silently regrow after it
+# has been shrunk (harness-IA principle #8 — "measure the win, don't assert
+# it": the cap is a number a check reads, not a claim in prose).
+#
+# Metric: rendered lines = File.readlines("ai/agents/athena-<name>.md").size —
+# the built artifact, INCLUDING the shared @include blocks (per the admiral-500
+# design, ai/docs/admiral-500-design.md, fixed decision #0.1). It reads the
+# RENDERED file, so it must run AFTER `build-agents --check` in the gate (which
+# guarantees the rendered file is in sync with the template + blocks). If the
+# render is stale, build-agents --check fails first and this check never reports
+# a misleading count.
+#
+# Fail conditions:
+#   * any rendered agent whose line count > its budget, or
+#   * any rendered agent with NO budget entry (a new agent must be given a
+#     deliberate budget, so it can never grow unbounded by being unlisted).
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/check-agent-size              cap rendered agents; exit 1 on overage/missing
+#   ai/bin/check-agent-size --self-test  verify the checker's own logic
+#
+# Extending: to ratchet a budget down as an agent is optimized, lower its entry
+# in BUDGETS (one-line edit). A NEW agent needs a new BUDGETS entry set to its
+# current rendered count or lower — never above without owner approval.
+
+require "fileutils"
+require "tmpdir"
+
+AI_DIR     = File.expand_path("..", __dir__)
+AGENTS_DIR = File.join(AI_DIR, "agents")
+
+# Rendered-line budgets, keyed by the <name> in ai/agents/athena-<name>.md.
+# admiral => 1040 is the CURRENT rendered count (1034) plus tiny headroom: this
+# is stage 1 of the admiral-500 shrink (ai/docs/admiral-500-design.md §5, PR 1),
+# which stands up the gate to enforce NO-REGROWTH first; the target 500 lands in
+# a later stage together with the resident trim. Every other agent is pinned at
+# its current rendered size plus a small headroom, so the gate caps regrowth
+# without false-failing an un-optimized agent. Each is a one-line ratchet.
+BUDGETS = {
+  "admiral"     => 1040,  # current 1034; ratchets to 500 in a later admiral-500 stage
+  "captain"     => 760,   # current 730 + headroom
+  "architect"   => 560,   # current 529 + headroom
+  "shipwright"  => 690,   # current 663 + headroom
+  "diff-critic" => 140,   # current 111 + headroom
+}.freeze
+
+FILE_RE = /\Aathena-(.+)\.md\z/
+
+# Every rendered ai/agents/athena-*.md, as [name, absolute-path, line-count].
+def rendered_agents(dir = AGENTS_DIR)
+  Dir.glob(File.join(dir, "athena-*.md")).sort.map do |path|
+    m = File.basename(path).match(FILE_RE)
+    next nil unless m
+
+    [m[1], path, File.readlines(path).size]
+  end.compact
+end
+
+# Evaluate agents against a budget table; returns [overages, missing] where each
+# is a list of [name, count, budget] / [name, count].
+def evaluate(agents, budgets)
+  overages = []
+  missing  = []
+  agents.each do |name, _path, count|
+    budget = budgets[name]
+    if budget.nil?
+      missing << [name, count]
+    elsif count > budget
+      overages << [name, count, budget]
+    end
+  end
+  [overages, missing]
+end
+
+def run_check
+  agents = rendered_agents
+  if agents.empty?
+    warn "check-agent-size: FAILED — no rendered ai/agents/athena-*.md found"
+    warn "  Fix: run ai/bin/build-agents to render the agent templates, then re-check."
+    return 1
+  end
+
+  overages, missing = evaluate(agents, BUDGETS)
+
+  if overages.empty? && missing.empty?
+    summary = agents.map { |n, _p, c| "#{n} #{c}/#{BUDGETS[n]}" }.join(", ")
+    puts "check-agent-size: OK — #{agents.size} agent(s) within budget (#{summary})"
+    return 0
+  end
+
+  overages.each do |name, count, budget|
+    warn "check-agent-size: FAILED — athena-#{name}.md is #{count} rendered lines, " \
+         "budget #{budget} (over by #{count - budget})."
+    warn "  Fix: relocate content out of the RESIDENT template ai/agents/athena-#{name}.md.in per"
+    warn "  ai/blocks/ops/harness-ia.md's mechanism split — a must-happen invariant -> a hook or gate;"
+    warn "  a deterministic procedure -> an ai/bin script; a multi-step how-to -> a JIT skill; deep"
+    warn "  reference detail -> an ai/docs file. Leave a one-line resident trigger naming each new home."
+    warn "  Do NOT delete a safety invariant to fit (see ai/blocks/ops/safety-checks.md) — move it to an"
+    warn "  enforced home instead. Then run ai/bin/build-agents and re-check. If a budget increase is"
+    warn "  genuinely intended and approved, raise the agent's entry in BUDGETS in ai/bin/check-agent-size."
+  end
+
+  missing.each do |name, count|
+    warn "check-agent-size: FAILED — athena-#{name}.md (#{count} rendered lines) has no BUDGETS entry."
+    warn "  Fix: add \"#{name}\" => <max-rendered-lines> to BUDGETS in ai/bin/check-agent-size (set it to"
+    warn "  the current rendered count or lower; never above without owner approval)."
+  end
+
+  1
+end
+
+def run_self_test
+  dir = File.join(Dir.tmpdir, "check-agent-size-selftest-#{Process.pid}")
+  agents_dir = File.join(dir, "agents")
+  FileUtils.mkdir_p(agents_dir)
+  ok = true
+  begin
+    # A fixture agent of exactly 10 lines.
+    ten = File.join(agents_dir, "athena-ten.md")
+    File.write(ten, Array.new(10) { "line" }.join("\n") + "\n")
+
+    over  = evaluate(rendered_agents(agents_dir), { "ten" => 9 })[0]
+    under = evaluate(rendered_agents(agents_dir), { "ten" => 11 })[0]
+    exact = evaluate(rendered_agents(agents_dir), { "ten" => 10 })[0]
+    _o, missing = evaluate(rendered_agents(agents_dir), {})
+
+    if over.empty?
+      warn "self-test: FAIL — a 10-line agent against budget 9 was NOT flagged as over"; ok = false
+    end
+    unless under.empty?
+      warn "self-test: FAIL — a 10-line agent against budget 11 was flagged as over"; ok = false
+    end
+    unless exact.empty?
+      warn "self-test: FAIL — a 10-line agent against budget 10 (== budget) was flagged as over"; ok = false
+    end
+    if missing.empty?
+      warn "self-test: FAIL — an agent with no budget entry was NOT flagged as missing"; ok = false
+    end
+  ensure
+    FileUtils.rm_rf(dir)
+  end
+
+  if ok
+    puts "check-agent-size: self-test OK"
+    0
+  else
+    warn "check-agent-size: self-test FAILED"
+    warn "  Fix: repair evaluate() so it flags a rendered agent OVER its budget and one with NO budget"
+    warn "  entry, while passing an agent at or under budget."
+    1
+  end
+end
+
+exit(ARGV.include?("--self-test") ? run_self_test : run_check)
