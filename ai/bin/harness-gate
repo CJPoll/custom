@@ -74,11 +74,31 @@ SELF_TEST_DELEGATES = {
 # than the commit. When root has no git metadata (a fixture tmpdir), this
 # returns nil and callers skip the filter, so the existing fixture-based
 # --self-test cases are unaffected.
+# Raised only when root IS a confirmed git worktree but `git ls-files` itself
+# failed — never for "this isn't a repo" (see below). Left uncaught, this must
+# never surface as a bare Ruby backtrace (CLAUDE.md -> "Guard/error messages
+# are written for the LLM"); the top-level dispatch below rescues it into a
+# Fix:-carrying message.
+GitTrackingError = Class.new(StandardError)
+
 def tracked_files(root)
-  out, _err, status = Open3.capture3("git", "-C", root, "ls-files")
-  return nil unless status.success?
+  # Two DISTINCT questions, on purpose, so failure can never look like "not a
+  # repo" (fail nil/skip-filter — the fixture-root case) when it is actually
+  # "a repo git itself couldn't read" (fail LOUD — the ai/skills/synced/ case
+  # this filter exists to guard, if it ever went wrong). Collapsing them was a
+  # prior version's bug: both a fixture root AND a `git`/`.git` error returned
+  # nil, so a genuine git failure on the REAL repo would have silently skipped
+  # the filter and let an untracked/vendored self-test.sh straight into the
+  # blocking gate — the exact failure this filter exists to prevent.
+  _out, _err, probe = Open3.capture3("git", "-C", root, "rev-parse", "--is-inside-work-tree")
+  return nil unless probe.success? # not a git worktree at all -> a fixture root; skip the filter
+
+  out, err, status = Open3.capture3("git", "-C", root, "ls-files")
+  raise GitTrackingError, "git -C #{root} ls-files failed: #{err.strip}" unless status.success?
 
   out.split("\n")
+rescue Errno::ENOENT
+  raise GitTrackingError, "git executable not found on PATH"
 end
 
 # DND-209: this repo has real self-tests (e.g. scripts/test/athena-inbox-client/
@@ -112,7 +132,21 @@ def self_test_checks(root = CUSTOM_DIR)
   end
 end
 
-CHECKS = (STATIC_CHECKS + self_test_checks).freeze
+# self_test_checks -> discover_self_tests -> tracked_files can raise
+# GitTrackingError (see above) while this constant is evaluated at file load
+# time, for EVERY invocation (including --list/--self-test), before the
+# ARGV dispatch at the bottom of this file ever runs. Fall back to
+# STATIC_CHECKS-only here so the file finishes loading; the SAME call is made
+# again inside run_gate/run_list/run_self_test (they all call
+# discover_self_tests(root) directly, not just through this constant), and
+# THAT raise is caught by the rescue around the dispatch below, which reports
+# it with a Fix: line instead of a bare Ruby backtrace.
+CHECKS =
+  begin
+    (STATIC_CHECKS + self_test_checks).freeze
+  rescue GitTrackingError
+    STATIC_CHECKS
+  end
 
 # The discovery CONTRACT is the exact filename `self-test.sh` — anything else
 # (a suite named tests.sh, foo_test.sh, ...) is invisible to the glob with no
@@ -292,6 +326,22 @@ def run_self_test
     ok = false
   end
 
+  # 3b. STATIC_CHECKS must never ALSO hand-declare a path that discovery
+  #     already finds — that would run the same suite twice under two labels,
+  #     silently, with no failure. SELF_TEST_DELEGATES documents each case
+  #     that already had this collision fixed (ai/inbox/test/self-test.sh
+  #     moved out of STATIC_CHECKS in favor of discovery); this assertion is
+  #     what stops it from creeping back in on any FUTURE STATIC_CHECKS entry.
+  overlap = STATIC_CHECKS.map { |(_, argv)| argv.first } & discover_self_tests
+  unless overlap.empty?
+    warn "self-test: FAIL — STATIC_CHECKS hand-declares #{overlap.join(', ')}, " \
+         "which discover_self_tests ALSO finds — the suite would run twice " \
+         "under two labels. Remove the STATIC_CHECKS entry and let discovery " \
+         "cover it (add a SELF_TEST_DELEGATES entry if some installer's " \
+         "--self-test also wraps it)."
+    ok = false
+  end
+
   # 4. Every scripts/setup-* installer that ADVERTISES a --self-test is either
   #    declared in CHECKS or delegates (SELF_TEST_DELEGATES) to a check that IS
   #    declared/discovered. Same class as (3): a committed self-test the gate
@@ -312,6 +362,31 @@ def run_self_test
     ok = false
   end
 
+  # Cases 5, 6, 6b and 6c below all plant a fixture suite under a
+  # Dir.mktmpdir tree and assume it is NOT itself inside a git worktree — that
+  # is what makes discover_self_tests(fixture_root) return exactly what was
+  # planted. `Dir.mktmpdir` honours $TMPDIR, so if TMPDIR is ever pointed
+  # inside a repo (a plausible CI/agent/sandbox setup), `tracked_files` would
+  # treat the fixture as a real repo, the planted suite would look untracked,
+  # and every one of those cases would report a FALSE red that blames
+  # discovery for an environment property instead of a real bug. Verify the
+  # assumption instead of stating it: probe once, and if it doesn't hold, skip
+  # those specific cases with a clear NOTE rather than a false failure (6d and
+  # 6e are unaffected — 6d creates its own real repo on purpose, 6e's `git` is
+  # a PATH-shimmed fake that never touches the real filesystem check).
+  fixtures_isolated =
+    Dir.mktmpdir("harness-gate-selftest-probe") do |probe|
+      _out, _err, probe_status = Open3.capture3("git", "-C", probe, "rev-parse", "--is-inside-work-tree")
+      !probe_status.success?
+    end
+  unless fixtures_isolated
+    warn "self-test: NOTE — skipping cases 5/6/6b/6c: Dir.mktmpdir resolves " \
+         "inside a git worktree in this environment (check $TMPDIR), so the " \
+         "tracked-file filter would treat every fixture there as a real repo " \
+         "and produce false reds unrelated to this code. Not counted as a " \
+         "failure."
+  end
+
   # 5. Discovery itself actually discovers and actually runs — proven against a
   #    THROWAWAY fixture tree, never a real test/ directory, per the ticket's
   #    required case: "a deliberately failing stub suite under scripts/test/
@@ -319,6 +394,7 @@ def run_self_test
   #    plain "on-disk == declared" comparison here would be tautological, since
   #    CHECKS is built FROM discover_self_tests — this fixture instead
   #    exercises the actual discover -> run -> pass/fail behavior end to end.)
+  if fixtures_isolated
   Dir.mktmpdir("harness-gate-selftest-scripts") do |fixture_root|
     suite_dir = File.join(fixture_root, "scripts/test/fixture-suite")
     FileUtils.mkdir_p(suite_dir)
@@ -370,9 +446,11 @@ def run_self_test
       ok = false
     end
   end
+  end
 
   # 6. Two suites that share a leaf directory name must not collide on label
   #    (self_test_checks must key off the full relative path, not a basename).
+  if fixtures_isolated
   Dir.mktmpdir("harness-gate-selftest-labels") do |fixture_root|
     %w[groupA/test groupB/test].each do |rel|
       dir = File.join(fixture_root, rel)
@@ -388,10 +466,12 @@ def run_self_test
       ok = false
     end
   end
+  end
 
   # 6b. run_gate's own guards, exercised as predicates/helpers against fixture
   #     roots — the zero-discovery hard-fail and the stray-suite-name warning
   #     each need their own case; nothing above reaches either branch.
+  if fixtures_isolated
   Dir.mktmpdir("harness-gate-selftest-guards") do |fixture_root|
     # self_tests_found? must be false with nothing on disk, and true again
     # once a real self-test.sh exists.
@@ -433,6 +513,7 @@ def run_self_test
       ok = false
     end
   end
+  end
 
   # 6c. run_gate's OWN zero-discovery and stray-suite branches, not just the
   #     extracted predicates 6b already covers — a bug in the branch itself
@@ -449,6 +530,7 @@ def run_self_test
     $stdout, $stderr = old_out, old_err
   end
 
+  if fixtures_isolated
   Dir.mktmpdir("harness-gate-selftest-rungate") do |fixture_root|
     code, _out, err = capture.call { run_gate(root: fixture_root, dry_run: true) }
     if code != 1
@@ -480,6 +562,7 @@ def run_self_test
            "with a Fix: line (stderr: #{err2.inspect})"
       ok = false
     end
+  end
   end
 
   # 6d. discover_self_tests/stray_test_scripts must not promote an UNTRACKED
@@ -517,6 +600,69 @@ def run_self_test
     unless found_tracked.include?("scripts/test/tracked/self-test.sh")
       warn "self-test: FAIL — discover_self_tests dropped a TRACKED " \
            "self-test.sh when a git repo is present: #{found_tracked.inspect}"
+      ok = false
+    end
+  end
+
+  # 6e. tracked_files must FAIL LOUD (GitTrackingError), never silently skip
+  #     the filter, when root IS a confirmed git worktree but `git ls-files`
+  #     itself errors — the ambiguity a prior version of this code collapsed
+  #     (both "not a repo" and "repo, but git errored" returned nil, so a real
+  #     git failure on the REAL repo would have silently let an
+  #     untracked/vendored self-test.sh straight into the gate). Proven with a
+  #     fake `git` on PATH that answers `rev-parse` normally but fails
+  #     `ls-files`, so this exercises the exact branch, not just its shape.
+  Dir.mktmpdir("harness-gate-selftest-git-fail") do |fixture_root|
+    fake_bin = File.join(fixture_root, "fakebin")
+    FileUtils.mkdir_p(fake_bin)
+    fake_git = File.join(fake_bin, "git")
+    File.write(fake_git, <<~SH)
+      #!/bin/sh
+      if [ "$3" = "rev-parse" ]; then exit 0; fi
+      if [ "$3" = "ls-files" ]; then echo "boom: simulated git failure" >&2; exit 128; fi
+      exit 1
+    SH
+    FileUtils.chmod(0o755, fake_git)
+
+    old_path = ENV["PATH"]
+    raised = nil
+    begin
+      ENV["PATH"] = "#{fake_bin}:#{old_path}"
+      begin
+        tracked_files(fixture_root)
+        raised = false
+      rescue GitTrackingError => e
+        raised = true
+        unless e.message.include?("ls-files") && e.message.include?("simulated git failure")
+          warn "self-test: FAIL — GitTrackingError's message didn't carry the " \
+               "underlying git error: #{e.message.inspect}"
+          ok = false
+        end
+      end
+    ensure
+      ENV["PATH"] = old_path
+    end
+    unless raised
+      warn "self-test: FAIL — tracked_files did not raise GitTrackingError " \
+           "when a confirmed git worktree's ls-files failed (it must never " \
+           "fail open into skipping the filter)"
+      ok = false
+    end
+
+    # And the dispatch-level rescue turns that into a Fix:-carrying failure,
+    # not a bare Ruby backtrace, end to end via a real subprocess.
+    env = { "PATH" => "#{fake_bin}:#{old_path}" }
+    out, status = Open3.capture2e(env, "ruby", File.join(CUSTOM_DIR, "ai/bin/harness-gate"),
+                                   "--list", chdir: CUSTOM_DIR, stdin_data: "")
+    if status.success?
+      warn "self-test: FAIL — harness-gate --list exited 0 despite a " \
+           "simulated git ls-files failure"
+      ok = false
+    end
+    unless out.include?("Fix:") && !out.include?(":in `")
+      warn "self-test: FAIL — a git-failure exit did not carry a clean Fix: " \
+           "message (looks like a raw, unhandled backtrace instead): " \
+           "#{out.inspect}"
       ok = false
     end
   end
@@ -603,9 +749,22 @@ def run_self_test
   end
 end
 
-exit(
-  if ARGV.include?("--self-test") then run_self_test
-  elsif ARGV.include?("--list") then run_list
-  else run_gate
-  end
-)
+begin
+  exit(
+    if ARGV.include?("--self-test") then run_self_test
+    elsif ARGV.include?("--list") then run_list
+    else run_gate
+    end
+  )
+rescue GitTrackingError => e
+  # A confirmed git worktree whose `ls-files` itself failed (never raised for
+  # "this isn't a repo" — see tracked_files). Must never surface as a bare
+  # Ruby backtrace.
+  warn "harness-gate: FAILED — #{e.message}"
+  warn "  Fix: ensure `git` is on PATH and #{CUSTOM_DIR} is a readable git " \
+       "worktree (try `git -C #{CUSTOM_DIR} status`), then re-run " \
+       "ai/bin/harness-gate. Discovery refuses to silently skip its " \
+       "tracked-file filter here, since that could promote an " \
+       "untracked/vendored self-test.sh into the blocking gate."
+  exit 1
+end
