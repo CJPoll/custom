@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # descriptor.sh -- the tenancy registry: parse, validate, select, resolve.
-# DOMAIN: pure. Every function here takes TEXT and returns text or a status.
+# DOMAIN. Every function here takes TEXT and returns text or a status; the one
+# effect is a refusal on stderr via err.sh.
 # Nothing opens a file, runs git, or looks at the filesystem; that is fs.sh's
 # job, and keeping it that way is what makes D-8 / D-10 / A-8 provable with no
 # fixtures at all.
@@ -30,8 +31,9 @@
 # project's channels. `descriptor_select` matches on the repo key and returns
 # NOTHING when no entry matches -- it never falls back to "well, show them
 # whatever is in the root". A resolver with that fallback passes every other
-# case in the QA plan and fails E2E step 8, which is why the no-match path is
-# asserted rather than assumed.
+# case in the QA plan and fails its *Tenancy boundary* end-to-end case
+# (currently step 8), which is why the no-match path is asserted rather than
+# assumed.
 #
 # Source order: err.sh, names.sh, then this file. Requires jq.
 
@@ -297,8 +299,9 @@ descriptor_has_channel() {
 descriptor_select() {
   local want="$1" line src json match="" match_src="" dupes=""
 
-  while IFS=$'\t' read -r src json; do
+  while IFS=$'\t' read -r json src; do
     [ -n "${json}" ] || continue
+    case "${json}" in '#unparseable') continue ;; esac
     [ "$(descriptor_repo_key "${json}")" = "${want}" ] || continue
     if [ -n "${match}" ]; then
       dupes="${dupes}${dupes:+, }${src}"
@@ -327,8 +330,12 @@ descriptor_resolve() {
   local root="${1%/}" doc="$2" chan="$3" kind
 
   if ! descriptor_has_channel "${doc}" "${chan}"; then
-    inbox_fail "channel \"${chan}\" is not declared in this registry entry" \
-      "declare it in \$ATHENA_INBOX_ROOT/projects/<project>.json, or ask for a channel this project declares."
+    # Name-free, exactly like the manager's copy one layer up. The suite
+    # exercises this path directly as "the check the next entry point will
+    # rely on", so echoing the requested name here would reinstate the very
+    # oracle the manager's refusal is asserted not to be.
+    inbox_fail "no such channel in this registry entry" \
+      "declare it in \$ATHENA_INBOX_ROOT/projects/<project>.json, or ask for a channel this project declares: $(descriptor_channel_names "${doc}" | paste -sd, -)."
     return 1
   fi
 

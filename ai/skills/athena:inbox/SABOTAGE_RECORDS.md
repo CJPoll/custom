@@ -38,12 +38,12 @@ corrected and re-run.
   `lib/maildir.sh` (unread filter only), `lib/fs.sh`, `lib/inbox.sh`,
   `bin/inbox-status`
 - **Suite run:** `bash test/self-test.sh` (no network — nothing here makes one;
-  the inbox root is always a `mktemp -d`; ~40s)
-- **Baseline:** `VERDICT: PASS (158 cases)` (131 at the first pass; 11 added
+  the inbox root is always a `mktemp -d`; ~2s wall)
+- **Baseline:** `VERDICT: PASS (188 cases)` (131 at the first pass; 11 added
   after the sabotage run found six checks the suite did not actually protect,
-  plus the state-rewrite rule that arrived mid-build, plus 16 more from the
-  `athena-diff-critic` round — see *What the critic found that sabotage did
-  not*)
+  plus the state-rewrite rule that arrived mid-build, plus 46 more from the
+  `athena-diff-critic` round and the `code-reviewer`/`adr-reviewer` pair — see
+  *What the reviewers found that sabotage did not*)
 - **Runner:** 38 mutations, one at a time, full suite after each.
 
 ### What the suite proves
@@ -105,7 +105,7 @@ accounting of what the first draft of the tests did not actually prove:
 | S31 | The sentinel assertions proved no body leaked **that day** — but only because the per-message record happens not to carry `text`. They could not prove no body leaks tomorrow. | A **structural** assertion: the status object carries counts and no per-message key of any kind. |
 | S35 | Two use cases each carry their own copy of the "a fatal registry error is fatal" check; only `inbox_status_json`'s was covered, so `inbox_channels` could silently report zero channels on a broken registry — indistinguishable from "not opted in". | `an unparseable registry FILE is fatal to inbox_channels, not silent zero`. |
 
-### What the critic found that sabotage did not
+### What the reviewers found that sabotage did not
 
 Mutation testing proves a check is load-bearing. It cannot find a defect in
 code **no mutation targets**, and it cannot find a defect whose correct
@@ -125,6 +125,25 @@ contract **MUST** (a never-delivered `log` channel must be reported with a
 `Fix:` clause naming producer registration) with the deviation argued in the
 skill rather than honoured. Both are fixed; the never-delivered report gained
 three cases.
+
+A second round, with a `code-reviewer` and an `adr-reviewer` reading the PR,
+found six more of the same species. Every one is now covered by §8 of the
+suite:
+
+| Finding | Why nothing caught it before |
+|---|---|
+| A non-string `event_id` on a log line (`"event_id": 7`) made jq abort the scan of **every remaining line** — `Cannot index object with number` is fatal, not a lookup that misses. One hostile line cost the whole channel. | The D-15 cases cover an *unparseable* line; nothing covered well-formed JSON with an unexpected value **type**. The line is written by other people, so nothing guarantees either. |
+| The manager did not check the scan's status, and `$(...)` discards it. A failed scan yields no output, jq on empty input emits nothing and **exits 0**, so the failure travelled as a successful count of nothing, discarded every other channel's count, and `--json` emitted an unparseable blank line while claiming success. | Mutating a missing check is impossible: there was no line to remove. |
+| The maildir count was **peer-controllable**: `ls -A` + a line filter counted a filename containing a newline twice, and a subdirectory as a message. The slug is prose the sender chose, so the sender decided how many messages it had sent. | Every fixture used conformant filenames. The count is the only number this command publishes. |
+| `$((offset + bytes))` and `tail -c "+$(( $2 + 1 ))"` are arithmetic contexts, and bash **executes a command substitution inside an array subscript** there. Confirmed: `logchan_scan 'a[$(touch /tmp/PWNED)]'` created the file. Unreachable through the manager, which sanitizes — but both are documented as strings-in primitives with no stated precondition, and their taint source becomes writable the moment the ack ticket lands. | A primitive that is only safe because of its current caller is not safe, and no mutation expresses "safe for the wrong reason". |
+| `fs_registry_records` hard-failed on **every** file in `projects/`, so one project's typo wedged `inbox-status` for every project on the machine — and the refusal printed another tenant's registry **filename**, the same disclosure `descriptor_select` refuses by name. | Every fixture had one registry file. Multi-tenancy is the whole point of the directory. |
+| `inbox_status_json` returned on any single channel's failure, so one symlinked inbox suppressed the counts for every other channel — contradicting `err.sh`'s own contract, which returns a status rather than exiting *"so a caller can refuse one channel without killing a multi-channel run"*. | No fixture had a broken channel and a healthy one at the same time. |
+
+The pattern across both rounds is worth naming, because it is the argument for
+running a reader alongside the mutations: **sabotage proves a check that exists
+is load-bearing; it cannot find a check that was never written, one that is
+safe only by accident of its caller, or one whose failure is indistinguishable
+from success one layer up.**
 
 ### Measured zeros
 

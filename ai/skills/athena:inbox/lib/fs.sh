@@ -40,7 +40,39 @@ fs_size() {
 # not one. `tail` already yields nothing for a missing file, so the guard was
 # never needed; what it did was disguise that fact.)
 fs_slice_from() {
+  # Validated before it reaches the arithmetic context: `$(( ))` executes a
+  # command substitution inside an array subscript, so an unvalidated offset
+  # here is code execution, not a bad read.
+  case "${2}" in
+    ''|*[!0-9]*)
+      inbox_fail "refusing a non-numeric byte offset for \"$1\"" \
+        "reset the channel's .state.json \"offset\" to 0; a non-numeric offset means the state file is corrupt."
+      return 1
+      ;;
+  esac
   tail -c "+$(( ${2} + 1 ))" "$1" 2>/dev/null || true
+}
+
+# fs_assert_no_nul <path>
+# A NUL byte in a .jsonl is corruption: the writer emits JSON, where a NUL is
+# escaped as \u0000, so a raw one never comes from a healthy producer.
+#
+# It has to be REFUSED rather than tolerated, because shell cannot carry it:
+# a command substitution drops NULs (printing `warning: command substitution:
+# ignored null byte in input` onto the very stderr this entry point exists to
+# keep clean) and the dropped bytes make the byte count SHORT -- so the
+# next_offset that D-13's crash-safety guarantee rests on would land before
+# the real complete-line boundary. Silently miscounting is the one outcome
+# worse than refusing.
+fs_assert_no_nul() {
+  local path="$1" raw stripped
+  [ -f "${path}" ] || return 0
+  raw="$(wc -c < "${path}" | tr -d ' ')"
+  stripped="$(tr -d '\0' < "${path}" | wc -c | tr -d ' ')"
+  [ "${raw}" = "${stripped}" ] && return 0
+  inbox_fail "channel file \"${path}\" contains a NUL byte, so it cannot be counted safely" \
+    "the file is corrupt -- a JSON writer escapes NUL as \\u0000 and never emits a raw one. Move it aside and let the producer recreate it, then reset the matching .state.json offset to 0."
+  return 1
 }
 
 # fs_assert_regular <path>
@@ -70,7 +102,9 @@ fs_assert_contained() {
   real_root="$(realpath -q "${root}" 2>/dev/null)" || real_root="${root}"
 
   anc="${path}"
-  while [ -n "${anc}" ] && [ ! -e "${anc}" ]; do
+  # `-e` is FALSE for a dangling symlink, so `-e || -L` is what stops the walk
+  # from stepping past one and judging containment on its parent instead.
+  while [ -n "${anc}" ] && [ ! -e "${anc}" ] && [ ! -L "${anc}" ]; do
     local parent="${anc%/*}"
     [ "${parent}" != "${anc}" ] || break
     anc="${parent:-/}"
@@ -112,34 +146,66 @@ fs_git_common_dir() {
 
 # fs_registry_records
 #
-# Emits one "<path>\t<compact json>" line per readable registry file. A
-# malformed file is a HARD error naming it: a registry nobody can parse must
-# not silently degrade into "this project has no channels", which is
-# indistinguishable from not having opted in.
+# Emits one "<compact json>\t<path>" line per PARSEABLE registry file, then a
+# trailing "#unparseable\t<count>" line when some file could not be read.
+#
+# THE JSON COMES FIRST. With the path first, a registry FILENAME containing a
+# tab would shift the JSON into the remainder field and the entry would be
+# silently dropped -- no match, no error. jq -c escapes a tab inside a string,
+# so the JSON field itself can never contain one.
+#
+# AN UNPARSEABLE FILE IS COUNTED, NOT NAMED, AND DOES NOT ABORT THE SCAN.
+# Every file in projects/ belongs to a DIFFERENT tenant, and failing here on
+# any of them had two costs: one project's typo wedged `inbox-status` for
+# every project on the machine, and the refusal printed another tenant's
+# registry filename -- the same disclosure `descriptor_select` refuses by
+# name. The caller decides: if its OWN entry was found, another tenant's
+# broken file is not its problem; if no entry matched AND something was
+# unparseable, the caller must refuse, because the broken one may be its own.
 #
 # A symlinked registry file is refused for the same reason a symlinked inbox
 # is: the mode and ownership you checked are not the ones you read.
 fs_registry_records() {
-  local dir file json
+  local dir file json bad=0
   dir="$(fs_registry_dir)"
   [ -d "${dir}" ] || return 0
 
   for file in "${dir}"/*.json; do
     [ -e "${file}" ] || continue
-    fs_assert_regular "${file}" || return 1
-    if ! json="$(jq -c . < "${file}" 2>/dev/null)"; then
-      inbox_fail "registry file \"${file}\" is not parseable JSON" \
-        "fix the JSON in \"${file}\" (check it with: jq . \"${file}\"), or remove the file if the project no longer uses the inbox."
-      return 1
-    fi
-    printf '%s\t%s\n' "${file}" "${json}"
+    if [ -L "${file}" ] || [ ! -f "${file}" ]; then bad=$((bad + 1)); continue; fi
+    if ! json="$(jq -c . < "${file}" 2>/dev/null)"; then bad=$((bad + 1)); continue; fi
+    printf '%s\t%s\n' "${json}" "${file}"
   done
+  [ "${bad}" -eq 0 ] || printf '#unparseable\t%s\n' "${bad}"
   return 0
 }
 
-# fs_list_dir <path>   -- bare names, one per line, INCLUDING dotfiles. Empty
-# for a directory that does not exist; the domain filter decides what counts.
-fs_list_dir() {
+# fs_list_dir_z <path>
+# Bare names, NUL-delimited, INCLUDING dotfiles. Empty for a directory that
+# does not exist; the domain predicate decides what counts.
+#
+# NUL-delimited, not `ls -A`, because `ls` is a LOSSY encoding of a directory:
+# a filename containing a newline arrives as two lines and is counted twice.
+# Here that is not academic -- a maildir message's slug is prose the PEER
+# chose, so `ls` would let the peer decide how many messages it had sent.
+# NUL is the one byte a filename cannot contain.
+fs_list_dir_z() {
   [ -d "$1" ] || return 0
-  ls -A -- "$1" 2>/dev/null || true
+  find "$1" -mindepth 1 -maxdepth 1 -printf '%f\0' 2>/dev/null || true
+}
+
+# fs_assert_not_symlink <path>
+# The directory counterpart of fs_assert_regular. `fs_assert_contained` uses
+# realpath, which FOLLOWS symlinks, so a symlinked directory inside the root
+# pointing elsewhere inside the root passes containment and is still a
+# redirect. Same reasoning as the inbox file's lstat defence, applied to the
+# directory a maildir channel reads from.
+fs_assert_not_symlink() {
+  local path="$1"
+  if [ -L "${path}" ]; then
+    inbox_fail "refusing to follow a symlinked directory at \"${path}\"" \
+      "replace \"${path}\" with a real directory; a symlink there redirects the read to a location the containment check already approved under a different name."
+    return 1
+  fi
+  return 0
 }

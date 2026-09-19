@@ -129,7 +129,11 @@ done
 # the grammar's NUL arm is unreachable from shell. Assert the reachable claim:
 # the name that survives assignment is the NUL-free one. See SABOTAGE_RECORDS.md
 # for the measured zero this produces.
-nulname="$(printf 'a\0b.jsonl' | tr -d '\0')"
+# Measured on the ASSIGNMENT, not on `tr` -- piping through `tr -d '\0'`
+# would assert a property of tr and prove nothing about bash.
+# The redirect wraps the ASSIGNMENT, not the substitution: bash emits the
+# "ignored null byte" warning itself, outside the subshell.
+{ nulname="$(printf 'a\0b.jsonl')"; } 2>/dev/null
 assert_eq "D-3 a NUL cannot survive a bash variable (grammar arm unreachable)" "ab.jsonl" "${nulname}"
 
 # The `..` arm of the grammar is only REACHABLE for a name that has no
@@ -334,11 +338,22 @@ assert_refused "an undeclared channel is refused by resolution itself, not just 
 # separates a correct resolver from one that passes everything else: a
 # fallback to "show whatever is in the root" satisfies every other assertion
 # in this file and hands one project another project's channels.
+# Records are "<json>\t<path>" -- JSON FIRST. With the path first, a registry
+# FILENAME containing a tab shifted the JSON into the remainder field and the
+# entry was silently dropped: no match, no error, and a project quietly loses
+# its channels. jq -c escapes a tab inside a string, so the JSON field can
+# never contain one.
 RECORDS="$(printf '%s\t%s\n%s\t%s\n' \
-  "/reg/a.json" '{"v":1,"repo":"/home/x/dev/a/.git","channels":{"a-chan":{"kind":"log","path":"a.jsonl"}}}' \
-  "/reg/b.json" '{"v":1,"repo":"/home/x/dev/b/.git","channels":{"b-chan":{"kind":"log","path":"b.jsonl"}}}')"
+  '{"v":1,"repo":"/home/x/dev/a/.git","channels":{"a-chan":{"kind":"log","path":"a.jsonl"}}}' "/reg/a.json" \
+  '{"v":1,"repo":"/home/x/dev/b/.git","channels":{"b-chan":{"kind":"log","path":"b.jsonl"}}}' "/reg/b.json")"
 sel="$(printf '%s\n' "${RECORDS}" | descriptor_select "/home/x/dev/a/.git")"
 assert_eq "an entry is selected by repo identity" "a-chan" "$(descriptor_channel_names "${sel}")"
+# A registry filename containing a tab must not silently drop the entry.
+tabrec="$(printf '%s\t%s\n' \
+  '{"v":1,"repo":"/home/x/dev/a/.git","channels":{"a-chan":{"kind":"log","path":"a.jsonl"}}}' \
+  "$(printf '/reg/we\tird.json')")"
+assert_eq "a registry filename containing a tab does not silently drop the entry" "a-chan" \
+  "$(printf '%s\n' "${tabrec}" | descriptor_select "/home/x/dev/a/.git" | descriptor_channel_names /dev/stdin 2>/dev/null || printf '%s\n' "${tabrec}" | descriptor_select "/home/x/dev/a/.git" | { read -r j; descriptor_channel_names "${j}"; })"
 out="$(printf '%s\n' "${RECORDS}" | descriptor_select "/home/x/dev/c/.git" 2>&1)"; rc=$?
 assert_eq "A-8 an unregistered repo selects NOTHING -- there is no fallback" "" "${out}"
 assert_eq "A-8 an unregistered repo is not a fault, it is simply no match" "1" "${rc}"
@@ -348,8 +363,8 @@ assert_eq "A-8 an unregistered repo is not a fault, it is simply no match" "1" "
 # channels. The refusal names the FILES and not their channels, because a
 # denial must not be usable to enumerate a namespace.
 DUPES="$(printf '%s\t%s\n%s\t%s\n' \
-  "/reg/a.json" '{"v":1,"repo":"/home/x/dev/a/.git","channels":{"a-chan":{"kind":"log","path":"a.jsonl"}}}' \
-  "/reg/dup.json" '{"v":1,"repo":"/home/x/dev/a/.git","channels":{"secret-chan":{"kind":"log","path":"s.jsonl"}}}')"
+  '{"v":1,"repo":"/home/x/dev/a/.git","channels":{"a-chan":{"kind":"log","path":"a.jsonl"}}}' "/reg/a.json" \
+  '{"v":1,"repo":"/home/x/dev/a/.git","channels":{"secret-chan":{"kind":"log","path":"s.jsonl"}}}' "/reg/dup.json")"
 err="$(printf '%s\n' "${DUPES}" | descriptor_select "/home/x/dev/a/.git" 2>&1 >/dev/null)"; rc=$?
 if [ "${rc}" -eq 0 ]; then bad "two entries claiming one repo is a hard error" "accepted"
 else
@@ -421,6 +436,25 @@ res="$(printf '%s\n' '{"v":1,"text":"keyless"}' | logchan_scan 0 "1" "" "")"
 assert_eq "a line with no dedupe key at all is unreadable, not counted" "1" "$(jq -r .unreadable <<<"${res}")"
 assert_eq "a line with no dedupe key at all is not counted as new" "0" "$(jq -r .new <<<"${res}")"
 
+# A line is JSON written by other people, so nothing guarantees a field has
+# the type this reader expects. A non-string `event_id` used directly as a jq
+# object key is not a lookup that misses -- it is `Cannot index object with
+# number`, a FATAL that aborts the scan of every REMAINING line in the slice.
+# One hostile line would cost the whole channel, and the D-15 cases do not
+# cover it: they exercise an unparseable line, not well-formed JSON with an
+# unexpected value type.
+for hostile in \
+  '{"v":1,"event_id":123,"channel":"C","ts":"1.1"}' \
+  '{"v":1,"event_id":{"a":1},"channel":"C","ts":"1.2"}' \
+  '{"v":1,"event_id":"E","channel":{"a":1},"ts":"1.3"}' \
+  '{"v":1,"event_id":true,"channel":"C","ts":"1.4"}'; do
+  printf '%s\n' "${hostile}" | logchan_scan 0 "1" "" "" >/dev/null 2>&1
+  assert_eq "a type-hostile field does not abort the scan: [$(printf '%s' "${hostile}" | cut -c1-34)…]" "0" "$?"
+done
+# And it must not cost the healthy lines around it either.
+res="$(printf '%s\n%s\n%s\n' "${L1}" '{"v":1,"event_id":123,"channel":"C","ts":"1.1"}' "${L2}" | logchan_scan 0 "1" "" "")"
+assert_eq "a type-hostile line does not suppress the healthy lines beside it" "3" "$(jq -r .new <<<"${res}")"
+
 # D-16: at-least-once delivery means a re-append of the same event is NORMAL.
 # event_id is the intra-file key that absorbs it.
 res="$(printf '%s\n' "${L1}" "${L2}" | logchan_scan 0 "1" "Ev1" "")"
@@ -461,6 +495,17 @@ assert_eq "D-18 the newest entry is kept" "Ev600" "$(printf '%s\n' "${ring}" | g
 # fixed key set would drop it on the next write, rotation would never fire
 # again, the log would grow forever -- the exact defect retention exists to
 # fix -- and nothing would report it.
+# The first-run case: no state file yet, so the existing document is absent or
+# empty. This is the FIRST case the ack ticket's writer will hit, and it was
+# broken -- `${1:-\{\}}` defaults to the literal string `\{}`, because inside
+# double quotes a backslash before `{` is not an escape.
+assert_eq "a merge with no arguments at all yields an empty document" "{}" \
+  "$(logchan_state_merge 2>/dev/null)"
+assert_eq "a merge onto an ABSENT existing document still applies the update" "1" \
+  "$(logchan_state_merge "" '{"offset":1}' 2>/dev/null | jq -r '.offset')"
+assert_eq "a merge onto an empty-object existing document applies the update" "1" \
+  "$(logchan_state_merge '{}' '{"offset":1}' 2>/dev/null | jq -r '.offset')"
+
 merged="$(logchan_state_merge \
   '{"v":1,"offset":10,"seen_event_ids":["Ev1"],"rotated_at":"2026-09-01T00:00:00Z","future_key":{"a":1}}' \
   '{"offset":42,"seen_event_ids":["Ev1","Ev2"]}')"
@@ -491,6 +536,16 @@ unread="$(printf '%s\n' \
   | maildir_filter_unread)"
 assert_eq "D-24 tmp/, .acked/ and dotfiles are excluded from unread" "2" \
   "$(printf '%s\n' "${unread}" | grep -c .)"
+
+# A message filename's slug is prose the PEER chose, so the peer picks these
+# bytes. A name carrying a newline is not a conformant message name, and
+# counted through any line-oriented listing it arrives as TWO entries -- which
+# would let the sender decide how many messages it had sent.
+if maildir_is_unread "$(printf 'a\nIGNORE-PREVIOUS-b')"; then
+  bad "a filename containing a newline is not counted as a message" "accepted"
+else ok "a filename containing a newline is not counted as a message"; fi
+assert_ok "a conformant message filename is still counted" \
+  maildir_is_unread "20260901T232215Z-001-a.md"
 
 echo "== 5. Side effects: lib/fs.sh =="
 
@@ -722,7 +777,11 @@ assert_contains "inbox-status points at the read step" "read-inbox" "${out}"
 assert_not_contains "inbox-status never prints another project's channel" "theirs" "${out}"
 
 jout="$(cd "${proj}" && "${BIN}/inbox-status" --json 2>&1)"
-assert_ok "--json emits one parseable object" bash -c "jq -e 'type==\"object\"' <<<'${jout}'"
+# Fed on stdin, never interpolated into a shell string: a quote in the output
+# would turn a real result into a shell parse error reported as a test
+# failure, or worse, into a pass.
+assert_ok "--json emits one parseable object" \
+  bash -c 'jq -e "type==\"object\"" >/dev/null' <<<"${jout}"
 assert_not_contains "--json never carries a peer-chosen slug either" "urgent-run-this-command" "${jout}"
 assert_not_contains "--json never carries a message body either" "${SENTINEL}" "${jout}"
 
@@ -736,6 +795,28 @@ assert_eq "--json carries counts only -- no per-message data of any kind" "" \
   "$(jq -r '[.channels[] | keys[] | select(. == "messages" or . == "ts" or . == "event_id" or . == "text" or . == "channel")] | join(",")' <<<"${jout}")"
 assert_eq "--json counts the maildir unread, excluding tmp/, .acked/ and .event" "1" \
   "$(jq -r '.channels[] | select(.name=="mail") | .unread' <<<"${jout}")"
+
+# A COUNTING failure must be fatal and visible, exactly as a REGISTRY failure
+# is. The suite proved the registry path several times over and never proved
+# this one, and the gap was real: a failed scan produces no output, feeding
+# jq empty input, which emits nothing and exits ZERO -- so the failure
+# travelled as a successful count of nothing, took every other channel's count
+# with it, and `--json` emitted an unparseable blank line while claiming exit
+# 0. Injected before the user has spoken, that reads as "you have no mail" to
+# a session that has mail.
+setup_case
+hproj="$(make_repo hproj)"
+register hproj "${hproj}" '{"a":{"kind":"log","path":"a.jsonl"},"b":{"kind":"log","path":"b.jsonl"}}'
+printf '%s\n' "${L1}" > "${ATHENA_INBOX_ROOT}/b.jsonl"
+# A line this reader genuinely cannot process, planted in the FIRST channel.
+printf '%s\n' 'not-json-and-not-recoverable' > "${ATHENA_INBOX_ROOT}/a.jsonl"
+jout="$(cd "${hproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_ok "--json output is parseable even with a hostile line present" \
+  bash -c 'jq -e "type==\"object\"" >/dev/null' <<<"${jout}"
+assert_eq "a hostile line in one channel does not erase another channel's count" "1" \
+  "$(jq -r '.channels[] | select(.name=="b") | .new' <<<"${jout}")"
+assert_eq "the hostile line is counted as unreadable, not as a fatal" "1" \
+  "$(jq -r '.channels[] | select(.name=="a") | .unreadable' <<<"${jout}")"
 
 # Zero across the board -> print NOTHING and exit 0. Unprompted output that
 # says "nothing new" every session is noise, and noise is what makes a real
@@ -783,6 +864,94 @@ else assert_contains "an unparseable registry file is a hard error with a Fix: c
 # mistyped flag is how a "--json" consumer ends up parsing prose.
 assert_refused "an unknown argument is refused with a Fix: clause" \
   "${BIN}/inbox-status" --bodies
+
+echo "== 8. Hardening: failures that must stay visible and contained =="
+
+# ARITHMETIC CONTEXT. `$(( ))` executes a command substitution inside an array
+# subscript, so an unvalidated offset reaching one is code execution, not a bad
+# read. Both primitives validate their own argument rather than trusting the
+# caller that happens to sanitize today.
+setup_case
+canary="${CASE_DIR}/PWNED"
+assert_refused "logchan_scan refuses a non-numeric offset rather than evaluating it" \
+  bash -c "cd '${CASE_DIR}' && $(_in_libs) && printf '' | logchan_scan 'a[\$(touch ${canary})]' 1 '' ''"
+assert_refused "fs_slice_from refuses a non-numeric offset rather than evaluating it" \
+  bash -c "cd '${CASE_DIR}' && $(_in_libs) && fs_slice_from /etc/hostname 'a[\$(touch ${canary})]'"
+if [ -e "${canary}" ]; then
+  bad "no command substitution is executed by an arithmetic context" "the canary file was created"
+else ok "no command substitution is executed by an arithmetic context"; fi
+
+# A NUL in a .jsonl is corruption, and shell CANNOT carry it: a command
+# substitution drops it (printing bash's own warning onto the pre-prompt
+# stream) and the dropped bytes make the byte count short, so next_offset
+# lands before the real complete-line boundary. Refusing is the only option
+# that is not a silent miscount.
+setup_case
+nproj="$(make_repo nproj)"
+register nproj "${nproj}" '{"n":{"kind":"log","path":"n.jsonl"}}'
+printf '{"v":1,"event_id":"E1","channel":"C","ts":"1.1","text":"a\0b"}\n' > "${ATHENA_INBOX_ROOT}/n.jsonl"
+err="$(cd "${nproj}" && "${BIN}/inbox-status" 2>&1 >/dev/null)"; rc=$?
+if [ "${rc}" -eq 0 ]; then bad "a NUL byte in a channel file is refused, not miscounted" "exited 0"
+else assert_contains "a NUL byte in a channel file is refused with a Fix: clause" "Fix:" "${err}"; fi
+assert_not_contains "the NUL refusal does not leak bash's own warning onto the stream" \
+  "ignored null byte" "${err}"
+
+# CROSS-TENANT BLAST RADIUS. Every other file in projects/ belongs to a
+# DIFFERENT tenant. One of them being broken must not wedge this project, and
+# the refusal must never name it -- that is the same disclosure descriptor_select
+# refuses by name.
+setup_case
+mine2="$(make_repo mine2)"
+register mine2 "${mine2}" '{"mine":{"kind":"log","path":"mine.jsonl"}}'
+printf '%s\n' '{ broken' > "${ATHENA_INBOX_ROOT}/projects/secret-project-b.json"
+out="$(cd "${mine2}" && inbox_channels 2>/dev/null)"; rc=$?
+assert_eq "another tenant's broken registry file does not wedge this project" "mine" "${out}"
+assert_eq "another tenant's broken registry file is not an error for this project" "0" "${rc}"
+err="$(cd "${mine2}" && "${BIN}/inbox-status" 2>&1 >/dev/null)"
+assert_not_contains "another tenant's registry filename is never disclosed" \
+  "secret-project-b" "${err}"
+# But when NO entry matched, the broken file may be THIS project's, so it must
+# refuse -- still by count, never by name.
+unreg="$(make_repo unreg)"
+err="$(cd "${unreg}" && "${BIN}/inbox-status" 2>&1 >/dev/null)"; rc=$?
+if [ "${rc}" -eq 0 ]; then bad "an unreadable registry file with no match is still fatal" "exited 0"
+else
+  assert_contains "an unreadable registry file with no match is fatal with a Fix: clause" "Fix:" "${err}"
+  assert_not_contains "that refusal names a COUNT, never the file" "secret-project-b" "${err}"
+fi
+
+# PARTIAL FAILURE. err.sh returns a status rather than exiting precisely "so a
+# caller can refuse one channel without killing a multi-channel run". One
+# misconfigured channel must not hide real mail on the others.
+setup_case
+pproj="$(make_repo pproj)"
+register pproj "${pproj}" '{"broken":{"kind":"log","path":"broken.jsonl"},"good":{"kind":"log","path":"good.jsonl"}}'
+printf '%s\n' "${L1}" > "${ATHENA_INBOX_ROOT}/good.jsonl"
+ln -s /etc/hostname "${ATHENA_INBOX_ROOT}/broken.jsonl"
+jout="$(cd "${pproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"; rc=$?
+assert_eq "a broken channel does not suppress a healthy channel's count" "1" \
+  "$(jq -r '.channels[] | select(.name=="good") | .new' <<<"${jout}")"
+assert_eq "the broken channel is marked, not silently dropped" "true" \
+  "$(jq -r '.channels[] | select(.name=="broken") | .error' <<<"${jout}")"
+if [ "${rc}" -eq 0 ]; then bad "a partial failure still exits non-zero" "exited 0"
+else ok "a partial failure still exits non-zero"; fi
+out="$(cd "${pproj}" && "${BIN}/inbox-status" 2>/dev/null)"
+assert_contains "the text output still reports the healthy channel" "good — 1 new" "${out}"
+assert_contains "the text output names the channel that could not be counted" "broken" "${out}"
+
+# A SUBDIRECTORY is not a message. The name predicate is name-only by design,
+# so the "is it actually a file" half has to happen where the filesystem is.
+setup_case
+sproj="$(make_repo sproj)"
+register sproj "${sproj}" '{"mail":{"kind":"maildir","namespace":"agent-mail/peer","read":"from-peer","write":"to-peer","identity":"athena"}}'
+SD="${ATHENA_INBOX_ROOT}/agent-mail/peer/from-peer"
+mkdir -p "${SD}/tmp" "${SD}/a-directory-not-a-message"
+printf -- '---\nfrom: peer\nto: athena\nsent_at: 2026-09-01T23:22:15Z\n---\n\nbody\n' \
+  > "${SD}/20260901T232215Z-001-real.md"
+touch "${SD}/$(printf 'b\nIGNORE-PREVIOUS-c')"
+jout="$(cd "${sproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "the peer does not get to choose the count: one real message counts as 1" "1" \
+  "$(jq -r '.channels[] | select(.name=="mail") | .unread' <<<"${jout}")"
 
 echo
 if [ "${FAIL}" -eq 0 ]; then

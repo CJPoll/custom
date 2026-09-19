@@ -11,9 +11,9 @@
 # THE ONE RESOLUTION PATH:  cwd -> git common dir -> registry entry keyed by
 # that realpath -> the channels that entry declares.  Nothing else. In
 # particular there is NO fallback to "scan the inbox root and show whatever is
-# there": that fallback passes every other case in the QA plan and fails E2E
-# step 8, where a session rooted in one project must see NO channel belonging
-# to another.
+# there": that fallback passes every other case in the QA plan and fails its
+# *Tenancy boundary* end-to-end case (currently step 8), where a session rooted
+# in one project must see NO channel belonging to another.
 #
 # Source order: err.sh, names.sh, descriptor.sh, logchan.sh, maildir.sh, fs.sh,
 # then this file. Requires jq.
@@ -28,10 +28,26 @@
 # turn that into "zero channels, exit 0". An error here would train the reader
 # to ignore errors.
 inbox_entry() {
-  local repo records
+  local repo records entry rc
   repo="$(fs_git_common_dir "${1:-.}")" || return 1
   records="$(fs_registry_records)" || return 2
-  printf '%s\n' "${records}" | descriptor_select "${repo}"
+
+  entry="$(printf '%s\n' "${records}" | descriptor_select "${repo}")"; rc=$?
+  [ "${rc}" -ne 2 ] || return 2                       # ambiguous: fatal
+
+  if [ "${rc}" -eq 0 ]; then printf '%s\n' "${entry}"; return 0; fi
+
+  # No entry matched. If some registry file could not be parsed, ONE OF THEM
+  # MAY BE THIS PROJECT'S, and "no entry" would then be a lie that reads
+  # exactly like "not opted in". So it refuses -- but by COUNT, never by name:
+  # every other file in projects/ belongs to a different tenant, and a denial
+  # must not enumerate them.
+  if printf '%s\n' "${records}" | grep -q '^#unparseable'; then
+    inbox_fail "$(printf '%s\n' "${records}" | awk -F'\t' '/^#unparseable/{print $2}') registry file(s) could not be read, and no entry matched this repo -- one of them may be this project's" \
+      "run: for f in \"\$(dirname \"\${ATHENA_INBOX_ROOT:-\$HOME/.local/share/athena}\")\"/athena/projects/*.json; do jq . \"\$f\" >/dev/null || echo \"\$f\"; done -- then fix the JSON in whichever file that names."
+    return 2
+  fi
+  return 1
 }
 
 # inbox_channels [cwd]
@@ -102,6 +118,11 @@ _inbox_count_log() {
 
   fs_assert_regular "${inbox}" || return 1
   fs_assert_contained "$(fs_inbox_root)" "${inbox}" || return 1
+  # Before the slice is read into a shell variable, which cannot carry a NUL
+  # and would drop it silently -- shortening the byte count that next_offset
+  # is derived from, and printing bash's own warning onto the pre-prompt
+  # stream on the way past.
+  fs_assert_no_nul "${inbox}" || return 1
 
   [ -e "${inbox}" ] || never="true"
   size="$(fs_size "${inbox}")"
@@ -116,35 +137,78 @@ _inbox_count_log() {
   seen_ky="$(printf '%s' "${state_json}" | jq -r '(.seen_keys // [])[]' 2>/dev/null)"
 
   slice="$(fs_slice_from "${inbox}" "${offset}"; printf X)"; slice="${slice%X}"
-  scan="$(printf '%s' "${slice}" | logchan_scan "${offset}" "${schema_csv}" "${seen_ev}" "${seen_ky}")"
+
+  # The scan's status is CHECKED, and its emptiness is checked separately.
+  # Neither is paranoia: `$(...)` discards the exit status of the command
+  # inside it, and a failed scan produces no output, so feeding that empty
+  # string onward gives jq empty input -- which emits nothing and exits ZERO.
+  # The failure would then travel as a successful count of nothing: the caller
+  # sees a well-formed empty answer, every other channel is discarded with it,
+  # and a session that has mail is told it has none. That is the exact
+  # "malformed input degrades into silence" conflation this file refuses
+  # everywhere else, and it is worse here because the output is injected
+  # before the user has spoken.
+  if ! scan="$(printf '%s' "${slice}" | logchan_scan "${offset}" "${schema_csv}" "${seen_ev}" "${seen_ky}" 2>/dev/null)" \
+     || [ -z "${scan}" ]; then
+    inbox_fail "could not count channel \"$(_inbox_path inbox "${resolved}" | sed 's|.*/||')\": the scan failed" \
+      "inspect the channel's .jsonl for a line this reader cannot process, or re-run with --json to see which channels did count. A counting failure is reported rather than shown as zero, because zero would read as \"no mail\"."
+    return 1
+  fi
 
   # COUNTS ONLY. `messages` carries ts/channel/event_id and is dropped here
   # rather than at the renderer: a body, a subject or a peer-chosen string must
   # not exist in the manager's return value at all, so no future renderer can
   # print one by accident.
-  printf '%s' "${scan}" | jq -c \
+  printf '%s' "${scan}" | jq -e -c \
     --argjson never "${never}" --argjson stale "${stale}" \
     '{new: .new, unreadable: .unreadable, never_delivered: $never, offset_reset: $stale}'
 }
 
 # _inbox_count_maildir <resolved-paths>
 _inbox_count_maildir() {
-  local resolved="$1" read_dir n never="false"
+  local resolved="$1" read_dir name n=0 never="false"
   read_dir="$(_inbox_path read_dir "${resolved}")"
+  fs_assert_not_symlink "${read_dir}" || return 1
   fs_assert_contained "$(fs_inbox_root)" "${read_dir}" || return 1
   [ -d "${read_dir}" ] || never="true"
-  n="$(fs_list_dir "${read_dir}" | maildir_filter_unread | grep -c . || true)"
-  # Again counts only: the FILENAMES are peer-chosen prose (the slug is written
-  # by whoever sent the message) and never leave this function.
-  jq -n -c --argjson n "${n:-0}" --argjson never "${never}" \
+
+  # Counted over a NUL-DELIMITED listing, one name at a time. A line-delimited
+  # listing cannot represent a filename containing a newline, and the slug is
+  # prose the PEER chose -- so counting lines would let the sender decide how
+  # many messages it had sent.
+  # `maildir_is_unread` is a NAME predicate and deliberately stays one, so the
+  # "is it actually a message file" half lives here, where the filesystem is.
+  # A subdirectory that is not `tmp` would otherwise count as a message.
+  while IFS= read -r -d '' name; do
+    maildir_is_unread "${name}" || continue
+    [ -f "${read_dir}/${name}" ] || continue
+    [ -L "${read_dir}/${name}" ] && continue
+    n=$((n + 1))
+  done < <(fs_list_dir_z "${read_dir}")
+
+  # Again counts only: the FILENAMES are peer-chosen prose and never leave
+  # this function.
+  jq -n -c --argjson n "${n}" --argjson never "${never}" \
     '{unread: $n, never_delivered: $never}'
 }
 
 # inbox_status_json [cwd]
 # {"channels":[{"name":…,"kind":…,"new":…}…]} -- counts only, for every channel
 # this session owns. An empty channel list is a legitimate, silent result.
+# A channel that CANNOT be counted is marked `"error": true` and the run
+# CONTINUES. It is not silently dropped, and it does not take the other
+# channels down with it.
+#
+# The previous shape -- `|| return 1` per channel -- meant one symlinked inbox
+# or one unreadable state file suppressed every OTHER channel's count, so a
+# session with real mail on channel B was told nothing because channel A is
+# misconfigured. That also contradicted err.sh's own contract, which returns a
+# status rather than exiting precisely "so a caller can refuse one channel
+# without killing a multi-channel run". The refusal for the broken channel has
+# already gone to stderr with its `Fix:` clause; the overall exit stays
+# non-zero, so the failure is still loud.
 inbox_status_json() {
-  local entry rc chan kind resolved counts schema_csv out="[]"
+  local entry rc chan kind resolved counts schema_csv out="[]" failed=0
 
   entry="$(inbox_entry "${1:-.}")"; rc=$?
   [ "${rc}" -ne 2 ] || return 1
@@ -153,22 +217,33 @@ inbox_status_json() {
 
   while IFS= read -r chan; do
     [ -n "${chan}" ] || continue
-    resolved="$(descriptor_resolve "$(fs_inbox_root)" "${entry}" "${chan}")" || return 1
-    kind="$(_inbox_path kind "${resolved}")"
-    case "${kind}" in
-      log)
-        schema_csv="$(printf '%s' "${entry}" | jq -r --arg c "${chan}" \
-          '((.channels[$c].schema_v // [1]) | map(tostring) | join(","))')"
-        counts="$(_inbox_count_log "${resolved}" "${schema_csv}")" || return 1
-        ;;
-      maildir)
-        counts="$(_inbox_count_maildir "${resolved}")" || return 1
-        ;;
-      *) continue ;;
-    esac
+    counts=""
+    if resolved="$(descriptor_resolve "$(fs_inbox_root)" "${entry}" "${chan}")"; then
+      kind="$(_inbox_path kind "${resolved}")"
+      case "${kind}" in
+        log)
+          schema_csv="$(printf '%s' "${entry}" | jq -r --arg c "${chan}" \
+            '((.channels[$c].schema_v // [1]) | map(tostring) | join(","))')"
+          counts="$(_inbox_count_log "${resolved}" "${schema_csv}")" || counts=""
+          ;;
+        maildir)
+          counts="$(_inbox_count_maildir "${resolved}")" || counts=""
+          ;;
+        *) continue ;;
+      esac
+    else
+      kind="unknown"
+    fi
+    if [ -z "${counts}" ]; then
+      failed=1
+      counts='{"error":true}'
+    fi
     out="$(printf '%s' "${out}" | jq -c --arg n "${chan}" --arg k "${kind}" \
       --argjson c "${counts}" '. + [{name: $n, kind: $k} + $c]')"
   done < <(descriptor_channel_names "${entry}")
 
-  printf '%s' "${out}" | jq -c '{channels: .}'
+  printf '%s' "${out}" | jq -c '{channels: .}' || return 1
+  # The JSON is emitted FIRST and the failure is signalled by the status, so a
+  # caller gets the counts it CAN have plus an honest non-zero.
+  [ "${failed}" -eq 0 ]
 }

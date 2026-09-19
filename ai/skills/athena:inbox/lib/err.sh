@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# err.sh -- the one refusal shape for the whole athena:inbox skill. Domain
-# (pure): it writes to stderr and returns, and touches nothing else.
+# err.sh -- the one refusal shape for the whole athena:inbox skill.
+#
+# Domain, with ONE deliberate exception to purity: it writes the refusal to
+# stderr. Every other domain file here is literally pure, and calling this one
+# is the single way any of them produces an effect. The alternative -- returning
+# a refusal string for the Manager to print -- is more correct on paper and buys
+# nothing here, because a refusal must be emitted at the point the offending
+# value is still in scope to be named. Saying so is the honest version of the
+# claim; "pure" without this paragraph is not.
 #
 # The contract (ai/contracts/athena-inbox.md -> "Conformance language") makes
 # this mandatory, not stylistic: EVERY refusal carries a greppable `Fix:`

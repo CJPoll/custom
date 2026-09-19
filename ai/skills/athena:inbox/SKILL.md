@@ -18,7 +18,7 @@ Normative contract: `ai/contracts/athena-inbox.md`. Where this file and the
 contract disagree, the contract wins — with **one dated exception**, currently
 being amended in the contract itself by DND-202:
 
-> **Later (2026-09-18):** the contract's *Tenancy: the descriptor* section
+> **Superseded design, as of 2026-09-18:** the contract's *Tenancy: the descriptor* section
 > still describes a `.athena-inbox.json` **committed at each repo's root**,
 > resolved from the **git toplevel**. The owner reversed that on 2026-09-18
 > (option B, DND-202): the config is harness-side and keyed by the **git
@@ -128,6 +128,7 @@ only:
 |---|---|
 | `new` / `unread` | messages waiting, **post-dedupe** — what the read step would actually show |
 | `unreadable` | lines this reader could not parse, counted separately, never fatal |
+| `error` | this channel could not be counted. The refusal, with its `Fix:` clause, has already gone to stderr; the other channels still report, because one misconfigured channel must not hide real mail on the rest |
 | `never_delivered` | nothing has **ever** arrived here. Not the same as "nothing new" — the file exists only if a producer was separately registered, so this is a broken setup, not a quiet morning. It **is** reported in the text line, with a `Fix:` clause naming producer registration, because the contract makes that a MUST; the all-zero silence rule covers healthy-but-empty channels, not broken ones |
 | `offset_reset` | a stored offset past EOF was recovered by re-reading from 0 |
 
@@ -154,7 +155,7 @@ honouring configuration nobody understands is the bug that rule prevents, and
 
 | Bucket | Files |
 |---|---|
-| Domain (pure, no I/O) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` |
+| Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` |
 | Side effects | `lib/fs.sh` — the only file I/O, and the only `git` call |
 | Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes |
 | Framework | `bin/inbox-status` |

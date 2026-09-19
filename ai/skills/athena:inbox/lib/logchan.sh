@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# logchan.sh -- the counting rules for a `log` channel. DOMAIN: pure.
+# logchan.sh -- the counting rules for a `log` channel. DOMAIN (the one effect
+# available to it is a refusal on stderr via err.sh; it does not use one).
 #
 # It takes a BYTE SLICE on stdin and returns JSON. It never opens the inbox, so
 # every rule below is provable without a fixture on disk -- which matters more
@@ -65,6 +66,21 @@ logchan_scan() {
   local offset="$1" schema_csv="${2:-1}" seen_ev="${3:-}" seen_ky="${4:-}"
   local complete bytes sv_json ev_json ky_json
 
+  # The offset is validated HERE, not only by the caller. It reaches an
+  # arithmetic context below, and bash EXECUTES a command substitution inside
+  # an array subscript in that context -- `a[$(...)]` runs. The manager does
+  # sanitize it today, but this function is documented as a strings-in domain
+  # primitive with no stated precondition, and its taint source is a state
+  # file that becomes writable the moment the ack ticket lands. A primitive
+  # that is only safe because of its current caller is not safe.
+  case "${offset}" in
+    ''|*[!0-9]*)
+      inbox_fail "refusing a non-numeric byte offset" \
+        "pass logchan_scan a decimal byte offset; a state file whose \"offset\" is not a plain number is corrupt and should be reset to 0."
+      return 1
+      ;;
+  esac
+
   complete="$(logchan_split_complete; printf X)"; complete="${complete%X}"
   bytes="$(LC_ALL=C printf '%s' "${complete}" | wc -c | tr -d ' ')"
 
@@ -93,9 +109,16 @@ logchan_scan() {
             # the writer must not take the reader down.
             .unreadable += 1
           else
+            # Both keys are forced to STRINGS before they are used as object
+            # keys. A line is JSON written by other people: nothing guarantees
+            # `event_id` is a string, and `.ev[7]` is not a lookup that misses,
+            # it is `Cannot index object with number` -- a jq FATAL that aborts
+            # the scan of every remaining line in the slice. A malformed line
+            # must cost one `unreadable`, never the whole channel.
             (if ($o.channel // "") != "" and ($o.ts // "") != ""
              then "\($o.channel):\($o.ts)" else null end) as $key
-            | ($o.event_id // null) as $eid
+            | (if ($o.event_id | type) == "null" then null
+               else ($o.event_id | tostring) end) as $eid
             | if $eid == null and $key == null then
                 # A line carrying NEITHER key cannot be deduped, so counting it
                 # would mean deduping on nothing and re-reporting it forever.
@@ -143,8 +166,16 @@ logchan_scan() {
 # rotation would then never fire again, the log would grow forever -- which is
 # exactly the defect retention exists to fix -- and nothing would report it.
 # A discarded key is invisible in production by construction.
+# The defaults are assigned rather than written as `${1:-\{\}}`: inside double
+# quotes a backslash before `{` is LITERAL, so that spelling defaults to the
+# string `\{}` and jq dies on it. The first-run case -- no state file yet, so
+# an empty or absent existing document -- is precisely the one the ack ticket
+# will hit first, and jq given empty input never reaches the `// {}` guard in
+# the program, so the guard alone is not enough.
 logchan_state_merge() {
-  local existing="${1:-\{\}}" updates="${2:-\{\}}"
+  local existing="${1:-}" updates="${2:-}"
+  [ -n "${existing}" ] || existing='{}'
+  [ -n "${updates}" ] || updates='{}'
   printf '%s' "${existing}" | jq -c --argjson u "${updates}" '(. // {}) * $u'
 }
 

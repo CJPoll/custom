@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # names.sh -- the path and name grammar of the Athena Inbox. DOMAIN: pure.
 #
-# Nothing here touches the filesystem. Every function takes strings and returns
+# Nothing here touches the filesystem (the one effect is a refusal on stderr,
+# via err.sh -- see its header). Every function takes strings and returns
 # strings or a status, which is what makes the whole grammar provable without a
 # single fixture on disk -- and it is why the containment check below is
 # LEXICAL.
@@ -22,7 +23,12 @@
 # --- name grammars ----------------------------------------------------------
 
 # names_byte_length <string>
-names_byte_length() { LC_ALL=C printf '%s' "$1" | wc -c | tr -d ' '; }
+# LC_ALL=C makes ${#s} count BYTES rather than characters, which is the
+# measurement the client's limit is expressed in. Done with parameter
+# expansion rather than `printf | wc -c | tr`: this is called for every segment
+# of every path, and three forks per segment in a file whose whole claim is
+# that it is pure string work is the wrong shape.
+names_byte_length() { local LC_ALL=C; printf '%s\n' "${#1}"; }
 
 # names_valid_inbox_name <name>  (kind `log` -> descriptor `path`)
 #
