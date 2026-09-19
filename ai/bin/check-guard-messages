@@ -47,6 +47,7 @@ GUARD_BINS = %w[
   check-generic-skills
   check-hooks-registered
   harness-eval
+  harness-gate
   critic-review
   critic-eval
 ].freeze

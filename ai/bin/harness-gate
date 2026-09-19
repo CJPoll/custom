@@ -1,0 +1,201 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# harness-gate — run the whole shipwright gate in one shot, in the verified-
+# correct invocation form for each check.
+#
+# Why this exists: the gate used to live ONLY as prose in
+# ai/agents/athena-shipwright.md.in -> "The gate". Prose is not executable, so
+# every run re-assembled the nine commands by hand, and a mis-assembly is
+# dangerous in ONE specific direction: a check that silently does nothing still
+# exits 0 and reads as PASS. That has already happened once — invoking a hook as
+# `ai/hooks/<hook>.sh --self-test` ignores the flag and blocks on (or empties)
+# stdin, a FALSE GREEN. The template now warns about it in prose; this script
+# makes the correct form the only form, and its --self-test asserts the trap
+# cannot creep back into the declared list.
+#
+# This runner is a convenience + a guard, NOT a new source of authority: the
+# canonical, human-readable gate spec stays in the shipwright template. Keep the
+# two in sync — add a check here AND there.
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/harness-gate              run every check; exit 1 if any fails
+#   ai/bin/harness-gate --list       print the declared checks, run nothing
+#   ai/bin/harness-gate --self-test  verify the runner's own logic
+#
+# Not in the list: harness-gate itself (it would recurse). Its --self-test is
+# the relevant check when this file changes.
+
+require "open3"
+require "fileutils"
+require "tmpdir"
+
+CUSTOM_DIR = File.expand_path("../..", __dir__)
+
+# Each entry: [label, argv]. argv[0] is repo-relative.
+CHECKS = [
+  ["build-agents --check",      %w[ai/bin/build-agents --check]],
+  ["safe-wait-guard self-test", %w[ai/hooks/safe-wait-guard.self-test.sh]],
+  ["pronoun-guard self-test",   %w[ai/hooks/pronoun-guard.self-test.sh]],
+  ["harness-event self-test",   %w[ai/hooks/harness-event.self-test.sh]],
+  ["check-generic-skills",      %w[ai/bin/check-generic-skills]],
+  ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
+  ["check-guard-messages",      %w[ai/bin/check-guard-messages]],
+  ["harness-eval",              %w[ai/bin/harness-eval]],
+  ["critic-review self-test",   %w[ai/bin/critic-review --self-test]],
+  ["critic-eval self-test",     %w[ai/bin/critic-eval --self-test]],
+].freeze
+
+FAIL_TAIL_LINES = 20
+
+# Run one check with stdin CLOSED (a check that reads stdin must never inherit
+# the caller's terminal or a pipe — that is the false-green path).
+# Returns [ok?, combined_output].
+def run_one(argv, chdir: CUSTOM_DIR)
+  out, status = Open3.capture2e(*argv, chdir: chdir, stdin_data: "")
+  [status.success?, out]
+rescue Errno::ENOENT, Errno::EACCES => e
+  [false, "harness-gate: cannot execute #{argv.first}: #{e.class}: #{e.message}"]
+end
+
+def missing_executables
+  CHECKS.reject { |(_, argv)| File.executable?(File.join(CUSTOM_DIR, argv.first)) }
+end
+
+# The false-green trap: a hook's own .sh invoked with --self-test.
+def false_green_entries
+  CHECKS.select do |(_, argv)|
+    argv.first.start_with?("ai/hooks/") &&
+      !argv.first.end_with?(".self-test.sh")
+  end
+end
+
+def run_gate
+  missing = missing_executables
+  unless missing.empty?
+    warn "harness-gate: FAILED — declared check(s) missing or not executable:"
+    missing.each { |(label, argv)| warn "  - #{label} (#{argv.first})" }
+    warn "  Fix: restore the script, `chmod +x` it, or remove its entry from " \
+         "CHECKS in ai/bin/harness-gate (and from the gate list in " \
+         "ai/agents/athena-shipwright.md.in)."
+    return 1
+  end
+
+  failures = []
+  CHECKS.each do |(label, argv)|
+    ok, out = run_one(argv)
+    printf("%-28s %s\n", label, ok ? "PASS" : "FAIL")
+    failures << [label, argv, out] unless ok
+  end
+
+  if failures.empty?
+    puts "harness-gate: OK — #{CHECKS.size}/#{CHECKS.size} checks PASS; safe to commit."
+    return 0
+  end
+
+  warn ""
+  warn "harness-gate: FAILED — #{failures.size} of #{CHECKS.size} check(s) did not pass:"
+  failures.each do |(label, argv, out)|
+    warn ""
+    warn "--- #{label} (#{argv.join(' ')}) ---"
+    out.to_s.lines.last(FAIL_TAIL_LINES).each { |l| warn "  #{l.chomp}" }
+  end
+  warn ""
+  warn "  Fix: repair each failing check above, or revert the harness edit that " \
+       "broke it (`git restore <files>`), then re-run ai/bin/harness-gate. Do " \
+       "NOT commit while this is red — a red gate means the harness fails its " \
+       "own checks. If you edited a template or block, run `ai/bin/build-agents` " \
+       "first so the rendered .md files are regenerated."
+  1
+end
+
+def run_list
+  CHECKS.each { |(label, argv)| printf("%-28s %s\n", label, argv.join(" ")) }
+  puts "harness-gate: #{CHECKS.size} declared check(s)"
+  0
+end
+
+def run_self_test
+  ok = true
+
+  # 1. Every declared check exists and is executable.
+  missing = missing_executables
+  unless missing.empty?
+    warn "self-test: FAIL — declared check(s) not executable: " \
+         "#{missing.map { |(_, a)| a.first }.join(', ')}"
+    ok = false
+  end
+
+  # 2. No hook is declared in the false-green form (`<hook>.sh --self-test`).
+  traps = false_green_entries
+  unless traps.empty?
+    warn "self-test: FAIL — hook check(s) declared in the FALSE-GREEN form " \
+         "(must be the dedicated .self-test.sh script): " \
+         "#{traps.map { |(_, a)| a.join(' ') }.join(', ')}"
+    ok = false
+  end
+
+  # 3. Every ai/hooks/*.self-test.sh on disk is actually declared (a new hook
+  #    must not be able to ship untested by the gate).
+  on_disk = Dir.glob(File.join(CUSTOM_DIR, "ai/hooks/*.self-test.sh"))
+               .map { |p| p.sub("#{CUSTOM_DIR}/", "") }.sort
+  declared = CHECKS.map { |(_, argv)| argv.first }
+  undeclared = on_disk - declared
+  unless undeclared.empty?
+    warn "self-test: FAIL — hook self-test(s) on disk but not in CHECKS: " \
+         "#{undeclared.join(', ')}"
+    ok = false
+  end
+
+  # 4. run_one reports PASS/FAIL correctly and closes stdin.
+  Dir.mktmpdir("harness-gate-selftest") do |dir|
+    passing = File.join(dir, "pass.sh")
+    failing = File.join(dir, "fail.sh")
+    reads   = File.join(dir, "reads-stdin.sh")
+    File.write(passing, "#!/bin/sh\nexit 0\n")
+    File.write(failing, "#!/bin/sh\necho boom\nexit 1\n")
+    # Exits 0 only if stdin is at EOF -- i.e. the runner closed it rather than
+    # leaving the check blocked on a terminal.
+    File.write(reads, "#!/bin/sh\nif cat >/dev/null; then exit 0; else exit 1; fi\n")
+    [passing, failing, reads].each { |p| FileUtils.chmod(0o755, p) }
+
+    good_ok, = run_one([passing], chdir: dir)
+    unless good_ok
+      warn "self-test: FAIL — a passing check was reported as FAIL"; ok = false
+    end
+
+    bad_ok, bad_out = run_one([failing], chdir: dir)
+    if bad_ok
+      warn "self-test: FAIL — a failing check was reported as PASS"; ok = false
+    end
+    unless bad_out.to_s.include?("boom")
+      warn "self-test: FAIL — a failing check's output was not captured"; ok = false
+    end
+
+    stdin_ok, = run_one([reads], chdir: dir)
+    unless stdin_ok
+      warn "self-test: FAIL — run_one did not close stdin for the check"; ok = false
+    end
+  end
+
+  if ok
+    puts "harness-gate: self-test OK (#{CHECKS.size} checks declared)"
+    0
+  else
+    warn "harness-gate: self-test FAILED"
+    warn "  Fix: repair CHECKS in ai/bin/harness-gate so every declared check is " \
+         "executable and every hook is invoked via its dedicated .self-test.sh " \
+         "script (never `<hook>.sh --self-test`, which is a false green), and " \
+         "keep run_one reporting the child's exit status with stdin closed."
+    1
+  end
+end
+
+exit(
+  if ARGV.include?("--self-test") then run_self_test
+  elsif ARGV.include?("--list") then run_list
+  else run_gate
+  end
+)
