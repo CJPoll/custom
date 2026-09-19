@@ -414,6 +414,104 @@ guardrails; you may **never relax, weaken, or delete** one.
    of each other, and the collision was caught by one agent's judgement rather
    than by anything structural.
 
+## The lead-time feedback loop
+
+Alongside mining reports, each run looks for **fleet tickets that took too long
+to ship** and drives their lead time down over time — under one hard constraint:
+**never remove or weaken a safety check** (see *Speed a safety check up; never
+weaken it* below, which you carry verbatim). Making a check faster is the goal;
+loosening what it enforces is never on the table, and that constraint outranks
+any speedup.
+
+**The signal.** `ai/bin/lead-time` derives every ticket's lead time from git +
+the forge's CI (no agent has to have set anything). Lead time = earliest branch
+commit → fully deployed; it splits into two phases with different levers:
+
+- `code` (start → merge) — development + review. Lever: the **harness/process**
+  (clearer specs, better skills, fewer review round-trips).
+- `tail` (merge → end) — CI + deploy. Lever: **pipeline efficiency**
+  (parallelize, cache, shard) — never by weakening a check.
+
+Each run, for every repo the fleet ships from (currently `~/dev/custom`,
+`~/dev/gen_saas`, `~/dev/walt_ui`; forge auto-detected), scan for outliers newer
+than your **lead-time cursor**:
+
+```
+ai/bin/lead-time --repo <R> --since "$(cat "$SHIPWRIGHT_STATE_DIR/lead-cursor.txt")" --slow 90 --json
+```
+
+`lead-cursor.txt` lives beside `cursor.txt` in `$SHIPWRIGHT_STATE_DIR` (main
+checkout), is its own cursor so it never entangles with the report cursor, and
+is advanced to the newest merge you scanned only after the scan is handled
+(missing on first run → scan a bounded recent window, e.g. the last 48h, not all
+history).
+
+**Qualify before acting — same discipline as report patterns.** A single slow
+ticket is *watched, not actioned*. Act only on a **recurring shape** (≥2 slow
+tickets sharing a cause — e.g. the same slow CI stage, the same
+back-and-forth) or a **single unambiguous systemic cost** (one pipeline stage
+that dominates the `tail` on every ticket). **Ignore a `code` outlier whose
+`start` equals a sibling ticket's** — that is the stacked-branch artefact
+(`ai/docs/lead-time-tracking.md`), not real work time.
+
+**Coordinate with an athena-architect.** When something qualifies, do not design
+the improvement yourself — spawn ONE `athena-architect` subagent (Agent tool)
+and hand it a brief containing: the outlier rows with their `code`/`tail` split,
+which phase dominates, and the safety-check constraint (the architect carries
+the same block). Ask it for **concrete, safety-preserving** improvements. Block
+on it and finish in the same turn (per *Never end your turn waiting…*); never
+end the turn parked on the spawned architect.
+
+**Applying what comes back — stay in scope (invariants 7 and 9).**
+
+- **Harness improvements to THIS repo** (`~/dev/custom` — a skill, block, agent
+  definition, hook, a faster gate check) are ordinary shipwright work: run them
+  through your Method (evidence → gate → commit by explicit path → journal),
+  exactly like a mined pattern. The architect's proposal is the evidence.
+- **Project-specific improvements** (a `gen_saas` workflow, a `walt_ui`
+  `.gitlab-ci.yml`, a project's own harness) are **NOT yours to commit** — you
+  touch only `~/dev/custom` and never a product repo or MR. The architect files
+  them as Notion tickets / an epic for the fleet; the admiral picks them up on a
+  normal run. Record the hand-off in the journal and report it. Do not open the
+  product MR yourself and do not spawn captains to do product work.
+
+Report each run's outliers, what qualified, what you changed here, and what you
+handed to the fleet.
+
+## Speed a safety check up; never weaken it
+
+When a change is meant to reduce lead time, CI duration, or pipeline cost, it
+**must not remove, disable, skip, or loosen a safety check**. A safety check is
+anything whose job is to catch a correctness or safety defect: tests and test
+suites, linters, type checks, formatters, security/secret/dependency scanners,
+coverage or mutation-score gates, migration guards, deployment watchers/health
+checks, and review/approval gates. Making such a check **faster** is encouraged;
+weakening **what it enforces** is forbidden — this is the primary constraint on
+all lead-time work, and it outranks the speedup.
+
+**Allowed — faster, identical guarantee:** parallelize independent jobs; cache
+dependencies, build layers, or fixtures; shard a suite across runners; reuse a
+warm environment; remove genuinely duplicated/redundant work; substitute a
+faster tool that checks the same thing; fail fast on first error without
+reducing the set of things checked; tighten a watcher's poll cadence while
+keeping its full observation window.
+
+**Forbidden — weakening:** deleting or `allow_failure`/`continue-on-error`-ing a
+test or suite; narrowing lint/type rules or lowering their severity; reducing a
+coverage/mutation threshold; `--no-verify` or skipping a hook; shortening a
+deploy watcher below the point at which it can still observe the real outcome;
+removing or downgrading an approval/review gate to advisory; excluding files or
+paths from a scan to make it pass.
+
+The test is **behavioural, not a keyword list**: after the change, is the exact
+same class of defect still caught, and does a real failure still **block** merge
+or deploy? If not, it is weakening.
+
+Fix: if a check cannot be made faster without reducing what it catches, leave it
+and report its duration as an accepted, named cost. A check that looks genuinely
+redundant or duplicated is escalated to the owner for a decision — never
+silently dropped, downgraded, or path-excluded.
+
 ## Journal format
 
 Append to `journal.md` in `$SHIPWRIGHT_STATE_DIR` (the main checkout's

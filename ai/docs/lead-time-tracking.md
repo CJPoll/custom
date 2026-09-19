@@ -136,6 +136,38 @@ worktree creation (`wt` could stamp a start file). It was deliberately **not**
 built: worktrees can be created early or reused, trading a known bias for a new
 unreliable signal and new maintenance. First-commit stays the marker.
 
+## Phase decomposition and the feedback loop
+
+Every row splits lead time into two phases, because they have **different
+improvement levers**:
+
+- **`code` = start → merge** — development + review. Lever: the **harness/process**
+  (clearer specs, better skills, fewer review round-trips).
+- **`tail` = merge → end** — CI + deploy. Lever: **pipeline efficiency**
+  (parallelize, cache, shard, faster-equivalent tooling).
+
+`ai/bin/lead-time --slow N` keeps only tickets with lead ≥ N minutes (sorted
+slowest-first, each tagged `slow_threshold_min`) — the outlier filter. Both
+phases appear in the human table and in `--json` (`code_seconds`/`tail_seconds`).
+
+The **athena-shipwright cron** runs this at `--slow 90` over every repo the fleet
+ships from, newer than its own `lead-cursor.txt`, and drives lead time down over
+time. When a slow shape recurs (≥2 tickets sharing a cause) or one pipeline stage
+dominates the `tail`, it spawns an **athena-architect** to design a
+**safety-preserving** improvement, then: applies harness changes to `~/dev/custom`
+itself, and files product-repo pipeline/harness changes as Notion tickets for the
+fleet (the shipwright never touches a product repo). Details live in the
+athena-shipwright agent definition (*The lead-time feedback loop*).
+
+**The hard constraint on all of this: never remove or weaken a safety check**
+(tests, linters, type checks, scanners, coverage/mutation gates, deployment
+watchers, review gates). Making a check *faster* is the goal; loosening *what it
+enforces* is forbidden and outranks any speedup. The doctrine is the shared block
+`ai/blocks/ops/safety-checks.md`, carried verbatim by the shipwright, architect,
+admiral, and captain. A large `tail` (e.g. gen_saas PR 244 below: `code 1h 46m +
+tail 48m 40s`) is a pipeline-efficiency target; a `code`-dominated ticket (PR
+242: `code 1h 59m + tail 5m 25s`) is a harness/process target.
+
 ## Worked backfill — 2026-09-19 fleet run (dated snapshot)
 
 **As-of 2026-09-19.** Acceptance test: every ticket that shipped, lead time

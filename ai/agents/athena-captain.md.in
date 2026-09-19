@@ -404,6 +404,8 @@ notice" — its sweep can be minutes away, and the owner measured that lag as
 the main reason green MRs sat unmerged. A DONE message is what puts your MR
 on the merge train.
 
+@include ops/safety-checks
+
 @include ops/never-end-turn-waiting
 
 **Every flaky test you meet gets a ticket (owner rule, 2026-08-28).** A test
