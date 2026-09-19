@@ -310,6 +310,30 @@ belongs somewhere nobody will wander into — the shipwright's lives inside
 rule for every agent, including the unattended ones that had quietly been
 exempt.
 
+**One worktree per unit of work, and short-lived.** Different units of work get
+different worktrees and branches — a worktree or branch is never reused for an
+unrelated change. Feature branches and their worktrees are created from current
+`origin/main`, merged back regularly, and cleaned up once their work has landed;
+a branch or worktree lingering after its work merged is the anti-pattern, not
+the resting state. Pruning a predecessor's leftover is fair game but is done
+safely: check `git worktree list` against running processes, confirm the branch
+is actually merged (a squash-merge is not an ancestor of `main` — confirm via
+the forge), and `git worktree remove` only what no live process holds; when
+unsure, leave it and note it. The shipwright cron is the one current exception —
+it reuses a single persistent tree inside `.git/` (named above); moving it to
+the per-invocation model is a tracked follow-up, and until then its persistence
+is deliberate, not a lingering worktree.
+
+**A directly-spawned agent stays out of another lane's branch and worktree.**
+The shipwright cron owns `shipwright/auto` at `.git/athena-shipwright`
+exclusively. A shipwright spawned by hand (or by another agent) is a *different
+unit of work*: it takes its own named branch and worktree under
+`~/.local/worktrees/<project>/<branch>`, never the cron's, and opens a PR for the
+owner to merge rather than pushing to main. Two actors sharing one branch or
+worktree is the same no-lock race as sharing the main checkout — on 2026-09-18 a
+cron run and a hand-spawned shipwright both operated on `shipwright/auto` and
+pushed to main inside one window, serialized only by luck.
+
 **This is a rule about writes, and specifically about git work.** Reading the
 main checkout is normal and often necessary. Four things are genuine exceptions,
 and they are exceptions because each one is *safe by construction* or has
