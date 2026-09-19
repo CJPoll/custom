@@ -199,6 +199,26 @@ fs_registry_records() {
     if ! printf '%s' "${json}" | jq -e 'type == "object" and (.repo | type == "string")' >/dev/null 2>&1; then
       bad=$((bad + 1)); continue
     fi
+    # THE ENTRY'S `repo` IS CANONICALISED HERE, in the adapter, because the
+    # contract's schema table makes the match bilateral -- "Matched exactly,
+    # AFTER REALPATH, against the session's own" -- and the session's side is
+    # already canonical (fs_git_common_dir realpaths it). Comparing a raw
+    # string against a canonical one means a grammatically fine entry whose
+    # `repo` carries a trailing slash, a `..`, or a symlinked-but-equivalent
+    # prefix NEVER matches, is never validated, and is not even a failed
+    # candidate -- it parses and has a string `repo`. The session then reports
+    # zero channels and exit 0: a dark channel indistinguishable from "not
+    # opted in", which is the exact outcome this facility exists to eliminate.
+    #
+    # `realpath -m` because the path need not exist: an entry naming a repo
+    # that was deleted, or that belongs to another machine, still normalises
+    # lexically and simply matches no session -- which is correct and quiet.
+    # Canonicalising is a filesystem operation, so it belongs in this file and
+    # not in descriptor.sh, which stays a pure string comparator.
+    local repo_raw repo_canon
+    repo_raw="$(printf '%s' "${json}" | jq -r '.repo')"
+    repo_canon="$(realpath -m -- "${repo_raw}" 2>/dev/null)" || repo_canon="${repo_raw}"
+    json="$(printf '%s' "${json}" | jq -c --arg r "${repo_canon}" '.repo = $r')" || continue
     printf '%s\t%s\n' "${json}" "${file}"
   done
   [ "${bad}" -eq 0 ] || printf '#unparseable\t%s\n' "${bad}"

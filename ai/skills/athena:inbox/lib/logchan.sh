@@ -187,8 +187,11 @@ logchan_state_merge() {
 # costs more to rewrite than the messages are worth.
 logchan_ring_append() {
   local cap="${1:-${LOGCHAN_RING_CAP}}" existing="${2:-}" additions="${3:-}"
-  printf '%s\n%s\n' "${existing}" "${additions}" \
-    | grep -v '^$' \
+  # `|| true` on the filter: under `set -o pipefail` a `grep` that matches
+  # nothing exits 1 and takes the whole pipeline with it, so appending nothing
+  # to an empty ring -- the FIRST-RUN case, and the first one the ack ticket
+  # will hit -- would look like a failure.
+  { printf '%s\n%s\n' "${existing}" "${additions}" | grep -v '^$' || true; } \
     | awk '!seen[$0]++' \
     | tail -n "${cap}"
 }
