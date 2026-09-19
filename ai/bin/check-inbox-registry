@@ -1,0 +1,257 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# check-inbox-registry — assert this machine's Athena Inbox tenancy registry
+# matches the committed source of truth, and say which entry drifted when it
+# does not.
+#
+# Why it exists: the registry (`$ATHENA_INBOX_ROOT/projects/<project>.json`) is
+# untracked machine-local state, and the contract defines a missing entry as
+# ZERO CHANNELS, EXIT 0, NO ERROR. So a clobbered or deleted entry is a
+# silently dead inbox — no diff, no `git` undo, nothing detecting it. That is
+# the 2026-09-17 hook-clobber class, and the contract's *Provisioning* section
+# makes the fix a MUST on the tooling: a committed source of truth
+# (ai/inbox/registry.json), an idempotent installer
+# (scripts/setup-inbox-registry), and THIS check — one that runs unprompted, in
+# the harness gate, because a diagnostic somebody has to think of running is not
+# a check.
+#
+# Read-only, always. It never creates, repairs, or touches anything, including
+# on the failure path; repair is the installer's job.
+#
+# Environment-safe by design, like check-hooks-registered: if the inbox root
+# does not exist, this machine does not run the facility (a fresh checkout, a CI
+# or agent environment with a different HOME, a container), there is nothing to
+# assert, and it PASSES with a note. It fails only when the root exists AND a
+# declared entry is missing, malformed, mis-permissioned, or edited away from
+# the committed text.
+#
+# What it never does: read, name, or otherwise surface an entry the committed
+# list does not declare. An unrelated tenant's file in projects/ is left
+# completely alone — the installer's anti-clobber property has a check that
+# matches it.
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/check-inbox-registry              assert the live registry matches
+#   ai/bin/check-inbox-registry --self-test  verify the checker's own logic
+#
+# Environment: ATHENA_INBOX_ROOT (default ~/.local/share/athena) selects the
+# root; ATHENA_INBOX_REGISTRY overrides the committed source of truth (tests).
+#
+# Exit codes: 0 ok / not-this-environment · 1 drift · 2 the committed source of
+# truth itself is missing or malformed
+
+require_relative "../inbox/lib/registry"
+
+def run
+  entries = InboxRegistry.declared
+  note = InboxRegistry.validation_note
+
+  unless File.directory?(InboxRegistry.root)
+    # "No root" means one of two very different things, and conflating them is
+    # how the whole registry disappears quietly. If a declared repo is checked
+    # out here, this IS the machine the committed list describes and the root
+    # should exist — so its absence is drift. Otherwise there is genuinely
+    # nothing to assert.
+    if InboxRegistry.declared_repo_present?(entries)
+      warn "check-inbox-registry: FAIL — the inbox root #{InboxRegistry.root} does not exist, " \
+           "but this machine has a checkout of a repo the committed list declares, so it is " \
+           "the machine that list describes."
+      warn "Fix: run `scripts/setup-inbox-registry --install` to recreate the root and the " \
+           "declared entries. If this machine should no longer be a tenant, remove its " \
+           "entry from ai/inbox/registry.json instead."
+      return 1
+    end
+    puts "check-inbox-registry: no inbox root at #{InboxRegistry.root} and no declared repo " \
+         "checked out here — nothing to assert (not this environment). OK."
+    return 0
+  end
+
+  problems = InboxRegistry.drift(entries)
+  if problems.empty?
+    puts "check-inbox-registry: all #{entries.size} declared registry " \
+         "entr#{entries.size == 1 ? 'y' : 'ies'} #{entries.size == 1 ? 'is' : 'are'} installed and " \
+         "#{entries.size == 1 ? 'matches' : 'match'} #{InboxRegistry.registry_path}. OK." +
+         (note ? " (#{note})" : "")
+    return 0
+  end
+
+  warn "check-inbox-registry: FAIL — #{problems.size} registry problem(s) under #{InboxRegistry.projects_dir}:"
+  problems.each { |p| warn "  - #{p}" }
+  warn "  note: #{note}" if note
+  warn "Fix: run `scripts/setup-inbox-registry --install` to re-materialise the " \
+       "declared entries from ai/inbox/registry.json (it writes only the entries it " \
+       "declares, backs up anything it replaces, and never touches another entry " \
+       "in projects/). If an entry was intentionally retired or its channels " \
+       "changed, edit ai/inbox/registry.json to match and re-run the installer — " \
+       "the committed file is the source of truth, and a live entry that exists " \
+       "nowhere in git is exactly the state this check exists to prevent."
+  1
+rescue InboxRegistry::Error => e
+  warn "check-inbox-registry: FAIL — #{e.message}"
+  warn "Fix: restore ai/inbox/registry.json from git (`git restore ai/inbox/registry.json`) " \
+       "or repair its JSON: it is an object with a \"projects\" array of " \
+       "{\"file\": \"<name>.json\", \"entry\": {\"v\":1,\"repo\":\"~/dev/<p>/.git\",\"channels\":{}}}."
+  2
+end
+
+# ---------------------------------------------------------------------------
+def self_test
+  require "tmpdir"
+  require "fileutils"
+  require "json"
+
+  ok = true
+  check = lambda do |name, cond|
+    puts "  #{cond ? 'ok  ' : 'FAIL'} #{name}"
+    ok &&= cond
+  end
+
+  quiet = lambda do |&blk|
+    o, e = $stdout, $stderr
+    $stdout = $stderr = File.open(File::NULL, "w")
+    begin
+      blk.call
+    ensure
+      $stdout.close
+      $stdout, $stderr = o, e
+    end
+  end
+
+  Dir.mktmpdir("check-inbox-registry-selftest") do |dir|
+    # A source of truth that names a repo NOT present on this machine, so the
+    # git cross-check is inert and each case isolates one property.
+    src = File.join(dir, "registry.json")
+    entry = { "v" => 1, "repo" => File.join(dir, "nowhere", ".git"),
+              "channels" => { "demo" => { "kind" => "log", "path" => "demo.jsonl" } } }
+    File.write(src, JSON.pretty_generate({ "projects" => [{ "file" => "demo.json", "entry" => entry }] }))
+    ENV["ATHENA_INBOX_REGISTRY"] = src
+
+    root = File.join(dir, "root")
+    ENV["ATHENA_INBOX_ROOT"] = root
+
+    # 1. Absent root -> not this environment, exit 0. (Env-safety: the check
+    #    must never false-fail a machine that does not run the facility.)
+    check.call("absent root -> exit 0", quiet.call { run } == 0)
+
+    # 2. Root present, projects/ absent -> drift, exit 1. (The opposite of the
+    #    case above: the facility IS here, so a missing registry is real.)
+    FileUtils.mkdir_p(root)
+    File.chmod(0o700, root)
+    check.call("root without projects/ -> exit 1", quiet.call { run } == 1)
+
+    # 3. A correctly installed entry -> clean.
+    projects = File.join(root, "projects")
+    FileUtils.mkdir_p(projects)
+    File.chmod(0o700, projects)
+    path = File.join(projects, "demo.json")
+    File.write(path, InboxRegistry.render(entry))
+    File.chmod(0o600, path)
+    check.call("installed entry -> no drift", InboxRegistry.drift.empty?)
+
+    # 4. An entry edited by hand -> drift naming the file and the key.
+    File.write(path, InboxRegistry.render(entry.merge("channels" => {})))
+    File.chmod(0o600, path)
+    d = InboxRegistry.drift
+    check.call("hand-edited entry -> drift names it", d.size == 1 && d.first.include?("demo.json") && d.first.include?("channels"))
+
+    # 5. A wrong file mode is drift on its own (0600 is a contract MUST).
+    File.write(path, InboxRegistry.render(entry))
+    File.chmod(0o644, path)
+    d = InboxRegistry.drift
+    check.call("0644 entry -> mode drift", d.size == 1 && d.first.include?("0644"))
+
+    # 6. A wrong directory mode is drift too (0700 is a contract MUST).
+    File.chmod(0o600, path)
+    File.chmod(0o755, projects)
+    d = InboxRegistry.drift
+    check.call("0755 projects/ -> mode drift", d.size == 1 && d.first.include?("0755"))
+    File.chmod(0o700, projects)
+
+    # 7. A deleted entry -> drift naming it.
+    FileUtils.rm_f(path)
+    d = InboxRegistry.drift
+    check.call("deleted entry -> drift names it", d.size == 1 && d.first.include?("demo.json"))
+
+    # 8. An unrelated entry in projects/ is never named. It is not ours to
+    #    police, and naming it would make this check a tenant-disclosure path.
+    File.write(File.join(projects, "someone_else.json"), "{}")
+    check.call("unrelated entry is not named", InboxRegistry.drift.none? { |p| p.include?("someone_else") })
+
+    # 9. A 0755 inbox ROOT is drift too, not only a 0755 projects/. Every
+    #    directory under the root MUST be 0700, and a listable root exposes
+    #    every tenant's message surfaces.
+    File.write(path, InboxRegistry.render(entry))
+    File.chmod(0o600, path)
+    File.chmod(0o755, root)
+    d = InboxRegistry.drift
+    check.call("0755 root -> mode drift", d.size == 1 && d.first.include?("inbox root"))
+    File.chmod(0o700, root)
+
+    # 10. A symlink where an entry belongs is reported as what it is, never
+    #     followed. Following it is how an installer ends up writing outside the
+    #     root entirely.
+    FileUtils.rm_f(path)
+    File.symlink(File.join(dir, "elsewhere.json"), path)
+    d = InboxRegistry.drift
+    check.call("symlinked entry -> reported, not followed",
+               d.size == 1 && d.first.include?("not a regular file"))
+    FileUtils.rm_f(path)
+
+    # 11. Two declared entries claiming one repo identity is the reader's own
+    #     hard error, so the committed list is refused outright (exit 2) rather
+    #     than installed into a wedged state.
+    dupe = { "projects" => [{ "file" => "a.json", "entry" => entry },
+                            { "file" => "b.json", "entry" => entry }] }
+    File.write(src, JSON.pretty_generate(dupe))
+    check.call("two entries claiming one repo -> exit 2", quiet.call { run } == 2)
+
+    # 12. An absent root is NOT "not this environment" when a declared repo is
+    #     checked out here: that proves this is the machine the committed list
+    #     describes, so the missing root is drift. Without this discriminator,
+    #     losing the whole root reads as OK.
+    here = { "v" => 1, "repo" => InboxRegistry.git_common_dir(InboxRegistry.repo_dir), "channels" => {} }
+    File.write(src, JSON.pretty_generate({ "projects" => [{ "file" => "here.json", "entry" => here }] }))
+    FileUtils.rm_rf(root)
+    check.call("absent root + a declared repo checked out here -> exit 1", quiet.call { run } == 1)
+
+    # 13. A malformed source of truth exits 2 (a code error, not machine state).
+    File.write(src, "{ not json")
+    check.call("malformed source of truth -> exit 2", quiet.call { run } == 2)
+  end
+
+  # 10. Repo identity resolves at the point of capture: this repo's common dir
+  #     comes back ABSOLUTE even though git prints `.git` in a main checkout.
+  #     Resolving that raw string later is the trap that silently yields zero
+  #     channels; a helper returning a relative path would fail here.
+  common = InboxRegistry.git_common_dir(InboxRegistry.repo_dir)
+  check.call("git common dir is absolute and ends in .git",
+             !common.nil? && common.start_with?("/") && File.basename(common) == ".git")
+
+  # 11. A non-git directory is not a fault — nil, never a raise.
+  Dir.mktmpdir { |d| check.call("non-git dir -> nil", InboxRegistry.git_common_dir(d).nil?) }
+
+  ENV.delete("ATHENA_INBOX_REGISTRY")
+  ENV.delete("ATHENA_INBOX_ROOT")
+
+  puts(ok ? "ALL CASES PASS" : "SELF-TEST FAILED")
+  unless ok
+    warn "Fix: repair the drift logic in ai/inbox/lib/registry.rb (or this " \
+         "self-test's expectations if a rule genuinely changed) until every " \
+         "case above passes; a broken checker is worse than none, because the " \
+         "gate then reports PASS over a dead registry."
+  end
+  ok ? 0 : 1
+end
+
+if ARGV.include?("--self-test")
+  exit self_test
+elsif ARGV.empty?
+  exit run
+else
+  warn "check-inbox-registry: unknown argument(s): #{ARGV.join(' ')}"
+  warn "Fix: run it with no arguments to check the live registry, or with --self-test."
+  exit 1
+end

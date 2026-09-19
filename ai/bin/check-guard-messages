@@ -46,6 +46,7 @@ GUARD_BINS = %w[
   build-agents
   check-generic-skills
   check-hooks-registered
+  check-inbox-registry
   harness-eval
   harness-gate
   critic-review
