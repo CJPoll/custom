@@ -50,7 +50,14 @@
 # second acquire would silently skip the sweep on exactly the path that is
 # entitled to run it. `inbox_lock_acquire` is therefore IDEMPOTENT for the path
 # it already holds.
-INBOX_LOCK_FD=9
+# THE FD IS ALLOCATED AT ACQUIRE TIME, NOT HARD-CODED. A literal `exec 9<>`
+# silently clobbers fd 9 when a caller already has it open -- a wrapper's
+# `9>log`, a hook harness -- and that caller would find its own descriptor
+# replaced by our lock with nothing said. `exec {var}<>` asks bash for a free
+# descriptor (>= 10) instead, and the number lands in INBOX_LOCK_FD for
+# `flock` and for the close. It stays empty until something is held, which is
+# also what makes "are we holding anything" answerable without a stat.
+INBOX_LOCK_FD=""
 INBOX_LOCK_PATH=""
 
 # inbox_lock_acquire <lock-path> [channel-label]
@@ -93,7 +100,7 @@ inbox_lock_acquire() {
   # the live holder's diagnostics on its way to being refused, and the refusal
   # it then printed could not name the holder it had just erased. The suite
   # caught exactly that. `<>` creates the file if absent and truncates nothing.
-  if ! eval "exec ${INBOX_LOCK_FD}<>\"\${path}\""; then
+  if ! exec {INBOX_LOCK_FD}<>"${path}"; then
     inbox_fail "cannot open ${label}'s consumer lock file" \
       "check the permissions on \$ATHENA_INBOX_ROOT (0700) and on the .consumer.lock file (0600), then re-run."
     return 1
@@ -101,7 +108,7 @@ inbox_lock_acquire() {
 
   if ! flock -n "${INBOX_LOCK_FD}"; then
     hint="$(inbox_lock_holder_hint "${path}")"
-    eval "exec ${INBOX_LOCK_FD}>&-"
+    exec {INBOX_LOCK_FD}>&-; INBOX_LOCK_FD=""
     inbox_fail "another session is the designated consumer of ${label}${hint:+ (${hint})}" \
       "read without advancing: re-run with --peek. Only one session may advance a channel's offset or ack its mail; when that session exits, the kernel releases the lock and this one can advance."
     return 1
@@ -129,7 +136,8 @@ inbox_lock_acquire() {
 # opened it).
 inbox_lock_release() {
   [ -n "${INBOX_LOCK_PATH}" ] || return 0
-  eval "exec ${INBOX_LOCK_FD}>&-" 2>/dev/null || true
+  [ -n "${INBOX_LOCK_FD}" ] && { exec {INBOX_LOCK_FD}>&-; } 2>/dev/null
+  INBOX_LOCK_FD=""
   INBOX_LOCK_PATH=""
   return 0
 }
@@ -180,9 +188,9 @@ inbox_lock_try() {
   [ -n "${INBOX_LOCK_PATH}" ] && return 1
   fs_assert_regular "${path}" >/dev/null 2>&1 || return 1
   [ -d "${path%/*}" ] || return 1
-  eval "exec ${INBOX_LOCK_FD}<>\"\${path}\"" 2>/dev/null || return 1
+  exec {INBOX_LOCK_FD}<>"${path}" 2>/dev/null || return 1
   if ! flock -n "${INBOX_LOCK_FD}"; then
-    eval "exec ${INBOX_LOCK_FD}>&-"
+    exec {INBOX_LOCK_FD}>&-; INBOX_LOCK_FD=""
     return 1
   fi
   INBOX_LOCK_PATH="${path}"

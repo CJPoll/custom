@@ -497,6 +497,17 @@ _inbox_retain() {
   size="$(fs_size "${inbox}")"
   now="$(fs_now_epoch)"
 
+  # NOTHING EVER DELIVERED MEANS NO CLOCK TO START. A `rotated_at` stamped on
+  # a channel whose file has never existed is a timestamp about nothing, and
+  # writing it would create the state file the contract says not to create
+  # until there is something to record (*First run*) -- on precisely the
+  # channel whose real problem is that its producer was never registered, so
+  # the operator would then have a state file to explain as well.
+  if [ ! -e "${inbox}" ]; then
+    printf '{}\n'
+    return 0
+  fi
+
   rot="$(printf '%s' "${state_json}" | jq -r '.rotated_at // empty' 2>/dev/null)"
   if [ -z "${rot}" ] || ! rot_epoch="$(fs_epoch_of_rfc3339 "${rot}")"; then
     # The UPGRADE case, and the first one any implementation meets: today's
@@ -811,6 +822,24 @@ inbox_ack_log() {
   # tooling than the one running. Replacing this with a fixed key set is the
   # silent-forever defect described above.
   merged="$(logchan_state_merge "${state_json}" "${updates}")" || return 1
+
+  # DO NOT CREATE THE STATE FILE UNTIL THERE IS SOMETHING TO RECORD (contract,
+  # *First run*). Reading a never-delivered channel used to leave a
+  # `.state.json` behind that said nothing -- offset 0, empty seen-sets --
+  # which then made "this channel has state" stop meaning "this channel has
+  # been consumed from", and left a file to explain on a channel whose real
+  # problem is that its producer was never registered.
+  #
+  # An EXISTING state file is always rewritten: a no-op write on a file that
+  # is already there preserves the unrecognised keys a newer writer may have
+  # added, and skipping it would be the fixed-key-set defect by another route.
+  if [ ! -e "${state}" ] \
+     && [ "${target}" = "0" ] \
+     && [ -z "${new_ev}" ] && [ -z "${new_ky}" ] \
+     && [ "$(printf '%s' "${rot_updates}" | jq -r 'length' 2>/dev/null)" = "0" ]; then
+    _inbox_sweep_due "${resolved}" "${merged}" "channel \"${chan}\"" "${hook_json}"
+    return 0
+  fi
   fs_write_state "${state}" "${merged}" || return 1
 
   # Every read the designated consumer performs sweeps, not only a rotation.

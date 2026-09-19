@@ -1466,6 +1466,28 @@ assert_eq "R-7 a generation rotated 13 days ago is NOT sweepable" "no" \
 # silently one day short, which destroys evidence early and looks like nothing.
 # The window is "OLDER than", so at exactly the window the generation is KEPT:
 # deleting a day late is recoverable, a day early is not.
+# A date(1) WITHOUT -d makes fs_epoch_of_rfc3339 fail for every input, which
+# is indistinguishable from "this generation has no rotated_at": the retain
+# path re-stamps rotated_at to now on every ack and rotation NEVER FIRES. The
+# inbox grows forever, every ack reports success, and nothing says the
+# retention policy stopped existing. The missing-input shape again, in the one
+# subsystem whose whole job is deleting things on a schedule -- so it is
+# reported. Reported, not fatal: mail still delivers without retention.
+DATE_SHIM="$(mktemp -d)"
+printf '#!/bin/sh\nexit 1\n' > "${DATE_SHIM}/date"; chmod +x "${DATE_SHIM}/date"
+NO_DATE_D="$(timeout 20 bash -c '
+  PATH="'"${DATE_SHIM}"':$PATH"
+  . "'"${LIB}"'/err.sh"; . "'"${LIB}"'/fs.sh"
+  fs_epoch_of_rfc3339 "2026-01-01T00:00:00Z" >/dev/null 2>/tmp/nodated.$$
+  cat /tmp/nodated.$$; rm -f /tmp/nodated.$$
+' 2>&1)"
+assert_contains "a date(1) with no -d is REPORTED, not a silent no-op" \
+  "does not support -d" "${NO_DATE_D}"
+assert_contains "and it says what stops working: rotation and the sweep" \
+  "ROTATION AND THE SWEEP" "${NO_DATE_D}"
+assert_contains "and it carries a Fix: clause" "Fix:" "${NO_DATE_D}"
+rm -rf "${DATE_SHIM}"
+
 assert_eq "R-7 at EXACTLY the window a generation is kept, not swept" "no" \
   "$(logchan_should_sweep "$((NOW - LOGCHAN_SWEEP_AGE_S))" "${NOW}")"
 assert_eq "R-6 one second past the window it is swept" "yes" \
@@ -1568,6 +1590,21 @@ SAME="$(timeout 20 bash -c '
   printf "rc=%s\n" "$?"
 ' 2>&1)"
 assert_eq "A-6 re-acquiring the same channel's lock is a no-op" "rc=0" "${SAME}"
+
+# THE LOCK DOES NOT CLOBBER A CALLER'S DESCRIPTOR. A literal `exec 9<>` takes
+# fd 9 whether or not the caller was using it -- a wrapper's `9>log`, a hook
+# harness -- and the caller's own descriptor is silently replaced by our lock
+# file. The fd is allocated by bash instead, so the caller's survives.
+FD9="$(timeout 20 bash -c '
+  exec 9>"'"${ATHENA_INBOX_ROOT}"'/caller-owned.txt"
+  . "'"${LIB}"'/err.sh"; . "'"${LIB}"'/fs.sh"; . "'"${LIB}"'/lock.sh"
+  inbox_lock_acquire "'"${ATHENA_INBOX_ROOT}"'/fd-probe.consumer.lock" "probe" >/dev/null 2>&1
+  printf "caller-fd-9-still-mine\n" >&9
+  printf "lockfd=%s\n" "${INBOX_LOCK_FD}"
+' 2>&1)"
+assert_contains "the lock does not take fd 9 out from under its caller" \
+  "caller-fd-9-still-mine" "$(cat "${ATHENA_INBOX_ROOT}/caller-owned.txt" 2>/dev/null)"
+assert_not_contains "and the allocated fd is not 9" "lockfd=9" "${FD9}"
 
 # ONLY THE ACQUIRER RELEASES. `inbox_lock_try` used to answer 0 both for
 # "newly acquired" and for "already ours", and the sweep released
@@ -2172,6 +2209,21 @@ assert_not_contains "a never-delivered channel does NOT read as 'nothing new'" \
 assert_contains "it says nothing has EVER been delivered" \
   "nothing has EVER been delivered" "${OUT}"
 assert_contains "and its Fix: names producer registration" "producer" "${OUT}"
+# FIRST RUN: "do not create the state file until there is something to record"
+# (contract). Reading a never-delivered channel used to leave behind a state
+# file saying nothing -- offset 0, empty seen-sets -- after which "this channel
+# has state" stopped meaning "this channel has been consumed from", and there
+# was a file to explain on a channel whose real problem is an unregistered
+# producer.
+assert_eq "reading a never-delivered channel writes no state file" "0" \
+  "$(ls "${LSTATE}" 2>/dev/null | wc -l | tr -d ' ')"
+# But a real ack DOES write one -- the assertion above must not be passing
+# because the writer is simply broken.
+setup_log_case
+printf '{"v":1,"ts":"1","channel":"D0","event_id":"Ev9","text":"hi","user":"U1"}\n' > "${LINBOX}"
+( cd "${LPROJ}" && "${BIN}/read-inbox" slack >/dev/null 2>&1 )
+assert_eq "a channel with something to record DOES get a state file" "1" \
+  "$(ls "${LSTATE}" 2>/dev/null | wc -l | tr -d ' ')"
 # The distinction is real, not a blanket message: a channel whose file EXISTS
 # and is simply empty of new lines is an ordinary quiet morning.
 setup_log_case

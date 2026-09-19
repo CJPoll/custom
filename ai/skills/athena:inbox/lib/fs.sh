@@ -280,9 +280,40 @@ fs_now_rfc3339()  { date -u +%Y-%m-%dT%H:%M:%SZ; }
 fs_epoch_of_rfc3339() {
   local s="$1" out
   [ -n "${s}" ] || return 1
+  fs_require_date_d || return 1
   out="$(date -u -d "${s}" +%s 2>/dev/null)" || return 1
   case "${out}" in ''|*[!0-9-]*) return 1 ;; esac
   printf '%s\n' "${out}"
+}
+
+# fs_require_date_d
+#
+# `date -u -d <rfc3339>` is a GNU extension. Without it this function fails for
+# EVERY input, and the failure is indistinguishable from "this generation has
+# no rotated_at": `_inbox_retain` takes the absent/unparseable branch, re-stamps
+# `rotated_at` to now on every ack, and rotation therefore NEVER FIRES. The
+# inbox grows forever, every ack still reports success, and nothing anywhere
+# says the retention policy stopped existing.
+#
+# That is the standing missing-input shape -- an absent capability reading as a
+# benign "nothing to do" -- in the one subsystem whose whole job is to delete
+# things on a schedule. It gets reported once per process rather than silently.
+#
+# Reported, NOT fatal: mail still delivers without retention, and taking the
+# reader down over a missing date(1) flag would turn a disk-growth problem into
+# an outage.
+_INBOX_DATE_D_OK=""
+fs_require_date_d() {
+  if [ -z "${_INBOX_DATE_D_OK}" ]; then
+    if date -u -d "2026-01-01T00:00:00Z" +%s >/dev/null 2>&1; then
+      _INBOX_DATE_D_OK=yes
+    else
+      _INBOX_DATE_D_OK=no
+      inbox_fail "this date(1) does not support -d, so retention cannot run" \
+        "install GNU coreutils (on macOS: brew install coreutils, and put gnubin on PATH). Mail still delivers; what stops is ROTATION AND THE SWEEP, so the channel file grows without bound and nothing else would have told you."
+    fi
+  fi
+  [ "${_INBOX_DATE_D_OK}" = "yes" ]
 }
 
 # fs_mtime_epoch <path>

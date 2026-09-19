@@ -160,9 +160,25 @@ maildir_parse_frontmatter() {
         if (k ~ /^[A-Za-z_][A-Za-z0-9_-]*$/) printf "%s\t%s\n", k, v
       }
     }
-  ' | jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t")) 
-                   | map(select(length >= 1)) 
-                   | map({(.[0]): (.[1] // "")}) | add // {}'
+  ' | _maildir_fm_to_json
+}
+
+# THE VALUE IS REJOINED, not taken as the first field.
+#
+# The awk above emits "<key>\t<value>" and the value is PEER-WRITTEN, so it may
+# itself contain a tab -- the same delimiter collision that has now cost this
+# skill four bugs (a tab in a registry filename, a tab in a channel path, a
+# newline in a dedupe key, and a caller recomputing that key without the guard).
+#
+# Taking `.[1]` TRUNCATES at the first tab, invisibly. A peer sending
+# `from: athena<TAB>anything` parses as exactly "athena" -- which is this
+# channel's own identity -- so the message is treated as the reader's own
+# outgoing mail, never acked, and re-listed on every read forever. A wedge the
+# SENDER chose, with nothing anywhere saying why.
+_maildir_fm_to_json() {
+  jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t"))
+               | map(select(length >= 1))
+               | map({(.[0]): (.[1:] | join("\t"))}) | add // {}'
 }
 
 # maildir_body   (message content on stdin) -- everything after the closing ---
