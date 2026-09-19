@@ -426,16 +426,28 @@ agents on the live channel did by hand for fifty-one messages.
 
 | Bucket | Files |
 |---|---|
-| Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` |
-| Side effects | `lib/fs.sh` (the only file I/O, and the only `git` call) · `lib/lock.sh` · `lib/session.sh` |
-| Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes · `lib/doctor.sh` — the chain-liveness checks (pure `doctor_state_*` decisions over probed facts) |
+| Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` · `lib/doctor.sh`'s `doctor_state_*` decisions |
+| Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the message-handling path**) · `lib/lock.sh` · `lib/session.sh` · `lib/doctor.sh`'s `doctor_check_*`/probe functions (a **declared deviation** — see below) |
+| Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes |
 | Framework | `bin/inbox-status` · `bin/read-inbox` · `bin/inbox-doctor` |
 
 The domain files take strings and return strings. That is what makes the
 counting and parsing rules provable with no fixtures on disk, which is the
-whole reason for splitting shell this way. `lib/fence.sh` is the one declared
+whole reason for splitting shell this way. `lib/fence.sh` is one declared
 deviation: it reads `/dev/urandom` for its nonce, and takes an injected one so
 a caller that needs determinism has a way to get it.
+
+`lib/doctor.sh` is the other, and it is deliberate: a diagnostic's whole job is
+to probe subsystems `fs.sh` has no business knowing about — a supervisor
+pidfile, the crontab, an HTTP health endpoint, `ruby` for the committed
+registry list — so it carries its own side-effect probes rather than bloating
+the message-handling adapter with them. The split is kept WITHIN the file: the
+pure `doctor_state_*` decisions (mode, future stamp, connection verdict,
+override match) take facts and return a state with no I/O, and are what the
+suite proves branch-by-branch; the `doctor_check_*` functions gather the facts.
+Every probe is steerable by an environment override, which is what lets the
+suite drive the whole tool against temp dirs and canned JSON without opening a
+socket or reading a real pidfile.
 
 **Later (2026-09-18):** This section previously read "*this slice writes
 nothing* — `lib/fs.sh` contains no state writer at all, so 'counting never

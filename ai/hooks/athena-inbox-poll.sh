@@ -578,12 +578,24 @@ fi
 # read for exactly one boolean (`summary.healthy`) and one severity, both
 # integers -- a peer-chosen string never reaches this file. `na` findings are
 # NOT "worse than ok": a check that could not run is not a fault to announce.
-# Bounded by the same timeout as the status read, and on this path the doctor
-# makes no network request (the server check is `na` without a token).
+# Bounded by the same timeout as the status read.
+#
+# --no-server IS LOAD-BEARING, not a tidiness flag. Without it, a machine that
+# has enabled the server check (ATHENA_INBOX_DOCTOR_API_* set) would fire an
+# authenticated curl on EVERY session start -- the exact unprompted network
+# coupling this facility must not have -- and a slow server would eat the whole
+# timeout budget. With it the SessionStart path is guaranteed local-only (file
+# stats, a crontab read, one ruby); the server picture is for the owner running
+# the doctor by hand.
+#
+# A DOCTOR THAT COULD NOT RUN IS LOGGED, NOT SILENT (missing-looks-empty). A
+# killed or garbled run leaves DOCTOR_JSON unusable; that is a different fact
+# from "healthy", and it goes to the reason log so a silence has a trail --
+# never to the pre-prompt notice, which stays counts-only.
 DOCTOR_TEXT=""
 DOCTOR_HEALTHY=""
 if [ "${DOCTOR_LINE_ENABLED}" -eq 1 ] && [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 1 ] && [ -x "${DOCTOR_BIN}" ]; then
-  DOCTOR_JSON="$(timeout "${STATUS_TIMEOUT_SECONDS}" "${DOCTOR_BIN}" --json 2>/dev/null)"
+  DOCTOR_JSON="$(timeout "${STATUS_TIMEOUT_SECONDS}" "${DOCTOR_BIN}" --json --no-server 2>/dev/null)"
   if [ -n "${DOCTOR_JSON}" ] \
      && printf '%s' "${DOCTOR_JSON}" | jq -e 'type == "object" and (.summary | type == "object")' >/dev/null 2>&1; then
     if printf '%s' "${DOCTOR_JSON}" | jq -e '.summary.healthy == false' >/dev/null 2>&1; then
@@ -598,6 +610,8 @@ if [ "${DOCTOR_LINE_ENABLED}" -eq 1 ] && [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN
     else
       DOCTOR_HEALTHY=1
     fi
+  else
+    log_reason "inbox-doctor produced no usable --json (timed out or errored), so the delivery-chain health line was skipped this session. Fix: run ai/skills/athena:inbox/bin/inbox-doctor from this project to see why."
   fi
 fi
 

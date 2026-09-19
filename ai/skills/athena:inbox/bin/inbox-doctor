@@ -5,6 +5,9 @@
 #
 #   inbox-doctor            human-readable report, one line per finding
 #   inbox-doctor --json     the same findings as one JSON object (for the hook)
+#   inbox-doctor --no-server force the server check to n-a (no network); the
+#                           SessionStart hook uses this so its unprompted run
+#                           never makes an authenticated request
 #   inbox-doctor -h         this header
 #
 # FOUR STATES, not three: ok | warn | fail | na.
@@ -72,9 +75,15 @@ JSON=0
 for arg in "$@"; do
   case "${arg}" in
     --json) JSON=1 ;;
+    # The SessionStart hook passes this so the unprompted check NEVER makes a
+    # network request, even on a machine where the server env vars are set: an
+    # authenticated curl on every session start is exactly the coupling this
+    # tool must not have. The server check then reports `na` (disabled), and an
+    # owner running the doctor by hand gets the full server picture.
+    --no-server) export DOCTOR_NO_SERVER=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
-      inbox_fail "unknown argument \"${arg}\"" "run: inbox-doctor [--json]"
+      inbox_fail "unknown argument \"${arg}\"" "run: inbox-doctor [--json] [--no-server]"
       exit 2
       ;;
   esac

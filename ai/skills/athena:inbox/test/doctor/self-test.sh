@@ -253,7 +253,30 @@ SV="$(cd "${R2}" && doctor_check_server ".")"
 assert_finding "override mismatch -> fail" "${SV}" fail server-override "WRONG.jsonl"
 assert_finding "typo key -> warn"          "${SV}" warn server-override "typo"
 assert_finding "unclaimed inbox_name -> warn" "${SV}" warn server-override "nobody.jsonl"
+# undelivered > 0 -> warn ("server holding events")
+printf '{"data":{"machine":{"connected":true},"instances":[{"name":"slack","inbox_name":"ch-slack.jsonl","undelivered":2}]}}' > "${HJ}"
+printf '{"instances":{}}' > "${CFG2}"; chmod 600 "${CFG2}"
+assert_finding "undelivered>0 -> warn" "$(cd "${R2}" && doctor_check_server ".")" warn server "not yet delivered to this machine"
+# everything agrees -> server-override ok. The R2 registry entry declares a log
+# channel with path ch-slack.jsonl, so the server's inbox_name is claimed; the
+# config override matches; no typo.
+printf '{"instances":{"slack":{"inbox":"ch-slack.jsonl","doorbell":null}}}' > "${CFG2}"; chmod 600 "${CFG2}"
+printf '{"data":{"machine":{"connected":true},"instances":[{"name":"slack","inbox_name":"ch-slack.jsonl","undelivered":0}]}}' > "${HJ}"
+assert_eq "all agree -> server-override ok" ok "$(state_of "$(cd "${R2}" && doctor_check_server ".")" server-override)"
 unset ATHENA_INBOX_DOCTOR_HEALTH_FILE; export ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json"
+# --no-server: the hook's flag forces the server check to na (no network),
+# whatever the environment holds.
+export DOCTOR_NO_SERVER=1
+assert_eq "--no-server -> server na (disabled)" na "$(state_of "$(cd "${R2}" && doctor_check_server ".")" server)"
+unset DOCTOR_NO_SERVER
+# a token file more permissive than 0600 -> warn, and the credential is NOT read
+TOKF="${TMP}/apitoken"; printf 'usr-tok' > "${TOKF}"; chmod 644 "${TOKF}"
+export ATHENA_INBOX_DOCTOR_API_BASE="https://x" ATHENA_INBOX_DOCTOR_MACHINE_ID="m" ATHENA_INBOX_DOCTOR_API_TOKEN_FILE="${TOKF}"
+assert_eq "0644 token file -> server warn (credential not read)" warn "$(state_of "$(cd "${R2}" && doctor_check_server ".")" server)"
+# NOTE: the 0600-but-unreachable path (a real curl) is deliberately NOT
+# exercised here -- it would open a socket, which this suite forbids. It is the
+# same na branch the "token file missing" case above already proves.
+unset ATHENA_INBOX_DOCTOR_API_BASE ATHENA_INBOX_DOCTOR_MACHINE_ID ATHENA_INBOX_DOCTOR_API_TOKEN_FILE
 
 # ============================================================================
 echo "== bin: exit code, --json, na-never-ok =="
@@ -266,11 +289,19 @@ export ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" ATHENA_INBOX_DOCTOR_CRON_CH
 JSON="$(cd "${R3}" && bash "${BIN}" --json)"
 assert_eq "json is one object"     object "$(printf '%s' "${JSON}" | jq -r 'type')"
 assert_eq "summary na is its own bucket" true "$(printf '%s' "${JSON}" | jq -r '.summary.na >= 1')"
-# na is NOT counted as ok: ok bucket excludes the na findings
-NA_AS_CHECK="$(printf '%s' "${JSON}" | jq -r '[.findings[] | select(.state=="na")] | length')"
-OK_HAS_NA="$(printf '%s' "${JSON}" | jq -r '[.findings[] | select(.state=="ok" and .state=="na")] | length')"
-assert_eq "na findings present" true "$([ "${NA_AS_CHECK}" -ge 1 ] && echo true || echo false)"
-assert_eq "no finding is both ok and na" 0 "${OK_HAS_NA}"
+# na is NOT counted as ok -- the ticket's crux. The summary's ok/na counts MUST
+# equal the number of findings actually in each state; a count_state that folded
+# na into N_OK (or a summary that miscounted) would make summary.ok exceed the
+# ok-findings tally and redden here. (The earlier `state=="ok" and state=="na"`
+# check was a tautology -- a state cannot be two values -- and proved nothing;
+# the critic's review caught it.)
+OK_FINDINGS="$(printf '%s' "${JSON}" | jq -r '[.findings[] | select(.state=="ok")] | length')"
+NA_FINDINGS="$(printf '%s' "${JSON}" | jq -r '[.findings[] | select(.state=="na")] | length')"
+assert_eq "summary.ok equals the ok-findings tally" "${OK_FINDINGS}" "$(printf '%s' "${JSON}" | jq -r '.summary.ok')"
+assert_eq "summary.na equals the na-findings tally" "${NA_FINDINGS}" "$(printf '%s' "${JSON}" | jq -r '.summary.na')"
+assert_eq "there ARE na findings to mis-count" true "$([ "${NA_FINDINGS}" -ge 1 ] && echo true || echo false)"
+assert_eq "na alone keeps healthy true" true \
+  "$(printf '%s' "${JSON}" | jq -r 'if (.summary.warn==0 and .summary.fail==0) then (.summary.healthy==true) else true end')"
 # force a fail (invalid entry) -> exit 1
 printf '{"v":1,"repo":"%s","channels":{"slack":{"kind":"bogus"}}}' "${C3}" > "${ATHENA_INBOX_ROOT}/projects/bin.json"; chmod 600 "${ATHENA_INBOX_ROOT}/projects/bin.json"
 ( cd "${R3}" && bash "${BIN}" >/dev/null 2>&1 ); assert_eq "a fail -> exit 1" 1 "$?"

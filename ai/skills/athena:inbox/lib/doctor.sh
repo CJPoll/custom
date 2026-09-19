@@ -406,12 +406,18 @@ doctor_check_collisions() {
     printf '%s\n' "${records}" | while IFS=$'\t' read -r json src; do
       [ -n "${json}" ] || continue
       case "${json}" in '#unparseable') continue ;; esac
+      # `sort -u` PER ENTRY so a surface counts at most once per file. Without
+      # it, a single entry declaring two channels on one surface would show up
+      # in the cross-file `uniq -d` below and be reported as "more than one
+      # registry entry" -- which is the wrong finding. The D12(a) case is a
+      # collision ACROSS entries, so the surface must appear in two DIFFERENT
+      # files to count.
       printf '%s' "${json}" | jq -r '
         .channels // {} | to_entries[]
         | .value as $c
         | if $c.kind == "log" then $c.path
           elif $c.kind == "maildir" then $c.namespace
-          else empty end' 2>/dev/null
+          else empty end' 2>/dev/null | sort -u
     done | sort | uniq -d
   )"
   if [ -n "${surfaces}" ]; then
@@ -610,6 +616,12 @@ doctor_server_health() {
   tokfile="${ATHENA_INBOX_DOCTOR_API_TOKEN_FILE:-}"
   [ -n "${base}" ] && [ -n "${id}" ] && [ -n "${tokfile}" ] || return 2
   [ -f "${tokfile}" ] || return 1
+  # A token file wider than 0600 is a credential exposure; refuse to read it
+  # (status 3 so the caller can warn rather than silently degrade to na).
+  case "$(stat -c '%a' "${tokfile}" 2>/dev/null)" in
+    600|400) ;;
+    *) return 3 ;;
+  esac
   command -v curl >/dev/null 2>&1 || return 1
 
   tmp="$(mktemp -d 2>/dev/null)" || return 1
@@ -638,10 +650,20 @@ doctor_server_health() {
 # cannot be reached (no token configured -> opt-out, not a breakage).
 doctor_check_server() {
   local cwd="${1:-.}" health rc cfg
+  if [ "${DOCTOR_NO_SERVER:-0}" = "1" ]; then
+    doctor_finding na "server" "server check not run (disabled for this invocation)" \
+      "run inbox-doctor by hand (without --no-server) to include the server side; the unprompted SessionStart path deliberately makes no network request."
+    return 0
+  fi
   health="$(doctor_server_health)"; rc=$?
   if [ "${rc}" -eq 2 ]; then
     doctor_finding na "server" "server check skipped -- no API token configured (opt-out)" \
       "to enable it, set ATHENA_INBOX_DOCTOR_API_BASE, ATHENA_INBOX_DOCTOR_MACHINE_ID and ATHENA_INBOX_DOCTOR_API_TOKEN_FILE (a 0600 file holding a user API token); the doctor never stores or mints one."
+    return 0
+  fi
+  if [ "${rc}" -eq 3 ]; then
+    doctor_finding warn "server" "the API token file is more permissive than 0600, so the server check was not run" \
+      "chmod 0600 \$ATHENA_INBOX_DOCTOR_API_TOKEN_FILE; a user API token is a credential and the doctor refuses to read one from a world- or group-readable file."
     return 0
   fi
   if [ "${rc}" -ne 0 ] || [ -z "${health}" ] || ! printf '%s' "${health}" | jq -e 'type == "object"' >/dev/null 2>&1; then
@@ -666,10 +688,14 @@ doctor_check_server() {
   esac
 
   # Per-instance delivery: undelivered counts are a fact worth surfacing.
+  # `undelivered` is server-side: rows the server has NOT yet delivered to this
+  # machine (drained on the client's channel join). A non-zero count means the
+  # server is holding events the client has not received -- usually because the
+  # client is down or not connected, NOT because a session failed to ack.
   local undel
   undel="$(printf '%s' "${health}" | jq -r '[.data.instances[]? | select((.undelivered // 0) > 0) | "\(.name):\(.undelivered)"] | join(", ")' 2>/dev/null)"
-  [ -n "${undel}" ] && doctor_finding warn "server" "instance(s) have unacked events on the server: ${undel}" \
-    "these events are delivered to the machine but not yet acked by a session -- run read-inbox on the matching channel; a growing count with a live client means nothing is consuming that channel."
+  [ -n "${undel}" ] && doctor_finding warn "server" "the server is holding events not yet delivered to this machine: ${undel}" \
+    "these are queued on the server for a client that has not drained them -- check the client is running and connected (see client-running and the connection verdict above); a growing count is the server unable to hand events to this machine."
 
   # The silent-override cross-check needs the client config's instances map.
   cfg="$(doctor_client_config_path)"

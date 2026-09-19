@@ -1524,3 +1524,9 @@ the channel file's md5 is unchanged and no `.state.json` was created — a run
 that advanced an offset or wrote state would redden `channel file unchanged by a
 run` / `no state file written by a run`. S6 above is the same guarantee from the
 lock side.
+
+### Added on the merge-round critic's finding
+
+| # | Mutation | Case that reddened | What it proves |
+|---|---|---|---|
+| S7 | `bin/inbox-doctor` `count_state`: fold `na` into the `ok` tally (`$1==s \|\| ($1=="na" && s=="ok")`) | `summary.ok equals the ok-findings tally` | the ticket's crux -- `na` is never counted as `ok`. The original assertion (`state=="ok" and state=="na"`) was a tautology and caught nothing; the replacement compares `summary.ok`/`summary.na` against the actual per-state finding tallies, and reddens the moment a count folds one state into another. |

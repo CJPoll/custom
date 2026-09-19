@@ -1391,7 +1391,45 @@ CTX="$(context_of "${OUT}")"
 assert_not_contains "healthy chain: no doctor line" "delivery chain is unhealthy" "${CTX}"
 assert_no_file "healthy chain: the doctor marker is not stamped" "$(pm doctor-warn)"
 
-unset ATHENA_INBOX_REGISTRY ATHENA_INBOX_DOCTOR_CRON_CHECK ATHENA_INBOX_CLIENT_STATE_DIR ATHENA_INBOX_CLIENT_CONFIG
+# Case: the OPTED-IN gate. A repo with NO registry entry never runs the doctor,
+# so even a machine-global fault (a stop marker) produces no line -- nagging in
+# every repo is the noise the gate exists to prevent. Dropping the OPTED_IN
+# guard would surface a line here (the temp root's 0755 projects/ alone makes
+# the doctor unhealthy), so this is the case that proves the gate.
+setup_case
+export ATHENA_INBOX_DOCTOR_LINE=1
+export ATHENA_INBOX_DOCTOR_CRON_CHECK="true"
+export ATHENA_INBOX_CLIENT_STATE_DIR="${CASE_DIR}/cstate"; mkdir -p "${ATHENA_INBOX_CLIENT_STATE_DIR}"
+printf 'partial line\n' > "${ATHENA_INBOX_CLIENT_STATE_DIR}/athena-inbox-client.stopped"
+# deliberately DO NOT register an entry -> this repo is not opted in
+run_hook
+assert_eq "not opted in: no stdout at all (doctor never runs)" "" "${OUT}"
+
+# Case: the opt-out. ATHENA_INBOX_DOCTOR_LINE=0 suppresses the line even on an
+# unhealthy chain (the doctor still works by hand).
+setup_case
+doctor_healthy_env
+export ATHENA_INBOX_DOCTOR_LINE=0
+printf 'partial line\n' > "${ATHENA_INBOX_CLIENT_STATE_DIR}/athena-inbox-client.stopped"
+plant_log_lines
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_not_contains "opt-out: no doctor line" "delivery chain is unhealthy" "${CTX}"
+assert_contains "opt-out: the count line still shows" "new in" "${CTX}"
+
+# Case: the fail wording. A client config present with NO pidfile -> the doctor
+# reports client-running FAIL -> the line reads "a link is broken", not
+# "needs attention".
+setup_case
+doctor_healthy_env
+export ATHENA_INBOX_CLIENT_CONFIG="${CASE_DIR}/present-config.json"
+printf '{"instances":{}}' > "${ATHENA_INBOX_CLIENT_CONFIG}"; chmod 600 "${ATHENA_INBOX_CLIENT_CONFIG}"
+# state dir exists but holds no pidfile -> client-running fail
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "fail wording: 'a link is broken'" "a link is broken" "${CTX}"
+
+unset ATHENA_INBOX_REGISTRY ATHENA_INBOX_DOCTOR_CRON_CHECK ATHENA_INBOX_CLIENT_STATE_DIR ATHENA_INBOX_CLIENT_CONFIG ATHENA_INBOX_DOCTOR_LINE
 
 # The real HOME was never a target — by fingerprint, not by inspection.
 HOME="${REAL_HOME}"
