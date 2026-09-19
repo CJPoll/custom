@@ -3285,6 +3285,17 @@ assert_ok "M-11 the test takes this channel's sender lock" \
 ERR="$( cd "${SPROJ}" && printf 'contended\n' | "${BIN}/send-mail" mail contended --to peer 2>&1 >/dev/null )"; RC=$?
 assert_eq "M-11 a second sender is refused while the lock is held" "1" "${RC}"
 assert_contains "M-11 ... with a Fix: clause" "Fix:" "${ERR}"
+# THE REFUSAL IS PHRASED FOR A SENDER, NOT A CONSUMER. inbox_lock_acquire guards
+# both a read/ack and a send; a send that hit it once reported "another session
+# is the designated consumer" and told the user to "re-run with --peek" -- a
+# flag send-mail does not have, over a lock that is not the consumer's. A test
+# that checked only that SOME refusal appeared could not tell the two apart.
+assert_contains "M-11 ... naming the contention as a concurrent SEND, not a consumer" \
+  "already sending" "${ERR}"
+assert_not_contains "M-11 ... and not directing a sender to the reader-only --peek flag" \
+  "--peek" "${ERR}"
+assert_not_contains "M-11 ... nor calling the sender a designated consumer" \
+  "designated consumer" "${ERR}"
 assert_eq "M-11 ... and delivered nothing" "0" "$(ls "${SWRITE}"/*.md 2>/dev/null | wc -l)"
 inbox_release_consumer
 ERR="$( cd "${SPROJ}" && printf 'uncontended\n' | "${BIN}/send-mail" mail uncontended --to peer 2>&1 >/dev/null )"; RC=$?

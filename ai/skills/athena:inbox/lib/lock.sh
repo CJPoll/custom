@@ -60,11 +60,20 @@
 INBOX_LOCK_FD=""
 INBOX_LOCK_PATH=""
 
-# inbox_lock_acquire <lock-path> [channel-label]
+# inbox_lock_acquire <lock-path> [channel-label] [role]
 # Status 0 = held by us. Status 1 = refused (someone else holds it), with a
 # `Fix:` clause naming the holder as far as the diagnostics allow.
+#
+# `role` is "consumer" (default) or "sender", and it decides WHAT THE REFUSAL
+# NAMES. This same function guards two different operations -- a read/ack advance
+# takes `<channel>.consumer.lock`, a send takes `<write>/.sender.lock` -- and a
+# refusal phrased for one is a `Fix:` the other's user cannot act on. A sender
+# told to "re-run with --peek" is sent to a flag `send-mail` does not have, over
+# a lock that is not the consumer's. The lock-file basename in the diagnostics
+# is taken from the path, so it is always the file the caller actually uses.
 inbox_lock_acquire() {
-  local path="$1" label="${2:-this channel}" dir hint
+  local path="$1" label="${2:-this channel}" role="${3:-consumer}" dir hint lockbase
+  lockbase="${path##*/}"
 
   if [ -n "${INBOX_LOCK_PATH}" ] && [ "${INBOX_LOCK_PATH}" = "${path}" ]; then
     return 0                       # already ours; see the fd note above
@@ -99,7 +108,7 @@ inbox_lock_acquire() {
     # parents at the process umask (0755) inside a root the contract holds at
     # 0700 throughout.
     fs_mkdir_0700 "${dir}" || {
-      inbox_fail "cannot create the directory for ${label}'s consumer lock" \
+      inbox_fail "cannot create the directory for ${label}'s ${lockbase}" \
         "check that \$ATHENA_INBOX_ROOT exists and is writable (it should be mode 0700), then re-run."
       return 1
     }
@@ -111,16 +120,25 @@ inbox_lock_acquire() {
   # it then printed could not name the holder it had just erased. The suite
   # caught exactly that. `<>` creates the file if absent and truncates nothing.
   if ! exec {INBOX_LOCK_FD}<>"${path}"; then
-    inbox_fail "cannot open ${label}'s consumer lock file" \
-      "check the permissions on \$ATHENA_INBOX_ROOT (0700) and on the .consumer.lock file (0600), then re-run."
+    inbox_fail "cannot open ${label}'s ${lockbase} file" \
+      "check the permissions on \$ATHENA_INBOX_ROOT (0700) and on the ${lockbase} file (0600), then re-run."
     return 1
   fi
 
   if ! flock -n "${INBOX_LOCK_FD}"; then
     hint="$(inbox_lock_holder_hint "${path}")"
     exec {INBOX_LOCK_FD}>&-; INBOX_LOCK_FD=""
-    inbox_fail "another session is the designated consumer of ${label}${hint:+ (${hint})}" \
-      "read without advancing: re-run with --peek. Only one session may advance a channel's offset or ack its mail; when that session exits, the kernel releases the lock and this one can advance."
+    if [ "${role}" = "sender" ]; then
+      # A SENDER, NOT A CONSUMER. It contends only with another sender of this
+      # identity -- exactly the <seq> race the contract names -- and there is no
+      # --peek for a send, so the consumer's advice would send the reader to a
+      # flag that does not exist over a lock that is not theirs.
+      inbox_fail "another session is already sending on ${label}${hint:+ (${hint})}" \
+        "wait for the other sender to finish, then re-run. A send holds this channel's .sender.lock across scanning for the next sequence number, building the filename and delivering -- so two sends at once would pick the same number. This is the writer's own lock, not the peer's consumer lock, and there is no read-only mode to fall back to for a send."
+    else
+      inbox_fail "another session is the designated consumer of ${label}${hint:+ (${hint})}" \
+        "read without advancing: re-run with --peek. Only one session may advance a channel's offset or ack its mail; when that session exits, the kernel releases the lock and this one can advance."
+    fi
     return 1
   fi
 

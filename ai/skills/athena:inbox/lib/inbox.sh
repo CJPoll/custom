@@ -966,7 +966,7 @@ INBOX_SEND_ATTEMPTS=5
 # would read as an access control it is not.
 inbox_require_sender() {
   local lock="$1" label="${2:-this channel}"
-  inbox_lock_acquire "${lock}" "${label}" || return 1
+  inbox_lock_acquire "${lock}" "${label}" sender || return 1
   return 0
 }
 
@@ -1050,7 +1050,12 @@ inbox_send_mail() {
     # refuses, permanently, as a non-conformant file, while the sender exits 0.
     sent_at="$(fs_now_rfc3339)"
     name="$(maildir_message_name "${sent_at}" "${seq}" "${slug}")" || { rc=1; break; }
-    content="$(printf '%s' "${body}" | maildir_render_message "${identity}" "${to}" "${sent_at}" "${re}" "${thread}"; printf X)" \
+    # `&&`, not `;`: `$(a; b)` takes b's status (printf, always 0), so the
+    # `|| { rc=1; break; }` could never fire and the render's non-zero would be
+    # swallowed. The `[ -z ]` check below is belt for the same case (a refusing
+    # render buffers and emits nothing), but a dead `||` is the S36 pattern and
+    # the two guards are cheaper kept consistent than left disagreeing.
+    content="$(printf '%s' "${body}" | maildir_render_message "${identity}" "${to}" "${sent_at}" "${re}" "${thread}" && printf X)" \
       || { rc=1; break; }
     content="${content%X}"
     if [ -z "${content}" ]; then

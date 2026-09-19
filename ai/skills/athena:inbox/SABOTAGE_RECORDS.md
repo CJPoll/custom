@@ -543,15 +543,15 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
 
 # DND-187 — `bin/send-mail`, the writer's half
 
-**36 mutations, 31 red, 5 measured green** — in the FINAL state of the branch.
-The numbers moved across four passes and every movement is recorded rather than
+**37 mutations, 32 red, 5 measured green** — in the FINAL state of the branch.
+The numbers moved across five passes and every movement is recorded rather than
 smoothed over, because a sabotage record whose header disagrees with its own
 table is a record a reader cannot use: the first pass was **18 red / 6 green**
 over 24 mutations; closing the two real gaps it found (S10, S13) made it 20/4;
 the review round added six more mutations (S25 … S30) over the checks written to
 answer it, of which five reddened; a second review round added five more
 (S31 … S35), all of which reddened; a third review round added one more (S36),
-which reddened.
+which reddened; a fourth added one more (S37), which reddened.
 
 Each mutation was an
 exact-substring replace whose anchor was asserted present before writing, run
@@ -568,7 +568,7 @@ carry that history in place; **S13 was a real gap**, not a redundancy.
 | # | Mutation | Verdict | The case that names it |
 |---|---|---|---|
 | S1 | delivery uses `mv` **and** the destination pre-check is removed | **RED** (7) | *M-11 delivery onto an existing name returns 2 (collision), not 0* — `mv` silently replaces, so the earlier message is destroyed with no error |
-| S2 | `ln` → `mv`, pre-check kept | GREEN | redundancy, not a zero — see *The two greens that are redundancy* |
+| S2 | `ln` → `mv`, pre-check kept | GREEN | redundancy, not a zero — see *The green that is redundancy, not a zero* |
 | S3 | pre-check removed, `ln` kept | GREEN | same pair |
 | S4 | the doorbell is bumped **before** the delivery | **RED** (3) | *M-12 the message is ALREADY in place when the bell rings* |
 | S5 | the `<seq>` scan skips `.acked/` | **RED** (1) | *I-5 the next send allocates 002 even though .acked/ holds 001* |
@@ -672,7 +672,27 @@ under the `;` form; measured by reverting the fix on the `--body-file` line
 alone, which reddened exactly the two body-file assertions and left the stdin
 twin green.
 
-## The input classes the fixtures never contained
+### Added in the fourth review round
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S37 | the send path drops the `sender` role arg to `inbox_lock_acquire` | **RED** (3) | *M-11 … naming the contention as a concurrent SEND, not a consumer* — and the two twins that a sender's refusal never says "designated consumer" or "--peek" |
+
+**S37 is a refusal that misnamed what a sender was doing, and it was shipped.**
+`inbox_lock_acquire` guards two operations — a read/ack advance on
+`<channel>.consumer.lock`, and a send on `<write>/.sender.lock` — and its refusal
+was written only for the reader: a send blocked on a busy `.sender.lock` reported
+"another session is the designated consumer" and told the user to "re-run with
+`--peek`", a flag `send-mail` does not have, over a lock that is not the
+consumer's. It is the same class the review round opened with (a refusal whose
+`Fix:` the reader cannot act on), one level deeper: `bin/send-mail`'s own
+"already holds another lock" message had been reworded for a sender, but the one
+refusal a real, correctly-configured send can actually hit had not. Fixed by
+threading a `role` through `inbox_lock_acquire` (patch the class, not the site),
+defaulting to `consumer` so every existing caller is unchanged, and branching the
+`flock -n` refusal on it. The section-4b contention case asserted only that
+*some* refusal appeared; it now asserts the refusal names a concurrent send and
+mentions neither `--peek` nor "designated consumer".
 
 Mutating code finds a check that stopped working. It cannot find a check
 nobody thought to write, because a fixture is built the way the code already
