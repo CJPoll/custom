@@ -65,21 +65,31 @@
 #
 # MARKERS -- under $HOME/.claude/, worktree-independent, one per concern
 # ---------------------------------------------------------------------
+# GLOBAL -- about the machine, not about any one project:
 #   athena-inbox-last-poll     when did we last ATTEMPT
-#   athena-inbox-last-success  when did we last SUCCEED (is the silence healthy?)
-#   athena-inbox-last-warn     when did we last say THE POLL IS BROKEN
-#   athena-inbox-last-health-warn  when did we last say THE POLL FOUND A FAULT
 #   athena-inbox-poll.log      last 200 lines, fixed reason strings only
-#   athena-inbox-seen/<hash>   this project HAD channels once (per-project)
-#   athena-inbox-seen/<hash>.warn  when we last said they had vanished
+#
+# PER-PROJECT, under athena-inbox-seen/<hash-of-repo-key>. -- the poll outcome
+# is per repo, and this hook runs in every repo on the machine:
+#   <hash>.success        when did THIS project last SUCCEED
+#   <hash>.warn           when did we last say ITS poll is broken
+#   <hash>.health-warn    when did we last say its poll found a fault
+#   <hash>.seen           this project HAD channels once
+#   <hash>.vanished-warn  when did we last say they had vanished
+#
+# The $HOME-level athena-inbox-last-{success,warn,health-warn} names remain as
+# the DEGRADED fallback, used only when the project identity cannot be resolved
+# -- which always logs a Fix: first, because sharing this state between projects
+# is the defect the per-project keying exists to close.
 #
 # Merging any two of these breaks one of the answers, and they are namespaced
 # separately from the athena-slack-* family: a shared marker once let a fresh
 # CHECK silently suppress a POLL (walt_ui sabotage S14).
 #
-# THE TWO WARNINGS HAVE SEPARATE MARKERS for that same reason. "The poll is not
-# working" and "the poll works and found a fault downstream" have different
-# owners and very different lifetimes: a benign health fault is a state the
+# EVERY WARNING HAS ITS OWN MARKER, per concern AND per project, for that same
+# reason. "The poll is not working", "the poll works and found a fault
+# downstream" and "this project's entry has vanished" have different owners and
+# very different lifetimes: a benign health fault is a state the
 # reader may live with for weeks, re-stamping on its own cadence, while an
 # outage is urgent and new. Sharing one marker lets the chronic one rate-limit
 # the urgent one into silence for a whole window.
@@ -158,32 +168,30 @@ if [ -z "${HOME:-}" ]; then exit 0; fi
 
 MARKER_DIR="${HOME}/.claude"
 POLL_MARKER="${MARKER_DIR}/athena-inbox-last-poll"
-SUCCESS_MARKER="${MARKER_DIR}/athena-inbox-last-success"
-WARN_MARKER="${MARKER_DIR}/athena-inbox-last-warn"
-HEALTH_WARN_MARKER="${MARKER_DIR}/athena-inbox-last-health-warn"
 LOG_FILE="${MARKER_DIR}/athena-inbox-poll.log"
 
-# PER-PROJECT state, and the only state here that is not per-$HOME.
+# PER-PROJECT state, which is what all of this state actually is.
 #
-# "This project never opted in" and "this project's registry entry was deleted
-# or clobbered" are BYTE-IDENTICAL on disk -- inbox-status answers
-# {"channels":[],"failed_candidates":0} and exits 0 for both, correctly, since
-# it cannot know a project's history. The second is the silent-dark failure
-# CLAUDE.md names for this registry: an untracked file outside git, so its loss
-# has no diff and no undo. Somebody has to remember that this project once had
-# channels, and the session standing in the project is the only one who can.
+# The poll outcome is per-repo; the marker family used to live one-per-$HOME,
+# and this hook runs with the "" matcher -- in EVERY repo on the machine. That
+# made one project's session move another project's markers: a healthy sibling
+# refreshing the success marker kept a broken project's outage warning six
+# hours away forever, and one project's health warning rate-limited another's.
+# Both are reachable today; this machine's registry holds several entries.
 #
-# The identity is the contract's own key -- the realpath of the git common dir,
-# identical for a repo's main checkout and all its worktrees. It is READ OUT OF
-# `inbox-status --json` (`repo_key`), not computed here: that command already
-# resolves it, and a hook that recomputed it would be a second implementation of
-# the identity rule, free to drift from the contract. This file calls the
-# skill's public surface and nothing below it. The key is hashed for the marker
-# filename, because a filename must not be a filesystem path.
+# So the success marker, both warn markers and the seen marker are keyed by the
+# project. The ATTEMPT marker and the reason log stay global on purpose: they
+# answer "did this machine attempt, and why did it stop", which is not a
+# question about any one project.
+#
+# The identity is the contract's own key, from the skill's PUBLIC surface
+# (`inbox-status --repo-key`), never recomputed here -- a second implementation
+# of the identity rule is a second thing free to drift from the contract, and
+# `--repo-key` exists so that the answer is available even on the path where
+# the status document does not (a refusal prints nothing). It is hashed because
+# a marker filename must not be a filesystem path, and because the filename
+# would otherwise disclose which projects this machine has registered.
 SEEN_DIR="${MARKER_DIR}/athena-inbox-seen"
-SEEN_MARKER=""
-SEEN_WARN_MARKER=""
-
 # --- markers ---------------------------------------------------------------
 
 # log_reason <fixed-string>
@@ -231,6 +239,51 @@ marker_is_stale() {
   age="$(marker_age_seconds "$1")" || return 0
   [ "${age}" -ge "$2" ]
 }
+
+# --- the project identity, and the markers keyed by it ----------------------
+
+PROJECT_HASH=""
+if [ ! -x "${STATUS_BIN}" ]; then
+  : # reported below, where the missing command actually stops the poll
+elif ! command -v sha256sum >/dev/null 2>&1; then
+  log_reason "sha256sum is not on PATH, so this project's markers cannot be named and its inbox state would be shared with every other project on this machine. Fix: install coreutils' sha256sum and start a new session."
+else
+  # --repo-key touches no registry and cannot fail, so a non-zero status or an
+  # error here means the inbox-status beside this hook PREDATES the option --
+  # hook/skill version skew, reachable because settings.json wires one tree's
+  # hook path and STATUS_BIN resolves from that tree. Logged rather than
+  # silently falling back, because the fallback is shared state.
+  if PROJECT_KEY="$(timeout "${STATUS_TIMEOUT_SECONDS}" "${STATUS_BIN}" --repo-key 2>/dev/null)"; then
+    PROJECT_KEY="${PROJECT_KEY%$'\n'}"
+    if [ -n "${PROJECT_KEY}" ]; then
+      PROJECT_HASH="$(printf '%s' "${PROJECT_KEY}" | sha256sum 2>/dev/null | cut -c1-32)"
+      case "${PROJECT_HASH}" in ''|*[!0-9a-f]*) PROJECT_HASH="" ;; esac
+    fi
+    # An EMPTY key is a cwd in no git repository. Nothing here could ever have
+    # had channels, so there is nothing to remember and nothing to report --
+    # the ordinary case for most directories on this machine.
+  else
+    log_reason "inbox-status does not support --repo-key, so this project's markers cannot be named and its inbox state would be shared with every other project on this machine. Fix: check that ai/skills/athena:inbox and ai/hooks come from the same checkout."
+  fi
+fi
+
+if [ -n "${PROJECT_HASH}" ]; then
+  SUCCESS_MARKER="${SEEN_DIR}/${PROJECT_HASH}.success"
+  WARN_MARKER="${SEEN_DIR}/${PROJECT_HASH}.warn"
+  HEALTH_WARN_MARKER="${SEEN_DIR}/${PROJECT_HASH}.health-warn"
+  SEEN_MARKER="${SEEN_DIR}/${PROJECT_HASH}.seen"
+else
+  # Degraded, and said so above. The $HOME-level names are the old shared ones:
+  # worse than per-project, but still better than no rate limit at all, and
+  # every route here has left a Fix: in the log.
+  SUCCESS_MARKER="${MARKER_DIR}/athena-inbox-last-success"
+  WARN_MARKER="${MARKER_DIR}/athena-inbox-last-warn"
+  HEALTH_WARN_MARKER="${MARKER_DIR}/athena-inbox-last-health-warn"
+  SEEN_MARKER=""
+fi
+# The vanished-entry warning is a DIFFERENT CONCERN from the outage warning
+# even now that both are per-project, so it keeps its own rate limit.
+SEEN_WARN_MARKER="${SEEN_MARKER:+${SEEN_MARKER%.seen}.vanished-warn}"
 
 # --- emit ------------------------------------------------------------------
 
@@ -317,46 +370,6 @@ OPTED_IN=1
 if [ "${POLL_OK}" -eq 1 ] \
    && printf '%s' "${STATUS_JSON}" | jq -e '(.channels | length) == 0' >/dev/null 2>&1; then
   OPTED_IN=0
-fi
-
-# The per-project marker paths, now that the status document can name this
-# repo. Every way of failing to derive them is LOGGED rather than silently
-# disabling the detector: an inert R16 looks exactly like a healthy project, and
-# a lookup that finds nothing must still leave something a later reader can see.
-if [ "${POLL_OK}" -eq 1 ]; then
-  # ABSENT and EMPTY are different answers and must not collapse. An empty
-  # `repo_key` means "this cwd is in no git repository", which legitimately has
-  # no identity to remember and is the ordinary case for most directories on
-  # this machine -- quiet. NO `repo_key` at all means the inbox-status beside
-  # this hook predates the field (hook/skill version skew: settings.json wires
-  # one tree's hook, which resolves STATUS_BIN from whatever tree that is), and
-  # that silently makes the vanished-entry detector inert while looking exactly
-  # like a healthy project. `// ""` would have made those two indistinguishable.
-  if ! printf '%s' "${STATUS_JSON}" | jq -e 'has("repo_key")' >/dev/null 2>&1; then
-    log_reason "the status document carries no repo_key, so this project's inbox-seen marker could not be named and a vanished registry entry would go unnoticed here. Fix: the inbox-status beside this hook predates the field — check that ai/skills/athena:inbox and ai/hooks come from the same checkout."
-    PROJECT_KEY=""
-  else
-    PROJECT_KEY="$(printf '%s' "${STATUS_JSON}" | jq -r '.repo_key' 2>/dev/null)" || PROJECT_KEY=""
-  fi
-  if [ -z "${PROJECT_KEY}" ]; then
-    :
-  elif ! command -v sha256sum >/dev/null 2>&1; then
-    log_reason "sha256sum is not on PATH, so this project's inbox-seen marker could not be named and a vanished registry entry would go unnoticed here. Fix: install coreutils' sha256sum and start a new session."
-  else
-    PROJECT_HASH="$(printf '%s' "${PROJECT_KEY}" | sha256sum 2>/dev/null | cut -c1-32)"
-    case "${PROJECT_HASH}" in
-      ''|*[!0-9a-f]*)
-        log_reason "this project's identity could not be hashed, so its inbox-seen marker could not be named and a vanished registry entry would go unnoticed here. Fix: check that sha256sum and cut behave normally on this machine."
-        ;;
-      *)
-        SEEN_MARKER="${SEEN_DIR}/${PROJECT_HASH}"
-        # Rate-limited by a marker of its OWN, beside the fact it is about. A
-        # per-project fault must not be silenced by another project's warning,
-        # which is what a shared $HOME-level marker would do.
-        SEEN_WARN_MARKER="${SEEN_DIR}/${PROJECT_HASH}.warn"
-        ;;
-    esac
-  fi
 fi
 
 if [ "${POLL_OK}" -eq 1 ] && [ "${OPTED_IN}" -eq 1 ]; then

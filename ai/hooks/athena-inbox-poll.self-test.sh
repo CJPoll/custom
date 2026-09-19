@@ -49,7 +49,8 @@ trap cleanup EXIT INT TERM
 real_markers_fingerprint() {
   local f
   for f in athena-inbox-last-poll athena-inbox-last-success athena-inbox-last-warn \
-           athena-inbox-last-health-warn athena-inbox-poll.log settings.json; do
+           athena-inbox-last-health-warn athena-inbox-poll.log athena-inbox-seen \
+           settings.json; do
     printf '%s:%s\n' "${f}" "$(stat -c %Y -- "${REAL_HOME}/.claude/${f}" 2>/dev/null || printf 'absent')"
   done
 }
@@ -121,6 +122,19 @@ run_hook() {
 }
 
 hook_log()  { cat "${HOME}/.claude/athena-inbox-poll.log" 2>/dev/null; }
+
+# pm <suffix> -- this case's PER-PROJECT marker path. The whole marker family
+# except the attempt marker and the log is keyed by the project, because the
+# poll outcome is per-repo while the hook runs in every repo on the machine.
+# Resolved the same way the hook resolves it -- through the skill's public
+# --repo-key -- so a divergence between suite and hook cannot hide a bug.
+pm() {
+  local key hash
+  key="$(cd "${REPO}" && "${STATUS_BIN}" --repo-key 2>/dev/null)"
+  hash="$(printf '%s' "${key}" | sha256sum | cut -c1-32)"
+  mkdir -p "${HOME}/.claude/athena-inbox-seen" 2>/dev/null
+  printf '%s\n' "${HOME}/.claude/athena-inbox-seen/${hash}.$1"
+}
 context_of() { printf '%s' "$1" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null; }
 
 # assert_one_json_object <claim> <stdout>  -- exactly one object, nothing else.
@@ -185,6 +199,7 @@ run_stub_hook() {
 }
 
 STUB_OK='#!/usr/bin/env bash
+case "$1" in --repo-key) realpath "$(git rev-parse --git-common-dir)"; exit 0 ;; esac
 printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidates":0}'"'"'
 exit 0'
 
@@ -305,7 +320,7 @@ assert_eq "F-4 no registry entry is not an error on stderr" "" "${ERR}"
 # the outage warning this hook exists to raise was structurally unreachable, and
 # no mutation could show it because no fixture ever asserted these files.
 assert_no_file "F-4 a non-opted-in repo does NOT stamp success" \
-  "${HOME}/.claude/athena-inbox-last-success"
+  "$(pm success)"
 assert_file "F-4 a non-opted-in repo still stamps the ATTEMPT marker" \
   "${HOME}/.claude/athena-inbox-last-poll"
 assert_contains "F-4 a non-opted-in repo records why it did nothing" \
@@ -315,13 +330,13 @@ assert_contains "F-4 a non-opted-in repo records why it did nothing" \
 # side: a warning raised by the project that OWNS these markers must survive a
 # session in an unrelated repo.
 setup_case
-touch "${HOME}/.claude/athena-inbox-last-warn"
-touch "${HOME}/.claude/athena-inbox-last-health-warn"
+touch "$(pm warn)"
+touch "$(pm health-warn)"
 run_hook
 assert_file "F-4 a non-opted-in repo does not clear the outage marker" \
-  "${HOME}/.claude/athena-inbox-last-warn"
+  "$(pm warn)"
 assert_file "F-4 a non-opted-in repo does not clear the health marker" \
-  "${HOME}/.claude/athena-inbox-last-health-warn"
+  "$(pm health-warn)"
 
 # F-4d: an unreadable root. Whatever inbox-status makes of it, the hook's
 # contract is unchanged: nothing on stdout, exit 0, one line in the log.
@@ -353,7 +368,7 @@ setup_case
 register "${LOG_CHANNEL}"
 break_registry
 run_hook
-assert_no_file "F-5 the precondition holds: no success marker exists" "${HOME}/.claude/athena-inbox-last-success"
+assert_no_file "F-5 the precondition holds: no success marker exists" "$(pm success)"
 assert_contains "F-5 a never-successful setup warns on the first attempt" \
   "has not succeeded recently" "$(context_of "${OUT}")"
 
@@ -368,8 +383,8 @@ assert_eq "F-9 the warning object names the SessionStart event like any other" "
 setup_case
 register "${LOG_CHANNEL}"
 break_registry
-touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "${HOME}/.claude/athena-inbox-last-success"
-touch "${HOME}/.claude/athena-inbox-last-warn"
+touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "$(pm success)"
+touch "$(pm warn)"
 run_hook
 assert_eq "F-6 a stale success plus a FRESH warn marker is silent" "" "${OUT}"
 assert_eq "F-6 the rate-limited run still exits 0" "0" "${RC}"
@@ -379,8 +394,8 @@ assert_eq "F-6 the rate-limited run still exits 0" "0" "${RC}"
 setup_case
 register "${LOG_CHANNEL}"
 break_registry
-touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "${HOME}/.claude/athena-inbox-last-success"
-touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "${HOME}/.claude/athena-inbox-last-warn"
+touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "$(pm success)"
+touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "$(pm warn)"
 run_hook
 assert_contains "F-6 a stale success plus a STALE warn marker warns again" \
   "has not succeeded recently" "$(context_of "${OUT}")"
@@ -391,7 +406,7 @@ assert_contains "F-6 a stale success plus a STALE warn marker warns again" \
 setup_case
 register "${LOG_CHANNEL}"
 break_registry
-touch "${HOME}/.claude/athena-inbox-last-success"
+touch "$(pm success)"
 run_hook
 assert_eq "F-6 a fresh success marker makes one failed poll silent" "" "${OUT}"
 
@@ -409,12 +424,57 @@ mkdir -p "${OTHER}"
 OTHER_SAVED="${REPO}"; REPO="${OTHER}"
 run_hook                                  # a session in the unrelated repo...
 assert_no_file "F-6 an unrelated repo's session leaves no success marker behind" \
-  "${HOME}/.claude/athena-inbox-last-success"
+  "$(pm success)"
 REPO="${OTHER_SAVED}"
 break_registry                            # ...and now the opted-in project's poll is broken
 run_hook
 assert_contains "F-6 a session in another repo does not suppress this project's outage warning" \
   "has not succeeded recently" "$(context_of "${OUT}")"
+
+# TWO REGISTERED PROJECTS, ONE $HOME. The case above covers a repo that never
+# opted in; this covers the one the suite could not see, and the one that is
+# reachable on this machine today -- its registry holds several entries. The
+# marker family used to be one file per $HOME while the poll outcome is per
+# repo, so a HEALTHY SIBLING refreshing the success marker kept a broken
+# project's outage warning six hours away forever. That is the same
+# structurally-unreachable warning the OPTED_IN third state was added to close,
+# reached from a sibling tenant instead of an unrelated repo.
+setup_case
+register "${LOG_CHANNEL}"                       # project A, healthy
+plant_log_lines
+SIB="${CASE_DIR}/sibling"
+mkdir -p "${SIB}"
+( cd "${SIB}" && git init -q . && git config user.email t@t && git config user.name t )
+SIB_COMMON="$(cd "${SIB}" && realpath "$(git rev-parse --git-common-dir)")"
+jq -n --arg r "${SIB_COMMON}" --argjson c "${LOG_CHANNEL}" \
+  '{v:1, repo:$r, channels:$c}' > "${ATHENA_INBOX_ROOT}/projects/sib.json"
+run_hook                                        # a healthy session in A
+A_SAVED="${REPO}"; REPO="${SIB}"
+printf 'not json at all' > "${ATHENA_INBOX_ROOT}/projects/sib.json"   # B's entry rots
+run_hook
+assert_contains "F-8 a healthy SIBLING PROJECT does not silence this project's outage warning" \
+  "has not succeeded recently" "$(context_of "${OUT}")"
+REPO="${A_SAVED}"
+
+# ...and the same for the health warning, which R16 established the principle
+# for and only applied to the vanished-entry notice: every health clause but
+# failed_candidates is derived from THIS project's own channels.
+setup_case
+register "${LOG_CHANNEL}"                       # project A, never delivered to
+SIB="${CASE_DIR}/sibling"
+mkdir -p "${SIB}"
+( cd "${SIB}" && git init -q . && git config user.email t@t && git config user.name t )
+SIB_COMMON="$(cd "${SIB}" && realpath "$(git rev-parse --git-common-dir)")"
+jq -n --arg r "${SIB_COMMON}" --argjson c "${LOG_CHANNEL}" \
+  '{v:1, repo:$r, channels:$c}' > "${ATHENA_INBOX_ROOT}/projects/sib.json"
+run_hook                                        # A warns, stamping ITS marker
+assert_contains "F-8 the precondition: project A raises its health warning" \
+  "never received anything" "$(context_of "${OUT}")"
+A_SAVED="${REPO}"; REPO="${SIB}"
+run_hook                                        # B has the same fault
+assert_contains "F-8 project A's health warning does not silence project B's" \
+  "never received anything" "$(context_of "${OUT}")"
+REPO="${A_SAVED}"
 
 echo "== F-7 · F-8: marker discipline =="
 
@@ -426,7 +486,7 @@ register "${LOG_CHANNEL}"
 break_registry
 run_hook
 assert_file    "F-7 a failing run DOES stamp the attempt marker" "${HOME}/.claude/athena-inbox-last-poll"
-assert_no_file "F-7 a failing run does NOT stamp the success marker" "${HOME}/.claude/athena-inbox-last-success"
+assert_no_file "F-7 a failing run does NOT stamp the success marker" "$(pm success)"
 
 # The attempt marker is stamped before the work in the strongest sense: even a
 # run that cannot do any work at all has already recorded the attempt.
@@ -448,10 +508,10 @@ assert_file "F-7 a run that cannot even start stamps the attempt marker first" \
 setup_case
 register "${LOG_CHANNEL}"
 plant_log_lines
-touch "${HOME}/.claude/athena-inbox-last-warn"
+touch "$(pm warn)"
 run_hook
-assert_file    "F-8 a succeeding run stamps the success marker" "${HOME}/.claude/athena-inbox-last-success"
-assert_no_file "F-8 a succeeding run clears the warn marker" "${HOME}/.claude/athena-inbox-last-warn"
+assert_file    "F-8 a succeeding run stamps the success marker" "$(pm success)"
+assert_no_file "F-8 a succeeding run clears the warn marker" "$(pm warn)"
 
 echo "== F-10: a separate marker per concern =="
 
@@ -460,7 +520,7 @@ echo "== F-10: a separate marker per concern =="
 setup_case
 register "${LOG_CHANNEL}"
 plant_log_lines
-touch "${HOME}/.claude/athena-inbox-last-warn"
+touch "$(pm warn)"
 touch "${HOME}/.claude/athena-inbox-last-poll"
 run_hook
 assert_contains "F-10 a fresh WARN marker does not suppress the COUNT" "2 new in slack" \
@@ -485,8 +545,8 @@ if grep -q 'athena-slack-last' "${HOOK}"; then
 else
   ok "F-10 the hook shares no marker path with the athena-slack-* family"
 fi
-for m in athena-inbox-last-poll athena-inbox-last-success athena-inbox-last-warn \
-         athena-inbox-last-health-warn; do
+for m in athena-inbox-last-poll athena-inbox-seen '.success' '.warn' \
+         '.health-warn' '.seen' '.vanished-warn'; do
   if grep -q "${m}" "${HOOK}"; then ok "F-10 marker [${m}] has its own path"
   else bad "F-10 marker [${m}] has its own path" "not referenced by the hook"; fi
 done
@@ -521,15 +581,15 @@ assert_contains "R8 a channel that has NEVER received anything is surfaced" \
 # happening, and re-warn at every session start.
 setup_case
 register "${LOG_CHANNEL}"
-touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "${HOME}/.claude/athena-inbox-last-health-warn"
+touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "$(pm health-warn)"
 run_hook
 assert_file "R8 a successful-but-unhealthy run does not clear the health-warn marker" \
-  "${HOME}/.claude/athena-inbox-last-health-warn"
+  "$(pm health-warn)"
 
 # ...and is itself rate-limited, by that same marker.
 setup_case
 register "${LOG_CHANNEL}"
-touch "${HOME}/.claude/athena-inbox-last-health-warn"
+touch "$(pm health-warn)"
 run_hook
 assert_eq "R8 the health warning is rate-limited like any other warning" "" "${OUT}"
 
@@ -540,7 +600,7 @@ assert_eq "R8 the health warning is rate-limited like any other warning" "" "${O
 # swallowed for a whole window by a warning about something else entirely.
 setup_case
 register "${LOG_CHANNEL}"
-touch "${HOME}/.claude/athena-inbox-last-health-warn"   # health warned just now
+touch "$(pm health-warn)"   # health warned just now
 break_registry                                          # ...and now the poll breaks
 run_hook
 assert_contains "R8 a fresh HEALTH warning does not suppress an OUTAGE warning" \
@@ -549,7 +609,7 @@ assert_contains "R8 a fresh HEALTH warning does not suppress an OUTAGE warning" 
 # ...and the converse, so the split is not merely one-directional.
 setup_case
 register "${LOG_CHANNEL}"
-touch "${HOME}/.claude/athena-inbox-last-warn"          # outage warned just now
+touch "$(pm warn)"          # outage warned just now
 run_hook
 assert_contains "R8 a fresh OUTAGE warning does not suppress a HEALTH warning" \
   "never received anything" "$(context_of "${OUT}")"
@@ -560,10 +620,10 @@ assert_contains "R8 a fresh OUTAGE warning does not suppress a HEALTH warning" \
 # outage gets rate-limited by one that is already over.
 setup_case
 register "${LOG_CHANNEL}"
-touch "${HOME}/.claude/athena-inbox-last-warn"
+touch "$(pm warn)"
 run_hook
 assert_no_file "R8 a successful-but-unhealthy run DOES clear the outage marker" \
-  "${HOME}/.claude/athena-inbox-last-warn"
+  "$(pm warn)"
 
 # Private state, by construction. A 0644 marker or reason log under ~/.claude is
 # not a disaster, but the inbox family's whole discipline is 0600/0700 and a
@@ -581,7 +641,7 @@ run_hook
 assert_eq "the attempt marker is created 0600" "600" \
   "$(stat -c %a "${HOME}/.claude/athena-inbox-last-poll" 2>/dev/null)"
 assert_eq "the success marker is created 0600" "600" \
-  "$(stat -c %a "${HOME}/.claude/athena-inbox-last-success" 2>/dev/null)"
+  "$(stat -c %a "$(pm success)" 2>/dev/null)"
 assert_eq "the reason log is created 0600" "600" \
   "$(stat -c %a "${HOME}/.claude/athena-inbox-poll.log" 2>/dev/null)"
 
@@ -612,7 +672,7 @@ assert_not_contains "R13 an unwritten-to maildir is not announced as a missing p
   "never received anything" "${CTX}"
 assert_contains "R13 the log channel's real mail is still counted" "2 new in slack" "${CTX}"
 assert_no_file "R13 an unwritten-to maildir does not leave the health-warn marker stamped" \
-  "${HOME}/.claude/athena-inbox-last-health-warn"
+  "$(pm health-warn)"
 
 # The control, so the case above cannot pass by the clause being dead: the same
 # fixture with a LOG channel that has never been delivered to DOES warn.
@@ -656,7 +716,7 @@ setup_case
 register "${LOG_CHANNEL}"
 run_hook
 rm -f "${ATHENA_INBOX_ROOT}/projects/p.json"
-touch "${HOME}/.claude/athena-inbox-last-health-warn"   # another project warned
+touch "$(pm health-warn)"   # another project warned
 run_hook
 assert_contains "R16 another project's health warning does not silence this one" \
   "has none now" "$(context_of "${OUT}")"
@@ -672,7 +732,7 @@ assert_eq "R16 the vanished-entry warning is rate-limited by its own marker" "" 
 register "${LOG_CHANNEL}"                                # the entry is restored
 run_hook
 assert_no_file "R16 a repair clears the vanished-entry rate limit" \
-  "$(ls -d "${HOME}/.claude/athena-inbox-seen"/*.warn 2>/dev/null | head -1)"
+  "$(pm vanished-warn)"
 rm -f "${ATHENA_INBOX_ROOT}/projects/p.json"             # ...and clobbered again
 run_hook
 assert_contains "R16 a second disappearance warns again rather than being rate-limited" \
@@ -683,25 +743,34 @@ assert_contains "R16 a second disappearance warns again rather than being rate-l
 # inbox-status beside this hook predates the field -- hook/skill version skew,
 # which settings.json makes reachable by wiring one tree's hook path -- and that
 # silently makes the detector inert. `// ""` collapsed the two.
+# An inbox-status that predates --repo-key -- hook/skill version skew, which
+# settings.json makes reachable by wiring one tree's hook path while STATUS_BIN
+# resolves from that tree. Falling back to the shared $HOME markers silently
+# would put this project's inbox state back in the pool with every other
+# project's, which is the defect the per-project keying exists to close.
 setup_case
 register "${LOG_CHANNEL}"
 stub_repo '#!/usr/bin/env bash
+case "$1" in --repo-key) echo "unknown argument" >&2; exit 2 ;; esac
 printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidates":0}'"'"'
 exit 0'
 run_stub_hook
-assert_contains "R16 a status document with NO repo_key is logged, not silently inert" \
-  "carries no repo_key" "$(hook_log)"
+assert_contains "R16 an inbox-status without --repo-key is logged, not silently shared" \
+  "does not support --repo-key" "$(hook_log)"
 assert_contains "R16 ...and the count is still reported" "2 new in slack" \
   "$(context_of "${OUT}")"
 
+# An EMPTY key is the quiet case: a cwd in no git repository has nothing that
+# could ever have had channels.
 setup_case
 register "${LOG_CHANNEL}"
 stub_repo '#!/usr/bin/env bash
-printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidates":0,"repo_key":""}'"'"'
+case "$1" in --repo-key) printf '"'"'\n'"'"'; exit 0 ;; esac
+printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidates":0}'"'"'
 exit 0'
 run_stub_hook
-assert_not_contains "R16 an EMPTY repo_key is the quiet no-git-repo case, not a fault" \
-  "carries no repo_key" "$(hook_log)"
+assert_not_contains "R16 an EMPTY repo key is the quiet no-git-repo case, not a fault" \
+  "does not support --repo-key" "$(hook_log)"
 
 # A repo that NEVER opted in must stay silent. Without this, the warning above
 # would fire in every unrelated repo on the machine -- the noise this hook
@@ -722,7 +791,7 @@ setup_case
 register "${LOG_CHANNEL}"
 plant_log_lines
 printf 'not json' > "${ATHENA_INBOX_ROOT}/p-slack.state.json"
-touch "${HOME}/.claude/athena-inbox-last-health-warn"    # the warning is silenced...
+touch "$(pm health-warn)"    # the warning is silenced...
 run_hook
 CTX="$(context_of "${OUT}")"
 assert_contains "R17 the inflated count still carries its caveat" \
@@ -748,8 +817,8 @@ done
 OLD_PATH="${PATH}"
 PATH="${NOBIN2}" run_hook
 PATH="${OLD_PATH}"
-assert_contains "R16 a key that cannot be hashed is LOGGED, not silently inert" \
-  "would go unnoticed here" "$(hook_log)"
+assert_contains "R16 a key that cannot be hashed is LOGGED, not silently shared" \
+  "markers cannot be named" "$(hook_log)"
 assert_eq "R16 the degraded run still exits 0" "0" "${RC}"
 
 # ...and the converse: a cwd in NO git repository has no identity to remember
@@ -761,7 +830,7 @@ mkdir -p "${NOGIT}"
 REPO="${NOGIT}"
 run_hook
 assert_not_contains "R16 a cwd in no git repo is not reported as a degraded key" \
-  "would go unnoticed here" "$(hook_log)"
+  "markers cannot be named" "$(hook_log)"
 assert_eq "R16 a cwd in no git repo still exits 0" "0" "${RC}"
 
 echo "== R12: a registry entry that could not be read is surfaced, not skipped =="
@@ -812,7 +881,7 @@ assert_contains "R12 an unreadable candidate with NO match is a failed poll, not
 assert_not_contains "R12 ...so it never renders the other-projects clause" \
   "those projects are dark" "${CTX}"
 assert_no_file "R12 ...and it does not stamp success" \
-  "${HOME}/.claude/athena-inbox-last-success"
+  "$(pm success)"
 assert_contains "R12 ...and the refusal is recorded" \
   "no usable status document" "$(hook_log)"
 assert_not_contains "R12 ...without relaying the refusal's own text" \
@@ -832,6 +901,7 @@ echo "== R9: an ANSWER THAT CANNOT BE READ is a failed poll, not an empty one ==
 setup_case
 register "${LOG_CHANNEL}"
 stub_repo '#!/usr/bin/env bash
+case "$1" in --repo-key) realpath "$(git rev-parse --git-common-dir)"; exit 0 ;; esac
 printf "not a status document at all\n"
 exit 0'
 run_stub_hook
@@ -844,7 +914,7 @@ assert_contains "R9 non-empty but unparseable output warns instead" \
   "has not succeeded recently" "$(context_of "${OUT}")"
 assert_eq "R9 non-empty but unparseable output still exits 0" "0" "${RC}"
 assert_no_file "R9 non-empty but unparseable output does NOT stamp success" \
-  "${HOME}/.claude/athena-inbox-last-success"
+  "$(pm success)"
 assert_contains "R9 the unusable answer is logged as a fixed reason" \
   "no usable status document" "$(hook_log)"
 
@@ -854,12 +924,13 @@ assert_contains "R9 the unusable answer is logged as a fixed reason" \
 setup_case
 register "${LOG_CHANNEL}"
 stub_repo '#!/usr/bin/env bash
+case "$1" in --repo-key) realpath "$(git rev-parse --git-common-dir)"; exit 0 ;; esac
 printf '"'"'{"channels":{"slack":2}}'"'"'
 exit 0'
 run_stub_hook
 assert_not_contains "R9 a JSON object of the wrong shape is not a count" "new in" "${OUT}"
 assert_no_file "R9 a JSON object of the wrong shape does NOT stamp success" \
-  "${HOME}/.claude/athena-inbox-last-success"
+  "$(pm success)"
 
 # The stub proves the control: the SAME harness with a well-formed document does
 # produce a count. Without this, all three assertions above would also hold for
@@ -871,7 +942,7 @@ run_stub_hook
 assert_contains "R9 the control: a well-formed document IS counted" "2 new in slack" \
   "$(context_of "${OUT}")"
 assert_file "R9 the control: a usable answer stamps success" \
-  "${HOME}/.claude/athena-inbox-last-success"
+  "$(pm success)"
 
 echo "== R14: the wrapped command is bounded too =="
 
@@ -885,6 +956,7 @@ setup_case
 register "${LOG_CHANNEL}"
 export ATHENA_INBOX_STATUS_TIMEOUT_SECONDS=1
 stub_repo '#!/usr/bin/env bash
+case "$1" in --repo-key) realpath "$(git rev-parse --git-common-dir)"; exit 0 ;; esac
 sleep 30
 printf '"'"'{"channels":[]}'"'"''
 START="$(date +%s)"
@@ -898,7 +970,7 @@ else
 fi
 assert_eq "R14 the expiry still exits 0" "0" "${RC}"
 assert_no_file "R14 an expired poll does NOT stamp success" \
-  "${HOME}/.claude/athena-inbox-last-success"
+  "$(pm success)"
 
 echo "== R15: a Fix: must answer the question it promises =="
 
@@ -940,6 +1012,7 @@ echo "== R10: the wrapped command's stderr is discarded, never relayed =="
 setup_case
 register "${LOG_CHANNEL}"
 stub_repo '#!/usr/bin/env bash
+case "$1" in --repo-key) realpath "$(git rev-parse --git-common-dir)"; exit 0 ;; esac
 printf "refusing: '"${SENTINEL}"'\n" >&2
 printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidates":0}'"'"'
 exit 1'
@@ -1061,7 +1134,7 @@ register "${LOG_CHANNEL}"
 plant_log_lines
 run_hook --dry-run
 assert_no_file "--dry-run writes no attempt marker" "${HOME}/.claude/athena-inbox-last-poll"
-assert_no_file "--dry-run writes no success marker" "${HOME}/.claude/athena-inbox-last-success"
+assert_no_file "--dry-run writes no success marker" "$(pm success)"
 assert_no_file "--dry-run writes no log" "${HOME}/.claude/athena-inbox-poll.log"
 assert_one_json_object "--dry-run still emits exactly one well-formed object" "${OUT}"
 if [ "$(printf '%s' "${OUT}" | wc -l)" -gt 1 ]; then

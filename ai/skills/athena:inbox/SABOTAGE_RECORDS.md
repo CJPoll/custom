@@ -550,14 +550,15 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
 - **Suite run:** `bash ai/hooks/athena-inbox-poll.self-test.sh </dev/null`
   (no network; every case gets a fake `$HOME`, a private `ATHENA_INBOX_ROOT`
   and its own `git init` repo under one `mktemp -d`; ~5s wall)
-- **Baseline:** `VERDICT: PASS (158 cases)` (91 at the first pass; 21 added
+- **Baseline:** `VERDICT: PASS (164 cases)` (91 at the first pass; 21 added
   after the sabotage run, 46 more across eight critic rounds — see *The four
   zeros* and *What the critic found that sabotage did not*)
-- **Runner:** 38 mutations, one at a time, full suite after each, restored by
-  `cp` from a backup taken before the run. S24–S38 were added after the review
-  rounds (see *What the critic found that sabotage did not*). **38 mutations,
-  38 reddened, no measured zeros** — S1–S35 in one full pass, S36–S38 in a
-  second, after a sibling captain's run clobbered the shared runner (below).
+- **Runner:** 42 mutations, one at a time, full suite after each, restored by
+  `cp` from a backup taken before the run. S24–S42 were added after the review
+  rounds (see *What the critic found that sabotage did not*). **42 mutations,
+  42 reddened, no measured zeros** — S1–S35 in one full pass, S36–S38 in a
+  second (after a sibling captain's run clobbered the shared runner, below),
+  S39–S42 in a third.
 
 The mutations were applied by an exact-substring replace that asserts the
 anchor occurs **exactly once** before writing, as DND-183's run did. That
@@ -610,7 +611,11 @@ produces 23 green runs, which reads as "this suite is dead".
 | S35 | `inbox_status_json` stops naming the session's repo | 5 | `FAIL  R16 a vanished entry is announced, not silently treated as opt-out` |
 | S36 | the other-projects clause claims the doubt is unresolved again | 2 | `FAIL  R12 an unreadable registry entry is surfaced` |
 | S37 | a repair never clears the vanished-entry rate limit | 2 | `FAIL  R16 a repair clears the vanished-entry rate limit` |
-| S38 | an ABSENT `repo_key` collapses into the quiet no-git-repo case | 1 | `FAIL  R16 a status document with NO repo_key is logged, not silently inert` |
+| S38 | an ABSENT repo key collapses into the quiet no-git-repo case | 1 | `FAIL  R16 an inbox-status without --repo-key is logged, not silently shared` |
+| S39 | the marker family goes back to being shared across projects | 5 | `FAIL  F-8 a healthy SIBLING PROJECT does not silence this project's outage warning` |
+| S40 | the health warning goes back to a shared rate limit | 3 | `FAIL  F-8 project A's health warning does not silence project B's` |
+| S41 | an `inbox-status` without `--repo-key` degrades in silence | 1 | `FAIL  R16 an inbox-status without --repo-key is logged, not silently shared` |
+| S42 | `inbox-status` stops answering `--repo-key` | 16 | `FAIL  F-6 a stale success plus a FRESH warn marker is silent` |
 
 ### The four zeros
 
@@ -864,6 +869,32 @@ path and `STATUS_BIN` resolves from that tree — and it silently made the whole
 vanished-entry detector inert while looking exactly like a healthy project. That
 is the round-five claim ("every way of failing to derive that marker name is
 LOGGED") escaping through its last door. **S38.**
+
+**The review floor found the last and largest instance: the marker family was
+still `$HOME`-global, so ONE PROJECT'S SESSION MOVED ANOTHER PROJECT'S
+MARKERS.** Round three had fixed this for a repo that never opted in (the
+`OPTED_IN` third state) and stopped there. Between two *registered* projects it
+was untouched, and reproducible on this machine today, whose registry holds
+several entries: a healthy sibling refreshing the shared success marker kept a
+broken project's outage warning six hours away **forever** — the same
+structurally-unreachable warning the third state was added to close, reached
+from a sibling tenant instead of an unrelated repo — and one project's health
+warning rate-limited another's.
+
+Every fixture the suite had for this used a second repo that was *unregistered*,
+which is the case that was already fixed, so no mutation could have reddened it.
+The whole family — success, both warn markers, the seen marker — is now keyed by
+a hash of the project identity; only the attempt marker and the reason log stay
+global, because they answer "did this machine attempt, and why did it stop",
+which is not a question about any one project.
+
+That fix needed the identity **on the failure path**, where the status document
+does not exist — a refusal prints nothing. Rather than let the hook recompute
+it (the drift this design refuses), `bin/inbox-status` grew **`--repo-key`**: it
+reads no registry, cannot fail, and answers the one question that still has an
+answer when everything else has failed. The degraded route — an `inbox-status`
+too old to know the option — falls back to the shared names and **logs a `Fix:`
+first**, because silently sharing this state is the defect being closed. S39–S42.
 
 ### A harness hazard this run measured
 

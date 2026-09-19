@@ -1160,6 +1160,43 @@ assert_eq "outside a git repo the field is present..." "true" \
 assert_eq "...and empty, never missing" "" \
   "$(jq -r '.repo_key' <<<"${jout}")"
 
+# `--repo-key` -- the same identity, on a path where --json has none.
+#
+# A refusal prints NOTHING on stdout, so a caller that needs the repo identity
+# exactly when this command has just refused (to name a per-project file, say)
+# cannot read it off the status document. --repo-key touches no registry and
+# cannot fail, which is the whole point: without it that caller reimplements
+# the identity rule with its own `git rev-parse`, and a second implementation
+# is a second thing free to drift from the contract.
+setup_case
+rkproj2="$(make_repo rkproj2)"
+assert_eq "--repo-key prints the same key --json carries" \
+  "$(cd "${rkproj2}" && realpath "$(git rev-parse --git-common-dir)")" \
+  "$(cd "${rkproj2}" && "${BIN}/inbox-status" --repo-key 2>/dev/null)"
+
+# It answers with NO registry at all -- the state in which every other question
+# this command can be asked has no answer.
+rm -rf "${ATHENA_INBOX_ROOT}/projects"
+assert_eq "--repo-key answers with no registry directory at all" \
+  "$(cd "${rkproj2}" && realpath "$(git rev-parse --git-common-dir)")" \
+  "$(cd "${rkproj2}" && "${BIN}/inbox-status" --repo-key 2>/dev/null)"
+( cd "${rkproj2}" && "${BIN}/inbox-status" --repo-key >/dev/null 2>&1 )
+assert_eq "--repo-key exits 0 even then" "0" "$?"
+
+# ...and when the registry is there but UNPARSEABLE, where --json hard-refuses.
+mkdir -p "${ATHENA_INBOX_ROOT}/projects"
+printf 'not json at all' > "${ATHENA_INBOX_ROOT}/projects/broken.json"
+assert_eq "--repo-key answers even where --json refuses" \
+  "$(cd "${rkproj2}" && realpath "$(git rev-parse --git-common-dir)")" \
+  "$(cd "${rkproj2}" && "${BIN}/inbox-status" --repo-key 2>/dev/null)"
+
+# Outside a git repository it is EMPTY, not missing and not an error.
+nogit2="${CASE_DIR}/nogit2"; mkdir -p "${nogit2}"
+assert_eq "--repo-key is empty outside a git repo" "" \
+  "$(cd "${nogit2}" && "${BIN}/inbox-status" --repo-key 2>/dev/null)"
+( cd "${nogit2}" && "${BIN}/inbox-status" --repo-key >/dev/null 2>&1 )
+assert_eq "--repo-key exits 0 outside a git repo" "0" "$?"
+
 # Back to the failed-candidate fixture for the cases that follow.
 setup_case
 fcproj="$(make_repo fcproj)"

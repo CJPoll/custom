@@ -121,9 +121,17 @@ Both are woken by a `.event` doorbell beside them.
 ### `bin/inbox-status`
 
 ```
-inbox-status            one line per channel that has something waiting
-inbox-status --json     the same counts as one object
+inbox-status              one line per channel that has something waiting
+inbox-status --json       the same counts as one object
+inbox-status --repo-key   this session's repo identity, and nothing else
 ```
+
+`--repo-key` prints the realpath of the session's git common dir (an empty line
+outside a git repository) and exits 0. It reads no registry and cannot fail,
+which is the point: a caller needing the identity **on a path where this command
+has just refused** — to name a per-project file, say — would otherwise
+reimplement the identity rule with its own `git rev-parse`. `repo_key` on the
+`--json` document answers the same question on the success path.
 
 Zero across the board prints **nothing** and exits 0. Unprompted output that
 says "nothing new" every session is noise, and noise is what makes a real
@@ -148,8 +156,8 @@ level**, beside `channels`:
 | `failed_candidates` | how many files under `projects/` could not be parsed. A count, never names — every other entry belongs to a different tenant |
 | `repo_key` | the session's own repo identity: the realpath of its git common dir, or `""` in no git repository. Present on every `--json` answer, including the one with no channels |
 
-**If you need the repo identity, take `repo_key` from here — never recompute
-it.** `inbox-status` has already resolved it by the contract's rule, and a
+**If you need the repo identity, take it from here — `repo_key` on `--json`, or
+`--repo-key` when `--json` may have refused — never recompute it.** `inbox-status` has already resolved it by the contract's rule, and a
 second implementation is a second thing free to drift from that rule; an
 identity that did not match the way the contract says is the bug this facility
 has already paid for twice (DND-183, DND-202). It is emitted on the

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # inbox-status -- FRAMEWORK. How many unread messages does this project have?
 #
-#   inbox-status           one line per channel with anything waiting
-#   inbox-status --json    the same counts as one JSON object
-#   inbox-status -h        this header
+#   inbox-status             one line per channel with anything waiting
+#   inbox-status --json      the same counts as one JSON object
+#   inbox-status --repo-key  this session's repo identity, and nothing else
+#   inbox-status -h          this header
 #
 # COUNTS ONLY. No body, no subject, no sender's text, no filename, no token.
 #
@@ -27,6 +28,15 @@
 # configured to write it, so "nobody registered the writer" and "nothing
 # arrived" look identical on disk and must not look identical here. A healthy
 # channel that is merely empty still prints nothing.
+#
+# --repo-key prints the session's repo identity -- the realpath of its git
+# common dir, or an empty line outside a git repository -- and exits 0. It
+# touches no registry and cannot fail, which is the point: a CALLER THAT NEEDS
+# THE IDENTITY WHEN THIS COMMAND HAS JUST REFUSED (to name a per-project file,
+# say) would otherwise have to recompute it with its own `git rev-parse`, and a
+# second implementation of the identity rule is a second thing free to drift
+# from the contract. `repo_key` on the --json document answers the same question
+# on the success path; this answers it on every path.
 #
 # Not opting in is not a fault: a cwd in no git repository, or a repo with no
 # registry entry, prints nothing and exits 0. A MALFORMED registry entry is a
@@ -67,16 +77,26 @@ LIB="$(dirname "${HERE}")/lib"
 usage() { sed -n '2,/^#--- end usage ---$/p' "${BASH_SOURCE[0]}" | grep -v '^#--- end usage ---$' | sed 's/^# \{0,1\}//'; }
 
 JSON=0
+REPO_KEY_ONLY=0
 for arg in "$@"; do
   case "${arg}" in
     --json) JSON=1 ;;
+    --repo-key) REPO_KEY_ONLY=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
-      inbox_fail "unknown argument \"${arg}\"" "run: inbox-status [--json]"
+      inbox_fail "unknown argument \"${arg}\"" "run: inbox-status [--json|--repo-key]"
       exit 2
       ;;
   esac
 done
+
+# Answered before the jq check and before anything reads the registry: this is
+# the one question that still has an answer when everything else has failed,
+# and a caller asks it precisely then.
+if [ "${REPO_KEY_ONLY}" -eq 1 ]; then
+  fs_git_common_dir "." 2>/dev/null || printf '\n'
+  exit 0
+fi
 
 if ! command -v jq >/dev/null 2>&1; then
   inbox_fail "jq is required and was not found on PATH" \
