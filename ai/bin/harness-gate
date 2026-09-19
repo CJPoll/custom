@@ -97,12 +97,23 @@ CHECKS = (STATIC_CHECKS + scripts_self_test_checks).freeze
 # visible instead of silently unrun (helper scripts a real self-test.sh
 # `source`s or execs are expected to live here too, so this WARNS rather than
 # fails the gate — it cannot tell a stray suite from a deliberate helper).
+# Deliberately NOT filtered to executable files: a suite committed without its
+# `+x` bit (invoked as `bash foo.sh`, say) is the exact case this exists to
+# catch — filtering it out would leave the contract's most likely violation
+# invisible to its own detector.
 def stray_test_scripts(root = CUSTOM_DIR)
   Dir.glob(File.join(root, "scripts/test/**/*.sh"))
      .reject { |p| p.end_with?("/self-test.sh") }
-     .select { |p| File.executable?(p) }
      .map { |p| p.sub("#{root}/", "") }
      .sort
+end
+
+# Pure predicate so --self-test can exercise run_gate's zero-discovery
+# decision directly, against a fixture root, instead of only asserting on
+# discover_scripts_self_tests (which case 5 already covers) or having to run
+# the whole gate to reach the branch.
+def scripts_discovery_ok?(root = CUSTOM_DIR)
+  !discover_scripts_self_tests(root).empty?
 end
 
 FAIL_TAIL_LINES = 20
@@ -138,7 +149,7 @@ def run_gate
   # checkout (they are source, not environment-dependent config), so finding
   # none means the glob or CUSTOM_DIR resolution broke, not that there is
   # legitimately nothing to run. Fail loud instead of a silently-shorter PASS.
-  if scripts_found.empty?
+  unless scripts_discovery_ok?
     warn "harness-gate: FAILED — discovered ZERO scripts/test/**/self-test.sh, " \
          "but this repo has committed suites there."
     warn "  Fix: this means discover_scripts_self_tests (ai/bin/harness-gate) " \
@@ -150,11 +161,12 @@ def run_gate
 
   strays = stray_test_scripts
   unless strays.empty?
-    warn "harness-gate: NOTE — executable .sh file(s) under scripts/test/ not " \
-         "named self-test.sh, so NOT discovered/run: #{strays.join(', ')}"
+    warn "harness-gate: NOTE — .sh file(s) under scripts/test/ not named " \
+         "self-test.sh, so NOT discovered/run: #{strays.join(', ')}"
     warn "  Fix: if any of these is meant to be a self-test entry point, " \
-         "rename it to self-test.sh (the only name harness-gate discovers); " \
-         "if it's a helper another self-test.sh sources/execs, no action needed."
+         "rename it to self-test.sh (the only name harness-gate discovers), " \
+         "and make sure it is executable; if it's a helper another " \
+         "self-test.sh sources/execs, no action needed."
   end
 
   missing = missing_executables
@@ -163,10 +175,12 @@ def run_gate
     missing.each { |(label, argv)| warn "  - #{label} (#{argv.first})" }
     warn "  Fix: restore the script and `chmod +x` it. For a STATIC_CHECKS " \
          "entry you can also remove it from CHECKS in ai/bin/harness-gate (and " \
-         "from the gate list in ai/agents/athena-shipwright.md.in); a " \
-         "discovered scripts/test/**/self-test.sh entry is NOT removable from " \
-         "CHECKS by hand (it is derived from disk) — either chmod +x it or " \
-         "delete the file from scripts/test/."
+         "from the gate list in ai/agents/athena-shipwright.md.in) instead, if " \
+         "the check no longer applies. A discovered scripts/test/**/" \
+         "self-test.sh entry is NOT removable from CHECKS by hand (it is " \
+         "derived from disk) — `chmod +x` it. Do NOT delete it to make this " \
+         "pass: with only one scripts/test suite on disk today, deleting it " \
+         "just trades this failure for the zero-discovery failure above."
     return 1
   end
 
@@ -331,6 +345,51 @@ def run_self_test
     if labels.uniq.size != labels.size
       warn "self-test: FAIL — two distinct scripts/test suites produced the " \
            "same label: #{labels.inspect}"
+      ok = false
+    end
+  end
+
+  # 6b. run_gate's own guards, exercised as predicates/helpers against fixture
+  #     roots — the zero-discovery hard-fail and the stray-suite-name warning
+  #     each need their own case; nothing above reaches either branch.
+  Dir.mktmpdir("harness-gate-selftest-guards") do |fixture_root|
+    # scripts_discovery_ok? must be false with no scripts/test/ at all, and
+    # true again once a real self-test.sh exists.
+    if scripts_discovery_ok?(fixture_root)
+      warn "self-test: FAIL — scripts_discovery_ok? was true for a fixture " \
+           "root with no scripts/test/ directory at all"
+      ok = false
+    end
+
+    suite_dir = File.join(fixture_root, "scripts/test/only-suite")
+    FileUtils.mkdir_p(suite_dir)
+    suite_path = File.join(suite_dir, "self-test.sh")
+    File.write(suite_path, "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o755, suite_path)
+    unless scripts_discovery_ok?(fixture_root)
+      warn "self-test: FAIL — scripts_discovery_ok? was false for a fixture " \
+           "root that has a real self-test.sh"
+      ok = false
+    end
+
+    # stray_test_scripts must catch a misnamed suite EVEN WITHOUT the
+    # executable bit (the case a suite is most likely to be committed in) and
+    # must never flag the correctly-named self-test.sh sitting right next to it.
+    stray_dir = File.join(fixture_root, "scripts/test/misnamed")
+    FileUtils.mkdir_p(stray_dir)
+    stray_path = File.join(stray_dir, "tests.sh")
+    File.write(stray_path, "#!/bin/sh\nexit 0\n")
+    FileUtils.chmod(0o644, stray_path) # deliberately NOT executable
+
+    strays = stray_test_scripts(fixture_root)
+    unless strays.include?("scripts/test/misnamed/tests.sh")
+      warn "self-test: FAIL — stray_test_scripts did not flag a non-executable " \
+           "misnamed suite (found: #{strays.inspect})"
+      ok = false
+    end
+    if strays.include?("scripts/test/only-suite/self-test.sh")
+      warn "self-test: FAIL — stray_test_scripts flagged a correctly-named " \
+           "self-test.sh as stray"
       ok = false
     end
   end
