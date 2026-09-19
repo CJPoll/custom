@@ -1,0 +1,333 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# lead-time — derive a fleet ticket's LEAD TIME from durable artifacts only.
+#
+# Lead time = interval from when a captain STARTS working a ticket to when that
+# ticket is FULLY DEPLOYED (or, for a repo that does not deploy, when its
+# post-merge signal completes — which for a no-CI repo is the merge itself).
+#
+# The whole point of this tool is that it CAPTURES NOTHING and asks NOTHING of
+# any agent. Every timestamp is recovered on demand from git + GitHub Actions,
+# both of which retain history independently of whether an agent remembered to
+# set a Notion status. See ai/docs/lead-time-tracking.md for the design and the
+# markers we rejected (chiefly: the Notion API exposes no per-property
+# transition time, so a Todo->In Progress timestamp is unrecoverable).
+#
+# Markers (derived, durable):
+#   START = earliest commit on the ticket's branch (min committedDate over the
+#           PR's commits; survives squash merge via `gh pr view --json commits`).
+#           This LAGS true start by the first work chunk, so lead time computed
+#           this way slightly UNDER-reports. It is the honest durable floor.
+#   END   = for a repo that runs a post-merge DEPLOY workflow (detected by
+#           .github/workflows/post-merge.yml): the completion time of the deploy
+#           run whose headSha is the merge commit.
+#           for a repo with no such workflow (e.g. ~/dev/custom, no CI, no
+#           deploy): the merge commit time (PR mergedAt). No later durable
+#           signal exists there, so unifying on "deployment" is impossible for
+#           that half of the fleet — we unify on the RULE "latest durable end
+#           signal that exists for the repo," which is regular per-repo.
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   lead-time --repo DIR --pr N            one merged (or open) PR
+#   lead-time --repo DIR --since ISO8601   every PR merged at/after ISO8601
+#   lead-time ... --json                   machine-readable output
+#   lead-time --self-test                  verify the pure date/marker logic
+#
+# Exit: 0 on success, 1 on usage/tool error, 2 if a requested PR is missing.
+
+require "time"
+require "json"
+require "open3"
+
+DEPLOY_WORKFLOW_FILE = ".github/workflows/post-merge.yml"
+DEPLOY_WORKFLOW_NAME  = "Post-Merge Deploy"
+
+# ---------------------------------------------------------------------------
+# Pure core (self-tested; no network, no git)
+# ---------------------------------------------------------------------------
+
+module LeadTime
+  module_function
+
+  # Earliest commit is the start. nil if there are no commits yet.
+  def pick_start(commit_iso_times)
+    times = commit_iso_times.compact.map { |t| Time.iso8601(t) }
+    times.min
+  end
+
+  # END rule. A deploy repo ends at deploy completion when we have it; otherwise
+  # (no deploy workflow, or no matching run found) it ends at merge. An open PR
+  # (no merge yet) has no end.
+  def pick_end(has_deploy:, deploy_completed_at:, merged_at:)
+    if has_deploy && deploy_completed_at && !deploy_completed_at.empty?
+      [Time.iso8601(deploy_completed_at), :deploy]
+    elsif merged_at && !merged_at.empty?
+      [Time.iso8601(merged_at), has_deploy ? :merge_deploy_missing : :merge]
+    else
+      [nil, :open]
+    end
+  end
+
+  # Whole-number, human-scaled duration. Always two most-significant units.
+  def duration_human(seconds)
+    return "n/a" if seconds.nil?
+    return "0s" if seconds <= 0
+
+    s = seconds.to_i
+    d = s / 86_400; s -= d * 86_400
+    h = s / 3_600;  s -= h * 3_600
+    m = s / 60;     s -= m * 60
+    parts = []
+    parts << "#{d}d" if d.positive?
+    parts << "#{h}h" if h.positive?
+    parts << "#{m}m" if m.positive?
+    parts << "#{s}s" if s.positive?
+    # At most the two most-significant non-zero units.
+    parts.first(2).join(" ")
+  end
+
+  # Full computation from already-gathered facts. Returns a result Hash.
+  def compute(start_iso_times:, has_deploy:, deploy_completed_at:, merged_at:)
+    start = pick_start(start_iso_times)
+    finish, end_kind = pick_end(has_deploy: has_deploy,
+                                deploy_completed_at: deploy_completed_at,
+                                merged_at: merged_at)
+    secs = (start && finish) ? (finish - start).to_i : nil
+    {
+      start: start&.utc&.iso8601,
+      end: finish&.utc&.iso8601,
+      end_kind: end_kind,
+      lead_seconds: secs,
+      lead_human: duration_human(secs),
+    }
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Impure shell (git / gh); not exercised by --self-test
+# ---------------------------------------------------------------------------
+
+def sh_json(dir, *args)
+  out, err, st = Open3.capture3("gh", *args, chdir: dir)
+  unless st.success?
+    warn "lead-time: gh #{args.join(' ')} failed: #{err.strip}"
+    warn "Fix: run from a directory whose GitHub remote you can read; check `gh auth status`."
+    return nil
+  end
+  JSON.parse(out)
+rescue JSON::ParserError => e
+  warn "lead-time: could not parse gh output: #{e.message}"
+  nil
+end
+
+def repo_has_deploy?(dir)
+  File.file?(File.join(dir, DEPLOY_WORKFLOW_FILE))
+end
+
+def pr_facts(dir, pr)
+  d = sh_json(dir, "pr", "view", pr.to_s,
+              "--json", "number,title,mergedAt,headRefName,commits,mergeCommit")
+  return nil unless d
+
+  {
+    number: d["number"],
+    title: d["title"],
+    merged_at: d["mergedAt"],
+    branch: d["headRefName"],
+    merge_sha: d.dig("mergeCommit", "oid"),
+    commit_times: (d["commits"] || []).map { |c| c["committedDate"] },
+  }
+end
+
+# Completion time of the deploy run whose headSha == merge sha. nil if none.
+def deploy_completed_at(dir, merge_sha)
+  return nil unless merge_sha
+
+  runs = sh_json(dir, "run", "list", "--workflow", DEPLOY_WORKFLOW_NAME,
+                 "--limit", "200",
+                 "--json", "headSha,updatedAt,conclusion,status")
+  return nil unless runs
+
+  run = runs.find { |r| r["headSha"] == merge_sha && r["status"] == "completed" }
+  return nil unless run
+  # Only a successful deploy marks "fully deployed".
+  run["conclusion"] == "success" ? run["updatedAt"] : nil
+end
+
+def merged_prs_since(dir, since_iso)
+  since = Time.iso8601(since_iso)
+  prs = sh_json(dir, "pr", "list", "--state", "merged", "--limit", "100",
+                "--json", "number,mergedAt")
+  return [] unless prs
+
+  prs.select { |p| p["mergedAt"] && Time.iso8601(p["mergedAt"]) >= since }
+     .sort_by { |p| p["mergedAt"] }
+     .map { |p| p["number"] }
+end
+
+def analyze_pr(dir, pr, has_deploy)
+  f = pr_facts(dir, pr)
+  return nil unless f
+
+  dep_done = has_deploy ? deploy_completed_at(dir, f[:merge_sha]) : nil
+  res = LeadTime.compute(start_iso_times: f[:commit_times],
+                         has_deploy: has_deploy,
+                         deploy_completed_at: dep_done,
+                         merged_at: f[:merged_at])
+  res.merge(pr: f[:number], title: f[:title], branch: f[:branch])
+end
+
+# ---------------------------------------------------------------------------
+# --self-test (pure logic only)
+# ---------------------------------------------------------------------------
+
+def self_test
+  failures = []
+  check = lambda do |name, got, want|
+    failures << "#{name}: got #{got.inspect}, want #{want.inspect}" unless got == want
+  end
+
+  # duration_human
+  check.call("dur 47m", LeadTime.duration_human(47 * 60), "47m")
+  check.call("dur 2h14m", LeadTime.duration_human(2 * 3600 + 14 * 60), "2h 14m")
+  check.call("dur 3d5h", LeadTime.duration_human(3 * 86_400 + 5 * 3600 + 9 * 60), "3d 5h")
+  check.call("dur 18s", LeadTime.duration_human(18), "18s")
+  check.call("dur 0", LeadTime.duration_human(0), "0s")
+  check.call("dur neg", LeadTime.duration_human(-5), "0s")
+  check.call("dur nil", LeadTime.duration_human(nil), "n/a")
+  check.call("dur 5m0s->5m", LeadTime.duration_human(5 * 60), "5m")
+
+  # pick_start = earliest
+  check.call("start earliest",
+             LeadTime.pick_start(["2026-09-19T05:00:00Z", "2026-09-19T04:42:00Z",
+                                  "2026-09-19T04:55:00Z"]).utc.iso8601,
+             "2026-09-19T04:42:00Z")
+  check.call("start empty", LeadTime.pick_start([]), nil)
+
+  # pick_end: deploy repo with a completed deploy -> deploy time
+  e, k = LeadTime.pick_end(has_deploy: true,
+                           deploy_completed_at: "2026-09-19T06:06:39Z",
+                           merged_at: "2026-09-19T05:46:40Z")
+  check.call("end deploy time", e.utc.iso8601, "2026-09-19T06:06:39Z")
+  check.call("end deploy kind", k, :deploy)
+
+  # deploy repo but deploy run not found -> falls back to merge, flagged
+  e2, k2 = LeadTime.pick_end(has_deploy: true, deploy_completed_at: nil,
+                             merged_at: "2026-09-19T05:46:40Z")
+  check.call("end deploy-missing time", e2.utc.iso8601, "2026-09-19T05:46:40Z")
+  check.call("end deploy-missing kind", k2, :merge_deploy_missing)
+
+  # non-deploy repo -> merge time
+  e3, k3 = LeadTime.pick_end(has_deploy: false, deploy_completed_at: nil,
+                             merged_at: "2026-09-19T05:41:21Z")
+  check.call("end merge time", e3.utc.iso8601, "2026-09-19T05:41:21Z")
+  check.call("end merge kind", k3, :merge)
+
+  # open PR -> no end
+  e4, k4 = LeadTime.pick_end(has_deploy: false, deploy_completed_at: nil, merged_at: nil)
+  check.call("end open", e4, nil)
+  check.call("end open kind", k4, :open)
+
+  # compute end-to-end: custom PR14 shape (non-deploy)
+  r = LeadTime.compute(
+    start_iso_times: ["2026-09-19T04:42:59Z", "2026-09-19T05:35:44Z"],
+    has_deploy: false, deploy_completed_at: nil, merged_at: "2026-09-19T05:41:21Z")
+  check.call("compute pr14 seconds", r[:lead_seconds], 3502) # 04:42:59 -> 05:41:21
+  check.call("compute pr14 human", r[:lead_human], "58m 22s")
+  check.call("compute pr14 kind", r[:end_kind], :merge)
+
+  # compute deploy shape
+  r2 = LeadTime.compute(
+    start_iso_times: ["2026-09-19T05:00:00Z"],
+    has_deploy: true, deploy_completed_at: "2026-09-19T06:06:39Z",
+    merged_at: "2026-09-19T05:46:40Z")
+  check.call("compute deploy kind", r2[:end_kind], :deploy)
+  check.call("compute deploy seconds", r2[:lead_seconds], 3999) # 05:00:00 -> 06:06:39
+
+  if failures.empty?
+    puts "lead-time --self-test: PASS (pure-logic assertions)"
+    0
+  else
+    warn "lead-time --self-test: FAIL"
+    failures.each { |f| warn "  - #{f}" }
+    warn "Fix: reconcile the pure logic in module LeadTime with the expected marker/date math above."
+    1
+  end
+end
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def usage
+  warn <<~USAGE
+    lead-time — derive a fleet ticket's lead time from git + GitHub Actions.
+
+      lead-time --repo DIR --pr N [--json]
+      lead-time --repo DIR --since ISO8601 [--json]
+      lead-time --self-test
+
+    Fix: pass --self-test, or --repo with either --pr or --since.
+  USAGE
+  1
+end
+
+def print_row(r)
+  kind = { deploy: "deploy", merge: "merge", merge_deploy_missing: "merge(!deploy)",
+           open: "open" }[r[:end_kind]] || r[:end_kind].to_s
+  printf("PR %-4s  lead=%-10s  start=%s  end=%s  via=%s  %s\n",
+         r[:pr], r[:lead_human], r[:start] || "-", r[:end] || "-", kind,
+         (r[:title] || "")[0, 52])
+end
+
+def main(argv)
+  return self_test if argv.include?("--self-test")
+
+  repo = nil
+  pr = nil
+  since = nil
+  as_json = argv.include?("--json")
+  i = 0
+  while i < argv.length
+    case argv[i]
+    when "--repo"  then repo = argv[i += 1]
+    when "--pr"    then pr = argv[i += 1]
+    when "--since" then since = argv[i += 1]
+    when "--json"  then nil
+    else
+      warn "lead-time: unknown argument #{argv[i].inspect}"
+      return usage
+    end
+    i += 1
+  end
+
+  return usage unless repo && (pr || since)
+  unless File.directory?(File.join(repo, ".git")) || File.exist?(File.join(repo, ".git"))
+    warn "lead-time: #{repo} is not a git worktree/checkout"
+    warn "Fix: pass --repo pointing at a git checkout (e.g. ~/dev/custom or ~/dev/gen_saas)."
+    return 1
+  end
+
+  has_deploy = repo_has_deploy?(repo)
+  prs = pr ? [pr] : merged_prs_since(repo, since)
+
+  rows = prs.map { |n| analyze_pr(repo, n, has_deploy) }.compact
+  if pr && rows.empty?
+    warn "lead-time: PR #{pr} not found or unreadable in #{repo}"
+    warn "Fix: check the PR number and that `gh` can read this repo."
+    return 2
+  end
+
+  if as_json
+    puts JSON.pretty_generate(rows)
+  else
+    warn "repo=#{repo}  deploy=#{has_deploy ? DEPLOY_WORKFLOW_NAME : 'none (end=merge)'}"
+    rows.each { |r| print_row(r) }
+  end
+  0
+end
+
+exit main(ARGV) if $PROGRAM_NAME == __FILE__
