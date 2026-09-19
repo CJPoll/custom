@@ -213,6 +213,15 @@ end
 # zero-discovery/stray-suite branches against a fixture never spends the time
 # (or risk) of re-running the whole real gate as a side effect.
 def run_gate(root: CUSTOM_DIR, dry_run: false)
+  # `root` only ever governs the discovery reporting below (found/self_tests_
+  # found?/stray_test_scripts) — missing_executables and the CHECKS execution
+  # loop past `return 0 if dry_run` always use the real CUSTOM_DIR/CHECKS,
+  # never `root`. A non-default root with dry_run: false would therefore
+  # report on one tree and execute another with no failure — make that
+  # misuse impossible to construct rather than merely undocumented.
+  raise ArgumentError, "run_gate: root: only supported together with dry_run: true" \
+    if root != CUSTOM_DIR && !dry_run
+
   found = discover_self_tests(root)
   puts "self-tests discovered: #{found.size}"
 
@@ -360,6 +369,26 @@ def run_self_test
     warn "self-test: FAIL — installer self-test(s) on disk but not run by the " \
          "gate: #{unrun.join(', ')}"
     ok = false
+  end
+
+  # 4b. A SELF_TEST_DELEGATES value must be the suite the installer ACTUALLY
+  #     execs, not merely some other path that happens to be covered — case 4
+  #     only checks "the named path is covered by something", so a delegate
+  #     entry pointing at a real-but-wrong suite would read as "installer
+  #     covered" while the installer's own suite silently goes unrun. That is
+  #     this ticket's exact class, one level up in its own bookkeeping.
+  SELF_TEST_DELEGATES.each do |script, delegate|
+    script_path = File.join(CUSTOM_DIR, script)
+    next unless File.file?(script_path) # case 4 already flags a missing installer
+
+    contents = File.read(script_path)
+    unless contents.include?(delegate)
+      warn "self-test: FAIL — SELF_TEST_DELEGATES[#{script.inspect}] = " \
+           "#{delegate.inspect}, but #{script} does not reference that path " \
+           "anywhere in its source — the delegate is unverified, so the " \
+           "installer's real self-test suite could be going unrun"
+      ok = false
+    end
   end
 
   # Cases 5, 6, 6b and 6c below all plant a fixture suite under a
