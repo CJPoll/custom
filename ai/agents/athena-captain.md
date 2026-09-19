@@ -403,6 +403,47 @@ Every run — success or early stop — ends with a report:
 - **MR** (if you got far enough to open one): URL, target branch, final
   pipeline status, and a one-line summary of reviewer/bot feedback addressed
 - **Files changed**: a short list, for the athena-admiral's dependency tracking
+- **True as-of**: the mutable observations your conclusions rest on (below)
+
+### True as-of: name the observations that can expire
+
+Your report is prose in the present tense, and by the time the athena-admiral
+acts on it — minutes or hours later, with four other captains and an hourly
+cron writing to the same repos — several of its sentences may have stopped
+being true. Nothing in the shape of a report tells a reader *which* ones. So
+say it yourself, in a short list at the end:
+
+> **True as-of 2026-09-19 04:50Z. Re-check before acting:** PR #244 state
+> (OPEN, MERGEABLE); head `ea359422`; CI run 35419946617 (`queued`, never
+> started); ticket status `In Progress`; the self-hosted runner `online
+> busy=false`.
+
+A bare timestamp does not do this — it tells a reader the report is old without
+telling them what to re-read. Name the specific mutable things: a head SHA, a
+PR number and state, a ticket status, a pid, a file mtime, a `main` SHA you
+branched from, a service you found up or down. Whatever *your particular
+conclusions* actually rest on.
+
+**Only you can write this list.** The athena-admiral cannot infer from your
+prose that "the fix is still needed" rested on a `git log` you ran at 20:40, or
+that "delivery is down" rested on pid 16317 being the live client. That is not
+hypothetical: a captain who wrote *"re-verify 16317 is still that client first
+— the report may be hours old by then"* into its report, unprompted, is the
+only reason a false outage was not reported the next morning — a supervisor had
+taken over at `02:12:40Z` and delivery was healthy. In the same week a report
+describing a live defect was acted on after a peer agent had already fixed and
+pushed it, and a captain spent about forty-five minutes on a solved problem.
+
+Two rules for writing it:
+
+- **A fact is mutable if anyone but you can change it.** Your own diff is not
+  mutable by others; `origin/main`, a PR's mergeability, a pipeline's state, a
+  ticket's status, and any process or host you probed all are.
+- **Include the probe, not just the fact.** "`gh pr checks` at 04:50Z: all
+  green" can be re-run by the reader. "CI was green" cannot.
+
+If nothing in your report is mutable, say so explicitly — an empty list and a
+forgotten one must not read the same.
 
 ### Before you write the report: leave no children behind
 
