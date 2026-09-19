@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+#
+# forge-preflight — assert the Athena forge wrapper for THIS repo's remote host
+# can authenticate BEFORE any PR/MR is created, so a broken/unusable wrapper
+# fails loudly here instead of silently falling back to the machine owner's
+# identity (the DND-203 outage: gh-athena had no App credentials, the captain
+# fell back to bare `gh`, and the PR was authored by CJPoll — with nothing in
+# the output saying the write had been re-attributed).
+#
+# Run this once at the start of a run, before opening a PR/MR:
+#   ai/bin/forge-preflight            # exit 0 = the wrapper is healthy; refuse otherwise
+#
+# On refusal it prints a `Fix:` line naming the exact remedy, per this repo's
+# "guard messages are written for the LLM" convention.
+#
+# THE TRAP (single most likely way to get this wrong — see DND-203/DND-206):
+# probe GitHub health with `gh-athena --check`, NEVER with `gh-athena api user`.
+# An App *installation* token has no authenticated user, so `api user` returns
+# HTTP 403 "Resource not accessible by integration" even when the wrapper is
+# perfectly healthy. A guard that probed with `api user` would report a false
+# failure and push the captain into the exact bare-`gh` fallback this guard
+# exists to prevent. `--check` is the health probe; `api user` is not.
+#
+# GitLab is the opposite: the athena-amby *service account* PAT DOES resolve to
+# an authenticated user, so `glab-athena api user` succeeding IS the correct
+# health probe there. The asymmetry is deliberate and per-forge.
+#
+# Test seams (used only by ai/test/forge-preflight/self-test.sh; never in prod):
+#   GH_ATHENA_BIN / GLAB_ATHENA_BIN   path to the wrapper (default: sibling script)
+#   FORGE_PREFLIGHT_REMOTE            remote URL (default: `git remote get-url origin`)
+#
+# Exit codes: 0 healthy / not-a-managed-forge (nothing to assert) · 1 refused.
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+GH_ATHENA="${GH_ATHENA_BIN:-$SELF_DIR/gh-athena}"
+GLAB_ATHENA="${GLAB_ATHENA_BIN:-$SELF_DIR/glab-athena}"
+
+# jq is required for the GitLab identity assertion below. Fail loudly HERE with
+# an actionable remedy rather than fail-closing later with a misleading "run
+# glab-athena refresh" message that would not fix a missing jq.
+command -v jq >/dev/null 2>&1 || {
+  echo "forge-preflight: jq not found, but it is needed to verify the forge identity." >&2
+  echo "Fix: install jq (it is already a hard dependency of gh-athena/glab-athena)." >&2
+  exit 1
+}
+
+# Resolve the remote URL. The override lets the self-test drive host resolution
+# without standing up a git repo; in production it is the repo's origin.
+remote="${FORGE_PREFLIGHT_REMOTE:-$(git remote get-url origin 2>/dev/null || true)}"
+# A FAILED lookup must never look like a clean "nothing to assert" pass (repo
+# doctrine): with no origin we cannot resolve the forge, so a forge write would
+# proceed past the only guard in front of it. Refuse loudly.
+if [ -z "$remote" ]; then
+  {
+    echo "forge-preflight: REFUSED — no git remote 'origin', so the forge cannot be"
+    echo "resolved and a PR/MR opened now would bypass this identity check entirely."
+    echo "Fix: run this from the repo you are about to open a PR/MR in (its worktree has"
+    echo "  an 'origin'), or set one with \`git remote add origin <url>\`."
+  } >&2
+  exit 1
+fi
+
+# Extract the host from either an ssh (git@github.com:owner/repo.git),
+# scp-like, or https (https://github.com/owner/repo.git) remote URL, and
+# lowercase it — DNS hosts are case-insensitive, so `GitHub.com` must classify
+# the same as `github.com` rather than falling through to the unmanaged branch.
+host="$(printf '%s' "$remote" | sed -E 's#^[a-zA-Z]+://##; s#^[^@/]*@##; s#[:/].*$##' | tr '[:upper:]' '[:lower:]')"
+# An empty host is a malformed remote, not an unmanaged forge — again, a failed
+# lookup must not read as a clean pass.
+if [ -z "$host" ]; then
+  {
+    echo "forge-preflight: REFUSED — could not parse a host from origin ('$remote'),"
+    echo "so the forge cannot be resolved and the identity check cannot run."
+    echo "Fix: point 'origin' at a normal github.com/gitlab.com URL, e.g."
+    echo "  git@github.com:owner/repo.git or https://gitlab.com/group/repo.git."
+  } >&2
+  exit 1
+fi
+
+# Alias-aware classification: an ssh alias (github.com-work), a subdomain
+# (ssh.github.com) or the bare host all resolve to the same forge. A genuinely
+# unknown host falls through to the *) note.
+case "$host" in
+  github.com|*.github.com|github.com-*)
+    # Probe with --check ONLY. See "THE TRAP" above.
+    # LIMITATION (asymmetric with the GitLab branch, which asserts the identity
+    # IS athena-amby): a GitHub App *installation* token cannot fetch the `/app`
+    # slug, so `--check` proves the wrapper reaches an installation but NOT that
+    # the installed App is athena-harness specifically. If a DIFFERENT App's
+    # id/key were placed at ~/.claude/github-athena-*, this would pass green
+    # while PRs were authored by that other bot. Closing this needs a JWT-signed
+    # `/app` probe inside gh-athena --check; tracked as a follow-up, not here.
+    if out="$("$GH_ATHENA" --check 2>&1)"; then
+      exit 0   # healthy → silent
+    fi
+    {
+      echo "forge-preflight: REFUSED — the gh-athena wrapper cannot authenticate as the"
+      echo "Athena GitHub App, so any PR opened now would be silently attributed to the"
+      echo "machine owner instead of Athena (the DND-203 failure). The wrapper reported:"
+      printf '  %s\n' "$out"
+      echo "Fix: install the athena-harness GitHub App credentials on this machine —"
+      echo "  the App ID at ~/.claude/github-athena-app-id and the private key at"
+      echo "  ~/.claude/github-athena-key.pem (chmod 600) — then re-verify with"
+      echo "  \`~/dev/custom/ai/bin/gh-athena --check\`. Do NOT fall back to bare \`gh\`"
+      echo "  and do NOT create, rotate, or re-issue these credentials yourself (owner-gated)."
+    } >&2
+    exit 1
+    ;;
+  gitlab.com|*.gitlab.com|gitlab.com-*)
+    # GitLab SA PAT resolves to a real user, so `api user` IS the health probe
+    # (the opposite of GitHub — see THE TRAP). But a readable token file alone
+    # proves nothing: it could hold the owner's PAT, another account's token, or
+    # be empty (glab may then fall back to the owner's saved login). So assert
+    # the resolved identity IS the athena-amby service account and active — the
+    # same test the wrapper's own `refresh` applies — not merely that SOME user
+    # authenticated. Otherwise the preflight could pass while MRs are still
+    # opened as the owner, the exact failure this exists to stop.
+    if out="$("$GLAB_ATHENA" api user 2>&1)" \
+       && printf '%s' "$out" | jq -e '.username=="athena-amby" and .state=="active"' >/dev/null 2>&1; then
+      exit 0   # healthy AND is Athena → silent
+    fi
+    {
+      echo "forge-preflight: REFUSED — the glab-athena wrapper does not authenticate as the"
+      echo "active athena-amby service account, so any MR opened now would be silently"
+      echo "attributed to the wrong identity (the DND-203 failure). The wrapper reported:"
+      printf '  %s\n' "$out"
+      echo "Fix: mint the athena-amby service-account token into ~/.claude/gitlab-athena-token"
+      echo "  by running \`~/dev/custom/ai/bin/glab-athena refresh\`, then re-verify with"
+      echo "  \`~/dev/custom/ai/bin/glab-athena api user\`. Do NOT fall back to bare \`glab\`."
+    } >&2
+    exit 1
+    ;;
+  *)
+    echo "forge-preflight: remote host '$host' is not a managed forge (github.com/gitlab.com) — nothing to assert. OK." >&2
+    exit 0
+    ;;
+esac

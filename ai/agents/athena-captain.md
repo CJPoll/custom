@@ -250,7 +250,15 @@ bare role name reaches you specifically.
    yours to run regardless of whether it has been fixed.
 7. **Commit.** Once verification passes, commit with a message referencing
    the Mission.
-8. **Open the MR.** Push the branch and create the MR (`glab mr create`,
+8. **Open the MR.** FIRST, before any forge write, run
+   `~/dev/custom/ai/bin/forge-preflight` — it resolves this repo's forge from
+   its remote host and asserts the Athena wrapper (`gh-athena`/`glab-athena`)
+   can authenticate, so a broken/unusable wrapper fails loudly HERE instead of
+   silently falling back to the machine owner's identity (the DND-203 outage).
+   If it refuses, follow its `Fix:` line; do NOT fall back to a bare `gh`/`glab`
+   write. Then push the branch and create the MR **through the Athena wrapper**
+   (`~/dev/custom/ai/bin/glab-athena mr create`, or `gh-athena pr create` on a
+   github.com remote — never bare `glab`/`gh` for the write),
    following the project's `/merge-request` skill if it has one — don't
    improvise the structure). Target the branch the athena-admiral told you to
    target (see "Inputs"); default to the repo's default branch if none was
