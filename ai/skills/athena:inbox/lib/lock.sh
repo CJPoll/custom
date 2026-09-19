@@ -88,7 +88,11 @@ inbox_lock_acquire() {
     # The reader creates its own lock file (the contract's conformance
     # checklist forbids a WRITER from creating one, not a reader), so it may
     # need the directory. 0700, like the root.
-    mkdir -p -m 0700 "${dir}" 2>/dev/null || {
+    # fs_mkdir_0700, not `mkdir -p -m 0700`: the `-m` form modes only the
+    # LAST component, so a lock in a namespace that did not exist yet left its
+    # parents at the process umask (0755) inside a root the contract holds at
+    # 0700 throughout.
+    fs_mkdir_0700 "${dir}" || {
       inbox_fail "cannot create the directory for ${label}'s consumer lock" \
         "check that \$ATHENA_INBOX_ROOT exists and is writable (it should be mode 0700), then re-run."
       return 1

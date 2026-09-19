@@ -912,3 +912,182 @@ inbox_ack_message() {
   fi
   return 0
 }
+
+# ============================================================================
+# SEND (DND-187). The other end of the maildir conversation.
+#
+# It goes through this file for the same reason the read and the ack do: one
+# path every caller takes, so tenancy is structural rather than remembered.
+# `inbox_send_mail` cannot be pointed at another project's channel, because the
+# only way to obtain a write directory is to resolve a channel the registry
+# entry claiming THIS session's repo identity declares.
+# ============================================================================
+
+# INBOX_SEND_ATTEMPTS -- how many times a <seq> collision is retried.
+#
+# Bounded, and small. The collision it retries is a lost race with another
+# sender, which the lock below makes rare and a crash-retry makes possible; an
+# unbounded loop against a genuinely stuck destination would spin forever on a
+# path that cannot be delivered to, which is the one outcome worse than
+# refusing to send.
+INBOX_SEND_ATTEMPTS=5
+
+# inbox_require_sender <lock-path> <label>
+#
+# THE SENDER LOCK, AND WHY IT IS NOT THE CONSUMER LOCK.
+#
+# The contract requires a sender to hold "its `write` directory's lock across
+# scan, build name, deliver", because deriving <seq> is a scan-then-create with
+# no interlock and two senders scanning at once pick the same value. But it
+# MUST NOT be `<write>/.consumer.lock`, for two independent reasons:
+#
+#   * the conformance checklist forbids a WRITER creating any `*.consumer.lock`
+#     under the root -- "those are the reader's and the owner's";
+#   * under the mirrored-declaration model MY write directory IS THE PEER'S
+#     READ DIRECTORY, so `<write>/.consumer.lock` is the lock the PEER takes to
+#     read and ack its mail. Taking it to send would make an ordinary send fail
+#     whenever the peer happens to be reading, and an ordinary peer read fail
+#     whenever this side happens to be sending -- two correct operations
+#     denying each other over a lock neither is contending for.
+#
+# So sending takes `<write>/.sender.lock`, which is this side's own, is a
+# dotfile (so the peer's reader excludes it from its unread listing like any
+# other), and contends only with another sender of this identity -- which is
+# exactly the race the contract names.
+#
+# THE NOT-A-SUBAGENT CONDITION IS DELIBERATELY NOT APPLIED. That condition
+# belongs to *The designated consumer*, whose subject is ADVANCING a channel's
+# consumption state: a subagent that acked would take the offset from the
+# session that reports to Cody, and the mail would be consumed by a session
+# that finishes without telling anyone. A send advances nothing and consumes
+# nothing -- it appends to the transcript, where the record is the message
+# itself. Refusing a subagent here would block the ordinary case (an agent
+# reporting to its peer) to prevent a loss that cannot occur, and the check
+# would read as an access control it is not.
+inbox_require_sender() {
+  local lock="$1" label="${2:-this channel}"
+  inbox_lock_acquire "${lock}" "${label}" || return 1
+  return 0
+}
+
+# inbox_send_mail <channel> <slug> <to> [cwd] [re] [thread]   (body on stdin)
+#
+# Prints the delivered filename on stdout, and NEVER the body. Ordering, which
+# is the whole of this function:
+#
+#   resolve -> validate -> LOCK -> scan <seq> -> build name -> render
+#           -> stage in <write>/tmp -> link into place -> THEN bump .event
+#
+# THE DOORBELL IS BUMPED AFTER THE DELIVERY, NEVER BEFORE. The contract calls
+# this "the single most consequential ordering rule in the document", and the
+# reason is that the failure is invisible: a waiter woken before the file is
+# linked finds nothing, goes back to sleep, and THE WAKE IS LOST -- the message
+# then sits undelivered-looking until something else happens to look. The
+# guarantee readers rely on ("no settle delay, do not add a sleep") is this
+# ordering and nothing else.
+inbox_send_mail() {
+  local chan="$1" slug="$2" to="$3" cwd="${4:-.}" re="${5:-}" thread="${6:-}"
+  local resolved kind write_dir read_dir identity lock body content
+  local attempt seq name sent_at rc
+
+  resolved="$(inbox_resolve_channel "${chan}" "${cwd}")" || return 1
+  kind="$(_inbox_path kind "${resolved}")"
+  if [ "${kind}" != "maildir" ]; then
+    inbox_fail "channel \"${chan}\" is not a maildir channel, so there is nothing to send into" \
+      "send on a maildir channel. A log channel is a one-way firehose written by a producer registered server-side; this tool cannot append to one, and a message dropped there would be read by nobody."
+    return 1
+  fi
+
+  write_dir="$(_inbox_path write_dir "${resolved}")"
+  read_dir="$(_inbox_path read_dir "${resolved}")"
+  identity="$(_inbox_path identity "${resolved}")"
+
+  # Re-checked here although `descriptor_validate` already refuses an entry
+  # whose read and write are equal. This is the last point before I/O at which
+  # the two are both in scope, and the consequence of being wrong is that every
+  # message this session sends lands in the directory it reads from -- so the
+  # sender ingests its own outgoing mail and the peer never sees any of it.
+  if [ "${write_dir}" = "${read_dir}" ]; then
+    inbox_fail "channel \"${chan}\" resolves the same directory for reading and writing" \
+      "give the channel a \"write\" different from its \"read\" in \$ATHENA_INBOX_ROOT/projects/<project>.json; the peer's mirrored entry swaps the two. As declared, every message sent would be delivered into the directory this session reads."
+    return 1
+  fi
+  fs_assert_contained "$(fs_inbox_root)" "${write_dir}" || return 1
+
+  maildir_refuse_self_send "${to}" "${identity}" || return 1
+  maildir_valid_slug "${slug}" || {
+    inbox_fail "refusing to send: the slug is not a legal message slug" \
+      'use a slug matching ^[a-z0-9][a-z0-9-]*$, 1 to 48 characters, with no leading or trailing "-".'
+    return 1
+  }
+
+  # The body is read ONCE, before the lock, and re-rendered per attempt. Read
+  # inside the retry loop it would be consumed by the first attempt and every
+  # retry would render an empty message -- which `maildir_render_message`
+  # refuses, so a <seq> collision would present as "refusing to send an empty
+  # message" and the real cause would never be printed.
+  body="$(cat; printf X)"; body="${body%X}"
+
+  lock="${write_dir}/.sender.lock"
+  inbox_require_sender "${lock}" "channel \"${chan}\"" || return 1
+
+  # `rc` is seeded to a FAILURE, not to 0. Under `set -u` an unset `rc` would
+  # abort the caller, and seeded to 0 a loop that never ran (a misconfigured
+  # INBOX_SEND_ATTEMPTS) would report a successful send of nothing.
+  rc=1
+  attempt=0
+  while [ "${attempt}" -lt "${INBOX_SEND_ATTEMPTS}" ]; do
+    attempt=$((attempt + 1))
+
+    # The scan covers the live directory AND `.acked/`: acking is what empties
+    # the live one, so scanning only it would restart at 001 as soon as the
+    # peer caught up and collide with the whole transcript.
+    seq="$( { fs_list_dir_z "${write_dir}"; fs_list_dir_z "${write_dir}/.acked"; } | maildir_next_seq )"
+
+    # ONE clock read, and the filename is derived FROM the frontmatter value.
+    # Two `date` calls could straddle a second boundary and produce a message
+    # whose `sent_at` disagrees with its own filename -- which the reader
+    # refuses, permanently, as a non-conformant file, while the sender exits 0.
+    sent_at="$(fs_now_rfc3339)"
+    name="$(maildir_message_name "${sent_at}" "${seq}" "${slug}")" || { rc=1; break; }
+    content="$(printf '%s' "${body}" | maildir_render_message "${identity}" "${to}" "${sent_at}" "${re}" "${thread}"; printf X)" \
+      || { rc=1; break; }
+    content="${content%X}"
+    if [ -z "${content}" ]; then
+      # The render refused (it buffers, so a refusal emits nothing). Its own
+      # Fix: clause has already gone to stderr; failing silently here would
+      # turn that refusal into an empty successful send.
+      rc=1; break
+    fi
+
+    fs_maildir_deliver "${write_dir}" "${name}" "${content}"; rc=$?
+    case "${rc}" in
+      0) break ;;
+      2) continue ;;          # the name was taken: re-scan and rebuild
+      *) break ;;
+    esac
+  done
+
+  if [ "${rc}" -eq 2 ]; then
+    inbox_fail "gave up delivering to channel \"${chan}\" after ${INBOX_SEND_ATTEMPTS} name collisions" \
+      "another sender is using this channel's identity concurrently, or a stale file occupies every name this sender derived. List the channel's write directory, then re-run. NOTHING WAS DELIVERED -- this is a refusal, not a partial send."
+  fi
+  if [ "${rc}" -ne 0 ]; then
+    inbox_release_consumer
+    return 1
+  fi
+
+  # AFTER the delivery. Non-fatal but never silent, exactly as the ack's bump
+  # is: the message is linked and durable, so failing the send here would
+  # report a loss that did not happen -- but a bump that did not happen means
+  # the PEER IS NEVER SIGNALLED and falls back to polling, which the contract
+  # forbids. `|| true` would discard precisely that.
+  if ! fs_bump_doorbell "${write_dir}/.event"; then
+    inbox_fail "the message was delivered, but this channel's doorbell could not be rung" \
+      "the message is IN PLACE and durable -- nothing is lost. What did not happen is the signal to the peer, which will now wait until it polls. Check the write directory is writable (0700) and that its .event is a regular file, then send or ack again to ring it."
+  fi
+
+  inbox_release_consumer
+  printf '%s\n' "${name}"
+  return 0
+}

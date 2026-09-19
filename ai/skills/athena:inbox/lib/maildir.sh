@@ -6,16 +6,13 @@
 # filename grammar, frontmatter parse/validate, and the
 # "never ack your own message" rule (QA D-20 … D-25).
 #
-# What is deliberately still absent is the WRITER's half. QA M-11 and M-12 are
-# `send-mail` cases -- stage in `tmp/`, deliver without clobbering, bump the
-# doorbell after -- and this ticket ships no send entry point, so writing that
-# machinery here would mean shipping an untested writer to satisfy a row in a
-# matrix. **Later (2026-09-18):** this note previously listed `<seq>` allocation
-# among what DND-184 adds. It went the same way as the rest of the writer: it is writer-side, it had no
-# reader calling it, and the justification once given for the exception (that
-# the reader needs to understand the grammar it enumerates) is discharged by
-# `maildir_valid_message_name`, which the reader does call. It lands with
-# `send-mail`, beside the caller that gives it a reason to be correct.
+# **Later (2026-09-18):** this note previously said the WRITER's half was
+# deliberately absent -- "QA M-11 and M-12 are `send-mail` cases [...] and this
+# ticket ships no send entry point, so writing that machinery here would mean
+# shipping an untested writer to satisfy a row in a matrix", with `<seq>`
+# allocation named as going the same way. DND-187 is that ticket: `bin/send-mail`
+# exists, so the writer's half lands here under THE WRITER'S HALF banner below,
+# beside the caller that gives it a reason to be correct.
 #
 # Source order: err.sh, names.sh, then this file. `maildir_parse_frontmatter`
 # requires jq (it emits JSON); everything else is shell-only.
@@ -281,5 +278,215 @@ maildir_refuse_self_ack() {
       "this is a message YOU sent, sitting where the peer has not consumed it yet. Acking it would move your own outgoing mail into .acked/ and record it as ingested by a peer that never saw it. Ack only messages addressed to you."
     return 1
   fi
+  return 0
+}
+
+# ============================================================================
+# THE WRITER'S HALF (DND-187). Still pure: these build and check STRINGS. The
+# staging, the link(2) and the doorbell are fs.sh's, and the order they happen
+# in is the manager's.
+# ============================================================================
+
+# maildir_valid_slug <slug>
+#
+# Contract -> "Message filename": lowercase, ^[a-z0-9][a-z0-9-]*$, 1..48 bytes,
+# never leading or trailing "-".
+#
+# The reader already refuses a bad slug through `maildir_valid_message_name`,
+# and this looks like the same check twice. It is not: the reader is judging a
+# name a PEER chose, where the only available answer is "not a conformant
+# message". This judges a slug THIS session typed, where the answer can name
+# the rule that was broken before anything is written -- and a refusal a sender
+# can act on is the whole point of checking at the boundary rather than after
+# the filename has been assembled.
+maildir_valid_slug() {
+  local slug="$1"
+  [ -n "${slug}" ] || return 1
+  [[ "${slug}" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+  case "${slug}" in *-) return 1 ;; esac
+  [ "$(names_byte_length "${slug}")" -le 48 ] || return 1
+  return 0
+}
+
+# maildir_basic_stamp <rfc3339>
+#
+# 2026-09-01T23:22:15Z -> 20260901T232215 (the filename's <UTCbasic>, without
+# the literal Z the name carries separately).
+#
+# STRING SURGERY, NOT date(1). The filename stamp and the frontmatter
+# `sent_at` are two copies of one fact, and `maildir_validate_message` refuses
+# a message whose copies disagree -- so a sender that derived them from two
+# separate `date` calls could straddle a second boundary and post a message
+# the READER then refuses, forever, with the sender seeing a clean exit. One
+# `date` call reaches this function and the filename is computed FROM the
+# frontmatter value, which makes the agreement structural instead of likely.
+maildir_basic_stamp() {
+  local s="$1"
+  [[ "${s}" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z$ ]] || return 1
+  printf '%s%s%sT%s%s%s\n' \
+    "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" \
+    "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}" "${BASH_REMATCH[6]}"
+}
+
+# maildir_next_seq   (a NUL-delimited directory listing on stdin)
+#
+# One past the highest <seq> present, zero-padded to at least 3 digits. An
+# empty (or entirely non-conformant) directory yields 001.
+#
+# THE LISTING MUST INCLUDE `.acked/`. The contract is explicit -- "the next
+# value is one past the highest <seq> present in the directory INCLUDING
+# .acked/" -- and it matters because acking is what empties the live directory:
+# a sender that scanned only the unacked names would restart at 001 the moment
+# the peer caught up, and then collide with every message already in the
+# transcript. The collision is caught (delivery cannot clobber) but it would be
+# a retry loop on every send, forever, on a healthy channel.
+#
+# IT WIDENS PAST 999 RATHER THAN WRAPPING. Wrapping reorders the directory;
+# widening does not, because the fixed-width timestamp prefix is what carries
+# chronological order and <seq> only breaks ties inside one second.
+#
+# NUL-DELIMITED for the reason every other listing in this skill is: a name
+# containing a newline arrives as two entries through any line-oriented
+# encoding, and the slug is prose the PEER chose on the side of the
+# conversation the peer writes into.
+maildir_next_seq() {
+  local name rest seq max=0
+  while IFS= read -r -d '' name; do
+    maildir_valid_message_name "${name}" || continue
+    rest="${name%.md}"; rest="${rest#*Z-}"
+    seq="${rest%%-*}"
+    # 10# forces base 10: an allocated seq is zero-padded, and without it "008"
+    # is an invalid octal constant that aborts the arithmetic -- so the scan
+    # would die on precisely the names it allocated itself.
+    seq=$((10#${seq}))
+    [ "${seq}" -gt "${max}" ] && max="${seq}"
+  done
+  printf '%03d\n' "$((max + 1))"
+}
+
+# maildir_message_name <rfc3339> <seq> <slug>
+#
+# The filename, built and then RE-VALIDATED through the reader's own grammar.
+# Not belt and braces: the builder and the reader must agree about what a
+# conformant name is, and the only way to prove they do is to run the reader's
+# check over the builder's output. A name this function emits is one the peer's
+# reader accepts, or it is not emitted at all.
+maildir_message_name() {
+  local sent_at="$1" seq="$2" slug="$3" stamp name
+
+  if ! maildir_valid_slug "${slug}"; then
+    inbox_fail "refusing to send: the slug is not a legal message slug" \
+      'use a slug matching ^[a-z0-9][a-z0-9-]*$, 1 to 48 characters, with no leading or trailing "-" -- it becomes part of the filename the peer sees, and a filename is data, never a path.'
+    return 1
+  fi
+  if ! stamp="$(maildir_basic_stamp "${sent_at}")"; then
+    inbox_fail "refusing to send: the timestamp is not RFC 3339 UTC" \
+      'pass sent_at as YYYY-MM-DDTHH:MM:SSZ. The filename stamp is derived from this one value so the two copies cannot disagree.'
+    return 1
+  fi
+  case "${seq}" in ''|*[!0-9]*) inbox_fail "refusing to send: the allocated sequence number is not numeric" \
+      "this is a bug in the sender, not in your setup: re-run, and report it if it recurs."; return 1 ;;
+  esac
+
+  name="${stamp}Z-${seq}-${slug}.md"
+  if ! maildir_valid_message_name "${name}"; then
+    inbox_fail "refusing to send: the assembled filename does not match the contract's grammar" \
+      'the filename is <YYYYMMDD>T<HHMMSS>Z-<seq>-<slug>.md with seq at least 3 digits; shorten the slug or report this as a sender bug.'
+    return 1
+  fi
+  printf '%s\n' "${name}"
+}
+
+# maildir_refuse_self_send <to> <identity>
+#
+# The send-side mirror of `maildir_refuse_self_ack`, and an anti-footgun for
+# the same reason: `from` is a LABEL, not authentication, so this is a check on
+# MY OWN writes and calling it a security control would overstate it. A message
+# addressed to my own identity would be delivered into the directory the PEER
+# reads -- where the peer's reader sees a message addressed to someone else and
+# the peer's "never ack your own" filter does not fire, so it sits unread
+# forever and nothing ever says why.
+maildir_refuse_self_send() {
+  local to="$1" identity="$2"
+  [ -n "${identity}" ] || return 0
+  if [ "${to}" = "${identity}" ]; then
+    inbox_fail "refusing to send a message addressed to this channel's own identity (\"${identity}\")" \
+      "address the message to the PEER's identity -- the one on the other side of this channel, as it appears in the \"from\" of the mail you receive here. A message addressed to yourself lands in the directory the peer reads and is never claimed by anyone."
+    return 1
+  fi
+  return 0
+}
+
+# maildir_render_message <from> <to> <sent_at> <re> <thread>   (body on stdin)
+#
+# The whole message: frontmatter, blank line, body. Buffered, so a refusal
+# emits NOTHING -- a half-rendered message is a half-delivered one.
+#
+# EVERY VALUE IS REFUSED IF IT CAN BREAK THE FORMAT IT IS BEING WRITTEN INTO.
+# The frontmatter block is `key: value` lines between `---` and a matching
+# `---`, so a value carrying a newline writes a LINE, not a value -- and the
+# line it writes may be `---`. A `re:` of $'x\n---\nfrom: someone-else' would
+# close the block early and leave the rest of my own header in the body, or
+# open a second one; the reader's parser would then attribute the message to
+# whoever the injected line named. This is the same delimiter-collision class
+# that has already cost this skill four bugs, arriving from the side that
+# WRITES the delimiter rather than the side that splits on it.
+#
+# `from`, `to` and `thread` are covered by grammars that exclude a newline by
+# construction; `re` is free text by the contract (an absolute path or a URL),
+# so it is the one that needs the explicit arm.
+maildir_render_message() {
+  local from="$1" to="$2" sent_at="$3" re="${4:-}" thread="${5:-}" body
+
+  if ! names_valid_identity "${from}"; then
+    inbox_fail "refusing to send: this channel's \"identity\" is not a legal identity" \
+      'set the channel'"'"'s "identity" in $ATHENA_INBOX_ROOT/projects/<project>.json to a name matching ^[a-z0-9][a-z0-9_-]*$, at most 64 bytes.'
+    return 1
+  fi
+  if ! names_valid_identity "${to}"; then
+    inbox_fail "refusing to send: the recipient is not a legal identity" \
+      'pass --to with the peer'"'"'s identity, matching ^[a-z0-9][a-z0-9_-]*$, at most 64 bytes.'
+    return 1
+  fi
+  if ! maildir_basic_stamp "${sent_at}" >/dev/null; then
+    inbox_fail "refusing to send: the timestamp is not RFC 3339 UTC" \
+      'pass sent_at as YYYY-MM-DDTHH:MM:SSZ; it must agree with the filename stamp, and the reader refuses a message whose two copies disagree.'
+    return 1
+  fi
+  case "${re}" in
+    *$'\n'*|*$'\r'*)
+      inbox_fail "refusing to send: the \"re\" value contains a line break" \
+        "pass a single-line absolute path or URL for --re. A line break in a frontmatter value writes a LINE, not a value, and could close the header early or forge a key."
+      return 1
+      ;;
+  esac
+  if [ -n "${thread}" ] && ! maildir_valid_message_name "${thread}"; then
+    inbox_fail "refusing to send: \"thread\" is not a bare message filename" \
+      'pass --thread the BARE FILENAME of the message being replied to (<YYYYMMDD>T<HHMMSS>Z-<seq>-<slug>.md), never a path. A message name is data, and a path there would point the thread link outside the channel.'
+    return 1
+  fi
+
+  # The body is read whole and its emptiness is checked BEFORE anything is
+  # emitted. An empty body is the MISSING-input shape of this command -- a
+  # pipeline that produced nothing, an $EDITOR abandoned -- and delivering it
+  # would put an empty message in the peer's transcript, immutably, with a
+  # successful exit telling the sender their text went out.
+  body="$(cat; printf X)"; body="${body%X}"
+  if [ -z "${body//[[:space:]]/}" ]; then
+    inbox_fail "refusing to send an empty message" \
+      "pipe the body in on stdin, or use --body-file. A message is immutable once delivered, so an empty one cannot be corrected -- only followed by another message with a thread: pointer."
+    return 1
+  fi
+
+  printf -- '---\n'
+  printf 'from: %s\n' "${from}"
+  printf 'to: %s\n' "${to}"
+  printf 'sent_at: %s\n' "${sent_at}"
+  [ -n "${re}" ]     && printf 're: %s\n' "${re}"
+  [ -n "${thread}" ] && printf 'thread: %s\n' "${thread}"
+  printf -- '---\n\n'
+  printf '%s' "${body}"
+  # A trailing newline, always: the last line of the body is a line.
+  case "${body}" in *$'\n') ;; *) printf '\n' ;; esac
   return 0
 }

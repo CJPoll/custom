@@ -495,7 +495,9 @@ fs_maildir_ack() {
   fi
 
   if [ ! -d "${ack_dir}" ]; then
-    mkdir -p -m 0700 "${ack_dir}" 2>/dev/null || {
+    # Through fs_mkdir_0700 for the intermediates' sake -- see its header; the
+    # `-m` form modes only the final component.
+    fs_mkdir_0700 "${ack_dir}" || {
       inbox_fail "cannot create this channel's .acked directory" \
         "check that the read directory is writable and mode 0700; a maildir ack moves the message into .acked/ beside it."
       return 1
@@ -523,4 +525,142 @@ fs_read_message() {
   fs_assert_regular "${path}" || return 1
   [ -f "${path}" ] || return 1
   cat "${path}"
+}
+
+# --- maildir delivery (DND-187) ---------------------------------------------
+
+# fs_mkdir_0700 <dir>
+#
+# `mkdir -p` where EVERY directory it creates is 0700, not just the last one.
+#
+# `mkdir -p -m 0700 a/b/c` applies the mode to `c` ALONE; the intermediates are
+# created with the process umask, so under the usual 022 a send into a
+# namespace that did not exist yet left `agent-mail/` and `agent-mail/<peer>/`
+# at 0755 -- world-readable directories holding a private conversation, inside
+# a root the contract says is 0700 throughout. Measured, not theorised: it is
+# what the first end-to-end send of this ticket actually produced.
+#
+# `umask 077` around a plain `mkdir -p` is what covers the intermediates, and
+# the explicit chmod covers a directory that already existed with a wider mode
+# on a path this tool owns.
+fs_mkdir_0700() {
+  local dir="$1"
+  ( umask 077; mkdir -p "${dir}" ) 2>/dev/null || return 1
+  chmod 0700 "${dir}" 2>/dev/null || true
+  return 0
+}
+
+# fs_maildir_provision_write <write-dir>
+#
+# Creates ONLY the directory this identity writes into, and its `tmp/`, at
+# 0700. Idempotent and never destructive.
+#
+# IT MUST NOT CREATE THE DIRECTORY THIS IDENTITY READS FROM. The contract is
+# explicit: that is the PEER's delivery target, and fabricating it invents a
+# channel the peer never declared -- after which a reader counting it reports a
+# healthy empty inbox for a conversation whose other half does not exist.
+# Phrased as "my write directory" rather than "the peer's read directory" on
+# purpose: under the mirrored model those are the SAME directory, and the rule
+# read the other way round would forbid exactly what this function is for.
+fs_maildir_provision_write() {
+  local write_dir="$1"
+  fs_assert_not_symlink "${write_dir}" || return 1
+  if [ ! -d "${write_dir}" ]; then
+    fs_mkdir_0700 "${write_dir}" || {
+      inbox_fail "cannot create this channel's write directory" \
+        "check that \$ATHENA_INBOX_ROOT exists and is writable at mode 0700. A send creates only the directory it delivers INTO and that directory's tmp/ -- never the one it reads from, which is the peer's."
+      return 1
+    }
+  fi
+  fs_assert_not_symlink "${write_dir}/tmp" || return 1
+  if [ ! -d "${write_dir}/tmp" ]; then
+    fs_mkdir_0700 "${write_dir}/tmp" || {
+      inbox_fail "cannot create this channel's delivery staging directory (tmp/)" \
+        "check that the channel's write directory is writable at mode 0700; every message is written into tmp/ of the directory it is delivered to, then linked into place."
+      return 1
+    }
+  fi
+  return 0
+}
+
+# fs_maildir_deliver <write-dir> <name> <content>
+#
+# Stage in `tmp/`, then link into place. Status 0 = delivered; status 2 = the
+# destination NAME IS TAKEN (the caller re-derives <seq> and retries); status 1
+# = a real failure.
+#
+# WHY link(2) + unlink AND NOT rename(2). Both are atomic, and atomicity is not
+# the property at issue here -- it protects the READER from seeing a partial
+# file, and `cp` is what would break that. The property at issue is
+# NON-CLOBBERING: plain `rename(2)`/`mv` SILENTLY REPLACES an existing
+# destination, so a <seq> race or a crash-retry of a name that already exists
+# destroys the earlier message with no error anywhere. `ln` fails with EEXIST
+# instead, which is the signal the retry is built on. The contract names both
+# permitted forms (`link` then `unlink`, or `renameat2(RENAME_NOREPLACE)`);
+# shell has the first one.
+#
+# THE MODE IS SET BEFORE THE FILE BECOMES VISIBLE. `umask 077` around the write
+# rather than a chmod after the link: under the usual `umask 022` a plain
+# create is 0644, and the contract records that 23 of the messages already in
+# the deployed corpus are exactly that. A chmod after the link would leave a
+# window in which the peer could read a world-readable file; setting it in tmp/
+# closes it, because nothing but this sender looks in tmp/.
+fs_maildir_deliver() {
+  local write_dir="$1" name="$2" content="$3" staged dst
+
+  # The name is re-checked HERE, not only in the manager. This function takes a
+  # bare name and JOINS IT ONTO A DIRECTORY: a primitive that is safe only
+  # because of its current caller is not safe, and the next caller inherits
+  # nothing. Same reasoning as fs_maildir_ack's copy of this check.
+  if ! maildir_valid_message_name "${name}"; then
+    inbox_fail "refusing to deliver a message whose filename does not match the contract's grammar" \
+      'a message filename is <YYYYMMDD>T<HHMMSS>Z-<seq>-<slug>.md; a name is data, never a path.'
+    return 1
+  fi
+
+  fs_maildir_provision_write "${write_dir}" || return 1
+
+  staged="${write_dir}/tmp/${name}"
+  dst="${write_dir}/${name}"
+
+  fs_assert_regular "${staged}" || return 1
+  if ! ( umask 077; printf '%s' "${content}" > "${staged}" ); then
+    inbox_fail "cannot stage the message in this channel's tmp/ directory" \
+      "check that the channel's write directory and its tmp/ are writable at mode 0700; nothing was delivered, so nothing is half-sent."
+    return 1
+  fi
+  chmod 0600 "${staged}" 2>/dev/null || true
+
+  if [ -e "${dst}" ] || [ -L "${dst}" ]; then
+    rm -f "${staged}" 2>/dev/null || true
+    return 2
+  fi
+  if ! ln "${staged}" "${dst}" 2>/dev/null; then
+    # EEXIST is the race this is built for -- another sender took the name
+    # between the check above and this link. Anything else is a real failure,
+    # and the two are distinguished by asking the filesystem rather than by
+    # parsing an error string.
+    if [ -e "${dst}" ]; then
+      rm -f "${staged}" 2>/dev/null || true
+      return 2
+    fi
+    rm -f "${staged}" 2>/dev/null || true
+    inbox_fail "cannot deliver the staged message into this channel's write directory" \
+      "check that the write directory is a real directory at mode 0700 on the same filesystem as its tmp/ (delivery is a link(2), which cannot cross one). Nothing was delivered."
+    return 1
+  fi
+  rm -f "${staged}" 2>/dev/null || true
+
+  # THE DELIVERY IS CONFIRMED BEFORE IT IS REPORTED. `ln` returning 0 is the
+  # kernel's answer, and it is the right one -- but this whole facility exists
+  # because "it looked like it worked" is the failure mode, and a send that
+  # reports success with nothing at the destination is the worst instance of it
+  # the sender can produce. One stat is cheap insurance against every way the
+  # path could have been something other than what was meant.
+  if [ ! -f "${dst}" ]; then
+    inbox_fail "the message is not at its destination after delivery reported success" \
+      "do not assume it was sent: list the channel's write directory and check. This means the delivery path resolved somewhere other than the directory intended, which is a bug worth reporting."
+    return 1
+  fi
+  return 0
 }

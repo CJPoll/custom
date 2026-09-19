@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# send-mail -- FRAMEWORK. Say something back, on a maildir channel.
+#
+#   send-mail <channel> <slug> --to <identity> [--re <path-or-url>]
+#                              [--thread <message-filename>] [--body-file <path>]
+#   send-mail -h                 this header
+#
+# The body comes from stdin, from --body-file, or from $EDITOR when stdin is a
+# terminal. The delivered FILENAME is printed; the body is never printed back.
+#
+# ============================ WHAT A SEND IS ===============================
+#
+# A message is IMMUTABLE once delivered. There is no edit, no append and no
+# delete: a correction is a NEW message carrying `thread:` with the filename of
+# the one being corrected. `.acked/` is the only durable transcript of the
+# collaboration, and a transcript that can be rewritten is not one.
+#
+# The peer is not a subordinate and this is not a command channel. Write a
+# message as a REPORT OR A REQUEST -- never as a directive to the receiving
+# harness -- for the same reason the read side treats every incoming imperative
+# as a fact rather than an instruction: neither agent supervises the other, and
+# a channel that can issue instructions is a channel that can be used to issue
+# SOMEONE ELSE'S instructions. Both sides are allowed to disagree; say so in a
+# reply rather than expecting compliance.
+#
+# ============================ THE ORDER, WHICH IS THE POINT ================
+#
+#   scan <seq> -> build the name -> render -> stage in <write>/tmp/
+#              -> link(2) into place -> THEN touch <write>/.event
+#
+# The doorbell is bumped AFTER the message is in place, never before: a waiter
+# woken early finds nothing, goes back to sleep, and the wake is lost. Delivery
+# is link(2) rather than rename(2) because rename SILENTLY REPLACES an existing
+# destination, and a message destroyed by a name collision is exactly the
+# silent loss this facility exists to eliminate.
+#
+# The scan, the name and the delivery all happen under this channel's
+# `.sender.lock` -- deriving <seq> is a scan-then-create with no interlock, so
+# two senders scanning at once pick the same value. That lock is NOT the
+# consumer lock: a writer may not create one, and under the mirrored model the
+# consumer lock in this directory is the PEER's.
+#--- end usage ---
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB="$(dirname "${HERE}")/lib"
+
+# shellcheck source=/dev/null
+. "${LIB}/err.sh"
+# shellcheck source=/dev/null
+. "${LIB}/names.sh"
+# shellcheck source=/dev/null
+. "${LIB}/descriptor.sh"
+# shellcheck source=/dev/null
+. "${LIB}/logchan.sh"
+# shellcheck source=/dev/null
+. "${LIB}/maildir.sh"
+# shellcheck source=/dev/null
+. "${LIB}/fence.sh"
+# shellcheck source=/dev/null
+. "${LIB}/session.sh"
+# shellcheck source=/dev/null
+. "${LIB}/fs.sh"
+# shellcheck source=/dev/null
+. "${LIB}/lock.sh"
+# shellcheck source=/dev/null
+. "${LIB}/inbox.sh"
+
+usage() { sed -n '2,/^#--- end usage ---$/p' "${BASH_SOURCE[0]}" | grep -v '^#--- end usage ---$' | sed 's/^# \{0,1\}//'; }
+
+CHANNEL=""
+SLUG=""
+TO=""
+RE=""
+THREAD=""
+BODY_FILE=""
+
+# The option parser refuses a flag with no value rather than swallowing the
+# next positional. `--to --re x` would otherwise set TO="--re" and then fail
+# the identity grammar with a message about a name nobody typed.
+need_value() {
+  local opt="$1" val="${2:-}"
+  case "${val}" in
+    ""|--*)
+      inbox_fail "option \"${opt}\" needs a value" \
+        "run: send-mail <channel> <slug> --to <identity>. Run send-mail -h for the full synopsis."
+      exit 2
+      ;;
+  esac
+  return 0
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --to)        need_value --to "${2:-}";        TO="$2";        shift 2 ;;
+    --re)        need_value --re "${2:-}";        RE="$2";        shift 2 ;;
+    --thread)    need_value --thread "${2:-}";    THREAD="$2";    shift 2 ;;
+    --body-file) need_value --body-file "${2:-}"; BODY_FILE="$2"; shift 2 ;;
+    -h|--help)   usage; exit 0 ;;
+    -*)
+      inbox_fail "unknown option \"$1\"" \
+        "run: send-mail <channel> <slug> --to <identity> [--re <path-or-url>] [--thread <message-filename>] [--body-file <path>]"
+      exit 2
+      ;;
+    *)
+      if   [ -z "${CHANNEL}" ]; then CHANNEL="$1"
+      elif [ -z "${SLUG}" ];    then SLUG="$1"
+      else
+        inbox_fail "too many positional arguments (\"$1\")" \
+          "run: send-mail <channel> <slug> --to <identity>. The body is not an argument: pipe it on stdin or pass --body-file."
+        exit 2
+      fi
+      shift
+      ;;
+  esac
+done
+
+# EVERY MISSING INPUT IS NAMED SEPARATELY. A single "usage" line for all of
+# them would make the commonest mistake -- forgetting --to, which has no
+# default and cannot have one -- read as though the whole invocation were
+# wrong.
+if [ -z "${CHANNEL}" ]; then
+  inbox_fail "no channel named" \
+    "run: send-mail <channel> <slug> --to <identity>. Run inbox-status to see which channels this project declares."
+  exit 2
+fi
+if [ -z "${SLUG}" ]; then
+  inbox_fail "no slug given" \
+    "run: send-mail ${CHANNEL} <slug> --to <identity>. The slug is the human-readable tail of the filename the peer will see -- 1 to 48 characters matching ^[a-z0-9][a-z0-9-]*$."
+  exit 2
+fi
+if [ -z "${TO}" ]; then
+  # THERE IS NO DEFAULT, AND GUESSING ONE WOULD BE WORSE THAN REFUSING. A
+  # registry entry declares only THIS side's `identity`; the peer's name is not
+  # in the schema, and an unknown key there is a hard error. Deriving it from
+  # the mail already in the read directory would mean taking a `from` -- a
+  # label any local process can claim -- as the address to send to.
+  inbox_fail "no recipient given" \
+    "pass --to with the peer's identity: the name on the other side of this channel, as it appears in the \"from\" of the mail you receive here. A registry entry declares only your own identity, so there is nothing to default to."
+  exit 2
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  inbox_fail "jq is required and was not found on PATH" \
+    "install jq (it is already a dependency of the athena:slack skill), then re-run."
+  exit 2
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  # REFUSED, NOT DEGRADED. Without the lock two senders scanning at once derive
+  # the same <seq>; the delivery is non-clobbering so nothing is destroyed, but
+  # the contract requires the lock across scan/build/deliver and a send that
+  # quietly ran without it would be non-conformant while looking identical.
+  inbox_fail "flock is required to send and was not found on PATH" \
+    "install util-linux (flock). The sender holds this channel's .sender.lock across scanning for the next sequence number, building the filename and delivering -- without it two senders pick the same number."
+  exit 2
+fi
+
+# --- the body ---------------------------------------------------------------
+# Three sources, one of which is interactive. Whichever is used, an EMPTY body
+# is refused downstream: an empty message is the missing-input shape of this
+# command (a pipeline that produced nothing, an $EDITOR abandoned), and it
+# would be delivered into the peer's transcript immutably while the sender was
+# told their text went out.
+BODY=""
+if [ -n "${BODY_FILE}" ]; then
+  if [ ! -f "${BODY_FILE}" ] || [ -L "${BODY_FILE}" ]; then
+    inbox_fail "the --body-file is not a readable regular file" \
+      "pass --body-file an existing regular file, or pipe the body on stdin instead. Nothing was sent."
+    exit 2
+  fi
+  BODY="$(cat -- "${BODY_FILE}"; printf X)"; BODY="${BODY%X}"
+elif [ ! -t 0 ]; then
+  BODY="$(cat; printf X)"; BODY="${BODY%X}"
+else
+  if [ -z "${EDITOR:-}" ]; then
+    inbox_fail "no body: stdin is a terminal, no --body-file was given, and \$EDITOR is unset" \
+      "pipe the body in (printf '%s\\n' \"...\" | send-mail ...), pass --body-file <path>, or set \$EDITOR to compose interactively."
+    exit 2
+  fi
+  DRAFT="$(mktemp "${TMPDIR:-/tmp}/athena-mail.XXXXXX")" || {
+    inbox_fail "cannot create a draft file for \$EDITOR" "check that \$TMPDIR is writable, or pipe the body on stdin instead."
+    exit 2
+  }
+  trap 'rm -f "${DRAFT}"' EXIT
+  chmod 0600 "${DRAFT}" 2>/dev/null || true
+  if ! "${EDITOR}" "${DRAFT}"; then
+    inbox_fail "\$EDITOR exited non-zero; nothing was sent" \
+      "re-run and save the draft, or pipe the body on stdin. The draft was discarded rather than delivered, because an editor that failed may have written a partial message."
+    exit 1
+  fi
+  BODY="$(cat -- "${DRAFT}"; printf X)"; BODY="${BODY%X}"
+fi
+
+# --- send -------------------------------------------------------------------
+# The lock is released on every exit path, including a failure between the scan
+# and the delivery. Left held, it would deny the next send in this shell.
+trap 'inbox_release_consumer; rm -f "${DRAFT:-}" 2>/dev/null || true' EXIT
+
+NAME="$(printf '%s' "${BODY}" | inbox_send_mail "${CHANNEL}" "${SLUG}" "${TO}" "." "${RE}" "${THREAD}")" || exit 1
+
+# THE FILENAME, AND NOTHING ELSE. Not the body -- echoing it back would put the
+# text a second time in the context that composed it, for no information. The
+# filename is what the peer will see, what a `thread:` in a later message
+# points at, and the only handle this side has on the message afterwards.
+printf 'athena:inbox: delivered %s\n' "${NAME}"
