@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# admiral-report-watch — the athena-admiral's captain-report watcher loop.
+#
+# Emits one line per new/updated captain report file under a run's reports
+# directory, and forces a staleness-sweep heartbeat roughly every 45 minutes
+# even when nothing changed — so the admiral's 3b staleness rule fires on a
+# quiet run instead of only in theory.
+#
+# CONTRACT: run this under the harness `Monitor` primitive with
+# `persistent: true` — it is the sanctioned harness-wakeup path (CLAUDE.md
+# safe-wait pattern #1). Do NOT launch it via a bare `Bash` call: its own
+# `while` loop is a legitimate external poll that belongs to Monitor, not a
+# hand-rolled shell spin.
+#
+# Usage:
+#   admiral-report-watch <run-id>
+#
+# The reports directory is
+#   ~/dev/custom/ai-artifacts/coordination/<run-id>/reports
+# resolved against the custom repo, never a worktree, so it survives worktree
+# cleanup (same location the admiral gives every captain at dispatch).
+
+set -u
+
+usage() {
+  echo "Usage: admiral-report-watch <run-id>" >&2
+  echo "  Run under the harness Monitor primitive (persistent: true), not bare Bash." >&2
+  exit 2
+}
+
+case "${1:-}" in
+  ""|-h|--help) usage ;;
+esac
+
+run_id="$1"
+
+# Resolve the custom repo root (this script lives in <repo>/ai/bin).
+repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+reports_dir="$repo_root/ai-artifacts/coordination/$run_id/reports"
+seen="/tmp/admiral-$run_id-seen"
+
+mkdir -p "$reports_dir"
+: > "$seen"
+last_sweep=$(date +%s)
+
+while true; do
+  find "$reports_dir" -name '*-report.md' -newer "$seen" -print
+  touch "$seen"
+  now=$(date +%s)
+  if [ $((now - last_sweep)) -ge 2700 ]; then
+    echo "STALENESS SWEEP DUE: $(date -u +%FT%TZ) — reconcile every IN_PROGRESS Mission"
+    last_sweep=$now
+  fi
+  sleep 20
+done
