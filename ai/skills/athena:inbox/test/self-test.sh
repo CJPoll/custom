@@ -1104,6 +1104,150 @@ assert_contains "the Fix: names the key check the session can actually run" \
 assert_contains "and it repeats the tenant-privacy rule where the reader will act on it" \
   "Do not open the other files" "${out}"
 
+# `repo_key` -- the session's own identity, carried on EVERY --json answer.
+#
+# SKILL.md makes three promises about it to callers, whose whole point is that a
+# consumer needing the repo identity takes it from here instead of re-deriving
+# it with its own `git rev-parse`. A second implementation of the identity rule
+# is a second thing free to drift from the contract, and an identity that did
+# not match the way the contract says is the bug this facility has already paid
+# for twice (D-5's raw-string comparison, and DND-202's model change). So the
+# promises are asserted here, where they are owned, and not only through the
+# consumer that happens to read them today.
+# Its own case: the fixture above deliberately leaves unparseable candidates in
+# projects/, and no-match-plus-unparseable is a HARD REFUSAL with empty stdout,
+# so these assertions would read nothing and pass for the wrong reason.
+setup_case
+rkproj="$(make_repo rkproj)"
+register rkproj "${rkproj}" '{"mine":{"kind":"log","path":"mine.jsonl"}}'
+jout="$(cd "${rkproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "repo_key is the realpath of this session's git common dir" \
+  "$(cd "${rkproj}" && realpath "$(git rev-parse --git-common-dir)")" \
+  "$(jq -r '.repo_key' <<<"${jout}")"
+
+# ...on the NO-CHANNELS answer too, which is exactly when a caller telling
+# "never opted in" apart from "my entry vanished" needs it. Asserted with
+# `has`, not `// ""`: a field that is ABSENT and a field that is EMPTY are
+# different answers, and the consumer distinguishes them.
+unregistered="$(make_repo unregistered)"
+jout="$(cd "${unregistered}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "the no-channels answer still carries repo_key" "true" \
+  "$(jq -r 'has("repo_key")' <<<"${jout}")"
+assert_eq "...and it names that repo, not the last one looked at" \
+  "$(cd "${unregistered}" && realpath "$(git rev-parse --git-common-dir)")" \
+  "$(jq -r '.repo_key' <<<"${jout}")"
+
+# A WORKTREE resolves to its parent repo's key. This is the property the whole
+# tenancy model rests on -- one entry serves a repo and all its worktrees -- and
+# it had no assertion on this field.
+wt_parent="$(make_repo wtparent)"
+( cd "${wt_parent}" && git commit -q --allow-empty -m init >/dev/null 2>&1 \
+  && git worktree add -q "${wt_parent}-wt" -b wtbranch >/dev/null 2>&1 )
+if [ -d "${wt_parent}-wt" ]; then
+  assert_eq "a worktree reports its PARENT repo's key, which is what makes one entry serve both" \
+    "$(cd "${wt_parent}" && realpath "$(git rev-parse --git-common-dir)")" \
+    "$(cd "${wt_parent}-wt" && "${BIN}/inbox-status" --json 2>/dev/null | jq -r '.repo_key')"
+else
+  bad "a worktree reports its PARENT repo's key" "could not create the worktree fixture"
+fi
+
+# Empty, not absent, when there is no git repository at all -- the state a
+# consumer is told means "nothing here could ever have had channels".
+nogit="${CASE_DIR}/nogit"; mkdir -p "${nogit}"
+jout="$(cd "${nogit}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "outside a git repo the field is present..." "true" \
+  "$(jq -r 'has("repo_key")' <<<"${jout}")"
+assert_eq "...and empty, never missing" "" \
+  "$(jq -r '.repo_key' <<<"${jout}")"
+
+# `--repo-key` -- the same identity, on a path where --json has none.
+#
+# A refusal prints NOTHING on stdout, so a caller that needs the repo identity
+# exactly when this command has just refused (to name a per-project file, say)
+# cannot read it off the status document. --repo-key touches no registry, which
+# is the whole point: without it that caller reimplements the identity rule with
+# its own `git rev-parse`, and a second implementation is a second thing free to
+# drift from the contract. It CAN still exit non-zero -- when it could not tell
+# the identity (git missing, cwd gone, a dubious/corrupt repo) -- and a caller
+# must honour that exit code rather than read the empty output as "no repo".
+setup_case
+rkproj2="$(make_repo rkproj2)"
+assert_eq "--repo-key prints the same key --json carries" \
+  "$(cd "${rkproj2}" && realpath "$(git rev-parse --git-common-dir)")" \
+  "$(cd "${rkproj2}" && "${BIN}/inbox-status" --repo-key 2>/dev/null)"
+
+# It answers with NO registry at all -- the state in which every other question
+# this command can be asked has no answer.
+rm -rf "${ATHENA_INBOX_ROOT}/projects"
+assert_eq "--repo-key answers with no registry directory at all" \
+  "$(cd "${rkproj2}" && realpath "$(git rev-parse --git-common-dir)")" \
+  "$(cd "${rkproj2}" && "${BIN}/inbox-status" --repo-key 2>/dev/null)"
+( cd "${rkproj2}" && "${BIN}/inbox-status" --repo-key >/dev/null 2>&1 )
+assert_eq "--repo-key exits 0 even then" "0" "$?"
+
+# ...and when the registry is there but UNPARSEABLE, where --json hard-refuses.
+mkdir -p "${ATHENA_INBOX_ROOT}/projects"
+printf 'not json at all' > "${ATHENA_INBOX_ROOT}/projects/broken.json"
+assert_eq "--repo-key answers even where --json refuses" \
+  "$(cd "${rkproj2}" && realpath "$(git rev-parse --git-common-dir)")" \
+  "$(cd "${rkproj2}" && "${BIN}/inbox-status" --repo-key 2>/dev/null)"
+
+# Outside a git repository it is EMPTY, not missing and not an error.
+nogit2="${CASE_DIR}/nogit2"; mkdir -p "${nogit2}"
+assert_eq "--repo-key is empty outside a git repo" "" \
+  "$(cd "${nogit2}" && "${BIN}/inbox-status" --repo-key 2>/dev/null)"
+( cd "${nogit2}" && "${BIN}/inbox-status" --repo-key >/dev/null 2>&1 )
+assert_eq "--repo-key exits 0 outside a git repo" "0" "$?"
+
+# GIT ABSENT is "could not tell", NOT "no git repository". With git off PATH,
+# --repo-key must EXIT NON-ZERO (not empty-and-0), and --json must REFUSE (no
+# document, non-zero, a Fix: clause) rather than emit a healthy-looking empty
+# doc a caller reads as "not opted in, nothing here". inbox_repo_key's
+# `... || printf ''` used to collapse exactly this, and EVERY repo_key case above
+# keeps git on PATH, so none of them caught it (DND-188 merge-round critic).
+setup_case
+rkg="$(make_repo rkgit)"
+register rkgit "${rkg}" '{"mine":{"kind":"log","path":"mine.jsonl"}}'
+NOGITBIN="${CASE_DIR}/nogitbin"; mkdir -p "${NOGITBIN}"
+for b in bash sh env jq sha256sum cut realpath dirname date stat wc tail mv rm mkdir cat sed grep awk timeout printf; do
+  src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${NOGITBIN}/${b}"
+done   # git DELIBERATELY omitted
+( cd "${rkg}" && PATH="${NOGITBIN}" "${BIN}/inbox-status" --repo-key >/dev/null 2>&1 )
+assert_eq "--repo-key exits non-zero when git is absent (could not tell, not empty-and-0)" "1" "$?"
+( cd "${rkg}" && PATH="${NOGITBIN}" "${BIN}/inbox-status" --json >/dev/null 2>&1 )
+assert_eq "--json REFUSES (non-zero) when git is absent, not a healthy-empty doc" "1" "$?"
+jout="$(cd "${rkg}" && PATH="${NOGITBIN}" "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_eq "--json emits NO document when it cannot tell the repo identity" "" "${jout}"
+err="$(cd "${rkg}" && PATH="${NOGITBIN}" "${BIN}/inbox-status" --json 2>&1 >/dev/null)"
+assert_contains "...and its refusal carries a Fix: clause" "Fix:" "${err}"
+
+# A git 128 that is NOT "not a git repository" (dubious ownership, a corrupt
+# repo) is ALSO "could not tell", never a genuine non-repo -- git 128 is not a
+# synonym for "no repo". Proven with a git shim that fails the way safe.directory
+# does, because triggering the real thing needs a cross-owner repo.
+setup_case
+rkd="$(make_repo rkdubious)"
+register rkdubious "${rkd}" '{"mine":{"kind":"log","path":"mine.jsonl"}}'
+SHIMBIN="${CASE_DIR}/shimbin"; mkdir -p "${SHIMBIN}"
+for b in bash sh env jq sha256sum cut realpath dirname date stat wc tail mv rm mkdir cat sed grep awk timeout printf; do
+  src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${SHIMBIN}/${b}"
+done
+cat > "${SHIMBIN}/git" <<'GITSHIM'
+#!/usr/bin/env bash
+echo "fatal: detected dubious ownership in repository at '/x'" >&2
+exit 128
+GITSHIM
+chmod +x "${SHIMBIN}/git"
+( cd "${rkd}" && PATH="${SHIMBIN}" "${BIN}/inbox-status" --repo-key >/dev/null 2>&1 )
+assert_eq "--repo-key exits non-zero on a git 128 that is not 'not a git repository'" "1" "$?"
+( cd "${rkd}" && PATH="${SHIMBIN}" "${BIN}/inbox-status" --json >/dev/null 2>&1 )
+assert_eq "--json REFUSES on a dubious-ownership git failure, never a healthy-empty doc" "1" "$?"
+
+# Back to the failed-candidate fixture for the cases that follow.
+setup_case
+fcproj="$(make_repo fcproj)"
+register fcproj "${fcproj}" '{"mine":{"kind":"log","path":"mine.jsonl"}}'
+
 # NOT A CANDIDATE vs A CANDIDATE THAT FAILED. A stray backup or editor
 # swapfile was never a registry entry, so it says nothing -- and counting it
 # would pin the warning on every status line forever. A counter that is always

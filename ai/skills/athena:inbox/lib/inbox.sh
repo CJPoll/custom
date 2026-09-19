@@ -310,6 +310,58 @@ _inbox_count_maildir() {
     '{unread: $n, never_delivered: $never}'
 }
 
+# inbox_repo_key [cwd]
+#
+# The session's repo identity. THREE outcomes, deliberately distinct:
+#   * a non-empty key + exit 0 -- the realpath of the git common dir;
+#   * an EMPTY key + exit 0    -- the cwd is DEFINITIVELY in no git work tree
+#                                 (git ran, the cwd was reachable, git said so):
+#                                 nothing to remember, a caller stays silent;
+#   * exit NON-ZERO            -- COULD NOT TELL: git is missing, the cwd is
+#                                 gone, or realpath failed on a common dir that
+#                                 does exist. This is NOT the same as "no repo",
+#                                 and a caller must log it rather than treat an
+#                                 empty key as "nothing here". (User rule: a
+#                                 failed lookup must never look like an empty
+#                                 one.) The previous `|| printf ''` collapsed
+#                                 all three failure modes into the silent empty
+#                                 key, so a git-less environment read as "not a
+#                                 repo, nothing to report" -- caught by the
+#                                 DND-188 merge-round critic.
+# MANAGER, so that `bin/` never reaches into the adapter itself: every other
+# path in bin/ goes through an `inbox_*`, and the one exception was the exact
+# Framework-calls-an-adapter violation this facility had already moved once.
+#
+# It exists as its own entry point because a CALLER NEEDS THE IDENTITY ON THE
+# PATH WHERE THE STATUS DOCUMENT DOES NOT EXIST -- a refusal prints nothing --
+# and recomputing it there would be a second implementation of the identity
+# rule, free to drift from the contract.
+inbox_repo_key() {
+  local dir="${1:-.}" msg rc
+  command -v git >/dev/null 2>&1 || return 1          # could not tell: no git
+  ( cd "${dir}" 2>/dev/null ) || return 1             # could not tell: cwd gone
+  # Ask git directly, capturing its message. Exit 0 => inside a repo: resolve the
+  # common dir. Exit non-zero must be CLASSIFIED, because git 128 is NOT a synonym
+  # for "not a repo": it is also "detected dubious ownership" (safe.directory),
+  # a corrupt `.git`, and other fatals. Only git's own "not a git repository"
+  # is a genuine non-repo (empty key, exit 0); EVERYTHING else is "could not
+  # tell" and must surface as non-zero so the caller logs it rather than reading
+  # an empty key as "no repo, nothing here".
+  #
+  # LC_ALL=C so the message match is against git's C-locale text, not a
+  # translated one -- otherwise, under a non-English locale, an ordinary non-git
+  # directory would be misread as "could not tell" and warned about everywhere.
+  msg="$( ( cd "${dir}" 2>/dev/null && LC_ALL=C git rev-parse --git-common-dir ) 2>&1 1>/dev/null )"; rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    fs_git_common_dir "${dir}" 2>/dev/null || return 1  # in a repo, but realpath failed
+    return 0
+  fi
+  case "${msg}" in
+    *"not a git repository"*) return 0 ;;             # genuine non-repo: empty key, success
+    *) return 1 ;;                                    # could not tell
+  esac
+}
+
 # inbox_status_json [cwd]
 # {"channels":[{"name":…,"kind":…,"new":…}…]} -- counts only, for every channel
 # this session owns. An empty channel list is a legitimate, silent result.
@@ -325,13 +377,44 @@ _inbox_count_maildir() {
 # without killing a multi-channel run". The refusal for the broken channel has
 # already gone to stderr with its `Fix:` clause; the overall exit stays
 # non-zero, so the failure is still loud.
+#
+# The document also carries `repo_key`: the realpath of the session's git common
+# dir, or "" when the cwd is DEFINITIVELY in no git repository. There is no third
+# document value for "could not tell" (git missing, cwd gone, a dubious-ownership
+# or corrupt repo): on that outcome this function REFUSES -- non-zero, no
+# document -- rather than emit an empty one a caller reads as "not opted in,
+# nothing here". That is the same "an empty result is the only fatal" discipline
+# the command already applies, and it is what stops the DND-188 collapse from
+# reappearing one layer down: a `repo_key: null` beside `channels: []` would just
+# be another silent-empty answer with no reader, so we make the count itself fail
+# and let the caller treat it as the failed poll it is.
+# It is here because this is the layer that already computes it, and a CALLER
+# THAT NEEDS IT MUST NOT RECOMPUTE IT -- a second implementation of the identity
+# rule is a second thing that can drift from the contract, and the one bug this
+# facility has already paid for twice is exactly an identity that did not match
+# the way the contract says. It is the session's OWN key, which the caller
+# already knows because it is standing in it, so it discloses nothing about any
+# other tenant. It is emitted on BOTH branches, including the not-opted-in one,
+# because a caller distinguishing "never opted in" from "my entry vanished"
+# needs it precisely when there is no entry.
 inbox_status_json() {
-  local entry rc chan kind resolved counts schema_csv out="[]" failed=0
+  local entry rc chan kind resolved counts schema_csv out="[]" failed=0 repo_key
+
+  # "" + exit 0 is a genuine non-repo and counts normally (zero channels). A
+  # NON-ZERO is "could not tell": we cannot resolve the registry entry either,
+  # so there is no count to emit -- REFUSE, so the caller treats it as a failed
+  # poll rather than a healthy-empty one.
+  if ! repo_key="$(inbox_repo_key "${1:-.}")"; then
+    inbox_fail "could not determine this session's repo identity, so no channels can be resolved or counted" \
+      "check that git is on PATH, the cwd still exists, and the repository is not flagged for dubious ownership (git config --global --add safe.directory)"
+    return 1
+  fi
 
   entry="$(inbox_entry "${1:-.}")"; rc=$?
   [ "${rc}" -ne 2 ] || return 1
   if [ -z "${entry}" ]; then
-    jq -n -c --argjson f "$(inbox_failed_candidates)" '{channels: [], failed_candidates: $f}'
+    jq -n -c --argjson f "$(inbox_failed_candidates)" --arg r "${repo_key}" \
+      '{channels: [], failed_candidates: $f, repo_key: $r}'
     return 0
   fi
   descriptor_validate "${entry}" || return 1
@@ -374,8 +457,8 @@ inbox_status_json() {
       --argjson c "${counts}" '. + [{name: $n, kind: $k} + $c]')"
   done < <(descriptor_channel_names "${entry}")
 
-  printf '%s' "${out}" | jq -c --argjson f "$(inbox_failed_candidates)" \
-    '{channels: ., failed_candidates: $f}' || return 1
+  printf '%s' "${out}" | jq -c --argjson f "$(inbox_failed_candidates)" --arg r "${repo_key}" \
+    '{channels: ., failed_candidates: $f, repo_key: $r}' || return 1
   # The JSON is emitted FIRST and the failure is signalled by the status, so a
   # caller gets the counts it CAN have plus an honest non-zero.
   [ "${failed}" -eq 0 ]

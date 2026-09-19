@@ -29,7 +29,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-REGISTRY="${REPO_DIR}/ai/hooks/registry.json"
+# HOOKS_REGISTRY_FILE is a TEST SEAM, like HOOKS_SETTINGS_FILE beside it: the
+# self-test needs a registry naming a hook that is deliberately not on disk, and
+# the alternative is a case that re-implements norm() and asserts on its own
+# copy instead of on the shipped code.
+REGISTRY="${HOOKS_REGISTRY_FILE:-${REPO_DIR}/ai/hooks/registry.json}"
 CHECKER="${REPO_DIR}/ai/bin/check-hooks-registered"
 
 # Hook commands must be wired at the MAIN checkout's path, NEVER a worktree's:
@@ -61,6 +65,12 @@ while [ $# -gt 0 ]; do
     --check)    ACTION="check" ;;
     --remove)   ACTION="remove" ;;
     --self-test) ACTION="self-test" ;;
+    # Internal: print this tool's normalized form of one path. Used by the
+    # self-test to compare against check-hooks-registered's, driving both
+    # SHIPPED implementations rather than copies of them.
+    # Consume the value only if there IS one, so `--norm` as the last argument
+    # does not `shift` an empty stack and trip `set -e` with a bare exit.
+    --norm) ACTION="norm"; NORM_ARG="${2:-}"; if [ $# -ge 2 ]; then shift; fi ;;
     --dry-run)  DRY_RUN=1 ;;
     -h|--help)  usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -71,15 +81,59 @@ done
 command -v python3 >/dev/null 2>&1 || { echo "error: python3 required. Fix: install python3 or wire hooks by hand from ai/hooks/registry.json." >&2; exit 2; }
 [ -f "$REGISTRY" ] || { echo "error: registry not found at $REGISTRY. Fix: restore ai/hooks/registry.json from git." >&2; exit 2; }
 
-# Merge (or remove) the registry hooks into a settings file. Emits, on stdout,
-# a one-line-per-change report; exits 10 (no change) or 0 (changed) via the
-# trailing marker the caller reads. All JSON work is done in python for safety.
-apply() {
-  local mode="$1"        # "install" | "remove"
-  local settings="$2"
-  local dry="$3"
-  REPO_DIR="$HOOKS_REPO_DIR" REGISTRY="$REGISTRY" SETTINGS="$settings" MODE="$mode" DRY="$dry" python3 - <<'PY'
+# The path normalizer AND the merge/remove logic, as ONE python program with a
+# SINGLE norm(). `apply` runs the whole program; `norm_path` runs it with
+# NORM_ONLY=1, which prints norm(NORM_IN) and exits BEFORE any registry/settings
+# read — so the agreement case drives the EXACT norm() the installer uses, not a
+# second copy of it. (setup-hooks and check-hooks-registered stay two
+# INDEPENDENT norm()s that must agree; what this removes is the duplicate copy
+# that used to live inside setup-hooks itself — which let the agreement case
+# pass green while the shipped install-path norm() drifted, the critic finding
+# of the DND-188 merge round.)
+MERGE_PY="$(cat <<'PY'
 import json, os, sys
+
+def norm(cmd):
+    # Resolve symlinks so two spellings of the same script compare equal — on
+    # this machine ~/.claude/hooks is a symlink to the repo's ai/hooks/, so a live
+    # entry `~/.claude/hooks/foo.sh` is the SAME file as `<repo>/ai/hooks/foo.sh`.
+    # Without this, a raw-string compare treats them as distinct and install
+    # appends a duplicate wiring (double-firing the guard).
+    #
+    # THE DIRECTORY IS RESOLVED EVEN WHEN THE FILE DOES NOT EXIST. Falling back
+    # to the literal string for a missing file made the comparison depend on
+    # something irrelevant to it — whether the script happens to be on disk
+    # right now. Two cases hit that: a hook that is ALREADY WIRED but whose file
+    # is temporarily absent (a moved checkout, a half-finished edit) was seen as
+    # unwired and duplicated, which is the exact double-firing this function
+    # exists to prevent; and a hook being ADDED on a branch, where `--self-test`
+    # resolves the repo dir to the MAIN checkout by design, so the file is not
+    # there yet and a correct registry entry reported a false failure. Resolving
+    # only `dirname` answers the question actually being asked — are these two
+    # spellings the same location — and needs no file to do it.
+    if not cmd:
+        return cmd
+    try:
+        if os.path.exists(cmd):
+            return os.path.realpath(cmd)
+        head, tail = os.path.split(cmd)
+        # A missing HEAD is left alone, exactly as check-hooks-registered's
+        # `norm` leaves it: realpath would resolve it against the CWD and
+        # invent an absolute path for a command that names no location this
+        # process can see. The two must agree, or drift is reported by one tool
+        # and not the other.
+        if not head or head == os.curdir or not os.path.isdir(head):
+            return cmd
+        return os.path.join(os.path.realpath(head), tail)
+    except OSError:
+        return cmd
+
+# NORM_ONLY: print this tool's norm() of NORM_IN and exit, BEFORE reading any
+# registry or settings file. This is the entry the agreement case reaches
+# through `--norm`, so it drives the very function `apply` uses below.
+if os.environ.get("NORM_ONLY"):
+    sys.stdout.write(norm(os.environ.get("NORM_IN", "")) + "\n")
+    sys.exit(0)
 
 repo   = os.environ["REPO_DIR"]
 reg    = json.load(open(os.environ["REGISTRY"]))["hooks"]
@@ -88,18 +142,6 @@ mode   = os.environ["MODE"]
 dry    = os.environ["DRY"] == "1"
 
 def absscript(rel): return os.path.join(repo, rel)
-
-def norm(cmd):
-    # Resolve symlinks so two spellings of the same script compare equal — on
-    # this machine ~/.claude/hooks is a symlink to the repo's ai/hooks/, so a live
-    # entry `~/.claude/hooks/foo.sh` is the SAME file as `<repo>/ai/hooks/foo.sh`.
-    # Without this, a raw-string compare treats them as distinct and install
-    # appends a duplicate wiring (double-firing the guard). Falls back to the
-    # literal string when the path does not exist, so it never raises.
-    try:
-        return os.path.realpath(cmd) if os.path.exists(cmd) else cmd
-    except OSError:
-        return cmd
 
 try:
     with open(path) as f: settings = json.load(f)
@@ -159,9 +201,33 @@ with open(path, "w") as f:
     f.write("\n")
 print("MARKER:changed")
 PY
+)"
+
+# Merge (or remove) the registry hooks into a settings file. Emits, on stdout,
+# a one-line-per-change report and a trailing MARKER line the caller reads.
+# All JSON work is done in python for safety, through the SINGLE norm() above.
+apply() {
+  local mode="$1"        # "install" | "remove"
+  local settings="$2"
+  local dry="$3"
+  REPO_DIR="$HOOKS_REPO_DIR" REGISTRY="$REGISTRY" SETTINGS="$settings" MODE="$mode" DRY="$dry" python3 -c "$MERGE_PY"
+}
+
+# norm_path <path>  -- print the SHIPPED norm() of one path, by running the
+# SAME program `apply` runs, with NORM_ONLY=1 (which prints norm(NORM_IN) and
+# exits before any settings read). Exists so the agreement case drives the
+# installer's OWN norm(), not a copy of it: a case that re-implements the thing
+# it pins cannot fail for the reason it names, which is exactly how the previous
+# version of that case passed green while the two norm()s had drifted.
+norm_path() {
+  NORM_ONLY=1 NORM_IN="$1" python3 -c "$MERGE_PY"
 }
 
 case "$ACTION" in
+  norm)
+    norm_path "${NORM_ARG:-}"
+    ;;
+
   check)
     exec "$CHECKER"
     ;;
@@ -198,6 +264,51 @@ PY
     rs="$(apply install "$slink" 0)"
     echo "$rs" | grep -q "MARKER:nochange" || { echo "  FAIL symlink-spelled hooks should be seen as wired (no duplicate install)"; ok=0; }
     HOOKS_SETTINGS_FILE="$slink" "$CHECKER" >/dev/null 2>&1 && echo "  ok   symlink-spelled hooks recognized as wired" || { echo "  FAIL check should pass on symlink-spelled hooks"; ok=0; }
+    # ...and the same, for a hook whose FILE IS NOT THERE, driving the SHIPPED
+    # code path rather than a copy of norm(). `norm` resolves the directory
+    # rather than the whole path, so "are these two spellings the same
+    # location" does not depend on whether the script is on disk right now.
+    # Without that, a wired hook whose file is temporarily absent reads as
+    # unwired and install DUPLICATES it (double-firing the guard on restore),
+    # and a hook being added on a branch reddens this suite against the main
+    # checkout it is not in yet. The case above only covers this incidentally,
+    # and stops covering it the moment every registry hook exists in main -- so
+    # this one uses a registry of its own naming a hook that is deliberately
+    # not there.
+    ghostreg="${tmp}/ghost-registry.json"
+    printf '%s\n' '{ "hooks": [ { "event": "SessionStart", "matcher": "", "script": "ai/hooks/definitely-not-on-disk.sh" } ] }' > "$ghostreg"
+    ghost="${tmp}/settings-ghost.json"
+    HLINK="$hlink" SLINK="$ghost" python3 - <<'PY2'
+import json, os
+cmd = os.path.join(os.environ["HLINK"], "definitely-not-on-disk.sh")
+json.dump({"hooks": {"SessionStart": [
+    {"matcher": "", "hooks": [{"type": "command", "command": cmd}]}]}},
+    open(os.environ["SLINK"], "w"), indent=4)
+PY2
+    rg="$(REGISTRY="$ghostreg" apply install "$ghost" 0)"
+    echo "$rg" | grep -q "MARKER:nochange" \
+      && echo "  ok   a symlink-spelled hook whose file is absent is still seen as wired" \
+      || { echo "  FAIL an absent hook file must not make install duplicate the wiring"; ok=0; }
+    HOOKS_REGISTRY_FILE="$ghostreg" HOOKS_SETTINGS_FILE="$ghost" "$CHECKER" >/dev/null 2>&1 \
+      && echo "  ok   the checker agrees on an absent hook file" \
+      || { echo "  FAIL setup-hooks and check-hooks-registered must agree on an absent file"; ok=0; }
+    # The two norm()s must agree on the input class that SEPARATES them, not
+    # only on the absolute paths the installer happens to write. A `.`-headed
+    # relative command is that class: one implementation returned the literal
+    # string and the other invented a CWD-absolute path, while both comments
+    # asserted step-lock as an invariant. Both sides here are the SHIPPED
+    # implementations, reached through each tool's --norm: a case that compares
+    # two copies cannot fail for the reason it names, which is how the previous
+    # version of this case passed while the divergence was live.
+    norm_agrees=1
+    for probe in "./definitely-not-on-disk.sh" "definitely-not-on-disk.sh" \
+                 "/nonexistent/dir/x.sh" "${hlink}/definitely-not-on-disk.sh" \
+                 "${HOOKS_REPO_DIR}/ai/hooks/registry.json"; do
+      py="$("$0" --norm "$probe")"
+      rb="$("$CHECKER" --norm "$probe")"
+      [ "$py" = "$rb" ] || { echo "  FAIL the two norm() implementations disagree on [$probe]: setup-hooks=[$py] checker=[$rb]"; ok=0; norm_agrees=0; }
+    done
+    [ "$norm_agrees" -eq 1 ] && echo "  ok   setup-hooks and check-hooks-registered normalize a path identically"
 
     # Worktree safety: the wired commands must point at the MAIN checkout, so
     # they survive `wt` cleanup of whatever worktree this was run from.

@@ -34,7 +34,10 @@ require "shellwords"
 
 AI_DIR       = File.expand_path("..", __dir__)          # .../ai
 REPO_DIR     = File.expand_path("..", AI_DIR)           # repo root (may be a worktree)
-REGISTRY     = File.join(AI_DIR, "hooks", "registry.json")
+# HOOKS_REGISTRY_FILE is a TEST SEAM, matching setup-hooks': the two tools must
+# be checkable against the same synthetic registry, or "they agree" is asserted
+# only where both happen to read the real one.
+REGISTRY     = ENV.fetch("HOOKS_REGISTRY_FILE") { File.join(AI_DIR, "hooks", "registry.json") }
 
 # The MAIN checkout for this repo. Hooks are always wired at the main checkout's
 # path, because a worktree path vanishes when the worktree is cleaned up. But
@@ -76,11 +79,30 @@ end
 # compare equal. On this machine ~/.claude/hooks is a symlink to the repo's
 # ai/hooks/, so a live entry spelled `~/.claude/hooks/foo.sh` is the SAME file as
 # the registry's `<repo>/ai/hooks/foo.sh` — comparing raw strings falsely reports
-# drift (and makes setup-hooks append a duplicate). Realpath both sides. Falls
-# back to the literal string when the path does not exist (e.g. a retired hook or
-# a command that is not a bare path), so this never raises.
+# drift (and makes setup-hooks append a duplicate).
+#
+# The DIRECTORY is resolved even when the file does not exist, and it must stay
+# in step with setup-hooks' own `norm` — these two answer the same question and
+# a divergence between them is drift reported by one tool and not the other.
+# Falling back to the literal string made the comparison depend on whether the
+# script is on disk right now, which is irrelevant to "are these two spellings
+# the same location": a wired hook whose file is temporarily absent read as
+# drift, and a hook being added on a branch read as drift against the main
+# checkout it is not in yet. Resolving `dirname` needs no file. A command that
+# is not a bare path has no directory component and is returned unchanged.
 def norm(cmd)
-  File.exist?(cmd) ? File.realpath(cmd) : cmd
+  return cmd if cmd.nil? || cmd.empty?
+  return File.realpath(cmd) if File.exist?(cmd)
+
+  dir = File.dirname(cmd)
+  # A missing directory, or a command that is not a path at all, is left alone:
+  # realpath would resolve it against the CWD and invent an absolute path for a
+  # command that names no location this process can see. setup-hooks' `norm`
+  # makes the same choice; the two must agree, or drift is reported by one tool
+  # and not the other.
+  return cmd if dir == "." || !File.directory?(dir)
+
+  File.join(File.realpath(dir), File.basename(cmd))
 rescue StandardError
   cmd
 end
@@ -216,7 +238,14 @@ def self_test
   ok ? 0 : 1
 end
 
-if ARGV.include?("--self-test")
+# Internal: print this tool's normalized form of one path, so setup-hooks'
+# self-test can compare the two SHIPPED implementations rather than copies of
+# them. The step-lock between them is asserted as an invariant in both comment
+# blocks; an invariant nothing checks is the thing the next reader relies on.
+if (i = ARGV.index("--norm"))
+  puts norm(ARGV[i + 1].to_s)
+  exit 0
+elsif ARGV.include?("--self-test")
   exit self_test
 else
   exit run

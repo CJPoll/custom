@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # inbox-status -- FRAMEWORK. How many unread messages does this project have?
 #
-#   inbox-status           one line per channel with anything waiting
-#   inbox-status --json    the same counts as one JSON object
-#   inbox-status -h        this header
+#   inbox-status             one line per channel with anything waiting
+#   inbox-status --json      the same counts as one JSON object
+#   inbox-status --repo-key  this session's repo identity, and nothing else
+#   inbox-status -h          this header
 #
 # COUNTS ONLY. No body, no subject, no sender's text, no filename, no token.
 #
@@ -27,6 +28,22 @@
 # configured to write it, so "nobody registered the writer" and "nothing
 # arrived" look identical on disk and must not look identical here. A healthy
 # channel that is merely empty still prints nothing.
+#
+# --repo-key prints the session's repo identity, in THREE outcomes and the exit
+# code is load-bearing: the realpath of the git common dir + exit 0; an empty
+# line + exit 0 when the cwd is DEFINITIVELY in no git repository; or a non-zero
+# exit when it COULD NOT TELL (git missing, cwd gone, realpath failed, a
+# dubious/corrupt repo). It touches no registry, which is the point: a CALLER
+# THAT NEEDS THE IDENTITY WHEN --json HAS JUST REFUSED (to name a per-project
+# file, say) can ask here rather than recompute it with its own `git rev-parse`
+# -- but it MUST honour the exit code, because an empty line read as "no repo"
+# when the truth is "could not tell" is the collapse this facility just removed.
+# `repo_key` on the --json document answers the same question on the success
+# path, as the realpath or "". It is NEVER null: on the could-not-tell outcome
+# --json refuses outright (non-zero, no document), because a command that cannot
+# name the repo cannot resolve or count its channels either -- so that outcome
+# is a refusal, and --repo-key (honouring its exit code) is how a caller learns
+# the identity when --json has refused.
 #
 # Not opting in is not a fault: a cwd in no git repository, or a repo with no
 # registry entry, prints nothing and exits 0. A MALFORMED registry entry is a
@@ -67,16 +84,34 @@ LIB="$(dirname "${HERE}")/lib"
 usage() { sed -n '2,/^#--- end usage ---$/p' "${BASH_SOURCE[0]}" | grep -v '^#--- end usage ---$' | sed 's/^# \{0,1\}//'; }
 
 JSON=0
+REPO_KEY_ONLY=0
 for arg in "$@"; do
   case "${arg}" in
     --json) JSON=1 ;;
+    --repo-key) REPO_KEY_ONLY=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
-      inbox_fail "unknown argument \"${arg}\"" "run: inbox-status [--json]"
+      inbox_fail "unknown argument \"${arg}\"" "run: inbox-status [--json|--repo-key]"
       exit 2
       ;;
   esac
 done
+
+# Answered before the jq check and before anything reads the registry: this is
+# the one question that still has an answer when everything else has failed,
+# and a caller asks it precisely then.
+if [ "${REPO_KEY_ONLY}" -eq 1 ]; then
+  # An empty key with exit 0 is a genuine non-repo cwd. A NON-ZERO from
+  # inbox_repo_key is "could not tell" (git missing, cwd gone, realpath failed)
+  # and MUST propagate -- swallowing it with `|| printf ''` was exactly the
+  # collapse that let a git-less environment read as "no repo, nothing to
+  # report" (DND-188 merge-round critic).
+  if key="$(inbox_repo_key ".")"; then
+    printf '%s\n' "${key}"
+    exit 0
+  fi
+  exit 1
+fi
 
 if ! command -v jq >/dev/null 2>&1; then
   inbox_fail "jq is required and was not found on PATH" \

@@ -541,6 +541,537 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
 
 ---
 
+## 2026-09-19 — DND-188: the SessionStart hook
+
+- **Domain:** athena:inbox (the notice slice)
+- **Date:** 2026-09-19
+- **Code under test:** `ai/hooks/athena-inbox-poll.sh`, plus its two wiring
+  sites — `ai/hooks/registry.json` and `EXEMPT` in `ai/bin/check-guard-messages`
+- **Suite run:** `bash ai/hooks/athena-inbox-poll.self-test.sh </dev/null`
+  (no network; every case gets a fake `$HOME`, a private `ATHENA_INBOX_ROOT`
+  and its own `git init` repo under one `mktemp -d`; ~5s wall)
+- **Baseline:** `VERDICT: PASS (170 cases)` (91 at the first pass; 21 added
+  after the sabotage run, 46 more across eight critic rounds — see *The four
+  zeros* and *What the critic found that sabotage did not*). **These totals are
+  the pre-merge state.** The two merge-forward rounds (DND-185, then
+  DND-187) grew the suites to **176 hook / 543 skill cases** and added
+  **S43–S50** — see the `**Later (2026-09-19)**` notes below, which carry the
+  final figures; this headline and table are left at their original values, per
+  the dated-record convention.
+- **Runner:** 42 mutations, one at a time, full suite after each, restored by
+  `cp` from a backup taken before the run. S24–S42 were added after the review
+  rounds (see *What the critic found that sabotage did not*). **42 mutations,
+  42 reddened, no measured zeros** — S1–S35 in one full pass, S36–S38 in a
+  second (after a sibling captain's run clobbered the shared runner, below),
+  S39–S42 in a third. (S43–S50 followed in the merge rounds; see the Later
+  notes.)
+
+The mutations were applied by an exact-substring replace that asserts the
+anchor occurs **exactly once** before writing, as DND-183's run did. That
+discipline earned its keep twice here: one anchor reported
+`ANCHOR NOT UNIQUE (0)` (an indentation mismatch) rather than silently
+skipping, and the runner's own first pass reported **all 23** anchors absent —
+`restore()` used a bare `for f`, and because bash locals are **dynamically
+scoped** that overwrote `run_one`'s `f`, pointing every mutation at the suite
+file instead of the file under test. A runner that mutates the wrong file
+produces 23 green runs, which reads as "this suite is dead".
+
+### What the suite proves
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S1 | the attempt marker is stamped AFTER the work instead of before | 3 | `FAIL  F-7 a failing run DOES stamp the attempt marker` |
+| S2 | a FAILED poll also stamps the success marker | 10 | `FAIL  F-5 the precondition holds: no success marker exists` |
+| S3 | a clean run no longer clears the warn marker | 1 | `FAIL  F-8 a succeeding run clears the warn marker` |
+| S4 | the warning is rate-limited by the POLL marker, not its own | 8 | `FAIL  F-5 a never-successful setup warns on the first attempt` |
+| S5 | staleness judged on the ATTEMPT marker instead of success | 6 | `FAIL  F-5 a never-successful setup warns on the first attempt` |
+| S6 | an absent marker counts as FRESH rather than stale | 7 | `FAIL  F-5 a never-successful setup warns on the first attempt` |
+| S7 | the health clause NAMES the channels instead of counting them | 1 | `FAIL  R8 a channel that cannot be counted is surfaced, not shown as zero` |
+| S8 | the never-delivered clause is dropped | 2 | `FAIL  R8 a channel that has NEVER received anything is surfaced` |
+| S9 | the unreadable-registry-entry clause is dropped | 2 | `FAIL  R12 an unreadable registry entry is surfaced` |
+| S10 | the stdin read is unbounded (`timeout 2 cat` → `cat`) | 1 | `FAIL  the stdin read is bounded — an open pipe does not hang session start` |
+| S11 | the reason log is never trimmed | 1 | `FAIL  the reason log is bounded to 200 lines` |
+| S12 | zero unread announces itself every session | 6 | `FAIL  F-3 zero unread produces no stdout at all` |
+| S13 | `--dry-run` writes the real marker family | 2 | `FAIL  --dry-run writes no attempt marker` |
+| S14 | the private `umask 077` is dropped | 3 | `FAIL  the attempt marker is created 0600` |
+| S15 | any non-empty stdout counts as a successful poll | 4 | `FAIL  R9 non-empty but unparseable output does NOT stamp success` |
+| S16 | the notice names `read-inbox` whether or not it exists | 2 | `FAIL  R11 with read-inbox absent the notice says so` |
+| S17 | the markers move into the `athena-slack-*` namespace | 4 | `FAIL  F-10 the hook shares no marker path with the athena-slack-* family` |
+| S18 | the warning is emitted as a bare text line beside the JSON | 8 | `FAIL  F-9 the stale warning travels as one well-formed JSON object` |
+| S19 | the notice reports the newest message body alongside the count | 2 | `FAIL  F-2 no substring of a message body reaches the notice` |
+| S20 | the hook's entry is removed from `registry.json` | 2 | `FAIL  F-11 the hook is registered on SessionStart with the "" matcher` |
+| S21 | the `EXEMPT` classification is removed from `check-guard-messages` | 1 | `FAIL  F-12 the hook is EXEMPT with a stated reason, not carrying a fake deny path` |
+| S22 | a `UserPromptSubmit` entry is added for the hook | 2 | `FAIL  F-11 no UserPromptSubmit entry is registered for any hook` |
+| S23 | `inbox-status`'s stderr is relayed into the hook's reason log | 1 | `FAIL  R10 the wrapped command's stderr does not reach the reason log` |
+| S24 | the never-delivered clause drops its `.kind == "log"` filter | 2 | `FAIL  R13 an unwritten-to maildir is not announced as a missing producer` |
+| S25 | the wrapped command loses its `timeout` ceiling | 2 | `FAIL  R14 a hanging inbox-status does not hang session start` |
+| S26 | the unreadable-entry `Fix:` collapses back into the generic one | 3 | `FAIL  R15 the unreadable-entry Fix names something actually actionable` |
+| S27 | the two warnings share one rate-limit marker again | 2 | `FAIL  R8 a fresh OUTAGE warning does not suppress a HEALTH warning` |
+| S28 | a non-opted-in repo counts as a successful poll again | 5 | `FAIL  F-4 a non-opted-in repo does NOT stamp success` |
+| S29 | a non-opted-in repo clears the other project's warn markers again | 2 | `FAIL  F-4 a non-opted-in repo does not clear the outage marker` |
+| S30 | the vanished-entry warning is dropped | 4 | `FAIL  R16 a vanished entry is announced, not silently treated as opt-out` |
+| S31 | the per-project seen marker is never recorded | 4 | `FAIL  R16 a vanished entry is announced, not silently treated as opt-out` |
+| S32 | the vanished-entry warning shares the `$HOME`-level health rate limit | 1 | `FAIL  R16 another project's health warning does not silence this one` |
+| S33 | the inflated-count caveat moves back behind the rate limit | 1 | `FAIL  R17 the inflated count still carries its caveat` |
+| S34 | a key that cannot be hashed disables the detector in silence | 1 | `FAIL  R16 a key that cannot be hashed is LOGGED, not silently shared` |
+| S35 | `inbox_status_json` stops naming the session's repo | 5 | `FAIL  R16 a vanished entry is announced, not silently treated as opt-out` |
+| S36 | the other-projects clause claims the doubt is unresolved again | 2 | `FAIL  R12 an unreadable registry entry is surfaced` |
+| S37 | a repair never clears the vanished-entry rate limit | 2 | `FAIL  R16 a repair clears the vanished-entry rate limit` |
+| S38 | an ABSENT repo key collapses into the quiet no-git-repo case | 1 | `FAIL  R16 an inbox-status without --repo-key is logged, not silently shared` |
+| S39 | the marker family goes back to being shared across projects | 5 | `FAIL  F-8 a healthy SIBLING PROJECT does not silence this project's outage warning` |
+| S40 | the health warning goes back to a shared rate limit | 3 | `FAIL  F-8 project A's health warning does not silence project B's` |
+| S41 | an `inbox-status` without `--repo-key` degrades in silence | 1 | `FAIL  R16 an inbox-status without --repo-key is logged, not silently shared` |
+| S42 | `inbox-status` stops answering `--repo-key` | 16 | `FAIL  F-6 a stale success plus a FRESH warn marker is silent` |
+
+### The four zeros
+
+Four mutations ran **green** on the first pass. All four were real gaps, and
+all four are closed — the table above shows each reddening after the fix.
+
+**S15 — the shape check on `inbox-status`'s answer.** Every fixture in the
+suite reached the failing path through *empty* stdout, so replacing the entire
+`type == "object" and (.channels | type == "array")` test with `true` changed
+nothing. The claim it protects is this epic's standing question in its sharpest
+form: an answer that cannot be **read** is not an answer of **zero**. The
+difference is invisible on stdout — both are silent — and visible only in the
+success marker, which is what lets the staleness warning eventually fire. New
+cases **R9** drive non-empty-but-unusable output (unparseable, and well-formed
+JSON of the wrong shape) plus a control proving the same harness does count a
+good document.
+
+**S9 — the unreadable-registry-entry clause.** `projects/` is multi-tenant; an
+entry that fails to parse is dropped from the candidate set, and the session
+whose entry it was then looks *exactly* like a session that never opted in.
+`inbox-status` reports the drop as `failed_candidates` and the hook renders it,
+but nothing asserted that. New case **R12**, which also pins the disclosure
+rule: the clause counts and does not name, because every other entry belongs to
+a different tenant.
+
+**S16 — the `read-inbox` switch.** `F-1`'s `contains "read-inbox"` passes on
+*either* branch, because the not-installed sentence names the command too. The
+assertion looked like it protected the switch and protected nothing. New case
+**R11** asserts both branches by their distinguishing text.
+
+**S23 — the wrapped command's discarded stderr.** `inbox-status` refuses on
+stderr with paths and channel names in the clause, and the hook discards that
+stream rather than relaying it. No fixture put anything identifiable on stderr,
+so a mutation that logged it was green. New case **R10** puts the sentinel
+there.
+
+Closing S15, S16 and S23 needed a fixture the suite deliberately lacked: a
+**stub `inbox-status`**, because the real one never produces non-empty-unusable
+stdout, never has a `read-inbox` beside it (that ships later), and never puts a
+recognisable string on stderr. The stub lives in a copied repo tree under the
+case's tmpdir — the hook resolves its wrapped command from its own
+`BASH_SOURCE`, so a copy of the hook picks up whatever is placed beside it, with
+no `PATH` games and no mutation of the real skill. Every other case still runs
+against the real `inbox-status`.
+
+### What the run found in the fixtures, not the code
+
+**A leak canary on one row of a fixture tests one row, not the claim.** S19
+appended `tail -n1` of the channel file to the notice — a message body in the
+pre-prompt position, the single thing `F-2` exists to forbid — and ran
+**green**, because `plant_log_lines` put the sentinel on its *first* line and
+`tail -n1` took the second. Every planted line now carries it.
+
+**A fixture can be rejected by a grammar and still look like a fixture.** The
+first draft of `R12` named its malformed entry `ZQXSENTINELDONOTLEAK.json`. The
+registry's project-name grammar is lowercase-only, so that file was not a
+*failed* candidate — it was not a candidate at all, and the case asserted
+nothing while appearing to assert everything. It now uses a lowercase variant.
+
+That second finding has a **consequence outside this ticket, recorded here
+rather than fixed here**: a registry entry whose *filename* is not a legal
+project name is invisible to `inbox-status` — not counted in
+`failed_candidates`, not reported anywhere — so a project registered as
+`Foo.json` is dark in exactly the way this epic has already paid for twice. It
+belongs to the registry reader (DND-208 / `lib/descriptor.sh`), not to the
+hook, and is raised to the athena-admiral in `dnd-188-report.md`.
+
+### What the critic found that sabotage did not
+
+The `athena-diff-critic` round found a **correctness** bug that 23 mutations
+had not: the never-delivered health clause had no `.kind == "log"` filter.
+
+`never_delivered` means opposite things for the two channel kinds. For a log
+channel it is a genuine fault -- an unregistered producer and an empty channel
+are identical on disk. For a **maildir** it is normal: the contract
+(`ai/contracts/athena-inbox.md`) makes the read directory something the tool
+that *sends* creates, so a declared peer mailbox nobody has written to yet is a
+healthy channel waiting for its first message. `bin/inbox-status`'s own renderer
+filters on `.kind == "log"` for precisely this reason; the hook's clause had
+diverged from it.
+
+The consequence was not cosmetic. `HEALTH_TEXT` would be permanently non-empty
+for any project declaring a peer mailbox, so the branch that clears
+`WARN_MARKER` on a clean run could never execute -- and the next **real** outage
+would inherit a fresh warn marker from a non-fault and be rate-limited into
+silence by it. That is the S21 failure the hook's own header argues against,
+reached through a different door.
+
+**Why no mutation found it.** Sabotage can only redden a claim some fixture
+exercises, and the suite's single maildir fixture (`plant_mail`) *creates*
+`from-peer/` before running -- so `never_delivered` was never true for a maildir
+anywhere in 116 cases. The gap was in the fixture space, not the mutation set,
+which is the one class a mutation run is structurally blind to. Closed by
+**R13**, with a control asserting a never-delivered *log* channel still warns,
+and pinned by S24 above.
+
+The second critic round found three more of the same species -- claims no
+fixture reached, so no mutation could reach them either:
+
+**The wrapped command had no ceiling.** The hook bounds its stdin read with
+`timeout 2 cat` and states why (an inherited open pipe never sees EOF), but ran
+`inbox-status` unbounded. `inbox-status` scans channel files with no timeout of
+its own, so a very large `.jsonl` or an inbox root on a stale mount blocks
+SessionStart for as long as it takes -- the same hazard class, on the other of
+the hook's two blocking inputs, with `timeout` already in hand. Now
+`STATUS_TIMEOUT_SECONDS` (10s); an expiry is just another failed poll, which the
+existing path already handles. **R14**, pinned by S25.
+
+**One marker rate-limited two concerns.** `WARN_MARKER` gated both "the poll is
+not working" and "the poll works and found a fault downstream". Those have
+different owners and very different lifetimes: a benign health fault (a declared
+log channel whose producer was never registered) is a state the reader may live
+with for weeks, re-stamping every six hours, and a real outage beginning shortly
+after one of those stamps was rate-limited into silence by a warning about
+something else. That is this file's own S14 doctrine violated from the inside.
+Split into `athena-inbox-last-warn` and `athena-inbox-last-health-warn`. **R8**
+gains both directions of the independence claim -- the door 24 mutations left
+open, because S4 only ever exercised poll-vs-warn, never warn-vs-warn. Pinned by
+S27.
+
+**A `Fix:` that could not answer the question it promised.** The health warning
+ended "run inbox-status from this project to see which" for every clause. True
+for the channel-level ones; false for `failed_candidates`, because inbox-status
+is counts-only for tenant privacy and can never say *which* registry entry
+failed to parse -- naming them would enumerate other tenants. An agent following
+it re-ran a command that returned the same number. That is the defect **R11**
+exists to prevent, arriving through the guard-message convention instead of the
+read-step pointer. The clause now names what the reader can actually check, and
+says outright that inbox-status cannot narrow it. **R15**, pinned by S26, with a
+companion case proving the channel-level clauses kept their pointer rather than
+both being flattened into one vague sentence.
+
+**The worst of them, found in the third round: "not opted in" was recorded as a
+SUCCESSFUL POLL**, which made the outage warning this hook exists to raise
+structurally unreachable.
+
+`inbox-status` answers `{"channels":[],"failed_candidates":0}` and exits 0 for
+any project with no matching registry entry — correctly, per the contract: *not
+opting in is not a fault*. The hook's `POLL_OK` test asked only whether
+`.channels` was an array, so that answer stamped `SUCCESS_MARKER` and cleared
+both warn markers. But the marker family is **per-`$HOME`** while the poll
+outcome is **per-cwd**, and the hook is registered with the `""` matcher — it
+runs in *every* repo on the machine. One session in walt_ui or gen_saas
+refreshed the success marker, so the six-hour staleness test could never come
+due, however broken the opted-in project's poll was. The same door made a
+**deleted or clobbered registry entry** — the silent-dark failure `CLAUDE.md`
+names for this registry — look exactly like never having opted in, in the one
+piece of state that could have told the difference.
+
+The fix is a third state. Not opted in is **neither** success nor failure:
+nothing stamped, nothing cleared, nothing printed, one line in the log. The
+opted-in project's markers are then only ever moved by that project's own
+sessions, which is what makes them mean anything — and a project whose entry
+vanishes stops stamping success, so its own next session crosses the staleness
+window and warns.
+
+**Why 27 mutations missed it.** `F-4c` was the only no-entry fixture, and it
+asserted stdout, rc and stderr — everything about that path *except* the marker
+state, which is the one thing it changes. And no case in the suite ever ran two
+different repos against one fake `$HOME`, so the cross-project mechanism had no
+fixture at all. Again a hole in the fixture space rather than the mutation set.
+Closed by the new `F-4` marker assertions and a two-repos-one-`$HOME` case;
+pinned by S28 and S29.
+
+**Round four closed the other half of the same door, which round three had
+opened without noticing.** Making "not opted in" stamp nothing stopped the hook
+*lying* about success; it did not make the resulting absence of success
+**speak**. A project whose registry entry is deleted or clobbered answers
+`{"channels":[]}` exactly like one that never opted in, so the hook stamped
+nothing, cleared nothing and printed nothing — forever. The staleness warning is
+reachable only under `POLL_OK=0`, and that path is `POLL_OK=1`. Worse, the
+record written in round three asserted the fix had this property ("a project
+whose entry vanishes stops stamping success, so its own next session crosses the
+staleness window and warns"), which the code did not do — **a dated record
+claiming a behaviour the code lacks is worse than no record**, and it is
+corrected here rather than quietly dropped.
+
+The fix needs memory that `inbox-status` cannot have, because it cannot know a
+project's history: a **per-project** marker, `athena-inbox-seen/<hash>`, stamped
+whenever a session does resolve channels. Channels once, none now, is then a
+distinguishable state and gets a warning naming both repairs — restore the
+entry, or delete the marker if the project was retired on purpose. The identity
+is the contract's own key, hashed so the filename neither is a path nor
+discloses which projects this machine has registered. (**As first written, this
+round took that key by sourcing the skill's `lib/fs.sh` and calling
+`fs_git_common_dir` in a subshell. Round five replaced that** — it is a
+Framework-bucket file calling an adapter directly, and a second computation of
+the identity rule free to drift from the contract. The key now arrives as
+`repo_key` on the status document. The sentence is corrected here rather than
+left standing, because a reader grepping `fs_git_common_dir` lands on this
+paragraph first.) Its
+rate limit sits beside it, per project: a fault about one project must not be
+silenced by a warning about another. **R16**, pinned by S30–S32.
+
+**And a count known to be wrong was being announced as fact.**
+`state_unreadable` means the channel was re-read from offset 0 with empty
+seen-sets, so `new` includes messages already acked. The caveat lived in
+`HEALTH_TEXT` → `WARN_TEXT`, which the warn rate limit blanks — so for up to a
+whole six-hour window the pre-prompt notice read "12 new in slack" with nothing
+marking it as inflated. The rate limit on the *warning* was laundering the
+*number*. The caveat now rides the number, where no rate limit can strip it,
+the way `bin/inbox-status` attaches its own per-channel `Fix:` unconditionally.
+**R17**, pinned by S33.
+
+**Round five: the detector could disable itself in silence, and it reached
+below the skill's public surface to do it.** Two findings on one mechanism.
+
+The per-project key was derived in the hook by sourcing `lib/fs.sh` and calling
+`fs_git_common_dir`. That is a **Framework-bucket file calling an adapter
+directly** — `lib/fs.sh`'s own header reads "SIDE EFFECTS. The only file I/O in
+the skill, plus the one `git` call" — and it left two independent computations
+of the identity rule free to drift from each other and from the contract, which
+is the bug this facility has already paid for twice. `inbox_status_json` now
+emits `repo_key` on **both** branches (including the not-opted-in one, which is
+exactly when a caller needs it), and the hook reads it out of the public
+surface like every other field. Pinned by S35.
+
+And every way of failing to derive that marker name disabled R16 **silently**:
+no `sha256sum`, a failed sourcing, an unhashable key — all produced an empty
+marker path, whose `stamp` no-ops, so the vanished-entry warning could never
+fire and nothing anywhere said so. An inert detector is indistinguishable from a
+healthy project, and this is the detector whose whole purpose is to make a
+silent-dark registry speak. Each failure now logs a `Fix:`; the one case that
+legitimately has nothing to remember — a cwd in no git repository — stays quiet,
+and a case asserts that too, so the logging cannot be satisfied by logging
+always. Pinned by S34.
+
+**Rounds seven and eight, the last three findings.** The
+`failed_candidates` clause rendered **only** on the branch where its own wording
+was false: `inbox_entry` makes no-match-plus-unparseable-candidate a hard
+refusal (empty stdout, exit 1), which reaches the hook as a *failed poll*, so by
+the time a health clause can render at all this project's entry has been found
+and the unreadable ones provably belong to somebody else. It said "one of which
+may be this project's" anyway, and every R12/R15 fixture called `register` first
+— so no fixture ever visited the branch the wording was written for, and nothing
+could contradict it. Reworded, and the hard-refusal branch now has a case of its
+own. **S36.**
+
+`SEEN_WARN_MARKER` was exempt from the S21 clear-on-success discipline the other
+two markers follow, so an entry restored and clobbered *again* inside the window
+was silenced by a warning about the fault that had already been repaired —
+skipping the rule at the one failure with no diff and no undo. The existing
+rate-limit case passed either way; a case now asserts the **repair** re-arms it.
+**S37.**
+
+And `.repo_key // ""` collapsed *absent* into *empty*. Empty means "no git
+repository here", which legitimately has nothing to remember and stays quiet;
+absent means the `inbox-status` beside this hook predates the field — reachable
+through hook/skill version skew, since `settings.json` wires one tree's hook
+path and `STATUS_BIN` resolves from that tree — and it silently made the whole
+vanished-entry detector inert while looking exactly like a healthy project. That
+is the round-five claim ("every way of failing to derive that marker name is
+LOGGED") escaping through its last door. **S38.**
+
+**The review floor found the last and largest instance: the marker family was
+still `$HOME`-global, so ONE PROJECT'S SESSION MOVED ANOTHER PROJECT'S
+MARKERS.** Round three had fixed this for a repo that never opted in (the
+`OPTED_IN` third state) and stopped there. Between two *registered* projects it
+was untouched, and reproducible on this machine today, whose registry holds
+several entries: a healthy sibling refreshing the shared success marker kept a
+broken project's outage warning six hours away **forever** — the same
+structurally-unreachable warning the third state was added to close, reached
+from a sibling tenant instead of an unrelated repo — and one project's health
+warning rate-limited another's.
+
+Every fixture the suite had for this used a second repo that was *unregistered*,
+which is the case that was already fixed, so no mutation could have reddened it.
+The whole family — success, both warn markers, the seen marker — is now keyed by
+a hash of the project identity; only the attempt marker and the reason log stay
+global, because they answer "did this machine attempt, and why did it stop",
+which is not a question about any one project.
+
+That fix needed the identity **on the failure path**, where the status document
+does not exist — a refusal prints nothing. Rather than let the hook recompute
+it (the drift this design refuses), `bin/inbox-status` grew **`--repo-key`**: it
+reads no registry, cannot fail, and answers the one question that still has an
+answer when everything else has failed. The degraded route — an `inbox-status`
+too old to know the option — falls back to the shared names and **logs a `Fix:`
+first**, because silently sharing this state is the defect being closed. S39–S42.
+
+**The floor's nits, two of which had a wrong failure direction.**
+`STALE_SECONDS` and `WARN_INTERVAL_SECONDS` were read from the environment
+without the `case ''|*[!0-9]*)` guard every other number in the file carries.
+Unguarded, `[ "${age}" -ge "abc" ]` errors, `marker_is_stale` reads that error
+as **not stale**, and a typo in an environment variable therefore **suppressed**
+the warning instead of failing loudly — the wrong direction for the one
+mechanism whose job is to break a silence. And `F-4a`'s stripped `PATH` omitted
+`dirname`, without which the hook cannot locate itself at all, so that case was
+measuring a different failure than the one it names.
+
+**And the last critic round, on the machinery the previous one added.** Three
+more, all of the shape this whole record is about — a failure that is silent or
+mis-stated rather than loud:
+
+- **The attempt marker was no longer stamped first.** The per-project identity
+  block runs an external command under a timeout, and it had been inserted
+  *above* the stamp, so a run killed mid-resolution left no record that this
+  machine attempted — the only question that global marker exists to answer,
+  while the file's own header still claimed "FIRST, before anything that can
+  fail". Moved back above it.
+- **A `--repo-key` TIMEOUT was diagnosed as version skew.** The command itself
+  cannot fail, so a non-zero status was read as "this `inbox-status` predates
+  the option" — but the `timeout` wrapping it can expire, which is the entire
+  reason that wrapper exists (an inbox root on a slow or stale mount). The
+  reader was sent to compare checkouts over a transient condition, and the
+  session dropped into the shared marker family on it. Exit 124/137 now has its
+  own reason and its own `Fix:`.
+- **A third route to an empty hash logged nothing.** `sha256sum` present but its
+  output unusable (a missing `cut`, say) fell through the hex guard silently
+  into the shared-marker fallback. The suite's degraded case stripped
+  `sha256sum` *and* `cut` together, so it always exited through the logged
+  guard and could not see it.
+
+The round also caught the *test* added one round earlier: the "absent hook file"
+case in `scripts/setup-hooks --self-test` defined **its own copy of `norm`** and
+asserted on the copy, so reverting the real one left it green — a case that
+cannot fail for the reason it names. It now drives `apply install` against a
+synthetic registry (a `HOOKS_REGISTRY_FILE` seam, matching the existing
+`HOOKS_SETTINGS_FILE` one) and asserts `MARKER:nochange`, plus that the checker
+agrees. Verified by reverting each `norm` in turn: both reverts now redden it.
+And the two `norm`s, whose step-lock the comment asserts as an invariant, had
+**diverged as written** on a relative command whose head does not exist — one
+returned the literal string, the other invented a CWD-relative absolute path.
+They now make the same choice.
+
+**The final round, on the fixes the round before it made.** Three of the four
+were the same violation or the same false claim recurring one layer down:
+
+- **`bin/inbox-status --repo-key` called `fs_git_common_dir` directly.** Round
+  five had moved exactly this violation — Framework calling an adapter — off the
+  hook; the fix relocated it into `bin/` rather than removing it. Every other
+  path in `bin/` goes through an `inbox_*`; this one did not. Now
+  `inbox_repo_key`, a manager, which `inbox_status_json` also uses, so the key
+  has one derivation and one caller shape.
+- **The two `norm`s still diverged**, on a `.`-headed relative command: one
+  returned the literal string, the other a CWD-absolute path — precisely the
+  divergence the previous round's record claimed to have fixed and both comment
+  blocks assert as an invariant.
+- **And the case pinning that invariant compared two COPIES of `norm`**, not the
+  shipped ones, so it stayed green while the divergence was live. This is the
+  second time in two rounds the same case failed for this reason. Both tools now
+  expose their own `--norm`, the case drives those, and it was verified by
+  reintroducing the divergence: `FAIL the two norm() implementations disagree on
+  [./definitely-not-on-disk.sh]`.
+
+**Later (2026-09-19) — the merge round found the `--norm` claim above was still
+false.** Merging `origin/main` (DND-185) forward, the standing diff-critic
+caught that `setup-hooks --norm` did **not** drive the shipped install `norm()`:
+it ran a *second copy* inside `norm_path`'s own `PYNORM` heredoc, while
+`apply`/install used the `norm()` in the `PY` heredoc. So sabotaging the
+install-path `norm()` left the agreement case green — the third time this case
+passed for the wrong reason. Truly fixed now: `setup-hooks` carries **one**
+`norm()`, in a single `$MERGE_PY` program; `apply` runs it, and `--norm` runs
+the same program with `NORM_ONLY=1` (which prints `norm(NORM_IN)` and exits
+before any settings read). Re-verified by sabotage on the single shipped
+`norm()` — dropping its `head == os.curdir` guard reddened the case:
+`FAIL the two norm() implementations disagree on [./definitely-not-on-disk.sh]:
+setup-hooks=[…/definitely-not-on-disk.sh] checker=[./definitely-not-on-disk.sh]`.
+(Caveat left standing, not re-run: row **S35** was measured when the hook read a
+`.repo_key` JSON field; the hook now calls `inbox-status --repo-key`, so that
+mutation's reddening may now belong to the skill's own `test/self-test.sh`
+rather than this hook suite.)
+
+**Later (2026-09-19) — the same merge round found `inbox_repo_key` swallowed
+"could not tell" as an empty key.** The critic caught that `inbox_repo_key` was
+`fs_git_common_dir … 2>/dev/null || printf ''` — so **git missing, the cwd gone,
+and realpath failing all collapsed to the same empty key with exit 0**, which
+the hook reads as "a cwd in no git repository, nothing to report" and stays
+silent. That is the exact missing-vs-unknown conflation the ticket's standing
+review question forbids, and the user rule *a failed lookup must never look like
+an empty one*. **Every existing degraded-key case kept `git` on the stripped
+PATH**, so none of them exercised it — a measured zero the sabotage run had
+missed because its fixtures never dropped `git`. Fixed: `inbox_repo_key` now
+returns **non-zero on "could not tell"** and empty-with-exit-0 **only** for a
+cwd `git` itself reports as no work tree; `bin/inbox-status --repo-key`
+propagates the non-zero instead of swallowing it; the hook logs
+`inbox-status could not name this project's repo identity …` on that path and
+falls back to the shared markers, never stamping success. New case **S43** —
+*a real `inbox-status`, `git` stripped from PATH* — reddens under the old body:
+`FAIL R16 git absent is 'could not tell', LOGGED not silently shared` (the old
+body logged instead `no registry entry declares a channel … left untouched`,
+i.e. false-healthy silence). Restored: `VERDICT: PASS (173 cases)`.
+
+**Later (2026-09-19) — two further critic rounds carried the fix to its root.**
+The `--repo-key` fix above was necessary but not sufficient; the following
+landed on top, all reddened (hook suite 173 → 176, skill suite 538 → 543):
+- **"Could not tell" still exited as "not opted in" on the deciding path.** The
+  hook never reads `repo_key`; on a git-less session `--json` still answered a
+  healthy-looking `{channels:[], …}` and the hook logged the FALSE line *"no
+  registry entry declares a channel … nothing to poll here"* while staying
+  silent. Root fix: `inbox_status_json` now **REFUSES** (non-zero, no document,
+  a `Fix:` clause) when `inbox_repo_key` cannot tell — it cannot resolve the
+  entry, so it cannot count — and the hook then treats it as a **failed poll**
+  (`POLL_OK=0`), logging *"no usable status document"* and **surfacing the
+  outage warning** rather than silence. `--json` therefore has no `null`
+  `repo_key`: the field is a string or `""`, and could-not-tell is a refusal.
+  **S48–S50** (hook, git stripped): the false "nothing to poll" line is absent,
+  the failed-poll line present, the outage warning emitted — all `RED` if
+  `inbox_status_json` is reverted to emit an empty doc instead of refusing.
+- **git exit 128 was treated as "not a repo" wholesale.** 128 is also
+  dubious-ownership (`safe.directory`) and a corrupt `.git`, which are
+  could-not-tell. `inbox_repo_key` classifies by git's own **`LC_ALL=C`**
+  message (locale-pinned, so a translated "not a git repository" cannot flip an
+  ordinary non-repo into could-not-tell): only *"not a git repository"* is a
+  genuine non-repo; everything else is non-zero. **S44/S45** (git stripped) and
+  **S46/S47** (a `git` shim exiting 128 with a dubious-ownership message):
+  `--repo-key` exits non-zero and `--json` refuses — `RED` under the old
+  `|| printf ''`, and `RED` again when the classification arm is widened to
+  treat every 128 as a non-repo.
+- **Stale "cannot fail" contract text** in `SKILL.md`, `bin/inbox-status`, the
+  hook and this suite's own comment — corrected in place (living documents), so
+  the next consumer is not taught to ignore `--repo-key`'s exit code.
+- A latent `setup-hooks --norm` **double-`shift` under `set -e`** (a bare exit,
+  no `Fix:`, when `--norm` is the last argument) was guarded.
+The dubious-ownership branch is proven by shim only; the real `safe.directory`
+trigger needs a cross-owner repo (root), so it is not fixtured live.
+
+The fourth: an entry that is **present but declares an empty `channels`** is
+byte-identical to a missing one — `descriptor_validate` accepts a zero-key
+object, and `inbox_status_json` then emits the same `{"channels":[]}`. The hook
+cannot tell them apart, so the vanished-entry `Fix:` named two repairs, neither
+of which was the actual one. It now names all three, and a case raises the
+notice from an emptied entry.
+
+**Left as raised, not fixed:** nothing prunes `athena-inbox-seen/`, so a repo
+that is deleted or moved leaves its markers behind forever. Harmless — a stale
+hash is never consulted again — but there is no reaper and nothing documents
+one.
+
+### A harness hazard this run measured
+
+**The session scratchpad is shared between concurrently running captains**, and
+a sibling's `sabotage.sh` overwrote this one's mid-ticket, at the same path. The
+overwritten runner then executed against *this* worktree under a `nohup`, and
+the only reason nothing was corrupted is that the sibling's runner also installs
+a restoring `trap`. Two agents, one directory, generic filenames. A sabotage
+runner writes mutations into a real tree, so this is the one class of shared file
+where a collision can silently corrupt another agent's work. Namespace the
+runner (`<scratchpad>/<ticket>/`), and treat a generic filename in the session
+scratchpad as unsafe.
+
+### Not exercised by this run
+
+The hook is a thin wrapper; everything below it — name grammar, descriptor
+validation, dedupe, offsets, maildir rules — belongs to DND-183's run above.
+Still unexercised anywhere: the fence renderer, the consumer lock, the atomic
+state writer, the doorbell waiter, and `read-inbox` itself.
+
+---
+
 # DND-187 — `bin/send-mail`, the writer's half
 
 **39 mutations, 34 red, 5 measured green** — in the FINAL state of the branch.
