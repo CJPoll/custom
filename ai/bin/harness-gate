@@ -42,6 +42,8 @@ CHECKS = [
   ["harness-event self-test",   %w[ai/hooks/harness-event.self-test.sh]],
   ["check-generic-skills",      %w[ai/bin/check-generic-skills]],
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
+  ["check-inbox-registry",      %w[ai/bin/check-inbox-registry]],
+  ["inbox-registry self-test",  %w[ai/inbox/test/self-test.sh]],
   ["check-guard-messages",      %w[ai/bin/check-guard-messages]],
   ["harness-eval",              %w[ai/bin/harness-eval]],
   ["critic-review self-test",   %w[ai/bin/critic-review --self-test]],

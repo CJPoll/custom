@@ -1,0 +1,217 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# setup-inbox-registry — materialise the Athena Inbox tenancy registry
+# ($ATHENA_INBOX_ROOT/projects/*.json) from the committed source of truth,
+# ai/inbox/registry.json.
+#
+# The registry is untracked machine-local state, and the contract defines a
+# missing entry as zero channels, exit 0, no error — so a lost entry is a
+# silently dead inbox with no diff and no `git` undo. This installer is the
+# recovery path (ai/contracts/athena-inbox.md -> Provisioning), and
+# ai/bin/check-inbox-registry is what notices you need it.
+#
+# It MERGES, it never rewrites the directory. Concretely: it touches only the
+# files ai/inbox/registry.json declares. Any other entry in projects/ — another
+# project's, one you are trialling by hand — is not read, not moved, and not
+# removed. A full rewrite is exactly what silently dropped two hooks on
+# 2026-09-17, which is the outage this whole triad answers. A declared file
+# whose content differs is backed up beside itself as <name>.json.bak-<stamp>
+# before being rewritten, so a hand edit is always recoverable; that suffix
+# fails the registry filename grammar, so the backup is "not a candidate" under
+# the contract's *Finding the entry* and no reader will ever load it.
+#
+# Idempotent: re-running reports "already installed" and writes nothing.
+# Entries are written 0600 inside a 0700 directory, as the contract requires.
+#
+# Usage:
+#   setup-inbox-registry [--install] [--dry-run]  install/repair declared entries (default)
+#   setup-inbox-registry --check                  assert the live registry matches (read-only)
+#   setup-inbox-registry --remove [--dry-run]     remove the declared entries (backed up first)
+#   setup-inbox-registry --self-test              run ai/inbox/test/self-test.sh
+#   setup-inbox-registry -h | --help
+#
+# Environment: ATHENA_INBOX_ROOT (default ~/.local/share/athena);
+# ATHENA_INBOX_REGISTRY overrides the committed source of truth (tests).
+#
+# Exit codes: 0 ok · 1 usage error or a failed self-test · 2 the committed
+# source of truth is missing or malformed
+
+require "fileutils"
+require "json"
+require_relative "../ai/inbox/lib/registry"
+
+CHECKER = File.join(InboxRegistry.repo_dir, "ai", "bin", "check-inbox-registry")
+SUITE   = File.join(InboxRegistry.repo_dir, "ai", "inbox", "test", "self-test.sh")
+
+# The help text IS the leading comment block — one source, so `-h` can never
+# drift from what the file says about itself.
+def usage
+  File.readlines(__FILE__)
+      .drop_while { |l| !l.start_with?("# setup-inbox-registry") }
+      .take_while { |l| l.start_with?("#") }
+      .map { |l| l.sub(/\A# ?/, "") }
+      .each { |l| puts l }
+end
+
+def stamp
+  Time.now.strftime("%Y%m%d-%H%M%S")
+end
+
+# Copy a file beside itself before we replace or delete it. Returns the backup
+# path (nil when there was nothing to back up).
+def backup(path, dry:)
+  return nil unless File.file?(path)
+
+  bak = "#{path}.bak-#{stamp}"
+  FileUtils.cp(path, bak, preserve: true) unless dry
+  bak
+end
+
+def ensure_dir(path, dry:, changes:)
+  unless File.directory?(path)
+    changes << "+ #{path}/ (created 0700)"
+    FileUtils.mkdir_p(path, mode: 0o700) unless dry
+    FileUtils.chmod(0o700, path) unless dry
+    return
+  end
+
+  mode = InboxRegistry.mode_of(path)
+  return if mode == InboxRegistry::PROJECTS_DIR_MODE
+
+  changes << format("~ %s/ (mode %04o -> 0700)", path, mode)
+  FileUtils.chmod(0o700, path) unless dry
+end
+
+def write_entry(path, text, dry:)
+  return if dry
+
+  File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |f| f.write(text) }
+  FileUtils.chmod(0o600, path)
+end
+
+# Never install an entry the reader would refuse to load. An entry that passes
+# here and fails there is a channel that is configured, installed, and dark —
+# which is the whole failure class this tooling exists to close — so the
+# validator that decides it is the reader's own (see InboxRegistry).
+def refuse_invalid_entries(entries)
+  bad = entries.filter_map do |p|
+    r = InboxRegistry.reader_rejection(p["entry"])
+    "#{p['file']}: #{r}" if r
+  end
+  return if bad.empty?
+
+  warn "setup-inbox-registry: refusing to install — #{bad.size} declared entr#{bad.size == 1 ? 'y is' : 'ies are'} invalid:"
+  bad.each { |b| warn "  - #{b}" }
+  raise InboxRegistry::Error,
+        "ai/inbox/registry.json declares an entry the athena:inbox reader refuses"
+end
+
+def install(entries, dry:)
+  refuse_invalid_entries(entries)
+  changes = []
+  ensure_dir(InboxRegistry.root, dry: dry, changes: changes)
+  ensure_dir(InboxRegistry.projects_dir, dry: dry, changes: changes)
+
+  entries.each do |p|
+    file = p["file"]
+    path = InboxRegistry.entry_path(file)
+    text = InboxRegistry.render(p["entry"])
+
+    unless File.file?(path)
+      changes << "+ #{file} (created)"
+      write_entry(path, text, dry: dry)
+      next
+    end
+
+    same = begin
+      JSON.parse(File.read(path)) == p["entry"]
+    rescue JSON::ParserError
+      false
+    end
+
+    if same
+      mode = InboxRegistry.mode_of(path)
+      next if mode == InboxRegistry::ENTRY_MODE
+
+      changes << format("~ %s (mode %04o -> 0600)", file, mode)
+      FileUtils.chmod(0o600, path) unless dry
+      next
+    end
+
+    bak = backup(path, dry: dry)
+    changes << "~ #{file} (replaced; backup #{File.basename(bak)})"
+    write_entry(path, text, dry: dry)
+  end
+
+  changes
+end
+
+def remove(entries, dry:)
+  changes = []
+  entries.each do |p|
+    file = p["file"]
+    path = InboxRegistry.entry_path(file)
+    next unless File.file?(path)
+
+    bak = backup(path, dry: dry)
+    changes << "- #{file} (removed; backup #{File.basename(bak)})"
+    FileUtils.rm_f(path) unless dry
+  end
+  changes
+end
+
+def main(argv)
+  action = "install"
+  dry = false
+
+  argv.each do |arg|
+    case arg
+    when "--install" then action = "install"
+    when "--check" then action = "check"
+    when "--remove" then action = "remove"
+    when "--self-test" then action = "self-test"
+    when "--dry-run" then dry = true
+    when "-h", "--help" then usage; return 0
+    else
+      warn "setup-inbox-registry: unknown argument: #{arg}"
+      warn "Fix: use one of --install (default), --check, --dry-run, --remove, --self-test, -h."
+      return 1
+    end
+  end
+
+  case action
+  when "check"
+    exec(CHECKER)
+  when "self-test"
+    unless File.executable?(SUITE)
+      warn "setup-inbox-registry: self-test suite missing at #{SUITE}"
+      warn "Fix: restore it from git (`git restore ai/inbox/test/self-test.sh`) and `chmod +x` it."
+      return 1
+    end
+    exec("bash", SUITE)
+  end
+
+  entries = InboxRegistry.declared
+  changes = action == "install" ? install(entries, dry: dry) : remove(entries, dry: dry)
+
+  changes.each { |c| puts c }
+  if changes.empty?
+    puts "setup-inbox-registry: nothing to do — all #{entries.size} declared entr" \
+         "#{entries.size == 1 ? 'y is' : 'ies are'} already #{action == 'install' ? 'installed' : 'removed'}."
+  elsif dry
+    puts "setup-inbox-registry: (dry-run) the above would be applied under #{InboxRegistry.projects_dir}."
+  else
+    puts "setup-inbox-registry: #{action} applied under #{InboxRegistry.projects_dir} " \
+         "(#{changes.size} change(s)). Entries not declared in ai/inbox/registry.json were left untouched."
+  end
+  0
+rescue InboxRegistry::Error => e
+  warn "setup-inbox-registry: #{e.message}"
+  warn "Fix: restore ai/inbox/registry.json from git (`git restore ai/inbox/registry.json`) " \
+       "or repair its JSON — an object with a \"projects\" array of " \
+       "{\"file\": \"<name>.json\", \"entry\": {\"v\":1,\"repo\":\"~/dev/<p>/.git\",\"channels\":{}}}."
+  2
+end
+
+exit main(ARGV)

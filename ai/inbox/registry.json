@@ -1,0 +1,37 @@
+{
+  "_meta": "Committed source of truth for the Athena Inbox tenancy registry — which projects this machine expects to have a registry entry for, and what each entry says. The live entries are untracked machine-local files at $ATHENA_INBOX_ROOT/projects/<file> (0600, in a 0700 directory); `scripts/setup-inbox-registry --install` materialises them from here by MERGING (it touches only the files declared here and never the rest of the directory), and `ai/bin/check-inbox-registry` fails naming each entry that is missing or drifted. Without these three artifacts a clobbered entry is silent by contract — zero channels, exit 0 — and unrecoverable from git, the 2026-09-17 hook-clobber class. See ai/contracts/athena-inbox.md -> Provisioning, Tenancy: the registry. NO SECRET EVER GOES IN THIS FILE: the machine token lives at ~/.config/athena-inbox-client/config.json and nowhere else. `repo` is the realpath of the project's git common dir and MAY be written with a leading ~/ , which is expanded (and realpath'd, when the path exists) at install and check time.",
+  "v": 1,
+  "projects": [
+    {
+      "file": "custom.json",
+      "entry": {
+        "v": 1,
+        "repo": "~/dev/custom/.git",
+        "channels": {
+          "gen_saas-mail": {
+            "kind": "maildir",
+            "namespace": "agent-mail/gen_saas",
+            "read": "from-server",
+            "write": "to-server",
+            "identity": "athena"
+          }
+        }
+      }
+    },
+    {
+      "file": "walt_ui.json",
+      "entry": {
+        "v": 1,
+        "repo": "~/dev/walt_ui/.git",
+        "channels": {
+          "slack": {
+            "kind": "log",
+            "path": "walt_ui-slack.jsonl",
+            "dedupe": ["event_id", "channel+ts"],
+            "schema_v": [1]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -224,3 +224,37 @@ and pronoun-guard; nothing detected it. The durable fix:
 - **Editing hooks:** change `registry.json` and run `scripts/setup-hooks
   --install`; do not hand-write the `settings.json` hooks block (that is the
   clobber path). Hooks load at session start, so reload a session to activate.
+
+## Inbox tenancy registry (`$ATHENA_INBOX_ROOT/projects/` is not in git)
+
+Which projects can reach the Athena Inbox is decided by machine-local, untracked
+entries at `$ATHENA_INBOX_ROOT/projects/<project>.json` (default root
+`~/.local/share/athena`; `0600` files in a `0700` directory). That is the same
+shape as the hook wiring above, with one property that makes it worse: the
+contract defines a **missing entry as zero channels, exit 0, no error**
+(`ai/contracts/athena-inbox.md` → *Tenancy: the registry*), so a clobbered or
+deleted entry is a **silently dead inbox** — no failure, no diff, no `git` undo.
+The same three artifacts answer it:
+
+- **Source of truth:** `ai/inbox/registry.json` — the tenant list, one
+  `{file, entry}` per project. `repo` is a project's git-common-dir realpath and
+  MAY be written `~/...`. **No secret ever goes in it**; the machine token stays
+  in `~/.config/athena-inbox-client/config.json`.
+- **Detect drift:** `ai/bin/check-inbox-registry` (in the shipwright gate) fails,
+  naming each entry that is missing, malformed, mis-permissioned, or edited away
+  from the committed text. Environment-safe: passes with a note when there is no
+  inbox root (CI/agent env), so it never false-fails; a root that exists with no
+  `projects/` is real drift, not "not this environment".
+- **Recover:** `scripts/setup-inbox-registry --install` materialises the declared
+  entries, backing up anything it replaces. It **merges**: it touches only the
+  files the committed list declares, so another project's entry in `projects/` is
+  never read, moved, or removed. `--check` delegates to the check, `--dry-run`
+  previews, `--remove` reverts, `--self-test` runs `ai/inbox/test/self-test.sh`.
+- **Repo identity is resolved at the point of capture.** `git rev-parse
+  --git-common-dir` prints a **cwd-relative** path in a main checkout (`.git`)
+  and an absolute one only inside a worktree. Resolve it later — after a `chdir`,
+  in a helper running elsewhere — and you get a path that matches no entry, which
+  means zero channels and exit 0: the channel dies quietly.
+- **One validator:** the committed entries are validated by the `athena:inbox`
+  skill's own `descriptor_validate`, not by a second copy of its rules, so the
+  installer can never write an entry the reader refuses to load.

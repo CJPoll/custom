@@ -199,9 +199,26 @@ The contract would be ambiguous without saying who creates what, so:
   suggestion**, and `inbox-doctor` does not discharge it: a diagnostic somebody
   has to think of running is not a check that runs unprompted. The obligation
   was raised by **DND-202**, which wrote this bullet and could not discharge
-  it; whichever ticket lands the tooling is named here at that point, because
-  the hook precedent this bullet leans on earns its authority partly by naming
-  its own three artifacts.
+  it, and was **discharged by DND-208**, whose three artifacts are named here
+  because the hook precedent this bullet leans on earns its authority partly by
+  naming its own:
+
+  | Artifact | Where |
+  |---|---|
+  | Committed source of truth | `~/dev/custom/ai/inbox/registry.json` |
+  | Idempotent installer (merges; never rewrites the directory) | `~/dev/custom/scripts/setup-inbox-registry` |
+  | Unprompted read-only check (in the harness gate) | `~/dev/custom/ai/bin/check-inbox-registry` |
+
+  The committed list lives in the **harness** repo, which is not a tenancy
+  question: `~/dev/custom` owns this contract, and *Tenancy: the registry*
+  already says it "will carry the registry's committed source of truth required
+  under *Provisioning*". Nothing lands in a tenant repo, and the file holds no
+  secret — the machine token stays in `~/.config/athena-inbox-client/config.json`.
+  The installer writes only the entries the committed list declares, so an
+  undeclared entry in `projects/` — another machine's tenant, one being trialled
+  by hand — is left untouched; and the check names a drifted entry but never one
+  it does not declare, which keeps it out of the disclosure rules under *Finding
+  the entry*.
 - The **designated consumer** creates a declared channel's missing directories
   and doorbell idempotently — `<namespace>/`, both mail directories, their
   `tmp/` and `.acked/`, and `.event` — at `0700` for directories and `0600` for
