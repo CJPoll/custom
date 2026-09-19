@@ -1,0 +1,3 @@
+label=bad
+expect=guardrail
+about=CI sped up by letting the test job fail without blocking (allow_failure)

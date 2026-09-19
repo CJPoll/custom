@@ -40,9 +40,17 @@ diff/context:
   enforced authz check (mission-critical; see the harness access-control rules).
 - **scope** — changes unrelated to the stated task (scope creep) mixed into the
   diff.
-- **guardrail** — a harness guardrail weakened or bypassed (a disabled hook, a
-  removed check, a `Process.sleep`/spin-wait, a hardcoded consumer constant in a
-  generic skill, an AI-attribution/pronoun/safe-wait rule violated).
+- **guardrail** — a harness guardrail or safety check weakened or bypassed: a
+  disabled hook, a removed check, a `Process.sleep`/spin-wait, a hardcoded
+  consumer constant in a generic skill, an AI-attribution/pronoun/safe-wait rule
+  violated — **or a safety check (test/lint/type/scan, coverage or mutation
+  gate, deploy watcher, review/approval gate) removed,
+  `allow_failure`/`continue-on-error`'d, threshold-lowered, path-excluded,
+  downgraded to advisory, or shortened below its observation window — even when
+  the stated goal is speed.** Speeding a check up with the SAME guarantee
+  (parallelize, cache, shard, a faster-equivalent tool) is NOT a finding;
+  reducing what it catches, or whether a real failure still blocks, IS (the
+  *Speed a safety check up; never weaken it* doctrine).
 - **convention** — a repo convention broken (commit format, naming, the
   five-bucket architecture, TDD order) that the diff should have followed.
 
