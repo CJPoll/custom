@@ -78,15 +78,6 @@ inbox_channels() {
   descriptor_channel_names "${entry}"
 }
 
-# inbox_resolve_channel <channel> [cwd]
-# "<label>\t<path>" lines for a channel this session owns.
-#
-# DENY BY DEFAULT (M-6 / A-8). A channel this entry does not declare is not
-# addressable, and the refusal lists only the channels THIS entry declares --
-# it never echoes the requested name back. An error message is a disclosure
-# channel: echoing an unknown name turns the denial into an oracle that
-# confirms what a caller guessed, and listing another project's channels would
-# hand over the namespace outright.
 # _inbox_no_entry_refusal <cwd>
 #
 # "Nothing resolved" has THREE causes, and collapsing them into one message is
@@ -133,6 +124,15 @@ _inbox_no_entry_refusal() {
   return 1
 }
 
+# inbox_resolve_channel <channel> [cwd]
+# "<label>\t<path>" lines for a channel this session owns.
+#
+# DENY BY DEFAULT (M-6 / A-8). A channel this entry does not declare is not
+# addressable, and the refusal lists only the channels THIS entry declares --
+# it never echoes the requested name back. An error message is a disclosure
+# channel: echoing an unknown name turns the denial into an oracle that
+# confirms what a caller guessed, and listing another project's channels would
+# hand over the namespace outright.
 inbox_resolve_channel() {
   local chan="$1" entry rc declared
   entry="$(inbox_entry "${2:-.}")"; rc=$?
@@ -154,6 +154,28 @@ inbox_resolve_channel() {
 
 # _inbox_path <label> <resolved>
 _inbox_path() { printf '%s\n' "$2" | awk -F'\t' -v k="$1" '$1==k {print $2; exit}'; }
+
+# inbox_field <label> <resolved>
+#
+# THE PUBLIC form of `_inbox_path`, for the Framework.
+#
+# `bin/read-inbox` needs two fields out of a resolved record (`kind`, to choose
+# an ack strategy, and `lock`, to take the consumer lock), and was re-parsing
+# the tab-delimited record with its own `awk -F'\t'`. That is the duplication
+# `descriptor_resolve`'s `lock` line was added to eliminate -- two copies of a
+# path that must be the same file -- reintroduced one layer up, and it puts the
+# `<label>\t<path>` protocol (whose delimiter collisions have already cost this
+# skill three bugs) in a second place that would have to be fixed twice.
+inbox_field() { _inbox_path "$1" "$2"; }
+
+# inbox_release_consumer
+#
+# The release half of `inbox_require_consumer`, so the Framework has a manager
+# to call. `bin/read-inbox`'s EXIT trap called `inbox_lock_release` -- an
+# adapter (`lock.sh` declares itself SIDE EFFECTS) -- directly from Framework,
+# which "Framework MUST NOT call adapters directly" forbids. Everything else in
+# that file already routes through this layer; this was the one inversion.
+inbox_release_consumer() { inbox_lock_release; }
 
 # _inbox_count_log <resolved-paths> <schema_csv>
 # Emits the counting fields for one log channel as JSON.
@@ -560,6 +582,15 @@ _inbox_read_log() {
     '((.channels[$c].schema_v // [1]) | map(tostring) | join(","))')"
 
   state_json="$(_inbox_state_or_recovered "${state}")" || return 1
+  # NEVER DELIVERED is carried through the READ too, not only the count.
+  # "nobody ever registered the writer" and "nothing new arrived" are
+  # identical on disk -- no file, or no new bytes -- and the contract makes
+  # distinguishing them a MUST. `bin/inbox-status` already did; the read did
+  # not, and the read is the command an operator reaches for when a channel
+  # looks quiet, so it was the one place the distinction was most needed and
+  # least present.
+  local never_delivered=false
+  [ -f "${inbox}" ] || never_delivered=true
   size="$(fs_size "${inbox}")"
   offset="$(_inbox_offset_of "${state_json}" "${size}")"
   seen_ev="$(printf '%s' "${state_json}" | jq -r '(.seen_event_ids // [])[]' 2>/dev/null)"
@@ -578,11 +609,11 @@ _inbox_read_log() {
     return 1
   fi
 
-  printf '%s' "${scan}" | jq -c --arg c "${chan}" '
-    {kind: "log", channel: $c, next_offset: .next_offset,
+  printf '%s' "${scan}" | jq -c --arg c "${chan}" --argjson nd "${never_delivered}" '
+    {kind: "log", channel: $c, next_offset: .next_offset, never_delivered: $nd,
      unreadable: .unreadable, messages: .messages,
      event_ids: [.messages[].event_id | select(. != "")],
-     keys: [.messages[] | select((.channel != "") and (.ts != "")) | "\(.channel):\(.ts)"]}'
+     keys: [.messages[].dedupe_key | select(. != "")]}'
 }
 
 # _inbox_state_or_recovered <state-path>

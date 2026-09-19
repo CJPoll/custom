@@ -2127,6 +2127,61 @@ SCAN="$(printf '{"v":1,"ts":"1","channel":"D1","event_id":"Ev-clean"}\n' | logch
 assert_eq "an ordinary event_id is still usable (the guard is not a blanket reject)" "Ev-clean" \
   "$(jq -r '.messages[0].event_id' <<<"${SCAN}")"
 
+# ...AND THE GUARD SURVIVES THE MANAGER. `ts` and `channel` are kept RAW on
+# the message record for display, so the composed "channel:ts" key could be --
+# and was -- rebuilt one layer up in _inbox_read_log WITHOUT the guard. The
+# seen-sets travel as newline-delimited lists, so a poisoned `ts` became TWO
+# seen_keys entries and the sender chose which future message got silently
+# suppressed: no count, no `unreadable`, no error. A guard that can be
+# bypassed by recomputing its input is not a guard, which is why the scan now
+# emits the key it actually used.
+#
+# The domain case above is green either way, so only this one -- through the
+# real read path, into a real state file -- can tell the difference.
+setup_log_case
+printf '{"v":1,"ts":"111\\nD0:999","channel":"D0","event_id":"Ev1","text":"hi","user":"U1"}\n' > "${LINBOX}"
+( cd "${LPROJ}" && "${BIN}/read-inbox" slack >/dev/null 2>&1 )
+assert_eq "a poisoned ts cannot inject a second seen_keys entry via the ack" "0" \
+  "$(jq -r '[.seen_keys[] | select(. == "D0:999")] | length' < "${LSTATE}")"
+assert_eq "and the poisoned key is not stored under any spelling" "0" \
+  "$(jq -r '[.seen_keys[] | select(test("999"))] | length' < "${LSTATE}")"
+# The message is still DELIVERED -- it has a clean event_id. Dropping it would
+# let a sender suppress its own message by malforming one field, which is the
+# same silent loss from the other direction.
+assert_eq "the message is still deduped on its clean event_id" "Ev1" \
+  "$(jq -r '.seen_event_ids[0]' < "${LSTATE}")"
+# A CLEAN composed key still reaches the state file, so the assertion above is
+# not passing merely because keys never get written.
+setup_log_case
+printf '{"v":1,"ts":"222","channel":"D0","text":"hi","user":"U1"}\n' > "${LINBOX}"
+( cd "${LPROJ}" && "${BIN}/read-inbox" slack >/dev/null 2>&1 )
+assert_eq "a clean composed key IS recorded (the guard is not dropping all keys)" "D0:222" \
+  "$(jq -r '.seen_keys[0]' < "${LSTATE}")"
+
+# A NEVER-DELIVERED LOG CHANNEL, THROUGH THE READ. The contract makes this a
+# MUST: "nobody registered the writer" and "nothing arrived" are identical on
+# disk -- no file, or no new bytes -- and must not be identical in output.
+# inbox-status already said so; read-inbox printed "nothing new", and
+# read-inbox is the command an operator reaches for when a channel looks
+# quiet, so it was where the distinction was most needed and least present.
+setup_log_case
+rm -f "${LINBOX}"
+OUT="$(cd "${LPROJ}" && "${BIN}/read-inbox" slack 2>&1)"
+assert_not_contains "a never-delivered channel does NOT read as 'nothing new'" \
+  "nothing new" "${OUT}"
+assert_contains "it says nothing has EVER been delivered" \
+  "nothing has EVER been delivered" "${OUT}"
+assert_contains "and its Fix: names producer registration" "producer" "${OUT}"
+# The distinction is real, not a blanket message: a channel whose file EXISTS
+# and is simply empty of new lines is an ordinary quiet morning.
+setup_log_case
+: > "${LINBOX}"
+OUT="$(cd "${LPROJ}" && "${BIN}/read-inbox" slack 2>&1)"
+assert_contains "an EXISTING but empty channel is still 'nothing new'" \
+  "nothing new" "${OUT}"
+assert_not_contains "and it is not reported as never-delivered" \
+  "nothing has EVER been delivered" "${OUT}"
+
 echo
 echo "== DND-184 / 8. A-10: no token ever reaches the read output =="
 

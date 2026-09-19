@@ -206,8 +206,16 @@ maildir_validate_message() {
 
   want="$(maildir_message_stamp "${name}")"
   got="$(printf '%s' "${fm}" | jq -r '.sent_at // empty' 2>/dev/null)"
+  # THE PEER'S VALUE IS NOT QUOTED BACK. `got` is frontmatter the sender
+  # wrote, and interpolating it into this reader's own stderr narration puts
+  # peer-chosen bytes in the position a reader takes as the tool speaking --
+  # the class read-inbox's malformed-file and self-ack reports both refuse by
+  # name, by emitting counts and never the slug. The filename's stamp IS
+  # quoted: it passed the grammar one check earlier, so it is 16 known-shape
+  # characters, and without it the operator cannot tell which of two
+  # timestamps the message should have carried.
   if [ "${want}" != "${got}" ]; then
-    inbox_fail "message frontmatter \"sent_at\" (${got}) disagrees with its filename (${want})" \
+    inbox_fail "message frontmatter \"sent_at\" disagrees with its filename (which says ${want})" \
       "ask the sender to re-send with sent_at matching the filename stamp; two copies of one fact that disagree cannot both be believed, and there is no way to tell which is wrong."
     return 1
   fi

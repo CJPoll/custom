@@ -2,11 +2,13 @@
 # fs.sh -- SIDE EFFECTS. The only file I/O in the skill, plus the one `git`
 # call. Everything else in lib/ takes strings and returns strings.
 #
-# This slice (DND-183) is READ-ONLY on purpose. There is no state writer in
-# this file at all, because `inbox-status` counts and must never consume: the
-# strongest available guarantee that counting does not advance an offset is
-# that the code which could advance it does not exist yet. The atomic state
-# writer arrives with the ack ticket.
+# **Amended (DND-184).** This file was READ-ONLY through DND-183: `inbox-status`
+# counts and must never consume, and the strongest available guarantee that
+# counting does not advance an offset was that the code which could advance it
+# did not exist yet. The ack ticket is DND-184, so that guarantee has been
+# spent: the writes now live here, under the WRITES banner below, and the
+# counting path's guarantee is the designated-consumer gate instead -- a
+# subagent or a non-holder may count and may peek, and neither advances.
 #
 # ON CONTAINMENT vs. THE SYMLINK DEFENCE -- two different jobs, and one does
 # not do the other's:

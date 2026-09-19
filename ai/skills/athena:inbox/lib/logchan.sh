@@ -163,7 +163,23 @@ logchan_scan() {
                 # re-append NORMAL, not an anomaly.
                 .
               else
-                .new += [ ({ts: ($o.ts // ""), channel: ($o.channel // ""), event_id: ($eid // "")}
+                # `dedupe_key` IS EMITTED, not left to be recomputed.
+                #
+                # `ts` and `channel` are kept RAW for display (they go inside
+                # the fence, where peer bytes belong), so a caller that rebuilt
+                # "\(.channel):\(.ts)" from them would rebuild it WITHOUT the
+                # `usable` guard above -- and the seen-sets travel as
+                # newline-delimited lists, so one embedded newline becomes two
+                # seen-set entries and the sender picks which future message is
+                # silently suppressed. That is exactly the bug `usable` exists
+                # to stop, reintroduced one layer up by a caller doing the
+                # arithmetic again.
+                #
+                # A guard that can be bypassed by recomputing its input is not
+                # a guard. So the key the scan ACTUALLY USED travels with the
+                # message, and there is nothing left to recompute.
+                .new += [ ({ts: ($o.ts // ""), channel: ($o.channel // ""),
+                            event_id: ($eid // ""), dedupe_key: ($key // "")}
                            + (if $wt then
                                 # Every peer-controlled field is forced to a
                                 # STRING here. A `text` that arrived as an

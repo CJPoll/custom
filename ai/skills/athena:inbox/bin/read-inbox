@@ -116,7 +116,7 @@ fi
 # The lock is released on EVERY exit path, including a failure between the read
 # and the ack. Left held, it would deny the NEXT session in this shell -- and
 # the diagnostics in the file would describe a holder that is long gone.
-trap 'inbox_lock_release' EXIT
+trap 'inbox_release_consumer' EXIT
 
 # ============================================================================
 # ACQUIRE FIRST, READ SECOND.
@@ -132,13 +132,12 @@ trap 'inbox_lock_release' EXIT
 # Better to refuse up front and name `--peek` in the Fix: clause.
 # ============================================================================
 RESOLVED="$(inbox_resolve_channel "${CHANNEL}" ".")" || exit 1
-KIND="$(printf '%s\n' "${RESOLVED}" | awk -F'\t' '$1=="kind"{print $2; exit}')"
+KIND="$(inbox_field kind "${RESOLVED}")"
 
 if [ "${PEEK}" -eq 0 ]; then
   case "${KIND}" in
-    log)     LOCK="$(printf '%s\n' "${RESOLVED}" | awk -F'\t' '$1=="lock"{print $2; exit}')" ;;
-    maildir) LOCK="$(printf '%s\n' "${RESOLVED}" | awk -F'\t' '$1=="lock"{print $2; exit}')" ;;
-    *)       LOCK="" ;;
+    log|maildir) LOCK="$(inbox_field lock "${RESOLVED}")" ;;
+    *)           LOCK="" ;;
   esac
   [ -n "${LOCK}" ] || { inbox_fail "channel \"${CHANNEL}\" has a kind this reader cannot ack" \
     "set the channel's \"kind\" to \"log\" or \"maildir\"."; exit 1; }
@@ -176,6 +175,16 @@ else
   if [ "${COUNT}" -eq 0 ]; then
     if [ "${MALFORMED}" -gt 0 ]; then
       report_malformed
+    elif [ "$(printf '%s' "${READ}" | jq -r '.never_delivered // false')" = "true" ]; then
+      # A DECLARED LOG CHANNEL WHOSE FILE HAS NEVER EXISTED IS NOT "nothing
+      # new". The contract makes distinguishing the two a MUST: "nobody
+      # registered the writer" and "nothing arrived" are identical on disk and
+      # must not be identical in output. `inbox-status` already said so; this
+      # command did not -- and this is the one an operator reaches for when a
+      # channel looks quiet, so it was where the distinction was most needed
+      # and least present.
+      printf 'athena:inbox: %s is declared, but nothing has EVER been delivered to it.\n' "${CHANNEL}"
+      printf '  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json — then re-check. An unregistered producer and an empty channel look identical on disk.\n'
     else
       printf 'athena:inbox: %s — nothing new.\n' "${CHANNEL}"
     fi
