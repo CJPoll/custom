@@ -39,7 +39,7 @@ corrected and re-run.
   `bin/inbox-status`
 - **Suite run:** `bash test/self-test.sh` (no network — nothing here makes one;
   the inbox root is always a `mktemp -d`; ~2s wall)
-- **Baseline:** `VERDICT: PASS (218 cases)` (131 at the first pass; 11 added
+- **Baseline:** `VERDICT: PASS (231 cases)` (131 at the first pass; 11 added
   after the sabotage run found six checks the suite did not actually protect,
   plus the state-rewrite rule that arrived mid-build, plus 46 more from the
   `athena-diff-critic` round and the `code-reviewer`/`adr-reviewer` pair — see
@@ -179,7 +179,18 @@ invokes inside `$(...)`, a **subshell**. The assignment could never reach the
 caller, so the count would have read `0` everywhere and the MUST would have
 looked satisfied while doing nothing. It is a function now.
 
-The pattern across all four rounds is worth naming, because it is the argument
+A fifth round found two more **silent dark channels** — the same shape as
+everything else here, reached by different inputs:
+
+| Finding | Why nothing caught it |
+|---|---|
+| The session's identity was canonicalised (`fs_git_common_dir` → `realpath`) but the entry's `repo` was compared as a **raw string**, while the contract makes the match bilateral: *"Matched exactly, after realpath, against the session's own."* A grammatically fine entry whose `repo` carried a trailing slash, a `..`, or a symlinked-but-equivalent prefix never matched, was never validated, and was not even a **failed candidate** — it parses and has a string `repo`. The session reported `{"channels":[],"failed_candidates":0}`, exit 0. | Every fixture wrote the `repo` key by realpathing it, so every fixture was already canonical. The suite asserted the *session* side of the equality and never the *entry* side. |
+| A **tab or newline in a log `path`** is contract-legal (the grammar bars only `/ \ NUL ..`, a leading dot and >128 bytes) and collides with **both** delimiters of the `<label>\t<path>` protocol that `descriptor_resolve` emits and `_inbox_path` parses. The path truncated, real mail reported as *"nothing has EVER been delivered"*, and `inbox` and `state` resolved to the **same** truncated path — which the ack ticket's state writer would have written over the channel file. | This is the delimiter-collision class already fixed once for the registry *filename* (the "JSON first" ordering). Fixing an instance is not fixing a class, and nothing went looking for the second instance. |
+
+Both are now refused, and the second is a **named deviation**: the grammar is
+deliberately stricter than the contract's, in the safe direction.
+
+The pattern across all five rounds is worth naming, because it is the argument
 for running a reader alongside the mutations: **sabotage proves a check that exists
 is load-bearing; it cannot find a check that was never written, one that is
 safe only by accident of its caller, or one whose failure is indistinguishable
