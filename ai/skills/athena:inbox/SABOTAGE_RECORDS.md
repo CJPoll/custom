@@ -538,3 +538,100 @@ and runs every `**/test/self-test.sh` repo-wide, scoped to committed source).
 DND-209 landed on main while this branch was in review and its discovery
 already covers both suites, so the hand-declaration was dropped in the merge.
 The finding that produced it stands: this suite was dark, and nothing ran it.
+
+---
+
+# DND-187 — `bin/send-mail`, the writer's half
+
+**24 mutations, 21 red, 3 measured green.** Each mutation was an
+exact-substring replace whose anchor was asserted present before writing, run
+against the whole suite, and reverted from the original bytes held in memory —
+never `git checkout`, which cannot restore work that is not yet committed.
+Every row below names the case that reddened and what it says.
+
+Two of the three greens are genuine unreachability and are written up rather
+than dropped; the third was a **real gap** and was closed, and the two rows
+that were green on the first pass and are red now (**S10**, **S13**) carry that
+history in place.
+
+| # | Mutation | Verdict | The case that names it |
+|---|---|---|---|
+| S1 | delivery uses `mv` **and** the destination pre-check is removed | **RED** (7) | *M-11 delivery onto an existing name returns 2 (collision), not 0* — `mv` silently replaces, so the earlier message is destroyed with no error |
+| S2 | `ln` → `mv`, pre-check kept | GREEN | redundancy, not a zero — see *The two greens that are redundancy* |
+| S3 | pre-check removed, `ln` kept | GREEN | same pair |
+| S4 | the doorbell is bumped **before** the delivery | **RED** (3) | *M-12 the message is ALREADY in place when the bell rings* |
+| S5 | the `<seq>` scan skips `.acked/` | **RED** (1) | *I-5 the next send allocates 002 even though .acked/ holds 001* |
+| S6 | `<seq>` printed with `%d` instead of `%03d` | **RED** (28) | the whole grammar — `-1-` sorts after `-10-` |
+| S7 | `<seq>` parsed without `10#` | **RED** (1) | *M-10 a zero-padded seq is read base 10, not octal* — `008` aborts the arithmetic, on names the allocator wrote itself |
+| S8 | `fs_mkdir_0700` → `mkdir -p -m 0700` | **RED** (2) | *M-11 every intermediate directory is 0700 too* — the defect this ticket shipped and then fixed |
+| S9 | the render's round-trip self-check removed | **RED** (2) | *M-11 a `re` whose fragment the reader's parser would strip is refused* |
+| S10 | the explicit newline-in-`re` arm removed | GREEN → **RED** (1) | green at first (the round trip also catches it) — a case asserting the refusal **names the line break** makes the arm load-bearing for its own message. A refusal that misnames the problem is a `Fix:` the reader cannot act on |
+| S11 | the empty-body refusal removed | **RED** (2) | *M-11 an empty body is refused — the MISSING-input shape of a send* |
+| S12 | the builder skips re-validating through the reader's grammar | **RED** (1) | *M-10 a `<seq>` shorter than 3 digits is refused at build time* |
+| S13 | the manager stops calling `maildir_refuse_self_send` | GREEN → **RED** (3) | **a real gap.** The domain predicate was asserted; the production call was not — so a message addressed to my own identity was delivered into the directory the peer reads, where the peer's never-ack-your-own filter does not fire and it sits unread forever. Verbatim DND-184's lesson (the contract's message rules held in the domain and nowhere a message travels), found again by sabotage. Closed with an end-to-end case |
+| S14 | a `<seq>` collision aborts instead of retrying | **RED** (1) | *M-11 a collision is retried with a fresh sequence number* |
+| S15 | the sender lock is not taken | **RED** (3) | *M-11 a second sender is refused while the lock is held* |
+| S16 | the post-delivery existence confirmation removed | GREEN | unreachable today — see below |
+| S17 | `send-mail` echoes the body back | **RED** (1) | *M-11 send-mail never prints the body back* |
+| S18 | the send also provisions the directory it **reads** from | **RED** (1) | *M-11 a send does NOT create the directory it reads from* — fabricating it invents a channel the peer never declared |
+| S19 | a `log` channel is allowed to be sent on | **RED** (1) | *M-10 sending on a log channel is refused* |
+| S20 | the manager's `write == read` guard removed | GREEN | unreachable today — see below |
+| S21 | the slug grammar accepts anything | **RED** (8) | the slug block, and the assembled-name check behind it |
+| S22 | `thread` accepted without the message-name grammar | **RED** (2) | *A-3 a `thread` that is a PATH is refused* |
+| S23 | the delivery primitive drops its own filename re-check | **RED** (2) | *A-3 the delivery primitive refuses a non-conformant filename* |
+| S24 | the doorbell bump failure swallowed with `|| true` | **RED** (3) | *M-12 an undeliverable send exits non-zero* — and the bump refusal's own text |
+
+## The input classes the fixtures never contained
+
+Mutating code finds a check that stopped working. It cannot find a check
+nobody thought to write, because a fixture is built the way the code already
+expects — which is how DND-184's worst defect (an unterminated `---` block
+destroying peer content and acking it) survived every mutation and was found
+by feeding the parser a shape no fixture contained. So the same hunt was run
+from the writing side:
+
+1. **A `re` value containing `" #"`.** `maildir_parse_frontmatter` strips a `#`
+   comment that follows whitespace, so `re: /home/x/design.md #section-3`
+   reached the peer as `/home/x/design.md` — the fragment gone, **both sides
+   reporting success, nothing anywhere saying a value had been edited in
+   transit**. A URL fragment or a line anchor is exactly the kind of thing a
+   `re:` carries. Fixed by parsing the rendered message back and refusing any
+   value that does not survive — a **round trip**, not a second copy of the
+   parser's grammar, because that copy would go stale the first time the
+   reader learned a new rule.
+2. **A value with leading or trailing whitespace**, trimmed by the same parser.
+   Same fix, same case.
+3. **A body containing `---` lines and `key: value` lines** — the shape that
+   produced DND-184's destroyed message, now written by this sender rather
+   than a peer. Asserted to round trip with the sender unforged and the body
+   intact.
+4. **A body with no trailing newline**, which would run into whatever a reader
+   concatenated after it. The assertion needed `printf X` to be able to observe
+   its own claim at all: `$(...)` strips trailing newlines, so the obvious form
+   of that case reports a missing newline whether or not one was emitted.
+
+## The two greens that are redundancy, not a zero
+
+**S2 and S3 are one claim with two independent guards.** Delivery must not
+clobber; the `ln` and the destination pre-check each enforce it alone, so
+removing either leaves the suite green and removing **both** (S1) reddens seven
+cases. The claim is tested — S1 is the proof — and the redundancy is kept: `ln`
+is the contract's named mechanism, and the pre-check is what makes the
+collision a cheap `return 2` on the retry path rather than an error branch.
+
+## The two genuine unreachables, recorded rather than dropped
+
+- **S16 — the post-delivery existence confirmation.** `ln` returning 0 already
+  means the link exists, so no input reaches the branch. It is kept anyway, for
+  the reason DND-184 kept its own unreachable check: this facility exists
+  because *"it looked like it worked"* is the failure mode, and a send that
+  reports success with nothing at the destination is the worst instance of it a
+  sender can produce. It is **defence in depth, not a tested check**, and this
+  row is what says so.
+- **S20 — the manager's `write == read` guard.** `descriptor_validate` refuses
+  an entry whose `read` and `write` are equal, so the manager's copy cannot
+  fire through any registry entry a session can load. Kept because the
+  consequence of being wrong is total — every message sent would land in the
+  directory this session reads, so the sender would ingest its own outgoing
+  mail and the peer would never see any of it — and because it is the last
+  point before I/O at which both values are in scope. Same standing as S16.

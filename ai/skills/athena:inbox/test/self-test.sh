@@ -2534,6 +2534,15 @@ render_with() {
 }
 assert_refused "M-11 a newline in \"re\" is refused (it would forge a header line)" \
   render_with "body" athena peer 2026-09-01T23:22:15Z "$(printf 'a\n---\nfrom: someone-else')" ""
+# The REFUSAL ITSELF is asserted, not just the non-zero exit. The round-trip
+# check below would also catch a newline -- the parsed value comes back
+# different -- so without this the explicit arm could be deleted with the suite
+# still green, and the sender would be told its value "would not survive the
+# reader's parse" when the truth is that it forges a header line. A refusal
+# that misnames the problem is a Fix: clause the reader cannot act on.
+assert_contains "M-11 ... and the refusal names the line break, not a parse mismatch" \
+  "contains a line break" \
+  "$(render_with "body" athena peer 2026-09-01T23:22:15Z "$(printf 'a\n---\nfrom: someone-else')" "" 2>&1 >/dev/null)"
 assert_refused "M-11 a \"thread\" that is a PATH is refused (A-3: a name is data, never a path)" \
   render_with "body" athena peer 2026-09-01T23:22:15Z "" "../../etc/passwd"
 assert_refused "M-11 a \"thread\" that is not a conformant message name is refused" \
@@ -2815,6 +2824,20 @@ assert_eq "M-11 ... and delivered nothing" "0" "$(ls "${SWRITE}"/*.md 2>/dev/nul
 inbox_release_consumer
 ERR="$( cd "${SPROJ}" && printf 'uncontended\n' | "${BIN}/send-mail" mail uncontended --to peer 2>&1 >/dev/null )"; RC=$?
 assert_eq "M-11 and it succeeds once the lock is released (the refusal was the LOCK, not the setup)" "0" "${RC}"
+
+# THE MANAGER CALLS THE SELF-SEND GUARD. Asserting the domain predicate alone
+# left the production call untested: with the manager's call removed the whole
+# suite stayed green while a message addressed to this channel's own identity
+# was delivered into the directory the peer reads -- where the peer's
+# "never ack your own" filter does not fire, so it sits unread forever and
+# nothing says why. That is DND-184's own lesson (the contract's message rules
+# held in the domain and nowhere a message travels), measured again by
+# sabotage.
+setup_send_case
+ERR="$( cd "${SPROJ}" && printf 'to myself\n' | "${BIN}/send-mail" mail self-addressed --to athena 2>&1 >/dev/null )"; RC=$?
+assert_eq "M-12 a send addressed to my own identity is refused end to end" "1" "${RC}"
+assert_contains "M-12 ... with a Fix: clause" "Fix:" "${ERR}"
+assert_eq "M-12 ... and nothing was delivered" "0" "$(ls "${SWRITE}"/*.md 2>/dev/null | wc -l)"
 
 # THE SENDER LOCK IS NOT THE CONSUMER LOCK, and this is the case that says why.
 # A writer may not create a `*.consumer.lock` under the root at all, and under
