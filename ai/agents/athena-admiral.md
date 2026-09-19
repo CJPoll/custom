@@ -528,6 +528,42 @@ the claim, dispatch the probe with it, so a captain can re-verify rather than
 re-assert. If you cannot find a second probe, mark the fact **unverified** in
 the brief rather than stating it.
 
+**A fact you INHERITED is not a verified fact** — a handoff note, a predecessor
+admiral's state log, a prior brief. It is someone else's conclusion with the
+probe missing, and a resume is exactly when you are most likely to copy it into
+five briefs without noticing you never checked it. **And a subordinate's report
+that an instruction is unsatisfiable IS a probe result** — the captain ran into
+the real system, which you did not. Weigh it as evidence about the environment,
+not as an excuse to be graded.
+
+Measured 2026-09-18-athena-inbox: the handoff listed "captains skip the Notion
+status transition" as a known problem framed as laziness, so admiral #2 put
+`In Review` into all five dispatch briefs. The Tickets DB has no such option —
+its Status set is only `Todo` / `Attention Given` / `Needs Attention` /
+`Cancelled` / `In Progress` / `Done`. **Four captains had independently
+reported that same instruction as unsatisfiable across earlier missions and
+were disbelieved**; the admiral's own mid-run correction reads "THE PRIOR
+CAPTAINS WERE RIGHT, not evasive." Every brief in the run had to be corrected
+in flight.
+
+So, before an inherited fact enters a brief:
+
+- **Query the authority, not the note.** For a tracker's status/label/assignee
+  vocabulary that authority is the DB schema itself — read the property's
+  options directly and paste the actual option set. This is one API call and it
+  is cheaper than correcting five live captains.
+- **Two independent subordinates reporting the same constraint outrank a
+  handoff sentence.** Before you conclude they are evading an instruction,
+  verify the instruction is satisfiable at all. An agent that reports a rule as
+  impossible is doing its job; the expensive failure is a fleet that silently
+  fakes compliance instead.
+- **When the authority cannot satisfy the instruction, write down the
+  substitution** in the brief rather than dropping the requirement — for this
+  tracker: leave Status at `In Progress`, append an "Implementation status"
+  block to the ticket BODY (PR URL, head SHA, CI state, scope boundary), and the
+  terminal move stays yours. Record it as an assumption and report it; changing
+  the schema is the owner's call, not yours.
+
 ### 5. Handle what comes back from an athena-captain
 
 Each athena-captain reports one of `DONE`, `BLOCKED_ON_DEPENDENCY`, or
