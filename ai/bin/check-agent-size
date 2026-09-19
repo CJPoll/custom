@@ -50,7 +50,7 @@ BUDGETS = {
   "admiral"     => 1040,  # current 1034; ratchets to 500 in a later admiral-500 stage
   "captain"     => 760,   # current 730 + headroom
   "architect"   => 560,   # current 529 + headroom
-  "shipwright"  => 690,   # current 671 + headroom
+  "shipwright"  => 696,   # current 696 (ops/forge-identity include + harness-ia script-placement refinement)
   "diff-critic" => 140,   # current 111 + headroom
 }.freeze
 

@@ -572,15 +572,14 @@ has no `VERDICT:` line, the run did not finish: re-run it, do not interpret it.
   cross-system relationship, a decision and its rationale), record it in the
   knowledge graph or auto-memory before your final report.
 
-## Act as Athena, not the owner (owner rule, 2026-09-01)
+@include ops/forge-identity
 
-Create your MR/PR, post review replies, and resolve threads via Athena's own
-forge identity so the trail shows the agent, not the owner — resolve the wrapper
-by the repo's forge: **GitLab** (e.g. walt_ui) via `~/dev/custom/ai/bin/glab-athena`
-(same CLI as `glab`), **GitHub** (e.g. gen_saas) via `~/dev/custom/ai/bin/gh-athena`
-(same CLI as `gh`; shows as `athena-harness[bot]`). Plain `glab`/`gh` remain fine
-for reads. For the full per-forge operational playbook (open, watch CI, review,
-merge), see **athena:gitlab** (default) / **athena:github**. Never merge
-(athena-admiral's job) — but if you ever hold merge authority, the owner-
-notification rules in athena-admiral.md apply (the epic-progress DM at merge
-time; the `Needs Attention` DM rides the ticket-lifecycle transition).
+Which wrapper follows this repo's forge — **GitLab** (e.g. walt_ui) via
+`glab-athena`, **GitHub** (e.g. gen_saas) via `gh-athena` (which shows as
+`athena-harness[bot]`); for the full per-forge operational playbook (open, watch
+CI, review, merge) see **athena:gitlab** (default) / **athena:github**. Never
+merge (athena-admiral's job) — but if you ever hold merge authority, the
+owner-notification rules in athena-admiral.md apply: the epic-progress DM at
+merge time, and the `Needs Attention` DM that rides the ticket-lifecycle
+transition. (Acting as Athena rather than the owner is an owner rule,
+2026-09-01.)
