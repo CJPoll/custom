@@ -73,11 +73,10 @@ real_markers_fingerprint() {
 }
 REAL_MARKERS_BEFORE="$(real_markers_fingerprint)"
 
-# The set of real-$HOME seen markers that already exist BEFORE the suite runs.
-# The live poll may ADD one keyed to the REAL repo hash while the suite runs --
-# that is allowed and must not fail the guard. Only a marker keyed to one of the
-# FAKE project hashes this suite fabricates is a leak (see the check at the end).
-# Recorded for context in the failure message, not asserted against.
+# The real-$HOME seen dir. The live poll may ADD a marker here keyed to the REAL
+# repo hash while the suite runs -- that is allowed and must not fail the guard.
+# Only a marker keyed to one of the FAKE project hashes this suite fabricates is
+# a leak, which the end-of-suite check (1) looks for by name.
 REAL_SEEN_DIR="${REAL_HOME}/.claude/athena-inbox-seen"
 
 PASS=0; FAIL=0
@@ -1355,39 +1354,107 @@ export HOME
 # can NEVER produce. The fake hashes are recomputed the SAME way the hook names
 # them -- inbox-status --repo-key, hashed -- so a divergence between suite and
 # hook cannot hide a leak.
+#
+# Every fake repo is enumerated by FINDING every git dir under ${TMP}, not by
+# path name: cases fabricate repos at proj/, other/ and sibling/, so a name-based
+# list ("case-*/proj") would silently miss the others. (stubrepo/ is never
+# git-inited, so it has no key of its own -- the stub hook runs with cwd ${REPO},
+# i.e. proj/, so any leak it caused would be keyed to proj's hash, which IS
+# enumerated.) And this check refuses to read "found nothing to look at" as
+# "no leak" (the repo's "a failed lookup must never look like an empty one"
+# rule): checking zero projects, or being unable to compute any fake project's
+# hash, is a FAILURE.
 leaked=""
-for _proj in "${TMP}"/case-*/proj; do
+checked=0
+uncomputable=""
+while IFS= read -r _gitmeta; do
+  [ -n "${_gitmeta}" ] || continue
+  _proj="$(dirname -- "${_gitmeta}")"
   [ -d "${_proj}" ] || continue
-  _fkey="$(cd "${_proj}" 2>/dev/null && "${STATUS_BIN}" --repo-key 2>/dev/null)" || continue
-  [ -n "${_fkey}" ] || continue
+  checked=$((checked + 1))
+  if ! _fkey="$(cd "${_proj}" 2>/dev/null && "${STATUS_BIN}" --repo-key 2>/dev/null)"; then
+    uncomputable="${uncomputable} ${_proj}(--repo-key exited non-zero)"; continue
+  fi
+  if [ -z "${_fkey}" ]; then
+    uncomputable="${uncomputable} ${_proj}(empty key from a repo with a .git)"; continue
+  fi
   _fhash="$(printf '%s' "${_fkey}" | sha256sum 2>/dev/null | cut -c1-32)"
-  case "${_fhash}" in ''|*[!0-9a-f]*) continue ;; esac
+  case "${_fhash}" in
+    ''|*[!0-9a-f]*) uncomputable="${uncomputable} ${_proj}(bad hash [${_fhash}])"; continue ;;
+  esac
   for _m in "${REAL_SEEN_DIR}/${_fhash}."*; do
     [ -e "${_m}" ] || continue
     leaked="${leaked}
-        ${_fhash}.$(basename "${_m}" | sed "s/^${_fhash}\.//")  (fake project: ${_fkey})"
+        $(basename -- "${_m}")  (fake project: ${_fkey})"
   done
-done
-if [ -z "${leaked}" ]; then
-  ok "no fake-project marker leaked into the real \$HOME seen dir"
-else
+done < <(find "${TMP}" -name .git 2>/dev/null)
+if [ "${checked}" -eq 0 ]; then
+  bad "no fake-project marker leaked into the real \$HOME seen dir" \
+"checked ZERO fake projects under ${TMP}, so this check vouches for nothing --
+        yet ${CASE_N} cases ran and every one fabricates a git repo. Either find(1)
+        failed or the per-case repos are gone. Fix: confirm find is on PATH and
+        the fake repos still exist under ${TMP} when this check runs."
+elif [ -n "${leaked}" ]; then
+  # A real leak is the most actionable outcome, so it is reported ahead of the
+  # uncomputable diagnostic when a run happens to have both.
   bad "no fake-project marker leaked into the real \$HOME seen dir" \
 "the suite wrote per-project marker(s) into ${REAL_SEEN_DIR} keyed to a FAKE
-        project it fabricated under ${TMP} -- so a case ran the hook against the
-        real \$HOME rather than its per-case tmp home:${leaked}
-        Fix: find the case that reached run_hook/run_stub_hook without a
-        preceding setup_case (so HOME still pointed at ${REAL_HOME}), or a helper
-        that built a marker path from \${REAL_HOME} instead of \${HOME}. Every
-        marker the hook writes must land under the per-case \${HOME} beneath
-        ${TMP}. Remove the leaked file(s) named above from ${REAL_SEEN_DIR}."
+        project it fabricated under ${TMP} (${checked} projects checked) -- so a
+        suite helper built a marker path from \${REAL_HOME} instead of the
+        per-case \${HOME}:${leaked}
+        Fix: find the helper that wrote under \${REAL_HOME}/.claude/athena-inbox-seen
+        (the hook itself cannot -- assert_fake_home FATAL-exits every run_hook /
+        run_stub_hook against the real \$HOME); it must build the path from
+        \${HOME} beneath ${TMP}. Remove the leaked file(s) named above from ${REAL_SEEN_DIR}."
+elif [ -n "${uncomputable}" ]; then
+  bad "no fake-project marker leaked into the real \$HOME seen dir" \
+"could not compute the marker hash for fake project(s), so a leak keyed to them
+        could not be ruled out (a failed lookup must never read as 'no leak'):${uncomputable}
+        Fix: check that ${STATUS_BIN} --repo-key, sha256sum and cut work in this session."
+else
+  ok "no fake-project marker leaked into the real \$HOME seen dir (${checked} fake projects checked)"
 fi
 
-# (2) The daemon-untouched members of the family, byte-for-byte unmoved. See
-# real_markers_fingerprint for why last-poll / poll.log / the seen dir are NOT
-# in this set (the live poll owns them; asserting them unchanged is asserting a
-# falsehood whenever a session coincides).
+# (2) The daemon-UNTOUCHED members of the family, byte-for-byte unmoved. These
+# are the top-level FALLBACK markers (written only on the hook's degraded,
+# hash-unresolvable path, which this machine's live poll never takes) and
+# settings.json (only ever read). last-poll, poll.log and the seen DIRECTORY are
+# NOT here: the live poll rewrites all three every session, so an mtime assertion
+# on them races the daemon (that was the DND-224 false positive). Their leak
+# coverage is check (1) for the seen dir and check (3) for the log.
 assert_eq "the suite left the real \$HOME marker family untouched" \
   "${REAL_MARKERS_BEFORE}" "$(real_markers_fingerprint)"
+
+# (3) poll.log is SHARED (not project-keyed) and the live poll appends to it on
+# every session, so its mtime/length cannot be fingerprinted without racing.
+#
+# WHO could write to the real poll.log at all? Not the hook: every hook
+# invocation in this suite goes through run_hook / run_stub_hook, each of which
+# calls assert_fake_home FIRST, and assert_fake_home FATAL-exits the whole suite
+# the instant HOME is the real home. So a hook run against the real $HOME is
+# structurally impossible -- it never reaches the log write -- which is why the
+# dropped mtime fingerprint on last-poll / poll.log was a backstop for an event
+# assert_fake_home already prevents, not primary coverage, and racy against the
+# daemon besides. The remaining writer is a suite HELPER that hardcodes
+# ${REAL_HOME}. Check (3) guards that vector by CONTENT: the live poll only ever
+# logs fixed real-repo reason strings (see log_reason), never a path under
+# ${TMP} nor the suite's sentinel, so either string in the real log is a trace
+# only a suite helper could have left, and a concurrent live write can never trip
+# it. (athena-inbox-last-poll -- a 0-byte attempt marker a helper could touch
+# with no ${TMP}/sentinel signature -- is the one residual, and it changes no
+# rate-limit decision; see SABOTAGE_RECORDS.md Z-DND224-1.)
+real_log="${REAL_HOME}/.claude/athena-inbox-poll.log"
+if [ -f "${real_log}" ] && \
+   { grep -qF -- "${TMP}" "${real_log}" 2>/dev/null || grep -qF -- "${SENTINEL}" "${real_log}" 2>/dev/null; }; then
+  bad "the suite left no trace in the real \$HOME poll log" \
+"the real poll log ${real_log} contains this suite's tmp root (${TMP}) or its
+        sentinel -- the live poll never logs either, so a suite helper appended to
+        the real log. Fix: a write reached \${REAL_HOME}/.claude/athena-inbox-poll.log
+        instead of \${HOME}/.claude/athena-inbox-poll.log; every log write must land
+        under the per-case \${HOME} beneath ${TMP}. Remove the offending lines from ${real_log}."
+else
+  ok "the suite left no trace in the real \$HOME poll log"
+fi
 
 echo
 TOTAL=$((PASS + FAIL))

@@ -84,3 +84,67 @@ a hook defect.
     `LEAK:…success`, reddens and names the file.
 - This is the exact conflation the change removes: a concurrent live write no
   longer reads as a suite leak, while a real leak still reddens.
+
+### S-DND224-3 — the shared poll.log is still guarded (by content)
+
+Dropping `athena-inbox-poll.log` from the mtime fingerprint (it races the live
+poll's appends) must not open a leak hole for it. Check (3) guards it by content
+instead.
+
+- **Mutation:** a suite helper appends a line mentioning the tmp root to the
+  REAL log — `printf … "${TMP}" >> "${REAL_HOME}/.claude/athena-inbox-poll.log"`.
+- **Observed:** `FAIL  the suite left no trace in the real $HOME poll log`
+  (`VERDICT: FAIL (1 of 178 cases)`). The live poll never logs a `${TMP}` path
+  nor the sentinel, so the check cannot be tripped by a concurrent live write.
+- **Cleanup:** restored the suite with `git checkout --`; restored the real log
+  from a byte-for-byte `cp -a` backup taken before the run.
+
+### S-DND224-4 — check (1) fails when it looked at NOTHING
+
+- **Mutation:** point the repo-enumerating `find` at a non-existent dir
+  (`find "${TMP}/nope" …`), so the loop checks zero projects.
+- **Observed:** `checked ZERO fake projects … so this check vouches for
+  nothing` (`VERDICT: FAIL (1 of 178)`). A green run that examined nothing is
+  now impossible — "a failed lookup must never look like an empty one".
+- **Cleanup:** none — the mutation writes nothing under the real `$HOME`;
+  restored the suite with `git checkout --`.
+
+### S-DND224-5 — check (1) fails when a fake hash can't be computed
+
+- **Mutation:** truncate the hash to zero chars (`cut -c1-0`), so every fake
+  project yields an empty/bad hash.
+- **Observed:** `could not compute the marker hash for fake project(s) …`
+  (`VERDICT: FAIL (1 of 178)`). An uncomputable key reddens rather than silently
+  skipping the project it could not vet.
+- **Cleanup:** none — the mutation writes nothing under the real `$HOME`;
+  restored the suite with `git checkout --`.
+
+### Z-DND224-1 — MEASURED LIMITATION: `athena-inbox-last-poll` is unguarded
+
+**Who can write into the real `~/.claude`?** Not the hook. Every hook invocation
+in this suite goes through `run_hook` / `run_stub_hook`, and both call
+`assert_fake_home` first — which FATAL-exits the whole suite the instant `HOME`
+is the real home. So a hook run against the real `$HOME` is *structurally
+prevented*, not merely detected after the fact; the no-channel branch also
+stamps nothing (`athena-inbox-poll.sh` "no registry entry declares a channel …
+the marker family was left untouched"). The dropped mtime fingerprint on
+`last-poll` / `poll.log` was therefore a backstop for an event `assert_fake_home`
+already prevents, and racy against the live daemon besides — removing it removed
+a false-positive source, not a real guarantee.
+
+**The one remaining vector is a suite HELPER that hardcodes `${REAL_HOME}`.**
+Those are covered: a helper writing a project-keyed marker → check (1)
+(S-DND224-1); a helper appending fake-env text to the log → check (3)
+(S-DND224-3, since realistic helper text carries the `${TMP}` root or sentinel).
+
+**The single residual is a helper that touches ONLY `athena-inbox-last-poll`.**
+That file is a shared, 0-byte attempt marker the live poll stamps every session;
+a stray touch is byte-for-byte indistinguishable from the daemon's own (no
+project key, no content, only an mtime the daemon moves anyway), so no guard can
+tell them apart without racing — the very false positive this ticket removed. It
+is left unguarded deliberately, and it is safe: a touch of the attempt marker
+changes NO rate-limit decision (it records only "when did this machine last
+attempt"). The rate-limit state that gates warnings — per-project seen markers
+(check 1), top-level fallback markers + settings.json (check 2), the log's
+content (check 3) — all remain guarded. This row records the residual gap rather
+than leaving it silent.
