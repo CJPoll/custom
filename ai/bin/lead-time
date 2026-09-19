@@ -105,17 +105,31 @@ module LeadTime
   end
 
   # Full computation from already-gathered facts. Returns a result Hash.
+  #
+  # Lead time splits into two phases with DIFFERENT improvement levers, so the
+  # result reports both so an improver can target the right one:
+  #   code = start -> merge   (development + review; a HARNESS/process lever)
+  #   tail = merge -> end      (CI + deploy; a PIPELINE-EFFICIENCY lever, which
+  #                             must never be sped up by weakening a check)
   def compute(start_iso_times:, deploy_at:, pipeline_at:, merged_at:)
     start = pick_start(start_iso_times)
     finish, end_kind = pick_end(deploy_at: deploy_at, pipeline_at: pipeline_at,
                                 merged_at: merged_at)
-    secs = (start && finish) ? (finish - start).to_i : nil
+    merged = present?(merged_at) ? Time.iso8601(merged_at) : nil
+    secs      = (start && finish) ? (finish - start).to_i : nil
+    code_secs = (start && merged) ? (merged - start).to_i : nil
+    tail_secs = (merged && finish) ? [(finish - merged).to_i, 0].max : nil
     {
       start: start&.utc&.iso8601,
+      merged: merged&.utc&.iso8601,
       end: finish&.utc&.iso8601,
       end_kind: end_kind,
       lead_seconds: secs,
       lead_human: duration_human(secs),
+      code_seconds: code_secs,
+      code_human: duration_human(code_secs),
+      tail_seconds: tail_secs,
+      tail_human: duration_human(tail_secs),
     }
   end
 end
@@ -341,6 +355,8 @@ def self_test
   check.call("compute pr14 seconds", r[:lead_seconds], 3502)
   check.call("compute pr14 human", r[:lead_human], "58m 22s")
   check.call("compute pr14 kind", r[:end_kind], :merge)
+  check.call("compute pr14 code", r[:code_seconds], 3502)  # start->merge
+  check.call("compute pr14 tail", r[:tail_seconds], 0)     # merge->end (=merge)
 
   # compute deploy shape (gitlab walt_ui MR1188: 05:05:41Z -> 06:58:17Z)
   r2 = LeadTime.compute(
@@ -349,6 +365,8 @@ def self_test
     merged_at: "2026-09-19T06:47:40Z")
   check.call("compute deploy kind", r2[:end_kind], :deploy)
   check.call("compute deploy seconds", r2[:lead_seconds], 6756) # 05:05:41 -> 06:58:17
+  check.call("compute deploy code", r2[:code_seconds], 6119)    # start -> merge
+  check.call("compute deploy tail", r2[:tail_seconds], 637)     # merge -> deploy
 
   if failures.empty?
     puts "lead-time --self-test: PASS (pure-logic assertions)"
@@ -380,9 +398,9 @@ end
 
 def print_row(r)
   kind = { deploy: "deploy", pipeline: "pipeline", merge: "merge", open: "open" }[r[:end_kind]] || r[:end_kind].to_s
-  printf("#%-5s  lead=%-10s  start=%s  end=%s  via=%-8s %s\n",
-         r[:pr], r[:lead_human], r[:start] || "-", r[:end] || "-", kind,
-         (r[:title] || "")[0, 52])
+  printf("#%-5s  lead=%-9s (code %-8s + tail %-8s)  via=%-8s %s\n",
+         r[:pr], r[:lead_human], r[:code_human], r[:tail_human], kind,
+         (r[:title] || "")[0, 46])
 end
 
 def main(argv)
@@ -391,6 +409,7 @@ def main(argv)
   repo = nil
   id = nil
   since = nil
+  slow_min = nil
   as_json = argv.include?("--json")
   i = 0
   while i < argv.length
@@ -398,6 +417,7 @@ def main(argv)
     when "--repo"        then repo = argv[i += 1]
     when "--pr", "--mr"  then id = argv[i += 1]
     when "--since"       then since = argv[i += 1]
+    when "--slow"        then slow_min = Integer(argv[i += 1], exception: false)
     when "--json"        then nil
     else
       warn "lead-time: unknown argument #{argv[i].inspect}"
@@ -428,10 +448,19 @@ def main(argv)
     return 2
   end
 
+  # --slow N: keep only tickets whose lead time is >= N minutes (the feedback
+  # loop's outlier filter). Rows without a computable lead are dropped.
+  if slow_min
+    threshold = slow_min * 60
+    rows = rows.select { |r| r[:lead_seconds] && r[:lead_seconds] >= threshold }
+               .each { |r| r[:slow_threshold_min] = slow_min }
+    rows.sort_by! { |r| -(r[:lead_seconds] || 0) }
+  end
+
   if as_json
     puts JSON.pretty_generate(rows)
   else
-    warn "repo=#{repo}  forge=#{forge.name}"
+    warn "repo=#{repo}  forge=#{forge.name}#{slow_min ? "  slow>=#{slow_min}m: #{rows.size}" : ''}"
     rows.each { |r| print_row(r) }
   end
   0
