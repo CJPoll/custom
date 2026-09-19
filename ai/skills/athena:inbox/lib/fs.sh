@@ -34,8 +34,12 @@ fs_size() {
 }
 
 # fs_slice_from <path> <byte-offset>
+# Empty for a file that does not exist -- the first-run case, which the
+# contract calls normal. (There was a `[ -f "$2" ]` here that tested the
+# OFFSET as a pathname and discarded its result: it read as a guard and was
+# not one. `tail` already yields nothing for a missing file, so the guard was
+# never needed; what it did was disguise that fact.)
 fs_slice_from() {
-  [ -f "$2" ] 2>/dev/null
   tail -c "+$(( ${2} + 1 ))" "$1" 2>/dev/null || true
 }
 

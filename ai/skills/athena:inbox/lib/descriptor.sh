@@ -279,15 +279,21 @@ descriptor_has_channel() {
 
 # descriptor_select <repo-id>   (records on stdin: "<source>\t<one-line json>")
 #
-# Prints the matching record's JSON, or NOTHING with status 1 when no entry
-# names this repo. THE NO-MATCH PATH IS NOT A FAULT and must stay silent: a cwd
-# in an unregistered repo is the ordinary state of most repos on this machine,
-# and an error there would train the reader to ignore errors.
+# Status 1 = NO ENTRY NAMES THIS REPO, with no output. That is not a fault and
+# must stay silent: a cwd in an unregistered repo is the ordinary state of most
+# repos on this machine, and an error there would train the reader to ignore
+# errors.
 #
-# Two entries naming the same repo is a HARD error. Ambiguous ownership is the
+# Status 2 = AMBIGUOUS, a hard error. Two entries naming the same repo is the
 # one case where picking a winner could hand a session another project's
 # channels, so it refuses -- and the refusal names the FILES, never their
 # channels, because a denial must not be usable to enumerate a namespace.
+#
+# The two failures get DIFFERENT statuses on purpose. Sharing status 1 would
+# make every caller's "no entry, so zero channels, exit 0" branch swallow the
+# ambiguity too, and ambiguous ownership would present as "this project has not
+# opted in" -- a well-formed empty answer, which is exactly the conflation the
+# hard error exists to prevent.
 descriptor_select() {
   local want="$1" line src json match="" match_src="" dupes=""
 
@@ -303,8 +309,8 @@ descriptor_select() {
 
   if [ -n "${dupes}" ]; then
     inbox_fail "registry files ${match_src}, ${dupes} all claim the same repo; ownership is ambiguous" \
-      "leave exactly one registry file whose \"repo\" is \"${want}\" and delete or re-key the others."
-    return 1
+      "leave exactly one registry file whose \"repo\" is \"${want}\" and delete or re-key the others." 2
+    return 2
   fi
   [ -n "${match}" ] || return 1
   printf '%s\n' "${match}"

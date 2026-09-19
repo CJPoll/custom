@@ -19,13 +19,14 @@
 # "nothing new" every session is noise, and noise is what makes a real notice
 # invisible.
 #
-# `never_delivered` — "nobody ever registered the writer" and "nothing new
-# arrived" are identical on disk and must not be identical in the data, so the
-# distinction is carried in `--json`. It is deliberately NOT printed in the
-# text line: the text line is the unprompted one, and the all-zero rule above
-# governs it absolutely. Reporting a dead channel is the liveness concern, and
-# it belongs to `inbox-doctor` and the hook's rate-limited warning, which read
-# this field rather than re-deriving it.
+# A `log` channel whose inbox file has NEVER existed is reported, with a `Fix:`
+# clause naming producer registration — the contract requires it ("Declaring a
+# `log` channel MUST be accompanied by registering its producer"). That is not
+# a violation of the all-zero rule above, because a never-delivered channel is
+# not zero, it is BROKEN: the file exists only if a producer was separately
+# configured to write it, so "nobody registered the writer" and "nothing
+# arrived" look identical on disk and must not look identical here. A healthy
+# channel that is merely empty still prints nothing.
 #
 # Not opting in is not a fault: a cwd in no git repository, or a repo with no
 # registry entry, prints nothing and exits 0. A MALFORMED registry entry is a
@@ -89,6 +90,8 @@ printf '%s' "${STATUS}" | jq -r '
      then " (+\(.unreadable) unreadable)" else "" end) as $u
   | if $n > 0 then
       "athena:inbox: \($c.name) — \($n) new\($u). Run: read-inbox \($c.name)"
+    elif $c.kind == "log" and $c.never_delivered then
+      "athena:inbox: \($c.name) is declared, but nothing has EVER been delivered to it.\n  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json — then re-check. An unregistered producer and an empty channel look identical on disk."
     else empty end
 '
 exit 0

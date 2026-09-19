@@ -15,7 +15,16 @@ yet — where this document describes them, it is describing the shape they must
 fit, not a command you can run.
 
 Normative contract: `ai/contracts/athena-inbox.md`. Where this file and the
-contract disagree, the contract wins.
+contract disagree, the contract wins — with **one dated exception**, currently
+being amended in the contract itself by DND-202:
+
+> **Later (2026-09-18):** the contract's *Tenancy: the descriptor* section
+> still describes a `.athena-inbox.json` **committed at each repo's root**,
+> resolved from the **git toplevel**. The owner reversed that on 2026-09-18
+> (option B, DND-202): the config is harness-side and keyed by the **git
+> common dir**, as described below. This code implements the decision, not the
+> superseded prose. DND-202 carries the contract amendment; until it lands,
+> the contract's repo-root wording is stale and this section supersedes it.
 
 ## The one rule that matters
 
@@ -119,7 +128,7 @@ only:
 |---|---|
 | `new` / `unread` | messages waiting, **post-dedupe** — what the read step would actually show |
 | `unreadable` | lines this reader could not parse, counted separately, never fatal |
-| `never_delivered` | nothing has **ever** arrived here. Not the same as "nothing new", and deliberately not printed in the text line: that is a liveness concern for `inbox-doctor`, and the all-zero rule governs the unprompted line absolutely |
+| `never_delivered` | nothing has **ever** arrived here. Not the same as "nothing new" — the file exists only if a producer was separately registered, so this is a broken setup, not a quiet morning. It **is** reported in the text line, with a `Fix:` clause naming producer registration, because the contract makes that a MUST; the all-zero silence rule covers healthy-but-empty channels, not broken ones |
 | `offset_reset` | a stored offset past EOF was recovered by re-reading from 0 |
 
 A malformed registry entry is a **hard error**, not zero channels. Partially

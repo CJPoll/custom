@@ -77,12 +77,22 @@ names_valid_identity()     { names_valid_segment "$1"; }
 # names_valid_namespace <relative-path>
 # One or more segments, each matching the segment grammar. No `..`, no leading
 # dot, no absolute path.
+# The segments are walked by parameter expansion, NOT by `for seg in ${ns}`
+# with IFS=/. An unquoted expansion is word-split AND pathname-expanded, so a
+# namespace of `*` would glob against the caller's current directory: in a
+# directory containing `abc` the loop would validate `abc` and accept `*`. The
+# grammar's verdict would then depend on the cwd of whoever called it -- the
+# one thing a domain file claiming to be pure and fixture-free must not do.
+# `set -f` would also fix it, but it is process-global state this function has
+# no business toggling on a caller's behalf.
 names_valid_namespace() {
-  local ns="$1" seg
+  local ns="$1" seg rest
   [ -n "${ns}" ] || return 1
   case "${ns}" in /*|*//*|*/) return 1 ;; esac
-  local IFS=/
-  for seg in ${ns}; do
+  rest="${ns}"
+  while [ -n "${rest}" ]; do
+    seg="${rest%%/*}"
+    if [ "${seg}" = "${rest}" ]; then rest=""; else rest="${rest#*/}"; fi
     names_valid_segment "${seg}" || return 1
   done
   return 0
@@ -151,8 +161,15 @@ names_resolve_in_root() {
       ;;
   esac
 
-  local IFS=/
-  for comp in ${rel}; do
+  # Walked by parameter expansion for the same reason as names_valid_namespace:
+  # `for comp in ${rel}` with IFS=/ also PATHNAME-EXPANDS each word, so a path
+  # containing a glob character would be checked as whatever it happened to
+  # match in the caller's cwd -- and then returned UNEXPANDED, so the component
+  # that was validated is not the component that gets used.
+  local rest="${rel}"
+  while [ -n "${rest}" ]; do
+    comp="${rest%%/*}"
+    if [ "${comp}" = "${rest}" ]; then rest=""; else rest="${rest#*/}"; fi
     case "${comp}" in
       ..|.)
         inbox_fail "path \"${rel}\" escapes the inbox root (component \"${comp}\")" "${fix}"

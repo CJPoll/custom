@@ -175,6 +175,37 @@ for p in "../x.jsonl" "a/../x.jsonl" "A/x.jsonl" "a/x.json" "a/.x.jsonl"; do
   else ok "an illegal log path is rejected: [${p}]"; fi
 done
 
+# A glob metacharacter must be judged as a LITERAL. These functions walk their
+# segments by parameter expansion rather than `for x in ${var}` precisely
+# because an unquoted expansion is pathname-expanded as well as word-split: a
+# namespace of `*` would otherwise glob against the caller's cwd, so the
+# grammar's verdict would depend on where it was called from and the component
+# validated would not be the component returned. Asserted from INSIDE a
+# directory that has entries to match, or the case measures nothing.
+globdir="${TMP}/globdir"; mkdir -p "${globdir}/abc" "${globdir}/def"
+for g in "*" "?" "[a-z]" "a/*" "*/b"; do
+  if ( cd "${globdir}" && names_valid_namespace "${g}" ); then
+    bad "a glob metacharacter is judged literally, not expanded: [${g}]" "accepted"
+  else ok "a glob metacharacter is judged literally, not expanded: [${g}]"; fi
+done
+# A `*` in the FINAL component is legal and stays legal: the deployed Ruby
+# client's valid_name? permits it (it bars only `/`, `\`, NUL, `..` and a
+# leading dot), and this slice mirrors that grammar rather than reinventing a
+# stricter one. What must hold is that it is treated as a LITERAL character --
+# the same verdict from any cwd -- not that it is refused.
+if ( cd "${globdir}" && names_valid_log_path "*.jsonl" ) \
+  && ( cd "${TMP}" && names_valid_log_path "*.jsonl" ); then
+  ok "a glob character in a name is a literal, and its verdict does not vary by cwd"
+else bad "a glob character in a name is a literal, and its verdict does not vary by cwd" "verdict varied"; fi
+# But it is still a NAME, so it may not carry a namespace segment that the
+# segment grammar rejects.
+if ( cd "${globdir}" && names_valid_log_path "*/x.jsonl" ); then
+  bad "a glob in a log path's NAMESPACE is rejected by the segment grammar" "accepted"
+else ok "a glob in a log path's NAMESPACE is rejected by the segment grammar"; fi
+got="$(cd "${globdir}" && names_resolve_in_root "/tmp/r" "*.jsonl" 2>/dev/null)"
+assert_eq "a resolved path is returned unexpanded, whatever the cwd contains" \
+  "/tmp/r/*.jsonl" "${got}"
+
 echo "== 2. Domain: lib/descriptor.sh =="
 
 VALID_DESC='{
@@ -325,6 +356,13 @@ else
   assert_contains "two entries claiming one repo is a hard error with a Fix: clause" "Fix:" "${err}"
   assert_not_contains "the ambiguity refusal names files, never their channels" "secret-chan" "${err}"
 fi
+# The status must be DISTINCT from "no entry matched". Sharing status 1 makes
+# every caller's "nothing owned, so zero channels, exit 0" branch swallow the
+# ambiguity, and ambiguous ownership then presents as "this project has not
+# opted in" -- a well-formed empty answer, which is the exact conflation the
+# hard error exists to prevent.
+printf '%s\n' "${DUPES}" | descriptor_select "/home/x/dev/a/.git" >/dev/null 2>&1; rc=$?
+assert_eq "ambiguous ownership has its own status, not 'no match'" "2" "${rc}"
 
 echo "== 3. Domain: lib/logchan.sh =="
 
@@ -563,6 +601,17 @@ st="$(cd "${mine}" && inbox_status_json)"
 assert_eq "a never-delivered log channel is distinguished from 'nothing new'" "true" \
   "$(jq -r '.channels[] | select(.name=="mine") | .never_delivered' <<<"${st}")"
 
+# The contract makes this a MUST, not a nicety: "Declaring a log channel MUST
+# be accompanied by registering its producer", and a tool reporting on a log
+# channel whose file has never existed MUST say so with a Fix: clause naming
+# producer registration. A never-delivered channel is not zero, it is broken,
+# so the all-zero silence rule does not cover it.
+out="$(cd "${mine}" && "${BIN}/inbox-status" 2>&1)"
+assert_contains "a never-delivered log channel is REPORTED, not silently zero" \
+  "nothing has EVER been delivered" "${out}"
+assert_contains "the never-delivered report carries a Fix: clause" "Fix:" "${out}"
+assert_contains "the Fix: clause names producer registration" "producer" "${out}"
+
 # A populated log channel counts POST-dedupe: a pre-dedupe count would announce
 # messages the read step then declines to show.
 printf '%s\n%s\n' "${L1}" "${L2}" > "${ATHENA_INBOX_ROOT}/mine.jsonl"
@@ -618,6 +667,24 @@ uproj2="$(make_repo uproj2)"
 printf '%s\n' '{ broken' > "${ATHENA_INBOX_ROOT}/projects/uproj2.json"
 assert_refused "an unparseable registry FILE is fatal to inbox_channels, not silent zero" \
   bash -c "cd '${uproj2}' && $(_in_libs) && inbox_channels"
+
+# Ambiguous ownership must be fatal at EVERY entry point, not only in the
+# domain. Proven at the domain alone, the manager's "nothing owned, exit 0"
+# branch swallowed it and inbox-status printed nothing and exited 0 -- a
+# well-formed zero for a registry whose ownership nobody can determine. This
+# is the same shape of gap as S35, one layer up.
+setup_case
+amb="$(make_repo amb)"
+register amb-one   "${amb}" '{"mine":{"kind":"log","path":"mine.jsonl"}}'
+register amb-two   "${amb}" '{"secret-chan":{"kind":"log","path":"s.jsonl"}}'
+assert_refused "ambiguous ownership is fatal to inbox_channels, not silent zero" \
+  bash -c "cd '${amb}' && $(_in_libs) && inbox_channels"
+err="$(cd "${amb}" && "${BIN}/inbox-status" 2>&1)"; rc=$?
+if [ "${rc}" -eq 0 ]; then bad "ambiguous ownership is fatal to inbox-status" "exited 0"
+else assert_contains "ambiguous ownership is fatal to inbox-status with a Fix: clause" "Fix:" "${err}"; fi
+assert_eq "ambiguous ownership never prints a well-formed empty result" "" \
+  "$(cd "${amb}" && "${BIN}/inbox-status" --json 2>/dev/null)"
+assert_not_contains "the ambiguity refusal still names no channel" "secret-chan" "${err}"
 
 echo "== 7. Framework: bin/inbox-status =="
 

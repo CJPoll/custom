@@ -13,10 +13,10 @@ string. If it still passes, the check it protects has stopped being
 load-bearing and the row is now a bug report.
 
 Rows recording a **measured zero** are the important ones — they mark a claim
-no test protects. This run produced six on the first pass. **Five of them were
-real gaps and were closed** (S2, S11, S14, S18, S31, S35 — see *What the first
-pass got wrong*); one is a genuine unreachability and is written up rather than
-quietly dropped.
+no test protects. This run produced **seven** on the first pass. **Six of them
+were real gaps and were closed** (S2, S11, S14, S18, S31, S35 — see *What the
+first pass got wrong*); the seventh, **S12**, is a genuine unreachability and
+is written up rather than quietly dropped.
 
 Every mutation was applied by an exact-substring replace that asserted the
 anchor occurs **exactly once** before writing (a sabotage applied by substring
@@ -39,9 +39,11 @@ corrected and re-run.
   `bin/inbox-status`
 - **Suite run:** `bash test/self-test.sh` (no network — nothing here makes one;
   the inbox root is always a `mktemp -d`; ~40s)
-- **Baseline:** `VERDICT: PASS (142 cases)` (131 at the first pass; 11 added
-  after the sabotage run found five checks the suite did not actually protect,
-  plus the state-rewrite rule that arrived mid-build)
+- **Baseline:** `VERDICT: PASS (158 cases)` (131 at the first pass; 11 added
+  after the sabotage run found six checks the suite did not actually protect,
+  plus the state-rewrite rule that arrived mid-build, plus 16 more from the
+  `athena-diff-critic` round — see *What the critic found that sabotage did
+  not*)
 - **Runner:** 38 mutations, one at a time, full suite after each.
 
 ### What the suite proves
@@ -89,10 +91,10 @@ corrected and re-run.
 
 ### What the first pass got wrong
 
-Six mutations were survived by the green suite. Recording them is the point of
-the exercise; **five were real holes** and the suite gained 11 cases closing
-them. This is the honest accounting of what the first draft of the tests did
-not actually prove:
+Seven mutations were survived by the green suite. Recording them is the point
+of the exercise; **six were real holes** (the seventh, S12, is the measured
+zero below) and the suite gained cases closing every one. This is the honest
+accounting of what the first draft of the tests did not actually prove:
 
 | Row | What the green run meant | What was added |
 |---|---|---|
@@ -102,6 +104,27 @@ not actually prove:
 | S18 | Deny-by-default was proven only at the **manager**; the domain's own copy in `descriptor_resolve` was untested, so the next entry point calling it directly would have had no check. | A domain-level refusal case on `descriptor_resolve`. |
 | S31 | The sentinel assertions proved no body leaked **that day** — but only because the per-message record happens not to carry `text`. They could not prove no body leaks tomorrow. | A **structural** assertion: the status object carries counts and no per-message key of any kind. |
 | S35 | Two use cases each carry their own copy of the "a fatal registry error is fatal" check; only `inbox_status_json`'s was covered, so `inbox_channels` could silently report zero channels on a broken registry — indistinguishable from "not opted in". | `an unparseable registry FILE is fatal to inbox_channels, not silent zero`. |
+
+### What the critic found that sabotage did not
+
+Mutation testing proves a check is load-bearing. It cannot find a defect in
+code **no mutation targets**, and it cannot find a defect whose correct
+behaviour nothing in the suite ever described. The `athena-diff-critic` round
+found three of those, and they are recorded here because the gap between the
+two techniques is the lesson:
+
+| Finding | Why 38 mutations missed it |
+|---|---|
+| `descriptor_select` returned status **1** for *ambiguous ownership* and status **1** for *no entry matched*, so the manager's "nothing owned → zero channels, exit 0" branch swallowed the hard error and `inbox-status` printed nothing and exited 0 on a registry nobody can resolve. | S17 removed the ambiguity check and reddened the domain-level case, which passed. No mutation could reveal that the *status* the check returns is indistinguishable from success one layer up — the bug was in code that was present and running. Closed by four cases through `inbox_channels` and `bin/inbox-status`. |
+| `names_valid_namespace` and `names_resolve_in_root` iterated an **unquoted** expansion (`for seg in ${ns}` with `IFS=/`), so each word was pathname-expanded: a namespace of `*` globbed against the **caller's cwd**, and the component validated was not the component returned. A domain file's verdict depended on where it was called from. | No case fed a glob metacharacter to any grammar function, so no mutation of the *code* could redden something the *suite never exercised*. Closed by eight cases asserting literal treatment from inside a directory with entries to match. |
+| `fs_slice_from` carried `[ -f "$2" ]` — testing the byte **offset** as a pathname, discarding the result. It read as a missing-file guard and was not one. | Mutating a no-op changes nothing, by definition. |
+
+Two further findings were doc-level: this file's headline count disagreed with
+its own evidence (five vs. six), and `bin/inbox-status` deviated from a
+contract **MUST** (a never-delivered `log` channel must be reported with a
+`Fix:` clause naming producer registration) with the deviation argued in the
+skill rather than honoured. Both are fixed; the never-delivered report gained
+three cases.
 
 ### Measured zeros
 
