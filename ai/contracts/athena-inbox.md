@@ -153,8 +153,15 @@ The contract would be ambiguous without saying who creates what, so:
   `tmp/` and `.acked/`, and `.event` — at `0700` for directories and `0600` for
   the doorbell, before arming a waiter on them.
 - A **writer** creates only the surface it writes: its own inbox file, or its
-  own `<write>/` and `<write>/tmp/`. A writer MUST NOT create a peer's `read`
-  directory, because doing so fabricates a channel the peer never declared.
+  own `<write>/` and `<write>/tmp/`. It MUST NOT create **the directory it reads
+  from** — that is the peer's delivery target, and fabricating it invents a
+  channel the peer never declared.
+
+  Say it as "the directory you read from", never as "the peer's `read`
+  directory": under the mirrored-descriptor model, **my `write` directory *is*
+  the peer's `read` directory** (`to-server/` is what the server agent reads).
+  Phrased the other way the rule would forbid creating exactly the directory the
+  bullet above requires you to create.
 - Provisioning is **idempotent and never destructive**. It creates what is
   missing and adjusts modes on what it created; it never truncates, replaces, or
   re-creates an existing surface.
@@ -363,10 +370,21 @@ maildir  read dir     R/<namespace>/<read>/
          my staging   R/<namespace>/<write>/tmp/   (I deliver through this)
          peer staging R/<namespace>/<read>/tmp/    (the peer delivers through this)
          ack dir      R/<namespace>/<read>/.acked/
-         doorbells    R/<namespace>/<read>/.event   (the one to watch)
-                      R/<namespace>/<write>/.event  (the one to bump)
+         doorbells    R/<namespace>/<read>/.event   (incoming mail, and my acks)
+                      R/<namespace>/<write>/.event  (my deliveries, and the
+                                                     peer's acks of them)
          lock         R/<namespace>/<read>/.consumer.lock
 ```
+
+**A directory's `.event` means "this directory changed" — nothing narrower.**
+There is no "the one to watch" and "the one to bump": each doorbell is bumped by
+whoever changes its directory, whether by delivering a message into it or by
+acking one inside it. **A party watches both doorbells in its namespace** — its
+`read` doorbell for incoming mail, its `write` doorbell for the peer's acks of
+what it sent. Labelling one doorbell as watch-only and the other as bump-only
+breaks the ack notification: my ack happens inside *my* `read` directory, which
+is the directory the *peer* writes into, so the peer learns of it by watching
+that same doorbell from its own side.
 
 **Each mail directory owns its own `tmp/`**, because the rule is always "stage
 in `tmp/` of the directory you are delivering *to*". This identity writes
@@ -713,12 +731,16 @@ lenient about what I receive.
   the end.
 - **Ack is not agreement.** Acking a proposal you disagree with is correct; say
   so in a reply.
-- **Bump the doorbell of the directory you acked in, after the move.** An ack
-  is the only way the peer learns its message was ingested, and a move into
-  `.acked/` otherwise rings no bell — leaving the peer to poll, which
-  *The doorbell* forbids. A consequence readers MUST handle: **a wake does not
-  imply unread mail.** Waking to find zero unread is normal; it means an ack
-  landed, not that something was missed.
+- **Bump the doorbell of the directory you acked in, after the move.** The ack
+  happens inside your `read` directory, so you bump `<read>/.event` — which is
+  the doorbell the **peer** watches from its side, because that directory is the
+  one the peer delivers into. That is how the peer learns its message was
+  ingested; a move into `.acked/` otherwise rings no bell at all, leaving the
+  peer to poll, which *The doorbell* forbids.
+
+  Two consequences readers MUST handle: **a wake does not imply unread mail**
+  (waking to find zero unread is normal — it means an ack landed), and a party
+  will observe bumps it caused itself, which it MAY ignore.
 - **Never delete a message.** `.acked/` is the record, and the only durable
   transcript of the collaboration.
 - **Never ack your own message.** A message whose `from` is your own `identity`,
@@ -815,8 +837,11 @@ timeout "$BUDGET" inotifywait -qq -e attrib,modify,close_write,move_self,delete_
 - `BUDGET` defaults to **540s**, under the 600s ceiling at which an unattended
   `claude -p` kills background subagents. `ATHENA_INBOX_WAIT_BUDGET` overrides
   it, but the override is **bounded, not free**: it MUST be a positive integer,
-  and a value of 600 or more MUST be refused (or clamped to 540) with a `Fix:`
-  line naming the 600s ceiling. An unbounded override reintroduces the
+  and a value of 600 or more MUST be **refused** — non-zero exit, with a `Fix:`
+  line naming the 600s ceiling. Refuse rather than silently clamping, so the
+  caller learns the budget it asked for is not the budget it got; a tool MAY
+  offer clamping behind an explicit opt-in flag, but never as the default for a
+  bare override. An unbounded override reintroduces the
   killed-subagent bug in a form that looks like configuration. A session that
   has raised `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` may raise this to match.
 - **A timeout means re-arm, not all-clear.** Treating a timeout as "nothing to
