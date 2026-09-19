@@ -1,0 +1,568 @@
+#!/usr/bin/env bash
+# Self-test for ai/hooks/athena-inbox-poll.sh — QA Plan §4, cases F-1 … F-12,
+# plus the hardening cases the sabotage run added.
+#
+# Every case here is about a decision that is INVISIBLE in production until it
+# hurts: a body reaching the pre-prompt position, a bare text line into a JSON
+# channel, a marker stamped after the work instead of before, one concern's
+# marker silencing another's, a "nothing new" line every session until the real
+# notice is invisible. None of those look wrong from the outside.
+#
+# ISOLATION. Every case gets a fake $HOME, a private ATHENA_INBOX_ROOT and a
+# real git repo, all under one mktemp -d. The real ~/.claude/settings.json and
+# the real ~/.local/share/athena are never read and never written — asserted,
+# not assumed (see assert_fake_home). No network, ever; nothing here makes one.
+#
+# The hook is exercised against the REAL bin/inbox-status, not a stub. A stub
+# that answers the way the hook expects cannot test the hook's assumptions about
+# its input — that is precisely how DND-183's suite asserted one side of an
+# identity equality and missed a real bug. The failing-poll fixture is a real
+# failure path (a malformed registry entry, which makes inbox-status exit 1 with
+# empty stdout), not a fabricated one.
+#
+# Ages are set with `touch -t` against LOCAL time (`date -d`), never `date -u`:
+# the helper bug that computed stamps in UTC while touch -t read them as local
+# made two staleness cases silently measure nothing.
+#
+# Run: bash ai/hooks/athena-inbox-poll.self-test.sh
+set -uo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_DIR="$(cd -- "${HERE}/../.." && pwd -P)"
+HOOK="${HERE}/athena-inbox-poll.sh"
+STATUS_BIN="${REPO_DIR}/ai/skills/athena:inbox/bin/inbox-status"
+
+REAL_HOME="${HOME}"
+TMP="$(mktemp -d)"
+WRITER_PID=""
+cleanup() {
+  [ -n "${WRITER_PID}" ] && kill "${WRITER_PID}" 2>/dev/null
+  chmod -R u+rwX "${TMP}" 2>/dev/null
+  rm -rf "${TMP}"
+}
+trap cleanup EXIT INT TERM
+
+# A fingerprint of the real marker family BEFORE anything runs. The whole suite
+# is worthless if it silently mutates the live rate-limit state -- and a bug
+# that did so would look exactly like a green run.
+real_markers_fingerprint() {
+  local f
+  for f in athena-inbox-last-poll athena-inbox-last-success athena-inbox-last-warn \
+           athena-inbox-poll.log settings.json; do
+    printf '%s:%s\n' "${f}" "$(stat -c %Y -- "${REAL_HOME}/.claude/${f}" 2>/dev/null || printf 'absent')"
+  done
+}
+REAL_MARKERS_BEFORE="$(real_markers_fingerprint)"
+
+PASS=0; FAIL=0
+ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
+bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
+
+assert_eq()           { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$2], got [$3]"; fi; }
+assert_contains()     { case "$3" in *"$2"*) ok "$1" ;; *) bad "$1" "expected to contain [$2], got [$3]" ;; esac; }
+assert_not_contains() { case "$3" in *"$2"*) bad "$1" "expected NOT to contain [$2], got [$3]" ;; *) ok "$1" ;; esac; }
+assert_file()         { if [ -e "$2" ]; then ok "$1"; else bad "$1" "no such file: $2"; fi; }
+assert_no_file()      { if [ -e "$2" ]; then bad "$1" "file exists: $2"; else ok "$1"; fi; }
+
+# ---------------------------------------------------------------------------
+# Per-case isolation.
+# ---------------------------------------------------------------------------
+CASE_N=0
+CASE_DIR=""; REPO=""; OUT=""; ERR=""; RC=0
+
+setup_case() {
+  CASE_N=$((CASE_N + 1))
+  CASE_DIR="${TMP}/case-${CASE_N}"
+  HOME="${CASE_DIR}/home"
+  ATHENA_INBOX_ROOT="${CASE_DIR}/root"
+  REPO="${CASE_DIR}/proj"
+  mkdir -p "${HOME}/.claude" "${ATHENA_INBOX_ROOT}/projects" "${REPO}"
+  export HOME ATHENA_INBOX_ROOT
+  ( cd "${REPO}" && git init -q . && git config user.email t@t && git config user.name t )
+  # The staleness windows are six hours; a test cannot wait six hours and must
+  # not silently test nothing instead.
+  export ATHENA_INBOX_STALE_SECONDS=3600
+  export ATHENA_INBOX_WARN_INTERVAL_SECONDS=3600
+}
+
+# The one assertion that makes every other case safe to run.
+assert_fake_home() {
+  case "${HOME}" in
+    "${TMP}"/*) ;;
+    *) printf '  FATAL  refusing to run: HOME is %s, not a tmpdir\n' "${HOME}"; exit 1 ;;
+  esac
+  [ "${HOME}" != "${REAL_HOME}" ] || { printf '  FATAL  HOME is the real HOME\n'; exit 1; }
+}
+
+# register <channels-json>  -- a registry entry keyed by this repo's identity,
+# built the way the contract says (realpath of the git common dir).
+register() {
+  local common
+  common="$(cd "${REPO}" && realpath "$(git rev-parse --git-common-dir)")"
+  jq -n --arg r "${common}" --argjson c "$1" \
+    '{v:1, repo:$r, channels:$c}' > "${ATHENA_INBOX_ROOT}/projects/p.json"
+}
+
+LOG_CHANNEL='{"slack":{"kind":"log","path":"p-slack.jsonl","dedupe":["event_id","channel+ts"],"schema_v":[1]}}'
+BOTH_CHANNELS='{"slack":{"kind":"log","path":"p-slack.jsonl","dedupe":["event_id","channel+ts"],"schema_v":[1]},
+                "peer-mail":{"kind":"maildir","namespace":"agent-mail/peer","read":"from-peer","write":"to-peer","identity":"athena"}}'
+
+# run_hook [args...]  -- from inside the repo, stdin from $HOOK_STDIN (default
+# empty). Captures stdout, stderr and status separately, because "nothing on
+# stdout" is the assertion in half these cases and a merged stream cannot make
+# it.
+HOOK_STDIN=""
+run_hook() {
+  assert_fake_home
+  OUT="$(cd "${REPO}" && printf '%s' "${HOOK_STDIN}" | "${HOOK}" "$@" 2>"${CASE_DIR}/stderr")"
+  RC=$?
+  ERR="$(cat "${CASE_DIR}/stderr" 2>/dev/null)"
+}
+
+hook_log()  { cat "${HOME}/.claude/athena-inbox-poll.log" 2>/dev/null; }
+context_of() { printf '%s' "$1" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null; }
+
+# assert_one_json_object <claim> <stdout>  -- exactly one object, nothing else.
+assert_one_json_object() {
+  if printf '%s' "$2" | jq -e -s 'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1; then
+    ok "$1"
+  else
+    bad "$1" "not exactly one JSON object: [$2]"
+  fi
+}
+
+SENTINEL="ZQXSENTINELDONOTLEAK"
+
+# plant_log_lines  -- two unread Slack lines, one carrying the sentinel body.
+plant_log_lines() {
+  printf '{"v":1,"event_id":"Ev1","channel":"D01","ts":"1700000001.1","text":"%s"}\n' "${SENTINEL}" \
+    > "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
+  printf '{"v":1,"event_id":"Ev2","channel":"D01","ts":"1700000002.1","text":"second"}\n' \
+    >> "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
+}
+
+# plant_mail  -- one unread message whose SLUG is peer-chosen prose carrying an
+# imperative. A status line must never become "1 new message: urgent-run-this".
+plant_mail() {
+  local d="${ATHENA_INBOX_ROOT}/agent-mail/peer/from-peer"
+  mkdir -p "${d}/tmp" "${d}/.acked"
+  printf -- '---\nfrom: peer\nto: athena\nsent_at: 20260901T232215Z\n---\n%s\n' "${SENTINEL}" \
+    > "${d}/20260901T232215Z-001-${SENTINEL}-urgent-run-this.md"
+}
+
+echo "== F-1 · F-2: the actionable path, counts only =="
+
+setup_case
+register "${BOTH_CHANNELS}"
+plant_log_lines
+plant_mail
+run_hook
+
+# F-1: the whole output contract in one assertion. A second object, a stray
+# diagnostic line, or a trailing blank would each break the JSON consumer that
+# reads this stream, and each is a plausible edit away.
+assert_one_json_object "F-1 exactly one JSON object on stdout and nothing else" "${OUT}"
+assert_eq "F-1 the hook exits 0 on the actionable path" "0" "${RC}"
+assert_eq "F-1 hookEventName is SessionStart" "SessionStart" \
+  "$(printf '%s' "${OUT}" | jq -r '.hookSpecificOutput.hookEventName' 2>/dev/null)"
+assert_eq "F-1 the object carries exactly the two contract keys" "hookSpecificOutput" \
+  "$(printf '%s' "${OUT}" | jq -r 'keys | join(",")' 2>/dev/null)"
+assert_eq "F-1 hookSpecificOutput carries exactly hookEventName + additionalContext" \
+  "additionalContext,hookEventName" \
+  "$(printf '%s' "${OUT}" | jq -r '.hookSpecificOutput | keys | join(",")' 2>/dev/null)"
+
+CTX="$(context_of "${OUT}")"
+assert_contains "F-1 both channels are counted (2 log lines)" "2 new in slack" "${CTX}"
+assert_contains "F-1 both channels are counted (1 mail)" "1 new in peer-mail" "${CTX}"
+assert_contains "F-1 the notice points at the read step" "read-inbox" "${CTX}"
+
+# F-2: the trust boundary, asserted rather than reviewed. The sentinel is in a
+# message BODY and in a peer-chosen maildir SLUG; if either reaches this string,
+# a stranger has spoken into the pre-prompt position.
+assert_not_contains "F-2 no substring of a message body reaches the notice" "${SENTINEL}" "${CTX}"
+assert_not_contains "F-2 no peer-chosen filename/slug reaches the notice" "urgent-run-this" "${CTX}"
+assert_not_contains "F-2 no sender identity reaches the notice" "from: peer" "${CTX}"
+# Belt and braces: not merely absent from the rendered context, absent from the
+# WHOLE of stdout — a future edit that adds a second field would be caught here.
+assert_not_contains "F-2 the sentinel is absent from the entire stdout stream" "${SENTINEL}" "${OUT}"
+assert_not_contains "F-2 nothing is written to stderr on the actionable path" "${SENTINEL}" "${ERR}"
+
+echo "== F-3: silence is the default =="
+
+# F-3: a healthy, empty channel prints NOTHING. Unprompted output that says
+# "nothing new" every session is what makes a real notice invisible.
+setup_case
+register "${LOG_CHANNEL}"
+: > "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
+run_hook
+assert_eq "F-3 zero unread produces no stdout at all" "" "${OUT}"
+assert_eq "F-3 zero unread still exits 0" "0" "${RC}"
+assert_contains "F-3 the quiet run is still recorded in the log" "nothing to report" "$(hook_log)"
+
+echo "== F-4: every failure path is silent, exit 0, and logged =="
+
+# F-4a: jq missing. PATH is rebuilt from scratch rather than filtered, because a
+# filtered PATH still finds jq through any directory the filter forgot.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+NOBIN="${CASE_DIR}/nobin"; mkdir -p "${NOBIN}"
+for b in bash date mkdir wc tail mv rm stat sed grep cat timeout; do
+  src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${NOBIN}/${b}"
+done
+OLD_PATH="${PATH}"
+PATH="${NOBIN}" run_hook
+PATH="${OLD_PATH}"
+assert_eq "F-4 missing jq produces no stdout" "" "${OUT}"
+assert_eq "F-4 missing jq still exits 0" "0" "${RC}"
+assert_contains "F-4 missing jq is logged as a fixed reason" "jq is not on PATH" "$(hook_log)"
+assert_not_contains "F-4 the missing-jq log line carries no body" "${SENTINEL}" "$(hook_log)"
+
+# F-4b: unparseable stdin. The payload is the harness's, not a message's, but a
+# hook that guesses at a shape it does not recognise is a hook that emits
+# garbage into a JSON channel.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+HOOK_STDIN='this is not json'
+run_hook
+HOOK_STDIN=""
+assert_eq "F-4 unparseable stdin produces no stdout" "" "${OUT}"
+assert_eq "F-4 unparseable stdin still exits 0" "0" "${RC}"
+assert_contains "F-4 unparseable stdin is logged as a fixed reason" "was not a JSON object" "$(hook_log)"
+
+# A WELL-FORMED SessionStart payload must of course still be accepted — the
+# guard above is worthless if it also rejects the real thing.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+HOOK_STDIN='{"session_id":"abc","hook_event_name":"SessionStart","cwd":"/tmp"}'
+run_hook
+HOOK_STDIN=""
+assert_one_json_object "F-4 a well-formed SessionStart payload is accepted" "${OUT}"
+
+# F-4c: no registry entry. NOT OPTING IN IS NOT A FAULT — silent, exit 0, and
+# no error anywhere.
+setup_case
+run_hook
+assert_eq "F-4 no registry entry produces no stdout" "" "${OUT}"
+assert_eq "F-4 no registry entry still exits 0" "0" "${RC}"
+assert_eq "F-4 no registry entry is not an error on stderr" "" "${ERR}"
+
+# F-4d: an unreadable root. Whatever inbox-status makes of it, the hook's
+# contract is unchanged: nothing on stdout, exit 0, one line in the log.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+chmod 000 "${ATHENA_INBOX_ROOT}"
+run_hook
+chmod 700 "${ATHENA_INBOX_ROOT}"
+assert_eq "F-4 an unreadable root produces no stdout" "" "${OUT}"
+assert_eq "F-4 an unreadable root still exits 0" "0" "${RC}"
+assert_eq "F-4 an unreadable root logs exactly one reason line" "1" \
+  "$(hook_log | wc -l | tr -d ' ')"
+
+echo "== F-5 · F-6 · F-9: the stale warning, and its own rate limit =="
+
+# A FAILING poll, built from a real failure: a malformed registry entry makes
+# inbox-status exit 1 with empty stdout.
+break_registry() { printf 'not json at all' > "${ATHENA_INBOX_ROOT}/projects/p.json"; }
+
+# F-5: a never-working setup warns on the FIRST attempt. Note the reading: a run
+# that SUCCEEDS is never stale by construction, so F-5's "success marker absent"
+# and F-6's "success marker 7h old" both describe a FAILING poll — otherwise the
+# marker's age could not affect the outcome and the case would measure nothing.
+setup_case
+register "${LOG_CHANNEL}"
+break_registry
+run_hook
+assert_no_file "F-5 the precondition holds: no success marker exists" "${HOME}/.claude/athena-inbox-last-success"
+assert_contains "F-5 a never-successful setup warns on the first attempt" \
+  "has not succeeded recently" "$(context_of "${OUT}")"
+
+# F-9: and it travels as the SAME JSON object — never a bare text line into a
+# JSON channel, which is the exact malformed stdout the contract refuses.
+assert_one_json_object "F-9 the stale warning travels as one well-formed JSON object" "${OUT}"
+assert_eq "F-9 the warning object names the SessionStart event like any other" "SessionStart" \
+  "$(printf '%s' "${OUT}" | jq -r '.hookSpecificOutput.hookEventName' 2>/dev/null)"
+
+# F-6: the warning is itself rate-limited. Without this, an outage that lasts a
+# week warns at every single session start until the notice stops being read.
+setup_case
+register "${LOG_CHANNEL}"
+break_registry
+touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "${HOME}/.claude/athena-inbox-last-success"
+touch "${HOME}/.claude/athena-inbox-last-warn"
+run_hook
+assert_eq "F-6 a stale success plus a FRESH warn marker is silent" "" "${OUT}"
+assert_eq "F-6 the rate-limited run still exits 0" "0" "${RC}"
+
+# The other half of the same claim: a stale success and a STALE warn marker does
+# warn. A rate limit that never expires is indistinguishable from a broken warning.
+setup_case
+register "${LOG_CHANNEL}"
+break_registry
+touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "${HOME}/.claude/athena-inbox-last-success"
+touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "${HOME}/.claude/athena-inbox-last-warn"
+run_hook
+assert_contains "F-6 a stale success plus a STALE warn marker warns again" \
+  "has not succeeded recently" "$(context_of "${OUT}")"
+
+# And the inverse: a FRESH success marker means a single failed poll is not an
+# outage and says nothing. Warning on every transient blip is how a real one
+# stops being read.
+setup_case
+register "${LOG_CHANNEL}"
+break_registry
+touch "${HOME}/.claude/athena-inbox-last-success"
+run_hook
+assert_eq "F-6 a fresh success marker makes one failed poll silent" "" "${OUT}"
+
+echo "== F-7 · F-8: marker discipline =="
+
+# F-7: stamped BEFORE the work, never after. An after-the-fact stamp turns every
+# session into a retry storm (walt_ui S1/S4), and a failure that stamps SUCCESS
+# (S17) makes an outage indistinguishable from health forever after.
+setup_case
+register "${LOG_CHANNEL}"
+break_registry
+run_hook
+assert_file    "F-7 a failing run DOES stamp the attempt marker" "${HOME}/.claude/athena-inbox-last-poll"
+assert_no_file "F-7 a failing run does NOT stamp the success marker" "${HOME}/.claude/athena-inbox-last-success"
+
+# The attempt marker is stamped before the work in the strongest sense: even a
+# run that cannot do any work at all has already recorded the attempt.
+setup_case
+register "${LOG_CHANNEL}"
+NOBIN="${CASE_DIR}/nobin"; mkdir -p "${NOBIN}"
+for b in bash date mkdir wc tail mv rm stat sed grep cat timeout; do
+  src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${NOBIN}/${b}"
+done
+OLD_PATH="${PATH}"
+PATH="${NOBIN}" run_hook
+PATH="${OLD_PATH}"
+assert_file "F-7 a run that cannot even start stamps the attempt marker first" \
+  "${HOME}/.claude/athena-inbox-last-poll"
+
+# F-8: a clean success stamps success AND clears the warn marker, so the NEXT
+# outage gets its own warning instead of being rate-limited by a fault that has
+# already been fixed (walt_ui S21).
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+touch "${HOME}/.claude/athena-inbox-last-warn"
+run_hook
+assert_file    "F-8 a succeeding run stamps the success marker" "${HOME}/.claude/athena-inbox-last-success"
+assert_no_file "F-8 a succeeding run clears the warn marker" "${HOME}/.claude/athena-inbox-last-warn"
+
+echo "== F-10: a separate marker per concern =="
+
+# F-10: a shared marker once let a fresh CHECK silently suppress a POLL (walt_ui
+# S14). Two directions, both asserted.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+touch "${HOME}/.claude/athena-inbox-last-warn"
+touch "${HOME}/.claude/athena-inbox-last-poll"
+run_hook
+assert_contains "F-10 a fresh WARN marker does not suppress the COUNT" "2 new in slack" \
+  "$(context_of "${OUT}")"
+
+# A fresh marker belonging to the OTHER family (athena-slack-*) must not reach
+# into this one at all.
+setup_case
+register "${LOG_CHANNEL}"
+break_registry
+touch "${HOME}/.claude/athena-slack-last-warn"
+touch "${HOME}/.claude/athena-slack-last-success"
+run_hook
+assert_contains "F-10 the athena-slack-* family does not rate-limit this hook" \
+  "has not succeeded recently" "$(context_of "${OUT}")"
+
+# Structural, not behavioural: the hook must not name the other family's markers
+# anywhere. A test of behaviour alone would pass a hook that shared a path it
+# merely happened not to hit in these fixtures.
+if grep -q 'athena-slack-last' "${HOOK}"; then
+  bad "F-10 the hook shares no marker path with the athena-slack-* family" "found athena-slack-last in the hook"
+else
+  ok "F-10 the hook shares no marker path with the athena-slack-* family"
+fi
+for m in athena-inbox-last-poll athena-inbox-last-success athena-inbox-last-warn; do
+  if grep -q "${m}" "${HOOK}"; then ok "F-10 marker [${m}] has its own path"
+  else bad "F-10 marker [${m}] has its own path" "not referenced by the hook"; fi
+done
+
+echo "== F-11: registration through the registry, never by hand =="
+
+# F-11: the entry exists, on SessionStart, with the all-events matcher — and NO
+# UserPromptSubmit entry, which D3 rules out explicitly.
+REG="${REPO_DIR}/ai/hooks/registry.json"
+assert_eq "F-11 the hook is registered on SessionStart with the \"\" matcher" "SessionStart|" \
+  "$(jq -r '.hooks[] | select(.script == "ai/hooks/athena-inbox-poll.sh") | "\(.event)|\(.matcher)"' "${REG}" 2>/dev/null)"
+assert_eq "F-11 no UserPromptSubmit entry is registered for any hook" "0" \
+  "$(jq -r '[.hooks[] | select(.event == "UserPromptSubmit")] | length' "${REG}" 2>/dev/null)"
+# The five hooks that predate this ticket must all still be registered. The
+# 2026-09-17 outage was exactly this: entries silently disappearing from a file
+# with no diff and no undo.
+for s in safe-wait-guard pronoun-guard harness-event notify-idle main-session-policy; do
+  assert_eq "F-11 pre-existing hook [${s}] is still in the registry" "1" \
+    "$(jq -r --arg s "ai/hooks/${s}.sh" '[.hooks[] | select(.script == $s)] | length' "${REG}" 2>/dev/null)"
+done
+
+# The installer is exercised end to end against a TEMP settings file carrying
+# unrelated keys. Written out here rather than delegated to
+# `setup-hooks --self-test` deliberately: that self-test resolves hook paths
+# against the MAIN checkout, where a brand-new hook does not exist until this
+# branch merges, so delegating would make this case measure the state of
+# ~/dev/custom rather than the state of this change.
+setup_case
+SET="${CASE_DIR}/settings.json"
+printf '{\n  "model": "x",\n  "permissions": {"allow": ["Bash(ls:*)"]}\n}\n' > "${SET}"
+( cd "${REPO_DIR}" && HOOKS_SETTINGS_FILE="${SET}" scripts/setup-hooks --install >/dev/null 2>&1 )
+R2="$( cd "${REPO_DIR}" && HOOKS_SETTINGS_FILE="${SET}" scripts/setup-hooks --install 2>&1 )"
+assert_contains "F-11 a second --install is a no-op (idempotent)" "nothing to do" "${R2}"
+assert_eq "F-11 the merge preserves an unrelated scalar key" "x" \
+  "$(jq -r '.model' "${SET}" 2>/dev/null)"
+assert_eq "F-11 the merge preserves an unrelated nested key" "Bash(ls:*)" \
+  "$(jq -r '.permissions.allow[0]' "${SET}" 2>/dev/null)"
+assert_eq "F-11 the new hook is wired on SessionStart" "1" \
+  "$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | endswith("athena-inbox-poll.sh"))] | length' "${SET}" 2>/dev/null)"
+for s in safe-wait-guard pronoun-guard harness-event notify-idle main-session-policy; do
+  assert_eq "F-11 the merge leaves pre-existing hook [${s}] wired" "1" \
+    "$(jq --arg s "${s}.sh" '[.hooks[]?[]?.hooks[]? | select(.command | endswith($s))] | length' "${SET}" 2>/dev/null)"
+done
+# HOME is restored for the ruby checks: `ruby` here is an asdf shim that
+# resolves its version data under $HOME, so running it with the fake HOME makes
+# the checker fail for a reason that has nothing to do with the thing under
+# test. (A failure message that fits both "the check failed" and "the
+# interpreter could not start" must be told apart before it is believed.)
+if ( cd "${REPO_DIR}" && HOME="${REAL_HOME}" HOOKS_SETTINGS_FILE="${SET}" ai/bin/check-hooks-registered >/dev/null 2>&1 ); then
+  ok "F-11 check-hooks-registered passes against the installed settings"
+else
+  bad "F-11 check-hooks-registered passes against the installed settings" \
+      "ai/bin/check-hooks-registered reported drift"
+fi
+
+echo "== F-12: the guard-message convention =="
+
+# F-12: a counts-only notifier with no deny path is the same species as
+# main-session-policy.sh, so EXEMPT is the honest classification. Asserted two
+# ways: the checker passes, AND the exemption is actually present with a reason
+# (the checker would also pass if a bolted-on `Fix:` line had been added
+# instead, which is exactly the dodge the ticket forbids).
+if ( cd "${REPO_DIR}" && HOME="${REAL_HOME}" ai/bin/check-guard-messages >/dev/null 2>&1 ); then
+  ok "F-12 check-guard-messages passes with the new hook"
+else
+  bad "F-12 check-guard-messages passes with the new hook" "ai/bin/check-guard-messages failed"
+fi
+# The checker would ALSO pass if a bolted-on `Fix:` line had been added to the
+# hook instead of exempting it -- which is exactly the dodge the ticket forbids.
+# So assert the classification itself, with its reason.
+if grep -Eq '"athena-inbox-poll\.sh" +=> +"[^"]+"' "${REPO_DIR}/ai/bin/check-guard-messages"; then
+  ok "F-12 the hook is EXEMPT with a stated reason, not carrying a fake deny path"
+else
+  bad "F-12 the hook is EXEMPT with a stated reason, not carrying a fake deny path" \
+      "no EXEMPT entry with a reason in ai/bin/check-guard-messages"
+fi
+
+echo "== hardening: --dry-run, the log bound, and the stdin guard =="
+
+# --dry-run writes NO markers: a diagnostic run that mutates the rate-limit
+# state would suppress the next real session's warning.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+run_hook --dry-run
+assert_no_file "--dry-run writes no attempt marker" "${HOME}/.claude/athena-inbox-last-poll"
+assert_no_file "--dry-run writes no success marker" "${HOME}/.claude/athena-inbox-last-success"
+assert_no_file "--dry-run writes no log" "${HOME}/.claude/athena-inbox-poll.log"
+assert_one_json_object "--dry-run still emits exactly one well-formed object" "${OUT}"
+if [ "$(printf '%s' "${OUT}" | wc -l)" -gt 1 ]; then
+  ok "--dry-run pretty-prints (more than one line)"
+else
+  bad "--dry-run pretty-prints (more than one line)" "got a single line: [${OUT}]"
+fi
+
+# --dry-run skips the stdin guard: a manual run from a pipe carrying anything at
+# all must still produce its diagnostic.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+HOOK_STDIN='not json'
+run_hook --dry-run
+HOOK_STDIN=""
+assert_one_json_object "--dry-run skips the stdin guard" "${OUT}"
+
+# The log is bounded. An unbounded reason log on a machine that starts many
+# sessions a day is a slow leak nobody notices until it is large.
+setup_case
+register "${LOG_CHANNEL}"
+: > "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
+for _ in $(seq 1 205); do printf 'filler\n' >> "${HOME}/.claude/athena-inbox-poll.log"; done
+run_hook
+LOGLINES="$(hook_log | wc -l | tr -d ' ')"
+if [ "${LOGLINES}" -le 200 ]; then ok "the reason log is bounded to 200 lines (got ${LOGLINES})"
+else bad "the reason log is bounded to 200 lines" "got ${LOGLINES}"; fi
+assert_contains "the bound keeps the NEWEST lines, not the oldest" "nothing to report" "$(hook_log)"
+
+# The stdin read is BOUNDED. An unbounded `cat` on an inherited open pipe never
+# sees EOF and would hang session start forever (walt_ui M8). Asserted by
+# holding a pipe open and requiring the hook to finish anyway.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+assert_fake_home
+# A FIFO held open by a background writer, not `sleep | hook`: a pipeline waits
+# for every member, so the sleep's own duration would be what this measured.
+FIFO="${CASE_DIR}/fifo"; mkfifo "${FIFO}"
+( exec 9>"${FIFO}"; sleep 20 ) & WRITER_PID=$!
+START="$(date +%s)"
+OUT="$( cd "${REPO}" && timeout 10 "${HOOK}" < "${FIFO}" 2>/dev/null )"
+RC=$?
+ELAPSED=$(( $(date +%s) - START ))
+kill "${WRITER_PID}" 2>/dev/null; wait "${WRITER_PID}" 2>/dev/null; WRITER_PID=""
+if [ "${RC}" -ne 124 ] && [ "${ELAPSED}" -lt 8 ]; then
+  ok "the stdin read is bounded — an open pipe does not hang session start (${ELAPSED}s)"
+else
+  bad "the stdin read is bounded — an open pipe does not hang session start" \
+      "rc=${RC} elapsed=${ELAPSED}s"
+fi
+
+# An unknown argument is not a reason to interrupt a session, and not a reason
+# to emit garbage either.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+run_hook --no-such-flag
+assert_one_json_object "an unrecognised argument is ignored, not fatal" "${OUT}"
+assert_contains "an unrecognised argument is noted in the log" "unrecognised argument" "$(hook_log)"
+
+# The help text is the header block, and it states the output contract verbatim
+# — the ticket requires the contract to live in the file, where an implementer
+# changing this hook will actually read it.
+setup_case
+run_hook -h
+assert_contains "-h prints the output contract verbatim" \
+  '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":' "${OUT}"
+assert_contains "-h states the counts-only rule" "WHAT IT NEVER PRINTS" "${OUT}"
+
+# inbox-status itself must exist where the hook looks for it. A path typo would
+# otherwise degrade into permanent, contract-conformant silence.
+if [ -x "${STATUS_BIN}" ]; then ok "the wrapped command exists where the hook resolves it"
+else bad "the wrapped command exists where the hook resolves it" "not executable: ${STATUS_BIN}"; fi
+
+# The real HOME was never a target — by fingerprint, not by inspection.
+HOME="${REAL_HOME}"
+export HOME
+assert_eq "the suite left the real \$HOME marker family untouched" \
+  "${REAL_MARKERS_BEFORE}" "$(real_markers_fingerprint)"
+
+echo
+TOTAL=$((PASS + FAIL))
+if [ "${FAIL}" -eq 0 ]; then
+  echo "VERDICT: PASS (${TOTAL} cases)"
+  exit 0
+else
+  echo "VERDICT: FAIL (${FAIL} of ${TOTAL} cases)"
+  exit 1
+fi

@@ -182,7 +182,8 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
 - Every hook self-test — run each dedicated `ai/hooks/*.self-test.sh` script
   with stdin closed: `ai/hooks/safe-wait-guard.self-test.sh </dev/null`,
   `ai/hooks/pronoun-guard.self-test.sh </dev/null`,
-  `ai/hooks/harness-event.self-test.sh </dev/null` (and any you add — the
+  `ai/hooks/harness-event.self-test.sh </dev/null`,
+  `ai/hooks/athena-inbox-poll.self-test.sh </dev/null` (and any you add — the
   runner's `--self-test` fails if a `*.self-test.sh` on disk is not declared,
   which is how `harness-event`'s was found unrun). NOTE: the
   hooks read their input from stdin, so `ai/hooks/<hook>.sh --self-test` is NOT a
