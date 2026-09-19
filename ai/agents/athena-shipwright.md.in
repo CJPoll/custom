@@ -205,15 +205,16 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   silently dropped safe-wait-guard + pronoun-guard. Environment-safe: passes with
   a note when no settings file exists (CI/agent env), so it never false-fails.
   Recover drift with `scripts/setup-hooks --install` (merges, never clobbers).
-- `ai/bin/check-inbox-registry` and the suite `ai/inbox/test/self-test.sh` (both
-  in `CHECKS`; run the check's own `--self-test` too if you touched the checker
-  or `ai/inbox/lib/registry.rb`) — this machine's Athena Inbox tenancy registry
-  (`$ATHENA_INBOX_ROOT/projects/*.json`, untracked) still matches the committed
-  source of truth `ai/inbox/registry.json`. The contract defines a missing entry
-  as zero channels, exit 0, no error, so a clobbered entry is a silently dead
-  inbox — the 2026-09-17 class again, on the inbox's configuration. Environment-
-  safe: passes with a note when there is no inbox root (CI/agent env). Recover
-  drift with `scripts/setup-inbox-registry --install` (writes only the declared
+- `ai/bin/check-inbox-registry` (in `CHECKS`; `ai/inbox/test/self-test.sh` is
+  covered separately, below, by the repo-wide self-test discovery — run the
+  checker's own `--self-test` too if you touched it or `ai/inbox/lib/registry.rb`)
+  — this machine's Athena Inbox tenancy registry (`$ATHENA_INBOX_ROOT/projects/
+  *.json`, untracked) still matches the committed source of truth
+  `ai/inbox/registry.json`. The contract defines a missing entry as zero
+  channels, exit 0, no error, so a clobbered entry is a silently dead inbox —
+  the 2026-09-17 class again, on the inbox's configuration. Environment-safe:
+  passes with a note when there is no inbox root (CI/agent env). Recover drift
+  with `scripts/setup-inbox-registry --install` (writes only the declared
   entries, backs up what it replaces, never touches another entry).
 - `ai/bin/check-guard-messages` — every first-party guard/hook/check emits an
   actionable `Fix:` message on failure (LLM-facing errors); run its `--self-test`
@@ -230,38 +231,45 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   stay verified even when a harness edit did not touch the critic directly. (The
   model-in-loop `--run` is NOT part of the gate.)
 - `scripts/setup-hooks --self-test` — the installer's --self-test is INLINE
-  (no dedicated `scripts/test/**/self-test.sh` backs it), so it stays a
+  (no dedicated `**/test/self-test.sh` file backs it), so it stays a
   hand-declared `CHECKS` entry. Its install / idempotency / merge-safety cases
   are the ONLY verification of the recovery path for the 2026-09-17 hook
   clobber, and were unrun by the gate until DND-209.
-- Every `scripts/test/**/self-test.sh` — DISCOVERED (globbed), never
-  hand-declared, so a future suite under `scripts/test/` is covered with zero
-  manual wiring step, **provided its entry point is named exactly
-  `self-test.sh`** — that filename is the whole discovery contract; a suite
-  shipped as e.g. `scripts/test/foo/tests.sh` is NOT discovered by the glob
-  (DND-209: `scripts/test/athena-inbox-client/self-test.sh`, 42 cases + a
-  sabotage run, shipped by DND-189 and ran automatically nowhere — `harness-gate`
-  was 10/10 green and would have stayed green with every `scripts/` suite
-  deleted). This is also how `scripts/setup-athena-inbox-client --self-test`
-  ends up covered: it runs that same file, declared in the runner's
-  `SELF_TEST_DELEGATES` map so it isn't ALSO run as a separate installer entry
-  (same suite, one label). `scripts/setup-inbox-registry --self-test`
-  delegates the same way, to the already-listed `ai/inbox/test/self-test.sh`.
-  The runner prints the discovered count in its normal output (`scripts/test
-  self-tests discovered: N`) and FAILS outright on zero (this repo always has
-  committed suites, so zero means the glob broke, not that there is nothing to
-  run); it also WARNS (non-blocking, since a helper script may legitimately
-  live there) about any other executable `.sh` under `scripts/test/` not named
+- Every `**/test/**/self-test.sh` in the repo — DISCOVERED (globbed), never
+  hand-declared, so a future suite anywhere under a `test/` directory is
+  covered with zero manual wiring step, **provided its entry point is named
+  exactly `self-test.sh`** — that filename is the whole discovery contract; a
+  suite shipped as e.g. `scripts/test/foo/tests.sh` is NOT discovered by the
+  glob. This patches the CLASS, not one site: DND-209 started from
+  `scripts/test/athena-inbox-client/self-test.sh` (42 cases + a sabotage run,
+  shipped by DND-189 and ran automatically nowhere — `harness-gate` was 10/10
+  green and would have stayed green with it deleted), and a review pass found
+  the same gap already existed for `ai/inbox/test/self-test.sh`,
+  `ai/skills/athena:inbox/test/self-test.sh` and
+  `ai/skills/athena:slack/test/self-test.sh` — so the glob covers the whole
+  repo, not just `scripts/test/`. This is also how
+  `scripts/setup-athena-inbox-client --self-test` and `scripts/setup-inbox-registry
+  --self-test` end up covered: each runs a file the glob already discovers
+  (`scripts/test/athena-inbox-client/self-test.sh`,
+  `ai/inbox/test/self-test.sh` respectively), declared in the runner's
+  `SELF_TEST_DELEGATES` map so neither is ALSO run as a separate installer
+  entry (same suite, one label). The runner prints the discovered count in its
+  normal output (`self-tests discovered: N`) and FAILS outright on zero (this
+  repo always has committed suites, so zero means the glob broke, not that
+  there is nothing to run); it also WARNS (non-blocking, since a helper script
+  may legitimately live under a `test/` directory too, and the check does NOT
+  filter on the executable bit — a suite committed without `+x` is the likelier
+  real mistake) about any other `.sh` file under a `test/` directory not named
   `self-test.sh`, so a misnamed suite is at least visible. Its `--self-test`
   proves the discovery mechanism itself works — against a throwaway fixture
-  tree, never the real `scripts/test/` — by planting a deliberately failing
+  tree, never a real `test/` directory — by planting a deliberately failing
   stub, confirming it turns red, then fixing/removing it and confirming it
-  turns green again, PLUS an end-to-end check that `harness-gate --list`
-  actually lists the real discovered suite (catching a regression in the
-  `CHECKS = STATIC_CHECKS + scripts_self_test_checks` composition itself); and
-  it FAILS if any `scripts/setup-*` advertising a `--self-test` is neither
-  declared nor delegated, so a future installer cannot ship an unrun suite
-  either.
+  turns green again, exercising the zero-discovery and stray-suite guards the
+  same way, PLUS an end-to-end check that `harness-gate --list` actually lists
+  every real discovered suite (catching a regression in the `CHECKS =
+  STATIC_CHECKS + self_test_checks` composition itself); and it FAILS if any
+  `scripts/setup-*` advertising a `--self-test` is neither declared nor
+  delegated, so a future installer cannot ship an unrun suite either.
 - `ai/bin/harness-gate --self-test` — the runner itself (not in its own CHECKS;
   it would recurse). Run it when you touch the gate's composition.
 - Any skill or script self-test relevant to what you changed.
