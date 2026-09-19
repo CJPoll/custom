@@ -248,6 +248,14 @@ marker_is_stale() {
   [ "${age}" -ge "$2" ]
 }
 
+# THE ATTEMPT MARKER, FIRST -- before anything that can fail, which now
+# includes the identity resolution below (it runs an external command under a
+# timeout). A marker stamped after the work answers "when did we last succeed",
+# which is a different question and already has its own file; and a run killed
+# mid-resolution must still leave a record that this machine attempted, which
+# is the only question this global marker exists to answer.
+stamp "${POLL_MARKER}"
+
 # --- the project identity, and the markers keyed by it ----------------------
 
 PROJECT_HASH=""
@@ -261,11 +269,29 @@ else
   # hook/skill version skew, reachable because settings.json wires one tree's
   # hook path and STATUS_BIN resolves from that tree. Logged rather than
   # silently falling back, because the fallback is shared state.
-  if PROJECT_KEY="$(timeout "${STATUS_TIMEOUT_SECONDS}" "${STATUS_BIN}" --repo-key 2>/dev/null)"; then
+  PROJECT_KEY="$(timeout "${STATUS_TIMEOUT_SECONDS}" "${STATUS_BIN}" --repo-key 2>/dev/null)"
+  REPO_KEY_RC=$?
+  if [ "${REPO_KEY_RC}" -eq 124 ] || [ "${REPO_KEY_RC}" -eq 137 ]; then
+    # An EXPIRY, not a version mismatch. --repo-key itself cannot fail, but the
+    # `timeout` wrapping it can -- which is the whole reason that wrapper is
+    # here (an inbox root on a slow or stale mount). Diagnosing it as skew
+    # would send the reader to compare checkouts over a transient condition.
+    log_reason "inbox-status --repo-key did not finish within ${STATUS_TIMEOUT_SECONDS}s, so this project's markers cannot be named and its inbox state would be shared with every other project on this machine. Fix: something under \${ATHENA_INBOX_ROOT:-~/.local/share/athena} or this repo's .git is slow to stat — check for a stale network mount, or raise ATHENA_INBOX_STATUS_TIMEOUT_SECONDS."
+    PROJECT_KEY=""
+  elif [ "${REPO_KEY_RC}" -eq 0 ]; then
     PROJECT_KEY="${PROJECT_KEY%$'\n'}"
     if [ -n "${PROJECT_KEY}" ]; then
       PROJECT_HASH="$(printf '%s' "${PROJECT_KEY}" | sha256sum 2>/dev/null | cut -c1-32)"
-      case "${PROJECT_HASH}" in ''|*[!0-9a-f]*) PROJECT_HASH="" ;; esac
+      case "${PROJECT_HASH}" in
+        ''|*[!0-9a-f]*)
+          # sha256sum present but failing, or cut missing. A THIRD route to an
+          # empty hash, and it must log like the other two: the fallback it
+          # drops into is the shared marker family, which is the defect the
+          # per-project keying exists to close.
+          log_reason "this project's identity could not be hashed, so its markers cannot be named and its inbox state would be shared with every other project on this machine. Fix: check that sha256sum and cut behave normally on this machine."
+          PROJECT_HASH=""
+          ;;
+      esac
     fi
     # An EMPTY key is a cwd in no git repository. Nothing here could ever have
     # had channels, so there is nothing to remember and nothing to report --
@@ -308,10 +334,6 @@ emit() {
 
 # --- the attempt -----------------------------------------------------------
 
-# FIRST, before anything that can fail. A marker stamped after the work answers
-# "when did we last succeed", which is a different question and already has its
-# own file.
-stamp "${POLL_MARKER}"
 [ -n "${UNKNOWN_ARG:-}" ] && log_reason "ignored an unrecognised argument; the hook takes only --dry-run"
 
 if ! command -v jq >/dev/null 2>&1; then

@@ -550,7 +550,7 @@ The finding that produced it stands: this suite was dark, and nothing ran it.
 - **Suite run:** `bash ai/hooks/athena-inbox-poll.self-test.sh </dev/null`
   (no network; every case gets a fake `$HOME`, a private `ATHENA_INBOX_ROOT`
   and its own `git init` repo under one `mktemp -d`; ~5s wall)
-- **Baseline:** `VERDICT: PASS (165 cases)` (91 at the first pass; 21 added
+- **Baseline:** `VERDICT: PASS (168 cases)` (91 at the first pass; 21 added
   after the sabotage run, 46 more across eight critic rounds — see *The four
   zeros* and *What the critic found that sabotage did not*)
 - **Runner:** 42 mutations, one at a time, full suite after each, restored by
@@ -905,6 +905,41 @@ the warning instead of failing loudly — the wrong direction for the one
 mechanism whose job is to break a silence. And `F-4a`'s stripped `PATH` omitted
 `dirname`, without which the hook cannot locate itself at all, so that case was
 measuring a different failure than the one it names.
+
+**And the last critic round, on the machinery the previous one added.** Three
+more, all of the shape this whole record is about — a failure that is silent or
+mis-stated rather than loud:
+
+- **The attempt marker was no longer stamped first.** The per-project identity
+  block runs an external command under a timeout, and it had been inserted
+  *above* the stamp, so a run killed mid-resolution left no record that this
+  machine attempted — the only question that global marker exists to answer,
+  while the file's own header still claimed "FIRST, before anything that can
+  fail". Moved back above it.
+- **A `--repo-key` TIMEOUT was diagnosed as version skew.** The command itself
+  cannot fail, so a non-zero status was read as "this `inbox-status` predates
+  the option" — but the `timeout` wrapping it can expire, which is the entire
+  reason that wrapper exists (an inbox root on a slow or stale mount). The
+  reader was sent to compare checkouts over a transient condition, and the
+  session dropped into the shared marker family on it. Exit 124/137 now has its
+  own reason and its own `Fix:`.
+- **A third route to an empty hash logged nothing.** `sha256sum` present but its
+  output unusable (a missing `cut`, say) fell through the hex guard silently
+  into the shared-marker fallback. The suite's degraded case stripped
+  `sha256sum` *and* `cut` together, so it always exited through the logged
+  guard and could not see it.
+
+The round also caught the *test* added one round earlier: the "absent hook file"
+case in `scripts/setup-hooks --self-test` defined **its own copy of `norm`** and
+asserted on the copy, so reverting the real one left it green — a case that
+cannot fail for the reason it names. It now drives `apply install` against a
+synthetic registry (a `HOOKS_REGISTRY_FILE` seam, matching the existing
+`HOOKS_SETTINGS_FILE` one) and asserts `MARKER:nochange`, plus that the checker
+agrees. Verified by reverting each `norm` in turn: both reverts now redden it.
+And the two `norm`s, whose step-lock the comment asserts as an invariant, had
+**diverged as written** on a relative command whose head does not exist — one
+returned the literal string, the other invented a CWD-relative absolute path.
+They now make the same choice.
 
 **Left as raised, not fixed:** nothing prunes `athena-inbox-seen/`, so a repo
 that is deleted or moved leaves its markers behind forever. Harmless — a stale

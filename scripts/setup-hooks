@@ -29,7 +29,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-REGISTRY="${REPO_DIR}/ai/hooks/registry.json"
+# HOOKS_REGISTRY_FILE is a TEST SEAM, like HOOKS_SETTINGS_FILE beside it: the
+# self-test needs a registry naming a hook that is deliberately not on disk, and
+# the alternative is a case that re-implements norm() and asserts on its own
+# copy instead of on the shipped code.
+REGISTRY="${HOOKS_REGISTRY_FILE:-${REPO_DIR}/ai/hooks/registry.json}"
 CHECKER="${REPO_DIR}/ai/bin/check-hooks-registered"
 
 # Hook commands must be wired at the MAIN checkout's path, NEVER a worktree's:
@@ -113,7 +117,14 @@ def norm(cmd):
         if os.path.exists(cmd):
             return os.path.realpath(cmd)
         head, tail = os.path.split(cmd)
-        return os.path.join(os.path.realpath(head), tail) if head else cmd
+        # A missing HEAD is left alone, exactly as check-hooks-registered's
+        # `norm` leaves it: realpath would resolve it against the CWD and
+        # invent an absolute path for a command that names no location this
+        # process can see. The two must agree, or drift is reported by one tool
+        # and not the other.
+        if not head or not os.path.isdir(head):
+            return cmd
+        return os.path.join(os.path.realpath(head), tail)
     except OSError:
         return cmd
 
@@ -214,14 +225,19 @@ PY
     rs="$(apply install "$slink" 0)"
     echo "$rs" | grep -q "MARKER:nochange" || { echo "  FAIL symlink-spelled hooks should be seen as wired (no duplicate install)"; ok=0; }
     HOOKS_SETTINGS_FILE="$slink" "$CHECKER" >/dev/null 2>&1 && echo "  ok   symlink-spelled hooks recognized as wired" || { echo "  FAIL check should pass on symlink-spelled hooks"; ok=0; }
-    # ...and the same, for a hook whose FILE IS NOT THERE. `norm` resolves the
-    # directory rather than the whole path, so "are these two spellings the same
+    # ...and the same, for a hook whose FILE IS NOT THERE, driving the SHIPPED
+    # code path rather than a copy of norm(). `norm` resolves the directory
+    # rather than the whole path, so "are these two spellings the same
     # location" does not depend on whether the script is on disk right now.
     # Without that, a wired hook whose file is temporarily absent reads as
     # unwired and install DUPLICATES it (double-firing the guard on restore),
     # and a hook being added on a branch reddens this suite against the main
     # checkout it is not in yet. The case above only covers this incidentally,
-    # and stops covering it the moment every registry hook exists in main.
+    # and stops covering it the moment every registry hook exists in main -- so
+    # this one uses a registry of its own naming a hook that is deliberately
+    # not there.
+    ghostreg="${tmp}/ghost-registry.json"
+    printf '%s\n' '{ "hooks": [ { "event": "SessionStart", "matcher": "", "script": "ai/hooks/definitely-not-on-disk.sh" } ] }' > "$ghostreg"
     ghost="${tmp}/settings-ghost.json"
     HLINK="$hlink" SLINK="$ghost" python3 - <<'PY2'
 import json, os
@@ -230,19 +246,13 @@ json.dump({"hooks": {"SessionStart": [
     {"matcher": "", "hooks": [{"type": "command", "command": cmd}]}]}},
     open(os.environ["SLINK"], "w"), indent=4)
 PY2
-    GHOST_ABS="${HOOKS_REPO_DIR}/ai/hooks/definitely-not-on-disk.sh" \
-    GHOST="$ghost" REPO_DIR="$HOOKS_REPO_DIR" python3 - <<'PY2' \
+    rg="$(REGISTRY="$ghostreg" apply install "$ghost" 0)"
+    echo "$rg" | grep -q "MARKER:nochange" \
       && echo "  ok   a symlink-spelled hook whose file is absent is still seen as wired" \
-      || { echo "  FAIL an absent hook file must not make two spellings compare unequal"; ok=0; }
-import json, os, sys
-def norm(cmd):
-    if not cmd: return cmd
-    if os.path.exists(cmd): return os.path.realpath(cmd)
-    head, tail = os.path.split(cmd)
-    return os.path.join(os.path.realpath(head), tail) if head else cmd
-live = json.load(open(os.environ["GHOST"]))["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-sys.exit(0 if norm(live) == norm(os.environ["GHOST_ABS"]) else 1)
-PY2
+      || { echo "  FAIL an absent hook file must not make install duplicate the wiring"; ok=0; }
+    HOOKS_REGISTRY_FILE="$ghostreg" HOOKS_SETTINGS_FILE="$ghost" "$CHECKER" >/dev/null 2>&1 \
+      && echo "  ok   the checker agrees on an absent hook file" \
+      || { echo "  FAIL setup-hooks and check-hooks-registered must agree on an absent file"; ok=0; }
 
     # Worktree safety: the wired commands must point at the MAIN checkout, so
     # they survive `wt` cleanup of whatever worktree this was run from.

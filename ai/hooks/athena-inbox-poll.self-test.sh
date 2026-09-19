@@ -835,6 +835,39 @@ assert_contains "R16 a key that cannot be hashed is LOGGED, not silently shared"
   "markers cannot be named" "$(hook_log)"
 assert_eq "R16 the degraded run still exits 0" "0" "${RC}"
 
+# A TIMEOUT on --repo-key is an expiry, not version skew. The command itself
+# cannot fail; the `timeout` wrapping it can, which is why that wrapper exists
+# (an inbox root on a slow or stale mount). Diagnosing it as a checkout
+# mismatch would send the reader to compare trees over a transient condition.
+setup_case
+register "${LOG_CHANNEL}"
+export ATHENA_INBOX_STATUS_TIMEOUT_SECONDS=1
+stub_repo '#!/usr/bin/env bash
+case "$1" in --repo-key) sleep 30 ;; esac
+printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidates":0}'"'"'
+exit 0'
+run_stub_hook
+unset ATHENA_INBOX_STATUS_TIMEOUT_SECONDS
+assert_contains "R16 a --repo-key timeout is reported as an expiry" \
+  "did not finish within" "$(hook_log)"
+assert_not_contains "R16 ...and not misdiagnosed as version skew" \
+  "does not support --repo-key" "$(hook_log)"
+
+# The THIRD route to an empty hash: sha256sum present but its output unusable
+# (here, `cut` removed). It must log like the other two, because the fallback
+# it drops into is the shared marker family.
+setup_case
+register "${LOG_CHANNEL}"
+NOCUT="${CASE_DIR}/nocut"; mkdir -p "${NOCUT}"
+for b in bash dirname date mkdir wc tail mv rm stat sed grep cat timeout jq git realpath awk sha256sum; do
+  src="$(command -v "${b}" 2>/dev/null)" && ln -sf "${src}" "${NOCUT}/${b}"
+done
+OLD_PATH="${PATH}"
+PATH="${NOCUT}" run_hook
+PATH="${OLD_PATH}"
+assert_contains "R16 an unhashable identity is LOGGED, not silently shared" \
+  "could not be hashed" "$(hook_log)"
+
 # ...and the converse: a cwd in NO git repository has no identity to remember
 # and legitimately logs nothing about it, because there is nothing there that
 # could ever have had channels.

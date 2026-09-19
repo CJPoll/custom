@@ -34,7 +34,10 @@ require "shellwords"
 
 AI_DIR       = File.expand_path("..", __dir__)          # .../ai
 REPO_DIR     = File.expand_path("..", AI_DIR)           # repo root (may be a worktree)
-REGISTRY     = File.join(AI_DIR, "hooks", "registry.json")
+# HOOKS_REGISTRY_FILE is a TEST SEAM, matching setup-hooks': the two tools must
+# be checkable against the same synthetic registry, or "they agree" is asserted
+# only where both happen to read the real one.
+REGISTRY     = ENV.fetch("HOOKS_REGISTRY_FILE") { File.join(AI_DIR, "hooks", "registry.json") }
 
 # The MAIN checkout for this repo. Hooks are always wired at the main checkout's
 # path, because a worktree path vanishes when the worktree is cleaned up. But
@@ -92,7 +95,12 @@ def norm(cmd)
   return File.realpath(cmd) if File.exist?(cmd)
 
   dir = File.dirname(cmd)
-  return cmd if dir == "." || !File.exist?(dir)
+  # A missing directory, or a command that is not a path at all, is left alone:
+  # realpath would resolve it against the CWD and invent an absolute path for a
+  # command that names no location this process can see. setup-hooks' `norm`
+  # makes the same choice; the two must agree, or drift is reported by one tool
+  # and not the other.
+  return cmd if dir == "." || !File.directory?(dir)
 
   File.join(File.realpath(dir), File.basename(cmd))
 rescue StandardError
