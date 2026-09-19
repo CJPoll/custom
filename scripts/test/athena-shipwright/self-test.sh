@@ -690,6 +690,152 @@ wait "$RUNNER_PID" 2>/dev/null
 RUNNER_PID=""
 
 # ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — the run happens in a worktree, the memory does not'
+
+# A stub that records where it was run and what state directory it was handed.
+# "Where" is the whole point of this section: a session started in the main
+# checkout shares an index and a set of working files with whoever else is
+# typing there, which is the class ce70e04 came from.
+stub_claude_probe() { # $1 = path, $2 = exit code, $3 = extra shell line
+  cat >"$1" <<EOF
+#!/usr/bin/env bash
+d="\$(dirname "\$0")"
+echo "\$@" >"\$d/claude-was-invoked"
+pwd -P >"\$d/claude-cwd"
+printf '%s\n' "\${SHIPWRIGHT_STATE_DIR:-<unset>}" >"\$d/claude-state-dir"
+${3:-:}
+exit $2
+EOF
+  chmod +x "$1"
+}
+
+real() { ( cd "$1" 2>/dev/null && pwd -P ); }
+
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+rc="$(run_runner "$r")"
+wt="$r/.git/athena-shipwright"
+if [ "$rc" -eq 0 ] && [ -e "$wt/.git" ]; then
+  ok "the runner provisions a worktree inside the repo's own .git"
+else
+  bad "worktree provisioned" "rc=$rc $(cat "$a/runner.err" 2>&1)"
+fi
+if [ "$(cat "$a/claude-cwd" 2>/dev/null)" = "$(real "$wt")" ]; then
+  ok "and starts the session THERE, not in the main checkout"
+else
+  bad "session runs in the worktree" "cwd=$(cat "$a/claude-cwd" 2>/dev/null) wanted=$(real "$wt")"
+fi
+# The worktree living inside .git is what makes this hold with no dependence on
+# a gitignore rule — the machine-local one is neutralised in this fixture.
+if [ -z "$(git -C "$r" status --porcelain -uall | grep -v '^?? ai-artifacts/')" ]; then
+  ok "and the main checkout does not see the worktree as dirt (no ignore rule in play)"
+else
+  bad "main checkout stays clean" "$(git -C "$r" status --porcelain -uall)"
+fi
+if [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "shipwright/auto" ]; then
+  ok "on its own branch, so it never contends for main with the checkout that holds it"
+else
+  bad "worktree branch" "$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>&1)"
+fi
+
+# THE STATE GOTCHA. ai-artifacts/ is gitignored, so a worktree starts with no
+# cursor.txt and no journal.md. If the state directory were derived from the
+# tree the run executes in, every run would see an empty one — and an absent
+# cursor reads the same as a cursor at epoch, so the run either re-mines
+# everything or mines nothing, and both report success. State must resolve to
+# the main checkout however the run is invoked.
+if [ "$(cat "$a/claude-state-dir" 2>/dev/null)" = "$r/ai-artifacts/shipwright" ]; then
+  ok "the session is handed SHIPWRIGHT_STATE_DIR in the MAIN checkout, not its own tree"
+else
+  bad "state dir is anchored" "got=$(cat "$a/claude-state-dir" 2>/dev/null) wanted=$r/ai-artifacts/shipwright"
+fi
+if ls "$r"/ai-artifacts/shipwright/runs/*.log >/dev/null 2>&1 \
+   && [ ! -e "$wt/ai-artifacts" ]; then
+  ok "and the run log lands there too — no state is written into the worktree"
+else
+  bad "logs land in the main checkout" "$(ls -R "$r/ai-artifacts" "$wt/ai-artifacts" 2>&1 | head -20)"
+fi
+
+# Landing on main: the agent pushes, but the MAIN CHECKOUT must also advance.
+# ~/.claude/skills and ~/.claude/hooks resolve into it, so a harness change that
+# never reaches it never takes effect — every run would report success while
+# nothing on the machine changed.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 0 'git commit --allow-empty -qm "run work"'
+before="$(git -C "$r" rev-parse HEAD)"
+rc="$(run_runner "$r")"
+after="$(git -C "$r" rev-parse HEAD)"
+if [ "$rc" -eq 0 ] && [ "$after" != "$before" ] \
+   && [ "$after" = "$(git -C "$r/.git/athena-shipwright" rev-parse HEAD)" ]; then
+  ok "a run's commits reach the main checkout by fast-forward"
+else
+  bad "main checkout fast-forwards" "rc=$rc before=$before after=$after $(cat "$a/runner.err" 2>&1)"
+fi
+
+# ...but never by overwriting a bystander. --ff-only is what makes the one
+# main-checkout action safe: git refuses it rather than clobbering live work.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 0 'printf "shipwright\n" > bystander.conf; git commit -qam "conflicting work"'
+printf 'HUMAN MID-EDIT\n' >"$r/bystander.conf"
+before="$(git -C "$r" rev-parse HEAD)"
+rc="$(run_runner "$r" SHIPWRIGHT_ALLOW_DIRTY=1)"
+if [ "$(git -C "$r" rev-parse HEAD)" = "$before" ] \
+   && [ "$(cat "$r/bystander.conf")" = "HUMAN MID-EDIT" ]; then
+  ok "a fast-forward that would overwrite a live edit is refused, and the edit survives"
+else
+  bad "ff-only protects live work" "rc=$rc head=$(git -C "$r" rev-parse HEAD) file=$(cat "$r/bystander.conf")"
+fi
+if grep -q 'Fix:' "$a/runner.err" && grep -q 'could not be fast-forwarded' "$a/runner.err"; then
+  ok "and the refusal is reported with a Fix:, not swallowed"
+else
+  bad "ff failure is reported" "$(cat "$a/runner.err")"
+fi
+
+# Dirt in the RUN WORKTREE is not a bystander — nobody else works there — so it
+# is a previous run that died between editing and committing. It must yield and
+# escalate like any other wedge, NEVER be reset away: a lane that discards its
+# own tree every tick destroys real work and can never accumulate a skip, so the
+# wedge escalation would be unreachable.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+rc="$(run_runner "$r")"              # first run creates the worktree
+wt="$r/.git/athena-shipwright"
+printf 'LEFTOVER\n' >"$wt/ai/agents/ours.md"
+rm -f "$a/claude-was-invoked"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && [ ! -e "$a/claude-was-invoked" ] \
+   && grep -q 'ai/agents/ours.md' "$a/runner.err"; then
+  ok "a previous run's leftovers in the worktree yield the tick"
+else
+  bad "worktree dirt yields" "rc=$rc invoked=$([ -e "$a/claude-was-invoked" ] && echo yes) $(cat "$a/runner.err")"
+fi
+if [ "$(cat "$wt/ai/agents/ours.md")" = "LEFTOVER" ]; then
+  ok "and they are left intact — the runner never resets its own tree out from under a crashed run"
+else
+  bad "leftovers survive" "$(cat "$wt/ai/agents/ours.md")"
+fi
+if grep -q "PREVIOUS RUN's leftovers" "$a/runner.err" && grep -q "$wt" "$a/runner.err"; then
+  ok "and the message says which tree they are in and whose they are"
+else
+  bad "dirt message distinguishes the trees" "$(cat "$a/runner.err")"
+fi
+
+# There is no fallback to the main checkout. An unusable worktree path must be a
+# loud failure, because "run in the main checkout instead" is precisely the
+# behaviour this section exists to remove.
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 0
+printf 'not a worktree\n' >"$a/blocked"
+rc="$(run_runner "$r" SHIPWRIGHT_WORKTREE="$a/blocked")"
+if [ "$rc" -ne 0 ] && [ ! -e "$a/claude-was-invoked" ]; then
+  ok "an unusable worktree path fails the run instead of falling back to the main checkout"
+else
+  bad "no main-checkout fallback" "rc=$rc invoked=$([ -e "$a/claude-was-invoked" ] && echo yes) $(cat "$a/runner.err")"
+fi
+if grep -q 'Fix:' "$a/runner.err"; then
+  ok "and says how to clear it"
+else
+  bad "worktree failure is actionable" "$(cat "$a/runner.err")"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || {
   printf 'Fix: read each FAIL line above — it names the guarantee that broke. Re-run with: bash scripts/test/athena-shipwright/self-test.sh\n' >&2
