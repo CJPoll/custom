@@ -15,112 +15,140 @@ that ticket is fully deployed in production.** Cody's definition, precisely:
   kinds — deliberately not a fixed whitelist): lead time ends when the
   **post-merge pipeline completes**, which is not quite deployment.
 
+This is a **harness capability** and works across the fleet's forges. The fleet
+ships on both GitHub (`gen_saas`, `custom`) and GitLab (`walt_ui`), so the tool
+detects the forge from the repo's `origin` remote and reads whichever CI applies.
+
+**Later (2026-09-19):** first written GitHub-only (a single hardcoded
+`Post-Merge Deploy` workflow, end = that run's completion or, for a no-CI repo,
+merge). Superseded the same day when Cody noted this is a harness change that
+must work across projects: `~/dev/walt_ui` deploys on **GitLab**
+(`.gitlab-ci.yml`, a `deploy` stage, Porter/GCP), read via `glab`, not `gh`. The
+end marker is now a forge-independent 3-tier rule (below), and deploy detection
+is **per-ticket** rather than per-repo. Nothing about a specific repo is
+hardcoded; the deploy workflow/stage is matched by pattern and is overridable via
+`LEAD_TIME_DEPLOY_RE` (GitHub workflow name) / `LEAD_TIME_DEPLOY_STAGE` (GitLab
+job stage).
+
 ## The chosen markers
 
-| | Marker | Where it lives | Recovers historically? |
-|---|---|---|---|
-| **START** | earliest commit on the ticket's branch | git / `gh pr view --json commits` | yes (survives squash merge) |
-| **END (deploy repo)** | completion of the `Post-Merge Deploy` run whose `headSha` is the merge commit | GitHub Actions / `gh run list` | yes |
-| **END (no-deploy repo)** | the merge commit time (`PR mergedAt`) | git / `gh pr view` | yes |
+| | Marker | Where it lives |
+|---|---|---|
+| **START** | earliest commit on the ticket's branch | git; `gh pr view --json commits` / `glab api …/merge_requests/:iid/commits` |
+| **END** | first of the 3 tiers below that exists | GitHub Actions runs / GitLab pipeline jobs / merge time |
 
-The end rule is a single sentence: **the latest durable end signal that exists
-for the repo.** A repo that deploys ends at deploy completion; a repo that does
-not ends at merge.
+### The END rule — one 3-tier rule, forge-independent
 
-### Why not unify on "deployment completed" for both (Cody's offered simplification)
+For a merged ticket, gather three candidate end times and take the **first that
+exists**. This maps exactly onto Cody's definition:
 
-Cody offered: if it tracks with more regularity, use the completed-deployment
-marker as the end for both categories. We could not take it, for a concrete
-reason rather than a purist one: **`~/dev/custom` has no CI and no deploy at
-all** — there is no post-merge run of any kind to read, so there is no
-deployment marker to unify on for half the fleet. The simplification presupposes
-a deployment exists; for the no-deploy repo none does.
+1. **DEPLOY completed** — the deploy step's completion time.
+   - GitHub: completion (`updatedAt`) of the successful workflow run for the
+     merge commit whose workflow name matches the deploy pattern (default
+     `/deploy/i`; `gen_saas`'s `Post-Merge Deploy` matches).
+   - GitLab: the latest `finished_at` among **successful jobs in the `deploy`
+     stage** of the merge commit's pipeline on the default branch.
+2. **POST-MERGE PIPELINE completed** — if no deploy step ran (a doc-/test-only
+   ticket), the completion of the post-merge pipeline/run itself.
+   - GitHub: latest successful non-deploy run for the merge commit.
+   - GitLab: latest `finished_at` among all successful jobs in that pipeline.
+3. **MERGE time** — if there is no post-merge CI at all (e.g. `~/dev/custom`, no
+   CI, no deploy), the merge commit time (`mergedAt` / `merged_at`).
 
-So instead of unifying on the *marker* we unified on the *rule* ("latest durable
-end signal that exists"), which is just as regular and just as trustworthy,
-because both signals are derived per-repo from durable artifacts that always
-exist for that repo. Within `~/dev/gen_saas` the end is uniform: `post-merge.yml`
-fires on **every** push to `main` with no path filter, so a doc-/test-only
-gen_saas ticket still gets a `Post-Merge Deploy` run — the deploy-completion
-marker is available for every merged gen_saas ticket, deploying or not.
+This is Cody's offered simplification, made regular: a **single rule** yields a
+consistently-available, trustworthy end for every ticket on every forge. It is
+"slightly late" only in the benign sense that a deploy tail is included when a
+deploy ran — which is exactly what "fully deployed" means.
+
+### Why GitLab reads the deploy *job*, not the whole pipeline
+
+walt_ui's post-merge pipeline can sit at `status=manual` (it has manual jobs like
+`pages`/`release:run-scripts` and can carry a failed `release:rollback`), so
+"whole pipeline succeeded" is often false even when the deploy itself succeeded.
+The precise, durable signal is the latest successful **`deploy`-stage** job's
+`finished_at` (e.g. MR 1188's `porter:deploy`/`release:deploy`/`release:watch`
+succeeded ~06:58–07:07Z while the pipeline read `manual`). Reading the job, not
+the pipeline status, is what makes the GitLab end trustworthy.
 
 ### The START marker is honest about under-reporting
 
-Earliest-commit-on-branch **lags true start** by the first chunk of work (the
-captain reads the ticket, plans, and writes code before the first commit). It
-therefore **slightly under-reports** lead time. Worked example, PR #14 (DND-185):
-first commit `04:42:59Z`, PR opened `05:19:29Z`, and the admiral had dispatched
-the captain earlier still. We accept the under-report rather than manufacture a
-start we cannot prove. It is the honest durable floor, and it is consistent
-across every ticket, so trends are comparable even if the absolute value runs a
-little short.
+Earliest-commit-on-branch **lags true start** by the first chunk of work (read
+the ticket, plan, write code before the first commit). It therefore **slightly
+under-reports**. Worked example, GitHub PR #14 (DND-185): first commit
+`04:42:59Z`, PR opened `05:19:29Z`, admiral dispatched earlier still. We accept
+the under-report rather than invent a start we cannot prove.
+
+**Known limitation — stacked branches over-report.** For a **stacked** MR/PR
+whose branch still contains an unmerged parent's commits, the forge's commit list
+includes those ancestor commits, so `min(commit time)` reaches back to the
+stack's base and the lead time is inflated. Observed on walt_ui's `margie/`
+stacks (2026-09-19 backfill): MRs 1170/1175/1176 all resolve to the same start
+`2026-09-17T22:52:20Z`, yielding 19–22h — an artefact of the stack, not the work.
+GitHub's `dnd-*` branches tonight were not stacked, so they were clean. Treat a
+lead time that shares a start with a sibling ticket as suspect. A robust fix
+(counting only commits unique to the ticket after its stack-parent merges) is
+forge- and tooling-specific and was **not** built; the plain first-commit floor
+is kept, with this caveat, rather than adding fragile stack-aware logic.
 
 ## The markers we rejected, with evidence
 
-- **Notion `Todo → In Progress` transition time.** Rejected on a *verified*
-  fact, not a guess: the Notion public API exposes exactly two page timestamps —
-  `created_time` and `last_edited_time` — and no per-property transition history.
-  Retrieving DND-184 (`3df349da-87fb-8156-9f43-f829183f841a`) returned
-  `created_time` `2026-09-18T19:09Z` and `last_edited_time` `2026-09-19T04:36Z`;
-  the `Status` property carries only its current value (`Done`) with no
-  timestamp. Worse, `last_edited_time` is whole-page and equals the *last* edit —
-  here `04:36Z`, which is the status→Done edit at merge — so it cannot isolate
-  the start transition even approximately. Compounding the API limit, captains
-  have historically not set the status reliably (the 2026-09-18 athena-inbox run
-  recorded "Captains set NO status; the admiral holds tickets at In Progress
-  until merge"). Unrecoverable and unreliable: rejected.
-- **Admiral dispatch time.** The admiral knows it, but it is not persisted in any
-  queryable form. `state.md` records dispatch *ordering* and page IDs in prose,
-  not a machine-readable per-ticket dispatch timestamp; the only trace is file
-  mtimes on `ai-artifacts/coordination/*` (gitignored, local, not shared, and
-  bumped by any later edit). Not durable, not queryable: rejected as the marker.
-- **Branch / worktree creation time.** Durable in a local reflog but not
-  recoverable across machines or after cleanup, and a branch can be cut early or
-  reused, so it is neither reliable nor better than first-commit. Rejected.
+- **Notion `Todo → In Progress` transition time.** Rejected on a *verified* fact:
+  the Notion public API exposes exactly two page timestamps — `created_time` and
+  `last_edited_time` — and no per-property transition history. Retrieving DND-184
+  (`3df349da-87fb-8156-9f43-f829183f841a`) returned `created_time`
+  `2026-09-18T19:09Z` and `last_edited_time` `2026-09-19T04:36Z`; the `Status`
+  property carries only its current value (`Done`), no timestamp. Worse,
+  `last_edited_time` is whole-page and equals the status→Done edit at merge, so it
+  cannot isolate the start even approximately. Compounded by captains
+  historically not setting the status. Unrecoverable and unreliable.
+- **Admiral dispatch time.** Not persisted queryably — `state.md` records
+  dispatch *ordering* in prose, not a machine-readable per-ticket timestamp; the
+  only trace is gitignored, local `ai-artifacts/coordination/*` file mtimes.
+- **Branch / worktree creation time.** Not recoverable across machines or after
+  cleanup; a branch can be cut early or reused. No better than first-commit.
 
 ## The capture mechanism: derive, don't capture
 
 **The best capture mechanism is no capture at all.** `ai/bin/lead-time` recovers
-every timestamp on demand from git + GitHub Actions, both of which retain history
+every timestamp on demand from git + the forge's CI, both of which retain history
 independently of whether any agent remembered to do anything. There is **no new
-manual step** for an agent to skip — which is the entire lesson that motivated
-this work.
+manual step** for an agent to skip — the whole lesson that motivated this work.
 
 ```
-ai/bin/lead-time --repo ~/dev/gen_saas --since 2026-09-19T00:00:00Z
-ai/bin/lead-time --repo ~/dev/custom   --pr 14 --json
-ai/bin/lead-time --self-test        # pure date/marker logic, no network
+ai/bin/lead-time --repo ~/dev/gen_saas --since 2026-09-19T00:00:00Z   # github/gh
+ai/bin/lead-time --repo ~/dev/walt_ui  --mr 1188                      # gitlab/glab
+ai/bin/lead-time --repo ~/dev/custom   --pr 14 --json                 # github, no CI
+ai/bin/lead-time --self-test            # pure date/marker logic, no network
 ```
 
-- `--repo` detects whether the repo deploys by the presence of
-  `.github/workflows/post-merge.yml`; that switches the end marker automatically.
-- Pure date/marker math lives in module `LeadTime` and is covered by
-  `ai/test/lead-time/self-test.sh`, discovered and run by `harness-gate`.
-- Run it ad hoc, or on a cadence (e.g. a shipwright pass) redirecting `--json`
-  into a local ledger under `ai-artifacts/` if a running history is wanted.
-  Because it derives, re-running is idempotent and back-datable.
+- `--repo`'s `origin` remote selects the backend: `github.com` → `gh`,
+  `gitlab.com` → `glab`. `--pr` and `--mr` are synonyms.
+- Pure date/marker math lives in module `LeadTime` (Ruby stdlib only, runs on the
+  system's Ruby 2.7) and is covered by `ai/test/lead-time/self-test.sh`,
+  discovered and run by `harness-gate`.
+- Run ad hoc, or on a cadence (e.g. a shipwright pass) redirecting `--json` into a
+  local ledger under `ai-artifacts/` if a running history is wanted. Because it
+  derives, re-running is idempotent and back-datable.
 
-**If a manual start-capture is ever wanted** (to beat the first-commit lag), the
-only place to add it with near-zero agent dependence is worktree creation (`wt`
-could stamp a start file). It was deliberately **not** built: worktrees can be
-created early or reused, so it trades a known small under-report for a new
-unreliable signal and a new thing to maintain. First-commit stays the marker.
+**If a manual start-capture is ever wanted** (to beat the first-commit lag and the
+stacked-branch artefact), the only near-zero-agent-dependence place to add it is
+worktree creation (`wt` could stamp a start file). It was deliberately **not**
+built: worktrees can be created early or reused, trading a known bias for a new
+unreliable signal and new maintenance. First-commit stays the marker.
 
 ## Worked backfill — 2026-09-19 fleet run (dated snapshot)
 
-**As-of 2026-09-19.** Acceptance test of the design: every ticket that shipped
-tonight, lead time derived from durable data alone. All timestamps UTC.
-`via=merge` = ended at merge (no-deploy repo); `via=deploy` = ended at
-`Post-Merge Deploy` completion.
+**As-of 2026-09-19.** Acceptance test: every ticket that shipped, lead time
+derived from durable data alone. All timestamps UTC. `via=deploy` = ended at the
+deploy step; `via=pipeline` = ended at post-merge pipeline completion (no deploy
+step ran); `via=merge` = no post-merge CI (ended at merge).
 
-### `~/dev/custom` (no CI, no deploy → end = merge)
+### `~/dev/custom` — GitHub, no CI/deploy → `via=merge`
 
-| PR | Ticket | Lead | Start (first commit) | End (merge) |
+| PR | Ticket | Lead | Start | End (merge) |
 |---|---|---|---|---|
 | 1  | DND-182 | 9m 21s  | 00:37:23 | 00:46:44 |
 | 3  | DND-183 | 44m     | 01:31:04 | 02:15:04 |
-| 5  | DND-183 f/u | 1m 13s | 02:30:07 | 02:31:20 |
-| 6  | DND-183 f/u | 53s    | 02:35:34 | 02:36:27 |
 | 2  | DND-189 | 38m 14s | 01:34:04 | 02:12:18 |
 | 4  | DND-202 | 16m 5s  | 01:54:07 | 02:10:12 |
 | 7  | DND-208 | 22m 7s  | 02:27:08 | 02:49:15 |
@@ -128,38 +156,39 @@ tonight, lead time derived from durable data alone. All timestamps UTC.
 | 11 | DND-209 | 1h 3m   | 03:18:01 | 04:21:44 |
 | 12 | DND-209 f/u | 1h 13m | 03:18:01 | 04:31:44 |
 | 14 | DND-185 | 58m 22s | 04:42:59 | 05:41:21 |
-| 8  | shipwright | 1m 44s | 04:24:09 | 04:25:53 |
-| 10 | shipwright | 3m 46s | 04:26:43 | 04:30:29 |
+| 5/6/8/10 | follow-ups/shipwright | 53s–3m 46s | — | — |
 
-### `~/dev/gen_saas` (deploys via `post-merge.yml` → end = deploy completion)
+### `~/dev/gen_saas` — GitHub, `Post-Merge Deploy` → `via=deploy`
 
-| PR | Lead | Start (first commit) | End (deploy done) |
+| PR | Lead | Start | End (deploy done) |
 |---|---|---|---|
 | 230 | 10m 45s | 18:21:03 | 18:31:48 |
-| 231 | 27m 26s | 19:11:16 | 19:38:42 |
-| 232 | 42m 53s | 19:40:12 | 20:23:05 |
 | 233 | 8m 41s  | 20:51:33 | 21:00:14 |
-| 234 | 17m 40s | 20:59:41 | 21:17:21 |
 | 235 | 12m 27s | 21:12:52 | 21:25:19 |
-| 236 | 15m 4s  | 22:12:24 | 22:27:28 |
-| 237 | 13m 18s | 22:47:51 | 23:01:09 |
 | 238 | 21m 31s | 23:32:12 | 23:53:43 |
 | 241 | 52m 15s | 01:21:40 | 02:13:55 |
-| 239 | 32m 24s | 01:41:50 | 02:14:14 |
 | 242 | 2h 4m   | 00:38:28 | 02:43:12 |
-| 243 | 1h 9m   | 02:46:09 | 03:55:30 |
 | 244 | 2h 35m  | 03:09:27 | 05:44:31 |
 | 245 | 1h 42m  | 04:24:11 | 06:06:39 |
 
-**Reading it.** Custom tickets cluster short (seconds to ~2h; the ~1h+ ones are
-DND-184/209, which iterated). gen_saas tickets carry a deploy tail — end minus
-merge is the CI+deploy duration, typically ~5–20 min on top of the coding
-interval (e.g. PR 245 merged `05:41:21`, deploy completed `06:06:39`: a ~25 min
-tail). The tail is exactly why deploy-completion, not merge, is the right end for
-a deploying repo: "fully deployed" is genuinely later than "merged."
+(15 gen_saas PRs total merged/deployed tonight; representative rows shown.)
 
-**Backfill verdict: yes, fully recoverable.** Both the start (first commit) and
-the end (merge time / deploy-run completion) came entirely from git + GitHub
-Actions with no reliance on any status an agent did or did not set. The start is
-the first-commit floor described above, not the true dispatch instant — that
-instant is not recoverable for past tickets and was not invented.
+### `~/dev/walt_ui` — GitLab, `deploy`-stage jobs → `via=deploy`
+
+| MR | Lead | Start | End (deploy done) | Note |
+|---|---|---|---|---|
+| 1177 | 3m 14s | 21:43:12 | 21:46:26 | clean |
+| 1183 | 43m 14s | 00:40:03 | 01:23:17 | clean |
+| 1188 | 2h 1m   | 05:05:41 | 07:07:37 | clean |
+| 1186 | 4h 34m  | 09:08:00 | 13:42:03 | clean |
+| 1170/1175/1176 | 19–22h | 2026-09-17T22:52:20 | 18:18–20:51 | **stacked — over-reported**, see limitation above |
+
+**Reading it.** gen_saas deploy tails run ~5–20 min over merge (PR 245 merged
+`05:41:21`, deploy done `06:06:39` — a ~25 min tail); that tail is why
+deploy-completion, not merge, is the right end for a deploying repo. walt_ui's
+clean MRs behave the same; its stacked `margie/` MRs are the documented artefact.
+
+**Backfill verdict: yes, recoverable across all three repos and both forges**, from
+git + CI alone with no reliance on any agent-set status. The start is the
+first-commit floor (over-reported for stacked branches, flagged above); the true
+dispatch instant is not recoverable for past tickets and was not invented.
