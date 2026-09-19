@@ -2858,6 +2858,705 @@ assert_contains "W-10 a log channel that has NEVER been delivered to is reported
 assert_contains "W-10 and the notice names producer registration" "register this channel's producer" "${ERR}"
 
 echo
+echo "== DND-187 / 1. Domain: the writer's half of lib/maildir.sh =="
+
+# M-10: the slug is the one part of the filename a sender chooses freely, and
+# it becomes a name the PEER will see and a `thread:` will point at. The
+# grammar is the contract's, and it is checked at the boundary rather than
+# after assembly so the refusal can name the rule that was broken.
+for s in "a" "plan-review" "0" "$(printf 'a%.0s' $(seq 1 48))"; do
+  assert_ok "M-10 slug [${s:0:12}…] is accepted" maildir_valid_slug "${s}"
+done
+for s in "" "-leading" "trailing-" "Upper" "with_underscore" "with space" "a/b" ".." "$(printf 'a%.0s' $(seq 1 49))"; do
+  if maildir_valid_slug "${s}"; then
+    bad "M-10 slug [${s:0:12}…] is rejected" "accepted"
+  else
+    ok "M-10 slug [${s:0:12}…] is rejected"
+  fi
+done
+
+# M-10: the filename stamp and the frontmatter `sent_at` are TWO COPIES OF ONE
+# FACT, and maildir_validate_message refuses a message whose copies disagree.
+# The agreement is structural -- the name is derived FROM the sent_at value --
+# so the assertion is that the reader's own extractor returns the sender's own
+# input, not that two strings happen to look alike.
+NAME="$(maildir_message_name "2026-09-01T23:22:15Z" "007" "liaison-intro")"
+assert_eq "M-10 the filename is built in the contract's shape" \
+  "20260901T232215Z-007-liaison-intro.md" "${NAME}"
+assert_eq "M-10 the reader's stamp extractor returns the sender's own sent_at" \
+  "2026-09-01T23:22:15Z" "$(maildir_message_stamp "${NAME}")"
+assert_ok "M-10 a built filename passes the READER's grammar" \
+  maildir_valid_message_name "${NAME}"
+assert_refused "M-10 a non-RFC3339 stamp is refused, not coerced" \
+  maildir_message_name "2026-09-01 23:22:15" "001" "x"
+assert_refused "M-10 a local-time stamp with an offset is refused (UTC only)" \
+  maildir_message_name "2026-09-01T23:22:15+02:00" "001" "x"
+assert_refused "M-10 an illegal slug is refused before a name is assembled" \
+  maildir_message_name "2026-09-01T23:22:15Z" "001" "Not A Slug"
+
+# M-10 <seq>: one past the highest present, INCLUDING .acked/. Acking is what
+# empties the live directory, so a sender that scanned only the unacked names
+# would restart at 001 the moment the peer caught up and collide with the whole
+# transcript.
+seqz() { printf '%s\0' "$@" | maildir_next_seq; }
+assert_eq "M-10 an empty write directory allocates 001" "001" "$(printf '' | maildir_next_seq)"
+assert_eq "M-10 seq is one past the highest present" "003" \
+  "$(seqz 20260901T232215Z-001-a.md 20260901T232216Z-002-b.md)"
+assert_eq "M-10 a zero-padded seq is read base 10, not octal" "009" \
+  "$(seqz 20260901T232215Z-008-a.md)"
+assert_eq "M-10 the field WIDENS past 999 rather than wrapping" "1000" \
+  "$(seqz 20260901T232215Z-999-a.md)"
+assert_eq "M-10 non-conformant names contribute no sequence number" "001" \
+  "$(seqz notes.md .event tmp README 20260901T232215Z-1-short.md)"
+assert_eq "M-10 order of the listing does not matter" "004" \
+  "$(seqz 20260901T232216Z-003-b.md 20260901T232215Z-001-a.md)"
+
+# M-11: EVERY VALUE IS REFUSED IF IT CAN BREAK THE FORMAT IT IS WRITTEN INTO.
+# The frontmatter block is `key: value` lines between two `---`, so a value
+# carrying a newline writes a LINE -- and the line it writes may be `---`, or a
+# second `from:`. This is the delimiter-collision class that has already cost
+# this skill four bugs, arriving from the side that WRITES the delimiter.
+# `assert_refused` runs its command in THIS shell, so the renderer is invoked
+# through a wrapper rather than `bash -c`: a subshell started with -c does not
+# inherit these functions, and every case in this block would then "refuse"
+# because the command did not exist. That is a test passing for the wrong
+# reason -- measured, not imagined: the first version of this block did exactly
+# that, and its six cases were green against a renderer that was never called.
+render_with() {
+  local body="$1"; shift
+  printf '%s' "${body}" | maildir_render_message "$@"
+}
+assert_refused "M-11 a newline in \"re\" is refused (it would forge a header line)" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "$(printf '/home/x\n---\nfrom: someone-else')" ""
+# The REFUSAL ITSELF is asserted, not just the non-zero exit. The round-trip
+# check below would also catch a newline -- the parsed value comes back
+# different -- so without this the explicit arm could be deleted with the suite
+# still green, and the sender would be told its value "would not survive the
+# reader's parse" when the truth is that it forges a header line. A refusal
+# that misnames the problem is a Fix: clause the reader cannot act on.
+assert_contains "M-11 ... and the refusal names the line break, not a parse mismatch" \
+  "contains a line break" \
+  "$(render_with "body" athena peer 2026-09-01T23:22:15Z "$(printf '/home/x\n---\nfrom: someone-else')" "" 2>&1 >/dev/null)"
+assert_refused "M-11 a \"thread\" that is a PATH is refused (A-3: a name is data, never a path)" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "" "../../etc/passwd"
+assert_refused "M-11 a \"thread\" that is not a conformant message name is refused" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "" "notes.md"
+assert_refused "M-11 an identity that is not a legal identity is refused" \
+  render_with "body" "athena x" peer 2026-09-01T23:22:15Z "" ""
+assert_refused "M-11 a recipient that is not a legal identity is refused" \
+  render_with "body" athena "peer/../x" 2026-09-01T23:22:15Z "" ""
+assert_refused "M-11 an empty body is refused -- the MISSING-input shape of a send" \
+  render_with "" athena peer 2026-09-01T23:22:15Z "" ""
+assert_refused "M-11 a whitespace-only body is refused too" \
+  render_with "$(printf '  \n\n\t\n')" athena peer 2026-09-01T23:22:15Z "" ""
+assert_ok "M-11 the ordinary render is accepted (the block above is not refusing everything)" \
+  render_with "a body" athena peer 2026-09-01T23:22:15Z "" ""
+
+# THE QUIETER HALF: a value the reader would not break on but WOULD SILENTLY
+# CHANGE. `maildir_parse_frontmatter` strips a "#" comment that follows
+# whitespace and trims both ends of every value, so `re: /home/x/design.md
+# #section-3` reached the peer as `/home/x/design.md` -- the fragment gone,
+# both sides reporting success, nothing saying a value had been edited in
+# transit. Found by rendering an input class the reader's fixtures never
+# contained; the renderer now parses its own output back and refuses a value
+# that does not survive.
+assert_refused "M-11 a \"re\" whose fragment the reader's parser would strip is refused" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "/home/x/design.md #section-3" ""
+assert_refused "M-11 a \"re\" with trailing whitespace the parser would trim is refused" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "/home/x/design.md   " ""
+assert_ok "M-11 a \"re\" carrying a URL fragment with no space before # is fine" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "https://example.invalid/a#frag" ""
+
+# A body with no trailing newline still ends as a line: the last line of a
+# message is a line, and a reader concatenating it would otherwise run it into
+# whatever came next.
+# `printf X` guards the comparison: `$(...)` STRIPS trailing newlines, so the
+# obvious form of this case can never observe the thing it claims to check --
+# it would report a missing newline whether or not the renderer emitted one.
+RT="$(render_with "no trailing newline" athena peer 2026-09-01T23:22:15Z "" ""; printf X)"; RT="${RT%X}"
+case "${RT}" in *$'\n') ok "M-11 the rendered message always ends with a newline" ;;
+  *) bad "M-11 the rendered message always ends with a newline" "it does not" ;; esac
+
+# A short <seq> is refused by the BUILDER, not only by the reader: "-1-" sorts
+# after "-10-", so one accepted name breaks the ordering guarantee for every
+# name around it.
+assert_refused "M-10 a <seq> shorter than 3 digits is refused at build time" \
+  maildir_message_name "2026-09-01T23:22:15Z" "1" "x"
+
+# A refusal emits NOTHING. The renderer buffers for exactly this reason: a
+# half-rendered message delivered is a half-sent one, and the caller checks
+# emptiness because `$(...)` discards the inner status.
+OUT="$(printf 'body' | maildir_render_message athena peer 2026-09-01T23:22:15Z "$(printf 'a\nb')" "" 2>/dev/null)"
+assert_eq "M-11 a refused render emits no partial message" "" "${OUT}"
+
+echo
+echo "== DND-187 / 2. The writer and the reader agree (round trip, no disk) =="
+
+# THE CLAIM THAT MATTERS: what this sender writes, that reader accepts. Both
+# halves are in this repo, so the agreement is assertable rather than hoped
+# for -- and it is the assertion that would fail if either grammar drifted.
+RT="$(printf 'Hello peer.\n' | maildir_render_message athena gen-saas-server 2026-09-01T23:22:15Z \
+        "/home/cjpoll/dev/gen_saas/ai-artifacts/athena-comms.md" "20260901T232215Z-001-prior.md")"
+FM="$(printf '%s' "${RT}" | maildir_parse_frontmatter)"
+assert_eq "M-10 round trip: from" "athena" "$(printf '%s' "${FM}" | jq -r .from)"
+assert_eq "M-10 round trip: to"   "gen-saas-server" "$(printf '%s' "${FM}" | jq -r .to)"
+assert_eq "M-10 round trip: sent_at" "2026-09-01T23:22:15Z" "$(printf '%s' "${FM}" | jq -r .sent_at)"
+assert_eq "M-10 round trip: re survives (a path with slashes is not a delimiter)" \
+  "/home/cjpoll/dev/gen_saas/ai-artifacts/athena-comms.md" "$(printf '%s' "${FM}" | jq -r .re)"
+assert_eq "M-10 round trip: thread survives" "20260901T232215Z-001-prior.md" \
+  "$(printf '%s' "${FM}" | jq -r .thread)"
+assert_eq "M-10 round trip: the body arrives intact" "Hello peer." \
+  "$(printf '%s' "${RT}" | maildir_body | sed '/^$/d')"
+assert_ok "M-10 round trip: the reader VALIDATES the message the sender built" \
+  maildir_validate_message "$(maildir_message_name 2026-09-01T23:22:15Z 001 x)" "${FM}"
+
+# THE BLANK LINE BETWEEN THE HEADER AND THE BODY IS ASSERTED, and it needs its
+# own case because every other body assertion is blind to it: the round trip
+# above pipes through `sed '/^$/d'`, which deletes precisely the line in
+# question, and `assert_contains` on the body cannot see a separator that is
+# not part of the body. The suite was green with the separator and green
+# without it -- and it WAS without it, because the header was assembled in a
+# `$( )`, which strips every trailing newline. Our own reader tolerates either
+# shape, so the whole cost of that would have landed on the OTHER
+# implementation of this contract: the peer this channel exists to talk to,
+# whose parser we do not own and whose example (contract -> "Frontmatter")
+# shows the blank line.
+RT="$(render_with "the body" athena peer 2026-09-01T23:22:15Z "" ""; printf X)"; RT="${RT%X}"
+case "${RT}" in
+  *"---"$'\n\n'"the body"*) ok "M-10 the closing --- is followed by a blank line, as the contract's example shows" ;;
+  *) bad "M-10 the closing --- is followed by a blank line, as the contract's example shows" \
+       "got [$(printf '%s' "${RT}" | tr '\n' '~')]" ;;
+esac
+# Lines 1..5 are `---`, from, to, sent_at, `---`; 6 is the blank separator, so
+# the body starts on 7. Spelled out because an off-by-one here would make the
+# case above look like it had verified the separator when it had verified
+# nothing.
+assert_eq "M-10 ... and the body still starts on the line after it" "the body" \
+  "$(printf '%s' "${RT}" | sed -n '7p')"
+
+# --re is an absolute path or a URL (contract -> "Frontmatter"). A RELATIVE
+# path is the one shape that silently means something else on the other side:
+# it resolves against the PEER's working directory.
+assert_refused "M-11 a relative --re is refused (it would resolve against the peer's cwd)" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "ai-artifacts/notes.md" ""
+assert_ok "M-11 an absolute --re is accepted" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "/home/cjpoll/x.md" ""
+assert_ok "M-11 a URL --re is accepted" \
+  render_with "body" athena peer 2026-09-01T23:22:15Z "https://example.invalid/a" ""
+
+# A MISSING CAPABILITY MUST NOT BE REPORTED AS A BAD VALUE. Without jq the
+# round-trip check reads every value as "would not survive the reader's parse"
+# and names whitespace or " #" as the cause -- a refusal whose Fix: sends the
+# sender to edit a value that was never the problem. This is the repo's
+# standing missing-vs-wrong rule arriving INSIDE the check written to honour
+# it, so it gets its own case rather than a comment.
+ERR="$( PATH=/nonexistent-for-this-case render_with "body" athena peer 2026-09-01T23:22:15Z "/home/x.md" "" 2>&1 >/dev/null )"
+assert_contains "M-11 a missing jq is named as the missing capability it is" "jq is required" "${ERR}"
+assert_not_contains "M-11 ... and is NOT reported as a bad value" "would not survive" "${ERR}"
+
+# THE INPUT CLASS THE READER'S OWN FIXTURES NEVER CONTAINED. DND-184's worst
+# defect was an unterminated `---` block harvesting a `key: value`-shaped BODY
+# as frontmatter, rendering an empty body and acking it -- peer content
+# destroyed and recorded as ingested. A sender is the one component that can
+# produce that shape by accident, so the body most likely to trigger it is the
+# one asserted here: `---` lines and `key: value` lines, inside the body.
+TRICKY="$(printf -- 'The decision is: do not deploy on Friday.\n---\nfrom: not-a-header\nto: nobody\n---\ntail line\n')"
+RT="$(printf '%s' "${TRICKY}" | maildir_render_message athena peer 2026-09-01T23:22:15Z "" "")"
+FM="$(printf '%s' "${RT}" | maildir_parse_frontmatter)"
+assert_eq "M-10 a body containing \"---\" does not forge the sender" "athena" \
+  "$(printf '%s' "${FM}" | jq -r .from)"
+assert_eq "M-10 a body containing \"to:\" does not forge the recipient" "peer" \
+  "$(printf '%s' "${FM}" | jq -r .to)"
+assert_contains "M-10 the whole tricky body survives the round trip" \
+  "tail line" "$(printf '%s' "${RT}" | maildir_body)"
+assert_contains "M-10 including its own \"key: value\" line" \
+  "The decision is: do not deploy on Friday." "$(printf '%s' "${RT}" | maildir_body)"
+
+# M-12's send-side mirror of "never ack your own message".
+assert_refused "M-12 refusing to address a message to my own identity" \
+  maildir_refuse_self_send athena athena
+assert_ok "M-12 addressing the peer is fine" maildir_refuse_self_send peer athena
+
+echo
+echo "== DND-187 / 3. Delivery: stage, link, and what must NOT happen =="
+
+setup_send_case() {
+  setup_case
+  SPROJ="$(make_repo sproj)"
+  register sproj "${SPROJ}" '{"mail":{"kind":"maildir","namespace":"agent-mail/peer","read":"from-peer","write":"to-peer","identity":"athena"}}'
+  SNS="${ATHENA_INBOX_ROOT}/agent-mail/peer"
+  SWRITE="${SNS}/to-peer"
+  SREAD="${SNS}/from-peer"
+}
+
+setup_send_case
+OUT="$( cd "${SPROJ}" && printf 'first body\n' | "${BIN}/send-mail" mail first-message --to peer 2>&1 )"
+assert_contains "M-11 send-mail reports the delivered filename" "delivered 2" "${OUT}"
+assert_not_contains "M-11 send-mail never prints the body back" "first body" "${OUT}"
+DELIVERED="$(ls "${SWRITE}" | head -1)"
+assert_ok "M-11 the message is in the WRITE directory" test -f "${SWRITE}/${DELIVERED}"
+assert_eq "M-11 nothing is left in tmp/ after delivery" "" "$(ls -A "${SWRITE}/tmp")"
+assert_eq "M-11 the delivered message is 0600" "600" "$(stat -c %a "${SWRITE}/${DELIVERED}")"
+assert_eq "M-11 the write directory is 0700" "700" "$(stat -c %a "${SWRITE}")"
+# `mkdir -p -m 0700 a/b/c` modes ONLY `c`; the intermediates take the process
+# umask, so the first end-to-end send of this ticket really did leave a private
+# conversation under a world-readable directory. fs_mkdir_0700 is the fix and
+# this is the case that found it.
+assert_eq "M-11 every intermediate directory is 0700 too, not just the last" "700" \
+  "$(stat -c %a "${SNS}")"
+assert_eq "M-11 ... including the namespace root" "700" \
+  "$(stat -c %a "${ATHENA_INBOX_ROOT}/agent-mail")"
+
+# THE DIRECTORY THIS IDENTITY READS FROM IS THE PEER'S DELIVERY TARGET.
+# Fabricating it invents a channel the peer never declared, after which a
+# reader counting it reports a healthy empty inbox for a conversation whose
+# other half does not exist.
+if [ -e "${SREAD}" ]; then
+  bad "M-11 a send does NOT create the directory it reads from" "created ${SREAD}"
+else
+  ok "M-11 a send does NOT create the directory it reads from"
+fi
+
+# The doorbell, and only the write side's.
+assert_ok "M-12 the write directory's doorbell exists after a send" test -f "${SWRITE}/.event"
+assert_eq "M-12 the doorbell stays zero bytes -- it is a bell, not a letter" "0" \
+  "$(stat -c %s "${SWRITE}/.event")"
+
+# The sequence really does advance on disk, and a second send does not collide.
+( cd "${SPROJ}" && printf 'second body\n' | "${BIN}/send-mail" mail second-message --to peer >/dev/null 2>&1 )
+assert_eq "M-11 two sends produce two messages" "2" "$(ls "${SWRITE}"/*.md | wc -l)"
+assert_contains "M-11 the second send allocated 002" "-002-" "$(ls "${SWRITE}"/*.md | tail -1)"
+
+# NON-CLOBBERING DELIVERY. `rename(2)`/`mv` SILENTLY REPLACES an existing
+# destination, so a <seq> race or a crash-retry of an existing name destroys
+# the earlier message with no error anywhere. `ln` fails instead, and status 2
+# is what the retry is built on.
+setup_send_case
+mkdir -p "${SWRITE}/tmp"
+printf 'THE ORIGINAL MESSAGE\n' > "${SWRITE}/20260901T232215Z-001-taken.md"
+fs_maildir_deliver "${SWRITE}" "20260901T232215Z-001-taken.md" "REPLACEMENT"; RC=$?
+assert_eq "M-11 delivery onto an existing name returns 2 (collision), not 0" "2" "${RC}"
+assert_contains "M-11 and the existing message is UNTOUCHED" "THE ORIGINAL MESSAGE" \
+  "$(cat "${SWRITE}/20260901T232215Z-001-taken.md")"
+assert_eq "M-11 a collided delivery leaves nothing staged in tmp/" "" "$(ls -A "${SWRITE}/tmp")"
+
+# A filename is data, never a path -- re-checked in the primitive, because a
+# primitive that is safe only because of its current caller is not safe.
+assert_refused "A-3 the delivery primitive refuses a non-conformant filename" \
+  fs_maildir_deliver "${SWRITE}" "../escape.md" "x"
+assert_refused "A-3 ... and a bare name that is not a message name" \
+  fs_maildir_deliver "${SWRITE}" "notes.md" "x"
+
+# THE RETRY IS EXERCISED, not merely written. A <seq> collision cannot be
+# provoked through the real scanner -- it allocates one past what it sees, so
+# it never picks a name that exists -- and a retry nothing ever runs is a claim,
+# not a behaviour. So the ALLOCATOR is shimmed to keep returning a number that
+# is already taken, which is exactly what a lost race with another sender looks
+# like from inside this process.
+setup_send_case
+mkdir -p "${SWRITE}/tmp"
+# The planted name must match the one the shimmed allocator and the pinned
+# clock will produce IN FULL -- stamp, seq AND slug. A plant that differs in
+# any field is simply a different message, and the case would then assert a
+# retry over a collision that never happened.
+printf 'ORIGINAL\n' > "${SWRITE}/20260901T232215Z-001-retry-case.md"
+# The CLOCK is pinned as well as the allocator: a filename is
+# <stamp>Z-<seq>-<slug>, so two sends collide only when BOTH the second and the
+# sequence number match -- which is precisely the race the contract describes
+# (two senders scanning at once), and precisely why an unpinned clock made the
+# first version of this case silently provoke nothing.
+eval "orig_now_rfc3339() $(declare -f fs_now_rfc3339 | tail -n +2)"
+fs_now_rfc3339() { printf '2026-09-01T23:22:15Z\n'; }
+eval "orig_next_seq() $(declare -f maildir_next_seq | tail -n +2)"
+SEQ_CALLS="${CASE_DIR}/seq.calls"; : > "${SEQ_CALLS}"
+maildir_next_seq() { printf 'x\n' >> "${SEQ_CALLS}"; if [ "$(wc -l < "${SEQ_CALLS}")" -le 1 ]; then cat >/dev/null; printf '001\n'; else orig_next_seq; fi; }
+OUT="$( cd "${SPROJ}" && printf 'retry me\n' | inbox_send_mail mail retry-case peer "." "" "" 2>&1 )"
+assert_contains "M-11 a collision is retried with a fresh sequence number" "-002-" "${OUT}"
+assert_contains "M-11 ... and the original message is untouched" "ORIGINAL" \
+  "$(cat "${SWRITE}/20260901T232215Z-001-retry-case.md")"
+
+# AND THE RETRY IS BOUNDED. An unbounded loop against a destination that can
+# never be delivered to would spin forever on a path that is not going to work,
+# which is the one outcome worse than refusing -- and the refusal has to say
+# plainly that NOTHING was delivered, or a caller cannot tell a give-up from a
+# partial send.
+setup_send_case
+mkdir -p "${SWRITE}/tmp"
+printf 'ORIGINAL\n' > "${SWRITE}/20260901T232215Z-001-wedged.md"
+maildir_next_seq() { cat >/dev/null; printf '001\n'; }
+ERR="$( cd "${SPROJ}" && printf 'never lands\n' | inbox_send_mail mail wedged peer "." "" "" 2>&1 >/dev/null )"; RC=$?
+assert_eq "M-11 a send that cannot find a free name exits non-zero" "1" "${RC}"
+assert_contains "M-11 ... refusing with a Fix: clause" "Fix:" "${ERR}"
+assert_contains "M-11 ... and saying plainly that nothing was delivered" "NOTHING WAS DELIVERED" "${ERR}"
+assert_eq "M-11 ... leaving exactly the one message that was already there" "1" \
+  "$(ls "${SWRITE}"/*.md | wc -l)"
+unset -f maildir_next_seq fs_now_rfc3339
+eval "maildir_next_seq() $(declare -f orig_next_seq | tail -n +2)"
+eval "fs_now_rfc3339() $(declare -f orig_now_rfc3339 | tail -n +2)"
+assert_eq "M-11 the real allocator is restored for the cases that follow" "001" \
+  "$(printf '' | maildir_next_seq)"
+
+echo
+echo "== DND-187 / 4. M-12: the doorbell is bumped AFTER the delivery =="
+
+# ASSERTED ON ORDERING, NOT ON THE END STATE. Both orders leave the same files
+# on disk; the difference is that a waiter woken BEFORE the link finds nothing,
+# goes back to sleep, and THE WAKE IS LOST. So the observation is made from
+# inside the bump itself: how many messages were already in place when the bell
+# rang. Zero would mean the contract's most consequential ordering rule had
+# been inverted, with every end-state assertion still green.
+setup_send_case
+ORDER="${CASE_DIR}/order.log"
+: > "${ORDER}"
+eval "orig_deliver() $(declare -f fs_maildir_deliver | tail -n +2)"
+eval "orig_bump() $(declare -f fs_bump_doorbell | tail -n +2)"
+fs_maildir_deliver() { orig_deliver "$@"; local r=$?; printf 'deliver rc=%s\n' "${r}" >> "${ORDER}"; return "${r}"; }
+fs_bump_doorbell()   { printf 'bump messages-in-place=%s\n' "$(ls "${SWRITE}"/*.md 2>/dev/null | wc -l)" >> "${ORDER}"; orig_bump "$@"; }
+( cd "${SPROJ}" && printf 'ordering\n' | inbox_send_mail mail ordering-case peer "." "" "" >/dev/null 2>&1 )
+assert_eq "M-12 the delivery happens before the bump" "deliver rc=0" "$(sed -n 1p "${ORDER}")"
+assert_eq "M-12 and the message is ALREADY in place when the bell rings" \
+  "bump messages-in-place=1" "$(sed -n 2p "${ORDER}")"
+unset -f fs_maildir_deliver fs_bump_doorbell
+eval "fs_maildir_deliver() $(declare -f orig_deliver | tail -n +2)"
+eval "fs_bump_doorbell() $(declare -f orig_bump | tail -n +2)"
+
+# A FAILED DELIVERY RINGS NO BELL. The other half of the ordering rule: a bump
+# with nothing delivered wakes a peer to an empty directory, and a bump that
+# happened anyway would make "the bell means something arrived" false.
+setup_send_case
+mkdir -p "${SWRITE}"
+: > "${SWRITE}/.event"
+touch -d "2020-01-01 00:00:00" "${SWRITE}/.event"
+BEFORE="$(stat -c %Y "${SWRITE}/.event")"
+# Unwritable staging: the delivery cannot happen at all.
+mkdir -p "${SWRITE}/tmp"; chmod 0500 "${SWRITE}/tmp"
+( cd "${SPROJ}" && printf 'x\n' | "${BIN}/send-mail" mail undeliverable --to peer >/dev/null 2>&1 ); RC=$?
+chmod 0700 "${SWRITE}/tmp"
+assert_eq "M-12 an undeliverable send exits non-zero" "1" "${RC}"
+assert_eq "M-12 ... and the doorbell was NOT bumped" "${BEFORE}" "$(stat -c %Y "${SWRITE}/.event")"
+assert_eq "M-12 ... and nothing was delivered" "0" "$(ls "${SWRITE}"/*.md 2>/dev/null | wc -l)"
+
+# THE OTHER TWO fs_mkdir_0700 CALL SITES. The mode defect was swept as a class
+# -- no `mkdir -p -m` remains in lib/ or bin/ -- but a swept class with one
+# assertion is a class that can quietly come back at the two sites nobody
+# looked at. Reverting either of these to `mkdir -p -m 0700` left the suite
+# green; S8 mutated the send path only. Both are asserted on a namespace whose
+# intermediates DO NOT EXIST beforehand, which is the only state in which the
+# difference between the two forms is observable at all.
+setup_case
+KPROJ="$(make_repo kproj)"
+register kproj "${KPROJ}" '{"mail":{"kind":"maildir","namespace":"agent-mail/fresh/deeper","read":"from-peer","write":"to-peer","identity":"athena"}}'
+KNS="${ATHENA_INBOX_ROOT}/agent-mail/fresh/deeper"
+
+# (a) the consumer lock's directory, created by lock.sh on first acquire.
+assert_ok "M-11 the consumer lock is acquirable in a namespace that does not exist yet" \
+  inbox_lock_acquire "${KNS}/from-peer/.consumer.lock" "the test"
+inbox_release_consumer
+assert_eq "M-11 lock.sh creates its directory at 0700" "700" "$(stat -c %a "${KNS}/from-peer")"
+assert_eq "M-11 ... and every intermediate it had to create too" "700" "$(stat -c %a "${KNS}")"
+assert_eq "M-11 ... all the way up" "700" "$(stat -c %a "${ATHENA_INBOX_ROOT}/agent-mail/fresh")"
+
+# (b) `.acked/`, created by the maildir ack.
+printf -- '---\nfrom: peer\nto: athena\nsent_at: 2026-09-01T23:22:15Z\n---\n\nhi\n' \
+  > "${KNS}/from-peer/20260901T232215Z-001-hello.md"
+assert_ok "M-11 the ack moves a message into a .acked/ that did not exist" \
+  bash -c "cd '${KPROJ}' && '${BIN}/read-inbox' mail >/dev/null 2>&1"
+assert_eq "M-11 the ack creates .acked/ at 0700" "700" "$(stat -c %a "${KNS}/from-peer/.acked")"
+
+echo
+echo "== DND-187 / 4b. The sender lock is actually taken =="
+
+# THE LOCK IS THE ONLY THING BETWEEN TWO SENDERS AND ONE SEQUENCE NUMBER.
+# Deriving <seq> is a scan-then-create with no interlock, so the contract
+# requires the write directory's lock held across scan, build and deliver -- a
+# requirement nothing would notice the loss of, because the collision it
+# prevents is rare and the delivery is non-clobbering anyway. So it is
+# asserted: this shell takes the lock, and a send in a SEPARATE PROCESS must be
+# refused rather than quietly proceeding without it.
+#
+# Deterministic by construction -- no background job, no sleep, no polling. The
+# holder is this test process and the contender is a child, so the contention
+# is ordered by the fact that the child cannot start until the parent has the
+# lock.
+setup_send_case
+mkdir -p "${SWRITE}"
+assert_ok "M-11 the test takes this channel's sender lock" \
+  inbox_lock_acquire "${SWRITE}/.sender.lock" "the test"
+ERR="$( cd "${SPROJ}" && printf 'contended\n' | "${BIN}/send-mail" mail contended --to peer 2>&1 >/dev/null )"; RC=$?
+assert_eq "M-11 a second sender is refused while the lock is held" "1" "${RC}"
+assert_contains "M-11 ... with a Fix: clause" "Fix:" "${ERR}"
+# THE REFUSAL IS PHRASED FOR A SENDER, NOT A CONSUMER. inbox_lock_acquire guards
+# both a read/ack and a send; a send that hit it once reported "another session
+# is the designated consumer" and told the user to "re-run with --peek" -- a
+# flag send-mail does not have, over a lock that is not the consumer's. A test
+# that checked only that SOME refusal appeared could not tell the two apart.
+assert_contains "M-11 ... naming the contention as a concurrent SEND, not a consumer" \
+  "already sending" "${ERR}"
+assert_not_contains "M-11 ... and not directing a sender to the reader-only --peek flag" \
+  "--peek" "${ERR}"
+assert_not_contains "M-11 ... nor calling the sender a designated consumer" \
+  "designated consumer" "${ERR}"
+assert_eq "M-11 ... and delivered nothing" "0" "$(ls "${SWRITE}"/*.md 2>/dev/null | wc -l)"
+inbox_release_consumer
+ERR="$( cd "${SPROJ}" && printf 'uncontended\n' | "${BIN}/send-mail" mail uncontended --to peer 2>&1 >/dev/null )"; RC=$?
+assert_eq "M-11 and it succeeds once the lock is released (the refusal was the LOCK, not the setup)" "0" "${RC}"
+
+# THE MANAGER CALLS THE SELF-SEND GUARD. Asserting the domain predicate alone
+# left the production call untested: with the manager's call removed the whole
+# suite stayed green while a message addressed to this channel's own identity
+# was delivered into the directory the peer reads -- where the peer's
+# "never ack your own" filter does not fire, so it sits unread forever and
+# nothing says why. That is DND-184's own lesson (the contract's message rules
+# held in the domain and nowhere a message travels), measured again by
+# sabotage.
+setup_send_case
+ERR="$( cd "${SPROJ}" && printf 'to myself\n' | "${BIN}/send-mail" mail self-addressed --to athena 2>&1 >/dev/null )"; RC=$?
+assert_eq "M-12 a send addressed to my own identity is refused end to end" "1" "${RC}"
+assert_contains "M-12 ... with a Fix: clause" "Fix:" "${ERR}"
+assert_eq "M-12 ... and nothing was delivered" "0" "$(ls "${SWRITE}"/*.md 2>/dev/null | wc -l)"
+
+# THE SENDER LOCK IS NOT THE CONSUMER LOCK, and this is the case that says why.
+# A writer may not create a `*.consumer.lock` under the root at all, and under
+# the mirrored model this directory is the PEER's read directory -- so its
+# consumer lock belongs to the peer, and a send taking it would deny an
+# ordinary peer read, and be denied by one.
+#
+# OBSERVED OVER A SEND THAT ACTUALLY TOOK A LOCK. The self-send and contended
+# cases above are refused BEFORE any lock is taken or any directory created, so
+# asserting the absence of a lock there proves nothing -- it holds no matter
+# which file a real send would use. So run a genuine successful send first, then
+# assert BOTH halves: the writer's lock (`.sender.lock`, which flock never
+# unlinks) is present, and the peer's (`.consumer.lock`) is absent.
+setup_send_case
+( cd "${SPROJ}" && printf 'lock-shape check\n' | "${BIN}/send-mail" mail lock-shape --to peer >/dev/null 2>&1 )
+assert_ok "M-11 the send this case observes actually delivered" \
+  test -n "$(ls "${SWRITE}"/*.md 2>/dev/null)"
+assert_ok "M-11 the writer took its own .sender.lock (present after the send)" \
+  test -e "${SWRITE}/.sender.lock"
+if [ -e "${SWRITE}/.consumer.lock" ]; then
+  bad "M-11 a send creates no .consumer.lock in the directory the peer reads" "it did"
+else
+  ok "M-11 a send creates no .consumer.lock in the directory the peer reads"
+fi
+
+# A SYMLINKED WRITE DIRECTORY IS REFUSED BEFORE ANY FILE IS CREATED THROUGH IT.
+# fs_assert_contained resolves through realpath, which FOLLOWS symlinks, so a
+# write dir that is a symlink to another place INSIDE the root passes
+# containment. If the sender lock were taken first, a .sender.lock carrying this
+# session's id and pid would be written into that other directory -- another
+# tenant's namespace, or the peer's read directory -- before the send refused.
+# So the write dir is symlink-checked (fs_maildir_provision_write) BEFORE the
+# lock. This plants the write dir as a symlink to a decoy and proves nothing is
+# created there.
+setup_send_case
+DECOY="${ATHENA_INBOX_ROOT}/agent-mail/peer/decoy"
+fs_mkdir_0700 "${SNS}" >/dev/null 2>&1 || mkdir -p "${SNS}"
+mkdir -p "${DECOY}"
+ln -s "${DECOY}" "${SWRITE}"
+ERR="$( cd "${SPROJ}" && printf 'through a symlink\n' | "${BIN}/send-mail" mail via-symlink --to peer 2>&1 >/dev/null )"; RC=$?
+assert_eq "A-5 a send through a symlinked write directory is refused" "1" "${RC}"
+assert_contains "A-5 ... naming the symlink, with a Fix:" "Fix:" "${ERR}"
+if [ -e "${DECOY}/.sender.lock" ]; then
+  bad "A-5 ... and no .sender.lock was created in the directory the symlink pointed at" "it was"
+else
+  ok "A-5 ... and no .sender.lock was created in the directory the symlink pointed at"
+fi
+assert_eq "A-5 ... and nothing was delivered through it" "0" "$(ls "${DECOY}"/*.md 2>/dev/null | wc -l)"
+
+# THE DOORBELL-BUMP-FAILURE BRANCH: delivered, but the bell could not ring. The
+# message is linked and durable, so failing the send would report a loss that
+# did not happen -- but the failure must never be SILENT, or the peer waits on a
+# signal that never comes. Made unbumpable by planting `.event` as a directory
+# (fs_bump_doorbell refuses a non-regular doorbell). The send must still exit 0,
+# still report the filename, and print the "could not be rung" warning.
+setup_send_case
+mkdir -p "${SWRITE}"
+mkdir -p "${SWRITE}/.event"
+OUT="$( cd "${SPROJ}" && printf 'bell wont ring\n' | "${BIN}/send-mail" mail bell-fail --to peer 2>&1 )"; RC=$?
+assert_eq "M-12 a send whose doorbell cannot ring still exits 0 (the message is durable)" "0" "${RC}"
+assert_contains "M-12 ... and still reports the delivered filename" "delivered" "${OUT}"
+assert_contains "M-12 ... and warns that the bell did not ring, not silently" "could not be rung" "${OUT}"
+assert_contains "M-12 ... with a Fix: clause the reader can act on" "Fix:" "${OUT}"
+assert_eq "M-12 ... and the message really is in place" "1" "$(ls "${SWRITE}"/*bell-fail.md 2>/dev/null | wc -l)"
+
+echo
+echo "== DND-187 / 5. The send path's refusals (A-3, A-8, and missing input) =="
+
+setup_send_case
+OUT="$( cd "${SPROJ}" && printf 'x\n' | "${BIN}/send-mail" nosuch-channel slug --to peer 2>&1 )"
+assert_contains "A-8 an undeclared channel is refused" "no such channel" "${OUT}"
+assert_not_contains "A-8 the refusal does not echo the requested name back" "nosuch-channel" "${OUT}"
+
+# DENY BY DEFAULT ACROSS TENANTS, structurally: the only way to obtain a write
+# directory is to resolve a channel THIS session's registry entry declares, so
+# there is no argument that reaches another project's channel.
+OTHER="$(make_repo other)"
+register other "${OTHER}" '{"secret-mail":{"kind":"maildir","namespace":"agent-mail/other","read":"from-x","write":"to-x","identity":"someone"}}'
+OUT="$( cd "${SPROJ}" && printf 'x\n' | "${BIN}/send-mail" secret-mail slug --to peer 2>&1 )"
+assert_contains "A-8 another project's channel is not addressable from here" "no such channel" "${OUT}"
+assert_not_contains "A-8 and the refusal names no other tenant's channel" "secret-mail" "${OUT}"
+if [ -e "${ATHENA_INBOX_ROOT}/agent-mail/other" ]; then
+  bad "A-8 a refused send creates nothing in the other tenant's namespace" "created it"
+else
+  ok "A-8 a refused send creates nothing in the other tenant's namespace"
+fi
+
+# A log channel is a one-way firehose written by a producer registered
+# server-side. A message dropped there would be read by nobody.
+setup_log_case
+OUT="$( cd "${LPROJ}" && printf 'x\n' | "${BIN}/send-mail" slack slug --to peer 2>&1 )"
+assert_contains "M-10 sending on a log channel is refused" "not a maildir channel" "${OUT}"
+assert_contains "M-10 ... with a Fix: clause" "Fix:" "${OUT}"
+
+setup_send_case
+for args in "mail slug" "mail" ""; do
+  # shellcheck disable=SC2086
+  OUT="$( cd "${SPROJ}" && printf 'x\n' | "${BIN}/send-mail" ${args} 2>&1 )"
+  assert_contains "M-10 [send-mail ${args:-<nothing>}] refuses with a Fix: clause" "Fix:" "${OUT}"
+done
+OUT="$( cd "${SPROJ}" && printf 'x\n' | "${BIN}/send-mail" mail slug --to 2>&1 )"
+assert_contains "M-10 a flag with no value is refused rather than swallowing a word" \
+  "needs a value" "${OUT}"
+OUT="$( cd "${SPROJ}" && printf 'x\n' | "${BIN}/send-mail" mail slug --to peer --body-file /nonexistent 2>&1 )"
+assert_contains "M-10 a missing --body-file is refused, not read as an empty body" \
+  "not a readable regular file" "${OUT}"
+# THE ACCURATE REFUSAL IS THE LAST WORD. The capture uses `$(cap && printf X)`,
+# not `$(cap; printf X)`: a `;` would take the substitution's status from the
+# trailing printf (always 0), so the `|| exit 1` never fired, the body stayed
+# empty, and the run fell through to the DOWNSTREAM "empty message" refusal --
+# which names the wrong cause for a file that existed and was rejected. This
+# asserts that misleading second refusal is absent.
+assert_not_contains "M-10 ... and NOT with the misleading downstream empty-body refusal" \
+  "refusing to send an empty message" "${OUT}"
+assert_eq "M-10 ... and nothing was delivered" "0" "$(ls "${SWRITE}"/*.md 2>/dev/null | wc -l)"
+
+# THE OTHER TWO BODY SOURCES. Only stdin was exercised, and the sabotage pass
+# recorded no mutation over this block -- so gutting either branch would have
+# left the suite green. The interactive branch is reachable here because
+# `--edit` exists: selecting it only by "stdin is a tty" made it untestable by
+# construction, and a branch no test can enter is a branch that breaks
+# silently, which is the entire subject of this skill.
+setup_send_case
+printf 'from a file\n' > "${CASE_DIR}/body.txt"
+OUT="$( cd "${SPROJ}" && "${BIN}/send-mail" mail from-file --to peer --body-file "${CASE_DIR}/body.txt" 2>&1 </dev/null )"
+assert_contains "M-10 --body-file delivers" "delivered 2" "${OUT}"
+assert_contains "M-10 ... with the file's contents as the body" "from a file" \
+  "$(cat "${SWRITE}"/*from-file.md)"
+ln -s "${CASE_DIR}/body.txt" "${CASE_DIR}/body-link.txt"
+assert_refused "M-10 a symlinked --body-file is refused (the file you checked is not the file you read)" \
+  bash -c "cd '${SPROJ}' && '${BIN}/send-mail' mail via-link --to peer --body-file '${CASE_DIR}/body-link.txt' </dev/null"
+
+# $EDITOR CARRYING ARGUMENTS is the common case (`code -w`, `emacsclient -nw`),
+# and invoked as a single word it fails with "not found" -- surfacing as "the
+# editor exited non-zero", which sends the reader to look at their draft
+# instead of at their environment.
+setup_send_case
+cat > "${CASE_DIR}/fake-editor" <<'EDSH'
+#!/usr/bin/env bash
+# $1 is the flag this case proves is passed through; $2 is the draft.
+printf 'composed with %s\n' "$1" > "$2"
+EDSH
+chmod +x "${CASE_DIR}/fake-editor"
+OUT="$( cd "${SPROJ}" && EDITOR="${CASE_DIR}/fake-editor --flag" "${BIN}/send-mail" mail composed --to peer --edit 2>&1 </dev/null )"
+assert_contains "M-10 --edit composes through \$EDITOR" "delivered 2" "${OUT}"
+assert_contains "M-10 ... and \$EDITOR's own arguments are passed through" "composed with --flag" \
+  "$(cat "${SWRITE}"/*composed.md)"
+
+# An editor that failed may have written a partial message, so the draft is
+# discarded rather than delivered.
+cat > "${CASE_DIR}/failing-editor" <<'EDSH'
+#!/usr/bin/env bash
+printf 'half a thought\n' > "$1"
+exit 3
+EDSH
+chmod +x "${CASE_DIR}/failing-editor"
+ERR="$( cd "${SPROJ}" && EDITOR="${CASE_DIR}/failing-editor" "${BIN}/send-mail" mail aborted --to peer --edit 2>&1 >/dev/null </dev/null )"
+assert_contains "M-10 an \$EDITOR that exits non-zero sends nothing" "exited non-zero" "${ERR}"
+assert_eq "M-10 ... and the half-written draft is not delivered" "0" \
+  "$(ls "${SWRITE}"/*aborted.md 2>/dev/null | wc -l)"
+ERR="$( cd "${SPROJ}" && EDITOR="" "${BIN}/send-mail" mail no-editor --to peer --edit 2>&1 >/dev/null </dev/null )"
+assert_contains "M-10 --edit with \$EDITOR unset is refused, not read as an empty body" \
+  "\$EDITOR is unset" "${ERR}"
+
+# A NUL IN THE BODY WAS DELIVERED SILENTLY ALTERED, with exit 0 and the
+# filename printed. Shell DROPS a NUL on assignment, so the body that arrived
+# was not the body that was passed -- immutably, in the peer's transcript, with
+# nothing recording the edit. The frontmatter round trip cannot see this: it
+# compares the header, never the body. Asserted on both sources that can carry
+# one.
+setup_send_case
+printf 'before\0after\n' > "${CASE_DIR}/nul-body.bin"
+ERR="$( cd "${SPROJ}" && "${BIN}/send-mail" mail nul-file --to peer --body-file "${CASE_DIR}/nul-body.bin" 2>&1 >/dev/null </dev/null )"; RC=$?
+assert_eq "M-10 a --body-file containing a NUL is refused" "1" "${RC}"
+assert_contains "M-10 ... naming the NUL as the reason" "NUL byte" "${ERR}"
+assert_not_contains "M-10 ... and not with the misleading empty-body refusal (the && capture guard held)" \
+  "refusing to send an empty message" "${ERR}"
+ERR="$( cd "${SPROJ}" && printf 'before\0after\n' | "${BIN}/send-mail" mail nul-stdin --to peer 2>&1 >/dev/null )"; RC=$?
+assert_eq "M-10 a body piped on stdin containing a NUL is refused too" "1" "${RC}"
+assert_contains "M-10 ... naming the NUL there as well" "NUL byte" "${ERR}"
+assert_not_contains "M-10 ... and not the misleading empty-body refusal on the stdin source either" \
+  "refusing to send an empty message" "${ERR}"
+assert_eq "M-10 ... and neither was delivered" "0" "$(ls "${SWRITE}"/*.md 2>/dev/null | wc -l)"
+
+echo
+echo "== DND-187 / 6. I-5: the mirrored entries, end to end =="
+
+# THE MIRROR IS WHAT MAKES THE ROLE TABLE MACHINE-CHECKABLE. Two registry
+# entries, two repos, ONE namespace, read/write swapped -- which is exactly the
+# shape the live custom <-> gen_saas channel has. Athena sends into to-server;
+# the server side reads from to-server and acks into to-server/.acked; the
+# doorbell the server bumps on its ack is the one Athena watches. If the
+# mirroring were wrong in either entry, this case is what would not round trip.
+setup_case
+AREPO="$(make_repo arepo)"
+BREPO="$(make_repo brepo)"
+register arepo "${AREPO}" '{"peer-mail":{"kind":"maildir","namespace":"agent-mail/gen-saas","read":"from-server","write":"to-server","identity":"athena"}}'
+register brepo "${BREPO}" '{"athena-mail":{"kind":"maildir","namespace":"agent-mail/gen-saas","read":"to-server","write":"from-server","identity":"gen-saas-server"}}'
+NS="${ATHENA_INBOX_ROOT}/agent-mail/gen-saas"
+
+OUT="$( cd "${AREPO}" && printf 'Design review, please.\n' | "${BIN}/send-mail" peer-mail design-review --to gen-saas-server 2>&1 )"
+assert_contains "I-5 athena's send reports a filename" "delivered 2" "${OUT}"
+SENT="$(cd "${NS}/to-server" && ls -- *.md)"
+
+# The sender does NOT see its own outgoing message as unread: it is in the
+# directory it writes into, which is not the one it reads from.
+OUT="$( cd "${AREPO}" && "${BIN}/read-inbox" peer-mail --peek 2>&1 )"
+assert_contains "I-5 the sender's own read is unaffected by what it sent" "nothing new" "${OUT}"
+
+# The server side reads it, and acking moves it into to-server/.acked -- the
+# directory it READ FROM, which is the one athena delivers into.
+OUT="$( cd "${BREPO}" && "${BIN}/read-inbox" athena-mail 2>&1 )"
+assert_contains "I-5 the peer reads the message athena sent" "Design review, please." "${OUT}"
+assert_contains "I-5 ... attributed to athena" "from: athena" "${OUT}"
+assert_contains "I-5 ... inside the untrusted-content fence" "untrusted content" "${OUT}"
+assert_ok "I-5 the ack moved it into the directory it was read from" \
+  test -f "${NS}/to-server/.acked/${SENT}"
+assert_eq "I-5 ... and the live directory is empty again" "" "$(ls -A "${NS}/to-server" | grep -v '^\.' | grep -v '^tmp$')"
+
+# AND THE SEQUENCE DOES NOT RESTART. Acking is what empties the live
+# directory, so a sender scanning only the unacked names would allocate 001
+# again and collide with the entire transcript.
+( cd "${AREPO}" && printf 'Follow-up.\n' | "${BIN}/send-mail" peer-mail follow-up --to gen-saas-server >/dev/null 2>&1 )
+assert_contains "I-5 the next send allocates 002 even though .acked/ holds 001" \
+  "-002-" "$(cd "${NS}/to-server" && ls -- *.md)"
+
+# The reply direction, and the thread link that makes a correction a NEW
+# message rather than an edit.
+OUT="$( cd "${BREPO}" && printf 'Reviewed. Two notes.\n' | "${BIN}/send-mail" athena-mail review-notes --to athena --thread "${SENT}" 2>&1 )"
+assert_contains "I-5 the peer replies in the other direction" "delivered 2" "${OUT}"
+OUT="$( cd "${AREPO}" && "${BIN}/read-inbox" peer-mail 2>&1 )"
+assert_contains "I-5 athena reads the reply" "Reviewed. Two notes." "${OUT}"
+assert_contains "I-5 ... attributed to the server side" "from: gen-saas-server" "${OUT}"
+assert_ok "I-5 athena's ack lands in from-server/.acked -- the transcript" \
+  bash -c "ls '${NS}/from-server/.acked' | grep -q review-notes"
+
+# Neither side ever wrote into the directory it reads from, and neither ever
+# deleted a message: `.acked/` is the only durable transcript of the
+# collaboration, and a transcript that can be rewritten is not one.
+assert_eq "I-5 every message ever sent still exists somewhere" "3" \
+  "$(find "${NS}" -name '*.md' | wc -l)"
+
+echo
 if [ "${FAIL}" -eq 0 ]; then
   echo "VERDICT: PASS (${PASS} cases)"
   exit 0
