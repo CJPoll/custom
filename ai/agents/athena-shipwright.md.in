@@ -217,6 +217,16 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   step in the captain self-review, so its decision/FINDINGS-parser logic must
   stay verified even when a harness edit did not touch the critic directly. (The
   model-in-loop `--run` is NOT part of the gate.)
+- `scripts/setup-hooks --self-test` and `scripts/setup-athena-inbox-client
+  --self-test` — the two committed installer suites that were on disk but unrun
+  by the gate (DND-189 shipped 42 cases nothing invoked; setup-hooks' install /
+  idempotency / merge-safety cases are the ONLY verification of the recovery
+  path for the 2026-09-17 hook clobber). `scripts/setup-inbox-registry
+  --self-test` is not listed separately: it runs `ai/inbox/test/self-test.sh`,
+  already above, and that delegation is declared in the runner's
+  `SELF_TEST_DELEGATES`. The runner's `--self-test` now FAILS if any
+  `scripts/setup-*` advertising a `--self-test` is neither declared nor
+  delegated, so this is the class, not the two instances.
 - `ai/bin/harness-gate --self-test` — the runner itself (not in its own CHECKS;
   it would recurse). Run it when you touch the gate's composition.
 - Any skill or script self-test relevant to what you changed.

@@ -48,7 +48,17 @@ CHECKS = [
   ["harness-eval",              %w[ai/bin/harness-eval]],
   ["critic-review self-test",   %w[ai/bin/critic-review --self-test]],
   ["critic-eval self-test",     %w[ai/bin/critic-eval --self-test]],
+  ["setup-hooks self-test",     %w[scripts/setup-hooks --self-test]],
+  ["inbox-client self-test",    %w[scripts/setup-athena-inbox-client --self-test]],
 ].freeze
+
+# A `scripts/setup-*` installer whose own --self-test is ALREADY declared above
+# under a different name. Maps script -> the declared check that runs it, so the
+# self-test's "no committed self-test goes unrun" assertion stays true without
+# running the same suite twice.
+SELF_TEST_DELEGATES = {
+  "scripts/setup-inbox-registry" => "ai/inbox/test/self-test.sh",
+}.freeze
 
 FAIL_TAIL_LINES = 20
 
@@ -151,7 +161,26 @@ def run_self_test
     ok = false
   end
 
-  # 4. run_one reports PASS/FAIL correctly and closes stdin.
+  # 4. Every scripts/setup-* installer that ADVERTISES a --self-test is either
+  #    declared in CHECKS or delegates to a declared check. Same class as (3):
+  #    a committed self-test the gate never runs is a suite that cannot go red.
+  #    DND-189 shipped 42 cases nothing invoked; setup-hooks' merge-safety cases
+  #    had been equally unrun since the 2026-09-17 hook-clobber fix.
+  installers = Dir.glob(File.join(CUSTOM_DIR, "scripts/setup-*"))
+                  .select { |p| File.file?(p) && File.executable?(p) }
+                  .select { |p| File.read(p).include?("--self-test") }
+                  .map { |p| p.sub("#{CUSTOM_DIR}/", "") }.sort
+  unrun = installers.reject do |script|
+    declared.include?(script) ||
+      declared.include?(SELF_TEST_DELEGATES[script])
+  end
+  unless unrun.empty?
+    warn "self-test: FAIL — installer self-test(s) on disk but not run by the " \
+         "gate: #{unrun.join(', ')}"
+    ok = false
+  end
+
+  # 5. run_one reports PASS/FAIL correctly and closes stdin.
   Dir.mktmpdir("harness-gate-selftest") do |dir|
     passing = File.join(dir, "pass.sh")
     failing = File.join(dir, "fail.sh")
@@ -189,8 +218,10 @@ def run_self_test
     warn "harness-gate: self-test FAILED"
     warn "  Fix: repair CHECKS in ai/bin/harness-gate so every declared check is " \
          "executable and every hook is invoked via its dedicated .self-test.sh " \
-         "script (never `<hook>.sh --self-test`, which is a false green), and " \
-         "keep run_one reporting the child's exit status with stdin closed."
+         "script (never `<hook>.sh --self-test`, which is a false green), every " \
+         "scripts/setup-* installer that advertises a --self-test is declared " \
+         "(or listed in SELF_TEST_DELEGATES as running under another entry), " \
+         "and run_one reports the child's exit status with stdin closed."
     1
   end
 end
