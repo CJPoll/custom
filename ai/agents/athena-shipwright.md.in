@@ -136,7 +136,19 @@ Everything you learn from is local, under `~/dev/custom/`:
    `git checkout --` the touched files), journal the failure, and move to the
    next pattern. Never leave the tree dirty or broken.
 7. **Commit and journal.** One `git commit` per concern, in `~/dev/custom`, with
-   a message stating the pattern, the evidence (run-ids), and the fix. Append a
+   a message stating the pattern, the evidence (run-ids), and the fix.
+   **Stage the files YOU changed, by path — never `git add -A` / `git add .`.**
+   This repo is shared with live interactive sessions and with the owner's own
+   editing; `-A` stages whatever else happens to be dirty at that instant and
+   silently lands it under your commit message and your evidence. Measured
+   2026-09-18 (21:00 run): my first commit swept in a concurrent session's
+   `hypr/hyprland.conf` edit AND a 230-line `hyprland.conf.bak-*` the backup had
+   just dropped, and that session had to push a corrective commit to untrack it.
+   `git add -A` is also how an unrelated in-flight change gets attributed to the
+   shipwright in `git log`, which is the one audit trail invariant 3 relies on.
+   So: `git add <the exact paths>`, then `git status --porcelain` BEFORE
+   committing and confirm every staged path is one you touched (a rendered
+   `.md` from `ai/bin/build-agents` counts as yours). Append a
    journal entry (format below). Advance `cursor.txt` only after all of a run's
    qualifying patterns are handled — write it as the newest processed artifact's
    **full mtime including sub-second precision** (e.g.
@@ -217,6 +229,16 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   step in the captain self-review, so its decision/FINDINGS-parser logic must
   stay verified even when a harness edit did not touch the critic directly. (The
   model-in-loop `--run` is NOT part of the gate.)
+- `scripts/setup-hooks --self-test` and `scripts/setup-athena-inbox-client
+  --self-test` — the two committed installer suites that were on disk but unrun
+  by the gate (DND-189 shipped 42 cases nothing invoked; setup-hooks' install /
+  idempotency / merge-safety cases are the ONLY verification of the recovery
+  path for the 2026-09-17 hook clobber). `scripts/setup-inbox-registry
+  --self-test` is not listed separately: it runs `ai/inbox/test/self-test.sh`,
+  already above, and that delegation is declared in the runner's
+  `SELF_TEST_DELEGATES`. The runner's `--self-test` now FAILS if any
+  `scripts/setup-*` advertising a `--self-test` is neither declared nor
+  delegated, so this is the class, not the two instances.
 - `ai/bin/harness-gate --self-test` — the runner itself (not in its own CHECKS;
   it would recurse). Run it when you touch the gate's composition.
 - Any skill or script self-test relevant to what you changed.
