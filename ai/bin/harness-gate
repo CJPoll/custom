@@ -377,16 +377,37 @@ def run_self_test
   #     entry pointing at a real-but-wrong suite would read as "installer
   #     covered" while the installer's own suite silently goes unrun. That is
   #     this ticket's exact class, one level up in its own bookkeeping.
+  #
+  #     A textual "does the installer's source mention this path?" check was
+  #     tried first and rejected: both real installers build their suite path
+  #     via variable interpolation / File.join (`"${SCRIPT_DIR}/test/…"`,
+  #     `File.join(repo_dir, "ai", "inbox", …)`), so the literal delegate
+  #     string never appears on the line that actually execs it — a substring
+  #     search only passed today because a Fix:/error message elsewhere
+  #     happens to spell the same path, which proves nothing about what the
+  #     installer runs. Verify BEHAVIOR instead: run `<installer> --self-test`
+  #     and the delegated suite directly, then assert the installer's captured
+  #     output contains the delegate's OWN verdict line (`VERDICT: PASS (N
+  #     cases…)`, unique per suite by case count/wording) — not just "both
+  #     happened to pass", which two unrelated always-green suites would also
+  #     satisfy, but "the installer's run really is this suite's run" (both
+  #     installers either `exec` the suite directly or `bash` it without
+  #     redirecting output, so its own verdict line passes straight through).
   SELF_TEST_DELEGATES.each do |script, delegate|
     script_path = File.join(CUSTOM_DIR, script)
-    next unless File.file?(script_path) # case 4 already flags a missing installer
+    next unless File.file?(script_path) && File.executable?(script_path) # case 4 flags this
 
-    contents = File.read(script_path)
-    unless contents.include?(delegate)
+    installer_ok, installer_out = run_one([script, "--self-test"])
+    delegate_ok, delegate_out = run_one([delegate])
+    verdict = delegate_out.to_s.lines.find { |l| l =~ /^\s*VERDICT:/i }
+    unless installer_ok && delegate_ok && verdict && installer_out.include?(verdict.strip)
       warn "self-test: FAIL — SELF_TEST_DELEGATES[#{script.inspect}] = " \
-           "#{delegate.inspect}, but #{script} does not reference that path " \
-           "anywhere in its source — the delegate is unverified, so the " \
-           "installer's real self-test suite could be going unrun"
+           "#{delegate.inspect}, but `#{script} --self-test`'s output does " \
+           "not contain that suite's own verdict line (#{verdict.inspect}) — " \
+           "the delegation is unverified, so the installer's real self-test " \
+           "suite could be going unrun. (installer_ok=#{installer_ok}, " \
+           "delegate_ok=#{delegate_ok}, installer output tail: " \
+           "#{installer_out.to_s.lines.last(5).join.inspect})"
       ok = false
     end
   end
