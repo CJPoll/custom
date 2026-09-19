@@ -319,17 +319,24 @@ doctor_check_skipped_files() {
     case "${base}" in .|..) continue ;; esac
     # A well-formed, parseable, repo-bearing *.json is a usable entry -- not a
     # skip. Everything else is reported.
+    # NOT-A-CANDIDATE (wrong extension, or a *.json whose stem fails the grammar)
+    # vs. A-CANDIDATE-THAT-FAILED (a conformant *.json that does not parse or has
+    # no repo). The first kind is a harmless stray -- a backup, a swapfile -- that
+    # was never a registry entry; it is reported for hygiene but as an
+    # INFORMATIONAL `stray-file`, so it does not flip `healthy` and nag every
+    # session. The second kind MIGHT have been a project's own entry, so it is a
+    # `fail` and always surfaces.
     case "${base}" in
       *.json) name="${base%.json}" ;;
       *)
-        doctor_finding warn "skipped-file" "projects/ holds a non-entry file: ${base} (does not end in .json, so it was never a registry entry)" \
+        doctor_finding warn "stray-file" "projects/ holds a non-entry file: ${base} (does not end in .json, so it was never a registry entry)" \
           "if ${base} is a stray backup or editor swapfile, remove it; a file in projects/ that is not a *.json entry is ignored but clutters the tenancy directory."
         any=1
         continue
         ;;
     esac
     if ! names_valid_segment "${name}"; then
-      doctor_finding warn "skipped-file" "projects/ holds a *.json whose name fails the entry grammar: ${base}" \
+      doctor_finding warn "stray-file" "projects/ holds a *.json whose name fails the entry grammar: ${base}" \
         "rename ${base} so its stem matches ^[a-z0-9][a-z0-9_-]*$, or remove it; a non-conformant name is never loaded as an entry."
       any=1
       continue
@@ -615,28 +622,32 @@ doctor_check_maildir_channel() {
 }
 
 # doctor_check_lock <chan> <lock-path>
-# READ-ONLY. A held lock (flock -n fails) means a live designated consumer -- ok.
-# A lock file whose recorded pid is DEAD and which nothing holds is REAPABLE
-# residue: reported, NEVER reaped (the ticket's hard constraint). flock is the
-# authority; the pid inside is diagnostics only.
+#
+# READ-ONLY, and it must NEVER acquire the lock -- not even with `flock -n` for
+# an instant. An earlier version took the lock in a subshell to test whether
+# anyone held it; but the SessionStart hook runs the doctor on EVERY session in
+# every opted-in repo, so a real consumer's read/ack landing in that window
+# would be refused with a false "another session is the designated consumer",
+# naming the wrong holder. That is a side effect that can deny a live reader --
+# exactly what "read-only, absolutely" forbids.
+#
+# So the doctor only READS the recorded pid. That is precisely the ticket's
+# signal ("a consumer.lock whose pid is dead -- report it as reapable, do not
+# reap"). `flock` stays authoritative for OWNERSHIP (lock.sh), and this is
+# consistent with it: the holder writes its own pid on acquire and the kernel
+# releases the lock on the holder's death, so a DEAD recorded pid is exactly a
+# leftover file that nothing holds. A live recorded pid is reported as nothing
+# (a live holder, or at worst a benign stale-but-live pid the doctor will not
+# guess about). The pid is diagnostics, and the doctor treats it as such.
 doctor_check_lock() {
   local chan="$1" lock="$2" pid
   [ -n "${lock}" ] && [ -e "${lock}" ] || return 0
   [ -f "${lock}" ] && [ ! -L "${lock}" ] || return 0
-  if ! command -v flock >/dev/null 2>&1; then
-    return 0
-  fi
-  # A NON-BLOCKING probe in a SUBSHELL so the descriptor closes immediately and
-  # this probe never becomes the holder. If flock -n fails, a live consumer
-  # holds it -> healthy.
-  if ( exec 9<>"${lock}" && flock -n 9 ) 2>/dev/null; then
-    # Nobody holds it. Is its recorded pid dead? Then it is leftover diagnostics.
-    pid="$(jq -r '.pid // empty' <"${lock}" 2>/dev/null)"
-    if [ -n "${pid}" ] && ! doctor_pid_alive "${pid}"; then
-      doctor_finding warn "channel:${chan}" "channel \"${chan}\" has a consumer lock whose recorded pid ${pid} is dead and which nothing holds -- it is reapable residue" \
-        "safe to remove ${lock} by hand; the kernel already released the flock when that process died, so it blocks nothing. The doctor never reaps it for you."
-    fi
-  fi
+  pid="$(jq -r '.pid // empty' <"${lock}" 2>/dev/null)"
+  [ -n "${pid}" ] || return 0
+  doctor_pid_alive "${pid}" && return 0
+  doctor_finding warn "channel:${chan}" "channel \"${chan}\" has a consumer lock whose recorded pid ${pid} is dead -- it is reapable residue" \
+    "safe to remove ${lock} by hand; the kernel released the flock when that process died, so it blocks nothing. The doctor never reaps it for you."
 }
 
 # --- server checks (opt-in) -------------------------------------------------

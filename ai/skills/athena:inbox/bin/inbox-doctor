@@ -129,19 +129,21 @@ N_NA="$(count_state na)"
 # INFORMATIONAL findings are surfaced (they stay `warn` in the report and in
 # N_WARN) but they do NOT flip the chain's health. They are bookkeeping the owner
 # should eventually act on -- a committed-list entry behind the live registry, a
-# cross-tenant surface collision, a server instance no descriptor claims -- not a
-# degraded RUNNING chain. Folding them into `healthy` would make the SessionStart
-# hook nag every opted-in repo, every window, forever, about a benign steady
-# state -- exactly the noise the hook's opted-in gate exists to prevent. The
-# exit code is unaffected either way (it is `fail`-driven), and a hand run still
-# prints them.
+# server instance no descriptor claims, a stray non-entry file in projects/ --
+# not a degraded RUNNING chain. `never-delivered` is here for a related reason:
+# the count path already surfaces it, so letting the doctor's copy flip health
+# too would nag twice for one fault. Folding any of these into `healthy` would
+# make the SessionStart hook nag every opted-in repo, every window, about a
+# benign steady state -- the noise the hook's opted-in gate exists to prevent.
+# The exit code is unaffected either way (it is `fail`-driven), and a hand run
+# still prints them.
 #
 # A COLLISION is deliberately NOT here: two entries resolving to one surface
 # means one tenant's mail lands in the other's file -- a live cross-tenant
 # mix-up, not bookkeeping -- so it counts against `healthy` and the hook does
 # surface it. (The contract lists collision as a separate "MAY report" case, not
 # under the informational carve-out.)
-INFO_SET=" undeclared-entry server-instance never-delivered "
+INFO_SET=" undeclared-entry server-instance never-delivered stray-file "
 N_INFO="$(printf '%s\n' "${FINDINGS}" | awk -F'\t' -v set="${INFO_SET}" '$1=="warn" && index(set," "$2" ")>0{n++} END{print n+0}')"
 
 if [ "${JSON}" -eq 1 ]; then

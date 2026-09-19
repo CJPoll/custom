@@ -1665,13 +1665,20 @@ must not enumerate `projects/`, but the tool someone runs to look may:
   committed source of truth does not declare** (the installer merges at the
   directory level, so the committed list can silently fall behind reality) and,
   when the server is reachable, an agent instance with no route pointing at it —
-  neither is an error, and neither is ever deleted. These informational findings
-  are surfaced (they render as `warn` and are counted) but they do **not** flip
-  the chain's `healthy` verdict: they are bookkeeping the owner acts on in their
-  own time, not a degraded running chain, and folding them into `healthy` would
-  make the SessionStart line nag every opted-in repo, every window, about a
-  benign steady state. The summary carries an `info` count for them, and
-  `healthy` is `no fail and no non-informational warn`.
+  neither is an error, and neither is ever deleted. A **never-delivered log
+  channel** is informational here too, for a different reason: the count path
+  (`inbox-status`'s status output) already surfaces it, so letting the doctor's
+  copy flip `healthy` would nag twice for one fault on two separate rate limits.
+  A **collision is NOT** informational — one tenant's mail landing in another's
+  file is a live cross-wiring, so it counts against `healthy`.
+
+  These informational findings are surfaced (they render as `warn` and are
+  counted) but they do **not** flip the chain's `healthy` verdict: they are
+  bookkeeping the owner acts on in their own time, not a degraded running chain,
+  and folding them into `healthy` would make the SessionStart line nag every
+  opted-in repo, every window, about a benign steady state. The summary carries
+  an `info` count for them, and `healthy` is `no fail and no non-informational
+  warn`.
 
   The committed list is consulted by invoking the tool that owns it
   (`ai/inbox`'s `InboxRegistry`), never by the skill's reader libraries parsing

@@ -131,13 +131,14 @@ echo "== skipped-file (name every skip) =="
 export ATHENA_INBOX_ROOT="${TMP}/sk"; mkdir -p -m 700 "${ATHENA_INBOX_ROOT}/projects"
 P="${ATHENA_INBOX_ROOT}/projects"
 : > "${P}/walt_ui.json.bak"                       # not a candidate
-printf '{}' > "${P}/BadName!.json" 2>/dev/null || printf '{}' > "${P}/Bad_Name.json"
+printf '{}' > "${P}/UpperCase.json"   # stem fails ^[a-z0-9]... -> not a candidate
 ln -s /etc/hosts "${P}/linked.json"               # symlink candidate
 printf '{ this is not json' > "${P}/broken.json"  # unterminated JSON (SABOTAGE)
 printf '{"v":1,"channels":{}}' > "${P}/norepo.json" # candidate, no repo
 printf '{"v":1,"repo":"/x/.git","channels":{}}' > "${P}/good.json"; chmod 600 "${P}/good.json"
 SK="$(doctor_check_skipped_files)"
-assert_finding "backup named"        "${SK}" warn skipped-file "walt_ui.json.bak"
+assert_finding "backup named (informational stray-file)" "${SK}" warn stray-file "walt_ui.json.bak"
+assert_finding "bad-stem .json named (informational stray-file)" "${SK}" warn stray-file "UpperCase.json"
 assert_finding "symlink entry fail"  "${SK}" fail skipped-file "linked.json"
 assert_finding "unterminated json fail" "${SK}" fail skipped-file "broken.json"
 assert_finding "no-repo candidate fail" "${SK}" fail skipped-file "norepo.json"
@@ -239,11 +240,22 @@ printf '{"session_id":"s","pid":2147483646,"started_at":"x"}' > "${LOCK}"; chmod
 LK="$(doctor_check_lock slack "${LOCK}")"
 assert_finding "dead-pid lock -> warn reapable" "${LK}" warn "channel:slack" "reapable residue"
 [ -f "${LOCK}" ] && ok "lock NOT reaped (still present)" || bad "lock NOT reaped" "file was removed"
-# a HELD lock -> no reapable finding (live consumer)
-exec 8<>"${LOCK}"; flock -n 8
+# a LIVE recorded pid -> no reapable finding (a live holder). The doctor reads
+# the pid; it NEVER acquires the lock, so a real consumer is never denied -- the
+# read-only-that-can-deny-a-consumer defect the critic caught.
+printf '{"session_id":"s","pid":%s,"started_at":"x"}' "$$" > "${LOCK}"; chmod 600 "${LOCK}"
 LK="$(doctor_check_lock slack "${LOCK}")"
-assert_no_finding "held lock -> no reapable finding" "${LK}" warn "channel:slack" "reapable residue"
-exec 8>&-
+assert_no_finding "live-pid lock -> no reapable finding" "${LK}" warn "channel:slack" "reapable residue"
+# READ-ONLY PROOF: a real consumer holds the flock (fd 8, separate open) while
+# the doctor checks the lock; the consumer must STILL hold it afterward (a
+# second, independent open cannot take it), proving the doctor did not acquire.
+if command -v flock >/dev/null 2>&1; then
+  printf '{"session_id":"s","pid":2147483646,"started_at":"x"}' > "${LOCK}"; chmod 600 "${LOCK}"
+  exec 8<>"${LOCK}"; flock -n 8
+  doctor_check_lock slack "${LOCK}" >/dev/null 2>&1
+  if ( exec 9<>"${LOCK}"; flock -n 9 ) 2>/dev/null; then bad "doctor left the lock free" "an independent open acquired it — the consumer's hold was lost"; else ok "the consumer still holds the lock after the doctor's check"; fi
+  exec 8>&-
+fi
 
 echo "== maildir channel =="
 MENTRY='{"v":1,"repo":"'"${C2}"'","channels":{"mail":{"kind":"maildir","namespace":"agent-mail/x","read":"in","write":"out","identity":"me"}}}'
