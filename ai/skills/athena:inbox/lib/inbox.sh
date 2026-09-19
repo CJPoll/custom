@@ -27,6 +27,21 @@
 # this machine: both yield nothing, silently, status 1, and the callers below
 # turn that into "zero channels, exit 0". An error here would train the reader
 # to ignore errors.
+# inbox_failed_candidates
+# How many grammar-conformant registry candidates could not be read. Reported
+# as a COUNT, never by name -- every other file in projects/ belongs to a
+# different tenant, and a denial must not enumerate them.
+#
+# A separate function rather than a variable set by inbox_entry: every caller
+# runs inbox_entry inside `$(...)`, which is a SUBSHELL, so an assignment
+# there would never reach the caller -- the count would read 0 everywhere and
+# the MUST would look satisfied while doing nothing.
+inbox_failed_candidates() {
+  local records
+  records="$(fs_registry_records)" || { printf '0\n'; return 0; }
+  printf '%s\n' "${records}" | awk -F'\t' '/^#unparseable/{n=$2} END{print n+0}'
+}
+
 inbox_entry() {
   local repo records entry rc
   repo="$(fs_git_common_dir "${1:-.}")" || return 1
@@ -42,9 +57,11 @@ inbox_entry() {
   # exactly like "not opted in". So it refuses -- but by COUNT, never by name:
   # every other file in projects/ belongs to a different tenant, and a denial
   # must not enumerate them.
-  if printf '%s\n' "${records}" | grep -q '^#unparseable'; then
-    inbox_fail "$(printf '%s\n' "${records}" | awk -F'\t' '/^#unparseable/{print $2}') registry file(s) could not be read, and no entry matched this repo -- one of them may be this project's" \
-      "run: for f in \"\$(dirname \"\${ATHENA_INBOX_ROOT:-\$HOME/.local/share/athena}\")\"/athena/projects/*.json; do jq . \"\$f\" >/dev/null || echo \"\$f\"; done -- then fix the JSON in whichever file that names."
+  local failed
+  failed="$(printf '%s\n' "${records}" | awk -F'\t' '/^#unparseable/{n=$2} END{print n+0}')"
+  if [ "${failed}" -gt 0 ]; then
+    inbox_fail "${failed} registry entry(s) unreadable, and no entry matched this repo -- one of them may be this project's" \
+      "run: for f in \"\${ATHENA_INBOX_ROOT:-\$HOME/.local/share/athena}\"/projects/*.json; do jq . \"\$f\" >/dev/null || echo \"\$f\"; done -- then fix the JSON in whichever file that names."
     return 2
   fi
   return 1
@@ -246,7 +263,10 @@ inbox_status_json() {
 
   entry="$(inbox_entry "${1:-.}")"; rc=$?
   [ "${rc}" -ne 2 ] || return 1
-  if [ -z "${entry}" ]; then printf '{"channels":[]}\n'; return 0; fi
+  if [ -z "${entry}" ]; then
+    jq -n -c --argjson f "$(inbox_failed_candidates)" '{channels: [], failed_candidates: $f}'
+    return 0
+  fi
   descriptor_validate "${entry}" || return 1
 
   while IFS= read -r chan; do
@@ -276,7 +296,8 @@ inbox_status_json() {
       --argjson c "${counts}" '. + [{name: $n, kind: $k} + $c]')"
   done < <(descriptor_channel_names "${entry}")
 
-  printf '%s' "${out}" | jq -c '{channels: .}' || return 1
+  printf '%s' "${out}" | jq -c --argjson f "$(inbox_failed_candidates)" \
+    '{channels: ., failed_candidates: $f}' || return 1
   # The JSON is emitted FIRST and the failure is signalled by the status, so a
   # caller gets the counts it CAN have plus an honest non-zero.
   [ "${failed}" -eq 0 ]

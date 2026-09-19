@@ -39,7 +39,7 @@ corrected and re-run.
   `bin/inbox-status`
 - **Suite run:** `bash test/self-test.sh` (no network — nothing here makes one;
   the inbox root is always a `mktemp -d`; ~2s wall)
-- **Baseline:** `VERDICT: PASS (200 cases)` (131 at the first pass; 11 added
+- **Baseline:** `VERDICT: PASS (218 cases)` (131 at the first pass; 11 added
   after the sabotage run found six checks the suite did not actually protect,
   plus the state-rewrite rule that arrived mid-build, plus 46 more from the
   `athena-diff-critic` round and the `code-reviewer`/`adr-reviewer` pair — see
@@ -155,7 +155,31 @@ on the count itself saying the numbers include messages already read. Twelve
 cases, including the two that keep the warning honest: a healthy state file and
 an absent one must not raise it.
 
-The pattern across all three rounds is worth naming, because it is the argument
+A fourth round ran after DND-202's contract merged into this branch, against
+prose that did not exist when the code was written. It found two **MUSTs the
+implementation had never seen**:
+
+| Finding | Why nothing caught it |
+|---|---|
+| **`projects/` is reserved** — no channel `path` or `namespace` may resolve inside it. Containment cannot catch this one, and the contract says so explicitly: `projects/` is *inside* the root, so `"namespace": "projects"` passed every check and pointed a MESSAGE surface at the TENANCY directory. In this counting slice it would have counted other tenants' registry entries as unread mail. | The rule was written after the code. No amount of mutation finds a requirement the author never read. |
+| The **failed-candidate count** is required in *ordinary* status output, not only when nothing matched — a skipped candidate might have been this session's own entry. The implementation surfaced it only on the no-match path, dropping the warning in exactly the case where the session cannot tell it was dropped. | Same: the clause post-dates the code. The suite encoded the existing behaviour as if it were the specification. |
+
+That round also caught the `Fix:` clause of the unparseable-registry refusal
+being **unrunnable**: it globbed `<dirname of root>/athena/projects/*.json`,
+correct only when the root's basename happens to be `athena`, so under any
+custom root the agent reading the refusal was sent to an empty path. The repo
+convention is that a deny message tells the agent how to self-correct, and a
+`Fix:` that does not run is a `Fix:` in name only — so there is now a case that
+**extracts the command from the refusal and runs it**, asserting it names the
+broken file. Asserting the marker is present was never enough.
+
+And a bug introduced by that same fix, caught before it shipped: the count was
+first threaded through a global set inside `inbox_entry` — which every caller
+invokes inside `$(...)`, a **subshell**. The assignment could never reach the
+caller, so the count would have read `0` everywhere and the MUST would have
+looked satisfied while doing nothing. It is a function now.
+
+The pattern across all four rounds is worth naming, because it is the argument
 for running a reader alongside the mutations: **sabotage proves a check that exists
 is load-bearing; it cannot find a check that was never written, one that is
 safe only by accident of its caller, or one whose failure is indistinguishable
