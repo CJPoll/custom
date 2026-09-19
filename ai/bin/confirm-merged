@@ -85,6 +85,8 @@ run_self_test() {
 case "$3" in
   1) echo '{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z"}' ;;
   2) echo '{"state":"OPEN","mergedAt":null}' ;;
+  3) : ;;             # rc=0, EMPTY body (unreadable)
+  4) echo '{}' ;;     # rc=0, schema-unexpected body (no state/mergedAt)
   *) echo "no such PR $3" >&2; exit 1 ;;
 esac
 SH
@@ -98,6 +100,8 @@ SH
 case "$3" in
   1) echo '{"state":"merged","merged_at":"2026-01-01T00:00:00Z"}' ;;
   2) echo '{"state":"opened","merged_at":null}' ;;
+  3) : ;;             # rc=0, EMPTY body (unreadable)
+  4) echo '{}' ;;     # rc=0, schema-unexpected body (no state/merged_at)
   *) echo "no such MR $3" >&2; exit 1 ;;
 esac
 SH
@@ -125,6 +129,10 @@ SH
   expect "ancestry: head NOT ancestor"      1 -- --sha "$sha_C" --target "$target" --repo "$repo"
   expect "OR: forge open but ancestry ok"   0 -- --pr 2 --sha "$sha_A" --target "$target" --repo "$repo"
   expect "forge error alone -> undetermined" 3 -- --pr 9 --repo "$repo"
+  expect "PR rc=0 EMPTY body -> undetermined"  3 -- --pr 3 --repo "$repo"
+  expect "PR rc=0 no state/mergedAt -> undet"  3 -- --pr 4 --repo "$repo"
+  expect "MR rc=0 EMPTY body -> undetermined"  3 -- --mr 3 --repo "$repo"
+  expect "MR rc=0 no state/merged_at -> undet" 3 -- --mr 4 --repo "$repo"
   expect "clean-not-merged + bad sha -> undetermined" 3 -- --pr 2 --sha deadbeef --target "$target" --repo "$repo"
   expect "no probe -> usage error"          2 -- --repo "$repo"
   expect "both --pr and --mr -> usage"      2 -- --pr 1 --mr 1 --repo "$repo"
@@ -218,6 +226,13 @@ forge_probe() {
   if [ "$kind" = pr ]; then
     out="$( ( cd "$REPO" && "$GH_BIN" pr view "$id" --json state,mergedAt ) 2>&1 )"; rc=$?
     if [ "$rc" -ne 0 ]; then ERRORED=1; note "gh pr view $id failed: $(printf '%s' "$out" | head -1)"; return; fi
+    # rc==0 but an unparseable/empty/schema-unexpected body cannot be READ, and
+    # the "failed lookup must never look like an empty one" doctrine forbids
+    # reading it as "not merged" (exit 1). Treat an unreadable body as a probe
+    # that could not complete (ERRORED -> exit 3), NOT as a clean not-merged.
+    if ! printf '%s' "$out" | jq -e 'type=="object" and has("state") and has("mergedAt")' >/dev/null 2>&1; then
+      ERRORED=1; note "PR #$id: gh exited 0 but the body is empty/unparseable or lacks state/mergedAt"; return
+    fi
     if printf '%s' "$out" | jq -e '.state=="MERGED" and (.mergedAt // null)!=null' >/dev/null 2>&1; then
       CONFIRMED=1; note "PR #$id state=MERGED with mergedAt set"
     else
@@ -226,6 +241,11 @@ forge_probe() {
   else
     out="$( ( cd "$REPO" && "$GLAB_BIN" mr view "$id" -F json ) 2>&1 )"; rc=$?
     if [ "$rc" -ne 0 ]; then ERRORED=1; note "glab mr view $id failed: $(printf '%s' "$out" | head -1)"; return; fi
+    # See the GitHub branch above: an rc==0 body that cannot be read is a probe
+    # that could not complete (ERRORED -> exit 3), never a clean not-merged.
+    if ! printf '%s' "$out" | jq -e 'type=="object" and has("state") and has("merged_at")' >/dev/null 2>&1; then
+      ERRORED=1; note "MR !$id: glab exited 0 but the body is empty/unparseable or lacks state/merged_at"; return
+    fi
     if printf '%s' "$out" | jq -e '.state=="merged" and (.merged_at // null)!=null' >/dev/null 2>&1; then
       CONFIRMED=1; note "MR !$id state=merged with merged_at set"
     else
