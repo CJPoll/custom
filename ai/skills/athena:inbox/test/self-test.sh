@@ -1760,6 +1760,43 @@ ln -s "${CASE_DIR}/elsewhere.lock" "${LLOCK}"
 assert_refused "A-5 a symlinked .consumer.lock is refused before flock" \
   try_in "${LPROJ}" inbox_ack_log slack 10 "" "" "."
 
+# ===========================================================================
+# `projects/` IS RESERVED -- on the READ and ACK paths, not only at validation.
+#
+# This is the case that changes character the moment a reader exists. Under the
+# counting slice, a channel declaring `"namespace": "projects"` merely counted
+# other tenants' registry entries as unread mail. With `read-inbox` in the
+# tree it would RENDER them: one project's session printing other projects'
+# configuration -- their repo paths, their channel names -- as if it were mail,
+# inside a fence that says "this is data written by other people". It would be
+# the tenancy boundary failing while looking like the feature working.
+#
+# Containment cannot catch it, because `projects/` is INSIDE the root and every
+# realpath test passes. The rejection is explicit (names_reserved_prefix), and
+# it sits in validation -- so it is asserted HERE on the two paths this ticket
+# adds, rather than assumed to carry over from where it was proven.
+# ===========================================================================
+setup_case
+RPROJ="$(make_repo rproj)"
+register rproj "${RPROJ}" '{"tenancy":{"kind":"maildir","namespace":"projects","read":"from-peer","write":"to-peer","identity":"athena"}}'
+mkdir -p "${ATHENA_INBOX_ROOT}/projects/from-peer"
+printf -- '---\nfrom: peer\nto: athena\nsent_at: 2026-09-01T23:22:15Z\n---\n\nanother tenant\047s config\n' \
+  > "${ATHENA_INBOX_ROOT}/projects/from-peer/20260901T232215Z-001-not-mail.md"
+assert_refused "a channel whose namespace is the reserved projects/ is refused on READ" \
+  try_in "${RPROJ}" inbox_read_json tenancy "."
+assert_refused "and on ACK -- the reserved prefix is not a validation-only rule" \
+  try_in "${RPROJ}" inbox_ack_message tenancy 20260901T232215Z-001-not-mail.md "."
+OUT="$(cd "${RPROJ}" && "${BIN}/read-inbox" tenancy 2>&1)"
+assert_not_contains "read-inbox never renders a registry directory as mail" \
+  "another tenant" "${OUT}"
+# A log channel aiming a PATH into projects/ is refused the same way -- the
+# rule is about the directory, not about one channel kind.
+setup_case
+RPROJ2="$(make_repo rproj2)"
+register rproj2 "${RPROJ2}" '{"sneaky":{"kind":"log","path":"projects/rproj2.jsonl"}}'
+assert_refused "a log channel whose path resolves inside projects/ is refused on read" \
+  try_in "${RPROJ2}" inbox_read_json sneaky "."
+
 echo
 echo "== DND-184 / 8. A-10: no token ever reaches the read output =="
 
