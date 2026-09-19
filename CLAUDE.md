@@ -304,8 +304,8 @@ of caught by luck.
 
 So: an agent that will edit, stage, commit, rebase, or reset **works in a
 worktree** (`wt`, or `git worktree add`; house convention puts human-facing ones
-at `~/.local/worktrees/<project>/<branch>`, while a robot's own persistent tree
-belongs somewhere nobody will wander into — the shipwright's lives inside
+at `~/.local/worktrees/<project>/<branch>`, while a robot's own tree belongs
+somewhere nobody will wander into — the shipwright cron's lanes live inside
 `.git/`). This is the same discipline captains have always had; it is now the
 rule for every agent, including the unattended ones that had quietly been
 exempt.
@@ -319,20 +319,39 @@ the resting state. Pruning a predecessor's leftover is fair game but is done
 safely: check `git worktree list` against running processes, confirm the branch
 is actually merged (a squash-merge is not an ancestor of `main` — confirm via
 the forge), and `git worktree remove` only what no live process holds; when
-unsure, leave it and note it. The shipwright cron is the one current exception —
-it reuses a single persistent tree inside `.git/` (named above); moving it to
-the per-invocation model is a tracked follow-up, and until then its persistence
-is deliberate, not a lingering worktree.
+unsure, leave it and note it.
+
+**Later (2026-09-19):** this paragraph ended by naming **the shipwright cron as
+the one current exception** — a single persistent tree inside `.git/` that it
+rebased in place each hour, with the move to per-invocation lanes recorded as a
+tracked follow-up. Superseded: that follow-up landed (PR #21, `c2317da`). The
+cron now provisions a fresh lane per invocation —
+`.git/shipwright-lanes/run-<utc>-<pid>` on branch `shipwright/run-<utc>-<pid>`,
+created from `origin/main` and torn down after the run — so **there is no
+exception left**: one worktree per unit of work, short-lived, now holds for
+every agent on this machine without qualification. A crashed run leaves a lane
+corpse that the next cron run reaps, judging liveness by a held `flock(2)` on
+the lane's lock and never by a pid (pids recycle); reaping another run's lane by
+hand is not a thing anyone does.
 
 **A directly-spawned agent stays out of another lane's branch and worktree.**
-The shipwright cron owns `shipwright/auto` at `.git/athena-shipwright`
-exclusively. A shipwright spawned by hand (or by another agent) is a *different
-unit of work*: it takes its own named branch and worktree under
-`~/.local/worktrees/<project>/<branch>`, never the cron's, and opens a PR for the
-owner to merge rather than pushing to main. Two actors sharing one branch or
+A shipwright spawned by hand (or by another agent) is a *different unit of
+work*: it takes its own named branch and worktree under
+`~/.local/worktrees/<project>/<branch>`, never a cron lane's, and opens a PR for
+the owner to merge rather than pushing to main. Two actors sharing one branch or
 worktree is the same no-lock race as sharing the main checkout — on 2026-09-18 a
-cron run and a hand-spawned shipwright both operated on `shipwright/auto` and
-pushed to main inside one window, serialized only by luck.
+cron run and a hand-spawned shipwright both operated on one shared shipwright
+branch and pushed to main inside one window, serialized only by luck.
+
+**Later (2026-09-19):** this rule used to rest on the cron owning a *named*
+standing lane — **`shipwright/auto` at `.git/athena-shipwright`**, said to be
+its exclusively — and the 2026-09-18 incident above was two actors on that one
+branch. Superseded by the same PR #21 (`c2317da`): neither the branch nor the
+path exists any more, and each cron invocation gets its own
+`shipwright/run-<utc>-<pid>` lane that no other actor can name in advance. The
+rule above is unchanged and is not weakened by that — it is what makes the
+guarantee hold whichever way an agent was started, rather than depending on one
+reserved name a hand-spawned run had to remember to avoid.
 
 **This is a rule about writes, and specifically about git work.** Reading the
 main checkout is normal and often necessary. Four things are genuine exceptions,
