@@ -35,6 +35,16 @@
 # which. Every other entry under projects/ belongs to a different tenant, and a
 # notice must not enumerate them.
 #
+# And a health clause must describe a FAULT. `never_delivered` is a fault for a
+# LOG channel only: the contract makes a missing maildir read directory normal
+# ("a tool that SENDS mail creates <write>/"), so an unwritten-to peer mailbox
+# is a healthy channel awaiting its first message. Announcing it would be a
+# warning nobody can clear by fixing anything — and, worse, a permanently
+# non-empty HEALTH_TEXT keeps WARN_MARKER stamped forever, so the NEXT real
+# outage inherits a fresh marker from a non-fault and is rate-limited by it.
+# `bin/inbox-status`'s own renderer filters on `.kind == "log"` for this reason;
+# this clause matches it deliberately, not by coincidence.
+#
 # WHY SessionStart, NOT UserPromptSubmit
 # -------------------------------------
 # The harness abandoned the per-prompt cadence on 2026-09-11: it does not
@@ -261,7 +271,7 @@ if [ "${POLL_OK}" -eq 1 ]; then
        else empty end),
       ([.channels[] | select(.error // false)] | length
        | if . > 0 then "\(.) declared channel(s) could not be counted" else empty end),
-      ([.channels[] | select(.never_delivered // false)] | length
+      ([.channels[] | select(.kind == "log" and (.never_delivered // false))] | length
        | if . > 0 then "\(.) declared channel(s) have never received anything, so their producer may be unregistered" else empty end),
       ([.channels[] | select(.state_unreadable // false)] | length
        | if . > 0 then "\(.) channel(s) have an unreadable state file, so their counts are not deduped" else empty end)

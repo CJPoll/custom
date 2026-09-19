@@ -257,8 +257,9 @@ without it. Its header says so.
   and its own `git init` repo under one `mktemp -d`; ~5s wall)
 - **Baseline:** `VERDICT: PASS (112 cases)` (91 at the first pass; 21 added
   after this run — see *The four zeros*)
-- **Runner:** 23 mutations, one at a time, full suite after each, restored by
-  `cp` from a backup taken before the run.
+- **Runner:** 24 mutations, one at a time, full suite after each, restored by
+  `cp` from a backup taken before the run. S24 was added after the review round
+  (see *What the critic found that sabotage did not*).
 
 The mutations were applied by an exact-substring replace that asserts the
 anchor occurs **exactly once** before writing, as DND-183's run did. That
@@ -297,6 +298,7 @@ produces 23 green runs, which reads as "this suite is dead".
 | S21 | the `EXEMPT` classification is removed from `check-guard-messages` | 1 | `FAIL  F-12 the hook is EXEMPT with a stated reason, not carrying a fake deny path` |
 | S22 | a `UserPromptSubmit` entry is added for the hook | 2 | `FAIL  F-11 no UserPromptSubmit entry is registered for any hook` |
 | S23 | `inbox-status`'s stderr is relayed into the hook's reason log | 1 | `FAIL  R10 the wrapped command's stderr does not reach the reason log` |
+| S24 | the never-delivered clause drops its `.kind == "log"` filter | 2 | `FAIL  R13 an unwritten-to maildir is not announced as a missing producer` |
 
 ### The four zeros
 
@@ -363,6 +365,35 @@ project name is invisible to `inbox-status` — not counted in
 `Foo.json` is dark in exactly the way this epic has already paid for twice. It
 belongs to the registry reader (DND-208 / `lib/descriptor.sh`), not to the
 hook, and is raised to the athena-admiral in `dnd-188-report.md`.
+
+### What the critic found that sabotage did not
+
+The `athena-diff-critic` round found a **correctness** bug that 23 mutations
+had not: the never-delivered health clause had no `.kind == "log"` filter.
+
+`never_delivered` means opposite things for the two channel kinds. For a log
+channel it is a genuine fault -- an unregistered producer and an empty channel
+are identical on disk. For a **maildir** it is normal: the contract
+(`ai/contracts/athena-inbox.md`) makes the read directory something the tool
+that *sends* creates, so a declared peer mailbox nobody has written to yet is a
+healthy channel waiting for its first message. `bin/inbox-status`'s own renderer
+filters on `.kind == "log"` for precisely this reason; the hook's clause had
+diverged from it.
+
+The consequence was not cosmetic. `HEALTH_TEXT` would be permanently non-empty
+for any project declaring a peer mailbox, so the branch that clears
+`WARN_MARKER` on a clean run could never execute -- and the next **real** outage
+would inherit a fresh warn marker from a non-fault and be rate-limited into
+silence by it. That is the S21 failure the hook's own header argues against,
+reached through a different door.
+
+**Why no mutation found it.** Sabotage can only redden a claim some fixture
+exercises, and the suite's single maildir fixture (`plant_mail`) *creates*
+`from-peer/` before running -- so `never_delivered` was never true for a maildir
+anywhere in 116 cases. The gap was in the fixture space, not the mutation set,
+which is the one class a mutation run is structurally blind to. Closed by
+**R13**, with a control asserting a never-delivered *log* channel still warns,
+and pinned by S24 above.
 
 ### Not exercised by this run
 

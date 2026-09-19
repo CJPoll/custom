@@ -500,6 +500,43 @@ assert_eq "the success marker is created 0600" "600" \
 assert_eq "the reason log is created 0600" "600" \
   "$(stat -c %a "${HOME}/.claude/athena-inbox-poll.log" 2>/dev/null)"
 
+echo "== R13: a maildir awaiting its first message is HEALTHY, not a fault =="
+
+# `never_delivered` means opposite things for the two channel kinds. For a log
+# channel it is a real fault: the producer may never have been registered, and
+# an unregistered producer looks exactly like an empty channel on disk. For a
+# maildir it is NORMAL -- the contract says the read directory is created by the
+# tool that SENDS, so a declared peer mailbox nobody has written to yet is a
+# healthy channel waiting, and `bin/inbox-status`'s own renderer filters on
+# `.kind == "log"` for exactly this reason.
+#
+# Getting this wrong is not a cosmetic false positive. HEALTH_TEXT would be
+# permanently non-empty, so the branch that clears WARN_MARKER on a clean run
+# could never execute -- and the next REAL outage would inherit a fresh warn
+# marker from a non-fault and be rate-limited into silence by it. The suite
+# could not see any of this: its only maildir fixture, plant_mail, CREATES the
+# read directory before running, so `never_delivered` was never true for a
+# maildir anywhere.
+setup_case
+register "${BOTH_CHANNELS}"
+plant_log_lines
+# No agent-mail/peer/from-peer anywhere: the peer has not sent yet.
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_not_contains "R13 an unwritten-to maildir is not announced as a missing producer" \
+  "never received anything" "${CTX}"
+assert_contains "R13 the log channel's real mail is still counted" "2 new in slack" "${CTX}"
+assert_no_file "R13 an unwritten-to maildir does not leave the warn marker stamped" \
+  "${HOME}/.claude/athena-inbox-last-warn"
+
+# The control, so the case above cannot pass by the clause being dead: the same
+# fixture with a LOG channel that has never been delivered to DOES warn.
+setup_case
+register "${LOG_CHANNEL}"
+run_hook
+assert_contains "R13 the control: a never-delivered LOG channel is still a fault" \
+  "never received anything" "$(context_of "${OUT}")"
+
 echo "== R12: a registry entry that could not be read is surfaced, not skipped =="
 
 # The sharpest form of the standing question. `projects/` is multi-tenant: an
