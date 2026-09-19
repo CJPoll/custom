@@ -1,18 +1,24 @@
 ---
 name: athena:inbox
-description: Read Athena's own machine-local message inboxes — the Slack delivery log and the agent-mail maildirs — scoped to the project the session is rooted in. Use to check whether anything has arrived for THIS project, to understand why a channel is silent, or whenever a session-start notice reports a count of unread inbox messages. Counts only for now; the read, ack, send and wait steps land with later tickets.
+description: Read Athena's own machine-local message inboxes — the Slack delivery log and the agent-mail maildirs — scoped to the project the session is rooted in. Use to check whether anything has arrived for THIS project, to understand why a channel is silent, or whenever a session-start notice reports a count of unread inbox messages. Counting (inbox-status) and reading + acking (read-inbox, behind a designated-consumer lock, with bodies fenced as untrusted) both work; send-mail and inbox-wait land with later tickets.
 ---
 
 # athena:inbox
+
+**Kind: living normative document.** Amended in place, per
+`~/dev/custom/CLAUDE.md` -> *Documentation conventions*. A reader implements
+from the current text, so a superseded rule is replaced rather than left
+standing beside its replacement; each supersession carries one bold dated
+(UTC) label at the definitional mention.
 
 A machine-local message facility. Other people's words arrive as files under an
 inbox root; this skill decides which of them belong to the project you are
 sitting in, and how many are unread.
 
-**Status: partial.** This is the counting slice (DND-183). `bin/inbox-status`
-works. `read-inbox`, `send-mail`, `inbox-wait` and `inbox-doctor` do not exist
-yet — where this document describes them, it is describing the shape they must
-fit, not a command you can run.
+**Status: partial.** `bin/inbox-status` (counting, DND-183) and
+`bin/read-inbox` (read + ack + the consumer lock, DND-184) work. `send-mail`
+and `inbox-wait` do not exist yet — where this document describes them, it is
+describing the shape they must fit, not a command you can run.
 
 Normative contract: `ai/contracts/athena-inbox.md`, specifically *Tenancy: the
 registry*. Where this file and the contract disagree, **the contract wins** —
@@ -133,6 +139,37 @@ A malformed registry entry is a **hard error**, not zero channels. Partially
 honouring configuration nobody understands is the bug that rule prevents, and
 "broken registry" must never be indistinguishable from "not opted in".
 
+### `bin/read-inbox`
+
+```
+read-inbox <channel>          read the unread messages AND ack them
+read-inbox <channel> --peek   read them without acking
+read-inbox <channel> --json   the same messages as one JSON object
+```
+
+The only place a body enters context, and it runs only because someone asked.
+Every body arrives inside a **fence carrying a per-render nonce** — a fixed
+marker is breakable by definition, since a body containing the closing string
+would end the fence early and the rest would land outside it.
+
+**Who may ack.** Reading is open to any of Cody's sessions. *Advancing* needs
+all three: the channel belongs to this repo's registry entry, this session is
+not a subagent, and this session holds the channel's `flock`. A refusal points
+at `--peek`. `flock` alone decides ownership — there is nothing to reap, and a
+pid check that steals a lock when the file "looks stale" is a race against a
+live holder.
+
+Three things this command refuses to let look like "nothing new":
+
+- a declared `log` channel whose file has **never existed** (nobody registered
+  the producer),
+- files in a maildir that are **not conformant messages** — wrong filename
+  grammar, or missing the required `from`/`to`/`sent_at`. They are counted,
+  never rendered and never acked, and never named: the slug is prose the peer
+  chose. Conformant mail in the same channel keeps flowing past them,
+- messages carrying **your own identity** as `from`, sitting in the directory
+  the peer delivers into.
+
 ## Reading the counts
 
 - **`new` is post-dedupe.** At-least-once delivery means the same message can
@@ -152,17 +189,24 @@ honouring configuration nobody understands is the bug that rule prevents, and
 
 | Bucket | Files |
 |---|---|
-| Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` |
-| Side effects | `lib/fs.sh` — the only file I/O, and the only `git` call |
+| Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` |
+| Side effects | `lib/fs.sh` (the only file I/O, and the only `git` call) · `lib/lock.sh` · `lib/session.sh` |
 | Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes |
-| Framework | `bin/inbox-status` |
+| Framework | `bin/inbox-status` · `bin/read-inbox` |
 
 The domain files take strings and return strings. That is what makes the
 counting and parsing rules provable with no fixtures on disk, which is the
-whole reason for splitting shell this way.
+whole reason for splitting shell this way. `lib/fence.sh` is the one declared
+deviation: it reads `/dev/urandom` for its nonce, and takes an injected one so
+a caller that needs determinism has a way to get it.
 
-**This slice writes nothing.** `lib/fs.sh` contains no state writer at all, so
-"counting never advances an offset" is structural rather than a promise.
+**Later (2026-09-18):** This section previously read "*this slice writes
+nothing* — `lib/fs.sh` contains no state writer at all, so 'counting never
+advances an offset' is structural rather than a promise." The ack ticket spent
+that guarantee: `fs.sh` now holds the atomic state writer, rotation, the sweep
+and the maildir ack. What replaces it is the **designated-consumer gate** — a
+subagent or a session that does not hold the channel's `flock` may count and
+may `--peek`, and neither advances anything.
 
 ## Tests
 
