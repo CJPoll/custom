@@ -232,8 +232,8 @@ a refusal to run.
   `seen_keys` cross-source drop, `inbox_state_advance`), `bin/read-inbox`,
   `ai/hooks/athena-slack-poll.sh` (now a SessionStart hook)
 - **Suite run:** `bash test/self-test.sh` (no network — curl is a PATH shim)
-- **Baseline:** `VERDICT: PASS (67 cases)` (55 pre-existing + 12 new: cases 56–67)
-- **Runner:** 12 mutations, one at a time, full suite after each; exact-substring
+- **Baseline:** `VERDICT: PASS (68 cases)` (55 pre-existing + 13 new: cases 56–68)
+- **Runner:** 13 mutations, one at a time, full suite after each; exact-substring
   replace asserting the anchor occurs **exactly once**; restored from an
   **in-memory byte copy** (never `git checkout` — the test edits are uncommitted
   relative to the mutated file during the run) — full runner in the report.
@@ -254,14 +254,15 @@ a refusal to run.
 | S50 | `athena-slack-poll.sh`: `emit`'s `hookEventName:"SessionStart"` → `"UserPromptSubmit"` (malformed object) | 3 | `FAIL hook: N>0 emits exactly one SessionStart object …` / `FAIL hook: warns after 6h …, as one SessionStart object` / `FAIL markers: a missing success marker counts as stale …` |
 | S51 | `athena-slack-poll.sh`: `[ -n "$MESSAGE" ] \|\| exit 0` → `\|\| MESSAGE=" "` (emits even with nothing to say) | 8 | `FAIL hook: zero new prints absolutely nothing, rc=0` (+7 more silent-path cases) |
 | S52 | `lib/inbox.sh`: the `SLACK_INBOX_STATE` default drops the `%.jsonl` strip (`${SLACK_INBOX_JSONL}.state.json`) so the path is no longer the reader's suffix swap | 1 | `FAIL state path: derived by suffix swap from SLACK_INBOX_JSONL (matches names_state_name)` |
+| S53 | `lib/inbox.sh`: `_inbox_state_read` stops folding the legacy `channels` into a shared state file the reader already wrote (`.channels = (.channels // {})`) | 1 | `FAIL migration: legacy watermark is folded in even when the reader already wrote the shared file` |
 
-All twelve mutations (S41–S52) reddened the intended case(s); after each, the file was
+All thirteen mutations (S41–S53) reddened the intended case(s); after each, the file was
 restored from its in-memory byte copy and the suite returned to
-`VERDICT: PASS (67 cases)`.
+`VERDICT: PASS (68 cases)`.
 
 ### Input classes the fixtures now contain (not just code mutations)
 
-Three of the new cases are about an INPUT the earlier suite never had:
+Four of the new cases are about an INPUT the earlier suite never had:
 
 - **A `seen_keys` set already carrying the message's `channel:ts`** (cases 56/57)
   — the cross-source state the file channel produces. Before DND-186 no fixture
@@ -273,3 +274,6 @@ Three of the new cases are about an INPUT the earlier suite never had:
 - **A legacy `{"version":1,…}` cache and no new state file** (case 62) — the
   first-run-after-upgrade input. Distinguished from a clean start (case 45) by
   whether the post-watermark message is reported.
+- **A shared state file the FILE reader already wrote (no `channels`) plus a
+  legacy cache** (case 68) — the upgrade-after-the-reader-arrived input, where
+  keying migration on "shared file absent" would silently swallow the backlog.

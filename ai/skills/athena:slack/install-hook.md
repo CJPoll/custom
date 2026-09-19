@@ -20,6 +20,14 @@ per-prompt cadence on 2026-09-11 (it does not compose with a Monitor loop and
 couples a network call to the user typing). Mid-session coverage comes from a
 Monitor loop.
 
+**Migrating from the old install.** Earlier versions of this doc told you to
+hand-add a `UserPromptSubmit` entry pointing at
+`~/.claude/skills/athena:slack/hooks/athena-slack-poll.sh` — a path this change
+deletes. `setup-hooks --install` only merges the registry, so it does **not**
+remove that stale entry; delete it from `~/.claude/settings.json` by hand (it
+would otherwise fire a "No such file" on every prompt). Nothing here was ever
+auto-wired, so a machine that never hand-added it has nothing to remove.
+
 ## Check it
 
 ```sh

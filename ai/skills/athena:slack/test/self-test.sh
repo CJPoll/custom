@@ -599,7 +599,7 @@ if [[ "${ONEOBJ}" == "yes" ]] && [[ "${CTX}" == *"has not succeeded in 6h"* ]]; 
   ok "hook: warns after 6h with no successful poll, as one SessionStart object"
 else bad "hook: warns after 6h with no successful poll, as one SessionStart object" "oneobj='${ONEOBJ}' ctx='${CTX}' out='${OUT}' log='${HOOKLOG}'"; fi
 
-# 38. ...and does not repeat it on the next prompt.
+# 38. ...and does not repeat it on the next session start.
 rm -f "${CHOME}/.claude/athena-slack-last-poll"
 run_hook
 if [[ -z "${OUT}" ]]; then ok "hook: the staleness warning is itself rate-limited"
@@ -1006,6 +1006,26 @@ if [[ -f "${JDIR}/foo-slack.state.json" ]] \
   ok "state path: derived by suffix swap from SLACK_INBOX_JSONL (matches names_state_name)"
 else bad "state path: derived by suffix swap from SLACK_INBOX_JSONL (matches names_state_name)" \
   "ls: $(ls "${JDIR}" 2>/dev/null | tr '\n' ' ')"; fi
+
+# 68. MIGRATION WHEN THE FILE READER GOT THERE FIRST. The shared state file may
+#     already exist -- written by the athena:inbox reader with v/offset/seen_*
+#     and NO `channels`. Migration keyed only on "shared file absent" would skip
+#     here and treat every conversation as first sight, silently swallowing the
+#     messages between the last cache read and the upgrade. The legacy watermark
+#     must still be folded in, so a post-watermark message IS reported.
+setup_case
+seed_caches
+# The shared file as the file reader would leave it: no channels key.
+printf '{"v":1,"offset":42,"seen_event_ids":["Ev9"],"seen_keys":[]}' > "${STATE}"
+printf '{"version":1,"channels":{"D0CODY":"1000.0"}}' > "${LEGACY}"
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","user":"U0AHNV4RJGP"}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.history "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"post-watermark, reader got there first\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+run_bin read-inbox
+if [[ "${OUT}" == *"post-watermark, reader got there first"* ]] \
+   && [[ "$(jq -r '.offset' "${STATE}")" == "42" ]]; then
+  ok "migration: legacy watermark is folded in even when the reader already wrote the shared file"
+else bad "migration: legacy watermark is folded in even when the reader already wrote the shared file" \
+  "out='${OUT}' state=$(cat "${STATE}")"; fi
 
 echo
 if [[ "${FAIL}" -eq 0 ]]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0; fi

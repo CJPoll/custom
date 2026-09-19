@@ -68,7 +68,22 @@ _inbox_state_empty() { printf '{"v":1,"channels":{},"seen_event_ids":[],"seen_ke
 
 _inbox_state_read() {
   if [ -f "$SLACK_INBOX_STATE" ]; then
-    cat "$SLACK_INBOX_STATE"
+    if [ -f "$SLACK_INBOX_LEGACY_STATE" ]; then
+      # The shared file exists but may have been created by the FILE reader,
+      # which writes v/offset/seen_event_ids/seen_keys and NO `channels` -- so
+      # keying migration on "shared file absent" would skip it here and treat
+      # every conversation as first sight, silently swallowing the DMs/mentions
+      # between the last cache read and the upgrade (exactly what the backstop
+      # exists to recover). So fold the legacy per-conversation watermark into
+      # any channel the shared file does not already carry. `$lc + current`
+      # means a watermark already advanced here WINS; legacy only fills gaps.
+      jq -c --slurpfile leg "$SLACK_INBOX_LEGACY_STATE" '
+        (($leg[0].channels) // {}) as $lc
+        | .channels = ($lc + (.channels // {}))
+      ' "$SLACK_INBOX_STATE" 2>/dev/null || cat "$SLACK_INBOX_STATE"
+    else
+      cat "$SLACK_INBOX_STATE"
+    fi
   elif [ -f "$SLACK_INBOX_LEGACY_STATE" ]; then
     # First run after the state moved into the shared inbox-root file: carry the
     # per-conversation API watermark across so a message already seen by the old
