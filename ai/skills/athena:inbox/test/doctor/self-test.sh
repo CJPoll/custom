@@ -215,6 +215,18 @@ CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"
 assert_finding "overdue .1 -> warn" "${CH}" warn "channel:slack" "past its 14-day sweep window"
 rm -f "${STATE}" "${ATHENA_INBOX_ROOT}/ch-slack.jsonl.1"
 
+# A ROTATED, QUIET channel: the live file is gone (rotation renamed it to .1),
+# only ch-slack.jsonl.1 remains. It must NOT be reported as "never received",
+# and the overdue-.1 and lock checks must still run.
+rm -f "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"
+printf 'old\n' > "${ATHENA_INBOX_ROOT}/ch-slack.jsonl.1"; chmod 600 "${ATHENA_INBOX_ROOT}/ch-slack.jsonl.1"
+printf '{"offset":0,"rotated_at":"2020-01-01T00:00:00Z"}' > "${STATE}"; chmod 600 "${STATE}"
+CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"
+assert_no_finding "rotated+quiet: NOT reported as never-received" "${CH}" warn "channel:slack" "never received"
+assert_finding "rotated+quiet: overdue .1 still reported" "${CH}" warn "channel:slack" "past its 14-day sweep window"
+rm -f "${STATE}" "${ATHENA_INBOX_ROOT}/ch-slack.jsonl.1"
+printf '{"v":1,"ts":"1","channel":"c","event_id":"e"}\n' > "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"; chmod 600 "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"
+
 echo "== lock: dead-pid reapable, READ-ONLY (never reaped) =="
 LOCK="${ATHENA_INBOX_ROOT}/ch-slack.consumer.lock"
 printf '{"session_id":"s","pid":2147483646,"started_at":"x"}' > "${LOCK}"; chmod 600 "${LOCK}"
@@ -301,8 +313,17 @@ NA_FINDINGS="$(printf '%s' "${JSON}" | jq -r '[.findings[] | select(.state=="na"
 assert_eq "summary.ok equals the ok-findings tally" "${OK_FINDINGS}" "$(printf '%s' "${JSON}" | jq -r '.summary.ok')"
 assert_eq "summary.na equals the na-findings tally" "${NA_FINDINGS}" "$(printf '%s' "${JSON}" | jq -r '.summary.na')"
 assert_eq "there ARE na findings to mis-count" true "$([ "${NA_FINDINGS}" -ge 1 ] && echo true || echo false)"
-assert_eq "na alone keeps healthy true" true \
-  "$(printf '%s' "${JSON}" | jq -r 'if (.summary.warn==0 and .summary.fail==0) then (.summary.healthy==true) else true end')"
+# na alone keeps healthy TRUE -- proven on a fixture with ZERO warnings (the
+# entry declared in a committed list so undeclared-entry is ok), where na
+# findings (client-config, client-running, server) are the only non-ok states.
+# The earlier form (`... else true`) was vacuous whenever the fixture warned.
+DECL="${TMP}/bin-committed.json"
+jq -n --arg r "${C3}" '{v:1,projects:[{file:"bin.json",entry:{v:1,repo:$r,channels:{slack:{kind:"log",path:"bin-slack.jsonl"}}}}]}' > "${DECL}"
+JSON0="$(cd "${R3}" && ATHENA_INBOX_REGISTRY="${DECL}" bash "${BIN}" --json)"
+assert_eq "zero-warn fixture really has na findings" true "$(printf '%s' "${JSON0}" | jq -r '.summary.na >= 1')"
+assert_eq "zero-warn fixture really has no warnings" 0 "$(printf '%s' "${JSON0}" | jq -r '.summary.warn')"
+assert_eq "na alone keeps healthy true" true "$(printf '%s' "${JSON0}" | jq -r '.summary.healthy')"
+assert_eq "na alone keeps exit 0" 0 "$( ( cd "${R3}" && ATHENA_INBOX_REGISTRY="${DECL}" bash "${BIN}" >/dev/null 2>&1 ); echo $? )"
 # INFORMATIONAL warns (this fixture's entry is undeclared in the committed list)
 # are surfaced as warn AND counted in info, but DO NOT flip healthy -- otherwise
 # the hook would nag every opted-in repo forever about a benign steady state.

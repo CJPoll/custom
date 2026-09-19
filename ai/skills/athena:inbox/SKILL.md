@@ -382,10 +382,10 @@ file holding a user API token) to enable it; without them it is `n-a`, not a
 failure. The token reaches `curl` only through a `umask 077` config file, never
 in argv and never logged. The doctor mints and stores nothing.
 
-The SessionStart hook runs `inbox-doctor --json` and, when the chain is worse
-than `ok`, folds one rate-limited sentence into its notice; set
-`ATHENA_INBOX_DOCTOR_LINE=0` to opt out of that line (the command still works by
-hand).
+The SessionStart hook runs `inbox-doctor --json --no-server` (never a network
+request on that path) and, when the chain is not `healthy`, folds one
+rate-limited sentence into its notice; set `ATHENA_INBOX_DOCTOR_LINE=0` to opt
+out of that line (the command still works by hand).
 
 ## Writing on a maildir channel
 
@@ -428,8 +428,8 @@ agents on the live channel did by hand for fifty-one messages.
 | Bucket | Files |
 |---|---|
 | Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` · `lib/doctor.sh`'s `doctor_state_*` decisions |
-| Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the message-handling path**) · `lib/lock.sh` · `lib/session.sh` · `lib/doctor.sh`'s `doctor_check_*`/probe functions (a **declared deviation** — see below) |
-| Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes |
+| Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the message-handling path**) · `lib/lock.sh` · `lib/session.sh` |
+| Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes · `lib/doctor.sh`'s `doctor_check_*` — the diagnostic orchestration (a **declared deviation** — see below) |
 | Framework | `bin/inbox-status` · `bin/read-inbox` · `bin/inbox-doctor` |
 
 The domain files take strings and return strings. That is what makes the
@@ -438,17 +438,28 @@ whole reason for splitting shell this way. `lib/fence.sh` is one declared
 deviation: it reads `/dev/urandom` for its nonce, and takes an injected one so
 a caller that needs determinism has a way to get it.
 
-`lib/doctor.sh` is the other, and it is deliberate: a diagnostic's whole job is
-to probe subsystems `fs.sh` has no business knowing about — a supervisor
-pidfile, the crontab, an HTTP health endpoint, `ruby` for the committed
-registry list — so it carries its own side-effect probes rather than bloating
-the message-handling adapter with them. The split is kept WITHIN the file: the
-pure `doctor_state_*` decisions (mode, future stamp, connection verdict,
-override match) take facts and return a state with no I/O, and are what the
-suite proves branch-by-branch; the `doctor_check_*` functions gather the facts.
-Every probe is steerable by an environment override, which is what lets the
-suite drive the whole tool against temp dirs and canned JSON without opening a
-socket or reading a real pidfile.
+`lib/doctor.sh`'s `doctor_check_*` layer is the other, and the deviation is
+twofold and deliberate. It is the doctor's **manager** — it orchestrates the
+checks — and a manager normally coordinates side effects through an adapter. The
+doctor does two things a strict reading forbids, both because a diagnostic's job
+is to reach across every layer:
+
+1. **It performs its own read-only probes** rather than routing them through
+   `fs.sh` — a supervisor pidfile, the crontab, an HTTP health endpoint, `ruby`
+   for the committed registry list. These are subsystems `fs.sh` has no business
+   knowing about, and folding them into the message-handling adapter would bloat
+   it with concerns no reader or writer shares.
+2. **It calls back into `lib/inbox.sh` (the manager)** — `inbox_entry`,
+   `inbox_field` — to resolve the matched entry and its channel paths. Reusing
+   the exact resolution every other command takes is the point: a second
+   resolver is how the diagnostic would drift from the tool it diagnoses.
+
+What is kept clean is the DECISION layer: the pure `doctor_state_*` functions
+(mode, future stamp, connection verdict, override match) take facts and return a
+state with no I/O, and are what the suite proves branch-by-branch. Every probe
+is steerable by an environment override, which is what lets the suite drive the
+whole tool against temp dirs and canned JSON without opening a socket or reading
+a real pidfile.
 
 **Later (2026-09-18):** This section previously read "*this slice writes
 nothing* — `lib/fs.sh` contains no state writer at all, so 'counting never

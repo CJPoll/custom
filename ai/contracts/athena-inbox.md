@@ -1635,9 +1635,9 @@ config, a channel never provisioned, no API token — and it is **never counted 
 `ok`**. A diagnostic that printed `ok` because an input was missing would be the
 silence it exists to break, wearing a diagnostic's coat. The exit code is `0`
 unless some check is `fail`; a `warn` or an `n-a` alone never makes it non-zero.
-`--json` emits `{summary:{ok,warn,fail,na,healthy},findings:[…]}` for the
+`--json` emits `{summary:{ok,warn,fail,na,info,healthy},findings:[…]}` for the
 SessionStart hook, which folds one rate-limited sentence into its own JSON object
-when the chain is anything worse than `ok`.
+when the chain is not `healthy` (see the informational carve-out below).
 
 **Read-only, absolutely.** The doctor never acks, advances an offset, rotates,
 sweeps, fixes a mode, or reaps a lock — a dead-pid `*.consumer.lock` is reported

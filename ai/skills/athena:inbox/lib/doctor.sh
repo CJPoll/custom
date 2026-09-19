@@ -504,20 +504,40 @@ doctor_check_one_channel() {
 }
 
 doctor_check_log_channel() {
-  local chan="$1" resolved="$2" inbox state rotated now mode st
+  local chan="$1" resolved="$2" inbox state one now rotated rot_epoch mode st mt age
   inbox="$(inbox_field inbox "${resolved}")"
   state="$(inbox_field state "${resolved}")"
+  one="$(fs_rotated_name "${inbox}")"
+  now="$(fs_now_epoch)"
 
-  if [ ! -e "${inbox}" ]; then
+  # NEVER DELIVERED is the absence of BOTH the live file AND a rotated
+  # generation. A channel that was rotated and has had no delivery SINCE has no
+  # <channel>.jsonl (rotation renamed it to .1) but does have <channel>.jsonl.1 --
+  # reporting THAT as "never received" is false, and would also skip the
+  # sweep-residue and lock checks below, which are exactly what such a quiet,
+  # rotated channel needs. So the never-delivered warning fires only when
+  # neither file exists.
+  if [ ! -e "${inbox}" ] && [ ! -e "${one}" ]; then
     doctor_finding warn "channel:${chan}" "log channel \"${chan}\" has never received anything (${inbox##*/} does not exist)" \
       "register this channel's producer -- a server-side agent instance mapped to ${inbox##*/} in the client config; an unregistered producer and an empty channel look identical on disk."
     return 0
   fi
-  # Permissions: the channel file and its state file must be 0600.
-  mode="$(stat -c '%a' "${inbox}" 2>/dev/null)"
-  st="$(doctor_state_mode "${mode}" "600")"
-  [ "${st}" = "warn" ] && doctor_finding warn "channel:${chan}" "the channel file ${inbox##*/} is mode 0${mode}, expected 0600" \
-    "chmod 0600 ${inbox}; message surfaces under the root are private."
+
+  # Permissions + freshness apply to the LIVE file when it exists.
+  if [ -e "${inbox}" ]; then
+    mode="$(stat -c '%a' "${inbox}" 2>/dev/null)"
+    st="$(doctor_state_mode "${mode}" "600")"
+    [ "${st}" = "warn" ] && doctor_finding warn "channel:${chan}" "the channel file ${inbox##*/} is mode 0${mode}, expected 0600" \
+      "chmod 0600 ${inbox}; message surfaces under the root are private."
+    if mt="$(fs_mtime_epoch "${inbox}" 2>/dev/null)"; then
+      age=$(( now - mt ))
+      doctor_finding ok "channel:${chan}" "log channel \"${chan}\" last changed ${age}s ago"
+    fi
+  else
+    doctor_finding ok "channel:${chan}" "log channel \"${chan}\" is rotated and quiet (only ${one##*/} remains)"
+  fi
+
+  # State-file permissions, regardless of the live file's presence.
   if [ -e "${state}" ]; then
     mode="$(stat -c '%a' "${state}" 2>/dev/null)"
     st="$(doctor_state_mode "${mode}" "600")"
@@ -525,33 +545,23 @@ doctor_check_log_channel() {
       "chmod 0600 ${state}; it records this channel's read offset and dedupe sets."
   fi
 
-  # Freshness: age of the channel file, as a fact (never a fault on its own).
-  local mt age
-  if mt="$(fs_mtime_epoch "${inbox}" 2>/dev/null)"; then
-    now="$(fs_now_epoch)"
-    age=$(( now - mt ))
-    doctor_finding ok "channel:${chan}" "log channel \"${chan}\" last changed ${age}s ago"
-  fi
-
-  # A rotated_at in the FUTURE blocks rotation indefinitely and is invisible
-  # otherwise (contract obligation).
-  now="$(fs_now_epoch)"
+  # rotated_at, read once. A FUTURE stamp blocks rotation indefinitely and is
+  # otherwise invisible; both checks run whether or not the live file is present,
+  # because the rotated case is precisely when the .1 residue check matters.
   rotated="$(fs_read_state "${state}" 2>/dev/null | jq -r '.rotated_at // empty' 2>/dev/null)"
   if [ -n "${rotated}" ]; then
-    local rot_epoch fstate
     if rot_epoch="$(fs_epoch_of_rfc3339 "${rotated}" 2>/dev/null)"; then
-      fstate="$(doctor_state_future "${rot_epoch}" "${now}")"
-      [ "${fstate}" = "warn" ] && doctor_finding warn "channel:${chan}" "channel \"${chan}\" has a rotated_at in the future (${rotated})" \
-        "the machine clock was set back or ${state##*/} was hand-edited; rotation will not fire while rotated_at is ahead of now. Correct the clock or reset rotated_at in ${state##*/}."
+      [ "$(doctor_state_future "${rot_epoch}" "${now}")" = "warn" ] && \
+        doctor_finding warn "channel:${chan}" "channel \"${chan}\" has a rotated_at in the future (${rotated})" \
+          "the machine clock was set back or ${state##*/} was hand-edited; rotation will not fire while rotated_at is ahead of now. Correct the clock or reset rotated_at in ${state##*/}."
     fi
-    # A .jsonl.1 whose rotation is more than 14 days old is residue the ack-path
-    # sweep structurally cannot reach (D12(b)).
-    local one
-    one="$(fs_rotated_name "${inbox}")"
-    if [ -e "${one}" ] && [ "$(logchan_should_sweep "${rot_epoch:-}" "${now}")" = "yes" ]; then
-      doctor_finding warn "channel:${chan}" "channel \"${chan}\" has a rotated generation (${one##*/}) past its 14-day sweep window" \
-        "the designated consumer has not run since rotation, so the ack-path sweep never fired. Run a read on this channel as the designated consumer, or remove ${one} by hand; the doctor never sweeps."
-    fi
+  fi
+  # A .jsonl.1 more than 14 days past its rotation is residue the ack-path sweep
+  # structurally cannot reach (D12(b)) -- the residue a channel whose designated
+  # consumer never runs again leaves behind.
+  if [ -e "${one}" ] && [ "$(logchan_should_sweep "${rot_epoch:-}" "${now}")" = "yes" ]; then
+    doctor_finding warn "channel:${chan}" "channel \"${chan}\" has a rotated generation (${one##*/}) past its 14-day sweep window" \
+      "the designated consumer has not run since rotation, so the ack-path sweep never fired. Run a read on this channel as the designated consumer, or remove ${one} by hand; the doctor never sweeps."
   fi
 
   # The consumer lock: a dead-pid lock is REPORTED reapable, never reaped.
