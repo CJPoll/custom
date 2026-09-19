@@ -47,11 +47,19 @@ logchan_split_complete() {
   esac
 }
 
-# logchan_scan <offset> <schema_v_csv> <seen_event_ids> <seen_keys>
+# logchan_scan <offset> <schema_v_csv> <seen_event_ids> <seen_keys> [with_text]
 #
 # Byte slice on stdin (the file from <offset> to EOF). Emits one JSON object:
 #   {"new":N,"unreadable":U,"next_offset":O,
 #    "messages":[{"ts":…,"channel":…,"event_id":…}, …]}
+#
+# `with_text` (default 0) is what separates the COUNT path from the READ path,
+# and it is a parameter rather than a filter applied afterwards on purpose.
+# With it off, no message body exists in this function's return value AT ALL --
+# so the counting path cannot leak one even through a future renderer's
+# mistake, because there is nothing there to print. The contract's counts-only
+# rule is about the pre-prompt position, and this is the structural half of it.
+# The read path passes 1 and renders inside a nonce fence.
 #
 # `next_offset` advances over COMPLETE LINES ONLY (D-13). That is the whole
 # crash-safety guarantee: the fragment is neither parsed nor counted, and the
@@ -63,8 +71,8 @@ logchan_split_complete() {
 # outage appends older messages after newer ones. `received_at` is monotonic;
 # `ts` is not, and `ts` is what recency means to a human.
 logchan_scan() {
-  local offset="$1" schema_csv="${2:-1}" seen_ev="${3:-}" seen_ky="${4:-}"
-  local complete bytes sv_json ev_json ky_json
+  local offset="$1" schema_csv="${2:-1}" seen_ev="${3:-}" seen_ky="${4:-}" with_text="${5:-0}"
+  local complete bytes sv_json ev_json ky_json wt_json
 
   # The offset is validated HERE, not only by the caller. It reaches an
   # arithmetic context below, and bash EXECUTES a command substitution inside
@@ -87,11 +95,13 @@ logchan_scan() {
   sv_json="$(printf '%s' "${schema_csv}" | jq -R 'split(",") | map(select(length>0) | tonumber)')"
   ev_json="$(printf '%s' "${seen_ev}" | jq -R -s 'split("\n") | map(select(length>0))')"
   ky_json="$(printf '%s' "${seen_ky}" | jq -R -s 'split("\n") | map(select(length>0))')"
+  case "${with_text}" in 1|true|yes) wt_json=true ;; *) wt_json=false ;; esac
 
   printf '%s' "${complete}" | jq -R -s \
     --argjson sv "${sv_json}" \
     --argjson ev "${ev_json}" \
     --argjson ky "${ky_json}" \
+    --argjson wt "${wt_json}" \
     --argjson next "$((offset + bytes))" '
     def parse: try fromjson catch null;
 
@@ -129,7 +139,20 @@ logchan_scan() {
                 # re-append NORMAL, not an anomaly.
                 .
               else
-                .new += [{ts: ($o.ts // ""), channel: ($o.channel // ""), event_id: ($eid // "")}]
+                .new += [ ({ts: ($o.ts // ""), channel: ($o.channel // ""), event_id: ($eid // "")}
+                           + (if $wt then
+                                # Every peer-controlled field is forced to a
+                                # STRING here. A `text` that arrived as an
+                                # object or an array would otherwise reach the
+                                # renderer as a jq structure and print as one,
+                                # and the fence renders what it is given -- so
+                                # the coercion is part of the boundary, not
+                                # cosmetics.
+                                {text: (($o.text // "") | tostring),
+                                 user: (($o.user // "") | tostring),
+                                 kind: (($o.kind // "") | tostring),
+                                 permalink: (($o.permalink // "") | tostring)}
+                              else {} end)) ]
                 | (if $eid != null then .ev[$eid] = true else . end)
                 | (if $key != null then .ky[$key] = true else . end)
               end
@@ -191,4 +214,94 @@ logchan_ring_append() {
     | grep -v '^$' \
     | awk '!seen[$0]++' \
     | tail -n "${cap}"
+}
+
+# --- retention: the rotation and sweep decisions (DND-204) ------------------
+#
+# DOMAIN, and deliberately so. Both decisions are arithmetic over four numbers,
+# and keeping them here means R-1 … R-7 are provable with no file on disk, no
+# `touch -t`, and no clock. The I/O half -- the rename, the unlink, the
+# re-check under the lock -- is fs.sh's, and the gate is the manager's.
+
+LOGCHAN_ROTATE_AGE_S=604800        # 7 days
+LOGCHAN_ROTATE_SIZE=8388608        # 8 MiB
+LOGCHAN_SWEEP_AGE_S=1209600        # 14 days
+
+# logchan_should_rotate <offset> <size> <rotated_at_epoch|""> <now_epoch>
+# Prints "yes" or "no". Never fails a run: an unparseable input is "no".
+#
+# ALL of these must hold (contract -> "Rotation trigger"):
+#
+#   1. offset == size            the EOF gate. Rotating with unread bytes
+#                                DESTROYS them, and retention's whole principle
+#                                is that it never touches content nobody has
+#                                read. Age NEVER overrides this (R-1): a reader
+#                                away for three weeks comes back to a large
+#                                un-rotated inbox, and that is the system
+#                                working.
+#   2. size > 0                  the non-emptiness clause, and it is not
+#                                decoration. Rotation resets the offset to 0,
+#                                so an empty live file means nothing arrived
+#                                since the last rotation -- and without this a
+#                                quiet channel would rename an EMPTY file over
+#                                its `.1` every 7 days, destroying the evidence
+#                                the sweep's 14-day window promises, on exactly
+#                                the low-traffic channel where that window is
+#                                the only thing that ever fires.
+#   3. age >= 7d OR size >= 8MiB age is the PRIMARY trigger and size the
+#                                backstop, not the reverse. This channel
+#                                carries the routable subset of a workspace --
+#                                hundreds of bytes per week -- so a size-only
+#                                threshold never fires and the file grows
+#                                forever, which is the defect retention exists
+#                                to close.
+#
+# An ABSENT `rotated_at` is "unknown", not "infinitely old", and the answer is
+# NO. That is the upgrade case and the very first case any implementation
+# meets: today's deployed state files carry `offset` and the seen-sets and
+# nothing else. Treating absent as ancient would rotate, on the first drain, a
+# file nobody meant to rotate. The caller stamps it to `now` instead and the
+# clock starts from the first reader that understood it.
+logchan_should_rotate() {
+  local offset="$1" size="$2" rot="$3" now="$4" age
+
+  case "${offset}${size}${now}" in ''|*[!0-9]*) printf 'no\n'; return 0 ;; esac
+  [ "${offset}" = "${size}" ] || { printf 'no\n'; return 0; }
+  [ "${size}" -gt 0 ]         || { printf 'no\n'; return 0; }
+
+  if [ "${size}" -ge "${LOGCHAN_ROTATE_SIZE}" ]; then printf 'yes\n'; return 0; fi
+
+  case "${rot}" in ''|*[!0-9]*) printf 'no\n'; return 0 ;; esac
+  age=$(( now - rot ))
+  # A `rotated_at` in the FUTURE (a clock stepped backwards, a hand-edited
+  # state file) yields a negative age, which is not >= the window, so it does
+  # not rotate. That is the conservative direction: a deferred rotation costs
+  # disk, an eager one costs evidence.
+  if [ "${age}" -ge "${LOGCHAN_ROTATE_AGE_S}" ]; then printf 'yes\n'; else printf 'no\n'; fi
+  return 0
+}
+
+# logchan_should_sweep <rotated_at_epoch|""> <now_epoch>
+# Prints "yes" or "no".
+#
+# THE CLOCK IS `rotated_at`, NOT THE `.1` MTIME, and the difference is not
+# academic. `rename(2)` PRESERVES mtime, so a rotated file's mtime is the
+# timestamp of its last APPEND and can already be days old at the moment it
+# becomes `.1` -- sweeping on that would make the real retention window vary
+# with write traffic, which is the one thing a stated window must not do. The
+# reader stamps `.1`'s mtime to `now` on rotation as a convenience for a human
+# running `ls -l`; where the two disagree, `rotated_at` wins and the mtime is
+# restamped.
+#
+# `rotated_at` ABSENT -- a `.1` left by an older reader -- is NOT sweepable.
+# The reader does not compute a window from mtime at all; it stamps
+# `rotated_at` to now so the clock starts from the first reader that
+# understood it. Keeping evidence a fortnight too long is recoverable;
+# destroying it early is not.
+logchan_should_sweep() {
+  local rot="$1" now="$2"
+  case "${now}" in ''|*[!0-9]*) printf 'no\n'; return 0 ;; esac
+  case "${rot}" in ''|*[!0-9]*) printf 'no\n'; return 0 ;; esac
+  if [ $(( now - rot )) -gt "${LOGCHAN_SWEEP_AGE_S}" ]; then printf 'yes\n'; else printf 'no\n'; fi
+  return 0
 }
