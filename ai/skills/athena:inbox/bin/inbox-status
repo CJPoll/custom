@@ -39,7 +39,11 @@
 # -- but it MUST honour the exit code, because an empty line read as "no repo"
 # when the truth is "could not tell" is the collapse this facility just removed.
 # `repo_key` on the --json document answers the same question on the success
-# path (as a string, "", or null, matching these three outcomes).
+# path, as the realpath or "". It is NEVER null: on the could-not-tell outcome
+# --json refuses outright (non-zero, no document), because a command that cannot
+# name the repo cannot resolve or count its channels either -- so that outcome
+# is a refusal, and --repo-key (honouring its exit code) is how a caller learns
+# the identity when --json has refused.
 #
 # Not opting in is not a fault: a cwd in no git repository, or a repo with no
 # registry entry, prints nothing and exits 0. A MALFORMED registry entry is a
