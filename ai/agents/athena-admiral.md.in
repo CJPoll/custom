@@ -727,6 +727,27 @@ unblocked work left, or `STUCK`, produce a summary:
 - Assumptions you made unassisted, and why
 - Location of the full state log for anyone picking this up later
 
+**Before you write it, reconcile the tracker against the forge.** Take the list
+of MRs/PRs you confirmed merged and the list of Missions at a terminal status,
+and diff them in both directions. Every merged MR must have its Mission at
+`Done` / `Ready for Release`; every Mission still at `In Progress` must have
+unmerged work. Do the same for the human-waiting statuses: a Mission sitting at
+`Needs Attention` whose blocking condition you later resolved is asking the
+owner for work that is already finished, so clear it or restate it.
+
+This is not covered by the per-merge transition under *Confirm a merge actually
+landed*. That transition fires on an event, and two things routinely break the
+event: a fleet-wide kill between the merge and the status move, and the
+no-`In Review`-option substitution under *Inputs*, which deliberately decouples
+the ticket from the captain and makes the terminal move **yours alone**. Both
+leave the tracker behind the repos silently — nothing errors, and your own
+state log holds both lists without ever comparing them. Measured
+2026-09-18-athena-inbox: DND-208 appears under "Confirmed MERGED" (state.md
+L496, `custom` PR #7) while the last completion roll-up omits it and still
+carries it as Running/`In Progress` (L471-472); and DND-203's remediation was
+recorded done (L133) while the ticket stayed `Needs Attention`, assigned to
+Cody, still asking for it (L533).
+
 @include ops/never-end-turn-waiting
 
 - **Label assertion before the batch tail boards:** a batch where NO MR
