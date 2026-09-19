@@ -590,6 +590,23 @@ repo="$(make_repo mainco)"
 ( cd "${repo}" && git worktree add -q -b wt "${CASE_DIR}/wt" >/dev/null 2>&1 )
 assert_eq "the repo identity is identical from a worktree and its main checkout" \
   "$(fs_git_common_dir "${repo}")" "$(fs_git_common_dir "${CASE_DIR}/wt")"
+# `git rev-parse --git-common-dir` returns a CWD-RELATIVE path in a MAIN
+# checkout (`.git` at the root, `../../.git` two levels down) and an absolute
+# one only in a worktree. The contract makes taking the realpath AT THE POINT
+# OF CAPTURE a MUST, because an implementation that captures the raw string
+# and resolves it after a chdir produces a path that exists nowhere, matches
+# no entry, and therefore reports ZERO CHANNELS AND EXIT 0 — the channel goes
+# dark with no error and nothing skipped, which is the precise failure mode
+# this facility exists to eliminate.
+mkdir -p "${repo}/a/b/c"
+assert_eq "the identity from a deep subdirectory equals the identity from the repo root" \
+  "$(fs_git_common_dir "${repo}")" "$(fs_git_common_dir "${repo}/a/b/c")"
+assert_eq "the identity is absolute even where git returns a relative path" "1" \
+  "$(case "$(fs_git_common_dir "${repo}/a/b/c")" in /*) echo 1 ;; *) echo 0 ;; esac)"
+# The raw git output really is relative here, or the case above measures nothing.
+assert_eq "git really does return a relative common dir in a main checkout" "1" \
+  "$(case "$(cd "${repo}/a/b/c" && git rev-parse --git-common-dir)" in /*) echo 0 ;; *) echo 1 ;; esac)"
+
 other="$(make_repo otherco)"
 if [ "$(fs_git_common_dir "${repo}")" = "$(fs_git_common_dir "${other}")" ]; then
   bad "the repo identity is distinct per repo" "two repos share one identity"
@@ -634,6 +651,11 @@ assert_eq "E2E-8 the other project sees its own, from the same registry director
 ( cd "${mine}" && git commit -q --allow-empty -m init && git worktree add -q -b wt "${CASE_DIR}/mine-wt" >/dev/null 2>&1 )
 assert_eq "a worktree of a registered repo resolves to its parent's channels" "mine" \
   "$(cd "${CASE_DIR}/mine-wt" && inbox_channels)"
+# And a DEEP SUBDIRECTORY of the registered main checkout, where git's answer
+# is relative, must resolve to the same channels rather than going dark.
+mkdir -p "${mine}/deep/er/still"
+assert_eq "a deep subdirectory of a registered repo still resolves to its channels" "mine" \
+  "$(cd "${mine}/deep/er/still" && inbox_channels)"
 
 # M-6 / A-8: an undeclared channel is UNREACHABLE, the refusal names only
 # channels THIS entry declares, and it does not echo the requested name back.
