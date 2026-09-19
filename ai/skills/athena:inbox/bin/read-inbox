@@ -249,7 +249,16 @@ case "${KIND}" in
     # inside the fence above and never appears in this line.
     MINE="$(printf '%s' "${READ}" | jq -r --arg id "${IDENTITY}" \
               '[.messages[] | select(.from == $id)] | length')"
-    if [ "${MINE}" -gt 0 ]; then
+    # STDOUT IS THE JSON DOCUMENT IN --json MODE, and nothing else may join it.
+    # This notice went to stdout unconditionally, so `read-inbox mail --json`
+    # emitted the document followed by prose: a consumer piping to jq got a
+    # parse error on trailing garbage, and the word "above" pointed at a fence
+    # that was never printed. `report_malformed` is confined to the human
+    # branch; this one escaped it because it lives in the ack section, which
+    # runs in both modes. It is a notice for a person, so it is suppressed
+    # under --json -- where the same fact is already in the document, as the
+    # `from` on each message beside this channel's `identity`.
+    if [ "${MINE}" -gt 0 ] && [ "${JSON}" -eq 0 ]; then
       printf 'athena:inbox: %s message(s) above carry YOUR identity as "from" and were not acked.\n' "${MINE}"
       printf '  Fix: they are your own outgoing mail sitting in the directory the peer delivers into — move them to this channel'"'"'s write directory, or delete them if they were a mistake. Acking them would record them as ingested by a peer that never saw them.\n'
     fi

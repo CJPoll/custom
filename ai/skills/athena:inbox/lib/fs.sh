@@ -2,7 +2,7 @@
 # fs.sh -- SIDE EFFECTS. The only file I/O in the skill, plus the one `git`
 # call. Everything else in lib/ takes strings and returns strings.
 #
-# **Amended (DND-184).** This file was READ-ONLY through DND-183: `inbox-status`
+# **Later (2026-09-18):** This file was READ-ONLY through DND-183: `inbox-status`
 # counts and must never consume, and the strongest available guarantee that
 # counting does not advance an offset was that the code which could advance it
 # did not exist yet. The ack ticket is DND-184, so that guarantee has been

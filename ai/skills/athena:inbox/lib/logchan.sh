@@ -299,12 +299,21 @@ LOGCHAN_SWEEP_AGE_S=1209600        # 14 days
 #                                forever, which is the defect retention exists
 #                                to close.
 #
-# An ABSENT `rotated_at` is "unknown", not "infinitely old", and the answer is
-# NO. That is the upgrade case and the very first case any implementation
-# meets: today's deployed state files carry `offset` and the seen-sets and
-# nothing else. Treating absent as ancient would rotate, on the first drain, a
-# file nobody meant to rotate. The caller stamps it to `now` instead and the
-# clock starts from the first reader that understood it.
+# An ABSENT `rotated_at` is "unknown", not "infinitely old", so THE AGE ARM
+# answers NO. That is the upgrade case and the very first case any
+# implementation meets: today's deployed state files carry `offset` and the
+# seen-sets and nothing else. Treating absent as ancient would rotate, on the
+# first drain, a file nobody meant to rotate. The caller stamps it to `now`
+# instead and the clock starts from the first reader that understood it.
+#
+# THE SIZE BACKSTOP IS DELIBERATELY NOT SCOPED BY THAT, and the ordering below
+# says so on purpose: 8 MiB is a disk-safety floor, not an age rule, and it has
+# no clock to be unknown about. A channel that reached 8 MiB rotates whether or
+# not anyone ever recorded when it last did -- withholding that on a missing
+# timestamp would let exactly the file most in need of rotation grow forever.
+# Stated here because the arms are checked in the opposite order to the way the
+# paragraph above reads, and a later caller is entitled to know which claim is
+# scoped to which arm rather than inferring it from the code.
 logchan_should_rotate() {
   local offset="$1" size="$2" rot="$3" now="$4" age
 

@@ -5,6 +5,12 @@ description: Read Athena's own machine-local message inboxes — the Slack deliv
 
 # athena:inbox
 
+**Kind: living normative document.** Amended in place, per
+`~/dev/custom/CLAUDE.md` -> *Documentation conventions*. A reader implements
+from the current text, so a superseded rule is replaced rather than left
+standing beside its replacement; each supersession carries one bold dated
+(UTC) label at the definitional mention.
+
 A machine-local message facility. Other people's words arrive as files under an
 inbox root; this skill decides which of them belong to the project you are
 sitting in, and how many are unread.
@@ -194,7 +200,7 @@ whole reason for splitting shell this way. `lib/fence.sh` is the one declared
 deviation: it reads `/dev/urandom` for its nonce, and takes an injected one so
 a caller that needs determinism has a way to get it.
 
-**Amended (DND-184).** This section previously read "*this slice writes
+**Later (2026-09-18):** This section previously read "*this slice writes
 nothing* — `lib/fs.sh` contains no state writer at all, so 'counting never
 advances an offset' is structural rather than a promise." The ack ticket spent
 that guarantee: `fs.sh` now holds the atomic state writer, rotation, the sweep

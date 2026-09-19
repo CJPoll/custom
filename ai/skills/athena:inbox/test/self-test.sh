@@ -1453,6 +1453,17 @@ assert_eq "R-4 an EMPTY live file is never rotated over its kept generation" "no
 # and the seen-sets and nothing else.
 assert_eq "R-10 an absent rotated_at does not rotate on the first drain" "no" \
   "$(logchan_should_rotate 2048 2048 "" "${NOW}")"
+# ...BUT THAT CLAIM IS SCOPED TO THE AGE ARM. The size backstop has no clock
+# to be unknown about: 8 MiB is a disk-safety floor, and withholding it on a
+# missing timestamp would let exactly the file most in need of rotation grow
+# forever. The arms are checked in the opposite order to the way the header
+# reads, which is why both halves are pinned here rather than left to be
+# inferred -- the header previously stated the NO unconditionally, and a
+# later caller reading it would have been misinformed.
+assert_eq "R-10 the size backstop fires even with rotated_at absent" "yes" \
+  "$(logchan_should_rotate 9437184 9437184 "" "${NOW}")"
+assert_eq "R-10 and it still respects the EOF gate with rotated_at absent" "no" \
+  "$(logchan_should_rotate 100 9437184 "" "${NOW}")"
 # A clock stepped backwards must not rotate eagerly.
 assert_eq "R-4 a rotated_at in the future does not rotate" "no" \
   "$(logchan_should_rotate 2048 2048 "$((NOW + D7))" "${NOW}")"
@@ -2051,6 +2062,39 @@ assert_contains "M-12 and the reader says so, by COUNT -- the slug is peer-chose
   'carry YOUR identity' "${OUT}"
 assert_not_contains "M-12 the unfenced note names no filename" \
   "my-own-note" "$(printf '%s\n' "${OUT}" | grep 'carry YOUR identity')"
+# --json MODE: STDOUT IS THE DOCUMENT, AND NOTHING ELSE MAY JOIN IT.
+#
+# The notice above lives in the ACK section, which runs in both modes, so it
+# went to stdout unconditionally: `read-inbox mail --json` emitted the JSON
+# followed by prose, a consumer piping to jq got a parse error on trailing
+# garbage, and the word "above" pointed at a fence that was never printed.
+# `report_malformed` is confined to the human branch; this one escaped it.
+#
+# No case exercised a MAILDIR channel through --json at all -- I-4 and A-10
+# both run against the log channel, which happens to have no post-JSON writer
+# -- so "the machine-readable form of the same fence" was a claim nothing
+# asserted.
+setup_mail_case
+printf -- '---\nfrom: athena\nto: peer\nsent_at: 2026-09-02T10:00:00Z\n---\n\nmine\n' \
+  > "${MDIR}/20260902T100000Z-002-my-own-note.md"
+JOUT="$(cd "${MPROJ}" && "${BIN}/read-inbox" mail --json 2>/dev/null)"
+assert_eq "M-12 --json emits ONE parseable document and no trailing prose" "0" \
+  "$(printf '%s' "${JOUT}" | jq -e . >/dev/null 2>&1; echo $?)"
+assert_not_contains "M-12 the human notice does not leak into the --json stream" \
+  "carry YOUR identity" "${JOUT}"
+# The fact itself is not lost -- it is IN the document, as `from` beside the
+# channel's own `identity`, which is what makes suppressing the prose safe.
+assert_eq "M-12 and the same fact is carried structurally instead" "athena" \
+  "$(printf '%s' "${JOUT}" | jq -r '.identity')"
+assert_eq "M-12 the self-addressed message is present in the document" "1" \
+  "$(printf '%s' "${JOUT}" | jq -r '. as $d | [$d.messages[] | select(.from == $d.identity)] | length')"
+# A malformed file in the same channel must not break the document either.
+printf 'junk\n' > "${MDIR}/notes.md"
+JOUT="$(cd "${MPROJ}" && "${BIN}/read-inbox" mail --json 2>/dev/null)"
+assert_eq "M-12 --json stays parseable with a non-conformant file present" "0" \
+  "$(printf '%s' "${JOUT}" | jq -e . >/dev/null 2>&1; echo $?)"
+assert_eq "M-12 and the non-conformant count is carried as a field" "1" \
+  "$(printf '%s' "${JOUT}" | jq -r '.malformed')"
 # The direct manager call refuses with a Fix: clause.
 assert_refused "M-12 acking my own message by name is refused outright" \
   try_in "${MPROJ}" inbox_ack_message mail 20260902T100000Z-002-my-own-note.md "."
