@@ -243,3 +243,130 @@ SessionStart hook (F-1…F-12, A-9, A-10).
 `maildir.sh` here contains exactly one function — the unread filter — because
 `bin/inbox-status` cannot produce an honest count for a maildir channel
 without it. Its header says so.
+
+---
+
+## 2026-09-19 — DND-188: the SessionStart hook
+
+- **Domain:** athena:inbox (the notice slice)
+- **Date:** 2026-09-19
+- **Code under test:** `ai/hooks/athena-inbox-poll.sh`, plus its two wiring
+  sites — `ai/hooks/registry.json` and `EXEMPT` in `ai/bin/check-guard-messages`
+- **Suite run:** `bash ai/hooks/athena-inbox-poll.self-test.sh </dev/null`
+  (no network; every case gets a fake `$HOME`, a private `ATHENA_INBOX_ROOT`
+  and its own `git init` repo under one `mktemp -d`; ~5s wall)
+- **Baseline:** `VERDICT: PASS (112 cases)` (91 at the first pass; 21 added
+  after this run — see *The four zeros*)
+- **Runner:** 23 mutations, one at a time, full suite after each, restored by
+  `cp` from a backup taken before the run.
+
+The mutations were applied by an exact-substring replace that asserts the
+anchor occurs **exactly once** before writing, as DND-183's run did. That
+discipline earned its keep twice here: one anchor reported
+`ANCHOR NOT UNIQUE (0)` (an indentation mismatch) rather than silently
+skipping, and the runner's own first pass reported **all 23** anchors absent —
+`restore()` used a bare `for f`, and because bash locals are **dynamically
+scoped** that overwrote `run_one`'s `f`, pointing every mutation at the suite
+file instead of the file under test. A runner that mutates the wrong file
+produces 23 green runs, which reads as "this suite is dead".
+
+### What the suite proves
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S1 | the attempt marker is stamped AFTER the work instead of before | 3 | `FAIL  F-7 a failing run DOES stamp the attempt marker` |
+| S2 | a FAILED poll also stamps the success marker | 10 | `FAIL  F-5 the precondition holds: no success marker exists` |
+| S3 | a clean run no longer clears the warn marker | 1 | `FAIL  F-8 a succeeding run clears the warn marker` |
+| S4 | the warning is rate-limited by the POLL marker, not its own | 8 | `FAIL  F-5 a never-successful setup warns on the first attempt` |
+| S5 | staleness judged on the ATTEMPT marker instead of success | 6 | `FAIL  F-5 a never-successful setup warns on the first attempt` |
+| S6 | an absent marker counts as FRESH rather than stale | 7 | `FAIL  F-5 a never-successful setup warns on the first attempt` |
+| S7 | the health clause NAMES the channels instead of counting them | 1 | `FAIL  R8 a channel that cannot be counted is surfaced, not shown as zero` |
+| S8 | the never-delivered clause is dropped | 2 | `FAIL  R8 a channel that has NEVER received anything is surfaced` |
+| S9 | the unreadable-registry-entry clause is dropped | 2 | `FAIL  R12 an unreadable registry entry is surfaced` |
+| S10 | the stdin read is unbounded (`timeout 2 cat` → `cat`) | 1 | `FAIL  the stdin read is bounded — an open pipe does not hang session start` |
+| S11 | the reason log is never trimmed | 1 | `FAIL  the reason log is bounded to 200 lines` |
+| S12 | zero unread announces itself every session | 6 | `FAIL  F-3 zero unread produces no stdout at all` |
+| S13 | `--dry-run` writes the real marker family | 2 | `FAIL  --dry-run writes no attempt marker` |
+| S14 | the private `umask 077` is dropped | 3 | `FAIL  the attempt marker is created 0600` |
+| S15 | any non-empty stdout counts as a successful poll | 4 | `FAIL  R9 non-empty but unparseable output does NOT stamp success` |
+| S16 | the notice names `read-inbox` whether or not it exists | 2 | `FAIL  R11 with read-inbox absent the notice says so` |
+| S17 | the markers move into the `athena-slack-*` namespace | 4 | `FAIL  F-10 the hook shares no marker path with the athena-slack-* family` |
+| S18 | the warning is emitted as a bare text line beside the JSON | 8 | `FAIL  F-9 the stale warning travels as one well-formed JSON object` |
+| S19 | the notice reports the newest message body alongside the count | 2 | `FAIL  F-2 no substring of a message body reaches the notice` |
+| S20 | the hook's entry is removed from `registry.json` | 2 | `FAIL  F-11 the hook is registered on SessionStart with the "" matcher` |
+| S21 | the `EXEMPT` classification is removed from `check-guard-messages` | 1 | `FAIL  F-12 the hook is EXEMPT with a stated reason, not carrying a fake deny path` |
+| S22 | a `UserPromptSubmit` entry is added for the hook | 2 | `FAIL  F-11 no UserPromptSubmit entry is registered for any hook` |
+| S23 | `inbox-status`'s stderr is relayed into the hook's reason log | 1 | `FAIL  R10 the wrapped command's stderr does not reach the reason log` |
+
+### The four zeros
+
+Four mutations ran **green** on the first pass. All four were real gaps, and
+all four are closed — the table above shows each reddening after the fix.
+
+**S15 — the shape check on `inbox-status`'s answer.** Every fixture in the
+suite reached the failing path through *empty* stdout, so replacing the entire
+`type == "object" and (.channels | type == "array")` test with `true` changed
+nothing. The claim it protects is this epic's standing question in its sharpest
+form: an answer that cannot be **read** is not an answer of **zero**. The
+difference is invisible on stdout — both are silent — and visible only in the
+success marker, which is what lets the staleness warning eventually fire. New
+cases **R9** drive non-empty-but-unusable output (unparseable, and well-formed
+JSON of the wrong shape) plus a control proving the same harness does count a
+good document.
+
+**S9 — the unreadable-registry-entry clause.** `projects/` is multi-tenant; an
+entry that fails to parse is dropped from the candidate set, and the session
+whose entry it was then looks *exactly* like a session that never opted in.
+`inbox-status` reports the drop as `failed_candidates` and the hook renders it,
+but nothing asserted that. New case **R12**, which also pins the disclosure
+rule: the clause counts and does not name, because every other entry belongs to
+a different tenant.
+
+**S16 — the `read-inbox` switch.** `F-1`'s `contains "read-inbox"` passes on
+*either* branch, because the not-installed sentence names the command too. The
+assertion looked like it protected the switch and protected nothing. New case
+**R11** asserts both branches by their distinguishing text.
+
+**S23 — the wrapped command's discarded stderr.** `inbox-status` refuses on
+stderr with paths and channel names in the clause, and the hook discards that
+stream rather than relaying it. No fixture put anything identifiable on stderr,
+so a mutation that logged it was green. New case **R10** puts the sentinel
+there.
+
+Closing S15, S16 and S23 needed a fixture the suite deliberately lacked: a
+**stub `inbox-status`**, because the real one never produces non-empty-unusable
+stdout, never has a `read-inbox` beside it (that ships later), and never puts a
+recognisable string on stderr. The stub lives in a copied repo tree under the
+case's tmpdir — the hook resolves its wrapped command from its own
+`BASH_SOURCE`, so a copy of the hook picks up whatever is placed beside it, with
+no `PATH` games and no mutation of the real skill. Every other case still runs
+against the real `inbox-status`.
+
+### What the run found in the fixtures, not the code
+
+**A leak canary on one row of a fixture tests one row, not the claim.** S19
+appended `tail -n1` of the channel file to the notice — a message body in the
+pre-prompt position, the single thing `F-2` exists to forbid — and ran
+**green**, because `plant_log_lines` put the sentinel on its *first* line and
+`tail -n1` took the second. Every planted line now carries it.
+
+**A fixture can be rejected by a grammar and still look like a fixture.** The
+first draft of `R12` named its malformed entry `ZQXSENTINELDONOTLEAK.json`. The
+registry's project-name grammar is lowercase-only, so that file was not a
+*failed* candidate — it was not a candidate at all, and the case asserted
+nothing while appearing to assert everything. It now uses a lowercase variant.
+
+That second finding has a **consequence outside this ticket, recorded here
+rather than fixed here**: a registry entry whose *filename* is not a legal
+project name is invisible to `inbox-status` — not counted in
+`failed_candidates`, not reported anywhere — so a project registered as
+`Foo.json` is dark in exactly the way this epic has already paid for twice. It
+belongs to the registry reader (DND-208 / `lib/descriptor.sh`), not to the
+hook, and is raised to the athena-admiral in `dnd-188-report.md`.
+
+### Not exercised by this run
+
+The hook is a thin wrapper; everything below it — name grammar, descriptor
+validation, dedupe, offsets, maildir rules — belongs to DND-183's run above.
+Still unexercised anywhere: the fence renderer, the consumer lock, the atomic
+state writer, the doorbell waiter, and `read-inbox` itself.
