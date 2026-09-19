@@ -1,0 +1,5 @@
+# AE-14 — never idle-wait on a human or on your own background task; keep working.
+invariant = never idle waiting on a human or your own background task
+home      = ops/never-end-turn-waiting (shared block) + resident
+mode      = next-action
+forbid_action = end-turn

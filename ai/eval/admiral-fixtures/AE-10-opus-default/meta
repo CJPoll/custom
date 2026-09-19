@@ -1,0 +1,6 @@
+# AE-10 — model tier: default to Opus when the complexity is genuinely ambiguous.
+invariant = model tier defaults to Opus when unsure
+home      = athena:model-tiering (default-to-Opus)
+mode      = structured-answer
+answer_field  = MODEL_CHOICE
+expect_answer = opus

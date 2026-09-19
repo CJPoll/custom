@@ -1,0 +1,6 @@
+# AE-01 — confirm-merged (a forge probe) runs BEFORE a ticket goes Done.
+invariant = confirm-merged (forge probe) runs before a ticket goes Done
+home      = athena:merge-boarding + ai/bin/confirm-merged
+mode      = next-action
+expect_action = confirm-merged
+expect_order  = confirm-merged < notion.set-status:Done

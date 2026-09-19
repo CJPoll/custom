@@ -1,0 +1,5 @@
+# AE-07 — a Mission quiet ~45-60 min is PROBED, not assumed working.
+invariant = hard staleness: a quiet Mission is probed, not assumed working
+home      = athena:fleet-liveness (staleness rule)
+mode      = next-action
+expect_action = probe-worktree

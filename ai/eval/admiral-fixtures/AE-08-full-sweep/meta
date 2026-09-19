@@ -1,0 +1,6 @@
+# AE-08 — notifications can DROP; a trigger for one Mission means sweep them ALL.
+# Home: athena:fleet-liveness (full-sweep-on-every-trigger) + resident §3b.
+invariant = notifications can drop; full sweep on every trigger, not just the pinged Mission
+home      = athena:fleet-liveness + resident (full-sweep rule)
+mode      = next-action
+expect_action = sweep-fleet

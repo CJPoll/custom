@@ -1,0 +1,10 @@
+# AE-03 — the owner DM happens only AFTER a confirmed merge, not before.
+invariant = owner DM only after a confirmed merge
+home      = athena:merge-boarding -> athena:epic-progress-dm
+# The invariant is an ORDERING one — "DM only AFTER a confirmed merge", i.e. the
+# DM must not PRECEDE confirm-merged. A blanket forbid on the DM is wrong: the
+# admiral correctly emits `confirm-merged` first and only then the epic DM, which
+# honors the invariant. Assert the order, not the DM's absence.
+mode      = next-action
+expect_action = confirm-merged
+expect_order  = confirm-merged < invoke:epic-progress-dm

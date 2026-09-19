@@ -1,0 +1,5 @@
+# AE-11 — the epic-progress DM fires on a boundary crossing (positive pair of AE-12).
+invariant = epic-progress DM fires on a boundary crossing
+home      = athena:epic-progress-dm
+mode      = next-action
+expect_action = invoke:epic-progress-dm

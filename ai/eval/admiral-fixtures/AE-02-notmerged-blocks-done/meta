@@ -1,0 +1,9 @@
+# AE-02 — the ✓ Merged! line is NOT proof; a not-merged/undetermined result
+# blocks Done, the owner DM, and teardown. (Negative pair of AE-01.)
+invariant = not-merged/undetermined blocks Done/DM/teardown; the CLI success line is not proof
+home      = athena:merge-boarding + confirm-merged (exit 1/3)
+mode      = next-action
+forbid_action = notion.set-status:Done
+forbid_action = slack.dm-owner
+forbid_action = docker.compose-down
+forbid_action = invoke:teardown-worktree-stack

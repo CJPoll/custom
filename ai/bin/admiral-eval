@@ -27,17 +27,23 @@
 #   1. Plan-only framing (primary): every scenario ends with an explicit
 #      instruction to output ONLY the decision trailer and call no tool / run no
 #      command / spawn no agent. The admiral is scored on stated intent.
-#   2. Inert sandbox (belt-and-suspenders — defense in depth, NOT a complete
-#      jail): the model runs with an isolated HOME (no MCP config -> Slack /
-#      Notion / Agent surfaces unconfigured, and the child admiral's own
-#      PreToolUse hooks do not load) and a PATH front-loaded with no-op stubs for
-#      gh/glab/gh-athena/glab-athena/docker plus a git wrapper that blocks `push`.
-#      Honest scope: the stubs neutralize PATH-RESOLVED forge/comms/container
-#      calls only — an absolute-path call (`/usr/bin/docker ...`) bypasses them,
-#      and gh/glab/push are ultimately harmless because the isolated HOME is
-#      credential-less, not because of the stubs. Hermeticity therefore rests
-#      PRIMARILY on the plan-only framing; the sandbox is the second layer. This
-#      is acceptable because `--run` is never in the gate.
+#   2. Inert PATH sandbox (belt-and-suspenders — defense in depth, NOT a jail):
+#      PATH is front-loaded with no-op stubs for gh/glab/gh-athena/glab-athena/
+#      docker plus a git wrapper that blocks `push`, so a PATH-RESOLVED
+#      forge/comms/container/push call is neutralized.
+#      DEVIATION from design §2.1: that section specified an ISOLATED HOME for the
+#      model too. That is INFEASIBLE and is deliberately not done — `claude`
+#      resolves BOTH its auth AND the `athena-admiral` agent definition from the
+#      ambient HOME, so an isolated HOME yields "--agent athena-admiral not found"
+#      and no auth (verified empirically). The model therefore runs under the
+#      ambient HOME (same as critic-eval's model run). Honest scope of what
+#      remains: the stubs catch PATH-resolved calls only — an absolute-path call
+#      (`/usr/bin/docker ...`) bypasses them, and MCP surfaces (Slack/Notion/
+#      Agent) ARE reachable under the ambient HOME. Hermeticity therefore rests
+#      PRIMARILY on the plan-only framing (guard 1); the PATH stubs are the
+#      second layer. Acceptable because `--run` is never in the gate and the
+#      admiral follows the plan-only instruction. (Surfaced to the coordinator in
+#      EVAL-PR2 for ratification.)
 #
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 #
@@ -328,17 +334,18 @@ def hook_pass?(verdict, expect)
 end
 
 # ---------------------------------------------------------------------------
-# Inert sandbox (guard 2). build_sandbox writes the no-op stubs into <dir>/bin
-# and returns [home, bin]. model_env front-loads that bin on PATH and points HOME
-# at the isolated dir (so no MCP config -> no Slack/Notion/Agent surface).
+# Inert PATH sandbox (guard 2, defense in depth). build_sandbox writes the no-op
+# stubs into <dir>/bin and returns that bin dir. model_env front-loads it on PATH
+# but does NOT override HOME — see the DEVIATION note in the file header:
+# `claude` needs the ambient HOME to authenticate and to resolve the
+# athena-admiral agent, so an isolated HOME is infeasible for the model run.
 # ---------------------------------------------------------------------------
 INERT_STUBS = %w[gh glab gh-athena glab-athena docker].freeze
 INERT_EXIT  = 97
 
 def build_sandbox(dir)
-  home = File.join(dir, "home")
-  bin  = File.join(dir, "bin")
-  FileUtils.mkdir_p([home, bin])
+  bin = File.join(dir, "bin")
+  FileUtils.mkdir_p(bin)
 
   INERT_STUBS.each do |name|
     path = File.join(bin, name)
@@ -378,7 +385,7 @@ def build_sandbox(dir)
   SH
   FileUtils.chmod(0o755, gitpath)
 
-  [home, bin]
+  bin
 end
 
 def which(cmd)
@@ -389,9 +396,11 @@ def which(cmd)
   nil
 end
 
-# The env the model child runs under: isolated HOME, stub bin prepended.
-def model_env(home, bin)
-  { "HOME" => home, "PATH" => "#{bin}:#{ENV['PATH']}" }
+# The env the model child runs under: the stub bin prepended to PATH. HOME is
+# NOT overridden — it inherits the ambient HOME so `claude` can authenticate and
+# resolve the athena-admiral agent (see the DEVIATION note in the file header).
+def model_env(bin)
+  { "PATH" => "#{bin}:#{ENV['PATH']}" }
 end
 
 def model_argv
@@ -400,10 +409,12 @@ end
 
 # Invoke the admiral once for a T2 fixture, return its raw output (or nil on
 # failure). The scenario body + the mode's trailer instructions form the prompt.
-def invoke_admiral(scenario, mode, home, bin)
+def invoke_admiral(scenario, mode, bin)
   prompt = "#{scenario}\n\n#{trailer_instructions(mode)}"
-  out, _err, st = Open3.capture3(model_env(home, bin), *model_argv, stdin_data: prompt)
-  st&.success? ? out : nil
+  out, err, st = Open3.capture3(model_env(bin), *model_argv, stdin_data: prompt)
+  return out if st&.success?
+  warn "  ! admiral invocation failed (exit #{st ? st.exitstatus : '?'}): #{err.to_s.lines.last(2).join.strip}"
+  nil
 rescue StandardError => e
   warn "  ! admiral invocation failed: #{e.message} (is `claude` on PATH?)"
   nil
@@ -440,10 +451,10 @@ def evaluate(dir, runs:)
     end
     scenario = File.read(File.join(dir, "scenario.md"))
     Dir.mktmpdir("admiral-eval-sandbox-") do |sb|
-      home, bin = build_sandbox(sb)
+      bin = build_sandbox(sb)
       last_reasons = nil
       samples = Array.new(runs) do
-        out = invoke_admiral(scenario, mode, home, bin)
+        out = invoke_admiral(scenario, mode, bin)
         if out.nil?
           last_reasons ||= ["admiral produced no output (invocation failed)"]
           next false
@@ -549,10 +560,11 @@ def list
   puts ""
   puts "Trust model: the model PRODUCES a decision; a DETERMINISTIC scorer scores it."
   puts "  Hermeticity rests PRIMARILY on plan-only framing (the scenario forbids tool use);"
-  puts "  the inert sandbox is defense in depth — no-op gh/glab/docker/git-push stubs neutralize"
-  puts "  PATH-RESOLVED forge/comms/container calls, and a credential-less isolated HOME makes"
-  puts "  gh/glab/push harmless (it does NOT stop an absolute-path call). --run is model-in-loop"
-  puts "  and NOT in the gate; the deterministic --self-test IS gate-wired."
+  puts "  the inert PATH sandbox is defense in depth — no-op gh/glab/docker/git-push stubs"
+  puts "  neutralize PATH-RESOLVED forge/comms/container calls (an absolute-path call bypasses"
+  puts "  them). The model runs under the AMBIENT HOME (required for claude auth + --agent"
+  puts "  resolution; design §2.1's isolated HOME is infeasible). --run is model-in-loop and NOT"
+  puts "  in the gate; the deterministic --self-test IS gate-wired."
   puts "Run the model-in-loop evaluation with: ai/bin/admiral-eval --run"
   0
 end
@@ -714,11 +726,14 @@ def self_test
   # validate_case directly: a well-formed next-action case is valid
   fail.("a well-formed case must validate") unless validate_case({ "mode" => "next-action", "expect_action" => ["wait"] }).empty?
 
-  # -- 9. inert sandbox: stubs are inert; git push blocked; git read forwarded
+  # -- 9. inert PATH sandbox: stubs are inert; git push blocked; git read
+  # forwarded; and model_env prepends the stub bin WITHOUT overriding HOME (the
+  # ambient HOME is required for claude auth + --agent resolution — the design
+  # §2.1 deviation documented in the file header).
   Dir.mktmpdir("admiral-eval-sb-") do |d|
-    home, bin = build_sandbox(d)
-    env = model_env(home, bin)
-    fail.("model HOME must be the sandbox home") unless env["HOME"] == home
+    bin = build_sandbox(d)
+    env = model_env(bin)
+    fail.("model_env must NOT override HOME (claude needs the ambient HOME to auth + resolve --agent)") if env.key?("HOME")
     fail.("model PATH must front-load the stub bin") unless env["PATH"].start_with?("#{bin}:")
     INERT_STUBS.each do |name|
       out, st = Open3.capture2e(env, name, "whatever", "args", stdin_data: "")

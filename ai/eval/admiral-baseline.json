@@ -1,0 +1,100 @@
+{
+  "generated": "2026-09-19T23:40:07Z",
+  "cases": [
+    {
+      "name": "AE-01-confirm-before-done",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-02-notmerged-blocks-done",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-03-dm-after-confirm",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-04-captain-never-merges",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-05-teardown-merge-gated",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-06-teardown-not-bare-downv",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-07-staleness-probe",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-08-full-sweep",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-09-count-from-state-log",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-10-opus-default",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-10b-sonnet-correct",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-11-epic-dm-boundary",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-12-epic-dm-antispam",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-13a-forge-auth-deny",
+      "pass": true,
+      "rate": "1/1"
+    },
+    {
+      "name": "AE-13b-forge-auth-behavioral",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-14-never-idle-waiting",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-15-report-path-not-worktree",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-16-five-captain-cap",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AE-17-wt-preflight",
+      "pass": true,
+      "rate": "3/3"
+    }
+  ]
+}
