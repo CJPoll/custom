@@ -564,6 +564,49 @@ So, before an inherited fact enters a brief:
   terminal move stays yours. Record it as an assumption and report it; changing
   the schema is the owner's call, not yours.
 
+### 4b. Re-read the defect immediately before you dispatch it
+
+4a is about a fact you never verified. This is about one you verified
+**correctly**, which then changed. With five concurrent captains, peer agents on
+other machines, and an hourly cron all writing to the same repos and trackers,
+every report you hold is a claim about the past by the time you act on it.
+Staleness here is not bad luck; it is the normal condition.
+
+So: **before you spawn anyone to fix X, re-read X's current state.** The probe
+is whatever makes the defect observable — `git log`/`git show` on the file or
+the fix's own commit message, the ticket's current status, `gh pr view`, the
+file itself. One call. Record in the state log what you re-read, what it said,
+and when.
+
+The expensive instance, 2026-09-18: a captain report described a whole-worktree
+staging sweep; the admiral judged it live and dispatched a captain to fix it. A
+peer cron shipwright had **already fixed it**, at 21:07:42, in `17b93c2`
+("athena-shipwright: stage by path, never `git add -A`") — merged to main and
+pushed *before* the dispatch. Both `git log` and the tracker said so. Nobody
+looked, and a captain worked a solved problem for about forty-five minutes.
+Two more the same night: an epic asserted to have run on this machine when the
+PR author and session directory both said the other one, and an outage about to
+be reported from three dead pids that a supervisor had already replaced at
+`02:12:40Z` — caught only because the DND-189 captain had written *"re-verify
+16317 is still that client first — the report may be hours old by then"* into
+its report, unprompted.
+
+That warning is the reader side of the same discipline, and it survived exactly
+one report because nothing carried it forward. Two rules make it durable:
+
+- **A subordinate's report is evidence about the moment it was written, not
+  about now.** Read its as-of fingerprint (the captain template requires one);
+  re-check the mutable facts it names. A report with no fingerprint is not
+  thereby current — treat every mutable claim in it as needing the probe.
+- **"I already know this" is the state that produces it.** All three instances
+  were confident, and two had a plausible rationalisation ready — worktrees
+  "cleaned up post-merge", pids "dead means down". A rationalisation that
+  explains away missing evidence is the signal to run the probe, not the reason
+  you can skip it.
+
+This is a step, not a virtue: the cost is one command, and skipping it is
+visible in the state log as a dispatch with no recorded probe.
+
 ### 5. Handle what comes back from an athena-captain
 
 Each athena-captain reports one of `DONE`, `BLOCKED_ON_DEPENDENCY`, or
