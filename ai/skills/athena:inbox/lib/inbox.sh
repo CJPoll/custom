@@ -899,6 +899,16 @@ inbox_ack_message() {
   # how the PEER learns its message was ingested, because the directory I read
   # from is the one it delivers into. A move into `.acked/` otherwise rings no
   # bell at all and leaves the peer to poll, which the contract forbids.
-  fs_bump_doorbell "${read_dir}/.event" || true
+  # NON-FATAL, BUT NEVER SILENT. The move already happened and is durable, so
+  # failing the ack here would report a loss that did not occur. But a bump
+  # that failed means the PEER IS NEVER SIGNALLED -- it falls back to polling,
+  # which the contract forbids, and the sentence above is then a promise the
+  # code did not keep. `|| true` discarded exactly that, so an unwritable read
+  # directory or an `.event` replaced by a non-regular file produced a clean
+  # exit 0 with the peer left waiting.
+  if ! fs_bump_doorbell "${read_dir}/.event"; then
+    inbox_fail "the message was acked, but this channel's doorbell could not be rung" \
+      "the move into .acked/ is DONE and durable -- nothing is lost. What did not happen is the signal to the peer, which will now wait until it polls. Check the read directory is writable (0700) and that its .event is a regular file, then send or ack again to ring it."
+  fi
   return 0
 }

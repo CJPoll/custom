@@ -180,8 +180,36 @@ inbox_lock_holder_hint() {
 # invariant a property of CALL ORDERING rather than of this file. Invariants
 # that live in call ordering are the ones that break when someone reorders
 # two lines for an unrelated reason.
+# inbox_require_flock
+#
+# AN ABSENT `flock(1)` IS NOT A CONTENDED LOCK, and conflating them turns
+# retention off in silence. `inbox_lock_try` answers 1 for "someone else holds
+# it", and the sweep treats that as "not an error for a count" -- correctly, by
+# contract. On a host without util-linux the same 1 meant the sweep NEVER ran,
+# the rotated generation was kept forever, and every count still exited 0
+# saying nothing.
+#
+# `bin/read-inbox` already refuses to ack without `flock`, so the asymmetry was
+# one-sided: the loud path checked and the quiet path did not. Same treatment
+# as `fs_require_date_d` -- reported once per process, and NOT fatal, because
+# counting and peeking are correct without the lock.
+_INBOX_FLOCK_OK=""
+inbox_require_flock() {
+  if [ -z "${_INBOX_FLOCK_OK}" ]; then
+    if command -v flock >/dev/null 2>&1; then
+      _INBOX_FLOCK_OK=yes
+    else
+      _INBOX_FLOCK_OK=no
+      inbox_fail "flock is not on PATH, so this session can never be a channel's designated consumer" \
+        "install util-linux (flock). Counting and --peek still work; what stops is every ADVANCE -- acking, rotation and the sweep -- so channels grow without bound and nothing else would have told you, because a missing flock is otherwise indistinguishable from another session holding the lock."
+    fi
+  fi
+  [ "${_INBOX_FLOCK_OK}" = "yes" ]
+}
+
 inbox_lock_try() {
   local path="$1"
+  inbox_require_flock || return 1
   if [ -n "${INBOX_LOCK_PATH}" ] && [ "${INBOX_LOCK_PATH}" = "${path}" ]; then
     return 2
   fi

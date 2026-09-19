@@ -10,7 +10,8 @@
 # `send-mail` cases -- stage in `tmp/`, deliver without clobbering, bump the
 # doorbell after -- and this ticket ships no send entry point, so writing that
 # machinery here would mean shipping an untested writer to satisfy a row in a
-# matrix. `<seq>` ALLOCATION went the same way: it is writer-side, it had no
+# matrix. **Later (2026-09-18):** this note previously listed `<seq>` allocation
+# among what DND-184 adds. It went the same way as the rest of the writer: it is writer-side, it had no
 # reader calling it, and the justification once given for the exception (that
 # the reader needs to understand the grammar it enumerates) is discharged by
 # `maildir_valid_message_name`, which the reader does call. It lands with

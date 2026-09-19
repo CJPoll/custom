@@ -484,3 +484,49 @@ S12: **defence in depth, not a tested check.** It is kept anyway — the
 manager declined exactly this "unreachable today" argument for itself, and the
 Framework copy is no safer for sitting nearer the surface. Nothing protects it;
 this table must not imply otherwise.
+
+### Fourth round
+
+| # | Mutation (the defect, re-applied) | Cases reddened | First failure |
+|---|---|---|---|
+| T32 | `inbox.sh`: the doorbell bump's failure swallowed with `\|\| true` | 2 | `FAIL  I-5 a PRE-EXISTING doorbell has its mtime advanced, not merely kept` |
+| T33 | `inbox.sh`: the doorbell not bumped at all | 2 | same |
+| T34 | `lock.sh`: a missing `flock(1)` reads as a contended lock | **0 → 4** | see below |
+
+**T32 — and why the old case could not have caught it.** The ack's doorbell
+bump was `fs_bump_doorbell ... || true`, directly under a comment saying that
+without it the move "rings no bell at all and leaves the peer to poll, **which
+the contract forbids**". An unwritable read directory or an `.event` replaced
+by a non-regular file produced a clean exit 0 with the peer left waiting.
+
+The existing assertion was `ls .event | wc -l` = 1 — **existence, not the
+bump**. The doorbell's semantics are an mtime/attrib change (`touch` on an
+existing file is ATTRIB-only, which is exactly why a waiter must watch
+`attrib`), and on any *live* channel `.event` already exists because the writer
+maintains it. So the case only ever exercised **creation** — the path the
+contract calls optional for a reader — and passed for the deployed case whether
+or not the bump happened. The fixture now pre-dates `.event` to 2020 and
+asserts the mtime advanced; both mutations redden on it.
+
+The failure is now reported and deliberately **not** fatal: the move already
+happened and is durable, so failing the ack would report a loss that did not
+occur. What is refused is the silence.
+
+**T34 — an absent `flock(1)` is not a contended lock.** `inbox_lock_try`
+answers 1 for "another session holds it", and `_inbox_sweep_due` treats that as
+"not an error for a count" — correct, by contract. On a host without util-linux
+the *same 1* meant the sweep never ran, the rotated generation was kept
+forever, and every count exited 0 saying nothing. `bin/read-inbox` already
+refused to ack without `flock`, so the asymmetry was one-sided: **the loud path
+checked and the quiet path did not.** Reported once per process, non-fatal
+(counting and `--peek` are correct without it), same shape as
+`fs_require_date_d`. Two absent-capability gaps in one subsystem, both found by
+asking what happens when the input is missing rather than wrong.
+
+### Not fixed, raised instead
+
+- **`ai/bin/critic-review` rides this branch (scope).** The judge's own runner
+  is modified by the branch it judges. The fix is isolated in its own commit
+  and was load-bearing for this very review — three BLOCKED verdicts printed
+  no findings before it — so it is left here and flagged to the admiral as a
+  split-or-keep call at merge time rather than decided unilaterally.

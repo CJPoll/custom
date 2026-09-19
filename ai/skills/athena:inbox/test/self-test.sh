@@ -1262,6 +1262,20 @@ hold_lock() {
     read -r _ < "$3"
   ' _ "${lock}" "${HOLD_READY}" "${HOLD_STOP}" &
   HOLDER_PID=$!
+  # CLAUSE (c) OF THE SAFE-WAIT RULE. The holder is backgrounded and blocks on
+  # a FIFO that lives under ${TMP} -- which this suite's own EXIT trap deletes.
+  # Any abnormal exit between hold_lock and release_lock (a `set -u` abort, a
+  # ^C, harness-gate killing the run) would orphan a process blocked forever
+  # on a FIFO that no longer exists, still holding the flock. It blocks rather
+  # than spins, so it is not the PT-919 load storm, but it is the orphan class
+  # the rule names -- and now that this suite runs under the gate, an
+  # interrupted run is routine rather than exotic.
+  #
+  # Chained onto the existing cleanup rather than replacing it: a bare
+  # `trap ... EXIT` here would silently drop the `rm -rf "${TMP}"` installed at
+  # the top of the file, which is the same class of clobber the repo records
+  # for settings.json.
+  trap 'kill "${HOLDER_PID}" 2>/dev/null; rm -rf "${TMP}"' EXIT INT TERM
   # `timeout` bounds it so a holder that failed to acquire fails the case
   # loudly instead of hanging the suite forever.
   timeout 10 cat "${HOLD_READY}" >/dev/null 2>&1 || true
@@ -1269,6 +1283,8 @@ hold_lock() {
 release_lock() {
   timeout 5 bash -c 'printf "stop" > "$1"' _ "${HOLD_STOP}" 2>/dev/null || true
   wait "${HOLDER_PID}" 2>/dev/null || true
+  HOLDER_PID=""
+  trap 'rm -rf "${TMP}"' EXIT INT TERM
 }
 
 # try_in <dir> <manager-function> [args...]
@@ -1510,6 +1526,35 @@ assert_contains "and it says what stops working: rotation and the sweep" \
   "ROTATION AND THE SWEEP" "${NO_DATE_D}"
 assert_contains "and it carries a Fix: clause" "Fix:" "${NO_DATE_D}"
 rm -rf "${DATE_SHIM}"
+
+# AN ABSENT flock(1) IS NOT A CONTENDED LOCK. inbox_lock_try answers 1 for
+# "another session holds it", and the sweep treats that as "not an error for a
+# count" -- correctly, by contract. On a host without util-linux the SAME 1
+# meant the sweep never ran, the rotated generation was kept forever, and
+# every count exited 0 saying nothing. bin/read-inbox already refused to ack
+# without flock, so the asymmetry was one-sided: the loud path checked and the
+# quiet path did not.
+NOFLOCK_DIR="$(mktemp -d)"
+for c in jq awk sed date stat mv rm mkdir touch cat printf ls find sort wc tr grep cp chmod realpath git; do
+  p="$(command -v "$c" 2>/dev/null)" && ln -sf "$p" "${NOFLOCK_DIR}/$c"
+done
+NO_FLOCK="$(timeout 20 bash -c '
+  PATH="'"${NOFLOCK_DIR}"'"
+  . "'"${LIB}"'/err.sh"; . "'"${LIB}"'/fs.sh"; . "'"${LIB}"'/lock.sh"
+  # The report is emitted ONCE PER PROCESS (memoised), so it has to be
+  # captured from the FIRST call -- a second one is deliberately silent.
+  inbox_lock_try "'"${ATHENA_INBOX_ROOT}"'/noflock.consumer.lock" 2>&1 >/dev/null
+  inbox_lock_try "'"${ATHENA_INBOX_ROOT}"'/noflock.consumer.lock" >/dev/null 2>&1 \
+    && printf "SECOND-CALL-ACQUIRED\n"
+' 2>&1)"
+assert_contains "an absent flock(1) is REPORTED, not read as a contended lock" \
+  "never be a channel's designated consumer" "${NO_FLOCK}"
+assert_contains "and it names what stops: every ADVANCE" "every ADVANCE" "${NO_FLOCK}"
+assert_contains "and it says counting and --peek still work" "--peek" "${NO_FLOCK}"
+assert_contains "and it carries a Fix: clause" "Fix:" "${NO_FLOCK}"
+assert_not_contains "and a lock is never handed out without flock to enforce it" \
+  "SECOND-CALL-ACQUIRED" "${NO_FLOCK}"
+rm -rf "${NOFLOCK_DIR}"
 
 assert_eq "R-7 at EXACTLY the window a generation is kept, not swept" "no" \
   "$(logchan_should_sweep "$((NOW - LOGCHAN_SWEEP_AGE_S))" "${NOW}")"
@@ -1954,6 +1999,20 @@ assert_eq "I-5/M-10 nothing was deleted -- the content is intact in .acked/" "He
   "$(grep -h 'Hello' "${MDIR}/.acked/20260901T232215Z-001-a-real-message.md")"
 assert_eq "I-5 the read directory's doorbell is bumped after the move (the peer's bell)" "1" \
   "$(ls "${MDIR}/.event" 2>/dev/null | wc -l | tr -d ' ')"
+# EXISTENCE IS NOT THE BUMP. The doorbell's semantics are an mtime/attrib
+# change -- `touch` on an existing file is ATTRIB-only, which is exactly why a
+# waiter must watch `attrib` -- and on any LIVE channel `.event` already
+# exists, because the writer maintains it. The case above therefore only ever
+# exercised CREATION, the path the contract calls optional for a reader, and
+# passed for the deployed case whether or not the bump happened. So it could
+# not fail when the bump's failure was being discarded with `|| true`.
+setup_mail_case
+touch -d '2020-01-01 00:00:00' "${MDIR}/.event"
+BELL_BEFORE="$(fs_mtime_epoch "${MDIR}/.event")"
+( cd "${MPROJ}" && "${BIN}/read-inbox" mail >/dev/null 2>&1 )
+BELL_AFTER="$(fs_mtime_epoch "${MDIR}/.event")"
+assert_eq "I-5 a PRE-EXISTING doorbell has its mtime advanced, not merely kept" "1" \
+  "$([ "${BELL_AFTER}" -gt "${BELL_BEFORE}" ] && echo 1 || echo 0)"
 assert_eq "I-5 the cycle ends at zero unread" "0" \
   "$(cd "${MPROJ}" && "${BIN}/inbox-status" --json 2>/dev/null | jq -r '.channels[0].unread')"
 
