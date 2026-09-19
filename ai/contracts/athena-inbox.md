@@ -189,12 +189,12 @@ The contract would be ambiguous without saying who creates what, so:
   already lost once.** `~/dev/custom/CLAUDE.md` → *Hook registration* records
   the 2026-09-17 outage: a file outside version control was clobbered, and
   because there was no diff and no `git` undo, nothing detected it. The durable
-  fix there was three things, and the registry owes the same three: a
+  fix there was three things, and the registry owed the same three: a
   **committed source of truth** for which tenants this machine expects, an
   **idempotent installer** that merges entries rather than rewriting the
   directory (`scripts/setup-hooks` is the shape), and a **read-only check** that
   fails, naming each one, when an expected entry is missing or malformed. Until
-  those exist, a clobbered entry is silent by contract and unrecoverable from
+  they existed, a clobbered entry was silent by contract and unrecoverable from
   git. **This is a MUST on the tooling that implements this contract, not a
   suggestion**, and `inbox-doctor` does not discharge it: a diagnostic somebody
   has to think of running is not a check that runs unprompted. The obligation
@@ -210,15 +210,27 @@ The contract would be ambiguous without saying who creates what, so:
   | Unprompted read-only check (in the harness gate) | `~/dev/custom/ai/bin/check-inbox-registry` |
 
   The committed list lives in the **harness** repo, which is not a tenancy
-  question: `~/dev/custom` owns this contract, and *Tenancy: the registry*
-  already says it "will carry the registry's committed source of truth required
-  under *Provisioning*". Nothing lands in a tenant repo, and the file holds no
-  secret — the machine token stays in `~/.config/athena-inbox-client/config.json`.
+  question: `~/dev/custom` owns this contract, and carries the committed source
+  of truth as *Tenancy: the registry* provides for. Nothing lands in a tenant
+  repo, and the file holds no secret — the machine token stays in
+  `~/.config/athena-inbox-client/config.json`.
   The installer writes only the entries the committed list declares, so an
   undeclared entry in `projects/` — another machine's tenant, one being trialled
   by hand — is left untouched; and the check names a drifted entry but never one
   it does not declare, which keeps it out of the disclosure rules under *Finding
   the entry*.
+
+  **The committed list's filename for an entry is a *provisioning* name, not a
+  second authority.** The authoritative key is still the entry's `repo`
+  (*Finding the entry*), so renaming a live entry does not re-key it: the
+  installer would otherwise write the declared name beside the renamed file and
+  leave two entries claiming one repo identity, which is that section's hard
+  error — manufactured by the documented recovery command. A renamed live entry
+  is therefore **drift**, reported as the declared name missing, and an install
+  that would collide refuses and names the file to remove or re-key. Naming it
+  is legitimate for the same reason the duplicate-identity error may name its
+  files: an entry claiming an identity this machine's own list declares is this
+  owner's configuration, whatever it is called.
 - The **designated consumer** creates a declared channel's missing directories
   and doorbell idempotently — `<namespace>/`, both mail directories, their
   `tmp/` and `.acked/`, and `.event` — at `0700` for directories and `0600` for
@@ -263,8 +275,9 @@ the prose around it is amended in place rather than duplicated. Owner decision,
 `.athena-inbox.json`, no `.gitignore` entry, no `.git/info/exclude` entry, no
 `CLAUDE.md` section. "Tenant repo" means **any repo other than the harness that
 owns this contract** (`~/dev/custom`). The distinction is load-bearing in both
-directions: the harness necessarily documents the facility it owns and will
-carry the registry's committed source of truth required under *Provisioning*,
+directions: the harness necessarily documents the facility it owns and
+carries the registry's committed source of truth required under *Provisioning*
+(`~/dev/custom/ai/inbox/registry.json`),
 while a tenant carries nothing at all. The stated harm is specific to
 tenants — a shared work repo, a file coworkers read, a personal path hardcoded
 into it — and the harness's own declaration was moved to the registry anyway,

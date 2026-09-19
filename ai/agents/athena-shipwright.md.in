@@ -193,8 +193,9 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   silently dropped safe-wait-guard + pronoun-guard. Environment-safe: passes with
   a note when no settings file exists (CI/agent env), so it never false-fails.
   Recover drift with `scripts/setup-hooks --install` (merges, never clobbers).
-- `ai/bin/check-inbox-registry` (+ its `--self-test`, and the suite
-  `ai/inbox/test/self-test.sh`) — this machine's Athena Inbox tenancy registry
+- `ai/bin/check-inbox-registry` and the suite `ai/inbox/test/self-test.sh` (both
+  in `CHECKS`; run the check's own `--self-test` too if you touched the checker
+  or `ai/inbox/lib/registry.rb`) — this machine's Athena Inbox tenancy registry
   (`$ATHENA_INBOX_ROOT/projects/*.json`, untracked) still matches the committed
   source of truth `ai/inbox/registry.json`. The contract defines a missing entry
   as zero channels, exit 0, no error, so a clobbered entry is a silently dead

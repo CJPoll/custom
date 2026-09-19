@@ -11,15 +11,20 @@
 # recovery path (ai/contracts/athena-inbox.md -> Provisioning), and
 # ai/bin/check-inbox-registry is what notices you need it.
 #
-# It MERGES, it never rewrites the directory. Concretely: it touches only the
-# files ai/inbox/registry.json declares. Any other entry in projects/ — another
-# project's, one you are trialling by hand — is not read, not moved, and not
-# removed. A full rewrite is exactly what silently dropped two hooks on
-# 2026-09-17, which is the outage this whole triad answers. A declared file
-# whose content differs is backed up beside itself as <name>.json.bak-<stamp>
-# before being rewritten, so a hand edit is always recoverable; that suffix
-# fails the registry filename grammar, so the backup is "not a candidate" under
-# the contract's *Finding the entry* and no reader will ever load it.
+# It MERGES, it never rewrites the directory. Concretely: it writes only the
+# ENTRIES ai/inbox/registry.json declares (plus the root and projects/
+# themselves, which it creates at 0700 if missing). Any other entry in
+# projects/ is not moved and not removed — it is only read far enough to refuse
+# an install that would leave two entries claiming one repo identity. A full
+# rewrite is exactly what silently dropped two hooks on 2026-09-17, which is
+# the outage this whole triad answers.
+#
+# A declared entry whose content differs is copied to
+# $XDG_STATE_HOME/athena/inbox-registry-backups/ (0600, never overwriting an
+# earlier backup) before being replaced, so a hand edit is always recoverable.
+# Backups live outside the inbox root on purpose: a copy kept in projects/
+# inherits the mode of what it copied, and every one of them would become a
+# permanent line in `inbox-doctor`'s "report every skipped file by name".
 #
 # Idempotent: re-running reports "already installed" and writes nothing.
 # Entries are written 0600 inside a 0700 directory, as the contract requires.
@@ -58,13 +63,40 @@ def stamp
   Time.now.strftime("%Y%m%d-%H%M%S")
 end
 
-# Copy a file beside itself before we replace or delete it. Returns the backup
-# path (nil when there was nothing to back up).
-def backup(path, dry:)
-  return nil unless File.file?(path)
+# Backups live OUTSIDE the inbox root, for two reasons the reviewers measured:
+# a copy kept in projects/ inherits the mode of what it copied (so repairing a
+# 0644 entry left a durable world-readable file in the root, which the check
+# deliberately never looks at), and every replacement would add a permanent
+# line to `inbox-doctor`'s "every skipped file, by name" report.
+def backup_dir
+  File.join(ENV["XDG_STATE_HOME"] || File.join(Dir.home, ".local", "state"),
+            "athena", "inbox-registry-backups")
+end
 
-  bak = "#{path}.bak-#{stamp}"
-  FileUtils.cp(path, bak, preserve: true) unless dry
+# Copy an entry aside before we replace or delete it. Never follows a symlink
+# and never overwrites an earlier backup — a second-resolution stamp collides,
+# and a clobbered backup is the undo path this exists to provide. Returns the
+# backup path, or nil when there was nothing regular to back up.
+def backup(path, dry:)
+  stat = begin
+    File.lstat(path)
+  rescue SystemCallError
+    nil
+  end
+  return nil unless stat&.file?
+
+  FileUtils.mkdir_p(backup_dir, mode: 0o700) unless dry
+  FileUtils.chmod(0o700, backup_dir) if !dry && File.directory?(backup_dir)
+
+  base = File.join(backup_dir, "#{File.basename(path)}.bak-#{stamp}")
+  bak = base
+  n = 0
+  bak = "#{base}-#{n += 1}" while File.exist?(bak)
+
+  unless dry
+    FileUtils.cp(path, bak)
+    FileUtils.chmod(0o600, bak)
+  end
   bak
 end
 
@@ -83,43 +115,106 @@ def ensure_dir(path, dry:, changes:)
   FileUtils.chmod(0o700, path) unless dry
 end
 
+# Write an entry so that it is never visible in a wrong mode and never written
+# THROUGH something that is not a regular file of ours.
+#
+# Both properties come from the same mechanism: create a fresh temp file with
+# O_EXCL|O_NOFOLLOW at 0600, write it, fsync-free rename it into place. A
+# truncate-in-place would reuse the existing inode — so repairing an entry that
+# drifted to 0644 would publish the new bytes world-readable and only then
+# chmod, and a symlink sitting where the entry belongs would be followed and
+# something outside the root overwritten (measured by review). The temp name
+# starts with a dot, so it fails the registry filename grammar and no reader
+# will ever treat a half-written file as a candidate.
 def write_entry(path, text, dry:)
   return if dry
 
-  File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |f| f.write(text) }
-  FileUtils.chmod(0o600, path)
+  tmp = File.join(File.dirname(path), ".tmp-#{Process.pid}-#{File.basename(path)}")
+  FileUtils.rm_f(tmp)
+  flags = File::WRONLY | File::CREAT | File::EXCL
+  flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+  File.open(tmp, flags, 0o600) do |f|
+    raise "#{tmp} is not a regular file" unless f.stat.file?
+
+    f.write(text)
+  end
+  FileUtils.chmod(0o600, tmp)
+  File.rename(tmp, path)
+rescue SystemCallError, RuntimeError => e
+  FileUtils.rm_f(tmp) if tmp
+  warn "setup-inbox-registry: could not write #{path}: #{e.class}: #{e.message}"
+  warn "Fix: make sure #{File.dirname(path)} is a writable directory you own and that " \
+       "#{File.basename(path)} is a regular file (not a symlink, directory or special file), " \
+       "then re-run. `ai/bin/check-inbox-registry` names an entry that is not a regular file."
+  raise InboxRegistry::Error, "could not write #{File.basename(path)}"
 end
 
-# Never install an entry the reader would refuse to load. An entry that passes
-# here and fails there is a channel that is configured, installed, and dark —
-# which is the whole failure class this tooling exists to close — so the
-# validator that decides it is the reader's own (see InboxRegistry).
-def refuse_invalid_entries(entries)
-  bad = entries.filter_map do |p|
-    r = InboxRegistry.reader_rejection(p["entry"])
-    "#{p['file']}: #{r}" if r
-  end
-  return if bad.empty?
+# The committed `file` is the PROVISIONING name; the authoritative key is the
+# entry's `repo` (contract: *Finding the entry*). So a live entry that was
+# renamed still claims its repo identity, and installing the declared name
+# beside it would leave TWO entries claiming one identity — which the reader
+# treats as a hard error that wedges every session in that repo. Refuse instead,
+# and say which file to remove.
+#
+# Naming that file is not the cross-tenant disclosure the contract forbids: an
+# entry claiming an identity this machine's own list declares IS this owner's
+# configuration, whatever it is called.
+def refuse_identity_collisions(entries)
+  declared_names = entries.map { |p| p["file"] }
+  collisions = []
 
-  warn "setup-inbox-registry: refusing to install — #{bad.size} declared entr#{bad.size == 1 ? 'y is' : 'ies are'} invalid:"
-  bad.each { |b| warn "  - #{b}" }
-  raise InboxRegistry::Error,
-        "ai/inbox/registry.json declares an entry the athena:inbox reader refuses"
+  Dir.glob(File.join(InboxRegistry.projects_dir, "*.json")).sort.each do |path|
+    name = File.basename(path)
+    next if declared_names.include?(name)
+    next unless File.lstat(path).file?
+
+    repo = begin
+      JSON.parse(File.read(path))["repo"]
+    rescue StandardError
+      nil
+    end
+    next unless repo.is_a?(String)
+
+    owner = entries.find { |p| p["entry"]["repo"] == InboxRegistry.expand_repo(repo) }
+    collisions << "#{name} already claims #{repo}, which #{owner['file']} declares" if owner
+  end
+  return if collisions.empty?
+
+  warn "setup-inbox-registry: refusing to install — installing would leave two entries claiming one repo:"
+  collisions.each { |c| warn "  - #{c}" }
+  warn "Fix: delete or re-key the file named above (the committed list's name is the one this " \
+       "installer maintains), then re-run. Two entries claiming one repo identity is a hard " \
+       "error for every session in that repo, not a dark channel."
+  raise InboxRegistry::Error, "a live entry already claims a declared repo identity under another name"
 end
 
 def install(entries, dry:)
-  refuse_invalid_entries(entries)
   changes = []
   ensure_dir(InboxRegistry.root, dry: dry, changes: changes)
   ensure_dir(InboxRegistry.projects_dir, dry: dry, changes: changes)
+  refuse_identity_collisions(entries)
 
   entries.each do |p|
     file = p["file"]
     path = InboxRegistry.entry_path(file)
     text = InboxRegistry.render(p["entry"])
 
-    unless File.file?(path)
+    stat = begin
+      File.lstat(path)
+    rescue SystemCallError
+      nil
+    end
+
+    if stat.nil?
       changes << "+ #{file} (created)"
+      write_entry(path, text, dry: dry)
+      next
+    end
+
+    unless stat.file?
+      # Replaced, never written through: the rename below unlinks whatever this
+      # is rather than following it out of the root.
+      changes << "~ #{file} (was a #{stat.ftype}; replaced with a regular entry)"
       write_entry(path, text, dry: dry)
       next
     end
@@ -131,7 +226,7 @@ def install(entries, dry:)
     end
 
     if same
-      mode = InboxRegistry.mode_of(path)
+      mode = stat.mode & 0o777
       next if mode == InboxRegistry::ENTRY_MODE
 
       changes << format("~ %s (mode %04o -> 0600)", file, mode)
@@ -140,7 +235,7 @@ def install(entries, dry:)
     end
 
     bak = backup(path, dry: dry)
-    changes << "~ #{file} (replaced; backup #{File.basename(bak)})"
+    changes << "~ #{file} (replaced; backup #{bak})"
     write_entry(path, text, dry: dry)
   end
 
@@ -152,10 +247,10 @@ def remove(entries, dry:)
   entries.each do |p|
     file = p["file"]
     path = InboxRegistry.entry_path(file)
-    next unless File.file?(path)
+    next unless File.symlink?(path) || File.exist?(path)
 
     bak = backup(path, dry: dry)
-    changes << "- #{file} (removed; backup #{File.basename(bak)})"
+    changes << "- #{file} (removed#{bak ? "; backup #{bak}" : ''})"
     FileUtils.rm_f(path) unless dry
   end
   changes
@@ -182,7 +277,15 @@ def main(argv)
 
   case action
   when "check"
-    exec(CHECKER)
+    unless File.executable?(CHECKER)
+      warn "setup-inbox-registry: the check is missing or not executable at #{CHECKER}"
+      warn "Fix: restore it from git (`git restore ai/bin/check-inbox-registry`) and `chmod +x` it, " \
+           "or run `ai/bin/check-inbox-registry` directly."
+      return 1
+    end
+    # [cmd, argv0] form, never a bare string: a single-string exec is shell-split
+    # on whitespace, so a repo path containing a space would break --check.
+    exec([CHECKER, CHECKER])
   when "self-test"
     unless File.executable?(SUITE)
       warn "setup-inbox-registry: self-test suite missing at #{SUITE}"
@@ -208,9 +311,11 @@ def main(argv)
   0
 rescue InboxRegistry::Error => e
   warn "setup-inbox-registry: #{e.message}"
-  warn "Fix: restore ai/inbox/registry.json from git (`git restore ai/inbox/registry.json`) " \
-       "or repair its JSON — an object with a \"projects\" array of " \
-       "{\"file\": \"<name>.json\", \"entry\": {\"v\":1,\"repo\":\"~/dev/<p>/.git\",\"channels\":{}}}."
+  warn "Fix: correct ai/inbox/registry.json — the message above names the defect. A channel or " \
+       "key the validator refused is fixed against ai/contracts/athena-inbox.md -> Schema; a " \
+       "structural problem is fixed by restoring the file (`git restore ai/inbox/registry.json`). " \
+       "The shape is an object with a \"projects\" array of {\"file\": \"<name>.json\", " \
+       "\"entry\": {\"v\":1,\"repo\":\"~/dev/<p>/.git\",\"channels\":{}}}."
   2
 end
 

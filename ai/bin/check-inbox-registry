@@ -47,25 +47,42 @@ require_relative "../inbox/lib/registry"
 
 def run
   entries = InboxRegistry.declared
+  note = InboxRegistry.validation_note
 
   unless File.directory?(InboxRegistry.root)
-    puts "check-inbox-registry: no inbox root at #{InboxRegistry.root} — " \
-         "nothing to assert (not this environment). OK."
+    # "No root" means one of two very different things, and conflating them is
+    # how the whole registry disappears quietly. If a declared repo is checked
+    # out here, this IS the machine the committed list describes and the root
+    # should exist — so its absence is drift. Otherwise there is genuinely
+    # nothing to assert.
+    if InboxRegistry.declared_repo_present?(entries)
+      warn "check-inbox-registry: FAIL — the inbox root #{InboxRegistry.root} does not exist, " \
+           "but this machine has a checkout of a repo the committed list declares, so it is " \
+           "the machine that list describes."
+      warn "Fix: run `scripts/setup-inbox-registry --install` to recreate the root and the " \
+           "declared entries. If this machine should no longer be a tenant, remove its " \
+           "entry from ai/inbox/registry.json instead."
+      return 1
+    end
+    puts "check-inbox-registry: no inbox root at #{InboxRegistry.root} and no declared repo " \
+         "checked out here — nothing to assert (not this environment). OK."
     return 0
   end
 
   problems = InboxRegistry.drift(entries)
   if problems.empty?
     puts "check-inbox-registry: all #{entries.size} declared registry " \
-         "entr#{entries.size == 1 ? 'y is' : 'ies are'} installed and match " \
-         "#{InboxRegistry.registry_path}. OK."
+         "entr#{entries.size == 1 ? 'y' : 'ies'} #{entries.size == 1 ? 'is' : 'are'} installed and " \
+         "#{entries.size == 1 ? 'matches' : 'match'} #{InboxRegistry.registry_path}. OK." +
+         (note ? " (#{note})" : "")
     return 0
   end
 
   warn "check-inbox-registry: FAIL — #{problems.size} registry problem(s) under #{InboxRegistry.projects_dir}:"
   problems.each { |p| warn "  - #{p}" }
+  warn "  note: #{note}" if note
   warn "Fix: run `scripts/setup-inbox-registry --install` to re-materialise the " \
-       "declared entries from ai/inbox/registry.json (it writes only the files it " \
+       "declared entries from ai/inbox/registry.json (it writes only the entries it " \
        "declares, backs up anything it replaces, and never touches another entry " \
        "in projects/). If an entry was intentionally retired or its channels " \
        "changed, edit ai/inbox/registry.json to match and re-run the installer — " \
@@ -122,6 +139,7 @@ def self_test
     # 2. Root present, projects/ absent -> drift, exit 1. (The opposite of the
     #    case above: the facility IS here, so a missing registry is real.)
     FileUtils.mkdir_p(root)
+    File.chmod(0o700, root)
     check.call("root without projects/ -> exit 1", quiet.call { run } == 1)
 
     # 3. A correctly installed entry -> clean.
@@ -162,7 +180,44 @@ def self_test
     File.write(File.join(projects, "someone_else.json"), "{}")
     check.call("unrelated entry is not named", InboxRegistry.drift.none? { |p| p.include?("someone_else") })
 
-    # 9. A malformed source of truth exits 2 (a code error, not machine state).
+    # 9. A 0755 inbox ROOT is drift too, not only a 0755 projects/. Every
+    #    directory under the root MUST be 0700, and a listable root exposes
+    #    every tenant's message surfaces.
+    File.write(path, InboxRegistry.render(entry))
+    File.chmod(0o600, path)
+    File.chmod(0o755, root)
+    d = InboxRegistry.drift
+    check.call("0755 root -> mode drift", d.size == 1 && d.first.include?("inbox root"))
+    File.chmod(0o700, root)
+
+    # 10. A symlink where an entry belongs is reported as what it is, never
+    #     followed. Following it is how an installer ends up writing outside the
+    #     root entirely.
+    FileUtils.rm_f(path)
+    File.symlink(File.join(dir, "elsewhere.json"), path)
+    d = InboxRegistry.drift
+    check.call("symlinked entry -> reported, not followed",
+               d.size == 1 && d.first.include?("not a regular file"))
+    FileUtils.rm_f(path)
+
+    # 11. Two declared entries claiming one repo identity is the reader's own
+    #     hard error, so the committed list is refused outright (exit 2) rather
+    #     than installed into a wedged state.
+    dupe = { "projects" => [{ "file" => "a.json", "entry" => entry },
+                            { "file" => "b.json", "entry" => entry }] }
+    File.write(src, JSON.pretty_generate(dupe))
+    check.call("two entries claiming one repo -> exit 2", quiet.call { run } == 2)
+
+    # 12. An absent root is NOT "not this environment" when a declared repo is
+    #     checked out here: that proves this is the machine the committed list
+    #     describes, so the missing root is drift. Without this discriminator,
+    #     losing the whole root reads as OK.
+    here = { "v" => 1, "repo" => InboxRegistry.git_common_dir(InboxRegistry.repo_dir), "channels" => {} }
+    File.write(src, JSON.pretty_generate({ "projects" => [{ "file" => "here.json", "entry" => here }] }))
+    FileUtils.rm_rf(root)
+    check.call("absent root + a declared repo checked out here -> exit 1", quiet.call { run } == 1)
+
+    # 13. A malformed source of truth exits 2 (a code error, not machine state).
     File.write(src, "{ not json")
     check.call("malformed source of truth -> exit 2", quiet.call { run } == 2)
   end
