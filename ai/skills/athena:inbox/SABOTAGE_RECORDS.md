@@ -538,3 +538,86 @@ and runs every `**/test/self-test.sh` repo-wide, scoped to committed source).
 DND-209 landed on main while this branch was in review and its discovery
 already covers both suites, so the hand-declaration was dropped in the merge.
 The finding that produced it stands: this suite was dark, and nothing ran it.
+
+---
+
+# DND-185 — `bin/inbox-wait`, the `.event` waiter
+
+Baseline and final: **PASS (511 cases)**, up from 455. Every mutation below was
+applied to a clean tree, measured, and reverted. A mutation that leaves the
+suite GREEN is recorded as green — that is the whole point of running them.
+
+| # | Mutation | Result |
+|---|---|---|
+| S1 | drop `attrib` from the watch set | **RED** — one case |
+| S1b | watch `modify` only (the contract's named failure) | **RED** — 11 cases |
+| S2 | map the elapsed-budget status to `0` | **RED** |
+| S3 | clamp an over-ceiling budget instead of refusing | **RED** |
+| S4 | do not pre-create missing doorbells before arming | **RED** — 5 cases |
+| S5 | zero channels → exit 0 with no doorbells instead of refusing | **RED** |
+| S6 | drop the not-a-subagent check | **RED** |
+| S7 | drop the maildir **write** doorbell | **RED** — 13 cases |
+| S8 | drop `delete_self` from the watch set | **GREEN — a measured zero** |
+| S9 | silence the never-delivered notice | **RED** |
+| S11 | the three-cause no-entry refusal collapses to exit 0 | **RED** |
+
+## The measured zero that was FIXED: `attrib` (S1, first pass)
+
+The first version of I-1 bumped the doorbell with `touch(1)` and asserted the
+wake — the case the ticket calls "the single most important". **Deleting
+`attrib` from the watch set left it green.**
+
+`touch(1)` emits `ATTRIB` **and `CLOSE_WRITE`**, so `modify,close_write` alone
+still wakes for it. The contract's table says exactly this and the test was
+written as though `touch` were ATTRIB-only. The case proved the union worked;
+it proved nothing about `attrib`.
+
+The fix is a `chmod`-only bump — the one mechanism that emits `ATTRIB` and
+nothing else. With it, S1 reddens. **A test that passes is not a test that
+discriminates**, and nothing but the mutation would have told the difference:
+the original case was correct, meaningful, and load-bearing for the union,
+while being worthless for the claim it was named after.
+
+## The measured zero that STANDS: `delete_self` (S8)
+
+Removing `delete_self` does not redden the delete-mid-wait case, because on
+this kernel an `unlink(2)` also changes the link count and therefore emits
+`ATTRIB`, which is already watched. It is kept for two reasons and neither is a
+passing test: the contract requires it, and the `ATTRIB`-on-unlink overlap is a
+kernel implementation detail this facility must not depend on — the same
+argument that puts the whole union in the watch set. **Recorded as defence in
+depth, not as a tested check.**
+
+## Two defects in the SABOTAGE HARNESS itself, both measured
+
+Neither was in the product, and both produced *false verdicts* — which is worse
+than no verdict, because a false one is acted on.
+
+1. **`run() { … | head -10; }` leaked concurrent suites.** When a mutation
+   produced more than ten `FAIL` lines, `head` exited, `grep` took `SIGPIPE`,
+   and the **suite kept running** while the batch moved on and applied the next
+   mutation. Two suites then raced on the same files. Observed directly:
+   two `bash test/self-test.sh` processes alive at once, and a `run.log` `grep`
+   reported as "binary file matches" because two writers were interleaving into
+   it. The run's output now goes to a file and the **file** is filtered; this is
+   `~/dev/custom/CLAUDE.md` → *never read a gate's pass/fail through
+   `tail`/`head`*, arriving through the reader's side effect rather than its
+   exit status.
+2. **Killing the batch left a mutation on disk.** The next "baseline" then
+   measured the leftover mutation and reported five failures with no regression
+   behind them — a red run that reads exactly like a real one. The batch now
+   carries `trap 'git checkout -- bin lib' EXIT INT TERM`, and takes an
+   **`flock`** so a second instance is impossible rather than unlikely.
+
+The general shape is the one this epic keeps finding: **a verification step
+whose own failure is indistinguishable from the thing it verifies.**
+
+## A test that would have hung for ten minutes
+
+The "a budget just under the ceiling is accepted" case originally armed a real
+`ATHENA_INBOX_WAIT_BUDGET=599` waiter and bumped it. Under the S1 mutation the
+bump stopped waking it, and the case sat on a **599-second** budget — observed
+live, with `inotifywait -qq -e modify` blocked on a doorbell nothing would ever
+ring. It is now proven through `--dry-run`, which cannot block. A test whose
+failure mode is a ten-minute hang teaches the next person to shorten the
+timeout instead of reading the failure.

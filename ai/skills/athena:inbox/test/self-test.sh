@@ -2581,7 +2581,26 @@ arm_waiter "${WREPO}" 20
 await_armed
 touch "${MAIL_R_BELL}"
 reap_waiter
-assert_eq "I-1 an ATTRIB-only bump (touch, the maildir mechanism) wakes the waiter" "0" "${WAIT_RC}"
+assert_eq "I-1 a touch(1) bump (the maildir mechanism) wakes the waiter" "0" "${WAIT_RC}"
+
+# I-1, THE CASE THAT ACTUALLY DISCRIMINATES `attrib`. The one above does not,
+# and that was MEASURED, not assumed: `touch(1)` emits ATTRIB *and*
+# CLOSE_WRITE, so a waiter watching `modify,close_write` alone still wakes for
+# it and the mutation that deletes `attrib` from the watch set stays green.
+# A test that passes is not the same as a test that discriminates.
+#
+# `chmod` is the one bump mechanism that emits ATTRIB and NOTHING ELSE -- no
+# open, no close, no modify. It is exactly the shape the contract warns about
+# when it says no single event type is reliable across a future client
+# refactor, and it is the only case in this file whose failure means `attrib`
+# has left the watch set.
+arm_waiter "${WREPO}" 20
+await_armed
+chmod 0644 "${MAIL_R_BELL}"
+reap_waiter
+assert_eq "I-1 an ATTRIB-ONLY bump (chmod) wakes the waiter -- the case that proves attrib is watched" \
+  "0" "${WAIT_RC}"
+chmod 0600 "${MAIL_R_BELL}"
 
 # I-1b, the log side: the client bumps by open + fchmod + ftruncate on a
 # descriptor it holds. `truncate -s 0` + `chmod` replicates that pair of
@@ -2681,13 +2700,20 @@ for b in 600 601 900; do
   assert_eq "W-7 a budget of ${b}s (at/over the 600s ceiling) is REFUSED, not clamped" "2" "${RC}"
   assert_contains "W-7 and the refusal names the ceiling" "600" "${ERR}"
 done
-# 599 is accepted -- the bound is the ceiling, not a mood. Proven by arming it
-# and confirming the wake, so an over-eager tightening cannot pass this file.
-arm_waiter "${BREPO}" 599
-await_armed
-touch "${ATHENA_INBOX_ROOT}/b-slack.event"
-reap_waiter
-assert_eq "W-7 a budget just under the ceiling is accepted and arms normally" "0" "${WAIT_RC}"
+# 599 is ACCEPTED -- the bound is the ceiling, not a mood, and a case that only
+# ever asserted refusals would stay green against a tightening that refused
+# everything.
+#
+# IT IS PROVEN THROUGH --dry-run, DELIBERATELY. Arming a real 599s waiter here
+# would be a test that blocks for TEN MINUTES the moment a mutation stops the
+# bump waking it -- measured during this ticket's sabotage pass, where dropping
+# `attrib` from the watch set left exactly this case sitting on a 599s budget.
+# A test whose failure mode is a ten-minute hang is a test nobody can afford to
+# run, and it teaches the next person to shorten the timeout rather than read
+# the failure.
+DRC=0
+( cd "${BREPO}" && ATHENA_INBOX_WAIT_BUDGET=599 timeout 10 "${BIN}/inbox-wait" --dry-run ) >/dev/null 2>&1 || DRC=$?
+assert_eq "W-7 a budget just under the ceiling is accepted" "0" "${DRC}"
 for b in 0 "" "abc" "-5" "12.5" "5s"; do
   ERR="$(cd "${BREPO}" && ATHENA_INBOX_WAIT_BUDGET="${b}" timeout 10 "${BIN}/inbox-wait" --dry-run 2>&1 >/dev/null)"; RC=$?
   if [ -z "${b}" ]; then
