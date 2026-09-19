@@ -1402,12 +1402,12 @@ else
   bad "no fake-project marker leaked into the real \$HOME seen dir" \
 "the suite wrote per-project marker(s) into ${REAL_SEEN_DIR} keyed to a FAKE
         project it fabricated under ${TMP} (${checked} projects checked) -- so a
-        case ran the hook against the real \$HOME rather than its per-case tmp home:${leaked}
-        Fix: find the case that reached run_hook/run_stub_hook without a
-        preceding setup_case (so HOME still pointed at ${REAL_HOME}), or a helper
-        that built a marker path from \${REAL_HOME} instead of \${HOME}. Every
-        marker the hook writes must land under the per-case \${HOME} beneath
-        ${TMP}. Remove the leaked file(s) named above from ${REAL_SEEN_DIR}."
+        suite helper built a marker path from \${REAL_HOME} instead of the
+        per-case \${HOME}:${leaked}
+        Fix: find the helper that wrote under \${REAL_HOME}/.claude/athena-inbox-seen
+        (the hook itself cannot -- assert_fake_home FATAL-exits every run_hook /
+        run_stub_hook against the real \$HOME); it must build the path from
+        \${HOME} beneath ${TMP}. Remove the leaked file(s) named above from ${REAL_SEEN_DIR}."
 fi
 
 # (2) The daemon-UNTOUCHED members of the family, byte-for-byte unmoved. These
@@ -1421,14 +1421,23 @@ assert_eq "the suite left the real \$HOME marker family untouched" \
   "${REAL_MARKERS_BEFORE}" "$(real_markers_fingerprint)"
 
 # (3) poll.log is SHARED (not project-keyed) and the live poll appends to it on
-# every session, so its mtime/length cannot be fingerprinted without racing. It
-# is guarded by CONTENT instead: the live poll only ever logs real-repo reasons,
-# never a path under ${TMP} nor the suite's sentinel, so either string in the
-# real log is a trace only the suite could have left. This closes the shared-file
-# leak the mtime drop would otherwise have opened for the log. (athena-inbox-last-poll
-# is a 0-byte attempt marker whose spurious touch changes no rate-limit decision
-# and carries no signature distinguishable from the daemon's own touch -- it is
-# intentionally left unguarded; see SABOTAGE_RECORDS.md Z-DND224-1.)
+# every session, so its mtime/length cannot be fingerprinted without racing.
+#
+# WHO could write to the real poll.log at all? Not the hook: every hook
+# invocation in this suite goes through run_hook / run_stub_hook, each of which
+# calls assert_fake_home FIRST, and assert_fake_home FATAL-exits the whole suite
+# the instant HOME is the real home. So a hook run against the real $HOME is
+# structurally impossible -- it never reaches the log write -- which is why the
+# dropped mtime fingerprint on last-poll / poll.log was a backstop for an event
+# assert_fake_home already prevents, not primary coverage, and racy against the
+# daemon besides. The remaining writer is a suite HELPER that hardcodes
+# ${REAL_HOME}. Check (3) guards that vector by CONTENT: the live poll only ever
+# logs fixed real-repo reason strings (see log_reason), never a path under
+# ${TMP} nor the suite's sentinel, so either string in the real log is a trace
+# only a suite helper could have left, and a concurrent live write can never trip
+# it. (athena-inbox-last-poll -- a 0-byte attempt marker a helper could touch
+# with no ${TMP}/sentinel signature -- is the one residual, and it changes no
+# rate-limit decision; see SABOTAGE_RECORDS.md Z-DND224-1.)
 real_log="${REAL_HOME}/.claude/athena-inbox-poll.log"
 if [ -f "${real_log}" ] && \
    { grep -qF -- "${TMP}" "${real_log}" 2>/dev/null || grep -qF -- "${SENTINEL}" "${real_log}" 2>/dev/null; }; then

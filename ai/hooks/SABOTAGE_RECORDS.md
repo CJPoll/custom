@@ -117,15 +117,30 @@ instead.
 
 ### Z-DND224-1 — MEASURED LIMITATION: `athena-inbox-last-poll` is unguarded
 
-`athena-inbox-last-poll` is a shared, 0-byte attempt marker that the live
-SessionStart poll stamps on EVERY session. A spurious touch of it by a suite
-helper is byte-for-byte indistinguishable from the daemon's own touch (no
+**Who can write into the real `~/.claude`?** Not the hook. Every hook invocation
+in this suite goes through `run_hook` / `run_stub_hook`, and both call
+`assert_fake_home` first — which FATAL-exits the whole suite the instant `HOME`
+is the real home. So a hook run against the real `$HOME` is *structurally
+prevented*, not merely detected after the fact; the no-channel branch also
+stamps nothing (`athena-inbox-poll.sh` "no registry entry declares a channel …
+the marker family was left untouched"). The dropped mtime fingerprint on
+`last-poll` / `poll.log` was therefore a backstop for an event `assert_fake_home`
+already prevents, and racy against the live daemon besides — removing it removed
+a false-positive source, not a real guarantee.
+
+**The one remaining vector is a suite HELPER that hardcodes `${REAL_HOME}`.**
+Those are covered: a helper writing a project-keyed marker → check (1)
+(S-DND224-1); a helper appending fake-env text to the log → check (3)
+(S-DND224-3, since realistic helper text carries the `${TMP}` root or sentinel).
+
+**The single residual is a helper that touches ONLY `athena-inbox-last-poll`.**
+That file is a shared, 0-byte attempt marker the live poll stamps every session;
+a stray touch is byte-for-byte indistinguishable from the daemon's own (no
 project key, no content, only an mtime the daemon moves anyway), so no guard can
-tell the two apart without racing the daemon — the very false positive this
-ticket removed. It is therefore intentionally left unguarded. This is safe
-because a stray touch of the attempt marker changes NO rate-limit decision (it
-records only "when did this machine last attempt"); the rate-limit state that
-actually gates warnings is the per-project seen markers (check 1), the top-level
-fallback markers and settings.json (check 2), and the log's content (check 3),
-all of which remain guarded. No test protects `last-poll`; this row records that
-gap deliberately rather than leaving it silent.
+tell them apart without racing — the very false positive this ticket removed. It
+is left unguarded deliberately, and it is safe: a touch of the attempt marker
+changes NO rate-limit decision (it records only "when did this machine last
+attempt"). The rate-limit state that gates warnings — per-project seen markers
+(check 1), top-level fallback markers + settings.json (check 2), the log's
+content (check 3) — all remain guarded. This row records the residual gap rather
+than leaving it silent.
