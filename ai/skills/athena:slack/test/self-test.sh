@@ -15,7 +15,11 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "${HERE}")"
 BIN="${ROOT}/bin"
-HOOK="${ROOT}/hooks/athena-slack-poll.sh"
+# The poll hook moved to ai/hooks/ (so setup-hooks / check-hooks-registered wire
+# it like every other registry hook, at the main checkout's path). ROOT is
+# .../ai/skills/athena:slack; the hook is two levels up under ai/hooks/.
+AI_DIR="$(cd "${ROOT}/../.." && pwd)"
+HOOK="${AI_DIR}/hooks/athena-slack-poll.sh"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 PASS=0; FAIL=0
@@ -120,6 +124,13 @@ setup_case() {
   # A recent success by default, so soft-fail cases assert the silence they
   # were written for rather than tripping the staleness warning.
   : > "${CHOME}/.claude/athena-slack-last-success"
+  # The seen-state now lives in the SHARED inbox-root file, not the private
+  # cache. STATE is the new file; LEGACY is the pre-DND-186 cache the first run
+  # migrates from. Both are passed to every runner so a case fully controls the
+  # state location regardless of the ambient environment.
+  STATE="${CHOME}/inbox-root/slack-inbox.state.json"
+  LEGACY="${CACHE}/inbox-state.json"
+  mkdir -p "$(dirname "${STATE}")"
 }
 
 # Pre-seed the caches the inbox scan reads, so a case can script the API calls
@@ -152,6 +163,7 @@ run_bin() { # run_bin <script> [args...]
   local script="$1"; shift
   set +e
   OUT="$(env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" SHIM_DIR="${SHIM_DIR}" \
+    SLACK_INBOX_STATE="${STATE}" SLACK_INBOX_LEGACY_STATE="${LEGACY}" \
     SLACK_MAX_RETRIES="${SLACK_MAX_RETRIES_OVERRIDE:-3}" \
     "${BIN}/${script}" "$@" 2>"${TMP}/err${CASE_N}")"
   RC=$?
@@ -163,19 +175,35 @@ run_bin_stdin() { # run_bin_stdin <stdin> <script> [args...]
   local input="$1" script="$2"; shift 2
   set +e
   OUT="$(printf '%s' "${input}" | env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" \
-    SHIM_DIR="${SHIM_DIR}" "${BIN}/${script}" "$@" 2>"${TMP}/err${CASE_N}")"
+    SHIM_DIR="${SHIM_DIR}" SLACK_INBOX_STATE="${STATE}" \
+    SLACK_INBOX_LEGACY_STATE="${LEGACY}" "${BIN}/${script}" "$@" 2>"${TMP}/err${CASE_N}")"
   RC=$?
   set -e
   ERR="$(cat "${TMP}/err${CASE_N}")"
 }
 
+# CTX is the additionalContext string the SessionStart hook emits; OUT is the
+# whole (compact JSON) object, or empty on the silent paths. ONEOBJ is "yes"
+# when OUT is exactly one well-formed SessionStart object (F-1/F-9), "no"
+# otherwise, and "" when OUT is empty.
 run_hook() {
   set +e
   OUT="$(env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" SHIM_DIR="${SHIM_DIR}" \
+    SLACK_INBOX_STATE="${STATE}" SLACK_INBOX_LEGACY_STATE="${LEGACY}" \
     "$@" sh "${HOOK}" 2>"${TMP}/herr${CASE_N}")"
   RC=$?
   set -e
   HOOKLOG="$(cat "${CHOME}/.claude/athena-slack-poll.log" 2>/dev/null || true)"
+  CTX=""; ONEOBJ=""
+  if [[ -n "${OUT}" ]]; then
+    if [[ "$(printf '%s' "${OUT}" | jq -s 'length' 2>/dev/null)" == "1" ]] \
+       && [[ "$(printf '%s' "${OUT}" | jq -r '.hookSpecificOutput.hookEventName' 2>/dev/null)" == "SessionStart" ]]; then
+      ONEOBJ="yes"
+      CTX="$(printf '%s' "${OUT}" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null)"
+    else
+      ONEOBJ="no"
+    fi
+  fi
 }
 
 echo "athena:slack self-test"
@@ -496,7 +524,7 @@ seed_inbox_fixtures() { # seed_inbox_fixtures <dm-messages-json> <channel-messag
   fixture_seq conversations.history 1 "{\"ok\":true,\"messages\":$1,\"response_metadata\":{\"next_cursor\":\"\"}}"
   fixture_seq conversations.history 2 "{\"ok\":true,\"messages\":$2,\"response_metadata\":{\"next_cursor\":\"\"}}"
 }
-seed_state() { printf '{"version":1,"channels":{"D0CODY":"1000.0","%s":"1000.0"}}' "${ENG_CHANNEL}" > "${CACHE}/inbox-state.json"; }
+seed_state() { printf '{"v":1,"channels":{"D0CODY":"1000.0","%s":"1000.0"},"seen_event_ids":[],"seen_keys":[]}' "${ENG_CHANNEL}" > "${STATE}"; }
 
 # 31. Nothing new: absolutely nothing printed.
 setup_case
@@ -513,10 +541,10 @@ seed_inbox_fixtures \
   "[{\"ts\":\"2000.1\",\"user\":\"${CODY}\",\"text\":\"ping one\"},{\"ts\":\"2000.2\",\"user\":\"${CODY}\",\"text\":\"ping two\"}]" \
   "[{\"ts\":\"2000.3\",\"user\":\"${CODY}\",\"text\":\"hey <@${BOT_USER}> look\"}]"
 run_hook
-if [[ "${OUT}" != *$'\n'* ]] \
-   && [[ "${OUT}" == "2 new Slack DM(s) and 1 mention(s) for Athena — run /athena:slack read-inbox" ]]; then
-  ok "hook: N>0 prints exactly one line with the right DM and mention counts"
-else bad "hook: N>0 prints exactly one line with the right DM and mention counts" "out='${OUT}'"; fi
+if [[ "${ONEOBJ}" == "yes" ]] \
+   && [[ "${CTX}" == "2 new Slack DM(s) and 1 mention(s) for Athena — run /athena:slack read-inbox" ]]; then
+  ok "hook: N>0 emits exactly one SessionStart object with the right DM and mention counts"
+else bad "hook: N>0 emits exactly one SessionStart object with the right DM and mention counts" "oneobj='${ONEOBJ}' ctx='${CTX}' out='${OUT}'"; fi
 
 # 33. It never prints a body, a sender or a channel name -- not on stdout and
 #     not into the log. A hook's output is injected before the user has spoken.
@@ -550,11 +578,11 @@ else bad "hook: the bot's own messages are ignored" "out='${OUT}'"; fi
 setup_case
 seed_caches; seed_state
 seed_inbox_fixtures "[{\"ts\":\"2000.1\",\"user\":\"${CODY}\",\"text\":\"unread\"}]" '[]'
-BEFORE="$(cat "${CACHE}/inbox-state.json")"
+BEFORE="$(cat "${STATE}")"
 run_hook
-if [[ "$(cat "${CACHE}/inbox-state.json")" == "${BEFORE}" ]]; then
+if [[ "$(cat "${STATE}")" == "${BEFORE}" ]]; then
   ok "hook: the inbox state file is left untouched (read-inbox owns it)"
-else bad "hook: the inbox state file is left untouched" "after=$(cat "${CACHE}/inbox-state.json")"; fi
+else bad "hook: the inbox state file is left untouched" "after=$(cat "${STATE}")"; fi
 
 echo
 echo "-- the hook: staleness -----------------------------------------------------"
@@ -565,8 +593,11 @@ seed_caches
 touch_ago 400 "${CHOME}/.claude/athena-slack-last-success"
 fixture conversations.list '{"ok":false,"error":"invalid_auth"}'
 run_hook
-if [[ "${OUT}" == *"has not succeeded in 6h"* ]]; then ok "hook: warns after 6h with no successful poll"
-else bad "hook: warns after 6h with no successful poll" "out='${OUT}' log='${HOOKLOG}'"; fi
+# F-9: the stale warning travels as the SAME well-formed SessionStart object,
+# never a bare text line into a JSON channel.
+if [[ "${ONEOBJ}" == "yes" ]] && [[ "${CTX}" == *"has not succeeded in 6h"* ]]; then
+  ok "hook: warns after 6h with no successful poll, as one SessionStart object"
+else bad "hook: warns after 6h with no successful poll, as one SessionStart object" "oneobj='${ONEOBJ}' ctx='${CTX}' out='${OUT}' log='${HOOKLOG}'"; fi
 
 # 38. ...and does not repeat it on the next prompt.
 rm -f "${CHOME}/.claude/athena-slack-last-poll"
@@ -617,10 +648,10 @@ seed_inbox_fixtures "[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"please 
 run_bin read-inbox
 if [[ "${OUT}" == *"please look at MR 42"* ]] \
    && [[ "${OUT}" == *"cody"* ]] \
-   && [[ "$(jq -r '.channels.D0CODY' "${CACHE}/inbox-state.json")" == "2000.5" ]]; then
+   && [[ "$(jq -r '.channels.D0CODY' "${STATE}")" == "2000.5" ]]; then
   ok "read-inbox: shows the body, resolves the sender, advances the state file"
 else bad "read-inbox: shows the body, resolves the sender, advances the state file" \
-  "out='${OUT}' state=$(cat "${CACHE}/inbox-state.json")"; fi
+  "out='${OUT}' state=$(cat "${STATE}")"; fi
 
 # 43. It labels the bodies as untrusted. This is the boundary between "Slack
 #     said something" and "someone asked Athena to do something".
@@ -637,26 +668,26 @@ else bad "read-inbox: bodies are fenced between an opening and a closing untrust
 setup_case
 seed_caches; seed_state
 seed_inbox_fixtures "[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"peek at me\"}]" '[]'
-BEFORE="$(cat "${CACHE}/inbox-state.json")"
+BEFORE="$(cat "${STATE}")"
 run_bin read-inbox --peek
-if [[ "${OUT}" == *"peek at me"* ]] && [[ "$(cat "${CACHE}/inbox-state.json")" == "${BEFORE}" ]]; then
+if [[ "${OUT}" == *"peek at me"* ]] && [[ "$(cat "${STATE}")" == "${BEFORE}" ]]; then
   ok "read-inbox: --peek shows messages without advancing the state file"
 else bad "read-inbox: --peek shows messages without advancing the state file" \
-  "out='${OUT}' state=$(cat "${CACHE}/inbox-state.json")"; fi
+  "out='${OUT}' state=$(cat "${STATE}")"; fi
 
 # 45. A conversation seen for the first time records where it is and reports
 #     nothing. Otherwise the first run after install announces the entire
 #     history of every DM at once.
 setup_case
 seed_caches
-rm -f "${CACHE}/inbox-state.json"
+rm -f "${STATE}" "${LEGACY}"
 seed_inbox_fixtures "[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"ancient history\"}]" '[]'
 run_bin read-inbox
 if [[ "${OUT}" != *"ancient history"* ]] \
-   && [[ "$(jq -r '.channels.D0CODY' "${CACHE}/inbox-state.json")" == "2000.5" ]]; then
+   && [[ "$(jq -r '.channels.D0CODY' "${STATE}")" == "2000.5" ]]; then
   ok "read-inbox: first sight of a conversation records its ts and reports nothing"
 else bad "read-inbox: first sight of a conversation records its ts and reports nothing" \
-  "out='${OUT}' state=$(cat "${CACHE}/inbox-state.json" 2>/dev/null)"; fi
+  "out='${OUT}' state=$(cat "${STATE}" 2>/dev/null)"; fi
 
 # 46. The incremental read is what `oldest` buys: the second scan asks only for
 #     what came after the recorded ts.
@@ -680,6 +711,7 @@ fixture conversations.list "${BIGLIST}"
 fixture conversations.history '{"ok":true,"messages":[],"response_metadata":{"next_cursor":""}}'
 set +e
 OUT="$(env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" SHIM_DIR="${SHIM_DIR}" \
+  SLACK_INBOX_STATE="${STATE}" SLACK_INBOX_LEGACY_STATE="${LEGACY}" \
   SLACK_INBOX_MAX_CHANNELS=3 "${BIN}/read-inbox" 2>&1)"
 set -e
 if [[ "$(calls_of conversations.history)" == "3" ]] && [[ "${OUT}" == *"capped"* ]]; then
@@ -742,19 +774,19 @@ else bad "inbox scan: a scan in which every conversation failed is an error, not
 #     message anyone ever sends into it is swallowed by the backlog rule.
 setup_case
 seed_caches
-rm -f "${CACHE}/inbox-state.json"
+rm -f "${STATE}" "${LEGACY}"
 fixture conversations.list '{"ok":true,"channels":[{"id":"D0EMPTY","user":"U1"}],"response_metadata":{"next_cursor":""}}'
 fixture conversations.history '{"ok":true,"messages":[],"response_metadata":{"next_cursor":""}}'
 run_bin read-inbox
-if [[ "$(jq -r '.channels.D0EMPTY' "${CACHE}/inbox-state.json" 2>/dev/null)" == "0" ]]; then
+if [[ "$(jq -r '.channels.D0EMPTY' "${STATE}" 2>/dev/null)" == "0" ]]; then
   ok "inbox scan: an empty conversation records a zero baseline, not nothing"
 else bad "inbox scan: an empty conversation records a zero baseline, not nothing" \
-  "state=$(cat "${CACHE}/inbox-state.json" 2>/dev/null)"; fi
+  "state=$(cat "${STATE}" 2>/dev/null)"; fi
 
 # 52. ...and the NEXT message in it is then reported.
 setup_case
 seed_caches
-printf '{"version":1,"channels":{"D0EMPTY":"0"}}' > "${CACHE}/inbox-state.json"
+printf '{"v":1,"channels":{"D0EMPTY":"0"},"seen_event_ids":[],"seen_keys":[]}' > "${STATE}"
 fixture conversations.list '{"ok":true,"channels":[{"id":"D0EMPTY","user":"U1"}],"response_metadata":{"next_cursor":""}}'
 fixture conversations.history "{\"ok\":true,\"messages\":[{\"ts\":\"3000.1\",\"user\":\"${CODY}\",\"text\":\"first ever message\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
 run_bin read-inbox
@@ -802,6 +834,155 @@ setup_case
 run_bin upload "${ENG_CHANNEL}" "${TMP}/empty${CASE_N}"
 if [[ "${RC}" != 0 ]] && ! any_curl; then ok "upload: an empty file is refused before any request"
 else bad "upload: an empty file is refused before any request" "rc=${RC}"; fi
+
+echo
+echo "-- DND-186: one dedupe set across file and API -----------------------------"
+
+# 56. THE CORE CROSS-SOURCE DROP. A message whose channel:ts is already in the
+#     shared seen_keys (put there by the file channel, or a prior API read) must
+#     NOT be reported again by the API scan. Without this the backstop
+#     double-reports everything the file path already delivered.
+setup_case
+seed_caches
+printf '{"v":1,"channels":{"D0CODY":"1000.0"},"seen_event_ids":[],"seen_keys":["D0CODY:2000.5"]}' > "${STATE}"
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","user":"U0AHNV4RJGP"}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.history "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"already delivered by the file channel\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+run_bin read-inbox
+if [[ "${OUT}" != *"already delivered by the file channel"* ]] \
+   && [[ "${OUT}" == *"0 new DM(s)"* ]]; then
+  ok "dedupe: a message whose channel:ts is in seen_keys is dropped by the API scan"
+else bad "dedupe: a message whose channel:ts is in seen_keys is dropped by the API scan" "out='${OUT}'"; fi
+
+# 57. ...and the SAME drop applies to the hook's count, so the doorbell is not
+#     rung for something the file channel already delivered.
+setup_case
+seed_caches
+printf '{"v":1,"channels":{"D0CODY":"1000.0"},"seen_event_ids":[],"seen_keys":["D0CODY:2000.5"]}' > "${STATE}"
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY"}],"response_metadata":{"next_cursor":""}}'
+fixture_seq conversations.history 1 "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"seen\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+run_hook
+if [[ -z "${OUT}" ]]; then ok "dedupe: the hook does not count a message already in seen_keys"
+else bad "dedupe: the hook does not count a message already in seen_keys" "out='${OUT}'"; fi
+
+# 58. THE CROSS-SOURCE ADD. read-inbox records each reported message's
+#     channel:ts in seen_keys, so the FILE reader will not re-report what the
+#     API just delivered. (read-inbox is the door; it owns the state advance.)
+setup_case
+seed_caches; seed_state
+seed_inbox_fixtures "[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"api delivered this one\"}]" '[]'
+run_bin read-inbox
+if [[ "${OUT}" == *"api delivered this one"* ]] \
+   && [[ "$(jq -r '.seen_keys | index("D0CODY:2000.5")' "${STATE}")" != "null" ]]; then
+  ok "dedupe: read-inbox adds a reported message's channel:ts to the shared seen_keys"
+else bad "dedupe: read-inbox adds a reported message's channel:ts to the shared seen_keys" \
+  "seen_keys=$(jq -c '.seen_keys' "${STATE}") out='${OUT}'"; fi
+
+# 59. THE HOOK NEVER ADDS to seen_keys -- doorbell, not door. If it did, the
+#     body would be marked seen before read-inbox ever showed it.
+setup_case
+seed_caches; seed_state
+seed_inbox_fixtures "[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"unread\"}]" '[]'
+run_hook
+if [[ "$(jq -r '.seen_keys | length' "${STATE}")" == "0" ]]; then
+  ok "dedupe: the hook does not add to seen_keys (read-inbox owns the state advance)"
+else bad "dedupe: the hook does not add to seen_keys" "seen_keys=$(jq -c '.seen_keys' "${STATE}")"; fi
+
+# 60. THE SHARED FILE IS NOT CLOBBERED. The file-channel reader owns offset and
+#     seen_event_ids; an API-side advance must preserve them (and any other key,
+#     e.g. rotated_at) verbatim, or it rewinds the file channel's consumption.
+setup_case
+seed_caches
+printf '{"v":1,"offset":819,"channels":{"D0CODY":"1000.0"},"seen_event_ids":["Ev123"],"seen_keys":[],"rotated_at":"2026-09-18T19:30:00Z"}' > "${STATE}"
+seed_inbox_fixtures "[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"advance me\"}]" '[]'
+run_bin read-inbox
+if [[ "$(jq -r '.offset' "${STATE}")" == "819" ]] \
+   && [[ "$(jq -r '.seen_event_ids | index("Ev123")' "${STATE}")" != "null" ]] \
+   && [[ "$(jq -r '.rotated_at' "${STATE}")" == "2026-09-18T19:30:00Z" ]] \
+   && [[ "$(jq -r '.channels.D0CODY' "${STATE}")" == "2000.5" ]]; then
+  ok "dedupe: an API advance preserves the file reader's offset/seen_event_ids/rotated_at"
+else bad "dedupe: an API advance preserves the file reader's offset/seen_event_ids/rotated_at" \
+  "state=$(cat "${STATE}")"; fi
+
+# 61. last_api_poll_at is stamped on a read, for the file reader's staleness
+#     reporting -- it is the producer-side liveness field the contract reserves.
+setup_case
+seed_caches; seed_state
+seed_inbox_fixtures '[]' '[]'
+run_bin read-inbox
+if [[ "$(jq -r '.last_api_poll_at // ""' "${STATE}")" == *"T"*"Z" ]]; then
+  ok "dedupe: read-inbox stamps last_api_poll_at"
+else bad "dedupe: read-inbox stamps last_api_poll_at" "state=$(cat "${STATE}")"; fi
+
+# 62. MIGRATION. A pre-DND-186 ~/.cache cache is migrated on first run: its
+#     per-conversation watermark is carried across, so a message already past
+#     that watermark is treated as known (not first-sight) and IS reported --
+#     which is exactly what distinguishes a migrated start from a clean one
+#     (case 45, where an unknown conversation reports nothing).
+setup_case
+seed_caches
+rm -f "${STATE}"
+printf '{"version":1,"channels":{"D0CODY":"1000.0"}}' > "${LEGACY}"
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","user":"U0AHNV4RJGP"}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.history "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"post-watermark message\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+run_bin read-inbox
+if [[ "${OUT}" == *"post-watermark message"* ]] \
+   && [[ "$(jq -r '.channels.D0CODY' "${STATE}")" == "2000.5" ]]; then
+  ok "migration: the legacy cache's watermark is carried into the shared state file"
+else bad "migration: the legacy cache's watermark is carried into the shared state file" \
+  "out='${OUT}' state=$(cat "${STATE}" 2>/dev/null)"; fi
+
+# 63. A MISSING state file (and no legacy) is a clean start, NOT an error: the
+#     hook completes and stays silent, exit 0. "missing vs wrong."
+setup_case
+seed_caches
+rm -f "${STATE}" "${LEGACY}"
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY"}],"response_metadata":{"next_cursor":""}}'
+fixture conversations.history "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"hi\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+run_hook
+if [[ -z "${OUT}" && "${RC}" == 0 ]] && [[ "${HOOKLOG}" != *rror* ]]; then
+  ok "missing state file is a clean start (first sight), not an error"
+else bad "missing state file is a clean start (first sight), not an error" "rc=${RC} out='${OUT}' log='${HOOKLOG}'"; fi
+
+echo
+echo "-- DND-186: the SessionStart marker family and contract --------------------"
+
+# 64. F-7: THE ATTEMPT MARKER IS STAMPED BEFORE THE NETWORK CALL, and a FAILING
+#     poll must NEVER stamp the success marker (the one the whole signal rests
+#     on). Remove both markers, run a failing poll: attempt present, success
+#     still absent.
+setup_case
+seed_caches
+rm -f "${CHOME}/.claude/athena-slack-last-success" "${CHOME}/.claude/athena-slack-last-poll"
+fixture conversations.list '{"ok":false,"error":"invalid_auth"}'
+run_hook
+if [[ -f "${CHOME}/.claude/athena-slack-last-poll" ]] \
+   && [[ ! -f "${CHOME}/.claude/athena-slack-last-success" ]]; then
+  ok "markers: a failing poll stamps the attempt marker but never the success marker"
+else bad "markers: a failing poll stamps the attempt marker but never the success marker" \
+  "attempt=$([[ -f "${CHOME}/.claude/athena-slack-last-poll" ]] && echo yes || echo no) success=$([[ -f "${CHOME}/.claude/athena-slack-last-success" ]] && echo yes || echo no)"; fi
+
+# 65. F-5: a MISSING success marker counts as stale, so a never-working setup
+#     warns on its very first attempt (no prior success to call the failure
+#     momentary against).
+setup_case
+seed_caches
+rm -f "${CHOME}/.claude/athena-slack-last-success" "${CHOME}/.claude/athena-slack-last-warn"
+fixture conversations.list '{"ok":false,"error":"invalid_auth"}'
+run_hook
+if [[ "${ONEOBJ}" == "yes" ]] && [[ "${CTX}" == *"has not succeeded in 6h"* ]]; then
+  ok "markers: a missing success marker counts as stale (warns on the first attempt)"
+else bad "markers: a missing success marker counts as stale (warns on the first attempt)" \
+  "oneobj='${ONEOBJ}' ctx='${CTX}' out='${OUT}'"; fi
+
+# 66. F-3 / the contract's silent path: a successful poll with nothing new emits
+#     NO STDOUT AT ALL and exits 0 -- never an empty or "nothing new" object.
+setup_case
+seed_caches; seed_state
+seed_inbox_fixtures '[]' '[]'
+run_hook
+if [[ -z "${OUT}" && "${RC}" == 0 ]]; then
+  ok "contract: a successful poll with nothing new produces no stdout, exit 0"
+else bad "contract: a successful poll with nothing new produces no stdout, exit 0" "rc=${RC} out='${OUT}'"; fi
 
 echo
 if [[ "${FAIL}" -eq 0 ]]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0; fi

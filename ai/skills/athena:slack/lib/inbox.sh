@@ -146,7 +146,8 @@ _inbox_drop_seen() {
     || printf '[]' > "$_ds_keys"
   if jq -c --slurpfile k "$_ds_keys" '
         ($k[0] // []) as $seen
-        | select(($seen | index(.channel + ":" + .ts)) | not)
+        | (.channel + ":" + .ts) as $key
+        | select(($seen | index($key)) | not)
       ' "$_ds_out" > "$_ds_out.tmp" 2>/dev/null; then
     mv "$_ds_out.tmp" "$_ds_out"
   else

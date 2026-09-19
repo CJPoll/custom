@@ -191,8 +191,10 @@ out of scope here.
 
 ## Tests
 
-`bash test/self-test.sh` — 55 cases, no network (curl is a PATH shim). Covers
+`bash test/self-test.sh` — 66 cases, no network (curl is a PATH shim). Covers
 the ok:false convention, the token never reaching argv or a URL, request shapes,
-pagination, 429 backoff, the users cache, unreadable conversations, and every
-branch of the hook and the inbox scan. `SABOTAGE_RECORDS.md` records the mutation that was watched to
-redden each of them.
+pagination, 429 backoff, the users cache, unreadable conversations, every branch
+of the hook and the inbox scan, the cross-source `seen_keys` dedupe (drop + add),
+the legacy-cache migration, and the SessionStart output contract and marker
+family. `SABOTAGE_RECORDS.md` records the mutation that was watched to redden
+each of them.
