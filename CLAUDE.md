@@ -1,5 +1,8 @@
 # Custom Tools Repository
 
+**Kind: living normative document.** Amended in place, per *Documentation
+conventions* → the living/dated rule below.
+
 ## Project Overview
 This repository contains personal development tools and configurations:
 - **dotfiles/**: Personal dotfiles and configurations
@@ -55,7 +58,11 @@ Contains AI-related resources:
 - **skills/**: Claude Code skills (symlinked to `~/.claude/skills`)
 - **contracts/**: normative cross-project contracts — interfaces this machine's
   projects implement against, owned here rather than by any one consumer (e.g.
-  `athena-inbox.md`, the local multi-tenant message facility)
+  `athena-inbox.md`, the local multi-tenant message facility). A project opts
+  into the inbox through a machine-local registry entry under
+  `$ATHENA_INBOX_ROOT/projects/` (default `~/.local/share/athena`), keyed by the
+  realpath of the repo's git common dir — **never** a file committed to the
+  consumer repo
 - **prompts/**: Legacy prompts (deprecated, migrated to skills)
 - Default `CLAUDE.md` template for Elixir projects
 - Other AI workflow configurations
@@ -114,6 +121,23 @@ skills/agents. (Conventions adapted from riddler's howie/wurk harness.)
   renumbering and a stale one is greppable. Numbers inside a file's own body are
   fine (a renumber edits that file anyway); a number outside follows the name as
   decoration only ("the command-resolution step, currently step 2").
+- **A living normative document is amended in place; a dated record is not.**
+  The rule below governs **dated records** — a proposal, a journal entry, an
+  ADR, a design page, anything whose value is that it says what was true on its
+  date. A **living normative document** (today: `ai/contracts/*.md`, this file,
+  and `ai/CLAUDE.md`) is the
+  opposite: a reader implements from its current text, so a superseded rule is
+  replaced rather than left standing beside its replacement. Such a document
+  announces each amendment **that supersedes an existing rule** with **one**
+  bold dated label at the definitional mention — the place a reader grepping the superseded term lands
+  — saying what the rule was, what replaced it, and why. **Purely additive
+  content — a new section, a rule where there was none — carries no label**;
+  there is no superseded text for a reader to be warned about, and labelling
+  additions turns the marker into noise that hides the supersessions. The
+  document states
+  which kind it is in its own header; if it does not, treat it as a dated
+  record. Dates in these labels are **UTC**, so a label can legitimately read
+  one day ahead of the local date it was written on.
 - **Never rewrite a dated document to match later reality; ANNOTATE it.** A
   reader who lands in a 2026-09-16 proposal or journal entry must learn what was
   true then. Corrections are added as a new paragraph whose first token is a
