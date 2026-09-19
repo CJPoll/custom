@@ -1999,6 +1999,31 @@ assert_eq "D-23 and it is NOT acked -- an unattributable message is not consumed
   "$(ls "${MDIR}/.acked/20260903T100000Z-003-no-from-key.md" 2>/dev/null | wc -l | tr -d ' ')"
 assert_contains "D-23 it is reported as non-conformant" "not conformant messages" "${OUT}"
 
+# A TAB IN A FRONTMATTER VALUE MUST NOT TRUNCATE IT.
+#
+# The parser emits "<key>\t<value>" and the value is PEER-WRITTEN, so taking
+# the field after the first tab truncates, invisibly. A peer sending
+# `from: athena<TAB>anything` parsed as exactly "athena" -- this channel's own
+# identity -- so the message was classed as the reader's OWN outgoing mail,
+# never acked, and re-listed on every read forever: a wedge the SENDER chose,
+# with nothing anywhere saying why. Fifth instance of the delimiter class.
+setup_mail_case
+# The fixture claims the READER'S OWN identity followed by a tab. Truncated,
+# it becomes exactly "athena" and trips never-ack-your-own; intact, it is a
+# different string and the message acks normally. `from` is a LABEL, not
+# authentication, so a peer may write anything there -- which is exactly why
+# the reader must compare the whole value.
+printf -- '---\nfrom: athena\tspoofed\nto: athena\nsent_at: 2026-09-05T10:00:00Z\n---\n\ntab in from\n' \
+  > "${MDIR}/20260905T100000Z-005-tab-in-from.md"
+FM="$(printf -- '---\nfrom: athena\tspoofed\nto: athena\nsent_at: x\n---\n\nb\n' | maildir_parse_frontmatter)"
+assert_eq "a tab in a frontmatter value is preserved, not truncated" "athena	spoofed" \
+  "$(jq -r '.from' <<<"${FM}")"
+OUT="$(cd "${MPROJ}" && "${BIN}/read-inbox" mail 2>&1)"
+assert_not_contains "and the message is NOT misclassed as the reader's own" \
+  "carry YOUR identity" "${OUT}"
+assert_eq "so it is acked rather than wedging the channel forever" "1" \
+  "$(ls "${MDIR}/.acked/20260905T100000Z-005-tab-in-from.md" 2>/dev/null | wc -l | tr -d ' ')"
+
 # D-23: sent_at DISAGREEING with the filename, through the read path. Two
 # copies of one fact that disagree cannot both be believed, and there is no
 # way to tell which is wrong.

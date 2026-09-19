@@ -362,3 +362,66 @@ Closed by declaring the suite, and by generalizing the gate's own
 "every self-test on disk is declared" rule from `ai/hooks/*.self-test.sh` to
 every place this repo puts a suite. That rule immediately found a second dark
 suite — `athena:slack`'s 55 cases — which is now declared too.
+
+### The review round (same date)
+
+The standing `athena-diff-critic`, plus a `code-reviewer` and an `adr-reviewer`
+over the branch diff. Between them they found six defects sabotage could not
+have reached, and every fix was then sabotaged in turn.
+
+| # | Mutation (the defect, re-applied) | Cases reddened | First failure |
+|---|---|---|---|
+| T22 | `inbox.sh`: the manager recomputes the dedupe key from raw fields | 2 | `FAIL  a poisoned ts cannot inject a second seen_keys entry via the ack` |
+| T24 | `inbox.sh`: `never_delivered` dropped from the read | 3 | `FAIL  a never-delivered channel does NOT read as 'nothing new'` |
+| T25 | `maildir.sh`: a frontmatter value truncated at the first tab | **0 → 3** | see below |
+| T26 | `fs.sh`: the `date -d` capability check removed | 3 | `FAIL  a date(1) with no -d is REPORTED, not a silent no-op` |
+| T27 | `inbox.sh`: a state file created with nothing to record | 1 | `FAIL  reading a never-delivered channel writes no state file` |
+
+**The one that mattered: a guard bypassable by recomputing its input.**
+`logchan_scan` discards a composed `channel:ts` dedupe key carrying a newline
+or tab, and its comment calls itself the third instance of that class. But it
+keeps `ts` and `channel` **raw** on the message record — correctly, they are
+for display and go inside the fence — and `_inbox_read_log` then **rebuilt the
+key from those raw fields, without the guard**. The seen-sets travel as
+newline-delimited lists, so `"ts": "111\nD0:999"` became two `seen_keys`
+entries and the sender chose which future message was silently suppressed: no
+count, no `unreadable`, no error. The domain case was green throughout, exactly
+as the maildir one was. A guard that can be bypassed by recomputing its input
+is not a guard, so the scan now emits the key it used and there is nothing left
+to recompute. **Fourth instance of the delimiter class; the fifth is T25.**
+
+**T25 — the frontmatter tab.** The parser emits `<key>\t<value>` and took the
+field after the first tab, but the value is **peer-written**. A peer sending
+`from: athena<TAB>anything` parsed as exactly `athena` — the reader's own
+identity — so the message was classed as the reader's own outgoing mail, never
+acked, and re-listed on every read forever: a wedge the **sender** chose. The
+first fixture measured a zero because it truncated to `peer` rather than to the
+identity, which proved the truncation but not the consequence; the fixture now
+claims the reader's own identity, and all three cases redden.
+
+**What the reviewers found that 27 mutations could not.** Every one of these is
+a check that was **absent**, or present but shadowed by another check firing
+first — and mutating a check that does not exist is not a thing you can do:
+
+| Finding | Why no mutation reaches it |
+|---|---|
+| `maildir_validate_message` had **no production caller** — D-22/D-23 held in the domain and nowhere a message travels | Deleting the rule reddened the domain cases, which pass. Nothing asserted it at the boundary, so nothing could tell enforced from unwired. |
+| `maildir_is_unread` admits any non-dot name, so a peer-delivered `notes.md` was read, rendered, then refused by the ack — re-reported every read **forever**, with the refusal naming no filename | Two correct-looking checks in the wrong order. Each mutates to a red; the *combination* is the defect. |
+| `inbox_lock_try` returned 0 for both "newly acquired" and "already ours", so the ack's trailing sweep released a lock it never took | Harmless *today* because that sweep sits after the state write — so it is a property of **call ordering**, not of the lock code, and no mutation expresses "correct for a reason that will not survive a reorder". |
+| Framework called an adapter directly (`inbox_lock_release` in the EXIT trap) and re-parsed the resolved record with its own `awk -F'\t'` | A layering violation changes no behaviour. It is the *next* delimiter bug's entry point, not this one's. |
+| A `date(1)` without `-d` disables retention permanently and silently | The mutation is the *environment*, not the code. Nothing on this machine could have produced it. |
+
+### The standing review question, second pass
+
+Applied again after the first sweep, it kept paying:
+
+- a declared `log` channel whose file has **never existed** read as "nothing
+  new" through `read-inbox` — `inbox-status` had it right, and the read is the
+  command an operator reaches for when a channel looks quiet, so it was where
+  the distinction was most needed and least present;
+- a **non-conformant file** in a maildir was neither reported nor readable —
+  silence, or a permanent wedge, depending on where you looked;
+- a **missing `date -d`** turned the whole retention subsystem into a no-op
+  that reports success on every ack.
+
+Three more instances of one shape: *the absent thing reads as the fine thing.*
