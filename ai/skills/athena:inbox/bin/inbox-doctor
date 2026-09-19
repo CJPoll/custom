@@ -135,7 +135,13 @@ N_NA="$(count_state na)"
 # state -- exactly the noise the hook's opted-in gate exists to prevent. The
 # exit code is unaffected either way (it is `fail`-driven), and a hand run still
 # prints them.
-INFO_SET=" undeclared-entry collision server-instance "
+#
+# A COLLISION is deliberately NOT here: two entries resolving to one surface
+# means one tenant's mail lands in the other's file -- a live cross-tenant
+# mix-up, not bookkeeping -- so it counts against `healthy` and the hook does
+# surface it. (The contract lists collision as a separate "MAY report" case, not
+# under the informational carve-out.)
+INFO_SET=" undeclared-entry server-instance "
 N_INFO="$(printf '%s\n' "${FINDINGS}" | awk -F'\t' -v set="${INFO_SET}" '$1=="warn" && index(set," "$2" ")>0{n++} END{print n+0}')"
 
 if [ "${JSON}" -eq 1 ]; then

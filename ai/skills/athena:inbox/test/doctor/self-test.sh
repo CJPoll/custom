@@ -224,6 +224,11 @@ printf '{"offset":0,"rotated_at":"2020-01-01T00:00:00Z"}' > "${STATE}"; chmod 60
 CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"
 assert_no_finding "rotated+quiet: NOT reported as never-received" "${CH}" warn "channel:slack" "never received"
 assert_finding "rotated+quiet: overdue .1 still reported" "${CH}" warn "channel:slack" "past its 14-day sweep window"
+# a .1 whose rotated_at is UNKNOWN (older reader, or unparseable) -> na, named,
+# never a silent "fine".
+printf '{"offset":0}' > "${STATE}"; chmod 600 "${STATE}"   # no rotated_at
+CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"
+assert_finding "unknown rotated_at .1 -> na, named" "${CH}" na "channel:slack" "rotation time is unknown"
 rm -f "${STATE}" "${ATHENA_INBOX_ROOT}/ch-slack.jsonl.1"
 printf '{"v":1,"ts":"1","channel":"c","event_id":"e"}\n' > "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"; chmod 600 "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"
 

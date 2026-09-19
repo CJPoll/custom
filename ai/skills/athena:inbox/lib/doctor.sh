@@ -556,12 +556,23 @@ doctor_check_log_channel() {
           "the machine clock was set back or ${state##*/} was hand-edited; rotation will not fire while rotated_at is ahead of now. Correct the clock or reset rotated_at in ${state##*/}."
     fi
   fi
-  # A .jsonl.1 more than 14 days past its rotation is residue the ack-path sweep
-  # structurally cannot reach (D12(b)) -- the residue a channel whose designated
-  # consumer never runs again leaves behind.
-  if [ -e "${one}" ] && [ "$(logchan_should_sweep "${rot_epoch:-}" "${now}")" = "yes" ]; then
-    doctor_finding warn "channel:${chan}" "channel \"${chan}\" has a rotated generation (${one##*/}) past its 14-day sweep window" \
-      "the designated consumer has not run since rotation, so the ack-path sweep never fired. Run a read on this channel as the designated consumer, or remove ${one} by hand; the doctor never sweeps."
+  # A .jsonl.1 is residue the ack-path sweep structurally cannot reach (D12(b))
+  # -- the residue a channel whose designated consumer never runs again leaves
+  # behind. THREE outcomes, and "could not decide" is not "fine":
+  #   * rotated_at absent or unparseable -> na, NAMING the file. `.1` left by an
+  #     older reader carries no rotated_at, so the window cannot be judged;
+  #     reporting `ok`/nothing here would be exactly the missing-looks-empty
+  #     silence this tool exists to break.
+  #   * over 14 days past rotated_at -> warn (overdue residue);
+  #   * within the window -> nothing (a fresh rotation is healthy).
+  if [ -e "${one}" ]; then
+    if [ -z "${rot_epoch:-}" ]; then
+      doctor_finding na "channel:${chan}" "channel \"${chan}\" has a rotated generation (${one##*/}) whose rotation time is unknown, so its 14-day sweep window cannot be judged" \
+        "an older reader left ${one##*/} with no (or an unparseable) rotated_at in ${state##*/}. A read on this channel as the designated consumer stamps rotated_at and starts the clock; the doctor never removes ${one##*/} for you."
+    elif [ "$(logchan_should_sweep "${rot_epoch}" "${now}")" = "yes" ]; then
+      doctor_finding warn "channel:${chan}" "channel \"${chan}\" has a rotated generation (${one##*/}) past its 14-day sweep window" \
+        "the designated consumer has not run since rotation, so the ack-path sweep never fired. Run a read on this channel as the designated consumer, or remove ${one} by hand; the doctor never sweeps."
+    fi
   fi
 
   # The consumer lock: a dead-pid lock is REPORTED reapable, never reaped.
