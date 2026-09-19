@@ -18,7 +18,41 @@
 # announce every DM in the workspace's history at once, and the first thing the
 # skill ever did would be to cry wolf.
 
-SLACK_INBOX_STATE="${SLACK_INBOX_STATE:-$SLACK_CACHE_DIR/inbox-state.json}"
+# THE STATE FILE IS SHARED WITH THE FILE CHANNEL (athena:inbox), on purpose.
+# The two Slack sources -- this Web API backstop and the athena:inbox file
+# reader -- carry the same messages under different identities (the file line
+# has an `event_id`, the API poll does not; both have `channel` and `ts`). If
+# they kept separate state they would double-report each other's messages. So
+# there is ONE state file, derived from the log channel's `.jsonl` path by a
+# suffix swap and living under $ATHENA_INBOX_ROOT, holding a single cross-source
+# seen-set keyed on `channel + ":" + ts` (Slack's true message identity).
+#
+# This skill (the producer-side backstop) owns exactly two keys in that file:
+# the `channels` per-conversation API watermark (moved here from the old
+# ~/.cache/athena-slack/inbox-state.json so the two sources cannot disagree) and
+# `last_api_poll_at`. It READS `seen_keys` to drop anything the file channel
+# already delivered, and ADDS to `seen_keys` what it reports. Every other key
+# (`offset`, `seen_event_ids`, `v`, `rotated_at`) belongs to the athena:inbox
+# file reader and is preserved verbatim on write -- never clobbered. The contract
+# (ai/contracts/athena-inbox.md, "Ordering and duplicates") reserves
+# `last_api_poll_at`/`channels` for exactly this producer.
+SLACK_INBOX_ROOT="${ATHENA_INBOX_ROOT:-$HOME/.local/share/athena}"
+# The log channel this backstop shares state with. Its state file is derived by
+# the SAME suffix swap the athena:inbox file reader uses (its names_state_name:
+# <name>.jsonl -> <name>.state.json), so this is not a hardcoded path -- point
+# SLACK_INBOX_JSONL at a real per-project channel (e.g. walt_ui-slack.jsonl) and
+# the two sources share the one state file the reader actually consumes. The
+# DEFAULT is the flat in-root channel the ticket names; on a machine whose file
+# channel is a per-project <project>-slack.jsonl, set SLACK_INBOX_JSONL (or
+# SLACK_INBOX_STATE outright) to that channel. See SKILL.md, "The backstop".
+SLACK_INBOX_JSONL="${SLACK_INBOX_JSONL:-$SLACK_INBOX_ROOT/slack-inbox.jsonl}"
+SLACK_INBOX_STATE="${SLACK_INBOX_STATE:-${SLACK_INBOX_JSONL%.jsonl}.state.json}"
+# The pre-DND-186 location. Migrated on first run (its per-conversation
+# watermark is carried across); a MISSING one is a clean start, not an error.
+SLACK_INBOX_LEGACY_STATE="${SLACK_INBOX_LEGACY_STATE:-$SLACK_CACHE_DIR/inbox-state.json}"
+# The bound on both dedupe ring buffers, matching athena:inbox's LOGCHAN_RING_CAP
+# so the two producers agree on the file's shape.
+SLACK_INBOX_RING_CAP="${SLACK_INBOX_RING_CAP:-500}"
 # Requests per tick are roughly 2 + (channels scanned). Tier 3 gives ~50/min,
 # and the hook runs at most once per 5 minutes, so 25 leaves comfortable room
 # for whatever else the session is doing with the same token.
@@ -28,11 +62,42 @@ SLACK_INBOX_HISTORY_LIMIT="${SLACK_INBOX_HISTORY_LIMIT:-50}"
 INBOX_CAPPED=0
 INBOX_SKIPPED=0
 
+# The empty state: the new schema, cross-source-ready. `channels` is the API
+# watermark; `seen_keys`/`seen_event_ids` are the shared dedupe rings.
+_inbox_state_empty() { printf '{"v":1,"channels":{},"seen_event_ids":[],"seen_keys":[]}'; }
+
 _inbox_state_read() {
   if [ -f "$SLACK_INBOX_STATE" ]; then
-    cat "$SLACK_INBOX_STATE"
+    if [ -f "$SLACK_INBOX_LEGACY_STATE" ]; then
+      # The shared file exists but may have been created by the FILE reader,
+      # which writes v/offset/seen_event_ids/seen_keys and NO `channels` -- so
+      # keying migration on "shared file absent" would skip it here and treat
+      # every conversation as first sight, silently swallowing the DMs/mentions
+      # between the last cache read and the upgrade (exactly what the backstop
+      # exists to recover). So fold the legacy per-conversation watermark into
+      # any channel the shared file does not already carry. `$lc + current`
+      # means a watermark already advanced here WINS; legacy only fills gaps.
+      # This fold is a PERMANENT gap-filler, not a one-shot: the legacy cache is
+      # left in place, so it runs on every read while both files exist. That is
+      # idempotent (current always wins for known channels) and cheap; it costs
+      # one extra file read until the legacy cache is deleted by hand.
+      jq -c --slurpfile leg "$SLACK_INBOX_LEGACY_STATE" '
+        (($leg[0].channels) // {}) as $lc
+        | .channels = ($lc + (.channels // {}))
+      ' "$SLACK_INBOX_STATE" 2>/dev/null || cat "$SLACK_INBOX_STATE"
+    else
+      cat "$SLACK_INBOX_STATE"
+    fi
+  elif [ -f "$SLACK_INBOX_LEGACY_STATE" ]; then
+    # First run after the state moved into the shared inbox-root file: carry the
+    # per-conversation API watermark across so a message already seen by the old
+    # cache is not re-announced. The dedupe rings start empty. A parse failure of
+    # the legacy file falls back to a clean start rather than aborting the scan.
+    jq -c '{v: 1, channels: (.channels // {}), seen_event_ids: [], seen_keys: []}' \
+      "$SLACK_INBOX_LEGACY_STATE" 2>/dev/null || _inbox_state_empty
   else
-    printf '{"version":1,"channels":{}}'
+    # A missing state file is a clean start, NOT an error.
+    _inbox_state_empty
   fi
 }
 
@@ -88,6 +153,34 @@ inbox_scan() {
 
   _inbox_scan_list dm "$SLACK_TMPDIR/dm-ids" "$_is_out"
   _inbox_scan_list mention "$SLACK_TMPDIR/member-ids" "$_is_out"
+
+  # Cross-source dedupe. Drop anything the FILE channel already delivered: its
+  # reader records each message's `channel:ts` in the shared `seen_keys`, and a
+  # message delivered there must not be re-reported here. Runs for the hook (so
+  # its count is not inflated) and for read-inbox (so a body is not shown twice)
+  # alike; read-inbox is what later adds these keys back for the file reader.
+  _inbox_drop_seen "$_is_out"
+  return 0
+}
+
+# _inbox_drop_seen <scan-output-file>
+# Rewrites the scan output, removing any message whose `channel:ts` is already
+# in the shared seen_keys set.
+_inbox_drop_seen() {
+  _ds_out="$1"
+  [ -s "$_ds_out" ] || return 0
+  _ds_keys="$SLACK_TMPDIR/seen_keys.json"
+  _inbox_state_read | jq -c '.seen_keys // []' > "$_ds_keys" 2>/dev/null \
+    || printf '[]' > "$_ds_keys"
+  if jq -c --slurpfile k "$_ds_keys" '
+        ($k[0] // []) as $seen
+        | (.channel + ":" + .ts) as $key
+        | select(($seen | index($key)) | not)
+      ' "$_ds_out" > "$_ds_out.tmp" 2>/dev/null; then
+    mv "$_ds_out.tmp" "$_ds_out"
+  else
+    rm -f "$_ds_out.tmp" 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -159,19 +252,57 @@ _inbox_scan_list() {
   return 0
 }
 
-# Merge the newest-observed timestamps into the state file. Called only by
-# read-inbox, never by the hook.
+# inbox_state_advance [reported-jsonl]
+# Merge the newest-observed timestamps into the state file, record the reported
+# messages' `channel:ts` in the shared cross-source `seen_keys`, and stamp the
+# backstop's last-poll time. Called only by read-inbox (the door), NEVER by the
+# hook (the doorbell) -- a hook that advanced state would mark messages seen
+# before anyone read them.
+#
+# Read-modify-write that PRESERVES every key this producer does not own
+# (`offset`, `seen_event_ids`, `v`, `rotated_at`): they belong to the
+# athena:inbox file reader, which shares this one file. Rewriting the file from
+# scratch would rewind the file channel's consumption or drop its intra-file
+# dedupe ring.
+#
+# Concurrency: the write is atomic (temp file + rename), so the file is never
+# left corrupt or half-written. It does NOT take the file channel's consumer
+# lock, so a read-inbox racing a simultaneous file-channel ack is last-writer-
+# wins on any field they both change. Both are interactive "door" events that
+# rarely overlap; coordinating on athena:inbox's `<channel>.consumer.lock` is
+# out of this skill's scope and is raised as a follow-up.
 inbox_state_advance() {
-  slack_cache_dir
-  if [ ! -s "$SLACK_TMPDIR/latest.tsv" ]; then return 0; fi
+  _isa_reported="${1:-}"
+  # $ATHENA_INBOX_ROOT, not the ~/.cache dir: this file is the shared one.
+  _isa_dir="${SLACK_INBOX_STATE%/*}"
+  mkdir -p "$_isa_dir" 2>/dev/null || slack_die "cannot create $_isa_dir"
+
+  # channel:ts of everything reported this read, one per line, for seen_keys.
+  _isa_keys="$SLACK_TMPDIR/reported-keys"
+  : > "$_isa_keys"
+  if [ -n "$_isa_reported" ] && [ -s "$_isa_reported" ]; then
+    jq -r 'select((.channel // "") != "" and (.ts // "") != "")
+           | .channel + ":" + .ts' "$_isa_reported" >> "$_isa_keys" 2>/dev/null || true
+  fi
+
+  _isa_now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
   _inbox_state_read \
-    | jq --rawfile tsv "$SLACK_TMPDIR/latest.tsv" '
-        .channels = (
-          ($tsv | split("\n") | map(select(length > 0) | split("\t"))
-                | map({key: .[0], value: .[1]}) | from_entries)
-          as $new
-          | .channels + $new
-        )
+    | jq --rawfile tsv "$SLACK_TMPDIR/latest.tsv" \
+         --rawfile keys "$_isa_keys" \
+         --arg now "$_isa_now" \
+         --argjson cap "$SLACK_INBOX_RING_CAP" '
+        .v = (.v // 1)
+        | .channels = (
+            (.channels // {})
+            + ($tsv | split("\n") | map(select(length > 0) | split("\t"))
+                    | map({key: .[0], value: .[1]}) | from_entries)
+          )
+        | .seen_keys = (
+            ((.seen_keys // []) + ($keys | split("\n") | map(select(length > 0))))
+            | .[-$cap:]
+          )
+        | .last_api_poll_at = $now
       ' > "$SLACK_INBOX_STATE.tmp" || slack_die "could not update inbox state"
   mv "$SLACK_INBOX_STATE.tmp" "$SLACK_INBOX_STATE"
   return 0

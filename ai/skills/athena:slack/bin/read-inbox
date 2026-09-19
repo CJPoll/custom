@@ -67,5 +67,7 @@ else
 fi
 
 if [ "$PEEK" != "true" ]; then
-  inbox_state_advance
+  # Pass the reported messages so their `channel:ts` join the shared seen_keys,
+  # keeping the file channel from re-reporting what the API just delivered.
+  inbox_state_advance "$NEW"
 fi

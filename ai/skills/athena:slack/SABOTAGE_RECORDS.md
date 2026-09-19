@@ -221,3 +221,59 @@ FAIL  upload: the bot token is not sent to the pre-signed upload URL
 Same trap as the `Ecto.Query.CastError` row in `backend/CLAUDE.md`: when a
 sabotage reddens something, check that the red is a claim about a value and not
 a refusal to run.
+
+---
+
+## 2026-09-19 — DND-186: one dedupe set across file and API, SessionStart
+
+- **Domain:** athena:slack
+- **Date:** 2026-09-19
+- **Code under test:** `lib/inbox.sh` (shared-state read/migrate, the
+  `seen_keys` cross-source drop, `inbox_state_advance`), `bin/read-inbox`,
+  `ai/hooks/athena-slack-poll.sh` (now a SessionStart hook)
+- **Suite run:** `bash test/self-test.sh` (no network — curl is a PATH shim)
+- **Baseline:** `VERDICT: PASS (68 cases)` (55 pre-existing + 13 new: cases 56–68)
+- **Runner:** 13 mutations, one at a time, full suite after each; exact-substring
+  replace asserting the anchor occurs **exactly once**; restored from an
+  **in-memory byte copy** (never `git checkout` — the test edits are uncommitted
+  relative to the mutated file during the run) — full runner in the report.
+
+### What the new cases prove
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S41 | `lib/inbox.sh`: `_inbox_drop_seen`'s `select(($seen \| index($key)) \| not)` → `select(true)` (the cross-source drop keeps everything) | 2 | `FAIL dedupe: a message whose channel:ts is in seen_keys is dropped by the API scan` / `FAIL dedupe: the hook does not count a message already in seen_keys` |
+| S42 | `lib/inbox.sh`: `inbox_state_advance` stops appending the reported `$keys` to `seen_keys` | 1 | `FAIL dedupe: read-inbox adds a reported message's channel:ts to the shared seen_keys` |
+| S43 | `athena-slack-poll.sh`: the hook subshell also calls `inbox_state_advance "$NEW"` (doorbell advances state) | 2 | `FAIL hook: the inbox state file is left untouched` / `FAIL dedupe: the hook does not add to seen_keys` |
+| S44 | `lib/inbox.sh`: the advance's jq starts from `{}` instead of the piped state (no read-modify-write) | 1 | `FAIL dedupe: an API advance preserves the file reader's offset/seen_event_ids/rotated_at` |
+| S45 | `lib/inbox.sh`: `\| .last_api_poll_at = $now` dropped | 1 | `FAIL dedupe: read-inbox stamps last_api_poll_at` |
+| S46 | `lib/inbox.sh`: the legacy-migration read points at `/dev/null` (watermark not carried) | 1 | `FAIL migration: the legacy cache's watermark is carried into the shared state file` |
+| S47 | `athena-slack-poll.sh`: the pre-network `: > "$MARKER"` (attempt stamp) → `true` | 2 | `FAIL hook: a failed poll still stamps the marker` / `FAIL markers: a failing poll stamps the attempt marker but never the success marker` |
+| S48 | `athena-slack-poll.sh`: the success-stamp guard `if [ "$POLL_OK" -eq 1 ]` → `if true` (a failure stamps success) | 3 | `FAIL hook: warns after 6h …` / `FAIL markers: a failing poll … never the success marker` / `FAIL markers: a missing success marker counts as stale …` |
+| S49 | `athena-slack-poll.sh`: `warn_text_if_stale`'s first guard flipped so an ABSENT success marker counts as fresh | 1 | `FAIL markers: a missing success marker counts as stale (warns on the first attempt)` |
+| S50 | `athena-slack-poll.sh`: `emit`'s `hookEventName:"SessionStart"` → `"UserPromptSubmit"` (malformed object) | 3 | `FAIL hook: N>0 emits exactly one SessionStart object …` / `FAIL hook: warns after 6h …, as one SessionStart object` / `FAIL markers: a missing success marker counts as stale …` |
+| S51 | `athena-slack-poll.sh`: `[ -n "$MESSAGE" ] \|\| exit 0` → `\|\| MESSAGE=" "` (emits even with nothing to say) | 8 | `FAIL hook: zero new prints absolutely nothing, rc=0` (+7 more silent-path cases) |
+| S52 | `lib/inbox.sh`: the `SLACK_INBOX_STATE` default drops the `%.jsonl` strip (`${SLACK_INBOX_JSONL}.state.json`) so the path is no longer the reader's suffix swap | 1 | `FAIL state path: derived by suffix swap from SLACK_INBOX_JSONL (matches names_state_name)` |
+| S53 | `lib/inbox.sh`: `_inbox_state_read` stops folding the legacy `channels` into a shared state file the reader already wrote (`.channels = (.channels // {})`) | 1 | `FAIL migration: legacy watermark is folded in even when the reader already wrote the shared file` |
+
+All thirteen mutations (S41–S53) reddened the intended case(s); after each, the file was
+restored from its in-memory byte copy and the suite returned to
+`VERDICT: PASS (68 cases)`.
+
+### Input classes the fixtures now contain (not just code mutations)
+
+Four of the new cases are about an INPUT the earlier suite never had:
+
+- **A `seen_keys` set already carrying the message's `channel:ts`** (cases 56/57)
+  — the cross-source state the file channel produces. Before DND-186 no fixture
+  ever pre-populated `seen_keys`, so nothing exercised the drop.
+- **A state file carrying the file reader's own keys** (`offset`,
+  `seen_event_ids`, `rotated_at`; case 60) — the shared-file reality. A naive
+  advance that rewrote the file from scratch passed every pre-DND-186 case and
+  silently rewound the file channel; S44 is its regression.
+- **A legacy `{"version":1,…}` cache and no new state file** (case 62) — the
+  first-run-after-upgrade input. Distinguished from a clean start (case 45) by
+  whether the post-watermark message is reported.
+- **A shared state file the FILE reader already wrote (no `channels`) plus a
+  legacy cache** (case 68) — the upgrade-after-the-reader-arrived input, where
+  keying migration on "shared file absent" would silently swallow the backlog.
