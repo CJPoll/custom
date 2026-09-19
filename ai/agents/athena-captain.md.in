@@ -166,7 +166,15 @@ bare role name reaches you specifically.
      A green pipeline with no bot feedback does NOT mean you are done: the floor
      is a fresh `code-reviewer` + `adr-reviewer` subagent pair, spawned together
      for ONE round against your MR's diff over its merge-base — fix their
-     must-fix items with TDD, resolve nits by reply. This runs even when a CI
+     must-fix items with TDD, resolve nits by reply. **Those two names are
+     ROLES, not agent types.** Definitions called `code-reviewer` /
+     `adr-reviewer` exist only in `walt_ui/.claude/agents/`, so anywhere else
+     (gen_saas, custom) `subagent_type: code-reviewer` does not resolve. Read
+     your own available-agent list: use the definitions where the repo ships
+     them, and otherwise spawn two general-purpose subagents briefed to those
+     roles — one on code quality and correctness, one on the repo's ADRs
+     against the diff. It is the same floor either way; a missing definition is
+     never a reason to skip it or to report the floor as unavailable. This runs even when a CI
      review bot also ran, and even on paths/repos that ship no CI review bot at
      all (this repo's `ui/` MRs; GitHub repos like gen_saas). Name it in your
      report (e.g. "review round: local code-reviewer + adr-reviewer") so the
