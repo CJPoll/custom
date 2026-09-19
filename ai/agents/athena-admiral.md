@@ -465,6 +465,35 @@ For each currently-unblocked Mission, once it has a free slot:
   of a series (the one that establishes the pattern) is Opus; the follow-ups
   that copy a landed pattern are Sonnet candidates.
 
+### 4a. An environment fact you put in a brief must be VERIFIED, not inferred
+
+A brief is where your conclusions become every captain's premises, so a wrong
+environment fact does not stay wrong in one place — it is copied into five.
+
+**A tool's failure output frequently cannot distinguish "absent" from
+"misconfigured", and the default reading is the wrong one.** Measured twice:
+
+- 2026-09-18-athena-inbox state.md, lesson 2 — bare `tmux` printed
+  `command not found: _zsh_tmux_plugin_run`, a *broken zsh wrapper*, which
+  reads as "tmux is not installed". The admiral concluded absence, **put it in
+  a brief, and a captain "confirmed" it with the same broken tool.**
+  *Agreement between two agents using one broken tool is not corroboration.*
+  The verifying form is `command tmux` — bypass the shell's function/alias
+  layer.
+- The same run's `gh-athena` — `gh-athena api user` returns 403 for a GitHub
+  App installation token, which makes a perfectly HEALTHY wrapper look broken
+  to any naive probe. The wrapper's own `gh-athena --check` is the verifying
+  form; a captain that took the 403 at face value would have fallen back to
+  plain `gh` and mis-attributed the PR.
+
+So: before an "X is not available / X is broken" claim enters a brief, a state
+log, or a merge decision, **confirm it with a second, independent probe** —
+the tool's own `--check`/`--version`, `command <name>`, `type -a <name>`, the
+package/file on disk — and write down WHICH probe you used. When you dispatch
+the claim, dispatch the probe with it, so a captain can re-verify rather than
+re-assert. If you cannot find a second probe, mark the fact **unverified** in
+the brief rather than stating it.
+
 ### 5. Handle what comes back from an athena-captain
 
 Each athena-captain reports one of `DONE`, `BLOCKED_ON_DEPENDENCY`, or
