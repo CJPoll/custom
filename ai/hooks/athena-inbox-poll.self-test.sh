@@ -132,14 +132,60 @@ assert_one_json_object() {
 }
 
 SENTINEL="ZQXSENTINELDONOTLEAK"
+# The registry's project-name grammar is lowercase-only, so a fixture that
+# needs the sentinel in a FILENAME under projects/ needs this variant.
+SENTINEL_LC="zqxsentineldonotleak"
 
-# plant_log_lines  -- two unread Slack lines, one carrying the sentinel body.
+# plant_log_lines  -- two unread Slack lines, EVERY one carrying the sentinel
+# body. The sentinel was originally on the first line only, and the sabotage run
+# measured what that costs: a mutation that appended `tail -n1` of the channel
+# file to the notice -- a message body in the pre-prompt position, the one thing
+# F-2 exists to forbid -- ran GREEN, because the line it leaked was the one
+# without the sentinel. A leak test whose canary sits on one row of the fixture
+# tests one row, not the claim.
 plant_log_lines() {
   printf '{"v":1,"event_id":"Ev1","channel":"D01","ts":"1700000001.1","text":"%s"}\n' "${SENTINEL}" \
     > "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
-  printf '{"v":1,"event_id":"Ev2","channel":"D01","ts":"1700000002.1","text":"second"}\n' \
+  printf '{"v":1,"event_id":"Ev2","channel":"D01","ts":"1700000002.1","text":"second %s"}\n' "${SENTINEL}" \
     >> "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
 }
+
+# ---------------------------------------------------------------------------
+# A stub `inbox-status`, in a copied repo tree.
+#
+# Every case above runs against the REAL inbox-status, which is the right
+# default -- a stub that answers the way the hook expects cannot test the hook's
+# assumptions. But three of this hook's claims are about inputs the real
+# inbox-status never produces: stdout that is non-empty AND unusable, stderr
+# that carries a peer-chosen string, and a read-inbox that EXISTS. The sabotage
+# run measured all three as zeros. The hook resolves its wrapped command from
+# its own BASH_SOURCE, so a copy of the hook in a scratch tree picks up whatever
+# is placed beside it -- no PATH games, and the real skill is untouched.
+# ---------------------------------------------------------------------------
+STUB_HOOK=""
+stub_repo() { # <inbox-status script body>  [--with-read-inbox]
+  local stub="${CASE_DIR}/stubrepo"
+  mkdir -p "${stub}/ai/hooks" "${stub}/ai/skills/athena:inbox/bin"
+  cp -- "${HOOK}" "${stub}/ai/hooks/athena-inbox-poll.sh"
+  printf '%s\n' "$1" > "${stub}/ai/skills/athena:inbox/bin/inbox-status"
+  chmod +x "${stub}/ai/skills/athena:inbox/bin/inbox-status"
+  if [ "${2:-}" = "--with-read-inbox" ]; then
+    printf '#!/usr/bin/env bash\nexit 0\n' > "${stub}/ai/skills/athena:inbox/bin/read-inbox"
+    chmod +x "${stub}/ai/skills/athena:inbox/bin/read-inbox"
+  fi
+  STUB_HOOK="${stub}/ai/hooks/athena-inbox-poll.sh"
+}
+
+run_stub_hook() {
+  assert_fake_home
+  OUT="$(cd "${REPO}" && printf '%s' "${HOOK_STDIN}" | "${STUB_HOOK}" "$@" 2>"${CASE_DIR}/stderr")"
+  RC=$?
+  ERR="$(cat "${CASE_DIR}/stderr" 2>/dev/null)"
+}
+
+STUB_OK='#!/usr/bin/env bash
+printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidates":0}'"'"'
+exit 0'
 
 # plant_mail  -- one unread message whose SLUG is peer-chosen prose carrying an
 # imperative. A status line must never become "1 new message: urgent-run-this".
@@ -391,6 +437,203 @@ for m in athena-inbox-last-poll athena-inbox-last-success athena-inbox-last-warn
   if grep -q "${m}" "${HOOK}"; then ok "F-10 marker [${m}] has its own path"
   else bad "F-10 marker [${m}] has its own path" "not referenced by the hook"; fi
 done
+
+echo "== R8: a broken chain is noticed, and the notice still names nothing =="
+
+# A channel that CANNOT be counted is a broken chain, and reporting it as zero
+# would read as "no mail". It is surfaced -- as a COUNT. The hook is the
+# counts-only surface; inbox-status is the surface that says which.
+setup_case
+register '{"tenant-private-name":{"kind":"log","path":"p-slack.jsonl","dedupe":["event_id"],"schema_v":[1]}}'
+printf 'x\n' > "${CASE_DIR}/elsewhere.jsonl"
+ln -s "${CASE_DIR}/elsewhere.jsonl" "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "R8 a channel that cannot be counted is surfaced, not shown as zero" \
+  "1 declared channel(s) could not be counted" "${CTX}"
+assert_not_contains "R8 the health clause counts and does not name the channel" \
+  "tenant-private-name" "${CTX}"
+
+# "Nobody ever registered the writer" and "nothing new arrived" are identical on
+# disk. They must not be identical in the notice: the first is a broken setup,
+# the second is a good morning.
+setup_case
+register "${LOG_CHANNEL}"
+run_hook
+assert_contains "R8 a channel that has NEVER received anything is surfaced" \
+  "never received anything" "$(context_of "${OUT}")"
+
+# A run that succeeded but found a broken channel must NOT clear the warn
+# marker: clearing it would defeat the rate limit for the fault that is still
+# happening, and re-warn at every session start.
+setup_case
+register "${LOG_CHANNEL}"
+touch -t "$(date -d '7 hours ago' +%Y%m%d%H%M)" "${HOME}/.claude/athena-inbox-last-warn"
+run_hook
+assert_file "R8 a successful-but-unhealthy run does not clear the warn marker" \
+  "${HOME}/.claude/athena-inbox-last-warn"
+
+# ...and is itself rate-limited, by the same marker.
+setup_case
+register "${LOG_CHANNEL}"
+touch "${HOME}/.claude/athena-inbox-last-warn"
+run_hook
+assert_eq "R8 the health warning is rate-limited like any other warning" "" "${OUT}"
+
+# Private state, by construction. A 0644 marker or reason log under ~/.claude is
+# not a disaster, but the inbox family's whole discipline is 0600/0700 and a
+# umask this file forgets is how that erodes.
+#
+# The fixture is the QUIET path (an empty-but-delivered channel), not the
+# actionable one: the actionable path has nothing to log -- it says its piece on
+# stdout -- so asserting the log's mode there asserts the mode of a file that
+# does not exist, which `stat` reports as the empty string and which an
+# `assert_eq` against "600" would only ever have caught by luck.
+setup_case
+register "${LOG_CHANNEL}"
+: > "${ATHENA_INBOX_ROOT}/p-slack.jsonl"
+run_hook
+assert_eq "the attempt marker is created 0600" "600" \
+  "$(stat -c %a "${HOME}/.claude/athena-inbox-last-poll" 2>/dev/null)"
+assert_eq "the success marker is created 0600" "600" \
+  "$(stat -c %a "${HOME}/.claude/athena-inbox-last-success" 2>/dev/null)"
+assert_eq "the reason log is created 0600" "600" \
+  "$(stat -c %a "${HOME}/.claude/athena-inbox-poll.log" 2>/dev/null)"
+
+echo "== R12: a registry entry that could not be read is surfaced, not skipped =="
+
+# The sharpest form of the standing question. `projects/` is multi-tenant: an
+# entry that fails to parse is DROPPED from the candidate set, and the session
+# whose entry it was then looks exactly like a session that never opted in --
+# zero channels, exit 0, nothing wrong. inbox-status reports the drop as
+# `failed_candidates`; the hook's job is to SAY it, because the one reader who
+# can fix it is the one starting this session. Sabotage S9 (a measured zero)
+# deleted the whole clause and the suite stayed green.
+#
+# The clause counts and does not name: every other entry under projects/ belongs
+# to a different tenant.
+setup_case
+register "${LOG_CHANNEL}"
+plant_log_lines
+# A LOWERCASE name, deliberately: the registry's own name grammar rejects
+# uppercase, so an entry called `ZQX....json` is not a failed candidate -- it is
+# not a candidate at all, and this case would assert nothing while looking like
+# it asserted everything.
+printf 'not json at all' > "${ATHENA_INBOX_ROOT}/projects/${SENTINEL_LC}.json"
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "R12 an unreadable registry entry is surfaced" \
+  "1 registry entry(s) unreadable" "${CTX}"
+assert_contains "R12 the notice says it may be this project's" \
+  "may be this project" "${CTX}"
+assert_not_contains "R12 the clause counts and does not name the other tenant" \
+  "${SENTINEL_LC}" "${OUT}"
+assert_contains "R12 the real mail is still counted alongside the health clause" \
+  "2 new in slack" "${CTX}"
+
+echo "== R9: an ANSWER THAT CANNOT BE READ is a failed poll, not an empty one =="
+
+# The standing question for this epic: what happens when the input is MISSING
+# rather than wrong? "inbox-status said nothing usable" and "inbox-status said
+# zero" are the same silence on stdout, and they must NOT be the same state --
+# the first leaves the success marker unstamped so the staleness warning can
+# eventually fire, the second stamps it. Every fixture above reaches the failing
+# path through EMPTY stdout, so the shape check on a NON-EMPTY answer was, until
+# this case, protecting nothing (sabotage S15, a measured zero: replacing the
+# whole jq shape test with `true` left the suite green).
+
+setup_case
+register "${LOG_CHANNEL}"
+stub_repo '#!/usr/bin/env bash
+printf "not a status document at all\n"
+exit 0'
+run_stub_hook
+# Not "no stdout": with no success marker at all this is F-5's never-worked
+# setup, which warns on the first attempt -- correctly. The claim is that it is
+# a WARNING and not a COUNT.
+assert_not_contains "R9 non-empty but unparseable output is not a count" \
+  "new in" "${OUT}"
+assert_contains "R9 non-empty but unparseable output warns instead" \
+  "has not succeeded recently" "$(context_of "${OUT}")"
+assert_eq "R9 non-empty but unparseable output still exits 0" "0" "${RC}"
+assert_no_file "R9 non-empty but unparseable output does NOT stamp success" \
+  "${HOME}/.claude/athena-inbox-last-success"
+assert_contains "R9 the unusable answer is logged as a fixed reason" \
+  "no usable status document" "$(hook_log)"
+
+# Well-formed JSON is not the same as a status document. An object whose
+# `channels` is not an array would make every count expression below it silently
+# evaluate to nothing -- the exact shape of a green run that reports no mail.
+setup_case
+register "${LOG_CHANNEL}"
+stub_repo '#!/usr/bin/env bash
+printf '"'"'{"channels":{"slack":2}}'"'"'
+exit 0'
+run_stub_hook
+assert_not_contains "R9 a JSON object of the wrong shape is not a count" "new in" "${OUT}"
+assert_no_file "R9 a JSON object of the wrong shape does NOT stamp success" \
+  "${HOME}/.claude/athena-inbox-last-success"
+
+# The stub proves the control: the SAME harness with a well-formed document does
+# produce a count. Without this, all three assertions above would also hold for
+# a stub that simply never ran.
+setup_case
+register "${LOG_CHANNEL}"
+stub_repo "${STUB_OK}"
+run_stub_hook
+assert_contains "R9 the control: a well-formed document IS counted" "2 new in slack" \
+  "$(context_of "${OUT}")"
+assert_file "R9 the control: a usable answer stamps success" \
+  "${HOME}/.claude/athena-inbox-last-success"
+
+echo "== R10: the wrapped command's stderr is discarded, never relayed =="
+
+# inbox-status refuses on stderr with paths and channel names in the clause.
+# None of that belongs in this hook's notice OR in its log, and discarding the
+# stream is the structural guarantee rather than a promise. Sabotage S23 (a
+# measured zero) relayed that stderr into the log and the suite stayed green,
+# because no fixture put anything identifiable on it.
+setup_case
+register "${LOG_CHANNEL}"
+stub_repo '#!/usr/bin/env bash
+printf "refusing: '"${SENTINEL}"'\n" >&2
+printf '"'"'{"channels":[{"name":"slack","kind":"log","new":2}],"failed_candidates":0}'"'"'
+exit 1'
+run_stub_hook
+assert_not_contains "R10 the wrapped command's stderr does not reach stdout" \
+  "${SENTINEL}" "${OUT}"
+assert_not_contains "R10 the wrapped command's stderr does not reach this hook's stderr" \
+  "${SENTINEL}" "${ERR}"
+assert_not_contains "R10 the wrapped command's stderr does not reach the reason log" \
+  "${SENTINEL}" "$(hook_log)"
+assert_contains "R10 a partial success is still counted (rc is not the signal)" \
+  "2 new in slack" "$(context_of "${OUT}")"
+
+echo "== R11: the notice points at a step that EXISTS =="
+
+# An instruction an agent cannot act on is worse than no instruction, and
+# read-inbox ships with a later ticket. Both branches are asserted: F-1's
+# `contains "read-inbox"` passes on EITHER branch (the not-installed sentence
+# names it too), so it was never protecting the switch -- sabotage S16, a
+# measured zero.
+setup_case
+register "${LOG_CHANNEL}"
+stub_repo "${STUB_OK}"
+run_stub_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "R11 with read-inbox absent the notice says so" "not installed yet" "${CTX}"
+assert_not_contains "R11 with read-inbox absent the notice does not tell anyone to run it" \
+  "Run athena:inbox read-inbox" "${CTX}"
+
+setup_case
+register "${LOG_CHANNEL}"
+stub_repo "${STUB_OK}" --with-read-inbox
+run_stub_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "R11 with read-inbox present the notice names the command" \
+  "Run athena:inbox read-inbox" "${CTX}"
+assert_not_contains "R11 with read-inbox present the not-installed sentence is gone" \
+  "not installed yet" "${CTX}"
 
 echo "== F-11: registration through the registry, never by hand =="
 
