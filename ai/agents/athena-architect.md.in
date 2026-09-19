@@ -132,6 +132,39 @@ to proceed, record the assumption in the spec's assumptions section, mark it
 **UNRESOLVED — ACCESS CONTROL**, choose the most restrictive interpretation,
 and surface it in your report to the caller.
 
+### A supersession sweeps the tickets, not just the design
+
+When a decision replaces a mechanism — a lookup key, a file location, a
+protocol, an interface — the contract and the code get updated because someone
+is actively editing them. **The already-written ticket bodies do not**, and they
+are what the captains actually implement from. A ticket still describing the
+deleted mechanism does not fail loudly; it produces a captain faithfully
+rebuilding the thing the decision removed. Stale spec text fails the same way a
+stale key does (`~/.claude/CLAUDE.md` → *A failed lookup must never look like an
+empty one*): it matches nothing and says nothing.
+
+So, in the same pass as any supersession you author or ratify:
+
+1. **Name the greppable tokens** the old mechanism is known by — the deleted
+   filename, the old field, the old term.
+2. **Grep every ticket in the epic for them**, `Todo` and `In Progress` alike,
+   not only the ones you are currently designing.
+3. **Correct each body by appending the correction** (per *Documentation
+   conventions*: annotate, never rewrite a dated record), and **relay
+   immediately** to the captain of any ticket already `In Progress` — that one
+   cannot wait for its next read.
+
+Measured 2026-09-18-athena-inbox (`reports/architect-three-decisions.md`,
+*READ THIS FIRST*): DND-202 moved tenancy from a committed `.athena-inbox.json`
+descriptor at the git *toplevel* to a registry entry keyed on the git *common
+dir*, and amended both the contract and the code. DND-184 — **`In Progress` at
+the time** — still specified "the descriptor at this session's git toplevel",
+the one key the contract rejects by name, so implementing the ticket as written
+would have given every worktree session zero channels, exit 0: verbatim the
+dark-channel bug two follow-up PRs had just been spent on, re-entering through
+the spec rather than the code. DND-190 carried the same dead text, and four
+more tickets had to be swept before dispatch.
+
 @include arch/5-bucket
 
 @include arch/tdd-workflow
