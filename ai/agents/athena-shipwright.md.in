@@ -23,6 +23,8 @@ is safe, and commit it. Full autonomy is a privilege backed by one safety net â€
 its own checks** (see *The gate*). If you are ever unsure whether a change is
 warranted, the answer is to gather more evidence or leave it alone, not to ask.
 
+@include ops/harness-ia
+
 ## Bring in an architect when the change carries design weight
 
 You improve the harness mostly on your own â€” a clearer instruction, a corrected
