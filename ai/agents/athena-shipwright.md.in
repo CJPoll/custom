@@ -236,23 +236,32 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   clobber, and were unrun by the gate until DND-209.
 - Every `scripts/test/**/self-test.sh` — DISCOVERED (globbed), never
   hand-declared, so a future suite under `scripts/test/` is covered with zero
-  manual wiring step (DND-209: `scripts/test/athena-inbox-client/self-test.sh`,
-  42 cases + a sabotage run, shipped by DND-189 and ran automatically nowhere —
-  `harness-gate` was 10/10 green and would have stayed green with every
-  `scripts/` suite deleted). This is also how `scripts/setup-athena-inbox-client
-  --self-test` ends up covered: it runs that same file, declared in the
-  runner's `SELF_TEST_DELEGATES` map so it isn't ALSO run as a separate
-  installer entry (same suite, one label). `scripts/setup-inbox-registry
-  --self-test` delegates the same way, to the already-listed
-  `ai/inbox/test/self-test.sh`. The runner prints the discovered count in its
-  normal output (`scripts/test self-tests discovered: N`) so a drop to zero is
-  visible rather than a silently-shorter PASS list; its `--self-test` proves
-  the discovery mechanism itself works — against a throwaway fixture tree,
-  never the real `scripts/test/` — by planting a deliberately failing stub,
-  confirming it turns red, then fixing/removing it and confirming it turns
-  green again; and it FAILS if any `scripts/setup-*` advertising a
-  `--self-test` is neither declared nor delegated, so a future installer
-  cannot ship an unrun suite either.
+  manual wiring step, **provided its entry point is named exactly
+  `self-test.sh`** — that filename is the whole discovery contract; a suite
+  shipped as e.g. `scripts/test/foo/tests.sh` is NOT discovered by the glob
+  (DND-209: `scripts/test/athena-inbox-client/self-test.sh`, 42 cases + a
+  sabotage run, shipped by DND-189 and ran automatically nowhere — `harness-gate`
+  was 10/10 green and would have stayed green with every `scripts/` suite
+  deleted). This is also how `scripts/setup-athena-inbox-client --self-test`
+  ends up covered: it runs that same file, declared in the runner's
+  `SELF_TEST_DELEGATES` map so it isn't ALSO run as a separate installer entry
+  (same suite, one label). `scripts/setup-inbox-registry --self-test`
+  delegates the same way, to the already-listed `ai/inbox/test/self-test.sh`.
+  The runner prints the discovered count in its normal output (`scripts/test
+  self-tests discovered: N`) and FAILS outright on zero (this repo always has
+  committed suites, so zero means the glob broke, not that there is nothing to
+  run); it also WARNS (non-blocking, since a helper script may legitimately
+  live there) about any other executable `.sh` under `scripts/test/` not named
+  `self-test.sh`, so a misnamed suite is at least visible. Its `--self-test`
+  proves the discovery mechanism itself works — against a throwaway fixture
+  tree, never the real `scripts/test/` — by planting a deliberately failing
+  stub, confirming it turns red, then fixing/removing it and confirming it
+  turns green again, PLUS an end-to-end check that `harness-gate --list`
+  actually lists the real discovered suite (catching a regression in the
+  `CHECKS = STATIC_CHECKS + scripts_self_test_checks` composition itself); and
+  it FAILS if any `scripts/setup-*` advertising a `--self-test` is neither
+  declared nor delegated, so a future installer cannot ship an unrun suite
+  either.
 - `ai/bin/harness-gate --self-test` — the runner itself (not in its own CHECKS;
   it would recurse). Run it when you touch the gate's composition.
 - Any skill or script self-test relevant to what you changed.

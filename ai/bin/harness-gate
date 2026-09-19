@@ -91,6 +91,20 @@ end
 
 CHECKS = (STATIC_CHECKS + scripts_self_test_checks).freeze
 
+# The discovery CONTRACT is the exact filename `self-test.sh` — anything else
+# under scripts/test/ (a suite named tests.sh, foo_test.sh, ...) is invisible
+# to the glob with no count change to notice. Flag it so a misnamed suite is
+# visible instead of silently unrun (helper scripts a real self-test.sh
+# `source`s or execs are expected to live here too, so this WARNS rather than
+# fails the gate — it cannot tell a stray suite from a deliberate helper).
+def stray_test_scripts(root = CUSTOM_DIR)
+  Dir.glob(File.join(root, "scripts/test/**/*.sh"))
+     .reject { |p| p.end_with?("/self-test.sh") }
+     .select { |p| File.executable?(p) }
+     .map { |p| p.sub("#{root}/", "") }
+     .sort
+end
+
 FAIL_TAIL_LINES = 20
 
 # Run one check with stdin CLOSED (a check that reads stdin must never inherit
@@ -117,8 +131,31 @@ end
 
 def run_gate
   scripts_found = discover_scripts_self_tests
-  puts "scripts/test self-tests discovered: #{scripts_found.size}" \
-       "#{scripts_found.empty? ? ' (none on disk — verify the glob, not just the count)' : ''}"
+  puts "scripts/test self-tests discovered: #{scripts_found.size}"
+
+  # A DROP TO ZERO is exactly the failure mode this ticket exists to close —
+  # this repo has committed scripts/test/**/self-test.sh suites in every
+  # checkout (they are source, not environment-dependent config), so finding
+  # none means the glob or CUSTOM_DIR resolution broke, not that there is
+  # legitimately nothing to run. Fail loud instead of a silently-shorter PASS.
+  if scripts_found.empty?
+    warn "harness-gate: FAILED — discovered ZERO scripts/test/**/self-test.sh, " \
+         "but this repo has committed suites there."
+    warn "  Fix: this means discover_scripts_self_tests (ai/bin/harness-gate) " \
+         "or CUSTOM_DIR resolution is broken, or scripts/test/ was moved/" \
+         "renamed without updating the glob — a real gap, not something to " \
+         "suppress. Restore the suites or the glob before committing."
+    return 1
+  end
+
+  strays = stray_test_scripts
+  unless strays.empty?
+    warn "harness-gate: NOTE — executable .sh file(s) under scripts/test/ not " \
+         "named self-test.sh, so NOT discovered/run: #{strays.join(', ')}"
+    warn "  Fix: if any of these is meant to be a self-test entry point, " \
+         "rename it to self-test.sh (the only name harness-gate discovers); " \
+         "if it's a helper another self-test.sh sources/execs, no action needed."
+  end
 
   missing = missing_executables
   unless missing.empty?
@@ -298,7 +335,38 @@ def run_self_test
     end
   end
 
-  # 7. run_one reports PASS/FAIL correctly and closes stdin.
+  # 7. Composition, end to end: invoke the REAL `harness-gate --list` as a
+  #    subprocess against the real repo (safe — it only lists, never runs the
+  #    checks) and assert the real discovered suite actually reaches `CHECKS`
+  #    and its printed output. This is the non-tautological check case 5
+  #    can't be: case 5 proves discover_scripts_self_tests works in isolation,
+  #    but nothing there would notice `CHECKS = (STATIC_CHECKS +
+  #    scripts_self_test_checks).freeze` losing its `+ scripts_self_test_checks`
+  #    term, since CHECKS and the fixture calls are otherwise independent of
+  #    that line. A real subprocess exercises the actual composition.
+  list_ok, list_out = run_one(%w[ai/bin/harness-gate --list])
+  unless list_ok
+    warn "self-test: FAIL — `harness-gate --list` itself exited non-zero"
+    ok = false
+  end
+  real_suites = discover_scripts_self_tests
+  real_suites.each do |relpath|
+    name = relpath.sub(%r{\Ascripts/test/}, "").sub(%r{/self-test\.sh\z}, "")
+    unless list_out.include?("scripts self-test: #{name}")
+      warn "self-test: FAIL — `harness-gate --list` did not list the real " \
+           "discovered suite #{relpath.inspect} (composition at CHECKS = " \
+           "STATIC_CHECKS + scripts_self_test_checks may be broken)"
+      ok = false
+    end
+  end
+  unless list_out.include?("(#{real_suites.size} of them discovered under " \
+                            "scripts/test/**/self-test.sh)")
+    warn "self-test: FAIL — `harness-gate --list`'s discovered-count summary " \
+         "does not match discover_scripts_self_tests"
+    ok = false
+  end
+
+  # 8. run_one reports PASS/FAIL correctly and closes stdin.
   Dir.mktmpdir("harness-gate-selftest") do |dir|
     passing = File.join(dir, "pass.sh")
     failing = File.join(dir, "fail.sh")
