@@ -984,6 +984,29 @@ if [[ -z "${OUT}" && "${RC}" == 0 ]]; then
   ok "contract: a successful poll with nothing new produces no stdout, exit 0"
 else bad "contract: a successful poll with nothing new produces no stdout, exit 0" "rc=${RC} out='${OUT}'"; fi
 
+# 67. THE STATE PATH IS DERIVED, NOT HARDCODED. With no SLACK_INBOX_STATE set,
+#     the state file is the channel's .jsonl with the suffix swapped to
+#     .state.json -- the SAME rule athena:inbox's names_state_name uses, which is
+#     the only thing that makes the "one shared file" real for a per-project
+#     channel. Point SLACK_INBOX_JSONL at foo-slack.jsonl and the state must land
+#     at foo-slack.state.json beside it, not at a fixed slack-inbox.state.json.
+setup_case
+seed_caches
+JDIR="${CHOME}/jroot"; mkdir -p "${JDIR}"
+seed_inbox_fixtures "[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"derive me\"}]" '[]'
+# Deliberately NO SLACK_INBOX_STATE: the derivation from SLACK_INBOX_JSONL is
+# exactly what is under test.
+set +e
+env HOME="${CHOME}" PATH="${SHIMBIN}:${PATH}" SHIM_DIR="${SHIM_DIR}" \
+  SLACK_INBOX_JSONL="${JDIR}/foo-slack.jsonl" \
+  "${BIN}/read-inbox" >/dev/null 2>&1
+set -e
+if [[ -f "${JDIR}/foo-slack.state.json" ]] \
+   && [[ ! -f "${JDIR}/foo-slack.jsonl.state.json" ]]; then
+  ok "state path: derived by suffix swap from SLACK_INBOX_JSONL (matches names_state_name)"
+else bad "state path: derived by suffix swap from SLACK_INBOX_JSONL (matches names_state_name)" \
+  "ls: $(ls "${JDIR}" 2>/dev/null | tr '\n' ' ')"; fi
+
 echo
 if [[ "${FAIL}" -eq 0 ]]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0; fi
 echo "VERDICT: FAIL (${FAIL} of $((PASS+FAIL)) cases)"; exit 1

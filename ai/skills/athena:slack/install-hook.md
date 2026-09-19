@@ -27,7 +27,8 @@ Monitor loop.
 ~/.claude/skills/athena:slack/bin/whoami
 
 # 2. The hook runs clean and says nothing when there is nothing to say.
-sh ~/.claude/skills/athena:slack/hooks/athena-slack-poll.sh; echo "rc=$?"
+#    (~/.claude/hooks is a symlink to the repo's ai/hooks/.)
+sh ~/.claude/hooks/athena-slack-poll.sh; echo "rc=$?"
 
 # 3. Force the next run to actually poll (the marker is a 5-minute rate limit).
 rm -f ~/.claude/athena-slack-last-poll

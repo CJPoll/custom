@@ -42,8 +42,9 @@
 # already delivered) and never writes it.
 #
 # GUARD-MESSAGE CONVENTION. This hook has no deny path: it emits a notice or
-# stays quiet, and it cannot fail a turn. It lives under the skill, not
-# ai/hooks/, so check-guard-messages does not scan it; the `Fix:` in its
+# stays quiet, and it cannot fail a turn. It lives under ai/hooks/, so
+# check-guard-messages does scan it, and it is EXEMPT there with a reason (same
+# species as main-session-policy.sh / athena-inbox-poll.sh). The `Fix:` in its
 # staleness notice is guidance for whoever is diagnosing the silence, not a
 # denial.
 

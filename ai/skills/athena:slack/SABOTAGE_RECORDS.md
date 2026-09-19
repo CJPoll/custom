@@ -232,7 +232,7 @@ a refusal to run.
   `seen_keys` cross-source drop, `inbox_state_advance`), `bin/read-inbox`,
   `ai/hooks/athena-slack-poll.sh` (now a SessionStart hook)
 - **Suite run:** `bash test/self-test.sh` (no network — curl is a PATH shim)
-- **Baseline:** `VERDICT: PASS (66 cases)` (55 pre-existing + 11 new: cases 56–66)
+- **Baseline:** `VERDICT: PASS (67 cases)` (55 pre-existing + 12 new: cases 56–67)
 - **Runner:** 12 mutations, one at a time, full suite after each; exact-substring
   replace asserting the anchor occurs **exactly once**; restored from an
   **in-memory byte copy** (never `git checkout` — the test edits are uncommitted
@@ -253,14 +253,15 @@ a refusal to run.
 | S49 | `athena-slack-poll.sh`: `warn_text_if_stale`'s first guard flipped so an ABSENT success marker counts as fresh | 1 | `FAIL markers: a missing success marker counts as stale (warns on the first attempt)` |
 | S50 | `athena-slack-poll.sh`: `emit`'s `hookEventName:"SessionStart"` → `"UserPromptSubmit"` (malformed object) | 3 | `FAIL hook: N>0 emits exactly one SessionStart object …` / `FAIL hook: warns after 6h …, as one SessionStart object` / `FAIL markers: a missing success marker counts as stale …` |
 | S51 | `athena-slack-poll.sh`: `[ -n "$MESSAGE" ] \|\| exit 0` → `\|\| MESSAGE=" "` (emits even with nothing to say) | 8 | `FAIL hook: zero new prints absolutely nothing, rc=0` (+7 more silent-path cases) |
+| S52 | `lib/inbox.sh`: the `SLACK_INBOX_STATE` default drops the `%.jsonl` strip (`${SLACK_INBOX_JSONL}.state.json`) so the path is no longer the reader's suffix swap | 1 | `FAIL state path: derived by suffix swap from SLACK_INBOX_JSONL (matches names_state_name)` |
 
-All twelve mutations reddened the intended case(s); after each, the file was
+All twelve mutations (S41–S52) reddened the intended case(s); after each, the file was
 restored from its in-memory byte copy and the suite returned to
 `VERDICT: PASS (66 cases)`.
 
 ### Input classes the fixtures now contain (not just code mutations)
 
-Two of the new cases are about an INPUT the earlier suite never had:
+Three of the new cases are about an INPUT the earlier suite never had:
 
 - **A `seen_keys` set already carrying the message's `channel:ts`** (cases 56/57)
   — the cross-source state the file channel produces. Before DND-186 no fixture

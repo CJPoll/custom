@@ -37,7 +37,16 @@
 # (ai/contracts/athena-inbox.md, "Ordering and duplicates") reserves
 # `last_api_poll_at`/`channels` for exactly this producer.
 SLACK_INBOX_ROOT="${ATHENA_INBOX_ROOT:-$HOME/.local/share/athena}"
-SLACK_INBOX_STATE="${SLACK_INBOX_STATE:-$SLACK_INBOX_ROOT/slack-inbox.state.json}"
+# The log channel this backstop shares state with. Its state file is derived by
+# the SAME suffix swap the athena:inbox file reader uses (its names_state_name:
+# <name>.jsonl -> <name>.state.json), so this is not a hardcoded path -- point
+# SLACK_INBOX_JSONL at a real per-project channel (e.g. walt_ui-slack.jsonl) and
+# the two sources share the one state file the reader actually consumes. The
+# DEFAULT is the flat in-root channel the ticket names; on a machine whose file
+# channel is a per-project <project>-slack.jsonl, set SLACK_INBOX_JSONL (or
+# SLACK_INBOX_STATE outright) to that channel. See SKILL.md, "The backstop".
+SLACK_INBOX_JSONL="${SLACK_INBOX_JSONL:-$SLACK_INBOX_ROOT/slack-inbox.jsonl}"
+SLACK_INBOX_STATE="${SLACK_INBOX_STATE:-${SLACK_INBOX_JSONL%.jsonl}.state.json}"
 # The pre-DND-186 location. Migrated on first run (its per-conversation
 # watermark is carried across); a MISSING one is a clean start, not an error.
 SLACK_INBOX_LEGACY_STATE="${SLACK_INBOX_LEGACY_STATE:-$SLACK_CACHE_DIR/inbox-state.json}"
@@ -233,8 +242,16 @@ _inbox_scan_list() {
 #
 # Read-modify-write that PRESERVES every key this producer does not own
 # (`offset`, `seen_event_ids`, `v`, `rotated_at`): they belong to the
-# athena:inbox file reader, which shares this one file. Clobbering them would
-# rewind the file channel's consumption or drop its intra-file dedupe ring.
+# athena:inbox file reader, which shares this one file. Rewriting the file from
+# scratch would rewind the file channel's consumption or drop its intra-file
+# dedupe ring.
+#
+# Concurrency: the write is atomic (temp file + rename), so the file is never
+# left corrupt or half-written. It does NOT take the file channel's consumer
+# lock, so a read-inbox racing a simultaneous file-channel ack is last-writer-
+# wins on any field they both change. Both are interactive "door" events that
+# rarely overlap; coordinating on athena:inbox's `<channel>.consumer.lock` is
+# out of this skill's scope and is raised as a follow-up.
 inbox_state_advance() {
   _isa_reported="${1:-}"
   # $ATHENA_INBOX_ROOT, not the ~/.cache dir: this file is the shared one.
