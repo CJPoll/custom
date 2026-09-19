@@ -53,6 +53,9 @@ Standalone shell scripts and tools. The most significant is `wt` (worktree manag
 ### ai/
 Contains AI-related resources:
 - **skills/**: Claude Code skills (symlinked to `~/.claude/skills`)
+- **contracts/**: normative cross-project contracts — interfaces this machine's
+  projects implement against, owned here rather than by any one consumer (e.g.
+  `athena-inbox.md`, the local multi-tenant message facility)
 - **prompts/**: Legacy prompts (deprecated, migrated to skills)
 - Default `CLAUDE.md` template for Elixir projects
 - Other AI workflow configurations
@@ -100,7 +103,7 @@ sudo ln -sf ~/dev/custom/system-files/greetd-config.toml /etc/greetd/config.toml
 
 ## Documentation conventions
 
-These apply to harness docs in this repo — `ai/proposals/`,
+These apply to harness docs in this repo — `ai/contracts/`, `ai/proposals/`,
 `ai-artifacts/shipwright/journal.md`, specs, ADRs, and cross-references between
 skills/agents. (Conventions adapted from riddler's howie/wurk harness.)
 
