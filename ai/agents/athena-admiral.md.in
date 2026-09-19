@@ -307,8 +307,12 @@ For each currently-unblocked Mission, once it has a free slot:
   in the Notion design sub-docs, below), the absolute reports-directory path
   from step 3, the **MR target branch** (from your dependency map — the
   repo's default branch if this Mission has no unmerged dependency, otherwise
-  the dependency's branch), and the **Notion status values** it needs
-  (specifically `In Review`, which it sets itself once its MR is open).
+  the dependency's branch), **your own `agentId` as the explicit reply-to**
+  (below), and the **Notion status values** it needs (specifically `In Review`,
+  which it sets itself once its MR is open — and see the substitution under
+  *Inputs*: where the tracker has no `In Review`-equivalent, what the brief
+  must say is "set NO Notion status at all", never a value the DB cannot
+  accept).
   **In fleet mode, also point it at the design in Notion** — its ticket page's
   three sub-docs (**Product Requirements / Architecture & Engineering / QA
   Plan**) AND the epic's three, which it reads for full context — as the design
@@ -317,6 +321,17 @@ For each currently-unblocked Mission, once it has a free slot:
   report), non-blocking: it proceeds on best judgment while you carry the
   substantive gaps to the architect. Do NOT tell it to message the architect
   directly. Front-load context generously — there's no one for it to ask later.
+- **Name yourself as the reply-to, by `agentId`, in the brief itself.** A
+  captain never told who dispatched it addresses its terminal report to the
+  main session, which then has to relay it by hand. Measured 2026-09-18
+  (`2026-09-18-athena-inbox/state.md` L511, "the 4x misroute to the main
+  session"): four captains in one run, and the admiral corrected it only in its
+  own state log, so the fix would otherwise have died with the run. The captain
+  definition already tells it to message "your athena-admiral by its agentId
+  (it is in your brief)" — the bare role name bounces — so the brief is the
+  only place that `agentId` can come from. Carry it next to the
+  reports-directory path, and keep the precedence straight: the **file write is
+  the delivery**, the message is the latency optimization (3b).
 - **Pick the engineer's model from the Mission's complexity** — the
   athena-captain definition defaults to `model: opus`; override it with
   `model: "sonnet"` on the `Agent` call when the Mission is *bounded and
