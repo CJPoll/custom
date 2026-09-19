@@ -380,6 +380,11 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   (it reads the rendered files). Caps the fan-out baseline (harness-IA #2) and
   stops a shrunk agent silently regrowing (#8). Ratchet a budget down as an
   agent is optimized; a new agent needs a new entry at its current count or lower.
+- `ai/bin/confirm-merged --self-test` — the single scripted definition of "the
+  merge actually landed" (forge `state==merged`+timestamp OR the head is an
+  ancestor of the target), which the admiral / `athena:merge-boarding` call
+  before Done/DM/teardown. Deterministic and hermetic (throwaway git repo + stub
+  `gh`/`glab`), so it is gate-safe.
 - Every hook self-test — run each dedicated `ai/hooks/*.self-test.sh` script
   with stdin closed: `ai/hooks/safe-wait-guard.self-test.sh </dev/null`,
   `ai/hooks/pronoun-guard.self-test.sh </dev/null`,
