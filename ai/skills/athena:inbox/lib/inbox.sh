@@ -913,6 +913,23 @@ inbox_ack_message() {
   return 0
 }
 
+# inbox_refuse_subagent_arm [hook-json]
+#
+# THE MANAGER'S COPY OF THE SUBAGENT GATE, so the Framework has something to
+# call. `bin/inbox-wait` invoked `inbox_is_subagent` directly -- and
+# `lib/session.sh` declares itself SIDE EFFECTS, which "Framework MUST NOT call
+# adapters directly" forbids. It is the same inversion `inbox_release_consumer`
+# was added to close for `bin/read-inbox`, in the one bin that had not been
+# routed through this layer yet.
+#
+# Status 0 = this session may arm. Status 1 = refused, already reported.
+inbox_refuse_subagent_arm() {
+  inbox_is_subagent "${1:-}" || return 0
+  inbox_fail "a subagent may not arm an inbox waiter" \
+    "let the main session arm it. A subagent that woke on the doorbell would read and ack the mail, then finish -- and the session that actually reports to Cody would find a clean inbox and say nothing. Run inbox-status to see the counts without arming anything."
+  return 1
+}
+
 # --- the waiter's targets ---------------------------------------------------
 
 # inbox_doorbells [cwd]
@@ -980,15 +997,20 @@ inbox_doorbells() {
         # missing directories and doorbell idempotently -- both mail
         # directories, their tmp/ and .acked/, and both .event files -- BEFORE
         # arming a waiter on them.
+        # Every path comes from a LABEL, never from a string built here. The
+        # `.acked` directories especially: `fs_maildir_ack` moves messages into
+        # the one `descriptor_resolve` labels `ack_dir`, and a waiter that
+        # provisioned a directory it spelled itself could silently create a
+        # second one beside it.
         local rdir wdir
         rdir="$(_inbox_path read_dir "${resolved}")"
         wdir="$(_inbox_path write_dir "${resolved}")"
-        fs_ensure_dir "${rdir}"          || return 1
-        fs_ensure_dir "${rdir}/tmp"      || return 1
-        fs_ensure_dir "${rdir}/.acked"   || return 1
-        fs_ensure_dir "${wdir}"          || return 1
-        fs_ensure_dir "${wdir}/tmp"      || return 1
-        fs_ensure_dir "${wdir}/.acked"   || return 1
+        fs_ensure_dir "${rdir}"                                  || return 1
+        fs_ensure_dir "${rdir}/tmp"                              || return 1
+        fs_ensure_dir "$(_inbox_path ack_dir "${resolved}")"     || return 1
+        fs_ensure_dir "${wdir}"                                  || return 1
+        fs_ensure_dir "${wdir}/tmp"                              || return 1
+        fs_ensure_dir "$(_inbox_path write_ack_dir "${resolved}")" || return 1
         # BOTH bells. The write-side one is how this identity learns the peer
         # ACKED what it sent; dropping it loses half the conversation and
         # nothing would ever say so.

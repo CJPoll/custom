@@ -560,6 +560,39 @@ suite GREEN is recorded as green — that is the whole point of running them.
 | S8 | drop `delete_self` from the watch set | **GREEN — a measured zero** |
 | S9 | silence the never-delivered notice | **RED** |
 | S11 | the three-cause no-entry refusal collapses to exit 0 | **RED** |
+| S12 | `fs_ensure_doorbell` chmods an existing doorbell unconditionally | **RED** (the review round's defect, W-11) |
+
+## The review round's defect: provisioning rang every bell it listened to
+
+Both reviewers found it independently, and one measured it. `fs_ensure_doorbell`
+re-asserted `chmod 0600` on an **existing** doorbell, on the reasoning that
+setting a mode a file already has is a no-op. `chmod(2)` emits `IN_ATTRIB`
+regardless — verified here by watching all three of a fixture channel's
+doorbells while a second `inbox-wait --dry-run` ran, and getting `ATTRIB` on
+every one.
+
+Within one process it was invisible, because provisioning precedes the arm.
+Across processes it was a **mutual wake loop**: a maildir `.event` is shared
+with the peer, and a repo's main checkout and all its worktrees resolve to one
+repo identity and therefore one set of doorbells. A re-arm wakes the other
+session, which finds nothing, re-arms, and wakes the first. Every cycle costs
+both a full read-and-report turn — and every one reports zero new, which the
+contract calls a *normal* wake, so nothing would ever have named it a fault.
+Not one of the eleven mutations could have found it: every waiter case arms
+exactly one waiter.
+
+**And a third defect in the sabotage harness, found while confirming the fix.**
+S12 reverted with `git checkout -- lib/fs.sh`, which discarded the *uncommitted
+review fix* along with the mutation. The next run then measured the unfixed
+code and W-11 failed for real — a red that looked exactly like the fix not
+working. **Commit before sabotaging**: a mutation harness that reverts through
+git cannot tell your work from its own.
+
+**S10 is deliberately absent from this series.** It was "maildir `tmp/`
+provisioning skipped", dropped before the batch ran to keep the wall clock down
+while a sibling captain's suite shared the box. The gap is recorded rather than
+renumbered, because a missing number in a mutation series is exactly what a
+later reader cannot distinguish from an omitted red result.
 
 ## The measured zero that was FIXED: `attrib` (S1, first pass)
 

@@ -189,13 +189,16 @@ fi
 DOORBELLS="$(inbox_doorbells ".")" || exit "${EX_REFUSED}"
 mapfile -t EVENT_FILES <<< "${DOORBELLS}"
 
-# NOT-A-SUBAGENT. After resolution so a misconfigured registry is reported to
-# whoever runs this, and before the arm so a subagent never occupies one.
-if inbox_is_subagent; then
-  inbox_fail "a subagent may not arm an inbox waiter" \
-    "let the main session arm it. A subagent that woke on the doorbell would read and ack the mail, then finish -- and the session that actually reports to Cody would find a clean inbox and say nothing. Run inbox-status to see the counts without arming anything."
-  exit "${EX_REFUSED}"
-fi
+# NOT-A-SUBAGENT. It runs AFTER the step above, which both resolves and
+# PROVISIONS -- so a subagent's refused invocation does create this channel's
+# missing directories and doorbells on its way to being told no. That ordering
+# is deliberate: a misconfigured registry is reported to whoever ran the
+# command, whatever kind of session they are, rather than being masked by the
+# subagent refusal. The provisioning is idempotent, correctly moded, and no
+# longer rings anything (see fs_ensure_doorbell), so the only thing a subagent
+# leaves behind is the empty structure the contract says the channel should
+# have had. It never reaches the arm.
+inbox_refuse_subagent_arm || exit "${EX_REFUSED}"
 
 if [ "${DRY_RUN}" -eq 1 ]; then
   printf '%s\n' "${EVENT_FILES[@]}"

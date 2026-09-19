@@ -380,6 +380,11 @@ descriptor_resolve() {
       # only by watching that same bell from its own side.
       printf 'read_doorbell\t%s/%s/.event\n'  "${base}" "${rd}"
       printf 'write_doorbell\t%s/%s/.event\n' "${base}" "${wr}"
+      # The WRITE side's `.acked/` too, for the same reason `ack_dir` exists
+      # above: the waiter provisions both mail directories, and a `.acked`
+      # spelled at its point of use is a second copy of a path that must be the
+      # same directory the ack writes into.
+      printf 'write_ack_dir\t%s/%s/.acked\n' "${base}" "${wr}"
       # Derived HERE, once. It was previously spelled out in both the ack
       # manager and bin/read-inbox: two copies of a path that must be the same
       # file, where a divergence would mean the reader takes one lock and the

@@ -1,6 +1,6 @@
 ---
 name: athena:inbox
-description: Read Athena's own machine-local message inboxes — the Slack delivery log and the agent-mail maildirs — scoped to the project the session is rooted in. Use to check whether anything has arrived for THIS project, to understand why a channel is silent, or whenever a session-start notice reports a count of unread inbox messages. Counting (inbox-status) and reading + acking (read-inbox, behind a designated-consumer lock, with bodies fenced as untrusted) both work; send-mail and inbox-wait land with later tickets.
+description: Read Athena's own machine-local message inboxes — the Slack delivery log and the agent-mail maildirs — scoped to the project the session is rooted in. Use to check whether anything has arrived for THIS project, to understand why a channel is silent, or whenever a session-start notice reports a count of unread inbox messages. Counting (inbox-status), reading + acking (read-inbox, behind a designated-consumer lock, with bodies fenced as untrusted), and blocking until a doorbell rings (inbox-wait) all work; send-mail lands with a later ticket.
 ---
 
 # athena:inbox
@@ -15,10 +15,19 @@ A machine-local message facility. Other people's words arrive as files under an
 inbox root; this skill decides which of them belong to the project you are
 sitting in, and how many are unread.
 
-**Status: partial.** `bin/inbox-status` (counting, DND-183) and
-`bin/read-inbox` (read + ack + the consumer lock, DND-184) work. `send-mail`
-and `inbox-wait` do not exist yet — where this document describes them, it is
-describing the shape they must fit, not a command you can run.
+**Status: partial.** `bin/inbox-status` (counting, DND-183), `bin/read-inbox`
+(read + ack + the consumer lock, DND-184) and `bin/inbox-wait` (the doorbell
+waiter, DND-185) work. `send-mail` does not exist yet — where this document
+describes it, it is describing the shape it must fit, not a command you can
+run.
+
+**Later (2026-09-19):** this paragraph, and the `description` in the
+frontmatter above, previously said `inbox-wait` did **not** exist and would
+"land with a later ticket". DND-185 shipped it; both are corrected here and
+there rather than annotated in place, per this file's living-document rule.
+The frontmatter is called out because it is the skill-SELECTION surface: a
+model choosing a skill reads the description and never reaches this section, so
+a stale claim there hides a working command no matter what the body says.
 
 Normative contract: `ai/contracts/athena-inbox.md`, specifically *Tenancy: the
 registry*. Where this file and the contract disagree, **the contract wins** —
@@ -99,6 +108,13 @@ yields zero channels and exit 0 — silently. Not opting in is not a fault, and
 most directories on this machine have not opted in. A resolver that instead
 scanned the inbox root would satisfy almost every test and would show one
 project another project's mail.
+
+**That silence is for COUNTING. A waiter refuses instead**, and so does a read
+that named a channel. `inbox-status` with nothing to count has nothing to say;
+`inbox-wait` with nothing to watch cannot block on it, and its only two
+alternatives — exit 0, or block on nothing for the whole budget — both report
+"no mail arrived" for a session that was never going to hear about mail at all.
+See the contract, *Waiter rules*.
 
 ## Channel kinds
 

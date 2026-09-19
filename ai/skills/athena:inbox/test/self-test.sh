@@ -2506,15 +2506,23 @@ arm_waiter() {
 # The process tree is inbox-wait -> timeout -> inotifywait, so the descendants
 # are walked two levels. `pgrep -P` matches by PARENT pid, which cannot
 # self-match the way `pgrep -f <pattern>` does.
+# It counts the registered watches against the number of doorbells the waiter
+# is arming on, because being satisfied by the FIRST one leaves exactly the
+# race it was written to close: `inotifywait` registers its paths in turn, so a
+# bump issued after the log bell's watch lands but before the maildir one does
+# is still missed -- and the case then sits out its whole budget and fails with
+# 75, looking like a broken waiter rather than a mistimed test.
 await_armed() {
-  local i p gc
+  local want="${1:-1}" i p gc n
   for i in $(seq 1 30); do
     kill -0 "${WAIT_CHILD}" 2>/dev/null || return 1     # already exited
+    n=0
     for p in $(pgrep -P "${WAIT_CHILD}" 2>/dev/null); do
       for gc in "${p}" $(pgrep -P "${p}" 2>/dev/null); do
-        if grep -lq '^inotify wd:' /proc/"${gc}"/fdinfo/* 2>/dev/null; then return 0; fi
+        n=$(( n + $(grep -h '^inotify wd:' /proc/"${gc}"/fdinfo/* 2>/dev/null | wc -l) ))
       done
     done
+    [ "${n}" -ge "${want}" ] && return 0
     sleep 0.2
   done
   return 0            # unobservable here; bump anyway rather than fail blind
@@ -2578,7 +2586,7 @@ assert_eq "W-2 provisioning never creates the INBOX file -- that is the writer's
 # the mutation that must redden, and it is the only case in the file that
 # proves `attrib` is in the watch set.
 arm_waiter "${WREPO}" 20
-await_armed
+await_armed 3
 touch "${MAIL_R_BELL}"
 reap_waiter
 assert_eq "I-1 a touch(1) bump (the maildir mechanism) wakes the waiter" "0" "${WAIT_RC}"
@@ -2595,7 +2603,7 @@ assert_eq "I-1 a touch(1) bump (the maildir mechanism) wakes the waiter" "0" "${
 # refactor, and it is the only case in this file whose failure means `attrib`
 # has left the watch set.
 arm_waiter "${WREPO}" 20
-await_armed
+await_armed 3
 chmod 0644 "${MAIL_R_BELL}"
 reap_waiter
 assert_eq "I-1 an ATTRIB-ONLY bump (chmod) wakes the waiter -- the case that proves attrib is watched" \
@@ -2607,7 +2615,7 @@ chmod 0600 "${MAIL_R_BELL}"
 # syscalls (MODIFY from the ftruncate, ATTRIB from the fchmod) rather than
 # going through touch(1), so this case is not a second copy of the one above.
 arm_waiter "${WREPO}" 20
-await_armed
+await_armed 3
 truncate -s 0 "${LOG_BELL}"; chmod 0600 "${LOG_BELL}"
 reap_waiter
 assert_eq "I-1 the client's own bump mechanism (ftruncate + fchmod) wakes the waiter" "0" "${WAIT_RC}"
@@ -2616,7 +2624,7 @@ assert_eq "I-1 the client's own bump mechanism (ftruncate + fchmod) wakes the wa
 # the log bell and the maildir read bell; the write bell is the third, and the
 # one an implementation is most likely to leave out.
 arm_waiter "${WREPO}" 20
-await_armed
+await_armed 3
 touch "${MAIL_W_BELL}"
 reap_waiter
 assert_eq "I-3 one waiter covers both kinds -- the maildir WRITE bell wakes it too" "0" "${WAIT_RC}"
@@ -2625,10 +2633,38 @@ assert_eq "I-3 one waiter covers both kinds -- the maildir WRITE bell wakes it t
 # dead inode. It is recreated in the same breath so the next arm has something
 # to watch, which is also what the waiter itself does on re-arm.
 arm_waiter "${WREPO}" 20
-await_armed
+await_armed 3
 rm -f "${MAIL_R_BELL}"; ( umask 077; : > "${MAIL_R_BELL}" )
 reap_waiter
 assert_eq "W-3 a doorbell deleted mid-wait wakes the waiter instead of stranding it" "0" "${WAIT_RC}"
+
+# PROVISIONING MUST NOT RING THE BELL IT IS ABOUT TO LISTEN TO -- and the
+# failure is a MUTUAL one, invisible to every case above, because each of them
+# arms exactly one waiter.
+#
+# `chmod(2)` emits IN_ATTRIB even when the mode does not change, and `attrib`
+# is in the watch set (it must be). So a provisioning step that re-asserts
+# 0600 on an existing doorbell rings it. A maildir `.event` is SHARED with the
+# peer, and a repo's main checkout and every one of its worktrees resolve to
+# the same repo identity and therefore the same doorbells -- so session A's
+# re-arm wakes session B, B reads nothing, re-arms, and wakes A. A wake with
+# no mail in it is a NORMAL wake by contract, so nothing would ever have
+# called this a fault; it would just cost both sessions a turn, forever.
+#
+# The case is deterministic without a sleep: a second session provisions while
+# this waiter is armed, and the waiter must then time out (75) rather than
+# wake (0).
+arm_waiter "${WREPO}" 10
+await_armed 3
+# The waiter must still be BLOCKED when the second session provisions, or the
+# case would pass on a waiter that had already timed out -- green for the
+# wrong reason, which is the shape this whole ticket is about.
+ALIVE=no; kill -0 "${WAIT_CHILD}" 2>/dev/null && ALIVE=yes
+assert_eq "W-11 the waiter is still armed when the second session provisions" "yes" "${ALIVE}"
+( cd "${WREPO}" && "${BIN}/inbox-wait" --dry-run ) >/dev/null 2>&1
+reap_waiter
+assert_eq "W-11 a second session provisioning the same doorbells does NOT wake an armed waiter" \
+  "75" "${WAIT_RC}"
 
 # I-2: THE QUIET BUDGET. The single most dangerous status this command could
 # return is 0, because 0 is what the caller reads as "mail is waiting". A
@@ -2643,7 +2679,7 @@ assert_contains "I-2 and says so, in the words that stop it being read as all-cl
 # The wake line is the reader's OWN narration. Counts only: no filename, no
 # slug, no path, nothing anybody else chose.
 arm_waiter "${WREPO}" 20
-await_armed
+await_armed 3
 touch "${MAIL_R_BELL}"
 reap_waiter
 assert_eq "A-11 the wake returns 0" "0" "${WAIT_RC}"
@@ -2746,8 +2782,14 @@ assert_eq "A-13 and is handed no doorbell at all" "" "${OUT}"
 # Unknown arguments are refused rather than ignored: a caller reaching for a
 # --channel flag must be told there isn't one, not silently given a waiter
 # that watches everything under a name suggesting it doesn't.
+# BOUNDED LIKE THE REST. This is the one refusal whose plausible regression --
+# an unknown argument ignored instead of refused -- ARMS A REAL 540s WAITER,
+# and this suite runs inside the harness gate, so an unbounded version would
+# HANG the gate rather than redden it. It also runs from a fixture repo, so a
+# refusal arriving from tenancy resolution instead of argument parsing cannot
+# satisfy it by accident.
 assert_refused "W-9 an unknown argument is refused, naming the whole-session rule" \
-  "${BIN}/inbox-wait" --channel slack
+  env -C "${BREPO}" timeout 10 "${BIN}/inbox-wait" --channel slack
 
 # A declared log channel whose file has NEVER existed can never ring. The
 # waiter arms anyway (refusing would take the other channels down with it) but

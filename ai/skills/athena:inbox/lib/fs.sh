@@ -476,15 +476,42 @@ fs_ensure_dir() {
 # `.event` takes down the wake for ALL channels at once. A counting tool may
 # shrug at an absent doorbell; a waiter must create it before it arms.
 #
-# It does NOT bump an existing one. Creating is provisioning; bumping is
-# signalling, and a waiter that rang the bell it is about to listen to would
-# wake itself on every arm and report mail that never came.
+# IT MUST NOT RING THE BELL IT IS ABOUT TO LISTEN TO, AND `chmod` IS A RING.
+#
+# This branch used to `chmod 0600` an existing doorbell unconditionally, on the
+# reasoning that re-asserting a mode the file already has is a no-op. It is not:
+# `chmod(2)` emits `IN_ATTRIB` **even when the mode does not change** —
+# measured on this machine against the waiter's own watch set, which woke and
+# exited 0 on all three doorbells. The contract says as much from the other
+# direction: the `ATTRIB` that rings the log doorbell comes from the client's
+# `fchmod(0600)` on a file already at 0600, not from the `ftruncate`.
+#
+# Within one process that was harmless, because it precedes the arm. ACROSS
+# processes it was a self-sustaining wake loop with no mail in it: a maildir
+# `.event` is shared with the peer, and a repo's main checkout and all its
+# worktrees resolve to the SAME repo identity and therefore the same doorbells.
+# Session A re-arms, chmods, wakes B; B reads, finds nothing, re-arms, chmods,
+# wakes A. Every cycle costs both sessions a full read-and-report turn, and
+# every one of them reports zero new — which *Reader obligations* calls a
+# normal wake, so nothing anywhere would have called this a fault.
+#
+# So the mode is adjusted only when it is actually WRONG. The contract's
+# *Provisioning* rule is the same rule: provisioning "creates what is missing
+# and adjusts modes on what it created; it never truncates, replaces, or
+# re-creates an existing surface". A one-time correction of a genuinely `0644`
+# doorbell rings it once, which is an explicitly normal wake; re-asserting a
+# correct mode rings it forever.
 fs_ensure_doorbell() {
-  local path="$1"
+  local path="$1" mode
   fs_assert_contained "$(fs_inbox_root)" "${path}" || return 1
   fs_assert_regular "${path}" || return 1
   if [ -e "${path}" ]; then
-    chmod 0600 "${path}" 2>/dev/null || true
+    # If the mode cannot be read, do NOTHING. An unreadable mode is not
+    # evidence the mode is wrong, and guessing costs a spurious wake on every
+    # arm for the rest of the session's life.
+    mode="$(stat -c '%a' "${path}" 2>/dev/null)" || return 0
+    [ -n "${mode}" ] || return 0
+    [ "${mode}" = "600" ] || chmod 0600 "${path}" 2>/dev/null || true
     return 0
   fi
   fs_ensure_dir "${path%/*}" || return 1
