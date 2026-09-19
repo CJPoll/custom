@@ -153,22 +153,43 @@ somebody else's work, and **neither may be weakened**:
   aborting would discard a run's real work, while the pathspec limit already
   makes the commit safe. Exit codes: `1` git refused, `2` bad arguments, `3` the
   named paths contain nothing to commit.
-- `athena-shipwright-run.sh` **yields the tick** when the worktree is dirty:
+- `athena-shipwright-run.sh` **yields the tick** when the MAIN CHECKOUT is dirty:
   exit 0, a `Fix:` line on stderr (cron mails it) and a `.skipped` record beside
-  the run logs. This exists for a hazard narrowed staging does *not* cover — the
-  run's first act is `git pull --rebase --autostash`, which stashes and re-applies
-  a concurrent editor's work underneath them. Untracked strays count as dirt (the
-  file swept in the real incident was untracked). Override with
-  `SHIPWRIGHT_ALLOW_DIRTY=1` when you know the dirt is inert.
-  **A wedged lane does not look like a quiet one**: after
-  `SHIPWRIGHT_SKIP_ESCALATE` consecutive skips (default 6, i.e. six hours) the
-  skip exits **75** instead of 0, so a stray file nobody clears becomes a loud
-  cron failure rather than an hourly silence indistinguishable from "nothing to
-  do". Any run that actually starts resets the counter, so a passing editor
-  never accumulates into a false alarm. `ai-artifacts/` is excluded from the
-  dirt check **explicitly**, not via an ignore rule — it holds the runner's own
-  logs, `run.lock` and `.skipped` records, and is gitignored only by the user's
-  machine-local `~/.config/git/gitignore`, which is not in this repository.
+  the run logs. This is ECONOMY, not safety — a human or agent is mid-change in
+  the main checkout, so the end-of-run `git merge --ff-only` would refuse anyway
+  and there is no point spawning a whole session. Untracked strays count as dirt
+  (the file swept in the real incident was untracked). Override with
+  `SHIPWRIGHT_ALLOW_DIRTY=1` when you know the dirt is inert. This yield is
+  **decoupled from the wedge counter**: a human editing for hours must never look
+  like a wedged lane, so a yield exits 0 and never increments the counter.
+  `ai-artifacts/` is excluded from the dirt check **explicitly**, not via an
+  ignore rule — it holds the runner's own logs, `run.lock` and records, and is
+  gitignored only by the user's machine-local `~/.config/git/gitignore`, which is
+  not in this repository.
+  **A wedged lane does not look like a quiet one**: the runner keeps a
+  `consecutive-failures` counter of UNSUCCESSFUL cron OUTCOMES — a non-zero
+  session exit, a timeout, a stranded (un-landed) push, plus dead cron-origin
+  corpses reaped at the top of a run. After `SHIPWRIGHT_FAIL_ESCALATE` in a row
+  (default 6) the next run exits **75 without spawning a session**, so a lane that
+  is failing every hour becomes a loud cron failure instead of an hourly silence.
+  A clean landing resets the counter.
+
+  **Later (2026-09-19):** superseding PR #10's persistent-reused-worktree model.
+  The runner no longer reuses one standing worktree (`.git/athena-shipwright` on
+  `shipwright/auto`) that it rebases with `git pull --rebase --autostash`; each
+  invocation now gets its OWN short-lived lane (`.git/shipwright-lanes/run-<utc>-<pid>`
+  on `shipwright/run-<utc>-<pid>`), created from `origin/main` and torn down after.
+  Two consequences to the passage above: (1) the yield used to fire on the run's
+  OWN tree being dirty and fed the wedge counter (then named `consecutive-skips`);
+  a fresh lane is always clean, so the run-tree hazard is gone and the yield now
+  samples ONLY the main checkout, for economy, decoupled from the counter. (2) the
+  wedge signal moved off dirty-tree skips onto unsuccessful outcomes — a strict
+  superset, since the old counter never saw a session that RAN and FAILED on a
+  clean tree, which was the common real failure. A crashed run (rate-limit /
+  power-loss) now leaves a lane corpse the next run reaps via a held `flock(2)` on
+  the lane's lock (never a pid check, which recycles); only dead `origin=cron`
+  corpses count toward the wedge, and a lane whose lock is still held by a live run
+  is never reaped.
 
 **The repository-scoped lock is NOT in place, and that is a decision.** What
 exists is: a runner `flock` (cron-vs-cron), and a commit helper whose

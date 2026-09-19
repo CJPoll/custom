@@ -87,30 +87,36 @@ Everything you learn from is local, under `~/dev/custom/`:
 
 ## Where you run
 
-**You do not work in the main checkout.** The cron runner starts you in its own
-worktree — `<repo>/.git/athena-shipwright`, on branch `shipwright/auto`. A
-shipwright **spawned directly** (by hand or by another agent, not by the cron)
-is a *different unit of work* and must stay out of the cron's lane entirely:
-create your **own** named branch and worktree under
-`~/.local/worktrees/custom/<branch>` (named for this unit of work), never
-`shipwright/auto` and never `.git/athena-shipwright`, and **open a PR** for the
-owner to merge rather than pushing to main. The cron's hourly timer may fire
-while you work, so sharing its branch or worktree is a real collision — on
-2026-09-18 a cron run and a hand-spawned shipwright both operated on
-`shipwright/auto` and pushed to main in one window, serialized only by luck.
-(**Later (2026-09-19):** the old text told a non-cron invocation only to "move
-to a worktree" before editing, which a run could satisfy by using the cron's own
-tree. Superseded by the per-unit-of-work convention: a spawned run takes its OWN
-branch/worktree and opens a PR, never entering the cron's lane. The uniform end
-state — every invocation, cron included, on its own short-lived timestamped
-lane — is a tracked follow-up; until it lands, the cron keeps `shipwright/auto`
-and this carve-out is what prevents the collision.) The main checkout is the
-machine's live
-harness surface (`~/.claude/skills` and `~/.claude/hooks` resolve into it) and
-the tree interactive sessions are typing in. On 2026-09-18 a run of yours shared
-it with such a session and swept that session's `hypr/hyprland.conf` edit and a
-230-line `.bak` into `ce70e04`, a commit whose message was entirely about
-harness-gate self-tests.
+**You do not work in the main checkout.** Every invocation is its own unit of
+work and runs in its OWN short-lived lane, created from `origin/main` and torn
+down after the run — there is no standing shared lane. The rule is **uniform**,
+however you were started:
+- a **cron** invocation is dropped by the runner into a fresh lane
+  `<repo>/.git/shipwright-lanes/run-<utc>-<pid>` on branch
+  `shipwright/run-<utc>-<pid>`, and lands on main by pushing plus a main-checkout
+  fast-forward the runner does for you;
+- a shipwright **spawned directly** (by hand or by another agent) creates its
+  OWN named branch and worktree under `~/.local/worktrees/custom/<branch>`
+  (named for this unit of work) and **opens a PR** for the owner to merge, rather
+  than pushing to main.
+
+Either way, never edit in the main checkout — if you find yourself in
+`~/dev/custom` itself, move to a worktree first. The main checkout is the
+machine's live harness surface (`~/.claude/skills` and `~/.claude/hooks` resolve
+into it) and the tree interactive sessions are typing in. On 2026-09-18 a run of
+yours shared it with such a session and swept that session's `hypr/hyprland.conf`
+edit and a 230-line `.bak` into `ce70e04`, a commit whose message was entirely
+about harness-gate self-tests.
+
+**Later (2026-09-19):** superseding PR #10's persistent-reused-worktree model
+(one standing worktree `<repo>/.git/athena-shipwright` on branch `shipwright/auto`,
+rebased in place each hour). The cron runner now provisions a fresh
+per-invocation lane from `origin/main` and tears it down after, so there is no
+`shipwright/auto` lane left for a hand-spawned run to collide with — the uniform
+per-unit-of-work end state that earlier text called a tracked follow-up has
+landed. A crashed run leaves a lane the next cron run reaps (liveness via a held
+`flock(2)` on the lane's lock, never a pid check); you never clean up another
+run's lane by hand.
 
 Two consequences you must carry:
 
@@ -118,8 +124,9 @@ Two consequences you must carry:
   per the bullet above. Everything else — the code you edit, the commits you
   make — is your worktree's.
 - **On the cron path, you land on main by refspec, not by branch name.** Your
-  HEAD is `shipwright/auto`, so a bare `git pull` / `git push` does the wrong
-  thing. Spell both ends out (steps *Sync down first* and *Sync up*). After you
+  HEAD is a per-invocation `shipwright/run-<utc>-<pid>` branch, so a bare
+  `git pull` / `git push` does the wrong thing. Spell both ends out (steps *Sync
+  down first* and *Sync up*). After you
   push, the runner fast-forwards the main checkout so your work actually takes
   effect on this machine; you never do that yourself. A **directly-spawned** run
   does the opposite — it commits on its own named branch and **opens a PR** for
@@ -137,9 +144,13 @@ Two consequences you must carry:
 0. **Sync down first.** In your worktree, get current with the remote before you
    change anything: `git fetch origin main && git rebase --autostash FETCH_HEAD`.
    (**Later (2026-09-19):** this was `git pull --rebase --autostash` in
-   `~/dev/custom`. Superseded: you run on branch `shipwright/auto` in a worktree
-   now, where a bare `git pull` has no upstream to follow, so both ends are
-   spelled out. The `--autostash` and the conflict rule below are unchanged.)
+   `~/dev/custom`. Superseded: you run on a per-invocation `shipwright/run-*`
+   branch in a worktree now, where a bare `git pull` has no upstream to follow, so
+   both ends are spelled out. The `--autostash` and the conflict rule below are
+   unchanged. On the cron path the lane is already branched from `origin/main`, so
+   this fetch+rebase is usually a no-op that only picks up anything landed since;
+   it stays because a directly-spawned run needs it and it is harmless when the
+   lane is already current.)
    This is also where
    another machine's shipwright commits land, so pulling first is how you avoid
    duplicating a fix that already exists. If the pull hits a conflict you cannot
@@ -265,10 +276,11 @@ Two consequences you must carry:
    reports paths dirty outside your commit, that is someone else's work: leave
    it exactly as it is, do not `git add` it, do not `git restore` it, and do not
    mention it in your message. (When cron starts you, the runner has already
-   refused to begin at all on a dirty tree — it samples the main checkout, where
-   dirt means a person is live in the repository, and your worktree, where dirt
-   is a previous run of yours that died mid-edit. Started by hand you
-   get no such check, so in a dirty tree the rule applies harder, not less.)
+   yielded the tick rather than begin on a dirty MAIN CHECKOUT — dirt there means
+   a person is live in the repository. Your own lane is freshly created from
+   `origin/main`, so it is always clean; there is no run-tree dirt to sample.
+   Started by hand you get no such check, so in a dirty tree the rule applies
+   harder, not less.)
    Append a
    journal entry (format below). Advance `cursor.txt` only after all of a run's
    qualifying patterns are handled — write it as the newest processed artifact's
@@ -282,8 +294,9 @@ Two consequences you must carry:
    opens a PR from its own named branch and does not push to main (see *Where you
    run*). After the run's commits are in and the gate is green, push with
    an explicit refspec: `git push origin HEAD:main`. (**Later (2026-09-19):**
-   this was a bare `git push`. Superseded: your HEAD is `shipwright/auto` in a
-   worktree, so a bare push would create or advance a branch of that name on the
+   this was a bare `git push`. Superseded: your HEAD is a per-invocation
+   `shipwright/run-*` branch in a worktree, so a bare push would create or advance
+   a branch of that name on the
    remote instead of landing on main. The refspec is what makes "the shipwright
    commits straight to main" still true from a worktree; the remote rejects a
    non-fast-forward, which is the check that keeps it honest.) If the push is

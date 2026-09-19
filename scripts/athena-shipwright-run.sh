@@ -4,38 +4,52 @@
 #
 # Invoked by cron (this machine is OpenRC + cronie; see the crontab entry in
 # the repo README/docs). Sets its own PATH because cron starts with a minimal
-# environment. Starts a headless Claude Code session in a WORKTREE of
-# ~/dev/custom — never in the main checkout, which is the machine's live harness
-# surface and whatever else is being edited in it — and delegates to the
-# athena-shipwright agent, which mines the fleet's run artifacts, improves the
-# harness, and syncs the repo with GitHub. The run's durable state stays
-# anchored to the main checkout; see "where the run happens" below. Coordinating-session-then-delegate
-# matches the main-session-policy hook: the top-level session spawns the agent
-# rather than doing the work itself.
+# environment. Starts a headless Claude Code session in a PER-INVOCATION
+# WORKTREE of ~/dev/custom — never in the main checkout, which is the machine's
+# live harness surface and whatever else is being edited in it — and delegates
+# to the athena-shipwright agent, which mines the fleet's run artifacts,
+# improves the harness, and syncs the repo with GitHub. The run's durable state
+# stays anchored to the main checkout; see "where the run happens" below.
+# Coordinating-session-then-delegate matches the main-session-policy hook: the
+# top-level session spawns the agent rather than doing the work itself.
+#
+# Later (2026-09-19): earlier versions (PR #10, c8786cb) reused ONE persistent
+# worktree, <repo>/.git/athena-shipwright, on a standing branch shipwright/auto.
+# Superseded: each cron invocation is its own unit of work and gets its OWN
+# short-lived lane — a fresh worktree <repo>/.git/shipwright-lanes/run-<utc>-<pid>
+# on branch shipwright/run-<utc>-<pid>, created from origin/main and torn down
+# after the run (see "the per-invocation lane" and "teardown" below). There is
+# no standing shared lane, so a fresh tree is ALWAYS clean: the wedge-escalation
+# signal therefore moved off tree-dirtiness onto consecutive UNSUCCESSFUL cron
+# OUTCOMES (see "the failure counter" below), which is a strict superset of what
+# the old dirty-tree skip counter caught — it additionally catches a lane whose
+# sessions run and FAIL on a clean tree, which the old counter missed entirely.
 #
 # Single-run: an flock guard skips the run (exit 0) if one is already going, so
 # a slow run never overlaps the next timer tick.
 #
-# Yield-to-a-live-editor: a second guard skips the run (exit 0) when the
-# worktree is dirty, because dirt means a human or another agent is mid-change
-# in this checkout. See "the yield guard" below for why this is a skip and not
-# merely a narrower `git add`. Like the flock, this guard covers the CRON path
-# only — a directly-invoked shipwright agent never runs this script. The
-# guarantee that holds whichever way the agent starts is
-# scripts/athena-shipwright-commit.sh.
+# Yield-to-a-live-editor: a second guard skips the run (exit 0) when the MAIN
+# CHECKOUT is dirty, because dirt there means a human or another agent is
+# mid-change in it and the end-of-run fast-forward would fail anyway. This guard
+# is ECONOMY (don't spawn a whole session a human's edit will block), NOT safety,
+# and is DECOUPLED from the failure counter: a human editing for hours must never
+# look like a wedged lane. Like the flock, this guard covers the CRON path only —
+# a directly-invoked shipwright agent never runs this script. The guarantee that
+# holds whichever way the agent starts is scripts/athena-shipwright-commit.sh.
 #
 # Usage:
 #   scripts/athena-shipwright-run.sh          # normal (timer) invocation
 #   DRY_RUN=1 scripts/athena-shipwright-run.sh  # print the brief and exit
 #
 # Environment (test seams + the documented override):
-#   SHIPWRIGHT_ALLOW_DIRTY=1  run even though the worktree is dirty (see below)
-#   SHIPWRIGHT_SKIP_ESCALATE  consecutive dirty-tree skips before a skip exits
-#                             non-zero instead of 0 (default 6)
+#   SHIPWRIGHT_ALLOW_DIRTY=1  run even though the main checkout is dirty (below)
+#   SHIPWRIGHT_FAIL_ESCALATE  consecutive UNSUCCESSFUL outcomes before a run
+#                             exits 75 without spawning a session (default 6)
 #   SHIPWRIGHT_REPO           repo to operate on   (default ~/dev/custom)
 #   SHIPWRIGHT_CLAUDE         claude binary to run (default ~/.local/bin/claude)
-#   SHIPWRIGHT_WORKTREE       tree the run works in (default <repo>/.git/athena-shipwright)
-#   SHIPWRIGHT_BRANCH         branch that tree holds (default shipwright/auto)
+#   SHIPWRIGHT_LANES_DIR      dir the per-run lanes live in
+#                             (default <repo>/.git/shipwright-lanes)
+#   SHIPWRIGHT_RUN_ID         force this run's lane id (default run-<utc>-<pid>)
 #
 # Exported to the session:
 #   SHIPWRIGHT_STATE_DIR      the ONE canonical state directory (cursor.txt,
@@ -44,10 +58,13 @@
 #
 # Exit codes:
 #   0   the session ran and exited 0, OR this tick was skipped (a run already in
-#       flight, or a dirty tree) — a skip is not a failure
-#   75  EX_TEMPFAIL: skipped, and this was the SKIP_ESCALATE'th consecutive
-#       dirty-tree skip. The lane is wedged, not idle.
-#   *   whatever the headless session exited with (124 if the 55m timeout fired)
+#       flight, or a dirty main checkout) — a skip is not a failure
+#   75  EX_TEMPFAIL: refused to spawn because the lane is WEDGED — this was the
+#       SKIP_ESCALATE'th consecutive UNSUCCESSFUL outcome (a failing session, a
+#       stranded push, or reaped dead cron corpses)
+#   *   whatever the headless session exited with (124 if the 55m timeout fired);
+#       a session that exits non-zero, or one whose commits could not be landed
+#       on main (a "stranded" branch), counts as an unsuccessful outcome
 
 set -euo pipefail
 
@@ -130,50 +147,77 @@ else
   # fails loudly on its own; do not silently invent a state location.
   MAIN_CHECKOUT="${REPO}"
 fi
+# The branch the main checkout is on (usually "main"). Used for reachability
+# tests when deciding a lane branch is safe to delete. Fall back to "main".
+MAIN_BRANCH="$(git -C "${MAIN_CHECKOUT}" symbolic-ref --short HEAD 2>/dev/null || echo main)"
 
-# The worktree lives INSIDE the repo's own .git directory, deliberately:
-#   * it is created, found and removed with the repository it belongs to, so
-#     there is no per-run provisioning and nothing to leak on a crash — a fresh
-#     worktree per hour would leave one orphan per crashed run;
-#   * `git status` in the main checkout never sees it, with no dependence on a
-#     gitignore rule that is machine-local and not in this repo;
-#   * it cannot be mistaken for one of the human worktrees under
-#     ~/.local/worktrees, so nobody starts editing in the robot's tree.
-# It is persistent and reused. A previous run's leftovers in it are NOT
-# silently discarded — see the yield guard.
-WORKTREE="${SHIPWRIGHT_WORKTREE:-${GIT_COMMON:-${REPO}/.git}/athena-shipwright}"
-BRANCH="${SHIPWRIGHT_BRANCH:-shipwright/auto}"
+# --- the per-invocation lane -------------------------------------------------
+#
+# Each invocation gets its OWN short-lived worktree + branch, created from
+# origin/main and torn down after the run (see "teardown"). The lanes live
+# inside the repo's own .git dir, deliberately:
+#   * `git status` in the main checkout never sees them, with no dependence on a
+#     gitignore rule that is machine-local and not in this repository;
+#   * they cannot be mistaken for one of the human worktrees under
+#     ~/.local/worktrees, so nobody starts editing in a robot's tree;
+#   * they are created, found and removed with the repository they belong to.
+# The name carries a UTC timestamp and the pid, so two invocations never collide
+# and a crashed run's corpse is greppable and reap-able.
+LANES_DIR="${SHIPWRIGHT_LANES_DIR:-${GIT_COMMON:-${REPO}/.git}/shipwright-lanes}"
+RUN_ID="${SHIPWRIGHT_RUN_ID:-run-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+BRANCH="shipwright/${RUN_ID}"
+WORKTREE="${LANES_DIR}/${RUN_ID}"
+LANE_LOCK="${LANES_DIR}/${RUN_ID}.lock"
+LANE_META="${LANES_DIR}/${RUN_ID}.meta"
 
 STATE_DIR="${MAIN_CHECKOUT}/ai-artifacts/shipwright"
 export SHIPWRIGHT_STATE_DIR="${STATE_DIR}"
 LOG_DIR="${STATE_DIR}/runs"
 LOCK="${STATE_DIR}/run.lock"
-SKIP_COUNT="${STATE_DIR}/consecutive-skips"
-# How many consecutive dirty-tree skips before a skip becomes a loud failure
-# rather than a quiet exit 0. Six = six hourly ticks.
-SKIP_ESCALATE="${SHIPWRIGHT_SKIP_ESCALATE:-6}"
+# The wedge counter. It counts consecutive UNSUCCESSFUL cron OUTCOMES — a
+# non-zero session exit, a timeout, a stranded (un-landed) push, plus dead
+# cron-origin corpses reaped at the top of a run — and RESETS the moment a run
+# lands cleanly. This replaces the old consecutive-skips counter, which counted
+# dirty-tree skips and so never saw a clean session failure at all.
+FAIL_COUNT="${STATE_DIR}/consecutive-failures"
+# How many consecutive unsuccessful outcomes before a run refuses to spawn a
+# session and exits 75. Six = six hourly ticks.
+FAIL_ESCALATE="${SHIPWRIGHT_FAIL_ESCALATE:-6}"
 # Validate it. A non-numeric value makes the `-ge` test below error out, and
 # because that test sits in an `if` condition the error is exempt from `set -e`:
-# the script falls straight through to the quiet exit 0, disabling the
+# the script falls straight through to the quiet exit path, disabling the
 # wedged-lane escalation forever with nothing but a shell diagnostic to show for
 # it. That is the "a wedged lane must not look like a quiet one" invariant
 # defeated by a typo, so fall back to the default loudly rather than degrade
 # into silence.
-case "${SKIP_ESCALATE}" in
+case "${FAIL_ESCALATE}" in
   ''|*[!0-9]*|0)
-    echo "athena-shipwright: SHIPWRIGHT_SKIP_ESCALATE='${SKIP_ESCALATE}' is not a positive integer; using 6." >&2
-    echo "  Fix: set SHIPWRIGHT_SKIP_ESCALATE to a positive whole number of consecutive skips (or unset it to accept the default 6). Left unfixed, the wedged-lane escalation would never fire." >&2
-    SKIP_ESCALATE=6 ;;
+    echo "athena-shipwright: SHIPWRIGHT_FAIL_ESCALATE='${FAIL_ESCALATE}' is not a positive integer; using 6." >&2
+    echo "  Fix: set SHIPWRIGHT_FAIL_ESCALATE to a positive whole number of consecutive unsuccessful outcomes (or unset it to accept the default 6). Left unfixed, the wedged-lane escalation would never fire." >&2
+    FAIL_ESCALATE=6 ;;
 esac
 
 mkdir -p "${LOG_DIR}"
 
+# --- failure-counter helpers -------------------------------------------------
+read_fail() {
+  local n=0
+  [ -r "${FAIL_COUNT}" ] && n="$(cat "${FAIL_COUNT}" 2>/dev/null || echo 0)"
+  case "${n}" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "${n}"
+}
+bump_fail() {
+  local n; n="$(read_fail)"; n=$(( n + 1 ))
+  printf '%s\n' "${n}" >"${FAIL_COUNT}"
+}
+reset_fail() { rm -f "${FAIL_COUNT}"; }
+
 # The brief deliberately says "your tree" and never names a path. The agent
-# template owns where the run happens (a worktree, never the main checkout), and
-# a path restated here is a second source of truth that drifts from it — which
-# is exactly what happened: this string still read `~/dev/custom` after the
-# worktree change landed, so the runner handed the agent a brief its own
-# template had to override with a supersession label, every hour.
+# template owns where the run happens (a per-invocation worktree, never the main
+# checkout), and a path restated here is a second source of truth that drifts
+# from it — which is exactly what happened once: this string still read
+# `~/dev/custom` after the worktree change landed, so the runner handed the agent
+# a brief its own template had to override with a supersession label, every hour.
 BRIEF="You are coordinating; do the work by delegating. Spawn exactly one \
 athena-shipwright agent (Agent tool, subagent_type: athena-shipwright) with \
 this brief, and do nothing else yourself: 'Run your full retrospective now. \
@@ -196,6 +240,16 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
   exit 0
 fi
 
+# Everything below needs git. Without it there is nowhere to make a lane, so
+# fail loudly rather than invent a location.
+if [ -z "${GIT_COMMON}" ]; then
+  echo "athena-shipwright: ${REPO} is not a git repository (or git is unavailable); cannot provision a lane." >&2
+  echo "  Fix: confirm ${REPO} is a git checkout ('git -C ${REPO} rev-parse --git-common-dir'). The shipwright refuses to run in the main checkout, so a lane worktree is the only place a run can happen." >&2
+  exit 2
+fi
+
+# --- 1. single-run lock ------------------------------------------------------
+#
 # Skip rather than queue if a run is already in flight.
 #
 # SCOPE, stated plainly because it was misread once: this lock guards THIS
@@ -205,28 +259,15 @@ fi
 # cron-vs-agent is NOT covered. Do not read a held lock as "nobody else is
 # writing to ~/dev/custom". What protects the repo from a concurrent writer is
 # entry-point-independent by design: athena-shipwright-commit.sh commits
-# pathspec-limited, whichever way the agent was started. A repository-level lock
-# (one every writer must take, not one per entry point) is the real fix and is
-# deliberately NOT attempted here — a half-measure that looks like it covers the
-# agent path would stop people looking for the hole.
+# pathspec-limited, whichever way the agent was started.
 #
 # The lock FILE legitimately outlives a run: flock(2) lives on the open
 # descriptor, so an empty, apparently-stale run.lock sitting there is normal and
 # says nothing about whether a run is live. Do not "clean it up" — deleting it
 # while a run holds it gives the next invocation a fresh inode and a lock that
 # excludes nobody, which is the one way to actually get two cron runs at once.
-#
-# The lock file also RECORDS ITS HOLDER. It used to be zero-byte with no pid and
-# no timestamp, so nothing could tell a live holder from a leftover file — and
-# on 2026-09-18 someone reasonably concluded it was stale and deleted it by
-# hand. A lock that cannot be validated is a lock that gets deleted by the next
-# person who finds it inconvenient, and deleting a HELD one is the one way to
-# actually get two runs at once. The contents are advisory (flock(2) lives on
-# the descriptor, not the bytes); they exist so a human or agent can answer
-# "is this real?" without guessing.
 # `9>>` and not `9>`: opening for plain write TRUNCATES, so a contending tick
-# would erase the holder record before it could read it — the provenance would
-# be write-only and the message below would always come up empty.
+# would erase the holder record before it could read it.
 exec 9>>"${LOCK}"
 if ! flock -n 9; then
   holder="$(cat "${LOCK}" 2>/dev/null || true)"
@@ -247,140 +288,199 @@ printf 'pid=%s host=%s started=%s\n' "$$" "$(hostname 2>/dev/null || echo '?')" 
 ts="$(date +%Y-%m-%dT%H%M%S)"
 log="${LOG_DIR}/${ts}.log"
 
-# --- provision the run's worktree -------------------------------------------
+# --- reachability + reaping helpers -----------------------------------------
 #
-# Create it on first use; reuse it forever after. Based on the main checkout's
-# current HEAD, which the agent then rebases onto the remote itself — so this
-# needs no network and works in a repo with no remote at all.
-#
-# `-B` on an EXISTING worktree would move the branch under a run that is still
-# using it, so the branch is only forced at creation; a reused worktree is left
-# exactly as it is and the yield guard below decides whether it is fit to run in.
-if [ -n "${GIT_COMMON}" ] && [ ! -e "${WORKTREE}/.git" ]; then
-  if ! git -C "${MAIN_CHECKOUT}" worktree add -q -B "${BRANCH}" "${WORKTREE}" HEAD 2>>"${log}"; then
-    echo "athena-shipwright: could not create the run worktree at ${WORKTREE}." >&2
-    echo "  Fix: read ${log} for git's reason. Most often the path exists as a stale registration — 'git -C ${MAIN_CHECKOUT} worktree prune' clears that — or branch ${BRANCH} is checked out somewhere else, which 'git -C ${MAIN_CHECKOUT} worktree list' will show. This run does NOT fall back to the main checkout: running there is the hazard the worktree exists to remove." >&2
-    exit 1
+# A commit is "landed" (safe to drop its lane branch) once it is reachable from
+# the main checkout's branch OR from origin/main. A branch holding commits that
+# are on NEITHER is "stranded" — the push failed — and is KEPT so the work is
+# never silently discarded.
+commit_reachable() { # commit-ish
+  local c="$1"
+  git -C "${MAIN_CHECKOUT}" merge-base --is-ancestor "$c" "${MAIN_BRANCH}" 2>/dev/null && return 0
+  if git -C "${MAIN_CHECKOUT}" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+    git -C "${MAIN_CHECKOUT}" merge-base --is-ancestor "$c" origin/main 2>/dev/null && return 0
   fi
+  return 1
+}
+
+# Remove one lane's worktree, and delete its branch unless the branch is
+# stranded (then keep it and say how to recover). Used by both the reaper (for a
+# dead predecessor) and normal teardown.
+retire_lane() { # run-id worktree-path context-label
+  local rid="$1" wt="$2" ctx="$3" br="shipwright/$1" tip=""
+  if [ -e "${wt}/.git" ]; then
+    tip="$(git -C "${wt}" rev-parse HEAD 2>/dev/null || true)"
+  fi
+  git -C "${MAIN_CHECKOUT}" worktree remove --force "${wt}" >>"${log}" 2>&1 || rm -rf "${wt}"
+  git -C "${MAIN_CHECKOUT}" worktree prune >>"${log}" 2>&1 || true
+  if git -C "${MAIN_CHECKOUT}" show-ref --verify --quiet "refs/heads/${br}"; then
+    if commit_reachable "${br}"; then
+      git -C "${MAIN_CHECKOUT}" branch -D "${br}" >>"${log}" 2>&1 || true
+    else
+      echo "athena-shipwright: kept stranded branch ${br} (${ctx}); its commits are on neither ${MAIN_BRANCH} nor origin/main." >&2
+      echo "  Fix: the work is NOT lost. Inspect it ('git -C ${MAIN_CHECKOUT} log ${MAIN_BRANCH}..${br}'), then land it ('git -C ${MAIN_CHECKOUT} merge --ff-only ${br}', or cherry-pick) and delete it ('git -C ${MAIN_CHECKOUT} branch -D ${br}'). It is deliberately not auto-deleted so a failed push never silently discards a run's work." >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# Reap dead lanes left by crashed predecessors (rate-limit / power-loss killed
+# the run before teardown — happened twice in the 18h before this landed).
+#
+# Liveness is decided by a held flock(2) on the lane's lock file, NEVER by a pid
+# check: pids recycle, and a held lock is released by the kernel on SIGKILL or
+# power-loss, so acquiring the lock proves the owner is gone. We may reap ONLY a
+# lane whose lock we can acquire — so a LIVE concurrent run (cron, or a
+# hand-spawned agent that took a lane) is never reaped out from under itself.
+# A dead lane whose meta records origin=cron counts toward the failure counter
+# (a crashed cron run is an unsuccessful outcome); any other origin is reaped for
+# hygiene but NOT counted.
+reap_dead_lanes() {
+  [ -d "${LANES_DIR}" ] || return 0
+  local lock rid wt meta origin got
+  # Primary: every lane that advertises a lock file.
+  for lock in "${LANES_DIR}"/*.lock; do
+    [ -e "${lock}" ] || continue
+    rid="$(basename "${lock}" .lock)"
+    wt="${LANES_DIR}/${rid}"
+    meta="${LANES_DIR}/${rid}.meta"
+    origin="spawned"
+    [ -r "${meta}" ] && origin="$(sed -n 's/^origin=//p' "${meta}" | head -n1)"
+    [ -n "${origin}" ] || origin="spawned"
+    # Try to take the lock in a subshell. If we get it, the owner is dead and we
+    # reap WHILE HOLDING it, closing the race with a run that might take it next.
+    got=""
+    if got="$(
+      exec 7>>"${lock}"
+      if flock -n 7; then
+        retire_lane "${rid}" "${wt}" "reaped dead ${origin} run" >/dev/null 2>&1 || true
+        printf 'reaped'
+      fi
+    )"; [ "${got}" = "reaped" ]; then
+      rm -f "${lock}" "${meta}"
+      [ "${origin}" = "cron" ] && bump_fail
+      echo "athena-shipwright: reaped dead ${origin} lane ${rid}." >&2
+    fi
+    # else: a live run holds the lock — leave it strictly alone.
+  done
+  # Secondary hygiene: a worktree dir with NO lock file can only be a crash
+  # between `worktree add` and lock creation. A concurrent cron run is
+  # impossible here (we hold the single-run flock), so this is always safe.
+  for wt in "${LANES_DIR}"/run-*; do
+    [ -d "${wt}" ] || continue
+    rid="$(basename "${wt}")"
+    [ -e "${LANES_DIR}/${rid}.lock" ] && continue
+    retire_lane "${rid}" "${wt}" "reaped lockless lane" >/dev/null 2>&1 || true
+    echo "athena-shipwright: reaped lockless lane ${rid}." >&2
+  done
+  git -C "${MAIN_CHECKOUT}" worktree prune >>"${log}" 2>&1 || true
+}
+
+# --- 2. reap dead predecessors ----------------------------------------------
+reap_dead_lanes
+
+# --- 3. wedge escalation: refuse to spawn if too many failures in a row ------
+#
+# A WEDGED LANE MUST NOT LOOK LIKE A QUIET ONE. One bad outcome is routine; N in
+# a row means the lane is failing every hour, and an hourly exit that looked like
+# success would hide that indefinitely. Past the threshold we exit 75 (loud in
+# cron mail and to anything watching exit codes) WITHOUT spawning a session, so
+# a wedged lane stops burning tokens and starts being visible. A clean landing
+# resets the counter.
+failures="$(read_fail)"
+if [ "${failures}" -ge "${FAIL_ESCALATE}" ]; then
+  echo "athena-shipwright: WEDGED — ${failures} consecutive unsuccessful outcomes (failing sessions, stranded pushes, or reaped dead cron corpses). Refusing to spawn another session." >&2
+  echo "  Fix: read the recent logs under ${LOG_DIR} to see WHY the runs failed — this is a real fault, not a passing editor. Once the cause is fixed, re-arm the lane by deleting the counter ('rm ${FAIL_COUNT}'); the next tick then runs. Raise SHIPWRIGHT_FAIL_ESCALATE to tolerate more consecutive failures before this fires." >&2
+  exit 75
 fi
 
-if [ ! -d "${WORKTREE}" ]; then
-  echo "athena-shipwright: the run worktree ${WORKTREE} does not exist and could not be created." >&2
-  echo "  Fix: confirm ${REPO} is a git repository ('git -C ${REPO} rev-parse --git-common-dir'). The shipwright refuses to run in the main checkout, so there is nowhere else for this run to go." >&2
-  exit 1
-fi
-
-# Everything from here happens in the worktree. REPO keeps naming the
-# repository; RUN_TREE is the tree this run works in.
-RUN_TREE="${WORKTREE}"
-cd "${RUN_TREE}"
-
-# --- the yield guard: never start a run on top of someone else's dirt --------
+# --- 4. yield to a live editor in the MAIN CHECKOUT (economy, not safety) ----
 #
-# On 2026-09-18T21:03:07 a run fired while another agent was mid-edit in this
-# checkout and swept its unrelated work (hyprland.conf + a 230-line .bak) into
-# commit ce70e04, a commit whose message is entirely about harness-gate
-# self-tests. athena-shipwright-commit.sh now makes each commit
-# pathspec-limited, which removes that sweep. This guard addresses the SECOND,
-# independent hazard that narrowing the staging does not touch: the run's first
-# act is `git pull --rebase --autostash`, which stashes and re-applies a
-# concurrent editor's uncommitted work underneath them, and can fail to re-apply
-# it cleanly. An autonomous committer has no business rebasing a tree somebody
-# else is typing in.
+# The run fast-forwards the main checkout at the end so the live harness
+# (~/.claude/skills, ~/.claude/hooks) advances. If the main checkout is dirty a
+# human or another agent is mid-change in it and that fast-forward would fail
+# anyway, so there is no point spawning a whole session. This is purely economy
+# and is DECOUPLED from the failure counter: a human editing for hours must never
+# accumulate into a false wedge. (The RUN's own tree is a fresh lane created from
+# origin/main below, so it is always clean — there is nothing of the shipwright's
+# own to sample here.)
 #
-# So: dirt of ANY kind (tracked modifications or untracked files — the .bak was
-# untracked) means a human or another agent is active here, and this hourly loop
-# yields the tick. Skipping costs an hour; the alternative cost is somebody
-# else's uncommitted work.
-#
-# ai-artifacts/ is excluded EXPLICITLY rather than trusted to an ignore rule.
-# It holds this machine's runtime artifacts — including the runner's own logs,
-# run.lock and the .skipped records written below — and it is gitignored only by
-# the user's MACHINE-LOCAL ~/.config/git/gitignore, which is not in this
-# repository. Leaning on that would mean the runner's own output counts as dirt
-# wherever that rule is absent (a fresh clone, another machine, a worktree with
-# a different exclude file), and then every tick yields at exit 0 forever with
-# nobody able to tell a wedged lane from a quiet one: the same invisible-failure
-# class as the settings.json clobber this repo documents. The exclusion is
-# asserted by the self-test, in a fixture that deliberately has no ignore rule.
-#
-# Sampling caveat, stated so nobody over-trusts this: the check happens once, at
-# run start. Someone who begins editing AFTER the sample and before the agent's
-# `git pull --rebase --autostash` is not protected by it. The guarantee that
-# does not depend on timing is athena-shipwright-commit.sh's pathspec limit.
-#
-# TWO trees are sampled, for two different reasons:
-#   * the MAIN CHECKOUT, unchanged from what this guard has always done. The
-#     worktree makes a bystander's work unreachable, so this is no longer the
-#     load-bearing protection it was — but the run still fast-forwards the main
-#     checkout at the end, and dirt there still means somebody is live in the
-#     repository. Narrowing this to worktree-only is a defensible follow-up and
-#     is deliberately NOT bundled here.
-#   * the RUN WORKTREE, which is new and is about the shipwright's OWN
-#     leftovers. Dirt there cannot be a bystander — nobody else works in it — so
-#     it means a previous run died between editing and committing. That is never
-#     auto-discarded: `reset --hard` on our own tree would silently destroy a
-#     run's real work AND make the wedge escalation below unreachable, since a
-#     lane that resets itself every tick never accumulates a skip. It yields,
-#     names the paths, and escalates like any other wedge.
-#
-# A long-lived stray file will wedge the lane until it is dealt with. That is
-# intended, and it is made VISIBLE rather than left to be inferred: each skip
-# goes to stderr (cron mails it) and leaves a .skipped record beside the run
-# logs, and after SHIPWRIGHT_SKIP_ESCALATE consecutive skips the script exits
-# non-zero so a wedged lane stops looking like a quiet one. Environment:
-# SHIPWRIGHT_ALLOW_DIRTY=1 is the deliberate override for a human who knows the
-# dirt is inert.
+# ai-artifacts/ is excluded EXPLICITLY rather than trusted to an ignore rule: it
+# holds this machine's runtime artifacts (the runner's own logs, run.lock, the
+# skip records) and is gitignored only by the user's MACHINE-LOCAL
+# ~/.config/git/gitignore, which is not in this repository. Leaning on that would
+# make the runner's own output count as dirt on any checkout without that rule.
 if [ "${SHIPWRIGHT_ALLOW_DIRTY:-0}" != "1" ]; then
-  # -uall so an untracked directory is listed as its files (and so the
-  # ai-artifacts exclusion below cannot be defeated by a collapsed `?? dir/`
-  # line); paths only, since that is what the message needs.
-  # core.quotePath=false so a path with a non-ASCII byte is emitted raw rather
-  # than C-quoted as "ai-artifacts/..." — a quoted path would slip the exclusion
-  # below and wedge the lane on the shipwright's own output.
-  tree_dirt() { # tree_dirt <dir> <label> ; echoes "<label>: <path>" per dirty path
-    git -C "$1" -c core.quotePath=false status --porcelain -uall \
-      | cut -c4- | grep -v '^ai-artifacts/' | sed "s|^|$2: |" || true
-  }
   dirty="$(
-    tree_dirt "${MAIN_CHECKOUT}" "${MAIN_CHECKOUT}"
-    [ "${RUN_TREE}" = "${MAIN_CHECKOUT}" ] || tree_dirt "${RUN_TREE}" "${RUN_TREE}"
+    git -C "${MAIN_CHECKOUT}" -c core.quotePath=false status --porcelain -uall \
+      | cut -c4- | grep -v '^ai-artifacts/' || true
   )"
   if [ -n "${dirty}" ]; then
     skipped="${LOG_DIR}/${ts}.skipped"
     {
-      echo "athena-shipwright: skipped run ${ts} — ${REPO} has uncommitted changes."
-      echo "${dirty}"
+      echo "athena-shipwright: skipped run ${ts} — ${MAIN_CHECKOUT} has uncommitted changes."
+      printf '%s\n' "${dirty}"
     } >"${skipped}"
-    echo "athena-shipwright: skipping run ${ts}; a tree of ${REPO} is dirty (each path below is prefixed with the tree it is in)." >&2
+    echo "athena-shipwright: skipping run ${ts}; the main checkout ${MAIN_CHECKOUT} is dirty." >&2
     printf '%s\n' "${dirty}" >&2
-    echo "  Fix: commit, stash, or remove the paths listed above (they are not the shipwright's — its own state under ai-artifacts/ is excluded from this check), and the next hourly tick proceeds on its own. Paths under ${RUN_TREE} are a PREVIOUS RUN's leftovers, not a bystander's: inspect them, then commit or discard them there. To run anyway when you know the dirt is inert, re-run with SHIPWRIGHT_ALLOW_DIRTY=1. Record: ${skipped}" >&2
-
-    # A WEDGED LANE MUST NOT LOOK LIKE A QUIET ONE. One skip is routine; N in a
-    # row means a stray file (an editor swap file, an abandoned .bak) has
-    # stopped the shipwright indefinitely, and the only evidence of that is a
-    # quiet stderr line an hour apart. Past the threshold we exit NON-ZERO, so
-    # the failure is loud in cron mail and to anything watching exit codes,
-    # instead of an exit 0 that is indistinguishable from a healthy lane with
-    # nothing to do. The counter resets the moment a run actually starts.
-    skips=0
-    [ -r "${SKIP_COUNT}" ] && skips="$(cat "${SKIP_COUNT}" 2>/dev/null || echo 0)"
-    case "${skips}" in ''|*[!0-9]*) skips=0 ;; esac
-    skips=$(( skips + 1 ))
-    printf '%s\n' "${skips}" >"${SKIP_COUNT}"
-
-    if [ "${skips}" -ge "${SKIP_ESCALATE}" ]; then
-      echo "athena-shipwright: WEDGED — ${skips} consecutive ticks skipped on a dirty tree. The lane has not run since the first of them." >&2
-      echo "  Fix: this is no longer a passing editor — deal with the paths above (commit, stash or delete them). They are most likely an abandoned stray rather than live work. Then the next tick runs on its own; nothing here needs restarting. Raise SHIPWRIGHT_SKIP_ESCALATE to tolerate more consecutive skips before this fires." >&2
-      exit 75
-    fi
+    echo "  Fix: this is a yield to a live editor, not a failure — commit, stash, or remove the paths above (they are not the shipwright's; its own state under ai-artifacts/ is excluded) and the next tick proceeds. The end-of-run fast-forward would refuse to overwrite them anyway. This skip does NOT count toward the wedge escalation. To run regardless when you know the dirt is inert, re-run with SHIPWRIGHT_ALLOW_DIRTY=1. Record: ${skipped}" >&2
     exit 0
   fi
 fi
 
-# A run is actually starting: the lane is not wedged.
-rm -f "${SKIP_COUNT}"
+# --- 5. provision this run's lane -------------------------------------------
+#
+# From origin/main: fetch it, then branch the lane off it, so the run starts
+# from the current shared tip and every machine's shipwright builds on the same
+# base. No-network fallback: if the fetch fails (offline, or a repo with no
+# remote), base the lane on the main checkout's HEAD instead — the run still
+# works, it just starts from local state and its commits land locally.
+mkdir -p "${LANES_DIR}"
+if git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1; then
+  BASE_COMMIT="$(git -C "${MAIN_CHECKOUT}" rev-parse FETCH_HEAD 2>/dev/null || true)"
+  base_desc="origin/main"
+else
+  BASE_COMMIT="$(git -C "${MAIN_CHECKOUT}" rev-parse HEAD 2>/dev/null || true)"
+  base_desc="the main checkout HEAD (no-network fallback — could not fetch origin/main)"
+  echo "athena-shipwright: could not fetch origin/main; basing lane ${RUN_ID} on ${base_desc}." >&2
+fi
+if [ -z "${BASE_COMMIT}" ]; then
+  echo "athena-shipwright: could not resolve a base commit for the lane." >&2
+  echo "  Fix: confirm ${MAIN_CHECKOUT} has at least one commit ('git -C ${MAIN_CHECKOUT} rev-parse HEAD')." >&2
+  exit 1
+fi
 
+# `-b` (create), never `-B` (force): a name collision must FAIL LOUD rather than
+# move an existing branch under a run that might be using it. The name carries a
+# timestamp + pid, so a collision means a genuine leftover to investigate.
+if ! git -C "${MAIN_CHECKOUT}" worktree add -q -b "${BRANCH}" "${WORKTREE}" "${BASE_COMMIT}" >>"${log}" 2>&1; then
+  echo "athena-shipwright: could not create the per-invocation lane ${WORKTREE} on branch ${BRANCH} (base ${base_desc})." >&2
+  echo "  Fix: read ${log} for git's reason. A branch-name collision (${BRANCH} already exists) is FATAL by design — this run neither reuses nor forces an existing branch, and never falls back to the main checkout, which is the hazard the lane exists to remove. Clear a stale registration with 'git -C ${MAIN_CHECKOUT} worktree prune' and delete a leftover branch with 'git -C ${MAIN_CHECKOUT} branch -D ${BRANCH}'." >&2
+  exit 1
+fi
+
+# Record the lane's origin (for the reaper's counting rule) and take its
+# liveness lock. We hold fd 8 for the whole session; a future run's reaper that
+# tries this lock while we live will fail to acquire it and leave us alone.
+printf 'origin=cron\npid=%s\nrun_id=%s\n' "$$" "${RUN_ID}" >"${LANE_META}"
+exec 8>>"${LANE_LOCK}"
+if ! flock -n 8; then
+  # A brand-new lock file we just created cannot legitimately be held by anyone
+  # else; if it is, something is very wrong — do not run.
+  echo "athena-shipwright: the fresh lane lock ${LANE_LOCK} is already held; refusing to run." >&2
+  echo "  Fix: this should be impossible for a unique run id. Check for a stale process holding it ('fuser -v ${LANE_LOCK}') and for a duplicate SHIPWRIGHT_RUN_ID." >&2
+  git -C "${MAIN_CHECKOUT}" worktree remove --force "${WORKTREE}" >>"${log}" 2>&1 || rm -rf "${WORKTREE}"
+  git -C "${MAIN_CHECKOUT}" branch -D "${BRANCH}" >>"${log}" 2>&1 || true
+  rm -f "${LANE_LOCK}" "${LANE_META}"
+  exit 1
+fi
+
+RUN_TREE="${WORKTREE}"
+cd "${RUN_TREE}"
+
+# --- 6. run the session ------------------------------------------------------
+#
 # House pattern for unattended Claude Code (see scripts/athena).
 # Hard backstop: cap the whole invocation at 55 minutes (under the hourly tick)
 # so a hung session is killed and the flock is released before the next run,
@@ -392,33 +492,54 @@ else
   status=$?
 fi
 
-# --- publish: bring the main checkout up to what the run landed -------------
+# --- 7. teardown: publish on success, then always remove the lane ------------
 #
-# The agent commits in the worktree and pushes to origin/main itself. The main
-# checkout's local `main` would then sit behind forever — and that checkout is
-# not a spare copy: ~/.claude/skills and ~/.claude/hooks resolve into it, so a
-# harness improvement that never reaches it never takes effect on this machine.
-# A stale main checkout would make every run's work invisible while every run
-# reported success.
-#
-# --ff-only is the whole safety story, and it is why this one main-checkout
-# action does not reintroduce the hazard the worktree removed:
-#   * it can only move the branch pointer forward to a commit that already
-#     contains main's history — it never creates a commit, never rebases, and
-#     never rewrites anything;
-#   * git refuses it outright if it would overwrite a locally-modified file, so
-#     a bystander mid-edit is protected by git itself rather than by our timing;
-#   * uncommitted work it does not touch is left exactly as it is.
-# A failure here is reported and NOT retried or forced: the run's commits are
-# safe on the remote either way, and the next tick fast-forwards again.
-if [ "${status}" -eq 0 ] && [ -n "${GIT_COMMON}" ] && [ "${RUN_TREE}" != "${MAIN_CHECKOUT}" ]; then
-  if git -C "${MAIN_CHECKOUT}" merge --ff-only "${BRANCH}" >>"${log}" 2>&1; then
-    :
-  else
-    echo "athena-shipwright: run ${ts} landed, but ${MAIN_CHECKOUT} could not be fast-forwarded to ${BRANCH}." >&2
-    echo "  Fix: the run's commits are already pushed, so nothing is lost — but this machine's live harness (~/.claude/skills and ~/.claude/hooks resolve into ${MAIN_CHECKOUT}) is still on the older code until it catches up. Run 'git -C ${MAIN_CHECKOUT} merge --ff-only ${BRANCH}' once the blocker is cleared; git's reason is at the end of ${log}. Usual causes: a locally-modified file the fast-forward would overwrite, or main having commits of its own (not a fast-forward) — do NOT force either one." >&2
+# On a successful session, publish: refresh origin/main and fast-forward the
+# main checkout to the lane tip so the machine's live harness advances. --ff-only
+# is the whole safety story — it can only move the pointer forward to a commit
+# that already contains main's history, it never creates or rewrites a commit,
+# and git refuses it outright rather than overwrite a locally-modified file. A
+# failure here is reported and NOT retried or forced.
+tip="$(git -C "${WORKTREE}" rev-parse HEAD 2>/dev/null || true)"
+if [ "${status}" -eq 0 ] && [ -n "${tip}" ] && [ "${tip}" != "${BASE_COMMIT}" ]; then
+  git -C "${MAIN_CHECKOUT}" fetch --quiet origin main >>"${log}" 2>&1 || true
+  if ! git -C "${MAIN_CHECKOUT}" merge --ff-only "${tip}" >>"${log}" 2>&1; then
+    echo "athena-shipwright: run ${ts} landed, but ${MAIN_CHECKOUT} could not be fast-forwarded to ${tip}." >&2
+    echo "  Fix: the run's commits are already pushed (if the session pushed), so nothing is lost — but this machine's live harness (~/.claude/skills and ~/.claude/hooks resolve into ${MAIN_CHECKOUT}) stays on the older code until it catches up. Run 'git -C ${MAIN_CHECKOUT} merge --ff-only ${tip}' once the blocker is cleared; git's reason is at the end of ${log}. Usual causes: a locally-modified file the fast-forward would overwrite, or main having diverging commits — do NOT force either." >&2
   fi
 fi
 
-echo "athena-shipwright: run ${ts} exited ${status}; log: ${log}" >&2
+# Classify before removal: does the lane hold commits that never landed on
+# main/origin/main? If so it is stranded — an unsuccessful outcome even if the
+# session exited 0, because the harness work never reached the machine.
+stranded=0
+if [ -n "${tip}" ] && [ "${tip}" != "${BASE_COMMIT}" ] && ! commit_reachable "${tip}"; then
+  stranded=1
+fi
+
+# Always remove the worktree; retire_lane keeps the branch iff it is stranded.
+if retire_lane "${RUN_ID}" "${WORKTREE}" "run ${ts}"; then
+  : # branch deleted (landed) or never had commits
+else
+  stranded=1  # retire_lane kept a stranded branch and already printed the Fix
+fi
+
+# Release + remove this lane's liveness lock and meta.
+exec 8>&- 2>/dev/null || true
+rm -f "${LANE_LOCK}" "${LANE_META}"
+
+# --- 8. update the wedge counter --------------------------------------------
+# A clean landing (session exited 0 AND its commits reached main/origin/main, or
+# it made no commits at all) resets the counter. Anything else — a failing/timed
+# out session, or a stranded push — is an unsuccessful outcome and increments it.
+if [ "${status}" -eq 0 ] && [ "${stranded}" -eq 0 ]; then
+  reset_fail
+else
+  bump_fail
+fi
+
+if [ "${stranded}" -eq 1 ] && [ "${status}" -eq 0 ]; then
+  echo "athena-shipwright: run ${ts} ran clean but its commits did not land on main; counted as an unsuccessful outcome." >&2
+fi
+echo "athena-shipwright: run ${ts} exited ${status} (stranded=${stranded}); log: ${log}" >&2
 exit "${status}"
