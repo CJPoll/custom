@@ -100,34 +100,64 @@ ordinary rules, rather than special cases in code.
 
 ### Event disposition and dead-letter
 
-Every event resolves to **exactly one** of three dispositions, and the
-dead-letter MUST fires for only the third:
+Every event resolves through a **two-level** model. The dead-letter trigger keys
+on the first level ONLY; the per-delivery outcomes live at the second.
 
-- **(a) DELIVERED** — at least one enabled rule matched and produced a delivery.
-- **(b) EVALUATED, NO-OP** — at least one enabled rule **applied** to the event
-  (its declared `event_type(s)` includes this event's `type`) but produced **no**
-  delivery: its predicate evaluated false. The platform looked at the event and
-  correctly did nothing.
-- **(c) UNMATCHED** — **no** enabled rule applies to the event's `type` at all
-  (no rule's declared `event_type(s)` includes it).
+**Level 1 — event ROUTING disposition (total over exactly two outcomes)**, keyed
+on *"does any enabled rule apply to this event's `type`?"*:
 
-**An event is HANDLED when its disposition is (a) OR (b); the dead-letter MUST
-fires for (c) ONLY.** An **UNMATCHED** event MUST be **dead-lettered and
-persisted** to queryable storage for audit and debugging; it MUST NOT be silently
-dropped, and it MUST NOT be **merely counted** — a bare counter cannot answer
-"which event, of what type, for which owner, went unmatched?", exactly the
-failed-lookup discipline (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must
-never look like an empty one*): a legitimate miss MUST remain observable as the
-specific thing it was. A **DELIVERED** or **EVALUATED-NO-OP** event MUST NOT be
-dead-lettered.
+- **HANDLED** — at least one enabled rule's declared `event_type(s)` includes this
+  event's `type` (≥1 rule *applied*). **Not** dead-lettered, regardless of what
+  then happens to the individual deliveries.
+- **UNMATCHED** — **no** enabled rule applies to the event's `type` at all (no
+  rule's declared `event_type(s)` includes it). **This is the sole dead-letter
+  trigger.**
 
-**Why (b) is a distinct disposition, not a miss.** A routing rule declared on
-`notion.ticket.updated` applies to every ticket-update event, and many such
-events do not satisfy its predicate (a different property changed, or the
-current state does not match) — those are (b): the rule applied and correctly
-produced no delivery. Collapsing (b) into (c) would flood the dead-letter store
-(whose whole purpose is "which event went **unmatched**?") with routine no-ops
-and their full Path-2 payloads.
+An **UNMATCHED** event MUST be **dead-lettered and persisted** to queryable
+storage for audit and debugging; it MUST NOT be silently dropped, and it MUST NOT
+be **merely counted** — a bare counter cannot answer "which event, of what type,
+for which owner, went unmatched?", exactly the failed-lookup discipline
+(`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty
+one*): a legitimate miss MUST remain observable as the specific thing it was. A
+**HANDLED** event MUST NOT be dead-lettered.
+
+**Level 2 — per-`(event, rule)` DELIVERY outcome (total over exactly five
+outcomes).** Because of fan-out (see *Fan-out: every match fires*) a single
+HANDLED event has one outcome **per applied rule**, evaluated independently at the
+`(event, rule)` grain *Idempotency is per (event, rule)* defines — an event can be
+DELIVERED on rule X, SUPPRESSED on Y, and terminally FAILED on Z at once, so only
+the Level-1 routing question is genuinely per-event; every delivery outcome is
+per-`(event, rule)`:
+
+1. **DELIVERED** — predicate TRUE and the delivery succeeded.
+2. **FILTERED** — predicate FALSE; the rule applied and correctly produced no
+   delivery.
+3. **SUPPRESSED** — predicate TRUE, but the delivery was collapsed by the owner's
+   **dedupe window** (observable per *Enabled flag and dedupe window* — "recorded
+   and countable as 'suppressed by dedupe window', never a silent drop").
+4. **REFUSED** — predicate TRUE, but the **delivery-time target-bind
+   re-assertion** refused it (see *Mechanism vs config boundary, and
+   both-ends-or-dark*, enforcement point 2 — "recorded, never a silent drop").
+5. **FAILED (terminal)** — predicate TRUE, delivery attempted, retries exhausted /
+   adapter 5xx / credential revoked. Recorded in the **failed-delivery store**
+   (below), **never** dead-lettered as UNMATCHED.
+
+**Each Level-2 outcome that is not DELIVERED is individually observable** —
+FILTERED via ordinary accounting, SUPPRESSED per *Enabled flag and dedupe window*,
+REFUSED per *Mechanism vs config boundary, and both-ends-or-dark* enforcement
+point 2, FAILED per the failed-delivery store — so **no matched delivery is ever a
+silent drop.**
+
+**Why FILTERED is not a miss, and must not flood the dead-letter store.** A
+routing rule declared on `notion.ticket.updated` applies to every ticket-update
+event, and many such events do not satisfy its predicate (a different property
+changed, or the current state does not match) — those are **FILTERED**: the rule
+applied and correctly produced no delivery. Collapsing FILTERED into UNMATCHED
+would flood the dead-letter store (whose whole purpose is "which event went
+**unmatched**?") with routine no-ops and their full Path-2 payloads. Equally,
+FILTERED must not be conflated with SUPPRESSED, REFUSED, or terminally FAILED —
+those are matched deliveries that did not arrive, each separately observable
+above, not benign no-ops.
 
 The dead-letter store is **per-account** and its record grain is **one
 exemplar-plus-count per `(owner, type)`**: the **first-seen full event payload** of
@@ -167,6 +197,56 @@ or TTL number in this contract:** any operational cap/TTL is **ops/owner
 config, explicitly outside this contract's MUST surface** — the contract states
 **shape** only ("one exemplar + count per `(owner, type)`, unbounded-until-read").
 No MUST here carries a number.
+
+#### Terminal delivery failure — the failed-delivery store
+
+A **terminally-FAILED** matched delivery (Level-2 outcome 5 — retries exhausted,
+adapter 5xx, credential revoked) MUST be recorded in a **failed-delivery store**,
+**distinct from the dead-letter store**, and MUST be **reported to the owner**. A
+terminally-failed matched delivery is **never** dead-lettered as UNMATCHED — it
+*matched* a rule; dead-lettering it would both corrupt the dead-letter store's
+"which `type` went unmatched?" purpose and mask a delivery failure as a routing
+miss.
+
+- **Grain — one exemplar-plus-count per `(owner, rule_id, terminal-cause)`**,
+  mirroring the dead-letter store's structural bound. The **exemplar** is the
+  first-seen failed delivery's **full event payload plus the terminal error**
+  (cause class + adapter + target), which alone answers the failed-lookup question
+  "which delivery, of which rule, to which target, terminally failed, and why?".
+  Subsequent failures of the same `(owner, rule_id, terminal-cause)` **increment a
+  monotonic count** and update **last-seen**, storing **no** new payload. This
+  bounds the store by a **structural quantity** — distinct `(rule, cause)` pairs
+  per owner, a finite set — **independent of traffic volume**: a revoked credential
+  failing a million deliveries collapses to one exemplar + count 1,000,000, not a
+  million rows.
+- **Never merely counted; observable.** As with the dead-letter store, the
+  exemplar is retained so the store *names* the failed delivery; the count is
+  added scale metadata, never a replacement. The exemplar payload carries
+  third-party content, so the record is **Path-2 untrusted** when read into an LLM
+  (see *Trust posture — two paths*), and read access is the **owning account's**
+  only.
+- **Reported, not merely stored.** A rule whose deliveries are terminally failing
+  is a delivery the owner configured that is silently not arriving — strictly more
+  urgent than the existing "a rule matching **zero** over a long window MUST be
+  reported" (see *Mechanism vs config boundary, and both-ends-or-dark*). Terminal
+  delivery failure MUST likewise be **reported to the owner, never left silently
+  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count>
+  terminal delivery failures to <adapter>:<target> (cause: <class>); check the
+  target/credential or disable the rule — see the failed-delivery store exemplar
+  for the first-seen event.`
+- **Retention — the never-destroy-unread doctrine applies, made safe by the
+  grain.** Follow the sibling inbox doctrine (`ai/contracts/athena-inbox.md` →
+  *Retention* → *The principle*), exactly as the dead-letter store does: an
+  **un-triaged** failed-delivery exemplar has an unbounded lifetime (it is the sole
+  evidence of the miss); age-out applies only after read/triage; the per-`(owner,
+  rule_id, terminal-cause)` grain bounds it to at most one unread exemplar per
+  pair. **The store carries no cap or TTL number in this contract** — any
+  operational cap/TTL is ops/owner config, outside this contract's MUST surface.
+- **Reconciled with idempotency.** "Terminal" means the per-`(event, rule)`
+  idempotency/retry budget of *Idempotency is per (event, rule)* is exhausted; the
+  failed-delivery record is that key's terminal state. The idempotency key store is
+  separate, so a later re-processing of the same `(event, rule)` still dedupes and
+  does **not** manufacture a second failure record.
 
 ### Enumerated first-pass event types
 
@@ -239,10 +319,11 @@ contract* → *Engine*), so field trust and field schema cannot drift out of syn
 | | `ticket_number` | string | scalar |
 | | `changed_properties` (`notion.ticket.updated` only) | string | **collection** |
 | `notion.ticket.deleted` (the **un-enriched** delete type — the entity may already be unfetchable, so it carries identity only) | `entity_id` — stable source entity handle | string | scalar |
-| `notion.comment.*` | `entity_id` — stable source entity handle | string | scalar |
+| `notion.comment.created`, `notion.comment.updated` (the **enriched** comment types) | `entity_id` — stable source entity handle | string | scalar |
 | | `comment_text` | string | scalar |
 | | `ticket_number` | string | scalar |
 | | `title` | string | scalar |
+| `notion.comment.deleted` (the **un-enriched** delete type — the comment may already be unfetchable, so it carries identity only) | `entity_id` — stable source entity handle | string | scalar |
 | `slack.message.received` | `text` | string | scalar |
 | | `channel` | string | scalar |
 | | `user` | string | scalar |
@@ -291,6 +372,21 @@ schemas and reads `absent` on the delete event — there another declared type
 **supplies** the field, so the leaf is meaningful on at least one of the rule's
 types; a delete-only rule has no such supplier, so the field never exists for it
 and the bind is rejected where it is authored.
+
+**`notion.comment.deleted` carries a NARROWER schema than the enriched comment
+types — by design, not omission.** A deleted comment may already be unfetchable,
+so it carries only `entity_id`; a rule declared **solely** on
+`notion.comment.deleted` with a leaf on `payload.comment_text`, `title`, or
+`ticket_number` is an **unknown-path save-time HARD ERROR** with a `Fix:` — **not**
+a save-valid predicate that reads `absent` forever at runtime. The sanctioned
+**union-binding absent-by-design** case (a rule spanning `notion.comment.updated`
++ `notion.comment.deleted`) is unaffected — the enriched type **supplies** the
+field, so the leaf binds against the union and reads `absent` on the delete event.
+The `Fix:` reuses the existing unknown-field-path save-time path, naming the type:
+`Fix: field-path 'payload.comment_text' is not in notion.comment.deleted's payload
+schema (identity-only: entity_id). A delete carries no enrichment — remove the
+leaf, or declare the rule on an enriched comment type (notion.comment.created /
+updated) as well.`
 
 **`slack.message.received` carries `ts` and `event_id`** (not just
 `occurred_at`): the deployed inbox reader keys cross-source dedupe on
@@ -1125,6 +1221,33 @@ Therefore:
   a committed file and not a second registry concept**; the machine-token
   registration already exists for harness-emit, and the target-bind check reuses
   it.
+
+  **Create authority (owner-stamp-at-issuance).** The `machine id → owning
+  account` record is created only by an operation **authenticated as the owning
+  account**; `owning account` is **stamped from that authenticated identity, NEVER
+  from a request body**. The `machine id` is the identity **bound to the machine
+  token** — there is **no** owner-chosen registration surface — so possession of a
+  token issued to that `(account, machine)` under the account's authentication is
+  the **proof of control**; an account cannot bind a machine it does not control
+  because it cannot obtain a token bound to another account's machine. This is the
+  **owner-from-auth invariant** (see *Rule ownership is stamped from the
+  authenticated author*) applied at machine-token issuance — it is what makes the
+  target-bind sound rather than circular, and it is **distinct** from the removed
+  `derived:` seam (do not resurrect that). A create/issuance whose body-supplied
+  owner differs from the authenticated account is refused: `Fix: a machine-token
+  registration's owning account is stamped from the authenticated session, not the
+  request body — re-issue authenticated as the account that will own this machine.`
+
+  **The issuance and custody MECHANISM is server-side** (gen_saas machine-token /
+  secret custody, **GS-4**; Notion token custody, **GS-8**) — see *Secret
+  custody*. This contract states the binding invariant it depends on and defers the
+  custody mechanism to that home; it does not re-specify custody here.
+
+  **First-pass coupling.** The inbox adapter's target-bind is **first-pass** and
+  reads this record **even though harness-emit ingress is roadmap**, so the
+  record's owner-stamped-at-issuance creation is a **first-pass dependency of the
+  inbox adapter** — the target-bind cannot be sound until the record is created
+  under this invariant.
 - **Enforcement is at THREE points, because the inbox target is a filesystem path
   with no credential to fail closed** (a fixed-destination API adapter fails
   closed on its per-account credential; the inbox adapter has none, so the bind
@@ -1135,14 +1258,31 @@ Therefore:
      and predicate save-time validation.
   2. **Delivery-time re-assertion.** Before **each** delivery the platform
      re-resolves the target machine's **current** owner and refuses the delivery
-     — **recording it, never a silent drop** — if it is not the rule's owner.
-     This closes the window a save-time-only check would leave if ownership
-     changed after save, and it is cheap (one record lookup).
-  3. **Record immutability per `machine id`.** The machine↔owner registration is
-     **immutable per machine**: re-registering a machine to a **different** owner
-     does NOT silently re-home existing rules — it **invalidates the dependent
-     rules**, which are refused/flagged with a `Fix:` (re-author them under the
-     new owner). Ownership never transfers under a live rule's feet.
+     — **recording it, never a silent drop (this recorded refusal IS the Level-2
+     REFUSED disposition — see *Event disposition and dead-letter*)** — if the
+     record is absent, deregistered, or resolves to any account other than the
+     rule's owner: `Fix: delivery refused — target machine <id> no longer resolves
+     to this rule's owner (deregistered or re-owned). Re-author the rule against a
+     machine registered to its owner.` This closes the window a save-time-only
+     check would leave if the binding were **deregistered** — or otherwise ceased
+     to resolve to the rule's owner — between save and delivery (under in-place
+     immutability the current owner cannot *change*; it can only be deregistered),
+     and it is cheap (one record lookup).
+  3. **Record immutability per `machine id`.** The `machine id → owning account`
+     binding is **immutable in place**. Re-registering or re-pointing an
+     already-bound `machine id` to a **different** owner is **refused** with a
+     `Fix:`, never a silent re-home and never an in-place invalidation: `Fix:
+     machine id <id> is already bound to another account; the binding is immutable
+     in place. Deregister it (authenticated as its current owner, which invalidates
+     dependent rules) before re-registering it under a new owner.` Ownership
+     changes only by an explicit **DEREGISTER**, authenticated as the **current
+     owning account**, which **invalidates every dependent rule** (refused/flagged
+     with a `Fix:`) **before** the `machine id` is free to be registered afresh by
+     a new owner (finding-4 issuance path). **Ownership never transfers under a
+     live rule's feet, and never transfers silently at all.** Re-homing a machine
+     whose owning account can no longer authenticate a deregister is an
+     account-recovery / admin concern — server-side (GS-4) and **roadmap**; no
+     admin re-home path is built first pass.
   The separate *client-side* channel declaration remains the runtime
   both-ends-or-dark signal (channel-presence), distinct from this owner-binding.
 - The never-delivered distinction — "no channel declared" vs "nothing arrived" —
