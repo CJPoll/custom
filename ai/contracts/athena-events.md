@@ -929,31 +929,41 @@ author's text, a ticket title) flow through it.
 - **Auto-escaping is default-ON and context-aware.** Every interpolated value
   MUST pass through the target adapter's Escaper for the surrounding context.
 - **Emitting a value raw requires an explicit, owner-marked "trusted" slot.** The
-  **generating rule**: a field is **trusted-slot-eligible iff the platform itself
-  MINTS its value** — the value is computed by the platform or drawn from a closed
-  platform-controlled set, with **no** source-supplied or enrichment-derived
-  substring. A field whose value originated at a source, arrived on a webhook, or
-  was returned by an enrichment fetch is **never** trusted-slot-eligible, however
-  structured it looks. The **closed first-pass trusted set** is exactly the
-  platform-minted **envelope** fields:
-  - `event.type` — platform-normalized, from the closed taxonomy;
-  - `event.source` — platform-stamped, from the closed `source` set.
+  **generating rule**: a field is **trusted-slot-eligible iff it is platform-minted
+  AND drawn from a closed platform-controlled set** — its value is computed by the
+  platform, with **no** source-supplied or enrichment-derived substring and **no**
+  unconstrained caller/registration-supplied parameter. A field whose value
+  originated at a source, arrived on a webhook, or was returned by an enrichment
+  fetch is **never** trusted-slot-eligible, however structured it looks.
+- **In the first pass the trusted set is EMPTY — no field currently qualifies**,
+  so **every** payload and envelope field passes through the adapter's Escaper.
+  The two fields that might look platform-minted do not satisfy the generating
+  rule's **closed-set** half:
+  - `event.type` is **not from a closed set** — the taxonomy is **open and
+    extensible** (see *The event taxonomy is open*; new well-formed types appear
+    with no schema change), so a "closed taxonomy" premise for it is false.
+  - `event.source` carries **parameterized, unconstrained** forms —
+    `poller:<source>` and `emit:<machine_id>`, whose id substring is
+    registration-supplied and bound by no grammar / charset / registered-value
+    rule in this contract — so it is not a closed platform-controlled value; a raw
+    slot would render that substring unescaped, the Path-1 format-injection hazard
+    *Trust posture — two paths* names.
 
-  Any platform-minted routing field the fleet later introduces joins this set
-  under the same generating rule; there are no other platform-minted fields in
-  the first pass.
+  Escaping these is a **no-op on real values** (`notion.ticket.created`,
+  `poller:notion`) and closes the vector at zero cost. A **future** field that is
+  genuinely platform-minted **and** drawn from a **closed** set (a constrained
+  routing field the fleet introduces) MAY re-enter the trusted set under the same
+  generating rule; none does today.
 
-  **Everything else MUST go through the escaper — the exclusions are enumerated by
-  name so the wrong line cannot be drawn silently:** every enrichment-derived /
-  source-supplied field — `title`, `ticket_number`, `status`, `labels`,
+  **EVERY field goes through the escaper** — every enrichment-derived /
+  source-supplied field (`title`, `ticket_number`, `status`, `labels`,
   `assignee`, `comment_text`, and the Slack fields `text`, `channel`, `user`,
-  `ts`, `thread_ts`, `event_id`. **`payload.entity_id` is EXCLUDED** from the
-  trusted set: it is the **source handle** (e.g. `notion:<uuid>`) — a
-  source-supplied value that only *looks* like a platform-owned identifier — so it
-  is escaped like any source field. **`event.occurred_at` is also NOT trusted**: a
-  timestamp carries no markup, so escaping it is a no-op and marking it trusted
-  would only widen the raw surface for nothing — a field earns trusted status only
-  if it is platform-minted **and** has a formatting reason to be raw.
+  `ts`, `thread_ts`, `event_id`), **and** the envelope fields `event.type`,
+  `event.source`, and `event.occurred_at`. **`payload.entity_id`** is the
+  **source handle** (e.g. `notion:<uuid>`) — a source-supplied value that only
+  *looks* like a platform-owned identifier — so it is escaped like any source
+  field; escaping `event.occurred_at` (a timestamp, no markup) is a no-op that
+  costs nothing and keeps the rule uniform.
 - **A raw/trusted slot referencing any field OUTSIDE the enumerated trusted set is
   a save-time HARD ERROR** with a `Fix:` (name the field; a trusted slot admits
   only a platform-minted field — use an ordinary escaped slot instead). This is the
