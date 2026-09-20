@@ -331,7 +331,9 @@ first-pass permitted-origination rule:
 - **Source-emitted webhook types (`slack.*`, `notion.*`) are
   VERIFIED-INGRESS-ONLY.** They may be originated ONLY by the inbound-webhook
   ingress (or the reconciliation poller) for that source, whose sender
-  verification established that the change is real. **Harness-emit MUST NOT be
+  verification established that the change is real (the poller does no HMAC, but
+  reads the source directly under its own authorized token, so it is likewise an
+  authorized originator of that source's types). **Harness-emit MUST NOT be
   able to synthesize a source-emitted webhook type** — a machine-token holder
   cannot mint a `notion.ticket.deleted` or a `slack.message.received` that no
   verified webhook produced; such an event MUST be rejected with a `Fix:`.
@@ -403,7 +405,12 @@ Two owner-facing schema fields carried by every rule:
   is an owner **preference** that collapses **distinct** deliveries of the same
   rule within a time window into one ("don't DM me about this lane more than once
   an hour"). It is a **duration** (unit: **seconds**; **default: `0`** = no
-  windowing, every distinct delivery fires). A suppression within the window MUST
+  windowing, every distinct delivery fires). **The dedupe window is a
+  `notify`-only rate control.** A `membership` rule's `add`/`retract` transitions
+  are **never** collapsed by it: their fold **is** the working set, so suppressing
+  a distinct `retract` would corrupt the set (and drop exactly the
+  cancel-in-flight that must fire) — that is set corruption, not rate control.
+  Only `notify` deliveries are windowed. A suppression within the window MUST
   be **observable** — recorded and countable as "suppressed by dedupe window",
   **never a silent drop** (the document legislates against silent drops
   throughout — failed-lookup discipline). The two mechanisms are **orthogonal**:
@@ -428,8 +435,9 @@ retry.
 - **`membership` / lane (stateful).** The predicate defines a **set**; the
   platform maintains the derived membership per `(owner, rule)` in the
   lane-membership store (see *Membership rules and the lane-membership store*).
-  Each **relevant event** — the rule's declared predicate types **plus** the
-  exit/deletion types for its stored members, defined in that section — →
+  Each **relevant event** — the rule's declared predicate types, its
+  exit/deletion types scoped to stored members, and its re-entry types scoped to
+  non-members, as defined in that section — →
   enrich current state → re-evaluate the predicate → diff
   against the stored set → emit an `add` or `retract` transition, which drives
   the delivery. That emitted transition is **considered handled by this
@@ -568,6 +576,18 @@ rule is a predicate tree defining set membership **plus** the store diff that
 turns enter/leave into `lane.member.added` / `lane.member.retracted`. A predicate
 is never asked to know history; the store is.
 
+**A `membership` rule's predicate is evaluated over the enriched current payload
+only, and MUST NOT constrain `event.type`.** The rule's declared `event_type(s)`
+— plus the directional exit/re-entry scoping (see *Membership rules and the
+lane-membership store*) — are the **trigger** set (*when* to re-evaluate); the
+predicate decides **what is in the set** from the entity's current state
+(assignee, labels, status). Gating a membership predicate on `event.type` would
+defeat directional re-evaluation: a `notion.ticket.undeleted` (re-entry) or
+`notion.ticket.deleted` (exit) trigger carries a *different* `type`, so an
+`event.type in [created, updated]` leaf would fail on it and re-entry/exit could
+never re-evaluate. (`event.type` remains a normal, valid leaf for a `notify`
+rule, which matches the present event and is never re-evaluated over state.)
+
 **Worked owner examples:**
 
 - *"ticket assigned where the assignees include me → Slack DM"* (`notify`):
@@ -575,14 +595,17 @@ is never asked to know history; the store is.
   {field:"payload.assignee",op:"contains",value:"<cody-person-id>"}]}` → Slack
   adapter. (`payload.assignee` is a **collection** — a Notion people property
   holds zero or more people — so it is matched with `contains` / `intersects`,
-  never the scalar `eq`; both worked examples below use collection operators on
+  never the scalar `eq`; both worked examples here use collection operators on
   it, consistent with its declared cardinality.)
-- *"ticket created OR updated where assignee ∈ {Cody, Athena} AND label 'Flaky
-  Test' present → flaky-lane inbox channel"* (`membership`):
-  `{all:[{field:"event.type",op:"in",value:["notion.ticket.created","notion.ticket.updated"]},
-  {field:"payload.assignee",op:"intersects",value:["<cody>","<athena>"]},
+- *"assignee ∈ {Cody, Athena} AND label 'Flaky Test' present → flaky-lane inbox
+  channel"* (`membership`; **trigger `event_type(s)`** declared *separately* from
+  the predicate: `notion.ticket.created`, `notion.ticket.updated`, to which the
+  engine adds the directional `notion.ticket.deleted`/`undeleted` scoping):
+  `{all:[{field:"payload.assignee",op:"intersects",value:["<cody>","<athena>"]},
   {field:"payload.labels",op:"contains",value:"Flaky Test"}]}` → inbox adapter,
-  flaky channel; the membership diff emits `add`/`retract`.
+  flaky channel; the membership diff emits `add`/`retract`. The predicate does
+  **not** gate on `event.type` (see above), so it re-evaluates correctly on a
+  delete or undelete trigger.
 
 The router evaluates all rules with a pure matcher, a pure renderer, and a pure
 membership-diff (Domain), and dispatches through adapters and the membership store
@@ -599,25 +622,33 @@ what makes retraction reliable **without** source deltas.
 **A membership rule's "relevant events" (the re-evaluation scope) — defined.**
 The term "relevant event" is load-bearing: the store's headline guarantee (a
 `notion.ticket.deleted` on a stored member emits a `retract`) rests on it, and a
-naive "the rule's declared predicate event types" reading breaks that guarantee —
-the worked flaky example declares `notion.ticket.created` / `notion.ticket.updated`,
-so a delete would never reach the rule and **no retract would ever fire**, which
-is the one case the store exists to solve. Therefore a membership rule is
-re-evaluated on the **union** of:
+naive "the rule's declared predicate event types" reading breaks it — the worked
+flaky example declares `notion.ticket.created` / `notion.ticket.updated`, so a
+delete would never reach the rule and **no retract would ever fire**, the one
+case the store exists to solve. A membership rule is therefore re-evaluated on
+the **union** of three trigger sets, each with its own scope:
 
-- its **declared predicate event types** (the entry/update triggers — e.g.
-  `notion.ticket.created`, `notion.ticket.updated`), **and**
-- the **exit/deletion event types** for the source of its members (e.g.
-  `notion.ticket.deleted`, `notion.ticket.undeleted`), **scoped to entities that
-  are current stored members** of that `(owner, membership-rule)` — even when
-  those types are **not** in the rule's declared predicate types.
+- **(a) its declared predicate event types** (the entry/update triggers — e.g.
+  `notion.ticket.created`, `notion.ticket.updated`), evaluated for the entity the
+  event is about.
+- **(b) exit/deletion types** (e.g. `notion.ticket.deleted`) **scoped to CURRENT
+  stored members** of that `(owner, membership-rule)` — a stored member that is
+  deleted emits a `retract`.
+- **(c) re-entry types** (e.g. `notion.ticket.undeleted`) **scoped to
+  NON-members that PASS the predicate after enrichment** — a previously-retracted
+  entity that reappears and again satisfies the predicate emits an `add`.
 
-The membership engine MUST subscribe a membership rule to this full trigger set,
-not only its declared predicate types; equivalently, a membership rule MAY be
-required to declare its full trigger set including the exit/deletion types, but
-either way retract-on-delete MUST provably fire. An exit/deletion event for an
-entity that is **not** a stored member of the rule is simply not relevant to that
-rule (nothing to retract).
+The direction is what makes (b) and (c) different scopes, not one "exit/deletion"
+set: a deleted entity is **still** a stored member, so its retract is
+member-scoped (b); an **undeleted** entity was retracted on delete and is
+therefore **not** a current member, so scoping undelete to members would mean it
+could never re-enter — undelete is a **re-entry** trigger scoped to non-members
+(c). The membership engine MUST subscribe a membership rule to all three sets,
+not only its declared predicate types (equivalently, the rule MAY declare its
+full trigger set), so that both retract-on-delete and re-add-on-undelete provably
+fire. An (b)/(c) event for an entity outside its scope — a delete of a non-member,
+an undelete of something that still fails the predicate — is simply not relevant
+to that rule.
 
 - Per `(owner, membership-rule)` the store holds the member **entity IDs** plus
   the **minimal display fields** needed to render a retract (e.g. ticket number
@@ -905,6 +936,22 @@ Therefore:
   owner's own KMS-custodied per-account credential, which cannot reach another
   account's destination — but the **inbox adapter has no such credential** (the
   target is a path), so it MUST enforce the owner↔target binding explicitly.
+- **The machine↔owner binding the check reads IS the machine-token registration
+  record** — the same server-side per-account record from which harness-emit
+  resolves an event's owner ("the owner is resolved server-side from that token",
+  see *Harness-emit*). It binds each **`machine id → owning account`**; those two
+  fields are all the target-bind check reads. The check resolves the **target
+  machine's owning account** from that record and refuses (with a `Fix:`) when it
+  is not the rule's owner. This is **per-account server-side data** (consistent
+  with *Normative home* — rules, config, and secrets are per-account data), **not
+  a committed file and not a second registry concept**; the machine-token
+  registration already exists for harness-emit, and the target-bind check reuses
+  it. The owner-bind is enforced at **rule-save time** — the target machine and
+  the rule's owner are both known then, so it runs at the **same layer** as the
+  rule-authoring owner-stamp and predicate save-time validation, not at ingest.
+  (The separate *client-side* channel declaration is what the runtime
+  both-ends-or-dark observability below covers; owner-binding is the save-time
+  refusal, channel-presence is the runtime signal.)
 - `inbox-doctor`'s never-delivered finding MUST distinguish "no channel declared"
   from "nothing arrived".
 - A lane matching **zero** over a long window MUST be reported, not silently
