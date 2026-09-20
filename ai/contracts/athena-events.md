@@ -302,13 +302,6 @@ schema is an unknown-path save-time error. The **envelope** fields are common to
 every type — `event.type` (scalar string), `event.source` (scalar string),
 `event.occurred_at` (scalar timestamp).
 
-**Each type's payload schema also marks, per field, whether the field is
-platform-minted or source-supplied / enrichment-derived.** A platform-minted
-field is one the platform itself computes — from the envelope or a closed
-platform-controlled set — with no source-supplied substring. That marking is
-what the trusted-slot check reads (see *Templating and the per-adapter Escaper
-contract* → *Engine*), so field trust and field schema cannot drift out of sync.
-
 | Event type(s) | `payload.*` field | Type | Cardinality |
 |---|---|---|---|
 | `notion.ticket.created`, `notion.ticket.updated`, `notion.ticket.undeleted` (the **enriched** ticket types) | `entity_id` — stable source entity handle, e.g. `notion:<uuid>` | string | scalar |
@@ -317,13 +310,17 @@ contract* → *Engine*), so field trust and field schema cannot drift out of syn
 | | `assignee` | person-id | **collection** |
 | | `title` | string | scalar |
 | | `ticket_number` | string | scalar |
+| | `revision` — source revision indicator (Notion: `last_edited_time`, or finer) | string | scalar |
 | | `changed_properties` (`notion.ticket.updated` only) | string | **collection** |
 | `notion.ticket.deleted` (the **un-enriched** delete type — the entity may already be unfetchable, so it carries identity only) | `entity_id` — stable source entity handle | string | scalar |
+| | `revision` — source revision indicator from the deletion event (not an enrichment fetch) | string | scalar |
 | `notion.comment.created`, `notion.comment.updated` (the **enriched** comment types) | `entity_id` — stable source entity handle | string | scalar |
 | | `comment_text` | string | scalar |
 | | `ticket_number` | string | scalar |
 | | `title` | string | scalar |
+| | `revision` — source revision indicator (Notion: `last_edited_time`, or finer) | string | scalar |
 | `notion.comment.deleted` (the **un-enriched** delete type — the comment may already be unfetchable, so it carries identity only) | `entity_id` — stable source entity handle | string | scalar |
+| | `revision` — source revision indicator from the deletion event (not an enrichment fetch) | string | scalar |
 | `slack.message.received` | `text` | string | scalar |
 | | `channel` | string | scalar |
 | | `user` | string | scalar |
@@ -352,8 +349,10 @@ field is therefore **per source**: only the Notion entity types carry
 
 **`notion.ticket.deleted` carries a NARROWER schema than the enriched ticket
 types — by design, not omission.** A delete is not enriched (the entity may
-already be unfetchable), so it carries only `entity_id` (identity); it does
-**not** carry `status`, `labels`, `assignee`, `title`, or `ticket_number`. A
+already be unfetchable), so it carries only `entity_id` (identity) plus the
+source-supplied `revision` **read from the deletion webhook event, not from an
+enrichment fetch**; it does **not** carry `status`, `labels`, `assignee`, `title`,
+or `ticket_number`. A
 consumer that needs a display line for a departed entity renders it from its own
 held state (it recorded those fields when it added the entity — see *The consumer
 owns membership*), never from a platform cache. Those enrichment-only fields
@@ -375,7 +374,8 @@ and the bind is rejected where it is authored.
 
 **`notion.comment.deleted` carries a NARROWER schema than the enriched comment
 types — by design, not omission.** A deleted comment may already be unfetchable,
-so it carries only `entity_id`; a rule declared **solely** on
+so it carries only `entity_id` plus the source-supplied `revision` **read from the
+deletion webhook event, not an enrichment fetch**; a rule declared **solely** on
 `notion.comment.deleted` with a leaf on `payload.comment_text`, `title`, or
 `ticket_number` is an **unknown-path save-time HARD ERROR** with a `Fix:` — **not**
 a save-valid predicate that reads `absent` forever at runtime. The sanctioned
@@ -395,6 +395,23 @@ updated) as well.`
 are part of the closed schema so a rule may bind them and the dedupe pairing is
 expressible.
 
+**`payload.revision` is the source-supplied event-level idempotency change token
+for every Notion entity type.** It is the source's own revision/version indicator
+for the entity state the event reflects (Notion: `last_edited_time`, or a finer
+source-provided revision token where one exists — the ingress binds the finest the
+source exposes). It is **source-supplied, not platform-minted** — so it is escaped
+like any source field and is **not** trusted-slot-eligible (see *Templating and
+the per-adapter Escaper contract*) — and it is what distinguishes two **distinct**
+changes to the same `entity_id` at the idempotency layer (see *Idempotency is per
+(event, rule)*): it MUST be **stable** across at-least-once redeliveries of the
+**same** source change and **distinct** across **different** source changes. The
+enriched types read it during enrichment; the identity-only delete types
+(`notion.ticket.deleted`, `notion.comment.deleted`) source it from the deletion
+**webhook event itself, not an enrichment fetch** — preserving their identity-only
+property while still distinguishing delete → undelete → delete of one entity.
+`slack.message.received` carries **no** `revision`: a Slack message is transient
+and never updated, and its `payload.event_id` is already unique.
+
 ### Idempotency is per (event, rule)
 
 Because of fan-out (see *Fan-out: every match fires*), one event fires every
@@ -407,9 +424,29 @@ key; the platform combines it with the matched `rule_id` to form the
 The event-level key basis is defined for **every** enumerated type:
 
 - **Source-emitted** — the source's own event identity: Slack's `payload.event_id`;
-  a Notion entity's `payload.entity_id` (`notion:<uuid>`) combined with a change
-  token. (A reconciliation backstop hit reuses the same basis so it dedupes
-  against the primary path — see *Poller (fallback only)*.)
+  a Notion entity's `payload.entity_id` (`notion:<uuid>`) combined with
+  `payload.revision` (the source-supplied revision indicator declared in *Payload
+  fields and their types per event type*). (A reconciliation backstop hit reuses
+  the same basis so it dedupes against the primary path — see *Poller (fallback
+  only)*.)
+
+  `payload.entity_id` is **stable across changes** (it is identity), so two
+  **distinct** changes to one entity share it; `payload.revision` is what makes
+  their keys distinct. It MUST be **stable** across at-least-once redeliveries of
+  the **same** source change (a redelivered webhook for one edit dedupes to one
+  delivery) and **distinct** across **different** source changes (two edits →
+  two events → two deliveries). A **missing or unresolvable** `revision` is an
+  **error, not an empty value that collapses keys** (the failed-lookup discipline,
+  `~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty
+  one*): the ingress MUST **reject** emitting a Notion entity event whose
+  `revision` cannot be resolved, rather than emit one whose idempotency key
+  silently merges with another change's — `Fix: a notion.<entity>.<verb> event has
+  no resolvable source revision (payload.revision — e.g. Notion last_edited_time,
+  or the deletion event's source timestamp). Emit is rejected: entity_id alone is
+  stable across changes, so a missing revision would collapse two distinct changes
+  to one idempotency key and silently drop the second delivery. Supply the source
+  revision indicator.` The platform stays stateless — `revision` is source-supplied,
+  never platform-synthesized.
 
 ---
 
@@ -1047,30 +1084,31 @@ author's text, a ticket title) flow through it.
 
   Escaping these is a **no-op on real values** (`notion.ticket.created`,
   `poller:notion`) and closes the vector at zero cost. A **future** field that is
-  genuinely platform-minted **and** drawn from a **closed** set (a constrained
-  routing field the fleet introduces) MAY re-enter the trusted set under the same
-  generating rule; none does today.
+  genuinely platform-minted **AND** drawn from a **closed** platform-controlled set
+  MAY become trusted-slot-eligible, but ONLY by a **contract amendment** that, at
+  that time, defines how the escaper **identifies** a trusted-eligible field — the
+  identification mechanism is deliberately **NOT specified while the trusted set is
+  empty**, because there is nothing to identify. Until such an amendment the
+  trusted set is empty and **every slot is escaped**.
 
   **EVERY field goes through the escaper** — every enrichment-derived /
   source-supplied field (`title`, `ticket_number`, `status`, `labels`,
-  `assignee`, `comment_text`, and the Slack fields `text`, `channel`, `user`,
-  `ts`, `thread_ts`, `event_id`), **and** the envelope fields `event.type`,
+  `assignee`, `comment_text`, `revision`, and the Slack fields `text`, `channel`,
+  `user`, `ts`, `thread_ts`, `event_id`), **and** the envelope fields `event.type`,
   `event.source`, and `event.occurred_at`. **`payload.entity_id`** is the
   **source handle** (e.g. `notion:<uuid>`) — a source-supplied value that only
   *looks* like a platform-owned identifier — so it is escaped like any source
   field; escaping `event.occurred_at` (a timestamp, no markup) is a no-op that
   costs nothing and keeps the rule uniform.
-- **A raw/trusted slot referencing any field OUTSIDE the enumerated trusted set is
-  a save-time HARD ERROR** with a `Fix:` (name the field; a trusted slot admits
-  only a platform-minted field — use an ordinary escaped slot instead). This is the
-  same loud-at-author discipline every other unhonorable config gets (the
-  `exists`/`absent`-with-`value` and unknown-field-path hard errors): the
-  trusted-slot boundary is enforced where it is authored, not trusted to be drawn
-  correctly at render time.
-- **Trusted-eligibility is READ FROM each type's payload-schema field marking**
-  (see *Payload fields and their types per event type*): a field is
-  trusted-eligible only if its type's schema marks it platform-minted, so the
-  trusted set cannot drift out of sync with the payload schema.
+- **A raw/trusted slot is a save-time HARD ERROR in the first pass** — the trusted
+  set is empty, so **any** trusted/raw slot references a field outside it: `Fix: no
+  field is trusted-slot-eligible in the first pass — the trusted set is empty.
+  Remove the trusted/raw slot marking and use an ordinary escaped slot. Introducing
+  a trusted field is a contract amendment that must first define how the escaper
+  identifies it.` This is the same loud-at-author discipline every other
+  unhonorable config gets (the `exists`/`absent`-with-`value` and unknown-field-path
+  hard errors): the trusted-slot boundary is enforced where it is authored, not
+  trusted to be drawn correctly at render time.
 - The renderer is **pure Domain**; the Escaper is a **per-adapter behaviour**.
 
 ### Per-adapter Escaper contract
@@ -1232,8 +1270,7 @@ Therefore:
   because it cannot obtain a token bound to another account's machine. This is the
   **owner-from-auth invariant** (see *Rule ownership is stamped from the
   authenticated author*) applied at machine-token issuance — it is what makes the
-  target-bind sound rather than circular, and it is **distinct** from the removed
-  `derived:` seam (do not resurrect that). A create/issuance whose body-supplied
+  target-bind sound rather than circular. A create/issuance whose body-supplied
   owner differs from the authenticated account is refused: `Fix: a machine-token
   registration's owning account is stamped from the authenticated session, not the
   request body — re-issue authenticated as the account that will own this machine.`
@@ -1278,8 +1315,9 @@ Therefore:
      changes only by an explicit **DEREGISTER**, authenticated as the **current
      owning account**, which **invalidates every dependent rule** (refused/flagged
      with a `Fix:`) **before** the `machine id` is free to be registered afresh by
-     a new owner (finding-4 issuance path). **Ownership never transfers under a
-     live rule's feet, and never transfers silently at all.** Re-homing a machine
+     a new owner under the create authority above. **Ownership never transfers
+     under a live rule's feet, and never transfers silently at all.** Re-homing a
+     machine
      whose owning account can no longer authenticate a deregister is an
      account-recovery / admin concern — server-side (GS-4) and **roadmap**; no
      admin re-home path is built first pass.
