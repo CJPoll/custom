@@ -77,14 +77,41 @@ Two consequences:
   from the live one. It inflates the live count, and on resume — where you are
   told to read the state log FIRST and not re-triage from Notion — it reads as a
   Mission that was never dispatched, so the fix it invites is re-dispatching a
-  captain onto work that already merged. Keep the history in the row's Notes
-  column or in prose below the table, never in a second row.
+  captain onto work that already merged. Keep the history in the append-only log
+  below the table — never in a second row, and never accreted inside the row.
   - Measured 2026-09-19-slack-gensaas: the table carried SIX duplicated keys
     (DND-201/210/211/213/221/223), each with its original `UNSTARTED`
     dispatch-plan row still standing beside a `DONE/MERGED` row, plus a
     hand-written `DND-221dup` placeholder row — the admiral noticed the
     collision and, having no rule to apply, annotated the duplicate instead of
     resolving it.
+
+  **Later (2026-09-20):** the bullet's closing sentence previously read "Keep the
+  history in the row's Notes column or in prose below the table, never in a
+  second row." The Notes-column option is withdrawn, because it licensed exactly
+  the accretion the next bullet measures. History goes below the table; the row
+  carries current state only.
+- **One row is not enough — the row must give ONE answer per field.** The rule
+  above governs row *count*; this is the same defect one level in. A Mission's
+  **current-state fields** — its status token, the SHA it sits at, the SHA `main`
+  was at, its MR state — are **overwritten** on every update. Appending a fresh
+  claim beside the old one puts two answers to one lookup inside a single cell:
+  the duplicate-row failure again, hidden where no count of rows can find it, and
+  with no ordering convention to rescue you — a reader cannot tell which claim is
+  current, and last-wins is not a safe default. Narrative (what happened, why,
+  what was decided) goes in the append-only log below the table, where accretion
+  is the point.
+  - Measured 2026-09-20-notif-platform: the DND-232 row's Notes cell reached
+    **15,103 characters** and asserted two present-tense positions at once —
+    `HOLDING at 404b4f2b — nothing landed, main @e7aaee36` and `HOLDING at
+    a90efed8 — nothing landed, main clean @d6fe177` — with the **stale** one
+    written **last** (`d6fe177` is an ancestor of `e7aaee36`), so reading
+    top-to-bottom hands you the wrong head. Its status token still read
+    `ROUTER_R22_KIND1` while the cell's own body described round-26 findings,
+    four rounds on. Meanwhile the log below the table took no entry after round
+    22: rounds 23–26 survive only as report files and as prose stuffed into this
+    cell. An earlier run of the same fleet had already mis-read this cell once,
+    at half the size.
 - **Sweep a quiet Mission; never trust its silence.** With no directory, silence
   carries no information whatsoever, so the staleness rule above is the only
   thing between you and a dead captain. Apply it to every `IN_PROGRESS` Mission
