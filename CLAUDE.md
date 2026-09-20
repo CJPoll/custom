@@ -145,6 +145,17 @@ was written on.
   **Which kind a document is, it says in its own header**; absent a header,
   treat it as a dated record. That declaration is the rule — any list of
   current living documents here would go stale the first time one is added.
+
+  **Labelling starts at the first version a reader could have grepped.** A
+  document still unmerged on its branch has no such reader, so its whole
+  authoring cycle — including a review round that reverses a rule written an
+  hour earlier — is composing the first published version, amended in place and
+  unlabelled. This holds however long that cycle runs and however many rounds it
+  takes; a same-day label on text that never shipped is the noise the
+  one-label-per-supersession rule exists to prevent. Once the document lands,
+  every later supersession is labelled normally. (Measured 2026-09-20: two
+  workers converging the two contracts re-derived this judgement five times
+  because the convention was silent on it.)
 - **Never rewrite a dated document to match later reality; ANNOTATE it.**
   (**Later (2026-09-19):** this rule and the one after it once governed every
   harness doc listed above, `ai/contracts/` included. They now govern **dated
