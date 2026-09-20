@@ -238,13 +238,43 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `entity_id` | string | scalar |
 | | `display` fields — **declared per lane SOURCE** (see below) | per source | per source |
 
-**`entity_id` is the declared, bindable entity handle** every source-emitted
-type carries — the stable source identifier (e.g. `notion:<uuid>`) that the
-lane-membership store keys members on, that the trigger classes scope
-current-members / non-members by, and that the membership-derived idempotency
-basis references. It is a first-class declared field, not an undeclared handle
-buried in a key. It is **distinct from the display fields** `ticket_number` /
-`title` (which render a line and may be cached); `entity_id` is identity.
+**`entity_id` is the declared, bindable entity handle carried by every
+source-emitted type that names an ENTITY with a membership lifecycle** — the
+Notion ticket types (`notion.ticket.*`) and comment types (`notion.comment.*`)
+each declare it (above) as the stable source identifier (e.g. `notion:<uuid>`),
+and the membership-derived types (`lane.member.*`) carry the same field for the
+member's handle. It is what the lane-membership store keys members on, what the
+trigger classes scope current-members / non-members by, and what the
+membership-derived idempotency basis references. It is a first-class declared
+field, not an undeclared handle buried in a key. It is **distinct from the
+display fields** `ticket_number` / `title` (which render a line and may be
+cached); `entity_id` is identity.
+
+**`slack.message.received` carries NO `entity_id` — by design, and this is what
+the closed schema above says.** Its identity field is `payload.event_id` (paired
+with `channel:ts` for cross-source dedupe — see below and *Idempotency is per
+(event, rule)*), not an `entity_id`. A Slack message is a **transient event, not
+an entity with a set-membership lifecycle**: it is never "added to" then
+"retracted from" a working set, so there is no stable entity handle for the
+lane-membership store to key on. The prose here therefore does **not** claim a
+universal `entity_id` across all source-emitted types — the identity field is
+**per source**, and only the Notion entity types (plus the membership-derived
+types) carry `entity_id`, exactly as the closed table declares.
+
+**Consequence for membership lanes: a source can feed a membership lane only if
+its types carry `entity_id`.** Because the store keys members on `entity_id` and
+trigger classes (b)/(c) scope current-members / non-members by it (see
+*Membership rules and the lane-membership store*), a source with no `entity_id`
+has nothing to key membership on. **A `slack.message.received`-sourced membership
+lane is therefore not expressible in the first pass** — Slack messages carry no
+member handle — and a `membership` rule declared solely on `slack.*` types is a
+save-time HARD ERROR with a `Fix:` (a membership lane requires a source whose
+types declare `entity_id`; the first-pass membership source is Notion). A
+`notify` rule on `slack.message.received` is unaffected — it matches the present
+message and needs no entity handle. This keeps the store's "source-agnostic —
+carries over to a forge or any other membership lane" claim honest: any
+membership source (Notion, a forge, …) is one whose entities carry `entity_id`,
+which a Slack message is not.
 
 **`notion.ticket.deleted` carries a NARROWER schema than the enriched ticket
 types — by design, not omission.** A delete is diffed **without enrichment** (the
@@ -279,7 +309,10 @@ membership lane" claim honest and consistent with the open taxonomy: a
 non-Notion lane is **config**, not a schema change. The display shape stays
 **closed per source** (so it is still save-time-bindable): the platform validates
 a `lane.member.*` predicate/template against the display shape the lane's source
-declares. This is deliberate — the contract makes a `notify` rule on a
+declares — resolved from the consuming `notify` rule's declared **`source_lane`**
+(see *Binding a `notify` rule on a `lane.member.*` transition*), since a rule that
+matched every one of the owner's lanes could not resolve a single display shape
+to bind against. This is deliberate — the contract makes a `notify` rule on a
 `lane.member.retracted` transition first-class (see *Retraction-driven consumer
 patterns*), so a predicate leaf or a template slot on that event MUST have a
 closed, bindable, save-time-validated schema exactly like a source-emitted type.
@@ -447,9 +480,12 @@ A rule is **config the platform evaluates, never executable code**. A rule
 carries: the `event_type(s)` it applies to, its **predicate** (see *The predicate
 grammar*), its **kind** (`notify` / `membership`), its **adapter + target** (see
 *Delivery adapters* and *Both-ends-or-silently-dark*), its **template + format**
-(see *Templating and the per-adapter Escaper contract*), and its **enabled flag +
-dedupe window** (see *Enabled flag and dedupe window*). Every field named here has
-a normative section behind it; there are no dangling schema entries.
+(see *Templating and the per-adapter Escaper contract*), its **enabled flag +
+dedupe window** (see *Enabled flag and dedupe window*), and — **only when it is a
+`notify` rule declaring a `lane.member.*` event type** — a **`source_lane`**
+naming the membership rule (lane) whose transitions it consumes (see *Binding a
+`notify` rule on a `lane.member.*` transition*). Every field named here has a
+normative section behind it; there are no dangling schema entries.
 
 ### Rule ownership is stamped from the authenticated author
 
@@ -613,9 +649,16 @@ A predicate is a **JSON tree**, evaluated by the platform; it is never code.
     non-empty (e.g. `assignee` ∈ {Cody, Athena}).
   - `exists` / `absent` — presence / absence of the field on the **current**
     payload (the matchable form of a cleared assignee or a removed field). These
-    are **presence operators**: the leaf's `value` is **omitted and ignored** — a
-    `value` supplied alongside `exists`/`absent` is disregarded, never matched
-    against.
+    are **presence operators**: they take **no `value`**. A `value` supplied
+    alongside `exists`/`absent` is a **save-time HARD ERROR** with a `Fix:` (drop
+    the `value` — `exists`/`absent` test only presence; to compare the field's
+    value use `eq`/`ne`/`in`), **never silently disregarded**. Silently ignoring
+    it is the accept-and-silently-inert pattern this document refuses everywhere
+    (the membership dedupe-window and `event.type`-in-a-membership-predicate hard
+    errors): `{"field":"payload.status","op":"absent","value":"done"}` reads to
+    the author as *"status is not done"* but would evaluate as *"status is
+    missing"* — wrong, not empty — so it MUST be loud where it is authored, not
+    silently mis-evaluated where it runs.
 
 **Operators are typed to the field's cardinality.** `eq`, `ne`, `lt`, `lte`,
 `gt`, `gte`, `in` are **scalar** operators; `contains` and `intersects` are
@@ -629,6 +672,34 @@ rejected at save time with a `Fix:`. A wrongly-typed operator is a
 wrongly-computed key — it would otherwise match nothing forever, the same
 failed-lookup class as an unknown field-path.
 
+**Operators are ALSO typed to the field's declared TYPE — the declared `Type`
+column (see *Payload fields and their types per event type*) is CONSUMED at save
+time, not decorative.** In addition to the cardinality check above, the platform
+save-time-checks each leaf — its comparator **and** its `value` literal(s) —
+against its bound field's declared **type**, with **no cross-type coercion**:
+
+- **Ordering comparators `lt` / `lte` / `gt` / `gte` apply ONLY to an ORDERED
+  type** — a `timestamp` (e.g. `event.occurred_at`) or a numeric field. On a
+  `string`, `person-id`, or enum field they are a **save-time HARD ERROR** with a
+  `Fix:` (naming the field, its declared type, and that ordering compares only
+  ordered types). `{"field":"payload.title","op":"gt","value":5}` — an ordering
+  comparator on a `string` — is rejected at save on this ground.
+- **The `value` literal(s) MUST match the bound field's declared type** — for
+  `eq` / `ne` / `in` the field's own type, for `contains` / `intersects` the
+  collection's element type. A literal of the wrong type (a number against a
+  `string` field, a string against a `timestamp` field) is a **save-time HARD
+  ERROR** with a `Fix:` (naming the field, its declared type, and the offending
+  literal). The same example fails this check too — the numeric `5` against the
+  `string` `title`.
+- `eq` / `ne` compare within a single type; `exists` / `absent` are
+  type-agnostic presence operators and take no `value` (above).
+
+A wrongly-typed comparator or literal is a wrongly-computed key — it would
+otherwise match nothing (or evaluate undefined) forever, the same failed-lookup
+class as an unknown field-path or a cardinality mismatch. This is what the
+`Type` column is **for**: a rule that declared it but never enforced it would be
+a declared-but-unused column implying a check that is not there.
+
 **Boolean nodes:** `{ "all": [ … ] }` (AND), `{ "any": [ … ] }` (OR),
 `{ "not": <node> }`. A predicate is therefore an **arbitrarily nested tree** of
 boolean nodes over comparison leaves (e.g. `all[ any[a, b], not[c], d ]`),
@@ -637,7 +708,8 @@ bounded only by a depth/size cap.
 **Evaluation contract.** Predicate evaluation MUST be **pure, total,
 deterministic, and side-effect-free** (Domain code, per `~/dev/custom/ai/CLAUDE.md`
 → *Architecture*). No arithmetic beyond comparison, no regex, no code, fixed
-type-coercion rules, bounded depth/size. Specifically:
+and save-time-checked value types (no cross-type coercion — see *Operators are
+ALSO typed to the field's declared TYPE*), bounded depth/size. Specifically:
 
 - **`absent` is reserved for a KNOWN field missing from a given payload.** A
   field-path that is in the enumerated field set but not present in *this*
@@ -657,13 +729,29 @@ type-coercion rules, bounded depth/size. Specifically:
   runtime) and a save-time reject (an unknown field-path) are the two distinct
   dispositions, and an implementation MUST NOT collapse the unknown path into the
   runtime `absent` case.
-- **An operator incompatible with its field's declared type/cardinality is a
-  HARD ERROR at rule-SAVE time** — a collection operator (`contains` /
-  `intersects`) on a scalar field, or a scalar operator (`eq` / `ne` / `lt` /
-  `lte` / `gt` / `gte` / `in`) on a collection field. It is rejected with a
-  `Fix:` naming the field, its declared cardinality, and the compatible
-  operators, never left to match nothing at dispatch — the same failed-lookup
-  class as an unknown field-path, one binding step further in.
+- **An operator incompatible with its field's declared CARDINALITY is a HARD
+  ERROR at rule-SAVE time** — a collection operator (`contains` / `intersects`)
+  on a scalar field, or a scalar operator (`eq` / `ne` / `lt` / `lte` / `gt` /
+  `gte` / `in`) on a collection field. It is rejected with a `Fix:` naming the
+  field, its declared cardinality, and the compatible operators, never left to
+  match nothing at dispatch — the same failed-lookup class as an unknown
+  field-path, one binding step further in.
+- **A comparator or value literal incompatible with its field's declared TYPE is
+  a HARD ERROR at rule-SAVE time** — an ordering comparator (`lt` / `lte` / `gt`
+  / `gte`) on a non-ordered field (`string`, `person-id`, enum), or a `value`
+  literal whose type does not match the bound field's declared type (see
+  *Payload fields and their types per event type* and *Operators are ALSO typed
+  to the field's declared TYPE*). Rejected with a `Fix:` naming the field, its
+  declared type, and the compatible comparators / value type — never left to
+  match nothing or evaluate undefined at dispatch. This consumes the declared
+  `Type` column; it is not decorative.
+- **A `value` supplied on a presence operator (`exists` / `absent`) is a HARD
+  ERROR at rule-SAVE time** with a `Fix:` (drop the `value`; use `eq` / `ne` /
+  `in` to compare a value). `exists` / `absent` test presence only; silently
+  ignoring a supplied `value` would let `{"op":"absent","value":"done"}` — which
+  the author means as *"not done"* — evaluate as *"missing"*, the
+  accept-and-silently-inert pattern refused throughout (see the grammar's
+  presence-operator bullet).
 - **A `membership` rule whose predicate references `event.type` is a HARD ERROR
   at rule-SAVE time** with a `Fix:` — it would defeat directional re-evaluation
   and make the lane silently never retract (see *Predicates match the present;
@@ -674,6 +762,53 @@ type-coercion rules, bounded depth/size. Specifically:
   at dispatch. A bad rule must be **loud where it is authored, not dark where it
   runs** — a malformed rule that silently matches nothing is indistinguishable
   from a correct rule that legitimately matched nothing.
+
+**Binding a `notify` rule on a `lane.member.*` transition — the lane is named,
+so the display shape resolves at save.** A `notify` rule's schema (see *Handling
+rules*) names no source: its fields are `event_type(s)` + predicate + kind +
+adapter/target + template/format + enabled + dedupe window. A `lane.member.*`
+transition, however, has a display shape declared **per lane SOURCE** (see
+*Payload fields and their types per event type*), and an owner's lanes may have
+**different** sources with **different** display shapes. A `notify` rule declared
+on `lane.member.added` / `lane.member.retracted` therefore matches transitions
+from **every** one of the owner's lanes, and the validator would have no single
+lane from which to resolve a display shape — leaving a `payload.<display-field>`
+leaf or template slot bindable against no closed schema. That is precisely the
+failed-lookup class this document forbids: a display path drawn from a different
+lane's shape is an unknown path at runtime, which the *Evaluation contract* says
+MUST NOT collapse into `absent`. Therefore:
+
+- **A `notify` rule that declares ANY `lane.member.*` event type MUST also
+  declare `source_lane`** — the id of the membership rule whose lane it consumes.
+  This field (a) **scopes matching**: the rule applies only to `lane.member.*`
+  events whose `payload.rule_id` equals the named `source_lane`, so it never
+  receives another lane's transitions with an incompatible display shape; and (b)
+  **resolves the source at save time**: the named membership rule is declared on
+  a source (its own `event_type(s)`), which fixes that lane's declared display
+  shape, against which the platform validates every `payload.<display-field>`
+  leaf and template slot — the same save-time binding a source-emitted type gets.
+- **A `notify` rule declaring a `lane.member.*` type WITHOUT a `source_lane` is a
+  save-time HARD ERROR** with a `Fix:` (name the `source_lane` — the membership
+  rule whose lane this rule consumes — so the display shape can be resolved). A
+  `source_lane` naming a nonexistent rule, a non-`membership` rule, or a rule
+  owned by a different account is likewise a save-time HARD ERROR with a `Fix:`
+  (the second and third reuse the rule-authoring owner check — see *Rule
+  ownership is stamped from the authenticated author*).
+- **`source_lane` is meaningful ONLY on a `notify` rule declaring a
+  `lane.member.*` type.** Present on any other rule (a `membership` rule, or a
+  `notify` rule with no `lane.member.*` type) it is a save-time HARD ERROR with a
+  `Fix:` (drop `source_lane`; it names the lane a `lane.member.*` consumer reads).
+
+The **source-agnostic** fields of a `lane.member.*` event — the envelope
+(`event.type`, `event.source`, `event.occurred_at`) plus `payload.rule_id`,
+`payload.lane`, `payload.op`, and `payload.entity_id` — are guaranteed across
+**all** lanes regardless of source and so bind for such a rule with or without
+`source_lane`; it is the **per-source display fields** that `source_lane`
+additionally makes bindable. This is chosen over restricting `lane.member.*`
+rules to the source-agnostic fields alone precisely because the headline
+retraction-message use case (*Retraction-driven consumer patterns*) renders the
+per-source display fields — the ticket number and title — which the entity_id
+handle alone cannot.
 
 ### Predicates match the present; the membership diff handles the past
 
@@ -877,11 +1012,19 @@ patterns:
   on a `retract` for an item in the current working set, drop it.
 - **Retraction messages** — a retraction email/Slack message ("ticket X left
   scope / was deleted") via an ordinary `notify` rule on the retract transition.
+  The rule names its `source_lane` (see *Binding a `notify` rule on a
+  `lane.member.*` transition*), so the retract's per-source display fields — the
+  ticket number and title that render "ticket X" — bind against that lane's
+  declared shape at save time.
 - **Fleet-control cancel-in-flight** — when a ticket is deleted, deprioritized,
   or otherwise retracted while a captain is mid-flight on it, the retraction is
   an event; a rule routes it to a fleet-control consumer that cancels the
   in-flight captain rather than letting it finish work on a ticket that left
-  scope. This is the mirror of "spin a captain up".
+  scope. This is the mirror of "spin a captain up". The routing rule is a
+  `notify` rule on the `lane.member.retracted` transition and names its
+  `source_lane` (see *Binding a `notify` rule on a `lane.member.*` transition*),
+  scoping the auto-cancel to exactly the lane whose retraction should trigger it
+  rather than firing on any lane's retraction.
 
 **Cancel-in-flight and the trust boundary — Path 1 vs Path 2.** How a retraction
 acts on the fleet is governed by which trust path delivers it:
