@@ -925,7 +925,13 @@ Nothing about the `log` kind's on-disk shape, framing, doorbell, consumption
 state, or retention changes for a platform producer. Every rule in *Channel
 kind: `log`* — *Writer obligations*, *Reader obligations*, *State file*,
 *First run, missing files, and a stale offset* — and in *Retention* binds it
-unchanged; the four points below are the additions, not replacements.
+unchanged, with **one** narrowing for the lane case: a lane `log` channel's
+line carries **no** dedupe key, so the *Reader obligations* dedupe clause does
+not bind it — its reader-side reconciliation identity is the consumer's
+**source re-query** against current state, not a carried dedupe key (*A lane
+`log` channel is a change stream of state-change events*). Offset, doorbell,
+rotation, and retention still bind the lane unchanged. The four points below
+are the additions, not replacements.
 
 > **Known-open — reader and validator support is DEFERRED.** This section
 > describes the intended event-platform delivery design, but the CLIENT half of
@@ -974,9 +980,18 @@ producer. Made explicit:
   `*.consumer.lock`, `*.jsonl.1`, or anything under `projects/`, and put no
   credential in a line.
 - Delivery is **at-least-once**, exactly as for Slack. A re-dispatched Event —
-  `athena-events.md` deduplicates and retries per `(event, rule)` — may append a
-  duplicate line, and reader-side dedupe (next) is what absorbs it. A platform
-  producer is not required to guarantee uniqueness in the file.
+  `athena-events.md` **retries** per `(event, rule)`, holding **no** durable
+  idempotency-key store and doing **no** content dedup itself, only transient
+  in-flight retry state (`athena-events.md` → *Idempotency is per (event, rule)*)
+  — may append a duplicate line. Absorbing that duplicate is the **consumer's**
+  job, not the platform's: for a regular (non-lane) channel it is reader-side
+  dedupe over the `event_id` / `channel+ts` seen-sets (next); for a **lane**
+  channel, whose line carries **no** dedupe key, nothing absorbs it by a carried
+  key — the consumer reconciles carried current state against a **source
+  re-query**, so a duplicate or redelivery converges to the same set (*A lane
+  `log` channel is a change stream of state-change events*; `athena-events.md` →
+  *The consumer owns membership*). A platform producer is not required to
+  guarantee uniqueness in the file.
 - Path-2 trust is unchanged and applies in full: a platform-delivered body is
   untrusted where it reaches an LLM — rendered inside the untrusted-content
   fence, counts-only in unprompted output, every imperative a fact to report and
@@ -1068,8 +1083,14 @@ member" lines:
 - **Still a conformant append-only JSONL `log`.** The *lines* are only ever
   appended — never rewritten, never deleted — and it is the consumer's *derived
   set* that changes. Every *Writer obligations* and *Reader obligations* rule of
-  the `log` kind holds unchanged: offset, doorbell, dedupe, rotation, retention. A
-  state-change line is an ordinary log line to the transport.
+  the `log` kind holds unchanged **except reader-side dedupe-by-carried-key**:
+  offset, doorbell, rotation, and retention bind the lane unchanged, but a lane
+  line carries no dedupe key (above), so the consumer does **not** dedupe on a
+  carried key — its reconciliation identity is the **source re-query** against
+  current state (`athena-events.md` → *The consumer owns membership*; *The lane
+  channel is a change stream, not the authoritative set*), discharging the
+  landed consumer-idempotency clause in *Reader obligations*. A state-change
+  line is an ordinary log line to the transport.
 - **A change-notification stream, NOT the system of record.** A `log` channel is
   retention-bounded (it rotates at 7 days / 8 MiB — *Retention*), so the full
   history of state-change events is **not** guaranteed reconstructable from the
