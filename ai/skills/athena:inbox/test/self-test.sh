@@ -339,25 +339,25 @@ else assert_contains "an unrecognised dedupe member is a hard error naming it" "
 # DND-233 (landed Option C): the platform mints NO `op` stream and holds NO
 # durable dedupe key, so there is no `dedupe_key` dedupe family and no `stream`
 # discriminator to declare. A platform-produced line is the routed STATE-CHANGE
-# event, which the reference reader (logchan_scan, section 3 below) does NOT yet
-# ingest -- it derives a key only from `event_id` / `channel+ts`. Accepting either
-# declaration here would validate a channel whose platform-produced lines the
-# reader silently drops as `unreadable` while advancing the offset past them --
-# the "One validator" rule the OTHER way: the validator must never accept what the
-# reader would drop. Both stay REJECTED until reader support for state-change lines
-# lands in a later platform-delivery ticket (see ai/contracts/athena-inbox.md ->
-# "The inbox as an event-platform delivery adapter", the Known-open note). The
-# reader-side companion to these is the "test the miss" case in section 3.
+# event, which the reference reader `logchan_scan` (its cases below) does NOT yet
+# ingest -- it derives a key only from `event_id` / `channel+ts`. These two
+# refusals are correct on their own terms -- `dedupe_key` is a member
+# the reader does not compute, `stream` is an unknown channel key -- but NEITHER
+# is what makes platform delivery undeclarable. The REQUIRED marker is `producer`
+# (see the producer cases below): a platform-fed channel must declare
+# producer:"platform", which the validator refuses until reader support lands.
+# The reader-side companion to these is the "test the miss" case among the
+# `logchan_scan` cases (the platform state-change line).
 err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","dedupe":["dedupe_key"]}}}' 2>&1)"; rc=$?
 if [ "${rc}" -eq 0 ]; then bad "dedupe:[dedupe_key] is REJECTED while reader support is deferred" "accepted"
 else assert_contains "the deferred dedupe_key member is rejected naming it" "dedupe_key" "${err}"; fi
 assert_contains "the deferred-dedupe_key refusal carries a Fix: clause" "Fix:" "${err}"
 
-# `stream` is not a channel-object key: under landed Option C the platform mints
-# no `op` stream, so declaring `stream` -- with ANY value -- is an unknown-key
-# hard error naming it. If a later platform-delivery ticket ever models a
-# declaration surface, the reader gains it first and the validator admits it
-# second, in the same change; until then it stays rejected.
+# `stream` is NOT the platform-delivery declaration surface -- `producer` is
+# (below), and it exists today though its "platform" value stays refused. `stream`
+# is simply an unknown channel key, refused as such. If a later ticket wires the
+# reader to ingest state-change lines, it opens producer:"platform" second, in the
+# same change (reader first, validator second).
 for sv in "op" "pile"; do
   err="$(descriptor_validate "{\"v\":1,\"repo\":\"/r/.git\",\"channels\":{\"a\":{\"kind\":\"log\",\"path\":\"x.jsonl\",\"stream\":\"${sv}\"}}}" 2>&1)"; rc=$?
   if [ "${rc}" -eq 0 ]; then bad "a stream key [${sv}] is REJECTED while platform-delivery support is deferred" "accepted"
@@ -366,6 +366,22 @@ for sv in "op" "pile"; do
     assert_contains "the deferred-stream refusal carries a Fix: clause [${sv}]" "Fix:" "${err}"
   fi
 done
+
+# DND-233 finding 1 (landed Option C): `producer` is the client-side marker that
+# turns platform delivery on, and it is REFUSED until the reader ingests
+# state-change lines. "slack" (the default when absent) is the only value
+# accepted today; the reader-side companion is the platform state-change "test
+# the miss" case among the logchan_scan cases below.
+assert_ok "producer:slack -- the current default schema, explicitly declared -- is accepted" \
+  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","producer":"slack"}}}'
+err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","producer":"platform"}}}' 2>&1)"; rc=$?
+if [ "${rc}" -eq 0 ]; then bad "producer:platform is REFUSED while reader support is deferred" "accepted"
+else
+  assert_contains "the deferred platform producer is refused naming it" "platform" "${err}"
+  assert_contains "the deferred-platform refusal carries a Fix: clause" "Fix:" "${err}"
+fi
+assert_refused "an unknown producer value is refused (allow-list, not deny-list)" \
+  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","producer":"webhook"}}}'
 
 # read and write MUST differ -- equal ones would make every send land in the
 # directory this identity reads from, so a sender would ingest its own mail.
@@ -499,7 +515,7 @@ assert_eq "a line with no dedupe key at all is not counted as new" "0" "$(jq -r 
 # from a state-change line, falls through to the `unreadable` branch, and --
 # because the line is COMPLETE -- ADVANCES the offset past it. This is the exact
 # behaviour that makes accepting such a channel declaration a silent drop, which
-# is why section 2's validator rejects `dedupe:[dedupe_key]` / `stream:*`. If a
+# is why the `descriptor_validate` cases above refuse `producer:"platform"` (the required marker), and also `dedupe:[dedupe_key]` / `stream:*`. If a
 # later platform-delivery ticket wires the reader to ingest state-change lines,
 # THIS assertion flips and the validator opens in the same change -- the two move
 # together, never apart.

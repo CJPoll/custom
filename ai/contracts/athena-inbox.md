@@ -531,6 +531,7 @@ tenants MAY use the same channel name for different surfaces.
 | `path` | yes | string | Inbox filename, **relative to the root**. Grammar below. |
 | `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`. |
 | `schema_v` | no | array of integer | Line versions this reader understands. Defaults to `[1]`. |
+| `producer` | no | string | Which producer's line schema feeds this channel. The only value the reference reader ingests today is `"slack"` (the default when absent). `"platform"` — the event-platform state-change schema — is **refused** until the platform-delivery ticket lands reader support (see *The inbox as an event-platform delivery adapter*). |
 
 `dedupe` is **declarative, not a switch.** Both dedupe rules in *Reader
 obligations* are mandatory and have non-overlapping jobs, so this key cannot
@@ -541,6 +542,17 @@ whose lines lack the fields it needs rather than silently deduping on nothing.
 A `dedupe` listing an unrecognised member is a hard error. When the key is
 absent the reader assumes `["event_id", "channel+ts"]` and reports a line
 missing both as unreadable rather than counting it.
+
+`producer` is **deny-by-default against the reader's real capability.** Absent,
+it is `"slack"` — the Slack-receiver line schema the reference reader ingests —
+so every channel declared to date is a Slack channel unchanged. The only
+accepted value today is `"slack"`; any other, notably `"platform"` (the
+event-platform state-change schema), is a hard error, because the reader does
+not yet ingest those lines and would score every one `+1 unreadable` while
+advancing the offset past it. `"platform"` is the client-side declaration that
+turns event-platform delivery on; it is admitted only when the platform-delivery
+ticket wires reader ingestion **first** (see *The inbox as an event-platform
+delivery adapter*).
 
 **Channel object, kind `maildir`**
 
@@ -942,20 +954,41 @@ are the additions, not replacements.
 > carrying the routed current-state payload — e.g. `entity_id` plus current
 > fields, a delete carrying `entity_id` only — and no `channel`/`ts` and no
 > `event_id`); such a line is scored `+1 unreadable` and the offset advances past
-> it. Accordingly **no channel may be declared as a platform-delivery channel
-> yet**, and the designated validator
-> (`ai/skills/athena:inbox/lib/descriptor.sh`) **rejects** the not-yet-modeled
-> declaration keys — a `"stream"` channel key (an unknown channel-object key) and
-> any `dedupe` member other than `event_id` / `channel+ts` — precisely so the
-> validator never admits a channel whose platform lines the reader silently
-> drops, the exact failed-lookup / silent-loss class this contract is strict to
-> prevent (`~/dev/custom/CLAUDE.md` → *A failed lookup must never look like an
-> empty one*; the "One validator" rule the other way — the validator must never
-> accept what the reader would drop). Reader ingestion of platform state-change
-> lines, and the matching validator admission, land together in a later
-> platform-delivery ticket (reader first, validator second, so they never
-> disagree); until then the subsections below are a **forward specification** of
-> that ticket, not a description of current behaviour.
+> it. Accordingly a platform-delivery channel is one a config author **cannot yet turn
+> on**. Its client-side declaration surface is the `producer` key on a `log`
+> channel (*registry-entry schema*, kind `log`): the only value the reference
+> reader ingests today is `"slack"` (the default when the key is absent), and the
+> designated validator (`ai/skills/athena:inbox/lib/descriptor.sh`) **refuses**
+> `producer:"platform"` — and any `producer` other than `"slack"` — with a `Fix:`
+> naming the deferred platform-delivery ticket (DND-260), because the reader does not yet
+> ingest state-change lines. So a config author who follows the contract and
+> declares the platform producer gets a **hard, observable refusal** today, not a
+> channel whose lines are silently dropped (`~/dev/custom/CLAUDE.md` → *A failed
+> lookup must never look like an empty one*; the "One validator" rule the other
+> way — the validator must never **admit a declared producer the reader cannot
+> read**).
+>
+> This refusal binds only what the registry entry **declares**. It does **not**,
+> and structurally **cannot** — this validator never sees `athena-events.md`
+> handling-rule config — detect a channel left at `producer:"slack"` (or omitted)
+> that an owner handling rule nonetheless targets as a platform delivery. That is
+> a producer-registration **mismatch** between the two ends, surfaced not here but
+> by the never-delivered three-state distinction in *Producer registration extends
+> to platform deliveries* (**no server producer registered** vs **no client
+> channel declared** vs **nothing arrived**), whose `inbox-doctor` half lands with
+> the platform-delivery ticket. The two other refused markers — a `"stream"`
+> channel key and a non-standard `dedupe` member — stay refused on their own terms
+> (an unknown channel key; a dedupe member the reader does not compute), but
+> **neither is what makes platform delivery undeclarable**; the required
+> `producer:"platform"` marker is.
+>
+> Reader ingestion of platform state-change lines, and the matching validator
+> **admission** of `producer:"platform"`, land together in a later
+> platform-delivery ticket (**reader first, validator second**, so they never
+> disagree — the `producer` key exists now as a declaration surface, but the value
+> that turns platform delivery on stays refused until the reader can read it);
+> until then the subsections below are a **forward specification** of that ticket,
+> not a description of current behaviour.
 
 ### A `log` channel MAY have a non-Slack producer
 
@@ -1106,18 +1139,19 @@ member" lines:
   stream only accelerates the common case.
 - **A lane consumer MUST detect a partial or truncated stream and treat its
   fast-path set as NON-AUTHORITATIVE.** The consumer's fast-path diff is correct
-  only over a *complete, in-order* run of the channel's lines, and four mechanisms
+  only over a *complete, in-order* run of the channel's lines, and three mechanisms
   of the `log` kind can break that invisibly: **rotation** (7 days / 8 MiB —
   *Retention* — discards the pre-rotation generation), a **stale-offset reset**
   (*First run, missing files, and a stale offset* resets the offset to 0 and
-  re-reads, so lines already applied are re-presented), **seen-set overflow** (the
-  bounded ring at ≤ 500 can age out a genuine earlier event across a long window),
-  and **out-of-order at-least-once redelivery** (delivery is at-least-once and the
-  diff is *order-sensitive* — a re-dispatched duplicate appended out of order can
+  re-reads, so lines already applied are re-presented — and for a keyless lane
+  line the dedupe seen-sets that reset relies on to suppress a re-read suppress
+  **nothing**, since a lane line carries no dedupe key), and **out-of-order
+  at-least-once redelivery** (delivery is at-least-once and the diff is
+  *order-sensitive* — a re-dispatched duplicate appended out of order can
   re-present a state the consumer had already moved past). A consumer MUST
-  recognise these conditions — a rotation gap, an offset reset, a seen-set that
-  has evicted, a redelivery it has already applied — and when any holds it MUST
-  NOT present its fast-path set as authoritative: it **re-queries the source of
+  recognise these conditions — a rotation gap, an offset reset, a redelivery it
+  has already applied — and when any holds it MUST NOT present its fast-path set
+  as authoritative: it **re-queries the source of
   truth** (the consumer's own Notion re-query, per *The consumer owns membership*
   — **not** a platform store) and MUST leave the partial condition **observable**,
   never silently presenting a wrong set as if it were complete. This is the
