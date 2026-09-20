@@ -45,6 +45,11 @@ STATIC_CHECKS = [
   ["confirm-merged self-test",  %w[ai/bin/confirm-merged --self-test]],
   ["safe-wait-guard self-test", %w[ai/hooks/safe-wait-guard.self-test.sh]],
   ["pronoun-guard self-test",   %w[ai/hooks/pronoun-guard.self-test.sh]],
+  # main-session-policy is a context INJECTOR, so every way it breaks is silent
+  # (exit 0, nothing emitted, the main session just never learns it must
+  # delegate). Its suite therefore asserts the policy BODY, not only the JSON
+  # envelope — an empty additionalContext must be red, not green.
+  ["main-session-policy self-test", %w[ai/hooks/main-session-policy.self-test.sh]],
   ["forge-identity-guard self-test", %w[ai/hooks/forge-identity-guard.self-test.sh]],
   ["forge-auth-guard self-test", %w[ai/hooks/forge-auth-guard.self-test.sh]],
   ["harness-event self-test",   %w[ai/hooks/harness-event.self-test.sh]],

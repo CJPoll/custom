@@ -347,6 +347,7 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
 - Every hook self-test — run each dedicated `ai/hooks/*.self-test.sh` script
   with stdin closed: `ai/hooks/safe-wait-guard.self-test.sh </dev/null`,
   `ai/hooks/pronoun-guard.self-test.sh </dev/null`,
+  `ai/hooks/main-session-policy.self-test.sh </dev/null`,
   `ai/hooks/forge-identity-guard.self-test.sh </dev/null`,
   `ai/hooks/forge-auth-guard.self-test.sh </dev/null`,
   `ai/hooks/harness-event.self-test.sh </dev/null`,
