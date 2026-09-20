@@ -78,11 +78,19 @@ notification. Its envelope is:
   the ingress and that owner resolution failed), never defaulted to an arbitrary
   or "system" owner.
 - **`occurred_at`** — when the transition happened.
-- **`source`** — provenance, from this **closed** set: `webhook:slack`,
-  `webhook:notion`, `poller:<source>`, and `emit:<machine_id>`. Every
-  enumerated `type` therefore has a legal `source`, so an
-  owner predicate leaf on the matchable `event.source` field never reads an
-  undefined value. `source` is **diagnostic only**. It MUST NEVER be an
+- **`source`** — provenance, drawn from a **closed set of FORMS**: `webhook:slack`,
+  `webhook:notion`, `poller:<source>`, and `emit:<machine_id>`. The set of *forms*
+  is closed (exactly these four), so every enumerated `type` has a legal `source`
+  and an owner predicate leaf on the matchable `event.source` field never reads an
+  undefined value. Two forms carry a **parameterized, registration-supplied
+  substring** — `poller:<source>` and `emit:<machine_id>` — bound by no
+  grammar/charset rule in this contract (see *Templating and the per-adapter
+  Escaper contract*, which depends on exactly that). That open substring is **not**
+  a hole: `source` is not a component of any store key (the stores key on
+  `type` / `rule_id` — see *Event disposition and dead-letter*), it is never an
+  authorization input (next sentence), and it always passes through the adapter's
+  Escaper (the first-pass trusted set is empty — see *Templating and the
+  per-adapter Escaper contract*). `source` is **diagnostic only**. It MUST NEVER be an
   authorization input — nothing may grant an event more trust or more scope
   because of what its `source` says. (Authentication of the source is the
   ingress's sender-verification step; `source` is the label recorded after that
@@ -138,9 +146,17 @@ per-`(event, rule)`:
 3. **SUPPRESSED** — predicate TRUE, but the delivery was collapsed by the owner's
    **dedupe window** (observable per *Enabled flag and dedupe window* — "recorded
    and countable as 'suppressed by dedupe window', never a silent drop").
-4. **REFUSED** — predicate TRUE, but the **delivery-time target-bind
-   re-assertion** refused it (see *Mechanism vs config boundary, and
-   both-ends-or-dark*, enforcement point 2 — "recorded, never a silent drop").
+4. **REFUSED** — predicate TRUE, but a **delivery-time policy check refused the
+   delivery before it left the platform**. Two checks produce this outcome, and
+   both are inherently delivery-time (a save-time-only check cannot cover either —
+   a binding can be deregistered after save, and DNS rebinding defeats a
+   save-time destination check): (a) the **target-bind re-assertion** — the target
+   no longer resolves to the rule's owner (see *Mechanism vs config boundary, and
+   both-ends-or-dark*, the delivery-time re-assertion enforcement point); and (b)
+   the **generic-webhook egress guard** — the resolved destination is not on the
+   owner allowlist, or resolves to a blocked (loopback / link-local / private /
+   metadata) range (see *The generic-webhook egress model*). A REFUSED delivery is
+   **recorded and countable as REFUSED, never a silent drop**.
 5. **FAILED (terminal)** — predicate TRUE, delivery attempted, retries exhausted /
    adapter 5xx / credential revoked. Recorded in the **failed-delivery store**
    (below), **never** dead-lettered as UNMATCHED.
@@ -156,8 +172,8 @@ per-`(event, rule)`:
 
 **Each Level-2 outcome that is not DELIVERED is individually observable** —
 FILTERED via ordinary accounting, SUPPRESSED per *Enabled flag and dedupe window*,
-REFUSED per *Mechanism vs config boundary, and both-ends-or-dark* enforcement
-point 2, FAILED per the failed-delivery store, COLLAPSED as the
+REFUSED (both the target-bind re-assertion per *Mechanism vs config boundary, and
+both-ends-or-dark* and the egress guard per *The generic-webhook egress model*), FAILED per the failed-delivery store, COLLAPSED as the
 `collapsed-by-idempotency-key` outcome per *Idempotency is per (event, rule)* — so
 **no matched delivery is ever a silent drop.**
 
@@ -184,9 +200,15 @@ third-party content, so the record is **Path-2 untrusted** when read into an LLM
 (see *Trust posture — two paths*), and read access is the owning account's.
 
 **This one-exemplar-plus-count-per-`(owner, type)` grain bounds the store by a
-structural quantity — the number of distinct unmatched `type`s per owner** (a
-small finite set drawn from the enumerable taxonomy), independent of traffic
-volume: a million unmatched Slack events of one type collapse to one exemplar +
+structural quantity — the number of distinct unmatched `type`s per owner**,
+independent of traffic volume. That quantity is finite because **the set of `type`
+values that can enter the platform at all is the union of the ingress kinds'
+finite registered origination sets** (see *Which event types an ingress kind may
+originate* — origination is a registered finite set of `type` values, never an
+open prefix, so no emitter can mint an unbounded stream of distinct `type`s); the
+taxonomy is open, but what any ingress may *originate* is not. The bound is
+therefore a **registration-time config quantity**, not a property of the open
+taxonomy: a million unmatched Slack events of one type collapse to one exemplar +
 count 1,000,000, rather than the million full payloads a disabled rule could
 otherwise flood it with. The **"MUST NOT be merely counted"** rule is **honored,
 not weakened** — an exemplar payload is retained for every distinct unmatched
@@ -591,12 +613,33 @@ authenticated ingress is allowed to **originate**. Authentication of an ingress
 consumer that drops a ticket from its working set on that event — that only a
 verified source ingress should ever produce.
 
-Therefore **each ingress kind is registered with the event-type namespace(s) it
-is permitted to originate, and the platform MUST reject, at ingress, any event
-whose `type` falls outside the set its kind is permitted to originate**, with a
-`Fix:` naming the ingress kind and the disallowed `type`. The constraint is
-fixed at ingress **registration** (per ingress kind, not per event) and
-re-checked on every event, so a crafted payload cannot bypass it.
+Therefore **each ingress kind is registered with a *finite, explicitly-enumerated
+set* of the `type` values it is permitted to originate — a registered set, NOT an
+open prefix or namespace-glob — and the platform MUST reject, at ingress, any
+event whose `type` is not a member of the set its kind is permitted to
+originate**, with a `Fix:` naming the ingress kind and the disallowed `type`. The
+constraint is fixed at ingress **registration** (per ingress kind, not per event)
+and re-checked on every event, so a crafted payload cannot bypass it.
+
+**The origination set is a finite set of `type` values, never an unbounded
+suffix.** A registered prefix such as `fleet.*` names the *namespace a type may be
+registered INTO*; it does **not** license an ingress to originate an unbounded
+stream of distinct `fleet.<arbitrary-suffix>` values. An ingress MUST be permitted
+only the specific, enumerated `type` values registered to it. This keeps
+origination — and therefore the set of distinct `(owner, type)` keys any store can
+accrue (see *Event disposition and dead-letter* and *Sender verification and
+payload completeness*) — bounded by a **registration-time config quantity**, never
+by traffic. It **preserves the open taxonomy** (see *The event taxonomy is open*):
+a new `type` is added by **registering** it — config, no schema change and no code
+change — exactly as before; what is now forbidden is *originating* a `type` no
+ingress registration enumerated. This adds **no per-event routing state**: it is a
+membership test against static per-ingress registration config, the same check
+this section already mandates, tightened from prefix-membership to
+set-membership. It is the **ingress-origination** check, distinct from the router
+rule that an unknown well-formed `type` which *reaches routing* is **dead-lettered,
+never rejected** (see *Enumerated first-pass event types* and *Event disposition
+and dead-letter*) — origination-rejection happens before an event exists; the
+router still never rejects.
 
 The first-pass permitted-origination rule:
 
@@ -605,12 +648,26 @@ The first-pass permitted-origination rule:
   ingress (or the reconciliation poller) for that source, whose sender
   verification established that the change is real (the poller does no HMAC, but
   reads the source directly under its own authorized token, so it is likewise an
-  authorized originator of that source's types). **Harness-emit MUST NOT be
+  authorized originator of that source's types). That source's
+  permitted-origination set is likewise the **finite, enumerated set of that
+  source's `type` values** — the enumerated types of *Enumerated first-pass event
+  types*, extended only by *registering* a new type for that source — because the
+  ingress adapter normalizes to exactly that set; `slack.*` / `notion.*` denote
+  the **registered members**, never an open licence to originate an arbitrary
+  `slack.<x>` / `notion.<x>`. **Harness-emit MUST NOT be
   able to synthesize a source-emitted webhook type** — a machine-token holder
   cannot mint a `notion.ticket.deleted` or a `slack.message.received` that no
   verified webhook produced; such an event MUST be rejected with a `Fix:`.
-- **Harness-emit** may originate only `type`s in the namespace reserved for
-  fleet/harness events (e.g. `fleet.*`), never a source-emitted type.
+- **Harness-emit** may originate only the **finite set of `fleet.*` `type` values
+  registered to its machine token** at ingress registration — never a
+  source-emitted type, and never an unenumerated `fleet.<arbitrary>` value. The
+  `fleet.*` namespace bounds what MAY be registered; origination is bounded to the
+  **registered members** of it, not the open prefix (see the finite-set rule
+  above). An event whose `type` is a well-formed but unregistered `fleet.*` value
+  is rejected at ingress: `Fix: harness-emit is not permitted to originate type
+  '<type>' — it may originate only the fleet.* type values registered to this
+  machine token. Register the type (config, no schema change) or correct the
+  emitter.`
 
 This is the origination dual of the `source`-is-not-authz rule: `source` governs
 what a label may *earn*, and this governs what an ingress may *mint*. Both are
@@ -624,7 +681,7 @@ no webhook produced.
 A rule is **config the platform evaluates, never executable code**. A rule
 carries: the `event_type(s)` it applies to, its **predicate** (see *The predicate
 grammar*), its **adapter + target** (see *Delivery adapters* and
-*Both-ends-or-silently-dark*), its **template + format** (see *Templating and the
+*Mechanism vs config boundary, and both-ends-or-dark*), its **template + format** (see *Templating and the
 per-adapter Escaper contract*), and its **enabled flag + dedupe window** (see
 *Enabled flag and dedupe window*). There is **one** rule kind — a stateless
 routing/notify rule — so a rule carries no `kind` discriminator and no membership
@@ -653,7 +710,7 @@ identity**, NEVER from a request/payload body:
    event*). Stops an account **minting** another's events.
 2. **Delivery target — target-bind.** A rule's target MUST resolve to a
    machine/channel registered to the rule's owner (see
-   *Both-ends-or-silently-dark*). Stops an account **delivering into** another's
+   *Mechanism vs config boundary, and both-ends-or-dark*). Stops an account **delivering into** another's
    surfaces.
 3. **Rule authoring — author-stamp.** A rule's `owner` is stamped from the
    authenticated author (this section). Stops an account **authoring rules
@@ -1088,6 +1145,17 @@ The generic-webhook adapter (owner-supplied destination) MUST:
   credentials;
 - egress from a network position that cannot reach internal services.
 
+**An egress rejection (an allowlist miss or a blocked-range resolution) is the
+Level-2 REFUSED disposition — not a silent drop, and not a terminal FAILED.** The
+rule matched (predicate TRUE) and the delivery was assembled, but this
+delivery-time policy check refused it before connecting, so it MUST be **recorded
+and countable as REFUSED** (see *Event disposition and dead-letter*, Level-2
+outcome REFUSED), exactly as the target-bind re-assertion is. It is **distinct
+from FAILED (terminal)**: no delivery was attempted against the destination and no
+per-`(event, rule)` retry budget is consumed — a blocked destination MUST NOT be
+retried. The `Fix:` naming the rejected destination (above) is the recorded
+refusal's actionable marker.
+
 The allow-predicate is pure (Domain); the connecting adapter is a hardened Side
 Effect. This adapter is **SECURITY-REVIEW-gated and ships last.**
 
@@ -1292,8 +1360,13 @@ under-encrypted**:
     content, so the record is **Path-2 untrusted** when read into an LLM (see
     *Trust posture — two paths*), and read access is the **owning account's** only.
     Retention follows the **never-destroy-unread** doctrine, made structurally safe
-    by the grain, exactly as the two sibling stores (see *Event disposition and
-    dead-letter* and *Terminal delivery failure — the failed-delivery store*): an
+    by the grain (see *Event disposition and dead-letter* and *Terminal delivery
+    failure — the failed-delivery store*). The `(owner, type, …)` key is bounded
+    because only **source-emitted, enrichable `type`s** ever reach enrichment —
+    harness-emit does not enrich and cannot originate a source type (see *Which
+    event types an ingress kind may originate*) — and those `type`s are the
+    source-webhook ingress's **finite registered origination set**, a
+    registration-time config quantity, not the open taxonomy: an
     **un-triaged** exemplar has an **unbounded** lifetime (it is the sole evidence
     of the miss), age-out applies **only after** read/triage, and **the store
     carries no cap or TTL number in this contract** — any operational cap/TTL is
