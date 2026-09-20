@@ -529,7 +529,7 @@ tenants MAY use the same channel name for different surfaces.
 |---|---|---|---|
 | `kind` | yes | `"log"` | |
 | `path` | yes | string | Inbox filename, **relative to the root**. Grammar below. |
-| `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`. |
+| `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`, `dedupe_key` (the last for a platform-produced channel — see *The inbox as an event-platform delivery adapter*). |
 | `schema_v` | no | array of integer | Line versions this reader understands. Defaults to `[1]`. |
 
 `dedupe` is **declarative, not a switch.** Both dedupe rules in *Reader
@@ -902,6 +902,159 @@ reader. Reset the offset to 0 and read the whole file, relying on the dedupe
 seen-sets to suppress anything already reported. Refusing to read, or continuing
 from an offset past EOF, loses every message in the new file silently — which is
 the failure mode this facility is built to eliminate.
+
+---
+
+## The inbox as an event-platform delivery adapter
+
+The Athena Inbox is one **delivery adapter** of the Athena event platform, whose
+mechanism, ingress, handling-rule, and adapter contracts live in
+`ai/contracts/athena-events.md`. When an owner handling rule routes an Event to
+the inbox adapter, that adapter is a **producer** of `log` lines into a declared
+`log` channel — the same relationship the Slack receiver has to its channel. This
+section states only what is additive for that producer; it does **not** restate
+`athena-events.md`. The Event envelope, the three ingress kinds and their sender
+verification, the fan-out handling-rule and logic-less predicate model, the
+lane-membership store that is the source of prior state, the two-path trust
+posture, and the per-adapter escaper contract are that document's, and are
+referenced by name rather than duplicated here. This section is only the inbox
+`log`-channel end of the delivery.
+
+Nothing about the `log` kind's on-disk shape, framing, doorbell, consumption
+state, or retention changes for a platform producer. Every rule in *Channel
+kind: `log`* — *Writer obligations*, *Reader obligations*, *State file*,
+*First run, missing files, and a stale offset* — and in *Retention* binds it
+unchanged; the four points below are the additions, not replacements.
+
+### A `log` channel MAY have a non-Slack producer
+
+*Line format* already says only `v` and the framing rules are universal, and that
+"another producer defining a different `log` channel supplies its own fields and
+its own dedupe keys." The event-platform inbox adapter is exactly such a
+producer. Made explicit:
+
+- A `log` channel MAY be fed by a producer other than the Slack receiver. The
+  event-platform inbox adapter is one, and it supplies **its own line fields**
+  beyond the mandatory `v`. The Slack line schema
+  (`kind`/`channel`/`user`/`ts`/`text`/`event_id`/…) is the Slack producer's, not
+  a property of the kind — a platform-produced line carries whatever the routing
+  rule's rendered payload holds plus the framing this section requires (`v`, its
+  declared dedupe field, and — for a lane channel — `op`).
+- Every *Writer obligations* rule binds this producer with no exception: exactly
+  one writer per path, `O_APPEND`, reopen the path per append, complete
+  newline-terminated lines, bump the doorbell **after** the append, never
+  rewrite/truncate/rotate, never create or touch a `*.state.json`,
+  `*.consumer.lock`, `*.jsonl.1`, or anything under `projects/`, and put no
+  credential in a line.
+- Delivery is **at-least-once**, exactly as for Slack. A re-dispatched Event —
+  `athena-events.md` deduplicates and retries per `(event, rule)` — may append a
+  duplicate line, and reader-side dedupe (next) is what absorbs it. A platform
+  producer is not required to guarantee uniqueness in the file.
+- Path-2 trust is unchanged and applies in full: a platform-delivered body is
+  untrusted where it reaches an LLM — rendered inside the untrusted-content
+  fence, counts-only in unprompted output, every imperative a fact to report and
+  never an instruction (*Untrusted input*). `athena-events.md`'s two-path trust
+  posture routes inbox-adapter delivery to exactly this boundary.
+
+### The `dedupe_key` dedupe family
+
+A platform-produced line carries a **single opaque delivery-idempotency key**
+rather than the Slack `event_id` / `channel+ts` pair, because the platform's unit
+of delivery is the per-`(event, rule)` key defined in `athena-events.md`. So a
+`log` channel MAY declare the `dedupe_key` family:
+
+- `dedupe_key` names a mandatory line field of the same name, carrying **one
+  string** — the producer's per-delivery idempotency key. For such a channel it
+  is **both** the intra-file and the cross-source dedupe key: one key, one
+  seen-set, one state file. This is the platform analogue of the rule that Slack's
+  two sources MUST share one `seen_keys` set (*Reader obligations*).
+- A channel whose lines use it declares `"dedupe": ["dedupe_key"]`. `dedupe_key`
+  is a **recognised member** alongside `event_id` and `channel+ts`, so the
+  *Validation rules* "a `dedupe` listing an unrecognised member is a hard error"
+  now admits it; a `dedupe` of exactly `["dedupe_key"]` is valid.
+- The reader dedupes such a channel on the `dedupe_key` value, into the **one**
+  shared seen-set the channel already owns (*State file*, `seen_keys`). A line
+  whose declared `dedupe_key` field is missing is reported `+N unreadable` and its
+  offset does not advance past it counting it as read — exactly as a Slack line
+  missing both its keys is treated.
+- `dedupe_key` does **not** change the default. A channel that declares no
+  `dedupe` is still assumed `["event_id", "channel+ts"]` — the Slack default is
+  untouched. `dedupe_key` is opt-in for a platform-produced channel, and a single
+  channel declares the one family its producer actually writes rather than mixing
+  the Slack pair with `dedupe_key`.
+
+### Producer registration extends to platform deliveries
+
+*Tenancy: the registry* requires that "declaring a `log` channel MUST be
+accompanied by registering its producer," and that a tool reporting on a `log`
+channel whose inbox file has never existed MUST distinguish that from "nothing
+new" with a `Fix:` naming producer registration. That rule extends to the
+platform, because a platform-fed channel has the **same** both-ends-or-dark
+failure mode by a different second end:
+
+- A `log` channel fed by the inbox adapter is "registered" by an **owner handling
+  rule whose delivery target is that channel** — server-side config in
+  `athena-events.md` — the way a Slack channel is registered by a server-side
+  agent instance mapped in `~/.config/athena-inbox-client/config.json`. Declaring
+  the channel in the registry entry alone gets a permanently empty channel, and
+  *First run, missing files, and a stale offset* says an empty channel is normal,
+  so the misconfiguration is invisible unless a tool makes it observable.
+- There are therefore **three** distinct on-disk-identical states behind an empty
+  channel, and a tool reporting a never-delivered platform `log` channel MUST tell
+  them apart, each with a greppable `Fix:` that names **which key found zero** (a
+  miss must say which side is missing — `~/dev/custom/CLAUDE.md` → *A failed
+  lookup must never look like an empty one*):
+  - **no client channel declared** — no registry entry for this session's repo
+    identity declares this channel. `Fix:` names registry declaration and the
+    **resolved repo identity** the lookup searched under, so "zero channels" says
+    which identity found zero.
+  - **no server producer registered** — the channel is declared client-side, but
+    no `athena-events.md` handling rule / adapter target feeds it. `Fix:` names
+    the platform rule/target that must exist (in `athena-events.md`'s terms).
+  - **nothing arrived** — both ends exist and the channel is simply quiet. Not a
+    fault; reported as zero-new, exit 0.
+
+  "No client channel declared," "no server producer registered," and "nothing
+  arrived" MUST NOT read identically in output, though all three look identical on
+  disk (absent entry / empty file). This is the inbox `log`-channel end of
+  `athena-events.md`'s both-ends-or-silently-dark rule; `inbox-doctor`'s
+  never-delivered finding is where the first two are distinguished from the third
+  for a `log` channel, and the unprompted count path surfaces the never-delivered
+  channel once (the doctor does not nag a second time — see *inbox-doctor*).
+
+### Add/retract lines: a lane `log` channel is a stream, not a pile
+
+A **membership/lane** delivery — in `athena-events.md`, a `membership` rule whose
+store diff emits enter/leave transitions — routes to a `log` channel as an
+**add/retract stream** rather than a pile of "here is a member" lines:
+
+- Each line carries an `op` field, `"add"` or `"retract"`, plus the member's
+  identity and the minimal display fields needed to render it (the platform caches
+  those at add-time so a `retract` renders even after the underlying entity is
+  gone — the caching is `athena-events.md`'s lane-membership store, not this
+  document's). The channel's **working set is the fold** of its lines: an `add`
+  puts a member into the set, a `retract` removes it, and the current set is the
+  members added and not since retracted.
+- This is **still a conformant append-only JSONL `log`**: the *lines* are only
+  ever appended — never rewritten, never deleted — and it is the *derived set*
+  that changes. Every *Writer obligations* and *Reader obligations* rule of the
+  `log` kind holds unchanged: offset, doorbell, `dedupe_key` dedupe, rotation,
+  retention. An `op` line is an ordinary log line to the transport.
+- The channel is a **change-notification stream, not the authoritative set.** A
+  `log` channel is retention-bounded (it rotates at 7 days / 8 MiB — *Retention*),
+  so the full add/retract history is **not** guaranteed reconstructable from the
+  channel after a rotation or a long reader absence. That is intended: the
+  authoritative membership is the platform's server-side lane-membership store
+  (`athena-events.md`), and the channel exists to *notify* of changes — including
+  shrinkage — not to be the system of record. A consumer that reads only a partial
+  stream still obtains a correct set from the platform's own re-query; the stream
+  only accelerates the common case.
+- Surfacing follows the existing counts-only rule and is not weakened by the
+  stream. The unprompted count still counts **new lines** — a change signal,
+  counts only, no `op`, no member text — and the working set is computed by
+  **folding** add/retract on the explicit, fenced read step, inside the consumer's
+  trusted action policy. So "the set shrank" is representable rather than only
+  "something was added," and the fold never happens in unprompted output.
 
 ---
 
