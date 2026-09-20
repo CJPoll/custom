@@ -707,6 +707,42 @@ emitting; a **failed** enrichment fetch is handled there — never emitted
 un-enriched, never silently dropped (see *Sender verification and payload
 completeness*).
 
+**Per-account owner resolution (the ingress stamps `owner` from the authenticated
+ingress, never from the payload — see *The event*).** Sender verification proves
+the request is genuine; it does **not** by itself name the owner, because one
+credential can serve many accounts. Owner is resolved per ingress kind:
+
+- **Notion webhook** — the per-subscription `verification_token` that verified the
+  request is registered per-account (owner-stamped when the subscription is
+  created), so verifying against it **both** authenticates the sender **and**
+  identifies the owning account.
+- **Slack webhook** — the app signing secret authenticates that the request is
+  from Slack, but one Slack app is installed into many workspaces, so it does
+  **not** identify the owner. Owner is resolved by looking up the payload's
+  `team_id`/`enterprise_id` (with `api_app_id`) as a **key** into a per-install
+  record `(api_app_id, team_id | enterprise_id) → owning account`, whose owning
+  account was **stamped at OAuth-install time from the authenticated installing
+  account** (the owner-from-auth invariant of *Mechanism vs config boundary, and
+  both-ends-or-dark* → machine-token create authority). The `team_id` in the
+  payload is a lookup key into a pre-authenticated record, **not** an owner claim,
+  so "owner is never read from the payload" holds. The install-record
+  issuance/custody is server-side gen_saas (the GS-8 Notion-token / GS-4
+  machine-token analog); this contract states the binding invariant and defers
+  custody there. A `team_id`/`enterprise_id` that resolves to **no** install
+  record is an **owner-unresolvable reject** (per *The event*), never defaulted.
+- **Reconciliation poller** — the owner is the account its per-account source-read
+  token belongs to, resolved server-side from that token (as harness-emit resolves
+  owner from the machine token), never from fetched content.
+
+These **instantiate** MUSTs the contract already carries (they add no new MUST);
+they are stated so an implementer has the Slack-specific marker:
+
+- Inbound verification failure (the existing *Inbound webhook* hard-reject, named
+  for Slack):
+  `Fix: inbound Slack webhook rejected — X-Slack-Signature did not match v0=HMAC-SHA256(signing_secret,"v0:"+X-Slack-Request-Timestamp+":"+raw_body) (constant-time; timestamp within the freshness window). Do not normalize an unverified body. Check the Slack app signing secret in KMS custody.`
+- Owner-unresolvable (the existing *The event* owner-reject, named for Slack):
+  `Fix: owner could not be resolved for a verified Slack webhook (api_app_id <id>, team_id/enterprise_id <id>) — no OAuth install record binds this install to an owning account. Reject; never default to a 'system' or arbitrary owner. Install the Slack app authenticated as the owning account (install record is owner-stamped from the authenticated installer), or correct the install-record lookup key.`
+
 ### Poller (fallback only)
 
 A scheduled source poll, used **only where a source lacks an adequate webhook**,
@@ -1352,18 +1388,58 @@ both, and build is staged.
 
 ### Fixed-destination vs owner-supplied-destination
 
-Every outbound adapter is exactly one of:
+Every outbound adapter is classified on **two orthogonal axes**; conflating them
+is the defect the target-bind paragraph of *Mechanism vs config boundary, and
+both-ends-or-dark* guards against.
 
-- **Fixed-destination** — a known host (Slack, email, SMS, Discord, Notion, and
-  the inbox adapter). It carries **no** egress/SSRF model.
-- **Owner-supplied-destination** — the **generic webhook** adapter, which calls
-  an arbitrary owner-supplied endpoint. **Only** this adapter carries the
-  egress/SSRF model (see *The generic-webhook egress model*), and it ships
-  **last, after its own security review**.
+**Axis 1 — egress/SSRF model** (does the adapter connect to an owner-supplied
+**network endpoint**?):
 
-An implementation MUST classify each adapter into exactly one of these, and MUST
-NOT apply the egress model to a fixed-destination adapter (it would only obstruct
-a known-safe destination) nor omit it from the generic-webhook adapter.
+- **No egress/SSRF model** — a known transport: Slack, email, SMS, Discord,
+  Notion, and the inbox adapter. There is no owner-supplied URL to resolve, so no
+  SSRF surface.
+- **Egress/SSRF model** — the **generic-webhook** adapter alone, which calls an
+  arbitrary owner-supplied endpoint (see *The generic-webhook egress model*); it
+  ships **last, after its own security review**.
+
+An implementation MUST NOT apply the egress model to a no-egress adapter (it would
+only obstruct a known-safe transport) nor omit it from the generic-webhook
+adapter.
+
+**Axis 2 — owner↔destination bind** (is the delivery destination scoped by the
+adapter's **own credential**, or **supplied by the owner**?):
+
+- **Credential-scopes-destination** — **Slack** (workspace-scoped bot token),
+  **Notion** (tenant/DB-scoped token), and **Discord** when it delivers via a bot
+  token to a guild the bot was authorized into. The credential cannot reach
+  another account's destination, so the owner↔destination bind is **implied by the
+  credential** — no explicit destination check is required.
+- **Owner-supplied-destination** — the destination is rule config, not fixed by
+  the credential, so an **explicit owner↔destination check IS required** (see the
+  target-bind paragraph of *Mechanism vs config boundary, and both-ends-or-dark*):
+  - the **inbox adapter** — a `machine + inbox_name` path, no credential — via the
+    three-point machine↔owner bind;
+  - **email / SMS** (roadmap) — the recipient is owner-supplied and the credential
+    scopes the **sender, not the recipient** — via an owner-verified-recipient
+    check;
+  - the **generic-webhook** adapter — an owner-supplied URL — via the owner
+    allowlist of *The generic-webhook egress model*, which is simultaneously its
+    Axis-1 SSRF defense.
+
+Every adapter is exactly one value on **each** axis. The axes are independent:
+`no egress/SSRF` does **not** imply `credential-scopes-destination` (email, SMS,
+and the inbox adapter are no-egress yet owner-supplied). The earlier "a
+fixed-destination adapter gets the target-bind for free" reasoning holds **only**
+for the credential-scopes-destination members (Slack, Notion), never for
+email/SMS.
+
+The **email/SMS owner-verified-recipient** refusal — the delivery-time check the
+target-bind paragraph of *Mechanism vs config boundary, and both-ends-or-dark*
+requires for these roadmap owner-supplied-destination adapters — carries:
+`Fix: delivery refused — recipient <recipient> is not a destination verified for this rule's owner. An email/SMS adapter's credential scopes the sender, not the recipient, so an owner-supplied recipient MUST be verified for the rule's owner (owner-confirmed recipient or owner-verified sending domain) before delivery. Verify the recipient/domain for this owner, or correct the rule.`
+(This refusal is a Level-2 REFUSED disposition — recorded and reported, never a
+silent drop — exactly as the target-bind and generic-webhook egress refusals in
+*Delivery refusal — the refused-delivery store*.)
 
 ### The generic-webhook egress model
 
@@ -1540,9 +1616,22 @@ under-encrypted**:
   the owning account only** — no cross-account use is expressible.
 - A secret MUST NEVER be logged, placed on `argv`, echoed, made API-readable, or
   written into the inbox root.
-- The first-pass secret set is: the **Slack bot (`chat.write`) token**; the
-  **Notion per-subscription `verification_token`** (the webhook HMAC key); and a
-  **read-only, DB-scoped Notion enrichment token**. Any future adapter credential
+- The first-pass secret set is: the **Slack bot (`chat.write`) token** (OUTBOUND
+  delivery); the **Slack app signing secret** — the INBOUND-webhook HMAC key;
+  Slack signs each request `v0=HMAC-SHA256(signing_secret,
+  "v0:"+X-Slack-Request-Timestamp+":"+raw_body)`, verified constant-time against
+  `X-Slack-Signature` with the timestamp inside a freshness window (per *Inbound
+  webhook*); the **Notion per-subscription `verification_token`** (the Notion
+  inbound-webhook HMAC key); and a **read-only, DB-scoped Notion enrichment
+  token**. Every first-pass inbound-webhook ingress therefore has its inbound-auth
+  key named here — Slack's signing secret (per **app**) and Notion's
+  `verification_token` (per **subscription**) — under the same KMS
+  envelope-encryption custody, least-privilege at-use-only decrypt, and
+  never-logged/never-on-`argv`/never-in-inbox-root posture as every other secret.
+  The reconciliation poller carries no HMAC key: it reads the source under a
+  per-account, source-scoped read token (for Notion first-pass reconciliation the
+  read-only DB-scoped enrichment token above serves; a source needing a distinct
+  poller token adds it here under the same custody). Any future adapter credential
   (SMTP, SMS, Discord bot) joins this set under the same story.
 
 ### Sender verification and payload completeness
@@ -1658,11 +1747,27 @@ Therefore:
   stops one account from minting another's events; this stops one account from
   delivering into another's surfaces. A rule whose target is owned by a different
   account MUST be refused with a `Fix:` (name the target and that it is not
-  registered to the rule's owner). A **fixed-destination API adapter** (Slack,
-  email, Notion) gets this binding for free — it delivers only through the
-  owner's own KMS-custodied per-account credential, which cannot reach another
-  account's destination — but the **inbox adapter has no such credential** (the
-  target is a path), so it MUST enforce the owner↔target binding explicitly.
+  registered to the rule's owner). An adapter whose **credential itself scopes the
+  destination** gets this binding for free — **Slack** (workspace-scoped bot token)
+  and **Notion** (tenant/DB-scoped token) deliver only through the owner's own
+  KMS-custodied per-account credential, which cannot reach another account's
+  destination. This is a property of *those* credentials, **not** of every
+  fixed-host adapter: an adapter whose **destination is owner-supplied** carries no
+  such implication and MUST enforce an **explicit** owner↔destination check —
+  - the **inbox adapter** (the target is a `machine + inbox_name` path, no
+    credential) enforces the three-point bind below;
+  - an **addressed-messaging adapter whose recipient is owner-supplied rule config
+    — email (SMTP), SMS** (both roadmap) — has a credential scoping the **sender,
+    not the recipient**, so it MUST validate that the recipient resolves to a
+    destination **verified for the rule's owner** (an owner-confirmed recipient /
+    owner-verified sending domain), refused with a `Fix:` otherwise, exactly as the
+    inbox target-bind and the generic-webhook allowlist are — never a free bind;
+  - the **generic-webhook** adapter (owner-supplied URL) enforces the
+    egress/allowlist model of *The generic-webhook egress model*.
+
+  Only a credential-scopes-destination adapter (Slack, Notion) is exempt from an
+  explicit destination check; the **inbox adapter has no credential** (the target
+  is a path), so it MUST enforce the owner↔target binding explicitly, as follows.
 - **The machine↔owner binding the check reads IS the machine-token registration
   record** — the same server-side per-account record from which harness-emit
   resolves an event's owner ("the owner is resolved server-side from that token",
