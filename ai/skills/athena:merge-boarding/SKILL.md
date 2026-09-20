@@ -1,6 +1,6 @@
 ---
 name: athena:merge-boarding
-description: How the athena-admiral protects the latency between a green MR and a landed deploy — the merge bar (incl. the no-CI-repo rule), merge-train boarding on GitLab, the GitHub squash-merge path, batching one deploy per batch with the Auto-Deploy label, the label-assertion before a batch tail, confirming a merge actually landed with confirm-merged, and the Oban worker-rename gate. Use when a captain reports DONE and you are boarding/merging its MR. Merging is the admiral's alone.
+description: How the athena-admiral protects the latency between a green MR and a landed deploy — the merge bar (incl. the no-CI-repo rule), merge-train boarding on GitLab, the GitHub squash-merge path, batching one deploy per batch with the Auto-Deploy label, the label-assertion before a batch tail, confirming a merge actually landed with confirm-merged, the Oban worker-rename gate, and landing onto a main that other fleets are moving under you (rebase, re-gate the integration head, merge one at a time). Use when a captain reports DONE and you are boarding/merging its MR. Merging is the admiral's alone.
 ---
 
 # athena:merge-boarding
@@ -38,6 +38,68 @@ EXCEPT an access-control fix.) In such a repo the bar is **the captain's explici
 of repo** — before merging, confirm the head SHA you are landing is the one the
 report names, and never infer readiness from forge state alone while the
 captain's worktree is still moving.
+
+## Landing onto a moving main (you are never the only actor in the repo)
+
+`origin/main` moves under you mid-run — another fleet, the shipwright cron, the
+owner. Assume it; do not try to find out who. **"Is another fleet live?" is
+unanswerable** — every cheap liveness claim is indistinguishable from a corpse
+(`CLAUDE.md` → *Agents work in worktrees*, the zero-byte `run.lock`). **"Did
+`origin/main` move since my branch point?" is two SHAs**, and it is the only
+fact that changes what you do. It also covers the cron and the human, not just
+another fleet.
+
+`scripts/wt-preflight` already asserts your branch is not behind `origin/main`
+when it is **created**. This is the same assertion when it **lands**.
+
+**Before boarding or merging any MR, from the Mission's worktree, run:**
+
+```
+ai/skills/athena:merge-boarding/scripts/integration-gate \
+    [--target origin/main] [--since <baseline main SHA>] [--gate '<cmd>']
+```
+
+Exit 0 means: your HEAD contains current `origin/main`, **and** the local gate
+is green on that integrated head. It prints `INTEGRATION OK <sha>` — merge
+*that* SHA (the same SHA-match discipline as the merge bar's "confirm the head
+you are landing is the one the report names"). Any other exit tells you what to
+do next. It never rebases or writes anything; a rebase can conflict and is your
+judgement call.
+
+**Green-alone is not green-merged.** Two MRs with entirely disjoint file sets
+can each pass the gate and fail together: the admiral's rendered-line budget is
+a single global number (496/500 today — four lines of headroom), and
+`ai/hooks/registry.json` / `ai/inbox/registry.json` are single documents. Git
+sees no conflict, and in a repo with no CI (`~/dev/custom`) nothing re-runs the
+gate after a rebase — so the only thing standing between that defect and `main`
+is you running the gate on the integration result. This **adds** a check at a
+moment where none ran; it skips none.
+
+**Merge one at a time, re-running `integration-gate` between merges.** This is
+the one place the batching rule below is subordinate: batch the *deploy label*,
+never the integration check. Merging car N moves `origin/main`, which
+invalidates the check for car N+1. Sequential here costs minutes, and it is not
+the fan-out parallelism — that already happened during the work.
+
+**Pass `--since` once you have rebased.** After a rebase the original branch
+point is unrecoverable, so the incoming delta is empty *by construction* and
+the tool reports the intersection `UNAVAILABLE` rather than empty — an empty
+intersection would read as "the incoming delta missed my reviewed files, board
+it". `--since` is the target SHA your branch was last gated against (your state
+log's "baseline main =="). The intersection it then prints is the input to the
+**No replay churn** coverage-intersection rule below: empty plus a green
+integration gate, board it; non-empty, treat the delta as outside the reviewed
+set and replay.
+
+**Do not negotiate with the other fleet.** No messaging, no lock, no deferring,
+no reserving a budget line or a registry slot. Two peers deferring to each
+other is a race with no arbiter, and it would serialize the *work* phase to
+protect a number an existing check already validates at integration.
+`origin/main` is the arbiter; rebase is how you lose the race safely. The
+accepted, named cost: losing the race is discovered late, so a second fleet
+that also spent resident admiral lines may redo one ticket's work at merge
+time — rare, bounded at one ticket, and the `check-agent-size` failure names
+the budget, so the redo is mechanical.
 
 ## Boarding (GitLab merge train — walt_ui, the default)
 

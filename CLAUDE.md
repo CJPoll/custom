@@ -353,6 +353,19 @@ rule above is unchanged and is not weakened by that — it is what makes the
 guarantee hold whichever way an agent was started, rather than depending on one
 reserved name a hand-spawned run had to remember to avoid.
 
+**Two fleets in one repo is normal, and it resolves at `origin/main`, not
+between them.** Concurrent admirals never coordinate with each other — each
+rebases onto current `origin/main`, re-runs the gate on the **integrated** head,
+and merges one MR at a time. Detecting the other fleet is the wrong question
+(a liveness marker is indistinguishable from a corpse, as above); "did
+`origin/main` move since my branch point" is two SHAs, and it covers the
+shipwright cron and the human too. Gate-green-alone is not gate-green-merged:
+shared globals — the `check-agent-size` budgets, `ai/hooks/registry.json`,
+`ai/inbox/registry.json` — are one number or one document, so two branches with
+disjoint file sets can each pass alone and fail together, which git cannot see
+and (with no CI here) nothing else re-checks. Mechanics and the tool:
+`athena:merge-boarding` → *Landing onto a moving main*.
+
 **This is a rule about writes, and specifically about git work.** Reading the
 main checkout is normal and often necessary. Four things are genuine exceptions,
 and they are exceptions because each one is *safe by construction* or has

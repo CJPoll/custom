@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# integration-gate -- assert a branch is safe to land onto a MOVING main.
+#
+# `origin/main` moves under a fleet mid-run: another fleet, the shipwright
+# cron, the owner typing in the main checkout. This script answers the only
+# question that changes what the admiral does -- "did the target move since my
+# branch point, and is the gate still green once I contain it?" -- and it
+# answers it with SHAs, never with a liveness guess about who else is running.
+#
+# Why the re-gate is the load-bearing half: two MRs with COMPLETELY DISJOINT
+# file sets can each be gate-green alone and gate-red merged, because several
+# harness checks judge a single global document or number --
+# `check-agent-size`'s per-agent line budget, `ai/hooks/registry.json`,
+# `ai/inbox/registry.json`. Git sees no conflict and (in a repo with no CI,
+# like ~/dev/custom) nothing re-runs the gate after a rebase, so the defect is
+# invisible to both git and the forge. This ADDS a check at a moment where none
+# ran; it never drops, skips, downgrades, or path-excludes one.
+#
+# This script is a PURE ASSERTION: it never rebases, commits, pushes, or
+# otherwise writes to the repo. A rebase can conflict and is a judgement call,
+# so it reports and the admiral acts. Safe to run anywhere, any number of
+# times.
+#
+# Run: ai/skills/athena:merge-boarding/scripts/integration-gate [--target <ref>]
+# Self-test: ai/skills/athena:merge-boarding/test/self-test.sh
+set -uo pipefail
+
+PROG="integration-gate"
+TARGET="origin/main"
+GATE_CMD=""
+DO_FETCH=1
+SINCE=""
+
+usage() {
+  cat <<'EOF'
+Usage: integration-gate [--target <ref>] [--since <ref>] [--gate '<cmd>']
+                        [--no-fetch] [--self-test]
+
+Asserts that HEAD contains the current target ref AND that the local gate is
+green on that integrated head. Exits 0 only when both hold.
+
+  --target <ref>   integration target (default: origin/main)
+  --since <ref>    the target SHA your branch was last reviewed/gated against
+                   (the "baseline main" in your state log). REQUIRED for a
+                   meaningful file-set intersection once you have rebased:
+                   after a rebase the original branch point is unrecoverable,
+                   so without it the intersection is reported UNAVAILABLE
+                   rather than silently empty.
+  --gate '<cmd>'   gate command to run at the repo root
+                   (default: ai/bin/harness-gate when present in the repo)
+  --no-fetch       skip the fetch; compare against the target ref as-is
+  --self-test      run the dedicated test suite and exit
+
+Exit codes: 0 integration OK | 1 gate RED on the integrated head
+            2 usage / unresolvable ref / branch behind target
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) TARGET="${2-}"; [ -n "$TARGET" ] || { echo "${PROG}: --target needs a ref." >&2; echo "Fix: pass a ref, e.g. --target origin/main." >&2; exit 2; }; shift 2 ;;
+    --since)  SINCE="${2-}"; [ -n "$SINCE" ] || { echo "${PROG}: --since needs a ref." >&2; echo "Fix: pass the target SHA your branch was last gated against, e.g. --since 2e0eff3." >&2; exit 2; }; shift 2 ;;
+    --gate)   GATE_CMD="${2-}"; [ -n "$GATE_CMD" ] || { echo "${PROG}: --gate needs a command." >&2; echo "Fix: pass a command, e.g. --gate 'ai/bin/harness-gate'." >&2; exit 2; }; shift 2 ;;
+    --no-fetch) DO_FETCH=0; shift ;;
+    --self-test)
+      HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+      exec bash "$(dirname "${HERE}")/test/self-test.sh" ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "${PROG}: unknown argument '$1'." >&2
+       echo "Fix: see --help; valid flags are --target, --gate, --no-fetch, --self-test." >&2
+       exit 2 ;;
+  esac
+done
+
+# --- 1. cwd must be inside a work tree -------------------------------------
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "${PROG}: '$(pwd)' is not inside a git work tree." >&2
+  echo "Fix: run this from the Mission's worktree (the tree holding the branch you intend to merge)." >&2
+  exit 2
+fi
+ROOT="$(git rev-parse --show-toplevel)" || exit 2
+cd "$ROOT" || exit 2
+
+# --- 2. fetch --------------------------------------------------------------
+if [ "$DO_FETCH" -eq 1 ]; then
+  case "$TARGET" in
+    */*) REMOTE="${TARGET%%/*}" ;;
+    *)   REMOTE="" ;;
+  esac
+  if [ -n "$REMOTE" ] && git remote | grep -qx -- "$REMOTE"; then
+    git fetch "$REMOTE" >/dev/null 2>&1 || \
+      echo "${PROG}: WARN fetch of '${REMOTE}' failed; comparing against the ref as it stands locally." >&2
+  fi
+fi
+
+# --- 3. resolve the refs ---------------------------------------------------
+# A target ref that does not resolve is an ERROR, not an empty result: a
+# mistyped or never-fetched ref must never read as "nothing to integrate".
+if ! TARGET_SHA="$(git rev-parse --verify "${TARGET}^{commit}" 2>/dev/null)"; then
+  echo "${PROG}: target ref '${TARGET}' does not resolve to a commit in $(pwd)." >&2
+  echo "Fix: name a ref that exists here (git remote -v; git branch -r). A wrong ref must not be mistaken for 'no drift' -- this is an error, not an empty result." >&2
+  exit 2
+fi
+if ! HEAD_SHA="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null)"; then
+  echo "${PROG}: HEAD does not resolve to a commit (unborn branch?)." >&2
+  echo "Fix: check out the Mission branch with at least one commit, then re-run." >&2
+  exit 2
+fi
+BASE_SHA="$(git merge-base HEAD "$TARGET_SHA" 2>/dev/null)"
+if [ -z "$BASE_SHA" ]; then
+  echo "${PROG}: HEAD and '${TARGET}' share no merge base (unrelated histories)." >&2
+  echo "Fix: confirm you are in the right worktree and that '${TARGET}' is this repo's integration target." >&2
+  exit 2
+fi
+
+short() { git rev-parse --short "$1"; }
+
+# The anchor the file sets are measured from. An unresolvable --since is an
+# ERROR, not a silent fallback to the merge-base -- falling back would quietly
+# answer a different question than the one asked.
+if [ -n "$SINCE" ]; then
+  if ! ANCHOR="$(git rev-parse --verify "${SINCE}^{commit}" 2>/dev/null)"; then
+    echo "${PROG}: --since ref '${SINCE}' does not resolve to a commit in $(pwd)." >&2
+    echo "Fix: pass a resolvable SHA/ref for the baseline your branch was gated against (see your state log's 'baseline main =='), or omit --since." >&2
+    exit 2
+  fi
+else
+  ANCHOR="$BASE_SHA"
+fi
+
+# --- 4. drift verdict, printed EITHER WAY ----------------------------------
+# A no-drift run must never look like a skipped run.
+AHEAD="$(git rev-list --count "${BASE_SHA}..${TARGET_SHA}" 2>/dev/null || echo 0)"
+if [ "$BASE_SHA" = "$TARGET_SHA" ]; then
+  echo "${PROG}: target '${TARGET}' unchanged since branch point ($(short "$TARGET_SHA"))."
+else
+  echo "${PROG}: target '${TARGET}' advanced $(short "$BASE_SHA") -> $(short "$TARGET_SHA") (${AHEAD} commit(s))."
+fi
+
+# --- 5. the three file sets (input to the replay-churn rule) ---------------
+# Measured from ANCHOR, printed on BOTH the pass and the exit-2 path so a
+# still-behind branch can see what is coming at it.
+#
+# The intersection is UNAVAILABLE, never "empty", when the anchor has collapsed
+# onto the target with no --since supplied: once HEAD contains the target,
+# merge-base(HEAD,target) IS the target, so the incoming delta is empty BY
+# CONSTRUCTION and says nothing about what actually landed. Reporting that as
+# an empty intersection would read as "the incoming delta missed my reviewed
+# files -- board it", which is a failed lookup wearing an empty result's
+# clothes.
+# INCOMING is measured from the ANCHOR (what landed on the target since the
+# branch was last gated). MINE is measured from the MERGE-BASE, never the
+# anchor: from the anchor, "my" set would also contain every file the branch
+# merely INHERITED by rebasing over the target, which then shows up in the
+# intersection as a fake overlap and forces a replay nobody needed.
+INCOMING="$(git diff --name-only "$ANCHOR" "$TARGET_SHA" 2>/dev/null | sort -u)"
+MINE="$(git diff --name-only "$BASE_SHA" HEAD 2>/dev/null | sort -u)"
+OVERLAP="$(comm -12 <(printf '%s\n' "$INCOMING" | sed '/^$/d') <(printf '%s\n' "$MINE" | sed '/^$/d'))"
+
+INTERSECTION_AVAILABLE=1
+if [ -z "$SINCE" ] && [ "$ANCHOR" = "$TARGET_SHA" ]; then
+  INTERSECTION_AVAILABLE=0
+fi
+
+echo "--- incoming delta (${TARGET} since $(short "$ANCHOR"))"
+printf '%s\n' "$INCOMING" | sed '/^$/d' | sed 's/^/    /'
+echo "--- your branch (its own commits, since $(short "$BASE_SHA"))"
+printf '%s\n' "$MINE" | sed '/^$/d' | sed 's/^/    /'
+echo "--- intersection (drives the No replay churn coverage-intersection rule)"
+if [ "$INTERSECTION_AVAILABLE" -eq 0 ]; then
+  echo "    UNAVAILABLE -- HEAD already contains ${TARGET}, so the original branch point is unrecoverable and the incoming delta is empty by construction."
+  echo "    Fix: re-run with --since <the target SHA this branch was last gated against> to get a real intersection before deciding replay. Do NOT read this as an empty intersection."
+elif [ -z "$OVERLAP" ]; then
+  echo "    (empty -- incoming delta is outside your reviewed file set)"
+else
+  printf '%s\n' "$OVERLAP" | sed 's/^/    /'
+fi
+
+# --- 7. shared-global advisory (never a failure by itself) ----------------
+# These are judged by existing checks as ONE global document or number, so two
+# disjoint branches can draw them down against each other. Advisory: the gate
+# below is the judge; this only explains a red.
+SHARED_RE='^(ai/bin/check-agent-size|ai/hooks/registry\.json|ai/inbox/registry\.json|ai/agents/.*|ai/blocks/.*)$'
+SHARED_HITS="$(printf '%s\n%s\n' "$INCOMING" "$MINE" | sed '/^$/d' | sort -u | grep -E "$SHARED_RE" || true)"
+if [ -n "$SHARED_HITS" ]; then
+  echo "${PROG}: NOTE shared global(s) touched by one or both sides -- these are judged as a single budget/document, so green-alone does not imply green-merged:"
+  printf '%s\n' "$SHARED_HITS" | sed 's/^/    /'
+fi
+
+# --- 7. HEAD must CONTAIN the target --------------------------------------
+if ! git merge-base --is-ancestor "$TARGET_SHA" HEAD; then
+  echo "${PROG}: HEAD ($(short "$HEAD_SHA")) does not contain ${TARGET} ($(short "$TARGET_SHA")). NOT safe to merge." >&2
+  echo "Fix: your branch does not contain ${TARGET} ($(short "$TARGET_SHA")). Rebase onto it (git rebase ${TARGET}), resolve conflicts, re-run the local gate, then re-run this script (passing --since $(short "$TARGET_SHA") to keep the intersection meaningful)." >&2
+  exit 2
+fi
+
+# --- 8. run the gate ON THE INTEGRATED HEAD -------------------------------
+if [ -z "$GATE_CMD" ]; then
+  if [ -x "${ROOT}/ai/bin/harness-gate" ]; then
+    GATE_CMD="ai/bin/harness-gate"
+  else
+    echo "${PROG}: no gate command and no ai/bin/harness-gate in ${ROOT}." >&2
+    echo "Fix: pass the repo's local gate explicitly, e.g. --gate 'mix test' or --gate 'bin/check'." >&2
+    exit 2
+  fi
+fi
+echo "${PROG}: running gate on the integrated head $(short "$HEAD_SHA"): ${GATE_CMD}"
+if ! ( cd "$ROOT" && eval "$GATE_CMD" ); then
+  echo "${PROG}: gate RED on the integrated head $(short "$HEAD_SHA")." >&2
+  echo "Fix: the gate is RED on the integrated head $(short "$HEAD_SHA") although your branch passed alone. A disjoint file set does not imply a disjoint gate (shared budgets/registries). Fix it on this branch and re-run; do not merge." >&2
+  exit 1
+fi
+
+# --- 9. confirmed ----------------------------------------------------------
+echo "INTEGRATION OK ${HEAD_SHA}"
+exit 0
