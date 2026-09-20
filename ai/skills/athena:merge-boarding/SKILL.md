@@ -69,6 +69,29 @@ captain's worktree is still moving.
   `INTEGRATION OK` line. Copy that line verbatim into your state log and name it
   in the final report. An override is a recorded, attributable decision; what is
   being eliminated is the *unrecorded* one.
+- **The override covers the ABSENCE of a verdict, and nothing else — a recorded
+  BLOCK is refused with the flag exactly as without it.** Its scope is the four
+  states in which the judge did not deliver an opinion on this head: it **never
+  ran**, it is **still running**, it **fail-opened**, or its receipt is
+  **unreadable/dirty/for another SHA**. A BLOCK is not an absence of
+  information; it is the judge's answer, and no flag goes past it. The gate now
+  enforces that itself — it reads the receipt FIRST, then applies the flag, so
+  the override can only ever refuse a merge it used to allow. The `INTEGRATION
+  OK` line names **which** of those states was overridden, read from the
+  receipt. Past a BLOCK your moves are the ones in the bullet above: address the
+  findings and re-run the judge, or hold this ONE MR and move to the next
+  Mission.
+
+  **Later (2026-09-20):** the bullet below in *A loop that is not converging*
+  used to state this scope as "the integration-completeness class only" — a term
+  that appeared exactly once in the whole harness and was defined nowhere, while
+  the flag's designed case is the absence of a verdict, which has no finding
+  class at all. Replaced by the state list above. The gate also short-circuited
+  the verdict read entirely under the flag, so it merged past recorded BLOCKs
+  while printing "NO standing-judge verdict" — the line an admiral copies into
+  its state log as the attributable record. Measured pressure toward the broad
+  reading: on 2026-09-20 `notif-platform`'s coordinator had to add an
+  out-of-band state-log header retracting the override fallback mid-run.
 - **The verdict is the RECORDED one, never your reading of the critic's
   stdout.** `integration-gate` and `critic-review --verdict-for <SHA>` read a
   receipt; the text the critic streams is for the *resolver*, to learn what to
@@ -116,8 +139,11 @@ independently on 2026-09-19.
   clean / descoped-and-landed / parked-for-owner — not a Mission left in flight.
 - **Round count is never a merge argument.** It is not grounds for
   `--critic-override`, for carrying a finding as a known-open, or for relaxing
-  the bar in *The merge bar*. Override stays what it is: the
-  integration-completeness class only, recorded and attributable. A long loop
+  the bar in *The merge bar*. Override stays what it is — the scope fixed in
+  *The merge bar*, the absence-of-a-verdict bullet: the four states in which the
+  judge delivered no opinion on this head, recorded and attributable. A loop's
+  findings are a recorded BLOCK, which the gate refuses with the flag exactly as
+  without it. A long loop
   changes the METHOD (cluster round) or the OWNER (escalate) — never the bar.
 
 ## Merging is not always landing code

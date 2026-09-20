@@ -237,7 +237,10 @@ R="${TMP}/c12"; new_repo "$R"
 stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "c12 override lands a head with no verdict" || bad "c12 expected exit 0, got $rc" "$out"
-grep -q 'INTEGRATION OK .* (CRITIC OVERRIDE: model unreachable)' <<<"$out" && ok "c12 the reason is printed into INTEGRATION OK" || bad "c12 override not attributable in the OK line" "$out"
+grep -q 'INTEGRATION OK .* (CRITIC OVERRIDE \[.*\]: model unreachable)' <<<"$out" && ok "c12 the reason is printed into INTEGRATION OK" || bad "c12 override not attributable in the OK line" "$out"
+# ...and the state it overrode is READ from the receipt, not asserted. The old
+# line claimed "NO standing-judge verdict" unconditionally.
+grep -q 'state overridden: judge NEVER RAN on this head' <<<"$out" && ok "c12 names the state actually overridden" || bad "c12 did not name the overridden state" "$out"
 # ...and it is not silently available: an empty reason is a usage error.
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override '' 2>&1 )"; rc=$?
 [ "$rc" -eq 2 ] && ok "c12 override without a reason is a usage error" || bad "c12 expected exit 2, got $rc" "$out"
@@ -281,6 +284,63 @@ grep -q 'BLAST-RADIUS HOT' <<<"$out" && ok "c14 approval RECORDS without hiding 
 # ...and it is never silently available.
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-approval '' 2>&1 )"; rc=$?
 [ "$rc" -eq 2 ] && ok "c14 an empty --owner-approval is a usage error" || bad "c14 expected exit 2, got $rc" "$out"
+
+# ---------------------------------------------------------------- case 15
+# THE OVERRIDE'S SCOPE. --critic-override covers the ABSENCE of a verdict, not
+# a recorded BLOCK. It used to short-circuit the verdict READ entirely, so it
+# also merged past a BLOCK with real findings -- while printing "NO
+# standing-judge verdict", the line the admiral copies verbatim into its state
+# log. The attributable record said the opposite of what happened. Measured
+# pressure toward exactly this reading: 2026-09-20-notif-platform's coordinator
+# had to add an out-of-band header RETRACTING the override fallback mid-run.
+R="${TMP}/c15"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+
+# (a) recorded BLOCK for THIS head: the override is REFUSED.
+record_verdict "$R" block
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && ok "c15 override is REFUSED past a recorded BLOCK" || bad "c15 expected exit 3, got $rc" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "c15 override merged past a recorded BLOCK" "$out" || ok "c15 no INTEGRATION OK past a recorded BLOCK"
+grep -q 'CRITIC OVERRIDE REFUSED' <<<"$out" && ok "c15 says the override was refused" || bad "c15 refusal not named" "$out"
+grep -q 'Fix:' <<<"$out" && ok "c15 refusal carries an actionable Fix:" || bad "c15 refusal missing Fix:" "$out"
+grep -q 'NO standing-judge verdict' <<<"$out" && bad "c15 printed the FALSE 'no verdict' line over a BLOCK" "$out" || ok "c15 does not claim 'no verdict' when one is recorded"
+
+# (b) no verdict at all: still allowed, and the reason line is ACCURATE.
+# NB: `git rev-parse --git-path` is CWD-RELATIVE in a main checkout, so the rm
+# must run INSIDE the repo -- resolving it out here deletes nothing and the
+# case silently tests the previous subcase's receipt instead.
+( cd "$R" && rm -rf "$( git rev-parse --git-path critic-verdicts )" )
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c15 override still lands a head with NO verdict" || bad "c15 expected exit 0, got $rc" "$out"
+grep -q 'state overridden: judge NEVER RAN on this head' <<<"$out" && ok "c15 names NEVER RAN as the overridden state" || bad "c15 wrong/absent state label" "$out"
+
+# (c) a verdict for an OLDER sha is no verdict for THIS head -- and the
+#     override treats it as such, not as a BLOCK and not as a pass.
+( cd "$R" && echo g > g.txt && git add g.txt && git commit -qm g )
+parent="$( cd "$R" && git rev-parse HEAD~1 )"
+record_pass "$R" "$parent"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c15 a verdict for an older SHA is treated as no verdict" || bad "c15 expected exit 0, got $rc" "$out"
+grep -q 'state overridden: judge NEVER RAN on this head' <<<"$out" && ok "c15 older-SHA verdict is labelled NEVER RAN for this head" || bad "c15 older-SHA state mislabelled" "$out"
+# ...and that same older-SHA receipt is NOT what a BLOCK looks like: a BLOCK
+# recorded for the OLDER sha must not refuse the CURRENT head.
+record_verdict "$R" block "$parent"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c15 a BLOCK on an OLDER sha does not refuse this head" || bad "c15 expected exit 0, got $rc" "$out"
+
+# (d) fail-open (the DND-212 state): allowed, and NAMED as a fail-open.
+record_verdict "$R" fail-open
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c15 override lands a fail-open head" || bad "c15 expected exit 0, got $rc" "$out"
+grep -q 'state overridden: judge FAILED OPEN' <<<"$out" && ok "c15 names FAILED OPEN as the overridden state" || bad "c15 fail-open state mislabelled" "$out"
+
+# (e) a recorded PASS exists: the flag overrode NOTHING, and the record says so
+#     rather than claiming a bypass that never happened.
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c15 exit 0 when a PASS verdict exists" || bad "c15 expected exit 0, got $rc" "$out"
+grep -q 'CRITIC OVERRIDE \[UNUSED' <<<"$out" && ok "c15 an unnecessary override records itself as UNUSED" || bad "c15 claimed a bypass that did not happen" "$out"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"

@@ -129,7 +129,9 @@ is recorded here so the next loop does not have to re-derive it under load.
 Round count and loop fatigue are reasons to change METHOD or to ESCALATE. They
 are never a reason to:
 
-- override the judge (`integration-gate --critic-override`),
+- override the judge (`integration-gate --critic-override` — which the gate
+  REFUSES outright once a BLOCK is recorded for the head, its scope being the
+  absence of a verdict; see [[athena:merge-boarding]] -> *The merge bar*),
 - carry a finding forward as a known-open,
 - merge with findings unresolved, or
 - narrow what the judge looks at.
