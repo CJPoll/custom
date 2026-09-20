@@ -212,13 +212,16 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 
 | Event type(s) | `payload.*` field | Type | Cardinality |
 |---|---|---|---|
-| `notion.ticket.*` | `entity_id` — stable source entity handle, e.g. `notion:<uuid>` | string | scalar |
+| `notion.ticket.created`, `notion.ticket.updated`, `notion.ticket.undeleted` (the **enriched** ticket types) | `entity_id` — stable source entity handle, e.g. `notion:<uuid>` | string | scalar |
 | | `status` | string | scalar |
 | | `labels` | string | **collection** |
 | | `assignee` | person-id | **collection** |
 | | `title` | string | scalar |
 | | `ticket_number` | string | scalar |
 | | `changed_properties` (`notion.ticket.updated` only) | string | **collection** |
+| `notion.ticket.deleted` (the **un-enriched** delete type — diffed WITHOUT a fetch; see *Membership rules and the lane-membership store*, trigger class (b)) | `entity_id` — stable source entity handle | string | scalar |
+| | `ticket_number` — cached display field | string | scalar |
+| | `title` — cached display field | string | scalar |
 | `notion.comment.*` | `entity_id` — stable source entity handle | string | scalar |
 | | `comment_text` | string | scalar |
 | | `ticket_number` | string | scalar |
@@ -242,6 +245,28 @@ current-members / non-members by, and that the membership-derived idempotency
 basis references. It is a first-class declared field, not an undeclared handle
 buried in a key. It is **distinct from the display fields** `ticket_number` /
 `title` (which render a line and may be cached); `entity_id` is identity.
+
+**`notion.ticket.deleted` carries a NARROWER schema than the enriched ticket
+types — by design, not omission.** A delete is diffed **without enrichment** (the
+entity may already be unfetchable — see *Membership rules and the lane-membership
+store*, trigger class (b)), so it can carry only `entity_id` (identity) plus the
+`ticket_number` / `title` the store cached at add time; it does **not** carry
+`status`, `labels`, or `assignee`. Those enrichment-only fields are therefore
+**not in `notion.ticket.deleted`'s payload schema at all** (above), and a
+field-path binding against them follows the ordinary save-time rules (see *The
+predicate grammar* and the *Evaluation contract*): a rule declared **solely** on
+`notion.ticket.deleted` with a leaf on `payload.labels` (or `status` /
+`assignee`) is an **unknown-path save-time HARD ERROR** with a `Fix:` — **not** a
+save-valid predicate that reads `absent` forever at runtime, which would be the
+failed-lookup class this document legislates against (a leaf that binds valid at
+save but can never match). This is deliberately **distinct** from the sanctioned
+**union-binding absent-by-design** case: a rule spanning an enriched ticket type
+**and** `notion.ticket.deleted` (e.g. `notion.ticket.updated` +
+`notion.ticket.deleted`) binds such a leaf validly against the **union** of their
+schemas and reads `absent` on the delete event — there another declared type
+**supplies** the field, so the leaf is meaningful on at least one of the rule's
+types; a delete-only rule has no such supplier, so the field never exists for it
+and the bind is rejected where it is authored.
 
 **The membership-derived types have a closed payload schema** — the lane/rule
 identity (`rule_id`, `lane`), the transition `op`, the `entity_id` (the member's
@@ -485,7 +510,19 @@ Two owner-facing schema fields carried by every rule:
   are **never** collapsed by it: their fold **is** the working set, so suppressing
   a distinct `retract` would corrupt the set (and drop exactly the
   cancel-in-flight that must fire) — that is set corruption, not rate control.
-  Only `notify` deliveries are windowed. A suppression within the window MUST
+  Only `notify` deliveries are windowed. **What the field MEANS on a `membership`
+  rule is defined at save time, never left to be silently ignored:** a
+  `membership` rule MAY carry only the inert **default (`0` = no windowing)**; a
+  `membership` rule whose dedupe window is set to any **non-zero** value is a
+  **save-time HARD ERROR** with a `Fix:` (drop the dedupe window — it is a
+  `notify`-only rate control, and a membership rule's `add`/`retract` transitions
+  are the working set, never rate-collapsed). This is the same discipline as the
+  `event.type`-in-a-membership-predicate hard error (see *Predicates match the
+  present; the membership diff handles the past*): owner config that cannot be
+  honored is refused **where it is authored**, never accepted-and-silently-inert —
+  a silently-ignored rate control would read to the owner as "my lane is
+  throttled" while every transition still fires, the loud-not-dark rule this
+  document holds throughout. A suppression within the window MUST
   be **observable** — recorded and countable as "suppressed by dedupe window",
   **never a silent drop** (the document legislates against silent drops
   throughout — failed-lookup discipline). The two mechanisms are **orthogonal**:
@@ -548,10 +585,12 @@ A predicate is a **JSON tree**, evaluated by the platform; it is never code.
     (all scalar). (`owner` is not matchable — a rule belongs to exactly one owner
     and never matches across owners.)
   - **Payload fields:** the `payload.*` fields the **declaring type's closed
-    payload schema** lists — e.g. for a `notion.ticket.*` event `payload.status`
-    (scalar), `payload.labels` (collection), `payload.assignee` (collection),
-    `payload.title` (scalar), `payload.ticket_number` (scalar); every enumerated
-    type, including the membership-derived ones, has such a schema.
+    payload schema** lists — e.g. for a `notion.ticket.updated` event (an
+    enriched ticket type) `payload.status` (scalar), `payload.labels`
+    (collection), `payload.assignee` (collection), `payload.title` (scalar),
+    `payload.ticket_number` (scalar); every enumerated type, including
+    `notion.ticket.deleted` (narrower — see *Payload fields and their types per
+    event type*) and the membership-derived ones, has such a schema.
 
   Because a rule declares the `event_type(s)` it applies to, the platform
   validates every field-path in the rule against the **union of those types'
@@ -736,6 +775,33 @@ full trigger set), so that both retract-on-delete and re-add-on-undelete provabl
 fire. An (b)/(c) event for an entity outside its scope — a delete of a non-member,
 an undelete of something that still fails the predicate — is simply not relevant
 to that rule.
+
+**The direction class of each type is a per-source DECLARED classification, not
+by-example and not inferred.** The classes named above (`notion.ticket.deleted`
+as exit (b), `notion.ticket.undeleted` as re-entry (c), `created`/`updated` as
+entry (a)) are **Notion's** classification, given here as the first-pass
+instance. Under the open taxonomy (see *The event taxonomy is open*) a new
+membership-lane source adds its own types with no schema change, and the engine
+can compute a rule's (b)/(c) subscriptions for that source **only if it knows
+each type's direction**. Therefore a source that can feed a membership lane MUST
+declare, for each of its types, its **direction class** — (a) entry/update,
+(b) exit/deletion (member-scoped), or (c) re-entry (non-member-scoped) — as part
+of the **same source registration** that fixes the type namespace(s) it may
+originate (see *Which event types an ingress kind may originate*). The membership
+engine derives the (b)/(c) subscriptions from that classification, so
+retract-on-exit and re-add-on-re-entry provably fire for **any** source, not only
+Notion. A membership rule declared on a source type that has **no** declared
+direction class is a **save-time HARD ERROR** with a `Fix:` (classify the type at
+its source registration, or declare the rule's full trigger set explicitly) —
+this is exactly the **silent-never-retract** this section exists to prevent, made
+loud at authoring rather than dark at runtime; a new source's exit/re-entry types
+arriving unclassified must not silently produce a lane that never retracts. The
+"the rule MAY declare its full trigger set" formulation above remains valid as an
+explicit per-rule **override**; the mandatory per-source classification is what
+lets the engine subscribe correctly for a source the rule did **not** fully
+enumerate — which, under the open taxonomy, is the common case, so the
+classification is the primary line of defense and the declared set is the
+supplement, never the reverse.
 
 - Per `(owner, membership-rule)` the store holds each member's **`entity_id`**
   (the declared stable source handle, e.g. `notion:<uuid>` — see *Payload fields
