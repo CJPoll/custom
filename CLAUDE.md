@@ -173,6 +173,41 @@ was written on.
   identifier — with the pointer inline at the definitional mention (that is where
   the grep lands), one pointer per document. Do not sweep dangling step numbers
   or line ranges through old documents; that is the rewriting this forbids.
+- **An amendment that removes a mechanism must sweep everywhere that mechanism
+  was RESTATED — not only the document that defines it.** Amending the contract
+  and fixing the code leaves every *other* text that spelled the mechanism out
+  still specifying the deleted one. Stale spec text is the *A failed lookup must
+  never look like an empty one* class applied to specifications: it matches
+  nothing in the current system, says nothing about that, and whoever implements
+  it faithfully reproduces the removed model. Nothing raises. So, before the
+  amendment is treated as complete, **grep the removed identifier — the old key,
+  file, term, or field name — across every surface that could have restated it**,
+  and fix or retract each hit.
+
+  State the sweep as a class, not as a checklist of places: enumerating carriers
+  is how the one nobody listed gets through. The two measured carriers are only
+  exemplars. **Tracker bodies** — 2026-09-18, DND-202 moved inbox tenancy off the
+  committed descriptor at the git *toplevel* onto a registry entry keyed by the
+  git *common dir*, and DND-184 (In Progress at the time) and DND-190 still
+  specified the deleted model; a captain implementing DND-184 as written would
+  have given every worktree session zero channels, exit 0. **Unlanded sibling
+  work** — 2026-09-20, C-1 removed the platform dedupe key, the `op` fold, the
+  COLLAPSED outcome, and the lane-membership store from `athena-events.md` while
+  C-2 sat staged-and-held on a branch whose prose still specified all four; the
+  rebase was clean, because git compares lines and these two touched different
+  documents.
+
+  Two consequences worth stating outright, because each is invisible from one
+  side alone:
+  - **A clean rebase is not a clean reconcile, and no gate closes the hole.**
+    Git reports a conflict only where lines overlap; prose that cites a document
+    someone else rewrote conflicts with nothing. A mechanical gate cannot see it
+    either — a contract describing a deleted mechanism passes every check. The
+    re-read is the only instrument, so held work is re-read against *current*
+    reality before it lands, not merely re-gated.
+  - **Prefer citing a mechanism by section name over restating it.** A citation
+    follows an amendment; a restatement goes stale. This is the same reason the
+    first convention above cites steps by name rather than by number.
 
 ## Guard/error messages are written for the LLM
 
