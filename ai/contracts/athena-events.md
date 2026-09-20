@@ -210,6 +210,15 @@ schema is an unknown-path save-time error. The **envelope** fields are common to
 every type — `event.type` (scalar string), `event.source` (scalar string),
 `event.occurred_at` (scalar timestamp).
 
+**This payload schema is the schema half of the per-(source, type) type
+registry** (see *Membership rules and the lane-membership store*): the same
+per-(source, type) record that fixes each type's **direction class** (a/b/c) also
+fixes its payload schema, so a source's type is described in **one place** —
+schema + direction class + which of its fields are **platform-minted** vs
+**source-supplied / enrichment-derived**. That platform-minted marking is what the
+trusted-slot check reads (see *Templating and the per-adapter Escaper contract* →
+*Engine*), so field trust and field schema cannot drift out of sync.
+
 | Event type(s) | `payload.*` field | Type | Cardinality |
 |---|---|---|---|
 | `notion.ticket.created`, `notion.ticket.updated`, `notion.ticket.undeleted` (the **enriched** ticket types) | `entity_id` — stable source entity handle, e.g. `notion:<uuid>` | string | scalar |
@@ -445,8 +454,20 @@ is permitted to originate, and the platform MUST reject, at ingress, any event
 whose `type` falls outside the set its kind is permitted to originate**, with a
 `Fix:` naming the ingress kind and the disallowed `type`. The constraint is
 fixed at ingress **registration** (per ingress kind, not per event) and
-re-checked on every event, so a crafted payload cannot bypass it. The
-first-pass permitted-origination rule:
+re-checked on every event, so a crafted payload cannot bypass it.
+
+**This origination-permission registration is DISTINCT from the per-(source, type)
+type registry** (see *Membership rules and the lane-membership store* and *Payload
+fields and their types per event type*), and the two never overlap. This
+registration governs **origination permission** at the **namespace** grain, keyed
+**per ingress kind** — "may THIS transport mint this type?", an
+authorization/security control. The per-(source, type) **type registry** governs a
+type's **direction class and payload schema**, keyed **per (source, type)** and
+shared across all of that source's ingress kinds — pure semantic classification.
+They answer different questions, so neither is "authoritative over" the other and
+there is no ambiguity between them.
+
+The first-pass permitted-origination rule:
 
 - **Membership-derived types (`lane.member.added`, `lane.member.retracted`) are
   PLATFORM-INTERNAL.** They are produced ONLY by the platform's own membership
@@ -920,14 +941,21 @@ membership-lane source adds its own types with no schema change, and the engine
 can compute a rule's (b)/(c) subscriptions for that source **only if it knows
 each type's direction**. Therefore a source that can feed a membership lane MUST
 declare, for each of its types, its **direction class** — (a) entry/update,
-(b) exit/deletion (member-scoped), or (c) re-entry (non-member-scoped) — as part
-of the **same source registration** that fixes the type namespace(s) it may
-originate (see *Which event types an ingress kind may originate*). The membership
+(b) exit/deletion (member-scoped), or (c) re-entry (non-member-scoped) — in the
+**per-(source, type) type registry**: a source-level registration **distinct
+from** the per-ingress-kind origination-permission registration, with a different
+key and a different job (see *Which event types an ingress kind may originate*).
+Because the direction class is a property of an event type within a source's
+taxonomy — pure semantics, identical whichever transport (a verified webhook or
+the reconciliation poller) delivered the event — it resolves to **exactly one**
+record per (source, type), never the two-divergent-or-none an anchor to the
+per-ingress-kind registration would produce. The membership
 engine derives the (b)/(c) subscriptions from that classification, so
 retract-on-exit and re-add-on-re-entry provably fire for **any** source, not only
 Notion. A membership rule declared on a source type that has **no** declared
-direction class is a **save-time HARD ERROR** with a `Fix:` (classify the type at
-its source registration, or declare the rule's full trigger set explicitly) —
+direction class is a **save-time HARD ERROR** with a `Fix:` (classify the type in
+the per-(source, type) type registry, or declare the rule's full trigger set
+explicitly) —
 this is exactly the **silent-never-retract** this section exists to prevent, made
 loud at authoring rather than dark at runtime; a new source's exit/re-entry types
 arriving unclassified must not silently produce a lane that never retracts. The
@@ -1030,14 +1058,23 @@ patterns:
 acts on the fleet is governed by which trust path delivers it:
 
 - **Path 1 (auto-cancel) is legitimate as deterministic config the owner
-  authored** — e.g. a fleet-control endpoint the platform calls directly. The
-  owner's rule authorizes it by definition.
+  authored** — the owner's rule authorizes it by definition; the only open
+  question is the *delivery mechanism*, answered by the roadmap note below.
 - **Path 2 (recommend only)** — a retraction arriving as untrusted *content* into
   an LLM session can only **recommend** a cancel; it MUST NOT self-authorize one.
 
-Which path a given lane uses is config. (First-pass builds the set-consumer; the
-cancel-in-flight consumer is roadmap, but the event/predicate/transition model is
-specified now to carry it.)
+Which path a given lane uses is config. First-pass builds the **set-consumer** and
+the Path-2 **recommend-only** path; the event/predicate/transition model is
+specified now to carry the rest.
+
+**Cancel-in-flight fleet control is roadmap.** When it lands it MUST deliver
+through a **fixed-destination internal-control adapter** — a platform-operated
+control plane on a closed, platform-registered allowlist of control endpoints. It
+is classified fixed-destination and therefore carries no generic-webhook egress
+model; it is explicitly **NOT** the generic-webhook adapter (whose egress model
+would forbid the internal destination it requires) and **NOT** an unclassified
+direct call (which the adapter-classification MUST forbids). Its security review
+is a precondition of building it.
 
 ---
 
@@ -1053,7 +1090,8 @@ both, and build is staged.
 Every outbound adapter is exactly one of:
 
 - **Fixed-destination** — a known host (Slack, email, SMS, Discord, Notion, and
-  the inbox adapter). It carries **no** egress/SSRF model.
+  the inbox adapter, and — roadmap — a platform-operated fleet-control plane; see
+  *Retraction-driven consumer patterns*). It carries **no** egress/SSRF model.
 - **Owner-supplied-destination** — the **generic webhook** adapter, which calls
   an arbitrary owner-supplied endpoint. **Only** this adapter carries the
   egress/SSRF model (see *The generic-webhook egress model*), and it ships
@@ -1097,9 +1135,42 @@ author's text, a ticket title) flow through it.
   built as **data structures then encoded**, never by string concatenation.
 - **Auto-escaping is default-ON and context-aware.** Every interpolated value
   MUST pass through the target adapter's Escaper for the surrounding context.
-- **Emitting a value raw requires an explicit, owner-marked "trusted" slot**, and
-  a trusted slot MAY reference **only platform-controlled fields**, never
-  free-form untrusted payload text.
+- **Emitting a value raw requires an explicit, owner-marked "trusted" slot.** The
+  **generating rule**: a field is **trusted-slot-eligible iff the platform itself
+  MINTS its value** — the value is computed by the platform or drawn from a closed
+  platform-controlled set, with **no** source-supplied or enrichment-derived
+  substring. A field whose value originated at a source, arrived on a webhook, or
+  was returned by an enrichment fetch is **never** trusted-slot-eligible, however
+  structured it looks. The **closed first-pass trusted set** is exactly:
+  - `event.type` — platform-normalized, from the closed taxonomy;
+  - `event.source` — platform-stamped, from the closed `source` set;
+  - `payload.rule_id` — the platform's own rule identifier;
+  - `payload.lane` — the platform's own lane identifier;
+  - `payload.op` — platform-minted, closed set `"add"` | `"retract"`.
+
+  **Everything else MUST go through the escaper — the exclusions are enumerated by
+  name so the wrong line cannot be drawn silently:** every enrichment-derived /
+  source-supplied field — `title`, `ticket_number`, `status`, `labels`,
+  `assignee`, `comment_text`, and the Slack fields `text`, `channel`, `user`,
+  `ts`, `thread_ts`, `event_id`. **`payload.entity_id` is EXCLUDED** from the
+  trusted set: it is the **source handle** (e.g. `notion:<uuid>`) — a
+  source-supplied value that only *looks* like a platform-owned identifier — so it
+  is escaped like any source field. **`event.occurred_at` is also NOT trusted**: a
+  timestamp carries no markup, so escaping it is a no-op and marking it trusted
+  would only widen the raw surface for nothing — a field earns trusted status only
+  if it is platform-minted **and** has a formatting reason to be raw.
+- **A raw/trusted slot referencing any field OUTSIDE the enumerated trusted set is
+  a save-time HARD ERROR** with a `Fix:` (name the field; a trusted slot admits
+  only a platform-minted field — use an ordinary escaped slot instead). This is the
+  same loud-at-author discipline every other unhonorable config gets (the
+  membership dedupe-window, the `exists`/`absent`-with-`value`, and the
+  `event.type`-in-a-membership-predicate hard errors): the trusted-slot boundary is
+  enforced where it is authored, not trusted to be drawn correctly at render time.
+- **Trusted-eligibility is READ FROM the per-(source, type) type registry** (see
+  *Payload fields and their types per event type* and *Membership rules and the
+  lane-membership store*): a field is trusted-eligible only if that registry marks
+  it platform-minted, so the trusted set cannot drift out of sync with the payload
+  schema.
 - The renderer is **pure Domain**; the Escaper is a **per-adapter behaviour**.
 
 ### Per-adapter Escaper contract
