@@ -178,6 +178,17 @@ counting what the file channel already delivered). It is the doorbell;
 
 ### Mechanism 3 (documented, not built)
 
+**Later (2026-09-19):** the background waiter below is **built now** — it shipped
+as the `athena:inbox` skill's `bin/inbox-wait` (DND-185), which arms an
+`inotifywait` doorbell over a project's channels (the `.event` file beside each),
+wakes the session by its completion notification, and enforces exactly the
+safe-wait discipline described here plus the `ATHENA_INBOX_WAIT_BUDGET` /
+`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` pairing. Use it via `athena:inbox` rather
+than hand-rolling the loop below. The heading is left as it read on the date it
+was written, per `~/dev/custom/CLAUDE.md` → *Documentation conventions* (annotate
+a dated claim, do not silently rewrite it); the description that follows is the
+original design sketch.
+
 The hook fires on prompts, so a long autonomous run with no prompts hears
 nothing. Two patterns close that, both for later:
 
@@ -196,6 +207,19 @@ nothing. Two patterns close that, both for later:
 
 Real push (Socket Mode, `~/.claude/slack-app-token`) is the actual answer and is
 out of scope here.
+
+## See also — `athena:inbox`
+
+This skill is the **Slack-specific** side: Athena's own bot identity, the Web API
+scripts, and the Web API poll that is the disaster **backstop**. The normal
+delivery path — the file channel the Slack server pushes into, the doorbell
+waiter (`inbox-wait`), the counting/reading/acking of that channel under the
+designated-consumer lock, and the chain-liveness diagnostic (`inbox-doctor`) —
+lives in the **`athena:inbox`** skill, which is project-scoped and channel-kind
+agnostic. The two share one dedupe set (`slack-inbox.state.json`, see *The
+backstop, and one dedupe set*). Reach for `athena:inbox` to read what Slack
+actually delivered; reach for this skill to say or do something in Slack, or to
+recover after the file path has been down.
 
 ## Tests
 

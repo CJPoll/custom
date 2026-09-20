@@ -28,6 +28,14 @@ remove that stale entry; delete it from `~/.claude/settings.json` by hand (it
 would otherwise fire a "No such file" on every prompt). Nothing here was ever
 auto-wired, so a machine that never hand-added it has nothing to remove.
 
+**Not to be confused with the walt_ui agent-messages poll.** A *different*
+`UserPromptSubmit` hook — walt_ui's agent-messages / flaky-ticket poll — lives in
+`~/dev/walt_ui/.claude/` and is registered **repo-locally** in that repo's own
+`.claude/settings.json`, which is why it never appears in the user-global
+`~/.claude/settings.json` (and why hunting for it there turns up nothing). It is
+unrelated to this Slack hook: leave it in place, and do not expect `setup-hooks`
+(which wires only this repo's `ai/hooks/registry.json`) to know about it.
+
 ## Check it
 
 ```sh
