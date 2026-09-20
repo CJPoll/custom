@@ -66,11 +66,14 @@ DESCRIPTOR_DEDUPE_MEMBERS='["event_id","channel+ts"]'
 # two never disagree; see ai/contracts/athena-inbox.md -> "The inbox as an
 # event-platform delivery adapter", the Known-open note). The "One validator"
 # rule cuts both ways: the validator must never ADMIT A DECLARED PRODUCER THE
-# READER CANNOT READ. This refusal binds only what the entry declares; a channel
-# left "slack" but targeted by an athena-events handling rule is a
-# producer-registration MISMATCH surfaced by the never-delivered distinction in
-# the contract's "Producer registration extends to platform deliveries", not here
-# (this validator never sees athena-events config).
+# READER CANNOT READ. This refusal binds only what the entry declares (this
+# validator never sees athena-events config). A channel left "slack" but targeted
+# by an athena-events handling rule is a producer-registration MISMATCH that NO
+# instrument diagnoses as such today: it is NOT the never-delivered case (the file
+# exists, so never_delivered is false), and the only signal is the coarse
+# `+N unreadable` line count -- and even that only when the channel also carries a
+# reader-readable line. See ai/contracts/athena-inbox.md -> "The inbox as an
+# event-platform delivery adapter", the Known-open note.
 DESCRIPTOR_LOG_PRODUCERS='["slack"]'
 
 _descriptor_fix='edit $ATHENA_INBOX_ROOT/projects/<project>.json to match the registry schema in ai/contracts/athena-inbox.md, then re-run.'

@@ -972,11 +972,30 @@ are the additions, not replacements.
 > and structurally **cannot** — this validator never sees `athena-events.md`
 > handling-rule config — detect a channel left at `producer:"slack"` (or omitted)
 > that an owner handling rule nonetheless targets as a platform delivery. That is
-> a producer-registration **mismatch** between the two ends, surfaced not here but
-> by the never-delivered three-state distinction in *Producer registration extends
-> to platform deliveries* (**no server producer registered** vs **no client
-> channel declared** vs **nothing arrived**), whose `inbox-doctor` half lands with
-> the platform-delivery ticket. The two other refused markers — a `"stream"`
+> a producer-registration **mismatch** between the two ends, and **no instrument
+> diagnoses it *as* a mismatch today.** It is specifically **not** caught by the
+> never-delivered three-state distinction in *Producer registration extends to
+> platform deliveries*: that distinction fires only for a channel whose inbox file
+> has **never existed** (`never_delivered`, `ai/skills/athena:inbox/lib/inbox.sh`,
+> set only when `[ -e "${inbox}" ]` is false), whereas a mis-targeted channel **is**
+> being delivered to, so its file exists and `never_delivered` is permanently
+> false. The only signal today is **coarse**: the reference reader scores each
+> platform state-change line it cannot parse `+1 unreadable`
+> (`ai/skills/athena:inbox/lib/logchan.sh`), and that count rides the unprompted
+> notice as the `+N unreadable` suffix (`ai/hooks/athena-inbox-poll.sh`,
+> `ai/skills/athena:inbox/bin/inbox-status`) — a **symptom** (*N lines here are
+> unreadable*), never a **diagnosis** (*a producer is mis-declared*), and one that
+> surfaces **only when the same channel also carries a reader-readable line**,
+> because the count is gated on `new > 0`; a channel fed *only* by the mis-targeted
+> rule shows nothing at all today. The precise per-producer diagnosis is deferred
+> with the platform-delivery ticket (DND-260): once its reader ingests
+> `producer:"platform"` lines and the validator admits that marker, a
+> correctly-declared platform channel is **read** rather than mis-scored, and a
+> channel still left `producer:"slack"` while fed platform lines remains a
+> mis-declaration whose only signal stays this coarse count. (The never-delivered
+> three-state distinction below — **no client channel declared** vs **no server
+> producer registered** vs **nothing arrived** — addresses the *empty*-channel
+> states, not this delivering-but-mismatched one.) The two other refused markers — a `"stream"`
 > channel key and a non-standard `dedupe` member — stay refused on their own terms
 > (an unknown channel key; a dedupe member the reader does not compute), but
 > **neither is what makes platform delivery undeclarable**; the required
