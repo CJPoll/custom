@@ -43,7 +43,6 @@ tools:
   critic-eval:             { class: readOnly, reason: eval }
   critic-review:           { class: readOnly, reason: review }
   forge-preflight:         { class: readOnly, reason: probe }
-  harness-gate:            { class: readOnly, reason: gate }
   harness-signals:         { class: readOnly, reason: signals }
   lead-time:               { class: readOnly, reason: analysis }
 
@@ -55,6 +54,9 @@ tools:
   # default gate path), so by worst-case capability they mutate the repo.
   admiral-eval:            { class: idempotent, reason: baseline }
   harness-eval:            { class: idempotent, reason: scorecard }
+  # harness-gate's default (no-arg) path runs harness-eval bare, which writes
+  # ai/eval/scorecard.json, so the gate transitively mutates the repo too.
+  harness-gate:            { class: idempotent, reason: gate }
   # harness-metrics writes ai/telemetry/metrics.json on its default path.
   harness-metrics:         { class: idempotent, reason: metrics }
 
