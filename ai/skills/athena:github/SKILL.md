@@ -103,6 +103,14 @@ When a check **fails in ~1-2s with an empty log** (BlobNotFound), it did not
 flake — read **athena:diagnose-github-actions-failure** before re-running; the
 usual cause is billing exhaustion, which no re-run can clear.
 
+`--watch` only blocks *usefully* if a runner ever picks the job up. When checks
+stay **`queued` with nothing reaching `in_progress`** for more than a few
+minutes — especially on a repo using `runs-on: [self-hosted, …]` — the watch is
+no longer a wait but a stall, and waiting longer cannot distinguish a slow queue
+from a dead one. Stop and read the same skill (*Signature 2 — the pipeline never
+starts*): one `gh api repos/<owner>/<repo>/actions/runners` call says whether
+anything is listening.
+
 ## Review — the universal floor still applies
 
 On GitHub, review signal arrives as **PR reviews + check-runs** from Apps or

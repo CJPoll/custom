@@ -1,9 +1,19 @@
 ---
 name: athena:diagnose-github-actions-failure
-description: Diagnose a GitHub Actions job that fails WITHOUT producing logs — dies in ~1-2s with 0 steps executed, dependent jobs skipped, and `gh run view --log-failed` returns "log not found" / BlobNotFound. The real reason lives in the check-run annotations API, not the logs. The headline cause is billing exhaustion (failed payment / spending limit), which NO re-run can clear — so read the annotation before you retry. Use whenever a GitHub Actions pipeline fails and the logs are empty or absent, before diagnosing it as a transient/infra flake or re-running it.
+description: Diagnose a GitHub Actions pipeline that yields no usable result — either it FAILS without producing logs (dies in ~1-2s, 0 steps executed, dependent jobs skipped, `gh run view --log-failed` returns "log not found" / BlobNotFound; the real reason is in the check-run annotations API, headline cause billing exhaustion) or it never STARTS and sits `queued` indefinitely (headline cause an offline/unlabelled self-hosted runner, readable from the actions/runners API). Both are owner-gated and no re-run or longer wait can clear either. Use whenever a GitHub Actions pipeline fails with empty/absent logs, or stays queued for many minutes, before calling it a transient flake, re-running it, or continuing to watch it.
 ---
 
 # athena:diagnose-github-actions-failure
+
+Two signatures where the pipeline gives you **no usable result** and the obvious
+response (re-run it; keep watching it) is the wrong one, because in both the
+answer lives in an API the run page never shows you:
+
+1. **It fails, with no logs** — read the check-run *annotations* (below).
+2. **It never starts, staying `queued`** — read the *actions/runners* API
+   (*Signature 2 — the pipeline never starts*, below).
+
+## Signature 1 — it fails without producing logs
 
 A GitHub Actions job that **fails in ~1-2 seconds with 0 steps executed**, with
 its dependent jobs (Format / Credo / Test / …) all **skipped**, and where
@@ -17,7 +27,7 @@ transient CI-infra flake and manually re-ran the `--failed` job; the
 selfhosted-runner effort re-confirmed the same signature. Re-running is the wrong
 move and burns time. Diagnose first.
 
-## The signature
+### The signature
 
 Treat it as this class when you see **all** of:
 
@@ -26,7 +36,7 @@ Treat it as this class when you see **all** of:
 - every downstream job that `needs:` it is **skipped**, and
 - `gh run view <run-id> --log-failed` says the log is not found (BlobNotFound).
 
-## Diagnose it — read the annotation, don't re-run
+### Diagnose it — read the annotation, don't re-run
 
 Get the real reason from the check-run annotations API (the logs are empty):
 
@@ -46,7 +56,7 @@ The billing signature reads roughly:
 > spending limit needs to be increased. Please check the 'Billing & plans'
 > section in your settings.
 
-## What to do about it
+### What to do about it
 
 - **Billing exhaustion is owner-gated and external.** Do NOT touch billing,
   account, or payment state, and do NOT keep re-running — the pipeline can never
@@ -60,6 +70,64 @@ The billing signature reads roughly:
   disabled workflow, a missing runner label), fix that specific cause — the
   point of this skill is that the *log* is a dead end for this whole class, so
   the **annotation is the source of truth**, whatever it turns out to say.
+
+## Signature 2 — the pipeline never starts (`queued` forever)
+
+The run is created but no job ever reaches `in_progress`: `gh pr checks` reports
+everything **pending**, `gh run list` shows the run `queued`, and minutes turn
+into tens of minutes. **A queue that will never drain looks exactly like a slow
+one** — the failed-lookup class in a different dress (`ai/CLAUDE.md` → *A failed
+lookup must never look like an empty one*). Waiting longer cannot tell them
+apart; one API call can. So on a repo whose jobs declare
+`runs-on: [self-hosted, …]`, do not watch a queue for more than a few minutes
+without checking whether anything is listening to it.
+
+### Diagnose it — ask who is listening, don't wait longer
+
+```sh
+gh api repos/<owner>/<repo>/actions/runners \
+  --jq '.runners[] | {name, id, status, busy, labels: [.labels[].name]}'
+```
+
+Two distinct causes, both of which queue forever:
+
+- **`"status": "offline"`** — the runner agent is not connected. Nothing will
+  ever pick the job up.
+- **Online but the labels don't match** the job's `runs-on` set — the job is
+  waiting for a runner that does not exist. A label typo queues just as
+  permanently as an outage.
+
+Also confirm the **last successful dispatch** (`gh run list --branch <b> --json
+headSha,status,createdAt`) to date the onset, and check whether a *different*
+head already went green on the same job set — a CI-neutral change over a green
+head is strong evidence the stall is the runner, not the diff.
+
+**A self-hosted runner usually lives on another machine.** Measured 2026-09-20:
+`cjpoll-laptop` (runner id 21, labels `[self-hosted, Linux, X64]`) was the sole
+runner for `CJPoll/gen_saas` and ran on the **laptop**, while the fleet ran on
+`home-office-linux`. So `pgrep`-ing for an `actions-runner` process locally, or
+finding the local host healthy (load, memory, container count), proves **nothing
+at all** about the runner and must not be reported as evidence either way. The
+runners API is the only authority.
+
+### What to do about it
+
+- **Restarting it is owner-gated** and usually a system service on a machine
+  this session is not even on — never touch it (`ai/CLAUDE.md` → *Hard Rule*:
+  no unattended system-level changes). Surface it with the identity that makes
+  the instruction actionable: runner **name, id, labels, status**, which **host**
+  it runs on, the repo, and the time of the last successful dispatch.
+- **Stop watching and re-plan around it.** An indefinite `gh pr checks --watch`
+  is a stall, not a wait. Split the scope by what the runner gates: drive every
+  **runner-independent** tier (anything landing by a local gate rather than CI)
+  all the way to landed, and build the runner-dependent work as far as it goes
+  — fully implemented, reviewed, local checks green — as **stacked PRs that
+  merge none**. Same shape as `athena:run-autonomously`'s *Owner-credential
+  gates throttle merging, not progress*: the gate throttles **merging**, never
+  progress.
+- **Never overclaim.** A PR whose CI never ran is not "green" or "ready" — each
+  such PR and the return report says **CI-green is PENDING runner recovery**,
+  explicitly.
 
 ## Escape hatch: self-hosted runner
 
