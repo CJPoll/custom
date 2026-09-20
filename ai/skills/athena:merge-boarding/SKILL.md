@@ -137,6 +137,12 @@ independently on 2026-09-19.
   product-judgment item. Full procedure: [[athena:critic-convergence]] -> *After
   the escalation*. Parking is a terminal state you report like any other — say
   clean / descoped-and-landed / parked-for-owner — not a Mission left in flight.
+- **From round 12, a kind-3 finding is a SCOPE decision, not another cluster
+  round.** The rungs above are per-cluster; a big artifact otherwise buys one
+  trip per cluster and never stops. `critic-review` prints the round number, so
+  you are not tracking this by hand. Route it per
+  [[athena:critic-convergence]] -> *After the escalation* (land the coherent
+  core and file the rest, or park) — never as a re-dispatch.
 - **Round count is never a merge argument.** It is not grounds for
   `--critic-override`, for carrying a finding as a known-open, or for relaxing
   the bar in *The merge bar*. Override stays what it is — the scope fixed in

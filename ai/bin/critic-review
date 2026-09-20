@@ -181,6 +181,15 @@ def verdict_for(sha)
   end
 end
 
+# The round at which the per-cluster rungs stop being the bound and a kind-3
+# finding routes to the ARTIFACT-scope decision instead (athena:critic-convergence
+# -> "After the escalation"). Both measured loops that RESOLVED took eight rounds,
+# so a ceiling at or below 8 is a false positive costing a needless descope; the
+# loop that did NOT resolve was at round 13 when its admiral had to invent the
+# closure pass unaided. This is NOT the cluster trigger -- that stays at one
+# kind-3 with no round threshold.
+ARTIFACT_CEILING_ROUND = 12
+
 # How many judge rounds this worktree has recorded, and which SHAs they were.
 # The receipt dir is per-worktree (`git rev-parse --git-path` resolves against
 # the worktree's own $GIT_DIR) and a worktree is ONE unit of work (repo
@@ -225,6 +234,14 @@ def warn_round_notice(sha)
   warn "  Two independent EIGHT-round loops (2026-09-19 athena:inbox, 2026-09-20 DND-232) were"
   warn "  exactly this, caught five rounds late. Round count is NEVER a reason to override the"
   warn "  judge, defer a finding, or merge with findings open."
+  return if n < ARTIFACT_CEILING_ROUND
+  warn ""
+  warn "  ARTIFACT CEILING — round #{n} is at or past #{ARTIFACT_CEILING_ROUND}. The cluster rungs are per-cluster, so a"
+  warn "  large artifact otherwise buys one trip up the ladder per cluster and never stops."
+  warn "  Fix: a kind-3 finding at this round no longer buys a cluster round, whatever rung its"
+  warn "  own cluster is on — route it to the ARTIFACT-scope decision in `athena:critic-convergence`"
+  warn "  -> `After the escalation`: land the coherent core (no kind-3) with the row-per-open-question"
+  warn "  table and file the rest, or PARK. The core still lands only on FINDINGS: none."
 end
 
 def critic_output(base)
@@ -471,6 +488,12 @@ def run_receipt_self_test
       ok &&= !err.include?(second[0, 7])        # the current head is not
       ok &&= err.match?(/NEVER a reason to override/)
 
+      # (13b) BELOW THE ARTIFACT CEILING the notice must NOT mention it -- a
+      # per-cluster loop that is still working is never told to descope. (The
+      # at-ceiling half is case 15, in its own repo, because driving the count
+      # up here would break case 14's expectation of exactly 2.)
+      ok &&= !err.include?("ARTIFACT CEILING")
+
       # (14) THE REBASE CASE. A rebase rewrites the round SHAs and orphans every
       # earlier receipt, so an ancestry-based count would read LOW and silently
       # under-report the round -- the failed-lookup class. Counting from the
@@ -479,6 +502,74 @@ def run_receipt_self_test
       commit.call("three")
       sh.call("git", "-c", "commit.gpgsign=false", "reset", "-q", "--hard", first)
       ok &&= (rounds_recorded&.first == 2)
+
+      ENV.delete("CRITIC_REVIEW_STUB")
+    end
+  end
+
+  # (15) THE ARTIFACT CEILING, at and one short of the boundary. Its OWN repo:
+  # driving the round count to 12 inside the case-11-14 repo would break case
+  # 14's expectation of exactly 2.
+  #
+  # What is under test is the BOUNDARY, not "some large number fires" -- the
+  # ceiling's whole justification is that it sits ABOVE the two loops that
+  # RESOLVED at eight rounds, so a ceiling that crept down to 8 would start
+  # ordering needless descopes and nothing else would notice.
+  Dir.mktmpdir("critic-review-ceiling-") do |repo|
+    Dir.chdir(repo) do
+      sh = ->(*a) { system(*a, out: File::NULL, err: File::NULL) }
+      sh.call("git", "init", "-q", ".")
+      sh.call("git", "config", "user.email", "t@example.invalid")
+      sh.call("git", "config", "user.name", "t")
+      commit = lambda do |body|
+        File.write("a.txt", body)
+        sh.call("git", "add", "-A")
+        sh.call("git", "-c", "commit.gpgsign=false", "commit", "-qm", body)
+        head_sha
+      end
+      commit.call("base")
+      ENV["CRITIC_REVIEW_STUB"] = findings_out
+
+      ok &&= (ARTIFACT_CEILING_ROUND > 8)   # above BOTH loops that resolved
+
+      # Each commit body MUST be unique: commit.call writes it to a.txt, so a
+      # repeated body is an empty commit git refuses -- HEAD would not move, no
+      # new receipt would be recorded, and the count would never advance. The
+      # iteration bound is belt-and-braces so a future regression FAILS the
+      # suite instead of hanging it (repo CLAUDE.md -> the safe-wait pattern:
+      # every loop carries a max-iteration bound).
+      n = 0
+      while (rounds_recorded&.first || 0) < ARTIFACT_CEILING_ROUND - 1
+        n += 1
+        break if n > ARTIFACT_CEILING_ROUND + 5
+        commit.call("round-#{n}")
+        capture_err { run(["--base", "main"]) }
+      end
+
+      # One SHORT of the ceiling: silent about it.
+      ok &&= (rounds_recorded&.first == ARTIFACT_CEILING_ROUND - 1)
+      _rc, err = capture_err { warn_round_notice(head_sha) }
+      ok &&= err.include?("ROUND #{ARTIFACT_CEILING_ROUND - 1} on this change")
+      ok &&= !err.include?("ARTIFACT CEILING")
+
+      # AT the ceiling: names it, routes to the artifact-scope decision, and
+      # still exits 2. The notice is stderr on an already-blocking path, so it
+      # must never change whether the judge blocks.
+      commit.call("at-ceiling")
+      rc, err = capture_err { run(["--base", "main"]) }
+      ok &&= (rc == 2)
+      ok &&= (rounds_recorded&.first == ARTIFACT_CEILING_ROUND)
+      ok &&= err.include?("ARTIFACT CEILING")
+      ok &&= err.include?("Fix:")
+      ok &&= err.include?("PARK")
+      ok &&= err.include?("FINDINGS: none")
+      # The ceiling paragraph ITSELF routes to a SCOPE decision and offers no
+      # merge path -- scoped to the text after the marker, because the generic
+      # notice above it legitimately contains "merge with findings open" in the
+      # course of FORBIDDING it.
+      ceiling_text = err.split("ARTIFACT CEILING", 2).last.to_s
+      ok &&= !ceiling_text.match?(/--critic-override|known-open|merge with findings/i)
+      ok &&= ceiling_text.match?(/ARTIFACT-scope decision/i)
 
       ENV.delete("CRITIC_REVIEW_STUB")
     end

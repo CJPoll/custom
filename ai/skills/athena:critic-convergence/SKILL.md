@@ -5,6 +5,9 @@ description: Decide whether an iterated review/critic loop is converging or walk
 
 # athena:critic-convergence
 
+**Kind: living normative document.** Amended in place, per `~/dev/custom/CLAUDE.md`
+→ *Documentation conventions*.
+
 A loop where a resolver fixes findings and a judge re-runs on the new SHA is
 supposed to descend: each round's findings are fewer, and they are defects that
 were always there. When instead the fixes keep *creating* the next round's
@@ -78,7 +81,8 @@ one coherence pass; firing five rounds too late is what was measured, twice.
 - **One cluster round per cluster.** If the SAME cluster signals again after a
   cluster round, the artifact's requirements are underdetermined and no further
   round will find that out. Stop and escalate: a captain to its admiral, an
-  admiral to the architect, an architect to its caller.
+  admiral to the architect, an architect to its caller. (And only below the
+  round-12 artifact ceiling — see *After the escalation*.)
 
 ## After the escalation — the second re-signal, and the stop
 
@@ -105,24 +109,45 @@ silently dropped. Without the table, "the closure covers it" is the same
 unverifiable claim as "the redesign covers it"; with it, the next re-critic's
 findings can be checked against the rows rather than re-argued.
 
-**HARD STOP — if the same subsystem re-signals kind-3 even after the
-closure/descope pass, stop.** Do not iterate, do not override, do not escalate a
+**HARD STOP — if kind-3 signals again after a closure/descope pass — the same
+subsystem after a subsystem-scoped one, ANYWHERE in the artifact after an
+artifact-scoped one — stop.** (**Later (2026-09-20):** this rung read "if the
+same subsystem re-signals kind-3"; that scoping left the artifact-scoped rung
+below with no terminal.) Do not iterate, do not override, do not escalate a
 third time. **PARK** the work at its last clean-gate SHA, unmerged, and hand it
 to the owner as a product-judgment item: what the requirements *should be* has
 stopped being an engineering question, and no one in the loop can answer it.
 Parking is the only outcome that both terminates the loop and leaves the bar
 exactly where it was — nothing merges with findings unresolved.
 
+**Every rung above is scoped to the same CLUSTER; this one is scoped to the
+ARTIFACT.** Otherwise an artifact admits one full trip up the ladder per cluster
+and the stop cannot fire while the judge keeps finding a *fresh* one. So: **at
+round 12 or later, a kind-3 finding no longer buys a cluster round — it routes to
+the artifact-scope decision, whatever rung its own cluster is on.**
+`ai/bin/critic-review` prints the round number on every BLOCK; that is the
+counter, and it does not reset on a rebase or on a mid-loop re-spec (a re-spec
+that deletes the failing sections IS a descope — it spends this rung, it does not
+refund it). Kind-1 and kind-2 rounds never trigger this, so a judge still reading
+real pre-existing defects out of a long artifact is never cut short. Twelve,
+because both loops that RESOLVED took eight rounds; the one that did not was at
+round 13 when its admiral had to invent the closure pass unaided.
+
+**The artifact-scope decision** is the closure/descope pass above taken over the
+whole artifact, biased to the split: land the **coherent core** — the sections
+that have produced no kind-3 — with the same row-per-open-question table, and
+file the rest as follow-up tickets (*descoped-and-landed*); or **PARK** if no
+core separates from the kind-3 sections. The core still lands only on
+`FINDINGS: none`.
+
 State which of the three a loop reached — **clean**, **descoped-and-landed**, or
 **parked-for-owner** — so its outcome is legible without replaying the rounds.
 
-Measured 2026-09-20 (DND-232, the same loop this skill was written from): the
-first escalation produced three seam decisions, round 12 implemented them, and
-round 13's re-critic re-signaled kind-3 in that same cluster — one of them
-created by round 13's own fix. The admiral had to invent all of the above on the
-spot. It worked: a second escalation scoped to whole-subsystem closure produced a
-14-row table, and the re-critic found zero kind-3 in the subsystem. The judgement
-is recorded here so the next loop does not have to re-derive it under load.
+Measured 2026-09-20 (DND-232): the first escalation's three seam decisions landed
+in round 12, round 13 re-signaled kind-3 in the same cluster, and the second
+escalation — whole-subsystem closure — produced a 14-row table after which the
+re-critic found zero kind-3 in that subsystem. The admiral invented that pass on
+the spot; it is written down so the next loop does not.
 
 ## The bar does not move
 
