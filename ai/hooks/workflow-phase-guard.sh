@@ -177,6 +177,13 @@ case "$1" in
     echo "workflow-phase: unknown flag '$1'. Fix: use --set|--clear|--get|--marker-path|--self-test, or invoke with no args as a PreToolUse hook (stdin JSON)." >&2
     exit 2
     ;;
+  ?*)
+    # Any other NON-EMPTY first arg is misuse: reject rather than fall through to
+    # hook mode (which would block on stdin). Empty $1 (the real hook path) does
+    # not match this and proceeds below.
+    echo "workflow-phase: unexpected argument '$1'. Fix: use --set|--clear|--get|--marker-path|--self-test, or invoke with no args as a PreToolUse hook (stdin JSON)." >&2
+    exit 2
+    ;;
 esac
 
 # ---- PreToolUse hook mode (no CLI flag: read stdin JSON) -------------------
@@ -239,6 +246,10 @@ KEYS=$(printf '%s' "$JSON" | jq -r 'keys[]' 2>/dev/null) || { log "WARN cannot p
 MAXRANK=-1
 MAXTOOL=""
 MAXCLASS=""
+# Disable pathname globbing for the word-split over $KEYS: we want word-splitting
+# on IFS, NOT for a (hypothetical future) key containing *, ?, or [ to glob
+# against the cwd. Restored immediately after.
+set -f
 for tool in $KEYS; do
   if printf '%s' "$CMD" | grep -Fqw -- "$tool"; then
     cls=$("$CLASS_CMD" --class-of "$tool" 2>/dev/null) || cls="destructive"
@@ -249,6 +260,7 @@ for tool in $KEYS; do
     fi
   fi
 done
+set +f
 
 # No known registry tool referenced -> ALLOW (keeps ordinary Bash denial-free).
 if [ "$MAXRANK" -lt 0 ]; then

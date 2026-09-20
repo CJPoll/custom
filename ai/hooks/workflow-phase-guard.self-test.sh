@@ -194,6 +194,9 @@ WD_CLI="$TMP/wd-cli"; mkdir -p "$WD_CLI"
 ( cd "$WD_CLI" && sh "$HOOK" --clear >/dev/null && [ "$(sh "$HOOK" --get)" = none ] );      assert "--clear then --get = none"    $?
 ( cd "$WD_CLI" && sh "$HOOK" --set bogus 2>/dev/null ); [ $? -ne 0 ] && _z=0 || _z=1;        assert "--set invalid phase rejected" "$_z"
 ( cd "$WD_CLI" && sh "$HOOK" --marker-path | grep -q "^$MDIR/.*\.phase$" );                 assert "--marker-path under MARKER_DIR" $?
+# a stray NON-flag arg must be rejected (exit != 0), never fall through to a
+# stdin-blocking hook run.
+sh "$HOOK" bogus-arg </dev/null >/dev/null 2>&1; [ $? -ne 0 ] && _z=0 || _z=1;             assert "stray non-flag arg rejected" "$_z"
 
 echo
 echo "==================================================="
