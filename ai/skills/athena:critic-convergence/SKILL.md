@@ -27,7 +27,8 @@ skill is that judgement, made early and on purpose.
 At round N >= 2, classify each finding:
 
 1. **Pre-existing** — the judge found it on a deeper read; no earlier round
-   caused it. Patch it normally.
+   caused it. Patch it, and **sweep its class** (below). It is NOT a cluster
+   signal.
 2. **Mechanical follow-on** — it exists because of an earlier round's edit, but
    it is a stale name, citation, path, or reference. This is an incomplete
    sweep, not a structural problem. Patch it AND sweep its class (repo
@@ -47,6 +48,37 @@ The two kinds are worth separating because kind 2 is loud and cheap and kind 3
 is the one that compounds. Round 6 (four mis-cited files) and round 8 (one
 mis-targeted citation) of that loop were pure kind 2, and both were correctly
 handled as ordinary patch rounds — round 8's own report records "no new edges".
+
+## Sweeping a kind-1 class — what bounds a kind-1 loop
+
+A kind-1 finding is rarely one site. It is usually one instance of a *class* the
+artifact instantiates in several places, and the judge surfaces one instance per
+round because each round's patch removed only the instance it was handed. That
+is how a loop of real, correctly-fixed pre-existing defects still fails to
+descend — and kind-1 rounds never trip the artifact ceiling, so nothing else
+bounds them.
+
+So on a kind-1 finding, BEFORE patching: **name the class**, then find every
+other site of it — including sites an EARLIER round introduced, which are the
+ones a this-round reading misses — and fix them in the same pass. Where the
+class has a **root** (a premise, bound, or claim the other sites rest on), fix
+the root, so the remaining sites become correct by construction instead of
+carrying the same restated caveat each.
+
+It is the repo `CLAUDE.md`'s *patch the class, not the site* (-> *A failed
+lookup must never look like an empty one*) applied to kind 1, and it differs
+from both neighbours: the kind-2 sweep is textual (stale names, citations,
+paths) where this one is substantive; and it is **not** a cluster round — the
+correct fix shape is already known, so nothing is redesigned, no cluster is
+named or spent, and no rung is consumed.
+
+Measured 2026-09-20 (DND-232, round 23): two findings that read as unrelated
+defects — a store's bound resting on a taxonomy the document itself declares
+open, and a totality claim missing one delivery-time outcome — were one
+over-claiming class, whose third site ROUND 22 had just introduced. The
+architect's decision records why a two-site patch was rejected: it "would leave
+it to resurface next round". Swept at its root, a class costs one round instead
+of one round per site.
 
 ## The cluster round
 
