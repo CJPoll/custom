@@ -40,14 +40,14 @@ AI_DIR     = File.expand_path("..", __dir__)
 AGENTS_DIR = File.join(AI_DIR, "agents")
 
 # Rendered-line budgets, keyed by the <name> in ai/agents/athena-<name>.md.
-# admiral => 1040 is the CURRENT rendered count (1034) plus tiny headroom: this
-# is stage 1 of the admiral-500 shrink (ai/docs/admiral-500-design.md §5, PR 1),
-# which stands up the gate to enforce NO-REGROWTH first; the target 500 lands in
-# a later stage together with the resident trim. Every other agent is pinned at
-# its current rendered size plus a small headroom, so the gate caps regrowth
-# without false-failing an un-optimized agent. Each is a one-line ratchet.
+# admiral => 500 is the target the admiral-500 shrink delivers
+# (ai/docs/admiral-500-design.md §0.1 fixed decision, stage 4): the resident trim
+# landed and the cap is now locked at 500 (rendered sits at ~496, a modest
+# headroom below). Every other agent is pinned at its current rendered size plus a
+# small headroom, so the gate caps regrowth without false-failing an un-optimized
+# agent. Each is a one-line ratchet.
 BUDGETS = {
-  "admiral"     => 1040,  # current 1034; ratchets to 500 in a later admiral-500 stage
+  "admiral"     => 500,   # target delivered by the admiral-500 stage-4 resident trim
   "captain"     => 760,   # current 730 + headroom
   "architect"   => 560,   # current 529 + headroom
   "shipwright"  => 720,   # current 704 + headroom
