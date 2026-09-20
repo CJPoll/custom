@@ -336,26 +336,34 @@ err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log
 if [ "${rc}" -eq 0 ]; then bad "an unrecognised dedupe member is a hard error" "accepted"
 else assert_contains "an unrecognised dedupe member is a hard error naming it" "message_id" "${err}"; fi
 
-# DND-233: `dedupe_key` is now a RECOGNISED member -- the event-platform inbox
-# adapter's per-(event,rule) key, the same per-line `dedupe_key` field the Slack
-# reader already emits carrying channel:ts. The contract stated this present-tense
-# ("a `dedupe` of exactly [\"dedupe_key\"] is valid"); the validator must not deny
-# what the contract asserts (the "One validator" principle).
-assert_ok "a platform channel declaring dedupe:[dedupe_key] is accepted" \
-  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","dedupe":["dedupe_key"]}}}'
+# DND-233 (option A): the event-platform `dedupe_key` dedupe family and the
+# `stream` op-stream discriminator are DEFERRED. The reference reader
+# (logchan_scan, section 3 below) ingests NEITHER a line-level `dedupe_key` nor
+# an `op` fold, so accepting either declaration here would validate a channel
+# whose platform-produced lines the reader silently drops as `unreadable` while
+# advancing the offset past them -- the "One validator" rule the OTHER way: the
+# validator must never accept what the reader would drop. Both stay REJECTED
+# until reader support lands in a later platform-delivery ticket (see
+# ai/contracts/athena-inbox.md -> "The inbox as an event-platform delivery
+# adapter", the Known-open note). The reader-side companion to these is the
+# "test the miss" case in section 3.
+err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","dedupe":["dedupe_key"]}}}' 2>&1)"; rc=$?
+if [ "${rc}" -eq 0 ]; then bad "dedupe:[dedupe_key] is REJECTED while reader support is deferred" "accepted"
+else assert_contains "the deferred dedupe_key member is rejected naming it" "dedupe_key" "${err}"; fi
+assert_contains "the deferred-dedupe_key refusal carries a Fix: clause" "Fix:" "${err}"
 
-# DND-233 finding 4: the `stream` discriminator declares a lane / op-stream
-# channel (its lines carry `op` and are folded into a working set). A declared
-# op-stream channel is accepted; an unrecognised `stream` value -- an op-stream
-# channel missing the recognised `op` discipline -- is a hard error naming it,
-# because a channel silently NOT folded reads exactly like a correct pile of
-# lines (the failed-lookup class).
-assert_ok "an op-stream lane channel (stream:op, dedupe:[dedupe_key]) is accepted" \
-  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","stream":"op","dedupe":["dedupe_key"]}}}'
-err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","stream":"pile"}}}' 2>&1)"; rc=$?
-if [ "${rc}" -eq 0 ]; then bad "an op-stream channel missing the op discipline is a hard error" "accepted"
-else assert_contains "an unrecognised stream value is a hard error naming it" "pile" "${err}"; fi
-assert_contains "the unrecognised-stream refusal carries a Fix: clause" "Fix:" "${err}"
+# `stream` is not (yet) a channel-object key: declaring it -- with ANY value,
+# including the eventual "op" -- is an unknown-key hard error naming it. When the
+# reader gains op-fold, Schema/Validation gain the key and this case flips to
+# accept "op" and reject other values; until then neither can be declared.
+for sv in "op" "pile"; do
+  err="$(descriptor_validate "{\"v\":1,\"repo\":\"/r/.git\",\"channels\":{\"a\":{\"kind\":\"log\",\"path\":\"x.jsonl\",\"stream\":\"${sv}\"}}}" 2>&1)"; rc=$?
+  if [ "${rc}" -eq 0 ]; then bad "a stream key [${sv}] is REJECTED while op-fold is deferred" "accepted"
+  else
+    assert_contains "the deferred stream key [${sv}] is rejected as an unknown key naming it" "stream" "${err}"
+    assert_contains "the deferred-stream refusal carries a Fix: clause [${sv}]" "Fix:" "${err}"
+  fi
+done
 
 # read and write MUST differ -- equal ones would make every send land in the
 # directory this identity reads from, so a sender would ingest its own mail.
@@ -481,6 +489,26 @@ assert_eq "an unparseable line does not stop the readable ones counting" "1" "$(
 res="$(printf '%s\n' '{"v":1,"text":"keyless"}' | logchan_scan 0 "1" "" "")"
 assert_eq "a line with no dedupe key at all is unreadable, not counted" "1" "$(jq -r .unreadable <<<"${res}")"
 assert_eq "a line with no dedupe key at all is not counted as new" "0" "$(jq -r .new <<<"${res}")"
+
+# DND-233 finding 3 -- "test the miss, not just the hit." A PLATFORM-SHAPED line
+# is what a (deferred) event-platform producer would append: a line-level
+# `dedupe_key` and an `op`, but no `channel`/`ts` and no `event_id`. The
+# reference reader ingests NEITHER `dedupe_key` NOR `op`, so it derives no key,
+# falls through to the `unreadable` branch, and -- because the line is COMPLETE
+# -- ADVANCES the offset past it. This is the exact behaviour that makes
+# accepting such a channel declaration a silent drop, which is why section 2's
+# validator rejects `dedupe:[dedupe_key]` / `stream:*`. If a later
+# platform-delivery ticket wires the reader to read `dedupe_key` / fold `op`,
+# THIS assertion flips and the validator opens in the same change -- the two
+# move together, never apart.
+platform_line='{"v":1,"dedupe_key":"evt-1:rule-a","op":"add","member":"m1"}'
+res="$(printf '%s\n' "${platform_line}" | logchan_scan 0 "1" "" "")"
+assert_eq "a platform-shaped dedupe_key/op line is NOT counted new (reader does not ingest it)" \
+  "0" "$(jq -r .new <<<"${res}")"
+assert_eq "a platform-shaped dedupe_key/op line is counted unreadable, not silently lost" \
+  "1" "$(jq -r .unreadable <<<"${res}")"
+assert_eq "the offset advances past the complete-but-unreadable platform line (it does not wedge)" \
+  "$(printf '%s\n' "${platform_line}" | wc -c)" "$(jq -r .next_offset <<<"${res}")"
 
 # A line is JSON written by other people, so nothing guarantees a field has
 # the type this reader expects. A non-string `event_id` used directly as a jq
