@@ -1,6 +1,6 @@
 ---
 name: athena:critic-convergence
-description: Decide whether an iterated review/critic loop is converging or walking in circles, and what to do when it is walking — the cluster-round procedure. Use at round N>=2 of any loop where a resolver fixes findings and the judge re-runs on the new SHA (athena-diff-critic via ai/bin/critic-review, or review-loop), BEFORE fixing this round's findings.
+description: Decide whether an iterated review/critic loop is converging or walking in circles, and what to do when it is walking — the cluster-round procedure, the escalation, and the hard stop that terminates a loop no round will converge. Use at round N>=2 of any loop where a resolver fixes findings and the judge re-runs on the new SHA (athena-diff-critic via ai/bin/critic-review, or review-loop), BEFORE fixing this round's findings — and again whenever an already-escalated cluster signals a second time.
 ---
 
 # athena:critic-convergence
@@ -79,6 +79,50 @@ one coherence pass; firing five rounds too late is what was measured, twice.
   cluster round, the artifact's requirements are underdetermined and no further
   round will find that out. Stop and escalate: a captain to its admiral, an
   admiral to the architect, an architect to its caller.
+
+## After the escalation — the second re-signal, and the stop
+
+Escalating is not a termination rule. It hands the cluster to someone with
+design authority and the loop then resumes on the implemented decision. If the
+SAME cluster signals kind-3 **again** after that decision has landed, two things
+are true, and the loop still has no bound unless both are acted on.
+
+**The escalation was scoped too narrowly — widen it, do not repeat it.** This is
+the cluster-round bound *widen the cluster, do not regress the fix* one level up.
+A decision taken seam-by-seam answers each seam and leaves the seams' *joint*
+requirement as undetermined as it was; the re-signal is that gap, not a worse
+critic. The second escalation asks for one of exactly two deliverables:
+**requirements closure over the whole subsystem** — every open question in it
+decided together, against one stated invariant — **or a recommendation to descope
+to a coherent core**. Name which you want. "Look at it again" reproduces the
+first escalation and buys another re-signal.
+
+**A closure pass is verifiable or it is just another cluster round.** It reports
+a table with one row per open question, each row CLOSED (already resolved and
+still holding), DECIDED (with the decision and where in the artifact it landed),
+or DESCOPED — and the descoped parts are filed as follow-up tickets, never
+silently dropped. Without the table, "the closure covers it" is the same
+unverifiable claim as "the redesign covers it"; with it, the next re-critic's
+findings can be checked against the rows rather than re-argued.
+
+**HARD STOP — if the same subsystem re-signals kind-3 even after the
+closure/descope pass, stop.** Do not iterate, do not override, do not escalate a
+third time. **PARK** the work at its last clean-gate SHA, unmerged, and hand it
+to the owner as a product-judgment item: what the requirements *should be* has
+stopped being an engineering question, and no one in the loop can answer it.
+Parking is the only outcome that both terminates the loop and leaves the bar
+exactly where it was — nothing merges with findings unresolved.
+
+State which of the three a loop reached — **clean**, **descoped-and-landed**, or
+**parked-for-owner** — so its outcome is legible without replaying the rounds.
+
+Measured 2026-09-20 (DND-232, the same loop this skill was written from): the
+first escalation produced three seam decisions, round 12 implemented them, and
+round 13's re-critic re-signaled kind-3 in that same cluster — one of them
+created by round 13's own fix. The admiral had to invent all of the above on the
+spot. It worked: a second escalation scoped to whole-subsystem closure produced a
+14-row table, and the re-critic found zero kind-3 in the subsystem. The judgement
+is recorded here so the next loop does not have to re-derive it under load.
 
 ## The bar does not move
 

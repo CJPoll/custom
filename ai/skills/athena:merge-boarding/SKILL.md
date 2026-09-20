@@ -90,6 +90,15 @@ independently on 2026-09-19.
   point, not a third resume.** The requirements are underdetermined and another
   round will not discover that. Route it to the architect (design /
   security-design) per your escalation routing.
+- **A cluster that re-signals AFTER its escalation landed is not a second
+  escalation of the same shape, and it is the last one.** Widen the ask to
+  whole-subsystem requirements closure (or a descope recommendation), demand the
+  row-per-open-question table that makes the closure checkable, and set the stop
+  *before* dispatching: if that same subsystem re-signals kind-3 again, PARK the
+  Mission at its last clean-gate SHA, unmerged, and hand it to the owner as a
+  product-judgment item. Full procedure: [[athena:critic-convergence]] -> *After
+  the escalation*. Parking is a terminal state you report like any other — say
+  clean / descoped-and-landed / parked-for-owner — not a Mission left in flight.
 - **Round count is never a merge argument.** It is not grounds for
   `--critic-override`, for carrying a finding as a known-open, or for relaxing
   the bar in *The merge bar*. Override stays what it is: the
