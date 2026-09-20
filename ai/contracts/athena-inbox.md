@@ -974,12 +974,12 @@ are the additions, not replacements.
 > that an owner handling rule nonetheless targets as a platform delivery. That is
 > a producer-registration **mismatch** between the two ends, and **no instrument
 > diagnoses it *as* a mismatch today.** It is specifically **not** caught by the
-> never-delivered three-state distinction in *Producer registration extends to
-> platform deliveries*: that distinction fires only for a channel whose inbox file
-> has **never existed** (`never_delivered`, `ai/skills/athena:inbox/lib/inbox.sh`,
-> set only when `[ -e "${inbox}" ]` is false), whereas a mis-targeted channel **is**
-> being delivered to, so its file exists and `never_delivered` is permanently
-> false. The only signal today is **coarse**: the reference reader scores each
+> never-delivered finding — nor by the three-state distinction *specified* in
+> *Producer registration extends to platform deliveries* (itself deferred, per
+> this note): the `never_delivered` computation
+> (`ai/skills/athena:inbox/lib/inbox.sh`) keys on the inbox file's absence,
+> whereas a mis-targeted channel **is** being delivered to, so its file exists and
+> `never_delivered` is permanently false. The only signal today is **coarse**: the reference reader scores each
 > platform state-change line it cannot parse `+1 unreadable`
 > (`ai/skills/athena:inbox/lib/logchan.sh`), and that count rides the unprompted
 > notice as the `+N unreadable` suffix (`ai/hooks/athena-inbox-poll.sh`,
@@ -992,10 +992,10 @@ are the additions, not replacements.
 > `producer:"platform"` lines and the validator admits that marker, a
 > correctly-declared platform channel is **read** rather than mis-scored, and a
 > channel still left `producer:"slack"` while fed platform lines remains a
-> mis-declaration whose only signal stays this coarse count. (The never-delivered
-> three-state distinction below — **no client channel declared** vs **no server
-> producer registered** vs **nothing arrived** — addresses the *empty*-channel
-> states, not this delivering-but-mismatched one.) The two other refused markers — a `"stream"`
+> mis-declaration whose only signal stays this coarse count. (The three-state
+> never-delivered distinction *specified* below — **no client channel declared**
+> vs **no server producer registered** vs **nothing arrived** — concerns the
+> *empty*-channel states, not this delivering-but-mismatched one.) The two other refused markers — a `"stream"`
 > channel key and a non-standard `dedupe` member — stay refused on their own terms
 > (an unknown channel key; a dedupe member the reader does not compute), but
 > **neither is what makes platform delivery undeclarable**; the required
@@ -1106,10 +1106,16 @@ failure mode by a different second end:
   "No client channel declared," "no server producer registered," and "nothing
   arrived" MUST NOT read identically in output, though all three look identical on
   disk (absent entry / empty file). This is the inbox `log`-channel end of
-  `athena-events.md`'s both-ends-or-silently-dark rule; `inbox-doctor`'s
-  never-delivered finding is where the first two are distinguished from the third
-  for a `log` channel, and the unprompted count path surfaces the never-delivered
-  channel once (the doctor does not nag a second time — see *inbox-doctor*).
+  `athena-events.md`'s both-ends-or-silently-dark rule. Distinguishing all three
+  *as* never-delivered sub-states is **deferred to DND-260** and is not what
+  `inbox-doctor` does today: its current never-delivered finding
+  (`ai/skills/athena:inbox/lib/doctor.sh`) emits one message whose `Fix:` names
+  only server-side producer registration (**no server producer registered**),
+  while **no client channel declared** is reported separately by the
+  registry-entry finding and **nothing arrived** is a non-fault zero-new; the
+  full per-state distinction lands with DND-260's `inbox-doctor` work. Today the
+  unprompted count path surfaces a never-delivered channel once and the doctor
+  does not nag a second time (see *inbox-doctor*).
 
 ### A lane `log` channel is a change stream of state-change events
 
