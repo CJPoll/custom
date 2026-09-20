@@ -83,6 +83,13 @@ SCORECARD_REL       = File.join("ai", "eval", "scorecard.json")
 DEFAULT_BASELINE    = "origin/main"
 DEFAULT_RUNS        = 10        # T2 characterization depth for the pilot
 DELTA_NOISE         = 0.3       # fixed envelope: |p_base - p_var| must exceed this
+# Float tolerance for the envelope comparison. With N=10 the reachable fractions
+# are k/10, and some differences that are exactly Δ_noise in rational terms
+# evaluate ABOVE it in float (e.g. 0.9 - 0.6 == 0.30000000000000004). Requiring
+# the difference to exceed the envelope by more than EPS keeps a flip of EXACTLY
+# Δ_noise classified as INCONCLUSIVE, as documented (never a false KEEP/REVERT on
+# what the design calls sampling noise).
+ENVELOPE_EPS        = 1e-9
 
 KEEP_LABEL = "KEEP — pending human gate (requires gate-green + explicit human adoption; variant-eval NEVER adopts)"
 
@@ -182,8 +189,10 @@ end
 # Deterministic cases use N=1 and a 0-width envelope, so an exact 1->0 flip is
 # :regressed and 0->1 is :improved.
 def classify_flip(p_base, p_var, envelope = DELTA_NOISE)
-  return :regressed if (p_base - p_var) > envelope
-  return :improved  if (p_var - p_base) > envelope
+  # Exceed the envelope by more than EPS so a flip of EXACTLY Δ_noise (and its
+  # float-fuzz neighbours) stays INCONCLUSIVE rather than a false KEEP/REVERT.
+  return :regressed if (p_base - p_var) - envelope > ENVELOPE_EPS
+  return :improved  if (p_var - p_base) - envelope > ENVELOPE_EPS
 
   :inconclusive
 end
@@ -448,9 +457,19 @@ def self_test
   fail.("a small flip within Δ_noise must be INCONCLUSIVE") unless classify_flip(0.6, 0.5) == :inconclusive
   fail.("a within-envelope flip must NOT be regressed") if classify_flip(0.6, 0.5) == :regressed
   fail.("a within-envelope flip must NOT be improved") if classify_flip(0.5, 0.6) == :improved
-  # boundaries: exactly Δ_noise is NOT beyond the envelope -> inconclusive
+  # boundaries: a flip of EXACTLY Δ_noise is NOT beyond the envelope -> inconclusive.
+  # Exercise BOTH the exactly-0.3 float pair AND the reachable N=10 fractions whose
+  # difference float-rounds ABOVE 0.3 (9/10 vs 6/10 -> 0.30000000000000004); a
+  # naive `> envelope` would misclassify these as regressed/improved.
   fail.("a flip of exactly Δ_noise must be INCONCLUSIVE") unless classify_flip(0.6, 0.3) == :inconclusive
-  # a clear flip beyond the envelope
+  fail.("9/10 vs 6/10 (float 0.3000…4) must be INCONCLUSIVE, not regressed") \
+    unless classify_flip(0.9, 0.6) == :inconclusive
+  fail.("6/10 vs 9/10 (float 0.3000…4) must be INCONCLUSIVE, not improved") \
+    unless classify_flip(0.6, 0.9) == :inconclusive
+  fail.("8/10 vs 5/10 (exactly Δ_noise) must be INCONCLUSIVE") unless classify_flip(0.8, 0.5) == :inconclusive
+  # a flip that genuinely clears the envelope
+  fail.("a 1.0->0.6 flip (0.4 > Δ_noise) must be regressed") unless classify_flip(1.0, 0.6) == :regressed
+  fail.("a 0.6->1.0 flip (0.4 > Δ_noise) must be improved") unless classify_flip(0.6, 1.0) == :improved
   fail.("a 1.0->0.0 flip must be regressed") unless classify_flip(1.0, 0.0) == :regressed
   fail.("a 0.0->1.0 flip must be improved") unless classify_flip(0.0, 1.0) == :improved
   # a within-envelope T2 flip contributes INCONCLUSIVE: no regression/improvement
