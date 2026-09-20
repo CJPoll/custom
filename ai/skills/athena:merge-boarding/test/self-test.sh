@@ -253,6 +253,35 @@ stub_gate_pair "${R}/gp.sh"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 1 ] && ok "c13 a red gate exits 1 even with no verdict recorded" || bad "c13 expected exit 1, got $rc" "$out"
 
+# ---------------------------------------------------------------- case 14
+# BLAST RADIUS (step 8c). Every criterion before this one asks whether the CODE
+# is correct; this one asks what MERGING CAUSES. Measured 2026-09-20 (gen_saas
+# PR #256, DND-234): merging would have run `terraform apply -auto-approve` and
+# created a real, billable AWS KMS key, and the bar would have merged it.
+# The workflow is seeded into the BASE commit so the .tf is what drives the
+# verdict -- a workflow created inside the diff is itself a hit.
+R="${TMP}/c14"; new_repo "$R"
+mkdir -p "${R}/.github/workflows"
+printf 'name: post-merge\non:\n  push:\n    branches: [main]\njobs:\n  d:\n    runs-on: ubuntu-latest\n    steps: [{run: terraform apply -auto-approve}]\n' > "${R}/.github/workflows/post-merge.yml"
+( cd "$R" && git add -A && git commit -qm wf )
+( cd "$R" && git checkout -qb feature && mkdir -p infra && echo 'resource {}' > infra/kms.tf && git add infra/kms.tf && git commit -qm tf )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 4 ] && ok "c14 exit 4 when merging performs a real-world action" || bad "c14 expected exit 4, got $rc" "$out"
+grep -q 'BLAST-RADIUS HOT' <<<"$out" && ok "c14 names the blast radius as HOT" || bad "c14 no BLAST-RADIUS HOT line" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "c14 printed INTEGRATION OK on a HOT head" "$out" || ok "c14 does NOT print INTEGRATION OK on a HOT head"
+grep -q 'Fix:' <<<"$out" && ok "c14 carries an actionable Fix:" || bad "c14 missing Fix:" "$out"
+
+# ...and the owner's own authorization lands it, RECORDED, never hidden.
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-approval 'owner said go' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c14 --owner-approval lands the HOT head" || bad "c14 expected exit 0, got $rc" "$out"
+grep -q 'INTEGRATION OK .*(OWNER-APPROVED: owner said go)' <<<"$out" && ok "c14 the approval is attributable in the OK line" || bad "c14 approval not in the OK line" "$out"
+grep -q 'BLAST-RADIUS HOT' <<<"$out" && ok "c14 approval RECORDS without hiding what was approved" || bad "c14 approval suppressed the HOT block" "$out"
+# ...and it is never silently available.
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --owner-approval '' 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "c14 an empty --owner-approval is a usage error" || bad "c14 expected exit 2, got $rc" "$out"
+
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

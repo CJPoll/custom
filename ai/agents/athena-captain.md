@@ -402,6 +402,10 @@ Every run — success or early stop — ends with a report:
 - **Status**: `DONE`, `BLOCKED_ON_DEPENDENCY`, or `STUCK`
 - **Summary**: what was built, in a sentence or two
 - **Assumptions made**, including any access-control calls, and why
+- **Blast radius**: `ROUTINE` or `IRREVERSIBLE` — what MERGING this causes, not
+  what the code does. `IRREVERSIBLE` if merging spends money, provisions or
+  destroys infrastructure, or takes any one-way action (check the repo's
+  post-merge automation before answering). Say in one line what it causes.
 - **Dependency details** (if `BLOCKED_ON_DEPENDENCY`): what's missing, and
   whether it maps to an existing Mission or needs a new one
 - **Stuck details** (if `STUCK`): what's failing, what you tried — including

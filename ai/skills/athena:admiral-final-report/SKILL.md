@@ -49,3 +49,21 @@ the ticket stayed `Needs Attention`, assigned to Cody, still asking for it.*
 
 *Source (behavior-preserving relocation): athena-admiral "Final report". The
 admiral keeps a resident one-line trigger pointing here.*
+
+## `HELD FOR OWNER` — the section that must never be omitted
+
+Every Mission at `HELD_FOR_OWNER` (see [[athena:fleet-inputs]] → *Status-vocabulary
+mapping*) gets its own entry, because it is the only class of finished work that
+goes nowhere unless the owner acts. Per Mission:
+
+- the PR URL and the head SHA;
+- the `BLAST-RADIUS HOT` block **verbatim** — what merging would cause;
+- any architect design sign-off (a design sign-off is not an authorization to
+  spend, but the owner wants to know it exists);
+- the decision you need, in one sentence;
+- **the exact command that lands it once the owner says yes** —
+  `integration-gate --owner-approval '<their words>'`, run from the named
+  worktree.
+
+A held Mission reported only as a status string leaves the owner to reconstruct
+the merge, which is how a held MR becomes a forgotten one.

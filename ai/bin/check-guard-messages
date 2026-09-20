@@ -45,6 +45,7 @@ EXEMPT = {
 
 # Guard-type scripts under ai/bin/ (not every bin is a guard).
 GUARD_BINS = %w[
+  blast-radius
   build-agents
   forge-preflight
   confirm-merged

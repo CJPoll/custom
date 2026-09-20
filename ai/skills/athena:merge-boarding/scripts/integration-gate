@@ -31,6 +31,7 @@ GATE_CMD=""
 DO_FETCH=1
 SINCE=""
 CRITIC_OVERRIDE=""
+OWNER_APPROVAL=""
 
 usage() {
   cat <<'EOF'
@@ -54,11 +55,18 @@ green on that integrated head. Exits 0 only when both hold.
                    merge WITHOUT a standing-judge verdict on this head. Requires
                    a reason, which is printed into the INTEGRATION OK line for
                    your state log. Bounded to this one invocation.
+  --owner-approval <authorization>
+                   merge a head whose blast radius is HOT. Carries the OWNER'S
+                   OWN authorization, verbatim, and where it is recorded -- not
+                   your reasoning, not an architect sign-off, not a captain
+                   report. Printed into the INTEGRATION OK line.
   --self-test      run the dedicated test suite and exit
 
 Exit codes: 0 integration OK | 1 gate RED on the integrated head
             2 usage / unresolvable ref / branch behind target
             3 no green critic verdict on the integrated head
+            4 merging performs a real-world action -- owner's call, not the
+              fleet's
 EOF
 }
 
@@ -69,12 +77,13 @@ while [ $# -gt 0 ]; do
     --gate)   GATE_CMD="${2-}"; [ -n "$GATE_CMD" ] || { echo "${PROG}: --gate needs a command." >&2; echo "Fix: pass a command, e.g. --gate 'ai/bin/harness-gate'." >&2; exit 2; }; shift 2 ;;
     --no-fetch) DO_FETCH=0; shift ;;
     --critic-override) CRITIC_OVERRIDE="${2-}"; [ -n "$CRITIC_OVERRIDE" ] || { echo "${PROG}: --critic-override needs a REASON." >&2; echo "Fix: pass why you are merging with no judge verdict, e.g. --critic-override 'model unreachable for 3 re-runs; hotfix cannot wait'. An unrecorded bypass is the exact failure this flag exists to replace." >&2; exit 2; }; shift 2 ;;
+    --owner-approval) OWNER_APPROVAL="${2-}"; [ -n "$OWNER_APPROVAL" ] || { echo "${PROG}: --owner-approval needs the OWNER'S AUTHORIZATION." >&2; echo "Fix: pass the owner's own words and where they are recorded, e.g. --owner-approval 'yes, provision the KMS key -- Cody, session 2026-09-20, recorded on DND-234'. An empty value is not an approval, and no agent message is ever your user's consent." >&2; exit 2; }; shift 2 ;;
     --self-test)
       HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
       exec bash "$(dirname "${HERE}")/test/self-test.sh" ;;
     -h|--help) usage; exit 0 ;;
     *) echo "${PROG}: unknown argument '$1'." >&2
-       echo "Fix: see --help; valid flags are --target, --since, --gate, --no-fetch, --critic-override, --self-test." >&2
+       echo "Fix: see --help; valid flags are --target, --since, --gate, --no-fetch, --critic-override, --owner-approval, --self-test." >&2
        exit 2 ;;
   esac
 done
@@ -240,10 +249,37 @@ elif ! "$CRITIC" --verdict-for "$HEAD_SHA"; then
   exit 3
 fi
 
-# --- 9. confirmed ----------------------------------------------------------
-if [ -n "$CRITIC_OVERRIDE" ]; then
-  echo "INTEGRATION OK ${HEAD_SHA} (CRITIC OVERRIDE: ${CRITIC_OVERRIDE})"
-else
-  echo "INTEGRATION OK ${HEAD_SHA}"
+# --- 8c. blast radius: what does MERGING this head CAUSE? ------------------
+# Every criterion above asks whether the CODE is correct. None of them asks
+# what merging DOES. Measured 2026-09-20 (gen_saas PR #256, DND-234): merging
+# would have run `terraform apply -auto-approve` and created a real, billable
+# AWS KMS key -- and the documented bar would have merged it, because nothing
+# in the bar asked. This step asks the missing question. It is ADDITIVE: it can
+# only ever REFUSE a merge the old bar allowed, never permit one it refused.
+BLAST="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../bin" 2>/dev/null && pwd)/blast-radius"
+if [ ! -x "$BLAST" ]; then
+  echo "${PROG}: cannot locate blast-radius (expected ${BLAST})." >&2
+  echo "Fix: run this script from its committed path under ~/dev/custom so the blast-radius classifier resolves. A classifier that cannot be found is an ERROR, never a pass -- 'no surface touched' and 'nothing was checked' must never read the same." >&2
+  exit 2
 fi
+BLAST_ARGS=( --base "$TARGET_SHA" --head "$HEAD_SHA" --repo "$ROOT" )
+if [ -n "$OWNER_APPROVAL" ]; then
+  BLAST_ARGS+=( --owner-approval "$OWNER_APPROVAL" )
+fi
+"$BLAST" "${BLAST_ARGS[@]}"
+BLAST_RC=$?
+if [ "$BLAST_RC" -ne 0 ]; then
+  echo "${PROG}: NOT safe to merge -- see the BLAST-RADIUS lines above (exit ${BLAST_RC})." >&2
+  exit "$BLAST_RC"
+fi
+
+# --- 9. confirmed ----------------------------------------------------------
+SUFFIX=""
+if [ -n "$CRITIC_OVERRIDE" ]; then
+  SUFFIX=" (CRITIC OVERRIDE: ${CRITIC_OVERRIDE})"
+fi
+if [ -n "$OWNER_APPROVAL" ]; then
+  SUFFIX="${SUFFIX} (OWNER-APPROVED: ${OWNER_APPROVAL})"
+fi
+echo "INTEGRATION OK ${HEAD_SHA}${SUFFIX}"
 exit 0

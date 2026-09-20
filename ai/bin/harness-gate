@@ -66,6 +66,12 @@ STATIC_CHECKS = [
   ["check-tool-risk",           %w[ai/bin/check-tool-risk]],
   ["check-tool-risk self-test", %w[ai/bin/check-tool-risk --self-test]],
   ["harness-eval",              %w[ai/bin/harness-eval]],
+  # Answers the one merge question the rest of the bar never asked -- what
+  # merging CAUSES (gen_saas PR #256 / DND-234: merging would have run
+  # `terraform apply -auto-approve` on prod AWS). Deterministic and hermetic
+  # (throwaway git repos + fixture manifests; no network, no model), so it is
+  # gate-safe. Inline --self-test, NOT a discovered **/self-test.sh, per 3b.
+  ["blast-radius self-test",    %w[ai/bin/blast-radius --self-test]],
   ["critic-review self-test",   %w[ai/bin/critic-review --self-test]],
   ["critic-eval self-test",     %w[ai/bin/critic-eval --self-test]],
   # admiral-eval's deterministic scorer/parser/sampling/baseline/sandbox

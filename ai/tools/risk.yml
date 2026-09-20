@@ -33,6 +33,7 @@ tools:
   # --- readOnly: observe/analyze only (writes, if any, stay inside temp/self-test
   #     sandboxes; no repo/forge/tracker/remote mutation in any invocation) ---
   admiral-report-watch:    { class: readOnly, reason: watch }
+  blast-radius:            { class: readOnly, reason: check }
   check-agent-size:        { class: readOnly, reason: check }
   check-generic-skills:    { class: readOnly, reason: check }
   check-guard-messages:    { class: readOnly, reason: check }

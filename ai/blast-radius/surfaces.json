@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "comment": [
+    "Declared surfaces whose merge, in a repo where merging triggers automation on the",
+    "default branch, PERFORMS a real-world action rather than publishing code: it",
+    "provisions/mutates/destroys billable infrastructure, moves money, or is one-way.",
+    "Read by ai/bin/blast-radius, which is called by integration-gate before a merge.",
+    "",
+    "Patterns are deliberately GENERIC (no product repo is named here). This file",
+    "lives in ~/dev/custom and classifies other repos by reading them, never by",
+    "requiring anything to be committed into them.",
+    "",
+    "Adding a pattern only ever WIDENS what is held for the owner, which is always",
+    "safe. NEVER narrow or remove a pattern to make a merge pass",
+    "(ai/blocks/ops/safety-checks.md) -- excluding a path to go green is the named",
+    "forbidden move, and here it would silently restore the exact hole this exists to",
+    "close. If a pattern is genuinely wrong, the OWNER decides, and the change cites",
+    "the evidence."
+  ],
+  "surfaces": [
+    {
+      "class": "infrastructure-as-code",
+      "why": "merging applies it: provisions, mutates or destroys real, billable cloud resources",
+      "patterns": [
+        "**/*.tf",
+        "**/*.tf.json",
+        "**/*.tfvars",
+        "**/*.tfvars.json",
+        "**/*.tfstate",
+        "**/.terraform.lock.hcl",
+        "**/terraform/**",
+        "**/Pulumi.yaml",
+        "**/Pulumi.*.yaml",
+        "**/cloudformation/**",
+        "**/*.cfn.yml",
+        "**/*.cfn.yaml",
+        "**/serverless.yml",
+        "**/serverless.yaml",
+        "**/helm/**",
+        "**/k8s/**",
+        "**/kubernetes/**",
+        "**/ansible/**",
+        "**/playbooks/**"
+      ]
+    },
+    {
+      "class": "deploy-automation",
+      "why": "merging changes what EVERY future merge does -- the machinery that performs the action",
+      "patterns": [
+        ".github/workflows/**",
+        ".gitlab-ci.yml",
+        ".gitlab/ci/**",
+        ".buildkite/**",
+        ".circleci/**",
+        "Jenkinsfile"
+      ]
+    }
+  ]
+}

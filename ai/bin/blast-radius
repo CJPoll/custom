@@ -1,0 +1,639 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# blast-radius — answers the ONE merge question the rest of the merge bar never
+# asked: does merging this head PERFORM a real-world action, or does it publish
+# code?
+#
+# Every criterion in athena:merge-boarding's bar is about whether the CODE is
+# CORRECT (CI green, one review round, the captain's report, the head SHA, a
+# per-SHA standing-judge verdict). None of them asks what merging CAUSES.
+#
+# Measured 2026-09-20 (gen_saas PR #256, DND-234): the repo's
+# .github/workflows/post-merge.yml runs `terraform init && terraform apply
+# -auto-approve` on every merge to main, so merging that PR would have created a
+# real, billable AWS KMS key whose destruction makes every wrapped secret
+# permanently undecryptable. An unattended admiral following the documented bar
+# EXACTLY AND CORRECTLY would have merged it. The only thing that stopped it was
+# a captain choosing to read a workflow file nobody told it to read -- a safety
+# property resting on judgement rather than structure. This script is the
+# structure.
+#
+# THE DISCRIMINATOR is a conjunction, evaluated in this order:
+#
+#   HOT = (the diff touches a declared irreversible/billable surface)
+#         AND (merging triggers automation on the default branch)
+#
+# Both terms are load-bearing, and the ORDER is what preserves throughput:
+#
+#   * Path first, and it is the cheap common case. A routine app-code merge hits
+#     zero declared patterns and exits 0 immediately -- one `git diff` plus
+#     fnmatch, no network, no model, no owner. The automation term is never even
+#     consulted. Deploy-on-merge is the NORMAL case (gen_saas and walt_ui both);
+#     gating on it alone would stall every merge on an absent owner and defeat
+#     athena:run-autonomously outright.
+#   * Automation second, and only for a hot path. A .tf change in a repo where a
+#     human applies later is landing code, not performing an action -- correctly
+#     not gated. The same .tf in a repo where merge => `terraform apply
+#     -auto-approve` IS the action.
+#
+# In one sentence: merging is gated when merging PERFORMS the change rather than
+# PUBLISHES it. That is why .tf counts and an ordinary Elixir deploy does not.
+#
+# FAILED LOOKUPS NEVER READ AS EMPTY (~/.claude/CLAUDE.md -> "A failed lookup
+# must never look like an empty one"). "No post-merge.yml found" is exactly the
+# ambiguous empty result that doctrine warns about, so the automation term is
+# THREE-VALUED, never boolean, and UNDETERMINED fails CLOSED:
+#
+#   path hit? | automation        | verdict | exit
+#   ----------+-------------------+---------+-----
+#   no        | (not consulted)   | COLD    | 0
+#   yes       | CONFIRMED         | HOT     | 4
+#   yes       | UNDETERMINED      | HOT     | 4
+#   yes       | CONFIRMED-ABSENT  | WARM    | 0
+#
+# UNDETERMINED fails closed because the cost is asymmetric with no human
+# watching: a false positive costs one held MR plus an owner ping (and the fleet
+# moves on to the next Mission -- an already-specified move), while a false
+# negative costs a real billable key. It fails closed only inside the already-
+# rare hot-path branch, so routine throughput is never touched. And every run
+# PRINTS both terms, so a miss is observable rather than silent.
+#
+# Read-only: never writes, never reaches the network, never calls a model --
+# which is what makes --self-test gate-safe.
+#
+# Usage:
+#   blast-radius --base <ref> --head <ref> [--repo <dir>]
+#                [--owner-approval <authorization>]
+#   blast-radius --self-test
+#
+# Exit codes:
+#   0  COLD / WARM / HOT-OWNER-APPROVED -- merging publishes code (or the owner
+#      authorized the action)
+#   2  usage / unresolvable ref / empty diff / manifest error
+#   4  HOT -- merging performs an irreversible, billable or one-way action.
+#      NOT the fleet's call.
+
+require "json"
+require "yaml"
+require "open3"
+require "tmpdir"
+require "fileutils"
+
+PROG = "blast-radius"
+
+# The manifest is resolved from THIS SCRIPT'S OWN committed location, never from
+# cwd and never from the target repo. blast-radius is run from a PRODUCT
+# worktree; a cwd-relative manifest path would resolve to nothing there and
+# produce a silent COLD -- the precise failed-lookup trap this check exists to
+# avoid, reintroduced inside the check itself.
+DEFAULT_MANIFEST = File.expand_path("../blast-radius/surfaces.json", __dir__)
+
+FNM = File::FNM_PATHNAME | File::FNM_EXTGLOB
+
+# Branch names treated as the default branch for trigger matching.
+DEFAULT_BRANCHES = %w[main master].freeze
+
+def die(msg, fix, code = 2)
+  warn "#{PROG}: #{msg}"
+  warn "Fix: #{fix}"
+  exit code
+end
+
+# --- manifest ---------------------------------------------------------------
+
+def load_manifest(path)
+  unless File.file?(path)
+    die("manifest not found at #{path}.",
+        "the surface manifest is missing. It is resolved from this script's own " \
+        "committed location (ai/blast-radius/surfaces.json), so this means the " \
+        "checkout is incomplete -- restore the file from git. A manifest that " \
+        "cannot be loaded is an ERROR, never 'nothing is sensitive'.")
+  end
+
+  begin
+    data = JSON.parse(File.read(path))
+  rescue JSON::ParserError => e
+    die("manifest #{path} is not valid JSON (#{e.message}).",
+        "repair the JSON syntax in ai/blast-radius/surfaces.json, then re-run. " \
+        "An unparseable manifest is an ERROR, never an empty surface list.")
+  end
+
+  unless data.is_a?(Hash) && data["schema"] == 1
+    die("manifest #{path} has schema #{data.is_a?(Hash) ? data['schema'].inspect : 'n/a'}, expected 1.",
+        "this script understands schema 1 only. Either migrate the manifest or " \
+        "update blast-radius to handle the new schema. Refusing to classify " \
+        "against a schema it does not understand.")
+  end
+
+  surfaces = data["surfaces"]
+  unless surfaces.is_a?(Array) && !surfaces.empty?
+    die("manifest #{path} declares no surfaces.",
+        "a manifest with zero surfaces would classify EVERY merge as COLD, " \
+        "silently disabling this check. Restore the surface list. Zero surfaces " \
+        "is an ERROR, not 'nothing is sensitive'.")
+  end
+
+  pattern_count = surfaces.sum { |s| (s["patterns"] || []).size }
+  if pattern_count.zero?
+    die("manifest #{path} declares #{surfaces.size} surface(s) but ZERO patterns.",
+        "every surface has an empty `patterns` list, so nothing can ever match " \
+        "and every merge would read as COLD. Restore the patterns. Zero patterns " \
+        "is an ERROR, not 'nothing is sensitive'.")
+  end
+
+  [surfaces, pattern_count]
+end
+
+# --- matching ---------------------------------------------------------------
+
+# `**/*.tf` must also match a REPO-ROOT `main.tf`. Under FNM_PATHNAME a leading
+# `**/` does not match zero directories, so the depth-0 form is tried too. This
+# is pinned by a self-test case; without it every root-level terraform file
+# would read as COLD.
+def match?(pattern, path)
+  return true if File.fnmatch?(pattern, path, FNM)
+
+  if pattern.start_with?("**/")
+    return File.fnmatch?(pattern.sub(%r{\A\*\*/}, ""), path, FNM)
+  end
+
+  false
+end
+
+def hits_for(files, surfaces)
+  hits = []
+  files.each do |f|
+    surfaces.each do |s|
+      next unless (s["patterns"] || []).any? { |p| match?(p, f) }
+
+      hits << { path: f, class: s["class"], why: s["why"] }
+      break
+    end
+  end
+  hits
+end
+
+# --- git --------------------------------------------------------------------
+
+def git(repo, *args)
+  out, err, st = Open3.capture3("git", "-C", repo, *args)
+  [out, err, st.success?]
+end
+
+def changed_files(repo, base, head)
+  _, _, ok = git(repo, "rev-parse", "--verify", "#{base}^{commit}")
+  unless ok
+    die("cannot resolve --base '#{base}' in #{repo}.",
+        "the base ref does not name a commit in this repo. Pass the SHA pair " \
+        "integration-gate printed. An unresolvable ref is an ERROR -- it must " \
+        "never be treated as 'no files changed', which would read as COLD.")
+  end
+
+  _, _, ok = git(repo, "rev-parse", "--verify", "#{head}^{commit}")
+  unless ok
+    die("cannot resolve --head '#{head}' in #{repo}.",
+        "the head ref does not name a commit in this repo. Pass the SHA pair " \
+        "integration-gate printed. An unresolvable ref is an ERROR -- it must " \
+        "never be treated as 'no files changed', which would read as COLD.")
+  end
+
+  out, err, ok = git(repo, "diff", "--name-only", "#{base}..#{head}")
+  unless ok
+    die("`git diff --name-only #{base}..#{head}` failed in #{repo}: #{err.strip}",
+        "the diff could not be computed, so the changed-file set is UNKNOWN, " \
+        "not empty. Resolve the git error and re-run.")
+  end
+
+  files = out.split("\n").map(&:strip).reject(&:empty?)
+  if files.empty?
+    die("the diff #{base}..#{head} is EMPTY -- refusing to classify.",
+        "a merge with no changed files is either a wrong ref pair or nothing to " \
+        "merge. Either way it is an ERROR, not COLD. Re-check the SHAs you " \
+        "intend to land (they must be the pair integration-gate printed), then " \
+        "re-run.")
+  end
+  files
+end
+
+# --- automation detection ---------------------------------------------------
+
+# Returns [state, detail] where state is one of
+# "CONFIRMED" / "UNDETERMINED" / "CONFIRMED-ABSENT".
+#
+# NOTE: this parses TRIGGERS. It deliberately does NOT grep for the filename
+# `post-merge.yml` the way ai/bin/lead-time does -- lead-time answers a
+# different question (WHICH completed run was the deploy) and coupling them
+# would make one brittle filename load-bearing for two unrelated guarantees.
+def detect_automation(repo)
+  wf_dir = File.join(repo, ".github", "workflows")
+  if Dir.exist?(wf_dir)
+    files = Dir.glob(File.join(wf_dir, "*.{yml,yaml}")).sort
+    if files.empty?
+      # The directory exists but holds no workflow: fall through to the other
+      # forge shapes rather than claiming provable absence.
+    else
+      files.each do |f|
+        rel = f.sub("#{repo}/", "")
+        begin
+          doc = YAML.safe_load(File.read(f), aliases: true)
+        rescue StandardError => e
+          return ["UNDETERMINED",
+                  "#{rel}: unparseable YAML (#{e.class}) -- cannot prove it does " \
+                  "NOT deploy on merge"]
+        end
+        next unless doc.is_a?(Hash)
+
+        # YAML 1.1 parses a bare `on:` key as the BOOLEAN true, so the GitHub
+        # Actions trigger block lands under `true`, not `"on"`. Checking only
+        # "on" would silently find nothing on every real workflow file -- the
+        # failed-lookup class, inside the detector.
+        on = doc.key?("on") ? doc["on"] : doc[true]
+        next if on.nil?
+
+        trig = trigger_hit(on)
+        return ["CONFIRMED", "#{rel}: #{trig}"] if trig
+      end
+      return ["CONFIRMED-ABSENT",
+              "#{files.size} GitHub workflow(s) parsed, none triggers on a " \
+              "default-branch push or workflow_run"]
+    end
+  end
+
+  if File.exist?(File.join(repo, ".gitlab-ci.yml")) || Dir.exist?(File.join(repo, ".gitlab", "ci"))
+    return ["CONFIRMED",
+            ".gitlab-ci.yml present (GitLab: pipeline ABSENCE is not provable by " \
+            "this check -- proving a pipeline will NOT deploy needs rules:/only: " \
+            "evaluated across the whole graph, and an unproven negative here is " \
+            "the silent-empty class -- treated as present)"]
+  end
+
+  %w[Jenkinsfile azure-pipelines.yml azure-pipelines.yaml].each do |n|
+    if File.exist?(File.join(repo, n))
+      return ["UNDETERMINED",
+              "#{n} present -- a forge shape this check does not model, so it " \
+              "cannot prove merging does not deploy"]
+    end
+  end
+  %w[.circleci .buildkite].each do |d|
+    if Dir.exist?(File.join(repo, d))
+      return ["UNDETERMINED",
+              "#{d}/ present -- a forge shape this check does not model, so it " \
+              "cannot prove merging does not deploy"]
+    end
+  end
+
+  ["CONFIRMED-ABSENT", "no CI configuration of any recognised kind in the repo"]
+end
+
+def trigger_hit(on)
+  case on
+  when String
+    return "on: #{on}" if on == "push"
+  when Array
+    return "on: [#{on.join(', ')}] includes push" if on.include?("push")
+    return "on: [#{on.join(', ')}] includes workflow_run" if on.include?("workflow_run")
+  when Hash
+    return "on.workflow_run" if on.key?("workflow_run")
+
+    if on.key?("push")
+      push = on["push"]
+      return "on.push (no branch filter -- fires on the default branch)" if push.nil?
+
+      if push.is_a?(Hash)
+        branches = push["branches"]
+        return "on.push (no branch filter -- fires on the default branch)" if branches.nil?
+
+        b = Array(branches).map(&:to_s)
+        hit = b & DEFAULT_BRANCHES
+        return "on.push.branches=[#{b.join(', ')}]" unless hit.empty?
+      else
+        return "on.push"
+      end
+    end
+  end
+  nil
+end
+
+# --- reporting --------------------------------------------------------------
+
+def short(sha)
+  sha.to_s[0, 7]
+end
+
+def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, automation)
+  puts "BLAST-RADIUS #{verdict} #{short(head)}"
+  puts "  manifest: #{manifest} (#{surfaces.size} class(es), #{pattern_count} pattern(s))"
+  # This line is the failed-lookup doctrine discharged: a zero can always name
+  # WHICH key found zero, so "no surface hit" and "the manifest never loaded"
+  # can never read the same.
+  puts "  compared: #{files.size} changed file(s) against #{pattern_count} pattern(s) -> #{hits.size} hit"
+  if automation
+    puts "  merge-time automation: #{automation[0]} (#{automation[1]})"
+  else
+    puts "  merge-time automation: not consulted (no declared surface touched)"
+  end
+  return if hits.empty?
+
+  puts "  hits:"
+  width = hits.map { |h| h[:path].length }.max
+  hits.each do |h|
+    puts format("    %-#{width}s  [%s] %s", h[:path], h[:class], h[:why])
+  end
+end
+
+HOT_FIX = <<~FIX.freeze
+  do NOT merge. This is not a code-quality finding and there is no admiral override for it
+  -- the authority to spend money, provision or destroy infrastructure, or take a one-way
+  action is the OWNER's alone (~/.claude/CLAUDE.md -> Hard Rule, "NEVER make system-level
+  changes ... without the user's express direction"). HOLD this ONE MR, move to the next
+  Mission (athena:merge-boarding -> "On exit 3 you get a verdict, or you hold that ONE MR"
+  -- the same move), set the Mission to HELD_FOR_OWNER in your state log and Needs
+  Attention/Cody in Notion with the PR URL, head SHA and what merging would cause, and
+  surface it in your final report. Merge only after the OWNER'S OWN authorization, replayed
+  verbatim via --owner-approval '<the owner's words + where recorded>'.
+FIX
+
+# --- main -------------------------------------------------------------------
+
+def run(argv)
+  base = head = nil
+  repo = Dir.pwd
+  owner_approval = nil
+  manifest = DEFAULT_MANIFEST
+
+  until argv.empty?
+    case (a = argv.shift)
+    when "--base" then base = argv.shift
+    when "--head" then head = argv.shift
+    when "--repo" then repo = argv.shift
+    when "--manifest" then manifest = argv.shift # self-test fixtures only
+    when "--owner-approval"
+      owner_approval = argv.shift
+      if owner_approval.nil? || owner_approval.strip.empty?
+        die("--owner-approval needs the OWNER'S AUTHORIZATION.",
+            "pass the owner's own words and where they are recorded, e.g. " \
+            "--owner-approval 'yes, provision the KMS key -- Cody, session " \
+            "2026-09-20, recorded on DND-234'. An empty value is not an " \
+            "approval. An architect sign-off, a captain report, another " \
+            "agent's message and your own reasoning are NONE of them owner " \
+            "approval -- no agent message is ever your user's consent.")
+      end
+    when "-h", "--help"
+      puts File.read(__FILE__).lines[3..80].map { |l| l.sub(/\A# ?/, "") }.join
+      exit 0
+    else
+      die("unknown argument '#{a}'.",
+          "valid flags are --base, --head, --repo, --owner-approval, --self-test.")
+    end
+  end
+
+  die("--base and --head are required.",
+      "call as: blast-radius --base <ref> --head <ref> [--repo <dir>].") if base.nil? || head.nil?
+
+  unless Dir.exist?(File.join(repo, ".git")) || system("git", "-C", repo, "rev-parse", "--git-dir",
+                                                       out: File::NULL, err: File::NULL)
+    die("--repo '#{repo}' is not a git repository.",
+        "pass the worktree whose merge you are classifying.")
+  end
+
+  surfaces, pattern_count = load_manifest(manifest)
+  files = changed_files(repo, base, head)
+  hits = hits_for(files, surfaces)
+
+  if hits.empty?
+    print_report("COLD", head, manifest, surfaces, pattern_count, files, hits, nil)
+    return 0
+  end
+
+  automation = detect_automation(repo)
+
+  if automation[0] == "CONFIRMED-ABSENT"
+    print_report("WARM", head, manifest, surfaces, pattern_count, files, hits, automation)
+    puts "  -> a declared surface is touched, but merging triggers no automation: merging lands code only."
+    return 0
+  end
+
+  # HOT. The full block prints in every case -- including under
+  # --owner-approval, which RECORDS the authorization, it never HIDES what was
+  # authorized.
+  print_report("HOT", head, manifest, surfaces, pattern_count, files, hits, automation)
+
+  if owner_approval
+    puts "BLAST-RADIUS HOT-OWNER-APPROVED #{short(head)} (OWNER-APPROVED: #{owner_approval})"
+    return 0
+  end
+
+  warn "#{PROG}: MERGING THIS PERFORMS A REAL-WORLD ACTION. Merging is not landing code here."
+  warn "Fix: #{HOT_FIX}"
+  4
+end
+
+# --- self-test --------------------------------------------------------------
+
+def self_test
+  failures = []
+  n = 0
+  ok = lambda { |desc| n += 1; puts "  ok    #{desc}" }
+  bad = lambda { |desc, detail| n += 1; failures << desc; puts "  FAIL  #{desc}\n        #{detail}" }
+  check = lambda { |desc, cond, detail| cond ? ok.call(desc) : bad.call(desc, detail) }
+
+  script = File.expand_path(__FILE__)
+
+  # Run the script as a subprocess so exit codes and stderr are exercised
+  # exactly as integration-gate will see them.
+  run_br = lambda do |args|
+    out, err, st = Open3.capture3(RbConfig.ruby, script, *args)
+    [out, err, st.exitstatus]
+  end
+
+  # `seed:` files land in the BASE commit; the block's files land in the DIFF.
+  # The distinction is load-bearing: a workflow created inside the diff is itself
+  # a deploy-automation hit, so a COLD fixture must have its workflow already
+  # present at base. (That mistake made three cases fail on the first run here.)
+  mkrepo = lambda do |dir, seed: nil, &blk|
+    FileUtils.mkdir_p(dir)
+    system("git", "-C", dir, "init", "-q", "-b", "main", out: File::NULL, err: File::NULL)
+    system("git", "-C", dir, "config", "user.email", "t@t")
+    system("git", "-C", dir, "config", "user.name", "t")
+    # A global core.excludesFile can otherwise silently exclude fixture files.
+    system("git", "-C", dir, "config", "core.excludesFile", "/dev/null")
+    File.write(File.join(dir, "README.md"), "seed\n")
+    seed&.call(dir)
+    system("git", "-C", dir, "add", "-A", out: File::NULL, err: File::NULL)
+    system("git", "-C", dir, "commit", "-qm", "seed", out: File::NULL, err: File::NULL)
+    base = `git -C #{dir} rev-parse HEAD`.strip
+    blk.call(dir)
+    system("git", "-C", dir, "add", "-A", out: File::NULL, err: File::NULL)
+    system("git", "-C", dir, "commit", "-qm", "change", out: File::NULL, err: File::NULL)
+    head = `git -C #{dir} rev-parse HEAD`.strip
+    [base, head]
+  end
+
+  wf = lambda do |dir, name, body|
+    FileUtils.mkdir_p(File.join(dir, ".github", "workflows"))
+    File.write(File.join(dir, ".github", "workflows", name), body)
+  end
+
+  deploy_wf = "name: post-merge\non:\n  push:\n    branches: [main]\njobs:\n  d:\n    runs-on: ubuntu-latest\n    steps: [{run: terraform apply -auto-approve}]\n"
+  pr_wf     = "name: ci\non:\n  pull_request:\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps: [{run: test}]\n"
+
+  Dir.mktmpdir("blast-radius-selftest") do |tmp|
+    # 1. the REAL manifest loads and is non-trivial
+    surfaces, pc = nil
+    begin
+      surfaces, pc = load_manifest(DEFAULT_MANIFEST)
+      check.call("the committed manifest loads with >=1 class and >=1 pattern",
+                 !surfaces.empty? && pc.positive?,
+                 "loaded #{surfaces.inspect}")
+    rescue SystemExit
+      bad.call("the committed manifest loads with >=1 class and >=1 pattern",
+               "load_manifest exited on #{DEFAULT_MANIFEST}")
+    end
+
+    # 4. COLD: app code only, in a deploy-on-merge repo
+    d = File.join(tmp, "cold")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) { |r| FileUtils.mkdir_p(File.join(r, "lib")); File.write(File.join(r, "lib", "a.ex"), "x\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("COLD: app-code diff in a deploy-on-merge repo exits 0",
+               code.zero? && out.include?("BLAST-RADIUS COLD"), "exit=#{code} out=#{out}")
+    check.call("COLD: prints the compared/pattern counts and -> 0 hit (a zero names its key)",
+               out.include?("-> 0 hit") && out =~ /compared: \d+ changed file\(s\) against \d+ pattern\(s\)/,
+               out)
+    check.call("COLD: the automation term is NOT consulted on the cold path",
+               out.include?("not consulted"), out)
+
+    # 5. HOT: .tf under a subdir + deploy workflow
+    d = File.join(tmp, "hot")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) { |r| FileUtils.mkdir_p(File.join(r, "infra")); File.write(File.join(r, "infra", "kms.tf"), "resource\n") }
+    out, err, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("HOT: .tf + default-branch push workflow exits 4",
+               code == 4 && out.include?("BLAST-RADIUS HOT"), "exit=#{code} out=#{out}")
+    check.call("HOT: names the file, the class and the workflow",
+               out.include?("infra/kms.tf") && out.include?("infrastructure-as-code") && out.include?("post-merge.yml"),
+               out)
+    check.call("HOT: stderr carries an actionable Fix:", err.include?("Fix:"), err)
+
+    # 6. ROOT-level main.tf — pins the `**/` depth-0 fnmatch trap
+    d = File.join(tmp, "root-tf")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) { |r| File.write(File.join(r, "main.tf"), "resource\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("HOT: a REPO-ROOT main.tf matches `**/*.tf` (depth-0 trap)",
+               code == 4 && out.include?("main.tf"), "exit=#{code} out=#{out}")
+
+    # 7. WARM: .tf but no CI at all
+    d = File.join(tmp, "warm")
+    b, h = mkrepo.call(d) { |r| File.write(File.join(r, "main.tf"), "resource\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("WARM: .tf with no CI config exits 0 as CONFIRMED-ABSENT",
+               code.zero? && out.include?("BLAST-RADIUS WARM") && out.include?("CONFIRMED-ABSENT"),
+               "exit=#{code} out=#{out}")
+
+    # 8. UNDETERMINED: unparseable workflow YAML fails CLOSED
+    d = File.join(tmp, "badyaml")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "broken.yml", "on: [\n  unclosed\n") }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("UNDETERMINED: unparseable workflow YAML fails CLOSED (exit 4)",
+               code == 4 && out.include?("UNDETERMINED") && out.include?("broken.yml"),
+               "exit=#{code} out=#{out}")
+
+    # 9. UNDETERMINED: an unmodelled forge shape
+    d = File.join(tmp, "jenkins")
+    b, h = mkrepo.call(d, seed: ->(r) { File.write(File.join(r, "Jenkinsfile"), "pipeline{}\n") }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("UNDETERMINED: an unmodelled forge (Jenkinsfile) fails CLOSED (exit 4)",
+               code == 4 && out.include?("UNDETERMINED"), "exit=#{code} out=#{out}")
+
+    # 10. GitLab: absence not provable -> CONFIRMED
+    d = File.join(tmp, "gitlab")
+    b, h = mkrepo.call(d, seed: ->(r) { File.write(File.join(r, ".gitlab-ci.yml"), "stages: [deploy]\n") }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("GitLab: .gitlab-ci.yml is CONFIRMED (absence is not provable there)",
+               code == 4 && out.include?("CONFIRMED") && out.include?("not provable"),
+               "exit=#{code} out=#{out}")
+
+    # 11. A pull_request-only workflow must NOT read as a deploy
+    d = File.join(tmp, "pronly")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "ci.yml", pr_wf) }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("WARM: a pull_request-only workflow is not a deploy (trigger parse discriminates)",
+               code.zero? && out.include?("BLAST-RADIUS WARM"), "exit=#{code} out=#{out}")
+
+    # 12. deploy-automation class: touching the workflow itself
+    d = File.join(tmp, "wfchange")
+    b, h = mkrepo.call(d) { |r| wf.call(r, "post-merge.yml", deploy_wf) }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("HOT: changing .github/workflows/** is the deploy-automation class",
+               code == 4 && out.include?("deploy-automation"), "exit=#{code} out=#{out}")
+
+    # 13. --owner-approval records without hiding
+    d = File.join(tmp, "approved")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", "owner said go"])
+    check.call("--owner-approval exits 0 but STILL prints the full HOT block",
+               code.zero? && out.include?("BLAST-RADIUS HOT") && out.include?("HOT-OWNER-APPROVED") && out.include?("owner said go"),
+               "exit=#{code} out=#{out}")
+
+    # 14. empty --owner-approval is a usage error
+    _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--owner-approval", ""])
+    check.call("an EMPTY --owner-approval is refused with a Fix:",
+               code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+
+    # 15. unresolvable ref is an ERROR, not an empty diff
+    _, err, code = run_br.call(["--base", "deadbeef", "--head", h, "--repo", d])
+    check.call("an unresolvable --base is an ERROR (exit 2), never 'no files'",
+               code == 2 && err.include?("Fix:") && err.downcase.include?("resolve"),
+               "exit=#{code} err=#{err}")
+
+    # 16. empty diff is an ERROR, not COLD
+    _, err, code = run_br.call(["--base", h, "--head", h, "--repo", d])
+    check.call("an EMPTY diff is an ERROR (exit 2), never COLD",
+               code == 2 && err.include?("EMPTY"), "exit=#{code} err=#{err}")
+
+    # 2/3. manifest failure modes — a wrongly-resolved manifest must say so
+    empty_manifest = File.join(tmp, "empty.json")
+    File.write(empty_manifest, JSON.dump({ "schema" => 1, "surfaces" => [] }))
+    _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--manifest", empty_manifest])
+    check.call("a manifest with ZERO surfaces is an ERROR, not 'nothing is sensitive'",
+               code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+
+    nopat = File.join(tmp, "nopat.json")
+    File.write(nopat, JSON.dump({ "schema" => 1, "surfaces" => [{ "class" => "x", "why" => "y", "patterns" => [] }] }))
+    _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--manifest", nopat])
+    check.call("a manifest with ZERO patterns is an ERROR, not 'nothing is sensitive'",
+               code == 2 && err.include?("ZERO patterns"), "exit=#{code} err=#{err}")
+
+    _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--manifest", File.join(tmp, "absent.json")])
+    check.call("a MISSING manifest is an ERROR, not an empty surface list",
+               code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+
+    bad_schema = File.join(tmp, "schema9.json")
+    File.write(bad_schema, JSON.dump({ "schema" => 9, "surfaces" => [{ "class" => "x", "patterns" => ["*"] }] }))
+    _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--manifest", bad_schema])
+    check.call("an UNKNOWN manifest schema is refused rather than guessed at",
+               code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+
+    # The YAML 1.1 `on:` -> true trap, asserted directly on the parser path.
+    doc = YAML.safe_load(deploy_wf, aliases: true)
+    check.call("the `on:`-parses-as-boolean-true YAML trap is handled",
+               (doc.key?("on") ? doc["on"] : doc[true]) && !trigger_hit(doc.key?("on") ? doc["on"] : doc[true]).nil?,
+               "parsed keys=#{doc.keys.inspect}")
+  end
+
+  puts
+  if failures.empty?
+    puts "VERDICT: PASS (#{n} cases)"
+    0
+  else
+    puts "VERDICT: FAIL (#{failures.size} of #{n} cases)"
+    puts "Fix: repair each failing case above before committing; blast-radius is a " \
+         "merge safety check and a broken classifier silently reads as COLD."
+    1
+  end
+end
+
+if ARGV.include?("--self-test")
+  exit self_test
+else
+  exit run(ARGV.dup)
+end

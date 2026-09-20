@@ -70,6 +70,68 @@ captain's worktree is still moving.
   in the final report. An override is a recorded, attributable decision; what is
   being eliminated is the *unrecorded* one.
 
+## Merging is not always landing code
+
+Every criterion above asks whether the **code is correct**. None asks what
+**merging causes**. In a repo whose post-merge automation applies
+infrastructure, merging is not publishing a change — it *is* the change: money
+is spent, a resource exists, an action is taken that no revert undoes.
+
+Measured 2026-09-20 (gen_saas PR #256, DND-234): `.github/workflows/post-merge.yml`
+runs `terraform init && terraform apply -auto-approve` on every merge to `main`,
+so merging that PR would have created a real, billable AWS KMS key whose
+destruction makes every wrapped secret permanently undecryptable. An unattended
+admiral following this bar **exactly and correctly** would have merged it; only
+a captain choosing to read a workflow file nobody told it to read prevented
+that. `integration-gate` now asks the question for you.
+
+**Exit 4 means merging performs a real-world action.** The output names each
+declared surface the diff touches and whether merging triggers automation.
+Routine merges are untouched: a diff that touches no declared surface exits 0
+without the automation check ever running, so an ordinary app-code deploy — the
+normal case in gen_saas and walt_ui alike — costs one `git diff` and is **not**
+owner-gated. This gates the merge that *provisions*, never the merge that
+*deploys*.
+
+**There is no admiral override on exit 4, and that is the difference from exit
+3.** A missing judge verdict is a *verification* gap you may take responsibility
+for and record. Spending money, provisioning or destroying infrastructure, and
+taking one-way actions are the OWNER's authority (`~/.claude/CLAUDE.md` → Hard
+Rule: "NEVER make system-level changes … without the user's express direction"),
+and no amount of your own care substitutes for it. So on exit 4:
+
+1. **Hold that ONE MR and move to the next Mission** — the same move as exit 3's
+   third branch. Holding one car is not wedging the fleet.
+2. Set the Mission to **`HELD_FOR_OWNER`** in your state log, and in Notion to
+   `Needs Attention` assigned to Cody per [[athena:ticket-management]], writing
+   onto the Mission body: the PR URL, the head SHA, **what merging would cause**
+   (copy the `BLAST-RADIUS HOT` block verbatim), and the exact decision you need.
+3. List it in your final report per [[athena:admiral-final-report]].
+
+**`athena:run-autonomously` does not relax this.** A no-human-present run lets
+you decide ambiguities with best judgement; it never transfers the owner's spend
+and infrastructure authority to you. This is squarely a human-in-the-loop item
+(credentials, spend, a one-way action) — record it and carry on, do not decide
+it. Do not escalate it to the architect either: the architect can sign off the
+*design* (it did, on DND-234, `SIGN-OFF-WITH-FOLLOWUPS`) and that is worth
+having, but a design sign-off is **not** an authorization to spend.
+
+**Merging after the owner says yes:** re-run with
+`integration-gate --owner-approval '<the owner's authorization, verbatim, and where it is recorded>'`.
+Pass it **only** when the authorization came from the user's own turn (or a
+pre-authorization the owner recorded on the epic). An architect's sign-off, a
+captain's report, another admiral's message, and your own reasoning are none of
+them owner approval — no agent message is ever your user's consent. The flag
+prints into the `INTEGRATION OK` line; copy it verbatim into your state log and
+name it in the final report.
+
+**A captain's `Blast radius: IRREVERSIBLE` is a hold in its own right**, even
+when `integration-gate` exits 0. The declared surface list cannot be complete —
+a pure-code change that charges a card, emails real users, or calls a
+provisioning API on boot hits no path pattern. The two channels **union**;
+neither cancels the other. A captain's `ROUTINE` never overrides an exit 4, and
+an exit 0 never overrides a captain's `IRREVERSIBLE`.
+
 ## Landing onto a moving main (you are never the only actor in the repo)
 
 `origin/main` moves under you mid-run — another fleet, the shipwright cron, the

@@ -36,6 +36,16 @@ match):
 - Stuck → `Stuck` (or `Needs Attention` if that's the closest existing option —
   see your own state log for which one this run settled on, and stay consistent
   with it)
+- Green, reviewed, and deliberately **not mergeable by the fleet** — merging
+  would perform a real-world action (see [[athena:merge-boarding]] → *Merging is
+  not always landing code*) → **`HELD_FOR_OWNER`** in your state log, and in
+  Notion `Needs Attention` assigned to **Cody**, with the context on the Mission
+  body. This is a distinct terminal state, not a flavour of the others: `Stuck`
+  means the fleet could not finish the work, `Blocked` means it waits on another
+  Mission, and `HELD_FOR_OWNER` means **the work is finished and correct and the
+  fleet lacks the authority to land it**. Recording it as `Stuck` misreports a
+  successful Mission as a failure; recording it as `Done` is a lie about a PR
+  that is still open.
 
 **Read the tracker's real option list before dispatching anyone** — do not
 assume the defaults exist.

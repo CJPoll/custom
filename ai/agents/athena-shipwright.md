@@ -441,6 +441,8 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   its `--self-test` too. If a change intentionally alters a case, update the
   baseline with `ai/bin/harness-eval --update-baseline` (never to hide a
   regression).
+- `ai/bin/blast-radius --self-test` — the merge-consequence classifier
+  `integration-gate` runs pre-merge (exit 4 = merging PERFORMS an action).
 - `ai/bin/critic-review --self-test` and `ai/bin/critic-eval --self-test` — the
   LLM-judge critic tier. Both self-tests are deterministic and model-free (no
   `claude` in the loop), so they are gate-safe. `critic-review` gates a BLOCKING
