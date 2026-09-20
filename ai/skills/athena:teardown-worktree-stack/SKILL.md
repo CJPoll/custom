@@ -15,6 +15,27 @@ Tear a Mission's stack down as soon as its MR is **merged** (not merely green �
 green-but-open MR may still need its stack for review follow-ups) — every
 per-worktree stack the repo runs, including volumes, orphans, and the network.
 
+**Merged is not the only exit.** A Mission that terminates **non-DONE** — `STUCK`
+and parked, `BLOCKED_ON_DEPENDENCY` with no near-term unblock, or cancelled —
+also gets its stack torn down, right when you park it. It will never reach a
+merge, so a merge-only rule leaks its stack for the rest of the run: idle, but
+still holding database memory, containers, volumes, and an address-pool slot,
+which is precisely what this skill exists to prevent. A parked Mission has no
+review follow-up for its stack to serve, so nothing is being preserved by
+leaving it up.
+
+**Tear down the STACK; keep the TREE.** The work is the worktree, the branch,
+and the commits — never the containers. So this does not conflict with "never on
+a closed-unmerged MR whose work may be revived" above: preserve the worktree and
+the branch exactly as they are, and reclaim only the stack. Reviving a parked
+Mission then costs one stack re-up (and, where `-v` removed build caches, a
+recompile) — not a lost commit.
+
+Applies to your own fleet's Missions only, same as everything else here. Record
+the teardown and the reason (`parked STUCK`, `cancelled`) in the Mission's
+state-log entry, so the next sweep does not go looking for a stack that is
+deliberately gone.
+
 **How the teardown command is resolved is per-repo** (the project-name derivation
 and working directory are repo-specific, and a bare `down -v` in the wrong repo
 destroys the wrong stack's volumes). Resolve it in order:

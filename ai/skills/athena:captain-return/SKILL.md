@@ -64,6 +64,13 @@ own turn, confirm the `Monitor` is still running before trusting its silence.
   extra context you can supply, or mark it `Stuck` and move on — don't let one
   stuck Mission stall the rest of the run. Report it either way.
 
+**Whenever you PARK a Mission rather than retrying it** — `STUCK` and left
+stuck, `BLOCKED_ON_DEPENDENCY` with no near-term unblock, or cancelled — tear
+its docker-compose stack down at that moment per
+[[athena:teardown-worktree-stack]], keeping its worktree and branch untouched. A
+parked Mission never reaches the merge that the usual teardown gate waits for,
+so skipping this leaks a stack for the rest of the run.
+
 ## Propagate finished dependency work
 
 When branch A (a dependency) finishes and branch B depends on it: **merge or
