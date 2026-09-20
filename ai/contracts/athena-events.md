@@ -68,30 +68,19 @@ notification. Its envelope is:
 - **`payload`** — the enriched **current** values of the entity the event is
   about (for a ticket: status, labels, assignee, title, ticket number). The
   payload carries *present* state only; "what was it before?" is never in the
-  payload (see *Predicates match the present; the membership diff handles the
-  past*).
-- **`owner`** — the account the event belongs to. For an **ingress-originated**
-  event it MUST be stamped by the platform from the **authenticated ingress**,
-  and MUST NEVER be read from the payload; a payload field that purports to name
-  an owner is untrusted content, and using it to select an owner is a
-  privilege-escalation defect. An **ingress-originated** event whose owner cannot
+  payload — a predicate matches only the present (see *The predicate grammar*).
+- **`owner`** — the account the event belongs to. Every event is
+  ingress-originated, so its owner MUST be stamped by the platform from the
+  **authenticated ingress**, and MUST NEVER be read from the payload; a payload
+  field that purports to name an owner is untrusted content, and using it to
+  select an owner is a privilege-escalation defect. An event whose owner cannot
   be resolved from its authenticated ingress MUST be rejected with a `Fix:` (name
   the ingress and that owner resolution failed), never defaulted to an arbitrary
-  or "system" owner. A **platform-derived** event (a `lane.member.*` transition,
-  `source` = `derived:<rule_id>`, originated by no ingress) instead **inherits
-  the `owner` of the originating membership rule** — the rule's own
-  author-stamped owner (see *Rule ownership is stamped from the authenticated
-  author*), resolved from the rule, not from any payload/caller-supplied value —
-  so the "reject if unresolvable from ingress" clause above applies to
-  ingress-originated events only. This is the **fourth owner seam** alongside the
-  triad: **derived-inherits-rule-owner**.
+  or "system" owner.
 - **`occurred_at`** — when the transition happened.
 - **`source`** — provenance, from this **closed** set: `webhook:slack`,
-  `webhook:notion`, `poller:<lane>`, `emit:<machine_id>`, and
-  **`derived:<rule_id>`** for a **platform-derived** event (a membership-diff
-  transition — `lane.member.added` / `lane.member.retracted` — which is
-  originated by no ingress; its `source` names the membership rule whose diff
-  produced it). Every enumerated `type` therefore has a legal `source`, so an
+  `webhook:notion`, `poller:<source>`, and `emit:<machine_id>`. Every
+  enumerated `type` therefore has a legal `source`, so an
   owner predicate leaf on the matchable `event.source` field never reads an
   undefined value. `source` is **diagnostic only**. It MUST NEVER be an
   authorization input — nothing may grant an event more trust or more scope
@@ -114,18 +103,13 @@ ordinary rules, rather than special cases in code.
 Every event resolves to **exactly one** of three dispositions, and the
 dead-letter MUST fires for only the third:
 
-- **(a) DELIVERED** — at least one enabled rule produced a delivery: a `notify`
-  rule matched, or a `membership` rule's diff emitted an `add`/`retract`
-  transition (its own delivery).
+- **(a) DELIVERED** — at least one enabled rule matched and produced a delivery.
 - **(b) EVALUATED, NO-OP** — at least one enabled rule **applied** to the event
-  (its trigger set includes this event's `type` — a `notify` rule's declared
-  `event_type(s)`, or a membership rule's trigger set — see *Membership rules and
-  the lane-membership store*) but produced **no** delivery: e.g. a `notion.ticket.updated`
-  for a ticket already a stored member that **still** passes the predicate, so
-  the diff is empty; or a `notify` predicate that evaluated false. The platform
-  looked at the event and correctly did nothing.
+  (its declared `event_type(s)` includes this event's `type`) but produced **no**
+  delivery: its predicate evaluated false. The platform looked at the event and
+  correctly did nothing.
 - **(c) UNMATCHED** — **no** enabled rule applies to the event's `type` at all
-  (no rule's trigger set includes it).
+  (no rule's declared `event_type(s)` includes it).
 
 **An event is HANDLED when its disposition is (a) OR (b); the dead-letter MUST
 fires for (c) ONLY.** An **UNMATCHED** event MUST be **dead-lettered and
@@ -137,17 +121,13 @@ never look like an empty one*): a legitimate miss MUST remain observable as the
 specific thing it was. A **DELIVERED** or **EVALUATED-NO-OP** event MUST NOT be
 dead-lettered.
 
-**Why (b) is a distinct disposition, not a miss.** A membership rule declared on
-`notion.ticket.*` applies to every ticket event in its trigger set, and most such
-events change nothing about the set (the ticket was already a member and still
-qualifies) — those are (b): the rule applied and correctly produced no
-transition. Collapsing (b) into (c) would flood the dead-letter store (whose
-whole purpose is "which event went **unmatched**?") with routine no-ops and their
-full Path-2 payloads. Separately, a membership-derived `lane.member.*` transition
-is itself disposition **(a)** — delivered by its originating rule, never
-dead-lettered for want of a `notify` match; an owner MAY additionally declare a
-`notify` rule on `lane.member.*`, whose own (a)/(b)/(c) disposition is determined
-independently for that derived event.
+**Why (b) is a distinct disposition, not a miss.** A routing rule declared on
+`notion.ticket.updated` applies to every ticket-update event, and many such
+events do not satisfy its predicate (a different property changed, or the
+current state does not match) — those are (b): the rule applied and correctly
+produced no delivery. Collapsing (b) into (c) would flood the dead-letter store
+(whose whole purpose is "which event went **unmatched**?") with routine no-ops
+and their full Path-2 payloads.
 
 The dead-letter store is **per-account** and its record grain is **one
 exemplar-plus-count per `(owner, type)`**: the **first-seen full event payload** of
@@ -201,28 +181,35 @@ source):
 - `slack.message.received`
 - `notion.ticket.created`
 - `notion.ticket.updated` — the coarse "a property changed" signal; its payload
-  carries the changed property identifiers plus the enriched **current** values.
+  carries the changed property identifiers (`changed_properties`) plus the
+  enriched **current** values.
 - `notion.ticket.deleted`
 - `notion.ticket.undeleted`
 - `notion.comment.created`
 - `notion.comment.updated`
 - `notion.comment.deleted`
 
-**Membership-derived** (the platform's own membership diff produced a
-transition — see *Membership rules and the lane-membership store*):
+**Optional finer which-property types.** Because `notion.ticket.updated` carries
+`changed_properties`, the platform MAY additionally emit finer **which-property**
+types where that is more convenient for routing —
+`notion.ticket.status_changed`, `notion.ticket.labels_changed`,
+`notion.ticket.assignment_changed`. "Which property changed" is metadata Notion
+supplies. These finer types are still coarse in **direction**: they name the
+property that changed, never whether a value was added or removed, set or
+cleared.
 
-- `lane.member.added`
-- `lane.member.retracted`
-
-**Why value-direction lives on the membership side.** "A label was *added*" vs
-"a label was *removed*", "an assignee was *set*" vs "*cleared*", and
-"a ticket that *had* the label was *deleted*" are transitions of a specific
-value's **direction**. The source does not carry direction (a Notion webhook is
-metadata-only, with no before/after — see *Sender verification and payload
-completeness*). Therefore there is **no** source-level `notion.label.removed`
-type; that direction is produced by the membership diff and surfaces as
-`lane.member.retracted`. Present-state membership entering a lane predicate
-surfaces as `lane.member.added`.
+**Direction is NOT emitted for a metadata-only source; the consumer derives it.**
+"A label was *added*" vs "*removed*", "an assignee was *set*" vs "*cleared*" are
+transitions of a value's **direction**. A metadata-only source (a Notion webhook,
+with no before/after — see *Sender verification and payload completeness*) does
+not carry direction, and the platform holds **no prior state** to compute it
+from. Therefore the platform MUST NOT emit direction-resolved value-change types
+(`notion.label.added` / `notion.label.removed`) for such a source: it emits a
+coarse **current-state** event, and the **consumer derives direction** by diffing
+that current state against its own held set (see *The consumer owns membership*).
+Direction-resolved types MAY exist in the open taxonomy for a **future source
+that natively supplies deltas** (a forge sending real before/after) — that is a
+source capability, never a platform store.
 
 ### Payload fields and their types per event type
 
@@ -235,14 +222,12 @@ schema is an unknown-path save-time error. The **envelope** fields are common to
 every type — `event.type` (scalar string), `event.source` (scalar string),
 `event.occurred_at` (scalar timestamp).
 
-**This payload schema is the schema half of the per-(source, type) type
-registry** (see *Membership rules and the lane-membership store*): the same
-per-(source, type) record that fixes each type's **direction class** (a/b/c) also
-fixes its payload schema, so a source's type is described in **one place** —
-schema + direction class + which of its fields are **platform-minted** vs
-**source-supplied / enrichment-derived**. That platform-minted marking is what the
-trusted-slot check reads (see *Templating and the per-adapter Escaper contract* →
-*Engine*), so field trust and field schema cannot drift out of sync.
+**Each type's payload schema also marks, per field, whether the field is
+platform-minted or source-supplied / enrichment-derived.** A platform-minted
+field is one the platform itself computes — from the envelope or a closed
+platform-controlled set — with no source-supplied substring. That marking is
+what the trusted-slot check reads (see *Templating and the per-adapter Escaper
+contract* → *Engine*), so field trust and field schema cannot drift out of sync.
 
 | Event type(s) | `payload.*` field | Type | Cardinality |
 |---|---|---|---|
@@ -253,9 +238,7 @@ trusted-slot check reads (see *Templating and the per-adapter Escaper contract* 
 | | `title` | string | scalar |
 | | `ticket_number` | string | scalar |
 | | `changed_properties` (`notion.ticket.updated` only) | string | **collection** |
-| `notion.ticket.deleted` (the **un-enriched** delete type — diffed WITHOUT a fetch; see *Membership rules and the lane-membership store*, trigger class (b)) | `entity_id` — stable source entity handle | string | scalar |
-| | `ticket_number` — cached display field | string | scalar |
-| | `title` — cached display field | string | scalar |
+| `notion.ticket.deleted` (the **un-enriched** delete type — the entity may already be unfetchable, so it carries identity only) | `entity_id` — stable source entity handle | string | scalar |
 | `notion.comment.*` | `entity_id` — stable source entity handle | string | scalar |
 | | `comment_text` | string | scalar |
 | | `ticket_number` | string | scalar |
@@ -266,57 +249,34 @@ trusted-slot check reads (see *Templating and the per-adapter Escaper contract* 
 | | `ts` | string | scalar |
 | | `thread_ts` | string | scalar |
 | | `event_id` | string | scalar |
-| `lane.member.added`, `lane.member.retracted` | `rule_id` | string | scalar |
-| | `lane` | string | scalar |
-| | `op` | `"add"` \| `"retract"` | scalar |
-| | `entity_id` | string | scalar |
-| | `display` fields — **declared per lane SOURCE** (see below) | per source | per source |
 
 **`entity_id` is the declared, bindable entity handle carried by every
-source-emitted type that names an ENTITY with a membership lifecycle** — the
-Notion ticket types (`notion.ticket.*`) and comment types (`notion.comment.*`)
-each declare it (above) as the stable source identifier (e.g. `notion:<uuid>`),
-and the membership-derived types (`lane.member.*`) carry the same field for the
-member's handle. It is what the lane-membership store keys members on, what the
-trigger classes scope current-members / non-members by, and what the
-membership-derived idempotency basis references. It is a first-class declared
-field, not an undeclared handle buried in a key. It is **distinct from the
-display fields** `ticket_number` / `title` (which render a line and may be
-cached); `entity_id` is identity.
+source-emitted type that names a persistent ENTITY** — the Notion ticket types
+(`notion.ticket.*`) and comment types (`notion.comment.*`) each declare it
+(above) as the stable source identifier (e.g. `notion:<uuid>`). It is the
+event-level idempotency handle for a Notion entity (see *Idempotency is per
+(event, rule)*), and it is what a **consumer** keys its own held set on when it
+derives add/drop (see *The consumer owns membership*). It is a first-class
+declared field, not an undeclared handle buried in a key. It is **distinct from
+the display fields** `ticket_number` / `title` (which render a line);
+`entity_id` is identity.
 
 **`slack.message.received` carries NO `entity_id` — by design, and this is what
 the closed schema above says.** Its identity field is `payload.event_id` (paired
 with `channel:ts` for cross-source dedupe — see below and *Idempotency is per
 (event, rule)*), not an `entity_id`. A Slack message is a **transient event, not
-an entity with a set-membership lifecycle**: it is never "added to" then
-"retracted from" a working set, so there is no stable entity handle for the
-lane-membership store to key on. The prose here therefore does **not** claim a
-universal `entity_id` across all source-emitted types — the identity field is
-**per source**, and only the Notion entity types (plus the membership-derived
-types) carry `entity_id`, exactly as the closed table declares.
-
-**Consequence for membership lanes: a source can feed a membership lane only if
-its types carry `entity_id`.** Because the store keys members on `entity_id` and
-trigger classes (b)/(c) scope current-members / non-members by it (see
-*Membership rules and the lane-membership store*), a source with no `entity_id`
-has nothing to key membership on. **A `slack.message.received`-sourced membership
-lane is therefore not expressible in the first pass** — Slack messages carry no
-member handle — and a `membership` rule declared solely on `slack.*` types is a
-save-time HARD ERROR with a `Fix:` (a membership lane requires a source whose
-types declare `entity_id`; the first-pass membership source is Notion). A
-`notify` rule on `slack.message.received` is unaffected — it matches the present
-message and needs no entity handle. This keeps the store's "source-agnostic —
-carries over to a forge or any other membership lane" claim honest: any
-membership source (Notion, a forge, …) is one whose entities carry `entity_id`,
-which a Slack message is not.
+a persistent entity**, so there is no stable entity handle for it. The identity
+field is therefore **per source**: only the Notion entity types carry
+`entity_id`, exactly as the closed table declares.
 
 **`notion.ticket.deleted` carries a NARROWER schema than the enriched ticket
-types — by design, not omission.** A delete is diffed **without enrichment** (the
-entity may already be unfetchable — see *Membership rules and the lane-membership
-store*, trigger class (b)), so it can carry only `entity_id` (identity) plus the
-`ticket_number` / `title` the store cached at add time; it does **not** carry
-`status`, `labels`, or `assignee`. Those enrichment-only fields are therefore
-**not in `notion.ticket.deleted`'s payload schema at all** (above), and a
+types — by design, not omission.** A delete is not enriched (the entity may
+already be unfetchable), so it carries only `entity_id` (identity); it does
+**not** carry `status`, `labels`, `assignee`, `title`, or `ticket_number`. A
+consumer that needs a display line for a departed entity renders it from its own
+held state (it recorded those fields when it added the entity — see *The consumer
+owns membership*), never from a platform cache. Those enrichment-only fields
+being **not in `notion.ticket.deleted`'s payload schema at all** (above) means a
 field-path binding against them follows the ordinary save-time rules (see *The
 predicate grammar* and the *Evaluation contract*): a rule declared **solely** on
 `notion.ticket.deleted` with a leaf on `payload.labels` (or `status` /
@@ -331,29 +291,6 @@ schemas and reads `absent` on the delete event — there another declared type
 **supplies** the field, so the leaf is meaningful on at least one of the rule's
 types; a delete-only rule has no such supplier, so the field never exists for it
 and the bind is rejected where it is authored.
-
-**The membership-derived types have a closed payload schema** — the lane/rule
-identity (`rule_id`, `lane`), the transition `op`, the `entity_id` (the member's
-handle, same field name as the source event carries), and the **display
-fields**. The display fields are **declared per lane SOURCE**, not two
-hardcoded Notion columns: a **Notion** lane declares `ticket_number` (scalar) and
-`title` (scalar); a **forge** lane (or any other) declares its own display shape.
-This keeps the store's "source-agnostic — carries over to a forge or any other
-membership lane" claim honest and consistent with the open taxonomy: a
-non-Notion lane is **config**, not a schema change. The display shape stays
-**closed per source** (so it is still save-time-bindable): the platform validates
-a `lane.member.*` predicate/template against the display shape the lane's source
-declares — resolved from the consuming `notify` rule's declared **`source_lane`**
-(see *Binding a `notify` rule on a `lane.member.*` transition*), since a rule that
-matched every one of the owner's lanes could not resolve a single display shape
-to bind against. This is deliberate — the contract makes a `notify` rule on a
-`lane.member.retracted` transition first-class (see *Retraction-driven consumer
-patterns*), so a predicate leaf or a template slot on that event MUST have a
-closed, bindable, save-time-validated schema exactly like a source-emitted type.
-The display fields are the same minimal ones the lane-membership store caches at
-add time so a retract renders after the entity is gone (see *Membership rules and
-the lane-membership store*), and they remain **Path-2 untrusted** when they reach
-an LLM.
 
 **`slack.message.received` carries `ts` and `event_id`** (not just
 `occurred_at`): the deployed inbox reader keys cross-source dedupe on
@@ -371,29 +308,12 @@ key; the platform combines it with the matched `rule_id` to form the
 **per-delivery** key. An implementation MUST dedupe and retry at the
 `(event, rule)` grain, never only at the event grain.
 
-The event-level key basis is defined for **every** enumerated type, so a derived
-event dedupes as reliably as a source-emitted one:
+The event-level key basis is defined for **every** enumerated type:
 
 - **Source-emitted** — the source's own event identity: Slack's `payload.event_id`;
   a Notion entity's `payload.entity_id` (`notion:<uuid>`) combined with a change
   token. (A reconciliation backstop hit reuses the same basis so it dedupes
   against the primary path — see *Poller (fallback only)*.)
-- **Membership-derived** (`lane.member.added` / `lane.member.retracted`) — no
-  source event identity exists, so the key is composed from the transition's own
-  identity: **`rule_id` + `entity_id` + `op` + the triggering event's
-  `idempotency_key`** (each a declared payload field — see *Payload fields and
-  their types per event type*). This makes a given add/retract, produced by a given rule
-  for a given entity off a given triggering event, idempotent under the fan-out
-  and per-`(event, rule)` retry machinery like any other event. A transition
-  emitted by the **reconciliation sweep** (see *Membership rules and the
-  lane-membership store* → *The reconciliation sweep*) has no triggering source
-  event — a swept `retract` recovers a member absent from the snapshot, for which
-  no source delta arrived — so the **sweep run's own identity** (its snapshot/run
-  id) supplies the triggering component of the key: `rule_id` + `entity_id` + `op`
-  + the sweep run id. This keeps the swept transition retry-idempotent like any
-  other; cross-run re-emission is separately prevented by the serialized diff
-  against current stored state (an already-applied transition leaves no diff), not
-  by this key.
 
 ---
 
@@ -461,20 +381,15 @@ This split is what makes "nothing is queued" **provably** true rather than merel
 unobserved (failed-lookup discipline): the backstop's value is the run-level "I
 checked" signal, which a delivery-level dedupe would otherwise destroy.
 
-**For a MEMBERSHIP lane the backstop MUST run the full reconciliation sweep, not
-merely emit one event per new hit.** "One event per new hit" recovers **adds**
-(entities the webhook path missed) but never the **retracts** of stored members
-that left scope during the gap: a member deleted, relabelled, or reassigned while
-the webhook was down is simply **absent** from the snapshot and so produces no
-hit, leaving the dropped `retract` unrecovered forever and the entity a stored
-member permanently — the silent-never-retract class the membership store exists to
-prevent. The backstop therefore re-evaluates the whole `(owner, membership-rule)`
-set against the snapshot per *Membership rules and the lane-membership store* →
-*The reconciliation sweep* — snapshot-not-stored → `add`, stored-not-in-snapshot →
-`retract` — so the reconciliation guarantee covers **both** directions. Each
-emitted transition still dedupes against the primary path by the same
-`idempotency_key` machinery (above), so a `retract` the webhook path already
-delivered is not re-emitted; the sweep recovers only the genuinely-missed ones.
+**The backstop re-emits missed CHANGE EVENTS; it computes no membership.** It
+recovers **adds** — entities that changed while the webhook was down, or that
+existed before the subscription — by emitting the same source-emitted change
+events the webhook would have, each deduped against the primary path by the same
+`idempotency_key` machinery (above). It holds no set and diffs no membership: a
+**consumer** that tracks a working set catches any departure the fast path missed
+through its own authoritative re-sync (see *The consumer owns membership*), so
+set correctness never depends on any platform-side set reconciliation. The
+platform holds no set and reconciles none.
 
 ### Harness-emit
 
@@ -492,11 +407,9 @@ alone is not enough: it constrains how a `source` label is read, but not what an
 authenticated ingress is allowed to **originate**. Authentication of an ingress
 (a verified webhook signature, the machine token) proves *who* is emitting, not
 *what* they may emit. Without a second constraint, a machine-token holder could
-`POST` a `notion.ticket.deleted` or a `lane.member.retracted` and drive a
-fan-out delivery — including to a Path-1 auto-cancel fleet-control consumer (see
-*Retraction-driven consumer patterns*), which is "authorized by definition" —
-that only a verified source ingress or the platform's own membership diff should
-ever produce.
+`POST` a `notion.ticket.deleted` and drive a fan-out delivery — including to a
+consumer that drops a ticket from its working set on that event — that only a
+verified source ingress should ever produce.
 
 Therefore **each ingress kind is registered with the event-type namespace(s) it
 is permitted to originate, and the platform MUST reject, at ingress, any event
@@ -505,25 +418,8 @@ whose `type` falls outside the set its kind is permitted to originate**, with a
 fixed at ingress **registration** (per ingress kind, not per event) and
 re-checked on every event, so a crafted payload cannot bypass it.
 
-**This origination-permission registration is DISTINCT from the per-(source, type)
-type registry** (see *Membership rules and the lane-membership store* and *Payload
-fields and their types per event type*), and the two never overlap. This
-registration governs **origination permission** at the **namespace** grain, keyed
-**per ingress kind** — "may THIS transport mint this type?", an
-authorization/security control. The per-(source, type) **type registry** governs a
-type's **direction class and payload schema**, keyed **per (source, type)** and
-shared across all of that source's ingress kinds — pure semantic classification.
-They answer different questions, so neither is "authoritative over" the other and
-there is no ambiguity between them.
-
 The first-pass permitted-origination rule:
 
-- **Membership-derived types (`lane.member.added`, `lane.member.retracted`) are
-  PLATFORM-INTERNAL.** They are produced ONLY by the platform's own membership
-  diff (see *Membership rules and the lane-membership store*). **NO ingress of
-  any kind** — inbound-webhook, poller, or harness-emit — may originate a
-  `lane.member.*` event; an ingress-originated `lane.member.*` event MUST be
-  rejected with a `Fix:`.
 - **Source-emitted webhook types (`slack.*`, `notion.*`) are
   VERIFIED-INGRESS-ONLY.** They may be originated ONLY by the inbound-webhook
   ingress (or the reconciliation poller) for that source, whose sender
@@ -534,27 +430,12 @@ The first-pass permitted-origination rule:
   cannot mint a `notion.ticket.deleted` or a `slack.message.received` that no
   verified webhook produced; such an event MUST be rejected with a `Fix:`.
 - **Harness-emit** may originate only `type`s in the namespace reserved for
-  fleet/harness events (e.g. `fleet.*`), never a source-emitted or a
-  membership-derived type.
+  fleet/harness events (e.g. `fleet.*`), never a source-emitted type.
 
 This is the origination dual of the `source`-is-not-authz rule: `source` governs
 what a label may *earn*, and this governs what an ingress may *mint*. Both are
-required to stop a machine token from manufacturing a platform-internal or
-verified-source transition.
-
-**First pass registers ONLY Notion as a membership-capable source.** The
-per-(source, type) type registry (see *Membership rules and the lane-membership
-store*) is **designed** to carry a forge or any other source — the mechanism is
-source-agnostic — but the **first pass registers only Notion** as a
-membership-capable source. This removes, for now, the burden of proving
-multi-source coherence (per-source snapshot capability, per-source direction
-classes across N sources, and the type-unregistration lifecycle — see the
-append-only type registry under *Membership rules and the lane-membership
-store*). **Multi-source membership and
-the type-unregistration lifecycle are roadmap**, landing as one increment; only
-the first-pass *registration* is single-source, and the mechanism it registers
-against does not change. (`notify` rules on `slack.*` are unaffected — this bounds
-only which sources may feed a **membership lane**.)
+required to stop a machine token from manufacturing a verified-source transition
+no webhook produced.
 
 ---
 
@@ -562,33 +443,30 @@ only which sources may feed a **membership lane**.)
 
 A rule is **config the platform evaluates, never executable code**. A rule
 carries: the `event_type(s)` it applies to, its **predicate** (see *The predicate
-grammar*), its **kind** (`notify` / `membership`), its **adapter + target** (see
-*Delivery adapters* and *Both-ends-or-silently-dark*), its **template + format**
-(see *Templating and the per-adapter Escaper contract*), its **enabled flag +
-dedupe window** (see *Enabled flag and dedupe window*), and — **only when it is a
-`notify` rule declaring a `lane.member.*` event type** — a **`source_lane`**
-naming the membership rule (lane) whose transitions it consumes (see *Binding a
-`notify` rule on a `lane.member.*` transition*). Every field named here has a
-normative section behind it; there are no dangling schema entries.
+grammar*), its **adapter + target** (see *Delivery adapters* and
+*Both-ends-or-silently-dark*), its **template + format** (see *Templating and the
+per-adapter Escaper contract*), and its **enabled flag + dedupe window** (see
+*Enabled flag and dedupe window*). There is **one** rule kind — a stateless
+routing/notify rule — so a rule carries no `kind` discriminator and no membership
+fields. Every field named here has a normative section behind it; there are no
+dangling schema entries.
 
 ### Rule ownership is stamped from the authenticated author
 
 A rule carries an `owner`, and Path 1's entire safety argument is that the
 owner's own configured rules are "authorized by definition" (see *Trust posture —
-two paths*) — including a fleet-control **auto-cancel of an in-flight captain**
-(see *Retraction-driven consumer patterns*). A rule authored with **someone
-else's** `owner` is therefore a direct escalation into that account's fleet and
-destinations. Therefore **a rule's `owner` MUST be stamped from the authenticated
+two paths*). A rule authored with **someone else's** `owner` is therefore a
+direct escalation into that account's fleet and destinations. Therefore **a
+rule's `owner` MUST be stamped from the authenticated
 author's session at create/edit time, and MUST NEVER be accepted from the request
 body.** An attempt to create or edit a rule whose `owner` is any account other
 than the authenticated author's MUST be refused with a `Fix:` (name that a rule
 may be authored only for the authoring account). No "admin" or "on-behalf-of"
 path widens this in the first pass.
 
-**This completes the owner-binding triad — three authenticated-identity stamps,
-plus a fourth inheritance seam for derived events.** Every seam at which an
-`owner` enters the system fixes it from an **authenticated identity**, NEVER from
-a request/payload body:
+**This completes the owner-binding triad — three authenticated-identity stamps.**
+Every seam at which an `owner` enters the system fixes it from an **authenticated
+identity**, NEVER from a request/payload body:
 
 1. **Event owner — ingress-stamp.** An ingress-originated event's owner is
    stamped from the authenticated ingress, never read from the payload (see *The
@@ -600,20 +478,14 @@ a request/payload body:
 3. **Rule authoring — author-stamp.** A rule's `owner` is stamped from the
    authenticated author (this section). Stops an account **authoring rules
    under** another's authority.
-4. **Derived event — derived-inherits-rule-owner.** A platform-derived
-   `lane.member.*` event (no ingress to stamp from) inherits the `owner` of its
-   originating membership rule — the rule's own author-stamped owner from seam 3,
-   never a caller-supplied value (see *The event*). This is what makes the
-   `owner` MUST satisfiable for derived events.
 
-Seams 1–3 stamp the owner from an authenticated identity; seam 4 inherits it from
-an already-stamped rule owner. In every case an `owner` is an
-authenticated-identity fact, never a caller-supplied one.
+In every case an `owner` is an authenticated-identity fact, never a
+caller-supplied one.
 
 **Owner-scoping of ACCESS to an existing rule — the read/mutate dual of the
-stamps.** The four seams above fix how an `owner` is **written** — stamped onto
-events, stamped onto a rule at authoring, inherited by a derived event: the
-*entry* axis. They do not by themselves govern **access to an already-stored
+stamps.** The three seams above fix how an `owner` is **written** — stamped onto
+events, stamped onto a rule at authoring: the *entry* axis. They do not by
+themselves govern **access to an already-stored
 rule**, which is a distinct and equally first-class MUST: **read, list, edit,
 delete, disable, and enable of a rule MUST be scoped to the rule's owning
 account.** An actor MUST NOT read, list, edit, delete, disable, or enable a rule
@@ -631,15 +503,13 @@ reach an existing rule to read or mutate it. This matters on both axes:
   cross-account-readable: an ID grants nothing without a credential, but the *map*
   of another owner's channels, people, targets, and predicates is itself a
   disclosure.
-- **Mutate.** Deleting or disabling another owner's `membership` rule **destroys
-  their lane** and, per *Retraction-driven consumer patterns*, their
-  retraction-driven **auto-cancel path**; editing another owner's rule silently
-  re-points their deliveries. Each is a direct attack on that account's fleet and
-  surfaces.
+- **Mutate.** Deleting or disabling another owner's rule silently stops or
+  re-points their deliveries; editing it silently re-points them elsewhere. Each
+  is a direct attack on that account's fleet and surfaces.
 
 This mirrors the dead-letter store, whose read access this contract already scopes
 to the owning account's (see *Event disposition and dead-letter*). Together with
-the four stamping seams it makes the owner-binding honest on **both** axes — an
+the three stamping seams it makes the owner-binding honest on **both** axes — an
 `owner` is fixed from an authenticated identity when it **enters** (stamp), and it
 gates **who may read or mutate** the thing thereafter (scope); neither axis alone
 is sufficient, so the "every seam" claim above is the write half of a security
@@ -652,51 +522,18 @@ Two owner-facing schema fields carried by every rule:
 - **`enabled`** — a boolean gate. Only **enabled** rules are evaluated (see
   *Fan-out: every match fires*); a disabled rule is inert — it neither matches,
   fires, nor contributes to the dead-letter "handled" accounting (see *Event
-  disposition and dead-letter*) — and MAY be re-enabled. **Re-enabling a `notify`
-  rule is lossless**: it is stateless, so it simply resumes matching present
-  events. **Re-enabling a `membership` rule is NOT automatically lossless**: while
-  disabled the rule saw no events and its stored set **froze**, so entities that
-  left scope during the disable window (deleted, relabelled, reassigned) are still
-  stored members and entities that entered are still missing — and the incremental
-  per-event path can never notice, because it only re-diffs an entity that later
-  receives a triggering event. Re-enabling a `membership` rule therefore MUST run
-  the **full reconciliation sweep** (see *Membership rules and the lane-membership
-  store* → *The reconciliation sweep*) — reconciling the frozen stored set against
-  a fresh snapshot and emitting the missed `add`s/`retract`s — **before the rule is
-  considered live**. Only after that sweep is the "no loss" property restored; a
-  re-enable that skipped it would silently keep the members that left scope during
-  the disable window, the silent set-corruption this document refuses throughout.
-  **DELETE — as distinct from disable — of a `membership` rule tears down its
-  lane-membership store partition**: the `(owner, membership-rule)` set no longer
-  exists, alongside the invalidation of its `source_lane` consumers (see *Binding
-  a `notify` rule on a `lane.member.*` transition*, the referential-integrity
-  lifecycle). Disable **freezes** the set (and re-enable sweeps it, above); delete
-  **removes** it — the last store-lifecycle case, closed.
+  disposition and dead-letter*) — and MAY be re-enabled. **Re-enabling a rule is
+  lossless**: a routing rule is stateless, so it simply resumes matching present
+  events; it holds no set to reconcile. Deleting a rule likewise removes only the
+  rule — there is no platform-held set to tear down.
 - **`dedupe window`** — an **owner-facing rate control**, deliberately distinct
   from the correctness-guaranteeing `idempotency_key` (see *Idempotency is per
   (event, rule)*). The idempotency key prevents a **re-processed same delivery**
   from firing twice — a correctness guarantee, always in force. The dedupe window
   is an owner **preference** that collapses **distinct** deliveries of the same
-  rule within a time window into one ("don't DM me about this lane more than once
-  an hour"). It is a **duration** (unit: **seconds**; **default: `0`** = no
-  windowing, every distinct delivery fires). **The dedupe window is a
-  `notify`-only rate control.** A `membership` rule's `add`/`retract` transitions
-  are **never** collapsed by it: their fold **is** the working set, so suppressing
-  a distinct `retract` would corrupt the set (and drop exactly the
-  cancel-in-flight that must fire) — that is set corruption, not rate control.
-  Only `notify` deliveries are windowed. **What the field MEANS on a `membership`
-  rule is defined at save time, never left to be silently ignored:** a
-  `membership` rule MAY carry only the inert **default (`0` = no windowing)**; a
-  `membership` rule whose dedupe window is set to any **non-zero** value is a
-  **save-time HARD ERROR** with a `Fix:` (drop the dedupe window — it is a
-  `notify`-only rate control, and a membership rule's `add`/`retract` transitions
-  are the working set, never rate-collapsed). This is the same discipline as the
-  `event.type`-in-a-membership-predicate hard error (see *Predicates match the
-  present; the membership diff handles the past*): owner config that cannot be
-  honored is refused **where it is authored**, never accepted-and-silently-inert —
-  a silently-ignored rate control would read to the owner as "my lane is
-  throttled" while every transition still fires, the loud-not-dark rule this
-  document holds throughout. A suppression within the window MUST
+  rule within a time window into one ("don't DM me about this more than once an
+  hour"). It is a **duration** (unit: **seconds**; **default: `0`** = no
+  windowing, every distinct delivery fires). A suppression within the window MUST
   be **observable** — recorded and countable as "suppressed by dedupe window",
   **never a silent drop** (the document legislates against silent drops
   throughout — failed-lookup discipline). The two mechanisms are **orthogonal**:
@@ -714,22 +551,15 @@ a "DM me in Slack" rule AND a "push to flaky lane" rule → two
 independent deliveries, each with its own per-`(event, rule)` idempotency and
 retry.
 
-### Two rule kinds
+### One rule kind — the stateless routing rule
 
-- **`notify` (stateless).** Predicate matches the present event → render + escape
-  → dispatch to an adapter. Fires per event. The "DM me when assigned" case.
-- **`membership` / lane (stateful).** The predicate defines a **set**; the
-  platform maintains the derived membership per `(owner, rule)` in the
-  lane-membership store (see *Membership rules and the lane-membership store*).
-  Each **relevant event** — the rule's declared predicate types, its
-  exit/deletion types scoped to stored members, and its re-entry types scoped to
-  non-members, as defined in that section — →
-  enrich current state → re-evaluate the predicate → diff
-  against the stored set → emit an `add` or `retract` transition, which drives
-  the delivery. That emitted transition is **disposition (a) — DELIVERED by this
-  originating membership rule** (its own delivery is the handling), so it is
-  **never dead-lettered** merely because no separate `notify` rule matches it
-  (see *Event disposition and dead-letter*).
+There is **one** rule kind: a **stateless routing/notify rule**. Its predicate
+matches the present event → render + escape → dispatch to an adapter. It fires
+per event and holds no state — the "DM me when assigned" case, and the "forward
+the owner's ticket changes to the flaky lane's inbox channel" case alike. The
+platform maintains **no** membership set and computes **no** add/retract
+transition; a consumer that needs a working set derives and holds it itself (see
+*The consumer owns membership*).
 
 ### The predicate grammar
 
@@ -764,7 +594,7 @@ A predicate is a **JSON tree**, evaluated by the platform; it is never code.
     (collection), `payload.assignee` (collection), `payload.title` (scalar),
     `payload.ticket_number` (scalar); every enumerated type, including
     `notion.ticket.deleted` (narrower — see *Payload fields and their types per
-    event type*) and the membership-derived ones, has such a schema.
+    event type*), has such a schema.
 
   Because a rule declares the `event_type(s)` it applies to, the platform
   validates every field-path in the rule against the **union of those types'
@@ -792,7 +622,7 @@ A predicate is a **JSON tree**, evaluated by the platform; it is never code.
     the `value` — `exists`/`absent` test only presence; to compare the field's
     value use `eq`/`ne`/`in`), **never silently disregarded**. Silently ignoring
     it is the accept-and-silently-inert pattern this document refuses everywhere
-    (the membership dedupe-window and `event.type`-in-a-membership-predicate hard
+    (the same discipline as the unknown-field-path and wrongly-typed-operator hard
     errors): `{"field":"payload.status","op":"absent","value":"done"}` reads to
     the author as *"status is not done"* but would evaluate as *"status is
     missing"* — wrong, not empty — so it MUST be loud where it is authored, not
@@ -890,10 +720,6 @@ ALSO typed to the field's declared TYPE*), bounded depth/size. Specifically:
   the author means as *"not done"* — evaluate as *"missing"*, the
   accept-and-silently-inert pattern refused throughout (see the grammar's
   presence-operator bullet).
-- **A `membership` rule whose predicate references `event.type` is a HARD ERROR
-  at rule-SAVE time** with a `Fix:` — it would defeat directional re-evaluation
-  and make the lane silently never retract (see *Predicates match the present;
-  the membership diff handles the past*).
 - **A malformed predicate is a HARD ERROR at rule-SAVE time**, naming the fault
   with a `Fix:` (which node, which field, what is wrong — including an unknown
   field-path per the bullet above). It MUST NOT be a silent eval-time non-match
@@ -901,432 +727,148 @@ ALSO typed to the field's declared TYPE*), bounded depth/size. Specifically:
   runs** — a malformed rule that silently matches nothing is indistinguishable
   from a correct rule that legitimately matched nothing.
 
-**Binding a `notify` rule on a `lane.member.*` transition — the lane is named,
-so the display shape resolves at save.** A `notify` rule's schema (see *Handling
-rules*) names no source: its fields are `event_type(s)` + predicate + kind +
-adapter/target + template/format + enabled + dedupe window. A `lane.member.*`
-transition, however, has a display shape declared **per lane SOURCE** (see
-*Payload fields and their types per event type*), and an owner's lanes may have
-**different** sources with **different** display shapes. A `notify` rule declared
-on `lane.member.added` / `lane.member.retracted` therefore matches transitions
-from **every** one of the owner's lanes, and the validator would have no single
-lane from which to resolve a display shape — leaving a `payload.<display-field>`
-leaf or template slot bindable against no closed schema. That is precisely the
-failed-lookup class this document forbids: a display path drawn from a different
-lane's shape is an unknown path at runtime, which the *Evaluation contract* says
-MUST NOT collapse into `absent`. Therefore:
+### Predicates match the present
 
-- **A `notify` rule that declares ANY `lane.member.*` event type MUST also
-  declare `source_lane`** — the id of the membership rule whose lane it consumes.
-  This field (a) **scopes matching**: the rule applies only to `lane.member.*`
-  events whose `payload.rule_id` equals the named `source_lane`, so it never
-  receives another lane's transitions with an incompatible display shape; and (b)
-  **resolves the source at save time**: the named membership rule is declared on
-  a source (its own `event_type(s)`), which fixes that lane's declared display
-  shape, against which the platform validates every `payload.<display-field>`
-  leaf and template slot — the same save-time binding a source-emitted type gets.
-- **A `notify` rule declaring a `lane.member.*` type WITHOUT a `source_lane` is a
-  save-time HARD ERROR** with a `Fix:` (name the `source_lane` — the membership
-  rule whose lane this rule consumes — so the display shape can be resolved). A
-  `source_lane` naming a nonexistent rule, a non-`membership` rule, or a rule
-  owned by a different account is likewise a save-time HARD ERROR with a `Fix:`
-  (the second and third reuse the rule-authoring owner check — see *Rule
-  ownership is stamped from the authenticated author*).
-- **`source_lane` is meaningful ONLY on a `notify` rule declaring a
-  `lane.member.*` type.** Present on any other rule (a `membership` rule, or a
-  `notify` rule with no `lane.member.*` type) it is a save-time HARD ERROR with a
-  `Fix:` (drop `source_lane`; it names the lane a `lane.member.*` consumer reads).
-- **A `source_lane` reference gets the same referential-integrity lifecycle as a
-  `rule.target` → machine-record reference** (see *Both-ends-or-silently-dark* →
-  the record-immutability point, which "invalidates the dependent rules,
-  refused/flagged with a `Fix:`"). It reuses that proven pattern rather than
-  inventing a new one, so a `source_lane` can never be left silently dangling or
-  silently killed:
-  - **DELETE of the referenced membership rule → its `source_lane` dependents are
-    INVALIDATED**, exactly as re-homing a machine record invalidates its dependent
-    rules: each consuming `notify` rule is **refused/flagged with a `Fix:`** naming
-    the now-missing lane (`source_lane` <id> no longer exists — re-point this rule
-    at an existing lane, or remove it), asserted **at delivery and on the rule's
-    next edit**. The reference is never left dangling. This is chosen over refusing
-    the membership rule's deletion while dependents exist — it matches the
-    machine-record precedent and does not let one rule's dependents block another
-    rule's deletion.
-  - **DISABLE of the referenced membership rule → the lane stops emitting; its
-    `source_lane` dependents become INERT but OBSERVABLE, not invalidated.** A
-    disable is reversible, so a hard invalidate would be wrong; instead a consumer
-    whose `source_lane` is **disabled** is surfaced by the **existing**
-    "a lane matching zero over a long window MUST be reported" rule (see
-    *Both-ends-or-silently-dark*), extended to that case — never left silently
-    quiet. Re-enabling the membership rule (which already runs the reconciliation
-    sweep — see *Enabled flag and dedupe window*) resumes the consumers.
+A predicate tree matches **ONLY the present** — the current event plus its
+enriched payload. It MUST NEVER read prior state; there is no before-value in the
+event to compare against. "Was-a-member / now-not" — deleted-that-had-the-label,
+label-removed, assignee-changed-out — is a **direction**, and direction is **not
+expressible as a predicate**: the platform holds no prior state, so it emits a
+coarse current-state event and the **consumer** derives the direction by diffing
+against its own held set (see *The consumer owns membership*).
 
-The **source-agnostic** fields of a `lane.member.*` event — the envelope
-(`event.type`, `event.source`, `event.occurred_at`) plus `payload.rule_id`,
-`payload.lane`, `payload.op`, and `payload.entity_id` — are guaranteed across
-**all** lanes regardless of source and so bind for such a rule with or without
-`source_lane`; it is the **per-source display fields** that `source_lane`
-additionally makes bindable. This is chosen over restricting `lane.member.*`
-rules to the source-agnostic fields alone precisely because the headline
-retraction-message use case (*Retraction-driven consumer patterns*) renders the
-per-source display fields — the ticket number and title — which the entity_id
-handle alone cannot.
+`event.type` is a normal, valid leaf: a routing rule matches the present event,
+and the rule's declared `event_type(s)` plus its predicate decide what it fires
+on.
 
-### Predicates match the present; the membership diff handles the past
+**Worked owner examples** (both are stateless routing rules):
 
-Two composition mechanisms are **deliberately delineated**, and an implementation
-MUST NOT blur them:
-
-- **The in-event predicate tree matches ONLY the present** — the current event
-  plus its enriched payload. It MUST NEVER read prior state. There is no
-  before-value in the event to compare against.
-- **The membership diff handles "was-a-member / now-not"** transitions —
-  deleted-that-had-the-label, label-removed, assignee-changed-out. That direction
-  is **not expressible as a predicate** (there is no prior value in the event);
-  it is derived by diffing the current predicate result against the
-  lane-membership store.
-
-So a `notify` rule is a predicate tree over the present event; a `membership`
-rule is a predicate tree defining set membership **plus** the store diff that
-turns enter/leave into `lane.member.added` / `lane.member.retracted`. A predicate
-is never asked to know history; the store is.
-
-**A `membership` rule's predicate is evaluated over the enriched current payload
-only, and MUST NOT constrain `event.type`.** The rule's declared `event_type(s)`
-— plus the directional exit/re-entry scoping (see *Membership rules and the
-lane-membership store*) — are the **trigger** set (*when* to re-evaluate); the
-predicate decides **what is in the set** from the entity's current state
-(assignee, labels, status). Gating a membership predicate on `event.type` would
-defeat directional re-evaluation: a `notion.ticket.undeleted` (re-entry) or
-`notion.ticket.deleted` (exit) trigger carries a *different* `type`, so an
-`event.type in [created, updated]` leaf would fail on it and re-entry/exit could
-never re-evaluate. (`event.type` remains a normal, valid leaf for a `notify`
-rule, which matches the present event and is never re-evaluated over state.)
-Because `event.type` is otherwise a valid enumerated envelope field, a validator
-built to spec would accept such a predicate and the lane would then **silently
-never retract** — the failed-lookup class — so a **`membership` rule whose
-predicate references `event.type` in any leaf is a save-time HARD ERROR** with a
-`Fix:` (drop the `event.type` leaf; declare the trigger types in the rule's
-`event_type(s)` instead). This is folded into the same rule-save validation as an
-unknown field-path or an operator/cardinality mismatch (see the *Evaluation
-contract*), not left as a bare prohibition.
-
-**Worked owner examples:**
-
-- *"ticket assigned where the assignees include me → Slack DM"* (`notify`):
+- *"ticket assigned where the assignees include me → Slack DM"*:
   `{all:[{field:"event.type",op:"in",value:["notion.ticket.created","notion.ticket.updated"]},
   {field:"payload.assignee",op:"contains",value:"<cody-person-id>"}]}` → Slack
   adapter. (`payload.assignee` is a **collection** — a Notion people property
   holds zero or more people — so it is matched with `contains` / `intersects`,
-  never the scalar `eq`; both worked examples here use collection operators on
-  it, consistent with its declared cardinality.)
-- *"assignee ∈ {Cody, Athena} AND label 'Flaky Test' present → flaky-lane inbox
-  channel"* (`membership`; **trigger `event_type(s)`** declared *separately* from
-  the predicate: `notion.ticket.created`, `notion.ticket.updated`, to which the
-  engine adds the directional `notion.ticket.deleted`/`undeleted` scoping):
-  `{all:[{field:"payload.assignee",op:"intersects",value:["<cody>","<athena>"]},
-  {field:"payload.labels",op:"contains",value:"Flaky Test"}]}` → inbox adapter,
-  flaky channel; the membership diff emits `add`/`retract`. The predicate does
-  **not** gate on `event.type` (see above), so it re-evaluates correctly on a
-  delete or undelete trigger.
+  never the scalar `eq`.)
+- *"the owner's ticket changes → the flaky lane's inbox channel"* (coarse route,
+  consumer filters):
+  `{field:"event.type",op:"in",value:["notion.ticket.created","notion.ticket.updated","notion.ticket.deleted","notion.ticket.undeleted"]}`
+  → inbox adapter, flaky channel. The route is deliberately **coarse** — it
+  forwards the owner's ticket state-changes rather than "currently has the flaky
+  label", so a ticket whose flaky label was just **removed** still forwards its
+  change event and the consumer can learn of the departure. The consumer decides
+  add/keep/drop by diffing the forwarded current state against its own held set,
+  and backstops with its authoritative re-sync (see *The consumer owns
+  membership*). Narrowing this predicate to "currently matches the lane" would
+  drop exactly the departures the consumer must hear about — do not.
 
-The router evaluates all rules with a pure matcher, a pure renderer, and a pure
-membership-diff (Domain), and dispatches through adapters and the membership store
-(Side Effects). Generic router code is tenant-blind: it takes the owner's rules as
-input and contains none.
+The router evaluates all rules with a pure matcher and a pure renderer (Domain),
+and dispatches through adapters (Side Effects). Generic router code is
+tenant-blind: it takes the owner's rules as input and contains none.
 
 ---
 
-## Membership rules and the lane-membership store
+## The consumer owns membership
 
-The lane-membership store is the platform's **source of prior state**, and it is
-what makes retraction reliable **without** source deltas.
+The platform holds **no membership state** and computes **no** add/retract
+transition. A consumer that needs a working set — the flaky admiral is the
+first-pass instance — owns that set in its **own agent state**, and this contract
+specifies the discipline it follows. This is where platform state is most
+tempting; it is deliberately kept out of the platform.
 
-**A membership rule's "relevant events" (the re-evaluation scope) — defined.**
-The term "relevant event" is load-bearing: the store's headline guarantee (a
-`notion.ticket.deleted` on a stored member emits a `retract`) rests on it, and a
-naive "the rule's declared predicate event types" reading breaks it — the worked
-flaky example declares `notion.ticket.created` / `notion.ticket.updated`, so a
-delete would never reach the rule and **no retract would ever fire**, the one
-case the store exists to solve. A membership rule is therefore re-evaluated on
-the **union** of three trigger sets, each with its own scope:
+1. **Hold the working set** in the consumer's own state, keyed by `entity_id`,
+   with the display fields the consumer needs (it records them when it adds an
+   entity, so it can render a line for one that later leaves).
+2. **On a forwarded state-change event, diff against the held set:** an entity
+   that matches lane scope and is not held → **add**; an entity that is held and
+   no longer matches (label gone, reassigned, status moved out) → **drop**; a
+   `notion.ticket.deleted` for a held entity → **drop** by `entity_id`. The
+   platform never says "this is an add" or "this is a retract" — it says "this
+   entity is now in this state" (or "this entity was deleted"); the consumer
+   computes the transition.
+3. **Periodically re-sync against the source of truth.** The consumer re-lists
+   the authoritative scope from the source (the flaky admiral re-queries Notion
+   for "flaky + mine + Todo/Backlog") on a cadence it controls, and reconciles the
+   held set to it in **both** directions — adds present in the source but missing
+   from the held set, and members absent from (or no longer matching) the source.
+   This re-sync is the **authoritative correctness backstop**: forwarded events
+   only accelerate the common case, and a dropped webhook drifts only the
+   fast-path view, never the re-synced set. This is the "reliable without deltas"
+   guarantee, now owned by the consumer rather than a platform store.
+4. **Cancel-in-flight is a CONSUMER action.** When the consumer drops an entity a
+   captain is mid-flight on, the consumer cancels its own captain from its own
+   held state. There is **no** platform-delivered auto-cancel and **no**
+   fixed-destination internal-control adapter. Path-2 trust still holds: forwarded
+   content **informs, never authorizes** (see *Trust posture — two paths*) — the
+   cancellation is the consumer's own authorized action on its own state, not an
+   instruction obeyed from a message body.
 
-- **(a) its declared predicate event types** (the entry/update triggers — e.g.
-  `notion.ticket.created`, `notion.ticket.updated`), evaluated for the entity the
-  event is about.
-- **(b) exit/deletion types** (e.g. `notion.ticket.deleted`) **scoped to CURRENT
-  stored members** of that `(owner, membership-rule)` — a stored member that is
-  deleted emits a `retract`.
-- **(c) re-entry types** (e.g. `notion.ticket.undeleted`) **scoped to
-  NON-members that PASS the predicate after enrichment** — a previously-retracted
-  entity that reappears and again satisfies the predicate emits an `add`.
+This state lives client-side (the consumer's own action brief), never delivered
+as an instruction in a message. A consumer that **cannot** hold its own state (a
+dashboard, an email recipient) is **out of first-pass scope** — it would need a
+platform-held view, which is a later re-architecture, and no hook, seam, or
+"designed-for-now" interface for it is built now.
 
-The direction is what makes (b) and (c) different scopes, not one "exit/deletion"
-set: a deleted entity is **still** a stored member, so its retract is
-member-scoped (b); an **undeleted** entity was retracted on delete and is
-therefore **not** a current member, so scoping undelete to members would mean it
-could never re-enter — undelete is a **re-entry** trigger scoped to non-members
-(c). The membership engine MUST subscribe a membership rule to all three sets,
-not only its declared predicate types (equivalently, the rule MAY declare its
-full trigger set), so that both retract-on-delete and re-add-on-undelete provably
-fire. An (b)/(c) event for an entity outside its scope — a delete of a non-member,
-an undelete of something that still fails the predicate — is simply not relevant
-to that rule.
+---
 
-**The direction class of each type is a per-source DECLARED classification, not
-by-example and not inferred.** The classes named above (`notion.ticket.deleted`
-as exit (b), `notion.ticket.undeleted` as re-entry (c), `created`/`updated` as
-entry (a)) are **Notion's** classification, given here as the first-pass
-instance. Under the open taxonomy (see *The event taxonomy is open*) a new
-membership-lane source adds its own types with no schema change, and the engine
-can compute a rule's (b)/(c) subscriptions for that source **only if it knows
-each type's direction**. Therefore a source that can feed a membership lane MUST
-declare, for each of its types, its **direction class** — (a) entry/update,
-(b) exit/deletion (member-scoped), or (c) re-entry (non-member-scoped) — in the
-**per-(source, type) type registry**: a source-level registration **distinct
-from** the per-ingress-kind origination-permission registration, with a different
-key and a different job (see *Which event types an ingress kind may originate*).
-Because the direction class is a property of an event type within a source's
-taxonomy — pure semantics, identical whichever transport (a verified webhook or
-the reconciliation poller) delivered the event — it resolves to **exactly one**
-record per (source, type), never the two-divergent-or-none an anchor to the
-per-ingress-kind registration would produce. The membership
-engine derives the (b)/(c) subscriptions from that classification, so
-retract-on-exit and re-add-on-re-entry provably fire for **any** source, not only
-Notion. A membership rule declared on a source type that has **no** declared
-direction class is a **save-time HARD ERROR** with a `Fix:` (classify the type in
-the per-(source, type) type registry, or declare the rule's full trigger set
-explicitly) —
-this is exactly the **silent-never-retract** this section exists to prevent, made
-loud at authoring rather than dark at runtime; a new source's exit/re-entry types
-arriving unclassified must not silently produce a lane that never retracts. The
-"the rule MAY declare its full trigger set" formulation above remains valid as an
-explicit per-rule **override**; the mandatory per-source classification is what
-lets the engine subscribe correctly for a source the rule did **not** fully
-enumerate — which, under the open taxonomy, is the common case, so the
-classification is the primary line of defense and the declared set is the
-supplement, never the reverse.
+## The lane channel is a change stream, not the authoritative set
 
-**The per-(source, type) type registry also records a source-level full-snapshot
-capability.** Alongside each source's per-type direction classes and payload
-schemas, the registry records one **per-source fact** — whether the source is
-**full-snapshot / poll-capable**, i.e. able to enumerate its current in-scope set
-on demand for the reconciliation sweep. This capability is read at rule save time
-(see *The reconciliation sweep* → the full-snapshot requirement, which turns it
-into a save-time hard error for a source that lacks it).
-
-**In the first pass the per-(source, type) type registry is append-only /
-immutable per `(source, type)`**. The registered types are fixed — Notion's
-source-emitted types plus the membership-derived set — so **no
-type-unregistration path exists** to leave a saved rule bound against a vanished
-type, and a saved rule's binding to the type registry cannot dangle.
-**Type-unregistration**
-would, like a deleted membership rule, have to **invalidate the dependent rules**
-that bound their schema/direction class against the removed type; it is therefore
-**roadmap**, landing with the same increment that adds multi-source membership
-(see *Which event types an ingress kind may originate*). This is enumerated
-so it is visibly **not** a gap, not because a first-pass mechanism is missing.
-
-- Per `(owner, membership-rule)` the store holds each member's **`entity_id`**
-  (the declared stable source handle, e.g. `notion:<uuid>` — see *Payload fields
-  and their types per event type*) plus the **minimal display fields** needed to
-  render a retract (e.g. ticket number and title).
-- **On each relevant event the pipeline runs PER TRIGGER CLASS** — no single step
-  mandates an enrichment a trigger cannot perform:
-  - **(a) declared-predicate types:** **enrich** current state → **re-evaluate**
-    the predicate → **diff** against the stored set → append `add`/`retract`.
-  - **(b) exit/delete types** (e.g. `notion.ticket.deleted`) scoped to CURRENT
-    stored members: **diff WITHOUT enrichment**. A deleted stored member fails
-    the predicate **by definition**, so emit a `retract` from the **cached**
-    display fields — no fetch (the entity may be unfetchable).
-  - **(c) re-entry/undelete types** (e.g. `notion.ticket.undeleted`) scoped to
-    NON-members: **enrich** → **re-evaluate** the predicate → if it passes,
-    append `add`.
-- Because the store caches the minimal display fields **at add time**, a
-  `retract` can be rendered even after the entity is deleted and can no longer be
-  fetched (a `notion.ticket.deleted` on a stored member emits a `retract` from
-  the cached fields). This is exactly "deleted-that-had-the-label".
-- **The diff for a given `(owner, membership-rule)` MUST be serialized.** It is a
-  **read-modify-write** — read the stored set, re-evaluate, diff, append the
-  `add`/`retract`, commit the new set — and because of fan-out and
-  per-`(event, rule)` retries, two events for the same
-  `(owner, membership-rule)` (or a retry overlapping its original) can otherwise
-  interleave: both read the same prior set and both commit, producing a
-  **duplicate `add` or a lost `retract`**. The read-modify-write MUST therefore
-  be applied under a **compare-and-set (atomic read-modify-write)**, a per-`(owner,
-  membership-rule)` lock, or an equivalent serialization guarantee. Concurrent
-  evaluations against the same `(owner, membership-rule)` MUST NOT both read the
-  same prior set and both commit; the losing writer MUST re-read the committed
-  set and re-diff against it. Serialization is per `(owner, membership-rule)`;
-  distinct rules and distinct owners MAY proceed concurrently.
-
-**On a durably-emitted `retract`, the member's store entry is PURGED.** The store
-caches a member's `entity_id` and minimal display fields for exactly one stated
-purpose — so a `retract` can be rendered after the entity is gone (above). Once the
-`retract` transition is **durably emitted** — appended to the lane channel, and
-any `notify` consumers fired — that purpose is served, so the platform **purges the
-member's store entry** (`entity_id` + cached display fields). This needs **no owner
-retention number**; it is derived from the cache's sole stated purpose, and it
-bounds the active store by the lane's **working-set size** (the owner's in-scope
-entity count), not by cumulative history — closing the unbounded-store risk.
-Consequences, all coherent
-by construction:
-
-- **The stored set is thereby exactly the current members** — precisely what the
-  reconciliation sweep diffs against, so **purge and sweep agree**: a purged member
-  is absent from a later snapshot and yields **no diff** (no spurious re-`retract`);
-  a **re-appearing** entity is a class-(c) re-entry (scoped to non-members), which
-  **re-enriches** and re-adds, so purge loses nothing on re-add.
-- **Idempotency is unaffected:** the per-`(event, rule)` idempotency-key store is
-  **separate** from the lane-membership store (see *Idempotency is per (event,
-  rule)*), so a **retried** `retract` still dedupes on its key after the member is
-  purged — purge removes set membership, not the delivery dedupe record.
-
-**The reconciliation sweep — a full stored-set re-evaluation.** The
-per-triggering-event pipeline above is **incremental**: it reacts to one entity's
-event and can act only on transitions it actually receives. Some transitions never
-arrive on that path — a `retract` dropped while the webhook was down, or every
-transition missed while a rule was **disabled** or before its subscription
-existed. For these the platform provides a **reconciliation sweep**: a full
-re-evaluation of an entire `(owner, membership-rule)` set against a **fresh full
-snapshot** of the source's current in-scope set, which — unlike the incremental
-path — does **not** depend on receiving any source delta:
-
-- **snapshot passes the predicate but is NOT a stored member → emit `add`** (it
-  entered scope while the per-event path was not watching);
-- **stored member ABSENT from the snapshot (or present but now failing the
-  predicate) → emit `retract`** (it left scope — deleted, label removed,
-  reassigned — while the per-event path was not watching).
-
-The sweep's `add`/`retract` transitions run through the **same** per-`(owner,
-membership-rule)` serialized diff (the compare-and-set above): a transition the
-webhook path already applied is already reflected in the committed stored set, so
-the sweep produces **no diff** for it and does not re-emit it — the sweep recovers
-only the genuinely-missed ones. Each transition the sweep *does* emit then flows
-through the **same** per-`(event, rule)` idempotency and retry machinery as any
-other delivery (its key basis is defined in *Idempotency is per (event, rule)* →
-membership-derived, sweep case). Diffing **stored-members-absent-from-the-snapshot** is
-what makes the store's headline guarantee — retraction **reliable without source
-deltas** — hold across a gap the incremental path cannot see, rather than only
-across gaps in which the delete/exit event itself was delivered. A sweep that
-emitted only the snapshot's new hits (adds) and never diffed the
-stored-not-in-snapshot direction would leave a dropped `retract` **unrecovered
-forever** — the entity a stored member for good, the lane fold keeping an item
-that left scope — which is exactly the **silent-never-retract** class this section
-is built to prevent.
-
-**The sweep is invoked at exactly two points, and both cite this definition so the
-mechanism cannot drift:**
-
-1. **The low-frequency reconciliation backstop poller** runs it for a membership
-   lane (see *Poller (fallback only)*).
-2. **Re-enabling a disabled membership rule** runs it before the rule is
-   considered live (see *Enabled flag and dedupe window*).
-
-**A membership lane requires a full-snapshot-capable source, and this is checked
-at rule SAVE time.** The sweep diffs against a **fresh full snapshot of the
-source's current in-scope set**, so the sweep MUST is **unsatisfiable** for a
-source that cannot produce one — and a "best-effort sweep" would silently reopen
-exactly the silent-never-retract the sweep exists to close. Therefore
-full-snapshot / poll capability is a **declared source capability**, homed in the
-same **per-(source, type) type registry** that holds the source's direction
-classes and payload schema (see *The direction class of each type…* above), and a
-membership lane requires a source that is **(i) `entity_id`-bearing** (already —
-see *Payload fields and their types per event type*) **AND (ii)
-full-snapshot-capable**. **A `membership` rule declared on a source that is NOT
-full-snapshot-capable is a save-time HARD ERROR** with a `Fix:` (a membership lane
-requires a poll-capable source able to enumerate its in-scope set for the sweep;
-this source cannot — use it for a `notify` rule, or add a snapshot capability to
-its registration). This is the same save-time-loud discipline as the
-Slack-only-membership error (see *Payload fields and their types per event type*),
-and it makes the sweep MUST **satisfiable** and its satisfiability **checked where
-the rule is authored**. **Notion satisfies it**: the low-frequency reconciliation
-backstop already enumerates Notion's in-scope set with its read-only, DB-scoped
-enrichment token, so the sole first-pass membership source
-is full-snapshot-capable and the sweep MUST is satisfiable in the first pass at
-zero extra cost.
-
-**The sweep frequency carries no contract number.** How often the
-reconciliation backstop runs is **ops/owner configuration, explicitly outside this
-contract's MUST surface** — the contract states **shape** only ("a low-frequency,
-owner/ops-configured sweep"), never a cadence. No MUST here carries a frequency
-number.
-
-The store is source-agnostic — it carries over to a forge or any other membership
-lane — and turns "retraction" from an unanswerable source-delta question into a
-store diff. The cached display fields are the owner's own workspace data,
-deliberately minimized to what a retract line needs, and remain **Path-2
-untrusted** when they reach an LLM (see *Trust posture — two paths*).
-
-### The lane channel is a change stream, not the authoritative set
-
-A membership lane delivered to an inbox `log` channel carries an **add/retract
-stream** — `{"v":1,"op":"add"|"retract", …}` lines — and the lane's working set
-is `fold(adds − retracts)`. Each line MUST carry the mandatory `v` field that
-`ai/contracts/athena-inbox.md` → *Line format* requires on **every** `log` line
-(`v` plus the framing rules are the only universal fields; the remaining fields
-are this producer's own schema — e.g. `op`, `ticket`, and the minimal display
-fields to render a retract). This is still a conformant append-only `log`
-channel: the *lines* are appended; the *derived set* is what changes.
+A lane delivered to an inbox `log` channel carries the **routed state-change
+events** — each a current-state line (a delete carries `entity_id` only). Each
+line MUST carry the mandatory `v` field that `ai/contracts/athena-inbox.md` →
+*Line format* requires on **every** `log` line (`v` plus the framing rules are
+the only universal fields; the remaining fields are this producer's own schema).
+This is a conformant append-only `log` channel: the *lines* are appended.
 
 - The channel is a **change-notification stream, NOT the authoritative set.** A
-  `log` channel is retention-bounded, so the full add/retract history is not
-  guaranteed reconstructable from the channel alone after a rotation or a long
-  absence. That is intended.
-- **The authoritative set is the server-side membership store plus the
-  consumer's own authoritative re-query** (e.g. an admiral's Notion re-query). A
-  session that reads only a partial stream still gets a correct set from the
-  re-query; the stream accelerates the common case and lets an already-running
-  consumer shrink scope (drop a retracted item) without a full re-query.
+  `log` channel is retention-bounded, so the full history is not guaranteed
+  reconstructable from the channel alone after a rotation or a long absence. That
+  is intended.
+- **The authoritative set is the consumer's own held set plus its authoritative
+  re-query** (e.g. an admiral's Notion re-query — see *The consumer owns
+  membership*). A session that reads only a partial stream still gets a correct
+  set from the re-query; the stream accelerates the common case and lets an
+  already-running consumer shrink scope (drop a departed item) without a full
+  re-query.
 - An unprompted surface still counts new lines only (a change signal); the
-  working set is computed by folding add/retract on an explicit fenced read.
+  working set is computed by the consumer on an explicit fenced read.
 
 ---
 
-## Retraction-driven consumer patterns
+## Consumer patterns
 
-Because the taxonomy is open, a retraction/transition event can drive **any**
+Because the taxonomy is open, a forwarded state-change event can drive **any**
 owner-configured action. The platform MUST support at least these consumer
-patterns:
+patterns, all built on **stateless routing rules** delivering forwarded
+state-change events:
 
-- **Set consumers** (the flaky lane) — fold add/retract into a working set;
-  on a `retract` for an item in the current working set, drop it.
-- **Retraction messages** — a retraction email/Slack message ("ticket X left
-  scope / was deleted") via an ordinary `notify` rule on the retract transition.
-  The rule names its `source_lane` (see *Binding a `notify` rule on a
-  `lane.member.*` transition*), so the retract's per-source display fields — the
-  ticket number and title that render "ticket X" — bind against that lane's
-  declared shape at save time.
+- **Set consumers** (the flaky lane) — the consumer holds a working set and
+  diffs each forwarded current-state event against it, dropping an entity on a
+  delete or on a change that moves it out of scope (see *The consumer owns
+  membership*).
+- **Change messages** — an email/Slack message ("ticket X changed / left scope /
+  was deleted") via an ordinary routing rule on the forwarded change or delete
+  event. The message renders from the event's current-state payload (or, for a
+  consumer-side departure line, from the consumer's own held display fields).
 - **Fleet-control cancel-in-flight** — when a ticket is deleted, deprioritized,
-  or otherwise retracted while a captain is mid-flight on it, the retraction is
-  an event; a rule routes it to a fleet-control consumer that cancels the
-  in-flight captain rather than letting it finish work on a ticket that left
-  scope. This is the mirror of "spin a captain up". The routing rule is a
-  `notify` rule on the `lane.member.retracted` transition and names its
-  `source_lane` (see *Binding a `notify` rule on a `lane.member.*` transition*),
-  scoping the auto-cancel to exactly the lane whose retraction should trigger it
-  rather than firing on any lane's retraction.
+  or otherwise moved out of scope while a captain is mid-flight on it, the
+  consumer that holds the working set notices the drop on its own diff / re-sync
+  and cancels the in-flight captain. This is the mirror of "spin a captain up",
+  and it is a **consumer** action on the consumer's own state (see *The consumer
+  owns membership*), not a platform-delivered auto-cancel.
 
-**Cancel-in-flight and the trust boundary — Path 1 vs Path 2.** How a retraction
-acts on the fleet is governed by which trust path delivers it:
+**The trust boundary — Path 1 vs Path 2.** How a forwarded event acts is governed
+by which trust path delivers it:
 
-- **Path 1 (auto-cancel) is legitimate as deterministic config the owner
-  authored** — the owner's rule authorizes it by definition; the only open
-  question is the *delivery mechanism*, answered by the roadmap note below.
-- **Path 2 (recommend only)** — a retraction arriving as untrusted *content* into
-  an LLM session can only **recommend** a cancel; it MUST NOT self-authorize one.
+- **Path 1 (router → adapter delivery) is deterministic owner config** — the
+  owner's routing rule authorizes the delivery by definition; the only hazard is
+  format injection, handled by the per-adapter escapers.
+- **Path 2 (content reaching an LLM session)** — a forwarded event arriving as
+  untrusted *content* into an LLM session can only **recommend** an action; it
+  MUST NOT self-authorize one. A consumer's own cancel-in-flight is not this case:
+  it is the consumer acting on its own held state, not an imperative obeyed from a
+  message body.
 
-Which path a given lane uses is config. First-pass builds the **set-consumer** and
-the Path-2 **recommend-only** path; the event/predicate/transition model is
-specified now to carry the rest.
-
-**Cancel-in-flight fleet control is roadmap.** When it lands it MUST deliver
-through a **fixed-destination internal-control adapter** — a platform-operated
-control plane on a closed, platform-registered allowlist of control endpoints. It
-is classified fixed-destination and therefore carries no generic-webhook egress
-model; it is explicitly **NOT** the generic-webhook adapter (whose egress model
-would forbid the internal destination it requires) and **NOT** an unclassified
-direct call (which the adapter-classification MUST forbids). Its security review
-is a precondition of building it.
+First-pass builds the **set-consumer** and the Path-2 **recommend-only** path.
 
 ---
 
@@ -1342,8 +884,7 @@ both, and build is staged.
 Every outbound adapter is exactly one of:
 
 - **Fixed-destination** — a known host (Slack, email, SMS, Discord, Notion, and
-  the inbox adapter, and — roadmap — a platform-operated fleet-control plane; see
-  *Retraction-driven consumer patterns*). It carries **no** egress/SSRF model.
+  the inbox adapter). It carries **no** egress/SSRF model.
 - **Owner-supplied-destination** — the **generic webhook** adapter, which calls
   an arbitrary owner-supplied endpoint. **Only** this adapter carries the
   egress/SSRF model (see *The generic-webhook egress model*), and it ships
@@ -1393,12 +934,14 @@ author's text, a ticket title) flow through it.
   platform-controlled set, with **no** source-supplied or enrichment-derived
   substring. A field whose value originated at a source, arrived on a webhook, or
   was returned by an enrichment fetch is **never** trusted-slot-eligible, however
-  structured it looks. The **closed first-pass trusted set** is exactly:
+  structured it looks. The **closed first-pass trusted set** is exactly the
+  platform-minted **envelope** fields:
   - `event.type` — platform-normalized, from the closed taxonomy;
-  - `event.source` — platform-stamped, from the closed `source` set;
-  - `payload.rule_id` — the platform's own rule identifier;
-  - `payload.lane` — the platform's own lane identifier;
-  - `payload.op` — platform-minted, closed set `"add"` | `"retract"`.
+  - `event.source` — platform-stamped, from the closed `source` set.
+
+  Any platform-minted routing field the fleet later introduces joins this set
+  under the same generating rule; there are no other platform-minted fields in
+  the first pass.
 
   **Everything else MUST go through the escaper — the exclusions are enumerated by
   name so the wrong line cannot be drawn silently:** every enrichment-derived /
@@ -1415,14 +958,13 @@ author's text, a ticket title) flow through it.
   a save-time HARD ERROR** with a `Fix:` (name the field; a trusted slot admits
   only a platform-minted field — use an ordinary escaped slot instead). This is the
   same loud-at-author discipline every other unhonorable config gets (the
-  membership dedupe-window, the `exists`/`absent`-with-`value`, and the
-  `event.type`-in-a-membership-predicate hard errors): the trusted-slot boundary is
-  enforced where it is authored, not trusted to be drawn correctly at render time.
-- **Trusted-eligibility is READ FROM the per-(source, type) type registry** (see
-  *Payload fields and their types per event type* and *Membership rules and the
-  lane-membership store*): a field is trusted-eligible only if that registry marks
-  it platform-minted, so the trusted set cannot drift out of sync with the payload
-  schema.
+  `exists`/`absent`-with-`value` and unknown-field-path hard errors): the
+  trusted-slot boundary is enforced where it is authored, not trusted to be drawn
+  correctly at render time.
+- **Trusted-eligibility is READ FROM each type's payload-schema field marking**
+  (see *Payload fields and their types per event type*): a field is
+  trusted-eligible only if its type's schema marks it platform-minted, so the
+  trusted set cannot drift out of sync with the payload schema.
 - The renderer is **pure Domain**; the Escaper is a **per-adapter behaviour**.
 
 ### Per-adapter Escaper contract
@@ -1531,10 +1073,9 @@ under-encrypted**:
 - **Mechanism = committed `apps/athena` code**, a tenant-blind public exemplar:
   the router, the event value, the rule engine (with no rule), the three ingress
   kinds, the ingress verifiers, the delivery adapters and their escapers, the
-  poller runner, the lane-membership store. It carries no
-  owner/project/rule/token/channel.
-- **Config + secrets = server-side per-account DATA**: handling rules, ticket-lane
-  configs, targets, templates, third-party tokens/creds. Never committed.
+  poller runner. It carries no owner/project/rule/token/channel.
+- **Config + secrets = server-side per-account DATA**: handling rules, lane
+  routing configs, targets, templates, third-party tokens/creds. Never committed.
 - **The only harness-side config** is the client inbox **channel declaration** in
   the committed `ai/inbox/registry.json` (in `~/dev/custom`, which owns the
   contracts; tenant repos carry nothing), via the existing `setup-inbox-registry`
@@ -1600,15 +1141,8 @@ Therefore:
   contract* below). This contract does **not** restate or impose that obligation
   — it relies on it; the distinction is specified in the inbox contract, not
   here.
-- A lane matching **zero** over a long window MUST be reported, not silently
-  treated as healthy. **This report is extended to `source_lane` consumers: a
-  `notify` rule whose `source_lane` names a membership rule that is currently
-  DISABLED MUST likewise be reported** — its source lane is emitting nothing, so
-  the consumer is inert — never left silently quiet. This is the disable-side half
-  of the `source_lane` referential-integrity lifecycle; a DELETED `source_lane` is
-  instead **invalidated** (refused/flagged with a `Fix:`) per that same lifecycle
-  (see *Binding a `notify` rule on a `lane.member.*` transition*), which mirrors
-  the record-immutability invalidate-dependents rule below.
+- A rule matching **zero** over a long window MUST be reported, not silently
+  treated as healthy — never left silently quiet.
 
 git-common-dir tenancy keying stays the inbox client resolver's job
 (`ai/contracts/athena-inbox.md` → *Repo identity: the git common dir*). This
@@ -1621,7 +1155,7 @@ matched nothing and said nothing, and it MUST be made observable at every join.
 ## Relationship to the Athena Inbox contract
 
 The inbox is **one delivery adapter** among several. This contract owns the event
-platform (envelope, taxonomy, ingress, rules, predicates, membership, adapters,
+platform (envelope, taxonomy, ingress, rules, predicates, adapters,
 templating, trust posture, security). The Athena Inbox contract
 (`ai/contracts/athena-inbox.md`) owns the inbox *channel mechanism* — the `log`
 and `maildir` kinds, the doorbell, consumption state, tenancy resolution, and the
