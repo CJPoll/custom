@@ -59,6 +59,11 @@ tools:
   harness-gate:            { class: idempotent, reason: gate }
   # harness-metrics writes ai/telemetry/metrics.json on its default path.
   harness-metrics:         { class: idempotent, reason: metrics }
+  # variant-eval is proposal-only (stdout by default; --out writes a proposal
+  # file deterministically), runs corpora in throwaway detached worktrees, and
+  # explicitly denies merge/commit/push/forge/--update-baseline — no external
+  # or irreversible effect, so idempotent (never destructive).
+  variant-eval:            { class: idempotent, reason: measure }
 
   # --- destructive: external/irreversible, or grants that capability ---
   gh-athena:               { class: destructive, reason: forge }
