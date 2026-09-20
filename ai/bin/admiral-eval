@@ -27,8 +27,9 @@
 #   1. Plan-only framing (primary): every scenario ends with an explicit
 #      instruction to output ONLY the decision trailer and call no tool / run no
 #      command / spawn no agent. The admiral is scored on stated intent.
-#   2. Structural tool containment via CLI flags (belt-and-suspenders — the
-#      real jail). The model runs under the AMBIENT HOME (design §2.1 specified an
+#   2. Structural tool containment via CLI flags (belt-and-suspenders —
+#      structural for the three holes below, not just framing). The model runs
+#      under the AMBIENT HOME (design §2.1 specified an
 #      isolated HOME, but that is INFEASIBLE: `claude` resolves BOTH its auth AND
 #      the `athena-admiral` agent definition from the ambient HOME, so an isolated
 #      HOME yields "--agent athena-admiral not found" and no auth — verified
@@ -43,8 +44,12 @@
 #          docker) and no real captain spawn.
 #      A run therefore CANNOT reach MCP, CANNOT spawn a subagent, and CANNOT run
 #      Bash, while auth + --agent resolution + the decision trailer still work
-#      (all verified empirically). Guard 1 (plan-only framing) remains the primary
-#      framing; the inert PATH stubs (no-op gh/glab/gh-athena/glab-athena/docker +
+#      (all verified empirically). NOT structurally closed: the native Write/Edit
+#      file tools remain available under the ambient HOME — a file mutation is
+#      barred only by guard 1 (plan-only framing), not by these flags. It is out
+#      of the three holes this hardening targets and, being a text-only decision
+#      eval, no corpus case exercises it; noted so the containment is not read as
+#      total. Guard 1 (plan-only framing) remains the primary framing; the inert PATH stubs (no-op gh/glab/gh-athena/glab-athena/docker +
 #      a git wrapper that blocks `push`) remain as a third, residual layer for any
 #      PATH-resolved call — now largely redundant since Bash itself is disallowed,
 #      but kept as cheap defense in depth. Acceptable because `--run` is never in
