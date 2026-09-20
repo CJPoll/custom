@@ -224,6 +224,61 @@ from riddler's howie/wurk harness — "errors written for the LLM.")
 - `ai/bin/check-guard-messages` enforces this (part of the shipwright gate); a
   new hook is covered by default, so a bare failure message turns the gate red.
 
+## A claimed mechanism must be able to fire
+
+Normative text routinely discharges a gap by naming a mechanism: *the validator
+rejects X*; *the added observability MUST makes Y visible*; *the residual is not
+hidden, it is surfaced by Z*. That sentence is load-bearing — it is the reason
+the gap counts as closed rather than papered over, and the reason a reviewer
+accepts the resolution. It is also the sentence least likely to be checked,
+because checking it means going and reading the named mechanism's
+implementation, while the sentence already reads as true on its own.
+
+This is *A failed lookup must never look like an empty one* moved up one level,
+from a lookup to a specification. There, a wrongly-computed key matches nothing
+and reports nothing. Here, a well-formed claim points at an instrument that is
+structurally incapable of producing the outcome it is credited with, and the
+document reports nothing either. No gate catches it: prose that attributes a
+guarantee to a mechanism that cannot deliver it passes every check we have,
+because it is well-formed. Only a reader who goes and looks finds it.
+
+So, **when you write or accept a sentence crediting a named mechanism with a
+guarantee, a refusal, or an observation, read that mechanism and establish it
+can produce that outcome in the SPECIFIC STATE the claim is about** — not in
+general, and not by its name sounding right.
+
+- **Name the state, then ask what the instrument actually reads in it.** The
+  question is not "does this mechanism exist" or "is it well-designed"; it is
+  "in the exact condition I am claiming it covers, what value does it compute,
+  and is that value distinguishable from the healthy case?" An instrument that
+  is permanently false, or identical to healthy, in the state you cite is not a
+  weaker version of the claim — it is no claim at all.
+- **A residual that is "routed, not hidden" is only routed if the destination
+  can receive it.** Naming a follow-up ticket, a deferred subsection, or a
+  sibling mechanism as the home for what you did not close is a real discipline
+  and worth keeping — but the routing is the claim, so it gets the same check.
+  A residual routed to a mechanism that cannot observe it is hidden, with a
+  citation on top.
+- **An addition that makes a descope or narrowing "not a weakening" is the same
+  claim.** If the thing rescuing a reduction from being a loss is a MUST you
+  just wrote, that MUST is exactly the one to test for satisfiability before the
+  reduction is accepted — it is carrying the whole argument.
+- **The check belongs with the claim, not with the next reviewer.** Finding this
+  by critic round is the expensive path: it costs a round, and the round after,
+  and the rounds are what the convergence discipline is trying to bound.
+
+Measured 2026-09-20, twice in one epic, in two different work items. A descope
+was accepted as clean because it added a `collapsed-by-idempotency-key`
+observability MUST; eight critic rounds later that MUST proved unsatisfiable —
+no discriminator separates a sub-minute collapse from an at-least-once
+redelivery. And a reconciliation closed a residual by pointing at
+`inbox-doctor`'s never-delivered three-state distinction; one round later that
+was shown unsatisfiable for the state it was cited for — `never_delivered` is
+file-existence only (`[ -e "${inbox}" ] || never="true"`), so in a
+producer-registration mismatch the platform IS delivering, the file exists, the
+flag is permanently false, and the instrument can never fire. In both cases the
+unverifiable sentence was the one doing the persuading.
+
 ## Cross-session reflection loop (athena-shipwright cron)
 
 The shipwright's cross-session reflection runs on an hourly cron and aggregates
