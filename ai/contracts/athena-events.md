@@ -124,7 +124,7 @@ for which owner, went unmatched?", exactly the failed-lookup discipline
 one*): a legitimate miss MUST remain observable as the specific thing it was. A
 **HANDLED** event MUST NOT be dead-lettered.
 
-**Level 2 — per-`(event, rule)` DELIVERY outcome (total over exactly five
+**Level 2 — per-`(event, rule)` DELIVERY outcome (total over exactly six
 outcomes).** Because of fan-out (see *Fan-out: every match fires*) a single
 HANDLED event has one outcome **per applied rule**, evaluated independently at the
 `(event, rule)` grain *Idempotency is per (event, rule)* defines — an event can be
@@ -144,12 +144,22 @@ per-`(event, rule)`:
 5. **FAILED (terminal)** — predicate TRUE, delivery attempted, retries exhausted /
    adapter 5xx / credential revoked. Recorded in the **failed-delivery store**
    (below), **never** dead-lettered as UNMATCHED.
+6. **COLLAPSED** — predicate TRUE and the delivery matched, but its
+   `(entity_id, revision)` idempotency key collided with an earlier delivery's
+   because the source's revision granularity is coarser than its change rate — a
+   **sub-granularity source-revision collapse** (e.g. two Notion edits within one
+   `last_edited_time` minute share one `revision`), so the two deliveries collapse
+   to one. Recorded and **countable as the `collapsed-by-idempotency-key`
+   outcome** (see *Idempotency is per (event, rule)*), **kept DISTINCT from
+   SUPPRESSED** — which is strictly the owner's dedupe-window case — never a silent
+   drop.
 
 **Each Level-2 outcome that is not DELIVERED is individually observable** —
 FILTERED via ordinary accounting, SUPPRESSED per *Enabled flag and dedupe window*,
 REFUSED per *Mechanism vs config boundary, and both-ends-or-dark* enforcement
-point 2, FAILED per the failed-delivery store — so **no matched delivery is ever a
-silent drop.**
+point 2, FAILED per the failed-delivery store, COLLAPSED as the
+`collapsed-by-idempotency-key` outcome per *Idempotency is per (event, rule)* — so
+**no matched delivery is ever a silent drop.**
 
 **Why FILTERED is not a miss, and must not flood the dead-letter store.** A
 routing rule declared on `notion.ticket.updated` applies to every ticket-update
@@ -158,9 +168,9 @@ changed, or the current state does not match) — those are **FILTERED**: the ru
 applied and correctly produced no delivery. Collapsing FILTERED into UNMATCHED
 would flood the dead-letter store (whose whole purpose is "which event went
 **unmatched**?") with routine no-ops and their full Path-2 payloads. Equally,
-FILTERED must not be conflated with SUPPRESSED, REFUSED, or terminally FAILED —
-those are matched deliveries that did not arrive, each separately observable
-above, not benign no-ops.
+FILTERED must not be conflated with SUPPRESSED, REFUSED, COLLAPSED, or terminally
+FAILED — those are matched deliveries that did not (separately) arrive, each
+separately observable above, not benign no-ops.
 
 The dead-letter store is **per-account** and its record grain is **one
 exemplar-plus-count per `(owner, type)`**: the **first-seen full event payload** of
@@ -474,7 +484,8 @@ The event-level key basis is defined for **every** enumerated type:
 
   This bounds `revision` to what a **stateless** platform can derive from a
   source-supplied token; the platform never synthesizes a per-change sequence
-  (that would require platform state — see the collision-proof-revision follow-up).
+  (that would require platform state — see the roadmap follow-up **DND-257**
+  (collision-proof per-change revision)).
   Because a membership lane's authoritative set is the **consumer's own re-query**
   (see *The lane channel is a change stream, not the authoritative set*) and every
   forwarded event carries **current** enriched state, a sub-granularity collapse
