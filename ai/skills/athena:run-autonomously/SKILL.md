@@ -36,6 +36,22 @@ through to completion without them.
    one exists, it goes there, not on the ticket. Note what was decided, the
    options considered, and why.
 
+6. **Owner-credential gates throttle merging, not progress.** *Ship to
+   production* still governs everything you can ship. The one exception is a
+   step only the owner can perform — their actual credentials, or an
+   interactive console/account action the pipeline cannot self-service (an
+   out-of-band IAM/terraform apply, a provider-console app reinstall or
+   scope-add). Do not halt and do not sit idle waiting on it. Keep the base
+   change fixed-and-ready but **unmerged**; stack the dependent changes on top
+   as ready-to-merge PRs — fully implemented, reviewed with the fail-closed
+   critic, CI-green — and merge none of that stack. Carry every other
+   independent piece of work to done and merged as normal. In *When the user
+   returns*, give the owner the precise credential/console step **and** the
+   ordered list of the stacked, ready-to-merge PRs, so one manual step lands
+   the whole stack. This owner-creds/console class is the ONLY thing that
+   cannot be shipped autonomously — everything else, security fixes included,
+   still ships.
+
 ## When the user returns
 
 Include a **report of all decisions and assumptions** made while running
