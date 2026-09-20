@@ -70,13 +70,21 @@ notification. Its envelope is:
   payload carries *present* state only; "what was it before?" is never in the
   payload (see *Predicates match the present; the membership diff handles the
   past*).
-- **`owner`** — the account the event belongs to. It MUST be stamped by the
-  platform from the **authenticated ingress**, and MUST NEVER be read from the
-  payload. A payload field that purports to name an owner is untrusted content;
-  using it to select an owner is a privilege-escalation defect. An event whose
-  owner cannot be resolved from its authenticated ingress MUST be rejected with a
-  `Fix:` (name the ingress and that owner resolution failed), never defaulted to
-  an arbitrary or "system" owner.
+- **`owner`** — the account the event belongs to. For an **ingress-originated**
+  event it MUST be stamped by the platform from the **authenticated ingress**,
+  and MUST NEVER be read from the payload; a payload field that purports to name
+  an owner is untrusted content, and using it to select an owner is a
+  privilege-escalation defect. An **ingress-originated** event whose owner cannot
+  be resolved from its authenticated ingress MUST be rejected with a `Fix:` (name
+  the ingress and that owner resolution failed), never defaulted to an arbitrary
+  or "system" owner. A **platform-derived** event (a `lane.member.*` transition,
+  `source` = `derived:<rule_id>`, originated by no ingress) instead **inherits
+  the `owner` of the originating membership rule** — the rule's own
+  author-stamped owner (see *Rule ownership is stamped from the authenticated
+  author*), resolved from the rule, not from any payload/caller-supplied value —
+  so the "reject if unresolvable from ingress" clause above applies to
+  ingress-originated events only. This is the **fourth owner seam** alongside the
+  triad: **derived-inherits-rule-owner**.
 - **`occurred_at`** — when the transition happened.
 - **`source`** — provenance, from this **closed** set: `webhook:slack`,
   `webhook:notion`, `poller:<lane>`, `emit:<machine_id>`, and
@@ -204,13 +212,15 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 
 | Event type(s) | `payload.*` field | Type | Cardinality |
 |---|---|---|---|
-| `notion.ticket.*` | `status` | string | scalar |
+| `notion.ticket.*` | `entity_id` — stable source entity handle, e.g. `notion:<uuid>` | string | scalar |
+| | `status` | string | scalar |
 | | `labels` | string | **collection** |
 | | `assignee` | person-id | **collection** |
 | | `title` | string | scalar |
 | | `ticket_number` | string | scalar |
 | | `changed_properties` (`notion.ticket.updated` only) | string | **collection** |
-| `notion.comment.*` | `comment_text` | string | scalar |
+| `notion.comment.*` | `entity_id` — stable source entity handle | string | scalar |
+| | `comment_text` | string | scalar |
 | | `ticket_number` | string | scalar |
 | | `title` | string | scalar |
 | `slack.message.received` | `text` | string | scalar |
@@ -225,9 +235,18 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `entity_id` | string | scalar |
 | | `display` fields — **declared per lane SOURCE** (see below) | per source | per source |
 
+**`entity_id` is the declared, bindable entity handle** every source-emitted
+type carries — the stable source identifier (e.g. `notion:<uuid>`) that the
+lane-membership store keys members on, that the trigger classes scope
+current-members / non-members by, and that the membership-derived idempotency
+basis references. It is a first-class declared field, not an undeclared handle
+buried in a key. It is **distinct from the display fields** `ticket_number` /
+`title` (which render a line and may be cached); `entity_id` is identity.
+
 **The membership-derived types have a closed payload schema** — the lane/rule
-identity (`rule_id`, `lane`), the transition `op`, the `entity_id`, and the
-**display fields**. The display fields are **declared per lane SOURCE**, not two
+identity (`rule_id`, `lane`), the transition `op`, the `entity_id` (the member's
+handle, same field name as the source event carries), and the **display
+fields**. The display fields are **declared per lane SOURCE**, not two
 hardcoded Notion columns: a **Notion** lane declares `ticket_number` (scalar) and
 `title` (scalar); a **forge** lane (or any other) declares its own display shape.
 This keeps the store's "source-agnostic — carries over to a forge or any other
@@ -263,14 +282,15 @@ key; the platform combines it with the matched `rule_id` to form the
 The event-level key basis is defined for **every** enumerated type, so a derived
 event dedupes as reliably as a source-emitted one:
 
-- **Source-emitted** — the source's own event identity: Slack's `event_id`; a
-  Notion entity's `notion:<uuid>` combined with a change token. (A reconciliation
-  backstop hit reuses the same basis so it dedupes against the primary path — see
-  *Poller (fallback only)*.)
+- **Source-emitted** — the source's own event identity: Slack's `payload.event_id`;
+  a Notion entity's `payload.entity_id` (`notion:<uuid>`) combined with a change
+  token. (A reconciliation backstop hit reuses the same basis so it dedupes
+  against the primary path — see *Poller (fallback only)*.)
 - **Membership-derived** (`lane.member.added` / `lane.member.retracted`) — no
   source event identity exists, so the key is composed from the transition's own
   identity: **`rule_id` + `entity_id` + `op` + the triggering event's
-  `idempotency_key`**. This makes a given add/retract, produced by a given rule
+  `idempotency_key`** (each a declared payload field — see *Payload fields and
+  their types per event type*). This makes a given add/retract, produced by a given rule
   for a given entity off a given triggering event, idempotent under the fan-out
   and per-`(event, rule)` retry machinery like any other event.
 
@@ -420,13 +440,14 @@ than the authenticated author's MUST be refused with a `Fix:` (name that a rule
 may be authored only for the authoring account). No "admin" or "on-behalf-of"
 path widens this in the first pass.
 
-**This completes the owner-binding triad.** Every seam at which an `owner` enters
-the system stamps it from an **authenticated identity**, NEVER from a
-request/payload body:
+**This completes the owner-binding triad — three authenticated-identity stamps,
+plus a fourth inheritance seam for derived events.** Every seam at which an
+`owner` enters the system fixes it from an **authenticated identity**, NEVER from
+a request/payload body:
 
-1. **Event owner — ingress-stamp.** Stamped from the authenticated ingress,
-   never read from the payload (see *The event*). Stops an account **minting**
-   another's events.
+1. **Event owner — ingress-stamp.** An ingress-originated event's owner is
+   stamped from the authenticated ingress, never read from the payload (see *The
+   event*). Stops an account **minting** another's events.
 2. **Delivery target — target-bind.** A rule's target MUST resolve to a
    machine/channel registered to the rule's owner (see
    *Both-ends-or-silently-dark*). Stops an account **delivering into** another's
@@ -434,9 +455,15 @@ request/payload body:
 3. **Rule authoring — author-stamp.** A rule's `owner` is stamped from the
    authenticated author (this section). Stops an account **authoring rules
    under** another's authority.
+4. **Derived event — derived-inherits-rule-owner.** A platform-derived
+   `lane.member.*` event (no ingress to stamp from) inherits the `owner` of its
+   originating membership rule — the rule's own author-stamped owner from seam 3,
+   never a caller-supplied value (see *The event*). This is what makes the
+   `owner` MUST satisfiable for derived events.
 
-All three are one rule — an `owner` is an authenticated-identity fact, never a
-caller-supplied one — applied at the three seams where an owner is set.
+Seams 1–3 stamp the owner from an authenticated identity; seam 4 inherits it from
+an already-stamped rule owner. In every case an `owner` is an
+authenticated-identity fact, never a caller-supplied one.
 
 ### Enabled flag and dedupe window
 
@@ -444,8 +471,8 @@ Two owner-facing schema fields carried by every rule:
 
 - **`enabled`** — a boolean gate. Only **enabled** rules are evaluated (see
   *Fan-out: every match fires*); a disabled rule is inert — it neither matches,
-  fires, nor contributes to the dead-letter "handled" accounting (see *The event
-  taxonomy is open*) — and MAY be re-enabled with no loss.
+  fires, nor contributes to the dead-letter "handled" accounting (see *Event
+  disposition and dead-letter*) — and MAY be re-enabled with no loss.
 - **`dedupe window`** — an **owner-facing rate control**, deliberately distinct
   from the correctness-guaranteeing `idempotency_key` (see *Idempotency is per
   (event, rule)*). The idempotency key prevents a **re-processed same delivery**
@@ -710,9 +737,10 @@ fire. An (b)/(c) event for an entity outside its scope — a delete of a non-mem
 an undelete of something that still fails the predicate — is simply not relevant
 to that rule.
 
-- Per `(owner, membership-rule)` the store holds the member **entity IDs** plus
-  the **minimal display fields** needed to render a retract (e.g. ticket number
-  and title).
+- Per `(owner, membership-rule)` the store holds each member's **`entity_id`**
+  (the declared stable source handle, e.g. `notion:<uuid>` — see *Payload fields
+  and their types per event type*) plus the **minimal display fields** needed to
+  render a retract (e.g. ticket number and title).
 - **On each relevant event the pipeline runs PER TRIGGER CLASS** — no single step
   mandates an enrichment a trigger cannot perform:
   - **(a) declared-predicate types:** **enrich** current state → **re-evaluate**
