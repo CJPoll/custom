@@ -215,6 +215,40 @@ escalation — whole-subsystem closure — produced a 14-row table after which t
 re-critic found zero kind-3 in that subsystem. The admiral invented that pass on
 the spot; it is written down so the next loop does not.
 
+### The park brief owes the owner the option the loop cannot generate
+
+A PARK is a hand-off, and the brief is the whole of it — the owner decides from
+what it contains and nothing else. State the contradiction clause by clause, say
+why no engineering round resolves it, give each option its guarantee effect,
+blast radius and reversibility, and name a recommendation. Also state what
+happens to the parked work under *each* choice, so approving one approves a
+landing plan rather than a preference.
+
+The option set is where a park brief fails, and it fails in one direction. Every
+round before the park was spent making some mechanism work, so the options the
+loop generates all **preserve** that mechanism: add something so the constraint
+is satisfied, or soften the claim made about it. The option nobody in the loop
+proposes is **deleting the mechanism the contradictory clauses all constrain**,
+because those clauses conflict only as descriptions of it — remove it and they
+dissolve together instead of being traded off against each other. An
+unsatisfiability among N clauses always admits that option, and the loop's own
+history is what hides it, so put it in the brief explicitly even if only to
+reject it.
+
+Measured 2026-09-20 (DND-232 round 28): three clauses about a platform-side
+idempotency dedupe key were jointly unsatisfiable. The park brief offered (A) add
+a content digest so the two causes of a dedupe hit can be told apart — keeps the
+mechanism, reintroduces the per-change state the architecture had just removed —
+and (B) keep the mechanism but drop the claim that it could attribute a collapse,
+recommended. The owner proposed a path the brief did not contain: delete the
+platform dedupe entirely and require the **consumer** to be idempotent. The
+architect sent to validate it reported that it "dissolves F2 cleanly, by REMOVING
+the platform dedupe mechanism entirely rather than reframing a claim about it",
+called it "architecturally *more* consistent ... than (A) or (B)", and
+recommended it over the brief's own recommendation. Nothing prevented the loop
+from finding that option; twenty-eight rounds of making the mechanism work is
+what kept it out of view.
+
 ## The bar does not move
 
 Round count and loop fatigue are reasons to change METHOD or to ESCALATE. They
