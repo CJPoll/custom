@@ -160,18 +160,16 @@ last-seen timestamp; they store **no** new payload. The exemplar payload may car
 third-party content, so the record is **Path-2 untrusted** when read into an LLM
 (see *Trust posture — two paths*), and read access is the owning account's.
 
-**Later (2026-09-20):** this store previously held **a full event payload per
-unmatched event**, with the unbounded-until-read lifetime applied **per event**.
-That framing let the store grow without bound behind ungated traffic volume — a
-disabled rule could flood it with a million full payloads. It is superseded by the
-**one-exemplar-plus-count-per-`(owner, type)`** grain above, which **bounds the
-store by a structural quantity — the number of distinct unmatched `type`s per
-owner** (a small finite set drawn from the enumerable taxonomy), independent of
-traffic volume: a million unmatched Slack events collapse to one exemplar + count
-1,000,000. The **"MUST NOT be merely counted"** rule is **honored, not weakened**
-— an exemplar payload is retained for every distinct unmatched `(owner, type)`, so
-the store still names which/what/whose event went unmatched; the count is *added*
-metadata showing scale, never a *replacement* for the payload.
+**This one-exemplar-plus-count-per-`(owner, type)` grain bounds the store by a
+structural quantity — the number of distinct unmatched `type`s per owner** (a
+small finite set drawn from the enumerable taxonomy), independent of traffic
+volume: a million unmatched Slack events of one type collapse to one exemplar +
+count 1,000,000, rather than the million full payloads a disabled rule could
+otherwise flood it with. The **"MUST NOT be merely counted"** rule is **honored,
+not weakened** — an exemplar payload is retained for every distinct unmatched
+`(owner, type)`, so the store still names which/what/whose event went unmatched;
+the count is *added* metadata showing scale, never a *replacement* for the
+payload.
 
 Its retention follows the **same doctrine as the sibling inbox contract**
 (`ai/contracts/athena-inbox.md` → *Retention* → *The principle*), not a
@@ -185,7 +183,7 @@ old it gets"), now bounded in aggregate at **at most one unread exemplar per
 `(owner, type)`**; age-out under the product data-retention policy applies **only
 after** it has been read/triaged. Destroying an unread miss would erase the very
 observability the dead-letter store exists to provide. **The store carries no cap
-or TTL number in this contract (X-1):** any operational cap/TTL is **ops/owner
+or TTL number in this contract:** any operational cap/TTL is **ops/owner
 config, explicitly outside this contract's MUST surface** — the contract states
 **shape** only ("one exemplar + count per `(owner, type)`, unbounded-until-read").
 No MUST here carries a number.
@@ -544,14 +542,15 @@ what a label may *earn*, and this governs what an ingress may *mint*. Both are
 required to stop a machine token from manufacturing a platform-internal or
 verified-source transition.
 
-**First pass registers ONLY Notion as a membership-capable source (X-2).** The
+**First pass registers ONLY Notion as a membership-capable source.** The
 per-(source, type) type registry (see *Membership rules and the lane-membership
 store*) is **designed** to carry a forge or any other source — the mechanism is
 source-agnostic — but the **first pass registers only Notion** as a
 membership-capable source. This removes, for now, the burden of proving
 multi-source coherence (per-source snapshot capability, per-source direction
-classes across N sources, and the type-unregistration lifecycle — see D-A3 under
-*Membership rules and the lane-membership store*). **Multi-source membership and
+classes across N sources, and the type-unregistration lifecycle — see the
+append-only type registry under *Membership rules and the lane-membership
+store*). **Multi-source membership and
 the type-unregistration lifecycle are roadmap**, landing as one increment; only
 the first-pass *registration* is single-source, and the mechanism it registers
 against does not change. (`notify` rules on `slack.*` are unaffected — this bounds
@@ -1116,14 +1115,15 @@ on demand for the reconciliation sweep. This capability is read at rule save tim
 into a save-time hard error for a source that lacks it).
 
 **In the first pass the per-(source, type) type registry is append-only /
-immutable per `(source, type)`** (D-A3). The registered types are fixed — Notion's
+immutable per `(source, type)`**. The registered types are fixed — Notion's
 source-emitted types plus the membership-derived set — so **no
 type-unregistration path exists** to leave a saved rule bound against a vanished
-type, and R4 (`rule → type registry`) cannot dangle. **Type-unregistration**
+type, and a saved rule's binding to the type registry cannot dangle.
+**Type-unregistration**
 would, like a deleted membership rule, have to **invalidate the dependent rules**
 that bound their schema/direction class against the removed type; it is therefore
 **roadmap**, landing with the same increment that adds multi-source membership
-(see *Which event types an ingress kind may originate* → X-2). This is enumerated
+(see *Which event types an ingress kind may originate*). This is enumerated
 so it is visibly **not** a gap, not because a first-pass mechanism is missing.
 
 - Per `(owner, membership-rule)` the store holds each member's **`entity_id`**
@@ -1167,7 +1167,8 @@ any `notify` consumers fired — that purpose is served, so the platform **purge
 member's store entry** (`entity_id` + cached display fields). This needs **no owner
 retention number**; it is derived from the cache's sole stated purpose, and it
 bounds the active store by the lane's **working-set size** (the owner's in-scope
-entity count), not by cumulative history — closing R9. Consequences, all coherent
+entity count), not by cumulative history — closing the unbounded-store risk.
+Consequences, all coherent
 by construction:
 
 - **The stored set is thereby exactly the current members** — precisely what the
@@ -1240,11 +1241,11 @@ Slack-only-membership error (see *Payload fields and their types per event type*
 and it makes the sweep MUST **satisfiable** and its satisfiability **checked where
 the rule is authored**. **Notion satisfies it**: the low-frequency reconciliation
 backstop already enumerates Notion's in-scope set with its read-only, DB-scoped
-enrichment token (design §14.9 / GS-8), so the sole first-pass membership source
+enrichment token, so the sole first-pass membership source
 is full-snapshot-capable and the sweep MUST is satisfiable in the first pass at
 zero extra cost.
 
-**The sweep frequency carries no contract number (X-1).** How often the
+**The sweep frequency carries no contract number.** How often the
 reconciliation backstop runs is **ops/owner configuration, explicitly outside this
 contract's MUST surface** — the contract states **shape** only ("a low-frequency,
 owner/ops-configured sweep"), never a cadence. No MUST here carries a frequency
