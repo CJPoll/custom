@@ -32,6 +32,22 @@
           }
         }
       }
+    },
+    {
+      "file": "gen_saas.json",
+      "entry": {
+        "v": 1,
+        "repo": "~/dev/gen_saas/.git",
+        "channels": {
+          "athena-mail": {
+            "kind": "maildir",
+            "namespace": "agent-mail/gen_saas",
+            "read": "to-server",
+            "write": "from-server",
+            "identity": "gen_saas-server"
+          }
+        }
+      }
     }
   ]
 }
