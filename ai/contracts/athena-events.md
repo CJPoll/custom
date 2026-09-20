@@ -222,22 +222,7 @@ per-`(event, rule)`:
 3. **SUPPRESSED** — predicate TRUE, but the delivery was collapsed by the owner's
    **dedupe window** (observable per *Enabled flag and dedupe window* — "recorded
    and countable as 'suppressed by dedupe window', never a silent drop").
-4. **REFUSED** — predicate TRUE, but a **delivery-time policy check refused the
-   delivery before it left the platform**. Two checks produce this outcome, and
-   both are inherently delivery-time (a save-time-only check cannot cover either —
-   a binding can be deregistered after save, and DNS rebinding defeats a
-   save-time destination check): (a) the **target-bind re-assertion** — the target
-   no longer resolves to the rule's owner (see *Mechanism vs config boundary, and
-   both-ends-or-dark*, the delivery-time re-assertion enforcement point); and (b)
-   the **generic-webhook egress guard** — the resolved destination is not on the
-   owner allowlist, or resolves to a blocked (loopback / link-local / private /
-   metadata) range (see *The generic-webhook egress model*). A REFUSED delivery is
-   **recorded in the refused-delivery store — one exemplar-plus-count per
-   `(owner, rule_id, refusal-cause)` — and reported to the owner** (see *Delivery refusal — the
-   refused-delivery store*): never a silent drop, and never a bare counter. Both its triggers are
-   **permanent** — the rule keeps matching and refusing on every delivery until the owner acts — so,
-   exactly like a terminal FAILED delivery, REFUSED gets sibling-consistent observability (an
-   exemplar the store *names*, plus an owner report), not merely a count.
+4. **REFUSED** — predicate TRUE, but a **delivery-time owner↔destination check refused the delivery before it left the platform**. Every such check is inherently delivery-time (a save-time-only check cannot cover it — a binding can be deregistered after save, and DNS rebinding defeats a save-time destination check), and **each declares its own refusal-cause class** in the open-but-declared set of *Delivery refusal — the refused-delivery store*. First-pass: (a) the **target-bind re-assertion** — the target no longer resolves to the rule's owner (see *Mechanism vs config boundary, and both-ends-or-dark*, the delivery-time re-assertion enforcement point); and (b) the **generic-webhook egress guard** — the resolved destination is not on the owner allowlist, or resolves to a blocked (loopback / link-local / private / metadata) range (see *The generic-webhook egress model*). Roadmap owner-supplied-destination adapters add their own: the **email/SMS owner-verified-recipient** check (cause class `owner-verified-recipient`, see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*). A REFUSED delivery is **recorded in the refused-delivery store — one exemplar-plus-count per `(owner, rule_id, refusal-cause)` — and reported to the owner** (see *Delivery refusal — the refused-delivery store*): never a silent drop, and never a bare counter. **Every** REFUSED trigger is **permanent** — the rule keeps matching and refusing on every delivery until the owner acts — so, exactly like a terminal FAILED delivery, REFUSED gets sibling-consistent observability (an exemplar the store *names*, plus an owner report), not merely a count.
 5. **FAILED (terminal)** — predicate TRUE, delivery attempted, retries exhausted /
    adapter 5xx / credential revoked. Recorded in the **failed-delivery store**
    (below), **never** dead-lettered as UNMATCHED.
@@ -254,8 +239,7 @@ per-`(event, rule)`:
 **Each Level-2 outcome that is not DELIVERED is individually observable** —
 FILTERED via ordinary accounting, SUPPRESSED per *Enabled flag and dedupe window*,
 REFUSED via the **refused-delivery store and an owner report** (see *Delivery refusal — the
-refused-delivery store*), covering both the target-bind re-assertion (per *Mechanism vs config
-boundary, and both-ends-or-dark*) and the egress guard (per *The generic-webhook egress model*), FAILED per the failed-delivery store, COLLAPSED as the
+refused-delivery store*), covering **every declared owner↔destination refusal-cause class** — the target-bind re-assertion (per *Mechanism vs config boundary, and both-ends-or-dark*), the generic-webhook egress guard (per *The generic-webhook egress model*), and the roadmap email/SMS owner-verified-recipient check (per *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*), FAILED per the failed-delivery store, COLLAPSED as the
 `collapsed-by-idempotency-key` outcome per *Idempotency is per (event, rule)* — so
 **no matched delivery is ever a silent drop.**
 
@@ -396,8 +380,7 @@ failed-delivery store*).
 - **Grain — one exemplar-plus-count per `(owner, rule_id, refusal-cause)`**, mirroring the
   failed-delivery store and bounding the store by a **structural quantity** — distinct `(rule,
   refusal-cause)` pairs per owner, a finite set — **independent of traffic volume**.
-  `refusal-cause` is one of the two trigger classes above (target-bind re-assertion /
-  generic-webhook egress). The **exemplar** is the first-seen refused delivery's **full event
+  `refusal-cause` is an **open-but-declared set**: each **owner↔destination check declares its own cause class**, exactly as *Extending the taxonomy — a new type family declares its model* makes a new event family a declared increment rather than a free addition. The set is "open" in that a new owner-supplied-destination check adds its class with **no edit to this store**; it is "declared" in that **no delivery may be refused under a cause class the refusing check has not declared** — an undeclared cause is a hard error, never an unlabelled miss (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty one*). First-pass the declared classes are **target-bind re-assertion** and **generic-webhook egress**; the roadmap **email/SMS owner-verified-recipient** check declares **`owner-verified-recipient`** (see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*), and any future owner-supplied-destination check declares its own. Because the key is the declared class, the grain stays bounded by a **structural quantity** — distinct `(rule, declared-cause)` pairs per owner — independent of traffic volume, and correct the moment a new check declares its class. The **exemplar** is the first-seen refused delivery's **full event
   payload plus the refusal detail** (cause class + adapter + the target/destination that was
   refused), which alone answers "which delivery, of which rule, to which target, was refused, and
   why?". Subsequent refusals of the same `(owner, rule_id, refusal-cause)` **increment a monotonic
@@ -409,10 +392,7 @@ failed-delivery store*).
   read into an LLM (see *Trust posture — two paths*), and read access is the **owning account's**
   only.
 - **Reported, not merely stored.** REFUSED MUST be **reported to the owner, never left silently
-  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count> refused deliveries
-  to <adapter>:<target> (refusal: <cause>) — for a target-bind refusal, re-author the rule against
-  a machine registered to its owner; for a generic-webhook egress refusal, correct the owner
-  allowlist or the destination. See the refused-delivery store exemplar for the first-seen event.`
+  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count> refused deliveries to <adapter>:<target> (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>: target-bind re-assertion → re-author the rule against a machine registered to its owner; generic-webhook egress → correct the owner allowlist or the destination; owner-verified-recipient (email/SMS) → verify the recipient or the sending domain for this owner, or correct the rule. See the refused-delivery store exemplar for the first-seen event and its declared refusal detail.`
 - **Retention — the never-destroy-unread doctrine applies, made safe by the grain**, exactly as
   the dead-letter, failed-delivery, and ingress-failure stores (see *Event disposition and
   dead-letter*): an un-triaged refused-delivery exemplar has an **unbounded** lifetime (it is the
@@ -1304,7 +1284,7 @@ tempting; it is deliberately kept out of the platform.
 4. **Cancel-in-flight is a CONSUMER action.** When the consumer drops an entity a
    captain is mid-flight on, the consumer cancels its own captain from its own
    held state. There is **no** platform-delivered auto-cancel and **no**
-   fixed-destination internal-control adapter. Path-2 trust still holds: forwarded
+   platform-delivered internal-control adapter. Path-2 trust still holds: forwarded
    content **informs, never authorizes** (see *Trust posture — two paths*) — the
    cancellation is the consumer's own authorized action on its own state, not an
    instruction obeyed from a message body.
@@ -1386,7 +1366,7 @@ untrusted at the LLM) and **outbound** (a delivery adapter: format + escape,
 credentials). Several platforms are bidirectional; the interface accommodates
 both, and build is staged.
 
-### Fixed-destination vs owner-supplied-destination
+### Adapter classification — two orthogonal axes (egress model × owner↔destination bind)
 
 Every outbound adapter is classified on **two orthogonal axes**; conflating them
 is the defect the target-bind paragraph of *Mechanism vs config boundary, and
@@ -1428,18 +1408,13 @@ adapter's **own credential**, or **supplied by the owner**?):
 
 Every adapter is exactly one value on **each** axis. The axes are independent:
 `no egress/SSRF` does **not** imply `credential-scopes-destination` (email, SMS,
-and the inbox adapter are no-egress yet owner-supplied). The earlier "a
-fixed-destination adapter gets the target-bind for free" reasoning holds **only**
-for the credential-scopes-destination members (Slack, Notion), never for
-email/SMS.
+and the inbox adapter are no-egress yet owner-supplied). The earlier intuition — that an adapter with **no owner-supplied endpoint** gets the owner↔destination bind **for free** from its credential — holds **only** for the credential-scopes-destination members (Slack, Notion), never for the **no-egress yet owner-supplied** adapters (email/SMS), whose credential scopes the sender, not the recipient.
 
 The **email/SMS owner-verified-recipient** refusal — the delivery-time check the
 target-bind paragraph of *Mechanism vs config boundary, and both-ends-or-dark*
 requires for these roadmap owner-supplied-destination adapters — carries:
 `Fix: delivery refused — recipient <recipient> is not a destination verified for this rule's owner. An email/SMS adapter's credential scopes the sender, not the recipient, so an owner-supplied recipient MUST be verified for the rule's owner (owner-confirmed recipient or owner-verified sending domain) before delivery. Verify the recipient/domain for this owner, or correct the rule.`
-(This refusal is a Level-2 REFUSED disposition — recorded and reported, never a
-silent drop — exactly as the target-bind and generic-webhook egress refusals in
-*Delivery refusal — the refused-delivery store*.)
+(This refusal is a Level-2 REFUSED disposition — recorded and reported, never a silent drop — exactly as the target-bind and generic-webhook egress refusals in *Delivery refusal — the refused-delivery store*. It **declares `owner-verified-recipient` as its refusal-cause class** in that store's open-but-declared cause set, so a refused email/SMS delivery keys on `(owner, rule_id, owner-verified-recipient)` — never an undefined key that would read as absence.)
 
 ### The generic-webhook egress model
 
@@ -1806,7 +1781,7 @@ Therefore:
   inbox adapter** — the target-bind cannot be sound until the record is created
   under this invariant.
 - **Enforcement is at THREE points, because the inbox target is a filesystem path
-  with no credential to fail closed** (a fixed-destination API adapter fails
+  with no credential to fail closed** (a **credential-scopes-destination** API adapter fails
   closed on its per-account credential; the inbox adapter has none, so the bind
   is asserted explicitly and more than once):
   1. **Save-time bind.** At rule create/edit the target machine's owning account
@@ -1929,9 +1904,7 @@ wins**. The roles are those of *Conformance language* (ingress / router / adapte
   account (*Rule ownership is stamped from the authenticated author*; *Rule identity — `rule_id`*).
 
 **A delivery adapter is conformant when it:**
-- is classified as exactly **fixed-destination** or **owner-supplied-destination**, applying the
-  egress/SSRF model to the generic-webhook adapter only (*Fixed-destination vs
-  owner-supplied-destination*; *The generic-webhook egress model*);
+- is classified on **both orthogonal axes** — its **egress/SSRF model** (present only for the generic-webhook adapter) and its **owner↔destination bind** (**credential-scopes-destination** or **owner-supplied-destination**) — and, when it is **owner-supplied-destination**, enforces the required explicit owner↔destination check as a delivery-time **Level-2 REFUSED** disposition per its member: the inbox adapter's three-point machine↔owner bind, the **email/SMS owner-verified-recipient** check, or the generic-webhook owner allowlist (*Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*; *The generic-webhook egress model*);
 - passes **every** interpolated value through its per-adapter **Escaper** for the surrounding
   context — the first-pass trusted set is **empty**, so a raw/trusted slot is a save-time hard
   error — building structured formats as **data then encoded**, never by string concat
