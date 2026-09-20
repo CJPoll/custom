@@ -1,0 +1,68 @@
+# Tool risk registry (DND-172 / gap 13)
+#
+# Classifies every first-party `ai/bin` script by its WORST-CASE capability, so
+# a downstream consumer (C2 / DND-173 phase gating) can decide whether a tool is
+# allowed to run in a given phase. Classification is by TOOL, not by subcommand:
+# a tool that CAN mutate external state is destructive even if the invocation at
+# hand only reads.
+#
+# Classes, ordered least -> most restrictive:
+#   readOnly     observes/analyzes; cannot mutate the repo, forge, tracker, or
+#                remote in any invocation.
+#   idempotent   mutates LOCAL state deterministically; re-running yields the
+#                same result (no external/irreversible effect).
+#   destructive  mutates external or otherwise irreversible state (forge /
+#                tracker / remote), OR grants that capability to something else.
+#
+# Deny-by-default: `default` is the class assigned to any tool NOT listed here.
+# It MUST stay `destructive` — an unclassified tool is treated as most
+# restrictive until a human classifies it. `ai/bin/check-tool-risk` asserts both
+# this and full coverage (every executable ai/bin script has an entry).
+#
+# Each `tools` entry: `class` (one of `classes`, required) + `reason` (a
+# one-word token naming why, required).
+
+version: 1
+default: destructive
+classes:
+  - readOnly
+  - idempotent
+  - destructive
+
+tools:
+  # --- readOnly: observe/analyze only (writes, if any, stay inside temp/self-test
+  #     sandboxes; no repo/forge/tracker/remote mutation in any invocation) ---
+  admiral-report-watch:    { class: readOnly, reason: watch }
+  check-agent-size:        { class: readOnly, reason: check }
+  check-generic-skills:    { class: readOnly, reason: check }
+  check-guard-messages:    { class: readOnly, reason: check }
+  check-hooks-registered:  { class: readOnly, reason: check }
+  check-inbox-registry:    { class: readOnly, reason: check }
+  check-tool-risk:         { class: readOnly, reason: check }
+  confirm-merged:          { class: readOnly, reason: query }
+  critic-eval:             { class: readOnly, reason: eval }
+  critic-review:           { class: readOnly, reason: review }
+  forge-preflight:         { class: readOnly, reason: probe }
+  harness-gate:            { class: readOnly, reason: gate }
+  harness-signals:         { class: readOnly, reason: signals }
+  lead-time:               { class: readOnly, reason: analysis }
+
+  # --- idempotent: deterministic local mutation (writes an in-repo artifact;
+  #     re-running yields the same result; no external/irreversible effect) ---
+  build-agents:            { class: idempotent, reason: render }
+  # admiral-eval / harness-eval can rewrite a TRACKED baseline JSON via
+  # --update-baseline (and harness-eval writes ai/eval/scorecard.json on the
+  # default gate path), so by worst-case capability they mutate the repo.
+  admiral-eval:            { class: idempotent, reason: baseline }
+  harness-eval:            { class: idempotent, reason: scorecard }
+  # harness-metrics writes ai/telemetry/metrics.json on its default path.
+  harness-metrics:         { class: idempotent, reason: metrics }
+
+  # --- destructive: external/irreversible, or grants that capability ---
+  gh-athena:               { class: destructive, reason: forge }
+  glab-athena:             { class: destructive, reason: forge }
+  # notion-athena-mcp launches an MCP server that EXPOSES Notion writes. It does
+  # not itself write, but its worst-case capability is a tracker mutation, so it
+  # is classified destructive. FLAGGED for owner ratification (DND-172); shipped
+  # destructive because over-restrictive is the safe direction for C2's gating.
+  notion-athena-mcp:       { class: destructive, reason: mcp }

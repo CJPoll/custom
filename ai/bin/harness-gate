@@ -58,6 +58,8 @@ STATIC_CHECKS = [
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
   ["check-inbox-registry",      %w[ai/bin/check-inbox-registry]],
   ["check-guard-messages",      %w[ai/bin/check-guard-messages]],
+  ["check-tool-risk",           %w[ai/bin/check-tool-risk]],
+  ["check-tool-risk self-test", %w[ai/bin/check-tool-risk --self-test]],
   ["harness-eval",              %w[ai/bin/harness-eval]],
   ["critic-review self-test",   %w[ai/bin/critic-review --self-test]],
   ["critic-eval self-test",     %w[ai/bin/critic-eval --self-test]],

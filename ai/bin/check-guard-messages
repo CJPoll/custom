@@ -52,6 +52,7 @@ GUARD_BINS = %w[
   check-generic-skills
   check-hooks-registered
   check-inbox-registry
+  check-tool-risk
   harness-eval
   harness-gate
   critic-review
