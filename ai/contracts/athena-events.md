@@ -78,8 +78,14 @@ notification. Its envelope is:
   `Fix:` (name the ingress and that owner resolution failed), never defaulted to
   an arbitrary or "system" owner.
 - **`occurred_at`** — when the transition happened.
-- **`source`** — provenance: `webhook:slack`, `webhook:notion`, `poller:<lane>`,
-  `emit:<machine_id>`. `source` is **diagnostic only**. It MUST NEVER be an
+- **`source`** — provenance, from this **closed** set: `webhook:slack`,
+  `webhook:notion`, `poller:<lane>`, `emit:<machine_id>`, and
+  **`derived:<rule_id>`** for a **platform-derived** event (a membership-diff
+  transition — `lane.member.added` / `lane.member.retracted` — which is
+  originated by no ingress; its `source` names the membership rule whose diff
+  produced it). Every enumerated `type` therefore has a legal `source`, so an
+  owner predicate leaf on the matchable `event.source` field never reads an
+  undefined value. `source` is **diagnostic only**. It MUST NEVER be an
   authorization input — nothing may grant an event more trust or more scope
   because of what its `source` says. (Authentication of the source is the
   ingress's sender-verification step; `source` is the label recorded after that
@@ -99,7 +105,7 @@ An event that is **handled by no enabled rule** MUST be **dead-lettered and
 persisted** to queryable storage for audit and debugging. It MUST NOT be silently
 dropped, and it MUST NOT be **merely counted** — a bare counter cannot answer
 "which event, of what type, for which owner, went unmatched?", and that question
-is exactly the failed-lookup discipline (`~/dev/custom/CLAUDE.md` → *A failed
+is exactly the failed-lookup discipline (`~/dev/custom/ai/CLAUDE.md` → *A failed
 lookup must never look like an empty one*): an unmatched event is a legitimate
 miss, and a legitimate miss MUST remain observable as the specific thing it was.
 
@@ -221,10 +227,23 @@ gone (see *Membership rules and the lane-membership store*), and they remain
 Because of fan-out (see *Fan-out: every match fires*), one event fires every
 matching rule independently, so each `(event, rule)` delivery MUST be deduped and
 retried on its own. The `idempotency_key` in the envelope is the **event-level**
-key (e.g. Slack's `event_id`; a Notion entity's `notion:<uuid>` combined with a
-change token); the platform combines it with the matched `rule_id` to form the
+key; the platform combines it with the matched `rule_id` to form the
 **per-delivery** key. An implementation MUST dedupe and retry at the
 `(event, rule)` grain, never only at the event grain.
+
+The event-level key basis is defined for **every** enumerated type, so a derived
+event dedupes as reliably as a source-emitted one:
+
+- **Source-emitted** — the source's own event identity: Slack's `event_id`; a
+  Notion entity's `notion:<uuid>` combined with a change token. (A reconciliation
+  backstop hit reuses the same basis so it dedupes against the primary path — see
+  *Poller (fallback only)*.)
+- **Membership-derived** (`lane.member.added` / `lane.member.retracted`) — no
+  source event identity exists, so the key is composed from the transition's own
+  identity: **`rule_id` + `entity_id` + `op` + the triggering event's
+  `idempotency_key`**. This makes a given add/retract, produced by a given rule
+  for a given entity off a given triggering event, idempotent under the fan-out
+  and per-`(event, rule)` retry machinery like any other event.
 
 ---
 
@@ -521,7 +540,7 @@ boolean nodes over comparison leaves (e.g. `all[ any[a, b], not[c], d ]`),
 bounded only by a depth/size cap.
 
 **Evaluation contract.** Predicate evaluation MUST be **pure, total,
-deterministic, and side-effect-free** (Domain code, per `~/dev/custom/CLAUDE.md`
+deterministic, and side-effect-free** (Domain code, per `~/dev/custom/ai/CLAUDE.md`
 → *Architecture*). No arithmetic beyond comparison, no regex, no code, fixed
 type-coercion rules, bounded depth/size. Specifically:
 
@@ -536,7 +555,7 @@ type-coercion rules, bounded depth/size. Specifically:
   `event_type(s)`' payload schemas — see *The predicate grammar*). A path
   outside that set — a misspelled or nonexistent field — is rejected with a
   `Fix:` naming the offending path and the nearest valid field. This is the
-  failed-lookup discipline (`~/dev/custom/CLAUDE.md` → *A failed lookup must
+  failed-lookup discipline (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must
   never look like an empty one*): a wrongly-computed key — a misspelled field —
   otherwise silently matches nothing forever, indistinguishable from a correct
   field that legitimately matched nothing. `absent` (a known field missing at
@@ -550,6 +569,10 @@ type-coercion rules, bounded depth/size. Specifically:
   `Fix:` naming the field, its declared cardinality, and the compatible
   operators, never left to match nothing at dispatch — the same failed-lookup
   class as an unknown field-path, one binding step further in.
+- **A `membership` rule whose predicate references `event.type` is a HARD ERROR
+  at rule-SAVE time** with a `Fix:` — it would defeat directional re-evaluation
+  and make the lane silently never retract (see *Predicates match the present;
+  the membership diff handles the past*).
 - **A malformed predicate is a HARD ERROR at rule-SAVE time**, naming the fault
   with a `Fix:` (which node, which field, what is wrong — including an unknown
   field-path per the bullet above). It MUST NOT be a silent eval-time non-match
@@ -587,6 +610,14 @@ defeat directional re-evaluation: a `notion.ticket.undeleted` (re-entry) or
 `event.type in [created, updated]` leaf would fail on it and re-entry/exit could
 never re-evaluate. (`event.type` remains a normal, valid leaf for a `notify`
 rule, which matches the present event and is never re-evaluated over state.)
+Because `event.type` is otherwise a valid enumerated envelope field, a validator
+built to spec would accept such a predicate and the lane would then **silently
+never retract** — the failed-lookup class — so a **`membership` rule whose
+predicate references `event.type` in any leaf is a save-time HARD ERROR** with a
+`Fix:` (drop the `event.type` leaf; declare the trigger types in the rule's
+`event_type(s)` instead). This is folded into the same rule-save validation as an
+unknown field-path or an operator/cardinality mismatch (see the *Evaluation
+contract*), not left as a bare prohibition.
 
 **Worked owner examples:**
 
@@ -812,6 +843,7 @@ hostile payload values (fence markers, `</script>`, `\r\nBcc:`, `*bold*`,
 | **Email** | HTML body: HTML-entity-escape all values. **Headers (Subject/To/From)**: strip/reject CR/LF (CRLF header injection); use a library that separates headers from body — never interpolate into a raw header line. |
 | **SMS** | plain text: strip control chars; handle GSM-7 vs UCS-2 encoding and length/segmentation deterministically; no markup to escape, but truncate/segment safely. |
 | **Discord** | markdown: escape `* _ ~ ` \| > @`; embeds are JSON — encode, don't concat. |
+| **Notion** | rich-text / block JSON: build the block and rich-text objects as **data structures then encode**, never assemble Notion block JSON by string concat; escape/normalize any text run per Notion's rich-text rules and never inject markup through a `text.content` field. |
 | **Generic webhook** | JSON body: JSON-encode every value; never string-build JSON; content-type fixed. |
 | **Inbox** | a conformant inbox `log` line, per `ai/contracts/athena-inbox.md`; its untrusted body reaches an LLM (Path 2) and is fenced by the inbox contract's *Untrusted input* rules. |
 
@@ -959,7 +991,7 @@ Therefore:
 
 git-common-dir tenancy keying stays the inbox client resolver's job
 (`ai/contracts/athena-inbox.md` → *Repo identity: the git common dir*). This
-whole rule is the failed-lookup discipline (`~/dev/custom/CLAUDE.md` → *A failed
+whole rule is the failed-lookup discipline (`~/dev/custom/ai/CLAUDE.md` → *A failed
 lookup must never look like an empty one*): a dark channel is a lookup that
 matched nothing and said nothing, and it MUST be made observable at every join.
 
