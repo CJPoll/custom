@@ -164,6 +164,21 @@ provisioning API on boot hits no path pattern. The two channels **union**;
 neither cancels the other. A captain's `ROUTINE` never overrides an exit 4, and
 an exit 0 never overrides a captain's `IRREVERSIBLE`.
 
+**A destructive migration is PLANNED, so its authorization is too.** The
+`destructive-migration` surface gates a merge whose deploy drops a table or a
+column — measured 2026-09-20 at 19 of 372 migrations across gen_saas and
+walt_ui, so this fires roughly one MR in twenty, not once a quarter. Waiting for
+the owner at merge time is the avoidable half of that cost: the architect
+designed the drop days earlier, and the only question that decides it — *does
+anything still need this data?* — is the owner's, not a pattern's. So when a
+design specifies a destructive migration, that goes in the architect's
+`QUESTIONS` block at design time and the owner's answer is recorded on the epic;
+you then replay it verbatim via `--owner-approval` and never stall. When there
+is no such pre-authorization, hold the MR exactly as for any other exit 4 —
+**never** infer the authorization from the ticket, the design doc, or the fact
+that the migration is obviously intended. The gate does not bend; the latency is
+designed out upstream.
+
 ## Landing onto a moving main (you are never the only actor in the repo)
 
 `origin/main` moves under you mid-run — another fleet, the shipwright cron, the

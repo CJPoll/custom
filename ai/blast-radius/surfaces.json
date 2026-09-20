@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "comment": [
     "Declared surfaces whose merge, in a repo where merging triggers automation on the",
     "default branch, PERFORMS a real-world action rather than publishing code: it",
@@ -54,6 +54,67 @@
         ".circleci/**",
         "Jenkinsfile"
       ]
+    },
+    {
+      "class": "destructive-migration",
+      "why": "merging RUNS it: the migration executes on the deploy that merging triggers, and irreversibly destroys data. Ecto reversibility restores the SCHEMA, never the rows -- `remove :col, :type` in a `change` block is auto-reversible in Ecto's sense and every value in that column is still gone the moment it runs. NEVER use Ecto-reversibility to downgrade a hit here.",
+      "patterns": [
+        "**/priv/repo/migrations/*.exs",
+        "**/priv/*/migrations/*.exs"
+      ],
+      "content": {
+        "evaluator": "ecto-migration-v1",
+        "comment": [
+          "This surface is CONTENT-gated: a path hit alone is NOT a surface hit.",
+          "Routine migrations (create table, add column, create index) touch these",
+          "paths on every feature MR and must stay COLD.",
+          "",
+          "Measured 2026-09-20 over 364 migrations in gen_saas + walt_ui: a naive",
+          "verb rule (drop|remove anywhere) flags 59 and is ~50% precise on walt_ui,",
+          "gating `drop constraint` x15 and `drop index` x4, which lose no data.",
+          "This rule flags far fewer, and only where rows are actually destroyed.",
+          "",
+          "Content is read from the file AT HEAD (git show <head>:<path>), never",
+          "from diff text: a diff hunk may not show the `def down` line, which",
+          "would make the up/down distinction undecidable. A file absent at head",
+          "was DELETED and does not execute on deploy -- not a hit, but PRINTED,",
+          "never silently skipped. Any other read failure is a hit (fail closed)."
+        ],
+        "exempt_region": "down",
+        "region_def": "^\\s*defp?\\s+(up|down|change)\\b",
+        "region_other_def": "^\\s*defp?\\s+\\w+",
+        "executable_regions": ["up", "change", "helper", "toplevel"],
+        "exclude_first": [
+          {
+            "re": "\\bdrop(_if_exists)?\\s*\\(?\\s*(index|unique_index|constraint|exclusion_constraint)\\s*\\(",
+            "why": "dropping an index or a constraint loses no rows; it is mechanically rebuildable by its inverse. This exclusion is what keeps routine schema hygiene ungated."
+          }
+        ],
+        "match_line": [
+          {
+            "re": "\\bdrop(_if_exists)?\\s*\\(?\\s*table\\s*\\(",
+            "why": "drops a table and every row in it"
+          },
+          {
+            "re": "\\bremove(_if_exists)?\\s*\\(?\\s*:",
+            "why": "drops a column and every value in it"
+          },
+          {
+            "re": "\\bdrop(_if_exists)?\\b",
+            "why": "a `drop` whose argument this rule does not recognise -- the argument is what decides whether rows are lost, so an unrecognised argument is UNDECIDABLE and fails closed"
+          }
+        ],
+        "match_region": [
+          {
+            "re": "\\bDROP\\s+TABLE\\b|\\bDROP\\s+COLUMN\\b|\\bTRUNCATE\\b|\\bDELETE\\s+FROM\\b",
+            "why": "raw destructive SQL in an `execute`. Scanned region-wide, not per-line, so heredocs are covered."
+          }
+        ],
+        "known_gaps": [
+          "A lossy `modify` (narrowing a column type so Postgres truncates on cast) is NOT detected. Most `modify` calls are benign (null, default) and no pattern separates them, so this is a NAMED gap rather than a silent one; the captain's `Blast radius: IRREVERSIBLE` channel is its only cover.",
+          "A `drop table` on a table created earlier in the SAME migration is a hit, though it destroys nothing. Rare; fails closed by design."
+        ]
+      }
     }
   ]
 }

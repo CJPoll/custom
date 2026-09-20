@@ -127,6 +127,13 @@ questions — asking is cheaper than a wrong assumption, so ask rather than
 guess. Don't trickle questions out one at a time; each round trip stalls the
 ticket.
 
+**A design that specifies a destructive migration always raises one** — dropping
+a table or a column is gated at merge as an owner decision (`blast-radius` →
+`destructive-migration`), and the question it turns on, *does anything still
+need this data?*, is the owner's alone. Ask it here, where the answer can be
+recorded on the epic days before the merge, rather than leaving the admiral to
+stall on it at boarding time.
+
 Do not mark a spec ready while an access control question is open. If forced
 to proceed, record the assumption in the spec's assumptions section, mark it
 **UNRESOLVED — ACCESS CONTROL**, choose the most restrictive interpretation,

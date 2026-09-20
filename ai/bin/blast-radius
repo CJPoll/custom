@@ -94,6 +94,18 @@ FNM = File::FNM_PATHNAME | File::FNM_EXTGLOB
 # Branch names treated as the default branch for trigger matching.
 DEFAULT_BRANCHES = %w[main master].freeze
 
+# Bumped 1 -> 2 when surfaces gained `content`: a predicate over the file's TEXT
+# rather than only its path. No schema-1 surface needed one.
+MANIFEST_SCHEMA = 2
+
+ECTO_MIGRATION_EVALUATOR = "ecto-migration-v1"
+
+KNOWN_CONTENT_KEYS = %w[
+  evaluator comment known_gaps
+  exempt_region region_def region_other_def executable_regions
+  exclude_first match_line match_region
+].freeze
+
 def die(msg, fix, code = 2)
   warn "#{PROG}: #{msg}"
   warn "Fix: #{fix}"
@@ -119,9 +131,9 @@ def load_manifest(path)
         "An unparseable manifest is an ERROR, never an empty surface list.")
   end
 
-  unless data.is_a?(Hash) && data["schema"] == 1
-    die("manifest #{path} has schema #{data.is_a?(Hash) ? data['schema'].inspect : 'n/a'}, expected 1.",
-        "this script understands schema 1 only. Either migrate the manifest or " \
+  unless data.is_a?(Hash) && data["schema"] == MANIFEST_SCHEMA
+    die("manifest #{path} has schema #{data.is_a?(Hash) ? data['schema'].inspect : 'n/a'}, expected #{MANIFEST_SCHEMA}.",
+        "this script understands schema #{MANIFEST_SCHEMA} only. Either migrate the manifest or " \
         "update blast-radius to handle the new schema. Refusing to classify " \
         "against a schema it does not understand.")
   end
@@ -132,6 +144,50 @@ def load_manifest(path)
         "a manifest with zero surfaces would classify EVERY merge as COLD, " \
         "silently disabling this check. Restore the surface list. Zero surfaces " \
         "is an ERROR, not 'nothing is sensitive'.")
+  end
+
+  # A surface may declare `content`: a predicate over the FILE'S TEXT, not just
+  # its path. A path-only surface is unchanged. Validate here, loudly, because
+  # the two ways to get this wrong are both silent:
+  #   - ignoring an unknown content rule => the surface degrades to a PATH-ONLY
+  #     gate, and every routine migration reads HOT.
+  #   - ignoring the surface entirely    => it reads COLD and the gate is off.
+  # Both are "a failed lookup that looks like an empty one". Refuse instead.
+  surfaces.each do |s|
+    c = s["content"]
+    next if c.nil?
+
+    unless c.is_a?(Hash)
+      die("surface '#{s['class']}' has a `content` key that is not an object.",
+          "`content` declares a text predicate; it must be an object. Refusing " \
+          "to classify: a content rule this script cannot read would silently " \
+          "become either a path-only gate or no gate at all.")
+    end
+
+    unless c["evaluator"] == ECTO_MIGRATION_EVALUATOR
+      die("surface '#{s['class']}' declares content evaluator #{c['evaluator'].inspect}, " \
+          "which this blast-radius does not implement.",
+          "this script implements '#{ECTO_MIGRATION_EVALUATOR}' only. Either update " \
+          "blast-radius to implement that evaluator, or correct the manifest. An " \
+          "unevaluable content rule is an ERROR -- never a path-only gate (which " \
+          "would flag every routine migration) and never a silent miss.")
+    end
+
+    unknown = c.keys - KNOWN_CONTENT_KEYS
+    unless unknown.empty?
+      die("surface '#{s['class']}' declares unknown content key(s): #{unknown.join(', ')}.",
+          "this script would IGNORE those keys, so the rule would not mean what " \
+          "the manifest says. Remove them, or implement them in content_hit?. " \
+          "Silently ignoring part of a safety rule is the defect this check exists " \
+          "to prevent.")
+    end
+
+    if (c["match_line"].to_a + c["match_region"].to_a).empty?
+      die("surface '#{s['class']}' declares `content` with no match rules.",
+          "a content surface with nothing to match can never hit, silently " \
+          "disabling this surface while the manifest still lists it. Restore the " \
+          "match_line / match_region rules.")
+    end
   end
 
   pattern_count = surfaces.sum { |s| (s["patterns"] || []).size }
@@ -161,17 +217,187 @@ def match?(pattern, path)
   false
 end
 
-def hits_for(files, surfaces)
+# Split an Ecto migration into [region, line] pairs.
+#
+# Region attribution is PER-`def`, deliberately NOT "above/below the `def down`
+# line". A file that defines `down` BEFORE `up`, or that puts a helper after
+# `down`, breaks the positional form -- and it breaks it OPEN, reading an
+# executable `drop table` as exempt. Pinned by a self-test case.
+#
+# Only `down` is exempt. `helper` is executable-by-default: a private helper
+# called from `up` runs on deploy, and proving a helper is reachable only from
+# `down` needs call-graph analysis. Fail closed.
+# The manifest declares POLICY (which operations destroy data); this function
+# knows the LANGUAGE. Two lexical facts, both learned from replaying the rule
+# over the real 372-migration corpus on 2026-09-20 rather than from a fixture:
+#
+#   * `@moduledoc """ ... """` prose is not code. Six of the corpus's 25 hits
+#     were sentences like "then drop the extension" and "drop the plaintext
+#     columns" inside a moduledoc -- a 24% false-positive rate, entirely
+#     documentation. Comment lines were already skipped; docstrings are the
+#     same class and were not.
+#   * A call can span lines. walt_ui's 20260821164800 is
+#     `drop_if_exists(\n  constraint(...)\n)`, where the ARGUMENT -- the thing
+#     that decides whether rows are lost -- is on the next line. Matching per
+#     physical line cannot see it, so the index/constraint exclusion missed and
+#     the fail-closed rule fired on a constraint drop. Lines are therefore
+#     joined into LOGICAL lines while parentheses are unbalanced.
+#
+# Returns [region, logical_line] pairs.
+def ecto_regions(text, rule)
+  region_def = Regexp.new(rule["region_def"])
+  other_def  = Regexp.new(rule["region_other_def"])
+  region = "toplevel"
+  in_doc = false
+  out = []
+  pending = nil
+  pending_region = nil
+
+  text.to_s.lines.each do |line|
+    # Doc attributes: `@moduledoc """` opens a block that ends at the next
+    # `"""`; a single-line `@doc "..."` / `@moduledoc false` is dropped outright.
+    if in_doc
+      in_doc = false if line.strip == '"""'
+      next
+    end
+    if line.match?(/^\s*@(moduledoc|doc|typedoc|shortdoc)\s+"""/)
+      in_doc = true
+      next
+    end
+    next if line.match?(/^\s*@(moduledoc|doc|typedoc|shortdoc)\s/)
+
+    if pending.nil?
+      if (m = line.match(region_def))
+        region = m[1]
+      elsif line.match?(other_def)
+        region = "helper"
+      end
+      next if line.strip.start_with?("#")
+    end
+
+    if pending
+      # A comment does not execute at ANY nesting depth. Without this, a comment
+      # inside a multi-line call is joined into the logical line and its PROSE is
+      # matched: walt_ui's 20260716120000 has `execute(` spanning a comment
+      # reading "intentionally does NOT drop faraday_user", which fired the
+      # fail-closed rule on a migration that drops nothing. Inside a `"""`
+      # heredoc, though, a `#` line is SQL content rather than a comment -- an
+      # odd number of `"""` so far means we are in one.
+      in_heredoc = pending.scan('"""').length.odd?
+      if !in_heredoc && line.strip.start_with?("#")
+        next
+      end
+      pending << line
+      pending_balance = pending.count("(") - pending.count(")")
+      if pending_balance <= 0
+        out << [pending_region, pending]
+        pending = nil
+        pending_region = nil
+      end
+      next
+    end
+
+    if line.count("(") - line.count(")") > 0
+      pending = +line.dup
+      pending_region = region
+      next
+    end
+
+    out << [region, line]
+  end
+
+  # An unterminated call still has to be classified -- dropping it would be a
+  # silent miss.
+  out << [pending_region, pending] if pending
+  out
+end
+
+# [:hit, detail] / [:miss, nil] / [:skipped, detail]
+#
+# Content is read from the file AT HEAD, never from diff text. A diff hunk may
+# not show the `def down` line, which would make the up/down distinction
+# undecidable; the complete file always does. Ecto migrations are append-only by
+# convention, so the diff usually IS the whole file -- reading at head makes that
+# structural rather than lucky, and for an edited already-deployed migration it
+# is strictly more correct (the deploy runs the file as it is at head).
+def content_hit?(repo, head, path, rule)
+  _, _, exists = git(repo, "cat-file", "-e", "#{head}:#{path}")
+  unless exists
+    # DELETED at head. A migration that is not there does not execute on deploy,
+    # so this is correctly not a hit -- but it is PRINTED, never silently
+    # dropped (ai/CLAUDE.md -> "A failed lookup must never look like an empty
+    # one"): this is the one residual undecidable-looking case, and a reader has
+    # to be able to tell it from "examined and clean".
+    return [:skipped, "absent at head (deleted) -- not executed on deploy"]
+  end
+
+  text, err, ok = git(repo, "show", "#{head}:#{path}")
+  unless ok
+    # Present but unreadable is NOT the deleted case, and must not borrow its
+    # benign reading. Fail closed.
+    return [:hit, "UNDETERMINED-content: readable check passed but `git show` failed (#{err.to_s.strip})"]
+  end
+
+  exempt    = rule["exempt_region"]
+  exec_set  = rule["executable_regions"].to_a
+  excludes  = rule["exclude_first"].to_a.map { |r| [Regexp.new(r["re"]), r["why"]] }
+  lines_res = rule["match_line"].to_a.map { |r| [Regexp.new(r["re"]), r["why"]] }
+  region_res = rule["match_region"].to_a.map { |r| [Regexp.new(r["re"], Regexp::IGNORECASE), r["why"]] }
+
+  executable = []
+  ecto_regions(text, rule).each do |region, line|
+    next if region == exempt
+    next unless exec_set.include?(region)
+    # A commented-out line does not execute.
+    next if line.strip.start_with?("#")
+
+    executable << line
+
+    # Exclusions are checked FIRST: dropping an index or a constraint loses no
+    # rows. This is what keeps routine schema hygiene ungated -- 19 of the 49
+    # naive hits measured across walt_ui were exactly these.
+    next if excludes.any? { |re, _| line.match?(re) }
+
+    lines_res.each do |re, why|
+      return [:hit, "#{why} (in `#{region}`: #{line.strip.gsub(/\s+/, ' ')})"] if line.match?(re)
+    end
+  end
+
+  # Region-WIDE, so a destructive statement inside an `execute """ ... """`
+  # heredoc is covered. A per-line scan passes those only by accident.
+  joined = executable.join
+  region_res.each do |re, why|
+    if (m = joined.match(re))
+      return [:hit, "#{why} (matched #{m[0].strip.inspect})"]
+    end
+  end
+
+  [:miss, nil]
+end
+
+def hits_for(files, surfaces, repo = nil, head = nil)
   hits = []
+  examined = []
   files.each do |f|
     surfaces.each do |s|
       next unless (s["patterns"] || []).any? { |p| match?(p, f) }
+
+      if (rule = s["content"])
+        verdict, detail = content_hit?(repo, head, f, rule)
+        examined << { path: f, class: s["class"], verdict: verdict, detail: detail }
+        # A path hit alone is NOT a surface hit for a content surface: routine
+        # migrations touch these paths on every feature MR and must stay COLD.
+        next unless verdict == :hit
+
+        hits << { path: f, class: s["class"], why: s["why"], detail: detail }
+        break
+      end
 
       hits << { path: f, class: s["class"], why: s["why"] }
       break
     end
   end
-  hits
+  [hits, examined]
 end
 
 # --- git --------------------------------------------------------------------
@@ -321,13 +547,24 @@ def short(sha)
   sha.to_s[0, 7]
 end
 
-def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, automation)
+def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, automation, examined = [])
   puts "BLAST-RADIUS #{verdict} #{short(head)}"
   puts "  manifest: #{manifest} (#{surfaces.size} class(es), #{pattern_count} pattern(s))"
   # This line is the failed-lookup doctrine discharged: a zero can always name
   # WHICH key found zero, so "no surface hit" and "the manifest never loaded"
   # can never read the same.
   puts "  compared: #{files.size} changed file(s) against #{pattern_count} pattern(s) -> #{hits.size} hit"
+  # Same doctrine, one level deeper. For a CONTENT surface a path match is not a
+  # hit, so without this line a migration MR that went COLD could not say whether
+  # it examined the migration and found it clean, or never looked at all -- and a
+  # file skipped because it is absent at head must not read like a clean one.
+  unless examined.to_a.empty?
+    puts "  content-examined: #{examined.size} file(s) against content rule(s)"
+    examined.each do |e|
+      label = { hit: "HIT", miss: "clean", skipped: "skipped" }[e[:verdict]]
+      puts "    #{e[:path]}  [#{e[:class]}] #{label}#{e[:detail] ? " -- #{e[:detail]}" : ''}"
+    end
+  end
   if automation
     puts "  merge-time automation: #{automation[0]} (#{automation[1]})"
   else
@@ -399,17 +636,17 @@ def run(argv)
 
   surfaces, pattern_count = load_manifest(manifest)
   files = changed_files(repo, base, head)
-  hits = hits_for(files, surfaces)
+  hits, examined = hits_for(files, surfaces, repo, head)
 
   if hits.empty?
-    print_report("COLD", head, manifest, surfaces, pattern_count, files, hits, nil)
+    print_report("COLD", head, manifest, surfaces, pattern_count, files, hits, nil, examined)
     return 0
   end
 
   automation = detect_automation(repo)
 
   if automation[0] == "CONFIRMED-ABSENT"
-    print_report("WARM", head, manifest, surfaces, pattern_count, files, hits, automation)
+    print_report("WARM", head, manifest, surfaces, pattern_count, files, hits, automation, examined)
     puts "  -> a declared surface is touched, but merging triggers no automation: merging lands code only."
     return 0
   end
@@ -417,7 +654,7 @@ def run(argv)
   # HOT. The full block prints in every case -- including under
   # --owner-approval, which RECORDS the authorization, it never HIDES what was
   # authorized.
-  print_report("HOT", head, manifest, surfaces, pattern_count, files, hits, automation)
+  print_report("HOT", head, manifest, surfaces, pattern_count, files, hits, automation, examined)
 
   if owner_approval
     puts "BLAST-RADIUS HOT-OWNER-APPROVED #{short(head)} (OWNER-APPROVED: #{owner_approval})"
@@ -590,15 +827,231 @@ def self_test
     check.call("an EMPTY diff is an ERROR (exit 2), never COLD",
                code == 2 && err.include?("EMPTY"), "exit=#{code} err=#{err}")
 
+    # --- destructive-migration (content-gated surface) -----------------------
+    #
+    # This surface is the first whose predicate is the file's TEXT, not its path.
+    # The cases below are split deliberately: the MUST-GATE set proves the gate
+    # exists, and the MUST-NOT-GATE set proves the precision that makes it usable.
+    # Measured 2026-09-20 over 364 migrations in gen_saas + walt_ui, a naive verb
+    # rule was ~50% precise on walt_ui -- and a gate that fires wrongly half the
+    # time trains people to bypass it, which is a weakening in effect. The
+    # false-positive cases are therefore load-bearing, not decoration.
+    mig_n = 0
+    mig = lambda do |body, path: nil, seed_wf: deploy_wf, seed_mig: nil|
+      mig_n += 1
+      d = File.join(tmp, "mig#{mig_n}")
+      p = path || "priv/repo/migrations/20240101000000_m.exs"
+      seed = lambda do |r|
+        wf.call(r, "post-merge.yml", seed_wf) if seed_wf
+        if seed_mig
+          FileUtils.mkdir_p(File.join(r, File.dirname(p)))
+          File.write(File.join(r, p), seed_mig)
+        end
+      end
+      b2, h2 = mkrepo.call(d, seed: seed) do |r|
+        FileUtils.mkdir_p(File.join(r, File.dirname(p)))
+        if body.nil?
+          FileUtils.rm_f(File.join(r, p))
+        else
+          File.write(File.join(r, p), body)
+        end
+      end
+      out2, err2, code2 = run_br.call(["--base", b2, "--head", h2, "--repo", d])
+      [out2, err2, code2]
+    end
+
+    wrap = lambda { |up, down = nil| +"defmodule R.M do\n  use Ecto.Migration\n\n  def up do\n#{up}\n  end\n" + (down ? "\n  def down do\n#{down}\n  end\n" : "") + "end\n" }
+    chg  = lambda { |body| "defmodule R.M do\n  use Ecto.Migration\n\n  def change do\n#{body}\n  end\nend\n" }
+
+    # --- must gate (HOT, exit 4) ---
+    hot_mig = lambda do |desc, body, **kw|
+      o, _e, c = mig.call(body, **kw)
+      check.call(desc, c == 4 && o.include?("destructive-migration"), "exit=#{c} out=#{o}")
+    end
+
+    hot_mig.call("destructive-migration: `drop table` in `def up` is HOT",
+                 wrap.call("    drop table(:widgets)"))
+    hot_mig.call("destructive-migration: `drop table` in `def change` is HOT (change is executable)",
+                 chg.call("    drop table(:widgets)"))
+    hot_mig.call("destructive-migration: `remove :col` in `change` is HOT",
+                 chg.call("    alter table(:users) do\n      remove :legacy_token\n    end"))
+    hot_mig.call("destructive-migration: `remove :col, references(...)` in `up` is HOT (the walt_ui shape)",
+                 wrap.call("    alter table(:users) do\n      remove :contact_id, references(:contacts)\n    end"))
+    # Ecto-reversibility restores the SCHEMA, never the rows. This case is the
+    # one most likely to be "optimized" away by a future reader.
+    hot_mig.call("destructive-migration: Ecto-reversible `remove :col, :type` is STILL HOT (rows are gone)",
+                 chg.call("    alter table(:users) do\n      remove :nickname, :string\n    end"))
+    hot_mig.call("destructive-migration: `drop_if_exists table(...)` in `up` is HOT",
+                 wrap.call("    drop_if_exists table(:widgets)"))
+    # Raw SQL in a heredoc: a per-line scan passes this only by accident.
+    hot_mig.call("destructive-migration: destructive raw SQL in an `execute` heredoc is HOT (region-wide scan)",
+                 wrap.call("    execute \"\"\"\n    ALTER TABLE users DROP COLUMN legacy_token;\n    \"\"\""))
+    hot_mig.call("destructive-migration: `execute \"TRUNCATE ...\"` in `change` is HOT",
+                 chg.call("    execute \"TRUNCATE audit_log\""))
+    # The argument is what decides whether rows are lost, so an unrecognised
+    # argument is UNDECIDABLE and must fail closed.
+    hot_mig.call("destructive-migration: a `drop` with an UNRECOGNISED argument fails CLOSED",
+                 wrap.call("    drop some_dynamic_thing(:x)"))
+    # Region attribution is per-`def`, not "above the `def down` line". The
+    # positional form fails this one OPEN.
+    hot_mig.call("destructive-migration: `down` defined BEFORE `up` still gates the `up` (per-def regions)",
+                 "defmodule R.M do\n  use Ecto.Migration\n\n  def down do\n    create table(:widgets) do\n    end\n  end\n\n  def up do\n    drop table(:widgets)\n  end\nend\n")
+    hot_mig.call("destructive-migration: a destructive `defp` helper is HOT (helpers are executable)",
+                 "defmodule R.M do\n  use Ecto.Migration\n\n  def up do\n    nuke()\n  end\n\n  defp nuke do\n    drop table(:widgets)\n  end\nend\n")
+    # Classification reads the file AT HEAD, not the hunk.
+    hot_mig.call("destructive-migration: an EDITED migration is classified from HEAD, not the hunk",
+                 wrap.call("    drop table(:widgets)"),
+                 seed_mig: chg.call("    create table(:widgets) do\n    end"))
+    hot_mig.call("destructive-migration: the second migrations path glob (priv/*/migrations) matches",
+                 wrap.call("    drop table(:widgets)"),
+                 path: "priv/replica_repo/migrations/20240101000000_m.exs")
+
+    # --- must NOT gate (COLD, exit 0) — the precision cases ---
+    cold_mig = lambda do |desc, body, **kw|
+      o, _e, c = mig.call(body, **kw)
+      check.call(desc, c.zero? && o.include?("BLAST-RADIUS COLD"), "exit=#{c} out=#{o}")
+    end
+
+    # 15 occurrences in walt_ui. Constraints and indexes hold NO data.
+    cold_mig.call("destructive-migration: `drop constraint` is COLD (loses no rows)",
+                  chg.call("    drop constraint(:users, :users_email_check)"))
+    # 4 occurrences in walt_ui.
+    cold_mig.call("destructive-migration: `drop index` is COLD (loses no rows)",
+                  wrap.call("    drop index(:users, [:email])"))
+    cold_mig.call("destructive-migration: `drop_if_exists index` is COLD",
+                  chg.call("    drop_if_exists index(:users, [:email])"))
+    cold_mig.call("destructive-migration: `drop unique_index` is COLD",
+                  chg.call("    drop unique_index(:users, [:email])"))
+    # The core exemption, and the single most common real migration shape.
+    cold_mig.call("destructive-migration: `drop table` ONLY inside `def down` is COLD",
+                  wrap.call("    create table(:widgets) do\n    end", "    drop table(:widgets)"))
+    cold_mig.call("destructive-migration: `remove` inside `def down` (with `add` in `up`) is COLD",
+                  wrap.call("    alter table(:users) do\n      add :col, :string\n    end",
+                            "    alter table(:users) do\n      remove :col\n    end"))
+    cold_mig.call("destructive-migration: a commented-out `drop table` is COLD",
+                  wrap.call("    # drop table(:widgets)\n    create table(:gadgets) do\n    end"))
+
+    # --- lexical cases, ALL found by replaying the rule over the real corpus ---
+    #
+    # Every one of these was a live false positive measured on 2026-09-20 against
+    # the 372 migrations in gen_saas + walt_ui. None was predicted by a fixture,
+    # which is the argument for the replay: a hand-written fixture builds its
+    # input the way the matcher already expects.
+    cold_mig.call("destructive-migration: `drop` PROSE in a @moduledoc is COLD (6 corpus false positives)",
+                  "defmodule R.M do\n  @moduledoc \"\"\"\n  Rewrites the defaults, then drop the extension.\n  We also drop the plaintext columns here.\n  \"\"\"\n  use Ecto.Migration\n\n  def change do\n    create table(:gadgets) do\n    end\n  end\nend\n")
+    cold_mig.call("destructive-migration: a single-line @doc mentioning drop is COLD",
+                  "defmodule R.M do\n  @moduledoc \"drop the old table eventually\"\n  use Ecto.Migration\n\n  def change do\n    create table(:gadgets) do\n    end\n  end\nend\n")
+    # walt_ui 20260821164800: the ARGUMENT -- the thing that decides whether rows
+    # are lost -- was on the next line, so a per-physical-line match could not
+    # see it and the fail-closed rule fired on a constraint drop.
+    cold_mig.call("destructive-migration: a MULTI-LINE `drop_if_exists(constraint(...))` is COLD",
+                  wrap.call("    drop_if_exists(\n      constraint(:users, \"users_contact_id_fkey\")\n    )"))
+    # walt_ui 20260716120000: a comment inside a multi-line `execute(`.
+    cold_mig.call("destructive-migration: a COMMENT inside a multi-line call is not executable",
+                  chg.call("    execute(\n      \"CREATE SCHEMA IF NOT EXISTS s\",\n      # down: intentionally does NOT drop faraday_user\n      \"SELECT 1\"\n    )"))
+    # The joining must not LOSE a real hit -- the other direction of the same fix.
+    hot_mig.call("destructive-migration: a MULTI-LINE `drop(table(...))` is still HOT",
+                 wrap.call("    drop(\n      table(:widgets)\n    )"))
+    # Inside a heredoc a `#` line is STRING CONTENT, not an Elixir comment, so
+    # Elixir's comment rule must not reach into it. The destructive statement is
+    # deliberately the ONLY one and sits on the `#` line: strip that line and the
+    # case goes COLD, which is what makes this case discriminate rather than pass
+    # on a sibling line. (Its first draft did exactly that -- caught by sabotage,
+    # not by the suite being green.)
+    hot_mig.call("destructive-migration: a `#` line inside a heredoc is string content, not a comment",
+                 wrap.call("    execute(\n      \"\"\"\n      # DROP TABLE widgets;\n      \"\"\"\n    )"))
+
+    # A routine migration must not merely be silent -- it must SAY it was
+    # examined and found clean, or "clean" and "never looked" read the same.
+    o, _e, c = mig.call(chg.call("    create table(:gadgets) do\n      add :name, :string\n    end"))
+    check.call("destructive-migration: a routine migration is COLD",
+               c.zero? && o.include?("BLAST-RADIUS COLD"), "exit=#{c} out=#{o}")
+    check.call("destructive-migration: a COLD migration PRINTS that it was examined and clean",
+               o.include?("content-examined:") && o.include?("clean"), o)
+
+    # The one residual undecidable-looking case: absent at head means deleted,
+    # which does not execute on deploy. Not a hit -- but printed, never silent.
+    o, _e, c = mig.call(nil, seed_mig: wrap.call("    drop table(:widgets)"))
+    check.call("destructive-migration: a DELETED migration is COLD (it never runs on deploy)",
+               c.zero? && o.include?("BLAST-RADIUS COLD"), "exit=#{c} out=#{o}")
+    check.call("destructive-migration: the deleted-at-head skip is PRINTED, not silent",
+               o.include?("skipped") && o.include?("absent at head"), o)
+
+    # The content scan must never run off the cold path.
+    o, _e, c = mig.call(chg.call("    create table(:gadgets) do\n    end"),
+                        path: "lib/my_app/migrations_helper.ex")
+    check.call("destructive-migration: the content rule does not leak into ordinary source paths",
+               c.zero? && !o.include?("content-examined:"), "exit=#{c} out=#{o}")
+
+    # --- the conjunction still holds for this class ---
+    o, _e, c = mig.call(wrap.call("    drop table(:widgets)"), seed_wf: nil)
+    check.call("destructive-migration: destructive migration + NO CI config is WARM, not HOT",
+               c.zero? && o.include?("BLAST-RADIUS WARM"), "exit=#{c} out=#{o}")
+    o, _e, c = mig.call(wrap.call("    drop table(:widgets)"), seed_wf: pr_wf)
+    check.call("destructive-migration: destructive migration + pull_request-only CI is WARM",
+               c.zero? && o.include?("BLAST-RADIUS WARM"), "exit=#{c} out=#{o}")
+
+    # --- manifest schema/content validation ---
+    mig_d = File.join(tmp, "mig1")
+    mb = `git -C #{mig_d} rev-parse HEAD~1`.strip
+    mh = `git -C #{mig_d} rev-parse HEAD`.strip
+
+    old_schema = File.join(tmp, "schema1.json")
+    File.write(old_schema, JSON.dump({ "schema" => 1, "surfaces" => [{ "class" => "x", "why" => "y", "patterns" => ["**/*"] }] }))
+    _, err, code = run_br.call(["--base", mb, "--head", mh, "--repo", mig_d, "--manifest", old_schema])
+    check.call("a schema-1 manifest is refused after the content bump (with a Fix:)",
+               code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+
+    # An unevaluable content rule must be an ERROR -- never a silent path-only
+    # gate (which would flag EVERY migration) and never a silent miss.
+    bad_eval = File.join(tmp, "badeval.json")
+    File.write(bad_eval, JSON.dump({ "schema" => MANIFEST_SCHEMA, "surfaces" => [
+      { "class" => "x", "why" => "y", "patterns" => ["**/*"],
+        "content" => { "evaluator" => "some-future-thing-v9", "match_line" => [{ "re" => "x", "why" => "z" }] } }
+    ] }))
+    _, err, code = run_br.call(["--base", mb, "--head", mh, "--repo", mig_d, "--manifest", bad_eval])
+    check.call("an UNEVALUABLE content rule is an ERROR, not a path-only gate and not a silent miss",
+               code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+
+    unknown_key = File.join(tmp, "unknownkey.json")
+    File.write(unknown_key, JSON.dump({ "schema" => MANIFEST_SCHEMA, "surfaces" => [
+      { "class" => "x", "why" => "y", "patterns" => ["**/*"],
+        "content" => { "evaluator" => ECTO_MIGRATION_EVALUATOR, "match_line" => [{ "re" => "x", "why" => "z" }],
+                       "somethig_typoed" => true } }
+    ] }))
+    _, err, code = run_br.call(["--base", mb, "--head", mh, "--repo", mig_d, "--manifest", unknown_key])
+    check.call("an unknown content key is refused rather than SILENTLY IGNORED",
+               code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+
+    norules = File.join(tmp, "norules.json")
+    File.write(norules, JSON.dump({ "schema" => MANIFEST_SCHEMA, "surfaces" => [
+      { "class" => "x", "why" => "y", "patterns" => ["**/*"],
+        "content" => { "evaluator" => ECTO_MIGRATION_EVALUATOR } }
+    ] }))
+    _, err, code = run_br.call(["--base", mb, "--head", mh, "--repo", mig_d, "--manifest", norules])
+    check.call("a content surface with NO match rules is an ERROR, not a silently dead surface",
+               code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+
+    # --owner-approval still prints the full HOT block for this class too.
+    o, _e, c = mig.call(wrap.call("    drop table(:widgets)"))
+    mig_d2 = File.join(tmp, "mig#{mig_n}")
+    ob = `git -C #{mig_d2} rev-parse HEAD~1`.strip
+    oh = `git -C #{mig_d2} rev-parse HEAD`.strip
+    out, _, code = run_br.call(["--base", ob, "--head", oh, "--repo", mig_d2,
+                                "--owner-approval", "yes, drop it -- Cody, recorded on DND-999"])
+    check.call("destructive-migration under --owner-approval exits 0 but STILL prints the HOT hit",
+               code.zero? && out.include?("BLAST-RADIUS HOT") && out.include?("destructive-migration"),
+               "exit=#{code} out=#{out}")
+
     # 2/3. manifest failure modes — a wrongly-resolved manifest must say so
     empty_manifest = File.join(tmp, "empty.json")
-    File.write(empty_manifest, JSON.dump({ "schema" => 1, "surfaces" => [] }))
+    File.write(empty_manifest, JSON.dump({ "schema" => MANIFEST_SCHEMA, "surfaces" => [] }))
     _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--manifest", empty_manifest])
     check.call("a manifest with ZERO surfaces is an ERROR, not 'nothing is sensitive'",
                code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
 
     nopat = File.join(tmp, "nopat.json")
-    File.write(nopat, JSON.dump({ "schema" => 1, "surfaces" => [{ "class" => "x", "why" => "y", "patterns" => [] }] }))
+    File.write(nopat, JSON.dump({ "schema" => MANIFEST_SCHEMA, "surfaces" => [{ "class" => "x", "why" => "y", "patterns" => [] }] }))
     _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--manifest", nopat])
     check.call("a manifest with ZERO patterns is an ERROR, not 'nothing is sensitive'",
                code == 2 && err.include?("ZERO patterns"), "exit=#{code} err=#{err}")
