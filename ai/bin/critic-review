@@ -23,16 +23,35 @@
 # the deterministic gate. Its --self-test (the decision + FINDINGS parser) IS
 # deterministic and gate-safe.
 #
+# Verdict receipts (the load-bearing addition, 2026-09-20). Every completed run
+# records its outcome at $GIT_DIR/critic-verdicts/<head-sha>.json, and marks
+# <head-sha>.running for the duration. This exists so that a judge that NEVER
+# RAN, FAIL-OPENED, or HAD NOT FINISHED YET is distinguishable from one that
+# PASSED -- three states that were all "exit 0, nothing recorded" and therefore
+# all read as a pass at the admiral's merge gate. Measured on
+# 2026-09-19-slack-gensaas: DND-194 merged while the judge was still running
+# (factual error landed on main, recovered by PR #41); DND-212's judge
+# fail-opened twice and was caught only by the admiral's discretion.
+# `integration-gate` reads these; see athena:merge-boarding -> "The merge bar".
+#
 # Usage:
 #   ai/bin/critic-review [--base BRANCH]   review HEAD's diff vs BRANCH (default
 #                                          origin/HEAD or main); exit 0 pass /
 #                                          2 block / 0 fail-open(loud)
-#   ai/bin/critic-review --self-test       verify the decision + parser (no model)
+#   ai/bin/critic-review --verdict-for SHA read the RECORDED verdict for SHA;
+#                                          exit 0 pass / 2 block / 3 no green
+#                                          verdict (none / running / fail-open /
+#                                          stale-tree / malformed -- each named)
+#   ai/bin/critic-review --self-test       verify the decision, parser, and the
+#                                          receipt writer+reader (no model)
 #
 # Testing hook: CRITIC_REVIEW_STUB=<file> uses that file as the critic output
 # instead of invoking `claude` (used by --self-test; also handy for a dry run).
 
 require "open3"
+require "json"
+require "fileutils"
+require "time"
 
 CRITIC = "athena-diff-critic"
 
@@ -50,6 +69,116 @@ def decide(findings, trailer_ok, invoke_ok)
   return ["fail-open", 0] unless invoke_ok && trailer_ok
   return ["pass", 0] if findings.empty?
   ["block", 2]
+end
+
+VERDICT_SCHEMA = 1
+
+# Resolving the receipt directory is its OWN step with its OWN outcome.
+# `git rev-parse --git-path` returns a CWD-RELATIVE path in a main checkout and
+# an absolute one only in a worktree (CLAUDE.md -> "A failed lookup must never
+# look like an empty one" -- the DND-183/DND-202 instance). It is expanded
+# against the repo root HERE, at the point of capture, and never re-resolved.
+# Unresolvable is nil (an error to the caller), never a silent empty.
+def verdict_dir
+  root, _e, s1 = Open3.capture3("git", "rev-parse", "--show-toplevel")
+  raw,  _e2, s2 = Open3.capture3("git", "rev-parse", "--git-path", "critic-verdicts")
+  return nil unless s1.success? && s2.success?
+  return nil if root.strip.empty? || raw.strip.empty?
+  File.expand_path(raw.strip, root.strip)
+end
+
+def head_sha
+  out, _e, st = Open3.capture3("git", "rev-parse", "--verify", "HEAD^{commit}")
+  (st.success? && out.strip =~ /\A[0-9a-f]{40}\z/) ? out.strip : nil
+end
+
+def tree_dirty?
+  out, _e, st = Open3.capture3("git", "status", "--porcelain")
+  !st.success? || !out.strip.empty?
+end
+
+def mark_running(sha)
+  dir = verdict_dir
+  return unless dir && sha
+  FileUtils.mkdir_p(dir)
+  File.write(File.join(dir, "#{sha}.running"), Time.now.utc.iso8601)
+end
+
+def write_verdict(sha, base, action, findings, dirty)
+  dir = verdict_dir
+  unless dir && sha
+    warn "critic-review: NOTE no verdict receipt written (not inside a resolvable git work tree)."
+    warn "  Fix: run the judge from the Mission's worktree, or the admiral's integration-gate will see no verdict for this head and refuse the merge."
+    return false
+  end
+  FileUtils.mkdir_p(dir)
+  File.write(File.join(dir, "#{sha}.json"), JSON.generate(
+    "schema" => VERDICT_SCHEMA, "tool" => "critic-review", "sha" => sha,
+    "base" => base.to_s, "verdict" => action, "findings" => findings,
+    "dirty" => dirty, "at" => Time.now.utc.iso8601
+  ))
+  FileUtils.rm_f(File.join(dir, "#{sha}.running"))
+  true
+end
+
+# Reader. THE ONE PLACE the rules live -- integration-gate calls this rather
+# than parsing the JSON itself, so there is never a second copy of the
+# semantics that could drift from the writer's.
+#   0 = recorded PASS for exactly this sha, on a clean tree
+#   2 = recorded BLOCK
+#   3 = no green verdict; the REASON is always named on stderr
+def verdict_for(sha)
+  unless sha.to_s =~ /\A[0-9a-f]{7,40}\z/
+    warn "critic-review: --verdict-for needs a commit SHA (got #{sha.inspect})."
+    warn "  Fix: pass the 40-char SHA of the head you intend to merge, e.g. --verdict-for $(git rev-parse HEAD)."
+    return 3
+  end
+  dir = verdict_dir
+  unless dir
+    warn "critic-review: cannot resolve the verdict directory (not inside a git work tree)."
+    warn "  Fix: run this from the Mission's worktree. An unresolvable verdict store is an ERROR, never a pass."
+    return 3
+  end
+  full = Dir.glob(File.join(dir, "#{sha}*.json")).first
+  unless full
+    if (run = Dir.glob(File.join(dir, "#{sha}*.running")).first)
+      warn "critic-review: NO VERDICT for #{sha} — a judge run is IN PROGRESS (started #{File.read(run).strip})."
+      warn "  Fix: wait for that run to finish, then re-read. Do NOT merge while the judge is still running (DND-194 landed a factual error on main exactly this way). If the run is a corpse, re-run ai/bin/critic-review in this worktree."
+      return 3
+    end
+    warn "critic-review: NO VERDICT for #{sha} — the standing judge has NOT run on this head."
+    warn "  Fix: run ~/dev/custom/ai/bin/critic-review in this worktree to produce a verdict for #{sha}. A verdict recorded for a DIFFERENT commit does not count; 'no verdict' is not a pass."
+    return 3
+  end
+  data = begin
+    JSON.parse(File.read(full))
+  rescue StandardError => e
+    warn "critic-review: verdict receipt for #{sha} is unreadable (#{e.message})."
+    warn "  Fix: delete #{full} and re-run ai/bin/critic-review. A corrupt receipt is an error, never a pass."
+    return 3
+  end
+  if data["dirty"]
+    warn "critic-review: the verdict for #{sha} was recorded against a DIRTY working tree — it did not judge what you are about to merge."
+    warn "  Fix: commit or discard the working-tree changes, then re-run ai/bin/critic-review so the verdict matches the head being merged."
+    return 3
+  end
+  case data["verdict"]
+  when "pass"
+    puts "critic-review: VERDICT PASS for #{sha} (recorded #{data['at']}, base #{data['base']})."
+    0
+  when "block"
+    warn "critic-review: VERDICT BLOCK for #{sha} — findings: #{Array(data['findings']).join(', ')}"
+    warn "  Fix: the standing judge found issues on this head. Have them addressed and re-run ai/bin/critic-review before merging."
+    2
+  when "fail-open"
+    warn "critic-review: NO VERDICT for #{sha} — the judge FAILED OPEN (infra/model error) at #{data['at']}; it did not look at this diff."
+    warn "  Fix: re-run ai/bin/critic-review in this worktree. If it fails open again the model is unreachable — HOLD this one MR and move to the next Mission, or take the named escape hatch (integration-gate --critic-override '<reason>'). A fail-open is not a pass."
+    3
+  else
+    warn "critic-review: verdict receipt for #{sha} records an unknown verdict #{data['verdict'].inspect}."
+    warn "  Fix: delete #{full} and re-run ai/bin/critic-review."
+    3
+  end
 end
 
 def critic_output(base)
@@ -74,9 +203,13 @@ end
 
 def run(argv)
   base = (i = argv.index("--base")) ? argv[i + 1] : default_base
+  sha = head_sha
+  dirty = tree_dirty?
+  mark_running(sha)
   raw, invoke_ok = critic_output(base)
   findings, trailer_ok = parse_findings(raw)
   action, code = decide(findings || [], trailer_ok, invoke_ok)
+  write_verdict(sha, base, action, findings || [], dirty)
 
   case action
   when "pass"
@@ -111,6 +244,137 @@ def run(argv)
   code
 end
 
+# Capture $stderr around a block, returning [result, stderr_text].
+def capture_err
+  require "stringio"
+  prev = $stderr
+  $stderr = StringIO.new
+  res = yield
+  [res, $stderr.string]
+ensure
+  $stderr = prev
+end
+
+# The receipt half of the suite. It runs inside a REAL throwaway git repo,
+# because the writer/reader resolve their store through git -- running it in
+# the live repo would both pollute $GIT_DIR and test the wrong tree.
+#
+# Every case here is a MISS case except the first: the whole point of the
+# receipt is that "never ran" / "still running" / "fail-open" / "stale SHA"
+# stop being indistinguishable from PASS, so a suite that only proved the
+# PASS path would prove nothing about the defect this exists to catch.
+def run_receipt_self_test
+  require "tmpdir"
+  ok = true
+  stubs = Dir.mktmpdir("critic-review-stubs-")
+  clean_out = File.join(stubs, "c"); File.write(clean_out, "looks good\nFINDINGS: none\n")
+  findings_out = File.join(stubs, "f"); File.write(findings_out, "- [access-control] x.ex:1 — no authz\nFINDINGS: access-control\n")
+  broken_out = File.join(stubs, "b"); File.write(broken_out, "the model crashed, no trailer here\n")
+
+  # (8) unresolvable store: outside any git work tree, a missing store is an
+  # ERROR (3), never a pass. This is the case that would otherwise exit 0.
+  Dir.mktmpdir("critic-review-nogit-") do |nogit|
+    Dir.chdir(nogit) do
+      code, err = capture_err { verdict_for("a" * 40) }
+      ok &&= (code == 3)
+      ok &&= err.include?("Fix:")
+    end
+  end
+
+  Dir.mktmpdir("critic-review-repo-") do |repo|
+    Dir.chdir(repo) do
+      sh = ->(*a) { system(*a, out: File::NULL, err: File::NULL) }
+      sh.call("git", "init", "-q", ".")
+      sh.call("git", "config", "user.email", "t@example.invalid")
+      sh.call("git", "config", "user.name", "t")
+      File.write("a.txt", "one\n")
+      sh.call("git", "add", "-A")
+      sh.call("git", "-c", "commit.gpgsign=false", "commit", "-qm", "one")
+      parent = head_sha
+      File.write("a.txt", "two\n")
+      sh.call("git", "add", "-A")
+      sh.call("git", "-c", "commit.gpgsign=false", "commit", "-qm", "two")
+      sha = head_sha
+      ok &&= (!sha.nil? && sha != parent)
+      dir = verdict_dir
+      ok &&= !dir.nil?
+
+      # (2) never ran -> 3, and it must NOT read as a pass.
+      code, err = capture_err { verdict_for(sha) }
+      ok &&= (code == 3)
+      ok &&= err.match?(/NOT run/)
+      ok &&= err.include?("Fix:")
+
+      # (4) still running (the DND-194 state) -> 3, named DISTINCTLY from (2).
+      FileUtils.mkdir_p(dir)
+      File.write(File.join(dir, "#{sha}.running"), Time.now.utc.iso8601)
+      code, err = capture_err { verdict_for(sha) }
+      ok &&= (code == 3)
+      ok &&= err.match?(/IN PROGRESS/)
+      ok &&= err.include?("Fix:")
+      FileUtils.rm_f(File.join(dir, "#{sha}.running"))
+
+      # (1) hit + (10) the running marker is cleared by a completed run.
+      ENV["CRITIC_REVIEW_STUB"] = clean_out
+      _r, _e = capture_err { run(["--base", "main"]) }
+      ok &&= File.file?(File.join(dir, "#{sha}.json"))
+      ok &&= !File.exist?(File.join(dir, "#{sha}.running"))
+      code, _err = capture_err { verdict_for(sha) }
+      ok &&= (code == 0)
+
+      # (5) stale SHA: the PASS above belongs to `sha`, not to `parent`.
+      code, err = capture_err { verdict_for(parent) }
+      ok &&= (code == 3)
+      ok &&= err.include?("Fix:")
+
+      # (3) THE DND-212 REGRESSION: a fail-open still exits 0 for the captain
+      # (never wedge the fleet) but records NO green verdict for the admiral.
+      FileUtils.rm_f(File.join(dir, "#{sha}.json"))
+      ENV["CRITIC_REVIEW_STUB"] = broken_out
+      rc, _e = capture_err { run(["--base", "main"]) }
+      ok &&= (rc == 0)
+      code, err = capture_err { verdict_for(sha) }
+      ok &&= (code == 3)
+      ok &&= err.match?(/FAILED OPEN/)
+      ok &&= err.include?("Fix:")
+
+      # (9) block -> the receipt records it and the reader returns 2.
+      ENV["CRITIC_REVIEW_STUB"] = findings_out
+      rc, _e = capture_err { run(["--base", "main"]) }
+      ok &&= (rc == 2)
+      code, err = capture_err { verdict_for(sha) }
+      ok &&= (code == 2)
+      ok &&= err.include?("Fix:")
+
+      # (7) malformed receipt is an ERROR, not a pass.
+      File.write(File.join(dir, "#{sha}.json"), "{not json")
+      code, err = capture_err { verdict_for(sha) }
+      ok &&= (code == 3)
+      ok &&= err.include?("Fix:")
+
+      # (6) a verdict recorded against a DIRTY tree did not judge what is
+      # about to merge.
+      File.write(File.join(dir, "#{sha}.json"), JSON.generate(
+        "schema" => VERDICT_SCHEMA, "sha" => sha, "base" => "main",
+        "verdict" => "pass", "findings" => [], "dirty" => true,
+        "at" => Time.now.utc.iso8601
+      ))
+      code, err = capture_err { verdict_for(sha) }
+      ok &&= (code == 3)
+      ok &&= err.include?("Fix:")
+
+      # A non-SHA argument is rejected rather than globbed into a match.
+      code, err = capture_err { verdict_for("") }
+      ok &&= (code == 3)
+      ok &&= err.include?("Fix:")
+
+      ENV.delete("CRITIC_REVIEW_STUB")
+    end
+  end
+  FileUtils.remove_entry(stubs)
+  ok
+end
+
 def run_self_test
   require "tmpdir"
   ok = true
@@ -130,43 +394,55 @@ def run_self_test
     ok &&= (decide([], false, true) == ["fail-open", 0])   # no trailer -> fail-open
     ok &&= (decide([], true, false) == ["fail-open", 0])   # invoke failed -> fail-open
 
-    # end-to-end via stub (findings -> block exit 2)
-    code = nil
-    ENV["CRITIC_REVIEW_STUB"] = findings_out
-    code = run(["--base", "main"])
-    ok &&= (code == 2)
-    ENV["CRITIC_REVIEW_STUB"] = clean_out
-    ok &&= (run(["--base", "main"]) == 0)
-    ENV["CRITIC_REVIEW_STUB"] = broken_out
-    ok &&= (run(["--base", "main"]) == 0) # fail-open, not block
+    # end-to-end via stub. These run inside a THROWAWAY git repo: run() now
+    # writes a verdict receipt into $GIT_DIR, and doing that in the live repo
+    # would both pollute it and record a stub verdict against a real head.
+    Dir.mktmpdir("critic-review-e2e-") do |repo|
+      Dir.chdir(repo) do
+        sh = ->(*a) { system(*a, out: File::NULL, err: File::NULL) }
+        sh.call("git", "init", "-q", ".")
+        sh.call("git", "config", "user.email", "t@example.invalid")
+        sh.call("git", "config", "user.name", "t")
+        File.write("a.txt", "one\n")
+        sh.call("git", "add", "-A")
+        sh.call("git", "-c", "commit.gpgsign=false", "commit", "-qm", "one")
 
-    # THE BODY REACHES THE CALLER even when it is not a "- [cat]" bullet list.
-    # A blocked run that shows no findings is unactionable, and the previous
-    # grep produced exactly that for any other format.
-    odd_out = File.join(d, "o")
-    File.write(odd_out, "**MUST-FIX**\n1. foo.sh:12 drops the status\nFINDINGS: correctness\n")
-    ENV["CRITIC_REVIEW_STUB"] = odd_out
-    shown = +""
-    begin
-      require "stringio"
-      prev = $stderr; $stderr = StringIO.new
-      ok &&= (run(["--base", "main"]) == 2)
-      shown = $stderr.string
-    ensure
-      $stderr = prev
+        ENV["CRITIC_REVIEW_STUB"] = findings_out
+        ok &&= (capture_err { run(["--base", "main"]) }[0] == 2)
+        ENV["CRITIC_REVIEW_STUB"] = clean_out
+        ok &&= (capture_err { run(["--base", "main"]) }[0] == 0)
+        ENV["CRITIC_REVIEW_STUB"] = broken_out
+        ok &&= (capture_err { run(["--base", "main"]) }[0] == 0) # fail-open, not block
+
+        # THE BODY REACHES THE CALLER even when it is not a "- [cat]" bullet
+        # list. A blocked run that shows no findings is unactionable, and the
+        # previous grep produced exactly that for any other format.
+        odd_out = File.join(d, "o")
+        File.write(odd_out, "**MUST-FIX**\n1. foo.sh:12 drops the status\nFINDINGS: correctness\n")
+        ENV["CRITIC_REVIEW_STUB"] = odd_out
+        rc, shown = capture_err { run(["--base", "main"]) }
+        ok &&= (rc == 2)
+        ok &&= shown.include?("foo.sh:12 drops the status")
+        ok &&= !shown.include?("FINDINGS: correctness")   # the trailer is not echoed
+        ENV.delete("CRITIC_REVIEW_STUB")
+      end
     end
-    ok &&= shown.include?("foo.sh:12 drops the status")
-    ok &&= !shown.include?("FINDINGS: correctness")   # the trailer is not echoed
-    ENV.delete("CRITIC_REVIEW_STUB")
   end
+  ok &&= run_receipt_self_test
   if ok
     puts "critic-review: self-test OK"
     0
   else
     warn "critic-review: self-test FAILED"
-    warn "  Fix: keep the semantics exact — findings BLOCK (exit 2), none PASSES, any infra/no-trailer error FAILS OPEN (exit 0, loud)."
+    warn "  Fix: keep the semantics exact — findings BLOCK (exit 2), none PASSES, any infra/no-trailer error FAILS OPEN (exit 0, loud) for the CAPTAIN, and records a receipt so --verdict-for tells the ADMIRAL apart: pass=0, block=2, and none/running/fail-open/stale-SHA/dirty/malformed=3. A state that cannot be verified is never a pass."
     1
   end
 end
 
-exit(ARGV.include?("--self-test") ? run_self_test : run(ARGV))
+if ARGV.include?("--self-test")
+  exit run_self_test
+elsif (idx = ARGV.index("--verdict-for"))
+  exit verdict_for(ARGV[idx + 1].to_s)
+else
+  exit run(ARGV)
+end

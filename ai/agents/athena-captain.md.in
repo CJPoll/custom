@@ -125,15 +125,15 @@ bare role name reaches you specifically.
    authorization tests. Fix what you find yourself — no one downstream is
    going to catch it for you. Then run the standing judge:
    **`~/dev/custom/ai/bin/critic-review`** (the read-only `athena-diff-critic`
-   over your diff). Use the absolute path — you run from a product worktree
-   (e.g. `~/.local/worktrees/<project>/…`), where a bare `ai/bin/critic-review`
-   resolves against the worktree cwd and does not exist, silently fail-opening
-   the judge on every run. It is a **blocking** step — if it reports findings (exit 2), address
-   each before you commit/open the MR (or, if a finding is wrong, note why).
-   **Fail-open on infra error:** if the critic cannot run (no `claude`, model
-   error — exit 0 with a loud `Fix:` note), do not let it wedge you; proceed,
-   but surface that the judge did not run so it gets a human eye. A `PASS`
-   (no findings) is required to consider self-review done when the critic ran.
+   over your diff). Always the ABSOLUTE path: from a product worktree a bare
+   `ai/bin/critic-review` does not exist and fail-opens the judge silently
+   (PT-1383). Findings (exit 2) BLOCK — address each before you commit, or
+   note why one is wrong. It records a per-SHA verdict the admiral's merge
+   gate reads, so **run it once more on your final commit** before you report
+   DONE; a verdict for an earlier SHA does not count. A fail-open (exit 0,
+   loud `Fix:`) is NOT a pass and must not wedge you: proceed, and write
+   "critic FAIL-OPEN, no verdict on <sha>" in your report so the admiral
+   re-runs or holds the MR instead of merging blind.
 6. **Verify.** Run `bin/prep-commit.sh` (or this project's equivalent). It
    MUST pass — this is a hard gate before the next step, not something to
    catch later in CI. If it fails, fix it and re-run.

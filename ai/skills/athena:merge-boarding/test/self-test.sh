@@ -38,6 +38,24 @@ stub_gate_green() { printf '#!/bin/sh\ntouch "%s"\nexit 0\n' "$1" > "$2"; chmod 
 # A gate that is green unless BOTH files exist -- i.e. red only on integration.
 stub_gate_pair()  { printf '#!/bin/sh\nif [ -f a.txt ] && [ -f b.txt ]; then echo "budget exceeded"; exit 1; fi\nexit 0\n' > "$1"; chmod +x "$1"; }
 
+# record_verdict <repo> <verdict> [sha] -- forge a critic-review receipt for
+# HEAD (or an explicit SHA). integration-gate now refuses a head with no green
+# standing-judge verdict, so every case that expects INTEGRATION OK must show
+# one. Written in the receipt's real on-disk shape and read back by
+# critic-review's own reader, so a schema drift fails this suite rather than
+# silently passing every merge.
+record_verdict() { # <repo dir> <verdict> [sha]
+  # ${3:-...}, never ${3-...}: record_pass passes an EXPLICITLY EMPTY third
+  # argument when no SHA is given, and ${3-...} treats that as "set" -- which
+  # silently wrote a receipt named for the empty string, i.e. a receipt that
+  # matches nothing. The suite caught it; the colon is load-bearing.
+  ( cd "$1" && sha="${3:-$(git rev-parse HEAD)}" \
+    && d="$(git rev-parse --git-path critic-verdicts)" && mkdir -p "$d" \
+    && printf '{"schema":1,"tool":"critic-review","sha":"%s","base":"main","verdict":"%s","findings":[],"dirty":false,"at":"2026-09-20T00:00:00Z"}\n' \
+         "$sha" "$2" > "${d}/${sha}.json" )
+}
+record_pass() { record_verdict "$1" pass "${2-}"; }
+
 # new_repo <dir> -- a repo on branch `main` with one commit.
 new_repo() {
   mkdir -p "$1"; ( cd "$1" && git init -q -b main . && echo seed > seed.txt \
@@ -51,6 +69,7 @@ new_repo() {
 R="${TMP}/c1"; new_repo "$R"
 ( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
 stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "c1 exit 0 when target unchanged" || bad "c1 expected exit 0, got $rc" "$out"
 grep -q 'unchanged since branch point' <<<"$out" && ok "c1 reports 'unchanged' explicitly" || bad "c1 no-drift verdict not printed" "$out"
@@ -77,6 +96,7 @@ R="${TMP}/c3"; new_repo "$R"
 ( cd "$R" && echo m > m.txt && git add m.txt && git commit -qm m \
   && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
 stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
 head_sha="$( cd "$R" && git rev-parse HEAD )"
 [ "$rc" -eq 0 ] && ok "c3 exit 0 when integrated and green" || bad "c3 expected exit 0, got $rc" "$out"
@@ -106,6 +126,7 @@ base="$( cd "$R" && git rev-parse HEAD )"
 ( cd "$R" && echo v2 > shared.txt && echo x > incoming-only.txt && git add . && git commit -qm advance \
   && git checkout -qb feature && echo v3 > shared.txt && echo y > mine-only.txt && git add . && git commit -qm mine )
 stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --since "$base" --gate "${R}/g.sh" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "c5 exit 0" || bad "c5 expected exit 0, got $rc" "$out"
 sect="$( sed -n '/^--- intersection/,$p' <<<"$out" )"
@@ -133,6 +154,7 @@ R="${TMP}/c7"; new_repo "$R"
 ( cd "$R" && echo m > m.txt && git add m.txt && git commit -qm m \
   && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
 stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
 sect="$( sed -n '/^--- intersection/,$p' <<<"$out" )"
 grep -q 'UNAVAILABLE' <<<"$sect" && ok "c7 intersection reports UNAVAILABLE, not empty" || bad "c7 uncomputable intersection read as empty" "$sect"
@@ -159,6 +181,77 @@ o="$( cd "$R" && "$GATE" --bogus 2>&1 )"; check_fix bad-flag "$o" $?
 o="$( cd "$R" && "$GATE" --target 2>&1 )"; check_fix missing-arg "$o" $?
 o="$( cd "${TMP}" && "$GATE" --no-fetch --gate /bin/true 2>&1 )"; check_fix not-a-repo "$o" $?
 [ -z "$fixless" ] && ok "c8 every non-zero exit path carries Fix:" || bad "c8 paths missing Fix::${fixless}"
+
+# ---------------------------------------------------------------- case 9
+# THE DND-194 REGRESSION. Gate green, but the standing judge produced NO
+# verdict for this head -- it never ran, or had not finished. This is the exact
+# state in which PR #40 was merged on 2026-09-19 and landed a factual error on
+# main. "No verdict" must never read as a pass.
+R="${TMP}/c9"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && ok "c9 exit 3 when no judge verdict exists for the head" || bad "c9 expected exit 3, got $rc" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "c9 declared INTEGRATION OK with no judge verdict" "$out" || ok "c9 does not print INTEGRATION OK without a verdict"
+grep -q 'Fix:' <<<"$out" && ok "c9 carries an actionable Fix:" || bad "c9 missing Fix:" "$out"
+
+# ---------------------------------------------------------------- case 10
+# THE DND-212 REGRESSION. The judge RAN but FAILED OPEN (model unreachable), so
+# it never looked at this diff. A fail-open is not a verdict.
+R="${TMP}/c10"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_verdict "$R" fail-open
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && ok "c10 exit 3 on a fail-open verdict" || bad "c10 expected exit 3, got $rc" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "c10 treated a fail-open as a pass" "$out" || ok "c10 fail-open is not a pass"
+
+# A recorded BLOCK likewise refuses.
+record_verdict "$R" block
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && ok "c10 exit 3 on a recorded BLOCK verdict" || bad "c10 block expected exit 3, got $rc" "$out"
+
+# ---------------------------------------------------------------- case 11
+# THE SHA-MATCH DISCIPLINE. A verdict for the PARENT commit is not a verdict
+# for the head being merged. Without this, the whole design would "pass" while
+# judging a commit nobody is landing -- a green suite proving nothing.
+R="${TMP}/c11"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+parent="$( cd "$R" && git rev-parse HEAD )"
+( cd "$R" && echo g > g.txt && git add g.txt && git commit -qm g )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R" "$parent"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && ok "c11 exit 3 when the verdict belongs to an earlier SHA" || bad "c11 expected exit 3, got $rc" "$out"
+# and the same repo passes once the verdict names the actual head
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c11 exit 0 once the verdict names the head being merged" || bad "c11 expected exit 0, got $rc" "$out"
+
+# ---------------------------------------------------------------- case 12
+# The escape hatch is BOUNDED and ATTRIBUTABLE. It must land the head AND
+# print the reason into the line the admiral copies into its state log --
+# converting an unrecorded bypass into a recorded one.
+R="${TMP}/c12"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c12 override lands a head with no verdict" || bad "c12 expected exit 0, got $rc" "$out"
+grep -q 'INTEGRATION OK .* (CRITIC OVERRIDE: model unreachable)' <<<"$out" && ok "c12 the reason is printed into INTEGRATION OK" || bad "c12 override not attributable in the OK line" "$out"
+# ...and it is not silently available: an empty reason is a usage error.
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override '' 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "c12 override without a reason is a usage error" || bad "c12 expected exit 2, got $rc" "$out"
+grep -q 'Fix:' <<<"$out" && ok "c12 usage error carries Fix:" || bad "c12 missing Fix:" "$out"
+
+# ---------------------------------------------------------------- case 13
+# ORDERING. A RED gate must be reported as RED (exit 1), not masked by the
+# missing verdict (exit 3) -- the more specific failure wins.
+R="${TMP}/c13"; new_repo "$R"
+stub_gate_pair "${R}/gp.sh"
+( cd "$R" && echo a > a.txt && git add a.txt && git commit -qm a \
+  && git checkout -qb feature && echo b > b.txt && git add b.txt && git commit -qm b )
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 1 ] && ok "c13 a red gate exits 1 even with no verdict recorded" || bad "c13 expected exit 1, got $rc" "$out"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"

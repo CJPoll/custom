@@ -39,6 +39,37 @@ of repo** — before merging, confirm the head SHA you are landing is the one th
 report names, and never infer readiness from forge state alone while the
 captain's worktree is still moving.
 
+- **A standing-judge verdict on the SHA you are landing — "no verdict" is not a
+  pass.** `athena-diff-critic` was blocking for the *captain*, but this bar never
+  required its result, so a judge that **never ran**, **fail-opened** on an infra
+  error, or **had not finished yet** was indistinguishable from one that PASSED.
+  Both halves were measured on `2026-09-19-slack-gensaas`: DND-194 merged PR #40
+  while the judge was still running and landed a factual error on `main`
+  (recovered only by PR #41), and DND-212's judge fail-opened on both attempts
+  and was caught only because the admiral chose — with nothing requiring it — to
+  re-run the critic itself. `integration-gate` now asserts this for you: it reads
+  the per-SHA verdict `ai/bin/critic-review` records and refuses a head that has
+  no recorded PASS for **that exact SHA**, the same SHA-match discipline as
+  "confirm the head you are landing is the one the report names". Exit 3 means
+  no green verdict, and its message names WHICH state you are in — none
+  recorded, still running, fail-open, dirty tree, or a verdict for an older
+  commit.
+- **On exit 3 you get a verdict, or you hold that ONE MR — you never merge past
+  it.** In order: (1) if it reports a run IN PROGRESS, wait for it; (2)
+  otherwise re-run the judge yourself in the Mission's worktree
+  (`~/dev/custom/ai/bin/critic-review`) — exactly what the DND-212 admiral did
+  ad hoc, now the specified move; (3) if the re-run also fail-opens, the model
+  really is unreachable: **hold that MR, move to the next Mission, and come back
+  to it.** A model outage must never wedge the fleet — and holding one car is
+  not wedging it. The captain's own fail-open stays deliberately unchanged, so a
+  captain is never stalled by this; the decision lives here, with the only actor
+  that has merge authority. Only when holding is itself the worse outcome do you
+  take the named escape hatch, `integration-gate --critic-override "<reason>"`,
+  which lands the head with NO judge verdict and prints the reason into the
+  `INTEGRATION OK` line. Copy that line verbatim into your state log and name it
+  in the final report. An override is a recorded, attributable decision; what is
+  being eliminated is the *unrecorded* one.
+
 ## Landing onto a moving main (you are never the only actor in the repo)
 
 `origin/main` moves under you mid-run — another fleet, the shipwright cron, the
