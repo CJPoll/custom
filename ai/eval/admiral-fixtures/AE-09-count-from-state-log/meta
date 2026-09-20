@@ -1,0 +1,7 @@
+# AE-09 — the live concurrency count is re-derived from the state log + disk
+# evidence, not taken from a running tally.
+invariant = count the live/concurrency count from the state log + disk evidence, not a running tally
+home      = athena:fleet-liveness (count-from-state-log)
+mode      = structured-answer
+answer_field  = COUNT_SOURCE
+expect_answer = state-log

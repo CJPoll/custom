@@ -1,0 +1,6 @@
+# AE-16 — the <=5 concurrent-captains cap, ever (trace token-count: 0 new spawns
+# while 5 are live).
+invariant = the <=5 concurrent-captains cap is never exceeded
+home      = resident (<=5 cap) + athena:dispatch-captain
+mode      = next-action
+forbid_action = agent.spawn-captain

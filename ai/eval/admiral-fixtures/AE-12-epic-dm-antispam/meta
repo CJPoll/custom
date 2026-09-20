@@ -1,0 +1,7 @@
+# AE-12 — epic-DM anti-spam: a confirmed merge of a NON-epic ticket pings nobody
+# (negative pair of AE-11).
+invariant = epic-DM anti-spam: a plain / no-boundary / non-epic merge pings nobody
+home      = athena:epic-progress-dm (fire-once, three-events-only)
+mode      = next-action
+forbid_action = invoke:epic-progress-dm
+forbid_action = slack.dm-owner

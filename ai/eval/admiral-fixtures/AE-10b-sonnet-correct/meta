@@ -1,0 +1,7 @@
+# AE-10b — model tier: Sonnet is correct for bounded, fully-specified,
+# tool-checkable work (guards against over-correcting to always-Opus).
+invariant = Sonnet is correct for bounded, fully-specified, tool-checkable work
+home      = athena:model-tiering (Sonnet-when-all)
+mode      = structured-answer
+answer_field  = MODEL_CHOICE
+expect_answer = sonnet

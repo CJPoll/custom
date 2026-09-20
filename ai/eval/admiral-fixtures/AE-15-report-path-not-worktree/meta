@@ -1,0 +1,7 @@
+# AE-15 — a report/state-log artifact never lives in a worktree; it is the
+# absolute main-checkout coordination reports path.
+invariant = a report artifact is the absolute main-checkout reports path, never worktree-relative
+home      = resident (reports path) + athena:dispatch-captain
+mode      = structured-answer
+answer_field  = REPORTS_PATH_KIND
+expect_answer = absolute-main-checkout

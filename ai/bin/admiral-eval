@@ -27,17 +27,33 @@
 #   1. Plan-only framing (primary): every scenario ends with an explicit
 #      instruction to output ONLY the decision trailer and call no tool / run no
 #      command / spawn no agent. The admiral is scored on stated intent.
-#   2. Inert sandbox (belt-and-suspenders — defense in depth, NOT a complete
-#      jail): the model runs with an isolated HOME (no MCP config -> Slack /
-#      Notion / Agent surfaces unconfigured, and the child admiral's own
-#      PreToolUse hooks do not load) and a PATH front-loaded with no-op stubs for
-#      gh/glab/gh-athena/glab-athena/docker plus a git wrapper that blocks `push`.
-#      Honest scope: the stubs neutralize PATH-RESOLVED forge/comms/container
-#      calls only — an absolute-path call (`/usr/bin/docker ...`) bypasses them,
-#      and gh/glab/push are ultimately harmless because the isolated HOME is
-#      credential-less, not because of the stubs. Hermeticity therefore rests
-#      PRIMARILY on the plan-only framing; the sandbox is the second layer. This
-#      is acceptable because `--run` is never in the gate.
+#   2. Structural tool containment via CLI flags (belt-and-suspenders —
+#      structural for the three holes below, not just framing). The model runs
+#      under the AMBIENT HOME (design §2.1 specified an
+#      isolated HOME, but that is INFEASIBLE: `claude` resolves BOTH its auth AND
+#      the `athena-admiral` agent definition from the ambient HOME, so an isolated
+#      HOME yields "--agent athena-admiral not found" and no auth — verified
+#      empirically). Dropping the isolated HOME re-opens the real forge/comms/
+#      Agent surfaces, so containment is done with CLI flags that hold regardless
+#      of the ambient settings' pre-approvals (see model_argv / CONTAINMENT_ARGV):
+#        --strict-mcp-config --mcp-config {empty}  → NO MCP server loads, so the
+#          Notion/Slack/Agent tools do not exist for the run (closes the corpus's
+#          real temptations: AE-03's owner DM, AE-01/02's notion status writes).
+#        --disallowedTools Bash Task               → no shell (which also closes
+#          the absolute-path bypass of the PATH stubs — /usr/bin/gh, git push,
+#          docker) and no real captain spawn.
+#      A run therefore CANNOT reach MCP, CANNOT spawn a subagent, and CANNOT run
+#      Bash, while auth + --agent resolution + the decision trailer still work
+#      (all verified empirically). NOT structurally closed: the native Write/Edit
+#      file tools remain available under the ambient HOME — a file mutation is
+#      barred only by guard 1 (plan-only framing), not by these flags. It is out
+#      of the three holes this hardening targets and, being a text-only decision
+#      eval, no corpus case exercises it; noted so the containment is not read as
+#      total. Guard 1 (plan-only framing) remains the primary framing; the inert PATH stubs (no-op gh/glab/gh-athena/glab-athena/docker +
+#      a git wrapper that blocks `push`) remain as a third, residual layer for any
+#      PATH-resolved call — now largely redundant since Bash itself is disallowed,
+#      but kept as cheap defense in depth. Acceptable because `--run` is never in
+#      the gate. (Hardening ratified by the coordinator post-EVAL-PR2.)
 #
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 #
@@ -328,17 +344,18 @@ def hook_pass?(verdict, expect)
 end
 
 # ---------------------------------------------------------------------------
-# Inert sandbox (guard 2). build_sandbox writes the no-op stubs into <dir>/bin
-# and returns [home, bin]. model_env front-loads that bin on PATH and points HOME
-# at the isolated dir (so no MCP config -> no Slack/Notion/Agent surface).
+# Inert PATH sandbox (guard 2, defense in depth). build_sandbox writes the no-op
+# stubs into <dir>/bin and returns that bin dir. model_env front-loads it on PATH
+# but does NOT override HOME — see the DEVIATION note in the file header:
+# `claude` needs the ambient HOME to authenticate and to resolve the
+# athena-admiral agent, so an isolated HOME is infeasible for the model run.
 # ---------------------------------------------------------------------------
 INERT_STUBS = %w[gh glab gh-athena glab-athena docker].freeze
 INERT_EXIT  = 97
 
 def build_sandbox(dir)
-  home = File.join(dir, "home")
-  bin  = File.join(dir, "bin")
-  FileUtils.mkdir_p([home, bin])
+  bin = File.join(dir, "bin")
+  FileUtils.mkdir_p(bin)
 
   INERT_STUBS.each do |name|
     path = File.join(bin, name)
@@ -378,7 +395,7 @@ def build_sandbox(dir)
   SH
   FileUtils.chmod(0o755, gitpath)
 
-  [home, bin]
+  bin
 end
 
 def which(cmd)
@@ -389,21 +406,46 @@ def which(cmd)
   nil
 end
 
-# The env the model child runs under: isolated HOME, stub bin prepended.
-def model_env(home, bin)
-  { "HOME" => home, "PATH" => "#{bin}:#{ENV['PATH']}" }
+# The env the model child runs under: the stub bin prepended to PATH. HOME is
+# NOT overridden — it inherits the ambient HOME so `claude` can authenticate and
+# resolve the athena-admiral agent (see the DEVIATION note in the file header).
+def model_env(bin)
+  { "PATH" => "#{bin}:#{ENV['PATH']}" }
 end
 
+# Structural tool containment (guard 2, hardened — design §2.1). Under the
+# ambient HOME (required, see model_env) the model CAN otherwise reach real MCP
+# servers (Notion/Slack/Agent), spawn a real captain via the Task tool, and run
+# arbitrary Bash — including an absolute-path forge/git/docker call that the PATH
+# stubs never see. The admiral runs unattended, so its ambient settings likely
+# pre-approve those, giving no deny backstop. These CLI flags close all of it
+# STRUCTURALLY, independent of any ambient pre-approval:
+#   --strict-mcp-config --mcp-config {empty}  : load NO MCP server at all — the
+#     Notion/Slack/Agent tools simply do not exist for this run.
+#   --disallowedTools Bash Task               : no shell (which also closes the
+#     absolute-path stub bypass) and no subagent spawn.
+# VERIFIED empirically that the admiral still authenticates, still resolves
+# --agent athena-admiral, and still emits a parseable decision trailer under
+# these flags. The variadic flags are ordered so --mcp-config takes exactly one
+# value and --disallowedTools consumes the trailing tokens to argv end.
+EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
+CONTAINMENT_ARGV = [
+  "--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG,
+  "--disallowedTools", "Bash", "Task"
+].freeze
+
 def model_argv
-  ["claude", "-p", "--agent", AGENT]
+  ["claude", "-p", "--agent", AGENT, *CONTAINMENT_ARGV]
 end
 
 # Invoke the admiral once for a T2 fixture, return its raw output (or nil on
 # failure). The scenario body + the mode's trailer instructions form the prompt.
-def invoke_admiral(scenario, mode, home, bin)
+def invoke_admiral(scenario, mode, bin)
   prompt = "#{scenario}\n\n#{trailer_instructions(mode)}"
-  out, _err, st = Open3.capture3(model_env(home, bin), *model_argv, stdin_data: prompt)
-  st&.success? ? out : nil
+  out, err, st = Open3.capture3(model_env(bin), *model_argv, stdin_data: prompt)
+  return out if st&.success?
+  warn "  ! admiral invocation failed (exit #{st ? st.exitstatus : '?'}): #{err.to_s.lines.last(2).join.strip}"
+  nil
 rescue StandardError => e
   warn "  ! admiral invocation failed: #{e.message} (is `claude` on PATH?)"
   nil
@@ -440,10 +482,10 @@ def evaluate(dir, runs:)
     end
     scenario = File.read(File.join(dir, "scenario.md"))
     Dir.mktmpdir("admiral-eval-sandbox-") do |sb|
-      home, bin = build_sandbox(sb)
+      bin = build_sandbox(sb)
       last_reasons = nil
       samples = Array.new(runs) do
-        out = invoke_admiral(scenario, mode, home, bin)
+        out = invoke_admiral(scenario, mode, bin)
         if out.nil?
           last_reasons ||= ["admiral produced no output (invocation failed)"]
           next false
@@ -548,11 +590,15 @@ def list
   end
   puts ""
   puts "Trust model: the model PRODUCES a decision; a DETERMINISTIC scorer scores it."
-  puts "  Hermeticity rests PRIMARILY on plan-only framing (the scenario forbids tool use);"
-  puts "  the inert sandbox is defense in depth — no-op gh/glab/docker/git-push stubs neutralize"
-  puts "  PATH-RESOLVED forge/comms/container calls, and a credential-less isolated HOME makes"
-  puts "  gh/glab/push harmless (it does NOT stop an absolute-path call). --run is model-in-loop"
-  puts "  and NOT in the gate; the deterministic --self-test IS gate-wired."
+  puts "  The model runs under the AMBIENT HOME (required for claude auth + --agent"
+  puts "  resolution; design §2.1's isolated HOME is infeasible). Tool containment is"
+  puts "  STRUCTURAL, via CLI flags that hold regardless of the ambient settings:"
+  puts "    --strict-mcp-config --mcp-config {empty}  no MCP server loads (no Notion/Slack/Agent)"
+  puts "    --disallowedTools Bash Task               no shell (no absolute-path bypass), no subagent spawn"
+  puts "  So a run cannot reach MCP, spawn a captain, or run Bash. Guard 1 (plan-only"
+  puts "  framing) is the primary framing; the inert PATH stubs (no-op gh/glab/docker/"
+  puts "  git-push) are a residual layer. --run is model-in-loop and NOT in the gate;"
+  puts "  the deterministic --self-test IS gate-wired."
   puts "Run the model-in-loop evaluation with: ai/bin/admiral-eval --run"
   0
 end
@@ -714,11 +760,14 @@ def self_test
   # validate_case directly: a well-formed next-action case is valid
   fail.("a well-formed case must validate") unless validate_case({ "mode" => "next-action", "expect_action" => ["wait"] }).empty?
 
-  # -- 9. inert sandbox: stubs are inert; git push blocked; git read forwarded
+  # -- 9. inert PATH sandbox: stubs are inert; git push blocked; git read
+  # forwarded; and model_env prepends the stub bin WITHOUT overriding HOME (the
+  # ambient HOME is required for claude auth + --agent resolution — the design
+  # §2.1 deviation documented in the file header).
   Dir.mktmpdir("admiral-eval-sb-") do |d|
-    home, bin = build_sandbox(d)
-    env = model_env(home, bin)
-    fail.("model HOME must be the sandbox home") unless env["HOME"] == home
+    bin = build_sandbox(d)
+    env = model_env(bin)
+    fail.("model_env must NOT override HOME (claude needs the ambient HOME to auth + resolve --agent)") if env.key?("HOME")
     fail.("model PATH must front-load the stub bin") unless env["PATH"].start_with?("#{bin}:")
     INERT_STUBS.each do |name|
       out, st = Open3.capture2e(env, name, "whatever", "args", stdin_data: "")
@@ -740,8 +789,33 @@ def self_test
     unless trailer_instructions("next-action").include?("NEXT_ACTIONS:")
   fail.("structured-answer framing must forbid tool use") \
     unless trailer_instructions("structured-answer").include?("Do NOT call any tool")
-  fail.("model argv must invoke the admiral agent, no mutating flags") \
-    unless model_argv == ["claude", "-p", "--agent", AGENT]
+  argv = model_argv
+  fail.("model argv must invoke the admiral agent (claude -p --agent #{AGENT})") \
+    unless argv[0, 4] == ["claude", "-p", "--agent", AGENT]
+  # -- 10b. STRUCTURAL tool containment (guard 2, hardened — design §2.1). Assert
+  # the actual containment, not merely that HOME is ambient: NO MCP server may
+  # load, and Bash + Task must be disallowed. This is what closes the real
+  # forge/comms/Agent surfaces that the ambient HOME re-opens.
+  fail.("model argv must pass --strict-mcp-config (ignore all ambient MCP config)") \
+    unless argv.include?("--strict-mcp-config")
+  mci = argv.index("--mcp-config")
+  mcp_ok =
+    if mci && argv[mci + 1]
+      begin
+        JSON.parse(argv[mci + 1])["mcpServers"] == {}
+      rescue StandardError
+        false
+      end
+    else
+      false
+    end
+  fail.("model argv must pass --mcp-config with an EMPTY mcpServers set (no MCP surface loads)") unless mcp_ok
+  dti = argv.index("--disallowedTools")
+  disallowed = dti ? argv[(dti + 1)..] : []
+  fail.("model argv must --disallowedTools Bash (closes shell + absolute-path bypass)") \
+    unless disallowed.include?("Bash")
+  fail.("model argv must --disallowedTools Task (closes real captain spawn)") \
+    unless disallowed.include?("Task")
 
   if ok
     puts "admiral-eval: self-test OK"

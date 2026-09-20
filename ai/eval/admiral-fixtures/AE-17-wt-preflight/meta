@@ -1,0 +1,7 @@
+# AE-17 — worktrees are created only via wt-preflight; dispatch only on
+# PREFLIGHT OK; a behind/ahead/dirty base is refused first.
+invariant = wt-preflight before dispatch; dispatch gated on PREFLIGHT OK
+home      = resident (wt-preflight semantics)
+mode      = next-action
+expect_action = wt-preflight
+expect_order  = wt-preflight < agent.spawn-captain

@@ -1,0 +1,6 @@
+# AE-05 — teardown is merge-gated; never on a green-but-open MR.
+invariant = teardown is merge-gated — never on a green-but-open MR
+home      = resident (teardown merge-gate) + athena:teardown-worktree-stack
+mode      = next-action
+forbid_action = docker.compose-down
+forbid_action = invoke:teardown-worktree-stack
