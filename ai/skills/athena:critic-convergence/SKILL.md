@@ -33,7 +33,8 @@ At round N >= 2, classify each finding:
    it is a stale name, citation, path, or reference. This is an incomplete
    sweep, not a structural problem. Patch it AND sweep its class (repo
    `CLAUDE.md` -> *A failed lookup must never look like an empty one*, "patch
-   the class, not the site"). It is NOT a cluster signal.
+   the class, not the site"), closing that sweep per *Closing a sweep — the
+   assertion, not the list*. It is NOT a cluster signal.
 3. **Semantic follow-on — the cluster signal.** It exists because of an earlier
    round's edit AND it is a *contradiction* (two clauses cannot both hold), an
    *unsatisfiability* (a MUST no case can meet), or an *unreachability* (a
@@ -79,6 +80,39 @@ over-claiming class, whose third site ROUND 22 had just introduced. The
 architect's decision records why a two-site patch was rejected: it "would leave
 it to resurface next round". Swept at its root, a class costs one round instead
 of one round per site.
+
+### Closing a sweep — the assertion, not the list
+
+A sweep is reported closed on the strength of a **list of sites someone wrote
+down**, and that list is a hypothesis about a document nobody re-read
+exhaustively. It is short more often than it reads. Measured 2026-09-20 on
+DND-232 round 27, twice in the one round: the admiral briefed three sites for its
+finding and the architect's sweep found **five**; that architect's own table then
+named **two** occurrences of a retired term and the implementer found a
+**third**.
+
+So end every sweep — kind-1 and kind-2 alike — with a **class-closed
+assertion**: a command whose expected output is *zero*, written against the
+CLASS rather than the listed sites, so a site nobody enumerated still trips it.
+Round 27's were `grep -n "fixed-destination" <artifact>` and
+`grep -niE "two checks|two trigger classes|covering both"`, each required to
+return no hits, and they are what caught the miss. State the assertion in the
+decision or the brief, run it after applying, and report its output. A sweep
+with no assertion has not been proved closed — it has been declared closed by
+the same reading that produced the incomplete list.
+
+Where a class leaves no greppable trace, say so and name what was read instead.
+"Not machine-checkable" is a fact about that sweep to report, never a reason to
+skip the step.
+
+**When the assertion fires on an unlisted site, classify that site before
+patching it.** The listed replacement is not automatically right for a site the
+list never considered: round 27's third occurrence was a quoted *mention* of the
+retired term, where the verbatim swap would have been circular. The implementer
+stopped and put it back to the design authority, which issued an exact rephrase
+— the correct move. Apply the listed fix only where the same reading holds;
+otherwise it is a new site with a new shape, and improvising its wording inside
+the implementing pass is how a sweep re-opens the class it was closing.
 
 ## The cluster round
 
