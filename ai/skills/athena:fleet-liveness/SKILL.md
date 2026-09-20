@@ -68,6 +68,23 @@ Two consequences:
   processed; the difference is your live count. Reconcile it against worktree
   activity on every sweep, and settle any doubt about a slot by reading that
   Mission's worktree — never by trusting the bookkeeping you already doubt.
+- **The Missions table is KEYED BY MISSION: one row per Mission, amended in
+  place.** Counting a cap, and resuming, both assume a Mission's status can be
+  read off exactly one row. Never append a second row for a Mission already in
+  the table — update the existing one. A leftover planning row saying
+  `UNSTARTED` standing beside a later row saying `DONE` is not a history; it is
+  two contradictory answers to one lookup, with nothing to tell the stale one
+  from the live one. It inflates the live count, and on resume — where you are
+  told to read the state log FIRST and not re-triage from Notion — it reads as a
+  Mission that was never dispatched, so the fix it invites is re-dispatching a
+  captain onto work that already merged. Keep the history in the row's Notes
+  column or in prose below the table, never in a second row.
+  - Measured 2026-09-19-slack-gensaas: the table carried SIX duplicated keys
+    (DND-201/210/211/213/221/223), each with its original `UNSTARTED`
+    dispatch-plan row still standing beside a `DONE/MERGED` row, plus a
+    hand-written `DND-221dup` placeholder row — the admiral noticed the
+    collision and, having no rule to apply, annotated the duplicate instead of
+    resolving it.
 - **Sweep a quiet Mission; never trust its silence.** With no directory, silence
   carries no information whatsoever, so the staleness rule above is the only
   thing between you and a dead captain. Apply it to every `IN_PROGRESS` Mission
