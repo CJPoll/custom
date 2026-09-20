@@ -1,0 +1,618 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# variant-eval — a MEASUREMENT INSTRUMENT for harness variants (DND-174 / C3,
+# REDUCED SCOPE per the architect verdict). Given a candidate git ref and a
+# baseline ref, it measures the candidate against the existing eval corpus and
+# emits a PROPOSAL: a scorecard delta plus one of KEEP / REVERT / INCONCLUSIVE.
+#
+# It is a selector/measurer over git refs. It is NOT a self-modifier and has NO
+# merge/commit/push/adopt/--update-baseline code path. Its ONLY output is a
+# proposal (stdout and/or a file). A KEEP verdict is a recommendation that
+# "requires gate-green + explicit human adoption" — the human, not this tool,
+# adopts a variant by choosing to merge it. "Revert" is a no-op: the tool never
+# writes to the harness, so declining a variant is simply the human not merging.
+#
+# WHY REDUCED SCOPE (do NOT force the full ADAS/Darwin-Gödel measured-adoption
+# loop here): the existing eval "scorecard" (ai/bin/harness-eval,
+# ai/bin/admiral-eval) is a set of per-case BINARY pass/fail verdicts, NOT a
+# numeric score, and a "delta" is a pass-set diff (true->false = regressed,
+# false->true = fixed). There is NO noise band in code — admiral-eval uses
+# K-sample majority and hands 2/3->1/3 sampling-noise to a human re-run, and the
+# committed baseline already carries a 2/3 case. So a fully-automatic
+# measured-improvement verdict over the model signal is not yet trustworthy. Per
+# epic Decision 5 the speculative measured-adoption core is DEFERRED; this builds
+# the deterministic + inconclusive-by-default reduced scope. See
+# ai/docs/variant-eval.md.
+#
+# BOUNDARY WITH THE SHIPWRIGHT CRON LOOP (load-bearing): variant-eval is
+# human-gated, proposal-only, and triggered by a HANDED variant ref. It must NOT
+# wrap measurement in an auto-adopt loop — that would collide with the
+# shipwright's autonomy and violate C3's human-gate AC. It reuses
+# admiral-eval/harness-eval as its selector; it does NOT invent a second corpus
+# and it is NOT a second autonomous committer.
+#
+# Runs entirely within git history: for each of {baseline, variant} it creates a
+# short-lived `git worktree add --detach` (NEVER checks out in place), runs the
+# corpus there, collects the per-case result set, and tears the worktree down.
+#
+# Corpora:
+#   deterministic (default) — the exact / no-model portion:
+#       * ai/bin/harness-eval per-case pass-set (from its scorecard.json)
+#       * every admiral-eval T1 hook-stdin case (mode=hook-stdin)
+#     Delta = EXACT pass-set diff (regressed / fixed / new), no sampling, no band.
+#   full — additionally the admiral-eval T2 model-in-loop cases, characterized:
+#     run baseline ref N times for a per-case pass-fraction p_base, variant N
+#     times for p_var; a fixed envelope Δ_noise separates real delta from noise.
+#     Regression iff p_base - p_var > Δ_noise; improvement iff p_var - p_base >
+#     Δ_noise; otherwise INCONCLUSIVE. A flip within the envelope is NEVER a
+#     regression and NEVER an improvement.
+#
+# Before any delta the variant ref is run through the standing gate
+# (ai/bin/harness-gate: harness-eval + check-* guards + every --self-test). A red
+# gate short-circuits to BLOCKED with a Fix: line, BEFORE scoring
+# (never-commit-a-broken-harness).
+#
+# Verdict:
+#   variant gate red                                  -> BLOCKED (short-circuit)
+#   ANY deterministic regression OR any T2 regression -> REVERT
+#   zero regressions AND >=1 strict improvement        -> KEEP (pending human gate)
+#   zero regressions, no improvement clears envelope   -> INCONCLUSIVE
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ai/bin/variant-eval --variant <ref> [--baseline <ref>] [--corpus deterministic|full]
+#                       [--runs N] [--out <file>]
+#   ai/bin/variant-eval --self-test    verify the runner's own logic (NO model, NO git)
+#
+# The model-in-loop `variant-eval --variant … --corpus full` stays OUT of the
+# gate (like admiral-eval --run / critic-eval --run). Only --self-test is
+# gate-wired.
+
+require "json"
+require "open3"
+require "fileutils"
+require "tmpdir"
+require "time"
+
+AI_DIR              = File.expand_path("..", __dir__)
+ADMIRAL_FIXTURES    = File.join("ai", "eval", "admiral-fixtures")
+SCORECARD_REL       = File.join("ai", "eval", "scorecard.json")
+
+DEFAULT_BASELINE    = "origin/main"
+DEFAULT_RUNS        = 10        # T2 characterization depth for the pilot
+DELTA_NOISE         = 0.3       # fixed envelope: |p_base - p_var| must exceed this
+# Float tolerance for the envelope comparison. With N=10 the reachable fractions
+# are k/10, and some differences that are exactly Δ_noise in rational terms
+# evaluate ABOVE it in float (e.g. 0.9 - 0.6 == 0.30000000000000004). Requiring
+# the difference to exceed the envelope by more than EPS keeps a flip of EXACTLY
+# Δ_noise classified as INCONCLUSIVE, as documented (never a false KEEP/REVERT on
+# what the design calls sampling noise).
+ENVELOPE_EPS        = 1e-9
+
+KEEP_LABEL = "KEEP — pending human gate (requires gate-green + explicit human adoption; variant-eval NEVER adopts)"
+
+# Command strings that would constitute a mutation/adoption action. No proposal
+# output may contain any of these (self-test (d)); no command the tool runs may
+# match one (command_allowed?).
+MUTATION_COMMAND_STRINGS = [
+  "git merge", "git commit", "git push", "git rebase", "git reset",
+  "gh pr merge", "gh merge", "glab mr merge", "--update-baseline"
+].freeze
+
+# ---------------------------------------------------------------------------
+# STRUCTURAL CONTAINMENT (guard — this is a security-relevant, self-modifying-
+# adjacent tool; it must be provable it CANNOT mutate the live harness).
+#
+# Every external command is funneled through `capture`, which refuses any argv
+# that is not read-only. The self-test asserts (i) command_allowed? rejects each
+# mutation family, and (ii) the SOURCE routes ALL execution through this single
+# guarded call site (no backticks, %x, system(, IO.popen, spawn(, exec(, and
+# exactly one Open3.capture3( in the whole file).
+# ---------------------------------------------------------------------------
+class MutationAttempt < StandardError; end
+
+FORGE_CLIS = %w[gh glab gh-athena glab-athena].freeze
+# git subcommands that only READ or manage a scratch worktree (never mutate
+# harness content or history). Anything else under git (merge/commit/push/
+# rebase/reset/checkout/branch/tag/update-ref/...) is denied.
+GIT_ALLOWED_SUBCMDS = %w[
+  worktree rev-parse cat-file show log status diff ls-files rev-list merge-base --version
+].freeze
+
+# The first positional token after `git` (its subcommand), skipping global
+# option flags and the value of -C / -c. Mirrors admiral-eval's sandbox git
+# parser: iterate a snapshot, never shift.
+def git_subcommand(argv)
+  skip = false
+  argv.drop(1).each do |a|
+    if skip
+      skip = false
+      next
+    end
+    case a
+    when "-C", "-c" then skip = true
+    when /\A-/ then next
+    else return a
+    end
+  end
+  nil
+end
+
+def command_allowed?(argv)
+  return false if argv.nil? || argv.empty?
+
+  prog = File.basename(argv[0].to_s)
+  return false if FORGE_CLIS.include?(prog)     # never touch the forge
+  return false if argv.include?("--update-baseline") # never re-baseline a corpus
+  if prog == "git"
+    return GIT_ALLOWED_SUBCMDS.include?(git_subcommand(argv))
+  end
+
+  true
+end
+
+# The ONE guarded execution primitive. Refuses a forbidden argv rather than
+# running it. Returns [stdout, stderr, Process::Status].
+def capture(argv, chdir: nil, stdin_data: "", env: nil)
+  unless command_allowed?(argv)
+    raise MutationAttempt,
+          "variant-eval refused a non-read-only command: #{argv.inspect}. " \
+          "Fix: variant-eval is a measurement instrument — it must NEVER merge, " \
+          "commit, push, or re-baseline. Route only read-only/worktree commands " \
+          "through the single guarded exec primitive."
+  end
+  opts = { stdin_data: stdin_data }
+  opts[:chdir] = chdir if chdir
+  cmd = env ? [env, *argv] : argv
+  Open3.capture3(*cmd, **opts)
+end
+
+# ---------------------------------------------------------------------------
+# PURE SCORING (all exercised synthetically by --self-test; no model, no git).
+# ---------------------------------------------------------------------------
+
+# EXACT pass-set diff — identical semantics to harness-eval/admiral-eval
+# diff_baseline. Sets are { case_name => bool }.
+def deterministic_diff(base_set, var_set)
+  regressed = base_set.select { |name, was| was && var_set[name] == false }.keys
+  fixed     = base_set.select { |name, was| !was && var_set[name] == true }.keys
+  new_cases = var_set.keys - base_set.keys
+  { regressed: regressed.sort, fixed: fixed.sort, new: new_cases.sort }
+end
+
+# Classify a T2 (or any sampled) case's flip against the envelope.
+#   :regressed  iff p_base - p_var > envelope
+#   :improved   iff p_var - p_base > envelope
+#   :inconclusive otherwise (any flip WITHIN the envelope)
+# Deterministic cases use N=1 and a 0-width envelope, so an exact 1->0 flip is
+# :regressed and 0->1 is :improved.
+def classify_flip(p_base, p_var, envelope = DELTA_NOISE)
+  # Exceed the envelope by more than EPS so a flip of EXACTLY Δ_noise (and its
+  # float-fuzz neighbours) stays INCONCLUSIVE rather than a false KEEP/REVERT.
+  return :regressed if (p_base - p_var) - envelope > ENVELOPE_EPS
+  return :improved  if (p_var - p_base) - envelope > ENVELOPE_EPS
+
+  :inconclusive
+end
+
+# Pure verdict from gate status + the set of regressions and improvements.
+#   gate red                              -> :blocked
+#   any regression                        -> :revert
+#   zero regressions, >=1 improvement     -> :keep
+#   zero regressions, no improvement      -> :inconclusive
+def verdict(gate_ok:, regressions:, improvements:)
+  return :blocked unless gate_ok
+  return :revert if regressions.any?
+  return :keep   if improvements.any?
+
+  :inconclusive
+end
+
+# ---------------------------------------------------------------------------
+# PROPOSAL RENDERING — the tool's only output. Proposal-only, human-gated.
+# ---------------------------------------------------------------------------
+def render_proposal(res)
+  lines = []
+  lines << "=== variant-eval PROPOSAL (measurement instrument; human-gated; proposal-only) ==="
+  lines << "variant:  #{res[:variant]}"
+  lines << "baseline: #{res[:baseline]}"
+  lines << "corpus:   #{res[:corpus]}"
+  lines << "gate (variant): #{res[:gate_ok] ? 'GREEN' : 'RED'}"
+  lines << ""
+
+  if res[:verdict] == :blocked
+    lines << "VERDICT: BLOCKED — the variant's standing gate is RED; not scored."
+    lines << "  (never-commit-a-broken-harness: a variant that fails the gate is not a candidate.)"
+    lines << "  Fix: run `ai/bin/harness-gate` on the variant ref, make every check PASS, then re-run variant-eval."
+    (res[:gate_detail] || []).each { |l| lines << "    #{l}" }
+    return lines.join("\n") + "\n"
+  end
+
+  d = res[:deterministic] || { regressed: [], fixed: [], new: [] }
+  lines << "deterministic corpus (exact pass-set diff):"
+  lines << "  regressed (pass->fail): #{d[:regressed].empty? ? 'none' : d[:regressed].join(', ')}"
+  lines << "  fixed (fail->pass):     #{d[:fixed].empty?     ? 'none' : d[:fixed].join(', ')}"
+  lines << "  new cases:              #{d[:new].empty?       ? 'none' : d[:new].join(', ')}"
+
+  if res[:corpus] == "full"
+    lines << ""
+    lines << "T2 corpus (characterized, envelope Δ_noise=#{DELTA_NOISE}):"
+    if (res[:t2] || []).empty?
+      lines << "  (no T2 cases evaluated)"
+    else
+      res[:t2].each do |c|
+        lines << format("  %-34s p_base=%.2f p_var=%.2f -> %s",
+                        c[:name], c[:p_base], c[:p_var], c[:flip].to_s.upcase)
+      end
+    end
+  end
+
+  lines << ""
+  case res[:verdict]
+  when :revert
+    lines << "VERDICT: REVERT — the variant regresses a known case; never trade a known regression for an unproven gain."
+    lines << "  regressions: #{res[:regressions].join(', ')}"
+    lines << "  Fix: do NOT adopt this variant. Restore the regressed behavior on the variant ref (keep every " \
+             "guard the baseline caught), then re-run variant-eval; adoption stays a human decision."
+  when :keep
+    lines << "VERDICT: #{KEEP_LABEL}"
+    lines << "  improvements: #{res[:improvements].join(', ')}"
+    lines << "  This is a PROPOSAL only. variant-eval performs NO merge/commit/push/adopt. A human adopts the " \
+             "variant by merging it AFTER the standing gate is green."
+  when :inconclusive
+    lines << "VERDICT: INCONCLUSIVE — no improvement claim. Zero regressions, but no case improves beyond the envelope."
+    lines << "  (Any T2 flip within Δ_noise=#{DELTA_NOISE} is sampling noise, not a measured delta.)"
+  end
+
+  lines.join("\n") + "\n"
+end
+
+# ---------------------------------------------------------------------------
+# IMPURE MEASUREMENT — worktree add / run corpus / collect / tear down.
+# Exercised only by a real --variant run; NEVER by --self-test.
+# ---------------------------------------------------------------------------
+
+# Create a detached scratch worktree for `ref` and yield its path; remove it
+# after. Never checks out in place.
+def with_worktree(ref)
+  Dir.mktmpdir("variant-eval-wt-") do |parent|
+    wt = File.join(parent, "tree")
+    _o, err, st = capture(["git", "worktree", "add", "--detach", wt, ref])
+    raise "git worktree add failed for #{ref.inspect}: #{err.strip}" unless st.success?
+
+    begin
+      yield wt
+    ensure
+      capture(["git", "worktree", "remove", "--force", wt])
+    end
+  end
+end
+
+# Run the standing gate in a worktree. Returns [ok, detail_lines].
+def run_gate(wt)
+  out, err, st = capture(["ai/bin/harness-gate"], chdir: wt)
+  detail = (out.to_s + err.to_s).lines.map(&:chomp).last(12)
+  [st.success?, detail]
+end
+
+# Collect the deterministic per-case pass-set in a worktree:
+#   he:<name> from harness-eval's scorecard.json
+#   ae:<name> for every admiral-eval T1 hook-stdin fixture
+def collect_deterministic(wt)
+  set = {}
+
+  # harness-eval writes ai/eval/scorecard.json with per-case {name, pass}.
+  _o, _e, _st = capture(["ai/bin/harness-eval"], chdir: wt)
+  scorecard = File.join(wt, SCORECARD_REL)
+  if File.file?(scorecard)
+    data = JSON.parse(File.read(scorecard))
+    (data["cases"] || []).each { |c| set["he:#{c['name']}"] = (c["pass"] == true) }
+  end
+
+  # admiral-eval T1 hook-stdin cases (mode=hook-stdin), run via the same isolated
+  # -HOME hook primitive harness-eval/admiral-eval use.
+  Dir.glob(File.join(wt, ADMIRAL_FIXTURES, "*")).sort.each do |dir|
+    meta_path = File.join(dir, "meta")
+    next unless File.file?(meta_path)
+
+    meta = parse_meta(meta_path)
+    next unless meta["mode"] == "hook-stdin"
+
+    fired = hook_fires?(wt, meta["guard"], File.join(dir, meta["input"].to_s))
+    pass = (fired && meta["expect"] == "fires") || (!fired && meta["expect"] == "clean")
+    set["ae:#{File.basename(dir)}"] = pass
+  end
+
+  set
+end
+
+def parse_meta(path)
+  meta = {}
+  File.foreach(path) do |line|
+    line = line.strip
+    next if line.empty? || line.start_with?("#")
+
+    k, _, v = line.partition("=")
+    meta[k.strip] = v.strip
+  end
+  meta
+end
+
+# Pipe the fixture JSON into the worktree's ai/hooks/<guard>.sh under an isolated
+# HOME (so per-invocation hook dedup state is fresh every run); true iff it emits
+# a PreToolUse deny.
+def hook_fires?(wt, guard, input_path)
+  hook = File.join(wt, "ai", "hooks", "#{guard}.sh")
+  return false unless File.executable?(hook) && File.file?(input_path)
+
+  input = File.read(input_path)
+  Dir.mktmpdir("variant-eval-home-") do |home|
+    out, _err, _st = capture([hook], chdir: wt, stdin_data: input, env: { "HOME" => home })
+    out.include?('"permissionDecision":"deny"')
+  end
+end
+
+# Characterize the T2 model-in-loop cases in a worktree by running
+# admiral-eval --run --runs N and parsing its per-case rate column. Returns
+# { case_name => pass_fraction }.
+def collect_t2_fractions(wt, runs)
+  fractions = {}
+  out, _err, _st = capture(["ai/bin/admiral-eval", "--run", "--runs", runs.to_s], chdir: wt)
+  out.each_line do |line|
+    # Format: "PASS <name> <passes/samples> [<mode>] <detail>"
+    m = line.match(/\A(?:PASS|FAIL)\s+(\S+)\s+(\d+)\/(\d+)\b/)
+    next unless m
+
+    name, passes, samples = m[1], m[2].to_i, m[3].to_i
+    next if samples.zero?
+
+    fractions[name] = passes.to_f / samples
+  end
+  fractions
+end
+
+def measure(variant:, baseline:, corpus:, runs:, out_file:)
+  res = { variant: variant, baseline: baseline, corpus: corpus }
+
+  with_worktree(variant) do |var_wt|
+    # Gate short-circuit BEFORE any delta (never-commit-a-broken-harness).
+    gate_ok, gate_detail = run_gate(var_wt)
+    res[:gate_ok] = gate_ok
+    unless gate_ok
+      res[:verdict] = :blocked
+      res[:gate_detail] = gate_detail
+      return emit(res, out_file)
+    end
+
+    var_det = collect_deterministic(var_wt)
+
+    with_worktree(baseline) do |base_wt|
+      base_det = collect_deterministic(base_wt)
+      diff = deterministic_diff(base_det, var_det)
+      res[:deterministic] = diff
+
+      regressions = diff[:regressed].dup
+      improvements = diff[:fixed].dup
+      t2 = []
+
+      if corpus == "full"
+        p_base = collect_t2_fractions(base_wt, runs)
+        p_var  = collect_t2_fractions(var_wt, runs)
+        (p_base.keys | p_var.keys).sort.each do |name|
+          pb = p_base[name] || 0.0
+          pv = p_var[name] || 0.0
+          flip = classify_flip(pb, pv)
+          t2 << { name: name, p_base: pb, p_var: pv, flip: flip }
+          regressions << "t2:#{name}"  if flip == :regressed
+          improvements << "t2:#{name}" if flip == :improved
+        end
+      end
+
+      res[:t2] = t2
+      res[:regressions] = regressions
+      res[:improvements] = improvements
+      res[:verdict] = verdict(gate_ok: true, regressions: regressions, improvements: improvements)
+    end
+  end
+
+  emit(res, out_file)
+end
+
+def emit(res, out_file)
+  text = render_proposal(res)
+  puts text
+  if out_file
+    File.write(out_file, text)
+    puts "variant-eval: proposal written to #{out_file}"
+  end
+  # A "do not adopt" verdict exits non-zero for CLI callers; the tool is not a
+  # gate, so this exit code never affects harness-gate.
+  %i[revert blocked].include?(res[:verdict]) ? 1 : 0
+end
+
+# ---------------------------------------------------------------------------
+# --self-test — NO model, NO git. Synthetic pass-sets + stub argv only.
+# ---------------------------------------------------------------------------
+def self_test
+  ok = true
+  fail = ->(msg) { warn "self-test: FAIL — #{msg}"; ok = false }
+
+  # (a) a true->false deterministic flip -> REVERT
+  diff_a = deterministic_diff({ "c1" => true }, { "c1" => false })
+  fail.("a pass->fail must be regressed: #{diff_a.inspect}") unless diff_a[:regressed] == ["c1"]
+  va = verdict(gate_ok: true, regressions: diff_a[:regressed], improvements: diff_a[:fixed])
+  fail.("deterministic regression must verdict REVERT (got #{va})") unless va == :revert
+
+  # (b) strictly-better zero-regression set -> KEEP (pending gate)
+  diff_b = deterministic_diff({ "c1" => false, "c2" => true }, { "c1" => true, "c2" => true })
+  fail.("a fail->pass must be fixed: #{diff_b.inspect}") unless diff_b[:fixed] == ["c1"]
+  fail.("a strictly-better set must have no regression") unless diff_b[:regressed].empty?
+  vb = verdict(gate_ok: true, regressions: diff_b[:regressed], improvements: diff_b[:fixed])
+  fail.("zero-regression + improvement must verdict KEEP (got #{vb})") unless vb == :keep
+
+  # (c) within-envelope flip (p_base=0.6, p_var=0.6, the AE-02 shape) -> INCONCLUSIVE
+  fail.("equal fractions must be INCONCLUSIVE") unless classify_flip(0.6, 0.6) == :inconclusive
+  fail.("a small flip within Δ_noise must be INCONCLUSIVE") unless classify_flip(0.6, 0.5) == :inconclusive
+  fail.("a within-envelope flip must NOT be regressed") if classify_flip(0.6, 0.5) == :regressed
+  fail.("a within-envelope flip must NOT be improved") if classify_flip(0.5, 0.6) == :improved
+  # boundaries: a flip of EXACTLY Δ_noise is NOT beyond the envelope -> inconclusive.
+  # Exercise BOTH the exactly-0.3 float pair AND the reachable N=10 fractions whose
+  # difference float-rounds ABOVE 0.3 (9/10 vs 6/10 -> 0.30000000000000004); a
+  # naive `> envelope` would misclassify these as regressed/improved.
+  fail.("a flip of exactly Δ_noise must be INCONCLUSIVE") unless classify_flip(0.6, 0.3) == :inconclusive
+  fail.("9/10 vs 6/10 (float 0.3000…4) must be INCONCLUSIVE, not regressed") \
+    unless classify_flip(0.9, 0.6) == :inconclusive
+  fail.("6/10 vs 9/10 (float 0.3000…4) must be INCONCLUSIVE, not improved") \
+    unless classify_flip(0.6, 0.9) == :inconclusive
+  fail.("8/10 vs 5/10 (exactly Δ_noise) must be INCONCLUSIVE") unless classify_flip(0.8, 0.5) == :inconclusive
+  # a flip that genuinely clears the envelope
+  fail.("a 1.0->0.6 flip (0.4 > Δ_noise) must be regressed") unless classify_flip(1.0, 0.6) == :regressed
+  fail.("a 0.6->1.0 flip (0.4 > Δ_noise) must be improved") unless classify_flip(0.6, 1.0) == :improved
+  fail.("a 1.0->0.0 flip must be regressed") unless classify_flip(1.0, 0.0) == :regressed
+  fail.("a 0.0->1.0 flip must be improved") unless classify_flip(0.0, 1.0) == :improved
+  # a within-envelope T2 flip contributes INCONCLUSIVE: no regression/improvement
+  vc = verdict(gate_ok: true, regressions: [], improvements: [])
+  fail.("no regression + no improvement must verdict INCONCLUSIVE (got #{vc})") unless vc == :inconclusive
+
+  # (d) no KEEP output contains an adopt/commit/merge COMMAND token
+  keep_res = {
+    variant: "cand", baseline: "origin/main", corpus: "deterministic", gate_ok: true,
+    verdict: :keep, deterministic: { regressed: [], fixed: ["c1"], new: [] },
+    regressions: [], improvements: ["c1"]
+  }
+  keep_out = render_proposal(keep_res)
+  fail.("a KEEP proposal must carry the human-gate label") \
+    unless keep_out.include?("requires gate-green + explicit human adoption")
+  MUTATION_COMMAND_STRINGS.each do |tok|
+    fail.("a KEEP proposal must NOT contain the mutation command #{tok.inspect}") if keep_out.include?(tok)
+  end
+
+  # (e) a variant whose gate fails -> BLOCKED before scoring
+  ve = verdict(gate_ok: false, regressions: ["anything"], improvements: ["anything"])
+  fail.("a red gate must verdict BLOCKED regardless of delta (got #{ve})") unless ve == :blocked
+  blocked_out = render_proposal({
+    variant: "cand", baseline: "origin/main", corpus: "deterministic",
+    gate_ok: false, verdict: :blocked, gate_detail: ["some check FAILED"]
+  })
+  fail.("a BLOCKED proposal must say it was not scored") unless blocked_out.include?("not scored")
+
+  # (f) every failure/deny path carries Fix:
+  fail.("BLOCKED proposal must carry a Fix: line") unless blocked_out.include?("Fix:")
+  revert_out = render_proposal({
+    variant: "cand", baseline: "origin/main", corpus: "deterministic", gate_ok: true,
+    verdict: :revert, deterministic: { regressed: ["c1"], fixed: [], new: [] },
+    regressions: ["c1"], improvements: []
+  })
+  fail.("REVERT proposal must carry a Fix: line") unless revert_out.include?("Fix:")
+
+  # -- STRUCTURAL CONTAINMENT: command_allowed? rejects every mutation family --
+  fail.("worktree add must be allowed") unless command_allowed?(%w[git worktree add --detach /tmp/x origin/main])
+  fail.("worktree remove must be allowed") unless command_allowed?(%w[git worktree remove --force /tmp/x])
+  fail.("git rev-parse must be allowed") unless command_allowed?(%w[git rev-parse --git-common-dir])
+  fail.("harness-eval must be allowed") unless command_allowed?(%w[ai/bin/harness-eval])
+  fail.("admiral-eval --run must be allowed") unless command_allowed?(%w[ai/bin/admiral-eval --run --runs 3])
+  fail.("git merge must be DENIED") if command_allowed?(%w[git merge origin/main])
+  fail.("git commit must be DENIED") if command_allowed?(%w[git commit -m x])
+  fail.("git push must be DENIED") if command_allowed?(%w[git push origin main])
+  fail.("git -C … push must be DENIED (option skipping)") if command_allowed?(%w[git -C /repo push origin main])
+  fail.("git rebase must be DENIED") if command_allowed?(%w[git rebase origin/main])
+  fail.("git reset must be DENIED") if command_allowed?(%w[git reset --hard origin/main])
+  fail.("git checkout must be DENIED") if command_allowed?(%w[git checkout main])
+  fail.("gh pr merge must be DENIED") if command_allowed?(%w[gh pr merge 1])
+  fail.("glab mr merge must be DENIED") if command_allowed?(%w[glab mr merge 1])
+  fail.("gh-athena merge must be DENIED") if command_allowed?(%w[gh-athena pr merge 1])
+  fail.("--update-baseline must be DENIED anywhere in argv") if command_allowed?(%w[ai/bin/admiral-eval --run --update-baseline])
+
+  # capture() must REFUSE a forbidden argv rather than run it.
+  begin
+    capture(%w[git push origin main])
+    fail.("capture must raise MutationAttempt on a forbidden command")
+  rescue MutationAttempt
+    # expected
+  rescue StandardError => e
+    fail.("capture raised the wrong error class: #{e.class}")
+  end
+
+  # -- SOURCE containment: all execution is funneled through the ONE guarded
+  # exec call site. This is the "grep its own source for a mutation path"
+  # assertion (mirrors admiral-eval's containment self-test). A naive substring
+  # grep false-matches its own comments/Fix: prose, so we LEX with Ripper and
+  # inspect only real code tokens: comment text is :on_comment and string bodies
+  # are :on_tstring_content, so a mention in prose is excluded automatically. A
+  # genuine backtick/%x command literal is an :on_backtick token; a genuine call
+  # to system/spawn/exec/popen is an :on_ident.
+  require "ripper"
+  toks = Ripper.lex(File.read(__FILE__))
+  code_idents = toks.select { |t| t[1] == :on_ident }.map { |t| t[2] }
+  backtick_toks = toks.select { |t| t[1] == :on_backtick }
+
+  fail.("source must contain no backtick/%x command literal (route through the guarded exec primitive)") \
+    unless backtick_toks.empty?
+  %w[system spawn exec popen].each do |prim|
+    n = code_idents.count(prim)
+    fail.("source must not call #{prim} as code (found #{n}) — route through the guarded exec primitive") \
+      unless n.zero?
+  end
+  # The one permitted exec primitive is Open3.capture3, called exactly once
+  # (inside the guarded wrapper). `capture3` is an :on_ident only at a real call.
+  exec_calls = code_idents.count("capture3")
+  fail.("source must invoke the exec library exactly once (the guarded site), found #{exec_calls}") \
+    unless exec_calls == 1
+
+  if ok
+    puts "variant-eval: self-test OK"
+    0
+  else
+    warn "variant-eval: self-test FAILED"
+    warn "  Fix: the diff/classify/verdict/render logic or the structural containment is broken. A " \
+         "deterministic pass->fail must verdict REVERT; a within-envelope flip must be INCONCLUSIVE (never " \
+         "regressed/improved); a red gate must verdict BLOCKED before scoring; no KEEP proposal may contain a " \
+         "mutation command; command_allowed? must deny every merge/commit/push/forge/--update-baseline argv; " \
+         "and all execution must go through the single guarded `capture`."
+    1
+  end
+end
+
+# ---------------------------------------------------------------------------
+def arg_value(flag, default = nil)
+  i = ARGV.index(flag)
+  return default unless i && ARGV[i + 1]
+
+  ARGV[i + 1]
+end
+
+def run_from_argv
+  variant = arg_value("--variant")
+  unless variant
+    warn "variant-eval: FAILED — no --variant <ref> given."
+    warn "  Fix: pass the candidate ref, e.g. `ai/bin/variant-eval --variant my-branch`."
+    return 2
+  end
+
+  corpus = arg_value("--corpus", "deterministic")
+  unless %w[deterministic full].include?(corpus)
+    warn "variant-eval: FAILED — invalid --corpus #{corpus.inspect}."
+    warn "  Fix: use --corpus deterministic (default) or --corpus full (adds model-in-loop T2)."
+    return 2
+  end
+
+  measure(
+    variant: variant,
+    baseline: arg_value("--baseline", DEFAULT_BASELINE),
+    corpus: corpus,
+    runs: (arg_value("--runs", DEFAULT_RUNS.to_s).to_i.clamp(1, 99)),
+    out_file: arg_value("--out")
+  )
+rescue MutationAttempt => e
+  warn "variant-eval: FAILED — #{e.message}"
+  1
+rescue StandardError => e
+  warn "variant-eval: FAILED — #{e.message}"
+  warn "  Fix: check that --variant and --baseline are valid git refs and that `git worktree add` can " \
+       "create scratch trees for them."
+  1
+end
+
+exit(ARGV.include?("--self-test") ? self_test : run_from_argv)
