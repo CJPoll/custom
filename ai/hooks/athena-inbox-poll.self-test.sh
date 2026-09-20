@@ -11,8 +11,11 @@
 #
 # ISOLATION. Every case gets a fake $HOME, a private ATHENA_INBOX_ROOT and a
 # real git repo, all under one mktemp -d. The real ~/.claude/settings.json and
-# the real ~/.local/share/athena are never read and never written — asserted,
-# not assumed (see assert_fake_home). No network, ever; nothing here makes one.
+# the real ~/.local/share/athena are never WRITTEN — asserted, not assumed: for
+# the hook by assert_fake_home, and for settings.json by end-of-suite check (4),
+# which assert_fake_home does NOT cover, because some cases deliberately restore
+# the real $HOME for the asdf ruby shims and scripts/setup-hooks then defaults
+# to ${HOME}/.claude/settings.json. No network, ever; nothing here makes one.
 #
 # The hook is exercised against the REAL bin/inbox-status, not a stub. A stub
 # that answers the way the hook expects cannot test the hook's assumptions about
@@ -51,8 +54,19 @@ trap cleanup EXIT INT TERM
 # poll never writes on a healthy machine: the top-level FALLBACK markers (the
 # hook writes athena-inbox-last-success / -warn / -health-warn solely on its
 # degraded, hash-unresolvable path, which the real poll on this machine never
-# takes because git resolves its repo hash) and settings.json (the hook only
-# ever READS it). Three former members are DELIBERATELY excluded --
+# takes because git resolves its repo hash). FOUR former members are
+# DELIBERATELY excluded. The fourth is settings.json, whose exclusion is the
+# same class one ticket later: the comment here used to claim the hook "only
+# ever READS it", and that premise was FALSE as a guarantee about the FILE. The
+# hook indeed never touches it, but the LIVE CLAUDE CODE PROCESS rewrites
+# ~/.claude/settings.json asynchronously (model, theme, enabledPlugins,
+# permissions), so its mtime moves mid-run for reasons this suite does not
+# cause -- measured 2026-09-20 as a gate-only RED on an UNTOUCHED tree
+# (settings.json:1789882883 -> :1789887771, every other member matching), while
+# the same suite run solo passed 197/197 leaving the file byte-identical. Its
+# coverage moved to check (4), which fingerprints CONTENT (the registered hook
+# set) plus the setup-hooks backup trail -- neither of which the live writer can
+# produce. The other three excluded members are
 # athena-inbox-last-poll (the attempt marker, stamped first on every run),
 # athena-inbox-poll.log (appended on every run) and the athena-inbox-seen
 # DIRECTORY (whose mtime moves whenever the poll adds a marker under the real
@@ -67,11 +81,72 @@ trap cleanup EXIT INT TERM
 real_markers_fingerprint() {
   local f
   for f in athena-inbox-last-success athena-inbox-last-warn \
-           athena-inbox-last-health-warn settings.json; do
+           athena-inbox-last-health-warn; do
     printf '%s:%s\n' "${f}" "$(stat -c %Y -- "${REAL_HOME}/.claude/${f}" 2>/dev/null || printf 'absent')"
   done
 }
 REAL_MARKERS_BEFORE="$(real_markers_fingerprint)"
+
+# The real settings.json, guarded by CONTENT rather than mtime (see above).
+#
+# WHO could write it? NOT the hook (it never touches settings.json) and --
+# unlike the poll log -- assert_fake_home does NOT make a stray write
+# impossible here: some cases deliberately restore HOME="${REAL_HOME}" for the
+# asdf ruby shims, and scripts/setup-hooks resolves
+# SETTINGS="${HOOKS_SETTINGS_FILE:-${HOME}/.claude/settings.json}", so a suite
+# call that LOSES that seam merges this branch's registry into the machine's
+# LIVE hook wiring. That is the leak this check exists for, and it is PRIMARY
+# coverage, not a backstop.
+#
+# It cannot be signed the way check (3) signs the poll log: setup-hooks resolves
+# hook paths against the MAIN CHECKOUT, so a leaked install writes
+# /home/cjpoll/dev/custom/... -- content carrying neither ${TMP} nor
+# ${SENTINEL}. A ${TMP}/sentinel grep here would be a check that can NEVER fire.
+REAL_SETTINGS="${REAL_HOME}/.claude/settings.json"
+
+# The SET of hook commands registered in the real settings.json, as sorted JSON
+# triples. Sorted and structural, so a re-serialization by the live writer
+# cannot trip it; JSON-encoded rather than "event|matcher|command" because a
+# live matcher legitimately CONTAINS the pipe (pronoun-guard's is
+# "Bash|SendMessage|mcp__notion-(work|personal)__(...)") -- a delimiter that
+# occurs inside the value is the exact bug class this repo keeps re-finding.
+#
+# Reading races the live writer's own rewrite, so a parse failure is retried
+# (bounded: 3 attempts, 1s apart -- not a spin) before it is believed. An
+# unreadable-but-present file yields UNREADABLE, which check (4) reddens: a
+# check that cannot evaluate must never print ok.
+real_hooks_fingerprint() {
+  local attempt out
+  [ -e "${REAL_SETTINGS}" ] || { printf 'absent\n'; return 0; }
+  for attempt in 1 2 3; do
+    if out="$(jq -S -c '
+            [ (.hooks // {}) | to_entries[] as $e
+              | $e.value[]?
+              | (.matcher // "") as $m
+              | (.hooks[]? | .command)
+              | [$e.key, $m, .] ]
+            | sort' -- "${REAL_SETTINGS}" 2>/dev/null)" && [ -n "${out}" ]; then
+      printf '%s\n' "${out}"
+      return 0
+    fi
+    [ "${attempt}" = 3 ] || sleep 1
+  done
+  printf 'UNREADABLE(%s)\n' "${REAL_SETTINGS}"
+}
+REAL_HOOKS_BEFORE="$(real_hooks_fingerprint)"
+
+# scripts/setup-hooks backs its target up as "${SETTINGS}.bak-<ts>" before
+# merging. Nothing else on this machine writes that name, so a NEW one beside
+# the real settings file is a zero-false-positive trace of a leaked --install --
+# and it fires even when the merge happened to be a no-op on the command set,
+# which the hook-set check alone would miss.
+real_settings_backups() {
+  local b
+  for b in "${REAL_SETTINGS}".bak-*; do
+    [ -e "${b}" ] && printf '%s\n' "${b}"
+  done | LC_ALL=C sort
+}
+REAL_SETTINGS_BACKUPS_BEFORE="$(real_settings_backups)"
 
 # The real-$HOME seen dir. The live poll may ADD a marker here keyed to the REAL
 # repo hash while the suite runs -- that is allowed and must not fail the guard.
@@ -1557,13 +1632,14 @@ else
   ok "no fake-project marker leaked into the real \$HOME seen dir (${checked} fake projects checked)"
 fi
 
-# (2) The daemon-UNTOUCHED members of the family, byte-for-byte unmoved. These
-# are the top-level FALLBACK markers (written only on the hook's degraded,
-# hash-unresolvable path, which this machine's live poll never takes) and
-# settings.json (only ever read). last-poll, poll.log and the seen DIRECTORY are
-# NOT here: the live poll rewrites all three every session, so an mtime assertion
-# on them races the daemon (that was the DND-224 false positive). Their leak
-# coverage is check (1) for the seen dir and check (3) for the log.
+# (2) The daemon-UNTOUCHED members of the family, byte-for-byte unmoved: the
+# top-level FALLBACK markers, written only on the hook's degraded,
+# hash-unresolvable path, which this machine's live poll never takes. last-poll,
+# poll.log, the seen DIRECTORY and settings.json are NOT here -- each is
+# rewritten by a writer this suite does not control, so an mtime assertion on it
+# races (last-poll/log/seen-dir: the live poll, DND-224; settings.json: the live
+# Claude Code process, the same class one ticket later). Their leak coverage is
+# check (1) for the seen dir, check (3) for the log, check (4) for settings.json.
 assert_eq "the suite left the real \$HOME marker family untouched" \
   "${REAL_MARKERS_BEFORE}" "$(real_markers_fingerprint)"
 
@@ -1596,6 +1672,74 @@ if [ -f "${real_log}" ] && \
         under the per-case \${HOME} beneath ${TMP}. Remove the offending lines from ${real_log}."
 else
   ok "the suite left no trace in the real \$HOME poll log"
+fi
+
+# (4) The real settings.json, by CONTENT and by backup trail (see the prologue
+# for why not by mtime, and for why assert_fake_home does not cover this file).
+real_hooks_after="$(real_hooks_fingerprint)"
+case "${REAL_HOOKS_BEFORE}|${real_hooks_after}" in
+  *UNREADABLE*)
+    bad "the suite left the real settings.json hook wiring untouched" \
+"could not parse the hook wiring out of ${REAL_SETTINGS}, so a leaked write into it
+        could NOT be ruled out -- and a check that cannot evaluate must never print ok
+        (a failed lookup must not look like an empty one).
+          before=[${REAL_HOOKS_BEFORE}]
+          after =[${real_hooks_after}]
+        Fix: run 'jq -e . ${REAL_SETTINGS}' and confirm jq is on PATH and the file is
+        valid JSON. If a live Claude Code process was mid-rewrite, re-run the suite (this
+        check already retries 3x before giving up). If the file is genuinely corrupt,
+        restore it from the newest ${REAL_SETTINGS}.bak-* and re-run
+        'scripts/setup-hooks --install' from the MAIN checkout." ;;
+  *)
+    if [ "${REAL_HOOKS_BEFORE}" = "${real_hooks_after}" ]; then
+      ok "the suite left the real settings.json hook wiring untouched"
+    else
+      bad "the suite left the real settings.json hook wiring untouched" \
+"the set of hooks registered in ${REAL_SETTINGS} CHANGED while this suite ran:
+          before=[${REAL_HOOKS_BEFORE}]
+          after =[${real_hooks_after}]
+        The live Claude Code process rewrites this file asynchronously (model, theme,
+        enabledPlugins, permissions) -- which is why its mtime is NOT asserted -- but it
+        does not add, drop or re-point a hook COMMAND, so a change in this set is a write
+        this suite caused.
+        Fix: find the scripts/setup-hooks (or settings-writing) call that ran WITHOUT
+        HOOKS_SETTINGS_FILE pointing at a per-case file under ${TMP}. Every such call in
+        this suite must set it -- including the ones that restore HOME=\"\${REAL_HOME}\"
+        for the asdf ruby shims, because an unset HOOKS_SETTINGS_FILE defaults to
+        \${HOME}/.claude/settings.json, i.e. the live harness. Then repair the live
+        wiring: run 'scripts/setup-hooks --install' from the MAIN checkout and confirm
+        with 'ai/bin/check-hooks-registered'. If no suite call did this, a human or
+        another agent edited the live hooks block mid-run -- verify that was intended
+        (the 2026-09-17 outage was exactly a silent hooks-block rewrite)."
+    fi ;;
+esac
+
+if ! command -v comm >/dev/null 2>&1; then
+  bad "no settings.json backup appeared in the real \$HOME" \
+"comm(1) is not on PATH, so the before/after backup sets could not be compared and a
+        leaked 'setup-hooks --install' against the live settings file could not be ruled
+        out -- a check that cannot evaluate must not print ok.
+        Fix: install coreutils (comm) and re-run the suite."
+else
+  new_backups="$(comm -13 \
+    <(printf '%s\n' "${REAL_SETTINGS_BACKUPS_BEFORE}" | grep -v '^$' | LC_ALL=C sort) \
+    <(printf '%s\n' "$(real_settings_backups)"        | grep -v '^$' | LC_ALL=C sort) )"
+  if [ -n "${new_backups}" ]; then
+    bad "no settings.json backup appeared in the real \$HOME" \
+"new backup file(s) appeared beside the live settings file while this suite ran:
+        $(printf '%s' "${new_backups}" | tr '\n' ' ')
+        scripts/setup-hooks backs its target up as \"\${SETTINGS}.bak-<ts>\" before
+        merging, and nothing else on this machine writes that name -- so a
+        'setup-hooks --install' ran against the LIVE settings file instead of a per-case
+        one under ${TMP}.
+        Fix: set HOOKS_SETTINGS_FILE=\"\${CASE_DIR}/settings.json\" on every
+        scripts/setup-hooks invocation in this suite (unset defaults to
+        \${HOME}/.claude/settings.json). Then restore the live file from the OLDEST
+        backup listed above, confirm with 'ai/bin/check-hooks-registered', and delete the
+        stray backup(s) only once the live file is correct."
+  else
+    ok "no settings.json backup appeared in the real \$HOME"
+  fi
 fi
 
 echo

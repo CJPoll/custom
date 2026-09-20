@@ -148,3 +148,71 @@ attempt"). The rate-limit state that gates warnings — per-project seen markers
 (check 1), top-level fallback markers + settings.json (check 2), the log's
 content (check 3) — all remain guarded. This row records the residual gap rather
 than leaving it silent.
+
+---
+
+## 2026-09-20 — the `settings.json` mtime false positive (shipwright cron)
+
+- **Domain:** the same suite's end-of-run guard that the real `$HOME` is
+  untouched — specifically its coverage of `~/.claude/settings.json`, moved
+  from an **mtime** fingerprint (check 2) to a **content** fingerprint
+  (check 4).
+- **Baseline:** `VERDICT: PASS (199 cases)` (was 197).
+
+**What happened.** `ai/bin/harness-gate` went RED on an **untouched tree**, on
+this one case, reporting only an mtime diff on `settings.json`
+(`:1789882883` → `:1789887771`) with every other member matching. Run solo the
+same suite passed `197/197` and left the file byte-identical. `setup-hooks
+--self-test` and `check-hooks-registered` were instrumented the same way and
+also left it unchanged. So the suite never wrote it: the **live Claude Code
+process** did, asynchronously, mid-gate.
+
+The check-2 comment asserted `settings.json (the hook only ever READS it)`.
+That is true of the *hook* and false as a guarantee about the *file*, which is
+the conflation that made the assertion racy — the identical class as DND-224
+one ticket earlier, surviving on the one member DND-224 left in.
+
+**Why the poll-log signature (check 3) could NOT be reused.** `assert_fake_home`
+does *not* make a stray write to this file impossible, unlike the log: some
+cases deliberately restore `HOME="${REAL_HOME}"` for the asdf ruby shims, and
+`scripts/setup-hooks` resolves
+`SETTINGS="${HOOKS_SETTINGS_FILE:-${HOME}/.claude/settings.json}"` — so a call
+that loses that seam merges into the machine's LIVE hook wiring. And because
+`setup-hooks` resolves hook paths against the MAIN CHECKOUT, such a leak writes
+`/home/cjpoll/dev/custom/...` — carrying neither `${TMP}` nor `${SENTINEL}`. A
+`${TMP}`/sentinel grep here would have been **a check that can never fire**.
+This is PRIMARY coverage, not a backstop.
+
+| id | Mutation | Expected failure |
+|---|---|---|
+| S-1 | Drop a hook command from the settings under test (what a leaked `setup-hooks --install` merge does) | `the suite left the real settings.json hook wiring untouched` — MEASURED: 12 → 11 triples, check fires RED |
+| S-2 | Point `REAL_SETTINGS` at a file containing `{` | `could not parse the hook wiring out of …` after 3 bounded retries — MEASURED: yields `UNREADABLE(...)`, loud, never a silent `ok` |
+| S-3 | Run with `comm` off `PATH` | `comm(1) is not on PATH …` — the backup-trail check must not silently pass when it cannot evaluate |
+| S-4 | **Negative control.** Rewrite `model`/`theme`/`effortLevel` and move the mtime, hooks block untouched (simulating the live writer) | Both prongs stay GREEN — MEASURED. The OLD mtime fingerprint goes RED on this same stimulus; that conflation is exactly what was removed |
+
+S-1/S-2/S-4 were driven over a **synthetic** real-home copy
+(`cp ~/.claude/settings.json "$T/"`), per the `S-DND224-2` precedent — never
+against the live file.
+
+**Why this is a STRENGTHENING, not a relaxation.** The mtime fingerprint could
+be defeated by a mutation that preserved mtime — and this file's own header
+warns that `mv`'s preserved mtime "has burned this repo before". A content
+fingerprint catches that; mtime did not. What it drops is coverage of a
+*content-identical touch*, which is not a harm. Net: strictly more
+harm-detection, minus one non-harm, minus a false-positive source.
+
+A delimiter note, since this repo keeps re-finding the class: the fingerprint
+emits **JSON triples**, not `"$event|$matcher|$command"`, because a live matcher
+legitimately CONTAINS the pipe — verified on this machine, e.g.
+`Bash|SendMessage|mcp__notion-(work|personal)__(...)`.
+
+### Z-DND224-2 — MEASURED LIMITATION: non-`hooks` keys are unguarded
+
+A suite write that changed only a NON-hooks key of the real `settings.json`
+(`permissions`, `model`, `theme`, `enabledPlugins`) is not caught: it is
+byte-for-byte indistinguishable from the live Claude Code writer, which rewrites
+exactly those keys, so no guard can separate them without racing — the very
+false positive this change removes. Accepted because the only settings-writing
+tool this suite invokes is `scripts/setup-hooks`, which is covered on BOTH
+prongs: it changes the hooks block, and it leaves a `settings.json.bak-<ts>`
+behind.
