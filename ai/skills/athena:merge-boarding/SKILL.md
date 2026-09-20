@@ -112,7 +112,13 @@ and no amount of your own care substitutes for it. So on exit 4:
 you decide ambiguities with best judgement; it never transfers the owner's spend
 and infrastructure authority to you. This is squarely a human-in-the-loop item
 (credentials, spend, a one-way action) — record it and carry on, do not decide
-it. Do not escalate it to the architect either: the architect can sign off the
+it. That skill's *Owner-credential gates throttle merging, not progress* rule
+governs what the rest of the fleet does meanwhile, and it is the other half of
+this one: exit 4 is how you DETECT that you have hit such a gate, and that rule
+is what you then do with everything else — keep the base ready-but-unmerged,
+stack dependents on top as ready-to-merge PRs, merge none of that stack, and
+carry every independent Mission through to merged as normal. Hitting exit 4
+throttles one stack; it never idles the fleet. Do not escalate it to the architect either: the architect can sign off the
 *design* (it did, on DND-234, `SIGN-OFF-WITH-FOLLOWUPS`) and that is worth
 having, but a design sign-off is **not** an authorization to spend.
 
