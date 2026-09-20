@@ -1,0 +1,5 @@
+regression=DND-201 — editing a harness control surface (CLAUDE.md) with NO prior read-inbox in context must be ALLOWED; the inbox-untrusted guard must not wedge the shipwright's own legitimate harness editing (no false positive)
+guard=inbox-untrusted-guard
+mode=hook-stdin
+input=input.json
+expect=clean

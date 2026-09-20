@@ -58,6 +58,7 @@ STATIC_CHECKS = [
   ["workflow-phase-guard self-test", %w[ai/hooks/workflow-phase-guard.self-test.sh]],
   ["harness-event self-test",   %w[ai/hooks/harness-event.self-test.sh]],
   ["athena-inbox-poll self-test", %w[ai/hooks/athena-inbox-poll.self-test.sh]],
+  ["inbox-untrusted-guard self-test", %w[ai/hooks/inbox-untrusted-guard.self-test.sh]],
   ["check-generic-skills",      %w[ai/bin/check-generic-skills]],
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
   ["check-inbox-registry",      %w[ai/bin/check-inbox-registry]],

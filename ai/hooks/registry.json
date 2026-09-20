@@ -6,6 +6,8 @@
     { "event": "PreToolUse", "matcher": "Bash", "script": "ai/hooks/forge-auth-guard.sh" },
     { "event": "PreToolUse", "matcher": "Bash", "script": "ai/hooks/workflow-phase-guard.sh" },
     { "event": "PreToolUse", "matcher": "Bash|SendMessage|mcp__notion.*", "script": "ai/hooks/pronoun-guard.sh" },
+    { "event": "PreToolUse", "matcher": "Edit|Write|MultiEdit|NotebookEdit", "script": "ai/hooks/inbox-untrusted-guard.sh" },
+    { "event": "PostToolUse", "matcher": "Bash", "script": "ai/hooks/inbox-untrusted-guard.sh" },
     { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/harness-event.sh" },
     { "event": "Stop", "matcher": "", "script": "ai/hooks/notify-idle.sh" },
     { "event": "SessionStart", "matcher": "", "script": "ai/hooks/main-session-policy.sh" },
