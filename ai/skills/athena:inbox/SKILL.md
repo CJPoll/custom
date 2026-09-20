@@ -21,8 +21,9 @@ kind, and never talks to any network. The **Slack** producer, Athena's bot
 identity, the Web API scripts, and the Web API poll that is the disaster
 **backstop** for the file channel all live in `athena:slack`. A Slack DM reaches
 a session as a `log` channel here (e.g. `walt_ui-slack.jsonl`); the two skills
-share one dedupe set (`slack-inbox.state.json`) so the file channel and the API
-backstop never re-report each other. Reach for `athena:slack` to *say* something
+share one dedupe set — the `.state.json` beside that channel (the flat default
+is `slack-inbox.state.json`) — so the file channel and the API backstop never
+re-report each other. Reach for `athena:slack` to *say* something
 in Slack or to recover after the file path is down; reach for this skill to read
 what was delivered.
 
