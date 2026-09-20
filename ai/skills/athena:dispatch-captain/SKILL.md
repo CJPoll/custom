@@ -25,6 +25,18 @@ Give the captain, in the brief:
   codebase — **but NOT the architect's raw domain model**; the captain grounds
   in the Notion design sub-docs (below).
 - **The absolute reports-directory path** for this run.
+- **If this Mission's report file already exists** — a fix round, a re-dispatch,
+  a second worker on the same Mission — say that the worker **owns the whole
+  file, not just the section it appends**: its pass must leave the top-line
+  status, the summary, and any head-SHA / "final commit" field describing **its**
+  pass. A worker that appends a round and leaves the head alone produces a file
+  whose opening lines contradict its own body, and the head is what a resumed
+  reader greps first. Measured 2026-09-20 (`notif-platform`):
+  `dnd-232-report.md` still opened "**Status: DONE.** Eight critic rounds
+  resolved" with `Final commit: ace49df` while its body ran to round 20 at
+  `78d5be9` — twelve rounds and a whole re-spec later, across three separate
+  appending passes that each left the head untouched. A stale head SHA in a
+  report is the failed-lookup class: it reads exactly like a working answer.
 - **The MR target branch** (from your dependency map — the repo's default branch
   if this Mission has no unmerged dependency, otherwise the dependency's branch).
 - **Your own `agentId` as the explicit reply-to.** A captain never told who

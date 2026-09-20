@@ -34,6 +34,18 @@ it's gone. If one tells you it already reported, your monitor missed the file �
 check directly, don't ask it to redo anything. After any interruption to your
 own turn, confirm the `Monitor` is still running before trusting its silence.
 
+**A report that accumulated rounds has a head that can be older than its body.**
+When a Mission runs several passes into one report file, take the terminal facts
+— status, head SHA, what actually landed — from the **newest dated section**, and
+never from the top-line summary when the two disagree. The file's mtime is fresh
+either way, so nothing in its shape warns you. And when they do disagree, treat
+it as a defect in that file rather than reading around it silently: say so in
+your state log, and make reconciling the head part of the next dispatch into it
+(see [[athena:dispatch-captain]]). Measured 2026-09-20 (`notif-platform`):
+`dnd-232-report.md` opened `Status: DONE` / `Final commit: ace49df` for twenty
+rounds while its body ended at `78d5be9`, past a full re-spec — an admiral that
+boarded on the head would have merged a twelve-round-old SHA.
+
 ## Each return frees a slot
 
 `DONE`, `BLOCKED_ON_DEPENDENCY`, and `STUCK` each free a concurrency slot —
