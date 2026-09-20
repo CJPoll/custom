@@ -66,12 +66,23 @@
 #   ai/bin/admiral-eval --run --update-baseline  rewrite ai/eval/admiral-baseline.json (deliberate only)
 #   ai/bin/admiral-eval --run --only AE-05       run one case (local iteration)
 #
+# Baseline PROVENANCE: the baseline records a fingerprint of the agent it was
+# captured against (ai/agents/athena-admiral.md: line count + sha256), and every
+# --run reports whether that subject still MATCHES, is STALE, or is UNKNOWN (a
+# baseline written before fingerprinting). Without it, a baseline captured
+# against a rewritten agent still prints "0 regressed" and reads exactly like a
+# verified one — see report_provenance for the measured PR #32/#33 instance.
+# The verdict is ADVISORY (it never changes the exit code), because --run is not
+# gate-wired and a legitimate re-baseline must still be able to run; the point is
+# that staleness can no longer be silent.
+#
 # Adding a case: create ai/eval/admiral-fixtures/<AE-NN-name>/meta plus scenario.md
 # (T2) or an input.json (T1 hook-stdin). Keep the scorer deterministic — assert a
 # parsed decision token / labeled answer / guard verdict, never a model judgement.
 
 require "json"
 require "open3"
+require "digest"
 require "fileutils"
 require "tmpdir"
 require "time"
@@ -81,6 +92,7 @@ FIXTURES_DIR = File.join(AI_DIR, "eval", "admiral-fixtures")
 BASELINE     = File.join(AI_DIR, "eval", "admiral-baseline.json")
 HOOKS_DIR    = File.join(AI_DIR, "hooks")
 AGENT        = "athena-admiral"
+AGENT_FILE   = File.join(AI_DIR, "agents", "#{AGENT}.md")
 DEFAULT_RUNS = 3
 
 # The fixed action vocabulary shown to the admiral in next-action scenarios. It
@@ -519,6 +531,77 @@ rescue StandardError => e
   nil
 end
 
+# --- baseline PROVENANCE ----------------------------------------------------
+# A baseline records which cases passed, but until DND/2026-09-20 it recorded
+# nothing about WHICH admiral produced them. That made two very different
+# states byte-indistinguishable: a baseline captured against TODAY's agent, and
+# one captured against an agent that has since been rewritten. Both print
+# "0 regressed", and only the first one means anything.
+#
+# Measured instance: PR #32 captured an all-green baseline against the 1034-line
+# admiral; PR #33 then trimmed the rendered agent to 496 lines (a 52% cut of
+# resident prose) and asserted the trim was "behavior-preserving". Nothing
+# re-measured it, and nothing could have NOTICED that nothing had — which is
+# this repo's "a failed lookup must never look like an empty one" class, and the
+# converse of harness-IA #8 (measure the win, don't assert it).
+#
+# So the baseline now fingerprints its subject, and a run says which of the
+# three states it is in. This is ADVISORY, never a new failure: --run is
+# model-in-loop and not gate-wired, and a legitimate re-baseline would otherwise
+# be unable to run. The point is that a stale baseline can no longer be SILENT,
+# not that it should block.
+def subject_fingerprint(path = AGENT_FILE)
+  return { "file" => relpath(path), "status" => "missing" } unless File.file?(path)
+  body = File.read(path)
+  {
+    "file"   => relpath(path),
+    "lines"  => body.lines.size,
+    "sha256" => Digest::SHA256.hexdigest(body)
+  }
+end
+
+def relpath(path)
+  root = File.expand_path("..", AI_DIR)
+  path.start_with?(root + "/") ? path[(root.size + 1)..] : path
+end
+
+def load_baseline_subject(path = BASELINE)
+  return nil unless path && File.file?(path)
+  JSON.parse(File.read(path))["subject"]
+rescue StandardError
+  nil
+end
+
+# Prints the provenance verdict. Returns the verdict symbol so the self-test can
+# assert all three WITHOUT depending on the exact wording.
+def report_provenance(recorded, current = subject_fingerprint)
+  if recorded.nil?
+    puts "baseline subject: UNKNOWN — this baseline predates subject fingerprinting."
+    warn "admiral-eval: Note: the baseline does not record which #{AGENT} it was captured against, " \
+         "so a clean diff does NOT certify today's agent. " \
+         "Fix: re-capture it against the current agent with `ai/bin/admiral-eval --run --update-baseline` " \
+         "once this run is green; after that, drift is reported automatically."
+    return :unknown
+  end
+
+  if recorded["sha256"] == current["sha256"]
+    puts "baseline subject: #{current['file']} #{current['lines']} lines " \
+         "sha #{current['sha256'][0, 12]} (matches this run)"
+    return :match
+  end
+
+  puts "baseline subject: STALE — captured against a different #{AGENT}."
+  warn "admiral-eval: Note: the baseline was captured against #{recorded['file']} at " \
+       "#{recorded['lines'] || '?'} lines (sha #{(recorded['sha256'] || '?')[0, 12]}), but this run scored " \
+       "#{current['lines'] || '?'} lines (sha #{(current['sha256'] || '?')[0, 12]}). The agent changed since the " \
+       "baseline, so '0 regressed' above compares today's results against a DIFFERENT agent's expectations — " \
+       "it is not evidence that the change preserved behavior. " \
+       "Fix: if this run is green, re-capture with `ai/bin/admiral-eval --run --update-baseline` to certify the " \
+       "current agent; if it is NOT green, treat the failures as caused by the agent change and restore the " \
+       "invariant's trigger rather than re-baselining over it."
+  :stale
+end
+
 def diff_baseline(results, baseline)
   now = results.each_with_object({}) { |r, h| h[r[:name]] = r[:pass] }
   regressed = baseline.select { |name, was| was && now[name] == false }.keys
@@ -557,17 +640,22 @@ def run_model(runs:, only:, update:)
 
   if update
     FileUtils.mkdir_p(File.dirname(BASELINE))
+    subject = subject_fingerprint
     File.write(BASELINE, JSON.pretty_generate(
       "generated" => Time.now.utc.iso8601,
+      "subject" => subject,
       "cases" => results.map { |r| { "name" => r[:name], "pass" => r[:pass], "rate" => r[:rate] } }
     ))
-    puts "admiral-eval: baseline written to #{BASELINE}"
+    puts "admiral-eval: baseline written to #{BASELINE} " \
+         "(subject: #{subject['file']} #{subject['lines']} lines sha #{(subject['sha256'] || '?')[0, 12]})"
     return 0
   end
 
   baseline = load_baseline
   if baseline
-    return diff_baseline(results, baseline)
+    code = diff_baseline(results, baseline)
+    report_provenance(load_baseline_subject)
+    return code
   end
 
   failures = results.reject { |r| r[:pass] }
@@ -698,6 +786,45 @@ def self_test
   code2, out2, = capture_io { diff_baseline(fixed_run, base_fixed) }
   fail.("a newly-fixed case must exit 0") unless code2 == 0
   fail.("fixed case must be reported") unless out2.include?("+ fixed: AE-02")
+
+  # -- 7b. baseline PROVENANCE: a stale baseline must not read as a clean one --
+  # The defect this guards: a baseline captured against a DIFFERENT admiral
+  # still prints "0 regressed", so a 52%-trim (PR #32 baseline vs PR #33 agent)
+  # looked identical to a verified one. Assert the MISS, not just the hit.
+  Dir.mktmpdir("admiral-eval-prov-") do |d|
+    a = File.join(d, "agent-a.md")
+    b = File.join(d, "agent-b.md")
+    File.write(a, "line1\nline2\nline3\n")
+    File.write(b, "line1\n")
+
+    fp_a = subject_fingerprint(a)
+    fp_b = subject_fingerprint(b)
+    fail.("fingerprint must record line count") unless fp_a["lines"] == 3
+    fail.("fingerprint must record a sha256") unless fp_a["sha256"] =~ /\A[0-9a-f]{64}\z/
+    fail.("different agents must fingerprint differently") if fp_a["sha256"] == fp_b["sha256"]
+    fail.("an absent subject must be status=missing, never a silent match") \
+      unless subject_fingerprint(File.join(d, "nope.md"))["status"] == "missing"
+
+    # match: same agent -> :match, and NOTHING on stderr
+    vcode, vout, verr = capture_io { report_provenance(fp_a, fp_a) }
+    fail.("same subject must verdict :match (got #{vcode.inspect})") unless vcode == :match
+    fail.("a matching provenance must not warn: #{verr.inspect}") unless verr.strip.empty?
+    fail.("a matching provenance must name the subject") unless vout.include?("matches this run")
+
+    # stale: baseline captured against a DIFFERENT agent -> :stale + Fix:
+    scode, sout, serr = capture_io { report_provenance(fp_a, fp_b) }
+    fail.("a changed subject must verdict :stale (got #{scode.inspect})") unless scode == :stale
+    fail.("a stale baseline must say so on stdout") unless sout.include?("STALE")
+    fail.("a stale baseline must carry a Fix: line") unless serr.include?("Fix:")
+    fail.("a stale baseline must report BOTH line counts") \
+      unless serr.include?("3 lines") && serr.include?("1 lines")
+
+    # unknown: a pre-fingerprinting baseline must SAY unknown, not read as match
+    ucode, uout, uerr = capture_io { report_provenance(nil, fp_a) }
+    fail.("a baseline with no subject must verdict :unknown (got #{ucode.inspect})") unless ucode == :unknown
+    fail.("an unknown provenance must say UNKNOWN") unless uout.include?("UNKNOWN")
+    fail.("an unknown provenance must carry a Fix: line") unless uerr.include?("Fix:")
+  end
 
   # -- 8. T1 hook-stdin primitive: three states, and :error is NEVER a pass ---
   # (the coordinator's fix #1: a broken/absent hook returning "no deny" must not

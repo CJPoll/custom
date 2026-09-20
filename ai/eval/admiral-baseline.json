@@ -1,5 +1,10 @@
 {
-  "generated": "2026-09-20T00:10:55Z",
+  "generated": "2026-09-20T01:18:36Z",
+  "subject": {
+    "file": "ai/agents/athena-admiral.md",
+    "lines": 496,
+    "sha256": "76505fe5b33d542258b58fad2ceab4fe01b669011fdbcba09b1af923401acb4b"
+  },
   "cases": [
     {
       "name": "AE-01-confirm-before-done",
