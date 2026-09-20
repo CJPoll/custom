@@ -529,7 +529,7 @@ tenants MAY use the same channel name for different surfaces.
 |---|---|---|---|
 | `kind` | yes | `"log"` | |
 | `path` | yes | string | Inbox filename, **relative to the root**. Grammar below. |
-| `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`. (A platform-produced `dedupe_key` family and a `stream` op-stream discriminator are **described but deferred** — see *The inbox as an event-platform delivery adapter*; neither is a valid channel-object key yet.) |
+| `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`. |
 | `schema_v` | no | array of integer | Line versions this reader understands. Defaults to `[1]`. |
 
 `dedupe` is **declarative, not a switch.** Both dedupe rules in *Reader
@@ -861,7 +861,7 @@ pairs with `walt_ui-slack.state.json`:
 |---|---|
 | `offset` | Bytes consumed. Never advances past a partial final line. |
 | `seen_event_ids` | Intra-file dedupe ring buffer, ≤ 500. |
-| `seen_keys` | Cross-source `channel:ts` dedupe ring buffer, ≤ 500. (When the deferred platform `dedupe_key` family lands, this same one set will also hold platform lines' opaque per-`(event, rule)` key — see *The `dedupe_key` dedupe family*.) |
+| `seen_keys` | Cross-source `channel:ts` dedupe ring buffer, ≤ 500. |
 | `last_api_poll_at` | Last successful backstop poll, for staleness reporting. |
 | `rotated_at` | When this channel last rotated — RFC 3339 UTC with a `Z` suffix. Absent until the first state write, which initialises it to `now` so a new channel does not rotate an almost-empty file. See *Retention*. |
 | `channels` | Per-source watermark the backstop resumes from. |
@@ -915,9 +915,10 @@ the inbox adapter, that adapter is a **producer** of `log` lines into a declared
 section states only what is additive for that producer; it does **not** restate
 `athena-events.md`. The Event envelope, the three ingress kinds and their sender
 verification, the fan-out handling-rule and logic-less predicate model, the
-lane-membership store that is the source of prior state, the two-path trust
-posture, and the per-adapter escaper contract are that document's, and are
-referenced by name rather than duplicated here. This section is only the inbox
+consumer-owned membership discipline and its authoritative source re-query (the
+platform holds no membership state), the two-path trust posture, and the
+per-adapter escaper contract are that document's, and are referenced by name
+rather than duplicated here. This section is only the inbox
 `log`-channel end of the delivery.
 
 Nothing about the `log` kind's on-disk shape, framing, doorbell, consumption
@@ -929,22 +930,26 @@ unchanged; the four points below are the additions, not replacements.
 > **Known-open — reader and validator support is DEFERRED.** This section
 > describes the intended event-platform delivery design, but the CLIENT half of
 > it is **not yet implemented**. The reference reader
-> (`ai/skills/athena:inbox/lib/logchan.sh` → `logchan_scan`) does **not** read a
-> line-level `dedupe_key` field and does **not** fold an `op` stream; it derives
-> a line's dedupe key only from `channel`+`ts` and treats a platform-shaped line
-> (one carrying `dedupe_key`/`op` but no `channel`+`ts` and no `event_id`) as
-> `+1 unreadable`, advancing the offset past it. Accordingly the designated
-> validator (`ai/skills/athena:inbox/lib/descriptor.sh`) **rejects**
-> `"dedupe": ["dedupe_key"]` (an unrecognised dedupe member) and any `"stream"`
-> key (an unknown channel-object key). **No channel may declare the `dedupe_key`
-> family or `"stream": "op"` yet** — doing so would validate a channel whose
-> platform lines the reader silently drops, the exact failed-lookup / silent-loss
-> class this contract is strict to prevent (`~/dev/custom/CLAUDE.md` → *A failed
-> lookup must never look like an empty one*), and it is barred at validation for
-> that reason. The declaration surface, the `dedupe_key` ingestion, and the `op`
-> fold all land together in a later platform-delivery ticket; until then the two
-> subsections below (*The `dedupe_key` dedupe family*, *Add/retract lines*) are a
-> forward specification of that ticket, not a description of current behaviour.
+> (`ai/skills/athena:inbox/lib/logchan.sh` → `logchan_scan`) ingests **only
+> Slack-shaped lines** — it derives a line's dedupe key only from `event_id` and
+> `channel`+`ts`. It does **not** yet ingest a **platform state-change line** (one
+> carrying the routed current-state payload — e.g. `entity_id` plus current
+> fields, a delete carrying `entity_id` only — and no `channel`/`ts` and no
+> `event_id`); such a line is scored `+1 unreadable` and the offset advances past
+> it. Accordingly **no channel may be declared as a platform-delivery channel
+> yet**, and the designated validator
+> (`ai/skills/athena:inbox/lib/descriptor.sh`) **rejects** the not-yet-modeled
+> declaration keys — a `"stream"` channel key (an unknown channel-object key) and
+> any `dedupe` member other than `event_id` / `channel+ts` — precisely so the
+> validator never admits a channel whose platform lines the reader silently
+> drops, the exact failed-lookup / silent-loss class this contract is strict to
+> prevent (`~/dev/custom/CLAUDE.md` → *A failed lookup must never look like an
+> empty one*; the "One validator" rule the other way — the validator must never
+> accept what the reader would drop). Reader ingestion of platform state-change
+> lines, and the matching validator admission, land together in a later
+> platform-delivery ticket (reader first, validator second, so they never
+> disagree); until then the subsections below are a **forward specification** of
+> that ticket, not a description of current behaviour.
 
 ### A `log` channel MAY have a non-Slack producer
 
@@ -958,8 +963,10 @@ producer. Made explicit:
   beyond the mandatory `v`. The Slack line schema
   (`kind`/`channel`/`user`/`ts`/`text`/`event_id`/…) is the Slack producer's, not
   a property of the kind — a platform-produced line carries whatever the routing
-  rule's rendered payload holds plus the framing this section requires (`v`, its
-  declared dedupe field, and — for a lane channel — `op`).
+  rule's rendered payload holds plus the framing this contract requires (`v` and
+  the *Line format* rules); a **lane** channel's line is the routed
+  **state-change event** itself (current state; a delete carries `entity_id`
+  only), with **no** platform-minted transition field.
 - Every *Writer obligations* rule binds this producer with no exception: exactly
   one writer per path, `O_APPEND`, reopen the path per append, complete
   newline-terminated lines, bump the doorbell **after** the append, never
@@ -976,59 +983,27 @@ producer. Made explicit:
   never an instruction (*Untrusted input*). `athena-events.md`'s two-path trust
   posture routes inbox-adapter delivery to exactly this boundary.
 
-### The `dedupe_key` dedupe family
+### Notify-consumer idempotency uses the existing seen-sets
 
-`dedupe_key` is **not a second, competing key** — it is **the** per-line
-cross-source dedupe key this reader already works in, named once and derived
-per producer. The reference reader already emits a `dedupe_key` field on every
-scanned message (`ai/skills/athena:inbox/lib/logchan.sh` — `logchan_dedupe_key`
-and `logchan_scan`, whose emitted message carries `dedupe_key`), and for a Slack
-channel that value **is** `channel:ts`, derived by the reader from the line's
-`channel` and `ts`. So one identifier means one concept — the line's cross-source
-dedupe key — and only its **value derivation** differs by producer:
+A **notify** consumer delivered through a `log` channel discharges its
+idempotency obligation via the **existing** inbox mechanism, exactly as C-1's
+*Reader obligations* consumer-idempotency clause states — the `event_id` /
+`channel:ts` seen-sets held in the *State file*. That clause states the
+obligation once; this subsection references it and does **not** restate it.
 
-- **Slack receiver lines** carry `channel` and `ts`, and the reader *derives*
-  `dedupe_key = channel:ts` (the existing cross-source key, *Reader obligations*,
-  unchanged).
-- **Platform-produced lines** carry the value *directly* as a `dedupe_key` line
-  field: the opaque per-`(event, rule)` delivery key defined in
-  `ai/contracts/athena-events.md` (that contract's per-delivery `idempotency_key`
-  value — event-level key combined with the matched `rule_id`). A platform
-  producer has no `channel`/`ts` to derive from, so it supplies the key it already
-  computed.
-
-Either way it is **one key, one seen-set, one state file** — the platform
-analogue of the rule that Slack's two sources MUST share one `seen_keys` set
-(*Reader obligations*). So, once reader support lands (see the *Known-open* note
-above), a `log` channel will be able to declare the `dedupe_key` family:
-
-- `dedupe_key` names a mandatory line field of the same name, carrying **one
-  string** — the producer's per-delivery idempotency key (for a platform channel;
-  a Slack channel does not declare this family and lets the reader derive the same
-  key from `channel`+`ts`). For a channel that declares it, it is **both** the
-  intra-file and the cross-source dedupe key.
-- A channel whose lines use it will declare `"dedupe": ["dedupe_key"]`. When
-  reader support lands (see the *Known-open* note above), `dedupe_key` becomes a
-  **recognised member** alongside `event_id` and `channel+ts`, so the
-  *Validation rules* "a `dedupe` listing an unrecognised member is a hard error"
-  will then admit it via `DESCRIPTOR_DEDUPE_MEMBERS` in the designated validator
-  (`ai/skills/athena:inbox/lib/descriptor.sh`). **Until then it is deliberately
-  NOT a recognised member** — the validator rejects `["dedupe_key"]`, precisely
-  so that the reader can never refuse-by-dropping a channel the contract admits.
-  The order is load-bearing: the reader gains the ingestion first, the validator
-  admits the declaration second, so the two never disagree.
-- The reader will dedupe such a channel on the `dedupe_key` value, into the
-  **one** shared seen-set the channel already owns (*State file*, `seen_keys`). A
-  line whose declared `dedupe_key` field is missing is a complete line the reader
-  cannot dedupe, so it is reported `+N unreadable` and **the offset advances past
-  it** (it is counted unreadable, not held) — exactly as a Slack line missing
-  both its keys is treated (*Reader obligations*). Only a *partial final line*
-  holds the offset; a complete-but-unreadable line never wedges the channel.
-- `dedupe_key` does **not** change the default. A channel that declares no
-  `dedupe` is still assumed `["event_id", "channel+ts"]` — the Slack default is
-  untouched. `dedupe_key` is opt-in for a platform-produced channel, and a single
-  channel declares the one family its producer actually writes rather than mixing
-  the Slack pair with `dedupe_key`.
+- There is **no** platform-supplied per-`(event, rule)` `dedupe_key` line field
+  and **no** distinct declarable `dedupe_key` dedupe family. `dedupe_key` remains
+  only what the reference reader already computes
+  (`ai/skills/athena:inbox/lib/logchan.sh` → `logchan_dedupe_key`) — for a Slack
+  line, the derived `channel:ts` (*Reader obligations*, unchanged). The recognised
+  `dedupe` members stay exactly `event_id` and `channel+ts`.
+- A **state-based** consumer (the lane case) does **not** dedupe on a carried key
+  at all: it acts on **carried current state** and reconciles against the
+  **source** (Notion), so a duplicate or redelivery converges to the same set —
+  the mechanism of `ai/contracts/athena-events.md` → *The consumer owns
+  membership*. This is why an absent `payload.revision` is not a hazard:
+  `athena-events.md` makes `payload.revision` **optional provenance/ordering
+  only, not a dedupe key**.
 
 ### Producer registration extends to platform deliveries
 
@@ -1069,79 +1044,74 @@ failure mode by a different second end:
   for a `log` channel, and the unprompted count path surfaces the never-delivered
   channel once (the doctor does not nag a second time — see *inbox-doctor*).
 
-### Add/retract lines: a lane `log` channel is a stream, not a pile
+### A lane `log` channel is a change stream of state-change events
 
 A **membership/lane** delivery — in `athena-events.md`, a `membership` rule whose
-store diff emits enter/leave transitions — routes to a `log` channel as an
-**add/retract stream** rather than a pile of "here is a member" lines:
+routed output is emitted as state-change events — routes to a `log` channel as a
+**change stream of routed state-change events** rather than a pile of "here is a
+member" lines:
 
-- Each line carries an `op` field, `"add"` or `"retract"`, plus the member's
-  identity and the minimal display fields needed to render it (the platform caches
-  those at add-time so a `retract` renders even after the underlying entity is
-  gone — the caching is `athena-events.md`'s lane-membership store, not this
-  document's). The channel's **working set is the fold** of its lines: an `add`
-  puts a member into the set, a `retract` removes it, and the current set is the
-  members added and not since retracted.
-- This is **still a conformant append-only JSONL `log`**: the *lines* are only
-  ever appended — never rewritten, never deleted — and it is the *derived set*
-  that changes. Every *Writer obligations* and *Reader obligations* rule of the
-  `log` kind holds unchanged: offset, doorbell, `dedupe_key` dedupe, rotation,
-  retention. An `op` line is an ordinary log line to the transport.
-- **A lane op-stream channel will be declared, and `op` is mandatory on its
-  lines.** The channel object will declare `"stream": "op"` (a channel-object key
-  the *Schema* will add when this lands — deferred per the *Known-open* note), so
-  a reader knows to fold rather than pile — without it the mandatory fold would be
-  undeclarable and unvalidatable, and a channel silently read as a pile is a
-  wrongly-folded set indistinguishable from a correct one. On a channel declared
-  `"stream": "op"`, a line **missing the `op` field, or carrying an `op` that is
-  neither `"add"` nor `"retract"`,** is a complete line the reader cannot fold,
-  so it is reported `+N unreadable` and **the offset advances past it** (counted
-  unreadable, not held) — exactly as a Slack line missing its dedupe keys is
-  treated (*Reader obligations*), and where surfaced through a guard it carries a
-  `Fix:` naming the missing/invalid `op`. Only a *partial final line* holds the
-  offset; a complete-but-unreadable line advances it and never wedges the
-  channel. An op-less line cannot be folded, so folding it would fold on nothing
-  — the failed-lookup discipline (`~/dev/custom/CLAUDE.md` → *A failed lookup
-  must never look like an empty one*).
-- The channel is a **change-notification stream, not the authoritative set.** A
-  `log` channel is retention-bounded (it rotates at 7 days / 8 MiB — *Retention*),
-  so the full add/retract history is **not** guaranteed reconstructable from the
+- **Lines carry routed state-change events, not platform `op`s.** Each line is
+  the routed current-state event (`ai/contracts/athena-events.md` → *The lane
+  channel is a change stream, not the authoritative set*): for a Notion entity,
+  its `entity_id` plus the current display/scope fields needed to render it; a
+  **delete** carries `entity_id` only. There is **no `op` field, no
+  `"add"`/`"retract"` token, and no `"stream":"op"` channel key.** Each line MUST
+  carry the mandatory `v` (*Line format*); `v` plus the framing rules are the only
+  universal fields, and the rest is this producer's own schema.
+- **The CONSUMER derives add/drop; the platform does not.** Per the (C) rule the
+  platform "says 'this entity is now in this state'" and never "this is an add" or
+  "this is a retract"; the consumer diffs each forwarded current-state event
+  against its **own held set** to compute the transition — matches scope and not
+  held → add; held and no longer matches, or a delete → drop
+  (`athena-events.md` → *The consumer owns membership*).
+- **Still a conformant append-only JSONL `log`.** The *lines* are only ever
+  appended — never rewritten, never deleted — and it is the consumer's *derived
+  set* that changes. Every *Writer obligations* and *Reader obligations* rule of
+  the `log` kind holds unchanged: offset, doorbell, dedupe, rotation, retention. A
+  state-change line is an ordinary log line to the transport.
+- **A change-notification stream, NOT the system of record.** A `log` channel is
+  retention-bounded (it rotates at 7 days / 8 MiB — *Retention*), so the full
+  history of state-change events is **not** guaranteed reconstructable from the
   channel after a rotation or a long reader absence. That is intended: the
-  authoritative membership is the platform's server-side lane-membership store
-  (`athena-events.md`), and the channel exists to *notify* of changes — including
-  shrinkage — not to be the system of record. A consumer that reads only a partial
-  stream still obtains a correct set from the platform's own re-query; the stream
-  only accelerates the common case.
-- **A lane consumer MUST detect a partial or truncated stream and treat the fold
-  as NON-AUTHORITATIVE.** The fold is only correct over a *complete, in-order*
-  run of the channel's lines, and four mechanisms of the `log` kind can break that
-  invisibly: **rotation** (7 days / 8 MiB — *Retention* — discards the pre-rotation
-  generation), a **stale-offset reset** (*First run, missing files, and a stale
-  offset* resets the offset to 0 and re-reads, so lines already folded are
-  re-presented), **seen-set overflow** (the `dedupe_key` ring is bounded at ≤ 500,
-  so across a long window a genuine earlier `add`/`retract` can age out of the
-  dedupe set), and **out-of-order at-least-once redelivery** (delivery is
-  at-least-once and the fold is *order-sensitive* — a re-dispatched duplicate
-  `add` appended *after* its `retract` silently re-adds a retracted member). A
-  consumer MUST recognise these conditions — a rotation gap, an offset reset, a
-  seen-set that has evicted, an `add` for a member it has already seen retracted —
-  and when any holds it MUST NOT present the folded set as authoritative: it
-  re-queries the platform's authoritative membership set (the server-side
-  lane-membership store / the consumer's own source re-query, per the bullet
-  above) and MUST leave the partial condition **observable** — never silently
-  presenting a wrong folded set as if it were complete. This is the failed-lookup
-  discipline applied to the fold (`~/dev/custom/CLAUDE.md` → *A failed lookup must
-  never look like an empty one*): a truncated stream folds to a **wrong** set that
-  reads exactly like a **correct** one, so the truncation must be made observable
-  at the fold, and the authoritative re-query — not the stream — is what the
-  consumer acts on. The stream is a change signal that accelerates the common
-  case; it is never the system of record.
+  **authoritative set is the consumer's own held set plus its authoritative
+  re-query of the SOURCE (Notion)** (`athena-events.md` → *The consumer owns
+  membership*), and the channel exists to *notify* of changes — including
+  shrinkage — not to be the system of record. A departure for an entity that has
+  since left still renders from the display fields the consumer itself holds
+  (`athena-events.md` → *The consumer owns membership*), not from any platform
+  cache — there is no platform lane-membership store. A consumer that reads only a
+  partial stream still obtains a correct set from its own source re-query; the
+  stream only accelerates the common case.
+- **A lane consumer MUST detect a partial or truncated stream and treat its
+  fast-path set as NON-AUTHORITATIVE.** The consumer's fast-path diff is correct
+  only over a *complete, in-order* run of the channel's lines, and four mechanisms
+  of the `log` kind can break that invisibly: **rotation** (7 days / 8 MiB —
+  *Retention* — discards the pre-rotation generation), a **stale-offset reset**
+  (*First run, missing files, and a stale offset* resets the offset to 0 and
+  re-reads, so lines already applied are re-presented), **seen-set overflow** (the
+  bounded ring at ≤ 500 can age out a genuine earlier event across a long window),
+  and **out-of-order at-least-once redelivery** (delivery is at-least-once and the
+  diff is *order-sensitive* — a re-dispatched duplicate appended out of order can
+  re-present a state the consumer had already moved past). A consumer MUST
+  recognise these conditions — a rotation gap, an offset reset, a seen-set that
+  has evicted, a redelivery it has already applied — and when any holds it MUST
+  NOT present its fast-path set as authoritative: it **re-queries the source of
+  truth** (the consumer's own Notion re-query, per *The consumer owns membership*
+  — **not** a platform store) and MUST leave the partial condition **observable**,
+  never silently presenting a wrong set as if it were complete. This is the
+  failed-lookup discipline applied to the fold (`~/dev/custom/CLAUDE.md` → *A
+  failed lookup must never look like an empty one*): a truncated stream yields a
+  **wrong** set that reads exactly like a **correct** one, so the truncation must
+  be made observable, and the authoritative re-query — not the stream — is what
+  the consumer acts on.
 - Surfacing follows the existing counts-only rule and is not weakened by the
   stream. The unprompted count still counts **new lines** — a change signal,
-  counts only, no `op`, no member text — and the working set is computed by
-  **folding** add/retract on the explicit, fenced read step, inside the consumer's
-  trusted action policy. So "the set shrank" is representable rather than only
-  "something was added," and the fold never happens in unprompted output.
+  counts only, no member text — and the set is computed by the consumer's **diff**
+  on the explicit, fenced read step, inside the consumer's trusted action policy.
+  So "the set shrank" is representable rather than only "something was added" (a
+  departure is itself a forwarded state-change event), and the diff never happens
+  in unprompted output.
 
 ---
 

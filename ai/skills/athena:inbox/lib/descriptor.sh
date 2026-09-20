@@ -49,17 +49,17 @@ DESCRIPTOR_LOG_KEYS='["kind","path","dedupe","schema_v"]'
 DESCRIPTOR_MAILDIR_KEYS='["kind","namespace","read","write","identity"]'
 # `event_id` and `channel+ts` are the ONLY recognised dedupe members, because
 # they are the only two keys the reference reader (logchan.sh -> logchan_scan)
-# actually ingests. The event-platform `dedupe_key` family and the `stream`
-# op-stream discriminator are DEFERRED: the contract describes them (see
+# actually ingests. Under the landed Option (C) event-platform model the platform
+# mints NO `op` stream and holds NO durable dedupe key: a platform-produced line
+# is the routed STATE-CHANGE event (current state; a delete carries entity_id
+# only), which the reference reader does not yet ingest -- it derives a line's key
+# only from `event_id` / `channel+ts`. So declaring a platform-delivery channel is
+# barred until reader support for state-change lines lands (see
 # ai/contracts/athena-inbox.md -> "The inbox as an event-platform delivery
-# adapter"), but the reader does not yet read a line-level `dedupe_key` or fold
-# an `op` stream, so accepting either declaration here would validate a channel
-# whose platform-produced lines the reader silently drops as `unreadable` while
-# the offset advances past them -- the exact failed-lookup / silent-loss class
-# this validator exists to prevent. They stay REJECTED (an unknown `stream` key;
-# an unrecognised `dedupe` member) until reader support lands in a later
-# platform-delivery ticket. The "One validator" rule cuts both ways: the
-# validator must never accept what the reader would drop.
+# adapter", the Known-open note), and this validator REJECTS the not-yet-modeled
+# `"stream"` key (an unknown channel-object key) and any dedupe member other than
+# `event_id` / `channel+ts` for exactly that reason. The "One validator" rule cuts
+# both ways: the validator must never accept what the reader would drop.
 DESCRIPTOR_DEDUPE_MEMBERS='["event_id","channel+ts"]'
 
 _descriptor_fix='edit $ATHENA_INBOX_ROOT/projects/<project>.json to match the registry schema in ai/contracts/athena-inbox.md, then re-run.'
