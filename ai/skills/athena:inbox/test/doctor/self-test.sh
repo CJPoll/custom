@@ -267,6 +267,40 @@ echo "== maildir channel =="
 MENTRY='{"v":1,"repo":"'"${C2}"'","channels":{"mail":{"kind":"maildir","namespace":"agent-mail/x","read":"in","write":"out","identity":"me"}}}'
 CH="$(cd "${R2}" && doctor_check_channels "${MENTRY}" ".")"
 assert_finding "maildir no incoming yet -> ok" "${CH}" ok "channel:mail" "awaiting the peer"
+# ... and with no message files anywhere, message-mode says NOTHING (no dirs to
+# judge -- reporting ok here would be noise on an empty channel).
+assert_no_finding "no message files -> no message-mode finding at all" "${CH}" ok "message-mode" "message files"
+assert_no_finding "no message files -> no message-mode warn either" "${CH}" warn "message-mode" "message files"
+
+# DND-200: a message the PEER wrote under its umask arrives 0644. The writer's
+# half sets 0600 at delivery (fs_maildir_deliver); this is the "inbox-doctor
+# reports the REST" half of the contract's *Root and permissions* rule, which
+# had no maildir counterpart to the log kind's file-mode check.
+MREAD="${ATHENA_INBOX_ROOT}/agent-mail/x/in"
+mkdir -p -m 700 "${MREAD}"
+SLUG="secret-peer-slug"   # a distinctive slug so we can prove it never leaks.
+printf -- '---\nfrom: peer\nto: me\nsent_at: 2026-09-01T23:22:15Z\n---\n\nhi\n' \
+  > "${MREAD}/20260901T232215Z-001-${SLUG}.md"; chmod 600 "${MREAD}/20260901T232215Z-001-${SLUG}.md"
+printf -- '---\nfrom: peer\nto: me\nsent_at: 2026-09-02T00:00:00Z\n---\n\nyo\n' \
+  > "${MREAD}/20260902T000000Z-002-${SLUG}.md"; chmod 644 "${MREAD}/20260902T000000Z-002-${SLUG}.md"
+CH="$(cd "${R2}" && doctor_check_channels "${MENTRY}" ".")"
+assert_finding "a peer-written 0644 message -> warn message-mode" "${CH}" warn "message-mode" "not mode 0600"
+assert_contains "message-mode reports a COUNT (one file off-mode)" "1 message file(s)" "${CH}"
+# COUNTS ONLY, NEVER THE SLUG. A message filename carries the peer-chosen slug,
+# which the doctor never emits -- the same rule the count-only surfaces follow.
+assert_not_contains "message-mode NEVER names the peer's slug" "${SLUG}" "${CH}"
+# Fix it and the finding turns ok, proving the check tracks real state.
+chmod 600 "${MREAD}/20260902T000000Z-002-${SLUG}.md"
+CH="$(cd "${R2}" && doctor_check_channels "${MENTRY}" ".")"
+assert_finding "all 0600 -> ok message-mode" "${CH}" ok "message-mode" "all mode 0600"
+assert_no_finding "... and no message-mode warn remains" "${CH}" warn "message-mode" "not mode 0600"
+# .acked/ is judged too (a peer message acked with mv preserves its 0644 mode).
+mkdir -p -m 700 "${MREAD}/.acked"
+printf -- '---\nfrom: peer\nto: me\nsent_at: 2026-09-03T00:00:00Z\n---\n\nk\n' \
+  > "${MREAD}/.acked/20260903T000000Z-003-${SLUG}.md"; chmod 644 "${MREAD}/.acked/20260903T000000Z-003-${SLUG}.md"
+CH="$(cd "${R2}" && doctor_check_channels "${MENTRY}" ".")"
+assert_finding "a 0644 message in .acked/ is caught too" "${CH}" warn "message-mode" "not mode 0600"
+rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"
 
 # ============================================================================
 echo "== server (opt-in) =="
@@ -380,6 +414,25 @@ JHC="$(cd "${RH}" && ATHENA_INBOX_REGISTRY="${DECLHC}" ATHENA_INBOX_CLIENT_CONFI
 assert_eq "collision present" true "$(printf '%s' "${JHC}" | jq -r '[.findings[]|select(.check=="collision" and .state=="warn")]|length >= 1')"
 assert_eq "collision flips healthy to false" false "$(printf '%s' "${JHC}" | jq -r '.summary.healthy')"
 assert_eq "collision is not in the info bucket" 0 "$(printf '%s' "${JHC}" | jq -r '.summary.info')"
+
+# A peer-written 0644 maildir message is the OPPOSITE: contract drift on a
+# single-user box the local session cannot fix, so message-mode is a warn that
+# is surfaced (info count, findings list) but does NOT flip `healthy`. Proven
+# end to end through the bin, the way collision above is.
+export ATHENA_INBOX_ROOT="${TMP}/mm"; mkdir -p -m 700 "${ATHENA_INBOX_ROOT}/projects"; chmod 700 "${ATHENA_INBOX_ROOT}"
+RMM="${TMP}/repomm"; CMM="$(make_repo "${RMM}")"
+printf '{"v":1,"repo":"%s","channels":{"mail":{"kind":"maildir","namespace":"agent-mail/mm","read":"in","write":"out","identity":"me"}}}' "${CMM}" > "${ATHENA_INBOX_ROOT}/projects/mm.json"; chmod 600 "${ATHENA_INBOX_ROOT}/projects/mm.json"
+mkdir -p -m 700 "${ATHENA_INBOX_ROOT}/agent-mail/mm/in"
+printf -- '---\nfrom: peer\nto: me\nsent_at: 2026-09-01T23:22:15Z\n---\n\nhi\n' \
+  > "${ATHENA_INBOX_ROOT}/agent-mail/mm/in/20260901T232215Z-001-drift.md"; chmod 644 "${ATHENA_INBOX_ROOT}/agent-mail/mm/in/20260901T232215Z-001-drift.md"
+DECLMM="${TMP}/mm-committed.json"
+jq -n --arg r "${CMM}" '{v:1,projects:[{file:"mm.json",entry:{v:1,repo:$r,channels:{mail:{kind:"maildir",namespace:"agent-mail/mm",read:"in",write:"out",identity:"me"}}}}]}' > "${DECLMM}"
+JMM="$(cd "${RMM}" && ATHENA_INBOX_REGISTRY="${DECLMM}" ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" ATHENA_INBOX_DOCTOR_CRON_CHECK=true bash "${BIN}" --json --no-server)"
+assert_eq "message-mode warn present" true "$(printf '%s' "${JMM}" | jq -r '[.findings[]|select(.check=="message-mode" and .state=="warn")]|length >= 1')"
+assert_eq "message-mode is counted in the info bucket" true "$(printf '%s' "${JMM}" | jq -r '.summary.info >= 1')"
+assert_eq "message-mode does NOT flip healthy" true "$(printf '%s' "${JMM}" | jq -r '.summary.healthy')"
+assert_eq "message-mode does not set a non-zero exit" 0 "$( ( cd "${RMM}" && ATHENA_INBOX_REGISTRY="${DECLMM}" ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" ATHENA_INBOX_DOCTOR_CRON_CHECK=true bash "${BIN}" --no-server >/dev/null 2>&1 ); echo $? )"
+assert_not_contains "the bin output never leaks a message slug" "drift.md" "$(printf '%s' "${JMM}" | jq -r '.findings[]|select(.check=="message-mode")|.message + " " + .fix')"
 
 # ============================================================================
 echo "== repo-root resolves through a symlinked skills dir (bin uses -P) =="

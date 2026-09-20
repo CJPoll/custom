@@ -625,7 +625,57 @@ doctor_check_maildir_channel() {
     [ "${st}" = "warn" ] && doctor_finding warn "channel:${chan}" "the maildir directory for \"${chan}\" is mode 0${mode}, expected 0700" \
       "chmod 0700 ${read_dir}; a maildir holds a private conversation."
   fi
+  doctor_check_maildir_modes "${chan}" "${resolved}"
   doctor_check_lock "${chan}" "$(inbox_field lock "${resolved}")"
+}
+
+# doctor_check_maildir_modes <chan> <resolved>
+#
+# The contract's "inbox-doctor reports the rest": *Root and permissions* says
+# every file under the root MUST be 0600, and that "tooling fixes the mode of
+# files IT writes, and inbox-doctor reports the rest". The WRITER's half is
+# discharged -- fs_maildir_deliver sets 0600 at delivery -- but a message the
+# PEER wrote under its own umask arrives 0644, and nothing surfaced it: the log
+# kind's file-mode check has no maildir counterpart, so a peer-written 0644
+# message file was invisible. This closes that gap for the maildir kind.
+#
+# COUNT ONLY, NEVER A FILENAME. A message filename carries the peer-chosen slug,
+# and the doctor never emits a body, subject, sender or slug (file header). So
+# this reports HOW MANY files are off-mode across the channel's message
+# directories and names only the namespace DIRECTORY (a registry fact), never an
+# individual file.
+#
+# INFORMATIONAL, not health-flipping (see INFO_SET in bin/inbox-doctor): a 0644
+# message on a single-user box is contract drift, not an incident, and the peer
+# that writes it is not something a local session can fix -- so letting it flip
+# `healthy` would nag every opted-in repo, every window, about a benign steady
+# state the local session cannot change. It is surfaced in a hand run and in the
+# --json info count; the durable fix is the peer's writer, tracked separately.
+#
+# READ-ONLY, like everything in this file: it stats, it never chmods.
+doctor_check_maildir_modes() {
+  local chan="$1" resolved="$2" label dir ns seen=0 drift=0 n
+  for label in read_dir ack_dir write_dir write_ack_dir; do
+    dir="$(inbox_field "${label}" "${resolved}")"
+    [ -n "${dir}" ] && [ -d "${dir}" ] || continue
+    # Non-recursive per directory, regular files only (a symlink is -type l and
+    # excluded), and `*.md` so only message files are judged -- never `.event`,
+    # a lock, or a `tmp/` staging entry. `! -perm 600` is "not exactly 0600".
+    n="$(find "${dir}" -mindepth 1 -maxdepth 1 -type f -name '*.md' -printf 'x\n' 2>/dev/null | wc -l | tr -d ' ')"
+    seen=$(( seen + n ))
+    n="$(find "${dir}" -mindepth 1 -maxdepth 1 -type f -name '*.md' ! -perm 600 -printf 'x\n' 2>/dev/null | wc -l | tr -d ' ')"
+    drift=$(( drift + n ))
+  done
+  # No message files anywhere yet -> nothing to judge; "awaiting the peer" /
+  # freshness has already spoken. Reporting ok here would be noise.
+  [ "${seen}" -gt 0 ] || return 0
+  ns="$(inbox_field read_dir "${resolved}")"; ns="${ns%/*}"
+  if [ "${drift}" -gt 0 ]; then
+    doctor_finding warn "message-mode" "maildir channel \"${chan}\" has ${drift} message file(s) not mode 0600 (every file under the root MUST be 0600)" \
+      "normalise them: find ${ns} -type f -name '*.md' ! -perm 600 -exec chmod 0600 {} + . A peer that creates a message under its umask leaves it 0644; the mode of files THIS side writes is set at delivery, so this is peer-written drift on a single-user box -- hygiene and contract conformance, not an incident."
+  else
+    doctor_finding ok "message-mode" "maildir channel \"${chan}\" message files are all mode 0600"
+  fi
 }
 
 # doctor_check_lock <chan> <lock-path>

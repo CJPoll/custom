@@ -150,7 +150,14 @@ N_NA="$(count_state na)"
 # mix-up, not bookkeeping -- so it counts against `healthy` and the hook does
 # surface it. (The contract lists collision as a separate "MAY report" case, not
 # under the informational carve-out.)
-INFO_SET=" undeclared-entry server-instance never-delivered stray-file stale-lock "
+# `message-mode` is here for the same reason as the rest: a peer-written 0644
+# maildir message is contract drift on a single-user box, not a degraded running
+# chain, and the peer that writes it is not something the local session can fix
+# -- so it is surfaced (in a hand run and in the info count) without flipping
+# `healthy`, or the hook would nag every opted-in repo forever. The durable fix
+# is the peer's writer, tracked separately; the mode of files THIS side writes
+# is already set at delivery.
+INFO_SET=" undeclared-entry server-instance never-delivered stray-file stale-lock message-mode "
 N_INFO="$(printf '%s\n' "${FINDINGS}" | awk -F'\t' -v set="${INFO_SET}" '$1=="warn" && index(set," "$2" ")>0{n++} END{print n+0}')"
 
 if [ "${JSON}" -eq 1 ]; then
