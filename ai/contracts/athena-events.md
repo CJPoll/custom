@@ -529,7 +529,9 @@ untrusted wherever it reaches an LLM (see *Trust posture — two paths*).
 Source-specific knowledge stays inside the ingress adapter; the emitted event is
 clean, and the router and rules own delivery. For a metadata-only source, the
 ingress enriches the verified event via a least-privilege API fetch before
-emitting (see *Sender verification and payload completeness*).
+emitting; a **failed** enrichment fetch is handled there — never emitted
+un-enriched, never silently dropped (see *Sender verification and payload
+completeness*).
 
 ### Poller (fallback only)
 
@@ -1251,6 +1253,66 @@ under-encrypted**:
   fetch** on the verified event. Enrichment uses a **least-privilege, read-only,
   DB-scoped** token, **on-demand only** (never on a timer). Enrichment targets a
   **fixed destination**, so it carries **no** generic-webhook egress surface.
+- **When the enrichment fetch FAILS, the ingress MUST NOT emit an un-enriched
+  event and MUST NOT silently drop** — either is the silent miss this contract
+  legislates against (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never
+  look like an empty one*): an un-enriched event reads its known fields
+  (`status`, `labels`, `assignee`, `title`, `ticket_number`) as `absent` at
+  runtime, so a rule that should fire silently **FILTERs**, and because the event
+  is **Level-1 HANDLED** (see *Event disposition and dead-letter*) it is **never
+  dead-lettered** — an invisible miss; a drop is a silent drop. The three failure
+  modes resolve distinctly, keyed on the fetch outcome:
+  - **Transient failure (`429` / `5xx` / transient network).** The ingress
+    **retries** the enrichment fetch under a **bounded budget** — a maximum
+    attempt count with backoff, honoring a source-supplied `Retry-After` where
+    present, capped by a maximum total elapsed time — before treating the failure
+    as permanent. The budget carries **shape only**; its exact
+    attempt/backoff/timeout constants are **ops/owner config, explicitly outside
+    this contract's MUST surface** (exactly as the store cap/TTL constants — see
+    *Event disposition and dead-letter*). This ingress-side enrichment-retry
+    budget is **separate from** the per-`(event, rule)` delivery retry of
+    *Idempotency is per (event, rule)*: it **precedes emission**, matches no rule,
+    and requires **no platform membership or sequence state**. A fetch that
+    succeeds within budget emits the enriched event normally.
+  - **Exhausted or permanent failure (retry budget exhausted; a revoked/expired
+    enrichment token → `401`/`403`; persistent `5xx`).** The ingress MUST record
+    an **observable ingress-enrichment-failure** and MUST NOT emit. The record
+    lives in an **ingress-failure store**, **distinct from both the dead-letter
+    store and the failed-delivery store**: the event never reached routing, so it
+    is **not UNMATCHED** (not dead-letter), and no rule matched, so it is **not a
+    terminal delivery failure** — conflating it with either would corrupt that
+    store's meaning, exactly as *Terminal delivery failure — the failed-delivery
+    store* keeps those two distinct. Its grain **mirrors** the sibling stores:
+    **one exemplar-plus-count per `(owner, type, enrichment-failure-cause)`** — the
+    **exemplar** is the **verified webhook envelope** (source, `entity_id`) **plus
+    the enrichment error** (cause class + status), which alone answers "which
+    entity, of what `type`, for which owner, failed to enrich, and why?"; the
+    2nd..Nth failures of the same key **increment a monotonic count** and update
+    **last-seen**, storing **no** new payload. The exemplar may carry third-party
+    content, so the record is **Path-2 untrusted** when read into an LLM (see
+    *Trust posture — two paths*), and read access is the **owning account's** only.
+    Retention follows the **never-destroy-unread** doctrine, made structurally safe
+    by the grain, exactly as the two sibling stores (see *Event disposition and
+    dead-letter* and *Terminal delivery failure — the failed-delivery store*): an
+    **un-triaged** exemplar has an **unbounded** lifetime (it is the sole evidence
+    of the miss), age-out applies **only after** read/triage, and **the store
+    carries no cap or TTL number in this contract** — any operational cap/TTL is
+    ops/owner config, outside this contract's MUST surface. The failure MUST be
+    **reported to the owner, never left silently quiet**, carrying the
+    LLM-actionable marker:
+    `Fix: enrichment fetch failed for a <type> event on entity <entity_id> (owner <owner>; cause: <class>, <status>). Emit is rejected: emitting un-enriched would read the known fields (status, labels, assignee, title, ticket_number) as absent, silently FILTER at rule evaluation, and — being Level-1 HANDLED — never dead-letter, an invisible miss. The ingress-side enrichment-retry budget is exhausted; check the read-only enrichment token/scope or the source, then the event re-enriches on source redelivery. See the ingress-failure store exemplar for the first-seen event.`
+  - **Entity deleted between the webhook and the fetch is NOT an enrichment
+    failure.** A **definitive not-found / gone** signal (a `404` on a change
+    webhook whose entity has since been deleted) resolves to the **identity-only
+    delete-event path**: the ingress emits the corresponding
+    `notion.<entity>.deleted` event, which carries **identity only** and sources
+    its `revision` from the **deletion webhook event itself, not an enrichment
+    fetch** (see *Payload fields and their types per event type* and *Idempotency
+    is per (event, rule)*) — exactly as this contract already acknowledges the
+    entity "may already be unfetchable." This is kept distinct from an **auth**
+    failure (`401`/`403` → the permanent case above) and a **transient** failure
+    (`429`/`5xx` → the transient case above): only a not-found/deleted signal maps
+    here.
 - A write-scoped token (e.g. Notion outbound: post comment / update page) MUST be
   **separate** from the read-only enrichment token; do not widen the read token
   to gain write.
