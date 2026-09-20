@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-19T23:40:07Z",
+  "generated": "2026-09-20T00:10:55Z",
   "cases": [
     {
       "name": "AE-01-confirm-before-done",
@@ -9,7 +9,7 @@
     {
       "name": "AE-02-notmerged-blocks-done",
       "pass": true,
-      "rate": "3/3"
+      "rate": "2/3"
     },
     {
       "name": "AE-03-dm-after-confirm",
