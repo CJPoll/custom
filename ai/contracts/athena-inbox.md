@@ -531,6 +531,7 @@ tenants MAY use the same channel name for different surfaces.
 | `path` | yes | string | Inbox filename, **relative to the root**. Grammar below. |
 | `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`, `dedupe_key` (the last for a platform-produced channel — see *The inbox as an event-platform delivery adapter*). |
 | `schema_v` | no | array of integer | Line versions this reader understands. Defaults to `[1]`. |
+| `stream` | no | string | Declares the channel an add/retract **op-stream** — a lane/membership delivery whose lines carry an `op` field and are **folded** into a working set rather than read as a pile (see *Add/retract lines: a lane `log` channel is a stream, not a pile*). The only recognised value is `"op"`. Absent, the channel is an ordinary pile of lines. |
 
 `dedupe` is **declarative, not a switch.** Both dedupe rules in *Reader
 obligations* are mandatory and have non-overlapping jobs, so this key cannot
@@ -541,6 +542,20 @@ whose lines lack the fields it needs rather than silently deduping on nothing.
 A `dedupe` listing an unrecognised member is a hard error. When the key is
 absent the reader assumes `["event_id", "channel+ts"]` and reports a line
 missing both as unreadable rather than counting it.
+
+`stream` is the **op-stream discriminator**, and it applies the same
+recognised-value discipline as `dedupe`: a channel that declares `"stream":
+"op"` is a lane/membership op-stream whose lines each carry an `op` field
+(`"add"` / `"retract"`) and are **folded** into a working set (*Add/retract
+lines: a lane `log` channel is a stream, not a pile*); a channel that omits it
+is an ordinary pile of lines. A `stream` whose value is anything other than the
+recognised `"op"` is a hard error, for the reason an unrecognised `dedupe`
+member is: a channel that declares folding but names no discipline the reader
+implements would silently be read as a pile — the folded set never computed —
+and a wrongly-folded set reads exactly like a correct one (`~/dev/custom/CLAUDE.md`
+→ *A failed lookup must never look like an empty one*). This is a hard error
+**for the matched entry** (this session's own configuration), on the terms of
+*Finding the entry*.
 
 **Channel object, kind `maildir`**
 
@@ -861,7 +876,7 @@ pairs with `walt_ui-slack.state.json`:
 |---|---|
 | `offset` | Bytes consumed. Never advances past a partial final line. |
 | `seen_event_ids` | Intra-file dedupe ring buffer, ≤ 500. |
-| `seen_keys` | Cross-source `channel:ts` dedupe ring buffer, ≤ 500. |
+| `seen_keys` | Per-line dedupe-key ring buffer, ≤ 500 — one set whatever the producer. It holds the value of each line's cross-source dedupe key: `channel:ts` for Slack lines, and the opaque per-`(event, rule)` `dedupe_key` value for platform-produced lines (see *The `dedupe_key` dedupe family*). |
 | `last_api_poll_at` | Last successful backstop poll, for staleness reporting. |
 | `rotated_at` | When this channel last rotated — RFC 3339 UTC with a `Z` suffix. Absent until the first state write, which initialises it to `now` so a new channel does not rotate an almost-empty file. See *Retention*. |
 | `channels` | Per-source watermark the backstop resumes from. |
@@ -958,20 +973,40 @@ producer. Made explicit:
 
 ### The `dedupe_key` dedupe family
 
-A platform-produced line carries a **single opaque delivery-idempotency key**
-rather than the Slack `event_id` / `channel+ts` pair, because the platform's unit
-of delivery is the per-`(event, rule)` key defined in `athena-events.md`. So a
-`log` channel MAY declare the `dedupe_key` family:
+`dedupe_key` is **not a second, competing key** — it is **the** per-line
+cross-source dedupe key this reader already works in, named once and derived
+per producer. The reference reader already emits a `dedupe_key` field on every
+scanned message (`ai/skills/athena:inbox/lib/logchan.sh` — `logchan_dedupe_key`
+and `logchan_scan`, whose emitted message carries `dedupe_key`), and for a Slack
+channel that value **is** `channel:ts`, derived by the reader from the line's
+`channel` and `ts`. So one identifier means one concept — the line's cross-source
+dedupe key — and only its **value derivation** differs by producer:
+
+- **Slack receiver lines** carry `channel` and `ts`, and the reader *derives*
+  `dedupe_key = channel:ts` (the existing cross-source key, *Reader obligations*,
+  unchanged).
+- **Platform-produced lines** carry the value *directly* as a `dedupe_key` line
+  field: the opaque per-`(event, rule)` delivery key defined in
+  `ai/contracts/athena-events.md` (that contract's per-delivery `idempotency_key`
+  value — event-level key combined with the matched `rule_id`). A platform
+  producer has no `channel`/`ts` to derive from, so it supplies the key it already
+  computed.
+
+Either way it is **one key, one seen-set, one state file** — the platform
+analogue of the rule that Slack's two sources MUST share one `seen_keys` set
+(*Reader obligations*). So a `log` channel MAY declare the `dedupe_key` family:
 
 - `dedupe_key` names a mandatory line field of the same name, carrying **one
-  string** — the producer's per-delivery idempotency key. For such a channel it
-  is **both** the intra-file and the cross-source dedupe key: one key, one
-  seen-set, one state file. This is the platform analogue of the rule that Slack's
-  two sources MUST share one `seen_keys` set (*Reader obligations*).
+  string** — the producer's per-delivery idempotency key (for a platform channel;
+  a Slack channel does not declare this family and lets the reader derive the same
+  key from `channel`+`ts`). For a channel that declares it, it is **both** the
+  intra-file and the cross-source dedupe key.
 - A channel whose lines use it declares `"dedupe": ["dedupe_key"]`. `dedupe_key`
   is a **recognised member** alongside `event_id` and `channel+ts`, so the
   *Validation rules* "a `dedupe` listing an unrecognised member is a hard error"
-  now admits it; a `dedupe` of exactly `["dedupe_key"]` is valid.
+  now admits it; a `dedupe` of exactly `["dedupe_key"]` is valid. The designated
+  validator (`ai/skills/athena:inbox/lib/descriptor.sh`, `DESCRIPTOR_DEDUPE_MEMBERS`)
+  recognises it, so the reader never refuses a channel the contract admits.
 - The reader dedupes such a channel on the `dedupe_key` value, into the **one**
   shared seen-set the channel already owns (*State file*, `seen_keys`). A line
   whose declared `dedupe_key` field is missing is reported `+N unreadable` and its
@@ -1040,6 +1075,19 @@ store diff emits enter/leave transitions — routes to a `log` channel as an
   that changes. Every *Writer obligations* and *Reader obligations* rule of the
   `log` kind holds unchanged: offset, doorbell, `dedupe_key` dedupe, rotation,
   retention. An `op` line is an ordinary log line to the transport.
+- **A lane op-stream channel is declared, and `op` is mandatory on its lines.**
+  The channel object declares `"stream": "op"` (*Schema*, *Validation rules*), so
+  a reader knows to fold rather than pile — without it the mandatory fold would be
+  undeclarable and unvalidatable, and a channel silently read as a pile is a
+  wrongly-folded set indistinguishable from a correct one. On a channel declared
+  `"stream": "op"`, a line **missing the `op` field, or carrying an `op` that is
+  neither `"add"` nor `"retract"`,** is reported `+N unreadable` and its offset
+  does not advance past it counting it as read — exactly as a Slack line missing
+  its dedupe keys is treated (*Reader obligations*), and where surfaced through a
+  guard it carries a `Fix:` naming the missing/invalid `op`. An op-less line
+  cannot be folded, so counting it would fold on nothing — the failed-lookup
+  discipline (`~/dev/custom/CLAUDE.md` → *A failed lookup must never look like an
+  empty one*).
 - The channel is a **change-notification stream, not the authoritative set.** A
   `log` channel is retention-bounded (it rotates at 7 days / 8 MiB — *Retention*),
   so the full add/retract history is **not** guaranteed reconstructable from the
@@ -1049,6 +1097,30 @@ store diff emits enter/leave transitions — routes to a `log` channel as an
   shrinkage — not to be the system of record. A consumer that reads only a partial
   stream still obtains a correct set from the platform's own re-query; the stream
   only accelerates the common case.
+- **A lane consumer MUST detect a partial or truncated stream and treat the fold
+  as NON-AUTHORITATIVE.** The fold is only correct over a *complete, in-order*
+  run of the channel's lines, and four mechanisms of the `log` kind can break that
+  invisibly: **rotation** (7 days / 8 MiB — *Retention* — discards the pre-rotation
+  generation), a **stale-offset reset** (*First run, missing files, and a stale
+  offset* resets the offset to 0 and re-reads, so lines already folded are
+  re-presented), **seen-set overflow** (the `dedupe_key` ring is bounded at ≤ 500,
+  so across a long window a genuine earlier `add`/`retract` can age out of the
+  dedupe set), and **out-of-order at-least-once redelivery** (delivery is
+  at-least-once and the fold is *order-sensitive* — a re-dispatched duplicate
+  `add` appended *after* its `retract` silently re-adds a retracted member). A
+  consumer MUST recognise these conditions — a rotation gap, an offset reset, a
+  seen-set that has evicted, an `add` for a member it has already seen retracted —
+  and when any holds it MUST NOT present the folded set as authoritative: it
+  re-queries the platform's authoritative membership set (the server-side
+  lane-membership store / the consumer's own source re-query, per the bullet
+  above) and MUST leave the partial condition **observable** — never silently
+  presenting a wrong folded set as if it were complete. This is the failed-lookup
+  discipline applied to the fold (`~/dev/custom/CLAUDE.md` → *A failed lookup must
+  never look like an empty one*): a truncated stream folds to a **wrong** set that
+  reads exactly like a **correct** one, so the truncation must be made observable
+  at the fold, and the authoritative re-query — not the stream — is what the
+  consumer acts on. The stream is a change signal that accelerates the common
+  case; it is never the system of record.
 - Surfacing follows the existing counts-only rule and is not weakened by the
   stream. The unprompted count still counts **new lines** — a change signal,
   counts only, no `op`, no member text — and the working set is computed by

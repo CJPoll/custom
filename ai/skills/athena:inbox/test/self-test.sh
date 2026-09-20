@@ -336,6 +336,27 @@ err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log
 if [ "${rc}" -eq 0 ]; then bad "an unrecognised dedupe member is a hard error" "accepted"
 else assert_contains "an unrecognised dedupe member is a hard error naming it" "message_id" "${err}"; fi
 
+# DND-233: `dedupe_key` is now a RECOGNISED member -- the event-platform inbox
+# adapter's per-(event,rule) key, the same per-line `dedupe_key` field the Slack
+# reader already emits carrying channel:ts. The contract stated this present-tense
+# ("a `dedupe` of exactly [\"dedupe_key\"] is valid"); the validator must not deny
+# what the contract asserts (the "One validator" principle).
+assert_ok "a platform channel declaring dedupe:[dedupe_key] is accepted" \
+  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","dedupe":["dedupe_key"]}}}'
+
+# DND-233 finding 4: the `stream` discriminator declares a lane / op-stream
+# channel (its lines carry `op` and are folded into a working set). A declared
+# op-stream channel is accepted; an unrecognised `stream` value -- an op-stream
+# channel missing the recognised `op` discipline -- is a hard error naming it,
+# because a channel silently NOT folded reads exactly like a correct pile of
+# lines (the failed-lookup class).
+assert_ok "an op-stream lane channel (stream:op, dedupe:[dedupe_key]) is accepted" \
+  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","stream":"op","dedupe":["dedupe_key"]}}}'
+err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","stream":"pile"}}}' 2>&1)"; rc=$?
+if [ "${rc}" -eq 0 ]; then bad "an op-stream channel missing the op discipline is a hard error" "accepted"
+else assert_contains "an unrecognised stream value is a hard error naming it" "pile" "${err}"; fi
+assert_contains "the unrecognised-stream refusal carries a Fix: clause" "Fix:" "${err}"
+
 # read and write MUST differ -- equal ones would make every send land in the
 # directory this identity reads from, so a sender would ingest its own mail.
 assert_refused "maildir read and write must differ" \

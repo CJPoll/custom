@@ -45,9 +45,18 @@ DESCRIPTOR_SCHEMA_V=1
 # OPPOSITE of the maildir frontmatter rule (strict about what I write, lenient
 # about what I receive) -- a config file I wrote is not a message a peer sent.
 DESCRIPTOR_TOP_KEYS='["v","repo","channels"]'
-DESCRIPTOR_LOG_KEYS='["kind","path","dedupe","schema_v"]'
+DESCRIPTOR_LOG_KEYS='["kind","path","dedupe","schema_v","stream"]'
 DESCRIPTOR_MAILDIR_KEYS='["kind","namespace","read","write","identity"]'
-DESCRIPTOR_DEDUPE_MEMBERS='["event_id","channel+ts"]'
+# `dedupe_key` is the platform-producer member (a lane / event-platform channel):
+# it names the single per-line `dedupe_key` field, and it is the SAME field the
+# Slack reader already emits (logchan_scan) carrying the channel:ts value -- one
+# field, one seen-set, the value derived per producer. See ai/contracts/athena-inbox.md
+# -> "The `dedupe_key` dedupe family".
+DESCRIPTOR_DEDUPE_MEMBERS='["event_id","channel+ts","dedupe_key"]'
+# The only recognised value of a log channel's `stream` discriminator: it marks
+# the channel as an add/retract op-stream whose lines carry an `op` field and are
+# FOLDED into a working set (ai/contracts/athena-inbox.md -> "Add/retract lines").
+DESCRIPTOR_STREAM_VALUES='["op"]'
 
 _descriptor_fix='edit $ATHENA_INBOX_ROOT/projects/<project>.json to match the registry schema in ai/contracts/athena-inbox.md, then re-run.'
 
@@ -212,6 +221,22 @@ _descriptor_validate_log() {
       '.channels[$c].schema_v | (type == "array") and (length > 0) and all(type == "number")' >/dev/null 2>&1; then
       inbox_fail "log channel \"${chan}\"'s \"schema_v\" is not a non-empty array of numbers" \
         "set channel \"${chan}\"'s \"schema_v\" to a list of line schema versions this reader understands, e.g. [1]."
+      return 1
+    fi
+  fi
+
+  # The `stream` discriminator marks a lane / event-platform op-stream channel:
+  # its lines carry an `op` field ("add"/"retract") and the reader FOLDS them
+  # into a working set (ai/contracts/athena-inbox.md -> "Add/retract lines"). It
+  # is optional, but declared it MUST name a recognised discipline -- an
+  # unrecognised value is a wrongly-computed key, and a channel silently NOT
+  # folded reads exactly like a correct pile of lines, which is the failed-lookup
+  # class this whole registry is strict to avoid.
+  if printf '%s' "${doc}" | jq -e --arg c "${chan}" '.channels[$c] | has("stream")' >/dev/null 2>&1; then
+    out="$(printf '%s' "${doc}" | jq -r --arg c "${chan}" '.channels[$c].stream // ""')"
+    if ! printf '%s' "${DESCRIPTOR_STREAM_VALUES}" | jq -e --arg v "${out}" 'index($v)' >/dev/null 2>&1; then
+      inbox_fail "log channel \"${chan}\" declares an unrecognised \"stream\" value \"${out:-<absent>}\"" \
+        "set channel \"${chan}\"'s \"stream\" to $(printf '%s' "${DESCRIPTOR_STREAM_VALUES}" | jq -r 'join(", ")'), or remove it; only an op-stream (add/retract) discipline is defined."
       return 1
     fi
   fi
