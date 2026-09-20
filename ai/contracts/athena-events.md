@@ -101,32 +101,45 @@ what lets fleet-control transitions (an admiral spinning a captain down early),
 retraction messages, and future sources all be ordinary events matched by
 ordinary rules, rather than special cases in code.
 
-An event that is **handled by no enabled rule** MUST be **dead-lettered and
-persisted** to queryable storage for audit and debugging. It MUST NOT be silently
-dropped, and it MUST NOT be **merely counted** — a bare counter cannot answer
-"which event, of what type, for which owner, went unmatched?", and that question
-is exactly the failed-lookup discipline (`~/dev/custom/ai/CLAUDE.md` → *A failed
-lookup must never look like an empty one*): an unmatched event is a legitimate
-miss, and a legitimate miss MUST remain observable as the specific thing it was.
+### Event disposition and dead-letter
 
-**"Handled" is broader than "matched by a rule declared on this `type`".** A
-membership-derived transition (`lane.member.added` / `lane.member.retracted`) is
-produced by a membership rule that is declared on a **different** `type` (a flaky
-lane is declared on `notion.ticket.*`), so that rule is not among the rules that
-*match* the derived event — yet the transition **is delivered**: it drives the
-membership rule's own delivery (see *Two rule kinds*). Therefore **a
-membership-derived transition emitted by a membership rule is CONSIDERED HANDLED
-by that originating rule** — its own delivery is the handling — and MUST NOT be
-dead-lettered because no `notify` rule matched it. The dead-letter MUST fires
-**only when NO rule handled the event at all**: neither the originating
-membership rule's delivery, nor any additional `notify` rule the owner declared
-on `lane.member.*` (such a rule MAY match and fire **in addition**). Without this
-distinction, an owner with a single flaky-lane rule and no
-`notify`-on-`lane.member.*` rule would dead-letter **every** add/retract it
-successfully delivered — flooding the store (whose whole purpose is "which event
-went **unmatched**?") with successful deliveries and their full Path-2 payloads.
-"Delivered" and "unmatched" are disjoint: a correctly-delivered transition is
-never dead-lettered.
+Every event resolves to **exactly one** of three dispositions, and the
+dead-letter MUST fires for only the third:
+
+- **(a) DELIVERED** — at least one enabled rule produced a delivery: a `notify`
+  rule matched, or a `membership` rule's diff emitted an `add`/`retract`
+  transition (its own delivery).
+- **(b) EVALUATED, NO-OP** — at least one enabled rule **applied** to the event
+  (its trigger set includes this event's `type` — a `notify` rule's declared
+  `event_type(s)`, or a membership rule's trigger set — see *Membership rules and
+  the lane-membership store*) but produced **no** delivery: e.g. a `notion.ticket.updated`
+  for a ticket already a stored member that **still** passes the predicate, so
+  the diff is empty; or a `notify` predicate that evaluated false. The platform
+  looked at the event and correctly did nothing.
+- **(c) UNMATCHED** — **no** enabled rule applies to the event's `type` at all
+  (no rule's trigger set includes it).
+
+**An event is HANDLED when its disposition is (a) OR (b); the dead-letter MUST
+fires for (c) ONLY.** An **UNMATCHED** event MUST be **dead-lettered and
+persisted** to queryable storage for audit and debugging; it MUST NOT be silently
+dropped, and it MUST NOT be **merely counted** — a bare counter cannot answer
+"which event, of what type, for which owner, went unmatched?", exactly the
+failed-lookup discipline (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must
+never look like an empty one*): a legitimate miss MUST remain observable as the
+specific thing it was. A **DELIVERED** or **EVALUATED-NO-OP** event MUST NOT be
+dead-lettered.
+
+**Why (b) is a distinct disposition, not a miss.** A membership rule declared on
+`notion.ticket.*` applies to every ticket event in its trigger set, and most such
+events change nothing about the set (the ticket was already a member and still
+qualifies) — those are (b): the rule applied and correctly produced no
+transition. Collapsing (b) into (c) would flood the dead-letter store (whose
+whole purpose is "which event went **unmatched**?") with routine no-ops and their
+full Path-2 payloads. Separately, a membership-derived `lane.member.*` transition
+is itself disposition **(a)** — delivered by its originating rule, never
+dead-lettered for want of a `notify` match; an owner MAY additionally declare a
+`notify` rule on `lane.member.*`, whose own (a)/(b)/(c) disposition is determined
+independently for that derived event.
 
 The dead-letter store is **per-account** and holds a full event payload, which
 may carry third-party content, so it is **Path-2 untrusted** when read into an
@@ -147,7 +160,7 @@ exists to provide.
 The following `type`s are defined for the first pass. The namespace stays open —
 this enumeration is the set that exists today, **not** a closed universe, and an
 implementation MUST NOT reject or hard-code against an unknown well-formed `type`
-(it dead-letters it per *The event taxonomy is open*).
+(it dead-letters it per *Event disposition and dead-letter*).
 
 **Source-emitted** (an ingress verified and normalized a real change at the
 source):
@@ -203,24 +216,40 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | `slack.message.received` | `text` | string | scalar |
 | | `channel` | string | scalar |
 | | `user` | string | scalar |
+| | `ts` | string | scalar |
 | | `thread_ts` | string | scalar |
+| | `event_id` | string | scalar |
 | `lane.member.added`, `lane.member.retracted` | `rule_id` | string | scalar |
 | | `lane` | string | scalar |
 | | `op` | `"add"` \| `"retract"` | scalar |
 | | `entity_id` | string | scalar |
-| | `ticket_number` | string | scalar |
-| | `title` | string | scalar |
+| | `display` fields — **declared per lane SOURCE** (see below) | per source | per source |
 
-**The membership-derived types have a closed payload schema of their own** — the
-minimal cached display fields (`ticket_number`, `title`) plus the lane/rule
-identity (`rule_id`, `lane`) and the transition `op`. This is deliberate: the
-contract makes a `notify` rule on a `lane.member.retracted` transition first-class
-(see *Retraction-driven consumer patterns*), so a predicate leaf or a template
-slot on that event MUST have a closed, bindable, save-time-validated schema
-exactly like a source-emitted type. The fields are the same minimal ones the
-lane-membership store caches at add time so a retract renders after the entity is
-gone (see *Membership rules and the lane-membership store*), and they remain
-**Path-2 untrusted** when they reach an LLM.
+**The membership-derived types have a closed payload schema** — the lane/rule
+identity (`rule_id`, `lane`), the transition `op`, the `entity_id`, and the
+**display fields**. The display fields are **declared per lane SOURCE**, not two
+hardcoded Notion columns: a **Notion** lane declares `ticket_number` (scalar) and
+`title` (scalar); a **forge** lane (or any other) declares its own display shape.
+This keeps the store's "source-agnostic — carries over to a forge or any other
+membership lane" claim honest and consistent with the open taxonomy: a
+non-Notion lane is **config**, not a schema change. The display shape stays
+**closed per source** (so it is still save-time-bindable): the platform validates
+a `lane.member.*` predicate/template against the display shape the lane's source
+declares. This is deliberate — the contract makes a `notify` rule on a
+`lane.member.retracted` transition first-class (see *Retraction-driven consumer
+patterns*), so a predicate leaf or a template slot on that event MUST have a
+closed, bindable, save-time-validated schema exactly like a source-emitted type.
+The display fields are the same minimal ones the lane-membership store caches at
+add time so a retract renders after the entity is gone (see *Membership rules and
+the lane-membership store*), and they remain **Path-2 untrusted** when they reach
+an LLM.
+
+**`slack.message.received` carries `ts` and `event_id`** (not just
+`occurred_at`): the deployed inbox reader keys cross-source dedupe on
+`channel:ts` and on seen `event_id`s (against the Slack Web-API backstop — see
+`ai/contracts/athena-inbox.md`), which `occurred_at` alone does not cover. They
+are part of the closed schema so a rule may bind them and the dedupe pairing is
+expressible.
 
 ### Idempotency is per (event, rule)
 
@@ -459,10 +488,10 @@ retry.
   non-members, as defined in that section — →
   enrich current state → re-evaluate the predicate → diff
   against the stored set → emit an `add` or `retract` transition, which drives
-  the delivery. That emitted transition is **considered handled by this
+  the delivery. That emitted transition is **disposition (a) — DELIVERED by this
   originating membership rule** (its own delivery is the handling), so it is
   **never dead-lettered** merely because no separate `notify` rule matches it
-  (see *The event taxonomy is open*).
+  (see *Event disposition and dead-letter*).
 
 ### The predicate grammar
 
@@ -684,11 +713,17 @@ to that rule.
 - Per `(owner, membership-rule)` the store holds the member **entity IDs** plus
   the **minimal display fields** needed to render a retract (e.g. ticket number
   and title).
-- On each relevant event (as defined above): **enrich** current state →
-  **re-evaluate** the
-  membership predicate → **diff** against the stored member set → append an `add`
-  (a new member entered the set) or a `retract` (a member left the set — it now
-  fails the predicate, or it was deleted).
+- **On each relevant event the pipeline runs PER TRIGGER CLASS** — no single step
+  mandates an enrichment a trigger cannot perform:
+  - **(a) declared-predicate types:** **enrich** current state → **re-evaluate**
+    the predicate → **diff** against the stored set → append `add`/`retract`.
+  - **(b) exit/delete types** (e.g. `notion.ticket.deleted`) scoped to CURRENT
+    stored members: **diff WITHOUT enrichment**. A deleted stored member fails
+    the predicate **by definition**, so emit a `retract` from the **cached**
+    display fields — no fetch (the entity may be unfetchable).
+  - **(c) re-entry/undelete types** (e.g. `notion.ticket.undeleted`) scoped to
+    NON-members: **enrich** → **re-evaluate** the predicate → if it passes,
+    append `add`.
 - Because the store caches the minimal display fields **at add time**, a
   `retract` can be rendered even after the entity is deleted and can no longer be
   fetched (a `notion.ticket.deleted` on a stored member emits a `retract` from
@@ -978,14 +1013,33 @@ Therefore:
   with *Normative home* — rules, config, and secrets are per-account data), **not
   a committed file and not a second registry concept**; the machine-token
   registration already exists for harness-emit, and the target-bind check reuses
-  it. The owner-bind is enforced at **rule-save time** — the target machine and
-  the rule's owner are both known then, so it runs at the **same layer** as the
-  rule-authoring owner-stamp and predicate save-time validation, not at ingest.
-  (The separate *client-side* channel declaration is what the runtime
-  both-ends-or-dark observability below covers; owner-binding is the save-time
-  refusal, channel-presence is the runtime signal.)
-- `inbox-doctor`'s never-delivered finding MUST distinguish "no channel declared"
-  from "nothing arrived".
+  it.
+- **Enforcement is at THREE points, because the inbox target is a filesystem path
+  with no credential to fail closed** (a fixed-destination API adapter fails
+  closed on its per-account credential; the inbox adapter has none, so the bind
+  is asserted explicitly and more than once):
+  1. **Save-time bind.** At rule create/edit the target machine's owning account
+     is resolved from the record and the rule is refused (with a `Fix:`) if it is
+     not the rule's owner — the **same layer** as the rule-authoring owner-stamp
+     and predicate save-time validation.
+  2. **Delivery-time re-assertion.** Before **each** delivery the platform
+     re-resolves the target machine's **current** owner and refuses the delivery
+     — **recording it, never a silent drop** — if it is not the rule's owner.
+     This closes the window a save-time-only check would leave if ownership
+     changed after save, and it is cheap (one record lookup).
+  3. **Record immutability per `machine id`.** The machine↔owner registration is
+     **immutable per machine**: re-registering a machine to a **different** owner
+     does NOT silently re-home existing rules — it **invalidates the dependent
+     rules**, which are refused/flagged with a `Fix:` (re-author them under the
+     new owner). Ownership never transfers under a live rule's feet.
+  The separate *client-side* channel declaration remains the runtime
+  both-ends-or-dark signal (channel-presence), distinct from this owner-binding.
+- The never-delivered distinction — "no channel declared" vs "nothing arrived" —
+  belongs to **`inbox-doctor`**, which `ai/contracts/athena-inbox.md` owns (see
+  *The diagnostic: `inbox-doctor`* there, and *Relationship to the Athena Inbox
+  contract* below). This contract does **not** restate or impose that obligation
+  — it relies on it; the distinction is specified in the inbox contract, not
+  here.
 - A lane matching **zero** over a long window MUST be reported, not silently
   treated as healthy.
 
