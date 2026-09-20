@@ -36,6 +36,33 @@ the teardown and the reason (`parked STUCK`, `cancelled`) in the Mission's
 state-log entry, so the next sweep does not go looking for a stack that is
 deliberately gone.
 
+## Removing the WORKTREE: never over uncommitted work
+
+Cleaning up the worktree itself is a different act from tearing down its stack,
+and it is destructive in a way the stack is not: a stack re-ups, a deleted
+uncommitted edit does not. **Before `git worktree remove` / `wt remove`, read
+`git -C <worktree> status --porcelain`. If it is not empty, do not remove it.**
+Salvage first — the same discipline [[athena:admiral-resume]] already applies
+before a re-dispatch: copy the dirty files (or record a `git stash create` sha)
+into `.../[run-id]/salvage/[mission]/`, note in the state log what the worktree
+held, and only then remove. A worktree that is dirty for a reason you cannot
+explain is left alone and reported; it costs nothing to keep.
+
+Note `git worktree remove` refuses a dirty tree by default — **that refusal is a
+finding, not an obstacle.** Never reach for `--force` to get past it.
+
+- Measured 2026-09-19-slack-gensaas / DND-194: the MR was merged while the
+  captain's diff-critic round was still finishing, and the post-merge cleanup
+  removed the worktree with two uncommitted critic fixes in it — one of them
+  correcting a BLOCKING factual error (it called walt_ui's `SessionStart` polls
+  `UserPromptSubmit` hooks, inverting the very distinction the document turns
+  on). The error landed on `main` and needed a follow-up PR to clear.
+
+The merge bar in [[athena:merge-boarding]] is the other half of this and was
+independently in force: merge on the captain's `DONE` **plus** its report file,
+never on forge state while the captain's worktree is still moving. Salvage is
+what keeps a mistimed merge from also being a lost fix.
+
 **How the teardown command is resolved is per-repo** (the project-name derivation
 and working directory are repo-specific, and a bare `down -v` in the wrong repo
 destroys the wrong stack's volumes). Resolve it in order:
