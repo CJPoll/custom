@@ -181,6 +181,52 @@ def verdict_for(sha)
   end
 end
 
+# How many judge rounds this worktree has recorded, and which SHAs they were.
+# The receipt dir is per-worktree (`git rev-parse --git-path` resolves against
+# the worktree's own $GIT_DIR) and a worktree is ONE unit of work (repo
+# CLAUDE.md -> "Agents work in worktrees"), so every receipt in it belongs to
+# this change.
+#
+# Counted from the DIRECTORY, deliberately NOT from `git rev-list base..HEAD`:
+# a rebase rewrites the round SHAs and orphans every earlier receipt, so an
+# ancestry-based count would silently read LOW -- a wrongly-computed key
+# indistinguishable from a legitimately empty one (ai/CLAUDE.md -> "A failed
+# lookup must never look like an empty one"). DND-232 rebased twice mid-loop.
+#
+# Returns [count, shas] or nil. nil is an ERROR the caller must say out loud,
+# never a silent "round 1".
+def rounds_recorded
+  dir = verdict_dir
+  return nil unless dir && Dir.exist?(dir)
+  shas = Dir.glob(File.join(dir, "*.json")).map { |p| File.basename(p, ".json") }.sort
+  [shas.size, shas]
+end
+
+# Printed on a BLOCK only. This adds OUTPUT to a path that already exits 2 --
+# it can never block something that did not already block, and never unblocks
+# anything. Deliberate: a gate that went red on round count would create
+# pressure toward exactly the override this discipline forbids.
+def warn_round_notice(sha)
+  rounds = rounds_recorded
+  if rounds.nil?
+    warn "  NOTE: ROUND NUMBER UNKNOWN — the verdict store could not be resolved, so this may not be round 1."
+    warn "  Fix: re-run from the Mission's worktree so rounds are counted. If this is round 2+, apply the `athena:critic-convergence` skill before patching."
+    return
+  end
+  n, shas = rounds
+  return if n < 2
+  prior = (shas - [sha]).map { |s| s[0, 7] }.join(", ")
+  warn ""
+  warn "  ROUND #{n} on this change (#{n - 1} earlier judge verdict(s) here: #{prior})."
+  warn "  Fix: BEFORE patching these findings one at a time, run the convergence check in the"
+  warn "  `athena:critic-convergence` skill. If ANY finding above exists only because of an"
+  warn "  earlier round's own fix AND is a contradiction / unsatisfiability / unreachability"
+  warn "  (not a stale name or citation), stop per-finding patching and run a CLUSTER ROUND."
+  warn "  Two independent EIGHT-round loops (2026-09-19 athena:inbox, 2026-09-20 DND-232) were"
+  warn "  exactly this, caught five rounds late. Round count is NEVER a reason to override the"
+  warn "  judge, defer a finding, or merge with findings open."
+end
+
 def critic_output(base)
   stub = ENV["CRITIC_REVIEW_STUB"]
   return [File.read(stub), true] if stub && File.file?(stub)
@@ -237,6 +283,7 @@ def run(argv)
     text = body.join.strip
     warn(text.empty? ? "  (the critic returned a verdict with no body -- re-run to see it)" : text)
     warn "  Fix: address each finding above (or, if a finding is wrong, say why in the MR) before this change ships."
+    warn_round_notice(sha)
   when "fail-open"
     warn "critic-review: FAIL-OPEN — the critic did not return a usable verdict (infra/model error); NOT blocking."
     warn "  Fix: re-run ai/bin/critic-review once `claude` is reachable; a human should eyeball this diff since the judge did not run."
@@ -371,6 +418,72 @@ def run_receipt_self_test
       ENV.delete("CRITIC_REVIEW_STUB")
     end
   end
+
+  # (11-14) ROUND COUNTING -- the convergence signal (athena:critic-convergence).
+  # Its own repo: the cases above rewrite one SHA's receipt repeatedly, which
+  # would make the count here meaningless.
+  #
+  # The notice is stderr on an already-exit-2 path, so none of this can change
+  # whether the judge blocks; what is under test is that the ROUND NUMBER is
+  # right, and that an unresolvable store says so instead of reading as round 1.
+  Dir.mktmpdir("critic-review-rounds-") do |repo|
+    Dir.chdir(repo) do
+      sh = ->(*a) { system(*a, out: File::NULL, err: File::NULL) }
+      sh.call("git", "init", "-q", ".")
+      sh.call("git", "config", "user.email", "t@example.invalid")
+      sh.call("git", "config", "user.name", "t")
+      commit = lambda do |body|
+        File.write("a.txt", body)
+        sh.call("git", "add", "-A")
+        sh.call("git", "-c", "commit.gpgsign=false", "commit", "-qm", body)
+        head_sha
+      end
+      first = commit.call("one")
+
+      # (11) no store yet -> nil, and the caller says ROUND NUMBER UNKNOWN with
+      # a Fix:. It must NEVER silently read as round 1.
+      ok &&= rounds_recorded.nil?
+      _r, err = capture_err { warn_round_notice(first) }
+      ok &&= err.include?("ROUND NUMBER UNKNOWN")
+      ok &&= err.include?("Fix:")
+      ok &&= !err.match?(/ROUND 1\b/)
+
+      ENV["CRITIC_REVIEW_STUB"] = findings_out
+
+      # (12) round 1 BLOCK records a receipt but prints NO round notice --
+      # a converging first pass must not be nagged.
+      rc, err = capture_err { run(["--base", "main"]) }
+      ok &&= (rc == 2)
+      ok &&= (rounds_recorded&.first == 1)
+      ok &&= !err.include?("ROUND")
+      ok &&= !err.include?("critic-convergence")
+
+      # (13) round 2 BLOCK DOES print it, names the round, routes to the skill,
+      # and lists the PRIOR sha while EXCLUDING the current head.
+      second = commit.call("two")
+      rc, err = capture_err { run(["--base", "main"]) }
+      ok &&= (rc == 2)
+      ok &&= (rounds_recorded&.first == 2)
+      ok &&= err.include?("ROUND 2 on this change")
+      ok &&= err.include?("athena:critic-convergence")
+      ok &&= err.include?("CLUSTER ROUND")
+      ok &&= err.include?(first[0, 7])          # the earlier round is named
+      ok &&= !err.include?(second[0, 7])        # the current head is not
+      ok &&= err.match?(/NEVER a reason to override/)
+
+      # (14) THE REBASE CASE. A rebase rewrites the round SHAs and orphans every
+      # earlier receipt, so an ancestry-based count would read LOW and silently
+      # under-report the round -- the failed-lookup class. Counting from the
+      # DIRECTORY survives it: move HEAD off both recorded commits entirely and
+      # the count must still be 2.
+      commit.call("three")
+      sh.call("git", "-c", "commit.gpgsign=false", "reset", "-q", "--hard", first)
+      ok &&= (rounds_recorded&.first == 2)
+
+      ENV.delete("CRITIC_REVIEW_STUB")
+    end
+  end
+
   FileUtils.remove_entry(stubs)
   ok
 end

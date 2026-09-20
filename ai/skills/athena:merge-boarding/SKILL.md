@@ -70,6 +70,32 @@ captain's worktree is still moving.
   in the final report. An override is a recorded, attributable decision; what is
   being eliminated is the *unrecorded* one.
 
+## A loop that is not converging
+
+A resolver you keep resuming on critic findings is supposed to be descending.
+When its own fixes keep producing the next round's findings it is not, and
+nothing in the loop notices — on 2026-09-20 an admiral improvised a bar for this
+in its state log ("if round 6 yields NEW substantive findings, reassess") while
+the loop ran to eight rounds; the same eight-round shape was measured
+independently on 2026-09-19.
+
+- **Every re-dispatch for critic findings, from round 2 on, says so in the
+  brief**: "this is round N; apply `athena:critic-convergence` BEFORE fixing."
+  The resolver is a fresh or resumed context and cannot see the round count you
+  can. `ai/bin/critic-review` prints the round number on every BLOCK, so you are
+  never guessing at N.
+- **A resolver that reports a cluster round gets resumed normally.** That is the
+  loop working; the next round should be smaller and non-interacting.
+- **The SAME cluster signalling again AFTER a cluster round is your escalation
+  point, not a third resume.** The requirements are underdetermined and another
+  round will not discover that. Route it to the architect (design /
+  security-design) per your escalation routing.
+- **Round count is never a merge argument.** It is not grounds for
+  `--critic-override`, for carrying a finding as a known-open, or for relaxing
+  the bar in *The merge bar*. Override stays what it is: the
+  integration-completeness class only, recorded and attributable. A long loop
+  changes the METHOD (cluster round) or the OWNER (escalate) — never the bar.
+
 ## Merging is not always landing code
 
 Every criterion above asks whether the **code is correct**. None asks what
