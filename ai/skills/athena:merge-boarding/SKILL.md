@@ -69,6 +69,21 @@ captain's worktree is still moving.
   `INTEGRATION OK` line. Copy that line verbatim into your state log and name it
   in the final report. An override is a recorded, attributable decision; what is
   being eliminated is the *unrecorded* one.
+- **The verdict is the RECORDED one, never your reading of the critic's
+  stdout.** `integration-gate` and `critic-review --verdict-for <SHA>` read a
+  receipt; the text the critic streams is for the *resolver*, to learn what to
+  fix. Treating the stream as the verdict has now produced a wrong merge
+  decision twice. On 2026-09-18 a format-specific body grep printed `BLOCKED`
+  with zero findings under it (since fixed — the body is printed whole), and on
+  2026-09-20 an admiral read a recritic through `| tail`, saw a clean end,
+  recorded "FINDINGS: none → BOARD C-1" in its state log, and was corrected only
+  because it then cross-checked `--verdict-for`: the real verdict was BLOCK with
+  a `[correctness]` finding scrolled off the top. Note the asymmetry that makes
+  this dangerous — truncation removes findings, so it fails toward *merge*.
+  So: never pipe a critic run through `tail`/`head`/a grep and act on what
+  survives; capture the run whole to a file and read that. If what you have is
+  partial for any reason, you have **no verdict** — re-read it or take the
+  exit-3 path above; a truncated read is never a PASS.
 
 ## A loop that is not converging
 
