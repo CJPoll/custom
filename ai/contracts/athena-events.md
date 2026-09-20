@@ -104,14 +104,17 @@ Every event resolves through a **two-level** model. The dead-letter trigger keys
 on the first level ONLY; the per-delivery outcomes live at the second.
 
 **Level 1 — event ROUTING disposition (total over exactly two outcomes)**, keyed
-on *"does any enabled rule apply to this event's `type`?"*:
+on *"does any of the event owner's enabled rules apply to this event's `type`?"*:
 
-- **HANDLED** — at least one enabled rule's declared `event_type(s)` includes this
-  event's `type` (≥1 rule *applied*). **Not** dead-lettered, regardless of what
-  then happens to the individual deliveries.
-- **UNMATCHED** — **no** enabled rule applies to the event's `type` at all (no
-  rule's declared `event_type(s)` includes it). **This is the sole dead-letter
-  trigger.**
+- **HANDLED** — at least one of the **event owner's** enabled rules declares an
+  `event_type(s)` that includes this event's `type` (≥1 of the owner's rules
+  *applied*). **Not** dead-lettered, regardless of what then happens to the
+  individual deliveries.
+- **UNMATCHED** — **none** of the **event owner's** enabled rules applies to the
+  event's `type` at all (no owner rule's declared `event_type(s)` includes it).
+  **This is the sole dead-letter trigger.** Scoping to the owner's own rules is
+  required so that another account's rules can neither mark an event HANDLED nor
+  suppress the owner's dead-letter record.
 
 An **UNMATCHED** event MUST be **dead-lettered and persisted** to queryable
 storage for audit and debugging; it MUST NOT be silently dropped, and it MUST NOT
@@ -269,14 +272,24 @@ source):
 - `notion.comment.updated`
 - `notion.comment.deleted`
 
-**Optional finer which-property types.** Because `notion.ticket.updated` carries
-`changed_properties`, the platform MAY additionally emit finer **which-property**
-types where that is more convenient for routing —
-`notion.ticket.status_changed`, `notion.ticket.labels_changed`,
-`notion.ticket.assignment_changed`. "Which property changed" is metadata Notion
-supplies. These finer types are still coarse in **direction**: they name the
-property that changed, never whether a value was added or removed, set or
-cleared.
+**`notion.ticket.updated` is the coarse property-change signal; which property
+changed is expressed by filtering.** The first pass mints **no** per-property
+ticket types — there is no `notion.ticket.status_changed`,
+`notion.ticket.labels_changed`, or `notion.ticket.assignment_changed`. A rule that
+cares which property changed filters the coarse `notion.ticket.updated` on its
+declared `changed_properties` collection, e.g.
+`{"field":"payload.changed_properties","op":"contains","value":"<status-prop-id>"}`
+— that carries the full "which property" signal, so a finer separate type would
+buy no routing power and is not minted. (Finer separate types are roadmap; they
+would land with their own payload-schema rows only if a real need appears.) A
+routing rule authored against one of those non-existent finer types fails loud at
+**save** time — no new error class: a finer type has no payload schema, so any
+`payload.*` leaf is the existing unknown-path save-time HARD ERROR (see *The
+predicate grammar* → *Evaluation contract*), with a `Fix:` that redirects to
+`changed_properties`: `Fix: unknown event type '<type>' — the first pass emits no
+per-property ticket types (no notion.ticket.status_changed/labels_changed/
+assignment_changed). Declare notion.ticket.updated and filter on which property
+changed with a predicate leaf {"field":"payload.changed_properties","op":"contains","value":"<property-id>"}.`
 
 **Direction is NOT emitted for a metadata-only source; the consumer derives it.**
 "A label was *added*" vs "*removed*", "an assignee was *set*" vs "*cleared*" are
