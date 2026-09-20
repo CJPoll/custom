@@ -102,6 +102,12 @@ dropped, and it MUST NOT be **merely counted** — a bare counter cannot answer
 is exactly the failed-lookup discipline (`~/dev/custom/CLAUDE.md` → *A failed
 lookup must never look like an empty one*): an unmatched event is a legitimate
 miss, and a legitimate miss MUST remain observable as the specific thing it was.
+The dead-letter store is **per-account** and holds a full event payload, which
+may carry third-party content, so it is **Path-2 untrusted** when read into an
+LLM (see *Trust posture — two paths*) and its **retention and read-scope are
+governed by the product data-retention policy** — read access is the owning
+account's, and entries age out under that policy rather than being kept
+unbounded.
 
 ### Enumerated first-pass event types
 
@@ -138,6 +144,50 @@ completeness*). Therefore there is **no** source-level `notion.label.removed`
 type; that direction is produced by the membership diff and surfaces as
 `lane.member.retracted`. Present-state membership entering a lane predicate
 surfaces as `lane.member.added`.
+
+### Payload fields and their types per event type
+
+Every enumerated `type` declares a **closed payload schema** — the set of
+`payload.*` fields it carries, each with a **type** and a **cardinality**
+(scalar or collection). This schema is what a field-path binds against at rule
+save time and what an operator's cardinality is checked against (see *The
+predicate grammar*). It is closed: a `payload.*` path not in the declaring type's
+schema is an unknown-path save-time error. The **envelope** fields are common to
+every type — `event.type` (scalar string), `event.source` (scalar string),
+`event.occurred_at` (scalar timestamp).
+
+| Event type(s) | `payload.*` field | Type | Cardinality |
+|---|---|---|---|
+| `notion.ticket.*` | `status` | string | scalar |
+| | `labels` | string | **collection** |
+| | `assignee` | person-id | **collection** |
+| | `title` | string | scalar |
+| | `ticket_number` | string | scalar |
+| | `changed_properties` (`notion.ticket.updated` only) | string | **collection** |
+| `notion.comment.*` | `comment_text` | string | scalar |
+| | `ticket_number` | string | scalar |
+| | `title` | string | scalar |
+| `slack.message.received` | `text` | string | scalar |
+| | `channel` | string | scalar |
+| | `user` | string | scalar |
+| | `thread_ts` | string | scalar |
+| `lane.member.added`, `lane.member.retracted` | `rule_id` | string | scalar |
+| | `lane` | string | scalar |
+| | `op` | `"add"` \| `"retract"` | scalar |
+| | `entity_id` | string | scalar |
+| | `ticket_number` | string | scalar |
+| | `title` | string | scalar |
+
+**The membership-derived types have a closed payload schema of their own** — the
+minimal cached display fields (`ticket_number`, `title`) plus the lane/rule
+identity (`rule_id`, `lane`) and the transition `op`. This is deliberate: the
+contract makes a `notify` rule on a `lane.member.retracted` transition first-class
+(see *Retraction-driven consumer patterns*), so a predicate leaf or a template
+slot on that event MUST have a closed, bindable, save-time-validated schema
+exactly like a source-emitted type. The fields are the same minimal ones the
+lane-membership store caches at add time so a retract renders after the entity is
+gone (see *Membership rules and the lane-membership store*), and they remain
+**Path-2 untrusted** when they reach an LLM.
 
 ### Idempotency is per (event, rule)
 
@@ -303,18 +353,23 @@ A predicate is a **JSON tree**, evaluated by the platform; it is never code.
   **unknown** path is rejected at save time; a **known** path missing at runtime
   is `absent`.
 
-  **The enumerated field set** is closed, not an open document:
-  - **Envelope fields:** `event.type`, `event.source`, `event.occurred_at`.
-    (`owner` is not matchable — a rule belongs to exactly one owner and never
-    matches across owners.)
-  - **Payload fields:** the fields the event's payload schema declares for the
-    `event_type(s)` the rule applies to — for a ticket event: `payload.status`,
-    `payload.labels`, `payload.assignee`, `payload.title`,
-    `payload.ticket_number`.
+  **The enumerated field set** is closed, not an open document, and each field
+  carries a declared **type and cardinality** (see *Payload fields and their
+  types per event type*):
+  - **Envelope fields:** `event.type`, `event.source`, `event.occurred_at`
+    (all scalar). (`owner` is not matchable — a rule belongs to exactly one owner
+    and never matches across owners.)
+  - **Payload fields:** the `payload.*` fields the **declaring type's closed
+    payload schema** lists — e.g. for a `notion.ticket.*` event `payload.status`
+    (scalar), `payload.labels` (collection), `payload.assignee` (collection),
+    `payload.title` (scalar), `payload.ticket_number` (scalar); every enumerated
+    type, including the membership-derived ones, has such a schema.
 
   Because a rule declares the `event_type(s)` it applies to, the platform
   validates every field-path in the rule against the **union of those types'
-  declared payload schemas** at save time.
+  declared payload schemas** at save time — both that the path exists and that
+  the operator's cardinality matches the field's (see the comparators below and
+  the evaluation contract).
 - **comparators:**
   - `eq`, `ne`, `lt`, `lte`, `gt`, `gte` — scalar comparison.
   - `in` — scalar is a member of the literal set.
@@ -323,7 +378,22 @@ A predicate is a **JSON tree**, evaluated by the platform; it is never code.
   - `intersects` — a collection field's intersection with a literal set is
     non-empty (e.g. `assignee` ∈ {Cody, Athena}).
   - `exists` / `absent` — presence / absence of the field on the **current**
-    payload (the matchable form of a cleared assignee or a removed field).
+    payload (the matchable form of a cleared assignee or a removed field). These
+    are **presence operators**: the leaf's `value` is **omitted and ignored** — a
+    `value` supplied alongside `exists`/`absent` is disregarded, never matched
+    against.
+
+**Operators are typed to the field's cardinality.** `eq`, `ne`, `lt`, `lte`,
+`gt`, `gte`, `in` are **scalar** operators; `contains` and `intersects` are
+**collection** operators; `exists` / `absent` apply to a field of either
+cardinality. An operator whose cardinality does not match the bound field's
+declared cardinality (see *Payload fields and their types per event type*) is a
+**save-time HARD ERROR**, not a dispatch-time non-match:
+`{"field":"payload.status","op":"contains"}` (a collection op on a scalar) and
+`{"field":"payload.labels","op":"eq"}` (a scalar op on a collection) are both
+rejected at save time with a `Fix:`. A wrongly-typed operator is a
+wrongly-computed key — it would otherwise match nothing forever, the same
+failed-lookup class as an unknown field-path.
 
 **Boolean nodes:** `{ "all": [ … ] }` (AND), `{ "any": [ … ] }` (OR),
 `{ "not": <node> }`. A predicate is therefore an **arbitrarily nested tree** of
@@ -353,6 +423,13 @@ type-coercion rules, bounded depth/size. Specifically:
   runtime) and a save-time reject (an unknown field-path) are the two distinct
   dispositions, and an implementation MUST NOT collapse the unknown path into the
   runtime `absent` case.
+- **An operator incompatible with its field's declared type/cardinality is a
+  HARD ERROR at rule-SAVE time** — a collection operator (`contains` /
+  `intersects`) on a scalar field, or a scalar operator (`eq` / `ne` / `lt` /
+  `lte` / `gt` / `gte` / `in`) on a collection field. It is rejected with a
+  `Fix:` naming the field, its declared cardinality, and the compatible
+  operators, never left to match nothing at dispatch — the same failed-lookup
+  class as an unknown field-path, one binding step further in.
 - **A malformed predicate is a HARD ERROR at rule-SAVE time**, naming the fault
   with a `Fix:` (which node, which field, what is wrong — including an unknown
   field-path per the bullet above). It MUST NOT be a silent eval-time non-match
@@ -381,9 +458,13 @@ is never asked to know history; the store is.
 
 **Worked owner examples:**
 
-- *"ticket assigned where assignee == me → Slack DM"* (`notify`):
+- *"ticket assigned where the assignees include me → Slack DM"* (`notify`):
   `{all:[{field:"event.type",op:"in",value:["notion.ticket.created","notion.ticket.updated"]},
-  {field:"payload.assignee",op:"eq",value:"<cody-person-id>"}]}` → Slack adapter.
+  {field:"payload.assignee",op:"contains",value:"<cody-person-id>"}]}` → Slack
+  adapter. (`payload.assignee` is a **collection** — a Notion people property
+  holds zero or more people — so it is matched with `contains` / `intersects`,
+  never the scalar `eq`; both worked examples below use collection operators on
+  it, consistent with its declared cardinality.)
 - *"ticket created OR updated where assignee ∈ {Cody, Athena} AND label 'Flaky
   Test' present → flaky-lane inbox channel"* (`membership`):
   `{all:[{field:"event.type",op:"in",value:["notion.ticket.created","notion.ticket.updated"]},
@@ -673,6 +754,21 @@ Therefore:
 
 - An inbox rule with an **unknown target** MUST be refused with a `Fix:` (name
   the missing target).
+- **A rule's delivery target MUST resolve to a machine/channel registered to the
+  RULE'S OWNER.** Existence is not enough. The inbox target is a `machine +
+  inbox_name` — a **filesystem location**, not a credential-scoped API endpoint —
+  so an owner whose rule names *another account's* machine would otherwise get a
+  perfectly conformant target and have the platform deliver into that other
+  machine's sessions. That is a **cross-account delivery hole**, and it is the
+  egress dual of *Which event types an ingress kind may originate*: origination
+  stops one account from minting another's events; this stops one account from
+  delivering into another's surfaces. A rule whose target is owned by a different
+  account MUST be refused with a `Fix:` (name the target and that it is not
+  registered to the rule's owner). A **fixed-destination API adapter** (Slack,
+  email, Notion) gets this binding for free — it delivers only through the
+  owner's own KMS-custodied per-account credential, which cannot reach another
+  account's destination — but the **inbox adapter has no such credential** (the
+  target is a path), so it MUST enforce the owner↔target binding explicitly.
 - `inbox-doctor`'s never-delivered finding MUST distinguish "no channel declared"
   from "nothing arrived".
 - A lane matching **zero** over a long window MUST be reported, not silently
