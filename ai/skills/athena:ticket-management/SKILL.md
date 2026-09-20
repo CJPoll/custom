@@ -123,6 +123,19 @@ as `notion_person_id`; the flaky-lane tooling already resolves it that way.
 - A 404 "make sure ... shared with your integration" means the DB/page is not shared with
   the Athena integration yet — it must be shared (Connections → add Athena) before you can
   read or write it.
+- **`API-create-a-comment` does not work — do not spend a call on it.** On every
+  connection (`notion-personal`, `notion-work`, `notion-athena`) it returns
+  `400 missing_version`: *"Notion-Version header failed validation: ... instead was
+  `undefined`"*. The MCP server omits the header, so this is not something a caller
+  can pass around — it fails before the request reaches your page id, so a well-formed
+  call and a bogus one fail identically. **Property writes are unaffected**:
+  `API-patch-page` (status, assignee) and `API-post-page` work fine; only the comment
+  endpoint is broken. **Instead**, put the note where it will actually be read: append
+  it to the ticket page body (`API-patch-block-children`), or record it in the MR/PR
+  description and your report. Say in the report that the comment endpoint was
+  unavailable, so the absence of a comment is never read as an absence of the note.
+  [measured 2026-09-20; recurring since at least 2026-09-12 — PT-789, dnd-140,
+  PT-1080, DND-219 each rediscovered it]
 
 ## Design sub-docs (the architect's deliverables live in Notion)
 
