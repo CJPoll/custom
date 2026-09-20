@@ -149,19 +149,46 @@ dead-lettered for want of a `notify` match; an owner MAY additionally declare a
 `notify` rule on `lane.member.*`, whose own (a)/(b)/(c) disposition is determined
 independently for that derived event.
 
-The dead-letter store is **per-account** and holds a full event payload, which
-may carry third-party content, so it is **Path-2 untrusted** when read into an
-LLM (see *Trust posture — two paths*), and read access is the owning account's.
+The dead-letter store is **per-account** and its record grain is **one
+exemplar-plus-count per `(owner, type)`**: the **first-seen full event payload** of
+an unmatched `(owner, type)` — the **exemplar**, which alone answers the
+failed-lookup question "which event, of what type, for which owner, went
+unmatched?" — plus a monotonic **count** of subsequent unmatched events of that
+same `(owner, type)` and a **last-seen** timestamp. The 2nd..Nth unmatched events
+of an already-recorded `(owner, type)` **increment the count** and update the
+last-seen timestamp; they store **no** new payload. The exemplar payload may carry
+third-party content, so the record is **Path-2 untrusted** when read into an LLM
+(see *Trust posture — two paths*), and read access is the owning account's.
+
+**Later (2026-09-20):** this store previously held **a full event payload per
+unmatched event**, with the unbounded-until-read lifetime applied **per event**.
+That framing let the store grow without bound behind ungated traffic volume — a
+disabled rule could flood it with a million full payloads. It is superseded by the
+**one-exemplar-plus-count-per-`(owner, type)`** grain above, which **bounds the
+store by a structural quantity — the number of distinct unmatched `type`s per
+owner** (a small finite set drawn from the enumerable taxonomy), independent of
+traffic volume: a million unmatched Slack events collapse to one exemplar + count
+1,000,000. The **"MUST NOT be merely counted"** rule is **honored, not weakened**
+— an exemplar payload is retained for every distinct unmatched `(owner, type)`, so
+the store still names which/what/whose event went unmatched; the count is *added*
+metadata showing scale, never a *replacement* for the payload.
+
 Its retention follows the **same doctrine as the sibling inbox contract**
 (`ai/contracts/athena-inbox.md` → *Retention* → *The principle*), not a
-wholesale age-out: a dead-lettered event is the canonical **never-delivered,
-never-read** item — and the sole evidence of the miss this section insists stay
-observable — so retention MUST NOT destroy it until it has been **read/triaged**.
-An unread dead-letter entry has an **unbounded** lifetime ("unread bytes are
-mail, and mail is kept until it is delivered, however old it gets"); age-out under
-the product data-retention policy applies **only after** it has been read/triaged.
-Destroying an unread miss would erase the very observability the dead-letter store
-exists to provide.
+wholesale age-out — and the per-`(owner, type)`-exemplar grain is what makes that
+doctrine **structurally safe**, where per-event it was not: an **unread exemplar**
+is the canonical **never-delivered, never-read** item — and the sole evidence of
+the miss this section insists stay observable — so retention MUST NOT destroy it
+until it has been **read/triaged**. An unread exemplar has an **unbounded**
+lifetime ("unread bytes are mail, and mail is kept until it is delivered, however
+old it gets"), now bounded in aggregate at **at most one unread exemplar per
+`(owner, type)`**; age-out under the product data-retention policy applies **only
+after** it has been read/triaged. Destroying an unread miss would erase the very
+observability the dead-letter store exists to provide. **The store carries no cap
+or TTL number in this contract (X-1):** any operational cap/TTL is **ops/owner
+config, explicitly outside this contract's MUST surface** — the contract states
+**shape** only ("one exemplar + count per `(owner, type)`, unbounded-until-read").
+No MUST here carries a number.
 
 ### Enumerated first-pass event types
 
@@ -517,6 +544,19 @@ what a label may *earn*, and this governs what an ingress may *mint*. Both are
 required to stop a machine token from manufacturing a platform-internal or
 verified-source transition.
 
+**First pass registers ONLY Notion as a membership-capable source (X-2).** The
+per-(source, type) type registry (see *Membership rules and the lane-membership
+store*) is **designed** to carry a forge or any other source — the mechanism is
+source-agnostic — but the **first pass registers only Notion** as a
+membership-capable source. This removes, for now, the burden of proving
+multi-source coherence (per-source snapshot capability, per-source direction
+classes across N sources, and the type-unregistration lifecycle — see D-A3 under
+*Membership rules and the lane-membership store*). **Multi-source membership and
+the type-unregistration lifecycle are roadmap**, landing as one increment; only
+the first-pass *registration* is single-source, and the mechanism it registers
+against does not change. (`notify` rules on `slack.*` are unaffected — this bounds
+only which sources may feed a **membership lane**.)
+
 ---
 
 ## Handling rules — fan-out, predicate-driven, config not code
@@ -627,6 +667,12 @@ Two owner-facing schema fields carried by every rule:
   considered live**. Only after that sweep is the "no loss" property restored; a
   re-enable that skipped it would silently keep the members that left scope during
   the disable window, the silent set-corruption this document refuses throughout.
+  **DELETE — as distinct from disable — of a `membership` rule tears down its
+  lane-membership store partition**: the `(owner, membership-rule)` set no longer
+  exists, alongside the invalidation of its `source_lane` consumers (see *Binding
+  a `notify` rule on a `lane.member.*` transition*, the referential-integrity
+  lifecycle). Disable **freezes** the set (and re-enable sweeps it, above); delete
+  **removes** it — the last store-lifecycle case, closed.
 - **`dedupe window`** — an **owner-facing rate control**, deliberately distinct
   from the correctness-guaranteeing `idempotency_key` (see *Idempotency is per
   (event, rule)*). The idempotency key prevents a **re-processed same delivery**
@@ -891,6 +937,29 @@ MUST NOT collapse into `absent`. Therefore:
   `lane.member.*` type.** Present on any other rule (a `membership` rule, or a
   `notify` rule with no `lane.member.*` type) it is a save-time HARD ERROR with a
   `Fix:` (drop `source_lane`; it names the lane a `lane.member.*` consumer reads).
+- **A `source_lane` reference gets the same referential-integrity lifecycle as a
+  `rule.target` → machine-record reference** (see *Both-ends-or-silently-dark* →
+  the record-immutability point, which "invalidates the dependent rules,
+  refused/flagged with a `Fix:`"). It reuses that proven pattern rather than
+  inventing a new one, so a `source_lane` can never be left silently dangling or
+  silently killed:
+  - **DELETE of the referenced membership rule → its `source_lane` dependents are
+    INVALIDATED**, exactly as re-homing a machine record invalidates its dependent
+    rules: each consuming `notify` rule is **refused/flagged with a `Fix:`** naming
+    the now-missing lane (`source_lane` <id> no longer exists — re-point this rule
+    at an existing lane, or remove it), asserted **at delivery and on the rule's
+    next edit**. The reference is never left dangling. This is chosen over refusing
+    the membership rule's deletion while dependents exist — it matches the
+    machine-record precedent and does not let one rule's dependents block another
+    rule's deletion.
+  - **DISABLE of the referenced membership rule → the lane stops emitting; its
+    `source_lane` dependents become INERT but OBSERVABLE, not invalidated.** A
+    disable is reversible, so a hard invalidate would be wrong; instead a consumer
+    whose `source_lane` is **disabled** is surfaced by the **existing**
+    "a lane matching zero over a long window MUST be reported" rule (see
+    *Both-ends-or-silently-dark*), extended to that case — never left silently
+    quiet. Re-enabling the membership rule (which already runs the reconciliation
+    sweep — see *Enabled flag and dedupe window*) resumes the consumers.
 
 The **source-agnostic** fields of a `lane.member.*` event — the envelope
 (`event.type`, `event.source`, `event.occurred_at`) plus `payload.rule_id`,
@@ -1038,6 +1107,25 @@ enumerate — which, under the open taxonomy, is the common case, so the
 classification is the primary line of defense and the declared set is the
 supplement, never the reverse.
 
+**The per-(source, type) type registry also records a source-level full-snapshot
+capability.** Alongside each source's per-type direction classes and payload
+schemas, the registry records one **per-source fact** — whether the source is
+**full-snapshot / poll-capable**, i.e. able to enumerate its current in-scope set
+on demand for the reconciliation sweep. This capability is read at rule save time
+(see *The reconciliation sweep* → the full-snapshot requirement, which turns it
+into a save-time hard error for a source that lacks it).
+
+**In the first pass the per-(source, type) type registry is append-only /
+immutable per `(source, type)`** (D-A3). The registered types are fixed — Notion's
+source-emitted types plus the membership-derived set — so **no
+type-unregistration path exists** to leave a saved rule bound against a vanished
+type, and R4 (`rule → type registry`) cannot dangle. **Type-unregistration**
+would, like a deleted membership rule, have to **invalidate the dependent rules**
+that bound their schema/direction class against the removed type; it is therefore
+**roadmap**, landing with the same increment that adds multi-source membership
+(see *Which event types an ingress kind may originate* → X-2). This is enumerated
+so it is visibly **not** a gap, not because a first-pass mechanism is missing.
+
 - Per `(owner, membership-rule)` the store holds each member's **`entity_id`**
   (the declared stable source handle, e.g. `notion:<uuid>` — see *Payload fields
   and their types per event type*) plus the **minimal display fields** needed to
@@ -1070,6 +1158,27 @@ supplement, never the reverse.
   same prior set and both commit; the losing writer MUST re-read the committed
   set and re-diff against it. Serialization is per `(owner, membership-rule)`;
   distinct rules and distinct owners MAY proceed concurrently.
+
+**On a durably-emitted `retract`, the member's store entry is PURGED.** The store
+caches a member's `entity_id` and minimal display fields for exactly one stated
+purpose — so a `retract` can be rendered after the entity is gone (above). Once the
+`retract` transition is **durably emitted** — appended to the lane channel, and
+any `notify` consumers fired — that purpose is served, so the platform **purges the
+member's store entry** (`entity_id` + cached display fields). This needs **no owner
+retention number**; it is derived from the cache's sole stated purpose, and it
+bounds the active store by the lane's **working-set size** (the owner's in-scope
+entity count), not by cumulative history — closing R9. Consequences, all coherent
+by construction:
+
+- **The stored set is thereby exactly the current members** — precisely what the
+  reconciliation sweep diffs against, so **purge and sweep agree**: a purged member
+  is absent from a later snapshot and yields **no diff** (no spurious re-`retract`);
+  a **re-appearing** entity is a class-(c) re-entry (scoped to non-members), which
+  **re-enriches** and re-adds, so purge loses nothing on re-add.
+- **Idempotency is unaffected:** the per-`(event, rule)` idempotency-key store is
+  **separate** from the lane-membership store (see *Idempotency is per (event,
+  rule)*), so a **retried** `retract` still dedupes on its key after the member is
+  purged — purge removes set membership, not the delivery dedupe record.
 
 **The reconciliation sweep — a full stored-set re-evaluation.** The
 per-triggering-event pipeline above is **incremental**: it reacts to one entity's
@@ -1111,6 +1220,35 @@ mechanism cannot drift:**
    lane (see *Poller (fallback only)*).
 2. **Re-enabling a disabled membership rule** runs it before the rule is
    considered live (see *Enabled flag and dedupe window*).
+
+**A membership lane requires a full-snapshot-capable source, and this is checked
+at rule SAVE time.** The sweep diffs against a **fresh full snapshot of the
+source's current in-scope set**, so the sweep MUST is **unsatisfiable** for a
+source that cannot produce one — and a "best-effort sweep" would silently reopen
+exactly the silent-never-retract the sweep exists to close. Therefore
+full-snapshot / poll capability is a **declared source capability**, homed in the
+same **per-(source, type) type registry** that holds the source's direction
+classes and payload schema (see *The direction class of each type…* above), and a
+membership lane requires a source that is **(i) `entity_id`-bearing** (already —
+see *Payload fields and their types per event type*) **AND (ii)
+full-snapshot-capable**. **A `membership` rule declared on a source that is NOT
+full-snapshot-capable is a save-time HARD ERROR** with a `Fix:` (a membership lane
+requires a poll-capable source able to enumerate its in-scope set for the sweep;
+this source cannot — use it for a `notify` rule, or add a snapshot capability to
+its registration). This is the same save-time-loud discipline as the
+Slack-only-membership error (see *Payload fields and their types per event type*),
+and it makes the sweep MUST **satisfiable** and its satisfiability **checked where
+the rule is authored**. **Notion satisfies it**: the low-frequency reconciliation
+backstop already enumerates Notion's in-scope set with its read-only, DB-scoped
+enrichment token (design §14.9 / GS-8), so the sole first-pass membership source
+is full-snapshot-capable and the sweep MUST is satisfiable in the first pass at
+zero extra cost.
+
+**The sweep frequency carries no contract number (X-1).** How often the
+reconciliation backstop runs is **ops/owner configuration, explicitly outside this
+contract's MUST surface** — the contract states **shape** only ("a low-frequency,
+owner/ops-configured sweep"), never a cadence. No MUST here carries a frequency
+number.
 
 The store is source-agnostic — it carries over to a forge or any other membership
 lane — and turns "retraction" from an unanswerable source-delta question into a
@@ -1462,7 +1600,14 @@ Therefore:
   — it relies on it; the distinction is specified in the inbox contract, not
   here.
 - A lane matching **zero** over a long window MUST be reported, not silently
-  treated as healthy.
+  treated as healthy. **This report is extended to `source_lane` consumers: a
+  `notify` rule whose `source_lane` names a membership rule that is currently
+  DISABLED MUST likewise be reported** — its source lane is emitting nothing, so
+  the consumer is inert — never left silently quiet. This is the disable-side half
+  of the `source_lane` referential-integrity lifecycle; a DELETED `source_lane` is
+  instead **invalidated** (refused/flagged with a `Fix:`) per that same lifecycle
+  (see *Binding a `notify` rule on a `lane.member.*` transition*), which mirrors
+  the record-immutability invalidate-dependents rule below.
 
 git-common-dir tenancy keying stays the inbox client resolver's job
 (`ai/contracts/athena-inbox.md` → *Repo identity: the git common dir*). This
