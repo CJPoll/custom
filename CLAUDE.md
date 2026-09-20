@@ -58,7 +58,10 @@ Contains AI-related resources:
 - **skills/**: Claude Code skills (symlinked to `~/.claude/skills`)
 - **contracts/**: normative cross-project contracts — interfaces this machine's
   projects implement against, owned here rather than by any one consumer (e.g.
-  `athena-inbox.md`, the local multi-tenant message facility). A project opts
+  `athena-inbox.md`, the local multi-tenant message facility; and
+  `athena-events.md`, the Athena event platform — the deterministic
+  notification/event-handling substrate `apps/athena` implements, of which the
+  inbox is one delivery adapter). A project opts
   into the inbox through a machine-local registry entry under
   `$ATHENA_INBOX_ROOT/projects/` (default `~/.local/share/athena`), keyed by the
   realpath of the repo's git common dir — **never** a file committed to the

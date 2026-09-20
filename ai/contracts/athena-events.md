@@ -16,9 +16,11 @@ among several.
 rules, the predicate grammar, the trust posture, the security MUSTs. Owners own
 their *rules, config, and secrets* (server-side per-account data, never
 committed). The design record this contract is drawn from is
-`ai-artifacts/coordination/2026-09-19-inbox-lanes/design.md` (a dated record);
-where that design and this contract disagree on a normative point, **this
-contract wins**.
+`ai-artifacts/coordination/2026-09-19-inbox-lanes/design.md` (a gitignored,
+machine-local dated record cited for provenance only — this contract is
+self-contained and an implementer is **not** required to have that file); where
+that design and this contract disagree on a normative point, **this contract
+wins**.
 
 **How this document is amended.** As a living normative document (not a dated
 record):
@@ -205,6 +207,50 @@ server-side from that token (never from the payload). It carries no notification
 logic — it only produces an event. (Roadmap increment; the envelope is specified
 now so it is a natural later increment, not a rewrite.)
 
+### Which event types an ingress kind may originate
+
+`source` is diagnostic and MUST NEVER be an authorization input (see *The
+event*), so nothing is trusted *because of* the provenance it claims. That rule
+alone is not enough: it constrains how a `source` label is read, but not what an
+authenticated ingress is allowed to **originate**. Authentication of an ingress
+(a verified webhook signature, the machine token) proves *who* is emitting, not
+*what* they may emit. Without a second constraint, a machine-token holder could
+`POST` a `notion.ticket.deleted` or a `lane.member.retracted` and drive a
+fan-out delivery — including to a Path-1 auto-cancel fleet-control consumer (see
+*Retraction-driven consumer patterns*), which is "authorized by definition" —
+that only a verified source ingress or the platform's own membership diff should
+ever produce.
+
+Therefore **each ingress kind is registered with the event-type namespace(s) it
+is permitted to originate, and the platform MUST reject, at ingress, any event
+whose `type` falls outside the set its kind is permitted to originate**, with a
+`Fix:` naming the ingress kind and the disallowed `type`. The constraint is
+fixed at ingress **registration** (per ingress kind, not per event) and
+re-checked on every event, so a crafted payload cannot bypass it. The
+first-pass permitted-origination rule:
+
+- **Membership-derived types (`lane.member.added`, `lane.member.retracted`) are
+  PLATFORM-INTERNAL.** They are produced ONLY by the platform's own membership
+  diff (see *Membership rules and the lane-membership store*). **NO ingress of
+  any kind** — inbound-webhook, poller, or harness-emit — may originate a
+  `lane.member.*` event; an ingress-originated `lane.member.*` event MUST be
+  rejected with a `Fix:`.
+- **Source-emitted webhook types (`slack.*`, `notion.*`) are
+  VERIFIED-INGRESS-ONLY.** They may be originated ONLY by the inbound-webhook
+  ingress (or the reconciliation poller) for that source, whose sender
+  verification established that the change is real. **Harness-emit MUST NOT be
+  able to synthesize a source-emitted webhook type** — a machine-token holder
+  cannot mint a `notion.ticket.deleted` or a `slack.message.received` that no
+  verified webhook produced; such an event MUST be rejected with a `Fix:`.
+- **Harness-emit** may originate only `type`s in the namespace reserved for
+  fleet/harness events (e.g. `fleet.*`), never a source-emitted or a
+  membership-derived type.
+
+This is the origination dual of the `source`-is-not-authz rule: `source` governs
+what a label may *earn*, and this governs what an ingress may *mint*. Both are
+required to stop a machine token from manufacturing a platform-internal or
+verified-source transition.
+
 ---
 
 ## Handling rules — fan-out, predicate-driven, config not code
@@ -246,10 +292,29 @@ A predicate is a **JSON tree**, evaluated by the platform; it is never code.
 { "field": <field-path>, "op": <comparator>, "value": <literal> }
 ```
 
-- **field-path** addresses the event with a dotted path to a **bounded depth**:
-  `event.type`, `payload.assignee`, `payload.labels`, `payload.status`,
-  `payload.title`, …. An unresolvable path evaluates to **absent** (matchable —
-  see the evaluation contract), never to an error.
+- **field-path** addresses the event with a dotted path to a **bounded depth**,
+  drawn from a **closed, enumerated field set** (below), not an open document.
+  A field-path **outside** that set — a misspelling like `payload.asignee`, a
+  nonexistent `payload.lables` — is a **hard error at rule-SAVE time**, NOT an
+  `absent` match (see the evaluation contract). A path that names a **known**
+  field of the set which is simply missing from a given event's payload
+  evaluates to **absent** (matchable — see the evaluation contract), never an
+  error. The two dispositions are distinct and MUST NOT be conflated: an
+  **unknown** path is rejected at save time; a **known** path missing at runtime
+  is `absent`.
+
+  **The enumerated field set** is closed, not an open document:
+  - **Envelope fields:** `event.type`, `event.source`, `event.occurred_at`.
+    (`owner` is not matchable — a rule belongs to exactly one owner and never
+    matches across owners.)
+  - **Payload fields:** the fields the event's payload schema declares for the
+    `event_type(s)` the rule applies to — for a ticket event: `payload.status`,
+    `payload.labels`, `payload.assignee`, `payload.title`,
+    `payload.ticket_number`.
+
+  Because a rule declares the `event_type(s)` it applies to, the platform
+  validates every field-path in the rule against the **union of those types'
+  declared payload schemas** at save time.
 - **comparators:**
   - `eq`, `ne`, `lt`, `lte`, `gt`, `gte` — scalar comparison.
   - `in` — scalar is a member of the literal set.
@@ -270,15 +335,30 @@ deterministic, and side-effect-free** (Domain code, per `~/dev/custom/CLAUDE.md`
 → *Architecture*). No arithmetic beyond comparison, no regex, no code, fixed
 type-coercion rules, bounded depth/size. Specifically:
 
-- **A missing field is `absent`** — matchable by `absent`/`exists`, and a leaf
-  that reads it yields a defined non-match rather than a crash. Evaluation MUST
-  NEVER throw on a missing or unexpected field.
+- **`absent` is reserved for a KNOWN field missing from a given payload.** A
+  field-path that is in the enumerated field set but not present in *this*
+  event's payload evaluates to `absent` — matchable by `absent`/`exists`, and a
+  leaf that reads it yields a defined non-match rather than a crash. Evaluation
+  MUST NEVER throw on a known field that is missing at runtime.
+- **An UNKNOWN field-path is a HARD ERROR at rule-SAVE time, never an `absent`
+  match.** Every field-path in a predicate MUST be bound, at save time, to the
+  enumerated field set (against the union of the rule's declared
+  `event_type(s)`' payload schemas — see *The predicate grammar*). A path
+  outside that set — a misspelled or nonexistent field — is rejected with a
+  `Fix:` naming the offending path and the nearest valid field. This is the
+  failed-lookup discipline (`~/dev/custom/CLAUDE.md` → *A failed lookup must
+  never look like an empty one*): a wrongly-computed key — a misspelled field —
+  otherwise silently matches nothing forever, indistinguishable from a correct
+  field that legitimately matched nothing. `absent` (a known field missing at
+  runtime) and a save-time reject (an unknown field-path) are the two distinct
+  dispositions, and an implementation MUST NOT collapse the unknown path into the
+  runtime `absent` case.
 - **A malformed predicate is a HARD ERROR at rule-SAVE time**, naming the fault
-  with a `Fix:` (which node, which field, what is wrong). It MUST NOT be a silent
-  eval-time non-match at dispatch. A bad rule must be **loud where it is
-  authored, not dark where it runs** — this is the failed-lookup discipline: a
-  malformed rule that silently matches nothing is indistinguishable from a
-  correct rule that legitimately matched nothing.
+  with a `Fix:` (which node, which field, what is wrong — including an unknown
+  field-path per the bullet above). It MUST NOT be a silent eval-time non-match
+  at dispatch. A bad rule must be **loud where it is authored, not dark where it
+  runs** — a malformed rule that silently matches nothing is indistinguishable
+  from a correct rule that legitimately matched nothing.
 
 ### Predicates match the present; the membership diff handles the past
 
@@ -334,6 +414,19 @@ what makes retraction reliable **without** source deltas.
   `retract` can be rendered even after the entity is deleted and can no longer be
   fetched (a `notion.ticket.deleted` on a stored member emits a `retract` from
   the cached fields). This is exactly "deleted-that-had-the-label".
+- **The diff for a given `(owner, membership-rule)` MUST be serialized.** It is a
+  **read-modify-write** — read the stored set, re-evaluate, diff, append the
+  `add`/`retract`, commit the new set — and because of fan-out and
+  per-`(event, rule)` retries, two events for the same
+  `(owner, membership-rule)` (or a retry overlapping its original) can otherwise
+  interleave: both read the same prior set and both commit, producing a
+  **duplicate `add` or a lost `retract`**. The read-modify-write MUST therefore
+  be applied under a **compare-and-set (atomic read-modify-write)**, a per-`(owner,
+  membership-rule)` lock, or an equivalent serialization guarantee. Concurrent
+  evaluations against the same `(owner, membership-rule)` MUST NOT both read the
+  same prior set and both commit; the losing writer MUST re-read the committed
+  set and re-diff against it. Serialization is per `(owner, membership-rule)`;
+  distinct rules and distinct owners MAY proceed concurrently.
 
 The store is source-agnostic — it carries over to a forge or any other membership
 lane — and turns "retraction" from an unanswerable source-delta question into a
@@ -344,9 +437,13 @@ untrusted** when they reach an LLM (see *Trust posture — two paths*).
 ### The lane channel is a change stream, not the authoritative set
 
 A membership lane delivered to an inbox `log` channel carries an **add/retract
-stream** — `{op:"add"|"retract", …}` lines — and the lane's working set is
-`fold(adds − retracts)`. This is still a conformant append-only `log` channel:
-the *lines* are appended; the *derived set* is what changes.
+stream** — `{"v":1,"op":"add"|"retract", …}` lines — and the lane's working set
+is `fold(adds − retracts)`. Each line MUST carry the mandatory `v` field that
+`ai/contracts/athena-inbox.md` → *Line format* requires on **every** `log` line
+(`v` plus the framing rules are the only universal fields; the remaining fields
+are this producer's own schema — e.g. `op`, `ticket`, and the minimal display
+fields to render a retract). This is still a conformant append-only `log`
+channel: the *lines* are appended; the *derived set* is what changes.
 
 - The channel is a **change-notification stream, NOT the authoritative set.** A
   `log` channel is retention-bounded, so the full add/retract history is not
