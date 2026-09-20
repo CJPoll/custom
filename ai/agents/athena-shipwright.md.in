@@ -350,6 +350,7 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   `ai/hooks/main-session-policy.self-test.sh </dev/null`,
   `ai/hooks/forge-identity-guard.self-test.sh </dev/null`,
   `ai/hooks/forge-auth-guard.self-test.sh </dev/null`,
+  `ai/hooks/workflow-phase-guard.self-test.sh </dev/null`,
   `ai/hooks/harness-event.self-test.sh </dev/null`,
   `ai/hooks/athena-inbox-poll.self-test.sh </dev/null` (and any you add — the
   runner's `--self-test` fails if a `*.self-test.sh` on disk is not declared,
@@ -380,6 +381,10 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
 - `ai/bin/check-guard-messages` — every first-party guard/hook/check emits an
   actionable `Fix:` message on failure (LLM-facing errors); run its `--self-test`
   too if you touched the checker.
+- `ai/bin/check-tool-risk` (+ its `--self-test`) — every tool the harness can
+  call carries a risk annotation in the registry, and no annotated tool has been
+  added or renamed without one. Pairs with the `workflow-phase-guard` hook above,
+  which gates a tool by the workflow phase its risk class allows (DND-172/173).
 - `ai/bin/harness-eval` — the regression corpus still passes and nothing
   regressed vs `ai/eval/baseline.json` (it writes `ai/eval/scorecard.json`); run
   its `--self-test` too. If a change intentionally alters a case, update the
@@ -398,6 +403,13 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   words survived. The model-in-loop `admiral-eval --run` is NOT part of the gate
   (same rule as `critic-eval --run`); it runs to capture/verify the baseline and
   on the shipwright cron cadence.
+- `ai/bin/variant-eval --self-test` — the harness-variant measurement
+  instrument (DND-174), which scores a candidate ref against a baseline over the
+  eval corpus and emits KEEP / REVERT / INCONCLUSIVE. **Proposal-only and
+  human-gated by design**: it has no merge/commit/push/adopt path, and its
+  boundary with THIS cron loop is load-bearing — never wrap it in an auto-adopt
+  loop, and never treat a KEEP verdict as license to adopt a variant yourself.
+  Only its deterministic `--self-test` is in the gate.
 - `scripts/setup-hooks --self-test` — the installer's --self-test is INLINE
   (no dedicated `self-test.sh` file backs it), so it stays a hand-declared
   `CHECKS` entry. Its install / idempotency / merge-safety cases are the ONLY
