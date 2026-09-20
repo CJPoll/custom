@@ -208,7 +208,7 @@ for which owner, went unmatched?", exactly the failed-lookup discipline
 one*): a legitimate miss MUST remain observable as the specific thing it was. A
 **HANDLED** event MUST NOT be dead-lettered.
 
-**Level 2 — per-`(event, rule)` DELIVERY outcome (total over exactly six
+**Level 2 — per-`(event, rule)` DELIVERY outcome (total over exactly five
 outcomes).** Because of fan-out (see *Fan-out: every match fires*) a single
 HANDLED event has one outcome **per applied rule**, evaluated independently at the
 `(event, rule)` grain *Idempotency is per (event, rule)* defines — an event can be
@@ -226,21 +226,11 @@ per-`(event, rule)`:
 5. **FAILED (terminal)** — predicate TRUE, delivery attempted, retries exhausted /
    adapter 5xx / credential revoked. Recorded in the **failed-delivery store**
    (below), **never** dead-lettered as UNMATCHED.
-6. **COLLAPSED** — predicate TRUE and the delivery matched, but its
-   `(entity_id, revision)` idempotency key collided with an earlier delivery's
-   because the source's revision granularity is coarser than its change rate — a
-   **sub-granularity source-revision collapse** (e.g. two Notion edits within one
-   `last_edited_time` minute share one `revision`), so the two deliveries collapse
-   to one. Recorded and **countable as the `collapsed-by-idempotency-key`
-   outcome** (see *Idempotency is per (event, rule)*), **kept DISTINCT from
-   SUPPRESSED** — which is strictly the owner's dedupe-window case — never a silent
-   drop.
 
 **Each Level-2 outcome that is not DELIVERED is individually observable** —
 FILTERED via ordinary accounting, SUPPRESSED per *Enabled flag and dedupe window*,
 REFUSED via the **refused-delivery store and an owner report** (see *Delivery refusal — the
-refused-delivery store*), covering **every declared owner↔destination refusal-cause class** — the target-bind re-assertion (per *Mechanism vs config boundary, and both-ends-or-dark*), the generic-webhook egress guard (per *The generic-webhook egress model*), and the roadmap email/SMS owner-verified-recipient check (per *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*), FAILED per the failed-delivery store, COLLAPSED as the
-`collapsed-by-idempotency-key` outcome per *Idempotency is per (event, rule)* — so
+refused-delivery store*), covering **every declared owner↔destination refusal-cause class** — the target-bind re-assertion (per *Mechanism vs config boundary, and both-ends-or-dark*), the generic-webhook egress guard (per *The generic-webhook egress model*), and the roadmap email/SMS owner-verified-recipient check (per *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*), and FAILED per the failed-delivery store — so
 **no matched delivery is ever a silent drop.**
 
 **Why FILTERED is not a miss, and must not flood the dead-letter store.** A
@@ -250,7 +240,7 @@ changed, or the current state does not match) — those are **FILTERED**: the ru
 applied and correctly produced no delivery. Collapsing FILTERED into UNMATCHED
 would flood the dead-letter store (whose whole purpose is "which event went
 **unmatched**?") with routine no-ops and their full Path-2 payloads. Equally,
-FILTERED must not be conflated with SUPPRESSED, REFUSED, COLLAPSED, or terminally
+FILTERED must not be conflated with SUPPRESSED, REFUSED, or terminally
 FAILED — those are matched deliveries that did not (separately) arrive, each
 separately observable above, not benign no-ops.
 
@@ -344,10 +334,12 @@ miss.
   pair. **The store carries no cap or TTL number in this contract** — any
   operational cap/TTL is ops/owner config, outside this contract's MUST surface.
 - **Reconciled with idempotency.** "Terminal" means the per-`(event, rule)`
-  idempotency/retry budget of *Idempotency is per (event, rule)* is exhausted; the
-  failed-delivery record is that key's terminal state. The idempotency key store is
-  separate, so a later re-processing of the same `(event, rule)` still dedupes and
-  does **not** manufacture a second failure record.
+  at-least-once retry budget of *Idempotency is per (event, rule)* is exhausted;
+  the failed-delivery record is that delivery's terminal state. A later
+  at-least-once redelivery of the same `(event, rule)` is absorbed by the
+  idempotent consumer and does **not** manufacture a second failure record; the
+  record is keyed on `(owner, rule_id, terminal-cause)`, not on any per-change
+  dedupe key.
 
 #### Delivery refusal — the refused-delivery store
 
@@ -477,17 +469,17 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `assignee` | person-id | **collection** |
 | | `title` | string | scalar |
 | | `ticket_number` | string | scalar |
-| | `revision` — source revision indicator (Notion: `last_edited_time`, or finer) | string | scalar |
+| | `revision` — OPTIONAL source-supplied provenance / ordering hint (Notion: `last_edited_time`, or finer); not a dedupe key | string | scalar |
 | | `changed_properties` (`notion.ticket.updated` only) | string | **collection** |
 | `notion.ticket.deleted` (the **un-enriched** delete type — the entity may already be unfetchable, so it carries identity only) | `entity_id` — stable source entity handle | string | scalar |
-| | `revision` — source revision indicator from the deletion event (not an enrichment fetch) | string | scalar |
+| | `revision` — OPTIONAL provenance from the deletion event (not an enrichment fetch); not a dedupe key | string | scalar |
 | `notion.comment.created`, `notion.comment.updated` (the **enriched** comment types) | `entity_id` — stable source entity handle | string | scalar |
 | | `comment_text` | string | scalar |
 | | `ticket_number` | string | scalar |
 | | `title` | string | scalar |
-| | `revision` — source revision indicator (Notion: `last_edited_time`, or finer) | string | scalar |
+| | `revision` — OPTIONAL source-supplied provenance / ordering hint (Notion: `last_edited_time`, or finer); not a dedupe key | string | scalar |
 | `notion.comment.deleted` (the **un-enriched** delete type — the comment may already be unfetchable, so it carries identity only) | `entity_id` — stable source entity handle | string | scalar |
-| | `revision` — source revision indicator from the deletion event (not an enrichment fetch) | string | scalar |
+| | `revision` — OPTIONAL provenance from the deletion event (not an enrichment fetch); not a dedupe key | string | scalar |
 | `slack.message.received` | `text` | string | scalar |
 | | `channel` | string | scalar |
 | | `user` | string | scalar |
@@ -562,90 +554,93 @@ updated) as well.`
 are part of the closed schema so a rule may bind them and the dedupe pairing is
 expressible.
 
-**`payload.revision` is the source-supplied event-level idempotency change token
-for every Notion entity type.** It is the source's own revision/version indicator
-for the entity state the event reflects (Notion: `last_edited_time`, or a finer
+**`payload.revision` is an OPTIONAL source-supplied provenance / ordering hint
+for a Notion entity type.** It is the source's own revision/version indicator for
+the entity state the event reflects (Notion: `last_edited_time`, or a finer
 source-provided revision token where one exists — the ingress binds the finest the
-source exposes). It is **source-supplied, not platform-minted** — so it is escaped
-like any source field and is **not** trusted-slot-eligible (see *Templating and
-the per-adapter Escaper contract*) — and it is what separates two changes to the
-same `entity_id` at the idempotency layer (see *Idempotency is per (event,
-rule)*): it MUST be **stable** across at-least-once redeliveries of the **same**
-source change and **distinct across different source changes at the source's
-revision granularity** — where the source's revision indicator is coarser than its
-change rate (Notion's `last_edited_time` is minute-granular), two same-window
-changes collapse to one key, an **observable `collapsed-by-idempotency-key`**
-outcome defined in *Idempotency is per (event, rule)*, never a silent drop. The
-enriched types read it during enrichment; the identity-only delete types
-(`notion.ticket.deleted`, `notion.comment.deleted`) source it from the deletion
-**webhook event itself, not an enrichment fetch** — preserving their identity-only
-property while still distinguishing delete → undelete → delete of one entity.
-`slack.message.received` carries **no** `revision`: a Slack message is transient
-and never updated, and its `payload.event_id` is already unique.
+source exposes), carried **when the source exposes it**. It is **source-supplied,
+not platform-minted** — so it is escaped like any source field and is **not**
+trusted-slot-eligible (see *Templating and the per-adapter Escaper contract*). It
+is **not** a dedupe key: delivery is at-least-once and correctness rests on
+consumer idempotency over **current enriched state**, not on distinguishing two
+changes to the same `entity_id` at an event-level key (see *Idempotency is per
+(event, rule)*), so a coarse or **missing** `revision` is not a hazard and never an
+emit-blocking error. The enriched types read it during enrichment; the
+identity-only delete types (`notion.ticket.deleted`, `notion.comment.deleted`)
+source it from the deletion **webhook event itself, not an enrichment fetch** —
+preserving their identity-only property. `slack.message.received` carries **no**
+`revision`: a Slack message is transient and never updated, and its
+`payload.event_id` is already unique.
 
 ### Idempotency is per (event, rule)
 
-Because of fan-out (see *Fan-out: every match fires*), one event fires every
-matching rule independently, so each `(event, rule)` delivery MUST be deduped and
-retried on its own. The `idempotency_key` in the envelope is the **event-level**
-key; the platform combines it with the matched `rule_id` to form the
-**per-delivery** key. An implementation MUST dedupe and retry at the
-`(event, rule)` grain, never only at the event grain.
+Delivery is **at-least-once**: the platform delivers every matched `(event, rule)`
+at least once, carrying **current enriched state**, and **never silently drops** a
+matched delivery. The platform holds **no** durable idempotency-key store and
+performs **no** content dedupe; it retains only transient in-flight retry state
+(deliver → await ack → retry until acked or terminally FAILED).
 
-The event-level key basis is defined for **every** enumerated type:
+Because of fan-out (see *Fan-out: every match fires*), one event fires every
+matching rule independently, so at-least-once delivery and its retry are tracked
+per `(event, rule)`, never only at the event grain. The `idempotency_key` in the
+envelope is the **event-level** identity; the platform combines it with the
+matched `rule_id` as the **transient** in-flight retry handle for a delivery
+attempt. This handle is **ack-based in-flight tracking, not a durable content
+key** — a redelivery of the same source change reaches the consumer as another
+at-least-once delivery, and it is the **consumer** (below), not the platform, that
+makes a duplicate harmless.
+
+**Consumers MUST be idempotent** — a duplicate or redelivered event MUST NOT cause
+an adverse effect. A consumer satisfies this by acting on the **carried current
+state** and reconciling against the source of truth (e.g. a membership consumer
+re-queries Notion; see *The lane channel is a change stream, not the authoritative
+set*), or, for a notify consumer, by deduping at its delivery adapter (the
+Athena-inbox `dedupe_key`). A consumer that can provide **neither** — a stateless
+fire-and-forget digest — is **not first-pass-eligible** and is deferred until an
+idempotent (platform- or adapter-held) delivery view is built for it. This is the
+consumer half of a **bilateral** obligation whose producer half is stated above;
+the matching consumer-side clause lives in `ai/contracts/athena-inbox.md`.
+
+The event-level identity basis is defined for **every** enumerated type:
 
 - **Source-emitted** — the source's own event identity: Slack's `payload.event_id`;
-  a Notion entity's `payload.entity_id` (`notion:<uuid>`) combined with
-  `payload.revision` (the source-supplied revision indicator declared in *Payload
-  fields and their types per event type*). (A reconciliation backstop hit reuses
-  the same basis so it dedupes against the primary path — see *Poller (fallback
+  a Notion entity's `payload.entity_id` (`notion:<uuid>`), carrying
+  `payload.revision` as **optional provenance** (the source-supplied revision
+  indicator declared in *Payload fields and their types per event type*) when the
+  source exposes it. (A reconciliation backstop hit reuses the same identity so an
+  idempotent consumer absorbs it against the primary path — see *Poller (fallback
   only)*.)
 
-  `payload.entity_id` is **stable across changes** (it is identity), so two
-  distinct changes to one entity share it; `payload.revision` is what separates
-  their keys **at the source's revision granularity**. `revision` MUST be
-  **stable** across at-least-once redeliveries of the **same** source change (a
-  redelivered webhook for one edit dedupes to one delivery), and **distinct across
-  different source changes to the extent the source's revision granularity
-  permits**. Where a source's revision indicator is coarser than its change rate —
-  **Notion's `last_edited_time` is minute-granular**, so two distinct edits to one
-  entity within the same minute carry the **same** `revision` — the two changes
-  resolve to **one** `(entity_id, revision)` key and their `(event, rule)`
-  deliveries **collapse to one**. Such a collapse MUST be **observable**: recorded
-  and **countable as a `collapsed-by-idempotency-key` outcome**, exactly as a
-  dedupe-window suppression is recorded (see *Enabled flag and dedupe window*) —
-  **never a silent drop** (failed-lookup discipline, `~/dev/custom/ai/CLAUDE.md` →
-  *A failed lookup must never look like an empty one*). A **missing or
-  unresolvable** `revision` remains an **error, not an empty value that collapses
-  keys**: the ingress MUST **reject** emitting a Notion entity event whose
-  `revision` cannot be resolved, rather than emit one whose idempotency key
-  silently merges with another change's — `Fix: a notion.<entity>.<verb> event has
-  no resolvable source revision (payload.revision — e.g. Notion last_edited_time,
-  or the deletion event's source timestamp). Emit is rejected: entity_id alone is
-  stable across changes, so a missing revision would collapse two distinct changes
-  to one idempotency key and silently drop the second delivery. Supply the source
-  revision indicator.`
+  `payload.entity_id` is **stable across changes** (it is identity). Correctness
+  does not depend on distinguishing two distinct changes to one entity at the
+  event-level key: because every forwarded event carries **current enriched
+  state** and the consumer is idempotent, a consumer converges to the correct
+  current state whether it sees one delivery or several. `payload.revision`, when
+  present, is a provenance / ordering hint only — no longer a dedupe key — so a
+  source whose revision indicator is coarser than its change rate (Notion's
+  minute-granular `last_edited_time`) is not a hazard: two same-minute edits are
+  each delivered at-least-once carrying current state, and the idempotent consumer
+  reconciles to their final state. A **missing** `revision` is simply an absent
+  optional provenance field, **not** an emit-blocking error.
 
-  The basis above is defined for **every enumerated (first-pass) type**. A **new
-  type family** (a `fleet.*` family, a future delta-supplying source) has **no**
-  idempotency basis until it **declares** one — its identity field plus its
-  change/revision token, or an explicit 'transient, never updated, identity alone
-  is unique' statement — as part of registering the family (see *Extending the
-  taxonomy — a new type family declares its model*). A family whose basis is
-  undeclared MUST NOT be originated or routed, and MUST NOT fall back to
-  `rule_id`-alone dedupe — the silent cross-subject miss named in *Enabled flag
-  and dedupe window*.
+  A **new type family** (a `fleet.*` family, a future delta-supplying source) still
+  declares its **identity field** (its `entity_id` analogue — the `subject` of the
+  dedupe window, see *Enabled flag and dedupe window*), and MAY declare a
+  change/revision token as optional provenance, as part of registering the family
+  (see *Extending the taxonomy — a new type family declares its model*). A family
+  whose identity is undeclared MUST NOT be originated or routed, and MUST NOT fall
+  back to a `rule_id`-alone dedupe window — the silent cross-subject miss named in
+  *Enabled flag and dedupe window*.
 
-  This bounds `revision` to what a **stateless** platform can derive from a
-  source-supplied token; the platform never synthesizes a per-change sequence
-  (that would require platform state — see the roadmap follow-up **DND-257**
-  (collision-proof per-change revision)).
+  A future consumer that genuinely needs per-edit fidelity (rather than converging
+  on current state) gets a finer per-change token or adapter-side sequencing built
+  **then** — that would require platform state, so it is the roadmap follow-up
+  **DND-257** (collision-proof per-change revision); nothing here forecloses it.
   Because a membership lane's authoritative set is the **consumer's own re-query**
   (see *The lane channel is a change stream, not the authoritative set*) and every
-  forwarded event carries **current** enriched state, a sub-granularity collapse
-  does not corrupt a lane's set — it reduces two same-window edits to their final
-  current state, which is what a state-based consumer acts on; the residual is
-  bounded, observable sub-granularity notify completeness.
+  forwarded event carries **current** enriched state, a duplicate or same-window
+  redelivery does not corrupt a lane's set — the state-based consumer acts on the
+  final current state, which is exactly what consumer idempotency guarantees.
 
 ---
 
@@ -731,31 +726,32 @@ periodic snapshot of the current in-scope set, to catch entities that existed
 before the subscription and events dropped during downtime). A poller keeps a
 server-side cursor and emits one event per new hit.
 
-**A reconciliation backstop separates DELIVERY dedupe from its RUN audit**, and
+**A reconciliation backstop separates per-hit DELIVERY from its RUN audit**, and
 the two MUST NOT be conflated:
 
-- **Delivery dedupes against the primary path by the same `idempotency_key`
-  machinery.** A backstop hit on an entity a verified webhook already delivered
-  produces **no duplicate delivery** — the primary path's delivery wins and the
-  backstop hit is suppressed at delivery. (This is what "same dedupe machinery"
-  means.)
+- **Delivery is at-least-once (see *Idempotency is per (event, rule)*).** A
+  backstop hit on an entity a verified webhook already delivered is delivered
+  **again** as an ordinary at-least-once delivery carrying **current enriched
+  state**; the **idempotent consumer** absorbs it with no adverse effect. The
+  platform performs no per-hit suppression.
 - **The reconciliation RUN is recorded and reported on its own**, never folded
-  into the primary path's dedupe. Each run emits its own audit signal — "checked
+  into individual deliveries. Each run emits its own audit signal — "checked
   the in-scope set, found it consistent" or "found N gaps the webhook path
-  missed" — and that signal MUST survive **even when every individual hit deduped
-  away at delivery**. Suppressing a hit's *delivery* MUST NOT erase the *run's*
-  evidence that it checked and found nothing missing. (This is what "not
-  conflated in reporting" means.)
+  missed" — and that signal MUST survive **even when every individual hit is a
+  redelivery the consumer absorbs**. What happens to a hit's *delivery* MUST NOT
+  erase the *run's* evidence that it checked and found nothing missing. (This is
+  what "not conflated in reporting" means.)
 
 This split is what makes "nothing is queued" **provably** true rather than merely
 unobserved (failed-lookup discipline): the backstop's value is the run-level "I
-checked" signal, which a delivery-level dedupe would otherwise destroy.
+checked" signal, which folding it into per-hit delivery would otherwise obscure.
 
 **The backstop re-emits missed CHANGE EVENTS; it computes no membership.** It
 recovers **adds** — entities that changed while the webhook was down, or that
 existed before the subscription — by emitting the same source-emitted change
-events the webhook would have, each deduped against the primary path by the same
-`idempotency_key` machinery (above). It holds no set and diffs no membership: a
+events the webhook would have, each delivered at-least-once; a duplicate of a hit
+the webhook already delivered is absorbed by the idempotent consumer (above). It
+holds no set and diffs no membership: a
 **consumer** that tracks a working set catches any departure the fast path missed
 through its own authoritative re-sync (see *The consumer owns membership*), so
 set correctness never depends on any platform-side set reconciliation. The
@@ -866,7 +862,7 @@ dangling schema entries.
 
 Every rule carries a **`rule_id`**: a **platform-assigned**, per-account-unique identifier,
 minted once when the rule is **created** and **stable for the entire life of the rule**. It is
-the field the per-`(event, rule)` idempotency key combines with the event-level key (see
+the field the per-`(event, rule)` at-least-once delivery retry handle combines with the event-level key (see
 *Idempotency is per (event, rule)*), and the field the failed-delivery and refused-delivery
 stores key on (see *Terminal delivery failure — the failed-delivery store* and *Delivery refusal
 — the refused-delivery store*). Those keys are only as stable as `rule_id`, so its stability is a
@@ -875,16 +871,16 @@ stores key on (see *Terminal delivery failure — the failed-delivery store* and
 - **An edit preserves `rule_id`.** Editing any other field of a rule — predicate, adapter +
   target, template + format, `enabled`, dedupe window, or `event_type(s)` — MUST retain the
   **same** `rule_id`. Minting a new id on edit would re-key every prior `(event, rule)`
-  idempotency record, so deliveries already deduped as received would **re-fire**, breaking the
-  `(event, rule)`-grain dedupe guarantee across the edit; it would also orphan the rule's
+  at-least-once retry handle, so in-flight deliveries would lose their retry identity across the
+  edit; it would also orphan the rule's
   failed-delivery and refused-delivery exemplars, hiding an ongoing miss behind a fresh key.
 - **Only delete + recreate mints a new `rule_id`.** A deleted rule's id is never reused; a
-  recreated rule is a new rule with a new id and a fresh idempotency/store history. This is the
+  recreated rule is a new rule with a new id and a fresh retry/store history. This is the
   one sanctioned way a rule's id changes, and it is explicit.
 - **`rule_id` is platform-assigned, never caller-supplied** — like `owner` (see *Rule ownership
   is stamped from the authenticated author*), it is not read from the request body. A create
   request that supplies a `rule_id`, or an edit that attempts to change one, is refused with a
-  `Fix:`. This keeps the identity the idempotency and store keys depend on under the platform's
+  `Fix:`. This keeps the identity the retry and store keys depend on under the platform's
   control, not the caller's.
 
 The refusal for a caller-supplied or edit-mutated `rule_id` carries:
@@ -969,9 +965,9 @@ Two owner-facing schema fields carried by every rule:
   events; it holds no set to reconcile. Deleting a rule likewise removes only the
   rule — there is no platform-held set to tear down.
 - **`dedupe window`** — an **owner-facing rate control**, deliberately distinct
-  from the correctness-guaranteeing `idempotency_key` (see *Idempotency is per
-  (event, rule)*). The idempotency key prevents a **re-processed same delivery**
-  from firing twice — a correctness guarantee, always in force. The dedupe window
+  from the correctness-guaranteeing **consumer idempotency** (see *Idempotency is
+  per (event, rule)*). Consumer idempotency makes a **redelivered same delivery**
+  harmless — a correctness guarantee, always in force. The dedupe window
   is an owner **preference** that collapses **distinct** deliveries **of the same rule about the same
   subject** within a time window into one ("don't DM me about **this** more than once an hour" —
   *this* being the subject the deliveries concern, not every subject the rule covers). Its key
@@ -980,9 +976,9 @@ Two owner-facing schema fields carried by every rule:
   basis** (see *Idempotency is per (event, rule)*) — **`payload.entity_id`** for the Notion entity
   types (the handle stable across a given entity's changes) and **`payload.event_id`** for
   `slack.message.received` (a transient event carrying no persistent entity, so each message is its
-  own subject). The window deliberately **omits the change-discriminator `revision`** the
-  idempotency key adds — collapsing several edits of the **same** entity within the window is
-  exactly its purpose — so the grain is `(rule_id, subject)`, never `(rule_id, subject, revision)`
+  own subject). The window's grain is deliberately `(rule_id, subject)` — collapsing several edits
+  of the **same** entity within the window is exactly its purpose — never `(rule_id, subject, revision)`
+  (`revision` is optional provenance, not part of any dedupe grain)
   and never `rule_id` alone. **Rule-only grain is a silent cross-subject miss:** within one window
   it would drop the owner's notifications about **different** entities, the failed-lookup class
   this document legislates against — a delivery that matched but never arrived, invisibly
@@ -994,8 +990,8 @@ Two owner-facing schema fields carried by every rule:
   be **observable** — recorded and countable as "suppressed by dedupe window",
   **never a silent drop** (the document legislates against silent drops
   throughout — failed-lookup discipline). The two mechanisms are **orthogonal**:
-  the dedupe window never widens or narrows the idempotency key, and a window of
-  `0` leaves idempotency untouched. Keying by `(rule_id, subject)` reads the `subject` from the
+  the dedupe window never widens or narrows consumer idempotency, and a window of
+  `0` leaves consumer idempotency untouched. Keying by `(rule_id, subject)` reads the `subject` from the
   event in hand and keeps only the window's **existing short-lived per-window suppression state** —
   it introduces **no** membership set, held state, or routing state; it is the same state the
   window already holds, keyed one component finer. `subject` is defined above for
@@ -1014,8 +1010,8 @@ There is **no first-match, no rule ordering, and no short-circuit.** A single
 "ticket updated" event whose **assignees include Cody** (a `contains` match —
 `assignee` is a collection) **and** whose labels contain `Flaky Test` fires BOTH
 a "DM me in Slack" rule AND a "push to flaky lane" rule → two
-independent deliveries, each with its own per-`(event, rule)` idempotency and
-retry.
+independent deliveries, each with its own per-`(event, rule)` at-least-once
+delivery and retry.
 
 ### One rule kind — the stateless routing rule
 
@@ -1512,6 +1508,86 @@ author's text, a ticket title) flow through it.
   trusted to be drawn correctly at render time.
 - The renderer is **pure Domain**; the Escaper is a **per-adapter behaviour**.
 
+### A slot's field-path binds at save time, exactly as a predicate's does
+
+A template slot interpolates a value addressed by a **field-path** drawn from the
+**same closed, enumerated field set** a predicate leaf uses — envelope fields and
+the declaring type's closed `payload.*` schema (see *The predicate grammar* → *The
+enumerated field set*). A slot is the **other consumer of the same closed payload
+schema**, so it binds by the **same rule and the same mechanism** as a predicate
+field-path; no second mechanism is introduced.
+
+- **A slot field-path outside the union of the rule's declared `event_type(s)`'
+  payload schemas is a save-time HARD ERROR**, checked at rule save (create **and**
+  edit — the same seam predicate field-paths are bound at), never a runtime empty
+  render. A misspelled `{payload.asignee}` or `{payload.lables}` is rejected
+  exactly as the identical predicate leaf is (see *Evaluation contract* → "An
+  UNKNOWN field-path is a HARD ERROR at rule-SAVE time"): a wrongly-computed key
+  otherwise renders empty forever, silently dropping content the author believed
+  they were emitting — the failed-lookup class this document legislates against
+  (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty
+  one*). It reuses the predicate's unknown-field-path path, naming the offending
+  slot and the nearest valid field:
+  `Fix: template slot '{payload.asignee}' names a field-path that is not in the union of this rule's declared event_type(s)' payload schemas — the same save-time binding a predicate field-path gets. Correct the spelling (nearest valid field: payload.assignee); or, if the field lives only on a type this rule does not declare, add that event_type to the rule. A misspelled slot otherwise renders empty forever — an invisible content drop.`
+- **A delete-only (identity-only) type has no display field to slot.** A rule
+  declared **solely** on `notion.ticket.deleted` (or `notion.comment.deleted`)
+  with a slot on `payload.title` / `status` / `labels` / `assignee` /
+  `ticket_number` (or `comment_text`) is an **unknown-path save-time HARD ERROR**,
+  exactly as the identical *predicate* leaf on that type is (see
+  *`notion.ticket.deleted` carries a NARROWER schema…* and
+  *`notion.comment.deleted` carries a NARROWER schema…*): the field is not in that
+  type's schema at all, so the slot has no supplier and is rejected where it is
+  authored, not left to render empty at dispatch.
+
+### An absent-by-design slot renders an observable sentinel, never a silent gap
+
+A slot whose field-path **is** valid against the union but is **absent on this
+delivery** is the sanctioned **union-binding absent-by-design** case — the
+render-side analog of the predicate `absent` disposition (see *Evaluation
+contract* → "`absent` is reserved for a KNOWN field missing from a given
+payload"). It arises two ways, both legitimate, and **neither is catchable at save
+time** because the path is schema-valid:
+
+- a rule spanning an enriched type **and** a delete type (e.g.
+  `notion.ticket.updated` + `notion.ticket.deleted`) renders a slot on
+  `title` / `status` / `labels` / `assignee` on a **delete** delivery, where the
+  delete schema does not carry it; or
+- a **known** field simply missing from **this** event's payload (a cleared
+  `assignee`) — exactly the predicate runtime `absent` case.
+
+For such a slot the renderer MUST emit a **fixed platform absent-sentinel that
+NAMES the field-path** — `[absent: <field-path>]`, e.g. `[absent: payload.title]`
+— and **MUST NOT** emit an empty string. This is required by the failed-lookup
+discipline: a **misspelled** slot is already impossible at render time (rejected
+at save, above), so the only remaining way an absent render could be
+**indistinguishable from a defect** is a silent empty fragment. The sentinel
+removes that indistinguishability by making the miss **observable in the delivered
+content itself**, naming *which* field was absent (`~/dev/custom/ai/CLAUDE.md` →
+*A failed lookup must never look like an empty one*: a miss "has to be able to say
+which key found zero").
+
+The sentinel is consistent with the Escaper contract and adds **no** new platform
+state or mechanism:
+
+- **It carries no injection surface**, so it does not weaken the "trusted set is
+  empty" rule. It is **platform-minted and drawn from a closed set** — a fixed
+  sentinel string plus a field-path taken from the **closed enumerated field
+  set**, with **no** source-supplied or enrichment-derived substring — so it is
+  inert by construction. This is *not* a trusted/raw slot and does not reopen the
+  empty trusted set: **every interpolated source value still passes through the
+  adapter's Escaper** unchanged; only a *present* value is ever interpolated, and
+  the sentinel replaces an *absent* one.
+- **Its observability is the rendered sentinel in the delivered message** — a
+  human or a later check reading the delivery sees the named-path marker rather
+  than a gap. **No** new counter, store, or delivery disposition is introduced;
+  the existing dispositions (FILTERED / SUPPRESSED / REFUSED / FAILED / DELIVERED)
+  are untouched.
+- **It cannot arise from an enrichment miss.** The ingress **refuses to emit an
+  un-enriched event** (see *Sender verification and payload completeness*), so a
+  slot is never absent merely because enrichment failed — only because the field
+  is genuinely not on this delivery's type/payload. The sentinel therefore always
+  denotes a real, schema-legitimate absence, never a swallowed fetch failure.
+
 ### Per-adapter Escaper contract
 
 Each adapter MUST implement `escape(value, context) → safe_fragment`. A new
@@ -1869,11 +1945,8 @@ wins**. The roles are those of *Conformance language* (ingress / router / adapte
   under a bounded budget, recording a permanent/exhausted failure in the **ingress-failure store**
   and **reporting it to the owner**, and mapping a definitive not-found to the identity-only delete
   path (*Sender verification and payload completeness*);
-- rejects emitting a Notion entity event whose `payload.revision` cannot be resolved, rather than
-  emit one whose idempotency key would silently collapse two changes (*Idempotency is per (event,
-  rule)*);
 - records a reconciliation-backstop **run** on its own, so the "I checked" signal survives even
-  when every hit deduped at delivery (*Poller (fallback only)*).
+  when every hit is a redelivery the idempotent consumer absorbs (*Poller (fallback only)*).
 
 **The router is conformant when it:**
 - evaluates an event against **all** of the owner's **enabled** rules, firing **every** match
@@ -1882,18 +1955,19 @@ wins**. The roles are those of *Conformance language* (ingress / router / adapte
   **UNMATCHED** to the per-`(owner, type)` exemplar-plus-count store (never merely counted, never
   silently dropped), and never dead-letters a HANDLED event (*Event disposition and dead-letter*);
 - resolves **every** non-DELIVERED Level-2 outcome to its own observable disposition — FILTERED,
-  SUPPRESSED, REFUSED (refused-delivery store + report), FAILED (failed-delivery store + report),
-  COLLAPSED — so no matched delivery is ever a silent drop (*Event disposition and dead-letter*;
+  SUPPRESSED, REFUSED (refused-delivery store + report), FAILED (failed-delivery store + report)
+  — so no matched delivery is ever a silent drop (*Event disposition and dead-letter*;
   *Terminal delivery failure — the failed-delivery store*; *Delivery refusal — the refused-delivery
   store*);
-- dedupes and retries at the **`(event, rule)`** grain using the event-level key combined with the
-  stable `rule_id` (*Idempotency is per (event, rule)*; *Rule identity — `rule_id`*);
+- delivers **at-least-once** and retries at the **`(event, rule)`** grain using the event-level key combined with the
+  stable `rule_id`, holding no durable dedupe store and requiring consumer idempotency (*Idempotency is per (event, rule)*; *Rule identity — `rule_id`*);
 - applies the dedupe window at its declared **`(rule_id, subject)`** grain (*Enabled flag and
   dedupe window*);
 - validates every rule at **save time** — **each declared `event_type` is a
   member of the registered type set** (predicate-independent, so an envelope-only
-  rule with a misspelled type cannot save dark), field-paths against the union of
-  declared types' schemas, operator cardinality, operator/literal type,
+  rule with a misspelled type cannot save dark), predicate **and template-slot**
+  field-paths against the union of declared types' schemas, operator cardinality,
+  operator/literal type,
   presence-operator `value` — as **hard errors with a `Fix:`**, never a silent
   eval-time non-match (*The predicate grammar*; *Evaluation contract*; *Extending
   the taxonomy — a new type family declares its model*);

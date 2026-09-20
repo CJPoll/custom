@@ -810,6 +810,15 @@ Consequences, all normative:
     that can disagree is a defect, not redundancy.
   - Seen-sets are bounded ring buffers (most recent 500 entries). Unbounded
     growth in a file rewritten on every ack is its own failure.
+- **A consumer of forwarded `athena-events` change-events MUST be idempotent** —
+  the `athena-events` change-event stream is **at-least-once**
+  (`ai/contracts/athena-events.md` → *Idempotency is per (event, rule)*). The
+  inbox `dedupe_key` family (the `event_id` and `channel:ts` seen-sets above, held
+  in the *State file*) discharges this for inbox-delivered notify consumers; a
+  state-based consumer discharges it by acting on carried current state + source
+  re-query. This is the consumer half of the bilateral at-least-once obligation
+  whose producer half — deliver at-least-once, never silently drop — is stated in
+  `athena-events.md`.
 - **Rotation only after the offset has reached EOF.** Rotating with unread
   bytes destroys them. After rotation the offset resets to 0 and the doorbell is
   preserved. EOF is the *gate*; *Retention* fixes when a reader that has passed
