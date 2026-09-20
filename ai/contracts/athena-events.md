@@ -350,17 +350,74 @@ verified-source transition.
 
 A rule is **config the platform evaluates, never executable code**. A rule
 carries: the `event_type(s)` it applies to, its **predicate** (see *The predicate
-grammar*), its **kind** (`notify` / `membership`), its **adapter + target**, its
-**template + format** (see *Templating and the per-adapter Escaper contract*),
-and its **enabled flag + dedupe window**.
+grammar*), its **kind** (`notify` / `membership`), its **adapter + target** (see
+*Delivery adapters* and *Both-ends-or-silently-dark*), its **template + format**
+(see *Templating and the per-adapter Escaper contract*), and its **enabled flag +
+dedupe window** (see *Enabled flag and dedupe window*). Every field named here has
+a normative section behind it; there are no dangling schema entries.
+
+### Rule ownership is stamped from the authenticated author
+
+A rule carries an `owner`, and Path 1's entire safety argument is that the
+owner's own configured rules are "authorized by definition" (see *Trust posture —
+two paths*) — including a fleet-control **auto-cancel of an in-flight captain**
+(see *Retraction-driven consumer patterns*). A rule authored with **someone
+else's** `owner` is therefore a direct escalation into that account's fleet and
+destinations. Therefore **a rule's `owner` MUST be stamped from the authenticated
+author's session at create/edit time, and MUST NEVER be accepted from the request
+body.** An attempt to create or edit a rule whose `owner` is any account other
+than the authenticated author's MUST be refused with a `Fix:` (name that a rule
+may be authored only for the authoring account). No "admin" or "on-behalf-of"
+path widens this in the first pass.
+
+**This completes the owner-binding triad.** Every seam at which an `owner` enters
+the system stamps it from an **authenticated identity**, NEVER from a
+request/payload body:
+
+1. **Event owner — ingress-stamp.** Stamped from the authenticated ingress,
+   never read from the payload (see *The event*). Stops an account **minting**
+   another's events.
+2. **Delivery target — target-bind.** A rule's target MUST resolve to a
+   machine/channel registered to the rule's owner (see
+   *Both-ends-or-silently-dark*). Stops an account **delivering into** another's
+   surfaces.
+3. **Rule authoring — author-stamp.** A rule's `owner` is stamped from the
+   authenticated author (this section). Stops an account **authoring rules
+   under** another's authority.
+
+All three are one rule — an `owner` is an authenticated-identity fact, never a
+caller-supplied one — applied at the three seams where an owner is set.
+
+### Enabled flag and dedupe window
+
+Two owner-facing schema fields carried by every rule:
+
+- **`enabled`** — a boolean gate. Only **enabled** rules are evaluated (see
+  *Fan-out: every match fires*); a disabled rule is inert — it neither matches,
+  fires, nor contributes to the dead-letter "handled" accounting (see *The event
+  taxonomy is open*) — and MAY be re-enabled with no loss.
+- **`dedupe window`** — an **owner-facing rate control**, deliberately distinct
+  from the correctness-guaranteeing `idempotency_key` (see *Idempotency is per
+  (event, rule)*). The idempotency key prevents a **re-processed same delivery**
+  from firing twice — a correctness guarantee, always in force. The dedupe window
+  is an owner **preference** that collapses **distinct** deliveries of the same
+  rule within a time window into one ("don't DM me about this lane more than once
+  an hour"). It is a **duration** (unit: **seconds**; **default: `0`** = no
+  windowing, every distinct delivery fires). A suppression within the window MUST
+  be **observable** — recorded and countable as "suppressed by dedupe window",
+  **never a silent drop** (the document legislates against silent drops
+  throughout — failed-lookup discipline). The two mechanisms are **orthogonal**:
+  the dedupe window never widens or narrows the idempotency key, and a window of
+  `0` leaves idempotency untouched.
 
 ### Fan-out: every match fires
 
 One event MUST be evaluated against **all** of the owner's enabled rules, and
 **every** matching rule fires **independently**, each producing its own delivery.
 There is **no first-match, no rule ordering, and no short-circuit.** A single
-"ticket updated" event where `assignee == Cody` **and** label `Flaky Test` is
-present fires BOTH a "DM me in Slack" rule AND a "push to flaky lane" rule → two
+"ticket updated" event whose **assignees include Cody** (a `contains` match —
+`assignee` is a collection) **and** whose labels contain `Flaky Test` fires BOTH
+a "DM me in Slack" rule AND a "push to flaky lane" rule → two
 independent deliveries, each with its own per-`(event, rule)` idempotency and
 retry.
 
@@ -371,7 +428,9 @@ retry.
 - **`membership` / lane (stateful).** The predicate defines a **set**; the
   platform maintains the derived membership per `(owner, rule)` in the
   lane-membership store (see *Membership rules and the lane-membership store*).
-  Each relevant event → enrich current state → re-evaluate the predicate → diff
+  Each **relevant event** — the rule's declared predicate types **plus** the
+  exit/deletion types for its stored members, defined in that section — →
+  enrich current state → re-evaluate the predicate → diff
   against the stored set → emit an `add` or `retract` transition, which drives
   the delivery. That emitted transition is **considered handled by this
   originating membership rule** (its own delivery is the handling), so it is
@@ -415,7 +474,14 @@ A predicate is a **JSON tree**, evaluated by the platform; it is never code.
   validates every field-path in the rule against the **union of those types'
   declared payload schemas** at save time — both that the path exists and that
   the operator's cardinality matches the field's (see the comparators below and
-  the evaluation contract).
+  the evaluation contract). A field-path is valid when it appears in **any** one
+  of the rule's declared types' schemas (the union); **at runtime, on an event
+  whose specific type does not carry that field, the path evaluates to `absent`
+  by design** — e.g. `payload.changed_properties` is declared only on
+  `notion.ticket.updated`, so a rule spanning `notion.ticket.created` and
+  `notion.ticket.updated` binds it at save time and it reads `absent` on a
+  `created` event. This is the intended interaction of union-binding with the
+  known-field-missing `absent` rule, not a gap.
 - **comparators:**
   - `eq`, `ne`, `lt`, `lte`, `gt`, `gte` — scalar comparison.
   - `in` — scalar is a member of the literal set.
@@ -530,10 +596,34 @@ input and contains none.
 The lane-membership store is the platform's **source of prior state**, and it is
 what makes retraction reliable **without** source deltas.
 
+**A membership rule's "relevant events" (the re-evaluation scope) — defined.**
+The term "relevant event" is load-bearing: the store's headline guarantee (a
+`notion.ticket.deleted` on a stored member emits a `retract`) rests on it, and a
+naive "the rule's declared predicate event types" reading breaks that guarantee —
+the worked flaky example declares `notion.ticket.created` / `notion.ticket.updated`,
+so a delete would never reach the rule and **no retract would ever fire**, which
+is the one case the store exists to solve. Therefore a membership rule is
+re-evaluated on the **union** of:
+
+- its **declared predicate event types** (the entry/update triggers — e.g.
+  `notion.ticket.created`, `notion.ticket.updated`), **and**
+- the **exit/deletion event types** for the source of its members (e.g.
+  `notion.ticket.deleted`, `notion.ticket.undeleted`), **scoped to entities that
+  are current stored members** of that `(owner, membership-rule)` — even when
+  those types are **not** in the rule's declared predicate types.
+
+The membership engine MUST subscribe a membership rule to this full trigger set,
+not only its declared predicate types; equivalently, a membership rule MAY be
+required to declare its full trigger set including the exit/deletion types, but
+either way retract-on-delete MUST provably fire. An exit/deletion event for an
+entity that is **not** a stored member of the rule is simply not relevant to that
+rule (nothing to retract).
+
 - Per `(owner, membership-rule)` the store holds the member **entity IDs** plus
   the **minimal display fields** needed to render a retract (e.g. ticket number
   and title).
-- On each relevant event: **enrich** current state → **re-evaluate** the
+- On each relevant event (as defined above): **enrich** current state →
+  **re-evaluate** the
   membership predicate → **diff** against the stored member set → append an `add`
   (a new member entered the set) or a `retract` (a member left the set — it now
   fails the predicate, or it was deleted).
