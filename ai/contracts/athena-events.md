@@ -359,7 +359,16 @@ event dedupes as reliably as a source-emitted one:
   `idempotency_key`** (each a declared payload field — see *Payload fields and
   their types per event type*). This makes a given add/retract, produced by a given rule
   for a given entity off a given triggering event, idempotent under the fan-out
-  and per-`(event, rule)` retry machinery like any other event.
+  and per-`(event, rule)` retry machinery like any other event. A transition
+  emitted by the **reconciliation sweep** (see *Membership rules and the
+  lane-membership store* → *The reconciliation sweep*) has no triggering source
+  event — a swept `retract` recovers a member absent from the snapshot, for which
+  no source delta arrived — so the **sweep run's own identity** (its snapshot/run
+  id) supplies the triggering component of the key: `rule_id` + `entity_id` + `op`
+  + the sweep run id. This keeps the swept transition retry-idempotent like any
+  other; cross-run re-emission is separately prevented by the serialized diff
+  against current stored state (an already-applied transition leaves no diff), not
+  by this key.
 
 ---
 
@@ -426,6 +435,21 @@ the two MUST NOT be conflated:
 This split is what makes "nothing is queued" **provably** true rather than merely
 unobserved (failed-lookup discipline): the backstop's value is the run-level "I
 checked" signal, which a delivery-level dedupe would otherwise destroy.
+
+**For a MEMBERSHIP lane the backstop MUST run the full reconciliation sweep, not
+merely emit one event per new hit.** "One event per new hit" recovers **adds**
+(entities the webhook path missed) but never the **retracts** of stored members
+that left scope during the gap: a member deleted, relabelled, or reassigned while
+the webhook was down is simply **absent** from the snapshot and so produces no
+hit, leaving the dropped `retract` unrecovered forever and the entity a stored
+member permanently — the silent-never-retract class the membership store exists to
+prevent. The backstop therefore re-evaluates the whole `(owner, membership-rule)`
+set against the snapshot per *Membership rules and the lane-membership store* →
+*The reconciliation sweep* — snapshot-not-stored → `add`, stored-not-in-snapshot →
+`retract` — so the reconciliation guarantee covers **both** directions. Each
+emitted transition still dedupes against the primary path by the same
+`idempotency_key` machinery (above), so a `retract` the webhook path already
+delivered is not re-emitted; the sweep recovers only the genuinely-missed ones.
 
 ### Harness-emit
 
@@ -547,6 +571,41 @@ Seams 1–3 stamp the owner from an authenticated identity; seam 4 inherits it f
 an already-stamped rule owner. In every case an `owner` is an
 authenticated-identity fact, never a caller-supplied one.
 
+**Owner-scoping of ACCESS to an existing rule — the read/mutate dual of the
+stamps.** The four seams above fix how an `owner` is **written** — stamped onto
+events, stamped onto a rule at authoring, inherited by a derived event: the
+*entry* axis. They do not by themselves govern **access to an already-stored
+rule**, which is a distinct and equally first-class MUST: **read, list, edit,
+delete, disable, and enable of a rule MUST be scoped to the rule's owning
+account.** An actor MUST NOT read, list, edit, delete, disable, or enable a rule
+owned by any account other than its own authenticated account; each such attempt
+MUST be refused with a `Fix:` (name that a rule is accessible only to its owning
+account). The author-stamp (seam 3) does not cover this — it fixes only the
+`owner` a *new or edited* rule is written with, and says nothing about who may
+reach an existing rule to read or mutate it. This matters on both axes:
+
+- **Read / inspect.** A rule's **inspection surface** — the queryable, plaintext
+  config the *Config vs secret* boundary deliberately keeps unencrypted "to run
+  and debug rules" (predicates, targets, templates, and the workspace / channel /
+  person / label IDs they name — see *Config vs secret — the encryption boundary*)
+  — MUST be scoped to the owning account. Plaintext-for-diagnostics MUST NOT mean
+  cross-account-readable: an ID grants nothing without a credential, but the *map*
+  of another owner's channels, people, targets, and predicates is itself a
+  disclosure.
+- **Mutate.** Deleting or disabling another owner's `membership` rule **destroys
+  their lane** and, per *Retraction-driven consumer patterns*, their
+  retraction-driven **auto-cancel path**; editing another owner's rule silently
+  re-points their deliveries. Each is a direct attack on that account's fleet and
+  surfaces.
+
+This mirrors the dead-letter store, whose read access this contract already scopes
+to the owning account's (see *Event disposition and dead-letter*). Together with
+the four stamping seams it makes the owner-binding honest on **both** axes — an
+`owner` is fixed from an authenticated identity when it **enters** (stamp), and it
+gates **who may read or mutate** the thing thereafter (scope); neither axis alone
+is sufficient, so the "every seam" claim above is the write half of a security
+story whose read/mutate half is this MUST.
+
 ### Enabled flag and dedupe window
 
 Two owner-facing schema fields carried by every rule:
@@ -554,7 +613,20 @@ Two owner-facing schema fields carried by every rule:
 - **`enabled`** — a boolean gate. Only **enabled** rules are evaluated (see
   *Fan-out: every match fires*); a disabled rule is inert — it neither matches,
   fires, nor contributes to the dead-letter "handled" accounting (see *Event
-  disposition and dead-letter*) — and MAY be re-enabled with no loss.
+  disposition and dead-letter*) — and MAY be re-enabled. **Re-enabling a `notify`
+  rule is lossless**: it is stateless, so it simply resumes matching present
+  events. **Re-enabling a `membership` rule is NOT automatically lossless**: while
+  disabled the rule saw no events and its stored set **froze**, so entities that
+  left scope during the disable window (deleted, relabelled, reassigned) are still
+  stored members and entities that entered are still missing — and the incremental
+  per-event path can never notice, because it only re-diffs an entity that later
+  receives a triggering event. Re-enabling a `membership` rule therefore MUST run
+  the **full reconciliation sweep** (see *Membership rules and the lane-membership
+  store* → *The reconciliation sweep*) — reconciling the frozen stored set against
+  a fresh snapshot and emitting the missed `add`s/`retract`s — **before the rule is
+  considered live**. Only after that sweep is the "no loss" property restored; a
+  re-enable that skipped it would silently keep the members that left scope during
+  the disable window, the silent set-corruption this document refuses throughout.
 - **`dedupe window`** — an **owner-facing rate control**, deliberately distinct
   from the correctness-guaranteeing `idempotency_key` (see *Idempotency is per
   (event, rule)*). The idempotency key prevents a **re-processed same delivery**
@@ -998,6 +1070,47 @@ supplement, never the reverse.
   same prior set and both commit; the losing writer MUST re-read the committed
   set and re-diff against it. Serialization is per `(owner, membership-rule)`;
   distinct rules and distinct owners MAY proceed concurrently.
+
+**The reconciliation sweep — a full stored-set re-evaluation.** The
+per-triggering-event pipeline above is **incremental**: it reacts to one entity's
+event and can act only on transitions it actually receives. Some transitions never
+arrive on that path — a `retract` dropped while the webhook was down, or every
+transition missed while a rule was **disabled** or before its subscription
+existed. For these the platform provides a **reconciliation sweep**: a full
+re-evaluation of an entire `(owner, membership-rule)` set against a **fresh full
+snapshot** of the source's current in-scope set, which — unlike the incremental
+path — does **not** depend on receiving any source delta:
+
+- **snapshot passes the predicate but is NOT a stored member → emit `add`** (it
+  entered scope while the per-event path was not watching);
+- **stored member ABSENT from the snapshot (or present but now failing the
+  predicate) → emit `retract`** (it left scope — deleted, label removed,
+  reassigned — while the per-event path was not watching).
+
+The sweep's `add`/`retract` transitions run through the **same** per-`(owner,
+membership-rule)` serialized diff (the compare-and-set above): a transition the
+webhook path already applied is already reflected in the committed stored set, so
+the sweep produces **no diff** for it and does not re-emit it — the sweep recovers
+only the genuinely-missed ones. Each transition the sweep *does* emit then flows
+through the **same** per-`(event, rule)` idempotency and retry machinery as any
+other delivery (its key basis is defined in *Idempotency is per (event, rule)* →
+membership-derived, sweep case). Diffing **stored-members-absent-from-the-snapshot** is
+what makes the store's headline guarantee — retraction **reliable without source
+deltas** — hold across a gap the incremental path cannot see, rather than only
+across gaps in which the delete/exit event itself was delivered. A sweep that
+emitted only the snapshot's new hits (adds) and never diffed the
+stored-not-in-snapshot direction would leave a dropped `retract` **unrecovered
+forever** — the entity a stored member for good, the lane fold keeping an item
+that left scope — which is exactly the **silent-never-retract** class this section
+is built to prevent.
+
+**The sweep is invoked at exactly two points, and both cite this definition so the
+mechanism cannot drift:**
+
+1. **The low-frequency reconciliation backstop poller** runs it for a membership
+   lane (see *Poller (fallback only)*).
+2. **Re-enabling a disabled membership rule** runs it before the rule is
+   considered live (see *Enabled flag and dedupe window*).
 
 The store is source-agnostic — it carries over to a forge or any other membership
 lane — and turns "retraction" from an unanswerable source-delta question into a
