@@ -1162,29 +1162,50 @@ member" lines:
   cache — there is no platform lane-membership store. A consumer that reads only a
   partial stream still obtains a correct set from its own source re-query; the
   stream only accelerates the common case.
-- **A lane consumer MUST detect a partial or truncated stream and treat its
-  fast-path set as NON-AUTHORITATIVE.** The consumer's fast-path diff is correct
-  only over a *complete, in-order* run of the channel's lines, and three mechanisms
-  of the `log` kind can break that invisibly: **rotation** (7 days / 8 MiB —
-  *Retention* — discards the pre-rotation generation), a **stale-offset reset**
-  (*First run, missing files, and a stale offset* resets the offset to 0 and
-  re-reads, so lines already applied are re-presented — and for a keyless lane
-  line the dedupe seen-sets that reset relies on to suppress a re-read suppress
-  **nothing**, since a lane line carries no dedupe key), and **out-of-order
-  at-least-once redelivery** (delivery is at-least-once and the diff is
-  *order-sensitive* — a re-dispatched duplicate appended out of order can
-  re-present a state the consumer had already moved past). A consumer MUST
-  recognise these conditions — a rotation gap, an offset reset, a redelivery it
-  has already applied — and when any holds it MUST NOT present its fast-path set
-  as authoritative: it **re-queries the source of
-  truth** (the consumer's own Notion re-query, per *The consumer owns membership*
-  — **not** a platform store) and MUST leave the partial condition **observable**,
-  never silently presenting a wrong set as if it were complete. This is the
-  failed-lookup discipline applied to the fold (`~/dev/custom/CLAUDE.md` → *A
-  failed lookup must never look like an empty one*): a truncated stream yields a
-  **wrong** set that reads exactly like a **correct** one, so the truncation must
-  be made observable, and the authoritative re-query — not the stream — is what
-  the consumer acts on.
+- **A lane consumer MUST NOT treat its fast-path set as authoritative; it
+  reconciles via source re-query.** The consumer's fast-path diff — folding each
+  forwarded current-state line into its held set — is a **best-effort
+  optimization**, correct only over a *complete, in-order* run of the channel's
+  lines. The **authoritative** set is always the consumer's own held set plus its
+  **periodic source re-query** (`athena-events.md` → *The consumer owns
+  membership*, the "periodically re-sync against the source of truth" step — the
+  authoritative correctness backstop), which carries current state. Two
+  `log`-kind mechanisms can break the fast-path run and **are observable**; a
+  third **cannot be individually detected on a keyless lane and does not need to
+  be**:
+  - **Rotation** (7 days / 8 MiB — *Retention* — discards the pre-rotation
+    generation) and a **stale-offset reset** (*First run, missing files, and a
+    stale offset* resets the offset to 0 and re-reads, so lines already applied
+    are re-presented — and for a keyless lane line the dedupe seen-sets that
+    reset relies on to suppress a re-read suppress **nothing**, since a lane line
+    carries no dedupe key) are **observable** — rotation from the generation /
+    `rotated_at` change (*Retention*), the reset from *First run, missing files,
+    and a stale offset*. On either, the consumer MUST NOT present its fast-path
+    set as authoritative: it **re-queries the source of truth** (the consumer's
+    own Notion re-query, per *The consumer owns membership* — **not** a platform
+    store) and MUST leave the condition **observable**, never silently presenting
+    a partial set as if it were complete. This is the failed-lookup discipline
+    applied to the fold (`~/dev/custom/CLAUDE.md` → *A failed lookup must never
+    look like an empty one*): a truncated stream yields a **wrong** set that
+    reads exactly like a **correct** one, so the truncation must be made
+    observable, and the authoritative re-query — not the stream — is what the
+    consumer acts on.
+  - **Out-of-order at-least-once redelivery** is **not individually detectable**
+    on a keyless lane, and no instrument for it is required. A lane line carries
+    no dedupe key, and `athena-events.md` makes `payload.revision` optional
+    provenance/ordering only — **not** a dedupe key (`athena-events.md` →
+    *Idempotency is per (event, rule)*) — so nothing distinguishes a re-presented
+    stale state from a genuine change. It does not have to: a redelivery can at
+    worst **transiently mislead the fast-path view**, which the next re-query
+    reconciles, and it **cannot corrupt the authoritative set** — because every
+    forwarded event carries **current** state and the authoritative set is the
+    consumer's held set plus its periodic source re-query. This is exactly
+    `athena-events.md` → *Idempotency is per (event, rule)* ("a duplicate or
+    same-window redelivery does not corrupt a lane's set") and *The lane channel
+    is a change stream, not the authoritative set*. The consumer therefore does
+    **not** detect redelivery and does **not** need — and cannot have — a
+    per-redelivery instrument; the standing non-authoritative-plus-re-query
+    discipline above already makes redelivery harmless.
 - Surfacing follows the existing counts-only rule and is not weakened by the
   stream. The unprompted count still counts **new lines** — a change signal,
   counts only, no member text — and the set is computed by the consumer's **diff**

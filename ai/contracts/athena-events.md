@@ -640,7 +640,11 @@ The event-level identity basis is defined for **every** enumerated type:
   (see *The lane channel is a change stream, not the authoritative set*) and every
   forwarded event carries **current** enriched state, a duplicate or same-window
   redelivery does not corrupt a lane's set — the state-based consumer acts on the
-  final current state, which is exactly what consumer idempotency guarantees.
+  final current state, which is exactly what consumer idempotency guarantees. The
+  consumer-side lane discipline that matches this — fast-path best-effort,
+  source re-query authoritative, no per-redelivery instrument — is in
+  `ai/contracts/athena-inbox.md` → *A lane `log` channel is a change stream of
+  state-change events*.
 
 ---
 
