@@ -20,7 +20,7 @@
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 #
 # Usage:
-#   ai/bin/harness-metrics [--dir DIR] [--session FILE] [--json]
+#   ai/bin/harness-metrics [--dir DIR] [--session FILE] [--since ISO8601] [--json]
 #   ai/bin/harness-metrics --self-test
 #
 # Default DIR: ~/.claude/projects. Default output: human summary to stdout AND a
@@ -41,6 +41,31 @@ STALL_GAP_S = 300 # inter-record gap (s): floor for a plausible in-session stall
 # miscounted as a "stall" (observed 2026-09-17: gaps up to 1,807,179s). Gaps at
 # or above the ceiling are reported separately as session_idle_gaps, not stalls.
 STALL_GAP_CEILING_S = 14400 # 4h
+
+# The corpus under ~/.claude/projects is append-only and never pruned, so every
+# count derived from it is CUMULATIVE ALL-TIME: months of history, monotonically
+# non-decreasing. A threshold applied to such a total can never clear once it has
+# been crossed (measured: agent_stall_gaps sat at 48-49 and fired harness-signals
+# on 31 consecutive hourly shipwright runs, each of which correctly declined to
+# act). So alongside every all-time count, emit a WINDOWED count the caller can
+# threshold against — a number that can go back down.
+#
+# 6h: six times the shipwright's hourly cadence, so five consecutive missed cron
+# runs still cannot drop a gap through a seam, while a fixed cluster decays to
+# zero within a working session rather than droning for weeks. Measured against
+# the real 30-day agent-gap distribution (49 gaps, clustered: 16 on 08-23, 7 on
+# 09-07, 6 on 08-26), a 6h window with the harness-signals >=2 bar would have
+# fired on 8.9% of hourly runs; the 7d window that first suggested itself fires
+# on 100% of them — i.e. it reproduces the bug this exists to fix.
+RECENT_WINDOW_S = 6 * 3600
+
+# One parse per record, reused for both gap math and recency. Returns nil for a
+# missing or unparseable timestamp, which is then ignored for gap accounting (the
+# previous record's time stays the comparison anchor).
+def parse_ts(ts)
+  return nil unless ts.is_a?(String)
+  (Time.iso8601(ts) rescue (Time.parse(ts) rescue nil))
+end
 
 # Roll the harness-event.sh PostToolUse sink (A4) into the summary, if present.
 # Complements the JSONL parse with real-time-emitted events.
@@ -157,20 +182,26 @@ end
 # idle-between-turns, so only within-turn gaps feed agent_stall_gaps. Run 20
 # refined it once more: a within-turn gap that is the wall-clock of a synchronous
 # tool the agent invoked (see synchronous_tool_gap?) is tool runtime, not idle,
-# so it is excluded too.
-def fold(acc, o, prev_ts, agent = false, prev_o = nil)
-  ts = o["timestamp"]
-  if ts && prev_ts
-    begin
-      gap = Time.parse(ts) - Time.parse(prev_ts)
+# so it is excluded too. Run 21 left WHICH gaps are counted untouched and fixed
+# the SHAPE instead: each counted agent gap also lands in recent_agent_stall_gaps
+# when it falls inside acc[:recent_cutoff] (see RECENT_WINDOW_S), so a caller has
+# a count that can return to zero.
+def fold(acc, o, prev_t, agent = false, prev_o = nil)
+  t = parse_ts(o["timestamp"])
+  if t
+    recent = acc[:recent_cutoff] && t >= acc[:recent_cutoff]
+    acc[:recent_records] += 1 if recent
+    if prev_t
+      gap = t - prev_t
       if gap >= STALL_GAP_CEILING_S
         acc[:session_idle_gaps] += 1 # human closed/resumed the session, not a stall
       elsif gap >= STALL_GAP_S
         acc[:stall_gaps] += 1
-        acc[:agent_stall_gaps] += 1 if agent && !new_user_turn?(o) && !safe_wait_block?(prev_o) && !synchronous_tool_gap?(prev_o, o)
+        if agent && !new_user_turn?(o) && !safe_wait_block?(prev_o) && !synchronous_tool_gap?(prev_o, o)
+          acc[:agent_stall_gaps] += 1
+          acc[:recent_agent_stall_gaps] += 1 if recent
+        end
       end
-    rescue StandardError
-      # unparseable timestamp -> ignore for gap accounting
     end
   end
 
@@ -213,14 +244,18 @@ def fold(acc, o, prev_ts, agent = false, prev_o = nil)
       end
     end
   end
-  ts || prev_ts
+  t || prev_t
 end
 
-def parse_files(files)
+# `cutoff` is a Time (or nil). Nil means "recency not computed" — the recent_*
+# fields are then OMITTED from the report rather than emitted as 0, because a
+# zero with no window behind it is indistinguishable from a healthy zero.
+def parse_files(files, cutoff = nil)
   acc = {
     files: 0, records: 0, malformed: 0,
     tool_calls: 0, tool_results: 0, tool_errors: 0, stall_gaps: 0,
     agent_stall_gaps: 0, session_idle_gaps: 0,
+    recent_cutoff: cutoff, recent_records: 0, recent_agent_stall_gaps: 0,
     tools: Hash.new(0), skills: Hash.new(0), models: Hash.new(0),
     tokens: Hash.new(0), by_model: {},
   }
@@ -277,9 +312,25 @@ def build_report(acc, prices)
     "stall_gaps" => acc[:stall_gaps], "agent_stall_gaps" => acc[:agent_stall_gaps],
     "stall_gap_threshold_s" => STALL_GAP_S,
     "stall_gap_ceiling_s" => STALL_GAP_CEILING_S, "session_idle_gaps" => acc[:session_idle_gaps],
+  }.merge(recent_fields(acc)).merge({
     "tools" => acc[:tools], "skills" => acc[:skills], "models" => acc[:models],
     "tokens" => acc[:tokens].transform_keys(&:to_s),
     "cost" => cost.transform_keys(&:to_s),
+  })
+end
+
+# Emitted only when a window was actually computed. `recent_records` is the
+# observability counter that lets a reader tell "no gaps in the window" from
+# "nothing was observed in the window" — a windowed zero over zero records is
+# not a healthy harness, it is an unread corpus (CLAUDE.md -> "A failed lookup
+# must never look like an empty one": make every miss observable).
+def recent_fields(acc)
+  return {} unless acc[:recent_cutoff]
+  {
+    "recent_window_s" => (Time.now.utc - acc[:recent_cutoff]).round,
+    "recent_window_start" => acc[:recent_cutoff].utc.iso8601,
+    "recent_agent_stall_gaps" => acc[:recent_agent_stall_gaps],
+    "recent_records" => acc[:recent_records],
   }
 end
 
@@ -291,6 +342,13 @@ def print_human(r)
   puts "  idle/stall gaps (#{r['stall_gap_threshold_s']}-#{r['stall_gap_ceiling_s']}s): #{r['stall_gaps']}" \
        " (agent-session: #{r['agent_stall_gaps']})" \
        "  (session-idle gaps >=#{r['stall_gap_ceiling_s']}s, excluded: #{r['session_idle_gaps']})"
+  if r.key?("recent_agent_stall_gaps")
+    puts "  in the last #{r['recent_window_s'] / 3600}h (since #{r['recent_window_start']}): " \
+         "#{r['recent_agent_stall_gaps']} agent-session gap(s) over #{r['recent_records']} record(s)" \
+         "  [agent-session counts above are ALL-TIME and never decrease]"
+  else
+    puts "  recency: NOT COMPUTED (no window) — the agent-session count above is all-time only"
+  end
   tk = r["tokens"]
   puts "  tokens: in=#{tk['input']} out=#{tk['output']} cache_read=#{tk['cache_read']} " \
        "cache_write=#{tk['cache_write']} thinking=#{tk['thinking']}"
@@ -313,6 +371,19 @@ def run(argv)
   json_out = argv.include?("--json")
   dir = (i = argv.index("--dir")) ? argv[i + 1] : DEFAULT_DIR
   session = (i = argv.index("--session")) ? argv[i + 1] : nil
+  # Resolving the window is its own step with its own outcome: an unparseable
+  # --since is an ERROR, never a silently-default window (which would report a
+  # recency the caller did not ask for).
+  cutoff = Time.now.utc - RECENT_WINDOW_S
+  if (i = argv.index("--since"))
+    cutoff = parse_ts(argv[i + 1])
+    if cutoff.nil?
+      warn "harness-metrics: --since #{argv[i + 1].inspect} is not an ISO8601 timestamp"
+      warn "  Fix: pass e.g. --since 2026-09-20T08:00:00Z, or omit --since for the " \
+           "default #{RECENT_WINDOW_S / 3600}h window."
+      return 1
+    end
+  end
 
   files = session ? [session] : Dir.glob(File.join(dir, "**", "*.jsonl"))
   if files.empty?
@@ -322,7 +393,7 @@ def run(argv)
     return 0
   end
 
-  acc = parse_files(files)
+  acc = parse_files(files, cutoff)
   report = build_report(acc, load_prices)
   report["runtime_events"] = read_event_sink
 
@@ -441,7 +512,8 @@ def run_self_test
     ]
     File.write(qcf, qc_lines.map { |l| JSON.generate(l) }.join("\n") + "\n")
 
-    acc = parse_files([f, af, tf, sf, syncf, qcf])
+    fixtures = [f, af, tf, sf, syncf, qcf]
+    acc = parse_files(fixtures)
     r = build_report(acc, { "test-model" => {
       "input_per_mtok" => 1.0, "output_per_mtok" => 2.0,
       "cache_read_per_mtok" => 0.1, "cache_write_per_mtok" => 0.5 } })
@@ -457,6 +529,28 @@ def run_self_test
       "stall gap == 6"        => (r["stall_gaps"] == 6),
       "agent stall gap == 1 (turn-boundary + safe-wait + sync-tool excluded)" => (r["agent_stall_gaps"] == 1),
       "session-idle == 1"     => (r["session_idle_gaps"] == 1),
+      # Recency (run 21). The fixture's one countable agent gap ends at
+      # 2026-09-16T01:00:00Z. A window that OPENS AFTER it must report zero —
+      # this is the negative case that proves an old, long-fixed cluster stops
+      # producing a signal — while a window that opens before it must report it.
+      # A no-window parse must OMIT the recent_* fields entirely rather than
+      # emit a zero the caller would read as healthy.
+      "no cutoff omits recent fields" => (!r.key?("recent_agent_stall_gaps") &&
+                                          !r.key?("recent_window_s")),
+      "old gaps only -> recent == 0, all-time preserved" => (
+        rw = build_report(parse_files(fixtures, Time.parse("2026-09-19T00:00:00Z")), {})
+        rw["recent_agent_stall_gaps"].zero? && rw["agent_stall_gaps"] == 1),
+      "recent gap -> recent == 1" => (
+        rr = build_report(parse_files(fixtures, Time.parse("2026-09-16T00:30:00Z")), {})
+        rr["recent_agent_stall_gaps"] == 1),
+      "recent_records counts only in-window records" => (
+        rw2 = build_report(parse_files(fixtures, Time.parse("2026-09-19T00:00:00Z")), {})
+        rw2["recent_records"] == 1 && rw2["records"] > rw2["recent_records"]),
+      "window fields describe the window searched" => (
+        rw3 = build_report(parse_files(fixtures, Time.parse("2026-09-19T00:00:00Z")), {})
+        rw3["recent_window_start"] == "2026-09-19T00:00:00Z" && rw3["recent_window_s"].positive?),
+      "parse_ts rejects a non-timestamp" => (parse_ts("not-a-time").nil? && parse_ts(nil).nil? &&
+                                             !parse_ts("2026-09-20T08:00:00Z").nil?),
       # safe_wait_block? edge cases: a preceding Bash `tail --pid` block is a
       # prescribed safe-wait (excluded from agent stalls); a plain Bash command
       # or a nil/non-Bash prior record is not.

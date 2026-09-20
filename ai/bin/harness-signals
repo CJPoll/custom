@@ -20,16 +20,21 @@
 #   ai/bin/harness-signals [--file metrics.json] [--json]
 #   ai/bin/harness-signals --self-test
 #
-# Thresholds (tunable): a tool with failure_rate >= 0.20 over >= 5 results; any
-# agent-session idle/stall gaps (interactive-session gaps are human idle, not
-# shipwright-actionable, so they are excluded); any runtime error events.
+# Thresholds (tunable): a tool with failure_rate >= 0.20 over >= 5 results;
+# >= 2 agent-session idle/stall gaps INSIDE THE RECENT WINDOW (interactive-session
+# gaps are human idle, not shipwright-actionable, so they are excluded upstream);
+# any runtime error events.
 
 require "json"
+require "time"
 
 AI_DIR       = File.expand_path("..", __dir__)
 DEFAULT_FILE = File.join(AI_DIR, "telemetry", "metrics.json")
 FAIL_RATE    = 0.20
 MIN_RESULTS  = 5
+# The shipwright's own "recurs in >= 2 runs" bar, applied to the metric: one
+# isolated gap is the background rate, two inside one window is a pattern.
+RECENT_STALLS = 2
 
 def signals_from(m)
   out = []
@@ -39,19 +44,82 @@ def signals_from(m)
     out << { "kind" => "tool_failure_rate", "metric" => rate, "detail" =>
              "tool failure rate #{rate} over #{results} results (>= #{FAIL_RATE})" }
   end
-  # Only agent-session gaps are shipwright-actionable; interactive (UUID-named)
-  # session gaps are human think/idle time. Runs 16-18 showed ~88% of in-band
-  # gaps were benign interactive idle, which made a total-count signal always-on.
-  # Fall back to the total when the metric predates agent attribution.
-  gaps = (m.key?("agent_stall_gaps") ? m["agent_stall_gaps"] : m["stall_gaps"]).to_i
-  out << { "kind" => "stall_gaps", "metric" => gaps, "detail" =>
-           "#{gaps} agent-session idle/stall gap(s) over the window" } if gaps.positive?
+  out << stall_signal(m)
+  out << staleness_signal(m)
   ev = m["runtime_events"]
   if ev.is_a?(Hash) && ev["present"] && ev["error_events"].to_i.positive?
     out << { "kind" => "runtime_error_events", "metric" => ev["error_events"],
              "detail" => "#{ev['error_events']} runtime error event(s) from the hook sink" }
   end
-  out
+  out.compact
+end
+
+# Only agent-session gaps are shipwright-actionable; interactive (UUID-named)
+# session gaps are human think/idle time. Runs 16-18 showed ~88% of in-band gaps
+# were benign interactive idle, which made a total-count signal always-on, and
+# runs 18-20 pared the remainder down to 49 by excluding turn-boundary, safe-wait
+# and synchronous-tool gaps. None of that fixed the SHAPE: agent_stall_gaps is a
+# cumulative ALL-TIME count over an append-only corpus, so `> 0` is a threshold
+# that can never clear again — it fired on 31 consecutive hourly runs at a frozen
+# 48, every one of which correctly declined to act, until the journal recorded a
+# standing "do not revisit unless it MOVES". A signal the reader has learned to
+# ignore is indistinguishable from a live regression.
+#
+# So threshold the WINDOWED count instead (harness-metrics RECENT_WINDOW_S). What
+# is counted is unchanged; only what is SURFACED narrows, and it narrows to the
+# recent — which is the only thing the shipwright could act on anyway.
+def stall_signal(m)
+  unless m.key?("recent_agent_stall_gaps")
+    # Recency could not be computed (a metrics file from an older harness-metrics,
+    # or a parse with no window). That is NOT "healthy" — degrade to the old
+    # all-time shape, loudly labelled, rather than going quiet on an unknown.
+    total = (m.key?("agent_stall_gaps") ? m["agent_stall_gaps"] : m["stall_gaps"]).to_i
+    return nil unless total.positive?
+    return { "kind" => "stall_gaps_unwindowed", "metric" => total, "detail" =>
+             "#{total} agent-session idle/stall gap(s), ALL-TIME — this metrics file carries " \
+             "no recency, so new gaps cannot be told from historical ones. " \
+             "Fix: regenerate with `ai/bin/harness-metrics` (emits recent_agent_stall_gaps), " \
+             "then re-run harness-signals." }
+  end
+  n = m["recent_agent_stall_gaps"].to_i
+  return nil if n < RECENT_STALLS
+  hours = m["recent_window_s"].to_i / 3600
+  { "kind" => "stall_gaps", "metric" => n, "detail" =>
+    "#{n} agent-session idle/stall gap(s) in the last #{hours}h " \
+    "(since #{m['recent_window_start']}, >= #{RECENT_STALLS}); all-time #{m['agent_stall_gaps']}" }
+end
+
+# A windowed zero is only evidence of health if the window was actually READ.
+# Two ways it is not: the metrics snapshot is older than the window it describes
+# (so "recent" means recent-as-of-some-earlier-run), or the window contains zero
+# records at all (an unread or unwritten corpus). Either one must announce itself
+# rather than pass as a quiet, healthy harness.
+def staleness_signal(m)
+  return nil unless m.key?("recent_agent_stall_gaps")
+  window = m["recent_window_s"].to_i
+  gen = (Time.parse(m["generated"].to_s) rescue nil)
+  if gen.nil?
+    return { "kind" => "telemetry_stale", "metric" => 0, "detail" =>
+             "metrics file has no readable `generated` timestamp, so its recency window " \
+             "cannot be dated — a zero here is unverified, not healthy. " \
+             "Fix: regenerate with `ai/bin/harness-metrics`." }
+  end
+  age = (Time.now.utc - gen.utc).round
+  if window.positive? && age > window
+    return { "kind" => "telemetry_stale", "metric" => age, "detail" =>
+             "metrics are #{age / 3600}h old but describe a #{window / 3600}h window — the " \
+             "windowed counts predate their own window, so a zero proves nothing. " \
+             "Fix: run `ai/bin/harness-metrics` before `harness-signals`." }
+  end
+  if m["recent_records"].to_i.zero? && m["records"].to_i.positive?
+    return { "kind" => "telemetry_stale", "metric" => 0, "detail" =>
+             "0 of #{m['records']} records fall inside the #{window / 3600}h window " \
+             "(since #{m['recent_window_start']}) — the corpus is not being written or not " \
+             "being read, so a windowed zero is unobserved, not healthy. " \
+             "Fix: check that sessions are landing under ~/.claude/projects and that " \
+             "harness-metrics is pointed at them (--dir)." }
+  end
+  nil
 end
 
 def load_metrics(path)
@@ -86,27 +154,60 @@ end
 
 def run_self_test
   ok = true
-  hot = { "tool_failure_rate" => 0.5, "tool_results" => 20, "stall_gaps" => 3,
-          "agent_stall_gaps" => 3,
-          "runtime_events" => { "present" => true, "error_events" => 2 } }
-  cold = { "tool_failure_rate" => 0.0, "tool_results" => 100, "stall_gaps" => 0,
-           "agent_stall_gaps" => 0,
-           "runtime_events" => { "present" => true, "error_events" => 0 } }
-  below = { "tool_failure_rate" => 0.5, "tool_results" => 2, "stall_gaps" => 0,
-            "agent_stall_gaps" => 0, "runtime_events" => { "present" => false } }
+  fresh = -> (extra) {
+    { "generated" => Time.now.utc.iso8601, "recent_window_s" => 21_600,
+      "recent_window_start" => (Time.now.utc - 21_600).iso8601, "recent_records" => 5000,
+      "records" => 800_000, "tool_failure_rate" => 0.0, "tool_results" => 100,
+      "stall_gaps" => 0, "agent_stall_gaps" => 0, "recent_agent_stall_gaps" => 0,
+      "runtime_events" => { "present" => false } }.merge(extra)
+  }
+  hot = fresh.call("tool_failure_rate" => 0.5, "tool_results" => 20, "stall_gaps" => 3,
+                   "agent_stall_gaps" => 3, "recent_agent_stall_gaps" => 3,
+                   "runtime_events" => { "present" => true, "error_events" => 2 })
+  cold = fresh.call("runtime_events" => { "present" => true, "error_events" => 0 })
+  below = fresh.call("tool_failure_rate" => 0.5, "tool_results" => 2)
   # interactive-only idle: total gaps present, but none in agent sessions -> no signal
-  idle_only = { "tool_failure_rate" => 0.0, "tool_results" => 100, "stall_gaps" => 98,
-                "agent_stall_gaps" => 0, "runtime_events" => { "present" => false } }
-  # legacy metrics (pre-attribution): fall back to total stall_gaps
+  idle_only = fresh.call("stall_gaps" => 98)
+  # The headline negative case, and the exact shape of the real corpus on
+  # 2026-09-20: 49 agent gaps all-time, none of them recent. Must be SILENT.
+  # Under the pre-run-21 `> 0` threshold this fired on 31 consecutive runs.
+  old_only = fresh.call("stall_gaps" => 7009, "agent_stall_gaps" => 49,
+                        "recent_agent_stall_gaps" => 0)
+  # One gap in the window is the background rate, not a pattern (>= 2 bar).
+  one_recent = fresh.call("agent_stall_gaps" => 49, "recent_agent_stall_gaps" => 1)
+  # A real new cluster inside the window: must fire, promptly and visibly.
+  two_recent = fresh.call("agent_stall_gaps" => 51, "recent_agent_stall_gaps" => 2)
+  # Recency unavailable (metrics from an older harness-metrics): must NOT read as
+  # healthy — it degrades to the old all-time shape under a distinct kind.
   legacy = { "tool_failure_rate" => 0.0, "tool_results" => 100, "stall_gaps" => 4,
-             "runtime_events" => { "present" => false } }
+             "generated" => Time.now.utc.iso8601, "runtime_events" => { "present" => false } }
+  legacy_attributed = legacy.merge("agent_stall_gaps" => 49)
+  # A stale snapshot and an unread corpus each produce a zero that is not health.
+  stale = fresh.call("generated" => (Time.now.utc - 3 * 86_400).iso8601)
+  dark_corpus = fresh.call("recent_records" => 0)
 
+  kinds = ->(m) { signals_from(m).map { |s| s["kind"] } }
   checks = {
     "hot surfaces 3 signals"       => (signals_from(hot).size == 3),
     "cold surfaces none"           => (signals_from(cold).empty?),
     "below min_results suppressed" => (signals_from(below).none? { |s| s["kind"] == "tool_failure_rate" }),
     "interactive idle suppressed"  => (signals_from(idle_only).none? { |s| s["kind"] == "stall_gaps" }),
-    "legacy falls back to total"   => (signals_from(legacy).any? { |s| s["kind"] == "stall_gaps" }),
+    "NEGATIVE: old gaps only, none recent -> no stall signal at all" =>
+      kinds.call(old_only).none? { |k| k.start_with?("stall_gaps") },
+    "NEGATIVE: old gaps only -> completely silent" => signals_from(old_only).empty?,
+    "one recent gap is below the >= 2 bar" =>
+      kinds.call(one_recent).none? { |k| k.start_with?("stall_gaps") },
+    "POSITIVE: two recent gaps fire" => kinds.call(two_recent).include?("stall_gaps"),
+    "recent signal reports the recent count, not the all-time one" =>
+      (signals_from(two_recent).find { |s| s["kind"] == "stall_gaps" }["metric"] == 2),
+    "no recency != healthy (falls back, distinctly labelled)" =>
+      kinds.call(legacy).include?("stall_gaps_unwindowed"),
+    "no recency uses agent attribution when present" =>
+      (signals_from(legacy_attributed).find { |s| s["kind"] == "stall_gaps_unwindowed" }["metric"] == 49),
+    "stale metrics are not a healthy zero" => kinds.call(stale).include?("telemetry_stale"),
+    "unread corpus is not a healthy zero" => kinds.call(dark_corpus).include?("telemetry_stale"),
+    "fresh, populated window raises no staleness signal" =>
+      kinds.call(cold).none? { |k| k == "telemetry_stale" },
   }
   checks.each { |n, pass| (warn "self-test: FAIL — #{n}"; ok = false) unless pass }
   if ok
@@ -114,7 +215,8 @@ def run_self_test
     0
   else
     warn "harness-signals: self-test FAILED"
-    warn "  Fix: align signals_from thresholds with the fixtures — hot must surface, cold must not."
+    warn "  Fix: align signals_from thresholds with the fixtures — hot must surface, cold must not, " \
+         "and an all-time-only count must never be surfaced as if it were recent."
     1
   end
 end
