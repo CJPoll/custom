@@ -414,10 +414,14 @@ for the entity state the event reflects (Notion: `last_edited_time`, or a finer
 source-provided revision token where one exists — the ingress binds the finest the
 source exposes). It is **source-supplied, not platform-minted** — so it is escaped
 like any source field and is **not** trusted-slot-eligible (see *Templating and
-the per-adapter Escaper contract*) — and it is what distinguishes two **distinct**
-changes to the same `entity_id` at the idempotency layer (see *Idempotency is per
-(event, rule)*): it MUST be **stable** across at-least-once redeliveries of the
-**same** source change and **distinct** across **different** source changes. The
+the per-adapter Escaper contract*) — and it is what separates two changes to the
+same `entity_id` at the idempotency layer (see *Idempotency is per (event,
+rule)*): it MUST be **stable** across at-least-once redeliveries of the **same**
+source change and **distinct across different source changes at the source's
+revision granularity** — where the source's revision indicator is coarser than its
+change rate (Notion's `last_edited_time` is minute-granular), two same-window
+changes collapse to one key, an **observable `collapsed-by-idempotency-key`**
+outcome defined in *Idempotency is per (event, rule)*, never a silent drop. The
 enriched types read it during enrichment; the identity-only delete types
 (`notion.ticket.deleted`, `notion.comment.deleted`) source it from the deletion
 **webhook event itself, not an enrichment fetch** — preserving their identity-only
@@ -444,22 +448,39 @@ The event-level key basis is defined for **every** enumerated type:
   only)*.)
 
   `payload.entity_id` is **stable across changes** (it is identity), so two
-  **distinct** changes to one entity share it; `payload.revision` is what makes
-  their keys distinct. It MUST be **stable** across at-least-once redeliveries of
-  the **same** source change (a redelivered webhook for one edit dedupes to one
-  delivery) and **distinct** across **different** source changes (two edits →
-  two events → two deliveries). A **missing or unresolvable** `revision` is an
-  **error, not an empty value that collapses keys** (the failed-lookup discipline,
-  `~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty
-  one*): the ingress MUST **reject** emitting a Notion entity event whose
+  distinct changes to one entity share it; `payload.revision` is what separates
+  their keys **at the source's revision granularity**. `revision` MUST be
+  **stable** across at-least-once redeliveries of the **same** source change (a
+  redelivered webhook for one edit dedupes to one delivery), and **distinct across
+  different source changes to the extent the source's revision granularity
+  permits**. Where a source's revision indicator is coarser than its change rate —
+  **Notion's `last_edited_time` is minute-granular**, so two distinct edits to one
+  entity within the same minute carry the **same** `revision` — the two changes
+  resolve to **one** `(entity_id, revision)` key and their `(event, rule)`
+  deliveries **collapse to one**. Such a collapse MUST be **observable**: recorded
+  and **countable as a `collapsed-by-idempotency-key` outcome**, exactly as a
+  dedupe-window suppression is recorded (see *Enabled flag and dedupe window*) —
+  **never a silent drop** (failed-lookup discipline, `~/dev/custom/ai/CLAUDE.md` →
+  *A failed lookup must never look like an empty one*). A **missing or
+  unresolvable** `revision` remains an **error, not an empty value that collapses
+  keys**: the ingress MUST **reject** emitting a Notion entity event whose
   `revision` cannot be resolved, rather than emit one whose idempotency key
   silently merges with another change's — `Fix: a notion.<entity>.<verb> event has
   no resolvable source revision (payload.revision — e.g. Notion last_edited_time,
   or the deletion event's source timestamp). Emit is rejected: entity_id alone is
   stable across changes, so a missing revision would collapse two distinct changes
   to one idempotency key and silently drop the second delivery. Supply the source
-  revision indicator.` The platform stays stateless — `revision` is source-supplied,
-  never platform-synthesized.
+  revision indicator.`
+
+  This bounds `revision` to what a **stateless** platform can derive from a
+  source-supplied token; the platform never synthesizes a per-change sequence
+  (that would require platform state — see the collision-proof-revision follow-up).
+  Because a membership lane's authoritative set is the **consumer's own re-query**
+  (see *The lane channel is a change stream, not the authoritative set*) and every
+  forwarded event carries **current** enriched state, a sub-granularity collapse
+  does not corrupt a lane's set — it reduces two same-window edits to their final
+  current state, which is what a state-based consumer acts on; the residual is
+  bounded, observable sub-granularity notify completeness.
 
 ---
 
