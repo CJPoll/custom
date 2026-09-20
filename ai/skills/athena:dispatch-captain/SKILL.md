@@ -62,6 +62,36 @@ one-line reason into the state log** next to the dispatch.
 Every environment fact you put in the brief must be VERIFIED, not inferred —
 see [[athena:brief-verification]].
 
+## A `CONTENTION:` line lowers the cap for the rest of the run
+
+Captains run heavyweight per-worktree stacks, and several full suites at once
+can starve the box, so a Mission's verification fails for a reason that is the
+FLEET's doing and no single captain's to avoid. A captain that suspects this is
+required to attach a `~/dev/custom/ai/bin/contention-census` reading from the
+failure and from the re-run, as a `CONTENTION:` line in its report.
+
+**Treat that line as the feedback signal on your own concurrency:** the first
+`CONTENTION:` line from a Mission in a given repo lowers your effective cap for
+that repo **by one** for the remainder of the run — once per report, never more
+than once for the same report. It only ever moves DOWN, and the resident `≤5,
+ever` invariant is untouched; this can only tighten it.
+
+Two things this deliberately is **not**:
+
+- **Not a probe.** Do not sample the box's load at dispatch time and pick a cap
+  from it. Load now says nothing about load forty minutes later when three
+  suites collide — that is a guess wearing a measurement's clothes. React to a
+  measurement a captain actually took, or to a number the repo declares.
+- **Not a tolerance.** The red still blocks, the finding is still reported, and
+  nothing is retried, skipped, or loosened — the standing rule is that a safety
+  check gets FASTER, never weaker, and you carry it resident. The census
+  makes contention *attributable*; it never makes a failure acceptable.
+
+**Record the cap and where it came from** in the state log — `cap 3 — default`,
+or `cap 2 — lowered by DND-213 CONTENTION`. Without the provenance, a cap you
+chose and a cap that was forced on you read identically on resume, which is the
+same failed-lookup trap one level up.
+
 ---
 
 *Source (behavior-preserving relocation): athena-admiral §4 "Create worktrees

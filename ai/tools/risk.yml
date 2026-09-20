@@ -42,6 +42,7 @@ tools:
   confirm-merged:          { class: readOnly, reason: query }
   critic-eval:             { class: readOnly, reason: eval }
   critic-review:           { class: readOnly, reason: review }
+  contention-census:       { class: readOnly, reason: census }
   forge-preflight:         { class: readOnly, reason: probe }
   harness-signals:         { class: readOnly, reason: signals }
   lead-time:               { class: readOnly, reason: analysis }

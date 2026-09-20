@@ -1,0 +1,241 @@
+#!/bin/sh
+# contention-census — read-only snapshot of host load and running compose stacks.
+#
+# WHY THIS EXISTS
+# A test suite that fails and then passes on re-run produces the SAME observable
+# whether the cause was a genuine flake, a real defect, or a sibling captain
+# saturating the box. "It passed on re-run" is not evidence of anything. This
+# prints the numbers that tell those apart, at the moment of the failure and
+# again at the re-run, so an environment attribution is a measurement rather
+# than a plausible story.
+#
+# This script NEVER denies, gates, retries, or tolerates anything. It reads and
+# prints. It is not a guard, so it carries no `Fix:` clause and is deliberately
+# absent from GUARD_BINS in ai/bin/check-guard-messages.
+#
+# A lookup that fails must never read like a lookup that found nothing: when
+# docker cannot be consulted, compose_projects is `unknown` with a reason, never
+# `0`.
+#
+# Usage:  contention-census [--self-test]
+set -eu
+
+VERSION=1
+
+# Test seams. Unset in normal use; the self-test points them at fixtures.
+LOADAVG_FILE="${CONTENTION_CENSUS_LOADAVG:-/proc/loadavg}"
+MEMINFO_FILE="${CONTENTION_CENSUS_MEMINFO:-/proc/meminfo}"
+DOCKER_BIN="${CONTENTION_CENSUS_DOCKER:-docker}"
+
+emit() { printf 'CENSUS %s\n' "$*"; }
+
+report_header() {
+  emit "v=$VERSION ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+report_load() {
+  if [ -r "$LOADAVG_FILE" ]; then
+    load1=$(cut -d' ' -f1 <"$LOADAVG_FILE")
+    load5=$(cut -d' ' -f2 <"$LOADAVG_FILE")
+  else
+    emit "load_status=unavailable reason=no-loadavg path=$LOADAVG_FILE"
+    return 0
+  fi
+  ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)
+  if [ "$ncpu" != unknown ] && [ "$ncpu" -gt 0 ] 2>/dev/null; then
+    per_cpu=$(awk -v l="$load1" -v n="$ncpu" 'BEGIN{printf "%.2f", l/n}')
+  else
+    per_cpu=unknown
+  fi
+  emit "load_status=ok load1=$load1 load5=$load5 ncpu=$ncpu load1_per_cpu=$per_cpu"
+}
+
+report_mem() {
+  if [ ! -r "$MEMINFO_FILE" ]; then
+    emit "mem_status=unavailable reason=no-meminfo path=$MEMINFO_FILE"
+    return 0
+  fi
+  total_kb=$(awk '/^MemTotal:/{print $2; exit}' "$MEMINFO_FILE")
+  avail_kb=$(awk '/^MemAvailable:/{print $2; exit}' "$MEMINFO_FILE")
+  if [ -z "${total_kb:-}" ] || [ -z "${avail_kb:-}" ]; then
+    emit "mem_status=unavailable reason=unparsable-meminfo path=$MEMINFO_FILE"
+    return 0
+  fi
+  pct=$(awk -v a="$avail_kb" -v t="$total_kb" 'BEGIN{if(t>0) printf "%.0f", 100*a/t; else printf "unknown"}')
+  emit "mem_status=ok mem_total_mb=$((total_kb / 1024)) mem_avail_mb=$((avail_kb / 1024)) mem_avail_pct=$pct"
+}
+
+report_compose() {
+  if ! command -v "$DOCKER_BIN" >/dev/null 2>&1; then
+    emit "compose_status=unavailable reason=docker-not-found compose_projects=unknown compose_containers=unknown"
+    return 0
+  fi
+  ps_out=$("$DOCKER_BIN" ps --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null) || {
+    emit "compose_status=unavailable reason=docker-ps-failed compose_projects=unknown compose_containers=unknown"
+    return 0
+  }
+  # Every running container counts toward host pressure, including one with no
+  # compose project label — it is counted but never attributed to a project.
+  if [ -z "$ps_out" ]; then
+    n_containers=0
+    projects=""
+  else
+    n_containers=$(printf '%s\n' "$ps_out" | wc -l | tr -d ' ')
+    projects=$(printf '%s\n' "$ps_out" | grep -v '^[[:space:]]*$' | sort -u || true)
+  fi
+  if [ -z "$projects" ]; then
+    n_projects=0
+  else
+    n_projects=$(printf '%s\n' "$projects" | grep -c '[^[:space:]]')
+  fi
+  emit "compose_status=ok compose_projects=$n_projects compose_containers=$n_containers"
+  [ -z "$projects" ] || printf '%s\n' "$projects" | while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    n=$(printf '%s\n' "$ps_out" | grep -c "^${p}$" || true)
+    emit "compose_project=$p containers=$n"
+  done
+}
+
+report_self() {
+  # Which tree is asking. Best-effort: a census from outside a git tree is still
+  # a valid census, it just cannot name itself.
+  if wt=$(git rev-parse --show-toplevel 2>/dev/null); then
+    emit "self_worktree=$wt self_basename=$(basename "$wt")"
+  else
+    emit "self_worktree=unknown reason=not-a-git-worktree"
+  fi
+}
+
+run_census() {
+  report_header
+  report_load
+  report_mem
+  report_compose
+  report_self
+}
+
+# --------------------------------------------------------------------------
+self_test() {
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT INT TERM
+  fails=0
+  checks=0
+  check() { # check <desc> <expected-substring> <actual>
+    checks=$((checks + 1))
+    case "$3" in
+      *"$2"*) : ;;
+      *)
+        fails=$((fails + 1))
+        printf 'FAIL: %s\n  expected to contain: %s\n  got: %s\n' "$1" "$2" "$3"
+        ;;
+    esac
+  }
+  refute() { # refute <desc> <forbidden-substring> <actual>
+    checks=$((checks + 1))
+    case "$3" in
+      *"$2"*)
+        fails=$((fails + 1))
+        printf 'FAIL: %s\n  must NOT contain: %s\n  got: %s\n' "$1" "$2" "$3"
+        ;;
+    esac
+  }
+
+  printf '0.50 0.40 0.30 1/200 1234\n' >"$tmp/loadavg"
+  printf 'MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n' >"$tmp/meminfo"
+
+  # A stub docker reporting three distinct compose projects (five containers)
+  # plus one unlabelled container — a blank line, mid-stream, because a
+  # TRAILING one is eaten by command substitution and would not exercise this.
+  cat >"$tmp/docker-three" <<'STUB'
+#!/bin/sh
+printf 'alpha\nalpha\nbeta\n\ngamma\ngamma\n'
+STUB
+  # A stub docker with nothing running at all.
+  cat >"$tmp/docker-empty" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  # A stub docker whose daemon is down.
+  cat >"$tmp/docker-broken" <<'STUB'
+#!/bin/sh
+echo "Cannot connect to the Docker daemon" >&2
+exit 1
+STUB
+  chmod +x "$tmp/docker-three" "$tmp/docker-empty" "$tmp/docker-broken"
+
+  out=$(CONTENTION_CENSUS_LOADAVG="$tmp/loadavg" \
+        CONTENTION_CENSUS_MEMINFO="$tmp/meminfo" \
+        CONTENTION_CENSUS_DOCKER="$tmp/docker-three" \
+        "$0" 2>&1)
+  check "header carries a version" "CENSUS v=1" "$out"
+  check "load parsed" "load_status=ok load1=0.50 load5=0.40" "$out"
+  check "per-cpu load derived" "load1_per_cpu=" "$out"
+  check "memory parsed to MB" "mem_total_mb=15625" "$out"
+  check "memory availability percent" "mem_avail_pct=50" "$out"
+  check "distinct projects counted, not containers" "compose_projects=3" "$out"
+  check "unlabelled container still counted" "compose_containers=6" "$out"
+  check "per-project breakdown alpha" "compose_project=alpha containers=2" "$out"
+  check "per-project breakdown beta" "compose_project=beta containers=1" "$out"
+  check "per-project breakdown gamma" "compose_project=gamma containers=2" "$out"
+
+  # THE CLASS THIS SCRIPT MUST NOT FALL INTO: docker missing or broken must be
+  # distinguishable from docker reporting nothing running. Three cases, three
+  # distinct observables.
+  empty=$(CONTENTION_CENSUS_LOADAVG="$tmp/loadavg" CONTENTION_CENSUS_MEMINFO="$tmp/meminfo" \
+          CONTENTION_CENSUS_DOCKER="$tmp/docker-empty" "$0" 2>&1)
+  check "nothing running is a real zero" "compose_status=ok compose_projects=0" "$empty"
+
+  missing=$(CONTENTION_CENSUS_LOADAVG="$tmp/loadavg" CONTENTION_CENSUS_MEMINFO="$tmp/meminfo" \
+            CONTENTION_CENSUS_DOCKER="$tmp/definitely-not-here" "$0" 2>&1)
+  check "absent docker says unavailable" "compose_status=unavailable reason=docker-not-found" "$missing"
+  check "absent docker reports unknown, not zero" "compose_projects=unknown" "$missing"
+  refute "absent docker never reports a zero count" "compose_projects=0" "$missing"
+
+  broken=$(CONTENTION_CENSUS_LOADAVG="$tmp/loadavg" CONTENTION_CENSUS_MEMINFO="$tmp/meminfo" \
+           CONTENTION_CENSUS_DOCKER="$tmp/docker-broken" "$0" 2>&1)
+  check "dead daemon says unavailable" "compose_status=unavailable reason=docker-ps-failed" "$broken"
+  refute "dead daemon never reports a zero count" "compose_projects=0" "$broken"
+
+  # Same discipline for the host files.
+  noload=$(CONTENTION_CENSUS_LOADAVG="$tmp/nope" CONTENTION_CENSUS_MEMINFO="$tmp/nope" \
+           CONTENTION_CENSUS_DOCKER="$tmp/docker-empty" "$0" 2>&1)
+  check "missing loadavg is reported, not silently skipped" "load_status=unavailable reason=no-loadavg" "$noload"
+  check "missing meminfo is reported, not silently skipped" "mem_status=unavailable reason=no-meminfo" "$noload"
+
+  printf 'MemTotal:       16000000 kB\n' >"$tmp/meminfo-partial"
+  partial=$(CONTENTION_CENSUS_LOADAVG="$tmp/loadavg" CONTENTION_CENSUS_MEMINFO="$tmp/meminfo-partial" \
+            CONTENTION_CENSUS_DOCKER="$tmp/docker-empty" "$0" 2>&1)
+  check "unparsable meminfo is reported" "mem_status=unavailable reason=unparsable-meminfo" "$partial"
+
+  # A census must never be the thing that fails a caller's verification.
+  set +e
+  CONTENTION_CENSUS_LOADAVG="$tmp/nope" CONTENTION_CENSUS_MEMINFO="$tmp/nope" \
+    CONTENTION_CENSUS_DOCKER="$tmp/docker-broken" "$0" >/dev/null 2>&1
+  rc=$?
+  set -e
+  checks=$((checks + 1))
+  if [ "$rc" -ne 0 ]; then
+    fails=$((fails + 1))
+    printf 'FAIL: census exits 0 even when every source is unavailable (got %s)\n' "$rc"
+  fi
+
+  if [ "$fails" -eq 0 ]; then
+    printf 'contention-census: self-test OK (%s checks)\n' "$checks"
+    return 0
+  fi
+  printf 'contention-census: self-test FAILED (%s/%s checks failed)\n' "$fails" "$checks"
+  return 1
+}
+
+case "${1:-}" in
+  --self-test) self_test ;;
+  -h | --help)
+    sed -n '2,20p' "$0"
+    ;;
+  '') run_census ;;
+  *)
+    printf 'contention-census: unknown argument: %s\n' "$1" >&2
+    printf 'Fix: run `contention-census` with no arguments, or `--self-test`.\n' >&2
+    exit 2
+    ;;
+esac

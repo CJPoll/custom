@@ -631,7 +631,18 @@ test defect — and both a false red and a false green have cost real loops:
   suite, nothing else running) before you read it as red. File a flaky-test
   ticket only for a flake that SURVIVES an isolated re-run — a self-induced one
   is yours to avoid, not the lane's to drain (PT-1244, PT-1319→1322, PT-1318,
-  PT-1311).
+  PT-1311). **Two kinds of load, two owners.** Load YOU created — a second
+  build/test invocation against your own worktree, an emulator, capture loops —
+  is yours to isolate against and never to file. Load your SIBLING captains
+  created is NOT: you do not command them, so "re-run isolated" is unsatisfiable
+  and the finding otherwise belongs to nobody. Run
+  `~/dev/custom/ai/bin/contention-census` at the failure AND at the re-run, and
+  put one `CONTENTION:` line in your report carrying both censuses, the stage,
+  and the failure string; the admiral lowers the fleet's cap off that line. **An
+  environment attribution with no census is a masked defect** — "it passed on
+  re-run" is exactly what a real flake and a real bug also produce. The census
+  adds evidence and an owner; it never excuses the red, which still blocks and
+  is still reported as a surviving finding.
 - **Run each gate as its own bounded foreground command — never one
   chained/backgrounded blob.** A combined `typecheck && lint && test` pushed to
   the background can exceed the tool timeout: the foreground process is killed
