@@ -95,19 +95,46 @@ what lets fleet-control transitions (an admiral spinning a captain down early),
 retraction messages, and future sources all be ordinary events matched by
 ordinary rules, rather than special cases in code.
 
-An event whose `type` matches **no** enabled rule MUST be **dead-lettered and
+An event that is **handled by no enabled rule** MUST be **dead-lettered and
 persisted** to queryable storage for audit and debugging. It MUST NOT be silently
 dropped, and it MUST NOT be **merely counted** — a bare counter cannot answer
 "which event, of what type, for which owner, went unmatched?", and that question
 is exactly the failed-lookup discipline (`~/dev/custom/CLAUDE.md` → *A failed
 lookup must never look like an empty one*): an unmatched event is a legitimate
 miss, and a legitimate miss MUST remain observable as the specific thing it was.
+
+**"Handled" is broader than "matched by a rule declared on this `type`".** A
+membership-derived transition (`lane.member.added` / `lane.member.retracted`) is
+produced by a membership rule that is declared on a **different** `type` (a flaky
+lane is declared on `notion.ticket.*`), so that rule is not among the rules that
+*match* the derived event — yet the transition **is delivered**: it drives the
+membership rule's own delivery (see *Two rule kinds*). Therefore **a
+membership-derived transition emitted by a membership rule is CONSIDERED HANDLED
+by that originating rule** — its own delivery is the handling — and MUST NOT be
+dead-lettered because no `notify` rule matched it. The dead-letter MUST fires
+**only when NO rule handled the event at all**: neither the originating
+membership rule's delivery, nor any additional `notify` rule the owner declared
+on `lane.member.*` (such a rule MAY match and fire **in addition**). Without this
+distinction, an owner with a single flaky-lane rule and no
+`notify`-on-`lane.member.*` rule would dead-letter **every** add/retract it
+successfully delivered — flooding the store (whose whole purpose is "which event
+went **unmatched**?") with successful deliveries and their full Path-2 payloads.
+"Delivered" and "unmatched" are disjoint: a correctly-delivered transition is
+never dead-lettered.
+
 The dead-letter store is **per-account** and holds a full event payload, which
 may carry third-party content, so it is **Path-2 untrusted** when read into an
-LLM (see *Trust posture — two paths*) and its **retention and read-scope are
-governed by the product data-retention policy** — read access is the owning
-account's, and entries age out under that policy rather than being kept
-unbounded.
+LLM (see *Trust posture — two paths*), and read access is the owning account's.
+Its retention follows the **same doctrine as the sibling inbox contract**
+(`ai/contracts/athena-inbox.md` → *Retention* → *The principle*), not a
+wholesale age-out: a dead-lettered event is the canonical **never-delivered,
+never-read** item — and the sole evidence of the miss this section insists stay
+observable — so retention MUST NOT destroy it until it has been **read/triaged**.
+An unread dead-letter entry has an **unbounded** lifetime ("unread bytes are
+mail, and mail is kept until it is delivered, however old it gets"); age-out under
+the product data-retention policy applies **only after** it has been read/triaged.
+Destroying an unread miss would erase the very observability the dead-letter store
+exists to provide.
 
 ### Enumerated first-pass event types
 
@@ -243,11 +270,27 @@ A scheduled source poll, used **only where a source lacks an adequate webhook**,
 or as a **low-frequency reconciliation backstop** for a webhook source (a
 periodic snapshot of the current in-scope set, to catch entities that existed
 before the subscription and events dropped during downtime). A poller keeps a
-server-side cursor and emits one event per new hit, deduped by the same
-`idempotency_key` machinery as the primary path. A reconciliation backstop is
-what makes "nothing is queued" **provably** true rather than merely unobserved
-(failed-lookup discipline), so it MUST NOT be conflated with the primary trigger
-in dedupe or in reporting.
+server-side cursor and emits one event per new hit.
+
+**A reconciliation backstop separates DELIVERY dedupe from its RUN audit**, and
+the two MUST NOT be conflated:
+
+- **Delivery dedupes against the primary path by the same `idempotency_key`
+  machinery.** A backstop hit on an entity a verified webhook already delivered
+  produces **no duplicate delivery** — the primary path's delivery wins and the
+  backstop hit is suppressed at delivery. (This is what "same dedupe machinery"
+  means.)
+- **The reconciliation RUN is recorded and reported on its own**, never folded
+  into the primary path's dedupe. Each run emits its own audit signal — "checked
+  the in-scope set, found it consistent" or "found N gaps the webhook path
+  missed" — and that signal MUST survive **even when every individual hit deduped
+  away at delivery**. Suppressing a hit's *delivery* MUST NOT erase the *run's*
+  evidence that it checked and found nothing missing. (This is what "not
+  conflated in reporting" means.)
+
+This split is what makes "nothing is queued" **provably** true rather than merely
+unobserved (failed-lookup discipline): the backstop's value is the run-level "I
+checked" signal, which a delivery-level dedupe would otherwise destroy.
 
 ### Harness-emit
 
@@ -330,7 +373,10 @@ retry.
   lane-membership store (see *Membership rules and the lane-membership store*).
   Each relevant event → enrich current state → re-evaluate the predicate → diff
   against the stored set → emit an `add` or `retract` transition, which drives
-  the delivery.
+  the delivery. That emitted transition is **considered handled by this
+  originating membership rule** (its own delivery is the handling), so it is
+  **never dead-lettered** merely because no separate `notify` rule matches it
+  (see *The event taxonomy is open*).
 
 ### The predicate grammar
 
