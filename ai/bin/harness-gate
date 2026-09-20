@@ -52,6 +52,10 @@ STATIC_CHECKS = [
   ["main-session-policy self-test", %w[ai/hooks/main-session-policy.self-test.sh]],
   ["forge-identity-guard self-test", %w[ai/hooks/forge-identity-guard.self-test.sh]],
   ["forge-auth-guard self-test", %w[ai/hooks/forge-auth-guard.self-test.sh]],
+  # workflow-phase-guard's self-test is a dedicated .self-test.sh (NOT the
+  # false-green `<hook>.sh --self-test` form the gate's own self-test forbids);
+  # the hook's inline --self-test just execs this file.
+  ["workflow-phase-guard self-test", %w[ai/hooks/workflow-phase-guard.self-test.sh]],
   ["harness-event self-test",   %w[ai/hooks/harness-event.self-test.sh]],
   ["athena-inbox-poll self-test", %w[ai/hooks/athena-inbox-poll.self-test.sh]],
   ["check-generic-skills",      %w[ai/bin/check-generic-skills]],
