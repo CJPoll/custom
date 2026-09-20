@@ -100,11 +100,87 @@ notification. Its envelope is:
 ### The event taxonomy is open
 
 The taxonomy is **open and extensible**: any state-based change can become an
-event, and new sources and new fleet events add new `type`s **without a schema
-change**. `type` is a namespaced dotted string precisely so this holds. This is
+event, and new sources and new fleet events add new `type`s. Adding a new `type`
+**value** within an already-modeled family is **config, no schema change**;
+adding a genuinely **new type family** is a **declared increment** that declares
+its model — its payload schema, identity field, revision token, origination
+membership, and enrichment posture (see *Extending the taxonomy — a new type
+family declares its model*). `type` is a namespaced dotted string precisely so this holds. This is
 what lets fleet-control transitions (an admiral spinning a captain down early),
 retraction messages, and future sources all be ordinary events matched by
 ordinary rules, rather than special cases in code.
+
+### Extending the taxonomy — a new type family declares its model
+
+The open taxonomy (*The event taxonomy is open*) extends in **two shapes**,
+which cost differently:
+
+- **A new `type` VALUE within an already-modeled family** — one that reuses an
+  existing family's closed payload schema, identity field, and revision basis
+  (e.g. a further `notion.ticket.*` verb over the enriched-ticket model of
+  *Payload fields and their types per event type*) — is **config, no schema
+  change and no code change**: it inherits that family's payload schema, its
+  idempotency basis and `subject` (see *Idempotency is per (event, rule)* and
+  *Enabled flag and dedupe window*), and its enrichment posture, and it need
+  only be added to its ingress kind's **finite registered origination set** (see
+  *Which event types an ingress kind may originate*), which every type already
+  requires.
+
+- **A genuinely NEW type FAMILY** — one with no already-modeled payload schema
+  (`fleet.*` is the roadmap instance — see *Harness-emit*; a future forge source
+  natively supplying deltas is another) — is a **declared increment, not a free
+  addition**. The first-pass machinery this contract instantiates for the
+  enumerated families is defined **per family**, so registering a new family is
+  **config, not code, but NOT "nothing to declare"**: the family MUST declare,
+  at registration, the same five things the enumerated families already have, or
+  the guarantees this contract makes silently do not hold for it —
+
+  1. **Its closed payload schema** — the `payload.*` fields it carries, each
+     with a declared **type** and **cardinality**, exactly as *Payload fields
+     and their types per event type* declares for the enumerated types. This is
+     what rule save-time field-path / type / cardinality validation binds
+     against (see *The predicate grammar* → *Evaluation contract*); without it,
+     no `payload.*` leaf on the family is authorable.
+  2. **Its identity field** — the change-invariant handle identifying the
+     subject the event is about (the `entity_id` analogue for a persistent
+     entity; or, for a transient event never updated, the per-event identity as
+     `slack.message.received` uses `payload.event_id`). This is the **`subject`**
+     of the dedupe window (see *Enabled flag and dedupe window*).
+  3. **Its change/revision token** — the discriminator separating two distinct
+     changes to the same identity (the `revision` analogue), **or** an explicit
+     statement that the event is transient and never updated, so identity alone
+     is unique and no revision token exists (as for `slack.message.received`).
+     Items 2 and 3 together are the family's **event-level idempotency basis**
+     (see *Idempotency is per (event, rule)*). A family with neither declared
+     has an **undefined** idempotency basis and an **undefined** `(rule_id,
+     subject)` dedupe grain, and MUST NOT fall back to `rule_id` alone — the
+     silent cross-subject miss this contract names a defect (see *Enabled flag
+     and dedupe window*).
+  4. **Its origination membership** — which ingress kind may originate it, added
+     to that ingress's **finite registered origination set** (see *Which event
+     types an ingress kind may originate*). A source-emitted family is
+     verified-ingress-only; a `fleet.*` family is harness-emit-only.
+  5. **Its enrichment posture** — whether its ingress enriches a metadata-only
+     signal before emitting (declaring the least-privilege, read-only, on-demand
+     fetch per *Sender verification and payload completeness*), or — like
+     harness-emit — does not enrich at all. Harness-emitted families (`fleet.*`)
+     do not enrich.
+
+  Declaring these is a **registration-time config act** (no code change) and
+  introduces **no platform routing, membership, or per-change sequence state** —
+  it is static per-family registration config, the same nature as the
+  origination set. What it forbids is *originating or routing* a family the
+  platform has no model for, which would otherwise route with an undefined
+  idempotency basis, an undefined dedupe `subject`, and an unauthorable payload
+  schema — three instances of the failed-lookup class this contract legislates
+  against everywhere (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never
+  look like an empty one*).
+
+  The **registration mechanism** for a new family is a **roadmap increment** (it
+  lands with harness-emit and any future delta-supplying source — see
+  *Harness-emit*); this section fixes **what such a registration MUST declare**,
+  so the increment is a natural later addition and not a rewrite — exactly as the
+  harness-emit envelope is specified now though its ingress is roadmap.
 
 ### Event disposition and dead-letter
 
@@ -381,13 +457,13 @@ declared `changed_properties` collection, e.g.
 buy no routing power and is not minted. (Finer separate types are roadmap; they
 would land with their own payload-schema rows only if a real need appears.) A
 routing rule authored against one of those non-existent finer types fails loud at
-**save** time — no new error class: a finer type has no payload schema, so any
-`payload.*` leaf is the existing unknown-path save-time HARD ERROR (see *The
-predicate grammar* → *Evaluation contract*), with a `Fix:` that redirects to
-`changed_properties`: `Fix: unknown event type '<type>' — the first pass emits no
-per-property ticket types (no notion.ticket.status_changed/labels_changed/
-assignment_changed). Declare notion.ticket.updated and filter on which property
-changed with a predicate leaf {"field":"payload.changed_properties","op":"contains","value":"<property-id>"}.`
+**save** time on **two** independent grounds, so it is caught **whatever its
+predicate**: (1) the **declared-type-membership** check — a finer type is not a
+registered type, an unknown-`event_type` save-time HARD ERROR (see *The predicate
+grammar* → *Evaluation contract*), which fires **even for an envelope-only
+predicate**; and (2) for a predicate that additionally binds a `payload.*` leaf,
+the existing unknown-path save-time HARD ERROR (a finer type has no payload
+schema, so any `payload.*` leaf is unbindable). The redirecting `Fix:` is: `Fix: unknown event type '<type>' — the first pass emits no per-property ticket types (no notion.ticket.status_changed/labels_changed/assignment_changed). Declare notion.ticket.updated and filter on which property changed with a predicate leaf {"field":"payload.changed_properties","op":"contains","value":"<property-id>"}.`
 
 **Direction is NOT emitted for a metadata-only source; the consumer derives it.**
 "A label was *added*" vs "*removed*", "an assignee was *set*" vs "*cleared*" are
@@ -570,6 +646,16 @@ The event-level key basis is defined for **every** enumerated type:
   to one idempotency key and silently drop the second delivery. Supply the source
   revision indicator.`
 
+  The basis above is defined for **every enumerated (first-pass) type**. A **new
+  type family** (a `fleet.*` family, a future delta-supplying source) has **no**
+  idempotency basis until it **declares** one — its identity field plus its
+  change/revision token, or an explicit 'transient, never updated, identity alone
+  is unique' statement — as part of registering the family (see *Extending the
+  taxonomy — a new type family declares its model*). A family whose basis is
+  undeclared MUST NOT be originated or routed, and MUST NOT fall back to
+  `rule_id`-alone dedupe — the silent cross-subject miss named in *Enabled flag
+  and dedupe window*.
+
   This bounds `revision` to what a **stateless** platform can derive from a
   source-supplied token; the platform never synthesizes a per-change sequence
   (that would require platform state — see the roadmap follow-up **DND-257**
@@ -665,7 +751,12 @@ platform holds no set and reconciles none.
 primitive, authenticated by the **machine token**; the owner is resolved
 server-side from that token (never from the payload). It carries no notification
 logic — it only produces an event. (Roadmap increment; the envelope is specified
-now so it is a natural later increment, not a rewrite.)
+now so it is a natural later increment, not a rewrite. The `fleet.*` family is
+itself a **new type family**: the roadmap increment that lands harness-emit also
+**declares the fleet family's model** — its payload schema, its identity field,
+its change/revision token (or its transient-identity statement), its origination
+membership, and its no-enrichment posture — per *Extending the taxonomy — a new
+type family declares its model*.)
 
 ### Which event types an ingress kind may originate
 
@@ -695,10 +786,14 @@ only the specific, enumerated `type` values registered to it. This keeps
 origination — and therefore the set of distinct `(owner, type)` keys any store can
 accrue (see *Event disposition and dead-letter* and *Sender verification and
 payload completeness*) — bounded by a **registration-time config quantity**, never
-by traffic. It **preserves the open taxonomy** (see *The event taxonomy is open*):
-a new `type` is added by **registering** it — config, no schema change and no code
-change — exactly as before; what is now forbidden is *originating* a `type` no
-ingress registration enumerated. This adds **no per-event routing state**: it is a
+by traffic. It **preserves the open taxonomy** (see *The event taxonomy is open* and
+*Extending the taxonomy — a new type family declares its model*): a new `type`
+**value within an already-modeled family** is added by **registering** it into
+the origination set — config, no schema change and no code change — exactly as
+before; a **new type family** is added by **declaring its model** (payload
+schema, identity field, revision token, origination membership, enrichment
+posture) — config, not code, but **not "nothing to declare."** What is forbidden
+either way is *originating* a `type` no ingress registration enumerated. This adds **no per-event routing state**: it is a
 membership test against static per-ingress registration config, the same check
 this section already mandates, tightened from prefix-membership to
 set-membership. It is the **ingress-origination** check, distinct from the router
@@ -730,10 +825,7 @@ The first-pass permitted-origination rule:
   `fleet.*` namespace bounds what MAY be registered; origination is bounded to the
   **registered members** of it, not the open prefix (see the finite-set rule
   above). An event whose `type` is a well-formed but unregistered `fleet.*` value
-  is rejected at ingress: `Fix: harness-emit is not permitted to originate type
-  '<type>' — it may originate only the fleet.* type values registered to this
-  machine token. Register the type (config, no schema change) or correct the
-  emitter.`
+  is rejected at ingress: `Fix: harness-emit is not permitted to originate type '<type>' — it may originate only the fleet.* type values registered to this machine token. Register the type into this token's origination set (config, no code change); if it belongs to a fleet.* family the platform has no model for yet, that family MUST first declare its payload schema, identity field, revision token, origination membership, and enrichment posture (see 'Extending the taxonomy — a new type family declares its model'). Otherwise correct the emitter.`
 
 This is the origination dual of the `source`-is-not-authz rule: `source` governs
 what a label may *earn*, and this governs what an ingress may *mint*. Both are
@@ -890,7 +982,13 @@ Two owner-facing schema fields carried by every rule:
   `0` leaves idempotency untouched. Keying by `(rule_id, subject)` reads the `subject` from the
   event in hand and keeps only the window's **existing short-lived per-window suppression state** —
   it introduces **no** membership set, held state, or routing state; it is the same state the
-  window already holds, keyed one component finer.
+  window already holds, keyed one component finer. `subject` is defined above for
+  the enumerated families — **`payload.entity_id`** for the Notion entity types,
+  **`payload.event_id`** for `slack.message.received`. A **new type family**
+  declares its own `subject` (its change-invariant identity field) as part of
+  registering the family (see *Extending the taxonomy — a new type family declares
+  its model*); a family with no declared `subject` has an **undefined** `(rule_id,
+  subject)` grain and MUST NOT fall back to `rule_id` alone.
 
 ### Fan-out: every match fires
 
@@ -1049,6 +1147,27 @@ ALSO typed to the field's declared TYPE*), bounded depth/size. Specifically:
   runtime) and a save-time reject (an unknown field-path) are the two distinct
   dispositions, and an implementation MUST NOT collapse the unknown path into the
   runtime `absent` case.
+- **An UNKNOWN declared `event_type` is a HARD ERROR at rule-SAVE time,
+  independent of the predicate.** Every `type` in a rule's declared
+  `event_type(s)` MUST be a member of the platform's **registered/known type
+  set** — an enumerated first-pass type, or a type whose family has declared its
+  model (see *Extending the taxonomy — a new type family declares its model*). A
+  declared type outside that set — a misspelling like `notion.ticket.updatd`, or
+  a non-existent finer type like `notion.ticket.status_changed` — is rejected at
+  save with a `Fix:`. This check does **not** depend on the predicate binding a
+  `payload.*` leaf: an **envelope-only** predicate (e.g.
+  `{field:"event.type",op:"in",value:[…]}`, the second worked example in
+  *Predicates match the present*) binds only envelope fields, which exist for
+  every type, so field-path validation alone would let a rule with a misspelled
+  declared type **save cleanly and then match nothing forever** — a
+  wrongly-computed key indistinguishable from a rule that legitimately matched
+  nothing, the exact failed-lookup class (`~/dev/custom/ai/CLAUDE.md` → *A failed
+  lookup must never look like an empty one*). It is a **rule save-time**
+  (authoring) check, distinct from the router's runtime rule that an unknown
+  well-formed `type` which *reaches routing* is **dead-lettered, never rejected**
+  (see *Enumerated first-pass event types* and *Event disposition and
+  dead-letter*): a rule cannot be authored against an unknown type; an event that
+  arrives carrying one still dead-letters. `Fix: unknown event type '<type>' in this rule's event_type(s) — it is not a member of the registered type set. Correct the spelling; or, for a genuinely new type, declare its family's model before authoring rules against it (see 'Extending the taxonomy — a new type family declares its model'). For a per-property ticket route, declare notion.ticket.updated and filter on {"field":"payload.changed_properties","op":"contains","value":"<property-id>"}.`
 - **An operator incompatible with its field's declared CARDINALITY is a HARD
   ERROR at rule-SAVE time** — a collection operator (`contains` / `intersects`)
   on a scalar field, or a scalar operator (`eq` / `ne` / `lt` / `lte` / `gt` /
@@ -1691,10 +1810,13 @@ wins**. The roles are those of *Conformance language* (ingress / router / adapte
   stable `rule_id` (*Idempotency is per (event, rule)*; *Rule identity — `rule_id`*);
 - applies the dedupe window at its declared **`(rule_id, subject)`** grain (*Enabled flag and
   dedupe window*);
-- validates every rule at **save time** — field-paths against the union of declared types'
-  schemas, operator cardinality, operator/literal type, presence-operator `value` — as **hard
-  errors with a `Fix:`**, never a silent eval-time non-match (*The predicate grammar*; *Evaluation
-  contract*);
+- validates every rule at **save time** — **each declared `event_type` is a
+  member of the registered type set** (predicate-independent, so an envelope-only
+  rule with a misspelled type cannot save dark), field-paths against the union of
+  declared types' schemas, operator cardinality, operator/literal type,
+  presence-operator `value` — as **hard errors with a `Fix:`**, never a silent
+  eval-time non-match (*The predicate grammar*; *Evaluation contract*; *Extending
+  the taxonomy — a new type family declares its model*);
 - evaluates predicates **purely, totally, deterministically, side-effect-free**, matching only the
   present (*Predicates match the present*; *Evaluation contract*);
 - stamps a rule's `owner` and platform-assigns its `rule_id` from platform/authenticated identity,
