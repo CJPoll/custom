@@ -156,7 +156,12 @@ per-`(event, rule)`:
    the **generic-webhook egress guard** — the resolved destination is not on the
    owner allowlist, or resolves to a blocked (loopback / link-local / private /
    metadata) range (see *The generic-webhook egress model*). A REFUSED delivery is
-   **recorded and countable as REFUSED, never a silent drop**.
+   **recorded in the refused-delivery store — one exemplar-plus-count per
+   `(owner, rule_id, refusal-cause)` — and reported to the owner** (see *Delivery refusal — the
+   refused-delivery store*): never a silent drop, and never a bare counter. Both its triggers are
+   **permanent** — the rule keeps matching and refusing on every delivery until the owner acts — so,
+   exactly like a terminal FAILED delivery, REFUSED gets sibling-consistent observability (an
+   exemplar the store *names*, plus an owner report), not merely a count.
 5. **FAILED (terminal)** — predicate TRUE, delivery attempted, retries exhausted /
    adapter 5xx / credential revoked. Recorded in the **failed-delivery store**
    (below), **never** dead-lettered as UNMATCHED.
@@ -172,8 +177,9 @@ per-`(event, rule)`:
 
 **Each Level-2 outcome that is not DELIVERED is individually observable** —
 FILTERED via ordinary accounting, SUPPRESSED per *Enabled flag and dedupe window*,
-REFUSED (both the target-bind re-assertion per *Mechanism vs config boundary, and
-both-ends-or-dark* and the egress guard per *The generic-webhook egress model*), FAILED per the failed-delivery store, COLLAPSED as the
+REFUSED via the **refused-delivery store and an owner report** (see *Delivery refusal — the
+refused-delivery store*), covering both the target-bind re-assertion (per *Mechanism vs config
+boundary, and both-ends-or-dark*) and the egress guard (per *The generic-webhook egress model*), FAILED per the failed-delivery store, COLLAPSED as the
 `collapsed-by-idempotency-key` outcome per *Idempotency is per (event, rule)* — so
 **no matched delivery is ever a silent drop.**
 
@@ -282,6 +288,66 @@ miss.
   failed-delivery record is that key's terminal state. The idempotency key store is
   separate, so a later re-processing of the same `(event, rule)` still dedupes and
   does **not** manufacture a second failure record.
+
+#### Delivery refusal — the refused-delivery store
+
+A **REFUSED** matched delivery (Level-2 outcome 4 — predicate TRUE, but a delivery-time policy
+check refused the delivery before it left the platform) MUST be recorded in a **refused-delivery
+store**, **distinct from the dead-letter store, the failed-delivery store, and the
+ingress-failure store**, and MUST be **reported to the owner**. A REFUSED delivery *matched* a
+rule, so it is **never** dead-lettered as UNMATCHED; and no attempt reached the destination, so
+it is **never** a terminal FAILED — no per-`(event, rule)` retry budget is consumed, and a
+refused destination MUST NOT be retried.
+
+Both REFUSED triggers are **persistent**, which is exactly why a bare counter is insufficient —
+the condition holds for the same rule until the owner acts:
+
+- **Target-bind re-assertion refusal** — the target machine no longer resolves to the rule's
+  owner (deregistered or re-owned; see *Mechanism vs config boundary, and both-ends-or-dark*). The
+  rule matches and refuses on **every** delivery until it is re-authored.
+- **Generic-webhook egress refusal** — the resolved destination is not on the owner allowlist, or
+  resolves to a blocked (loopback / link-local / private / metadata) range (see *The
+  generic-webhook egress model*). The rule matches and refuses on **every** delivery until the
+  allowlist or destination is corrected.
+
+In both cases the rule **IS matching**, so the "a rule matching **zero** over a long window MUST
+be reported" backstop (see *Mechanism vs config boundary, and both-ends-or-dark*) does **not**
+fire, and a count alone cannot say **which rule → which target/destination** was refused, or
+**why**. The owner's configured delivery then silently never arrives — the failure this contract
+calls *strictly more urgent* than a zero-match rule (see *Terminal delivery failure — the
+failed-delivery store*).
+
+- **Grain — one exemplar-plus-count per `(owner, rule_id, refusal-cause)`**, mirroring the
+  failed-delivery store and bounding the store by a **structural quantity** — distinct `(rule,
+  refusal-cause)` pairs per owner, a finite set — **independent of traffic volume**.
+  `refusal-cause` is one of the two trigger classes above (target-bind re-assertion /
+  generic-webhook egress). The **exemplar** is the first-seen refused delivery's **full event
+  payload plus the refusal detail** (cause class + adapter + the target/destination that was
+  refused), which alone answers "which delivery, of which rule, to which target, was refused, and
+  why?". Subsequent refusals of the same `(owner, rule_id, refusal-cause)` **increment a monotonic
+  count** and update **last-seen**, storing **no** new payload. A revoked binding refusing a
+  million deliveries collapses to one exemplar + count 1,000,000, not a million rows.
+- **Never merely counted; observable.** As with the sibling stores, the exemplar is retained so
+  the store *names* the refused delivery; the count is added scale metadata, never a replacement.
+  The exemplar payload carries third-party content, so the record is **Path-2 untrusted** when
+  read into an LLM (see *Trust posture — two paths*), and read access is the **owning account's**
+  only.
+- **Reported, not merely stored.** REFUSED MUST be **reported to the owner, never left silently
+  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count> refused deliveries
+  to <adapter>:<target> (refusal: <cause>) — for a target-bind refusal, re-author the rule against
+  a machine registered to its owner; for a generic-webhook egress refusal, correct the owner
+  allowlist or the destination. See the refused-delivery store exemplar for the first-seen event.`
+- **Retention — the never-destroy-unread doctrine applies, made safe by the grain**, exactly as
+  the dead-letter, failed-delivery, and ingress-failure stores (see *Event disposition and
+  dead-letter*): an un-triaged refused-delivery exemplar has an **unbounded** lifetime (it is the
+  sole evidence of the miss); age-out under the product data-retention policy applies **only
+  after** it has been read/triaged; the per-`(owner, rule_id, refusal-cause)` grain bounds it to
+  **at most one unread exemplar per pair**. **The store carries no cap or TTL number in this
+  contract** — any operational cap/TTL is ops/owner config, explicitly outside this contract's
+  MUST surface.
+- **No routing state.** The refused-delivery store is **per-account exemplar-plus-count AUDIT
+  data**, exactly like the three existing stores; it holds no membership set and no per-change
+  sequence/routing state, and adds none.
 
 ### Enumerated first-pass event types
 
@@ -679,14 +745,45 @@ no webhook produced.
 ## Handling rules — fan-out, predicate-driven, config not code
 
 A rule is **config the platform evaluates, never executable code**. A rule
-carries: the `event_type(s)` it applies to, its **predicate** (see *The predicate
-grammar*), its **adapter + target** (see *Delivery adapters* and
-*Mechanism vs config boundary, and both-ends-or-dark*), its **template + format** (see *Templating and the
-per-adapter Escaper contract*), and its **enabled flag + dedupe window** (see
-*Enabled flag and dedupe window*). There is **one** rule kind — a stateless
+carries: a platform-assigned **`rule_id`** (see *Rule identity — `rule_id`*), the
+`event_type(s)` it applies to, its **predicate** (see *The predicate grammar*), its **adapter +
+target** (see *Delivery adapters* and *Mechanism vs config boundary, and both-ends-or-dark*), its
+**template + format** (see *Templating and the per-adapter Escaper contract*), and its **enabled
+flag + dedupe window** (see *Enabled flag and dedupe window*). There is **one** rule kind — a stateless
 routing/notify rule — so a rule carries no `kind` discriminator and no membership
 fields. Every field named here has a normative section behind it; there are no
 dangling schema entries.
+
+### Rule identity — `rule_id`
+
+Every rule carries a **`rule_id`**: a **platform-assigned**, per-account-unique identifier,
+minted once when the rule is **created** and **stable for the entire life of the rule**. It is
+the field the per-`(event, rule)` idempotency key combines with the event-level key (see
+*Idempotency is per (event, rule)*), and the field the failed-delivery and refused-delivery
+stores key on (see *Terminal delivery failure — the failed-delivery store* and *Delivery refusal
+— the refused-delivery store*). Those keys are only as stable as `rule_id`, so its stability is a
+**correctness MUST, not a convenience**:
+
+- **An edit preserves `rule_id`.** Editing any other field of a rule — predicate, adapter +
+  target, template + format, `enabled`, dedupe window, or `event_type(s)` — MUST retain the
+  **same** `rule_id`. Minting a new id on edit would re-key every prior `(event, rule)`
+  idempotency record, so deliveries already deduped as received would **re-fire**, breaking the
+  `(event, rule)`-grain dedupe guarantee across the edit; it would also orphan the rule's
+  failed-delivery and refused-delivery exemplars, hiding an ongoing miss behind a fresh key.
+- **Only delete + recreate mints a new `rule_id`.** A deleted rule's id is never reused; a
+  recreated rule is a new rule with a new id and a fresh idempotency/store history. This is the
+  one sanctioned way a rule's id changes, and it is explicit.
+- **`rule_id` is platform-assigned, never caller-supplied** — like `owner` (see *Rule ownership
+  is stamped from the authenticated author*), it is not read from the request body. A create
+  request that supplies a `rule_id`, or an edit that attempts to change one, is refused with a
+  `Fix:`. This keeps the identity the idempotency and store keys depend on under the platform's
+  control, not the caller's.
+
+The refusal for a caller-supplied or edit-mutated `rule_id` carries:
+
+```
+Fix: rule_id is platform-assigned and stable for the life of the rule — it is not accepted from the request body and an edit MUST NOT change it. Remove the rule_id from the request (it is minted at create); to obtain a new id, delete the rule and create a new one.
+```
 
 ### Rule ownership is stamped from the authenticated author
 
@@ -767,15 +864,33 @@ Two owner-facing schema fields carried by every rule:
   from the correctness-guaranteeing `idempotency_key` (see *Idempotency is per
   (event, rule)*). The idempotency key prevents a **re-processed same delivery**
   from firing twice — a correctness guarantee, always in force. The dedupe window
-  is an owner **preference** that collapses **distinct** deliveries of the same
-  rule within a time window into one ("don't DM me about this more than once an
-  hour"). It is a **duration** (unit: **seconds**; **default: `0`** = no
+  is an owner **preference** that collapses **distinct** deliveries **of the same rule about the same
+  subject** within a time window into one ("don't DM me about **this** more than once an hour" —
+  *this* being the subject the deliveries concern, not every subject the rule covers). Its key
+  grain is stated explicitly, like every other collapsing mechanism: **`(rule_id, subject)`**,
+  where **`subject` is the change-invariant identity component of the event-level idempotency
+  basis** (see *Idempotency is per (event, rule)*) — **`payload.entity_id`** for the Notion entity
+  types (the handle stable across a given entity's changes) and **`payload.event_id`** for
+  `slack.message.received` (a transient event carrying no persistent entity, so each message is its
+  own subject). The window deliberately **omits the change-discriminator `revision`** the
+  idempotency key adds — collapsing several edits of the **same** entity within the window is
+  exactly its purpose — so the grain is `(rule_id, subject)`, never `(rule_id, subject, revision)`
+  and never `rule_id` alone. **Rule-only grain is a silent cross-subject miss:** within one window
+  it would drop the owner's notifications about **different** entities, the failed-lookup class
+  this document legislates against — a delivery that matched but never arrived, invisibly
+  (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty one*). For a
+  transient type whose subject is per-event (`slack.message.received`, keyed on `event_id`) no two
+  distinct messages ever share a subject, so the window collapses only the redeliveries idempotency
+  already handles and never suppresses a distinct message. It is a **duration** (unit: **seconds**; **default: `0`** = no
   windowing, every distinct delivery fires). A suppression within the window MUST
   be **observable** — recorded and countable as "suppressed by dedupe window",
   **never a silent drop** (the document legislates against silent drops
   throughout — failed-lookup discipline). The two mechanisms are **orthogonal**:
   the dedupe window never widens or narrows the idempotency key, and a window of
-  `0` leaves idempotency untouched.
+  `0` leaves idempotency untouched. Keying by `(rule_id, subject)` reads the `subject` from the
+  event in hand and keeps only the window's **existing short-lived per-window suppression state** —
+  it introduces **no** membership set, held state, or routing state; it is the same state the
+  window already holds, keyed one component finer.
 
 ### Fan-out: every match fires
 
@@ -1149,8 +1264,9 @@ The generic-webhook adapter (owner-supplied destination) MUST:
 Level-2 REFUSED disposition — not a silent drop, and not a terminal FAILED.** The
 rule matched (predicate TRUE) and the delivery was assembled, but this
 delivery-time policy check refused it before connecting, so it MUST be **recorded
-and countable as REFUSED** (see *Event disposition and dead-letter*, Level-2
-outcome REFUSED), exactly as the target-bind re-assertion is. It is **distinct
+in the refused-delivery store and reported to the owner** (see *Delivery
+refusal — the refused-delivery store*) — never a silent drop and never a bare counter — exactly
+as the target-bind re-assertion refusal is. It is **distinct
 from FAILED (terminal)**: no delivery was attempted against the destination and no
 per-`(event, rule)` retry budget is consumed — a blocked destination MUST NOT be
 retried. The `Fix:` naming the rejected destination (above) is the recorded
@@ -1475,8 +1591,9 @@ Therefore:
      and predicate save-time validation.
   2. **Delivery-time re-assertion.** Before **each** delivery the platform
      re-resolves the target machine's **current** owner and refuses the delivery
-     — **recording it, never a silent drop (this recorded refusal IS the Level-2
-     REFUSED disposition — see *Event disposition and dead-letter*)** — if the
+     — **recording it in the refused-delivery store and reporting it to the owner, never a silent drop
+     (this recorded refusal IS the Level-2 REFUSED disposition — see *Event disposition and
+     dead-letter* and *Delivery refusal — the refused-delivery store*)** — if the
      record is absent, deregistered, or resolves to any account other than the
      rule's owner: `Fix: delivery refused — target machine <id> no longer resolves
      to this rule's owner (deregistered or re-owned). Re-author the rule against a
@@ -1529,3 +1646,75 @@ templating, trust posture, security). The Athena Inbox contract
 and `maildir` kinds, the doorbell, consumption state, tenancy resolution, and the
 Path-2 *Untrusted input* boundary. Where the inbox adapter produces `log` lines,
 it MUST conform to that contract; this contract does not restate or override it.
+
+---
+
+## Conformance checklists
+
+These checklists **introduce no new normative requirement**. Each item **restates an existing
+MUST** defined elsewhere in this contract (cited by section name) so an implementer of a given
+role can self-check; where a checklist item and its home section ever diverge, the **home section
+wins**. The roles are those of *Conformance language* (ingress / router / adapter).
+
+**An ingress is conformant when it:**
+- verifies every inbound webhook's signature over the **raw bytes as received**, constant-time,
+  before anything else, hard-rejecting the unverified with a `Fix:` (*Inbound webhook*; *Sender
+  verification and payload completeness*);
+- stamps each event's `owner` from the **authenticated ingress**, never from the payload, and
+  rejects an event whose owner cannot be resolved (*The event*);
+- originates only the **finite, registered set** of `type` values permitted to its kind, and
+  rejects any other `type` at ingress with a `Fix:` — harness-emit can never synthesize a
+  source-emitted `slack.*`/`notion.*` type (*Which event types an ingress kind may originate*);
+- resolves a metadata-only source by a **least-privilege, read-only, on-demand** enrichment fetch,
+  and on enrichment failure **neither emits un-enriched nor silently drops** — retrying transients
+  under a bounded budget, recording a permanent/exhausted failure in the **ingress-failure store**
+  and **reporting it to the owner**, and mapping a definitive not-found to the identity-only delete
+  path (*Sender verification and payload completeness*);
+- rejects emitting a Notion entity event whose `payload.revision` cannot be resolved, rather than
+  emit one whose idempotency key would silently collapse two changes (*Idempotency is per (event,
+  rule)*);
+- records a reconciliation-backstop **run** on its own, so the "I checked" signal survives even
+  when every hit deduped at delivery (*Poller (fallback only)*).
+
+**The router is conformant when it:**
+- evaluates an event against **all** of the owner's **enabled** rules, firing **every** match
+  independently — no first-match, no ordering, no short-circuit (*Fan-out: every match fires*);
+- scopes the Level-1 HANDLED/UNMATCHED decision to the **event owner's own** rules, dead-letters
+  **UNMATCHED** to the per-`(owner, type)` exemplar-plus-count store (never merely counted, never
+  silently dropped), and never dead-letters a HANDLED event (*Event disposition and dead-letter*);
+- resolves **every** non-DELIVERED Level-2 outcome to its own observable disposition — FILTERED,
+  SUPPRESSED, REFUSED (refused-delivery store + report), FAILED (failed-delivery store + report),
+  COLLAPSED — so no matched delivery is ever a silent drop (*Event disposition and dead-letter*;
+  *Terminal delivery failure — the failed-delivery store*; *Delivery refusal — the refused-delivery
+  store*);
+- dedupes and retries at the **`(event, rule)`** grain using the event-level key combined with the
+  stable `rule_id` (*Idempotency is per (event, rule)*; *Rule identity — `rule_id`*);
+- applies the dedupe window at its declared **`(rule_id, subject)`** grain (*Enabled flag and
+  dedupe window*);
+- validates every rule at **save time** — field-paths against the union of declared types'
+  schemas, operator cardinality, operator/literal type, presence-operator `value` — as **hard
+  errors with a `Fix:`**, never a silent eval-time non-match (*The predicate grammar*; *Evaluation
+  contract*);
+- evaluates predicates **purely, totally, deterministically, side-effect-free**, matching only the
+  present (*Predicates match the present*; *Evaluation contract*);
+- stamps a rule's `owner` and platform-assigns its `rule_id` from platform/authenticated identity,
+  never the request body, and scopes read/list/edit/delete/disable/enable of a rule to its owning
+  account (*Rule ownership is stamped from the authenticated author*; *Rule identity — `rule_id`*).
+
+**A delivery adapter is conformant when it:**
+- is classified as exactly **fixed-destination** or **owner-supplied-destination**, applying the
+  egress/SSRF model to the generic-webhook adapter only (*Fixed-destination vs
+  owner-supplied-destination*; *The generic-webhook egress model*);
+- passes **every** interpolated value through its per-adapter **Escaper** for the surrounding
+  context — the first-pass trusted set is **empty**, so a raw/trusted slot is a save-time hard
+  error — building structured formats as **data then encoded**, never by string concat
+  (*Templating and the per-adapter Escaper contract*);
+- ships **no** new adapter without its escaper and its hostile-payload templating tests
+  (*Per-adapter Escaper contract*);
+- for the inbox adapter, enforces the **owner↔target bind** at save time and re-asserts it at
+  **each** delivery (recording a refusal in the refused-delivery store + owner report), and emits a
+  conformant `log` line carrying the mandatory `v` field (*Mechanism vs config boundary, and
+  both-ends-or-dark*; *The lane channel is a change stream, not the authoritative set*);
+- custodies secrets by **KMS envelope encryption**, decrypting least-privilege at use time for the
+  owning account only, and never logs / argv-exposes / API-exposes a secret (*Secret custody*;
+  *Config vs secret — the encryption boundary*).
