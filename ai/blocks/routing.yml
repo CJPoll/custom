@@ -14,7 +14,7 @@ blocks:
   arch/tdd-workflow:          [architect, captain]
   arch/access-control:        [architect, captain]
   ops/fleet-coordination:     [architect, admiral]
-  ops/forge-identity:         [shipwright, captain]
+  ops/forge-identity:         [shipwright, captain, admiral]
   ops/harness-ia:             [shipwright, architect]
   ops/never-end-turn-waiting: [architect, captain, admiral, shipwright]
   ops/safety-checks:          [architect, admiral, captain, shipwright]
