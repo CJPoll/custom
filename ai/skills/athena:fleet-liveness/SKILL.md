@@ -68,6 +68,14 @@ Two consequences:
   processed; the difference is your live count. Reconcile it against worktree
   activity on every sweep, and settle any doubt about a slot by reading that
   Mission's worktree — never by trusting the bookkeeping you already doubt.
+- **The state log has TWO surfaces; give it both.** A `## Mission state` table —
+  one row per Mission, current state only — and below it a `## Log`, append-only,
+  carrying the narrative: what was decided, why, and what happened. The table
+  answers *where is this Mission now*; the log answers *how did it get here*.
+  Every admiral so far has invented this shape unprompted, which is why it is
+  written down rather than assumed: a run that quietly stops writing the log does
+  not lose the narrative, it relocates it into the table, and the two rules below
+  are what it then breaks.
 - **The Missions table is KEYED BY MISSION: one row per Mission, amended in
   place.** Counting a cap, and resuming, both assume a Mission's status can be
   read off exactly one row. Never append a second row for a Mission already in
