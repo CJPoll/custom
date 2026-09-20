@@ -58,6 +58,7 @@ GUARD_BINS = %w[
   critic-review
   critic-eval
   admiral-eval
+  variant-eval
 ].freeze
 
 def hook_guards

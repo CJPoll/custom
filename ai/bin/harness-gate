@@ -72,6 +72,11 @@ STATIC_CHECKS = [
   # (same rule that keeps critic-eval --run out — a model call pre-commit is
   # wrong on latency, cost, and determinism).
   ["admiral-eval self-test",    %w[ai/bin/admiral-eval --self-test]],
+  # variant-eval's diff/classify/verdict/render + structural containment
+  # self-test is gate-safe (no model, no git); its model-in-loop measurement run
+  # (`--variant … --corpus full`) is NOT declared here — same rule that keeps
+  # admiral-eval/critic-eval --run out of the gate.
+  ["variant-eval self-test",    %w[ai/bin/variant-eval --self-test]],
   # setup-hooks' --self-test is INLINE in the installer (no dedicated
   # **/test/self-test.sh file backs it), so it stays hand-declared here.
   ["setup-hooks self-test",     %w[scripts/setup-hooks --self-test]],
