@@ -239,6 +239,16 @@ So when writing or reviewing such a lookup:
   comparison, or protocol in the same change. The third instance above is two
   further dark channels found only *after* the first fix shipped.
 
+**The inverse bites too, and on this machine it is one command.** A measurement
+that reads *non-empty* when the thing is empty is the same defect pointed the
+other way. Here `ls` is aliased to `ls -hlvF --color --group-directories-first`
+in the profile every agent's Bash tool is initialized from, so `ls -1 <dir> |
+wc -l` emits `total 0` and **counts 1 for an EMPTY directory**. Measured
+2026-09-21: that idiom reported `reports: 1 file(s)` in an admiral's own fleet
+sweep when no captain report existed. Never count or parse `ls` output — use
+`find <dir> -maxdepth 1 -type f | wc -l`, or `command ls` to bypass the alias —
+and when a count drives a decision, print the names it counted.
+
 The standing question to ask of any such code, in review or while writing it,
 is **"what does this do when the input is MISSING rather than wrong?"** — the
 wrong input usually raises; the missing one is what exits 0.
