@@ -34,16 +34,9 @@
 # fail-opened twice and was caught only by the admiral's discretion.
 # `integration-gate` reads these; see athena:merge-boarding -> "The merge bar".
 #
-# Usage:
-#   ai/bin/critic-review [--base BRANCH]   review HEAD's diff vs BRANCH (default
-#                                          origin/HEAD or main); exit 0 pass /
-#                                          2 block / 0 fail-open(loud)
-#   ai/bin/critic-review --verdict-for SHA read the RECORDED verdict for SHA;
-#                                          exit 0 pass / 2 block / 3 no green
-#                                          verdict (none / running / fail-open /
-#                                          stale-tree / malformed -- each named)
-#   ai/bin/critic-review --self-test       verify the decision, parser, and the
-#                                          receipt writer+reader (no model)
+# Usage: see the USAGE constant below, or run `ai/bin/critic-review --help`.
+# It is stated once, there, so the text a caller is shown cannot drift from the
+# text a reader of this header believes.
 #
 # Testing hook: CRITIC_REVIEW_STUB=<file> uses that file as the critic output
 # instead of invoking `claude` (used by --self-test; also handy for a dry run).
@@ -54,6 +47,68 @@ require "fileutils"
 require "time"
 
 CRITIC = "athena-diff-critic"
+
+USAGE = <<~TXT.freeze
+  Usage:
+    ai/bin/critic-review [--base BRANCH]   review HEAD's diff vs BRANCH (default
+                                           origin/HEAD or main); exit 0 pass /
+                                           2 block / 0 fail-open(loud). Invokes
+                                           the model -- slow, and records a
+                                           per-SHA verdict receipt.
+    ai/bin/critic-review --verdict-for SHA read the RECORDED verdict for SHA;
+                                           exit 0 pass / 2 block / 3 no green
+                                           verdict (none / running / fail-open /
+                                           stale-tree / malformed -- each named)
+    ai/bin/critic-review --self-test       verify the decision, parser, and the
+                                           receipt writer+reader (no model)
+    ai/bin/critic-review --help            this text (never invokes the model)
+
+  Testing hook: CRITIC_REVIEW_STUB=<file> uses that file as the critic output
+  instead of invoking `claude` (used by --self-test; also handy for a dry run).
+
+  Exit 64 means the ARGUMENTS were wrong; it is never a verdict.
+TXT
+
+# Flags this tool actually accepts. An argument outside these tables is REFUSED
+# (exit 64), never ignored.
+#
+# It used to be ignored, and that is the defect this table exists to close: the
+# dispatcher fell through to `run(ARGV)` for anything it did not recognise, so a
+# typo'd flag -- or `--help`, which this tool did not implement -- silently
+# started a full model-in-loop review of HEAD instead of erroring. Measured
+# 2026-09-20 (DND-246/H-2): `--help` hung long enough that the captain's brief
+# had to carry "do NOT run `ai/bin/critic-review --help` (hangs)" as prose, and
+# the captain dutifully recorded not running it. A harness that documents a
+# hang is a harness that has not fixed one. Confirmed by this shipwright:
+# `timeout 10 ai/bin/critic-review --help </dev/null` exited 124.
+#
+# This is the CLI-argument instance of ~/dev/custom/CLAUDE.md -> "A failed
+# lookup must never look like an empty one": an unrecognised key must not
+# resolve to the most expensive default action and report nothing about it.
+VALUE_FLAGS = %w[--base --verdict-for].freeze
+BOOL_FLAGS  = %w[--self-test --help -h].freeze
+
+# -> nil when argv is well-formed, else a one-line reason.
+#
+# A value-taking flag's value must be present and must not itself look like a
+# flag, so `--verdict-for` with a forgotten SHA is an error rather than a
+# lookup of the empty string.
+def usage_error(argv)
+  i = 0
+  while i < argv.length
+    arg = argv[i]
+    if VALUE_FLAGS.include?(arg)
+      nxt = argv[i + 1]
+      return "#{arg} requires a value." if nxt.nil? || nxt.start_with?("-")
+      i += 2
+    elsif BOOL_FLAGS.include?(arg)
+      i += 1
+    else
+      return "unrecognised argument #{arg.inspect}."
+    end
+  end
+  nil
+end
 
 def parse_findings(text)
   line = text.to_s.lines.reverse.find { |l| l =~ /^\s*FINDINGS:/i }
@@ -317,6 +372,16 @@ def capture_err
   [res, $stderr.string]
 ensure
   $stderr = prev
+end
+
+def capture_out
+  require "stringio"
+  prev = $stdout
+  $stdout = StringIO.new
+  res = yield
+  [res, $stdout.string]
+ensure
+  $stdout = prev
 end
 
 # The receipt half of the suite. It runs inside a REAL throwaway git repo,
@@ -598,6 +663,39 @@ def run_self_test
     ok &&= (decide([], false, true) == ["fail-open", 0])   # no trailer -> fail-open
     ok &&= (decide([], true, false) == ["fail-open", 0])   # invoke failed -> fail-open
 
+    # ARGUMENT HANDLING -- the model-free dispatch paths.
+    #
+    # These assert the CHEAP outcome, which is the whole point: every case here
+    # must return WITHOUT invoking `claude`. CRITIC_REVIEW_STUB is deliberately
+    # unset for them, so if any case ever fell through to run() again it would
+    # try to spawn the model (and, in this live repo, write a verdict receipt)
+    # rather than quietly passing.
+    ok &&= usage_error([]).nil?                             # bare -> review HEAD
+    ok &&= usage_error(["--base", "main"]).nil?
+    ok &&= usage_error(["--verdict-for", "deadbeef"]).nil?
+    ok &&= usage_error(["--self-test"]).nil?
+    ok &&= !usage_error(["--help"])                         # documented, accepted
+    ok &&= !usage_error(["--bogus"]).nil?                   # typo'd flag refused
+    ok &&= !usage_error(["abc123"]).nil?                    # bare SHA is NOT --verdict-for
+    ok &&= !usage_error(["--verdict-for"]).nil?             # value missing
+    ok &&= !usage_error(["--base"]).nil?
+    ok &&= !usage_error(["--base", "--verdict-for"]).nil?   # value that is a flag
+
+    # --help prints usage, exits 0, invokes nothing.
+    rc, shown = capture_out { main(["--help"]) }
+    ok &&= (rc == 0)
+    ok &&= shown.include?("--verdict-for")
+    ok &&= shown.include?("--self-test")
+
+    # An unrecognised argument is REFUSED (64), not silently reviewed. 64 is
+    # neither 0 (pass) nor 2 (block) nor 3 (no green verdict), so a usage error
+    # can never be mistaken for a verdict by integration-gate.
+    rc, shown = capture_err { capture_out { main(["--bogus"]) }[0] }
+    ok &&= (rc == 64)
+    ok &&= shown.include?("Fix:")
+    ok &&= shown.include?("--bogus")
+    ok &&= (capture_err { capture_out { main(["--verdict-for"]) }[0] }[0] == 64)
+
     # end-to-end via stub. These run inside a THROWAWAY git repo: run() now
     # writes a verdict receipt into $GIT_DIR, and doing that in the live repo
     # would both pollute it and record a stub verdict against a real head.
@@ -643,10 +741,31 @@ def run_self_test
   end
 end
 
-if ARGV.include?("--self-test")
-  exit run_self_test
-elsif (idx = ARGV.index("--verdict-for"))
-  exit verdict_for(ARGV[idx + 1].to_s)
-else
-  exit run(ARGV)
+# Dispatch is a FUNCTION returning an exit code, not a bare `if` at the bottom,
+# so --help and the argument-refusal path are reachable from the self-test. A
+# guard nothing can test is a guard nothing keeps.
+def main(argv)
+  if (err = usage_error(argv))
+    warn "critic-review: #{err}"
+    warn USAGE
+    warn "  Fix: re-run using one of the forms above. An unrecognised argument is refused, not ignored: ignoring it would fall through to a full model-in-loop review of HEAD (slow, and it records a verdict receipt) when you asked for something else."
+    return 64
+  end
+
+  # --help is checked BEFORE --self-test and --verdict-for so it is always the
+  # cheap, model-free answer, whatever else is on the line.
+  if argv.include?("--help") || argv.include?("-h")
+    puts USAGE
+    return 0
+  end
+
+  return run_self_test if argv.include?("--self-test")
+
+  if (idx = argv.index("--verdict-for"))
+    return verdict_for(argv[idx + 1].to_s)
+  end
+
+  run(argv)
 end
+
+exit main(ARGV)
