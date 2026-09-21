@@ -12,6 +12,7 @@
     { "event": "Stop", "matcher": "", "script": "ai/hooks/notify-idle.sh" },
     { "event": "SessionStart", "matcher": "", "script": "ai/hooks/main-session-policy.sh" },
     { "event": "SessionStart", "matcher": "", "script": "ai/hooks/athena-inbox-poll.sh" },
-    { "event": "SessionStart", "matcher": "", "script": "ai/hooks/athena-slack-poll.sh" }
+    { "event": "SessionStart", "matcher": "", "script": "ai/hooks/athena-slack-poll.sh" },
+    { "event": "SessionStart", "matcher": "", "script": "ai/hooks/flaky-marker-sweep.sh" }
   ]
 }

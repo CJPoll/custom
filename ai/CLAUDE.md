@@ -319,8 +319,13 @@ machine's owner AND no flaky-test athena-admiral is currently running** (no fres
    - **Auto-merge** (the athena-admiral's default) and drain the ENTIRE scope.
 3. The athena-admiral removes `~/.claude/flaky-coordinator.lock` when the scope
    query is empty and every touched MR is merged. If a run aborts without
-   clearing it, delete the marker so the lane is not wedged shut (the poll also
-   self-heals a marker older than 12h).
+   clearing it, delete the marker so the lane is not wedged shut. Two
+   activity-independent age-outs also self-heal a marker older than 12h: the
+   walt_ui poll, and — surviving the poll's eventual retirement — the dedicated
+   SessionStart hook `~/dev/custom/ai/hooks/flaky-marker-sweep.sh` (registered in
+   `ai/hooks/registry.json`; overridable marker path via `FLAKY_MARKER_PATH`).
+   Both fire regardless of lane activity, so a stale marker left by a
+   dead/aborted admiral cannot leave the lane silently dark.
 
 **When the SessionStart context reports an athena-admiral is already running**, or
 reports nothing about the flaky lane: take no flaky-lane action — a running

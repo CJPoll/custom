@@ -58,6 +58,11 @@ STATIC_CHECKS = [
   ["workflow-phase-guard self-test", %w[ai/hooks/workflow-phase-guard.self-test.sh]],
   ["harness-event self-test",   %w[ai/hooks/harness-event.self-test.sh]],
   ["athena-inbox-poll self-test", %w[ai/hooks/athena-inbox-poll.self-test.sh]],
+  # flaky-marker-sweep is a SessionStart side-effect hook (DND-277): it ages out
+  # a >12h-stale flaky-coordinator marker, independent of lane activity. Its
+  # self-test is the dedicated .self-test.sh (NOT the false-green FLAG form) and
+  # asserts BOTH the hit (stale swept) and the miss (fresh kept).
+  ["flaky-marker-sweep self-test", %w[ai/hooks/flaky-marker-sweep.self-test.sh]],
   ["inbox-untrusted-guard self-test", %w[ai/hooks/inbox-untrusted-guard.self-test.sh]],
   ["check-generic-skills",      %w[ai/bin/check-generic-skills]],
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],

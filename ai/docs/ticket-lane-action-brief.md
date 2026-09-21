@@ -285,7 +285,7 @@ here and the citations flip.
 | `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel — **to be provisioned in `ai/inbox/registry.json` by DND-247's migration** (walt_ui declares only a `slack` channel there today; see the migration section) |
 | `{{CHANNEL_RESOLUTION}}` | assert the flaky `log` channel resolves in the **live installed** entry the consumer reads — the `$ATHENA_INBOX_ROOT/projects/*.json` entry whose realpath'd `repo` equals walt_ui's git-common-dir realpath (per `ai/contracts/athena-inbox.md` → *Finding the entry*; a human finds that entry in the file conventionally named `projects/walt_ui.json`, but the match key is `repo`, never the filename), not just the committed `ai/inbox/registry.json` — at startup; on a miss, log the searched repo-identity key and treat it as a fault, NOT an empty queue (in force once DND-247 provisions and installs the channel) |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
-| `{{STALE_MARKER_SWEEP}}` | choice (a): the `SessionStart` poll (`flaky-ticket-poll.sh`) — an activity-independent runner — clears a marker older than 12h; a human may also `rm -f` it |
+| `{{STALE_MARKER_SWEEP}}` | choice (a): an activity-independent runner clears a marker older than 12h; a human may also `rm -f` it. TWO such runners exist today: the `SessionStart` poll (`flaky-ticket-poll.sh`) and — provisioned by DND-277, so the sweep survives the poll's retirement — the dedicated `SessionStart` hook `~/dev/custom/ai/hooks/flaky-marker-sweep.sh` (see *Relationship to the existing flaky trigger*) |
 | `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per the flaky tracker policy above) against the Tickets DB |
 
 **The marker semantics preserved VERBATIM for the flaky instance:**
@@ -295,9 +295,13 @@ here and the citations flip.
 
 and: if the admiral terminates without clearing the marker, delete
 `~/.claude/flaky-coordinator.lock` yourself so the lane is not wedged shut. The
-flaky instance's `{{STALE_MARKER_SWEEP}}` is its `SessionStart` poll, which
-self-heals a marker older than 12h — a property of the flaky poll trigger, not of
-the marker; a lane without a poll has no such age-out (see the placeholder table).
+flaky instance's `{{STALE_MARKER_SWEEP}}` runs as TWO activity-independent
+age-outs — the `SessionStart` poll and, since DND-277, the dedicated
+`SessionStart` hook `flaky-marker-sweep.sh` — each self-healing a marker older
+than 12h. The age-out is a property of these runners, not of the marker; because
+the DND-277 hook is decoupled from the poll, retiring the poll does NOT remove
+the lane's age-out (see the placeholder table and *Relationship to the existing
+flaky trigger*).
 
 The flaky instance's add/drop handling is the generic *Add / drop handling*
 section above with the flaky values substituted — the flaky `log` channel as
@@ -317,21 +321,36 @@ remove-when-scope-empty** semantics carry over unchanged, but two things do
 change and are NOT "only the trigger":
 
 - The flaky `{{STALE_MARKER_SWEEP}}` **changes, and this is a real migration
-  constraint, not a detail.** Its current sweep IS the poll's 12h age-out — a
-  runner that fires independently of lane activity (choice (a)). Retiring the poll
-  retires the flaky lane's *only* activity-independent sweeper, and the new
-  inbox-count trigger cannot replace it (it fires only on new channel lines, which
-  a wedged-but-idle lane need not receive — see the *Recovering a stale marker*
-  step above). So the migration MUST provision a **replacement
-  activity-independent sweeper** for the flaky lane (e.g. a small
-  periodic/session-start age-out), or the flaky lane drops to choice (b),
-  `manual-only`, and loses automatic stale-marker recovery. Surfaced here as a
-  constraint DND-247 must honor; this template does not implement it.
+  constraint, not a detail.** The poll's 12h age-out fires independently of lane
+  activity (choice (a)), and the new inbox-count trigger cannot replace it (it
+  fires only on new channel lines, which a wedged-but-idle lane need not receive
+  — see the *Recovering a stale marker* step above). So the flaky lane MUST keep
+  an activity-independent sweeper across the poll's retirement, or it drops to
+  choice (b), `manual-only`, and loses automatic stale-marker recovery. This was
+  surfaced here as a constraint DND-247/DND-248 must honor — and it is now MET
+  by a poll-independent replacement; see the `**Later (2026-09-21)**` note below.
+
+  **Later (2026-09-21):** the replacement activity-independent sweeper now
+  EXISTS — DND-277 landed `~/dev/custom/ai/hooks/flaky-marker-sweep.sh`, a
+  dedicated `SessionStart` hook that ages out a >12h `flaky-coordinator.lock`
+  independent of lane activity, decoupled from the poll (registered in
+  `ai/hooks/registry.json`; marker path overridable via `FLAKY_MARKER_PATH`).
+  So the migration constraint above is already satisfied: H-4/DND-248 may retire
+  the poll without dropping the flaky lane to `manual-only`, and a DND-247
+  implementer should NOT provision a second sweeper — there is one. Two migration
+  jobs remain re: the sweep: (1) H-4/DND-248 retires the poll while the age-out
+  SURVIVES via this hook; (2) at the design's gated FINAL step, when
+  `flaky-coordinator.lock` itself is retired, this DND-277 hook is retired WITH
+  it (see the next bullet) — a `SessionStart` hook that ages out a marker nobody
+  writes is dead weight, and a gate check that can never meaningfully fire is
+  worse.
 - In the design's **gated final step** the whole flaky lock mechanism is retired:
-  the poll, its `walt_ui/.claude/settings.json` registration, and the dead
+  the poll, its `walt_ui/.claude/settings.json` registration, the DND-277 age-out
+  hook `ai/hooks/flaky-marker-sweep.sh` together with its `ai/hooks/registry.json`
+  entry, its `harness-gate` `STATIC_CHECKS` entry and its self-test, and the dead
   `~/.claude/flaky-*` files — which includes `flaky-coordinator.lock` itself. So
   the marker preserved verbatim above is preserved only up to that final step,
-  which removes it along with the trigger.
+  which removes it along with both the trigger and the age-out hook.
 
 The migration therefore **spans three homes, not one**, and "lands in walt_ui" is
 too narrow: (a) the poll and its `walt_ui/.claude/settings.json` registration
