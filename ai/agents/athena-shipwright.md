@@ -377,8 +377,16 @@ running every check below in its verified-correct form (stdin closed, hooks via
 their `.self-test.sh`), PASS/FAIL per check, non-zero if any fails.
 Hand-assembling the list is how a check silently does nothing and still reads as
 PASS; the runner's `--self-test` asserts the declared list stays correct and
-complete. The enumeration below remains the canonical human-readable spec — when
-you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
+complete, and `ai/bin/harness-gate --list` prints the live list. The runner's
+`CHECKS`/`STATIC_CHECKS` is the AUTHORITATIVE declaration; the enumeration below
+gives each check's rationale and is NOT a second list to keep in sync.
+
+**Later (2026-09-21):** this said the enumeration below "remains the canonical
+human-readable spec — when you add a check, add it in BOTH places". Superseded:
+a hand-kept duplicate of a gate-enforced list must drift, and it had. DND-277
+declared `flaky-marker-sweep.self-test.sh` in `STATIC_CHECKS` and deliberately
+left this prose alone (the extra line would have breached this agent's budget),
+so the list was stale from that moment and nothing could have caught it.
 
 - `ai/bin/build-agents --check` — agent templates rebuild clean and the
   rendered `.md` files are current. If you edited a template or block, run
@@ -394,18 +402,10 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
   ancestor of the target), which the admiral / `athena:merge-boarding` call
   before Done/DM/teardown. Deterministic and hermetic (throwaway git repo + stub
   `gh`/`glab`), so it is gate-safe.
-- Every hook self-test — run each dedicated `ai/hooks/*.self-test.sh` script
-  with stdin closed: `ai/hooks/safe-wait-guard.self-test.sh </dev/null`,
-  `ai/hooks/pronoun-guard.self-test.sh </dev/null`,
-  `ai/hooks/main-session-policy.self-test.sh </dev/null`,
-  `ai/hooks/forge-identity-guard.self-test.sh </dev/null`,
-  `ai/hooks/forge-auth-guard.self-test.sh </dev/null`,
-  `ai/hooks/workflow-phase-guard.self-test.sh </dev/null`,
-  `ai/hooks/harness-event.self-test.sh </dev/null`,
-  `ai/hooks/athena-inbox-poll.self-test.sh </dev/null`,
-  `ai/hooks/inbox-untrusted-guard.self-test.sh </dev/null` (and any you add — the
-  runner's `--self-test` fails if a `*.self-test.sh` on disk is not declared,
-  which is how `harness-event`'s was found unrun). NOTE: the
+- Every hook self-test — each dedicated `ai/hooks/*.self-test.sh` script, run
+  with stdin closed (`ai/hooks/<name>.self-test.sh </dev/null`). The runner runs
+  every one of them; its `--self-test` fails if a `*.self-test.sh` on disk is not
+  declared, which is how `harness-event`'s was found unrun. NOTE: the
   hooks read their input from stdin, so `ai/hooks/<hook>.sh --self-test` is NOT a
   self-test — the flag is ignored and it blocks on (or empties) stdin, a false
   green. Always invoke the `.self-test.sh` files.
