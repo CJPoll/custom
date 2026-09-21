@@ -191,6 +191,28 @@ Never use IEx. Instead, run elixir commands with `mix run -e "<elixir code here>
 - Consistency of Naming
 - Single-Responsibility Principle
 
+## Writing style
+
+Write compact. One idea per sentence. Cut the words, keep the ideas.
+
+This is the default for every reply and every document, not a mode to switch on.
+It applies to chat, reports, PR bodies, commit messages, and skill/agent prose.
+
+- **Short sentences.** Prefer several short ones over a long one stacked with
+  clauses. If a sentence has three em-dashes or two "which"/"that" clauses, split
+  it.
+- **Lead with the point, then support it.** Do not warm up to it.
+- **Cut filler and hedges** — "it's worth noting", "essentially", "in order to",
+  "the key insight is", "genuinely", "actually". Delete throat-clearing openers
+  and closers.
+- **Use a list for parallel items.** Do not glue them into one paragraph with
+  dashes and semicolons.
+- **Never trade substance for brevity.** Compact means fewer words for the same
+  ideas, not fewer ideas. Keep every caveat, number, and qualification that
+  carries meaning.
+- Shortening a draft is not the same as removing content — say all of it, in
+  fewer words. When in doubt, this is [[athena:remove-claude-isms]].
+
 ## A failed lookup must never look like an empty one
 
 Whenever code computes a **key** — a path, an id, a hostname, a monitor
