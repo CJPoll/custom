@@ -229,6 +229,26 @@ was written on.
   rebase was clean, because git compares lines and these two touched different
   documents.
 
+  **Sweep the CITATIONS of what you narrowed, not only the RESTATEMENTS of what
+  you removed.** Grepping the removed identifier finds every document that spelled
+  the mechanism out. It cannot find the document that never restated it and merely
+  *credited yours with holding it* — "the policy `X` places in `Y`", "those
+  constants live in `Z`". Narrow or descope a document and every such citation
+  becomes false while containing none of the text you deleted, so the grep you
+  were told to run returns clean. The second grep is for the **document or section
+  name you just changed**, and the question asked of each hit is whether it still
+  describes what that document now holds. Measured twice on 2026-09-21. DND-247's
+  descope removed `ai/CLAUDE.md`'s restatement and left both documents routing the
+  tracker constants *through* it: `ai/CLAUDE.md` claimed the brief holds constants
+  the brief explicitly declines to hold, while the brief cited a placement
+  `ai/CLAUDE.md` no longer makes (`grep -c` = 0) — two [correctness] findings at
+  critic round 10, a full apply round after the descope. In captain-500 the same
+  class was fixed at one site (round 14, §6 vs the rendered captain) and re-signalled
+  at the next (round 16, §1 vs §6) because the first sweep covered the site, not the
+  class. Close it by construction where you can: make one place normative and have
+  the others *defer by name* rather than re-state, then assert the class closed with
+  a grep that must return zero.
+
   Two consequences worth stating outright, because each is invisible from one
   side alone:
   - **A clean rebase is not a clean reconcile, and no gate closes the hole.**
