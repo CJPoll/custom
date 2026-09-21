@@ -1104,9 +1104,11 @@ failure mode by a different second end:
   lookup must never look like an empty one*):
   - **no client channel declared** — **no registry entry names this session's
     repo identity at all** (the whole project is unregistered), so nothing
-    declares this or any channel. `Fix:` names registry declaration and the
-    **resolved repo identity** the lookup searched under, so "zero channels" says
-    which identity found zero. (An entry that **exists but omits this channel**
+    declares this or any channel. `Fix:` names registry declaration and, **when
+    the repo identity resolved**, the identity the lookup searched under, so
+    "zero channels" says which identity found zero; a cwd in no git repository
+    resolves no identity and its `Fix:` says so instead (the doctor's three-way
+    split below). (An entry that **exists but omits this channel**
     while an `athena-events.md` rule targets it is **not** this state and is
     **not** distinguished here: it is the producer-registration **mismatch**
     routed to the coarse `+N unreadable` residual in *Known-open*, above.
@@ -1126,10 +1128,20 @@ failure mode by a different second end:
   (`ai/skills/athena:inbox/lib/doctor.sh`) distinguishes the three **to the
   extent it can observe them**: **no client channel declared** is the
   `registry-entry` `na` finding, which fires when **no entry matches this repo at
-  all** (`doctor.sh`, `if [ -z "${entry}" ]`) and names the **resolved repo
-  identity** the lookup searched under (so "zero channels" says which identity
-  found zero) — the per-channel omission above is deliberately **not** claimed
-  here, because the doctor takes the `descriptor_validate` success path (`ok`)
+  all** (`doctor.sh`, `if [ -z "${entry}" ]`). That guard itself splits three
+  ways on the repo-identity lookup, because a key that could not be computed and
+  a key that correctly matches nothing must not read alike (*A failed lookup must
+  never look like an empty one*): a **resolved** identity that no entry names is
+  the `na` finding that names **that identity** the lookup searched under (so
+  "zero channels" says which identity found zero); a cwd genuinely **in no git
+  repository** (identity empty, lookup definitive) is an `na` that deliberately
+  names **no** identity ("NO GIT REPOSITORY") — there was none to search with,
+  and its `Fix:` cannot tell the reader to set `"repo"` to a git-common-dir that
+  does not exist; and an identity that **could not be determined** (git missing,
+  cwd gone, dubious repo) is a **`warn`, not `na`**, naming no identity, so an
+  uncomputed key is never folded into the benign "not opted in" case. The
+  per-channel omission above is deliberately **not** claimed here, because the
+  doctor takes the `descriptor_validate` success path (`ok`)
   for an entry that merely omits a channel and has no handling-rule view to know
   a rule targets it; **no server producer registered** is the
   `never-delivered` finding on an absent inbox file, whose `Fix:` is
