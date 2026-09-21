@@ -226,30 +226,33 @@ the *Relationship to the existing flaky trigger* section below, not this table.
 
 The **tracker-management constants** — owner id, connector, scope DB + id, scope
 filter, status vocabulary, blocked semantics, merge policy — are **not copied
-here**. `~/.claude/CLAUDE.md` → *Flaky-test lane (per-machine automation)* is their
-one home; duplicating them into a second tracked file is exactly the staleness the
-*Documentation conventions* rule below warns of (drift was already present before
-this citation replaced the copies). So the rows below **cite** that home for every
-constant and give concrete values only for the **lane-shape** placeholders this
-template introduces. (DND-247 inverts the direction — it rewrites that home to fill
-this template — at which point the values live here and the citation flips.)
+here**, because copying them into a second tracked file is exactly the staleness
+the *Documentation conventions* rule below warns of (drift was already present
+before these citations replaced the copies). Those constants are today carried
+across **several homes**, canonically in **`walt_ui/CLAUDE.md` → "Flaky-test lane
+automation"** (which `~/.claude/CLAUDE.md` → *Flaky-test lane (per-machine
+automation)* summarises and points at as canonical). So the rows below **cite the
+flaky tracker policy** rather than copy it, and give concrete values only for the
+**lane-shape** placeholders this template introduces. **DND-247 owns collapsing
+those several carriers into this template** — after that sweep the values live
+here and the citations flip.
 
 | Placeholder | Flaky lane value |
 |---|---|
 | `{{LANE_ID}}` | `flaky` |
 | `{{LANE_LABEL}}` | flaky-test |
-| `{{OWNER_NAME}}` / `{{OWNER_ID}}` | per *Flaky-test lane (per-machine automation)* (its scope filter is keyed to the owner) |
-| `{{TRACKER_CONNECTOR}}` | per *Flaky-test lane (per-machine automation)* |
-| `{{SCOPE_DB_NAME}}` / `{{SCOPE_DB_ID}}` | per *Flaky-test lane (per-machine automation)* (the "Tickets" DB + its id) |
-| `{{SCOPE_FILTER}}` | per *Flaky-test lane (per-machine automation)* (the `flaky-tests` + owner + Todo/Backlog predicate) |
-| `{{STATUS_VOCAB}}` | per *Flaky-test lane (per-machine automation)* |
-| `{{BLOCKED_SEMANTICS}}` | per *Flaky-test lane (per-machine automation)* (the `Blocked By` relation) |
+| `{{OWNER_NAME}}` / `{{OWNER_ID}}` | per the flaky tracker policy above (its scope filter is keyed to the owner) |
+| `{{TRACKER_CONNECTOR}}` | per the flaky tracker policy above |
+| `{{SCOPE_DB_NAME}}` / `{{SCOPE_DB_ID}}` | per the flaky tracker policy above (the "Tickets" DB + its id) |
+| `{{SCOPE_FILTER}}` | per the flaky tracker policy above (the `flaky-tests` + owner + Todo/Backlog predicate) |
+| `{{STATUS_VOCAB}}` | per the flaky tracker policy above |
+| `{{BLOCKED_SEMANTICS}}` | per the flaky tracker policy above (the `Blocked By` relation) |
 | `{{MAX_CAPTAINS}}` | `1` (strictly sequential) |
-| `{{MERGE_POLICY}}` | per *Flaky-test lane (per-machine automation)* (the admiral's auto-merge default) |
-| `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel (provisioned in `ai/inbox/registry.json`; see the migration section) |
+| `{{MERGE_POLICY}}` | per the flaky tracker policy above (the admiral's auto-merge default) |
+| `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel — **to be provisioned in `ai/inbox/registry.json` by DND-247's migration** (walt_ui declares only a `slack` channel there today; see the migration section) |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
 | `{{STALE_MARKER_SWEEP}}` | the `SessionStart` poll (`flaky-ticket-poll.sh`) clears a marker older than 12h; a human may also `rm -f` it |
-| `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per *Flaky-test lane (per-machine automation)*) against the Tickets DB |
+| `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per the flaky tracker policy above) against the Tickets DB |
 
 **The marker semantics preserved VERBATIM for the flaky instance:**
 
@@ -265,8 +268,9 @@ the marker; a lane without a poll has no such age-out (see the placeholder table
 The flaky instance's add/drop handling is the generic *Add / drop handling*
 section above with the flaky values substituted — the flaky `log` channel as
 `{{LANE_CHANNEL}}`, the flaky `{{SCOPE_FILTER}}` and `{{SOURCE_RE_QUERY}}` per the
-worked-instantiation table above (which cites their one home). The mechanism is
-the contracts' (cited there); this instance adds no new rule.
+worked-instantiation table above (which cites the flaky tracker policy rather than
+copying it). The mechanism is the contracts' (cited there); this instance adds no
+new rule.
 
 ## Relationship to the existing flaky trigger
 
