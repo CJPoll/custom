@@ -141,4 +141,14 @@ def run_self_test
   end
 end
 
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/check-guard-messages              assert every first-party guard/hook
+                                               emits an actionable `Fix:` on failure
+      ai/bin/check-guard-messages --self-test  deterministic suite (no model)
+      ai/bin/check-guard-messages --help       this text
+  TXT
+  exit 0
+end
 exit(ARGV.include?("--self-test") ? run_self_test : run_check)

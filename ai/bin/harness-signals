@@ -221,4 +221,18 @@ def run_self_test
   end
 end
 
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/harness-signals [OPTIONS]      distil harness-metrics output into the
+                                            short list of over-threshold signals
+      ai/bin/harness-signals --self-test    deterministic suite (no model)
+      ai/bin/harness-signals --help         this text
+
+    Options:
+      --file PATH      read a metrics JSON file instead of computing metrics
+      --json           emit JSON instead of the human summary
+  TXT
+  exit 0
+end
 exit(ARGV.include?("--self-test") ? run_self_test : run(ARGV))

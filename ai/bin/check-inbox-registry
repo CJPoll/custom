@@ -246,6 +246,21 @@ def self_test
   ok ? 0 : 1
 end
 
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/check-inbox-registry              assert this machine's Athena Inbox
+                                               tenancy entries under
+                                               $ATHENA_INBOX_ROOT/projects/ match
+                                               the committed ai/inbox/registry.json
+      ai/bin/check-inbox-registry --self-test  deterministic suite (no model)
+      ai/bin/check-inbox-registry --help       this text
+
+    Environment-safe: passes with a note when there is no inbox root (CI/agent
+    env). Recover drift with `scripts/setup-inbox-registry --install`.
+  TXT
+  exit 0
+end
 if ARGV.include?("--self-test")
   exit self_test
 elsif ARGV.empty?

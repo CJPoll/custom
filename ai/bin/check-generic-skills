@@ -148,4 +148,14 @@ end
 
 require "tmpdir"
 
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/check-generic-skills              assert project-agnostic skills carry
+                                               no consumer-project constants
+      ai/bin/check-generic-skills --self-test  deterministic suite (no model)
+      ai/bin/check-generic-skills --help       this text
+  TXT
+  exit 0
+end
 exit(ARGV.include?("--self-test") ? run_self_test : run_check)

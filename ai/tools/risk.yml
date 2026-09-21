@@ -35,6 +35,11 @@ tools:
   admiral-report-watch:    { class: readOnly, reason: watch }
   blast-radius:            { class: readOnly, reason: check }
   check-agent-size:        { class: readOnly, reason: check }
+  # Executes each bin with --help, but under a refusing-stub PATH, a sandboxed
+  # cwd/HOME, and a bounded timeout, and it FAILS any bin whose help path
+  # writes to the repo or its cwd. Asserting the absence of side effects is
+  # what it does; readOnly is the accurate class.
+  check-bin-help:          { class: readOnly, reason: check }
   check-generic-skills:    { class: readOnly, reason: check }
   check-guard-messages:    { class: readOnly, reason: check }
   check-hooks-registered:  { class: readOnly, reason: check }

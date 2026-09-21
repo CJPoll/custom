@@ -33,6 +33,28 @@
 
 set -euo pipefail
 
+# Checked FIRST, before the jq requirement and before any probe: the default
+# action reaches the network and MINTS a GitHub App installation token, so a
+# fall-through here is a credential operation nobody asked for. Help must cost
+# nothing.
+case "${1:-}" in
+  -h|--help)
+    cat <<'EOF'
+Usage:
+  ai/bin/forge-preflight   assert the Athena forge wrapper for THIS repo's
+                           remote host can authenticate, BEFORE any PR/MR is
+                           created; exit 0 healthy (or not a managed forge),
+                           1 refused with a `Fix:` line
+  ai/bin/forge-preflight --help   this text
+
+Run once at the start of a run, before opening a PR/MR, so a broken wrapper
+fails loudly here instead of silently falling back to the machine owner's
+identity.
+EOF
+    exit 0
+    ;;
+esac
+
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 GH_ATHENA="${GH_ATHENA_BIN:-$SELF_DIR/gh-athena}"
 GLAB_ATHENA="${GLAB_ATHENA_BIN:-$SELF_DIR/glab-athena}"

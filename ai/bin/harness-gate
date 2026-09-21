@@ -63,6 +63,8 @@ STATIC_CHECKS = [
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
   ["check-inbox-registry",      %w[ai/bin/check-inbox-registry]],
   ["check-guard-messages",      %w[ai/bin/check-guard-messages]],
+  ["check-bin-help",            %w[ai/bin/check-bin-help]],
+  ["check-bin-help self-test",  %w[ai/bin/check-bin-help --self-test]],
   ["check-tool-risk",           %w[ai/bin/check-tool-risk]],
   ["check-tool-risk self-test", %w[ai/bin/check-tool-risk --self-test]],
   ["harness-eval",              %w[ai/bin/harness-eval]],
@@ -257,6 +259,17 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
   # misuse impossible to construct rather than merely undocumented.
   raise ArgumentError, "run_gate: root: only supported together with dry_run: true" \
     if root != CUSTOM_DIR && !dry_run
+
+  # RECURSION GUARD. ai/bin/check-bin-help probes every bin with `--help`, and
+  # harness-gate is the one bin whose pre-fix fall-through would have re-entered
+  # the very gate doing the probing. The probe sets this variable, so a gate run
+  # started from inside it is refused structurally rather than merely bounded by
+  # the probe's timeout. Nothing else sets it.
+  if ENV["HARNESS_BIN_HELP_PROBE"]
+    warn "harness-gate: REFUSED — started from inside a check-bin-help --help probe."
+    warn "  Fix: this means `harness-gate --help` fell through to running the gate instead of printing usage and exiting 0. Restore the --help branch at the bottom of ai/bin/harness-gate; do not unset HARNESS_BIN_HELP_PROBE to get past this."
+    return 1
+  end
 
   found = discover_self_tests(root)
   puts "self-tests discovered: #{found.size}"
@@ -833,6 +846,23 @@ def run_self_test
          "stdin closed."
     1
   end
+end
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/harness-gate              run every gate check in its verified-correct
+                                       invocation form; prints PASS/FAIL per check
+                                       and exits non-zero if any fails
+      ai/bin/harness-gate --list       list the checks without running them
+      ai/bin/harness-gate --self-test  assert the declared check list stays correct
+                                       and complete (no model)
+      ai/bin/harness-gate --help       this text
+
+    Run this from ~/dev/custom before every shipwright commit. Never commit a
+    harness that fails its own gate.
+  TXT
+  exit 0
 end
 
 begin

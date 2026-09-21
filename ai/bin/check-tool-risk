@@ -315,6 +315,19 @@ end
 
 # ---- dispatch --------------------------------------------------------------
 
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/check-tool-risk                    assert every tool the harness can
+                                                call carries a risk annotation in
+                                                ai/tools/risk.yml
+      ai/bin/check-tool-risk --json             emit the check result as JSON
+      ai/bin/check-tool-risk --class-of TOOL    print one tool's risk class
+      ai/bin/check-tool-risk --self-test        deterministic suite (no model)
+      ai/bin/check-tool-risk --help             this text
+  TXT
+  exit 0
+end
 if ARGV.include?("--self-test")
   exit run_self_test
 elsif (i = ARGV.index("--class-of"))

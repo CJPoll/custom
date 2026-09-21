@@ -466,4 +466,28 @@ def main(argv)
   0
 end
 
-exit main(ARGV) if $PROGRAM_NAME == __FILE__
+if $PROGRAM_NAME == __FILE__
+  # Inside the entry guard, so requiring this file never exits on someone
+  # else's ARGV.
+  if ARGV.include?("--help") || ARGV.include?("-h")
+    puts <<~TXT
+      Usage:
+        ai/bin/lead-time --repo PATH (--pr N | --mr N | --since WHEN) [OPTIONS]
+
+      Derive each ticket's lead time (earliest branch commit -> fully deployed)
+      from git plus the forge's CI. It splits into `code` (start->merge, a
+      harness/process lever) and `tail` (merge->deploy, a pipeline-efficiency
+      lever). It captures nothing, so no agent has to have recorded a status.
+
+      Options:
+        --repo PATH    git checkout to scan (e.g. ~/dev/custom, ~/dev/gen_saas)
+        --pr N/--mr N  one pull/merge request by number
+        --since WHEN   scan merges at or after WHEN
+        --slow MIN     only report tickets slower than MIN minutes
+        --json         emit JSON instead of the human table
+        --help         this text
+    TXT
+    exit 0
+  end
+  exit main(ARGV)
+end

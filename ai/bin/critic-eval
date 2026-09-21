@@ -144,6 +144,17 @@ def run_self_test
   end
 end
 
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/critic-eval              list the critic eval corpus (default)
+      ai/bin/critic-eval --run        score the critic against the corpus
+                                      (MODEL-IN-LOOP: slow; NOT part of the gate)
+      ai/bin/critic-eval --self-test  deterministic scorer/parser suite (no model)
+      ai/bin/critic-eval --help       this text
+  TXT
+  exit 0
+end
 exit(
   if ARGV.include?("--self-test") then run_self_test
   elsif ARGV.include?("--run") then run_model

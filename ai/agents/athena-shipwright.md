@@ -432,6 +432,10 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
 - `ai/bin/check-guard-messages` — every first-party guard/hook/check emits an
   actionable `Fix:` message on failure (LLM-facing errors); run its `--self-test`
   too if you touched the checker.
+- `ai/bin/check-bin-help` (+ its `--self-test`) — every tracked `ai/bin/`
+  executable answers `--help` on stdout, exit 0, doing nothing else; one with no
+  `--help` branch runs its DEFAULT action (measured: a model call, an agent
+  rewrite, a minted token). Detail + `EXEMPT` rule: the check's own header.
 - `ai/bin/check-tool-risk` (+ its `--self-test`) — every tool the harness can
   call carries a risk annotation in the registry, and no annotated tool has been
   added or renamed without one. Pairs with the `workflow-phase-guard` hook above,
@@ -444,30 +448,26 @@ you add a check, add it in BOTH places (`CHECKS` in the runner, and here):
 - `ai/bin/blast-radius --self-test` — the merge-consequence classifier
   `integration-gate` runs pre-merge (exit 4 = merging PERFORMS an action).
 - `ai/bin/critic-review --self-test` and `ai/bin/critic-eval --self-test` — the
-  LLM-judge critic tier. Both self-tests are deterministic and model-free (no
-  `claude` in the loop), so they are gate-safe. `critic-review` gates a BLOCKING
-  step in the captain self-review, so its decision/FINDINGS-parser logic must
-  stay verified even when a harness edit did not touch the critic directly. (The
-  model-in-loop `--run` is NOT part of the gate.)
-- `ai/bin/admiral-eval --self-test` — the admiral behavioral-eval runner's
-  deterministic scorer/parser/majority-sampling/baseline-diff/T1-hook-primitive
-  and its inert-sandbox self-test (model-free, gate-safe). It proves a stage-4
-  admiral trim still makes the right DECISION, not merely that the invariant's
-  words survived. The model-in-loop `admiral-eval --run` is NOT part of the gate
-  (same rule as `critic-eval --run`); it runs to capture/verify the baseline and
-  on the shipwright cron cadence.
+  LLM-judge critic tier, both deterministic and model-free so gate-safe.
+  `critic-review` gates a BLOCKING captain self-review step, so its decision /
+  FINDINGS-parser logic stays verified even when an edit did not touch it.
+- `ai/bin/admiral-eval --self-test` — deterministic scorer / parser /
+  majority-sampling / baseline-diff / T1-hook-primitive + inert sandbox
+  (model-free). Proves a stage-4 trim still makes the right DECISION, not merely
+  that the invariant's words survived. A model-in-loop `--run` is NEVER in the
+  gate (`critic-eval`, `admiral-eval`); `admiral-eval --run` captures/verifies
+  the baseline on the shipwright cron cadence.
 - `ai/bin/variant-eval --self-test` — the harness-variant measurement
-  instrument (DND-174), which scores a candidate ref against a baseline over the
-  eval corpus and emits KEEP / REVERT / INCONCLUSIVE. **Proposal-only and
-  human-gated by design**: it has no merge/commit/push/adopt path, and its
-  boundary with THIS cron loop is load-bearing — never wrap it in an auto-adopt
-  loop, and never treat a KEEP verdict as license to adopt a variant yourself.
-  Only its deterministic `--self-test` is in the gate.
-- `scripts/setup-hooks --self-test` — the installer's --self-test is INLINE
-  (no dedicated `self-test.sh` file backs it), so it stays a hand-declared
-  `CHECKS` entry. Its install / idempotency / merge-safety cases are the ONLY
-  verification of the recovery path for the 2026-09-17 hook clobber, and were
-  unrun by the gate until DND-209.
+  instrument (DND-174): scores a candidate ref against a baseline over the eval
+  corpus, emitting KEEP / REVERT / INCONCLUSIVE. **Proposal-only and
+  human-gated by design** — no merge/commit/push/adopt path, and its boundary
+  with THIS cron loop is load-bearing: never wrap it in an auto-adopt loop, and
+  never treat a KEEP verdict as license to adopt a variant yourself. Only its
+  deterministic `--self-test` is in the gate.
+- `scripts/setup-hooks --self-test` — INLINE (no `self-test.sh` file backs it),
+  so it stays a hand-declared `CHECKS` entry. Its install / idempotency /
+  merge-safety cases are the ONLY verification of the recovery path for the
+  2026-09-17 hook clobber (unrun by the gate until DND-209).
 - Every tracked `**/self-test.sh` in the repo — DISCOVERED (globbed, then
   intersected with `git ls-files` so an untracked/vendored/ignored tree, e.g.
   this repo's own `ai/skills/synced/` (".gitignore: vendored plugin skills;

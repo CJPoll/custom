@@ -98,7 +98,24 @@ sudo ln -sf ~/dev/custom/system-files/greetd-config.toml /etc/greetd/config.toml
 - Use clear, descriptive names
 - Include usage information in the script
 - Handle errors gracefully with meaningful exit codes
-- Support `--help` where appropriate
+- Every executable under `ai/bin/` MUST answer `--help` on **stdout** with
+  **exit 0**, doing nothing else — no model call, no network, no write,
+  anywhere. `ai/bin/check-bin-help` enforces this in the shipwright gate.
+
+  **Later (2026-09-21):** this read "Support `--help` where appropriate."
+  Superseded by the MUST above. "Where appropriate" let a tool ship with no
+  `--help` branch at all, and such a tool does not *decline* to answer help —
+  it runs its DEFAULT action and calls that the answer. Measured 2026-09-20:
+  `ai/bin/critic-review --help` fell through to a full model-in-loop review of
+  HEAD (`timeout 10 … --help </dev/null` exited 124), and the harness's
+  response was to write the hang into a captain's brief
+  (`ai-artifacts/coordination/2026-09-20-notif-platform/reports/H-2-DND-246-fix2-report.md`)
+  rather than fix it. The sweep that followed found 17 such bins, including
+  `build-agents --help` rewriting every rendered agent and `forge-preflight
+  --help` minting a GitHub App installation token. A passthrough wrapper whose
+  contract IS forwarding argv (`gh-athena`, `glab-athena`,
+  `notion-athena-mcp`) is exempt, named with a reason in the check's `EXEMPT`
+  table.
 
 ### Testing
 - Test scripts in isolation before committing

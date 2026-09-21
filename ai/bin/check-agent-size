@@ -161,4 +161,14 @@ def run_self_test
   end
 end
 
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/check-agent-size              check each rendered ai/agents/athena-*.md
+                                           against its per-agent line budget
+      ai/bin/check-agent-size --self-test  deterministic suite (no model)
+      ai/bin/check-agent-size --help       this text
+  TXT
+  exit 0
+end
 exit(ARGV.include?("--self-test") ? run_self_test : run_check)

@@ -978,6 +978,22 @@ def arg_value(flag, default = nil)
   ARGV[i + 1]
 end
 
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/admiral-eval                    list the admiral behavioral-eval corpus
+      ai/bin/admiral-eval --run [OPTIONS]    run the eval (MODEL-IN-LOOP: slow;
+                                             NOT part of the gate)
+      ai/bin/admiral-eval --self-test        deterministic suite (no model)
+      ai/bin/admiral-eval --help             this text
+
+    Options (with --run):
+      --runs N            majority-sampling runs per case (1-99)
+      --only NAME         restrict to one case
+      --update-baseline   rewrite the baseline from this run's results
+  TXT
+  exit 0
+end
 exit(
   if ARGV.include?("--self-test")
     self_test

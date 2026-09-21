@@ -242,6 +242,23 @@ end
 # self-test can compare the two SHIPPED implementations rather than copies of
 # them. The step-lock between them is asserted as an invariant in both comment
 # blocks; an invariant nothing checks is the thing the next reader relies on.
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/check-hooks-registered              assert every hook in
+                                                 ai/hooks/registry.json is wired
+                                                 into the live Claude Code settings
+      ai/bin/check-hooks-registered --norm PATH  print this tool's normalized form
+                                                 of PATH (used by setup-hooks'
+                                                 self-test)
+      ai/bin/check-hooks-registered --self-test  deterministic suite (no model)
+      ai/bin/check-hooks-registered --help       this text
+
+    Environment-safe: passes with a note when no settings file exists (CI/agent
+    env). Recover drift with `scripts/setup-hooks --install`.
+  TXT
+  exit 0
+end
 if (i = ARGV.index("--norm"))
   puts norm(ARGV[i + 1].to_s)
   exit 0

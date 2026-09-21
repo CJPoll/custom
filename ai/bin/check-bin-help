@@ -1,0 +1,414 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# check-bin-help -- every executable under ai/bin/ MUST answer `--help` on
+# stdout, with exit 0, and do NOTHING else.
+#
+# WHY THIS EXISTS
+#
+# A tool whose argument parser has no `--help` branch does not "not support
+# help". It runs its DEFAULT ACTION and calls that the answer. Measured
+# 2026-09-20 (DND-246/H-2): `ai/bin/critic-review --help` fell through to a
+# full model-in-loop review of HEAD -- `timeout 10 ... --help </dev/null`
+# exited 124 -- and the harness's response was to write "do NOT run
+# `ai/bin/critic-review --help` (hangs)" into a captain's brief. A harness
+# that documents a hang has not fixed one, and the workaround only ever
+# reached the one captain whose brief carried it.
+#
+# The class was worse than the one measured site:
+#   * `build-agents --help`    rewrote every ai/agents/*.md
+#   * `forge-preflight --help` minted a GitHub App installation token
+#   * `harness-gate --help`    ran the entire gate
+#   * the cheap `check-*` bins silently ran their check and exited 0, which
+#     READS AS IF HELP WORKED -- the nastier failure, because nothing looks
+#     wrong.
+#
+# This is ~/dev/custom/CLAUDE.md -> "A failed lookup must never look like an
+# empty one" at the CLI-argument level: an unrecognised key must not resolve
+# to the most expensive available action and report nothing about it.
+#
+# THE CHECK IS BEHAVIOURAL, NEVER A SOURCE PARSER (beyond phase 1 below).
+# It asserts what `<bin> --help` DOES. That is what lets one check cover Ruby,
+# bash, and /bin/sh bins without knowing or caring which is which.
+#
+# TWO PHASES, AND PHASE 1 EXISTS ONLY TO MAKE PHASE 2 SAFE
+#
+# Phase 1 (static): does the source contain the literal `--help`? If not,
+# FAIL and NEVER EXECUTE THE FILE. This test is deliberately weak and
+# permissive -- do not "strengthen" it into a real parser. Its only job is
+# deciding whether running the file is safe, and both its error modes are
+# safe: a false positive merely probes under the phase-2 sandbox (bounded),
+# and a false negative is a red gate carrying a Fix:.
+#
+# Phase 2 (dynamic): probe, under four independent belts --
+#   1. `timeout` bounds a fall-through that hangs (the measured case).
+#   2. A scrubbed PATH whose first entry holds REFUSING STUBS named claude,
+#      gh, glab, npx, curl (each exit 127). A bin that falls through to a
+#      model or a network call dies in milliseconds instead of burning the
+#      timeout or spending money. This is the belt that makes probing a
+#      critic-review-class tool genuinely safe rather than merely bounded.
+#   3. cwd and HOME are a throwaway tmpdir; stdin is closed; forge tokens
+#      are unset.
+#   4. HARNESS_BIN_HELP_PROBE=1 is exported. ai/bin/harness-gate refuses to
+#      run its gate when it sees that, because harness-gate is the one bin
+#      whose fall-through would re-enter the very gate that is probing it.
+#      Belts 1-2 bound that; this closes it structurally.
+#
+# THE HONEST LIMIT OF THE SANDBOX: cwd/HOME isolation cannot stop a bin that
+# writes to an ABSOLUTE path inside the repo. The per-bin `git status`
+# delta is what catches that (the build-agents case). Do not claim the
+# sandbox proves more than that.
+
+require "open3"
+require "tmpdir"
+require "fileutils"
+
+PROG = File.basename($PROGRAM_NAME)
+REPO = File.expand_path("../..", __dir__)
+PROBE_TIMEOUT = 10
+
+USAGE = <<~TXT.freeze
+  Usage:
+    ai/bin/check-bin-help              assert every tracked executable under
+                                       ai/bin/ answers --help on stdout with
+                                       exit 0 and no side effects
+    ai/bin/check-bin-help --self-test  deterministic, hermetic suite (no model,
+                                       fixtures only -- never the live ai/bin/)
+    ai/bin/check-bin-help --help       this text
+
+  Exit 0 = all bins conform. Exit 1 = at least one does not (each named).
+TXT
+
+# A passthrough wrapper's CONTRACT is forwarding argv, so `gh-athena --help`
+# correctly means `gh --help`. Intercepting it would break the tool by
+# definition. This is also why the unrecognised-argument refusal that
+# critic-review now does is NOT generalised to every bin.
+#
+# An entry with an empty reason is red. An entry naming a file that does not
+# exist is red (a stale exemption hides a bin that stopped being exempt).
+EXEMPT = {
+  "gh-athena"         => "passthrough wrapper: exec's gh \"$@\"; forwarding argv IS its contract, so --help means gh's own --help",
+  "glab-athena"       => "passthrough wrapper: exec's glab \"$@\"; forwarding argv IS its contract",
+  "notion-athena-mcp" => "passthrough wrapper: exec's the Notion MCP server; forwarding argv IS its contract",
+}.freeze
+
+# The bin list is a property of the COMMIT, not of whatever is lying around
+# in the checkout, so it comes from git -- same reasoning as harness-gate's
+# tracked-file filter. An untracked scratch script never becomes a blocking
+# gate entry.
+def tracked_bins(repo = REPO)
+  out, _, st = Open3.capture3("git", "-C", repo, "ls-files", "ai/bin")
+  raise "git ls-files failed in #{repo}" unless st.success?
+  out.lines.map(&:chomp).map { |rel| File.join(repo, rel) }
+     .select { |p| File.file?(p) && File.executable?(p) }
+     .sort
+end
+
+def git_status(repo)
+  out, _, st = Open3.capture3("git", "-C", repo, "status", "--porcelain")
+  # A git failure must not read as "no changes" -- that is the very class this
+  # file is about. Raise instead.
+  raise "git status failed in #{repo}" unless st.success?
+  out
+end
+
+# Snapshot a directory tree as path => mtime, to catch a cwd write.
+def tree_snapshot(dir)
+  Dir.glob(File.join(dir, "**", "*"), File::FNM_DOTMATCH)
+     .reject { |p| p.end_with?(".", "..") }
+     .to_h { |p| [p, (File.mtime(p).to_f rescue nil)] }
+end
+
+# Build the refusing-stub sandbox. Each stub exits 127 loudly, so a bin that
+# reaches for a model or the network fails fast AND is identifiable.
+def build_sandbox(root)
+  shim = File.join(root, "shim")
+  home = File.join(root, "home")
+  cwd  = File.join(root, "cwd")
+  [shim, home, cwd].each { |d| FileUtils.mkdir_p(d) }
+  %w[claude gh glab npx curl wget].each do |tool|
+    p = File.join(shim, tool)
+    File.write(p, "#!/bin/sh\necho \"check-bin-help: REFUSED: --help probe tried to run '#{tool}'\" >&2\nexit 127\n")
+    FileUtils.chmod(0o755, p)
+  end
+  [shim, home, cwd]
+end
+
+def probe_env(shim, home)
+  {
+    "PATH" => "#{shim}:/usr/bin:/bin",
+    "HOME" => home,
+    "HARNESS_BIN_HELP_PROBE" => "1",
+    # Unset (nil) rather than blanked, so a bin cannot read an empty token and
+    # try to use it.
+    "GH_TOKEN" => nil, "GITHUB_TOKEN" => nil, "GLAB_TOKEN" => nil,
+    "GITLAB_TOKEN" => nil, "ANTHROPIC_API_KEY" => nil,
+  }
+end
+
+# -> [ok, reason_or_nil]
+def probe_one(path, shim:, home:, cwd:, repo:)
+  name = File.basename(path)
+
+  # PHASE 1 -- static, never executes.
+  src = File.read(path) rescue ""
+  unless src.include?("--help")
+    return [false, "source contains no `--help` branch, so `#{name} --help` would run its DEFAULT action. NOT EXECUTED (refusing to run an unfixed bin to find out what it does)."]
+  end
+
+  # PHASE 2 -- sandboxed probe.
+  before_status = git_status(repo)
+  before_tree   = tree_snapshot(cwd)
+  started = Time.now
+
+  out, err, st = Open3.capture3(
+    probe_env(shim, home),
+    "timeout", PROBE_TIMEOUT.to_s, path, "--help",
+    chdir: cwd, stdin_data: ""
+  )
+
+  elapsed = Time.now - started
+  after_status = git_status(repo)
+  after_tree   = tree_snapshot(cwd)
+
+  if st.exitstatus == 124
+    return [false, "`#{name} --help` TIMED OUT after #{PROBE_TIMEOUT}s (#{elapsed.round(1)}s observed), so it did not answer --help cheaply -- it fell through to its default action."]
+  end
+  if err.include?("check-bin-help: REFUSED")
+    tool = err[/tried to run '([^']+)'/, 1]
+    return [false, "`#{name} --help` tried to execute `#{tool}` -- a help path must never invoke a model or the network."]
+  end
+  unless st.exitstatus.zero?
+    return [false, "`#{name} --help` exited #{st.exitstatus}, expected 0. (Help is a successful outcome, not an error; a non-zero code makes `#{name} --help` unusable in a pipeline and indistinguishable from a real failure.)"]
+  end
+  if out.strip.empty?
+    return [false, "`#{name} --help` printed nothing to STDOUT (stderr had #{err.strip.empty? ? 'nothing' : err.length.to_s + ' bytes'}). Help goes to stdout so `#{name} --help | head` works."]
+  end
+  unless out.include?(name)
+    return [false, "`#{name} --help` stdout never mentions `#{name}`, so it is probably not this tool's usage text."]
+  end
+  if after_status != before_status
+    return [false, "`#{name} --help` MODIFIED THE REPO (git status changed across the probe). A help path must not write. If the tree was edited by something else during the gate, re-run."]
+  end
+  if after_tree != before_tree
+    return [false, "`#{name} --help` wrote into its working directory. A help path must not write."]
+  end
+
+  [true, nil]
+end
+
+def run_check(bins, exempt: EXEMPT, repo: REPO, quiet: false)
+  failures = []
+
+  # An exemption must be honest: a reason, and a file it still applies to.
+  exempt.each do |name, reason|
+    if reason.to_s.strip.empty?
+      failures << [name, "EXEMPT entry has no reason. Every exemption states why the bin cannot answer --help."]
+    end
+    unless bins.any? { |b| File.basename(b) == name }
+      failures << [name, "EXEMPT entry names a bin that is not a tracked executable under ai/bin/. A stale exemption silently excuses nothing, or worse, excuses a future bin that reuses the name."]
+    end
+  end
+
+  # A failed lookup must never look like an empty one: zero bins is an ERROR.
+  if bins.empty?
+    unless quiet
+      warn "#{PROG}: FAIL -- enumerated ZERO executables under ai/bin/."
+      warn "  Fix: this repo always has committed bins, so zero means the enumeration broke (not a clean checkout, or `git ls-files ai/bin` returned nothing), not that there is nothing to check. Run `git ls-files ai/bin` and check the executable bit."
+    end
+    return 1
+  end
+
+  checked = 0
+  Dir.mktmpdir("check-bin-help-") do |root|
+    shim, home, cwd = build_sandbox(root)
+    bins.each do |path|
+      name = File.basename(path)
+      next if exempt.key?(name)   # never executed
+      checked += 1
+      ok, reason = probe_one(path, shim: shim, home: home, cwd: cwd, repo: repo)
+      failures << [name, reason] unless ok
+    end
+  end
+
+  if failures.empty?
+    puts "#{PROG}: OK — #{checked} bin(s) answer --help cheaply; #{exempt.size} exempt." unless quiet
+    return 0
+  end
+
+  return 1 if quiet   # negative self-test cases assert the CODE, not the prose
+
+  warn "#{PROG}: FAIL — #{failures.size} problem(s):"
+  failures.each { |name, reason| warn "  - #{name}: #{reason}" }
+  warn ""
+  warn "  Fix: give each bin above a --help branch checked BEFORE every other flag, printing its usage to STDOUT and exiting 0 without doing anything else. Ruby: `if ARGV.include?(\"--help\") || ARGV.include?(\"-h\") then puts USAGE; exit 0 end`. POSIX sh: `case \"${1:-}\" in -h|--help) usage; exit 0 ;; esac`. A bin that genuinely cannot (a passthrough wrapper that forwards argv) goes in EXEMPT in #{PROG} with a reason."
+  1
+end
+
+# ---------------------------------------------------------------------------
+# Self-test: deterministic, model-free, hermetic. Fixtures only -- it never
+# probes the live ai/bin/.
+# ---------------------------------------------------------------------------
+
+def write_fixture(dir, name, body)
+  p = File.join(dir, name)
+  File.write(p, body)
+  FileUtils.chmod(0o755, p)
+  p
+end
+
+def fixture_repo(dir)
+  sh = ->(*a) { system(*a, chdir: dir, out: File::NULL, err: File::NULL) }
+  sh.call("git", "init", "-q", ".")
+  sh.call("git", "config", "user.email", "t@example.invalid")
+  sh.call("git", "config", "user.name", "t")
+  # A global core.excludesFile can otherwise make a fixture file invisible to
+  # git ls-files, silently emptying the enumeration.
+  sh.call("git", "config", "core.excludesFile", "/dev/null")
+  FileUtils.mkdir_p(File.join(dir, "ai", "bin"))
+end
+
+def probe_fixture(path, repo)
+  ok = nil
+  Dir.mktmpdir("check-bin-help-ft-") do |root|
+    shim, home, cwd = build_sandbox(root)
+    ok = probe_one(path, shim: shim, home: home, cwd: cwd, repo: repo)
+  end
+  ok
+end
+
+def run_self_test
+  ok = true
+  fails = []
+  assert = lambda do |label, cond|
+    ok &&= cond
+    fails << label unless cond
+  end
+
+  Dir.mktmpdir("check-bin-help-selftest-") do |repo|
+    fixture_repo(repo)
+    bindir = File.join(repo, "ai", "bin")
+
+    good_rb = write_fixture(bindir, "good-rb", <<~RB)
+      #!/usr/bin/env ruby
+      if ARGV.include?("--help")
+        puts "Usage:\\n  good-rb --help   this text"
+        exit 0
+      end
+      exit 0
+    RB
+    good_sh = write_fixture(bindir, "good-sh", <<~SH)
+      #!/bin/sh
+      case "${1:-}" in -h|--help) echo "Usage: good-sh --help"; exit 0 ;; esac
+      exit 0
+    SH
+
+    # THE LOAD-BEARING CASE: a bin with no --help branch whose default action
+    # touches a sentinel. It must FAIL, and the sentinel must NOT exist --
+    # that is the proof phase 1 never executes an unfixed bin. Without this
+    # case the entire safety argument is unverified prose.
+    sentinel = File.join(repo, "SENTINEL-nohelp")
+    no_help = write_fixture(bindir, "no-help", <<~SH)
+      #!/bin/sh
+      : > "#{sentinel}"
+      exit 0
+    SH
+
+    exit1   = write_fixture(bindir, "exit1", "#!/bin/sh\ncase \"${1:-}\" in --help) echo 'exit1 usage'; exit 1 ;; esac\nexit 0\n")
+    silent  = write_fixture(bindir, "silent", "#!/bin/sh\ncase \"${1:-}\" in --help) exit 0 ;; esac\nexit 0\n")
+    onerr   = write_fixture(bindir, "onerr", "#!/bin/sh\ncase \"${1:-}\" in --help) echo 'onerr usage' >&2; exit 0 ;; esac\nexit 0\n")
+    hangs   = write_fixture(bindir, "hangs", "#!/bin/sh\ncase \"${1:-}\" in --help) sleep 600 ;; esac\nexit 0\n")
+    cwdwr   = write_fixture(bindir, "cwdwr", "#!/bin/sh\ncase \"${1:-}\" in --help) : > ./wrote-here; echo 'cwdwr usage'; exit 0 ;; esac\nexit 0\n")
+    repowr  = write_fixture(bindir, "repowr", "#!/bin/sh\ncase \"${1:-}\" in --help) : > '#{repo}/in-repo'; echo 'repowr usage'; exit 0 ;; esac\nexit 0\n")
+    callsm  = write_fixture(bindir, "callsm", "#!/bin/sh\ncase \"${1:-}\" in --help) claude -p hi; echo 'callsm usage'; exit 0 ;; esac\nexit 0\n")
+    wrongnm = write_fixture(bindir, "wrongnm", "#!/bin/sh\ncase \"${1:-}\" in --help) echo 'Usage: some other tool'; exit 0 ;; esac\nexit 0\n")
+
+    system("git", "-C", repo, "add", "-A", out: File::NULL, err: File::NULL)
+    system("git", "-C", repo, "-c", "commit.gpgsign=false", "commit", "-qm", "fixtures",
+           out: File::NULL, err: File::NULL)
+
+    # 1-2: correct help, both languages (proves language-agnosticism).
+    assert.call("ruby fixture passes", probe_fixture(good_rb, repo)[0])
+    assert.call("sh fixture passes",   probe_fixture(good_sh, repo)[0])
+
+    # 3: no --help -> FAIL, and NOT EXECUTED.
+    res = probe_fixture(no_help, repo)
+    assert.call("no-help fails", !res[0])
+    assert.call("no-help never executed (sentinel absent)", !File.exist?(sentinel))
+    assert.call("no-help reason says not executed", res[1].to_s.include?("NOT EXECUTED"))
+
+    # 4-6: wrong exit code / silent / stderr-only.
+    assert.call("exit 1 fails",      !probe_fixture(exit1, repo)[0])
+    assert.call("silent help fails", !probe_fixture(silent, repo)[0])
+    assert.call("stderr-only fails", !probe_fixture(onerr, repo)[0])
+
+    # 7: a hang FAILS *and is bounded*. A timeout that does not bound is not a
+    # timeout, so the wall time is asserted, not just the verdict.
+    t0 = Time.now
+    hres = probe_fixture(hangs, repo)
+    assert.call("hang fails", !hres[0])
+    assert.call("hang bounded under 20s", (Time.now - t0) < 20)
+    assert.call("hang reason says timed out", hres[1].to_s.include?("TIMED OUT"))
+
+    # 8-9: writes are caught, in cwd and in the repo.
+    assert.call("cwd write fails",  !probe_fixture(cwdwr, repo)[0])
+    assert.call("repo write fails", !probe_fixture(repowr, repo)[0])
+
+    # 10: the refusing stub is PROVEN WIRED, not decorative -- the failure must
+    # name the tool it reached for.
+    mres = probe_fixture(callsm, repo)
+    assert.call("model call fails", !mres[0])
+    assert.call("model-call reason names claude", mres[1].to_s.include?("claude"))
+
+    # 11: help that is not this tool's usage.
+    assert.call("wrong-name help fails", !probe_fixture(wrongnm, repo)[0])
+
+    # 12: an EXEMPT bin is skipped AND never executed (sentinel again).
+    FileUtils.rm_f(sentinel)
+    rc = run_check([no_help], exempt: { "no-help" => "fixture exemption" }, repo: repo, quiet: true)
+    assert.call("exempt bin passes", rc.zero?)
+    assert.call("exempt bin never executed", !File.exist?(sentinel))
+
+    # 13-14: dishonest exemptions are red.
+    assert.call("empty-reason exemption fails",
+                run_check([good_sh], exempt: { "good-sh" => "  " }, repo: repo, quiet: true) == 1)
+    assert.call("stale exemption fails",
+                run_check([good_sh], exempt: { "gone-bin" => "reason" }, repo: repo, quiet: true) == 1)
+
+    # 15: an empty enumeration is an ERROR, never a pass.
+    assert.call("empty enumeration fails",
+                run_check([], exempt: {}, repo: repo, quiet: true) == 1)
+
+    # 16: a clean set passes end to end.
+    assert.call("clean set passes",
+                run_check([good_rb, good_sh], exempt: {}, repo: repo, quiet: true).zero?)
+
+    # 17: every failure path carries Fix:.
+    _, errtxt = begin
+      prev = $stderr
+      $stderr = StringIO.new
+      run_check([no_help], exempt: {}, repo: repo, quiet: false)
+      [nil, $stderr.string]
+    ensure
+      $stderr = prev
+    end
+    assert.call("failure output carries Fix:", errtxt.include?("Fix:"))
+  end
+
+  if ok
+    puts "#{PROG}: self-test OK"
+    0
+  else
+    warn "#{PROG}: self-test FAILED: #{fails.join('; ')}"
+    warn "  Fix: keep the semantics exact — phase 1 must NEVER execute a bin lacking a --help branch (the sentinel case proves it), a hang must fail via the bounded timeout, a write to cwd or the repo must fail, the refusing stubs must be wired, a dishonest EXEMPT entry must be red, and an empty enumeration must be an ERROR rather than a pass."
+    1
+  end
+end
+
+require "stringio"
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts USAGE
+  exit 0
+end
+exit(ARGV.include?("--self-test") ? run_self_test : run_check(tracked_bins))

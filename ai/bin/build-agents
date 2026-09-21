@@ -31,6 +31,23 @@ INSTALL_DIR = File.expand_path("~/.claude/agents")
 
 INCLUDE_RE = /^@include[ \t]+(\S+)[ \t]*$/.freeze
 
+# Checked BEFORE anything else: the default action REWRITES every
+# ai/agents/*.md, so a fall-through here is a silent mutation of the harness.
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/build-agents            build + lint the agent definitions into
+                                     ai/agents/ (REWRITES the generated .md files)
+      ai/bin/build-agents --install  also copy generated defs to ~/.claude/agents/
+      ai/bin/build-agents --check    lint + verify ai/agents/ is up to date
+                                     (writes nothing)
+      ai/bin/build-agents --help     this text
+
+    Edit the .md.in templates and ai/blocks/**, never a generated .md.
+  TXT
+  exit 0
+end
+
 install = ARGV.include?("--install")
 check   = ARGV.include?("--check")
 

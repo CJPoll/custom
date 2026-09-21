@@ -23,13 +23,25 @@
 set -u
 
 usage() {
-  echo "Usage: admiral-report-watch <run-id>" >&2
-  echo "  Run under the harness Monitor primitive (persistent: true), not bare Bash." >&2
-  exit 2
+  cat <<'EOF'
+Usage: admiral-report-watch <run-id>
+  Emit one line per new captain report under the run's reports dir.
+  Run under the harness Monitor primitive (persistent: true), not bare Bash.
+
+  admiral-report-watch --help   this text
+EOF
 }
 
+# --help is a SUCCESSFUL outcome: usage on stdout, exit 0. A missing run-id is
+# a real error and keeps stderr + a non-zero code, so the two stay
+# distinguishable to a caller.
 case "${1:-}" in
-  ""|-h|--help) usage ;;
+  -h|--help) usage; exit 0 ;;
+  "")
+    usage >&2
+    echo "Fix: pass the run-id, e.g. \`admiral-report-watch 2026-09-20-notif-platform\`." >&2
+    exit 2
+    ;;
 esac
 
 run_id="$1"

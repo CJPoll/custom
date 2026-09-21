@@ -612,4 +612,20 @@ def run_self_test
   end
 end
 
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/harness-metrics [OPTIONS]      parse the session JSONL under
+                                            ~/.claude/projects/ into harness metrics
+      ai/bin/harness-metrics --self-test    deterministic suite (no model)
+      ai/bin/harness-metrics --help         this text
+
+    Options:
+      --dir PATH       read sessions from PATH instead of the default root
+      --session ID     restrict to one session id
+      --since WHEN     only records at or after WHEN
+      --json           emit JSON instead of the human summary
+  TXT
+  exit 0
+end
 exit(ARGV.include?("--self-test") ? run_self_test : run(ARGV))

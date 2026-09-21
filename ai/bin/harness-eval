@@ -235,6 +235,19 @@ def run_self_test
   end
 end
 
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/harness-eval                    run the regression corpus and compare
+                                             against ai/eval/baseline.json; writes
+                                             ai/eval/scorecard.json
+      ai/bin/harness-eval --update-baseline  rewrite the baseline from this run
+                                             (never to hide a regression)
+      ai/bin/harness-eval --self-test        deterministic suite (no model)
+      ai/bin/harness-eval --help             this text
+  TXT
+  exit 0
+end
 exit(
   if ARGV.include?("--self-test")
     run_self_test

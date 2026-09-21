@@ -615,4 +615,26 @@ rescue StandardError => e
   1
 end
 
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts <<~TXT
+    Usage:
+      ai/bin/variant-eval --variant REF [OPTIONS]   score a candidate harness ref
+                                                    against a baseline over the eval
+                                                    corpus; emits KEEP / REVERT /
+                                                    INCONCLUSIVE
+      ai/bin/variant-eval --self-test               deterministic suite (no model)
+      ai/bin/variant-eval --help                    this text
+
+    Options:
+      --baseline REF   ref to compare against (default: the configured baseline)
+      --corpus PATH    eval corpus directory
+      --runs N         samples per case (1-99)
+      --out PATH       write the scorecard here
+
+    PROPOSAL-ONLY and human-gated by design: this tool has no merge/commit/push/
+    adopt path, and a KEEP verdict is never license to adopt a variant
+    automatically. Never wrap it in an auto-adopt loop.
+  TXT
+  exit 0
+end
 exit(ARGV.include?("--self-test") ? self_test : run_from_argv)
