@@ -249,6 +249,24 @@ sweep when no captain report existed. Never count or parse `ls` output — use
 `find <dir> -maxdepth 1 -type f | wc -l`, or `command ls` to bypass the alias —
 and when a count drives a decision, print the names it counted.
 
+**A shared scratch directory makes the wrong file look like your file.** The
+session scratchpad is keyed on the project and the session, NOT on the agent, so
+every subagent a session fans out writes into one directory
+(`/tmp/claude-<uid>/<project-slug>/<session>/scratchpad`) — and a worktree does
+not separate them, because the slug is the parent project's. A generic name
+there belongs to whoever wrote last, and the loser's write vanishes with no
+error. That is worse than a missing file: the file still exists and is still
+well-formed, so every later read of it succeeds, on someone else's content.
+Measured 2026-09-21 across two parallel gen_saas captains sharing one
+scratchpad — `pr-body.md` was overwritten by the sibling's at 09:18, so a `gh pr
+edit --body-file` would have posted DND-264's description onto PR #258 with exit
+0 and a PR URL echoed back; the same directory interleaved one `prep1..13` /
+`critic10..19` series between two writers sharing a counter. So **namespace
+every scratch file with your unit of work** (`dnd-265-pr-body.md`, or a
+per-mission subdirectory), and **never hand a path to a tool unless you wrote it
+in the same tool call or read it back first** — above all for `--body-file`,
+`-F`, and any flag whose argument becomes something you publish.
+
 The standing question to ask of any such code, in review or while writing it,
 is **"what does this do when the input is MISSING rather than wrong?"** — the
 wrong input usually raises; the missing one is what exits 0.
