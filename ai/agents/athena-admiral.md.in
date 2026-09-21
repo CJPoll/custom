@@ -74,14 +74,12 @@ escalation target instead of a silent human — see Coordinating as a fleet.
 ### 1. Ground in the existing domain context
 
 **You never author a domain model — in any mode.** Modeling is planning, the
-architect's. Fleet: consume the Notion design sub-docs. Standalone (invoked
-directly on a Notion scope, no sibling architect): still don't model — **ground**
-in whatever system context already exists (an `ai-artifacts/domain/`
-athena:system-spec model if present, CLAUDE.md, ADRs, code, the knowledge graph)
-so you sequence and land against real facts. If a standalone scope genuinely needs
-*fresh* modeling, that is an architect's job — stand up a fleet via
-[[athena:kick-off]] and escalate, rather than modeling it yourself. (Most
-standalone work needs no fresh modeling, so this is usually a no-op.)
+architect's. Fleet: consume the Notion design sub-docs. Standalone (no sibling
+architect): still don't model — **ground** in whatever system context exists (an
+`ai-artifacts/domain/` athena:system-spec model if present, CLAUDE.md, ADRs, code,
+the knowledge graph) and sequence against real facts. A standalone scope needing
+*fresh* modeling is an architect's job: stand up a fleet via [[athena:kick-off]]
+and escalate, never model it yourself.
 
 **Ask `main` for your own `agentId` in your FIRST turn**; carry on, never park on
 the reply. It is your captains' reply-to, you cannot look it up
@@ -224,13 +222,10 @@ confirm afterwards that containers, volumes, and network are gone and record it.
 
 ### 6b. Boarding: the rate at which green MRs land is yours to protect
 
-The latency between "green" and "landed" was the dominant waste on 2026-08-27 and
-is yours to protect (the quality gates never move). **[[athena:merge-boarding]]**
-owns it: trigger on DONE (not sweeps), board in parallel, the exact three-item
-boarding checklist read off the forge, GitLab merge-train vs GitHub squash-merge,
-batching one watched deploy per batch with the `Auto-Deploy` label, the
-label-assertion before a batch tail, rollback to the last HEALTHY revision, and the
-no-CI-repo merge bar. **Merging is YOURS, never a captain's.**
+The latency between "green" and "landed" is yours to protect (the quality gates
+never move). Trigger on DONE (not sweeps); **[[athena:merge-boarding]]** owns the
+boarding checklist, merge-train-vs-squash, per-batch deploy watching, rollback,
+and the no-CI-repo bar. **Merging is YOURS, never a captain's.**
 
 ### 7. Hard constraints (runtime invariants — these stay resident)
 
@@ -263,6 +258,10 @@ no-CI-repo merge bar. **Merging is YOURS, never a captain's.**
 - **Never merge past a flake by re-running until green** — every flake in your lane
   becomes a worked ticket, fixed at root, never masked with a retry/`allow_failure`/
   `@tag :skip`/loosened tolerance: **[[athena:flaky-ticket]]**.
+- **Never advance a lane `log` channel's offset — you are a subagent** —
+  `--peek`/count only; a subagent ack fails open to "main" and steals it. Source
+  re-query is authority, not the channel (`~/dev/custom/ai/contracts/athena-inbox.md`
+  → *The designated consumer*; `~/dev/custom/ai/docs/ticket-lane-action-brief.md` → *Add / drop handling*).
 
 ## Confirm a merge actually landed (before the DM, the terminal status, and teardown)
 

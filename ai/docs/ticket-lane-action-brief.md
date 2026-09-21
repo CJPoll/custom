@@ -14,15 +14,20 @@ contracts (`ai/contracts/athena-events.md`, `ai/contracts/athena-inbox.md`); the
 design record is cited only for design provenance and the flaky lane's migration
 ordering, and where it is cited the operative fact is also stated here in the
 brief. The current flaky-lane guidance — carried across several files (e.g.
-`~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt`, the policy in
-`~/.claude/CLAUDE.md` → *Flaky-test lane (per-machine automation)*, and the
-canonical hook/brief/response policy `ai/CLAUDE.md` places in `walt_ui/CLAUDE.md`
-→ "Flaky-test lane automation"; the complete inventory is DND-247's, not this
-list's) — **will become one instance** of this template. That sweep of the
-existing flaky/ticket-lane guidance to point at this brief is **DND-247 / H-3**,
-not this document, which adds the template without editing those homes yet. A
-second lane,
-or a second project, is another instantiation of the same template with different
+`~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt` and the canonical
+hook/brief/response policy in `walt_ui/CLAUDE.md` → "Flaky-test lane
+automation"; the complete inventory is DND-247's, not this list's) — **becomes
+one instance** of this template under DND-247's remaining sweep; those walt_ui
+carriers are not yet rewritten. Rewriting the existing flaky/ticket-lane **action policy** to point at
+this brief is **DND-247 / H-3** (named for provenance); the
+`~/dev/custom/ai/CLAUDE.md` home is a trigger-pointer *into* this brief, not an
+instance that binds its placeholders — the flaky instance is this brief's own
+parameter table below. DND-247 does
+**not** collapse the tracker constants into a single home
+or flip the citations to it; that collapse is **DND-276** and has not happened
+yet (see *The flaky lane — the worked instantiation* and *Relationship to the
+existing flaky trigger* below). A second lane, or a
+second project, is another instantiation of the same template with different
 parameter values — no new prose, no new code.
 
 **What this is, and what it is NOT.** This is the **client-side action brief** for
@@ -135,6 +140,37 @@ no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
    knowingly take choice (b), `manual-only` recovery — a human deleting
    `{{LOCK_PATH}}`. The brief records the choice rather than crediting a sweep that
    cannot fire.
+
+**Read and ack on a lane `log` channel — who may advance the offset.** When the
+trigger is the inbox count on `{{LANE_CHANNEL}}`, the trigger check is
+counts-only (`inbox-status`) or a `--peek` read that does NOT advance the offset
+— non-consuming by construction. Advancing the offset (the `read-inbox` ack) is
+gated by `ai/contracts/athena-inbox.md` → *The designated consumer*: tenancy +
+**not-a-subagent** + the channel `flock`, all three. The spun-up admiral is a
+**subagent** (Agent tool), so it can NEVER ack — a subagent "may count and may
+`--peek`, and neither advances anything," and an attempted ack only "works" by
+failing open to "main," a detection miss, not a guarantee. Therefore:
+
+- **The admiral (subagent) reads the lane channel by `--peek` only** — bodies
+  enter as untrusted Path-2 content — and reconciles add/drop against its
+  authoritative `{{SOURCE_RE_QUERY}}`. It never advances the offset. It MAY `rm`
+  the coordinator marker (a file op, not an inbox ack).
+- **The only actor that may advance the lane offset is the non-subagent lane
+  consumer — the session that spawned the admiral** (for flaky, the walt_ui
+  `SessionStart` main session, which holds walt_ui tenancy for the lane channel
+  and can take `{{LANE_CHANNEL}}`'s `.consumer.lock`). It acks **best-effort
+  after the admiral reports drained**, to reset the count and let retention
+  reclaim.
+- **Correctness never depends on the ack.** No-loss and no-double-spawn are
+  guaranteed by the admiral's authoritative `{{SOURCE_RE_QUERY}}` (*The consumer
+  owns membership*) plus the coordinator marker, NOT by the count returning to
+  zero. On the fresh-or-wedged-marker no-action path nothing acks, so no line is
+  consumed and none is lost; on a completed drain a best-effort ack resets the
+  count, and if it is skipped the next session merely re-routes and no-ops on the
+  empty re-query. A consuming read on the trigger path would ack lines with no
+  running consumer to re-query — the silent-loss class the platform exists to
+  kill (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an
+  empty one*) — which is why the trigger check is `--peek`/counts-only.
 
 **When NOT to spin up — and when "nothing" is a failure, not a quiet queue.** The
 consumer spawns ONLY when both spin-up conditions above hold, and it takes **no
@@ -261,14 +297,33 @@ The **tracker-management constants** — owner id, connector, scope DB + id, sco
 filter, status vocabulary, blocked semantics, merge policy — are **not copied
 here**, because copying them into a second tracked file is exactly the staleness
 the *Documentation conventions* rule below warns of (drift was already present
-before these citations replaced the copies). Those constants are today carried
-across **several homes**, canonically in **`walt_ui/CLAUDE.md` → "Flaky-test lane
-automation"** (which `~/.claude/CLAUDE.md` → *Flaky-test lane (per-machine
-automation)* summarises and points at as canonical). So the rows below **cite the
-flaky tracker policy** rather than copy it, and give concrete values only for the
-**lane-shape** placeholders this template introduces. **DND-247 owns collapsing
-those several carriers into this template** — after that sweep the values live
-here and the citations flip.
+before these citations replaced the copies). The machine-readable tracker
+*target* the captain reads — connector, database id, label, queued status — is
+declared in `<repo-root>/.claude/flaky-lane.json` (for the flaky lane,
+`~/dev/walt_ui/.claude/flaky-lane.json`), which is how the athena-captain template
+resolves it and **never hardcodes the database id**. The fuller drain policy is
+today carried across **several homes** — canonically in prose in
+**`walt_ui/CLAUDE.md` → "Flaky-test lane automation"** (`~/.claude/CLAUDE.md` →
+*Ticket-driven lanes (per-machine automation, flaky = one instance)* is the
+trigger-pointer that routes a session into this brief, not a copy of that policy)
+— while the dispatch poll (`flaky-ticket-poll.sh`) holds a hand-synced copy of the
+database id/connector. So the rows below **cite the flaky tracker policy** rather
+than copy it, and give concrete values only for the **lane-shape** placeholders
+this template introduces. Collapsing the dispatch side to also read from
+`flaky-lane.json` — making it the single machine-readable home — and flipping
+every citation to it is **DND-276**; it has **not** happened yet, so the values
+do **not** yet live here and the citations do **not** yet flip.
+
+**Later (2026-09-21):** ownership of the tracker-constants collapse moved from
+**DND-247** to **DND-276**. The prior rule made DND-247 the collapse owner
+("DND-247 owns collapsing those several carriers into this template — after that
+sweep the values live here and the citations flip"); it now reads that DND-247
+only rewrites the carriers to *point at* this brief, while collapsing the
+tracker constants into a single machine-readable home and flipping every
+citation to it is the separate **DND-276**, which has not happened yet — so the
+values do not yet live here. The two sweeps were split because pointing the
+carriers at the brief (H-3) is independent of, and precedes, moving the
+constants into one home (DND-276).
 
 | Placeholder | Flaky lane value |
 |---|---|
@@ -282,11 +337,26 @@ here and the citations flip.
 | `{{BLOCKED_SEMANTICS}}` | per the flaky tracker policy above (the `Blocked By` relation) |
 | `{{MAX_CAPTAINS}}` | `1` (strictly sequential) |
 | `{{MERGE_POLICY}}` | per the flaky tracker policy above (the admiral's auto-merge default); **terminal state = merged** (the condition the marker-removal step waits for) |
-| `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel — **to be provisioned in `ai/inbox/registry.json` by DND-247's migration** (walt_ui declares only a `slack` channel there today; see the migration section) |
-| `{{CHANNEL_RESOLUTION}}` | assert the flaky `log` channel resolves in the **live installed** entry the consumer reads — the `$ATHENA_INBOX_ROOT/projects/*.json` entry whose realpath'd `repo` equals walt_ui's git-common-dir realpath (per `ai/contracts/athena-inbox.md` → *Finding the entry*; a human finds that entry in the file conventionally named `projects/walt_ui.json`, but the match key is `repo`, never the filename), not just the committed `ai/inbox/registry.json` — at startup; on a miss, log the searched repo-identity key and treat it as a fault, NOT an empty queue (in force once DND-247 provisions and installs the channel) |
+| `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel — now **declared in `ai/inbox/registry.json`** (`kind:log`, `producer:"platform"`; DND-260 landed it), but a committed declaration is not yet an operative trigger: it must also be installed and resolve in the live entry (see `{{CHANNEL_RESOLUTION}}` and the migration section) |
+| `{{CHANNEL_RESOLUTION}}` | resolve the flaky `log` channel in the **live installed** entry the consumer reads — the `$ATHENA_INBOX_ROOT/projects/*.json` entry whose realpath'd `repo` equals walt_ui's git-common-dir realpath (per `ai/contracts/athena-inbox.md` → *Finding the entry*; a human finds that entry in the file conventionally named `projects/walt_ui.json`, but the match key is `repo`, never the filename), not just the committed `ai/inbox/registry.json`. **Post-install invariant:** once the channel is declared AND installed, a live entry that does not resolve — logging the searched repo-identity key — is registry **drift**, a fault `check-inbox-registry` surfaces with `Fix: setup-inbox-registry --install`, never an empty queue. **Pre-install today:** the flaky lane's operative trigger is the `SessionStart` poll (`flaky-ticket-poll.sh`); the inbox-count trigger on this channel is **not yet wired**. What a consumer does on a **declared-but-not-installed** channel — the pre-install→install cutover — is **H-4 / DND-248**, not settled here. |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
 | `{{STALE_MARKER_SWEEP}}` | choice (a): an activity-independent runner clears a marker older than 12h; a human may also `rm -f` it. TWO such runners exist today: the `SessionStart` poll (`flaky-ticket-poll.sh`) and — provisioned by DND-277, so the sweep survives the poll's retirement — the dedicated `SessionStart` hook `~/dev/custom/ai/hooks/flaky-marker-sweep.sh` (see *Relationship to the existing flaky trigger*) |
 | `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per the flaky tracker policy above) against the Tickets DB |
+
+**Later (2026-09-21):** the `{{LANE_CHANNEL}}` and `{{CHANNEL_RESOLUTION}}` rows
+above (and the *Relationship to the existing flaky trigger* section below) were
+superseded when DND-260 landed the committed declaration of the flaky `log`
+channel in `ai/inbox/registry.json`. The rows previously read that the channel
+was "to be provisioned … (walt_ui declares only a `slack` channel there today)"
+and that `{{CHANNEL_RESOLUTION}}` was "in force once DND-247 provisions and
+installs the channel"; they now read that the channel is "declared" (`kind:log`,
+`producer:"platform"`) and state a **post-install invariant** — a
+declared-AND-installed channel that does not resolve is registry drift (a fault
+`check-inbox-registry` surfaces) — while the pre-install→install cutover (what a
+consumer does on a declared-but-not-installed channel) is deferred to
+**H-4 / DND-248**. The operative gate did not weaken — a committed declaration
+is still not an installed, resolving channel — only its stated status advanced
+from undeclared to declared-but-not-yet-installed.
 
 **The marker semantics preserved VERBATIM for the flaky instance:**
 
@@ -357,19 +427,24 @@ too narrow: (a) the poll and its `walt_ui/.claude/settings.json` registration
 retire in the **product repo (walt_ui)**; (b) the new trigger's `{{LANE_CHANNEL}}`
 `log` channel is provisioned by a **tenancy registry entry whose committed source
 of truth is THIS repo's `ai/inbox/registry.json`** (`~/dev/custom/CLAUDE.md` →
-*Inbox tenancy registry*) — walt_ui declares only a `slack` channel there today,
-and the contract forbids that entry from living in the tenant repo, so adding the
-lane channel is a change **here**, not in walt_ui; (c) the `~/.claude/flaky-*`
+*Inbox tenancy registry*) — the flaky `log` channel is now declared there
+(DND-260), and the contract forbids that entry from living in the tenant repo, so
+provisioning the lane channel was a change **here**, not in walt_ui (installing
+it so it resolves in the live entry per `{{CHANNEL_RESOLUTION}}` remains the
+operative gate); (c) the `~/.claude/flaky-*`
 files are **machine-local home state**, in no repo. This template is the
 harness-side artifact the guidance is rewritten to point at.
 
 **The DND-247 sweep's carrier inventory is authoritative, not this section's
 examples.** The current flaky policy is carried in more than one file — the
-`SessionStart` poll and `flaky-coordinator-spawn.txt` above, the flaky-lane policy
-in `~/.claude/CLAUDE.md` → *Flaky-test lane (per-machine automation)*, **and the
-canonical hook/brief/response policy that `ai/CLAUDE.md` declares to live in
-`walt_ui/CLAUDE.md` → "Flaky-test lane automation"**. This list is illustrative,
+`SessionStart` poll and `flaky-coordinator-spawn.txt` above, **and the canonical
+hook/brief/response policy in `walt_ui/CLAUDE.md` → "Flaky-test lane
+automation"** (the `~/.claude/CLAUDE.md` home is now the trigger-pointer into
+this brief, already rewritten by this change — not a policy carrier awaiting
+rewrite). This list is illustrative,
 not exhaustive; DND-247 owns the complete carrier inventory and each carrier's
-rewrite, so a carrier not named here is not thereby out of scope (`~/dev/custom/
+rewrite **to point at this brief** (collapsing the tracker constants into a
+single machine-readable home is the separate **DND-276**), so a carrier not named
+here is not thereby out of scope (`~/dev/custom/
 CLAUDE.md` → *Documentation conventions* — enumerating carriers is how the one
 nobody listed gets through).
