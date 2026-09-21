@@ -547,12 +547,24 @@ elif [ "${OPTED_IN}" -eq 1 ] && [ -n "${HEALTH_TEXT}" ]; then
     # line should not have to take. The registration differs by producer, and
     # this hook cannot name the channel (counts-only), so it names the path(s)
     # the dark channels actually need — both, when both kinds are dark.
+    # A producer-registration Fix is emitted ONLY when a never-delivered channel
+    # is actually present. HEALTH_TEXT can be non-empty for reasons that have
+    # NOTHING to do with never-delivered -- a channel that could not be counted,
+    # or an unreadable state file -- and in those cases both NEVER_* are 0.
+    # Prescribing producer registration then would MISDIAGNOSE the fault (the
+    # producer is fine; something else is wrong), so that case points at
+    # inbox-status for the per-channel detail instead.
     if [ "${NEVER_PLATFORM}" -gt 0 ] && [ "${NEVER_SLACK}" -eq 0 ]; then
       WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a platform lane nothing has ever been delivered to usually means no server-side producer is registered — add an athena-events routing rule that writes state-change events to its inbox file (see ai/contracts/athena-events.md). Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel."
     elif [ "${NEVER_PLATFORM}" -gt 0 ]; then
       WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a channel nothing has ever been delivered to usually means its producer was never registered — for a slack channel, map this inbox filename to a server-side agent instance in ~/.config/athena-inbox-client/config.json; for a platform lane, add an athena-events routing rule (see ai/contracts/athena-events.md). Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel is which."
-    else
+    elif [ "${NEVER_SLACK}" -gt 0 ]; then
       WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a channel nothing has ever been delivered to usually means its producer was never registered — map this inbox filename to a server-side agent instance in ~/.config/athena-inbox-client/config.json. Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel."
+    else
+      # HEALTH_TEXT is a NON-never-delivered clause (a channel that could not be
+      # counted, or an unreadable state file). Point at the per-channel detail;
+      # do not prescribe producer registration for a fault that is not that.
+      WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: run ai/skills/athena:inbox/bin/inbox-status from this project for the per-channel detail and its own Fix: clause."
     fi
   fi
   WARN_TEXT_MARKER="${HEALTH_WARN_MARKER}"

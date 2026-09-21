@@ -572,6 +572,17 @@ assert_eq "a platform line on a slack channel stays unreadable (accepted coarse 
   "1" "$(jq -r .unreadable <<<"${res}")"
 assert_eq "a platform line on a slack channel is not counted new" \
   "0" "$(jq -r .new <<<"${res}")"
+# NON-WEDGING: a COMPLETE line that is unreadable STILL advances next_offset to
+# EOF. If it did not, the offset would stop in front of it forever and the
+# channel would wedge -- re-reading the same unreadable line every scan and
+# never reaching the lines after it. The mismatch residual above (platform
+# lines arriving on a producer:"slack" channel) depends entirely on this: those
+# lines are permanently unreadable, so the channel MUST step past them or it is
+# stuck. This is the offset-advance assertion the round-2 rewrite dropped; it is
+# distinct from the READABLE-line offset check earlier, which cannot prove the
+# unreadable path advances.
+assert_eq "a complete-but-unreadable platform line still advances next_offset to EOF (no wedge)" \
+  "$(printf '%s\n' "${platform_line}" | wc -c)" "$(jq -r .next_offset <<<"${res}")"
 
 # A line is JSON written by other people, so nothing guarantees a field has
 # the type this reader expects. A non-string `event_id` used directly as a jq
@@ -940,6 +951,15 @@ register pmine "${pmine}" '{"flaky":{"kind":"log","path":"pf.jsonl","producer":"
 rout="$(cd "${pmine}" && "${BIN}/read-inbox" flaky --peek 2>&1)"
 assert_contains "read-inbox renders a platform channel's state-change entity" "notion:1" "${rout}"
 assert_contains "read-inbox labels a platform line as a state-change" "state-change" "${rout}"
+# NON-PEEK read+ack on a platform channel -- the FIRST case in the suite where a
+# non-empty read carries EMPTY event_ids AND keys (a keyless lane), flowing
+# through inbox_ack_log -> logchan_ring_append. --peek above never advances, so
+# the ack path of the new schema had no coverage. Prove the offset advances so a
+# SECOND read shows nothing new; a keyless lane that failed to advance would
+# re-report every change event forever.
+( cd "${pmine}" && "${BIN}/read-inbox" flaky >/dev/null 2>&1 )
+assert_eq "a platform read+ack advances the offset -- a second read shows nothing new (keyless lane, empty event_ids/keys)" "0" \
+  "$(cd "${pmine}" && "${BIN}/read-inbox" flaky --json 2>/dev/null | jq -r '.messages | length')"
 
 # A malformed registry entry is a HARD error, not "this project has no
 # channels": the two are indistinguishable downstream and only one is safe.

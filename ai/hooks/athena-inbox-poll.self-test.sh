@@ -692,6 +692,17 @@ assert_contains "R8 a channel that cannot be counted is surfaced, not shown as z
   "1 declared channel(s) could not be counted" "${CTX}"
 assert_not_contains "R8 the health clause counts and does not name the channel" \
   "tenant-private-name" "${CTX}"
+# FOLD-IN (DND-260 round-3): a could-not-count clause is NOT a never-delivered
+# fault, so its Fix must NOT prescribe producer registration (both NEVER_* are
+# 0 here). Prescribing it would MISDIAGNOSE -- the producer is fine, the count
+# failed for another reason. It points at inbox-status for the per-channel
+# detail instead.
+assert_not_contains "R8 a could-not-count clause does NOT prescribe producer registration (fold-in)" \
+  "server-side agent instance" "${CTX}"
+assert_not_contains "R8 a could-not-count clause does NOT prescribe an athena-events rule (fold-in)" \
+  "athena-events routing rule" "${CTX}"
+assert_contains "R8 a could-not-count clause points at inbox-status for per-channel detail" \
+  "per-channel detail" "${CTX}"
 
 # "Nobody ever registered the writer" and "nothing new arrived" are identical on
 # disk. They must not be identical in the notice: the first is a broken setup,
@@ -807,6 +818,11 @@ register "${LOG_CHANNEL}"
 run_hook
 assert_contains "R13 the control: a never-delivered LOG channel is still a fault" \
   "never received anything" "$(context_of "${OUT}")"
+# ...and its Fix, unlike the could-not-count clause above, DOES prescribe
+# producer registration -- this is a real never-delivered fault (NEVER_SLACK>0),
+# so the fold-in gate lets the producer-registration Fix through here.
+assert_contains "R13 a never-delivered slack LOG channel DOES prescribe producer registration (fold-in control)" \
+  "server-side agent instance" "$(context_of "${OUT}")"
 
 echo "== R16: an entry that VANISHED is not the same as one that never existed =="
 
