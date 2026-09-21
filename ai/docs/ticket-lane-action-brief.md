@@ -75,6 +75,7 @@ config value substituted into the template body.
 | `{{MAX_CAPTAINS}}` | The lane's concurrency cap (e.g. `1` for a strictly-sequential lane). |
 | `{{MERGE_POLICY}}` | The merge/deploy rule (e.g. auto-merge + the admiral's batch-and-watch defaults). |
 | `{{LANE_CHANNEL}}` | The inbox `log` channel the lane's forwarded state-change events arrive on (`ai/contracts/athena-inbox.md` → *A lane `log` channel is a change stream of state-change events*). |
+| `{{CHANNEL_RESOLUTION}}` | How the instance **asserts `{{LANE_CHANNEL}}` resolves** to a registered channel at startup and makes a miss **observable** — naming the searched key — rather than reading a silent zero as "no action" (per *When NOT to spin up*). Every lane MUST bind this; leaving it unbound is **NOT conformant** — an unasserted channel is the silent-dark failure the template calls worse than spinning up on nothing. This is the resolution-side twin of `{{STALE_MARKER_SWEEP}}`. |
 | `{{LOCK_PATH}}` | The coordinator marker path — `~/.claude/{{LANE_ID}}-coordinator.lock`. |
 | `{{STALE_MARKER_SWEEP}}` | The lane's declared recovery for a marker left behind by a died/aborted admiral. Every lane MUST make one of two **explicit, recorded** choices — leaving it unbound is NOT conformant (an unstated sweep must not read like a legitimate "manual only"): **(a)** bind a runner that fires **independently of lane activity** — a periodic/time-based check or a session-start hook that runs whether or not the lane has new work — which gives automatic recovery; or **(b)** declare `manual-only`, accepting that a wedged marker is cleared solely by a human deleting `{{LOCK_PATH}}`. What disqualifies a runner from (a) is firing **only on lane activity**, not being the work-trigger: the flaky lane's `SessionStart` poll is a valid (a) — it ages out a marker older than 12h every session start regardless of activity — *and it is also the flaky work-trigger*, which is fine. What has no (a) available is a purely **activity-triggered** lane, e.g. one whose only trigger is the count of new `{{LANE_CHANNEL}}` lines: a wedged-but-idle lane produces no new line to fire it (see the *Recovering a stale marker* step under *Spinning the lane up*), so such a lane must choose (b) knowingly. |
 | `{{SOURCE_RE_QUERY}}` | The authoritative re-list of lane scope from the source of truth (the same predicate as `{{SCOPE_FILTER}}`, re-run against the tracker). |
@@ -152,7 +153,10 @@ resolving the key is its own step; every miss stays observable; a missing input 
 not a match). Only a *resolved* channel's genuine emptiness is "no action"; an
 *unresolved* channel is a surfaced fault. A lane instance that collapses the two
 can spin up on nothing, or — worse — sit dark forever on a misconfigured channel
-believing its queue is empty.
+believing its queue is empty. **This assertion is not optional prose: every
+instance binds it as `{{CHANNEL_RESOLUTION}}`, a mandatory parameter symmetric to
+`{{STALE_MARKER_SWEEP}}`, so a table that fills every placeholder cannot silently
+omit the check** — leaving `{{CHANNEL_RESOLUTION}}` unbound is not conformant.
 
 **The marker is a best-effort quieting hint, NOT a lock** (these are the flaky
 lane's `~/.claude/flaky-coordinator.lock` semantics, preserved and generalized
@@ -260,6 +264,7 @@ here and the citations flip.
 | `{{MAX_CAPTAINS}}` | `1` (strictly sequential) |
 | `{{MERGE_POLICY}}` | per the flaky tracker policy above (the admiral's auto-merge default) |
 | `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel — **to be provisioned in `ai/inbox/registry.json` by DND-247's migration** (walt_ui declares only a `slack` channel there today; see the migration section) |
+| `{{CHANNEL_RESOLUTION}}` | assert the flaky `log` channel resolves in `ai/inbox/registry.json` at startup; on a miss, log the searched channel key and treat it as a fault, NOT an empty queue (in force once DND-247 provisions the channel) |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
 | `{{STALE_MARKER_SWEEP}}` | choice (a): the `SessionStart` poll (`flaky-ticket-poll.sh`) — an activity-independent runner — clears a marker older than 12h; a human may also `rm -f` it |
 | `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per the flaky tracker policy above) against the Tickets DB |
