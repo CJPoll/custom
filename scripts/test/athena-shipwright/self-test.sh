@@ -487,6 +487,99 @@ else
   bad "--dry-run is inert" "rc=$rc out=$o"
 fi
 
+# A BROKEN scan must not read as a clean one. The foreign-dirt notice is the
+# only signal that says "someone else is mid-edit here", and it was computed
+# through `<(status_paths ...)` — process substitution discards the exit status,
+# so a `git status` failure delivered an EMPTY stream, `comm` found nothing, and
+# the notice silently did not print while a bystander file was genuinely dirty.
+# Measured 2026-09-21: exit 0, no notice, the commit proceeding as if the tree
+# were quiet. Same class as the `|| true` on a `git ls-files` outside-scope scan
+# a captain removed from gen_saas the same day (GS-DND-234 [guardrail]).
+#
+# The stub passes every git call through EXCEPT the bare (no-pathspec) status,
+# which is the one whose failure used to be invisible.
+stub_git_bare_status_fails() { # <dir>
+  mkdir -p "$1"
+  cat >"$1/git" <<'EOS'
+#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "status" ]; then
+    case " $* " in
+      *" -- "*) : ;;
+      *) echo "fatal: simulated index failure" >&2; exit 128 ;;
+    esac
+  fi
+done
+exec git.real "$@"
+EOS
+  chmod +x "$1/git"
+  ln -sf "$(command -v git)" "$1/git.real"
+}
+
+r="$(new_repo)"; sdir="$(dirname "$r")/gitstub"
+stub_git_bare_status_fails "$sdir"
+printf 'shipwright edit\n' >"$r/ai/agents/ours.md"
+printf 'AGENT MID-EDIT\n'  >"$r/bystander.conf"
+o="$(cd "$r" && PATH="$sdir:$PATH" "$COMMIT" --dry-run -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$o" | grep -q 'Fix:' \
+   && printf '%s' "$o" | grep -q 'nothing was measured'; then
+  ok "a failed whole-tree scan exits 1 naming that nothing was measured, not a silent clean notice"
+else
+  bad "broken foreign scan must not read as clean" "rc=$rc out=$o"
+fi
+
+# ...and the refusal must be DISTINGUISHABLE from the real "nothing to commit"
+# (exit 3). Reporting a failed measurement as an empty result is the same defect
+# wearing the other exit code: it sends the reader off to name different paths.
+if printf '%s' "$o" | grep -q 'nothing to commit in the named paths'; then
+  bad "a broken scan must not claim 'nothing to commit'" "out=$o"
+else
+  ok "a broken scan is textually distinct from a genuinely empty one (exit 3)"
+fi
+
+# The mirror case: the PATHSPEC scan failing must also refuse loudly rather than
+# fall through to exit 3, whose Fix: line ("you named the wrong paths") is wrong
+# advice when the truth is that git could not be read at all.
+stub_git_pathspec_status_fails() { # <dir>
+  mkdir -p "$1"
+  cat >"$1/git" <<'EOS'
+#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "status" ]; then
+    case " $* " in
+      *" -- "*) echo "fatal: simulated index failure" >&2; exit 128 ;;
+    esac
+  fi
+done
+exec git.real "$@"
+EOS
+  chmod +x "$1/git"
+  ln -sf "$(command -v git)" "$1/git.real"
+}
+
+r="$(new_repo)"; sdir="$(dirname "$r")/gitstub2"
+stub_git_pathspec_status_fails "$sdir"
+printf 'shipwright edit\n' >"$r/ai/agents/ours.md"
+o="$(cd "$r" && PATH="$sdir:$PATH" "$COMMIT" --dry-run -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$o" | grep -q 'nothing was measured'; then
+  ok "a failed pathspec scan exits 1, never the exit-3 'you named the wrong paths'"
+else
+  bad "broken pathspec scan must not read as nothing-to-commit" "rc=$rc out=$o"
+fi
+
+# The healthy path is unchanged: real git, dirty bystander, notice PRINTS.
+# Without this the two cases above would pass against a script that had simply
+# been broken into always failing.
+r="$(new_repo)"
+printf 'shipwright edit\n' >"$r/ai/agents/ours.md"
+printf 'AGENT MID-EDIT\n'  >"$r/bystander.conf"
+o="$(cd "$r" && "$COMMIT" --dry-run -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'bystander.conf'; then
+  ok "a healthy scan still reports foreign dirt (the notice was not disabled)"
+else
+  bad "healthy foreign-dirt notice" "rc=$rc out=$o"
+fi
+
 # ---------------------------------------------------------------------------
 # Shared helpers for the runner (per-invocation-lane) sections below.
 

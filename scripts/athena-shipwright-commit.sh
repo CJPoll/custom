@@ -38,7 +38,8 @@
 #
 # Exit codes:
 #   0  committed (or --dry-run printed a plan)
-#   1  git itself refused the commit (e.g. a hook rejected it)
+#   1  git itself failed (it refused the commit, e.g. a hook rejected it; or the
+#      worktree status could not be read, so neither check below could be run)
 #   2  usage / validation error (no paths, a catch-all pathspec, a path outside
 #      the repo, a path git does not know and that does not exist)
 #   3  the named paths contain nothing to commit
@@ -265,8 +266,40 @@ status_paths() { git -c core.quotePath=false status --porcelain -uall "$@" | cut
 # gets learned-past. It is excluded from the foreign side only, never from
 # `ours_dirty`, so naming such a path still behaves normally rather than
 # silently reading as "nothing to commit".
-ours_dirty="$(status_paths -- "${PATHS[@]}" | grep -c . || true)"
-foreign="$(comm -23 <(status_paths | grep -v '^ai-artifacts/') <(status_paths -- "${PATHS[@]}"))"
+# `status_paths` is the ONLY instrument behind both the foreign-dirt notice and
+# the nothing-to-commit refusal, and `set -uo pipefail` above makes it report a
+# git failure — but ONLY if the caller looks. Reading it through `<(...)` throws
+# that status away: the scan delivers an EMPTY stream, `comm` finds no foreign
+# paths, and the notice the comment above calls "the only signal that says
+# someone else is mid-edit here" simply does not print. Measured 2026-09-21 with
+# a `git status` stubbed to exit 128 — a genuinely dirty bystander file produced
+# no notice and exit 0, which is this repo's *A failed lookup must never look
+# like an empty one* aimed squarely at this script's own guarantee. (Same class
+# as the `|| true` on a `git ls-files` outside-scope scan that a captain removed
+# from gen_saas the same day: a broken scan had read as "nothing outside".)
+#
+# So each scan is run into a VARIABLE and its status is checked, keeping "could
+# not look" textually distinct from "found nothing". Note this aborts on a
+# BROKEN SCAN, never on foreign dirt — dirt found is still only reported, per
+# the header. If git cannot be read, the `add`/`commit` below would fail anyway;
+# what this buys is a message carrying a `Fix:` instead of a silent miss.
+if ! ours_status="$(status_paths -- "${PATHS[@]}")"; then
+  die 1 "could not read the worktree status for the named paths (git failed); neither the foreign-dirt notice nor the nothing-to-commit check could be run." \
+    "This is NOT 'nothing to commit' — nothing was measured. Run 'git status --porcelain -uall -- ${PATHS[*]}' here and fix what it reports (a stale index.lock from a concurrent session is the usual cause), then re-run."
+fi
+if ! all_status="$(status_paths)"; then
+  die 1 "could not read the worktree status for the whole tree (git failed), so the foreign-dirt notice cannot be trusted to be silent." \
+    "This is NOT 'no one else is mid-edit' — nothing was measured. Run 'git status --porcelain -uall' here and fix what it reports (a stale index.lock from a concurrent session is the usual cause), then re-run."
+fi
+
+# `emit` replays a captured scan as lines. It drops blank lines so that an EMPTY
+# capture feeds `comm` an empty stream rather than the single blank line
+# `printf '%s\n' ""` would produce — a blank line present on one side only would
+# sort ahead of every path and read as a foreign entry named "".
+emit() { printf '%s' "$1" | grep -v '^$' || true; }
+
+ours_dirty="$(emit "$ours_status" | grep -c . || true)"
+foreign="$(comm -23 <(emit "$all_status" | grep -v '^ai-artifacts/') <(emit "$ours_status"))"
 
 if [ -n "$foreign" ]; then
   printf '%s: note: these paths are dirty outside this commit and are being left alone:\n' "$PROG" >&2
