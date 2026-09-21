@@ -6,7 +6,7 @@ description: The criteria the athena-admiral uses to pick a captain's model (Son
 # athena:model-tiering
 
 **Pick the engineer's model from the Mission's complexity.** The athena-captain
-definition defaults to `model: opus`; override it with `model: "sonnet"` on the
+definition defaults to `model: claude-opus-4-8`; override it with `model: "sonnet"` on the
 `Agent` call when the Mission is *bounded and mechanical*, and leave Opus for
 anything that needs judgment. Decide on the Mission as it actually is (read it
 and the code it names), not on its label, and write the choice and the one-line
