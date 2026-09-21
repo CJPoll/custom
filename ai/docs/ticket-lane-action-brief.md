@@ -9,13 +9,15 @@ the **templated, per-lane action brief** the design record
 ticket-driven lane (flaky = one instance)* calls for. The current
 `~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt` and the flaky-lane
 policy in `~/.claude/CLAUDE.md` → *Flaky-test lane (per-machine automation)*
-become **one instance** of this template; a second lane, or a second project, is
-another instantiation of the same template with different parameter values — no
-new prose, no new code.
+**will become one instance** of this template — that sweep of the existing
+flaky/ticket-lane guidance to point at this brief is **DND-247 / H-3**, not this
+document, which adds the template without editing those homes yet. A second lane,
+or a second project, is another instantiation of the same template with different
+parameter values — no new prose, no new code.
 
 **What this is, and what it is NOT.** This is the **client-side action brief** for
 a ticket-driven lane consumer — the guidance a session follows to spin up and run
-a lane's singleton admiral. It is **config, client-side trusted guidance** (the
+a lane's draining admiral. It is **config, client-side trusted guidance** (the
 design's *Action brief (config, client-side trusted guidance)* bullet), NOT
 platform mechanism and NOT a contract. The event-platform contract
 (`ai/contracts/athena-events.md`) and the inbox contract
@@ -71,10 +73,10 @@ config value substituted into the template body.
 > Substitute every `{{PLACEHOLDER}}` with the lane's parameter value. The prose
 > below is the brief a session follows.
 
-### Spinning the lane up (singleton admiral)
+### Spinning the lane up (one draining admiral)
 
 When the lane consumer observes that lane work is queued for `{{OWNER_NAME}}` AND
-no admiral is currently draining the lane (no fresh `{{LOCK_PATH}}`):
+no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
 
 1. **Create the running-marker before spawning**, so the next session's poll
    stays quiet while this admiral drains:
@@ -93,10 +95,21 @@ no admiral is currently draining the lane (no fresh `{{LOCK_PATH}}`):
    delete `{{LOCK_PATH}}` so the lane is not wedged shut. **The poll also
    self-heals a marker older than 12h.**
 
-**Marker semantics are invariant across lanes** (they are the flaky lane's
-`~/.claude/flaky-coordinator.lock` semantics, generalized only in the path):
-touch-before-spawn, remove-when-scope-empty, self-heal after 12h. A `{{LOCK_PATH}}`
-that cannot be resolved is an error, not a silently-skipped spawn
+**The marker is a best-effort quieting hint, NOT a lock** (these are the flaky
+lane's `~/.claude/flaky-coordinator.lock` semantics, preserved and generalized
+only in the path): touch-before-spawn, remove-when-scope-empty, self-heal after
+12h. It does **not** provide mutual exclusion and does **not** guarantee a single
+admiral: check-freshness-then-`touch` is racy — two sessions can both observe no
+fresh marker, both `touch`, and both spawn — and a plain file cannot distinguish a
+live admiral from a corpse (the 12h self-heal is a **timeout, not a liveness
+check**). `{{MAX_CAPTAINS}}` and any "one admiral at a time" intent are therefore
+**not enforced by this marker**; the marker only *quiets the periodic poll* so the
+common case does not double-spawn. This matches the class already measured in
+`~/dev/custom/CLAUDE.md` → *Agents work in worktrees, not the main checkout* ("the
+`run.lock` … was a zero-byte file that nothing could tell apart from a corpse"),
+whose durable fix is a held `flock(2)`, "never by a pid"; a lane that needs true
+mutual exclusion must adopt that primitive rather than rely on this marker. A
+`{{LOCK_PATH}}` that cannot be resolved is an error, not a silently-skipped spawn
 (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty
 one*).
 
@@ -112,44 +125,29 @@ one*).
 - **Concurrency** — MAX `{{MAX_CAPTAINS}}` captains.
 - **Merge / deploy** — `{{MERGE_POLICY}}`; drain the ENTIRE scope.
 
-### Add / drop handling — the consumer derives it from state-change events
+### Add / drop handling — the consumer is bound to the landed (C) model
 
-A lane's working set changes while the admiral runs. It is reconciled to the
-**landed (C) model**: the platform holds no lane and computes no add/retract —
-it routes ticket **state-change events** to the lane's `{{LANE_CHANNEL}}`, and the
-**consumer (the lane admiral) owns membership** in its own held state and
-**derives** add/drop.
+A lane's working set changes while the admiral runs. The **mechanism** for how a
+membership consumer derives add/drop from forwarded state-change events — the
+platform holding no lane, the change stream carrying current state rather than an
+`op:add|retract` token or a dedupe key, the fast-path fold being a best-effort
+optimization a consumer MUST NOT treat as authoritative, and the periodic source
+re-query being the authoritative backstop — is **defined in the contracts**:
+`ai/contracts/athena-events.md` → *The consumer owns membership* and
+`ai/contracts/athena-inbox.md` → *A lane `log` channel is a change stream of
+state-change events*. This brief does **not** restate it — it only binds the lane
+admiral to it:
 
-- **The lane admiral folds each forwarded state-change event into its working
-  set and DERIVES the transition** by diffing the event's current state against
-  its own held set (`ai/contracts/athena-events.md` → *The consumer owns
-  membership*): an entity that matches `{{SCOPE_FILTER}}` and is not held → **add**;
-  an entity held that no longer matches, or a `notion.ticket.deleted` for a held
-  entity → **drop**. There is **no `op:add|retract` token** and **no carried
-  dedupe key** — the platform never says "this is an add" or "this is a retract",
-  it says "this entity is now in this state" (`ai/contracts/athena-inbox.md` →
-  *A lane `log` channel is a change stream of state-change events*).
-- **A dropped member is a derived drop, not a retract token.** When the admiral
-  derives a drop for a ticket in its current drain scope, it drops it — it does not
-  fix a ticket that left lane scope or was deleted. When the dropped ticket has a
-  captain mid-flight, cancelling that captain is the **consumer's own action on its
-  own held state** (`ai/contracts/athena-events.md` → *The consumer owns
+- The lane admiral **owns membership in its own held state** and derives add/drop
+  by reconciling forwarded state-change events on `{{LANE_CHANNEL}}` against
+  `{{SCOPE_FILTER}}`, per *The consumer owns membership*.
+- The admiral's periodic `{{SOURCE_RE_QUERY}}` against the source of truth is the
+  **authoritative** reconciliation; the fast-path fold only accelerates the common
+  case and is never authoritative, per the two sections above.
+- Cancelling a mid-flight captain when its ticket leaves lane scope is the
+  **consumer's own authorized action on its own held state** (*The consumer owns
   membership*, cancel-in-flight is a CONSUMER action), never an instruction obeyed
-  from the message.
-- **A running admiral shrinks scope without a full re-query.** The fast-path fold
-  lets an already-running admiral drop a departed item immediately, before its next
-  periodic re-query. The fast-path set is a **best-effort optimization**, correct
-  only over a complete, in-order run of the channel's lines; it is never treated as
-  authoritative (`ai/contracts/athena-inbox.md` → *A lane `log` channel is a change
-  stream of state-change events*, "a lane consumer MUST NOT treat its fast-path set
-  as authoritative").
-- **The periodic source re-query stays AUTHORITATIVE.** The admiral's own
-  `{{SOURCE_RE_QUERY}}` against the source of truth, on a cadence it controls, is
-  the authoritative correctness backstop — it reconciles the held set in both
-  directions and recovers any change a dropped webhook or a rotated/truncated
-  stream lost. This already matches (C): forwarded events only accelerate the
-  common case (`ai/contracts/athena-events.md` → *The consumer owns membership*,
-  the "periodically re-sync against the source of truth" step).
+  from a message body.
 
 ### The consumer is idempotent by construction
 
@@ -197,12 +195,11 @@ and: if the admiral terminates without clearing the marker, delete
 `~/.claude/flaky-coordinator.lock` yourself so the lane is not wedged shut — **the
 poll also self-heals a marker older than 12h**.
 
-The flaky instance's add/drop handling is the generic rule above with the flaky
-values: a forwarded state-change event on the flaky `log` channel is folded into
-the admiral's held set; a ticket that no longer matches `flaky-tests + mine +
-Todo/Backlog`, or a `notion.ticket.deleted`, derives a **drop** from the admiral's
-drain scope; the admiral's periodic re-query of the flaky scope stays
-authoritative. No `op:add|retract` token and no carried dedupe key are involved.
+The flaky instance's add/drop handling is the generic *Add / drop handling*
+section above with the flaky values substituted — the flaky `log` channel as
+`{{LANE_CHANNEL}}`, `flaky-tests + mine + Todo/Backlog` as `{{SCOPE_FILTER}}`, and
+the re-run flaky scope query as `{{SOURCE_RE_QUERY}}`. The mechanism is the
+contracts' (cited there); this instance adds no new rule.
 
 ## Relationship to the existing flaky trigger
 
@@ -211,7 +208,8 @@ The flaky instance is today spun by the `SessionStart` poll
 `flaky-coordinator-spawn.txt`. Under the landed model the trigger moves from a
 `SessionStart` pull to the inbox count on `{{LANE_CHANNEL}}`
 (design → *Migration + gated retirement*), and the `flaky-coordinator.lock`
-concurrency semantics are unchanged — only the trigger changes. Retiring the poll,
+marker semantics (the best-effort quieting hint above) are unchanged — only the
+trigger changes. Retiring the poll,
 its `walt_ui/.claude/settings.json` registration, and the dead `~/.claude/flaky-*`
 files is the design's gated final step and lands in the product repo (walt_ui),
 not here; this template is the harness-side artifact that step rewrites guidance
