@@ -90,12 +90,21 @@ AGENTS_DIR = File.join(AI_DIR, "agents")
 # decision: for an agent under an active shrink objective it silently UNDOES
 # that objective, and nothing in git would show it as a reversal. Ratchet DOWN
 # freely; see the overage `Fix:` below before ever ratcheting one up.
+# Do NOT annotate an entry with the agent's current line count. Such a comment is
+# stale by construction -- it changes with every commit that touches a template or
+# a shared block, nothing checks it, and it goes stale in the FLATTERING
+# direction: it always reads as MORE headroom than exists, so an agent sizing up a
+# change trusts it and plans an edit that cannot fit. Measured 2026-09-21: three
+# entries here read "current 730/529/704 + headroom" while the real headroom was
+# 6, 15 and 0 -- the shipwright cron read its own line and then had to rework an
+# already-drafted change to net-zero. Read the live number instead; this check
+# prints it, and `wc -l ai/agents/athena-*.md` is the one-liner.
 BUDGETS = {
   "admiral"     => 500,   # target delivered by the admiral-500 stage-4 resident trim
-  "captain"     => 760,   # current 730 + headroom
-  "architect"   => 560,   # current 529 + headroom
-  "shipwright"  => 720,   # current 704 + headroom
-  "diff-critic" => 140,   # current 111 + headroom
+  "captain"     => 760,
+  "architect"   => 560,
+  "shipwright"  => 720,
+  "diff-critic" => 140,
 }.freeze
 
 FILE_RE = /\Aathena-(.+)\.md\z/
