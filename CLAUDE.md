@@ -311,6 +311,38 @@ producer-registration mismatch the platform IS delivering, the file exists, the
 flag is permanently false, and the instrument can never fire. In both cases the
 unverifiable sentence was the one doing the persuading.
 
+### The same question, asked of a PLAN: can step N's inputs exist at step N?
+
+An ordered list of implementation steps reads as executable *because it is
+ordered*. Nothing checks that the things step N consumes have been created by
+the time step N runs, and a step whose inputs do not yet exist does not announce
+itself — it runs, produces output, and the output looks like a result. That is
+this section's defect moved from a sentence to a schedule.
+
+The failure is worst where the mis-ordered step is a **measurement**, because
+the number it produces is then attributed to whatever the later steps do. A
+fixture whose discriminating input the harness cannot yet supply is not a
+neutral placeholder: it is *mislabeled*, it scores as a miss or a false
+positive, and the step that finally supplies its input gets credited with a
+gain that was only the label becoming true. The flattering direction is the
+dangerous one.
+
+So **state, per step, the inputs it consumes and the step that creates each
+one** — and where a step's output is a baseline, say which measurements are
+comparable across steps and which are not. A corpus that grows between
+measurements makes a before/after aggregate meaningless; the comparable series
+is the part held byte-identical, and a not-yet-measurable case is recorded as
+**`n/a`, never as `0`** (a zero is a measurement; an absent input is the lack of
+one). Best is when that distinction is enforced rather than remembered: a
+runner that *refuses to score* an input it cannot supply, naming the case,
+cannot silently emit the zero.
+
+Measured 2026-09-21: the same design's step 1 needed correcting in two
+consecutive shipwright runs. It ordered "add fixtures 08–11, then record the
+BEFORE recall/precision" ahead of the two steps that introduce the only prompt
+inputs those fixtures are distinguished by — so all four were unauthorable at
+the step whose entire purpose was to keep the later steps honest.
+
 ## Cross-session reflection loop (athena-shipwright cron)
 
 The shipwright's cross-session reflection runs on an hourly cron and aggregates
