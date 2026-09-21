@@ -175,6 +175,55 @@ silently dropped. Without the table, "the closure covers it" is the same
 unverifiable claim as "the redesign covers it"; with it, the next re-critic's
 findings can be checked against the rows rather than re-argued.
 
+**Price DELETING the mechanism before the pass adds anything to it.** The option
+the loop structurally cannot generate — remove the mechanism the contradictory
+clauses all constrain, so they dissolve instead of being traded off — is
+described under *The park brief owes the owner the option the loop cannot
+generate* below. It is not a park-time option. Every closure and descope pass
+owes it the same explicit consideration, because by then the loop has already
+spent every round making the mechanism work and the bias is at its strongest.
+Name the deletion option in the pass's own output even if only to reject it, and
+say what it would cost — a deletion rejected on the record is cheap; a deletion
+never named is how a pass spends its rung adding machinery to something that
+should have gone.
+
+Measured 2026-09-21, both directions, in two independent runs. H-3/DND-247
+(`ai-artifacts/coordination/2026-09-20-notif-platform/reports/H-3-DND-247-architect-escalation.md`):
+the admiral named it in the escalation itself — "this is the
+**delete-the-mechanism option the loop won't propose**" — recommending that
+`ai/CLAUDE.md`'s migration narrative be deleted rather than made consistent with
+the brief. The architect ruled descope; one round later the re-critic was clean,
+and all three findings dissolved at their sources rather than being answered one
+at a time. The captain-500 closure the same day went the other way, recording
+that the mechanism at issue "was NOT deleted (that was the PARK-brief option,
+not needed here)", added two instruments to it instead, and was parked at the
+next round.
+
+**An instrument a closure pass ADDS is the next round's most likely finding —
+read it in the state it is credited with before returning.** A closure that
+discharges a finding by naming a new mechanism ("this is now observable because
+the plan adds gate X") has made a *claimed-mechanism* claim, and it made it in
+the one place nobody re-checks: the sentence that persuaded everyone the loop
+was over. The closure pass is the LAST cheap moment to test it — a round later
+it costs the round, the escalation rung, and possibly the park. So for each
+instrument the pass adds, apply `~/dev/custom/CLAUDE.md` → *A claimed mechanism
+must be able to fire* to it: name the exact state the finding was about, say
+what the instrument computes in that state, and say how that value differs from
+the healthy case. If it is permanently silent there, or identical to healthy, it
+does not close the finding and the pass is not done. Ask the same of the
+instrument's *editability*: an instrument the change-under-test can itself
+rewrite constrains nothing.
+
+Measured 2026-09-21 (captain-500, `ai-artifacts/coordination/2026-09-20-captain-500/state.md`):
+the round-12 artifact-scope closure discharged its kind-3 finding by adding two
+mutually-covering instruments, and reported them as strengthening. Round 13
+defeated both — the first was permanently silent in the state it was cited for
+(a model reconstructs a removed statement from surrounding prose, so the proof
+bar passes either way), the second was editable by the very PR it constrained.
+Both were kind-3 re-signals in the same cluster, which fired the HARD STOP below
+and parked the whole chain. Neither needed a new round to find: each was
+readable off the instrument at the moment it was written.
+
 **HARD STOP — if kind-3 signals again after a closure/descope pass — the same
 subsystem after a subsystem-scoped one, ANYWHERE in the artifact after an
 artifact-scoped one — stop.** (**Later (2026-09-20):** this rung read "if the
@@ -234,6 +283,15 @@ dissolve together instead of being traded off against each other. An
 unsatisfiability among N clauses always admits that option, and the loop's own
 history is what hides it, so put it in the brief explicitly even if only to
 reject it.
+
+**Later (2026-09-21):** this rule was scoped to the PARK BRIEF — the deletion
+option was something the owner got offered once the loop had already stopped.
+Superseded: it now binds every closure and descope pass as well, per *Price
+DELETING the mechanism before the pass adds anything to it* above. Reserving it
+for the park brief meant the one pass whose whole job is to terminate the loop
+was the one pass not required to consider the option that terminates it; both
+2026-09-21 runs turned on exactly that. The park-brief obligation below is
+unchanged and still applies at a park.
 
 Measured 2026-09-20 (DND-232 round 28): three clauses about a platform-side
 idempotency dedupe key were jointly unsatisfiable. The park brief offered (A) add
