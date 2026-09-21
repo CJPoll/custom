@@ -139,6 +139,90 @@ rescue Errno::ENOENT
   raise GitTrackingError, "git executable not found on PATH"
 end
 
+# ---------------------------------------------------------------------------
+# WHICH TREE AM I GATING?
+#
+# Every check in CHECKS is resolved against CUSTOM_DIR, which is derived from
+# __dir__ — the location of THIS FILE, not the caller's cwd. So
+# `~/dev/custom/ai/bin/harness-gate`, run from a worktree, gates the MAIN
+# CHECKOUT and reports PASS about code the caller is not committing. Nothing in
+# the output said so: the gate printed per-check PASS and "38/38 ... safe to
+# commit" without ever naming the tree it measured.
+#
+# Measured 2026-09-20 (run 2026-09-20-notif-platform, state.md "CORRECTED
+# DIAGNOSIS"): an admiral gated the dnd-247 worktree with the main checkout's
+# binary. check-inbox-registry compares the LIVE registry against the
+# registry.json beside the script, so it compared MAIN's copy — the gate went
+# RED, was diagnosed as live-registry "drift", and an operational revert was
+# considered before the real cause (wrong tree) was found. A false GREEN in the
+# same shape is the strictly worse half and leaves no symptom at all.
+#
+# This is CLAUDE.md -> "A failed lookup must never look like an empty one" at
+# the level of a measurement: a gate run against the wrong tree is
+# indistinguishable from a gate run against the right one. Two responses, in
+# order of how much they cost:
+#   1. ALWAYS name the tree in the output, so any PASS/FAIL can be attributed.
+#   2. REFUSE when cwd is a DIFFERENT worktree OF THE SAME REPO — the one state
+#      where the caller demonstrably has their own copy of every file and the
+#      main-checkout path can only be a mistake.
+# Deliberately NOT refused: a cwd outside any repo, or inside an UNRELATED repo
+# (gating custom from elsewhere is a real thing to want), or a cwd that cannot
+# be resolved at all. Fail open, per house style — but say so, never silently.
+TreeIdentityError = Class.new(StandardError)
+
+# [worktree_root, repo_identity] for `dir`, both absolute realpaths, or nil if
+# `dir` is not inside a git worktree (fail-open: nothing to compare).
+def git_tree_identity(dir)
+  return nil unless File.directory?(dir.to_s)
+
+  top, _e, st = Open3.capture3("git", "-C", dir, "rev-parse", "--show-toplevel")
+  return nil unless st.success?
+
+  common, _e2, st2 = Open3.capture3("git", "-C", dir, "rev-parse", "--git-common-dir")
+  return nil unless st2.success?
+
+  top = top.strip
+  common = common.strip
+  return nil if top.empty? || common.empty?
+
+  # THE TRAP THIS REPO HAS HIT FOUR TIMES (DND-183/202/208, custom PR #6):
+  # --git-common-dir is CWD-RELATIVE in a main checkout (literally ".git") and
+  # absolute only in a linked worktree. Left unexpanded, a main checkout and
+  # its own worktree yield ".git" vs "/abs/path/.git" — UNEQUAL — so the two
+  # would be classified as different repositories and the guard below would
+  # never fire. `git -C dir` makes the relative form relative to `dir`, so
+  # expand against `dir` and NEVER against Dir.pwd. A value still not absolute
+  # after expansion is a FAILED resolution, not a legitimate no-match.
+  #
+  # The EXPANSION is the live defence and is what --self-test case 7b drives
+  # (with a stubbed git returning the relative form). The raise below is a
+  # backstop only: File.expand_path always yields an absolute path today, so
+  # it is unreachable until someone resolves this value a different way —
+  # which is exactly when a silent relative path would come back.
+  common = File.expand_path(common, dir)
+  unless common.start_with?("/")
+    raise TreeIdentityError,
+          "git -C #{dir} rev-parse --git-common-dir gave #{common.inspect}, which is not an absolute path"
+  end
+
+  [File.realpath(top), File.realpath(common)]
+rescue Errno::ENOENT, Errno::EACCES
+  nil
+end
+
+# nil when there is nothing to refuse; otherwise the two tree roots, as
+# [cwd_root, gate_root]. Pure (both inputs injected) so --self-test can drive
+# it with fixture repos instead of the live checkout.
+def foreign_gate_tree(gate_root: CUSTOM_DIR, cwd: Dir.pwd)
+  here = git_tree_identity(cwd)
+  gate = git_tree_identity(gate_root)
+  return nil if here.nil? || gate.nil?   # cannot tell -> allow
+  return nil if here[0] == gate[0]       # same worktree -> the normal case
+  return nil if here[1] != gate[1]       # a genuinely different repo -> allow
+
+  [here[0], gate[0]]
+end
+
 # DND-209: this repo has real self-tests (e.g. scripts/test/athena-inbox-client/
 # self-test.sh, 42 cases; ai/skills/athena:inbox/test/self-test.sh;
 # ai/skills/athena:slack/test/self-test.sh) that nothing ran automatically —
@@ -271,6 +355,10 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
     return 1
   end
 
+  # Attribution, unconditionally. A PASS that does not name its tree cannot be
+  # audited after the fact — see "WHICH TREE AM I GATING?" above.
+  puts "harness-gate: gating #{root}"
+
   found = discover_self_tests(root)
   puts "self-tests discovered: #{found.size}"
 
@@ -300,6 +388,22 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
   end
 
   return 0 if dry_run
+
+  # WRONG-TREE REFUSAL. Only reached on a real run (a fixture dry_run never
+  # gets here), and only fires for same-repo-different-worktree — see
+  # "WHICH TREE AM I GATING?" above for what is deliberately allowed.
+  if (mismatch = foreign_gate_tree)
+    cwd_root, gate_root = mismatch
+    warn "harness-gate: REFUSED — you are in #{cwd_root} but this binary gates #{gate_root}."
+    warn "  Fix: run the gate belonging to the tree you are about to commit in — " \
+         "`cd #{cwd_root} && ./ai/bin/harness-gate`. Every check resolves its " \
+         "inputs beside THIS script (check-inbox-registry reads the " \
+         "registry.json next to it, discovery globs that tree), so the result " \
+         "you just asked for would describe #{gate_root}, not your work. Do " \
+         "not work around this by copying the result across — gate the tree " \
+         "you are committing."
+    return 1
+  end
 
   missing = missing_executables
   unless missing.empty?
@@ -345,6 +449,7 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
 end
 
 def run_list
+  puts "harness-gate: listing for #{CUSTOM_DIR}"
   CHECKS.each { |(label, argv)| printf("%-28s %s\n", label, argv.join(" ")) }
   found = discover_self_tests
   puts "harness-gate: #{CHECKS.size} declared check(s) " \
@@ -797,6 +902,143 @@ def run_self_test
     ok = false
   end
 
+  # 7b. The wrong-tree guard: git_tree_identity + foreign_gate_tree, against
+  #     REAL fixture repositories (a main checkout, a linked worktree of it,
+  #     and an unrelated repo), because the whole defect class lives in git's
+  #     own path-format behaviour and a hand-built fixture would just encode
+  #     whatever this code already believes.
+  Dir.mktmpdir("harness-gate-tree") do |dir|
+    # -c core.excludesFile= : a global excludes file leaks into throwaway
+    # repos on this machine and has silently emptied fixture repos before.
+    mk = lambda do |path|
+      FileUtils.mkdir_p(path)
+      Open3.capture3("git", "-c", "init.defaultBranch=main", "init", "-q", path)
+      File.write(File.join(path, "f"), "x")
+      Open3.capture3("git", "-C", path, "add", "f")
+      Open3.capture3({ "GIT_AUTHOR_NAME" => "t", "GIT_AUTHOR_EMAIL" => "t@t",
+                       "GIT_COMMITTER_NAME" => "t", "GIT_COMMITTER_EMAIL" => "t@t" },
+                     "git", "-C", path, "commit", "-qm", "init")
+    end
+
+    main_co = File.join(dir, "repo")
+    other   = File.join(dir, "other")
+    wt      = File.join(dir, "wt")
+    sub     = File.join(main_co, "sub")
+    plain   = File.join(dir, "plain")
+    mk.call(main_co)
+    mk.call(other)
+    FileUtils.mkdir_p(sub)
+    FileUtils.mkdir_p(plain)
+    _o, e, st = Open3.capture3("git", "-C", main_co, "worktree", "add", "-q", "-b", "lane", wt)
+
+    if !st.success? || !File.directory?(wt)
+      warn "self-test: FAIL — could not build the worktree fixture: #{e.strip}"
+      ok = false
+    else
+      # THE MISS CASE, and the reason this fixture is a real worktree: a main
+      # checkout's --git-common-dir is the RELATIVE ".git". If the expansion in
+      # git_tree_identity were dropped, main and its own worktree would compare
+      # as different repositories and the next assertion would silently pass by
+      # not firing. Assert the absoluteness directly too, so the miss is named
+      # rather than inferred.
+      id_main = git_tree_identity(main_co)
+      id_wt   = git_tree_identity(wt)
+      if id_main.nil? || id_wt.nil?
+        warn "self-test: FAIL — git_tree_identity returned nil for a real git tree"
+        ok = false
+      else
+        unless id_main[1].start_with?("/") && id_wt[1].start_with?("/")
+          warn "self-test: FAIL — git_tree_identity returned a NON-ABSOLUTE repo " \
+               "identity (#{id_main[1].inspect} / #{id_wt[1].inspect}) — the " \
+               "cwd-relative --git-common-dir trap is back"
+          ok = false
+        end
+        unless id_main[1] == id_wt[1]
+          warn "self-test: FAIL — a main checkout and its own linked worktree did " \
+               "NOT resolve to the same repo identity (#{id_main[1].inspect} vs " \
+               "#{id_wt[1].inspect}); the guard can never fire"
+          ok = false
+        end
+        if id_main[0] == id_wt[0]
+          warn "self-test: FAIL — a main checkout and its worktree resolved to the " \
+               "SAME worktree root; the guard would never fire"
+          ok = false
+        end
+      end
+
+      # Fires: same repo, different tree — in BOTH directions.
+      [[wt, main_co], [main_co, wt]].each do |(from, gate)|
+        if foreign_gate_tree(gate_root: gate, cwd: from).nil?
+          warn "self-test: FAIL — foreign_gate_tree did NOT refuse gating #{gate} " \
+               "from #{from} (same repo, different worktree)"
+          ok = false
+        end
+      end
+
+      # Does NOT fire: same tree, a subdirectory of it, an unrelated repo, a
+      # non-repo directory, and an unresolvable path. Each of these is a
+      # deliberate allow, not an oversight.
+      {
+        "same tree"          => [main_co, main_co],
+        "subdirectory"       => [main_co, sub],
+        "unrelated repo"     => [main_co, other],
+        "not a repo at all"  => [main_co, plain],
+        "nonexistent cwd"    => [main_co, File.join(dir, "nope")],
+      }.each do |why, (gate, from)|
+        unless foreign_gate_tree(gate_root: gate, cwd: from).nil?
+          warn "self-test: FAIL — foreign_gate_tree wrongly refused (#{why}): " \
+               "gate=#{gate} cwd=#{from}"
+          ok = false
+        end
+      end
+
+      # THE MISS, driven rather than inferred. The relative-".git" form comes
+      # back only from a MAIN checkout, and the real main checkout is not
+      # something a self-test may chdir into, so stub `git` to return it
+      # unconditionally and assert the EXPANSION — that the identity comes
+      # back as an absolute path under the tree git was asked about, and NOT
+      # as ".git" resolved against whatever cwd the suite happened to run in.
+      # With `File.expand_path(common, dir)` deleted, File.realpath(".git")
+      # resolves against the caller's cwd, yields a different repo identity
+      # than the worktree's, and the refusal above silently never fires — a
+      # green suite guarding nothing.
+      stub_dir = File.join(dir, "stubbin")
+      FileUtils.mkdir_p(stub_dir)
+      stub = File.join(stub_dir, "git")
+      File.write(stub, <<~SH)
+        #!/bin/sh
+        for a in "$@"; do
+          case "$a" in
+            --show-toplevel)    echo "#{main_co}"; exit 0 ;;
+            --git-common-dir)   echo ".git";       exit 0 ;;
+          esac
+        done
+        exit 0
+      SH
+      FileUtils.chmod(0o755, stub)
+      old_path = ENV["PATH"]
+      begin
+        ENV["PATH"] = "#{stub_dir}:#{old_path}"
+        stubbed = git_tree_identity(main_co)
+        want = File.realpath(File.join(main_co, ".git"))
+        if stubbed.nil? || stubbed[1] != want
+          warn "self-test: FAIL — a CWD-RELATIVE --git-common-dir resolved to " \
+               "#{stubbed.inspect} instead of #{want.inspect}; the expansion in " \
+               "git_tree_identity is gone, so a main checkout and its own " \
+               "worktree compare as different repositories and the wrong-tree " \
+               "refusal can never fire"
+          ok = false
+        end
+      rescue TreeIdentityError => e
+        warn "self-test: FAIL — a relative --git-common-dir raised instead of " \
+             "being expanded against the directory git was asked about: #{e.message}"
+        ok = false
+      ensure
+        ENV["PATH"] = old_path
+      end
+    end
+  end
+
   # 8. run_one reports PASS/FAIL correctly and closes stdin.
   Dir.mktmpdir("harness-gate-selftest") do |dir|
     passing = File.join(dir, "pass.sh")
@@ -859,8 +1101,11 @@ if ARGV.include?("--help") || ARGV.include?("-h")
                                        and complete (no model)
       ai/bin/harness-gate --help       this text
 
-    Run this from ~/dev/custom before every shipwright commit. Never commit a
-    harness that fails its own gate.
+    Run the copy that belongs to the tree you are about to commit in —
+    `cd <your worktree> && ./ai/bin/harness-gate`. Every check resolves its
+    inputs beside this script, so another tree's copy measures that tree, not
+    yours; the gate names the tree it gated and refuses a same-repo mismatch.
+    Never commit a harness that fails its own gate.
   TXT
   exit 0
 end
@@ -872,6 +1117,22 @@ begin
     else run_gate
     end
   )
+rescue TreeIdentityError => e
+  # git handed back a repo identity that is malformed FOR ITS TYPE (a relative
+  # path where the contract says absolute). Per CLAUDE.md -> "A failed lookup
+  # must never look like an empty one", that is an error at the point of
+  # production, not a no-match — but it must still reach the reader as a Fix:
+  # message rather than a bare Ruby backtrace.
+  warn "harness-gate: FAILED — could not establish which tree is being gated: #{e.message}"
+  warn "  Fix: this is a git-resolution fault, not a harness-content failure — " \
+       "the gate refuses to run rather than report PASS/FAIL about a tree it " \
+       "cannot name. Check `git -C . rev-parse --path-format=absolute " \
+       "--git-common-dir` works and that #{CUSTOM_DIR} is a readable git " \
+       "worktree. Do NOT make this pass by dropping the absolute-path check in " \
+       "git_tree_identity: a cwd-relative --git-common-dir is exactly what " \
+       "makes a main checkout and its own worktree compare as different " \
+       "repositories, which silently disables the wrong-tree refusal."
+  exit 1
 rescue GitTrackingError => e
   # A confirmed git worktree whose `ls-files` itself failed (never raised for
   # "this isn't a repo" — see tracked_files). Must never surface as a bare

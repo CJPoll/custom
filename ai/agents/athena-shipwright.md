@@ -369,12 +369,12 @@ Two consequences you must carry:
 
 ## The gate — never commit a broken harness
 
-Before every commit, from `~/dev/custom`, all of these must pass; if any fails,
-you do not commit.
+Before every commit all of these must pass; if any fails, you do not commit.
 
-**Run it with `ai/bin/harness-gate`** — one command that runs every check below
-in its verified-correct invocation form (stdin closed, hooks via their dedicated
-`.self-test.sh`), prints PASS/FAIL per check, and exits non-zero if any fails.
+**Run YOUR worktree's own `./ai/bin/harness-gate`** (another tree's copy gates
+THAT tree; it names its tree and refuses a same-repo mismatch) — one command
+running every check below in its verified-correct form (stdin closed, hooks via
+their `.self-test.sh`), PASS/FAIL per check, non-zero if any fails.
 Hand-assembling the list is how a check silently does nothing and still reads as
 PASS; the runner's `--self-test` asserts the declared list stays correct and
 complete. The enumeration below remains the canonical human-readable spec — when
