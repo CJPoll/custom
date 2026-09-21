@@ -48,6 +48,32 @@ Give the captain, in the brief:
   place that `agentId` can come from. Carry it next to the reports-directory
   path, and keep the precedence straight: **the file write is the delivery**, the
   message is the latency optimization (see [[athena:fleet-liveness]]).
+
+  **You cannot look your own `agentId` up — it has to be given to you.**
+  `ListAgents` reports the agents you can *send to* and says outright that the
+  calling process "is not listed below"; there is no self-id anywhere in its
+  output, and from inside your own process the only address you have is the
+  bare word `main` for whoever spawned you. Your `agentId` exists in exactly one
+  place: the **`Agent` tool result your dispatcher received when it spawned
+  you**. So obtain it from your dispatcher — `SendMessage` to `main` asking for
+  your own `agentId` — and do it **before your first captain dispatch**, not
+  after a captain has already misrouted. Send the request and carry on preparing
+  worktrees while you wait; never park a turn on it.
+
+  **If you do not have it yet, say so in the brief — never omit the line.** A
+  brief silently missing its reply-to is the case that misroutes; a brief
+  saying *"no reply-to is available: write your report file and do not message
+  anyone"* costs only the latency optimization, which was never the delivery.
+  Fill the reply-to in on every brief from the moment your dispatcher answers.
+
+  This is the *how* the rule above always assumed and never stated. Measured
+  twice: 2026-09-18, four captains in one run addressed the main session; then
+  again on 2026-09-20 `notif-platform` — *after* the requirement was already
+  written here — where the state log records "reply-to misrouted to coordinator
+  **again**" and the run was only repaired when the **coordinator supplied this
+  admiral's `agentId`**, which is the one route the admiral could not take for
+  itself. An instruction to carry a value nobody tells you how to get is the
+  repo's *A claimed mechanism must be able to fire* class.
 - **The Notion status values it needs** — specifically `In Review`, which it
   sets itself once its MR is open. Where the tracker has no `In Review`-
   equivalent, the brief must say **"set NO Notion status at all"**, never a value
