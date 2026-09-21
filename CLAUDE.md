@@ -23,8 +23,22 @@ Configuration files for various tools and applications. These are symlinked to t
 ~/.zshrc -> ~/dev/custom/dotfiles/.zshrc
 ~/.config/nvim/init.vim -> ~/dev/custom/dotfiles/init.vim
 ~/.config/yazi -> ~/dev/custom/dotfiles/yazi
-~/CLAUDE.md -> ~/dev/custom/ai/CLAUDE.md
+~/.claude/CLAUDE.md -> ~/dev/custom/ai/CLAUDE.md
 ```
+
+**Later (2026-09-21):** the last entry read **`~/CLAUDE.md`**, here and in the
+recreate command below. Superseded: the live symlink is `~/.claude/CLAUDE.md`,
+and `~/CLAUDE.md` does not exist on this machine. This is worse than a stale
+note, because the path is not merely unread — it is *plausible*. A reader who
+ran the documented `ln -sf … ~/CLAUDE.md` would create a file Claude Code never
+loads, and get no error: the global instructions would simply not apply, and
+nothing would say so. That is *A failed lookup must never look like an empty
+one* pointed at the harness's own configuration. Measured 2026-09-20: a captain
+mid-task found the gap and had to note it in its report
+(`ai-artifacts/coordination/2026-09-20-notif-platform/reports/DND-247-h3-round3-report.md:40`
+— "Note `~/CLAUDE.md` does NOT exist on this machine … which is stale"). The
+other six symlinks in these two blocks were each verified live on 2026-09-21
+and are correct as written.
 
 **Theme Symlinks:**
 ```bash
@@ -39,7 +53,8 @@ ln -sf ~/dev/custom/dotfiles/.tmux.conf ~/.tmux.conf
 ln -sf ~/dev/custom/dotfiles/.zshrc ~/.zshrc
 ln -sf ~/dev/custom/dotfiles/init.vim ~/.config/nvim/init.vim
 ln -sf ~/dev/custom/dotfiles/yazi ~/.config/yazi
-ln -sf ~/dev/custom/ai/CLAUDE.md ~/CLAUDE.md
+mkdir -p ~/.claude
+ln -sf ~/dev/custom/ai/CLAUDE.md ~/.claude/CLAUDE.md
 
 # Themes
 ln -sf ~/dev/custom/hypr/themes/cyberpunk.vim ~/.vim/colors/cyberpunk.vim
