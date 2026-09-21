@@ -347,6 +347,19 @@ channel this project declares, of both kinds; there is no way to wait on one
 channel, because a narrowed waiter is indistinguishable from a complete one and
 the channels it left out never wake anybody.
 
+**The standing form: let a shell arm it, so quiet hours cost nothing.** The
+`run_in_background` loop above is the *attended* form — a human's session
+re-arming a waiter, one paid model turn per wake including every quiet 540s
+budget. For an unattended, session-long deployment (a desktop-as-server that
+talks to the owner on Slack and never restarts), the driver is
+`scripts/athena-attend-run.sh`: it arms `inbox-wait` from a **plain shell**
+outside any `claude` session and wakes a headless top-level `claude -p` handler
+**only when `inbox-status` reports `new > 0`**. Quiet hours are then a shell
+block, not a model turn, so they cost zero tokens, and the 540s/600s budget
+pairing never applies to the waiter. The wake procedure the handler runs is
+`athena:inbox-attend`; the supervision, epoch/ledger continuity and marker
+semantics are in `scripts/CLAUDE.md` → *Athena attendant supervision*.
+
 | exit | meaning | what to do |
 |---|---|---|
 | `0` | a doorbell rang | read, then **re-arm** |

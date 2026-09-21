@@ -291,6 +291,99 @@ loop above.
   and never touches the real crontab (`crontab(1)` is a PATH shim over a
   tmpfile).
 
+### Athena attendant supervision
+
+Keeps a project's Slack/inbox conversation live for a session's whole lifespan,
+with no restart — the answer to "desktop as server, talk to me on Slack, never
+restart the session." Same OpenRC arrangement as the inbox client above (user
+crontab + a supervising wrapper), one instance **per project**.
+
+The design that makes it cheap and reliable: **the shell waits, the model only
+handles.** `athena-attend-run.sh` owns the arm→wake→re-arm loop by calling
+`athena:inbox`'s `inbox-wait` *itself*, from a plain shell outside any `claude`
+session, and invokes a headless top-level `claude -p` handler **only when
+`inbox-status --json` reports `new > 0`**. Consequences:
+
+- **Quiet hours cost zero tokens.** A doorbell budget elapsing is a shell block
+  (inotifywait), not a paid model turn; the model runs only when real mail is
+  waiting. The `run_in_background`-in-a-model-session form (the *attended* form,
+  documented in `athena:inbox` → *How to arm it*) spends a turn on every quiet
+  re-arm on a growing transcript — which is why the runner-armed form is the
+  standing one.
+- **The 540s/600s ceiling never binds the waiter.** It bounds background waits
+  *under* `claude -p`; the waiter is not under claude. The handler's own turn
+  gets the shipwright's bounded pattern (`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`
+  default 600000 + a `timeout` wrapper as the lock-release backstop).
+- **The subagent constraint holds.** The runner's shell has no
+  `CLAUDE_AGENT_*`, so `inbox-wait` lets it arm; the reader/acker is the
+  handler's *top-level* turn, which is also what reports (to Slack). The runner
+  never sets `CLAUDE_AGENT_*` or `CLAUDE_CODE_SESSION_ATTENDED` (asserted).
+
+**`new > 0` is the trigger, not the doorbell.** Every path — exit 0, exit 75, a
+failed or blocked handler — re-checks `inbox-status` before deciding. That
+closes the lost-wake race (a bell rung between a handler's ack and the next
+re-arm) within one budget, and makes a blocked handler retryable (the offset
+never advanced, so `new` is still > 0). A non-document from `inbox-status` is
+"could not count", logged and retried — **never** treated as zero (the
+silent-dark class in `ai/CLAUDE.md` → *A failed lookup must never look like an
+empty one*).
+
+**Continuity without unbounded burn (epochs).** The handler is resumed within a
+bounded *epoch* (`--session-id <uuid>` then `--resume <uuid>`), rotated when any
+bound trips — wakes (30), transcript bytes (262144; unmeasurable → logged
+`n/a`, never 0), or age (86400s). Each resume re-caches the transcript prefix,
+so an unbounded transcript is an unbounded bill; the bounds cap it.
+Conversational continuity with the human lives in Slack (the thread) plus a
+small local **ledger** the handler reads at the top of every wake and appends at
+the end — not in the transcript, so a rotation needs no fragile handoff. The
+ledger holds **no message bodies** (it is read unfenced). Per-wake cost/turns
+land in `wakes.log`; the epoch defaults are starting points to re-set from that
+log, not numbers to defend.
+
+**What the handler may do** is `athena:inbox-attend`'s business, not the
+runner's: reply only in the originating conversation, or draft a Backlog ticket
+for a work request — never authorize an action from an (untrusted) message,
+never act outside the originating conversation, never edit the harness. The
+runner only decides *when* to wake it and *how much* it may cost.
+
+Two markers, two meanings (never repurposed, per the inbox-client rule):
+
+- `attend.stopped` — `inbox-wait` refused (exit 2: not opted in, no channels, a
+  bad budget). Full stop; the runner refuses to start (rate-limited) until a
+  human clears it. A stop is exit 0 (supervise) / exit 75 (`--once`), never a
+  silent exit.
+- `attend.wedged` — the handler failed `ATHENA_ATTEND_FAIL_ESCALATE` times in a
+  row (default 6). The runner writes it, exits **75**, and refuses to invoke the
+  model until cleared — a persistent failure becomes a loud cron exit, not an
+  hourly silence. An inotify fault (exit 1) is *survived* (re-arm once, then
+  backoff), never wedged. A handler that exits 0 without touching its receipt is
+  **blocked** (never reached the model — provider limit/auth): logged loudly,
+  mail left unread and retried, the wedge counter untouched.
+
+- `athena-attend-run.sh` — the runner. `--once` (one wait→check→handle cycle),
+  `--dry-run` (resolve doorbells + print the handler command line, run nothing),
+  `--project DIR`, `--help`. Holds an `flock` on its pidfile for the supervised
+  lifetime (second invocation exits 0 silently), closes the lock fd for every
+  child (`9>&-`) so a SIGKILLed supervisor's orphaned waiter cannot hold the
+  lock, adopts/reaps such an orphan by recorded pid on the next start, and
+  SIGTERM/SIGINT reap the child and stop the supervisor (exit 143/130).
+- `setup-athena-attend` — the committed idempotent installer, mirroring
+  `setup-athena-inbox-client`: `--install` (default) · `--check` · `--dry-run` ·
+  `--remove` · `--self-test` · `--project DIR` · `-h`, order-independent. Installs
+  `@reboot` + `*/5` entries naming the **main checkout's** runner and the
+  project (per-project, so a second project's entries are never disturbed).
+  Refuses to install for an unmerged runner path, a non-repo project, or a
+  project whose `inbox-wait --dry-run` refuses (no channels — the silent-dark
+  class caught at install time).
+- `test/athena-attend/` — the self-test (31 cases) + `SABOTAGE_RECORDS.md`.
+  Hermetic: `claude`, `inbox-wait`, `inbox-status`, `crontab` are all stubs, so
+  no model session, no real inbox, no real crontab is touched. It **consumes**
+  `inbox-wait`'s exit-code contract (proven at the source in
+  `ai/skills/athena:inbox/test/self-test.sh` — I-2/W-7/D-26) and proves the
+  *driver's reaction* to each: re-arm on 0 and 75, stop on 2, survive a fault or
+  a transient failure, wedge loudly on persistent failure, and never go silent
+  on any non-success terminal state. Discovered by the gate by filename.
+
 ### General Guidelines
 - Scripts should be self-documenting with clear usage information
 - Use consistent error handling and exit codes

@@ -189,6 +189,18 @@ was written, per `~/dev/custom/CLAUDE.md` → *Documentation conventions* (annot
 a dated claim, do not silently rewrite it); the description that follows is the
 original design sketch.
 
+**Later (2026-09-21):** the missing piece below — what *initiates and sustains*
+the waiter for a session's whole lifespan — is built now as the **Athena
+attendant** (`scripts/athena-attend-run.sh` + `athena:inbox-attend`). It is the
+answer to "keep a walt_ui session talking to me on Slack without restarting":
+a plain-shell supervised runner arms `inbox-wait` and wakes a top-level
+`claude -p` handler only when `inbox-status` reports `new > 0`. Because the
+waiter is a shell block, not a model turn, quiet hours cost zero tokens and the
+"background waiter" reliability concern (a model-session bg-wait / completion
+notification that can drop) is off the critical path. Install with
+`scripts/setup-athena-attend`; details in `scripts/CLAUDE.md` → *Athena
+attendant supervision*.
+
 The hook fires on prompts, so a long autonomous run with no prompts hears
 nothing. Two patterns close that, both for later:
 
