@@ -149,10 +149,12 @@ decision). Merge with:
 - **`--auto`** lands the PR the moment its required checks and approvals pass —
   the closest analog to GitLab boarding, but the platform holds and lands it;
   there is nothing to re-POST.
-- **Branch protection** (required checks + required approvals) is the gate. A
-  `gh pr merge` that is refused for unmet protection is **expected, not an auth
-  error** — do not retry it as an auth failure; surface what protection is
-  unmet.
+- **Branch protection** (required checks + required approvals) is the gate
+  **where it exists**. A `gh pr merge` that is refused for unmet protection is
+  **expected, not an auth error** — do not retry it as an auth failure; surface
+  what protection is unmet. On a free private repo there is no protection at
+  all, and then `--auto` gates on nothing — see *Expected refusals* below before
+  merging on such a repo.
 - **Deploy** is whatever the repo ships (typically a post-merge Actions
   workflow that fires automatically on merge to the default branch). There is
   **no `Auto-Deploy` label and no `release:watch` job** — watch the deploy run
@@ -162,6 +164,38 @@ decision). Merge with:
   `mergedAt` (the GitHub equivalent of MR `state=merged` / `merged_at`). The CLI
   success line alone is not proof — apply athena:gitlab's "confirm a merge
   actually landed" discipline.
+
+## Expected refusals — what the App and a free private repo cannot do
+
+Two refusals here are **structural facts about the identity and the plan**, not
+outages. Each has been read as an auth failure and retried at least once, so
+each is recorded with the response it actually returns.
+
+| You run | You get | What it means | What to do instead |
+|---|---|---|---|
+| `gh-athena run rerun <id>` (`--failed` too) | `Resource not accessible by integration` | The Athena App has no `actions:write`. Permanent; no token refresh or `forge-preflight` clears it. | Trigger a **fresh run with a branch push** — Athena's own path, and it re-runs against current code rather than replaying a stale SHA. A literal re-run of that same run needs the **owner's** `gh` (plain, not `gh-athena`), which makes it an owner step to surface, not a retry to attempt. |
+| `gh api repos/<owner>/<repo>/branches/<b>/protection` | HTTP 403 `Upgrade to GitHub Pro` | This repo is on a **free private** plan, where branch protection does not exist. | Treat the merge bar as entirely your own — see below. |
+
+**The second one changes what `--auto` means, so read it before merging.** The
+Merging section above calls branch protection "the gate" and says `--auto` lands
+the PR once required checks and approvals pass. With no protection, the required
+set is **empty**: there is nothing for `--auto` to wait on, and a **red PR is
+mechanically mergeable**. Measured 2026-09-20 on `gen_saas` (probe P9) and again
+in the same run on `custom`.
+
+So on a repo that answers 403 there, the platform is enforcing nothing and the
+admiral's own bar is the only thing standing between a red pipeline and `main`.
+That bar does not relax to match — it **tightens**, because nothing else is
+checking:
+
+- Read the check-run conclusions yourself and confirm every required-by-policy
+  check is genuinely green before merging. Do not infer green from a `gh pr
+  merge` that succeeded; it would have succeeded either way.
+- `--auto` on such a repo may land the PR **immediately**. If you are not ready
+  for it to land this second, do not pass `--auto`.
+- **"No lock on the door" is not consent.** Discovering that nothing blocks a
+  merge is never the reason to make one — and reaching for the owner's admin
+  token to force past a bar you set is out of scope regardless.
 
 ## Rules & etiquette
 
