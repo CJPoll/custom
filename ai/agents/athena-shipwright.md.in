@@ -528,14 +528,14 @@ Each run, for every repo the fleet ships from (currently `~/dev/custom`,
 than your **lead-time cursor**:
 
 ```
-ai/bin/lead-time --repo <R> --since "$(cat "$SHIPWRIGHT_STATE_DIR/lead-cursor.txt")" --slow 90 --json
+ai/bin/lead-time --repo <R> --since "$(cat "$SHIPWRIGHT_STATE_DIR/lead-cursor.<repo>.txt")" --slow 90 --json
 ```
 
-`lead-cursor.txt` lives beside `cursor.txt` in `$SHIPWRIGHT_STATE_DIR` (main
-checkout), is its own cursor so it never entangles with the report cursor, and
-is advanced to the newest merge you scanned only after the scan is handled
-(missing on first run → scan a bounded recent window, e.g. the last 48h, not all
-history).
+`lead-cursor.<repo>.txt` lives beside `cursor.txt` in `$SHIPWRIGHT_STATE_DIR`
+(main checkout) — **one cursor per repo**, advanced to that repo's newest
+scanned merge only once its scan is handled and **never on a `SCAN
+INCOMPLETE`**, so a repo whose probe failed keeps its window instead of having
+it eaten by a sibling's success. Missing on first run → a bounded 48h window.
 
 **Qualify before acting — same discipline as report patterns.** A single slow
 ticket is *watched, not actioned*. Act only on a **recurring shape** (≥2 slow

@@ -151,8 +151,20 @@ slowest-first, each tagged `slow_threshold_min`) — the outlier filter. Both
 phases appear in the human table and in `--json` (`code_seconds`/`tail_seconds`).
 
 The **athena-shipwright cron** runs this at `--slow 90` over every repo the fleet
-ships from, newer than its own `lead-cursor.txt`, and drives lead time down over
-time. When a slow shape recurs (≥2 tickets sharing a cause) or one pipeline stage
+ships from, newer than that repo's own `lead-cursor.<repo>.txt`, and drives lead
+time down over time.
+
+**Later (2026-09-21):** the cursor was a single `lead-cursor.txt` shared by every
+repo, advanced to the newest merge scanned anywhere. Superseded by one cursor per
+repo, advanced only for a repo whose own scan completed and **never on a `SCAN
+INCOMPLETE`**. A shared cursor makes one repo's success consume a sibling's
+unscanned window, permanently and silently: `gh` auth on this machine has been
+HTTP 401 for `custom` and `gen_saas` while `walt_ui` scanned clean, so a dozen
+journal entries advanced the shared cursor past windows those two repos were
+never measured over. Making the probe failure *loud* (the `SCAN INCOMPLETE`
+refusal, added 2026-09-21) fixed the reporting half but not this one — the loop
+still announced it had not measured while discarding the window it would have
+needed to measure later. When a slow shape recurs (≥2 tickets sharing a cause) or one pipeline stage
 dominates the `tail`, it spawns an **athena-architect** to design a
 **safety-preserving** improvement, then: applies harness changes to `~/dev/custom`
 itself, and files product-repo pipeline/harness changes as Notion tickets for the

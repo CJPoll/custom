@@ -423,7 +423,8 @@ across sessions — it is not a one-shot queue drain.
   derives it per ticket from git + the forge's CI (GitHub `gh` / GitLab `glab`,
   auto-detected) — capturing nothing, so no agent has to remember a status; the
   design and the rejected markers are in `ai/docs/lead-time-tracking.md`. Each
-  run scans `--slow 90` outliers newer than a second cursor (`lead-cursor.txt`),
+  run scans `--slow 90` outliers newer than a per-repo cursor
+  (`lead-cursor.<repo>.txt`, never advanced on a `SCAN INCOMPLETE`),
   splits each into `code` (start→merge, a harness/process lever) and `tail`
   (merge→deploy, a pipeline-efficiency lever), and when a slow shape qualifies
   spawns an **athena-architect** for a **safety-preserving** improvement. The
