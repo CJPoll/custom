@@ -1,6 +1,6 @@
 ---
 name: athena:diagnose-github-actions-failure
-description: Diagnose a GitHub Actions pipeline that yields no usable result — either it FAILS without producing logs (dies in ~1-2s, 0 steps executed, dependent jobs skipped, `gh run view --log-failed` returns "log not found" / BlobNotFound; the real reason is in the check-run annotations API, headline cause billing exhaustion) or it never STARTS and sits `queued` indefinitely (headline cause an offline/unlabelled self-hosted runner, readable from the actions/runners API). Both are owner-gated and no re-run or longer wait can clear either. Use whenever a GitHub Actions pipeline fails with empty/absent logs, or stays queued for many minutes, before calling it a transient flake, re-running it, or continuing to watch it.
+description: Diagnose a GitHub Actions pipeline that yields no usable result — either it FAILS without producing logs (dies in ~1-2s, 0 steps executed, dependent jobs skipped, `gh run view --log-failed` returns "log not found" / BlobNotFound; the real reason is in the check-run annotations API, headline cause billing exhaustion) or it never STARTS and sits `queued` indefinitely (headline cause an offline/unlabelled self-hosted runner, readable from the actions/runners API). Both are owner-gated and no re-run or longer wait can clear either. Use whenever a GitHub Actions pipeline fails with empty/absent logs, or stays queued for many minutes, before calling it a transient flake, re-running it, or continuing to watch it. Its first step verifies the premise by running `gh run view <run-id> --log`: if a log exists, neither class applies and the skill sends you back to the log rather than to the annotations API.
 ---
 
 # athena:diagnose-github-actions-failure
@@ -12,6 +12,47 @@ answer lives in an API the run page never shows you:
 1. **It fails, with no logs** — read the check-run *annotations* (below).
 2. **It never starts, staying `queued`** — read the *actions/runners* API
    (*Signature 2 — the pipeline never starts*, below).
+
+## First, prove you are in one of these classes — read the full log
+
+**Both signatures below are premised on the log being ABSENT, and this skill
+tells you the log is a dead end. That premise is the first thing to verify, not
+to assume.** Before reading a single annotation, run:
+
+```sh
+gh run view <run-id> --log        # the FULL log, every job, every step
+```
+
+If that prints step output, **you are not in either class and this skill does not
+apply.** Read the log, from the first failing step onward, and diagnose from it.
+Two rules that follow from that:
+
+- **Diagnose from `--log`, never from `--log-failed`.** `--log-failed` is a
+  discriminator for *Signature 1* (BlobNotFound ⇒ no log ever existed) and
+  nothing more. When it does return content it can show only the **post-failure
+  cleanup** — a teardown SIGKILL'ing the job's own children — which reads exactly
+  like a root cause and is a consequence. Measured 2026-09-20-ai-lms: a `Killed`
+  in a Tooling self-test was read as OOM; it was the job being torn down after its
+  *earlier* GHCR step failed.
+- **An annotation is not automatically a cause.** The annotations API answers
+  "why was no log produced"; ask it anything else and it will still answer.
+  Measured in the same run: `_diag/pages already exists` was the runner's own
+  diagnostic log colliding after a day of failing runs — a **symptom**, sent to
+  the owner twice as a remediation that would have fixed nothing. Four root
+  causes proposed, three wrong, each well-formed; the right one was in the logs
+  the whole time. Cost: a day.
+
+### Partition the jobs — the one that PASSES names the cause
+
+When some jobs fail and some pass, the passing set is the sharpest evidence in
+the run and the easiest to explain away. **Make the outlier the subject of the
+next probe rather than the thing your theory has to absorb**: list what every
+failing job does that the passing job does not, and probe *that*. In the run
+above, one job of six passed, and it was the only one that never touched
+GHCR — the discriminator sat in plain sight for a day while an admiral explained
+it as a hosted runner and an architect explained it as duration. Both
+explanations fit every observation collected; neither was tested against the
+outlier.
 
 ## Signature 1 — it fails without producing logs
 
