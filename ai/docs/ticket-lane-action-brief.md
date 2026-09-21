@@ -13,12 +13,15 @@ have that file. Every *mechanism* the brief binds to resolves to the two in-repo
 contracts (`ai/contracts/athena-events.md`, `ai/contracts/athena-inbox.md`); the
 design record is cited only for design provenance and the flaky lane's migration
 ordering, and where it is cited the operative fact is also stated here in the
-brief. The current
-`~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt` and the flaky-lane
-policy in `~/.claude/CLAUDE.md` → *Flaky-test lane (per-machine automation)*
-**will become one instance** of this template — that sweep of the existing
-flaky/ticket-lane guidance to point at this brief is **DND-247 / H-3**, not this
-document, which adds the template without editing those homes yet. A second lane,
+brief. The current flaky-lane guidance — carried across several files (e.g.
+`~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt`, the policy in
+`~/.claude/CLAUDE.md` → *Flaky-test lane (per-machine automation)*, and the
+canonical hook/brief/response policy `ai/CLAUDE.md` places in `walt_ui/CLAUDE.md`
+→ "Flaky-test lane automation"; the complete inventory is DND-247's, not this
+list's) — **will become one instance** of this template. That sweep of the
+existing flaky/ticket-lane guidance to point at this brief is **DND-247 / H-3**,
+not this document, which adds the template without editing those homes yet. A
+second lane,
 or a second project, is another instantiation of the same template with different
 parameter values — no new prose, no new code.
 
@@ -108,6 +111,17 @@ no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
    next spawn attempt checking the marker's age before `touch`; a lane that
    declares no sweep is unwedged only by a human deleting `{{LOCK_PATH}}`.
 
+**When NOT to spin up — the negative branch is normative.** The consumer spawns
+ONLY when both conditions above hold. It takes **no lane action** when an admiral
+already appears to be draining (a fresh `{{LOCK_PATH}}`), and — critically — when
+the trigger **reports nothing about the lane at all**. An absent lane signal is
+"no action", never a spawn: a missing/empty signal must not be read as "queue is
+empty, spin up" nor as "something is wrong, intervene" (`~/dev/custom/ai/CLAUDE.md`
+→ *A failed lookup must never look like an empty one* — a missing input is not a
+match). This is the same three-way branch the current flaky policy carries
+(spin-up / already-running → no action / nothing reported → no action); a lane
+instance that drops it can double-spawn or act on an absent signal.
+
 **The marker is a best-effort quieting hint, NOT a lock** (these are the flaky
 lane's `~/.claude/flaky-coordinator.lock` semantics, preserved and generalized
 only in the path): touch-before-spawn, remove-when-scope-empty, and
@@ -181,8 +195,13 @@ there; this brief does not restate it — it only binds the lane admiral to it.
 
 ## The flaky lane — the worked instantiation
 
-Filling every placeholder with the walt_ui flaky lane's values yields the current
-flaky brief as one instance of this template.
+Filling every placeholder with the walt_ui flaky lane's values yields the flaky
+lane's action brief as one instance of this template — the spin-up trigger, the
+negative no-action branch, the marker semantics, and the add/drop handling.
+(Fidelity is over the *action brief*; the complete inventory of the current
+flaky lane's carriers — which files hold the policy today, and which DND-247
+rewrites — is in the *Relationship to the existing flaky trigger* section below,
+not this table.)
 
 | Placeholder | Flaky lane value |
 |---|---|
@@ -238,5 +257,24 @@ change and are NOT "only the trigger":
   the marker preserved verbatim above is preserved only up to that final step,
   which removes it along with the trigger.
 
-That gated retirement lands in the product repo (walt_ui), not here; this template
-is the harness-side artifact that step rewrites guidance to point at.
+The migration therefore **spans three homes, not one**, and "lands in walt_ui" is
+too narrow: (a) the poll and its `walt_ui/.claude/settings.json` registration
+retire in the **product repo (walt_ui)**; (b) the new trigger's `{{LANE_CHANNEL}}`
+`log` channel is provisioned by a **tenancy registry entry whose committed source
+of truth is THIS repo's `ai/inbox/registry.json`** (`~/dev/custom/CLAUDE.md` →
+*Inbox tenancy registry*) — walt_ui declares only a `slack` channel there today,
+and the contract forbids that entry from living in the tenant repo, so adding the
+lane channel is a change **here**, not in walt_ui; (c) the `~/.claude/flaky-*`
+files are **machine-local home state**, in no repo. This template is the
+harness-side artifact the guidance is rewritten to point at.
+
+**The DND-247 sweep's carrier inventory is authoritative, not this section's
+examples.** The current flaky policy is carried in more than one file — the
+`SessionStart` poll and `flaky-coordinator-spawn.txt` above, the flaky-lane policy
+in `~/.claude/CLAUDE.md` → *Flaky-test lane (per-machine automation)*, **and the
+canonical hook/brief/response policy that `ai/CLAUDE.md` declares to live in
+`walt_ui/CLAUDE.md` → "Flaky-test lane automation"**. This list is illustrative,
+not exhaustive; DND-247 owns the complete carrier inventory and each carrier's
+rewrite, so a carrier not named here is not thereby out of scope (`~/dev/custom/
+CLAUDE.md` → *Documentation conventions* — enumerating carriers is how the one
+nobody listed gets through).
