@@ -53,28 +53,28 @@ DESCRIPTOR_MAILDIR_KEYS='["kind","namespace","read","write","identity"]'
 # reader never silently dedupes on nothing.
 DESCRIPTOR_DEDUPE_MEMBERS='["event_id","channel+ts"]'
 # `producer` is a log channel's marker for which line schema feeds it. "slack"
-# (the Slack-receiver line schema) is the only schema the reference reader
-# ingests today and is the default when `producer` is absent, so every existing
-# entry is a "slack" channel unchanged. Under the landed Option (C) event-platform
-# model a platform-produced line is the routed STATE-CHANGE event (current state;
-# a delete carries entity_id only), which the reader does NOT yet ingest -- it
-# derives a line's key only from `event_id` / `channel+ts` and scores a
-# state-change line `+1 unreadable`, advancing the offset past it. So
-# `producer:"platform"` is the client-side declaration that turns platform
-# delivery on, and it is REFUSED here until the platform-delivery ticket wires
-# reader ingestion of state-change lines (reader first, validator second, so the
-# two never disagree; see ai/contracts/athena-inbox.md -> "The inbox as an
-# event-platform delivery adapter", the Known-open note). The "One validator"
-# rule cuts both ways: the validator must never ADMIT A DECLARED PRODUCER THE
-# READER CANNOT READ. This refusal binds only what the entry declares (this
-# validator never sees athena-events config). A channel left "slack" but targeted
-# by an athena-events handling rule is a producer-registration MISMATCH that NO
-# instrument diagnoses as such today: it is NOT the never-delivered case (the file
-# exists, so never_delivered is false), and the only signal is the coarse
-# `+N unreadable` line count -- and even that only when the channel also carries a
-# reader-readable line. See ai/contracts/athena-inbox.md -> "The inbox as an
-# event-platform delivery adapter", the Known-open note.
-DESCRIPTOR_LOG_PRODUCERS='["slack"]'
+# (the Slack-receiver line schema) is the default when `producer` is absent, so
+# every channel declared without it is a "slack" channel unchanged. "platform"
+# (the event-platform inbox-adapter schema) is ALSO ingested now: DND-260 wired
+# `logchan_scan` (logchan.sh) to read a routed STATE-CHANGE line (current state;
+# a delete carries entity_id only) as a KEYLESS change event, so
+# `producer:"platform"` is admitted here (reader first, validator second -- the
+# two landed together, so they never disagree; see ai/contracts/athena-inbox.md
+# -> "The inbox as an event-platform delivery adapter"). Any OTHER value stays a
+# hard error: the "One validator" rule cuts both ways -- the validator must
+# never ADMIT A DECLARED PRODUCER THE READER CANNOT READ.
+#
+# This validator binds only what the entry declares (it never sees athena-events
+# config). A channel left "slack"/omitted but targeted by an athena-events
+# handling rule is a producer-registration MISMATCH that NO instrument diagnoses
+# as such: it is NOT the never-delivered case (the file exists, so
+# never_delivered is false), and the only signal is the coarse `+N unreadable`
+# line count -- and even that only when the channel also carries a
+# reader-readable line. DND-260 ACCEPTED that coarse count as the residual for
+# the mismatch case rather than building a precise per-producer diagnosis; see
+# ai/contracts/athena-inbox.md -> "The inbox as an event-platform delivery
+# adapter", the Known-open note.
+DESCRIPTOR_LOG_PRODUCERS='["slack","platform"]'
 
 _descriptor_fix='edit $ATHENA_INBOX_ROOT/projects/<project>.json to match the registry schema in ai/contracts/athena-inbox.md, then re-run.'
 
@@ -244,16 +244,15 @@ _descriptor_validate_log() {
   fi
 
   # `producer` names which line schema feeds this log channel. Only the values
-  # in DESCRIPTOR_LOG_PRODUCERS are ingestible today ("slack", also the default
-  # when absent). The deferred "platform" producer -- or any other value -- is
-  # refused HERE, on text, with a Fix: naming the deferred ticket, so a
-  # platform-fed channel cannot be declared while its lines would be dropped as
-  # unreadable.
+  # in DESCRIPTOR_LOG_PRODUCERS are ingestible ("slack" -- also the default when
+  # absent -- and, since DND-260, "platform"). Any other value is refused HERE,
+  # on text, with a Fix: naming the accepted set, so a channel whose lines the
+  # reader cannot ingest can never be declared.
   if printf '%s' "${doc}" | jq -e --arg c "${chan}" '.channels[$c] | has("producer")' >/dev/null 2>&1; then
     out="$(printf '%s' "${doc}" | jq -r --arg c "${chan}" '.channels[$c].producer')"
     if [ "$(printf '%s' "${DESCRIPTOR_LOG_PRODUCERS}" | jq -r --arg p "${out}" 'index($p) != null')" != "true" ]; then
       inbox_fail "log channel \"${chan}\" declares producer \"${out}\", which this reader cannot ingest" \
-        "set channel \"${chan}\"'s \"producer\" to $(printf '%s' "${DESCRIPTOR_LOG_PRODUCERS}" | jq -r 'join(", ")') (the default when omitted); platform delivery (producer \"platform\") is DEFERRED until the platform-delivery ticket (DND-260) wires the reader to ingest state-change lines, so declaring it now would admit a channel whose lines the reader drops as unreadable."
+        "set channel \"${chan}\"'s \"producer\" to one of $(printf '%s' "${DESCRIPTOR_LOG_PRODUCERS}" | jq -r 'join(", ")') (\"slack\" is the default when omitted; \"platform\" is the event-platform state-change schema). \"${out}\" has no reader, so declaring it would admit a channel whose lines the reader drops as unreadable."
       return 1
     fi
   fi

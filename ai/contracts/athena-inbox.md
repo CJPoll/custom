@@ -531,7 +531,7 @@ tenants MAY use the same channel name for different surfaces.
 | `path` | yes | string | Inbox filename, **relative to the root**. Grammar below. |
 | `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`. |
 | `schema_v` | no | array of integer | Line versions this reader understands. Defaults to `[1]`. |
-| `producer` | no | string | Which producer's line schema feeds this channel. The only value the reference reader ingests today is `"slack"` (the default when absent). `"platform"` — the event-platform state-change schema — is **refused** until the platform-delivery ticket lands reader support (see *The inbox as an event-platform delivery adapter*). |
+| `producer` | no | string | Which producer's line schema feeds this channel. `"slack"` (the default when absent) is the Slack-receiver schema; `"platform"` — the event-platform state-change schema — is ingested as of DND-260 (a keyless change stream). Any other value is refused. See *The inbox as an event-platform delivery adapter*. |
 
 `dedupe` is **declarative, not a switch.** Both dedupe rules in *Reader
 obligations* are mandatory and have non-overlapping jobs, so this key cannot
@@ -544,15 +544,22 @@ absent the reader assumes `["event_id", "channel+ts"]` and reports a line
 missing both as unreadable rather than counting it.
 
 `producer` is **deny-by-default against the reader's real capability.** Absent,
-it is `"slack"` — the Slack-receiver line schema the reference reader ingests —
-so every channel declared to date is a Slack channel unchanged. The only
-accepted value today is `"slack"`; any other, notably `"platform"` (the
-event-platform state-change schema), is a hard error, because the reader does
-not yet ingest those lines and would score every one `+1 unreadable` while
-advancing the offset past it. `"platform"` is the client-side declaration that
-turns event-platform delivery on; it is admitted only when the platform-delivery
-ticket wires reader ingestion **first** (see *The inbox as an event-platform
-delivery adapter*).
+it is `"slack"` — the Slack-receiver line schema — so every channel declared
+without it is a Slack channel unchanged. `"platform"` (the event-platform
+state-change schema) is now **also** ingested: the reference reader reads a
+platform line as a keyless change event (*The inbox as an event-platform
+delivery adapter*). Any other value is a hard error, because the reader has no
+schema for it and would score every line `+1 unreadable` while advancing the
+offset past it — the validator refuses a producer whose lines the reader cannot
+read, in either direction.
+
+**Later (2026-09-20):** `producer:"platform"` was previously **refused** here,
+deferred until reader support landed, so that a config author following the
+contract got a hard refusal rather than a silently-dropped channel. DND-260
+landed the reader support: `logchan_scan` ingests state-change lines (reader
+first, validator second, in one change), so `producer:"platform"` is now
+admitted. The deny-by-default posture is unchanged — it now refuses only the
+values the reader still has no schema for.
 
 **Channel object, kind `maildir`**
 
@@ -945,69 +952,64 @@ not bind it — its reader-side reconciliation identity is the consumer's
 rotation, and retention still bind the lane unchanged. The four points below
 are the additions, not replacements.
 
-> **Known-open — reader and validator support is DEFERRED.** This section
-> describes the intended event-platform delivery design, but the CLIENT half of
-> it is **not yet implemented**. The reference reader
-> (`ai/skills/athena:inbox/lib/logchan.sh` → `logchan_scan`) ingests **only
-> Slack-shaped lines** — it derives a line's dedupe key only from `event_id` and
-> `channel`+`ts`. It does **not** yet ingest a **platform state-change line** (one
-> carrying the routed current-state payload — e.g. `entity_id` plus current
-> fields, a delete carrying `entity_id` only — and no `channel`/`ts` and no
-> `event_id`); such a line is scored `+1 unreadable` and the offset advances past
-> it. Accordingly a platform-delivery channel is one a config author **cannot yet turn
-> on**. Its client-side declaration surface is the `producer` key on a `log`
-> channel (*registry-entry schema*, kind `log`): the only value the reference
-> reader ingests today is `"slack"` (the default when the key is absent), and the
-> designated validator (`ai/skills/athena:inbox/lib/descriptor.sh`) **refuses**
-> `producer:"platform"` — and any `producer` other than `"slack"` — with a `Fix:`
-> naming the deferred platform-delivery ticket (DND-260), because the reader does not yet
-> ingest state-change lines. So a config author who follows the contract and
-> declares the platform producer gets a **hard, observable refusal** today, not a
-> channel whose lines are silently dropped (`~/dev/custom/CLAUDE.md` → *A failed
-> lookup must never look like an empty one*; the "One validator" rule the other
-> way — the validator must never **admit a declared producer the reader cannot
-> read**).
+> **DND-260 landed — reader and validator support is IMPLEMENTED.** This section
+> describes event-platform delivery, and the CLIENT half is now built. The
+> reference reader (`ai/skills/athena:inbox/lib/logchan.sh` → `logchan_scan`)
+> ingests a **platform state-change line** — one carrying the routed current-state
+> payload (`entity_id` plus current fields, a delete carrying `entity_id` only)
+> and no `channel`/`ts` and no `event_id` — as a **keyless change event** when the
+> channel's `producer` marker is `"platform"`: the line is COUNTED (not scored
+> `+1 unreadable`), no dedupe key is derived, and a line that identifies no entity
+> is scored unreadable rather than counted as a phantom (the failed-lookup
+> discipline for this schema). The client-side declaration surface is the
+> `producer` key on a `log` channel (*registry-entry schema*, kind `log`):
+> `"slack"` (the default when absent) is the Slack schema, and the designated
+> validator (`ai/skills/athena:inbox/lib/descriptor.sh`) now **admits**
+> `producer:"platform"` — reader first, validator second, landed in one change so
+> the two never disagree — while refusing any value the reader still has no schema
+> for (`~/dev/custom/CLAUDE.md` → *A failed lookup must never look like an empty
+> one*; the "One validator" rule both ways).
 >
-> This refusal binds only what the registry entry **declares**. It does **not**,
-> and structurally **cannot** — this validator never sees `athena-events.md`
-> handling-rule config — detect a channel left at `producer:"slack"` (or omitted)
-> that an owner handling rule nonetheless targets as a platform delivery. That is
-> a producer-registration **mismatch** between the two ends, and **no instrument
-> diagnoses it *as* a mismatch today.** It is specifically **not** caught by the
-> never-delivered finding — nor by the three-state distinction *specified* in
-> *Producer registration extends to platform deliveries* (itself deferred, per
-> this note): the `never_delivered` computation
+> **Later (2026-09-20):** this note previously read *Known-open — reader and
+> validator support is DEFERRED*: the reader ingested only Slack-shaped lines, a
+> platform state-change line was scored `+1 unreadable`, the validator
+> **refused** `producer:"platform"`, and the subsections below were a **forward
+> specification**. DND-260 superseded all of that — the reader ingests
+> state-change lines, the validator admits the marker, and the subsections below
+> now describe **current behaviour**. What did **not** change: the coarse
+> mismatch residual described next, and every `log`-kind rule that binds the
+> platform producer unchanged.
+>
+> One residual remains, and DND-260 **accepted it as a coarse signal rather than
+> building a precise diagnosis** (obligation 3). This validator binds only what
+> the registry entry **declares**; it never sees `athena-events.md` handling-rule
+> config, so it **cannot** detect a channel left at `producer:"slack"` (or
+> omitted) that an owner handling rule nonetheless targets as a platform
+> delivery. That is a producer-registration **mismatch**, and **no instrument
+> diagnoses it *as* a mismatch.** It is specifically **not** caught by the
+> never-delivered three-state distinction in *Producer registration extends to
+> platform deliveries* (now implemented in
+> `ai/skills/athena:inbox/lib/doctor.sh`): the `never_delivered` computation
 > (`ai/skills/athena:inbox/lib/inbox.sh`) keys on the inbox file's absence,
 > whereas a mis-targeted channel **is** being delivered to, so its file exists and
-> `never_delivered` is permanently false. The only signal today is **coarse**: the reference reader scores each
-> platform state-change line it cannot parse `+1 unreadable`
-> (`ai/skills/athena:inbox/lib/logchan.sh`), and that count rides the unprompted
-> notice as the `+N unreadable` suffix (`ai/hooks/athena-inbox-poll.sh`,
-> `ai/skills/athena:inbox/bin/inbox-status`) — a **symptom** (*N lines here are
-> unreadable*), never a **diagnosis** (*a producer is mis-declared*), and one that
-> surfaces **only when the same channel also carries a reader-readable line**,
-> because the count is gated on `new > 0`; a channel fed *only* by the mis-targeted
-> rule shows nothing at all today. The precise per-producer diagnosis is deferred
-> with the platform-delivery ticket (DND-260): once its reader ingests
-> `producer:"platform"` lines and the validator admits that marker, a
-> correctly-declared platform channel is **read** rather than mis-scored, and a
-> channel still left `producer:"slack"` while fed platform lines remains a
-> mis-declaration whose only signal stays this coarse count. (The three-state
-> never-delivered distinction *specified* below — **no client channel declared**
-> vs **no server producer registered** vs **nothing arrived** — concerns the
-> *empty*-channel states, not this delivering-but-mismatched one.) The two other refused markers — a `"stream"`
-> channel key and a non-standard `dedupe` member — stay refused on their own terms
-> (an unknown channel key; a dedupe member the reader does not compute), but
-> **neither is what makes platform delivery undeclarable**; the required
-> `producer:"platform"` marker is.
->
-> Reader ingestion of platform state-change lines, and the matching validator
-> **admission** of `producer:"platform"`, land together in a later
-> platform-delivery ticket (**reader first, validator second**, so they never
-> disagree — the `producer` key exists now as a declaration surface, but the value
-> that turns platform delivery on stays refused until the reader can read it);
-> until then the subsections below are a **forward specification** of that ticket,
-> not a description of current behaviour.
+> `never_delivered` is permanently false. The only signal for the mismatch is
+> **coarse**: a channel left `producer:"slack"` while fed platform lines scores
+> each such line `+1 unreadable` (`ai/skills/athena:inbox/lib/logchan.sh`), and
+> that count rides the unprompted notice as the `+N unreadable` suffix
+> (`ai/hooks/athena-inbox-poll.sh`, `ai/skills/athena:inbox/bin/inbox-status`) — a
+> **symptom** (*N lines here are unreadable*), never a **diagnosis** (*a producer
+> is mis-declared*), and one that surfaces **only when the same channel also
+> carries a reader-readable line**, because the count is gated on `new > 0`; a
+> channel fed *only* by the mis-targeted rule shows nothing. Landing reader
+> ingestion **dissolved** the correctly-declared case (a `producer:"platform"`
+> channel is now **read**); the still-mis-declared channel keeps only this coarse
+> signal, which DND-260 accepted rather than building a precise per-producer
+> diagnosis. (The three-state never-delivered distinction below — **no client
+> channel declared** vs **no server producer registered** vs **nothing arrived** —
+> concerns the *empty*-channel states, not this delivering-but-mismatched one.)
+> The two other refused markers — a `"stream"` channel key and a non-standard
+> `dedupe` member — stay refused on their own terms (an unknown channel key; a
+> dedupe member the reader does not compute).
 
 ### A `log` channel MAY have a non-Slack producer
 
@@ -1106,16 +1108,23 @@ failure mode by a different second end:
   "No client channel declared," "no server producer registered," and "nothing
   arrived" MUST NOT read identically in output, though all three look identical on
   disk (absent entry / empty file). This is the inbox `log`-channel end of
-  `athena-events.md`'s both-ends-or-silently-dark rule. Distinguishing all three
-  *as* never-delivered sub-states is **deferred to DND-260** and is not what
-  `inbox-doctor` does today: its current never-delivered finding
-  (`ai/skills/athena:inbox/lib/doctor.sh`) emits one message whose `Fix:` names
-  only server-side producer registration (**no server producer registered**),
-  while **no client channel declared** is reported separately by the
-  registry-entry finding and **nothing arrived** is a non-fault zero-new; the
-  full per-state distinction lands with DND-260's `inbox-doctor` work. Today the
-  unprompted count path surfaces a never-delivered channel once and the doctor
-  does not nag a second time (see *inbox-doctor*).
+  `athena-events.md`'s both-ends-or-silently-dark rule. `inbox-doctor`
+  (`ai/skills/athena:inbox/lib/doctor.sh`) distinguishes the three: **no client
+  channel declared** is the `registry-entry` `na` finding, which now names the
+  **resolved repo identity** the lookup searched under (so "zero channels" says
+  which identity found zero); **no server producer registered** is the
+  `never-delivered` finding on an absent inbox file, whose `Fix:` is
+  **producer-aware** — a `platform` channel names the `athena-events.md` handling
+  rule/target that must feed it, a `slack` channel names the server-side agent
+  instance in the client config; and **nothing arrived** is the non-fault
+  zero-new / "last changed" state on a file that exists. The unprompted count
+  path surfaces a never-delivered channel once and the doctor does not nag a
+  second time (see *inbox-doctor*).
+
+  **Later (2026-09-20):** distinguishing the three *as* never-delivered
+  sub-states was **deferred to DND-260**, which then only emitted one
+  server-producer message and did not name the resolved identity. DND-260
+  implemented the full distinction described above.
 
 ### A lane `log` channel is a change stream of state-change events
 

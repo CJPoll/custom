@@ -1783,9 +1783,14 @@ under-encrypted**:
   the committed `ai/inbox/registry.json` (in `~/dev/custom`, which owns the
   contracts; tenant repos carry nothing), via the existing `setup-inbox-registry`
   / `check-inbox-registry` tooling. For an inbox-adapter **platform** delivery this
-  declaration also carries the `producer` marker — currently undeclarable, its
-  `"platform"` value being refused by the validator — per `athena-inbox.md` →
-  *The inbox as an event-platform delivery adapter*.
+  declaration also carries the `producer: "platform"` marker, ingested by the
+  reader as of DND-260 — per `athena-inbox.md` → *The inbox as an event-platform
+  delivery adapter*.
+
+  **Later (2026-09-20):** this marker was **currently undeclarable** when written,
+  its `"platform"` value refused by the inbox validator pending reader support.
+  DND-260 landed that reader support, so the validator now admits it; the
+  declaration above is live.
 
 **Both-ends-or-silently-dark.** A rule routing to the inbox adapter needs BOTH
 the server-side target (machine + `inbox_name`) AND the client-side `log`-channel

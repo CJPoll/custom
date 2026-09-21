@@ -194,7 +194,7 @@ inbox_release_consumer() { inbox_lock_release; }
 #  * COUNTS ARE POST-DEDUPE. A pre-dedupe count announces messages the read
 #    step then declines to show, which reads as the tool losing mail.
 _inbox_count_log() {
-  local resolved="$1" schema_csv="${2:-1}"
+  local resolved="$1" schema_csv="${2:-1}" producer="${3:-slack}"
   local inbox state size offset seen_ev seen_ky slice scan never="false" stale="false"
 
   inbox="$(_inbox_path inbox "${resolved}")"
@@ -265,7 +265,7 @@ _inbox_count_log() {
   # "malformed input degrades into silence" conflation this file refuses
   # everywhere else, and it is worse here because the output is injected
   # before the user has spoken.
-  if ! scan="$(printf '%s' "${slice}" | logchan_scan "${offset}" "${schema_csv}" "${seen_ev}" "${seen_ky}" 2>/dev/null)" \
+  if ! scan="$(printf '%s' "${slice}" | logchan_scan "${offset}" "${schema_csv}" "${seen_ev}" "${seen_ky}" 0 "${producer}" 2>/dev/null)" \
      || [ -z "${scan}" ]; then
     inbox_fail "could not count channel \"$(_inbox_path inbox "${resolved}" | sed 's|.*/||')\": the scan failed" \
       "inspect the channel's .jsonl for a line this reader cannot process, or re-run with --json to see which channels did count. A counting failure is reported rather than shown as zero, because zero would read as \"no mail\"."
@@ -398,7 +398,7 @@ inbox_repo_key() {
 # because a caller distinguishing "never opted in" from "my entry vanished"
 # needs it precisely when there is no entry.
 inbox_status_json() {
-  local entry rc chan kind resolved counts schema_csv out="[]" failed=0 repo_key
+  local entry rc chan kind resolved counts schema_csv producer out="[]" failed=0 repo_key
 
   # "" + exit 0 is a genuine non-repo and counts normally (zero channels). A
   # NON-ZERO is "could not tell": we cannot resolve the registry entry either,
@@ -428,7 +428,13 @@ inbox_status_json() {
         log)
           schema_csv="$(printf '%s' "${entry}" | jq -r --arg c "${chan}" \
             '((.channels[$c].schema_v // [1]) | map(tostring) | join(","))')"
-          counts="$(_inbox_count_log "${resolved}" "${schema_csv}")" || counts=""
+          # The channel-level producer marker selects the line schema the reader
+          # applies (DND-260). Absent -> "slack", so every existing channel is
+          # unchanged; "platform" reads state-change lines the reader would
+          # otherwise score unreadable.
+          producer="$(printf '%s' "${entry}" | jq -r --arg c "${chan}" \
+            '(.channels[$c].producer // "slack")')"
+          counts="$(_inbox_count_log "${resolved}" "${schema_csv}" "${producer}")" || counts=""
           # THE SWEEP RUNS ON EVERY COUNT, not only inside a rotation (R-6).
           # A channel that rotated once and then went quiet would otherwise
           # keep its rotated generation until it happened to rotate again --
@@ -662,7 +668,7 @@ inbox_read_json() {
 
 _inbox_read_log() {
   local resolved="$1" chan="$2" cwd="${3:-.}"
-  local inbox state entry schema_csv state_json offset size seen_ev seen_ky slice scan
+  local inbox state entry schema_csv producer state_json offset size seen_ev seen_ky slice scan
 
   inbox="$(_inbox_path inbox "${resolved}")"
   state="$(_inbox_path state "${resolved}")"
@@ -674,6 +680,11 @@ _inbox_read_log() {
   entry="$(inbox_entry "${cwd}")" || return 1
   schema_csv="$(printf '%s' "${entry}" | jq -r --arg c "${chan}" \
     '((.channels[$c].schema_v // [1]) | map(tostring) | join(","))')"
+  # Producer marker (DND-260): "slack" (default) reads the Slack line schema;
+  # "platform" reads keyless state-change lines. The read path renders the
+  # payload inside the untrusted fence -- same boundary as a Slack body.
+  producer="$(printf '%s' "${entry}" | jq -r --arg c "${chan}" \
+    '(.channels[$c].producer // "slack")')"
 
   state_json="$(_inbox_state_or_recovered "${state}")" || return 1
   # NEVER DELIVERED is carried through the READ too, not only the count.
@@ -696,7 +707,7 @@ _inbox_read_log() {
   # a failed scan yields an empty string, which jq reads as empty input and
   # exits ZERO -- so the failure would travel as a successful read of nothing
   # and the session would be told it has no mail when it has some.
-  if ! scan="$(printf '%s' "${slice}" | logchan_scan "${offset}" "${schema_csv}" "${seen_ev}" "${seen_ky}" 1)" \
+  if ! scan="$(printf '%s' "${slice}" | logchan_scan "${offset}" "${schema_csv}" "${seen_ev}" "${seen_ky}" 1 "${producer}")" \
      || [ -z "${scan}" ]; then
     inbox_fail "could not read channel \"${chan}\": the scan failed" \
       "inspect the channel's .jsonl for a line this reader cannot process. A read failure is reported rather than shown as an empty inbox, because an empty inbox reads as \"no mail\"."

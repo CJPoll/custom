@@ -29,6 +29,11 @@
             "path": "walt_ui-slack.jsonl",
             "dedupe": ["event_id", "channel+ts"],
             "schema_v": [1]
+          },
+          "flaky": {
+            "kind": "log",
+            "path": "walt_ui-flaky.jsonl",
+            "producer": "platform"
           }
         }
       }

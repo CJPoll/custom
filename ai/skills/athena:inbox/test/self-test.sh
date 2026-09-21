@@ -336,28 +336,26 @@ err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log
 if [ "${rc}" -eq 0 ]; then bad "an unrecognised dedupe member is a hard error" "accepted"
 else assert_contains "an unrecognised dedupe member is a hard error naming it" "message_id" "${err}"; fi
 
-# DND-233 (landed Option C): the platform mints NO `op` stream and holds NO
-# durable dedupe key, so there is no `dedupe_key` dedupe family and no `stream`
-# discriminator to declare. A platform-produced line is the routed STATE-CHANGE
-# event, which the reference reader `logchan_scan` (its cases below) does NOT yet
-# ingest -- it derives a key only from `event_id` / `channel+ts`. These two
-# refusals are correct on their own terms -- `dedupe_key` is a member
-# the reader does not compute, `stream` is an unknown channel key -- but NEITHER
-# is what makes platform delivery undeclarable. The REQUIRED marker is `producer`
-# (see the producer cases below): a platform-fed channel must declare
-# producer:"platform", which the validator refuses until reader support lands.
-# The reader-side companion to these is the "test the miss" case among the
-# `logchan_scan` cases (the platform state-change line).
+# DND-233/DND-260: the platform mints NO `op` stream and holds NO durable dedupe
+# key, so there is no `dedupe_key` dedupe family and no `stream` discriminator to
+# declare. A platform-produced line is the routed STATE-CHANGE event, which the
+# reference reader `logchan_scan` now ingests (as of DND-260) via the channel's
+# `producer` marker, NOT via a `dedupe`/`stream` key. So these two refusals below
+# are correct on their own terms -- `dedupe_key` is a member the reader does not
+# compute, `stream` is an unknown channel key -- and NEITHER is the
+# platform-delivery declaration surface: the marker is `producer` (see the
+# producer cases below), whose "platform" value is now ACCEPTED. The reader-side
+# companion is the "test the miss" case among the `logchan_scan` cases (a
+# platform state-change line that is now COUNTED, and one identifying no entity,
+# which stays unreadable).
 err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","dedupe":["dedupe_key"]}}}' 2>&1)"; rc=$?
 if [ "${rc}" -eq 0 ]; then bad "dedupe:[dedupe_key] is REJECTED while reader support is deferred" "accepted"
 else assert_contains "the deferred dedupe_key member is rejected naming it" "dedupe_key" "${err}"; fi
 assert_contains "the deferred-dedupe_key refusal carries a Fix: clause" "Fix:" "${err}"
 
 # `stream` is NOT the platform-delivery declaration surface -- `producer` is
-# (below), and it exists today though its "platform" value stays refused. `stream`
-# is simply an unknown channel key, refused as such. If a later ticket wires the
-# reader to ingest state-change lines, it opens producer:"platform" second, in the
-# same change (reader first, validator second).
+# (below), and DND-260 opened its "platform" value once the reader could ingest
+# state-change lines. `stream` is simply an unknown channel key, refused as such.
 for sv in "op" "pile"; do
   err="$(descriptor_validate "{\"v\":1,\"repo\":\"/r/.git\",\"channels\":{\"a\":{\"kind\":\"log\",\"path\":\"x.jsonl\",\"stream\":\"${sv}\"}}}" 2>&1)"; rc=$?
   if [ "${rc}" -eq 0 ]; then bad "a stream key [${sv}] is REJECTED while platform-delivery support is deferred" "accepted"
@@ -367,21 +365,21 @@ for sv in "op" "pile"; do
   fi
 done
 
-# DND-233 finding 1 (landed Option C): `producer` is the client-side marker that
-# turns platform delivery on, and it is REFUSED until the reader ingests
-# state-change lines. "slack" (the default when absent) is the only value
-# accepted today; the reader-side companion is the platform state-change "test
-# the miss" case among the logchan_scan cases below.
+# DND-260: `producer` is the client-side marker for a log channel's line schema.
+# "slack" (the default when absent) and "platform" (the event-platform
+# state-change schema, now that logchan_scan ingests it) are both accepted; any
+# other value is refused (allow-list, not deny-list). The reader-side companion
+# is the platform state-change "test the miss" case among the logchan_scan cases
+# below (a platform line is now COUNTED; an entity-less one stays unreadable).
 assert_ok "producer:slack -- the current default schema, explicitly declared -- is accepted" \
   descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","producer":"slack"}}}'
-err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","producer":"platform"}}}' 2>&1)"; rc=$?
-if [ "${rc}" -eq 0 ]; then bad "producer:platform is REFUSED while reader support is deferred" "accepted"
-else
-  assert_contains "the deferred platform producer is refused naming it" "platform" "${err}"
-  assert_contains "the deferred-platform refusal carries a Fix: clause" "Fix:" "${err}"
-fi
+assert_ok "producer:platform is ACCEPTED now that the reader ingests state-change lines (reader-first/validator-second, one change)" \
+  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","producer":"platform"}}}'
 assert_refused "an unknown producer value is refused (allow-list, not deny-list)" \
   descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","producer":"webhook"}}}'
+err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","producer":"webhook"}}}' 2>&1)"; rc=$?
+assert_contains "the unknown-producer refusal carries a Fix: clause" "Fix:" "${err}"
+assert_contains "the unknown-producer refusal names the accepted set (slack, platform)" "platform" "${err}"
 
 # read and write MUST differ -- equal ones would make every send land in the
 # directory this identity reads from, so a sender would ingest its own mail.
@@ -508,25 +506,48 @@ res="$(printf '%s\n' '{"v":1,"text":"keyless"}' | logchan_scan 0 "1" "" "")"
 assert_eq "a line with no dedupe key at all is unreadable, not counted" "1" "$(jq -r .unreadable <<<"${res}")"
 assert_eq "a line with no dedupe key at all is not counted as new" "0" "$(jq -r .new <<<"${res}")"
 
-# DND-233 finding 3 -- "test the miss, not just the hit." A PLATFORM-SHAPED line
-# under landed Option C is a routed STATE-CHANGE event: `entity_id` plus current
-# fields, and no `channel`/`ts`, no `event_id`, no `op`. The reference reader
-# derives a line's key only from `event_id` / `channel+ts`, so it derives no key
-# from a state-change line, falls through to the `unreadable` branch, and --
-# because the line is COMPLETE -- ADVANCES the offset past it. This is the exact
-# behaviour that makes accepting such a channel declaration a silent drop, which
-# is why the `descriptor_validate` cases above refuse `producer:"platform"` (the required marker), and also `dedupe:[dedupe_key]` / `stream:*`. If a
-# later platform-delivery ticket wires the reader to ingest state-change lines,
-# THIS assertion flips and the validator opens in the same change -- the two move
-# together, never apart.
+# DND-260 -- "test the miss, not just the hit." A PLATFORM line under Option C is
+# a routed STATE-CHANGE event: `entity_id` plus current fields, no `channel`/`ts`,
+# no `event_id`, no `op`. logchan_scan now ingests it WHEN the channel's producer
+# is "platform" -- THE HIT (this assertion, and the validator admission above,
+# moved together in one change, never apart).
 platform_line='{"v":1,"entity_id":"notion:abc","status":"in_progress"}'
-res="$(printf '%s\n' "${platform_line}" | logchan_scan 0 "1" "" "")"
-assert_eq "a platform state-change line is NOT counted new (reader does not ingest it)" \
-  "0" "$(jq -r .new <<<"${res}")"
-assert_eq "a platform state-change line is counted unreadable, not silently lost" \
-  "1" "$(jq -r .unreadable <<<"${res}")"
-assert_eq "the offset advances past the complete-but-unreadable platform line (it does not wedge)" \
+res="$(printf '%s\n' "${platform_line}" | logchan_scan 0 "1" "" "" 0 platform)"
+assert_eq "a platform state-change line IS counted new under producer:platform" \
+  "1" "$(jq -r .new <<<"${res}")"
+assert_eq "a platform state-change line is not unreadable under producer:platform" \
+  "0" "$(jq -r .unreadable <<<"${res}")"
+assert_eq "the offset advances to EOF over the platform line" \
   "$(printf '%s\n' "${platform_line}" | wc -c)" "$(jq -r .next_offset <<<"${res}")"
+# THE MISS: a platform line that identifies no entity cannot be reconciled
+# against the source of truth, so it is unreadable -- never a phantom counted
+# new. A mis-shaped line says so rather than reading as an empty success.
+res="$(printf '%s\n' '{"v":1,"status":"in_progress"}' | logchan_scan 0 "1" "" "" 0 platform)"
+assert_eq "a platform line with no entity_id is unreadable, not silently counted" \
+  "1" "$(jq -r .unreadable <<<"${res}")"
+assert_eq "a platform line with no entity_id is not counted new" \
+  "0" "$(jq -r .new <<<"${res}")"
+# KEYLESS lane: at-least-once redelivery is NOT suppressed by the reader (the
+# consumer reconciles via a source re-query), so a duplicate line counts twice.
+res="$(printf '%s\n%s\n' "${platform_line}" "${platform_line}" | logchan_scan 0 "1" "" "" 0 platform)"
+assert_eq "a duplicate platform line is NOT deduped (keyless lane; consumer reconciles)" \
+  "2" "$(jq -r .new <<<"${res}")"
+# The READ path carries the current-state payload (with_text), and no dedupe key.
+res="$(printf '%s\n' "${platform_line}" | logchan_scan 0 "1" "" "" 1 platform)"
+assert_eq "the read path carries the platform payload for rendering" \
+  "in_progress" "$(jq -r '.messages[0].payload.status' <<<"${res}")"
+assert_eq "a platform message carries no dedupe key (keyless lane)" \
+  "" "$(jq -r '.messages[0].dedupe_key' <<<"${res}")"
+# THE ACCEPTED RESIDUAL (DND-260 obligation 3): a platform-shaped line on a
+# channel LEFT producer:"slack" (the default) is the producer-registration
+# MISMATCH case -- it still scores +1 unreadable, and that coarse count is the
+# only signal that a producer is mis-declared. DND-260 accepted the coarse count
+# as the residual rather than building a precise per-producer mismatch diagnosis.
+res="$(printf '%s\n' "${platform_line}" | logchan_scan 0 "1" "" "")"
+assert_eq "a platform line on a slack channel stays unreadable (accepted coarse mismatch signal)" \
+  "1" "$(jq -r .unreadable <<<"${res}")"
+assert_eq "a platform line on a slack channel is not counted new" \
+  "0" "$(jq -r .new <<<"${res}")"
 
 # A line is JSON written by other people, so nothing guarantees a field has
 # the type this reader expects. A non-string `event_id` used directly as a jq
@@ -863,6 +884,38 @@ before="$(cat "${ATHENA_INBOX_ROOT}/mine.state.json")"
 ( cd "${mine}" && inbox_status_json >/dev/null )
 assert_eq "counting never advances the offset -- status is a read, not a consume" \
   "${before}" "$(cat "${ATHENA_INBOX_ROOT}/mine.state.json")"
+
+# DND-260: a PLATFORM-producer log channel is COUNTED and READ end-to-end through
+# the MANAGER, not scored unreadable. This proves the manager resolves the
+# `producer` marker from the entry and threads it down
+# (inbox_status_json -> _inbox_count_log -> logchan_scan, and
+#  read-inbox -> _inbox_read_log -> logchan_scan). Its own setup_case, placed
+# after the `mine` fixture's tests so it does not disturb their ATHENA_INBOX_ROOT.
+setup_case
+pmine="$(make_repo pmine)"
+register pmine "${pmine}" '{"flaky":{"kind":"log","path":"pf.jsonl","producer":"platform"}}'
+printf '%s\n%s\n' '{"v":1,"entity_id":"notion:1","status":"todo"}' \
+                  '{"v":1,"entity_id":"notion:2","status":"done"}' \
+  > "${ATHENA_INBOX_ROOT}/pf.jsonl"
+pst="$(cd "${pmine}" && inbox_status_json)"
+assert_eq "a platform channel COUNTS its state-change lines (manager threads producer)" "2" \
+  "$(jq -r '.channels[] | select(.name=="flaky") | .new' <<<"${pst}")"
+assert_eq "a platform channel scores no unreadable under producer:platform" "0" \
+  "$(jq -r '.channels[] | select(.name=="flaky") | .unreadable' <<<"${pst}")"
+# THE ACCEPTED MISMATCH RESIDUAL: the SAME lines on a channel left producer:slack
+# (the default) score unreadable -- the coarse signal, not counted new.
+register pmine "${pmine}" '{"flaky":{"kind":"log","path":"pf.jsonl"}}'
+sst="$(cd "${pmine}" && inbox_status_json)"
+assert_eq "the same lines on a default (slack) channel score unreadable (mismatch residual)" "2" \
+  "$(jq -r '.channels[] | select(.name=="flaky") | .unreadable' <<<"${sst}")"
+assert_eq "and are not counted new on a slack channel" "0" \
+  "$(jq -r '.channels[] | select(.name=="flaky") | .new' <<<"${sst}")"
+# The READ path renders a platform channel's current-state payload through
+# read-inbox (inside the untrusted fence).
+register pmine "${pmine}" '{"flaky":{"kind":"log","path":"pf.jsonl","producer":"platform"}}'
+rout="$(cd "${pmine}" && "${BIN}/read-inbox" flaky --peek 2>&1)"
+assert_contains "read-inbox renders a platform channel's state-change entity" "notion:1" "${rout}"
+assert_contains "read-inbox labels a platform line as a state-change" "state-change" "${rout}"
 
 # A malformed registry entry is a HARD error, not "this project has no
 # channels": the two are indistinguishable downstream and only one is safe.

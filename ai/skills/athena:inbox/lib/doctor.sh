@@ -487,8 +487,15 @@ doctor_check_entry() {
     return 0
   fi
   if [ -z "${entry}" ]; then
-    doctor_finding na "registry-entry" "this project has no registry entry (not in a repo, or none names this repo)" \
-      "if this project should receive mail, add \$ATHENA_INBOX_ROOT/projects/<project>.json whose \"repo\" is realpath \"\$(git rev-parse --git-common-dir)\"."
+    # NO CLIENT CHANNEL DECLARED -- one of the three empty-channel states
+    # (contract -> "Producer registration extends to platform deliveries"). Name
+    # the RESOLVED repo identity the lookup searched under, so "zero channels"
+    # says which key found zero rather than reading like a benign "not opted in"
+    # (CLAUDE.md -> "A failed lookup must never look like an empty one"). A cwd
+    # in no repo yields an empty identity, and the message still reads correctly.
+    local rk; rk="$(inbox_repo_key "${1:-.}" 2>/dev/null)"
+    doctor_finding na "registry-entry" "this project has no registry entry (NO CLIENT CHANNEL DECLARED): no entry under projects/ names this session's repo identity${rk:+ (${rk})}" \
+      "if this project should receive mail, add \$ATHENA_INBOX_ROOT/projects/<project>.json whose \"repo\" is ${rk:-realpath \"\$(git rev-parse --git-common-dir)\"} -- that is the identity the lookup searched for and found zero."
     return 0
   fi
   if err="$(descriptor_validate "${entry}" 2>&1 >/dev/null)"; then
@@ -517,17 +524,23 @@ doctor_check_channels() {
 # inbox_resolve_channel -- the latter re-derives the entry from the registry by
 # cwd, which would ignore the entry this session actually matched.
 doctor_check_one_channel() {
-  local entry="$1" chan="$2" resolved kind
+  local entry="$1" chan="$2" resolved kind producer
   resolved="$(descriptor_resolve "$(fs_inbox_root)" "${entry}" "${chan}" 2>/dev/null)" || return 0
   kind="$(inbox_field kind "${resolved}")"
   case "${kind}" in
-    log)     doctor_check_log_channel "${chan}" "${resolved}" ;;
+    log)
+      # The producer marker (DND-260) decides WHICH server end a never-delivered
+      # channel is missing -- an athena-events handling rule (platform) or a
+      # server-side agent instance (slack). Absent -> slack.
+      producer="$(descriptor_channel_field "${entry}" "${chan}" producer)"
+      doctor_check_log_channel "${chan}" "${resolved}" "${producer:-slack}"
+      ;;
     maildir) doctor_check_maildir_channel "${chan}" "${resolved}" ;;
   esac
 }
 
 doctor_check_log_channel() {
-  local chan="$1" resolved="$2" inbox state one now rotated rot_epoch mode st mt age
+  local chan="$1" resolved="$2" producer="${3:-slack}" inbox state one now rotated rot_epoch mode st mt age
   inbox="$(inbox_field inbox "${resolved}")"
   state="$(inbox_field state "${resolved}")"
   one="$(fs_rotated_name "${inbox}")"
@@ -541,13 +554,31 @@ doctor_check_log_channel() {
   # rotated channel needs. So the never-delivered warning fires only when
   # neither file exists.
   if [ ! -e "${inbox}" ] && [ ! -e "${one}" ]; then
+    # NEVER DELIVERED -> NO SERVER PRODUCER REGISTERED, one of the three states
+    # of an empty channel (contract -> "Producer registration extends to
+    # platform deliveries"). The three MUST NOT read identically though all look
+    # empty on disk:
+    #   * NO CLIENT CHANNEL DECLARED -> the registry-entry finding
+    #     (doctor_check_entry), which now names the resolved repo identity that
+    #     found zero;
+    #   * NO SERVER PRODUCER REGISTERED -> HERE (the file never existed), and the
+    #     Fix names WHICH server end must exist -- and that differs by producer:
+    #     a "platform" channel is fed by an athena-events handling rule, a
+    #     "slack" channel by a server-side agent instance;
+    #   * NOTHING ARRIVED -> the live/rotated file exists (handled below): a
+    #     quiet channel, not a fault.
     # Its OWN check name, and informational for the hook's verdict (see
     # INFO_SET in bin/inbox-doctor): the count path already surfaces
     # never-delivered via inbox-status's HEALTH_TEXT, so letting THIS finding
     # flip `healthy` too would double-nag one fault on two separate rate limits.
-    # A hand run still shows it as a warn with the producer-registration Fix.
-    doctor_finding warn "never-delivered" "log channel \"${chan}\" has never received anything (${inbox##*/} does not exist)" \
-      "register this channel's producer -- a server-side agent instance mapped to ${inbox##*/} in the client config; an unregistered producer and an empty channel look identical on disk."
+    # A hand run still shows it as a warn with the producer-specific Fix.
+    if [ "${producer}" = "platform" ]; then
+      doctor_finding warn "never-delivered" "platform log channel \"${chan}\" has never received anything (${inbox##*/} does not exist): NO SERVER PRODUCER REGISTERED" \
+        "register this channel's server producer -- an athena-events handling rule whose delivery target is this inbox channel (ai/contracts/athena-events.md). A channel declared producer:\"platform\" with no handling rule feeding it is empty and, on disk, indistinguishable from one that is merely quiet."
+    else
+      doctor_finding warn "never-delivered" "log channel \"${chan}\" has never received anything (${inbox##*/} does not exist): NO SERVER PRODUCER REGISTERED" \
+        "register this channel's producer -- a server-side agent instance mapped to ${inbox##*/} in the client config; an unregistered producer and an empty channel look identical on disk."
+    fi
     return 0
   fi
 

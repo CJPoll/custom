@@ -192,6 +192,14 @@ assert_eq "cwd not a repo -> na" na "$(cd "${NOREPO}" && state_of "$(doctor_chec
 # invalid entry (unknown kind) -> fail
 printf '{"v":1,"repo":"%s","channels":{"slack":{"kind":"bogus"}}}' "${C1}" > "${ATHENA_INBOX_ROOT}/projects/re.json"; chmod 600 "${ATHENA_INBOX_ROOT}/projects/re.json"
 assert_eq "invalid entry -> fail" fail "$(cd "${R1}" && state_of "$(doctor_check_entry ".")" registry-entry)"
+# DND-260: a repo with NO entry naming it is the NO CLIENT CHANNEL DECLARED
+# state, and the na finding must NAME the resolved repo identity that found zero
+# (CLAUDE.md -> "a failed lookup must never look like an empty one"), not read as
+# a benign "not opted in".
+R3="${TMP}/repo3"; C3="$(make_repo "${R3}")"
+NOENT="$(cd "${R3}" && doctor_check_entry ".")"
+assert_finding "unmatched repo -> na (NO CLIENT CHANNEL DECLARED)" "${NOENT}" na "registry-entry" "NO CLIENT CHANNEL DECLARED"
+assert_contains "the na finding names the resolved repo identity that found zero" "${C3}" "${NOENT}"
 
 # ============================================================================
 echo "== per-channel checks =="
@@ -199,9 +207,19 @@ export ATHENA_INBOX_ROOT="${TMP}/ch"; mkdir -p -m 700 "${ATHENA_INBOX_ROOT}/proj
 R2="${TMP}/repo2"; C2="$(make_repo "${R2}")"
 ENTRY='{"v":1,"repo":"'"${C2}"'","channels":{"slack":{"kind":"log","path":"ch-slack.jsonl"}}}'
 printf '%s' "${ENTRY}" > "${ATHENA_INBOX_ROOT}/projects/ch.json"; chmod 600 "${ATHENA_INBOX_ROOT}/projects/ch.json"
-# never delivered (no file)
+# never delivered (no file) -> NO SERVER PRODUCER REGISTERED
 CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"
 assert_finding "log never delivered -> warn (own check)" "${CH}" warn "never-delivered" "never received"
+assert_finding "slack never-delivered names NO SERVER PRODUCER REGISTERED" "${CH}" warn "never-delivered" "NO SERVER PRODUCER REGISTERED"
+assert_contains "slack never-delivered Fix names the client-config instance, not athena-events" "client config" "${CH}"
+assert_not_contains "slack never-delivered Fix does NOT name athena-events" "athena-events" "${CH}"
+# DND-260: a PLATFORM channel that never received distinguishes its Fix -- it
+# names the athena-events server producer (a handling rule), not a client
+# instance. The three empty-channel states must not read identically.
+PENTRY='{"v":1,"repo":"'"${C2}"'","channels":{"flaky":{"kind":"log","path":"ch-flaky.jsonl","producer":"platform"}}}'
+PCH="$(cd "${R2}" && doctor_check_channels "${PENTRY}" ".")"
+assert_finding "platform never-delivered -> warn naming NO SERVER PRODUCER REGISTERED" "${PCH}" warn "never-delivered" "NO SERVER PRODUCER REGISTERED"
+assert_contains "platform never-delivered Fix names the athena-events handling rule" "athena-events" "${PCH}"
 # deliver, good mode, fresh
 printf '{"v":1,"ts":"1","channel":"c","event_id":"e"}\n' > "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"; chmod 600 "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"
 CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"

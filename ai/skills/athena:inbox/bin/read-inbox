@@ -240,9 +240,17 @@ else
     # `[]` for a line carrying no kind. A defence that cannot fire is removed
     # rather than left to read as protection.
     if [ "${KIND}" = "log" ]; then
+      # A platform (event-platform) line is a routed STATE-CHANGE event carrying
+      # `entity_id` + a current-state `payload`, not the Slack channel/ts/user/
+      # text shape (DND-260). Render it as such; the payload is source bytes and
+      # rides inside this same untrusted fence, exactly like a Slack body.
       BODY="$(printf '%s' "${READ}" | jq -r '
         .messages[]
-        | "[\(if (.kind // "") == "" then "message" else .kind end)] \(.channel) \(.ts) \(.user)\n\(.text)\n"')" || RENDER_RC=1
+        | if (.entity_id // "") != "" then
+            "[state-change] \(.entity_id)\n\(.payload // {} | tojson)\n"
+          else
+            "[\(if (.kind // "") == "" then "message" else .kind end)] \(.channel) \(.ts) \(.user)\n\(.text)\n"
+          end')" || RENDER_RC=1
     else
       BODY="$(printf '%s' "${READ}" | jq -r '
         .messages[]

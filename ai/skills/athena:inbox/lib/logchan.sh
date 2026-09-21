@@ -47,7 +47,7 @@ logchan_split_complete() {
   esac
 }
 
-# logchan_scan <offset> <schema_v_csv> <seen_event_ids> <seen_keys> [with_text]
+# logchan_scan <offset> <schema_v_csv> <seen_event_ids> <seen_keys> [with_text] [producer]
 #
 # Byte slice on stdin (the file from <offset> to EOF). Emits one JSON object:
 #   {"new":N,"unreadable":U,"next_offset":O,
@@ -61,17 +61,36 @@ logchan_split_complete() {
 # rule is about the pre-prompt position, and this is the structural half of it.
 # The read path passes 1 and renders inside a nonce fence.
 #
+# `producer` (default "slack") selects the LINE SCHEMA this channel carries, and
+# it is the channel-level marker resolved from the registry entry, not a per-line
+# field (DND-260). "slack" is the reference reader's original schema, unchanged:
+# a line's identity is `event_id` (intra-file) and `channel:ts` (cross-source),
+# and a line carrying neither is unreadable. "platform" is the event-platform
+# inbox-adapter schema: each line is a routed STATE-CHANGE event carrying
+# `entity_id` plus current fields (a delete carries `entity_id` only) and NO
+# `event_id`/`channel`/`ts`. A platform lane is KEYLESS by contract
+# (ai/contracts/athena-inbox.md -> "A lane `log` channel is a change stream of
+# state-change events"): no dedupe key travels, so the reader does not suppress a
+# duplicate -- at-least-once redelivery is the CONSUMER's to reconcile via a
+# source re-query, and every complete valid platform line counts as one change
+# event. The MISS discipline still binds: a platform line that identifies no
+# entity is unreadable, never a silently-counted phantom
+# (ai/../CLAUDE.md -> "A failed lookup must never look like an empty one").
+#
 # `next_offset` advances over COMPLETE LINES ONLY (D-13). That is the whole
 # crash-safety guarantee: the fragment is neither parsed nor counted, and the
 # offset stops in front of it, so when the writer completes that line it is
 # counted exactly once (D-14) rather than zero times or twice.
 #
-# `messages` is ordered by `ts`, NOT by file position (D-19). File order is
-# DELIVERY order and the two disagree: a client draining a backlog after an
-# outage appends older messages after newer ones. `received_at` is monotonic;
-# `ts` is not, and `ts` is what recency means to a human.
+# `messages` is ordered by `ts`, NOT by file position (D-19), for a "slack"
+# producer. File order is DELIVERY order and the two disagree: a client draining
+# a backlog after an outage appends older messages after newer ones.
+# `received_at` is monotonic; `ts` is not, and `ts` is what recency means to a
+# human. A "platform" lane carries NO `ts` and IS a change stream, so its
+# messages stay in FILE (delivery) order -- the order the consumer folds them
+# into its held set -- and are not re-sorted.
 logchan_scan() {
-  local offset="$1" schema_csv="${2:-1}" seen_ev="${3:-}" seen_ky="${4:-}" with_text="${5:-0}"
+  local offset="$1" schema_csv="${2:-1}" seen_ev="${3:-}" seen_ky="${4:-}" with_text="${5:-0}" producer="${6:-slack}"
   local complete bytes sv_json ev_json ky_json wt_json
 
   # The offset is validated HERE, not only by the caller. It reaches an
@@ -102,12 +121,18 @@ logchan_scan() {
     --argjson ev "${ev_json}" \
     --argjson ky "${ky_json}" \
     --argjson wt "${wt_json}" \
+    --arg prod "${producer}" \
     --argjson next "$((offset + bytes))" '
     def parse: try fromjson catch null;
 
     reduce (split("\n") | map(select(length > 0)) | .[]) as $line
       ({new: [], unreadable: 0, ev: ($ev | map({(.): true}) | add // {}),
         ky: ($ky | map({(.): true}) | add // {})};
+        # `usable` is hoisted here so BOTH the slack and the platform branch
+        # share the one guard: a key or identity carrying a newline or tab is
+        # not a key (it would split the newline-delimited seen-set lists, or
+        # inject a phantom line into a rendered field). Discarded, not sanitised.
+        def usable: if type == "string" and (test("[\n\t]") | not) then . else null end;
         ($line | parse) as $o
         | if ($o | type) != "object" then
             # Not JSON at all, or a bare scalar: unreadable, never fatal.
@@ -118,6 +143,34 @@ logchan_scan() {
             # on the registry entry, which is a hard error. A schema bump on
             # the writer must not take the reader down.
             .unreadable += 1
+          elif $prod == "platform" then
+            # DND-260: a PLATFORM producer line is a routed STATE-CHANGE
+            # event -- `entity_id` plus current fields, a delete carrying
+            # `entity_id` only -- with NO `event_id`/`channel`/`ts`. The lane is
+            # KEYLESS by contract, so there is no dedupe key and no seen-set: a
+            # duplicate is for the consumer to reconcile via source re-query
+            # (ai/contracts/athena-inbox.md -> "A lane `log` channel is a change
+            # stream of state-change events"). `entity_id` is coerced to a usable
+            # string exactly as the slack keys are.
+            (if ($o.entity_id | type) == "null" then null
+             else ($o.entity_id | tostring | usable) end) as $entity
+            | if $entity == null then
+                # THE MISS. A state-change line that names no entity cannot be
+                # reconciled against the source of truth, so it is unreadable --
+                # never a phantom counted new. This is the failed-lookup
+                # discipline for the platform schema: a mis-shaped line says so
+                # rather than reading as an empty success.
+                .unreadable += 1
+              else
+                # Counted as one change event. `event_id`/`dedupe_key`/`ts`/
+                # `channel` are held EMPTY so the read-path extraction
+                # (event_ids/keys) skips them -- a lane line contributes no
+                # dedupe key to the state file. The current-state payload rides
+                # only the READ path (`$wt`), inside the untrusted fence.
+                .new += [ ({entity_id: $entity, event_id: "", dedupe_key: "",
+                            ts: "", channel: ""}
+                           + (if $wt then {payload: ($o | del(.v))} else {} end)) ]
+              end
           else
             # Both keys are forced to STRINGS before they are used as object
             # keys. A line is JSON written by other people: nothing guarantees
@@ -147,8 +200,7 @@ logchan_scan() {
             # below -- the same treatment as a line carrying no key at all,
             # for the same reason: deduping on nothing means re-reporting
             # forever, and a rule that says so once should not grow a second
-            # spelling.
-            def usable: if type == "string" and (test("[\n\t]") | not) then . else null end;
+            # spelling. (`usable` is defined once, hoisted above the branch.)
             (if ($o.channel // "") != "" and ($o.ts // "") != ""
              then ("\($o.channel):\($o.ts)" | usable) else null end) as $key
             | (if ($o.event_id | type) == "null" then null
@@ -201,7 +253,11 @@ logchan_scan() {
     | {new: (.new | length),
        unreadable: .unreadable,
        next_offset: $next,
-       messages: (.new | sort_by((.ts | tonumber? // 0), .ts))}
+       # A "platform" lane is a change stream: FILE order is the order the
+       # consumer must fold changes in, and there is no `ts` to sort on. "slack"
+       # sorts by `ts` (recency), which disagrees with file/delivery order.
+       messages: (if $prod == "platform" then .new
+                  else (.new | sort_by((.ts | tonumber? // 0), .ts)) end)}
   '
 }
 
