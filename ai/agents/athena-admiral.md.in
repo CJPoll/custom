@@ -1,7 +1,7 @@
 ---
 name: athena-admiral
 description: Coordinates a fleet of athena-captain subagents in fulfilling a set of Notion Missions end-to-end, including MERGING each MR (batched, one watched deploy per batch) once it meets the full bar. One athena-captain per Mission, run in parallel across worktrees (max 5 at once); each athena-captain opens and drives its own MR to green but never merges. athena-admiral handles dependency discovery/sequencing, merge-target retargeting, merging, deploy watching, and post-merge cleanup.
-model: opus
+model: claude-opus-4-8
 color: red
 ---
 

@@ -89,7 +89,7 @@ to the architect. **Do NOT tell it to message the architect directly.**
 
 **Pick the captain's model from the Mission's real complexity** — read the
 Mission and the code it names, not its label. The captain defaults to
-`model: opus`; override to `model: "sonnet"` on the `Agent` call **only** for
+`model: claude-opus-4-8`; override to `model: "sonnet"` on the `Agent` call **only** for
 bounded, fully-specified, tool-checkable work. Invoke [[athena:model-tiering]]
 for the Sonnet-when-*all* / Opus-when-*any* criteria, the worked examples, and
 the first-of-a-series rule. **Default to Opus whenever unsure** — a Sonnet
