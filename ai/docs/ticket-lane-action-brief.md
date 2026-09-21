@@ -76,7 +76,7 @@ config value substituted into the template body.
 | `{{MERGE_POLICY}}` | The merge/deploy rule (e.g. auto-merge + the admiral's batch-and-watch defaults). |
 | `{{LANE_CHANNEL}}` | The inbox `log` channel the lane's forwarded state-change events arrive on (`ai/contracts/athena-inbox.md` → *A lane `log` channel is a change stream of state-change events*). |
 | `{{LOCK_PATH}}` | The coordinator marker path — `~/.claude/{{LANE_ID}}-coordinator.lock`. |
-| `{{STALE_MARKER_SWEEP}}` | The lane's declared recovery for a marker left behind by a died/aborted admiral. Every lane MUST make one of two **explicit, recorded** choices — leaving it unbound is NOT conformant (an unstated sweep must not read like a legitimate "manual only"): **(a)** bind a runner that fires **independently of the lane's work-trigger** — a periodic/time-based check or a session-start hook — which gives automatic recovery (the flaky lane's `SessionStart` poll is one: it ages out a marker older than 12h regardless of channel activity); or **(b)** declare `manual-only`, accepting that a wedged marker is cleared solely by a human deleting `{{LOCK_PATH}}`. The work-trigger itself cannot serve as (a): a marker on an idle-but-wedged lane is not cleared by it (see the *Recovering a stale marker* step under *Spinning the lane up*), so a lane whose only trigger is channel activity has no (a) available and must choose (b) knowingly. |
+| `{{STALE_MARKER_SWEEP}}` | The lane's declared recovery for a marker left behind by a died/aborted admiral. Every lane MUST make one of two **explicit, recorded** choices — leaving it unbound is NOT conformant (an unstated sweep must not read like a legitimate "manual only"): **(a)** bind a runner that fires **independently of lane activity** — a periodic/time-based check or a session-start hook that runs whether or not the lane has new work — which gives automatic recovery; or **(b)** declare `manual-only`, accepting that a wedged marker is cleared solely by a human deleting `{{LOCK_PATH}}`. What disqualifies a runner from (a) is firing **only on lane activity**, not being the work-trigger: the flaky lane's `SessionStart` poll is a valid (a) — it ages out a marker older than 12h every session start regardless of activity — *and it is also the flaky work-trigger*, which is fine. What has no (a) available is a purely **activity-triggered** lane, e.g. one whose only trigger is the count of new `{{LANE_CHANNEL}}` lines: a wedged-but-idle lane produces no new line to fire it (see the *Recovering a stale marker* step under *Spinning the lane up*), so such a lane must choose (b) knowingly. |
 | `{{SOURCE_RE_QUERY}}` | The authoritative re-list of lane scope from the source of truth (the same predicate as `{{SCOPE_FILTER}}`, re-run against the tracker). |
 
 ## The template body
@@ -110,19 +110,22 @@ no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
 
 4. **Recovering a stale marker.** If the admiral terminates, or the run aborts
    without clearing the marker, the marker is stale and the lane is wedged until
-   something clears it. **The work-trigger will NOT clear it.** Under the landed model that trigger is the
-   count of *new lines* on `{{LANE_CHANNEL}}` (see *Relationship to the existing
-   flaky trigger*; `ai/contracts/athena-inbox.md` → *A lane `log` channel is a
-   change stream of state-change events*), and a lane wedged mid-drain still has
-   tickets queued but need not receive another line — no line, no trigger, no
-   spawn attempt — so there is no recovery hidden in the spawn path. Automatic
-   recovery therefore requires the lane's `{{STALE_MARKER_SWEEP}}` to be a runner
-   that fires **independently of the work-trigger** — `{{STALE_MARKER_SWEEP}}`
-   choice (a) (a poll/time-based check or a session-start hook, as the flaky
-   poll's 12h age-out is). A lane whose only trigger is channel activity has no
-   such runner available and must knowingly take choice (b), `manual-only`
-   recovery — a human deleting `{{LOCK_PATH}}`. The brief records the choice
-   rather than crediting a sweep that cannot fire.
+   something clears it. **An activity-only trigger will NOT clear it.** Under the
+   landed model the trigger is the count of *new lines* on `{{LANE_CHANNEL}}` (see
+   *Relationship to the existing flaky trigger*; `ai/contracts/athena-inbox.md` →
+   *A lane `log` channel is a change stream of state-change events*), and a lane
+   wedged mid-drain still has tickets queued but need not receive another line —
+   no line, no trigger, no spawn attempt — so for such a lane there is no recovery
+   hidden in the spawn path. Automatic recovery therefore requires
+   `{{STALE_MARKER_SWEEP}}` choice (a): a runner that fires **independently of lane
+   activity** — a periodic/time-based check or a session-start hook. Such a runner
+   MAY also be the lane's work-trigger (the flaky `SessionStart` poll is both: it
+   fires every session start regardless of activity, so it clears a stale marker);
+   what cannot recover a wedged-idle lane is a trigger that fires *only* on lane
+   activity. A lane with no activity-independent runner has no choice (a) and must
+   knowingly take choice (b), `manual-only` recovery — a human deleting
+   `{{LOCK_PATH}}`. The brief records the choice rather than crediting a sweep that
+   cannot fire.
 
 **When NOT to spin up — and when "nothing" is a failure, not a quiet queue.** The
 consumer spawns ONLY when both spin-up conditions above hold, and it takes **no
@@ -258,7 +261,7 @@ here and the citations flip.
 | `{{MERGE_POLICY}}` | per the flaky tracker policy above (the admiral's auto-merge default) |
 | `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel — **to be provisioned in `ai/inbox/registry.json` by DND-247's migration** (walt_ui declares only a `slack` channel there today; see the migration section) |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
-| `{{STALE_MARKER_SWEEP}}` | the `SessionStart` poll (`flaky-ticket-poll.sh`) clears a marker older than 12h; a human may also `rm -f` it |
+| `{{STALE_MARKER_SWEEP}}` | choice (a): the `SessionStart` poll (`flaky-ticket-poll.sh`) — an activity-independent runner — clears a marker older than 12h; a human may also `rm -f` it |
 | `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per the flaky tracker policy above) against the Tickets DB |
 
 **The marker semantics preserved VERBATIM for the flaky instance:**
@@ -291,14 +294,14 @@ change and are NOT "only the trigger":
 
 - The flaky `{{STALE_MARKER_SWEEP}}` **changes, and this is a real migration
   constraint, not a detail.** Its current sweep IS the poll's 12h age-out — a
-  runner that fires independently of channel activity. Retiring the poll retires
-  the flaky lane's *only* trigger-independent sweeper, and the new inbox-count
-  trigger cannot replace it (it fires only on new channel lines, which a
-  wedged-but-idle lane need not receive — see the *Recovering a stale marker*
-  step above). So the migration MUST
-  provision a **replacement trigger-independent sweeper** for the flaky lane
-  (e.g. a small periodic/session-start age-out), or the flaky lane loses
-  automatic stale-marker recovery and is left to manual `rm`. Surfaced here as a
+  runner that fires independently of lane activity (choice (a)). Retiring the poll
+  retires the flaky lane's *only* activity-independent sweeper, and the new
+  inbox-count trigger cannot replace it (it fires only on new channel lines, which
+  a wedged-but-idle lane need not receive — see the *Recovering a stale marker*
+  step above). So the migration MUST provision a **replacement
+  activity-independent sweeper** for the flaky lane (e.g. a small
+  periodic/session-start age-out), or the flaky lane drops to choice (b),
+  `manual-only`, and loses automatic stale-marker recovery. Surfaced here as a
   constraint DND-247 must honor; this template does not implement it.
 - In the design's **gated final step** the whole flaky lock mechanism is retired:
   the poll, its `walt_ui/.claude/settings.json` registration, and the dead
