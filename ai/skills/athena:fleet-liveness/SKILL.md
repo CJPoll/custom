@@ -54,6 +54,23 @@ Judge a Mission's captain by what it leaves on disk, in this order:
 
 1. **Its report file** (`.../[run-id]/reports/[mission]-report.md`). A fresh
    terminal report means the Mission is done, whatever any directory says.
+
+   **Probe it by LISTING the entries, never by counting `ls`.** Use
+   `find "$DIR" -mindepth 1 -type f` (or `-newer` against a reference file) and
+   read the names it prints. `ls -1 "$DIR" | wc -l` **reports 1 for an EMPTY
+   directory on this machine**: `ls` is aliased to a long-format variant that
+   emits a `total 0` header, so the count counts the header, not the files.
+   Measured 2026-09-20-ai-lms (state.md:124-134) — it produced a false
+   `reports: 1 file(s)` in a fleet sweep when **no captain report existed**,
+   inside the admiral's own instrumentation. Nothing errored and the number was
+   well-formed, so the sweep read a silent captain as a reporting one.
+
+   This is the sibling of the `find -newermt` false-zero recorded in
+   `athena-shipwright`: a count is a lookup, and a wrongly-computed count and a
+   truthfully-empty one are the same integer. Names are self-checking —
+   a header line does not look like a report filename — so **print what you
+   found and act on the names**, and treat any count you did not see the
+   entries behind as unverified.
 2. **Worktree activity** — `git -C <worktree> log -1 --format=%ct` and
    `git status --porcelain`. A fresh commit cannot be faked, and an agent can be
    alive and stuck, so this outranks a liveness flag even when you have one.
