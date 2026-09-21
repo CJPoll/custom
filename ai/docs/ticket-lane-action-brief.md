@@ -76,7 +76,7 @@ config value substituted into the template body.
 | `{{MERGE_POLICY}}` | The merge/deploy rule (e.g. auto-merge + the admiral's batch-and-watch defaults). |
 | `{{LANE_CHANNEL}}` | The inbox `log` channel the lane's forwarded state-change events arrive on (`ai/contracts/athena-inbox.md` → *A lane `log` channel is a change stream of state-change events*). |
 | `{{LOCK_PATH}}` | The coordinator marker path — `~/.claude/{{LANE_ID}}-coordinator.lock`. |
-| `{{STALE_MARKER_SWEEP}}` | The lane's declared recovery for a marker left behind by a died/aborted admiral — the only thing that unwedges the lane. It is instance-specific, NOT a generic marker property: a poll-triggered lane can age-out a stale marker (flaky: its poll clears one older than 12h); an inbox-count-triggered lane has no poll, so its sweep is the next spawn attempt checking marker age before `touch`; a lane that declares none has NO automatic recovery (a human clears `{{LOCK_PATH}}`). |
+| `{{STALE_MARKER_SWEEP}}` | The lane's declared recovery for a marker left behind by a died/aborted admiral. It MUST be a runner that executes **independently of the lane's work-trigger** — a periodic/time-based check or a session-start hook — because a marker on an idle-but-wedged lane is NOT cleared by the work-trigger itself (see step 4). The flaky lane's `SessionStart` poll IS such an independent runner (it ages out a marker older than 12h regardless of channel activity). A lane whose only trigger is channel activity has **NO automatic recovery** unless it adds an independent sweeper; absent one, it is unwedged only by a human deleting `{{LOCK_PATH}}`. |
 | `{{SOURCE_RE_QUERY}}` | The authoritative re-list of lane scope from the source of truth (the same predicate as `{{SCOPE_FILTER}}`, re-run against the tracker). |
 
 ## The template body
@@ -103,24 +103,46 @@ no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
        rm -f {{LOCK_PATH}}
 
 4. If the admiral terminates, or the run aborts without clearing the marker, the
-   marker is stale and the lane is wedged shut until something clears it. What
-   clears it is the lane's declared `{{STALE_MARKER_SWEEP}}` — **a stale marker
-   has no automatic recovery beyond whatever that parameter names.** A
-   poll-triggered lane can age the marker out (the flaky lane's poll clears one
-   older than 12h); an inbox-count-triggered lane has no poll, so its sweep is the
-   next spawn attempt checking the marker's age before `touch`; a lane that
-   declares no sweep is unwedged only by a human deleting `{{LOCK_PATH}}`.
+   marker is stale and the lane is wedged until something clears it. **The
+   work-trigger will NOT clear it.** Under the landed model that trigger is the
+   count of *new lines* on `{{LANE_CHANNEL}}` (see *Relationship to the existing
+   flaky trigger*; `ai/contracts/athena-inbox.md` → *A lane `log` channel is a
+   change stream of state-change events*), and a lane wedged mid-drain still has
+   tickets queued but need not receive another line — no line, no trigger, no
+   spawn attempt — so there is no recovery hidden in the spawn path. Automatic
+   recovery therefore requires the lane's `{{STALE_MARKER_SWEEP}}` to be a
+   runner that fires **independently of the work-trigger** (a poll/time-based
+   check or a session-start hook, as the flaky poll's 12h age-out is). A lane
+   with no such independent runner has **no automatic recovery** — it is unwedged
+   only by a human deleting `{{LOCK_PATH}}`, and the brief says so rather than
+   crediting a sweep that cannot fire.
 
-**When NOT to spin up — the negative branch is normative.** The consumer spawns
-ONLY when both conditions above hold. It takes **no lane action** when an admiral
-already appears to be draining (a fresh `{{LOCK_PATH}}`), and — critically — when
-the trigger **reports nothing about the lane at all**. An absent lane signal is
-"no action", never a spawn: a missing/empty signal must not be read as "queue is
-empty, spin up" nor as "something is wrong, intervene" (`~/dev/custom/ai/CLAUDE.md`
-→ *A failed lookup must never look like an empty one* — a missing input is not a
-match). This is the same three-way branch the current flaky policy carries
-(spin-up / already-running → no action / nothing reported → no action); a lane
-instance that drops it can double-spawn or act on an absent signal.
+**When NOT to spin up — and when "nothing" is a failure, not a quiet queue.** The
+consumer spawns ONLY when both spin-up conditions above hold, and it takes **no
+lane action** when an admiral already appears to be draining (a fresh
+`{{LOCK_PATH}}`). But "the trigger reports nothing about the lane" is **two states
+that must not be collapsed**:
+
+- The channel **resolved** and legitimately carries no new lines, or the scope
+  re-query returns empty → genuinely **no action** (the queue is quiet). This is
+  the current flaky policy's "already-running / nothing queued → no action"
+  branch.
+- `{{LANE_CHANNEL}}` **failed to resolve** — missing, misnamed, or its tenancy
+  registry entry absent, which `ai/contracts/athena-inbox.md` → *Validation
+  rules* ("No registry entry is not a fault") makes return **zero channels at
+  exit 0, silently** → this is a resolution **FAILURE**, not an empty queue, and
+  it must be made **observable**, never silently read as "no action".
+
+So **resolving `{{LANE_CHANNEL}}` is its own step with its own outcome**: the
+consumer asserts the channel resolves to a real registered channel and, on a miss,
+emits a readable signal naming the channel key it searched for — the same
+discipline this brief already puts on an unresolvable `{{LOCK_PATH}}`
+(`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty one*:
+resolving the key is its own step; every miss stays observable; a missing input is
+not a match). Only a *resolved* channel's genuine emptiness is "no action"; an
+*unresolved* channel is a surfaced fault. A lane instance that collapses the two
+can spin up on nothing, or — worse — sit dark forever on a misconfigured channel
+believing its queue is empty.
 
 **The marker is a best-effort quieting hint, NOT a lock** (these are the flaky
 lane's `~/.claude/flaky-coordinator.lock` semantics, preserved and generalized
@@ -247,10 +269,16 @@ The flaky instance is today spun by the `SessionStart` poll
 remove-when-scope-empty** semantics carry over unchanged, but two things do
 change and are NOT "only the trigger":
 
-- The flaky `{{STALE_MARKER_SWEEP}}` **changes**. Its current sweep IS the poll's
-  12h age-out; retiring the poll retires that sweep, so the inbox-triggered flaky
-  instance must adopt the no-poll sweep (the next spawn attempt checks marker age
-  before `touch`), per the placeholder table.
+- The flaky `{{STALE_MARKER_SWEEP}}` **changes, and this is a real migration
+  constraint, not a detail.** Its current sweep IS the poll's 12h age-out — a
+  runner that fires independently of channel activity. Retiring the poll retires
+  the flaky lane's *only* trigger-independent sweeper, and the new inbox-count
+  trigger cannot replace it (it fires only on new channel lines, which a
+  wedged-but-idle lane need not receive — see step 4). So the migration MUST
+  provision a **replacement trigger-independent sweeper** for the flaky lane
+  (e.g. a small periodic/session-start age-out), or the flaky lane loses
+  automatic stale-marker recovery and is left to manual `rm`. Surfaced here as a
+  constraint DND-247 must honor; this template does not implement it.
 - In the design's **gated final step** the whole flaky lock mechanism is retired:
   the poll, its `walt_ui/.claude/settings.json` registration, and the dead
   `~/.claude/flaky-*` files — which includes `flaky-coordinator.lock` itself. So
