@@ -33,7 +33,10 @@ terminal status, and **diff them in both directions**:
   work with no actor, which is the most expensive state in the fleet. Enumerate
   it with `ai/bin/ready-and-idle --repo <repo>`, and for each one either take it
   through the merge bar now or record it as blocked/stuck with the reason.
-  *"The run ended" is not a reason; it is the failure.*
+  *"The run ended" is not a reason; it is the failure.* Read its exit code: `3`
+  = UNAVAILABLE, no list, so report the sweep as not taken; `4` = the list is
+  COMPLETE and actionable, only the `drift` column is a `>=N` lower bound. A `4`
+  is not a failure — treating it as one abandons a valid orphan list.
 - Do the same for the human-waiting statuses: a Mission sitting at
   `Needs Attention` whose blocking condition you later resolved is asking the
   owner for work that is already finished — so clear it or restate it.

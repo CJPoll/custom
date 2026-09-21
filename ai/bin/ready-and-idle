@@ -43,9 +43,19 @@
 #   ready-and-idle --repo DIR [--idle-hours N] [--json] [--no-fetch]
 #   ready-and-idle --self-test                # pure logic, no network, no git
 #
-# Exit: 0 ok (INCLUDING a clean scan that found nothing), 1 usage/tool error,
-#       3 SCAN INCOMPLETE — at least one probe could not be taken, so this run
-#         measured nothing and MUST NOT be read as "zero orphans".
+# Exit: 0 ok (INCLUDING a clean scan that found nothing) — rows are complete
+#         and every field was measured,
+#       1 usage/tool error — nothing ran,
+#       3 SCAN INCOMPLETE — NO rows emitted; MEMBERSHIP could not be
+#         established, so this run measured nothing and MUST NOT be read as
+#         "zero orphans". Report it as UNAVAILABLE,
+#       4 DEGRADED SCAN — rows ARE emitted and membership is COMPLETE and
+#         trustworthy (0 rows here still means 0 orphans); one or more rows'
+#         `drift` is a lower bound (`>=N`) or uncountable (`n/a`). Act on the
+#         rows; never quote a `>=N` drift as exact.
+#
+# For a caller that reads only the exit code: 3 means "I have no list", 4 means
+# "I have the list, one column is soft".
 
 require "time"
 require "json"
@@ -122,9 +132,58 @@ module ReadyAndIdle
     nil
   end
 
+  # Quality of a drift count. An uncountable range beats staleness: with no
+  # number there is no bound to state.
+  def drift_quality(count:, refs_refreshed:)
+    return :unmeasured if count.nil?
+
+    refs_refreshed ? :measured : :stale
+  end
+
+  # The ONE place a drift value becomes text. A bare integer here ALWAYS means
+  # the refs were refreshed in THIS run — that invariant is the whole point,
+  # and `>=0` vs `0` is the byte-identical-looking pair it exists to separate.
+  def drift_display(count, quality)
+    return "n/a" if count.nil?
+
+    case quality
+    when :measured then count.to_s
+    when :stale    then ">=#{count}"
+    else                "n/a"
+    end
+  end
+
+  # True iff a drift value that was EMITTED is not exact. An empty row set is
+  # never degraded: nothing was priced, so nothing can be misread.
+  def degraded?(rows)
+    rows.any? { |r| r[:drift_quality] != "measured" }
+  end
+
+  # Parse `origin/main@{2026-09-14T08:12:03-06:00}` out of the first line of
+  # `git reflog show --date=iso-strict --format=%gd <ref>`. Returns nil for
+  # `@{0}` (an ordinal, not a time) and for anything unparseable — a value that
+  # is not a timestamp must never be PRINTED as one.
+  def refs_last_moved(reflog_first_line)
+    stamp = reflog_first_line.to_s[/@\{([^}]+)\}/, 1]
+    return nil if stamp.nil?
+
+    Time.iso8601(stamp)
+    stamp
+  rescue ArgumentError
+    nil
+  end
+
   # Build the emitted row for a qualifying change request.
+  #
+  # `drift:` is { commits: Integer|nil, quality: Symbol } — the count and how
+  # far it can be trusted. Splitting the key is load-bearing: keeping a stale
+  # number in `drift_commits` beside a sibling `drift_quality` would leave
+  # `jq '.rows[].drift_commits'` — the obvious consumer — reading an
+  # un-refreshed number as exact. `null` forces the question.
   def row(mr, now:, drift:)
     secs = idle_seconds(mr[:last_activity], now)
+    quality = drift[:quality]
+    count = drift[:commits]
     {
       id: mr[:id],
       branch: mr[:branch],
@@ -135,9 +194,15 @@ module ReadyAndIdle
       last_activity: mr[:last_activity],
       idle_seconds: secs,
       idle_human: duration_human(secs),
-      # NEVER 0 for "could not count". A target branch that has not moved is 0;
-      # a drift that could not be measured is nil, rendered `n/a`.
-      drift_commits: drift,
+      # EXACT count only. NEVER 0 for "could not count", and nil whenever the
+      # refs backing it were not refreshed in THIS run. A consumer reading only
+      # this key can never be handed an un-refreshed number.
+      drift_commits: (quality == :measured ? count : nil),
+      # Lower bound off un-refreshed refs: origin/<target> only GAINS commits
+      # between fetches, so a stale count understates and never overstates.
+      drift_at_least: (quality == :stale ? count : nil),
+      drift_quality: quality.to_s,
+      drift_display: drift_display(count, quality),
     }
   end
 end
@@ -154,14 +219,38 @@ end
 # a pass with a note*. This tool exists BECAUSE nobody noticed three orphaned
 # MRs for 2.5 days; a silent "0 orphans" from a broken probe would reproduce
 # exactly that, with a citation on top.
+#
+# TWO LEDGERS, and the split is DENY-BY-DEFAULT. `record` is BLOCKING: it means
+# the MEMBERSHIP of the row set is in doubt, so the run emits nothing and exits
+# 3. `record_degraded` is for the one ENRICHMENT field — `drift` — whose
+# failure leaves every orphan still listed, named and idle-timed, and costs
+# only its price tag.
+#
+# The asymmetry is the point. If the FORGE list is incomplete, a missing orphan
+# is invisible and silent — that is the 2.5-day outage this tool was written
+# for. If DRIFT is unmeasurable, nothing is missing from the list. Suppressing
+# the whole list because the price tag failed REPRODUCES the original outage in
+# order to protect a column; measured 2026-09-21, when the shipwright's hourly
+# cron lane (no ssh-agent, so `git fetch` dies on publickey) returned exit 3
+# and zero rows while `glab` was answering fine and 25 change requests were
+# ready-and-idle, the oldest for 54 days.
+#
+# `drift` is the ONLY enrichment field: every other key in `row` comes from the
+# forge probe. That is what makes this a two-way split rather than a slope, so
+# a probe added later without thought is blocking — the safe side.
 module ProbeFailures
   class << self
     def list
       @list ||= []
     end
 
+    def degraded_list
+      @degraded_list ||= []
+    end
+
     def reset!
       @list = []
+      @degraded_list = []
     end
 
     def record(cmd, detail)
@@ -169,8 +258,17 @@ module ProbeFailures
       nil
     end
 
+    def record_degraded(cmd, detail)
+      degraded_list << { cmd: cmd, detail: detail.to_s.strip }
+      nil
+    end
+
     def any?
       !list.empty?
+    end
+
+    def degraded_any?
+      !degraded_list.empty?
     end
   end
 end
@@ -213,26 +311,41 @@ def refresh_refs(dir)
   return true if st.success?
 
   warn "ready-and-idle: git -C #{dir} fetch origin failed: #{err.strip}"
-  warn "Fix: make `git -C #{dir} fetch origin` succeed (network/credentials), or " \
-       "pass --no-fetch to measure drift against the refs already on disk."
-  ProbeFailures.record("git -C #{dir} fetch origin", err)
+  # DEGRADED, not blocking: the orphan list is unaffected, only `drift`'s
+  # precision is. The full explanation and the Fix: land in the DEGRADED SCAN
+  # banner, once it is known whether any emitted row actually needed pricing.
+  ProbeFailures.record_degraded("git -C #{dir} fetch origin", err)
   false
+end
+
+# Last time `origin/<target>` was observed to MOVE — a LOWER BOUND on how stale
+# the refs are. git records no last-fetch time, so this deliberately does not
+# claim one (*A claimed mechanism must be able to fire*). nil when unknown.
+def refs_last_moved(dir, target)
+  out, _err, st = Open3.capture3("git", "-C", dir, "reflog", "show",
+                                 "--date=iso-strict", "--format=%gd",
+                                 "origin/#{target}")
+  st.success? ? ReadyAndIdle.refs_last_moved(out.lines.first) : nil
 end
 
 # How many commits the target branch has gained since `sha` — the rebase debt
 # accruing while the change request sits. nil (never 0) when it cannot be
-# counted; an uncountable drift is recorded as a probe failure, because a
-# silently-missing cost column is the same defect as a silently-empty scan.
-def drift_commits(dir, sha, target)
-  return ProbeFailures.record("git rev-list --count <sha>..origin/#{target}", "no head sha for the change request") if sha.to_s.empty?
+# counted. Whether the returned number is EXACT or a lower bound is not this
+# function's business: it depends on whether the refs were refreshed this run,
+# which is one boolean for the whole run (see `drift_quality`).
+def count_drift(dir, sha, target)
+  if sha.to_s.empty?
+    return ProbeFailures.record_degraded("git rev-list --count <sha>..origin/#{target}",
+                                         "no head sha for the change request")
+  end
 
   range = "#{sha}..origin/#{target}"
   out, err, st = Open3.capture3("git", "-C", dir, "rev-list", "--count", range)
   unless st.success?
     warn "ready-and-idle: git -C #{dir} rev-list --count #{range} failed: #{err.strip}"
-    warn "Fix: fetch the repo so both ends of the range exist locally " \
-         "(`git -C #{dir} fetch origin`); this run cannot price the change request's rebase debt."
-    return ProbeFailures.record("git -C #{dir} rev-list --count #{range}", err)
+    # DEGRADED, not blocking: an unpriceable row is still a real orphan and is
+    # still reported, as `drift=n/a`.
+    return ProbeFailures.record_degraded("git -C #{dir} rev-list --count #{range}", err)
   end
 
   Integer(out.strip, exception: false)
@@ -482,11 +595,65 @@ def self_test
   check.call("same row excluded at a higher threshold",
              ReadyAndIdle.disqualifier(at_2h, now: now, idle_hours: 3), :recently_active)
 
-  # row — drift of 0 and drift of "could not count" must not render alike.
-  r0 = ReadyAndIdle.row(ready, now: now, drift: 0)
-  rn = ReadyAndIdle.row(ready, now: now, drift: nil)
+  # drift_display — the ONE renderer. A bare integer must mean "refreshed this
+  # run" and nothing else. `0` vs `>=0` is the byte-identical-looking pair this
+  # exists to separate; it is the exact case measured on 2026-09-21, and the
+  # one that reads healthiest and is most tempting to "simplify" back.
+  check.call("measured drift renders bare", ReadyAndIdle.drift_display(19, :measured), "19")
+  check.call("measured zero renders bare", ReadyAndIdle.drift_display(0, :measured), "0")
+  check.call("STALE zero renders as a lower bound, never as 0",
+             ReadyAndIdle.drift_display(0, :stale), ">=0")
+  check.call("stale count renders as a lower bound",
+             ReadyAndIdle.drift_display(19, :stale), ">=19")
+  check.call("unmeasured renders n/a", ReadyAndIdle.drift_display(nil, :unmeasured), "n/a")
+  check.call("no number means no bound, even when stale",
+             ReadyAndIdle.drift_display(nil, :stale), "n/a")
+
+  # drift_quality — one boolean for the whole run, plus "countable at all".
+  check.call("counted with fresh refs is measured",
+             ReadyAndIdle.drift_quality(count: 3, refs_refreshed: true), :measured)
+  check.call("counted with stale refs is stale",
+             ReadyAndIdle.drift_quality(count: 3, refs_refreshed: false), :stale)
+  check.call("uncountable with fresh refs is unmeasured",
+             ReadyAndIdle.drift_quality(count: nil, refs_refreshed: true), :unmeasured)
+  check.call("uncountable beats stale",
+             ReadyAndIdle.drift_quality(count: nil, refs_refreshed: false), :unmeasured)
+
+  # row — drift of 0 and drift of "could not count" must not render alike, AND
+  # an un-refreshed number must never reach `drift_commits`, the key the
+  # obvious consumer (`jq '.rows[].drift_commits'`) reads as exact.
+  r0 = ReadyAndIdle.row(ready, now: now, drift: { commits: 0, quality: :measured })
+  rn = ReadyAndIdle.row(ready, now: now, drift: { commits: nil, quality: :unmeasured })
+  rs = ReadyAndIdle.row(ready, now: now, drift: { commits: 0, quality: :stale })
   check.call("drift 0 kept as 0", r0[:drift_commits], 0)
+  check.call("measured drift has no lower-bound twin", r0[:drift_at_least], nil)
   check.call("unmeasured drift is nil, not 0", rn[:drift_commits], nil)
+  check.call("unmeasured drift has no lower bound", rn[:drift_at_least], nil)
+  check.call("STALE drift never reaches drift_commits", rs[:drift_commits], nil)
+  check.call("stale drift is carried as a lower bound", rs[:drift_at_least], 0)
+  check.call("stale drift says so", rs[:drift_quality], "stale")
+  check.call("stale drift renders as a bound", rs[:drift_display], ">=0")
+
+  # degraded? — an empty row set is NEVER degraded: nothing was priced, so
+  # nothing can be misread, and a permanently non-zero exit trains the caller
+  # to ignore the code.
+  check.call("no rows is not degraded", ReadyAndIdle.degraded?([]), false)
+  check.call("all-measured rows are not degraded",
+             ReadyAndIdle.degraded?([{ drift_quality: "measured" }]), false)
+  check.call("one stale row degrades the run",
+             ReadyAndIdle.degraded?([{ drift_quality: "measured" }, { drift_quality: "stale" }]), true)
+  check.call("one unmeasured row degrades the run",
+             ReadyAndIdle.degraded?([{ drift_quality: "unmeasured" }]), true)
+
+  # refs_last_moved — a value that is not a timestamp must never be PRINTED as
+  # one (*A claimed mechanism must be able to fire*: git records no last-FETCH
+  # time, only last-ref-MOVED, which is a lower bound on staleness).
+  check.call("reflog timestamp is parsed",
+             ReadyAndIdle.refs_last_moved("origin/main@{2026-09-14T08:12:03-06:00}"),
+             "2026-09-14T08:12:03-06:00")
+  check.call("an ordinal is not a timestamp", ReadyAndIdle.refs_last_moved("origin/main@{0}"), nil)
+  check.call("empty reflog line is nil", ReadyAndIdle.refs_last_moved(""), nil)
+  check.call("absent reflog line is nil", ReadyAndIdle.refs_last_moved(nil), nil)
   check.call("row idle human", r0[:idle_human], "2d 10h")
 
   # ProbeFailures — the "could not look" vs "looked, found nothing" accounting.
@@ -502,6 +669,21 @@ def self_test
              ProbeFailures.list.first[:detail], "HTTP 401: Requires authentication")
   ProbeFailures.reset!
   check.call("reset clears", ProbeFailures.any?, false)
+
+  # TWO LEDGERS, deny-by-default. A degraded record must NOT make the blocking
+  # gate fire — and this assertion is what fails if a FORGE probe is ever
+  # rerouted through the degraded ledger, which would silently turn a
+  # membership failure into "here is your complete list".
+  ProbeFailures.record_degraded("git -C /repo fetch origin", "Permission denied (publickey)")
+  check.call("a degraded probe does NOT block the scan", ProbeFailures.any?, false)
+  check.call("a degraded probe is still observable", ProbeFailures.degraded_any?, true)
+  check.call("degraded probe names the command",
+             ProbeFailures.degraded_list.first[:cmd], "git -C /repo fetch origin")
+  ProbeFailures.record("gh pr list", "HTTP 401")
+  check.call("a blocking probe still blocks", ProbeFailures.any?, true)
+  ProbeFailures.reset!
+  check.call("reset clears BOTH ledgers",
+             [ProbeFailures.any?, ProbeFailures.degraded_any?], [false, false])
 
   # GitHub rollup mapping (pure; no network).
   gh = GitHubForge.new(".")
@@ -544,10 +726,46 @@ def usage
 end
 
 def print_row(r, marker)
-  printf("%-6s  idle=%-9s  drift=%-5s  sha=%-9s  %-34s  %s\n",
-         "#{marker}#{r[:id]}", r[:idle_human],
-         r[:drift_commits].nil? ? "n/a" : r[:drift_commits].to_s,
+  # `drift_display` is the ONLY renderer of a drift value: a bare integer in
+  # this column always means the refs were refreshed in THIS run.
+  printf("%-6s  idle=%-9s  drift=%-7s  sha=%-9s  %-34s  %s\n",
+         "#{marker}#{r[:id]}", r[:idle_human], r[:drift_display],
          r[:head_sha].to_s[0, 8], (r[:branch] || "")[0, 34], (r[:title] || "")[0, 46])
+end
+
+# The DEGRADED SCAN banner. Printed only when a drift value that was EMITTED is
+# inexact, so it can never appear on a run that priced nothing.
+def warn_degraded(repo:, rows:, refs_refreshed:, refs_reason:, target:)
+  inexact = rows.count { |r| r[:drift_quality] != "measured" }
+  warn "ready-and-idle: DEGRADED SCAN — the change-request list is COMPLETE. Every row"
+  warn "  below is a real ready-and-idle change request, and membership was NOT"
+  warn "  affected; #{inexact} of #{rows.size} row(s) could not be priced exactly, so only the"
+  warn "  `drift` column is degraded."
+  if refs_refreshed
+    warn "  refs: refreshed this run"
+  else
+    warn "  refs: NOT refreshed this run (#{refs_reason})"
+    moved = refs_last_moved(repo, target)
+    warn "  origin/#{target} last observed to MOVE: #{moved || 'unknown (no reflog for the remote-tracking ref)'}"
+    warn "    (that is the last time the ref moved, a LOWER BOUND on its staleness — git"
+    warn "     does not record when a fetch last ran.)"
+  end
+  ProbeFailures.degraded_list.each { |f| warn "  - #{f[:cmd]}: #{f[:detail].lines.first.to_s.strip}" }
+  warn "  drift column: `>=N` is a lower bound (the target branch only GAINS commits"
+  warn "  between fetches, so a stale count understates and never overstates); `n/a`"
+  warn "  could not be counted at all. A bare integer ALWAYS means the refs were"
+  warn "  refreshed in this run."
+  fix_head = if refs_refreshed || refs_reason.to_s.include?("--no-fetch")
+               "drop --no-fetch so drift is measured against current refs"
+             else
+               "make `git -C #{repo} fetch origin` succeed so drift is exact — in a " \
+                 "headless/cron session this is almost always a missing ssh-agent " \
+                 "(`ssh-add -l` should list the key), so run the sweep from a session that " \
+                 "has it or give the cron environment credential access to this remote"
+             end
+  warn "Fix: #{fix_head}. Until then ACT ON THE ROWS ANYWAY: they are complete and each"
+  warn "  one is finished work nobody is carrying. Never quote a `>=N` drift as an exact"
+  warn "  count. Do NOT report this run as unavailable — that is exit 3, and this is exit 4."
 end
 
 def main(argv)
@@ -593,7 +811,11 @@ def main(argv)
     return 1
   end
 
-  refresh_refs(repo) if fetch
+  refs_refreshed = fetch ? refresh_refs(repo) : false
+  refs_reason = if refs_refreshed then nil
+                elsif fetch then "git fetch origin failed"
+                else "--no-fetch was passed"
+                end
 
   now = Time.now.utc
   candidates = forge.open_requests || []
@@ -612,16 +834,25 @@ def main(argv)
       excluded[why] += 1
       next
     end
-    rows << ReadyAndIdle.row(mr, now: now,
-                             drift: drift_commits(repo, mr[:head_sha], mr[:target]))
+    count = count_drift(repo, mr[:head_sha], mr[:target])
+    rows << ReadyAndIdle.row(
+      mr, now: now,
+      drift: { commits: count,
+               quality: ReadyAndIdle.drift_quality(count: count, refs_refreshed: refs_refreshed) }
+    )
   end
   rows.sort_by! { |r| -(r[:idle_seconds] || 0) }
 
-  # A scan that could not read the forge (or could not price the drift) is NOT
-  # a scan. Refuse to emit a result at all — an empty or partial row set here
-  # means "could not look", and the caller must not be able to read it as
-  # "looked, found nothing". This tool exists because a 2.5-day orphan went
-  # unnoticed; a quiet zero here would be that failure again, self-inflicted.
+  # A scan that could not read the FORGE is NOT a scan. Refuse to emit a result
+  # at all — an empty or partial row set here means "could not look", and the
+  # caller must not be able to read it as "looked, found nothing". This tool
+  # exists because a 2.5-day orphan went unnoticed; a quiet zero here would be
+  # that failure again, self-inflicted.
+  #
+  # This gate covers MEMBERSHIP only, and runs FIRST. A failure that costs only
+  # the `drift` column is handled below as a DEGRADED scan (exit 4), because
+  # withholding a complete orphan list to protect a price tag is the very
+  # outage this tool exists to prevent.
   if ProbeFailures.any?
     warn "ready-and-idle: SCAN INCOMPLETE — #{ProbeFailures.list.size} probe(s) failed " \
          "against #{repo}. This is NOT a measurement and MUST NOT be recorded as " \
@@ -634,27 +865,51 @@ def main(argv)
     return 3
   end
 
+  # Degradation is raised only if it affected an EMITTED value. With no rows,
+  # no drift was computed, so nothing is misreadable — the run stays exit 0 and
+  # says CLEAN SCAN. The un-refreshed state is still made observable, on the
+  # CLEAN SCAN line itself; keeping the ordinary healthy sweep at 0 is what
+  # stops a caller learning to ignore the exit code.
+  degraded = ReadyAndIdle.degraded?(rows)
+  banner_target = rows.first&.fetch(:target, nil) || "main"
+  refs_note = refs_refreshed ? "refreshed this run" : "NOT refreshed this run (#{refs_reason})"
+
   if as_json
     puts JSON.pretty_generate(
       repo: repo, forge: forge.name, idle_hours: idle_hours,
       scanned: candidates.size, orphans: rows.size,
-      excluded: excluded.transform_keys(&:to_s), rows: rows
+      excluded: excluded.transform_keys(&:to_s),
+      refs_refreshed: refs_refreshed,
+      refs_note: refs_note,
+      refs_last_moved: (refs_refreshed ? {} : { banner_target => refs_last_moved(repo, banner_target) }),
+      # The marker is in the PAYLOAD, so a consumer that ignores stderr still
+      # cannot misread the state.
+      degraded: (degraded ? ["drift"] : []),
+      degradations: (degraded ? ProbeFailures.degraded_list : []),
+      rows: rows
     )
+    warn_degraded(repo: repo, rows: rows, refs_refreshed: refs_refreshed,
+                  refs_reason: refs_reason, target: banner_target) if degraded
   else
     warn "repo=#{repo}  forge=#{forge.name}  idle>=#{idle_hours}h"
     if rows.empty?
       # Textually distinct from SCAN INCOMPLETE above, on purpose and by
-      # construction: this line can only be printed after every probe landed.
+      # construction: this line can only be printed after every MEMBERSHIP
+      # probe landed, and only when no emitted value was priced.
       puts "ready-and-idle: CLEAN SCAN — looked at #{candidates.size} open change " \
            "request(s) in #{repo}; 0 are ready-and-idle." \
-           "#{excluded.empty? ? '' : " (excluded: #{excluded.map { |k, v| "#{k}=#{v}" }.join(', ')})"}"
+           "#{excluded.empty? ? '' : " (excluded: #{excluded.map { |k, v| "#{k}=#{v}" }.join(', ')})"}" \
+           "#{refs_refreshed ? '' : " Note: refs were not refreshed this run (#{refs_reason}); " \
+                                    "that did not affect this result, because no row needed drift priced."}"
     else
+      warn_degraded(repo: repo, rows: rows, refs_refreshed: refs_refreshed,
+                    refs_reason: refs_reason, target: banner_target) if degraded
       warn "ready-and-idle: #{rows.size} of #{candidates.size} open change request(s) are " \
            "ready-and-idle (finished work nobody is carrying)."
       rows.each { |r| print_row(r, forge.marker) }
     end
   end
-  0
+  degraded ? 4 : 0
 end
 
 if $PROGRAM_NAME == __FILE__
@@ -681,7 +936,10 @@ if $PROGRAM_NAME == __FILE__
         drift   commits the target branch has gained since that green head sha
                 (`git rev-list --count <sha>..origin/<target>`) — the rebase
                 debt accruing while it sits. `n/a` means it could not be
-                counted, which is never the same as 0.
+                counted, which is never the same as 0. `>=N` means the refs
+                were NOT refreshed this run, so N is a LOWER BOUND (the target
+                branch only gains commits between fetches). A bare integer
+                ALWAYS means the refs were refreshed this run.
         sha     the green head sha the pipeline/check suite passed on
 
       Notes:
@@ -702,8 +960,10 @@ if $PROGRAM_NAME == __FILE__
         --help           this text
 
       Exit: 0 ok (including a clean scan that found nothing), 1 usage/tool
-      error, 3 SCAN INCOMPLETE — a probe could not be taken, so the run
-      measured nothing and must not be read as zero orphans.
+      error, 3 SCAN INCOMPLETE — MEMBERSHIP could not be established, no rows
+      were emitted, and the run must not be read as zero orphans; 4 DEGRADED
+      SCAN — the row list IS complete and actionable, only the `drift` column
+      degraded to `>=N`/`n/a`. Exit 4 is not a failure: act on the rows.
     TXT
     exit 0
   end

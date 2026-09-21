@@ -9,11 +9,22 @@
 #
 # The load-bearing cases are the ones about INDISTINGUISHABILITY, because this
 # tool exists to notice something nobody noticed:
-#   * a FAILED probe must exit non-zero and must NOT print the zero-orphans
-#     text (~/dev/custom/CLAUDE.md -> "A failed lookup must never look like an
-#     empty one"); and
-#   * a GENUINELY empty result must exit 0 and be textually distinct from it.
-# A suite that only ever exercised a healthy probe would prove neither.
+#   * a FAILED MEMBERSHIP probe must exit 3, emit nothing, and must NOT print
+#     the zero-orphans text (~/dev/custom/CLAUDE.md -> "A failed lookup must
+#     never look like an empty one");
+#   * a GENUINELY empty result must exit 0 and be textually distinct from it;
+#   * and the INVERSE, which bites just as hard: a drift priced off
+#     un-refreshed refs must NOT render as a confident bare integer. `>=0` and
+#     `0` are the byte-identical-looking pair, and the stale one reads
+#     HEALTHIER than reality, since the target branch only gains commits
+#     between fetches.
+# A suite that only ever exercised a healthy probe would prove none of them.
+#
+# The suite also pins the 2026-09-21 regression directly: a failed `git fetch`
+# used to kill the whole scan, so the shipwright's hourly cron lane (no
+# ssh-agent) got exit 3 and ZERO rows while 28 change requests were
+# ready-and-idle, the oldest for 82 days. Case F1 fails if that is ever
+# reintroduced.
 #
 # Nothing outside the sandbox is touched: the repo, the fixtures and the stub
 # PATH all live in a mktemp -d that the EXIT trap removes.
@@ -132,22 +143,100 @@ fi
 # ---------------------------------------------------------------------------
 mk_gitlab 1187 "${SHA_OLD}" false true "$(ago '10 hours')" success 0
 run --repo "${WORK}" --no-fetch --json
-[ "${CODE}" -eq 0 ] && echo "${OUT}" | grep -q '"orphans": 1' \
+[ "${CODE}" -eq 4 ] && echo "${OUT}" | grep -q '"orphans": 1' \
   && echo "${OUT}" | grep -q '"id": 1187' \
-  && ok "green+idle+unblocked+approved MR is reported" \
+  && ok "green+idle+unblocked+approved MR is reported (exit 4: rows complete, drift soft)" \
   || bad "green+idle+unblocked+approved MR is reported" "code=${CODE} out=${OUT}"
 
-# The drift column is the accruing rebase debt, and it is the number that makes
-# the cost legible — assert it against real git, not against the fixture.
-echo "${OUT}" | grep -q '"drift_commits": 3' \
-  && ok "drift counts commits the target gained since the green head (3)" \
-  || bad "drift counts commits since the green head" "out=${OUT}"
+# --no-fetch is a REQUEST not to fetch, never a licence to claim freshness.
+# The same epistemic state (refs not refreshed) must not produce two different
+# confidences depending on whether it arose from a flag or from a failure.
+echo "${OUT}" | grep -q '"drift_at_least": 3' \
+  && echo "${OUT}" | grep -q '"drift_commits": null' \
+  && echo "${OUT}" | grep -q '"drift_quality": "stale"' \
+  && ! echo "${OUT}" | grep -q '"drift_commits": 3' \
+  && ok "--no-fetch drift is a LOWER BOUND, never an exact drift_commits" \
+  || bad "--no-fetch drift is a lower bound" "out=${OUT}"
 
+run --repo "${WORK}" --no-fetch
+echo "${OUT}" | grep -q 'drift=>=3' && ! echo "${OUT}" | grep -qE 'drift=3([^0-9]|$)' \
+  && ok "the table renders a stale drift as >=3, never as a bare 3" \
+  || bad "the table renders a stale drift as >=3" "out=${OUT}"
+
+# THE stale-zero pair, at the integration layer. `0` is the value that reads
+# healthiest ("nothing has moved, this is cheap to land") and is the most
+# tempting to collapse back to a plain integer.
 mk_gitlab 1188 "${SHA_TIP}" false true "$(ago '10 hours')" success 0
 run --repo "${WORK}" --no-fetch --json
-echo "${OUT}" | grep -q '"drift_commits": 0' \
-  && ok "drift is 0 when the target has not moved" \
-  || bad "drift is 0 when the target has not moved" "out=${OUT}"
+echo "${OUT}" | grep -q '"drift_at_least": 0' && echo "${OUT}" | grep -q '"drift_commits": null' \
+  && ok "an un-refreshed drift of 0 is >=0, never an exact 0" \
+  || bad "an un-refreshed drift of 0 is >=0" "out=${OUT}"
+run --repo "${WORK}" --no-fetch
+echo "${OUT}" | grep -q 'drift=>=0' && ! echo "${OUT}" | grep -qE 'drift=0([^0-9]|$)' \
+  && ok "the table never prints a bare drift=0 off un-refreshed refs" \
+  || bad "the table never prints a bare drift=0 off un-refreshed refs" "out=${OUT}"
+
+# ---------------------------------------------------------------------------
+# 1b. THE EXACT PATH. A local bare repo whose path contains "gitlab" both
+# selects the GitLab backend (detect_forge matches the substring) and gives a
+# genuinely SUCCEEDING `git fetch origin` with no network — which is how a bare
+# integer, and the "bare integer always means refreshed-this-run" invariant,
+# get covered hermetically.
+# ---------------------------------------------------------------------------
+UPSTREAM="${TMP}/gitlab-upstream.git"
+git clone -q --bare "${WORK}" "${UPSTREAM}"
+git -C "${UPSTREAM}" symbolic-ref HEAD refs/heads/main 2>/dev/null \
+  || git -C "${UPSTREAM}" symbolic-ref HEAD "refs/heads/$(git -C "${WORK}" rev-parse --abbrev-ref HEAD)"
+git -C "${UPSTREAM}" update-ref refs/heads/main "${SHA_TIP}"
+git -C "${WORK}" remote set-url origin "${UPSTREAM}"
+mk_gitlab 1189 "${SHA_OLD}" false true "$(ago '10 hours')" success 0
+run --repo "${WORK}" --json
+[ "${CODE}" -eq 0 ] \
+  && echo "${OUT}" | grep -q '"drift_commits": 3' \
+  && echo "${OUT}" | grep -q '"drift_at_least": null' \
+  && echo "${OUT}" | grep -q '"drift_quality": "measured"' \
+  && ! echo "${ERR}" | grep -q 'DEGRADED' \
+  && ok "a SUCCESSFUL fetch gives an exact drift and exit 0 (bare integer == refreshed)" \
+  || bad "a successful fetch gives an exact drift and exit 0" "code=${CODE} out=${OUT} err=${ERR}"
+
+# ---------------------------------------------------------------------------
+# F1. THE REGRESSION. A FAILED `git fetch` must NOT suppress the orphan list.
+# GIT_SSH_COMMAND=/bin/false reproduces the cron lane's missing ssh-agent with
+# no network and no DNS.
+# ---------------------------------------------------------------------------
+git -C "${WORK}" remote set-url origin git@gitlab.com:fixture/proj.git
+mk_gitlab 1187 "${SHA_OLD}" false true "$(ago '10 hours')" success 0
+GIT_SSH_COMMAND=/bin/false GIT_TERMINAL_PROMPT=0 run --repo "${WORK}" --json
+[ "${CODE}" -eq 4 ] && [ -n "${OUT}" ] \
+  && echo "${OUT}" | grep -q '"orphans": 1' && echo "${OUT}" | grep -q '"id": 1187' \
+  && echo "${ERR}" | grep -q 'DEGRADED SCAN' \
+  && ! echo "${ERR}" | grep -q 'SCAN INCOMPLETE' \
+  && ok "a FAILED git fetch degrades the drift column but still emits the orphan list" \
+  || bad "a failed git fetch still emits the orphan list" "code=${CODE} out=${OUT} err=${ERR}"
+
+echo "${OUT}" | grep -q '"degraded"' && echo "${OUT}" | grep -q '"refs_refreshed": false' \
+  && ok "the degraded marker is in the JSON PAYLOAD (a consumer ignoring stderr cannot misread it)" \
+  || bad "the degraded marker is in the JSON payload" "out=${OUT}"
+
+GIT_SSH_COMMAND=/bin/false GIT_TERMINAL_PROMPT=0 run --repo "${WORK}"
+echo "${ERR}" | grep -q 'Fix:' \
+  && echo "${ERR}" | grep -q 'ssh-add' \
+  && echo "${ERR}" | grep -q 'ACT ON THE ROWS' \
+  && echo "${ERR}" | grep -q 'exit 3' \
+  && ok "the DEGRADED banner tells the caller to act on the rows and not to call it unavailable" \
+  || bad "the DEGRADED banner is actionable" "err=${ERR}"
+
+# F2. The relaxation must NOT have leaked into MEMBERSHIP. A fetch failure AND
+# a forge failure together is still exit 3 with nothing on stdout.
+: > "${STUB}/fail"
+GIT_SSH_COMMAND=/bin/false GIT_TERMINAL_PROMPT=0 run --repo "${WORK}"
+F2_CODE="${CODE}"; F2_OUT="${OUT}"; F2_ERR="${ERR}"
+rm -f "${STUB}/fail"
+[ "${F2_CODE}" -eq 3 ] && [ -z "${F2_OUT}" ] \
+  && echo "${F2_ERR}" | grep -q 'SCAN INCOMPLETE' \
+  && ! echo "${F2_ERR}" | grep -q 'DEGRADED SCAN' \
+  && ok "a forge failure still blocks the scan even when the fetch also failed" \
+  || bad "a forge failure still blocks the scan" "code=${F2_CODE} out=${F2_OUT} err=${F2_ERR}"
 
 # ---------------------------------------------------------------------------
 # 2-7. Each disqualifier INDIVIDUALLY excludes an otherwise-qualifying MR.
@@ -175,7 +264,7 @@ excl "activity below threshold"  2007 "${SHA_OLD}" false true  "$(ago '30 minute
 # ---------------------------------------------------------------------------
 mk_gitlab 3001 "${SHA_OLD}" false true "$(ago '3 hours')" success 0
 run --repo "${WORK}" --no-fetch --json --idle-hours 2
-echo "${OUT}" | grep -q '"orphans": 1' \
+[ "${CODE}" -eq 4 ] && echo "${OUT}" | grep -q '"orphans": 1' \
   && ok "--idle-hours 2 reports a 3h-idle MR" \
   || bad "--idle-hours 2 reports a 3h-idle MR" "code=${CODE} out=${OUT}"
 run --repo "${WORK}" --no-fetch --json --idle-hours 4
@@ -193,8 +282,17 @@ run --repo "${WORK}" --no-fetch
 EMPTY_OUT="${OUT}"; EMPTY_ERR="${ERR}"; EMPTY_CODE="${CODE}"
 [ "${EMPTY_CODE}" -eq 0 ] && echo "${EMPTY_OUT}" | grep -q 'CLEAN SCAN' \
   && ! echo "${EMPTY_OUT}${EMPTY_ERR}" | grep -q 'SCAN INCOMPLETE' \
+  && ! echo "${EMPTY_OUT}${EMPTY_ERR}" | grep -q 'DEGRADED SCAN' \
   && ok "a genuine empty result exits 0 and says CLEAN SCAN" \
   || bad "a genuine empty result exits 0 and says CLEAN SCAN" "code=${EMPTY_CODE} out=${EMPTY_OUT}"
+
+# The zero-rows rule, AND its observability. Nothing was priced, so nothing can
+# be misread and the run stays at 0 — but the un-refreshed state is still
+# stated, so "not refreshed" never goes unrecorded just because it was harmless
+# this time.
+echo "${EMPTY_OUT}" | grep -q 'refs were not refreshed this run' \
+  && ok "a CLEAN SCAN off un-refreshed refs still SAYS the refs were not refreshed" \
+  || bad "a CLEAN SCAN states the un-refreshed refs" "out=${EMPTY_OUT}"
 
 # 9b. A FAILED forge probe: non-zero exit, and NOT the zero-orphans text.
 : > "${STUB}/fail"
@@ -226,20 +324,37 @@ echo "${FAIL_ERR}" | grep -q 'gh auth status\|glab auth status' \
   && ok "the failed-probe path enumerates the probe and how to restore it" \
   || bad "the failed-probe path enumerates the probe" "err=${FAIL_ERR}"
 
-# 9c. The two outcomes must not be confusable by their exit codes either.
-[ "${EMPTY_CODE}" -ne "${FAIL_CODE}" ] \
-  && ok "empty-result and could-not-look have different exit codes (${EMPTY_CODE} vs ${FAIL_CODE})" \
-  || bad "empty-result and could-not-look differ" "both=${EMPTY_CODE}"
+# 9c. The FOUR outcomes must not be confusable by their exit codes either.
+# For a caller that reads only the code: 3 means "I have no list", 4 means "I
+# have the list, one column is soft" — collapsing them reproduces the outage at
+# the READING layer, which no amount of banner wording would prevent.
+run --repo "${WORK}" --no-fetch --bogus; USAGE_CODE="${CODE}"
+mk_gitlab 4002 "${SHA_OLD}" false true "$(ago '10 hours')" success 0
+run --repo "${WORK}" --no-fetch; DEGRADED_CODE="${CODE}"
+CODES="$(printf '%s\n' "${EMPTY_CODE}" "${FAIL_CODE}" "${USAGE_CODE}" "${DEGRADED_CODE}" | sort -u | wc -l)"
+[ "${CODES}" -eq 4 ] \
+  && ok "clean/degraded/incomplete/usage are four DISTINCT exit codes (${EMPTY_CODE}/${DEGRADED_CODE}/${FAIL_CODE}/${USAGE_CODE})" \
+  || bad "the four outcomes have distinct exit codes" \
+         "clean=${EMPTY_CODE} degraded=${DEGRADED_CODE} incomplete=${FAIL_CODE} usage=${USAGE_CODE}"
 
 # ---------------------------------------------------------------------------
 # 10. An unmeasurable drift is a failed probe, never a silent 0.
 # ---------------------------------------------------------------------------
+# It must never read as 0 (the original half, still load-bearing) — but it must
+# also no longer KILL the scan, because an unpriceable row is still a real
+# orphan and withholding it is the outage this tool exists to prevent.
 mk_gitlab 5001 "0000000000000000000000000000000000000000" false true "$(ago '10 hours')" success 0
+run --repo "${WORK}" --no-fetch --json
+[ "${CODE}" -eq 4 ] && echo "${OUT}" | grep -q '"orphans": 1' \
+  && echo "${OUT}" | grep -q '"drift_quality": "unmeasured"' \
+  && ! echo "${OUT}" | grep -q '"drift_commits": 0' \
+  && ! echo "${OUT}" | grep -q '"drift_at_least": 0' \
+  && ok "an uncountable drift degrades the run but still reports the orphan" \
+  || bad "an uncountable drift still reports the orphan" "code=${CODE} out=${OUT} err=${ERR}"
 run --repo "${WORK}" --no-fetch
-[ "${CODE}" -ne 0 ] && echo "${ERR}" | grep -q 'SCAN INCOMPLETE' \
-  && ! echo "${OUT}" | grep -q 'drift=0' \
-  && ok "an uncountable drift fails the scan rather than reading as 0" \
-  || bad "an uncountable drift fails the scan" "code=${CODE} out=${OUT} err=${ERR}"
+echo "${OUT}" | grep -q 'drift=n/a' && ! echo "${OUT}" | grep -q 'drift=0' \
+  && ok "an uncountable drift renders n/a, never 0" \
+  || bad "an uncountable drift renders n/a" "out=${OUT}"
 
 # ---------------------------------------------------------------------------
 # 11. GitHub path: a different forge, the same verdicts.
@@ -252,8 +367,9 @@ cat > "${FIX}/prs.json" <<EOF
   "statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}]
 EOF
 run --repo "${WORK}" --no-fetch --json
-[ "${CODE}" -eq 0 ] && echo "${OUT}" | grep -q '"id": 42' && echo "${OUT}" | grep -q 'github (gh)' \
-  && ok "github: a green+idle+approved PR is reported" \
+[ "${CODE}" -eq 4 ] && echo "${OUT}" | grep -q '"id": 42' && echo "${OUT}" | grep -q 'github (gh)' \
+  && echo "${OUT}" | grep -q '"drift_quality": "stale"' \
+  && ok "github: a green+idle+approved PR is reported, and the degradation is forge-independent" \
   || bad "github: a green+idle+approved PR is reported" "code=${CODE} out=${OUT}"
 
 cat > "${FIX}/prs.json" <<EOF
@@ -271,7 +387,7 @@ echo "${OUT}" | grep -q '"orphans": 0' \
 run --repo "${WORK}" --no-fetch
 GH_CODE="${CODE}"; GH_OUT="${OUT}"; GH_ERR="${ERR}"
 rm -f "${STUB}/fail"
-[ "${GH_CODE}" -ne 0 ] && [ -z "${GH_OUT}" ] && echo "${GH_ERR}" | grep -q 'SCAN INCOMPLETE' \
+[ "${GH_CODE}" -eq 3 ] && [ -z "${GH_OUT}" ] && echo "${GH_ERR}" | grep -q 'SCAN INCOMPLETE' \
   && ok "github: a failed probe also refuses to report a result" \
   || bad "github: a failed probe refuses to report" "code=${GH_CODE} out=${GH_OUT}"
 
@@ -289,6 +405,9 @@ HELP_OUT="$("${BIN}" --help 2>"${TMP}/helperr")"; HELP_CODE=$?
 [ ! -s "${TMP}/invoked.log" ] \
   && ok "--help performs no action (neither gh nor glab was invoked)" \
   || bad "--help performs no action" "$(cat "${TMP}/invoked.log")"
+echo "${HELP_OUT}" | grep -q '>=N' && echo "${HELP_OUT}" | grep -q 'DEGRADED' \
+  && ok "--help documents the >=N lower bound and exit 4" \
+  || bad "--help documents >=N and exit 4" "out=${HELP_OUT}"
 
 # ---------------------------------------------------------------------------
 # 13. Bad inputs fail loudly, with a Fix:.
@@ -319,7 +438,7 @@ run --repo "${WORK}" --no-fetch --bogus
 # ---------------------------------------------------------------------------
 printf '\nready-and-idle self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then
-  echo "Fix: reconcile ai/bin/ready-and-idle with the cases above — above all, a probe that FAILED must exit non-zero and must never print the zero-orphans text, and a genuinely empty result must exit 0 and stay textually distinct from it." >&2
+  echo "Fix: reconcile ai/bin/ready-and-idle with the cases above — above all: a MEMBERSHIP probe that failed must exit 3 and never print the zero-orphans text; a genuinely empty result must exit 0 and stay textually distinct from it; and a drift priced off un-refreshed refs must render \`>=N\` (exit 4, rows still emitted), never a bare integer and never a suppressed list." >&2
   exit 1
 fi
 exit 0

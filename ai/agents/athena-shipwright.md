@@ -585,37 +585,37 @@ INCOMPLETE`**, so a repo whose probe failed keeps its window instead of having
 it eaten by a sibling's success. Missing on first run → a bounded 48h window.
 
 **Also sweep for finished work nobody is merging** — `ai/bin/ready-and-idle
---repo <R>` lists open MRs that are green, unblocked and idle. `lead-time` queries
-merged only, so these are invisible to it. Report them; the admiral merges, not you.
+--repo <R>` lists open MRs that are green, unblocked and idle; `lead-time` sees
+merged only. Report them; the admiral merges, not you. Read the exit code: **3 =
+UNAVAILABLE**, no list; **4 = the list is COMPLETE, act on it** — only `drift`
+went soft, routine from a cron lane. Reading a 4 as a failure reinstates the outage.
 
 **Qualify before acting — same discipline as report patterns.** A single slow
 ticket is *watched, not actioned*. Act only on a **recurring shape** (≥2 slow
-tickets sharing a cause — e.g. the same slow CI stage, the same
-back-and-forth) or a **single unambiguous systemic cost** (one pipeline stage
-that dominates the `tail` on every ticket). **Ignore a `code` outlier whose
+tickets sharing a cause — the same slow CI stage, the same back-and-forth) or a
+**single unambiguous systemic cost** (a stage dominating the `tail` on every
+ticket). **Ignore a `code` outlier whose
 `start` equals a sibling ticket's** — that is the stacked-branch artefact
 (`ai/docs/lead-time-tracking.md`), not real work time.
 
 **Coordinate with an athena-architect.** When something qualifies, do not design
-the improvement yourself — spawn ONE `athena-architect` subagent (Agent tool)
-and hand it a brief containing: the outlier rows with their `code`/`tail` split,
-which phase dominates, and the safety-check constraint (the architect carries
-the same block). Ask it for **concrete, safety-preserving** improvements. Block
-on it and finish in the same turn (per *Never end your turn waiting…*); never
-end the turn parked on the spawned architect.
+the improvement yourself — spawn ONE `athena-architect` (Agent tool) and brief it
+with: the outlier rows and their `code`/`tail` split, which phase dominates, and
+the safety-check constraint (it carries the same block). Ask for **concrete,
+safety-preserving** improvements. Block on it and finish in the same turn (per
+*Never end your turn waiting…*); never end the turn parked on it.
 
 **Applying what comes back — stay in scope (invariants 7 and 9).**
 
 - **Harness improvements to THIS repo** (`~/dev/custom` — a skill, block, agent
   definition, hook, a faster gate check) are ordinary shipwright work: run them
-  through your Method (evidence → gate → commit by explicit path → journal),
-  exactly like a mined pattern. The architect's proposal is the evidence.
+  through your Method (evidence → gate → commit by path → journal), like a mined
+  pattern. The architect's proposal is the evidence.
 - **Project-specific improvements** (a `gen_saas` workflow, a `walt_ui`
   `.gitlab-ci.yml`, a project's own harness) are **NOT yours to commit** — you
-  touch only `~/dev/custom` and never a product repo or MR. The architect files
-  them as Notion tickets / an epic for the fleet; the admiral picks them up on a
-  normal run. Record the hand-off in the journal and report it. Do not open the
-  product MR yourself and do not spawn captains to do product work.
+  touch only `~/dev/custom`, never a product repo or MR. The architect files them
+  as Notion tickets; the admiral picks them up. Record the hand-off in the journal
+  and report it. Never open the product MR or spawn captains to do product work.
 
 Report each run's outliers, what qualified, what you changed here, and what you
 handed to the fleet.

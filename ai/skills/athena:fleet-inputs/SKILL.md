@@ -32,6 +32,14 @@ left behind when an earlier run hit a ceiling, was killed, or simply ended
 while still holding it. Adopt any that falls in your scope and carry it through
 the **full, unchanged** merge bar; it is not pre-approved by having sat there.
 
+**Read its exit code; do not judge it by "non-zero".** `3` means UNAVAILABLE —
+membership could not be established, so there is no list and you must not read
+it as zero orphans. `4` means the list is **COMPLETE and actionable**; only the
+`drift` column degraded to a `>=N` lower bound (typically because `git fetch`
+could not run). Act on a `4`'s rows exactly as on a `0`'s. Abandoning a valid
+orphan list because the exit code was non-zero reproduces, at the reading layer,
+the 2.4-day outage this check exists to prevent.
+
 Do this before dispatching anyone: an orphan is cheaper to land than to
 re-derive, and it gets more expensive every hour. Measured 2026-09-19/21 on
 walt_ui — !1187/!1189/!1190 sat green and unblocked for ~2.4 days each
