@@ -62,6 +62,15 @@ vocabulary, the blocked-semantics, and what counts as actionable — plus the
 lane's identity, concurrency, and merge policy. Nothing here is code; each is a
 config value substituted into the template body.
 
+**The conformance rule that makes the table load-bearing:** every obligation the
+template body states as a per-lane MUST is a **placeholder with a row here**, so
+that a table filling every row is a complete, conformant instantiation and no MUST
+can be silently omitted. The three MUSTs that would otherwise hide — the marker
+recovery, the channel-resolution assertion, and the merge terminal state — are
+therefore `{{STALE_MARKER_SWEEP}}`, `{{CHANNEL_RESOLUTION}}`, and the terminal-state
+half of `{{MERGE_POLICY}}` respectively. Leaving any of them unbound is NOT
+conformant.
+
 | Placeholder | Meaning |
 |---|---|
 | `{{LANE_ID}}` | The lane's short identifier (e.g. `flaky`), used to name the coordinator marker. |
@@ -73,7 +82,7 @@ config value substituted into the template body.
 | `{{STATUS_VOCAB}}` | The exact existing status options each lifecycle stage maps to (per `athena:ticket-management` / `athena:fleet-inputs`). |
 | `{{BLOCKED_SEMANTICS}}` | How "blocked" is represented (e.g. the `Blocked By` relation non-empty ⇒ blocked; the blocking status). |
 | `{{MAX_CAPTAINS}}` | The lane's concurrency cap (e.g. `1` for a strictly-sequential lane). |
-| `{{MERGE_POLICY}}` | The merge/deploy rule (e.g. auto-merge + the admiral's batch-and-watch defaults). |
+| `{{MERGE_POLICY}}` | The merge/deploy rule AND its **terminal state** — the two are one binding. The rule is e.g. auto-merge + the admiral's batch-and-watch defaults; the terminal state is the per-MR end condition the marker-removal step waits for (see *Spinning the lane up*). A lane MUST name the terminal state explicitly — for auto-merge it is "merged"; for a non-auto-merge policy (e.g. "keep the base PR ready-but-unmerged, stack dependents, merge none" under an owner-creds gate) it is that policy's own end state (e.g. "ready and handed off"). Binding the rule without a terminal state is NOT conformant: the removal step becomes unreachable and the marker never clears. |
 | `{{LANE_CHANNEL}}` | The inbox `log` channel the lane's forwarded state-change events arrive on (`ai/contracts/athena-inbox.md` → *A lane `log` channel is a change stream of state-change events*). |
 | `{{CHANNEL_RESOLUTION}}` | How the instance **asserts `{{LANE_CHANNEL}}` resolves** at startup and makes a miss **observable** — naming the searched key — rather than reading a silent zero as "no action" (per *When NOT to spin up*). The assertion MUST check the **live** registry entry the consumer actually reads — `$ATHENA_INBOX_ROOT/projects/<project>.json`, an untracked machine-local file — not merely the committed `ai/inbox/registry.json`; a channel declared in the committed source but never installed (or clobbered) still resolves to zero channels at exit 0 (`~/dev/custom/CLAUDE.md` → *Inbox tenancy registry*; *A failed lookup must never look like an empty one* → "validate both sides of the comparison"). Every lane MUST bind this; leaving it unbound is **NOT conformant** — an unasserted channel is the silent-dark failure the template calls worse than spinning up on nothing. This is the resolution-side twin of `{{STALE_MARKER_SWEEP}}`. |
 | `{{LOCK_PATH}}` | The coordinator marker path — `~/.claude/{{LANE_ID}}-coordinator.lock`. |
@@ -99,13 +108,12 @@ no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
    yourself — with the inner brief below, which fixes every foundational input so
    the admiral never has to ask a clarifying question.
 3. The admiral **removes the marker when the scope query returns empty** and every
-   touched MR has reached `{{MERGE_POLICY}}`'s **terminal state** — this is a
-   parameter, not "merged": for an auto-merge lane the terminal state is merged;
-   for a non-auto-merge policy (e.g. the sanctioned "keep the base PR
-   ready-but-unmerged, stack dependents, merge none" under an owner-creds gate)
-   it is that policy's own end state (e.g. "ready and handed off"). A lane MUST
-   define this terminal state, or the removal step is unreachable and the marker
-   never clears:
+   touched MR has reached `{{MERGE_POLICY}}`'s bound **terminal state** (that
+   terminal state is part of the `{{MERGE_POLICY}}` binding, not a hardcoded
+   "merged" — see the parameter table; an auto-merge lane's is "merged", a
+   non-auto-merge lane's is its own end state). If a lane leaves the terminal
+   state unbound this step is unreachable and the marker never clears — which is
+   why the parameter table makes it a required part of `{{MERGE_POLICY}}`:
 
        rm -f {{LOCK_PATH}}
 
@@ -273,7 +281,7 @@ here and the citations flip.
 | `{{STATUS_VOCAB}}` | per the flaky tracker policy above |
 | `{{BLOCKED_SEMANTICS}}` | per the flaky tracker policy above (the `Blocked By` relation) |
 | `{{MAX_CAPTAINS}}` | `1` (strictly sequential) |
-| `{{MERGE_POLICY}}` | per the flaky tracker policy above (the admiral's auto-merge default) |
+| `{{MERGE_POLICY}}` | per the flaky tracker policy above (the admiral's auto-merge default); **terminal state = merged** (the condition the marker-removal step waits for) |
 | `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel — **to be provisioned in `ai/inbox/registry.json` by DND-247's migration** (walt_ui declares only a `slack` channel there today; see the migration section) |
 | `{{CHANNEL_RESOLUTION}}` | assert the flaky `log` channel resolves in the **live** `$ATHENA_INBOX_ROOT/projects/walt_ui.json` (not just the committed `ai/inbox/registry.json`) at startup; on a miss, log the searched channel key and treat it as a fault, NOT an empty queue (in force once DND-247 provisions and installs the channel) |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
