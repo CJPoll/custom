@@ -76,7 +76,7 @@ config value substituted into the template body.
 | `{{MERGE_POLICY}}` | The merge/deploy rule (e.g. auto-merge + the admiral's batch-and-watch defaults). |
 | `{{LANE_CHANNEL}}` | The inbox `log` channel the lane's forwarded state-change events arrive on (`ai/contracts/athena-inbox.md` → *A lane `log` channel is a change stream of state-change events*). |
 | `{{LOCK_PATH}}` | The coordinator marker path — `~/.claude/{{LANE_ID}}-coordinator.lock`. |
-| `{{STALE_MARKER_SWEEP}}` | The lane's declared recovery for a marker left behind by a died/aborted admiral. It MUST be a runner that executes **independently of the lane's work-trigger** — a periodic/time-based check or a session-start hook — because a marker on an idle-but-wedged lane is NOT cleared by the work-trigger itself (see the *Recovering a stale marker* step under *Spinning the lane up*). The flaky lane's `SessionStart` poll IS such an independent runner (it ages out a marker older than 12h regardless of channel activity). A lane whose only trigger is channel activity has **NO automatic recovery** unless it adds an independent sweeper; absent one, it is unwedged only by a human deleting `{{LOCK_PATH}}`. |
+| `{{STALE_MARKER_SWEEP}}` | The lane's declared recovery for a marker left behind by a died/aborted admiral. Every lane MUST make one of two **explicit, recorded** choices — leaving it unbound is NOT conformant (an unstated sweep must not read like a legitimate "manual only"): **(a)** bind a runner that fires **independently of the lane's work-trigger** — a periodic/time-based check or a session-start hook — which gives automatic recovery (the flaky lane's `SessionStart` poll is one: it ages out a marker older than 12h regardless of channel activity); or **(b)** declare `manual-only`, accepting that a wedged marker is cleared solely by a human deleting `{{LOCK_PATH}}`. The work-trigger itself cannot serve as (a): a marker on an idle-but-wedged lane is not cleared by it (see the *Recovering a stale marker* step under *Spinning the lane up*), so a lane whose only trigger is channel activity has no (a) available and must choose (b) knowingly. |
 | `{{SOURCE_RE_QUERY}}` | The authoritative re-list of lane scope from the source of truth (the same predicate as `{{SCOPE_FILTER}}`, re-run against the tracker). |
 
 ## The template body
@@ -89,8 +89,8 @@ config value substituted into the template body.
 When the lane consumer observes that lane work is queued for `{{OWNER_NAME}}` AND
 no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
 
-1. **Create the running-marker before spawning**, so the next session's poll
-   stays quiet while this admiral drains:
+1. **Create the running-marker before spawning**, so the next session that fires
+   the lane's trigger stays quiet while this admiral drains:
 
        touch {{LOCK_PATH}}
 
@@ -98,7 +98,13 @@ no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
    yourself — with the inner brief below, which fixes every foundational input so
    the admiral never has to ask a clarifying question.
 3. The admiral **removes the marker when the scope query returns empty** and every
-   touched MR is merged:
+   touched MR has reached `{{MERGE_POLICY}}`'s **terminal state** — this is a
+   parameter, not "merged": for an auto-merge lane the terminal state is merged;
+   for a non-auto-merge policy (e.g. the sanctioned "keep the base PR
+   ready-but-unmerged, stack dependents, merge none" under an owner-creds gate)
+   it is that policy's own end state (e.g. "ready and handed off"). A lane MUST
+   define this terminal state, or the removal step is unreachable and the marker
+   never clears:
 
        rm -f {{LOCK_PATH}}
 
@@ -110,12 +116,13 @@ no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
    change stream of state-change events*), and a lane wedged mid-drain still has
    tickets queued but need not receive another line — no line, no trigger, no
    spawn attempt — so there is no recovery hidden in the spawn path. Automatic
-   recovery therefore requires the lane's `{{STALE_MARKER_SWEEP}}` to be a
-   runner that fires **independently of the work-trigger** (a poll/time-based
-   check or a session-start hook, as the flaky poll's 12h age-out is). A lane
-   with no such independent runner has **no automatic recovery** — it is unwedged
-   only by a human deleting `{{LOCK_PATH}}`, and the brief says so rather than
-   crediting a sweep that cannot fire.
+   recovery therefore requires the lane's `{{STALE_MARKER_SWEEP}}` to be a runner
+   that fires **independently of the work-trigger** — `{{STALE_MARKER_SWEEP}}`
+   choice (a) (a poll/time-based check or a session-start hook, as the flaky
+   poll's 12h age-out is). A lane whose only trigger is channel activity has no
+   such runner available and must knowingly take choice (b), `manual-only`
+   recovery — a human deleting `{{LOCK_PATH}}`. The brief records the choice
+   rather than crediting a sweep that cannot fire.
 
 **When NOT to spin up — and when "nothing" is a failure, not a quiet queue.** The
 consumer spawns ONLY when both spin-up conditions above hold, and it takes **no
