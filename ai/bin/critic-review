@@ -46,6 +46,9 @@ require "json"
 require "fileutils"
 require "time"
 
+AI_DIR = File.expand_path("..", __dir__)
+require File.join(AI_DIR, "lib", "critic_prompt")
+
 CRITIC = "athena-diff-critic"
 
 USAGE = <<~TXT.freeze
@@ -358,7 +361,7 @@ def critic_output(base)
   return ["", false] unless system("command -v claude >/dev/null 2>&1")
   diff, _e, dst = Open3.capture3("git", "diff", "#{base}...HEAD")
   diff = Open3.capture3("git", "diff", base)[0] if !dst.success? || diff.strip.empty?
-  prompt = "Review this change against your rubric and end with the FINDINGS trailer.\n\n```diff\n#{diff}\n```"
+  prompt = CriticPrompt.build(diff: diff)
   out, _err, st = Open3.capture3("claude", "-p", "--agent", CRITIC, stdin_data: prompt)
   [out, st.success?]
 rescue StandardError => e
@@ -775,6 +778,38 @@ def run_self_test
     ok &&= (parse_findings(File.read(findings_out)) == [["access-control"], true])
     ok &&= (parse_findings(File.read(clean_out)) == [[], true])
     ok &&= (parse_findings(File.read(broken_out)) == [nil, false])
+
+    # PROMPT BUILDER -- ONE COPY, asserted rather than assumed.
+    #
+    # critic-eval's recall/precision numbers are the stated reason this critic
+    # is trusted as a BLOCKING step, and they only describe the shipping judge
+    # while both bins send it the same prompt. Built separately the two were
+    # byte-identical and free to drift silently: an edit to the shipping prompt
+    # that missed the eval would leave the eval scoring a prompt nobody runs,
+    # still printing a number and still reading as PASS.
+    #
+    # So this asserts the SHAPE and then the SINGLE COPY -- that neither bin
+    # carries its own inlined instruction string. A comment saying "keep these
+    # in sync" is exactly the guard that cannot fire.
+    built = CriticPrompt.build(diff: "DIFFBODY")
+    ok &&= built.start_with?(CriticPrompt::INSTRUCTION)
+    ok &&= built.include?("```diff\nDIFFBODY\n```")
+    ok &&= built.rindex("DIFFBODY") > built.rindex(CriticPrompt::INSTRUCTION) # varying part LAST (cache prefix)
+
+    %w[critic-review critic-eval].each do |bin|
+      path = File.join(__dir__, bin)
+      # A missing source is an ERROR, never a quietly-skipped case: a check that
+      # cannot find what it checks must not report the same thing as a clean one.
+      unless File.file?(path)
+        warn "critic-review --self-test: cannot read #{path} to verify the single-copy prompt property."
+        warn "  Fix: run --self-test from a checkout that contains ai/bin/#{bin}; do not treat this as a pass."
+        ok = false
+        next
+      end
+      src = File.read(path)
+      ok &&= src.include?("CriticPrompt.build")              # uses the shared builder
+      ok &&= !src.include?("\"#{CriticPrompt::INSTRUCTION}") # and does NOT inline its own
+    end
 
     # decision matrix
     ok &&= (decide(["access-control"], true, true) == ["block", 2])

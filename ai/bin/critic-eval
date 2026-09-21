@@ -27,6 +27,8 @@
 require "json"
 
 AI_DIR       = File.expand_path("..", __dir__)
+require File.join(AI_DIR, "lib", "critic_prompt")
+
 FIXTURES_DIR = File.join(AI_DIR, "eval", "critic-fixtures")
 CRITIC       = "athena-diff-critic"
 RECALL_BAR   = 0.8
@@ -70,7 +72,7 @@ def run_model
   rows = fixtures.map do |dir|
     m = parse_meta(File.join(dir, "meta"))
     input = File.read(File.join(dir, "input.diff"))
-    prompt = "Review this change against your rubric and end with the FINDINGS trailer.\n\n```diff\n#{input}\n```"
+    prompt = CriticPrompt.build(diff: input)
     out, _e, st = require_open3 { Open3.capture3("claude", "-p", "--agent", CRITIC, stdin_data: prompt) }
     flagged = st&.success? ? parse_findings(out.to_s) : []
     warn "  ! critic invocation failed for #{File.basename(dir)} (is `claude` on PATH?)" unless st&.success?
