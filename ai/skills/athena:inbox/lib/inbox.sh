@@ -177,8 +177,11 @@ inbox_field() { _inbox_path "$1" "$2"; }
 # that file already routes through this layer; this was the one inversion.
 inbox_release_consumer() { inbox_lock_release; }
 
-# _inbox_count_log <resolved-paths> <schema_csv>
-# Emits the counting fields for one log channel as JSON.
+# _inbox_count_log <resolved-paths> <schema_csv> [producer]
+# Emits the counting fields for one log channel as JSON. `producer` (default
+# "slack") selects the line schema logchan_scan reads and rides the count doc so
+# a never-delivered warning can name the right producer to register; a
+# "platform" lane is a keyless change stream (see logchan_scan's header).
 #
 # Three decisions live here and each is invisible in production until it burns
 # someone:

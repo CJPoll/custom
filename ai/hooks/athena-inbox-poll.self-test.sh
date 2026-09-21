@@ -210,6 +210,13 @@ register() {
 }
 
 LOG_CHANNEL='{"slack":{"kind":"log","path":"p-slack.jsonl","dedupe":["event_id","channel+ts"],"schema_v":[1]}}'
+# A platform lane: a log channel whose producer is the event-platform
+# state-change schema. It carries NO dedupe key (keyless change stream), so it
+# declares none. Never delivered to (no p-lane.jsonl planted), it is a real
+# never-delivered fault whose Fix must point at an athena-events routing rule,
+# NOT at the slack client-side registration -- the misdirection DND-260 exists
+# to prevent.
+PLATFORM_CHANNEL='{"lane":{"kind":"log","path":"p-lane.jsonl","producer":"platform","schema_v":[1]}}'
 BOTH_CHANNELS='{"slack":{"kind":"log","path":"p-slack.jsonl","dedupe":["event_id","channel+ts"],"schema_v":[1]},
                 "peer-mail":{"kind":"maildir","namespace":"agent-mail/peer","read":"from-peer","write":"to-peer","identity":"athena"}}'
 
@@ -823,6 +830,36 @@ assert_contains "R13 the control: a never-delivered LOG channel is still a fault
 # so the fold-in gate lets the producer-registration Fix through here.
 assert_contains "R13 a never-delivered slack LOG channel DOES prescribe producer registration (fold-in control)" \
   "server-side agent instance" "$(context_of "${OUT}")"
+
+echo "== DND-260: a dark PLATFORM lane points at athena-events, never at the slack path =="
+
+# The whole reason DND-260 splits NEVER_PLATFORM from NEVER_SLACK: a never-
+# delivered PLATFORM lane needs an athena-events routing rule, while a slack
+# channel needs a client-side instance in the inbox-client config. Pointing a
+# platform-lane operator at the slack file is the exact misdirection the split
+# exists to prevent -- and until this case existed, `grep -n platform` in this
+# suite returned ZERO hits, so the platform branch (NEVER_PLATFORM>0 &&
+# NEVER_SLACK==0) was structurally 0 in every fixture and nothing proved it.
+#
+# The channel is never delivered to (no p-lane.jsonl), so inbox-status reports
+# never_delivered:true with producer:"platform", NEVER_PLATFORM>0/NEVER_SLACK==0,
+# and the hook must select the athena-events Fix.
+setup_case
+register "${PLATFORM_CHANNEL}"
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "DND-260 a never-delivered platform lane is a fault" \
+  "never received anything" "${CTX}"
+assert_contains "DND-260 the Fix names the athena-events routing rule for a platform lane" \
+  "athena-events routing rule" "${CTX}"
+assert_contains "DND-260 ...and points at the athena-events contract" \
+  "ai/contracts/athena-events.md" "${CTX}"
+# THE MISDIRECTION GUARD. If the hook selected the SLACK Fix for a dark platform
+# lane, "server-side agent instance in ~/.config/athena-inbox-client" would
+# appear -- the operator sent to the wrong file. This assertion is what makes
+# the test fail on the exact bug the NEVER_PLATFORM/NEVER_SLACK split prevents.
+assert_not_contains "DND-260 a dark platform lane does NOT prescribe the slack client-side registration" \
+  "server-side agent instance" "${CTX}"
 
 echo "== R16: an entry that VANISHED is not the same as one that never existed =="
 

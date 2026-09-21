@@ -223,6 +223,20 @@ _descriptor_validate_log() {
       inbox_fail "log channel \"${chan}\"'s \"dedupe\" is not an array" "${_descriptor_fix}"
       return 1
     fi
+    # A `producer:"platform"` lane is a KEYLESS change stream: logchan_scan's
+    # platform branch derives no dedupe key and holds no seen-set (a lane's
+    # reconciliation identity is the source re-query, not a carried key -- see
+    # ai/contracts/athena-inbox.md -> "A lane `log` channel is a change stream of
+    # state-change events", "except reader-side dedupe-by-carried-key"). So a
+    # `dedupe` declaration here is inert: the reader would never honour it. That
+    # is the same "silently deduping on nothing" the recognised-member check
+    # below refuses, reached from the other side -- so reject `dedupe` on a
+    # platform channel outright rather than admit a key that can never fire.
+    if [ "$(printf '%s' "${doc}" | jq -r --arg c "${chan}" '.channels[$c].producer // "slack"')" = "platform" ]; then
+      inbox_fail "log channel \"${chan}\" declares \"dedupe\" on a producer:\"platform\" lane, which the reader ingests as a keyless change stream" \
+        "remove \"dedupe\" from channel \"${chan}\" -- a platform lane carries no dedupe key, so the reader never computes one and the declaration would be honoured by nothing (see the lane section of ai/contracts/athena-inbox.md). Reconciliation for a platform lane is the source re-query, not a carried key."
+      return 1
+    fi
     out="$(printf '%s' "${doc}" | jq -r --arg c "${chan}" --argjson ok "${DESCRIPTOR_DEDUPE_MEMBERS}" \
       '[.channels[$c].dedupe[] | select(. as $m | $ok | index($m) | not)] | join(", ")')"
     if [ -n "${out}" ]; then

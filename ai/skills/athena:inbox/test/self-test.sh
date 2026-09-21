@@ -381,6 +381,25 @@ err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log
 assert_contains "the unknown-producer refusal carries a Fix: clause" "Fix:" "${err}"
 assert_contains "the unknown-producer refusal names the accepted set (slack, platform)" "platform" "${err}"
 
+# DND-260 round-6: a `producer:"platform"` lane is a KEYLESS change stream --
+# logchan_scan's platform branch computes no dedupe key and holds no seen-set --
+# so a `dedupe` declaration on it would be honoured by nothing. That is the same
+# "silently deduping on nothing" the recognised-member check refuses, reached
+# from the other side, so the validator rejects `dedupe` on a platform channel
+# outright rather than admitting an inert declaration. The two sides (validator
+# + reader) must agree: an inert-but-accepted `dedupe` is exactly the "a claimed
+# mechanism must be able to fire" defect this round closes.
+assert_refused "a dedupe key on a producer:platform lane is refused (the reader computes no key -- inert declaration)" \
+  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","producer":"platform","dedupe":["event_id"]}}}'
+err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","producer":"platform","dedupe":["event_id"]}}}' 2>&1)"; rc=$?
+assert_contains "the platform-dedupe refusal names the channel and its platform producer" "platform" "${err}"
+assert_contains "the platform-dedupe refusal carries a Fix: clause telling the author to remove dedupe" "Fix:" "${err}"
+# The MISS vs HIT: the SAME dedupe key stays ACCEPTED on a slack (default)
+# channel, where the reader does compute it -- so the rejection above is about
+# the platform lane specifically, not about the dedupe member being wrong.
+assert_ok "the same dedupe key IS accepted on a slack (default) channel, where the reader honours it" \
+  descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","dedupe":["event_id"]}}}'
+
 # read and write MUST differ -- equal ones would make every send land in the
 # directory this identity reads from, so a sender would ingest its own mail.
 assert_refused "maildir read and write must differ" \

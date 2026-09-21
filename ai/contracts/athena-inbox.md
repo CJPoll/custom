@@ -541,7 +541,14 @@ families this channel's lines actually carry, so a reader can refuse a channel
 whose lines lack the fields it needs rather than silently deduping on nothing.
 A `dedupe` listing an unrecognised member is a hard error. When the key is
 absent the reader assumes `["event_id", "channel+ts"]` and reports a line
-missing both as unreadable rather than counting it.
+missing both as unreadable rather than counting it — **except on a
+`producer:"platform"` channel**, whose lines carry no dedupe key and are read as
+keyless change events (*A lane `log` channel is a change stream of state-change
+events*, "except reader-side dedupe-by-carried-key"). There the reader computes
+no key at all, so `dedupe` is inert: declaring it would be a key the reader
+never honours — exactly the "silently deduping on nothing" this field exists to
+prevent — and the validator therefore refuses `dedupe` on a `producer:"platform"`
+channel rather than admitting an inert declaration.
 
 `producer` is **deny-by-default against the reader's real capability.** Absent,
 it is `"slack"` — the Slack-receiver line schema — so every channel declared
