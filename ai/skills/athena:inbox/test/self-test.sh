@@ -961,6 +961,42 @@ assert_contains "read-inbox labels a platform line as a state-change" "state-cha
 assert_eq "a platform read+ack advances the offset -- a second read shows nothing new (keyless lane, empty event_ids/keys)" "0" \
   "$(cd "${pmine}" && "${BIN}/read-inbox" flaky --json 2>/dev/null | jq -r '.messages | length')"
 
+# NEVER-DELIVERED on a PLATFORM channel -- the producer-aware Fix must name the
+# PLATFORM registration path (an athena-events routing rule), not the slack
+# client-instance path. A platform channel whose inbox file has NEVER existed is
+# the "no server producer registered" state, and naming the wrong producer sends
+# the operator to the wrong place. The slack branch beside these is asserted
+# above (the `mine` channel); without these the platform branch could select the
+# slack Fix and nothing would catch it.
+register pmine "${pmine}" '{"pdark":{"kind":"log","path":"pdark.jsonl","producer":"platform"}}'
+pdout="$(cd "${pmine}" && "${BIN}/inbox-status" 2>&1)"
+assert_contains "inbox-status REPORTS a never-delivered platform channel" \
+  "nothing has EVER been delivered" "${pdout}"
+assert_contains "inbox-status names the PLATFORM producer path for a platform lane" \
+  "athena-events routing rule" "${pdout}"
+assert_not_contains "inbox-status does NOT name the slack client-instance path for a platform lane" \
+  "athena-inbox-client/config.json" "${pdout}"
+# read-inbox's never-delivered branch is producer-aware the same way.
+prdark="$(cd "${pmine}" && "${BIN}/read-inbox" pdark --peek 2>&1)"
+assert_contains "read-inbox REPORTS a never-delivered platform channel" \
+  "nothing has EVER been delivered" "${prdark}"
+assert_contains "read-inbox names the PLATFORM producer path for a platform lane" \
+  "athena-events routing rule" "${prdark}"
+assert_not_contains "read-inbox does NOT name the slack client-instance path for a platform lane" \
+  "athena-inbox-client/config.json" "${prdark}"
+# The WAITER's arm path (inbox_doorbells) emits the SAME producer-aware
+# never-delivered notice before a waiter blocks. It does NOT block itself -- it
+# provisions the doorbell and returns the list -- so the notice is testable
+# directly by capturing stderr. (This surface was an inherited gap; the diff
+# widens it with the platform branch, so it is covered here.)
+darm="$( cd "${pmine}" && inbox_doorbells 2>&1 >/dev/null )"
+assert_contains "the waiter arm path REPORTS a never-delivered platform channel" \
+  "nothing has EVER been delivered" "${darm}"
+assert_contains "the waiter arm path names the PLATFORM producer path for a platform lane" \
+  "athena-events routing rule" "${darm}"
+assert_not_contains "the waiter arm path does NOT name the slack client-instance path for a platform lane" \
+  "athena-inbox-client/config.json" "${darm}"
+
 # A malformed registry entry is a HARD error, not "this project has no
 # channels": the two are indistinguishable downstream and only one is safe.
 setup_case

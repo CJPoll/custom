@@ -251,6 +251,14 @@ Every body arrives inside a **fence carrying a per-render nonce** — a fixed
 marker is breakable by definition, since a body containing the closing string
 would end the fence early and the rest would land outside it.
 
+A **platform** `log` channel (its registry entry carries `"producer":
+"platform"`) renders differently: each message is a routed **state-change
+event** carrying `entity_id` and a current-state `payload`, not the Slack
+`channel`/`ts`/`user`/`text` shape. `--json` echoes the channel's `producer` so
+a consumer selects the render form by the **channel marker**, never by sniffing
+a line's fields; `payload` is peer bytes and rides inside the same untrusted
+fence as `.text`/`.body` (the `--json` fence notice names all three).
+
 **Who may ack.** Reading is open to any of Cody's sessions. *Advancing* needs
 all three: the channel belongs to this repo's registry entry, this session is
 not a subagent, and this session holds the channel's `flock`. A refusal points

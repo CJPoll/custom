@@ -1095,10 +1095,17 @@ failure mode by a different second end:
   them apart, each with a greppable `Fix:` that names **which key found zero** (a
   miss must say which side is missing — `~/dev/custom/CLAUDE.md` → *A failed
   lookup must never look like an empty one*):
-  - **no client channel declared** — no registry entry for this session's repo
-    identity declares this channel. `Fix:` names registry declaration and the
+  - **no client channel declared** — **no registry entry names this session's
+    repo identity at all** (the whole project is unregistered), so nothing
+    declares this or any channel. `Fix:` names registry declaration and the
     **resolved repo identity** the lookup searched under, so "zero channels" says
-    which identity found zero.
+    which identity found zero. (An entry that **exists but omits this channel**
+    while an `athena-events.md` rule targets it is **not** this state and is
+    **not** distinguished here: it is the producer-registration **mismatch**
+    routed to the coarse `+N unreadable` residual in *Known-open*, above.
+    `inbox-doctor` cannot tell it apart — it has no view of handling-rule config,
+    and an entry that omits the channel still validates `ok` — so this state is
+    scoped to the whole-project case the doctor CAN see.)
   - **no server producer registered** — the channel is declared client-side, but
     no `athena-events.md` handling rule / adapter target feeds it. `Fix:` names
     the platform rule/target that must exist (in `athena-events.md`'s terms).
@@ -1109,10 +1116,15 @@ failure mode by a different second end:
   arrived" MUST NOT read identically in output, though all three look identical on
   disk (absent entry / empty file). This is the inbox `log`-channel end of
   `athena-events.md`'s both-ends-or-silently-dark rule. `inbox-doctor`
-  (`ai/skills/athena:inbox/lib/doctor.sh`) distinguishes the three: **no client
-  channel declared** is the `registry-entry` `na` finding, which now names the
-  **resolved repo identity** the lookup searched under (so "zero channels" says
-  which identity found zero); **no server producer registered** is the
+  (`ai/skills/athena:inbox/lib/doctor.sh`) distinguishes the three **to the
+  extent it can observe them**: **no client channel declared** is the
+  `registry-entry` `na` finding, which fires when **no entry matches this repo at
+  all** (`doctor.sh`, `if [ -z "${entry}" ]`) and names the **resolved repo
+  identity** the lookup searched under (so "zero channels" says which identity
+  found zero) — the per-channel omission above is deliberately **not** claimed
+  here, because the doctor takes the `descriptor_validate` success path (`ok`)
+  for an entry that merely omits a channel and has no handling-rule view to know
+  a rule targets it; **no server producer registered** is the
   `never-delivered` finding on an absent inbox file, whose `Fix:` is
   **producer-aware** — a `platform` channel names the `athena-events.md` handling
   rule/target that must feed it, a `slack` channel names the server-side agent
