@@ -217,6 +217,11 @@ LOG_CHANNEL='{"slack":{"kind":"log","path":"p-slack.jsonl","dedupe":["event_id",
 # NOT at the slack client-side registration -- the misdirection DND-260 exists
 # to prevent.
 PLATFORM_CHANNEL='{"lane":{"kind":"log","path":"p-lane.jsonl","producer":"platform","schema_v":[1]}}'
+# Both kinds dark at once: a slack channel AND a platform lane, neither ever
+# delivered to. NEVER_SLACK>0 AND NEVER_PLATFORM>0, so the hook cannot know
+# which registration each needs and must name BOTH paths rather than guess one.
+BOTH_DARK_CHANNELS='{"slack":{"kind":"log","path":"p-slack.jsonl","dedupe":["event_id","channel+ts"],"schema_v":[1]},
+                     "lane":{"kind":"log","path":"p-lane.jsonl","producer":"platform","schema_v":[1]}}'
 BOTH_CHANNELS='{"slack":{"kind":"log","path":"p-slack.jsonl","dedupe":["event_id","channel+ts"],"schema_v":[1]},
                 "peer-mail":{"kind":"maildir","namespace":"agent-mail/peer","read":"from-peer","write":"to-peer","identity":"athena"}}'
 
@@ -860,6 +865,25 @@ assert_contains "DND-260 ...and points at the athena-events contract" \
 # the test fail on the exact bug the NEVER_PLATFORM/NEVER_SLACK split prevents.
 assert_not_contains "DND-260 a dark platform lane does NOT prescribe the slack client-side registration" \
   "server-side agent instance" "${CTX}"
+
+# BOTH KINDS DARK (NEVER_PLATFORM>0 && NEVER_SLACK>0). This is the third
+# never-delivered branch: the hook is counts-only so it cannot say which channel
+# is which, and the two registrations differ (a slack client instance vs an
+# athena-events rule), so when both kinds are dark it must name BOTH paths rather
+# than guess one. Until this case existed the both-dark branch (its unique
+# "which channel is which" string) had no covering fixture -- the platform-only
+# and slack-only cases each exercise a DIFFERENT elif arm.
+setup_case
+register "${BOTH_DARK_CHANNELS}"
+run_hook
+CTX="$(context_of "${OUT}")"
+assert_contains "DND-260 both-dark is a fault" "never received anything" "${CTX}"
+assert_contains "DND-260 both-dark names the slack client-side registration path" \
+  "server-side agent instance" "${CTX}"
+assert_contains "DND-260 both-dark ALSO names the athena-events routing rule path" \
+  "athena-events routing rule" "${CTX}"
+assert_contains "DND-260 both-dark points at inbox-status to say which channel is which" \
+  "which channel is which" "${CTX}"
 
 echo "== R16: an entry that VANISHED is not the same as one that never existed =="
 

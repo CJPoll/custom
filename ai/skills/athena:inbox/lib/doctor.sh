@@ -509,8 +509,22 @@ doctor_check_entry() {
         "ensure git is on PATH, the cwd still exists, and the repository is not flagged for dubious ownership (git config --global --add safe.directory); then re-run inbox-doctor. Until the identity resolves, this is not a benign \"not opted in\"."
       return 0
     fi
-    doctor_finding na "registry-entry" "this project has no registry entry (NO CLIENT CHANNEL DECLARED): no entry under projects/ names this session's repo identity${rk:+ (${rk})}" \
-      "if this project should receive mail, add \$ATHENA_INBOX_ROOT/projects/<project>.json whose \"repo\" is ${rk:-realpath \"\$(git rev-parse --git-common-dir)\"} -- that is the identity the lookup searched for and found zero."
+    # rc is 0, so inbox_repo_key was DEFINITIVE -- but its two 0-exit answers
+    # mean opposite things and must not read the same. A non-empty rk is a
+    # resolved identity that no entry names (the lookup searched and found zero);
+    # an EMPTY rk is a cwd genuinely in no git repository, where there is no
+    # identity to search WITH and the Fix cannot be "set repo to <the git common
+    # dir>" -- there is no git common dir. Collapsing the two is this repo's own
+    # failed-lookup-looks-empty collapse re-introduced at the message layer, so
+    # the discriminator (rk empty vs not) is named rather than papered over with
+    # a `${rk:+}` that drops silently.
+    if [ -z "${rk}" ]; then
+      doctor_finding na "registry-entry" "this project has no registry entry: this session's cwd is in NO GIT REPOSITORY, so there is no repo identity to name and nothing to opt in" \
+        "run inbox-doctor from inside a project's git repository; a registry entry's \"repo\" is realpath \"\$(git rev-parse --git-common-dir)\", which cannot be derived from a directory that is in no repo."
+    else
+      doctor_finding na "registry-entry" "this project has no registry entry (NO CLIENT CHANNEL DECLARED): no entry under projects/ names this session's repo identity (${rk})" \
+        "if this project should receive mail, add \$ATHENA_INBOX_ROOT/projects/<project>.json whose \"repo\" is ${rk} -- that is the identity the lookup searched for and found zero."
+    fi
     return 0
   fi
   if err="$(descriptor_validate "${entry}" 2>&1 >/dev/null)"; then

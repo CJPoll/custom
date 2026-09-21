@@ -349,19 +349,19 @@ else assert_contains "an unrecognised dedupe member is a hard error naming it" "
 # platform state-change line that is now COUNTED, and one identifying no entity,
 # which stays unreadable).
 err="$(descriptor_validate '{"v":1,"repo":"/r/.git","channels":{"a":{"kind":"log","path":"x.jsonl","dedupe":["dedupe_key"]}}}' 2>&1)"; rc=$?
-if [ "${rc}" -eq 0 ]; then bad "dedupe:[dedupe_key] is REJECTED while reader support is deferred" "accepted"
-else assert_contains "the deferred dedupe_key member is rejected naming it" "dedupe_key" "${err}"; fi
-assert_contains "the deferred-dedupe_key refusal carries a Fix: clause" "Fix:" "${err}"
+if [ "${rc}" -eq 0 ]; then bad "dedupe:[dedupe_key] is REJECTED (a member the reader does not compute)" "accepted"
+else assert_contains "the unrecognised dedupe_key member is rejected naming it" "dedupe_key" "${err}"; fi
+assert_contains "the unrecognised-dedupe_key refusal carries a Fix: clause" "Fix:" "${err}"
 
 # `stream` is NOT the platform-delivery declaration surface -- `producer` is
 # (below), and DND-260 opened its "platform" value once the reader could ingest
 # state-change lines. `stream` is simply an unknown channel key, refused as such.
 for sv in "op" "pile"; do
   err="$(descriptor_validate "{\"v\":1,\"repo\":\"/r/.git\",\"channels\":{\"a\":{\"kind\":\"log\",\"path\":\"x.jsonl\",\"stream\":\"${sv}\"}}}" 2>&1)"; rc=$?
-  if [ "${rc}" -eq 0 ]; then bad "a stream key [${sv}] is REJECTED while platform-delivery support is deferred" "accepted"
+  if [ "${rc}" -eq 0 ]; then bad "a stream key [${sv}] is REJECTED (an unknown channel key)" "accepted"
   else
-    assert_contains "the deferred stream key [${sv}] is rejected as an unknown key naming it" "stream" "${err}"
-    assert_contains "the deferred-stream refusal carries a Fix: clause [${sv}]" "Fix:" "${err}"
+    assert_contains "the unknown stream key [${sv}] is rejected naming it" "stream" "${err}"
+    assert_contains "the unknown-stream refusal carries a Fix: clause [${sv}]" "Fix:" "${err}"
   fi
 done
 

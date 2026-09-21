@@ -188,7 +188,17 @@ DOCTOR_MATCHED_ENTRY=""; EOUT="$(cd "${R1}" && doctor_check_entry ".")"
 assert_eq "matched entry -> ok" ok "$(state_of "${EOUT}" registry-entry)"
 # cwd in NO repo -> na (git-128 SABOTAGE class)
 NOREPO="${TMP}/notrepo"; mkdir -p "${NOREPO}"
-assert_eq "cwd not a repo -> na" na "$(cd "${NOREPO}" && state_of "$(doctor_check_entry ".")" registry-entry)"
+NOREPO_OUT="$(cd "${NOREPO}" && doctor_check_entry ".")"
+assert_eq "cwd not a repo -> na" na "$(state_of "${NOREPO_OUT}" registry-entry)"
+# DND-260 round-6 -- TEST THE MISS at the MESSAGE layer. A cwd genuinely in no
+# repo (rk empty, rc 0) and a resolved-but-unmatched repo (rk set, rc 0) are
+# both `na`, but they must not read the same: the no-repo case names NO GIT
+# REPOSITORY and must NOT claim an identity "found zero" (there was none to
+# search with), whose Fix would tell the reader to set "repo" to a git-common-dir
+# that does not exist. That is the failed-lookup-looks-empty collapse at the
+# message layer, and a state-only assertion cannot catch it.
+assert_contains "the no-repo na names that the cwd is in NO GIT REPOSITORY" "NO GIT REPOSITORY" "${NOREPO_OUT}"
+assert_not_contains "the no-repo na does NOT read as a resolved identity that found zero" "NO CLIENT CHANNEL DECLARED" "${NOREPO_OUT}"
 # invalid entry (unknown kind) -> fail
 printf '{"v":1,"repo":"%s","channels":{"slack":{"kind":"bogus"}}}' "${C1}" > "${ATHENA_INBOX_ROOT}/projects/re.json"; chmod 600 "${ATHENA_INBOX_ROOT}/projects/re.json"
 assert_eq "invalid entry -> fail" fail "$(cd "${R1}" && state_of "$(doctor_check_entry ".")" registry-entry)"
