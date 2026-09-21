@@ -951,6 +951,32 @@ register pmine "${pmine}" '{"flaky":{"kind":"log","path":"pf.jsonl","producer":"
 rout="$(cd "${pmine}" && "${BIN}/read-inbox" flaky --peek 2>&1)"
 assert_contains "read-inbox renders a platform channel's state-change entity" "notion:1" "${rout}"
 assert_contains "read-inbox labels a platform line as a state-change" "state-change" "${rout}"
+# The state-change content must render INSIDE the untrusted fence, not merely
+# somewhere in the output -- a platform payload is peer bytes exactly like a
+# Slack body (mirrors the I-4 slack fence-boundary check). Extract the region
+# between the open ("... untrusted content <nonce>: ...") and close
+# ("--- end untrusted content <nonce> ---") markers and assert the entity is in it.
+rfenced="$(printf '%s\n' "${rout}" | awk '/end untrusted content/{f=0} f; /untrusted content [0-9a-f]*:/{f=1}')"
+assert_contains "a platform state-change renders BETWEEN the fence markers, not outside it" \
+  "notion:1" "${rfenced}"
+# --json coverage for round-3's fix and the new platform surface, while `flaky`
+# still holds its two lines (the non-peek ack below consumes them):
+pjson="$(cd "${pmine}" && "${BIN}/read-inbox" flaky --json 2>/dev/null)"
+#  (1) the --json fence notice enumerates .payload -- a platform message carries
+#      its untrusted bytes there, so a consumer following the notice literally
+#      must know to fence it. A one-string regression on read-inbox's notice
+#      (dropping .payload) must be caught.
+assert_contains "the --json fence notice enumerates .payload as untrusted (regression guard)" \
+  "payload" "$(printf '%s' "${pjson}" | jq -r '.fence.notice')"
+#  (2) --json echoes the channel .producer. If it were silently dropped from the
+#      read doc, read-inbox's renderer would fall back to the Slack branch and
+#      mis-render every lane line -- nothing else catches that.
+assert_eq "the --json read echoes the platform producer marker" "platform" \
+  "$(printf '%s' "${pjson}" | jq -r '.producer')"
+#  (3) and the payload actually rides the --json messages, so the notice's
+#      mention of it is not vacuous.
+assert_eq "the --json read carries the state-change payload on .messages" "todo" \
+  "$(printf '%s' "${pjson}" | jq -r '.messages[0].payload.status')"
 # NON-PEEK read+ack on a platform channel -- the FIRST case in the suite where a
 # non-empty read carries EMPTY event_ids AND keys (a keyless lane), flowing
 # through inbox_ack_log -> logchan_ring_append. --peek above never advances, so
