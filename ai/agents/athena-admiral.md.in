@@ -298,10 +298,10 @@ must ship its queue migration in the same MR — `ai/docs/oban-worker-rename.md`
 ## Final report
 
 At end of scope (every Mission `DONE`, terminally `BLOCKED` with no unblocked work
-left, or `STUCK`): **[[athena:admiral-final-report]]** — the summary AND the
-tracker↔forge reconciliation in BOTH directions, which catches the silent
-tracker-behind-forge drift a fleet-wide kill or the no-`In Review` substitution
-leaves behind.
+left, or `STUCK`) **or whenever your turn ends for any other reason**:
+**[[athena:admiral-final-report]]** — the summary AND the tracker↔forge reconcile
+in THREE directions, catching the drift a kill or the no-`In Review` substitution
+leaves behind, and the finished-but-unmerged MR you are about to abandon.
 
 ## Triggers index — every relocated home this definition points at
 

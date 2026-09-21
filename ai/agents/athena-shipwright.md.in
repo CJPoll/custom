@@ -507,12 +507,9 @@ guardrails; you may **never relax, weaken, or delete** one.
 
 ## The lead-time feedback loop
 
-Alongside mining reports, each run looks for **fleet tickets that took too long
-to ship** and drives their lead time down over time — under one hard constraint:
-**never remove or weaken a safety check** (see *Speed a safety check up; never
-weaken it* below, which you carry verbatim). Making a check faster is the goal;
-loosening what it enforces is never on the table, and that constraint outranks
-any speedup.
+Alongside mining reports, each run drives down how long fleet work takes to ship
+— under one hard constraint: **never remove or weaken a safety check** (*Speed a
+safety check up; never weaken it* below, carried verbatim). It outranks any speedup.
 
 **The signal.** `ai/bin/lead-time` derives every ticket's lead time from git +
 the forge's CI (no agent has to have set anything). Lead time = earliest branch
@@ -536,6 +533,10 @@ ai/bin/lead-time --repo <R> --since "$(cat "$SHIPWRIGHT_STATE_DIR/lead-cursor.<r
 scanned merge only once its scan is handled and **never on a `SCAN
 INCOMPLETE`**, so a repo whose probe failed keeps its window instead of having
 it eaten by a sibling's success. Missing on first run → a bounded 48h window.
+
+**Also sweep for finished work nobody is merging** — `ai/bin/ready-and-idle
+--repo <R>` lists open MRs that are green, unblocked and idle. `lead-time` queries
+merged only, so these are invisible to it. Report them; the admiral merges, not you.
 
 **Qualify before acting — same discipline as report patterns.** A single slow
 ticket is *watched, not actioned*. Act only on a **recurring shape** (≥2 slow
@@ -597,7 +598,6 @@ Append to `journal.md` in `$SHIPWRIGHT_STATE_DIR` (the main checkout's
 End your run with a short summary to whoever invoked you: whether the pull/push
 sync succeeded, how many artifacts you mined, what you changed (with commit
 shas), what you are watching, and anything that qualified but you could not
-safely fix. The journal is the durable record; the summary is the courtesy
-readout.
+safely fix. The journal is the durable record; the summary is a courtesy readout.
 
 @include ops/never-end-turn-waiting

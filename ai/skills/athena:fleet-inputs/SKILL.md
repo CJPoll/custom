@@ -1,6 +1,6 @@
 ---
 name: athena:fleet-inputs
-description: The athena-admiral's required inputs (Notion scope + how "blocked" is represented) and the Notion status-vocabulary mapping — including the substitution to use when a tracker has NO `In Review`-equivalent option. Use when starting a run, before dispatching anyone, to fix the status values each stage uses and to decide what a captain's brief says about the status transition.
+description: The athena-admiral's required inputs (Notion scope + how "blocked" is represented), the sweep that adopts finished-but-unmerged MRs a previous run abandoned, and the Notion status-vocabulary mapping — including the substitution to use when a tracker has NO `In Review`-equivalent option. Use when starting a run, before dispatching anyone, to fix the status values each stage uses, to pick up orphaned green MRs, and to decide what a captain's brief says about the status transition.
 ---
 
 # athena:fleet-inputs
@@ -22,6 +22,23 @@ wait. Everything else in the process is designed to be resolved unassisted.
 When you were stood up by [[athena:kick-off]], these inputs arrive from the
 launcher (the same scope and semantics the architect planned against), and a
 sibling architect is your escalation target instead of a silent human.
+
+## Before dispatching: adopt the work a previous run abandoned
+
+Run `ai/bin/ready-and-idle --repo <repo>` on each repo in scope, **and again at
+each [[athena:merge-boarding]] pass**. It lists open MRs that are non-draft,
+green on their head SHA, unblocked and idle — finished work with no actor,
+left behind when an earlier run hit a ceiling, was killed, or simply ended
+while still holding it. Adopt any that falls in your scope and carry it through
+the **full, unchanged** merge bar; it is not pre-approved by having sat there.
+
+Do this before dispatching anyone: an orphan is cheaper to land than to
+re-derive, and it gets more expensive every hour. Measured 2026-09-19/21 on
+walt_ui — !1187/!1189/!1190 sat green and unblocked for ~2.4 days each
+(610,039s, 91.8% of their combined start→merge time), and draining them then
+cost 7 extra pipeline runs and 3 extra reviews because `origin/main` had moved
+under them (19 commits under !1187 alone). Re-running the check at each
+boarding pass also catches the MR your own run opened and then merged past.
 
 ## Status-vocabulary mapping
 

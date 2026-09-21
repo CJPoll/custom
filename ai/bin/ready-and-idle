@@ -1,0 +1,711 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# ready-and-idle — find open change requests that are DONE and UNATTENDED.
+#
+# A "ready-and-idle" change request is one that is open, not a draft, green on
+# its CURRENT head, has no unresolved blocking discussion and no unmet required
+# approval — and has had no activity for --idle-hours. Nothing is waiting on a
+# human and nothing is waiting on CI: it is finished work that nobody is
+# carrying. Every second in this state is pure lead time, and it accrues rebase
+# debt against the target branch for free.
+#
+# WHY THIS EXISTS (measured, 2026-09-21)
+#
+# Across three slow walt_ui tickets, 91.8% of the combined `code` phase —
+# 610,039s, 7.06 days — was exactly this state: !1187 idle 210,960s (93.6%),
+# !1189 idle 202,771s (94.1%), !1190 idle 196,308s (87.9%). A fleet run opened
+# them, merged its other MRs, and ended while still holding these three.
+# Nothing noticed for 2.5 days. Draining them later cost 7 extra pipeline runs
+# and 3 extra re-reviews, because main had moved under them (!1187 alone: 19
+# commits, 4 full pipelines).
+#
+# The structural hole this fills: `ai/bin/lead-time` only ever queries MERGED
+# change requests, so an orphaned OPEN one is invisible to it until it merges.
+# lead-time is a postmortem instrument and it reported this 2.5 days after the
+# damage was unrecoverable. This is the same measurement taken while the work
+# is still recoverable, so `drift` is a bill you can still refuse to pay.
+#
+# READ-ONLY. It merges nothing, approves nothing, comments nothing, resolves
+# nothing, relabels nothing. Reads go through plain `gh`/`glab` (the Athena
+# wrapper is for WRITES, and there are none here). The one thing it may write
+# is `git fetch`, into the local repo's remote-tracking refs, to make `drift`
+# measurable; `--no-fetch` skips it.
+#
+# CROSS-FORGE: the repo's `origin` remote selects the backend, the same way
+# lead-time picks one —
+#   github.com -> gh   (gen_saas, custom)
+#   gitlab.com -> glab (walt_ui)
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+#
+# Usage:
+#   ready-and-idle --repo DIR [--idle-hours N] [--json] [--no-fetch]
+#   ready-and-idle --self-test                # pure logic, no network, no git
+#
+# Exit: 0 ok (INCLUDING a clean scan that found nothing), 1 usage/tool error,
+#       3 SCAN INCOMPLETE — at least one probe could not be taken, so this run
+#         measured nothing and MUST NOT be read as "zero orphans".
+
+require "time"
+require "json"
+require "open3"
+
+# ---------------------------------------------------------------------------
+# Pure core (self-tested; no network, no git)
+# ---------------------------------------------------------------------------
+
+module ReadyAndIdle
+  module_function
+
+  # Seconds since `iso`, or nil if the timestamp is missing/unparseable. An
+  # unparseable timestamp is NOT "0 seconds ago" and is NOT "infinitely idle" —
+  # it is an absent measurement, and `disqualifier` treats it as such.
+  def idle_seconds(iso, now)
+    return nil if iso.nil? || iso.to_s.empty?
+
+    (now - Time.iso8601(iso.to_s)).to_i
+  rescue ArgumentError
+    nil
+  end
+
+  # Whole-number, human-scaled duration; the two most-significant non-zero
+  # units. Same presentation as lead-time, so the two tools' tables read alike.
+  def duration_human(seconds)
+    return "n/a" if seconds.nil?
+    return "0s" if seconds <= 0
+
+    s = seconds.to_i
+    d = s / 86_400; s -= d * 86_400
+    h = s / 3_600;  s -= h * 3_600
+    m = s / 60;     s -= m * 60
+    parts = []
+    parts << "#{d}d" if d.positive?
+    parts << "#{h}h" if h.positive?
+    parts << "#{m}m" if m.positive?
+    parts << "#{s}s" if s.positive?
+    parts.first(2).join(" ")
+  end
+
+  # A pipeline/check-suite status string is "green" only when it CONCLUDED
+  # SUCCESS. Everything else — running, failed, canceled, manual, and above all
+  # ABSENT — is not green. `nil`/`""`/`"none"` deliberately land here: a change
+  # request with no CI result at all has not been proven ready, and guessing in
+  # the permissive direction is how a detector starts reporting work as
+  # abandoned-and-finished when it is merely unbuilt.
+  def green?(status)
+    %w[success].include?(status.to_s.strip.downcase)
+  end
+
+  # THE predicate. Returns nil when the change request IS ready-and-idle, and
+  # otherwise a symbol naming the FIRST reason it is not. A reason is returned
+  # rather than a bare false so a caller can say what it looked at and why each
+  # candidate was excluded — "how many candidates were considered versus
+  # matched", per ~/dev/custom/CLAUDE.md -> "A failed lookup must never look
+  # like an empty one".
+  #
+  # :unknown_activity is a MISSING measurement, not a disqualification on the
+  # merits; the caller surfaces it as a probe failure rather than swallowing it.
+  def disqualifier(mr, now:, idle_hours:)
+    return :draft if mr[:draft]
+    return :not_green unless green?(mr[:pipeline_status])
+    return :blocking_discussions if mr[:blocking_unresolved]
+
+    left = mr[:approvals_left]
+    return :unknown_approvals if left.nil?
+    return :approvals_pending if left.to_i.positive?
+
+    secs = idle_seconds(mr[:last_activity], now)
+    return :unknown_activity if secs.nil?
+    return :recently_active if secs < (idle_hours.to_f * 3_600)
+
+    nil
+  end
+
+  # Build the emitted row for a qualifying change request.
+  def row(mr, now:, drift:)
+    secs = idle_seconds(mr[:last_activity], now)
+    {
+      id: mr[:id],
+      branch: mr[:branch],
+      target: mr[:target],
+      title: mr[:title],
+      head_sha: mr[:head_sha],
+      pipeline_status: mr[:pipeline_status],
+      last_activity: mr[:last_activity],
+      idle_seconds: secs,
+      idle_human: duration_human(secs),
+      # NEVER 0 for "could not count". A target branch that has not moved is 0;
+      # a drift that could not be measured is nil, rendered `n/a`.
+      drift_commits: drift,
+    }
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Impure shell — forge backends (not exercised by --self-test)
+# ---------------------------------------------------------------------------
+
+# Every probe that fails is RECORDED, not just warned about. A probe that could
+# not run and a repo with genuinely nothing to report both yield an empty row
+# set, and an empty result on stdout with exit 0 makes them indistinguishable to
+# the caller — the `ai/CLAUDE.md` class *A failed lookup must never look like an
+# empty one*, and its corollary *a bar that cannot be MEASURED is a failure, not
+# a pass with a note*. This tool exists BECAUSE nobody noticed three orphaned
+# MRs for 2.5 days; a silent "0 orphans" from a broken probe would reproduce
+# exactly that, with a citation on top.
+module ProbeFailures
+  class << self
+    def list
+      @list ||= []
+    end
+
+    def reset!
+      @list = []
+    end
+
+    def record(cmd, detail)
+      list << { cmd: cmd, detail: detail.to_s.strip }
+      nil
+    end
+
+    def any?
+      !list.empty?
+    end
+  end
+end
+
+def run_json(cmd, dir)
+  printable = "#{cmd.first} #{cmd[1..].join(' ')}"
+  out, err, st = Open3.capture3(*cmd, chdir: dir)
+  unless st.success?
+    warn "ready-and-idle: #{printable} failed: #{err.strip}"
+    warn "Fix: run against a repo whose forge you can read (`gh auth status` / `glab auth status`)."
+    return ProbeFailures.record(printable, err)
+  end
+  JSON.parse(out)
+rescue JSON::ParserError => e
+  warn "ready-and-idle: could not parse #{cmd.first} output: #{e.message}"
+  ProbeFailures.record(printable, "unparseable output: #{e.message}")
+end
+
+def origin_url(dir)
+  out, _err, st = Open3.capture3("git", "-C", dir, "remote", "get-url", "origin")
+  st.success? ? out.strip : ""
+end
+
+def detect_forge(dir)
+  url = origin_url(dir)
+  return :github if url.include?("github.com")
+  return :gitlab if url.include?("gitlab.com") || url.include?("gitlab")
+
+  nil
+end
+
+# ---- drift (git) ----------------------------------------------------------
+
+# Refresh remote-tracking refs so `drift` can be measured at all. An open change
+# request's head is on `origin` by definition, so after a successful fetch the
+# sha is present locally; a fetch that FAILS is recorded, because every drift
+# number in the run then rests on possibly-stale refs.
+def refresh_refs(dir)
+  _out, err, st = Open3.capture3("git", "-C", dir, "fetch", "--quiet", "origin")
+  return true if st.success?
+
+  warn "ready-and-idle: git -C #{dir} fetch origin failed: #{err.strip}"
+  warn "Fix: make `git -C #{dir} fetch origin` succeed (network/credentials), or " \
+       "pass --no-fetch to measure drift against the refs already on disk."
+  ProbeFailures.record("git -C #{dir} fetch origin", err)
+  false
+end
+
+# How many commits the target branch has gained since `sha` — the rebase debt
+# accruing while the change request sits. nil (never 0) when it cannot be
+# counted; an uncountable drift is recorded as a probe failure, because a
+# silently-missing cost column is the same defect as a silently-empty scan.
+def drift_commits(dir, sha, target)
+  return ProbeFailures.record("git rev-list --count <sha>..origin/#{target}", "no head sha for the change request") if sha.to_s.empty?
+
+  range = "#{sha}..origin/#{target}"
+  out, err, st = Open3.capture3("git", "-C", dir, "rev-list", "--count", range)
+  unless st.success?
+    warn "ready-and-idle: git -C #{dir} rev-list --count #{range} failed: #{err.strip}"
+    warn "Fix: fetch the repo so both ends of the range exist locally " \
+         "(`git -C #{dir} fetch origin`); this run cannot price the change request's rebase debt."
+    return ProbeFailures.record("git -C #{dir} rev-list --count #{range}", err)
+  end
+
+  Integer(out.strip, exception: false)
+end
+
+# ---- GitHub (gh) ----------------------------------------------------------
+
+class GitHubForge
+  def initialize(dir)
+    @dir = dir
+  end
+
+  def name
+    "github (gh)"
+  end
+
+  def marker
+    "#"
+  end
+
+  # One list call carries everything: statusCheckRollup is the rollup for the
+  # PR's head commit, so it is by construction "green on the CURRENT head".
+  def open_requests
+    prs = run_json(%w[gh pr list --state open --limit 200 --json
+                      number,title,headRefName,baseRefName,headRefOid,isDraft,updatedAt,reviewDecision,statusCheckRollup], @dir)
+    return nil unless prs
+
+    prs.map { |p| to_facts(p) }
+  end
+
+  def to_facts(p)
+    decision = p["reviewDecision"].to_s
+    {
+      id: p["number"], title: p["title"], branch: p["headRefName"],
+      target: p["baseRefName"], head_sha: p["headRefOid"],
+      draft: !!p["isDraft"],
+      pipeline_status: rollup_status(p["statusCheckRollup"]),
+      # GitHub has no per-thread "blocking" flag reachable from `gh pr list`;
+      # CHANGES_REQUESTED is the equivalent standing block, and it is the one
+      # that actually stops a merge.
+      blocking_unresolved: decision == "CHANGES_REQUESTED",
+      # REVIEW_REQUIRED = a required approval is still unmet. APPROVED, or no
+      # decision at all (no review rule on this repo), means nothing is waiting
+      # on a human — the same reading as GitLab's approvals_required: 0.
+      approvals_left: decision == "REVIEW_REQUIRED" ? 1 : 0,
+      last_activity: p["updatedAt"],
+    }
+  end
+
+  # "success" only when there is at least one check AND every check concluded
+  # non-negatively. An EMPTY rollup is "none", never "success": a PR with no CI
+  # result has not been proven ready (see ReadyAndIdle.green?).
+  def rollup_status(rollup)
+    checks = rollup || []
+    return "none" if checks.empty?
+
+    states = checks.map do |c|
+      if c["__typename"] == "CheckRun"
+        c["status"] == "COMPLETED" ? c["conclusion"].to_s.upcase : "PENDING"
+      else
+        c["state"].to_s.upcase
+      end
+    end
+    return "pending" if states.any? { |s| %w[PENDING QUEUED IN_PROGRESS EXPECTED].include?(s) }
+    return "success" if states.all? { |s| %w[SUCCESS NEUTRAL SKIPPED].include?(s) }
+
+    "failed"
+  end
+end
+
+# ---- GitLab (glab) --------------------------------------------------------
+
+class GitLabForge
+  PER_PAGE  = 100
+  MAX_PAGES = 10
+
+  def initialize(dir)
+    @dir = dir
+    @proj = project_path(dir)
+  end
+
+  def name
+    "gitlab (glab)"
+  end
+
+  def marker
+    "!"
+  end
+
+  def project_path(dir)
+    # git@gitlab.com:group/sub/repo.git  OR  https://gitlab.com/group/repo.git
+    require "uri"
+    url = origin_url(dir)
+    path = url.sub(%r{^git@[^:]+:}, "").sub(%r{^https?://[^/]+/}, "").sub(/\.git$/, "")
+    path.split("/").map { |seg| URI.encode_www_form_component(seg) }.join("%2F")
+  end
+
+  def api(path)
+    run_json(["glab", "api", path], @dir)
+  end
+
+  # The list endpoint already carries draft, updated_at, source/target branch,
+  # sha and blocking_discussions_resolved. Only the survivors of those cheap
+  # tests pay for the two per-MR calls (detail for head_pipeline, approvals) —
+  # 40 open MRs would otherwise be 80 round trips to answer a question about
+  # three of them.
+  def open_requests
+    listed = paged_open_mrs
+    return nil unless listed
+
+    listed.map do |m|
+      base = {
+        id: m["iid"], title: m["title"], branch: m["source_branch"],
+        target: m["target_branch"], head_sha: m["sha"],
+        draft: !!(m["draft"] || m["work_in_progress"]),
+        blocking_unresolved: m["blocking_discussions_resolved"] == false,
+        last_activity: m["updated_at"],
+        pipeline_status: nil, approvals_left: nil,
+      }
+      next base if base[:draft] || base[:blocking_unresolved]
+
+      base.merge(pipeline_status: head_pipeline_status(m["iid"]),
+                 approvals_left: approvals_left(m["iid"]))
+    end
+  end
+
+  # Paginate explicitly. A full page is indistinguishable from "that was all",
+  # so stopping at one page would silently truncate the scan — the same class
+  # of quiet wrongness this whole tool is aimed at.
+  def paged_open_mrs
+    all = []
+    (1..MAX_PAGES).each do |page|
+      batch = api("projects/#{@proj}/merge_requests?state=opened&order_by=updated_at" \
+                  "&per_page=#{PER_PAGE}&page=#{page}")
+      return nil unless batch
+
+      all.concat(batch)
+      return all if batch.size < PER_PAGE
+    end
+    ProbeFailures.record("glab api projects/#{@proj}/merge_requests (pagination)",
+                         "more than #{MAX_PAGES * PER_PAGE} open merge requests; the scan was truncated")
+    all
+  end
+
+  # `head_pipeline` IS the pipeline for the MR's current head — GitLab repoints
+  # it on every push. Do NOT compare its sha to the MR's sha: with merged-result
+  # pipelines the pipeline runs on a synthesised merge commit, so the two
+  # legitimately differ and an equality test would exclude every MR forever.
+  def head_pipeline_status(iid)
+    d = api("projects/#{@proj}/merge_requests/#{iid}")
+    return nil unless d
+
+    d.dig("head_pipeline", "status") || "none"
+  end
+
+  def approvals_left(iid)
+    a = api("projects/#{@proj}/merge_requests/#{iid}/approvals")
+    return nil unless a
+
+    # approvals_required: 0 satisfies this trivially, and correctly — the
+    # question is whether anything is WAITING on a human, not whether a human
+    # ever looked.
+    (a["approvals_left"] || 0).to_i
+  end
+end
+
+def forge_for(dir)
+  case detect_forge(dir)
+  when :github then GitHubForge.new(dir)
+  when :gitlab then GitLabForge.new(dir)
+  end
+end
+
+# ---------------------------------------------------------------------------
+# --self-test (pure logic only)
+# ---------------------------------------------------------------------------
+
+def self_test
+  failures = []
+  check = lambda do |name, got, want|
+    failures << "#{name}: got #{got.inspect}, want #{want.inspect}" unless got == want
+  end
+
+  now = Time.iso8601("2026-09-21T12:00:00Z")
+
+  # duration_human — shared presentation with lead-time.
+  check.call("dur 47m", ReadyAndIdle.duration_human(47 * 60), "47m")
+  check.call("dur 2d10h", ReadyAndIdle.duration_human(210_960), "2d 10h")
+  check.call("dur 0", ReadyAndIdle.duration_human(0), "0s")
+  check.call("dur nil", ReadyAndIdle.duration_human(nil), "n/a")
+
+  # idle_seconds — and the MISS side, which is the one that matters.
+  check.call("idle 3h", ReadyAndIdle.idle_seconds("2026-09-21T09:00:00Z", now), 10_800)
+  check.call("idle nil input", ReadyAndIdle.idle_seconds(nil, now), nil)
+  check.call("idle empty input", ReadyAndIdle.idle_seconds("", now), nil)
+  check.call("idle garbage input", ReadyAndIdle.idle_seconds("not-a-time", now), nil)
+
+  # green? — everything that is not a concluded success is not green.
+  check.call("green success", ReadyAndIdle.green?("success"), true)
+  check.call("green SUCCESS", ReadyAndIdle.green?("SUCCESS"), true)
+  check.call("green running", ReadyAndIdle.green?("running"), false)
+  check.call("green failed", ReadyAndIdle.green?("failed"), false)
+  check.call("green none", ReadyAndIdle.green?("none"), false)
+  check.call("green nil", ReadyAndIdle.green?(nil), false)
+  check.call("green empty", ReadyAndIdle.green?(""), false)
+
+  ready = {
+    id: 1187, title: "t", branch: "b", target: "main", head_sha: "abc123",
+    draft: false, pipeline_status: "success", blocking_unresolved: false,
+    approvals_left: 0, last_activity: "2026-09-19T01:24:00Z",
+  }
+
+  check.call("ready qualifies",
+             ReadyAndIdle.disqualifier(ready, now: now, idle_hours: 2), nil)
+
+  # Each disqualifier INDIVIDUALLY excludes, from an otherwise-qualifying row.
+  check.call("draft excluded",
+             ReadyAndIdle.disqualifier(ready.merge(draft: true), now: now, idle_hours: 2), :draft)
+  check.call("failed pipeline excluded",
+             ReadyAndIdle.disqualifier(ready.merge(pipeline_status: "failed"), now: now, idle_hours: 2), :not_green)
+  check.call("running pipeline excluded",
+             ReadyAndIdle.disqualifier(ready.merge(pipeline_status: "running"), now: now, idle_hours: 2), :not_green)
+  check.call("absent pipeline excluded",
+             ReadyAndIdle.disqualifier(ready.merge(pipeline_status: nil), now: now, idle_hours: 2), :not_green)
+  check.call("unresolved discussion excluded",
+             ReadyAndIdle.disqualifier(ready.merge(blocking_unresolved: true), now: now, idle_hours: 2), :blocking_discussions)
+  check.call("unmet approval excluded",
+             ReadyAndIdle.disqualifier(ready.merge(approvals_left: 1), now: now, idle_hours: 2), :approvals_pending)
+  check.call("approvals_required 0 still qualifies",
+             ReadyAndIdle.disqualifier(ready.merge(approvals_left: 0), now: now, idle_hours: 2), nil)
+  check.call("recent activity excluded",
+             ReadyAndIdle.disqualifier(ready.merge(last_activity: "2026-09-21T11:30:00Z"), now: now, idle_hours: 2), :recently_active)
+
+  # An UNMEASURABLE input is its own outcome, never a quiet exclusion.
+  check.call("unknown approvals is its own outcome",
+             ReadyAndIdle.disqualifier(ready.merge(approvals_left: nil), now: now, idle_hours: 2), :unknown_approvals)
+  check.call("unknown activity is its own outcome",
+             ReadyAndIdle.disqualifier(ready.merge(last_activity: nil), now: now, idle_hours: 2), :unknown_activity)
+
+  # --idle-hours boundary: exactly at the threshold counts as idle.
+  at_2h = ready.merge(last_activity: "2026-09-21T10:00:00Z")
+  check.call("exactly at threshold is idle",
+             ReadyAndIdle.disqualifier(at_2h, now: now, idle_hours: 2), nil)
+  check.call("one second under threshold is active",
+             ReadyAndIdle.disqualifier(ready.merge(last_activity: "2026-09-21T10:00:01Z"),
+                                       now: now, idle_hours: 2), :recently_active)
+  check.call("same row excluded at a higher threshold",
+             ReadyAndIdle.disqualifier(at_2h, now: now, idle_hours: 3), :recently_active)
+
+  # row — drift of 0 and drift of "could not count" must not render alike.
+  r0 = ReadyAndIdle.row(ready, now: now, drift: 0)
+  rn = ReadyAndIdle.row(ready, now: now, drift: nil)
+  check.call("drift 0 kept as 0", r0[:drift_commits], 0)
+  check.call("unmeasured drift is nil, not 0", rn[:drift_commits], nil)
+  check.call("row idle human", r0[:idle_human], "2d 10h")
+
+  # ProbeFailures — the "could not look" vs "looked, found nothing" accounting.
+  # Asserted on the MISS side deliberately: a suite that only ever exercises a
+  # healthy probe proves nothing about this class.
+  ProbeFailures.reset!
+  check.call("probes clean initially", ProbeFailures.any?, false)
+  check.call("record returns nil (so callers still see no data)",
+             ProbeFailures.record("gh pr list", "HTTP 401: Requires authentication"), nil)
+  check.call("failed probe is observable", ProbeFailures.any?, true)
+  check.call("failed probe names the command", ProbeFailures.list.first[:cmd], "gh pr list")
+  check.call("failed probe keeps the reason",
+             ProbeFailures.list.first[:detail], "HTTP 401: Requires authentication")
+  ProbeFailures.reset!
+  check.call("reset clears", ProbeFailures.any?, false)
+
+  # GitHub rollup mapping (pure; no network).
+  gh = GitHubForge.new(".")
+  check.call("rollup empty is none", gh.rollup_status([]), "none")
+  check.call("rollup nil is none", gh.rollup_status(nil), "none")
+  check.call("rollup all success",
+             gh.rollup_status([{ "__typename" => "CheckRun", "status" => "COMPLETED", "conclusion" => "SUCCESS" },
+                               { "__typename" => "StatusContext", "state" => "SUCCESS" }]), "success")
+  check.call("rollup in progress is pending",
+             gh.rollup_status([{ "__typename" => "CheckRun", "status" => "IN_PROGRESS" }]), "pending")
+  check.call("rollup one failure is failed",
+             gh.rollup_status([{ "__typename" => "CheckRun", "status" => "COMPLETED", "conclusion" => "SUCCESS" },
+                               { "__typename" => "CheckRun", "status" => "COMPLETED", "conclusion" => "FAILURE" }]), "failed")
+
+  if failures.empty?
+    puts "ready-and-idle --self-test: PASS (pure-logic assertions)"
+    0
+  else
+    warn "ready-and-idle --self-test: FAIL"
+    failures.each { |f| warn "  - #{f}" }
+    warn "Fix: reconcile module ReadyAndIdle with the expected qualification/idle math above."
+    1
+  end
+end
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def usage
+  warn <<~USAGE
+    ready-and-idle — open change requests that are green, unblocked, approved, and unattended.
+
+      ready-and-idle --repo DIR [--idle-hours N] [--json] [--no-fetch]
+      ready-and-idle --self-test
+
+    Fix: pass --self-test, or --repo pointing at a git checkout.
+  USAGE
+  1
+end
+
+def print_row(r, marker)
+  printf("%-6s  idle=%-9s  drift=%-5s  sha=%-9s  %-34s  %s\n",
+         "#{marker}#{r[:id]}", r[:idle_human],
+         r[:drift_commits].nil? ? "n/a" : r[:drift_commits].to_s,
+         r[:head_sha].to_s[0, 8], (r[:branch] || "")[0, 34], (r[:title] || "")[0, 46])
+end
+
+def main(argv)
+  return self_test if argv.include?("--self-test")
+
+  repo = nil
+  idle_hours = 2.0
+  as_json = argv.include?("--json")
+  fetch = !argv.include?("--no-fetch")
+  i = 0
+  while i < argv.length
+    case argv[i]
+    when "--repo"        then repo = argv[i += 1]
+    when "--idle-hours"  then idle_hours = Float(argv[i += 1], exception: false)
+    when "--json", "--no-fetch" then nil
+    else
+      warn "ready-and-idle: unknown argument #{argv[i].inspect}"
+      return usage
+    end
+    i += 1
+  end
+
+  return usage unless repo
+  if idle_hours.nil? || idle_hours.negative?
+    warn "ready-and-idle: --idle-hours must be a non-negative number"
+    warn "Fix: pass e.g. --idle-hours 2 (the default) or --idle-hours 0.5."
+    return 1
+  end
+
+  repo = File.expand_path(repo)
+  unless File.exist?(File.join(repo, ".git"))
+    warn "ready-and-idle: #{repo} is not a git worktree/checkout"
+    warn "Fix: pass --repo pointing at a git checkout (e.g. ~/dev/custom, ~/dev/gen_saas, ~/dev/walt_ui)."
+    return 1
+  end
+
+  forge = forge_for(repo)
+  unless forge
+    warn "ready-and-idle: could not detect a supported forge from #{repo}'s origin remote"
+    warn "Fix: this tool supports github.com (gh) and gitlab.com (glab) origins. A repo " \
+         "with neither (or with no `origin`) has no change requests to scan — there is " \
+         "nothing here to report, and nothing was measured."
+    return 1
+  end
+
+  refresh_refs(repo) if fetch
+
+  now = Time.now.utc
+  candidates = forge.open_requests || []
+  rows = []
+  excluded = Hash.new(0)
+  candidates.each do |mr|
+    why = ReadyAndIdle.disqualifier(mr, now: now, idle_hours: idle_hours)
+    # An UNKNOWN input is a probe that did not land, not a verdict on the
+    # change request. Record it, so the run refuses to call itself a scan.
+    if %i[unknown_approvals unknown_activity].include?(why)
+      ProbeFailures.record("#{forge.name} facts for #{forge.marker}#{mr[:id]}",
+                           "missing #{why == :unknown_approvals ? 'approval state' : 'last-activity timestamp'}")
+      next
+    end
+    if why
+      excluded[why] += 1
+      next
+    end
+    rows << ReadyAndIdle.row(mr, now: now,
+                             drift: drift_commits(repo, mr[:head_sha], mr[:target]))
+  end
+  rows.sort_by! { |r| -(r[:idle_seconds] || 0) }
+
+  # A scan that could not read the forge (or could not price the drift) is NOT
+  # a scan. Refuse to emit a result at all — an empty or partial row set here
+  # means "could not look", and the caller must not be able to read it as
+  # "looked, found nothing". This tool exists because a 2.5-day orphan went
+  # unnoticed; a quiet zero here would be that failure again, self-inflicted.
+  if ProbeFailures.any?
+    warn "ready-and-idle: SCAN INCOMPLETE — #{ProbeFailures.list.size} probe(s) failed " \
+         "against #{repo}. This is NOT a measurement and MUST NOT be recorded as " \
+         "\"0 ready-and-idle change requests\" or as a clean scan:"
+    ProbeFailures.list.each { |f| warn "  - #{f[:cmd]}: #{f[:detail].lines.first.to_s.strip}" }
+    warn "Fix: restore forge auth and local git refs for this repo, then re-run " \
+         "(`gh auth status` / `glab auth status`; `git -C #{repo} fetch origin`; a cron or " \
+         "other headless session often has no token even though an interactive one does). " \
+         "Until it re-runs clean, report the scan as UNAVAILABLE, not as zero orphans."
+    return 3
+  end
+
+  if as_json
+    puts JSON.pretty_generate(
+      repo: repo, forge: forge.name, idle_hours: idle_hours,
+      scanned: candidates.size, orphans: rows.size,
+      excluded: excluded.transform_keys(&:to_s), rows: rows
+    )
+  else
+    warn "repo=#{repo}  forge=#{forge.name}  idle>=#{idle_hours}h"
+    if rows.empty?
+      # Textually distinct from SCAN INCOMPLETE above, on purpose and by
+      # construction: this line can only be printed after every probe landed.
+      puts "ready-and-idle: CLEAN SCAN — looked at #{candidates.size} open change " \
+           "request(s) in #{repo}; 0 are ready-and-idle." \
+           "#{excluded.empty? ? '' : " (excluded: #{excluded.map { |k, v| "#{k}=#{v}" }.join(', ')})"}"
+    else
+      warn "ready-and-idle: #{rows.size} of #{candidates.size} open change request(s) are " \
+           "ready-and-idle (finished work nobody is carrying)."
+      rows.each { |r| print_row(r, forge.marker) }
+    end
+  end
+  0
+end
+
+if $PROGRAM_NAME == __FILE__
+  # Inside the entry guard, so requiring this file never exits on someone
+  # else's ARGV. --help is answered BEFORE any other flag, on stdout, exiting 0
+  # and doing nothing else (no network, no git, no write) — ai/bin/check-bin-help.
+  if ARGV.include?("--help") || ARGV.include?("-h")
+    puts <<~TXT
+      Usage:
+        ai/bin/ready-and-idle --repo PATH [OPTIONS]
+
+      Report open change requests that are DONE and UNATTENDED: open, not a
+      draft, green on their CURRENT head, with no unresolved blocking
+      discussion, no unmet required approval, and no activity for --idle-hours.
+      Nothing is waiting on CI and nothing is waiting on a human, so every
+      second in this state is pure lead time.
+
+      The sibling tool ai/bin/lead-time only sees MERGED change requests, so it
+      cannot report this until the damage is already unrecoverable. This one
+      fires while the work is still cheap to land.
+
+      Columns:
+        idle    time since the last activity on the change request
+        drift   commits the target branch has gained since that green head sha
+                (`git rev-list --count <sha>..origin/<target>`) — the rebase
+                debt accruing while it sits. `n/a` means it could not be
+                counted, which is never the same as 0.
+        sha     the green head sha the pipeline/check suite passed on
+
+      Notes:
+        * A change request with NO CI result at all counts as not green, so it
+          is never reported as finished-and-abandoned.
+        * `approvals_required: 0` satisfies the approval test trivially, which
+          is correct — the question is whether anything is WAITING on a human.
+        * Read-only: it merges, approves, comments, relabels and resolves
+          nothing. The only write is `git fetch` into local remote-tracking
+          refs, which --no-fetch skips.
+
+      Options:
+        --repo PATH      git checkout to scan (e.g. ~/dev/walt_ui, ~/dev/custom)
+        --idle-hours N   idle threshold in hours (default 2)
+        --json           emit JSON instead of the human table
+        --no-fetch       do not `git fetch` first; price drift off existing refs
+        --self-test      pure-logic assertions (no network, no git)
+        --help           this text
+
+      Exit: 0 ok (including a clean scan that found nothing), 1 usage/tool
+      error, 3 SCAN INCOMPLETE — a probe could not be taken, so the run
+      measured nothing and must not be read as zero orphans.
+    TXT
+    exit 0
+  end
+  exit main(ARGV)
+end
