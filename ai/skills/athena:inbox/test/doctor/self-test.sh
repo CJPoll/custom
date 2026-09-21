@@ -200,6 +200,19 @@ R3="${TMP}/repo3"; C3="$(make_repo "${R3}")"
 NOENT="$(cd "${R3}" && doctor_check_entry ".")"
 assert_finding "unmatched repo -> na (NO CLIENT CHANNEL DECLARED)" "${NOENT}" na "registry-entry" "NO CLIENT CHANNEL DECLARED"
 assert_contains "the na finding names the resolved repo identity that found zero" "${C3}" "${NOENT}"
+# FINDING 3 / DND-260 -- TEST THE MISS. When there is no entry AND the repo
+# identity COULD NOT BE COMPUTED (inbox_repo_key exits non-zero: git missing,
+# cwd gone, realpath failed, a dubious repo), an uncomputed key must NOT read as
+# a benign "no repo, not opted in" na -- it is its own warn finding (CLAUDE.md
+# -> "a failed lookup must never look like an empty one"). Stub the two lookups
+# so the branch is reached deterministically, then restore them.
+_real_ire="$(declare -f inbox_repo_key)"; _real_ie="$(declare -f inbox_entry)"
+inbox_repo_key() { return 1; }        # could not tell
+inbox_entry() { printf ''; return 0; } # no entry, not the fatal rc=2
+NOID="$(doctor_check_entry ".")"
+eval "${_real_ire}"; eval "${_real_ie}"; unset _real_ire _real_ie
+assert_finding "no entry + uncomputable identity -> warn, not na" "${NOID}" warn "registry-entry" "COULD NOT BE DETERMINED"
+assert_no_finding "the uncomputable-identity case does NOT emit the benign na finding" "${NOID}" na "registry-entry" "NO CLIENT CHANNEL DECLARED"
 
 # ============================================================================
 echo "== per-channel checks =="

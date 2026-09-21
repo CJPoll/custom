@@ -493,7 +493,22 @@ doctor_check_entry() {
     # says which key found zero rather than reading like a benign "not opted in"
     # (CLAUDE.md -> "A failed lookup must never look like an empty one"). A cwd
     # in no repo yields an empty identity, and the message still reads correctly.
-    local rk; rk="$(inbox_repo_key "${1:-.}" 2>/dev/null)"
+    # inbox_repo_key has THREE outcomes and the exit code is load-bearing: a
+    # realpath + exit 0 (a resolved identity), an EMPTY line + exit 0 (a cwd
+    # definitively in no git repo), or a NON-ZERO exit (could not tell: git
+    # missing, cwd gone, realpath failed, a dubious/corrupt repo). Discarding
+    # the rc collapses the last two -- an uncomputed key would read as "no repo,
+    # benignly not opted in", which is exactly the failed-lookup-looks-empty
+    # collapse this branch exists to prevent (CLAUDE.md -> "A failed lookup must
+    # never look like an empty one"). So the rc is captured and the could-not-
+    # tell case is its own finding, not folded into the empty one.
+    local rk rkrc
+    rk="$(inbox_repo_key "${1:-.}" 2>/dev/null)"; rkrc=$?
+    if [ "${rkrc}" -ne 0 ]; then
+      doctor_finding warn "registry-entry" "this project has no registry entry AND this session's repo identity COULD NOT BE DETERMINED, so whether an entry should name it cannot be checked -- an uncomputed identity is not the same as a cwd that is genuinely in no repo" \
+        "ensure git is on PATH, the cwd still exists, and the repository is not flagged for dubious ownership (git config --global --add safe.directory); then re-run inbox-doctor. Until the identity resolves, this is not a benign \"not opted in\"."
+      return 0
+    fi
     doctor_finding na "registry-entry" "this project has no registry entry (NO CLIENT CHANNEL DECLARED): no entry under projects/ names this session's repo identity${rk:+ (${rk})}" \
       "if this project should receive mail, add \$ATHENA_INBOX_ROOT/projects/<project>.json whose \"repo\" is ${rk:-realpath \"\$(git rev-parse --git-common-dir)\"} -- that is the identity the lookup searched for and found zero."
     return 0

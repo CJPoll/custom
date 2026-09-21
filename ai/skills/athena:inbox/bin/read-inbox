@@ -146,6 +146,13 @@ fi
 
 READ="$(inbox_read_json "${CHANNEL}" ".")" || exit 1
 
+# The channel's declared producer selects the render form for a log channel.
+# It is read from the read doc (which resolved it from the registry entry), so
+# the renderer never guesses the schema from a per-message field shape -- a
+# slack line and a platform state-change line can be close enough that a
+# per-line heuristic mis-renders one as the other. Absent -> "slack".
+PRODUCER="$(printf '%s' "${READ}" | jq -r '.producer // "slack"')"
+
 if [ "${JSON}" -eq 1 ]; then
   # --json CARRIES THE MARKER STRUCTURALLY, because the claim has to be true
   # in both forms or it is not a guarantee.
@@ -205,7 +212,14 @@ else
       # channel looks quiet, so it was where the distinction was most needed
       # and least present.
       printf 'athena:inbox: %s is declared, but nothing has EVER been delivered to it.\n' "${CHANNEL}"
-      printf '  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json — then re-check. An unregistered producer and an empty channel look identical on disk.\n'
+      # The producer to register differs by lane kind, and naming the wrong one
+      # sends the operator to the wrong place. A platform lane wants an
+      # athena-events routing rule; a slack channel wants a client-side instance.
+      if [ "${PRODUCER}" = "platform" ]; then
+        printf '  Fix: no server-side producer is registered for this platform lane — add an athena-events routing rule that writes state-change events to its inbox file (see ai/contracts/athena-events.md). An unregistered producer and an empty lane look identical on disk.\n'
+      else
+        printf '  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json — then re-check. An unregistered producer and an empty channel look identical on disk.\n'
+      fi
     else
       printf 'athena:inbox: %s — nothing new.\n' "${CHANNEL}"
     fi
@@ -239,18 +253,22 @@ else
     # never on "". The old `.kind // "message"` could not fire, and rendered
     # `[]` for a line carrying no kind. A defence that cannot fire is removed
     # rather than left to read as protection.
-    if [ "${KIND}" = "log" ]; then
-      # A platform (event-platform) line is a routed STATE-CHANGE event carrying
-      # `entity_id` + a current-state `payload`, not the Slack channel/ts/user/
-      # text shape (DND-260). Render it as such; the payload is source bytes and
-      # rides inside this same untrusted fence, exactly like a Slack body.
+    if [ "${KIND}" = "log" ] && [ "${PRODUCER}" = "platform" ]; then
+      # A platform (event-platform) lane line is a routed STATE-CHANGE event
+      # carrying `entity_id` + a current-state `payload`, not the Slack channel/
+      # ts/user/text shape (DND-260). The render form is chosen by the CHANNEL's
+      # declared producer, NOT by sniffing each message for an `entity_id` field
+      # -- a per-line heuristic would mis-render a slack line that happened to
+      # carry `entity_id`, or a platform line whose entity the scan already
+      # scored unreadable. The payload is source bytes and rides inside this
+      # same untrusted fence, exactly like a Slack body.
       BODY="$(printf '%s' "${READ}" | jq -r '
         .messages[]
-        | if (.entity_id // "") != "" then
-            "[state-change] \(.entity_id)\n\(.payload // {} | tojson)\n"
-          else
-            "[\(if (.kind // "") == "" then "message" else .kind end)] \(.channel) \(.ts) \(.user)\n\(.text)\n"
-          end')" || RENDER_RC=1
+        | "[state-change] \(.entity_id)\n\(.payload // {} | tojson)\n"')" || RENDER_RC=1
+    elif [ "${KIND}" = "log" ]; then
+      BODY="$(printf '%s' "${READ}" | jq -r '
+        .messages[]
+        | "[\(if (.kind // "") == "" then "message" else .kind end)] \(.channel) \(.ts) \(.user)\n\(.text)\n"')" || RENDER_RC=1
     else
       BODY="$(printf '%s' "${READ}" | jq -r '
         .messages[]

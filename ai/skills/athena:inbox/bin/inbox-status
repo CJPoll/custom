@@ -172,7 +172,17 @@ printf '%s' "${STATUS}" | jq -r --argjson have_read "${HAVE_READ}" '
     elif $n > 0 then
       "athena:inbox: \($c.name) — \($n) new\($u). \($read_hint)\($sbad)"
     elif .kind == "log" and (.never_delivered // false) then
-      "athena:inbox: \($c.name) is declared, but nothing has EVER been delivered to it.\n  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json — then re-check. An unregistered producer and an empty channel look identical on disk."
+      # A never-delivered warning must name the RIGHT producer to register, or
+      # it sends the reader to the wrong place. The producer of a platform lane
+      # is an athena-events routing rule, not a Slack client instance; the count
+      # doc carries .producer (channel config, not peer content) so the two do
+      # not get conflated here. (No apostrophe in this comment on purpose: it
+      # sits inside a single-quoted jq program in a bash string.)
+      (if (.producer // "slack") == "platform" then
+        "athena:inbox: \($c.name) is declared, but nothing has EVER been delivered to it.\n  Fix: no server-side producer is registered for this platform lane — add an athena-events routing rule that writes state-change events to its inbox file (see ai/contracts/athena-events.md). An unregistered producer and an empty lane look identical on disk."
+      else
+        "athena:inbox: \($c.name) is declared, but nothing has EVER been delivered to it.\n  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json — then re-check. An unregistered producer and an empty channel look identical on disk."
+      end)
     else empty end
 '
 exit "${STATUS_RC}"

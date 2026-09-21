@@ -445,6 +445,10 @@ HEALTH_TEXT=""
 # because it is the one health clause inbox-status cannot elaborate on, so it
 # selects a different Fix: sentence below.
 HEALTH_CANDIDATES=0
+# Counts of never-delivered channels by producer kind (set below when the poll
+# succeeded), initialised here so they are defined under `set -u` on every path.
+NEVER_PLATFORM=0
+NEVER_SLACK=0
 if [ "${POLL_OK}" -eq 1 ]; then
   # Counts only. `new`/`unread`/`unreadable` are integers; `name` is this
   # machine's own registry key, written by the owner, never by a peer.
@@ -479,6 +483,21 @@ if [ "${POLL_OK}" -eq 1 ]; then
 
   HEALTH_CANDIDATES="$(printf '%s' "${STATUS_JSON}" | jq -r '.failed_candidates // 0' 2>/dev/null)"
   case "${HEALTH_CANDIDATES}" in ''|*[!0-9]*) HEALTH_CANDIDATES=0 ;; esac
+
+  # Which PRODUCER kinds are among the never-delivered channels. This hook is
+  # counts-only for tenant privacy, so it cannot name the channel -- but the
+  # registration a reader must do differs by producer (a platform lane wants an
+  # athena-events routing rule; a slack channel wants a client-side instance),
+  # and a Fix that names only the slack path sends a platform-lane operator to
+  # the wrong file. It cannot say WHICH channel, so when both kinds are dark it
+  # names BOTH paths rather than guessing one. `.producer` rides the count doc
+  # (channel config, not peer content).
+  NEVER_PLATFORM="$(printf '%s' "${STATUS_JSON}" | jq -r \
+    '[.channels[] | select(.kind=="log" and (.never_delivered // false) and ((.producer // "slack")=="platform"))] | length' 2>/dev/null)"
+  case "${NEVER_PLATFORM}" in ''|*[!0-9]*) NEVER_PLATFORM=0 ;; esac
+  NEVER_SLACK="$(printf '%s' "${STATUS_JSON}" | jq -r \
+    '[.channels[] | select(.kind=="log" and (.never_delivered // false) and ((.producer // "slack")!="platform"))] | length' 2>/dev/null)"
+  case "${NEVER_SLACK}" in ''|*[!0-9]*) NEVER_SLACK=0 ;; esac
 fi
 
 # TWO CONCERNS, TWO MARKERS. "The poll is not working" and "the poll works and
@@ -525,8 +544,16 @@ elif [ "${OPTED_IN}" -eq 1 ] && [ -n "${HEALTH_TEXT}" ]; then
     # requires a never-delivered channel to be reported "with a Fix: clause
     # naming producer registration"; pointing only at inbox-status discharged
     # that by one indirection, which is a hop an agent reading a pre-prompt
-    # line should not have to take.
-    WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a channel nothing has ever been delivered to usually means its producer was never registered — map this inbox filename to a server-side agent instance in ~/.config/athena-inbox-client/config.json. Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel."
+    # line should not have to take. The registration differs by producer, and
+    # this hook cannot name the channel (counts-only), so it names the path(s)
+    # the dark channels actually need — both, when both kinds are dark.
+    if [ "${NEVER_PLATFORM}" -gt 0 ] && [ "${NEVER_SLACK}" -eq 0 ]; then
+      WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a platform lane nothing has ever been delivered to usually means no server-side producer is registered — add an athena-events routing rule that writes state-change events to its inbox file (see ai/contracts/athena-events.md). Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel."
+    elif [ "${NEVER_PLATFORM}" -gt 0 ]; then
+      WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a channel nothing has ever been delivered to usually means its producer was never registered — for a slack channel, map this inbox filename to a server-side agent instance in ~/.config/athena-inbox-client/config.json; for a platform lane, add an athena-events routing rule (see ai/contracts/athena-events.md). Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel is which."
+    else
+      WARN_TEXT="athena:inbox: ${HEALTH_TEXT}. Fix: a channel nothing has ever been delivered to usually means its producer was never registered — map this inbox filename to a server-side agent instance in ~/.config/athena-inbox-client/config.json. Run ai/skills/athena:inbox/bin/inbox-status from this project to see which channel."
+    fi
   fi
   WARN_TEXT_MARKER="${HEALTH_WARN_MARKER}"
 fi

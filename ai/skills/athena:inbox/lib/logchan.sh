@@ -151,9 +151,16 @@ logchan_scan() {
             # duplicate is for the consumer to reconcile via source re-query
             # (ai/contracts/athena-inbox.md -> "A lane `log` channel is a change
             # stream of state-change events"). `entity_id` is coerced to a usable
-            # string exactly as the slack keys are.
-            (if ($o.entity_id | type) == "null" then null
-             else ($o.entity_id | tostring | usable) end) as $entity
+            # string exactly as the slack keys are: ABSENT, empty (""), and
+            # non-string (a number, object, array, or false) are ALL null here,
+            # for the same reason the slack branch requires ($o.channel // "")
+            # != "" -- an identity that is missing is not weaker than one that
+            # is wrong, and both must land in the MISS branch rather than be
+            # counted as a phantom change. `false // ""` and absent both fold to
+            # "", `usable` rejects every non-string, and a string carrying a
+            # newline/tab is discarded by `usable` just as a slack key is.
+            (if ($o.entity_id // "") != "" then ($o.entity_id | usable)
+             else null end) as $entity
             | if $entity == null then
                 # THE MISS. A state-change line that names no entity cannot be
                 # reconciled against the source of truth, so it is unreadable --

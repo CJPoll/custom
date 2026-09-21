@@ -527,6 +527,30 @@ assert_eq "a platform line with no entity_id is unreadable, not silently counted
   "1" "$(jq -r .unreadable <<<"${res}")"
 assert_eq "a platform line with no entity_id is not counted new" \
   "0" "$(jq -r .new <<<"${res}")"
+# THE MISS, exhaustively: `entity_id` ABSENT (above), EMPTY, or a NON-STRING (a
+# number, object, array, or false) must ALL be unreadable, never a phantom
+# counted new. The entity guard mirrors the slack branch's ($o.channel // "")
+# != "" emptiness check: an identity that is missing is not weaker than one
+# that is wrong. A guard that only rejected absence would let entity_id:"" and
+# entity_id:0 through as counted-new phantoms -- the failed-lookup-looks-empty
+# class this ticket exists to close.
+res="$(printf '%s\n' '{"v":1,"entity_id":"","status":"x"}' | logchan_scan 0 "1" "" "" 0 platform)"
+assert_eq "a platform line with an EMPTY entity_id is unreadable" "1" "$(jq -r .unreadable <<<"${res}")"
+assert_eq "a platform line with an EMPTY entity_id is not counted new" "0" "$(jq -r .new <<<"${res}")"
+res="$(printf '%s\n' '{"v":1,"entity_id":0,"status":"x"}' | logchan_scan 0 "1" "" "" 0 platform)"
+assert_eq "a platform line with a NUMERIC entity_id is unreadable" "1" "$(jq -r .unreadable <<<"${res}")"
+assert_eq "a platform line with a NUMERIC entity_id is not counted new" "0" "$(jq -r .new <<<"${res}")"
+res="$(printf '%s\n' '{"v":1,"entity_id":{},"status":"x"}' | logchan_scan 0 "1" "" "" 0 platform)"
+assert_eq "a platform line with an OBJECT entity_id is unreadable" "1" "$(jq -r .unreadable <<<"${res}")"
+res="$(printf '%s\n' '{"v":1,"entity_id":false,"status":"x"}' | logchan_scan 0 "1" "" "" 0 platform)"
+assert_eq "a platform line with a FALSE entity_id is unreadable" "1" "$(jq -r .unreadable <<<"${res}")"
+# A newline/tab in entity_id is discarded by `usable` (it would split the
+# newline-delimited seen-set lists, or inject a phantom line into a rendered
+# field) -- so it, too, is unreadable rather than counted.
+res="$(printf '%s\n' '{"v":1,"entity_id":"a\nb","status":"x"}' | logchan_scan 0 "1" "" "" 0 platform)"
+assert_eq "a platform line with a NEWLINE in entity_id is unreadable" "1" "$(jq -r .unreadable <<<"${res}")"
+res="$(printf '%s\n' '{"v":1,"entity_id":"a\tb","status":"x"}' | logchan_scan 0 "1" "" "" 0 platform)"
+assert_eq "a platform line with a TAB in entity_id is unreadable" "1" "$(jq -r .unreadable <<<"${res}")"
 # KEYLESS lane: at-least-once redelivery is NOT suppressed by the reader (the
 # consumer reconciles via a source re-query), so a duplicate line counts twice.
 res="$(printf '%s\n%s\n' "${platform_line}" "${platform_line}" | logchan_scan 0 "1" "" "" 0 platform)"

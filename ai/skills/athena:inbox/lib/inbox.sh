@@ -276,10 +276,19 @@ _inbox_count_log() {
   # rather than at the renderer: a body, a subject or a peer-chosen string must
   # not exist in the manager's return value at all, so no future renderer can
   # print one by accident.
+  # `producer` rides the count doc so a caller that must phrase a
+  # never-delivered warning knows WHICH producer was supposed to be registered
+  # -- a server-side Slack agent instance vs an athena-events routing rule --
+  # without recomputing it from the entry. It is channel configuration this
+  # session owns, not peer content, so it is safe in the pre-prompt position
+  # (like `kind`). A never-delivered warning that names the wrong producer
+  # sends the reader to the wrong place to fix it, so the discriminator travels
+  # with the count rather than being guessed downstream.
   printf '%s' "${scan}" | jq -e -c \
     --argjson never "${never}" --argjson stale "${stale}" --argjson sbad "${state_bad}" \
+    --arg producer "${producer}" \
     '{new: .new, unreadable: .unreadable, never_delivered: $never,
-      offset_reset: $stale, state_unreadable: $sbad}'
+      offset_reset: $stale, state_unreadable: $sbad, producer: $producer}'
 }
 
 # _inbox_count_maildir <resolved-paths>
@@ -714,9 +723,15 @@ _inbox_read_log() {
     return 1
   fi
 
-  printf '%s' "${scan}" | jq -c --arg c "${chan}" --argjson nd "${never_delivered}" '
-    {kind: "log", channel: $c, next_offset: .next_offset, never_delivered: $nd,
-     unreadable: .unreadable, messages: .messages,
+  # `producer` rides the read doc so the RENDERER selects the line form by the
+  # CHANNEL's declared schema, not by guessing from a per-message field shape.
+  # A slack line and a platform state-change line can look alike enough that a
+  # per-line heuristic would mis-render one as the other; the channel marker is
+  # authoritative and travels here rather than being re-derived downstream.
+  printf '%s' "${scan}" | jq -c --arg c "${chan}" --argjson nd "${never_delivered}" \
+    --arg producer "${producer}" '
+    {kind: "log", channel: $c, producer: $producer, next_offset: .next_offset,
+     never_delivered: $nd, unreadable: .unreadable, messages: .messages,
      event_ids: [.messages[].event_id | select(. != "")],
      keys: [.messages[].dedupe_key | select(. != "")]}'
 }
@@ -1314,7 +1329,18 @@ inbox_doorbells() {
           # block for its whole budget, every budget, forever, and look
           # perfectly healthy doing it.
           printf 'athena:inbox: %s is declared, but nothing has EVER been delivered to it — arming anyway.\n' "${chan}" >&2
-          printf '  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json. Until then this doorbell can never ring, and a waiter blocked on it is indistinguishable from a quiet week.\n' >&2
+          # Name the RIGHT producer to register for this lane kind: a platform
+          # lane wants an athena-events routing rule, a slack channel a
+          # client-side instance. `entry` is validated above, so the marker is
+          # read from it rather than guessed.
+          local _wprod
+          _wprod="$(printf '%s' "${entry}" | jq -r --arg c "${chan}" \
+            '(.channels[$c].producer // "slack")')"
+          if [ "${_wprod}" = "platform" ]; then
+            printf '  Fix: no server-side producer is registered for this platform lane — add an athena-events routing rule that writes state-change events to its inbox file (see ai/contracts/athena-events.md). Until then this doorbell can never ring, and a waiter blocked on it is indistinguishable from a quiet week.\n' >&2
+          else
+            printf '  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json. Until then this doorbell can never ring, and a waiter blocked on it is indistinguishable from a quiet week.\n' >&2
+          fi
         fi
         ;;
       maildir)
