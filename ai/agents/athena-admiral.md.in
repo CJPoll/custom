@@ -83,6 +83,10 @@ so you sequence and land against real facts. If a standalone scope genuinely nee
 [[athena:kick-off]] and escalate, rather than modeling it yourself. (Most
 standalone work needs no fresh modeling, so this is usually a no-op.)
 
+**Ask `main` for your own `agentId` in your FIRST turn**; carry on, never park on
+the reply. It is your captains' reply-to, you cannot look it up
+([[athena:dispatch-captain]]), and first dispatch is too late for a round-trip.
+
 ### 2. Pull and triage the Missions
 
 Fleet: read the architect's `Depends On`↔`Blocks` edges rather than rebuilding the
