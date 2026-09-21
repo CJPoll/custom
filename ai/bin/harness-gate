@@ -306,6 +306,31 @@ end
 
 FAIL_TAIL_LINES = 20
 
+# How many failure-bearing lines to surface from ANYWHERE in a check's output.
+FAIL_GREP_LINES = 40
+
+# A blind tail cannot name the case that failed. A suite that prints one line
+# per case emits its `FAIL` line where the case ran and then keeps printing
+# passing cases, so with 119 cases the last 20 lines are 20 OTHER cases' `ok`
+# lines plus a "118 passed, 1 failed" total. That is a failure report that omits
+# the failure: the reader learns something broke and is shown only things that
+# worked, which is this repo's "Guard/error messages are written for the LLM"
+# convention violated at the one moment the gate exists for. Measured 2026-09-21
+# (shipwright 08:00Z): scripts/test/athena-shipwright failed twice under the
+# gate and passed 5/5 standalone; the gate's own output could not name the case,
+# so the intermittent failure could not be diagnosed at all.
+#
+# So: pull the failure-bearing lines out of the WHOLE output, then still print
+# the tail (which carries the suite's own total and Fix: line). Matching is
+# deliberately broad and case-sensitive on the loud spellings our suites use —
+# a false positive costs one extra printed line, a false negative costs the
+# diagnosis.
+FAIL_LINE_RE = /(^|\s)(FAIL|FAILED|not ok|ERROR|Error:)\b/.freeze
+
+def failure_lines(out)
+  out.to_s.lines.grep(FAIL_LINE_RE)
+end
+
 # Run one check with stdin CLOSED (a check that reads stdin must never inherit
 # the caller's terminal or a pipe — that is the false-green path).
 # Returns [ok?, combined_output].
@@ -437,7 +462,18 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
   failures.each do |(label, argv, out)|
     warn ""
     warn "--- #{label} (#{argv.join(' ')}) ---"
-    out.to_s.lines.last(FAIL_TAIL_LINES).each { |l| warn "  #{l.chomp}" }
+    tail = out.to_s.lines.last(FAIL_TAIL_LINES)
+    hits = failure_lines(out) - tail
+    unless hits.empty?
+      warn "  failure lines (from the full output, not just the tail):"
+      hits.first(FAIL_GREP_LINES).each { |l| warn "    #{l.chomp}" }
+      if hits.size > FAIL_GREP_LINES
+        warn "    ... #{hits.size - FAIL_GREP_LINES} more failure line(s) elided; " \
+             "re-run the check directly for all of them"
+      end
+      warn "  last #{tail.size} line(s):"
+    end
+    tail.each { |l| warn "  #{l.chomp}" }
   end
   warn ""
   warn "  Fix: repair each failing check above, or revert the harness edit that " \
@@ -1068,6 +1104,30 @@ def run_self_test
     unless stdin_ok
       warn "self-test: FAIL — run_one did not close stdin for the check"; ok = false
     end
+  end
+
+  # 9. The failure report NAMES the failing case even when a chatty suite has
+  #    pushed it far beyond the tail. This is the whole point of failure_lines:
+  #    a tail-only report of a 119-case suite shows 20 passing cases and a
+  #    total, and the reader cannot act on it. Shaped like the real thing — one
+  #    buried FAIL line, then well over FAIL_TAIL_LINES lines of `ok` after it.
+  buried = (["  FAIL  the case that actually broke"] +
+            Array.new(FAIL_TAIL_LINES + 10) { |i| "  ok    case #{i}" } +
+            ["118 passed, 1 failed"]).join("\n")
+  hits = failure_lines(buried)
+  if hits.none? { |l| l.include?("the case that actually broke") }
+    warn "self-test: FAIL — failure_lines did not surface a FAIL line buried " \
+         "beyond the tail (the gate would report a failure while showing only " \
+         "passing lines)"
+    ok = false
+  end
+  # And it must NOT fire on a clean suite, or every green check would print a
+  # "failure lines" block (noise that trains the reader to skim past a real one).
+  clean = (Array.new(5) { |i| "  ok    case #{i}" } + ["119 passed, 0 failed"]).join("\n")
+  unless failure_lines(clean).empty?
+    warn "self-test: FAIL — failure_lines matched a clean suite's output " \
+         "(#{failure_lines(clean).inspect})"
+    ok = false
   end
 
   if ok
