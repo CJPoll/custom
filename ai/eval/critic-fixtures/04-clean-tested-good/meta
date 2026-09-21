@@ -1,3 +1,4 @@
 label=good
 expect=none
 about=small correct change with a matching test; nothing to flag
+since=core

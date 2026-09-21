@@ -1,3 +1,4 @@
 label=bad
 expect=guardrail
 about=generic fix:* skill hardcodes a consumer-project constant
+since=core

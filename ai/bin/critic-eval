@@ -44,6 +44,57 @@ def fixtures
   Dir.glob(File.join(FIXTURES_DIR, "*")).select { |d| File.file?(File.join(d, "meta")) }.sort
 end
 
+# A fixture's declared prompt inputs and the step that introduced it.
+#
+#   requires=<token,...>  which CriticPrompt inputs distinguish this case.
+#                         ABSENT means `diff` -- the corpus predates the key,
+#                         and defaulting keeps the frozen core byte-identical.
+#   since=<step>          the step that authored it (`core` for 01-07). This is
+#                         what `--only` selects on, so the frozen core stays
+#                         separately measurable once the corpus grows and a
+#                         mixed-corpus aggregate stops being comparable.
+def fixture_spec(dir)
+  m = parse_meta(File.join(dir, "meta"))
+  tokens = (m["requires"] || "diff").split(",").map(&:strip).reject(&:empty?)
+  { dir: dir, name: File.basename(dir), label: m["label"], expect: m["expect"],
+    requires: tokens, since: (m["since"] || "").strip }
+end
+
+# Why a fixture is UNSCOREABLE, as a list of reasons (empty list = scoreable).
+#
+# Two ways: it names an input `CriticPrompt` does not carry yet, or it names one
+# that exists but its input file is absent. Both mean the judge would be shown a
+# prompt missing the very thing the fixture is labeled for.
+def unscoreable(fx)
+  fx[:requires].flat_map do |tok|
+    spec = CriticPrompt::INPUTS[tok]
+    if spec.nil?
+      ["declares requires=#{tok}, an input CriticPrompt does not carry " \
+       "(supported: #{CriticPrompt::SUPPORTED_TOKENS.join(', ')})"]
+    elsif !File.file?(File.join(fx[:dir], spec[:file]))
+      ["declares requires=#{tok} but its input file #{spec[:file]} is missing"]
+    else
+      []
+    end
+  end
+end
+
+# Select the fixtures to score. `--only <since>` narrows to one authoring step.
+#
+# A `--only` value matching NOTHING is an ERROR, never an empty successful run:
+# scoring zero fixtures yields recall 1.0 / precision 1.0 / PASS, so a typo'd
+# step name would print a perfect score over nothing at all.
+def select_fixtures(only)
+  all = fixtures.map { |d| fixture_spec(d) }
+  return [all, nil] if only.nil?
+
+  sel = all.select { |f| f[:since] == only }
+  return [sel, nil] unless sel.empty?
+
+  known = all.map { |f| f[:since] }.reject(&:empty?).uniq.sort
+  [nil, "no fixture declares since=#{only} (known: #{known.empty? ? '<none>' : known.join(', ')})"]
+end
+
 # Score a list of result rows into precision/recall.
 # row = {label: "bad"|"good", expect: kind, flagged: [kinds]}
 def score(rows)
@@ -68,18 +119,49 @@ def parse_findings(text)
   body.split(",").map { |s| s.strip.downcase }.reject(&:empty?)
 end
 
-def run_model
-  rows = fixtures.map do |dir|
-    m = parse_meta(File.join(dir, "meta"))
-    input = File.read(File.join(dir, "input.diff"))
-    prompt = CriticPrompt.build(diff: input)
+def refuse_unscoreable(bad)
+  warn "critic-eval: REFUSING TO SCORE — #{bad.size} fixture(s) declare a prompt input that does not exist yet."
+  bad.each { |(fx, reasons)| reasons.each { |r| warn "  - #{fx[:name]}: #{r}" } }
+  warn "  Fix: land the step that adds the input to CriticPrompt::INPUTS before authoring a fixture that"
+  warn "  needs it, or correct the fixture's `requires=`. Deliberately NOT scored as a miss: a judge shown a"
+  warn "  diff whose discriminating context is absent answers correctly for what it saw, so recording that as"
+  warn "  a 0 would depress the BEFORE number and credit the later step with a gain that is only the label"
+  warn "  becoming true. No row is printed for an unscoreable fixture — an absent input is not a measurement."
+  1
+end
+
+def run_model(only = nil)
+  selected, err = select_fixtures(only)
+  if err
+    warn "critic-eval: --only #{only} selected NO fixture — refusing to score."
+    warn "  Fix: #{err}. Use a `since=` value that exists, or drop --only to score the whole corpus."
+    warn "  Scoring an empty set would print recall=1.0 precision=1.0 PASS over nothing at all."
+    return 1
+  end
+
+  # Validate BEFORE any model call: refusing after scoring would already have
+  # printed the misleading rows this check exists to prevent.
+  blocked = selected.map { |fx| [fx, unscoreable(fx)] }.reject { |(_, r)| r.empty? }
+  return refuse_unscoreable(blocked) unless blocked.empty?
+
+  rows = selected.map do |fx|
+    args = fx[:requires].to_h do |tok|
+      spec = CriticPrompt::INPUTS[tok]
+      [spec[:key], File.read(File.join(fx[:dir], spec[:file]))]
+    end
+    prompt = CriticPrompt.build(**args)
     out, _e, st = require_open3 { Open3.capture3("claude", "-p", "--agent", CRITIC, stdin_data: prompt) }
     flagged = st&.success? ? parse_findings(out.to_s) : []
-    warn "  ! critic invocation failed for #{File.basename(dir)} (is `claude` on PATH?)" unless st&.success?
-    { name: File.basename(dir), label: m["label"], expect: m["expect"], flagged: flagged }
+    warn "  ! critic invocation failed for #{fx[:name]} (is `claude` on PATH?)" unless st&.success?
+    { name: fx[:name], label: fx[:label], expect: fx[:expect], flagged: flagged }
   end
   rows.each { |r| puts "#{r[:label] == 'bad' ? (r[:flagged].include?(r[:expect]) ? 'HIT ' : 'MISS') : (r[:flagged].empty? ? 'OK  ' : 'FP  ')}  #{r[:name]}  expect=#{r[:expect]} got=#{r[:flagged].join('|')}" }
   s = score(rows)
+  # Corpus membership prints WITH the aggregate, always. The same recall and
+  # precision numbers read identically over 7 fixtures and over 11 while meaning
+  # something else, so an aggregate without its membership is not comparable to
+  # anything -- including its own earlier self.
+  puts "critic-eval: corpus=#{only || 'all'} (#{rows.size} fixture(s): #{rows.map { |r| r[:name] }.join(', ')})"
   puts "critic-eval: recall=#{s[:recall]} precision=#{s[:precision]} " \
        "(detected #{s[:detected]}/#{s[:bad]} bad, #{s[:false_pos]} false pos over #{s[:good]} good)"
   if s[:pass]
@@ -100,11 +182,17 @@ rescue StandardError => e
 end
 
 def list
-  fx = fixtures
+  fx = fixtures.map { |d| fixture_spec(d) }
   puts "critic-eval: #{fx.size} labeled fixture(s) for #{CRITIC}:"
-  fx.each { |d| m = parse_meta(File.join(d, "meta")); puts "  - #{File.basename(d)} [#{m['label']}] expect=#{m['expect']}" }
+  fx.each do |f|
+    reasons = unscoreable(f)
+    flag = reasons.empty? ? "" : "  [UNSCOREABLE: #{reasons.join('; ')}]"
+    puts "  - #{f[:name]} [#{f[:label]}] expect=#{f[:expect]} " \
+         "requires=#{f[:requires].join(',')} since=#{f[:since].empty? ? '<unset>' : f[:since]}#{flag}"
+  end
+  puts "Prompt inputs CriticPrompt carries today: #{CriticPrompt::SUPPORTED_TOKENS.join(', ')}"
   puts "Trust bar: recall>=#{RECALL_BAR} AND precision>=#{PRECISION_BAR} before wiring as a blocking step."
-  puts "Run the model-in-loop evaluation with: ai/bin/critic-eval --run"
+  puts "Run the model-in-loop evaluation with: ai/bin/critic-eval --run [--only <since>]"
   0
 end
 
@@ -136,12 +224,65 @@ def run_self_test
   ok = false unless parse_findings("...\nFINDINGS: access-control, tests\n") == ["access-control", "tests"]
   ok = false unless parse_findings("all good\nFINDINGS: none\n") == []
 
+  # FIXTURE-INPUT DECLARATION -- the guard that keeps an unauthorable fixture
+  # from being recorded as a zero. Exercised on a throwaway fixture tree, not on
+  # the live corpus, so the cases assert the LOGIC rather than today's contents.
+  require "tmpdir"
+  Dir.mktmpdir("critic-eval-selftest") do |tmp|
+    mk = lambda do |name, meta, files|
+      d = File.join(tmp, name)
+      Dir.mkdir(d)
+      File.write(File.join(d, "meta"), meta)
+      files.each { |f| File.write(File.join(d, f), "x") }
+      fixture_spec(d)
+    end
+
+    # requires= ABSENT defaults to diff, so the frozen core needs no edit.
+    plain = mk.call("90-plain", "label=bad\nexpect=a\n", ["input.diff"])
+    ok = false unless plain[:requires] == ["diff"]
+    ok = false unless unscoreable(plain).empty?
+
+    # since= is read, and an explicit requires=diff is equivalent.
+    cored = mk.call("91-core", "label=good\nexpect=none\nrequires=diff\nsince=core\n", ["input.diff"])
+    ok = false unless cored[:since] == "core" && unscoreable(cored).empty?
+
+    # A token CriticPrompt does not carry -> unscoreable, naming the token.
+    future = mk.call("92-future", "label=bad\nexpect=a\nrequires=prior-report\nsince=p2a\n", ["input.diff"])
+    ok = false if unscoreable(future).empty?
+    ok = false unless unscoreable(future).join.include?("prior-report")
+
+    # A SUPPORTED token whose input file is absent -> unscoreable too. This is
+    # the miss-not-hit case: a fixture whose declared input simply is not there.
+    missing = mk.call("93-missing", "label=bad\nexpect=a\nrequires=diff\nsince=core\n", [])
+    ok = false if unscoreable(missing).empty?
+    ok = false unless unscoreable(missing).join.include?("input.diff")
+
+    # Every token in the table round-trips to a keyword `build` accepts.
+    ok = false unless CriticPrompt::INPUTS.values.map { |s| s[:key] } == CriticPrompt::SUPPORTED_INPUTS
+    ok = false unless CriticPrompt::SUPPORTED_TOKENS.include?("diff")
+  end
+
+  # --only that matches nothing is an ERROR, not an empty perfect score. Asserted
+  # against the live corpus because that is where a typo'd step name would land.
+  _sel, err = select_fixtures("no-such-step-exists")
+  ok = false if err.nil?
+  ok = false unless err.to_s.include?("no-such-step-exists")
+  all_sel, all_err = select_fixtures(nil)
+  ok = false unless all_err.nil? && all_sel.size == fixtures.size
+
+  # And the live corpus is itself scoreable -- otherwise `--run` refuses, which
+  # would be a silent "the eval never runs" rather than a loud one.
+  ok = false unless all_sel.all? { |f| unscoreable(f).empty? }
+
   if ok
     puts "critic-eval: self-test OK"
     0
   else
     warn "critic-eval: self-test FAILED"
-    warn "  Fix: the precision/recall scorer or FINDINGS parser is wrong — a miss must lower recall, a good-case finding must lower precision."
+    warn "  Fix: the precision/recall scorer, the FINDINGS parser, or the fixture-input declaration is wrong."
+    warn "  A miss must lower recall; a good-case finding must lower precision; a fixture naming an input"
+    warn "  absent from CriticPrompt::INPUTS (or missing its input file) must be UNSCOREABLE, never a zero;"
+    warn "  and an --only value matching no fixture must be an error, never an empty perfect score."
     1
   end
 end
@@ -149,17 +290,43 @@ end
 if ARGV.include?("--help") || ARGV.include?("-h")
   puts <<~TXT
     Usage:
-      ai/bin/critic-eval              list the critic eval corpus (default)
-      ai/bin/critic-eval --run        score the critic against the corpus
-                                      (MODEL-IN-LOOP: slow; NOT part of the gate)
-      ai/bin/critic-eval --self-test  deterministic scorer/parser suite (no model)
-      ai/bin/critic-eval --help       this text
+      ai/bin/critic-eval                  list the critic eval corpus (default)
+      ai/bin/critic-eval --run            score the critic against the corpus
+                                          (MODEL-IN-LOOP: slow; NOT part of the gate)
+      ai/bin/critic-eval --run --only S   score only fixtures declaring since=S
+                                          (e.g. --only core, the frozen 01-07
+                                          series that is comparable across steps)
+      ai/bin/critic-eval --self-test      deterministic scorer/parser/declaration
+                                          suite (no model)
+      ai/bin/critic-eval --help           this text
+
+    A fixture declares its prompt inputs in `meta`:
+      requires=<token,...>  inputs that distinguish it (absent => diff)
+      since=<step>          the step that authored it (core for 01-07)
+    `--run` REFUSES to score a fixture naming an input CriticPrompt does not
+    carry, rather than recording it as a miss.
   TXT
   exit 0
 end
+
+only = nil
+if (i = ARGV.index("--only"))
+  only = ARGV[i + 1]
+  if only.nil? || only.start_with?("-")
+    warn "critic-eval: --only needs a since= value."
+    warn "  Fix: pass one, e.g. `ai/bin/critic-eval --run --only core`."
+    exit 1
+  end
+  unless ARGV.include?("--run")
+    warn "critic-eval: --only only applies to --run."
+    warn "  Fix: use `ai/bin/critic-eval --run --only #{only}`."
+    exit 1
+  end
+end
+
 exit(
   if ARGV.include?("--self-test") then run_self_test
-  elsif ARGV.include?("--run") then run_model
+  elsif ARGV.include?("--run") then run_model(only)
   else list
   end
 )

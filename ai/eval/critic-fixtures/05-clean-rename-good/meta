@@ -1,3 +1,4 @@
 label=good
 expect=none
 about=pure rename with tests updated; no issue
+since=core

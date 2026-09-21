@@ -1,3 +1,4 @@
 label=bad
 expect=guardrail
 about=busy-spin wait loop introduced (safe-wait rule)
+since=core

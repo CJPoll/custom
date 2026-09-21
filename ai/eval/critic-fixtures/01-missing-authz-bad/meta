@@ -1,3 +1,4 @@
 label=bad
 expect=access-control
 about=new mutation endpoint added with no authorization check
+since=core

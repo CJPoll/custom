@@ -203,7 +203,7 @@ Creates: the frozen-core baseline.
 - Corroborates — does not prove — that `daaf9c8` left shipping behaviour
   unchanged. The **proof** is the deterministic `critic-review --self-test`.
 
-**Step 1b — FIXTURE-INPUT DECLARATION (deterministic, no model calls). NEXT.**
+**Step 1b — FIXTURE-INPUT DECLARATION (deterministic, no model calls). LANDED 2026-09-21 (09:00Z run).**
 Consumes: nothing new. Creates: the mechanism that makes a mis-ordered fixture
 an error instead of a number.
 - `CriticPrompt` exposes `SUPPORTED_INPUTS` (today `[:diff]`), the single source
@@ -226,6 +226,20 @@ an error instead of a number.
   which is the measured failure mode.
 - Both deterministic and model-free; `critic-eval --run` stays outside
   `harness-gate`, both self-tests stay in it.
+
+*As landed, with two additions the written step did not name.* `SUPPORTED_INPUTS`
+is derived from a single `CriticPrompt::INPUTS` table (token → `{key, file}`)
+rather than standing alone, so the corpus-facing token a fixture declares, the
+keyword the shipping caller must pass, and the fixture filename cannot drift
+apart — three names for one fact, declared once. And `--only <value>` matching
+**zero** fixtures is an error, not an empty run: `score` returns recall 1.0 /
+precision 1.0 / PASS over an empty row set, so a typo'd step name would
+otherwise print a perfect score over nothing (*A failed lookup must never look
+like an empty one*, inside the instrument that measures the judge). Both new
+guards were verified by red/green flip — a planted `requires=prior-report`
+fixture makes `--run` refuse and `critic-eval --self-test` go red; a planted
+`INPUTS` entry the shipping caller does not pass makes `critic-review
+--self-test` go red, naming the keyword.
 
 **Step 2 — P2-B (commit messages).** Unchanged in content. Additionally:
 `SUPPORTED_INPUTS` gains `:commit_messages`; `critic-review#critic_output`
