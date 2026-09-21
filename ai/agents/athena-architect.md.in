@@ -1,7 +1,7 @@
 ---
 name: athena-architect
 description: Whenever planning, software architecture, or other thinking is required.
-model: opus
+model: fable
 color: purple
 ---
 
