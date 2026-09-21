@@ -159,6 +159,58 @@ def mark_running(sha)
   File.write(File.join(dir, "#{sha}.running"), Time.now.utc.iso8601)
 end
 
+# The critic's REPORT BODY, persisted beside the verdict.
+#
+# The receipt records the finding CATEGORIES (`findings`), which is all the
+# admiral's merge gate needs. The body -- the actual text saying what is wrong
+# -- was printed to stderr and kept nowhere. A caller who captured that stderr
+# through `| tail -N`, `| head -N`, or a truncating tool therefore destroyed the
+# only copy, and the sole recovery was another full model-in-loop run.
+#
+# Measured on 2026-09-20-notif-platform, three times in ONE run: two truncated
+# captures caught by the recorded-verdict check, and one -- state.md, "ONE
+# finding captured (my bg cmd truncated stdout via tail -20) ... CORRECTNESS
+# finding body LOST to truncation" -- where the body was gone for good. The run
+# coined a rule for it ("never trust a tail-truncated critic read"), and a prior
+# run had already recorded the same class in memory. A rule telling agents not
+# to truncate does not survive contact with a background command; a file does.
+#
+# Returns the path written, or nil. nil is reported by the caller, never
+# silently swallowed -- a report that was not recorded must not read like one
+# that was.
+def write_report(sha, text)
+  dir = verdict_dir
+  return nil unless dir && sha
+  path = File.join(dir, "#{sha}.report.txt")
+  FileUtils.mkdir_p(dir)
+  File.write(path, text.to_s)
+  path
+rescue StandardError
+  nil
+end
+
+# The pointer is printed LAST, deliberately.
+#
+# `tail -N` keeps the END of a stream and `head -N` keeps the START, so no
+# single position survives both. The END is the one that survives the form
+# actually measured hurting us (every one of the three instances above was a
+# `tail`), and it is also what a terminal leaves on screen. A caller who sees
+# only the last line still learns where the whole report is.
+def warn_report_pointer(path, sha)
+  if path
+    warn ""
+    warn "critic-review: FULL REPORT RECORDED AT #{path}"
+    warn "  Fix: read that file (`cat #{path}`) rather than re-running the judge — if the output"
+    warn "  above reached you truncated (a pipe through tail/head, a capture bound, a background"
+    warn "  command), the file is the complete body and re-running costs another model round."
+  else
+    warn ""
+    warn "critic-review: NOTE the report body was NOT recorded to disk#{sha ? '' : ' (no resolvable HEAD)'}."
+    warn "  Fix: the text above is the ONLY copy — capture it whole now, without piping through"
+    warn "  tail/head. Then run the judge from the Mission's worktree so the next round records a report."
+  end
+end
+
 def write_verdict(sha, base, action, findings, dirty)
   dir = verdict_dir
   unless dir && sha
@@ -356,9 +408,21 @@ def run(argv)
     warn(text.empty? ? "  (the critic returned a verdict with no body -- re-run to see it)" : text)
     warn "  Fix: address each finding above (or, if a finding is wrong, say why in the MR) before this change ships."
     warn_round_notice(sha)
+    # The WHOLE raw output, trailer included -- this file is the archival copy,
+    # not a second rendering of what was just printed.
+    warn_report_pointer(write_report(sha, raw), sha)
   when "fail-open"
     warn "critic-review: FAIL-OPEN — the critic did not return a usable verdict (infra/model error); NOT blocking."
     warn "  Fix: re-run ai/bin/critic-review once `claude` is reachable; a human should eyeball this diff since the judge did not run."
+    # A fail-open's raw output is the diagnosis (a model error, a partial answer,
+    # a missing trailer) and is just as destroyable by a truncating capture.
+    # Empty raw is its OWN state: there is no body to point at, and saying so is
+    # not the same as pointing at a file that would be empty.
+    if raw.to_s.strip.empty?
+      warn "  NOTE the critic produced NO output at all, so there is no report to record."
+    else
+      warn_report_pointer(write_report(sha, raw), sha)
+    end
   end
   code
 end
@@ -475,6 +539,54 @@ def run_receipt_self_test
       ok &&= (code == 2)
       ok &&= err.include?("Fix:")
 
+      # (15-19) THE REPORT BODY SURVIVES A TRUNCATED READ.
+      #
+      # The defect: the receipt kept the finding CATEGORIES and threw the body
+      # away, so `critic-review | tail -N` destroyed the only copy of the text
+      # saying what was wrong. Three instances in the 2026-09-20 notif-platform
+      # run, one of them unrecoverable. These cases test the property, not the
+      # wording: a file exists, it holds the body, and a reader who keeps only
+      # the END of the stream still learns where it is.
+      report = File.join(dir, "#{sha}.report.txt")
+      FileUtils.rm_f(report)
+      ENV["CRITIC_REVIEW_STUB"] = findings_out
+      rc, err = capture_err { run(["--base", "main"]) }
+      ok &&= (rc == 2)
+      # (15) recorded, and WHOLE -- the trailer too, since this is the archival
+      # copy and not a re-render of what was printed.
+      ok &&= File.file?(report)
+      ok &&= File.read(report) == File.read(findings_out)
+      # (16) it holds the very text a truncated read loses: the finding body.
+      ok &&= File.read(report).include?("no authz")
+      # (17) THE TRUNCATION-SURVIVAL PROPERTY. `tail` keeps the end, so the
+      # pointer must be at the end. A regression that moves it anywhere else
+      # (e.g. before warn_round_notice) leaves the feature working and the
+      # REASON for it broken -- which is exactly how this would rot back.
+      tail = err.lines.map(&:strip).reject(&:empty?).last(4).join("\n")
+      ok &&= tail.include?(report)
+      ok &&= tail.include?("Fix:")
+
+      # (18) a fail-open's diagnosis is just as destroyable, so it is recorded
+      # too -- the missing-trailer output IS the thing a human must read.
+      FileUtils.rm_f(report)
+      ENV["CRITIC_REVIEW_STUB"] = broken_out
+      _rc, err = capture_err { run(["--base", "main"]) }
+      ok &&= File.file?(report)
+      ok &&= File.read(report).include?("the model crashed")
+      ok &&= err.include?(report)
+
+      # (19) EMPTY raw is its OWN state. Pointing at a file that would be empty
+      # is a claimed mechanism that cannot fire; say there is nothing instead.
+      empty_out = File.join(stubs, "e"); File.write(empty_out, "   \n")
+      FileUtils.rm_f(report)
+      ENV["CRITIC_REVIEW_STUB"] = empty_out
+      _rc, err = capture_err { run(["--base", "main"]) }
+      ok &&= !File.exist?(report)
+      ok &&= err.match?(/NO output at all/)
+      ok &&= !err.include?("FULL REPORT RECORDED AT")
+
+      ENV["CRITIC_REVIEW_STUB"] = findings_out
+
       # (7) malformed receipt is an ERROR, not a pass.
       File.write(File.join(dir, "#{sha}.json"), "{not json")
       code, err = capture_err { verdict_for(sha) }
@@ -549,8 +661,15 @@ def run_receipt_self_test
       ok &&= err.include?("ROUND 2 on this change")
       ok &&= err.include?("athena:critic-convergence")
       ok &&= err.include?("CLUSTER ROUND")
-      ok &&= err.include?(first[0, 7])          # the earlier round is named
-      ok &&= !err.include?(second[0, 7])        # the current head is not
+      # These two are claims about the ROUND NOTICE -- "it lists the prior
+      # SHAs and not the head you are on" -- so they are asserted against the
+      # notice, not against all of stderr. The report pointer that follows it
+      # names the current head inside a file path, legitimately and by design;
+      # reading the whole stream would fail on that and say "the notice named
+      # the current head", which is not what happened.
+      notice = err.split("FULL REPORT RECORDED AT").first.to_s
+      ok &&= notice.include?(first[0, 7])       # the earlier round is named
+      ok &&= !notice.include?(second[0, 7])     # the current head is not
       ok &&= err.match?(/NEVER a reason to override/)
 
       # (13b) BELOW THE ARTIFACT CEILING the notice must NOT mention it -- a
