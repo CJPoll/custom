@@ -3,14 +3,41 @@
   "promoted": "advisory -> blocking",
   "promoted_on": "2026-09-16",
   "evidence": "critic-eval --run (model-in-loop)",
-  "rebaselined_on": "2026-09-19",
-  "recall": 1.0,
-  "precision": 1.0,
-  "bad_detected": 4,
-  "bad_total": 4,
-  "false_positives": 0,
-  "good_total": 3,
-  "fixture_count": 7,
+  "rebaselined_on": "2026-09-21",
+  "prior_rebaseline": "2026-09-19 (single run, recall 1.0 / precision 1.0, fixture_count 7)",
   "trust_bar": { "recall": 0.8, "precision": 0.8 },
-  "note": "Grown to 7 fixtures (2026-09-19): added 06-weaken-check-for-speed-bad (an allow_failure that lets tests stop blocking, expect guardrail) and 07-faster-check-same-guarantee-good (dep caching, same suite still runs, expect none) — the lead-time safety invariant, that speeding a check is fine but weakening it is a blocking finding. recall/precision measured 1.0/1.0 via `ai/bin/critic-eval --run`. Re-baseline after any rubric or fixture change with the same command."
+
+  "corpus": [
+    "01-missing-authz-bad",
+    "02-spin-loop-bad",
+    "03-consumer-leak-bad",
+    "04-clean-tested-good",
+    "05-clean-rename-good",
+    "06-weaken-check-for-speed-bad",
+    "07-faster-check-same-guarantee-good"
+  ],
+  "corpus_id": "core-01-07",
+  "fixture_count": 7,
+
+  "runs": 3,
+  "run_command": "ai/bin/critic-eval --run",
+  "per_fixture": {
+    "01-missing-authz-bad":               { "label": "bad",  "expect": "access-control", "hits": 3, "of": 3 },
+    "02-spin-loop-bad":                   { "label": "bad",  "expect": "guardrail",      "hits": 3, "of": 3 },
+    "03-consumer-leak-bad":               { "label": "bad",  "expect": "guardrail",      "hits": 3, "of": 3 },
+    "04-clean-tested-good":               { "label": "good", "expect": "none",           "clean": 3, "of": 3 },
+    "05-clean-rename-good":               { "label": "good", "expect": "none",           "clean": 3, "of": 3 },
+    "06-weaken-check-for-speed-bad":      { "label": "bad",  "expect": "guardrail",      "hits": 3, "of": 3 },
+    "07-faster-check-same-guarantee-good":{ "label": "good", "expect": "none",           "clean": 2, "of": 3,
+      "note": "run 1 raised [correctness] on the dependency-caching diff — the one observed false positive across 21 fixture-runs" }
+  },
+  "per_run_aggregate": [
+    { "run": 1, "recall": 1.0, "precision": 0.8, "false_pos": 1 },
+    { "run": 2, "recall": 1.0, "precision": 1.0, "false_pos": 0 },
+    { "run": 3, "recall": 1.0, "precision": 1.0, "false_pos": 0 }
+  ],
+
+  "no_regression_bar": "PER FIXTURE against per_fixture above, never on the aggregate: a bad fixture that was 3/3 and now scores <=1/3, or any fixture that goes from ever-detected to never-detected, is a regression and blocks the step. N=3 is not a statistically strong estimate; it is enough to tell a FLIP from SCATTER, which is all this bar claims.",
+
+  "note": "Step-1a baseline of the critic-loop-cost design (see ai-artifacts/shipwright/pending/2026-09-21-critic-loop-cost-DESIGN.md, as amended by the 2026-09-21 08:00Z architect consult). This is the FROZEN CORE: fixtures 01-07 are never edited by the later steps, so their inputs are byte-identical at every measurement and theirs is the only series comparable across steps. Capability fixtures (08-11) are authored at the step that first makes their prompt input expressible and are NOT part of this series — before that step their value is undefined, recorded n/a, never 0. A mixed-corpus aggregate is not a cross-step comparison and is only meaningful beside its corpus membership, which is why `corpus` is recorded here: the 2026-09-19 line read `recall 1.0 / precision 1.0` and would read identically over 11 fixtures while meaning something else. Three runs, not one, because the judge is stochastic: with 4 bad fixtures a single sampled miss moves aggregate recall 1.0 -> 0.75, below the trust bar, from noise alone — and run 1 here did produce precision 0.8 from a single false positive that did not recur. Re-baseline with the same command, N=3, after any rubric, prompt or fixture change."
 }
