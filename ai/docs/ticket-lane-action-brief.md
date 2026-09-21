@@ -76,7 +76,7 @@ config value substituted into the template body.
 | `{{MERGE_POLICY}}` | The merge/deploy rule (e.g. auto-merge + the admiral's batch-and-watch defaults). |
 | `{{LANE_CHANNEL}}` | The inbox `log` channel the lane's forwarded state-change events arrive on (`ai/contracts/athena-inbox.md` → *A lane `log` channel is a change stream of state-change events*). |
 | `{{LOCK_PATH}}` | The coordinator marker path — `~/.claude/{{LANE_ID}}-coordinator.lock`. |
-| `{{STALE_MARKER_SWEEP}}` | The lane's declared recovery for a marker left behind by a died/aborted admiral. It MUST be a runner that executes **independently of the lane's work-trigger** — a periodic/time-based check or a session-start hook — because a marker on an idle-but-wedged lane is NOT cleared by the work-trigger itself (see step 4). The flaky lane's `SessionStart` poll IS such an independent runner (it ages out a marker older than 12h regardless of channel activity). A lane whose only trigger is channel activity has **NO automatic recovery** unless it adds an independent sweeper; absent one, it is unwedged only by a human deleting `{{LOCK_PATH}}`. |
+| `{{STALE_MARKER_SWEEP}}` | The lane's declared recovery for a marker left behind by a died/aborted admiral. It MUST be a runner that executes **independently of the lane's work-trigger** — a periodic/time-based check or a session-start hook — because a marker on an idle-but-wedged lane is NOT cleared by the work-trigger itself (see the *Recovering a stale marker* step under *Spinning the lane up*). The flaky lane's `SessionStart` poll IS such an independent runner (it ages out a marker older than 12h regardless of channel activity). A lane whose only trigger is channel activity has **NO automatic recovery** unless it adds an independent sweeper; absent one, it is unwedged only by a human deleting `{{LOCK_PATH}}`. |
 | `{{SOURCE_RE_QUERY}}` | The authoritative re-list of lane scope from the source of truth (the same predicate as `{{SCOPE_FILTER}}`, re-run against the tracker). |
 
 ## The template body
@@ -102,9 +102,9 @@ no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
 
        rm -f {{LOCK_PATH}}
 
-4. If the admiral terminates, or the run aborts without clearing the marker, the
-   marker is stale and the lane is wedged until something clears it. **The
-   work-trigger will NOT clear it.** Under the landed model that trigger is the
+4. **Recovering a stale marker.** If the admiral terminates, or the run aborts
+   without clearing the marker, the marker is stale and the lane is wedged until
+   something clears it. **The work-trigger will NOT clear it.** Under the landed model that trigger is the
    count of *new lines* on `{{LANE_CHANNEL}}` (see *Relationship to the existing
    flaky trigger*; `ai/contracts/athena-inbox.md` → *A lane `log` channel is a
    change stream of state-change events*), and a lane wedged mid-drain still has
@@ -287,7 +287,8 @@ change and are NOT "only the trigger":
   runner that fires independently of channel activity. Retiring the poll retires
   the flaky lane's *only* trigger-independent sweeper, and the new inbox-count
   trigger cannot replace it (it fires only on new channel lines, which a
-  wedged-but-idle lane need not receive — see step 4). So the migration MUST
+  wedged-but-idle lane need not receive — see the *Recovering a stale marker*
+  step above). So the migration MUST
   provision a **replacement trigger-independent sweeper** for the flaky lane
   (e.g. a small periodic/session-start age-out), or the flaky lane loses
   automatic stale-marker recovery and is left to manual `rm`. Surfaced here as a
