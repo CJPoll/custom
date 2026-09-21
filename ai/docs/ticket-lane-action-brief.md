@@ -217,30 +217,39 @@ there; this brief does not restate it — it only binds the lane admiral to it.
 
 ## The flaky lane — the worked instantiation
 
-Filling every placeholder with the walt_ui flaky lane's values yields the flaky
-lane's action brief as one instance of this template — the spin-up trigger, the
-negative no-action branch, the marker semantics, and the add/drop handling.
-(Fidelity is over the *action brief*; the complete inventory of the current
-flaky lane's carriers — which files hold the policy today, and which DND-247
-rewrites — is in the *Relationship to the existing flaky trigger* section below,
-not this table.)
+Binding every placeholder to the walt_ui flaky lane yields the flaky lane's
+action brief as one instance of this template — the spin-up trigger, the negative
+no-action branch, the marker semantics, and the add/drop handling. Fidelity is
+over the *action brief*: the complete inventory of the current flaky lane's
+carriers — which files hold the policy today, and which DND-247 rewrites — is in
+the *Relationship to the existing flaky trigger* section below, not this table.
+
+The **tracker-management constants** — owner id, connector, scope DB + id, scope
+filter, status vocabulary, blocked semantics, merge policy — are **not copied
+here**. `~/.claude/CLAUDE.md` → *Flaky-test lane (per-machine automation)* is their
+one home; duplicating them into a second tracked file is exactly the staleness the
+*Documentation conventions* rule below warns of (drift was already present before
+this citation replaced the copies). So the rows below **cite** that home for every
+constant and give concrete values only for the **lane-shape** placeholders this
+template introduces. (DND-247 inverts the direction — it rewrites that home to fill
+this template — at which point the values live here and the citation flips.)
 
 | Placeholder | Flaky lane value |
 |---|---|
 | `{{LANE_ID}}` | `flaky` |
 | `{{LANE_LABEL}}` | flaky-test |
-| `{{OWNER_NAME}}` / `{{OWNER_ID}}` | the owner / their Notion person id |
-| `{{TRACKER_CONNECTOR}}` | `notion-work` |
-| `{{SCOPE_DB_NAME}}` / `{{SCOPE_DB_ID}}` | "Tickets" / `f00eab4f-26e1-4a97-8a2b-fd6a4a15323e` |
-| `{{SCOPE_FILTER}}` | Labels contains `flaky-tests` AND Assignee contains the owner AND Status ∈ {`Todo`, `Backlog`} |
-| `{{STATUS_VOCAB}}` | In Progress (starting) / Needs Attention (blocked or stuck) / In Review (captain sets) / Ready for Release (merged) / Done |
-| `{{BLOCKED_SEMANTICS}}` | `Blocked By` relation non-empty ⇒ blocked; set it + move Status to Needs Attention |
+| `{{OWNER_NAME}}` / `{{OWNER_ID}}` | per *Flaky-test lane (per-machine automation)* (its scope filter is keyed to the owner) |
+| `{{TRACKER_CONNECTOR}}` | per *Flaky-test lane (per-machine automation)* |
+| `{{SCOPE_DB_NAME}}` / `{{SCOPE_DB_ID}}` | per *Flaky-test lane (per-machine automation)* (the "Tickets" DB + its id) |
+| `{{SCOPE_FILTER}}` | per *Flaky-test lane (per-machine automation)* (the `flaky-tests` + owner + Todo/Backlog predicate) |
+| `{{STATUS_VOCAB}}` | per *Flaky-test lane (per-machine automation)* |
+| `{{BLOCKED_SEMANTICS}}` | per *Flaky-test lane (per-machine automation)* (the `Blocked By` relation) |
 | `{{MAX_CAPTAINS}}` | `1` (strictly sequential) |
-| `{{MERGE_POLICY}}` | auto-merge (admiral default) + normal Auto-Deploy / batch-and-watch |
-| `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel |
+| `{{MERGE_POLICY}}` | per *Flaky-test lane (per-machine automation)* (the admiral's auto-merge default) |
+| `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel (provisioned in `ai/inbox/registry.json`; see the migration section) |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
 | `{{STALE_MARKER_SWEEP}}` | the `SessionStart` poll (`flaky-ticket-poll.sh`) clears a marker older than 12h; a human may also `rm -f` it |
-| `{{SOURCE_RE_QUERY}}` | re-run the flaky scope query above against the Tickets DB |
+| `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per *Flaky-test lane (per-machine automation)*) against the Tickets DB |
 
 **The marker semantics preserved VERBATIM for the flaky instance:**
 
@@ -255,9 +264,9 @@ the marker; a lane without a poll has no such age-out (see the placeholder table
 
 The flaky instance's add/drop handling is the generic *Add / drop handling*
 section above with the flaky values substituted — the flaky `log` channel as
-`{{LANE_CHANNEL}}`, `flaky-tests + mine + Todo/Backlog` as `{{SCOPE_FILTER}}`, and
-the re-run flaky scope query as `{{SOURCE_RE_QUERY}}`. The mechanism is the
-contracts' (cited there); this instance adds no new rule.
+`{{LANE_CHANNEL}}`, the flaky `{{SCOPE_FILTER}}` and `{{SOURCE_RE_QUERY}}` per the
+worked-instantiation table above (which cites their one home). The mechanism is
+the contracts' (cited there); this instance adds no new rule.
 
 ## Relationship to the existing flaky trigger
 
