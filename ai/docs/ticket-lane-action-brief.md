@@ -6,7 +6,14 @@
 **Status:** normative. **Adopted:** 2026-09-20 (DND-246 / H-2). This document is
 the **templated, per-lane action brief** the design record
 `ai-artifacts/coordination/2026-09-19-inbox-lanes/design.md` → *The generic
-ticket-driven lane (flaky = one instance)* calls for. The current
+ticket-driven lane (flaky = one instance)* calls for. That design record is a
+**gitignored, machine-local dated record cited for provenance only** — it is in
+no clone, and this brief is **self-contained**: a reader is **not** required to
+have that file. Every *mechanism* the brief binds to resolves to the two in-repo
+contracts (`ai/contracts/athena-events.md`, `ai/contracts/athena-inbox.md`); the
+design record is cited only for design provenance and the flaky lane's migration
+ordering, and where it is cited the operative fact is also stated here in the
+brief. The current
 `~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt` and the flaky-lane
 policy in `~/.claude/CLAUDE.md` → *Flaky-test lane (per-machine automation)*
 **will become one instance** of this template — that sweep of the existing
@@ -66,6 +73,7 @@ config value substituted into the template body.
 | `{{MERGE_POLICY}}` | The merge/deploy rule (e.g. auto-merge + the admiral's batch-and-watch defaults). |
 | `{{LANE_CHANNEL}}` | The inbox `log` channel the lane's forwarded state-change events arrive on (`ai/contracts/athena-inbox.md` → *A lane `log` channel is a change stream of state-change events*). |
 | `{{LOCK_PATH}}` | The coordinator marker path — `~/.claude/{{LANE_ID}}-coordinator.lock`. |
+| `{{STALE_MARKER_SWEEP}}` | The lane's declared recovery for a marker left behind by a died/aborted admiral — the only thing that unwedges the lane. It is instance-specific, NOT a generic marker property: a poll-triggered lane can age-out a stale marker (flaky: its poll clears one older than 12h); an inbox-count-triggered lane has no poll, so its sweep is the next spawn attempt checking marker age before `touch`; a lane that declares none has NO automatic recovery (a human clears `{{LOCK_PATH}}`). |
 | `{{SOURCE_RE_QUERY}}` | The authoritative re-list of lane scope from the source of truth (the same predicate as `{{SCOPE_FILTER}}`, re-run against the tracker). |
 
 ## The template body
@@ -91,20 +99,26 @@ no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
 
        rm -f {{LOCK_PATH}}
 
-4. If the admiral terminates, or the run aborts without clearing the marker,
-   delete `{{LOCK_PATH}}` so the lane is not wedged shut. **The poll also
-   self-heals a marker older than 12h.**
+4. If the admiral terminates, or the run aborts without clearing the marker, the
+   marker is stale and the lane is wedged shut until something clears it. What
+   clears it is the lane's declared `{{STALE_MARKER_SWEEP}}` — **a stale marker
+   has no automatic recovery beyond whatever that parameter names.** A
+   poll-triggered lane can age the marker out (the flaky lane's poll clears one
+   older than 12h); an inbox-count-triggered lane has no poll, so its sweep is the
+   next spawn attempt checking the marker's age before `touch`; a lane that
+   declares no sweep is unwedged only by a human deleting `{{LOCK_PATH}}`.
 
 **The marker is a best-effort quieting hint, NOT a lock** (these are the flaky
 lane's `~/.claude/flaky-coordinator.lock` semantics, preserved and generalized
-only in the path): touch-before-spawn, remove-when-scope-empty, self-heal after
-12h. It does **not** provide mutual exclusion and does **not** guarantee a single
-admiral: check-freshness-then-`touch` is racy — two sessions can both observe no
-fresh marker, both `touch`, and both spawn — and a plain file cannot distinguish a
-live admiral from a corpse (the 12h self-heal is a **timeout, not a liveness
-check**). `{{MAX_CAPTAINS}}` and any "one admiral at a time" intent are therefore
-**not enforced by this marker**; the marker only *quiets the periodic poll* so the
-common case does not double-spawn. This matches the class already measured in
+only in the path): touch-before-spawn, remove-when-scope-empty, and
+`{{STALE_MARKER_SWEEP}}` for a marker left behind. It does **not** provide mutual
+exclusion and does **not** guarantee a single admiral: check-freshness-then-`touch`
+is racy — two sessions can both observe no fresh marker, both `touch`, and both
+spawn — and a plain file cannot distinguish a live admiral from a corpse (a
+timeout-based `{{STALE_MARKER_SWEEP}}` such as the flaky poll's 12h age-out is a
+**timeout, not a liveness check**). `{{MAX_CAPTAINS}}` and any "one admiral at a
+time" intent are therefore **not enforced by this marker**; the marker only
+*quiets the trigger* so the common case does not double-spawn. This matches the class already measured in
 `~/dev/custom/CLAUDE.md` → *Agents work in worktrees, not the main checkout* ("the
 `run.lock` … was a zero-byte file that nothing could tell apart from a corpse"),
 whose durable fix is a held `flock(2)`, "never by a pid"; a lane that needs true
@@ -184,6 +198,7 @@ flaky brief as one instance of this template.
 | `{{MERGE_POLICY}}` | auto-merge (admiral default) + normal Auto-Deploy / batch-and-watch |
 | `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
+| `{{STALE_MARKER_SWEEP}}` | the `SessionStart` poll (`flaky-ticket-poll.sh`) clears a marker older than 12h; a human may also `rm -f` it |
 | `{{SOURCE_RE_QUERY}}` | re-run the flaky scope query above against the Tickets DB |
 
 **The marker semantics preserved VERBATIM for the flaky instance:**
@@ -192,8 +207,10 @@ flaky brief as one instance of this template.
     rm -f ~/.claude/flaky-coordinator.lock          # when the scope query is empty and every touched MR is merged
 
 and: if the admiral terminates without clearing the marker, delete
-`~/.claude/flaky-coordinator.lock` yourself so the lane is not wedged shut — **the
-poll also self-heals a marker older than 12h**.
+`~/.claude/flaky-coordinator.lock` yourself so the lane is not wedged shut. The
+flaky instance's `{{STALE_MARKER_SWEEP}}` is its `SessionStart` poll, which
+self-heals a marker older than 12h — a property of the flaky poll trigger, not of
+the marker; a lane without a poll has no such age-out (see the placeholder table).
 
 The flaky instance's add/drop handling is the generic *Add / drop handling*
 section above with the flaky values substituted — the flaky `log` channel as
@@ -206,11 +223,20 @@ contracts' (cited there); this instance adds no new rule.
 The flaky instance is today spun by the `SessionStart` poll
 (`~/dev/walt_ui/.claude/hooks/flaky-ticket-poll.sh`) and the spawn text
 `flaky-coordinator-spawn.txt`. Under the landed model the trigger moves from a
-`SessionStart` pull to the inbox count on `{{LANE_CHANNEL}}`
-(design → *Migration + gated retirement*), and the `flaky-coordinator.lock`
-marker semantics (the best-effort quieting hint above) are unchanged — only the
-trigger changes. Retiring the poll,
-its `walt_ui/.claude/settings.json` registration, and the dead `~/.claude/flaky-*`
-files is the design's gated final step and lands in the product repo (walt_ui),
-not here; this template is the harness-side artifact that step rewrites guidance
-to point at.
+`SessionStart` pull to the inbox count on `{{LANE_CHANNEL}}` (design →
+*Migration + gated retirement*). The marker's **touch-before-spawn /
+remove-when-scope-empty** semantics carry over unchanged, but two things do
+change and are NOT "only the trigger":
+
+- The flaky `{{STALE_MARKER_SWEEP}}` **changes**. Its current sweep IS the poll's
+  12h age-out; retiring the poll retires that sweep, so the inbox-triggered flaky
+  instance must adopt the no-poll sweep (the next spawn attempt checks marker age
+  before `touch`), per the placeholder table.
+- In the design's **gated final step** the whole flaky lock mechanism is retired:
+  the poll, its `walt_ui/.claude/settings.json` registration, and the dead
+  `~/.claude/flaky-*` files — which includes `flaky-coordinator.lock` itself. So
+  the marker preserved verbatim above is preserved only up to that final step,
+  which removes it along with the trigger.
+
+That gated retirement lands in the product repo (walt_ui), not here; this template
+is the harness-side artifact that step rewrites guidance to point at.
