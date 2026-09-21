@@ -99,3 +99,56 @@ they are repeated here so the procedure carries its own safety):
   project name). A `down` that only removed containers leaves the network holding
   an address-pool slot.
 - Record the teardown in the Mission's state-log entry.
+
+## Reclaiming the address pool when it starves — a DIFFERENT class
+
+The rules above — only your own fleet's stacks, only after a confirmed merge —
+govern `docker compose down -v`, which **destroys volumes and therefore data**.
+They are not the right rule for an exhausted address pool, and applying them
+there leaves no sanctioned way to reclaim an orphaned network: the dead lanes
+holding the last subnets belong to runs that ended, so nobody's live fleet owns
+them and every fleet's next dispatch wedges on
+`all predefined address pools have been fully subnetted`. That is a machine-wide
+stop with no actor permitted to clear it.
+
+**Probe the pool before a dispatch wave, not after the wedge:**
+
+```sh
+docker network ls --format '{{.Name}}' | wc -l
+docker network inspect -f '{{.Name}} {{len .Containers}}' $(docker network ls -q)
+```
+
+An idle network (`0` containers) from an ended run is a corpse holding a subnet.
+When free subnets are running out, **`docker network prune -f` is sanctioned,
+whoever created the networks** — and it is a genuinely different act from a
+destructive teardown:
+
+- Its safety predicate is exactly *no container is attached*, enforced by docker
+  itself, so it cannot take a network a live lane is using. You are not judging
+  liveness; docker is.
+- It destroys **no volume, no image, and no data** — only an address-pool
+  reservation.
+- A compose project recreates its network automatically on the next `up`, so the
+  reclaim is reversible by the normal path.
+- It is not a system-level change: no daemon, no service, no `/etc`, no `sudo`.
+
+Verify afterwards that every network you still need survived with its containers
+still attached (re-run the inspect above), and record the count before and after
+in the state log.
+
+Residual, accepted: an agent holding a **stopped** stack it meant to
+`docker compose start` now needs `docker compose up` instead — which is the
+normal path anyway, and far cheaper than a machine-wide dispatch wedge.
+
+**Volumes are NOT in this class.** They are the data-bearing resource, and a
+volume belonging to another lane is not yours to reclaim — `docker volume prune`
+and friends stay off the table. A large reclaimable-volume figure is an owner
+follow-up to report, never an action to take.
+
+Measured 2026-09-20-ai-lms (DEC-010): the pool was probed at 30 networks, 27 of
+them idle, with **one free subnet left** — the next dispatch of any lane would
+have wedged. All fifteen `172.17–172.31/16` pools were consumed, by 24
+`walt-ui-*` lanes from runs that had already ended. `docker network prune -f`
+took 30 → 6 and all three live networks survived intact. The admiral got there
+only by reasoning its way out of its own teardown rule mid-run; that reasoning
+is what this section replaces.
