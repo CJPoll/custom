@@ -42,10 +42,18 @@ AGENTS_DIR = File.join(AI_DIR, "agents")
 # Rendered-line budgets, keyed by the <name> in ai/agents/athena-<name>.md.
 # admiral => 500 is the target the admiral-500 shrink delivers
 # (ai/docs/admiral-500-design.md §0.1 fixed decision, stage 4): the resident trim
-# landed and the cap is now locked at 500 (rendered sits at ~496, a modest
-# headroom below). Every other agent is pinned at its current rendered size plus a
-# small headroom, so the gate caps regrowth without false-failing an un-optimized
+# landed and the cap is locked at 500. Every other agent is pinned at or near its
+# rendered size, so the gate caps regrowth without false-failing an un-optimized
 # agent. Each is a one-line ratchet.
+#
+# These numbers are CONTENDED. They are one shared global edited by the
+# shipwright cron, by the captain-500 chain whose whole objective is to lower
+# them, and by any fleet whose work adds a resident line -- so two branches with
+# disjoint file sets can each pass alone and fail together (CLAUDE.md -> "Two
+# fleets in one repo is normal"). Raising an entry is therefore not a local
+# decision: for an agent under an active shrink objective it silently UNDOES
+# that objective, and nothing in git would show it as a reversal. Ratchet DOWN
+# freely; see the overage `Fix:` below before ever ratcheting one up.
 BUDGETS = {
   "admiral"     => 500,   # target delivered by the admiral-500 stage-4 resident trim
   "captain"     => 760,   # current 730 + headroom
@@ -82,6 +90,21 @@ def evaluate(agents, budgets)
   [overages, missing]
 end
 
+# How close each budgeted agent is to its cap, for agents at or under it.
+# Returns [name, count, budget, headroom] for any with headroom <= THRESHOLD.
+# Reporting only — never consulted by evaluate(), so it cannot change a verdict.
+HEADROOM_NOTICE = 10
+
+def exhausted(agents, budgets = BUDGETS, threshold = HEADROOM_NOTICE)
+  agents.filter_map do |name, _path, count|
+    budget = budgets[name]
+    next nil if budget.nil? || count > budget
+
+    left = budget - count
+    left <= threshold ? [name, count, budget, left] : nil
+  end
+end
+
 def run_check
   agents = rendered_agents
   if agents.empty?
@@ -95,6 +118,29 @@ def run_check
   if overages.empty? && missing.empty?
     summary = agents.map { |n, _p, c| "#{n} #{c}/#{BUDGETS[n]}" }.join(", ")
     puts "check-agent-size: OK — #{agents.size} agent(s) within budget (#{summary})"
+    # HEADROOM IS REPORTED WHILE IT STILL PASSES.
+    #
+    # "admiral 500/500" above is a PASS and an exhausted budget, and the two read
+    # identically in a summary line. The next agent to add one resident line to
+    # that template gets a red gate it did not cause and, per the overage Fix:
+    # below, an invitation to raise the number -- which for an agent under an
+    # active shrink objective silently undoes it. Measured 2026-09-20: the
+    # notif-platform admiral hit admiral 500/500 mid-run and parked several turns
+    # on cross-fleet arbitration, while the captain-500 chain was contending the
+    # same number in the same week.
+    #
+    # So exhaustion is surfaced BEFORE it is a collision. Deliberately
+    # NON-BLOCKING: this changes what the check SAYS, never what it blocks.
+    exhausted(agents).each do |name, count, budget, left|
+      warn ""
+      warn "check-agent-size: NOTE athena-#{name}.md is at #{count}/#{budget} — " \
+           "#{left.zero? ? 'ZERO headroom' : "#{left} line(s) of headroom"}. Passing, but the next" \
+           " resident line turns this gate red."
+      warn "  Fix: shrink athena-#{name}.md.in now (relocate resident prose per the mechanism split in"
+      warn "  ai/blocks/ops/harness-ia.md) rather than raising BUDGETS[\"#{name}\"] when it finally fails."
+      warn "  If another fleet is already shrinking this agent, your line lands on a number it is"
+      warn "  actively lowering — rebase onto current origin/main and re-check before merging."
+    end
     return 0
   end
 
@@ -106,8 +152,14 @@ def run_check
     warn "  a deterministic procedure -> an ai/bin script; a multi-step how-to -> a JIT skill; deep"
     warn "  reference detail -> an ai/docs file. Leave a one-line resident trigger naming each new home."
     warn "  Do NOT delete a safety invariant to fit (see ai/blocks/ops/safety-checks.md) — move it to an"
-    warn "  enforced home instead. Then run ai/bin/build-agents and re-check. If a budget increase is"
-    warn "  genuinely intended and approved, raise the agent's entry in BUDGETS in ai/bin/check-agent-size."
+    warn "  enforced home instead. Then run ai/bin/build-agents and re-check."
+    warn "  Raising BUDGETS[\"#{name}\"] is NOT the default resolution and is rarely the right one. The"
+    warn "  budgets are a contended shared global: the shipwright cron, the captain-500 shrink chain and"
+    warn "  any fleet adding a resident line all edit this one table, so two branches can pass alone and"
+    warn "  fail together. For an agent under an active shrink objective, raising its entry silently"
+    warn "  UNDOES that objective and git shows it as a one-line edit, not as a reversal. Raise it only"
+    warn "  with OWNER approval, and rebase onto current origin/main first so you are not raising a number"
+    warn "  another branch is lowering. Shrinking the template is the resolution; the number is the bar."
   end
 
   missing.each do |name, count|
@@ -146,6 +198,36 @@ def run_self_test
     if missing.empty?
       warn "self-test: FAIL — an agent with no budget entry was NOT flagged as missing"; ok = false
     end
+
+    # HEADROOM REPORTER. Asserted as a real red/green flip on the boundary, not
+    # merely "it returns something": the case that matters is an EXHAUSTED
+    # budget, which passes evaluate() and so is invisible to every case above.
+    ten_agents = rendered_agents(agents_dir)
+    zero = exhausted(ten_agents, { "ten" => 10 }, 10)
+    unless zero.map { |n, c, b, l| [n, c, b, l] } == [["ten", 10, 10, 0]]
+      warn "self-test: FAIL — a 10-line agent at budget 10 was not reported as ZERO headroom"; ok = false
+    end
+    unless exhausted(ten_agents, { "ten" => 15 }, 10).map(&:last) == [5]
+      warn "self-test: FAIL — a 10-line agent at budget 15 should report 5 lines of headroom"; ok = false
+    end
+    unless exhausted(ten_agents, { "ten" => 100 }, 10).empty?
+      warn "self-test: FAIL — a 10-line agent at budget 100 is not near its cap and must be silent"; ok = false
+    end
+    # An OVER-budget agent is the overage path's business, not the notice's:
+    # reporting it twice would train a reader to skim the notice.
+    unless exhausted(ten_agents, { "ten" => 9 }, 10).empty?
+      warn "self-test: FAIL — an agent OVER budget must not also be reported as low headroom"; ok = false
+    end
+    # An unbudgeted agent is the `missing` path's business, and must not raise.
+    unless exhausted(ten_agents, {}, 10).empty?
+      warn "self-test: FAIL — an agent with no budget entry must not be reported as low headroom"; ok = false
+    end
+    # THE VERDICT IS UNCHANGED BY THE REPORTER. This is the property that keeps
+    # a reporting-only change from quietly becoming a scope change to what
+    # blocks a commit: evaluate() must not consult headroom at all.
+    unless evaluate(ten_agents, { "ten" => 10 }) == [[], []]
+      warn "self-test: FAIL — an exhausted-but-passing budget must still evaluate as clean"; ok = false
+    end
   ensure
     FileUtils.rm_rf(dir)
   end
@@ -156,7 +238,9 @@ def run_self_test
   else
     warn "check-agent-size: self-test FAILED"
     warn "  Fix: repair evaluate() so it flags a rendered agent OVER its budget and one with NO budget"
-    warn "  entry, while passing an agent at or under budget."
+    warn "  entry, while passing an agent at or under budget; and exhausted() so it reports an agent"
+    warn "  within #{HEADROOM_NOTICE} lines of its cap WITHOUT changing that verdict — the headroom notice is"
+    warn "  reporting only and must never decide what blocks a commit."
     1
   end
 end
