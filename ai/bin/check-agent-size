@@ -31,7 +31,43 @@
 #
 # Extending: to ratchet a budget down as an agent is optimized, lower its entry
 # in BUDGETS (one-line edit). A NEW agent needs a new BUDGETS entry set to its
-# current rendered count or lower — never above without owner approval.
+# current rendered count or lower. A RAISE is refused by the ratchet below.
+#
+# THE RATCHET — the bar is the LANDED value, not the one in your diff.
+#
+# Until 2026-09-21 the comparison bar and the thing under test were the same
+# diff: BUDGETS is a literal in this file, so a branch that wrote 508 was
+# measured against 508 and the gate went green. The owner-approval requirement
+# existed only as prose in the overage Fix: below, which nothing enforced.
+# Measured 2026-09-20-notif-platform (H-3/DND-247): an architect addendum
+# directed BUDGETS[admiral] 500 -> 508, a captain applied it, harness-gate passed
+# 39/39, and it was caught only by a critic at ROUND 10 quoting this file's own
+# Fix: text — after which the architect REVERSED the addendum and landed the same
+# required-correctness line at net 499 by shrink-to-pointer. The raise was never
+# necessary; it was the cheap-looking path.
+#
+# So each budget is now compared against the lowest value that has LANDED (probed
+# from refs/remotes/origin/main, then refs/heads/main; both the ref tip and the
+# merge-base, taking the minimum). Lowering always passes. A new agent's first
+# entry passes and is named. Raising FAILS.
+#
+# There is deliberately NO in-repo escape hatch. Any grant this check could read
+# — an env var, an approved.json, a comment marker — is writable by the very diff
+# being constrained, which is the mechanism being closed, not an exception to it.
+# The hatch is the ratchet itself: the owner lands the new number on main, and
+# every branch that rebases then sees it as the baseline and passes. Honest
+# residual: an agent that could push straight to main, or that edits the ratchet
+# out of this file, defeats it. Neither is closable from inside the repo, and
+# both are loud — a forge event with an audit trail, or a diff to a gate's own
+# enforcement path. This converts a silent one-line self-grant into an act that
+# is owner-visible. That is a reduction, not an elimination.
+#
+# A baseline that cannot be MEASURED is a failure, not a pass-with-note. This
+# departs from check-hooks-registered / check-inbox-registry on purpose: those
+# ask whether a SUBJECT exists and correctly pass when it does not. Here the
+# subject is always present (the table is in the diff) and what is missing is the
+# measurement — and an unmeasured ratchet that returns "no raise detected" is
+# exactly CLAUDE.md's "a failed lookup must never look like an empty one".
 
 require "fileutils"
 require "tmpdir"
@@ -63,6 +99,157 @@ BUDGETS = {
 }.freeze
 
 FILE_RE = /\Aathena-(.+)\.md\z/
+
+# --- the ratchet -------------------------------------------------------------
+
+# Refs probed for a landed BUDGETS table, in order. AGENT_SIZE_BASELINE_REF
+# names an additional ref to probe FIRST; it selects WHICH ref is read and can
+# never assert "no raise", so it is not an escape hatch — a ref it names is
+# still read for a real landed table, and naming a bogus ref yields UNRESOLVED
+# (a failure), not a pass.
+BASELINE_REFS = %w[refs/remotes/origin/main refs/heads/main].freeze
+
+def baseline_refs(env = ENV)
+  extra = env["AGENT_SIZE_BASELINE_REF"].to_s.strip
+  extra.empty? ? BASELINE_REFS : ([extra] + BASELINE_REFS)
+end
+
+GIT_ENV = {
+  "GIT_OPTIONAL_LOCKS" => "0",
+  "GIT_CONFIG_GLOBAL"  => "/dev/null",
+  "GIT_CONFIG_SYSTEM"  => "/dev/null",
+}.freeze
+
+def git_run(repo, *args)
+  out = IO.popen([GIT_ENV, "git", "-C", repo, *args], err: File::NULL, &:read)
+  [out.to_s, $CHILD_STATUS ? $CHILD_STATUS.success? : $?.success?]
+rescue StandardError
+  ["", false]
+end
+
+# Read a BUDGETS table out of source TEXT. Deliberately a strict regex over the
+# literal block and never `eval`: eval'ing a historical copy of this file would
+# execute whatever that commit contained.
+BUDGET_ENTRY_RE = /^\s*"([a-z0-9-]+)"\s*=>\s*(\d+)/.freeze
+
+def parse_budgets(text)
+  body = text.to_s[/^BUDGETS\s*=\s*\{(.*?)^\}\.freeze/m, 1]
+  return {} if body.nil?
+
+  body.scan(BUDGET_ENTRY_RE).each_with_object({}) { |(n, v), h| h[n] = Integer(v) }
+end
+
+# status: :resolved (at least one landed table read) | :absent (refs resolve but
+# this file does not exist there) | :unresolved (no measurement possible).
+Baseline = Struct.new(:status, :tables, :probes)
+
+# This file's path relative to the repo root — the KEY the ratchet looks the
+# landed table up by. Resolving it is its own step with its own outcome: a key
+# that cannot be computed returns nil and becomes UNRESOLVED, never an empty
+# table. Derived via `git -C` from AI_DIR, never from cwd (`--show-toplevel` is
+# cwd-sensitive, the trap recorded in CLAUDE.md).
+def self_repo_path(repo = AI_DIR, file = __FILE__, run: method(:git_run))
+  top, ok = run.call(repo, "rev-parse", "--show-toplevel")
+  return nil unless ok
+
+  root = top.strip
+  return nil if root.empty?
+
+  root = File.realpath(root)
+  here = File.realpath(file)
+  return nil unless here.start_with?("#{root}/")
+
+  here[(root.size + 1)..]
+rescue StandardError
+  nil
+end
+
+def resolve_baseline(repo:, file_rel:, refs: baseline_refs, run: method(:git_run))
+  probes = []
+  tables = []
+  saw_ref = false
+  saw_absent = false
+
+  if file_rel.nil? || file_rel.to_s.empty?
+    probes << ["<this file's repo-relative path>", "could not be computed"]
+    return Baseline.new(:unresolved, [], probes)
+  end
+
+  refs.each do |ref|
+    sha, ok = run.call(repo, "rev-parse", "--verify", "--quiet", "#{ref}^{commit}")
+    sha = sha.to_s.strip
+    if !ok || sha.empty?
+      probes << [ref, "no such ref"]
+      next
+    end
+    saw_ref = true
+
+    points = [["#{ref} (tip)", sha]]
+    mb, mbok = run.call(repo, "merge-base", "HEAD", sha)
+    mb = mb.to_s.strip
+    if mbok && !mb.empty?
+      points << ["merge-base(HEAD, #{ref})", mb] unless mb == sha
+    else
+      probes << ["merge-base(HEAD, #{ref})", "no common ancestor"]
+    end
+
+    points.each do |label, point|
+      blob, bok = run.call(repo, "show", "#{point}:#{file_rel}")
+      unless bok
+        probes << [label, "#{point[0, 12]}: no #{file_rel} at this commit"]
+        saw_absent = true
+        next
+      end
+
+      table = parse_budgets(blob)
+      if table.empty?
+        # A blob we CAN read but CANNOT parse is the silent-zero case: it would
+        # otherwise contribute no entries and so report no raise, forever.
+        probes << [label, "#{point[0, 12]}: BUDGETS table unreadable by parse_budgets"]
+        return Baseline.new(:unresolved, [], probes)
+      end
+
+      probes << [label, "#{point[0, 12]}: #{table.size} landed budget(s)"]
+      tables << [label, point, table]
+    end
+  end
+
+  return Baseline.new(:resolved, tables, probes) unless tables.empty?
+  return Baseline.new(:absent, [], probes) if saw_ref && saw_absent
+
+  Baseline.new(:unresolved, [], probes)
+end
+
+# The lowest landed value per agent name, across every point probed. `min` (not
+# merge-base alone) is what makes a STALE origin/main conservative: if main has
+# since lowered a budget, a branch cannot re-raise it to its older merge-base
+# value and pass.
+def landed_minimums(baseline)
+  return {} unless baseline.status == :resolved
+
+  baseline.tables.each_with_object({}) do |(_label, _sha, table), mins|
+    table.each { |name, value| mins[name] = mins.key?(name) ? [mins[name], value].min : value }
+  end
+end
+
+# [name, landed, current] for every budget raised above its landed value.
+def raises(current, baseline)
+  mins = landed_minimums(baseline)
+  current.filter_map do |name, value|
+    landed = mins[name]
+    next nil if landed.nil? || value <= landed
+
+    [name, landed, value]
+  end.sort
+end
+
+# Budget entries with no landed counterpart — a new agent's first entry. Allowed,
+# but NAMED, so a table read from the wrong place shows up as "everything is new"
+# instead of passing silently.
+def new_entries(current, baseline)
+  mins = landed_minimums(baseline)
+  current.keys.reject { |name| mins.key?(name) }.sort
+end
 
 # Every rendered ai/agents/athena-*.md, as [name, absolute-path, line-count].
 def rendered_agents(dir = AGENTS_DIR)
@@ -113,11 +300,43 @@ def run_check
     return 1
   end
 
-  overages, missing = evaluate(agents, BUDGETS)
+  # THE PARSER MUST REPRODUCE THIS FILE'S OWN TABLE.
+  #
+  # The ratchet reads the landed table with parse_budgets. If someone reformats
+  # BUDGETS into a shape the parser cannot read, every baseline silently yields
+  # ZERO entries, every raise reads as "no raise", and the ratchet is dead while
+  # the gate stays green. Asserting the parser against the LIVE constant makes
+  # that break loudly, in the same diff that breaks it.
+  live = parse_budgets(File.read(__FILE__))
+  if live != BUDGETS
+    warn "check-agent-size: FAILED — parse_budgets no longer reproduces this file's own BUDGETS table"
+    warn "  (parser read #{live.size} entry(ies); the live constant has #{BUDGETS.size})."
+    warn "  Fix: the ratchet reads the LANDED budgets out of git with this same parser, so a parser that"
+    warn "  cannot read the table reports zero raises forever. Either restore the literal"
+    warn "  `BUDGETS = { \"name\" => <integer>, ... }.freeze` shape in ai/bin/check-agent-size, or update"
+    warn "  parse_budgets to the new shape IN THE SAME CHANGE. Then run ai/bin/check-agent-size --self-test."
+    return 1
+  end
 
-  if overages.empty? && missing.empty?
+  overages, missing = evaluate(agents, BUDGETS)
+  baseline = resolve_baseline(repo: AI_DIR, file_rel: self_repo_path)
+  raised   = raises(BUDGETS, baseline)
+
+  if overages.empty? && missing.empty? && raised.empty? && baseline.status != :unresolved
     summary = agents.map { |n, _p, c| "#{n} #{c}/#{BUDGETS[n]}" }.join(", ")
     puts "check-agent-size: OK — #{agents.size} agent(s) within budget (#{summary})"
+    # Name what the bar was measured against, so a baseline read from the wrong
+    # place is visible on the PASSING path rather than only on a failure.
+    case baseline.status
+    when :resolved
+      puts "  budgets ratcheted against #{baseline.tables.map { |l, s, _t| "#{l} @ #{s[0, 12]}" }.join(', ')}"
+    when :absent
+      puts "  no landed BUDGETS table at any probed ref — every entry is new (probed: " \
+           "#{baseline.probes.map { |r, o| "#{r}: #{o}" }.join('; ')})"
+    end
+    unless (fresh = new_entries(BUDGETS, baseline)).empty?
+      puts "  new budget entry(ies) with no landed counterpart: #{fresh.join(', ')}"
+    end
     # HEADROOM IS REPORTED WHILE IT STILL PASSES.
     #
     # "admiral 500/500" above is a PASS and an exhausted budget, and the two read
@@ -168,7 +387,186 @@ def run_check
     warn "  the current rendered count or lower; never above without owner approval)."
   end
 
+  raised.each do |name, landed, current|
+    warn "check-agent-size: FAILED — BUDGETS[\"#{name}\"] is #{current}, raised above the landed #{landed}."
+    warn "  This diff moved its own bar: the budget and the thing it measures are both in your change, so"
+    warn "  a raise is self-satisfying. The bar is the lowest value on main, not the one you just wrote."
+    warn "  Fix: do NOT raise the number — resolve the content, in this order."
+    warn "    1. RELOCATE per ai/blocks/ops/harness-ia.md's mechanism split: a must-happen invariant -> a"
+    warn "       hook or gate; a deterministic procedure -> an ai/bin script; a multi-step how-to -> a JIT"
+    warn "       skill; deep reference detail -> an ai/docs file. Leave a one-line resident trigger."
+    warn "    2. FIT NET-ZERO: add the minimal pointer and shrink an equivalent count elsewhere in"
+    warn "       ai/agents/athena-#{name}.md.in. Measured 2026-09-21: this is how the admiral's required"
+    warn "       correctness line actually landed, at 499, after a 500->508 raise was reversed at critic"
+    warn "       round 10. Never delete a safety invariant to fit (ai/blocks/ops/safety-checks.md)."
+    warn "    3. ONLY IF IRREDUCIBLE: report the ceiling upward (captain -> admiral -> architect -> owner)"
+    warn "       and keep working the other paths — this is not a stall. The OWNER lands the new number on"
+    warn "       main themselves; rebase onto it and this check passes. There is no in-repo approval flag,"
+    warn "       because anything this check could read, your diff could also write."
+    warn "  If instead main has LOWERED this budget under you, rebase onto current origin/main first."
+  end
+
+  if baseline.status == :unresolved
+    warn "check-agent-size: FAILED — could not read a landed BUDGETS table, so no raise could be detected."
+    warn "  This is a missing MEASUREMENT, not a clean result: reporting 'no raise' here would be a failed"
+    warn "  lookup wearing an empty one's clothes. Candidate refs probed, and what each gave:"
+    baseline.probes.each { |ref, outcome| warn "    #{ref} -> #{outcome}" }
+    warn "  Fix: give the check a landed table to compare against — `git fetch origin main` (or"
+    warn "  `git fetch --deepen=100` in a shallow clone), or set AGENT_SIZE_BASELINE_REF to an EXISTING"
+    warn "  local ref that carries ai/bin/check-agent-size. If a probe says the table was unreadable, the"
+    warn "  BUDGETS literal shape changed and parse_budgets must be updated to match."
+  end
+
   1
+end
+
+# Source text for a fixture copy of this file carrying a given BUDGETS table.
+def budgets_fixture(table)
+  body = table.map { |n, v| "  \"#{n}\" => #{v},\n" }.join
+  "#!/usr/bin/env ruby\nBUDGETS = {\n#{body}}.freeze\n"
+end
+
+# RATCHET CASES — driven against a REAL hermetic git repo, not a stubbed runner,
+# so the git invocations themselves (rev-parse/merge-base/show spellings) are
+# under test and not merely the logic around them. Global/system git config is
+# neutralised via GIT_ENV (a leaked core.excludesFile is a recorded gotcha).
+def ratchet_cases(repo) # rubocop:disable Metrics/AbcSize
+  ok = true
+  fail_case = lambda do |msg|
+    warn "self-test: FAIL — #{msg}"
+    ok = false
+  end
+
+  FileUtils.mkdir_p(File.join(repo, "ai", "bin"))
+  rel  = "ai/bin/check-agent-size"
+  path = File.join(repo, rel)
+  git  = lambda do |*args|
+    out, good = git_run(repo, "-c", "user.name=t", "-c", "user.email=t@e", *args)
+    [out, good]
+  end
+
+  git_run(repo, "init", "--quiet")
+  git_run(repo, "symbolic-ref", "HEAD", "refs/heads/main")
+  File.write(path, budgets_fixture({ "ten" => 500 }))
+  git.call("add", "-A")
+  git.call("commit", "--quiet", "-m", "landed 500")
+
+  # A ref that resolves but where this file does not exist (orphan history).
+  git.call("checkout", "--quiet", "--orphan", "empty")
+  FileUtils.rm_f(path)
+  git_run(repo, "rm", "--quiet", "--cached", "-r", ".")
+  File.write(File.join(repo, "README"), "no budgets here\n")
+  git.call("add", "-A")
+  git.call("commit", "--quiet", "-m", "no budgets file")
+
+  # A ref where the file exists but the table is unparseable.
+  git.call("checkout", "--quiet", "main")
+  git.call("checkout", "--quiet", "-b", "garbled")
+  File.write(path, "#!/usr/bin/env ruby\nBUDGETS = compute_table()\n")
+  git.call("add", "-A")
+  git.call("commit", "--quiet", "-m", "reformatted table")
+
+  # Working branch, forked from main@500.
+  git.call("checkout", "--quiet", "main")
+  git.call("checkout", "--quiet", "-b", "work")
+
+  main_ref = ["refs/heads/main"]
+  base = resolve_baseline(repo: repo, file_rel: rel, refs: main_ref, run: method(:git_run))
+
+  fail_case.call("a landed BUDGETS table was not resolved from a real repo") unless base.status == :resolved
+  unless landed_minimums(base) == { "ten" => 500 }
+    fail_case.call("landed minimums should be {ten=>500}, got #{landed_minimums(base).inspect}")
+  end
+
+  # HIT CASES.
+  unless raises({ "ten" => 508 }, base).map(&:first) == ["ten"]
+    fail_case.call("raising a budget 500 -> 508 was NOT flagged")
+  end
+  unless raises({ "ten" => 490 }, base).empty?
+    fail_case.call("lowering a budget 500 -> 490 must pass — the ratchet only blocks raises")
+  end
+  unless raises({ "ten" => 500 }, base).empty?
+    fail_case.call("an unchanged budget was flagged as raised")
+  end
+  unless raises({ "ten" => 500, "fresh" => 9 }, base).empty?
+    fail_case.call("a NEW agent's first budget entry must not be flagged as a raise")
+  end
+  unless new_entries({ "ten" => 500, "fresh" => 9 }, base) == ["fresh"]
+    fail_case.call("a new budget entry must be reported BY NAME, not passed silently")
+  end
+
+  # STALE-TIP CONSERVATISM: main lowers to 480 after `work` forked at 500. The
+  # merge-base still says 500, so merge-base alone would let 500 stand; the
+  # minimum over tip AND merge-base refuses it.
+  git.call("checkout", "--quiet", "main")
+  File.write(path, budgets_fixture({ "ten" => 480 }))
+  git.call("add", "-A")
+  git.call("commit", "--quiet", "-m", "lowered to 480")
+  git.call("checkout", "--quiet", "work")
+
+  stale = resolve_baseline(repo: repo, file_rel: rel, refs: main_ref, run: method(:git_run))
+  unless landed_minimums(stale) == { "ten" => 480 }
+    fail_case.call("with tip=480 and merge-base=500 the baseline must be 480, " \
+                   "got #{landed_minimums(stale).inspect}")
+  end
+  unless raises({ "ten" => 500 }, stale).map(&:first) == ["ten"]
+    fail_case.call("holding 500 while main lowered to 480 is a raise and must fail")
+  end
+
+  # MISS CASES — a wrongly computed or unresolvable baseline key must SAY SO.
+  nosuch = resolve_baseline(repo: repo, file_rel: rel, refs: ["refs/heads/does-not-exist"],
+                            run: method(:git_run))
+  unless nosuch.status == :unresolved
+    fail_case.call("a baseline naming no existing ref must be UNRESOLVED, not an empty pass")
+  end
+  unless nosuch.probes.map(&:first) == ["refs/heads/does-not-exist"]
+    fail_case.call("UNRESOLVED must enumerate every candidate ref it probed")
+  end
+  unless raises({ "ten" => 9999 }, nosuch).empty? && landed_minimums(nosuch).empty?
+    fail_case.call("an unresolved baseline must yield no minimums — the FAILURE is the verdict")
+  end
+
+  garbled = resolve_baseline(repo: repo, file_rel: rel, refs: ["refs/heads/garbled"],
+                             run: method(:git_run))
+  unless garbled.status == :unresolved
+    fail_case.call("a readable blob whose BUDGETS table will not parse must be UNRESOLVED, " \
+                   "not zero budgets")
+  end
+  unless garbled.probes.any? { |_r, o| o.include?("unreadable by parse_budgets") }
+    fail_case.call("an unparseable landed table must name the ref and sha it failed on")
+  end
+
+  absent = resolve_baseline(repo: repo, file_rel: rel, refs: ["refs/heads/empty"],
+                            run: method(:git_run))
+  unless absent.status == :absent
+    fail_case.call("a resolvable ref with no #{rel} must be :absent (a correct empty), " \
+                   "distinguishable from :unresolved, got #{absent.status.inspect}")
+  end
+
+  # A path key that cannot be computed is an error, not an empty table.
+  unless resolve_baseline(repo: repo, file_rel: nil, refs: main_ref,
+                          run: method(:git_run)).status == :unresolved
+    fail_case.call("an uncomputable repo-relative path must be UNRESOLVED")
+  end
+  if self_repo_path(repo, File.join(Dir.tmpdir, "definitely-outside-#{Process.pid}"))
+    fail_case.call("a file outside the repo must not resolve to a repo-relative path")
+  end
+
+  # THE PARSER GUARD (the thing that keeps the ratchet able to fire at all).
+  unless parse_budgets(budgets_fixture({ "a" => 1, "b" => 2 })) == { "a" => 1, "b" => 2 }
+    fail_case.call("parse_budgets must read a well-formed BUDGETS literal")
+  end
+  unless parse_budgets("BUDGETS = compute_table()\n").empty?
+    fail_case.call("parse_budgets must return no entries for a non-literal table, so the live-file " \
+                   "assertion in run_check fires"
+                  )
+  end
+  unless parse_budgets(File.read(__FILE__)) == BUDGETS
+    fail_case.call("parse_budgets does not reproduce THIS file's own BUDGETS table — the ratchet " \
+                   "would read every baseline as zero budgets")
+  end
+
+  ok
 end
 
 def run_self_test
@@ -228,6 +626,8 @@ def run_self_test
     unless evaluate(ten_agents, { "ten" => 10 }) == [[], []]
       warn "self-test: FAIL — an exhausted-but-passing budget must still evaluate as clean"; ok = false
     end
+
+    ok = false unless ratchet_cases(File.join(dir, "repo"))
   ensure
     FileUtils.rm_rf(dir)
   end
