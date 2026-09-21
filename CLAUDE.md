@@ -331,6 +331,42 @@ producer-registration mismatch the platform IS delivering, the file exists, the
 flag is permanently false, and the instrument can never fire. In both cases the
 unverifiable sentence was the one doing the persuading.
 
+### A check's own bar must not live in the diff it is checking
+
+A gate that reads its threshold, allowlist, or marker list out of a file the
+change under test may edit is not enforcing that bar — it is asking the change
+what the bar should be. The failure is silent and reads as a pass: the number
+moves, the check compares against the moved number, and the gate goes green. The
+policy forbidding it usually exists, as prose in the check's own `Fix:` text,
+where nothing executes it.
+
+So **a numeric bar is ratcheted against its LANDED value** — the lowest across
+the merge-base and the tip of `origin/main`, read out of git — and never against
+the value in the working tree. Loosening fails; tightening is free; a genuinely
+new entry passes and is named. **Do not build an in-repo escape hatch.** An env
+var, an `approved.json`, a `# owner-approved` comment: each is writable by the
+same diff, so each is the hole rather than the exemption. The hatch is that the
+owner lands the new bar on `main` themselves and the branch rebases onto it —
+unforgeable precisely because it is outside the diff. Say the residual out loud
+(an agent that can push to `main`, or that edits the check's enforcement path,
+still defeats it) rather than writing the reduction up as an elimination.
+
+And **a bar that cannot be MEASURED is a failure, not a pass with a note.** This
+is the one place to depart from the environment-safe precedent of
+`check-hooks-registered` / `check-inbox-registry`: those ask whether a *subject*
+exists and rightly pass when it does not, whereas here the subject is always in
+the diff and what is missing is the measurement. Exit non-zero, enumerate every
+candidate probed and what each gave, and keep "found nothing" textually distinct
+from "could not look".
+
+Measured 2026-09-20/21, twice. `check-agent-size`'s `BUDGETS` was raised
+500 → 508 by an architect addendum, applied by a captain, and passed the gate
+39/39; a critic caught it at round 10 by quoting the check's own Fix: text, and
+the architect then reversed itself and landed the same required line at 499 by
+shrink-to-pointer. Separately, captain-500's proposed `check-resident-invariants`
+was found "defeated by the PR it constrains … threshold-lowering path the
+change-under-test controls", and that design is parked after 19 rounds.
+
 ### The same question, asked of a PLAN: can step N's inputs exist at step N?
 
 An ordered list of implementation steps reads as executable *because it is
