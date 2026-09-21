@@ -138,17 +138,47 @@ end
 # Impure shell — forge backends (not exercised by --self-test)
 # ---------------------------------------------------------------------------
 
+# Every forge probe that fails is RECORDED, not just warned about. A probe that
+# could not run and a repo with genuinely nothing to report both yield an empty
+# row set, and `[]` on stdout with exit 0 makes them indistinguishable to the
+# caller — the `ai/CLAUDE.md` class *A failed lookup must never look like an
+# empty one*, and its corollary *a bar that cannot be MEASURED is a failure, not
+# a pass with a note*. Measured 2026-09-21: an hourly shipwright cron with no
+# `gh` token got HTTP 401 on every repo and wrote "0 outliers across all three
+# repos" into its durable journal, a dozen runs deep, having measured nothing.
+module ProbeFailures
+  class << self
+    def list
+      @list ||= []
+    end
+
+    def reset!
+      @list = []
+    end
+
+    def record(cmd, detail)
+      list << { cmd: cmd, detail: detail.to_s.strip }
+      nil
+    end
+
+    def any?
+      !list.empty?
+    end
+  end
+end
+
 def run_json(cmd, dir)
+  printable = "#{cmd.first} #{cmd[1..].join(' ')}"
   out, err, st = Open3.capture3(*cmd, chdir: dir)
   unless st.success?
-    warn "lead-time: #{cmd.first} #{cmd[1..].join(' ')} failed: #{err.strip}"
+    warn "lead-time: #{printable} failed: #{err.strip}"
     warn "Fix: run against a repo whose forge you can read (`gh auth status` / `glab auth status`)."
-    return nil
+    return ProbeFailures.record(printable, err)
   end
   JSON.parse(out)
 rescue JSON::ParserError => e
   warn "lead-time: could not parse #{cmd.first} output: #{e.message}"
-  nil
+  ProbeFailures.record(printable, "unparseable output: #{e.message}")
 end
 
 def origin_url(dir)
@@ -368,6 +398,23 @@ def self_test
   check.call("compute deploy code", r2[:code_seconds], 6119)    # start -> merge
   check.call("compute deploy tail", r2[:tail_seconds], 637)     # merge -> deploy
 
+  # ProbeFailures — the "could not look" vs "looked, found nothing" accounting.
+  # Asserted on the MISS side deliberately: a suite that only ever exercises a
+  # healthy probe proves nothing about this class.
+  ProbeFailures.reset!
+  check.call("probes clean initially", ProbeFailures.any?, false)
+  check.call("record returns nil (so callers still see no data)",
+             ProbeFailures.record("gh pr list", "HTTP 401: Requires authentication"), nil)
+  check.call("failed probe is observable", ProbeFailures.any?, true)
+  check.call("failed probe names the command",
+             ProbeFailures.list.first.to_h[:cmd], "gh pr list")
+  check.call("failed probe keeps the reason",
+             ProbeFailures.list.first.to_h[:detail], "HTTP 401: Requires authentication")
+  ProbeFailures.record("glab api projects/1/merge_requests", "403")
+  check.call("probes accumulate", ProbeFailures.list.size, 2)
+  ProbeFailures.reset!
+  check.call("reset clears", ProbeFailures.any?, false)
+
   if failures.empty?
     puts "lead-time --self-test: PASS (pure-logic assertions)"
     0
@@ -455,6 +502,21 @@ def main(argv)
     rows = rows.select { |r| r[:lead_seconds] && r[:lead_seconds] >= threshold }
                .each { |r| r[:slow_threshold_min] = slow_min }
     rows.sort_by! { |r| -(r[:lead_seconds] || 0) }
+  end
+
+  # A scan that could not read the forge is NOT a scan. Refuse to emit a result
+  # at all — an empty (or partial) row set here means "could not look", and the
+  # caller must not be able to read it as "looked, found nothing".
+  if ProbeFailures.any?
+    warn "lead-time: SCAN INCOMPLETE — #{ProbeFailures.list.size} forge probe(s) " \
+         "failed against #{repo}. This is NOT a measurement and MUST NOT be " \
+         "recorded as \"0 outliers\" or as a clean scan:"
+    ProbeFailures.list.each { |f| warn "  - #{f[:cmd]}: #{f[:detail].lines.first.to_s.strip}" }
+    warn "Fix: restore forge auth for this repo and re-run (`gh auth status` / " \
+         "`glab auth status`; a cron or other headless session often has no token " \
+         "even though an interactive one does). Until it re-runs clean, report the " \
+         "scan as UNAVAILABLE, not as zero outliers."
+    return 3
   end
 
   if as_json
