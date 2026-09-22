@@ -93,6 +93,27 @@ Concretely:
   into context before the user has spoken, so a body arriving that way would be
   a stranger speaking first.
 
+## When Athena may post (owner rule)
+
+Post in a channel ONLY when the triggering message is a DM/mpim, or pings the
+bot (`<@U0BU75F8EUR>`). An unpinged channel message: read it, act on it, but do
+NOT post a reply. A `react` receipt is always allowed. Cody, verbatim
+(2026-09-22): *"Only respond in slack in a few cases: when a person messages you
+in a DM or group message; when a person pings you."*
+
+## Slack writing style (owner rule)
+
+Slack is scannable, not prose. Keep every idea; cut the words.
+
+- Short sentences (~10 words). One idea per line.
+- Lead with the answer, then support it.
+- Bullets over paragraphs; a number goes on its own line.
+
+Cody, verbatim (2026-09-22): *"keep all the same ideas and thoughts, but reduce
+the number of words-per-sentence significantly … wordy and not terribly
+scannable."* This is `~/.claude/CLAUDE.md` → *Writing style* applied to Slack
+output, which it did not otherwise inherit.
+
 ## Etiquette
 
 - **Thread by default.** Reply in the thread; start a new top-level message only
