@@ -63,6 +63,11 @@ function makeFakeEnv() {
     ATHENA_CHANNEL_WATCH_MODE: 'fs-watch',
   };
   delete env.ATHENA_INBOX_EXPECT_PROJECT;
+  // The golden records the relay-OFF capability set (claude/channel + tools). If
+  // the surrounding environment happens to export ATHENA_ATTEND_OWNER_SLACK_ID,
+  // the server would declare claude/channel/permission and the golden would drift
+  // spuriously. Strip it so the conformance always exercises the OFF branch.
+  delete env.ATHENA_ATTEND_OWNER_SLACK_ID;
   return { tmp, env };
 }
 

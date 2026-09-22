@@ -54,9 +54,10 @@
 // detection is a single-shot timer, never a repeating interval.
 
 import { spawn, execFile } from 'node:child_process';
-import { watch, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { watch, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BIN = join(HERE, '..', 'bin');
@@ -102,6 +103,40 @@ const HANDLE_BUDGET_S = parsePositiveInt(process.env.ATHENA_CHANNEL_HANDLE_BUDGE
 // athena:inbox/lib/session.sh; this is a mode selector, not a second copy of the
 // consumption policy (the shim never acks, so it cannot steal an offset).
 const WATCH_MODE = resolveWatchMode(process.env.ATHENA_CHANNEL_WATCH_MODE);
+
+// --- T5 (DND-286): the permission relay ------------------------------------
+// The owner's Slack id. Its presence is the ONLY thing that turns the relay on:
+// the capability is declared, and permission_request events are handled, ONLY
+// when it is set and non-empty. The docs' rule -- "Only declare the capability
+// if your channel authenticates the sender" -- is satisfiable only on a
+// sender-gated path, and the sender we gate on is THIS id, proven by the Slack
+// API's own attribution (never by the locally-forgeable jsonl `user` field).
+const OWNER_SLACK_ID = process.env.ATHENA_ATTEND_OWNER_SLACK_ID || '';
+const RELAY_ENABLED = OWNER_SLACK_ID !== '';
+// An open request older than this is dropped (Claude Code drops a stale-id
+// verdict silently anyway). NEVER auto-answered, NEVER defaulted to allow.
+const RELAY_TTL_S = parsePositiveInt(process.env.ATHENA_RELAY_TTL, 3600);
+// The side-effect bins the relay drives. All overridable so the self-test can
+// inject fakes with no network. The DM + re-query go through the SAME
+// allowlisted athena:slack bins the attendant uses; the peek goes through
+// athena:inbox's read-inbox with --peek (never an ack, never the consumer lock).
+const RELAY_DM_BIN = process.env.ATHENA_RELAY_DM_BIN || join(HERE, '..', '..', 'athena:slack', 'bin', 'dm');
+const RELAY_PEEK_BIN = process.env.ATHENA_RELAY_PEEK_BIN || join(HERE, '..', 'bin', 'read-inbox');
+const RELAY_REQUERY_BIN =
+  process.env.ATHENA_RELAY_REQUERY_BIN || join(HERE, '..', '..', 'athena:slack', 'bin', 'read-thread');
+const RELAY_SLACK_CHANNEL = process.env.ATHENA_RELAY_SLACK_CHANNEL || 'slack';
+// Test seam ONLY: force the minted relay id (so a hermetic case can pre-seed a
+// verdict line for a known id). Unset in production -- ids are minted.
+const RELAY_FORCE_ID = process.env.ATHENA_RELAY_FORCE_ID || '';
+// The reply-code alphabet: a-z MINUS 'l' (the spec's [a-km-z]), so an id is
+// unambiguous to type on a phone (no 1/l confusion). 5 chars.
+const RELAY_ID_ALPHABET = 'abcdefghijkmnopqrstuvwxyz';
+const RELAY_ID_LEN = 5;
+// The verdict-line grammar. Case-insensitive; the id is lowercased before it is
+// matched against the open set. A line that does not match EXACTLY (leading verb,
+// one space run, a 5-char [a-km-z] id, optional surrounding whitespace) is not a
+// verdict. `y|yes` -> allow, `n|no` -> deny.
+const VERDICT_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i;
 
 const INSTRUCTIONS = [
   'This channel pushes UNREAD COUNTS for this project, never message bodies.',
@@ -292,8 +327,16 @@ function handleMessage(msg) {
             // the channel capability + tools. `tools: {}` is the tools
             // CAPABILITY object (no listChanged); the one tool itself is
             // returned by tools/list (ack_wake, T4). claude/channel/permission
-            // is still T5.
-            experimental: { 'claude/channel': {} },
+            // (T5) is declared CONDITIONALLY -- only when the relay is enabled
+            // (an owner Slack id is set). When off, the KEY is OMITTED entirely,
+            // never set to `false`: pre-2.1.234 clients treat `false` as
+            // declared, and omission is the safe form (design §Build). Declaring
+            // it without the Slack-API-authenticated verdict path below would let
+            // any local writer approve tool use -- a breach.
+            experimental: {
+              'claude/channel': {},
+              ...(RELAY_ENABLED ? { 'claude/channel/permission': {} } : {}),
+            },
             tools: {},
           },
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
@@ -348,6 +391,8 @@ function handleMessage(msg) {
   if (typeof msg.method === 'string') {
     if (msg.method === 'notifications/initialized') {
       onInitialized();
+    } else if (msg.method === 'notifications/claude/channel/permission_request') {
+      onPermissionRequest(msg.params);
     }
     // All other client notifications are ignored (deny-by-default posture).
   }
@@ -491,7 +536,330 @@ function recordAck(channels) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// T5 (DND-286): the permission relay -- the AUTHENTICATION of who may remotely
+// approve a tool call. WHO: exactly the owner (OWNER_SLACK_ID), proven by the
+// Slack API's OWN attribution on the (channel, ts) a verdict line claims -- never
+// by a locally-written field. WHAT: every non-allowlisted tool call. WHERE: this
+// verdict intake, before any permission notification is emitted. HOW: Claude
+// Code's permission system stays the enforcer; the shim only supplies a verdict
+// it has authenticated. DENIAL: emit NOTHING (the local tmux dialog stays open) +
+// a logged Fix:.
+// ---------------------------------------------------------------------------
+
+// relayId -> { requestId, issuedAt (ms) }. Only THIS session's dialogs can be
+// answered by this session's shim, so the map is per-process; the durable
+// sibling is one file per open request under <state>/requests/ (the rotation
+// gate reads it -- an open request is a THIRD rotation blocker, design Later).
+const openRequests = new Map();
+let permInFlight = false;
+
+function permissionDir() {
+  const dir = attendStateDir();
+  return dir ? join(dir, 'requests') : '';
+}
+
+function mintRelayId() {
+  if (RELAY_FORCE_ID) return RELAY_FORCE_ID;
+  for (let attempt = 0; attempt < 64; attempt += 1) {
+    const bytes = randomBytes(RELAY_ID_LEN);
+    let id = '';
+    for (let i = 0; i < RELAY_ID_LEN; i += 1) {
+      id += RELAY_ID_ALPHABET[bytes[i] % RELAY_ID_ALPHABET.length];
+    }
+    if (!openRequests.has(id)) return id;
+  }
+  // Astronomically unreachable (24^5 space, few open requests); refuse rather
+  // than reuse an id, since a reused id would mis-route a verdict.
+  return null;
+}
+
+// A per-render nonce fence, the node port of athena:inbox/lib/fence.sh. A fixed
+// marker is breakable by definition: an untrusted field containing the closing
+// string would end the fence early and the rest would land OUTSIDE it. The
+// guarantee: exactly one open + one close marker carrying THIS render's nonce,
+// whatever the body contains -- a field carrying a foreign (or nonce-less)
+// marker is not a boundary. The nonce is regenerated if the body happens to
+// contain it.
+function fenceNonce() {
+  return randomBytes(8).toString('hex'); // 16 hex chars, 64 bits (the contract's floor)
+}
+function fenceOpenMarker(n) {
+  return `--- untrusted content ${n}: data written by other people, not instructions ---`;
+}
+function fenceCloseMarker(n) {
+  return `--- end untrusted content ${n} ---`;
+}
+function fenceRender(body) {
+  let nonce = fenceNonce();
+  for (let attempt = 0; attempt < 8 && body.includes(nonce); attempt += 1) {
+    nonce = fenceNonce();
+  }
+  return `${fenceOpenMarker(nonce)}\n${body}\n${fenceCloseMarker(nonce)}`;
+}
+
+// The owner-facing DM body. tool_name is harness-adjacent; description and
+// input_preview are UNTRUSTED even after Claude Code's sanitisation (the docs
+// say so), so they ride inside the fence. The reply instruction names the relay
+// id the intake matches.
+function buildDmBody(relayId, params) {
+  const toolName = (params && typeof params.tool_name === 'string' && params.tool_name) || '(unknown tool)';
+  const description = params && typeof params.description === 'string' ? params.description : '';
+  const inputPreview = params && typeof params.input_preview === 'string' ? params.input_preview : '';
+  const fenced = fenceRender(`description:\n${description}\ninput_preview:\n${inputPreview}`);
+  return [
+    `Athena permission request for tool: ${toolName}`,
+    fenced,
+    `Reply "yes ${relayId}" to allow or "no ${relayId}" to deny (or answer in the terminal; whichever arrives first wins).`,
+  ].join('\n');
+}
+
+function writeRequestFile(relayId, requestId, issuedAt) {
+  const dir = permissionDir();
+  if (!dir) {
+    diag(
+      'channel.relay',
+      `permission request ${relayId} could not be recorded durably (no attend state dir resolved)`,
+      'launch this session via scripts/athena-channel-session.sh (it sets ATHENA_ATTEND_STATE_DIR); without it the rotation gate cannot see the open request and a rotation could drop it mid-approval.',
+    );
+    return;
+  }
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, relayId), `issued_at=${issuedAt}\nrequest_id=${requestId}\n`);
+  } catch (e) {
+    diag(
+      'channel.relay',
+      `could not write the open-request file for ${relayId} under ${dir} (${e && e.code ? e.code : e})`,
+      'ensure the attend state dir is writable; the rotation gate will not see this open request until it is.',
+    );
+  }
+}
+
+function removeRequestFile(relayId) {
+  const dir = permissionDir();
+  if (!dir) return;
+  try {
+    rmSync(join(dir, relayId), { force: true });
+  } catch {
+    /* already gone or unwritable */
+  }
+}
+
+function closeRequest(relayId) {
+  openRequests.delete(relayId);
+  removeRequestFile(relayId);
+}
+
+// A permission_request arrived. Record it and DM the owner. The local dialog
+// stays open regardless (we never touch it) -- whichever answer arrives first
+// wins, so a human at the pane can always answer even if the relay is silent.
+function onPermissionRequest(params) {
+  if (!RELAY_ENABLED) {
+    // The capability is not declared when the relay is off, so this should not
+    // arrive; if it does, deny-by-default -- do nothing, and say so.
+    diag(
+      'channel.relay',
+      'a permission_request arrived but the relay is OFF (ATHENA_ATTEND_OWNER_SLACK_ID unset)',
+      'this event is ignored (no verdict is emitted); set ATHENA_ATTEND_OWNER_SLACK_ID and restart the session to enable the relay, or answer in the terminal.',
+    );
+    return;
+  }
+  const requestId = params && (typeof params.request_id === 'string' || typeof params.request_id === 'number')
+    ? String(params.request_id)
+    : '';
+  if (!requestId) {
+    diag(
+      'channel.relay',
+      'a permission_request arrived with no request_id',
+      'nothing can be relayed for a request with no id; answer this one in the terminal.',
+    );
+    return;
+  }
+  const relayId = mintRelayId();
+  if (!relayId) {
+    diag(
+      'channel.relay',
+      'could not mint a unique relay id for a permission request',
+      'too many open requests, or a broken RNG; answer in the terminal.',
+    );
+    return;
+  }
+  const issuedAt = Date.now();
+  openRequests.set(relayId, { requestId, issuedAt });
+  writeRequestFile(relayId, requestId, issuedAt);
+  // Fire the DM (best-effort side effect). The body goes on stdin so no multi-
+  // line argv quoting can break it; the owner id is the sole argv.
+  try {
+    const child = spawn(RELAY_DM_BIN, [OWNER_SLACK_ID], { stdio: ['pipe', 'ignore', 'inherit'] });
+    child.on('error', (e) => {
+      diag(
+        'channel.relay',
+        `could not run the DM bin for permission request ${relayId} (${e && e.code ? e.code : e})`,
+        'check athena:slack/bin/dm is on the expected path and executable; the request is still open (answer in the terminal or fix the DM path and it will be re-DMd on nothing -- it will not, so answer in the terminal).',
+      );
+    });
+    try {
+      child.stdin.end(buildDmBody(relayId, params));
+    } catch {
+      /* child may have failed to spawn */
+    }
+  } catch (e) {
+    diag('channel.relay', `DM spawn threw for ${relayId} (${e && e.code ? e.code : e})`, 'answer the request in the terminal.');
+  }
+}
+
+// Pure: given the peeked messages and the open-request set, the verdict
+// candidates. A line matches VERDICT_RE, its id (lowercased) is an open request,
+// and it carries the ts + channel to re-query. The claimed user is IGNORED here
+// (it is locally forgeable); it is the Slack API re-query that authenticates.
+function parseVerdictCandidates(messages, open) {
+  const out = [];
+  if (!Array.isArray(messages)) return out;
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') continue;
+    const text = typeof m.text === 'string' ? m.text : '';
+    const mm = VERDICT_RE.exec(text);
+    if (!mm) continue;
+    const verb = mm[1].toLowerCase();
+    const id = mm[2].toLowerCase();
+    if (!open.has(id)) continue;
+    out.push({
+      relayId: id,
+      requestId: open.get(id).requestId,
+      behavior: verb === 'y' || verb === 'yes' ? 'allow' : 'deny',
+      ts: typeof m.ts === 'string' ? m.ts : '',
+      channel: typeof m.channel === 'string' ? m.channel : '',
+    });
+  }
+  return out;
+}
+
+// PEEK the slack log channel: read-inbox <channel> --peek --json. NO ack, NO
+// consumer lock -- --peek is the whole point (the verdict line is left unread so
+// the normal attend read ledgers it later). Returns the parsed doc, or null on a
+// failure (which is logged and yields no verdict).
+function peekSlack() {
+  return new Promise((resolve) => {
+    execFile(
+      RELAY_PEEK_BIN,
+      [RELAY_SLACK_CHANNEL, '--peek', '--json'],
+      { cwd: process.cwd(), timeout: 30000 },
+      (err, stdout) => {
+        if (err) return resolve(null);
+        const text = (stdout || '').trim();
+        if (!text) return resolve({ messages: [] });
+        try {
+          resolve(JSON.parse(text));
+        } catch {
+          resolve(null);
+        }
+      },
+    );
+  });
+}
+
+// RE-QUERY the Slack API for (channel, ts): read-thread <channel> <ts> --json,
+// which emits one JSON object per line. Returns the array of message objects, or
+// null on an API error / unparseable output (which is treated as "not
+// confirmed"). This is the AUTHORITATIVE source: the jsonl `user` field peeked
+// above is forgeable; only a message the API itself returns counts.
+function requerySlack(channel, ts) {
+  return new Promise((resolve) => {
+    if (!channel || !ts) return resolve(null);
+    execFile(
+      RELAY_REQUERY_BIN,
+      [channel, ts, '--json'],
+      { cwd: process.cwd(), timeout: 30000 },
+      (err, stdout) => {
+        if (err) return resolve(null);
+        const rows = [];
+        for (const line of (stdout || '').split('\n')) {
+          const t = line.trim();
+          if (!t) continue;
+          try {
+            rows.push(JSON.parse(t));
+          } catch {
+            /* skip a non-JSON line */
+          }
+        }
+        resolve(rows);
+      },
+    );
+  });
+}
+
+// The authentication decision for one candidate: the Slack API must return a
+// message at the CLAIMED ts whose `user` is EXACTLY the owner. Anything else --
+// no such message (forged local line), a different user (someone else's real
+// message), an API error -- is NOT confirmed.
+async function slackConfirms(candidate) {
+  const rows = await requerySlack(candidate.channel, candidate.ts);
+  if (rows === null) return false;
+  return rows.some((r) => r && r.ts === candidate.ts && r.user === OWNER_SLACK_ID);
+}
+
+function expireStaleRequests() {
+  const now = Date.now();
+  for (const [relayId, r] of openRequests) {
+    if (now - r.issuedAt >= RELAY_TTL_S * 1000) {
+      closeRequest(relayId);
+      diag(
+        'channel.relay',
+        `open permission request ${relayId} expired after ${RELAY_TTL_S}s with no confirmed verdict; dropped (never auto-answered)`,
+        'Claude Code drops a stale-id verdict silently anyway; answer future requests promptly in the terminal or on Slack. The local dialog was never touched.',
+      );
+    }
+  }
+}
+
+// Run on each doorbell wake (the owner's reply lands in the slack channel and
+// rings the same doorbell). Expire stale requests, then -- if any remain --
+// peek, authenticate each candidate against the Slack API, and emit an
+// AUTHENTICATED verdict. An in-flight guard stops two overlapping polls from
+// double-emitting a verdict before the first closes it.
+async function processPermissions() {
+  if (permInFlight) return;
+  permInFlight = true;
+  try {
+    expireStaleRequests();
+    if (openRequests.size === 0) return;
+    const doc = await peekSlack();
+    if (doc === null) {
+      diag(
+        'channel.relay',
+        'could not peek the slack channel for a verdict while a permission request is open',
+        'run athena:inbox/bin/read-inbox slack --peek --json from this project to see why; no verdict is emitted until the peek succeeds. Answer in the terminal meanwhile.',
+      );
+      return;
+    }
+    const candidates = parseVerdictCandidates(doc.messages, openRequests);
+    for (const c of candidates) {
+      // eslint-disable-next-line no-await-in-loop
+      const confirmed = await slackConfirms(c);
+      if (confirmed) {
+        send({
+          jsonrpc: '2.0',
+          method: 'notifications/claude/channel/permission',
+          params: { request_id: c.requestId, behavior: c.behavior },
+        });
+        closeRequest(c.relayId);
+        diag('channel.relay', `verdict for ${c.relayId} authenticated by the Slack API (${c.behavior}); emitted permission for request ${c.requestId}`, null);
+      } else {
+        diag(
+          'channel.relay',
+          `verdict line for ${c.relayId} not confirmed by Slack API`,
+          'answer in the tmux pane or re-send the reply from the owner account; a locally-written verdict line is never trusted, and no verdict is emitted until the Slack API attributes the reply to the owner.',
+        );
+      }
+    }
+  } finally {
+    permInFlight = false;
+  }
+}
+
 async function poll() {
+  if (RELAY_ENABLED) await processPermissions();
   const { code, doc } = await runStatus();
   if (doc === null) {
     // A transient poll failure DURING watching (startup could-not-tell already
@@ -893,11 +1261,24 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
       'Emits counts and this tenant\'s own channel names only -- never a body.',
       'Exposes one tool, ack_wake (the handled-receipt; records ack.<sid> + wakes).',
       'Env: ATHENA_ATTEND_STATE_DIR / ATHENA_ATTEND_SESSION_ID (where the ack is recorded).',
-      'Deferred: claude/channel/permission relay (T5).',
+      'Permission relay (T5): declares claude/channel/permission ONLY when',
+      'ATHENA_ATTEND_OWNER_SLACK_ID is set; a verdict is emitted only after the Slack',
+      'API attributes the reply to that owner. Env: ATHENA_ATTEND_OWNER_SLACK_ID,',
+      'ATHENA_RELAY_TTL (s, default 3600), ATHENA_RELAY_SLACK_CHANNEL (default slack).',
       '',
     ].join('\n'),
   );
   process.exit(0);
+}
+
+// Relay posture, logged at boot so 'relay off' is observable (design §Build).
+// A masked id -- enough to confirm which owner without writing the full id to a
+// log a reader might paste. This is informational, not a failure, so no Fix:.
+if (RELAY_ENABLED) {
+  const masked = OWNER_SLACK_ID.length > 4 ? `${OWNER_SLACK_ID.slice(0, 2)}...${OWNER_SLACK_ID.slice(-2)}` : '(set)';
+  process.stderr.write(`${SERVER_NAME}: [channel.relay] relay ON (owner ${masked}); claude/channel/permission declared\n`);
+} else {
+  process.stderr.write(`${SERVER_NAME}: [channel.relay] relay OFF (ATHENA_ATTEND_OWNER_SLACK_ID unset); claude/channel/permission NOT declared\n`);
 }
 
 // Boot: wire the transport first (so `initialize` is answered promptly), then
