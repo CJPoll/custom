@@ -1042,6 +1042,58 @@ assert_contains "the waiter arm path names the PLATFORM producer path for a plat
 assert_not_contains "the waiter arm path does NOT name the slack client-instance path for a platform lane" \
   "athena-inbox-client/config.json" "${darm}"
 
+# DND-317/GS-2 -- "exactly once": a platform delivery is `delivered` on the
+# CLIENT'S ACK, never on the push (athena-inbox.md's new subsection). The
+# sweeper redelivers an un-acked push, so the SAME line can be appended to the
+# channel a second time, byte-identical. The transport must stay HONEST about
+# this -- at-least-once, both lines counted, neither silently collapsed --
+# while the fold identity (`entity_id`) rides EVERY line, so a consumer
+# folding its held set by entity_id holds the entity exactly once. And the
+# lane stays KEYLESS throughout: neither line contributes a dedupe-state
+# entry, because the platform branch (logchan.sh, DND-260) computes no
+# event_id/key for a state-change line.
+setup_case
+ponce="$(make_repo ponce)"
+register ponce "${ponce}" '{"flaky":{"kind":"log","path":"once.jsonl","producer":"platform"}}'
+once_line='{"v":1,"entity_id":"notion:once","status":"in_progress"}'
+printf '%s\n%s\n' "${once_line}" "${once_line}" > "${ATHENA_INBOX_ROOT}/once.jsonl"
+
+# Pure scan: the transport is honest about the redelivery (new == 2,
+# unreadable == 0) and the fold identity collapses the two lines to ONE
+# entity for a consumer that folds by entity_id.
+res="$(printf '%s\n%s\n' "${once_line}" "${once_line}" | logchan_scan 0 "1" "" "" 0 platform)"
+assert_eq "a byte-identical redelivered platform line is counted new TWICE (transport honest about at-least-once)" \
+  "2" "$(jq -r .new <<<"${res}")"
+assert_eq "a byte-identical redelivered platform line scores no unreadable" \
+  "0" "$(jq -r .unreadable <<<"${res}")"
+assert_eq "the fold identity (entity_id) rides both lines, so a consumer folding by it holds the entity exactly once" \
+  "1" "$(jq -r '[.messages[].entity_id] | unique | length' <<<"${res}")"
+
+# Manager level: inbox-status counts the same way through the full path
+# (inbox_status_json -> _inbox_count_log -> logchan_scan), not only in the
+# pure primitive.
+pst2="$(cd "${ponce}" && inbox_status_json)"
+assert_eq "inbox-status counts a redelivered platform line as new TWICE (manager path, honest at-least-once)" \
+  "2" "$(jq -r '.channels[] | select(.name=="flaky") | .new' <<<"${pst2}")"
+assert_eq "inbox-status scores the redelivered platform line as no unreadable (manager path)" \
+  "0" "$(jq -r '.channels[] | select(.name=="flaky") | .unreadable' <<<"${pst2}")"
+
+# Consume for real (an ordinary non-peek read) and confirm the state file's
+# seen-sets gain NO entry -- the platform lane is keyless by contract, and
+# this proves it end to end through the state writer, not only in the pure
+# scan above.
+( cd "${ponce}" && "${BIN}/read-inbox" flaky >/dev/null 2>&1 )
+once_state="$(cat "${ATHENA_INBOX_ROOT}/once.state.json")"
+assert_eq "a redelivered platform line adds NO seen_event_ids entry (keyless lane, no dedupe state)" \
+  "0" "$(jq -r '.seen_event_ids | length' <<<"${once_state}")"
+assert_eq "a redelivered platform line adds NO seen_keys entry (keyless lane, no dedupe state)" \
+  "0" "$(jq -r '.seen_keys | length' <<<"${once_state}")"
+# The offset still advances past both lines despite the keyless lane -- a
+# second read shows nothing new. A lane that dropped its offset advance
+# because it saw no key to dedupe on would re-report the redelivery forever.
+assert_eq "a second read of a fully-consumed platform channel shows nothing new" "0" \
+  "$(cd "${ponce}" && "${BIN}/read-inbox" flaky --json 2>/dev/null | jq -r '.messages | length')"
+
 # A malformed registry entry is a HARD error, not "this project has no
 # channels": the two are indistinguishable downstream and only one is safe.
 setup_case
