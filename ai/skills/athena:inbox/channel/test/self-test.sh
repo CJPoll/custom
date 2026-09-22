@@ -71,7 +71,11 @@ INV="${FAKE_WAIT_INV:?}"; CODES="${FAKE_WAIT_CODES:?}"
 n=$(( $(cat "${INV}" 2>/dev/null || echo 0) + 1 )); echo "${n}" > "${INV}"
 code="$(sed -n "${n}p" "${CODES}")"
 [ -n "${code}" ] || exec sleep 1
-[ "${code}" = "SIG" ] && kill -s TERM $$   # simulate an external kill of the waiter
+[ "${code}" = "SIG" ] && kill -s KILL $$   # simulate an UNTRAPPABLE external kill of
+                                            # the waiter (real inbox-wait traps TERM/
+                                            # INT -- see bin/inbox-wait:230-232 -- but
+                                            # not KILL/HUP, so this is the signal case
+                                            # that genuinely reaches Node as `signal`)
 exit "${code}"
 EOW
 
@@ -247,11 +251,34 @@ run_wait_case "$(printf '1\n1')" "$(printf '0 %s' "${UNREAD0}")"
   && ok "two faults -> a channel.wedged event" || bad "should wedge after two faults" "${OUT}"
 [ "${WAITN}" = "2" ] && ok "wedged after exactly one re-arm (waiter ran twice)" || bad "should re-arm exactly once" "invocations=${WAITN}"
 
-echo "== I2. an externally-signalled waiter re-arms once, then wedges (not silent) =="
+echo "== I2. an UNTRAPPABLE external kill (SIGKILL/SIGHUP) re-arms once, then wedges =="
+# real inbox-wait cannot trap KILL (or HUP, by default): the child dies WITH a
+# signal, Node reports it as `signal` (code=null), and the shim's `if (signal)`
+# branch treats it as transient -- re-arm once, then wedged on the second one.
+# This is the ONLY case that reaches the `if (signal)` branch at all; keeping it
+# distinct from I3 below is what keeps that branch reachable in this suite.
 run_wait_case "$(printf 'SIG\nSIG')" "$(printf '0 %s' "${UNREAD0}")"
 [ "$(jqr '[.events[]|select(.meta.kind=="wedged")]|length')" -ge 1 ] \
-  && ok "two external kills -> channel.wedged (never a silent dark)" || bad "signalled waiter should wedge" "${OUT}"
+  && ok "two untrappable kills -> channel.wedged (never a silent dark)" || bad "signalled waiter should wedge" "${OUT}"
 [ "${WAITN}" = "2" ] && ok "signalled waiter re-armed exactly once" || bad "should re-arm once on a signal" "invocations=${WAITN}"
+
+echo "== I3. a TRAPPED external TERM/INT (real inbox-wait behavior) -> channel.stopped, no re-arm =="
+# bin/inbox-wait:230-232 traps INT and TERM and exits 130/143 respectively --
+# a NORMAL exit code, signal=null. So the commonest external stops (an operator
+# or supervisor sending TERM/INT) never reach the `if (signal)` branch above;
+# they fall through `switch(code)` to `default:` -> onStopped, which is
+# PERMANENT on the first occurrence (no re-arm attempt at all). A test that
+# instead drove this case with an untrapped SIGTERM (as I2 previously did)
+# proved the OPPOSITE of what production does for its two commonest signals.
+run_wait_case "143" "$(printf '0 %s' "${UNREAD0}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="stopped")]|length')" -ge 1 ] \
+  && ok "trapped SIGTERM (exit 143) -> a channel.stopped event" || bad "trapped TERM should emit stopped" "${OUT}"
+[ "${WAITN}" = "1" ] && ok "trapped SIGTERM did NOT re-arm (waiter ran once)" || bad "trapped TERM must not re-arm" "invocations=${WAITN}"
+
+run_wait_case "130" "$(printf '0 %s' "${UNREAD0}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="stopped")]|length')" -ge 1 ] \
+  && ok "trapped SIGINT (exit 130) -> a channel.stopped event" || bad "trapped INT should emit stopped" "${OUT}"
+[ "${WAITN}" = "1" ] && ok "trapped SIGINT did NOT re-arm (waiter ran once)" || bad "trapped INT must not re-arm" "invocations=${WAITN}"
 
 echo "== J. count failure is logged, never a false 0, never silence =="
 # an uncountable channel (error:true) at startup
@@ -277,6 +304,22 @@ run_wait_case "" "$(printf '0 %s' "${NDDOC}")"
   && ok "never_delivered:true -> count_failed (broken, not a benign zero)" || bad "never_delivered should be uncountable" "${OUT}"
 [ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" = "0" ] \
   && ok "never_delivered emits NO wake" || bad "never_delivered must not emit a wake" "${OUT}"
+
+# never_delivered:true on a MAILDIR channel is the opposite case: it means the
+# peer-mail dir simply is not provisioned yet (normal on a fresh channel, before
+# the waiter's first provisioning pass) -- NOT a broken producer registration
+# (that concept only applies to `kind:"log"`; inbox-status's own jq gates the
+# never_delivered Fix on `.kind == "log"`, see bin/inbox-status). It must count
+# as 0 and must NOT be treated as uncountable, or a fresh maildir channel emits
+# a spurious count_failed wake on startup catch-up before it is ever provisioned.
+NDMAILDOC='{"channels":[{"name":"x","kind":"maildir","unread":0,"never_delivered":true}],"repo_key":"/x"}'
+run_wait_case "" "$(printf '0 %s' "${NDMAILDOC}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="count_failed")]|length')" = "0" ] \
+  && ok "never_delivered:true on a maildir channel -> NOT count_failed (benign, unprovisioned)" \
+  || bad "maildir never_delivered must not be treated as uncountable" "${OUT}"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" = "0" ] \
+  && ok "maildir never_delivered:true, unread:0 emits no wake either (it is just 0)" \
+  || bad "maildir never_delivered at 0 must not emit a wake" "${OUT}"
 
 echo "== K. dark detection fires when unread does not fall after a wake =="
 export ATHENA_CHANNEL_WATCH_MODE="fs-watch"

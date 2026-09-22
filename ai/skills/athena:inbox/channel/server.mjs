@@ -176,16 +176,21 @@ function resolveProjectName() {
 // no error -- the exact "failed lookup looks like an empty one" class. A channel
 // that cannot be counted is UNCOUNTABLE -- returned as null, never coerced to 0:
 //   * error:true            -- inbox-status could not count it;
-//   * never_delivered:true  -- declared but its inbox file has NEVER existed
-//     (a log channel whose producer was never registered). inbox-status refuses
-//     to render this as zero and prints a producer-registration Fix; the shim
-//     must not erase that distinction back into a benign 0. (A merely-empty but
-//     provisioned channel has never_delivered:false and counts as 0 normally.)
+//   * never_delivered:true, kind:"log" -- declared but its inbox file has NEVER
+//     existed for a log channel (its producer was never registered). This is
+//     the only kind inbox-status itself refuses to render as zero (see its own
+//     `.kind == "log" and (.never_delivered // false)` branch) and prints a
+//     producer-registration Fix; the shim must not erase that distinction back
+//     into a benign 0. never_delivered:true on a MAILDIR channel is benign --
+//     the peer-mail dir simply is not provisioned yet (normal before the
+//     waiter first provisions it) -- and counts as 0, matching inbox-status's
+//     own kind gate. (A merely-empty but provisioned channel has
+//     never_delivered:false and counts as 0 normally either way.)
 //   * neither `new` nor `unread` present -- an unexpected schema, not a zero.
 function channelCount(ch) {
   if (!ch || typeof ch !== 'object') return null;
   if (ch.error === true) return null;
-  if (ch.never_delivered === true) return null;
+  if (ch.never_delivered === true && ch.kind === 'log') return null;
   if (typeof ch.new === 'number') return ch.new;
   if (typeof ch.unread === 'number') return ch.unread;
   return null;
