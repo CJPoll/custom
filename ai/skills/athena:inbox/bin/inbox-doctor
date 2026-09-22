@@ -8,6 +8,8 @@
 #   inbox-doctor --no-server force the server check to n-a (no network); the
 #                           SessionStart hook uses this so its unprompted run
 #                           never makes an authenticated request
+#   inbox-doctor --probe    also run the on-demand channel probe (design §9.6);
+#                           na until the probe binary lands (T4)
 #   inbox-doctor -h         this header
 #
 # FOUR STATES, not three: ok | warn | fail | na.
@@ -88,9 +90,12 @@ for arg in "$@"; do
     # tool must not have. The server check then reports `na` (disabled), and an
     # owner running the doctor by hand gets the full server picture.
     --no-server) export DOCTOR_NO_SERVER=1 ;;
+    # Run the channel's on-demand probe (design §9.6) in addition to the state
+    # line. See doctor_check_channel_probe.
+    --probe) export DOCTOR_CHANNEL_PROBE=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
-      inbox_fail "unknown argument \"${arg}\"" "run: inbox-doctor [--json] [--no-server]"
+      inbox_fail "unknown argument \"${arg}\"" "run: inbox-doctor [--json] [--no-server] [--probe]"
       exit 2
       ;;
   esac
@@ -119,6 +124,10 @@ collect_findings() {
   doctor_check_entry "."
   doctor_check_channels "${DOCTOR_MATCHED_ENTRY}" "."
   doctor_check_server "."
+  # The standing channel session (DND-283): its state line, plus the on-demand
+  # probe when --probe was given.
+  doctor_check_channel
+  [ "${DOCTOR_CHANNEL_PROBE:-0}" = "1" ] && doctor_check_channel_probe
 }
 
 FINDINGS="$(collect_findings)"

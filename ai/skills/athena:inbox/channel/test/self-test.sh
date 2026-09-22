@@ -305,6 +305,29 @@ run_wait_case "" "$(printf '0 %s' "${NDDOC}")"
 [ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" = "0" ] \
   && ok "never_delivered emits NO wake" || bad "never_delivered must not emit a wake" "${OUT}"
 
+# The normalized per-channel `count` field (DND-283 ruling 2c). The shim's
+# channelCount PREFERS `count` when present; a null count is UNCOUNTABLE (never
+# a benign zero), a 0 is zero, a positive is unread. These prove the shim's
+# CONSUMPTION of the new field, not just its production by inbox-status.
+COUNTNULL='{"channels":[{"name":"x","kind":"maildir","unread":0,"count":null}],"repo_key":"/x"}'
+run_wait_case "" "$(printf '0 %s' "${COUNTNULL}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="count_failed")]|length')" -ge 1 ] \
+  && ok "count:null -> count_failed (uncountable, never a benign zero)" || bad "count:null should be uncountable" "${OUT}"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" = "0" ] \
+  && ok "count:null emits NO wake" || bad "count:null must not emit a wake" "${OUT}"
+COUNT0='{"channels":[{"name":"x","kind":"maildir","unread":5,"count":0}],"repo_key":"/x"}'
+run_wait_case "" "$(printf '0 %s' "${COUNT0}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" = "0" ] \
+  && ok "count:0 emits NO wake (count wins over a stale unread:5)" || bad "count:0 should be zero" "${OUT}"
+[ "$(jqr '[.events[]|select(.meta.kind=="count_failed")]|length')" = "0" ] \
+  && ok "count:0 is a clean zero, not a count failure" || bad "count:0 must not be uncountable" "${OUT}"
+COUNT3='{"channels":[{"name":"x","kind":"maildir","unread":0,"count":3}],"repo_key":"/x"}'
+run_wait_case "" "$(printf '0 %s' "${COUNT3}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" -ge 1 ] \
+  && ok "count:3 -> a mail wake (count wins over a stale unread:0)" || bad "count:3 should wake" "${OUT}"
+[ "$(jqr '.events[]|select(.meta.kind=="mail")|.meta.channels' | head -1)" = "x:3" ] \
+  && ok "count:3 wake reports the count from the count field" || bad "expected x:3 in the wake meta" "${OUT}"
+
 # never_delivered:true on a MAILDIR channel is the opposite case: it means the
 # peer-mail dir simply is not provisioned yet (normal on a fresh channel, before
 # the waiter's first provisioning pass) -- NOT a broken producer registration
@@ -381,6 +404,73 @@ export HARNESS_WINDOW_MS=800
 run_wait_case "" "$(printf '0 %s' "${UNREAD0}")"
 [ "$(jqr '[.events[]|select(.meta.kind=="stopped")]|length')" -ge 1 ] \
   && ok "zero doorbells in fs-watch -> channel.stopped" || bad "zero doorbells should stop, not go silent" "${OUT}"
+
+# ==========================================================================
+echo "== O. SDK wire-conformance (DND-283 ruling 1) =="
+# HERMETIC replay of the committed golden against a fresh server.mjs -- runs on
+# EVERY gate run, no node_modules, no network. This is the FIRED mechanism the
+# T2 ADR reviewer asked for before live registration: a golden recorded from
+# the pinned SDK that goes red the moment the shim's wire bytes drift from it.
+CONF="${HERE}/sdk-conformance.mjs"
+CONF_OUT="$(node "${CONF}" 2>&1)"; CONF_RC=$?
+if [ "${CONF_RC}" -eq 0 ]; then
+  case "${CONF_OUT}" in
+    *"GOLDEN PASS"*) ok "hermetic SDK conformance: golden replay passes (${CONF_OUT##*: })" ;;
+    *) bad "hermetic SDK conformance exited 0 without GOLDEN PASS" "${CONF_OUT}" ;;
+  esac
+else
+  bad "hermetic SDK conformance FAILED (rc=${CONF_RC})" "${CONF_OUT}"
+fi
+
+# The golden sdkVersion must equal the package.json pin, else FAIL with the
+# regenerate Fix -- the pin cannot drift from the golden silently (1e). Drive it
+# entirely inside a TEMP COPY of the channel dir: the tracked package.json is
+# NEVER mutated, so an interrupt/kill mid-check can never leave the checkout's
+# package.json corrupted (this suite runs on the gate).
+DRIFT_DIR="$(mktemp -d)"
+mkdir -p "${DRIFT_DIR}/test"
+cp "${SERVER}" "${DRIFT_DIR}/server.mjs"
+cp "${CONF}" "${DRIFT_DIR}/test/sdk-conformance.mjs"
+cp "${HERE}/sdk-golden.json" "${DRIFT_DIR}/test/sdk-golden.json"
+# Mangle the pin to a sentinel in the temp copy via jq (no hard-coded current
+# version to fall out of sync with the real pin).
+jq --arg v "0.0.0-drift" '.dependencies["@modelcontextprotocol/sdk"]=$v' "${CH}/package.json" > "${DRIFT_DIR}/package.json"
+DRIFT_OUT="$(node "${DRIFT_DIR}/test/sdk-conformance.mjs" 2>&1)"; DRIFT_RC=$?
+rm -rf "${DRIFT_DIR}"
+if [ "${DRIFT_RC}" -ne 0 ] && printf '%s' "${DRIFT_OUT}" | grep -q "regenerate\|gen-sdk-golden"; then
+  ok "golden sdkVersion != pin -> FAIL with the regenerate Fix line"
+else
+  bad "a golden/pin mismatch must FAIL with a regenerate Fix" "rc=${DRIFT_RC} out=${DRIFT_OUT}"
+fi
+
+# LIVE mode: with node_modules absent it must SKIP with exit 3 and a verbatim
+# "LIVE SKIPPED" line, so "validated" and "silently not validated" never read
+# the same (1c). We run --live inside a scratch channel copy that has NO
+# node_modules, so the assertion holds regardless of whether THIS worktree has
+# installed the SDK.
+if [ -d "${CH}/node_modules" ]; then
+  LIVE_OUT="$(node "${CONF}" --live 2>&1)"; LIVE_RC=$?
+  if [ "${LIVE_RC}" -eq 0 ] && printf '%s' "${LIVE_OUT}" | grep -q "LIVE PASS"; then
+    ok "live SDK interop passes when node_modules is present (${LIVE_OUT##*: })"
+  else
+    bad "live SDK interop should pass with node_modules present" "rc=${LIVE_RC} out=${LIVE_OUT}"
+  fi
+fi
+# The SKIPPED path, always asserted: point the check at a channel dir with no
+# node_modules by copying just the files it reads into a scratch dir.
+SKIP_DIR="$(mktemp -d)"
+mkdir -p "${SKIP_DIR}/test"
+cp "${SERVER}" "${SKIP_DIR}/server.mjs"
+cp "${CH}/package.json" "${SKIP_DIR}/package.json"
+cp "${CONF}" "${SKIP_DIR}/test/sdk-conformance.mjs"
+cp "${HERE}/sdk-golden.json" "${SKIP_DIR}/test/sdk-golden.json"
+SKIP_OUT="$(node "${SKIP_DIR}/test/sdk-conformance.mjs" --live 2>&1)"; SKIP_RC=$?
+rm -rf "${SKIP_DIR}"
+if [ "${SKIP_RC}" -eq 3 ] && printf '%s' "${SKIP_OUT}" | grep -q "LIVE SKIPPED -- node_modules absent"; then
+  ok "live SDK interop SKIPS (exit 3) with a verbatim LIVE SKIPPED line when node_modules is absent"
+else
+  bad "live with no node_modules must exit 3 and print LIVE SKIPPED" "rc=${SKIP_RC} out=${SKIP_OUT}"
+fi
 
 # ==========================================================================
 echo

@@ -499,6 +499,74 @@ else
   ok "symlinked-skills root test skipped (no ruby or no registry.rb in this checkout)"
 fi
 
+echo "== the standing channel session line (DND-283) =="
+# The channel: state line, computed from the supervisor's markers + tmux
+# has-session, via the shared scripts/lib/athena-attend-lib.sh. Every state is
+# driven with seams (project name, tmux presence, a temp state dir) so nothing
+# real is touched. The crux: no-session and dark must NEVER read as registered.
+if [ -r "${REPO}/scripts/lib/athena-attend-lib.sh" ]; then
+  . "${REPO}/scripts/lib/athena-attend-lib.sh"
+  export ATHENA_INBOX_DOCTOR_CHANNEL_PROJECT="probeproj"
+  CHSD="${TMP}/chan-state"; mkdir -p "${CHSD}"; export ATHENA_ATTEND_STATE_DIR="${CHSD}"
+
+  export ATHENA_INBOX_DOCTOR_TMUX_HAS_SESSION=1
+  F="$(doctor_check_channel)"
+  assert_eq "channel: session up, no markers -> registered (ok)" ok "$(state_of "${F}" channel)"
+  assert_finding "channel: registered names the tmux session" "${F}" ok channel "athena-attend-probeproj"
+
+  export ATHENA_INBOX_DOCTOR_TMUX_HAS_SESSION=0
+  F="$(doctor_check_channel)"
+  # na (opt-in per project), NOT a health-flipping warn -- but still a message
+  # distinct from "registered" (the must-not-read-the-same requirement).
+  assert_eq "channel: session absent -> no-session (na, opt-in)" na "$(state_of "${F}" channel)"
+  assert_finding "channel: no-session says so, distinct from registered" "${F}" na channel "no standing channel session is running"
+  assert_not_contains "channel: no-session must NOT read as registered" "is registered" "${F}"
+
+  attend_write_marker "${CHSD}" dark "unread persisted past budget"
+  F="$(doctor_check_channel)"
+  assert_eq "channel: dark marker -> dark (fail), even with no session" fail "$(state_of "${F}" channel)"
+  assert_finding "channel: dark carries a Fix" "${F}" fail channel "DARK"
+  assert_not_contains "channel: dark must NOT read as registered" "is registered" "${F}"
+
+  attend_write_marker "${CHSD}" wedged "restart cap hit"
+  F="$(doctor_check_channel)"
+  assert_eq "channel: wedged beats dark (fail)" fail "$(state_of "${F}" channel)"
+  assert_finding "channel: wedged names WEDGED" "${F}" fail channel "WEDGED"
+
+  rm -f "${CHSD}/channel.wedged" "${CHSD}/channel.dark"
+  attend_write_marker "${CHSD}" stopped "operator stopped it"
+  export ATHENA_INBOX_DOCTOR_TMUX_HAS_SESSION=1
+  F="$(doctor_check_channel)"
+  assert_eq "channel: stopped marker -> stopped (warn), a deliberate state" warn "$(state_of "${F}" channel)"
+
+  # --probe with no probe binary is na, never a passing probe.
+  unset ATHENA_INBOX_DOCTOR_CHANNEL_PROBE
+  F="$(doctor_check_channel_probe)"
+  assert_eq "channel-probe: missing binary -> na, never ok" na "$(state_of "${F}" channel-probe)"
+  assert_finding "channel-probe: na says 'not yet built', not 'passed'" "${F}" na channel-probe "not present"
+
+  # With a probe binary present (via the seam): exit 0 -> ok, exit non-zero ->
+  # fail with the failing step. Both branches driven, not just the na path.
+  PROBE_OK="${TMP}/probe-ok"; printf '#!/usr/bin/env bash\necho round-tripped\nexit 0\n' > "${PROBE_OK}"; chmod +x "${PROBE_OK}"
+  export ATHENA_INBOX_DOCTOR_CHANNEL_PROBE="${PROBE_OK}"
+  F="$(doctor_check_channel_probe)"
+  assert_eq "channel-probe: a passing probe -> ok" ok "$(state_of "${F}" channel-probe)"
+  PROBE_BAD="${TMP}/probe-bad"; printf '#!/usr/bin/env bash\necho "no ack within budget" >&2\nexit 4\n' > "${PROBE_BAD}"; chmod +x "${PROBE_BAD}"
+  export ATHENA_INBOX_DOCTOR_CHANNEL_PROBE="${PROBE_BAD}"
+  F="$(doctor_check_channel_probe)"
+  assert_eq "channel-probe: a failing probe -> fail (never silently ok)" fail "$(state_of "${F}" channel-probe)"
+  assert_finding "channel-probe: fail names the exit code" "${F}" fail channel-probe "exit 4"
+  unset ATHENA_INBOX_DOCTOR_CHANNEL_PROBE
+
+  # A project that resolves to nothing -> na (not opted in), not a false fail.
+  export ATHENA_INBOX_DOCTOR_CHANNEL_PROJECT=""
+  F="$(doctor_check_channel)"
+  assert_eq "channel: no inbox project -> na" na "$(state_of "${F}" channel)"
+  unset ATHENA_INBOX_DOCTOR_CHANNEL_PROJECT ATHENA_INBOX_DOCTOR_TMUX_HAS_SESSION ATHENA_ATTEND_STATE_DIR
+else
+  ok "channel line test skipped (scripts/lib/athena-attend-lib.sh not in this checkout)"
+fi
+
 printf '\n'
 if [ "${FAIL}" -eq 0 ]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0
 else echo "VERDICT: FAIL (${FAIL} failed, ${PASS} passed)"; exit 1; fi
