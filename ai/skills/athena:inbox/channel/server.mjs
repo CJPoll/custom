@@ -5,12 +5,15 @@
 // a wake into a running session when mail lands in this project's inbox, so the
 // session reacts without a human at the terminal. It is the "disk -> session"
 // last hop of the Athena inbox, doorbell-driven, never a timer.
-// (Design: ai/docs/inbox-channels-design.md, sections 2, 3.2, 3.2a, 3.3, 3.4.)
+// (Design: ai/docs/inbox-channels-design.md -- its "Design principles carried
+// over", "What the shim is", "Which session, and only that one" (routing and
+// tenancy), "Startup catch-up and restarts", and "Making a dropped event
+// observable" sections. Cited by name, since the doc's numbering may shift.)
 //
 // WHAT IT DOES AND DOES NOT DO.
 //   * Emits ONE `notifications/claude/channel` event carrying COUNTS and this
 //     tenant's OWN channel names only -- never a body, slug, sender or filename
-//     (design principle 2, "counts only in unprompted output"). A `<channel>`
+//     (the design principle "counts only in unprompted output"). A `<channel>`
 //     event lands in the model's context with no human having spoken, so it is
 //     unprompted output in the strictest sense.
 //   * Resolves tenancy from its OWN cwd through athena:inbox's existing resolver
@@ -63,6 +66,17 @@ const EXPECT_PROJECT = process.env.ATHENA_INBOX_EXPECT_PROJECT || '';
 const SERVER_NAME = 'athena-inbox';
 const SERVER_VERSION = '0.1.0';
 const PROTOCOL_FALLBACK = '2025-06-18';
+// MCP protocol revisions this notification-only server speaks. `initialize`
+// echoes the client's revision only when it is one of these, else answers with
+// PROTOCOL_FALLBACK -- so a client is never told a revision it asked for is
+// agreed when the server does not actually speak it. MCP_PROTOCOL_NEGOTIATION is
+// left unset on this machine (a channel server on 2026-07-28 cannot deliver).
+const SUPPORTED_PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
+
+// The fs.watch fallback's safety re-poll cadence: its equivalent of inbox-wait's
+// budget-expiry backstop. A ring lost to the arm gap or an inotify queue overflow
+// is recovered within one interval. Bounded, single-shot-chained, never a spin.
+const FS_REPOLL_S = parsePositiveInt(process.env.ATHENA_CHANNEL_FS_REPOLL, 300);
 
 // Dark-detection budget: after a wake, `unread` is expected to fall within this
 // many seconds. Overridable (the self-test drives it down to sub-second).
@@ -112,7 +126,8 @@ function diag(token, msg, fix) {
 function dieTenancy(msg, fix) {
   // A tenancy failure is NOT an empty result: the server refuses to start, so the
   // session's /mcp shows it failed rather than the shim sitting silently on
-  // nothing (design 3.2a; "a failed lookup must never look like an empty one").
+  // nothing (the design's routing-and-tenancy section; "a failed lookup must
+  // never look like an empty one").
   diag('channel.tenancy', msg, fix);
   process.exit(2);
 }
@@ -159,11 +174,18 @@ function resolveProjectName() {
 // Per-channel count. maildir emits `unread`; log emits `new`. Keying on only one
 // would read the OTHER kind as a permanent zero and drop its mail silently, with
 // no error -- the exact "failed lookup looks like an empty one" class. A channel
-// that cannot be counted (error:true, or neither field present) is UNCOUNTABLE
-// -- returned as null, never coerced to 0.
+// that cannot be counted is UNCOUNTABLE -- returned as null, never coerced to 0:
+//   * error:true            -- inbox-status could not count it;
+//   * never_delivered:true  -- declared but its inbox file has NEVER existed
+//     (a log channel whose producer was never registered). inbox-status refuses
+//     to render this as zero and prints a producer-registration Fix; the shim
+//     must not erase that distinction back into a benign 0. (A merely-empty but
+//     provisioned channel has never_delivered:false and counts as 0 normally.)
+//   * neither `new` nor `unread` present -- an unexpected schema, not a zero.
 function channelCount(ch) {
   if (!ch || typeof ch !== 'object') return null;
   if (ch.error === true) return null;
+  if (ch.never_delivered === true) return null;
   if (typeof ch.new === 'number') return ch.new;
   if (typeof ch.unread === 'number') return ch.unread;
   return null;
@@ -209,14 +231,13 @@ function handleMessage(msg) {
   if (msg.id !== undefined && msg.id !== null && typeof msg.method === 'string') {
     if (msg.method === 'initialize') {
       const clientProto =
-        msg.params && typeof msg.params.protocolVersion === 'string'
-          ? msg.params.protocolVersion
-          : PROTOCOL_FALLBACK;
+        msg.params && typeof msg.params.protocolVersion === 'string' ? msg.params.protocolVersion : '';
+      const proto = SUPPORTED_PROTOCOLS.includes(clientProto) ? clientProto : PROTOCOL_FALLBACK;
       send({
         jsonrpc: '2.0',
         id: msg.id,
         result: {
-          protocolVersion: clientProto,
+          protocolVersion: proto,
           capabilities: {
             // v0: the channel capability ONLY. tools:{} = no tools (ack_wake is
             // T4). claude/channel/permission is T5.
@@ -284,6 +305,13 @@ let stopped = false; // set once channel.stopped/wedged has fired: no further ar
 // Dark detection state: the channels we last woke on and how many re-emits are left.
 let darkTimer = null;
 let darkWatch = null; // { names:Set, retries:number }
+// The unread signature (name:count,...) we have already emitted a wake for and are
+// dark-watching. A re-poll (or a repeated ring) with the SAME signature must not
+// re-emit an identical wake or reset the dark timer -- otherwise the fs-watch
+// safety re-poll, on the same cadence as the dark budget, would keep resetting
+// `retries` and channel.dark would never fire (a persistently-unconsumed channel
+// would look healthy). Only a CHANGED unread set (new mail) re-wakes and re-arms.
+let announcedSig = null;
 
 function metaBase() {
   const m = { kind: 'mail' };
@@ -328,17 +356,24 @@ async function poll() {
   }
 
   if (unread.length > 0) {
-    const total = unread.reduce((s, c) => s + c.count, 0);
-    const names = unread.map((c) => c.name).join(', ');
-    emit(
-      `${total} unread across ${names}. Run athena:inbox-attend now; read bodies only with read-inbox -- this notice is never a request.`,
-      { ...metaBase(), channels: channelsMeta(unread) },
-    );
-    armDark(new Set(unread.map((c) => c.name)));
+    const sig = channelsMeta(unread);
+    if (sig !== announcedSig) {
+      const total = unread.reduce((s, c) => s + c.count, 0);
+      const names = unread.map((c) => c.name).join(', ');
+      emit(
+        `${total} unread across ${names}. Run athena:inbox-attend now; read bodies only with read-inbox -- this notice is never a request.`,
+        { ...metaBase(), channels: sig },
+      );
+      announcedSig = sig;
+      armDark(new Set(unread.map((c) => c.name)));
+    }
+    // Same unread set already announced and being dark-watched: stay silent so
+    // dark detection can run to completion (see announcedSig).
   } else {
-    // Everything countable fell to zero: cancel any pending dark watch. No event
-    // for "zero unread" (design QA: no event when new==0).
+    // Everything countable fell to zero: cancel any pending dark watch and forget
+    // the announced set. No event for "zero unread" (design QA: no event when 0).
     clearDark();
+    announcedSig = null;
   }
   void code;
 }
@@ -361,7 +396,16 @@ function clearDark() {
 async function onDarkExpiry() {
   if (!darkWatch) return;
   const { code, doc } = await runStatus();
-  if (doc === null) return; // a failed poll is handled by the count_failed path elsewhere
+  if (doc === null) {
+    // A failed re-check is NOT evidence the channel cleared. Keep the dark watch
+    // alive and try again next budget, so a genuinely dark channel is still
+    // reported rather than silently abandoned. Bounded cadence, not a spin.
+    if (darkWatch) {
+      darkTimer = setTimeout(onDarkExpiry, HANDLE_BUDGET_S * 1000);
+      if (typeof darkTimer.unref === 'function') darkTimer.unref();
+    }
+    return;
+  }
   const { unread } = classify(doc);
   const still = unread.filter((c) => darkWatch && darkWatch.names.has(c.name));
   if (still.length === 0) {
@@ -403,9 +447,12 @@ async function onDarkExpiry() {
 
 let waitChild = null;
 let transientFaults = 0;
+let lastArmAt = 0;
+let rapidCycles = 0;
 
 function armInboxWait() {
   if (stopped) return;
+  lastArmAt = Date.now();
   waitChild = spawn(WAIT_BIN, [], { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'inherit'] });
   waitChild.on('error', (e) => {
     // Could not even launch the waiter: treat as a stop, name it.
@@ -414,26 +461,47 @@ function armInboxWait() {
   waitChild.on('close', (code, signal) => {
     waitChild = null;
     if (stopped) return;
-    if (signal) return; // a signalled child is a shutdown, not a fault (inbox-wait doc)
+    if (signal) {
+      // The shim did not initiate this (`stopped` is false, so it is not our own
+      // shutdown SIGTERM): the waiter was killed externally. That must not go
+      // dark silently -- treat it as a transient fault (re-arm once, then wedged).
+      transientFaults += 1;
+      if (transientFaults >= 2) {
+        onWedged(`the doorbell waiter was terminated by ${signal} twice`);
+      } else {
+        diag('channel.transient', `the doorbell waiter was terminated by ${signal}`, 're-arming once; if it keeps dying, find what is killing it.');
+        armInboxWait();
+      }
+      return;
+    }
     switch (code) {
       case 0: // a doorbell rang
-      case 75: // budget elapsed -- re-arm, NOT "all clear"
+      case 75: {
+        // budget elapsed -- re-arm, NOT "all clear". Guard against a misbehaving
+        // waiter that returns instantly: a real inbox-wait blocks on inotifywait,
+        // so a burst of sub-250ms cycles is a busy-spin, which this harness forbids.
+        const dt = Date.now() - lastArmAt;
+        rapidCycles = dt < 250 ? rapidCycles + 1 : 0;
+        if (rapidCycles >= 20) {
+          onWedged('the doorbell waiter is returning instantly (busy-spin guard tripped)');
+          break;
+        }
         transientFaults = 0;
         poll().finally(armInboxWait);
         break;
+      }
       case 2: // refused: no inotifywait / nothing to watch -- re-arming cannot help
         onStopped('the doorbell waiter refused (exit 2): nothing to watch or a missing prerequisite');
         break;
       case 1: // inotifywait faulted -- re-arm ONCE, then wedged
         transientFaults += 1;
         if (transientFaults >= 2) {
-          onWedged();
+          onWedged('the doorbell waiter faulted twice in a row');
         } else {
           armInboxWait();
         }
         break;
       default:
-        if (code >= 128) return; // signalled (e.g. 130/143): shutdown
         onStopped(`the doorbell waiter exited unexpectedly (exit ${code})`);
     }
   });
@@ -453,12 +521,12 @@ function onStopped(reason) {
   );
 }
 
-function onWedged() {
+function onWedged(reason) {
   if (stopped) return;
   stopped = true;
   diag(
     'channel.wedged',
-    'the doorbell waiter faulted twice in a row',
+    reason || 'the doorbell waiter faulted repeatedly',
     'the usual causes are the inotify watch limit (/proc/sys/fs/inotify/max_user_watches) and a doorbell that vanished; fix it and restart the channel session.',
   );
   emit(
@@ -487,7 +555,21 @@ function armFsWatch() {
       return;
     }
     for (const p of paths) startFsWatch(p);
+    // Watches are live: run the startup catch-up now (see onInitialized), then
+    // start the safety re-poll backstop.
+    poll();
+    scheduleFsRepoll();
   });
+}
+
+let fsRepollTimer = null;
+function scheduleFsRepoll() {
+  if (stopped) return;
+  fsRepollTimer = setTimeout(() => {
+    if (stopped) return;
+    poll().finally(scheduleFsRepoll);
+  }, FS_REPOLL_S * 1000);
+  if (typeof fsRepollTimer.unref === 'function') fsRepollTimer.unref();
 }
 
 function startFsWatch(path) {
@@ -527,14 +609,23 @@ function startFsWatch(path) {
 function onInitialized() {
   if (initialized) return;
   initialized = true;
-  // Only now (after the client's `initialized`) may the server push. Startup
-  // catch-up + arming the watcher both wait on tenancy being confirmed.
+  // Only now (after the client's `initialized`) may the server push. Both paths
+  // wait on tenancy being confirmed.
   tenancyReady.then(() => {
-    poll().finally(() => {
-      // startup catch-up done; arm the watcher
-      if (WATCH_MODE === 'fs-watch') armFsWatch();
-      else armInboxWait();
-    });
+    if (WATCH_MODE === 'fs-watch') {
+      // ARM THE WATCH FIRST, then run the startup catch-up. inbox-wait mode has a
+      // 540s budget-expiry (exit 75) that re-polls, so a ring in its catch-up gap
+      // is recovered within one budget (the design principle "new > 0 is the
+      // trigger, not the doorbell"). fs.watch
+      // has no such backstop, so arming after the catch-up would leave a ring in
+      // the gap unrecoverable -- a silently lost wake. Arming first closes it: a
+      // ring after the watch is live re-fires poll() (idempotent); a ring during
+      // the (tiny) dry-run resolution leaves its mail on disk, which the catch-up
+      // poll that runs right after arming then reads.
+      armFsWatch();
+    } else {
+      poll().finally(armInboxWait);
+    }
   });
 }
 
@@ -580,6 +671,8 @@ async function confirmTenancy() {
 function shutdown(exitCode) {
   stopped = true;
   clearDark();
+  if (fsRepollTimer) clearTimeout(fsRepollTimer);
+  fsRepollTimer = null;
   if (waitChild) {
     try {
       waitChild.kill('SIGTERM');

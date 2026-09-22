@@ -2,7 +2,8 @@
 # Self-test for the athena:inbox channel shim (DND-282, v0).
 #
 # Every case is a property from the design's QA plan (ai/docs/inbox-channels-
-# design.md section 8), driven against a FAKE stdio client (test/harness.mjs):
+# design.md, its "Tickets ... and the QA properties" section), driven against a
+# FAKE stdio client (test/harness.mjs):
 #
 #   * an event on a doorbell wake and on a budget timeout, when unread>0
 #   * NO event when unread==0
@@ -70,6 +71,7 @@ INV="${FAKE_WAIT_INV:?}"; CODES="${FAKE_WAIT_CODES:?}"
 n=$(( $(cat "${INV}" 2>/dev/null || echo 0) + 1 )); echo "${n}" > "${INV}"
 code="$(sed -n "${n}p" "${CODES}")"
 [ -n "${code}" ] || exec sleep 1
+[ "${code}" = "SIG" ] && kill -s TERM $$   # simulate an external kill of the waiter
 exit "${code}"
 EOW
 
@@ -155,18 +157,6 @@ esac
   && ok "meta.project resolved via the one resolver" || bad "meta.project" "${OUT}"
 HYPHEN_KEYS="$(jqr '.events[].meta|keys[]' | grep -c '-' || true)"
 [ "${HYPHEN_KEYS}" = "0" ] && ok "no meta KEY contains a hyphen" || bad "a meta key has a hyphen" "${OUT}"
-
-echo "== C. attrib-discriminating doorbell wake (fs.watch fallback) =="
-# Same fixture, but now TOUCH the doorbell (attrib-only). A watcher that missed
-# attrib would arm, block, and never fire: only the startup event would appear.
-export HARNESS_TOUCH="${R1_ROOT}/agent-mail/peer/from-server/.event"
-export HARNESS_TOUCH_DELAY_MS=700
-export HARNESS_WINDOW_MS=1600
-run_harness "${R1_REPO}"
-MAILN2="$(jqr '[.events[]|select(.meta.kind=="mail")]|length')"
-[ "${MAILN2}" -ge 2 ] && ok "an attrib touch of the doorbell fires the watcher (>=2 events)" \
-  || bad "attrib touch did not wake the watcher" "got ${MAILN2}: ${OUT}"
-unset HARNESS_TOUCH
 
 echo "== D. no event when unread==0 =="
 D_ROOT="${TMP}/d/root"; D_REPO="${TMP}/d/repo"; mkdir -p "${D_REPO}"
@@ -257,6 +247,12 @@ run_wait_case "$(printf '1\n1')" "$(printf '0 %s' "${UNREAD0}")"
   && ok "two faults -> a channel.wedged event" || bad "should wedge after two faults" "${OUT}"
 [ "${WAITN}" = "2" ] && ok "wedged after exactly one re-arm (waiter ran twice)" || bad "should re-arm exactly once" "invocations=${WAITN}"
 
+echo "== I2. an externally-signalled waiter re-arms once, then wedges (not silent) =="
+run_wait_case "$(printf 'SIG\nSIG')" "$(printf '0 %s' "${UNREAD0}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="wedged")]|length')" -ge 1 ] \
+  && ok "two external kills -> channel.wedged (never a silent dark)" || bad "signalled waiter should wedge" "${OUT}"
+[ "${WAITN}" = "2" ] && ok "signalled waiter re-armed exactly once" || bad "should re-arm once on a signal" "invocations=${WAITN}"
+
 echo "== J. count failure is logged, never a false 0, never silence =="
 # an uncountable channel (error:true) at startup
 ERRDOC='{"channels":[{"name":"x","kind":"log","error":true}],"repo_key":"/x"}'
@@ -273,6 +269,15 @@ run_wait_case "0" "$(printf '0 %s\n0 %s\n1 EMPTY' "${UNREAD0}" "${UNREAD0}")"
 [ "$(jqr '[.events[]|select(.meta.kind=="count_failed")]|length')" -ge 1 ] \
   && ok "a null poll while watching -> count_failed (never silence)" || bad "null poll should emit count_failed" "${OUT}"
 
+# never_delivered:true (a log channel whose producer was never registered) has
+# count 0 on disk but is BROKEN, not empty -- it must not read as zero unread.
+NDDOC='{"channels":[{"name":"x","kind":"log","new":0,"never_delivered":true}],"repo_key":"/x"}'
+run_wait_case "" "$(printf '0 %s' "${NDDOC}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="count_failed")]|length')" -ge 1 ] \
+  && ok "never_delivered:true -> count_failed (broken, not a benign zero)" || bad "never_delivered should be uncountable" "${OUT}"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" = "0" ] \
+  && ok "never_delivered emits NO wake" || bad "never_delivered must not emit a wake" "${OUT}"
+
 echo "== K. dark detection fires when unread does not fall after a wake =="
 export ATHENA_CHANNEL_WATCH_MODE="fs-watch"
 export FAKE_DOORBELLS="${TMP}/dark.event"; : > "${FAKE_DOORBELLS}"
@@ -287,6 +292,52 @@ case "$(jqr '.events[]|select(.meta.kind=="dark")|.content' | head -1)" in
   *) bad "dark content should carry the count + channel" "$(jqr '.events[]|select(.meta.kind=="dark")|.content')" ;;
 esac
 case "$(jqr '.stderr')" in *"channel.dark"*"Fix:"*) ok "dark carries a Fix:" ;; *) bad "dark needs a Fix:" "$(jqr '.stderr')";; esac
+
+echo "== L. fs-watch safety re-poll recovers a wake missed by the arm gap =="
+# fs-watch has no inbox-wait budget backstop; the re-poll is its equivalent. Mail
+# that appears with no doorbell ring (or a ring lost in the arm gap) is recovered
+# within one FS_REPOLL interval. Startup sees unread0 (no emit); a later re-poll
+# sees unread2 and emits -- with NO doorbell touch.
+export ATHENA_CHANNEL_WATCH_MODE="fs-watch"
+export FAKE_DOORBELLS="${TMP}/repoll.event"; : > "${FAKE_DOORBELLS}"
+export ATHENA_CHANNEL_FS_REPOLL=1
+export ATHENA_CHANNEL_HANDLE_BUDGET=300     # keep dark out of this window
+export HARNESS_WINDOW_MS=2600
+run_wait_case "" "$(printf '0 %s\n0 %s\n0 %s' "${UNREAD0}" "${UNREAD0}" "${UNREAD2}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" -ge 1 ] \
+  && ok "the fs-watch re-poll recovers a wake with no doorbell ring" || bad "re-poll should recover the wake" "${OUT}"
+unset ATHENA_CHANNEL_FS_REPOLL
+
+echo "== M0. attrib-discriminating doorbell wake (fs.watch fallback) =="
+# A `touch(1)` of the doorbell reports only ATTRIB+CLOSE_WRITE (no MODIFY). A
+# watcher that missed attrib would arm, block, and never fire. Startup sees
+# unread0 (no emit); the attrib-touch-triggered poll sees unread2 -> a wake.
+export ATHENA_CHANNEL_WATCH_MODE="fs-watch"
+export FAKE_DOORBELLS="${TMP}/attrib.event"; : > "${FAKE_DOORBELLS}"
+export ATHENA_CHANNEL_HANDLE_BUDGET=300
+export HARNESS_TOUCH="${FAKE_DOORBELLS}"; export HARNESS_TOUCH_DELAY_MS=800; export HARNESS_WINDOW_MS=1800
+run_wait_case "" "$(printf '0 %s\n0 %s\n0 %s' "${UNREAD0}" "${UNREAD0}" "${UNREAD2}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" -ge 1 ] \
+  && ok "an attrib touch of the doorbell fires the watcher" || bad "attrib touch did not wake the watcher" "${OUT}"
+unset HARNESS_TOUCH
+
+echo "== M. fs.watch 'rename' (unlink+recreate) re-establishes the watch and polls =="
+export ATHENA_CHANNEL_WATCH_MODE="fs-watch"
+export FAKE_DOORBELLS="${TMP}/rename.event"; : > "${FAKE_DOORBELLS}"
+export ATHENA_CHANNEL_HANDLE_BUDGET=300
+export HARNESS_RENAME="${FAKE_DOORBELLS}"; export HARNESS_TOUCH_DELAY_MS=800; export HARNESS_WINDOW_MS=1800
+# startup unread0 (no emit); the rename-triggered poll sees unread2 -> a wake.
+run_wait_case "" "$(printf '0 %s\n0 %s\n0 %s' "${UNREAD0}" "${UNREAD0}" "${UNREAD2}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" -ge 1 ] \
+  && ok "an inode rename fires a poll (recovery path)" || bad "rename should trigger a poll" "${OUT}"
+unset HARNESS_RENAME
+
+echo "== N. fs-watch with zero resolved doorbells -> channel.stopped (not silent) =="
+export FAKE_DOORBELLS=""
+export HARNESS_WINDOW_MS=800
+run_wait_case "" "$(printf '0 %s' "${UNREAD0}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="stopped")]|length')" -ge 1 ] \
+  && ok "zero doorbells in fs-watch -> channel.stopped" || bad "zero doorbells should stop, not go silent" "${OUT}"
 
 # ==========================================================================
 echo

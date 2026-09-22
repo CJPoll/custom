@@ -19,13 +19,16 @@
 // from the harness process, which self-test.sh sets per case).
 
 import { spawn } from 'node:child_process';
-import { utimesSync, openSync, closeSync, existsSync } from 'node:fs';
+import { utimesSync, openSync, closeSync, existsSync, unlinkSync } from 'node:fs';
 
 const SERVER = process.env.HARNESS_SERVER;
 const NO_INIT = process.env.HARNESS_NO_INIT === '1';
 const WINDOW_MS = Number(process.env.HARNESS_WINDOW_MS || '700');
 const TOUCH = process.env.HARNESS_TOUCH || '';
 const TOUCH_DELAY_MS = Number(process.env.HARNESS_TOUCH_DELAY_MS || '200');
+// HARNESS_RENAME: unlink+recreate this path as a stimulus (an inode rename, which
+// fs.watch reports as 'rename' -- the rotation/repair recovery path).
+const RENAME = process.env.HARNESS_RENAME || '';
 
 const events = [];
 let initResult = null;
@@ -75,6 +78,16 @@ function startWindow() {
         // A pure attrib bump (like the client's touch(1)): update times only.
         const now = new Date();
         utimesSync(TOUCH, now, now);
+      } catch {
+        /* ignore */
+      }
+    }, TOUCH_DELAY_MS);
+  }
+  if (RENAME) {
+    setTimeout(() => {
+      try {
+        if (existsSync(RENAME)) unlinkSync(RENAME);
+        closeSync(openSync(RENAME, 'w')); // recreate: a new inode at the same path
       } catch {
         /* ignore */
       }

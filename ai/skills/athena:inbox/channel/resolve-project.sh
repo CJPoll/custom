@@ -49,11 +49,21 @@ esac
 # shellcheck source=/dev/null
 . "${LIB}/inbox.sh"
 
-# Identity, via the resolver's own classifier. Non-zero here is could-not-tell.
-key="$(inbox_repo_key ".")" || exit 3
+# Identity, via the resolver's own classifier. Non-zero here is could-not-tell
+# (no git, cwd gone, dubious ownership) -- an error worth naming, not a silent
+# non-zero, since "errors are written for the LLM".
+key="$(inbox_repo_key ".")" || {
+  printf 'resolve-project.sh: could not determine this repo'\''s identity\n' >&2
+  printf '  Fix: run from inside the repo whose project you want; check git is on PATH, the cwd exists, and the repo is not flagged for dubious ownership (git config --global --add safe.directory).\n' >&2
+  exit 3
+}
 
 # The candidate records: "<canonicalised one-line json>\t<file>" per entry.
-records="$(fs_registry_records)" || exit 3
+records="$(fs_registry_records)" || {
+  printf 'resolve-project.sh: could not read the inbox registry\n' >&2
+  printf '  Fix: check $ATHENA_INBOX_ROOT (default $HOME/.local/share/athena) exists and its projects/ directory is readable.\n' >&2
+  exit 3
+}
 
 # The authoritative match. descriptor_select returns the winning entry's json
 # (exit 0), refuses on ambiguity (exit 2), or is silent on no-match (exit 1).
