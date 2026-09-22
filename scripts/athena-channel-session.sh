@@ -193,9 +193,32 @@ say() {
   return 0
 }
 
+# mark_owner_not_notified -- appends "(owner NOT notified: ...)" onto the END
+# of LINE 2 of the wedged marker this run just wrote (every dm_owner call site
+# writes a `wedged` marker immediately before calling dm_owner; there is no
+# dark+dm_owner pairing, so only `wedged` is ever the right target).
+#
+# It MUST land on line 2, not a new line 3: inbox-doctor's channel: line reads
+# the reason with `sed -n 2p "$(attend_marker ... wedged)"` (and the dark
+# branch does the same for its own marker) -- ai/skills/athena:inbox/lib/doctor.sh.
+# An earlier version of this function appended a new trailing line, which sat
+# on line 3 and was never read by that `sed -n 2p`: the annotation existed on
+# disk but the one consumer credited with surfacing it could not see it -- a
+# claimed mechanism that could not fire (DND-288 build 4 correction).
+mark_owner_not_notified() {
+  local f="$(attend_marker "${STATE_DIR}" wedged)"
+  [ -e "${f}" ] || return 0
+  sed -i '2 s/$/ (owner NOT notified: ATHENA_ATTEND_OWNER_SLACK_ID unset)/' "${f}" 2>/dev/null
+  return 0
+}
+
 dm_owner() {
   local msg="$1"
-  [ -n "${ATHENA_ATTEND_OWNER_SLACK_ID:-}" ] || { say "owner DM skipped (ATHENA_ATTEND_OWNER_SLACK_ID unset): ${msg}"; return 0; }
+  [ -n "${ATHENA_ATTEND_OWNER_SLACK_ID:-}" ] || {
+    say "owner DM skipped (ATHENA_ATTEND_OWNER_SLACK_ID unset): ${msg}"
+    mark_owner_not_notified
+    return 0
+  }
   [ -x "${DM_BIN}" ] || { say "owner DM skipped (dm bin not executable: ${DM_BIN}): ${msg}"; return 0; }
   "${DM_BIN}" "${ATHENA_ATTEND_OWNER_SLACK_ID}" "${msg}" >/dev/null 2>&1 \
     || say "owner DM failed to send: ${msg}"

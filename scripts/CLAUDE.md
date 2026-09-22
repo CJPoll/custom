@@ -435,6 +435,19 @@ registration notice in the pane, and rotates/restarts the session under bounds.
   under user-scope registration); the launcher DETECTS and REPORTS these but
   never answers them, because they are trust decisions. Set
   `ATHENA_ATTEND_OWNER_SLACK_ID` so wedge/dark DMs can reach you.
+  **Later (2026-09-22, DND-288):** this used to be a reminder only — the T3
+  installer never persisted the id, so a cron-launched session (minimal
+  environment) never saw it and every wedge/dark/version-pin DM silently
+  no-op'd. `--install` now REFUSES (exit 2, a `Fix:` line, crontab left
+  byte-identical) unless `ATHENA_ATTEND_OWNER_SLACK_ID` validates against
+  `^U[A-Z0-9]{8,}$` or `--no-owner-dm` is passed explicitly (which prints a
+  loud warning and records the choice as a trailing comment in the crontab
+  entry). A valid id is baked directly into the `@reboot`/`*/5` crontab lines
+  as a `VAR=value` prefix, so it survives into cron's own minimal environment.
+  `--check` reports one of three states — persisted (id masked to 3 chars),
+  disabled (`--no-owner-dm` was used), or `NOT PERSISTED (installed before
+  DND-288)` for a pre-existing bare line — see `scripts/setup-athena-attend
+  --help` for the authoritative flag/exit-code reference.
 - **Diagnose.** `inbox-doctor` prints a `channel:` line
   (`registered | dark | stopped | wedged | no-session`) from the durable markers
   under `~/.local/state/athena-attend/<project>/` + `tmux has-session`, and
