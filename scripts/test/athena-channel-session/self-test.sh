@@ -376,6 +376,20 @@ CRON="$(cat "${FAKE_CRONTAB_FILE}")"
 assert_contains "installer: the @reboot entry points at athena-channel-session.sh" "@reboot ${SCRIPTS}/athena-channel-session.sh" "${CRON}"
 assert_contains "installer: the */5 relaunch entry is installed" "*/5 * * * * ${SCRIPTS}/athena-channel-session.sh" "${CRON}"
 
+# --check is READ-ONLY: it reports the live conformance result but must NOT run
+# `npm ci` (a network install that rewrites node_modules in the main checkout).
+# A recording fake npm proves it is never invoked on the --check path.
+cat > "${FAKES}/npm-rec" <<EON
+#!/usr/bin/env bash
+printf 'npm %s\n' "\$*" >> "${INST_TMP}/npm-calls"
+exit 0
+EON
+chmod +x "${FAKES}/npm-rec"
+: > "${INST_TMP}/npm-calls"
+OUT="$( env "${inst_env[@]}" ATHENA_ATTEND_NPM="${FAKES}/npm-rec" FAKE_NODE_RC=0 bash "${INSTALLER}" --check --project "${PROJ}" 2>&1 )"; RC=$?
+assert_eq "installer: --check exits 0 when entries are present" 0 "${RC}"
+assert_eq "installer: --check is READ-ONLY -- it never runs npm ci" "" "$(cat "${INST_TMP}/npm-calls")"
+
 echo "== dry-run: prints the plan, launches nothing =="
 CASE="${TMP}/c-dry"; mkdir -p "${CASE}"
 launcher_env

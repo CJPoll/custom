@@ -305,6 +305,29 @@ run_wait_case "" "$(printf '0 %s' "${NDDOC}")"
 [ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" = "0" ] \
   && ok "never_delivered emits NO wake" || bad "never_delivered must not emit a wake" "${OUT}"
 
+# The normalized per-channel `count` field (DND-283 ruling 2c). The shim's
+# channelCount PREFERS `count` when present; a null count is UNCOUNTABLE (never
+# a benign zero), a 0 is zero, a positive is unread. These prove the shim's
+# CONSUMPTION of the new field, not just its production by inbox-status.
+COUNTNULL='{"channels":[{"name":"x","kind":"maildir","unread":0,"count":null}],"repo_key":"/x"}'
+run_wait_case "" "$(printf '0 %s' "${COUNTNULL}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="count_failed")]|length')" -ge 1 ] \
+  && ok "count:null -> count_failed (uncountable, never a benign zero)" || bad "count:null should be uncountable" "${OUT}"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" = "0" ] \
+  && ok "count:null emits NO wake" || bad "count:null must not emit a wake" "${OUT}"
+COUNT0='{"channels":[{"name":"x","kind":"maildir","unread":5,"count":0}],"repo_key":"/x"}'
+run_wait_case "" "$(printf '0 %s' "${COUNT0}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" = "0" ] \
+  && ok "count:0 emits NO wake (count wins over a stale unread:5)" || bad "count:0 should be zero" "${OUT}"
+[ "$(jqr '[.events[]|select(.meta.kind=="count_failed")]|length')" = "0" ] \
+  && ok "count:0 is a clean zero, not a count failure" || bad "count:0 must not be uncountable" "${OUT}"
+COUNT3='{"channels":[{"name":"x","kind":"maildir","unread":0,"count":3}],"repo_key":"/x"}'
+run_wait_case "" "$(printf '0 %s' "${COUNT3}")"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" -ge 1 ] \
+  && ok "count:3 -> a mail wake (count wins over a stale unread:0)" || bad "count:3 should wake" "${OUT}"
+[ "$(jqr '.events[]|select(.meta.kind=="mail")|.meta.channels' | head -1)" = "x:3" ] \
+  && ok "count:3 wake reports the count from the count field" || bad "expected x:3 in the wake meta" "${OUT}"
+
 # never_delivered:true on a MAILDIR channel is the opposite case: it means the
 # peer-mail dir simply is not provisioned yet (normal on a fresh channel, before
 # the waiter's first provisioning pass) -- NOT a broken producer registration

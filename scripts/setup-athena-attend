@@ -135,21 +135,29 @@ CHANNEL_DIR="${ATHENA_ATTEND_CHANNEL_DIR:-$(main_channel_dir)}"
 NPM="${ATHENA_ATTEND_NPM:-npm}"
 NODE="${ATHENA_ATTEND_NODE:-node}"
 
-# run_sdk_conformance -- npm ci (--omit=dev) + `sdk-conformance.mjs --live` in
-# CHANNEL_DIR. Prints the check's output; returns its exit code (non-zero,
-# INCLUDING the exit-3 skip which cannot happen after npm ci, is a refusal). It
-# is the FIRED interop mechanism before live registration: an SDK protocol drift
-# refuses the install rather than registering a shim the SDK cannot talk to.
+# run_sdk_conformance <install:0|1> -- run `sdk-conformance.mjs --live` in
+# CHANNEL_DIR. With arg 1 (the --install path) it first runs `npm ci --omit=dev`
+# so the SDK is present, then the live check; a non-zero exit (INCLUDING the
+# exit-3 skip) is a refusal. With arg 0 (the --check path, which the header
+# promises is READ-ONLY) it runs NEITHER npm ci NOR any filesystem mutation: it
+# only reports the live result against whatever node_modules is already there,
+# and the check's own exit-3 "LIVE SKIPPED -- node_modules absent" stands in for
+# "not installed yet". It is the FIRED interop mechanism before live
+# registration: an SDK protocol drift refuses the install rather than
+# registering a shim the SDK cannot talk to.
 run_sdk_conformance() {
+  local do_install="${1:-1}"
   if [ -z "${CHANNEL_DIR}" ] || [ ! -d "${CHANNEL_DIR}" ]; then
     echo "error: channel dir not found: ${CHANNEL_DIR:-<unresolved>}" >&2
     echo "  Fix: run from the custom repo so the main checkout resolves, or set ATHENA_ATTEND_CHANNEL_DIR." >&2
     return 2
   fi
-  if ! ( cd -- "${CHANNEL_DIR}" && "${NPM}" ci --omit=dev ) >/dev/null 2>&1; then
-    echo "error: 'npm ci --omit=dev' failed in ${CHANNEL_DIR}" >&2
-    echo "  Fix: run it there by hand to see why (it needs network and the committed package-lock.json); the SDK must install before live registration." >&2
-    return 2
+  if [ "${do_install}" = "1" ]; then
+    if ! ( cd -- "${CHANNEL_DIR}" && "${NPM}" ci --omit=dev ) >/dev/null 2>&1; then
+      echo "error: 'npm ci --omit=dev' failed in ${CHANNEL_DIR}" >&2
+      echo "  Fix: run it there by hand to see why (it needs network and the committed package-lock.json); the SDK must install before live registration." >&2
+      return 2
+    fi
   fi
   local out rc
   out="$( cd -- "${CHANNEL_DIR}" && "${NODE}" test/sdk-conformance.mjs --live 2>&1 )"; rc=$?
@@ -218,12 +226,18 @@ if [ "$MODE" = "check" ]; then
   if [ "$have_reboot" -eq 1 ] && [ "$have_relaunch" -eq 1 ]; then
     say "OK — both channel-session crontab entries are installed for ${PROJECT_ABS}:"
     printf '%s\n' "$current" | grep -F -- "$MATCH" | sed 's/^/  /'
-    # Report the live SDK interop result too (DND-283 ruling 1d). Informational
-    # on --check: it does not change the crontab verdict, but it tells the owner
-    # whether live registration WOULD pass right now.
-    step "SDK wire-conformance (live)"
-    if conf_out="$(run_sdk_conformance)"; then
+    # Report the live SDK interop result too (DND-283 ruling 1d). READ-ONLY on
+    # --check (arg 0): NO npm ci, no filesystem mutation -- it reports against
+    # whatever node_modules is already installed, and the check's exit-3 "LIVE
+    # SKIPPED -- node_modules absent" stands in for "not installed yet". It is
+    # informational: it never changes the crontab verdict.
+    step "SDK wire-conformance (live, read-only) — informational"
+    conf_out="$(run_sdk_conformance 0)"; conf_rc=$?
+    if [ "${conf_rc}" -eq 0 ]; then
       printf '%s\n' "$conf_out" | sed 's/^/  /'
+    elif [ "${conf_rc}" -eq 3 ]; then
+      printf '%s\n' "$conf_out" | sed 's/^/  /'
+      say "  (SDK not installed here yet; --install runs 'npm ci' then this check before registering)"
     else
       printf '%s\n' "$conf_out" | sed 's/^/  /' >&2
       say "  (the channel would REFUSE live registration until this passes)"
