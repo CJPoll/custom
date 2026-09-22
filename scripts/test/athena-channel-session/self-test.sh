@@ -68,6 +68,35 @@ assert_eq "gate: uncountable blocks (never idle)" BLOCKED "$(attend_rotation_gat
 assert_eq "gate: not idle blocks (turn in flight)" BLOCKED "$(attend_rotation_gate_open zero 0 0 && echo OPEN || echo BLOCKED)"
 assert_eq "gate: permission request open blocks (T5 seam)" BLOCKED "$(attend_rotation_gate_open zero 1 1 && echo OPEN || echo BLOCKED)"
 
+echo "== pure lib: attend_permission_open (T5/DND-286 rotation blocker) =="
+PSTATE="${TMP}/perm-state"; PREQ="${PSTATE}/requests"; mkdir -p "${PREQ}"
+NOW="$(date +%s)"
+assert_eq "perm dir path" "${PSTATE}/requests" "$(attend_permission_dir "${PSTATE}")"
+# empty requests dir -> NOT open (rotation may proceed).
+assert_eq "perm: no request files -> CLOSED" CLOSED \
+  "$(attend_permission_open "${PSTATE}" 3600 "${NOW}" && echo OPEN || echo CLOSED)"
+# a missing state dir -> NOT open.
+assert_eq "perm: missing requests dir -> CLOSED" CLOSED \
+  "$(attend_permission_open "${TMP}/nope" 3600 "${NOW}" && echo OPEN || echo CLOSED)"
+# a FRESH request file (age 0) BLOCKS rotation.
+: > "${PREQ}/abcde"
+assert_eq "perm: a fresh request file -> OPEN (blocks rotation)" OPEN \
+  "$(attend_permission_open "${PSTATE}" 3600 "${NOW}" && echo OPEN || echo CLOSED)"
+# and, integrated with the gate, an open request makes the gate BLOCK even when
+# counts are zero and the turn is idle.
+assert_eq "perm+gate: zero+idle but a permission open -> BLOCKED" BLOCKED \
+  "$(attend_rotation_gate_open zero 1 "$(attend_permission_open "${PSTATE}" 3600 "${NOW}" && echo 1 || echo 0)" && echo OPEN || echo BLOCKED)"
+# a STALE file (older than TTL) does NOT block -- a dead shim should be relaunched,
+# not wedge rotation forever. Age the file well past the TTL.
+touch -d "@$(( NOW - 4000 ))" "${PREQ}/abcde"
+assert_eq "perm: a request file older than TTL -> CLOSED (stale; do not wedge)" CLOSED \
+  "$(attend_permission_open "${PSTATE}" 3600 "${NOW}" && echo OPEN || echo CLOSED)"
+# fresh + stale together -> OPEN (the fresh one still blocks).
+: > "${PREQ}/fresh"
+assert_eq "perm: a fresh file among stale ones -> OPEN" OPEN \
+  "$(attend_permission_open "${PSTATE}" 3600 "${NOW}" && echo OPEN || echo CLOSED)"
+rm -rf "${PREQ}"; mkdir -p "${PREQ}"
+
 echo "== pure lib: counts key on the normalized count; null/absent = uncountable, never 0 =="
 assert_eq "counts: all zero -> zero" "zero" \
   "$(attend_counts_state '{"channels":[{"name":"a","count":0},{"name":"b","count":0}]}')"

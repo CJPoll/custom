@@ -237,6 +237,50 @@ attend_rotation_gate_open() {
 }
 
 # ---------------------------------------------------------------------------
+# open permission requests (the T5/DND-286 seam: the shim writes one file per
+# open request under <state-dir>/requests/; this reads them for the rotation
+# gate's third blocker). Pure, so the self-test drives it against fixture files.
+# ---------------------------------------------------------------------------
+
+# attend_permission_dir <state-dir> -> the dir the shim records open requests in.
+# ONE computation, shared by the shim (server.mjs permissionDir) and this reader,
+# so the two agree by construction -- a mismatch here is the silent-dark class
+# (a rotation that never sees an open request would cut the owner's pending
+# approval in half).
+attend_permission_dir() { printf '%s/requests\n' "${1:?state dir}"; }
+
+# attend_permission_open <state-dir> <ttl-s> <now-epoch>
+# rc 0 (a permission request is OPEN, so rotation MUST NOT fire) iff the requests
+# dir holds at least one request file whose age is < ttl. The safety direction:
+#   * a FRESH request file blocks rotation -- rotating now would silently drop the
+#     owner's pending approval (design Later: the exact harm this seam prevents);
+#   * a request file older than ttl does NOT block -- the shim expires and removes
+#     it at the same ttl, so a lingering stale file means the shim (or its whole
+#     session) died, and a dead session SHOULD be rotated/relaunched rather than
+#     wedging rotation forever;
+#   * an unreadable mtime blocks (deny-by-default: if we cannot tell a file's age,
+#     we cannot call it stale, so we must not rotate past it);
+#   * no dir / no files -> not open (rc 1).
+# The SHIM owns "never emit an unconfirmed verdict"; this reader owns only "do not
+# rotate away a request that may still be open".
+attend_permission_open() {
+  local dir ttl now reqdir f mtime age
+  dir="${1:?state dir}"; ttl="${2:-3600}"; now="${3:?now epoch}"
+  case "${ttl}" in ''|*[!0-9]*) ttl=3600 ;; esac
+  case "${now}" in ''|*[!0-9]*) return 0 ;; esac  # cannot compute age -> block (safe)
+  reqdir="$(attend_permission_dir "${dir}")"
+  [ -d "${reqdir}" ] || return 1
+  for f in "${reqdir}"/*; do
+    [ -e "${f}" ] || continue   # the glob matched nothing -> no files
+    mtime="$(stat -c %Y -- "${f}" 2>/dev/null || stat -f %m -- "${f}" 2>/dev/null || printf '')"
+    case "${mtime}" in ''|*[!0-9]*) return 0 ;; esac  # unreadable mtime -> block (safe)
+    age=$(( now - mtime ))
+    [ "${age}" -lt "${ttl}" ] && return 0
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # restart-rate cap (dark -> restart, bounded 3/hour; design §3.4)
 # ---------------------------------------------------------------------------
 

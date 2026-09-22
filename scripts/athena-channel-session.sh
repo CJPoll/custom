@@ -380,10 +380,13 @@ is_idle() {
 }
 
 permission_request_open() {
-  # T5 seam: a rotation must also not fire while a permission request is open.
-  # Pre-T5 there is no such signal, so none is ever open (rc 1). Shaped so T5
-  # wires the real check in here with no change to the gate call site.
-  return 1
+  # T5/DND-286: a rotation must not fire while a permission request is open --
+  # rotating (tmux kill-session + relaunch) would silently drop the owner's
+  # pending approval. The shim (server.mjs) writes one file per open request
+  # under <STATE_DIR>/requests/; attend_permission_open reads them, treating a
+  # file older than the relay TTL as stale (a dead shim should be relaunched, not
+  # wedge rotation forever). ATHENA_RELAY_TTL matches the shim's own default.
+  attend_permission_open "${STATE_DIR}" "${ATHENA_RELAY_TTL:-3600}" "$(date +%s)"
 }
 
 read_int() { local v; v="$(cat "$1" 2>/dev/null || true)"; case "${v}" in ''|*[!0-9]*) echo 0 ;; *) echo "${v}" ;; esac; }
