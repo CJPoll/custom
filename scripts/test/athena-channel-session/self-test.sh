@@ -22,6 +22,7 @@ set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$(cd -- "${HERE}/../.." && pwd -P)"
+REPO="$(cd -- "${SCRIPTS}/.." && pwd -P)"
 LAUNCHER="${SCRIPTS}/athena-channel-session.sh"
 LIB="${SCRIPTS}/lib/athena-attend-lib.sh"
 
@@ -85,6 +86,45 @@ assert_eq "wake: unread then zero IS a wake" yes "$(attend_wake_completed unread
 assert_eq "wake: zero then zero is NOT a wake" no "$(attend_wake_completed zero zero && echo yes || echo no)"
 assert_eq "wake: uncountable then zero is NOT a wake" no "$(attend_wake_completed uncountable zero && echo yes || echo no)"
 
+echo "== pure lib: attend_turn_ended (T4 rotation idle, per-session) + ledger path =="
+TE="${TMP}/turnend"; mkdir -p "${TE}"
+# all three present, idle NEWER than ack -> the turn ended (rotation may proceed).
+touch -d '2020-01-01 00:00:00' "${TE}/ack.sidA"
+touch -d '2020-01-01 00:00:05' "${TE}/idle.sidA"
+assert_eq "turn: ack + idle.<sid> newer than ack -> ended" yes "$(attend_turn_ended "${TE}" sidA && echo yes || echo no)"
+# ack present but NO idle.<sid>: ack_wake was called but the Stop hook has not
+# fired -- output may still follow the ack, so it is NOT ended (no rotation).
+touch -d '2020-01-01 00:00:00' "${TE}/ack.sidB"
+assert_eq "turn: ack but no idle.<sid> -> NOT ended (ack alone never rotates)" no "$(attend_turn_ended "${TE}" sidB && echo yes || echo no)"
+# an idle marker for ANOTHER session must NOT satisfy our gate (never a global
+# marker -- a wrong-key match is the failed-lookup class).
+touch "${TE}/idle.other-sid"
+assert_eq "turn: idle.<other-sid> present, none for our sid -> NOT ended" no "$(attend_turn_ended "${TE}" sidB && echo yes || echo no)"
+# idle OLDER than ack: a fresh bell arrived after the last turn-end -> NOT ended.
+touch -d '2020-01-01 00:00:10' "${TE}/ack.sidC"
+touch -d '2020-01-01 00:00:00' "${TE}/idle.sidC"
+assert_eq "turn: idle older than ack -> NOT ended" no "$(attend_turn_ended "${TE}" sidC && echo yes || echo no)"
+assert_eq "turn: empty sid -> NOT ended" no "$(attend_turn_ended "${TE}" '' && echo yes || echo no)"
+assert_eq "ledger: attend_ledger_path appends ledger.log to the state dir" "${TE}/ledger.log" "$(attend_ledger_path "${TE}")"
+
+# CROSS-TURN: after turn N ends (ack_N, then idle_N newer) the markers persist.
+# When bell N+1 arrives the shim removes idle.<sid> (server.mjs invalidateTurnEnd);
+# in the mid-reply window of turn N+1 (mail drained to zero, ack_wake not yet
+# called) the gate MUST read NOT-ended, or it could rotate mid-reply. With idle
+# removed and ack_N still present, attend_turn_ended is false -> gate stays closed.
+XT="${TMP}/xturn"; mkdir -p "${XT}"
+touch -d '2020-01-01 00:00:00' "${XT}/ack.sidX"; touch -d '2020-01-01 00:00:05' "${XT}/idle.sidX"
+assert_eq "cross-turn: turn N ended (ack_N, idle_N newer) -> ended" yes "$(attend_turn_ended "${XT}" sidX && echo yes || echo no)"
+rm -f "${XT}/idle.sidX"   # the shim's invalidateTurnEnd at bell N+1
+assert_eq "cross-turn: bell N+1 removed idle, mid-reply (ack_N present) -> NOT ended (no mid-reply rotation)" no "$(attend_turn_ended "${XT}" sidX && echo yes || echo no)"
+
+echo "== pure lib: the three rotation conditions compose in the gate =="
+# all three (counts zero + turn ended) -> OPEN; ack-but-no-idle or other-sid -> BLOCKED.
+assert_eq "rot: zero counts + turn ended (all three) -> gate OPEN" OPEN \
+  "$(attend_rotation_gate_open zero "$(attend_turn_ended "${TE}" sidA && echo 1 || echo 0)" 0 && echo OPEN || echo BLOCKED)"
+assert_eq "rot: ack seen but no idle.<sid> newer -> gate BLOCKED (no rotation)" BLOCKED \
+  "$(attend_rotation_gate_open zero "$(attend_turn_ended "${TE}" sidB && echo 1 || echo 0)" 0 && echo OPEN || echo BLOCKED)"
+
 echo "== pure lib: transcript bytes n/a (never 0) when unmeasurable =="
 assert_eq "transcript: missing dir -> n/a" "n/a" "$(attend_transcript_bytes "${TMP}/nope")"
 mkdir -p "${TMP}/slug-empty"
@@ -132,6 +172,8 @@ if [ "${1:-}" = "--version" ]; then printf '%s\n' "${FAKE_CLAUDE_VERSION:-Claude
   printf 'ATTENDED=[%s] EXPECT=[%s] AGENT_ID=[%s] AGENT_TYPE=[%s]\n' \
     "${CLAUDE_CODE_SESSION_ATTENDED:-UNSET}" "${ATHENA_INBOX_EXPECT_PROJECT:-UNSET}" \
     "${CLAUDE_AGENT_ID:-UNSET}" "${CLAUDE_AGENT_TYPE:-UNSET}"
+  printf 'ATTEND_STATE=[%s] ATTEND_SID=[%s] ATTEND_LEDGER=[%s]\n' \
+    "${ATHENA_ATTEND_STATE_DIR:-UNSET}" "${ATHENA_ATTEND_SESSION_ID:-UNSET}" "${ATHENA_ATTEND_LEDGER:-UNSET}"
   printf 'ARGV=[%s]\n' "$*"
 } >> "${FAKE_CLAUDE_ENVLOG}"
 exit 0
@@ -262,6 +304,14 @@ assert_contains "the launcher never set CLAUDE_AGENT_ID on the launched session"
 assert_contains "the launcher never set CLAUDE_AGENT_TYPE on the launched session" "AGENT_TYPE=[UNSET]" "$(cat "${FAKE_CLAUDE_ENVLOG}")"
 assert_eq "happy path left NO dark/wedged marker" "" \
   "$(ls "${ATHENA_ATTEND_STATE_DIR}"/channel.dark "${ATHENA_ATTEND_STATE_DIR}"/channel.wedged 2>/dev/null || true)"
+# T4/DND-285: the launched claude gets a per-session --session-id, and the attend
+# env the shim's ack_wake + the Stop hook key their markers on.
+assert_contains "happy path launched claude with --session-id" "--session-id" "$(cat "${FAKE_CLAUDE_ENVLOG}")"
+assert_contains "happy path passed ATHENA_ATTEND_STATE_DIR into the session" "ATTEND_STATE=[${ATHENA_ATTEND_STATE_DIR}]" "$(cat "${FAKE_CLAUDE_ENVLOG}")"
+assert_not_contains "happy path passed a non-empty ATHENA_ATTEND_SESSION_ID" "ATTEND_SID=[UNSET]" "$(cat "${FAKE_CLAUDE_ENVLOG}")"
+assert_contains "happy path passed ATHENA_ATTEND_LEDGER (ends in ledger.log)" "ledger.log]" "$(cat "${FAKE_CLAUDE_ENVLOG}")"
+assert_eq "happy path stored the session id in session.id" "1" \
+  "$([ -s "${ATHENA_ATTEND_STATE_DIR}/session.id" ] && echo 1 || echo 0)"
 
 echo "== registration notice missing -> dark -> ONE retry -> wedged + DM =="
 CASE="${TMP}/c-miss"; mkdir -p "${CASE}"
@@ -367,12 +417,18 @@ chmod +x "${FAKES}/crontab" "${FAKES}/inbin/inbox-wait" "${FAKES}/npm" "${FAKES}
 INST_TMP="${TMP}/inst"; mkdir -p "${INST_TMP}"
 export FAKE_CRONTAB_FILE="${INST_TMP}/crontab.txt"; : > "${FAKE_CRONTAB_FILE}"
 CHDIR="${INST_TMP}/channel"; mkdir -p "${CHDIR}/test"   # run_sdk_conformance only needs the dir to exist
+# The allowlist merge (T4) runs on every --install; seam it at the real committed
+# fragment merging into a scratch target/state so the SDK-gate cases exercise a
+# real merge without touching any project's settings.
 inst_env=(
   "ATHENA_ATTEND_RUNNER_DIR=${SCRIPTS}"
   "ATHENA_ATTEND_INBOX_BIN_DIR=${FAKES}/inbin"
   "ATHENA_ATTEND_CHANNEL_DIR=${CHDIR}"
   "ATHENA_ATTEND_NPM=${FAKES}/npm"
   "ATHENA_ATTEND_NODE=${FAKES}/node"
+  "ATHENA_ATTEND_FRAGMENT=${REPO}/ai/skills/athena:inbox/channel/settings.attend.json"
+  "ATHENA_ATTEND_SETTINGS_FILE=${INST_TMP}/default-settings.json"
+  "ATHENA_ATTEND_STATE_DIR=${INST_TMP}/default-state"
   "PATH=${FAKES}:${PATH}"
 )
 
@@ -407,6 +463,110 @@ chmod +x "${FAKES}/npm-rec"
 OUT="$( env "${inst_env[@]}" ATHENA_ATTEND_NPM="${FAKES}/npm-rec" FAKE_NODE_RC=0 bash "${INSTALLER}" --check --project "${PROJ}" 2>&1 )"; RC=$?
 assert_eq "installer: --check exits 0 when entries are present" 0 "${RC}"
 assert_eq "installer: --check is READ-ONLY -- it never runs npm ci" "" "$(cat "${INST_TMP}/npm-calls")"
+
+echo "== committed allowlist fragment is deny-by-default (static QA; T4/DND-285) =="
+REPO="$(cd -- "${SCRIPTS}/.." && pwd -P)"
+FRAG="${REPO}/ai/skills/athena:inbox/channel/settings.attend.json"
+if [ ! -f "${FRAG}" ]; then
+  bad "the committed allowlist fragment must exist" "${FRAG} not found"
+else
+  FRAGALLOW="$(jq -r '.permissions.allow[]' "${FRAG}" 2>/dev/null)"
+  assert_eq "fragment has exactly 7 allow entries" "7" "$(jq '.permissions.allow | length' "${FRAG}")"
+  # EXACT-SET assertion (not just count + denylist): the ticket says the entries
+  # are EXACTLY the 7 routine calls, so a future diff cannot swap one of the
+  # unpinned slots for a non-forbidden-but-dangerous entry while keeping count 7.
+  EXPECT_ALLOW='["Bash(/home/cjpoll/dev/custom/ai/skills/athena:inbox/bin/inbox-status*)","Bash(/home/cjpoll/dev/custom/ai/skills/athena:inbox/bin/read-inbox*)","Bash(/home/cjpoll/dev/custom/ai/skills/athena:slack/bin/reply*)","Bash(/home/cjpoll/dev/custom/ai/skills/athena:slack/bin/dm*)","Bash(/home/cjpoll/dev/custom/ai/skills/athena:slack/bin/read-thread*)","Bash(tail -n * __ATTEND_LEDGER__)","mcp__athena-inbox__ack_wake"]'
+  assert_eq "fragment allow is EXACTLY the 7 routine entries (no swap surface)" "${EXPECT_ALLOW}" "$(jq -c '.permissions.allow' "${FRAG}")"
+  assert_not_contains "fragment allows NO Edit tool" "Edit(" "${FRAGALLOW}"
+  assert_not_contains "fragment allows NO Write tool" "Write(" "${FRAGALLOW}"
+  assert_not_contains "fragment allows NO MultiEdit tool" "MultiEdit" "${FRAGALLOW}"
+  assert_not_contains "fragment allows NO NotebookEdit tool" "NotebookEdit" "${FRAGALLOW}"
+  assert_not_contains "fragment allows NO git write" "git " "${FRAGALLOW}"
+  assert_not_contains "fragment allows NO gh-athena" "gh-athena" "${FRAGALLOW}"
+  assert_not_contains "fragment allows NO send-mail" "send-mail" "${FRAGALLOW}"
+  assert_not_contains "fragment has NO Bash(*) wildcard" "Bash(*)" "${FRAGALLOW}"
+  assert_not_contains "fragment names NO worktree path (main-checkout absolute only)" "/.local/worktrees/" "${FRAGALLOW}"
+  assert_contains "fragment allows ack_wake" "mcp__athena-inbox__ack_wake" "${FRAGALLOW}"
+  assert_contains "fragment bin paths are main-checkout absolute (/home/cjpoll/dev/custom)" \
+    "/home/cjpoll/dev/custom/ai/skills/athena:inbox/bin/read-inbox" "${FRAGALLOW}"
+fi
+
+echo "== installer: allowlist merges into settings.json (merge, never clobber; idempotent) =="
+MERGE_STATE="${INST_TMP}/mstate"; mkdir -p "${MERGE_STATE}"
+TARGET="${INST_TMP}/proj-claude/settings.json"; mkdir -p "$(dirname "${TARGET}")"
+# a pre-existing settings.json with an unrelated key AND a pre-existing allow entry.
+printf '%s\n' '{"model":"opus","permissions":{"allow":["Bash(ls*)"]}}' > "${TARGET}"
+: > "${FAKE_CRONTAB_FILE}"
+env "${inst_env[@]}" FAKE_NODE_RC=0 \
+  ATHENA_ATTEND_FRAGMENT="${FRAG}" \
+  ATHENA_ATTEND_SETTINGS_FILE="${TARGET}" \
+  ATHENA_ATTEND_STATE_DIR="${MERGE_STATE}" \
+  bash "${INSTALLER}" --install --project "${PROJ}" >/dev/null 2>&1; RC=$?
+assert_eq "installer: --install with a mergeable allowlist exits 0" 0 "${RC}"
+assert_contains "merge kept the pre-existing unrelated key (model)" '"model": "opus"' "$(cat "${TARGET}")"
+MALLOW="$(jq -r '.permissions.allow[]' "${TARGET}" 2>/dev/null)"
+assert_contains "merge kept the pre-existing allow entry" "Bash(ls*)" "${MALLOW}"
+assert_contains "merge added ack_wake" "mcp__athena-inbox__ack_wake" "${MALLOW}"
+assert_contains "merge added the read-inbox main-checkout entry" "/home/cjpoll/dev/custom/ai/skills/athena:inbox/bin/read-inbox" "${MALLOW}"
+assert_contains "merge substituted the per-project ledger path" "tail -n * ${MERGE_STATE}/ledger.log" "${MALLOW}"
+assert_not_contains "no unsubstituted __ATTEND_LEDGER__ placeholder remains" "__ATTEND_LEDGER__" "${MALLOW}"
+assert_not_contains "the fragment's _note key never reaches the merged settings" "_note" "$(cat "${TARGET}")"
+# idempotent: a second --install adds nothing.
+BEFORE_N="$(jq '.permissions.allow | length' "${TARGET}")"
+: > "${FAKE_CRONTAB_FILE}"
+env "${inst_env[@]}" FAKE_NODE_RC=0 ATHENA_ATTEND_FRAGMENT="${FRAG}" ATHENA_ATTEND_SETTINGS_FILE="${TARGET}" ATHENA_ATTEND_STATE_DIR="${MERGE_STATE}" bash "${INSTALLER}" --install --project "${PROJ}" >/dev/null 2>&1
+AFTER_N="$(jq '.permissions.allow | length' "${TARGET}")"
+assert_eq "merge is idempotent (allow length unchanged on re-run)" "${BEFORE_N}" "${AFTER_N}"
+# --remove un-merges the attend entries but keeps the pre-existing one.
+: > "${FAKE_CRONTAB_FILE}"
+env "${inst_env[@]}" ATHENA_ATTEND_FRAGMENT="${FRAG}" ATHENA_ATTEND_SETTINGS_FILE="${TARGET}" ATHENA_ATTEND_STATE_DIR="${MERGE_STATE}" bash "${INSTALLER}" --remove --project "${PROJ}" >/dev/null 2>&1
+RALLOW="$(jq -r '.permissions.allow[]' "${TARGET}" 2>/dev/null)"
+assert_not_contains "--remove dropped the attend ack_wake entry" "mcp__athena-inbox__ack_wake" "${RALLOW}"
+assert_contains "--remove kept the pre-existing unrelated allow entry" "Bash(ls*)" "${RALLOW}"
+
+echo "== athena:inbox-attend skill: ack_wake wiring + consumer-lock note (T4/DND-285) =="
+SKILL_MD="${REPO}/ai/skills/athena:inbox-attend/SKILL.md"
+if [ ! -f "${SKILL_MD}" ]; then
+  bad "the athena:inbox-attend skill must exist" "${SKILL_MD} not found"
+else
+  SKILLTXT="$(cat "${SKILL_MD}")"
+  assert_contains "skill's final wake step calls mcp__athena-inbox__ack_wake" "mcp__athena-inbox__ack_wake" "${SKILLTXT}"
+  # consumer-lock refusal -> not the designated consumer -> call ack_wake + end
+  # the turn (design 3.2a; the refusal itself is proven by the inbox suite's
+  # M-2/A-6 lock test).
+  assert_contains "skill tells a non-consumer (lock refused, --peek) to not peek/reply" "not** the designated consumer" "${SKILLTXT}"
+  assert_contains "skill routes a lock-refused session to ack_wake + end the turn" "call \`ack_wake\` (final step) and end the turn" "${SKILLTXT}"
+  # DoD: the #47 receipt env var is gone from the skill (the operational grep is
+  # clean; the only ATHENA_ATTEND_RECEIPT left in ai/ is the design doc's dated
+  # T6-sweep-list token, which is an immutable dated record).
+  assert_not_contains "skill contains no ATHENA_ATTEND_RECEIPT (receipt step is gone)" "ATHENA_ATTEND_RECEIPT" "${SKILLTXT}"
+fi
+
+echo "== notify-idle Stop hook writes idle.<sid> for attend sessions only (T4/DND-285) =="
+NIH="${REPO}/ai/hooks/notify-idle.sh"
+NI_STATE="${TMP}/ni-state"; mkdir -p "${NI_STATE}"
+# An attend session: ATHENA_ATTEND_STATE_DIR set. The marker keys on the env
+# ATHENA_ATTEND_SESSION_ID (the launcher UUID the gate reads), NOT the stdin
+# .session_id -- anchoring to the single source the gate keys on. Feed a
+# DIFFERENT stdin session_id to prove the env wins.
+printf '%s' '{"session_id":"stdin-sid","hook_event_name":"Stop"}' \
+  | ATHENA_ATTEND_STATE_DIR="${NI_STATE}" ATHENA_ATTEND_SESSION_ID="env-sid" bash "${NIH}" >/dev/null 2>&1
+assert_eq "attend Stop wrote idle.<env-sid> (anchored to the gate's source, not stdin)" "1" \
+  "$([ -e "${NI_STATE}/idle.env-sid" ] && echo 1 || echo 0)"
+assert_eq "attend Stop did NOT write idle.<stdin-sid> (env wins over the Stop payload)" "0" \
+  "$([ -e "${NI_STATE}/idle.stdin-sid" ] && echo 1 || echo 0)"
+# stdin .session_id is used only as a FALLBACK when the env var is absent.
+NI_STATE2="${TMP}/ni-state2"; mkdir -p "${NI_STATE2}"
+printf '%s' '{"session_id":"fallback-sid","hook_event_name":"Stop"}' \
+  | ATHENA_ATTEND_STATE_DIR="${NI_STATE2}" bash "${NIH}" >/dev/null 2>&1
+assert_eq "attend Stop falls back to the stdin .session_id when the env var is unset" "1" \
+  "$([ -e "${NI_STATE2}/idle.fallback-sid" ] && echo 1 || echo 0)"
+# A NON-attend session (no ATHENA_ATTEND_STATE_DIR) writes NO marker anywhere.
+NI_STATE3="${TMP}/ni-state3"; mkdir -p "${NI_STATE3}"
+printf '%s' '{"session_id":"whatever","hook_event_name":"Stop"}' \
+  | ATHENA_ATTEND_SESSION_ID="x" bash "${NIH}" >/dev/null 2>&1
+assert_eq "a non-attend session writes no idle marker" "0" \
+  "$(find "${NI_STATE3}" -name 'idle.*' 2>/dev/null | wc -l | tr -d ' ')"
 
 echo "== dry-run: prints the plan, launches nothing =="
 CASE="${TMP}/c-dry"; mkdir -p "${CASE}"

@@ -73,6 +73,21 @@
 #                               refuses to install an attendant for a project
 #                               with no channels (a test seam; defaults to the
 #                               main checkout's athena:inbox bin).
+#   ATHENA_ATTEND_FRAGMENT      committed allowlist fragment to merge (test seam;
+#                               defaults to the channel dir's settings.attend.json)
+#   ATHENA_ATTEND_SETTINGS_FILE target settings.json to merge into (test seam;
+#                               defaults to <project>/.claude/settings.json)
+#   ATHENA_ATTEND_STATE_DIR     per-project attend state dir (test seam); also
+#                               fixes the ledger path named in the merged allowlist
+#
+# --install ALSO merges the committed permission allowlist
+# (ai/skills/athena:inbox/channel/settings.attend.json) into the attended
+# project's .claude/settings.json permissions.allow — MERGE, never clobber (same
+# discipline as scripts/setup-hooks): unrelated keys and pre-existing allow
+# entries survive, it is idempotent, and it backs the target up first. Only the
+# attend procedure's routine calls run without a prompt; everything else prompts
+# (deny-by-default; T5 relays the prompt). The fragment's __ATTEND_LEDGER__ is
+# substituted with the resolved per-project ledger path. --remove un-merges them.
 #
 # Exit codes: 0 ok · 1 usage/arg error, or --check found entries missing
 #             · 2 missing prerequisite (no crontab, runner not in main checkout,
@@ -119,6 +134,12 @@ RUNNER_DIR="${ATHENA_ATTEND_RUNNER_DIR:-$(main_checkout_dir)}"
 RUNNER="${RUNNER_DIR}/athena-channel-session.sh"
 SELF_TEST="${SCRIPT_DIR}/test/athena-channel-session/self-test.sh"
 
+# Shared attend helpers (attend_state_dir / attend_ledger_path) so the ledger
+# path named in the merged allowlist is byte-identical to the one the launcher
+# exports into the session env.
+# shellcheck source=/dev/null
+[ -r "${SCRIPT_DIR}/lib/athena-attend-lib.sh" ] && . "${SCRIPT_DIR}/lib/athena-attend-lib.sh"
+
 # The channel dir whose SDK wire-conformance must pass live before we install
 # the entries that start the session that registers the server (DND-283 ruling
 # 1d). Defaults to the MAIN checkout's copy; seams (NPM/NODE/CHANNEL_DIR) let
@@ -134,6 +155,108 @@ main_channel_dir() {
 CHANNEL_DIR="${ATHENA_ATTEND_CHANNEL_DIR:-$(main_channel_dir)}"
 NPM="${ATHENA_ATTEND_NPM:-npm}"
 NODE="${ATHENA_ATTEND_NODE:-node}"
+
+# The committed allowlist fragment (the owner's standing authorization) merged
+# into the attended project's settings.json (T4/DND-285). Seams let the
+# self-test drive it against a scratch fragment/target.
+FRAGMENT="${ATHENA_ATTEND_FRAGMENT:-${CHANNEL_DIR}/settings.attend.json}"
+RESOLVE_PROJECT_BIN="${CHANNEL_DIR}/resolve-project.sh"
+
+# resolve_attend_project_name <project-abs> -> the registry project NAME (via the
+# channel's resolve-project.sh), falling back to the dir basename -- the SAME
+# rule the launcher uses, so the state dir (and thus the ledger path) match.
+resolve_attend_project_name() {
+  local abs="$1" name=""
+  if [ -x "${RESOLVE_PROJECT_BIN}" ]; then
+    name="$( cd -- "${abs}" 2>/dev/null && "${RESOLVE_PROJECT_BIN}" 2>/dev/null || true )"
+  fi
+  [ -n "${name}" ] || name="$(basename -- "${abs}")"
+  printf '%s' "${name}"
+}
+
+# merge_allowlist <mode:install|remove> <project-abs> <ledger-path> <settings-file>
+# Merges (or removes) the fragment's .permissions.allow entries into the target
+# settings.json -- backup-first, idempotent, MERGE not clobber (unrelated keys
+# and pre-existing allow entries survive). __ATTEND_LEDGER__ is substituted with
+# the resolved per-project ledger path. Honors DRY_RUN. Pure JSON via python3.
+MERGE_ALLOWLIST_PY='
+import json, os, sys, time, shutil
+mode, fragment, ledger, target, dry = sys.argv[1:6]
+with open(fragment) as f:
+    frag = json.load(f)
+entries = ((frag.get("permissions") or {}).get("allow")) or []
+entries = [e.replace("__ATTEND_LEDGER__", ledger) for e in entries]
+try:
+    with open(target) as f:
+        settings = json.load(f)
+except FileNotFoundError:
+    settings = {}
+if not isinstance(settings, dict):
+    sys.stderr.write("error: target settings is not a JSON object\n")
+    sys.exit(3)
+# A "permissions": null (or non-dict) key must not crash the merge -- coerce it.
+perms = settings.get("permissions")
+if not isinstance(perms, dict):
+    perms = {}
+    settings["permissions"] = perms
+allow = perms.get("allow")
+if not isinstance(allow, list):
+    allow = []
+if mode == "remove":
+    allow = [a for a in allow if a not in entries]
+else:
+    have = set(allow)
+    for e in entries:
+        if e not in have:
+            allow.append(e); have.add(e)
+perms["allow"] = allow
+out = json.dumps(settings, indent=2) + "\n"
+if dry == "1":
+    sys.stdout.write(out)
+    sys.exit(0)
+# Idempotent no-op: if the file already equals the merged result, do not rewrite
+# it (which would reformat a hand-edited settings.json) or spawn a fresh .bak.
+try:
+    with open(target) as f:
+        if f.read() == out:
+            sys.exit(0)
+except FileNotFoundError:
+    pass
+os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+if os.path.exists(target):
+    bak = "%s.bak.%s" % (target, time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
+    shutil.copy2(target, bak)
+tmp = target + ".tmp.%d" % os.getpid()
+with open(tmp, "w") as f:
+    f.write(out)
+os.replace(tmp, target)
+'
+
+merge_allowlist() {
+  local mode="$1" abs="$2" ledger="$3" target="$4"
+  command -v python3 >/dev/null 2>&1 || {
+    echo "error: python3 is required to merge the permission allowlist." >&2
+    echo "  Fix: install python3, then re-run 'scripts/setup-athena-attend --install'." >&2
+    return 2
+  }
+  [ -r "${FRAGMENT}" ] || {
+    echo "error: allowlist fragment not found: ${FRAGMENT}" >&2
+    echo "  Fix: run from the custom repo so the main checkout resolves, or set ATHENA_ATTEND_FRAGMENT." >&2
+    return 2
+  }
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    say "  [dry-run] would merge the allowlist into ${target}; resulting permissions.allow:"
+    python3 -c "${MERGE_ALLOWLIST_PY}" "${mode}" "${FRAGMENT}" "${ledger}" "${target}" 1 \
+      | sed 's/^/    /'
+    return 0
+  fi
+  python3 -c "${MERGE_ALLOWLIST_PY}" "${mode}" "${FRAGMENT}" "${ledger}" "${target}" 0 || {
+    echo "error: merging the permission allowlist into ${target} failed." >&2
+    echo "  Fix: ensure ${target} is valid JSON and writable, then re-run." >&2
+    return 2
+  }
+  return 0
+}
 
 # run_sdk_conformance <install:0|1> -- run `sdk-conformance.mjs --live` in
 # CHANNEL_DIR. With arg 1 (the --install path) it first runs `npm ci --omit=dev`
@@ -258,6 +381,18 @@ if [ "$MODE" = "remove" ]; then
   step "Removing the Athena attendant crontab entries for ${PROJECT_ABS}"
   current="$(read_crontab)"
   put_crontab "$(without_our_entries "$current")"
+  # Also remove the attend allowlist entries (merge-not-clobber in reverse:
+  # unrelated allow entries and other keys survive). Best-effort: a missing
+  # settings file or fragment is not fatal to the crontab removal.
+  ATTEND_PROJECT_NAME="$(resolve_attend_project_name "${PROJECT_ABS}")"
+  ATTEND_STATE_DIR_RESOLVED="$(attend_state_dir "${ATTEND_PROJECT_NAME}")"
+  ATTEND_LEDGER_RESOLVED="$(attend_ledger_path "${ATTEND_STATE_DIR_RESOLVED}")"
+  SETTINGS_FILE="${ATHENA_ATTEND_SETTINGS_FILE:-${PROJECT_ABS}/.claude/settings.json}"
+  if [ -f "${SETTINGS_FILE}" ]; then
+    merge_allowlist remove "${PROJECT_ABS}" "${ATTEND_LEDGER_RESOLVED}" "${SETTINGS_FILE}" \
+      && say "Removed the attend allowlist entries from ${SETTINGS_FILE} (unrelated entries kept)." \
+      || say "note: could not update ${SETTINGS_FILE}; remove the attend allow entries by hand if needed."
+  fi
   say "Done. Any attendant already running is left alone; it simply will not be relaunched."
   say "Stop a running attendant by killing the pid in ~/.local/state/athena-attend/$(basename -- "$PROJECT_ABS")/attend.pid."
   exit 0
@@ -329,6 +464,24 @@ say "    ${REBOOT_LINE}"
 say "    ${RELAUNCH_LINE}"
 if [ -n "$kept" ]; then
   say "  preserved $(printf '%s\n' "$kept" | wc -l | tr -d ' ') unrelated crontab entr(y/ies)."
+fi
+
+step "Permission allowlist (the owner's standing authorization)"
+ATTEND_PROJECT_NAME="$(resolve_attend_project_name "${PROJECT_ABS}")"
+ATTEND_STATE_DIR_RESOLVED="$(attend_state_dir "${ATTEND_PROJECT_NAME}")"
+ATTEND_LEDGER_RESOLVED="$(attend_ledger_path "${ATTEND_STATE_DIR_RESOLVED}")"
+SETTINGS_FILE="${ATHENA_ATTEND_SETTINGS_FILE:-${PROJECT_ABS}/.claude/settings.json}"
+if merge_allowlist install "${PROJECT_ABS}" "${ATTEND_LEDGER_RESOLVED}" "${SETTINGS_FILE}"; then
+  if [ "${DRY_RUN}" -eq 0 ]; then
+    say "  merged the attend allowlist into ${SETTINGS_FILE}"
+    say "  (ledger entry: tail -n * ${ATTEND_LEDGER_RESOLVED})"
+    say "  only the routine attend calls run without a prompt; everything else prompts."
+  fi
+else
+  echo "error: could not merge the permission allowlist; the crontab entries above ARE installed" >&2
+  echo "  but the attendant would prompt on every routine call until the allowlist is merged." >&2
+  echo "  Fix: resolve the error above, then re-run 'scripts/setup-athena-attend --install --project ${PROJECT_ABS}'." >&2
+  exit 2
 fi
 
 step "Done"

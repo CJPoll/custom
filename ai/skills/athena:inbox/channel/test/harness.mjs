@@ -29,8 +29,15 @@ const TOUCH_DELAY_MS = Number(process.env.HARNESS_TOUCH_DELAY_MS || '200');
 // HARNESS_RENAME: unlink+recreate this path as a stimulus (an inode rename, which
 // fs.watch reports as 'rename' -- the rotation/repair recovery path).
 const RENAME = process.env.HARNESS_RENAME || '';
+// Tool driving (T4): request tools/list, and/or call one tool after a delay.
+const LIST_TOOLS = process.env.HARNESS_LIST_TOOLS === '1';
+const CALL_TOOL = process.env.HARNESS_CALL_TOOL || '';
+const CALL_ARGS = process.env.HARNESS_CALL_ARGS || '{}';
+const CALL_DELAY_MS = Number(process.env.HARNESS_CALL_DELAY_MS || '250');
 
 const events = [];
+let toolsList = null; // result.tools from tools/list
+let callResult = null; // result (or {error}) from tools/call
 let initResult = null;
 let stderrBuf = '';
 let exitCode = null;
@@ -50,7 +57,7 @@ function finish() {
   // Give the server a beat to reap its own child (the waiter) on SIGTERM.
   setTimeout(() => {
     process.stdout.write(
-      JSON.stringify({ init: initResult, events, exit: exitCode, stderr: stderrBuf }) + '\n',
+      JSON.stringify({ init: initResult, events, toolsList, callResult, exit: exitCode, stderr: stderrBuf }) + '\n',
     );
     process.exit(0);
   }, 120);
@@ -109,10 +116,26 @@ child.stdout.on('data', (chunk) => {
     } catch {
       continue;
     }
-    if (msg.id !== undefined && msg.result && msg.result.capabilities) {
+    if (msg.id === 1 && msg.result && msg.result.capabilities) {
       initResult = msg.result;
       send({ jsonrpc: '2.0', method: 'notifications/initialized' });
       startWindow();
+      if (LIST_TOOLS) send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+      if (CALL_TOOL) {
+        setTimeout(() => {
+          let args = {};
+          try {
+            args = JSON.parse(CALL_ARGS);
+          } catch {
+            /* leave empty */
+          }
+          send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: CALL_TOOL, arguments: args } });
+        }, CALL_DELAY_MS);
+      }
+    } else if (msg.id === 2) {
+      toolsList = msg.result ? msg.result.tools : { error: msg.error };
+    } else if (msg.id === 3) {
+      callResult = msg.result || { error: msg.error };
     } else if (msg.method === 'notifications/claude/channel') {
       events.push(msg.params);
     }
