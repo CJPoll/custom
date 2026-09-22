@@ -114,6 +114,21 @@ the number of words-per-sentence significantly … wordy and not terribly
 scannable."* This is `~/.claude/CLAUDE.md` → *Writing style* applied to Slack
 output, which it did not otherwise inherit.
 
+## Every DM to the owner names its sending session (owner rule)
+
+Every Slack DM to Cody (`U0AHNV4RJGP`) leads with the sending session's name.
+Many sessions share the one Athena bot identity, so without it the owner cannot
+tell which session to answer — and an answer or authorization only counts in the
+session that asked.
+
+- Format: `*<session> session (<repo path>):*` — e.g. `*harness session
+  (~/dev/custom):*`, `*walt_ui session:*`.
+- A spawned admiral or captain names its spawning session and its role — e.g.
+  `*harness session → admiral (DND-315):*`.
+- One short prefix line, then the message in the scannable style above.
+
+Cody, verbatim (2026-09-22): *"Make sure to specify which session you are."*
+
 ## Etiquette
 
 - **Thread by default.** Reply in the thread; start a new top-level message only
