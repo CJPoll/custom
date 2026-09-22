@@ -709,30 +709,64 @@ function onPermissionRequest(params) {
   }
 }
 
-// Pure: given the peeked messages and the open-request set, the verdict
-// candidates. A line matches VERDICT_RE, its id (lowercased) is an open request,
-// and it carries the ts + channel to re-query. The claimed user is IGNORED here
-// (it is locally forgeable); it is the Slack API re-query that authenticates.
-function parseVerdictCandidates(messages, open) {
+// Pure: NOMINATE (channel, ts) pairs from the peek that are worth authenticating.
+// The peek is UNTRUSTED end to end -- its text, user, AND the verb/id it appears
+// to carry are locally forgeable, so they decide ONLY which timestamps to
+// re-query, NEVER the verdict itself. A peeked line whose text looks like a
+// verdict grammar is a candidate; the authoritative verb + id are re-derived from
+// the Slack API's OWN copy of that message in authenticateVerdict below. (Reading
+// the verb/id from the peek was the DND-286 escalation: an attacker who can forge
+// a peek line could point the re-query at any (channel, ts) where the owner
+// posted -- including the owner's genuine "no <id>" -- and, by supplying "yes
+// <id>" as the peek text, flip a deny into an allow, since the re-query confirmed
+// only the sender's presence at that ts, not what they said.)
+function nominateCandidates(messages) {
   const out = [];
+  const seen = new Set();
   if (!Array.isArray(messages)) return out;
   for (const m of messages) {
     if (!m || typeof m !== 'object') continue;
     const text = typeof m.text === 'string' ? m.text : '';
-    const mm = VERDICT_RE.exec(text);
-    if (!mm) continue;
-    const verb = mm[1].toLowerCase();
-    const id = mm[2].toLowerCase();
-    if (!open.has(id)) continue;
-    out.push({
-      relayId: id,
-      requestId: open.get(id).requestId,
-      behavior: verb === 'y' || verb === 'yes' ? 'allow' : 'deny',
-      ts: typeof m.ts === 'string' ? m.ts : '',
-      channel: typeof m.channel === 'string' ? m.channel : '',
-    });
+    if (!VERDICT_RE.test(text)) continue; // an UNTRUSTED pre-filter, never the decision
+    const ts = typeof m.ts === 'string' ? m.ts : '';
+    const channel = typeof m.channel === 'string' ? m.channel : '';
+    if (!ts || !channel) continue;
+    const key = `${channel}\u0000${ts}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ channel, ts });
+    if (out.length >= 32) break; // bound the re-queries against a flooded peek
   }
   return out;
+}
+
+// Authenticate one nominated (channel, ts) against the Slack API. The API must
+// return a message AT that exact ts authored EXACTLY by the owner, AND that
+// message's OWN text (never the peek's) must itself be a verdict for an OPEN
+// request. Only then is a verdict real. Returns:
+//   { relayId, requestId, behavior }  -- authenticated
+//   { error: true }                   -- API error (re-query failed)
+//   null                              -- no owner message at that ts, or the
+//                                        owner's real message is not a verdict,
+//                                        or its id is not an open request.
+// The verb, the relay id, and thus the relayId->request_id binding all come from
+// the API text, so a forged peek can neither manufacture nor flip a verdict.
+async function authenticateVerdict(candidate, open) {
+  const rows = await requerySlack(candidate.channel, candidate.ts);
+  if (rows === null) return { error: true };
+  const row = rows.find((r) => r && r.ts === candidate.ts && r.user === OWNER_SLACK_ID);
+  if (!row) return null; // forged line, or someone else's real message at that ts
+  const text = typeof row.text === 'string' ? row.text : '';
+  const mm = VERDICT_RE.exec(text); // parse the AUTHORITATIVE text
+  if (!mm) return null; // the owner's real message at that ts is not a verdict
+  const id = mm[2].toLowerCase();
+  if (!open.has(id)) return null; // a real owner verdict, but not for an open request
+  const verb = mm[1].toLowerCase();
+  return {
+    relayId: id,
+    requestId: open.get(id).requestId,
+    behavior: verb === 'y' || verb === 'yes' ? 'allow' : 'deny',
+  };
 }
 
 // PEEK the slack log channel: read-inbox <channel> --peek --json. NO ack, NO
@@ -789,16 +823,6 @@ function requerySlack(channel, ts) {
   });
 }
 
-// The authentication decision for one candidate: the Slack API must return a
-// message at the CLAIMED ts whose `user` is EXACTLY the owner. Anything else --
-// no such message (forged local line), a different user (someone else's real
-// message), an API error -- is NOT confirmed.
-async function slackConfirms(candidate) {
-  const rows = await requerySlack(candidate.channel, candidate.ts);
-  if (rows === null) return false;
-  return rows.some((r) => r && r.ts === candidate.ts && r.user === OWNER_SLACK_ID);
-}
-
 function expireStaleRequests() {
   const now = Date.now();
   for (const [relayId, r] of openRequests) {
@@ -833,25 +857,33 @@ async function processPermissions() {
       );
       return;
     }
-    const candidates = parseVerdictCandidates(doc.messages, openRequests);
+    const candidates = nominateCandidates(doc.messages);
     for (const c of candidates) {
       // eslint-disable-next-line no-await-in-loop
-      const confirmed = await slackConfirms(c);
-      if (confirmed) {
-        send({
-          jsonrpc: '2.0',
-          method: 'notifications/claude/channel/permission',
-          params: { request_id: c.requestId, behavior: c.behavior },
-        });
-        closeRequest(c.relayId);
-        diag('channel.relay', `verdict for ${c.relayId} authenticated by the Slack API (${c.behavior}); emitted permission for request ${c.requestId}`, null);
-      } else {
+      const v = await authenticateVerdict(c, openRequests);
+      if (v && v.error) {
         diag(
           'channel.relay',
-          `verdict line for ${c.relayId} not confirmed by Slack API`,
-          'answer in the tmux pane or re-send the reply from the owner account; a locally-written verdict line is never trusted, and no verdict is emitted until the Slack API attributes the reply to the owner.',
+          `a peeked verdict line at ${c.ts} was not confirmed by Slack API (the re-query failed)`,
+          'answer in the tmux pane or re-send the reply from the owner account; no verdict is emitted until the Slack API returns the owner\'s own message.',
         );
+        continue;
       }
+      if (!v) {
+        diag(
+          'channel.relay',
+          `a peeked verdict line at ${c.ts} was not confirmed by Slack API`,
+          'answer in the tmux pane or re-send the reply from the owner account; the verb and id are read from the Slack API\'s own copy of the message, never the local channel log, so a forged or unrelated line is never a verdict.',
+        );
+        continue;
+      }
+      send({
+        jsonrpc: '2.0',
+        method: 'notifications/claude/channel/permission',
+        params: { request_id: v.requestId, behavior: v.behavior },
+      });
+      closeRequest(v.relayId);
+      diag('channel.relay', `verdict for ${v.relayId} authenticated by the Slack API (${v.behavior}); emitted permission for request ${v.requestId}`, null);
     }
   } finally {
     permInFlight = false;
