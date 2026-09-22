@@ -1,0 +1,5 @@
+# v0 ships no vendored deps: server.mjs runs on bare node (see package.json "//").
+# A local `npm install` (to exercise the pinned SDK before T3 live registration)
+# must never be committed.
+node_modules/
+package-lock.json

@@ -189,6 +189,22 @@ fi
 DOORBELLS="$(inbox_doorbells ".")" || exit "${EX_REFUSED}"
 mapfile -t EVENT_FILES <<< "${DOORBELLS}"
 
+# --DRY-RUN EXITS HERE, BEFORE THE SUBAGENT GATE, ON PURPOSE. Dry-run does not
+# ARM anything -- it only resolves and provisions, which is exactly what a
+# subagent channel shim's fs.watch fallback needs (server.mjs's armFsWatch
+# calls `inbox-wait --dry-run` to learn what paths to watch, because a subagent
+# is the ONE case that fallback exists for). The "who may arm" restriction
+# below is about not BLOCKING on a wake and consuming it as a subagent -- it
+# has nothing to say about listing paths that resolve+provisioning already
+# produced. Gating dry-run on the subagent check as well (an earlier ordering
+# of this file did) made `armFsWatch` refused-on-arrival for every subagent:
+# the one runtime configuration the fallback exists for could never resolve
+# its doorbells, exit 2, and permanently stop (critic-review, DND-282 round 6).
+if [ "${DRY_RUN}" -eq 1 ]; then
+  printf '%s\n' "${EVENT_FILES[@]}"
+  exit "${EX_RANG}"
+fi
+
 # NOT-A-SUBAGENT. It runs AFTER the step above, which both resolves and
 # PROVISIONS -- so a subagent's refused invocation does create this channel's
 # missing directories and doorbells on its way to being told no. That ordering
@@ -199,11 +215,6 @@ mapfile -t EVENT_FILES <<< "${DOORBELLS}"
 # leaves behind is the empty structure the contract says the channel should
 # have had. It never reaches the arm.
 inbox_refuse_subagent_arm || exit "${EX_REFUSED}"
-
-if [ "${DRY_RUN}" -eq 1 ]; then
-  printf '%s\n' "${EVENT_FILES[@]}"
-  exit "${EX_RANG}"
-fi
 
 ERRF="$(mktemp)" || { inbox_fail "could not create a temporary file for inotifywait's stderr" \
   "check that \$TMPDIR is writable, then re-run."; exit "${EX_REFUSED}"; }
