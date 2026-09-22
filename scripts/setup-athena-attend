@@ -164,7 +164,7 @@ step() { printf '\n== %s\n' "$*"; }
 if [ "$MODE" = "self-test" ]; then
   if [ ! -x "$SELF_TEST" ]; then
     echo "error: self-test suite not found or not executable: $SELF_TEST" >&2
-    echo "  Fix: restore scripts/test/athena-attend/self-test.sh and chmod +x it." >&2
+    echo "  Fix: restore scripts/test/athena-channel-session/self-test.sh and chmod +x it." >&2
     exit 2
   fi
   if bash "$SELF_TEST"; then say "ALL CASES PASS"; exit 0; fi
