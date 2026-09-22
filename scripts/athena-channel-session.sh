@@ -193,9 +193,32 @@ say() {
   return 0
 }
 
+# mark_owner_not_notified -- appends "(owner NOT notified: ...)" onto the END
+# of LINE 2 of the wedged marker this run just wrote (every dm_owner call site
+# writes a `wedged` marker immediately before calling dm_owner; there is no
+# dark+dm_owner pairing, so only `wedged` is ever the right target).
+#
+# It MUST land on line 2, not a new line 3: inbox-doctor's channel: line reads
+# the reason with `sed -n 2p "$(attend_marker ... wedged)"` (and the dark
+# branch does the same for its own marker) -- ai/skills/athena:inbox/lib/doctor.sh.
+# An earlier version of this function appended a new trailing line, which sat
+# on line 3 and was never read by that `sed -n 2p`: the annotation existed on
+# disk but the one consumer credited with surfacing it could not see it -- a
+# claimed mechanism that could not fire (DND-288 build 4 correction).
+mark_owner_not_notified() {
+  local f="$(attend_marker "${STATE_DIR}" wedged)"
+  [ -e "${f}" ] || return 0
+  sed -i '2 s/$/ (owner NOT notified: ATHENA_ATTEND_OWNER_SLACK_ID unset)/' "${f}" 2>/dev/null
+  return 0
+}
+
 dm_owner() {
   local msg="$1"
-  [ -n "${ATHENA_ATTEND_OWNER_SLACK_ID:-}" ] || { say "owner DM skipped (ATHENA_ATTEND_OWNER_SLACK_ID unset): ${msg}"; return 0; }
+  [ -n "${ATHENA_ATTEND_OWNER_SLACK_ID:-}" ] || {
+    say "owner DM skipped (ATHENA_ATTEND_OWNER_SLACK_ID unset): ${msg}"
+    mark_owner_not_notified
+    return 0
+  }
   [ -x "${DM_BIN}" ] || { say "owner DM skipped (dm bin not executable: ${DM_BIN}): ${msg}"; return 0; }
   "${DM_BIN}" "${ATHENA_ATTEND_OWNER_SLACK_ID}" "${msg}" >/dev/null 2>&1 \
     || say "owner DM failed to send: ${msg}"
@@ -253,6 +276,7 @@ launch_session() {
   # ledger path.
   "${TMUX_BIN}" new-session -d -s "${SESSION}" -c "${PROJECT_DIR}" \
     env -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_AGENT_ID -u CLAUDE_AGENT_TYPE \
+    "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-}" \
     "ATHENA_INBOX_EXPECT_PROJECT=${PROJECT_NAME}" \
     "ATHENA_ATTEND_STATE_DIR=${STATE_DIR}" \
     "ATHENA_ATTEND_SESSION_ID=${sid}" \
@@ -404,6 +428,20 @@ if ! flock -n 9; then
   exit 0
 fi
 printf '%s\n' "$$" >"${PIDFILE}" 2>/dev/null || true
+
+# --- suppress D-Bus autolaunch, and reap any orphaned daemons ---------------
+# See scripts/lib/dbus-env.sh: a cron process with no DBUS_SESSION_BUS_ADDRESS
+# but a leaked graphical DISPLAY autolaunches a throwaway dbus-daemon that never
+# exits and exhausts the inotify instance limit. This wrapper is the strongest
+# suspect: it runs an INTERACTIVE `claude` in tmux whose notify-idle Stop hook
+# fires `dunstify` on every turn end. Export an address (also passed into the
+# tmux session below), and best-effort reap earlier orphans. After the flock so
+# the */5 no-op does neither.
+__wrapper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+# shellcheck source=scripts/lib/dbus-env.sh
+. "${__wrapper_dir}/lib/dbus-env.sh"
+athena_dbus_env_setup
+"${__wrapper_dir}/reap-orphan-dbus" --min-age 300 >/dev/null 2>&1 || true
 
 # ---- signal handling: SIGTERM tears down the tmux session ------------------
 teardown() { kill_session; }

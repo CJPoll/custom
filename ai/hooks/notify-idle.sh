@@ -70,6 +70,22 @@ else
   worktree="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
 fi
 
+# dunstify is a libnotify/D-Bus client. When this hook runs with a graphical
+# DISPLAY (e.g. leaked from the login-shell snapshot Claude Code's Bash tool
+# sources) but no DBUS_SESSION_BUS_ADDRESS (a cron-launched session), libdbus
+# AUTOLAUNCHES a throwaway `dbus-daemon --syslog-only --fork ... --session` that
+# never exits — the leak that exhausted the inotify instance limit. Setting the
+# address (to a real session bus if one is discoverable, else an unconnectable
+# sentinel) stops the autolaunch: with a real bus the notification still
+# reaches the user; otherwise dunstify just fails fast (guarded below). See
+# scripts/lib/dbus-env.sh.
+__notify_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+if [ -r "${__notify_dir}/../../scripts/lib/dbus-env.sh" ]; then
+  # shellcheck source=../../scripts/lib/dbus-env.sh
+  . "${__notify_dir}/../../scripts/lib/dbus-env.sh"
+  athena_dbus_env_setup || true
+fi
+
 # The attendant runs headless in tmux with no display, where dunstify fails; the
 # notification is best-effort and must never fail the hook (which would surface
 # an error on every attended turn), so it is guarded.

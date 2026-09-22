@@ -435,6 +435,51 @@ across sessions — it is not a one-shot queue drain.
   The shipwright applies harness changes to `~/dev/custom` and files product-repo
   changes as Notion tickets for the fleet (it never touches a product repo).
 
+## Cron D-Bus autolaunch leak (orphaned `dbus-daemon`, inotify exhaustion)
+
+A cron-launched process runs with no `DBUS_SESSION_BUS_ADDRESS` (the crontab
+sets none), yet a graphical `DISPLAY=:0` leaks in through the login-shell
+snapshot that Claude Code's Bash tool sources (`dotfiles/.zshrc` exports
+`DISPLAY=:0`, never the bus address). When any libdbus/GLib client then runs —
+`dunstify` in the `notify-idle.sh` Stop hook is the identified one — with an
+X11-reachable DISPLAY but no live/reachable session bus, libdbus AUTOLAUNCHES
+one via `dbus-launch`, forking `dbus-daemon --syslog-only --fork ... --session`.
+Being `--fork`, it daemonises (reparents to PID 1) and never exits — one leaked
+bus per trigger. Measured 2026-09-22: ~109 accumulated (~1/hour) and exhausted
+`fs.inotify.max_user_instances` (127/128), turning fleet gates red and
+threatening the inbox doorbell (`inbox-wait`) and the channel attendant. The
+tell was mysterious fleet-wide red gates, not a named error — the silent-dark
+class. Autolaunch fires ONLY when the variable is unset, so any set value
+disables it (reproduced both directions).
+
+The durable fix, defense in depth:
+
+- **`scripts/lib/dbus-env.sh`** — a shared helper the cron wrappers source.
+  `athena_dbus_env_setup` exports a `DBUS_SESSION_BUS_ADDRESS` so no descendant
+  autolaunches: a REAL bus discovered at runtime from a live session process
+  (never a hardcoded `/tmp/dbus-*` path — those change across reboots), else an
+  unconnectable sentinel that suppresses autolaunch (a headless run needs no
+  notifications; a client just fails fast). Never overrides a value the caller
+  set.
+- **The three cron wrappers** (`athena-shipwright-run.sh`,
+  `athena-inbox-client-run.sh`, `athena-channel-session.sh`) source it after
+  their early-exit arg parsing and single-run lock, so `--help`/`--dry-run` and
+  the `*/5` no-op relaunch never trigger it. `athena-channel-session.sh` also
+  passes the address into its tmux `claude` session. `notify-idle.sh` sources it
+  too, so the Stop hook is guarded in every session regardless of how launched.
+- **`scripts/reap-orphan-dbus`** — belt-and-suspenders. Kills orphaned
+  autolaunch session daemons (comm `dbus-daemon`; argv has `--fork` + `--session`
+  + `--syslog`/`--syslog-only`; NOT `--system`/`--nofork`/`--config-file`;
+  PPID 1; own uid; older than `--min-age`, default 300s). Never touches the
+  system, real-session, or at-spi buses. Invoked best-effort by each wrapper, so
+  no crontab change is needed; `--dry-run` inspects, `--self-test` checks the
+  matcher against real signatures.
+- **`ai/bin/check-inotify-headroom`** — loud observability, in the shipwright
+  gate. FAILS with a `Fix:` naming the reaper when per-user inotify INSTANCE
+  usage exceeds a threshold (default 80%). Environment-safe: passes with a note
+  where `/proc` is absent, so it never false-fails a CI/sandbox commit; a
+  re-exhaustion is now a named red, not a mysterious one.
+
 ## Hook registration (`~/.claude/settings.json` is not in git)
 
 The `ai/hooks/*.sh` guards only run if they are *registered* in the live Claude

@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+#
+# check-inotify-headroom — alarm when per-user inotify INSTANCE usage is close
+# to the kernel limit, so a re-exhaustion is LOUD instead of a mysterious
+# fleet-wide red gate.
+#
+# Background: the D-Bus autolaunch leak (see scripts/lib/dbus-env.sh) exhausted
+# `fs.inotify.max_user_instances` (127/128 on 2026-09-22). Every inotify-backed
+# tool then failed with cryptic errors — the inbox doorbell (inbox-wait), the
+# channel attendant, and the gates that use them — with nothing naming the real
+# cause. This check turns that silent failure into a named one.
+#
+# Modes:
+#   check-inotify-headroom               measure live usage; FAIL if over threshold
+#   check-inotify-headroom --threshold N  headroom threshold percent (default 80)
+#   check-inotify-headroom --self-test    verify the decision logic (no measuring)
+#   check-inotify-headroom --help         show this help
+#
+# Live mode is ENVIRONMENT-SAFE: where the limit is unreadable (non-Linux, a
+# sandbox without /proc) it exits 0 with a note. It does NOT silently pass a
+# machine it cannot measure with a "found nothing" — "cannot measure" and
+# "measured, healthy" print differently.
+
+set -euo pipefail
+
+THRESHOLD=80
+
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# --- pure decision logic (unit-tested) ---------------------------------------
+# over_threshold CUR MAX PCT -> exit 0 if usage strictly exceeds PCT% of MAX.
+# Exit 2 means "cannot decide" (MAX not a positive integer).
+over_threshold() {
+  local cur="$1" max="$2" pct="$3"
+  case "$max" in ''|*[!0-9]*) return 2 ;; esac
+  case "$cur" in ''|*[!0-9]*) return 2 ;; esac
+  case "$pct" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$max" -gt 0 ] || return 2
+  # cur/max*100 > pct  <=>  cur*100 > pct*max   (integer-safe)
+  [ $(( cur * 100 )) -gt $(( pct * max )) ]
+}
+
+# --- self-test ----------------------------------------------------------------
+run_self_test() {
+  local fails=0
+  _case() { # desc want(over=0/under=1/cannot=2) cur max pct
+    local desc="$1" want="$2" got
+    if over_threshold "$3" "$4" "$5"; then got=0; else got=$?; fi
+    if [ "$got" = "$want" ]; then
+      printf 'PASS %s\n' "$desc"
+    else
+      printf 'FAIL %s (want %s got %s)\n' "$desc" "$want" "$got"
+      fails=$((fails+1))
+    fi
+  }
+  #      desc                                   want cur  max  pct
+  _case "127/128 over 80%"                       0   127  128  80
+  _case "at exactly 80% is NOT over"             1   80   100  80
+  _case "just over 80%"                          0   81   100  80
+  _case "well under"                             1   22   128  80
+  _case "zero usage"                             1   0    128  80
+  _case "full"                                   0   128  128  80
+  _case "max=0 cannot decide"                    2   1    0    80
+  _case "non-numeric max cannot decide"          2   1    "x"  80
+  _case "empty cur cannot decide"                2   ""   128  80
+  _case "custom threshold 50, 65/100 over"       0   65   100  50
+  _case "custom threshold 50, 40/100 under"      1   40   100  50
+
+  if [ "$fails" -eq 0 ]; then
+    echo "check-inotify-headroom self-test: OK"
+    return 0
+  fi
+  echo "check-inotify-headroom self-test: $fails failure(s)" >&2
+  echo "  Fix: over_threshold changed its verdict on a case above; re-check the integer comparison before shipping." >&2
+  return 1
+}
+
+# --- live measurement ---------------------------------------------------------
+count_inotify_instances() {
+  local uid="$1" n=0 d owner
+  for d in /proc/[0-9]*; do
+    [ -d "$d" ] || continue
+    owner="$(stat -c %u "$d" 2>/dev/null)" || continue
+    [ "$owner" = "$uid" ] || continue
+    n=$(( n + $(find "$d/fd" -maxdepth 1 -type l -lname 'anon_inode:inotify' 2>/dev/null | wc -l) ))
+  done
+  printf '%s' "$n"
+}
+
+run_live() {
+  local limit_file="/proc/sys/fs/inotify/max_user_instances"
+  if [ ! -r "$limit_file" ]; then
+    echo "inotify headroom: not measurable in this environment (no ${limit_file}); skipping"
+    return 0
+  fi
+  local max cur uid pct
+  max="$(cat "$limit_file" 2>/dev/null || true)"
+  case "$max" in ''|*[!0-9]*)
+    echo "inotify headroom: could not read a numeric limit from ${limit_file}; skipping"
+    return 0 ;;
+  esac
+  uid="$(id -u 2>/dev/null || printf '%s' "${UID:-}")"
+  cur="$(count_inotify_instances "$uid")"
+  pct=$(( cur * 100 / max ))
+
+  if over_threshold "$cur" "$max" "$THRESHOLD"; then
+    echo "inotify headroom LOW: ${cur}/${max} instances in use (${pct}%, threshold ${THRESHOLD}%) for uid ${uid}" >&2
+    echo "  Fix: orphaned autolaunched dbus-daemons are the usual cause on this machine. Run 'scripts/reap-orphan-dbus' (add --dry-run first to inspect) to reclaim instances, then confirm 'cat ${limit_file}' headroom is restored. If the reaper finds none, a different watcher is leaking inotify instances — identify it with 'for d in /proc/*/fd; do n=\$(find \"\$d\" -lname anon_inode:inotify 2>/dev/null|wc -l); [ \"\$n\" -gt 0 ] && echo \"\$n \$d\"; done | sort -rn | head'." >&2
+    return 1
+  fi
+  echo "inotify headroom OK: ${cur}/${max} instances in use (${pct}%, threshold ${THRESHOLD}%)"
+  return 0
+}
+
+# --- args ---------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --threshold) shift
+                 case "${1:-}" in
+                   ''|*[!0-9]*) echo "error: --threshold needs an integer percent" >&2
+                                echo "  Fix: run 'check-inotify-headroom --threshold 80'." >&2
+                                exit 2 ;;
+                   *) THRESHOLD="$1" ;;
+                 esac ;;
+    --self-test) run_self_test; exit $? ;;
+    -h|--help)   usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2
+       echo "  Fix: use --threshold N, --self-test, or --help." >&2
+       exit 2 ;;
+  esac
+  shift
+done
+
+run_live
