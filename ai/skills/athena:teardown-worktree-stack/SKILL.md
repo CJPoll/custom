@@ -63,6 +63,29 @@ independently in force: merge on the captain's `DONE` **plus** its report file,
 never on forge state while the captain's worktree is still moving. Salvage is
 what keeps a mistimed merge from also being a lost fix.
 
+**A root-owned husk is not a failed removal — reclaim it without `sudo`.** A repo
+whose stack builds inside docker (bind-mounting the worktree) leaves
+`backend/deps`, `_build`, and the like owned by `root` on the host. `git worktree
+remove` then deregisters the worktree cleanly but cannot `rm` those dirs, so a
+root-owned husk stays behind under `~/.local/worktrees/<project>/`. Measured
+2026-09-22: six husks from a single epic; the honest-but-wrong reflex is `sudo rm
+-rf`, a system-level act this harness does not take unattended. The sanctioned
+reclaim is a **throwaway container** operating only on the user's own
+docker-created files — the same class as `docker network prune` below, not a
+system change: no daemon, no `/etc`, no `sudo`. From the husk's PARENT
+(`~/.local/worktrees/<project>`):
+
+```sh
+docker run --rm -v "$PWD":/mnt alpine rm -rf "/mnt/<husk-dir-basename>"
+```
+
+Target the **single** husk directory by name — never the parent, which holds
+other worktrees' live siblings — and afterward confirm the siblings survived
+(`ls` the parent, cross-check `git worktree list`). Do this only for a husk whose
+worktree is already deregistered (or which you have just removed per the
+salvage-first rule above); a husk you cannot account for is left alone and
+reported.
+
 **How the teardown command is resolved is per-repo** (the project-name derivation
 and working directory are repo-specific, and a bare `down -v` in the wrong repo
 destroys the wrong stack's volumes). Resolve it in order:

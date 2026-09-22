@@ -129,8 +129,16 @@ as `notion_person_id`; the flaky-lane tooling already resolves it that way.
   `undefined`"*. The MCP server omits the header, so this is not something a caller
   can pass around — it fails before the request reaches your page id, so a well-formed
   call and a bogus one fail identically. **Property writes are unaffected**:
-  `API-patch-page` (status, assignee) and `API-post-page` work fine; only the comment
-  endpoint is broken. **Instead**, put the note where it will actually be read: append
+  `API-patch-page` (status, assignee) works fine; only the comment endpoint is
+  broken. **`API-post-page` truncates a large input** (measured 2026-09-22: it
+  silently cuts inputs around ~2,000 bytes → a JSON parse error), so a
+  normal-length ticket/sub-page BODY cannot be created through it in one call —
+  it is fine for the page's properties (title, relations) and a short body only.
+  For a full-length body, create the page with its properties via `API-post-page`
+  then write the body in chunks with `API-patch-block-children`; or fall back to
+  `curl` with the connection's token and a `Notion-Version: 2022-06-28` header
+  (the same fallback the comment endpoint needs). **Instead** of a comment, put
+  the note where it will actually be read: append
   it to the ticket page body (`API-patch-block-children`), or record it in the MR/PR
   description and your report. Say in the report that the comment endpoint was
   unavailable, so the absence of a comment is never read as an absence of the note.
