@@ -382,3 +382,56 @@ github-runner `231072`, gitlab-runner `296608`, each `:65536`). Neither is ever 
 `wheel`/`sudo`/`docker` — the setup scripts assert it. Registration (a repo/project
 token) and the actual `sudo` install are **yours to run**; the scripts install the
 OpenRC service but never start it until a runner is registered.
+
+## Athena channel session (`athena-channel-session.sh` + `setup-athena-attend`)
+
+The **standing channel session** is the "disk → session" last hop of the Athena
+inbox (epic *Inbox on Channels*, design `ai/docs/inbox-channels-design.md` §4).
+`scripts/athena-channel-session.sh` launches an interactive `claude` in a
+dedicated tmux session (`athena-attend-<project>`) with
+`--dangerously-load-development-channels server:athena-inbox`, so the inbox
+channel shim (`ai/skills/athena:inbox/channel/server.mjs`) pushes unread-count
+wakes straight into it. The launcher answers the one full-screen dev-channels
+warning (a single Enter — P2, verified on the pinned version), asserts the
+registration notice in the pane, and rotates/restarts the session under bounds.
+
+- **`--permission-mode default`, never the skip-permissions bypass.**
+  `CLAUDE_CODE_SESSION_ATTENDED` is left unset so `inbox-untrusted-guard`
+  enforces on the session that reads untrusted mail. Routine attend calls PROMPT
+  until T4 lands the allowlist; the tmux pane is where a human answers.
+- **Version pin (HARD FAIL).** The launcher pins the Claude Code version P2 was
+  verified against (`PINNED_CLAUDE_VERSION`, currently **2.1.278**). On a
+  mismatch it does NOT launch (a blind keypress into an unknown dialog is the
+  hazard): it writes `channel.wedged` with a Fix line and DMs the owner once.
+  **Re-verify P2 on every Claude Code upgrade** (`ai/docs/inbox-channels-probes.md`),
+  then update the pin in `scripts/athena-channel-session.sh`.
+- **Supervision.** `scripts/setup-athena-attend --install` adds the `@reboot` +
+  `*/5` user-crontab entries, both pointing at the MAIN checkout's launcher
+  (never a worktree's — the same main-checkout-resolution rule as the inbox
+  client and hooks). A per-project `flock` makes a second invocation a no-op, so
+  the `*/5` relaunch costs nothing while the session is healthy. Rotation
+  (kill + relaunch) fires on wakes ≥ `ATHENA_ATTEND_MAX_WAKES` (30), transcript
+  bytes ≥ 262144, or age ≥ 86400s — but ONLY when every channel counts zero, the
+  session is idle, and no permission request is open, so a rotation never cuts a
+  reply. A dark channel is restarted up to 3×/hour, then wedged with an owner DM.
+- **SDK wire-conformance gate.** `setup-athena-attend --install` runs
+  `npm ci --omit=dev` + `node test/sdk-conformance.mjs --live` in the channel dir
+  BEFORE it installs the entries that start the session (which registers the
+  server live), and refuses to install on a non-zero exit. The committed golden
+  (`ai/skills/athena:inbox/channel/test/sdk-golden.json`, recorded by
+  `gen-sdk-golden.mjs`) is replayed hermetically by the channel self-test on
+  every gate run; regenerate it (`npm ci && node test/gen-sdk-golden.mjs`) and
+  commit it whenever the `@modelcontextprotocol/sdk` pin in the channel's
+  `package.json` changes.
+- **Owner-executed at install (§9.7).** Accept the one-time project-trust dialog
+  (and the "New MCP server found" MCP-consent dialog if it appears — it does not
+  under user-scope registration); the launcher DETECTS and REPORTS these but
+  never answers them, because they are trust decisions. Set
+  `ATHENA_ATTEND_OWNER_SLACK_ID` so wedge/dark DMs can reach you.
+- **Diagnose.** `inbox-doctor` prints a `channel:` line
+  (`registered | dark | stopped | wedged | no-session`) from the durable markers
+  under `~/.local/state/athena-attend/<project>/` + `tmux has-session`, and
+  `inbox-doctor --probe` runs the on-demand channel probe (lands with T4).
+
+**Inert until installed.** Shipping these scripts starts no always-on session;
+`setup-athena-attend --install` is the deliberate switch.

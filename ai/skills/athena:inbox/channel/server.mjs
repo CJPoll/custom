@@ -189,6 +189,13 @@ function resolveProjectName() {
 //   * neither `new` nor `unread` present -- an unexpected schema, not a zero.
 function channelCount(ch) {
   if (!ch || typeof ch !== 'object') return null;
+  // DND-283 ruling 2c: PREFER the normalized per-channel `count` inbox-status
+  // now emits (a number, or null when uncountable), so the per-kind rule has
+  // exactly one home (inbox-status's _INBOX_COUNT_JQ). Keep the per-kind
+  // fallback below UNCHANGED for any document that predates the field, so T2's
+  // committed behaviour (and its hermetic self-test, which emits no `count`) is
+  // untouched. `count` present and null means uncountable, not a benign zero.
+  if ('count' in ch) return typeof ch.count === 'number' ? ch.count : null;
   if (ch.error === true) return null;
   if (ch.never_delivered === true && ch.kind === 'log') return null;
   if (typeof ch.new === 'number') return ch.new;
@@ -697,6 +704,18 @@ function shutdown(exitCode) {
 
 process.on('SIGTERM', () => shutdown(0));
 process.on('SIGINT', () => shutdown(0));
+
+// --print-protocols: emit the shim's protocol constants as JSON and exit,
+// starting no transport (DND-283 ruling 1b(ii)). sdk-conformance.mjs reads
+// these to assert SUPPORTED_PROTOCOLS is a subset of the pinned SDK's and that
+// PROTOCOL_FALLBACK is among them -- from the ONE definition above, never a
+// second copy that could drift from what initialize actually agrees.
+if (process.argv.includes('--print-protocols')) {
+  process.stdout.write(
+    JSON.stringify({ SUPPORTED_PROTOCOLS, PROTOCOL_FALLBACK }) + '\n',
+  );
+  process.exit(0);
+}
 
 // --help / -h: answer on stdout, exit 0, do nothing else (ai/bin help convention).
 if (process.argv.includes('--help') || process.argv.includes('-h')) {

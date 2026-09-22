@@ -409,6 +409,35 @@ inbox_repo_key() {
 # other tenant. It is emitted on BOTH branches, including the not-opted-in one,
 # because a caller distinguishing "never opted in" from "my entry vanished"
 # needs it precisely when there is no entry.
+
+# _INBOX_COUNT_JQ (DND-283, ruling 2): the SINGLE SOURCE of the per-kind count
+# rule. A jq expression that, given a channel object as `.`, yields its
+# normalized `count` -- an integer, or null when UNCOUNTABLE (2a):
+#   * error:true                          -- inbox-status could not count it;
+#   * kind=="log" && never_delivered:true -- declared, its log inbox file has
+#     NEVER existed (producer never registered): a broken channel, not a zero;
+#   * neither per-kind field is a number  -- an unexpected schema.
+# Per kind: log -> .new, everything else (maildir) -> .unread. A maildir
+# never_delivered is benign (the dir is simply unprovisioned) and counts via
+# .unread -- exactly the shim's channelCount reference. inbox_status_json and
+# inbox_channel_count_json both apply THIS expression, so there is one
+# implementation to test and none to drift.
+# shellcheck disable=SC2034
+_INBOX_COUNT_JQ='
+  if (.error // false) then null
+  elif (.kind == "log" and (.never_delivered // false)) then null
+  elif (.kind == "log") then (if (.new | type) == "number" then .new else null end)
+  else (if (.unread | type) == "number" then .unread else null end)
+  end'
+
+# inbox_channel_count_json <channel-object-json>
+# Prints the normalized count (an integer or the literal `null`) for one channel
+# object, applying _INBOX_COUNT_JQ -- the same rule inbox_status_json bakes into
+# every channel of its document. Exists so the rule can be tested directly.
+inbox_channel_count_json() {
+  printf '%s' "${1:-null}" | jq -c "${_INBOX_COUNT_JQ}"
+}
+
 inbox_status_json() {
   local entry rc chan kind resolved counts schema_csv producer out="[]" failed=0 repo_key
 
@@ -474,6 +503,17 @@ inbox_status_json() {
     out="$(printf '%s' "${out}" | jq -c --arg n "${chan}" --arg k "${kind}" \
       --argjson c "${counts}" '. + [{name: $n, kind: $k} + $c]')"
   done < <(descriptor_channel_names "${entry}")
+
+  # ADDITIVE per-channel `count` (DND-283, ruling 2): the NORMALIZED per-kind
+  # unread integer, or null when UNCOUNTABLE. Computed HERE, once, where the
+  # document is built -- never re-derived by a consumer, because a second copy
+  # of the per-kind rule is a second thing that drifts (the very failed-lookup
+  # class this facility keeps paying for). From this ticket on every consumer
+  # keys on `count` and treats null/absent as uncountable; existing fields
+  # (`new`, `unread`, `error`, `never_delivered`, ...) are untouched. The rule
+  # itself is _INBOX_COUNT_JQ, the single source that inbox_channel_count_json
+  # also applies, so there is exactly one implementation to test.
+  out="$(printf '%s' "${out}" | jq -c "map(. + {count: (${_INBOX_COUNT_JQ})})")" || return 1
 
   printf '%s' "${out}" | jq -c --argjson f "$(inbox_failed_candidates)" --arg r "${repo_key}" \
     '{channels: ., failed_candidates: $f, repo_key: $r}' || return 1

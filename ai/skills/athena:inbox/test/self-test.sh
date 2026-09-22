@@ -3969,6 +3969,44 @@ assert_ok "I-5 athena's ack lands in from-server/.acked -- the transcript" \
 assert_eq "I-5 every message ever sent still exists somewhere" "3" \
   "$(find "${NS}" -name '*.md' | wc -l)"
 
+echo "== per-channel count field (DND-283, ruling 2) =="
+# The normalized per-kind `count` inbox-status --json now carries, so no
+# consumer re-derives the per-kind rule (log:new, maildir:unread) and silently
+# drops the other kind. Uncountable is null, NEVER 0 -- a broken channel read
+# as zero is the failed-lookup-looks-empty class this facility exists to close.
+# The five cases ruling 2b enumerates, against the single-source expression.
+assert_eq "count: maildir unread 3 -> 3" "3" \
+  "$(inbox_channel_count_json '{"kind":"maildir","unread":3}')"
+assert_eq "count: log new 2 -> 2" "2" \
+  "$(inbox_channel_count_json '{"kind":"log","new":2}')"
+assert_eq "count: log never_delivered -> null (broken, not zero)" "null" \
+  "$(inbox_channel_count_json '{"kind":"log","never_delivered":true}')"
+assert_eq "count: error -> null" "null" \
+  "$(inbox_channel_count_json '{"kind":"log","error":true}')"
+assert_eq "count: neither field (log) -> null" "null" \
+  "$(inbox_channel_count_json '{"kind":"log"}')"
+assert_eq "count: neither field (maildir) -> null" "null" \
+  "$(inbox_channel_count_json '{"kind":"maildir"}')"
+# A maildir never_delivered is BENIGN (the peer-mail dir is simply not
+# provisioned yet) and counts via .unread -- it must NOT be null, matching the
+# shim's channelCount reference and inbox-status's own kind gate.
+assert_eq "count: maildir never_delivered with unread 0 -> 0 (benign, not null)" "0" \
+  "$(inbox_channel_count_json '{"kind":"maildir","never_delivered":true,"unread":0}')"
+
+# And end-to-end through inbox_status_json: every channel object in the built
+# document carries `count`, computed once, alongside (never replacing) the
+# existing per-kind fields. A log channel with two complete lines counts 2.
+setup_case
+cproj="$(make_repo cproj)"
+register cproj "${cproj}" '{"slack":{"kind":"log","path":"c-slack.jsonl"}}'
+printf '%s\n%s\n' '{"v":1,"channel":"C1","ts":"1.1","text":"a"}' \
+  '{"v":1,"channel":"C1","ts":"2.2","text":"b"}' > "${ATHENA_INBOX_ROOT}/c-slack.jsonl"
+doc="$(cd "${cproj}" && inbox_status_json ".")"
+assert_eq "status-json: the log channel's count is the per-kind integer (2)" "2" \
+  "$(jq -r '.channels[] | select(.name=="slack") | .count' <<<"${doc}")"
+assert_eq "status-json: the existing per-kind .new field is untouched" "2" \
+  "$(jq -r '.channels[] | select(.name=="slack") | .new' <<<"${doc}")"
+
 echo
 if [ "${FAIL}" -eq 0 ]; then
   echo "VERDICT: PASS (${PASS} cases)"

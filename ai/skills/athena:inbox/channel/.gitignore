@@ -1,5 +1,8 @@
-# v0 ships no vendored deps: server.mjs runs on bare node (see package.json "//").
-# A local `npm install` (to exercise the pinned SDK before T3 live registration)
-# must never be committed.
+# server.mjs runs on bare node; a local install exists only to exercise the
+# pinned SDK live (gen-sdk-golden.mjs, and setup-athena-attend --install's
+# `npm ci` + sdk-conformance --live before `claude mcp add`). node_modules is
+# never committed.
 node_modules/
-package-lock.json
+# package-lock.json IS committed (DND-283 ruling 1d): `npm ci` needs it, and it
+# pins the whole resolved tree, not just the top-level version, so the live SDK
+# interop check runs against the exact tree the golden was recorded from.

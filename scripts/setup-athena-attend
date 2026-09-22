@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+#
+# setup-athena-attend — install (or remove) the user-crontab entries that keep
+# the Athena attendant alive on this OpenRC host.
+#
+# The standing channel session (scripts/athena-channel-session.sh) is the
+# supervisor for a project's Athena inbox: it launches an interactive `claude`
+# in tmux with --dangerously-load-development-channels so the inbox channel shim
+# pushes unread-count wakes straight into it, answers the one dev-channels
+# dialog, asserts the registration notice, and rotates/restarts under bounds.
+# Nothing runs until these entries are installed — shipping the launcher starts
+# no always-on session; this installer is the deliberate switch. It also runs
+# the live SDK wire-conformance check before installing, so a shim that has
+# drifted from the pinned SDK never reaches live registration.
+#
+# There is no `systemd --user` here, and an /etc/init.d service is a system-level
+# change that belongs to Cody, not to an agent. The user crontab (cronie) is the
+# only user-level scheduler available; this script mirrors
+# scripts/setup-athena-inbox-client deliberately.
+#
+# Two entries are installed, both pointing at the MAIN CHECKOUT's
+# scripts/athena-channel-session.sh — never a worktree's copy, even when this
+# installer is run from one. A worktree path vanishes when `wt` cleans the
+# branch up, and cron would go on firing a job pointing at a file that no longer
+# exists: silently, forever, with nothing attending the inbox. Same failure
+# class, same resolver, as scripts/setup-hooks and setup-athena-inbox-client.
+#
+# The two entries are (for the project named by --project, default ~/dev/walt_ui):
+#
+#   @reboot          <runner> --project <abs dir>   start the attendant at boot
+#   */5 * * * *      <runner> --project <abs dir>   relaunch it if it ever died
+#
+# The */5 entry costs nothing while the attendant is healthy: the runner takes
+# an flock on its pidfile and a second invocation exits immediately without
+# starting anything. It is a paced, bounded external poll — not a spin loop.
+#
+# Per-project. The entries name the project, so a second project's attendant is
+# installed and removed independently; installing walt_ui's never disturbs
+# another project's entry (matching is on the runner path AND that project's
+# absolute dir).
+#
+# Idempotent. The crontab is edited read-modify-write: every line mentioning THIS
+# project's entry is filtered out and the two canonical entries re-appended.
+# Unrelated entries — the shipwright's hourly line, the inbox client's, another
+# project's attendant — survive verbatim. Blank lines are dropped (the filter
+# normalises whitespace-only lines away).
+#
+# Usage:
+#   setup-athena-attend [--install] [--project DIR] [--dry-run]
+#   setup-athena-attend --check   [--project DIR]
+#   setup-athena-attend --remove  [--project DIR] [--dry-run]
+#   setup-athena-attend --self-test
+#   setup-athena-attend --help
+#
+# Options:
+#   --install    Install both crontab entries (the default when no mode is given)
+#   --project D  Project whose inbox to attend (default ~/dev/walt_ui)
+#   --check      Read-only: report whether both entries are live. OK + the lines
+#                and exit 0, or MISSING + a Fix: line and exit 1.
+#   --dry-run    Print what would happen; change nothing
+#   --remove     Remove this project's crontab entries and exit
+#   --self-test  Run scripts/test/athena-channel-session/self-test.sh on a temp crontab
+#   --help       Show this help
+#
+# Options are order-independent.
+#
+# Environment (all optional; defaults are the production values):
+#   ATHENA_ATTEND_PROJECT_DIR   default project when --project is not given
+#   ATHENA_ATTEND_RUNNER_DIR    dir holding the runner to schedule. Defaults to
+#                               the MAIN CHECKOUT's scripts/ (see above); a test
+#                               seam, not something an operator should need.
+#   ATHENA_ATTEND_INBOX_BIN_DIR dir holding inbox-wait, for the preflight that
+#                               refuses to install an attendant for a project
+#                               with no channels (a test seam; defaults to the
+#                               main checkout's athena:inbox bin).
+#
+# Exit codes: 0 ok · 1 usage/arg error, or --check found entries missing
+#             · 2 missing prerequisite (no crontab, runner not in main checkout,
+#               project not a git repo, or inbox-wait refuses for that project)
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+
+main_checkout_dir() {
+  local common parent
+  common="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)" \
+    || { printf '%s\n' "$SCRIPT_DIR"; return 0; }
+  [ -n "$common" ] || { printf '%s\n' "$SCRIPT_DIR"; return 0; }
+  case "$common" in /*) ;; *) common="${SCRIPT_DIR}/${common}" ;; esac
+  parent="$(dirname -- "$common")"
+  if [ -d "${parent}/scripts" ]; then (cd -- "${parent}/scripts" && pwd -P); else printf '%s\n' "$SCRIPT_DIR"; fi
+}
+
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
+
+MODE="install"
+DRY_RUN=0
+PROJECT_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --install)   MODE="install" ;;
+    --check)     MODE="check" ;;
+    --remove)    MODE="remove" ;;
+    --self-test) MODE="self-test" ;;
+    --dry-run)   DRY_RUN=1 ;;
+    --project)   shift; PROJECT_ARG="${1:-}"
+                 [ -n "$PROJECT_ARG" ] || { echo "error: --project needs a directory argument" >&2
+                   echo "  Fix: run 'setup-athena-attend --project /path/to/project'." >&2; exit 1; } ;;
+    -h|--help)   usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2
+       echo "  Fix: use --install (default), --check, --remove, --self-test, --project DIR, --dry-run, --help." >&2
+       exit 1 ;;
+  esac
+  shift
+done
+
+RUNNER_DIR="${ATHENA_ATTEND_RUNNER_DIR:-$(main_checkout_dir)}"
+RUNNER="${RUNNER_DIR}/athena-channel-session.sh"
+SELF_TEST="${SCRIPT_DIR}/test/athena-channel-session/self-test.sh"
+
+# The channel dir whose SDK wire-conformance must pass live before we install
+# the entries that start the session that registers the server (DND-283 ruling
+# 1d). Defaults to the MAIN checkout's copy; seams (NPM/NODE/CHANNEL_DIR) let
+# the self-test drive it with fakes.
+main_channel_dir() {
+  local common parent
+  common="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)" || { printf '%s' ""; return; }
+  [ -n "$common" ] || { printf '%s' ""; return; }
+  case "$common" in /*) ;; *) common="${SCRIPT_DIR}/${common}" ;; esac
+  parent="$(dirname -- "$common")"
+  printf '%s' "${parent}/ai/skills/athena:inbox/channel"
+}
+CHANNEL_DIR="${ATHENA_ATTEND_CHANNEL_DIR:-$(main_channel_dir)}"
+NPM="${ATHENA_ATTEND_NPM:-npm}"
+NODE="${ATHENA_ATTEND_NODE:-node}"
+
+# run_sdk_conformance -- npm ci (--omit=dev) + `sdk-conformance.mjs --live` in
+# CHANNEL_DIR. Prints the check's output; returns its exit code (non-zero,
+# INCLUDING the exit-3 skip which cannot happen after npm ci, is a refusal). It
+# is the FIRED interop mechanism before live registration: an SDK protocol drift
+# refuses the install rather than registering a shim the SDK cannot talk to.
+run_sdk_conformance() {
+  if [ -z "${CHANNEL_DIR}" ] || [ ! -d "${CHANNEL_DIR}" ]; then
+    echo "error: channel dir not found: ${CHANNEL_DIR:-<unresolved>}" >&2
+    echo "  Fix: run from the custom repo so the main checkout resolves, or set ATHENA_ATTEND_CHANNEL_DIR." >&2
+    return 2
+  fi
+  if ! ( cd -- "${CHANNEL_DIR}" && "${NPM}" ci --omit=dev ) >/dev/null 2>&1; then
+    echo "error: 'npm ci --omit=dev' failed in ${CHANNEL_DIR}" >&2
+    echo "  Fix: run it there by hand to see why (it needs network and the committed package-lock.json); the SDK must install before live registration." >&2
+    return 2
+  fi
+  local out rc
+  out="$( cd -- "${CHANNEL_DIR}" && "${NODE}" test/sdk-conformance.mjs --live 2>&1 )"; rc=$?
+  printf '%s\n' "${out}"
+  return "${rc}"
+}
+
+say()  { printf '%s\n' "$*"; }
+step() { printf '\n== %s\n' "$*"; }
+
+# ---- self-test path --------------------------------------------------------
+if [ "$MODE" = "self-test" ]; then
+  if [ ! -x "$SELF_TEST" ]; then
+    echo "error: self-test suite not found or not executable: $SELF_TEST" >&2
+    echo "  Fix: restore scripts/test/athena-attend/self-test.sh and chmod +x it." >&2
+    exit 2
+  fi
+  if bash "$SELF_TEST"; then say "ALL CASES PASS"; exit 0; fi
+  echo "SELF-TEST FAILED" >&2
+  echo "  Fix: read the failing case above, repair scripts/athena-channel-session.sh or this" \
+       "installer, then re-run 'scripts/setup-athena-attend --self-test'." >&2
+  exit 1
+fi
+
+# ---- resolve the project (absolute) ----------------------------------------
+PROJECT_DIR="${PROJECT_ARG:-${ATHENA_ATTEND_PROJECT_DIR:-${HOME}/dev/walt_ui}}"
+case "$PROJECT_DIR" in
+  /*) PROJECT_ABS="$PROJECT_DIR" ;;
+  *)  PROJECT_ABS="$(cd -- "$PROJECT_DIR" 2>/dev/null && pwd -P)" || PROJECT_ABS="$PROJECT_DIR" ;;
+esac
+
+REBOOT_LINE="@reboot ${RUNNER} --project ${PROJECT_ABS}"
+RELAUNCH_LINE="*/5 * * * * ${RUNNER} --project ${PROJECT_ABS}"
+
+# ---- crontab access --------------------------------------------------------
+command -v crontab >/dev/null 2>&1 || {
+  echo "error: crontab not installed (need cronie/dcron)." >&2
+  echo "  Fix: install cronie (Cody, as root: sudo emerge sys-process/cronie), then re-run." >&2
+  exit 2
+}
+read_crontab() { crontab -l 2>/dev/null || true; }
+put_crontab() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  [dry-run] resulting crontab would be:"
+    printf '%s\n' "$1" | sed 's/^/    /'
+    return 0
+  fi
+  if printf '%s\n' "$1" | crontab -; then return 0; fi
+  echo "error: writing the crontab failed — nothing was installed or removed." >&2
+  echo "  Fix: the per-user spool dir is the usual cause. scripts/setup-shipwright-cron owns" \
+       "the root repair for it; run that once (needs sudo, Cody's to run), then re-run and" \
+       "confirm with 'scripts/setup-athena-attend --check'." >&2
+  exit 2
+}
+# Match on the runner path AND this project's dir, so a second project's
+# attendant entry is never touched.
+MATCH="${RUNNER} --project ${PROJECT_ABS}"
+without_our_entries() { printf '%s\n' "$1" | grep -vF -- "$MATCH" | sed '/^[[:space:]]*$/d'; }
+
+# ---- check path (read-only) ------------------------------------------------
+if [ "$MODE" = "check" ]; then
+  current="$(read_crontab)"
+  have_reboot=0; have_relaunch=0
+  printf '%s\n' "$current" | grep -qxF -- "$REBOOT_LINE"   && have_reboot=1
+  printf '%s\n' "$current" | grep -qxF -- "$RELAUNCH_LINE" && have_relaunch=1
+  if [ "$have_reboot" -eq 1 ] && [ "$have_relaunch" -eq 1 ]; then
+    say "OK — both channel-session crontab entries are installed for ${PROJECT_ABS}:"
+    printf '%s\n' "$current" | grep -F -- "$MATCH" | sed 's/^/  /'
+    # Report the live SDK interop result too (DND-283 ruling 1d). Informational
+    # on --check: it does not change the crontab verdict, but it tells the owner
+    # whether live registration WOULD pass right now.
+    step "SDK wire-conformance (live)"
+    if conf_out="$(run_sdk_conformance)"; then
+      printf '%s\n' "$conf_out" | sed 's/^/  /'
+    else
+      printf '%s\n' "$conf_out" | sed 's/^/  /' >&2
+      say "  (the channel would REFUSE live registration until this passes)"
+    fi
+    exit 0
+  fi
+  {
+    echo "MISSING — the Athena attendant is not durably scheduled for ${PROJECT_ABS}; nothing restarts it."
+    [ "$have_reboot" -eq 1 ]   || echo "  missing: ${REBOOT_LINE}"
+    [ "$have_relaunch" -eq 1 ] || echo "  missing: ${RELAUNCH_LINE}"
+    echo "  Fix: run 'scripts/setup-athena-attend --project ${PROJECT_ABS}' to install both entries."
+  } >&2
+  exit 1
+fi
+
+# ---- remove path -----------------------------------------------------------
+if [ "$MODE" = "remove" ]; then
+  step "Removing the Athena attendant crontab entries for ${PROJECT_ABS}"
+  current="$(read_crontab)"
+  put_crontab "$(without_our_entries "$current")"
+  say "Done. Any attendant already running is left alone; it simply will not be relaunched."
+  say "Stop a running attendant by killing the pid in ~/.local/state/athena-attend/$(basename -- "$PROJECT_ABS")/attend.pid."
+  exit 0
+fi
+
+# ---- install path — prerequisites ------------------------------------------
+[ -x "$RUNNER" ] || {
+  echo "error: runner not found or not executable in the main checkout: $RUNNER" >&2
+  echo "  Fix: this branch's runner has not merged yet, or it is not chmod +x. Install after" \
+       "the merge (the entry must name the main checkout, never a worktree), from anywhere." >&2
+  exit 2
+}
+git -C "$PROJECT_ABS" rev-parse --git-dir >/dev/null 2>&1 || {
+  echo "error: project dir is not a git repository: $PROJECT_ABS" >&2
+  echo "  Fix: pass --project with the project's checkout. Inbox tenancy resolves from the" \
+       "repo's git common dir, so a non-repo has no channels to attend." >&2
+  exit 2
+}
+# Refuse to install an attendant for a project with no channels — that is the
+# silent-dark class, and the installer is the earliest place to catch it.
+INBOX_BIN_DIR="${ATHENA_ATTEND_INBOX_BIN_DIR:-$(cd -- "$(dirname -- "$RUNNER")/../ai/skills/athena:inbox/bin" 2>/dev/null && pwd -P || true)}"
+if [ -n "$INBOX_BIN_DIR" ] && [ -x "${INBOX_BIN_DIR}/inbox-wait" ]; then
+  if ! (cd -- "$PROJECT_ABS" && "${INBOX_BIN_DIR}/inbox-wait" --dry-run >/dev/null 2>&1); then
+    echo "error: inbox-wait --dry-run refused for ${PROJECT_ABS} — it has no inbox channels." >&2
+    echo "  Fix: opt the project into the Athena inbox first (a machine-local registry entry" \
+         "under \$ATHENA_INBOX_ROOT/projects/; see scripts/setup-inbox-registry), then re-run." >&2
+    exit 2
+  fi
+else
+  say "note: could not locate inbox-wait to preflight ${PROJECT_ABS}'s channels; installing anyway."
+fi
+
+# SDK wire-conformance BEFORE the crontab entries that would start the session
+# that registers the server live (DND-283 ruling 1d). npm ci + a real SDK
+# handshake against server.mjs; a non-zero exit (incl. the exit-3 skip)
+# ABORTS the install and registers nothing, with the check's own Fix: line.
+step "SDK wire-conformance (live) — gate before install"
+if conf_out="$(run_sdk_conformance)"; then
+  printf '%s\n' "$conf_out" | sed 's/^/  /'
+else
+  conf_rc=$?
+  printf '%s\n' "$conf_out" | sed 's/^/  /' >&2
+  echo "error: SDK wire-conformance did not pass (exit ${conf_rc}); NOTHING was installed." >&2
+  echo "  Fix: resolve the conformance failure above (regenerate the golden if the SDK pin" \
+       "changed, or fix the shim), then re-run 'scripts/setup-athena-attend --install'." >&2
+  exit 2
+fi
+
+step "Cron daemon"
+if pgrep -x crond >/dev/null 2>&1 || pgrep -x cron >/dev/null 2>&1; then
+  say "  running."
+else
+  say "  NOT running — the entries will install but nothing will fire them."
+  say "  These need root, so they are Cody's to run:"
+  say "    sudo rc-update add cronie default && sudo rc-service cronie start"
+fi
+
+step "Crontab entries"
+current="$(read_crontab)"
+kept="$(without_our_entries "$current")"
+if [ -n "$kept" ]; then
+  new_crontab="$(printf '%s\n%s\n%s' "$kept" "$REBOOT_LINE" "$RELAUNCH_LINE")"
+else
+  new_crontab="$(printf '%s\n%s' "$REBOOT_LINE" "$RELAUNCH_LINE")"
+fi
+put_crontab "$new_crontab"
+if [ "$DRY_RUN" -eq 1 ]; then say "  [dry-run] would install:"; else say "  installed:"; fi
+say "    ${REBOOT_LINE}"
+say "    ${RELAUNCH_LINE}"
+if [ -n "$kept" ]; then
+  say "  preserved $(printf '%s\n' "$kept" | wc -l | tr -d ' ') unrelated crontab entr(y/ies)."
+fi
+
+step "Done"
+say "Verify:    scripts/setup-athena-attend --check --project ${PROJECT_ABS}"
+say "Start now: ${RUNNER} --project ${PROJECT_ABS}    (blocks; it is the standing channel session)"
+say "           or wait for the */5 entry to pick it up."
+say "Owner:     accept the one-time project-trust dialog (and MCP-consent if it appears) once,"
+say "           and set ATHENA_ATTEND_OWNER_SLACK_ID so wedge/dark DMs can reach you."
+say "Watch:     tail -f ~/.local/state/athena-attend/$(basename -- "$PROJECT_ABS")/attend.log"
+say "State:     ~/.local/state/athena-attend/$(basename -- "$PROJECT_ABS")/ (channel.dark/wedged/stopped markers)"

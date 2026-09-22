@@ -958,3 +958,125 @@ doctor_registry_log_paths() {
     printf '%s' "${json}" | jq -r '.channels // {} | to_entries[] | select(.value.kind == "log") | .value.path' 2>/dev/null
   done
 }
+
+# ===========================================================================
+# THE STANDING CHANNEL SESSION (DND-283, design §3.4).
+#
+# One diagnosis line: `channel: registered|dark|stopped|wedged|no-session`,
+# computed from the supervisor's durable markers + `tmux has-session`. The
+# precedence + the marker/name/state-dir computation live ONCE, in
+# scripts/lib/athena-attend-lib.sh, so the launcher (which WRITES the markers)
+# and the doctor (which READS them) can never disagree about what a state is
+# called -- the silent-dark class this whole facility fights. "no-session" and
+# "dark" are DISTINCT states from "registered" by construction, so a dead or
+# dark channel never reads as a healthy one.
+# ===========================================================================
+
+# doctor_channel_project_name
+# THIS session's inbox project name, via the channel resolver (the same key the
+# launcher names its tmux session and state dir with). Overridable so the suite
+# drives states without a real registry. Empty = not opted in / cannot tell.
+doctor_channel_project_name() {
+  if [ -n "${ATHENA_INBOX_DOCTOR_CHANNEL_PROJECT:-}" ]; then
+    printf '%s\n' "${ATHENA_INBOX_DOCTOR_CHANNEL_PROJECT}"
+    return 0
+  fi
+  local repo resolver
+  repo="${DOCTOR_REPO_DIR:-}"
+  resolver="${repo:+${repo}/ai/skills/athena:inbox/channel/resolve-project.sh}"
+  [ -n "${resolver}" ] && [ -x "${resolver}" ] || return 0
+  "${resolver}" 2>/dev/null || true
+}
+
+# doctor_channel_has_session <session-name>  -- status 0 = the tmux session is up.
+# Overridable (ATHENA_INBOX_DOCTOR_TMUX_HAS_SESSION: "1"=up, "0"=absent) so the
+# suite never talks to a real tmux server.
+doctor_channel_has_session() {
+  case "${ATHENA_INBOX_DOCTOR_TMUX_HAS_SESSION:-}" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  local tmux; tmux="${ATHENA_INBOX_DOCTOR_TMUX:-tmux}"
+  command -v "${tmux}" >/dev/null 2>&1 || return 1
+  "${tmux}" has-session -t "${1:?}" >/dev/null 2>&1
+}
+
+# doctor_check_channel
+# The `channel:` finding. na when the channel lib is not in this checkout or the
+# repo resolves to no inbox project; otherwise ok/warn/fail per the state.
+doctor_check_channel() {
+  local repo lib name sdir has=0 state reason
+  repo="${DOCTOR_REPO_DIR:-}"
+  lib="${repo:+${repo}/scripts/lib/athena-attend-lib.sh}"
+  if [ -z "${lib}" ] || [ ! -r "${lib}" ]; then
+    doctor_finding na "channel" "the channel-session lib is not in this checkout, so the standing session's state cannot be read" \
+      "run inbox-doctor from the main checkout; the channel: line needs scripts/lib/athena-attend-lib.sh (DND-283)."
+    return 0
+  fi
+  name="$(doctor_channel_project_name)"
+  if [ -z "${name}" ]; then
+    doctor_finding na "channel" "this repo resolves to no inbox project, so no standing channel session is expected here" \
+      "if this project should have a live channel session, opt it into the inbox (scripts/setup-inbox-registry) and install it (scripts/setup-athena-attend --install)."
+    return 0
+  fi
+  # shellcheck source=/dev/null
+  . "${lib}"
+  sdir="$(attend_state_dir "${name}")"
+  doctor_channel_has_session "$(attend_session_name "${name}")" && has=1
+  state="$(attend_channel_state "${sdir}" "${has}")"
+  case "${state}" in
+    registered)
+      doctor_finding ok "channel" "the standing channel session is registered (tmux athena-attend-${name} is up, no dark/wedged/stopped marker)" ;;
+    dark)
+      reason="$(sed -n 2p "$(attend_marker "${sdir}" dark)" 2>/dev/null | tr '\t\n\r' '   ')"
+      doctor_finding fail "channel" "the channel is DARK for ${name}${reason:+: ${reason}}" \
+        "the session is not consuming. Read $(attend_marker "${sdir}" dark) and the launcher log; confirm the pane shows the registration notice or restart the session (scripts/athena-channel-session.sh). The supervisor restarts a dark channel up to 3x/hour before wedging." ;;
+    wedged)
+      reason="$(sed -n 2p "$(attend_marker "${sdir}" wedged)" 2>/dev/null | tr '\t\n\r' '   ')"
+      doctor_finding fail "channel" "the channel is WEDGED for ${name}${reason:+: ${reason}}" \
+        "a human is needed. Read $(attend_marker "${sdir}" wedged), fix the cause it names, then remove that marker and re-run scripts/setup-athena-attend --install (or the launcher)." ;;
+    stopped)
+      reason="$(sed -n 2p "$(attend_marker "${sdir}" stopped)" 2>/dev/null | tr '\t\n\r' '   ')"
+      doctor_finding warn "channel" "the channel session was STOPPED deliberately for ${name}${reason:+: ${reason}}" \
+        "this is not a fault; remove $(attend_marker "${sdir}" stopped) and re-run the launcher to resume, if that is what you want." ;;
+    no-session)
+      # na, not warn: a standing session is OPT-IN per project (setup-athena-attend
+      # --install), so a project that has not adopted it -- the normal steady
+      # state for most repos and throughout the Phase-2 rollout -- must not nag
+      # every opted-in session's health. Same reasoning as client-running's
+      # na-when-not-configured. It stays a DISTINCT message from "registered"
+      # (the ticket's must-not-read-the-same requirement); dark/wedged (a session
+      # that WAS running and broke) are the fail signals.
+      doctor_finding na "channel" "no standing channel session is running for ${name} (tmux athena-attend-${name} is absent)" \
+        "if this project should have a live channel session, start it: scripts/setup-athena-attend --install keeps it alive, or run scripts/athena-channel-session.sh once. Without one, sessions still get cold-start counts, but no live push arrives." ;;
+    *)
+      doctor_finding na "channel" "the channel state could not be determined for ${name}" \
+        "this should not happen; inspect ${sdir} and the launcher log." ;;
+  esac
+}
+
+# doctor_check_channel_probe
+# `inbox-doctor --probe` runs the channel's on-demand probe (design §9.6:
+# append a synthetic line to a probe channel, bump the doorbell, assert the wake
+# within budget). The probe binary is NOT part of this ticket's landed shim and
+# its ack_wake assertion depends on T4; until it lands, this reports na with the
+# key it looked for -- a MISSING probe is never read as a passing one (a failed
+# lookup must not look like an empty one).
+doctor_check_channel_probe() {
+  local repo probe
+  repo="${DOCTOR_REPO_DIR:-}"
+  probe="${ATHENA_INBOX_DOCTOR_CHANNEL_PROBE:-${repo:+${repo}/ai/skills/athena:inbox/channel/bin/channel-probe}}"
+  if [ -z "${probe}" ] || [ ! -x "${probe}" ]; then
+    doctor_finding na "channel-probe" "the on-demand channel probe is not present in this checkout (channel/bin/channel-probe)" \
+      "the probe (design §9.6) lands with the ack_wake tool (T4/DND-285); until then a live channel is watched by the channel.dark instrument. This is 'not yet built', never 'probe passed'."
+    return 0
+  fi
+  local out rc
+  out="$("${probe}" 2>&1)"; rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    doctor_finding ok "channel-probe" "the channel probe round-tripped a synthetic wake within budget"
+  else
+    doctor_finding fail "channel-probe" "the channel probe did not confirm a wake within budget (exit ${rc})" \
+      "$(printf '%s' "${out}" | tr '\t\n\r' '   ' | tail -c 300); run channel-probe by hand from the project to see the failing step."
+  fi
+}
