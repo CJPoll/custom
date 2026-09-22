@@ -36,23 +36,27 @@ Athena's words) and is frequently 404-down. See [[athena:slack]].
   digits from the end.)
 - **Reply in that thread.** Never post a new top-level message.
 
-## 2. Reporting window: 9AM MT of the last business day → now
+## 2. Reporting window: yesterday 9AM MT → today 8:59AM MT
 
-"Yesterday" means **since 09:00 America/Denver of the last business day**. Weekends
-roll back to Friday. Compute the UTC cutoff for queries:
+The window is bounded on **both** ends: from **09:00 America/Denver of the last
+business day** (weekends roll back to Friday) through **08:59:59 America/Denver
+of today**. Both bounds matter — without the upper bound a run at 3PM would sweep
+in this afternoon's work and report it as yesterday's.
+
+Compute both UTC bounds with the skill's own script (never inline `date` — the
+naive `TZ=America/Denver date -d "…09:00" -u` idiom is silently six hours wrong,
+because `-u` parses the string in UTC; the script embeds `TZ` in the `-d` string
+and is DST-correct, MDT vs MST):
 
 ```sh
-dow=$(TZ=America/Denver date +%u)   # 1=Mon .. 7=Sun
-case "$dow" in
-  1) back=3 ;;   # Mon -> Fri
-  6) back=1 ;;   # Sat -> Fri
-  7) back=2 ;;   # Sun -> Fri
-  *) back=1 ;;   # Tue-Fri -> prev day
-esac
-lastbiz=$(TZ=America/Denver date -d "$back days ago" +%Y-%m-%d)
-CUTOFF=$(TZ=America/Denver date -d "$lastbiz 09:00" -u +%Y-%m-%dT%H:%M:%SZ)
-echo "$CUTOFF"   # e.g. 2026-09-03T15:00:00Z
+WIN="$(~/.claude/skills/athena:standup/scripts/standup-window.sh)"
+CUTOFF=$(printf '%s\n' "$WIN"  | sed -n 's/^CUTOFF=//p')   # e.g. 2026-09-21T15:00:00Z
+CEILING=$(printf '%s\n' "$WIN" | sed -n 's/^CEILING=//p')  # e.g. 2026-09-22T14:59:59Z
+echo "$CUTOFF .. $CEILING"
 ```
+
+The window computation is self-tested (`test/self-test.sh` pins the expected
+UTC bounds for an MDT and an MST date); do not hand-roll the formula.
 
 ## 3. Gather the content — Cody/Athena ONLY
 
@@ -64,8 +68,13 @@ Scope strictly to Athena/Cody work. Other people's MRs (`tom888`/`johnnyt1`/
   ```sh
   glab api --paginate \
     "projects/amby_ai%2Fwalt_ui/merge_requests?state=merged&order_by=updated_at&sort=desc&updated_after=$CUTOFF&per_page=50" \
-    | jq -r '.[] | select(.merged_at >= "'"$CUTOFF"'") | select(.author.username=="athena-amby" or .author.username=="cody") | [.iid, .merged_at, .title] | @tsv'
+    | jq -r --arg lo "$CUTOFF" --arg hi "$CEILING" \
+        '.[] | select(.merged_at >= $lo and .merged_at <= $hi)
+             | select(.author.username=="athena-amby" or .author.username=="cody")
+             | [.iid, .merged_at, .title] | @tsv'
   ```
+  Filter on **both** bounds: `merged_at` in `[$CUTOFF, $CEILING]`. An MR merged
+  after `$CEILING` (this morning) belongs to *today's* window, not this one.
   Group by theme/epic/lane; cite `!MR` and `PT-###` inline. Note which reached
   prod HEALTHY.
 - **Q2 — today:** In-Progress + next-queued work. Query the Notion Tickets DB
