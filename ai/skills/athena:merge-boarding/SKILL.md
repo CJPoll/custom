@@ -379,6 +379,33 @@ and the deploy is the repo's own post-merge Actions workflow — no `Auto-Deploy
 label; watch it with `gh run watch <run-id>`. See [[athena:github]]; GitLab
 forge mechanics are in [[athena:gitlab]].
 
+## Ride a boarded train to landed (do not end your turn on it)
+
+A merge-train or MR you boarded is OBSERVABLE — `confirm-merged` polls its true
+state — so it is NOT the "external poll the harness genuinely cannot observe"
+carve-out in the *never end your turn waiting* discipline. Do NOT end your turn
+while an MR you boarded is unmerged. Ride it to landed in a bounded FOREGROUND
+poll: `confirm-merged --mr <n>` (or `--pr <n>`), `sleep 60`, up to ~45
+iterations (≈45 min; chunk it under the Bash tool time cap), then act on the
+result.
+
+End the turn only in one of two states, and record which in your `state.md`:
+
+- **CONFIRMED** — `confirm-merged` returned landed; proceed to Done / DM /
+  teardown.
+- **HANDED-OFF `<receiver>` `<next-command>`** — you explicitly handed the watch
+  to a named session, with the exact command it must run.
+
+"Watching", or "the train is running, I'll act when it merges", is NEITHER — it
+is the turn-end abandonment this section forbids. A `state.md` left mid-poll is
+the signal for the orphan-MR sweep ([[athena:fleet-inputs]]) /
+[[athena:admiral-resume]] to adopt.
+
+*Measured 2026-09-22 (2 of 2 admiral runs, PT-1385 + PT-1479): both ended the
+turn on a running train; one never resumed, one resumed 90 min late, and the
+main session closed both by hand — duplicated teardown + status writes, and
+downstream tracker drift (tickets left off `Done`).*
+
 ## Confirm the merge actually landed (before Done, DM, or teardown)
 
 `glab mr merge` prints `✓ Merged!`, and a merge train can report a car done,

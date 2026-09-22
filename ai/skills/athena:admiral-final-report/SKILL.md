@@ -37,6 +37,11 @@ terminal status, and **diff them in both directions**:
   = UNAVAILABLE, no list, so report the sweep as not taken; `4` = the list is
   COMPLETE and actionable, only the `drift` column is a `>=N` lower bound. A `4`
   is not a failure — treating it as one abandons a valid orphan list.
+- **An MR whose merge-train is still running is ridden to landed, not left as
+  "running".** See [[athena:merge-boarding]] → *Ride a boarded train to landed*.
+  End the run only once it is CONFIRMED landed or explicitly HANDED-OFF; a final
+  report that says "the train is still running" is the abandonment above, not a
+  status.
 - Do the same for the human-waiting statuses: a Mission sitting at
   `Needs Attention` whose blocking condition you later resolved is asking the
   owner for work that is already finished — so clear it or restate it.
