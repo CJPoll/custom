@@ -277,6 +277,28 @@ Three things this command refuses to let look like "nothing new":
 - messages carrying **your own identity** as `from`, sitting in the directory
   the peer delivers into.
 
+**At-least-once across its own crash.** `read-inbox` emits every body **first**
+and acks (advances the log offset, or `mv`s the mail into `.acked/`) **only
+after** the bodies are out. So a `read-inbox` killed between the print and the
+ack — the ordinary case is a downstream `| head`, `| grep -q`, or a pager quit
+early, which closes the pipe and hits the emit with `SIGPIPE` — never acks, and
+the **whole batch is re-delivered on the next read**. The ordering is
+deliberate and is not weakened: acking before the consumer holds the content
+would turn a truncated read into silent message loss, so the offset only ever
+advances past bodies that were actually shown.
+
+Two obligations follow for a consumer:
+
+- **Do not pipe `read-inbox` into a truncating reader.** `| head`, a pager you
+  quit, any reader that closes the pipe early kills the emit mid-batch: you see
+  a *partial* batch, and the full batch reappears next read. Capture the whole
+  output (`--json` into a file, or read it all) and truncate your own copy.
+- **Dedupe by each message's stable id**, because a re-delivered batch is
+  identical bytes, not new mail. `read-inbox --json` carries the identity per
+  message: a maildir message's `name` (its immutable delivered filename), a
+  Slack `log` line's `ts`, a platform line's `entity_id` + event id. Key on
+  that, never on arrival order or a running counter.
+
 ### `bin/send-mail`
 
 ```
@@ -360,10 +382,31 @@ again THE standing mechanism, and the exit-code table below is unchanged.
 
 | exit | meaning | what to do |
 |---|---|---|
-| `0` | a doorbell rang | read, then **re-arm** |
+| `0` | a doorbell rang | read the channel(s) it **named** (below), then **re-arm** |
 | `75` | the budget elapsed, nothing rang | **re-arm** — this is *not* "all clear" |
 | `2` | refused (bad usage, no `inotifywait`, an unusable budget, nothing to watch) | fix what the `Fix:` line names; re-arming will not help |
 | `1` | `inotifywait` faulted; one reason line is printed | re-arm **once**, then surface it rather than looping |
+
+**The wake names which channel rang.** On exit `0` the waiter prints a stable,
+machine-readable line:
+
+```
+athena:inbox: rang-channels: <name> [<name> …]
+```
+
+Read `read-inbox` on the channel(s) it names — not only the one you were
+expecting. A session watching several channels that is told merely "a doorbell
+rang" reads its usual channel and can miss the one that actually fired (a
+consumer watching `slack` + `flaky` read only `slack` and nearly missed the
+first-ever `flaky` event). Grep the line's fixed prefix
+(`^athena:inbox: rang-channels: `) and take the space-separated names after it.
+
+**`rang-channels: UNKNOWN` is a scan-everything signal, never "nothing new".**
+If the fired doorbell maps to no declared channel — a doorbell recreated out of
+band, or a registry change under the armed waiter — the waiter still exits `0`
+(a bell *did* ring) but prints `UNKNOWN` plus a `Fix:` telling you to run
+`inbox-status` and `read-inbox` across **every** channel. A rang wake that
+cannot name a channel is the one case that must not read as success-with-nothing.
 
 **75, not 0, for a quiet budget.** `0` is what a caller reads as "mail is
 waiting", so the one status that can never be reused is the one that means

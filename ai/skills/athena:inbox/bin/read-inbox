@@ -44,6 +44,20 @@
 # view of what has been ingested. Three conditions, all required -- the channel
 # belongs to THIS repo's registry entry, this session is not a subagent, and
 # this session holds the channel's `flock`. A refusal points at `--peek`.
+#
+# ============================ AT-LEAST-ONCE ================================
+#
+# Bodies are emitted FIRST and the ack runs ONLY after they are out (see "ACK.
+# Only after the bodies are out." below). So a read KILLED between the print
+# and the ack -- the ordinary case is a downstream `| head`/`| grep -q`/a pager
+# quit early, which closes the pipe and delivers SIGPIPE to the emit -- never
+# advances the offset, and the WHOLE BATCH is re-delivered on the next read.
+# This is at-least-once by construction, and it must stay that way: acking
+# before the consumer holds the content would convert a truncated read into
+# silent loss. Consumers must therefore NOT pipe this into a truncating reader,
+# and must dedupe re-delivered bytes by each message's stable id (maildir:
+# `name`; slack log: `ts`; platform: `entity_id` + event id). See SKILL.md ->
+# bin/read-inbox -> "At-least-once across its own crash".
 #--- end usage ---
 set -uo pipefail
 

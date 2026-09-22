@@ -3029,6 +3029,41 @@ touch "${MAIL_W_BELL}"
 reap_waiter
 assert_eq "I-3 one waiter covers both kinds -- the maildir WRITE bell wakes it too" "0" "${WAIT_RC}"
 
+# R3: THE WAKE NAMES WHICH CHANNEL RANG. A session watching several channels
+# that is told only "a doorbell rang" reads the channel it expects and can miss
+# the one that actually fired. The wake must print a stable, machine-readable
+# `rang-channels: <name...>` line, and the name must be the channel whose
+# doorbell fired -- not merely "some channel rang".
+arm_waiter "${WREPO}" 20
+await_armed 3
+touch "${LOG_BELL}"
+reap_waiter
+assert_eq "R3 the log bell still wakes the waiter (0)" "0" "${WAIT_RC}"
+assert_contains "R3 the wake NAMES the log channel that fired, on the stable line" \
+  "rang-channels: slack" "$(cat "${WAIT_OUT}")"
+
+arm_waiter "${WREPO}" 20
+await_armed 3
+touch "${MAIL_R_BELL}"
+reap_waiter
+assert_contains "R3 the wake names the maildir channel when its READ bell fires (new mail)" \
+  "rang-channels: peer-mail" "$(cat "${WAIT_OUT}")"
+
+arm_waiter "${WREPO}" 20
+await_armed 3
+touch "${MAIL_W_BELL}"
+reap_waiter
+assert_contains "R3 the wake names the maildir channel when its WRITE bell fires (peer ack)" \
+  "rang-channels: peer-mail" "$(cat "${WAIT_OUT}")"
+
+# R3, THE SILENT-EMPTY GUARD: a fired path that maps to NO declared channel is
+# not attributed to a wrong one. inbox_doorbell_channel is the reverse-resolver
+# the wake uses; an unowned path must yield NOTHING (so the wake prints the
+# UNKNOWN sentinel + "scan everything" rather than a bogus name) and status 1.
+UNOWNED="$(cd "${WREPO}" && inbox_doorbell_channel "${ATHENA_INBOX_ROOT}/no-such-channel.event" . 2>/dev/null; echo "rc=$?")"
+assert_eq "R3 an unowned fired path names NO channel and returns status 1 (whole output is just the rc)" \
+  "rc=1" "${UNOWNED}"
+
 # A doorbell unlinked mid-wait must not leave the waiter blocked forever on a
 # dead inode. It is recreated in the same breath so the next arm has something
 # to watch, which is also what the waiter itself does on re-arm.

@@ -219,6 +219,14 @@ inbox_refuse_subagent_arm || exit "${EX_REFUSED}"
 ERRF="$(mktemp)" || { inbox_fail "could not create a temporary file for inotifywait's stderr" \
   "check that \$TMPDIR is writable, then re-run."; exit "${EX_REFUSED}"; }
 
+# inotifywait's stdout goes here so the wake can NAME which doorbell fired.
+# Without `-m` inotifywait reads ONE event and exits, so this holds one line
+# (the `--format '%w%f'` path of the doorbell that rang). A read failure here
+# never loses a wake: the exit-0 arm falls back to "rang, channel unknown --
+# scan every channel", which is louder than a clean success, not quieter.
+OUTF="$(mktemp)" || { inbox_fail "could not create a temporary file for inotifywait's stdout" \
+  "check that \$TMPDIR is writable, then re-run."; rm -f "${ERRF}"; exit "${EX_REFUSED}"; }
+
 # ============================================================================
 # CLEANUP AND SIGNALS.
 #
@@ -238,9 +246,9 @@ ERRF="$(mktemp)" || { inbox_fail "could not create a temporary file for inotifyw
 # to launch this with `run_in_background`, so every stop produced that.
 # ============================================================================
 child=""
-trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}"' EXIT
-trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}"; exit 130' INT
-trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}"; exit 143' TERM
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}" "${OUTF}"' EXIT
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}" "${OUTF}"; exit 130' INT
+trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}" "${OUTF}"; exit 143' TERM
 
 # ============================================================================
 # THE ARM.
@@ -265,18 +273,59 @@ trap 'kill "$child" 2>/dev/null; rm -f "${ERRF}"; exit 143' TERM
 # link count and therefore emits ATTRIB, so the two overlap today; the overlap
 # is not a guarantee and is not what the waiter relies on.)
 # ============================================================================
-timeout "${BUDGET}" inotifywait -qq \
+# `-q --format '%w%f'`, NOT `-qq`. `-qq` prints nothing, so the wake could
+# never say which doorbell rang. `-q` suppresses the "Watches established"
+# chatter (measured: stderr stays empty, exactly as under `-qq`, so the fault
+# branch below still reads a clean ERRF) while `--format '%w%f'` prints the
+# fired doorbell's path to stdout. Watching FILES, `%f` is empty and `%w` is
+# the path as passed, so `%w%f` is that path; without `-m`, inotifywait reads
+# one event and exits, so OUTF holds the single line naming what rang.
+timeout "${BUDGET}" inotifywait -q --format '%w%f' \
   -e attrib,modify,close_write,move_self,delete_self \
-  -- "${EVENT_FILES[@]}" 2>"${ERRF}" &
+  -- "${EVENT_FILES[@]}" >"${OUTF}" 2>"${ERRF}" &
 child=$!
 wait "${child}"; RC=$?
 
 case "${RC}" in
   0)
-    # COUNTS ONLY, and not even a count here: this line is the reader's own
-    # narration and never carries a byte anybody else wrote. The bodies come
-    # later, from read-inbox, inside fences.
-    printf 'athena:inbox: a doorbell rang (%s watched). Run inbox-status, then read-inbox <channel>, then re-arm.\n' "${#EVENT_FILES[@]}"
+    # NAME WHICH DOORBELL RANG. A session watching several channels that is
+    # told only "a doorbell rang" reads the channel it expects and can miss the
+    # one that actually fired (measured: a walt_ui consumer read only `slack`
+    # and nearly missed the first-ever `flaky` event). inotifywait echoed the
+    # fired path into OUTF; map each back to its channel name.
+    #
+    # No `local` here -- this is script top level, not a function.
+    RANG_CHANNELS=""
+    RANG_PATH=""
+    while IFS= read -r RANG_PATH; do
+      [ -n "${RANG_PATH}" ] || continue
+      RANG_CH="$(inbox_doorbell_channel "${RANG_PATH}" ".")" || continue
+      case " ${RANG_CHANNELS} " in
+        *" ${RANG_CH} "*) : ;;                       # already listed
+        *) RANG_CHANNELS="${RANG_CHANNELS:+${RANG_CHANNELS} }${RANG_CH}" ;;
+      esac
+    done < "${OUTF}"
+
+    # COUNTS ONLY, and not even a count in the bodies sense: these lines are the
+    # reader's own narration and never carry a byte anybody else wrote. The
+    # bodies come later, from read-inbox, inside fences.
+    if [ -n "${RANG_CHANNELS}" ]; then
+      printf 'athena:inbox: a doorbell rang (%s watched). Run inbox-status, then read-inbox <channel>, then re-arm.\n' "${#EVENT_FILES[@]}"
+      # THE STABLE, MACHINE-READABLE LINE. A consumer greps `^athena:inbox:
+      # rang-channels: ` and reads the space-separated channel names after it.
+      # This line's shape is a contract (see SKILL.md → bin/inbox-wait).
+      printf 'athena:inbox: rang-channels: %s\n' "${RANG_CHANNELS}"
+    else
+      # RANG, BUT UNATTRIBUTABLE. This is exit 0 by contract (a bell DID ring),
+      # but it must NOT read as "rang, nothing to do": OUTF was empty, or the
+      # fired path matched no declared channel (a doorbell repaired/recreated
+      # out of band, a registry that changed under the armed waiter). The
+      # sentinel keeps the machine line present and parseable while telling the
+      # consumer, in the same breath, to scan EVERYTHING.
+      printf 'athena:inbox: a doorbell rang (%s watched) but the fired doorbell could not be mapped to a declared channel.\n' "${#EVENT_FILES[@]}" >&2
+      printf 'athena:inbox: rang-channels: UNKNOWN\n'
+      printf '  Fix: run inbox-status and read-inbox on EVERY channel this project declares; do NOT treat this wake as "nothing new". A doorbell recreated out of band, or a registry change under the armed waiter, produces this. Then re-arm.\n' >&2
+    fi
     printf '  Note: a wake does not imply unread mail — a peer acking a message you sent rings the same bell. Zero new is a normal wake, not a fault.\n'
     exit "${EX_RANG}"
     ;;

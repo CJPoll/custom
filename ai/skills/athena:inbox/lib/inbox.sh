@@ -1431,3 +1431,48 @@ inbox_doorbells() {
   printf '%s\n' "${bells[@]}"
   return 0
 }
+
+# inbox_doorbell_channel <bellpath> [cwd]
+#
+# Reverse of inbox_doorbells for ONE fired doorbell: print the channel name
+# whose `.event` is <bellpath>, exit 0. Print nothing and exit 1 when no
+# declared channel owns it. Used only on a wake, to name WHICH channel rang, so
+# a consumer watching several channels reads the one that fired rather than
+# guessing (and, when this returns 1, learns the wake could NOT be attributed
+# rather than reading it as "nothing new").
+#
+# READ-ONLY: it resolves, it never provisions. inbox_doorbells already created
+# every doorbell before arming; re-running the provisioning loop here would
+# re-emit the never-delivered warning on every wake and mutate the tree during
+# a read.
+#
+# BOTH SIDES OF THE COMPARISON COME FROM ONE SOURCE. The <bellpath> a caller
+# passes is a path inotifywait echoed back from the argv inbox_doorbells built,
+# and the paths compared here come from the SAME `descriptor_resolve` +
+# `_inbox_path` that built that argv. The equality is therefore between two
+# outputs of the same resolver, not between a stored path and a recomputed one
+# (the asymmetry `ai/CLAUDE.md` → *A failed lookup...* warns about).
+inbox_doorbell_channel() {
+  local target="$1" cwd="${2:-.}" entry chan resolved kind
+  [ -n "${target}" ] || return 1
+  entry="$(inbox_entry "${cwd}")" || return 1
+  [ -n "${entry}" ] || return 1
+  while IFS= read -r chan; do
+    [ -n "${chan}" ] || continue
+    resolved="$(descriptor_resolve "$(fs_inbox_root)" "${entry}" "${chan}")" || continue
+    kind="$(_inbox_path kind "${resolved}")"
+    case "${kind}" in
+      log)
+        [ "$(_inbox_path doorbell "${resolved}")" = "${target}" ] && { printf '%s\n' "${chan}"; return 0; }
+        ;;
+      maildir)
+        # Either side wakes for the same channel: the read bell is new mail
+        # from the peer, the write bell is the peer acking what you sent. R3
+        # names the channel; which side rang is a read-inbox concern.
+        [ "$(_inbox_path read_doorbell "${resolved}")" = "${target}" ]  && { printf '%s\n' "${chan}"; return 0; }
+        [ "$(_inbox_path write_doorbell "${resolved}")" = "${target}" ] && { printf '%s\n' "${chan}"; return 0; }
+        ;;
+    esac
+  done < <(descriptor_channel_names "${entry}")
+  return 1
+}
