@@ -323,6 +323,22 @@ if ! flock -n 9; then
   exit 0
 fi
 
+# --- suppress D-Bus autolaunch, and reap any orphaned daemons ---------------
+# cron provides no DBUS_SESSION_BUS_ADDRESS, but a graphical DISPLAY=:0 leaks in
+# through the login-shell snapshot Claude Code's Bash tool sources. A dbus
+# client (e.g. dunstify in the notify-idle Stop hook) then AUTOLAUNCHES a
+# throwaway `dbus-daemon --syslog-only --fork ... --session` that never exits
+# and, one per hour, exhausted the inotify instance limit (see
+# scripts/lib/dbus-env.sh). Export an address so no descendant `claude`
+# autolaunches, and best-effort reap orphans earlier runs left behind. Placed
+# after the --help/DRY_RUN early exits and the single-run lock, so it runs only
+# for an actual run.
+__wrapper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+# shellcheck source=scripts/lib/dbus-env.sh
+. "${__wrapper_dir}/lib/dbus-env.sh"
+athena_dbus_env_setup
+"${__wrapper_dir}/reap-orphan-dbus" --min-age 300 >/dev/null 2>&1 || true
+
 # Record who holds it, for the message above in the NEXT tick. Written to the
 # PATH rather than to fd 9 (which is append-mode now), so each run replaces the
 # previous holder's line instead of growing the file forever. We hold the lock,

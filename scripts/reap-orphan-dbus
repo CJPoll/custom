@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+#
+# reap-orphan-dbus — kill orphaned, autolaunched session dbus-daemons.
+#
+# Belt-and-suspenders for the D-Bus autolaunch leak (see scripts/lib/dbus-env.sh
+# for the root cause). Even with the wrappers exporting DBUS_SESSION_BUS_ADDRESS,
+# historical orphans and any not-yet-fixed spawner would still accumulate and
+# exhaust the per-user inotify instance limit. This reaper cleans them up. It is
+# invoked best-effort at the top of each cron wrapper and is safe to run from
+# cron or by hand.
+#
+# WHAT IT KILLS (all conditions required):
+#   * comm is exactly `dbus-daemon`
+#   * argv contains `--fork` AND `--session` AND (`--syslog` OR `--syslog-only`)
+#   * argv does NOT contain `--system`, `--nofork`, or `--config-file`
+#   * process is orphaned (PPID == 1) — dbus-launch daemonises the bus it forks
+#   * owned by the current user
+#   * at least --min-age seconds old (never race a bus mid-handshake)
+#
+# WHAT IT NEVER TOUCHES:
+#   * the system bus            (`dbus-daemon --system`)
+#   * the real session bus      (`dbus-daemon --nofork ... --session`)
+#   * the at-spi accessibility bus (`--config-file=.../accessibility.conf`)
+#   * any daemon younger than --min-age
+# These are excluded by construction, verified against live instances in the
+# self-test.
+#
+# Usage:
+#   reap-orphan-dbus                 reap now (best-effort; prints a summary)
+#   reap-orphan-dbus --dry-run       list what would be reaped; kill nothing
+#   reap-orphan-dbus --min-age N     minimum daemon age in seconds (default 300)
+#   reap-orphan-dbus --self-test     run the matcher self-tests (no side effects)
+#   reap-orphan-dbus --help          show this help
+
+set -euo pipefail
+
+MIN_AGE=300
+DRY_RUN=0
+
+# --- the matcher: pure, side-effect-free, unit-tested ------------------------
+# Given a dbus-daemon argv string, decide whether it is an autolaunched orphan
+# session bus. Returns 0 (reapable) or 1 (keep). Callers still apply the
+# comm/ppid/uid/age gates around this.
+dbus_argv_is_orphan_session() {
+  local cl="$1"
+  # Must be daemonised (--fork) AND a session bus.
+  case "$cl" in *--fork*) ;; *) return 1 ;; esac
+  case "$cl" in *--session*) ;; *) return 1 ;; esac
+  # Must carry the autolaunch syslog flag.
+  case "$cl" in
+    *--syslog-only*|*--syslog*) ;;
+    *) return 1 ;;
+  esac
+  # Must NOT be the system bus, a foregrounded (real) bus, or a config-driven
+  # bus (at-spi and friends).
+  case "$cl" in
+    *--system*|*--nofork*|*--config-file*) return 1 ;;
+  esac
+  return 0
+}
+
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# --- self-test ----------------------------------------------------------------
+run_self_test() {
+  local fails=0
+  _expect() { # desc expected(0/1) argv
+    local desc="$1" want="$2" cl="$3" got
+    if dbus_argv_is_orphan_session "$cl"; then got=0; else got=1; fi
+    if [ "$got" = "$want" ]; then
+      printf 'PASS %s\n' "$desc"
+    else
+      printf 'FAIL %s (want %s got %s) :: %s\n' "$desc" "$want" "$got" "$cl"
+      fails=$((fails+1))
+    fi
+  }
+
+  # The exact live orphan signature reproduced on this machine (2026-09-22).
+  _expect "orphan autolaunch bus (--syslog-only)" 0 \
+    "/usr/bin/dbus-daemon --syslog-only --fork --print-pid 5 --print-address 7 --session"
+  # dbus-launch also has a plain --syslog form.
+  _expect "orphan autolaunch bus (--syslog)" 0 \
+    "/usr/bin/dbus-daemon --syslog --fork --print-pid 5 --print-address 7 --session"
+  _expect "orphan, flags reordered" 0 \
+    "dbus-daemon --session --fork --syslog-only"
+
+  # Real buses that must NEVER be reaped (live signatures from this machine).
+  _expect "system bus" 1 "/usr/bin/dbus-daemon --system"
+  _expect "real session bus (--nofork)" 1 \
+    "dbus-daemon --nofork --print-address 4 --session"
+  _expect "at-spi accessibility bus" 1 \
+    "/usr/bin/dbus-daemon --config-file=/usr/share/defaults/at-spi2/accessibility.conf --nofork --print-address 11 --address=unix:path=/run/user/1000/at-spi/bus"
+  # A hypothetical forked session bus started from an explicit config is not an
+  # autolaunch orphan and must be kept.
+  _expect "forked but config-driven session bus" 1 \
+    "dbus-daemon --fork --config-file=/etc/custom.conf --session"
+  # A forked SYSTEM bus is not a session bus.
+  _expect "forked system bus" 1 "dbus-daemon --system --fork --syslog"
+  # Missing --fork => not daemonised => not our orphan class.
+  _expect "session bus without --fork" 1 "dbus-daemon --session --syslog-only"
+  _expect "empty argv" 1 ""
+
+  if [ "$fails" -eq 0 ]; then
+    echo "reap-orphan-dbus self-test: OK"
+    return 0
+  fi
+  echo "reap-orphan-dbus self-test: $fails failure(s)" >&2
+  echo "  Fix: the orphan-matcher (dbus_argv_is_orphan_session) changed its verdict on a signature above; re-check the conditions before shipping." >&2
+  return 1
+}
+
+# --- live reaping -------------------------------------------------------------
+# Process age in seconds, or empty if unknown. Uses ps etimes (procps).
+proc_age_secs() {
+  local pid="$1" a
+  a="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')" || return 1
+  [ -n "$a" ] || return 1
+  printf '%s' "$a"
+}
+
+reap() {
+  local me killed=0 considered=0 pid comm cl ppid owner age
+  me="$(id -u 2>/dev/null || printf '%s' "${UID:-}")"
+
+  # pgrep -x matches comm exactly; it never self-matches (this script's comm is
+  # bash/reap-orphan-dbus, not dbus-daemon).
+  local pids
+  pids="$(pgrep -x dbus-daemon 2>/dev/null || true)"
+  [ -n "$pids" ] || { echo "reap-orphan-dbus: no dbus-daemon processes"; return 0; }
+
+  local p
+  for p in $pids; do
+    [ -d "/proc/$p" ] || continue
+    cl="$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null || true)"
+    dbus_argv_is_orphan_session "$cl" || continue
+    considered=$((considered+1))
+    ppid="$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null || true)"
+    [ "$ppid" = "1" ] || { echo "keep pid=$p (not orphaned, ppid=$ppid)"; continue; }
+    owner="$(stat -c %u "/proc/$p" 2>/dev/null || true)"
+    [ "$owner" = "$me" ] || { echo "keep pid=$p (other user uid=$owner)"; continue; }
+    age="$(proc_age_secs "$p" || true)"
+    if [ -n "$age" ] && [ "$age" -lt "$MIN_AGE" ]; then
+      echo "keep pid=$p (age ${age}s < min ${MIN_AGE}s)"
+      continue
+    fi
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "would reap pid=$p age=${age:-?}s :: $cl"
+    else
+      if kill -TERM "$p" 2>/dev/null; then
+        echo "reaped pid=$p age=${age:-?}s :: $cl"
+        killed=$((killed+1))
+      else
+        echo "failed to reap pid=$p (already gone?)"
+      fi
+    fi
+  done
+
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "reap-orphan-dbus: $considered orphan candidate(s); dry-run, killed none"
+  else
+    echo "reap-orphan-dbus: $considered orphan candidate(s), reaped $killed"
+  fi
+  return 0
+}
+
+# --- args ---------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run)   DRY_RUN=1 ;;
+    --min-age)   shift
+                 case "${1:-}" in
+                   ''|*[!0-9]*) echo "error: --min-age needs a non-negative integer" >&2
+                                echo "  Fix: run 'reap-orphan-dbus --min-age 300'." >&2
+                                exit 1 ;;
+                   *) MIN_AGE="$1" ;;
+                 esac ;;
+    --self-test) run_self_test; exit $? ;;
+    -h|--help)   usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2
+       echo "  Fix: use --dry-run, --min-age N, --self-test, or --help." >&2
+       exit 1 ;;
+  esac
+  shift
+done
+
+reap
