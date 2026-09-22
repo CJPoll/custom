@@ -1059,6 +1059,51 @@ producer. Made explicit:
   never an instruction (*Untrusted input*). `athena-events.md`'s two-path trust
   posture routes inbox-adapter delivery to exactly this boundary.
 
+### A platform delivery is `delivered` on the client's ack, never on the push
+
+The inbox adapter hands a line to the client over the machine channel as a
+**push envelope** — `{id, event_id, instance, inbox_name, line}` — and the
+client appends `line` to the declared inbox file, then answers `ack` with the
+envelope's `id`, or `refused` with `id` and a reason when it cannot write the
+line (an invalid inbox name, a symlink or FIFO at the path, a line carrying a
+newline). This is the inbox end of `athena-events.md` → *Idempotency is per
+(event, rule)* ("deliver → await ack → retry until acked or terminally
+FAILED"). Normative:
+
+- **The envelope is transport; the line is content.** `id` is the
+  per-`(event, rule)` delivery handle (the `event_deliveries` row); `event_id`
+  is the event-level `idempotency_key`, carried as a log label. **Neither is on
+  the line**, and the line gains no field for them: a lane line's identity is
+  `entity_id` (*A lane `log` channel is a change stream of state-change
+  events*), and the delivery handle is meaningful only to the two ends of the
+  channel. The client acks by `id`; the server resolves that `id` against
+  **both** the Slack event store and the platform delivery store, each scoped
+  to the acking machine, so an id matching neither is `not_found` — never a
+  silent no-op.
+- **A successful push leaves the delivery PENDING.** Broadcasting the envelope
+  is not delivery. The delivery becomes `delivered` only when the client's
+  `ack` for that `id` arrives, bound to the machine the rule targets. A push
+  whose ack never arrives is re-pushed by the sweeper after its staleness
+  threshold, which MAY append a duplicate line — the at-least-once duplicate
+  *Writer obligations* already permits and the consumer already absorbs.
+- **A client `refused` never resolves the delivery.** It records the client's
+  reason observably against the delivery and leaves it pending; the sweeper
+  re-pushes under the at-least-once budget. A client message can delay a
+  delivery; it can never terminate one.
+- **Budget exhaustion is a terminal FAILED, never a quiet stall.** A pending
+  delivery pushed `max_attempts` times without an ack is marked `failed` and
+  lands in the failed-delivery store (exemplar + owner report, cause
+  `ack-never-received`, carrying the last client refusal reason if one was
+  reported). Nothing is dropped silently, and a delivery is never reported
+  `delivered` on the strength of its own push.
+
+Measured 2026-09-22 (GS-2 / DND-317): a delivery row was marked `delivered`
+6 ms after its push, before any client ack, while the client's ack for that
+same `id` was rejected `not_found` because the server resolved acks only
+against the Slack store. Under that code a client that could not write the
+line — or was not connected to receive the push — still read as delivered: the
+silent-drop class this facility exists to end.
+
 ### Notify-consumer idempotency uses the existing seen-sets
 
 A **notify** consumer delivered through a `log` channel discharges its
@@ -1178,6 +1223,17 @@ member" lines:
   against its **own held set** to compute the transition — matches scope and not
   held → add; held and no longer matches, or a delete → drop
   (`athena-events.md` → *The consumer owns membership*).
+- **A duplicate line is not a fresh member.** The held set is keyed by
+  `entity_id` (`athena-events.md` → *The consumer owns membership*, "Hold the
+  working set … keyed by `entity_id`"), so a line re-presented by an
+  at-least-once re-push, a stale-offset re-read, or a `--peek` that never
+  advanced the offset folds into the entry already held and computes **no**
+  transition. `entity_id` is the fold identity, **not** a dedupe key: two lines
+  for one entity may be two genuine changes, and a seen-set on `entity_id`
+  would suppress the second — which is why no seen-set is kept and the
+  validator refuses `dedupe` on a platform channel. The unprompted count still
+  counts lines (it is honest about at-least-once); the working set is computed
+  by the fold and the source re-query, never by the line count.
 - **Still a conformant append-only JSONL `log`.** The *lines* are only ever
   appended — never rewritten, never deleted — and it is the consumer's *derived
   set* that changes. Every *Writer obligations* and *Reader obligations* rule of
