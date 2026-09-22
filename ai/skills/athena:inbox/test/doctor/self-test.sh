@@ -545,6 +545,19 @@ if [ -r "${REPO}/scripts/lib/athena-attend-lib.sh" ]; then
   assert_eq "channel-probe: missing binary -> na, never ok" na "$(state_of "${F}" channel-probe)"
   assert_finding "channel-probe: na says 'not yet built', not 'passed'" "${F}" na channel-probe "not present"
 
+  # With a probe binary present (via the seam): exit 0 -> ok, exit non-zero ->
+  # fail with the failing step. Both branches driven, not just the na path.
+  PROBE_OK="${TMP}/probe-ok"; printf '#!/usr/bin/env bash\necho round-tripped\nexit 0\n' > "${PROBE_OK}"; chmod +x "${PROBE_OK}"
+  export ATHENA_INBOX_DOCTOR_CHANNEL_PROBE="${PROBE_OK}"
+  F="$(doctor_check_channel_probe)"
+  assert_eq "channel-probe: a passing probe -> ok" ok "$(state_of "${F}" channel-probe)"
+  PROBE_BAD="${TMP}/probe-bad"; printf '#!/usr/bin/env bash\necho "no ack within budget" >&2\nexit 4\n' > "${PROBE_BAD}"; chmod +x "${PROBE_BAD}"
+  export ATHENA_INBOX_DOCTOR_CHANNEL_PROBE="${PROBE_BAD}"
+  F="$(doctor_check_channel_probe)"
+  assert_eq "channel-probe: a failing probe -> fail (never silently ok)" fail "$(state_of "${F}" channel-probe)"
+  assert_finding "channel-probe: fail names the exit code" "${F}" fail channel-probe "exit 4"
+  unset ATHENA_INBOX_DOCTOR_CHANNEL_PROBE
+
   # A project that resolves to nothing -> na (not opted in), not a false fail.
   export ATHENA_INBOX_DOCTOR_CHANNEL_PROJECT=""
   F="$(doctor_check_channel)"
