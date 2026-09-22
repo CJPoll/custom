@@ -136,8 +136,55 @@ attend_counts_state() {
 # A "wake" for the pre-T4 wake counter is a transition from unread to zero: mail
 # arrived and the session drained it. rc 0 = a wake just completed. Uncountable
 # on either side is NOT a wake (we cannot claim the mail drained).
+#
+# SUPERSEDED as the wake counter by T4/DND-285: the standing session now records
+# each handled wake with the `ack_wake` MCP tool, which bumps the `wakes` counter
+# file directly (server.mjs recordAck) -- so the launcher no longer infers wakes
+# from an unread->zero count transition. Kept as a pure predicate for callers /
+# tests that still reason about the count transition.
 attend_wake_completed() {
   [ "${1:-}" = "unread" ] && [ "${2:-}" = "zero" ]
+}
+
+# attend_ledger_path <state-dir> -> the attendant's ledger file (no bodies; the
+# skill's `tail -n 40 "$ATHENA_ATTEND_LEDGER"` reads it). ONE computation shared
+# by the launcher (which exports it into the session env) and the installer
+# (which names it in the committed allowlist's tail entry), so the two agree by
+# construction -- a mismatch here is the silent-permission-prompt class.
+attend_ledger_path() { printf '%s/ledger.log\n' "${1:?state dir}"; }
+
+# attend_turn_ended <state-dir> <session-id>
+# The T4/DND-285 rotation idle signal, PER SESSION. rc 0 (the turn has fully
+# ended) requires BOTH:
+#   * ack.<sid> exists  -- ack_wake was called since the session started (the
+#     handled-receipt; conditions "ack_wake seen since the last bell");
+#   * idle.<sid> exists AND is NEWER than ack.<sid>  -- the Stop hook fired
+#     AFTER the ack, proving no output followed it (ack_wake is called "last" but
+#     text can still follow it; rotating on the ack alone cuts a reply's tail).
+# It keys on the CALLER'S OWN session id, never a global marker: a global idle
+# marker written by any other session would read as "this session is idle" -- the
+# failed-lookup class (a key that matches the wrong thing looks like a match).
+# An empty sid, a missing ack, a missing idle.<sid>, or an idle no newer than the
+# ack all return non-zero (rotation blocked) -- deny-by-default, never truncate.
+#
+# CROSS-TURN SAFETY: these markers persist across turns (cleared only on
+# relaunch), so a PRIOR turn's idle_N stays newer than ack_N. If it were left in
+# place, the window after bell N+1's mail drains to zero but before that turn's
+# ack_wake would read idle_N as "ended" and could rotate mid-reply. The shim
+# closes this by removing idle.<sid> when it emits a new mail wake (server.mjs
+# invalidateTurnEnd), so this predicate is true only when the CURRENT turn has
+# ended: ack_wake writes a fresh ack, then the Stop hook writes idle newer than
+# it. (Regression: channel self-test "a new mail wake invalidates a stale
+# idle.<sid>"; lib test "ack present, idle removed -> NOT ended".)
+attend_turn_ended() {
+  local dir="${1:?state dir}" sid="${2:-}"
+  [ -n "${sid}" ] || return 1
+  local ack idle
+  ack="${dir}/ack.${sid}"
+  idle="${dir}/idle.${sid}"
+  [ -e "${ack}" ]  || return 1   # no ack_wake yet -> the wake was not handled
+  [ -e "${idle}" ] || return 1   # no per-session turn-end marker -> a turn may be in flight
+  [ "${idle}" -nt "${ack}" ]     # the turn-end must be strictly newer than the ack
 }
 
 # ---------------------------------------------------------------------------
