@@ -357,13 +357,21 @@ points at, it states no lane mechanics (the marker semantics, channel resolution
 read mechanics, and add/drop handling are the brief's); on any detail the brief
 wins.
 
-**What routes a session into the brief — two trigger sources during the
-migration.** Either signal means lane state may have changed and the brief should
+**What routes a session into the brief — three trigger sources during the
+migration.** Any signal means lane state may have changed and the brief should
 be consulted:
 
 - **Inbox count.** A nonzero unread count on the lane's `log` channel (surfaced
   counts-only per the inbox *Untrusted input* rule). Whether this trigger is
   operative for a given lane is the brief's `{{CHANNEL_RESOLUTION}}`, not settled
+  here.
+- **Channel event.** In a **standing channel session** (an interactive `claude`
+  launched with `--dangerously-load-development-channels server:athena-inbox`),
+  the inbox channel shim pushes a `<channel>` event carrying the unread count on
+  the lane's `log` channel straight into the running session — the push form of
+  the inbox count above, with no `SessionStart` or hand-armed waiter in between.
+  Its mechanics (how the shim resolves the channel, what the session does on the
+  event) are `~/dev/custom/ai/docs/ticket-lane-action-brief.md`'s, not stated
   here.
 - **`SessionStart` poll.** `~/dev/walt_ui/.claude/hooks/flaky-ticket-poll.sh`
   reports flaky-lane state as factual `additionalContext`; it remains flaky's
@@ -396,3 +404,13 @@ into the brief* above (for flaky, still the `SessionStart` poll), and all lane
 mechanics — read mechanics, marker semantics, channel resolution, merge policy —
 are the `~/dev/custom/ai/docs/ticket-lane-action-brief.md` template's, cited and
 not restated.
+
+**Later (2026-09-22):** a **third** trigger source was added above — a
+`<channel>` event pushed into a standing channel session — so *What routes a
+session into the brief* previously named "two trigger sources during the
+migration" and now names three. The channel event is the push delivery of the
+inbox count (the standing session, launched with
+`--dangerously-load-development-channels server:athena-inbox`, receives the count
+as a `<channel>` event rather than a hook or hand-armed waiter delivering it);
+its mechanics stay the lane brief's. Nothing about the two prior triggers
+changed.

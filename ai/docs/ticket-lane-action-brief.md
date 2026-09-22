@@ -338,7 +338,7 @@ constants into one home (DND-276).
 | `{{MAX_CAPTAINS}}` | `1` (strictly sequential) |
 | `{{MERGE_POLICY}}` | per the flaky tracker policy above (the admiral's auto-merge default); **terminal state = merged** (the condition the marker-removal step waits for) |
 | `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel — now **declared in `ai/inbox/registry.json`** (`kind:log`, `producer:"platform"`; DND-260 landed it), but a committed declaration is not yet an operative trigger: it must also be installed and resolve in the live entry (see `{{CHANNEL_RESOLUTION}}` and the migration section) |
-| `{{CHANNEL_RESOLUTION}}` | resolve the flaky `log` channel in the **live installed** entry the consumer reads — the `$ATHENA_INBOX_ROOT/projects/*.json` entry whose realpath'd `repo` equals walt_ui's git-common-dir realpath (per `ai/contracts/athena-inbox.md` → *Finding the entry*; a human finds that entry in the file conventionally named `projects/walt_ui.json`, but the match key is `repo`, never the filename), not just the committed `ai/inbox/registry.json`. **Post-install invariant:** once the channel is declared AND installed, a live entry that does not resolve — logging the searched repo-identity key — is registry **drift**, a fault `check-inbox-registry` surfaces with `Fix: setup-inbox-registry --install`, never an empty queue. **Pre-install today:** the flaky lane's operative trigger is the `SessionStart` poll (`flaky-ticket-poll.sh`); the inbox-count trigger on this channel is **not yet wired**. What a consumer does on a **declared-but-not-installed** channel — the pre-install→install cutover — is **H-4 / DND-248**, not settled here. |
+| `{{CHANNEL_RESOLUTION}}` | resolve the flaky `log` channel in the **live installed** entry the consumer reads — the `$ATHENA_INBOX_ROOT/projects/*.json` entry whose realpath'd `repo` equals walt_ui's git-common-dir realpath (per `ai/contracts/athena-inbox.md` → *Finding the entry*; a human finds that entry in the file conventionally named `projects/walt_ui.json`, but the match key is `repo`, never the filename), not just the committed `ai/inbox/registry.json`. **Post-install invariant:** once the channel is declared AND installed, a live entry that does not resolve — logging the searched repo-identity key — is registry **drift**, a fault `check-inbox-registry` surfaces with `Fix: setup-inbox-registry --install`, never an empty queue. **Pre-install today:** the flaky lane's operative trigger is the `SessionStart` poll (`flaky-ticket-poll.sh`); the standing channel session's `<channel>`-event delivery on this channel — the push form of the inbox count — is **built** (the shim; `ai/docs/inbox-channels-design.md` §3 *The channel server*) but goes live for the flaky lane only once the channel is installed and resolves. What a consumer does on a **declared-but-not-installed** channel — the pre-install→install cutover — is **H-4 / DND-248**, not settled here. |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
 | `{{STALE_MARKER_SWEEP}}` | choice (a): an activity-independent runner clears a marker older than 12h; a human may also `rm -f` it. TWO such runners exist today: the `SessionStart` poll (`flaky-ticket-poll.sh`) and — provisioned by DND-277, so the sweep survives the poll's retirement — the dedicated `SessionStart` hook `~/dev/custom/ai/hooks/flaky-marker-sweep.sh` (see *Relationship to the existing flaky trigger*) |
 | `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per the flaky tracker policy above) against the Tickets DB |
@@ -357,6 +357,17 @@ consumer does on a declared-but-not-installed channel) is deferred to
 **H-4 / DND-248**. The operative gate did not weaken — a committed declaration
 is still not an installed, resolving channel — only its stated status advanced
 from undeclared to declared-but-not-yet-installed.
+
+**Later (2026-09-22):** the `{{CHANNEL_RESOLUTION}}` row's "inbox-count trigger
+… not yet wired" and the *Relationship to the existing flaky trigger* section's
+"the trigger moves … to the inbox count" were narrowed above once the **standing
+channel session** landed (epic *Inbox on Channels*, T1–T5): the inbox count now
+reaches a session as a `<channel>` event the shim pushes on `{{LANE_CHANNEL}}`,
+so the trigger **mechanism** exists rather than being unwired. Unchanged: the
+resolution assertion, the pre-install→install cutover (still **H-4 / DND-248**),
+and the pre-install operative trigger (the `SessionStart` poll). The channel
+event goes live for the flaky lane only when its channel is installed and
+resolves.
 
 **The marker semantics preserved VERBATIM for the flaky instance:**
 
@@ -385,8 +396,11 @@ new rule.
 The flaky instance is today spun by the `SessionStart` poll
 (`~/dev/walt_ui/.claude/hooks/flaky-ticket-poll.sh`) and the spawn text
 `flaky-coordinator-spawn.txt`. Under the landed model the trigger moves from a
-`SessionStart` pull to the inbox count on `{{LANE_CHANNEL}}` (design →
-*Migration + gated retirement*). The marker's **touch-before-spawn /
+`SessionStart` pull to a `<channel>` event the standing channel session receives
+on `{{LANE_CHANNEL}}` — the push form of the inbox count (the gated-retirement
+ordering is `ai/docs/inbox-channels-design.md` §9.7 *Ordering — nothing old comes
+down before the new path is proven*; the standing session itself is §4 *The
+persistent `--channels` session*). The marker's **touch-before-spawn /
 remove-when-scope-empty** semantics carry over unchanged, but two things do
 change and are NOT "only the trigger":
 
