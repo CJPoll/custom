@@ -555,6 +555,14 @@ owner_inst_env=(
   "ATHENA_ATTEND_CHANNEL_DIR=${CHDIR}"
   "ATHENA_ATTEND_NPM=${FAKES}/npm"
   "ATHENA_ATTEND_NODE=${FAKES}/node"
+  # T4/DND-285's allowlist merge runs on every --install (after the owner-id and
+  # SDK gates), so this owner-id sub-suite must seam it too — the real committed
+  # fragment merging into a scratch target/state — or a passing --install would
+  # still exit 2 at the merge for want of a fragment. Harmless to the --check /
+  # --remove / deny-by-default (exit-2-before-merge) cases here.
+  "ATHENA_ATTEND_FRAGMENT=${REPO}/ai/skills/athena:inbox/channel/settings.attend.json"
+  "ATHENA_ATTEND_SETTINGS_FILE=${INST_TMP}/owner-settings.json"
+  "ATHENA_ATTEND_STATE_DIR=${INST_TMP}/owner-state"
   "PATH=${FAKES}:${PATH}"
 )
 
@@ -702,11 +710,14 @@ TARGET="${INST_TMP}/proj-claude/settings.json"; mkdir -p "$(dirname "${TARGET}")
 # a pre-existing settings.json with an unrelated key AND a pre-existing allow entry.
 printf '%s\n' '{"model":"opus","permissions":{"allow":["Bash(ls*)"]}}' > "${TARGET}"
 : > "${FAKE_CRONTAB_FILE}"
+# --no-owner-dm isolates this merge test from DND-288's owner-id deny-by-default
+# gate (which runs BEFORE the merge): this case is about the allowlist merge, not
+# the owner-id refusal (covered in its own sub-suite above).
 env "${inst_env[@]}" FAKE_NODE_RC=0 \
   ATHENA_ATTEND_FRAGMENT="${FRAG}" \
   ATHENA_ATTEND_SETTINGS_FILE="${TARGET}" \
   ATHENA_ATTEND_STATE_DIR="${MERGE_STATE}" \
-  bash "${INSTALLER}" --install --project "${PROJ}" >/dev/null 2>&1; RC=$?
+  bash "${INSTALLER}" --install --no-owner-dm --project "${PROJ}" >/dev/null 2>&1; RC=$?
 assert_eq "installer: --install with a mergeable allowlist exits 0" 0 "${RC}"
 assert_contains "merge kept the pre-existing unrelated key (model)" '"model": "opus"' "$(cat "${TARGET}")"
 MALLOW="$(jq -r '.permissions.allow[]' "${TARGET}" 2>/dev/null)"
@@ -719,7 +730,7 @@ assert_not_contains "the fragment's _note key never reaches the merged settings"
 # idempotent: a second --install adds nothing.
 BEFORE_N="$(jq '.permissions.allow | length' "${TARGET}")"
 : > "${FAKE_CRONTAB_FILE}"
-env "${inst_env[@]}" FAKE_NODE_RC=0 ATHENA_ATTEND_FRAGMENT="${FRAG}" ATHENA_ATTEND_SETTINGS_FILE="${TARGET}" ATHENA_ATTEND_STATE_DIR="${MERGE_STATE}" bash "${INSTALLER}" --install --project "${PROJ}" >/dev/null 2>&1
+env "${inst_env[@]}" FAKE_NODE_RC=0 ATHENA_ATTEND_FRAGMENT="${FRAG}" ATHENA_ATTEND_SETTINGS_FILE="${TARGET}" ATHENA_ATTEND_STATE_DIR="${MERGE_STATE}" bash "${INSTALLER}" --install --no-owner-dm --project "${PROJ}" >/dev/null 2>&1
 AFTER_N="$(jq '.permissions.allow | length' "${TARGET}")"
 assert_eq "merge is idempotent (allow length unchanged on re-run)" "${BEFORE_N}" "${AFTER_N}"
 # --remove un-merges the attend entries but keeps the pre-existing one.
