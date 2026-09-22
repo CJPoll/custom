@@ -11,11 +11,14 @@
 # / restarts the session under bounds so a long-lived session never grows an
 # unbounded standing bill and a dark channel never sits silent.
 #
-# NOTE ON ROTATION (staged): the wakes/bytes/age rotation is gated on an idle
-# signal (ATHENA_ATTEND_IDLE_MARKER) so a rotation never cuts a reply. That
-# marker is wired by a later ticket (the T4 ack_wake / Stop-hook idle work), so
-# UNTIL THEN the bound-rotation path is inert in production and only dark-restart
-# is active. The gate is shaped so T4/T5 turn rotation on with no change here.
+# ROTATION (activated by T4/DND-285): the wakes/bytes/age rotation is gated on
+# THREE conditions together, so a rotation never cuts a reply -- every channel
+# counts zero, ack_wake was called (ack.<sid> exists), and this session's Stop
+# hook fired AFTER the ack (idle.<sid> newer than ack.<sid>). The wakes counter
+# is bumped by the shim's ack_wake tool. Each launched session gets its own
+# --session-id UUID (stored in session.id); the gate keys on THAT session's
+# markers, never a global one. Pre-T4 only dark-restart was active; T4 wires the
+# idle signal (is_idle -> attend_turn_ended) that turns bound-rotation live.
 #
 # INERT UNTIL INSTALLED. Nothing here runs on its own; `scripts/setup-athena-attend
 # --install` adds the @reboot + */5 crontab entries (pointing at the MAIN
@@ -50,7 +53,10 @@
 #   ATHENA_ATTEND_RESOLVE_PROJECT resolve-project.sh (default: channel copy)
 #   ATHENA_ATTEND_STATE_DIR     per-project state/marker dir (test seam)
 #   ATHENA_ATTEND_TRANSCRIPT_DIR ~/.claude/projects/<slug> (test seam)
-#   ATHENA_ATTEND_IDLE_MARKER   file whose presence means "no turn in flight"
+#   (idle detection is per-session and NOT env-configurable: is_idle keys on
+#    ack.<sid>/idle.<sid> in the state dir under this session's own --session-id;
+#    ATHENA_ATTEND_SESSION_ID sets that id, ack_wake writes the ack, the Stop
+#    hook writes the idle marker)
 #   ATHENA_ATTEND_MAX_WAKES     rotate after N wakes (30)
 #   ATHENA_ATTEND_MAX_BYTES     rotate at transcript bytes (262144)
 #   ATHENA_ATTEND_MAX_AGE       rotate after N seconds (86400)
@@ -151,6 +157,8 @@ PIDFILE="${STATE_DIR}/attend.pid"
 RESTARTS_LOG="${STATE_DIR}/restarts.log"
 STARTED_F="${STATE_DIR}/session.started"
 WAKES_F="${STATE_DIR}/wakes"
+SESSION_ID_F="${STATE_DIR}/session.id"
+LEDGER_F="$(attend_ledger_path "${STATE_DIR}")"
 LOG="${STATE_DIR}/attend.log"
 
 # bounds / cadences
@@ -208,7 +216,29 @@ get_status_json() { ( cd -- "${PROJECT_DIR}" 2>/dev/null && "${INBOX_STATUS}" --
 has_session() { "${TMUX_BIN}" has-session -t "${SESSION}" 2>/dev/null; }
 kill_session() { "${TMUX_BIN}" kill-session -t "${SESSION}" 2>/dev/null || true; }
 
+# new_session_id -> a fresh UUID for the claude session about to launch. The
+# rotation idle gate keys on THIS session's idle.<sid> marker, so each launched
+# session gets its own id (a fresh id per (re)launch), stored in SESSION_ID_F.
+new_session_id() {
+  if [ -r /proc/sys/kernel/random/uuid ]; then cat /proc/sys/kernel/random/uuid; return; fi
+  if command -v uuidgen >/dev/null 2>&1; then uuidgen; return; fi
+  # last resort: a time+pid+random token (still per-launch-unique).
+  printf 'attend-%s-%s-%s\n' "$(date +%s)" "$$" "${RANDOM:-0}"
+}
+
 launch_session() {
+  # A per-launch session id: passed to claude as --session-id AND into the env as
+  # ATHENA_ATTEND_SESSION_ID, so ack_wake writes ack.<sid> and the Stop hook
+  # writes idle.<sid> under the SAME id the rotation gate reads (validate both
+  # sides of the comparison). Stored in SESSION_ID_F for one_cycle to read.
+  local sid; sid="$(new_session_id)"
+  # A fresh session starts with NO handled-receipt and NO turn-end marker; the
+  # gate keys on the current sid so stale ack.<old>/idle.<old> are never read,
+  # but clearing them here keeps a long-lived supervisor's state dir from
+  # accumulating one pair of tiny files per rotation, unbounded.
+  rm -f -- "${STATE_DIR}"/ack.* "${STATE_DIR}"/idle.* 2>/dev/null || true
+  printf '%s\n' "${sid}" >"${SESSION_ID_F}" 2>/dev/null || true
+
   # `env -u` strips CLAUDE_CODE_SESSION_ATTENDED (so inbox-untrusted-guard
   # enforces) AND CLAUDE_AGENT_ID/TYPE. The agent vars must not merely be unset
   # by us -- they must be REMOVED even if the supervisor's own environment
@@ -216,10 +246,19 @@ launch_session() {
   # inherits them). If either reached the session, session.sh / server.mjs would
   # classify it a SUBAGENT and the consumer gate would refuse to ack -- the
   # session could never drain its own channel, ending in a silent channel.dark.
+  #
+  # ATHENA_ATTEND_STATE_DIR / _SESSION_ID / _LEDGER are PASSED IN so the shim's
+  # ack_wake records to the dir the supervisor reads, and the attend skill's
+  # `tail -n 40 "$ATHENA_ATTEND_LEDGER"` (allowlisted) resolves to the committed
+  # ledger path.
   "${TMUX_BIN}" new-session -d -s "${SESSION}" -c "${PROJECT_DIR}" \
     env -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_AGENT_ID -u CLAUDE_AGENT_TYPE \
     "ATHENA_INBOX_EXPECT_PROJECT=${PROJECT_NAME}" \
-    "${CLAUDE_BIN}" --dangerously-load-development-channels "server:athena-inbox" --permission-mode default
+    "ATHENA_ATTEND_STATE_DIR=${STATE_DIR}" \
+    "ATHENA_ATTEND_SESSION_ID=${sid}" \
+    "ATHENA_ATTEND_LEDGER=${LEDGER_F}" \
+    "${CLAUDE_BIN}" --dangerously-load-development-channels "server:athena-inbox" \
+    --permission-mode default --session-id "${sid}"
 }
 
 # wait_pane_contains <text> <timeout-s> -- paced, bounded poll (never a spin).
@@ -304,10 +343,16 @@ check_version() {
 }
 
 is_idle() {
-  # Pre-T4/T5 the idle signal is a marker file (the Stop-hook idle marker, or a
-  # later ack_wake). Its ABSENCE means "cannot confirm idle" -> treat as a turn
-  # in flight, so a rotation never cuts a reply (conservative by design).
-  [ -n "${ATHENA_ATTEND_IDLE_MARKER:-}" ] && [ -e "${ATHENA_ATTEND_IDLE_MARKER}" ]
+  # T4/DND-285: the turn has fully ended for THIS session iff ack_wake was called
+  # (ack.<sid> exists) AND the Stop hook fired afterwards (idle.<sid> newer than
+  # the ack). ack_wake is called "last", but output can still follow it, so the
+  # ack alone is NOT proof the turn ended -- the newer idle marker is. Keys on the
+  # session's OWN id (SESSION_ID_F), never a global marker (a global one from any
+  # other session would read as idle -- the failed-lookup class). Absence of any
+  # of these means "cannot confirm idle" -> not idle, so a rotation never cuts a
+  # reply (deny-by-default).
+  local sid; sid="$(cat "${SESSION_ID_F}" 2>/dev/null || true)"
+  attend_turn_ended "${STATE_DIR}" "${sid}"
 }
 
 permission_request_open() {
@@ -333,9 +378,12 @@ if [ "${DRY_RUN}" -eq 1 ]; then
   echo "  tmux session : ${SESSION}"
   echo "  state dir    : ${STATE_DIR}"
   echo "  pinned claude: ${PIN}"
+  echo "  ledger       : ${LEDGER_F}"
   echo "  launch       : ${TMUX_BIN} new-session -d -s ${SESSION} -c ${PROJECT_DIR} \\"
-  echo "                   env -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_AGENT_ID -u CLAUDE_AGENT_TYPE ATHENA_INBOX_EXPECT_PROJECT=${PROJECT_NAME} \\"
-  echo "                   ${CLAUDE_BIN} --dangerously-load-development-channels server:athena-inbox --permission-mode default"
+  echo "                   env -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_AGENT_ID -u CLAUDE_AGENT_TYPE \\"
+  echo "                   ATHENA_INBOX_EXPECT_PROJECT=${PROJECT_NAME} ATHENA_ATTEND_STATE_DIR=${STATE_DIR} \\"
+  echo "                   ATHENA_ATTEND_SESSION_ID=<uuid> ATHENA_ATTEND_LEDGER=${LEDGER_F} \\"
+  echo "                   ${CLAUDE_BIN} --dangerously-load-development-channels server:athena-inbox --permission-mode default --session-id <uuid>"
   echo "  (dry-run changed nothing and started no session)"
   exit 0
 fi
@@ -366,19 +414,16 @@ check_version || exit 75
 # Reads counts, maintains the wake counter, detects runtime dark (unread that
 # does not clear within the handle budget), restarts on dark (bounded), and
 # rotates when a bound has tripped AND the gate is open.
-PREV_TOKEN="zero"
 UNREAD_SINCE=""
 one_cycle() {
   local doc token word now bytes age wakes reason
   doc="$(get_status_json)"
   token="$(attend_counts_state "${doc}")"; word="${token%% *}"
 
-  # wake counter: a transition unread -> zero is one wake.
-  if attend_wake_completed "${PREV_TOKEN}" "${word}"; then
-    wakes="$(read_int "${WAKES_F}")"; printf '%s\n' "$(( wakes + 1 ))" >"${WAKES_F}" 2>/dev/null || true
-    say "wake completed (unread drained); wakes=$(( wakes + 1 ))"
-  fi
-  PREV_TOKEN="${word}"
+  # wake counter: the wakes file is bumped by the shim's ack_wake tool
+  # (server.mjs recordAck) each time the session handles a wake -- "rotation
+  # counts ack_wake calls" (DND-285). The supervisor no longer infers wakes from
+  # an unread->zero count transition; it just READS the counter below.
 
   now="$(date +%s)"
 

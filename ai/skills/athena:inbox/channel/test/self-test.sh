@@ -134,9 +134,11 @@ run_harness "${R1_REPO}"
 [ "$(jqr '.init.capabilities.experimental | has("claude/channel/permission")')" = "false" ] \
   && ok "does NOT declare claude/channel/permission (T5)" || bad "permission capability must be absent in v0" "${OUT}"
 [ "$(jqr '.init.capabilities | has("tools")')" = "true" ] \
-  && ok "advertises tools:{} (no tools; ack_wake is T4)" || bad "tools capability present" "${OUT}"
+  && ok "advertises the tools capability" || bad "tools capability present" "${OUT}"
+# The tools CAPABILITY object stays {} (no listChanged); the one tool (ack_wake)
+# is returned by tools/list, asserted in the ack_wake section below.
 [ "$(jqr '.init.capabilities.tools | length')" = "0" ] \
-  && ok "tools is empty in v0" || bad "tools should be empty" "${OUT}"
+  && ok "tools capability object is empty (the tool is exposed via tools/list)" || bad "tools capability object should be empty" "${OUT}"
 
 echo "== B. counts-only startup catch-up + hostile content + meta keys =="
 MAILN="$(jqr '[.events[]|select(.meta.kind=="mail")]|length')"
@@ -171,8 +173,19 @@ export HARNESS_TOUCH="${D_ROOT}/agent-mail/peer/from-server/.event"
 export HARNESS_TOUCH_DELAY_MS=700
 export HARNESS_WINDOW_MS=1600
 run_harness "${D_REPO}"
-[ "$(jqr '[.events[]]|length')" = "0" ] \
-  && ok "unread==0 emits NO event, on startup and on a wake" || bad "expected no events" "${OUT}"
+# The property: a zero-unread channel emits NO WAKE (no `mail`, and hence no
+# follow-on `dark`), on startup and on a doorbell wake. It asserts the
+# wake-bearing kinds are absent rather than "zero events of ANY kind": this case
+# drives the REAL, heavy inbox-status (it sources ~10 libs and reads a git-backed
+# repo), which under host contention from sibling fleets can transiently fail to
+# count -- and the shim then CORRECTLY emits a `count_failed` (never a false 0,
+# never silence; section J proves that path). That transient is not a spurious
+# wake, so counting it as one made this case flake under gate-time contention
+# (observed once, 0/11 in isolation). Forbidding the wake kinds keeps the real
+# guarantee -- a zero-unread channel never manufactures a wake -- exact.
+NWAKE="$(jqr '[.events[]|select(.meta.kind=="mail" or .meta.kind=="dark")]|length')"
+[ "${NWAKE}" = "0" ] \
+  && ok "unread==0 emits NO wake (mail/dark), on startup and on a wake" || bad "expected no wake event" "${OUT}"
 unset HARNESS_TOUCH
 
 echo "== E. tenancy: zero channels is refused (exit 2 + Fix), never silent =="
@@ -471,6 +484,84 @@ if [ "${SKIP_RC}" -eq 3 ] && printf '%s' "${SKIP_OUT}" | grep -q "LIVE SKIPPED -
 else
   bad "live with no node_modules must exit 3 and print LIVE SKIPPED" "rc=${SKIP_RC} out=${SKIP_OUT}"
 fi
+
+# ==========================================================================
+echo "== P. ack_wake tool (T4/DND-285): ListTools, receipt, cancels the bell =="
+# Self-contained: fake status (always unread>0 so a bell arms), fake resolve,
+# fs-watch mode with a large re-poll so ONLY the startup poll arms dark, and a
+# tiny handle budget so dark WOULD fire quickly unless ack_wake cancels it.
+P_STATE="${TMP}/p/state"; mkdir -p "${P_STATE}"
+P_UNREAD2='{"channels":[{"name":"x","kind":"maildir","unread":2,"count":2}],"repo_key":"/x"}'
+export ATHENA_INBOX_STATUS_BIN="${FAKES}/fake-status.sh"
+export ATHENA_INBOX_RESOLVE_PROJECT_BIN="${FAKES}/fake-resolve.sh"
+export ATHENA_INBOX_WAIT_BIN="${FAKES}/fake-wait.sh"
+export ATHENA_CHANNEL_WATCH_MODE="fs-watch"
+export FAKE_DOORBELLS="${TMP}/p.event"; : > "${FAKE_DOORBELLS}"
+export FAKE_STATUS_CNT="${TMP}/p-scnt"; : > "${FAKE_STATUS_CNT}"
+export FAKE_STATUS_SPEC="${TMP}/p-sspec"; printf '0 %s\n' "${P_UNREAD2}" > "${FAKE_STATUS_SPEC}"
+export ATHENA_ATTEND_STATE_DIR="${P_STATE}"
+export ATHENA_ATTEND_SESSION_ID="sid-P"
+export ATHENA_CHANNEL_HANDLE_BUDGET=1
+export ATHENA_CHANNEL_FS_REPOLL=300
+unset HARNESS_TOUCH HARNESS_RENAME HARNESS_NO_INIT ATHENA_INBOX_EXPECT_PROJECT
+
+# P1: ListTools returns exactly [ack_wake] with a {channels:string} schema.
+export HARNESS_LIST_TOOLS=1; unset HARNESS_CALL_TOOL
+export HARNESS_WINDOW_MS=1200
+run_harness "${TMP}"
+[ "$(jqr '.toolsList | length')" = "1" ] && ok "ListTools returns exactly one tool" || bad "ListTools length" "${OUT}"
+[ "$(jqr '.toolsList[0].name')" = "ack_wake" ] && ok "the one tool is ack_wake" || bad "tool name" "${OUT}"
+[ "$(jqr '.toolsList[0].inputSchema.properties.channels.type')" = "string" ] \
+  && ok "ack_wake inputSchema is {channels: string}" || bad "ack_wake schema" "${OUT}"
+
+# P2: ack_wake returns 'acked', records ack.<sid> with the channels string, bumps
+# the wakes counter, and CANCELS the bell armed at startup (no dark event fires).
+: > "${FAKE_STATUS_CNT}"
+rm -f "${P_STATE}/ack.sid-P" "${P_STATE}/wakes"
+unset HARNESS_LIST_TOOLS
+export HARNESS_CALL_TOOL="ack_wake"
+export HARNESS_CALL_ARGS='{"channels":"x:2"}'
+export HARNESS_CALL_DELAY_MS=300
+export HARNESS_WINDOW_MS=3600
+run_harness "${TMP}"
+[ "$(jqr '.callResult.content[0].text')" = "acked" ] && ok "ack_wake returns 'acked'" || bad "ack_wake reply" "${OUT}"
+[ -f "${P_STATE}/ack.sid-P" ] && ok "ack_wake wrote ack.<sid> to the attend state dir" || bad "ack file missing" "$(ls "${P_STATE}" 2>/dev/null)"
+grep -q "x:2" "${P_STATE}/ack.sid-P" 2>/dev/null && ok "the ack record carries the channels string" || bad "ack channels" "$(cat "${P_STATE}/ack.sid-P" 2>/dev/null)"
+[ "$(cat "${P_STATE}/wakes" 2>/dev/null)" = "1" ] && ok "ack_wake incremented the wakes counter (rotation counts ack_wake calls)" || bad "wakes counter" "$(cat "${P_STATE}/wakes" 2>/dev/null)"
+[ "$(jqr '[.events[]|select(.meta.kind=="dark")]|length')" = "0" ] \
+  && ok "a dark timer armed by the bell is CANCELLED by ack_wake" || bad "ack_wake should cancel the pending dark" "${OUT}"
+
+# P3: an unrelated (non-ack_wake) tool call is DENIED and does NOT cancel the
+# bell -- dark still fires. Proves deny-by-default AND that only ack_wake acks.
+: > "${FAKE_STATUS_CNT}"
+export HARNESS_CALL_TOOL="not_a_real_tool"
+export HARNESS_CALL_ARGS='{}'
+run_harness "${TMP}"
+[ "$(jqr '.callResult.error.code')" = "-32602" ] && ok "an unknown tool is denied (deny-by-default: only ack_wake exists)" || bad "unknown tool should be denied" "${OUT}"
+[ "$(jqr '[.events[]|select(.meta.kind=="dark")]|length')" -ge 1 ] \
+  && ok "an unrelated tool call does NOT cancel the bell (dark fires)" || bad "unrelated call must not cancel dark" "${OUT}"
+unset HARNESS_CALL_TOOL HARNESS_CALL_ARGS HARNESS_CALL_DELAY_MS
+
+# P4: a new mail wake INVALIDATES a stale turn-end marker (cross-turn rotation
+# safety). Pre-seed ack.<sid> + idle.<sid> as if a PRIOR turn had ended (idle
+# newer than ack). A fresh bell (unread>0) must remove idle.<sid> so the rotation
+# gate cannot read the previous turn's idle as "this turn ended" and rotate
+# mid-reply. ack.<sid> is NOT removed by a bell (only ack_wake writes it).
+: > "${FAKE_STATUS_CNT}"
+mkdir -p "${P_STATE}"
+: > "${P_STATE}/ack.sid-P"; sleep 0.05; : > "${P_STATE}/idle.sid-P"   # idle newer than ack
+unset HARNESS_CALL_TOOL HARNESS_LIST_TOOLS
+export HARNESS_WINDOW_MS=1200
+run_harness "${TMP}"
+[ "$(jqr '[.events[]|select(.meta.kind=="mail")]|length')" -ge 1 ] \
+  && ok "P4 setup: a new mail wake was emitted" || bad "P4 expected a mail wake" "${OUT}"
+[ ! -e "${P_STATE}/idle.sid-P" ] \
+  && ok "a new mail wake INVALIDATES the stale idle.<sid> (no mid-reply rotation across turns)" || bad "the bell must remove a stale idle.<sid>" "$(ls "${P_STATE}")"
+[ -e "${P_STATE}/ack.sid-P" ] \
+  && ok "a new mail wake does NOT remove ack.<sid> (only ack_wake writes it)" || bad "the bell must not remove ack.<sid>" "$(ls "${P_STATE}")"
+
+unset HARNESS_CALL_TOOL HARNESS_CALL_ARGS HARNESS_CALL_DELAY_MS HARNESS_LIST_TOOLS
+unset ATHENA_ATTEND_STATE_DIR ATHENA_ATTEND_SESSION_ID ATHENA_CHANNEL_FS_REPOLL
 
 # ==========================================================================
 echo
