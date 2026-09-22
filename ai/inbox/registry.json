@@ -17,6 +17,13 @@
             "read": "from-server",
             "write": "to-server",
             "identity": "athena"
+          },
+          "walt_ui-mail": {
+            "kind": "maildir",
+            "namespace": "agent-mail/walt_ui",
+            "read": "to-custom",
+            "write": "to-walt_ui",
+            "identity": "custom"
           }
         }
       }
@@ -37,6 +44,13 @@
             "kind": "log",
             "path": "walt_ui-flaky.jsonl",
             "producer": "platform"
+          },
+          "custom-mail": {
+            "kind": "maildir",
+            "namespace": "agent-mail/walt_ui",
+            "read": "to-walt_ui",
+            "write": "to-custom",
+            "identity": "walt_ui"
           }
         }
       }
