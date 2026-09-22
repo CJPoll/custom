@@ -711,9 +711,15 @@ case "${LASTCLOSE}" in
 esac
 
 # ---- verdict cases: FORCE a known relay id so the peek can be pre-seeded ----
-# A peeked line the owner "sent"; the re-query is the authority.
-seed_peek()   { printf '{"messages":[{"channel":"D1","ts":"1700.1","user":"%s","text":"%s"}]}\n' "$1" "$2" > "${FAKE_PEEK_JSON}"; }
-seed_requery(){ printf '{"ts":"1700.1","user":"%s","text":"%s"}\n' "$1" "$2" > "${FAKE_REQUERY_JSON}"; }
+# A peeked line the owner "sent"; the re-query is the authority. The message ts
+# must POST-DATE the request's issuedAt (Date.now() at request receipt), so use a
+# near-future epoch-seconds ts by default. QTS_PAST (1970) is the replay case: a
+# genuine owner verdict from BEFORE the request must never approve it.
+QTS_FUTURE="$(( $(date +%s) + 120 )).000100"
+QTS_PAST="1700.000100"
+QTS="${QTS_FUTURE}"
+seed_peek()   { printf '{"messages":[{"channel":"D1","ts":"%s","user":"%s","text":"%s"}]}\n' "${QTS}" "$1" "$2" > "${FAKE_PEEK_JSON}"; }
+seed_requery(){ printf '{"ts":"%s","user":"%s","text":"%s"}\n' "${QTS}" "$1" "$2" > "${FAKE_REQUERY_JSON}"; }
 
 # Q3: confirmed owner "yes" -> allow.
 q_reset
@@ -798,6 +804,18 @@ seed_peek "${OWNER}" "Yes ABCDE"; seed_requery "${OWNER}" "Yes ABCDE"
 run_perm
 [ "$(jqr '[.permissions[]|select(.request_id=="rq-8" and .behavior=="allow")]|length')" -ge 1 ] \
   && ok "'Yes ABCDE' is normalised (case-insensitive, lowercased id) -> allow" || bad "autocorrect-capitalised verdict should normalise" "${OUT}"
+
+# Q8b: REPLAY defense -- a GENUINE owner "yes <id>" whose Slack ts PRE-DATES the
+# request's issuance must NOT approve it (a re-minted id + a standing forged peek
+# pointing at an old owner verdict). The API returns a real owner verdict, but its
+# ts is in the past -> NO verdict.
+q_reset
+export ATHENA_RELAY_FORCE_ID="abcde"
+export PERM_REQUEST='{"request_id":"rq-8b","tool_name":"Bash","description":"d","input_preview":"p"}'
+QTS="${QTS_PAST}"; seed_peek "${OWNER}" "yes abcde"; seed_requery "${OWNER}" "yes abcde"; QTS="${QTS_FUTURE}"
+run_perm
+[ "$(jqr '.permissions|length')" = "0" ] \
+  && ok "a real owner verdict PRE-DATING the request -> NO verdict (replay defense)" || bad "a verdict older than its request must not be accepted" "${OUT}"
 
 # Q9: peek is ALWAYS --peek --json, never a bare (acking) read; the offset/lock
 # are never touched by the shim (it only ever calls the peek bin).

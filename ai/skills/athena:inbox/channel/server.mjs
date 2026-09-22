@@ -559,17 +559,29 @@ function permissionDir() {
   return dir ? join(dir, 'requests') : '';
 }
 
+// Every relay id this SESSION has ever minted, so a CLOSED id is never re-minted
+// within the session. Defense in depth behind the time-binding in
+// authenticateVerdict: a re-minted id is the precondition for replaying a
+// genuine past owner verdict, so we simply never re-mint one.
+const mintedIds = new Set();
+
 function mintRelayId() {
-  if (RELAY_FORCE_ID) return RELAY_FORCE_ID;
+  if (RELAY_FORCE_ID) {
+    mintedIds.add(RELAY_FORCE_ID);
+    return RELAY_FORCE_ID;
+  }
   for (let attempt = 0; attempt < 64; attempt += 1) {
     const bytes = randomBytes(RELAY_ID_LEN);
     let id = '';
     for (let i = 0; i < RELAY_ID_LEN; i += 1) {
       id += RELAY_ID_ALPHABET[bytes[i] % RELAY_ID_ALPHABET.length];
     }
-    if (!openRequests.has(id)) return id;
+    if (!openRequests.has(id) && !mintedIds.has(id)) {
+      mintedIds.add(id);
+      return id;
+    }
   }
-  // Astronomically unreachable (24^5 space, few open requests); refuse rather
+  // Astronomically unreachable (25^5 space, few ids per session); refuse rather
   // than reuse an id, since a reused id would mis-route a verdict.
   return null;
 }
@@ -603,7 +615,10 @@ function fenceRender(body) {
 // say so), so they ride inside the fence. The reply instruction names the relay
 // id the intake matches.
 function buildDmBody(relayId, params) {
-  const toolName = (params && typeof params.tool_name === 'string' && params.tool_name) || '(unknown tool)';
+  // Strip newlines from tool_name: it is rendered OUTSIDE the fence (Claude Code
+  // sets it, not an untrusted field), so a newline would let it inject owner-
+  // facing text above the fence. Defense in depth.
+  const toolName = ((params && typeof params.tool_name === 'string' && params.tool_name) || '(unknown tool)').replace(/[\r\n]+/g, ' ');
   const description = params && typeof params.description === 'string' ? params.description : '';
   const inputPreview = params && typeof params.input_preview === 'string' ? params.input_preview : '';
   const fenced = fenceRender(`description:\n${description}\ninput_preview:\n${inputPreview}`);
@@ -696,7 +711,7 @@ function onPermissionRequest(params) {
       diag(
         'channel.relay',
         `could not run the DM bin for permission request ${relayId} (${e && e.code ? e.code : e})`,
-        'check athena:slack/bin/dm is on the expected path and executable; the request is still open (answer in the terminal or fix the DM path and it will be re-DMd on nothing -- it will not, so answer in the terminal).',
+        'answer this request in the terminal; it will NOT be re-DMd. Check athena:slack/bin/dm is on the expected path and executable so the next request can relay.',
       );
     });
     try {
@@ -760,11 +775,22 @@ async function authenticateVerdict(candidate, open) {
   const mm = VERDICT_RE.exec(text); // parse the AUTHORITATIVE text
   if (!mm) return null; // the owner's real message at that ts is not a verdict
   const id = mm[2].toLowerCase();
-  if (!open.has(id)) return null; // a real owner verdict, but not for an open request
+  const rec = open.get(id);
+  if (!rec) return null; // a real owner verdict, but not for an open request
+  // TIME-BIND the verdict to THIS request: the owner's approving message must have
+  // been posted AFTER the request was issued. Without this, a standing forged peek
+  // line pointing at a GENUINE PAST owner "yes <id>" reply could approve a later
+  // request that happens to re-mint the same id (ids are short and reused across
+  // time / sessions). row.ts is the AUTHENTIC Slack timestamp -- the API's own, so
+  // it cannot be forged into the future. A shim clock that runs behind Slack only
+  // ever REJECTS a genuine verdict (safe: the owner answers in the terminal),
+  // never accepts a stale one; a genuine reply post-dates the DM by human latency.
+  const rowTsSec = Number.parseFloat(typeof row.ts === 'string' ? row.ts : '');
+  if (!Number.isFinite(rowTsSec) || rowTsSec * 1000 <= rec.issuedAt) return null;
   const verb = mm[1].toLowerCase();
   return {
     relayId: id,
-    requestId: open.get(id).requestId,
+    requestId: rec.requestId,
     behavior: verb === 'y' || verb === 'yes' ? 'allow' : 'deny',
   };
 }
