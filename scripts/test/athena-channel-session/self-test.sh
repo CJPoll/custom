@@ -216,6 +216,23 @@ else
   bad "launcher should launch with --dangerously-load-development-channels" "missing"
 fi
 
+# `mark_owner_not_notified` only re-annotates the `wedged` marker (not `dark`),
+# which is only correct because EVERY `dm_owner` call site writes `wedged`
+# immediately before calling it -- there is no `dark`+`dm_owner` pairing. Only
+# ONE of the three call sites is exercised end-to-end below (version-pin
+# mismatch); this static check is the regression guard for the other two, so a
+# future call site that pairs `dm_owner` with a `dark` marker (or skips writing
+# a marker first) is caught even though it is not separately run.
+DM_OWNER_CALLS="$(grep -c '^\s*dm_owner ' "${LAUNCHER}")"
+assert_eq "static: exactly 3 dm_owner call sites (matches the reviewed set)" 3 "${DM_OWNER_CALLS}"
+WEDGED_THEN_DM="$(awk '
+  /attend_write_marker "\$\{STATE_DIR\}" wedged/ { pending=1 }
+  /attend_write_marker "\$\{STATE_DIR\}" dark/   { pending=0 }
+  /dm_owner "/ && pending { n++ }
+  END { print n+0 }
+' "${LAUNCHER}")"
+assert_eq "static: every dm_owner call is preceded by a wedged (not dark) marker write" 3 "${WEDGED_THEN_DM}"
+
 echo "== version pin mismatch -> NO launch + channel.wedged + owner DM =="
 CASE="${TMP}/c-ver"; mkdir -p "${CASE}"
 launcher_env
@@ -534,6 +551,24 @@ for BAD_ID in 'u0123abcd' 'U123' 'U ABCDEFGH' 'not-a-slack-id'; do
   assert_eq "deny-by-default: malformed id '${BAD_ID}' refuses (exit 2)" 2 "${RC}"
   assert_eq "deny-by-default: malformed id '${BAD_ID}' writes nothing" "" "$(cat "${FAKE_CRONTAB_FILE}")"
 done
+
+# -- --no-owner-dm must bypass the refusal for a MALFORMED id too, not just an
+# unset one: an earlier version only checked $NO_OWNER_DM in the unset branch,
+# so a malformed id + --no-owner-dm still refused (exit 2) while its own Fix:
+# line told the caller to pass --no-owner-dm -- which they already had. Caught
+# by review; this proves the fix and guards the regression.
+: > "${FAKE_CRONTAB_FILE}"
+OUT="$( env "${owner_inst_env[@]}" "ATHENA_ATTEND_OWNER_SLACK_ID=not-a-slack-id" FAKE_NODE_RC=0 \
+  bash "${INSTALLER}" --install --no-owner-dm --project "${PROJ}" 2>&1 )"; RC=$?
+assert_eq "deny-by-default: malformed id + --no-owner-dm together exits 0 (bypass works)" 0 "${RC}"
+assert_contains "deny-by-default: malformed id + --no-owner-dm warns the id was discarded" \
+  "malformed ATHENA_ATTEND_OWNER_SLACK_ID" "${OUT}"
+CRON="$(cat "${FAKE_CRONTAB_FILE}")"
+assert_not_contains "deny-by-default: the malformed id is NOT baked into the @reboot line" \
+  "not-a-slack-id" "$(printf '%s\n' "${CRON}" | grep -F '@reboot ')"
+assert_contains "deny-by-default: the malformed-id-bypass line still carries the no-owner-dm marker" \
+  "ATHENA-NO-OWNER-DM" "${CRON}"
+env "${owner_inst_env[@]}" FAKE_NODE_RC=0 bash "${INSTALLER}" --remove --project "${PROJ}" >/dev/null 2>&1
 
 echo "== owner id: --no-owner-dm is the only explicit way past the refusal =="
 : > "${FAKE_CRONTAB_FILE}"

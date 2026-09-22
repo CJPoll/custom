@@ -251,22 +251,33 @@ if [ -n "$OWNER_SLACK_ID" ] && printf '%s' "$OWNER_SLACK_ID" | grep -Eq -- "$OWN
 fi
 NO_OWNER_DM_MARKER=" # ATHENA-NO-OWNER-DM (DND-288: owner DM explicitly disabled at install)"
 
-if [ "$MODE" = "install" ]; then
-  if [ -n "$OWNER_SLACK_ID" ] && [ "$OWNER_ID_VALID" -ne 1 ]; then
-    echo "error: ATHENA_ATTEND_OWNER_SLACK_ID is malformed: '${OWNER_SLACK_ID}' (expected a Slack user id" \
-         "matching ^U[A-Z0-9]{8,}\$). NOTHING was installed." >&2
-    echo "  Fix: export a valid ATHENA_ATTEND_OWNER_SLACK_ID and re-run --install, or pass --no-owner-dm to" \
-         "install without owner DMs (a loud warning is printed; wedge/dark/version-pin alerts go silent)." >&2
+if [ "$MODE" = "install" ] && [ "$OWNER_ID_VALID" -ne 1 ]; then
+  # --no-owner-dm is unconditionally "the ONLY way past the refusal below" (per
+  # --help): it must bypass BOTH the unset case and the malformed case, or the
+  # help text lies and an agent that follows the malformed-id error's own Fix:
+  # line (which names --no-owner-dm) loops forever re-passing a flag that does
+  # nothing for that case. A malformed id is discarded, never silently kept.
+  if [ "$NO_OWNER_DM" -ne 1 ]; then
+    if [ -n "$OWNER_SLACK_ID" ]; then
+      echo "error: ATHENA_ATTEND_OWNER_SLACK_ID is malformed: '${OWNER_SLACK_ID}' (expected a Slack user id" \
+           "matching ^U[A-Z0-9]{8,}\$). NOTHING was installed." >&2
+      echo "  Fix: export a valid ATHENA_ATTEND_OWNER_SLACK_ID and re-run --install, or pass --no-owner-dm" \
+           "to install anyway (a loud warning is printed; the malformed id is discarded and" \
+           "wedge/dark/version-pin alerts go silent)." >&2
+    else
+      echo "error: ATHENA_ATTEND_OWNER_SLACK_ID is unset — refusing to install. NOTHING was installed." >&2
+      echo "  Fix: export ATHENA_ATTEND_OWNER_SLACK_ID=<your Slack user id> and re-run --install; the" \
+           "attendant's wedge/dark/version-pin paths DM this id and cannot fire under cron without it." \
+           "Pass --no-owner-dm to install anyway (a loud warning is printed; those DMs will be silent)." >&2
+    fi
     exit 2
   fi
-  if [ -z "$OWNER_SLACK_ID" ] && [ "$NO_OWNER_DM" -ne 1 ]; then
-    echo "error: ATHENA_ATTEND_OWNER_SLACK_ID is unset — refusing to install. NOTHING was installed." >&2
-    echo "  Fix: export ATHENA_ATTEND_OWNER_SLACK_ID=<your Slack user id> and re-run --install; the" \
-         "attendant's wedge/dark/version-pin paths DM this id and cannot fire under cron without it." \
-         "Pass --no-owner-dm to install anyway (a loud warning is printed; those DMs will be silent)." >&2
-    exit 2
-  fi
-  if [ "$OWNER_ID_VALID" -ne 1 ] && [ "$NO_OWNER_DM" -eq 1 ]; then
+  if [ -n "$OWNER_SLACK_ID" ]; then
+    say "WARNING: installing with --no-owner-dm — the malformed ATHENA_ATTEND_OWNER_SLACK_ID" \
+        "('${OWNER_SLACK_ID}') is DISCARDED, not baked in. wedge, dark-channel, and version-pin alerts" \
+        "will NOT reach anyone. This is a deliberate, explicit choice; it is recorded in the crontab" \
+        "entry itself."
+  else
     say "WARNING: installing with --no-owner-dm — wedge, dark-channel, and version-pin alerts will NOT" \
         "reach anyone. This is a deliberate, explicit choice; it is recorded in the crontab entry itself."
   fi
