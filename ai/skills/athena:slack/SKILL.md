@@ -189,6 +189,16 @@ was written, per `~/dev/custom/CLAUDE.md` → *Documentation conventions* (annot
 a dated claim, do not silently rewrite it); the description that follows is the
 original design sketch.
 
+**Later (2026-09-22):** the standing **initiator** of that background wake is now
+the **channel session**, not a hand-rolled `run_in_background` loop: an
+interactive `claude` launched with `--dangerously-load-development-channels
+server:athena-inbox`, into which the `athena:inbox` channel shim
+(`ai/skills/athena:inbox/channel/`) pushes an unread-count `<channel>` event on
+each doorbell. See `athena:inbox` → *How to arm it* and
+`ai/docs/inbox-channels-design.md` §4. This is the documented standing mechanism
+that supersedes both sketch patterns below; the heading and sketch text are left
+as written per the annotate-don't-rewrite rule.
+
 The hook fires on prompts, so a long autonomous run with no prompts hears
 nothing. Two patterns close that, both for later:
 

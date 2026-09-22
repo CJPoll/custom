@@ -1934,6 +1934,12 @@ and `maildir` kinds, the doorbell, consumption state, tenancy resolution, and th
 Path-2 *Untrusted input* boundary. Where the inbox adapter produces `log` lines,
 it MUST conform to that contract; this contract does not restate or override it.
 
+The **local session wake** — pushing a delivered inbox line into a running
+session — is **consumer-side**, done by the inbox channel shim
+(`ai/skills/athena:inbox/channel/`), not by this platform; a platform
+**session-delivery adapter** (the platform pushing directly to a machine's
+session) is roadmap, not built (DND-250 / DND-253).
+
 ---
 
 ## Conformance checklists

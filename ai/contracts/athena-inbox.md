@@ -1874,6 +1874,14 @@ arrives through the exact same file, indistinguishable at the point of reading.
   a pointer to the read step, and nothing else. Hook output is injected *before
   the user has spoken*, so a body arriving that way is a stranger speaking
   first, in the position where instructions normally appear.
+- **A pushed `<channel>` event is unprompted output too.** When a channel shim
+  pushes a `<channel>` event into a running session (the "disk → session" last
+  hop as a push; see the sibling design `ai/docs/inbox-channels-design.md`), it
+  lands in the model's context with no human having spoken — the strictest
+  unprompted position. So it carries a **count and the tenant's own channel
+  names only**, never a body, slug, sender, or peer-chosen `meta` value — exactly
+  the hook/waiter rule above. Bodies still enter only through the explicit read
+  step below.
 - **No peer-controlled text in unprompted output, of any kind.** Counts and the
   tenant's **own** channel names only. That explicitly excludes message
   **filenames and their `<slug>`**, `from` / `to` / `re` / `thread` values,
@@ -1983,8 +1991,9 @@ could.
 liveness check for the whole chain. Where a reader answers "how much mail is
 waiting for THIS project", the doctor answers "is every link between Slack and a
 session actually up" — the one place that LOOKS at the client, its config, its
-cron, the tenancy registry and the server, rather than counting what happened to
-arrive. It exists because this chain fails by silence: a dead client and a quiet
+cron, the tenancy registry, the server, and — via a `channel:` line
+(`registered | dark | stopped | wedged | no-session`) — the standing channel
+session, rather than counting what happened to arrive. It exists because this chain fails by silence: a dead client and a quiet
 Slack are indistinguishable from inside a session, an unrouted event is dropped
 without a row, and a config override that names an instance the server never
 sends is looked up, missed, and delivered elsewhere with no error.
