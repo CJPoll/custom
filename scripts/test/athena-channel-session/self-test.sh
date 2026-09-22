@@ -27,7 +27,18 @@ LIB="${SCRIPTS}/lib/athena-attend-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not found"; exit 0; }
 
-TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+TMP="$(mktemp -d)"
+# Track every backgrounded supervisor so a mid-suite abort never leaves an
+# orphaned launcher looping `sleep` (reparented to init) behind.
+BG_SUPS=""
+cleanup() {
+  local p
+  for p in ${BG_SUPS}; do kill -TERM "${p}" 2>/dev/null; done
+  sleep 1
+  for p in ${BG_SUPS}; do kill -9 "${p}" 2>/dev/null; done
+  rm -rf "${TMP}"
+}
+trap cleanup EXIT INT TERM
 PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
@@ -286,7 +297,7 @@ export ATHENA_ATTEND_POLL_INTERVAL=30   # so it blocks in the loop after registe
 # `exec` so $! IS the launcher process (not a wrapping subshell); otherwise the
 # SIGTERM would hit the subshell and the launcher's teardown trap never fires.
 ( cd "${PROJ}" && exec bash "${LAUNCHER}" >/dev/null 2>&1 ) &
-SUP=$!
+SUP=$!; BG_SUPS="${BG_SUPS} ${SUP}"
 # wait (bounded) for it to register, then SIGTERM it
 for _ in $(seq 1 50); do [ -f "${ATHENA_ATTEND_STATE_DIR}/session.started" ] && break; sleep 0.2; done
 : > "${FAKE_TMUX_LOG}"   # clear so we assert the kill AFTER term
@@ -308,8 +319,11 @@ export FAKE_PANE="${CASE}/pane"
 printf 'WARNING: Loading development channels\nChannels (experimental) messages from server:athena-inbox inject directly in this session\n' > "${FAKE_PANE}"
 export FAKE_STATUS_JSON='{"channels":[{"name":"peer","kind":"maildir","count":0}]}'
 export ATHENA_ATTEND_POLL_INTERVAL=30
-( cd "${PROJ}" && bash "${LAUNCHER}" >/dev/null 2>&1 ) &
-SUP=$!
+# `exec` so $! IS the launcher (not a wrapping subshell): otherwise the kill
+# below hits the subshell and the launcher orphans to init, looping `sleep`
+# forever — an orphan leak on every gate run.
+( cd "${PROJ}" && exec bash "${LAUNCHER}" >/dev/null 2>&1 ) &
+SUP=$!; BG_SUPS="${BG_SUPS} ${SUP}"
 for _ in $(seq 1 50); do [ -f "${ATHENA_ATTEND_STATE_DIR}/session.started" ] && break; sleep 0.2; done
 SECOND_LOG="${CASE}/second-tmux"; : > "${SECOND_LOG}"
 ( cd "${PROJ}" && FAKE_TMUX_LOG="${SECOND_LOG}" timeout 10 bash "${LAUNCHER}" --once >/dev/null 2>&1 ); SRC=$?
