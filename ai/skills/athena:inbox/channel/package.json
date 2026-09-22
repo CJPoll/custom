@@ -1,0 +1,20 @@
+{
+  "//": "athena:inbox channel shim (DND-282, v0). server.mjs speaks the MCP stdio wire protocol directly and imports NOTHING at runtime, so this skill's self-test is hermetic (the harness gate runs with no network and a fresh worktree carries no node_modules). @modelcontextprotocol/sdk is pinned here per the design (ai/docs/inbox-channels-design.md section 1: 'the only hard requirement is the @modelcontextprotocol/sdk package') as the protocol reference and the runtime T3 will register the server live against; the wire bytes are identical either way. Install it (npm install) before live registration; the self-test does NOT require it.",
+  "name": "athena-inbox-channel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Athena inbox channel shim -- MCP stdio server that pushes unread-count wakes into a running Claude Code session.",
+  "bin": {
+    "athena-inbox-channel": "./server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0"
+  },
+  "scripts": {
+    "test": "bash test/self-test.sh"
+  }
+}
