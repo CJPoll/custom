@@ -4,6 +4,18 @@
 → *Documentation conventions*). **Date:** 2026-09-21 (UTC). **Status:** DRAFT —
 awaiting owner sign-off; nothing here is implemented.
 
+**Later (2026-09-22): ABANDONED.** The Inbox-on-Channels delivery mechanism this
+proposal designed — a Claude Code `--channels` session with an MCP shim pushing
+`<channel>` events — was **reverted** by owner decision in favor of the
+`inbox-wait` background waiter (the "attended form" in `athena:inbox-attend`;
+`ai/skills/athena:inbox/SKILL.md` → *How to arm it*). The channels-delivery code
+was removed (the launcher `scripts/athena-channel-session.sh`, the installer
+`scripts/setup-athena-attend`, the shim `ai/skills/athena:inbox/channel/`, and
+the `inbox-doctor` channel-session finding). See auto-memory
+`autonomous-run-2026-09-21-channels-hold.md` (DIRECTION REVERSAL note) for the
+why. This document is retained as the dated record of the design as proposed; it
+is annotated, not rewritten, per the doc conventions.
+
 **Later (2026-09-21):** the owner decided all six §7 items in the autonomous
 run, and the design is now **building**. Decisions: (1) accept the
 research-preview posture, with probes **P1–P5 as hard build gates**; (2)

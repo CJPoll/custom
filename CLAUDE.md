@@ -461,12 +461,11 @@ The durable fix, defense in depth:
   unconnectable sentinel that suppresses autolaunch (a headless run needs no
   notifications; a client just fails fast). Never overrides a value the caller
   set.
-- **The three cron wrappers** (`athena-shipwright-run.sh`,
-  `athena-inbox-client-run.sh`, `athena-channel-session.sh`) source it after
-  their early-exit arg parsing and single-run lock, so `--help`/`--dry-run` and
-  the `*/5` no-op relaunch never trigger it. `athena-channel-session.sh` also
-  passes the address into its tmux `claude` session. `notify-idle.sh` sources it
-  too, so the Stop hook is guarded in every session regardless of how launched.
+- **The cron wrappers** (`athena-shipwright-run.sh`,
+  `athena-inbox-client-run.sh`) source it after their early-exit arg parsing and
+  single-run lock, so `--help`/`--dry-run` and the `*/5` no-op relaunch never
+  trigger it. `notify-idle.sh` sources it too, so the Stop hook is guarded in
+  every session regardless of how launched.
 - **`scripts/reap-orphan-dbus`** — belt-and-suspenders. Kills orphaned
   autolaunch session daemons (comm `dbus-daemon`; argv has `--fork` + `--session`
   + `--syslog`/`--syslog-only`; NOT `--system`/`--nofork`/`--config-file`;

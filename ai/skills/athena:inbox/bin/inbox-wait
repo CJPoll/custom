@@ -191,9 +191,9 @@ mapfile -t EVENT_FILES <<< "${DOORBELLS}"
 
 # --DRY-RUN EXITS HERE, BEFORE THE SUBAGENT GATE, ON PURPOSE. Dry-run does not
 # ARM anything -- it only resolves and provisions, which is exactly what a
-# subagent channel shim's fs.watch fallback needs (server.mjs's armFsWatch
-# calls `inbox-wait --dry-run` to learn what paths to watch, because a subagent
-# is the ONE case that fallback exists for). The "who may arm" restriction
+# caller that just needs the doorbell paths (e.g. an fs.watch fallback learning
+# what to watch via `inbox-wait --dry-run`) needs, including from a subagent
+# context. The "who may arm" restriction
 # below is about not BLOCKING on a wake and consuming it as a subagent -- it
 # has nothing to say about listing paths that resolve+provisioning already
 # produced. Gating dry-run on the subagent check as well (an earlier ordering

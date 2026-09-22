@@ -339,28 +339,24 @@ by construction — the workspace to the server, the server to the client, the
 client's append and its bell. Without this, the last hop is a session happening
 to look.
 
-**How to arm it.** The standing form is the **channel session** — an interactive
-`claude` launched with `--dangerously-load-development-channels
-server:athena-inbox` (`scripts/athena-channel-session.sh`; server
-`ai/skills/athena:inbox/channel/`). The inbox channel shim spawns this waiter as
-its blocking child, consumes the exit codes below, and on a wake pushes **one
-`<channel>` count event** into the session and re-arms. A woken session handles
-it exactly as a SessionStart count — run `inbox-status`, then `read-inbox
-<channel>` for each channel that has something. One waiter covers every channel
-this project declares, of both kinds; there is no way to wait on one channel,
-because a narrowed waiter is indistinguishable from a complete one and the
-channels it left out never wake anybody.
+**How to arm it.** Launch `bin/inbox-wait` with `run_in_background`. **The
+completion notification is the wake**: the waiter blocks on the doorbell, exits
+when a bell rings (or its budget elapses), the harness delivers that completion
+as a notification, and the woken session handles the mail and then **arms it
+again**. A woken session handles a wake exactly as a SessionStart count — run
+`inbox-status`, then `read-inbox <channel>` for each channel that has something.
+One waiter covers every channel this project declares, of both kinds; there is
+no way to wait on one channel, because a narrowed waiter is indistinguishable
+from a complete one and the channels it left out never wake anybody. The
+judgment half of each wake — read, reply, re-arm — is `athena:inbox-attend`
+(the attended form); this is the standing mid-session mechanism.
 
-**Later (2026-09-22):** this paragraph read "Launch it with `run_in_background`.
-**The completion notification is the wake**: … and then **arm it again**." That
-hand-armed `run_in_background` self-arm loop is **retired as the documented way
-for a human**: a human (or standing session) wanting live mail launches the
-channel session above, which arms this waiter for them and delivers the wake as
-a `<channel>` event. The `run_in_background` form still runs and the exit-code
-table below is unchanged — the shim consumes those codes — but the standing wake
-is now the channel event, not a hand-driven re-arm loop. See
-`ai/docs/inbox-channels-design.md` §4 and `scripts/CLAUDE.md` → *Athena channel
-session*.
+**Later (2026-09-22):** an "Inbox on Channels" epic briefly made the standing
+form a channel session (an MCP shim that pushed a count event into a
+`--channels` session) and retired this `run_in_background` self-arm loop as the
+documented way. That delivery mechanism was **abandoned** by owner decision
+(2026-09-22) and its code removed; the `inbox-wait` background waiter above is
+again THE standing mechanism, and the exit-code table below is unchanged.
 
 | exit | meaning | what to do |
 |---|---|---|
@@ -447,23 +443,6 @@ request on that path) and, when the chain is not `healthy`, folds one
 rate-limited sentence into its notice; set `ATHENA_INBOX_DOCTOR_LINE=0` to opt
 out of that line (the command still works by hand).
 
-### `channel/` — the MCP channel shim
-
-`channel/server.mjs` is a machine-local MCP **channel** server (the "shim") — the
-"disk → session" last hop as a **push** instead of a hand-armed waiter. It
-watches this project's doorbells by spawning `bin/inbox-wait` as its blocking
-child, and on each wake pushes **one `<channel>` count event** into the running
-Claude Code session that named it in `--channels`. It carries counts and the
-tenant's own channel names only (never a body — bodies still enter solely through
-`read-inbox`), never acks and never holds the consumer lock, and resolves tenancy
-from its own cwd through the skill's one resolver. It ships one tool, `ack_wake`,
-which the attend procedure calls last so the shim can tell "handled" from "never
-reached the model". `channel/package.json` pins `@modelcontextprotocol/sdk`; a
-committed golden fixture (`channel/test/sdk-golden.json`) plus a live interop
-check keep the wire protocol conformant without the gate needing `node_modules`.
-The shim is launched by the channel session (`scripts/CLAUDE.md` → *Athena
-channel session*); design in `ai/docs/inbox-channels-design.md` §3.
-
 ## Writing on a maildir channel
 
 The mechanics are one half; these are the other, and they are what the two
@@ -508,12 +487,6 @@ agents on the live channel did by hand for fifty-one messages.
 | Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the message-handling path**) · `lib/lock.sh` · `lib/session.sh` |
 | Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes · `lib/doctor.sh`'s `doctor_check_*` — the diagnostic orchestration (a **declared deviation** — see below) |
 | Framework | `bin/inbox-status` · `bin/read-inbox` · `bin/inbox-doctor` |
-
-`channel/` (`server.mjs`) is a separate Node MCP server, **not** part of the
-shell bucket split above: it is a Framework/Side-effect process that pushes
-`<channel>` events into a session and spawns `bin/inbox-wait`. Its own
-`channel/test/self-test.sh` proves its event contract hermetically (a golden SDK
-fixture, no `node_modules`).
 
 The domain files take strings and return strings. That is what makes the
 counting and parsing rules provable with no fixtures on disk, which is the

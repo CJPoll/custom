@@ -6,6 +6,14 @@
 `ai/docs/inbox-channels-design.md` §1 *Inferred*, *The development-flag dialog
 is the operational risk* (§4.3), *Ordering* / Phase 0 (§9.7).
 
+**Later (2026-09-22): ABANDONED.** The Inbox-on-Channels delivery mechanism these
+probes were gating was **reverted** by owner decision in favor of the
+`inbox-wait` background waiter, and the channels-delivery code was removed. This
+probe log is retained as the dated record of what was measured on its date;
+annotated, not rewritten, per the doc conventions. See
+`ai/docs/inbox-channels-design.md` (top annotation) and auto-memory
+`autonomous-run-2026-09-21-channels-hold.md`.
+
 **Reachability note:** as of this record the design doc is **not yet on
 `origin/main`** — it lives on the unmerged branch `design/inbox-channels`
 (`git show origin/design/inbox-channels:ai/docs/inbox-channels-design.md`). Every

@@ -357,22 +357,15 @@ points at, it states no lane mechanics (the marker semantics, channel resolution
 read mechanics, and add/drop handling are the brief's); on any detail the brief
 wins.
 
-**What routes a session into the brief — three trigger sources during the
+**What routes a session into the brief — two trigger sources during the
 migration.** Any signal means lane state may have changed and the brief should
 be consulted:
 
 - **Inbox count.** A nonzero unread count on the lane's `log` channel (surfaced
-  counts-only per the inbox *Untrusted input* rule). Whether this trigger is
-  operative for a given lane is the brief's `{{CHANNEL_RESOLUTION}}`, not settled
-  here.
-- **Channel event.** In a **standing channel session** (an interactive `claude`
-  launched with `--dangerously-load-development-channels server:athena-inbox`),
-  the inbox channel shim pushes a `<channel>` event carrying the unread count on
-  the lane's `log` channel straight into the running session — the push form of
-  the inbox count above, with no `SessionStart` or hand-armed waiter in between.
-  Its mechanics (how the shim resolves the channel, what the session does on the
-  event) are `~/dev/custom/ai/docs/ticket-lane-action-brief.md`'s, not stated
-  here.
+  counts-only per the inbox *Untrusted input* rule), reaching a live session
+  through the `inbox-wait` background waiter (`athena:inbox` → *How to arm it*).
+  Whether this trigger is operative for a given lane is the brief's
+  `{{CHANNEL_RESOLUTION}}`, not settled here.
 - **`SessionStart` poll.** `~/dev/walt_ui/.claude/hooks/flaky-ticket-poll.sh`
   reports flaky-lane state as factual `additionalContext`; it remains flaky's
   operative trigger until H-4/DND-248 retires it.
@@ -405,12 +398,12 @@ mechanics — read mechanics, marker semantics, channel resolution, merge policy
 are the `~/dev/custom/ai/docs/ticket-lane-action-brief.md` template's, cited and
 not restated.
 
-**Later (2026-09-22):** a **third** trigger source was added above — a
-`<channel>` event pushed into a standing channel session — so *What routes a
-session into the brief* previously named "two trigger sources during the
-migration" and now names three. The channel event is the push delivery of the
-inbox count (the standing session, launched with
-`--dangerously-load-development-channels server:athena-inbox`, receives the count
-as a `<channel>` event rather than a hook or hand-armed waiter delivering it);
-its mechanics stay the lane brief's. Nothing about the two prior triggers
-changed.
+**Later (2026-09-22):** *What routes a session into the brief* briefly named a
+**third** trigger source — a `<channel>` event pushed into a standing channel
+session (the "Inbox on Channels" delivery mechanism) — while that section named
+"three trigger sources during the migration". That mechanism was **abandoned**
+by owner decision (2026-09-22) in favor of the `inbox-wait` background waiter,
+and the channels-delivery code was removed; the section now names the **two**
+prior triggers again (inbox count + `SessionStart` poll), with the inbox count
+reaching a session through the `inbox-wait` waiter rather than a channel push.
+Nothing about the two prior triggers changed.

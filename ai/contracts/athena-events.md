@@ -1935,10 +1935,16 @@ Path-2 *Untrusted input* boundary. Where the inbox adapter produces `log` lines,
 it MUST conform to that contract; this contract does not restate or override it.
 
 The **local session wake** — pushing a delivered inbox line into a running
-session — is **consumer-side**, done by the inbox channel shim
-(`ai/skills/athena:inbox/channel/`), not by this platform; a platform
-**session-delivery adapter** (the platform pushing directly to a machine's
-session) is roadmap, not built (DND-250 / DND-253).
+session — is **consumer-side**, done by the `inbox-wait` background waiter the
+inbox skill arms (`ai/skills/athena:inbox/SKILL.md` → *How to arm it*), not by
+this platform; a platform **session-delivery adapter** (the platform pushing
+directly to a machine's session) is roadmap, not built (DND-250 / DND-253).
+
+**Later (2026-09-22):** this named the inbox **channel shim**
+(`ai/skills/athena:inbox/channel/`) as the local-wake mechanism (the "Inbox on
+Channels" epic); that delivery mechanism was abandoned by owner decision and its
+code removed, so the local wake is the `inbox-wait` waiter above. The
+consumer-side / platform-roadmap split is unchanged.
 
 ---
 

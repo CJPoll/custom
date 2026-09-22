@@ -210,14 +210,15 @@ was written, per `~/dev/custom/CLAUDE.md` → *Documentation conventions* (annot
 a dated claim, do not silently rewrite it); the description that follows is the
 original design sketch.
 
-**Later (2026-09-22):** the standing **initiator** of that background wake is now
-the **channel session**, not a hand-rolled `run_in_background` loop: an
-interactive `claude` launched with `--dangerously-load-development-channels
-server:athena-inbox`, into which the `athena:inbox` channel shim
-(`ai/skills/athena:inbox/channel/`) pushes an unread-count `<channel>` event on
-each doorbell. See `athena:inbox` → *How to arm it* and
-`ai/docs/inbox-channels-design.md` §4. This is the documented standing mechanism
-that supersedes both sketch patterns below; the heading and sketch text are left
+**Later (2026-09-22):** the standing **initiator** of that background wake is the
+`athena:inbox` **`inbox-wait` background waiter** — armed with `run_in_background`
+so its completion notification is the wake, then re-armed on each wake (the
+"attended form" whose judgment half is `athena:inbox-attend`). See `athena:inbox`
+→ *How to arm it*. An "Inbox on Channels" epic briefly made the initiator a
+channel session (an MCP shim pushing count events into a `--channels` session);
+that delivery mechanism was **abandoned** by owner decision (2026-09-22) and its
+code removed, so the `inbox-wait` waiter is the documented standing mechanism.
+This supersedes both sketch patterns below; the heading and sketch text are left
 as written per the annotate-don't-rewrite rule.
 
 The hook fires on prompts, so a long autonomous run with no prompts hears

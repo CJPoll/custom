@@ -3171,11 +3171,11 @@ assert_contains "A-12 and the refusal explains the theft it prevents" "reports t
 ERR="$(cd "${BREPO}" && CLAUDE_AGENT_TYPE=explorer timeout 10 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
 assert_eq "A-12 CLAUDE_AGENT_TYPE alone is signal enough" "2" "${RC}"
 
-# A-12b: --dry-run is NOT an arm, so a subagent is NOT refused by it. This is
-# the one case a subagent channel shim's fs.watch fallback depends on
-# (server.mjs's armFsWatch calls `inbox-wait --dry-run` to resolve doorbells --
-# see athena:inbox/channel). --dry-run only resolves+provisions and prints; it
-# never blocks on a wake or consumes anything, so the "a subagent must not arm"
+# A-12b: --dry-run is NOT an arm, so a subagent is NOT refused by it. A caller
+# that only needs the resolved doorbell paths (e.g. an fs.watch fallback) can
+# use `inbox-wait --dry-run` from a subagent context. --dry-run only
+# resolves+provisions and prints; it never blocks on a wake or consumes
+# anything, so the "a subagent must not arm"
 # rule above does not apply to it. An earlier ordering of this file ran the
 # subagent gate BEFORE the --dry-run branch, which refused this on arrival for
 # every subagent and made the fs.watch fallback dead code (critic-review,
