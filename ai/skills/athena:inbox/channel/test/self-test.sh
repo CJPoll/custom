@@ -424,13 +424,17 @@ fi
 
 # The golden sdkVersion must equal the package.json pin, else FAIL with the
 # regenerate Fix -- the pin cannot drift from the golden silently (1e). Drive it
-# with a mangled pin via a throwaway package.json copy so the assertion is real,
-# not eyeballed.
-CONF_TMP="$(mktemp -d)"
-cp "${CH}/package.json" "${CONF_TMP}/package.json.bak"
-sed 's/"1\.30\.0"/"0.0.0-drift"/' "${CONF_TMP}/package.json.bak" > "${CH}/package.json"
-DRIFT_OUT="$(node "${CONF}" 2>&1)"; DRIFT_RC=$?
-cp "${CONF_TMP}/package.json.bak" "${CH}/package.json"; rm -rf "${CONF_TMP}"
+# entirely inside a TEMP COPY of the channel dir: the tracked package.json is
+# NEVER mutated, so an interrupt/kill mid-check can never leave the checkout's
+# package.json corrupted (this suite runs on the gate).
+DRIFT_DIR="$(mktemp -d)"
+mkdir -p "${DRIFT_DIR}/test"
+cp "${SERVER}" "${DRIFT_DIR}/server.mjs"
+cp "${CONF}" "${DRIFT_DIR}/test/sdk-conformance.mjs"
+cp "${HERE}/sdk-golden.json" "${DRIFT_DIR}/test/sdk-golden.json"
+sed 's/"1\.30\.0"/"0.0.0-drift"/' "${CH}/package.json" > "${DRIFT_DIR}/package.json"
+DRIFT_OUT="$(node "${DRIFT_DIR}/test/sdk-conformance.mjs" 2>&1)"; DRIFT_RC=$?
+rm -rf "${DRIFT_DIR}"
 if [ "${DRIFT_RC}" -ne 0 ] && printf '%s' "${DRIFT_OUT}" | grep -q "regenerate\|gen-sdk-golden"; then
   ok "golden sdkVersion != pin -> FAIL with the regenerate Fix line"
 else
