@@ -191,6 +191,39 @@ lock, so the enforced half of the trust boundary keeps firing.
 
   `meta` keys are identifiers (no hyphens — they are silently dropped). The
   `channels` value lists **the tenant's own channel names and counts only**.
+
+  **Later (2026-09-22, architect ruling on the admiral's Pass-2 gap):** "`new > 0`"
+  above (and in §3.3, §3.4) names the wrong field for half the channels. Live
+  `inbox-status --json` emits a **per-kind count field**: `new` on a `log`
+  channel, `unread` on a `maildir` channel (its own reader,
+  `bin/inbox-status`, keys `if .kind == "log" then .new else .unread end`).
+  Read every `new > 0` in this document as "the per-kind count is > 0". A
+  consumer that keys on one field silently drops the other kind's mail —
+  *A failed lookup must never look like an empty one*. Normative for T3+:
+  (1) a channel is **uncountable, never 0**, when `error` is true, when it is a
+  `log` channel with `never_delivered` true, or when neither field is a
+  number; (2) T3 (DND-283) adds one **additive** per-channel field to
+  `inbox-status --json`, `count` — the per-kind integer, or `null` when
+  uncountable — computed once by the skill's own jq, so later consumers key
+  on a single field; (3) every consumer after T3 (the launcher's rotation
+  gate, T4's `ack_wake`, `inbox-doctor`'s `channel:` line) keys on `count`
+  and treats `null`/absent as uncountable; the shim's `countOf` prefers
+  `count` and keeps its per-kind fallback. T2's shim (`server.mjs`,
+  `countOf`/`classify`) already keys on both and treats the three
+  uncountable states as not-zero; it is the reference behaviour.
+
+  **Later (2026-09-22, architect ruling, same gap set):** the shim speaks the
+  MCP wire protocol hand-rolled; the pinned `@modelcontextprotocol/sdk` is
+  never imported, so the self-test stays hermetic. The ADR reviewer's
+  **SDK conformance check** is **T3 scope** (DND-283 carries the build item),
+  in two tiers so the gate stays hermetic and live registration is still
+  gated by the real SDK: a committed **golden fixture recorded from the
+  pinned SDK** that the self-test replays with no `node_modules`, and a
+  **live interop check** that imports the SDK and which `setup-athena-attend
+  --install` runs before `claude mcp add`, refusing to register on failure.
+  The fixture carries the SDK version it was recorded from and the self-test
+  fails when that differs from `package.json`'s pin, so the pin cannot drift
+  from the golden silently. "Skipped" and "passed" never print the same.
 - **Never acks, never reads a body, never holds the consumer lock.** The
   session's `read-inbox` is the designated consumer, as today.
 - **Tenancy:** the shim resolves the project from its own `cwd` (Claude Code
