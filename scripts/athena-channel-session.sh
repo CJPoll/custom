@@ -11,6 +11,12 @@
 # / restarts the session under bounds so a long-lived session never grows an
 # unbounded standing bill and a dark channel never sits silent.
 #
+# NOTE ON ROTATION (staged): the wakes/bytes/age rotation is gated on an idle
+# signal (ATHENA_ATTEND_IDLE_MARKER) so a rotation never cuts a reply. That
+# marker is wired by a later ticket (the T4 ack_wake / Stop-hook idle work), so
+# UNTIL THEN the bound-rotation path is inert in production and only dark-restart
+# is active. The gate is shaped so T4/T5 turn rotation on with no change here.
+#
 # INERT UNTIL INSTALLED. Nothing here runs on its own; `scripts/setup-athena-attend
 # --install` adds the @reboot + */5 crontab entries (pointing at the MAIN
 # checkout's copy). Shipping this script starts no always-on session.
@@ -189,7 +195,12 @@ dm_owner() {
 
 transcript_dir() {
   if [ -n "${ATHENA_ATTEND_TRANSCRIPT_DIR:-}" ]; then printf '%s' "${ATHENA_ATTEND_TRANSCRIPT_DIR}"; return; fi
-  printf '%s/.claude/projects/%s' "${HOME}" "$(printf '%s' "${PROJECT_DIR}" | sed 's#/#-#g')"
+  # Claude Code's project-slug maps BOTH '/' and '.' to '-'; mapping only '/'
+  # would miss the dir for any dotted path (e.g. a repo under ~/x.y/), so
+  # attend_transcript_bytes would return n/a and size-rotation silently no-op --
+  # the failed-lookup-looks-empty class. When rotation goes live (idle seam),
+  # this is the key that must actually match.
+  printf '%s/.claude/projects/%s' "${HOME}" "$(printf '%s' "${PROJECT_DIR}" | sed 's#[/.]#-#g')"
 }
 
 get_status_json() { ( cd -- "${PROJECT_DIR}" 2>/dev/null && "${INBOX_STATUS}" --json 2>/dev/null ); }
@@ -198,8 +209,16 @@ has_session() { "${TMUX_BIN}" has-session -t "${SESSION}" 2>/dev/null; }
 kill_session() { "${TMUX_BIN}" kill-session -t "${SESSION}" 2>/dev/null || true; }
 
 launch_session() {
+  # `env -u` strips CLAUDE_CODE_SESSION_ATTENDED (so inbox-untrusted-guard
+  # enforces) AND CLAUDE_AGENT_ID/TYPE. The agent vars must not merely be unset
+  # by us -- they must be REMOVED even if the supervisor's own environment
+  # carries them (an agent, or an operator's `Start now:` shell during setup,
+  # inherits them). If either reached the session, session.sh / server.mjs would
+  # classify it a SUBAGENT and the consumer gate would refuse to ack -- the
+  # session could never drain its own channel, ending in a silent channel.dark.
   "${TMUX_BIN}" new-session -d -s "${SESSION}" -c "${PROJECT_DIR}" \
-    env -u CLAUDE_CODE_SESSION_ATTENDED "ATHENA_INBOX_EXPECT_PROJECT=${PROJECT_NAME}" \
+    env -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_AGENT_ID -u CLAUDE_AGENT_TYPE \
+    "ATHENA_INBOX_EXPECT_PROJECT=${PROJECT_NAME}" \
     "${CLAUDE_BIN}" --dangerously-load-development-channels "server:athena-inbox" --permission-mode default
 }
 
@@ -315,7 +334,7 @@ if [ "${DRY_RUN}" -eq 1 ]; then
   echo "  state dir    : ${STATE_DIR}"
   echo "  pinned claude: ${PIN}"
   echo "  launch       : ${TMUX_BIN} new-session -d -s ${SESSION} -c ${PROJECT_DIR} \\"
-  echo "                   env -u CLAUDE_CODE_SESSION_ATTENDED ATHENA_INBOX_EXPECT_PROJECT=${PROJECT_NAME} \\"
+  echo "                   env -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_AGENT_ID -u CLAUDE_AGENT_TYPE ATHENA_INBOX_EXPECT_PROJECT=${PROJECT_NAME} \\"
   echo "                   ${CLAUDE_BIN} --dangerously-load-development-channels server:athena-inbox --permission-mode default"
   echo "  (dry-run changed nothing and started no session)"
   exit 0

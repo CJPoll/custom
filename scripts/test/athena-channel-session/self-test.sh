@@ -235,9 +235,13 @@ export FAKE_PANE="${CASE}/pane"
 # pane shows BOTH the warning and the registration notice
 printf 'WARNING: Loading development channels\nChannels (experimental) messages from server:athena-inbox inject directly in this session\n' > "${FAKE_PANE}"
 export FAKE_STATUS_JSON='{"channels":[{"name":"peer","kind":"maildir","count":0}]}'
-export CLAUDE_CODE_SESSION_ATTENDED=1   # so we can prove `env -u` removes it
+# Set ALL THREE so `env -u` removing them is proven, not vacuous: a leaked
+# CLAUDE_AGENT_* would make the standing session a subagent that can never ack.
+export CLAUDE_CODE_SESSION_ATTENDED=1
+export CLAUDE_AGENT_ID="agent-leak-probe"
+export CLAUDE_AGENT_TYPE="athena-captain"
 ( cd "${PROJ}" && timeout 20 bash "${LAUNCHER}" --once >/dev/null 2>&1 ); RC=$?
-unset CLAUDE_CODE_SESSION_ATTENDED
+unset CLAUDE_CODE_SESSION_ATTENDED CLAUDE_AGENT_ID CLAUDE_AGENT_TYPE
 assert_eq "happy path exits 0" 0 "${RC}"
 assert_contains "happy path launched a tmux session named athena-attend-testproj" "athena-attend-testproj" "$(cat "${FAKE_TMUX_LOG}")"
 assert_contains "happy path sent one Enter to the pane" "send-keys" "$(cat "${FAKE_TMUX_LOG}")"

@@ -73,6 +73,14 @@ attend_clear_markers() {
 
 # attend_channel_state <state-dir> <has-session:0|1> -> one of
 #   wedged | dark | stopped | registered | no-session
+#
+# NOTE: T3 writes `dark` and `wedged` (launch/dialog + runtime dark detection);
+# `stopped` is READ here but has no T3 writer yet -- it is reserved for the
+# shim's waiter-death signal (server.mjs marks that condition with a stderr
+# diagnostic today; the durable marker is a follow-up). The launcher's own
+# count-based dark detection covers the practical harm meanwhile, so a genuinely
+# deaf-but-alive session still surfaces (as `dark`) rather than silently reading
+# `registered`.
 # The inbox-doctor `channel:` line (design §3.4). Precedence puts the faults a
 # human must act on first (wedged, then dark), then the deliberate stop, then
 # the live/absent split. "no-session" and "dark" are DISTINCT strings from

@@ -432,7 +432,9 @@ mkdir -p "${DRIFT_DIR}/test"
 cp "${SERVER}" "${DRIFT_DIR}/server.mjs"
 cp "${CONF}" "${DRIFT_DIR}/test/sdk-conformance.mjs"
 cp "${HERE}/sdk-golden.json" "${DRIFT_DIR}/test/sdk-golden.json"
-sed 's/"1\.30\.0"/"0.0.0-drift"/' "${CH}/package.json" > "${DRIFT_DIR}/package.json"
+# Mangle the pin to a sentinel in the temp copy via jq (no hard-coded current
+# version to fall out of sync with the real pin).
+jq --arg v "0.0.0-drift" '.dependencies["@modelcontextprotocol/sdk"]=$v' "${CH}/package.json" > "${DRIFT_DIR}/package.json"
 DRIFT_OUT="$(node "${DRIFT_DIR}/test/sdk-conformance.mjs" 2>&1)"; DRIFT_RC=$?
 rm -rf "${DRIFT_DIR}"
 if [ "${DRIFT_RC}" -ne 0 ] && printf '%s' "${DRIFT_OUT}" | grep -q "regenerate\|gen-sdk-golden"; then

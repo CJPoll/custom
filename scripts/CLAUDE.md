@@ -410,10 +410,17 @@ registration notice in the pane, and rotates/restarts the session under bounds.
   (never a worktree's — the same main-checkout-resolution rule as the inbox
   client and hooks). A per-project `flock` makes a second invocation a no-op, so
   the `*/5` relaunch costs nothing while the session is healthy. Rotation
-  (kill + relaunch) fires on wakes ≥ `ATHENA_ATTEND_MAX_WAKES` (30), transcript
-  bytes ≥ 262144, or age ≥ 86400s — but ONLY when every channel counts zero, the
-  session is idle, and no permission request is open, so a rotation never cuts a
-  reply. A dark channel is restarted up to 3×/hour, then wedged with an owner DM.
+  (kill + relaunch) is bounded on wakes ≥ `ATHENA_ATTEND_MAX_WAKES` (30),
+  transcript bytes ≥ 262144, or age ≥ 86400s, and proceeds ONLY when every
+  channel counts zero, the session is idle, and no permission request is open,
+  so a rotation never cuts a reply. **Rotation-by-bound is STAGED:** its idle
+  gate needs a per-session "no turn in flight" signal, which the design names as
+  a Stop-hook marker / `ack_wake`. `ai/hooks/notify-idle.sh` today is a *global*
+  Stop hook (it cannot say which session is idle), so no per-session idle signal
+  exists until T4's `ack_wake` lands — until then the idle gate stays closed and
+  **only dark-restart is active** (the bound math and the gate are fully built
+  and tested here; T4 wires the signal with no change to this code). A dark
+  channel is restarted up to 3×/hour, then wedged with an owner DM.
 - **SDK wire-conformance gate.** `setup-athena-attend --install` runs
   `npm ci --omit=dev` + `node test/sdk-conformance.mjs --live` in the channel dir
   BEFORE it installs the entries that start the session (which registers the
