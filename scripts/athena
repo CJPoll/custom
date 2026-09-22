@@ -1,3 +1,11 @@
 #!/usr/bin/env bash
 
+# Subagents default to a 5-minute prompt-cache TTL (only the main conversation
+# on a subscription gets 1h). A long-running admiral that resumes after a >5min
+# wait then re-pays cache CREATION on its whole transcript instead of a ~0.1x
+# read — the dominant token-burn source for the fleet. Force 1h for subagents so
+# the cache stays warm across resume gaps. An explicit override still wins.
+# (Ref: Claude Code prompt-caching docs; verified 2026-09-21.)
+export CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL="${CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL:-1h}"
+
 "${HOME}/.local/bin/claude" --verbose --dangerously-skip-permissions "${@}"
