@@ -212,6 +212,18 @@ printf '%s\n' "$$" >"$PIDFILE" 2>/dev/null || true
 
 say "supervising $LAUNCHER (pid $$)"
 
+# --- suppress D-Bus autolaunch, and reap any orphaned daemons ---------------
+# See scripts/lib/dbus-env.sh: a cron process with no DBUS_SESSION_BUS_ADDRESS
+# but a leaked graphical DISPLAY autolaunches a throwaway dbus-daemon that never
+# exits and exhausts the inotify instance limit. Export an address so no
+# descendant autolaunches, and best-effort reap earlier orphans. Placed after
+# the flock so the */5 no-op relaunch does neither; silent (cron mails output).
+__wrapper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+# shellcheck source=scripts/lib/dbus-env.sh
+. "${__wrapper_dir}/lib/dbus-env.sh"
+athena_dbus_env_setup
+"${__wrapper_dir}/reap-orphan-dbus" --min-age 300 >/dev/null 2>&1 || true
+
 # ---- adopt the wreckage of a SIGKILLed supervisor --------------------------
 # The lock says "a supervisor is alive" (the client is started with fd 9 closed
 # so it cannot hold the lock itself — otherwise an orphan would keep the lock

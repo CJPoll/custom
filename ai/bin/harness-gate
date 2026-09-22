@@ -72,6 +72,15 @@ STATIC_CHECKS = [
   ["check-bin-help self-test",  %w[ai/bin/check-bin-help --self-test]],
   ["check-tool-risk",           %w[ai/bin/check-tool-risk]],
   ["check-tool-risk self-test", %w[ai/bin/check-tool-risk --self-test]],
+  # Live per-user inotify INSTANCE headroom. When orphaned autolaunched
+  # dbus-daemons (or any watcher) exhaust fs.inotify.max_user_instances, the
+  # inbox doorbell (inbox-wait) and the channel attendant fail with cryptic
+  # errors and gates go mysteriously red fleet-wide (measured 127/128 on
+  # 2026-09-22). This turns that silent failure into a named one whose Fix:
+  # points at scripts/reap-orphan-dbus. ENVIRONMENT-SAFE: passes with a note
+  # where /proc is absent (CI/sandbox), so it never false-fails a harness commit.
+  ["check-inotify-headroom",    %w[ai/bin/check-inotify-headroom]],
+  ["check-inotify-headroom self-test", %w[ai/bin/check-inotify-headroom --self-test]],
   ["harness-eval",              %w[ai/bin/harness-eval]],
   # Answers the one merge question the rest of the bar never asked -- what
   # merging CAUSES (gen_saas PR #256 / DND-234: merging would have run

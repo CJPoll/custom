@@ -44,6 +44,7 @@ tools:
   check-guard-messages:    { class: readOnly, reason: check }
   check-hooks-registered:  { class: readOnly, reason: check }
   check-inbox-registry:    { class: readOnly, reason: check }
+  check-inotify-headroom:  { class: readOnly, reason: check }
   check-tool-risk:         { class: readOnly, reason: check }
   confirm-merged:          { class: readOnly, reason: query }
   critic-eval:             { class: readOnly, reason: eval }
