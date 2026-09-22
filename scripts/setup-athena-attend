@@ -27,8 +27,13 @@
 #
 # The two entries are (for the project named by --project, default ~/dev/walt_ui):
 #
-#   @reboot          <runner> --project <abs dir>   start the attendant at boot
-#   */5 * * * *      <runner> --project <abs dir>   relaunch it if it ever died
+#   @reboot          [ATHENA_ATTEND_OWNER_SLACK_ID=<id>] <runner> --project <abs dir>
+#   */5 * * * *      [ATHENA_ATTEND_OWNER_SLACK_ID=<id>] <runner> --project <abs dir>
+#
+# The optional VAR=value prefix is baked in only when ATHENA_ATTEND_OWNER_SLACK_ID
+# is set in THIS installer's own env at --install time — see the env var below.
+# It sits before <runner> so idempotency's find/remove match (below) still finds
+# the line whether or not an id is baked in.
 #
 # The */5 entry costs nothing while the attendant is healthy: the runner takes
 # an flock on its pidfile and a second invocation exits immediately without
@@ -53,10 +58,24 @@
 #   setup-athena-attend --help
 #
 # Options:
-#   --install    Install both crontab entries (the default when no mode is given)
+#   --install    Install both crontab entries (the default when no mode is given).
+#                DENIES BY DEFAULT (exit 2, crontab left byte-identical, a Fix:
+#                line) unless ATHENA_ATTEND_OWNER_SLACK_ID is set to a valid
+#                Slack user id (^U[A-Z0-9]{8,}$) or --no-owner-dm is passed
+#                explicitly (DND-288 build 2) — see ATHENA_ATTEND_OWNER_SLACK_ID
+#                below for why a reminder alone is not enough.
 #   --project D  Project whose inbox to attend (default ~/dev/walt_ui)
+#   --no-owner-dm  Install without a validated owner Slack id. The ONLY way
+#                past the deny-by-default refusal above. Prints a loud WARNING
+#                naming what goes silent (wedge/dark/version-pin alerts), and
+#                the choice is recorded in the crontab entry itself (a trailing
+#                comment), never silently.
 #   --check      Read-only: report whether both entries are live. OK + the lines
-#                and exit 0, or MISSING + a Fix: line and exit 1.
+#                and exit 0, or MISSING + a Fix: line and exit 1. When the entries
+#                are live, also reports the owner-DM state: persisted (the id,
+#                masked to its first 3 chars), disabled (--no-owner-dm was used),
+#                or — for a T3-era bare line — a WARNING "NOT PERSISTED (installed
+#                before DND-288)" + Fix:. These three states never read the same.
 #   --dry-run    Print what would happen; change nothing
 #   --remove     Remove this project's crontab entries and exit
 #   --self-test  Run scripts/test/athena-channel-session/self-test.sh on a temp crontab
@@ -73,10 +92,25 @@
 #                               refuses to install an attendant for a project
 #                               with no channels (a test seam; defaults to the
 #                               main checkout's athena:inbox bin).
+#   ATHENA_ATTEND_OWNER_SLACK_ID  required at --install time (or pass
+#                               --no-owner-dm explicitly). Baked directly into
+#                               the written crontab entries (VAR=value BEFORE
+#                               the runner path) so a cron-launched session —
+#                               which runs with a minimal, mostly empty
+#                               environment — still has it. Without this,
+#                               athena-channel-session.sh's dm_owner silently
+#                               no-ops on every wedge/dark/version-pin event
+#                               under cron: the exact silent-failure class this
+#                               installer exists to catch, which is why an
+#                               unset or malformed id (not matching
+#                               ^U[A-Z0-9]{8,}$) REFUSES the install rather
+#                               than falling back to a bare, unannounced entry.
 #
 # Exit codes: 0 ok · 1 usage/arg error, or --check found entries missing
 #             · 2 missing prerequisite (no crontab, runner not in main checkout,
-#               project not a git repo, or inbox-wait refuses for that project)
+#               project not a git repo, inbox-wait refuses for that project, or
+#               ATHENA_ATTEND_OWNER_SLACK_ID is unset/malformed and --no-owner-dm
+#               was not passed)
 
 set -uo pipefail
 
@@ -97,19 +131,22 @@ usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
 MODE="install"
 DRY_RUN=0
 PROJECT_ARG=""
+NO_OWNER_DM=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --install)   MODE="install" ;;
-    --check)     MODE="check" ;;
-    --remove)    MODE="remove" ;;
-    --self-test) MODE="self-test" ;;
-    --dry-run)   DRY_RUN=1 ;;
+    --install)      MODE="install" ;;
+    --check)        MODE="check" ;;
+    --remove)       MODE="remove" ;;
+    --self-test)    MODE="self-test" ;;
+    --dry-run)      DRY_RUN=1 ;;
+    --no-owner-dm)  NO_OWNER_DM=1 ;;
     --project)   shift; PROJECT_ARG="${1:-}"
                  [ -n "$PROJECT_ARG" ] || { echo "error: --project needs a directory argument" >&2
                    echo "  Fix: run 'setup-athena-attend --project /path/to/project'." >&2; exit 1; } ;;
     -h|--help)   usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2
-       echo "  Fix: use --install (default), --check, --remove, --self-test, --project DIR, --dry-run, --help." >&2
+       echo "  Fix: use --install (default), --check, --remove, --self-test, --project DIR, --dry-run," \
+            "--no-owner-dm, --help." >&2
        exit 1 ;;
   esac
   shift
@@ -189,8 +226,62 @@ case "$PROJECT_DIR" in
   *)  PROJECT_ABS="$(cd -- "$PROJECT_DIR" 2>/dev/null && pwd -P)" || PROJECT_ABS="$PROJECT_DIR" ;;
 esac
 
-REBOOT_LINE="@reboot ${RUNNER} --project ${PROJECT_ABS}"
-RELAUNCH_LINE="*/5 * * * * ${RUNNER} --project ${PROJECT_ABS}"
+# Bake the owner Slack id into the crontab entries themselves when it is set
+# at install time (read from THIS process's own env, e.g. the §9.7 owner step).
+# Cron runs a job with a minimal environment, so an id that lives only in the
+# operator's interactive shell never reaches the cron-launched session, and
+# athena-channel-session.sh's dm_owner silently no-ops
+# (`[ -n "${ATHENA_ATTEND_OWNER_SLACK_ID:-}" ] || … return 0`) — the exact
+# wedge/dark-attendant-never-alerts-the-owner class this installer exists to
+# prevent. The VAR=value prefix goes BEFORE ${RUNNER} so the line still
+# contains $MATCH (defined below) intact: the existing find/remove/idempotency
+# logic keeps working unchanged whether an id is baked in, absent, or the
+# --no-owner-dm marker comment is present instead.
+#
+# DND-288 build 2 (deny by default): a reminder that the operator SHOULD set
+# this is not enforcement -- the T3 install let an unset id through silently,
+# which is the same defect this whole ticket exists to close, one layer up.
+# --install now REFUSES (below) unless the id validates or --no-owner-dm was
+# passed explicitly; --check/--remove never enforce this (they take no id).
+OWNER_SLACK_ID="${ATHENA_ATTEND_OWNER_SLACK_ID:-}"
+OWNER_ID_RE='^U[A-Z0-9]{8,}$'
+OWNER_ID_VALID=0
+if [ -n "$OWNER_SLACK_ID" ] && printf '%s' "$OWNER_SLACK_ID" | grep -Eq -- "$OWNER_ID_RE"; then
+  OWNER_ID_VALID=1
+fi
+NO_OWNER_DM_MARKER=" # ATHENA-NO-OWNER-DM (DND-288: owner DM explicitly disabled at install)"
+
+if [ "$MODE" = "install" ]; then
+  if [ -n "$OWNER_SLACK_ID" ] && [ "$OWNER_ID_VALID" -ne 1 ]; then
+    echo "error: ATHENA_ATTEND_OWNER_SLACK_ID is malformed: '${OWNER_SLACK_ID}' (expected a Slack user id" \
+         "matching ^U[A-Z0-9]{8,}\$). NOTHING was installed." >&2
+    echo "  Fix: export a valid ATHENA_ATTEND_OWNER_SLACK_ID and re-run --install, or pass --no-owner-dm to" \
+         "install without owner DMs (a loud warning is printed; wedge/dark/version-pin alerts go silent)." >&2
+    exit 2
+  fi
+  if [ -z "$OWNER_SLACK_ID" ] && [ "$NO_OWNER_DM" -ne 1 ]; then
+    echo "error: ATHENA_ATTEND_OWNER_SLACK_ID is unset — refusing to install. NOTHING was installed." >&2
+    echo "  Fix: export ATHENA_ATTEND_OWNER_SLACK_ID=<your Slack user id> and re-run --install; the" \
+         "attendant's wedge/dark/version-pin paths DM this id and cannot fire under cron without it." \
+         "Pass --no-owner-dm to install anyway (a loud warning is printed; those DMs will be silent)." >&2
+    exit 2
+  fi
+  if [ "$OWNER_ID_VALID" -ne 1 ] && [ "$NO_OWNER_DM" -eq 1 ]; then
+    say "WARNING: installing with --no-owner-dm — wedge, dark-channel, and version-pin alerts will NOT" \
+        "reach anyone. This is a deliberate, explicit choice; it is recorded in the crontab entry itself."
+  fi
+fi
+
+if [ "$OWNER_ID_VALID" -eq 1 ]; then
+  REBOOT_LINE="@reboot ATHENA_ATTEND_OWNER_SLACK_ID=${OWNER_SLACK_ID} ${RUNNER} --project ${PROJECT_ABS}"
+  RELAUNCH_LINE="*/5 * * * * ATHENA_ATTEND_OWNER_SLACK_ID=${OWNER_SLACK_ID} ${RUNNER} --project ${PROJECT_ABS}"
+elif [ "$NO_OWNER_DM" -eq 1 ]; then
+  REBOOT_LINE="@reboot ${RUNNER} --project ${PROJECT_ABS}${NO_OWNER_DM_MARKER}"
+  RELAUNCH_LINE="*/5 * * * * ${RUNNER} --project ${PROJECT_ABS}${NO_OWNER_DM_MARKER}"
+else
+  REBOOT_LINE="@reboot ${RUNNER} --project ${PROJECT_ABS}"
+  RELAUNCH_LINE="*/5 * * * * ${RUNNER} --project ${PROJECT_ABS}"
+fi
 
 # ---- crontab access --------------------------------------------------------
 command -v crontab >/dev/null 2>&1 || {
@@ -220,12 +311,39 @@ without_our_entries() { printf '%s\n' "$1" | grep -vF -- "$MATCH" | sed '/^[[:sp
 # ---- check path (read-only) ------------------------------------------------
 if [ "$MODE" = "check" ]; then
   current="$(read_crontab)"
+  # Match by MATCH substring (RUNNER + project), not by exact line equality
+  # against REBOOT_LINE/RELAUNCH_LINE: those are built from THIS invocation's
+  # own ATHENA_ATTEND_OWNER_SLACK_ID env, which --check has no reason to share
+  # with whatever was set at install time. An exact-line compare would report
+  # a persisted-id entry as MISSING whenever --check runs with the id unset
+  # (or a different id) in its own env — a false negative on the very state
+  # this check exists to verify.
+  reboot_actual="$(printf '%s\n' "$current" | grep -F -- "$MATCH" | grep -F -- '@reboot ' | head -1)"
+  relaunch_actual="$(printf '%s\n' "$current" | grep -F -- "$MATCH" | grep -F -- '*/5 * * * *' | head -1)"
   have_reboot=0; have_relaunch=0
-  printf '%s\n' "$current" | grep -qxF -- "$REBOOT_LINE"   && have_reboot=1
-  printf '%s\n' "$current" | grep -qxF -- "$RELAUNCH_LINE" && have_relaunch=1
+  [ -n "$reboot_actual" ]   && have_reboot=1
+  [ -n "$relaunch_actual" ] && have_relaunch=1
   if [ "$have_reboot" -eq 1 ] && [ "$have_relaunch" -eq 1 ]; then
     say "OK — both channel-session crontab entries are installed for ${PROJECT_ABS}:"
     printf '%s\n' "$current" | grep -F -- "$MATCH" | sed 's/^/  /'
+    # Three states, and they must never read the same (DND-288 build 3):
+    # persisted (id baked in, shown masked), disabled (--no-owner-dm was used,
+    # an explicit owner choice, not a warning), or NOT PERSISTED (a T3-era bare
+    # line — a wedged/dark/version-pin DM will silently go nowhere under cron).
+    if printf '%s\n%s\n' "$reboot_actual" "$relaunch_actual" | grep -q 'ATHENA_ATTEND_OWNER_SLACK_ID='; then
+      found_id="$(printf '%s\n' "$reboot_actual" | grep -oE 'ATHENA_ATTEND_OWNER_SLACK_ID=[^ ]+' | cut -d= -f2)"
+      say "  owner DM: persisted (id ${found_id%"${found_id#???}"}...) — wedge/dark/version-pin DMs can reach the owner under cron."
+    elif printf '%s\n%s\n' "$reboot_actual" "$relaunch_actual" | grep -q 'ATHENA-NO-OWNER-DM'; then
+      say "  owner DM: disabled (--no-owner-dm was used at install) — an explicit choice, not a fault."
+    else
+      {
+        echo "WARNING — owner DM: NOT PERSISTED (installed before DND-288)."
+        echo "  Cron runs with a minimal environment, so a wedged or dark attendant launched by" \
+             "@reboot/*/5 will silently skip the owner DM (dm_owner no-ops when the var is unset) —" \
+             "a wedge, dark, or version-pin fault will alert no one."
+        echo "  Fix: re-run --install with ATHENA_ATTEND_OWNER_SLACK_ID set."
+      } >&2
+    fi
     # Report the live SDK interop result too (DND-283 ruling 1d). READ-ONLY on
     # --check (arg 0): NO npm ci, no filesystem mutation -- it reports against
     # whatever node_modules is already installed, and the check's exit-3 "LIVE
@@ -335,7 +453,12 @@ step "Done"
 say "Verify:    scripts/setup-athena-attend --check --project ${PROJECT_ABS}"
 say "Start now: ${RUNNER} --project ${PROJECT_ABS}    (blocks; it is the standing channel session)"
 say "           or wait for the */5 entry to pick it up."
-say "Owner:     accept the one-time project-trust dialog (and MCP-consent if it appears) once,"
-say "           and set ATHENA_ATTEND_OWNER_SLACK_ID so wedge/dark DMs can reach you."
+say "Owner:     accept the one-time project-trust dialog (and MCP-consent if it appears) once."
+if [ "$OWNER_ID_VALID" -eq 1 ]; then
+  say "           owner Slack id baked into the crontab entries above — wedge/dark/version-pin DMs will reach you under cron."
+else
+  say "           installed with --no-owner-dm: wedge/dark/version-pin DMs will NOT reach anyone under cron"
+  say "           (this was an explicit choice, recorded in the crontab entry itself)."
+fi
 say "Watch:     tail -f ~/.local/state/athena-attend/$(basename -- "$PROJECT_ABS")/attend.log"
 say "State:     ~/.local/state/athena-attend/$(basename -- "$PROJECT_ABS")/ (channel.dark/wedged/stopped markers)"

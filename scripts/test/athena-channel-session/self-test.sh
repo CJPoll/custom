@@ -234,6 +234,25 @@ assert_contains "version mismatch wrote channel.wedged with a regenerate Fix" "r
 assert_contains "version mismatch DM'd the owner once" "U-OWNER" "$(cat "${FAKE_DM_LOG}")"
 unset FAKE_CLAUDE_VERSION
 
+echo "== version pin mismatch, owner id UNSET -> wedged marker says 'owner NOT notified' (DND-288 build 4) =="
+CASE="${TMP}/c-ver-noid"; mkdir -p "${CASE}"
+launcher_env
+unset ATHENA_ATTEND_OWNER_SLACK_ID   # simulate a cron-launched run with no id reaching it
+export ATHENA_ATTEND_STATE_DIR="${CASE}/state"; mkdir -p "${ATHENA_ATTEND_STATE_DIR}"
+export FAKE_CLAUDE_ENVLOG="${CASE}/envlog"; : > "${FAKE_CLAUDE_ENVLOG}"
+export FAKE_TMUX_LOG="${CASE}/tmuxlog"; : > "${FAKE_TMUX_LOG}"
+export FAKE_DM_LOG="${CASE}/dmlog"; : > "${FAKE_DM_LOG}"
+export FAKE_SESSION_MARKER="${CASE}/session"
+export FAKE_PANE="${CASE}/pane"; : > "${FAKE_PANE}"
+export FAKE_CLAUDE_VERSION="Claude Code v9.9.9"   # != pin
+( cd "${PROJ}" && timeout 20 bash "${LAUNCHER}" --once >/dev/null 2>&1 ); RC=$?
+assert_eq "no-id wedge: still exits 75 (wedged)" 75 "${RC}"
+assert_eq "no-id wedge: sent NO owner DM (dm bin never called)" "" "$(cat "${FAKE_DM_LOG}")"
+assert_contains "no-id wedge: the wedged marker records 'owner NOT notified'" "owner NOT notified" \
+  "$(cat "$(attend_marker "${ATHENA_ATTEND_STATE_DIR}" wedged)" 2>/dev/null)"
+unset FAKE_CLAUDE_VERSION
+export ATHENA_ATTEND_OWNER_SLACK_ID="U-OWNER"   # restore for the cases below
+
 echo "== happy path: launches, confirms the notice, sets no ATTENDED / AGENT env =="
 CASE="${TMP}/c-happy"; mkdir -p "${CASE}"
 launcher_env
@@ -332,6 +351,12 @@ assert_eq "the second invocation launched NOTHING (no new-session)" "" "$(grep '
 kill -TERM "${SUP}" 2>/dev/null; wait "${SUP}" 2>/dev/null
 unset ATHENA_ATTEND_POLL_INTERVAL
 
+# launcher_env (used by earlier cases) exports ATHENA_ATTEND_OWNER_SLACK_ID for
+# the LAUNCHER's own tests; unset it here so it does not leak into the
+# installer's PATH env and silently get baked into every crontab entry below
+# — the owner-id sub-suite further down sets it back explicitly, per case.
+unset ATHENA_ATTEND_OWNER_SLACK_ID
+
 echo "== installer: SDK conformance gate refuses --install on a live-check failure (1e) =="
 INSTALLER="${SCRIPTS}/setup-athena-attend"
 # fake crontab (a file shim), fake inbox-wait (channels present), fake npm/node.
@@ -377,18 +402,21 @@ inst_env=(
 )
 
 # FAILURE: the live check exits 1 -> install refused (exit 2), NO crontab
-# entries written, and a Fix line printed.
+# entries written, and a Fix line printed. --no-owner-dm is passed so this
+# case tests the SDK-conformance refusal specifically, not the (separately
+# tested, below) owner-id deny-by-default refusal.
 : > "${FAKE_CRONTAB_FILE}"
-OUT="$( env "${inst_env[@]}" FAKE_NODE_RC=1 bash "${INSTALLER}" --install --project "${PROJ}" 2>&1 )"; RC=$?
+OUT="$( env "${inst_env[@]}" FAKE_NODE_RC=1 bash "${INSTALLER}" --install --no-owner-dm --project "${PROJ}" 2>&1 )"; RC=$?
 assert_eq "installer: a failed live SDK check refuses --install (exit 2)" 2 "${RC}"
 assert_contains "installer: the refusal carries a Fix line" "Fix:" "${OUT}"
 assert_eq "installer: NOTHING was written to the crontab on a refused install" "" "$(cat "${FAKE_CRONTAB_FILE}")"
 
 # SUCCESS: the live check passes -> the two entries are installed, pointing at
 # the MAIN-checkout launcher (never a worktree copy is the installer's own job;
-# here RUNNER_DIR is seamed).
+# here RUNNER_DIR is seamed). --no-owner-dm again, since this case is about the
+# SDK gate, not the owner-id gate (covered in its own sub-suite below).
 : > "${FAKE_CRONTAB_FILE}"
-OUT="$( env "${inst_env[@]}" FAKE_NODE_RC=0 bash "${INSTALLER}" --install --project "${PROJ}" 2>&1 )"; RC=$?
+OUT="$( env "${inst_env[@]}" FAKE_NODE_RC=0 bash "${INSTALLER}" --install --no-owner-dm --project "${PROJ}" 2>&1 )"; RC=$?
 assert_eq "installer: a passing live SDK check allows --install (exit 0)" 0 "${RC}"
 CRON="$(cat "${FAKE_CRONTAB_FILE}")"
 assert_contains "installer: the @reboot entry points at athena-channel-session.sh" "@reboot ${SCRIPTS}/athena-channel-session.sh" "${CRON}"
@@ -407,6 +435,124 @@ chmod +x "${FAKES}/npm-rec"
 OUT="$( env "${inst_env[@]}" ATHENA_ATTEND_NPM="${FAKES}/npm-rec" FAKE_NODE_RC=0 bash "${INSTALLER}" --check --project "${PROJ}" 2>&1 )"; RC=$?
 assert_eq "installer: --check exits 0 when entries are present" 0 "${RC}"
 assert_eq "installer: --check is READ-ONLY -- it never runs npm ci" "" "$(cat "${INST_TMP}/npm-calls")"
+
+# ==========================================================================
+# T3-followup: the owner Slack id must reach a CRON-launched (empty-env)
+# session, not just live in the operator's interactive shell at install time.
+# A fake "runner" stands in for athena-channel-session.sh: it only echoes
+# whether ATHENA_ATTEND_OWNER_SLACK_ID reached it, so running the crontab
+# line's exact text under `env -i` proves what cron itself would see —
+# nothing about the real launcher needs faking for that question.
+# ==========================================================================
+echo "== owner id: baked into the crontab entries + proven to reach a cron-shaped (empty-env) run =="
+FAKE_RUNNER_DIR="${INST_TMP}/runnerdir"; mkdir -p "${FAKE_RUNNER_DIR}"
+cat > "${FAKE_RUNNER_DIR}/athena-channel-session.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'OWNER_SLACK_ID=[%s]\n' "${ATHENA_ATTEND_OWNER_SLACK_ID:-UNSET}"
+EOF
+chmod +x "${FAKE_RUNNER_DIR}/athena-channel-session.sh"
+owner_inst_env=(
+  "ATHENA_ATTEND_RUNNER_DIR=${FAKE_RUNNER_DIR}"
+  "ATHENA_ATTEND_INBOX_BIN_DIR=${FAKES}/inbin"
+  "ATHENA_ATTEND_CHANNEL_DIR=${CHDIR}"
+  "ATHENA_ATTEND_NPM=${FAKES}/npm"
+  "ATHENA_ATTEND_NODE=${FAKES}/node"
+  "PATH=${FAKES}:${PATH}"
+)
+
+# -- with an owner id set at install: baked in, and reaches an empty-env run --
+: > "${FAKE_CRONTAB_FILE}"
+OUT="$( env "${owner_inst_env[@]}" ATHENA_ATTEND_OWNER_SLACK_ID=UOWNERPERSIST9 FAKE_NODE_RC=0 \
+  bash "${INSTALLER}" --install --project "${PROJ}" 2>&1 )"; RC=$?
+assert_eq "owner id: --install with the id set exits 0" 0 "${RC}"
+CRON="$(cat "${FAKE_CRONTAB_FILE}")"
+assert_contains "owner id: baked into the @reboot line" \
+  "@reboot ATHENA_ATTEND_OWNER_SLACK_ID=UOWNERPERSIST9 ${FAKE_RUNNER_DIR}/athena-channel-session.sh --project ${PROJ}" "${CRON}"
+assert_contains "owner id: baked into the */5 line" \
+  "*/5 * * * * ATHENA_ATTEND_OWNER_SLACK_ID=UOWNERPERSIST9 ${FAKE_RUNNER_DIR}/athena-channel-session.sh --project ${PROJ}" "${CRON}"
+REBOOT_ACTUAL="$(printf '%s\n' "${CRON}" | grep -F '@reboot ')"
+CRONRUN_OUT="$(env -i /bin/sh -c "${REBOOT_ACTUAL#@reboot }" 2>&1)"
+assert_contains "owner id: reaches the launcher under a cron-shaped EMPTY environment" \
+  "OWNER_SLACK_ID=[UOWNERPERSIST9]" "${CRONRUN_OUT}"
+
+# -- --check, run with a DIFFERENT (or no) id in ITS OWN env, still reports
+# persisted (proves --check matches by substring, not by re-deriving the line
+# from its own env) — and shows the id MASKED to its first 3 chars, never in full.
+OUT="$( env "${owner_inst_env[@]}" FAKE_NODE_RC=0 bash "${INSTALLER}" --check --project "${PROJ}" 2>&1 )"; RC=$?
+assert_eq "owner id: --check exits 0 when persisted (even with no id in ITS OWN env)" 0 "${RC}"
+assert_contains "owner id: --check reports the id as persisted" "owner DM: persisted" "${OUT}"
+assert_contains "owner id: --check masks the id to its first 3 chars" "id UOW..." "${OUT}"
+assert_not_contains "owner id: --check does NOT warn when the id is persisted" "WARNING" "${OUT}"
+
+# -- --remove still matches and drops a persisted-id line (idempotency held,
+# no orphan even though the line now carries a VAR=value prefix) --
+OUT="$( env "${owner_inst_env[@]}" FAKE_NODE_RC=0 bash "${INSTALLER}" --remove --project "${PROJ}" 2>&1 )"; RC=$?
+assert_eq "owner id: --remove exits 0" 0 "${RC}"
+assert_eq "owner id: --remove drops the persisted-id entries" "" \
+  "$(grep -F -- "${FAKE_RUNNER_DIR}/athena-channel-session.sh --project ${PROJ}" "${FAKE_CRONTAB_FILE}" || true)"
+
+echo "== owner id: deny by default -- --install REFUSES without a valid id or --no-owner-dm =="
+# -- unset id, no --no-owner-dm -> exit 2, Fix line, crontab left BYTE-IDENTICAL --
+: > "${FAKE_CRONTAB_FILE}"; printf 'PRE-EXISTING-LINE\n' > "${FAKE_CRONTAB_FILE}"
+BEFORE="$(cat "${FAKE_CRONTAB_FILE}")"
+OUT="$( env "${owner_inst_env[@]}" FAKE_NODE_RC=0 bash "${INSTALLER}" --install --project "${PROJ}" 2>&1 )"; RC=$?
+assert_eq "deny-by-default: unset id with no --no-owner-dm refuses (exit 2)" 2 "${RC}"
+assert_contains "deny-by-default: the refusal carries a Fix line" "Fix:" "${OUT}"
+assert_eq "deny-by-default: the crontab is left BYTE-IDENTICAL on refusal" "${BEFORE}" "$(cat "${FAKE_CRONTAB_FILE}")"
+
+# -- malformed ids (test the MISS, not just the hit): lowercase, empty-ish,
+# whitespace, and simply not matching ^U[A-Z0-9]{8,}$ -- each rejected --
+for BAD_ID in 'u0123abcd' 'U123' 'U ABCDEFGH' 'not-a-slack-id'; do
+  : > "${FAKE_CRONTAB_FILE}"
+  OUT="$( env "${owner_inst_env[@]}" "ATHENA_ATTEND_OWNER_SLACK_ID=${BAD_ID}" FAKE_NODE_RC=0 \
+    bash "${INSTALLER}" --install --project "${PROJ}" 2>&1 )"; RC=$?
+  assert_eq "deny-by-default: malformed id '${BAD_ID}' refuses (exit 2)" 2 "${RC}"
+  assert_eq "deny-by-default: malformed id '${BAD_ID}' writes nothing" "" "$(cat "${FAKE_CRONTAB_FILE}")"
+done
+
+echo "== owner id: --no-owner-dm is the only explicit way past the refusal =="
+: > "${FAKE_CRONTAB_FILE}"
+OUT="$( env "${owner_inst_env[@]}" FAKE_NODE_RC=0 bash "${INSTALLER}" --install --no-owner-dm --project "${PROJ}" 2>&1 )"; RC=$?
+assert_eq "no-owner-dm: --install --no-owner-dm exits 0" 0 "${RC}"
+assert_contains "no-owner-dm: prints a loud WARNING" "WARNING" "${OUT}"
+CRON="$(cat "${FAKE_CRONTAB_FILE}")"
+assert_not_contains "no-owner-dm: the @reboot line has no OWNER_SLACK_ID=" "ATHENA_ATTEND_OWNER_SLACK_ID=" \
+  "$(printf '%s\n' "${CRON}" | grep -F '@reboot ')"
+assert_contains "no-owner-dm: the choice is recorded IN the crontab entry itself" "ATHENA-NO-OWNER-DM" "${CRON}"
+REBOOT_ACTUAL="$(printf '%s\n' "${CRON}" | grep -F '@reboot ')"
+CRONRUN_OUT="$(env -i /bin/sh -c "${REBOOT_ACTUAL#@reboot }" 2>&1)"
+assert_contains "no-owner-dm: the cron-shaped run sees it UNSET (distinct from the persisted case)" \
+  "OWNER_SLACK_ID=[UNSET]" "${CRONRUN_OUT}"
+
+OUT="$( env "${owner_inst_env[@]}" FAKE_NODE_RC=0 bash "${INSTALLER}" --check --project "${PROJ}" 2>&1 )"; RC=$?
+assert_eq "no-owner-dm: --check exits 0 (entries present; disabled is an explicit choice, not a fault)" 0 "${RC}"
+assert_contains "no-owner-dm: --check reports it as DISABLED, not as NOT PERSISTED" "owner DM: disabled" "${OUT}"
+assert_not_contains "no-owner-dm: --check does not raise a WARNING for an explicit no-owner-dm choice" "WARNING" "${OUT}"
+
+# -- --remove drops a --no-owner-dm-marked line too (no orphan) --
+OUT="$( env "${owner_inst_env[@]}" FAKE_NODE_RC=0 bash "${INSTALLER}" --remove --project "${PROJ}" 2>&1 )"; RC=$?
+assert_eq "no-owner-dm: --remove exits 0" 0 "${RC}"
+assert_eq "no-owner-dm: --remove drops the marked-disabled entries (no orphan)" "" \
+  "$(grep -F -- "${FAKE_RUNNER_DIR}/athena-channel-session.sh --project ${PROJ}" "${FAKE_CRONTAB_FILE}" || true)"
+
+echo "== owner id: a T3-era BARE line (installed before DND-288) reads NOT PERSISTED, distinctly =="
+# Simulate the pre-DND-288 installed state directly (bare, no prefix, no
+# marker) rather than via --install, which can no longer produce it.
+: > "${FAKE_CRONTAB_FILE}"
+printf '@reboot %s --project %s\n*/5 * * * * %s --project %s\n' \
+  "${FAKE_RUNNER_DIR}/athena-channel-session.sh" "${PROJ}" \
+  "${FAKE_RUNNER_DIR}/athena-channel-session.sh" "${PROJ}" > "${FAKE_CRONTAB_FILE}"
+OUT="$( env "${owner_inst_env[@]}" FAKE_NODE_RC=0 bash "${INSTALLER}" --check --project "${PROJ}" 2>&1 )"; RC=$?
+assert_eq "T3-era bare line: --check STILL exits 0 (entries present; this is a warning, not a failure)" 0 "${RC}"
+assert_contains "T3-era bare line: --check reports NOT PERSISTED, naming DND-288" \
+  "owner DM: NOT PERSISTED (installed before DND-288)" "${OUT}"
+assert_contains "T3-era bare line: --check's warning carries a Fix line" "Fix:" "${OUT}"
+assert_contains "T3-era bare line: the Fix line names re-running --install with the id set" \
+  "re-run --install with ATHENA_ATTEND_OWNER_SLACK_ID set" "${OUT}"
+assert_not_contains "T3-era bare line: NOT PERSISTED never reads as 'disabled'" "owner DM: disabled" "${OUT}"
+assert_not_contains "T3-era bare line: NOT PERSISTED never reads as 'persisted'" "owner DM: persisted" "${OUT}"
+# clean up this sub-suite's crontab so it doesn't leak into anything after it
+: > "${FAKE_CRONTAB_FILE}"
 
 echo "== dry-run: prints the plan, launches nothing =="
 CASE="${TMP}/c-dry"; mkdir -p "${CASE}"

@@ -185,9 +185,26 @@ say() {
   return 0
 }
 
+# mark_owner_not_notified -- appends "owner NOT notified" to whichever of the
+# wedged/dark markers this run just wrote, so inbox-doctor's channel: line can
+# say "wedged (owner NOT notified)" instead of just "wedged" (DND-288 build 4).
+# A wedged attendant that DM'd no one must not read the same as one that did.
+mark_owner_not_notified() {
+  local f
+  for kind in wedged dark; do
+    f="$(attend_marker "${STATE_DIR}" "${kind}")"
+    [ -e "${f}" ] && printf 'owner NOT notified: ATHENA_ATTEND_OWNER_SLACK_ID unset\n' >>"${f}" 2>/dev/null
+  done
+  return 0
+}
+
 dm_owner() {
   local msg="$1"
-  [ -n "${ATHENA_ATTEND_OWNER_SLACK_ID:-}" ] || { say "owner DM skipped (ATHENA_ATTEND_OWNER_SLACK_ID unset): ${msg}"; return 0; }
+  [ -n "${ATHENA_ATTEND_OWNER_SLACK_ID:-}" ] || {
+    say "owner DM skipped (ATHENA_ATTEND_OWNER_SLACK_ID unset): ${msg}"
+    mark_owner_not_notified
+    return 0
+  }
   [ -x "${DM_BIN}" ] || { say "owner DM skipped (dm bin not executable: ${DM_BIN}): ${msg}"; return 0; }
   "${DM_BIN}" "${ATHENA_ATTEND_OWNER_SLACK_ID}" "${msg}" >/dev/null 2>&1 \
     || say "owner DM failed to send: ${msg}"
