@@ -250,6 +250,31 @@ assert_eq "no-id wedge: still exits 75 (wedged)" 75 "${RC}"
 assert_eq "no-id wedge: sent NO owner DM (dm bin never called)" "" "$(cat "${FAKE_DM_LOG}")"
 assert_contains "no-id wedge: the wedged marker records 'owner NOT notified'" "owner NOT notified" \
   "$(cat "$(attend_marker "${ATHENA_ATTEND_STATE_DIR}" wedged)" 2>/dev/null)"
+assert_eq "no-id wedge: the annotation lands on LINE 2 (the line doctor.sh reads)" 2 \
+  "$(grep -n 'owner NOT notified' "$(attend_marker "${ATHENA_ATTEND_STATE_DIR}" wedged)" 2>/dev/null | cut -d: -f1)"
+# Prove the CONSUMER actually surfaces it, not just that the byte exists in the
+# file: run the real doctor_check_channel against this exact marker and assert
+# its "channel" finding names "owner NOT notified" -- the claimed mechanism
+# (inbox-doctor's channel: line) must be able to fire, per this repo's
+# "a claimed mechanism must be able to fire" convention.
+DOCTOR_LIB="${SCRIPTS}/../ai/skills/athena:inbox/lib/doctor.sh"
+if [ -r "${DOCTOR_LIB}" ]; then
+  DOCTOR_OUT="$(
+    # shellcheck source=/dev/null
+    . "${DOCTOR_LIB}"
+    export DOCTOR_REPO_DIR="${SCRIPTS%/*}"
+    export ATHENA_INBOX_DOCTOR_CHANNEL_PROJECT="testproj"
+    export ATHENA_INBOX_DOCTOR_TMUX_HAS_SESSION=0
+    export ATHENA_ATTEND_STATE_DIR="${ATHENA_ATTEND_STATE_DIR}"
+    doctor_check_channel
+  )"
+  assert_contains "no-id wedge: inbox-doctor's channel: finding NAMES 'owner NOT notified' (the consumer this exists for)" \
+    "owner NOT notified" "${DOCTOR_OUT}"
+  assert_contains "no-id wedge: inbox-doctor still reports the finding as fail (wedged)" "fail" \
+    "$(printf '%s\n' "${DOCTOR_OUT}" | cut -f1)"
+else
+  echo "  SKIP: ai/skills/athena:inbox/lib/doctor.sh not found at ${DOCTOR_LIB}; consumer-side assertion skipped"
+fi
 unset FAKE_CLAUDE_VERSION
 export ATHENA_ATTEND_OWNER_SLACK_ID="U-OWNER"   # restore for the cases below
 

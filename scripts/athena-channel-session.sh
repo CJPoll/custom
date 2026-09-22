@@ -185,16 +185,22 @@ say() {
   return 0
 }
 
-# mark_owner_not_notified -- appends "owner NOT notified" to whichever of the
-# wedged/dark markers this run just wrote, so inbox-doctor's channel: line can
-# say "wedged (owner NOT notified)" instead of just "wedged" (DND-288 build 4).
-# A wedged attendant that DM'd no one must not read the same as one that did.
+# mark_owner_not_notified -- appends "(owner NOT notified: ...)" onto the END
+# of LINE 2 of the wedged marker this run just wrote (every dm_owner call site
+# writes a `wedged` marker immediately before calling dm_owner; there is no
+# dark+dm_owner pairing, so only `wedged` is ever the right target).
+#
+# It MUST land on line 2, not a new line 3: inbox-doctor's channel: line reads
+# the reason with `sed -n 2p "$(attend_marker ... wedged)"` (and the dark
+# branch does the same for its own marker) -- ai/skills/athena:inbox/lib/doctor.sh.
+# An earlier version of this function appended a new trailing line, which sat
+# on line 3 and was never read by that `sed -n 2p`: the annotation existed on
+# disk but the one consumer credited with surfacing it could not see it -- a
+# claimed mechanism that could not fire (DND-288 build 4 correction).
 mark_owner_not_notified() {
-  local f
-  for kind in wedged dark; do
-    f="$(attend_marker "${STATE_DIR}" "${kind}")"
-    [ -e "${f}" ] && printf 'owner NOT notified: ATHENA_ATTEND_OWNER_SLACK_ID unset\n' >>"${f}" 2>/dev/null
-  done
+  local f="$(attend_marker "${STATE_DIR}" wedged)"
+  [ -e "${f}" ] || return 0
+  sed -i '2 s/$/ (owner NOT notified: ATHENA_ATTEND_OWNER_SLACK_ID unset)/' "${f}" 2>/dev/null
   return 0
 }
 
