@@ -72,6 +72,15 @@ them**. You integrate with that system — you do not design a parallel one.
   authorization ADRs.
 - Query the **knowledge graph** for prior decisions, constraints, and gotchas
   in this area (see the `kg` skills). Nothing found is also signal.
+- **Search the tracker for open Bug-labelled tickets touching the modules your
+  work will exercise** — especially any the plan runs at higher load or
+  concurrency than they see today. List each as a named risk in the grounding
+  note; a plan that raises the load on a module with a known open defect must
+  address that defect, not design on top of it. Measured 2026-09-22: a 4-way
+  concurrent realtor master-load was designed on `bulk_upsert_brokerages`,
+  discarding 21/22 shards to `40P01 deadlock_detected` — the exact failure of
+  PT-440, an open Backlog bug on that path (~397 daily occurrences) that no
+  planning step searched for.
 
 ## 5. Record what you found
 
