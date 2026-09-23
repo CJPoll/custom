@@ -119,20 +119,34 @@ fi
 # mask_wrapper_vars: `$W git` / `${W} git` becomes the wrapper form when, at
 # that point in the command, W's most recent assignment is a wrapper path
 # (`W=~/…/glab-athena`, `export W="$HOME/…/gh-athena"`). Scanned left to right,
-# so a later reassignment cannot bless an earlier use. Reads dequoted text.
+# so a later reassignment cannot bless an earlier use. Only an assignment that
+# sets W in THIS shell counts: a standalone statement ended by `;`, `&&`, `||`
+# or the end of the command. A prefix assignment (`W=… cmd`), a pipeline or
+# backgrounded element (`W=… | x`, `W=… &`) and anything inside `( … )` or
+# `$( … )` leave W unset for the later use, where an unquoted `$W git push` is a
+# plain push — so they bless nothing, and a `)` forgets what was set inside it.
+# Reads dequoted text.
 mask_wrapper_vars() {
   awk '{
-    s = $0; out = ""
-    are = "(^|[[:space:];&|(])[A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|)]*"
+    s = $0; out = ""; depth = 0
+    are = "(^|[[:space:];&|])[A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|()]*[[:space:]]*(;|&&|[|][|]|$)"
     ure = "[$]([{][A-Za-z_][A-Za-z0-9_]*[}]|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]+git[[:space:]]"
     while (1) {
       a = match(s, are); as = RSTART; al = RLENGTH
       u = match(s, ure); us = RSTART; ul = RLENGTH
-      if (!a && !u) break
+      p = match(s, /[()]/); ps = RSTART
+      if (!a && !u && !p) break
+      if (p && (!a || ps < as) && (!u || ps < us)) {
+        # A subshell inherits W; what it sets dies at its `)`.
+        if (substr(s, ps, 1) == "(") depth++
+        else { for (k in wd) if (wd[k] == depth) { delete wv[k]; delete wd[k] }; if (depth > 0) depth-- }
+        out = out substr(s, 1, ps); s = substr(s, ps + 1); continue
+      }
       if (a && (!u || as < us)) {
-        tok = substr(s, as, al); sub(/^[[:space:];&|(]/, "", tok)
-        name = tok; sub(/=.*/, "", name); val = substr(tok, length(name) + 2)
-        wv[name] = (val ~ /(^|\/)(gh|glab)-athena$/)
+        tok = substr(s, as, al); sub(/^[[:space:];&|]/, "", tok)
+        name = tok; sub(/=.*/, "", name)
+        val = substr(tok, length(name) + 2); sub(/[[:space:];&|].*$/, "", val)
+        wv[name] = (val ~ /(^|\/)(gh|glab)-athena$/); wd[name] = depth
         out = out substr(s, 1, as + al - 1); s = substr(s, as + al); continue
       }
       tok = substr(s, us, ul); name = tok; sub(/^[$][{]?/, "", name); sub(/[}[:space:]].*/, "", name)

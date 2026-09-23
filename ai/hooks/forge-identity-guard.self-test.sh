@@ -360,6 +360,21 @@ check_text "C27. a hook written by echo, fired by git commit" 'to a github.com r
 run "$(bash_json_cwd "$TMP/gh_scp" "python3 -c \"import os; os.system('git push origin HEAD')\"")"
 check_text "C28. python3 -c running a push" 'to a github.com remote'
 
+run "$(bash_json_cwd "$TMP/gh_scp" '(W=~/dev/custom/ai/bin/gh-athena); $W git push origin HEAD')"
+check_text "C29. W set only in a subshell -> the later \$W git push is plain, warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena true; $W git push origin HEAD')"
+check_text "C30. W as a command-prefix assignment does not persist -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena | cat; $W git push origin HEAD')"
+check_text "C31. W set in a pipeline element does not persist -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'X=$(W=~/dev/custom/ai/bin/gh-athena; echo); $W git push origin HEAD')"
+check_text "C32. W set inside \$( … ) does not persist -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena && (cd . && "$W" git push origin x)')"
+check "V6. W set in this shell, used inside a later subshell (inherited)" allow
+
 echo
 echo "--- MUST-NOT-WARN cases (wrapper / reads / unrelated) ---"
 
