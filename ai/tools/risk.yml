@@ -54,6 +54,7 @@ tools:
   forge-preflight:         { class: readOnly, reason: probe }
   harness-signals:         { class: readOnly, reason: signals }
   lead-time:               { class: readOnly, reason: analysis }
+  push-actor-check:        { class: readOnly, reason: query }
   ready-and-idle:          { class: readOnly, reason: analysis }
 
   # --- idempotent: deterministic local mutation (writes an in-repo artifact;

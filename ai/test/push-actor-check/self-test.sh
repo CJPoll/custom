@@ -70,7 +70,7 @@ run_in() {
 
 expect() {  # expect <label> <rc> [needle]
   if [ "${RC}" -ne "$2" ]; then bad "$1" "rc=${RC} want $2; out=[${OUT}]"; return; fi
-  if [ -n "${3:-}" ] && ! printf '%s' "${OUT}" | grep -qF -- "$3"; then bad "$1" "missing [$3]; out=[${OUT}]"; return; fi
+  if [ -n "${3:-}" ] && ! grep -qF -- "$3" <<<"${OUT}"; then bad "$1" "missing [$3]; out=[${OUT}]"; return; fi
   ok "$1"
 }
 
@@ -81,7 +81,7 @@ echo "bin: ${BIN}"
 # --help: stdout, exit 0, does nothing else.
 reset_stub gh
 HELP=$("${BIN}" --help 2>/dev/null); RC=$?
-if [ "${RC}" -eq 0 ] && printf '%s' "${HELP}" | grep -q 'Usage:' && [ "$(reads gh)" = 0 ]; then ok "1. --help on stdout, exit 0, no read"; else bad "1. --help" "rc=${RC} help=[${HELP}]"; fi
+if [ "${RC}" -eq 0 ] && grep -q 'Usage:' <<<"${HELP}" && [ "$(reads gh)" = 0 ]; then ok "1. --help on stdout, exit 0, no read"; else bad "1. --help" "rc=${RC} help=[${HELP}]"; fi
 
 # GitHub: bot event on the first read.
 reset_stub gh; gh_event feat "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
@@ -96,6 +96,12 @@ gh_event feat "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
 run_in repo_gh --sha "${SHA}" --window 10 --interval 1 feat
 expect "3. lagging event found on a re-read -> 0" 0 'athena-harness[bot]'
 [ "$(reads gh)" = 3 ] && ok "3a. exactly three reads" || bad "3a. read count" "reads=$(reads gh)"
+
+# GitHub: a warning on stderr does not spoil a good read; a failure's stderr is reported.
+reset_stub gh; gh_event feat "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
+sed -i 's#^exit#echo "warning: gh update available" >\&2; exit#' "${TMP}/gh/bin"
+run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
+expect "3b. a stderr warning beside valid JSON -> still 0" 0 'athena-harness[bot]'
 
 # GitHub: the owner is the actor.
 reset_stub gh; gh_event feat "${SHA}" 'CJPoll' > "${TMP}/gh/responses/default"
@@ -116,6 +122,7 @@ reset_stub gh; printf 'HTTP 502\n' > "${TMP}/gh/responses/default"; printf '1' >
 run_in repo_gh --sha "${SHA}" --window 2 --interval 1 feat
 expect "6. every read failed -> 3 (could not read, not 'no event')" 3 'could not read'
 expect "6a. carries Fix:" 3 'Fix:'
+expect "6b. names the last error" 3 'HTTP 502'
 
 # GitHub: unparseable output is a failed read too.
 reset_stub gh; printf 'not json' > "${TMP}/gh/responses/default"
