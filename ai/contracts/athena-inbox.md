@@ -1123,25 +1123,24 @@ change stream of state-change events*), unchanged by this section.
   `fleet.session.message` schema pin of the same date (epic D39) — the inbox
   line mirrors the event payload so a recipient can reply.
 - **`agent_message`** — a routed `notion.agent_message.*`
-  (`athena-events.md`). Fields: `entity_id` (equal to `row_id`), `row_id` (the
-  Notion page id), `from`, `subject`, `sent_at`, `to`, `acked_by`, `thread`,
-  `re`, `sending_owner`, `recipient_owner`, `revision`; a delete line carries
-  `entity_id`, `row_id`, and `revision` only. **NO body field**: the line is a
-  **trigger**, and the Notion row (`row_id`) is the authority — the consumer
-  wakes, re-fetches the row, acts, and acks by adding itself to the row's
-  `Acked By`. The consumer procedure is `ai/skills/athena:inbox/SKILL.md` →
-  *Agent Messages*.
+  (`athena-events.md`). Fields: the family's payload schema exactly as
+  `athena-events.md` → *Declared families beyond the first pass* declares it.
+  That section is normative for the field set and for the form of each field.
+  This contract adds one requirement: the line MUST carry `entity_id`, which
+  the reference reader keys every `producer:"platform"` line on. **NO body
+  field**: the line is a **trigger**, and the Notion row is the authority. The
+  consumer wakes, re-fetches the row by `row_id`, acts, and acks by adding
+  itself to the row's `Acked By`. The consumer procedure is
+  `ai/skills/athena:inbox/SKILL.md` → *Agent Messages*.
 
-  **Later (2026-09-23):** this field list previously named `row_id` as the
-  only identity and no `entity_id`. Superseded because a platform line with no
-  `entity_id` cannot be read: the reference reader keys every
-  `producer:"platform"` line on `entity_id` and scores one without it `+1
-  unreadable` (*A `log` channel MAY have a non-Slack producer*; `logchan_scan`),
-  and the server line encoder refuses to encode a payload without it. Under the
-  old list every agent-message line was either refused at encode or unreadable
-  at the client. Which server component supplies `entity_id` (the event
-  payload, or the line encoder from `row_id`) is the producer's choice; the line
-  MUST carry it.
+  **Later (2026-09-23):** this bullet previously listed the fields inline,
+  with `row_id` as the only identity and no `entity_id`. Superseded because a
+  platform line with no `entity_id` cannot be read. The reference reader keys
+  every `producer:"platform"` line on `entity_id` and scores a line without
+  one as `+1 unreadable` (*A `log` channel MAY have a non-Slack producer*;
+  `logchan_scan`). The server line encoder refuses to encode such a payload at
+  all. The field list now defers to `athena-events.md`, so the form of
+  `entity_id` is stated in one place.
 
 **Registry convention for a session inbox.** A project's session inbox is the
 per-project `log` channel **`<project>-mail.jsonl`**, `producer: "platform"`,

@@ -671,15 +671,28 @@ delivery dual of the Slack-click direct route (design §4/§D6), same-owner only
 **The `notion.agent_message.{created,updated,deleted}` family** (Agent Messages
 routing):
 
-1. **Payload schema** — `row_id` (string, scalar — the Notion page id),
-   `from` (string, scalar), `subject` (string, scalar), `sent_at` (timestamp,
-   scalar), `to` (string, **collection**), `acked_by` (string, **collection**),
-   `thread` (string, **collection**), `re` (string, scalar, optional),
-   `sending_owner` (string, **collection**), `recipient_owner` (string,
-   **collection**), `revision` (string, scalar). **NO `body` field** — the line
-   is a **trigger**; the Notion row is the authority (the consumer re-fetches the
-   row).
-2. **Identity field** — the **page id** (`row_id`).
+1. **Payload schema** — `entity_id` (string, scalar — the stable source
+   entity handle `notion:<page id>`, the same form every other `notion.*`
+   family carries; see *Payload fields and their types per event type*),
+   `row_id` (string, scalar — the **bare** Notion page id, which the consumer
+   re-fetches the row by), `from` (string, scalar), `subject` (string, scalar),
+   `sent_at` (timestamp, scalar), `to` (string, **collection**), `acked_by`
+   (string, **collection**), `thread` (string, **collection**), `re` (string,
+   scalar, optional), `sending_owner` (string, **collection**),
+   `recipient_owner` (string, **collection**), `revision` (string, scalar).
+   `notion.agent_message.deleted` carries `entity_id`, `row_id`, and
+   `revision` only. **NO `body` field** — the line is a **trigger**; the Notion
+   row is the authority (the consumer re-fetches the row).
+2. **Identity field** — `entity_id` (`notion:<page id>`), naming the same
+   page as `row_id`.
+
+   **Later (2026-09-23):** the schema above previously carried no `entity_id`
+   and named the bare page id (`row_id`) as the identity field. Superseded by
+   admiral decision D-ADM-4 (AM-2/AM-5). An inbox line built from this payload
+   could not be read: the inbox reader and the server line encoder both key
+   every platform line on `entity_id` (`ai/contracts/athena-inbox.md` →
+   *Platform `log` line kinds*). The `notion:<uuid>` form keeps this family
+   consistent with the entity-handle rule every `notion.*` family follows.
 3. **Change/revision token** — `revision` = the row's `last_edited_time` (a
    persistent entity that is updated).
 4. **Origination membership** — the **Notion inbound-webhook ingress** and the
