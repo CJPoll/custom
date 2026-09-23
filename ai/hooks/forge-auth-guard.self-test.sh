@@ -777,6 +777,11 @@ for _sub in login logout refresh configure-docker docker-helper dpop-gen; do
   check_names "N2-glab-${_sub}. rule 2 deny names $_sub" "$_sub"
 done
 
+for _sub in login logout refresh token setup-git switch configure-docker docker-helper dpop-gen; do
+  run "$(bash_json "\$G auth $_sub")"
+  check_names "N5-${_sub}. rule 5 deny names $_sub" "$_sub"
+done
+
 echo
 echo "==================================================="
 printf 'RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"

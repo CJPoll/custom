@@ -370,7 +370,7 @@ fi
 # text-match false positive described in the header.
 VAR_WORD='(^|[[:space:];&|(`])[^[:space:];&|()`]*[$](\{[^}]*\}|[[:alnum:]_]+)[^[:space:];&|()`]*'
 if has "(${VAR_WORD}|[)\`])[[:space:]]+auth[[:space:]]+(${ANY_MUT}|${EXPANDED})"; then
-  deny 'forge-auth: this runs `auth <login/logout/refresh/token/setup-git/switch/configure-docker/...>` through a command word built from a variable or command substitution, so it may change GitHub/GitLab auth state, which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). Diagnosing is fine: `~/dev/custom/ai/bin/forge-preflight` and `gh auth status` are reads.'
+  deny "forge-auth: this runs \`auth <${ANY_MUT_MSG}>\` through a command word built from a variable or command substitution, so it may change GitHub/GitLab auth state, which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> \"When a forge write can't be done as Athena\"). Diagnosing is fine: \`~/dev/custom/ai/bin/forge-preflight\` and \`gh auth status\` are reads."
 fi
 
 # ---- 6: glab-athena refresh (DND-390, coordinator scope addition) ----------
