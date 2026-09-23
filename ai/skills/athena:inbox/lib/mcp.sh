@@ -26,19 +26,29 @@ MCP_PROTOCOL_VERSION="2025-03-26"
 # The URL of the `athena` MCP server Claude Code has registered for this
 # project, from `$HOME/.claude.json`: local scope keyed by the main checkout
 # (where `add-athena-mcp` is told to run), then by this worktree's toplevel,
-# then user scope. Status 1 when none is registered; status 2 when a key is not
-# an absolute path (a wrongly computed key is an error, never "not registered").
+# then user scope. Three failure statuses, never folded into one another:
+#   1 -- the config file does not exist, or it names no `athena` server in any
+#        of those scopes: genuinely not registered;
+#   2 -- a lookup key is not an absolute path (computed wrongly; an internal
+#        error, never "not registered");
+#   3 -- the config exists but cannot be read or parsed, or its `athena` entry
+#        has no usable `url`: a broken registration, whose repair is not
+#        re-running add-athena-mcp over a file nobody has looked at.
 mcp_registered_url() {
   local main="$1" top="$2" cfg="${HOME}/.claude.json" url
   case "${main}" in /*) ;; *) inbox_fail "internal: the main-checkout key for the MCP lookup is not absolute (\"${main}\")" \
     "report this; the key is computed from the git common dir and must be absolute."; return 2 ;; esac
   case "${top}" in /*) ;; *) inbox_fail "internal: the toplevel key for the MCP lookup is not absolute (\"${top}\")" \
     "report this; the key is computed from git rev-parse --show-toplevel and must be absolute."; return 2 ;; esac
-  [ -f "${cfg}" ] || return 1
-  url="$(jq -r --arg a "${main}" --arg b "${top}" '
-      (.projects[$a].mcpServers.athena // .projects[$b].mcpServers.athena // .mcpServers.athena // null)
-      | if . == null then empty else (.url // "") end' "${cfg}" 2>/dev/null)" || return 1
-  [ -n "${url}" ] || return 1
+  [ -e "${cfg}" ] || return 1
+  local entry
+  entry="$(jq -c --arg a "${main}" --arg b "${top}" '
+      (.projects[$a]?.mcpServers?.athena? // .projects[$b]?.mcpServers?.athena? // .mcpServers?.athena? // null)' \
+      "${cfg}" 2>/dev/null)" || return 3
+  [ -n "${entry}" ] || return 3
+  [ "${entry}" != "null" ] || return 1
+  url="$(printf '%s' "${entry}" | jq -r 'if type == "object" and (.url | type) == "string" then .url else "" end' 2>/dev/null)"
+  [ -n "${url}" ] || return 3
   printf '%s\n' "${url}"
 }
 

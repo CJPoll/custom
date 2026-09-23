@@ -1653,6 +1653,11 @@ inbox_send_routed() {
   top="$(mcp_toplevel "${cwd}")" || top="${main}"
   url="$(mcp_registered_url "${main}" "${top}")"; rc=$?
   [ "${rc}" -ne 2 ] || return 1
+  if [ "${rc}" -eq 3 ]; then
+    inbox_fail "the Claude Code config (\$HOME/.claude.json) could not be read, or its athena MCP entry has no url, so the registration cannot be trusted (nothing was sent)" \
+      "inspect it yourself: jq '.projects[\"${main}\"].mcpServers.athena' ~/.claude.json. Repair the JSON or the entry by hand; re-running scripts/add-athena-mcp over a file that does not parse is not a fix."
+    return 1
+  fi
   if [ "${rc}" -ne 0 ]; then
     inbox_fail "the athena MCP server is not registered for this project, so a routed message cannot be sent (nothing was sent, and no maildir was written)" \
       "run scripts/add-athena-mcp from this project's main checkout (${main}), then restart the session through scripts/athena. There is no silent fallback to a maildir channel; send-mail <channel> <slug> --to <identity> is the explicit maildir path."

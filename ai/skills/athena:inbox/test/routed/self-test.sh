@@ -217,6 +217,20 @@ printf '{"projects":{"/somewhere/else":{"mcpServers":{"athena":{"url":"https://x
 send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
 refused_before_network "athena registered only for ANOTHER project" "not registered"
 
+# THE MISS the not-registered cases above must not swallow: a config that
+# EXISTS but cannot be parsed, or whose athena entry has no url, is a broken
+# registration -- its own refusal, never "run add-athena-mcp".
+printf '{"projects": {broken' > "${HOME}/.claude.json"; shim_reset
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+refused_before_network "an unparseable ~/.claude.json" "could not be read"
+assert_not_contains "unparseable config: NOT reported as merely unregistered" "is not registered" "${ERR}"
+jq -n --arg p "${MAIN}" '{projects: {($p): {mcpServers: {athena: {type: "http"}}}}}' > "${HOME}/.claude.json"; shim_reset
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+refused_before_network "an athena entry with no url" "has no url"
+printf '[1,2]' > "${HOME}/.claude.json"; shim_reset
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+refused_before_network "a ~/.claude.json that is not an object" "could not be read"
+
 register_mcp; unset ATHENA_MCP_BEARER; shim_reset
 send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
 refused_before_network "ATHENA_MCP_BEARER unset" "ATHENA_MCP_BEARER is not set"
