@@ -357,7 +357,8 @@ miss.
   **increments a monotonic count** and updates **last-seen**. On an **unread**
   row it stores **no** new payload. On a **read** row it **re-opens** the row
   (unread again, reported again) and its payload becomes the exemplar, so a
-  re-opened row names what re-opened it. This bounds the store by a
+  re-opened row names what re-opened it. The count spans every episode; only the
+  exemplar restarts. This bounds the store by a
   **structural quantity** — per owner, distinct `(rule, cause)` pairs plus
   distinct `(direct recipient machine, cause)` pairs, a finite set —
   **independent of traffic volume**: a revoked credential failing a million
@@ -417,54 +418,72 @@ miss.
   store also records each time a machine **becomes unreachable**, so the owner is
   told without having to write a rule for it.
   - **Cause and trigger.** Cause class `machine-unreachable`. The server judges a
-    machine's reachability from delivery silence — pending deliveries it has not
-    acked within the reachability window — never from socket or process state
-    (see *Which machine am I — the own-machine id* for the `machine_reachable`
-    verdict). When a machine **transitions** to unreachable, the server records
-    one row write, **once per transition**: a latch on the machine makes a
-    machine that stays unreachable record nothing more. The latch flip, the
-    routed `fleet.machine.unreachable` event, and this row write commit
-    together or not at all. A recovery records nothing and never touches the
-    row; the owner marks it read.
+    machine's reachability from delivery silence, never from socket or process
+    state: a delivery to the machine older than the silence budget (the one
+    *Which machine am I — the own-machine id* names), still pending or terminal
+    for want of an ack, with no later ack or join, makes the machine
+    unreachable (`reachable: false`). When a machine **transitions** to
+    unreachable from any other verdict, the server writes this row **once per
+    transition**: a latch on the machine makes a machine that stays unreachable
+    write nothing more, and the latch flip and the row write commit together or
+    not at all. A recovery writes nothing and never touches the row; the owner
+    marks it read.
   - **Why this store.** A live-but-silent connection's deliveries terminal-FAIL
-    only after the longer per-connection ack timeout, and the routed event
-    reaches the owner only through a rule the owner wrote. This row is the
-    owner report that needs neither.
+    only after the longer per-connection ack timeout, so no delivery row would
+    report the outage in time. This row is the owner report, and it needs no
+    rule.
   - **Key.** `rule_id` is `nil` (no rule is involved), the terminal-cause is
     `machine-unreachable`, and `machine_id` is **the machine that went
     unreachable**, under the store's *Grain* above. So there is one row per
     machine. It never collides with a direct delivery's row for that machine,
     because no delivery fails under this cause. A `nil` `rule_id` therefore
     means a direct delivery only for a delivery cause.
-  - **Exemplar.** The `fleet.machine.unreachable` event's payload plus the
-    terminal error: adapter `platform`, target `machine:<machine_id>`, the cause,
-    the machine's id and name, `unreachable_since`, and the count of deliveries
-    pending at the transition. A pending count of `0` is stated, never omitted,
-    so "nothing waiting" does not read as "no data".
+  - **Exemplar.** The server's own record of the transition — the machine's id
+    and name, `unreachable_since`, its last ack, join and heartbeat times, and
+    the count of deliveries pending at the transition — plus the terminal error:
+    adapter `platform`, target `machine:<machine_id>`, the cause, the machine's
+    id and name, `unreachable_since`, and the pending count. A pending count of
+    `0` is stated, never omitted, so "nothing waiting" does not read as "no
+    data". The record carries no third-party content.
   - **Episodes.** Every transition starts a **new episode**, even while the row
-    is unread: it re-opens the row, is reported again, and takes that
-    transition's exemplar. The count is the machine's transitions. This departs
-    from the delivery rows' unread rule in *Grain* above on purpose: each
-    transition is one outage the latch already debounced, and the recovery
+    is unread: it re-opens the row, is reported again, and **takes that
+    transition's exemplar**. The count is the machine's transitions. This
+    departs from the delivery rows' unread rule in *Grain* above on purpose:
+    each transition is one outage the latch already debounced, and the recovery
     between two outages is silent, so an unread alert from an earlier outage
-    must not swallow the next one. It is not a delivery, so no retry budget
-    applies (*Reconciled with idempotency* below does not govern it).
+    must not swallow the next one. The replaced exemplar is therefore the one
+    exception to never-destroy-unread (see *Retention* below). What survives
+    of an earlier outage is the transition count, plus its owner report if that
+    report was sent before the next transition re-armed the row. It
+    is not a delivery, so no retry budget applies (*Reconciled with
+    idempotency* below does not govern it).
   - **Marker.** `Fix: <machine> is unreachable (machine <machine_id>,
     unreachable since <unreachable_since>, <pending> pending deliveries;
     <count> transition(s) on this record) — it is connected-or-not but has
     acked nothing within the reachability window; check its inbox client
-    (machine_reachable), then mark this read.` `<machine>` is the machine's
-    name, else `machine <machine_id>`, else `unknown machine`. A missing
-    `<machine_id>` or `<unreachable_since>` renders `?`, and a missing
-    `<pending>` renders `0`.
+    (machine_reachable), then mark this read.` Here "the reachability window"
+    is the silence budget above. `<machine>` is the machine's name, else
+    `machine <machine_id>`, else `unknown machine`. A missing `<machine_id>`
+    or `<unreachable_since>` renders `?`, and a missing `<pending>` renders
+    `0`.
 - **Retention — the never-destroy-unread doctrine applies, made safe by the
   grain.** Follow the sibling inbox doctrine (`ai/contracts/athena-inbox.md` →
   *Retention* → *The principle*), exactly as the dead-letter store does: an
   **un-triaged** failed-delivery exemplar has an unbounded lifetime (it is the sole
   evidence of the miss); age-out applies only after read/triage; the store's
-  *Grain* above bounds it to at most one unread exemplar per key. **The store
+  *Grain* above bounds it to at most one unread exemplar per key. The one
+  exception is a machine-unreachable row, whose next transition replaces its
+  exemplar even unread (*Machine-unreachable rows* → *Episodes* above states
+  why). **The store
   carries no cap or TTL number in this contract** — any
   operational cap/TTL is ops/owner config, outside this contract's MUST surface.
+
+  **Later (2026-09-23):** this bullet previously stated the doctrine with no
+  exception. Superseded (DND-386, declaring the row kind gen_saas files under
+  DND-369/DND-379): a machine-unreachable row's exemplar is replaced by each new
+  transition, so an unread row keeps only its latest outage's exemplar. Why:
+  each transition is a separate outage, reported on its own, and the latest one
+  is the outage the owner must act on.
 - **Reconciled with idempotency.** "Terminal" means the per-`(event, rule)`
   at-least-once retry budget of *Idempotency is per (event, rule)* is exhausted;
   the failed-delivery record is that delivery's terminal state. A later
