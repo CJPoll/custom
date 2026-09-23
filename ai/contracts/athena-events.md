@@ -236,17 +236,23 @@ per-`(event, rule)`:
 3. **SUPPRESSED** — predicate TRUE, but the delivery was collapsed by the owner's
    **dedupe window** (observable per *Enabled flag and dedupe window* — "recorded
    and countable as 'suppressed by dedupe window', never a silent drop").
-4. **REFUSED** — predicate TRUE, but a **delivery-time owner↔destination check refused the delivery before it left the platform**. Every such check is inherently delivery-time (a save-time-only check cannot cover it — a binding can be deregistered after save, and DNS rebinding defeats a save-time destination check), and **each declares its own refusal-cause class** in the open-but-declared set of *Delivery refusal — the refused-delivery store*. First-pass: (a) the **target-bind re-assertion** — the target no longer resolves to the rule's owner (see *Mechanism vs config boundary, and both-ends-or-dark*, the delivery-time re-assertion enforcement point); and (b) the **generic-webhook egress guard** — the resolved destination is not on the owner allowlist, or resolves to a blocked (loopback / link-local / private / metadata) range (see *The generic-webhook egress model*). Roadmap owner-supplied-destination adapters add their own: the **email/SMS owner-verified-recipient** check (cause class `owner-verified-recipient`, see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*). A REFUSED delivery is **recorded in the refused-delivery store — one exemplar-plus-count per `(owner, rule_id, refusal-cause)` — and reported to the owner** (see *Delivery refusal — the refused-delivery store*): never a silent drop, and never a bare counter. **Every** REFUSED trigger is **permanent** — the rule keeps matching and refusing on every delivery until the owner acts — so, exactly like a terminal FAILED delivery, REFUSED gets sibling-consistent observability (an exemplar the store *names*, plus an owner report), not merely a count.
+4. **REFUSED** — predicate TRUE, but a **delivery-time owner↔destination check refused the delivery before it left the platform**. Every such check is inherently delivery-time (a save-time-only check cannot cover it — a binding can be deregistered after save, and DNS rebinding defeats a save-time destination check), and **each declares its own refusal-cause class** in the open-but-declared set of *Delivery refusal — the refused-delivery store*. First-pass: (a) the **target-bind re-assertion** — the target no longer resolves to the rule's owner, or, for a **direct** delivery (which has no rule), the event's own owner (see *Mechanism vs config boundary, and both-ends-or-dark*, the delivery-time re-assertion enforcement point); and (b) the **generic-webhook egress guard** — the resolved destination is not on the owner allowlist, or resolves to a blocked (loopback / link-local / private / metadata) range (see *The generic-webhook egress model*). Roadmap owner-supplied-destination adapters add their own: the **email/SMS owner-verified-recipient** check (cause class `owner-verified-recipient`, see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*). A REFUSED delivery is **recorded in the refused-delivery store — one exemplar-plus-count per `(owner, rule_id, refusal-cause)` — and reported to the owner** (see *Delivery refusal — the refused-delivery store*): never a silent drop, and never a bare counter. **Every** REFUSED trigger is **permanent** — the rule keeps matching and refusing on every delivery until the owner acts — so, exactly like a terminal FAILED delivery, REFUSED gets sibling-consistent observability (an exemplar the store *names*, plus an owner report), not merely a count.
 5. **FAILED (terminal)** — predicate TRUE, delivery attempted, retries exhausted /
    adapter 5xx / credential revoked. Recorded in the **failed-delivery store**
    (below), **never** dead-lettered as UNMATCHED.
 
 **Later (2026-09-23):** the "per-`(event, rule)`" grain stated above the list
 previously had no exception. Superseded (D40, HG-16/DND-311): a direct
-delivery has the same five Level-2 outcomes above, evaluated at its own key
-(*Declared families beyond the first pass* → `fleet.session.message`, stated
-once there and deferred to here) rather than `(event, rule)`, because it has
-no rule. Every other delivery in this document is still per-`(event, rule)`.
+delivery is evaluated at its own key (*Declared families beyond the first
+pass* → `fleet.session.message`, stated once there and deferred to here)
+rather than `(event, rule)`, because it has no rule — but it can reach only
+**three** of the five outcomes above, never all five: **DELIVERED**,
+**REFUSED**, or **FAILED**. It can never be **FILTERED** (there is no rule and
+no predicate to be false) or **SUPPRESSED** (the dedupe window is keyed
+`(rule_id, subject)`, a rule field a ruleless delivery has none of — the
+`fleet.session.message` direct-delivery bullets state this as a design
+decision, not an oversight). Every other delivery in this document is still
+per-`(event, rule)` and still totals over all five.
 
 **Each Level-2 outcome that is not DELIVERED is individually observable** —
 FILTERED via ordinary accounting, SUPPRESSED per *Enabled flag and dedupe window*,
