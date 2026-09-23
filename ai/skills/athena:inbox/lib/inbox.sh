@@ -1696,11 +1696,18 @@ inbox_send_routed() {
        return 1 ;;
   esac
   res="$(routed_tool_result "${out}")"; rc=$?
+  if [ "${rc}" -eq 5 ]; then
+    inbox_fail "session_send answered with a server error and its outcome is UNKNOWN: ${res}" \
+      "the server may have recorded the message before it failed. Do not blindly re-send (session_send has no idempotency key yet, DND-354): ask the recipient, or check the server's delivery status, before sending again."
+    return 1
+  fi
   if [ "${rc}" -eq 2 ]; then
     # The server's own refusal. Its text normally carries the Fix; when it does
     # not, one is added so a refusal never reaches the sender without one.
     case "${res}" in
-      *"Fix:"*) inbox_fail "session_send refused the message (nothing was sent): ${res%%Fix:*}" "${res#*Fix: }" ;;
+      *"Fix:"*)
+        local said="${res%%Fix:*}"
+        inbox_fail "session_send refused the message (nothing was sent)${said:+: ${said}}" "${res#*Fix: }" ;;
       *) inbox_fail "session_send refused the message (nothing was sent): ${res}" \
            "correct what the server named and re-send; the refusal is the server's, not this client's." ;;
     esac

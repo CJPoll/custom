@@ -288,6 +288,28 @@ assert_contains "server refusal: its Fix is carried" "Fix: address one of your o
 assert_contains "server refusal: says nothing was sent" "nothing was sent" "${ERR}"
 assert_eq "server refusal: no receipt printed" "" "${OUT}"
 
+# How gen_saas actually refuses: a JSON-RPC error with code -32000
+# (Hermes.MCP.Error.execution), carrying the server's Fix.
+shim_reset
+printf '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Fix: a session message must name what it is about — set re: <path|url> or thread: <event_id of the message you are answering>"}}' > "${SHIM}/session_send.answer"
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+if [ "${RC}" -ne 0 ]; then ok "JSON-RPC -32000 refusal: exit non-zero"; else bad "JSON-RPC -32000 refusal: exit non-zero" "exit 0"; fi
+assert_contains "JSON-RPC -32000 refusal: says nothing was sent" "nothing was sent" "${ERR}"
+assert_contains "JSON-RPC -32000 refusal: carries the server's Fix" "must name what it is about" "${ERR}"
+
+# THE MISS: any other JSON-RPC error (an internal error, possibly after the
+# event was written) is an UNKNOWN outcome, never "nothing was sent".
+shim_reset
+printf '{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"Internal error"}}' > "${SHIM}/session_send.answer"
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+if [ "${RC}" -ne 0 ]; then ok "JSON-RPC -32603: exit non-zero"; else bad "JSON-RPC -32603: exit non-zero" "exit 0"; fi
+assert_contains "JSON-RPC -32603: the outcome is UNKNOWN" "outcome is UNKNOWN" "${ERR}"
+assert_not_contains "JSON-RPC -32603: never claims nothing was sent" "nothing was sent" "${ERR}"
+shim_reset
+printf '{"jsonrpc":"2.0","id":2,"error":{"message":"no code at all"}}' > "${SHIM}/session_send.answer"
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+assert_contains "JSON-RPC error with no code: the outcome is UNKNOWN" "outcome is UNKNOWN" "${ERR}"
+
 shim_reset; printf 500 > "${SHIM}/session_send.code"
 send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
 if [ "${RC}" -ne 0 ]; then ok "tools/call HTTP 500: exit non-zero"; else bad "tools/call HTTP 500: exit non-zero" "exit 0"; fi

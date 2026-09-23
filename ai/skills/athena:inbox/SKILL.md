@@ -771,7 +771,7 @@ agents on the live channel did by hand for fifty-one messages.
 | Bucket | Files |
 |---|---|
 | Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` · `lib/routed.sh` (the routed send's refusals and arguments; the `session.message` render) · `lib/doctor.sh`'s `doctor_state_*` decisions · `lib/liveness.sh`'s `liveness_classify_line` / `liveness_judge` |
-| Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the message-handling path**) · `lib/mcp.sh` (the routed send's two outside touches: reading the `athena` MCP registration from `~/.claude.json`, and the MCP tool call) · `lib/lock.sh` · `lib/session.sh` · `lib/liveness.sh`'s log and mtime readers (the client log and doorbell ages; shared with `scripts/athena-inbox-client-run.sh`) |
+| Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the read, count, ack and maildir-send paths**) · `lib/mcp.sh` (the routed send's own, a declared deviation: reading the `athena` MCP registration from `~/.claude.json`, one `git rev-parse --show-toplevel`, and the MCP call, whose request and response bodies sit in a private temp dir) · `lib/lock.sh` · `lib/session.sh` · `lib/liveness.sh`'s log and mtime readers (the client log and doorbell ages; shared with `scripts/athena-inbox-client-run.sh`) |
 | Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes · `lib/doctor.sh`'s `doctor_check_*` — the diagnostic orchestration (a **declared deviation** — see below) |
 | Framework | `bin/inbox-status` · `bin/read-inbox` · `bin/inbox-doctor` |
 
@@ -821,6 +821,16 @@ narrowed here: `fs.sh` is the only file I/O *on the message-handling path*, and
 `doctor.sh`'s `doctor_check_*` is a *second* declared deviation (documented just
 above). The guarantee `fs.sh` still carries in full — that nothing on the
 read/count/ack path does I/O outside it — is unchanged.
+
+**Later (2026-09-23):** the Side-effects row then read "the only file I/O and
+the only `git` call **on the message-handling path**". DND-312 (HG-17) added the
+routed send, which is on a message-handling path and does its own I/O in
+`lib/mcp.sh`: it reads `~/.claude.json` for the MCP registration, runs `git
+rev-parse --show-toplevel` for the local-scope key, and stages the MCP request
+and response bodies in a private temp dir. `fs.sh` has no business knowing the
+Claude Code config or the MCP wire, so `mcp.sh` is a *third* declared deviation
+and the row names the paths `fs.sh` still owns alone: read, count, ack and the
+maildir send. The read/count/ack guarantee above is unchanged.
 
 ## Tests
 

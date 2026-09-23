@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# fs.sh -- SIDE EFFECTS. The only file I/O in the skill, plus the one `git`
-# call. Everything else in lib/ takes strings and returns strings.
+# fs.sh -- SIDE EFFECTS. The only file I/O, and the one `git` call, on the
+# read, count, ack and maildir-send paths. Everything else in lib/ on those paths
+# takes strings and returns strings. Three declared deviations do their own I/O
+# for subsystems this file has no business knowing: doctor.sh's probes,
+# liveness.sh's client-log and mtime readers, and mcp.sh (the routed send:
+# ~/.claude.json, the MCP wire). See SKILL.md -> Layout.
 #
 # **Later (2026-09-18):** This file was READ-ONLY through DND-183: `inbox-status`
 # counts and must never consume, and the strongest available guarantee that

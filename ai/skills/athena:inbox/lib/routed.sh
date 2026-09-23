@@ -257,18 +257,39 @@ routed_session_args() {
     + (if $th == "" then {} else {thread: $th} end)'
 }
 
+# The JSON-RPC error codes that mean the server REFUSED the call before doing
+# anything: -32601 (no such method/tool), -32602 (the arguments failed the
+# tool's input schema), -32000 (`Hermes.MCP.Error.execution`, which is how
+# gen_saas `Athena.MCP.Tools.SessionSend` returns every refusal it has --
+# derived identity, payload validation, not found, and `route_failed`, which the
+# server itself words "nothing was sent"). Every other error, above all -32603
+# (internal error: a crash that may have come after the event was written), is
+# an UNKNOWN outcome.
+ROUTED_REFUSAL_CODES="-32601 -32602 -32000"
+
 # routed_tool_result <json-rpc-message>
-# The tool's result object on stdout. On a JSON-RPC error or an isError tool
-# result, the SERVER'S OWN WORDS go to stdout instead and the status is 2: that
-# text is the server's Fix for a refused send, not message content. Status 1: the
-# answer carried neither a result nor an error.
+# The tool's result object on stdout, status 0. Otherwise the SERVER'S OWN
+# WORDS go to stdout (they are its Fix, not message content) and the status
+# says what they mean:
+#   2 -- a refusal: an `isError` tool result, or a JSON-RPC error whose code is
+#        in ROUTED_REFUSAL_CODES. Nothing was done.
+#   5 -- any other JSON-RPC error: the outcome is UNKNOWN.
+#   1 -- the answer carried neither a result nor an error.
 routed_tool_result() {
-  local msg="$1" err res
+  local msg="$1" err code res
   err="$(printf '%s' "${msg}" | jq -r '
-      if .error then (.error.message // "an MCP error")
-      elif (.result.isError // false) then ([.result.content[]? | .text? // empty] | join(" ") | if . == "" then "a tool error" else . end)
+      if (.result.isError // false) then ([.result.content[]? | .text? // empty] | join(" ") | if . == "" then "a tool error" else . end)
       else empty end' 2>/dev/null)"
   if [ -n "${err}" ]; then printf '%s\n' "${err}"; return 2; fi
+  err="$(printf '%s' "${msg}" | jq -r 'if .error then (.error.message // "an MCP error" | tostring) else empty end' 2>/dev/null)"
+  if [ -n "${err}" ]; then
+    code="$(printf '%s' "${msg}" | jq -r '.error.code // "" | tostring' 2>/dev/null)"
+    printf '%s\n' "${err}"
+    case " ${ROUTED_REFUSAL_CODES} " in
+      *" ${code} "*) [ -n "${code}" ] && return 2 ;;
+    esac
+    return 5
+  fi
   res="$(printf '%s' "${msg}" | jq -c '(.result.structuredContent // (.result.content[0].text | fromjson))' 2>/dev/null)"
   [ -n "${res}" ] && [ "${res}" != "null" ] || return 1
   printf '%s\n' "${res}"
