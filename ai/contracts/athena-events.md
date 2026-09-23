@@ -263,7 +263,8 @@ per-`(event, rule)`:
    and countable as 'suppressed by dedupe window', never a silent drop").
 4. **REFUSED** — predicate TRUE, but a **delivery-time owner↔destination check refused the delivery before it left the platform**. Every such check is inherently delivery-time (a save-time-only check cannot cover it — a binding can be deregistered after save, and DNS rebinding defeats a save-time destination check), and **each declares its own refusal-cause class** in the open-but-declared set of *Delivery refusal — the refused-delivery store*. First-pass: (a) the **target-bind re-assertion** — the target no longer resolves to the rule's owner, or, for a **direct** delivery (which has no rule), the event's own owner (see *Mechanism vs config boundary, and both-ends-or-dark*, the delivery-time re-assertion enforcement point); and (b) the **generic-webhook egress guard** — the resolved destination is not on the owner allowlist, or resolves to a blocked (loopback / link-local / private / metadata) range (see *The generic-webhook egress model*). Roadmap owner-supplied-destination adapters add their own: the **email/SMS owner-verified-recipient** check (cause class `owner-verified-recipient`, see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*). A REFUSED delivery is **recorded in the refused-delivery store — one exemplar-plus-count at the grain *Delivery refusal — the refused-delivery store* states — and reported to the owner**: never a silent drop, and never a bare counter. For a **rule** delivery, **every** REFUSED trigger is **permanent** — the rule keeps matching and refusing on every delivery until the owner acts. A **direct** delivery has no standing rule to keep matching; each send is independent, so its REFUSED is a per-send outcome, not a persistent condition — but it still gets the same sibling-consistent observability (an exemplar the store *names*, plus an owner report), never merely a count.
 5. **FAILED (terminal)** — predicate TRUE, delivery attempted, retries exhausted /
-   adapter 5xx / credential revoked. Recorded in the **failed-delivery store**
+   adapter 5xx / credential revoked / the dispatch kept raising until its crash
+   budget was spent (*Sweeper dispatch-crash rows*). Recorded in the **failed-delivery store**
    (below), **never** dead-lettered as UNMATCHED.
 
 **Later (2026-09-23):** the "per-`(event, rule)`" grain stated above the list
@@ -351,8 +352,8 @@ No MUST here carries a number.
 
 #### Terminal delivery failure — the failed-delivery store
 
-A **terminally-FAILED** matched delivery (Level-2 outcome 5 — retries exhausted,
-adapter 5xx, credential revoked) MUST be recorded in a **failed-delivery store**,
+A **terminally-FAILED** matched delivery (Level-2 outcome 5, whose causes that
+item lists) MUST be recorded in a **failed-delivery store**,
 **distinct from the dead-letter store**, and MUST be **reported to the owner**. A
 terminally-failed matched delivery is **never** dead-lettered as UNMATCHED — it
 *matched* a rule; dead-lettering it would both corrupt the dead-letter store's
@@ -586,8 +587,10 @@ miss.
     because it was acked is not reported. The crashes between log only. Unlike
     a delivery failure, the first row is written while the delivery is still
     pending, so this is the one delivery-cause row that is not always
-    terminal (*Reconciled with idempotency* below still governs the terminal
-    one).
+    terminal. The terminal crash ends the delivery FAILED because its crash
+    budget, not its retry budget, is spent; a later redelivery of that same
+    delivery still records nothing new, because the row is keyed on *Grain*
+    above.
   - **Key.** The crashed delivery's own key under *Grain* above: its
     `rule_id` (or `nil` for a direct delivery), the cause
     `sweeper-dispatch-crash`, and its `machine_id` (the direct recipient, `nil`
