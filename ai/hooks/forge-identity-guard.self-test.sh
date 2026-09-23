@@ -373,7 +373,26 @@ run "$(bash_json_cwd "$TMP/gh_scp" 'X=$(W=~/dev/custom/ai/bin/gh-athena; echo); 
 check_text "C32. W set inside \$( … ) does not persist -> warns" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena && (cd . && "$W" git push origin x)')"
-check "V6. W set in this shell, used inside a later subshell (inherited)" allow
+check "V6. only the next-statement shape is blessed; a use in a later subshell still warns" warn
+
+run "$(bash_json_cwd "$TMP/gl" "$(printf 'W=~/dev/custom/ai/bin/glab-athena\n"$W" git push origin x')")"
+check "V7. newline-separated W=glab-athena then \"\$W\" git push" allow
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'echo W=~/dev/custom/ai/bin/gh-athena; $W git push origin HEAD')"
+check_text "C33. W=… as an echo ARGUMENT sets nothing -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'false && W=~/dev/custom/ai/bin/gh-athena; $W git push origin HEAD')"
+check_text "C34. a conditional assignment -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" '(W=~/dev/custom/ai/bin/gh-athena; echo "("); $W git push origin HEAD')"
+check_text "C35. subshell assignment with a quoted paren -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "W=~/dev/custom/ai/bin/gh-athena; bash -c '\$W git push origin HEAD'")"
+check_text "C36. \$W used in a child shell where W is unset -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "W='~/dev/custom/ai/bin/gh-athena' ; \"\$W\" git push origin HEAD ; \$W git push origin HEAD")"
+check_text "C37. only the next statement is blessed; a second use warns" 'to a github.com remote'
+
 
 echo
 echo "--- MUST-NOT-WARN cases (wrapper / reads / unrelated) ---"

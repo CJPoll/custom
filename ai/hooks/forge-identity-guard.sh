@@ -116,55 +116,48 @@ fi
 # must never miss a real push, so a mention costs a warning instead. The parked
 # design is on branch dnd-397-mention-masking-parked.
 
-# mask_wrapper_vars: `$W git` / `${W} git` becomes the wrapper form when, at
-# that point in the command, W's most recent assignment is a wrapper path
-# (`W=~/…/glab-athena`, `export W="$HOME/…/gh-athena"`). Scanned left to right,
-# so a later reassignment cannot bless an earlier use. Only an assignment that
-# sets W in THIS shell counts: a standalone statement ended by `;`, `&&`, `||`
-# or the end of the command. A prefix assignment (`W=… cmd`), a pipeline or
-# backgrounded element (`W=… | x`, `W=… &`) and anything inside `( … )` or
-# `$( … )` leave W unset for the later use, where an unquoted `$W git push` is a
-# plain push — so they bless nothing, and a `)` forgets what was set inside it.
-# Reads dequoted text.
-mask_wrapper_vars() {
-  awk '{
-    s = $0; out = ""; depth = 0
-    are = "(^|[[:space:];&|])[A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|()]*[[:space:]]*(;|&&|[|][|]|$)"
-    ure = "[$]([{][A-Za-z_][A-Za-z0-9_]*[}]|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]+git[[:space:]]"
-    while (1) {
-      a = match(s, are); as = RSTART; al = RLENGTH
-      u = match(s, ure); us = RSTART; ul = RLENGTH
-      p = match(s, /[()]/); ps = RSTART
-      if (!a && !u && !p) break
-      if (p && (!a || ps < as) && (!u || ps < us)) {
-        # A subshell inherits W; what it sets dies at its `)`.
-        if (substr(s, ps, 1) == "(") depth++
-        else { for (k in wd) if (wd[k] == depth) { delete wv[k]; delete wd[k] }; if (depth > 0) depth-- }
-        out = out substr(s, 1, ps); s = substr(s, ps + 1); continue
+# bless_wrapper_var: the ONE shape in which `$W git …` is provably the Athena
+# wrapper (DND-397, the coordinator's `W=~/…/glab-athena; "$W" git push` probe):
+#   * the command's FIRST statement, at top level, is `[export ]W=<path>` whose
+#     value is bare or wholly double-quoted and ends in /gh-athena or
+#     /glab-athena (optionally from ~, $HOME or ${HOME}) — the same path trust
+#     the literal `gh-athena git` rewrite below has always given;
+#   * it is ended directly by `;`, `&&` or a newline;
+#   * the VERY NEXT statement's command word — after simple `NAME=val` prefixes —
+#     is `$W`, `"$W"`, `${W}` or `"${W}"`, followed by `git`.
+# Only that one use is rewritten to the wrapper form. A first statement always
+# runs in the shell the next statement runs in, so W is set there; nothing sits
+# between them to unset, shadow or re-scope it. Every other shape — a use later
+# in the command, inside `( … )`, `bash -c '…'` or a heredoc, an assignment in
+# argument, prefix or pipeline position — is left alone and warns exactly as it
+# did before DND-397. Reads the raw command (before dequoting).
+bless_wrapper_var() {
+  awk '
+    { src = src (NR > 1 ? "\n" : "") $0 }
+    END {
+      s = src
+      VAL = "(~|[$]HOME|[$][{]HOME[}])?([A-Za-z0-9._-]*/)*(gh|glab)-athena"
+      if (!match(s, "^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=")) { printf "%s", s; exit }
+      head = substr(s, 1, RLENGTH); rest = substr(s, RLENGTH + 1)
+      name = head; sub(/=$/, "", name); sub(/^[[:space:]]*(export[[:space:]]+)?/, "", name)
+      q = ""; if (substr(rest, 1, 1) == "\"") q = "\""
+      if (!match(rest, "^" q VAL q "[[:space:]]*(;|&&|\n)[[:space:]]*")) { printf "%s", s; exit }
+      head = head substr(rest, 1, RLENGTH); rest = substr(rest, RLENGTH + 1)
+      if (match(rest, "^([A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9._/:=-]*[[:space:]]+)+")) {
+        head = head substr(rest, 1, RLENGTH); rest = substr(rest, RLENGTH + 1)
       }
-      if (a && (!u || as < us)) {
-        tok = substr(s, as, al); sub(/^[[:space:];&|]/, "", tok)
-        name = tok; sub(/=.*/, "", name)
-        val = substr(tok, length(name) + 2); sub(/[[:space:];&|].*$/, "", val)
-        wv[name] = (val ~ /(^|\/)(gh|glab)-athena$/); wd[name] = depth
-        out = out substr(s, 1, as + al - 1); s = substr(s, as + al); continue
-      }
-      tok = substr(s, us, ul); name = tok; sub(/^[$][{]?/, "", name); sub(/[}[:space:]].*/, "", name)
-      if (wv[name]) out = out substr(s, 1, us - 1) "FORGE_ATHENA_GIT" substr(tok, ul)
-      else out = out substr(s, 1, us + ul - 1)
-      s = substr(s, us + ul)
-    }
-    printf "%s", out s
-  }'
+      if (!match(rest, "^(\"[$]" name "\"|\"[$][{]" name "[}]\"|[$]" name "|[$][{]" name "[}])[[:space:]]+git[[:space:]]")) { printf "%s", s; exit }
+      printf "%s", head "FORGE_ATHENA_GIT " substr(rest, RLENGTH + 1)
+    }'
 }
 
 # Dequote (as forge-auth-guard does) so quoting cannot split the pattern, and
 # mask the wrapper forms `gh-athena git` / `glab-athena git` first so they are
-# never matched. DND-397: `$W git` / `${W} git` count as the wrapper form too
-# when W holds a wrapper path there (mask_wrapper_vars).
+# never matched. DND-397: bless_wrapper_var first rewrites the one provable
+# `W=<wrapper>; "$W" git …` shape to the wrapper form.
 # Newlines become `;` here (not spaces, as in FLAT): a push's arguments end at
 # the end of its line, so `git push<NL>echo done` never reads `echo` as a remote.
-GFLAT=$(printf '%s' "$CMD" | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g' | mask_wrapper_vars)
+GFLAT=$(printf '%s' "$CMD" | bless_wrapper_var | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g')
 # `git`, bare or path-qualified, then only GLOBAL options (-C/-c take a value),
 # then `push`. `git commit -m "push"` does not match: `commit` is not an option.
 GIT_PUSH_RE='(^|[[:space:];&|(/])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:];&|]+|--?[^[:space:];&|]+))*[[:space:]]+push([[:space:]]|$|[;&|)])'
