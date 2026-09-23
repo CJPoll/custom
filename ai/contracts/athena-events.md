@@ -360,7 +360,8 @@ miss.
   re-opened row names what re-opened it. The count spans every episode; only the
   exemplar restarts. This bounds the store by a
   **structural quantity** — per owner, distinct `(rule, cause)` pairs plus
-  distinct `(direct recipient machine, cause)` pairs, a finite set —
+  distinct `(direct recipient machine, cause)` pairs plus one
+  machine-unreachable row per machine, a finite set —
   **independent of traffic volume**: a revoked credential failing a million
   deliveries collapses to one exemplar + count 1,000,000, not a million rows.
 
@@ -463,9 +464,9 @@ miss.
     acked nothing within the reachability window; check its inbox client
     (machine_reachable), then mark this read.` Here "the reachability window"
     is the silence budget above. `<machine>` is the machine's name, else
-    `machine <machine_id>`, else `unknown machine`. A missing `<machine_id>`
-    or `<unreachable_since>` renders `?`, and a missing `<pending>` renders
-    `0`.
+    `machine <machine_id>`, else `unknown machine`. A missing `<machine_id>`,
+    `<unreachable_since>` or `<pending>` renders `?`. A missing pending count
+    never renders `0`, which would read as "nothing waiting".
 - **Retention — the never-destroy-unread doctrine applies, made safe by the
   grain.** Follow the sibling inbox doctrine (`ai/contracts/athena-inbox.md` →
   *Retention* → *The principle*), exactly as the dead-letter store does: an
