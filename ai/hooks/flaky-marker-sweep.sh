@@ -4,20 +4,21 @@
 #
 # WHY (DND-277): the flaky lane treats a present marker as "an admiral is
 # draining", so a stale marker left by a dead/aborted admiral wedges the lane
-# dark. Today the ONLY activity-independent age-out of that marker lives in
-# walt_ui's flaky-ticket-poll.sh ("the poll also self-heals a marker older than
-# 12h"). H-4/DND-248 retires that poll, and the inbox-count trigger CANNOT
-# replace the age-out (the .event doorbell is an mtime bump AFTER an append —
-# there is no platform periodic sweep). This hook re-provisions the age-out half
-# so it survives the poll's retirement: it fires on EVERY session start,
-# independent of flaky-lane activity, so the wedged-idle state (stale marker +
-# no new activity) is still swept.
+# dark. Before H-4/DND-248, the ONLY activity-independent age-out of that
+# marker lived in walt_ui's flaky-ticket-poll.sh ("the poll also self-heals a
+# marker older than 12h"). H-4/DND-248 has now retired that poll as a trigger
+# (owner directive, 2026-09-23; ai/CLAUDE.md → *Ticket-driven lanes*), and the
+# inbox-count trigger CANNOT replace the age-out (the .event doorbell is an
+# mtime bump AFTER an append — there is no platform periodic sweep). This hook
+# re-provisions the age-out half so it survives the poll's retirement: it
+# fires on EVERY session start, independent of flaky-lane activity, so the
+# wedged-idle state (stale marker + no new activity) is still swept.
 #
 # FAIL-SAFE and NON-BLOCKING: a SessionStart hook must never break session
 # start, so every path exits 0. It removes ONLY a stale (>12h) marker; a fresh
 # (<12h) marker — a live admiral draining — is always preserved. Removal is
-# idempotent, so co-existing with the (not-yet-retired) poll's own age-out is
-# fine.
+# idempotent, so this hook is now the sole age-out mechanism (the poll's own
+# age-out is retired along with the poll).
 #
 # OBSERVABLE: removing the marker is the one destructive action here, and the
 # lane reads a present marker as "an admiral is draining", so a silent removal

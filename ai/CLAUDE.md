@@ -436,7 +436,8 @@ such as `~/dev/walt_ui` or `~/.claude/flaky-*` may still grep for) previously
 named the `SessionStart` poll as the *only* trigger and restated the flaky spawn
 brief, the tracker constants, and the coordinator-marker semantics inline. It is
 now a pure trigger-pointer: what is operative today is in *What routes a session
-into the brief* above (for flaky, still the `SessionStart` poll), and all lane
+into the brief* above (as of the Later (2026-09-23) label there, the inbox
+count — the `SessionStart` poll is retired), and all lane
 mechanics — read mechanics, marker semantics, channel resolution, merge policy —
 are the `~/dev/custom/ai/docs/ticket-lane-action-brief.md` template's, cited and
 not restated.
