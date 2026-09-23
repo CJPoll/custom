@@ -454,8 +454,10 @@ if wait_file "${TMP}/nested.ready" 100; then
   fi
   GATE="${SCRIPTS}/../ai/bin/check-inbox-mock-orphans"
   # --min-age 0: this fixture's whole point is that PPID == 1 alone is proof,
-  # with no wait required (the real gate run uses the 60s default).
-  GATE_OUT="$("${GATE}" --min-age 0 2>&1)"; GATE_RC=$?
+  # with no wait required (the real gate run uses the 60s default). --pid
+  # scopes this to OUR fabricated orphan: a concurrent gate run in a sibling
+  # worktree fabricating its own for the same reason must never race us.
+  GATE_OUT="$("${GATE}" --min-age 0 --pid "${NESTED_CHILD}" 2>&1)"; GATE_RC=$?
   if [ "${GATE_RC}" -eq 1 ] && grep -q "pid=${NESTED_CHILD} " <<<"${GATE_OUT}" && grep -q 'Fix:' <<<"${GATE_OUT}"; then
     ok "check-inbox-mock-orphans finds it by PPID == 1 alone: exit 1 with a Fix:"
   else
@@ -466,7 +468,7 @@ if wait_file "${TMP}/nested.ready" 100; then
   else
     bad "the orphan is gone once the backstop has run" "pid ${NESTED_CHILD} still alive"
   fi
-  GATE_OUT2="$("${GATE}" --min-age 0 2>&1)"; GATE_RC2=$?
+  GATE_OUT2="$("${GATE}" --min-age 0 --pid "${NESTED_CHILD}" 2>&1)"; GATE_RC2=$?
   if [ "${GATE_RC2}" -eq 0 ]; then
     ok "re-running the backstop once clean is exit 0 (PASS)"
   else

@@ -86,6 +86,12 @@ STATIC_CHECKS = [
   # where /proc is absent (CI/sandbox), so it never false-fails a harness commit.
   ["check-inotify-headroom",    %w[ai/bin/check-inotify-headroom]],
   ["check-inotify-headroom self-test", %w[ai/bin/check-inotify-headroom --self-test]],
+  # check-inbox-mock-orphans's REAP run is FINAL_CHECKS (must run last, after
+  # every discovered self-test); its own --self-test has no such ordering
+  # requirement (it only proves the matcher, against fixtures and fabricated
+  # processes it cleans up itself), so it is declared here like
+  # check-inotify-headroom/check-pipefail-grep above.
+  ["check-inbox-mock-orphans self-test", %w[ai/bin/check-inbox-mock-orphans --self-test]],
   ["harness-eval",              %w[ai/bin/harness-eval]],
   # Answers the one merge question the rest of the bar never asked -- what
   # merging CAUSES (gen_saas PR #256 / DND-234: merging would have run
@@ -1165,13 +1171,12 @@ def run_self_test
     ok = false
   end
 
-  # 10 (DND-404). check-inbox-mock-orphans (FINAL_CHECKS) must stay the LAST
-  #    entry in CHECKS — it backstops scripts/test/inbox-client-capture's
-  #    self-test, and discovery order would put it BEFORE that suite (a
-  #    self-test label sorts by path, and "scripts/test/inbox-client-capture"
-  #    < "ai/bin/check-inbox-mock-orphans" is not how CHECKS is built, but a
-  #    future refactor that reordered the concatenation could silently move it
-  #    earlier with no other symptom).
+  # 10 (DND-404). check-inbox-mock-orphans's REAP invocation (FINAL_CHECKS)
+  #    must stay the LAST entry in CHECKS — it backstops
+  #    scripts/test/inbox-client-capture's self-test, so it must run after
+  #    that suite (and after every other check). Nothing else enforces the
+  #    concatenation order; a future refactor of the CHECKS assignment could
+  #    silently move it earlier with no other symptom, so assert it directly.
   unless CHECKS.last == ["check-inbox-mock-orphans", %w[ai/bin/check-inbox-mock-orphans]]
     warn "self-test: FAIL — check-inbox-mock-orphans is not the LAST entry in " \
          "CHECKS (currently: #{CHECKS.last.inspect}). Fix: keep " \

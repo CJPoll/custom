@@ -54,6 +54,12 @@
 # Usage:
 #   ai/bin/check-inbox-mock-orphans              reap now; exit 1 if anything was found
 #   ai/bin/check-inbox-mock-orphans --min-age N   minimum age in seconds (default 60)
+#   ai/bin/check-inbox-mock-orphans --pid N       only consider this one pid (tests only --
+#                                                  narrows what a real gate run reaps to a
+#                                                  single known pid, so two concurrent gate
+#                                                  runs each fabricating their own throwaway
+#                                                  orphan for a self-test cannot reap each
+#                                                  other's)
 #   ai/bin/check-inbox-mock-orphans --self-test   run the matcher self-tests
 #   ai/bin/check-inbox-mock-orphans --help
 
@@ -69,15 +75,17 @@ HELP = <<~HELP
   Usage:
     ai/bin/check-inbox-mock-orphans              reap now; exit 1 if anything was found
     ai/bin/check-inbox-mock-orphans --min-age N  minimum age in seconds (default #{DEFAULT_MIN_AGE})
+    ai/bin/check-inbox-mock-orphans --pid N      only consider this one pid (tests only)
     ai/bin/check-inbox-mock-orphans --self-test  run the matcher self-tests
     ai/bin/check-inbox-mock-orphans --help
 HELP
 
 # Pure: given `ps -eo pid=,ppid=,etimes=,uid=,args=` lines, this process's
-# uid, and a minimum age, the matching [pid, ppid, etimes, args] tuples.
-# PPID == 1 is the whole proof of orphanhood (see the file banner); uid and
-# age are courtesy narrowing, not what makes this safe.
-def find_orphans(ps_lines, my_uid, min_age)
+# uid, a minimum age, and an optional single pid to narrow to, the matching
+# [pid, ppid, etimes, args] tuples. PPID == 1 is the whole proof of
+# orphanhood (see the file banner); uid, age and only_pid are narrowing, not
+# what makes this safe.
+def find_orphans(ps_lines, my_uid, min_age, only_pid: nil)
   ps_lines.filter_map do |line|
     line = line.chomp
     next if line.strip.empty?
@@ -88,6 +96,7 @@ def find_orphans(ps_lines, my_uid, min_age)
     next unless ppid == "1"
     next unless uid == my_uid.to_s
     next unless etimes.to_i >= min_age
+    next if only_pid && pid != only_pid.to_s
 
     [pid, ppid, etimes, args]
   end
@@ -110,11 +119,11 @@ def kill_orphans(orphans)
   end
 end
 
-def run_check(min_age, ps_lines: nil, my_uid: Process.uid)
-  orphans = find_orphans(ps_lines || live_ps_lines, my_uid, min_age)
+def run_check(min_age, ps_lines: nil, my_uid: Process.uid, only_pid: nil)
+  orphans = find_orphans(ps_lines || live_ps_lines, my_uid, min_age, only_pid: only_pid)
   if orphans.empty?
     puts "check-inbox-mock-orphans: no orphaned (PPID 1, >= #{min_age}s old) " \
-         "mock-athena-inbox-client.rb process found."
+         "mock-athena-inbox-client.rb process found#{only_pid ? " (pid #{only_pid})" : ''}."
     return 0
   end
 
@@ -235,9 +244,12 @@ def self_test
       bad.call("SIGKILLing the launcher orphans the mock (PPID 1)", "mock #{mock_pid} did not reparent to 1")
     end
 
-    rc = run_check(0)
+    # --pid scopes this to OUR fabricated pid: a concurrent gate run in a
+    # different worktree doing the same fabrication at the same moment must
+    # never have its own fresh orphan reaped by this one.
+    rc = run_check(0, only_pid: mock_pid)
     if rc == 1
-      ok.call("min-age 0: a real, freshly orphaned mock -> exit 1 (FAIL), Fix: printed")
+      ok.call("min-age 0, --pid #{mock_pid}: a real, freshly orphaned mock -> exit 1 (FAIL), Fix: printed")
     else
       bad.call("a real, freshly orphaned mock -> exit 1", "rc=#{rc}")
     end
@@ -260,22 +272,23 @@ def self_test
       ok.call("the orphan was killed by the check (pid #{mock_pid} gone)")
     end
 
-    rc2 = run_check(0)
+    rc2 = run_check(0, only_pid: mock_pid)
     if rc2.zero?
-      ok.call("re-running once clean -> exit 0 (PASS)")
+      ok.call("re-running once clean, same --pid -> exit 0 (PASS)")
     else
-      bad.call("re-running once clean -> exit 0", "rc=#{rc2}")
+      bad.call("re-running once clean, same --pid -> exit 0", "rc=#{rc2}")
     end
   end
 
   # 4. A mock still parented to a LIVE process, even past min-age, is left
-  #    alone -- the invariant that makes this safe without any marker.
+  #    alone -- the invariant that makes this safe without any marker. Scoped
+  #    to this fabricated pid for the same reason as case 3.
   live_launcher = Process.spawn(
     "bash", "-c", 'exec -a "mock-athena-inbox-client.rb" sleep 300',
     out: "/dev/null", err: "/dev/null"
   )
   begin
-    rc = run_check(0)
+    rc = run_check(0, only_pid: live_launcher)
     if rc.zero?
       ok.call("a mock still parented to a LIVE process is never touched, even at min-age 0")
     else
@@ -308,6 +321,7 @@ def self_test
 end
 
 min_age = DEFAULT_MIN_AGE
+only_pid = nil
 args = ARGV.dup
 mode = nil
 until args.empty?
@@ -324,9 +338,17 @@ until args.empty?
       exit 1
     end
     min_age = v.to_i
+  when "--pid"
+    v = args.shift
+    unless v && v =~ /\A\d+\z/
+      warn "check-inbox-mock-orphans: --pid needs a positive integer, got #{v.inspect}"
+      warn "  Fix: pass e.g. --pid 12345."
+      exit 1
+    end
+    only_pid = v
   else
     warn "check-inbox-mock-orphans: unknown argument #{a.inspect}"
-    warn "  Fix: run with no arguments, --min-age N, --self-test, or --help."
+    warn "  Fix: run with no arguments, --min-age N, --pid N, --self-test, or --help."
     exit 1
   end
 end
@@ -338,5 +360,5 @@ when :help
 when :self_test
   exit self_test
 else
-  exit run_check(min_age)
+  exit run_check(min_age, only_pid: only_pid)
 end

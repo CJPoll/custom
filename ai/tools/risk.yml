@@ -60,10 +60,10 @@ tools:
   # --- idempotent: deterministic local mutation (writes an in-repo artifact;
   #     re-running yields the same result; no external/irreversible effect) ---
   build-agents:            { class: idempotent, reason: render }
-  # Kills only processes it identifies itself, scoped to this gate run's own
-  # marker (ATHENA_HARNESS_GATE_RUN_MARKER) -- local process state, never
-  # repo/forge/tracker/remote, so idempotent (re-running with the same,
-  # already-clean marker is a no-op).
+  # Kills only this uid's mock-athena-inbox-client.rb processes with PPID 1
+  # (unambiguous orphans, never a live process) -- local process state, never
+  # repo/forge/tracker/remote, so idempotent (re-running once clean is a
+  # no-op).
   check-inbox-mock-orphans: { class: idempotent, reason: reap }
   # admiral-eval / harness-eval can rewrite a TRACKED baseline JSON via
   # --update-baseline (and harness-eval writes ai/eval/scorecard.json on the
