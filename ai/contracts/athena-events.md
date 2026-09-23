@@ -243,11 +243,12 @@ per-`(event, rule)`:
 
 **Later (2026-09-23):** the "per-`(event, rule)`" grain stated above the list
 previously had no exception. Superseded (D40, HG-16/DND-311): a direct
-delivery has the same five Level-2 outcomes above, evaluated at `(event,
-direct-target)` instead of `(event, rule)`, because it has no rule — see the
-direct-delivery bullets under *Declared families beyond the first pass* →
-`fleet.session.message`. This is the one delivery-row shape not keyed on a
-rule; every other delivery in this document is still per-`(event, rule)`.
+delivery has the same five Level-2 outcomes above, evaluated at `(owner,
+event)` with `rule_id: nil` instead of `(event, rule)`, because it has no rule
+— the one canonical key, stated once at *Declared families beyond the first
+pass* → `fleet.session.message` and deferred to everywhere else. This is the
+one delivery-row shape not keyed on a rule; every other delivery in this
+document is still per-`(event, rule)`.
 
 **Each Level-2 outcome that is not DELIVERED is individually observable** —
 FILTERED via ordinary accounting, SUPPRESSED per *Enabled flag and dedupe window*,
@@ -747,20 +748,24 @@ An addressed message's direct delivery, made normative (D40, HG-16/DND-311):
   No live agent instance on the (same-owner) target machine declaring
   `to.inbox_name` is both-ends-or-dark, not a silent drop: the refusal names
   the HG-17/HG-18 registration convention, and nothing is persisted.
-- **The direct delivery's key is `(event, direct-target)`, not `(event,
-  rule)` — `rule_id` is `nil`.** Level 2 above is defined per `(event, rule)`;
-  a direct delivery has no rule, so it is the one delivery-row shape keyed
-  instead on the event alone (at most one direct delivery per event, owner-
-  scoped). Every Level-2 store that keys on `rule_id` accepts a `nil` there as
-  this row's own key, never a collision with a rule's bucket: the
-  failed-delivery store's `(owner, rule_id, terminal-cause)` key and the
-  refused-delivery store's `(owner, rule_id, refusal-cause)` key both admit a
-  `nil` `rule_id` as the direct delivery's own exemplar-plus-count bucket,
-  distinct from any rule's. Retry (*Idempotency is per (event, rule)*'s
-  deliver→ack→retry loop) applies unchanged to this row — the sweeper's
-  staleness query selects by delivery status and `last_pushed_at`, not by
-  `rule_id`, so a direct delivery is retried and can terminally FAIL exactly
-  like a rule delivery, just keyed on the event instead of the rule.
+- **A direct delivery's key is `(owner, event)` with `rule_id: nil` — the
+  ONE canonical description, used the same way everywhere this document and
+  `athena-inbox.md` refer to it.** Level 2 above is defined per `(event,
+  rule)`; a direct delivery has no rule, so `rule_id` is `nil` rather than
+  absent — a delivery row always has the shape `(owner, event, rule_id)`, and
+  a direct delivery is the one case where `rule_id` is `nil` rather than a
+  real id. Because at most one direct delivery exists per event (owner-scoped,
+  structurally enforced — a second `create_direct` for the same event is a
+  changeset error, never a duplicate row), `(owner, event)` alone is already
+  as specific as `(owner, event, rule_id)` is for a rule delivery: no second
+  disambiguating component is needed. Every Level-2 store that keys on
+  `rule_id` accepts a `nil` there as this row's own key, never a collision
+  with a rule's bucket (*Terminal delivery failure — the failed-delivery
+  store*; *Delivery refusal — the refused-delivery store*). Retry (below)
+  applies to this row using the same key; the sweeper's staleness query
+  selects by delivery status and `last_pushed_at`, not by `rule_id`, so a
+  direct delivery is retried and can terminally FAIL exactly like a rule
+  delivery.
 - **REFUSED (target-bind) covers a direct delivery too; SUPPRESSED (dedupe
   window) does not, by design.** The delivery-time target-bind re-assertion
   (`InboxAdapter`, Level 2's REFUSED, cause `target-bind`) is the inbox
@@ -844,12 +849,15 @@ makes a duplicate harmless.
 always `idempotency_key` + a **matched** `rule_id` — every delivery had a rule.
 Superseded: an addressed `fleet.session.message`'s direct delivery (*Declared
 families beyond the first pass* → `fleet.session.message`) has no rule, so its
-transient in-flight retry handle is `idempotency_key` + the **event id** in
-`rule_id`'s place (there is at most one direct delivery per event, so the event
-id alone is as specific a handle as `rule_id` is for a rule delivery). Every
-other clause in this section — at-least-once, ack-based tracking, consumer
-idempotency — binds a direct delivery unchanged; only the handle's second
-component differs.
+transient in-flight retry handle is keyed by `(owner, event)` with `rule_id:
+nil` — the one canonical description of a direct delivery's key, stated once
+at *Declared families beyond the first pass* → `fleet.session.message` and
+deferred to everywhere else this document or `athena-inbox.md` names it.
+`idempotency_key` is already event-level, so it adds nothing beyond that key
+for this row; `rule_id: nil` is what makes it the platform's one delivery-row
+shape not disambiguated by a rule. Every other clause in this section — at-
+least-once, ack-based tracking, consumer idempotency — binds a direct
+delivery unchanged.
 
 **Consumers MUST be idempotent** — a duplicate or redelivered event MUST NOT cause
 an adverse effect. A consumer satisfies this by acting on the **carried current
@@ -1163,6 +1171,14 @@ The refusal for a caller-supplied or edit-mutated `rule_id` carries:
 ```
 Fix: rule_id is platform-assigned and stable for the life of the rule — it is not accepted from the request body and an edit MUST NOT change it. Remove the rule_id from the request (it is minted at create); to obtain a new id, delete the rule and create a new one.
 ```
+
+**Later (2026-09-23):** this section previously implied every delivery, retry
+handle, and store key carries a real `rule_id`. Superseded (D40, HG-16/DND-311):
+a direct (addressed, rule-less) delivery's `rule_id` is `nil`, not a rule's id —
+see *Declared families beyond the first pass* → `fleet.session.message` for that
+one delivery-row shape's key. Everything above still holds for every **rule**
+delivery; `rule_id`'s stability guarantees are about the rule's own id, not
+about whether a given delivery row has one.
 
 ### Rule ownership is stamped from the authenticated author
 

@@ -1220,7 +1220,11 @@ newline). This is the inbox end of `athena-events.md` → *Idempotency is per
 FAILED"). Normative:
 
 - **The envelope is transport; the line is content.** `id` is the
-  per-`(event, rule)` delivery handle (the `event_deliveries` row); `event_id`
+  per-`(event, rule)` delivery handle (the `event_deliveries` row) — or, for
+  an addressed `fleet.session.message`'s direct delivery, the `(owner,
+  event)`-keyed row with `rule_id: nil` (`athena-events.md` → *Declared
+  families beyond the first pass* → `fleet.session.message`, stated once
+  there); `event_id`
   is the event-level `idempotency_key`, carried as a log label. **Neither is on
   the line, with one carve-out:** a lane line's identity is `entity_id` (*A
   lane `log` channel is a change stream of state-change events*), and for
