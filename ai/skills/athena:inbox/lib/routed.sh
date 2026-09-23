@@ -220,10 +220,17 @@ routed_pick_machine() {
     return 1
   fi
   hits="$(printf '%s' "${machines}" | jq -c --arg ib "${inbox}" --arg sel "${sel}" '
-      [ .[] | select($sel == "" or (.id // "") == $sel or (.name // "") == $sel)
-        | select([.instances[]? | (.inbox_name // "")] | index($ib))
-        | {id: (.id // "" | tostring), name: (.name // "" | tostring)} ]')"
-  n="$(printf '%s' "${hits}" | jq 'length')"
+      [ .[] | select(type == "object")
+        | select($sel == "" or ((.id // "") | tostring) == $sel or ((.name // "") | tostring) == $sel)
+        | select([.instances[]? | objects | (.inbox_name // "")] | index($ib))
+        | {id: (.id // "" | tostring), name: (.name // "" | tostring)} ]' 2>/dev/null)"
+  n="$(printf '%s' "${hits}" | jq 'length' 2>/dev/null)"
+  case "${n}" in
+    ''|*[!0-9]*)
+      inbox_fail "list_my_machines answered a machine list of an unexpected shape" \
+        "retry; if it persists the server's answer shape changed -- check the athena MCP's list_my_machines, or address the recipient directly with --to <machine_id>/${inbox}."
+      return 1 ;;
+  esac
   if [ "${n}" -eq 1 ]; then
     printf '%s' "${hits}" | jq -r '.[0].id'
     return 0

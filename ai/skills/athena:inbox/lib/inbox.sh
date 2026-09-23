@@ -1711,8 +1711,9 @@ inbox_send_routed() {
     # not, one is added so a refusal never reaches the sender without one.
     case "${res}" in
       *"Fix:"*)
-        local said="${res%%Fix:*}"
-        inbox_fail "session_send refused the message (nothing was sent)${said:+: ${said}}" "${res#*Fix: }" ;;
+        local said="${res%%Fix:*}" fix="${res#*Fix:}"
+        fix="${fix#"${fix%%[![:space:]]*}"}"
+        inbox_fail "session_send refused the message (nothing was sent)${said:+: ${said}}" "${fix}" ;;
       *) inbox_fail "session_send refused the message (nothing was sent): ${res}" \
            "correct what the server named and re-send; the refusal is the server's, not this client's." ;;
     esac

@@ -60,6 +60,16 @@ mcp_toplevel() {
   realpath -q "${out}" 2>/dev/null
 }
 
+# _mcp_timeout -- ATHENA_MCP_HTTP_TIMEOUT when it is a plain 1-4 digit number,
+# else 30. It is written into a curl config line, so anything else (a newline
+# could add a `url = ...` line) is never passed through.
+_mcp_timeout() {
+  case "${ATHENA_MCP_HTTP_TIMEOUT:-}" in
+    [1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]) printf '%s\n' "${ATHENA_MCP_HTTP_TIMEOUT}" ;;
+    *) printf '30\n' ;;
+  esac
+}
+
 # _mcp_post <workdir> <url> <session-id-or-empty> <json-body>
 # One POST; writes <workdir>/hdr and <workdir>/body, prints the HTTP status.
 _mcp_post() {
@@ -76,18 +86,26 @@ _mcp_post() {
     printf 'dump-header = "%s/hdr"\n' "${w}"
     printf 'output = "%s/body"\n' "${w}"
     printf 'write-out = "%%{http_code}"\n'
-    printf 'max-time = %s\n' "${ATHENA_MCP_HTTP_TIMEOUT:-30}"
+    printf 'max-time = %s\n' "$(_mcp_timeout)"
     printf 'silent\n'
   } | curl --config - 2>/dev/null
 }
 
-# _mcp_json <file> -- the JSON-RPC message in a plain-JSON or SSE body.
+# _mcp_json <file> <id> -- the JSON-RPC response with that id, from a plain-JSON
+# body or an SSE stream. An SSE event may carry several `data:` lines (joined
+# by newlines, per the SSE spec), and the stream may carry notifications as
+# well as the response, so the response is SELECTED by id, never taken as
+# "the last line". Nothing selected -> empty output, which the caller reads as
+# an answer that carried neither a result nor an error.
 _mcp_json() {
-  if grep -q '^data:' "$1" 2>/dev/null; then
-    grep '^data:' "$1" | tail -n 1 | sed 's/^data: \{0,1\}//'
+  local f="$1" id="$2"
+  if grep -q '^data:' "${f}" 2>/dev/null; then
+    awk '/^data:/ { sub(/^data: ?/, ""); buf = (buf == "" ? $0 : buf "\n" $0); next }
+         /^\r?$/  { if (buf != "") print buf; buf = ""; next }
+         END      { if (buf != "") print buf }' "${f}"
   else
-    cat "$1"
-  fi
+    cat "${f}"
+  fi | jq -c --argjson id "${id}" 'select(type == "object" and .id == $id)' 2>/dev/null | tail -n 1
 }
 
 # mcp_call_tool <url> <tool> <arguments-json>
@@ -116,6 +134,10 @@ mcp_call_tool() {
 
   w="$(mktemp -d 2>/dev/null)" || { printf 'could not create a private temp dir\n'; return 3; }
   chmod 700 "${w}"
+  # The temp dir's path goes into curl config lines too ($TMPDIR chooses it).
+  case "${w}" in
+    *'"'*|*'\'*|*[[:space:]]*) rm -rf "${w}"; printf 'the temp dir path (from $TMPDIR) contains a quote, backslash or whitespace\n'; return 3 ;;
+  esac
   # shellcheck disable=SC2064
   trap "rm -rf '${w}'; trap - RETURN" RETURN
 
@@ -140,5 +162,5 @@ mcp_call_tool() {
   http="$(_mcp_post "${w}" "${url}" "${sid}" "${req}")" \
     || { printf 'the %s call to %s failed in transport\n' "${tool}" "${url}"; return 4; }
   case "${http}" in 2??) ;; *) printf 'the %s call answered HTTP %s\n' "${tool}" "${http:-none}"; return 4 ;; esac
-  _mcp_json "${w}/body"
+  _mcp_json "${w}/body" 2
 }

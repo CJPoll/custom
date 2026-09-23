@@ -65,7 +65,10 @@ case "${method}" in
   initialize)
     echo initialize >> "${S}/calls.log"
     code="$(cat "${S}/init.code" 2>/dev/null || echo 200)"
-    printf 'HTTP/1.1 %s OK\r\nmcp-session-id: sess-1\r\n\r\n' "${code}" > "${hdr}"
+    sid="$(cat "${S}/init.sid" 2>/dev/null || echo sess-1)"
+    if [ -n "${sid}" ]; then printf 'HTTP/1.1 %s OK\r\nmcp-session-id: %s\r\n\r\n' "${code}" "${sid}" > "${hdr}"
+    else printf 'HTTP/1.1 %s OK\r\n\r\n' "${code}" > "${hdr}"; fi
+    printf '%s\n' "${cfg}" | grep '^max-time' >> "${S}/maxtime.log"
     printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26"}}' > "${out}"
     printf '%s' "${code}" ;;
   notifications/initialized)
@@ -77,6 +80,8 @@ case "${method}" in
     : > "${hdr}"
     code="$(cat "${S}/${tool}.code" 2>/dev/null || echo 200)"
     cp "${S}/${tool}.answer" "${out}" 2>/dev/null || : > "${out}"
+    # A curl that fails in transport AFTER the request went out (a timeout).
+    [ -f "${S}/${tool}.curlexit" ] && exit "$(cat "${S}/${tool}.curlexit")"
     printf '%s' "${code}" ;;
   *) printf 400 ;;
 esac
@@ -86,7 +91,7 @@ export PATH="${SHIM}/bin:${PATH}"
 export SHIM_DIR="${SHIM}" SHIM_BEARER="${BEARER}"
 
 shim_reset() {
-  rm -f "${SHIM}"/*.log "${SHIM}"/args.*.json "${SHIM}"/*.code "${SHIM}"/*.answer
+  rm -f "${SHIM}"/*.log "${SHIM}"/args.*.json "${SHIM}"/*.code "${SHIM}"/*.answer "${SHIM}"/*.curlexit "${SHIM}"/init.sid
   # The default session_send answer: an SSE stream, the shape Streamable HTTP uses.
   printf 'event: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\\"event_id\\":\\"ev-111\\",\\"delivery_id\\":\\"dl-222\\",\\"status\\":\\"pending\\"}"}],"isError":false}}\n\n' \
     > "${SHIM}/session_send.answer"
@@ -341,6 +346,60 @@ send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
 if [ "${RC}" -ne 0 ]; then ok "an answer with no event_id is not a receipt"; else bad "an answer with no event_id is not a receipt" "exit 0: ${OUT}"; fi
 assert_contains "no event_id: the outcome is UNKNOWN" "UNKNOWN" "${ERR}"
 
+echo "== the MCP wire: malformed inputs and transport failures =="
+for badbearer in 'has"quote' 'has space' 'has\backslash'; do
+  shim_reset; export ATHENA_MCP_BEARER="${badbearer}"
+  send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+  if [ "${RC}" -ne 0 ]; then ok "a bearer with [${badbearer}] is refused"; else bad "a bearer with [${badbearer}] is refused" "exit 0"; fi
+  assert_eq "a bearer with [${badbearer}]: nothing reached the server" "" "$(calls)"
+  assert_not_contains "a bearer with [${badbearer}]: the value is never printed" "${badbearer}" "${ERR}"
+done
+export ATHENA_MCP_BEARER="${BEARER}"
+
+shim_reset; printf '' > "${SHIM}/init.sid"
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+assert_contains "initialize with no session id: refused, nothing was sent" "no session id" "${ERR}"
+assert_not_contains "initialize with no session id: session_send never called" "session_send" "$(calls)"
+shim_reset; printf 'bad"sid' > "${SHIM}/init.sid"
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+assert_contains "initialize with a malformed session id: refused" "malformed session id" "${ERR}"
+assert_not_contains "initialize with a malformed session id: session_send never called" "session_send" "$(calls)"
+
+shim_reset; printf 28 > "${SHIM}/session_send.curlexit"
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+assert_contains "curl failing in transport on tools/call: outcome UNKNOWN" "outcome is UNKNOWN" "${ERR}"
+assert_not_contains "curl failing in transport on tools/call: never 'nothing was sent'" "nothing was sent" "${ERR}"
+
+# SSE: the response split over two `data:` lines of one event, then a
+# notification. The response is selected by id, not by position.
+shim_reset
+cat > "${SHIM}/session_send.answer" <<'SSE'
+event: message
+data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text",
+data: "text":"{\"event_id\":\"ev-sse\",\"delivery_id\":\"dl-sse\"}"}]}}
+
+event: message
+data: {"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}
+
+SSE
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+assert_eq "SSE: the response is found by id across a multi-line event and a trailing notification" "ev-sse" "$(printf '%s' "${OUT}" | jq -r .event_id 2>/dev/null)"
+
+# A server Fix written without the space after the colon.
+shim_reset
+printf '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"refused.Fix:do the thing"}}' > "${SHIM}/session_send.answer"
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+assert_contains "Fix: with no space: the server's fix is carried" "Fix: do the thing" "${ERR}"
+assert_eq "Fix: with no space: the lead-in is not repeated as the fix" "1" "$(printf '%s\n' "${ERR}" | grep -c 'refused\.')"
+
+# A timeout that could inject a curl config line is never passed through.
+shim_reset; export ATHENA_MCP_HTTP_TIMEOUT=$'5\nurl = "http://evil.test/"'
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+assert_eq "a malformed ATHENA_MCP_HTTP_TIMEOUT: the send still succeeds" 0 "${RC}"
+assert_not_contains "a malformed ATHENA_MCP_HTTP_TIMEOUT never reaches curl's config" "evil" "$(cat "${SHIM}/maxtime.log" "${SHIM}/argv.log" 2>/dev/null)"
+assert_contains "a malformed ATHENA_MCP_HTTP_TIMEOUT falls back to 30" "max-time = 30" "$(cat "${SHIM}/maxtime.log" 2>/dev/null)"
+unset ATHENA_MCP_HTTP_TIMEOUT
+
 echo "== --to-project: resolved through list_my_machines =="
 LIST_TWO='{"jsonrpc":"2.0","id":2,"result":{"structuredContent":[{"id":"m-desk","name":"Cody Desktop","instances":[{"inbox_name":"walt_ui-session.jsonl"},{"inbox_name":"walt_ui-slack.jsonl"}]},{"id":"m-lap","name":"cjpoll-laptop","instances":[{"inbox_name":"custom-session.jsonl"}]}]}}'
 shim_reset; printf '%s' "${LIST_TWO}" > "${SHIM}/list_my_machines.answer"
@@ -366,6 +425,14 @@ send --routed --to-project gen_saas --subject s --re /x
 if [ "${RC}" -ne 0 ]; then ok "to-project with no machine hosting it: refused"; else bad "to-project with no machine hosting it: refused" "exit 0"; fi
 assert_contains "to-project none: names the inbox it looked for" "none of your machines declares gen_saas-session.jsonl" "${ERR}"
 assert_not_contains "to-project none: session_send was never called" "session_send" "$(calls)"
+
+shim_reset; printf '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":["not-an-object",{"id":"m-desk","name":"d","instances":["x",{"inbox_name":"walt_ui-session.jsonl"}]}]}}' > "${SHIM}/list_my_machines.answer"
+send --routed --to-project walt_ui --subject s --re /x
+assert_eq "a list with non-object members: the well-formed machine is still chosen" "m-desk" "$(jq -r .to.machine_id "${SHIM}/args.session_send.json" 2>/dev/null)"
+shim_reset; printf '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"not":"a list"}}}' > "${SHIM}/list_my_machines.answer"
+send --routed --to-project walt_ui --subject s --re /x
+assert_contains "a list that is not an array: refused as an unexpected answer" "did not answer with a list of machines" "${ERR}"
+assert_not_contains "a list that is not an array: session_send never called" "session_send" "$(calls)"
 
 shim_reset
 send --routed --to-project walt_ui@ --subject s --re /x
@@ -477,6 +544,18 @@ R="$(cd "${PROJ}" && "${BIN}/read-inbox" lane --peek 2>&1)"
 assert_eq "lane: exactly ONE fence around the batch" "1" "$(printf '%s\n' "${R}" | grep -c '^--- untrusted content ')"
 assert_contains "lane: the state-change render is unchanged" "[state-change] notion:a" "${R}"
 assert_not_contains "lane: no session doctrine line on a lane read" "A session message is" "${R}"
+
+echo "== read side: a MIXED platform batch renders each line in file order =="
+: > "${LOGF}"; rm -f "${ATHENA_INBOX_ROOT}/cproj-session.state.json"
+printf '%s\n' '{"v":1,"kind":"notion.ticket.updated","entity_id":"notion:m","status":"z"}' >> "${LOGF}"
+line ev-7 m-walt "mixed" "session body" >> "${LOGF}"
+register '{"session":{"kind":"log","path":"cproj-session.jsonl","producer":"platform","stale_after_s":0}}'
+R="$(cd "${PROJ}" && "${BIN}/read-inbox" session --peek 2>&1)"
+assert_contains "mixed: the state-change line is labelled as not a session message" "[state-change] (not a session message)" "${R}"
+assert_contains "mixed: its entity is shown inside its own fence" "notion:m" "$(printf '%s\n' "${R}" | inside_fences)"
+assert_eq "mixed: one fence per message (2)" "2" "$(printf '%s\n' "${R}" | grep -c '^--- untrusted content ')"
+assert_eq "mixed: file order kept (state-change first)" "state-change" \
+  "$(printf '%s\n' "${R}" | grep -m1 -oE '^\[(state-change|session\.message)' | tr -d '[')"
 
 echo "== an inherited FENCED in the environment never replaces a real body =="
 register '{"session":{"kind":"log","path":"cproj-session.jsonl","producer":"platform","stale_after_s":0},"slack":{"kind":"log","path":"cproj-slack.jsonl"}}'
