@@ -178,6 +178,30 @@ wait_for_nonempty() { # wait_for_nonempty <file> [max-tenths]
   done
   return 1
 }
+# wait_for_log <fixed-string> [max-tenths] — block (bounded, real sleep between
+# checks) until the case LOG contains the string. Signal-and-exit cases assert
+# on OBSERVED events like this, never on "enough time has passed": under load
+# only the wait's duration changes, never the verdict (DND-365).
+wait_for_log() {
+  local s="$1" max="${2:-300}" i=0
+  while [ "$i" -lt "$max" ]; do
+    grep -qF -- "$s" "${LOG}" 2>/dev/null && return 0
+    sleep 0.1
+    i=$((i+1))
+  done
+  return 1
+}
+# proc_start <pid> — the process's start time (clock ticks since boot, field 22
+# of /proc/<pid>/stat), or nothing if it does not exist. Parsed after the LAST
+# ')' because the comm field may contain spaces or parens.
+proc_start() {
+  local st f; st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+  # After "comm) " the first field is field 3 (state), so field 22 is index 19.
+  st="${st##*) }"; read -r -a f <<<"${st}"; printf '%s' "${f[19]:-}"
+}
+# same_process <pid> <start> — status 0 while <pid> is still THAT process (not
+# a reuse of its pid). A zombie still counts: it has not been reaped yet.
+same_process() { [ -n "$2" ] && [ "$(proc_start "$1")" = "$2" ]; }
 
 # ---------------------------------------------------------------------------
 # I-8 — the installer: idempotency, preservation, --check, --remove, --dry-run
@@ -747,7 +771,13 @@ if wait_for_nonempty "${CALLS}" 100; then
   #     init keeps writing to the inbox with nothing supervising it, and the
   #     next supervisor takes the lock and becomes a second writer (PT-919 is
   #     the same species of failure).
+  #     The supervisor's reaper SIGTERMs the client and exits without waiting,
+  #     so the client's death is AWAITED (bounded) before it is judged, never
+  #     assumed from elapsed time: the `sleep 2` above is for case 33, and under
+  #     load it is no promise the client has been reaped (DND-365). A client
+  #     that really is orphaned outlives the ceiling and still fails.
   client_pid="$(cat "${STUB_PID}" 2>/dev/null | tr -d ' ')"
+  [ -n "$client_pid" ] && timeout 20 tail --pid="$client_pid" -f /dev/null >/dev/null 2>&1
   if [ -n "$client_pid" ] && ! kill -0 "$client_pid" 2>/dev/null; then
     ok "the client is reaped with the supervisor, never orphaned"
   else
@@ -780,8 +810,11 @@ SUPERVISOR_PID=$!
 
 # The stub exits 1 immediately, so once it has run once the supervisor is in
 # its 30s backoff — the window under test.
-if wait_for_nonempty "${CALLS}" 100; then
-  sleep 1
+# Synchronised on the supervisor's own "restart 1 in 30s" line, not on
+# `sleep 1`: under load a fixed second is no promise the supervisor has reached
+# the backoff, and a TERM that lands earlier would pass without testing the
+# window this case exists for (DND-365).
+if wait_for_nonempty "${CALLS}" 100 && wait_for_log 'restart 1 in 30s' 300; then
   started="$(date +%s)"
   kill "$SUPERVISOR_PID" 2>/dev/null
   # Bounded: if TERM is being swallowed this returns when the timeout lapses
@@ -799,7 +832,7 @@ if wait_for_nonempty "${CALLS}" 100; then
   SUPERVISOR_PID=""
 else
   bad "SIGTERM is honoured during the backoff sleep, not deferred until it ends" \
-      "the backgrounded supervisor never ran the stub client"
+      "the supervisor never ran the stub client, or never logged entering its backoff (calls=$(calls) log=$(tail -n 3 "${LOG}" 2>/dev/null | tr '\n' '|'))"
   kill "$SUPERVISOR_PID" 2>/dev/null; wait "$SUPERVISOR_PID" 2>/dev/null
   SUPERVISOR_PID=""
 fi
@@ -1000,11 +1033,15 @@ STUBEOF
   SUPERVISOR_PID=$!
   WD_PIDS+=("${SUPERVISOR_PID}")
   CLIENT_PID=""
-  if wait_for_nonempty "${CASE_DIR}/ready" 100; then CLIENT_PID="$(cat "${CASE_DIR}/ready")"; WD_PIDS+=("${CLIENT_PID}"); fi
+  if wait_for_nonempty "${CASE_DIR}/ready" 300; then CLIENT_PID="$(cat "${CASE_DIR}/ready")"; WD_PIDS+=("${CLIENT_PID}"); fi
   printf '{"token":"SEKRETtok-watchdog-0123456789"}' > "${CASE_DIR}/config.json"
 }
+# run_watchdog [dump-wait] — one watchdog pass, synchronously. The timeout is a
+# hang CEILING, not a budget: a pass that escalates to SIGKILL spends a fixed
+# 10s plus the capture, so under load it must not be the thing that decides the
+# verdict. Its status is returned (124 = the ceiling fired) for the diagnostics.
 run_watchdog() {
-  timeout 60 env XDG_STATE_HOME="${WD_XDG:-${CASE_DIR}/xdg}" \
+  timeout 120 env XDG_STATE_HOME="${WD_XDG:-${CASE_DIR}/xdg}" \
       ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
       ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
       ATHENA_INBOX_CLIENT_CONFIG="${CASE_DIR}/config.json" \
@@ -1083,7 +1120,7 @@ if grep -q 'WATCHDOG: client pid .* WEDGED' "${LOG}" && grep -q 'WATCHDOG: captu
 else
   bad "the log records wedge -> captured -> SIGTERM, in that order" "$(grep WATCHDOG "${LOG}" | tr '\n' '|')"
 fi
-if wait_for_nonempty "${CASE_DIR}/ready" 100 && [ "$(cat "${CASE_DIR}/ready")" != "${FIRST_CLIENT}" ] && kill -0 "${SUPERVISOR_PID}" 2>/dev/null; then
+if wait_for_nonempty "${CASE_DIR}/ready" 300 && [ "$(cat "${CASE_DIR}/ready")" != "${FIRST_CLIENT}" ] && kill -0 "${SUPERVISOR_PID}" 2>/dev/null; then
   WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
   ok "the owning supervisor relaunched a NEW client after the SIGTERM"
 else
@@ -1136,7 +1173,7 @@ else bad "a failed alert send is logged loudly with a Fix:, after the restart" "
 #     kill the fresh client.
 n_before="$(caps | wc -l)"
 rm -f "${CASE_DIR}/term"
-wait_for_nonempty "${CASE_DIR}/ready" 100 && WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
+wait_for_nonempty "${CASE_DIR}/ready" 300 && WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
 rm -f "${CASE_DIR}/ready"
 tail -n 1 "${LOG}" >/dev/null
 grep 'INFO reconnecting in 1.0s' "${LOG}" | head -n 1 >> "${LOG}"
@@ -1174,18 +1211,58 @@ stop_wd_supervisor
 
 # 45c. A client that IGNORES SIGTERM is escalated to SIGKILL after 10s — and
 #      only after its identity is re-checked.
+#
+#      Every claim is synchronised on an OBSERVED event, never on elapsed time
+#      (DND-365: the old form asserted `! kill -0` the instant the watchdog
+#      returned, which raced the supervisor's reap -- a SIGKILLed child stays a
+#      zombie, and kill -0 succeeds on a zombie, until its parent runs `wait`;
+#      it went red once in harness-gate at load ~49). The chain asserted:
+#        1. the mock RECEIVED SIGTERM and IGNORED it (its own markers);
+#        2. the watchdog logged its SIGKILL escalation (synchronous: the
+#           watchdog pass has returned);
+#        3. the supervisor REAPED the client with status 137 (its log line);
+#        4. that process no longer exists (pid + start time, so a reused pid
+#           cannot read as the stubborn client still alive).
+#      To make the reap race DETERMINISTIC rather than load-dependent, the
+#      supervisor is held SIGSTOPped across the watchdog pass: the SIGKILLed
+#      client then cannot have been reaped when the pass returns (asserted as
+#      the premise), and only a test that waits on the reap can pass. Stopping
+#      the supervisor changes nothing the watchdog reads: identity resolution
+#      (pidfile, kill -0 on the supervisor, pgrep -P) works on a stopped pid.
 setup_case wd_sigkill
 WD_IGNORE_TERM=1 start_wd_supervisor dump
 STUBBORN="${CLIENT_PID}"
+STUBBORN_START="$(proc_start "${STUBBORN}")"
 printf '%s INFO step ws_upgrade 111ms\n' "$(backdated 600)" >> "${LOG}"
-run_watchdog 3
-if [ -s "${CASE_DIR}/term" ] && grep -q "WATCHDOG: client ${STUBBORN} ignored SIGTERM for 10s; sending SIGKILL" "${LOG}" \
-   && ! kill -0 "${STUBBORN}" 2>/dev/null; then
-  ok "a client that ignores SIGTERM is SIGKILLed after 10s (identity re-checked first)"
+# Cleared BEFORE the pass (see case 40-43): the relaunched client inherits
+# MOCK_IGNORE_TERM, so its pid must be read from a fresh ready file and handed
+# to stop_wd_supervisor, or it would outlive the case.
+rm -f "${CASE_DIR}/ready"
+kill -STOP "${SUPERVISOR_PID}" 2>/dev/null
+run_watchdog 3; WD_RC=$?
+# Premise: with its parent stopped, the killed client is still unreaped here --
+# exactly the state the old instant `! kill -0` assertion raced against.
+if same_process "${STUBBORN}" "${STUBBORN_START}"; then PREMISE=y; else PREMISE=n; fi
+kill -CONT "${SUPERVISOR_PID}" 2>/dev/null
+if [ -n "${STUBBORN}" ] && [ "${PREMISE}" = y ]; then
+  ok "premise: while the supervisor cannot run, a SIGKILLed client is not yet reaped (so exit must be awaited, not assumed)"
 else
-  bad "a client that ignores SIGTERM is SIGKILLed after 10s (identity re-checked first)" "$(grep WATCHDOG "${LOG}" | tr '\n' '|') alive=$(kill -0 "${STUBBORN}" 2>/dev/null && echo y || echo n)"
+  bad "premise: while the supervisor cannot run, a SIGKILLed client is not yet reaped" "client=${STUBBORN:-none} start=${STUBBORN_START:-none} watchdog_rc=${WD_RC}"
 fi
-[ -s "${CASE_DIR}/ready" ] && WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
+REAPED=n
+if wait_for_log 'client exited 137 after' 300 && timeout 30 tail --pid="${STUBBORN}" -f /dev/null 2>/dev/null \
+   && ! same_process "${STUBBORN}" "${STUBBORN_START}"; then REAPED=y; fi
+if [ -s "${CASE_DIR}/term" ] && [ "$(cat "${CASE_DIR}/term.ignored" 2>/dev/null)" = "${STUBBORN}" ] \
+   && grep -q "WATCHDOG: client ${STUBBORN} ignored SIGTERM for 10s; sending SIGKILL" "${LOG}" \
+   && [ "$(line_of 'WATCHDOG: SIGTERM client pid')" -lt "$(line_of 'ignored SIGTERM for 10s; sending SIGKILL')" ] \
+   && [ "${REAPED}" = y ] \
+   && [ "$(line_of 'ignored SIGTERM for 10s; sending SIGKILL')" -lt "$(line_of 'client exited 137 after')" ]; then
+  ok "a client that ignores SIGTERM is SIGKILLed after 10s (identity re-checked first), and exits 137"
+else
+  bad "a client that ignores SIGTERM is SIGKILLed after 10s (identity re-checked first), and exits 137" \
+      "watchdog_rc=${WD_RC} term=$(cat "${CASE_DIR}/term" 2>/dev/null) ignored=$(cat "${CASE_DIR}/term.ignored" 2>/dev/null) reaped=${REAPED} log=$(grep -E 'WATCHDOG|client exited' "${LOG}" | tr '\n' '|')"
+fi
+wait_for_nonempty "${CASE_DIR}/ready" 300 && WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
 stop_wd_supervisor
 
 # 45d. The capture itself FAILS (no dump directory can be made). The client is

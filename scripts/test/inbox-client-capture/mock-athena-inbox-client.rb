@@ -16,7 +16,9 @@
 #   MOCK_DUMP_DIR   where the dump goes (the client's dump dir)
 #   MOCK_LOG        the client log to append the "diagnostics: wrote" line to
 #   MOCK_READY      written with this pid once the traps are installed
-#   MOCK_TERM_FILE  written with the epoch-ms at which SIGTERM arrived
+#   MOCK_TERM_FILE  written with the epoch-ms at which SIGTERM arrived; with
+#                   MOCK_IGNORE_TERM=1, <MOCK_TERM_FILE>.ignored is then
+#                   written with this pid once the SIGTERM has been ignored
 #   MOCK_TOKEN      embedded in the dump, so redaction can be asserted
 #   MOCK_LINE       the line number in the top frame (signature must ignore it)
 #   MOCK_STEP       the dump's current_step (default tls)
@@ -75,8 +77,12 @@ end
 Signal.trap("TERM") do
   File.write(term_file, (Time.now.to_f * 1000).round.to_s)
   # MOCK_IGNORE_TERM=1: record the SIGTERM and keep running (a client that
-  # does not stop), so the watchdog's SIGKILL escalation can be proven.
+  # does not stop), so the watchdog's SIGKILL escalation can be proven. The
+  # decision to keep running is itself recorded in <MOCK_TERM_FILE>.ignored,
+  # so a test synchronises on "SIGTERM arrived AND was ignored" as an observed
+  # event rather than inferring it from elapsed time (DND-365).
   exit!(143) unless ENV["MOCK_IGNORE_TERM"] == "1"
+  File.write("#{term_file}.ignored", Process.pid.to_s)
 end
 
 File.write(ENV["MOCK_READY"], Process.pid.to_s) if ENV["MOCK_READY"]
