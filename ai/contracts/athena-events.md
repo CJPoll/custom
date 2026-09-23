@@ -230,6 +230,14 @@ DELIVERED on rule X, SUPPRESSED on Y, and terminally FAILED on Z at once, so onl
 the Level-1 routing question is genuinely per-event; every delivery outcome is
 per-`(event, rule)`:
 
+**Later (2026-09-23):** the paragraph above previously left the "per-`(event,
+rule)`" grain with no exception. Superseded (D40, HG-16/DND-311): a direct
+delivery has the same five Level-2 outcomes, evaluated at `(event,
+direct-target)` instead of `(event, rule)`, because it has no rule — see the
+direct-delivery bullets under *Declared families beyond the first pass* →
+`fleet.session.message`. This is the one delivery-row shape not keyed on a
+rule; every other delivery in this document is still per-`(event, rule)`.
+
 1. **DELIVERED** — predicate TRUE and the delivery succeeded.
 2. **FILTERED** — predicate FALSE; the rule applied and correctly produced no
    delivery.
@@ -721,6 +729,30 @@ An addressed message's direct delivery, made normative (D40, HG-16/DND-311):
   staleness query selects by delivery status and `last_pushed_at`, not by
   `rule_id`, so a direct delivery is retried and can terminally FAIL exactly
   like a rule delivery, just keyed on the event instead of the rule.
+- **REFUSED (target-bind) covers a direct delivery too; SUPPRESSED (dedupe
+  window) does not — a known, unticketed gap.** The delivery-time target-bind
+  re-assertion (`InboxAdapter`, Level 2's REFUSED, cause `target-bind`) is
+  the inbox adapter's own delivery-time check and runs for every delivery it
+  pushes, rule-based or direct, so a direct delivery whose target is
+  deregistered after send is REFUSED exactly like a rule's. The dedupe
+  window, by contrast, is keyed `(rule_id, subject)` (*Enabled flag and
+  dedupe window*) — a **rule** field — so a direct delivery, having no rule,
+  is never collapsed by it: nothing throttles one owner's session-message
+  fan-out to itself. That asymmetry is intentional for this pass (a direct
+  message is addressed by a human/agent choice each time, not a standing
+  rule an owner tuned a window for) but is not yet closed by a ticket.
+- **The owner report renders a delivery-specific `Fix:` for `rule_id: nil`,
+  never a rule's.** Both stores' report builder branches on `rule_id`: for
+  `nil` the subject reads "direct (addressed) delivery," not "rule `nil`,"
+  and the remedy names the recipient-side action — for a FAILED direct
+  delivery, "check the recipient machine is connected and still declares the
+  inbox, then re-send" (never "disable the rule," since there is none); for a
+  REFUSED one, the refusing check's own declared remediation, exactly as for a
+  rule. Because the `(owner, nil, cause)` bucket aggregates across every
+  recipient the owner ever addressed under that cause, the exemplar names only
+  the **first-seen** target and says so ("… recipients (first seen:
+  `adapter:target`)"), never implying it is the only one.
+
 **The `notion.agent_message.{created,updated,deleted}` family** (Agent Messages
 routing):
 

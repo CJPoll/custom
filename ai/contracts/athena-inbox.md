@@ -1134,9 +1134,9 @@ change stream of state-change events*), unchanged by this section.
   is_owner}`). It carries **no body of its own** beyond these; the click is a
   signal, and its `value` is Path-2 untrusted (*Untrusted input*).
 - **`session.message`** — a routed `fleet.session.message`
-  (`athena-events.md`). Fields: `entity_id` — its form (`"session:<event_id>"`,
-  D40) is stated once, in `athena-events.md` → *Declared families beyond the
-  first pass* → `fleet.session.message`, the same pattern that section uses for
+  (`athena-events.md`). Fields: `entity_id` (D40) — its form is stated once, in
+  `athena-events.md` → *Declared families beyond the first pass* →
+  `fleet.session.message`, the same pattern that section uses for
   `notion.agent_message.*`'s `entity_id`; here it is only the line's
   reconciliation identity, **not** a dedupe key (D25 stands: no platform
   channel line carries a dedupe key, *Notify-consumer idempotency uses the
