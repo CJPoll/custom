@@ -40,6 +40,19 @@ if [[ -z "${WT_LIB_COMMON_SOURCED:-}" ]]; then
       fi
   }
 
+  # error <message> : print an "Error: <message>" line to stderr (the same
+  # convention used throughout scripts/wt and scripts/wt-lib/tmux.sh) and
+  # exit non-zero. Used as a bare statement on a wt-lib failure path — it
+  # exits rather than returns so that caller doesn't need `|| return` after
+  # every call, matching how every existing call site is already written.
+  # DND-398: this function did not exist, so every `error "..."` call in
+  # pr.sh/merge.sh failed with "command not found" (exit 127) and lost the
+  # intended message.
+  error() {
+      echo "Error: $*" >&2
+      exit 1
+  }
+
   # Run command with optional quiet mode
   run_cmd() {
       if [ "$QUIET" = true ]; then
