@@ -18,9 +18,13 @@ if [[ -z "${WT_LIB_PR_SOURCED:-}" ]]; then
     source "${SCRIPT_DIR}/worktree.sh"
     source "${SCRIPT_DIR}/stack.sh"
     source "${SCRIPT_DIR}/stack-advanced.sh"
+    source "${SCRIPT_DIR}/push.sh"
 
     create_stack_prs() {
         local open_in_browser="${1:-false}"
+
+        # Graphite submits as the owner; refused under WT_AGENT_PUSH=1 (push.sh).
+        wt_refuse_gt_submit_under_agent || return 3
 
         # Check if Graphite is available
         if ! command -v gt &>/dev/null; then
@@ -65,6 +69,9 @@ if [[ -z "${WT_LIB_PR_SOURCED:-}" ]]; then
 
     push_stack() {
         local force="${1:-false}"
+
+        # Graphite submits as the owner; refused under WT_AGENT_PUSH=1 (push.sh).
+        wt_refuse_gt_submit_under_agent || return 3
 
         # Check if Graphite is available
         if ! command -v gt &>/dev/null; then
@@ -117,15 +124,15 @@ if [[ -z "${WT_LIB_PR_SOURCED:-}" ]]; then
         log "Pushing $branch..."
 
         if [ "$force" = "true" ]; then
-            if (cd "$worktree_path" && git push --force-with-lease origin "$branch"); then
+            if (cd "$worktree_path" && wt_git_push --force-with-lease origin "$branch"); then
                 log "✓ Force pushed $branch"
             else
                 error "Failed to push $branch"
             fi
         else
-            if (cd "$worktree_path" && git push origin "$branch"); then
+            if (cd "$worktree_path" && wt_git_push origin "$branch"); then
                 log "✓ Pushed $branch"
-            elif (cd "$worktree_path" && git push --set-upstream origin "$branch"); then
+            elif (cd "$worktree_path" && wt_git_push --set-upstream origin "$branch"); then
                 log "✓ Pushed $branch (with upstream set)"
             else
                 error "Failed to push $branch"
@@ -136,6 +143,9 @@ if [[ -z "${WT_LIB_PR_SOURCED:-}" ]]; then
     # Create a single PR for the current branch
     create_pr() {
         local open_in_browser="${1:-false}"
+
+        # Graphite submits as the owner; refused under WT_AGENT_PUSH=1 (push.sh).
+        wt_refuse_gt_submit_under_agent || return 3
 
         if ! command -v gt &>/dev/null; then
             error "Graphite (gt) is required for creating PRs"

@@ -18,6 +18,7 @@ if [[ -z "${WT_LIB_MERGE_SOURCED:-}" ]]; then
     source "${SCRIPT_DIR}/worktree.sh"
     source "${SCRIPT_DIR}/stack.sh"
     source "${SCRIPT_DIR}/stack-advanced.sh"
+    source "${SCRIPT_DIR}/push.sh"
 
     merge_worktree() {
         local branch_to_merge="$1"
@@ -61,7 +62,7 @@ if [[ -z "${WT_LIB_MERGE_SOURCED:-}" ]]; then
 
         # Push the merged changes
         log "Pushing merged changes"
-        git push origin "$merge_into" || {
+        wt_git_push origin "$merge_into" || {
             error "Failed to push. Resolve any issues and push manually."
         }
 
@@ -94,13 +95,28 @@ if [[ -z "${WT_LIB_MERGE_SOURCED:-}" ]]; then
 
             # Delete the remote branch
             log "Deleting remote branch"
-            git push origin --delete "$branch_to_merge" 2>/dev/null || \
-            log "Could not delete remote branch (might already be deleted or protected)"
+            wt_delete_remote_branch "$branch_to_merge"
         else
             log "Keeping branch $branch_to_merge as requested"
         fi
 
         log "✓ Merge completed successfully!"
+    }
+
+    # Delete a merged branch on origin. For the owner this stays best-effort
+    # and quiet, as it always was (the branch may already be gone). Under
+    # WT_AGENT_PUSH=1 the push goes through the forge wrapper and a failure is
+    # loud: its stderr is shown and the exit is non-zero, because a refused
+    # wrapper must never read as "already deleted".
+    wt_delete_remote_branch() {
+        local branch="$1" mode
+        mode="$(wt_agent_push_mode)" || return 3
+        if [ "$mode" = owner ]; then
+            wt_git_push origin --delete "$branch" 2>/dev/null || \
+            log "Could not delete remote branch (might already be deleted or protected)"
+            return 0
+        fi
+        wt_git_push origin --delete "$branch"
     }
 
     rebase_children_after_merge() {
@@ -151,7 +167,7 @@ if [[ -z "${WT_LIB_MERGE_SOURCED:-}" ]]; then
 
             # Push the rebased branch
             log "  Force pushing rebased $child"
-            git push --force-with-lease origin "$child"
+            wt_git_push --force-with-lease origin "$child"
 
             log "  ✓ Successfully rebased $child"
 
