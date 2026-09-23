@@ -68,7 +68,7 @@ satisfied by the relayed wrapper string and a preflight that dropped its own
   safety.
 
   **Later (2026-09-23):** DND-390 made the athena-amby token refresh
-  OWNER-GATED (`forge-auth-guard.sh` rule 6 denies it). Case 5 now pins the
+  OWNER-GATED (`forge-auth-guard.sh`'s `glab-athena refresh` deny). Case 5 now pins the
   preflight's own `Fix: the athena-amby token needs refreshing, which is
   OWNER-GATED` line plus `escalate to your admiral`, and asserts the output
   does NOT contain `glab-athena refresh`. The `glab_broken` shim is now
