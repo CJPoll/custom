@@ -89,10 +89,16 @@ What each part does:
 
 The wrapper (DND-389 and later) applies the helper reset, the rewrite, and the
 no-prompt setting itself, so the flags above are belt-and-braces. It also
-**refuses**, exit 3 with a `Fix:`, any push or other network git op that would
-still reach github.com over SSH or plain HTTP after the rewrite: an `ssh://`
-URL, a `pushurl` override, or an `insteadOf`/`pushInsteadOf` that forces SSH.
-Handle that refusal by the rule in the next section. The
+**refuses**, exit 3 with a `Fix:`, a network op that would still reach
+github.com over SSH or plain HTTP after the rewrite: an `ssh://` URL, a
+`pushurl` override, or an `insteadOf`/`pushInsteadOf` that forces SSH. It
+checks `push`, `fetch`, `pull`, `ls-remote`, `clone`, `remote update`,
+`submodule`, `subtree push/pull/add`, and git aliases that expand to them. It
+refuses a shell alias and a push that recurses into submodules outright. It
+does **not** see an `~/.ssh/config` Host alias for github.com, `ext::`
+transports, `clone --recurse-submodules`, git-lfs, or other subcommands; the
+header of `ai/bin/gh-athena` lists these. Handle a refusal by the rule in the
+next section. The
 `forge-identity-guard.sh` hook warns on a plain `git push` to a github.com
 remote.
 
@@ -124,6 +130,9 @@ resolving to the bot, a guard denial or refusal, anything. Then:
    the intent. The admiral escalates to its coordinator and waits. Nobody works
    around it.
 3. **Keep working** on anything the failure does not block.
+
+With no admiral above you (you are the admiral, the coordinator, or the main
+session), escalate to the owner.
 
 **Why (owner):** coordinating gets the root problem fixed faster than detecting
 violations after the fact. A workaround hides the broken identity path, and the

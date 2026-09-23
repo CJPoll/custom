@@ -85,6 +85,7 @@ mkrepo local "$TMP/bare.git"
 mkrepo gl_ghpush 'git@gitlab.com:g/r.git'
 git -C "$TMP/gl_ghpush" config remote.origin.pushurl 'git@github.com:o/r.git'
 mkdir -p "$TMP/norepo"
+mkrepo gopath "$TMP/go/src/github.com/o/r.git"
 
 echo "forge-identity-guard self-test"
 echo "hook: $HOOK"
@@ -138,6 +139,12 @@ run "$(bash_json_cwd "$TMP/norepo" 'git push origin HEAD')"
 check "3i. unresolvable remote (not a repo) -> still warns, never silent" warn
 check_text "3i'. the unresolvable warn says it could not resolve" 'could not resolve its remote'
 
+run "$(bash_json_cwd "$TMP/norepo" "git -C $TMP/gl push origin HEAD; git -C $TMP/gh_scp push origin HEAD")"
+check_text "3m. two pushes, the SECOND to github -> warns (every push examined)" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP" 'cd gh_scp && git push')"
+check_text "3n. relative cd resolved against the input cwd" 'to a github.com remote'
+
 run "$(bash_json_cwd "$TMP/gh_scp" 'git push origin HEAD')"
 check_text "3j. push warn carries the escalate Fix:" 'Fix: push through the wrapper'
 check_text "3k. push warn says escalate to your admiral" 'escalate to your admiral with the command + error and wait'
@@ -165,6 +172,12 @@ check "M11. git commit whose message says push github.com" allow
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'git log --grep push')"
 check "M12. git log --grep push (not a push)" allow
+
+run "$(bash_json_cwd "$TMP/gopath" 'git push origin HEAD')"
+check "M13. push to a LOCAL path containing github.com (Go workspace) is not GitHub" allow
+
+run "$(bash_json_cwd "$TMP/gl" 'git push origin fix/github.com-links')"
+check "M14. GitLab push of a branch whose NAME mentions github.com" allow
 
 run "$(bash_json '~/dev/custom/ai/bin/gh-athena pr create --title x')"
 check "M1. gh-athena pr create (wrapper)" allow

@@ -115,27 +115,58 @@ GIT_PUSH_RE='(^|[[:space:];&|(/])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:];&
 
 PUSH_FIX='Fix: push through the wrapper, which authenticates as athena-harness[bot] over HTTPS for that one command: `GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c credential.helper= -c url.https://github.com/.insteadOf=git@github.com: push …` (athena:github -> "Pushing as Athena"). If the wrapper refuses or fails, do not work around this; escalate to your admiral with the command + error and wait.'
 
-# push_segment_default_dir: the repo dir the push runs in.
+# is_github_url <url> : the URL's HOST is github.com (or a subdomain). A local
+# path that merely contains "github.com" (a Go-workspace path) is not.
+is_github_url() {
+  _u=$1
+  case "$_u" in
+    /*|./*|../*|\~*|file://*) return 1 ;;
+    *://*) _h=${_u#*://}; _h=${_h%%/*}; _h=${_h##*@}; _h=${_h%%:*} ;;
+    *:*) _h=${_u%%:*}; case "$_h" in */*) return 1 ;; esac; _h=${_h##*@} ;;
+    *) return 1 ;;
+  esac
+  _h=$(printf '%s' "$_h" | tr 'A-Z' 'a-z')
+  case "$_h" in github.com|*.github.com) return 0 ;; esac
+  return 1
+}
+
+# Split GFLAT at the FIRST push match (gawk/mawk leftmost match), so the repo
+# dir and the push arguments always come from the same push.
+split_first_push() {
+  printf '%s' "$GFLAT" | awk -v re="$GIT_PUSH_RE" -v part="$1" '{
+    if (!match($0, re)) exit
+    m = substr($0, RSTART, RLENGTH)
+    if (part == "before") { print substr($0, 1, RSTART - 1); exit }
+    if (part == "match")  { print m; exit }
+    rest = substr($0, RSTART + RLENGTH)
+    if (m ~ /[;&|)]$/) rest = ";" rest     # the boundary ate a separator
+    print rest
+  }'
+}
+
+# push_repo_dir: the repo dir the push runs in — `-C <dir>`, else the last
+# `cd <dir>` before the push, else the hook input cwd. Relative paths resolve
+# against the input cwd (where the command actually runs), not the hook's dir.
 push_repo_dir() {
-  _pre=$(printf '%s' "$GFLAT" | grep -Eo "$GIT_PUSH_RE" | head -n1)
-  _c=$(printf '%s' "$_pre" | sed -nE 's#.*[[:space:]]-C[[:space:]]+([^[:space:];&|]+).*#\1#p')
+  _base=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+  _c=$(split_first_push match | sed -nE 's#.*[[:space:]]-C[[:space:]]+([^[:space:];&|]+).*#\1#p')
   if [ -z "$_c" ]; then
-    # Last `cd <dir>` BEFORE the git push.
-    _before=$(printf '%s' "$GFLAT" | sed -E "s#${GIT_PUSH_RE}.*##")
-    _c=$(printf '%s' "$_before" | grep -Eo '(^|[[:space:];&|(])cd[[:space:]]+[^[:space:];&|)]+' | tail -n1 | sed -E 's#.*cd[[:space:]]+##')
+    _c=$(split_first_push before | grep -Eo '(^|[[:space:];&|(])cd[[:space:]]+[^[:space:];&|)]+' | tail -n1 | sed -E 's#.*cd[[:space:]]+##')
   fi
-  [ -n "$_c" ] || _c=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+  [ -n "$_c" ] || _c=$_base
   case "$_c" in "~"|"~/"*) _c="$HOME${_c#\~}" ;; "\$HOME"*) _c="$HOME${_c#\$HOME}" ;; esac
+  case "$_c" in /*|'') ;; *) [ -n "$_base" ] && _c="$_base/$_c" ;; esac
   printf '%s' "$_c"
 }
 
-if printf '%s' "$GFLAT" | grep -Eq "$GIT_PUSH_RE"; then
+# Examine EVERY push in the command, one at a time: after each, GFLAT becomes
+# the text after it (bounded, so a pathological command cannot loop).
+N=0
+while [ "$N" -lt 10 ] && printf '%s' "$GFLAT" | grep -Eq "$GIT_PUSH_RE"; do
+  N=$((N + 1))
   # The push's own arguments: from `push` to the next separator.
-  ARGS=$(printf '%s' "$GFLAT" | sed -E "s#^.*${GIT_PUSH_RE}##; s#^[[:space:]]*##; s#[;&|)].*##")
-  # A github.com URL (any form) named literally on the push -> warn outright.
-  case " $ARGS " in *github.com*)
-    warn "forge-identity: this is a plain \`git push\` to github.com, which authenticates with the machine owner's SSH key or credential helper — GitHub records the push as CJPoll, not Athena. ${PUSH_FIX}" ;;
-  esac
+  AFTER=$(split_first_push after)
+  ARGS=$(printf '%s' "$AFTER" | sed -E 's#^[[:space:]]*##; s#[;&|)].*##')
   # First positional (skipping options; -o/--push-option/--receive-pack/--exec/--repo take a value).
   TARGET=""; SKIP=0; PREV=""
   set -f   # word-split ARGS without globbing against the cwd
@@ -164,14 +195,21 @@ if printf '%s' "$GFLAT" | grep -Eq "$GIT_PUSH_RE"; then
     else
       URLS=$TARGET   # a URL literal (or a path)
     fi
+  elif [ -n "$TARGET" ] && is_github_url "$TARGET"; then
+    URLS=$TARGET     # a literal github URL needs no repo to classify
   fi
   if [ -z "$URLS" ]; then
     warn "forge-identity: this is a plain \`git push\` and the guard could not resolve its remote (repo dir '${DIR:-unknown}', remote '${TARGET:-default}'), so it cannot tell whether it goes to github.com. If it does, it authenticates as the machine owner (CJPoll), not Athena. ${PUSH_FIX}"
   fi
-  case "$URLS" in *github.com*)
-    warn "forge-identity: this is a plain \`git push\` to a github.com remote ('${TARGET}' -> $(printf '%s' "$URLS" | head -n1)), which authenticates with the machine owner's SSH key or credential helper — GitHub records the push as CJPoll, not Athena. ${PUSH_FIX}" ;;
-  esac
-fi
+  set -f
+  for u in $URLS; do
+    if is_github_url "$u"; then
+      warn "forge-identity: this is a plain \`git push\` to a github.com remote ('${TARGET}' -> ${u}), which authenticates with the machine owner's SSH key or credential helper — GitHub records the push as CJPoll, not Athena. ${PUSH_FIX}"
+    fi
+  done
+  set +f
+  GFLAT=$AFTER
+done
 
 # No bypass detected → allow silently.
 exit 0

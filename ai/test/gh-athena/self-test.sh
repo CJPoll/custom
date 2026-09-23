@@ -141,8 +141,46 @@ gha "${TMP}" clone ssh://git@github.com/o/r.git "${TMP}/clone-out"
 is_refusal && ok "13. \`clone ssh://git@github.com/...\` outside any repo -> refused" \
   || bad "13. clone ssh:// refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
+R="$(new_repo alias 'ssh://git@github.com/o/r.git')"
+gha "${R}" -c alias.p=push p origin HEAD
+is_refusal && ok "13b. a git alias expanding to push (alias.p=push) -> refused" \
+  || bad "13b. alias to push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+gha "${R}" -c 'alias.sp=!git push' sp
+is_refusal && [[ "${ERR}" == *"shell alias"* ]] && ok "13c. a shell alias (!...) -> refused (cannot be checked)" \
+  || bad "13c. shell alias refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+R="$(new_repo submod 'https://github.com/o/r.git')"
+git -C "${R}" config submodule.lib.url 'ssh://git@github.com/o/lib.git'
+gha "${R}" submodule update --init
+is_refusal && ok "13d. \`submodule update\` with an ssh:// submodule URL -> refused" \
+  || bad "13d. submodule update refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+gha "${R}" fetch --recurse-submodules origin
+is_refusal && ok "13e. \`fetch --recurse-submodules\` with an ssh:// submodule URL -> refused" \
+  || bad "13e. fetch --recurse-submodules refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+gha "${R}" push --recurse-submodules=on-demand origin HEAD
+is_refusal && ok "13f. \`push --recurse-submodules=on-demand\` -> refused (submodule remotes unchecked)" \
+  || bad "13f. recursive push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
+gha "${R}" subtree push -P lib ssh://git@github.com/o/lib.git main
+is_refusal && ok "13g. \`subtree push -P lib ssh://...\` -> refused" \
+  || bad "13g. subtree push refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
 echo
 echo "--- NEGATIVE: what must pass untouched ---"
+R="$(new_repo alias-local 'ssh://git@github.com/o/r.git')"
+gha "${R}" -c alias.st=status st
+if [ "${RC}" = 0 ] && [ -z "${ERR}" ]; then
+  ok "13h. an alias to a local command (alias.st=status) is not refused"
+else bad "13h. local alias passes" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+gha "${R}" -c alias.pz=push -c url.https://github.com/.insteadOf=ssh://git@github.com/ pz origin HEAD
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://github.com/o/r.git"* ]]; then
+  ok "13i. an aliased push whose remote DOES resolve to HTTPS passes"
+else bad "13i. aliased https push passes" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
 R="$(new_repo https 'https://github.com/o/r.git')"
 gha "${R}" push origin HEAD
 if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://github.com/o/r.git"* ]] && [ -z "${ERR}" ]; then

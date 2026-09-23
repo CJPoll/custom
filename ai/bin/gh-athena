@@ -105,16 +105,23 @@ fi
 #   * credential.helper= (empty resets the list, URL-scoped helpers included),
 #     core.askPass= , GIT_ASKPASS/SSH_ASKPASS unset, GIT_TERMINAL_PROMPT=0 — no
 #     fallback source of the owner's credentials; a bot-auth failure FAILS.
-#   * git_refuse_non_https: before exec, every URL the command would reach is
-#     resolved (with the rewrite applied, pushurl and pushInsteadOf included) and
-#     the command is REFUSED if any of them still reaches github.com over SSH or
-#     another non-HTTPS transport (ssh://, git://, http://, a pushurl override, a
-#     global insteadOf that forces SSH). A refusal is exit 3 with a Fix: line.
+#   * git_refuse_non_https: before exec, for the network subcommands it knows —
+#     push, fetch, pull, ls-remote, clone, remote update, submodule, subtree
+#     push/pull/add, and git aliases that expand to them — every URL the command
+#     would reach is resolved (rewrite applied, pushurl and pushInsteadOf
+#     included, submodule URLs when it recurses) and the command is REFUSED if
+#     any still reaches github.com over SSH or another non-HTTPS transport
+#     (ssh://, git://, http://, a pushurl override, an insteadOf that forces
+#     SSH). A shell alias (`!...`) and a push that recurses into submodules are
+#     refused outright. A refusal is exit 3 with a Fix: line.
 #
 # Test seam: GH_ATHENA_GIT_DRY_RUN=1 runs the resolution and refusal, then prints
 # the resolved URLs and the git argv (token redacted) instead of exec'ing git.
-# Residual (not detectable from git config): an ~/.ssh/config Host alias for
-# github.com (`myalias:owner/repo`) and ext:: transports.
+# Residual (NOT checked; each still runs): an ~/.ssh/config Host alias for
+# github.com (`myalias:owner/repo`); ext:: transports; `clone
+# --recurse-submodules` (the submodule URLs are unknown until the clone lands);
+# git-lfs transfers; third-party `git-<name>` subcommands; any subcommand not
+# named above.
 
 GH_HTTPS_REWRITE='url.https://github.com/.insteadOf=git@github.com:'
 
@@ -157,6 +164,22 @@ EOF
   exit 3
 }
 
+git_refuse_shell_alias() {
+  cat >&2 <<EOF
+gh-athena: REFUSING \`git $1\`: it is a shell alias ('$2'), which can run any command, so gh-athena cannot check which remote it reaches or which identity it pushes as.
+  Fix: run the underlying git command directly through the wrapper — \`~/dev/custom/ai/bin/gh-athena git <the expanded command>\`. If it cannot be done as Athena, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can't be done as Athena").
+EOF
+  exit 3
+}
+
+git_refuse_unchecked() {
+  cat >&2 <<EOF
+gh-athena: REFUSING \`git $1\`: $2, so it could reach github.com as the machine OWNER (CJPoll) unchecked.
+  Fix: push the superproject and each submodule separately, each through \`~/dev/custom/ai/bin/gh-athena git -C <repo> push …\` (drop --recurse-submodules / push.recurseSubmodules). If it cannot be done as Athena, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can't be done as Athena").
+EOF
+  exit 3
+}
+
 # git_refuse_non_https <git args...> : resolve every URL the network op would
 # reach and refuse on the first one that goes to github.com over non-HTTPS.
 # Sets RESOLVED_URLS (newline-separated) for the dry-run report.
@@ -172,15 +195,48 @@ git_refuse_non_https() {
     esac
   done
   [ $# -gt 0 ] || return 0
-  local sub="$1" mode; shift
-  case "$sub" in
-    push) mode=push ;;
-    fetch|pull|ls-remote|clone) mode=fetch ;;
-    remote) [ "${1:-}" = update ] || return 0; mode=fetch ;;
-    *) return 0 ;;
-  esac
+  local sub="$1" mode depth=0 alias_val; shift
 
   G() { git "${glob[@]}" -c "$GH_HTTPS_REWRITE" "$@"; }
+
+  # Expand git aliases (`alias.p=push`) the way git would, so an alias cannot
+  # carry a network op past the check. A shell alias (`!...`) can run anything,
+  # so it is refused outright rather than guessed at.
+  while [ "$depth" -lt 10 ]; do
+    case "$sub" in push|fetch|pull|ls-remote|clone|remote|submodule|subtree) break ;; esac
+    alias_val="$(G config --get "alias.$sub" 2>/dev/null || true)"
+    [ -n "$alias_val" ] || break
+    case "$alias_val" in
+      '!'*) git_refuse_shell_alias "$sub" "$alias_val" ;;
+    esac
+    local -a ex=(); read -ra ex <<<"$alias_val"
+    sub="${ex[0]}"; set -- "${ex[@]:1}" "$@"
+    depth=$((depth + 1))
+  done
+
+  local recurse=0 a0
+  for a0 in "$@"; do
+    case "$a0" in --recurse-submodules|--recurse-submodules=yes|--recurse-submodules=on-demand|--recurse-submodules=only) recurse=1 ;; esac
+  done
+  case "$sub" in
+    push)
+      mode=push
+      # A recursive push pushes each submodule through ITS OWN remote config,
+      # which this check does not inspect: refuse rather than half-check.
+      case "$(G config --get push.recurseSubmodules 2>/dev/null || true)" in on-demand|only) recurse=1 ;; esac
+      [ "$recurse" = 1 ] && git_refuse_unchecked push "--recurse-submodules pushes each submodule through its own remote, which gh-athena does not inspect" ;;
+    fetch|pull|ls-remote|clone) mode=fetch ;;
+    remote) [ "${1:-}" = update ] || return 0; mode=fetch ;;
+    submodule) mode=fetch; recurse=1 ;;
+    subtree)
+      case "${1:-}" in
+        push) mode=push ;;
+        pull|add) mode=fetch ;;
+        *) return 0 ;;
+      esac
+      shift ;;
+    *) return 0 ;;
+  esac
 
   local -a remotes=()
   mapfile -t remotes < <(G remote 2>/dev/null || true)
@@ -191,10 +247,23 @@ git_refuse_non_https() {
   # EVERY token that names a configured remote or mentions github.com is also
   # checked, so a mis-parsed option value can only add a check, never drop one.
   local -a targets=() ; local positional="" all=0 has_repo=0 a takes_value
+  if [ "$sub" = submodule ]; then
+    # Every submodule URL (config after `submodule init`, and .gitmodules).
+    # Relative URLs (./ ../) resolve against the superproject's remote, which
+    # the default-remote check below covers.
+    local top m
+    top="$(G rev-parse --show-toplevel 2>/dev/null || true)"
+    while read -r _ m; do
+      case "$m" in ./*|../*|'') ;; *) targets+=("$m") ;; esac
+    done < <({ G config --get-regexp '^submodule\..*\.url$' 2>/dev/null
+               [ -n "$top" ] && [ -f "$top/.gitmodules" ] \
+                 && G config -f "$top/.gitmodules" --get-regexp '^submodule\..*\.url$' 2>/dev/null; } || true)
+    set --   # submodule's own args name paths, not repositories
+  fi
   if [ "$mode" = push ]; then
-    takes_value='^(-o|--push-option|--receive-pack|--exec|--repo)$'
+    takes_value='^(-o|--push-option|--receive-pack|--exec|--repo|-P|--prefix|-m|--message)$'
   else
-    takes_value='^(-o|--upload-pack|-j|--jobs|--depth|--deepen|--shallow-since|--shallow-exclude|--refmap|--server-option|--negotiation-tip|-s|--strategy|-X|--strategy-option|--origin|-b|--branch|-u|--reference|--reference-if-able|--separate-git-dir|-c|--config|--template|--filter|--bundle-uri|--ref-format)$'
+    takes_value='^(-P|--prefix|-m|--message|-o|--upload-pack|-j|--jobs|--depth|--deepen|--shallow-since|--shallow-exclude|--refmap|--server-option|--negotiation-tip|-s|--strategy|-X|--strategy-option|--origin|-b|--branch|-u|--reference|--reference-if-able|--separate-git-dir|-c|--config|--template|--filter|--bundle-uri|--ref-format)$'
   fi
   local dd=0
   while [ $# -gt 0 ]; do
@@ -218,8 +287,21 @@ git_refuse_non_https() {
   done
   [ "$sub" = remote ] && all=1
   [ "$all" = 1 ] && targets+=("${remotes[@]}")
+  # fetch/pull --recurse-submodules (or the config that implies it) also
+  # fetches every submodule: check their URLs too.
+  if [ "$mode" = fetch ] && [ "$sub" != submodule ] && [ "$sub" != clone ]; then
+    case "$(G config --get fetch.recurseSubmodules 2>/dev/null || true)$(G config --get submodule.recurse 2>/dev/null || true)" in
+      *true*|*yes*|*on-demand*) recurse=1 ;;
+    esac
+    if [ "$recurse" = 1 ]; then
+      local _k m2
+      while read -r _k m2; do
+        case "$m2" in ./*|../*|'') ;; *) targets+=("$m2") ;; esac
+      done < <(G config --get-regexp '^submodule\..*\.url$' 2>/dev/null || true)
+    fi
+  fi
 
-  if [ -z "$positional" ] && [ "$all" = 0 ] && [ "$has_repo" = 0 ] && [ "$sub" != clone ]; then
+  if [ -z "$positional" ] && [ "$all" = 0 ] && [ "$has_repo" = 0 ] && [ "$sub" != clone ] && [ "$sub" != subtree ]; then
     # Default remote, as git resolves it: pushRemote / pushDefault (push only),
     # then branch.<cur>.remote, then origin.
     local cur def=""
