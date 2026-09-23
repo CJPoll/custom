@@ -139,6 +139,7 @@ collect_findings() {
   doctor_check_server "."
   doctor_check_server_reachability
   doctor_check_send_paths "${DOCTOR_MATCHED_ENTRY}" "."
+  doctor_check_server_failed_deliveries
 }
 
 FINDINGS="$(collect_findings)"

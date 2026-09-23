@@ -560,6 +560,13 @@ checks now answer the question a pid cannot:
   server-addressed send would be refused) or the registration cannot be read;
   `n-a` when routed is not configured or reachability was not asked. The
   maildir channels' own health is their per-channel findings.
+- `server-failed-deliveries` asks the same MCP, with the same token, for the
+  account's UNREAD failed-delivery records (`failed_deliveries`; every terminal
+  delivery failure and every machine-unreachable transition). N > 0 unread is a
+  `warn` listing each record's cause, count and id, with a Fix naming the tool's
+  `mark_read`. "checked: 0 unread" is `ok`; "UNAVAILABLE" (asked, no answer, or
+  an answer with no numeric `unread_count`) is `na` and says it is NOT 0 unread.
+  The server also emails the owner once per new or re-opened record.
 
 `inbox-status` and `read-inbox` carry the same freshness: every line they print
 for a channel carries its last-delivery age and the client's last-join age, and

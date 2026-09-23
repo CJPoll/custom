@@ -1304,15 +1304,16 @@ _doctor_mcp_json() {
   fi
 }
 
-# doctor_machine_reachable
-# Prints the machine_reachable tool result (a JSON object) on success.
-# Status: 0 answered · 2 skipped (no config / no token) · 4 unavailable, with
-# the one-line reason on stdout instead.
-doctor_machine_reachable() {
-  local cfg canned url w http sid msg res tool_err
-  canned="${ATHENA_INBOX_DOCTOR_REACHABLE_FILE:-}"
+# doctor_mcp_tool_call <tool> <arguments-json> <canned-file-or-empty>
+# One authenticated MCP tool call on the machine token: initialize -> session
+# id -> notifications/initialized -> tools/call <tool>. Prints the tool result
+# (a JSON value) on success. Status: 0 answered · 2 skipped (no config / no
+# token) · 4 unavailable, with the one-line reason on stdout instead. A canned
+# file (a JSON value, or `UNAVAILABLE:<reason>`) skips the network.
+doctor_mcp_tool_call() {
+  local tool="$1" args="$2" canned="$3" cfg url w http sid msg res tool_err
   if [ -n "${canned}" ]; then
-    [ -f "${canned}" ] || { printf 'the canned reachability file %s does not exist\n' "${canned}"; return 4; }
+    [ -f "${canned}" ] || { printf 'the canned %s file %s does not exist\n' "${tool}" "${canned}"; return 4; }
     case "$(head -c 12 "${canned}")" in
       UNAVAILABLE:*) sed -n '1s/^UNAVAILABLE://p' "${canned}"; return 4 ;;
     esac
@@ -1354,24 +1355,36 @@ doctor_machine_reachable() {
   names_safe_curl_config_value "${sid}" 256 || { printf 'the MCP initialize returned a session id that cannot be sent back safely (a quote, backslash, whitespace or control character, or over 256 bytes)\n'; return 4; }
   doctor_mcp_post "${w}" "${url}" "${sid}" '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' >/dev/null || true
 
-  http="$(doctor_mcp_post "${w}" "${url}" "${sid}" \
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"machine_reachable","arguments":{}}}')" \
-    || { printf 'the machine_reachable call to %s failed in transport\n' "${url}"; return 4; }
-  case "${http}" in 2??) ;; *) printf 'the machine_reachable call answered HTTP %s\n' "${http:-none}"; return 4 ;; esac
+  http="$(doctor_mcp_post "${w}" "${url}" "${sid}" "$(jq -n -c --arg t "${tool}" --argjson a "${args}" \
+    '{jsonrpc:"2.0", id:2, method:"tools/call", params:{name:$t, arguments:$a}}')")" \
+    || { printf 'the %s call to %s failed in transport\n' "${tool}" "${url}"; return 4; }
+  case "${http}" in 2??) ;; *) printf 'the %s call answered HTTP %s\n' "${tool}" "${http:-none}"; return 4 ;; esac
   msg="$(_doctor_mcp_json "${w}/body")"
-  # A JSON-RPC error, or a tool result flagged isError -- the tool missing
-  # (DND-315 not deployed) lands here. Report the server's own words, which are
-  # server text about a tool, never message content.
+  # A JSON-RPC error, or a tool result flagged isError -- a tool not deployed
+  # yet lands here. Report the server's own words, which are server text about
+  # a tool, never message content.
   tool_err="$(printf '%s' "${msg}" | jq -r '
       if .error then (.error.message // "an MCP error")
       elif (.result.isError // false) then ((.result.content[0].text // "a tool error") | tostring)
       else empty end' 2>/dev/null | head -c 200 | tr '\t\n\r' '   ')"
-  if [ -n "${tool_err}" ]; then printf 'machine_reachable is not available from the server: %s\n' "${tool_err}"; return 4; fi
+  if [ -n "${tool_err}" ]; then printf '%s is not available from the server: %s\n' "${tool}" "${tool_err}"; return 4; fi
   res="$(printf '%s' "${msg}" | jq -c '(.result.structuredContent // (.result.content[0].text | fromjson))' 2>/dev/null)"
-  if [ -z "${res}" ] || ! printf '%s' "${res}" | jq -e 'type == "object" and has("reachable")' >/dev/null 2>&1; then
+  [ -n "${res}" ] || { printf 'the %s answer carried no result\n' "${tool}"; return 4; }
+  printf '%s\n' "${res}"
+}
+
+# doctor_machine_reachable
+# Prints the machine_reachable tool result (a JSON object) on success.
+# Status: 0 answered · 2 skipped (no config / no token) · 4 unavailable, with
+# the one-line reason on stdout instead.
+doctor_machine_reachable() {
+  local out rc
+  out="$(doctor_mcp_tool_call machine_reachable '{}' "${ATHENA_INBOX_DOCTOR_REACHABLE_FILE:-}")"; rc=$?
+  [ "${rc}" -eq 0 ] || { printf '%s\n' "${out}"; return "${rc}"; }
+  if ! printf '%s' "${out}" | jq -e 'type == "object" and has("reachable")' >/dev/null 2>&1; then
     printf 'the machine_reachable answer was not a verdict object\n'; return 4
   fi
-  printf '%s\n' "${res}"
+  printf '%s\n' "${out}"
 }
 
 # doctor_state_reachable <reachable> <pending>
@@ -1523,5 +1536,80 @@ doctor_check_send_paths() {
             "if the maildir channel count is UNREADABLE, run inbox-status and check this project's registry entry parses; if ATHENA_MCP_BEARER is unset, launch the session through scripts/athena (it exports it for that launch only); if the registration cannot be read, inspect ~/.claude.json's athena entry for this project by hand; if the session inbox is missing or invalid, declare the \"session\" log channel (ai/inbox/registry.json, scripts/setup-inbox-registry --install); if this machine is not reachable, read client-liveness and server-reachability above. Until then send cross-machine mail with --routed (the server holds it pending) and same-machine mail with --local." ;;
     *)    doctor_finding na "send-paths" "${facts}" \
             "routed sending is not configured or not checked here. To enable it: scripts/add-athena-mcp from the main checkout, launch through scripts/athena, declare the \"session\" channel. If reachability was not asked: run inbox-doctor without --no-server (not-asked), or install the inbox client's machine token (skipped-no-token) -- send-mail itself asks at send time with ATHENA_MCP_BEARER. The local maildir path does not depend on any of this." ;;
+  esac
+}
+
+# --- unread failed-delivery records via the machine token (DND-373) ---------
+#
+# The server records every terminal delivery failure, and every machine-
+# unreachable transition, in its failed-delivery store and emails the owner once
+# per new/re-opened record. Until the owner marks a record read it stays unread,
+# and this check says so: it asks the `failed_deliveries` MCP tool (same /mcp,
+# same machine token, same four outcomes as server-reachability above) for the
+# account's UNREAD records.
+#
+#   skipped / disabled / UNAVAILABLE  na -- exactly as server-reachability;
+#                         "unavailable" never reads like "0 unread".
+#   checked, 0 unread     ok -- says "0 unread" in those words.
+#   checked, N > 0 unread warn -- NOT ok, with each record's cause/count/id and a
+#                         Fix naming mark_read.
+#
+# Seam: ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE holds a canned tool result
+# (a JSON object, or `UNAVAILABLE:<reason>`) and skips the network.
+
+# doctor_failed_deliveries
+# Prints the failed_deliveries tool result (a JSON object with a numeric
+# unread_count) on success. Status as doctor_mcp_tool_call.
+doctor_failed_deliveries() {
+  local out rc
+  out="$(doctor_mcp_tool_call failed_deliveries '{}' "${ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE:-}")"; rc=$?
+  [ "${rc}" -eq 0 ] || { printf '%s\n' "${out}"; return "${rc}"; }
+  if ! printf '%s' "${out}" | jq -e 'type == "object" and (.unread_count | type == "number")' >/dev/null 2>&1; then
+    printf 'the failed_deliveries answer carried no numeric unread_count\n'; return 4
+  fi
+  printf '%s\n' "${out}"
+}
+
+# doctor_state_failed_deliveries <unread-count>
+# Pure. 0 -> ok · a positive integer -> warn · anything else -> na.
+doctor_state_failed_deliveries() {
+  case "$1" in
+    ''|*[!0-9]*) printf 'na\n' ;;
+    0) printf 'ok\n' ;;
+    *) [ "$1" -gt 0 ] && printf 'warn\n' || printf 'ok\n' ;;
+  esac
+}
+
+# doctor_check_server_failed_deliveries
+doctor_check_server_failed_deliveries() {
+  local out rc n records first_id canned_note=""
+  if [ "${DOCTOR_NO_SERVER:-0}" = "1" ]; then
+    doctor_finding na "server-failed-deliveries" "server failed-deliveries check not run (disabled for this invocation)" \
+      "run inbox-doctor by hand (without --no-server) to ask the server for your unread failed-delivery records; the unprompted SessionStart path deliberately makes no network request."
+    return 0
+  fi
+  out="$(doctor_failed_deliveries)"; rc=$?
+  [ -n "${ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE:-}" ] && canned_note=" [CANNED answer from ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE, not the live server]"
+  case "${rc}" in
+    2) doctor_finding na "server-failed-deliveries" "server failed-deliveries check SKIPPED -- no client config or machine token on this machine" \
+         "this check authenticates with the inbox client's machine token (~/.config/athena-inbox-client/config.json); a machine that only reads delivered mail has none, and this is expected there."
+       return 0 ;;
+    4) doctor_finding na "server-failed-deliveries" "server failed-deliveries check UNAVAILABLE (tried, got no answer; this is NOT 0 unread): $(printf '%s' "${out}" | head -n 1)${canned_note}" \
+         "the server was asked and could not answer, so the unread count is unknown. If failed_deliveries is not deployed yet (DND-373), this is expected until it is; otherwise check the network, the /mcp endpoint, and that the machine token in the client config is current."
+       return 0 ;;
+    0) ;;
+    *) doctor_finding na "server-failed-deliveries" "server failed-deliveries check UNAVAILABLE (unexpected status ${rc})" \
+         "re-run inbox-doctor; if it persists, check doctor_failed_deliveries in lib/doctor.sh."
+       return 0 ;;
+  esac
+  n="$(printf '%s' "${out}" | jq -r '.unread_count | tostring')"
+  records="$(printf '%s' "${out}" | jq -r '[(.failed_deliveries // [])[:5][] | "\(.cause) x\(.count) (id \(.id))"] | join("; ")' 2>/dev/null | head -c 600)"
+  first_id="$(printf '%s' "${out}" | jq -r '(.failed_deliveries // [])[0].id // "<id>"' 2>/dev/null)"
+  case "$(doctor_state_failed_deliveries "${n}")" in
+    ok)   doctor_finding ok "server-failed-deliveries" "checked: 0 unread failed-delivery records on the server${canned_note}" ;;
+    warn) doctor_finding warn "server-failed-deliveries" "checked: the server holds ${n} UNREAD failed-delivery record(s) for your account: ${records:-none listed}${canned_note}" \
+            "triage each record (the failed_deliveries MCP tool returns its report: what failed and where), then clear it with the failed_deliveries MCP tool and mark_read: \"${first_id}\" (one call per id). The server emailed the owner once when each record was new or re-opened." ;;
+    na)   doctor_finding na "server-failed-deliveries" "the server answered failed_deliveries with no usable count (unread_count: ${n})" \
+            "the answer shape may have changed; failed_deliveries should return a numeric unread_count." ;;
   esac
 }

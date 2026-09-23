@@ -671,10 +671,13 @@ case "${method}" in
   tools/call)
     grep -qF "header = \"mcp-session-id: ${SHIM_SID}\"" "${cfg}" || { printf 'HTTP/1.1 400\r\n' > "${hdr}"; : > "${out}"; printf '400'; exit 0; }
     printf 'HTTP/1.1 200 OK\r\n' > "${hdr}"
+    tool="$(jq -r '.params.name' < "${data}")"
+    printf '%s\n' "${tool}" >> "${SHIM_LOG}.tools"
+    result="${SHIM_RESULT}"; [ "${tool}" = "failed_deliveries" ] && result="${SHIM_FD_RESULT:-}"
     if [ "${SHIM_MODE:-ok}" = "notool" ]; then
-      printf '{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Tool not found: machine_reachable"}}' > "${out}"
+      jq -n -c --arg t "${tool}" '{jsonrpc:"2.0",id:2,error:{code:-32601,message:("Tool not found: " + $t)}}' > "${out}"
     else
-      jq -n -c --arg t "${SHIM_RESULT}" '{jsonrpc:"2.0",id:2,result:{content:[{type:"text",text:$t}],isError:false}}' > "${out}"
+      jq -n -c --arg t "${result}" '{jsonrpc:"2.0",id:2,result:{content:[{type:"text",text:$t}],isError:false}}' > "${out}"
     fi
     printf '200' ;;
   *) printf '400' ;;
@@ -714,7 +717,58 @@ printf '{"server_url":"wss://athena.example/machine/websocket","token":"bad\\"to
 RO="$(PATH="${SHIM}:${PATH}" ATHENA_INBOX_CLIENT_CONFIG="${LV}/badtok.json" doctor_check_server_reachability)"
 assert_contains "a token that cannot be quoted safely -> UNAVAILABLE, never sent" "cannot be sent safely" "${RO}"
 assert_eq "... and curl was never invoked" "" "$(cat "${SHIM_LOG}.argv")"
-unset DOCTOR_NO_SERVER ATHENA_INBOX_CLIENT_STATE_DIR XDG_STATE_HOME SHIM_LOG SHIM_EXPECT_TOKEN SHIM_RESULT
+
+echo "== DND-373: server-failed-deliveries with the MACHINE token =="
+FF="${LV}/fd.json"
+printf '{"unread_count":2,"failed_deliveries":[{"id":"aaaa-1","cause":"machine-unreachable","count":3,"notified":true},{"id":"bbbb-2","cause":"retries-exhausted","count":1,"notified":false}]}' > "${FF}"
+FO="$(ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE="${FF}" doctor_check_server_failed_deliveries)"
+assert_eq "unread > 0 -> warn (NOT ok)" warn "$(state_of "${FO}" server-failed-deliveries)"
+assert_contains "... names the unread count" "2 UNREAD failed-delivery record(s)" "${FO}"
+assert_contains "... lists cause, count and id" "machine-unreachable x3 (id aaaa-1)" "${FO}"
+assert_contains "... the Fix names mark_read with a real id" 'mark_read: "aaaa-1"' "$(printf '%s\n' "${FO}" | awk -F'\t' '$2=="server-failed-deliveries"{print $4}')"
+assert_contains "a canned answer says it is canned" "CANNED answer" "${FO}"
+printf '{"unread_count":0,"failed_deliveries":[]}' > "${FF}"
+FO="$(ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE="${FF}" doctor_check_server_failed_deliveries)"
+assert_eq "0 unread -> ok" ok "$(state_of "${FO}" server-failed-deliveries)"
+assert_contains "... says '0 unread' in those words" "checked: 0 unread" "${FO}"
+printf 'UNAVAILABLE:Tool not found: failed_deliveries' > "${FF}"
+FO="$(ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE="${FF}" doctor_check_server_failed_deliveries)"
+assert_eq "tool not deployed -> na" na "$(state_of "${FO}" server-failed-deliveries)"
+assert_contains "... reads UNAVAILABLE, and says it is NOT 0 unread" "UNAVAILABLE (tried, got no answer; this is NOT 0 unread)" "${FO}"
+assert_not_contains "... never reads '0 unread' as a result" "checked: 0 unread" "${FO}"
+printf '{"failed_deliveries":[]}' > "${FF}"
+FO="$(ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE="${FF}" doctor_check_server_failed_deliveries)"
+assert_eq "an answer with NO unread_count -> na (missing is not 0)" na "$(state_of "${FO}" server-failed-deliveries)"
+assert_contains "... says the count was missing" "no numeric unread_count" "${FO}"
+printf '{"unread_count":"3"}' > "${FF}"
+assert_eq "a string unread_count -> na (never coerced)" na "$(state_of "$(ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE="${FF}" doctor_check_server_failed_deliveries)" server-failed-deliveries)"
+FO="$(ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" doctor_check_server_failed_deliveries)"
+assert_contains "no client config -> SKIPPED (never UNAVAILABLE)" "SKIPPED" "${FO}"
+assert_not_contains "... never reads UNAVAILABLE" "UNAVAILABLE" "${FO}"
+FO="$(DOCTOR_NO_SERVER=1 doctor_check_server_failed_deliveries)"
+assert_contains "--no-server -> disabled, no request" "not run (disabled" "${FO}"
+assert_eq "doctor_state_failed_deliveries: 0 -> ok" ok "$(doctor_state_failed_deliveries 0)"
+assert_eq "doctor_state_failed_deliveries: 7 -> warn" warn "$(doctor_state_failed_deliveries 7)"
+assert_eq "doctor_state_failed_deliveries: empty -> na" na "$(doctor_state_failed_deliveries '')"
+assert_eq "doctor_state_failed_deliveries: -1 -> na" na "$(doctor_state_failed_deliveries -1)"
+
+# The real protocol path: the SAME shim, asked for failed_deliveries by name.
+: > "${SHIM_LOG}.argv"; : > "${SHIM_LOG}.tools"
+export SHIM_FD_RESULT='{"unread_count":1,"failed_deliveries":[{"id":"cccc-3","cause":"machine-unreachable","count":1,"notified":true}]}'
+FO="$(PATH="${SHIM}:${PATH}" doctor_check_server_failed_deliveries)"
+assert_eq "protocol path: failed_deliveries unread 1 -> warn" warn "$(state_of "${FO}" server-failed-deliveries)"
+assert_eq "... the tool called by name is failed_deliveries" "failed_deliveries" "$(cat "${SHIM_LOG}.tools")"
+assert_not_contains "... not marked canned" "CANNED" "${FO}"
+assert_not_contains "... the machine token is never in curl's argv" "SEKRETTOKEN" "$(cat "${SHIM_LOG}.argv")"
+assert_not_contains "... the machine token is never in a finding" "SEKRETTOKEN" "${FO}"
+export SHIM_FD_RESULT='{"unread_count":0,"failed_deliveries":[]}'
+FO="$(PATH="${SHIM}:${PATH}" doctor_check_server_failed_deliveries)"
+assert_eq "protocol path: 0 unread -> ok" ok "$(state_of "${FO}" server-failed-deliveries)"
+FO="$(PATH="${SHIM}:${PATH}" SHIM_MODE=notool doctor_check_server_failed_deliveries)"
+assert_contains "protocol path: tool missing -> UNAVAILABLE with the server's words" "Tool not found: failed_deliveries" "${FO}"
+FO="$(PATH="${SHIM}:${PATH}" SHIM_EXPECT_TOKEN=other doctor_check_server_failed_deliveries)"
+assert_contains "protocol path: a refused token -> UNAVAILABLE naming the refusal" "refused the machine token" "${FO}"
+unset DOCTOR_NO_SERVER ATHENA_INBOX_CLIENT_STATE_DIR XDG_STATE_HOME SHIM_LOG SHIM_EXPECT_TOKEN SHIM_RESULT SHIM_FD_RESULT
 export ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json"
 
 # ============================================================================
