@@ -474,12 +474,13 @@ change and are NOT "only the trigger":
   So the migration constraint above is already satisfied: H-4/DND-248 may retire
   the poll without dropping the flaky lane to `manual-only`, and a DND-247
   implementer should NOT provision a second sweeper — there is one. Two migration
-  jobs remain re: the sweep: (1) H-4/DND-248 retires the poll while the age-out
-  SURVIVES via this hook; (2) at the design's gated FINAL step, when
-  `flaky-coordinator.lock` itself is retired, this DND-277 hook is retired WITH
-  it (see the next bullet) — a `SessionStart` hook that ages out a marker nobody
-  writes is dead weight, and a gate check that can never meaningfully fire is
-  worse.
+  jobs applied re: the sweep: (1) H-4/DND-248 retires the poll while the age-out
+  SURVIVES via this hook — **done**, by owner directive (see the `**Later
+  (2026-09-23)**` note under the worked-instantiation table above); (2) at the
+  design's gated FINAL step, when `flaky-coordinator.lock` itself is retired,
+  this DND-277 hook is retired WITH it (see the next bullet) — a `SessionStart`
+  hook that ages out a marker nobody writes is dead weight, and a gate check
+  that can never meaningfully fire is worse. Job (2) remains open.
 - In the design's **gated final step** the whole flaky lock mechanism is retired
   (the poll and its `walt_ui/.claude/settings.json` registration already went in
   walt_ui's PT-1542): the DND-277 age-out

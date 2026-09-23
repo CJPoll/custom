@@ -10,17 +10,18 @@
 # (owner directive, 2026-09-23; ai/CLAUDE.md → *Ticket-driven lanes*), and the
 # inbox-count trigger CANNOT replace the age-out (the .event doorbell is an
 # mtime bump AFTER an append — there is no platform periodic sweep). This hook
-# re-provisions the age-out half so it survives the poll's retirement as a
-# trigger: it fires on EVERY session start, independent of flaky-lane
-# activity, so the wedged-idle state (stale marker + no new activity) is
-# still swept even if walt_ui's poll is no longer running.
+# re-provisions the age-out half so it survives the poll's retirement: it
+# fires on EVERY session start, independent of flaky-lane activity, so the
+# wedged-idle state (stale marker + no new activity) is still swept. walt_ui's
+# own PT-1542 already removed the poll hook and its `settings.json`
+# registration (`ai/docs/ticket-lane-action-brief.md` → *Relationship to the
+# existing flaky trigger*), so this hook is now the only age-out that runs.
 #
 # FAIL-SAFE and NON-BLOCKING: a SessionStart hook must never break session
 # start, so every path exits 0. It removes ONLY a stale (>12h) marker; a fresh
 # (<12h) marker — a live admiral draining — is always preserved. Removal is
-# idempotent, so this hook is the only age-out THIS HARNESS guarantees;
-# running alongside walt_ui's poll, if it is still wired there (its removal
-# is walt_ui's own separate change, not yet confirmed done), is harmless.
+# idempotent, so even if some other copy of the poll were still wired,
+# running alongside its own age-out would be harmless.
 #
 # OBSERVABLE: removing the marker is the one destructive action here, and the
 # lane reads a present marker as "an admiral is draining", so a silent removal
