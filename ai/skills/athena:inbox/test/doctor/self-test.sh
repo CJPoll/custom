@@ -384,6 +384,25 @@ unset DOCTOR_NO_SERVER
 TOKF="${TMP}/apitoken"; printf 'usr-tok' > "${TOKF}"; chmod 644 "${TOKF}"
 export ATHENA_INBOX_DOCTOR_API_BASE="https://x" ATHENA_INBOX_DOCTOR_MACHINE_ID="m" ATHENA_INBOX_DOCTOR_API_TOKEN_FILE="${TOKF}"
 assert_eq "0644 token file -> server warn (credential not read)" warn "$(state_of "$(cd "${R2}" && doctor_check_server ".")" server)"
+# THE MISS for the curl-config rule on the health check: an unsafe token, base
+# or machine id is refused with its OWN finding -- never "could not be
+# reached" -- and curl is never run. (A curl shim that records any call.)
+HSHIM="${TMP}/hshim"; mkdir -p "${HSHIM}"; printf '#!/bin/sh\necho called >> "%s/called"\nprintf 200\n' "${HSHIM}" > "${HSHIM}/curl"; chmod +x "${HSHIM}/curl"
+chmod 600 "${TOKF}"
+for bad in 'tok"en' 'base' 'id'; do
+  case "${bad}" in
+    tok*) printf '%s' "${bad}" > "${TOKF}"; export ATHENA_INBOX_DOCTOR_API_BASE="https://x" ATHENA_INBOX_DOCTOR_MACHINE_ID="m" ;;
+    base) printf 'usr-tok' > "${TOKF}"; export ATHENA_INBOX_DOCTOR_API_BASE='https://x" -k' ATHENA_INBOX_DOCTOR_MACHINE_ID="m" ;;
+    id)   printf 'usr-tok' > "${TOKF}"; export ATHENA_INBOX_DOCTOR_API_BASE="https://x" ATHENA_INBOX_DOCTOR_MACHINE_ID=$'m\nurl = "http://evil"' ;;
+  esac
+  rm -f "${HSHIM}/called"
+  RO="$(cd "${R2}" && PATH="${HSHIM}:${PATH}" doctor_check_server ".")"
+  assert_contains "health check: an unsafe ${bad} is refused with its own finding" "contains a quote, backslash, whitespace or control character" "${RO}"
+  assert_eq "health check: an unsafe ${bad} never runs curl" "no" "$([ -e "${HSHIM}/called" ] && echo yes || echo no)"
+done
+# The timeout written into both doctor curl configs is a plain number or 10.
+assert_eq "doctor timeout: a plain number passes through" "25" "$(ATHENA_INBOX_DOCTOR_HTTP_TIMEOUT=25 _doctor_http_timeout)"
+assert_eq "doctor timeout: an injected config line falls back to 10" "10" "$(ATHENA_INBOX_DOCTOR_HTTP_TIMEOUT=$'5\nurl = "http://evil"' _doctor_http_timeout)"
 # NOTE: the 0600-but-unreachable path (a real curl) is deliberately NOT
 # exercised here -- it would open a socket, which this suite forbids. It is the
 # same na branch the "token file missing" case above already proves.
@@ -681,6 +700,10 @@ for badsid in 'ab"cd==' 'ab\\cd=='; do
   RO="$(PATH="${SHIM}:${PATH}" SHIM_SID="${badsid}" doctor_check_server_reachability)"
   assert_contains "a server session id carrying [${badsid}] -> UNAVAILABLE, never written into curl's config" "cannot be sent back safely" "${RO}"
 done
+# An unsafe server_url HOST is refused with its own message, never "no server_url".
+printf '{"server_url":"wss://athe\\"na.example/machine/websocket","token":"SEKRETTOKEN-abcdef-0123456789","instances":{}}' > "${LV}/badhost.json"; chmod 600 "${LV}/badhost.json"
+RO="$(PATH="${SHIM}:${PATH}" ATHENA_INBOX_CLIENT_CONFIG="${LV}/badhost.json" doctor_check_server_reachability)"
+assert_contains "an unsafe server_url host -> UNAVAILABLE naming the host" "server_url host contains a quote" "${RO}"
 RO="$(PATH="${SHIM}:${PATH}" SHIM_MODE=notool doctor_check_server_reachability)"
 assert_contains "protocol path: tool missing (DND-315 not deployed) -> UNAVAILABLE" "UNAVAILABLE" "${RO}"
 assert_contains "... with the server's own words" "Tool not found" "${RO}"

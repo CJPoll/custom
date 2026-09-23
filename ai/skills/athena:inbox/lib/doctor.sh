@@ -1020,7 +1020,9 @@ doctor_check_lock() {
 # 0600 config file as an Authorization header, exactly as athena:slack does.
 # Steerable: ATHENA_INBOX_DOCTOR_HEALTH_FILE feeds canned JSON and skips curl
 # entirely, which is the test seam and also lets an owner diagnose from a saved
-# response. Prints the response JSON on stdout; status 1 on any failure.
+# response. Prints the response JSON on stdout; status 1 on any failure, 2 not
+# configured, 3 token file too permissive, 4 a base/id/token/temp path that
+# cannot be written safely into the curl config (never sent).
 doctor_server_health() {
   local base id tokfile canned tmp rc
   canned="${ATHENA_INBOX_DOCTOR_HEALTH_FILE:-}"
@@ -1044,9 +1046,10 @@ doctor_server_health() {
   # Every value below lands in a double-quoted curl config value (the same
   # rule as the MCP client's; names_safe_curl_config_value).
   names_safe_curl_config_value "${base}" && names_safe_curl_config_value "${id}" \
-    && names_safe_curl_config_value "$(tr -d '\r\n' <"${tokfile}")" || return 1
+    && names_safe_curl_config_value "$(tr -d '\r\n' <"${tokfile}")" || return 4
 
   tmp="$(mktemp -d 2>/dev/null)" || return 1
+  names_safe_curl_config_value "${tmp}" || { rm -rf "${tmp}"; return 4; }
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
   (
@@ -1054,7 +1057,7 @@ doctor_server_health() {
     {
       printf 'url = "%s/api/machines/%s/health"\n' "${base%/}" "${id}"
       printf 'header = "Authorization: Bearer %s"\n' "$(tr -d '\r\n' <"${tokfile}")"
-      printf 'output = %s\n' "${tmp}/resp.json"
+      printf 'output = "%s"\n' "${tmp}/resp.json"
       printf 'write-out = "%%{http_code}"\n'
       printf 'max-time = %s\n' "$(_doctor_http_timeout)"
       printf 'silent\n'
@@ -1086,6 +1089,11 @@ doctor_check_server() {
   if [ "${rc}" -eq 3 ]; then
     doctor_finding warn "server" "the API token file is more permissive than 0600, so the server check was not run" \
       "chmod 0600 \$ATHENA_INBOX_DOCTOR_API_TOKEN_FILE; a user API token is a credential and the doctor refuses to read one from a world- or group-readable file."
+    return 0
+  fi
+  if [ "${rc}" -eq 4 ]; then
+    doctor_finding na "server" "the server check was not run: ATHENA_INBOX_DOCTOR_API_BASE, ATHENA_INBOX_DOCTOR_MACHINE_ID, the API token, or the temp dir path contains a quote, backslash, whitespace or control character" \
+      "correct the value: each is written into a double-quoted curl config value, so it is refused rather than sent malformed. The token itself is never printed."
     return 0
   fi
   if [ "${rc}" -ne 0 ] || [ -z "${health}" ] || ! printf '%s' "${health}" | jq -e 'type == "object"' >/dev/null 2>&1; then
@@ -1319,6 +1327,8 @@ doctor_machine_reachable() {
 
   w="$(mktemp -d 2>/dev/null)" || { printf 'could not create a private temp dir\n'; return 4; }
   chmod 700 "${w}"
+  # Its path goes into curl config lines (data-binary, dump-header, output).
+  names_safe_curl_config_value "${w}" || { rm -rf "${w}"; printf 'the temp dir path (from $TMPDIR) contains a quote, backslash, whitespace or control character\n'; return 4; }
   # shellcheck disable=SC2064
   trap "rm -rf '${w}'; trap - RETURN" RETURN
   ( umask 077; jq -r '.token' <"${cfg}" | tr -d '\r\n' >"${w}/token" ) || { printf 'could not stage the machine token\n'; return 4; }
