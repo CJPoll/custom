@@ -235,7 +235,27 @@ else
         printf '  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json — then re-check. An unregistered producer and an empty channel look identical on disk.\n'
       fi
     else
-      printf 'athena:inbox: %s — nothing new.\n' "${CHANNEL}"
+      # "Nothing new" and "dark" must not read the same (DND-316 R2). The
+      # freshness is this machine's own fact (the doorbell mtime, the client
+      # log), so it is safe beside a count. A freshness lookup that FAILS says
+      # so, rather than printing a bare "nothing new" that reads as healthy.
+      if ! FRESH="$(inbox_channel_freshness_json "${CHANNEL}" "." 2>/dev/null)" || [ -z "${FRESH}" ]; then
+        printf 'athena:inbox: %s — nothing new (freshness could not be determined; run inbox-doctor).\n' "${CHANNEL}"
+      elif [ "$(printf '%s' "${FRESH}" | jq -r '.stale')" = "true" ]; then
+        printf 'athena:inbox: %s — nothing new; STALE: last delivery %s ago (threshold %s)%s.\n' "${CHANNEL}" \
+          "$(liveness_human_age "$(printf '%s' "${FRESH}" | jq -r '.last_delivery_age_s')")" \
+          "$(liveness_human_age "$(printf '%s' "${FRESH}" | jq -r '.stale_after_s')")" \
+          "$(J="$(printf '%s' "${FRESH}" | jq -r '.last_join_age_s')"; [ "${J}" = "null" ] || printf '; client last joined %s ago' "$(liveness_human_age "${J}")")"
+        printf '  Fix: quiet and dark look the same from here. Run inbox-doctor to check the relay (client-liveness, server-reachability); if the relay is healthy and this channel is simply quiet, raise its "stale_after_s" in the registry entry.\n'
+      else
+        D="$(printf '%s' "${FRESH}" | jq -r '.last_delivery_age_s')"
+        J="$(printf '%s' "${FRESH}" | jq -r '.last_join_age_s')"
+        SUFFIX=""
+        [ "${D}" = "null" ] || SUFFIX=" Last delivery $(liveness_human_age "${D}") ago"
+        [ "${J}" = "null" ] || SUFFIX="${SUFFIX}; client last joined $(liveness_human_age "${J}") ago"
+        [ -z "${SUFFIX}" ] || SUFFIX="${SUFFIX}."
+        printf 'athena:inbox: %s — nothing new.%s\n' "${CHANNEL}" "${SUFFIX}"
+      fi
     fi
   else
     UNREADABLE="$(printf '%s' "${READ}" | jq -r '.unreadable // 0')"

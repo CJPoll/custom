@@ -246,7 +246,7 @@ assert_contains "platform never-delivered Fix names the athena-events handling r
 # deliver, good mode, fresh
 printf '{"v":1,"ts":"1","channel":"c","event_id":"e"}\n' > "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"; chmod 600 "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"
 CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"
-assert_finding "log delivered -> ok freshness" "${CH}" ok "channel:slack" "last changed"
+assert_finding "log delivered -> ok freshness" "${CH}" ok "freshness:slack" "last delivery"
 # wrong mode -> warn
 chmod 644 "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"
 CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"
@@ -474,6 +474,146 @@ assert_eq "message-mode is counted in the info bucket" true "$(printf '%s' "${JM
 assert_eq "message-mode does NOT flip healthy" true "$(printf '%s' "${JMM}" | jq -r '.summary.healthy')"
 assert_eq "message-mode does not set a non-zero exit" 0 "$( ( cd "${RMM}" && ATHENA_INBOX_REGISTRY="${DECLMM}" ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" ATHENA_INBOX_DOCTOR_CRON_CHECK=true bash "${BIN}" --no-server >/dev/null 2>&1 ); echo $? )"
 assert_not_contains "the bin output never leaks a message slug" "drift.md" "$(printf '%s' "${JMM}" | jq -r '.findings[]|select(.check=="message-mode")|.message + " " + .fix')"
+
+# ============================================================================
+echo "== DND-316: client-liveness (never pid existence) =="
+LV="${TMP}/lv"; mkdir -p "${LV}/state" "${LV}/xdg"
+LVCFG="${LV}/config.json"
+printf '{"server_url":"wss://athena.example/machine/websocket?vsn=2.0.0","token":"SEKRETTOKEN-abcdef-0123456789","instances":{}}' > "${LVCFG}"; chmod 600 "${LVCFG}"
+export ATHENA_INBOX_CLIENT_CONFIG="${LVCFG}" ATHENA_INBOX_CLIENT_STATE_DIR="${LV}/state" XDG_STATE_HOME="${LV}/xdg"
+LVLOG="${LV}/state/athena-inbox-client.log"
+# THE 2026-09-22 15:55Z SHAPE: a reconnect that never finished. Must FAIL.
+printf '%s\n' '2026-09-22T15:32:56Z INFO appended Ev0C3LF099SS to walt_ui-slack.jsonl' \
+  '2026-09-22T15:55:15Z ERROR session ended: ProtocolError: heartbeat unanswered' \
+  '2026-09-22T15:55:15Z INFO reconnecting in 1.0s' > "${LVLOG}"
+LO="$(doctor_check_client_liveness 1)"
+assert_eq "15:55Z replay -> client-liveness fail" fail "$(state_of "${LO}" client-liveness)"
+assert_contains "the wedge finding names the step" "stuck in step sleep" "${LO}"
+assert_contains "the wedge Fix says capture before restart" "CAPTURE BEFORE RESTART" "${LO}"
+assert_contains "the wedge Fix names the supervisor" "athena-inbox-client-run.sh" "${LO}"
+# A HEALTHY log with a lazily-closed prior socket: reconnect, join, then quiet.
+printf '%s\n' '2026-09-22T21:30:02Z INFO reconnecting in 1.1s' '2026-09-22T21:30:04Z INFO step tls 48ms' \
+  '2026-09-22T21:30:04Z INFO connected to wss://athena.example/machine/websocket' \
+  '2026-09-22T21:30:12Z INFO joined machine:self; instances: ["a"]' > "${LVLOG}"
+LO="$(doctor_check_client_liveness 1)"
+assert_eq "healthy quiet client (CLOSE-WAIT shape) -> ok, no false alarm" ok "$(state_of "${LO}" client-liveness)"
+: > "${LVLOG}"
+assert_eq "a log with no connect-cycle line -> warn (not ok)" warn "$(state_of "$(doctor_check_client_liveness 1)" client-liveness)"
+rm -f "${LVLOG}"
+assert_eq "no log -> na" na "$(state_of "$(doctor_check_client_liveness 1)" client-liveness)"
+assert_eq "stopped -> na" na "$(state_of "$(doctor_check_client_liveness 0)" client-liveness)"
+assert_eq "no client config -> na" na "$(ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" doctor_check_client_liveness 1 | cut -f1)"
+assert_eq "pure: wedged -> fail"           fail "$(doctor_state_liveness wedged)"
+assert_eq "pure: reconnecting -> ok"       ok   "$(doctor_state_liveness reconnecting)"
+assert_eq "pure: unknown -> warn"          warn "$(doctor_state_liveness unknown)"
+assert_eq "pure: absent -> na"             na   "$(doctor_state_liveness absent)"
+
+echo "== DND-316: dump-dir resolves and is writable =="
+DD="${LV}/xdg/athena/inbox-client-dumps"
+assert_eq "dump dir not yet created, parent writable -> warn" warn "$(state_of "$(doctor_check_dump_dir)" dump-dir)"
+mkdir -p -m 700 "${DD}"; chmod 700 "${DD}"
+assert_eq "dump dir 0700 writable -> ok" ok "$(state_of "$(doctor_check_dump_dir)" dump-dir)"
+chmod 755 "${DD}"
+assert_eq "dump dir 0755 -> warn" warn "$(state_of "$(doctor_check_dump_dir)" dump-dir)"
+chmod 500 "${DD}"
+if [ -w "${DD}" ]; then ok "dump dir unwritable -> fail (skipped: running as a user that bypasses modes)"; else
+  assert_eq "dump dir unwritable -> fail" fail "$(state_of "$(doctor_check_dump_dir)" dump-dir)"; fi
+chmod 700 "${DD}"; rmdir "${DD}"; : > "${DD}"
+DDO="$(doctor_check_dump_dir)"
+assert_eq "a FILE where the dump dir should be -> fail" fail "$(state_of "${DDO}" dump-dir)"
+assert_contains "... with a Fix:" "remove whatever sits at" "${DDO}"
+rm -f "${DD}"
+assert_eq "a RELATIVE XDG_STATE_HOME -> fail (wrongly computed key)" fail "$(XDG_STATE_HOME=rel doctor_check_dump_dir | cut -f1)"
+assert_eq "no client config -> na" na "$(ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" doctor_check_dump_dir | cut -f1)"
+
+echo "== DND-316: a stale channel FAILS (never 'last changed Ns ago' ok) =="
+export ATHENA_INBOX_ROOT="${TMP}/stale"; mkdir -p -m 700 "${ATHENA_INBOX_ROOT}/projects"; chmod 700 "${ATHENA_INBOX_ROOT}"
+RS="${TMP}/repo-stale"; CS="$(make_repo "${RS}")"
+SENTRY='{"v":1,"repo":"'"${CS}"'","channels":{"slack":{"kind":"log","path":"st-slack.jsonl"}}}'
+printf '{"v":1,"ts":"1","channel":"c","event_id":"e"}\n' > "${ATHENA_INBOX_ROOT}/st-slack.jsonl"; : > "${ATHENA_INBOX_ROOT}/st-slack.event"
+chmod 600 "${ATHENA_INBOX_ROOT}/st-slack.jsonl" "${ATHENA_INBOX_ROOT}/st-slack.event"
+touch -d "@$(( $(date -u +%s) - 5632 ))" "${ATHENA_INBOX_ROOT}/st-slack.jsonl" "${ATHENA_INBOX_ROOT}/st-slack.event"
+SO="$(cd "${RS}" && doctor_check_channels "${SENTRY}" ".")"
+assert_finding "the 5632s-stale channel of 2026-09-22 -> FAIL" "${SO}" fail "freshness:slack" "STALE"
+assert_contains "the stale Fix points at client-liveness and server-reachability" "client-liveness and server-reachability" "${SO}"
+assert_no_finding "no ok finding grades that age" "${SO}" ok "freshness:slack" "last delivery"
+SENTRY0='{"v":1,"repo":"'"${CS}"'","channels":{"slack":{"kind":"log","path":"st-slack.jsonl","stale_after_s":0}}}'
+SO="$(cd "${RS}" && doctor_check_channels "${SENTRY0}" ".")"
+assert_finding "stale_after_s 0 -> ok, threshold disabled" "${SO}" ok "freshness:slack" "no staleness threshold"
+
+echo "== DND-316: server-reachability with the MACHINE token =="
+export DOCTOR_NO_SERVER=0
+RF="${LV}/reach.json"
+printf '{"reachable":false,"basis":"ack_silence","last_ack_at":"2026-09-22T15:32:56Z","last_joined_at":null,"pending_deliveries":3,"unreachable_since":"2026-09-22T15:40:00Z"}' > "${RF}"
+RO="$(ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${RF}" doctor_check_server_reachability)"
+assert_eq "reachable:false -> fail" fail "$(state_of "${RO}" server-reachability)"
+assert_contains "... names unreachable_since" "UNREACHABLE since 2026-09-22T15:40:00Z" "${RO}"
+assert_contains "... reports the pending count" "3 pending" "${RO}"
+printf '{"reachable":true,"basis":"recent_ack","last_ack_at":"2026-09-23T08:00:00Z","last_joined_at":"2026-09-23T07:39:06Z","pending_deliveries":0,"unreachable_since":null}' > "${RF}"
+RO="$(ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${RF}" doctor_check_server_reachability)"
+assert_eq "reachable:true, 0 pending -> ok" ok "$(state_of "${RO}" server-reachability)"
+assert_contains "... says 'checked' and '0 pending' in those words" "checked: reachable true, 0 pending" "${RO}"
+printf '{"reachable":"unknown","basis":"no_traffic","last_ack_at":null,"last_joined_at":null,"pending_deliveries":2,"unreachable_since":null}' > "${RF}"
+RO="$(ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${RF}" doctor_check_server_reachability)"
+assert_eq "unknown with pending > 0 -> warn with the count" warn "$(state_of "${RO}" server-reachability)"
+assert_contains "... the pending count (exhausted-offline counts as pending)" "holds 2 pending" "${RO}"
+printf 'UNAVAILABLE:tool machine_reachable not found' > "${RF}"
+RO="$(ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${RF}" doctor_check_server_reachability)"
+assert_eq "tool not deployed -> na" na "$(state_of "${RO}" server-reachability)"
+assert_contains "... reads UNAVAILABLE" "UNAVAILABLE (tried, got no answer)" "${RO}"
+assert_not_contains "... never reads SKIPPED" "SKIPPED" "${RO}"
+RO="$(ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" doctor_check_server_reachability)"
+assert_contains "no client config -> SKIPPED (never UNAVAILABLE)" "SKIPPED" "${RO}"
+assert_not_contains "... never reads UNAVAILABLE" "UNAVAILABLE" "${RO}"
+RO="$(DOCTOR_NO_SERVER=1 doctor_check_server_reachability)"
+assert_contains "--no-server -> disabled, no request" "not run (disabled" "${RO}"
+
+# The REAL protocol path through a curl shim: initialize -> session id ->
+# notifications/initialized -> tools/call machine_reachable. The shim records its
+# argv and the curl config so the suite can assert the token never reaches argv.
+SHIM="${LV}/shimbin"; mkdir -p "${SHIM}"
+cat > "${SHIM}/curl" <<'SHIMEOF'
+#!/usr/bin/env bash
+# curl shim for the doctor suite: reads --config, answers like the Athena /mcp.
+printf '%s\n' "$*" >> "${SHIM_LOG}.argv"
+cfg=""; while [ $# -gt 0 ]; do [ "$1" = "--config" ] && cfg="$2"; shift; done
+stat -c '%a' "${cfg}" >> "${SHIM_LOG}.cfgmode"
+val() { sed -n "s/^$1 = \"\\(.*\\)\"\$/\\1/p" "${cfg}" | head -n1; }
+hdr="$(val dump-header)"; out="$(val output)"; data="$(val data-binary)"; data="${data#@}"
+auth="$(sed -n 's/^header = "Authorization: Bearer \(.*\)"$/\1/p' "${cfg}")"
+[ "${auth}" = "${SHIM_EXPECT_TOKEN}" ] || { printf 'HTTP/1.1 401\r\n' > "${hdr}"; : > "${out}"; printf '401'; exit 0; }
+method="$(jq -r '.method' < "${data}")"
+case "${method}" in
+  initialize) printf 'HTTP/1.1 200 OK\r\nmcp-session-id: sess-42\r\n\r\n' > "${hdr}"; printf '{"jsonrpc":"2.0","id":1,"result":{}}' > "${out}"; printf '200' ;;
+  notifications/initialized) printf 'HTTP/1.1 202\r\n' > "${hdr}"; : > "${out}"; printf '202' ;;
+  tools/call)
+    grep -q 'mcp-session-id: sess-42' "${cfg}" || { printf 'HTTP/1.1 400\r\n' > "${hdr}"; : > "${out}"; printf '400'; exit 0; }
+    printf 'HTTP/1.1 200 OK\r\n' > "${hdr}"
+    if [ "${SHIM_MODE:-ok}" = "notool" ]; then
+      printf '{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Tool not found: machine_reachable"}}' > "${out}"
+    else
+      jq -n -c --arg t "${SHIM_RESULT}" '{jsonrpc:"2.0",id:2,result:{content:[{type:"text",text:$t}],isError:false}}' > "${out}"
+    fi
+    printf '200' ;;
+  *) printf '400' ;;
+esac
+SHIMEOF
+chmod +x "${SHIM}/curl"
+export SHIM_LOG="${LV}/shim" SHIM_EXPECT_TOKEN="SEKRETTOKEN-abcdef-0123456789"
+export SHIM_RESULT='{"reachable":true,"basis":"recent_ack","last_ack_at":"2026-09-23T08:00:00Z","last_joined_at":null,"pending_deliveries":0,"unreachable_since":null}'
+RO="$(PATH="${SHIM}:${PATH}" doctor_check_server_reachability)"
+assert_eq "protocol path: initialize/session/tools/call -> ok" ok "$(state_of "${RO}" server-reachability)"
+assert_contains "... 'checked, 0 pending'" "0 pending" "${RO}"
+assert_not_contains "the machine token is never in curl's argv" "SEKRETTOKEN" "$(cat "${SHIM_LOG}.argv")"
+assert_not_contains "the machine token is never in a finding" "SEKRETTOKEN" "${RO}"
+assert_eq "every curl config was 0600" "600" "$(sort -u "${SHIM_LOG}.cfgmode")"
+RO="$(PATH="${SHIM}:${PATH}" SHIM_MODE=notool doctor_check_server_reachability)"
+assert_contains "protocol path: tool missing (DND-315 not deployed) -> UNAVAILABLE" "UNAVAILABLE" "${RO}"
+assert_contains "... with the server's own words" "Tool not found" "${RO}"
+RO="$(PATH="${SHIM}:${PATH}" SHIM_EXPECT_TOKEN=other doctor_check_server_reachability)"
+assert_contains "protocol path: a refused token -> UNAVAILABLE naming the refusal" "refused the machine token" "${RO}"
+unset DOCTOR_NO_SERVER ATHENA_INBOX_CLIENT_STATE_DIR XDG_STATE_HOME SHIM_LOG SHIM_EXPECT_TOKEN SHIM_RESULT
+export ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json"
 
 # ============================================================================
 echo "== repo-root resolves through a symlinked skills dir (bin uses -P) =="

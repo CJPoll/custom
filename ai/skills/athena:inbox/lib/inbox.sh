@@ -17,6 +17,15 @@
 #
 # Source order: err.sh, names.sh, descriptor.sh, logchan.sh, maildir.sh, fs.sh,
 # then this file. Requires jq.
+#
+# liveness.sh (DND-316: per-channel freshness, the client wedge predicate) is
+# sourced HERE, from this file's own directory, rather than added to every
+# caller's source list: inbox_status_json now depends on it, and a caller that
+# forgot the extra `.` line would fail every count with "command not found" --
+# or, worse, a guard that skipped freshness when it was absent would print a
+# channel as fresh because nobody measured it.
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/liveness.sh"
 
 # inbox_entry [cwd]
 # The registry entry owning this session, as one-line JSON. Empty output with
@@ -499,6 +508,17 @@ inbox_status_json() {
     if [ -z "${counts}" ]; then
       failed=1
       counts='{"error":true}'
+    elif [ -n "${resolved:-}" ] && [ "${kind}" != "unknown" ]; then
+      # Freshness (DND-316 R2): the last-delivery age and the client's last-join
+      # age, and STALE past the channel's threshold. Merged only onto a channel
+      # that counted: an errored channel is already reported as such, and a
+      # freshness guess layered on top of it would be a second, weaker claim.
+      local fresh
+      if fresh="$(liveness_channel_freshness "${entry}" "${chan}" "${resolved}")" && [ -n "${fresh}" ]; then
+        counts="$(printf '%s' "${counts}" | jq -c --argjson f "${fresh}" '. + $f')"
+      else
+        counts="$(printf '%s' "${counts}" | jq -c '. + {freshness_error: true}')"
+      fi
     fi
     out="$(printf '%s' "${out}" | jq -c --arg n "${chan}" --arg k "${kind}" \
       --argjson c "${counts}" '. + [{name: $n, kind: $k} + $c]')"
@@ -684,6 +704,19 @@ _inbox_retain() {
       ;;
   esac
   return 0
+}
+
+# inbox_channel_freshness_json <channel> [cwd]
+# The freshness document (liveness_channel_freshness) for ONE channel of THIS
+# session's registry entry, resolved through the same single path every other
+# use case takes. Status 1 (refused on stderr) when the channel does not
+# resolve -- never an empty object that would read as "fresh".
+inbox_channel_freshness_json() {
+  local chan="$1" cwd="${2:-.}" entry resolved
+  entry="$(inbox_entry "${cwd}")" || return 1
+  [ -n "${entry}" ] || return 1
+  resolved="$(descriptor_resolve "$(fs_inbox_root)" "${entry}" "${chan}")" || return 1
+  liveness_channel_freshness "${entry}" "${chan}" "${resolved}"
 }
 
 # --- read -------------------------------------------------------------------

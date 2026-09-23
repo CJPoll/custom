@@ -76,13 +76,21 @@
 # corrupt"; do not repurpose it as an off switch, or a real partial write later
 # becomes indistinguishable from a deliberate stop.)
 #
-# Log size: the log is trimmed only BETWEEN client runs (the rewrite replaces
-# the inode, so trimming under a live client would send its output into an
-# unlinked file). A healthy client never exits, so a long-lived deployment does
-# not reach the trim and MAX_LOG_LINES does not bound it — the trim bounds a
-# crash-looping client, which is the case that actually produces volume. If the
-# steady-state log ever needs bounding, rotate it out of band (logrotate with
-# copytruncate) rather than trimming from in here.
+# Log size: the CLIENT bounds its own log. The supervisor exports
+# ATHENA_INBOX_CLIENT_LOG=<the log below>, which switches on the LV-1 client's
+# own size-capped rotation (8 MiB x 4 generations: <log>.1 .. <log>.3); without
+# that variable the rotation is dormant and the client logs to stderr, which
+# this script appends to the same file. The supervisor's own lines are appended
+# by PATH, so they follow a rotation into the fresh file. The between-runs trim
+# below remains for a crash-looping client (the rewrite replaces the inode, so
+# it only ever runs while no client is alive).
+#
+# Liveness (DND-316) and the dump directory: the supervisor sources
+# ai/skills/athena:inbox/lib/liveness.sh — the ONE wedge predicate and the ONE
+# dump-dir derivation this machine has — and creates the client's SIGQUIT dump
+# directory (0700) before every client start. The client creates it lazily on
+# its first dump, so without this "no dumps yet" and "the dump path is broken"
+# read the same until the wedge whose evidence has nowhere to go.
 #
 # Exit codes: 0 ok (client exited cleanly, or another instance holds the lock,
 #             or the stop marker is present) · 1 usage/arg error
@@ -175,6 +183,20 @@ command -v flock >/dev/null 2>&1 || {
   exit 2
 }
 
+# The liveness library: the wedge predicate and the dump-dir derivation, shared
+# with inbox-doctor so the two can never disagree about either. Its absence is
+# a broken checkout, not a mode to run in: without it the supervisor could not
+# tell a wedged client from a working one, which is the silence DND-316 closes.
+__liveness_lib="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)/../ai/skills/athena:inbox/lib/liveness.sh"
+[ -r "$__liveness_lib" ] || {
+  echo "error: the liveness library is missing: $__liveness_lib" >&2
+  echo "  Fix: run this script from a complete ~/dev/custom checkout (it needs" \
+       "ai/skills/athena:inbox/lib/liveness.sh beside scripts/); restore the file with git." >&2
+  exit 2
+}
+# shellcheck source=ai/skills/athena:inbox/lib/liveness.sh
+. "$__liveness_lib"
+
 # ---- the stop marker refuses the start ------------------------------------
 # Checked BEFORE taking the lock so the state is reported even if a stale
 # supervisor is somehow still holding it. Rate-limited: the */5 relaunch would
@@ -260,6 +282,25 @@ reap_orphaned_client() {
 }
 reap_orphaned_client
 
+# ---- the client's dump directory -------------------------------------------
+# Created (0700) before every client start, so a SIGQUIT dump always has a
+# directory to land in. A failure is LOGGED, not fatal: delivery does not
+# depend on it, and inbox-doctor's dump-dir check fails loudly with a Fix: for
+# exactly this state.
+ensure_dump_dir() {
+  local d
+  if ! d="$(liveness_dump_dir)"; then
+    say "cannot derive the client dump directory: XDG_STATE_HOME is relative (${XDG_STATE_HOME:-})"
+    say "  Fix: set XDG_STATE_HOME to an absolute path or unset it; a wedge dump would otherwise land where nothing looks."
+    return 0
+  fi
+  if ! { mkdir -p -- "$d" 2>/dev/null && chmod 700 -- "$d" 2>/dev/null && [ -d "$d" ] && [ ! -L "$d" ]; }; then
+    say "cannot create the client dump directory $d (0700)"
+    say "  Fix: make its parent writable, or remove whatever sits at $d; run inbox-doctor (dump-dir) for the detail."
+  fi
+  return 0
+}
+
 # ---- supervise -------------------------------------------------------------
 backoff="$MIN_BACKOFF"
 restarts=0
@@ -285,11 +326,18 @@ while :; do
   trim_log
   started="$(date +%s)"
 
+  ensure_dump_dir
+
   # 9>&- is load-bearing, not hygiene: without it the client inherits the open
   # lock descriptor and an orphan would hold the flock for its whole life, so
   # every later invocation would exit 0 in silence and nothing would ever
   # supervise again. See reap_orphaned_client above for the other half.
-  "$LAUNCHER" 9>&- >>"$LOG" 2>&1 &
+  #
+  # ATHENA_INBOX_CLIENT_LOG hands the client its own log file so its size-capped
+  # rotation is live (it is dormant while the variable is unset). stdout/stderr
+  # still append here, so a fatal message printed before the logger exists, or
+  # the exit-2 partial-write text, is never lost.
+  ATHENA_INBOX_CLIENT_LOG="$LOG" "$LAUNCHER" 9>&- >>"$LOG" 2>&1 &
   child=$!
   printf '%s\n' "$child" >"$CLIENT_PIDFILE" 2>/dev/null || true
   wait "$child"

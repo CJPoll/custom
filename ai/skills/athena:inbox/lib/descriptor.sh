@@ -45,8 +45,15 @@ DESCRIPTOR_SCHEMA_V=1
 # OPPOSITE of the maildir frontmatter rule (strict about what I write, lenient
 # about what I receive) -- a config file I wrote is not a message a peer sent.
 DESCRIPTOR_TOP_KEYS='["v","repo","channels"]'
-DESCRIPTOR_LOG_KEYS='["kind","path","dedupe","schema_v","producer"]'
-DESCRIPTOR_MAILDIR_KEYS='["kind","namespace","read","write","identity"]'
+DESCRIPTOR_LOG_KEYS='["kind","path","dedupe","schema_v","producer","stale_after_s"]'
+DESCRIPTOR_MAILDIR_KEYS='["kind","namespace","read","write","identity","stale_after_s"]'
+# `stale_after_s` (DND-316, both kinds) is the channel's staleness threshold in
+# seconds: a channel whose last delivery is older prints STALE and inbox-doctor
+# grades it `fail`. Absent -> the per-kind default (1800 for `log`, none for
+# `maildir`, see liveness.sh); 0 or null DISABLES it. Anything else -- a string,
+# a negative, a fraction -- is refused, because a threshold that silently
+# failed to parse would read as "never stale", the dark-channel silence this
+# key exists to break.
 # `event_id` and `channel+ts` are the ONLY recognised dedupe members, because
 # they are the only two keys the reference reader (logchan.sh -> logchan_scan)
 # actually ingests. A dedupe member the reader does not compute is refused so a
@@ -185,6 +192,15 @@ _descriptor_validate_channel() {
   if [ -n "${out}" ]; then
     inbox_fail "channel \"${chan}\" carries unknown key(s): ${out}" \
       "remove or correct ${out} on channel \"${chan}\"; a ${kind} channel takes only $(printf '%s' "${allowed}" | jq -r 'join(", ")')."
+    return 1
+  fi
+
+  if ! printf '%s' "${doc}" | jq -e --arg c "${chan}" \
+       '.channels[$c] | (has("stale_after_s") | not) or (.stale_after_s == null)
+        or ((.stale_after_s | type) == "number" and .stale_after_s >= 0 and (.stale_after_s | floor) == .stale_after_s)' \
+       >/dev/null 2>&1; then
+    inbox_fail "channel \"${chan}\" declares a \"stale_after_s\" that is not a non-negative whole number of seconds" \
+      "set channel \"${chan}\"'s \"stale_after_s\" to a whole number of seconds (e.g. 1800), or to 0 or null to disable staleness for it; omit it for the default (1800 for a log channel, none for a maildir)."
     return 1
   fi
 

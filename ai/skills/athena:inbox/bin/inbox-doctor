@@ -33,6 +33,15 @@
 # configured -- an opt-out, not a breakage. It never mints, stores, or logs a
 # token, and never mutates server state.
 #
+# LIVENESS (DND-316). client-liveness judges the client from its log's last
+# connect-cycle line, never from pid existence: a reconnect that never finished
+# is a FAIL naming the stuck step. freshness:<channel> FAILS a channel past its
+# `stale_after_s` (default 1800 s for a log channel). dump-dir asserts the
+# client's SIGQUIT dump directory resolves and is writable. server-reachability
+# asks the server, with the MACHINE token, whether it can reach this machine
+# (HG-20 machine_reachable): "skipped" (no token), "UNAVAILABLE" (asked, no
+# answer) and "checked, 0 pending" never read the same.
+#
 # Tests: test/doctor/self-test.sh. Every probe is stubbed there; the suite never
 # opens a socket or reads a real pidfile.
 #--- end usage ---
@@ -115,10 +124,13 @@ collect_findings() {
   doctor_check_client_config
   if doctor_check_client_stopped; then STOPPED=0; else STOPPED=1; fi
   doctor_check_client_running "${STOPPED}"
+  doctor_check_client_liveness "${STOPPED}"
+  doctor_check_dump_dir
   doctor_check_cron
   doctor_check_entry "."
   doctor_check_channels "${DOCTOR_MATCHED_ENTRY}" "."
   doctor_check_server "."
+  doctor_check_server_reachability
 }
 
 FINDINGS="$(collect_findings)"

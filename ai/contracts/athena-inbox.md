@@ -322,6 +322,15 @@ channel is normal — so the misconfiguration is invisible. Therefore:
   MUST distinguish that from "nothing new", and say so with a `Fix:` clause
   naming producer registration. "Nobody registered the writer" and "nothing
   arrived" look identical on disk and must not look identical in output.
+- A tool reporting on a channel whose **last delivery is older than the
+  channel's staleness threshold** (`stale_after_s`, *Schema*) MUST say `STALE`
+  with the age, even when nothing is new, and a diagnostic MUST grade it a
+  fault. "Quiet" and "dark" look identical by count and must not look identical
+  in output (DND-316; the 2026-09-22 96-minute outage was read as "nothing new"
+  for its whole length). The age is the channel's doorbell mtime — the writer
+  bumps it on every delivery and it survives rotation — or the inbox file's
+  mtime when that is newer. Staleness is the reader's own fact about its own
+  files, never message content, so reporting it is within the counts-only rule.
 
 ### Repo identity: the git common dir
 
@@ -532,6 +541,7 @@ tenants MAY use the same channel name for different surfaces.
 | `dedupe` | no | array of string | **Additional** dedupe key families this channel's lines support. Recognised members: `event_id`, `channel+ts`. |
 | `schema_v` | no | array of integer | Line versions this reader understands. Defaults to `[1]`. |
 | `producer` | no | string | Which producer's line schema feeds this channel. `"slack"` (the default when absent) is the Slack-receiver schema; `"platform"` — the event-platform state-change schema — is ingested as of DND-260 (a keyless change stream). Any other value is refused. See *The inbox as an event-platform delivery adapter*. |
+| `stale_after_s` | no | integer ≥ 0, or null | Staleness threshold in seconds: a last delivery older than this is reported `STALE`. Absent → **1800**. `0` or `null` disables it (a channel that is legitimately quiet for long stretches). Any other value is refused. |
 
 `dedupe` is **declarative, not a switch.** Both dedupe rules in *Reader
 obligations* are mandatory and have non-overlapping jobs, so this key cannot
@@ -577,6 +587,7 @@ values the reader still has no schema for.
 | `read` | yes | string | Subdirectory this identity reads from and acks into. |
 | `write` | yes | string | Subdirectory this identity writes into. |
 | `identity` | yes | string | This side's name, as it appears in a message's `from`/`to`. MUST match `^[a-z0-9][a-z0-9_-]*$` and be ≤ 64 bytes. |
+| `stale_after_s` | no | integer ≥ 0, or null | Staleness threshold in seconds for the `read` side (its doorbell age). Absent → **none**: a conversation may be quiet for days. `0` or `null` also means none. |
 
 `read` and `write` MUST differ. Each MUST be a single path segment matching
 `^[a-z0-9][a-z0-9_-]*$`.
@@ -1282,9 +1293,18 @@ failure mode by a different second end:
   **producer-aware** — a `platform` channel names the `athena-events.md` handling
   rule/target that must feed it, a `slack` channel names the server-side agent
   instance in the client config; and **nothing arrived** is the non-fault
-  zero-new / "last changed" state on a file that exists. The unprompted count
-  path surfaces a never-delivered channel once and the doctor does not nag a
-  second time (see *inbox-doctor*).
+  zero-new state on a file that exists — until the channel's last delivery is
+  older than its `stale_after_s`, when it becomes the `STALE` fault
+  (`freshness:<channel>`, graded `fail`), because past that age "nothing
+  arrived" and "the relay is dark" cannot be told apart by count. The
+  unprompted count path surfaces a never-delivered channel once and the doctor
+  does not nag a second time (see *inbox-doctor*).
+
+  **Later (2026-09-23):** this passage called "nothing arrived" the non-fault
+  "last changed" state whatever its age, and the doctor graded a present file's
+  `last changed Ns ago` as `ok` — 5632 s through the 2026-09-22 outage.
+  Superseded by DND-316: past the channel's `stale_after_s` (default 1800 s for
+  `log`) the state is `STALE`, a fault.
 
   **Later (2026-09-20):** distinguishing the three *as* never-delivered
   sub-states was **deferred to DND-260**, which then only emitted one
@@ -2247,6 +2267,32 @@ reads `GET /api/machines/:id/health` (DND-192) for the connection verdict and
 per-instance `undelivered`/`last_delivered_at`; the token reaches `curl` only
 through a `umask 077` config file as an `Authorization` header, never in argv and
 never logged, and the doctor mints, stores, and mutates nothing.
+
+**Liveness is judged from evidence, never from a pid (DND-316).** On 2026-09-22
+the client wedged for 96 minutes — a reconnect that never completed — while
+`client-running` reported the supervisor's live pid as `ok` and the channel's
+96-minute silence as `last changed 5632s ago`, also `ok`. The doctor therefore
+also reports:
+
+- **`client-liveness`** — from the client log's last connect-cycle line: a
+  reconnect line (`reconnecting in Xs`, a reconnect `step`, `connected to`
+  without `joined`) older than its declared backoff plus a wedge allowance
+  (default 60 s) is `fail`, naming the step. A connected client that is merely
+  quiet is `ok` however long it has been silent. A CLOSE-WAIT socket is NOT a
+  wedge signature — it appears on healthy clients — so sockets are not read.
+- **`freshness:<channel>`** — `fail` past the channel's `stale_after_s`.
+- **`dump-dir`** — the client's diagnostics dump directory resolves and is
+  writable, so "no dumps yet" and "dump path broken" do not read the same.
+- **`server-reachability`** — authenticated with the **machine token** the
+  client already holds, it calls the server's `machine_reachable` (the `athena`
+  MCP; self when no machine is named): `reachable:false` is `fail`, a non-zero
+  pending-delivery count is a `warn` carrying the count (exhausted-offline
+  deliveries count as pending — evidence of a dark relay, not resolved
+  failures), and "skipped" (no token on this machine), "unavailable" (asked,
+  no usable answer — including the tool not being deployed) and "checked, 0
+  pending" are three different findings. An unavailable server check is `n-a`
+  and never fails the doctor by itself. The token reaches `curl` only through a
+  `umask 077` config file.
 
 ## Conformance checklist
 

@@ -66,6 +66,20 @@ is the brief, not the message.
    `read-inbox` it here. Its count is a lane trigger — follow
    `~/dev/custom/ai/docs/ticket-lane-action-brief.md` → *Spinning the lane up*,
    which checks by count or `--peek` and acks only after the admiral drains.
+
+   **"Nothing new" must not hide a dark channel.** `inbox-status` prints a
+   `STALE` line for any channel whose last delivery is older than its threshold
+   (`stale_after_s` in the registry entry; default 30 min for a `log` channel),
+   even when nothing is new, and `read-inbox` says `nothing new; STALE: …`. When
+   a wake finds nothing to handle, your report names every stale channel with
+   its age — `nothing new; channel slack stale 94m` — never a bare `nothing
+   new`. On 2026-09-22 roughly a dozen consecutive wakes said "nothing new"
+   through a 96-minute outage; each was true about the disk and wrong about the
+   world. Staleness is this machine's own fact (file ages), not message content,
+   so saying it keeps the counts-only rule. A `STALE` line is a relay question,
+   not a reason to act on a message: run `athena:inbox/bin/inbox-doctor` and
+   relay its `client-liveness` / `server-reachability` findings to the owner if
+   either is not `ok`.
 3. **Re-arm the waiter NOW — right after reading and acking, before you reply
    or investigate.** Launch `athena:inbox/bin/inbox-wait` with
    `run_in_background` so the next doorbell wakes you again (`athena:inbox` →

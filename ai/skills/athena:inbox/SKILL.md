@@ -490,6 +490,35 @@ file holding a user API token) to enable it; without them it is `n-a`, not a
 failure. The token reaches `curl` only through a `umask 077` config file, never
 in argv and never logged. The doctor mints and stores nothing.
 
+**Liveness is judged, never assumed from a pid (DND-316).** On 2026-09-22 the
+client wedged for 96 minutes while `client-running` said "ok, pid 759946". Four
+checks now answer the question a pid cannot:
+
+- `client-liveness` reads the client log's LAST connect-cycle line
+  (`lib/liveness.sh`). A reconnect line — `reconnecting in Xs`, a reconnect
+  `step`, `connected to` without a `joined` — older than its allowance (the
+  declared backoff plus 60 s, `ATHENA_INBOX_CLIENT_WEDGE_AFTER`) is **`fail`**,
+  naming the step it is stuck in. A connected client that is merely quiet logs
+  nothing and stays `ok`. Sockets are never read: a CLOSE-WAIT socket appears
+  on healthy clients too.
+- `freshness:<channel>` **fails** a channel whose last delivery (its `.event`
+  doorbell mtime) is older than `stale_after_s` (default 1800 s for a `log`
+  channel, none for a `maildir`; 0 or null disables).
+- `dump-dir` asserts the client's SIGQUIT dump directory resolves and is
+  writable (the client creates it lazily; the supervisor now creates it at
+  start).
+- `server-reachability` asks the server, with the **machine token** from the
+  client config, whether it can reach this machine (the `athena` MCP's
+  `machine_reachable`): `reachable:false` is `fail`, pending deliveries are a
+  `warn` with the count, and "SKIPPED" (no token), "UNAVAILABLE" (asked, no
+  answer — e.g. the tool is not deployed) and "checked, 0 pending" never read
+  the same. The token reaches `curl` only through a 0600 config file.
+
+`inbox-status` and `read-inbox` carry the same freshness: every line they print
+for a channel carries its last-delivery age and the client's last-join age, and
+a stale channel prints a `STALE` fault line even at zero new — "quiet" and
+"dark" must not read the same.
+
 The SessionStart hook runs `inbox-doctor --json --no-server` (never a network
 request on that path) and, when the chain is not `healthy`, folds one
 rate-limited sentence into its notice; set `ATHENA_INBOX_DOCTOR_LINE=0` to opt
@@ -617,8 +646,8 @@ agents on the live channel did by hand for fifty-one messages.
 
 | Bucket | Files |
 |---|---|
-| Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` · `lib/doctor.sh`'s `doctor_state_*` decisions |
-| Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the message-handling path**) · `lib/lock.sh` · `lib/session.sh` |
+| Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` · `lib/doctor.sh`'s `doctor_state_*` decisions · `lib/liveness.sh`'s `liveness_classify_line` / `liveness_judge` |
+| Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the message-handling path**) · `lib/lock.sh` · `lib/session.sh` · `lib/liveness.sh`'s log and mtime readers (the client log and doorbell ages; shared with `scripts/athena-inbox-client-run.sh`) |
 | Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes · `lib/doctor.sh`'s `doctor_check_*` — the diagnostic orchestration (a **declared deviation** — see below) |
 | Framework | `bin/inbox-status` · `bin/read-inbox` · `bin/inbox-doctor` |
 

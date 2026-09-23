@@ -264,6 +264,107 @@ doctor_check_client_running() {
   fi
 }
 
+# doctor_state_liveness <verdict-state>
+# Pure. The client-liveness grade for a liveness_verdict state:
+#   progressing / reconnecting -> ok     (connected, or mid-cycle within its allowance)
+#   wedged                     -> fail   (the 2026-09-22 15:55Z shape)
+#   unknown                    -> warn   (a log that says nothing about the cycle
+#                                         is a failed lookup, not a healthy client)
+#   absent / anything else     -> na     (no log to read)
+doctor_state_liveness() {
+  case "$1" in
+    progressing|reconnecting) printf 'ok\n' ;;
+    wedged)  printf 'fail\n' ;;
+    unknown) printf 'warn\n' ;;
+    *)       printf 'na\n' ;;
+  esac
+}
+
+# doctor_check_client_liveness <stopped:0/1>
+# DND-316 R1(1a): is the client progressing, or wedged mid-reconnect? PID
+# EXISTENCE IS NOT ASKED -- on 2026-09-22 client-running said "ok, pid 759946"
+# for 72 minutes of a wedge. The verdict comes from the client log's LAST
+# CONNECT-CYCLE LINE (lib/liveness.sh): a reconnect line (reconnecting / a
+# reconnect step / connected-but-not-joined) older than its allowance is a
+# wedge, and the finding names the step it is stuck in. A connected client that
+# is merely quiet logs nothing and stays ok however long the silence.
+doctor_check_client_liveness() {
+  local stopped="${1:-1}" log v state step age detail
+  if [ ! -e "$(doctor_client_config_path)" ]; then
+    doctor_finding na "client-liveness" "no client config, so no client is expected to run here" \
+      "if this machine should run the inbox client, install it with scripts/setup-athena-inbox-client; if it only reads delivered mail, this is expected."
+    return 0
+  fi
+  if [ "${stopped}" -eq 0 ]; then
+    doctor_finding na "client-liveness" "the client is deliberately stopped (see client-stopped), so its log says nothing about liveness" \
+      "resolve the client-stopped finding first."
+    return 0
+  fi
+  log="$(liveness_client_log)"
+  v="$(liveness_verdict "${log}")"
+  IFS=$'\t' read -r state step age detail <<<"${v}"
+  case "$(doctor_state_liveness "${state}")" in
+    ok)   doctor_finding ok "client-liveness" "the inbox client is ${state}: ${detail}" ;;
+    fail) doctor_finding fail "client-liveness" "the inbox client is WEDGED: ${detail} -- a reconnect that never finished, the 2026-09-22 15:55Z shape" \
+            "CAPTURE BEFORE RESTART, never the reverse (D35): the */5 supervisor watchdog (scripts/athena-inbox-client-run.sh) captures the wedge with scripts/inbox-client-capture and only then SIGTERMs the client, which the supervisor relaunches. To act now, run scripts/athena-inbox-client-run.sh by hand (it runs that watchdog pass). Never SIGTERM the client first -- that destroys the evidence." ;;
+    warn) doctor_finding warn "client-liveness" "the client log ${log} has no connect-cycle line, so liveness cannot be judged (${detail})" \
+            "a log with no connected/joined/reconnect line means the supervisor is not writing where this doctor reads, or the client never started. Check ATHENA_INBOX_CLIENT_STATE_DIR and tail ${log}; an unreadable liveness is not a healthy client." ;;
+    na)   doctor_finding na "client-liveness" "no client log to judge liveness from (${detail})" \
+            "the supervisor writes ${log}; if the client should be running, start it with scripts/athena-inbox-client-run.sh and re-check." ;;
+  esac
+}
+
+# doctor_check_dump_dir
+# DND-316 addition: the LV-1 client writes its SIGQUIT dumps into a directory it
+# creates LAZILY, on the first dump -- so before this check "no dumps yet" read
+# exactly like "the dump path is broken", and the first time anyone learned the
+# difference would be the wedge whose evidence went nowhere. The supervisor now
+# creates it (0700) at client start; this asserts it RESOLVES, is a directory,
+# and is writable. Derived by liveness_dump_dir, the one derivation the
+# supervisor and the capture share with the client ($XDG_STATE_HOME rules).
+doctor_check_dump_dir() {
+  local dir parent mode
+  if [ ! -e "$(doctor_client_config_path)" ]; then
+    doctor_finding na "dump-dir" "no client config, so no client dump directory is expected here" \
+      "if this machine should run the inbox client, install it with scripts/setup-athena-inbox-client; if it only reads delivered mail, this is expected."
+    return 0
+  fi
+  if ! dir="$(liveness_dump_dir)"; then
+    doctor_finding fail "dump-dir" "the client dump directory does not resolve: XDG_STATE_HOME is set to a RELATIVE path (${XDG_STATE_HOME:-})" \
+      "set XDG_STATE_HOME to an absolute path, or unset it (the default is ~/.local/state); a relative base resolves differently for the client and for the capture, so a dump would land where nothing looks."
+    return 0
+  fi
+  if [ -L "${dir}" ] || { [ -e "${dir}" ] && [ ! -d "${dir}" ]; }; then
+    doctor_finding fail "dump-dir" "the client dump path ${dir} exists but is not a plain directory" \
+      "remove whatever sits at ${dir}; the client and the capture need a 0700 directory there, and a wedge dump written to a symlink or a file would be lost."
+    return 0
+  fi
+  if [ ! -d "${dir}" ]; then
+    parent="$(dirname "${dir}")"
+    while [ ! -e "${parent}" ] && [ "${parent}" != "/" ]; do parent="$(dirname "${parent}")"; done
+    if [ -d "${parent}" ] && [ -w "${parent}" ]; then
+      doctor_finding warn "dump-dir" "the client dump directory ${dir} does not exist yet (the supervisor creates it at client start; it can be created)" \
+        "restart the supervised client so it creates ${dir} (0700), or mkdir -m 0700 -p ${dir}. Until it exists, \"no dumps\" and \"dump path broken\" read the same."
+    else
+      doctor_finding fail "dump-dir" "the client dump directory ${dir} does not exist and cannot be created (nearest existing ancestor ${parent} is not a writable directory)" \
+        "make ${parent} writable by this user, or point XDG_STATE_HOME elsewhere; a SIGQUIT dump from a wedged client would otherwise fail to write and the evidence would be lost."
+    fi
+    return 0
+  fi
+  if [ ! -w "${dir}" ]; then
+    doctor_finding fail "dump-dir" "the client dump directory ${dir} is not writable by this user" \
+      "chmod u+rwx ${dir} (it should be 0700); the client writes its wedge dumps there and the capture writes its capture directories beside them."
+    return 0
+  fi
+  mode="$(stat -c '%a' "${dir}" 2>/dev/null)"
+  if [ "$(doctor_state_mode "${mode}" "700")" = "warn" ]; then
+    doctor_finding warn "dump-dir" "the client dump directory ${dir} is mode 0${mode}, expected 0700" \
+      "chmod 0700 ${dir}; dumps hold thread backtraces and socket state of a process holding the machine token."
+    return 0
+  fi
+  doctor_finding ok "dump-dir" "the client dump directory ${dir} exists, is writable, and is mode 0700"
+}
+
 # doctor_check_cron
 # `setup-athena-inbox-client --check` reports whether the crontab entries are
 # live. The script absent -> na (not this checkout's concern). The command is
@@ -566,6 +667,47 @@ doctor_check_one_channel() {
       ;;
     maildir) doctor_check_maildir_channel "${chan}" "${resolved}" ;;
   esac
+  doctor_check_freshness "${entry}" "${chan}" "${resolved}"
+}
+
+# doctor_state_freshness <stale:true/false> <age-or-null>
+# Pure. fail when stale; ok when an age is known and not stale; na when there
+# is no delivery to age (never delivered -- its own finding says so).
+doctor_state_freshness() {
+  if [ "$1" = "true" ]; then printf 'fail\n'
+  elif [ "$2" = "null" ] || [ -z "$2" ]; then printf 'na\n'
+  else printf 'ok\n'; fi
+}
+
+# doctor_check_freshness <entry> <chan> <resolved>
+# DND-316 R2: a channel whose last delivery is older than its threshold is a
+# FAIL. On 2026-09-22 this doctor printed `log channel "slack" last changed
+# 5632s ago` and graded it ok through a 96-minute outage; a doctor that turns
+# an outage into a clean bill of health is worse than none. The age source is
+# the channel's `.event` doorbell mtime (liveness_channel_freshness), and the
+# threshold is the entry's `stale_after_s` (default 1800 s for `log`, none for
+# `maildir`). Quiet and dark cannot be told apart by age alone, so the Fix
+# points at the two checks that CAN: client-liveness and server-reachability.
+doctor_check_freshness() {
+  local entry="$1" chan="$2" resolved="$3" fresh stale age thr basis join
+  fresh="$(liveness_channel_freshness "${entry}" "${chan}" "${resolved}" 2>/dev/null)"
+  if [ -z "${fresh}" ]; then
+    doctor_finding warn "freshness:${chan}" "channel \"${chan}\" freshness could NOT be measured, so quiet and dark cannot be told apart" \
+      "check that the channel's files are stat-able and jq is on PATH; a freshness that cannot be measured is not a fresh channel."
+    return 0
+  fi
+  stale="$(printf '%s' "${fresh}" | jq -r '.stale')"
+  age="$(printf '%s' "${fresh}" | jq -r '.last_delivery_age_s')"
+  thr="$(printf '%s' "${fresh}" | jq -r '.stale_after_s')"
+  basis="$(printf '%s' "${fresh}" | jq -r '.age_basis')"
+  join="$(printf '%s' "${fresh}" | jq -r 'if .last_join_age_s == null then "" else "; client last joined \(.last_join_age_s)s ago" end')"
+  case "$(doctor_state_freshness "${stale}" "${age}")" in
+    fail) doctor_finding fail "freshness:${chan}" "channel \"${chan}\" is STALE: last delivery ${age}s ago (${basis} mtime), threshold ${thr}s${join}" \
+            "quiet and dark look identical by age. Read the client-liveness and server-reachability findings: if either is not ok the relay is dark -- capture before restart (never SIGTERM first). If both are ok the channel is only quiet: raise its \"stale_after_s\" in the registry entry (0 or null disables)." ;;
+    ok)   doctor_finding ok "freshness:${chan}" "channel \"${chan}\" last delivery ${age}s ago (${basis} mtime)$( [ "${thr}" = "null" ] && printf '; no staleness threshold' || printf ', threshold %ss' "${thr}")${join}" ;;
+    na)   doctor_finding na "freshness:${chan}" "channel \"${chan}\" has no delivery to age yet" \
+            "nothing has been delivered to this channel, so its freshness cannot be judged; see its never-delivered / channel finding." ;;
+  esac
 }
 
 doctor_check_log_channel() {
@@ -617,10 +759,10 @@ doctor_check_log_channel() {
     st="$(doctor_state_mode "${mode}" "600")"
     [ "${st}" = "warn" ] && doctor_finding warn "channel:${chan}" "the channel file ${inbox##*/} is mode 0${mode}, expected 0600" \
       "chmod 0600 ${inbox}; message surfaces under the root are private."
-    if mt="$(fs_mtime_epoch "${inbox}" 2>/dev/null)"; then
-      age=$(( now - mt ))
-      doctor_finding ok "channel:${chan}" "log channel \"${chan}\" last changed ${age}s ago"
-    fi
+    # The channel's AGE is graded by doctor_check_freshness (freshness:<chan>),
+    # which fails a stale channel. This line used to report "last changed Ns
+    # ago" as ok whatever N was -- 5632 s during the 2026-09-22 outage.
+    doctor_finding ok "channel:${chan}" "log channel \"${chan}\" file is present"
   else
     doctor_finding ok "channel:${chan}" "log channel \"${chan}\" is rotated and quiet (only ${one##*/} remains)"
   fi
@@ -957,4 +1099,201 @@ doctor_registry_log_paths() {
     case "${json}" in '#unparseable') continue ;; esac
     printf '%s' "${json}" | jq -r '.channels // {} | to_entries[] | select(.value.kind == "log") | .value.path' 2>/dev/null
   done
+}
+
+# --- server reachability via the machine token (DND-316 R6 / R1(1b)) --------
+#
+# The check above (doctor_check_server) needs a USER API token that is usually
+# not configured, so on most machines it reports "skipped" -- and a skipped
+# server check read the same as a clean one. This one authenticates with the
+# MACHINE token the inbox client already holds (HG-1), and asks the hosted
+# `athena` MCP server (HG-3; /mcp on the client's own host) the HG-20 question
+# `machine_reachable` for THIS machine (no machine_id = self). The answer is
+# three-valued (true | false | "unknown") with the pending-delivery count, the
+# last ack, and `unreachable_since`.
+#
+# FOUR OUTCOMES, AND NONE MAY READ LIKE ANOTHER:
+#   skipped      na    -- no client config / no token on this machine (opt-out)
+#   disabled     na    -- --no-server (the SessionStart hook's unprompted run)
+#   UNAVAILABLE  na    -- we tried and got no answer: network, HTTP, an MCP
+#                         error, or the tool is not deployed yet (DND-315). It
+#                         says "unavailable", never "skipped", and it never fails
+#                         the doctor on its own: an absent server feature is not
+#                         a dark relay.
+#   checked      ok/warn/fail -- reachable:false is a FAIL (R1(1b)); pending
+#                         deliveries > 0 is a warn with the count; "checked, 0
+#                         pending" says so in those words.
+#
+# THE TOKEN IS NEVER IN ARGV, NEVER LOGGED, NEVER PRINTED. It is read from the
+# client config into a 0600 curl config inside a 0700 mktemp dir and reaches
+# curl as an Authorization header only. The response is parsed, not echoed.
+#
+# Seams: ATHENA_INBOX_DOCTOR_REACHABLE_FILE holds a canned tool result (a JSON
+# object, or `UNAVAILABLE:<reason>`) and skips the network; the suite drives the
+# real protocol path through a curl shim on PATH. There is NO endpoint override
+# (see doctor_mcp_url).
+
+DOCTOR_MCP_PROTOCOL="2025-03-26"
+
+# doctor_mcp_url -- the /mcp endpoint on the client's own server host, always
+# https. There is deliberately NO override: the machine token goes wherever this
+# URL points, so the only place it may point is the server the client itself is
+# configured to trust.
+doctor_mcp_url() {
+  local host
+  host="$(jq -r '.server_url // empty' <"$(doctor_client_config_path)" 2>/dev/null | sed -E 's#^[a-z]+://##; s#[/?].*$##')"
+  [ -n "${host}" ] || return 1
+  printf 'https://%s/mcp\n' "${host}"
+}
+
+# doctor_mcp_post <workdir> <url> <session-id-or-empty> <json-body>
+# One POST. Writes <workdir>/hdr and <workdir>/body, prints the HTTP status.
+# The bearer comes from <workdir>/token (0600), placed there by the caller; it
+# is written into the curl config here and never touches argv.
+doctor_mcp_post() {
+  local w="$1" url="$2" sid="$3" body="$4"
+  command -v curl >/dev/null 2>&1 || return 1
+  printf '%s' "${body}" >"${w}/req.json"
+  (
+    umask 077
+    {
+      printf 'url = "%s"\n' "${url}"
+      printf 'request = "POST"\n'
+      printf 'header = "Authorization: Bearer %s"\n' "$(tr -d '\r\n' <"${w}/token")"
+      printf 'header = "Content-Type: application/json"\n'
+      printf 'header = "Accept: application/json, text/event-stream"\n'
+      [ -n "${sid}" ] && printf 'header = "mcp-session-id: %s"\n' "${sid}"
+      printf 'data-binary = "@%s/req.json"\n' "${w}"
+      printf 'dump-header = "%s/hdr"\n' "${w}"
+      printf 'output = "%s/body"\n' "${w}"
+      printf 'write-out = "%%{http_code}"\n'
+      printf 'max-time = %s\n' "${ATHENA_INBOX_DOCTOR_HTTP_TIMEOUT:-10}"
+      printf 'silent\n'
+    } >"${w}/curlrc"
+  ) || return 1
+  curl --config "${w}/curlrc" 2>/dev/null
+}
+
+# _doctor_mcp_json <body-file> -- the JSON-RPC message in a body that may be
+# plain JSON or a Streamable-HTTP SSE stream (last `data:` line wins).
+_doctor_mcp_json() {
+  local f="$1"
+  if grep -q '^data:' "${f}" 2>/dev/null; then
+    grep '^data:' "${f}" | tail -n 1 | sed 's/^data: \{0,1\}//'
+  else
+    cat "${f}"
+  fi
+}
+
+# doctor_machine_reachable
+# Prints the machine_reachable tool result (a JSON object) on success.
+# Status: 0 answered · 2 skipped (no config / no token) · 4 unavailable, with
+# the one-line reason on stdout instead.
+doctor_machine_reachable() {
+  local cfg canned url w http sid msg res tool_err
+  canned="${ATHENA_INBOX_DOCTOR_REACHABLE_FILE:-}"
+  if [ -n "${canned}" ]; then
+    [ -f "${canned}" ] || { printf 'the canned reachability file %s does not exist\n' "${canned}"; return 4; }
+    case "$(head -c 12 "${canned}")" in
+      UNAVAILABLE:*) sed -n '1s/^UNAVAILABLE://p' "${canned}"; return 4 ;;
+    esac
+    cat "${canned}"; return 0
+  fi
+  cfg="$(doctor_client_config_path)"
+  [ -f "${cfg}" ] || return 2
+  jq -e '(.token // "") | length > 0' <"${cfg}" >/dev/null 2>&1 || return 2
+  if ! url="$(doctor_mcp_url)"; then printf 'the client config has no server_url to derive the /mcp endpoint from\n'; return 4; fi
+
+  w="$(mktemp -d 2>/dev/null)" || { printf 'could not create a private temp dir\n'; return 4; }
+  chmod 700 "${w}"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${w}'; trap - RETURN" RETURN
+  ( umask 077; jq -r '.token' <"${cfg}" | tr -d '\r\n' >"${w}/token" ) || { printf 'could not stage the machine token\n'; return 4; }
+
+  http="$(doctor_mcp_post "${w}" "${url}" "" "$(jq -n -c --arg v "${DOCTOR_MCP_PROTOCOL}" \
+    '{jsonrpc:"2.0", id:1, method:"initialize", params:{protocolVersion:$v, capabilities:{}, clientInfo:{name:"inbox-doctor", version:"1"}}}')")" \
+    || { printf 'the MCP endpoint %s could not be reached\n' "${url}"; return 4; }
+  case "${http}" in
+    2??) ;;
+    401|403) printf 'the MCP endpoint refused the machine token (HTTP %s)\n' "${http}"; return 4 ;;
+    *) printf 'the MCP initialize at %s answered HTTP %s\n' "${url}" "${http:-none}"; return 4 ;;
+  esac
+  sid="$(tr -d '\r' <"${w}/hdr" 2>/dev/null | awk 'tolower($1)=="mcp-session-id:"{print $2; exit}')"
+  [ -n "${sid}" ] || { printf 'the MCP initialize returned no session id\n'; return 4; }
+  doctor_mcp_post "${w}" "${url}" "${sid}" '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' >/dev/null || true
+
+  http="$(doctor_mcp_post "${w}" "${url}" "${sid}" \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"machine_reachable","arguments":{}}}')" \
+    || { printf 'the machine_reachable call to %s failed in transport\n' "${url}"; return 4; }
+  case "${http}" in 2??) ;; *) printf 'the machine_reachable call answered HTTP %s\n' "${http:-none}"; return 4 ;; esac
+  msg="$(_doctor_mcp_json "${w}/body")"
+  # A JSON-RPC error, or a tool result flagged isError -- the tool missing
+  # (DND-315 not deployed) lands here. Report the server's own words, which are
+  # server text about a tool, never message content.
+  tool_err="$(printf '%s' "${msg}" | jq -r '
+      if .error then (.error.message // "an MCP error")
+      elif (.result.isError // false) then ((.result.content[0].text // "a tool error") | tostring)
+      else empty end' 2>/dev/null | head -c 200 | tr '\t\n\r' '   ')"
+  if [ -n "${tool_err}" ]; then printf 'machine_reachable is not available from the server: %s\n' "${tool_err}"; return 4; fi
+  res="$(printf '%s' "${msg}" | jq -c '(.result.structuredContent // (.result.content[0].text | fromjson))' 2>/dev/null)"
+  if [ -z "${res}" ] || ! printf '%s' "${res}" | jq -e 'type == "object" and has("reachable")' >/dev/null 2>&1; then
+    printf 'the machine_reachable answer was not a verdict object\n'; return 4
+  fi
+  printf '%s\n' "${res}"
+}
+
+# doctor_state_reachable <reachable> <pending>
+# Pure. false -> fail · pending > 0 -> warn · true/"unknown" with 0 pending -> ok
+# · anything else -> na (an answer with no usable verdict).
+doctor_state_reachable() {
+  local r="$1" p="$2"
+  case "${p}" in ''|*[!0-9]*) p=0 ;; esac
+  case "${r}" in
+    false) printf 'fail\n' ;;
+    true|unknown) [ "${p}" -gt 0 ] && printf 'warn\n' || printf 'ok\n' ;;
+    *) printf 'na\n' ;;
+  esac
+}
+
+# doctor_check_server_reachability
+doctor_check_server_reachability() {
+  local out rc r basis pending last_ack since joined facts now ack_age ack_epoch
+  if [ "${DOCTOR_NO_SERVER:-0}" = "1" ]; then
+    doctor_finding na "server-reachability" "server reachability check not run (disabled for this invocation)" \
+      "run inbox-doctor by hand (without --no-server) to ask the server whether it can reach this machine; the unprompted SessionStart path deliberately makes no network request."
+    return 0
+  fi
+  out="$(doctor_machine_reachable)"; rc=$?
+  case "${rc}" in
+    2) doctor_finding na "server-reachability" "server reachability check SKIPPED -- no client config or machine token on this machine" \
+         "this check authenticates with the inbox client's machine token (~/.config/athena-inbox-client/config.json); a machine that only reads delivered mail has none, and this is expected there."
+       return 0 ;;
+    4) doctor_finding na "server-reachability" "server reachability check UNAVAILABLE (tried, got no answer): $(printf '%s' "${out}" | head -n 1)" \
+         "this is not a skip and not a clean bill: the server was asked and could not answer. If machine_reachable is not deployed yet (DND-315), this is expected until it is; otherwise check the network, the /mcp endpoint, and that the machine token in the client config is current."
+       return 0 ;;
+    0) ;;
+    *) doctor_finding na "server-reachability" "server reachability check UNAVAILABLE (unexpected status ${rc})" \
+         "re-run inbox-doctor; if it persists, check doctor_machine_reachable in lib/doctor.sh."
+       return 0 ;;
+  esac
+  r="$(printf '%s' "${out}" | jq -r '.reachable | tostring')"
+  basis="$(printf '%s' "${out}" | jq -r '.basis // "unknown"')"
+  pending="$(printf '%s' "${out}" | jq -r '(.pending_deliveries // 0) | tostring')"
+  last_ack="$(printf '%s' "${out}" | jq -r '.last_ack_at // "never"')"
+  since="$(printf '%s' "${out}" | jq -r '.unreachable_since // ""')"
+  joined="$(printf '%s' "${out}" | jq -r '.last_joined_at // ""')"
+  ack_age=""
+  if [ "${last_ack}" != "never" ] && ack_epoch="$(date -u -d "${last_ack}" +%s 2>/dev/null)"; then
+    now="$(date -u +%s)"; ack_age=" ($(( now - ack_epoch ))s ago)"
+  fi
+  facts="basis ${basis}; ${pending} pending deliver(y/ies) for this machine; server last ack ${last_ack}${ack_age}${joined:+; server last join ${joined}}"
+  case "$(doctor_state_reachable "${r}" "${pending}")" in
+    fail) doctor_finding fail "server-reachability" "the server reports this machine UNREACHABLE${since:+ since ${since}}: ${facts}" \
+            "the relay is dark from the server's side. Read client-liveness: a wedged client is captured and restarted by the */5 supervisor watchdog (run scripts/athena-inbox-client-run.sh by hand to act now -- capture first, never SIGTERM first). Pending deliveries, including exhausted-offline ones, are held server-side and re-delivered on the next join." ;;
+    warn) doctor_finding warn "server-reachability" "checked: the server holds ${pending} pending deliver(y/ies) for this machine (reachable: ${r}; ${facts})" \
+            "a pending count that does not drain means the client is not acking. Check client-liveness and the client log; exhausted-offline deliveries count here as evidence of a dark relay, not as resolved failures." ;;
+    ok)   doctor_finding ok "server-reachability" "checked: reachable ${r}, 0 pending (${facts})" ;;
+    na)   doctor_finding na "server-reachability" "the server answered machine_reachable with no usable verdict (reachable: ${r})" \
+            "the answer shape may have changed; machine_reachable should return reachable true|false|\"unknown\"." ;;
+  esac
 }

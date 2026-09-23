@@ -46,6 +46,13 @@ SUPERVISOR_PID=""
 
 TMP="$(mktemp -d)"
 
+# The supervisor creates the client's dump directory under $XDG_STATE_HOME
+# (DND-316). Pinned for the WHOLE suite, not per helper: a case that invokes
+# the runner directly would otherwise create the live
+# ~/.local/state/athena/inbox-client-dumps (measured 2026-09-23 on this suite's
+# first DND-316 run). setup_case re-pins it into each case dir.
+export XDG_STATE_HOME="${TMP}/xdg"
+
 # Reap anything this suite backgrounded, BY PID. A `pkill -f` here could match
 # a real supervisor, or a sibling worktree's test run.
 cleanup() {
@@ -73,6 +80,7 @@ setup_case() {
   CASE_N=$((CASE_N+1))
   CASE_DIR="${TMP}/$(printf '%02d' "$CASE_N")-$1"
   mkdir -p "${CASE_DIR}"
+  export XDG_STATE_HOME="${CASE_DIR}/xdg"
   FAKE_CRONTAB="${CASE_DIR}/crontab.txt"
   STATE_DIR="${CASE_DIR}/state"
   STUB="${CASE_DIR}/stub-client"
@@ -140,6 +148,9 @@ run_installer() {
 # Run the supervisor. Backoff/restart knobs are passed by each case so a run
 # is bounded in seconds rather than unbounded in principle.
 run_supervisor() {
+  # XDG_STATE_HOME is pinned into the case dir: the supervisor creates the
+  # client's dump directory under it, and the live one must never be touched.
+  XDG_STATE_HOME="${CASE_DIR}/xdg" \
   ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
   ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
   ATHENA_INBOX_CLIENT_MIN_BACKOFF="${MIN_BACKOFF:-1}" \
@@ -631,7 +642,7 @@ fi
 #     SABOTAGE_RECORDS S28a, a measured zero.
 setup_case minimal_path
 make_stub 0 0
-out="$(env -i HOME="${HOME}" PATH=/bin:/usr/bin \
+out="$(env -i HOME="${HOME}" PATH=/bin:/usr/bin XDG_STATE_HOME="${CASE_DIR}/xdg" \
         ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
         ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
         ATHENA_INBOX_CLIENT_MAX_RESTARTS=1 \
@@ -861,6 +872,55 @@ else
       "the backgrounded supervisor never recorded a client pid"
   kill -9 "$SUPERVISOR_PID" 2>/dev/null; wait "$SUPERVISOR_PID" 2>/dev/null
   SUPERVISOR_PID=""
+fi
+
+# ---------------------------------------------------------------------------
+printf '\nI-12 supervisor: client-owned log rotation and the dump directory (DND-316)\n'
+
+# 36. The LV-1 client's size-capped rotation is DORMANT until the supervisor
+#     names its log file. Unset, a tight reconnect loop can fill the disk through
+#     an unbounded stderr append (the gen_saas LV-1 dependency note).
+setup_case client_log_env
+cat > "${STUB}" <<STUBEOF
+#!/usr/bin/env bash
+printf '%s\n' "\${ATHENA_INBOX_CLIENT_LOG:-<unset>}" > '${CASE_DIR}/seen-log'
+d="\${XDG_STATE_HOME}/athena/inbox-client-dumps"
+if [ -d "\$d" ]; then stat -c '%a' "\$d" > '${CASE_DIR}/seen-dump-mode'; else echo absent > '${CASE_DIR}/seen-dump-mode'; fi
+exit 0
+STUBEOF
+chmod +x "${STUB}"
+MAX_RESTARTS=1 run_supervisor >/dev/null 2>&1
+if [ "$(cat "${CASE_DIR}/seen-log" 2>/dev/null)" = "${LOG}" ]; then
+  ok "the client is started with ATHENA_INBOX_CLIENT_LOG naming the supervised log"
+else
+  bad "the client is started with ATHENA_INBOX_CLIENT_LOG naming the supervised log" \
+      "client saw: $(cat "${CASE_DIR}/seen-log" 2>/dev/null)"
+fi
+
+# 37. The dump directory exists, 0700, BEFORE the client runs. The client makes
+#     it lazily on its first dump, so until then "no dumps" and "dump path
+#     broken" read the same.
+if [ "$(cat "${CASE_DIR}/seen-dump-mode" 2>/dev/null)" = "700" ]; then
+  ok "the dump directory exists (0700) before the client starts"
+else
+  bad "the dump directory exists (0700) before the client starts" \
+      "client saw: $(cat "${CASE_DIR}/seen-dump-mode" 2>/dev/null)"
+fi
+
+# 38. The liveness library is a prerequisite: a supervisor that cannot tell a
+#     wedged client from a working one is the silence DND-316 closes, so its
+#     absence is a loud exit 2 with a Fix:, never a quiet degraded run.
+setup_case no_liveness_lib
+make_stub 0 0
+mkdir -p "${CASE_DIR}/lonely/scripts"
+cp "${RUNNER}" "${CASE_DIR}/lonely/scripts/athena-inbox-client-run.sh"
+err="$(XDG_STATE_HOME="${CASE_DIR}/xdg" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
+  bash "${CASE_DIR}/lonely/scripts/athena-inbox-client-run.sh" 2>&1 >/dev/null)"; rc=$?
+if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q 'liveness library is missing' && printf '%s' "$err" | grep -q 'Fix:' \
+   && [ "$(calls)" = "0" ]; then
+  ok "a missing liveness library is exit 2 with a Fix:, and no client is started"
+else
+  bad "a missing liveness library is exit 2 with a Fix:, and no client is started" "rc=$rc calls=$(calls) err=${err}"
 fi
 
 # ---------------------------------------------------------------------------
