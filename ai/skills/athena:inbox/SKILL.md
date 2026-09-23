@@ -299,7 +299,9 @@ Two obligations follow for a consumer:
   identical bytes, not new mail. `read-inbox --json` carries the identity per
   message: a maildir message's `name` (its immutable delivered filename), a
   Slack `log` line's `ts`, a platform line's `entity_id` + event id. Key on
-  that, never on arrival order or a running counter.
+  that, never on arrival order or a running counter. The one exception is an
+  `agent_message` line, which is deduped only by the Notion `Acked By` check
+  (*Agent Messages* below).
 
 ### `bin/send-mail`
 
@@ -533,6 +535,14 @@ the reconciliation poller re-emitting a row not yet acked, or both paths during
 the AM-6 cutover overlap with walt_ui's SessionStart pull. The `Acked By` check
 in step 3 is what makes a second arrival harmless. Do not build a seen-set on
 `row_id` either: two lines for one row can be two real edits.
+
+**The Notion `Acked By` check is the only dedupe for an `agent_message` line.**
+Do not dedupe on `entity_id`, the delivery id, or an event id either. That
+overrides the general *dedupe by each message's stable id* advice under
+`bin/read-inbox`. A line re-delivered after a crash-before-ack carries the same
+ids as the first delivery. At-least-once means that is a legitimate
+re-arrival, and if you had not yet acked in Notion, an id seen-set would drop
+the only copy.
 
 **Counts-only unprompted.** `inbox-status` and the SessionStart hook report a
 count for this channel like any other, and nothing else. `subject` and `from` are
