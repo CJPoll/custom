@@ -1669,6 +1669,16 @@ inbox_self_reachable() {
 inbox_session_inbox_state() {
   local entry
   entry="$(inbox_entry "${1:-.}" 2>/dev/null)" || { printf 'missing\n'; return 0; }
+  inbox_session_state_of_entry "${entry}"
+}
+
+# inbox_session_state_of_entry <entry-json>
+# The same three-valued state for an entry already in hand. ONE definition,
+# shared with inbox-doctor's send-paths, so the doctor cannot grade a session
+# inbox differently from the send it describes. An entry that fails
+# descriptor_validate is `invalid`.
+inbox_session_state_of_entry() {
+  local entry="$1"
   descriptor_validate "${entry}" >/dev/null 2>&1 || { printf 'invalid\n'; return 0; }
   if [ -z "$(printf '%s' "${entry}" | jq -r --arg n "${ROUTED_SESSION_CHANNEL}" '.channels[$n] // empty' 2>/dev/null)" ]; then
     printf 'missing\n'

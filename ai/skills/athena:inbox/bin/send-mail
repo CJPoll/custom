@@ -223,7 +223,8 @@ else
   # identity never carries a "/".
   case "${TO}" in
     */*)
-      inbox_fail "--to is a server address (${TO%%/*}/...), not a maildir peer identity, and this is a maildir send (${CHANNEL:+channel \"${CHANNEL}\"}${CHANNEL:---local}) -- nothing was sent" \
+      if [ -n "${CHANNEL}" ]; then WHAT="channel \"${CHANNEL}\""; else WHAT="--local"; fi
+      inbox_fail "--to is a server address (${TO%%/*}/...), not a maildir peer identity, and this is a maildir send (${WHAT}) -- nothing was sent" \
         "on the maildir: send-mail [--local] <channel> <slug> --to <identity>. To send to <machine_id>/<inbox> on the server, drop the channel and use --routed (or no flag)."
       exit 2 ;;
   esac

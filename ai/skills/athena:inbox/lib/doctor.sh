@@ -1503,9 +1503,7 @@ doctor_check_send_paths() {
   lookup_err="$(inbox_mcp_registration "${cwd}" 2>&1 >/dev/null)"; rc=$?
   case "${rc}" in 0) reg=registered ;; 1) reg=unregistered ;; 3) reg=broken ;; *) reg=error ;; esac
   if [ -n "${ATHENA_MCP_BEARER:-}" ]; then bearer=set; else bearer=unset; fi
-  if [ -z "$(printf '%s' "${entry}" | jq -r '.channels.session // empty' 2>/dev/null)" ]; then session=missing
-  elif routed_select_from_inbox "${entry}" >/dev/null 2>&1; then session=declared
-  else session=invalid; fi
+  session="$(inbox_session_state_of_entry "${entry}")"
   names="$(printf '%s' "${entry}" | jq -r '[.channels // {} | to_entries[] | select(.value.kind == "maildir") | .key] | join(", ")' 2>/dev/null)"
   maildirs="$(printf '%s' "${entry}" | jq -r '[.channels // {} | to_entries[] | select(.value.kind == "maildir")] | length' 2>/dev/null)"
   state="$(doctor_state_send_paths "${reg}" "${session}" "${DOCTOR_REACHABLE}" "${bearer}" "${maildirs}")"
