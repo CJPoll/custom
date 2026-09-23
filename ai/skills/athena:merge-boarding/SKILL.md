@@ -23,6 +23,11 @@ items fixed, nits replied/resolved) with threads replied.
   merging — "the bots re-ran clean" is not the bar; "first round addressed +
   pipeline green" is. (`*:run` jobs skipping on a later pipeline is expected and
   fine — leave them skipped.)
+- **A bug fix lands with its fail-before evidence.** The captain's report, and
+  the MR/PR body where there is one, shows the regression test failing on the
+  unfixed code and then passing, per `~/dev/custom/ai/CLAUDE.md` → *TDD
+  Workflow*. The standing judge's PASS covers the fix commit's message; the
+  report and PR body are yours to check.
 
 **A merge criterion is scoped to its evidence model — in a repo with NO CI,
 "green" proves nothing and the report IS the gate.** The readiness rules assume

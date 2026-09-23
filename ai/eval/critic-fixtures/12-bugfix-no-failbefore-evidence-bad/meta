@@ -1,0 +1,5 @@
+label=bad
+expect=tests
+about=a bug fix that adds a regression test but records no fail-before evidence (the test was never shown failing against the unfixed code)
+requires=diff,commit-msg
+since=dnd-400

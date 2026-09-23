@@ -1,0 +1,15 @@
+commit 1f0c2a9e4b7d3c5a8e6f0b1d2c3a4e5f6a7b8c9d
+Fix: negative remaining_days after a billing period ends (BILL-212)
+
+Customers whose period had ended were credited a negative proration.
+Clamp remaining_days at zero and add a regression test.
+
+Regression evidence (ai/CLAUDE.md -> TDD Workflow):
+- BEFORE (test added, fix not applied), mix test test/billing/proration_test.exs:
+    1) test remaining_days is zero, not negative, after the period ends (Billing.ProrationTest)
+       Assertion with == failed
+       code:  assert Proration.remaining_days(period, ~D[2026-01-20]) == 0
+       left:  -5
+       right: 0
+    4 tests, 1 failure
+- AFTER (fix applied): 4 tests, 0 failures

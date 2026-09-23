@@ -126,6 +126,23 @@ follow these steps in order:
      cases work as expected (no mocks)
   6. Write the UI code.
 
+**A bug fix starts with a regression test that fails.** This is the one home of
+the rule; other documents cite it by name.
+
+1. Write a test that exercises the defect. Run it against the UNFIXED code and
+   record its real failure output — the failing case and its assertion message.
+2. Apply the fix. Re-run the test and record it passing.
+3. Put that before/after evidence in the fix commit's message, where
+   `athena-diff-critic` reads it. Also put it in the MR/PR body; a repo with no
+   PRs (like this one) uses the captain report instead. Where the project keeps a
+   `SABOTAGE_RECORDS.md`, record it there too.
+
+What counts as a bug fix, what is exempt (features, refactors, prose-only
+changes), and what counts as evidence is defined once, operationally, in
+`BUG_FIX_RULE` in `ai/lib/critic_prompt.rb`. The standing critic applies it on
+every run and blocks a bug fix that lacks the test or the recorded failing
+output.
+
 If you're ever unsure of what to do or what to say, just ask clarifying
 questions.
 

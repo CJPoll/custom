@@ -89,6 +89,14 @@ Give the captain, in the brief:
   that pushes with a plain `git push` puts the owner's name on its work
   (measured 2026-09-23, every gen_saas branch push).
 
+- **The bug-fix regression rule, cited by name.** Every brief carries this line,
+  bug Mission or not, since any Mission can end up fixing a defect: *"Any bug
+  fix follows the regression-test rule in `~/dev/custom/ai/CLAUDE.md` → *TDD
+  Workflow*: record the test failing on the unfixed code, then passing, and put
+  that evidence where the rule says."* Cite it; do not restate it. The standing
+  judge blocks a fix commit without the evidence, so a captain who learns the
+  rule from the critic pays a whole review round for it.
+
 **In fleet mode, also point it at the design in Notion** — its ticket page's
 three sub-docs (**Product Requirements / Architecture & Engineering / QA Plan**)
 AND the epic's three, which it reads for full context — as the design it

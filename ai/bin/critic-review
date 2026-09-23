@@ -354,6 +354,22 @@ def warn_round_notice(sha)
   warn "  table and file the rest, or PARK. The core still lands only on FINDINGS: none."
 end
 
+# The change's commit messages, oldest first, for the judge's commit-msg input.
+#
+# `base..HEAD` is the same commit set as the diff's `base...HEAD` (both are
+# "on HEAD, not on base"). An empty string means there really are no commits
+# (e.g. a diff of uncommitted work); nil means the log could NOT be read, which
+# is said out loud here and reaches the judge as "NOT SUPPLIED" -- never as an
+# empty log, which would read as "no fix was claimed".
+def commit_log(base)
+  out, err, st = Open3.capture3("git", "log", "--reverse", "--format=commit %H%n%B", "#{base}..HEAD")
+  return out if st.success?
+
+  warn "critic-review: NOTE could not read the commit messages for #{base}..HEAD (#{err.strip})."
+  warn "  Fix: pass a --base that resolves in this repo. Until then the judge cannot see a bug-fix claim or its evidence."
+  nil
+end
+
 def critic_output(base)
   stub = ENV["CRITIC_REVIEW_STUB"]
   return [File.read(stub), true] if stub && File.file?(stub)
@@ -361,7 +377,7 @@ def critic_output(base)
   return ["", false] unless system("command -v claude >/dev/null 2>&1")
   diff, _e, dst = Open3.capture3("git", "diff", "#{base}...HEAD")
   diff = Open3.capture3("git", "diff", base)[0] if !dst.success? || diff.strip.empty?
-  prompt = CriticPrompt.build(diff: diff)
+  prompt = CriticPrompt.build(diff: diff, commit_messages: commit_log(base))
   out, _err, st = Open3.capture3("claude", "-p", "--agent", CRITIC, stdin_data: prompt)
   [out, st.success?]
 rescue StandardError => e
@@ -795,6 +811,29 @@ def run_self_test
     ok &&= built.start_with?(CriticPrompt::INSTRUCTION)
     ok &&= built.include?("```diff\nDIFFBODY\n```")
     ok &&= built.rindex("DIFFBODY") > built.rindex(CriticPrompt::INSTRUCTION) # varying part LAST (cache prefix)
+
+    # BUG-FIX REGRESSION EVIDENCE (DND-400). The rule lives in ai/CLAUDE.md ->
+    # "TDD Workflow"; the enforceable half rides in the prompt, because the
+    # judge can only rule on a fix claim it can SEE, and the claim lives in the
+    # commit messages. So assert all three parts, each as a separate outcome:
+    #   - the addendum sits in the STABLE prefix, ahead of every varying part;
+    #   - supplied commit messages land between the addendum and the diff;
+    #   - a MISSING input (nil) and an EMPTY one ("") print different markers --
+    #     "no commits" must never read the same as "nobody passed the commits".
+    with_msgs = CriticPrompt.build(diff: "DIFFBODY", commit_messages: "fix: MSGBODY")
+    ok &&= with_msgs.include?(CriticPrompt::BUG_FIX_RULE)
+    ok &&= with_msgs.index(CriticPrompt::BUG_FIX_RULE) < with_msgs.index("MSGBODY")
+    ok &&= with_msgs.index("MSGBODY") < with_msgs.index("DIFFBODY")
+    ok &&= built.include?(CriticPrompt::BUG_FIX_RULE)
+    ok &&= built.include?(CriticPrompt::COMMITS_NOT_SUPPLIED)
+    none = CriticPrompt.build(diff: "DIFFBODY", commit_messages: "")
+    ok &&= none.include?(CriticPrompt::COMMITS_NONE)
+    ok &&= !none.include?(CriticPrompt::COMMITS_NOT_SUPPLIED)
+    ok &&= !with_msgs.include?(CriticPrompt::COMMITS_NOT_SUPPLIED) && !with_msgs.include?(CriticPrompt::COMMITS_NONE)
+    # The addendum names its own normative home, so a reader of a finding can
+    # find the rule it enforces (cite by section name, never restate a second copy).
+    ok &&= CriticPrompt::BUG_FIX_RULE.include?("TDD Workflow")
+    ok &&= CriticPrompt::SUPPORTED_TOKENS.include?("commit-msg")
 
     %w[critic-review critic-eval].each do |bin|
       path = File.join(__dir__, bin)

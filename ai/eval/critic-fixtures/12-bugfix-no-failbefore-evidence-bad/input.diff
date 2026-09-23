@@ -1,0 +1,18 @@
+--- a/lib/billing/proration.ex
++++ b/lib/billing/proration.ex
+@@ -12,7 +12,7 @@ defmodule Billing.Proration do
+   def remaining_days(%Period{ends_on: ends_on}, today) do
+-    Date.diff(ends_on, today)
++    max(Date.diff(ends_on, today), 0)
+   end
+--- a/test/billing/proration_test.exs
++++ b/test/billing/proration_test.exs
+@@ -30,3 +30,8 @@ defmodule Billing.ProrationTest do
+     assert Proration.remaining_days(period, ~D[2026-01-10]) == 5
+   end
++
++  test "remaining_days is zero, not negative, after the period ends" do
++    period = %Period{ends_on: ~D[2026-01-15]}
++    assert Proration.remaining_days(period, ~D[2026-01-20]) == 0
++  end
+ end

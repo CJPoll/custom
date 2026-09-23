@@ -248,6 +248,16 @@ passes them; `critic-eval` reads a fixture's `commit-msg` file. **Fixtures
 (`requires=commit-msg`, `since=p2b`) — the first step at which their
 discriminating input exists. Closes F2 as a side effect.
 
+**Later (2026-09-23):** step 2's INPUT landed ahead of its content, under
+DND-400. `CriticPrompt::INPUTS` now carries `commit-msg` (key
+`:commit_messages`, fixture file `commit-msg`), and `critic-review` passes the
+`base..HEAD` log. It was needed for the bug-fix regression-evidence addendum
+(`CriticPrompt::BUG_FIX_RULE`), whose fixtures are `12`–`14` (`since=dnd-400`),
+numbered past the `08`–`11` reserved here. The `Scope-Note:` trailer rule and
+fixtures `09`/`10` are still unlanded. F2's "never sees a commit message" is no
+longer true for runs through `critic-review` or a fixture declaring
+`requires=commit-msg`.
+
 **Step 3 — P2-A (prior rounds).** Unchanged in content. `SUPPORTED_INPUTS` gains
 `:prior_rounds`; the fixture input is a `prior-report.txt`. **Fixtures
 `08-anchored-reversal-bad` and `11-claimed-fix-not-applied-bad` are authored

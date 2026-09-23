@@ -1,0 +1,4 @@
+commit 7c1d9e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d
+Add Proration.elapsed_days for the usage summary (BILL-230)
+
+New helper for the upcoming usage-summary card. Tested with a unit test.

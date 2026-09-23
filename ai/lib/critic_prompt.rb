@@ -53,6 +53,11 @@ module CriticPrompt
   # file:  the file inside a fixture directory that carries it
   INPUTS = {
     "diff" => { key: :diff, file: "input.diff" },
+    # The change's commit messages (subjects AND bodies). Step 2 of
+    # ai/docs/critic-loop-cost-design.md named this input; DND-400 lands it,
+    # because the bug-fix rule below can only fire on a fix claim the judge can
+    # see, and that claim lives in the commit messages, not the diff.
+    "commit-msg" => { key: :commit_messages, file: "commit-msg" },
   }.freeze
 
   # The keyword arguments `build` accepts.
@@ -68,15 +73,53 @@ module CriticPrompt
   # The corpus-facing tokens a fixture may declare in `requires=`.
   SUPPORTED_TOKENS = INPUTS.keys.freeze
 
+  # The enforceable half of the bug-fix regression-test rule (DND-400).
+  #
+  # The RULE lives once, in ~/dev/custom/ai/CLAUDE.md -> "TDD Workflow". The
+  # judge's rubric proper lives in ai/agents/athena-diff-critic.md(.in); this
+  # addendum rides in the prompt so the check fires from the shipping path
+  # (critic-review) and the measuring path (critic-eval) alike. It is part of
+  # the STABLE prefix, so it costs nothing against the prompt cache.
+  BUG_FIX_RULE = <<~TXT.freeze
+    Rubric addendum: bug-fix regression evidence (the rule is ~/dev/custom/ai/CLAUDE.md -> "TDD Workflow").
+
+    A change is a BUG FIX when a commit message below claims to fix a defect: its subject or body says it fixes a bug, defect, regression, crash, or flaky test, or it names a bug/defect/Flaky ticket or a bug ticket type or label.
+    Exempt, so this addendum does not apply: features, refactors, and changes whose diff touches no executable code or test (docs, prose, comments), even when the message says "fix".
+
+    A bug fix needs BOTH:
+    1. A test in the diff that exercises the defect (added or changed).
+    2. Fail-before evidence: the RECORDED failing output of that test run against the UNFIXED code (the failure line, assertion message, or failing case name with its non-zero result), plus the passing re-run after the fix. It counts when it appears in a commit message below, or in a report or sabotage-record file inside the diff. A bare claim ("verified red/green", "test failed before") with no recorded output is not evidence.
+
+    A bug fix missing either is a `tests` finding. Every finding blocks, so it is must-fix. Name which part is missing.
+    If the commit messages are NOT SUPPLIED below, you cannot see a fix claim: note this addendum as "unable to assess", never as a finding.
+  TXT
+
+  # The three states of the commit-messages input, kept textually distinct:
+  # "nobody passed them" must never read the same as "there were none".
+  COMMITS_NOT_SUPPLIED = "Commit messages: NOT SUPPLIED to this prompt."
+  COMMITS_NONE         = "Commit messages: none (no commits between the base and HEAD)."
+
   # Build the critic prompt for a diff.
   #
-  # diff: the change under review, as unified-diff text.
+  # diff:            the change under review, as unified-diff text.
+  # commit_messages: the change's commit messages, oldest first. nil means the
+  #                  caller did not supply them (a fixture that does not declare
+  #                  requires=commit-msg, or critic-review failing to read the
+  #                  log, which it says on stderr); "" means there were none.
   #
   # The diff goes LAST, inside a fenced block. Order is load-bearing, not
   # cosmetic: the instruction (and anything else stable across rounds) forms a
   # byte-identical prefix that stays prompt-cache-hittable across a loop's many
-  # rounds, while the part that varies per round sits at the end.
-  def self.build(diff:)
-    "#{INSTRUCTION}\n\n```diff\n#{diff}\n```"
+  # rounds, while the parts that vary per round sit at the end.
+  def self.build(diff:, commit_messages: nil)
+    "#{INSTRUCTION}\n\n#{BUG_FIX_RULE}\n#{commits_section(commit_messages)}\n\n```diff\n#{diff}\n```"
   end
+
+  def self.commits_section(commit_messages)
+    return COMMITS_NOT_SUPPLIED if commit_messages.nil?
+    return COMMITS_NONE if commit_messages.strip.empty?
+
+    "Commit messages on this change (oldest first):\n\n```text\n#{commit_messages}\n```"
+  end
+  private_class_method :commits_section
 end

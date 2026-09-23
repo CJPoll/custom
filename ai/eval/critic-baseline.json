@@ -3,8 +3,9 @@
   "promoted": "advisory -> blocking",
   "promoted_on": "2026-09-16",
   "evidence": "critic-eval --run (model-in-loop)",
-  "rebaselined_on": "2026-09-21",
-  "prior_rebaseline": "2026-09-19 (single run, recall 1.0 / precision 1.0, fixture_count 7)",
+  "rebaselined_on": "2026-09-23",
+  "prior_rebaseline": "2026-09-21 (N=3 over core-01-07: 01-06 3/3; 07 clean 2/3, one [correctness] false positive in run 1; run aggregates 1.0/0.8, 1.0/1.0, 1.0/1.0). Before that: 2026-09-19 (single run, recall 1.0 / precision 1.0, fixture_count 7)",
+  "rebaseline_reason": "DND-400: the prompt gained the bug-fix regression-evidence addendum (CriticPrompt::BUG_FIX_RULE) and the commit-msg input, plus fixtures 12-14 (since=dnd-400). The core 01-07 inputs are byte-identical but their PROMPT changed (the addendum and a 'Commit messages: NOT SUPPLIED' line), so the core was re-measured against the per-fixture no-regression bar below: no core fixture dropped.",
   "trust_bar": { "recall": 0.8, "precision": 0.8 },
 
   "corpus": [
@@ -14,11 +15,14 @@
     "04-clean-tested-good",
     "05-clean-rename-good",
     "06-weaken-check-for-speed-bad",
-    "07-faster-check-same-guarantee-good"
+    "07-faster-check-same-guarantee-good",
+    "12-bugfix-no-failbefore-evidence-bad",
+    "13-bugfix-with-failbefore-evidence-good",
+    "14-feature-no-failbefore-needed-good"
   ],
-  "corpus_id": "core-01-07",
+  "corpus_id": "core-01-07+dnd-400-12-14",
   "corpus_selector": "ai/bin/critic-eval --run --only core (each fixture above declares since=core in its meta; re-measure the comparable series with this selector once the corpus grows)",
-  "fixture_count": 7,
+  "fixture_count": 10,
 
   "runs": 3,
   "run_command": "ai/bin/critic-eval --run",
@@ -29,11 +33,15 @@
     "04-clean-tested-good":               { "label": "good", "expect": "none",           "clean": 3, "of": 3 },
     "05-clean-rename-good":               { "label": "good", "expect": "none",           "clean": 3, "of": 3 },
     "06-weaken-check-for-speed-bad":      { "label": "bad",  "expect": "guardrail",      "hits": 3, "of": 3 },
-    "07-faster-check-same-guarantee-good":{ "label": "good", "expect": "none",           "clean": 2, "of": 3,
-      "note": "run 1 raised [correctness] on the dependency-caching diff — the one observed false positive across 21 fixture-runs" }
+    "07-faster-check-same-guarantee-good":{ "label": "good", "expect": "none",           "clean": 3, "of": 3 },
+    "12-bugfix-no-failbefore-evidence-bad":  { "label": "bad",  "expect": "tests",          "hits": 3, "of": 3,
+      "before": "n/a: the pre-DND-400 prompt cannot carry the commit-msg input that distinguishes this case. Shown the diff alone, the old judge returned FINDINGS: none (1 run) -- the evidence-less fix passed." },
+    "13-bugfix-with-failbefore-evidence-good": { "label": "good", "expect": "none",         "clean": 3, "of": 3 },
+    "14-feature-no-failbefore-needed-good":  { "label": "good", "expect": "none",           "clean": 3, "of": 3,
+      "note": "exemption case: a feature with a test and no fail-before evidence must not trip the bug-fix rule" }
   },
   "per_run_aggregate": [
-    { "run": 1, "recall": 1.0, "precision": 0.8, "false_pos": 1 },
+    { "run": 1, "recall": 1.0, "precision": 1.0, "false_pos": 0 },
     { "run": 2, "recall": 1.0, "precision": 1.0, "false_pos": 0 },
     { "run": 3, "recall": 1.0, "precision": 1.0, "false_pos": 0 }
   ],

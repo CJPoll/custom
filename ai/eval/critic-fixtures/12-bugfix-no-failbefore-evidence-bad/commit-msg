@@ -1,0 +1,5 @@
+commit 1f0c2a9e4b7d3c5a8e6f0b1d2c3a4e5f6a7b8c9d
+Fix: negative remaining_days after a billing period ends (BILL-212)
+
+Customers whose period had ended were credited a negative proration.
+Clamp remaining_days at zero and add a regression test.

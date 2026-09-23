@@ -1,0 +1,5 @@
+label=good
+expect=none
+about=a new feature with a test and no fail-before evidence -- the bug-fix evidence rule must not fire on a non-bug change
+requires=diff,commit-msg
+since=dnd-400

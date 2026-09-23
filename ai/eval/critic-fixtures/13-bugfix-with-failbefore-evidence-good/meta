@@ -1,0 +1,5 @@
+label=good
+expect=none
+about=the same bug fix, with the regression test's recorded failing output against the unfixed code and the passing re-run in the commit message
+requires=diff,commit-msg
+since=dnd-400
