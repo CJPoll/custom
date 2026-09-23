@@ -168,10 +168,11 @@ which cost differently:
      `fleet.machine.*` family (gen_saas HG-20/DND-315) is originated by the
      platform's own reachability sweeper, never by harness-emit, and is
      declared as such. Why an exception rather than a rename: the name
-     describes fleet state, which is what the family reports; owner rules
-     already match `fleet.machine.unreachable`, and inbox lines already carry
-     it as their `kind`, so a rename would break every one of them for no gain
-     in safety. What matters is that no machine token can mint one, and the
+     describes fleet state, which is what the family reports; the type is
+     already shipped, so an owner rule saved against it would stop matching
+     and an inbox line routed from it would change its `kind` (the type
+     itself, per *Relationship to the Athena Inbox contract*), for no gain in
+     safety. What matters is that no machine token can mint one, and the
      exception states that.
   5. **Its enrichment posture** — whether its ingress enriches a metadata-only
      signal before emitting (declaring the **on-demand read** enrichment fetch,
@@ -736,7 +737,7 @@ failed-delivery store*).
   `(direct recipient machine, refusal-cause)` pairs, a finite set — **independent of traffic
   volume**.
 
-  `refusal-cause` is an **open-but-declared set**: each **owner↔destination check declares its own cause class**, exactly as *Extending the taxonomy — a new type family declares its model* makes a new event family a declared increment rather than a free addition. The set is "open" in that a new owner-supplied-destination check adds its class with **no edit to this store**; it is "declared" in that **no delivery may be refused under a cause class the refusing check has not declared** — an undeclared cause is a hard error, never an unlabelled miss (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty one*). First-pass the declared classes are **target-bind re-assertion** and **generic-webhook egress**; the roadmap **email/SMS owner-verified-recipient** check declares **`owner-verified-recipient`** (see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*), and any future owner-supplied-destination check declares its own. Because the key is the declared class, the grain stays bounded by a **structural quantity** — the pairs above, each over a declared cause — independent of traffic volume, and correct the moment a new check declares its class. The **exemplar** is the **first refused delivery since the row was last triaged** — its **full event
+  `refusal-cause` is an **open-but-declared set**: each **owner↔destination check declares its own cause class**, exactly as *Extending the taxonomy — a new type family declares its model* makes a new event family a declared increment rather than a free addition. The set is "open" in that a new owner-supplied-destination check adds its class with **no edit to this store**; it is "declared" in that **no delivery may be refused under a cause class the refusing check has not declared** — an undeclared cause is a hard error, never an unlabelled miss (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty one*). First-pass the declared classes are **target-bind re-assertion** (recorded as `target-bind`) and **generic-webhook egress** (recorded as `generic-webhook-egress`); the roadmap **email/SMS owner-verified-recipient** check declares **`owner-verified-recipient`** (see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*), and any future owner-supplied-destination check declares its own. Because the key is the declared class, the grain stays bounded by a **structural quantity** — the pairs above, each over a declared cause — independent of traffic volume, and correct the moment a new check declares its class. The **exemplar** is the **first refused delivery since the row was last triaged** — its **full event
   payload plus the refusal detail** (cause class + adapter + the target/destination that was
   refused), which alone answers "which delivery, of which rule, to which target, was refused, and
   why?". A later refusal of the same key **increments a monotonic
@@ -1178,8 +1179,11 @@ transitions, gen_saas HG-20/DND-315):
    `pending_deliveries` is absent, never `0`.
 2. **Identity field** — `payload.machine_id`, the machine the transition is
    about; it is the `subject` of the dedupe window. `payload.entity_id`
-   (`machine:<machine_id>`) names the same machine and is the inbox line's
-   `entity_id` (`ai/contracts/athena-inbox.md` → *Platform `log` line kinds*).
+   (`machine:<machine_id>`) names the same machine. An inbox line routed from
+   this family is a lane state-change line (its `kind` is the `type`, per
+   *Relationship to the Athena Inbox contract*), and `entity_id` is its
+   reconciliation identity (`ai/contracts/athena-inbox.md` → *A lane `log`
+   channel is a change stream of state-change events*).
 3. **Change/revision token** — none in the payload: each event is one
    transition and is never updated. The transition instant
    (`unreachable_since` for `unreachable`, the emit time for `reachable`) is
