@@ -390,8 +390,15 @@ check_text "C35. subshell assignment with a quoted paren -> warns" 'to a github.
 run "$(bash_json_cwd "$TMP/gh_scp" "W=~/dev/custom/ai/bin/gh-athena; bash -c '\$W git push origin HEAD'")"
 check_text "C36. \$W used in a child shell where W is unset -> warns" 'to a github.com remote'
 
-run "$(bash_json_cwd "$TMP/gh_scp" "W='~/dev/custom/ai/bin/gh-athena' ; \"\$W\" git push origin HEAD ; \$W git push origin HEAD")"
-check_text "C37. only the next statement is blessed; a second use warns" 'to a github.com remote'
+run "$(bash_json_cwd "$TMP/gh_scp" "W=\"\$HOME/dev/custom/ai/bin/gh-athena\" ; \"\$W\" git push origin x ; \$W git -C $TMP/gl push origin HEAD")"
+if is_warn_with 'to a gitlab.com remote' && ! is_warn_with 'to a github.com remote'; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "C37. the next statement's use is blessed (no github warn); a second use still warns (gitlab)"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s status=%s out=[%s]\n' "C37. blessed first use, warned second use" "$STATUS" "$OUT"
+fi
+
+run "$(bash_json_cwd "$TMP/gh_scp" "W='~/dev/custom/ai/bin/gh-athena' ; \"\$W\" git push origin HEAD")"
+check_text "C38. a single-quoted value (no ~ expansion) is not blessed -> warns" 'to a github.com remote'
 
 
 echo

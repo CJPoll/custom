@@ -138,6 +138,12 @@ reset_stub glab; gl_event feat "${SHA}" 'athena-amby' > "${TMP}/glab/responses/d
 run_in repo_gl --sha "${SHA}" --window 5 --interval 1 feat
 expect "8. gitlab bot event -> 0" 0 'athena-amby'
 grep -qF 'projects/g%2Fsub%2Fr/events' "${TMP}/glab/argv" && ok "8a. project path URL-encoded" || bad "8a. project path" "$(cat "${TMP}/glab/argv")"
+reset_stub glab
+printf '[]' > "${TMP}/glab/responses/1"; gl_event feat "${OLD}" 'athena-amby' > "${TMP}/glab/responses/2"
+gl_event feat "${SHA}" 'athena-amby' > "${TMP}/glab/responses/default"
+run_in repo_gl --sha "${SHA}" --window 10 --interval 1 feat
+expect "8b. gitlab lagging event found on the third read -> 0" 0 'athena-amby'
+[ "$(reads glab)" = 3 ] && ok "8c. exactly three gitlab reads" || bad "8c. gitlab read count" "reads=$(reads glab)"
 reset_stub glab; gl_event feat "${SHA}" 'cjpoll' > "${TMP}/glab/responses/default"
 run_in repo_gl --sha "${SHA}" --window 5 --interval 1 feat
 expect "9. gitlab wrong author -> 1" 1 'cjpoll'
