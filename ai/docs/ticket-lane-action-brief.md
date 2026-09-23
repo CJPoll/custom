@@ -14,9 +14,9 @@ contracts (`ai/contracts/athena-events.md`, `ai/contracts/athena-inbox.md`); the
 design record is cited only for design provenance and the flaky lane's migration
 ordering, and where it is cited the operative fact is also stated here in the
 brief. The current flaky-lane guidance — carried across several files (e.g.
-`~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt` and the canonical
-hook/brief/response policy in `walt_ui/CLAUDE.md` → "Flaky-test lane
-automation"; the complete inventory is DND-247's, not this list's) — **becomes
+`~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt`, which holds the
+canonical policy, and `walt_ui/CLAUDE.md` → "Flaky-test lane automation", which
+points at it; the complete inventory is DND-247's, not this list's) — **becomes
 one instance** of this template under DND-247's remaining sweep; those walt_ui
 carriers are not yet rewritten. Rewriting the existing flaky/ticket-lane **action policy** to point at
 this brief is **DND-247 / H-3** (named for provenance); the
@@ -80,7 +80,7 @@ conformant.
 |---|---|
 | `{{LANE_ID}}` | The lane's short identifier (e.g. `flaky`), used to name the coordinator marker. |
 | `{{LANE_LABEL}}` | The human name of the lane's work (e.g. "flaky-test"). |
-| `{{OWNER_NAME}}` / `{{OWNER_ID}}` | The account the scope filter is keyed to (name for prose, source person-id for the query). |
+| `{{OWNER_NAME}}` / `{{OWNER_ID}}` | The owner account the scope filter's assignee clause includes (name for prose, source person-id for the query). The clause may OR further assignees; `{{SCOPE_FILTER}}` names them. |
 | `{{TRACKER_CONNECTOR}}` | The MCP connector the tracker is reached through (e.g. `notion-work`). |
 | `{{SCOPE_DB_NAME}}` / `{{SCOPE_DB_ID}}` | The tracker database the scope query runs against. |
 | `{{SCOPE_FILTER}}` | The complete queue definition — the label/assignee/status/project predicate that defines lane membership. |
@@ -239,6 +239,13 @@ one*).
   `{{TRACKER_CONNECTOR}}` connector), filter = `{{SCOPE_FILTER}}`. Re-run this
   exact query (`{{SOURCE_RE_QUERY}}`) after each ticket and drain until it returns
   empty; tickets that land mid-run belong to THIS run.
+- **State the filter you ran** — in the first report, name the filter actually
+  applied and, for each OR'd clause (for flaky, each assignee), its match count
+  (e.g. owner: 2, bot: 0). A clause the filter could not resolve (an id file
+  missing, an id unset) is reported as unresolved, never silently dropped from
+  the OR. A narrowed filter and a quiet queue both read "0 tickets"; the
+  per-clause counts are what tell them apart (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look
+  like an empty one*).
 - **Blocked semantics** — `{{BLOCKED_SEMANTICS}}`.
 - **Status values** — `{{STATUS_VOCAB}}` (use the exact existing options; create
   none).
@@ -285,6 +292,16 @@ clauses — `ai/contracts/athena-events.md` → *Idempotency is per (event, rule
 it by acting on carried current state + source re-query). The mechanism is defined
 there; this brief does not restate it — it only binds the lane admiral to it.
 
+So a lane needs **no seen-set** on the inbox path, by design. The retired flaky
+poll kept a per-ticket seen-set (`~/.claude/flaky-ticket-poll.seen`); nothing
+replaces it. The line is only a trigger. The re-query against the tracker is the
+authority, so a repeat line for a ticket already handled re-queries and no-ops.
+The coordinator marker quiets a repeat trigger while an admiral drains. It is a
+best-effort hint, not a lock (*Spinning the lane up* → "The marker is a
+best-effort quieting hint, NOT a lock"), so a
+lane needing true mutual exclusion still needs a held `flock(2)`, with or without
+a seen-set.
+
 ## The flaky lane — the worked instantiation
 
 Binding every placeholder to the walt_ui flaky lane yields the flaky lane's
@@ -303,12 +320,15 @@ before these citations replaced the copies). The machine-readable tracker
 declared in `<repo-root>/.claude/flaky-lane.json` (for the flaky lane,
 `~/dev/walt_ui/.claude/flaky-lane.json`), which is how the athena-captain template
 resolves it and **never hardcodes the database id**. The fuller drain policy is
-today carried across **several homes** — canonically in prose in
-**`walt_ui/CLAUDE.md` → "Flaky-test lane automation"** (`~/.claude/CLAUDE.md` →
-*Ticket-driven lanes (per-machine automation, flaky = one instance)* is the
-trigger-pointer that routes a session into this brief, not a copy of that policy)
-— while the dispatch poll (`flaky-ticket-poll.sh`) holds a hand-synced copy of the
-database id/connector. So the rows below **cite the flaky tracker policy** rather
+today carried across **several homes** — canonically in the admiral brief
+**`~/dev/walt_ui/.claude/hooks/flaky-coordinator-spawn.txt`** (scope filter,
+blocked semantics, status values, concurrency, merge policy), which
+`walt_ui/CLAUDE.md` → "Flaky-test lane automation" points at. The owner's Notion
+id resolves from walt_ui's `.claude/agent-messages/roster.json`; the harness
+bot's from the machine-local `~/.claude/flaky-assignee-id`, which that spawn
+text reads. `~/.claude/CLAUDE.md` → *Ticket-driven lanes (per-machine
+automation, flaky = one instance)* is the trigger-pointer that routes a session
+into this brief, not a copy of that policy. So the rows below **cite the flaky tracker policy** rather
 than copy it, and give concrete values only for the **lane-shape** placeholders
 this template introduces. Collapsing the dispatch side to also read from
 `flaky-lane.json` — making it the single machine-readable home — and flipping
@@ -330,10 +350,10 @@ constants into one home (DND-276).
 |---|---|
 | `{{LANE_ID}}` | `flaky` |
 | `{{LANE_LABEL}}` | flaky-test |
-| `{{OWNER_NAME}}` / `{{OWNER_ID}}` | per the flaky tracker policy above (its scope filter is keyed to the owner) |
+| `{{OWNER_NAME}}` / `{{OWNER_ID}}` | per the flaky tracker policy above (the owner is one of the two assignees its scope filter ORs; see `{{SCOPE_FILTER}}`) |
 | `{{TRACKER_CONNECTOR}}` | per the flaky tracker policy above |
 | `{{SCOPE_DB_NAME}}` / `{{SCOPE_DB_ID}}` | per the flaky tracker policy above (the "Tickets" DB + its id) |
-| `{{SCOPE_FILTER}}` | per the flaky tracker policy above (the `flaky-tests` + owner + Todo/Backlog predicate) |
+| `{{SCOPE_FILTER}}` | per the flaky tracker policy above, whose assignee clause is an OR of the owner and the harness bot. Run it whole: an owner-only filter silently misses bot-assigned tickets. The admiral reports the count per assignee (*The inner admiral brief* → "State the filter you ran") |
 | `{{STATUS_VOCAB}}` | per the flaky tracker policy above |
 | `{{BLOCKED_SEMANTICS}}` | per the flaky tracker policy above (the `Blocked By` relation) |
 | `{{MAX_CAPTAINS}}` | `1` (strictly sequential) |
@@ -341,7 +361,7 @@ constants into one home (DND-276).
 | `{{LANE_CHANNEL}}` | the walt_ui `flaky` `log` channel, file `walt_ui-flaky.jsonl` (`kind:log`, `producer:"platform"`), declared in `ai/inbox/registry.json` (DND-260) and installed in the live entry. Its inbox count is the flaky lane's **operative trigger** (see `{{CHANNEL_RESOLUTION}}`) |
 | `{{CHANNEL_RESOLUTION}}` | resolve the flaky `log` channel in the **live installed** entry the consumer reads — the `$ATHENA_INBOX_ROOT/projects/*.json` entry whose realpath'd `repo` equals walt_ui's git-common-dir realpath (per `ai/contracts/athena-inbox.md` → *Finding the entry*; a human finds that entry in the file conventionally named `projects/walt_ui.json`, but the match key is `repo`, never the filename), not just the committed `ai/inbox/registry.json`. **Post-install invariant:** once the channel is declared AND installed, a live entry that does not resolve — logging the searched repo-identity key — is registry **drift**, a fault `check-inbox-registry` surfaces with `Fix: setup-inbox-registry --install`, never an empty queue. **Operative trigger:** the inbox count on this channel, reaching a live walt_ui session when the `inbox-wait` doorbell rings (`ai/skills/athena:inbox/SKILL.md` → *How to arm it*). The `SessionStart` poll (`flaky-ticket-poll.sh`) is **retired** as a trigger. A declared channel that is **not installed** is the same drift fault, never a quiet queue. **The line is a trigger, not the authority:** the consumer checks by count or `--peek`, then decides from `{{SOURCE_RE_QUERY}}` against Notion, never from the payload (*The consumer is idempotent by construction*). |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
-| `{{STALE_MARKER_SWEEP}}` | choice (a): an activity-independent runner clears a marker older than 12h; a human may also `rm -f` it. the runner is the dedicated `SessionStart` hook `~/dev/custom/ai/hooks/flaky-marker-sweep.sh` (DND-277), built so the sweep survives the poll's retirement. The retired poll's own 12h age-out keeps running only until walt_ui removes the hook, and nothing depends on it (see *Relationship to the existing flaky trigger*) |
+| `{{STALE_MARKER_SWEEP}}` | choice (a): an activity-independent runner clears a marker older than 12h; a human may also `rm -f` it. the runner is the dedicated `SessionStart` hook `~/dev/custom/ai/hooks/flaky-marker-sweep.sh` (DND-277), built so the sweep survives the poll's retirement. The retired poll's own 12h age-out went with the hook when walt_ui's PT-1542 removed it; nothing depended on it (see *Relationship to the existing flaky trigger*) |
 | `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per the flaky tracker policy above) against the Tickets DB |
 
 **Later (2026-09-21):** the `{{LANE_CHANNEL}}` and `{{CHANNEL_RESOLUTION}}` rows
@@ -384,6 +404,23 @@ queue; the line is only a trigger and Notion stays the authority; the age-out
 survives through `flaky-marker-sweep.sh`. Removing the poll hook itself is
 walt_ui's change, made after this one lands.
 
+**Later (2026-09-23):** the `{{SCOPE_FILTER}}` row above summarised the flaky
+predicate as "`flaky-tests` + owner + Todo/Backlog". That omitted the harness-bot
+assignee, which the retired poll also matched (via `~/.claude/flaky-assignee-id`)
+and to which flaky tickets are often assigned. An admiral following the row would
+run an owner-only filter, match zero bot tickets, and read the miss as an empty
+queue. The row now cites the policy without copying its values, and names the
+owner-OR-bot assignee clause so it is not dropped. The `{{OWNER_NAME}}` /
+`{{OWNER_ID}}` rows (generic and flaky) no longer call the filter "keyed to"
+the owner. *The inner admiral brief*
+requires per-assignee counts so a narrowed filter is observable. In the
+same change, the paragraph above the table stopped naming `walt_ui/CLAUDE.md` as
+the policy's canonical prose home and the poll as holding a hand-synced copy:
+walt_ui's PT-1542 retired the poll and reduced that `CLAUDE.md` section to a
+pointer at `flaky-coordinator-spawn.txt`, which holds the policy now. The
+living text that still said walt_ui "will" remove the poll hook now says it
+did.
+
 **The marker semantics preserved VERBATIM for the flaky instance:**
 
     touch ~/.claude/flaky-coordinator.lock          # before spawning
@@ -414,7 +451,7 @@ inbox count delivered by the `inbox-wait` background waiter on
 `{{LANE_CHANNEL}}` (`ai/skills/athena:inbox/SKILL.md` → *How to arm it*); the
 poll is retired as a trigger by owner directive (see the `**Later
 (2026-09-23)**` note under the worked-instantiation table). The poll hook and its
-`settings.json` registration are removed by walt_ui's own change, after this one.
+`settings.json` registration were removed by walt_ui's own change, PT-1542.
 The marker's **touch-before-spawn / remove-when-scope-empty** semantics carry over
 unchanged, but two things do
 change and are NOT "only the trigger":
@@ -443,8 +480,9 @@ change and are NOT "only the trigger":
   it (see the next bullet) — a `SessionStart` hook that ages out a marker nobody
   writes is dead weight, and a gate check that can never meaningfully fire is
   worse.
-- In the design's **gated final step** the whole flaky lock mechanism is retired:
-  the poll, its `walt_ui/.claude/settings.json` registration, the DND-277 age-out
+- In the design's **gated final step** the whole flaky lock mechanism is retired
+  (the poll and its `walt_ui/.claude/settings.json` registration already went in
+  walt_ui's PT-1542): the DND-277 age-out
   hook `ai/hooks/flaky-marker-sweep.sh` together with its `ai/hooks/registry.json`
   entry, its `harness-gate` `STATIC_CHECKS` entry and its self-test, and the dead
   `~/.claude/flaky-*` files — which includes `flaky-coordinator.lock` itself. So
@@ -453,7 +491,7 @@ change and are NOT "only the trigger":
 
 The migration therefore **spans three homes, not one**, and "lands in walt_ui" is
 too narrow: (a) the poll and its `walt_ui/.claude/settings.json` registration
-retire in the **product repo (walt_ui)**; (b) the new trigger's `{{LANE_CHANNEL}}`
+retired in the **product repo (walt_ui)**, by PT-1542; (b) the new trigger's `{{LANE_CHANNEL}}`
 `log` channel is provisioned by a **tenancy registry entry whose committed source
 of truth is THIS repo's `ai/inbox/registry.json`** (`~/dev/custom/CLAUDE.md` →
 *Inbox tenancy registry*) — the flaky `log` channel is now declared there
@@ -466,9 +504,9 @@ harness-side artifact the guidance is rewritten to point at.
 
 **The DND-247 sweep's carrier inventory is authoritative, not this section's
 examples.** The current flaky policy is carried in more than one file — the
-`SessionStart` poll and `flaky-coordinator-spawn.txt` above, **and the canonical
-hook/brief/response policy in `walt_ui/CLAUDE.md` → "Flaky-test lane
-automation"** (the `~/.claude/CLAUDE.md` home is now the trigger-pointer into
+`SessionStart` poll (retired by walt_ui's PT-1542) and
+`flaky-coordinator-spawn.txt` above (the canonical policy), **and
+`walt_ui/CLAUDE.md` → "Flaky-test lane automation"**, which points at it (the `~/.claude/CLAUDE.md` home is now the trigger-pointer into
 this brief, already rewritten by this change — not a policy carrier awaiting
 rewrite). This list is illustrative,
 not exhaustive; DND-247 owns the complete carrier inventory and each carrier's
