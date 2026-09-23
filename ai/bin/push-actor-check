@@ -92,7 +92,8 @@ GLAB_BIN=${PUSH_ACTOR_CHECK_GLAB:-glab}
 case "${HOST}" in
   github.com)
     FORGE=github; EXPECT='athena-harness[bot]'
-    read_events() { "${GH_BIN}" api "repos/${PATH_}/activity?ref=refs/heads/${BRANCH}&per_page=30"; }
+    ENC_B=$(jq -rn --arg b "refs/heads/${BRANCH}" '$b | @uri')
+    read_events() { "${GH_BIN}" api "repos/${PATH_}/activity?ref=${ENC_B}&per_page=30"; }
     ACTOR_JQ='if type != "array" then error("not an array") else
       first(.[] | select(.ref == ("refs/heads/" + $b) and .after == $s) | .actor.login) // "" end' ;;
   gitlab.com)

@@ -342,6 +342,60 @@ run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena; "$W" git pu
 check_text "C13. same var: wrapper use, reassignment, plain use -> the plain one warns" 'to a github.com remote'
 
 echo
+echo "--- DND-397 critic r2 (cluster): masked text must be provably inert ---"
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'git rebase --exec "git push origin HEAD" main')"
+check_text "C14. git rebase --exec \"<push>\"" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'git rebase -x "git push origin HEAD" main')"
+check_text "C15. git rebase -x \"<push>\"" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'git submodule foreach "git push origin HEAD"')"
+check_text "C16. git submodule foreach \"<push>\"" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "cat <<'EOF' | perl\nsystem(\"git push origin HEAD\")\nEOF")")"
+check_text "C17. heredoc piped into perl" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "echo 'git push origin HEAD' | python3")"
+check_text "C18. echo '<push>' | python3" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "echo 'git push origin HEAD' | awk '{system(\$0)}'")"
+check_text "C19. echo '<push>' | awk system" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "echo 'git push origin HEAD' | sed e")"
+check_text "C20. echo '<push>' | sed e" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "\$(echo 'git push origin HEAD')")"
+check_text "C21. \$(echo '<push>') as the command word" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "\"\$(echo 'git push origin HEAD')\"")"
+check_text "C22. \"\$(echo '<push>')\" as the command word" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "gh alias set --shell p 'git push origin HEAD' && gh p")"
+check_text "C23. gh alias set --shell '<push>' (not a DATA subcommand)" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "git -C . -c 'alias.p=!git push origin HEAD' p")"
+check_text "C24. git -C . -c '<alias>' (value before the subcommand)" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "grep -rn 'git push' . || sh -c 'git push origin HEAD'")"
+check_text "C25. || then a shell still warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'grep -rn "git push" . | head -5')"
+check "Q9. grep \"git push\" | head (a PIPE_SAFE consumer)" allow
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'git log --grep "git push origin" --oneline')"
+check "Q10. git log --grep \"git push origin\"" allow
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'gh pr comment 5 --body "then git push origin main"')"
+check "Q11. gh pr comment --body \"…git push…\"" allow
+
+run "$(bash_json_cwd "$TMP/norepo" "cd $TMP/norepo && grep -n \"git push\" notes.md")"
+check "Q12. cd <dir> && grep \"git push\"" allow
+
+run "$(bash_json_cwd "$TMP/gh_scp" "grep -n 'git push' f || echo 'no git push here'")"
+check "Q13. || between two DATA commands" allow
+
+echo
 echo "--- MUST-NOT-WARN cases (wrapper / reads / unrelated) ---"
 
 run "$(bash_json_cwd "$TMP/gh_scp" '~/dev/custom/ai/bin/gh-athena git push origin HEAD')"

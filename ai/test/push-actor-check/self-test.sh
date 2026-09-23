@@ -88,6 +88,10 @@ reset_stub gh; gh_event feat "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/respons
 run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
 expect "2. github bot event -> 0" 0 'athena-harness[bot]'
 grep -qF 'repos/o/r/activity' "${TMP}/gh/argv" && ok "2a. owner/repo parsed from the SSH-form URL" || bad "2a. owner/repo" "$(cat "${TMP}/gh/argv")"
+reset_stub gh; gh_event 'a&b#c' "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
+run_in repo_gh --sha "${SHA}" --window 5 --interval 1 'a&b#c'
+expect "2b. a branch with & and # still matches" 0 'athena-harness[bot]'
+grep -qF 'ref=refs%2Fheads%2Fa%26b%23c&' "${TMP}/gh/argv" && ok "2c. the branch is URL-encoded in the query" || bad "2c. query encoding" "$(cat "${TMP}/gh/argv")"
 
 # GitHub: the event appears only on the third read (the lag this exists for).
 reset_stub gh
