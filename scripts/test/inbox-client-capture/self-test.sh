@@ -55,7 +55,12 @@ cleanup() {
   for p in "${PIDS[@]}"; do wait "${p}" 2>/dev/null; done
   rm -rf -- "${TMP}"
 }
-trap cleanup EXIT INT TERM
+# INT/TERM must END the suite, not just run cleanup and carry on: a handler
+# that returns resumes the next case against a deleted TMP (measured DND-365).
+# `exit` fires the EXIT trap, so cleanup still runs exactly once.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 command -v ruby >/dev/null 2>&1 || {
   echo "VERDICT: FAIL — ruby is not on PATH; the mock client is ruby so the identity check is the real one."

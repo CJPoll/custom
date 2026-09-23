@@ -68,13 +68,29 @@ export ATHENA_INBOX_ROOT="${TMP}/inbox-root"
 # Reap anything this suite backgrounded, BY PID. A `pkill -f` here could match
 # a real supervisor, or a sibling worktree's test run.
 cleanup() {
+  local p
   if [ -n "$SUPERVISOR_PID" ]; then
+    # CONT first: case 45c holds the supervisor SIGSTOPped across a watchdog
+    # pass, and a stopped process does not act on TERM -- an interrupt landing
+    # in that window would otherwise hang the `wait` below forever.
+    kill -CONT "$SUPERVISOR_PID" 2>/dev/null
     kill "$SUPERVISOR_PID" 2>/dev/null
+    timeout 15 tail --pid="$SUPERVISOR_PID" -f /dev/null 2>/dev/null
+    kill -9 "$SUPERVISOR_PID" 2>/dev/null   # still ours until waited: no pid reuse
     wait "$SUPERVISOR_PID" 2>/dev/null
   fi
+  # The watchdog cases' mock clients (45c's ignores TERM, so the supervisor's
+  # reaper cannot stop it): children first, then the pids, by PID only.
+  for p in ${WD_PIDS[@]+"${WD_PIDS[@]}"}; do [ -n "$p" ] && pkill -9 -P "$p" 2>/dev/null; done
+  for p in ${WD_PIDS[@]+"${WD_PIDS[@]}"}; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
   rm -rf -- "$TMP"
 }
-trap cleanup EXIT INT TERM
+# INT/TERM must END the suite, not just run cleanup and carry on: a handler
+# that returns resumes the next case against a deleted TMP (measured DND-365).
+# `exit` fires the EXIT trap, so cleanup still runs exactly once.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
