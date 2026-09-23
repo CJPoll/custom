@@ -182,6 +182,24 @@ check "P6c. rm -rf the glab-cli config dir" deny
 run "$(bash_json 'true && $(/usr/bin/cp x ~/.config/gh/config.yml)')"
 check "P6d. path-qualified cp inside \$( )" deny
 
+run "$(bash_json 'perl -pi -e s/a/b/ ~/.config/glab-cli/config.yml')"
+check "P6e. perl -pi on glab-cli config.yml" deny
+
+run "$(bash_json 'sed -e s/a/b/ -i ~/.config/gh/hosts.yml')"
+check "P6f. sed with -i after another flag" deny
+
+run "$(bash_json 'sed --in-place s/a/b/ ~/.config/gh/hosts.yml')"
+check "P6g. sed --in-place" deny
+
+run "$(bash_json 'unlink ~/.config/gh/hosts.yml; shred -u ~/.config/glab-cli/config.yml')"
+check "P6h. unlink / shred" deny
+
+run "$(bash_json 'rm -rf "$XDG_CONFIG_HOME/gh"')"
+check "P6i. rm -rf \$XDG_CONFIG_HOME/gh (dir form)" deny
+
+run "$(bash_json '~/dev/custom/ai/bin/gh-athena auth switch --user x')"
+check "P7a. gh auth switch (changes the active account)" deny
+
 echo
 echo "--- MUST-NOT-BLOCK cases (reads / ordinary forge use) ---"
 
@@ -235,6 +253,18 @@ check "M16. ls of glab-cli dir redirected to /dev/null" allow
 
 run "$(bash_json 'curl -s https://gitlab.com/oauth/token/info -H "Authorization: Bearer x"')"
 check "M17. GET oauth/token/info (read)" allow
+
+run "$(bash_json 'curl -fsSL https://gitlab.com/oauth/token/info')"
+check "M18. curl -fsSL GET of oauth/token/info (-f is --fail, not a POST)" allow
+
+run "$(bash_json 'curl -D - https://gitlab.com/oauth/token/info')"
+check "M19. curl -D (dump header) GET of oauth/token/info" allow
+
+run "$(bash_json 'perl -Mstrict -ne print ~/.config/gh/hosts.yml')"
+check "M20. perl -Mstrict -ne read of gh hosts.yml" allow
+
+run "$(bash_json 'sed -n p ~/.config/gh/hosts.yml | grep -i github')"
+check "M21. sed -n read piped to grep -i" allow
 
 echo
 echo "--- FAIL-OPEN cases (never wedge Bash) ---"
