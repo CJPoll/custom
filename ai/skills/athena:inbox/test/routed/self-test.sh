@@ -69,7 +69,10 @@ case "${method}" in
   initialize)
     echo initialize >> "${S}/calls.log"
     code="$(cat "${S}/init.code" 2>/dev/null || echo 200)"
-    sid="$(cat "${S}/init.sid" 2>/dev/null || echo sess-1)"
+    # Default: a REAL-SHAPED Hermes session id -- base64, 28 chars, with `+`,
+    # `/` and `=` padding (live 2026-09-23). "sess-1" was the fixture that let
+    # the first client ship refusing every real id.
+    sid="$(cat "${S}/init.sid" 2>/dev/null || echo 'k3Jz9vQm+Pq/7XbL2wYtR0aC5dE=')"
     if [ -n "${sid}" ]; then printf 'HTTP/1.1 %s OK\r\nmcp-session-id: %s\r\n\r\n' "${code}" "${sid}" > "${hdr}"
     else printf 'HTTP/1.1 %s OK\r\n\r\n' "${code}" > "${hdr}"; fi
     printf '%s\n' "${cfg}" | grep '^max-time' >> "${S}/maxtime.log"
@@ -80,6 +83,7 @@ case "${method}" in
   tools/call)
     tool="$(jq -r '.params.name' "${req}")"
     echo "tools/call ${tool}" >> "${S}/calls.log"
+    printf '%s\n' "${cfg}" | grep '^header = "mcp-session-id: ' >> "${S}/sid.log"
     jq -c '.params.arguments' "${req}" > "${S}/args.${tool}.json"
     : > "${hdr}"
     code="$(cat "${S}/${tool}.code" 2>/dev/null || echo 200)"
@@ -364,10 +368,40 @@ shim_reset; printf '' > "${SHIM}/init.sid"
 send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
 assert_contains "initialize with no session id: refused, nothing was sent" "no session id" "${ERR}"
 assert_not_contains "initialize with no session id: session_send never called" "session_send" "$(calls)"
-shim_reset; printf 'bad"sid' > "${SHIM}/init.sid"
-send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
-assert_contains "initialize with a malformed session id: refused" "malformed session id" "${ERR}"
-assert_not_contains "initialize with a malformed session id: session_send never called" "session_send" "$(calls)"
+# REAL-SHAPED session ids are accepted and sent back verbatim: base64 with
+# `=` padding, and one carrying `+` and `/`.
+for goodsid in 'k3Jz9vQm+Pq/7XbL2wYtR0aC5dE=' 'Zm9vYmFyYmF6cXV4MTIzNDU2Nzg=' 'a+b/c+d/e+f/g+h/i+j/k+l/mn=='; do
+  shim_reset; printf '%s' "${goodsid}" > "${SHIM}/init.sid"
+  send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+  assert_eq "a base64 session id [${goodsid}] is accepted" 0 "${RC}"
+  assert_contains "a base64 session id [${goodsid}] is sent back verbatim in the curl config" \
+    "header = \"mcp-session-id: ${goodsid}\"" "$(cat "${SHIM}/sid.log" 2>/dev/null)"
+done
+# Ids that WOULD break a double-quoted curl config value are refused, before
+# session_send, with a Fix. (A space or newline cannot survive the header
+# parse -- awk splits on whitespace -- so those are asserted on the predicate.)
+for badsid in 'ab"cd==' 'ab\\cd=='; do
+  shim_reset; printf '%s' "${badsid}" > "${SHIM}/init.sid"
+  send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+  assert_contains "a session id carrying [${badsid}] is refused" "cannot be sent back safely" "${ERR}"
+  assert_contains "a session id carrying [${badsid}]: the refusal carries a Fix" "Fix:" "${ERR}"
+  assert_not_contains "a session id carrying [${badsid}]: session_send never called" "session_send" "$(calls)"
+done
+
+echo "== names_safe_curl_config_value: the one predicate every curl-config value passes =="
+(
+  . "${LIB}/err.sh"; . "${LIB}/names.sh"
+  for v in 'k3Jz9vQm+Pq/7XbL2wYtR0aC5dE=' 'https://athena.example.test/mcp' 'xoxb-1-abc'; do
+    if names_safe_curl_config_value "${v}"; then ok "safe: [${v}]"; else bad "safe: [${v}]" "refused"; fi
+  done
+  for v in '' 'a"b' 'a\b' 'a b' $'a\nb' $'a\tb' $'a\rb' $'a\x01b'; do
+    if names_safe_curl_config_value "${v}"; then bad "unsafe refused: [$(printf '%q' "${v}")]" "accepted"; else ok "unsafe refused: [$(printf '%q' "${v}")]"; fi
+  done
+  long="$(printf 'A%.0s' $(seq 1 257))"
+  if names_safe_curl_config_value "${long}" 256; then bad "a 257-byte value is refused under a 256 bound" "accepted"; else ok "a 257-byte value is refused under a 256 bound"; fi
+  printf '%s %s\n' "${PASS}" "${FAIL}" > "${TMP}/pred.counts"
+)
+read -r PASS FAIL < "${TMP}/pred.counts"
 
 shim_reset; printf 28 > "${SHIM}/session_send.curlexit"
 send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x

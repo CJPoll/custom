@@ -17,7 +17,8 @@
 # of every file. The protocol steps (initialize -> initialized -> tools/call, a
 # body that may be plain JSON or an SSE stream) are the same.
 #
-# Source order: err.sh, then this file. Requires jq and curl.
+# Source order: err.sh, names.sh (names_safe_curl_config_value), then this
+# file. Requires jq and curl.
 
 MCP_PROTOCOL_VERSION="2025-03-26"
 
@@ -121,23 +122,18 @@ mcp_call_tool() {
   local url="$1" tool="$2" args="$3" w http sid req
   command -v curl >/dev/null 2>&1 || { printf 'curl is not on PATH\n'; return 3; }
   case "${url}" in
-    *'"'*|*'\'*|*[[:space:]]*) printf 'the registered athena MCP URL contains a quote, backslash or whitespace\n'; return 3 ;;
-    https://*) ;;
+    https://*) names_safe_curl_config_value "${url}" || { printf 'the registered athena MCP URL contains a quote, backslash, whitespace or control character\n'; return 3; } ;;
     *) printf 'the registered athena MCP URL is not https, and the machine token is not sent in clear text\n'; return 3 ;;
   esac
   # The bearer is written into a double-quoted curl config value: a quote,
   # backslash or whitespace in it would corrupt the header (or inject a config
   # line). Refused, never sent malformed; the value is never printed.
-  case "${ATHENA_MCP_BEARER:-}" in
-    *'"'*|*'\'*|*[[:space:]]*) printf 'ATHENA_MCP_BEARER contains a quote, backslash or whitespace and cannot be sent safely\n'; return 3 ;;
-  esac
+  names_safe_curl_config_value "${ATHENA_MCP_BEARER:-}" || { printf 'ATHENA_MCP_BEARER contains a quote, backslash, whitespace or control character and cannot be sent safely\n'; return 3; }
 
   w="$(mktemp -d 2>/dev/null)" || { printf 'could not create a private temp dir\n'; return 3; }
   chmod 700 "${w}"
   # The temp dir's path goes into curl config lines too ($TMPDIR chooses it).
-  case "${w}" in
-    *'"'*|*'\'*|*[[:space:]]*) rm -rf "${w}"; printf 'the temp dir path (from $TMPDIR) contains a quote, backslash or whitespace\n'; return 3 ;;
-  esac
+  names_safe_curl_config_value "${w}" || { rm -rf "${w}"; printf 'the temp dir path (from $TMPDIR) contains a quote, backslash, whitespace or control character\n'; return 3; }
   # shellcheck disable=SC2064
   trap "rm -rf '${w}'; trap - RETURN" RETURN
 
@@ -153,7 +149,7 @@ mcp_call_tool() {
   [ -n "${sid}" ] || { printf 'the MCP initialize returned no session id\n'; return 3; }
   # The session id goes into the curl config too; a server-sent value that is
   # not a plain token is refused rather than written into a config line.
-  [[ "${sid}" =~ ^[A-Za-z0-9._:-]{1,256}$ ]] || { printf 'the MCP initialize returned a malformed session id\n'; return 3; }
+  names_safe_curl_config_value "${sid}" 256 || { printf 'the MCP initialize returned a session id that cannot be sent back safely (a quote, backslash, whitespace or control character, or over 256 bytes)\n'; return 3; }
   _mcp_post "${w}" "${url}" "${sid}" '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' >/dev/null || true
 
   req="$(jq -n -c --arg t "${tool}" --argjson a "${args}" \

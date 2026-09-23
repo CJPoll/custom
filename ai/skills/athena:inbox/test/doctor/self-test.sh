@@ -647,10 +647,10 @@ auth="$(sed -n 's/^header = "Authorization: Bearer \(.*\)"$/\1/p' "${cfg}")"
 [ "${auth}" = "${SHIM_EXPECT_TOKEN}" ] || { printf 'HTTP/1.1 401\r\n' > "${hdr}"; : > "${out}"; printf '401'; exit 0; }
 method="$(jq -r '.method' < "${data}")"
 case "${method}" in
-  initialize) printf 'HTTP/1.1 200 OK\r\nmcp-session-id: sess-42\r\n\r\n' > "${hdr}"; printf '{"jsonrpc":"2.0","id":1,"result":{}}' > "${out}"; printf '200' ;;
+  initialize) printf 'HTTP/1.1 200 OK\r\nmcp-session-id: %s\r\n\r\n' "${SHIM_SID}" > "${hdr}"; printf '{"jsonrpc":"2.0","id":1,"result":{}}' > "${out}"; printf '200' ;;
   notifications/initialized) printf 'HTTP/1.1 202\r\n' > "${hdr}"; : > "${out}"; printf '202' ;;
   tools/call)
-    grep -q 'mcp-session-id: sess-42' "${cfg}" || { printf 'HTTP/1.1 400\r\n' > "${hdr}"; : > "${out}"; printf '400'; exit 0; }
+    grep -qF "header = \"mcp-session-id: ${SHIM_SID}\"" "${cfg}" || { printf 'HTTP/1.1 400\r\n' > "${hdr}"; : > "${out}"; printf '400'; exit 0; }
     printf 'HTTP/1.1 200 OK\r\n' > "${hdr}"
     if [ "${SHIM_MODE:-ok}" = "notool" ]; then
       printf '{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Tool not found: machine_reachable"}}' > "${out}"
@@ -662,6 +662,10 @@ case "${method}" in
 esac
 SHIMEOF
 chmod +x "${SHIM}/curl"
+# A REAL-SHAPED session id: Hermes ids are base64, 28 chars, `=`-padded, and
+# may carry `+` and `/`. A fixture built the way the code expected ("sess-42")
+# is how the first client shipped refusing every real id (DND-312 hotfix).
+export SHIM_SID='k3Jz9vQm+Pq/7XbL2wYtR0aC5dE='
 export SHIM_LOG="${LV}/shim" SHIM_EXPECT_TOKEN="SEKRETTOKEN-abcdef-0123456789"
 export SHIM_RESULT='{"reachable":true,"basis":"recent_ack","last_ack_at":"2026-09-23T08:00:00Z","last_joined_at":null,"pending_deliveries":0,"unreachable_since":null}'
 RO="$(PATH="${SHIM}:${PATH}" doctor_check_server_reachability)"
@@ -671,6 +675,12 @@ assert_not_contains "the live protocol path is not marked canned" "CANNED" "${RO
 assert_not_contains "the machine token is never in curl's argv" "SEKRETTOKEN" "$(cat "${SHIM_LOG}.argv")"
 assert_not_contains "the machine token is never in a finding" "SEKRETTOKEN" "${RO}"
 assert_eq "every curl config was 0600" "600" "$(sort -u "${SHIM_LOG}.cfgmode")"
+# (The "ok" above already proves the base64 id was sent back verbatim: the shim
+# answers tools/call with 400 unless the config carries that exact header.)
+for badsid in 'ab"cd==' 'ab\\cd=='; do
+  RO="$(PATH="${SHIM}:${PATH}" SHIM_SID="${badsid}" doctor_check_server_reachability)"
+  assert_contains "a server session id carrying [${badsid}] -> UNAVAILABLE, never written into curl's config" "cannot be sent back safely" "${RO}"
+done
 RO="$(PATH="${SHIM}:${PATH}" SHIM_MODE=notool doctor_check_server_reachability)"
 assert_contains "protocol path: tool missing (DND-315 not deployed) -> UNAVAILABLE" "UNAVAILABLE" "${RO}"
 assert_contains "... with the server's own words" "Tool not found" "${RO}"

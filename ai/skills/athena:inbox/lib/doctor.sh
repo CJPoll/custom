@@ -1041,6 +1041,10 @@ doctor_server_health() {
     *) return 3 ;;
   esac
   command -v curl >/dev/null 2>&1 || return 1
+  # Every value below lands in a double-quoted curl config value (the same
+  # rule as the MCP client's; names_safe_curl_config_value).
+  names_safe_curl_config_value "${base}" && names_safe_curl_config_value "${id}" \
+    && names_safe_curl_config_value "$(tr -d '\r\n' <"${tokfile}")" || return 1
 
   tmp="$(mktemp -d 2>/dev/null)" || return 1
   # shellcheck disable=SC2064
@@ -1052,7 +1056,7 @@ doctor_server_health() {
       printf 'header = "Authorization: Bearer %s"\n' "$(tr -d '\r\n' <"${tokfile}")"
       printf 'output = %s\n' "${tmp}/resp.json"
       printf 'write-out = "%%{http_code}"\n'
-      printf 'max-time = %s\n' "${ATHENA_INBOX_DOCTOR_HTTP_TIMEOUT:-10}"
+      printf 'max-time = %s\n' "$(_doctor_http_timeout)"
       printf 'silent\n'
     } >"${tmp}/curlrc"
   ) || return 1
@@ -1230,6 +1234,16 @@ doctor_registry_log_paths() {
 
 DOCTOR_MCP_PROTOCOL="2025-03-26"
 
+# _doctor_http_timeout -- ATHENA_INBOX_DOCTOR_HTTP_TIMEOUT when it is a plain
+# 1-4 digit number, else 10. It is written into a curl config line, where a
+# newline could add a line of its own.
+_doctor_http_timeout() {
+  case "${ATHENA_INBOX_DOCTOR_HTTP_TIMEOUT:-}" in
+    [1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]) printf '%s\n' "${ATHENA_INBOX_DOCTOR_HTTP_TIMEOUT}" ;;
+    *) printf '10\n' ;;
+  esac
+}
+
 # doctor_mcp_url -- the /mcp endpoint on the client's own server host, always
 # https. There is deliberately NO override: the machine token goes wherever this
 # URL points, so the only place it may point is the server the client itself is
@@ -1238,6 +1252,8 @@ doctor_mcp_url() {
   local host
   host="$(jq -r '.server_url // empty' <"$(doctor_client_config_path)" 2>/dev/null | sed -E 's#^[a-z]+://##; s#[/?].*$##')"
   [ -n "${host}" ] || return 1
+  # The URL is written into a double-quoted curl config value.
+  names_safe_curl_config_value "${host}" || return 2
   printf 'https://%s/mcp\n' "${host}"
 }
 
@@ -1262,7 +1278,7 @@ doctor_mcp_post() {
       printf 'dump-header = "%s/hdr"\n' "${w}"
       printf 'output = "%s/body"\n' "${w}"
       printf 'write-out = "%%{http_code}"\n'
-      printf 'max-time = %s\n' "${ATHENA_INBOX_DOCTOR_HTTP_TIMEOUT:-10}"
+      printf 'max-time = %s\n' "$(_doctor_http_timeout)"
       printf 'silent\n'
     } >"${w}/curlrc"
   ) || return 1
@@ -1297,7 +1313,9 @@ doctor_machine_reachable() {
   cfg="$(doctor_client_config_path)"
   [ -f "${cfg}" ] || return 2
   jq -e '(.token // "") | length > 0' <"${cfg}" >/dev/null 2>&1 || return 2
-  if ! url="$(doctor_mcp_url)"; then printf 'the client config has no server_url to derive the /mcp endpoint from\n'; return 4; fi
+  url="$(doctor_mcp_url)"; local urc=$?
+  if [ "${urc}" -eq 2 ]; then printf 'the client config server_url host contains a quote, backslash, whitespace or control character\n'; return 4; fi
+  if [ "${urc}" -ne 0 ]; then printf 'the client config has no server_url to derive the /mcp endpoint from\n'; return 4; fi
 
   w="$(mktemp -d 2>/dev/null)" || { printf 'could not create a private temp dir\n'; return 4; }
   chmod 700 "${w}"
@@ -1307,7 +1325,7 @@ doctor_machine_reachable() {
   # The token is written into a double-quoted curl config value, so a quote,
   # backslash or whitespace in it would corrupt the header. Refuse such a token
   # (UNAVAILABLE, never silently sent malformed); the token is never printed.
-  if grep -q '["\\[:space:]]' "${w}/token"; then printf 'the machine token contains a quote, backslash or whitespace and cannot be sent safely\n'; return 4; fi
+  if ! names_safe_curl_config_value "$(cat "${w}/token")"; then printf 'the machine token contains a quote, backslash, whitespace or control character and cannot be sent safely\n'; return 4; fi
 
   http="$(doctor_mcp_post "${w}" "${url}" "" "$(jq -n -c --arg v "${DOCTOR_MCP_PROTOCOL}" \
     '{jsonrpc:"2.0", id:1, method:"initialize", params:{protocolVersion:$v, capabilities:{}, clientInfo:{name:"inbox-doctor", version:"1"}}}')")" \
@@ -1319,6 +1337,11 @@ doctor_machine_reachable() {
   esac
   sid="$(tr -d '\r' <"${w}/hdr" 2>/dev/null | awk 'tolower($1)=="mcp-session-id:"{print $2; exit}')"
   [ -n "${sid}" ] || { printf 'the MCP initialize returned no session id\n'; return 4; }
+  # It is sent back inside a double-quoted curl config value. A Hermes session
+  # id is base64 (`+`, `/`, `=` are legal and safe there); only what would
+  # change the config line's meaning is refused. Unchecked, a server-sent `"`
+  # or newline would have injected a config line.
+  names_safe_curl_config_value "${sid}" 256 || { printf 'the MCP initialize returned a session id that cannot be sent back safely (a quote, backslash, whitespace or control character, or over 256 bytes)\n'; return 4; }
   doctor_mcp_post "${w}" "${url}" "${sid}" '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' >/dev/null || true
 
   http="$(doctor_mcp_post "${w}" "${url}" "${sid}" \

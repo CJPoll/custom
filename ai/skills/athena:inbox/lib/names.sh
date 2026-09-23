@@ -216,3 +216,29 @@ names_resolve_in_root() {
   printf '%s/%s\n' "${root}" "${rel}"
   return 0
 }
+
+# names_safe_curl_config_value <value> [max-bytes]
+#
+# True when <value> can be written inside a DOUBLE-QUOTED curl config value
+# (`header = "...: <value>"`, `url = "<value>"`) without changing its meaning.
+# Inside those quotes curl treats `\` as an escape and `"` as the end of the
+# value, and a newline ends the config line, so those three, any whitespace,
+# and any other control character are refused. Everything else is literal --
+# notably the base64 alphabet (`+`, `/`, `=`), which Hermes MCP session ids use
+# (`...Xw==`, 28 chars, measured live 2026-09-23). An ALLOWLIST of "id-looking"
+# characters here was the bug: it refused every real session id, while the
+# fixtures, built the way the code expected, all passed.
+#
+# One predicate for every value the MCP clients (lib/mcp.sh, lib/doctor.sh)
+# write into a curl config -- URL, bearer, session id, temp path -- so the
+# rule cannot drift between them again. Empty is refused; <max-bytes>
+# (default 4096) bounds a value a server or config supplied.
+names_safe_curl_config_value() {
+  local v="$1" max="${2:-4096}"
+  [ -n "${v}" ] || return 1
+  case "${v}" in
+    *'"'*|*'\'*|*[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
+  esac
+  [ "$(names_byte_length "${v}")" -le "${max}" ] || return 1
+  return 0
+}
