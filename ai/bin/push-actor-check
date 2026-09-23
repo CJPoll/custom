@@ -64,6 +64,7 @@ done
 BRANCH=${BRANCH#refs/heads/}
 case "${WINDOW}" in ''|*[!0-9]*) die_usage "--window '${WINDOW}' is not a whole number" "pass --window 0..300" ;; esac
 case "${INTERVAL}" in ''|*[!0-9]*) die_usage "--interval '${INTERVAL}' is not a whole number" "pass --interval 1..60" ;; esac
+WINDOW=$((10#${WINDOW})) INTERVAL=$((10#${INTERVAL}))   # `08` is decimal, not a bad octal
 [ "${WINDOW}" -le 300 ] || die_usage "--window ${WINDOW} exceeds the 300s cap" "pass --window 300 or less"
 [ "${INTERVAL}" -ge 1 ] && [ "${INTERVAL}" -le 60 ] || die_usage "--interval ${INTERVAL} is outside 1..60 (below 1 would spin)" "pass --interval 1..60"
 command -v jq >/dev/null 2>&1 || die_usage "jq is required" "install jq"
@@ -101,7 +102,7 @@ case "${HOST}" in
     ACTOR_JQ='if type != "array" then error("not an array") else
       first(.[] | select(.push_data.ref == $b and .push_data.commit_to == $s) | .author.username) // "" end' ;;
   *)
-    die_usage "remote '${REMOTE}' (${URL}) is on neither github.com nor gitlab.com" \
+    die_usage "remote '${REMOTE}' (host '${HOST:-unparsed}') is on neither github.com nor gitlab.com" \
       "run this only for a push to github.com or gitlab.com; pass --remote for the right remote" ;;
 esac
 

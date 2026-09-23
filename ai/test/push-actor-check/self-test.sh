@@ -141,12 +141,18 @@ expect "9. gitlab wrong author -> 1" 1 'cjpoll'
 # Usage errors.
 run_in repo_other --sha "${SHA}" feat
 expect "10. a remote on neither forge -> 2" 2 'Fix:'
+git -C "${TMP}/repo_other" remote set-url origin 'https://user:s3cr3t@example.com/o/r.git'
+run_in repo_other --sha "${SHA}" feat
+if [ "${RC}" -eq 2 ] && ! grep -qF 's3cr3t' <<<"${OUT}"; then ok "10a. a credential in the remote URL is never printed"; else bad "10a. credential leak" "rc=${RC} out=[${OUT}]"; fi
 run_in repo_gh --sha "${SHA}" --interval 0 feat
 expect "11. --interval below 1 is refused (no spinning) -> 2" 2 'Fix:'
 run_in repo_gh --sha "${SHA}" --window 301 feat
 expect "12. --window above the cap is refused -> 2" 2 'Fix:'
 run_in repo_gh --sha "${SHA}"
 expect "13. no branch -> 2" 2 'Fix:'
+reset_stub gh; gh_event feat "${OLD}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
+run_in repo_gh --sha "${SHA}" --window 08 --interval 09 feat
+expect "13a. leading-zero numbers are decimal, never an octal abort read as exit 1" 4 'no event'
 OUT=$(cd "${TMP}" && "${BIN}" --sha "${SHA}" feat 2>&1); RC=$?
 expect "14. not in a git repo -> 2" 2 'Fix:'
 

@@ -300,6 +300,48 @@ run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "git commit -m \"\$(cat <<'EOF'\nms
 check_text "R18. a commit-message heredoc then a real push -> warns" 'to a github.com remote'
 
 echo
+echo "--- DND-397 critic r1: a quoted command string run by a NON-listed runner still warns ---"
+
+run "$(bash_json_cwd "$TMP/gh_scp" '$SHELL -c "git push origin HEAD"')"
+check_text "C1. \$SHELL -c \"<push>\"" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'x=bash; $x -c "git push origin HEAD"')"
+check_text "C2. x=bash; \$x -c \"<push>\"" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'script -qc "git push origin HEAD" /dev/null')"
+check_text "C3. script -qc \"<push>\"" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'flock /tmp/l -c "git push origin HEAD"')"
+check_text "C4. flock <lock> -c \"<push>\"" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'tmux new-window "git push origin HEAD"')"
+check_text "C5. tmux new-window \"<push>\"" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "node -e \"require('child_process').execSync('git push origin HEAD')\"")"
+check_text "C6. an unlisted interpreter's code string (node -e)" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "cat > s.sh <<'EOF'\ngit push origin HEAD\nEOF\nchmod +x s.sh && ./s.sh")")"
+check_text "C7. heredoc writes a script, ./s.sh runs it" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "git -c 'alias.p=!git push origin HEAD' p")"
+check_text "C8. git -c '<alias that pushes>' is never masked" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "echo 'git push origin HEAD' | at now")"
+check_text "C9. echo '<push>' | at now" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'env -S "git push origin HEAD"')"
+check_text "C10. env -S \"<push>\"" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'timeout 60 sudo -u me sh -c "git push origin HEAD"')"
+check_text "C11. prefixes before a shell" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'W=/usr/bin/env; "$W" git push origin HEAD; W=~/dev/custom/ai/bin/gh-athena')"
+check_text "C12. a wrapper assigned AFTER the use does not bless it" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena; "$W" git push origin x; W=/usr/bin/env; "$W" git push origin HEAD')"
+check_text "C13. same var: wrapper use, reassignment, plain use -> the plain one warns" 'to a github.com remote'
+
+echo
 echo "--- MUST-NOT-WARN cases (wrapper / reads / unrelated) ---"
 
 run "$(bash_json_cwd "$TMP/gh_scp" '~/dev/custom/ai/bin/gh-athena git push origin HEAD')"

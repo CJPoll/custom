@@ -113,8 +113,8 @@ case.
 
 **The activity API lags a push by a few seconds.** One read with no event for
 your ref and SHA is not yet a failure: re-read for up to **~20s**, sleeping
-between reads, before it counts as one. `ai/bin/push-actor-check <branch>`
-does that bounded re-read (run it in the repo; `--help` for options). Its exits
+between reads, before it counts as one. `~/dev/custom/ai/bin/push-actor-check
+<branch>` does that bounded re-read (run it in the repo; `--help` for options). Its exits
 keep the outcomes apart: 0 Athena, 1 another actor, 3 could not read the API
 (not evidence either way), 4 no event in the window. A 1 or a 4 is the next
 section's case.

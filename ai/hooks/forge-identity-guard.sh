@@ -110,39 +110,75 @@ fi
 # DND-397: before matching, drop text that only MENTIONS a push. mask_data
 # removes heredoc bodies and replaces multi-word quoted strings with a
 # placeholder, so `python3 - <<'EOF' … git push … EOF`, `grep -n "git push" f`
-# and `echo 'git push'` no longer warn. It never hides text a shell will run:
-#   * If the command invokes a shell or evaluator anywhere (sh, bash, zsh,
-#     dash, ksh, fish, su, eval, ssh, watch, source — bare or path-qualified,
-#     outside quotes and heredoc bodies), NOTHING is masked. `bash -c '…'`,
-#     `bash <<EOF`, `… | sh` and `eval "…"` are scanned exactly as before.
+# and `echo 'git push'` no longer warn. It is deny-by-default: text is masked
+# ONLY where it is provably data, and every doubt keeps it.
+#   * ALLOWLIST. A quoted string or heredoc body is masked only when it is an
+#     argument of a segment whose command word is on DATA (echo, printf, the
+#     grep family, cat, tee, jq, text filters, git, gh, glab, python, python3).
+#     Any other command — an unknown tool, `node -e`, `script -qc`, `flock -c`,
+#     `tmux new-window "…"` — keeps its text and is scanned as before.
+#   * BELT. Nothing at all is masked if the command anywhere names a program
+#     that runs a string or stdin as commands (the shells, su/runuser/sudo/doas,
+#     eval, source, ssh, watch, script, flock, tmux, screen, parallel, xargs,
+#     env, at, batch, expect), or has a command word that is a variable (`$SHELL
+#     -c`, `$x -c`), `.`, or a path to a non-DATA program (`./s.sh` running a
+#     script a heredoc just wrote). So `bash -c '…'`, `… | sh`, `eval "…"` and
+#     `cat > s.sh <<EOF … EOF; ./s.sh` are scanned exactly as before.
+#   * `git -c '<value>'` is never masked: an alias value (`alias.p=!git push`)
+#     runs.
 #   * A double-quoted string containing `$(` or a backtick is RE-SCANNED with
 #     these same rules, not masked: its command substitution runs. So
 #     `echo "$(git push …)"` still warns, while the heredoc inside
 #     `git commit -m "$(cat <<'EOF' … EOF)"` is still dropped.
 #   * An unquoted-delimiter heredoc body containing `$(` or a backtick is kept:
-#     its command substitution runs.
-#   * A ONE-word quoted string is kept (`"origin"`, `-C "/dir"`, `"$W"`), so a
-#     quoted remote, dir or command word still resolves.
-#   * An unterminated quote or heredoc is kept as-is.
-# Residual (named, not hidden): a push a NON-shell interpreter spawns from its
-# own quoted code or heredoc (`python3 -c "os.system('git push')"`) is not
-# seen. It was only seen before by accident of the dequote, and
-# `subprocess.run(['git','push'])` never was.
+#     its command substitution runs. A ONE-word quoted string is kept
+#     (`"origin"`, `-C "/dir"`, `"$W"`), so a quoted remote, dir or command word
+#     still resolves. An unterminated quote or heredoc is kept as-is.
+# Residual (named, not hidden): python/python3 are on DATA because the ticket's
+# own case is a python heredoc, so a push that python spawns from its quoted
+# code or heredoc (`python3 -c "os.system('git push')"`) is not seen; nor is a
+# script written to a file and later run by a DATA program. The former was only
+# ever seen by accident of the dequote, and `subprocess.run(['git','push'])`
+# never was.
 mask_data() {
   awk '
-    function shellword(w,   b) {
-      b = w; sub(/.*\//, "", b)
-      return b ~ /^(sh|bash|zsh|dash|ksh|fish|su|eval|ssh|watch|source)$/
+    BEGIN {
+      DATA = "^(echo|printf|grep|egrep|fgrep|rg|ag|ack|cat|tee|jq|cut|head|tail|wc|sort|uniq|diff|git|gh|glab|python|python3)$"
+      BELT = "^(sh|bash|zsh|dash|ksh|mksh|csh|tcsh|fish|su|runuser|sudo|doas|eval|source|ssh|watch|script|flock|tmux|screen|parallel|xargs|env|at|batch|expect)$"
+      PREFIX = "^(time|nice|nohup|timeout|command|exec|stdbuf|setsid|ionice)$"
     }
-    # flush(w): end an unquoted word; a shell word anywhere sets `shell`.
-    function flush(w) { if (w != "" && shellword(w)) shell = 1; return "" }
+    function base(w,   b) { b = w; sub(/.*\//, "", b); return b }
+    # reset(): a new command segment starts (after ; & | ( ) or a newline).
+    function reset() { cmdpos = 1; cmdword = ""; inprefix = 0; prevword = "" }
+    # flush(w): end an unquoted word. Tracks the segment command word (past
+    # NAME=val assignments and PREFIX commands) and trips the BELT.
+    function flush(w,   b) {
+      if (w == "") return ""
+      b = base(w)
+      if (b ~ BELT) shell = 1
+      if (cmdpos) {
+        if (w ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { }
+        else if (b ~ PREFIX) inprefix = 1
+        else if (inprefix && (w ~ /^-/ || w ~ /^[0-9.]+[smhd]?$/)) { }
+        else {
+          if (w ~ /^\$/ || w == "." || (w ~ /\// && b !~ DATA)) shell = 1
+          cmdword = b; cmdpos = 0
+        }
+      }
+      prevword = w
+      return ""
+    }
+    # is_data(): the text being read now is an argument of a DATA command.
+    function is_data() { return !cmdpos && cmdword ~ DATA && !(cmdword == "git" && prevword == "-c") }
     function quoted(body, q) {
       if (body !~ /[ \t\n]/) return q body q
       # A double-quoted $(...) or `...` runs: re-scan it with the same rules.
       if (q == "\"" && (index(body, "$(") || index(body, "`"))) return q mask(body) q
+      if (!is_data()) return q body q
       return q "FORGE_QUOTED_TEXT" q
     }
-    function mask(s,   n, i, c, t, j, d, body, k, strip, dl, qd, h, e, line, cmp, found, out, w, nhd, hd, hs, hq) {
+    function mask(s,   n, i, c, t, j, d, body, k, strip, dl, qd, h, e, line, cmp, found, out, w, nhd, hd, hs, hq, hm, sv1, sv2, sv3, sv4) {
+      sv1 = cmdpos; sv2 = cmdword; sv3 = inprefix; sv4 = prevword; reset()
       n = length(s); i = 1; out = ""; w = ""; nhd = 0
       while (i <= n) {
         c = substr(s, i, 1)
@@ -172,11 +208,11 @@ mask_data() {
             if (d == "\047" || d == "\"" || d == "\\") qd = 1; else dl = dl d
             k++
           }
-          if (dl != "") { nhd++; hd[nhd] = dl; hs[nhd] = strip; hq[nhd] = qd }
+          if (dl != "") { nhd++; hd[nhd] = dl; hs[nhd] = strip; hq[nhd] = qd; hm[nhd] = is_data() }
           out = out substr(s, i, k - i); i = k; continue
         }
         if (c == "\n") {
-          w = flush(w); out = out c; i++
+          w = flush(w); reset(); out = out c; i++
           for (h = 1; h <= nhd; h++) {
             body = ""; found = 0
             while (i <= n) {
@@ -187,41 +223,61 @@ mask_data() {
               body = body line "\n"
             }
             if (!found) { out = out body; continue }   # unterminated: keep
-            if (!hq[h] && (index(body, "$(") || index(body, "`"))) out = out body
+            if (!hm[h] || (!hq[h] && (index(body, "$(") || index(body, "`")))) out = out body
             out = out line "\n"
           }
           nhd = 0; continue
         }
-        if (c ~ /[ \t;&|()]/) { w = flush(w); out = out c; i++; continue }
+        if (c ~ /[ \t;&|()]/) {
+          if (c == "(") sub(/\$$/, "", w)   # the `$` of `$(` is not a word
+          w = flush(w); if (c != " " && c != "\t") reset()
+          out = out c; i++; continue
+        }
         out = out c; w = w c; i++
       }
       w = flush(w)
+      cmdpos = sv1; cmdword = sv2; inprefix = sv3; prevword = sv4
       return out
     }
     { src = src (NR > 1 ? "\n" : "") $0 }
     END { shell = 0; m = mask(src); printf "%s", (shell ? src : m) }'
 }
 
-# wrapper_vars: the names assigned a wrapper path (`W=~/…/glab-athena`,
-# `export W="$HOME/…/gh-athena"`) whose LAST assignment in the command is still
-# a wrapper, one per line. Reads GFLAT, which is already dequoted.
-wrapper_vars() {
-  printf '%s' "$GFLAT" | grep -Eo '(^|[[:space:];&|(])[A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|)]*' \
-    | sed -E 's#^[[:space:];&|(]##' | awk -F= '
-      { v = substr($0, length($1) + 2); last[$1] = (v ~ /(^|\/)(gh|glab)-athena$/) }
-      END { for (k in last) if (last[k]) print k }'
+# mask_wrapper_vars: `$W git` / `${W} git` becomes the wrapper form when, at
+# that point in the command, W's most recent assignment is a wrapper path
+# (`W=~/…/glab-athena`, `export W="$HOME/…/gh-athena"`). Scanned left to right,
+# so a later reassignment cannot bless an earlier use. Reads dequoted text.
+mask_wrapper_vars() {
+  awk '{
+    s = $0; out = ""
+    are = "(^|[[:space:];&|(])[A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|)]*"
+    ure = "[$]([{][A-Za-z_][A-Za-z0-9_]*[}]|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]+git[[:space:]]"
+    while (1) {
+      a = match(s, are); as = RSTART; al = RLENGTH
+      u = match(s, ure); us = RSTART; ul = RLENGTH
+      if (!a && !u) break
+      if (a && (!u || as < us)) {
+        tok = substr(s, as, al); sub(/^[[:space:];&|(]/, "", tok)
+        name = tok; sub(/=.*/, "", name); val = substr(tok, length(name) + 2)
+        wv[name] = (val ~ /(^|\/)(gh|glab)-athena$/)
+        out = out substr(s, 1, as + al - 1); s = substr(s, as + al); continue
+      }
+      tok = substr(s, us, ul); name = tok; sub(/^[$][{]?/, "", name); sub(/[}[:space:]].*/, "", name)
+      if (wv[name]) out = out substr(s, 1, us - 1) "FORGE_ATHENA_GIT" substr(tok, ul)
+      else out = out substr(s, 1, us + ul - 1)
+      s = substr(s, us + ul)
+    }
+    printf "%s", out s
+  }'
 }
 
 # Dequote (as forge-auth-guard does) so quoting cannot split the pattern, and
 # mask the wrapper forms `gh-athena git` / `glab-athena git` first so they are
 # never matched. DND-397: `$W git` / `${W} git` count as the wrapper form too
-# when W is a wrapper_vars name.
+# when W holds a wrapper path there (mask_wrapper_vars).
 # Newlines become `;` here (not spaces, as in FLAT): a push's arguments end at
 # the end of its line, so `git push<NL>echo done` never reads `echo` as a remote.
-GFLAT=$(printf '%s' "$CMD" | mask_data | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g')
-for _v in $(wrapper_vars); do
-  GFLAT=$(printf '%s' "$GFLAT" | sed -E "s#\\\$(${_v}|\\{${_v}\\})[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\\2#g")
-done
+GFLAT=$(printf '%s' "$CMD" | mask_data | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g' | mask_wrapper_vars)
 # `git`, bare or path-qualified, then only GLOBAL options (-C/-c take a value),
 # then `push`. `git commit -m "push"` does not match: `commit` is not an option.
 GIT_PUSH_RE='(^|[[:space:];&|(/])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:];&|]+|--?[^[:space:];&|]+))*[[:space:]]+push([[:space:]]|$|[;&|)])'
