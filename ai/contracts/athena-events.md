@@ -2302,19 +2302,23 @@ verdict:
   that machine. A machine of another owner and a missing one both answer the
   same `not found`, with no id in it.
 - `reachable` is three-valued, and `"unknown"` is **not** a failure. It means
-  no recent signal, and it is what an idle, healthy machine reads outside
-  ~120 s of an ack or join. A consumer that needs "did the question get
+  no recent signal, and it is what an idle, healthy machine reads once the
+  server's silence budget (default 120 s) has passed since its last ack or
+  join. A consumer that needs "did the question get
   answered" MUST tell an absent, malformed, or errored answer apart from
   `"unknown"`, and MUST NOT read one as the other.
 - **`list_my_machines`** (HG-2) returns every machine the caller's owner owns,
   each `{id, name, live?, last_connected_at, instances, self}`. Exactly one
   entry has `self: true`: the caller's own machine.
-- A server that predates #307 answers without `machine_id` or `self`. A
-  consumer MUST treat that as "own id not known" and say so. It MUST NOT
+- A server that predates #307 answers without the `machine_id` key (and
+  without `self`). A consumer MUST treat that as "own id not known" and say
+  so. A `machine_id` key that is present but not an id-shaped string
+  (including `null`) is a MALFORMED answer, not an absent one. It MUST NOT
   guess, for example from a machine name, a hostname, or the only machine
   hosting an inbox. `athena:inbox`'s `send-mail` is the reference consumer:
   it compares `--to`'s machine with this id to decide whether a recipient is
-  on this machine.
+  on this machine. `inbox-doctor`'s `send-paths` also consumes it, and reports
+  absent, malformed, unavailable and not-asked as four different facts.
 
 ---
 

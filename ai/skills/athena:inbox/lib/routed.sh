@@ -213,9 +213,10 @@ routed_maildir_name_refusal() {
 #
 # `send-mail` with neither --routed nor --local picks ONE path and says which.
 # The rule (D20): routed when the `athena` MCP is registered AND (the recipient
-# is on another machine OR (it is on this machine AND the server reports this
-# machine reachable)); otherwise the local maildir. NEVER a silent local write
-# for a cross-machine recipient.
+# is on another machine OR (it is on this machine AND the server does not
+# report this machine unreachable -- true or unknown, DND-378)); otherwise the
+# local maildir for a maildir address and a refusal for a server address.
+# NEVER a silent local write for a cross-machine recipient.
 #
 # WHAT THE CLIENT CAN KNOW. The address, and one server answer, say which side
 # of the rule applies:
@@ -234,7 +235,8 @@ routed_maildir_name_refusal() {
 # REACHABILITY IS THREE-VALUED, AND "COULD NOT ASK" IS A FOURTH, DIFFERENT THING:
 #   true         the server heard from this machine recently;
 #   unknown      no recent signal (no_signal / awaiting). The server answers
-#                true only within ~120 s of an ack or join, so an IDLE, healthy
+#                true only within its silence budget (default 120 s) of an
+#                ack or join, so an IDLE, healthy
 #                machine reads unknown almost always (DND-378). Routable: the
 #                server holds the message pending until the recipient acks, and
 #                a never-acked delivery alarms server-side (DND-315/373);
@@ -257,6 +259,13 @@ routed_maildir_name_refusal() {
 #                                         ways out. A server address is never
 #                                         written to a local maildir.
 #
+# ROUTED_REACHABLE_JQ -- the ONE jq expression that reads `.reachable` from a
+# machine_reachable answer, shared by send-mail and inbox-doctor so the two can
+# never disagree: boolean true -> "true", boolean false -> "false", the exact
+# string "unknown" -> "unknown", ANYTHING else (a string "true", null, a
+# number, absent) -> "" -- a malformed answer, never a verdict.
+ROUTED_REACHABLE_JQ='.reachable as $r | if $r == true then "true" elif $r == false then "false" elif $r == "unknown" then "unknown" else "" end'
+
 # routed_default_path <address> <registration> <bearer> <session> <reachable> <locality>
 #   address       maildir | server
 #   registration  registered | unregistered | broken

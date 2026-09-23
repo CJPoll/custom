@@ -569,7 +569,8 @@ checks now answer the question a pid cannot:
   way `send-mail` decides: `ok` when the routed path is ready (reachable
   `true` or `unknown`); `warn` when it is configured but unusable now (no
   bearer, no valid session inbox, reachable `false`, or a failed or malformed
-  lookup) or the registration cannot be read;
+  lookup; on `false`, a `--to` proven to be on another machine still routes,
+  and the finding says which) or the registration cannot be read;
   `n-a` when routed is not configured or reachability was not asked. The
   maildir channels' own health is their per-channel findings.
 - `server-failed-deliveries` asks the same MCP, with the same token, for the
@@ -829,8 +830,15 @@ name (D41), and never falls back. The two together are refused.
 
 **Neither flag: the D20 rule, applied without guessing.** Routed when the MCP
 is registered AND (the recipient is on another machine OR (it is on this
-machine AND the server reports this machine reachable)); otherwise local. What
-the client can know decides which side applies:
+machine AND the server does not report this machine unreachable: `true` or
+`unknown`)); otherwise local for a maildir address and refused for a server
+address. What the client can know decides which side applies:
+
+**Later (2026-09-23):** this rule read "AND the server reports this machine
+reachable", as epic D20 wrote it. Superseded by DND-378: `unknown` (an idle
+machine with no recent signal) counts as not-unreachable, because the server
+holds an undelivered message and alarms if it is never acked. A server address
+the rule cannot route is refused, never sent locally.
 
 - **A maildir address** (`<channel> <slug> --to <identity>`) is a directory on
   this machine, so the recipient is provably here → **local**. Naming the
@@ -859,8 +867,10 @@ the client can know decides which side applies:
   written to a local maildir.
 
   **Later (2026-09-23):** a server address was routed only on `true`, and
-  `unknown` was refused. Superseded by DND-378: the server answers `true` only
-  within ~120 s of an ack or join, so an idle, healthy machine reads `unknown`
+  `unknown` was refused, whatever the recipient's machine. Superseded by
+  DND-378: a recipient proven on another machine now routes whatever this
+  machine's reachability is. The server also answers `true` only within its
+  silence budget (default 120 s) of an ack or join, so an idle, healthy machine reads `unknown`
   almost always, and every no-flag routed send from it was refused. `unknown`
   now routes. The server holds the message pending until the recipient acks,
   and a delivery that is never acked alarms server-side (DND-315/373).

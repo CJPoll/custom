@@ -1678,7 +1678,9 @@ inbox_self_reachable() {
   if [ "${rc}" -ne 0 ]; then printf 'unavailable\t\t%s\n' "$(printf '%s' "${out}" | head -n 1)"; return 0; fi
   res="$(routed_tool_result "${out}")"; rc=$?
   if [ "${rc}" -ne 0 ]; then printf 'unavailable\t\tthe server answered machine_reachable with an error: %s\n' "$(printf '%s' "${res:-no result}" | head -n 1)"; return 0; fi
-  r="$(printf '%s' "${res}" | jq -r 'if type == "object" and has("reachable") then (.reachable | tostring) else "" end' 2>/dev/null)"
+  # STRICT: boolean true/false or the exact string "unknown". A string "true"
+  # is a malformed answer, not a verdict (routed_reachable_verdict_jq).
+  r="$(printf '%s' "${res}" | jq -r "if type == \"object\" then (${ROUTED_REACHABLE_JQ}) else \"\" end" 2>/dev/null)"
   case "${r}" in
     true|false|unknown) ;;
     *) printf 'unavailable\t\tthe machine_reachable answer carried no reachable verdict (true, false or "unknown")\n'; return 0 ;;
@@ -1758,13 +1760,17 @@ inbox_default_path() {
     # machine is resolved only at send time, so it stays unproven.
     locality="unproven"
     if [ -n "${to_spec}" ] && [ -n "${self_id}" ]; then
-      to_machine="$(routed_parse_to "${to_spec}" 2>/dev/null)" || return 2
+      to_machine="$(routed_parse_to "${to_spec}")" || return 2
       to_machine="$(printf '%s' "${to_machine%%$'\t'*}" | tr '[:upper:]' '[:lower:]')"
       if [ "${to_machine}" = "${self_id}" ]; then locality="same"; else locality="other"; fi
     elif [ -z "${to_spec}" ] && [ "${reach}" != "unavailable" ]; then
       detail="${detail:+${detail}; }--to-project resolves the recipient's machine only at send time"
     fi
-    decision="$(routed_default_path server "${reg}" "${bearer}" "${session}" "${reach}" "${locality}")" || return 2
+    decision="$(routed_default_path server "${reg}" "${bearer}" "${session}" "${reach}" "${locality}")" || {
+      inbox_fail "internal: the path decision got an input outside its vocabulary (reachable \"${reach}\", locality \"${locality}\"); nothing was sent" \
+        "report this with the flags you passed. Meanwhile choose the path yourself with --local or --routed."
+      return 2
+    }
     [ -z "${detail}" ] || decision="${decision} (${detail})"
   fi
   printf '%s\n' "${decision}"

@@ -1433,7 +1433,7 @@ doctor_check_server_reachability() {
          "re-run inbox-doctor; if it persists, check doctor_machine_reachable in lib/doctor.sh."
        return 0 ;;
   esac
-  r="$(printf '%s' "${out}" | jq -r '.reachable | tostring')"
+  r="$(printf '%s' "${out}" | jq -r "${ROUTED_REACHABLE_JQ}" 2>/dev/null)"; r="${r:-malformed}"
   case "${r}" in true|false|unknown) DOCTOR_REACHABLE="${r}" ;; *) DOCTOR_REACHABLE="unavailable" ;; esac
   # This machine's own server id (gen_saas #307, DND-375), for send-paths.
   # ABSENT (an older server) and MALFORMED are kept apart, never folded into
@@ -1554,8 +1554,11 @@ doctor_check_send_paths() {
     *)  if [ "${reg}" = "registered" ] && [ "${session}" = "declared" ] && [ "${bearer}" = "set" ] \
              && { [ "${DOCTOR_REACHABLE}" = "not-asked" ] || [ "${DOCTOR_REACHABLE}" = "skipped-no-token" ]; }; then
           dflt="a server-addressed send routes if machine_reachable answers true or unknown when it is sent"
-        elif [ "${reg}" = "registered" ] && [ "${session}" = "declared" ] && [ "${bearer}" = "set" ] && [ "${DOCTOR_REACHABLE}" = "false" ]; then
-          dflt="a server-addressed send to THIS machine (or one not proven elsewhere) is REFUSED; one to another of your machines still ROUTES"
+        elif [ "${reg}" = "registered" ] && [ "${session}" = "declared" ] && [ "${bearer}" = "set" ] \
+             && [ "${reach_for_grade}" = "false" ] && [ "${DOCTOR_SELF_ID}" != "absent" ]; then
+          dflt="a server-addressed send to THIS machine (or one not proven elsewhere, e.g. --to-project) is REFUSED; a --to another of your machines still ROUTES"
+        elif [ "${reg}" = "registered" ] && [ "${session}" = "declared" ] && [ "${bearer}" = "set" ] && [ "${reach_for_grade}" = "false" ]; then
+          dflt="EVERY server-addressed send is REFUSED: the server names no machine_id (it predates gen_saas #307), so no recipient can be proven to be on another machine"
         else
           dflt="a server-addressed send is REFUSED (use --routed for another machine, --local for this one)"
         fi ;;
