@@ -474,7 +474,8 @@ miss.
     - **Reported.** The next owner report MUST carry every kept earlier outage,
       at least its `unreachable_since` and pending count (a missing value
       renders `?`), and the omitted count. One report may carry several
-      outages. The owner's read of the store carries them too.
+      outages. The owner's read of the store carries every outage the row
+      still keeps.
     - **Released only by delivery or triage.** A delivered owner report
       releases the earlier outages it carried and resets the omitted count to
       0; a report that fails, or that a
@@ -488,9 +489,11 @@ miss.
     - **The two stated exceptions to never-destroy-unread.** Only these two
       cases discard an unread outage's detail from the store, and each leaves a
       trace:
-      1. **Reported, then replaced.** A transition on an unread row whose
-         exemplar's owner report was delivered replaces it. The detail
-         survives in that delivered report, not in the store.
+      1. **Reported.** Once an owner report was delivered, the detail it
+         carried may leave the store while the row is still unread: the
+         delivery releases the earlier outages it carried, and the next
+         transition replaces the reported exemplar. The detail survives in
+         that delivered report, not in the store.
       2. **Overflow past the bound.** An omitted outage's detail is never kept.
          Only its count survives, and it is logged and reported as above.
   - **Marker.** `Fix: <machine> is unreachable (machine <machine_id>,
