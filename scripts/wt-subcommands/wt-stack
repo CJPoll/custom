@@ -57,7 +57,7 @@ Subcommands:
                     Refused under WT_AGENT_PUSH=1: gt submits as the owner
                     (see scripts/wt-lib/push.sh)
 
-  sync             Sync the stack with remote changes using Graphite (gt sync)
+  sync              Sync the stack with remote changes using Graphite (gt sync)
                     --continue: continue a sync operation after resolving conflicts
 
   restack           Fix stack relationships and rebase onto correct parents (gt restack)
