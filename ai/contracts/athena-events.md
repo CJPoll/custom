@@ -236,7 +236,7 @@ per-`(event, rule)`:
 3. **SUPPRESSED** — predicate TRUE, but the delivery was collapsed by the owner's
    **dedupe window** (observable per *Enabled flag and dedupe window* — "recorded
    and countable as 'suppressed by dedupe window', never a silent drop").
-4. **REFUSED** — predicate TRUE, but a **delivery-time owner↔destination check refused the delivery before it left the platform**. Every such check is inherently delivery-time (a save-time-only check cannot cover it — a binding can be deregistered after save, and DNS rebinding defeats a save-time destination check), and **each declares its own refusal-cause class** in the open-but-declared set of *Delivery refusal — the refused-delivery store*. First-pass: (a) the **target-bind re-assertion** — the target no longer resolves to the rule's owner, or, for a **direct** delivery (which has no rule), the event's own owner (see *Mechanism vs config boundary, and both-ends-or-dark*, the delivery-time re-assertion enforcement point); and (b) the **generic-webhook egress guard** — the resolved destination is not on the owner allowlist, or resolves to a blocked (loopback / link-local / private / metadata) range (see *The generic-webhook egress model*). Roadmap owner-supplied-destination adapters add their own: the **email/SMS owner-verified-recipient** check (cause class `owner-verified-recipient`, see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*). A REFUSED delivery is **recorded in the refused-delivery store — one exemplar-plus-count per `(owner, rule_id, refusal-cause)`, or for a direct delivery `(owner, nil, refusal-cause)` (*Delivery refusal — the refused-delivery store*) — and reported to the owner**: never a silent drop, and never a bare counter. For a **rule** delivery, **every** REFUSED trigger is **permanent** — the rule keeps matching and refusing on every delivery until the owner acts. A **direct** delivery has no standing rule to keep matching; each send is independent, so its REFUSED is a per-send outcome, not a persistent condition — but it still gets the same sibling-consistent observability (an exemplar the store *names*, plus an owner report), never merely a count.
+4. **REFUSED** — predicate TRUE, but a **delivery-time owner↔destination check refused the delivery before it left the platform**. Every such check is inherently delivery-time (a save-time-only check cannot cover it — a binding can be deregistered after save, and DNS rebinding defeats a save-time destination check), and **each declares its own refusal-cause class** in the open-but-declared set of *Delivery refusal — the refused-delivery store*. First-pass: (a) the **target-bind re-assertion** — the target no longer resolves to the rule's owner, or, for a **direct** delivery (which has no rule), the event's own owner (see *Mechanism vs config boundary, and both-ends-or-dark*, the delivery-time re-assertion enforcement point); and (b) the **generic-webhook egress guard** — the resolved destination is not on the owner allowlist, or resolves to a blocked (loopback / link-local / private / metadata) range (see *The generic-webhook egress model*). Roadmap owner-supplied-destination adapters add their own: the **email/SMS owner-verified-recipient** check (cause class `owner-verified-recipient`, see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*). A REFUSED delivery is **recorded in the refused-delivery store — one exemplar-plus-count at the grain *Delivery refusal — the refused-delivery store* states — and reported to the owner**: never a silent drop, and never a bare counter. For a **rule** delivery, **every** REFUSED trigger is **permanent** — the rule keeps matching and refusing on every delivery until the owner acts. A **direct** delivery has no standing rule to keep matching; each send is independent, so its REFUSED is a per-send outcome, not a persistent condition — but it still gets the same sibling-consistent observability (an exemplar the store *names*, plus an owner report), never merely a count.
 5. **FAILED (terminal)** — predicate TRUE, delivery attempted, retries exhausted /
    adapter 5xx / credential revoked. Recorded in the **failed-delivery store**
    (below), **never** dead-lettered as UNMATCHED.
@@ -332,36 +332,50 @@ terminally-failed matched delivery is **never** dead-lettered as UNMATCHED — i
 "which `type` went unmatched?" purpose and mask a delivery failure as a routing
 miss.
 
-- **Grain — one exemplar-plus-count per `(owner, rule_id, terminal-cause)`**,
-  mirroring the dead-letter store's structural bound. The **exemplar** is the
+- **Grain — one exemplar-plus-count per `(owner, rule_id, terminal-cause,
+  machine_id)`**, mirroring the dead-letter store's structural bound. This is the
+  store's one normative statement of its key; every other mention defers to it.
+  - `rule_id` is the matched rule, or `nil` for a direct (addressed, rule-less)
+    delivery (the direct delivery's key is stated once in *Declared families
+    beyond the first pass* → `fleet.session.message`).
+  - `machine_id` is the machine a row is about where the rule does not already
+    pin one: a direct delivery's **recipient machine**. It is `nil` for a rule
+    delivery, because a rule has exactly one target. (The implementation also
+    files each machine-unreachable transition in this store, with `rule_id: nil`
+    and the machine that went unreachable — `athena-inbox.md` →
+    `server-failed-deliveries`.)
+  - The unique index is `NULLS NOT DISTINCT` (`nulls_distinct: false`), so every
+    failure sharing one key upserts into one row, `nil` components included —
+    never a row per occurrence, and never a collision between a direct row and a
+    rule's.
+
+  So each recipient machine's failures are a row of their own: one machine's
+  unread row never absorbs another machine's failures. The **exemplar** is the
   first-seen failed delivery's **full event payload plus the terminal error**
   (cause class + adapter + target), which alone answers the failed-lookup question
   "which delivery, of which rule, to which target, terminally failed, and why?".
-  Subsequent failures of the same `(owner, rule_id, terminal-cause)` **increment a
-  monotonic count** and update **last-seen**, storing **no** new payload. This
-  bounds the store by a **structural quantity** — distinct `(rule, cause)` pairs
-  per owner, a finite set — **independent of traffic volume**: a revoked credential
-  failing a million deliveries collapses to one exemplar + count 1,000,000, not a
-  million rows.
+  Subsequent failures of the same key **increment a monotonic count** and update
+  **last-seen**, storing **no** new payload. This bounds the store by a
+  **structural quantity** — per owner, distinct `(rule, cause)` pairs plus
+  distinct `(machine, cause)` pairs for the rows keyed on a machine, a finite
+  set —
+  **independent of traffic volume**: a revoked credential failing a million
+  deliveries collapses to one exemplar + count 1,000,000, not a million rows.
 
   **Later (2026-09-23):** the grain above previously assumed every failed
   delivery has a `rule_id`. Superseded (D40, HG-16/DND-311): a direct
-  (addressed, rule-less) delivery's terminal failure keys on `(owner, nil,
-  terminal-cause)` — `rule_id: nil` is that delivery's own bucket, distinct
-  from and never colliding with any rule's (the unique index is
-  `nulls_distinct: false` / `NULLS NOT DISTINCT`, so every `nil`-`rule_id` row
-  for one `(owner, terminal-cause)` upserts into the same one, never a row per
-  occurrence), so "distinct `(rule, cause)` pairs" now reads as "distinct
-  `(rule-or-direct, cause)` pairs." The report
-  marker below gets a `rule_id: nil` branch to match: `Fix: direct (addressed)
-  delivery has <count> terminal delivery failures to <adapter> recipients
-  (first seen: <adapter>:<target>) (cause: <class>); check the recipient
-  machine is connected and still declares the inbox, then re-send — see the
-  failed-delivery store exemplar for the first-seen event.` (the direct
-  bucket aggregates across every recipient the owner ever addressed under
-  that cause, so the exemplar names only the first-seen target). The rule
-  form of the marker (below) is unchanged and still applies whenever
-  `rule_id` is present.
+  (addressed, rule-less) delivery's terminal failure keys with `rule_id: nil`,
+  its own bucket, never colliding with any rule's, and the report marker gained
+  a direct form (under *Reported, not merely stored* below).
+
+  **Later (2026-09-23):** the grain above was then keyed on owner, rule and
+  cause only, so every direct delivery of one owner under one cause shared a
+  single `nil`-rule row whose exemplar named only the first-seen recipient.
+  Superseded (DND-379, gen_saas #309): the key gains `machine_id`, the direct
+  delivery's recipient machine (`nil` for a rule delivery). Why: with one shared
+  row, a second machine's failures were counted silently into the first
+  machine's unread row — no new exemplar, no new report. One row per recipient
+  machine makes each machine's failure visible, and reported, on its own.
 - **Never merely counted; observable.** As with the dead-letter store, the
   exemplar is retained so the store *names* the failed delivery; the count is
   added scale metadata, never a replacement. The exemplar payload carries
@@ -376,22 +390,31 @@ miss.
   quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count>
   terminal delivery failures to <adapter>:<target> (cause: <class>); check the
   target/credential or disable the rule — see the failed-delivery store exemplar
-  for the first-seen event.`
+  for the first-seen event.` A direct row (`rule_id: nil`) carries the direct
+  form instead: `Fix: direct (addressed) delivery has <count> terminal delivery
+  failures to <adapter> recipients (first seen: <adapter>:<target>) (cause:
+  <class>); check the recipient machine is connected and still declares the
+  inbox, then re-send — see the failed-delivery store exemplar for the
+  first-seen event.` The row is one recipient machine's (see *Grain* above), and
+  the inbox target is `<machine_id>:<inbox_name>`, so the first-seen target
+  names that machine; the row may span several of its inboxes, which is why the
+  exemplar is only the first-seen one. A direct row recorded before this grain
+  may keep `machine_id` `nil`, and such a row may span machines.
 - **Retention — the never-destroy-unread doctrine applies, made safe by the
   grain.** Follow the sibling inbox doctrine (`ai/contracts/athena-inbox.md` →
   *Retention* → *The principle*), exactly as the dead-letter store does: an
   **un-triaged** failed-delivery exemplar has an unbounded lifetime (it is the sole
-  evidence of the miss); age-out applies only after read/triage; the per-`(owner,
-  rule_id, terminal-cause)` grain bounds it to at most one unread exemplar per
-  pair. **The store carries no cap or TTL number in this contract** — any
+  evidence of the miss); age-out applies only after read/triage; the store's
+  *Grain* above bounds it to at most one unread exemplar per key. **The store
+  carries no cap or TTL number in this contract** — any
   operational cap/TTL is ops/owner config, outside this contract's MUST surface.
 - **Reconciled with idempotency.** "Terminal" means the per-`(event, rule)`
   at-least-once retry budget of *Idempotency is per (event, rule)* is exhausted;
   the failed-delivery record is that delivery's terminal state. A later
   at-least-once redelivery of the same `(event, rule)` is absorbed by the
   idempotent consumer and does **not** manufacture a second failure record; the
-  record is keyed on `(owner, rule_id, terminal-cause)`, not on any per-change
-  dedupe key.
+  record is keyed on the store's *Grain* above, not on any per-change dedupe
+  key.
 
 #### Delivery refusal — the refused-delivery store
 
@@ -421,44 +444,60 @@ fire, and a count alone cannot say **which rule → which target/destination** w
 calls *strictly more urgent* than a zero-match rule (see *Terminal delivery failure — the
 failed-delivery store*).
 
-- **Grain — one exemplar-plus-count per `(owner, rule_id, refusal-cause)`**, mirroring the
-  failed-delivery store and bounding the store by a **structural quantity** — distinct `(rule,
-  refusal-cause)` pairs per owner, a finite set — **independent of traffic volume**.
-  `refusal-cause` is an **open-but-declared set**: each **owner↔destination check declares its own cause class**, exactly as *Extending the taxonomy — a new type family declares its model* makes a new event family a declared increment rather than a free addition. The set is "open" in that a new owner-supplied-destination check adds its class with **no edit to this store**; it is "declared" in that **no delivery may be refused under a cause class the refusing check has not declared** — an undeclared cause is a hard error, never an unlabelled miss (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty one*). First-pass the declared classes are **target-bind re-assertion** and **generic-webhook egress**; the roadmap **email/SMS owner-verified-recipient** check declares **`owner-verified-recipient`** (see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*), and any future owner-supplied-destination check declares its own. Because the key is the declared class, the grain stays bounded by a **structural quantity** — distinct `(rule, declared-cause)` pairs per owner — independent of traffic volume, and correct the moment a new check declares its class. The **exemplar** is the first-seen refused delivery's **full event
+- **Grain — one exemplar-plus-count per `(owner, rule_id, refusal-cause, machine_id)`**,
+  mirroring the failed-delivery store. This is the store's one normative statement of its key;
+  every other mention defers to it.
+  - `rule_id` is the matched rule, or `nil` for a direct (addressed, rule-less) delivery (the
+    direct delivery's key is stated once in *Declared families beyond the first pass* →
+    `fleet.session.message`). A direct delivery's refusal is, for example, a target-bind
+    re-assertion refusal on a recipient deregistered after send.
+  - `machine_id` is a direct delivery's **recipient machine**. It is `nil` for a rule delivery,
+    because a rule has exactly one target.
+  - The unique index is `NULLS NOT DISTINCT` (`nulls_distinct: false`), the same shape as the
+    failed-delivery store's (*Terminal delivery failure — the failed-delivery store*), so every
+    refusal sharing one key upserts into one row, `nil` components included — never a row per
+    occurrence, and never a collision between a direct row and a rule's.
+
+  So each recipient machine's refusals are a row of their own. This bounds the store by a
+  **structural quantity** — per owner, distinct `(rule, refusal-cause)` pairs plus distinct
+  `(direct recipient machine, refusal-cause)` pairs, a finite set — **independent of traffic
+  volume**.
+
+  `refusal-cause` is an **open-but-declared set**: each **owner↔destination check declares its own cause class**, exactly as *Extending the taxonomy — a new type family declares its model* makes a new event family a declared increment rather than a free addition. The set is "open" in that a new owner-supplied-destination check adds its class with **no edit to this store**; it is "declared" in that **no delivery may be refused under a cause class the refusing check has not declared** — an undeclared cause is a hard error, never an unlabelled miss (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty one*). First-pass the declared classes are **target-bind re-assertion** and **generic-webhook egress**; the roadmap **email/SMS owner-verified-recipient** check declares **`owner-verified-recipient`** (see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*), and any future owner-supplied-destination check declares its own. Because the key is the declared class, the grain stays bounded by a **structural quantity** — the pairs above, each over a declared cause — independent of traffic volume, and correct the moment a new check declares its class. The **exemplar** is the first-seen refused delivery's **full event
   payload plus the refusal detail** (cause class + adapter + the target/destination that was
   refused), which alone answers "which delivery, of which rule, to which target, was refused, and
-  why?". Subsequent refusals of the same `(owner, rule_id, refusal-cause)` **increment a monotonic
+  why?". Subsequent refusals of the same key **increment a monotonic
   count** and update **last-seen**, storing **no** new payload. A revoked binding refusing a
   million deliveries collapses to one exemplar + count 1,000,000, not a million rows.
 
   **Later (2026-09-23):** the grain above previously assumed every refused
   delivery has a `rule_id`. Superseded (D40, HG-16/DND-311): a direct
-  (addressed, rule-less) delivery's refusal — for example a target-bind
-  re-assertion refusal on a recipient deregistered after send — keys on
-  `(owner, nil, refusal-cause)` — the same `nulls_distinct: false` unique
-  index shape the failed-delivery store uses (*Terminal delivery failure —
-  the failed-delivery store*), never colliding with a rule's. The report marker
-  below gets a `rule_id: nil` branch: `Fix: direct (addressed) delivery has
-  <count> refused deliveries to <adapter> recipients (first seen:
-  <adapter>:<target>) (refusal-cause: <cause>) — apply the remediation the
-  refusing owner↔destination check declares for <cause>; a direct delivery
-  has no rule to re-author. See the refused-delivery store exemplar for the
-  first-seen event and its declared refusal detail.` The rule form of the
-  marker (below) is unchanged and still applies whenever `rule_id` is
-  present.
+  (addressed, rule-less) delivery's refusal keys with `rule_id: nil`, its own
+  bucket, never colliding with a rule's, and the report marker gained a direct
+  form (under *Reported, not merely stored* below).
+
+  **Later (2026-09-23):** the grain above was then keyed on owner, rule and
+  refusal-cause only, so every direct delivery of one owner under one cause
+  shared a single `nil`-rule row whose exemplar named only the first-seen
+  recipient. Superseded (DND-381, gen_saas #313): the key gains `machine_id`,
+  the direct delivery's recipient machine (`nil` for a rule delivery), mirroring
+  the failed-delivery store's DND-379 change. Why: with one shared row, refusals
+  to a second machine were counted silently into the first machine's row. One
+  row per recipient machine makes each machine's refusal visible, and reported,
+  on its own.
 - **Never merely counted; observable.** As with the sibling stores, the exemplar is retained so
   the store *names* the refused delivery; the count is added scale metadata, never a replacement.
   The exemplar payload carries third-party content, so the record is **Path-2 untrusted** when
   read into an LLM (see *Trust posture — two paths*), and read access is the **owning account's**
   only.
 - **Reported, not merely stored.** REFUSED MUST be **reported to the owner, never left silently
-  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count> refused deliveries to <adapter>:<target> (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>: target-bind re-assertion → re-author the rule against a machine registered to its owner; generic-webhook egress → correct the owner allowlist or the destination; owner-verified-recipient (email/SMS) → verify the recipient or the sending domain for this owner, or correct the rule. See the refused-delivery store exemplar for the first-seen event and its declared refusal detail.`
+  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count> refused deliveries to <adapter>:<target> (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>: target-bind re-assertion → re-author the rule against a machine registered to its owner; generic-webhook egress → correct the owner allowlist or the destination; owner-verified-recipient (email/SMS) → verify the recipient or the sending domain for this owner, or correct the rule. See the refused-delivery store exemplar for the first-seen event and its declared refusal detail.` A direct row (`rule_id: nil`) carries the direct form instead: `Fix: direct (addressed) delivery has <count> refused deliveries to <adapter> recipients on machine <machine_id> (first seen: <adapter>:<target>) (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>; a direct delivery has no rule to re-author. See the refused-delivery store exemplar for the first-seen event and its declared refusal detail.` The row is one recipient machine's (see *Grain* above) but may span several of its inboxes, so the exemplar names only the first-seen target. A direct row recorded before this grain whose machine could not be attributed has `machine_id` `nil`; its marker omits the `on machine <machine_id>` clause, because that row may span machines.
 - **Retention — the never-destroy-unread doctrine applies, made safe by the grain**, exactly as
   the dead-letter, failed-delivery, and ingress-failure stores (see *Event disposition and
   dead-letter*): an un-triaged refused-delivery exemplar has an **unbounded** lifetime (it is the
   sole evidence of the miss); age-out under the product data-retention policy applies **only
-  after** it has been read/triaged; the per-`(owner, rule_id, refusal-cause)` grain bounds it to
-  **at most one unread exemplar per pair**. **The store carries no cap or TTL number in this
+  after** it has been read/triaged; the store's *Grain* above bounds it to
+  **at most one unread exemplar per key**. **The store carries no cap or TTL number in this
   contract** — any operational cap/TTL is ops/owner config, explicitly outside this contract's
   MUST surface.
 - **No routing state.** The refused-delivery store is **per-account exemplar-plus-count AUDIT
@@ -772,8 +811,9 @@ An addressed message's direct delivery, made normative (D40, HG-16/DND-311):
   changeset error, never a duplicate row), `(owner, event)` alone is already
   as specific as `(owner, event, rule_id)` is for a rule delivery: no second
   disambiguating component is needed. Every Level-2 store that keys on
-  `rule_id` accepts a `nil` there as this row's own key, never a collision
-  with a rule's bucket (*Terminal delivery failure — the failed-delivery
+  `rule_id` accepts a `nil` there for a direct delivery, never a collision
+  with a rule's bucket; the full key, including the recipient machine, is the
+  grain each store states (*Terminal delivery failure — the failed-delivery
   store*; *Delivery refusal — the refused-delivery store*). Retry (below)
   applies to this row using the same key; the sweeper's staleness query
   selects by delivery status and `last_pushed_at`, not by `rule_id`, so a
@@ -792,7 +832,7 @@ An addressed message's direct delivery, made normative (D40, HG-16/DND-311):
   never collapsed: nothing rate-limits one owner's session-message fan-out to
   itself. This is a design decision for this pass, not an open item.
 - **A FAILED or REFUSED direct delivery reports through the same two stores,
-  under their own `rule_id: nil` grain and report form** — *Terminal delivery
+  under the direct-delivery key and report form each store states** — *Terminal delivery
   failure — the failed-delivery store* and *Delivery refusal — the
   refused-delivery store*, each amended for this case rather than restated
   here.
@@ -1714,7 +1754,7 @@ The **email/SMS owner-verified-recipient** refusal — the delivery-time check t
 target-bind paragraph of *Mechanism vs config boundary, and both-ends-or-dark*
 requires for these roadmap owner-supplied-destination adapters — carries:
 `Fix: delivery refused — recipient <recipient> is not a destination verified for this rule's owner. An email/SMS adapter's credential scopes the sender, not the recipient, so an owner-supplied recipient MUST be verified for the rule's owner (owner-confirmed recipient or owner-verified sending domain) before delivery. Verify the recipient/domain for this owner, or correct the rule.`
-(This refusal is a Level-2 REFUSED disposition — recorded and reported, never a silent drop — exactly as the target-bind and generic-webhook egress refusals in *Delivery refusal — the refused-delivery store*. It **declares `owner-verified-recipient` as its refusal-cause class** in that store's open-but-declared cause set, so a refused email/SMS delivery keys on `(owner, rule_id, owner-verified-recipient)` — never an undefined key that would read as absence.)
+(This refusal is a Level-2 REFUSED disposition — recorded and reported, never a silent drop — exactly as the target-bind and generic-webhook egress refusals in *Delivery refusal — the refused-delivery store*. It **declares `owner-verified-recipient` as its refusal-cause class** in that store's open-but-declared cause set, so a refused email/SMS delivery records `owner-verified-recipient` as its refusal-cause at the grain *Delivery refusal — the refused-delivery store* states — never an undefined key that would read as absence.)
 
 ### The generic-webhook egress model
 
