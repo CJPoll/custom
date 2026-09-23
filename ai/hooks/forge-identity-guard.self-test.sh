@@ -196,35 +196,6 @@ run "$(bash_json_cwd "$TMP/gl" 'GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/glab-a
 check "G8. the documented glab-athena push form -> allow" allow
 
 echo
-echo "--- DND-397: text that only MENTIONS a push must not warn ---"
-
-run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "python3 - <<'EOF'\nimport subprocess\nprint('run git push origin x later')\nEOF")")"
-check "Q1. python3 heredoc whose body says git push (github cwd)" allow
-
-run "$(bash_json_cwd "$TMP/norepo" "$(printf "python3 - <<'EOF'\nprint(\"git push\")\nEOF")")"
-check "Q2. python3 heredoc body, no repo (was the could-not-resolve noise)" allow
-
-run "$(bash_json_cwd "$TMP/norepo" "$(printf "cat > notes.md <<EOF\nthen git push origin main\nEOF")")"
-check "Q3. unquoted-delimiter heredoc body with no expansion" allow
-
-run "$(bash_json_cwd "$TMP/norepo" "$(printf "cat > notes.md <<-'END'\n\tgit push origin main\n\tEND\necho ok")")"
-check "Q4. <<- heredoc with a tab-indented delimiter" allow
-
-run "$(bash_json_cwd "$TMP/norepo" 'grep -n "git push" notes.md')"
-check "Q5. grep -n \"git push\" <file> (no repo)" allow
-run "$(bash_json_cwd "$TMP/gh_scp" 'grep -n "git push origin" scripts/wt')"
-check "Q5b. grep -n \"git push origin\" <file> (github cwd)" allow
-
-run "$(bash_json_cwd "$TMP/gh_scp" "echo 'git push'")"
-check "Q6. echo 'git push'" allow
-
-run "$(bash_json_cwd "$TMP/gh_scp" "rg -n 'git -C x push' . && grep -c \"git push origin\" f")"
-check "Q7. several quoted mentions in one command" allow
-
-run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "git commit -q -m \"\$(cat <<'EOF'\nDND-1: then git push origin main\nEOF\n)\"")")"
-check "Q8. commit message heredoc inside \"\$(cat <<'EOF' … EOF)\"" allow
-
-echo
 echo "--- DND-397: a wrapper invoked through a shell variable must not warn ---"
 
 run "$(bash_json_cwd "$TMP/gl" 'W=~/dev/custom/ai/bin/glab-athena; "$W" git push origin x')"
@@ -300,7 +271,7 @@ run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "git commit -m \"\$(cat <<'EOF'\nms
 check_text "R18. a commit-message heredoc then a real push -> warns" 'to a github.com remote'
 
 echo
-echo "--- DND-397 critic r1: a quoted command string run by a NON-listed runner still warns ---"
+echo "--- DND-397: a quoted command string run by any runner still warns ---"
 
 run "$(bash_json_cwd "$TMP/gh_scp" '$SHELL -c "git push origin HEAD"')"
 check_text "C1. \$SHELL -c \"<push>\"" 'to a github.com remote'
@@ -342,7 +313,7 @@ run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena; "$W" git pu
 check_text "C13. same var: wrapper use, reassignment, plain use -> the plain one warns" 'to a github.com remote'
 
 echo
-echo "--- DND-397 critic r2 (cluster): masked text must be provably inert ---"
+echo "--- DND-397: text runners the parked mention-masking missed — must warn ---"
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'git rebase --exec "git push origin HEAD" main')"
 check_text "C14. git rebase --exec \"<push>\"" 'to a github.com remote'
@@ -380,20 +351,14 @@ check_text "C24. git -C . -c '<alias>' (value before the subcommand)" 'to a gith
 run "$(bash_json_cwd "$TMP/gh_scp" "grep -rn 'git push' . || sh -c 'git push origin HEAD'")"
 check_text "C25. || then a shell still warns" 'to a github.com remote'
 
-run "$(bash_json_cwd "$TMP/gh_scp" 'grep -rn "git push" . | head -5')"
-check "Q9. grep \"git push\" | head (a PIPE_SAFE consumer)" allow
+run "$(bash_json_cwd "$TMP/gh_scp" "git grep -O\"sh -c 'git push origin HEAD'\" x")"
+check_text "C26. git grep -O\"<pager that pushes>\"" 'to a github.com remote'
 
-run "$(bash_json_cwd "$TMP/gh_scp" 'git log --grep "git push origin" --oneline')"
-check "Q10. git log --grep \"git push origin\"" allow
+run "$(bash_json_cwd "$TMP/gh_scp" "echo 'git push origin HEAD' > .git/hooks/post-commit && chmod +x .git/hooks/post-commit && git commit -qm x")"
+check_text "C27. a hook written by echo, fired by git commit" 'to a github.com remote'
 
-run "$(bash_json_cwd "$TMP/gh_scp" 'gh pr comment 5 --body "then git push origin main"')"
-check "Q11. gh pr comment --body \"…git push…\"" allow
-
-run "$(bash_json_cwd "$TMP/norepo" "cd $TMP/norepo && grep -n \"git push\" notes.md")"
-check "Q12. cd <dir> && grep \"git push\"" allow
-
-run "$(bash_json_cwd "$TMP/gh_scp" "grep -n 'git push' f || echo 'no git push here'")"
-check "Q13. || between two DATA commands" allow
+run "$(bash_json_cwd "$TMP/gh_scp" "python3 -c \"import os; os.system('git push origin HEAD')\"")"
+check_text "C28. python3 -c running a push" 'to a github.com remote'
 
 echo
 echo "--- MUST-NOT-WARN cases (wrapper / reads / unrelated) ---"
