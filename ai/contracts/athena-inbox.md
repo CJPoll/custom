@@ -1106,11 +1106,22 @@ change stream of state-change events*), unchanged by this section.
   is_owner}`). It carries **no body of its own** beyond these; the click is a
   signal, and its `value` is Path-2 untrusted (*Untrusted input*).
 - **`session.message`** — a routed `fleet.session.message`
-  (`athena-events.md`). Fields: `from` (**server-stamped** from the sending
-  machine's token record — never client-set), `subject` (optional), `body`,
-  `re` (optional), `thread` (optional). A routed session message's `from` MAY be
-  trusted for **attribution** but never for **authorization** (*Untrusted
-  input*; contrast maildir `from`, which is only a label — *Frontmatter*).
+  (`athena-events.md`). Fields: `from` (`{machine_id, inbox_name}` —
+  `machine_id` **server-stamped** from the sending machine's token record,
+  `inbox_name` the sender's declared instance on that machine, server-verified;
+  never client-set free-form), `to` (`{machine_id, inbox_name}`), `subject`
+  (required), `body`, `re` and `thread` (at least one present), `event_id` and
+  `delivery_id` (references for threading and `delivery_status`, **not** dedupe
+  keys — *A `log` channel MAY have a non-Slack producer*). A routed session
+  message's `from` MAY be trusted for **attribution** but never for
+  **authorization** (*Untrusted input*; contrast maildir `from`, which is only a
+  label — *Frontmatter*). A reply is a new session message whose `to` is the
+  received `from` and whose `thread` is the received `event_id`.
+
+  **Later (2026-09-23):** `from` was previously an unstructured server-stamped
+  value and `subject` optional; superseded with `athena-events.md`'s
+  `fleet.session.message` schema pin of the same date (epic D39) — the inbox
+  line mirrors the event payload so a recipient can reply.
 - **`agent_message`** — a routed `notion.agent_message.*`
   (`athena-events.md`). Fields: `row_id` (the Notion page id), `from`,
   `subject`, `sent_at`, `to`, `acked_by`, `thread`, `re`, `sending_owner`,

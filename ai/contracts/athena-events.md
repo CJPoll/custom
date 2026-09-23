@@ -606,12 +606,39 @@ the enumerated first-pass source-webhook types above.
 
 **The `fleet.session.message` family** (session-to-session messaging):
 
-1. **Payload schema** — `to` (string, scalar, OPTIONAL — the router target
-   `owner/machine/inbox`; its presence makes the message *addressed*), `from`
-   (string, scalar — **server-stamped**, see origination), `subject` (string,
-   scalar, optional), `body` (string, scalar), `re` (string, scalar, optional),
-   `thread` (string, scalar, optional). A `payload.*` leaf not in this schema is
-   the ordinary unknown-path save-time error.
+1. **Payload schema** — `to` (**object** `{machine_id, inbox_name}`, OPTIONAL —
+   the router target minus `owner`, which is never caller-supplied; its presence
+   makes the message *addressed*), `from` (**object** `{machine_id, inbox_name}`
+   — **server-stamped**, see origination), `subject` (string, scalar,
+   **required**, non-empty), `body` (string, scalar), `re` (string, scalar,
+   optional), `thread` (string, scalar, optional) — **at least one of `re` /
+   `thread` is required** (the referent rule): a message naming neither is
+   refused at ingress with `Fix: a session message must name what it is about —
+   set re: <path|url> or thread: <event_id of the message you are answering>`.
+   The addressable predicate leaves are `payload.to.machine_id`,
+   `payload.to.inbox_name`, `payload.from.machine_id`, `payload.from.inbox_name`;
+   any other `payload.*` leaf is the ordinary unknown-path save-time error.
+
+   **Later (2026-09-23):** this schema previously declared `to` as a string
+   scalar `owner/machine/inbox`, `from` as a string scalar, `subject` as
+   optional, and no referent rule. Superseded by the architect's pin of
+   2026-09-23 (epic decision D39), reconciling the contract with the HG-15
+   ticket (DND-310) and its implementation. Why each: `to` is an **object**
+   because it is the inbox adapter's target map `{machine_id, inbox_name}`
+   verbatim (*Mechanism vs config boundary, and both-ends-or-dark*) and a
+   caller-supplied `owner` segment would be a 6D violation dressed as an
+   address — `owner` comes from the token and a cross-owner `to` is refused,
+   so the address never carries it; `from` is an **object with an
+   `inbox_name`** because a recipient cannot reply to a session without an
+   inbox address (the R9 reply-ability requirement) — `from.machine_id` is
+   stamped from the token and `from.inbox_name` is the sender's **declared
+   sending instance**: the caller names one of its OWN machine's declared
+   instances (a within-scope selector, verified server-side against the
+   machine's instances, refused with a `Fix:` if it names another machine's
+   or an undeclared one), never a free string; `subject` is **required**
+   because the delivered `session.message` line is read fenced and
+   counts-first, and a reader must be able to see what a message is about
+   before opening its body; the referent rule is R9.
 2. **Identity field** — the **platform event id** (per-event, as
    `slack.message.received` uses `payload.event_id`). It is the `subject` of the
    dedupe window.
@@ -623,13 +650,19 @@ the enumerated first-pass source-webhook types above.
    ingress that tried would be rejected.
 5. **Enrichment posture** — **none**. Harness-emitted; nothing is fetched.
 
-`from` is **server-stamped from the machine-token registration record** — the
-same record harness-emit resolves `owner` from and the target-bind check reads
-(*Machine↔owner API binding and the outbound return-address dual*; *Mechanism vs
-config boundary, and both-ends-or-dark*). A caller-supplied `from` (or `owner`,
-or `type`) is **refused with a `Fix:`** — the 6D principle for this family:
-`Fix: fleet.session.message 'from' is stamped server-side from the authenticated
-machine token, not the request body — remove it and re-emit.` An **addressed**
+`from.machine_id` is **server-stamped from the machine-token registration
+record** — the same record harness-emit resolves `owner` from and the
+target-bind check reads (*Machine↔owner API binding and the outbound
+return-address dual*; *Mechanism vs config boundary, and both-ends-or-dark*).
+`from.inbox_name` is the sending session's **declared instance on that same
+machine**, selected by the caller from its own machine's instances and verified
+server-side (both-ends-or-dark applies to the sender too: an undeclared sending
+inbox is refused, never stamped as a free string). A caller-supplied
+`from.machine_id` (or `owner`, or `type`) is **refused with a `Fix:`** — the 6D
+principle for this family: `Fix: fleet.session.message 'from.machine_id' is
+stamped server-side from the authenticated machine token, not the request body —
+remove it and re-emit; 'from.inbox_name' must name one of this machine's
+declared instances.` An **addressed**
 message (`payload.to` present) is delivered **directly to the same-owner target**
 (the target machine's session inbox), in addition to ordinary rule fan-out — the
 delivery dual of the Slack-click direct route (design §4/§D6), same-owner only; a
