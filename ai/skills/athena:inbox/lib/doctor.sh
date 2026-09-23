@@ -369,12 +369,15 @@ doctor_check_dump_dir() {
 }
 
 # doctor_check_watchdog
-# The supervisor's watchdog needs two tools: the liveness library (the wedge
-# predicate) and scripts/inbox-client-capture (capture before restart, D35).
-# Missing either, the supervisor DEGRADES rather than stopping -- the client is
-# still supervised -- but a wedge is then restarted with no evidence (no
-# capture tool) or not detected at all (no liveness library). That is a fault
-# the owner must see, so it is a `fail` here, not a log line nobody reads.
+# The supervisor's watchdog needs three tools: the liveness library (the wedge
+# predicate), scripts/inbox-client-capture (capture before restart, D35) and
+# scripts/inbox-client-alert (the harness-alerts message, DND-334). Missing any,
+# the supervisor DEGRADES rather than stopping -- the client is still
+# supervised -- but a wedge is then restarted with no evidence (no capture
+# tool), not detected at all (no liveness library), or captured and never
+# reported to the harness session (no alert tool: the watchdog logs ALERT NOT
+# SENT, which nobody reads -- DND-367). That is a fault the owner must see, so
+# it is a `fail` here, not a log line nobody reads.
 doctor_check_watchdog() {
   local repo missing=""
   [ -e "$(doctor_client_config_path)" ] || {
@@ -390,11 +393,12 @@ doctor_check_watchdog() {
   fi
   [ -r "${repo}/ai/skills/athena:inbox/lib/liveness.sh" ] || missing="ai/skills/athena:inbox/lib/liveness.sh"
   [ -x "${repo}/scripts/inbox-client-capture" ] || missing="${missing:+${missing}, }scripts/inbox-client-capture (executable)"
+  [ -x "${repo}/scripts/inbox-client-alert" ] || missing="${missing:+${missing}, }scripts/inbox-client-alert (executable)"
   if [ -n "${missing}" ]; then
-    doctor_finding fail "watchdog" "the supervisor watchdog is missing ${missing}: without the capture tool a wedge is restarted with NO evidence; without the liveness library a wedge is not even detected" \
-      "restore ${missing} in ${repo} with git (chmod +x the capture script). The supervisor keeps the client running meanwhile, but only a human would notice the next wedge."
+    doctor_finding fail "watchdog" "the supervisor watchdog is missing ${missing}: without the capture tool a wedge is restarted with NO evidence; without the liveness library a wedge is not even detected; without the alert tool a captured wedge never reaches the harness session (ALERT NOT SENT)" \
+      "restore ${missing} in ${repo} with git (chmod +x the scripts). The supervisor keeps the client running meanwhile, but only a human would notice the next wedge; re-send a missed alert by hand with scripts/inbox-client-alert <capture-dir>."
   else
-    doctor_finding ok "watchdog" "the supervisor watchdog's tools are present (liveness library, inbox-client-capture)"
+    doctor_finding ok "watchdog" "the supervisor watchdog's tools are present (liveness library, inbox-client-capture, inbox-client-alert)"
   fi
 }
 
@@ -427,7 +431,7 @@ doctor_check_captures() {
     shown="${shown:+${shown}; }${name} sig ${sig:-?} step ${step:-?} dump ${dump:-?}"
   done < <(printf '%s\n' "${names}" | head -n 5)
   doctor_finding warn "captures" "${n} wedge capture(s) on disk (newest first): ${shown}" \
-    "each is a wedge the watchdog captured and then restarted. The same signature more than once is the same wedge recurring -- read that capture's dump.txt and signature.txt (${dir}/<name>/) and file or bump the [wedge:<sig8>] ticket. Retention keeps the newest 5."
+    "each is a wedge the watchdog captured and then restarted. The same signature more than once is the same wedge recurring -- read that capture's dump.txt and signature.txt (${dir}/<name>/) and file or bump the [wedge:<sig8>] ticket. Retention keeps the newest ATHENA_INBOX_CAPTURE_KEEP (5), plus any an unread harness-alerts message references, up to ATHENA_INBOX_CAPTURE_HARD_MAX (25); prunes are recorded in ${dir}/pruned-captures.log."
 }
 
 # doctor_check_cron

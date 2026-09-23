@@ -520,9 +520,11 @@ checks now answer the question a pid cannot:
   `[wedge:<sig8>]` ticket (`athena:inbox-attend` → *harness-alerts*). The
   mirror channel `harness-alerts-detector` is the detector's sending side:
   never read or send on it.
-- `watchdog` fails when the supervisor's watchdog tools are missing (the
-  supervisor keeps the client running, but a wedge is then restarted without
-  evidence, or not detected at all).
+- `watchdog` fails when any of the supervisor's watchdog tools is missing: the
+  liveness library, `scripts/inbox-client-capture` or `scripts/inbox-client-alert`
+  (the supervisor keeps the client running, but a wedge is then restarted
+  without evidence, not detected at all, or never reported to the harness
+  session).
 - `server-reachability` asks the server, with the **machine token** from the
   client config, whether it can reach this machine (the `athena` MCP's
   `machine_reachable`): `reachable:false` is `fail`, pending deliveries are a

@@ -550,6 +550,18 @@ FAKEREPO="${LV}/fakerepo"; mkdir -p "${FAKEREPO}/scripts" "${FAKEREPO}/ai/skills
 WO="$(DOCTOR_REPO_DIR="${FAKEREPO}" doctor_check_watchdog)"
 assert_eq "capture tool missing -> fail" fail "$(state_of "${WO}" watchdog)"
 assert_contains "... naming it, with a Fix:" "scripts/inbox-client-capture (executable)" "${WO}"
+# DND-367: the alert tool is the watchdog's too. Missing, the watchdog logs
+# ALERT NOT SENT and the harness session never hears of the wedge; the doctor
+# must not stay green over that.
+printf '#!/bin/sh\n' > "${FAKEREPO}/scripts/inbox-client-capture"; chmod +x "${FAKEREPO}/scripts/inbox-client-capture"
+WO="$(DOCTOR_REPO_DIR="${FAKEREPO}" doctor_check_watchdog)"
+assert_eq "alert tool missing (capture present) -> fail" fail "$(state_of "${WO}" watchdog)"
+assert_contains "... naming the alert tool" "scripts/inbox-client-alert (executable)" "${WO}"
+assert_contains "... with a fix naming the tool to restore" "restore" "$(printf '%s\n' "${WO}" | awk -F'\t' '$2=="watchdog"{print $4}')"
+printf '#!/bin/sh\n' > "${FAKEREPO}/scripts/inbox-client-alert"; chmod -x "${FAKEREPO}/scripts/inbox-client-alert"
+assert_eq "alert tool present but NOT executable -> fail" fail "$(state_of "$(DOCTOR_REPO_DIR="${FAKEREPO}" doctor_check_watchdog)" watchdog)"
+chmod +x "${FAKEREPO}/scripts/inbox-client-alert"
+assert_eq "all three tools present -> ok" ok "$(state_of "$(DOCTOR_REPO_DIR="${FAKEREPO}" doctor_check_watchdog)" watchdog)"
 assert_eq "no client config -> na" na "$(ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" doctor_check_watchdog | cut -f1)"
 
 echo "== DND-316: a stale channel FAILS (never 'last changed Ns ago' ok) =="

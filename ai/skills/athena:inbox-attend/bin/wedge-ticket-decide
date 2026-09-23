@@ -21,7 +21,7 @@
 #        create            no open ticket carries [wedge:<sig8>] in its title
 #        increment         one does; bump `Occurrences: N` and add the line
 #        already-recorded  that ticket already lists this capture (idempotent)
-#        refuse            anything unverifiable or ambiguous (exit 3)
+#        refuse            anything unverifiable, pruned or ambiguous (exit 3)
 #      plus `needs_attention yes` when this makes >= 3 occurrences within 7 days
 #      and the ticket is not already in Needs Attention.
 #
@@ -55,7 +55,8 @@
 # Exit codes: 0 decided (create / increment / already-recorded / verified) · 1 usage ·
 #             3 refused (verification failed or ambiguous; stdout says
 #             `decision<TAB>refuse` and `refusal<TAB><class>` -- unverifiable,
-#             integrity or ambiguous -- and stderr carries the reason and a Fix:)
+#             pruned, integrity or ambiguous -- and stderr carries the reason
+#             and a Fix:)
 
 set -uo pipefail
 export LC_ALL="${LC_ALL:-C.UTF-8}"
@@ -95,10 +96,13 @@ for f in err.sh names.sh maildir.sh liveness.sh wedge.sh; do
   . "${INBOX_LIB}/${f}"
 done
 
-# refuse [--class integrity|ambiguous] <reason> <fix>
+# refuse [--class pruned|integrity|ambiguous] <reason> <fix>
 # Every refusal files nothing. Its CLASS tells the attendant how to report it
 # (athena:inbox-attend -> harness-alerts, which alone decides who is told):
 #   unverifiable (default)  the message or capture cannot be checked
+#   pruned                  capture retention removed the capture before the
+#                           alert was processed (its prune ledger says so): the
+#                           occurrence is LOST, not tampered (DND-367)
 #   integrity               the message or capture does not verify: possible
 #                           local forgery or post-capture edit
 #   ambiguous               the tracker state needs a human (duplicates, a
@@ -143,8 +147,27 @@ BODY_CAP="$(printf '%s\n' "${BODY}" | sed -n 's/^capture: //p' | head -n 1)"
 DUMPS="$(liveness_dump_dir)" || refuse "the dump directory does not resolve (XDG_STATE_HOME is relative)" \
   "set XDG_STATE_HOME to an absolute path or unset it."
 case "${RE}" in /*) ;; *) refuse "re: is not an absolute path" "a capture path is absolute; nothing was filed." ;; esac
+# A capture that is GONE is one of two things, and they are reported apart
+# (DND-367). Retention pruned it -- the prune ledger in the dump dir names it --
+# so the occurrence was lost before processing: class `pruned`. Or nothing on
+# record removed it: class `unverifiable`. Neither is ever `integrity`: an
+# absent capture proves nothing about tampering. The ledger is consulted only
+# for a re: that is a capture name directly inside THIS dump dir.
+if [ ! -e "${RE}" ] && [ ! -L "${RE}" ]; then
+  RE_NAME="$(basename -- "${RE}")"
+  if REAL_DUMPS_GONE="$(realpath -e -- "${DUMPS}" 2>/dev/null)" \
+     && [ "$(dirname -- "$(realpath -m -- "${RE}")")" = "${REAL_DUMPS_GONE}" ] \
+     && [[ "${RE_NAME}" =~ ${WEDGE_CAPTURE_NAME_RE} ]] \
+     && PRUNED="$(wedge_pruned_record "${REAL_DUMPS_GONE}" "${RE_NAME}")"; then
+    IFS=$'\t' read -r PRUNED_AT PRUNED_WHY <<<"${PRUNED}"
+    refuse --class pruned "the capture was pruned before processing (capture retention removed it at ${PRUNED_AT}, reason ${PRUNED_WHY}); the occurrence is lost, not tampered" \
+      "nothing can be verified, so nothing was filed. Retention keeps a capture an unread alert references and prunes one only at ATHENA_INBOX_CAPTURE_HARD_MAX (reason hard-max-while-unread): alerts piled up faster than they were attended. Attend harness-alerts promptly, or raise ATHENA_INBOX_CAPTURE_HARD_MAX."
+  fi
+  refuse "re: names a capture that does not exist, and the capture's prune ledger has no record of removing it" \
+    "it was moved or deleted outside inbox-client-capture, or never existed; nothing can be verified, so nothing was filed. Inspect ${DUMPS}."
+fi
 [ -d "${RE}" ] && [ ! -L "${RE}" ] || refuse "re: is not an existing capture directory" \
-  "the capture may have been pruned (the capture keeps the newest 5). Without it nothing can be verified, so nothing was filed; if wedges outrun the attendant, raise ATHENA_INBOX_CAPTURE_KEEP."
+  "re: must name a real capture directory, not a symlink or a file; nothing was filed."
 REAL_CAP="$(realpath -e -- "${RE}" 2>/dev/null)"
 REAL_DUMPS="$(realpath -e -- "${DUMPS}" 2>/dev/null)"
 [ -n "${REAL_CAP}" ] && [ -n "${REAL_DUMPS}" ] && [ "$(dirname -- "${REAL_CAP}")" = "${REAL_DUMPS}" ] \

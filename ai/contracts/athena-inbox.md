@@ -2303,12 +2303,22 @@ also reports:
   `inbox-client-detector`, writes `to-custom`), because both parties run from
   that repo. The message is untrusted like any other. The reader acts only on
   what it recomputes from the capture directory named in `re:`, which must sit
-  directly in the client dump directory.
-- **`watchdog`** — the watchdog's two tools (the liveness library and
-  `scripts/inbox-client-capture`) are present. Missing either, the supervisor
-  keeps the client running, but a wedge is then restarted with no evidence (no
-  capture tool) or not detected at all (no liveness library), so this is a
-  `fail`.
+  directly in the client dump directory. Capture retention (DND-367) never
+  prunes a capture an UNREAD `harness-alerts` message references to meet its
+  ordinary bound; only its hard maximum can, and every prune is recorded in
+  `<dump dir>/pruned-captures.log`, so the reader reports a vanished capture as
+  "pruned before processing" (refusal class `pruned`), never as tampering.
+- **`watchdog`** — the watchdog's three tools (the liveness library,
+  `scripts/inbox-client-capture` and `scripts/inbox-client-alert`) are present.
+  Missing any, the supervisor keeps the client running, but a wedge is then
+  restarted with no evidence (no capture tool), not detected at all (no
+  liveness library), or captured and never reported to the harness session (no
+  alert tool), so this is a `fail`.
+
+  **Later (2026-09-23):** this check named **two** tools and stayed `ok` with
+  `scripts/inbox-client-alert` missing, while the watchdog logged `ALERT NOT
+  SENT` where nobody reads it. Superseded by DND-367: the alert tool is the
+  third, and its absence fails the check.
 - **`server-reachability`** — authenticated with the **machine token** the
   client already holds, it calls the server's `machine_reachable` (the `athena`
   MCP; self when no machine is named): `reachable:false` is `fail`, a non-zero

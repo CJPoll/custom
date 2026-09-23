@@ -334,6 +334,9 @@ watchdog_pass() {
       sig="$(printf '%s\n' "$out" | awk -F'\t' '$1=="signature"{print substr($2,1,8)}')"
       dump="$(printf '%s\n' "$out" | awk -F'\t' '$1=="dump"{print $2}')"
       say "WATCHDOG: captured ${dir} (signature ${sig}, dump ${dump})"
+      # DND-367: retention's `note:` lines (references unreadable, or a capture
+      # an unread alert references pruned at the hard max) belong in this log.
+      printf '%s\n' "$out" | grep '^note: ' | while IFS= read -r n; do say "WATCHDOG: capture ${n}"; done
       ;;
     3)
       # The client changed identity between resolve and capture (it exited, or
@@ -375,7 +378,7 @@ alert_capture() {
   [ -n "$d" ] || return 0
   if [ ! -x "$ALERT" ]; then
     say "WATCHDOG: ALERT NOT SENT for ${d} — $ALERT is missing"
-    say "  Fix: restore scripts/inbox-client-alert (git), then send it by hand: scripts/inbox-client-alert ${d}"
+    say "  Fix: restore scripts/inbox-client-alert (git), then send it by hand: scripts/inbox-client-alert ${d}; inbox-doctor's watchdog finding fails until then."
     return 0
   fi
   out="$("$ALERT" "$d" 9>&- 2>&1)"; rc=$?

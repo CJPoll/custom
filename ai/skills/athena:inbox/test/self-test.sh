@@ -4094,6 +4094,36 @@ assert_eq "status-json: the log channel's count is the per-kind integer (2)" "2"
 assert_eq "status-json: the existing per-kind .new field is untouched" "2" \
   "$(jq -r '.channels[] | select(.name=="slack") | .new' <<<"${doc}")"
 
+echo "== DND-367: inbox_unread_refs -- the re: of every UNREAD message, read-only =="
+setup_case
+uproj="$(make_repo uproj)"
+register uproj "${uproj}" '{"alerts":{"kind":"maildir","namespace":"alerts","read":"to-me","write":"to-det","identity":"me"}}'
+assert_eq "U-1 a declared channel whose read dir was never delivered -> none, exit 0" "0:" \
+  "$(r="$(cd "${uproj}" && inbox_unread_refs alerts . 2>/dev/null)"; printf '%s:%s' "$?" "${r}")"
+URD="${ATHENA_INBOX_ROOT}/alerts/to-me"; mkdir -p "${URD}/.acked" "${URD}/tmp"
+u_msg() { # u_msg <dir> <name> <sent_at> [re]
+  { printf -- '---\nfrom: det\nto: me\nsent_at: %s\n' "$3"; [ -n "${4:-}" ] && printf 're: %s\n' "$4"; printf -- '---\n\nbody\n'; } >"$1/$2"
+}
+u_msg "${URD}" 20260923T100000Z-001-a.md 2026-09-23T10:00:00Z /caps/one
+u_msg "${URD}" 20260923T100001Z-002-b.md 2026-09-23T10:00:01Z "/caps/two with space"
+u_msg "${URD}" 20260923T100002Z-003-c.md 2026-09-23T10:00:02Z             # no re: -> nothing
+u_msg "${URD}/.acked" 20260923T090000Z-001-z.md 2026-09-23T09:00:00Z /caps/acked
+u_msg "${URD}/tmp" 20260923T100003Z-004-t.md 2026-09-23T10:00:03Z /caps/half-delivered
+u_msg "${URD}" 20260923T100004Z-005-d.md 2026-09-23T09:59:59Z /caps/bad-stamp   # sent_at disagrees: non-conformant
+got="$(cd "${uproj}" && inbox_unread_refs alerts . 2>/dev/null)"; rc=$?
+assert_eq "U-2 exit 0 on a readable channel" "0" "${rc}"
+assert_eq "U-2 only the unread, conformant messages' re: values, in name order (acked, tmp, no-re and malformed excluded)" \
+  "$(printf '/caps/one\n/caps/two with space')" "${got}"
+assert_eq "U-3 reading acks nothing (the messages are still unread)" "4" \
+  "$(find "${URD}" -mindepth 1 -maxdepth 1 -type f -name '*.md' | wc -l)"
+err="$(cd "${uproj}" && inbox_unread_refs nosuch . 2>&1 >/dev/null)"; rc=$?
+if [ "${rc}" -ne 0 ] && printf '%s' "${err}" | grep -q 'Fix:'; then ok "U-4 an undeclared channel is a FAILURE with a Fix:, never 'no references'"; else bad "U-4 an undeclared channel is a failure" "rc=${rc} ${err}"; fi
+err="$(cd "${CASE_DIR}" && ATHENA_INBOX_ROOT="${CASE_DIR}/no-root" inbox_unread_refs alerts "${uproj}" 2>&1 >/dev/null)"; rc=$?
+if [ "${rc}" -ne 0 ]; then ok "U-5 a missing registry is a FAILURE (could not look), never an empty set"; else bad "U-5 a missing registry is a failure" "rc=${rc} ${err}"; fi
+register uproj "${uproj}" '{"alerts":{"kind":"log","path":"alerts.jsonl"}}'
+err="$(cd "${uproj}" && inbox_unread_refs alerts . 2>&1 >/dev/null)"; rc=$?
+if [ "${rc}" -ne 0 ] && printf '%s' "${err}" | grep -q 'Fix:'; then ok "U-6 a log channel is refused with a Fix: (it has no re:)"; else bad "U-6 a log channel is refused" "rc=${rc} ${err}"; fi
+
 echo
 if [ "${FAIL}" -eq 0 ]; then
   echo "VERDICT: PASS (${PASS} cases)"

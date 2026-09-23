@@ -922,6 +922,55 @@ _inbox_read_maildir() {
     '{kind: "maildir", channel: $c, identity: $id, malformed: $m, messages: .}'
 }
 
+# inbox_unread_refs <channel> [cwd]
+#
+# The `re:` value of every UNREAD, conformant message on a maildir channel,
+# one per line, in name (= chronological) order. DND-367: capture retention
+# asks it which captures an unread harness-alerts message still references,
+# so it never prunes evidence the attendant has not verified yet.
+#
+# READ-ONLY and lock-free: reading is open (see inbox_require_consumer); only
+# advancing is gated. It acks nothing and prints no body.
+#
+# THREE outcomes, deliberately distinct:
+#   * exit 0 with lines   -- the unread references;
+#   * exit 0, no output   -- the channel resolved and nothing unread carries a
+#                            re: (including a read dir never delivered to);
+#   * exit NON-ZERO       -- COULD NOT LOOK: no entry, channel not declared,
+#                            not a maildir, a symlinked or escaping read dir.
+#                            A refusal with a Fix: is on stderr. A caller must
+#                            never read this as "no references".
+# A malformed message is skipped: the verifier refuses it anyway, so it pins
+# no capture.
+inbox_unread_refs() {
+  local chan="$1" cwd="${2:-.}" resolved kind read_dir name content fm re
+
+  resolved="$(inbox_resolve_channel "${chan}" "${cwd}")" || return 1
+  kind="$(_inbox_path kind "${resolved}")"
+  if [ "${kind}" != "maildir" ]; then
+    inbox_fail "channel \"${chan}\" is not a maildir channel, so its messages carry no re:" \
+      "ask for the references of a maildir channel (e.g. harness-alerts)."
+    return 1
+  fi
+  read_dir="$(_inbox_path read_dir "${resolved}")"
+  fs_assert_not_symlink "${read_dir}" || return 1
+  fs_assert_contained "$(fs_inbox_root)" "${read_dir}" || return 1
+  [ -d "${read_dir}" ] || return 0
+
+  while IFS= read -r -d '' name; do
+    maildir_is_unread "${name}" || continue
+    [ -f "${read_dir}/${name}" ] || continue
+    [ -L "${read_dir}/${name}" ] && continue
+    _inbox_maildir_conformant "${read_dir}" "${name}" || continue
+    content="$(fs_read_message "${read_dir}/${name}"; printf X)" || continue
+    content="${content%X}"
+    fm="$(printf '%s' "${content}" | maildir_parse_frontmatter)"
+    re="$(printf '%s' "${fm}" | jq -r '.re // empty' 2>/dev/null)"
+    [ -n "${re}" ] && printf '%s\n' "${re}"
+  done < <(fs_list_dir_z "${read_dir}" | sort -z)
+  return 0
+}
+
 # --- ack --------------------------------------------------------------------
 
 # inbox_ack_log <channel> <offset> [event-ids-nl] [keys-nl] [cwd] [hook-json]

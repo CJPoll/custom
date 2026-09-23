@@ -87,21 +87,38 @@
 # [REDACTED]; a file that still carries the prefix after that is deleted and
 # the manifest says so.
 #
-# RETENTION: keep the newest N capture directories (default 5); prune oldest
-# first BEFORE writing a new one, and never prune the one being written. SIZE:
-# each capture is capped (default 4 MiB total); the largest file is truncated
-# first, with a marker, until the capture fits.
+# RETENTION (DND-367): at most KEEP capture directories (default 5), pruned
+# oldest first BEFORE the new one is written; the one being written is never a
+# candidate. A capture that an UNREAD harness-alerts message references (its
+# re:) is NEVER pruned to meet KEEP: its alert has not been verified yet, and
+# without the capture the attendant cannot recompute the signature, so the
+# occurrence would be lost. The references are read through the athena:inbox
+# manager (inbox_unread_refs, this checkout's registry entry). If they cannot be
+# read, every capture counts as referenced: a failed lookup never reads as "none
+# referenced". Only the HARD MAX (default 25) prunes a referenced capture, and it
+# says so on stderr as a `note:` line. Every prune is recorded, one line
+# "<UTC>\t<name>\t<reason>", in <dumps>/pruned-captures.log (reasons: retention,
+# hard-max-while-unread, hard-max-references-unknown), so the attendant reports
+# a missing capture as "pruned before processing", never as tampering. The plan
+# itself is lib/wedge.sh's wedge_retention_plan (pure). The manifest's
+# `retention:` line records what happened. SIZE: each capture is capped
+# (default 4 MiB total); the largest file is truncated first, with a marker,
+# until the capture fits.
 #
 # Environment (defaults are the production values):
 #   ATHENA_INBOX_CLIENT_STATE_DIR   supervisor state dir: pidfile, log (~/.local/state)
 #   XDG_STATE_HOME                  base of the dump dir, as the client derives it
 #   ATHENA_INBOX_CLIENT_CONFIG      client config, read ONLY for redaction
 #                                   (~/.config/athena-inbox-client/config.json)
-#   ATHENA_INBOX_CAPTURE_KEEP       capture dirs kept (5)
+#   ATHENA_INBOX_CAPTURE_KEEP       capture dirs kept (5), unread-referenced ones exempt
+#   ATHENA_INBOX_CAPTURE_HARD_MAX   capture dirs kept, absolutely (25; >= KEEP)
+#   ATHENA_INBOX_ROOT               the inbox root whose harness-alerts channel is read
 #   ATHENA_INBOX_CAPTURE_MAX_BYTES  per-capture cap in bytes (4194304)
 #   ATHENA_INBOX_CAPTURE_DUMP_WAIT  seconds to wait for the dump (10)
 #
-# Output (stdout, on success): TAB-separated `dir`, `signature`, `dump` lines.
+# Output (stdout, on success): TAB-separated `dir`, `signature`, `dump`,
+# `retention` lines; `note:` lines on stderr when retention could not read the
+# references or pruned a referenced capture.
 # Exit codes: 0 captured (dump present OR absent) · 1 usage · 2 prerequisite
 #             (no dump dir, cannot create the capture) · 3 could not identify
 #             the client (nothing captured, nothing signalled)
@@ -114,6 +131,8 @@ usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 LIVENESS_LIB="${HERE}/../ai/skills/athena:inbox/lib/liveness.sh"
 WEDGE_LIB="${HERE}/../ai/skills/athena:inbox/lib/wedge.sh"
+REPO="$(cd -- "${HERE}/.." && pwd -P)"
+INBOX_LIB_DIR="${HERE}/../ai/skills/athena:inbox/lib"
 
 MODE="capture"; PID=""; STEP=""; REASON="manual"
 while [ $# -gt 0 ]; do
@@ -147,14 +166,30 @@ done
 # shellcheck source=ai/skills/athena:inbox/lib/wedge.sh
 . "${WEDGE_LIB}"
 
+# The athena:inbox manager, for the unread harness-alerts references retention
+# must not prune (DND-367). NOT fatal when missing: retention then treats every
+# capture as referenced (bounded by the hard max) and says why.
+HAVE_INBOX_LIB=1; INBOX_LIB_WHY=""
+for f in err.sh names.sh descriptor.sh logchan.sh maildir.sh fs.sh lock.sh inbox.sh; do
+  if [ ! -r "${INBOX_LIB_DIR}/${f}" ]; then HAVE_INBOX_LIB=0; INBOX_LIB_WHY="the athena:inbox library ${f} is missing"; break; fi
+done
+if [ "${HAVE_INBOX_LIB}" -eq 1 ]; then
+  for f in err.sh names.sh descriptor.sh logchan.sh maildir.sh fs.sh lock.sh inbox.sh; do
+    # shellcheck source=/dev/null
+    . "${INBOX_LIB_DIR}/${f}"
+  done
+fi
+
 KEEP="${ATHENA_INBOX_CAPTURE_KEEP:-5}"
+HARD_MAX="${ATHENA_INBOX_CAPTURE_HARD_MAX:-25}"
 MAX_BYTES="${ATHENA_INBOX_CAPTURE_MAX_BYTES:-4194304}"
 DUMP_WAIT="${ATHENA_INBOX_CAPTURE_DUMP_WAIT:-10}"
-for v in KEEP MAX_BYTES DUMP_WAIT; do
+for v in KEEP HARD_MAX MAX_BYTES DUMP_WAIT; do
   case "${!v}" in ''|*[!0-9]*) echo "error: ${v} must be a whole number (got '${!v}')" >&2
     echo "  Fix: unset ATHENA_INBOX_CAPTURE_${v} or set it to a whole number." >&2; exit 1 ;; esac
 done
 [ "${KEEP}" -ge 1 ] || { echo "error: ATHENA_INBOX_CAPTURE_KEEP must be at least 1" >&2; echo "  Fix: keep at least the capture being written." >&2; exit 1; }
+[ "${HARD_MAX}" -ge "${KEEP}" ] || { echo "error: ATHENA_INBOX_CAPTURE_HARD_MAX (${HARD_MAX}) is below ATHENA_INBOX_CAPTURE_KEEP (${KEEP})" >&2; echo "  Fix: set ATHENA_INBOX_CAPTURE_HARD_MAX to at least KEEP; it is the absolute bound, KEEP the ordinary one." >&2; exit 1; }
 CONFIG="${ATHENA_INBOX_CLIENT_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/athena-inbox-client/config.json}"
 
 # ---- identity ---------------------------------------------------------------
@@ -244,14 +279,79 @@ capture_dirs() {
     -regex '.*/[0-9]{8}T[0-9]{6}Z-[0-9]+(-[0-9]+)?' -printf '%f\n' 2>/dev/null | sort
 }
 
-# Retention, BEFORE the new capture exists: keep KEEP-1, so with the new one
-# there are KEEP. The capture being written is never a candidate.
+# ---- retention, BEFORE the new capture exists (DND-367) ----------------------
+# The plan is lib/wedge.sh's (pure); this block gathers its inputs and carries
+# it out. The capture being written is never a candidate: it does not exist yet.
+NOTES=()
+# load_references — sets REFERENCED to the capture names an UNREAD
+# harness-alerts message references (its re:), read through the athena:inbox
+# manager from THIS checkout's registry entry, exactly as the attendant will
+# read them. Status 1 = COULD NOT LOOK, with the reason in REFS_WHY. Called
+# directly, never in $( ), so the globals reach the caller.
+REFERENCED=""; REFS_WHY=""
+load_references() {
+  local refs errf real_dumps re dir
+  if [ "${HAVE_INBOX_LIB}" -ne 1 ]; then REFS_WHY="${INBOX_LIB_WHY}"; return 1; fi
+  errf="$(mktemp "${TMPDIR:-/tmp}/inbox-client-capture-refs.XXXXXX")" || { REFS_WHY="cannot create a temporary file"; return 1; }
+  if ! refs="$(inbox_unread_refs harness-alerts "${REPO}" 2>"${errf}")"; then
+    REFS_WHY="$(grep -m1 -v '^  Fix:' "${errf}" | sed 's/^athena:inbox: //')"
+    REFS_WHY="${REFS_WHY:-the harness-alerts channel did not resolve}"
+    rm -f -- "${errf}"
+    return 1
+  fi
+  rm -f -- "${errf}"
+  real_dumps="$(realpath -e -- "${DUMPS}")" || { REFS_WHY="the dump directory ${DUMPS} does not resolve"; return 1; }
+  # Both sides normalised the same way: the alert sends the capture's realpath,
+  # and a re: not directly inside THIS dump dir references nothing here.
+  while IFS= read -r re; do
+    [ -n "${re}" ] || continue
+    dir="$(realpath -m -- "${re}" 2>/dev/null)" || continue
+    [ "$(dirname -- "${dir}")" = "${real_dumps}" ] || continue
+    [[ "$(basename -- "${dir}")" =~ ${WEDGE_CAPTURE_NAME_RE} ]] || continue
+    REFERENCED="${REFERENCED}$(basename -- "${dir}")"$'\n'
+  done <<<"${refs}"
+  return 0
+}
+REFS_KNOWN=1
+load_references || { REFS_KNOWN=0; REFERENCED=""; }
+
 EXISTING="$(capture_dirs)"
-N_EXISTING="$(printf '%s' "${EXISTING}" | grep -c .)"
-if [ "${N_EXISTING}" -gt $(( KEEP - 1 )) ]; then
-  printf '%s\n' "${EXISTING}" | head -n $(( N_EXISTING - (KEEP - 1) )) | while IFS= read -r old; do
-    [ -n "${old}" ] && rm -rf -- "${DUMPS:?}/${old}"
-  done
+N_EXISTING=0; N_PROTECTED=0; PLAN_IN=""
+while IFS= read -r c; do
+  [ -n "${c}" ] || continue
+  N_EXISTING=$(( N_EXISTING + 1 ))
+  if printf '%s' "${REFERENCED}" | grep -qxF -- "${c}"; then
+    N_PROTECTED=$(( N_PROTECTED + 1 )); PLAN_IN="${PLAN_IN}${c}"$'\t1\n'
+  else
+    PLAN_IN="${PLAN_IN}${c}"$'\t0\n'
+  fi
+done <<<"${EXISTING}"
+PLAN="$(printf '%s' "${PLAN_IN}" | wedge_retention_plan "${KEEP}" "${HARD_MAX}" "${REFS_KNOWN}")"
+N_PRUNED=0; LOST=""
+LEDGER="${DUMPS}/${WEDGE_PRUNE_LEDGER}"
+while IFS=$'\t' read -r old why; do
+  [ -n "${old}" ] || continue
+  rm -rf -- "${DUMPS:?}/${old}"
+  N_PRUNED=$(( N_PRUNED + 1 ))
+  # The ledger is what lets the attendant say "pruned before processing" rather
+  # than guess from an absent directory (DND-367).
+  ( umask 077; printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${old}" "${why}" >>"${LEDGER}" )
+  [ "${why}" = "retention" ] || LOST="${LOST:+${LOST} }${old}(${why})"
+done <<<"${PLAN}"
+# Bound the ledger itself: the newest 1000 prunes are plenty to answer "was
+# this capture pruned" for any alert still in a maildir.
+if [ -f "${LEDGER}" ] && [ "$(wc -l <"${LEDGER}")" -gt 1000 ]; then
+  tail -n 1000 -- "${LEDGER}" >"${LEDGER}.tmp" && mv -f -- "${LEDGER}.tmp" "${LEDGER}"
+fi
+if [ "${REFS_KNOWN}" -eq 1 ]; then
+  RETENTION="keep ${KEEP}, hard max ${HARD_MAX}; ${N_EXISTING} existed, ${N_PROTECTED} referenced by unread harness-alerts, ${N_PRUNED} pruned"
+else
+  RETENTION="keep ${KEEP}, hard max ${HARD_MAX}; ${N_EXISTING} existed, unread references UNKNOWN (${REFS_WHY}), so pruned only to the hard max: ${N_PRUNED} pruned"
+  NOTES+=("note: capture retention could not read the unread harness-alerts references (${REFS_WHY}); it kept every capture up to the hard max (${HARD_MAX}). Fix: run inbox-doctor from ${REPO}; install the registry with scripts/setup-inbox-registry --install.")
+fi
+if [ -n "${LOST}" ]; then
+  RETENTION="${RETENTION}; LOST before processing: ${LOST}"
+  NOTES+=("note: capture retention hit the hard max (${HARD_MAX}) and pruned captures an unread harness-alert may still reference: ${LOST}; the attendant will report those alerts as 'pruned before processing'. Fix: attend the harness-alerts channel (athena:inbox-attend), or raise ATHENA_INBOX_CAPTURE_HARD_MAX.")
 fi
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -456,6 +556,7 @@ FINISHED_MS="$(now_ms)"
   printf 'uptime_s: %s\n' "${UPTIME_S}"
   printf 'reconnecting_since: %s (%s)\n' "${N_RECONNECTING}" "${COUNTS_SINCE}"
   printf 'connected_since: %s (%s)\n' "${N_CONNECTED}" "${COUNTS_SINCE}"
+  printf 'retention: %s\n' "${RETENTION}"
 } >"${CAP}/capture.txt"
 chmod 600 "${CAP}"/* 2>/dev/null
 chmod 700 "${CAP}"
@@ -463,4 +564,7 @@ chmod 700 "${CAP}"
 printf 'dir\t%s\n' "${CAP}"
 printf 'signature\t%s\n' "${SIGNATURE}"
 printf 'dump\t%s\n' "${DUMP_STATUS}"
+printf 'retention\t%s\n' "${RETENTION}"
+# Last, so a caller reading the first line of a failure never reads a note.
+for n in "${NOTES[@]}"; do printf '%s\n' "${n}" >&2; done
 exit 0

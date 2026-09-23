@@ -206,8 +206,15 @@ tool's `Fix:` text says what is wrong, never whom to tell. Every refusal files
 nothing. Name it in your turn output and put it in the ledger as `declined
 <class>`. The `refusal` line gives the class:
 
-- `unverifiable` (not from the detector, no capture, capture pruned, outside
-  the dump directory, malformed): the ledger and the turn output only.
+- `unverifiable` (not from the detector, no capture with no prune on record,
+  outside the dump directory, malformed): the ledger and the turn output only.
+- `pruned` (capture retention removed the capture before you processed the
+  alert, and its prune ledger says so; DND-367): the occurrence is LOST, not
+  tampered. Retention keeps a capture an unread alert references and drops one
+  only at its hard max, so this means alerts piled up faster than they were
+  attended. Name it in the turn output and the ledger as `declined pruned`. It
+  also needs a human, because the ticket's occurrence count is now low: DM the
+  owner under the same one-per-24-hours cap as `integrity` below.
 - `integrity` (the message does not match its capture, or the capture does not
   recompute or is not ours) or `ambiguous` (two open tickets with one tag, or an
   8-character prefix collision): these need a human. DM the owner

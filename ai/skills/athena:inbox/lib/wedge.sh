@@ -68,6 +68,59 @@ wedge_valid_step() {
   [[ "$1" =~ ^[a-z][a-z0-9_]{0,31}$ ]]
 }
 
+# --- retention (DND-367) -----------------------------------------------------
+#
+# Retention used to keep the newest KEEP captures, full stop. A capture whose
+# harness-alerts message was still UNREAD could be pruned first; the attendant
+# then could not recompute its signature, refused the alert, and the occurrence
+# was lost: the silent-loss class. So a capture an unread alert references is
+# never pruned to meet KEEP. Only the HARD MAX may prune it, and that prune is
+# recorded under its own reason in the prune ledger, so the attendant reports it
+# as "pruned before processing", never as tampering.
+#
+# When the references could NOT be read (the channel does not resolve, jq is
+# missing, the registry is unreadable), every capture is treated as referenced.
+# A failed lookup must not read as "none referenced": that is the exact silent
+# prune this exists to stop. The hard max still bounds the disk.
+
+# The prune ledger's basename, in the dump directory. One line per pruned
+# capture: "<UTC>\t<capture name>\t<reason>". Written by inbox-client-capture,
+# read by athena:inbox-attend/bin/wedge-ticket-decide.
+WEDGE_PRUNE_LEDGER="pruned-captures.log"
+
+# wedge_retention_plan <keep> <hard_max> <refs_known 0|1>
+# stdin: "<capture name>\t<referenced 0|1>" lines, OLDEST FIRST, for the
+# captures that exist BEFORE the new one is written. stdout: the ones to prune,
+# as "<name>\t<reason>", oldest first. PURE.
+#   pass 1  unreferenced captures, oldest first, until KEEP-1 remain -> retention
+#   pass 2  anything, oldest first, until HARD_MAX-1 remain ->
+#           hard-max-while-unread (references known) or
+#           hard-max-references-unknown (they could not be read)
+# The "-1" leaves room for the capture about to be written, which is never a
+# candidate because it does not exist yet.
+wedge_retention_plan() {
+  awk -F'\t' -v keep="$1" -v hard="$2" -v known="$3" '
+    $1 != "" { n++; name[n] = $1; ref[n] = (known == 1) ? ($2 == 1) : 1 }
+    END {
+      left = n
+      for (i = 1; i <= n && left > keep - 1; i++)
+        if (!ref[i]) { gone[i] = "retention"; left-- }
+      why = (known == 1) ? "hard-max-while-unread" : "hard-max-references-unknown"
+      for (i = 1; i <= n && left > hard - 1; i++)
+        if (!(i in gone)) { gone[i] = why; left-- }
+      for (i = 1; i <= n; i++) if (i in gone) print name[i] "\t" gone[i]
+    }'
+}
+
+# wedge_pruned_record <dump-dir> <capture name>
+# Prints "<UTC>\t<reason>" from the LAST ledger line naming <name> exactly, or
+# returns 1 when the ledger has none (or does not exist). Read-only.
+wedge_pruned_record() {
+  local ledger="$1/${WEDGE_PRUNE_LEDGER}"
+  [ -f "${ledger}" ] && [ ! -L "${ledger}" ] || return 1
+  awk -F'\t' -v n="$2" '$2 == n { r = $1 "\t" $3; f = 1 } END { if (f) print r; exit !f }' "${ledger}"
+}
+
 # wedge_cycle_counts <client-log>
 # Prints "<reconnecting>\t<connected>\t<since>": how many `reconnecting in` and
 # (log level INFO, WARN or ERROR, as liveness.sh admits them)

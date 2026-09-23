@@ -16,6 +16,11 @@
 #   * the signature ignores line numbers and changes with the step;
 #   * retention keeps N and never prunes the capture being written; the size
 #     cap truncates the largest file with a marker;
+#   * (DND-367) retention never prunes a capture an UNREAD harness-alerts
+#     message references: KEEP=1 with two unread alerts, both still verify; the
+#     hard max prunes one only on the record, and its alert is then refused as
+#     "pruned before processing", never as tampering; references it could not
+#     read keep everything up to the hard max, loudly;
 #   * the client is found as the supervisor's ONE child, and "could not
 #     identify" (exit 3) is distinct and captures/signals nothing.
 #
@@ -55,6 +60,16 @@ export ATHENA_INBOX_CLIENT_STATE_DIR="${TMP}/state"
 export XDG_STATE_HOME="${TMP}/xdg"
 export ATHENA_INBOX_CLIENT_CONFIG="${TMP}/config.json"
 export ATHENA_INBOX_CAPTURE_DUMP_WAIT=5
+# DND-367: retention reads the harness-alerts channel through the registry, so
+# the inbox root is pinned suite-wide and holds the COMMITTED custom entry,
+# re-keyed to this checkout's common dir. The live root is never read.
+export ATHENA_INBOX_ROOT="${TMP}/inbox-root"
+REPO_ROOT="$(cd -- "${SCRIPTS}/.." && pwd -P)"
+COMMON="$(cd -- "${REPO_ROOT}" && realpath -- "$(git rev-parse --git-common-dir)")"
+mkdir -p "${ATHENA_INBOX_ROOT}/projects"; chmod 700 "${ATHENA_INBOX_ROOT}" "${ATHENA_INBOX_ROOT}/projects"
+jq --arg r "${COMMON}" '.projects[] | select(.file == "custom.json") | .entry | .repo = $r' \
+  "${REPO_ROOT}/ai/inbox/registry.json" >"${ATHENA_INBOX_ROOT}/projects/custom.json"
+chmod 600 "${ATHENA_INBOX_ROOT}/projects/custom.json"
 TOKEN="SEKRETtok-9f8e7d6c5b4a-0123456789abcdef"
 mkdir -p "${ATHENA_INBOX_CLIENT_STATE_DIR}"
 printf '{"server_url":"wss://x/machine/websocket","token":"%s","instances":{}}' "${TOKEN}" > "${ATHENA_INBOX_CLIENT_CONFIG}"
@@ -132,6 +147,28 @@ CL="${TMP}/counts.log"
 if [ "$(wedge_cycle_counts "${CL}")" = "$(printf '2\t1\tlast restart')" ]; then ok "counts reset at the last supervisor restart line (any log level)"; else bad "counts reset at the last supervisor restart line" "$(wedge_cycle_counts "${CL}")"; fi
 if [ "$(wedge_cycle_counts "${TMP}/no-such.log")" = "$(printf 'n/a\tn/a\tno log')" ]; then ok "a missing log is n/a, never a measured 0"; else bad "a missing log is n/a, never 0" "$(wedge_cycle_counts "${TMP}/no-such.log")"; fi
 if [ "$(wedge_signature tls "$(wedge_frames "${CAP}/dump.txt")")" = "${SIG1}" ]; then ok "lib/wedge.sh recomputes the capture's own signature from its dump (one algorithm)"; else bad "lib/wedge.sh recomputes the capture's signature" "want ${SIG1}"; fi
+
+# ---------------------------------------------------------------------------
+printf '\nC-8  the retention PLAN (pure, lib/wedge.sh): a referenced capture is never pruned to meet KEEP (DND-367)\n'
+# plan <keep> <hard> <known> <name:ref ...> -> the prune lines, space-joined
+plan() {
+  local keep="$1" hard="$2" known="$3"; shift 3
+  printf '%s\n' "$@" | tr ':' '\t' | wedge_retention_plan "${keep}" "${hard}" "${known}" | tr '\t' '=' | paste -sd' ' -
+}
+got="$(plan 5 25 1 a:0 b:0 c:0 d:0 e:0 f:0)"
+if [ "${got}" = "a=retention b=retention" ]; then ok "six unreferenced, KEEP=5: the two OLDEST go (room for the new one)"; else bad "six unreferenced, KEEP=5: the two oldest go" "${got}"; fi
+got="$(plan 1 25 1 a:0 b:1 c:1)"
+if [ "${got}" = "a=retention" ]; then ok "KEEP=1 with two referenced: only the unreferenced one goes"; else bad "KEEP=1 with two referenced: only the unreferenced one goes" "${got}"; fi
+got="$(plan 1 25 1 a:1 b:0 c:1)"
+if [ "${got}" = "b=retention" ]; then ok "a referenced capture OLDER than an unreferenced one still survives"; else bad "a referenced older capture still survives" "${got}"; fi
+got="$(plan 1 3 1 a:1 b:1 c:1 d:1)"
+if [ "${got}" = "a=hard-max-while-unread b=hard-max-while-unread" ]; then ok "the hard max bounds even referenced captures, oldest first, and NAMES the loss"; else bad "the hard max bounds referenced captures and names the loss" "${got}"; fi
+got="$(plan 1 25 0 a:0 b:0 c:0 d:0)"
+if [ -z "${got}" ]; then ok "references UNKNOWN: nothing is pruned below the hard max (a failed lookup is not 'none referenced')"; else bad "references unknown: nothing pruned below the hard max" "${got}"; fi
+got="$(plan 1 3 0 a:0 b:0 c:0 d:0)"
+if [ "${got}" = "a=hard-max-references-unknown b=hard-max-references-unknown" ]; then ok "references unknown: the hard max still holds, with its own reason"; else bad "references unknown: the hard max still holds" "${got}"; fi
+got="$(printf '' | wedge_retention_plan 5 25 1)"
+if [ -z "${got}" ]; then ok "no captures: nothing to prune"; else bad "no captures: nothing to prune" "${got}"; fi
 
 # ---------------------------------------------------------------------------
 printf '\nC-2  the signature: stable across line numbers, sensitive to the step\n'
@@ -224,6 +261,61 @@ V="$(ATHENA_INBOX_ROOT="${TMP}/inbox-root" "${SCRIPTS}/../ai/skills/athena:inbox
 if printf '%s\n' "${V}" | grep -qx 'decision	verified' && printf '%s\n' "${V}" | grep -q '^frames_from	signature.txt (dump.txt was truncated'; then
   ok "a REAL capped capture still verifies, from signature.txt's frames, and says so"
 else bad "a real capped capture still verifies" "${V}"; fi
+
+# ---------------------------------------------------------------------------
+printf '\nC-9  retention never prunes a capture an UNREAD harness-alert references (DND-367)\n'
+DECIDE="${REPO_ROOT}/ai/skills/athena:inbox-attend/bin/wedge-ticket-decide"
+RX="${TMP}/rx-xdg"; RXD="${RX}/athena/inbox-client-dumps"; mkdir -p "${RXD}"; chmod 700 "${RXD}"
+TO_CUSTOM="${ATHENA_INBOX_ROOT}/harness-alerts/to-custom"
+mkdir -p "${TO_CUSTOM}"; chmod 700 "${ATHENA_INBOX_ROOT}/harness-alerts" "${TO_CUSTOM}"
+OLD0="$(XDG_STATE_HOME="${RX}" wf_make_capture "${RXD}" 20260101T000000Z-10 tls)"   # no alert references it
+CA="$(XDG_STATE_HOME="${RX}" wf_make_capture "${RXD}" 20260102T000000Z-11 tls)"
+CB="$(XDG_STATE_HOME="${RX}" wf_make_capture "${RXD}" 20260103T000000Z-12 dns)"
+MA="$(wf_make_message "${TO_CUSTOM}" "${CA}" "$(wf_signature_of "${CA}")" inbox-client-detector custom 001)"
+MB="$(wf_make_message "${TO_CUSTOM}" "${CB}" "$(wf_signature_of "${CB}")" inbox-client-detector custom 002)"
+out="$(XDG_STATE_HOME="${RX}" MOCK_DUMP_DIR="${RXD}" ATHENA_INBOX_CAPTURE_KEEP=1 ATHENA_INBOX_CAPTURE_DUMP_WAIT=1 "${CAPTURE}" "${M3}" 2>"${TMP}/c9.err")"; rc=$?
+NEWX="$(field "${out}" dir)"
+if [ "${rc}" -eq 0 ] && [ -d "${CA}" ] && [ -d "${CB}" ] && [ -d "${NEWX}" ]; then ok "KEEP=1 with two UNREAD alerts: both referenced captures survive, and the new one is written"; else bad "KEEP=1 with two unread alerts: both referenced captures survive" "rc=${rc} $(command ls "${RXD}" | tr '\n' ' ')"; fi
+if [ ! -e "${OLD0}" ] && grep -qP "\t20260101T000000Z-10\tretention$" "${RXD}/pruned-captures.log"; then ok "the unreferenced capture was pruned, and the prune ledger records it (reason retention)"; else bad "the unreferenced capture was pruned and recorded" "$(cat "${RXD}/pruned-captures.log" 2>&1)"; fi
+for m in "${MA}" "${MB}"; do
+  V="$(XDG_STATE_HOME="${RX}" "${DECIDE}" --message "${m}" --verify-only 2>&1)"
+  if printf '%s\n' "${V}" | grep -qx 'decision	verified'; then ok "the alert $(basename "${m}") still VERIFIES against its capture after the prune"; else bad "the alert $(basename "${m}") still verifies" "${V}"; fi
+done
+if grep -q '^retention: keep 1, hard max 25; 3 existed, 2 referenced by unread harness-alerts, 1 pruned$' "${NEWX}/capture.txt" && [ "$(field "${out}" retention)" = "keep 1, hard max 25; 3 existed, 2 referenced by unread harness-alerts, 1 pruned" ]; then
+  ok "the manifest and stdout say what retention did (counts, not silence)"
+else bad "the manifest and stdout say what retention did" "$(grep '^retention' "${NEWX}/capture.txt"; field "${out}" retention)"; fi
+if [ ! -s "${TMP}/c9.err" ]; then ok "an ordinary prune prints no note"; else bad "an ordinary prune prints no note" "$(cat "${TMP}/c9.err")"; fi
+
+# An ACKED alert no longer pins its capture (the attendant has read it).
+mkdir -p "${TO_CUSTOM}/.acked"; mv "${MB}" "${TO_CUSTOM}/.acked/"
+rm -rf "${NEWX}"
+out="$(XDG_STATE_HOME="${RX}" MOCK_DUMP_DIR="${RXD}" ATHENA_INBOX_CAPTURE_KEEP=1 ATHENA_INBOX_CAPTURE_DUMP_WAIT=1 "${CAPTURE}" "${M3}" 2>/dev/null)"
+NEWY="$(field "${out}" dir)"
+if [ -d "${CA}" ] && [ ! -e "${CB}" ]; then ok "an acked alert's capture is prunable again; the unread one's is not"; else bad "an acked alert's capture is prunable; the unread one's is not" "$(command ls "${RXD}" | tr '\n' ' ')"; fi
+rm -rf "${NEWY}"; mv "${TO_CUSTOM}/.acked/$(basename "${MB}")" "${TO_CUSTOM}/"
+CB="$(XDG_STATE_HOME="${RX}" wf_make_capture "${RXD}" 20260103T000000Z-12 dns)"
+
+# The HARD MAX prunes a referenced capture, oldest first, ON THE RECORD.
+out="$(XDG_STATE_HOME="${RX}" MOCK_DUMP_DIR="${RXD}" ATHENA_INBOX_CAPTURE_KEEP=1 ATHENA_INBOX_CAPTURE_HARD_MAX=2 ATHENA_INBOX_CAPTURE_DUMP_WAIT=1 "${CAPTURE}" "${M3}" 2>"${TMP}/c9h.err")"; rc=$?
+NEWZ="$(field "${out}" dir)"
+if [ "${rc}" -eq 0 ] && [ ! -e "${CA}" ] && [ -d "${CB}" ] && [ -d "${NEWZ}" ]; then ok "HARD_MAX=2: the OLDEST referenced capture goes, the newer one stays"; else bad "HARD_MAX=2: the oldest referenced capture goes" "rc=${rc} $(command ls "${RXD}" | tr '\n' ' ')"; fi
+if grep -qP "\t20260102T000000Z-11\thard-max-while-unread$" "${RXD}/pruned-captures.log" && grep -q '^note: .*hard max (2).*20260102T000000Z-11.*Fix:' "${TMP}/c9h.err" && grep -q '^retention: .*LOST before processing: 20260102T000000Z-11(hard-max-while-unread)' "${NEWZ}/capture.txt"; then
+  ok "...recorded as hard-max-while-unread in the ledger, the manifest, and a note: with a Fix:"
+else bad "...recorded in the ledger, the manifest and a note" "$(cat "${TMP}/c9h.err"; cat "${RXD}/pruned-captures.log")"; fi
+V="$(XDG_STATE_HOME="${RX}" "${DECIDE}" --message "${MA}" --verify-only 2>"${TMP}/c9v.err")"; rc=$?
+if [ "${rc}" -eq 3 ] && [ "$(field "${V}" refusal)" = "pruned" ] && grep -q 'pruned before processing' "${TMP}/c9v.err" && grep -q 'hard-max-while-unread' "${TMP}/c9v.err" && ! grep -q 'REFUSED (integrity)' "${TMP}/c9v.err"; then
+  ok "its alert is refused as 'pruned before processing' (class pruned, the recorded reason), never as tampering"
+else bad "its alert is refused as pruned before processing" "rc=${rc} ${V} $(cat "${TMP}/c9v.err")"; fi
+
+# References that cannot be READ keep everything below the hard max, loudly.
+out="$(ATHENA_INBOX_ROOT="${TMP}/no-such-root" XDG_STATE_HOME="${RX}" MOCK_DUMP_DIR="${RXD}" ATHENA_INBOX_CAPTURE_KEEP=1 ATHENA_INBOX_CAPTURE_DUMP_WAIT=1 "${CAPTURE}" "${M3}" 2>"${TMP}/c9u.err")"; rc=$?
+NEWU="$(field "${out}" dir)"
+if [ "${rc}" -eq 0 ] && [ -d "${CB}" ] && [ -d "${NEWZ}" ] && [ -d "${NEWU}" ]; then ok "unreadable references (no registry): KEEP=1 prunes NOTHING below the hard max"; else bad "unreadable references: nothing pruned below the hard max" "rc=${rc} $(command ls "${RXD}" | tr '\n' ' ')"; fi
+if grep -q '^note: capture retention could not read the unread harness-alerts references (.*registry.*).*Fix:' "${TMP}/c9u.err" && grep -q '^retention: .*unread references UNKNOWN' "${NEWU}/capture.txt"; then
+  ok "...and says so: a note: naming why with a Fix:, and 'UNKNOWN' in the manifest (never '0 referenced')"
+else bad "...and says so" "$(cat "${TMP}/c9u.err"; grep '^retention' "${NEWU}/capture.txt")"; fi
+out="$(ATHENA_INBOX_CAPTURE_KEEP=5 ATHENA_INBOX_CAPTURE_HARD_MAX=4 "${CAPTURE}" "${M3}" 2>&1)"; rc=$?
+if [ "${rc}" -eq 1 ] && printf '%s' "${out}" | grep -q 'Fix:'; then ok "HARD_MAX below KEEP is a usage error with a Fix:"; else bad "HARD_MAX below KEEP is a usage error" "rc=${rc} ${out}"; fi
 
 # ---------------------------------------------------------------------------
 printf '\nC-5  identity: the supervisor'"'"'s ONE child, and exit 3 is distinct\n'

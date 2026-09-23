@@ -324,7 +324,12 @@ loop above.
   restart (D35): SIGQUIT for the client's own dump, `ss`, `/proc` fds and
   status, the log tail, and a signature (sha256 of the stalled step + the top 5
   frames) into `$XDG_STATE_HOME/athena/inbox-client-dumps/<utc>-<pid>/`. Keeps
-  the newest 5, each capped at 4 MiB; redacts the machine token. `--now` for a
+  the newest 5 (`ATHENA_INBOX_CAPTURE_KEEP`), each capped at 4 MiB, but never
+  prunes one an UNREAD `harness-alerts` message references (DND-367): only the
+  hard max (`ATHENA_INBOX_CAPTURE_HARD_MAX`, 25) can, loudly, and every prune is
+  recorded in `pruned-captures.log` so the attendant reports it as "pruned
+  before processing". Unreadable references keep everything up to the hard max.
+  Redacts the machine token. `--now` for a
   human, `--resolve-client` finds the client as the supervisor's one child.
   Never kills anything, and sends SIGQUIT only to a client whose running code
   traps it (Ruby's default would kill a pre-LV-1 client). If it or the
