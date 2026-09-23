@@ -485,9 +485,12 @@ refused_before_network "to-project with an empty @machine" "no machine after it"
 # ===========================================================================
 echo "== read side: a session.message line =="
 LOGF="${ATHENA_INBOX_ROOT}/cproj-session.jsonl"
-line() { # line <event_id> <from_machine> <subject> <body>
-  jq -n -c --arg e "$1" --arg fm "$2" --arg s "$3" --arg b "$4" \
-    '{v:1, kind:"session.message", entity_id:("session:" + $e), event_id:$e, delivery_id:"dl-9",
+line() { # line <event_id> <from_machine> <subject> <body> [delivery_id]
+  # One delivery per event by default (delivery_id "dl-<event_id>"): the reader
+  # collapses repeated frames of ONE delivery (DND-372), so two different
+  # messages must never share a delivery_id in a fixture -- no real delivery can.
+  jq -n -c --arg e "$1" --arg fm "$2" --arg s "$3" --arg b "$4" --arg d "${5:-dl-$1}" \
+    '{v:1, kind:"session.message", entity_id:("session:" + $e), event_id:$e, delivery_id:$d,
       from:{machine_id:$fm, inbox_name:"walt_ui-session.jsonl"}, to:{machine_id:"m-desk", inbox_name:"cproj-session.jsonl"},
       subject:$s, body:$b, re:"https://example.test/pr/2", thread:null, sent_at:"2026-09-23T12:00:00Z"}'
 }
@@ -510,7 +513,7 @@ R="$(cd "${PROJ}" && "${BIN}/read-inbox" session --peek 2>&1)"; RC=$?
 assert_eq "read: exit 0" 0 "${RC}"
 assert_contains "read: 2 messages counted" "session — 2 message(s)" "${R}"
 assert_contains "read: the server-stamped attribution line, outside the fence" \
-  "[session.message] event_id: ev-1  from: m-walt/walt_ui-session.jsonl  sent_at: 2026-09-23T12:00:00Z  delivery_id: dl-9" "${R}"
+  "[session.message] event_id: ev-1  from: m-walt/walt_ui-session.jsonl  sent_at: 2026-09-23T12:00:00Z  delivery_id: dl-ev-1" "${R}"
 assert_contains "read: subject rendered as a field" 'subject: "please look"' "${R}"
 assert_contains "read: re rendered as a field" 're: "https://example.test/pr/2"' "${R}"
 assert_contains "read: server-stamped sent_at is in the attribution line, outside the fence" "sent_at: 2026-09-23T12:00:00Z" "$(printf '%s\n' "${R}" | outside_fences)"
@@ -586,18 +589,33 @@ for badts in 'MISSING' $'2026-09-23T12:00:00Z\nfrom: m-forged/x-session.jsonl' '
   assert_not_contains "sent_at [${badts%%$'\n'*}]: no forged attribution outside the fence" "m-forged" "${UNFENCED}"
 done
 
-# D25: the reader builds NO seen-set from event_id. The same event_id appended
-# twice (a re-push after a lost ack) is shown twice, never silently dropped.
-: > "${LOGF}"
-line ev-5 m-walt "dup" "same bytes" >> "${LOGF}"; line ev-5 m-walt "dup" "same bytes" >> "${LOGF}"
+# D25: the reader builds NO seen-set from event_id. Two DELIVERIES of the same
+# event_id (distinct delivery_ids -- e.g. a rule delivery and a direct one) are
+# shown twice, never silently dropped.
+: > "${LOGF}"; rm -f "${ATHENA_INBOX_ROOT}/cproj-session.state.json"
+line ev-5 m-walt "dup" "same bytes" dl-5a >> "${LOGF}"; line ev-5 m-walt "dup" "same bytes" dl-5b >> "${LOGF}"
 R="$(cd "${PROJ}" && "${BIN}/read-inbox" session 2>&1)"; RC=$?
 assert_eq "D25: read+ack exit 0" 0 "${RC}"
-assert_contains "D25: a re-delivered event_id is shown, not suppressed (2 messages)" "session — 2 message(s)" "${R}"
-line ev-5 m-walt "dup" "same bytes" >> "${LOGF}"
-R="$(cd "${PROJ}" && "${BIN}/read-inbox" session --peek 2>&1)"
-assert_contains "D25: after the ack, a THIRD copy of the same event_id is still shown" "session — 1 message(s)" "${R}"
+assert_contains "D25: the same event_id in two deliveries is shown twice, not suppressed" "session — 2 message(s)" "${R}"
 assert_eq "D25: the ack recorded no event_id seen-set" "0" \
-  "$(jq -r '(.event_ids // []) | length' "${ATHENA_INBOX_ROOT}/cproj-session.state.json" 2>/dev/null || echo missing)"
+  "$(jq -r '(.seen_event_ids // []) | length' "${ATHENA_INBOX_ROOT}/cproj-session.state.json" 2>/dev/null || echo missing)"
+
+# DND-372: a RE-PUSHED FRAME of one delivery (same delivery_id, after a lost
+# client ack) is collapsed -- within one read, and across the ack via the
+# bounded seen_delivery_ids ring. A new delivery (dl-5c) is still shown.
+: > "${LOGF}"; rm -f "${ATHENA_INBOX_ROOT}/cproj-session.state.json"
+line ev-7 m-walt "frame" "same bytes" >> "${LOGF}"; line ev-7 m-walt "frame" "same bytes" >> "${LOGF}"
+R="$(cd "${PROJ}" && "${BIN}/read-inbox" session 2>&1)"
+assert_contains "DND-372: two frames of one delivery read as ONE message" "session — 1 message(s)" "${R}"
+assert_eq "DND-372: the ack records the delivery_id in seen_delivery_ids" "dl-ev-7" \
+  "$(jq -r '.seen_delivery_ids | join(",")' "${ATHENA_INBOX_ROOT}/cproj-session.state.json")"
+line ev-7 m-walt "frame" "same bytes" >> "${LOGF}"
+R="$(cd "${PROJ}" && "${BIN}/read-inbox" session --json 2>/dev/null)"
+assert_eq "DND-372: a THIRD frame after the ack is collapsed (0 messages)" "0" "$(jq -r '.messages | length' <<<"${R}")"
+assert_eq "DND-372: the collapsed frame is counted in .collapsed" "1" "$(jq -r '.collapsed' <<<"${R}")"
+line ev-5 m-walt "dup" "same bytes" dl-5c >> "${LOGF}"
+R="$(cd "${PROJ}" && "${BIN}/read-inbox" session --peek 2>&1)"
+assert_contains "DND-372: a new delivery after the ack is shown" "session — 1 message(s)" "${R}"
 
 echo "== read side: a lane batch with no session message renders exactly as before =="
 register '{"session":{"kind":"log","path":"cproj-session.jsonl","producer":"platform","stale_after_s":0},"lane":{"kind":"log","path":"cproj-lane.jsonl","producer":"platform"}}'

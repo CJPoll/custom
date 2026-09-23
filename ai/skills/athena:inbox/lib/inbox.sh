@@ -214,7 +214,7 @@ inbox_release_consumer() { inbox_lock_release; }
 #    step then declines to show, which reads as the tool losing mail.
 _inbox_count_log() {
   local resolved="$1" schema_csv="${2:-1}" producer="${3:-slack}"
-  local inbox state size offset seen_ev seen_ky slice scan never="false" stale="false"
+  local inbox state size offset seen_ev seen_ky seen_dl slice scan never="false" stale="false"
 
   inbox="$(_inbox_path inbox "${resolved}")"
   state="$(_inbox_path state "${resolved}")"
@@ -257,19 +257,23 @@ _inbox_count_log() {
   if [ "${offset}" -gt "${size}" ]; then offset=0; stale="true"; fi
 
   # The seen-sets must be an array of strings, or dedupe is silently a no-op.
+  # `seen_delivery_ids` (DND-372) is the platform frame-collapse ring; absent is
+  # an empty ring (every state file written before it existed).
   if ! printf '%s' "${state_json}" | jq -e \
        '((.seen_event_ids // []) | type == "array" and all(type == "string"))
-        and ((.seen_keys // []) | type == "array" and all(type == "string"))' >/dev/null 2>&1; then
+        and ((.seen_keys // []) | type == "array" and all(type == "string"))
+        and ((.seen_delivery_ids // []) | type == "array" and all(type == "string"))' >/dev/null 2>&1; then
     state_bad="true"
-    seen_ev=""; seen_ky=""
+    seen_ev=""; seen_ky=""; seen_dl=""
   else
     seen_ev="$(printf '%s' "${state_json}" | jq -r '(.seen_event_ids // [])[]' 2>/dev/null)"
     seen_ky="$(printf '%s' "${state_json}" | jq -r '(.seen_keys // [])[]' 2>/dev/null)"
+    seen_dl="$(printf '%s' "${state_json}" | jq -r '(.seen_delivery_ids // [])[]' 2>/dev/null)"
   fi
 
   if [ "${state_bad}" = "true" ]; then
     inbox_fail "channel file \"$(_inbox_path inbox "${resolved}" | sed 's|.*/||')\" has an unreadable state file, so its counts are not deduped and include messages already read" \
-      "inspect ${state} (check it with: jq . \"${state}\"). Until it is valid JSON with a numeric \"offset\" and string arrays for \"seen_event_ids\"/\"seen_keys\", this channel re-reports everything; delete the file to start cleanly from offset 0."
+      "inspect ${state} (check it with: jq . \"${state}\"). Until it is valid JSON with a numeric \"offset\" and string arrays for \"seen_event_ids\"/\"seen_keys\"/\"seen_delivery_ids\", this channel re-reports everything; delete the file to start cleanly from offset 0."
   fi
 
   slice="$(fs_slice_from "${inbox}" "${offset}"; printf X)"; slice="${slice%X}"
@@ -284,7 +288,7 @@ _inbox_count_log() {
   # "malformed input degrades into silence" conflation this file refuses
   # everywhere else, and it is worse here because the output is injected
   # before the user has spoken.
-  if ! scan="$(printf '%s' "${slice}" | logchan_scan "${offset}" "${schema_csv}" "${seen_ev}" "${seen_ky}" 0 "${producer}" 2>/dev/null)" \
+  if ! scan="$(printf '%s' "${slice}" | logchan_scan "${offset}" "${schema_csv}" "${seen_ev}" "${seen_ky}" 0 "${producer}" "${seen_dl}" 2>/dev/null)" \
      || [ -z "${scan}" ]; then
     inbox_fail "could not count channel \"$(_inbox_path inbox "${resolved}" | sed 's|.*/||')\": the scan failed" \
       "inspect the channel's .jsonl for a line this reader cannot process, or re-run with --json to see which channels did count. A counting failure is reported rather than shown as zero, because zero would read as \"no mail\"."
@@ -760,7 +764,7 @@ inbox_read_json() {
 
 _inbox_read_log() {
   local resolved="$1" chan="$2" cwd="${3:-.}"
-  local inbox state entry schema_csv producer state_json offset size seen_ev seen_ky slice scan
+  local inbox state entry schema_csv producer state_json offset size seen_ev seen_ky seen_dl slice scan
 
   inbox="$(_inbox_path inbox "${resolved}")"
   state="$(_inbox_path state "${resolved}")"
@@ -792,6 +796,7 @@ _inbox_read_log() {
   offset="$(_inbox_offset_of "${state_json}" "${size}")"
   seen_ev="$(printf '%s' "${state_json}" | jq -r '(.seen_event_ids // [])[]' 2>/dev/null)"
   seen_ky="$(printf '%s' "${state_json}" | jq -r '(.seen_keys // [])[]' 2>/dev/null)"
+  seen_dl="$(printf '%s' "${state_json}" | jq -r '(.seen_delivery_ids // [])[]' 2>/dev/null)"
 
   slice="$(fs_slice_from "${inbox}" "${offset}"; printf X)"; slice="${slice%X}"
 
@@ -799,7 +804,7 @@ _inbox_read_log() {
   # a failed scan yields an empty string, which jq reads as empty input and
   # exits ZERO -- so the failure would travel as a successful read of nothing
   # and the session would be told it has no mail when it has some.
-  if ! scan="$(printf '%s' "${slice}" | logchan_scan "${offset}" "${schema_csv}" "${seen_ev}" "${seen_ky}" 1 "${producer}")" \
+  if ! scan="$(printf '%s' "${slice}" | logchan_scan "${offset}" "${schema_csv}" "${seen_ev}" "${seen_ky}" 1 "${producer}" "${seen_dl}")" \
      || [ -z "${scan}" ]; then
     inbox_fail "could not read channel \"${chan}\": the scan failed" \
       "inspect the channel's .jsonl for a line this reader cannot process. A read failure is reported rather than shown as an empty inbox, because an empty inbox reads as \"no mail\"."
@@ -814,9 +819,11 @@ _inbox_read_log() {
   printf '%s' "${scan}" | jq -c --arg c "${chan}" --argjson nd "${never_delivered}" \
     --arg producer "${producer}" '
     {kind: "log", channel: $c, producer: $producer, next_offset: .next_offset,
-     never_delivered: $nd, unreadable: .unreadable, messages: .messages,
+     never_delivered: $nd, unreadable: .unreadable, collapsed: .collapsed,
+     messages: .messages,
      event_ids: [.messages[].event_id | select(. != "")],
-     keys: [.messages[].dedupe_key | select(. != "")]}'
+     keys: [.messages[].dedupe_key | select(. != "")],
+     delivery_ids: [.messages[] | .delivery_id // empty | select(. != "")]}'
 }
 
 # _inbox_state_or_recovered <state-path>
@@ -980,7 +987,13 @@ inbox_unread_refs() {
 
 # --- ack --------------------------------------------------------------------
 
-# inbox_ack_log <channel> <offset> [event-ids-nl] [keys-nl] [cwd] [hook-json]
+# inbox_ack_log <channel> <offset> [event-ids-nl] [keys-nl] [cwd] [hook-json] [delivery-ids-nl]
+#
+# `delivery-ids-nl` (DND-372) feeds the platform frame-collapse ring,
+# `seen_delivery_ids`, bounded at LOGCHAN_RING_CAP like the other two rings.
+# It is recorded at the SAME point the offset advances past the frame -- after
+# the bodies were shown -- so a later frame it collapses never carries anything
+# the consumer was not already shown.
 #
 # `offset = max(stored, given)`, and a `given` greater than the file's current
 # size is REFUSED. Idempotent (M-7): acking the same offset twice is a no-op,
@@ -995,7 +1008,7 @@ inbox_unread_refs() {
 # by construction. (DND-183 sabotage row S38 proves the primitive is
 # load-bearing; R-11 in this ticket's suite proves the ACK actually uses it.)
 inbox_ack_log() {
-  local chan="$1" given="$2" new_ev="${3:-}" new_ky="${4:-}" cwd="${5:-.}" hook_json="${6:-}"
+  local chan="$1" given="$2" new_ev="${3:-}" new_ky="${4:-}" cwd="${5:-.}" hook_json="${6:-}" new_dl="${7:-}"
   local resolved lock inbox state state_json size stored target updates merged rot_updates
 
   resolved="$(inbox_resolve_channel "${chan}" "${cwd}")" || return 1
@@ -1048,9 +1061,12 @@ inbox_ack_log() {
                  "$(printf '%s' "${state_json}" | jq -r '(.seen_event_ids // [])[]' 2>/dev/null)" "${new_ev}")" \
     --arg ky "$(logchan_ring_append "${LOGCHAN_RING_CAP}" \
                  "$(printf '%s' "${state_json}" | jq -r '(.seen_keys // [])[]' 2>/dev/null)" "${new_ky}")" \
+    --arg dl "$(logchan_ring_append "${LOGCHAN_RING_CAP}" \
+                 "$(printf '%s' "${state_json}" | jq -r '(.seen_delivery_ids // [])[]' 2>/dev/null)" "${new_dl}")" \
     '{v: 1, offset: $o,
-      seen_event_ids: ($ev | split("\n") | map(select(length > 0)) | .[-$cap:]),
-      seen_keys:      ($ky | split("\n") | map(select(length > 0)) | .[-$cap:])}')" || return 1
+      seen_event_ids:    ($ev | split("\n") | map(select(length > 0)) | .[-$cap:]),
+      seen_keys:         ($ky | split("\n") | map(select(length > 0)) | .[-$cap:]),
+      seen_delivery_ids: ($dl | split("\n") | map(select(length > 0)) | .[-$cap:])}')" || return 1
 
   # Rotation runs BEFORE the state write, and folds its own updates into the
   # SAME write -- rename first, then state, one atomic rewrite.
@@ -1076,7 +1092,7 @@ inbox_ack_log() {
   # added, and skipping it would be the fixed-key-set defect by another route.
   if [ ! -e "${state}" ] \
      && [ "${target}" = "0" ] \
-     && [ -z "${new_ev}" ] && [ -z "${new_ky}" ] \
+     && [ -z "${new_ev}" ] && [ -z "${new_ky}" ] && [ -z "${new_dl}" ] \
      && [ "$(printf '%s' "${rot_updates}" | jq -r 'length' 2>/dev/null)" = "0" ]; then
     _inbox_sweep_due "${resolved}" "${merged}" "channel \"${chan}\"" "${hook_json}"
     return 0

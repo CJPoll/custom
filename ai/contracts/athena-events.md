@@ -1595,10 +1595,15 @@ platform-held view, which is a later re-architecture, and no hook, seam, or
 
 A lane delivered to an inbox `log` channel carries the **routed state-change
 events** — each a current-state line (a delete carries `entity_id` only). Each
-line MUST carry the mandatory `v` field that `ai/contracts/athena-inbox.md` →
-*Line format* requires on **every** `log` line (`v` plus the framing rules are
-the only universal fields; the remaining fields are this producer's own schema).
+line MUST carry every field `ai/contracts/athena-inbox.md` → *Line format*
+requires of a platform `log` line; that section is normative for them and they
+are not restated here. The remaining fields are this producer's own schema.
 This is a conformant append-only `log` channel: the *lines* are appended.
+
+**Later (2026-09-23):** this paragraph named the universal fields itself (`v`
+plus the framing rules). It now defers to *Line format* by name, because
+DND-372 added `delivery_id` to every platform line there and a restated list
+here would have gone stale.
 
 - The channel is a **change-notification stream, NOT the authoritative set.** A
   `log` channel is retention-bounded, so the full history is not guaranteed
@@ -2317,9 +2322,9 @@ This binds every platform-producer `log` line — lane and the three named
 delivery kinds alike. It does not touch the Slack receiver's own `log` line,
 whose `kind` is that separate encoder's `im|mpim|channel|mention|thread_reply`
 enum (`ai/contracts/athena-inbox.md` → *Line format*) — a different producer,
-outside this contract's taxonomy. The byte-level framing this value sits inside
-(`{v, kind}`, compact JSON, no trailing newline) remains `athena-inbox.md`'s,
-unrestated here.
+outside this contract's taxonomy. The byte-level framing this value sits inside,
+and every other field a platform line carries, remain `athena-inbox.md`'s
+(*Line format*), unrestated here.
 
 The **local session wake** — pushing a delivered inbox line into a running
 session — is **consumer-side**, done by the `inbox-wait` background waiter the
@@ -2404,7 +2409,8 @@ wins**. The roles are those of *Conformance language* (ingress / router / adapte
   (*Per-adapter Escaper contract*);
 - for the inbox adapter, enforces the **owner↔target bind** at save time and re-asserts it at
   **each** delivery (recording a refusal in the refused-delivery store + owner report), and emits a
-  conformant `log` line carrying the mandatory `v` field (*Mechanism vs config boundary, and
+  conformant `log` line carrying every field `athena-inbox.md` → *Line format* requires of a
+  platform line (*Mechanism vs config boundary, and
   both-ends-or-dark*; *The lane channel is a change stream, not the authoritative set*);
 - custodies secrets by **KMS envelope encryption**, decrypting least-privilege at use time for the
   owning account only, and never logs / argv-exposes / API-exposes a secret (*Secret custody*;

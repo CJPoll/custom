@@ -570,11 +570,55 @@ res="$(printf '%s\n' '{"v":1,"entity_id":"a\nb","status":"x"}' | logchan_scan 0 
 assert_eq "a platform line with a NEWLINE in entity_id is unreadable" "1" "$(jq -r .unreadable <<<"${res}")"
 res="$(printf '%s\n' '{"v":1,"entity_id":"a\tb","status":"x"}' | logchan_scan 0 "1" "" "" 0 platform)"
 assert_eq "a platform line with a TAB in entity_id is unreadable" "1" "$(jq -r .unreadable <<<"${res}")"
-# KEYLESS lane: at-least-once redelivery is NOT suppressed by the reader (the
-# consumer reconciles via a source re-query), so a duplicate line counts twice.
+# KEYLESS lane, LEGACY line: a platform line with NO delivery_id (written before
+# the encoder stamped one) is never collapsed -- at-least-once redelivery of it
+# is the consumer's to reconcile via a source re-query, so it counts twice.
 res="$(printf '%s\n%s\n' "${platform_line}" "${platform_line}" | logchan_scan 0 "1" "" "" 0 platform)"
-assert_eq "a duplicate platform line is NOT deduped (keyless lane; consumer reconciles)" \
+assert_eq "a duplicate LEGACY platform line (no delivery_id) is NOT collapsed (consumer reconciles)" \
   "2" "$(jq -r .new <<<"${res}")"
+assert_eq "a legacy platform line reads as readable, never unreadable" \
+  "0" "$(jq -r .unreadable <<<"${res}")"
+assert_eq "a legacy platform line collapses nothing" \
+  "0" "$(jq -r .collapsed <<<"${res}")"
+
+# DND-372 -- delivery_id FRAME COLLAPSE. Every frame of one delivery carries the
+# same delivery_id, so N frames of it are ONE line, counted once; the repeats
+# are observable in .collapsed, never silently gone.
+dl_a='{"v":1,"entity_id":"notion:abc","delivery_id":"11111111-1111-4111-8111-111111111111","status":"in_progress"}'
+dl_b='{"v":1,"entity_id":"notion:abc","delivery_id":"22222222-2222-4222-8222-222222222222","status":"done"}'
+res="$(printf '%s\n%s\n%s\n' "${dl_a}" "${dl_a}" "${dl_a}" | logchan_scan 0 "1" "" "" 1 platform)"
+assert_eq "DND-372: 3 frames with one delivery_id count as ONE new line" "1" "$(jq -r .new <<<"${res}")"
+assert_eq "DND-372: the 2 repeated frames are counted in .collapsed" "2" "$(jq -r .collapsed <<<"${res}")"
+assert_eq "DND-372: repeated frames are not unreadable" "0" "$(jq -r .unreadable <<<"${res}")"
+assert_eq "DND-372: the kept line carries its delivery_id for the ack" \
+  "11111111-1111-4111-8111-111111111111" "$(jq -r '.messages[0].delivery_id' <<<"${res}")"
+assert_eq "DND-372: the offset still advances over every collapsed frame" \
+  "$(printf '%s\n%s\n%s\n' "${dl_a}" "${dl_a}" "${dl_a}" | wc -c)" "$(jq -r .next_offset <<<"${res}")"
+# A NEW delivery of the SAME entity is a separate line: delivery_id is a frame
+# identity, not a dedupe key across changes.
+res="$(printf '%s\n%s\n' "${dl_a}" "${dl_b}" | logchan_scan 0 "1" "" "" 1 platform)"
+assert_eq "DND-372: two delivery_ids for one entity are TWO lines" "2" "$(jq -r .new <<<"${res}")"
+assert_eq "DND-372: two deliveries of one entity collapse nothing" "0" "$(jq -r .collapsed <<<"${res}")"
+assert_eq "DND-372: both carry the one entity_id (the reconciliation identity)" \
+  "1" "$(jq -r '[.messages[].entity_id] | unique | length' <<<"${res}")"
+# The seen ring spans reads: a frame whose delivery_id is already in the ring is
+# collapsed; one that is not is counted.
+res="$(printf '%s\n%s\n' "${dl_a}" "${dl_b}" | logchan_scan 0 "1" "" "" 0 platform "11111111-1111-4111-8111-111111111111")"
+assert_eq "DND-372: a frame whose delivery_id is in the seen ring is collapsed" "1" "$(jq -r .collapsed <<<"${res}")"
+assert_eq "DND-372: a delivery not in the seen ring is still counted" "1" "$(jq -r .new <<<"${res}")"
+# A MALFORMED delivery_id is a wrong key, not a missing one: the line is
+# unreadable rather than read as legacy (the failed-lookup rule). null is the
+# JSON spelling of absent and reads as legacy.
+for bad in '""' '0' '{}' '["x"]' 'false' '"a\nb"' '"a\tb"'; do
+  res="$(printf '{"v":1,"entity_id":"notion:abc","delivery_id":%s}\n' "${bad}" | logchan_scan 0 "1" "" "" 0 platform)"
+  assert_eq "DND-372: delivery_id ${bad} is unreadable, never read as absent" "1" "$(jq -r .unreadable <<<"${res}")"
+done
+res="$(printf '%s\n' '{"v":1,"entity_id":"notion:abc","delivery_id":null}' | logchan_scan 0 "1" "" "" 0 platform)"
+assert_eq "DND-372: delivery_id null reads as a legacy line (counted)" "1" "$(jq -r .new <<<"${res}")"
+# A SLACK channel ignores delivery_id: its identity is event_id / channel:ts.
+res="$(printf '%s\n%s\n' '{"v":1,"event_id":"Ev1","channel":"C1","ts":"1.1","delivery_id":"same"}' \
+        '{"v":1,"event_id":"Ev2","channel":"C1","ts":"1.2","delivery_id":"same"}' | logchan_scan 0 "1" "" "")"
+assert_eq "DND-372: a slack channel does not collapse on delivery_id" "2" "$(jq -r .new <<<"${res}")"
 # The READ path carries the current-state payload (with_text), and no dedupe key.
 res="$(printf '%s\n' "${platform_line}" | logchan_scan 0 "1" "" "" 1 platform)"
 assert_eq "the read path carries the platform payload for rendering" \
@@ -1093,6 +1137,53 @@ assert_eq "a redelivered platform line adds NO seen_keys entry (keyless lane, no
 # because it saw no key to dedupe on would re-report the redelivery forever.
 assert_eq "a second read of a fully-consumed platform channel shows nothing new" "0" \
   "$(cd "${ponce}" && "${BIN}/read-inbox" flaky --json 2>/dev/null | jq -r '.messages | length')"
+assert_eq "a legacy platform read records no seen_delivery_ids entry" \
+  "0" "$(jq -r '.seen_delivery_ids | length' "${ATHENA_INBOX_ROOT}/once.state.json")"
+
+# DND-372 end to end: frames of one delivery count ONCE through the manager
+# (inbox-status and read agree -- counts are post-collapse), the ack records the
+# delivery_id, a frame re-pushed after the ack is collapsed, and a new delivery
+# of the same entity is still shown.
+setup_case
+pdl="$(make_repo pdl)"
+register pdl "${pdl}" '{"flaky":{"kind":"log","path":"dl.jsonl","producer":"platform"}}'
+dl_line='{"v":1,"entity_id":"notion:dl","delivery_id":"33333333-3333-4333-8333-333333333333","status":"todo"}'
+printf '%s\n%s\n%s\n' "${dl_line}" "${dl_line}" "${dl_line}" > "${ATHENA_INBOX_ROOT}/dl.jsonl"
+pst3="$(cd "${pdl}" && inbox_status_json)"
+assert_eq "DND-372: inbox-status counts 3 frames of one delivery as 1 (manager path)" \
+  "1" "$(jq -r '.channels[] | select(.name=="flaky") | .new' <<<"${pst3}")"
+pjs3="$(cd "${pdl}" && "${BIN}/read-inbox" flaky --json 2>/dev/null)"
+assert_eq "DND-372: the read shows the one line (count and read agree)" "1" "$(jq -r '.messages | length' <<<"${pjs3}")"
+assert_eq "DND-372: the read doc carries the delivery_id for the ack" \
+  "33333333-3333-4333-8333-333333333333" "$(jq -r '.delivery_ids | join(",")' <<<"${pjs3}")"
+assert_eq "DND-372: the ack wrote the delivery_id into seen_delivery_ids" \
+  "33333333-3333-4333-8333-333333333333" "$(jq -r '.seen_delivery_ids | join(",")' "${ATHENA_INBOX_ROOT}/dl.state.json")"
+printf '%s\n' "${dl_line}" >> "${ATHENA_INBOX_ROOT}/dl.jsonl"
+pst3="$(cd "${pdl}" && inbox_status_json)"
+assert_eq "DND-372: a frame re-pushed after the ack counts 0 (collapsed by the ring)" \
+  "0" "$(jq -r '.channels[] | select(.name=="flaky") | .new' <<<"${pst3}")"
+printf '%s\n' '{"v":1,"entity_id":"notion:dl","delivery_id":"44444444-4444-4444-8444-444444444444","status":"done"}' \
+  >> "${ATHENA_INBOX_ROOT}/dl.jsonl"
+pjs3="$(cd "${pdl}" && "${BIN}/read-inbox" flaky --json 2>/dev/null)"
+assert_eq "DND-372: a new delivery of the same entity is a separate line" "done" \
+  "$(jq -r '.messages | map(.payload.status) | join(",")' <<<"${pjs3}")"
+
+# DND-372: the seen ring is BOUNDED at LOGCHAN_RING_CAP. 502 distinct deliveries
+# read and acked leave exactly 500 in the ring: the two oldest drop, the newest
+# is kept.
+setup_case
+pring="$(make_repo pring)"
+register pring "${pring}" '{"flaky":{"kind":"log","path":"ring.jsonl","producer":"platform"}}'
+jq -n -c 'range(1; 503) | {v: 1, entity_id: "notion:r", delivery_id: ("d-\(.)"), status: "x"}' \
+  > "${ATHENA_INBOX_ROOT}/ring.jsonl"
+( cd "${pring}" && "${BIN}/read-inbox" flaky --json >/dev/null 2>&1 )
+ring_state="$(cat "${ATHENA_INBOX_ROOT}/ring.state.json")"
+assert_eq "DND-372: the seen_delivery_ids ring is capped at ${LOGCHAN_RING_CAP}" \
+  "${LOGCHAN_RING_CAP}" "$(jq -r '.seen_delivery_ids | length' <<<"${ring_state}")"
+assert_eq "DND-372: the ring drops the OLDEST delivery_id first" \
+  "d-3" "$(jq -r '.seen_delivery_ids[0]' <<<"${ring_state}")"
+assert_eq "DND-372: the ring keeps the NEWEST delivery_id" \
+  "d-502" "$(jq -r '.seen_delivery_ids[-1]' <<<"${ring_state}")"
 
 # A malformed registry entry is a HARD error, not "this project has no
 # channels": the two are indistinguishable downstream and only one is safe.

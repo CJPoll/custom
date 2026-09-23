@@ -210,7 +210,7 @@ only:
 
 | field | meaning |
 |---|---|
-| `new` / `unread` | messages waiting, **post-dedupe** — what the read step would actually show |
+| `new` / `unread` | messages waiting, **post-dedupe** (and, on a platform channel, post frame-collapse on `delivery_id`) — what the read step would actually show |
 | `unreadable` | lines this reader could not parse, counted separately, never fatal |
 | `error` | this channel could not be counted. The refusal, with its `Fix:` clause, has already gone to stderr; the other channels still report, because one misconfigured channel must not hide real mail on the rest |
 | `never_delivered` | nothing has **ever** arrived here. Not the same as "nothing new" — the file exists only if a producer was separately registered, so this is a broken setup, not a quiet morning. It **is** reported in the text line, with a `Fix:` clause naming producer registration, because the contract makes that a MUST; the all-zero silence rule covers healthy-but-empty channels, not broken ones |
@@ -305,8 +305,18 @@ Two obligations follow for a consumer:
   Slack `log` line's `ts`, a platform line's `entity_id` + event id. Key on
   that, never on arrival order or a running counter. Two exceptions: an
   `agent_message` line is deduped only by the Notion `Acked By` check
-  (*Agent Messages* below), and a `session.message` line has no dedupe at all
-  on the reader's side (*Session messages* below).
+  (*Agent Messages* below), and a `session.message` line gets no dedupe beyond
+  the frame collapse below (*Session messages* below).
+
+**Repeated frames of one platform delivery are collapsed for you.** Every
+platform line carries a `delivery_id` (`ai/contracts/athena-inbox.md` →
+*Line format*), the same on every frame of one delivery. `read-inbox` and
+`inbox-status` count and show it once, and remember it in the channel's
+`seen_delivery_ids` ring (500 entries) when the read is acked. `--json` reports
+the number collapsed as `collapsed` and the ids acked as `delivery_ids`. This is
+not a dedupe across changes: a new delivery of the same entity is a separate
+line. A line with no `delivery_id` (written before the server stamped one) is
+never collapsed.
 
 ### `bin/send-mail`
 
@@ -629,7 +639,10 @@ overrides the general *dedupe by each message's stable id* advice under
 `bin/read-inbox`. A line re-delivered after a crash-before-ack carries the same
 ids as the first delivery. At-least-once means that is a legitimate
 re-arrival, and if you had not yet acked in Notion, an id seen-set would drop
-the only copy.
+the only copy. (`read-inbox`'s own frame collapse on `delivery_id` is not such
+a set: it records an id only when the read is acked, after the line was shown
+to you, and a new delivery of the row always carries a new id. Your recovery
+path stays the actionable query in step 2.)
 
 **Counts-only unprompted.** `inbox-status` and the SessionStart hook report a
 count for this channel like any other, and nothing else. `subject` and `from` are
@@ -770,10 +783,16 @@ each answered every message would loop forever, because every hop carries a new
 
 **No seen-set on `event_id`.** A session message is not a state-change line,
 carries no authority, and its `event_id` / `delivery_id` are references, not
-dedupe keys (D25). `read-inbox` suppresses nothing: a line re-pushed after a
-lost ack is shown again. If you fold duplicates yourself, key the fold on
-`event_id`, which is unique per send (D28). Never fold on `re` or `thread`:
-two different messages can share a referent.
+dedupe keys (D25). `read-inbox` collapses only a repeated frame of one delivery
+(same `delivery_id`, *Repeated frames of one platform delivery are collapsed
+for you* above). Two deliveries of one `event_id` are both shown. If you fold
+duplicates yourself, key the fold on `event_id`, which is unique per send
+(D28). Never fold on `re` or `thread`: two different messages can share a
+referent.
+
+**Later (2026-09-23):** this said "`read-inbox` suppresses nothing: a line
+re-pushed after a lost ack is shown again." Superseded by DND-372: a re-pushed
+frame carries the same `delivery_id`, and the reader collapses it.
 
 ## Two send paths: routed and local (HG-19)
 
@@ -859,7 +878,8 @@ agents on the live channel did by hand for fifty-one messages.
 
 - **`new` is post-dedupe.** At-least-once delivery means the same message can
   be appended twice; a pre-dedupe count would announce messages the read step
-  then declines to show.
+  then declines to show. On a platform channel that includes collapsing
+  repeated frames of one delivery (same `delivery_id`).
 - **`unreadable > 0` is a schema bump, not a fault.** A line whose `v` this
   reader does not know is counted separately and never fails the run. (A
   registry entry's unknown `v` is the exact opposite — a hard error. One is a

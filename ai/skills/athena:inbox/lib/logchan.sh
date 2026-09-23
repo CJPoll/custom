@@ -47,10 +47,10 @@ logchan_split_complete() {
   esac
 }
 
-# logchan_scan <offset> <schema_v_csv> <seen_event_ids> <seen_keys> [with_text] [producer]
+# logchan_scan <offset> <schema_v_csv> <seen_event_ids> <seen_keys> [with_text] [producer] [seen_delivery_ids]
 #
 # Byte slice on stdin (the file from <offset> to EOF). Emits one JSON object:
-#   {"new":N,"unreadable":U,"next_offset":O,
+#   {"new":N,"unreadable":U,"collapsed":C,"next_offset":O,
 #    "messages":[{"ts":…,"channel":…,"event_id":…}, …]}
 #
 # `with_text` (default 0) is what separates the COUNT path from the READ path,
@@ -71,11 +71,30 @@ logchan_split_complete() {
 # `event_id`/`channel`/`ts`. A platform lane is KEYLESS by contract
 # (ai/contracts/athena-inbox.md -> "A lane `log` channel is a change stream of
 # state-change events"): no dedupe key travels, so the reader does not suppress a
-# duplicate -- at-least-once redelivery is the CONSUMER's to reconcile via a
-# source re-query, and every complete valid platform line counts as one change
-# event. The MISS discipline still binds: a platform line that identifies no
+# second CHANGE -- at-least-once redelivery is the CONSUMER's to reconcile via a
+# source re-query. The one thing the reader does collapse is a repeated FRAME of
+# one delivery, by `delivery_id` (below); every other complete valid platform
+# line counts as one change event. The MISS discipline still binds: a platform line that identifies no
 # entity is unreadable, never a silently-counted phantom
 # (ai/../CLAUDE.md -> "A failed lookup must never look like an empty one").
+#
+# `seen_delivery_ids` (7th, newline-delimited, default empty) is the platform
+# FRAME-COLLAPSE ring (DND-372; ai/contracts/athena-inbox.md -> *Line format*,
+# the `delivery_id` rule). Every frame of ONE delivery carries the same
+# `delivery_id`, and no two deliveries share one, so a platform line whose
+# `delivery_id` was already seen -- earlier in this slice, or in the ring -- is a
+# re-pushed FRAME of a delivery the reader already holds. It is collapsed:
+# counted in `collapsed`, never in `new`, and it records nothing. This is not a
+# dedupe key across changes: two genuine changes of one entity are two events,
+# so two deliveries, so two `delivery_id`s, and both are counted. The three
+# states are kept distinct (the failed-lookup rule):
+#   * ABSENT or null  -- a legacy line, or one written before the encoder
+#                        stamped it. Read and counted normally, NEVER collapsed.
+#   * a usable non-empty string -- the frame identity; collapsed on a repeat.
+#   * anything else   -- "", a number/object/array/false, or a string carrying a
+#                        newline/tab: a malformed key, so the line is UNREADABLE,
+#                        never read as if it were absent.
+# A "slack" channel ignores `delivery_id`; its identity is event_id/channel:ts.
 #
 # `next_offset` advances over COMPLETE LINES ONLY (D-13). That is the whole
 # crash-safety guarantee: the fragment is neither parsed nor counted, and the
@@ -90,8 +109,8 @@ logchan_split_complete() {
 # messages stay in FILE (delivery) order -- the order the consumer folds them
 # into its held set -- and are not re-sorted.
 logchan_scan() {
-  local offset="$1" schema_csv="${2:-1}" seen_ev="${3:-}" seen_ky="${4:-}" with_text="${5:-0}" producer="${6:-slack}"
-  local complete bytes sv_json ev_json ky_json wt_json
+  local offset="$1" schema_csv="${2:-1}" seen_ev="${3:-}" seen_ky="${4:-}" with_text="${5:-0}" producer="${6:-slack}" seen_dl="${7:-}"
+  local complete bytes sv_json ev_json ky_json dl_json wt_json
 
   # The offset is validated HERE, not only by the caller. It reaches an
   # arithmetic context below, and bash EXECUTES a command substitution inside
@@ -114,20 +133,23 @@ logchan_scan() {
   sv_json="$(printf '%s' "${schema_csv}" | jq -R 'split(",") | map(select(length>0) | tonumber)')"
   ev_json="$(printf '%s' "${seen_ev}" | jq -R -s 'split("\n") | map(select(length>0))')"
   ky_json="$(printf '%s' "${seen_ky}" | jq -R -s 'split("\n") | map(select(length>0))')"
+  dl_json="$(printf '%s' "${seen_dl}" | jq -R -s 'split("\n") | map(select(length>0))')"
   case "${with_text}" in 1|true|yes) wt_json=true ;; *) wt_json=false ;; esac
 
   printf '%s' "${complete}" | jq -R -s \
     --argjson sv "${sv_json}" \
     --argjson ev "${ev_json}" \
     --argjson ky "${ky_json}" \
+    --argjson dl "${dl_json}" \
     --argjson wt "${wt_json}" \
     --arg prod "${producer}" \
     --argjson next "$((offset + bytes))" '
     def parse: try fromjson catch null;
 
     reduce (split("\n") | map(select(length > 0)) | .[]) as $line
-      ({new: [], unreadable: 0, ev: ($ev | map({(.): true}) | add // {}),
-        ky: ($ky | map({(.): true}) | add // {})};
+      ({new: [], unreadable: 0, collapsed: 0, ev: ($ev | map({(.): true}) | add // {}),
+        ky: ($ky | map({(.): true}) | add // {}),
+        dl: ($dl | map({(.): true}) | add // {})};
         # `usable` is hoisted here so BOTH the slack and the platform branch
         # share the one guard: a key or identity carrying a newline or tab is
         # not a key (it would split the newline-delimited seen-set lists, or
@@ -147,8 +169,9 @@ logchan_scan() {
             # DND-260: a PLATFORM producer line is a routed STATE-CHANGE
             # event -- `entity_id` plus current fields, a delete carrying
             # `entity_id` only -- with NO `event_id`/`channel`/`ts`. The lane is
-            # KEYLESS by contract, so there is no dedupe key and no seen-set: a
-            # duplicate is for the consumer to reconcile via source re-query
+            # KEYLESS by contract, so there is no dedupe key on the entity: a
+            # second change is for the consumer to reconcile via source re-query
+            # (the only seen-set is the delivery_id FRAME ring, DND-372)
             # (ai/contracts/athena-inbox.md -> "A lane `log` channel is a change
             # stream of state-change events"). `entity_id` is coerced to a usable
             # string exactly as the slack keys are: ABSENT, empty (""), and
@@ -161,22 +184,39 @@ logchan_scan() {
             # newline/tab is discarded by `usable` just as a slack key is.
             (if ($o.entity_id // "") != "" then ($o.entity_id | usable)
              else null end) as $entity
-            | if $entity == null then
+            # DND-372: the frame identity. ABSENT/null is a legacy line (read,
+            # never collapsed); a usable non-empty string is the key; anything
+            # else is a malformed key and makes the line unreadable -- a key
+            # that is wrong must not read as a key that is missing.
+            | (if $o.delivery_id == null then {s: "absent"}
+               elif ($o.delivery_id | type) == "string" and $o.delivery_id != ""
+                    and ($o.delivery_id | usable) != null
+               then {s: "ok", k: $o.delivery_id}
+               else {s: "bad"} end) as $dlv
+            | if $entity == null or $dlv.s == "bad" then
                 # THE MISS. A state-change line that names no entity cannot be
                 # reconciled against the source of truth, so it is unreadable --
                 # never a phantom counted new. This is the failed-lookup
                 # discipline for the platform schema: a mis-shaped line says so
                 # rather than reading as an empty success.
                 .unreadable += 1
+              elif $dlv.s == "ok" and (.dl[$dlv.k] // false) then
+                # A re-pushed FRAME of a delivery already held (this slice, or
+                # the ring). Same delivery, same persisted event, same content:
+                # collapsed, counted in `collapsed` so it is observable, and it
+                # adds nothing to the read.
+                .collapsed += 1
               else
                 # Counted as one change event. `event_id`/`dedupe_key`/`ts`/
                 # `channel` are held EMPTY so the read-path extraction
                 # (event_ids/keys) skips them -- a lane line contributes no
-                # dedupe key to the state file. The current-state payload rides
-                # only the READ path (`$wt`), inside the untrusted fence.
+                # dedupe key to the state file. `delivery_id` is "" for a
+                # legacy line, so it records nothing either. The current-state
+                # payload rides only the READ path (`$wt`), inside the fence.
                 .new += [ ({entity_id: $entity, event_id: "", dedupe_key: "",
-                            ts: "", channel: ""}
+                            ts: "", channel: "", delivery_id: ($dlv.k // "")}
                            + (if $wt then {payload: ($o | del(.v))} else {} end)) ]
+                | (if $dlv.s == "ok" then .dl[$dlv.k] = true else . end)
               end
           else
             # Both keys are forced to STRINGS before they are used as object
@@ -259,6 +299,7 @@ logchan_scan() {
       )
     | {new: (.new | length),
        unreadable: .unreadable,
+       collapsed: .collapsed,
        next_offset: $next,
        # A "platform" lane is a change stream: FILE order is the order the
        # consumer must fold changes in, and there is no `ts` to sort on. "slack"

@@ -240,7 +240,8 @@ _descriptor_validate_log() {
       return 1
     fi
     # A `producer:"platform"` lane is a KEYLESS change stream: logchan_scan's
-    # platform branch derives no dedupe key and holds no seen-set (a lane's
+    # platform branch derives no dedupe key (its only seen-set is the built-in
+    # delivery_id FRAME ring, DND-372, which is not declarable) (a lane's
     # reconciliation identity is the source re-query, not a carried key -- see
     # ai/contracts/athena-inbox.md -> "A lane `log` channel is a change stream of
     # state-change events", "except reader-side dedupe-by-carried-key"). So a

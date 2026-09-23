@@ -365,7 +365,8 @@ case "${KIND}" in
     OFFSET="$(printf '%s' "${READ}" | jq -r '.next_offset')"
     EVIDS="$(printf '%s' "${READ}" | jq -r '.event_ids[]?')"
     KEYS="$(printf '%s' "${READ}" | jq -r '.keys[]?')"
-    inbox_ack_log "${CHANNEL}" "${OFFSET}" "${EVIDS}" "${KEYS}" "." || RC=1
+    DLIDS="$(printf '%s' "${READ}" | jq -r '.delivery_ids[]?')"
+    inbox_ack_log "${CHANNEL}" "${OFFSET}" "${EVIDS}" "${KEYS}" "." "" "${DLIDS}" || RC=1
     ;;
   maildir)
     IDENTITY="$(printf '%s' "${READ}" | jq -r '.identity // ""')"

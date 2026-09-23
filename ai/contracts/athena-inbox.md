@@ -783,6 +783,57 @@ key, and the validator's refusal of `dedupe` on a `producer:"platform"` channel
 field per channel / `event_id` for both producers" proposal did **not** land.
 Slack channels keep their existing dedupe (`event_id`, `channel+ts`).
 
+**Every `producer:"platform"` line carries `delivery_id`** — lane state-change
+lines and the named delivery kinds (*Platform `log` line kinds*) alike. This is
+the one place the field is defined; every other section defers here.
+
+- **What it is.** A string naming the platform **delivery** this line is a
+  **frame** of. The platform mints it as a UUID: the `event_deliveries` row id
+  (`athena-events.md` → *Idempotency is per (event, rule)*), the same value as
+  the push envelope's `id` (*A platform delivery is `delivered` on the client's
+  ack, never on the push*). A consumer MUST NOT parse it.
+- **A frame identity, not a dedupe key.** Every frame of one delivery carries
+  the same `delivery_id`: a re-push after a lost client ack, or a client crash
+  between its write and its ack, re-appends the same delivery. No two
+  deliveries share one. Two genuine changes of one entity are two events, so two
+  deliveries, so two `delivery_id`s — collapsing on it never suppresses a
+  change. It is not a registry `dedupe` member, the validator's refusal of
+  `dedupe` on a platform channel stands, and `entity_id` stays the
+  reconciliation identity.
+- **The reader collapses repeated frames.** Within a channel, a platform line
+  whose `delivery_id` the reader has already seen is **collapsed**: not counted,
+  not shown, and the offset still advances past it. The seen-set is
+  `seen_delivery_ids` in the channel's *State file*, a ring of the most recent
+  500, recorded on ack. The ack is also where the offset passes the first frame,
+  after its body was shown, so a frame collapsed later never carries anything
+  the consumer was not shown. Counts are post-collapse (*Reader obligations*).
+  The read path reports the number collapsed, so a collapse is observable.
+- **Consumer rules are unchanged.** Collapse removes only a repeated frame of a
+  delivery already delivered, and every frame of a delivery is encoded from the
+  same persisted event. An `agent_message` consumer still acts on the
+  re-fetched Notion row and its `Acked By`; a lane consumer still reconciles
+  current state against the source; a new delivery of the same entity is a
+  separate line.
+- **Absent reads as legacy; malformed is unreadable.** A platform line with no
+  `delivery_id` (or `null`) — written before the producer stamped one — is read
+  and counted normally and is **never** collapsed. A `delivery_id` that is
+  present but not a non-empty string, or carries a newline or tab, scores
+  `+1 unreadable`; a wrong key never reads as a missing one (`~/dev/custom/CLAUDE.md`
+  → *A failed lookup must never look like an empty one*).
+- **The producer MUST stamp it** on every platform line and refuse to encode a
+  line without one. A Slack-producer line's identity stays `event_id` /
+  `channel:ts`; a `delivery_id` on it is ignored.
+
+**Later (2026-09-23):** platform lines carried **no** frame identity:
+`delivery_id` rode only `session.message` lines, as a reference, and the reader
+collapsed nothing on a platform channel — a duplicate platform line counted
+twice. Superseded by DND-372: in the DND-315 live verify a frozen-but-connected
+client wrote 10 identical lines for one row. DND-369 stops that re-push at the
+source, but delivery stays at-least-once, so duplicate frames must collapse end
+to end. The server encoder change that stamps the field on every line is
+DND-372's gen_saas half; until it deploys, lane and `agent_message` lines carry
+none and read as legacy.
+
 ### `received_at` — what it is and is not
 
 **Corrects v1 (`~/dev/gen_saas/ai-artifacts/athena-integration.md`).** That
@@ -877,6 +928,9 @@ Consequences, all normative:
     `channel` and `ts` — so `event_id` **cannot** be the cross-source key. Both
     sources MUST share **one** seen-set, in **one** state file. Two state files
     that can disagree is a defect, not redundancy.
+  - On a `producer:"platform"` channel the reader keeps one seen-set,
+    `delivery_id`, which collapses repeated frames of one delivery (*Line
+    format*). It is not a dedupe key across changes.
   - Seen-sets are bounded ring buffers (most recent 500 entries). Unbounded
     growth in a file rewritten on every ack is its own failure.
 - **A consumer of forwarded `athena-events` change-events MUST be idempotent** —
@@ -921,6 +975,7 @@ pairs with `walt_ui-slack.state.json`:
 { "v": 1, "offset": 819,
   "seen_event_ids": ["Ev…"],
   "seen_keys": ["D0…:1788….…"],
+  "seen_delivery_ids": ["3f2c…-…"],
   "last_api_poll_at": "2026-09-18T18:10:50Z",
   "rotated_at": "2026-09-18T19:30:00Z",
   "channels": { "D0…": "1788….…" } }
@@ -931,6 +986,7 @@ pairs with `walt_ui-slack.state.json`:
 | `offset` | Bytes consumed. Never advances past a partial final line. |
 | `seen_event_ids` | Intra-file dedupe ring buffer, ≤ 500. |
 | `seen_keys` | Cross-source `channel:ts` dedupe ring buffer, ≤ 500. |
+| `seen_delivery_ids` | Platform frame-collapse ring buffer (*Line format*, `delivery_id`), ≤ 500. Absent is an empty ring. |
 | `last_api_poll_at` | Last successful backstop poll, for staleness reporting. |
 | `rotated_at` | When this channel last rotated — RFC 3339 UTC with a `Z` suffix. Absent until the first state write, which initialises it to `now` so a new channel does not rotate an almost-empty file. See *Retention*. |
 | `channels` | Per-source watermark the backstop resumes from. |
@@ -999,7 +1055,8 @@ line carries **no** dedupe key, so the *Reader obligations* dedupe clause does
 not bind it — its reader-side reconciliation identity is the consumer's
 **source re-query** against current state, not a carried dedupe key (*A lane
 `log` channel is a change stream of state-change events*). Offset, doorbell,
-rotation, and retention still bind the lane unchanged. The four points below
+rotation, retention, and the `delivery_id` frame collapse (*Line format*) still
+bind the lane unchanged. The four points below
 are the additions, not replacements.
 
 > **DND-260 landed — reader and validator support is IMPLEMENTED.** This section
@@ -1063,8 +1120,8 @@ are the additions, not replacements.
 
 ### A `log` channel MAY have a non-Slack producer
 
-*Line format* already says only `v` and the framing rules are universal, and that
-"another producer defining a different `log` channel supplies its own fields and
+*Line format* already says which fields are universal and which a platform line
+must carry, and that "another producer defining a different `log` channel supplies its own fields and
 its own dedupe keys." The event-platform inbox adapter is exactly such a
 producer. Made explicit:
 
@@ -1073,8 +1130,8 @@ producer. Made explicit:
   beyond the mandatory `v`. The Slack line schema
   (`kind`/`channel`/`user`/`ts`/`text`/`event_id`/…) is the Slack producer's, not
   a property of the kind — a platform-produced line carries whatever the routing
-  rule's rendered payload holds plus the framing this contract requires (`v` and
-  `kind`, per the *Line format* rules); a **lane** channel's line is the routed
+  rule's rendered payload holds plus the fields *Line format* requires of a
+  platform line; a **lane** channel's line is the routed
   **state-change event** itself (current state; a delete carries `entity_id`
   only), with **no** platform-minted transition field. The universal `kind` (R4)
   is the line's category: for the platform delivery kinds it is one of *Platform
@@ -1091,15 +1148,17 @@ producer. Made explicit:
   `athena-events.md` **retries** per `(event, rule)`, holding **no** durable
   idempotency-key store and doing **no** content dedup itself, only transient
   in-flight retry state (`athena-events.md` → *Idempotency is per (event, rule)*)
-  — may append a duplicate line. Absorbing that duplicate is the **consumer's**
-  job, not the platform's: for a regular (non-lane) channel it is reader-side
-  dedupe over the `event_id` / `channel+ts` seen-sets (next); for a **lane**
-  channel, whose line carries **no** dedupe key, nothing absorbs it by a carried
-  key — the consumer reconciles carried current state against a **source
-  re-query**, so a duplicate or redelivery converges to the same set (*A lane
-  `log` channel is a change stream of state-change events*; `athena-events.md` →
-  *The consumer owns membership*). A platform producer is not required to
-  guarantee uniqueness in the file.
+  — may append a duplicate line. Absorbing that duplicate is the **reader's and
+  consumer's** job, not the platform's. A retry of one `(event, rule)` delivery
+  is a repeated frame, which the reader collapses on `delivery_id` (*Line
+  format*). The consumer absorbs anything else: for a regular (non-lane)
+  channel by reader-side dedupe over the `event_id` / `channel+ts` seen-sets
+  (next); for a **lane** channel, whose line carries **no** dedupe key, by
+  reconciling carried current state against a **source re-query**, so a
+  duplicate or redelivery converges to the same set (*A lane `log` channel is a
+  change stream of state-change events*; `athena-events.md` → *The consumer
+  owns membership*). A platform producer is not required to guarantee
+  uniqueness in the file.
 - Path-2 trust is unchanged and applies in full: a platform-delivered body is
   untrusted where it reaches an LLM — rendered inside the untrusted-content
   fence, counts-only in unprompted output, every imperative a fact to report and
@@ -1117,10 +1176,11 @@ producer. Made explicit:
 ### Platform `log` line kinds: `slack.interaction`, `session.message`, `agent_message`
 
 A `producer:"platform"` line carries a `kind` (mandatory per *Line format*) that
-names which platform delivery it is. Three kinds are defined; each carries `v`
-and `kind` (the framing) plus the fields below. None carries a dedupe key — a
-platform channel's lines are read keyless (*Schema*; *A lane `log` channel is a
-change stream of state-change events*), unchanged by this section.
+names which platform delivery it is. Three kinds are defined; each carries the
+fields *Line format* requires of a platform line plus the fields below. None carries a
+dedupe key — a platform channel's lines are read keyless (*Schema*; *A lane
+`log` channel is a change stream of state-change events*), unchanged by this
+section.
 
 - **`slack.interaction`** — a routed verified Slack block-action click
   (`athena-events.md` → `slack.interaction.received`). Fields: `channel`, `ts`,
@@ -1144,7 +1204,8 @@ change stream of state-change events*), unchanged by this section.
   non-Slack producer*): `event_id` — the **platform event id**, the
   `event_router_events` row this session message is persisted as, and the
   identity a reply's `thread` names — and `delivery_id`, for
-  `delivery_status`. `sent_at` (ISO-8601 UTC).
+  `delivery_status` (the frame identity every platform line carries, *Line
+  format*). `sent_at` (ISO-8601 UTC).
 
   **`sent_at` MUST be server-stamped** — the platform's receive time for the
   event (its persisted event row's `inserted_at`), never a value the sender's
@@ -1234,14 +1295,14 @@ FAILED"). Normative:
   event)`-keyed row with `rule_id: nil` (`athena-events.md` → *Declared
   families beyond the first pass* → `fleet.session.message`, stated once
   there); `event_id`
-  is the event-level `idempotency_key`, carried as a log label. **Neither is on
-  the line, with one carve-out:** a lane line's identity is `entity_id` (*A
-  lane `log` channel is a change stream of state-change events*), and for
-  every other regular line the delivery handle is meaningful only to the two
-  ends of the channel and gains no field. A **`session.message`** line is the
-  exception — it carries `event_id` and `delivery_id` **as references, not as
-  the envelope's transport identity** (D25; *Platform `log` line kinds* →
-  `session.message`): `event_id` there is the **platform event row id**
+  is the event-level `idempotency_key`, carried as a log label. **The
+  envelope's `event_id` is not on the line**, and the envelope's `id` is on
+  every platform line only as `delivery_id`, the frame identity (*Line
+  format*). A lane line's reconciliation identity is still `entity_id` (*A lane
+  `log` channel is a change stream of state-change events*). A
+  **`session.message`** line also carries an `event_id` — **as a reference,
+  not as the envelope's transport identity** (D25; *Platform `log` line kinds*
+  → `session.message`): `event_id` there is the **platform event row id**
   (`event_router_events`), which a reply's `thread` names, not the envelope's
   idempotency-key label. **DND-353 (open):** those are two different values
   that can both be called "`event_id`" — the envelope's idempotency-key label
@@ -1260,6 +1321,10 @@ FAILED"). Normative:
   so the blanket "neither is on the line" no longer held for that one kind. The
   rule is unchanged for every other regular (non-lane, non-session.message)
   line, and the lane carve-out already stood.
+
+  **Later (2026-09-23):** this bullet said the delivery handle "gains no field"
+  on any line but a `session.message`. Superseded by DND-372: every platform
+  line carries it as `delivery_id` (*Line format*).
 - **A successful push leaves the delivery PENDING.** Broadcasting the envelope
   is not delivery. The delivery becomes `delivered` only when the client's
   `ack` for that `id` arrives, bound to the delivery's target machine — the
@@ -1299,7 +1364,9 @@ obligation once; this subsection references it and does **not** restate it.
   only what the reference reader already computes
   (`ai/skills/athena:inbox/lib/logchan.sh` → `logchan_dedupe_key`) — for a Slack
   line, the derived `channel:ts` (*Reader obligations*, unchanged). The recognised
-  `dedupe` members stay exactly `event_id` and `channel+ts`.
+  `dedupe` members stay exactly `event_id` and `channel+ts`. `delivery_id` is not
+  one: it collapses repeated frames of one delivery and never distinguishes
+  changes (*Line format*).
 - A **state-based** consumer (the lane case) does **not** dedupe on a carried key
   at all: it acts on **carried current state** and reconciles against the
   **source** (Notion), so a duplicate or redelivery converges to the same set —
@@ -1406,8 +1473,8 @@ member" lines:
   its `entity_id` plus the current display/scope fields needed to render it; a
   **delete** carries `entity_id` only. There is **no `op` field, no
   `"add"`/`"retract"` token, and no `"stream":"op"` channel key.** Each line MUST
-  carry the mandatory `v` (*Line format*); `v` plus the framing rules are the only
-  universal fields, and the rest is this producer's own schema.
+  carry the fields *Line format* requires of a platform line; the rest is this
+  producer's own schema.
 - **The CONSUMER derives add/drop; the platform does not.** Per the (C) rule the
   platform "says 'this entity is now in this state'" and never "this is an add" or
   "this is a retract"; the consumer diffs each forwarded current-state event
@@ -1421,10 +1488,12 @@ member" lines:
   advanced the offset folds into the entry already held and computes **no**
   transition. `entity_id` is the fold identity, **not** a dedupe key: two lines
   for one entity may be two genuine changes, and a seen-set on `entity_id`
-  would suppress the second — which is why no seen-set is kept and the
-  validator refuses `dedupe` on a platform channel. The unprompted count still
-  counts lines (it is honest about at-least-once); the working set is computed
-  by the fold and the source re-query, never by the line count.
+  would suppress the second — which is why no seen-set is kept on it and the
+  validator refuses `dedupe` on a platform channel. The one seen-set is the
+  `delivery_id` frame ring (*Line format*), which collapses repeated frames of
+  one delivery and nothing else. The unprompted count still counts lines after
+  that collapse; the working set is computed by the fold and the source
+  re-query, never by the line count.
 - **Still a conformant append-only JSONL `log`.** The *lines* are only ever
   appended — never rewritten, never deleted — and it is the consumer's *derived
   set* that changes. Every *Writer obligations* and *Reader obligations* rule of
@@ -1463,9 +1532,10 @@ member" lines:
   - **Rotation** (7 days / 8 MiB — *Retention* — discards the pre-rotation
     generation) and a **stale-offset reset** (*First run, missing files, and a
     stale offset* resets the offset to 0 and re-reads, so lines already applied
-    are re-presented — and for a keyless lane line the dedupe seen-sets that
-    reset relies on to suppress a re-read suppress **nothing**, since a lane line
-    carries no dedupe key) are **observable** — rotation from the generation /
+    are re-presented — and for a keyless lane line the seen-sets that reset
+    relies on suppress only frames whose `delivery_id` is still in the
+    500-entry ring; a legacy line or an older frame is re-presented) are
+    **observable** — rotation from the generation /
     `rotated_at` change (*Retention*), the reset from *First run, missing files,
     and a stale offset*. On either, the consumer MUST NOT present its fast-path
     set as authoritative: it **re-queries the source of truth** (the consumer's
@@ -1478,7 +1548,9 @@ member" lines:
     observable, and the authoritative re-query — not the stream — is what the
     consumer acts on.
   - **Out-of-order at-least-once redelivery** is **not individually detectable**
-    on a keyless lane, and no instrument for it is required. A lane line carries
+    on a keyless lane, and no instrument for it is required. A repeated frame is
+    collapsed while its `delivery_id` is in the ring (*Line format*), but past
+    the ring, or on a legacy line, nothing marks it. A lane line carries
     no dedupe key, and `athena-events.md` makes `payload.revision` optional
     provenance/ordering only — **not** a dedupe key (`athena-events.md` →
     *Idempotency is per (event, rule)*) — so nothing distinguishes a re-presented
@@ -2452,6 +2524,8 @@ any channel or message name failing its grammar, and any non-regular file
 (a *registry filename* failing its grammar is skipped, not refused); never parses, counts,
 or advances past a partial final line; counts unknown `v` separately without
 failing; dedupes on `channel:ts` across sources through one shared state file;
+collapses repeated frames of one platform delivery on `delivery_id`, and never
+collapses a platform line that has none (*Line format*);
 rotates only at EOF, only when the live file is non-empty, and only after
 re-checking `size == offset` under the lock immediately before the rename;
 sweeps a rotated generation more than 14 days past its `rotated_at`;
