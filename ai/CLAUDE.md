@@ -140,6 +140,36 @@ and a genuinely ambiguous requirement is still worth a clarifying
 question — but once the assigned work is done and meets the bar, ship it
 rather than handing it back for a go-ahead.
 
+## Ownership tells you whom to ask, not whether you may
+
+Ownership definitions — the Agent Messages roster's `owns`, a lane, a subtree's
+maintainer — exist so an agent knows **whom to ask for additional context** on
+unfamiliar code. They are not a gate. Owning a lane confers no approval right:
+any agent may fix, improve, or change something in another agent's lane without
+that owner's sign-off. If it needs fixing, fix it.
+
+- When another agent announces work in your lane, answer with context and "go
+  ahead." Never "wait for approval," and never "that's the owner's call to hand
+  off." Ownership is not yours to grant or withhold, because it was never a
+  gate.
+- A heads-up before an MR is welcome as **context** — so the owner isn't
+  surprised and can offer what they know. It is not a permission handshake, and
+  nobody waits on it to proceed.
+- "Message before changes that cross an ownership boundary" still holds, with
+  its purpose corrected: it shares context and avoids surprise; it does **not**
+  collect sign-off. Send it and keep working — do not block on a reply.
+
+**Owner-gated actions are a separate category and stay gated.** This is not
+about lanes. It is about actions that touch the owner's real-world resources or
+irreversible state, and it does not relax just because ownership isn't a gate:
+production data, credentials and secrets, system/host/daemon changes, anything
+on a human's own machine, merges and deploys where policy requires them, and the
+`athena:run-autonomously` owner-gated list. Example: the config of a GitLab
+runner on the owner's laptop is the owner's call because it is the owner's
+machine — a system change under the Hard Rule below — not because of who owns
+the CI/CD lane. "Ownership isn't a gate" never licenses an agent to do an
+owner-gated thing.
+
 ## Hard Rule
 
 - NEVER EVER UNDER ANY CIRCUMSTANCE use Process.sleep in tests for arbitrary timing delays
