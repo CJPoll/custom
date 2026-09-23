@@ -119,6 +119,9 @@ shared with `gh-athena git` and listed in `ai/lib/forge-git-passthrough.sh`.
 The `forge-identity-guard.sh` hook warns on a plain `git push` to a gitlab.com
 remote.
 
+An agent driving `wt` sets `WT_AGENT_PUSH=1` so `wt`'s own pushes take this
+path; see the header of `scripts/wt-lib/push.sh`.
+
 Afterwards, run this in the repo to check who the push was attributed to:
 
 ```sh

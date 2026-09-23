@@ -114,6 +114,9 @@ case.
 GitLab pushes go through `glab-athena git`: see **athena:gitlab** → *Pushing
 as Athena*.
 
+An agent driving `wt` sets `WT_AGENT_PUSH=1`, and `wt` then routes its own
+pushes through these wrappers; see the header of `scripts/wt-lib/push.sh`.
+
 ## When a forge write can't be done as Athena
 
 **The owner's standing rule, for every forge (GitHub and GitLab) and every

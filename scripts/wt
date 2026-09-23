@@ -136,6 +136,16 @@ Options:
   --draft           Create draft pull requests (for pr --stack)
   --publish         Publish draft PRs to ready state (for pr --stack)
 
+Environment:
+  WT_AGENT_PUSH=1   Set by an AGENT driving wt. Every wt push (merge, pr, merge's
+                    child rebase) then goes through the Athena forge wrapper for
+                    the remote's host: gh-athena git (github.com) or glab-athena
+                    git (gitlab.com). Any other remote, or a wrapper refusal,
+                    fails (exit 3, with a Fix:) and never falls back to a plain
+                    push; Graphite submits (stack push, pr) are refused.
+                    Unset or 0 (the default, a human's use): plain git push,
+                    unchanged. See scripts/wt-lib/push.sh.
+
 Examples:
   wt init
   wt list
