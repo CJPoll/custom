@@ -1028,5 +1028,96 @@ else bad "migration: legacy watermark is folded in even when the reader already 
   "out='${OUT}' state=$(cat "${STATE}")"; fi
 
 echo
+echo "-- read-inbox --json: empty is [], a failure is never empty-and-0 ----------"
+
+# 69. THE REPORTED DEFECT. --json with nothing new must print exactly `[]`
+#     (valid JSON), exit 0 -- not zero bytes. Zero bytes make "no messages"
+#     indistinguishable from "the read produced nothing", which is what made a
+#     consumer fall back to conversations.history to be sure.
+setup_case
+seed_caches; seed_state
+seed_inbox_fixtures '[]' '[]'
+run_bin read-inbox --json --peek
+if [[ "${OUT}" == "[]" ]] && [[ "${RC}" == 0 ]] && [[ -z "${ERR}" ]]; then
+  ok "read-inbox --json: an empty read prints exactly [] and exits 0"
+else bad "read-inbox --json: an empty read prints exactly [] and exits 0" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# 70. --json with messages present is a JSON ARRAY (not bare JSONL), each element
+#     carrying the message, so `[]` and a populated read share one shape.
+setup_case
+seed_caches; seed_state
+seed_inbox_fixtures "[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"look at MR 7\"}]" '[]'
+run_bin read-inbox --json --peek
+if [[ "$(printf '%s' "${OUT}" | jq -r 'type')" == "array" ]] \
+   && [[ "$(printf '%s' "${OUT}" | jq -r '.[0].text')" == "look at MR 7" ]] \
+   && [[ "${RC}" == 0 ]]; then
+  ok "read-inbox --json: a populated read is a JSON array of the messages"
+else bad "read-inbox --json: a populated read is a JSON array of the messages" "rc=${RC} out='${OUT}'"; fi
+
+# 71. TEST THE MISS. A failure path (here: no bot token) must exit non-zero with
+#     a Fix: line on stderr, and must NOT print `[]` or empty-and-0 -- otherwise
+#     a broken read reads as an empty inbox, the exact class this skill fights.
+setup_case
+seed_caches; seed_state
+rm -f "${CHOME}/.claude/slack-bot-token"
+seed_inbox_fixtures '[]' '[]'
+run_bin read-inbox --json --peek
+if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${OUT}" != "[]" ]] && [[ -z "${OUT}" ]]; then
+  ok "read-inbox --json: a token failure exits non-zero with Fix:, not []"
+else bad "read-inbox --json: a token failure exits non-zero with Fix:, not []" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# 72. ...and a Slack API failure is the same: non-zero, Fix:, never []. A dead
+#     read must never be a quiet inbox.
+setup_case
+seed_caches; seed_state
+fixture conversations.list '{"ok":false,"error":"invalid_auth"}'
+run_bin read-inbox --json --peek
+if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"invalid_auth"* ]] && [[ "${OUT}" != "[]" ]]; then
+  ok "read-inbox --json: a Slack API failure exits non-zero with Fix:, not []"
+else bad "read-inbox --json: a Slack API failure exits non-zero with Fix:, not []" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+echo
+echo "-- DND-300/DND-318: the backstop's kind vocab is im | mpim -----------------"
+
+# 73. A 1:1 conversation is labeled `im` (not the legacy `dm`), and is counted
+#     as a DM. The conversation object has no is_mpim flag, so it is a 1:1.
+setup_case
+seed_caches; seed_state
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","is_im":true,"user":"U0AHNV4RJGP"}],"response_metadata":{"next_cursor":""}}'
+fixture_seq conversations.history 1 "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"one to one\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+fixture_seq conversations.history 2 '{"ok":true,"messages":[],"response_metadata":{"next_cursor":""}}'
+run_bin read-inbox --json --peek
+if [[ "$(printf '%s' "${OUT}" | jq -r '.[0].kind')" == "im" ]]; then
+  ok "kind: a 1:1 conversation is labeled im"
+else bad "kind: a 1:1 conversation is labeled im" "out='${OUT}'"; fi
+
+# 74. A GROUP DM (is_mpim) is labeled `mpim`, from the conversation type the API
+#     returns -- the classification the whole item exists to add.
+setup_case
+seed_caches; seed_state
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0GROUP","is_mpim":true}],"response_metadata":{"next_cursor":""}}'
+fixture_seq conversations.history 1 "{\"ok\":true,\"messages\":[{\"ts\":\"2000.6\",\"user\":\"${CODY}\",\"text\":\"group hello\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+fixture_seq conversations.history 2 '{"ok":true,"messages":[],"response_metadata":{"next_cursor":""}}'
+# seed_state only keys D0CODY/ENG; D0GROUP is first-sight, so seed its watermark.
+printf '{"v":1,"channels":{"D0GROUP":"1000.0"},"seen_event_ids":[],"seen_keys":[]}' > "${STATE}"
+run_bin read-inbox --json --peek
+if [[ "$(printf '%s' "${OUT}" | jq -r '.[0].kind')" == "mpim" ]]; then
+  ok "kind: a group DM (is_mpim) is labeled mpim"
+else bad "kind: a group DM (is_mpim) is labeled mpim" "out='${OUT}'"; fi
+
+# 75. Both im and mpim count as DMs in the human-readable tally, so the split
+#     from a single `dm` label does not change what the count means.
+setup_case
+seed_caches
+printf '{"v":1,"channels":{"D0CODY":"1000.0","D0GROUP":"1000.0"},"seen_event_ids":[],"seen_keys":[]}' > "${STATE}"
+fixture conversations.list '{"ok":true,"channels":[{"id":"D0CODY","is_im":true,"user":"U0AHNV4RJGP"},{"id":"D0GROUP","is_mpim":true}],"response_metadata":{"next_cursor":""}}'
+fixture_seq conversations.history 1 "{\"ok\":true,\"messages\":[{\"ts\":\"2000.5\",\"user\":\"${CODY}\",\"text\":\"im msg\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+fixture_seq conversations.history 2 "{\"ok\":true,\"messages\":[{\"ts\":\"2000.6\",\"user\":\"${CODY}\",\"text\":\"mpim msg\"}],\"response_metadata\":{\"next_cursor\":\"\"}}"
+run_bin read-inbox --peek
+if [[ "${OUT}" == *"2 new DM(s)"* ]]; then
+  ok "kind: im + mpim are both counted as DMs"
+else bad "kind: im + mpim are both counted as DMs" "out='${OUT}'"; fi
+
+echo
 if [[ "${FAIL}" -eq 0 ]]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0; fi
 echo "VERDICT: FAIL (${FAIL} of $((PASS+FAIL)) cases)"; exit 1

@@ -277,3 +277,50 @@ Four of the new cases are about an INPUT the earlier suite never had:
 - **A shared state file the FILE reader already wrote (no `channels`) plus a
   legacy cache** (case 68) — the upgrade-after-the-reader-arrived input, where
   keying migration on "shared file absent" would silently swallow the backlog.
+
+---
+
+## 2026-09-23 — `read-inbox --json` shape + the `im | mpim` kind vocabulary
+
+- **Domain:** athena:slack
+- **Date:** 2026-09-23
+- **Code under test:** `bin/read-inbox` (the `--json` array emit, the DM count,
+  the `slack_die` Fix: override), `lib/inbox.sh` (the im/mpim classification,
+  `_inbox_scan_list`'s class/kind split), `ai/hooks/athena-slack-poll.sh` (the
+  DM count)
+- **Suite run:** `bash test/self-test.sh` (no network — curl is a PATH shim)
+- **Baseline:** `VERDICT: PASS (75 cases)` (68 pre-existing + 7 new: cases 69–75)
+- **Two changes:** (1) `read-inbox --json` now prints a JSON **array** — `[]` for
+  an empty read, exit 0, never zero bytes — and every failure path exits
+  non-zero with a `Fix:` line, so "no messages" and "the read produced nothing"
+  are no longer the same output (reported by the walt_ui backstop consumer).
+  (2) the legacy Web-API backstop labels DMs with the inbox contract's
+  `im`/`mpim` vocabulary (DND-300/DND-318) instead of a generic `dm`; the DM
+  count is `im + mpim + dm` (legacy tolerated).
+
+### What the new cases prove
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S54 | `bin/read-inbox`: the `--json` emit `jq -s '.' "$NEW"` → `cat "$NEW"` (bare JSONL; empty prints zero bytes) | 4 | `FAIL read-inbox --json: an empty read prints exactly [] and exits 0` / `FAIL read-inbox --json: a populated read is a JSON array of the messages` / `FAIL kind: a 1:1 conversation is labeled im` / `FAIL kind: a group DM (is_mpim) is labeled mpim` |
+| S55 | `bin/read-inbox`: the DM count `grep -c -E '"kind":"(im\|mpim\|dm)"'` → `grep -c '"kind":"dm"'` | 1 | `FAIL kind: im + mpim are both counted as DMs` |
+| S56 | `lib/inbox.sh`: the classification `if (.is_mpim // false) then "mpim" else "im" end` → `"im"` (mpim never labeled) | 1 | `FAIL kind: a group DM (is_mpim) is labeled mpim` |
+| S57 | `bin/read-inbox`: the `Fix:` line dropped from the `slack_die` override | 2 | `FAIL read-inbox --json: a token failure exits non-zero with Fix:, not []` / `FAIL read-inbox --json: a Slack API failure exits non-zero with Fix:, not []` |
+| S58 | `ai/hooks/athena-slack-poll.sh`: the DM count `grep -c -E '"kind":"(im\|mpim\|dm)"'` → `grep -c '"kind":"dm"'` | 1 | `FAIL hook: N>0 emits exactly one SessionStart object with the right DM and mention counts` |
+
+All five mutations reddened the intended case(s); after each the file was
+restored from a byte copy and the suite returned to `VERDICT: PASS (75 cases)`.
+
+### S13 under the new vocabulary (annotation, not a rewrite)
+
+**Later (2026-09-23):** the 2026-09-01 row **S13** mutates the hook's *mention*
+count matcher `"kind":"mention"` → `"kind":"dm"`. That anchor still occurs
+exactly once, and the mutation still reddens — but note the target label
+`"kind":"dm"` is now the **legacy** DM label: the live scan emits `im`/`mpim`,
+so a mention matcher flipped to `"kind":"dm"` counts **zero** mentions (S13's
+whole point — proving the mention counter is distinct from the DM counter —
+stands, and case 32 still reddens). S13's failure string references the case's
+older name ("prints exactly one line"); the case is now "emits exactly one
+SessionStart object with the right DM and mention counts" (see S58). The row is
+left as written on its date, per `~/dev/custom/CLAUDE.md` → *Documentation
+conventions* (annotate a dated record, do not rewrite it).

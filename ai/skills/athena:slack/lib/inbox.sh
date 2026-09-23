@@ -7,8 +7,13 @@
 # print nothing. The hook is a doorbell; read-inbox is the door.
 #
 # WHAT COUNTS AS NEW:
-#   DM      -- any message in an im/mpim conversation, newer than that
-#              conversation's last-seen ts, not written by the bot itself.
+#   DM      -- any message in an im (1:1) or mpim (group DM) conversation, newer
+#              than that conversation's last-seen ts, not written by the bot
+#              itself. Labeled "im" or "mpim" in the scan output, from the
+#              conversation type the API returns -- the same `kind` vocabulary
+#              the inbox contract and the file channel use. Any legacy "dm"
+#              label in persisted state is still honoured, and the DM count is
+#              im + mpim (+ dm).
 #   MENTION -- a message in a channel the bot is a member of, newer than that
 #              channel's last-seen ts, not written by the bot itself, whose
 #              text contains the literal mention token <@BOT_USER_ID>.
@@ -133,8 +138,14 @@ inbox_scan() {
   # `conversations.history failed: channel_not_found` for the USLACKBOT im,
   # which aborted the whole scan. It can never carry a message for Athena, so
   # it is dropped by name rather than merely tolerated below.
-  jq -r 'select((.user // "") != "USLACKBOT") | .id' "$SLACK_TMPDIR/dms.jsonl" \
-    > "$SLACK_TMPDIR/dm-ids"
+  # Carry each DM conversation's kind alongside its id, tab-separated:
+  # `is_mpim` distinguishes a group DM (mpim) from a 1:1 (im). This is what lets
+  # the scan output label with the contract's `im`/`mpim` vocabulary instead of
+  # a generic `dm`. A conversation object with neither flag (a bare {"id":..}) is
+  # a 1:1, so `im` is the safe default.
+  jq -r 'select((.user // "") != "USLACKBOT")
+         | .id + "\t" + (if (.is_mpim // false) then "mpim" else "im" end)' \
+    "$SLACK_TMPDIR/dms.jsonl" > "$SLACK_TMPDIR/dm-ids"
 
   # Channels the bot has actually joined. conversations.history on a channel the
   # bot is not in returns not_in_channel, so scanning all of them would be one
@@ -184,14 +195,23 @@ _inbox_drop_seen() {
   return 0
 }
 
-# _inbox_scan_list <kind> <id-file> <out-file>
+# _inbox_scan_list <class> <id-file> <out-file>
+# <class> is dm or mention: it drives the mention filter and is the DEFAULT
+# `kind` label. A dm id-file line may carry a tab-separated per-conversation
+# kind (im|mpim) that overrides the label for that line; a mention line is a
+# bare id and keeps the class as its label.
 _inbox_scan_list() {
-  _sl_kind="$1"
+  _sl_class="$1"
   _sl_ids="$2"
   _sl_out="$3"
   _sl_attempted=0
   _sl_skipped_before="$INBOX_SKIPPED"
-  while IFS= read -r _sl_ch; do
+  _sl_tab="$(printf '\t')"
+  while IFS= read -r _sl_line; do
+    if [ -z "$_sl_line" ]; then continue; fi
+    _sl_ch="${_sl_line%%"$_sl_tab"*}"
+    _sl_kind="${_sl_line#*"$_sl_tab"}"
+    if [ "$_sl_kind" = "$_sl_line" ]; then _sl_kind="$_sl_class"; fi
     if [ -z "$_sl_ch" ]; then continue; fi
     if [ "$_is_budget" -le 0 ]; then return 0; fi
     _is_budget=$((_is_budget - 1))
@@ -235,19 +255,20 @@ _inbox_scan_list() {
     # First sight: record where we are, report nothing.
     if [ -z "$_sl_last" ]; then continue; fi
 
-    jq -c --arg kind "$_sl_kind" --arg ch "$_sl_ch" --arg me "$SLACK_BOT_USER_ID" '
+    jq -c --arg kind "$_sl_kind" --arg class "$_sl_class" \
+       --arg ch "$_sl_ch" --arg me "$SLACK_BOT_USER_ID" '
       .messages[]?
       | select((.user // "") != $me)
       | select((.subtype // "") != "message_changed")
       | select((.subtype // "") != "message_deleted")
-      | select(($kind == "dm") or ((.text // "") | contains("<@" + $me + ">")))
+      | select(($class == "dm") or ((.text // "") | contains("<@" + $me + ">")))
       | {kind: $kind, channel: $ch, ts: .ts, user: (.user // .bot_id // "unknown"),
          thread_ts: (.thread_ts // .ts), text: (.text // "")}
     ' "$SLACK_TMPDIR/hist.json" >> "$_sl_out"
   done < "$_sl_ids"
   if [ "$_sl_attempted" -gt 0 ] &&
      [ "$((INBOX_SKIPPED - _sl_skipped_before))" -eq "$_sl_attempted" ]; then
-    slack_die "every $_sl_kind conversation failed to read ($_sl_attempted of $_sl_attempted)"
+    slack_die "every $_sl_class conversation failed to read ($_sl_attempted of $_sl_attempted)"
   fi
   return 0
 }

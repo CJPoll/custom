@@ -195,7 +195,9 @@ else
       log_failure "scan: $why"
     else
       POLL_OK=1
-      DMS="$(grep -c '"kind":"dm"' "$NEW" 2>/dev/null)"
+      # A DM is an im (1:1) or mpim (group DM); a legacy "dm" label in older
+      # state is still counted, so old seen-state does not skew the tally.
+      DMS="$(grep -c -E '"kind":"(im|mpim|dm)"' "$NEW" 2>/dev/null)"
       MENTIONS="$(grep -c '"kind":"mention"' "$NEW" 2>/dev/null)"
       case "$DMS" in ''|*[!0-9]*) DMS=0 ;; esac
       case "$MENTIONS" in ''|*[!0-9]*) MENTIONS=0 ;; esac

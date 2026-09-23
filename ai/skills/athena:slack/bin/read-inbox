@@ -19,6 +19,22 @@ set -eu
 SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 . "$SELF_DIR/../lib/slack.sh"
 . "$SELF_DIR/../lib/inbox.sh"
+
+# read-inbox's contract to its callers (the walt_ui backstop consumer among
+# them): a failure NEVER looks like an empty inbox. Every failure path exits
+# non-zero with an actionable Fix: line on stderr -- never empty-and-0, and
+# never the `[]` that --json prints for a genuinely empty read. slack_die is
+# the one failure path the whole skill funnels through (no token, a Slack
+# ok:false, a 429 give-up, an unreadable state), so redefining it here -- after
+# sourcing, exactly as the poll hook does -- puts the Fix: on all of them at
+# once. Functions are late-bound, so inbox_scan's later slack_die calls resolve
+# to this one.
+slack_die() {
+  printf 'athena-slack: read-inbox failed: %s\n' "$1" >&2
+  printf 'Fix: resolve the error above (run /athena:slack whoami to test the bot token); read-inbox exits non-zero on failure rather than printing empty JSON, so do NOT read this as an empty inbox.\n' >&2
+  exit 1
+}
+
 slack_need_tools
 slack_tmp_init
 
@@ -35,13 +51,23 @@ done
 NEW="$SLACK_TMPDIR/new.jsonl"
 inbox_scan "$NEW"
 
-DMS="$(grep -c '"kind":"dm"' "$NEW" 2>/dev/null || true)"
+# A DM is an im (1:1) or an mpim (group DM); a legacy "dm" label in older state
+# is still counted, so old seen-state does not skew the tally.
+DMS="$(grep -c -E '"kind":"(im|mpim|dm)"' "$NEW" 2>/dev/null || true)"
 MENTIONS="$(grep -c '"kind":"mention"' "$NEW" 2>/dev/null || true)"
 if [ -z "$DMS" ]; then DMS=0; fi
 if [ -z "$MENTIONS" ]; then MENTIONS=0; fi
 
 if [ "$AS_JSON" = "true" ]; then
-  cat "$NEW"
+  # A JSON ARRAY, always: `[]` for an empty read (exit 0), never zero bytes --
+  # so a consumer can tell "no new messages" from "the read produced nothing".
+  # jq -s slurps the JSONL scan output into an array; a jq failure here is a
+  # real failure and must not masquerade as an empty read.
+  if ! jq -s '.' "$NEW"; then
+    printf 'athena-slack: read-inbox --json: could not assemble the scan output into a JSON array\n' >&2
+    printf 'Fix: the scanned message stream was not valid JSON; re-run read-inbox, and if it persists check jq and the Slack response handling. This is a failure, not an empty inbox.\n' >&2
+    exit 1
+  fi
 else
   printf 'Athena inbox: %s new DM(s), %s new mention(s)\n' "$DMS" "$MENTIONS"
   if [ "$INBOX_SKIPPED" != "0" ]; then

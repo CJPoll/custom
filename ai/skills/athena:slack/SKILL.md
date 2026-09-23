@@ -65,7 +65,7 @@ can thread onto it.
 | `react <channel> <ts> <emoji> [--remove]` | Add/remove a reaction. Bare name (`eyes`, not `:eyes:`). |
 | `read-channel <channel> [--since TS] [--limit N] [--json]` | Channel history, oldest-first, ids resolved to names. |
 | `read-thread <channel> <thread_ts> [--json]` | One thread, oldest-first. |
-| `read-inbox [--json] [--peek]` | New DMs + mentions **with bodies**; advances the seen-state unless `--peek`. |
+| `read-inbox [--json] [--peek]` | New DMs + mentions **with bodies**; advances the seen-state unless `--peek`. `--json` emits a JSON **array** (`[]` when empty, never zero bytes); a failure exits non-zero with a `Fix:` line, never an empty inbox. |
 | `channels [--types CSV] [--member] [--json]` | Conversation list with ids. `--types im,mpim` for DMs. |
 | `upload <channel> <file> [--title T] [--thread_ts TS] [--comment C]` | Three-step external upload (`files.upload` is sunset). |
 | `permalink <channel> <ts>` | Shareable URL for one message. |
@@ -178,6 +178,11 @@ it reports — so **neither source re-reports the other's message**. (`event_id`
 stays the file channel's intra-file key for at-least-once re-appends; the API
 poll never touches it.)
 
+The backstop labels each scanned message with the inbox contract's `kind`
+vocabulary — `im` (1:1 DM), `mpim` (group DM), or `mention` — matching the
+server-side file channel (DND-300/DND-318) rather than a generic `dm`. The DM
+count is `im + mpim` (a legacy `dm` in older persisted state is still counted).
+
 **`thread_reply` has no backstop.** The API poll recovers **DMs and mentions
 only**. A `thread_reply` the file channel misses is simply lost: it depends on
 `slack_thread_participations`, which only the receiver populates, and there is
@@ -282,10 +287,11 @@ recover after the file path has been down.
 
 ## Tests
 
-`bash test/self-test.sh` — 68 cases, no network (curl is a PATH shim). Covers
+`bash test/self-test.sh` — 75 cases, no network (curl is a PATH shim). Covers
 the ok:false convention, the token never reaching argv or a URL, request shapes,
 pagination, 429 backoff, the users cache, unreadable conversations, every branch
 of the hook and the inbox scan, the cross-source `seen_keys` dedupe (drop + add),
-the legacy-cache migration, and the SessionStart output contract and marker
-family. `SABOTAGE_RECORDS.md` records the mutation that was watched to redden
+the legacy-cache migration, the SessionStart output contract and marker family,
+the `read-inbox --json` array contract (`[]` vs. a failure), and the `im`/`mpim`
+kind vocabulary. `SABOTAGE_RECORDS.md` records the mutation that was watched to redden
 each of them.
