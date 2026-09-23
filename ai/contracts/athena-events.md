@@ -357,8 +357,9 @@ miss.
   **increments a monotonic count** and updates **last-seen**. On an **unread**
   row it stores **no** new payload. On a **read** row it **re-opens** the row
   (unread again, reported again) and its payload becomes the exemplar, so a
-  re-opened row names what re-opened it. The count spans every episode; only the
-  exemplar restarts. This bounds the store by a
+  re-opened row names what re-opened it. The count spans every episode of the
+  row's life; only the exemplar restarts. A row aged out after triage (see
+  *Retention* below) starts again at 1. This bounds the store by a
   **structural quantity** — per owner, distinct `(rule, cause)` pairs plus
   distinct `(direct recipient machine, cause)` pairs plus one
   machine-unreachable row per machine, a finite set —
@@ -436,9 +437,11 @@ miss.
   - **Key.** `rule_id` is `nil` (no rule is involved), the terminal-cause is
     `machine-unreachable`, and `machine_id` is **the machine that went
     unreachable**, under the store's *Grain* above. So there is one row per
-    machine. It never collides with a direct delivery's row for that machine,
-    because no delivery fails under this cause. A `nil` `rule_id` therefore
-    means a direct delivery only for a delivery cause.
+    machine. The cause `machine-unreachable` is **reserved** for this row
+    kind: a delivery's failure MUST NOT be recorded under it. That is what
+    keeps this row from colliding with a direct delivery's row for the same
+    machine, and why a `nil` `rule_id` means a direct delivery only for a
+    delivery cause.
   - **Exemplar.** The server's own record of the transition — the machine's id
     and name, `unreachable_since`, its last ack, join and heartbeat times, and
     the count of deliveries pending at the transition — plus the terminal error:
@@ -448,7 +451,8 @@ miss.
     data". The record carries no third-party content.
   - **Episodes.** Every transition starts a **new episode**, even while the row
     is unread: it re-opens the row, is reported again, and **takes that
-    transition's exemplar**. The count is the machine's transitions. This
+    transition's exemplar**. The count is the machine's transitions over the
+    row's life; a row aged out after triage starts again at 1. This
     departs from the delivery rows' unread rule in *Grain* above on purpose:
     each transition is one outage the latch already debounced, and the recovery
     between two outages is silent, so an unread alert from an earlier outage
