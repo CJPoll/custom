@@ -79,8 +79,10 @@ notification. Its envelope is:
   or "system" owner.
 - **`occurred_at`** — when the transition happened.
 - **`source`** — provenance, drawn from a **closed set of FORMS**: `webhook:slack`,
-  `webhook:notion`, `poller:<source>`, and `emit:<machine_id>`. The set of *forms*
-  is closed (exactly these four), so every enumerated `type` has a legal `source`
+  `webhook:notion`, `poller:<source>`, `emit:<machine_id>`, and `platform` (a
+  platform-originated family, *Which event types an ingress kind may originate*
+  → *Platform-originated*). The set of *forms* is closed (exactly these five),
+  so every enumerated or declared `type` has a legal `source`
   and an owner predicate leaf on the matchable `event.source` field never reads an
   undefined value. Two forms carry a **parameterized, registration-supplied
   substring** — `poller:<source>` and `emit:<machine_id>` — bound by no
@@ -95,6 +97,12 @@ notification. Its envelope is:
   because of what its `source` says. (Authentication of the source is the
   ingress's sender-verification step; `source` is the label recorded after that
   step already succeeded, not a substitute for it.)
+
+  **Later (2026-09-23):** the set of forms was exactly four, without
+  `platform`. Superseded (DND-395): the platform-originated `fleet.machine.*`
+  family carries `source` `platform`, which no ingress form described. Why:
+  its producer is the server itself, not an ingress, so none of the four
+  forms is true of it.
 - **`idempotency_key`** — see *Idempotency is per (event, rule)*.
 
 ### The event taxonomy is open
@@ -173,7 +181,10 @@ which cost differently:
      and an inbox line routed from it would change its `kind` (the type
      itself, per *Relationship to the Athena Inbox contract*), for no gain in
      safety. What matters is that no machine token can mint one, and the
-     exception states that.
+     exception states that. The same amendment names the platform's producer
+     in the dead-letter store's bound (*Event disposition and dead-letter*)
+     and beside the three ingress kinds (*Ingress — three kinds, one event*),
+     which each defer to *Platform-originated*.
   5. **Its enrichment posture** — whether its ingress enriches a metadata-only
      signal before emitting (declaring the **on-demand read** enrichment fetch,
      least-privilege enforced server-side per-caller rather than by token scope,
@@ -306,10 +317,12 @@ third-party content, so the record is **Path-2 untrusted** when read into an LLM
 structural quantity — the number of distinct unmatched `type`s per owner**,
 independent of traffic volume. That quantity is finite because **the set of `type`
 values that can enter the platform at all is the union of the ingress kinds'
-finite registered origination sets** (see *Which event types an ingress kind may
-originate* — origination is a registered finite set of `type` values, never an
-open prefix, so no emitter can mint an unbounded stream of distinct `type`s); the
-taxonomy is open, but what any ingress may *originate* is not. The bound is
+finite registered origination sets plus the declared platform-originated
+families** (see *Which event types an ingress kind may originate* — origination
+is a registered finite set of `type` values, never an open prefix, so no emitter
+can mint an unbounded stream of distinct `type`s; its *Platform-originated*
+bullet names each platform family); the taxonomy is open, but what any ingress,
+or the platform itself, may *originate* is not. The bound is
 therefore a **registration-time config quantity**, not a property of the open
 taxonomy: a million unmatched Slack events of one type collapse to one exemplar +
 count 1,000,000, rather than the million full payloads a disabled rule could
@@ -378,8 +391,9 @@ miss.
   *Retention* below) starts again at 1. This bounds the store by a
   **structural quantity** — per owner, distinct `(rule, cause)` pairs plus
   distinct `(direct recipient machine, cause)` pairs (a sweeper dispatch-crash
-  row is one of these pairs) plus one machine-unreachable row per machine plus
-  one reconciliation re-emit row, a finite set —
+  row is one of either kind, under its own cause) plus one
+  machine-unreachable row per machine plus one reconciliation re-emit row, a
+  finite set —
   **independent of traffic volume**: a revoked credential failing a million
   deliveries collapses to one exemplar + count 1,000,000, not a million rows.
 
@@ -1302,6 +1316,9 @@ The event-level identity basis is defined for **every** enumerated type:
 
 There are exactly three ingress kinds, all normalizing to one event:
 **inbound-webhook (PREFERRED)**, **poller (FALLBACK)**, and **harness-emit**.
+The platform's own producer of a platform-originated family is not an ingress
+and sits outside these three; *Which event types an ingress kind may
+originate* → *Platform-originated* states what it may originate.
 Webhooks are preferred over pollers wherever a source supports an adequate one —
 a poller carries a long-lived source token and more reliability infrastructure to
 own, so it is the fallback used only where a source lacks an adequate webhook, or
