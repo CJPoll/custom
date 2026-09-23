@@ -344,14 +344,20 @@ miss.
     failure sharing one key upserts into one row, `nil` components included —
     never a row per occurrence, and never a collision between a direct row and a
     rule's.
+  - The store holds one row kind that is not a delivery, keyed on this same
+    tuple with its own cause: *Machine-unreachable rows* below states how it
+    fills each component.
 
   So each recipient machine's failures are a row of their own: one machine's
   unread row never absorbs another machine's failures. The **exemplar** is the
-  first-seen failed delivery's **full event payload plus the terminal error**
-  (cause class + adapter + target), which alone answers the failed-lookup question
-  "which delivery, of which rule, to which target, terminally failed, and why?".
-  Subsequent failures of the same key **increment a monotonic count** and update
-  **last-seen**, storing **no** new payload. This bounds the store by a
+  **first failed delivery since the row was last triaged** — its **full event
+  payload plus the terminal error** (cause class + adapter + target), which alone
+  answers the failed-lookup question "which delivery, of which rule, to which
+  target, terminally failed, and why?". A later failure of the same key
+  **increments a monotonic count** and updates **last-seen**. On an **unread**
+  row it stores **no** new payload. On a **read** row it **re-opens** the row
+  (unread again, reported again) and its payload becomes the exemplar, so a
+  re-opened row names what re-opened it. This bounds the store by a
   **structural quantity** — per owner, distinct `(rule, cause)` pairs plus
   distinct `(direct recipient machine, cause)` pairs, a finite set —
   **independent of traffic volume**: a revoked credential failing a million
@@ -385,18 +391,72 @@ miss.
   quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count>
   terminal delivery failures to <adapter>:<target> (cause: <class>); check the
   target/credential or disable the rule — see the failed-delivery store exemplar
-  for the first-seen event.` A direct row (`rule_id: nil`) carries the direct
+  for the first event since last triage.` A direct row (`rule_id: nil`) carries the direct
   form instead: `Fix: direct (addressed) delivery has <count> terminal delivery
-  failures to <adapter> recipients (first seen: <adapter>:<target>) (cause:
+  failures to <adapter> recipients (first since last triage: <adapter>:<target>) (cause:
   <class>); check the recipient machine is connected and still declares the
   inbox, then re-send — see the failed-delivery store exemplar for the
-  first-seen event.` The row is one recipient machine's (see *Grain* above), and
-  the inbox target is `<machine_id>:<inbox_name>`, so the first-seen target
+  first event since last triage.` The row is one recipient machine's (see *Grain* above), and
+  the inbox target is `<machine_id>:<inbox_name>`, so the named target
   names that machine; the row may span several of its inboxes, which is why the
-  exemplar is only the first-seen one. A direct row recorded before this grain
+  exemplar names only one of them. A direct row recorded before this grain
   may have `machine_id` `nil` (an implementation need not attribute it), and
-  such a row may span machines; its first-seen target still names the first
-  machine.
+  such a row may span machines; its named target still names only one
+  machine. A machine-unreachable row is not a delivery and carries neither
+  form; its marker is its own (*Machine-unreachable rows* below).
+
+  **Later (2026-09-23):** both markers above read `… for the first-seen event`,
+  and the direct form read `(first seen: <adapter>:<target>)`. The exemplar
+  (under *Grain* above) was the first-seen delivery's, with no new payload
+  stored on any recurrence. Superseded (DND-386, matching gen_saas DND-373):
+  a failure that re-opens a read row takes the exemplar, so the markers say
+  `first since last triage`. Why: a re-opened row is reported to the owner
+  again, and its report must name the failure that re-opened it, not one the
+  owner already triaged.
+- **Machine-unreachable rows — the one row kind that is not a delivery.** The
+  store also records each time a machine **becomes unreachable**, so the owner is
+  told without having to write a rule for it.
+  - **Cause and trigger.** Cause class `machine-unreachable`. The server judges a
+    machine's reachability from delivery silence — pending deliveries it has not
+    acked within the reachability window — never from socket or process state
+    (see *Which machine am I — the own-machine id* for the `machine_reachable`
+    verdict). When a machine **transitions** to unreachable, the server records
+    one row write, **once per transition**: a latch on the machine makes a
+    machine that stays unreachable record nothing more. The latch flip, the
+    routed `fleet.machine.unreachable` event, and this row write commit
+    together or not at all. A recovery records nothing and never touches the
+    row; the owner marks it read.
+  - **Why this store.** A live-but-silent connection's deliveries terminal-FAIL
+    only after the longer per-connection ack timeout, and the routed event
+    reaches the owner only through a rule the owner wrote. This row is the
+    owner report that needs neither.
+  - **Key.** `rule_id` is `nil` (no rule is involved), the terminal-cause is
+    `machine-unreachable`, and `machine_id` is **the machine that went
+    unreachable**, under the store's *Grain* above. So there is one row per
+    machine. It never collides with a direct delivery's row for that machine,
+    because no delivery fails under this cause. A `nil` `rule_id` therefore
+    means a direct delivery only for a delivery cause.
+  - **Exemplar.** The `fleet.machine.unreachable` event's payload plus the
+    terminal error: adapter `platform`, target `machine:<machine_id>`, the cause,
+    the machine's id and name, `unreachable_since`, and the count of deliveries
+    pending at the transition. A pending count of `0` is stated, never omitted,
+    so "nothing waiting" does not read as "no data".
+  - **Episodes.** Every transition starts a **new episode**, even while the row
+    is unread: it re-opens the row, is reported again, and takes that
+    transition's exemplar. The count is the machine's transitions. This departs
+    from the delivery rows' unread rule in *Grain* above on purpose: each
+    transition is one outage the latch already debounced, and the recovery
+    between two outages is silent, so an unread alert from an earlier outage
+    must not swallow the next one. It is not a delivery, so no retry budget
+    applies (*Reconciled with idempotency* below does not govern it).
+  - **Marker.** `Fix: <machine> is unreachable (machine <machine_id>,
+    unreachable since <unreachable_since>, <pending> pending deliveries;
+    <count> transition(s) on this record) — it is connected-or-not but has
+    acked nothing within the reachability window; check its inbox client
+    (machine_reachable), then mark this read.` `<machine>` is the machine's
+    name, else `machine <machine_id>`, else `unknown machine`. A missing
+    `<machine_id>` or `<unreachable_since>` renders `?`, and a missing
+    `<pending>` renders `0`.
 - **Retention — the never-destroy-unread doctrine applies, made safe by the
   grain.** Follow the sibling inbox doctrine (`ai/contracts/athena-inbox.md` →
   *Retention* → *The principle*), exactly as the dead-letter store does: an
@@ -460,11 +520,13 @@ failed-delivery store*).
   `(direct recipient machine, refusal-cause)` pairs, a finite set — **independent of traffic
   volume**.
 
-  `refusal-cause` is an **open-but-declared set**: each **owner↔destination check declares its own cause class**, exactly as *Extending the taxonomy — a new type family declares its model* makes a new event family a declared increment rather than a free addition. The set is "open" in that a new owner-supplied-destination check adds its class with **no edit to this store**; it is "declared" in that **no delivery may be refused under a cause class the refusing check has not declared** — an undeclared cause is a hard error, never an unlabelled miss (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty one*). First-pass the declared classes are **target-bind re-assertion** and **generic-webhook egress**; the roadmap **email/SMS owner-verified-recipient** check declares **`owner-verified-recipient`** (see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*), and any future owner-supplied-destination check declares its own. Because the key is the declared class, the grain stays bounded by a **structural quantity** — the pairs above, each over a declared cause — independent of traffic volume, and correct the moment a new check declares its class. The **exemplar** is the first-seen refused delivery's **full event
+  `refusal-cause` is an **open-but-declared set**: each **owner↔destination check declares its own cause class**, exactly as *Extending the taxonomy — a new type family declares its model* makes a new event family a declared increment rather than a free addition. The set is "open" in that a new owner-supplied-destination check adds its class with **no edit to this store**; it is "declared" in that **no delivery may be refused under a cause class the refusing check has not declared** — an undeclared cause is a hard error, never an unlabelled miss (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty one*). First-pass the declared classes are **target-bind re-assertion** and **generic-webhook egress**; the roadmap **email/SMS owner-verified-recipient** check declares **`owner-verified-recipient`** (see *Adapter classification — two orthogonal axes (egress model × owner↔destination bind)*), and any future owner-supplied-destination check declares its own. Because the key is the declared class, the grain stays bounded by a **structural quantity** — the pairs above, each over a declared cause — independent of traffic volume, and correct the moment a new check declares its class. The **exemplar** is the **first refused delivery since the row was last triaged** — its **full event
   payload plus the refusal detail** (cause class + adapter + the target/destination that was
   refused), which alone answers "which delivery, of which rule, to which target, was refused, and
-  why?". Subsequent refusals of the same key **increment a monotonic
-  count** and update **last-seen**, storing **no** new payload. A revoked binding refusing a
+  why?". A later refusal of the same key **increments a monotonic
+  count** and updates **last-seen**. On an **unread** row it stores **no** new payload. On a
+  **read** row it **re-opens** the row (unread again, reported again) and its payload becomes the
+  exemplar, as in the failed-delivery store's *Grain*. A revoked binding refusing a
   million deliveries collapses to one exemplar + count 1,000,000, not a million rows.
 
   **Later (2026-09-23):** the grain above previously assumed every refused
@@ -488,7 +550,14 @@ failed-delivery store*).
   read into an LLM (see *Trust posture — two paths*), and read access is the **owning account's**
   only.
 - **Reported, not merely stored.** REFUSED MUST be **reported to the owner, never left silently
-  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count> refused deliveries to <adapter>:<target> (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>: target-bind re-assertion → re-author the rule against a machine registered to its owner; generic-webhook egress → correct the owner allowlist or the destination; owner-verified-recipient (email/SMS) → verify the recipient or the sending domain for this owner, or correct the rule. See the refused-delivery store exemplar for the first-seen event and its declared refusal detail.` A direct row (`rule_id: nil`) carries the direct form instead: `Fix: direct (addressed) delivery has <count> refused deliveries to <adapter> recipients on machine <machine_id> (first seen: <adapter>:<target>) (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>; a direct delivery has no rule to re-author. See the refused-delivery store exemplar for the first-seen event and its declared refusal detail.` The row is one recipient machine's (see *Grain* above) but may span several of its inboxes, so the exemplar names only the first-seen target. A direct row recorded before this grain may have `machine_id` `nil` (an implementation need not attribute it); its marker omits the `on machine <machine_id>` clause, because that row may span machines.
+  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count> refused deliveries to <adapter>:<target> (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>: target-bind re-assertion → re-author the rule against a machine registered to its owner; generic-webhook egress → correct the owner allowlist or the destination; owner-verified-recipient (email/SMS) → verify the recipient or the sending domain for this owner, or correct the rule. See the refused-delivery store exemplar for the first event since last triage and its declared refusal detail.` A direct row (`rule_id: nil`) carries the direct form instead: `Fix: direct (addressed) delivery has <count> refused deliveries to <adapter> recipients on machine <machine_id> (first since last triage: <adapter>:<target>) (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>; a direct delivery has no rule to re-author. See the refused-delivery store exemplar for the first event since last triage and its declared refusal detail.` The row is one recipient machine's (see *Grain* above) but may span several of its inboxes, so the exemplar names only one target. A direct row recorded before this grain may have `machine_id` `nil` (an implementation need not attribute it); its marker omits the `on machine <machine_id>` clause, because that row may span machines.
+
+  **Later (2026-09-23):** both markers above read `… for the first-seen event …`, and the direct
+  form read `(first seen: <adapter>:<target>)`. The exemplar (under *Grain* above) was the
+  first-seen refusal's, with no new payload stored on any recurrence. Superseded (DND-386,
+  matching gen_saas DND-384): a refusal that re-opens a read row takes the exemplar, so the
+  markers say `first since last triage`. Why: a re-opened row is reported to the owner again,
+  and its report must name the refusal that re-opened it, not one the owner already triaged.
 - **Retention — the never-destroy-unread doctrine applies, made safe by the grain**, exactly as
   the dead-letter, failed-delivery, and ingress-failure stores (see *Event disposition and
   dead-letter*): an un-triaged refused-delivery exemplar has an **unbounded** lifetime (it is the
