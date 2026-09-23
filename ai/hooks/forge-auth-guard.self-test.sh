@@ -170,6 +170,39 @@ check "P5d. curl --data-urlencode" deny
 run "$(bash_json "curl -X POST 'https://gitlab.com/oauth/\"token\"'")"
 check "P5e. quote-split oauth path" deny
 
+run "$(bash_json 'wget --post-data grant_type=x https://gitlab.com/oauth/token')"
+check "P5f. wget --post-data" deny
+
+run "$(bash_json 'wget --post-file body.txt https://gitlab.com/oauth/token')"
+check "P5g. wget --post-file" deny
+
+run "$(bash_json 'curl --json {} https://github.com/login/oauth/access_token')"
+check "P5h. curl --json" deny
+
+run "$(bash_json 'curl --form code=x https://github.com/login/oauth/access_token')"
+check "P5i. curl --form" deny
+
+run "$(bash_json 'http POST https://gitlab.com/oauth/token grant_type=x')"
+check "P5j. httpie POST verb word" deny
+
+run "$(bash_json 'curl -sd grant_type=x https://gitlab.com/oauth/token')"
+check "P5k. curl -sd (d inside a flag cluster)" deny
+
+run "$(bash_json 'curl -dgrant_type=x https://gitlab.com/oauth/token')"
+check "P5l. curl -dVALUE (attached)" deny
+
+run "$(bash_json 'gh api /login/oauth/access_token --field code=x')"
+check "P5m. gh api --field" deny
+
+run "$(bash_json 'gh api /login/oauth/access_token --raw-field code=x')"
+check "P5n. gh api --raw-field" deny
+
+run "$(bash_json 'gh api /login/oauth/access_token --input body.json')"
+check "P5o. gh api --input" deny
+
+run "$(bash_json '/usr/bin/glab api oauth/token -f grant_type=x')"
+check "P5p. path-qualified glab api -f" deny
+
 run "$(bash_json '/bin/rm ~/.config/gh/hosts.yml')"
 check "P6a. path-qualified /bin/rm of gh hosts.yml" deny
 
@@ -217,6 +250,15 @@ check "P6o. gsed -i (GNU sed)" deny
 
 run "$(bash_json 'rm "$GH_CONFIG_DIR/hosts.yml"')"
 check "P6p. \$GH_CONFIG_DIR/hosts.yml" deny
+
+run "$(bash_json 'truncate -s0 "$GLAB_CONFIG_DIR/config.yml"')"
+check "P6q. \$GLAB_CONFIG_DIR/config.yml" deny
+
+run "$(bash_json 'ln -sf /tmp/evil.yml ~/.config/gh/hosts.yml')"
+check "P6r. ln -sf over gh hosts.yml" deny
+
+run "$(bash_json 'sed -Ei s/a/b/ ~/.config/gh/hosts.yml')"
+check "P6s. sed -Ei (i inside a flag cluster)" deny
 
 run "$(bash_json '~/dev/custom/ai/bin/gh-athena auth switch --user x')"
 check "P7a. gh auth switch (changes the active account)" deny
@@ -280,6 +322,9 @@ check "M18. curl -fsSL GET of oauth/token/info (-f is --fail, not a POST)" allow
 
 run "$(bash_json 'curl -D - https://gitlab.com/oauth/token/info')"
 check "M19. curl -D (dump header) GET of oauth/token/info" allow
+
+run "$(bash_json 'curl -sS -L -H Accept:application/json -o out.json https://gitlab.com/oauth/token/info')"
+check "M19b. ordinary curl flags (no d cluster) on a token-path GET" allow
 
 run "$(bash_json 'perl -Mstrict -ne print ~/.config/gh/hosts.yml')"
 check "M20. perl -Mstrict -ne read of gh hosts.yml" allow
