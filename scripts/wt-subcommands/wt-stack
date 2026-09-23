@@ -54,7 +54,10 @@ Subcommands:
                     --dry-run: show what would be pushed without pushing
                     --publish: publish draft PRs to ready for review
                     --draft: create new PRs as drafts
-                    Refused under WT_AGENT_PUSH=1: gt submits as the owner
+                    Refused under WT_AGENT_PUSH=1: gt submits as the owner,
+                    and Graphite has no Athena route. An agent pushes plain
+                    branches and opens each PR with
+                    `gh-athena pr create --base <parent-branch>`
                     (see scripts/wt-lib/push.sh)
 
   sync              Sync the stack with remote changes using Graphite (gt sync)

@@ -125,6 +125,14 @@ as Athena*.
 An agent driving `wt` sets `WT_AGENT_PUSH=1`, and `wt` then routes its own
 pushes through these wrappers; see the header of `scripts/wt-lib/push.sh`.
 
+**Agents do not use Graphite stacks.** Graphite has no Athena route, so `wt`
+refuses `gt submit` under the signal. `gt submit` needs the owner's stored
+Graphite token, and api.graphite.dev opens the PRs as the owner through
+Graphite's own GitHub App; no flag or env var gives it a GitHub token
+(DND-399). To stack as an agent, use plain branches. Push each one in the form
+above, then open each PR with `gh-athena pr create --base <parent-branch>`.
+The bottom branch's parent is the trunk.
+
 ## When a forge write can't be done as Athena
 
 **The owner's standing rule, for every forge (GitHub and GitLab) and every

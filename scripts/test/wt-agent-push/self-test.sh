@@ -237,6 +237,30 @@ if has "$out" "rc=0" && logged "gt submit --stack --no-interactive"; then
   pass "owner (no signal): wt stack push still runs gt submit"
 else fail "owner: wt stack push [$out] log=[$(cat "${log}")]"; fi
 
+# --- 13b. the refusal and the docs name the ONLY agent stack path (DND-399) ---
+# Graphite has no Athena route: `gt submit` needs the owner's stored Graphite
+# token and api.graphite.dev opens the PRs as the owner. So an agent stacks
+# with plain branches, each pushed through the wrapper, and opens each PR with
+# `gh-athena pr create --base <parent-branch>`. The refusal's Fix: and every
+# doc an agent reads must say exactly that.
+out="$(in_wt "${tmp}/r2" WT_AGENT_PUSH=1 -- 'push_stack false')"
+err="$(cat "${tmp}/stderr")"
+if has "$err" "Fix:" && has "$err" "gh-athena pr create --base <parent-branch>" \
+   && has "$err" "no Athena route"; then
+  pass "agent: the gt refusal's Fix: names the plain-branch + gh-athena pr create --base path"
+else fail "agent: gt refusal Fix: text [$err]"; fi
+
+wt_help="$("${scripts_dir}/wt" --help 2>&1)"
+stack_help="$("${scripts_dir}/wt-subcommands/wt-stack" --help 2>&1)"
+gh_skill="${scripts_dir}/../ai/skills/athena:github/SKILL.md"
+for pair in "wt --help|${wt_help}" "wt stack --help|${stack_help}" \
+            "athena:github SKILL.md|$(cat "${gh_skill}" 2>/dev/null)"; do
+  name="${pair%%|*}"; text="${pair#*|}"
+  if has "$text" "gh-athena pr create --base" && has "$text" "no Athena route"; then
+    pass "docs: ${name} names the agent stack path (no Athena route for Graphite)"
+  else fail "docs: ${name} does not name the agent stack path"; fi
+done
+
 # --- 14. no push site bypasses the helper ------------------------------------
 # Every `git push` in wt lives in push.sh. A new raw push elsewhere would push
 # as the owner even under the agent signal.

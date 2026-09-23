@@ -143,6 +143,11 @@ Environment:
                     git (gitlab.com). Any other remote, or a wrapper refusal,
                     fails (exit 3, with a Fix:) and never falls back to a plain
                     push; Graphite submits (stack push, pr) are refused.
+                    Graphite has no Athena route (it needs the owner's stored
+                    Graphite token and opens PRs as the owner), so an agent
+                    stacks with plain branches: push each through wt or
+                    gh-athena git, then open each PR with
+                    `gh-athena pr create --base <parent-branch>`.
                     Unset or 0 (the default, a human's use): plain git push,
                     unchanged. See scripts/wt-lib/push.sh.
 

@@ -14,7 +14,9 @@
 # Under the signal nothing falls back to a plain push. A remote no wrapper
 # covers, a remote that does not resolve, a missing wrapper, or a wrapper
 # refusal each FAIL, exit 3, with a Fix:. A Graphite submit (which pushes with
-# the owner's credentials) is refused too.
+# the owner's credentials) is refused too: Graphite has no Athena route (see
+# wt_refuse_gt_submit_under_agent), so agents stack with plain branches and
+# `gh-athena pr create --base <parent-branch>`.
 #
 # The signal is only ever the variable. No TTY or CI heuristic: an agent can
 # have a TTY and a human can run without one.
@@ -148,13 +150,25 @@ if [[ -z "${WT_LIB_PUSH_SOURCED:-}" ]]; then
     }
 
     # wt_refuse_gt_submit_under_agent : Graphite's `gt submit` pushes (and opens
-    # PRs) with the owner's credentials, and wt cannot route it through a
-    # wrapper. Under the agent signal it is refused; for the owner it passes.
+    # PRs) with the owner's credentials. Under the agent signal it is refused;
+    # for the owner it passes.
+    #
+    # There is no Athena route through Graphite (DND-399, researched on gt
+    # 1.7.2). `gt submit` first requires the Graphite auth token stored in the
+    # owner's ~/.config/graphite/user_config; no env var or flag supplies one.
+    # It then opens every PR by POSTing to api.graphite.dev
+    # (/v1/graphite/submit/pull-requests), whose params carry no GitHub token:
+    # Graphite's own GitHub App opens the PR for the Graphite user, i.e. the
+    # owner. Only its branch push shells out to `git push`. A bot identity
+    # (athena-harness[bot] is a GitHub App) cannot sign in to Graphite, and
+    # Graphite does not support GitLab at all. So agents stack with plain
+    # branches instead: push each through the wrapper and open each PR with
+    # `gh-athena pr create --base <parent-branch>`.
     wt_refuse_gt_submit_under_agent() {
         local mode
         mode="$(wt_agent_push_mode)" || return 3
         [ "$mode" = owner ] && return 0
-        _wt_push_refuse "Graphite \`gt submit\` pushes and opens PRs as the owner, and WT_AGENT_PUSH=1 is set." \
-            "push each branch with \`wt\` commands that push through wt_git_push, or with \`GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git push -u origin <branch>\`, and open the PR with \`gh-athena pr create\`; $WT_AGENT_PUSH_ESCALATE"
+        _wt_push_refuse "Graphite \`gt submit\` pushes and opens PRs as the owner, and WT_AGENT_PUSH=1 is set. Graphite has no Athena route: it needs the owner's stored Graphite token, and api.graphite.dev opens the PRs as the owner." \
+            "do not use Graphite stacks as an agent. Use plain branches: push each with \`wt\` commands that push through wt_git_push, or with \`GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git push -u origin <branch>\`, then open each PR with \`~/dev/custom/ai/bin/gh-athena pr create --base <parent-branch>\` (the parent is the trunk for the bottom branch). On GitLab use \`glab-athena git push\` and \`glab-athena mr create --target-branch <parent-branch>\`. If that path fails, $WT_AGENT_PUSH_ESCALATE"
     }
 fi
