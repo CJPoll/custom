@@ -5,11 +5,14 @@
 # Athena (MR create/comment/approve, merge-train boarding, merges). Reads may
 # keep using the owner's OAuth glab.
 #
-# Self-healing: `glab-athena refresh` mints a fresh PAT for the athena-amby
+# Owner-run repair: `glab-athena refresh` mints a fresh PAT for the athena-amby
 # service account and writes it to the token file. It uses the OWNER's plain
 # `glab` (Cody's OAuth session, group owner of amby_ai) to mint, so it works
 # even when the current Athena token is expired/revoked (chicken-and-egg).
-# `refresh` is OWNER-GATED: it uses the owner's glab session. Agents never run it.
+# `refresh` is OWNER-GATED: it uses the owner's glab session. Agents never run it:
+# ai/hooks/forge-auth-guard.sh rule 6 denies it in every Claude Code session, so
+# only the owner runs it, in their own terminal. An agent that finds the token
+# expired escalates to its admiral.
 #
 # Git passthrough (DND-393): `glab-athena git <args>` runs git as athena-amby for
 # ONE command, over HTTPS only — see "The git passthrough" below.
