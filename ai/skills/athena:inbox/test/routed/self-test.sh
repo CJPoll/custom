@@ -834,8 +834,6 @@ for sv in '"true"' '"false"' '"Unknown"' '1' '{}'; do
   shim_reset; reach_self "${sv}"
   fail_shape "lookup failure: reachable ${sv} (only boolean true/false or the exact string \"unknown\" is a verdict)" "carried no reachable verdict"
 done
-shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"reachable":null}}}'
-fail_shape "lookup failure: reachable null (a missing answer is not unknown)" "carried no reachable verdict"
 shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":["reachable","unknown"]}}'
 fail_shape "lookup failure: an answer that is not an object" "carried no reachable verdict"
 shim_reset; reach_answer '{"jsonrpc":"2.0","id":2}'

@@ -1726,7 +1726,15 @@ inbox_session_state_of_entry() {
   fi
 }
 
-# inbox_default_path <maildir|server> [cwd]
+# inbox_default_path <maildir|server> [cwd] [to-spec]
+#
+# <to-spec> is --to's "<machine_id>/<inbox>" for a server address, and EMPTY
+# for --to-project (whose machine is resolved only at send time). It decides
+# the recipient's LOCALITY against machine_reachable {}.machine_id: omitting it
+# for a --to send would silently read every --to as `unproven` and refuse a
+# send to another machine whenever this one reads false -- so send-mail always
+# passes it (DEFAULT_TO), and a --to that cannot be parsed here refuses (it
+# was already validated; routed_parse_to names the reason on stderr).
 #
 # The no-flag `send-mail` decision (HG-19): "<path>\t<reason>" on stdout,
 # status 0, with <path> local | routed | refuse. Status 2 on an internal error
