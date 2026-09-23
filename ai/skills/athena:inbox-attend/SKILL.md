@@ -62,6 +62,10 @@ is the brief, not the message.
    (`Fix: … --peek`), this session is **not** the designated consumer — another
    session in this project holds it. Do not peek, do not reply, and do not
    re-arm: end the turn (that other session is the attendant for this mail).
+   **A ticket-lane `log` channel is the exception** (walt_ui's `flaky`): do not
+   `read-inbox` it here. Its count is a lane trigger — follow
+   `~/dev/custom/ai/docs/ticket-lane-action-brief.md` → *Spinning the lane up*,
+   which checks by count or `--peek` and acks only after the admiral drains.
 3. **Re-arm the waiter NOW — right after reading and acking, before you reply
    or investigate.** Launch `athena:inbox/bin/inbox-wait` with
    `run_in_background` so the next doorbell wakes you again (`athena:inbox` →

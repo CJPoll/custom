@@ -602,6 +602,13 @@ repo change a captain lands.
 | `flaky-coordinator.lock` touch-marker → DND-261 | **REUSED** (orthogonal) | The channel session's supervisor `flock` is a *different* singleton (one attendant per project), not the admiral singleton. |
 | The flaky admiral's Notion re-query (consumer-owns-membership) | **REUSED** | The channel event is a wake; the re-query stays authoritative. |
 
+**Later (2026-09-23):** the poll row above ("**DEAD — by H-4/DND-248, gated**")
+was settled without the channel hop and without its full gate. By owner
+directive the flaky trigger is now the inbox count on `walt_ui-flaky.jsonl`,
+woken by `inbox-wait`, and the poll is retired as a trigger; the owner waived
+DND-248's criteria 2 (liveness) and 3 (measured overlap). See
+`ai/docs/ticket-lane-action-brief.md` → its `Later (2026-09-23)` note.
+
 ### 9.6 The monitor-reliability evals (#47's, owner-requested)
 
 **MIGRATED to channel-delivery reliability; not dropped.** #47's conclusion —

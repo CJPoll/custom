@@ -133,8 +133,9 @@ no admiral appears to be draining the lane (no fresh `{{LOCK_PATH}}`):
    hidden in the spawn path. Automatic recovery therefore requires
    `{{STALE_MARKER_SWEEP}}` choice (a): a runner that fires **independently of lane
    activity** — a periodic/time-based check or a session-start hook. Such a runner
-   MAY also be the lane's work-trigger (the flaky `SessionStart` poll is both: it
-   fires every session start regardless of activity, so it clears a stale marker);
+   MAY also be the lane's work-trigger (the flaky `SessionStart` poll was both
+   until its retirement as a trigger: it fired every session start regardless of
+   activity, so it cleared a stale marker);
    what cannot recover a wedged-idle lane is a trigger that fires *only* on lane
    activity. A lane with no activity-independent runner has no choice (a) and must
    knowingly take choice (b), `manual-only` recovery — a human deleting
@@ -157,7 +158,7 @@ failing open to "main," a detection miss, not a guarantee. Therefore:
   the coordinator marker (a file op, not an inbox ack).
 - **The only actor that may advance the lane offset is the non-subagent lane
   consumer — the session that spawned the admiral** (for flaky, the walt_ui
-  `SessionStart` main session, which holds walt_ui tenancy for the lane channel
+  main session whose `inbox-wait` doorbell rang, which holds walt_ui tenancy for the lane channel
   and can take `{{LANE_CHANNEL}}`'s `.consumer.lock`). It acks **best-effort
   after the admiral reports drained**, to reset the count and let retention
   reclaim.
@@ -205,7 +206,7 @@ omit the check** — leaving `{{CHANNEL_RESOLUTION}}` unbound is not conformant.
 **"Fresh" is defined by `{{STALE_MARKER_SWEEP}}`, not left to prose.** The spin-up
 gate ("no *fresh* `{{LOCK_PATH}}`") needs a staleness threshold, and that threshold
 is exactly the lane's `{{STALE_MARKER_SWEEP}}` choice: for a choice-**(a)** lane a
-marker is *fresh* until the runner's window elapses (the flaky poll's 12h), after
+marker is *fresh* until the runner's window elapses (the flaky sweeper's 12h), after
 which it is stale and the gate no longer treats it as a live admiral; for a
 choice-**(b)** `manual-only` lane there is **no auto-staleness**, so *every*
 existing marker is treated as fresh and the gate degrades to "marker exists" —
@@ -220,7 +221,7 @@ only in the path): touch-before-spawn, remove-when-scope-empty, and
 exclusion and does **not** guarantee a single admiral: check-freshness-then-`touch`
 is racy — two sessions can both observe no fresh marker, both `touch`, and both
 spawn — and a plain file cannot distinguish a live admiral from a corpse (a
-timeout-based `{{STALE_MARKER_SWEEP}}` such as the flaky poll's 12h age-out is a
+timeout-based `{{STALE_MARKER_SWEEP}}` such as the flaky sweeper's 12h age-out is a
 **timeout, not a liveness check**). `{{MAX_CAPTAINS}}` and any "one admiral at a
 time" intent are therefore **not enforced by this marker**; the marker only
 *quiets the trigger* so the common case does not double-spawn. This matches the class already measured in
@@ -337,10 +338,10 @@ constants into one home (DND-276).
 | `{{BLOCKED_SEMANTICS}}` | per the flaky tracker policy above (the `Blocked By` relation) |
 | `{{MAX_CAPTAINS}}` | `1` (strictly sequential) |
 | `{{MERGE_POLICY}}` | per the flaky tracker policy above (the admiral's auto-merge default); **terminal state = merged** (the condition the marker-removal step waits for) |
-| `{{LANE_CHANNEL}}` | the walt_ui flaky `log` channel — now **declared in `ai/inbox/registry.json`** (`kind:log`, `producer:"platform"`; DND-260 landed it), but a committed declaration is not yet an operative trigger: it must also be installed and resolve in the live entry (see `{{CHANNEL_RESOLUTION}}` and the migration section) |
-| `{{CHANNEL_RESOLUTION}}` | resolve the flaky `log` channel in the **live installed** entry the consumer reads — the `$ATHENA_INBOX_ROOT/projects/*.json` entry whose realpath'd `repo` equals walt_ui's git-common-dir realpath (per `ai/contracts/athena-inbox.md` → *Finding the entry*; a human finds that entry in the file conventionally named `projects/walt_ui.json`, but the match key is `repo`, never the filename), not just the committed `ai/inbox/registry.json`. **Post-install invariant:** once the channel is declared AND installed, a live entry that does not resolve — logging the searched repo-identity key — is registry **drift**, a fault `check-inbox-registry` surfaces with `Fix: setup-inbox-registry --install`, never an empty queue. **Pre-install today:** the flaky lane's operative trigger is the `SessionStart` poll (`flaky-ticket-poll.sh`); the go-forward delivery is the inbox count reaching a live session through the `inbox-wait` background waiter (`ai/skills/athena:inbox/SKILL.md` → *How to arm it*), which goes live for the flaky lane only once the channel is installed and resolves. What a consumer does on a **declared-but-not-installed** channel — the pre-install→install cutover — is **H-4 / DND-248**, not settled here. |
+| `{{LANE_CHANNEL}}` | the walt_ui `flaky` `log` channel, file `walt_ui-flaky.jsonl` (`kind:log`, `producer:"platform"`), declared in `ai/inbox/registry.json` (DND-260) and installed in the live entry. Its inbox count is the flaky lane's **operative trigger** (see `{{CHANNEL_RESOLUTION}}`) |
+| `{{CHANNEL_RESOLUTION}}` | resolve the flaky `log` channel in the **live installed** entry the consumer reads — the `$ATHENA_INBOX_ROOT/projects/*.json` entry whose realpath'd `repo` equals walt_ui's git-common-dir realpath (per `ai/contracts/athena-inbox.md` → *Finding the entry*; a human finds that entry in the file conventionally named `projects/walt_ui.json`, but the match key is `repo`, never the filename), not just the committed `ai/inbox/registry.json`. **Post-install invariant:** once the channel is declared AND installed, a live entry that does not resolve — logging the searched repo-identity key — is registry **drift**, a fault `check-inbox-registry` surfaces with `Fix: setup-inbox-registry --install`, never an empty queue. **Operative trigger:** the inbox count on this channel, reaching a live walt_ui session when the `inbox-wait` doorbell rings (`ai/skills/athena:inbox/SKILL.md` → *How to arm it*). The `SessionStart` poll (`flaky-ticket-poll.sh`) is **retired** as a trigger. A declared channel that is **not installed** is the same drift fault, never a quiet queue. **The line is a trigger, not the authority:** the consumer checks by count or `--peek`, then decides from `{{SOURCE_RE_QUERY}}` against Notion, never from the payload (*The consumer is idempotent by construction*). |
 | `{{LOCK_PATH}}` | `~/.claude/flaky-coordinator.lock` |
-| `{{STALE_MARKER_SWEEP}}` | choice (a): an activity-independent runner clears a marker older than 12h; a human may also `rm -f` it. TWO such runners exist today: the `SessionStart` poll (`flaky-ticket-poll.sh`) and — provisioned by DND-277, so the sweep survives the poll's retirement — the dedicated `SessionStart` hook `~/dev/custom/ai/hooks/flaky-marker-sweep.sh` (see *Relationship to the existing flaky trigger*) |
+| `{{STALE_MARKER_SWEEP}}` | choice (a): an activity-independent runner clears a marker older than 12h; a human may also `rm -f` it. the runner is the dedicated `SessionStart` hook `~/dev/custom/ai/hooks/flaky-marker-sweep.sh` (DND-277), built so the sweep survives the poll's retirement. The retired poll's own 12h age-out keeps running only until walt_ui removes the hook, and nothing depends on it (see *Relationship to the existing flaky trigger*) |
 | `{{SOURCE_RE_QUERY}}` | re-run the flaky `{{SCOPE_FILTER}}` predicate (per the flaky tracker policy above) against the Tickets DB |
 
 **Later (2026-09-21):** the `{{LANE_CHANNEL}}` and `{{CHANNEL_RESOLUTION}}` rows
@@ -368,6 +369,21 @@ count reaching a live session through the `inbox-wait` background waiter
 assertion, the pre-install→install cutover (still **H-4 / DND-248**), and the
 pre-install operative trigger (the `SessionStart` poll).
 
+**Later (2026-09-23):** the flaky lane's operative trigger moved from the
+walt_ui `SessionStart` poll (`flaky-ticket-poll.sh`) to the inbox count on the
+`flaky` `log` channel (`walt_ui-flaky.jsonl`), woken by the `inbox-wait`
+doorbell. The rows above previously said the poll stayed operative
+"pre-install", and deferred the pre-install→install cutover to **H-4 /
+DND-248**. That cutover is now settled, by **owner directive**: the channel is
+installed and resolving, a declared-but-uninstalled channel is a fault, and the
+poll is retired as a trigger. The owner **waived** DND-248's retirement
+criteria 2 (liveness) and 3 (a measured overlap window). Criteria 1, 4 and 5 are
+met and verified live: the GS-2 ack fix, the retry budget, and the gap-only
+backstop. Unchanged: a channel that fails to resolve is a FAULT, never a quiet
+queue; the line is only a trigger and Notion stays the authority; the age-out
+survives through `flaky-marker-sweep.sh`. Removing the poll hook itself is
+walt_ui's change, made after this one lands.
+
 **The marker semantics preserved VERBATIM for the flaky instance:**
 
     touch ~/.claude/flaky-coordinator.lock          # before spawning
@@ -375,12 +391,11 @@ pre-install operative trigger (the `SessionStart` poll).
 
 and: if the admiral terminates without clearing the marker, delete
 `~/.claude/flaky-coordinator.lock` yourself so the lane is not wedged shut. The
-flaky instance's `{{STALE_MARKER_SWEEP}}` runs as TWO activity-independent
-age-outs — the `SessionStart` poll and, since DND-277, the dedicated
-`SessionStart` hook `flaky-marker-sweep.sh` — each self-healing a marker older
-than 12h. The age-out is a property of these runners, not of the marker; because
-the DND-277 hook is decoupled from the poll, retiring the poll does NOT remove
-the lane's age-out (see the placeholder table and *Relationship to the existing
+flaky instance's `{{STALE_MARKER_SWEEP}}` is the activity-independent
+age-out in the dedicated `SessionStart` hook `flaky-marker-sweep.sh` (DND-277),
+which self-heals a marker older than 12h. The age-out is a property of that
+runner, not of the marker; because the hook is decoupled from the poll, retiring
+the poll does NOT remove the lane's age-out (see the placeholder table and *Relationship to the existing
 flaky trigger*).
 
 The flaky instance's add/drop handling is the generic *Add / drop handling*
@@ -392,13 +407,15 @@ new rule.
 
 ## Relationship to the existing flaky trigger
 
-The flaky instance is today spun by the `SessionStart` poll
+The flaky instance was spun by the `SessionStart` poll
 (`~/dev/walt_ui/.claude/hooks/flaky-ticket-poll.sh`) and the spawn text
-`flaky-coordinator-spawn.txt`. Under the go-forward model the trigger moves from
-a `SessionStart` pull to the inbox count delivered by the `inbox-wait` background
-waiter on `{{LANE_CHANNEL}}` (`ai/skills/athena:inbox/SKILL.md` → *How to arm
-it*), still gated so nothing old comes down before the new path is proven. The
-marker's **touch-before-spawn / remove-when-scope-empty** semantics carry over
+`flaky-coordinator-spawn.txt`. The trigger has now moved from that pull to the
+inbox count delivered by the `inbox-wait` background waiter on
+`{{LANE_CHANNEL}}` (`ai/skills/athena:inbox/SKILL.md` → *How to arm it*); the
+poll is retired as a trigger by owner directive (see the `**Later
+(2026-09-23)**` note under the worked-instantiation table). The poll hook and its
+`settings.json` registration are removed by walt_ui's own change, after this one.
+The marker's **touch-before-spawn / remove-when-scope-empty** semantics carry over
 unchanged, but two things do
 change and are NOT "only the trigger":
 

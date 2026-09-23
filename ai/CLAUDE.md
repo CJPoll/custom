@@ -387,8 +387,8 @@ points at, it states no lane mechanics (the marker semantics, channel resolution
 read mechanics, and add/drop handling are the brief's); on any detail the brief
 wins.
 
-**What routes a session into the brief — two trigger sources during the
-migration.** Any signal means lane state may have changed and the brief should
+**What routes a session into the brief — the inbox count; the `SessionStart`
+poll is retired.** Any signal means lane state may have changed and the brief should
 be consulted:
 
 - **Inbox count.** A nonzero unread count on the lane's `log` channel (surfaced
@@ -396,9 +396,19 @@ be consulted:
   through the `inbox-wait` background waiter (`athena:inbox` → *How to arm it*).
   Whether this trigger is operative for a given lane is the brief's
   `{{CHANNEL_RESOLUTION}}`, not settled here.
-- **`SessionStart` poll.** `~/dev/walt_ui/.claude/hooks/flaky-ticket-poll.sh`
-  reports flaky-lane state as factual `additionalContext`; it remains flaky's
-  operative trigger until H-4/DND-248 retires it.
+  For the flaky lane this trigger is **operative**: the count on walt_ui's
+  `flaky` `log` channel (`walt_ui-flaky.jsonl`, producer platform).
+- **`SessionStart` poll — retired.** `~/dev/walt_ui/.claude/hooks/flaky-ticket-poll.sh`
+  is no longer a trigger for any lane. Its removal from walt_ui is walt_ui's
+  change.
+
+**Later (2026-09-23):** the poll bullet above said the `SessionStart` poll
+"remains flaky's operative trigger until H-4/DND-248 retires it". Superseded by
+**owner directive**: the inbox count on the flaky `log` channel is now flaky's
+operative trigger, and the poll is retired. The owner waived DND-248's
+retirement criteria 2 (liveness) and 3 (a measured overlap window); criteria 1,
+4 and 5 (the GS-2 ack fix, the retry budget, the gap-only backstop) are met and
+verified live. The brief's `{{CHANNEL_RESOLUTION}}` records the cutover.
 
 Whether and how the lane response differs by trigger — including the
 trigger-specific read mechanics — is the brief's, not this section's.

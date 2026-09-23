@@ -401,6 +401,11 @@ consumer watching `slack` + `flaky` read only `slack` and nearly missed the
 first-ever `flaky` event). Grep the line's fixed prefix
 (`^athena:inbox: rang-channels: `) and take the space-separated names after it.
 
+**A ticket-lane `log` channel is not read-and-acked on the wake** (walt_ui's
+`flaky`). Its count is a lane trigger: follow
+`~/dev/custom/ai/docs/ticket-lane-action-brief.md` → *Spinning the lane up*,
+which checks by count or `--peek` and acks only after the admiral drains.
+
 **`rang-channels: UNKNOWN` is a scan-everything signal, never "nothing new".**
 If the fired doorbell maps to no declared channel — a doorbell recreated out of
 band, or a registry change under the armed waiter — the waiter still exits `0`
