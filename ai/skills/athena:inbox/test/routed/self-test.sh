@@ -654,8 +654,8 @@ assert_contains "R2: with a threshold set, the session channel prints STALE like
 echo "== HG-19 domain: routed_default_path =="
 DP() { ( . "${LIB}/err.sh"; . "${LIB}/names.sh"; . "${LIB}/fence.sh"; . "${LIB}/routed.sh"; routed_default_path "$@" ); }
 assert_eq "domain: a maildir address is local, whatever the server says" "local" "$(DP maildir registered set true | cut -f1)"
-assert_eq "domain: ... and the reason names the missing self id (the gap), not a guess" "true" \
-  "$(DP maildir registered set true | cut -f2 | grep -q "own server id" && echo true || echo false)"
+assert_contains "domain: ... and the reason names the missing self id (the gap), not a guess" "own server id" \
+  "$(DP maildir registered set true | cut -f2)"
 assert_eq "domain: server + unregistered -> refuse" "refuse" "$(DP server unregistered set unasked | cut -f1)"
 assert_eq "domain: server + broken registration -> refuse (never read as unregistered)" "refuse" "$(DP server broken set unasked | cut -f1)"
 assert_contains "domain: the broken-registration reason says it cannot be read" "cannot be read" "$(DP server broken set unasked)"
