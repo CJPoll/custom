@@ -130,6 +130,37 @@ detects a worktree. Onboarding a new work account: create its Notion
 Connection, share pages with it, save the secret to a token file, then extend
 the mode map near the top of the script.
 
+### add-athena-mcp
+Registers the hosted **Athena MCP server** (gen_saas `apps/athena`, mounted at
+`/mcp`, DND-295) for the **current project** at local scope — sibling of
+`add-notion`. The server is HTTP (Streamable HTTP, epic decision D5:
+server-hosted, not a stdio shim) and authenticates with the **machine token the
+inbox client already holds** — there is NEVER a second copy of the token.
+
+**Token handling (one source of truth, never in `~/.claude.json`).** The
+registered header is the literal `Authorization: Bearer ${ATHENA_MCP_BEARER}`;
+Claude Code expands the env var at MCP-connect time, so the token is not written
+into config. The claude launcher `scripts/athena` exports `ATHENA_MCP_BEARER`
+from `~/.config/athena-inbox-client/config.json` (via `jq -r .token`), scoped to
+the launch rather than a shell profile. That export is **environment-safe but
+hard-fails on a broken required input**: an *absent* inbox config skips silently
+(not the Athena environment, so an unrelated `claude` launch is never broken); a
+*present-but-tokenless/unreadable* config, or a missing `jq`, is a loud `exit 1`
+with a `Fix:` rather than a silent 401 (owner: hard-fail-on-required-inputs). An
+explicit `export ATHENA_MCP_BEARER=…` always wins and skips the read.
+
+Idempotent (`claude mcp add --transport http athena <url> …`, safe to re-run);
+`--dry-run` prints the command + the export line without running anything;
+`--url` overrides the `/mcp` URL (default derived from the inbox config's
+`server_url` host). `--help` is stdout-only, exit 0. Same **launch-dir rule** as
+`add-notion` (run from the main checkout; a worktree warning fires). Self-test:
+`scripts/test/add-athena-mcp/self-test.sh`.
+
+**Verification caveat.** The `${VAR}`-in-header expansion is reported (not yet
+independently verified against live Claude Code MCP-connect behavior; HG-4
+confirms). If it does not apply, the header reaches the server literally and is
+answered 401 — a loud failure, never a silent-dark channel.
+
 ### Shipwright commit discipline (`athena-shipwright-commit.sh`)
 
 The shipwright is an autonomous committer on an hourly cron, in a checkout a

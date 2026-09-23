@@ -8,4 +8,58 @@
 # (Ref: Claude Code prompt-caching docs; verified 2026-09-21.)
 export CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL="${CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL:-1h}"
 
+# The Athena MCP server (/mcp, DND-295) authenticates with the machine token the
+# inbox client already holds. Export the bearer HERE rather than in a shell
+# profile: it then lives only in the launched `claude` process env (and, like
+# any env var, is inherited by claude's own subprocesses/subagents) — narrower
+# than a login shell where every interactive command would see it, and the
+# standard trade-off of env-var MCP auth versus writing the secret into
+# ~/.claude.json. `add-athena-mcp` registers the MCP header as
+# `Authorization: Bearer ${ATHENA_MCP_BEARER}` and Claude Code expands it from
+# this process env at connect time; the token is never written into
+# ~/.claude.json.
+#
+# Only set it when the caller has not already (an explicit export wins and skips
+# the read below). A MISSING inbox config means the inbox client is not
+# provisioned here — this is not an Athena-MCP environment, so the bearer is not
+# a required input for this launch: skip silently rather than break an unrelated
+# `claude` launch (environment-safe, like the harness's registry checks). A
+# PRESENT config IS the Athena environment, so a broken/tokenless one is a loud
+# HARD FAIL — never a silent launch that would 401 every /mcp call
+# (owner: hard-fail-on-required-inputs).
+if [ -z "${ATHENA_MCP_BEARER:-}" ]; then
+  athena_inbox_config="${HOME}/.config/athena-inbox-client/config.json"
+
+  # Detect the environment by EXISTENCE (-e), not readability: a present-but-
+  # unreadable config (wrong perms) is the Athena environment with a broken
+  # required input, NOT "some other machine" — it must hard-fail, never take the
+  # silent skip (a present-but-wrong config must not read as a missing one).
+  if [ -e "${athena_inbox_config}" ]; then
+    if ! command -v jq >/dev/null 2>&1; then
+      echo "athena: jq is required to read the machine token from ${athena_inbox_config}" \
+           "but is not on PATH." >&2
+      echo "Fix: install jq, or export ATHENA_MCP_BEARER yourself before launching." >&2
+      exit 1
+    fi
+
+    if [ ! -r "${athena_inbox_config}" ]; then
+      echo "athena: inbox-client config exists but is not readable: ${athena_inbox_config}" >&2
+      echo "Fix: fix its permissions (0600, owned by you), or export ATHENA_MCP_BEARER" \
+           "yourself before launching." >&2
+      exit 1
+    fi
+
+    ATHENA_MCP_BEARER="$(jq -r '.token // empty' "${athena_inbox_config}")"
+
+    if [ -z "${ATHENA_MCP_BEARER}" ]; then
+      echo "athena: no .token in ${athena_inbox_config} (the Athena MCP server would 401)." >&2
+      echo "Fix: the inbox-client config must carry the machine token under .token;" \
+           "re-run scripts/setup-athena-inbox-client, or export ATHENA_MCP_BEARER yourself." >&2
+      exit 1
+    fi
+
+    export ATHENA_MCP_BEARER
+  fi
+fi
+
 "${HOME}/.local/bin/claude" --verbose --dangerously-skip-permissions "${@}"
