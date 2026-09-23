@@ -2363,9 +2363,11 @@ wins**. The roles are those of *Conformance language* (ingress / router / adapte
 **The router is conformant when it:**
 - evaluates an event against **all** of the owner's **enabled** rules, firing **every** match
   independently — no first-match, no ordering, no short-circuit (*Fan-out: every match fires*);
-- scopes the Level-1 HANDLED/UNMATCHED decision to the **event owner's own** rules, dead-letters
-  **UNMATCHED** to the per-`(owner, type)` exemplar-plus-count store (never merely counted, never
-  silently dropped), and never dead-letters a HANDLED event (*Event disposition and dead-letter*);
+- scopes the Level-1 HANDLED/UNMATCHED decision to the **event owner's own** rules **or a direct
+  delivery** (D40 — an addressed `fleet.session.message` with zero matching rules is still
+  HANDLED), dead-letters **UNMATCHED** to the per-`(owner, type)` exemplar-plus-count store (never
+  merely counted, never silently dropped), and never dead-letters a HANDLED event (*Event
+  disposition and dead-letter*);
 - resolves **every** non-DELIVERED Level-2 outcome to its own observable disposition — FILTERED,
   SUPPRESSED, REFUSED (refused-delivery store + report), FAILED (failed-delivery store + report)
   — so no matched delivery is ever a silent drop (*Event disposition and dead-letter*;
