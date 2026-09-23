@@ -13,6 +13,9 @@
 # config is replaced with a sandbox file, and the PAT comes from a fixture token
 # file. Resolution is observed through the GLAB_ATHENA_GIT_DRY_RUN=1 seam.
 #
+# Gated: ai/bin/harness-gate's discover_self_tests runs every tracked
+# **/self-test.sh (this file reports as `self-test: ai/test/glab-athena`).
+#
 # Run against another copy of the wrapper (old-vs-new evidence) with
 #   GLAB_ATHENA_UNDER_TEST=/path/to/glab-athena bash ai/test/glab-athena/self-test.sh
 set -uo pipefail
