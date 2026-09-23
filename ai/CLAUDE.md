@@ -133,8 +133,8 @@ the rule; other documents cite it by name.
    record its real failure output — the failing case and its assertion message.
 2. Apply the fix. Re-run the test and record it passing.
 3. Put that before/after evidence in the fix commit's message, where
-   `athena-diff-critic` reads it. Also put it in the MR/PR body; a repo with no
-   PRs (like this one) uses the captain report instead. Where the project keeps a
+   `athena-diff-critic` reads it. Also put it in the MR/PR body; a repo without
+   MRs/PRs uses the captain report instead. Where the project keeps a
    `SABOTAGE_RECORDS.md`, record it there too.
 
 What counts as a bug fix, what is exempt (features, refactors, prose-only

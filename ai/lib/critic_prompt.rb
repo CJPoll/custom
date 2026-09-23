@@ -88,7 +88,7 @@ module CriticPrompt
 
     A bug fix needs BOTH:
     1. A test in the diff that exercises the defect (added or changed).
-    2. Fail-before evidence: the RECORDED failing output of that test run against the UNFIXED code (the failure line, assertion message, or failing case name with its non-zero result), plus the passing re-run after the fix. It counts when it appears in a commit message below, or in a report or sabotage-record file inside the diff. A bare claim ("verified red/green", "test failed before") with no recorded output is not evidence.
+    2. Fail-before evidence: the RECORDED failing output of that test run against the UNFIXED code (the failure line, assertion message, or failing case name with its non-zero result), plus the passing re-run after the fix. It counts when it appears in a commit message below, or in a report or sabotage-record file inside the diff. A bare claim ("verified red/green", "test failed before") with no recorded output is not evidence. For a flaky-test fix, the evidence is the recorded failing run(s) on the unfixed code with the seed or repeat count that reproduced it.
 
     A bug fix missing either is a `tests` finding. Every finding blocks, so it is must-fix. Name which part is missing.
     If the commit messages are NOT SUPPLIED below, you cannot see a fix claim: note this addendum as "unable to assess", never as a finding.
@@ -119,7 +119,10 @@ module CriticPrompt
     return COMMITS_NOT_SUPPLIED if commit_messages.nil?
     return COMMITS_NONE if commit_messages.strip.empty?
 
-    "Commit messages on this change (oldest first):\n\n```text\n#{commit_messages}\n```"
+    # One backtick longer than the longest run inside, so a pasted ``` fence
+    # (the natural way to quote failing test output) cannot close the block.
+    fence = "`" * [3, (commit_messages.scan(/`+/).map(&:length).max || 0) + 1].max
+    "Commit messages on this change (oldest first):\n\n#{fence}text\n#{commit_messages}\n#{fence}"
   end
   private_class_method :commits_section
 end

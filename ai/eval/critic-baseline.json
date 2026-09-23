@@ -21,7 +21,7 @@
     "14-feature-no-failbefore-needed-good"
   ],
   "corpus_id": "core-01-07+dnd-400-12-14",
-  "corpus_selector": "ai/bin/critic-eval --run --only core (each fixture above declares since=core in its meta; re-measure the comparable series with this selector once the corpus grows)",
+  "corpus_selector": "ai/bin/critic-eval --run --only core (01-07 declare since=core in their meta; re-measure the comparable series with this selector). 12-14 declare since=dnd-400 and are re-measured with --only dnd-400.",
   "fixture_count": 10,
 
   "runs": 3,

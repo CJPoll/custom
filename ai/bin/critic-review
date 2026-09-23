@@ -834,6 +834,11 @@ def run_self_test
     # find the rule it enforces (cite by section name, never restate a second copy).
     ok &&= CriticPrompt::BUG_FIX_RULE.include?("TDD Workflow")
     ok &&= CriticPrompt::SUPPORTED_TOKENS.include?("commit-msg")
+    # Pasted test output often carries its own ``` fence. The commits block must
+    # use a LONGER fence, or that paste closes the block early and the judge
+    # reads the rest of the evidence as loose prompt text.
+    fenced = CriticPrompt.build(diff: "D", commit_messages: "fix: x\n```\nFAILOUT\n```\nafter")
+    ok &&= fenced.include?("````text\nfix: x\n```\nFAILOUT\n```\nafter\n````")
 
     %w[critic-review critic-eval].each do |bin|
       path = File.join(__dir__, bin)
@@ -965,6 +970,16 @@ def run_self_test
         ok &&= shown.include?("foo.sh:12 drops the status")
         ok &&= !shown.include?("FINDINGS: correctness")   # the trailer is not echoed
         ENV.delete("CRITIC_REVIEW_STUB")
+
+        # COMMIT LOG -- the judge's commit-msg input, three outcomes kept apart:
+        # commits present, none (""), and an unreadable log (nil, said on stderr).
+        first = `git rev-parse HEAD`.strip
+        File.write("a.txt", "two\n")
+        sh.call("git", "-c", "commit.gpgsign=false", "commit", "-qam", "fix: two")
+        ok &&= commit_log(first).to_s.include?("fix: two")
+        ok &&= (commit_log("HEAD") == "")
+        rc_nil, said = capture_err { commit_log("no-such-ref-dnd400").inspect }
+        ok &&= (rc_nil == "nil") && said.include?("Fix:") && said.include?("no-such-ref-dnd400")
       end
     end
   end
