@@ -45,6 +45,7 @@ tools:
   check-hooks-registered:  { class: readOnly, reason: check }
   check-inbox-registry:    { class: readOnly, reason: check }
   check-inotify-headroom:  { class: readOnly, reason: check }
+  check-pipefail-grep:     { class: readOnly, reason: check }
   check-tool-risk:         { class: readOnly, reason: check }
   confirm-merged:          { class: readOnly, reason: query }
   critic-eval:             { class: readOnly, reason: eval }
