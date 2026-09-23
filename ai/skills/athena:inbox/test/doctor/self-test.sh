@@ -837,7 +837,7 @@ assert_contains "... says the lookup itself failed, with its words" "the registr
 RO="$(sp_run false)"
 assert_eq "send-paths: registered, this machine unreachable -> warn" warn "$(state_of "${RO}" send-paths)"
 assert_contains "... says a same-machine or unproven server-addressed send is REFUSED, one elsewhere still routes" \
-  "to THIS machine (or one not proven elsewhere) is REFUSED; one to another of your machines still ROUTES" "${RO}"
+  "to THIS machine (or one not proven elsewhere, e.g. --to-project) is REFUSED; a --to another of your machines still ROUTES" "${RO}"
 assert_contains "... warn carries a Fix naming both explicit flags" "with --routed" "${RO}"
 RO="$(sp_run not-asked)"
 assert_eq "send-paths: --no-server -> na, never ok" na "$(state_of "${RO}" send-paths)"
