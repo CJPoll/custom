@@ -138,7 +138,7 @@ if [ "${1:-}" = git ]; then
 	TOKEN=""
 	[ -r "$TOKEN_FILE" ] && TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
 	[ -n "$TOKEN" ] || {
-		echo "glab-athena: REFUSING \`git ${1:-}\`: the athena-amby token file $TOKEN_FILE is missing, unreadable or empty, so the push cannot run as Athena." >&2
+		echo "glab-athena: REFUSING \`git\`: the athena-amby token file $TOKEN_FILE is missing, unreadable or empty, so the push cannot run as Athena." >&2
 		echo "  Fix: do not run \`glab-athena refresh\` or any \`glab auth\` yourself (owner-gated), and do not fall back to a plain \`git push\`; $FG_ESCALATE" >&2
 		exit 3
 	}
@@ -146,7 +146,11 @@ if [ "${1:-}" = git ]; then
 fi
 
 # --- normal path: run glab as the Athena service account -------------------
-[ -r "$TOKEN_FILE" ] || { echo "glab-athena: token file $TOKEN_FILE missing/unreadable (run: glab-athena refresh)" >&2; exit 1; }
+[ -r "$TOKEN_FILE" ] || {
+	echo "glab-athena: the athena-amby token file $TOKEN_FILE is missing or unreadable, so this cannot run as Athena." >&2
+	echo "  Fix: do not run \`glab-athena refresh\` or any \`glab auth\` yourself (owner-gated), and do not fall back to plain \`glab\`; escalate to your admiral with the command + error and wait (athena:github -> \"When a forge write can't be done as Athena\")." >&2
+	exit 1
+}
 GITLAB_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
 export GITLAB_TOKEN GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 GLAB_SKIP_UPDATE_CHECK=1
 exec glab "$@"
