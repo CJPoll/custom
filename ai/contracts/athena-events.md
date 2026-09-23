@@ -467,13 +467,10 @@ miss.
     discard it. The row **keeps** it in a list of the row's earlier un-notified
     outages, oldest first, and the new transition takes the exemplar.
     - **Bounded, never silently.** The list has an explicit bound, set by the
-      implementation (gen_saas: 10). Past it the row keeps the oldest entries
-      and **counts** each further outage as omitted. An omitted outage's
-      detail is lost while unread, and only its count survives: that overflow
-      is the **one remaining exception to never-destroy-unread** in this store.
-      It is never silent. Every omission is logged where it happens, and the
-      next owner report states it (`N more earlier outage(s) omitted`). The
-      transition count still includes every outage.
+      implementation. Past it the row keeps the oldest entries and **counts**
+      each further outage as omitted. Every omission is logged where it
+      happens, and the next owner report states it (`N more earlier outage(s)
+      omitted`). The transition count still includes every outage.
     - **Reported.** The next owner report MUST carry every kept earlier outage,
       at least its `unreachable_since` and pending count (a missing value
       renders `?`), and the omitted count. One report may carry several
@@ -486,6 +483,14 @@ miss.
       zero times. A transition on a row whose exemplar was reported, or that
       the owner has read, replaces the exemplar and starts the list empty: the
       owner already has that detail.
+    - **The two stated exceptions to never-destroy-unread.** Only these two
+      cases discard an unread outage's detail from the store, and each leaves a
+      trace:
+      1. **Reported, then replaced.** A transition on an unread row whose
+         exemplar's owner report was delivered replaces it. The detail
+         survives in that delivered report, not in the store.
+      2. **Overflow past the bound.** An omitted outage's detail is never kept.
+         Only its count survives, and it is logged and reported as above.
   - **Marker.** `Fix: <machine> is unreachable (machine <machine_id>,
     unreachable since <unreachable_since>, <pending> pending deliveries;
     <count> transition(s) on this record) — it is connected-or-not but has
@@ -503,7 +508,7 @@ miss.
   *Grain* above bounds it to at most one unread exemplar per key, plus a
   machine-unreachable row's bounded list of earlier un-notified outages
   (*Machine-unreachable rows* → *An un-notified outage is kept, up to a bound*
-  above), whose overflow is the one remaining exception that rule states.
+  above), which also states the two exceptions this store makes.
   **The store
   carries no cap or TTL number in this contract** — any
   operational cap/TTL is ops/owner config, outside this contract's MUST surface.
@@ -519,9 +524,10 @@ miss.
   machine-unreachable row's next transition replaced its exemplar even unread,
   and *Episodes* said only the transition count survived an earlier outage,
   plus its owner report if that went out first. Superseded (DND-396, gen_saas):
-  the exception is narrowed to a logged, reported overflow past an explicit
-  bound. An exemplar whose owner report has not been delivered is kept in a
-  bounded list and reported, not replaced (*Machine-unreachable rows* → *An
+  the exception is narrowed to two stated cases: an exemplar whose owner report
+  was delivered, and a logged, reported overflow past an explicit bound. An
+  exemplar whose owner report has not been delivered is kept in a bounded list
+  and reported, not replaced (*Machine-unreachable rows* → *An
   un-notified outage is kept, up to a bound*). Why: when an
   earlier outage's report failed, or had not gone out, before the next
   transition, the replace destroyed that outage's detail silently, and only
