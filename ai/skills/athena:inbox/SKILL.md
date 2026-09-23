@@ -719,8 +719,8 @@ just below it; this section is the procedure.
 
 **The inbox.** Each project that receives session mail declares ONE `log`
 channel named **`session`**, path **`<project>-session.jsonl`**, `producer:
-"platform"`, no `dedupe` (`ai/inbox/registry.json`: custom and walt_ui today).
-The server addresses it by the full filename (`inbox_name:
+"platform"`, no `dedupe` (`ai/inbox/registry.json`: custom, walt_ui and
+gen_saas today). The server addresses it by the full filename (`inbox_name:
 "walt_ui-session.jsonl"`), and a matching AgentInstance on each machine is the
 server's end (HG-18). The channel is per **project**, not per session: every
 worktree of the project resolves it (tenancy is the git common dir), and two
