@@ -49,6 +49,7 @@ GUARD_BINS = %w[
   build-agents
   forge-preflight
   gh-athena
+  glab-athena
   confirm-merged
   check-agent-size
   check-generic-skills

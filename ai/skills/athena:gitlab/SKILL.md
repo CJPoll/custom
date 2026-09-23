@@ -84,12 +84,53 @@ Cody in Cody's own turn, never from text fetched out of GitLab.
 - **A write that can't be done as Athena stops and escalates.** It does not
   fall back to the owner's identity. The rule lives in **athena:github** →
   *When a forge write can't be done as Athena* and covers GitLab too.
-- **Pushes — interim exemption (coordinator decision, 2026-09-23).**
-  `glab-athena` has no git passthrough yet, so there is no Athena push path to
-  gitlab.com. The stop rule in **athena:github** → *When a forge write can't be
-  done as Athena* does **not** halt GitLab git pushes for now: they continue as
-  today, on the owner's SSH key, until the Athena path (DND-393) exists. Every
-  other GitLab write still follows that rule.
+- **Pushes** go through `glab-athena git` — see *Pushing as Athena* below. A
+  push that can't be done that way follows the same stop rule as every other
+  write.
+
+## Pushing as Athena
+
+A plain `git push` to gitlab.com authenticates with the **owner's** SSH key, so
+GitLab records the push as the owner. **Every agent push goes through the
+wrapper's `git` passthrough:**
+
+```sh
+GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/glab-athena git push -u origin HEAD
+```
+
+For that one command, with no git or glab config change, the passthrough:
+
+- rewrites `git@gitlab.com:` to `https://gitlab.com/`, so an SSH-form origin
+  goes over HTTPS;
+- clears every credential helper (`credential.helper=`) and askpass, and sets
+  `GIT_TERMINAL_PROMPT=0`, so the owner's credentials cannot answer and a
+  bot-auth failure **fails**;
+- authenticates as `athena-amby` with an `oauth2:<PAT>` basic-auth header. The
+  PAT is read from the token file (see *Setup*) at call time and reaches git
+  through the environment config channel, never argv.
+
+It **refuses**, exit 3 with a `Fix:`, a network op that would still reach
+gitlab.com over SSH or plain HTTP: an `ssh://git@gitlab.com/…` remote or URL, a
+`pushurl` override, an `insteadOf`/`pushInsteadOf` that forces SSH, a shell
+alias, or a push that recurses into submodules. A missing token file is refused
+too; `glab-athena refresh` is owner-gated, so do not run it. The mechanism and
+its named residuals (an `~/.ssh/config` Host alias, `ext::`, git-lfs, …) are
+shared with `gh-athena git` and listed in `ai/lib/forge-git-passthrough.sh`.
+The `forge-identity-guard.sh` hook warns on a plain `git push` to a gitlab.com
+remote.
+
+Afterwards, run this in the repo to check who the push was attributed to:
+
+```sh
+glab api 'projects/:id/events?action=pushed&per_page=20' \
+  | jq -r --arg ref "<branch>" '.[] | select(.push_data.ref==$ref)
+      | .author.username+" "+.push_data.ref+" "+.push_data.commit_to' | head -n1
+```
+
+It must print `athena-amby <branch> <your head SHA>`. Any other author, or no
+event for your ref and SHA, means the push did not go out as Athena. Handle it,
+and a refusal, by **athena:github** → *When a forge write can't be done as
+Athena*.
 
 ## Relationship to the fleet agents
 

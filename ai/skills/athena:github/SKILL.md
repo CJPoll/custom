@@ -97,10 +97,10 @@ checks `push`, `fetch`, `pull`, `ls-remote`, `clone`, `remote update`,
 refuses a shell alias and a push that recurses into submodules outright. It
 does **not** see an `~/.ssh/config` Host alias for github.com, `ext::`
 transports, `clone --recurse-submodules`, git-lfs, or other subcommands; the
-header of `ai/bin/gh-athena` lists these. Handle a refusal by the rule in the
-next section. The
-`forge-identity-guard.sh` hook warns on a plain `git push` to a github.com
-remote.
+header of `ai/lib/forge-git-passthrough.sh` (shared with `glab-athena git`)
+lists these. Handle a refusal by the rule in the next section. The
+`forge-identity-guard.sh` hook warns on a plain `git push` to a github.com or
+gitlab.com remote.
 
 Afterwards, check who the push was attributed to:
 
@@ -111,7 +111,8 @@ gh api 'repos/<owner>/<repo>/activity?per_page=3' -q '.[]|.activity_type+" "+.re
 It must show `athena-harness[bot]`. If it does not, that is the next section's
 case.
 
-GitLab pushes: see **athena:gitlab** → *Rules & etiquette* (the pushes item).
+GitLab pushes go through `glab-athena git`: see **athena:gitlab** → *Pushing
+as Athena*.
 
 ## When a forge write can't be done as Athena
 
@@ -137,8 +138,8 @@ fleet goes on attributing work to the owner.
 
 This is the one home of the rule. Other skills, briefs, and agent blocks cite
 this section by name and do not restate it. The `Fix:` text in
-`forge-auth-guard.sh`, `forge-identity-guard.sh`, and the `gh-athena` refusal
-points here.
+`forge-auth-guard.sh`, `forge-identity-guard.sh`, and the `gh-athena git` /
+`glab-athena git` refusals point here.
 
 ## Vocabulary map (GitLab → GitHub)
 

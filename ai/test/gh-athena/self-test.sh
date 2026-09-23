@@ -70,9 +70,10 @@ gha "${R}" push origin HEAD
 if [ "${RC}" = 0 ] && [[ "${OUT}" == *"dry-run: url https://github.com/o/r.git"* ]] \
   && [[ "${OUT}" == *"[credential.helper=]"* ]] \
   && [[ "${OUT}" == *"[url.https://github.com/.insteadOf=git@github.com:]"* ]] \
-  && [[ "${OUT}" == *"[http.https://github.com/.extraheader=AUTHORIZATION: basic <x-access-token:REDACTED>]"* ]] \
+  && [[ "${OUT}" == *"GIT_CONFIG_KEY_0=[http.https://github.com/.extraheader] GIT_CONFIG_VALUE_0=[AUTHORIZATION: basic <x-access-token:REDACTED>]"* ]] \
+  && [[ "${OUT}" != *"exec git"*"extraheader"* ]] \
   && [[ "${OUT}" == *"[core.askPass=]"* ]]; then
-  ok "1. git@github.com: origin -> https://github.com/o/r.git, helper off, bot header"
+  ok "1. git@github.com: origin -> https://github.com/o/r.git, helper off, bot header via env (not argv)"
 else bad "1. SSH-form origin rewritten with bot auth" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
 B64="$(printf 'x-access-token:%s' "${FAKE_TOKEN}" | openssl base64 -A)"
@@ -208,6 +209,15 @@ R="$(new_repo real "${BARE}")"
 if [ "${RC}" = 0 ] && [ "$(git -C "${BARE}" rev-parse refs/heads/landed 2>/dev/null)" = "$(git -C "${R}" rev-parse HEAD)" ]; then
   ok "16. real exec: push to a local bare remote under .../github.com/... lands"
 else bad "16. real local push lands" "rc=${RC} err='$(cat "${TMP}/err")'"; fi
+
+# A REAL exec of a local command through the wrapper: git itself must see the
+# bot header for https://github.com/ (proves the env config channel is wired,
+# not just printed), and the token must not be on git's argv.
+R="$(new_repo hdr 'git@github.com:o/r.git')"
+( cd "${R}" && "${WRAPPER}" git config --get-all http.https://github.com/.extraheader ) >"${TMP}/out" 2>"${TMP}/err"; RC=$?
+if [ "${RC}" = 0 ] && [ "$(cat "${TMP}/out")" = "AUTHORIZATION: basic ${B64}" ]; then
+  ok "17. real exec: git sees the x-access-token basic header for https://github.com/"
+else bad "17. git sees the bot header" "rc=${RC} out='$(cat "${TMP}/out")' err='$(cat "${TMP}/err")'"; fi
 
 echo
 echo "==================================================="

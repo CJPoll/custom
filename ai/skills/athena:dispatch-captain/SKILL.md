@@ -80,8 +80,9 @@ Give the captain, in the brief:
   the DB cannot accept (see the substitution in [[athena:fleet-inputs]]).
 
 - **The forge-identity rule, cited by name.** Every brief carries this line:
-  *"Forge writes and pushes run as Athena: follow **athena:github** →
-  *Pushing as Athena* for every push, and **athena:github** → *When a forge
+  *"Forge writes and pushes run as Athena: follow *Pushing as Athena* in
+  **athena:github** (github.com) or **athena:gitlab** (gitlab.com) for every
+  push, and **athena:github** → *When a forge
   write can't be done as Athena* when any forge operation can't run under the
   Athena identity; escalate to me, the admiral."* Cite it; do not restate the
   rule in the brief. A captain

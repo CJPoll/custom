@@ -17,9 +17,10 @@
 # branch.<cur>.remote / origin) in the repo the push runs in (`-C <dir>`, else a
 # preceding `cd <dir>`, else the hook's cwd). A push whose remote CANNOT be
 # resolved still warns, naming that it could not tell — an unresolvable remote
-# must not read as "not GitHub". A remote resolving elsewhere (GitLab, a local
-# path) is allowed silently: glab-athena has no git passthrough, so there is no
-# Athena push path to point a GitLab push at.
+# must not read as "not GitHub". DND-393 extends the rule to gitlab.com: a plain
+# push there goes out on the owner's SSH key and GitLab records the owner, and
+# `glab-athena git` is now the Athena path to point it at. A remote resolving
+# elsewhere (a local path, another host) is allowed silently.
 #
 # SCOPE: this surfaces the authorship-ESTABLISHING write — `pr create` /
 # `mr create` — AND the MERGE write the athena-admiral performs (`pr merge` /
@@ -107,29 +108,35 @@ fi
 
 # ---- Plain `git push` to a github.com remote (DND-389) ----------------------
 # Dequote (as forge-auth-guard does) so quoting cannot split the pattern, and
-# mask the wrapper form `gh-athena git` first so it is never matched.
+# mask the wrapper forms `gh-athena git` / `glab-athena git` first so they are
+# never matched.
 # Newlines become `;` here (not spaces, as in FLAT): a push's arguments end at
 # the end of its line, so `git push<NL>echo done` never reads `echo` as a remote.
-GFLAT=$(printf '%s' "$CMD" | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#gh-athena[[:space:]]+git([[:space:]])#GH_ATHENA_GIT\1#g')
+GFLAT=$(printf '%s' "$CMD" | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g')
 # `git`, bare or path-qualified, then only GLOBAL options (-C/-c take a value),
 # then `push`. `git commit -m "push"` does not match: `commit` is not an option.
 GIT_PUSH_RE='(^|[[:space:];&|(/])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:];&|]+|--?[^[:space:];&|]+))*[[:space:]]+push([[:space:]]|$|[;&|)])'
 
 PUSH_FIX='Fix: push through the wrapper, which authenticates as athena-harness[bot] over HTTPS for that one command: `GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c credential.helper= -c url.https://github.com/.insteadOf=git@github.com: push …` (athena:github -> "Pushing as Athena"). If the wrapper refuses or fails, do not work around this; escalate to your admiral with the command + error and wait.'
+GITLAB_PUSH_FIX='Fix: push through the wrapper, which authenticates as athena-amby over HTTPS for that one command: `GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/glab-athena git push …` (athena:gitlab -> "Pushing as Athena"). If the wrapper refuses or fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'"'"'t be done as Athena").'
 
-# is_github_url <url> : the URL's HOST is github.com (or a subdomain). A local
-# path that merely contains "github.com" (a Go-workspace path) is not.
-is_github_url() {
+# forge_of_url <url> : prints "github" / "gitlab" when the URL's HOST is
+# github.com / gitlab.com (or a subdomain); prints nothing otherwise. A local
+# path that merely contains "github.com" (a Go-workspace path) is neither.
+forge_of_url() {
   _u=$1
   case "$_u" in
-    /*|./*|../*|\~*|file://*) return 1 ;;
+    /*|./*|../*|\~*|file://*) return 0 ;;
     *://*) _h=${_u#*://}; _h=${_h%%/*}; _h=${_h##*@}; _h=${_h%%:*} ;;
-    *:*) _h=${_u%%:*}; case "$_h" in */*) return 1 ;; esac; _h=${_h##*@} ;;
-    *) return 1 ;;
+    *:*) _h=${_u%%:*}; case "$_h" in */*) return 0 ;; esac; _h=${_h##*@} ;;
+    *) return 0 ;;
   esac
   _h=$(printf '%s' "$_h" | tr 'A-Z' 'a-z')
-  case "$_h" in github.com|*.github.com) return 0 ;; esac
-  return 1
+  case "$_h" in
+    github.com|*.github.com) printf github ;;
+    gitlab.com|*.gitlab.com) printf gitlab ;;
+  esac
+  return 0
 }
 
 # looks_like_url_or_path <word> : a URL (scheme://, scp-style host:path) or a
@@ -172,7 +179,15 @@ push_repo_dir() {
 }
 
 # Examine EVERY push in the command, one at a time: after each, GFLAT becomes
-# the text after it (bounded, so a pathological command cannot loop).
+# the text after it (bounded, so a pathological command cannot loop). Every
+# push's warning is collected (a GitLab push must not hide a later GitHub one)
+# and they are emitted together after the loop.
+WARNINGS=""
+add_warning() {
+  case "$WARNINGS" in *"$1"*) return 0 ;; esac
+  if [ -n "$WARNINGS" ]; then WARNINGS="$WARNINGS
+$1"; else WARNINGS=$1; fi
+}
 N=0
 while [ "$N" -lt 10 ] && printf '%s' "$GFLAT" | grep -Eq "$GIT_PUSH_RE"; do
   N=$((N + 1))
@@ -207,21 +222,26 @@ while [ "$N" -lt 10 ] && printf '%s' "$GFLAT" | grep -Eq "$GIT_PUSH_RE"; do
     elif looks_like_url_or_path "$TARGET"; then
       URLS=$TARGET   # a URL literal or a path, classified by host below
     fi               # else: neither a remote nor a URL -> unresolved (warn below)
-  elif [ -n "$TARGET" ] && is_github_url "$TARGET"; then
-    URLS=$TARGET     # a literal github URL needs no repo to classify
+  elif [ -n "$TARGET" ] && [ -n "$(forge_of_url "$TARGET")" ]; then
+    URLS=$TARGET     # a literal forge URL needs no repo to classify
   fi
   if [ -z "$URLS" ]; then
-    warn "forge-identity: this is a plain \`git push\` and the guard could not resolve its remote (repo dir '${DIR:-unknown}', remote '${TARGET:-default}'), so it cannot tell whether it goes to github.com. If it does, it authenticates as the machine owner (CJPoll), not Athena. ${PUSH_FIX}"
+    add_warning "forge-identity: this is a plain \`git push\` and the guard could not resolve its remote (repo dir '${DIR:-unknown}', remote '${TARGET:-default}'), so it cannot tell whether it goes to github.com or gitlab.com. If it does, it authenticates as the machine owner (CJPoll), not Athena. GitHub: ${PUSH_FIX} GitLab: ${GITLAB_PUSH_FIX}"
   fi
   set -f
   for u in $URLS; do
-    if is_github_url "$u"; then
-      warn "forge-identity: this is a plain \`git push\` to a github.com remote ('${TARGET}' -> ${u}), which authenticates with the machine owner's SSH key or credential helper — GitHub records the push as CJPoll, not Athena. ${PUSH_FIX}"
-    fi
+    case "$(forge_of_url "$u")" in
+      github)
+        add_warning "forge-identity: this is a plain \`git push\` to a github.com remote ('${TARGET}' -> ${u}), which authenticates with the machine owner's SSH key or credential helper — GitHub records the push as CJPoll, not Athena. ${PUSH_FIX}" ;;
+      gitlab)
+        add_warning "forge-identity: this is a plain \`git push\` to a gitlab.com remote ('${TARGET}' -> ${u}), which authenticates with the machine owner's SSH key or credential helper — GitLab records the push as the owner, not athena-amby. ${GITLAB_PUSH_FIX}" ;;
+    esac
   done
   set +f
   GFLAT=$AFTER
 done
+
+[ -z "$WARNINGS" ] || warn "$WARNINGS"
 
 # No bypass detected → allow silently.
 exit 0

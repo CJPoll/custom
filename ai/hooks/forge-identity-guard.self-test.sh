@@ -81,6 +81,9 @@ mkrepo() { git init -q "$TMP/$1" && git -C "$TMP/$1" remote add origin "$2"; }
 mkrepo gh_scp 'git@github.com:o/r.git'
 mkrepo gh_https 'https://github.com/o/r.git'
 mkrepo gl 'git@gitlab.com:g/r.git'
+mkrepo gl_https 'https://gitlab.com/g/r.git'
+mkrepo gh_glpush 'https://github.com/o/r.git'
+git -C "$TMP/gh_glpush" config remote.origin.pushurl 'git@gitlab.com:g/r.git'
 mkrepo local "$TMP/bare.git"
 mkrepo gl_ghpush 'git@gitlab.com:g/r.git'
 git -C "$TMP/gl_ghpush" config remote.origin.pushurl 'git@github.com:o/r.git'
@@ -139,8 +142,12 @@ run "$(bash_json_cwd "$TMP/norepo" 'git push origin HEAD')"
 check "3i. unresolvable remote (not a repo) -> still warns, never silent" warn
 check_text "3i'. the unresolvable warn says it could not resolve" 'could not resolve its remote'
 
-run "$(bash_json_cwd "$TMP/norepo" "git -C $TMP/gl push origin HEAD; git -C $TMP/gh_scp push origin HEAD")"
+run "$(bash_json_cwd "$TMP/norepo" "git -C $TMP/local push origin HEAD; git -C $TMP/gh_scp push origin HEAD")"
 check_text "3m. two pushes, the SECOND to github -> warns (every push examined)" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/norepo" "git -C $TMP/gl push origin HEAD; git -C $TMP/gh_scp push origin HEAD")"
+check_text "3m2. gitlab push then github push -> the gitlab warn does not hide the github one" 'to a github.com remote'
+check_text "3m3. ...and the gitlab one is reported too" 'to a gitlab.com remote'
 
 run "$(bash_json_cwd "$TMP" 'cd gh_scp && git push')"
 check_text "3n. relative cd resolved against the input cwd" 'to a github.com remote'
@@ -159,6 +166,36 @@ run "$(bash_json 'gh pr create --fill')"
 check_text "3l. create warn carries the escalate clause" 'escalate to your admiral with the command + error and wait'
 
 echo
+echo "--- GitLab push cases (DND-393) ---"
+
+run "$(bash_json_cwd "$TMP/gl" 'git push origin HEAD')"
+check "G1. plain git push, origin git@gitlab.com: (cwd)" warn
+check_text "G1a. gitlab push warn names gitlab.com" 'to a gitlab.com remote'
+check_text "G1b. gitlab push warn points at glab-athena git" '~/dev/custom/ai/bin/glab-athena git push'
+check_text "G1c. gitlab push warn carries the escalate Fix:" 'escalate to your admiral with the command + error and wait'
+
+run "$(bash_json_cwd "$TMP/gl_https" 'git push')"
+check_text "G2. plain git push, default remote -> https gitlab origin" 'to a gitlab.com remote'
+
+run "$(bash_json_cwd "$TMP/norepo" "git -C $TMP/gl push -u origin HEAD")"
+check_text "G3. git -C <gitlab repo> push -u from another dir" 'to a gitlab.com remote'
+
+run "$(bash_json_cwd "$TMP/local" 'git push ssh://git@gitlab.com/g/r.git HEAD')"
+check_text "G4. git push to a literal ssh://git@gitlab.com URL" 'to a gitlab.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_glpush" 'git push')"
+check_text "G5. github fetch url but a gitlab.com pushurl" 'to a gitlab.com remote'
+
+run "$(bash_json_cwd "$TMP/norepo" 'git push origin HEAD')"
+check_text "G6. unresolvable remote names both forges' fixes" 'glab-athena git push'
+
+run "$(bash_json_cwd "$TMP/gl" '~/dev/custom/ai/bin/glab-athena git push origin HEAD')"
+check "G7. glab-athena git push (wrapper) -> allow" allow
+
+run "$(bash_json_cwd "$TMP/gl" 'GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/glab-athena git push -u origin HEAD && echo pushed')"
+check "G8. the documented glab-athena push form -> allow" allow
+
+echo
 echo "--- MUST-NOT-WARN cases (wrapper / reads / unrelated) ---"
 
 run "$(bash_json_cwd "$TMP/gh_scp" '~/dev/custom/ai/bin/gh-athena git push origin HEAD')"
@@ -167,8 +204,8 @@ check "M7. gh-athena git push (wrapper)" allow
 run "$(bash_json_cwd "$TMP/gh_scp" "GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c credential.helper= -c 'url.https://github.com/.insteadOf=git@github.com:' push origin HEAD")"
 check "M8. the documented explicit wrapper push form" allow
 
-run "$(bash_json_cwd "$TMP/gl" 'git push origin HEAD')"
-check "M9. plain git push to a GitLab remote (no Athena push path there)" allow
+run "$(bash_json_cwd "$TMP/gl" 'git pull origin main')"
+check "M9. git pull from a GitLab remote (not a push)" allow
 
 run "$(bash_json_cwd "$TMP/local" 'git push origin HEAD')"
 check "M10. plain git push to a local bare remote" allow
@@ -183,7 +220,11 @@ run "$(bash_json_cwd "$TMP/gopath" 'git push origin HEAD')"
 check "M13. push to a LOCAL path containing github.com (Go workspace) is not GitHub" allow
 
 run "$(bash_json_cwd "$TMP/gl" 'git push origin fix/github.com-links')"
-check "M14. GitLab push of a branch whose NAME mentions github.com" allow
+if is_warn && ! is_warn_with 'to a github.com remote'; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "M14. GitLab push of a branch whose NAME mentions github.com -> gitlab warn only, never a github one"
+else
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s status=%s out=[%s]\n' "M14. branch name mentioning github.com" "$STATUS" "$OUT"
+fi
 
 run "$(bash_json '~/dev/custom/ai/bin/gh-athena pr create --title x')"
 check "M1. gh-athena pr create (wrapper)" allow

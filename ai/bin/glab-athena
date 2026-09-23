@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Run glab (or curl via `glab-athena api ...`) AS the Athena GitLab service
 # account (athena-amby, amby_ai group). Token read at call time from a 600
 # file; never in argv or config. Use for writes that should be attributed to
@@ -9,6 +9,10 @@
 # service account and writes it to the token file. It uses the OWNER's plain
 # `glab` (Cody's OAuth session, group owner of amby_ai) to mint, so it works
 # even when the current Athena token is expired/revoked (chicken-and-egg).
+# `refresh` is OWNER-GATED: it uses the owner's glab session. Agents never run it.
+#
+# Git passthrough (DND-393): `glab-athena git <args>` runs git as athena-amby for
+# ONE command, over HTTPS only — see "The git passthrough" below.
 set -eu
 TOKEN_FILE="${GITLAB_ATHENA_TOKEN_FILE:-$HOME/.claude/gitlab-athena-token}"
 
@@ -100,6 +104,45 @@ if [ "${1:-}" = refresh ]; then
 
 	echo "glab-athena refresh: OK."
 	exit 0
+fi
+
+# ---- The git passthrough (DND-393) ------------------------------------------
+# `glab-athena git <args>` runs git authenticated as athena-amby for ONE command.
+# No git or glab config change, no auth subcommand:
+#   * url.https://gitlab.com/.insteadOf=git@gitlab.com: rewrites the SSH form;
+#   * credential.helper= / core.askPass= / GIT_ASKPASS, SSH_ASKPASS unset /
+#     GIT_TERMINAL_PROMPT=0 keep every owner credential source out;
+#   * the athena-amby PAT, read from TOKEN_FILE at call time, goes to git as an
+#     `oauth2:<PAT>` basic-auth http.https://gitlab.com/.extraheader through the
+#     environment config channel — never on argv, in a URL, or in a config file;
+#   * a network op that would still reach gitlab.com over SSH or another
+#     non-HTTPS transport (ssh://, a pushurl override, an insteadOf forcing SSH)
+#     is REFUSED, exit 3 with a Fix:.
+# The mechanism, its coverage and its named residuals are shared with
+# `gh-athena git` and live in ai/lib/forge-git-passthrough.sh.
+#
+# Test seam: GLAB_ATHENA_GIT_DRY_RUN=1 prints the resolved URLs and the git argv
+# (token redacted) instead of exec'ing git.
+if [ "${1:-}" = git ]; then
+	shift
+	LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/forge-git-passthrough.sh"
+	[ -r "$LIB" ] || {
+		echo "glab-athena: cannot load $LIB. Fix: run glab-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+		exit 3
+	}
+	# shellcheck source=../lib/forge-git-passthrough.sh
+	. "$LIB"
+	FG_TOOL=glab-athena FG_HOST=gitlab.com FG_BOT=athena-amby
+	FG_DRY_RUN="${GLAB_ATHENA_GIT_DRY_RUN:-}"
+	fg_refuse_non_https "$@"
+	TOKEN=""
+	[ -r "$TOKEN_FILE" ] && TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+	[ -n "$TOKEN" ] || {
+		echo "glab-athena: REFUSING \`git ${1:-}\`: the athena-amby token file $TOKEN_FILE is missing, unreadable or empty, so the push cannot run as Athena." >&2
+		echo "  Fix: do not run \`glab-athena refresh\` or any \`glab auth\` yourself (owner-gated), and do not fall back to a plain \`git push\`; $FG_ESCALATE" >&2
+		exit 3
+	}
+	fg_git_exec oauth2 "$TOKEN" "$@"
 fi
 
 # --- normal path: run glab as the Athena service account -------------------
