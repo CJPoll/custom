@@ -3,7 +3,9 @@
 #
 # Pipes crafted PreToolUse stdin JSON into the hook and asserts the deny/allow
 # behavior described in the spec. Hermetic: no network, no state mutation, no
-# temp files, no reliance on anything outside the hook + jq.
+# reliance on anything outside the hook + jq. The cwd cases run the hook with a
+# pinned environment (fake HOME, forge config vars unset or set per case); the
+# two symlink cases use one mktemp dir, removed on exit.
 #
 # Exit 0 iff every case passes.
 
@@ -49,6 +51,22 @@ check() {
 
 bash_json() {
   jq -cn --arg c "$1" '{tool_name:"Bash",tool_input:{command:$c}}'
+}
+
+# run_ctx <cwd> <command> [VAR=value ...] : run the hook on a Bash call made
+# from <cwd> ("" = no cwd field), under a pinned environment: HOME=/home/u,
+# GH_CONFIG_DIR / GLAB_CONFIG_DIR / XDG_CONFIG_HOME unset unless a VAR=value
+# argument sets one. The live session's env can never leak into a case.
+run_ctx() {
+  _cwd=$1; _cmd=$2; shift 2
+  if [ -n "$_cwd" ]; then
+    _json=$(jq -cn --arg c "$_cmd" --arg d "$_cwd" '{tool_name:"Bash",cwd:$d,tool_input:{command:$c}}')
+  else
+    _json=$(bash_json "$_cmd")
+  fi
+  OUT=$(printf '%s' "$_json" \
+    | env -u GH_CONFIG_DIR -u GLAB_CONFIG_DIR -u XDG_CONFIG_HOME HOME=/home/u "$@" sh "$HOOK" 2>/dev/null)
+  STATUS=$?
 }
 
 echo "forge-auth-guard self-test"
@@ -264,6 +282,155 @@ run "$(bash_json '~/dev/custom/ai/bin/gh-athena auth switch --user x')"
 check "P7a. gh auth switch (changes the active account)" deny
 
 echo
+echo "--- DENY cases: residuals closed by DND-390 ---"
+# Each case below was ALLOWED by the DND-388 hook (origin/main 449c318).
+
+# V: a command word built by expansion (rule 5), or an expanded subcommand.
+run "$(bash_json 'G=gh; $G auth login')"
+check "V1. \$G auth login (variable command word)" deny
+
+run "$(bash_json '${GH:-gh} auth setup-git')"
+check "V2. \${GH:-gh} auth setup-git" deny
+
+run "$(bash_json '"$GH" auth token')"
+check "V3. quoted \"\$GH\" auth token" deny
+
+run "$(bash_json '$(which gh) auth login')"
+check "V4. \$(which gh) auth login (command substitution)" deny
+
+run "$(bash_json '`command -v glab` auth logout')"
+check "V5. backtick command substitution" deny
+
+run "$(bash_json '$HOME/bin/$X auth refresh')"
+check "V6. variable inside a path-qualified word" deny
+
+run "$(bash_json 'gh auth $SUB')"
+check "V7. gh auth \$SUB (expanded subcommand)" deny
+
+run "$(bash_json 'glab-athena auth $(echo login)')"
+check "V8. glab-athena auth \$(...) (substituted subcommand)" deny
+
+run "$(bash_json 'eval "$G auth switch --user x"')"
+check "V9. eval of a variable command word" deny
+
+run "$(bash_json '${GLAB} auth configure-docker')"
+check "V10. \${GLAB} auth configure-docker" deny
+
+run "$(bash_json 'cat tok | $G auth login --with-token')"
+check "V11. variable command word after a pipe" deny
+
+# D: glab auth subcommands missing from the DND-388 list (rule 2).
+run "$(bash_json 'glab auth configure-docker')"
+check "D1. glab auth configure-docker (writes docker credential config)" deny
+
+run "$(bash_json '/usr/bin/glab auth docker-helper')"
+check "D2. glab auth docker-helper (registry credential helper)" deny
+
+run "$(bash_json 'glab-athena auth dpop-gen --private-key ~/.ssh/id_ed25519')"
+check "D3. glab auth dpop-gen (mints a DPoP proof JWT)" deny
+
+# C: a write by bare name after reaching the config location (rule 4).
+run "$(bash_json 'cd ~/.config && rm -rf gh')"
+check "C1. cd ~/.config && rm -rf gh" deny
+
+run "$(bash_json 'pushd $XDG_CONFIG_HOME; mv glab-cli /tmp/x')"
+check "C2. pushd \$XDG_CONFIG_HOME; mv glab-cli" deny
+
+run "$(bash_json 'cd ${XDG_CONFIG_HOME:-~/.config} && rm -rf gh*')"
+check "C3. cd \${XDG_CONFIG_HOME:-~/.config} && rm -rf gh*" deny
+
+run "$(bash_json 'cd $HOME/.config; cd gh && rm hosts.yml')"
+check "C4. cd to the root, then cd gh, then a bare-name rm" deny
+
+run "$(bash_json 'cd ~/.config && echo x > gh/extra.yml')"
+check "C5. cd to the root, then a redirect into gh/" deny
+
+run "$(bash_json 'cd ~/.config && rm -rf ./gh')"
+check "C5a. cd to the root, then rm -rf ./gh (relative prefix)" deny
+
+run "$(bash_json 'cd ~/.config && echo x > ./gh/extra.yml')"
+check "C5b. cd to the root, then a redirect into ./gh/" deny
+
+run "$(bash_json 'cd ~/.config && cd ./gh && rm hosts.yml')"
+check "C5c. cd to the root, then cd ./gh, then a bare-name rm" deny
+
+run "$(bash_json 'cd ~/.config && rm -rf ${PWD}/glab-cli')"
+check "C5d. cd to the root, then rm -rf \${PWD}/glab-cli" deny
+
+run_ctx /home/u/.config 'mv ././glab-cli /tmp/x'
+check "C5e. cwd ~/.config: mv ././glab-cli" deny
+
+run_ctx /home/u/.config/gh 'rm hosts.yml'
+check "C6. cwd ~/.config/gh (earlier cd): rm hosts.yml" deny
+
+# The cwd deny over-denies a write that lands elsewhere, so its message must
+# name the cwd and the recovery (cd out in a separate call).
+run_ctx /home/u/.config/gh 'gh pr list > /tmp/out'
+if printf '%s' "$OUT" | grep -q '/home/u/.config/gh' \
+  && printf '%s' "$OUT" | grep -q 'OWN Bash call'; then
+  check "C6m. cwd deny names the cwd and says cd out in its own call" deny
+else
+  STATUS=1; check "C6m. cwd deny names the cwd and says cd out in its own call" deny
+fi
+
+run_ctx /home/u/.config/glab-cli/sub 'sed -i s/a/b/ config.yml'
+check "C7. cwd under ~/.config/glab-cli: sed -i" deny
+
+run_ctx /home/u/.config 'rm -rf gh'
+check "C8. cwd ~/.config: rm -rf gh" deny
+
+run_ctx /cfg/ghdir 'echo x > hosts.yml' GH_CONFIG_DIR=/cfg/ghdir
+check "C9. cwd = \$GH_CONFIG_DIR: a redirect" deny
+
+run_ctx /cfg/glabdir/ 'unlink config.yml' GLAB_CONFIG_DIR=/cfg/glabdir/
+check "C10. cwd = \$GLAB_CONFIG_DIR (trailing slashes)" deny
+
+run_ctx /xdg 'rm -rf glab-cli' XDG_CONFIG_HOME=/xdg
+check "C11. cwd = \$XDG_CONFIG_HOME: rm -rf glab-cli" deny
+
+run_ctx /xdg/gh 'truncate -s0 hosts.yml' XDG_CONFIG_HOME=/xdg
+check "C12. cwd = \$XDG_CONFIG_HOME/gh: truncate" deny
+
+# Symlinked config dir: compare realpaths on both sides.
+TMPD=$(mktemp -d 2>/dev/null) || TMPD=
+if [ -n "$TMPD" ]; then
+  trap 'rm -rf "$TMPD"' EXIT
+  trap 'exit 130' INT TERM
+  mkdir -p "$TMPD/real" && ln -s "$TMPD/real" "$TMPD/link"
+  run_ctx "$TMPD/link" 'rm hosts.yml' GH_CONFIG_DIR="$TMPD/real"
+  check "C13. cwd is a symlink to \$GH_CONFIG_DIR" deny
+  run_ctx "$TMPD/real" 'rm hosts.yml' GH_CONFIG_DIR="$TMPD/link"
+  check "C14. \$GH_CONFIG_DIR is a symlink to the cwd" deny
+else
+  FAIL=$((FAIL + 1)); echo "  FAIL  C13/C14: mktemp -d failed; symlink cases could not run"
+fi
+
+# H: httpie / xh infer POST from a request body (rule 3).
+run "$(bash_json 'http https://github.com/login/oauth/access_token client_id=x code=y')"
+check "H1. httpie data items key=value" deny
+
+run "$(bash_json 'https gitlab.com/oauth/token grant_type:=1')"
+check "H2. https command, key:=json item" deny
+
+run "$(bash_json 'echo {} | http https://gitlab.com/oauth/token')"
+check "H3. body piped into httpie" deny
+
+run "$(bash_json 'http https://gitlab.com/oauth/token < body.json')"
+check "H4. body redirected into httpie" deny
+
+run "$(bash_json 'xh https://gitlab.com/oauth/token code=@code.txt')"
+check "H5. xh key=@file item" deny
+
+run "$(bash_json 'http --raw x https://gitlab.com/oauth/token')"
+check "H6. httpie --raw body" deny
+
+run "$(bash_json '/usr/bin/http -f https://github.com/login/oauth/access_token client_id:=1')"
+check "H7. path-qualified httpie --form with key:= item" deny
+
+run "$(bash_json 'http https://gitlab.com/oauth/token upload@/tmp/f')"
+check "H8. httpie field@file upload" deny
+
+echo
 echo "--- MUST-NOT-BLOCK cases (reads / ordinary forge use) ---"
 
 run "$(bash_json 'gh auth status')"
@@ -341,6 +508,73 @@ check "M23. gh-athena git push with the helper disabled (the sanctioned push)" a
 run "$(bash_json '~/dev/custom/ai/bin/gh-athena auth git-credential get')"
 check "M24. gh-athena auth git-credential (a credential READ by git)" allow
 
+# DND-390 negatives: the new shapes must not over-match.
+run "$(bash_json '$GH auth status')"
+check "N1. \$GH auth status (read)" allow
+
+run "$(bash_json '${GH:-gh} auth git-credential get')"
+check "N2. \${GH:-gh} auth git-credential (read)" allow
+
+run "$(bash_json '$GH pr list; ${GLAB:-glab} mr view 1')"
+check "N3. variable command word, not auth" allow
+
+run "$(bash_json '$EDITOR notes.txt; echo $HOME/auth')"
+check "N4. other variable command words" allow
+
+run "$(bash_json 'glab auth status; /usr/bin/glab auth status --hostname gitlab.com')"
+check "N5. glab auth status (read)" allow
+
+run "$(bash_json 'http https://gitlab.com/oauth/token/info Authorization:"Bearer x"')"
+check "N6. httpie GET of a token path with a header only" allow
+
+run "$(bash_json 'http GET https://gitlab.com/oauth/token/info page==2')"
+check "N7. httpie query param key==value is not a body" allow
+
+run "$(bash_json 'http https://api.github.com/repos/o/r name=x')"
+check "N8. httpie POST to a non-token endpoint" allow
+
+run "$(bash_json 'false || http https://gitlab.com/oauth/token/info')"
+check "N9. || before httpie is not a pipe" allow
+
+run "$(bash_json 'curl -s https://example.com/x | jq . ; http https://gitlab.com/oauth/token/info')"
+check "N10. a pipe into another command before an httpie GET" allow
+
+run_ctx /home/u/.config/gh 'cat hosts.yml; ls -la'
+check "N11. cwd in ~/.config/gh: reads" allow
+
+run_ctx /home/u/.config 'ls gh; cat gh/hosts.yml'
+check "N12. cwd ~/.config: reads of gh" allow
+
+run_ctx /home/u/.config 'rm -rf nvim-cache'
+check "N13. cwd ~/.config: a write to a non-forge dir" allow
+
+run_ctx /home/u/.config/gh-dash 'rm -rf cache'
+check "N14. cwd in a sibling dir gh-dash" allow
+
+run "$(bash_json 'cd ~/.config && rm -rf nvim && gh pr list')"
+check "N15. cd to the root, write a non-forge dir, then gh" allow
+
+run "$(bash_json 'rm -rf ~/src/gh; cd /tmp && rm -rf gh')"
+check "N16. bare gh operand with no config-root context" allow
+
+run_ctx /tmp/work 'rm x' GH_CONFIG_DIR=
+check "N17. empty \$GH_CONFIG_DIR is not read as matching every cwd" allow
+
+run_ctx /tmp/work 'rm x' GH_CONFIG_DIR=/
+check "N18. \$GH_CONFIG_DIR=/ is not read as matching every cwd" allow
+
+run_ctx /home/u/work 'rm x' GLAB_CONFIG_DIR=work
+check "N19. a relative \$GLAB_CONFIG_DIR is skipped" allow
+
+run_ctx /tmp/work 'rm -rf glab-cli' XDG_CONFIG_HOME=
+check "N20. empty \$XDG_CONFIG_HOME is not read as a config root" allow
+
+run_ctx '' 'rm hosts.yml'
+check "N21. no cwd field: bare-name rm allowed (fail-open)" allow
+
+run_ctx /home/u/.config/gh 'GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c credential.helper= push origin x'
+check "N22. sanctioned push from any cwd" allow
+
 echo
 echo "--- FAIL-OPEN cases (never wedge Bash) ---"
 
@@ -387,6 +621,12 @@ check_escalate "T3. rule 3 (oauth token POST) deny says escalate"
 
 run "$(bash_json 'rm ~/.config/gh/hosts.yml')"
 check_escalate "T4. rule 4 (credential file write) deny says escalate"
+
+run "$(bash_json '$G auth login')"
+check_escalate "T5. rule 5 (expanded command word) deny says escalate"
+
+run_ctx /home/u/.config/gh 'rm hosts.yml'
+check_escalate "T6. rule 4c (cwd in a config dir) deny says escalate"
 
 echo
 echo "==================================================="
