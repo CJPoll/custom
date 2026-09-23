@@ -184,15 +184,7 @@ for f in capture.txt signature.txt; do
     "the capture is incomplete; inspect ${REAL_CAP} by hand. Nothing was filed."
 done
 manifest() { sed -n "s/^$1: //p" "${REAL_CAP}/capture.txt" | head -n 1; }
-
-# DND-362: a MANUAL capture (scripts/inbox-client-capture --now, or a direct
-# pid, run by a human) is not a wedge -- it proves nothing about the client
-# being stuck, even if a message somehow named it (untrusted input; the
-# capture on disk is authoritative). A LEGACY capture with no trigger field
-# (written before DND-362) is treated as watchdog, the pre-existing behaviour.
 TRIGGER="$(manifest trigger)"
-[ "${TRIGGER}" != "manual" ] || refuse --class manual "the capture is a MANUAL capture (trigger: manual), not a wedge the watchdog captured" \
-  "nothing was filed; a manual inbox-client-capture --now (or a directly-invoked capture) on a healthy client is never a wedge, however this message came to name it. If this really is a recurring wedge, let the supervisor watchdog capture it, or file the ticket by hand."
 
 # ---- 3. recompute the signature from the capture ---------------------------
 STEP="$(manifest step)"
@@ -228,6 +220,19 @@ if [ "${RECOMPUTED}" != "${ON_DISK}" ] || [ "${RECOMPUTED}" != "${IN_MANIFEST}" 
 fi
 [ "${CLAIMED}" = "${RECOMPUTED}" ] || refuse --class integrity "the message's signature does not match the capture it names (tampered or mis-addressed)" \
   "do not file or increment anything from this message; it did not verify against ${REAL_CAP}. Nothing was filed."
+
+# DND-362: a MANUAL capture (scripts/inbox-client-capture --now, or a direct
+# pid, run by a human) is not a wedge -- it proves nothing about the client
+# being stuck, even if a message somehow named it (untrusted input; the
+# capture on disk is authoritative). A LEGACY capture with no trigger field
+# (written before DND-362) is treated as watchdog, the pre-existing behaviour.
+# This runs AFTER the signature/integrity checks above, never before them: the
+# `trigger:` line is not covered by the recomputed signature (which hashes
+# only step and frames), so checking it first would let an edited-and-tampered
+# capture escape as `manual` (ledger only) merely by also adding
+# `trigger: manual` -- exactly the tamper the integrity check exists to catch.
+[ "${TRIGGER}" != "manual" ] || refuse --class manual "the capture is a MANUAL capture (trigger: manual), not a wedge the watchdog captured" \
+  "nothing was filed; a manual inbox-client-capture --now (or a directly-invoked capture) on a healthy client is never a wedge, however this message came to name it. If this really is a recurring wedge, let the supervisor watchdog capture it, or file the ticket by hand."
 
 SIG8="${RECOMPUTED:0:8}"
 FINISHED_MS="$(manifest finished_ms)"

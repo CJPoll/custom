@@ -148,6 +148,17 @@ MSG_MAN="$(wf_make_message "${TMP}/manual" "${CAPMAN}" "${SIGMAN}")"
 run --message "${MSG_MAN}" --tickets "${TMP}/none.json" --now "${NOW}"
 if [ "${RC}" -eq 3 ] && [ "$(field "${OUT}" decision)" = "refuse" ] && [ "$(field "${OUT}" refusal)" = "manual" ]; then ok "a manual capture's message is refused, class manual"; else bad "a manual capture's message is refused, class manual" "rc=${RC} out=${OUT} err=${ERR}"; fi
 if grep -q 'MANUAL capture' <<<"${ERR}" && grep -q '^  Fix: ' <<<"${ERR}" && ! grep -q 'REFUSED (integrity)' <<<"${ERR}"; then ok "the refusal names it as manual, carries Fix:, and is never classed integrity"; else bad "the refusal names it as manual and is never integrity" "${ERR}"; fi
+# The trigger check runs AFTER the signature/integrity checks, never before:
+# `trigger:` is not covered by the recomputed signature (step + frames only),
+# so an edited-and-tampered capture must not escape as `manual` (ledger only)
+# merely by also carrying `trigger: manual` -- that would silence the exact
+# tamper alarm `integrity` exists for.
+CAPTAMPMAN="$(wf_make_capture "${DUMPS}" 20260923T100055Z-4252 tls connect_nonblock manual)"
+SIGTAMPMAN="$(wf_signature_of "${CAPTAMPMAN}")"
+MSG_TAMPMAN="$(wf_make_message "${TMP}/tampered-manual" "${CAPTAMPMAN}" "${SIGTAMPMAN}")"
+sed -i 's/tls_handshake/something_else/' "${CAPTAMPMAN}/dump.txt"
+run --message "${MSG_TAMPMAN}" --tickets "${TMP}/none.json" --now "${NOW}"
+if [ "${RC}" -eq 3 ] && [ "$(field "${OUT}" refusal)" = "integrity" ]; then ok "a capture that is BOTH tampered and trigger: manual is refused as integrity, not manual (the tamper alarm wins)"; else bad "a tampered manual capture is refused as integrity, not manual" "rc=${RC} out=${OUT} err=${ERR}"; fi
 run --message "${MSG_MAN}" --verify-only
 if [ "${RC}" -eq 3 ] && [ "$(field "${OUT}" refusal)" = "manual" ]; then ok "--verify-only refuses a manual capture too (before any tracker search)"; else bad "--verify-only refuses a manual capture too" "rc=${RC} ${OUT}"; fi
 # A watchdog-triggered capture (the default of wf_make_capture) is unaffected,

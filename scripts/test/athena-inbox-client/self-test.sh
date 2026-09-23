@@ -1155,6 +1155,15 @@ if grep -q '^uptime_s: [0-9]' "${CAPDIR}/capture.txt" && grep -q '^reconnecting_
    && grep -q '^connected_since: [0-9]* (' "${CAPDIR}/capture.txt"; then
   ok "the capture manifest records uptime and the reconnecting/connected counts (DND-334)"
 else bad "the capture manifest records uptime and the counts" "$(cat "${CAPDIR}/capture.txt")"; fi
+# DND-362: the SUPERVISOR's own capture call is what claims trigger: watchdog
+# (scripts/athena-inbox-client-run.sh, not scripts/inbox-client-capture, which
+# defaults to manual). Without this assertion, dropping --trigger watchdog
+# from that one production line would make every real wedge read as manual
+# and wedge-ticket-decide would silently refuse it (ledger only, no DM, no
+# ticket) -- no error anywhere would say so.
+if grep -q '^trigger: watchdog$' "${CAPDIR}/capture.txt"; then
+  ok "the SUPERVISOR's watchdog capture is labelled trigger: watchdog (never left to default to manual)"
+else bad "the supervisor's watchdog capture is labelled trigger: watchdog" "$(cat "${CAPDIR}/capture.txt")"; fi
 AL="$(alerts)"
 if [ "$(printf '%s\n' "${AL}" | grep -c .)" -eq 1 ] && grep -qx 'from: inbox-client-detector' "${AL}" && grep -qx "re: ${CAPDIR}" "${AL}" \
    && ! grep -qF 'SEKRETtok' "${AL}"; then
