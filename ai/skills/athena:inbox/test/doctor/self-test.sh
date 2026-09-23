@@ -725,6 +725,7 @@ FO="$(ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE="${FF}" doctor_check_server_fai
 assert_eq "unread > 0 -> warn (NOT ok)" warn "$(state_of "${FO}" server-failed-deliveries)"
 assert_contains "... names the unread count" "2 UNREAD failed-delivery record(s)" "${FO}"
 assert_contains "... lists cause, count and id" "machine-unreachable x3 (id aaaa-1)" "${FO}"
+assert_contains "... says how many of the unread it shows" "(showing 2 of 2)" "${FO}"
 assert_contains "... the Fix names mark_read with a real id" 'mark_read: "aaaa-1"' "$(printf '%s\n' "${FO}" | awk -F'\t' '$2=="server-failed-deliveries"{print $4}')"
 assert_contains "a canned answer says it is canned" "CANNED answer" "${FO}"
 printf '{"unread_count":0,"failed_deliveries":[]}' > "${FF}"

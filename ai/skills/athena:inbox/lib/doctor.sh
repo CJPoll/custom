@@ -1312,6 +1312,9 @@ _doctor_mcp_json() {
 # file (a JSON value, or `UNAVAILABLE:<reason>`) skips the network.
 doctor_mcp_tool_call() {
   local tool="$1" args="$2" canned="$3" cfg url w http sid msg res tool_err
+  # A malformed arguments value would make the jq below fail inside a nested
+  # $(...) and POST an empty body; refuse it here instead.
+  jq -e 'type == "object"' <<<"${args}" >/dev/null 2>&1 || { printf 'doctor_mcp_tool_call: arguments for %s are not a JSON object\n' "${tool}"; return 4; }
   if [ -n "${canned}" ]; then
     [ -f "${canned}" ] || { printf 'the canned %s file %s does not exist\n' "${tool}" "${canned}"; return 4; }
     case "$(head -c 12 "${canned}")" in
@@ -1582,7 +1585,7 @@ doctor_state_failed_deliveries() {
 
 # doctor_check_server_failed_deliveries
 doctor_check_server_failed_deliveries() {
-  local out rc n records first_id canned_note=""
+  local out rc n records first_id shown canned_note=""
   if [ "${DOCTOR_NO_SERVER:-0}" = "1" ]; then
     doctor_finding na "server-failed-deliveries" "server failed-deliveries check not run (disabled for this invocation)" \
       "run inbox-doctor by hand (without --no-server) to ask the server for your unread failed-delivery records; the unprompted SessionStart path deliberately makes no network request."
@@ -1603,11 +1606,12 @@ doctor_check_server_failed_deliveries() {
        return 0 ;;
   esac
   n="$(printf '%s' "${out}" | jq -r '.unread_count | tostring')"
-  records="$(printf '%s' "${out}" | jq -r '[(.failed_deliveries // [])[:5][] | "\(.cause) x\(.count) (id \(.id))"] | join("; ")' 2>/dev/null | head -c 600)"
+  records="$(printf '%s' "${out}" | jq -r '[(.failed_deliveries // [])[:5][] | "\(.cause) x\(.count) (id \(.id))"] | join("; ")' 2>/dev/null)"
+  shown="$(printf '%s' "${out}" | jq -r '[(.failed_deliveries // [])[:5][]] | length' 2>/dev/null)"
   first_id="$(printf '%s' "${out}" | jq -r '(.failed_deliveries // [])[0].id // "<id>"' 2>/dev/null)"
   case "$(doctor_state_failed_deliveries "${n}")" in
     ok)   doctor_finding ok "server-failed-deliveries" "checked: 0 unread failed-delivery records on the server${canned_note}" ;;
-    warn) doctor_finding warn "server-failed-deliveries" "checked: the server holds ${n} UNREAD failed-delivery record(s) for your account: ${records:-none listed}${canned_note}" \
+    warn) doctor_finding warn "server-failed-deliveries" "checked: the server holds ${n} UNREAD failed-delivery record(s) for your account (showing ${shown:-0} of ${n}): ${records:-none listed}${canned_note}" \
             "triage each record (the failed_deliveries MCP tool returns its report: what failed and where), then clear it with the failed_deliveries MCP tool and mark_read: \"${first_id}\" (one call per id). The server emailed the owner once when each record was new or re-opened." ;;
     na)   doctor_finding na "server-failed-deliveries" "the server answered failed_deliveries with no usable count (unread_count: ${n})" \
             "the answer shape may have changed; failed_deliveries should return a numeric unread_count." ;;
