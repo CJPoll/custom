@@ -430,6 +430,28 @@ check "H7. path-qualified httpie --form with key:= item" deny
 run "$(bash_json 'http https://gitlab.com/oauth/token upload@/tmp/f')"
 check "H8. httpie field@file upload" deny
 
+# R: glab-athena refresh (rule 6; coordinator scope addition). Never run for real.
+run "$(bash_json 'glab-athena refresh')"
+check "R1. glab-athena refresh" deny
+
+run "$(bash_json '~/dev/custom/ai/bin/glab-athena refresh')"
+check "R2. path-qualified ~/.../glab-athena refresh" deny
+
+run "$(bash_json '"glab-athena" '"'"'refresh'"'"'')"
+check "R3. quoted command word and subcommand" deny
+
+run "$(bash_json 'git status && glab-athena refresh; echo done')"
+check "R4. chained after && and before ;" deny
+
+run "$(bash_json '$HOME/dev/custom/ai/bin/glab-athena refresh >/dev/null 2>&1')"
+check "R5. \$HOME/... path with redirects" deny
+
+run "$(bash_json '(glab-athena refresh)')"
+check "R6. inside a subshell" deny
+
+run "$(bash_json "bash -c '/home/u/dev/custom/ai/bin/glab-athena refresh'")"
+check "R7. inside bash -c" deny
+
 echo
 echo "--- MUST-NOT-BLOCK cases (reads / ordinary forge use) ---"
 
@@ -575,6 +597,21 @@ check "N21. no cwd field: bare-name rm allowed (fail-open)" allow
 run_ctx /home/u/.config/gh 'GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c credential.helper= push origin x'
 check "N22. sanctioned push from any cwd" allow
 
+run "$(bash_json 'glab-athena api user')"
+check "N23. glab-athena api user (read)" allow
+
+run "$(bash_json 'glab-athena mr list')"
+check "N24. glab-athena mr list (read)" allow
+
+run "$(bash_json '~/dev/custom/ai/bin/glab-athena api projects')"
+check "N25. path-qualified glab-athena api projects (read)" allow
+
+run "$(bash_json 'gh-athena api /user')"
+check "N26. gh-athena api /user (read)" allow
+
+run "$(bash_json 'glab-athena mr list --search refresh')"
+check "N27. refresh as a later argument, not the subcommand" allow
+
 echo
 echo "--- FAIL-OPEN cases (never wedge Bash) ---"
 
@@ -627,6 +664,9 @@ check_escalate "T5. rule 5 (expanded command word) deny says escalate"
 
 run_ctx /home/u/.config/gh 'rm hosts.yml'
 check_escalate "T6. rule 4c (cwd in a config dir) deny says escalate"
+
+run "$(bash_json 'glab-athena refresh')"
+check_escalate "T7. rule 6 (glab-athena refresh) deny says escalate"
 
 echo
 echo "==================================================="

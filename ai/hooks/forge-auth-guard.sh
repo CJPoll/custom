@@ -40,6 +40,12 @@
 #      command substitution (`$(which gh) auth login`). The command it names is
 #      unknowable here, so ANY expanded command word followed by `auth` and a
 #      gh/glab mutating subcommand is denied.
+#   6. `glab-athena refresh` (bare, path-qualified, quoted or chained): it mints
+#      a new PAT for the Athena GitLab service account with the OWNER's glab
+#      session. An expired Athena token is escalated, never self-healed.
+#      gh-athena has no equivalent: it mints its short-lived App installation
+#      token inside every call (and in `--check`, which forge-preflight runs),
+#      from the App key, with no owner session, so it is not denied.
 #
 # DELIBERATE FALSE POSITIVE (kept by coordinator decision, DND-390): matching
 # runs on TEXT, not parsed argv. The command is flattened to one line and
@@ -307,6 +313,14 @@ fi
 VAR_WORD='(^|[[:space:];&|(`])[^[:space:];&|()`]*[$](\{[^}]*\}|[[:alnum:]_]+)[^[:space:];&|()`]*'
 if has "(${VAR_WORD}|[)\`])[[:space:]]+auth[[:space:]]+(${ANY_MUT}|${EXPANDED})"; then
   deny 'forge-auth: this runs `auth <login/logout/refresh/token/setup-git/switch/configure-docker/...>` through a command word built from a variable or command substitution, so it may change GitHub/GitLab auth state, which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). Diagnosing is fine: `~/dev/custom/ai/bin/forge-preflight` and `gh auth status` are reads.'
+fi
+
+# ---- 6: glab-athena refresh (DND-390, coordinator scope addition) ----------
+# The wrapper intercepts `refresh` only as its FIRST argument, so only that
+# shape is matched: `glab-athena mr list --search refresh` or
+# `glab-athena api user` stay allowed. Bare `glab refresh` is not a glab command.
+if has "${CMD_START}glab-athena[[:space:]]+refresh([[:space:];&|)]|\$)"; then
+  deny 'forge-auth: `glab-athena refresh` mints a new token for the Athena GitLab service account using the OWNER'\''s glab session, which is OWNER-GATED: an expired Athena token is escalated, never self-healed. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). The admiral escalates to the coordinator; the owner (or the coordinator on the owner'\''s explicit go) runs the refresh. Diagnosing is fine: `~/dev/custom/ai/bin/forge-preflight` is a read.'
 fi
 
 # No auth-mutating construct detected -> allow silently.
