@@ -185,32 +185,37 @@ EOF
 # Sets RESOLVED_URLS (newline-separated) for the dry-run report.
 RESOLVED_URLS=""
 git_refuse_non_https() {
-  local -a glob=()
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix)
-        [ $# -ge 2 ] || return 0; glob+=("$1" "$2"); shift 2 ;;
-      -*) glob+=("$1"); shift ;;
-      *) break ;;
-    esac
-  done
-  [ $# -gt 0 ] || return 0
-  local sub="$1" mode depth=0 alias_val; shift
+  local -a glob=() ex=()
+  local sub="" mode depth=0 alias_val
 
   G() { git "${glob[@]}" -c "$GH_HTTPS_REWRITE" "$@"; }
 
-  # Expand git aliases (`alias.p=push`) the way git would, so an alias cannot
-  # carry a network op past the check. A shell alias (`!...`) can run anything,
-  # so it is refused outright rather than guessed at.
-  while [ "$depth" -lt 10 ]; do
+  # Peel global options (replayed on every probe), take the subcommand, and
+  # expand git aliases (`alias.p=push`) the way git would, so an alias cannot
+  # carry a network op past the check. An alias may itself start with global
+  # options (`alias.p=-c url...pushInsteadOf=... push`; git accepts -c there),
+  # so the peel runs again on every expansion. A shell alias (`!...`) can run
+  # anything, so it is refused outright rather than guessed at.
+  while :; do
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix)
+          [ $# -ge 2 ] || return 0; glob+=("$1" "$2"); shift 2 ;;
+        -*) glob+=("$1"); shift ;;
+        *) break ;;
+      esac
+    done
+    [ $# -gt 0 ] || return 0
+    sub="$1"; shift
+    [ "$depth" -lt 10 ] || break
     case "$sub" in push|fetch|pull|ls-remote|clone|remote|submodule|subtree) break ;; esac
     alias_val="$(G config --get "alias.$sub" 2>/dev/null || true)"
     [ -n "$alias_val" ] || break
     case "$alias_val" in
       '!'*) git_refuse_shell_alias "$sub" "$alias_val" ;;
     esac
-    local -a ex=(); read -ra ex <<<"$alias_val"
-    sub="${ex[0]}"; set -- "${ex[@]:1}" "$@"
+    read -ra ex <<<"$alias_val"
+    set -- "${ex[@]}" "$@"
     depth=$((depth + 1))
   done
 

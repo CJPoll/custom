@@ -108,7 +108,9 @@ fi
 # ---- Plain `git push` to a github.com remote (DND-389) ----------------------
 # Dequote (as forge-auth-guard does) so quoting cannot split the pattern, and
 # mask the wrapper form `gh-athena git` first so it is never matched.
-GFLAT=$(printf '%s' "$FLAT" | tr -d "'\"\\\\" | sed -E 's#gh-athena[[:space:]]+git([[:space:]])#GH_ATHENA_GIT\1#g')
+# Newlines become `;` here (not spaces, as in FLAT): a push's arguments end at
+# the end of its line, so `git push<NL>echo done` never reads `echo` as a remote.
+GFLAT=$(printf '%s' "$CMD" | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#gh-athena[[:space:]]+git([[:space:]])#GH_ATHENA_GIT\1#g')
 # `git`, bare or path-qualified, then only GLOBAL options (-C/-c take a value),
 # then `push`. `git commit -m "push"` does not match: `commit` is not an option.
 GIT_PUSH_RE='(^|[[:space:];&|(/])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:];&|]+|--?[^[:space:];&|]+))*[[:space:]]+push([[:space:]]|$|[;&|)])'
@@ -127,6 +129,16 @@ is_github_url() {
   esac
   _h=$(printf '%s' "$_h" | tr 'A-Z' 'a-z')
   case "$_h" in github.com|*.github.com) return 0 ;; esac
+  return 1
+}
+
+# looks_like_url_or_path <word> : a URL (scheme://, scp-style host:path) or a
+# filesystem path — something git would use as a repository without a remote.
+# A bare word that is not a configured remote is NEITHER: it is unresolved.
+looks_like_url_or_path() {
+  case "$1" in
+    */*|*:*|.|..|\~*) return 0 ;;
+  esac
   return 1
 }
 
@@ -192,9 +204,9 @@ while [ "$N" -lt 10 ] && printf '%s' "$GFLAT" | grep -Eq "$GIT_PUSH_RE"; do
     fi
     if git -C "$DIR" remote 2>/dev/null | grep -qxF -- "$TARGET"; then
       URLS=$(git -C "$DIR" remote get-url --push --all "$TARGET" 2>/dev/null)
-    else
-      URLS=$TARGET   # a URL literal (or a path)
-    fi
+    elif looks_like_url_or_path "$TARGET"; then
+      URLS=$TARGET   # a URL literal or a path, classified by host below
+    fi               # else: neither a remote nor a URL -> unresolved (warn below)
   elif [ -n "$TARGET" ] && is_github_url "$TARGET"; then
     URLS=$TARGET     # a literal github URL needs no repo to classify
   fi

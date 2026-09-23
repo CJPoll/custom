@@ -145,6 +145,12 @@ check_text "3m. two pushes, the SECOND to github -> warns (every push examined)"
 run "$(bash_json_cwd "$TMP" 'cd gh_scp && git push')"
 check_text "3n. relative cd resolved against the input cwd" 'to a github.com remote'
 
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'git push\necho done')")"
+check_text "3o. multi-line: push's args end at its line (origin=github still warns)" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push orgin HEAD')"
+check_text "3p. a target that is neither a remote nor a URL -> could-not-resolve warn" 'could not resolve its remote'
+
 run "$(bash_json_cwd "$TMP/gh_scp" 'git push origin HEAD')"
 check_text "3j. push warn carries the escalate Fix:" 'Fix: push through the wrapper'
 check_text "3k. push warn says escalate to your admiral" 'escalate to your admiral with the command + error and wait'

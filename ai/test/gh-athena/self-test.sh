@@ -150,6 +150,11 @@ gha "${R}" -c 'alias.sp=!git push' sp
 is_refusal && [[ "${ERR}" == *"shell alias"* ]] && ok "13c. a shell alias (!...) -> refused (cannot be checked)" \
   || bad "13c. shell alias refused" "rc=${RC} out='${OUT}' err='${ERR}'"
 
+R2="$(new_repo alias-opt 'https://github.com/o/r.git')"
+gha "${R2}" -c 'alias.p=-c url.git@github.com:.pushInsteadOf=https://github.com/ push' p origin HEAD
+is_refusal && ok "13c2. an alias that starts with -c (forcing SSH via pushInsteadOf) -> refused" \
+  || bad "13c2. alias with leading -c refused" "rc=${RC} out='${OUT}' err='${ERR}'"
+
 R="$(new_repo submod 'https://github.com/o/r.git')"
 git -C "${R}" config submodule.lib.url 'ssh://git@github.com/o/lib.git'
 gha "${R}" submodule update --init
