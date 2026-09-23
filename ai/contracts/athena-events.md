@@ -2283,6 +2283,39 @@ proves the server minted it; the account-equality check proves it came back on
 the app that owns that account. (Design §3 6D and §4 are the mechanism; this
 section states the invariant it rests on.)
 
+### Which machine am I — the own-machine id
+
+The machine↔owner binding above is resolved server-side, so the harness does
+not hold its own machine id; it asks. **`machine_reachable {}` (the `athena`
+MCP tool, HG-20, called with no selector) is the sanctioned source of the
+caller's own machine id.** Its answer carries `machine_id`, derived from the
+authenticated machine token (gen_saas #307, DND-375), beside the reachability
+verdict:
+
+```json
+{"machine_id": "<uuid>", "reachable": true | false | "unknown", "basis": "<str>",
+ "last_ack_at": "<iso>|null", "last_joined_at": "<iso>|null",
+ "pending_deliveries": <int>, "unreachable_since": "<iso>|null"}
+```
+
+- With a selector naming one of the caller's own machines, `machine_id` echoes
+  that machine. A machine of another owner and a missing one both answer the
+  same `not found`, with no id in it.
+- `reachable` is three-valued, and `"unknown"` is **not** a failure. It means
+  no recent signal, and it is what an idle, healthy machine reads outside
+  ~120 s of an ack or join. A consumer that needs "did the question get
+  answered" MUST tell an absent, malformed, or errored answer apart from
+  `"unknown"`, and MUST NOT read one as the other.
+- **`list_my_machines`** (HG-2) returns every machine the caller's owner owns,
+  each `{id, name, live?, last_connected_at, instances, self}`. Exactly one
+  entry has `self: true`: the caller's own machine.
+- A server that predates #307 answers without `machine_id` or `self`. A
+  consumer MUST treat that as "own id not known" and say so. It MUST NOT
+  guess, for example from a machine name, a hostname, or the only machine
+  hosting an inbox. `athena:inbox`'s `send-mail` is the reference consumer:
+  it compares `--to`'s machine with this id to decide whether a recipient is
+  on this machine.
+
 ---
 
 ## Relationship to the Athena Inbox contract

@@ -217,36 +217,53 @@ routed_maildir_name_refusal() {
 # machine reachable)); otherwise the local maildir. NEVER a silent local write
 # for a cross-machine recipient.
 #
-# WHAT THE CLIENT CAN KNOW. The address says which side of the rule applies:
+# WHAT THE CLIENT CAN KNOW. The address, and one server answer, say which side
+# of the rule applies:
 #   * a MAILDIR address (`<channel> <slug> --to <identity>`) names a local
 #     directory under the inbox root. Its peer reads it on THIS machine, by
-#     construction -- same machine is proven.
+#     construction. The sender chose that transport by naming the channel.
 #   * a SERVER address (`--to <machine_id>/<inbox>`, `--to-project`) names a
-#     recipient the server resolves. Whether it is THIS machine is not
-#     decidable client-side: no harness surface names this machine's own server
-#     id (list_my_machines does not mark the caller's machine, machine_reachable
-#     for self does not return it, and the client config holds none). The
-#     locality is UNKNOWN, never guessed.
+#     recipient the server resolves. Its LOCALITY comes from `machine_reachable
+#     {}`, whose `machine_id` is this machine's own server id (gen_saas #307,
+#     DND-375; the sanctioned "which machine am I" answer). A `--to` whose
+#     machine_id equals it is `same`; any other is `other`. The locality is
+#     `unproven` when the answer carries no machine_id (a server that predates
+#     #307) or the recipient is `--to-project` (its machine is resolved only at
+#     send time). Never guessed.
+#
+# REACHABILITY IS THREE-VALUED, AND "COULD NOT ASK" IS A FOURTH, DIFFERENT THING:
+#   true         the server heard from this machine recently;
+#   unknown      no recent signal (no_signal / awaiting). The server answers
+#                true only within ~120 s of an ack or join, so an IDLE, healthy
+#                machine reads unknown almost always (DND-378). Routable: the
+#                server holds the message pending until the recipient acks, and
+#                a never-acked delivery alarms server-side (DND-315/373);
+#   false        the server positively reports this machine unreachable;
+#   unavailable  the question got no usable answer (transport, HTTP, an MCP
+#                error, a malformed answer, a missing field). NEVER read as
+#                unknown: an answer that is missing is not an answer that says
+#                "no signal".
 #
 # SO THE RULE, APPLIED WITHOUT GUESSING:
-#   * maildir address -> local. The rule's same-machine routed branch needs a
-#     server address for THIS machine, which is the missing id above; until a
-#     surface exposes it, a same-machine message goes on the maildir that
-#     provably reaches its peer.
-#   * server address  -> routed only when BOTH branches of the rule agree it
-#     would be routed whichever machine the recipient is on: registered, bearer
-#     set, this project's session inbox valid (a routed send needs it as its
-#     reply address), and this machine confirmed reachable (reachable == true,
-#     nothing else). Any other answer refuses LOUDLY with the two explicit ways
-#     out -- it never writes a local maildir for a recipient that may be
-#     elsewhere.
+#   * maildir address -> local.
+#   * server address, after registered / bearer / session inbox all hold:
+#       unavailable                    -> refuse (the lookup failed);
+#       locality other                 -> routed (this machine's reachability
+#                                         does not gate a delivery elsewhere);
+#       same or unproven, true         -> routed;
+#       same or unproven, unknown      -> routed, and the reason says the
+#                                         server holds it until acked;
+#       same or unproven, false        -> refuse, loudly, with the explicit
+#                                         ways out. A server address is never
+#                                         written to a local maildir.
 #
-# routed_default_path <address> <registration> <bearer> <session> <reachable>
+# routed_default_path <address> <registration> <bearer> <session> <reachable> <locality>
 #   address       maildir | server
 #   registration  registered | unregistered | broken
 #   bearer        set | unset
 #   session       declared | missing | invalid  (this project's session inbox)
 #   reachable     unasked | true | false | unknown | unavailable
+#   locality      unasked | same | other | unproven
 # Prints "<path>\t<reason>" and returns 0, where <path> is one of:
 #   local    send on the maildir channel that was named
 #   routed   send through session_send
@@ -256,15 +273,19 @@ routed_maildir_name_refusal() {
 # Any input outside its vocabulary returns 1 with nothing printed: a wrongly
 # computed input is an error, never a path.
 routed_default_path() {
-  local address="$1" reg="$2" bearer="$3" session="$4" reach="$5"
+  local address="$1" reg="$2" bearer="$3" session="$4" reach="$5" locality="$6" where
   case "${address}" in maildir|server) ;; *) return 1 ;; esac
   case "${reg}" in registered|unregistered|broken) ;; *) return 1 ;; esac
   case "${bearer}" in set|unset) ;; *) return 1 ;; esac
   case "${session}" in declared|missing|invalid) ;; *) return 1 ;; esac
   case "${reach}" in unasked|true|false|unknown|unavailable) ;; *) return 1 ;; esac
+  case "${locality}" in unasked|same|other|unproven) ;; *) return 1 ;; esac
+  # The two "not yet asked" inputs travel together: one call answers both.
+  if [ "${reach}" = "unasked" ] && [ "${locality}" != "unasked" ]; then return 1; fi
+  if [ "${reach}" != "unasked" ] && [ "${locality}" = "unasked" ]; then return 1; fi
 
   if [ "${address}" = "maildir" ]; then
-    printf 'local\ta maildir channel was named, so the recipient is on this machine; a same-machine routed send needs this machine'"'"'s own server id, which no harness surface exposes yet (DND-314 gap)\n'
+    printf 'local\ta maildir channel was named: the recipient is on this machine and reads that maildir (to reach its session inbox instead, address it on the server with --to <machine_id>/<inbox> or --to-project)\n'
     return 0
   fi
   case "${reg}" in
@@ -284,9 +305,21 @@ routed_default_path() {
     return 0
   fi
   case "${reach}" in
-    unasked) printf 'ask\tmachine_reachable for this machine decides it\n' ;;
-    true)    printf 'routed\tthe athena MCP is registered and the server reports this machine reachable\n' ;;
-    *)       printf 'refuse\tthe server does not confirm this machine reachable (machine_reachable: %s), and whether the recipient is on this machine cannot be decided client-side, so neither path is safe to pick for you\n' "${reach}" ;;
+    unasked)
+      printf 'ask\tmachine_reachable for this machine decides it\n'; return 0 ;;
+    unavailable)
+      printf 'refuse\tthe machine_reachable lookup for this machine FAILED (no usable answer), so neither whether the recipient is on this machine nor whether this machine is reachable is known\n'; return 0 ;;
+  esac
+  case "${locality}" in
+    other)
+      printf 'routed\tthe recipient is on another of your machines; this machine'"'"'s reachability (%s) does not gate it, and the server holds it pending until the recipient acks\n' "${reach}"; return 0 ;;
+    same)     where="the recipient is on THIS machine" ;;
+    *)        where="whether the recipient is on this machine is not proven" ;;
+  esac
+  case "${reach}" in
+    true)    printf 'routed\t%s; self reachable (the server heard from this machine recently)\n' "${where}" ;;
+    unknown) printf 'routed\t%s; self reachability unknown (no recent signal); the server holds it until acked\n' "${where}" ;;
+    false)   printf 'refuse\t%s, and the server reports this machine UNREACHABLE (machine_reachable: false), so a routed message would sit undelivered\n' "${where}" ;;
   esac
   return 0
 }

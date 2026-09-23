@@ -1656,24 +1656,43 @@ inbox_mcp_registration() {
 }
 
 # inbox_self_reachable <url>
-# `machine_reachable` for THIS machine (no machine_id = self; gen_saas HG-20),
-# through the launcher bearer. Prints "<verdict>\t<detail>" where verdict is the
-# server's own three-valued answer (true | false | unknown) or `unavailable`
-# when anything stood between the question and an answer -- transport, HTTP, an
-# MCP error, the tool missing, a shape with no `reachable`. An unavailable
-# answer is NEVER read as reachable; <detail> says why, so "could not ask"
-# never looks like "asked, and it is fine".
+# `machine_reachable {}` -- THIS machine (no machine_id = self; gen_saas HG-20),
+# through the launcher bearer. Prints "<verdict>\t<self_id>\t<detail>":
+#   verdict  the server's own three-valued answer (true | false | unknown), or
+#            `unavailable` when anything stood between the question and an
+#            answer -- transport, HTTP, an MCP error, the tool missing, an
+#            answer that is not an object, a missing or out-of-vocabulary
+#            `reachable`, or a `machine_id` that is present but malformed.
+#            An unavailable answer is NEVER read as `unknown` (and never as
+#            reachable): "could not ask" and "asked: no recent signal" are
+#            different facts and stay different values.
+#   self_id  the answer's `machine_id` (gen_saas #307: the caller's own id,
+#            token-derived), lower-cased; EMPTY when the answer carries no
+#            machine_id at all (a server that predates #307). Absent and
+#            malformed are kept apart: absent -> empty + a detail saying so;
+#            malformed -> unavailable.
+#   detail   why, when there is something to say; else empty.
 inbox_self_reachable() {
-  local out rc res r
+  local out rc res r id
   out="$(mcp_call_tool "$1" machine_reachable '{}')"; rc=$?
-  if [ "${rc}" -ne 0 ]; then printf 'unavailable\t%s\n' "$(printf '%s' "${out}" | head -n 1)"; return 0; fi
+  if [ "${rc}" -ne 0 ]; then printf 'unavailable\t\t%s\n' "$(printf '%s' "${out}" | head -n 1)"; return 0; fi
   res="$(routed_tool_result "${out}")"; rc=$?
-  if [ "${rc}" -ne 0 ]; then printf 'unavailable\tthe server answered machine_reachable with an error: %s\n' "$(printf '%s' "${res:-no result}" | head -n 1)"; return 0; fi
+  if [ "${rc}" -ne 0 ]; then printf 'unavailable\t\tthe server answered machine_reachable with an error: %s\n' "$(printf '%s' "${res:-no result}" | head -n 1)"; return 0; fi
   r="$(printf '%s' "${res}" | jq -r 'if type == "object" and has("reachable") then (.reachable | tostring) else "" end' 2>/dev/null)"
   case "${r}" in
-    true|false|unknown) printf '%s\t\n' "${r}" ;;
-    *) printf 'unavailable\tthe machine_reachable answer carried no reachable verdict\n' ;;
+    true|false|unknown) ;;
+    *) printf 'unavailable\t\tthe machine_reachable answer carried no reachable verdict (true, false or "unknown")\n'; return 0 ;;
   esac
+  if ! printf '%s' "${res}" | jq -e 'has("machine_id")' >/dev/null 2>&1; then
+    printf '%s\t\tthe server'"'"'s machine_reachable answer names no machine_id (it predates gen_saas #307), so this machine'"'"'s own id is not known\n' "${r}"
+    return 0
+  fi
+  id="$(printf '%s' "${res}" | jq -r '.machine_id | if type == "string" then . else "" end' 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  if ! [[ "${id}" =~ ${ROUTED_ID_RE} ]]; then
+    printf 'unavailable\t\tthe machine_reachable answer carried a machine_id that is not a machine id\n'
+    return 0
+  fi
+  printf '%s\t%s\t\n' "${r}" "${id}"
 }
 
 # inbox_session_inbox_state [cwd]
@@ -1714,9 +1733,10 @@ inbox_session_state_of_entry() {
 # local reads, and machine_reachable is asked ONLY when the rule says the
 # answer decides it (a maildir address never makes a network call).
 inbox_default_path() {
-  local address="$1" cwd="${2:-.}" url rc reg bearer session entry decision probe reach detail
+  local address="$1" cwd="${2:-.}" to_spec="${3:-}" url rc reg bearer session decision probe reach self_id detail
+  local locality to_machine
   if [ "${address}" = "maildir" ]; then
-    routed_default_path maildir unregistered unset missing unasked || return 2
+    routed_default_path maildir unregistered unset missing unasked unasked || return 2
     return 0
   fi
   url="$(inbox_mcp_registration "${cwd}")"; rc=$?
@@ -1728,11 +1748,23 @@ inbox_default_path() {
   esac
   if [ -n "${ATHENA_MCP_BEARER:-}" ]; then bearer=set; else bearer=unset; fi
   session="$(inbox_session_inbox_state "${cwd}")"
-  decision="$(routed_default_path server "${reg}" "${bearer}" "${session}" unasked)" || return 2
+  decision="$(routed_default_path server "${reg}" "${bearer}" "${session}" unasked unasked)" || return 2
   if [ "${decision%%$'\t'*}" = "ask" ]; then
     probe="$(inbox_self_reachable "${url}")"
-    reach="${probe%%$'\t'*}"; detail="${probe#*$'\t'}"
-    decision="$(routed_default_path server "${reg}" "${bearer}" "${session}" "${reach}")" || return 2
+    reach="${probe%%$'\t'*}"; probe="${probe#*$'\t'}"
+    self_id="${probe%%$'\t'*}"; detail="${probe#*$'\t'}"
+    # LOCALITY: --to's machine against this machine's own server id, both
+    # lower-cased (the same normalisation on both sides). --to-project's
+    # machine is resolved only at send time, so it stays unproven.
+    locality="unproven"
+    if [ -n "${to_spec}" ] && [ -n "${self_id}" ]; then
+      to_machine="$(routed_parse_to "${to_spec}" 2>/dev/null)" || return 2
+      to_machine="$(printf '%s' "${to_machine%%$'\t'*}" | tr '[:upper:]' '[:lower:]')"
+      if [ "${to_machine}" = "${self_id}" ]; then locality="same"; else locality="other"; fi
+    elif [ -z "${to_spec}" ] && [ "${reach}" != "unavailable" ]; then
+      detail="${detail:+${detail}; }--to-project resolves the recipient's machine only at send time"
+    fi
+    decision="$(routed_default_path server "${reg}" "${bearer}" "${session}" "${reach}" "${locality}")" || return 2
     [ -z "${detail}" ] || decision="${decision} (${detail})"
   fi
   printf '%s\n' "${decision}"

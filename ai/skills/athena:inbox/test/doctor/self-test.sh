@@ -789,7 +789,7 @@ export ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json"
 echo "== DND-314: send-paths reports BOTH send paths, and the no-flag default =="
 assert_eq "send-paths state: registered + session + reachable true -> ok" ok "$(doctor_state_send_paths registered declared true set 1)"
 assert_eq "send-paths state: registered + session + reachable false -> warn" warn "$(doctor_state_send_paths registered declared false set 1)"
-assert_eq "send-paths state: registered + session + unknown -> warn (quiet is not reachable)" warn "$(doctor_state_send_paths registered declared unknown set 1)"
+assert_eq "send-paths state: registered + session + unknown (idle, no recent signal) -> ok, routable (DND-378)" ok "$(doctor_state_send_paths registered declared unknown set 1)"
 assert_eq "send-paths state: registered + session + unavailable -> warn" warn "$(doctor_state_send_paths registered declared unavailable set 0)"
 assert_eq "send-paths state: registered + session, not asked (--no-server) -> na, never ok" na "$(doctor_state_send_paths registered declared not-asked set 1)"
 assert_eq "send-paths state: registered, session missing -> warn" warn "$(doctor_state_send_paths registered missing true set 1)"
@@ -836,11 +836,12 @@ assert_eq "send-paths: a registration lookup that cannot be made (not a repo) ->
 assert_contains "... says the lookup itself failed, with its words" "the registration lookup itself failed: athena:inbox: the athena MCP registration cannot be looked up" "${RO}"
 RO="$(sp_run false)"
 assert_eq "send-paths: registered, this machine unreachable -> warn" warn "$(state_of "${RO}" send-paths)"
-assert_contains "... says the no-flag server-addressed send is REFUSED" "REFUSED (use --routed for another machine, --local for this one)" "${RO}"
+assert_contains "... says a same-machine or unproven server-addressed send is REFUSED, one elsewhere still routes" \
+  "to THIS machine (or one not proven elsewhere) is REFUSED; one to another of your machines still ROUTES" "${RO}"
 assert_contains "... warn carries a Fix naming both explicit flags" "with --routed" "${RO}"
 RO="$(sp_run not-asked)"
 assert_eq "send-paths: --no-server -> na, never ok" na "$(state_of "${RO}" send-paths)"
-assert_contains "... says the answer depends on machine_reachable at send time" "only if machine_reachable answers true" "${RO}"
+assert_contains "... says the answer depends on machine_reachable at send time" "routes if machine_reachable answers true or unknown when it is sent" "${RO}"
 RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" ATHENA_MCP_BEARER=fixture-bearer ATHENA_INBOX_CLIENT_CONFIG="${SP}/no-client.json" DOCTOR_NO_SERVER=0 \
   bash -c 'for f in err names descriptor logchan maildir fence session fs lock inbox doctor; do . "$0/${f}.sh"; done
            doctor_check_server_reachability >/dev/null; doctor_check_send_paths "$1" "."' "${LIB}" "${SPENTRY}" )"
@@ -874,6 +875,26 @@ RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_MCP_BEARER
            doctor_check_server_reachability >/dev/null; doctor_check_send_paths "$1" "."' "${LIB}" "${SPENTRY}" )"
 assert_eq "handoff: server-reachability's recorded false reaches send-paths (warn)" warn "$(state_of "${RO}" send-paths)"
 assert_contains "handoff: ... and is named in the facts" "this machine reachable: false" "${RO}"
+# DND-378 through the handoff: an IDLE machine (unknown) is routable, with the
+# note; the #307 self id reaches the facts; absent and malformed stay distinct.
+sp_handoff() { # sp_handoff -> send-paths finding(s) after server-reachability read ${SP}/reach.json
+  ( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_MCP_BEARER=fixture-bearer ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
+    bash -c 'for f in err names descriptor logchan maildir fence session fs lock inbox doctor; do . "$0/${f}.sh"; done
+             doctor_check_server_reachability >/dev/null; doctor_check_send_paths "$1" "."' "${LIB}" "${SPENTRY}" )
+}
+printf '{"machine_id":"3F1C9A2E-7B4D-4E8A-9C21-5D6E7F8A9B0C","reachable":"unknown","basis":"no_signal","pending_deliveries":0}' > "${SP}/reach.json"
+RO="$(sp_handoff)"
+assert_eq "handoff: reachable unknown (idle) -> send-paths ok" ok "$(state_of "${RO}" send-paths)"
+assert_contains "handoff: unknown -> the facts carry the note" "ROUTES (self reachability unknown: no recent signal; the server holds it until acked)" "${RO}"
+assert_contains "handoff: the #307 self id reaches the facts, lower-cased" "this machine's server id: 3f1c9a2e-7b4d-4e8a-9c21-5d6e7f8a9b0c" "${RO}"
+printf '{"reachable":true,"basis":"recent_ack","pending_deliveries":0}' > "${SP}/reach.json"
+RO="$(sp_handoff)"
+assert_eq "handoff: a pre-#307 answer (no machine_id), true -> ok" ok "$(state_of "${RO}" send-paths)"
+assert_contains "handoff: ... says the server provides no id, never guesses one" "not provided (the server predates gen_saas #307" "${RO}"
+printf '{"machine_id":42,"reachable":true,"basis":"recent_ack","pending_deliveries":0}' > "${SP}/reach.json"
+RO="$(sp_handoff)"
+assert_eq "handoff: a MALFORMED machine_id -> warn (send-mail refuses it as a failed lookup)" warn "$(state_of "${RO}" send-paths)"
+assert_contains "handoff: ... names it MALFORMED, never 'not provided'" "MALFORMED in the server's answer" "${RO}"
 printf 'UNAVAILABLE:tool machine_reachable not found' > "${SP}/reach.json"
 RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_MCP_BEARER=fixture-bearer ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
   bash -c 'for f in err names descriptor logchan maildir fence session fs lock inbox doctor; do . "$0/${f}.sh"; done

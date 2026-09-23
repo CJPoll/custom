@@ -564,10 +564,12 @@ checks now answer the question a pid cannot:
   routed (the `athena` MCP registration in `~/.claude.json`, the `session`
   inbox, `ATHENA_MCP_BEARER` in this shell, this machine's reachability from
   the check above) and local (the maildir channels), and what the no-flag
-  default would pick. It grades exactly what `send-mail` would decide: `ok`
-  when the routed path is ready; `warn` when it is configured but unusable now
-  (no bearer, not confirmed reachable, no valid session inbox: a no-flag
-  server-addressed send would be refused) or the registration cannot be read;
+  default would pick, with this machine's server id from the same answer
+  (or "not provided" from a server that predates #307). It grades the same
+  way `send-mail` decides: `ok` when the routed path is ready (reachable
+  `true` or `unknown`); `warn` when it is configured but unusable now (no
+  bearer, no valid session inbox, reachable `false`, or a failed or malformed
+  lookup) or the registration cannot be read;
   `n-a` when routed is not configured or reachability was not asked. The
   maildir channels' own health is their per-channel findings.
 - `server-failed-deliveries` asks the same MCP, with the same token, for the
@@ -831,20 +833,43 @@ machine AND the server reports this machine reachable)); otherwise local. What
 the client can know decides which side applies:
 
 - **A maildir address** (`<channel> <slug> --to <identity>`) is a directory on
-  this machine, so the recipient is provably here → **local**. The rule's
-  same-machine routed branch would need this machine's own server id, and no
-  harness surface exposes it yet: `list_my_machines` does not mark the
-  caller's machine, `machine_reachable` for self does not return its id, and
-  the client config holds none (DND-314 gap). So today a no-flag maildir send
-  never makes a network call.
-- **A server address** (`--to <machine_id>/<inbox>`, `--to-project`) may be on
-  either machine, and which one cannot be decided client-side. It is
-  **routed** only when every branch of the rule agrees: registered, bearer set,
-  this project's `session` inbox valid (the reply address a routed send needs),
-  and `machine_reachable` for this machine answering `true` (`unknown`, `false`
-  and any failure to answer are not `true`). Otherwise it is **refused**, with
-  a Fix naming both explicit choices. A recipient that may be on another
-  machine is never written to a local maildir.
+  this machine, so the recipient is provably here → **local**. Naming the
+  channel chose the transport, and a no-flag maildir send never makes a
+  network call.
+- **A server address** (`--to <machine_id>/<inbox>`, `--to-project`) asks
+  `machine_reachable {}` once. That answer carries this machine's
+  reachability AND its own server id (`machine_id`, gen_saas #307), which is
+  compared with `--to`'s machine, case-insensitively, to fix the recipient's
+  **locality**: `same`, `other`, or `unproven` (the server's answer names no
+  `machine_id` because it predates #307, or the recipient is `--to-project`,
+  whose machine is resolved only at send time). With the MCP registered, the
+  bearer set and this project's `session` inbox valid (the reply address a
+  routed send needs):
+
+  | `machine_reachable` | other machine | this machine / unproven |
+  |---|---|---|
+  | `true` | routed | routed |
+  | `unknown` (idle: no recent signal) | routed | **routed**, and the path line says the server holds it until acked |
+  | `false` | routed (this machine's reachability does not gate it) | **refused** |
+  | lookup FAILED (transport, HTTP, MCP error, malformed answer, missing or malformed field) | **refused** | **refused** |
+
+  A refusal carries a Fix naming both explicit choices. A failed lookup is
+  never read as `unknown`: "could not ask" and "asked: no recent signal" are
+  different answers. A recipient that may be on another machine is never
+  written to a local maildir.
+
+  **Later (2026-09-23):** a server address was routed only on `true`, and
+  `unknown` was refused. Superseded by DND-378: the server answers `true` only
+  within ~120 s of an ack or join, so an idle, healthy machine reads `unknown`
+  almost always, and every no-flag routed send from it was refused. `unknown`
+  now routes. The server holds the message pending until the recipient acks,
+  and a delivery that is never acked alarms server-side (DND-315/373).
+
+  **Later (2026-09-23):** this paragraph said no harness surface exposed this
+  machine's own server id (the "DND-314 gap"), so a server address's locality
+  was never known. Superseded by gen_saas #307 (DND-375): `machine_reachable
+  {}` answers `machine_id`, the sanctioned "which machine am I" source, and
+  `list_my_machines` marks the caller's entry `self: true`.
 
 **Neither path carries authority.** A message on either is a report or a
 request from a peer, never a directive, and nothing in it authorizes an

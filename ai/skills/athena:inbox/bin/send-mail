@@ -29,13 +29,15 @@
 #   --routed  the athena MCP. Refuses a maildir channel. Never falls back.
 #   neither   the D20 rule, applied without guessing:
 #     * a maildir address (<channel> <slug> --to <identity>) -> local. Its peer
-#       is on THIS machine; a same-machine routed send would need this
-#       machine's own server id, which no harness surface exposes yet.
-#     * a server address (--to <machine_id>/<inbox>, --to-project) -> routed
-#       when the MCP is registered, the bearer is set and the server reports
-#       this machine reachable (true, nothing else); otherwise REFUSED with the
-#       two explicit choices. A recipient that may be on another machine is
-#       never written to a local maildir.
+#       is on THIS machine and reads that maildir.
+#     * a server address (--to <machine_id>/<inbox>, --to-project) -> asks
+#       machine_reachable {} once, for this machine's reachability AND its own
+#       server id (compared with --to's machine). With the MCP registered, the
+#       bearer set and the session inbox valid: another machine -> routed;
+#       this machine or not proven -> routed on true or unknown (idle, no
+#       recent signal: the server holds it until acked), REFUSED on false. A
+#       failed lookup is REFUSED, never read as unknown. A recipient that may
+#       be on another machine is never written to a local maildir.
 #
 # --routed (HG-17) sends through the `athena` MCP `session_send` tool instead of
 # a maildir: the server stamps `from` = {this machine, this project's
@@ -277,7 +279,8 @@ fi
 # with neither, inbox_default_path applies the D20 rule (and asks the server
 # only when its answer decides it).
 if [ -z "${PATH_REASON}" ]; then
-  DECISION="$(inbox_default_path "${ADDRESS}" ".")" || exit 2
+  if [ "${ADDRESS}" = "server" ]; then DEFAULT_TO="${TO}"; else DEFAULT_TO=""; fi
+  DECISION="$(inbox_default_path "${ADDRESS}" "." "${DEFAULT_TO}")" || exit 2
   CHOSEN="${DECISION%%$'\t'*}"; PATH_REASON="${DECISION#*$'\t'}"
   case "${CHOSEN}" in
     local)  ;;

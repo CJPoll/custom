@@ -671,22 +671,37 @@ assert_contains "R2: with a threshold set, the session channel prints STALE like
 # ===========================================================================
 echo "== HG-19 domain: routed_default_path =="
 DP() { ( . "${LIB}/err.sh"; . "${LIB}/names.sh"; . "${LIB}/fence.sh"; . "${LIB}/routed.sh"; routed_default_path "$@" ); }
-assert_eq "domain: a maildir address is local, whatever the server says" "local" "$(DP maildir registered set declared true | cut -f1)"
-assert_contains "domain: ... and the reason names the missing self id (the gap), not a guess" "own server id" \
-  "$(DP maildir registered set declared true | cut -f2)"
-assert_eq "domain: server + unregistered -> refuse" "refuse" "$(DP server unregistered set declared unasked | cut -f1)"
-assert_eq "domain: server + broken registration -> refuse (never read as unregistered)" "refuse" "$(DP server broken set declared unasked | cut -f1)"
-assert_contains "domain: the broken-registration reason says it cannot be read" "cannot be read" "$(DP server broken set declared unasked)"
-assert_eq "domain: server + bearer unset -> refuse" "refuse" "$(DP server registered unset declared unasked | cut -f1)"
-assert_eq "domain: server + session inbox missing -> refuse before asking" "refuse" "$(DP server registered set missing unasked | cut -f1)"
-assert_eq "domain: server + session inbox invalid -> refuse before asking" "refuse" "$(DP server registered set invalid true | cut -f1)"
-assert_eq "domain: server, registered, bearer, not yet asked -> ask" "ask" "$(DP server registered set declared unasked | cut -f1)"
-assert_eq "domain: server + reachable true -> routed" "routed" "$(DP server registered set declared true | cut -f1)"
-for v in false unknown unavailable; do
-  assert_eq "domain: server + reachable ${v} -> refuse (only true routes)" "refuse" "$(DP server registered set declared "${v}" | cut -f1)"
+assert_eq "domain: a maildir address is local, whatever the server says" "local" "$(DP maildir registered set declared true same | cut -f1)"
+assert_contains "domain: ... and the reason says the maildir was named" "a maildir channel was named" "$(DP maildir registered set declared true same | cut -f2)"
+assert_eq "domain: server + unregistered -> refuse" "refuse" "$(DP server unregistered set declared unasked unasked | cut -f1)"
+assert_eq "domain: server + broken registration -> refuse (never read as unregistered)" "refuse" "$(DP server broken set declared unasked unasked | cut -f1)"
+assert_contains "domain: the broken-registration reason says it cannot be read" "cannot be read" "$(DP server broken set declared unasked unasked)"
+assert_eq "domain: server + bearer unset -> refuse" "refuse" "$(DP server registered unset declared unasked unasked | cut -f1)"
+assert_eq "domain: server + session inbox missing -> refuse before asking" "refuse" "$(DP server registered set missing unasked unasked | cut -f1)"
+assert_eq "domain: server + session inbox invalid -> refuse" "refuse" "$(DP server registered set invalid true same | cut -f1)"
+assert_eq "domain: server, registered, bearer, not yet asked -> ask" "ask" "$(DP server registered set declared unasked unasked | cut -f1)"
+# DND-378: the reachability x locality table.
+for loc in same unproven; do
+  assert_eq "domain: ${loc} + true -> routed" "routed" "$(DP server registered set declared true "${loc}" | cut -f1)"
+  assert_eq "domain: ${loc} + unknown (idle, no recent signal) -> routed" "routed" "$(DP server registered set declared unknown "${loc}" | cut -f1)"
+  assert_contains "domain: ${loc} + unknown: the reason says the server holds it until acked" \
+    "self reachability unknown (no recent signal); the server holds it until acked" "$(DP server registered set declared unknown "${loc}")"
+  assert_eq "domain: ${loc} + false -> refuse" "refuse" "$(DP server registered set declared false "${loc}" | cut -f1)"
+  assert_contains "domain: ${loc} + false: the reason names the explicit false" "machine_reachable: false" "$(DP server registered set declared false "${loc}")"
 done
+for v in true unknown false; do
+  assert_eq "domain: other machine + ${v} -> routed (self reachability does not gate it)" "routed" "$(DP server registered set declared "${v}" other | cut -f1)"
+done
+for loc in same other unproven; do
+  assert_eq "domain: a FAILED lookup (unavailable) -> refuse, even for ${loc}" "refuse" "$(DP server registered set declared unavailable "${loc}" | cut -f1)"
+done
+assert_contains "domain: the failed-lookup reason says FAILED, never unknown" "lookup for this machine FAILED" "$(DP server registered set declared unavailable unproven)"
+assert_not_contains "domain: ... and never calls it no signal" "no recent signal" "$(DP server registered set declared unavailable unproven)"
 # THE MISS: a wrongly computed input is an error, never a path.
-for bad in "mail registered set declared true" "server yes set declared true" "server registered maybe declared true" "server registered set declared TRUE" "server registered set declared ''" "server registered set present true" "server registered set true"; do
+for bad in "mail registered set declared true same" "server yes set declared true same" "server registered maybe declared true same" \
+           "server registered set declared TRUE same" "server registered set declared '' same" "server registered set present true same" \
+           "server registered set declared true" "server registered set declared true here" "server registered set declared true unasked" \
+           "server registered set declared unasked same" "server registered set declared true ''"; do
   eval "set -- ${bad}"; o="$(DP "$@")"; rc=$?
   assert_eq "domain: out-of-vocabulary input [${bad}] -> status 1, nothing printed" "1|" "${rc}|${o}"
 done
@@ -701,6 +716,12 @@ reach_answer() { # reach_answer <json-rpc message>
 REACH_FALSE='{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"reachable":false,"basis":"silence","pending_deliveries":3,"unreachable_since":"2026-09-23T06:00:00Z"}}}'
 REACH_TRUE='{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"reachable":true,"basis":"recent_ack","pending_deliveries":0}}}'
 REACH_UNKNOWN='{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"reachable":"unknown","basis":"quiet","pending_deliveries":0}}}'
+# gen_saas #307 shape: the same answers carrying this machine's own id. The
+# fixtures above (no machine_id) are the pre-#307 server.
+SELF_ID="3f1c9a2e-7b4d-4e8a-9c21-5d6e7f8a9b0c"
+reach_self() { # reach_self <true|false|"unknown"> [machine_id-json]
+  printf '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"machine_id":%s,"reachable":%s,"basis":"no_signal","pending_deliveries":0}}}' "${2:-\"${SELF_ID}\"}" "$1" > "${SHIM}/machine_reachable.answer"
+}
 maildir_files() { find "${ATHENA_INBOX_ROOT}/agent-mail" -name '*.md' -type f 2>/dev/null; }
 # refused_no_path <claim> <needle>: a no-flag refusal, loudly.
 refused_no_path() {
@@ -720,7 +741,7 @@ rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"; shim_reset; reach_answer "${REACH_FALS
 send peer-mail status-note --to peer --re /x
 assert_eq "acc-1: exit 0" 0 "${RC}"
 assert_contains "acc-1: the FIRST stdout line says local" "athena:inbox: path: local -- a maildir channel was named" "${PATHLINE}"
-assert_contains "acc-1: ... and why routed was not taken" "own server id" "${PATHLINE}"
+assert_contains "acc-1: ... and says it reads that maildir" "reads that maildir" "${PATHLINE}"
 assert_contains "acc-1: then the delivered filename" "athena:inbox: delivered " "$(printf '%s\n' "${OUT}" | sed -n 2p)"
 assert_eq "acc-1: exactly one message is in the peer's maildir" 1 "$(maildir_files | grep -c . )"
 assert_eq "acc-1: it is in THIS channel's write dir" "${MAILDIR_OUT}" "$(dirname "$(maildir_files | head -n 1)")"
@@ -736,38 +757,87 @@ echo "== HG-19 ACCEPTANCE 2: no flag, recipient addressed on the server -> route
 rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"; shim_reset; reach_answer "${REACH_TRUE}"
 send --to m-lap/walt_ui-session.jsonl --subject "cross-machine" --re /x
 assert_eq "acc-2 routes: exit 0" 0 "${RC}"
-assert_eq "acc-2 routes: the FIRST stdout line says routed, and why" \
-  "athena:inbox: path: routed -- the athena MCP is registered and the server reports this machine reachable" "${PATHLINE}"
+assert_contains "acc-2 routes (pre-#307 server, true): the FIRST stdout line says routed, and why" \
+  "athena:inbox: path: routed -- whether the recipient is on this machine is not proven; self reachable" "${PATHLINE}"
+assert_contains "acc-2 routes (pre-#307): the path line says the server names no machine_id" "names no machine_id (it predates gen_saas #307)" "${PATHLINE}"
 assert_eq "acc-2 routes: the receipt is the last line" "ev-111" "$(printf '%s' "${RECEIPT}" | jq -r .event_id 2>/dev/null)"
 assert_eq "acc-2 routes: machine_reachable was asked, THEN session_send was called" \
   "tools/call machine_reachable|tools/call session_send" "$(calls | grep '^tools/call' | paste -sd'|')"
 assert_eq "acc-2 routes: machine_reachable was asked for THIS machine (no machine_id)" "{}" "$(cat "${SHIM}/args.machine_reachable.json" 2>/dev/null)"
 assert_eq "acc-2 routes: no maildir was written" "" "$(maildir_files)"
 
-shim_reset; reach_answer "${REACH_FALSE}"
-send --to m-lap/walt_ui-session.jsonl --subject "cross-machine" --re /x
-refused_no_path "acc-2 refuses (server reports this machine unreachable)" "machine_reachable: false"
-
+echo "== DND-378: an IDLE machine (reachable unknown, no recent signal) routes, and says so =="
 shim_reset; reach_answer "${REACH_UNKNOWN}"
 send --to m-lap/walt_ui-session.jsonl --subject s --re /x
-refused_no_path "no flag, reachable \"unknown\" (quiet is not reachable)" "machine_reachable: unknown"
+assert_eq "unknown (pre-#307): exit 0, routed" "0|routed" "${RC}|$(printf '%s' "${PATHLINE}" | sed -n 's/^athena:inbox: path: \([a-z]*\) .*/\1/p')"
+assert_contains "unknown: the path line carries the note" "self reachability unknown (no recent signal); the server holds it until acked" "${PATHLINE}"
+assert_contains "unknown: session_send was called" "tools/call session_send" "$(calls)"
+shim_reset; reach_self '"unknown"'
+send --to "${SELF_ID}/walt_ui-session.jsonl" --subject s --re /x
+assert_eq "unknown, same machine (#307 self id): exit 0, routed" "0|routed" "${RC}|$(printf '%s' "${PATHLINE}" | sed -n 's/^athena:inbox: path: \([a-z]*\) .*/\1/p')"
+assert_contains "unknown, same machine: the path line says THIS machine, and the note" \
+  "the recipient is on THIS machine; self reachability unknown (no recent signal); the server holds it until acked" "${PATHLINE}"
 
+echo "== DND-378: an explicit reachable:false is refused =="
+shim_reset; reach_answer "${REACH_FALSE}"
+send --to m-lap/walt_ui-session.jsonl --subject "cross-machine" --re /x
+refused_no_path "false (pre-#307, locality not proven)" "machine_reachable: false"
+shim_reset; reach_self false
+send --to "${SELF_ID}/walt_ui-session.jsonl" --subject s --re /x
+refused_no_path "false, same machine (#307 self id)" "the recipient is on THIS machine, and the server reports this machine UNREACHABLE"
+
+echo "== DND-375/#307: same-machine detection from machine_reachable {}.machine_id =="
+shim_reset; reach_self true
+send --to "${SELF_ID}/walt_ui-session.jsonl" --subject s --re /x
+assert_eq "self id, same machine, true: routed (the original HG-19 intent)" "0|routed" "${RC}|$(printf '%s' "${PATHLINE}" | sed -n 's/^athena:inbox: path: \([a-z]*\) .*/\1/p')"
+assert_contains "self id, same machine: the path line says THIS machine" "the recipient is on THIS machine; self reachable" "${PATHLINE}"
+shim_reset; reach_self true
+UPPER_SELF="$(printf '%s' "${SELF_ID}" | tr '[:lower:]' '[:upper:]')"
+send --to "${UPPER_SELF}/walt_ui-session.jsonl" --subject s --re /x
+assert_contains "self id: the comparison normalises case on BOTH sides" "the recipient is on THIS machine" "${PATHLINE}"
+for v in true '"unknown"' false; do
+  shim_reset; reach_self "${v}"
+  send --to m-lap/walt_ui-session.jsonl --subject s --re /x
+  assert_eq "self id, OTHER machine, reachable ${v}: routed (self reachability does not gate it)" "0|routed" \
+    "${RC}|$(printf '%s' "${PATHLINE}" | sed -n 's/^athena:inbox: path: \([a-z]*\) .*/\1/p')"
+  assert_contains "self id, other machine, ${v}: the path line says another machine" "the recipient is on another of your machines" "${PATHLINE}"
+done
+shim_reset; reach_self '"unknown"'; printf '%s' "${LIST_TWO}" > "${SHIM}/list_my_machines.answer"
+send --to-project walt_ui --subject s --re /x
+assert_eq "--to-project with a self id: locality not proven, unknown still routes" "0|routed" "${RC}|$(printf '%s' "${PATHLINE}" | sed -n 's/^athena:inbox: path: \([a-z]*\) .*/\1/p')"
+assert_contains "--to-project: the path line says why locality is not proven" "--to-project resolves the recipient's machine only at send time" "${PATHLINE}"
+
+echo "== DND-378: every lookup-failure shape is REFUSED, never read as unknown =="
+fail_shape() { # fail_shape <claim> <needle>
+  send --to m-lap/walt_ui-session.jsonl --subject s --re /x
+  refused_no_path "$1" "lookup for this machine FAILED"
+  assert_contains "$1: the path line says why" "$2" "${PATHLINE}"
+  assert_not_contains "$1: never reported as no recent signal" "no recent signal" "${PATHLINE}"
+}
 shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found: machine_reachable"}}'
-send --to m-lap/walt_ui-session.jsonl --subject s --re /x
-refused_no_path "no flag, machine_reachable not deployed (never guessed reachable)" "machine_reachable: unavailable"
-assert_contains "no flag, tool missing: the server's own words say why" "Method not found" "${PATHLINE}"
-
+fail_shape "lookup failure: tool not deployed (MCP error)" "Method not found"
+shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"Internal error"}}'
+fail_shape "lookup failure: an internal MCP error" "Internal error"
+shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"boom"}],"isError":true}}'
+fail_shape "lookup failure: an isError tool result" "boom"
 shim_reset; printf 500 > "${SHIM}/machine_reachable.code"
-send --to m-lap/walt_ui-session.jsonl --subject s --re /x
-refused_no_path "no flag, machine_reachable HTTP 500" "machine_reachable: unavailable"
-
+fail_shape "lookup failure: HTTP 500" "HTTP 500"
+shim_reset; printf 28 > "${SHIM}/machine_reachable.curlexit"
+fail_shape "lookup failure: transport failure" "failed in transport"
 shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"basis":"silence"}}}'
-send --to m-lap/walt_ui-session.jsonl --subject s --re /x
-refused_no_path "no flag, an answer with no reachable verdict" "carried no reachable verdict"
-
+fail_shape "lookup failure: an answer with no reachable field" "carried no reachable verdict"
 shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"reachable":"yes"}}}'
-send --to m-lap/walt_ui-session.jsonl --subject s --re /x
-refused_no_path "no flag, a reachable value outside true|false|unknown" "machine_reachable: unavailable"
+fail_shape "lookup failure: a reachable value outside true|false|unknown" "carried no reachable verdict"
+shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"reachable":null}}}'
+fail_shape "lookup failure: reachable null (a missing answer is not unknown)" "carried no reachable verdict"
+shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":["reachable","unknown"]}}'
+fail_shape "lookup failure: an answer that is not an object" "carried no reachable verdict"
+shim_reset; reach_answer '{"jsonrpc":"2.0","id":2}'
+fail_shape "lookup failure: an answer with neither result nor error" "error"
+for badid in 'null' '""' '42' '"not an id!"' '"a/b"'; do
+  shim_reset; reach_self '"unknown"' "${badid}"
+  fail_shape "lookup failure: machine_id present but malformed (${badid})" "machine_id that is not a machine id"
+done
 
 rm -f "${HOME}/.claude.json"; shim_reset
 send --to m-lap/walt_ui-session.jsonl --subject s --re /x
