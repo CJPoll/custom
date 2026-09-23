@@ -769,6 +769,17 @@ FO="$(PATH="${SHIM}:${PATH}" SHIM_MODE=notool doctor_check_server_failed_deliver
 assert_contains "protocol path: tool missing -> UNAVAILABLE with the server's words" "Tool not found: failed_deliveries" "${FO}"
 FO="$(PATH="${SHIM}:${PATH}" SHIM_EXPECT_TOKEN=other doctor_check_server_failed_deliveries)"
 assert_contains "protocol path: a refused token -> UNAVAILABLE naming the refusal" "refused the machine token" "${FO}"
+: > "${SHIM_LOG}.argv"
+FO="$(PATH="${SHIM}:${PATH}" doctor_mcp_tool_call failed_deliveries 'not json' '')"; FRC=$?
+assert_eq "non-object tool arguments -> status 4 (unavailable)" 4 "${FRC}"
+assert_contains "... naming the refusal" "arguments for failed_deliveries are not a JSON object" "${FO}"
+assert_eq "... and curl was never invoked (no empty-body POST)" "" "$(cat "${SHIM_LOG}.argv")"
+printf '{"unread_count":7,"failed_deliveries":[' > "${FF}"
+for i in 1 2 3 4 5 6 7; do printf '{"id":"id-%s","cause":"retries-exhausted","count":1}' "${i}" >> "${FF}"; [ "${i}" -lt 7 ] && printf ',' >> "${FF}"; done
+printf ']}' >> "${FF}"
+FO="$(ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE="${FF}" doctor_check_server_failed_deliveries)"
+assert_contains "more than 5 unread: says it shows 5 of 7" "(showing 5 of 7)" "${FO}"
+assert_not_contains "... and lists no sixth record" "id-6" "${FO}"
 unset DOCTOR_NO_SERVER ATHENA_INBOX_CLIENT_STATE_DIR XDG_STATE_HOME SHIM_LOG SHIM_EXPECT_TOKEN SHIM_RESULT SHIM_FD_RESULT
 export ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json"
 

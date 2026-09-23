@@ -40,7 +40,10 @@
 # client's SIGQUIT dump directory resolves and is writable. server-reachability
 # asks the server, with the MACHINE token, whether it can reach this machine
 # (HG-20 machine_reachable): "skipped" (no token), "UNAVAILABLE" (asked, no
-# answer) and "checked, 0 pending" never read the same.
+# answer) and "checked, 0 pending" never read the same. server-failed-deliveries
+# asks the same MCP (DND-373 failed_deliveries) for the account's UNREAD
+# failed-delivery records: N > 0 is a warn with a Fix naming mark_read, and
+# "UNAVAILABLE" never reads as "0 unread".
 #
 # SEND PATHS (DND-314). send-paths reports both of send-mail's paths for this
 # project -- routed (athena MCP registration, the session inbox, this machine's

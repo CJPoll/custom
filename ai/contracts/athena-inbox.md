@@ -2407,6 +2407,16 @@ also reports:
   pending" are three different findings. An unavailable server check is `n-a`
   and never fails the doctor by itself. The token reaches `curl` only through a
   `umask 077` config file.
+- **`server-failed-deliveries`** — the same machine token and MCP, calling the
+  server's `failed_deliveries` for the account's UNREAD failed-delivery records
+  (terminal delivery failures and machine-unreachable transitions, DND-373). N
+  > 0 unread is a `warn` naming how many it lists of how many, each record's
+  cause, count and id, with a `Fix:` naming the tool's `mark_read`; "checked, 0
+  unread" is `ok`. "skipped", "unavailable" (asked, no usable answer, or an
+  answer without a numeric `unread_count`) and "checked, 0 unread" are three
+  different findings, and "unavailable" says it is NOT 0 unread. An
+  unavailable check is `n-a` and never fails the doctor by itself. The doctor
+  reads only; it never marks a record read.
 
 ## Conformance checklist
 
