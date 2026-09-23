@@ -43,7 +43,10 @@
 # answer) and "checked, 0 pending" never read the same. server-failed-deliveries
 # asks the same MCP (DND-373 failed_deliveries) for the account's UNREAD
 # failed-delivery records: N > 0 is a warn with a Fix naming mark_read, and
-# "UNAVAILABLE" never reads as "0 unread".
+# "UNAVAILABLE" never reads as "0 unread". server-refused-deliveries does the
+# same for the account's UNREAD refused-delivery records (DND-384
+# refused_deliveries: deliveries an owner<->destination check refused, one
+# record per recipient machine for a direct send).
 #
 # SEND PATHS (DND-314). send-paths reports both of send-mail's paths for this
 # project -- routed (athena MCP registration, the session inbox, this machine's
@@ -143,6 +146,7 @@ collect_findings() {
   doctor_check_server_reachability
   doctor_check_send_paths "${DOCTOR_MATCHED_ENTRY}" "."
   doctor_check_server_failed_deliveries
+  doctor_check_server_refused_deliveries
 }
 
 FINDINGS="$(collect_findings)"

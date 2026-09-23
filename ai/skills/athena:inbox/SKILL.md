@@ -580,6 +580,16 @@ checks now answer the question a pid cannot:
   `mark_read`. "checked: 0 unread" is `ok`; "UNAVAILABLE" (asked, no answer, or
   an answer with no numeric `unread_count`) is `na` and says it is NOT 0 unread.
   The server also emails the owner once per new or re-opened record.
+- `server-refused-deliveries` does the same for the account's UNREAD
+  refused-delivery records (`refused_deliveries`, DND-384; every delivery an
+  owner↔destination check refused before it left the platform — a deregistered
+  or re-owned target machine, a cross-account target, an inbox the recipient no
+  longer declares). A direct send's refusals are one record per recipient
+  machine, and each listed record names its sub-cause and that machine (`-`
+  for a rule refusal). Its outcomes read exactly as `server-failed-deliveries`'s,
+  including `na` — never "0 unread" — for a count that is missing, not a number,
+  or too large to compare. The server emails the owner once per new or
+  re-opened record, one email per recipient machine.
 
 `inbox-status` and `read-inbox` carry the same freshness: every line they print
 for a channel carries its last-delivery age and the client's last-join age, and

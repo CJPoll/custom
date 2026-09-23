@@ -1580,42 +1580,68 @@ doctor_check_send_paths() {
   esac
 }
 
-# --- unread failed-delivery records via the machine token (DND-373) ---------
+# --- unread owner-report records via the machine token (DND-373, DND-384) ---
 #
-# The server records every terminal delivery failure, and every machine-
-# unreachable transition, in its failed-delivery store and emails the owner once
-# per new/re-opened record. Until the owner marks a record read it stays unread,
-# and this check says so: it asks the `failed_deliveries` MCP tool (same /mcp,
-# same machine token, same four outcomes as server-reachability above) for the
-# account's UNREAD records.
+# The server keeps two owner-report stores and emails the owner once per
+# new/re-opened record in each. Until the owner marks a record read it stays
+# unread, and inbox-doctor says so, one check per store:
+#
+#   server-failed-deliveries   the `failed_deliveries` MCP tool (DND-373): every
+#                              terminal delivery failure and every machine-
+#                              unreachable transition.
+#   server-refused-deliveries  the `refused_deliveries` MCP tool (DND-384): every
+#                              delivery an owner<->destination check refused
+#                              before it left the platform (a deregistered or
+#                              re-owned target machine, a cross-account target,
+#                              an inbox the recipient no longer declares), one
+#                              record per recipient machine for a direct send.
+#
+# Both ask the same /mcp, with the same machine token and the same four outcomes
+# as server-reachability above, for the account's UNREAD records:
 #
 #   skipped / disabled / UNAVAILABLE  na -- exactly as server-reachability;
 #                         "unavailable" never reads like "0 unread".
 #   checked, 0 unread     ok -- says "0 unread" in those words.
-#   checked, N > 0 unread warn -- NOT ok, with each record's cause/count/id and a
-#                         Fix naming mark_read.
+#   checked, N > 0 unread warn -- NOT ok, with each record's summary and a Fix
+#                         naming mark_read.
+#   a count that is missing, not a number, or too large to compare -- na, never
+#                         "ok, 0 unread".
 #
-# Seam: ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE holds a canned tool result
-# (a JSON object, or `UNAVAILABLE:<reason>`) and skips the network.
+# Seams: ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE and
+# ATHENA_INBOX_DOCTOR_REFUSED_DELIVERIES_FILE each hold a canned tool result (a
+# JSON object, or `UNAVAILABLE:<reason>`) and skip the network.
 
-# doctor_failed_deliveries
-# Prints the failed_deliveries tool result (a JSON object with a numeric
-# unread_count) on success. Status as doctor_mcp_tool_call.
-doctor_failed_deliveries() {
-  local out rc
-  out="$(doctor_mcp_tool_call failed_deliveries '{}' "${ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE:-}")"; rc=$?
+# doctor_owner_records <tool> <canned-file>
+# Prints the <tool> result (a JSON object with a numeric unread_count) on
+# success. Status as doctor_mcp_tool_call; an answer with no numeric
+# unread_count is status 4 (unavailable), never a count of 0.
+doctor_owner_records() {
+  local tool="$1" canned="$2" out rc
+  out="$(doctor_mcp_tool_call "${tool}" '{}' "${canned}")"; rc=$?
   [ "${rc}" -eq 0 ] || { printf '%s\n' "${out}"; return "${rc}"; }
   if ! printf '%s' "${out}" | jq -e 'type == "object" and (.unread_count | type == "number")' >/dev/null 2>&1; then
-    printf 'the failed_deliveries answer carried no numeric unread_count\n'; return 4
+    printf 'the %s answer carried no numeric unread_count\n' "${tool}"; return 4
   fi
   printf '%s\n' "${out}"
 }
 
-# doctor_state_failed_deliveries <unread-count>
+# doctor_failed_deliveries
+# The failed_deliveries answer (DND-373). Status as doctor_owner_records.
+doctor_failed_deliveries() {
+  doctor_owner_records failed_deliveries "${ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE:-}"
+}
+
+# doctor_refused_deliveries
+# The refused_deliveries answer (DND-384). Status as doctor_owner_records.
+doctor_refused_deliveries() {
+  doctor_owner_records refused_deliveries "${ATHENA_INBOX_DOCTOR_REFUSED_DELIVERIES_FILE:-}"
+}
+
+# doctor_state_unread_count <unread-count>
 # Pure. 0 -> ok · a positive integer -> warn · anything else -> na, including a
 # digit string too large for a shell integer: an unmeasurable count must never
 # fall through to "0 unread".
-doctor_state_failed_deliveries() {
+doctor_state_unread_count() {
   case "$1" in
     ''|*[!0-9]*) printf 'na\n'; return 0 ;;
   esac
@@ -1625,37 +1651,63 @@ doctor_state_failed_deliveries() {
   fi
 }
 
-# doctor_check_server_failed_deliveries
-doctor_check_server_failed_deliveries() {
-  local out rc n records first_id shown canned_note=""
+# doctor_state_failed_deliveries / doctor_state_refused_deliveries <unread-count>
+# The two checks' names for doctor_state_unread_count.
+doctor_state_failed_deliveries() { doctor_state_unread_count "$1"; }
+doctor_state_refused_deliveries() { doctor_state_unread_count "$1"; }
+
+# doctor_check_server_owner_records <check> <tool> <list-key> <noun> <canned-env> <fetcher> <record-jq> <ticket>
+# One owner-report check. <noun> is the record kind in prose ("failed-delivery"),
+# <canned-env> the NAME of its canned-answer variable, <fetcher> the function
+# that asks the server, <record-jq> a jq string rendering one record's summary,
+# <ticket> the ticket that deployed the tool (named when it is missing).
+doctor_check_server_owner_records() {
+  local check="$1" tool="$2" key="$3" noun="$4" canned_env="$5" fetcher="$6" record_jq="$7" ticket="$8"
+  local out rc n records first_id shown canned_note="" label="${check#server-}"
   if [ "${DOCTOR_NO_SERVER:-0}" = "1" ]; then
-    doctor_finding na "server-failed-deliveries" "server failed-deliveries check not run (disabled for this invocation)" \
-      "run inbox-doctor by hand (without --no-server) to ask the server for your unread failed-delivery records; the unprompted SessionStart path deliberately makes no network request."
+    doctor_finding na "${check}" "server ${label} check not run (disabled for this invocation)" \
+      "run inbox-doctor by hand (without --no-server) to ask the server for your unread ${noun} records; the unprompted SessionStart path deliberately makes no network request."
     return 0
   fi
-  out="$(doctor_failed_deliveries)"; rc=$?
-  [ -n "${ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE:-}" ] && canned_note=" [CANNED answer from ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE, not the live server]"
+  out="$("${fetcher}")"; rc=$?
+  [ -n "${!canned_env:-}" ] && canned_note=" [CANNED answer from ${canned_env}, not the live server]"
   case "${rc}" in
-    2) doctor_finding na "server-failed-deliveries" "server failed-deliveries check SKIPPED -- no client config or machine token on this machine" \
+    2) doctor_finding na "${check}" "server ${label} check SKIPPED -- no client config or machine token on this machine" \
          "this check authenticates with the inbox client's machine token (~/.config/athena-inbox-client/config.json); a machine that only reads delivered mail has none, and this is expected there."
        return 0 ;;
-    4) doctor_finding na "server-failed-deliveries" "server failed-deliveries check UNAVAILABLE (tried, got no answer; this is NOT 0 unread): $(printf '%s' "${out}" | head -n 1)${canned_note}" \
-         "the server was asked and could not answer, so the unread count is unknown. If failed_deliveries is not deployed yet (DND-373), this is expected until it is; otherwise check the network, the /mcp endpoint, and that the machine token in the client config is current."
+    4) doctor_finding na "${check}" "server ${label} check UNAVAILABLE (tried, got no answer; this is NOT 0 unread): $(printf '%s' "${out}" | head -n 1)${canned_note}" \
+         "the server was asked and could not answer, so the unread count is unknown. If ${tool} is not deployed yet (${ticket}), this is expected until it is; otherwise check the network, the /mcp endpoint, and that the machine token in the client config is current."
        return 0 ;;
     0) ;;
-    *) doctor_finding na "server-failed-deliveries" "server failed-deliveries check UNAVAILABLE (unexpected status ${rc})" \
-         "re-run inbox-doctor; if it persists, check doctor_failed_deliveries in lib/doctor.sh."
+    *) doctor_finding na "${check}" "server ${label} check UNAVAILABLE (unexpected status ${rc})" \
+         "re-run inbox-doctor; if it persists, check ${fetcher} in lib/doctor.sh."
        return 0 ;;
   esac
   n="$(printf '%s' "${out}" | jq -r '.unread_count | tostring')"
-  records="$(printf '%s' "${out}" | jq -r '[(.failed_deliveries // [])[:5][] | "\(.cause) x\(.count) (id \(.id))"] | join("; ")' 2>/dev/null)"
-  shown="$(printf '%s' "${out}" | jq -r '[(.failed_deliveries // [])[:5][]] | length' 2>/dev/null)"
-  first_id="$(printf '%s' "${out}" | jq -r '(.failed_deliveries // [])[0].id // "<id>"' 2>/dev/null)"
-  case "$(doctor_state_failed_deliveries "${n}")" in
-    ok)   doctor_finding ok "server-failed-deliveries" "checked: 0 unread failed-delivery records on the server${canned_note}" ;;
-    warn) doctor_finding warn "server-failed-deliveries" "checked: the server holds ${n} UNREAD failed-delivery record(s) for your account (showing ${shown:-0} of ${n}): ${records:-none listed}${canned_note}" \
-            "triage each record (the failed_deliveries MCP tool returns its report: what failed and where), then clear it with the failed_deliveries MCP tool and mark_read: \"${first_id}\" (one call per id). The server emailed the owner once when each record was new or re-opened." ;;
-    na)   doctor_finding na "server-failed-deliveries" "the server answered failed_deliveries with no usable count (unread_count: ${n})" \
-            "the answer shape may have changed; failed_deliveries should return a numeric unread_count." ;;
+  records="$(printf '%s' "${out}" | jq -r --arg k "${key}" "[(.[\$k] // [])[:5][] | ${record_jq}] | join(\"; \")" 2>/dev/null)"
+  shown="$(printf '%s' "${out}" | jq -r --arg k "${key}" '[(.[$k] // [])[:5][]] | length' 2>/dev/null)"
+  first_id="$(printf '%s' "${out}" | jq -r --arg k "${key}" '(.[$k] // [])[0].id // "<id>"' 2>/dev/null)"
+  case "$(doctor_state_unread_count "${n}")" in
+    ok)   doctor_finding ok "${check}" "checked: 0 unread ${noun} records on the server${canned_note}" ;;
+    warn) doctor_finding warn "${check}" "checked: the server holds ${n} UNREAD ${noun} record(s) for your account (showing ${shown:-0} of ${n}): ${records:-none listed}${canned_note}" \
+            "triage each record (the ${tool} MCP tool returns its report: what happened and where), then clear it with the ${tool} MCP tool and mark_read: \"${first_id}\" (one call per id). The server emailed the owner once when each record was new or re-opened." ;;
+    na)   doctor_finding na "${check}" "the server answered ${tool} with no usable count (unread_count: ${n})" \
+            "the answer shape may have changed; ${tool} should return a numeric unread_count." ;;
   esac
+}
+
+# doctor_check_server_failed_deliveries
+doctor_check_server_failed_deliveries() {
+  doctor_check_server_owner_records server-failed-deliveries failed_deliveries failed_deliveries \
+    failed-delivery ATHENA_INBOX_DOCTOR_FAILED_DELIVERIES_FILE doctor_failed_deliveries \
+    '"\(.cause) x\(.count) (id \(.id))"' DND-373
+}
+
+# doctor_check_server_refused_deliveries
+# A record names its refusing check's sub-cause and, for a direct send, the
+# recipient machine (a rule refusal has none: "-").
+doctor_check_server_refused_deliveries() {
+  doctor_check_server_owner_records server-refused-deliveries refused_deliveries refused_deliveries \
+    refused-delivery ATHENA_INBOX_DOCTOR_REFUSED_DELIVERIES_FILE doctor_refused_deliveries \
+    '"\(.cause)/\(.refusal // "?") x\(.count) machine \(.machine_id // "-") (id \(.id))"' DND-384
 }

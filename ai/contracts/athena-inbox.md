@@ -2489,6 +2489,13 @@ also reports:
   different findings, and "unavailable" says it is NOT 0 unread. An
   unavailable check is `n-a` and never fails the doctor by itself. The doctor
   reads only; it never marks a record read.
+- **`server-refused-deliveries`** — the same, calling the server's
+  `refused_deliveries` for the account's UNREAD refused-delivery records
+  (deliveries an owner↔destination check refused before they left the platform,
+  DND-384; one record per recipient machine for a direct send). Its findings,
+  grades and read-only rule are `server-failed-deliveries`'s; each listed record
+  also names its refusal sub-cause and recipient machine. A count that is
+  missing, not a number, or too large to compare is `n-a`, never "0 unread".
 
 ## Conformance checklist
 
