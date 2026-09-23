@@ -1545,9 +1545,13 @@ The first-pass permitted-origination rule:
   harness-emit's family-level origination set**, so a machine token can never
   originate one, even for its own machine: a forged `fleet.machine.unreachable`
   would page the owner about a healthy machine, and a forged `reachable` would
-  mask a real outage. Harness-emit refuses it at ingress with a `Fix:`,
-  before any per-token registration is consulted, and a source ingress
-  refuses it as a non-member of its set.
+  mask a real outage. Harness-emit refuses it at ingress before any
+  per-token registration is consulted, with its own remedy, never the
+  unregistered-type one above (registration cannot allow it): `Fix: stop
+  emitting <type> — it is platform-originated (only the server's reachability
+  sweeper emits it) and no machine token may originate it, whatever its
+  registration says; to act on reachability, write a rule on the platform's
+  own event.` A source ingress refuses it as a non-member of its set.
   This is an exception for a declared family, not a namespace licence: a new
   platform-originated family declares its model like any other and is named
   here.
