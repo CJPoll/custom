@@ -119,6 +119,7 @@ module InboxRegistry
     entries = projects.map { |p| declared_one(p) }
     reject_duplicates(entries)
     reject_unreadable(entries)
+    reject_session_stem_collisions(entries)
     entries
   rescue Errno::ENOENT
     raise Error, "committed source of truth not found at #{registry_path}"
@@ -159,6 +160,41 @@ module InboxRegistry
                        "exactly one entry may claim a given #{key}"
         end
         seen[value] = p["file"]
+      end
+    end
+  end
+
+  # A routed session inbox is the platform `log` file `<project>-session.jsonl`
+  # (the contract's "Registry convention for a session inbox", epic D41). Its
+  # STEM (`walt_ui-session`) is what a reader sees it as, so no channel NAME in
+  # any entry may equal another channel's session stem: two different things
+  # would then print under one name in inbox-status and inbox-doctor. That is
+  # the collision that renamed the convention from `-mail` (custom's MAILDIR
+  # channel `walt_ui-mail` versus walt_ui's routed `walt_ui-mail.jsonl`), and
+  # nothing on either side would otherwise refuse it -- each entry is valid on
+  # its own. Raised as a defect in the committed file, like the rules above.
+  SESSION_SUFFIX = "-session.jsonl"
+
+  def reject_session_stem_collisions(entries)
+    stems = {}
+    entries.each do |p|
+      (p["entry"]["channels"] || {}).each do |name, ch|
+        next unless ch.is_a?(Hash) && ch["kind"] == "log" && ch["producer"] == "platform"
+        path = ch["path"]
+        next unless path.is_a?(String) && path.end_with?(SESSION_SUFFIX)
+
+        stems[path.delete_suffix(".jsonl")] = [p["file"], name]
+      end
+    end
+    entries.each do |p|
+      (p["entry"]["channels"] || {}).each_key do |name|
+        owner = stems[name]
+        next if owner.nil? || owner == [p["file"], name]
+
+        raise Error, "#{registry_path}: channel #{name.inspect} in #{p['file']} has the same name as the " \
+                     "routed session inbox #{name}.jsonl (channel #{owner[1].inspect} in #{owner[0]}); " \
+                     "the two would print under one name in inbox-status and inbox-doctor. " \
+                     "Fix: rename channel #{name.inspect} in #{p['file']} -- a session inbox's file stem is reserved"
       end
     end
   end

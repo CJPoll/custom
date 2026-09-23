@@ -618,6 +618,39 @@ else
   bad "C36 --check survives a repo path containing a space" "rc=${rc36}: ${out36}"
 fi
 
+# --- C37 (DND-312, D41): a channel NAME equal to another channel's routed
+# session-inbox stem is refused by both tools, exit 2, with a Fix. Each entry is
+# valid on its own, so only a cross-entry rule can see it -- and the colliding
+# pair is exactly the one that renamed the convention: a maildir channel named
+# `peer-session` in one entry, the routed `peer-session.jsonl` in another.
+reset_sandbox
+edit_registry "d['projects'][0]['entry']['channels']['session'] = {'kind' => 'log', 'path' => 'demo-session.jsonl', 'producer' => 'platform', 'stale_after_s' => 0}
+d['projects'] << {'file' => 'peer.json', 'entry' => {'v' => 1, 'repo' => '~/dev/peer/.git', 'channels' => {'demo-session' => {'kind' => 'maildir', 'namespace' => 'agent-mail/demo', 'read' => 'to-peer', 'write' => 'to-demo', 'identity' => 'peer'}}}}"
+out37="$(setup --install 2>&1)"; rc37=$?
+out37c="$("${CHECK}" 2>&1)"; rc37c=$?
+if [ ${rc37} -eq 2 ] && [ ${rc37c} -eq 2 ] \
+   && printf '%s' "${out37c}" | grep -q 'channel "demo-session" in peer.json has the same name as the routed session inbox' \
+   && printf '%s' "${out37c}" | grep -q "Fix: rename channel" && [ ! -e "${PROJECTS}/peer.json" ]; then
+  ok "C37 a channel named like another entry's session-inbox stem is refused by both tools, exit 2, nothing installed"
+else
+  bad "C37 a channel named like another entry's session-inbox stem is refused by both tools, exit 2, nothing installed" \
+    "install rc=${rc37} check rc=${rc37c}: ${out37c}"
+fi
+
+# --- C38: the HIT beside that miss. The same session inbox with no colliding
+# name installs and checks clean, so C37 is refusing the collision and not the
+# session channel itself.
+reset_sandbox
+edit_registry "d['projects'][0]['entry']['channels']['session'] = {'kind' => 'log', 'path' => 'demo-session.jsonl', 'producer' => 'platform', 'stale_after_s' => 0}
+d['projects'] << {'file' => 'peer.json', 'entry' => {'v' => 1, 'repo' => '~/dev/peer/.git', 'channels' => {'demo-mail' => {'kind' => 'maildir', 'namespace' => 'agent-mail/demo', 'read' => 'to-peer', 'write' => 'to-demo', 'identity' => 'peer'}}}}"
+out38="$(setup --install 2>&1)"; rc38=$?
+"${CHECK}" >/dev/null 2>&1; rc38c=$?
+if [ ${rc38} -eq 0 ] && [ ${rc38c} -eq 0 ]; then
+  ok "C38 a session inbox with no colliding channel name installs and checks clean"
+else
+  bad "C38 a session inbox with no colliding channel name installs and checks clean" "install rc=${rc38} check rc=${rc38c}: ${out38}"
+fi
+
 echo
 if [ "${FAIL}" -eq 0 ]; then
   suffix=""; [ "${SKIP}" -gt 0 ] && suffix=", ${SKIP} skipped"

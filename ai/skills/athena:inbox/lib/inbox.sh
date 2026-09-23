@@ -26,6 +26,13 @@
 # channel as fresh because nobody measured it.
 # shellcheck source=/dev/null
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/liveness.sh"
+# routed.sh (domain) and mcp.sh (side effects) back `inbox_send_routed`
+# (HG-17), sourced here for the same reason: every caller that already sources
+# this manager gets them, and none can forget one.
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/routed.sh"
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mcp.sh"
 
 # inbox_entry [cwd]
 # The registry entry owning this session, as one-line JSON. Empty output with
@@ -1557,4 +1564,154 @@ inbox_doorbell_channel() {
     esac
   done < <(descriptor_channel_names "${entry}")
   return 1
+}
+
+# --- routed session messages (HG-17 / DND-312) ------------------------------
+
+# inbox_send_routed <to-spec> <to-project-spec> <subject> <re> <thread> [cwd]
+#                                                              (body on stdin)
+#
+# `send-mail --routed`: hand one message to the `athena` MCP `session_send`
+# tool and print its receipt, {path, event_id, delivery_id, status, to,
+# from_inbox}. Exactly one of <to-spec> / <to-project-spec> is non-empty (the
+# Framework checks).
+#
+# THE ORDER IS CHEAPEST-REFUSAL FIRST, AND NOTHING LOCAL IS EVER WRITTEN:
+#
+#   subject, re/thread, the address grammar, the body   (pure, no I/O)
+#   -> this project's own session inbox (tenancy by git common dir)
+#   -> the MCP registration, then the launcher's bearer
+#   -> [--to-project: list_my_machines, pick the one machine]
+#   -> session_send -> the receipt
+#
+# There is NO fallback. A missing registration, a missing bearer, a refused
+# send and an unreachable server are each a refusal with its own Fix; none of
+# them writes a maildir. The explicit maildir fallback rule is HG-19's.
+# inbox_routed_precheck <to-spec> <to-project-spec> <subject> <re> <thread>
+# The pure refusals alone, so the Framework can run them BEFORE it captures a
+# body (an $EDITOR opened for a message that is then refused for a missing
+# --subject is wasted work). inbox_send_routed runs them again; they are cheap.
+inbox_routed_precheck() {
+  routed_require_subject "$3" || return 1
+  routed_require_referent "$4" "$5" || return 1
+  if [ -n "$1" ]; then routed_parse_to "$1" >/dev/null || return 1
+  else routed_parse_to_project "$2" >/dev/null || return 1; fi
+  return 0
+}
+
+# inbox_routed_channel_refusal <name> [cwd]
+# `send-mail --routed <name>`: a routed send takes no channel. Always a refusal
+# (status 1); the specific one when <name> is this project's maildir channel,
+# so "I meant that maildir" gets told how to reach it.
+inbox_routed_channel_refusal() {
+  local name="$1" entry
+  entry="$(inbox_entry "${2:-.}" 2>/dev/null)" || entry=""
+  if [ -n "${entry}" ] && routed_maildir_name_refusal "${entry}" "${name}"; then return 1; fi
+  inbox_fail "--routed takes no channel or slug" \
+    "run: send-mail --routed --to <machine_id>/<project>${ROUTED_SESSION_SUFFIX} --subject <line> --re <path-or-url>. The recipient's inbox is named by --to or --to-project, not by a channel."
+  return 1
+}
+
+inbox_send_routed() {
+  local to_spec="$1" project_spec="$2" subject="$3" re="$4" thread="$5" cwd="${6:-.}"
+  local to_machine="" to_inbox="" project="" sel="" parsed body entry rc from_inbox
+  local common main top url out machines res args receipt
+
+  inbox_routed_precheck "${to_spec}" "${project_spec}" "${subject}" "${re}" "${thread}" || return 1
+  if [ -n "${to_spec}" ]; then
+    parsed="$(routed_parse_to "${to_spec}")" || return 1
+    to_machine="${parsed%%$'\t'*}"; to_inbox="${parsed#*$'\t'}"
+  else
+    parsed="$(routed_parse_to_project "${project_spec}")" || return 1
+    project="${parsed%%$'\t'*}"; sel="${parsed#*$'\t'}"
+    to_inbox="$(routed_project_inbox "${project}")"
+  fi
+
+  body="$(cat; printf X)"; body="${body%X}"
+  if [ -z "${body}" ]; then
+    inbox_fail "the message body is empty; nothing was sent" \
+      "pipe the body in (printf '%s\\n' \"...\" | send-mail --routed ...), pass --body-file <path>, or --edit."
+    return 1
+  fi
+
+  # THIS project's own session inbox: the reply address the server stamps into
+  # `from`. Resolved by the same tenancy path every other command takes.
+  entry="$(inbox_entry "${cwd}")"; rc=$?
+  [ "${rc}" -ne 2 ] || return 1
+  if [ -z "${entry}" ]; then _inbox_no_entry_refusal "${cwd}"; return 1; fi
+  descriptor_validate "${entry}" || return 1
+  from_inbox="$(routed_select_from_inbox "${entry}")" || return 1
+  # --to-project naming one of THIS project's maildir channels (walt_ui-mail,
+  # say) is a routed send pointed at a maildir by name: refused, not guessed.
+  if [ -n "${project}" ] && routed_maildir_name_refusal "${entry}" "${project}"; then return 1; fi
+
+  # Where Claude Code registered the `athena` MCP for this project. Local scope
+  # is keyed by the directory `add-athena-mcp` ran in -- the MAIN checkout --
+  # which for a worktree session is the parent of the git common dir.
+  common="$(fs_git_common_dir "${cwd}")" || { _inbox_no_entry_refusal "${cwd}"; return 1; }
+  case "${common}" in */.git) main="${common%/.git}" ;; *) main="${common}" ;; esac
+  top="$(mcp_toplevel "${cwd}")" || top="${main}"
+  url="$(mcp_registered_url "${main}" "${top}")"; rc=$?
+  [ "${rc}" -ne 2 ] || return 1
+  if [ "${rc}" -ne 0 ]; then
+    inbox_fail "the athena MCP server is not registered for this project, so a routed message cannot be sent (nothing was sent, and no maildir was written)" \
+      "run scripts/add-athena-mcp from this project's main checkout (${main}), then restart the session through scripts/athena. There is no silent fallback to a maildir channel; send-mail <channel> <slug> --to <identity> is the explicit maildir path."
+    return 1
+  fi
+  if [ -z "${ATHENA_MCP_BEARER:-}" ]; then
+    inbox_fail "ATHENA_MCP_BEARER is not set in this session, so the athena MCP cannot be authenticated (nothing was sent)" \
+      "launch the session through scripts/athena, which exports ATHENA_MCP_BEARER from the inbox client's config for that launch only. Do not write the token into ~/.claude.json or any other file."
+    return 1
+  fi
+
+  if [ -n "${project}" ]; then
+    out="$(mcp_call_tool "${url}" list_my_machines '{}')"; rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      inbox_fail "could not resolve --to-project ${project_spec}: ${out} (nothing was sent)" \
+        "check the athena MCP is reachable (inbox-doctor) and the session was launched through scripts/athena, or address the recipient directly with --to <machine_id>/${to_inbox}."
+      return 1
+    fi
+    machines="$(routed_tool_result "${out}")"; rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      inbox_fail "list_my_machines did not answer usably${machines:+: ${machines}} (nothing was sent)" \
+        "retry; or address the recipient directly with --to <machine_id>/${to_inbox}."
+      return 1
+    fi
+    to_machine="$(routed_pick_machine "${machines}" "${to_inbox}" "${sel}")" || return 1
+  fi
+
+  args="$(printf '%s' "${body}" | routed_session_args "${to_machine}" "${to_inbox}" "${from_inbox}" "${subject}" "${re}" "${thread}")" || {
+    inbox_fail "could not build the session_send arguments (nothing was sent)" "re-run; if it persists, report it with the flags you passed."
+    return 1
+  }
+
+  out="$(mcp_call_tool "${url}" session_send "${args}")"; rc=$?
+  case "${rc}" in
+    0) ;;
+    3) inbox_fail "the routed send was refused before it reached session_send: ${out} (nothing was sent)" \
+         "check the athena MCP registration (claude mcp get athena), that the session was launched through scripts/athena, and inbox-doctor's server-reachability."
+       return 1 ;;
+    *) inbox_fail "the session_send call failed and its outcome is UNKNOWN: ${out}" \
+         "the server may have recorded the message. Do not blindly re-send (session_send has no idempotency key yet, DND-354): ask the recipient, or check the server's delivery status, before sending again."
+       return 1 ;;
+  esac
+  res="$(routed_tool_result "${out}")"; rc=$?
+  if [ "${rc}" -eq 2 ]; then
+    # The server's own refusal. Its text normally carries the Fix; when it does
+    # not, one is added so a refusal never reaches the sender without one.
+    case "${res}" in
+      *"Fix:"*) inbox_fail "session_send refused the message (nothing was sent): ${res%%Fix:*}" "${res#*Fix: }" ;;
+      *) inbox_fail "session_send refused the message (nothing was sent): ${res}" \
+           "correct what the server named and re-send; the refusal is the server's, not this client's." ;;
+    esac
+    return 1
+  fi
+  receipt=""
+  [ "${rc}" -ne 0 ] || receipt="$(routed_send_receipt "${res}" "${to_machine}" "${to_inbox}" "${from_inbox}")"
+  if [ -z "${receipt}" ]; then
+    inbox_fail "session_send answered without an event_id, so whether the message was recorded is UNKNOWN" \
+      "do not blindly re-send (no idempotency key yet, DND-354); ask the recipient or check the server's delivery status first."
+    return 1
+  fi
+  printf '%s\n' "${receipt}"
 }

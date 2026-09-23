@@ -4,11 +4,25 @@
 #   send-mail <channel> <slug> --to <identity> [--re <path-or-url>]
 #                              [--thread <message-filename>]
 #                              [--body-file <path> | --edit]
+#   send-mail --routed (--to <machine_id>/<inbox_name> | --to-project <project>[@<machine>])
+#             --subject <line> (--re <path-or-url> | --thread <event_id>)...
+#             [--body-file <path> | --edit]
 #   send-mail -h                 this header
 #
 # The body comes from stdin, from --body-file, or from $EDITOR (--edit, or by
 # default when stdin is a terminal). The delivered FILENAME is printed; the
 # body is never printed back.
+#
+# --routed (HG-17) sends through the `athena` MCP `session_send` tool instead of
+# a maildir: the server stamps `from` = {this machine, this project's
+# <project>-session.jsonl} and delivers into the recipient's session inbox, a
+# `log` channel. It prints one JSON receipt -- {path:"routed", event_id,
+# delivery_id, status:"pending", to, from_inbox} -- and NEVER writes a local
+# maildir. --subject and at least one of --re / --thread are required. It
+# refuses (never falls back) when the MCP is not registered for this project
+# (Fix: scripts/add-athena-mcp), when ${ATHENA_MCP_BEARER} is unset (launch via
+# scripts/athena), or when this project declares no <project>-session.jsonl
+# channel. In this mode --thread is the event_id of the message you answer.
 #
 # ============================ WHAT A SEND IS ===============================
 #
@@ -73,6 +87,9 @@ usage() { sed -n '2,/^#--- end usage ---$/p' "${BASH_SOURCE[0]}" | grep -v '^#--
 CHANNEL=""
 SLUG=""
 TO=""
+ROUTED=0
+TO_PROJECT=""
+SUBJECT=""
 RE=""
 THREAD=""
 BODY_FILE=""
@@ -96,6 +113,9 @@ need_value() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --to)        need_value --to "${2:-}";        TO="$2";        shift 2 ;;
+    --routed)    ROUTED=1; shift ;;
+    --to-project) need_value --to-project "${2:-}"; TO_PROJECT="$2"; shift 2 ;;
+    --subject)   need_value --subject "${2:-}";   SUBJECT="$2";   shift 2 ;;
     --re)        need_value --re "${2:-}";        RE="$2";        shift 2 ;;
     --thread)    need_value --thread "${2:-}";    THREAD="$2";    shift 2 ;;
     --body-file) need_value --body-file "${2:-}"; BODY_FILE="$2"; shift 2 ;;
@@ -103,7 +123,7 @@ while [ "$#" -gt 0 ]; do
     -h|--help)   usage; exit 0 ;;
     -*)
       inbox_fail "unknown option \"$1\"" \
-        "run: send-mail <channel> <slug> --to <identity> [--re <path-or-url>] [--thread <message-filename>] [--body-file <path> | --edit]"
+        "run: send-mail <channel> <slug> --to <identity> [--re <path-or-url>] [--thread <message-filename>] [--body-file <path> | --edit], or send-mail --routed --to <machine_id>/<inbox_name> --subject <line> --re <path-or-url>. Run send-mail -h for both synopses."
       exit 2
       ;;
     *)
@@ -119,21 +139,48 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# THE TWO MODES DO NOT MIX. A routed send has no channel and no slug (the
+# server names the delivery), and a maildir send has no subject and no
+# project addressing. A flag from the other mode is refused rather than
+# ignored: an ignored --subject on a maildir send would be text the sender
+# believes was delivered.
+if [ "${ROUTED}" -eq 1 ]; then
+  if [ -n "${CHANNEL}" ]; then
+    inbox_routed_channel_refusal "${CHANNEL}" "."
+    exit 2
+  fi
+  if [ -n "${TO}" ] && [ -n "${TO_PROJECT}" ]; then
+    inbox_fail "both --to and --to-project were given" \
+      "choose one: --to <machine_id>/<inbox_name>, or --to-project <project>[@<machine>]."
+    exit 2
+  fi
+  if [ -z "${TO}" ] && [ -z "${TO_PROJECT}" ]; then
+    inbox_fail "no recipient given" \
+      "pass --to <machine_id>/<project>-session.jsonl, or --to-project <project>[@<machine>] to resolve it through list_my_machines."
+    exit 2
+  fi
+  inbox_routed_precheck "${TO}" "${TO_PROJECT}" "${SUBJECT}" "${RE}" "${THREAD}" || exit 2
+elif [ -n "${TO_PROJECT}" ] || [ -n "${SUBJECT}" ]; then
+  inbox_fail "--to-project and --subject belong to a routed send" \
+    "add --routed to send through the athena MCP, or drop them for a maildir send (send-mail <channel> <slug> --to <identity>)."
+  exit 2
+fi
+
 # EVERY MISSING INPUT IS NAMED SEPARATELY. A single "usage" line for all of
 # them would make the commonest mistake -- forgetting --to, which has no
 # default and cannot have one -- read as though the whole invocation were
 # wrong.
-if [ -z "${CHANNEL}" ]; then
+if [ "${ROUTED}" -eq 0 ] && [ -z "${CHANNEL}" ]; then
   inbox_fail "no channel named" \
     "run: send-mail <channel> <slug> --to <identity>. Run inbox-status to see which channels this project declares."
   exit 2
 fi
-if [ -z "${SLUG}" ]; then
+if [ "${ROUTED}" -eq 0 ] && [ -z "${SLUG}" ]; then
   inbox_fail "no slug given" \
     "run: send-mail ${CHANNEL} <slug> --to <identity>. The slug is the human-readable tail of the filename the peer will see -- 1 to 48 characters matching ^[a-z0-9][a-z0-9-]*$."
   exit 2
 fi
-if [ -z "${TO}" ]; then
+if [ "${ROUTED}" -eq 0 ] && [ -z "${TO}" ]; then
   # THERE IS NO DEFAULT, AND GUESSING ONE WOULD BE WORSE THAN REFUSING. A
   # registry entry declares only THIS side's `identity`; the peer's name is not
   # in the schema, and an unknown key there is a hard error. Deriving it from
@@ -149,7 +196,7 @@ if ! command -v jq >/dev/null 2>&1; then
     "install jq (it is already a dependency of the athena:slack skill), then re-run."
   exit 2
 fi
-if ! command -v flock >/dev/null 2>&1; then
+if [ "${ROUTED}" -eq 0 ] && ! command -v flock >/dev/null 2>&1; then
   # REFUSED, NOT DEGRADED. Without the lock two senders scanning at once derive
   # the same <seq>; the delivery is non-clobbering so nothing is destroyed, but
   # the contract requires the lock across scan/build/deliver and a send that
@@ -239,6 +286,15 @@ fi
 # the library caller that sources these files and calls the manager in-process,
 # and the draft is removed on every exit path either way.
 trap 'inbox_release_consumer; rm -f "${DRAFT:-}" 2>/dev/null || true' EXIT
+
+if [ "${ROUTED}" -eq 1 ]; then
+  # THE RECEIPT, AND NOTHING ELSE -- the same rule as the filename below: the
+  # body is never echoed back. `event_id` is what a reply's --thread names;
+  # `delivery_id` is the handle for the server's delivery status. "pending"
+  # is literal: a platform delivery is delivered only on the recipient's ack.
+  printf '%s' "${BODY}" | inbox_send_routed "${TO}" "${TO_PROJECT}" "${SUBJECT}" "${RE}" "${THREAD}" "." || exit 1
+  exit 0
+fi
 
 NAME="$(printf '%s' "${BODY}" | inbox_send_mail "${CHANNEL}" "${SLUG}" "${TO}" "." "${RE}" "${THREAD}")" || exit 1
 

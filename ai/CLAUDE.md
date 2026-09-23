@@ -333,6 +333,9 @@ wrong input usually raises; the missing one is what exits 0.
 Messages reach a running session through the **Athena Inbox**, a local
 multi-tenant message facility rooted at `$ATHENA_INBOX_ROOT` (default
 `~/.local/share/athena`), carrying both Slack delivery and agent-to-agent mail.
+Routed session mail between projects is a `log` channel with a `platform`
+producer: each project's `session` channel, `<project>-session.jsonl`
+(`athena:inbox` → *Session messages*).
 
 **The contract is `~/dev/custom/ai/contracts/athena-inbox.md`** — the normative
 home for the layout, the channel kinds and their writer/reader obligations, the

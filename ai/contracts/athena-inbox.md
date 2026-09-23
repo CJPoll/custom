@@ -1198,10 +1198,22 @@ change stream of state-change events*), unchanged by this section.
   `entity_id` is stated in one place.
 
 **Registry convention for a session inbox.** A project's session inbox is the
-per-project `log` channel **`<project>-mail.jsonl`**, `producer: "platform"`,
+per-project `log` channel named **`session`**, path
+**`<project>-session.jsonl`**, `producer: "platform"`, with no `dedupe`,
 declared in `ai/inbox/registry.json` (the both-ends-or-dark client end;
 *Producer registration extends to platform deliveries*). The server end is the
-owner handling rule / addressed-delivery target that feeds it.
+owner handling rule / addressed-delivery target that feeds it. The server's
+`inbox_name` for it, in `to` and `from` alike, is the full filename
+(`walt_ui-session.jsonl`), not its stem. No channel name in any registry entry
+may equal a session inbox's file stem (`walt_ui-session`); the committed
+registry's loader refuses that collision (`ai/inbox/lib/registry.rb`).
+
+**Later (2026-09-23):** this convention named the file
+**`<project>-mail.jsonl`**, with no channel name. Superseded by epic decision
+D41 (DND-312): custom's entry already declares a **maildir** channel named
+`walt_ui-mail` (custom's outbound mail to walt_ui), so walt_ui's routed inbox
+`walt_ui-mail.jsonl` would have been shown under the same name for the
+opposite direction of a different transport.
 
 ### A platform delivery is `delivered` on the client's ack, never on the push
 
