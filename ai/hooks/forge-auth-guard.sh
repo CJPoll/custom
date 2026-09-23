@@ -24,8 +24,9 @@
 #      `oauth/token` / `/oauth/access_token` with a POST verb or a body/field
 #      flag that implies POST).
 #   4. A WRITE (redirect, tee, sed -i, rm/mv/cp/install/ln, editor) targeting a
-#      known forge credential/config location (anything under ~/.config/gh or
-#      ~/.config/glab-cli, or a gh/ or glab-cli/ hosts.yml/config.yml under any
+#      known forge credential/config location (anything under ~/.config/gh,
+#      ~/.config/glab-cli, $XDG_CONFIG_HOME/gh|glab-cli, $GH_CONFIG_DIR or
+#      $GLAB_CONFIG_DIR, or a gh/ or glab-cli/ hosts.yml/config.yml under any
 #      config root).
 #
 # Matching runs on the command flattened to one line with quotes and
@@ -89,12 +90,12 @@ CMD_START='(^|[^[:alnum:]_.-])'
 # `gh` or `gh-athena`, then `auth`, then a mutating subcommand (`switch` changes
 # the active account in hosts.yml). `gh auth status` is NOT matched (a read).
 if has "${CMD_START}gh(-athena)?[[:space:]]+auth[[:space:]]+(login|logout|refresh|token|setup-git|switch)"; then
-  deny 'forge-auth: this changes GitHub auth state (login/logout/refresh/token/setup-git/switch), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this, bare or path-qualified (~/.../gh-athena counts too). If a forge write is failing on auth, STOP and report to the owner that gh auth needs attention; verify the identity wrapper with `~/dev/custom/ai/bin/forge-preflight` (reads only). Reading status is fine: `gh auth status`.'
+  deny 'forge-auth: this changes GitHub auth state (login/logout/refresh/token), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this. If a forge write is failing on auth, STOP and report to the owner that gh auth needs attention; verify the identity wrapper with `~/dev/custom/ai/bin/forge-preflight` (reads only). Reading status is fine: `gh auth status`.'
 fi
 
 # ---- 2: glab auth <mutation> (bare, path-qualified, or -athena wrapper) ----
 if has "${CMD_START}glab(-athena)?[[:space:]]+auth[[:space:]]+(login|logout|refresh)"; then
-  deny 'forge-auth: this changes GitLab auth state (login/logout/refresh), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this, bare or path-qualified (~/.../glab-athena counts too). If a forge write is failing on auth, STOP and report to the owner that glab auth needs attention; verify the identity wrapper with `~/dev/custom/ai/bin/forge-preflight` (reads only). Reading status is fine: `glab auth status`.'
+  deny 'forge-auth: this changes GitLab auth state (login/logout/refresh), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this. If a forge write is failing on auth, STOP and report to the owner that glab auth needs attention; verify the identity wrapper with `~/dev/custom/ai/bin/forge-preflight` (reads only). Reading status is fine: `glab auth status`.'
 fi
 
 # ---- 3: POST to an OAuth token endpoint ------------------------------------
@@ -122,8 +123,10 @@ fi
 # The command names a gh/glab credential or config location AND carries a
 # mutating operator. Locations: anything under ~/.config/gh or
 # ~/.config/glab-cli or $XDG_CONFIG_HOME/gh|glab-cli (the dirs themselves
-# included), or a `gh/` / `glab-cli/` hosts.yml / config.yml under any root.
-# Operators: a redirect; an in-place edit (`sed`/`perl` with `-i`, anywhere in
+# included, whatever follows the dir name: / ; ) & * { space or end, but not a
+# sibling like gh-dash), anything named via $GH_CONFIG_DIR / $GLAB_CONFIG_DIR,
+# or a `gh/` / `glab-cli/` hosts.yml / config.yml under any root.
+# Operators: a redirect; an in-place edit (`sed`/`gsed`/`perl` with `-i`, anywhere in
 # that command's flags, or `--in-place`); or a mutating tool (tee, rm, unlink,
 # shred, mv, cp, install, ln, dd, truncate, an editor) invoked bare OR
 # path-qualified (`/bin/rm`), after any separator. A plain read
@@ -132,9 +135,9 @@ fi
 # /dev/null or an fd duplication (2>&1) does not write the file, so both are
 # removed before the operator check.
 WRITES=$(printf '%s' "$FLAT" | sed -E 's#[0-9]*>>?[[:space:]]*/dev/null##g; s#[0-9]*>&[0-9-]##g')
-if has '((\.config|XDG_CONFIG_HOME\}?)/(gh|glab-cli)(/|[[:space:]]|$)|(^|[^[:alnum:]_.-])(gh|glab-cli)/(hosts|config)\.yml)' \
-  && printf '%s' "$WRITES" | grep -Eq "(>|${CMD_START}(tee|rm|unlink|shred|mv|cp|install|ln|dd|truncate|vim?|nvim|nano|emacs)[[:space:]]|${CMD_START}(sed|perl)[[:space:]]([^|;&]*[[:space:]])?(-[nprlaswWXtTcEuz]*i|--in-place))"; then
-  deny 'forge-auth: this writes to a forge credential/config location (gh hosts.yml/config.yml, glab-cli config.yml, or the ~/.config/gh / ~/.config/glab-cli dir), which is OWNER-GATED — the agent never edits forge auth config. Fix: do NOT modify it. If the config is wrong, report to the owner, who provisions forge auth out of band. Reading the file (cat/grep/ls) is allowed.'
+if has '((\.config|XDG_CONFIG_HOME)\}?/(gh|glab-cli)([^[:alnum:]_.-]|$)|(GH|GLAB)_CONFIG_DIR([^[:alnum:]_]|$)|(^|[^[:alnum:]_.-])(gh|glab-cli)/(hosts|config)\.yml)' \
+  && printf '%s' "$WRITES" | grep -Eq "(>|${CMD_START}(tee|rm|unlink|shred|mv|cp|install|ln|dd|truncate|vim?|nvim|nano|emacs)[[:space:]]|${CMD_START}g?(sed|perl)[[:space:]]([^|;&]*[[:space:]])?(-[nprlaswWXtTcEuz]*i|--in-place))"; then
+  deny 'forge-auth: this writes to a forge credential/config file (gh hosts.yml/config.yml or glab-cli config.yml), which is OWNER-GATED — the agent never edits forge auth config. Fix: do NOT modify it. If the config is wrong, report to the owner, who provisions forge auth out of band. Reading the file (cat/grep) is allowed.'
 fi
 
 # No auth-mutating construct detected -> allow silently.

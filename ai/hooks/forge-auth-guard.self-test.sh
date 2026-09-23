@@ -197,6 +197,27 @@ check "P6h. unlink / shred" deny
 run "$(bash_json 'rm -rf "$XDG_CONFIG_HOME/gh"')"
 check "P6i. rm -rf \$XDG_CONFIG_HOME/gh (dir form)" deny
 
+run "$(bash_json 'rm -rf ~/.config/gh; true')"
+check "P6j. config dir followed by ';'" deny
+
+run "$(bash_json '(rm -rf ~/.config/glab-cli)')"
+check "P6k. config dir followed by ')'" deny
+
+run "$(bash_json 'mv ~/.config/gh{,.bak}')"
+check "P6l. config dir with brace expansion" deny
+
+run "$(bash_json 'rm -rf ~/.config/gh*')"
+check "P6m. config dir glob" deny
+
+run "$(bash_json 'rm -rf ${XDG_CONFIG_HOME:-~/.config}/gh')"
+check "P6n. \${XDG_CONFIG_HOME:-~/.config}/gh" deny
+
+run "$(bash_json 'gsed -i s/a/b/ ~/.config/gh/hosts.yml')"
+check "P6o. gsed -i (GNU sed)" deny
+
+run "$(bash_json 'rm "$GH_CONFIG_DIR/hosts.yml"')"
+check "P6p. \$GH_CONFIG_DIR/hosts.yml" deny
+
 run "$(bash_json '~/dev/custom/ai/bin/gh-athena auth switch --user x')"
 check "P7a. gh auth switch (changes the active account)" deny
 
@@ -265,6 +286,15 @@ check "M20. perl -Mstrict -ne read of gh hosts.yml" allow
 
 run "$(bash_json 'sed -n p ~/.config/gh/hosts.yml | grep -i github')"
 check "M21. sed -n read piped to grep -i" allow
+
+run "$(bash_json 'rm -rf ~/.config/gh-dash-cache')"
+check "M22. a sibling dir that merely starts with gh" allow
+
+run "$(bash_json 'GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c credential.helper= push origin x')"
+check "M23. gh-athena git push with the helper disabled (the sanctioned push)" allow
+
+run "$(bash_json '~/dev/custom/ai/bin/gh-athena auth git-credential get')"
+check "M24. gh-athena auth git-credential (a credential READ by git)" allow
 
 echo
 echo "--- FAIL-OPEN cases (never wedge Bash) ---"
