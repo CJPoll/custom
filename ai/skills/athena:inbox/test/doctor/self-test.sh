@@ -732,7 +732,8 @@ assert_eq "send-paths state: ready but NO bearer in this shell -> warn (send-mai
 assert_eq "send-paths state: a registration lookup that could not be made -> warn, never na" warn "$(doctor_state_send_paths error declared true set 1)"
 assert_eq "send-paths state: a broken registration is warn even when the maildir count is unreadable" warn "$(doctor_state_send_paths broken declared true set '')"
 assert_eq "send-paths state: no machine token to ask with -> na, never ok" na "$(doctor_state_send_paths registered declared skipped-no-token set 1)"
-assert_eq "send-paths state: a non-numeric maildir count -> na (never ok)" na "$(doctor_state_send_paths registered declared true set '')"
+assert_eq "send-paths state: an unreadable maildir count -> warn (its own fault, never na or ok)" warn "$(doctor_state_send_paths registered declared true set '')"
+assert_eq "send-paths state: an unreadable maildir count on an unregistered project -> warn, not na" warn "$(doctor_state_send_paths unregistered declared true set x)"
 
 SP="${TMP}/sp"; mkdir -p "${SP}/home" "${SP}/root/projects"; chmod 700 "${SP}/root" "${SP}/root/projects"
 SPROJ_D="${SP}/proj"; mkdir -p "${SPROJ_D}"
@@ -786,6 +787,13 @@ SPENTRY_NOSESS="$(printf '%s' "${SPENTRY}" | jq -c 'del(.channels.session)')"
 RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true ATHENA_MCP_BEARER=fixture-bearer doctor_check_send_paths "${SPENTRY_NOSESS}" "." )"
 assert_eq "send-paths: registered but no session inbox -> warn" warn "$(state_of "${RO}" send-paths)"
 assert_contains "... says the session inbox is missing" "session inbox missing" "${RO}"
+# THE MISS: a channels map the count cannot read. The finding must say the
+# count is UNREADABLE -- never "0 maildir channel(s)", never na.
+SPENTRY_BADCH="$(printf '%s' "${SPENTRY}" | jq -c '.channels = "not-an-object"')"
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true ATHENA_MCP_BEARER=fixture-bearer doctor_check_send_paths "${SPENTRY_BADCH}" "." )"
+assert_eq "send-paths: an uncountable channels map -> warn" warn "$(state_of "${RO}" send-paths)"
+assert_contains "... says the count is UNREADABLE" "maildir channel count UNREADABLE" "${RO}"
+assert_not_contains "... never prints it as 0 channels" "0 maildir channel(s)" "${RO}"
 RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true doctor_check_send_paths "" "." )"
 assert_eq "send-paths: no matched entry -> no finding at all (the entry check reports that)" "" "${RO}"
 

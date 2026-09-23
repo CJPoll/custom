@@ -792,6 +792,7 @@ rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"; shim_reset; reach_answer "${REACH_TRUE
 EDITOR="${TMP}/no-such-editor" send peer-mail x --to m-lap/walt_ui-session.jsonl
 if [ "${RC}" -ne 0 ]; then ok "no flag, a channel with a server --to: refused"; else bad "no flag, a channel with a server --to: refused" "exit 0"; fi
 assert_contains "no flag, channel + server --to: names the mismatch" "--to is a server address" "${ERR}"
+assert_contains "no flag, channel + server --to: names the channel it was given" "channel \"peer-mail\"" "${ERR}"
 assert_contains "no flag, channel + server --to: Fix:" "Fix:" "${ERR}"
 assert_eq "no flag, channel + server --to: refused before any path line, write or call" "|||" "${OUT}|$(maildir_files)|$(calls)|"
 
@@ -809,6 +810,12 @@ if [ "${RC}" -ne 0 ]; then ok "--local with a server address: refused"; else bad
 assert_contains "--local with a server address: names it" "--to is a server address" "${ERR}"
 assert_contains "--local with a server address: Fix:" "Fix:" "${ERR}"
 assert_eq "--local with a server address: no maildir written, nothing sent" "|" "$(maildir_files)|$(calls)"
+
+shim_reset; send --local --to m-lap/walt_ui-session.jsonl
+if [ "${RC}" -ne 0 ]; then ok "--local, no channel, a server --to: refused"; else bad "--local, no channel, a server --to: refused" "exit 0"; fi
+assert_contains "--local, no channel: names --local, never claims a channel was named" "this is a maildir send (--local)" "${ERR}"
+assert_not_contains "--local, no channel: no phantom channel in the refusal" "channel \"" "${ERR}"
+assert_eq "--local, no channel: nothing sent, nothing written" "|" "$(maildir_files)|$(calls)"
 
 shim_reset; send --local --to-project walt_ui --subject s --re /x
 if [ "${RC}" -ne 0 ]; then ok "--local with --to-project/--subject: refused"; else bad "--local with --to-project/--subject: refused" "exit 0"; fi
