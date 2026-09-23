@@ -97,6 +97,92 @@ run "$(bash_json 'rm ~/.config/gh/hosts.yml')"
 check "4c. rm gh hosts.yml" deny
 
 echo
+echo "--- DENY cases: path-qualified / quoted / chained forms (DND-388) ---"
+# Each case below was ALLOWED by the pre-DND-388 hook. The rule-1/2 left
+# boundary excluded '/', so a path-qualified command word never matched; quotes
+# around the command word or subcommand split the pattern; rules 3/4 missed the
+# attached/`=`/lowercase verb forms, gh api's implicit POST, XDG paths, and a
+# path-qualified mutating tool.
+
+run "$(bash_json 'git add -A; ~/dev/custom/ai/bin/gh-athena auth setup-git >/dev/null 2>&1; git push -u origin x')"
+check "P1a. ~/.../gh-athena auth setup-git (the DND-385 command line)" deny
+
+run "$(bash_json '~/dev/custom/ai/bin/gh-athena auth setup-git')"
+check "P1b. ~/.../gh-athena auth setup-git (bare)" deny
+
+run "$(bash_json '/usr/bin/gh auth login')"
+check "P1c. /usr/bin/gh auth login" deny
+
+run "$(bash_json './gh auth refresh')"
+check "P1d. ./gh auth refresh" deny
+
+run "$(bash_json '$HOME/dev/custom/ai/bin/glab-athena auth login')"
+check "P2a. \$HOME/.../glab-athena auth login" deny
+
+run "$(bash_json '/usr/local/bin/glab auth logout')"
+check "P2b. /usr/local/bin/glab auth logout" deny
+
+run "$(bash_json 'cd /tmp; /usr/bin/gh auth login')"
+check "P3a. after ';'" deny
+
+run "$(bash_json 'true && ~/dev/custom/ai/bin/gh-athena auth token')"
+check "P3b. after '&&'" deny
+
+run "$(bash_json 'false || /usr/bin/glab auth refresh')"
+check "P3c. after '||'" deny
+
+run "$(bash_json 'echo x | /usr/bin/gh auth login --with-token')"
+check "P3d. after '|'" deny
+
+run "$(bash_json 'T=$(~/dev/custom/ai/bin/gh-athena auth token)')"
+check "P3e. inside \$( )" deny
+
+run "$(bash_json 'T=`/usr/bin/gh auth token`')"
+check "P3f. inside backticks" deny
+
+run "$(bash_json '(cd /tmp && $HOME/dev/custom/ai/bin/glab-athena auth login)')"
+check "P3g. inside a subshell" deny
+
+run "$(bash_json '"gh" auth login')"
+check "P4a. quoted command word \"gh\"" deny
+
+run "$(bash_json "gh auth 'setup-git'")"
+check "P4b. quoted subcommand 'setup-git'" deny
+
+run "$(bash_json '\gh auth login')"
+check "P4c. backslash-escaped command word" deny
+
+run "$(bash_json "bash -c '/usr/bin/gh auth login'")"
+check "P4d. inside bash -c '...'" deny
+
+run "$(bash_json 'gh api /login/oauth/access_token -f client_id=x -f code=y')"
+check "P5a. gh api oauth token with -f fields (implicit POST)" deny
+
+run "$(bash_json 'curl -XPOST https://gitlab.com/oauth/token')"
+check "P5b. curl -XPOST (attached verb)" deny
+
+run "$(bash_json 'gh api --method=post /login/oauth/access_token')"
+check "P5c. --method=post (= form, lowercase)" deny
+
+run "$(bash_json 'curl --data-urlencode grant_type=refresh_token https://gitlab.com/oauth/token')"
+check "P5d. curl --data-urlencode" deny
+
+run "$(bash_json "curl -X POST 'https://gitlab.com/oauth/\"token\"'")"
+check "P5e. quote-split oauth path" deny
+
+run "$(bash_json '/bin/rm ~/.config/gh/hosts.yml')"
+check "P6a. path-qualified /bin/rm of gh hosts.yml" deny
+
+run "$(bash_json 'echo x > "$XDG_CONFIG_HOME/gh/hosts.yml"')"
+check "P6b. write to \$XDG_CONFIG_HOME/gh/hosts.yml" deny
+
+run "$(bash_json 'rm -rf ~/.config/glab-cli')"
+check "P6c. rm -rf the glab-cli config dir" deny
+
+run "$(bash_json 'true && $(/usr/bin/cp x ~/.config/gh/config.yml)')"
+check "P6d. path-qualified cp inside \$( )" deny
+
+echo
 echo "--- MUST-NOT-BLOCK cases (reads / ordinary forge use) ---"
 
 run "$(bash_json 'gh auth status')"
@@ -122,6 +208,33 @@ check "M7. grep glab config (read)" allow
 
 run "$(bash_json 'gh pr list && glab ci status')"
 check "M8. ordinary forge reads" allow
+
+run "$(bash_json '~/dev/custom/ai/bin/gh-athena auth status')"
+check "M9. path-qualified gh-athena auth status (read)" allow
+
+run "$(bash_json '/usr/bin/glab auth status')"
+check "M10. path-qualified glab auth status (read)" allow
+
+run "$(bash_json '~/dev/custom/ai/bin/gh-athena pr create --fill --base main')"
+check "M11. path-qualified gh-athena pr create" allow
+
+run "$(bash_json 'ls ~/dev/github/auth/login ~/ghost/auth/token')"
+check "M12. paths merely containing gh" allow
+
+run "$(bash_json '/opt/nigh auth login; ~/bin/sigh auth refresh')"
+check "M13. path-qualified words merely ending in gh" allow
+
+run "$(bash_json 'my-gh auth login; foo_glab auth login')"
+check "M14. words ending in -gh/_glab (not the forge CLI)" allow
+
+run "$(bash_json 'cat ~/.config/gh/hosts.yml 2>/dev/null')"
+check "M15. read of gh hosts.yml with 2>/dev/null" allow
+
+run "$(bash_json 'ls ~/.config/glab-cli >/dev/null 2>&1')"
+check "M16. ls of glab-cli dir redirected to /dev/null" allow
+
+run "$(bash_json 'curl -s https://gitlab.com/oauth/token/info -H "Authorization: Bearer x"')"
+check "M17. GET oauth/token/info (read)" allow
 
 echo
 echo "--- FAIL-OPEN cases (never wedge Bash) ---"

@@ -16,13 +16,27 @@
 # status (`gh auth status`, `glab auth status`) is NOT a change and is allowed.
 #
 # What it DENIES (see the messages for the exact remedy):
-#   1. `gh auth <login|logout|refresh|token|setup-git>` (also gh-athena wrapper)
-#   2. `glab auth <login|logout|refresh>` (also glab-athena wrapper)
+#   1. `gh auth <login|logout|refresh|token|setup-git>` (also gh-athena wrapper;
+#      bare OR path-qualified, e.g. ~/dev/custom/ai/bin/gh-athena, /usr/bin/gh)
+#   2. `glab auth <login|logout|refresh>` (also glab-athena wrapper; bare OR
+#      path-qualified)
 #   3. A POST to an OAuth token endpoint (`gh api`, `glab api`, or `curl` hitting
-#      `oauth/token` / `/oauth/access_token` with a POST verb).
-#   4. A WRITE (redirect, tee, sed -i, rm/mv/cp/install, editor) targeting a
-#      known forge credential/config file (gh hosts.yml/config.yml, glab-cli
-#      config.yml, a *_TOKEN/credentials file under those config dirs).
+#      `oauth/token` / `/oauth/access_token` with a POST verb or a body/field
+#      flag that implies POST).
+#   4. A WRITE (redirect, tee, sed -i, rm/mv/cp/install/ln, editor) targeting a
+#      known forge credential/config location (anything under ~/.config/gh or
+#      ~/.config/glab-cli, or a gh/ or glab-cli/ hosts.yml/config.yml under any
+#      config root).
+#
+# Matching runs on the command flattened to one line with quotes and
+# backslashes removed, so quoting cannot split a pattern. Like every text
+# guard it matches TEXT, not parsed argv: a command that merely prints the
+# pattern (a printf of a log line naming the subcommand) is also denied. That
+# false positive is accepted for a deny-only guard: rephrasing costs one retry,
+# while a miss leaks owner-gated auth state. Indirection through a variable
+# (`G=gh; $G auth ...`) or a `cd` into the config dir followed by a bare-name
+# rm is NOT caught; this guard is a tripwire for the direct forms, not a
+# sandbox.
 #
 # Design guarantees (mirror safe-wait-guard / forge-identity-guard):
 #   * FAIL-OPEN — any error (missing jq, unparseable input, non-Bash tool, no
@@ -44,9 +58,14 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) |
 [ -n "$CMD" ] || exit 0
 
 # Flatten to one logical line so a command split across newlines still matches.
-FLAT=$(printf '%s' "$CMD" | tr '\n\t' '  ')
+# Then DEQUOTE: drop every ' " and \ so shell quoting cannot split a pattern
+# ("gh" auth ..., a quoted subcommand, oauth/"token", a backslash-escaped
+# command word). The shell removes the same characters before exec, so the
+# dequoted text is closer to what actually runs. Every rule matches against it.
+FLAT=$(printf '%s' "$CMD" | tr '\n\t' '  ' | tr -d "'\"\\\\")
 
 has() { printf '%s' "$FLAT" | grep -Eq "$1"; }
+hasi() { printf '%s' "$FLAT" | grep -Eiq "$1"; }
 
 # deny <reason> : emit the PreToolUse deny decision and exit (fail-open if jq
 # cannot encode, which would simply allow — consistent with the guarantee).
@@ -57,34 +76,57 @@ deny() {
   exit 0
 }
 
-# ---- 1: gh auth <mutation> (bare or -athena wrapper) -----------------------
+# CMD_START: the left boundary of a COMMAND WORD (DND-388). The word may be bare
+# or path-qualified (`gh`, `/usr/bin/gh`, `~/.../gh-athena`, `$HOME/.../glab`,
+# `./gh`), so '/' IS a boundary, alongside the shell separators (space ; & | (
+# backtick $ and start of line). A letter, digit, '_', '-' or '.' is NOT a
+# boundary, so a word that merely ENDS in the name (`sigh`, `my-gh`,
+# `foo_glab`) never matches. The pre-DND-388 class also excluded '/', so every
+# path-qualified invocation was allowed.
+CMD_START='(^|[^[:alnum:]_.-])'
+
+# ---- 1: gh auth <mutation> (bare, path-qualified, or -athena wrapper) ------
 # `gh` or `gh-athena`, then `auth`, then a mutating subcommand. `gh auth status`
 # is NOT matched (status is a read).
-if has '(^|[^[:alnum:]_/-])gh(-athena)?[[:space:]]+auth[[:space:]]+(login|logout|refresh|token|setup-git)'; then
-  deny 'forge-auth: this changes GitHub auth state (login/logout/refresh/token), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this. If a forge write is failing on auth, STOP and report to the owner that gh auth needs attention; verify the identity wrapper with `~/dev/custom/ai/bin/forge-preflight` (reads only). Reading status is fine: `gh auth status`.'
+if has "${CMD_START}gh(-athena)?[[:space:]]+auth[[:space:]]+(login|logout|refresh|token|setup-git)"; then
+  deny 'forge-auth: this changes GitHub auth state (login/logout/refresh/token/setup-git), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this, bare or path-qualified (~/.../gh-athena counts too). If a forge write is failing on auth, STOP and report to the owner that gh auth needs attention; verify the identity wrapper with `~/dev/custom/ai/bin/forge-preflight` (reads only). Reading status is fine: `gh auth status`.'
 fi
 
-# ---- 2: glab auth <mutation> (bare or -athena wrapper) ---------------------
-if has '(^|[^[:alnum:]_/-])glab(-athena)?[[:space:]]+auth[[:space:]]+(login|logout|refresh)'; then
-  deny 'forge-auth: this changes GitLab auth state (login/logout/refresh), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this. If a forge write is failing on auth, STOP and report to the owner that glab auth needs attention; verify the identity wrapper with `~/dev/custom/ai/bin/forge-preflight` (reads only). Reading status is fine: `glab auth status`.'
+# ---- 2: glab auth <mutation> (bare, path-qualified, or -athena wrapper) ----
+if has "${CMD_START}glab(-athena)?[[:space:]]+auth[[:space:]]+(login|logout|refresh)"; then
+  deny 'forge-auth: this changes GitLab auth state (login/logout/refresh), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this, bare or path-qualified (~/.../glab-athena counts too). If a forge write is failing on auth, STOP and report to the owner that glab auth needs attention; verify the identity wrapper with `~/dev/custom/ai/bin/forge-preflight` (reads only). Reading status is fine: `glab auth status`.'
 fi
 
 # ---- 3: POST to an OAuth token endpoint ------------------------------------
-# A request that mints/refreshes a token: an oauth token path together with an
-# explicit POST verb (gh/glab `api --method POST`, curl `-X POST`/`--request
-# POST`, or `-d`/`--data` which forces POST).
+# A request that mints/refreshes a token: an oauth token path together with a
+# POST. POST is recognised in every form the tools accept:
+#   * an explicit verb, spaced, `=`-joined or attached, any case:
+#     `-X POST`, `-XPOST`, `--request=post`, `--method POST`, httpie `POST`;
+#   * a body/field flag, which makes curl and `gh api` send a POST: a
+#     short-flag cluster containing d, f or F (`-d`, `-dx`, `-sd`, `-f`, `-F`),
+#     `--data*`, `--json`, `--form*`, `--field`, `--raw-field`, `--input`,
+#     wget `--post-data` / `--post-file`.
+# A plain GET of a token path (e.g. GitLab's `oauth/token/info`) carrying none
+# of these does NOT match.
 if has 'oauth/(token|access_token)' \
-  && has '(--method[[:space:]]+POST|-X[[:space:]]+POST|--request[[:space:]]+POST|(^|[[:space:]])(-d|--data)([[:space:]]|=))'; then
+  && hasi '((-X|--request|--method)([[:space:]]*|=)post|(^|[[:space:]])post([[:space:]]|$)|(^|[[:space:]])-[[:alnum:]]*[dfF]|(^|[[:space:]])--(data|json|form|field|raw-field|input|post-data|post-file))'; then
   deny 'forge-auth: this POSTs to an OAuth token endpoint (minting/refreshing a forge token), which is OWNER-GATED — the agent never mints forge credentials. Fix: do NOT run this. Report to the owner if a token is expired or missing; the owner provisions forge auth out of band.'
 fi
 
 # ---- 4: a WRITE to a known forge credential/config file --------------------
-# The command names a gh/glab credential or config file AND carries a mutating
-# operator (redirect, tee, sed -i, rm/mv/cp/install, an editor). A plain read
-# (cat/grep/less of the file) does NOT match.
-if has '(\.config/(gh|glab-cli)/(hosts\.yml|config\.yml)|glab-cli/config\.yml|\.config/gh/hosts\.yml)' \
-  && has '(>>?[[:space:]]*[^&|]|(^|[[:space:]|;&])(tee|rm|mv|cp|install|dd|truncate|vim?|nvim|nano|emacs)[[:space:]]|sed[[:space:]]+-i)'; then
-  deny 'forge-auth: this writes to a forge credential/config file (gh hosts.yml/config.yml or glab-cli config.yml), which is OWNER-GATED — the agent never edits forge auth config. Fix: do NOT modify it. If the config is wrong, report to the owner, who provisions forge auth out of band. Reading the file (cat/grep) is allowed.'
+# The command names a gh/glab credential or config location AND carries a
+# mutating operator. Locations: anything under ~/.config/gh or
+# ~/.config/glab-cli (the dirs themselves included), or a `gh/` / `glab-cli/`
+# hosts.yml / config.yml under any config root ($XDG_CONFIG_HOME/gh/hosts.yml).
+# Operators: a redirect, `sed -i` / `perl -i`, or a mutating tool (tee, rm, mv,
+# cp, install, ln, dd, truncate, an editor) invoked bare OR path-qualified
+# (`/bin/rm`), after any separator. A plain read (cat/grep/less/ls) does NOT
+# match. A redirect to /dev/null or an fd duplication (2>&1) does not write the
+# file, so both are removed before the operator check.
+WRITES=$(printf '%s' "$FLAT" | sed -E 's#[0-9]*>>?[[:space:]]*/dev/null##g; s#[0-9]*>&[0-9-]##g')
+if has '(\.config/(gh|glab-cli)(/|[[:space:]]|$)|(^|[^[:alnum:]_.-])(gh|glab-cli)/(hosts|config)\.yml)' \
+  && printf '%s' "$WRITES" | grep -Eq "(>|${CMD_START}(tee|rm|mv|cp|install|ln|dd|truncate|vim?|nvim|nano|emacs)[[:space:]]|(sed|perl)[[:space:]]+(-[[:alnum:]]*[[:space:]]+)*-[[:alnum:]]*i)"; then
+  deny 'forge-auth: this writes to a forge credential/config location (gh hosts.yml/config.yml, glab-cli config.yml, or the ~/.config/gh / ~/.config/glab-cli dir), which is OWNER-GATED — the agent never edits forge auth config. Fix: do NOT modify it. If the config is wrong, report to the owner, who provisions forge auth out of band. Reading the file (cat/grep/ls) is allowed.'
 fi
 
 # No auth-mutating construct detected -> allow silently.
