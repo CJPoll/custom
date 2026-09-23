@@ -580,7 +580,7 @@ doctor_check_undeclared_live() {
     base="${f##*/}"
     name="${base%.json}"
     names_valid_segment "${name}" || continue
-    if ! printf '%s\n' "${declared}" | grep -qxF "${base}"; then
+    if ! grep -qxF "${base}" <<<"${declared}"; then
       doctor_finding warn "undeclared-entry" "live registry entry ${base} is not declared in the committed source of truth" \
         "if ${base} is a tenant this machine should keep, add it to ai/inbox/registry.json and re-run scripts/setup-inbox-registry --install; the committed list is what makes a clobbered entry recoverable, and an undeclared one is invisible to that safety net."
       any=1
@@ -1114,7 +1114,7 @@ doctor_check_overrides() {
   local any_key_problem=0
   while IFS= read -r key; do
     [ -n "${key}" ] || continue
-    if ! printf '%s\n' "${server_names}" | grep -qxF "${key}"; then
+    if ! grep -qxF "${key}" <<<"${server_names}"; then
       doctor_finding warn "server-override" "config instance \"${key}\" matches no live server instance, so its override is never looked up" \
         "either the server has no instance named \"${key}\" or the config key is a typo; deliveries arrive under the server's own instance name and the override you wrote is inert. Fix the key in ${cfg} to a live instance name, or remove it."
       any_key_problem=1
@@ -1140,7 +1140,7 @@ doctor_check_overrides() {
   local unclaimed=0
   while IFS= read -r inbox_name; do
     [ -n "${inbox_name}" ] || continue
-    if ! printf '%s\n' "${claimed}" | grep -qxF "${inbox_name}"; then
+    if ! grep -qxF "${inbox_name}" <<<"${claimed}"; then
       # INFORMATIONAL (its own check name), not an override error: an unclaimed
       # instance is bookkeeping, not a broken running chain, and must not flip
       # the chain's health or nag every session. Same class as an undeclared

@@ -286,7 +286,7 @@ if [ "${rc}" -eq 0 ] && [ -d "${CA}" ] && [ -d "${CB}" ] && [ -d "${NEWX}" ]; th
 if [ ! -e "${OLD0}" ] && grep -qP "\t20260101T000000Z-10\tretention$" "${RXD}/pruned-captures.log"; then ok "the unreferenced capture was pruned, and the prune ledger records it (reason retention)"; else bad "the unreferenced capture was pruned and recorded" "$(cat "${RXD}/pruned-captures.log" 2>&1)"; fi
 for m in "${MA}" "${MB}"; do
   V="$(XDG_STATE_HOME="${RX}" "${DECIDE}" --message "${m}" --verify-only 2>&1)"
-  if printf '%s\n' "${V}" | grep -qx 'decision	verified'; then ok "the alert $(basename "${m}") still VERIFIES against its capture after the prune"; else bad "the alert $(basename "${m}") still verifies" "${V}"; fi
+  if grep -qx 'decision	verified' <<<"${V}"; then ok "the alert $(basename "${m}") still VERIFIES against its capture after the prune"; else bad "the alert $(basename "${m}") still verifies" "${V}"; fi
 done
 if grep -q '^retention: keep 1, hard max 25; 3 existed, 2 referenced by unread harness-alerts, 1 pruned$' "${NEWX}/capture.txt" && [ "$(field "${out}" retention)" = "keep 1, hard max 25; 3 existed, 2 referenced by unread harness-alerts, 1 pruned" ]; then
   ok "the manifest and stdout say what retention did (counts, not silence)"
@@ -322,7 +322,7 @@ if grep -q '^note: capture retention could not read the unread harness-alerts re
   ok "...and says so: a note: naming why with a Fix:, and 'UNKNOWN' in the manifest (never '0 referenced')"
 else bad "...and says so" "$(cat "${TMP}/c9u.err"; grep '^retention' "${NEWU}/capture.txt")"; fi
 out="$(ATHENA_INBOX_CAPTURE_KEEP=5 ATHENA_INBOX_CAPTURE_HARD_MAX=4 "${CAPTURE}" "${M3}" 2>&1)"; rc=$?
-if [ "${rc}" -eq 1 ] && printf '%s' "${out}" | grep -q 'Fix:'; then ok "HARD_MAX below KEEP is a usage error with a Fix:"; else bad "HARD_MAX below KEEP is a usage error" "rc=${rc} ${out}"; fi
+if [ "${rc}" -eq 1 ] && grep -q 'Fix:' <<<"${out}"; then ok "HARD_MAX below KEEP is a usage error with a Fix:"; else bad "HARD_MAX below KEEP is a usage error" "rc=${rc} ${out}"; fi
 
 # ---------------------------------------------------------------------------
 printf '\nC-5  identity: the supervisor'"'"'s ONE child, and exit 3 is distinct\n'
@@ -378,6 +378,21 @@ out="$("${CAPTURE}" --bogus 2>&1)"; rc=$?
 if [ "${rc}" -eq 1 ] && grep -q 'Fix:' <<<"${out}"; then ok "an unknown option is exit 1 with a Fix:"; else bad "an unknown option is exit 1 with a Fix:" "rc=${rc}"; fi
 out="$(XDG_STATE_HOME=relative "${CAPTURE}" "${M1}" 2>&1)"; rc=$?
 if [ "${rc}" -eq 2 ] && grep -q 'Fix:' <<<"${out}"; then ok "a relative XDG_STATE_HOME is exit 2 with a Fix: (a wrongly computed key)"; else bad "a relative XDG_STATE_HOME is exit 2 with a Fix:" "rc=${rc} ${out}"; fi
+
+# C-7. The retention "is this capture referenced?" test must not be a
+#      `printf | grep -q` pipe. The tool runs under pipefail, where that pipe
+#      reads 141 when grep exits at its first match mid-write, so a REFERENCED
+#      capture would read as unreferenced and be pruned under its unread alert.
+#      The SIGPIPE needs a scheduling coincidence, so no behavioural fixture
+#      can force it; the shape itself is asserted instead (DND-365).
+printf '\nC-7  pipefail-safe matching\n'
+PIPES="$(grep -nE '\| *grep -[a-zA-Z]*q' "${CAPTURE}" | grep -v '^[0-9]*: *#')"
+if grep -q '^set -[a-z]*o pipefail' "${CAPTURE}" && [ -z "${PIPES}" ]; then
+  ok "inbox-client-capture (pipefail) matches with here-strings, never a 'printf | grep -q' pipe"
+else
+  bad "inbox-client-capture (pipefail) matches with here-strings, never a 'printf | grep -q' pipe" \
+      "pipes: ${PIPES:-none} (or pipefail no longer set). Fix: rewrite as grep -q PAT <<<\"\$var\""
+fi
 
 printf '\n'
 if [ "${FAIL}" -eq 0 ]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0; fi

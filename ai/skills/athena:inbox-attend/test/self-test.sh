@@ -166,11 +166,11 @@ if [ "${RC}" -eq 3 ]; then ok "a symlinked capture directory is refused"; else b
 run --message "$(wf_make_message "${TMP}/m6" "${DUMPS}/../inbox-client-dumps/20260923T100000Z-4242/../../../../etc" "${SIG}")" --tickets "${TMP}/none.json" --now "${NOW}"
 if [ "${RC}" -eq 3 ]; then ok "a traversal path in re: is refused"; else bad "a traversal path in re: is refused" "rc=${RC} ${OUT}"; fi
 run --message "$(wf_make_message "${TMP}/m7" "${DUMPS}/20260923T110000Z-7777" "${SIG}")" --tickets "${TMP}/none.json" --now "${NOW}"
-if [ "${RC}" -eq 3 ] && [ "$(field "${OUT}" refusal)" = "unverifiable" ] && printf '%s\n' "${ERR}" | grep -q 'prune ledger has no record' && ! printf '%s\n' "${ERR}" | grep -q 'pruned before processing'; then ok "a capture that no longer exists, with NO prune on record, is unverifiable (not 'pruned')"; else bad "a missing capture with no prune on record is unverifiable" "rc=${RC} ${OUT} ${ERR}"; fi
+if [ "${RC}" -eq 3 ] && [ "$(field "${OUT}" refusal)" = "unverifiable" ] && grep -q 'prune ledger has no record' <<<"${ERR}" && ! grep -q 'pruned before processing' <<<"${ERR}"; then ok "a capture that no longer exists, with NO prune on record, is unverifiable (not 'pruned')"; else bad "a missing capture with no prune on record is unverifiable" "rc=${RC} ${OUT} ${ERR}"; fi
 # DND-367: retention recorded the prune -> the distinct `pruned` class.
 printf '2026-09-23T11:00:00Z\t20260923T110000Z-7777\thard-max-while-unread\n' >>"${DUMPS}/pruned-captures.log"
 run --message "$(wf_make_message "${TMP}/m7b" "${DUMPS}/20260923T110000Z-7777" "${SIG}")" --tickets "${TMP}/none.json" --now "${NOW}"
-if [ "${RC}" -eq 3 ] && [ "$(field "${OUT}" refusal)" = "pruned" ] && printf '%s\n' "${ERR}" | grep -q 'pruned before processing (capture retention removed it at 2026-09-23T11:00:00Z, reason hard-max-while-unread)' && printf '%s\n' "${ERR}" | grep -q '^  Fix: '; then
+if [ "${RC}" -eq 3 ] && [ "$(field "${OUT}" refusal)" = "pruned" ] && grep -q 'pruned before processing (capture retention removed it at 2026-09-23T11:00:00Z, reason hard-max-while-unread)' <<<"${ERR}" && grep -q '^  Fix: ' <<<"${ERR}"; then
   ok "a capture the prune ledger names is refused as 'pruned before processing' (class pruned, with the recorded reason and a Fix:)"
 else bad "a ledger-recorded prune is refused as pruned before processing" "rc=${RC} ${OUT} ${ERR}"; fi
 # The ledger matches the name EXACTLY: a -<n> sibling of a pruned capture is not "pruned".

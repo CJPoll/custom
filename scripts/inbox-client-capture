@@ -320,7 +320,11 @@ N_EXISTING=0; N_PROTECTED=0; PLAN_IN=""
 while IFS= read -r c; do
   [ -n "${c}" ] || continue
   N_EXISTING=$(( N_EXISTING + 1 ))
-  if printf '%s' "${REFERENCED}" | grep -qxF -- "${c}"; then
+  # A here-string, never `printf | grep -q`: under this script's pipefail that
+  # pipe reads 141 when grep exits at its first match mid-write, and a REFERENCED
+  # capture would then look unreferenced and be pruned under its unread alert
+  # (DND-365; guarded by the capture self-test).
+  if grep -qxF -- "${c}" <<<"${REFERENCED}"; then
     N_PROTECTED=$(( N_PROTECTED + 1 )); PLAN_IN="${PLAN_IN}${c}"$'\t1\n'
   else
     PLAN_IN="${PLAN_IN}${c}"$'\t0\n'

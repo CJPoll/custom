@@ -4117,12 +4117,12 @@ assert_eq "U-2 only the unread, conformant messages' re: values, in name order (
 assert_eq "U-3 reading acks nothing (the messages are still unread)" "4" \
   "$(find "${URD}" -mindepth 1 -maxdepth 1 -type f -name '*.md' | wc -l)"
 err="$(cd "${uproj}" && inbox_unread_refs nosuch . 2>&1 >/dev/null)"; rc=$?
-if [ "${rc}" -ne 0 ] && printf '%s' "${err}" | grep -q 'Fix:'; then ok "U-4 an undeclared channel is a FAILURE with a Fix:, never 'no references'"; else bad "U-4 an undeclared channel is a failure" "rc=${rc} ${err}"; fi
+if [ "${rc}" -ne 0 ] && grep -q 'Fix:' <<<"${err}"; then ok "U-4 an undeclared channel is a FAILURE with a Fix:, never 'no references'"; else bad "U-4 an undeclared channel is a failure" "rc=${rc} ${err}"; fi
 err="$(cd "${CASE_DIR}" && ATHENA_INBOX_ROOT="${CASE_DIR}/no-root" inbox_unread_refs alerts "${uproj}" 2>&1 >/dev/null)"; rc=$?
 if [ "${rc}" -ne 0 ]; then ok "U-5 a missing registry is a FAILURE (could not look), never an empty set"; else bad "U-5 a missing registry is a failure" "rc=${rc} ${err}"; fi
 register uproj "${uproj}" '{"alerts":{"kind":"log","path":"alerts.jsonl"}}'
 err="$(cd "${uproj}" && inbox_unread_refs alerts . 2>&1 >/dev/null)"; rc=$?
-if [ "${rc}" -ne 0 ] && printf '%s' "${err}" | grep -q 'Fix:'; then ok "U-6 a log channel is refused with a Fix: (it has no re:)"; else bad "U-6 a log channel is refused" "rc=${rc} ${err}"; fi
+if [ "${rc}" -ne 0 ] && grep -q 'Fix:' <<<"${err}"; then ok "U-6 a log channel is refused with a Fix: (it has no re:)"; else bad "U-6 a log channel is refused" "rc=${rc} ${err}"; fi
 
 echo
 if [ "${FAIL}" -eq 0 ]; then
