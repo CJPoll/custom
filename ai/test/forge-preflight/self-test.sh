@@ -64,7 +64,9 @@ case "\$mode" in
     # authenticates fine, but as the OWNER, not the service account.
     echo '{"username":"cjpoll","name":"Cody","bot":false,"state":"active"}'; exit 0 ;;
   glab_broken)
-    echo "glab-athena: token file \${HOME}/.claude/gitlab-athena-token missing/unreadable. Fix: do not refresh it yourself (owner-gated); escalate to your admiral with the command + error and wait — the owner runs the refresh" >&2
+    # Deliberately GENERIC (no Fix:, no remedy): so case 5's assertions are
+    # pinned on the PREFLIGHT's own Fix: block, not on a relayed wrapper string.
+    echo "glab-athena: could not authenticate." >&2
     exit 1 ;;
 esac
 EOF
@@ -185,8 +187,8 @@ else bad "healthy gitlab: passes silently via 'api user'" "rc=${RC} out='${OUT}'
 #    the refresh itself.
 setup_case
 run_preflight "git@gitlab.com:amby_ai/walt_ui.git" "/nonexistent/gh" "$(make_shim glab_broken)"
-if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"escalate to your admiral"* ]] \
-   && [[ "${ERR}" != *"glab-athena refresh"* ]]; then
+if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix: the athena-amby token needs refreshing, which is OWNER-GATED"* ]] \
+   && [[ "${ERR}" == *"escalate to your admiral"* ]] && [[ "${ERR}" != *"glab-athena refresh"* ]]; then
   ok "gitlab broken: refuses with a Fix: line that escalates (never 'run the refresh')"
 else bad "gitlab broken: refuses with an escalate Fix: line, no self-refresh" "rc=${RC} err='${ERR}'"; fi
 

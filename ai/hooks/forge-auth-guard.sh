@@ -43,6 +43,9 @@
 #   6. `glab-athena refresh` (bare, path-qualified, quoted or chained): it mints
 #      a new PAT for the Athena GitLab service account with the OWNER's glab
 #      session. An expired Athena token is escalated, never self-healed.
+#      The deny has no exception, so it binds EVERY Claude Code session
+#      (admiral and coordinator included): only the human owner, in their
+#      own terminal outside Claude Code, can run the refresh.
 #      gh-athena has no equivalent: it mints its short-lived App installation
 #      token inside every call (and in `--check`, which forge-preflight runs),
 #      from the App key, with no owner session, so it is not denied.
@@ -322,7 +325,7 @@ fi
 # shape is matched: `glab-athena mr list --search refresh` or
 # `glab-athena api user` stay allowed. Bare `glab refresh` is not a glab command.
 if has "${CMD_START}glab-athena[[:space:]]+refresh([[:space:];&|)]|\$)"; then
-  deny 'forge-auth: `glab-athena refresh` mints a new token for the Athena GitLab service account using the OWNER'\''s glab session, which is OWNER-GATED: an expired Athena token is escalated, never self-healed. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). The admiral escalates to the coordinator; the owner (or the coordinator on the owner'\''s explicit go) runs the refresh. Diagnosing is fine: `~/dev/custom/ai/bin/forge-preflight` is a read.'
+  deny 'forge-auth: `glab-athena refresh` mints a new token for the Athena GitLab service account using the OWNER'\''s glab session, which is OWNER-GATED: an expired Athena token is escalated, never self-healed. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). The admiral escalates to the coordinator, who asks the owner: only the owner runs the refresh, in their own terminal (this guard denies it in every Claude Code session). Diagnosing is fine: `~/dev/custom/ai/bin/forge-preflight` is a read.'
 fi
 
 # No auth-mutating construct detected -> allow silently.

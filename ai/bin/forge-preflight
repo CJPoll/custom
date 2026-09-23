@@ -152,8 +152,9 @@ case "$host" in
       echo "  with the owner's glab session; agents never run it, and forge-auth-guard denies it)."
       echo "  Do NOT fall back to bare \`glab\` — do not work around this; escalate to your admiral"
       echo "  with the command + error and wait (athena:github -> \"When a forge write can't be done"
-      echo "  as Athena\"). The owner (or the coordinator on the owner's explicit go) refreshes it;"
-      echo "  afterwards re-verify with \`~/dev/custom/ai/bin/glab-athena api user\`."
+      echo "  as Athena\"). Only the owner refreshes it, in their own terminal (the guard denies it"
+      echo "  in every Claude Code session); afterwards re-verify with"
+      echo "  \`~/dev/custom/ai/bin/glab-athena api user\`."
     } >&2
     exit 1
     ;;

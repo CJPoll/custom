@@ -68,10 +68,13 @@ satisfied by the relayed wrapper string and a preflight that dropped its own
   safety.
 
   **Later (2026-09-23):** DND-390 made the athena-amby token refresh
-  OWNER-GATED (`forge-auth-guard.sh` rule 6 denies it). The GitLab refusal's
-  pinned tokens are now `Fix:` plus `escalate to your admiral`, and case 5 also
-  asserts that the output does NOT contain `glab-athena refresh`, so a
-  regression back to a self-refresh instruction reddens it.
+  OWNER-GATED (`forge-auth-guard.sh` rule 6 denies it). Case 5 now pins the
+  preflight's own `Fix: the athena-amby token needs refreshing, which is
+  OWNER-GATED` line plus `escalate to your admiral`, and asserts the output
+  does NOT contain `glab-athena refresh`. The `glab_broken` shim is now
+  GENERIC, like `gh_broken`, so no relayed wrapper text can satisfy those
+  tokens. Mutations checked: deleting the preflight's GitLab Fix: block, and
+  restoring the old self-refresh Fix:, each redden case 5.
 - **MZ2 — the unknown-host note wording.** Changing "is not a managed forge" to
   "is not a forge we know" left `PASS (11)`. Case 6 pins the *behaviour* (exit 0,
   no wrapper invoked), not the note text.
