@@ -459,8 +459,8 @@ miss.
     must not swallow the next one. It
     is not a delivery, so no retry budget applies (*Reconciled with
     idempotency* below does not govern it).
-  - **An outage the owner was not told of is never overwritten.** This is the
-    one statement of the rule; every other mention defers to it. An exemplar
+  - **An un-notified outage is kept, up to a bound.** This is the one
+    statement of the rule; every other mention defers to it. An exemplar
     is **un-notified** while the row is unread and no owner report of its
     episode has been delivered: the report failed, or has not gone out yet. A
     transition that lands on a row whose exemplar is un-notified MUST NOT
@@ -468,15 +468,19 @@ miss.
     outages, oldest first, and the new transition takes the exemplar.
     - **Bounded, never silently.** The list has an explicit bound, set by the
       implementation (gen_saas: 10). Past it the row keeps the oldest entries
-      and **counts** each further outage as omitted. Every omission is logged
-      where it happens, and the next owner report states it (`N more earlier
-      outage(s) omitted`). The transition count still includes every outage.
+      and **counts** each further outage as omitted. An omitted outage's
+      detail is lost while unread, and only its count survives: that overflow
+      is the **one remaining exception to never-destroy-unread** in this store.
+      It is never silent. Every omission is logged where it happens, and the
+      next owner report states it (`N more earlier outage(s) omitted`). The
+      transition count still includes every outage.
     - **Reported.** The next owner report MUST carry every kept earlier outage,
       at least its `unreachable_since` and pending count (a missing value
       renders `?`), and the omitted count. One report may carry several
       outages. The owner's read of the store carries them too.
     - **Released only by delivery or triage.** A delivered owner report
-      releases the earlier outages it carried; a report that fails, or that a
+      releases the earlier outages it carried and resets the omitted count to
+      0; a report that fails, or that a
       newer transition superseded mid-send, releases nothing, and the next
       report carries them again. So an outage can be reported twice, never
       zero times. A transition on a row whose exemplar was reported, or that
@@ -498,8 +502,9 @@ miss.
   evidence of the miss); age-out applies only after read/triage; the store's
   *Grain* above bounds it to at most one unread exemplar per key, plus a
   machine-unreachable row's bounded list of earlier un-notified outages
-  (*Machine-unreachable rows* → *An outage the owner was not told of is never
-  overwritten* above). **The store
+  (*Machine-unreachable rows* → *An un-notified outage is kept, up to a bound*
+  above), whose overflow is the one remaining exception that rule states.
+  **The store
   carries no cap or TTL number in this contract** — any
   operational cap/TTL is ops/owner config, outside this contract's MUST surface.
 
@@ -514,9 +519,10 @@ miss.
   machine-unreachable row's next transition replaced its exemplar even unread,
   and *Episodes* said only the transition count survived an earlier outage,
   plus its owner report if that went out first. Superseded (DND-396, gen_saas):
-  there is no exception. An exemplar whose owner report has not been delivered
-  is kept, bounded and reported, never replaced (*Machine-unreachable rows* →
-  *An outage the owner was not told of is never overwritten*). Why: when an
+  the exception is narrowed to a logged, reported overflow past an explicit
+  bound. An exemplar whose owner report has not been delivered is kept in a
+  bounded list and reported, not replaced (*Machine-unreachable rows* → *An
+  un-notified outage is kept, up to a bound*). Why: when an
   earlier outage's report failed, or had not gone out, before the next
   transition, the replace destroyed that outage's detail silently, and only
   the count remained.
