@@ -547,9 +547,11 @@ checks now answer the question a pid cannot:
   the same. The token reaches `curl` only through a 0600 config file.
 - `send-paths` (DND-314) reports both of `send-mail`'s paths for this project:
   routed (the `athena` MCP registration in `~/.claude.json`, the `session`
-  inbox, this machine's reachability from the check above) and local (the
-  maildir channels), and what the no-flag default would pick. `ok` when the
-  routed path is ready; `warn` when it is configured but unusable now (a no-flag
+  inbox, `ATHENA_MCP_BEARER` in this shell, this machine's reachability from
+  the check above) and local (the maildir channels), and what the no-flag
+  default would pick. It grades exactly what `send-mail` would decide: `ok`
+  when the routed path is ready; `warn` when it is configured but unusable now
+  (no bearer, not confirmed reachable, no valid session inbox: a no-flag
   server-addressed send would be refused) or the registration cannot be read;
   `n-a` when routed is not configured or reachability was not asked. The
   maildir channels' own health is their per-channel findings.

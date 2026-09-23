@@ -719,16 +719,18 @@ export ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json"
 
 # ============================================================================
 echo "== DND-314: send-paths reports BOTH send paths, and the no-flag default =="
-assert_eq "send-paths state: registered + session + reachable true -> ok" ok "$(doctor_state_send_paths registered declared true 1)"
-assert_eq "send-paths state: registered + session + reachable false -> warn" warn "$(doctor_state_send_paths registered declared false 1)"
-assert_eq "send-paths state: registered + session + unknown -> warn (quiet is not reachable)" warn "$(doctor_state_send_paths registered declared unknown 1)"
-assert_eq "send-paths state: registered + session + unavailable -> warn" warn "$(doctor_state_send_paths registered declared unavailable 0)"
-assert_eq "send-paths state: registered + session, not asked (--no-server) -> na, never ok" na "$(doctor_state_send_paths registered declared not-asked 1)"
-assert_eq "send-paths state: registered, session missing -> warn" warn "$(doctor_state_send_paths registered missing true 1)"
-assert_eq "send-paths state: registered, session invalid -> warn" warn "$(doctor_state_send_paths registered invalid true 1)"
-assert_eq "send-paths state: registration unreadable -> warn (never read as unregistered)" warn "$(doctor_state_send_paths broken declared true 1)"
-assert_eq "send-paths state: not registered -> na (routed not configured; local only)" na "$(doctor_state_send_paths unregistered declared true 2)"
-assert_eq "send-paths state: a non-numeric maildir count -> na (never ok)" na "$(doctor_state_send_paths registered declared true '')"
+assert_eq "send-paths state: registered + session + reachable true -> ok" ok "$(doctor_state_send_paths registered declared true set 1)"
+assert_eq "send-paths state: registered + session + reachable false -> warn" warn "$(doctor_state_send_paths registered declared false set 1)"
+assert_eq "send-paths state: registered + session + unknown -> warn (quiet is not reachable)" warn "$(doctor_state_send_paths registered declared unknown set 1)"
+assert_eq "send-paths state: registered + session + unavailable -> warn" warn "$(doctor_state_send_paths registered declared unavailable set 0)"
+assert_eq "send-paths state: registered + session, not asked (--no-server) -> na, never ok" na "$(doctor_state_send_paths registered declared not-asked set 1)"
+assert_eq "send-paths state: registered, session missing -> warn" warn "$(doctor_state_send_paths registered missing true set 1)"
+assert_eq "send-paths state: registered, session invalid -> warn" warn "$(doctor_state_send_paths registered invalid true set 1)"
+assert_eq "send-paths state: registration unreadable -> warn (never read as unregistered)" warn "$(doctor_state_send_paths broken declared true set 1)"
+assert_eq "send-paths state: not registered -> na (routed not configured; local only)" na "$(doctor_state_send_paths unregistered declared true set 2)"
+assert_eq "send-paths state: ready but NO bearer in this shell -> warn (send-mail would refuse)" warn "$(doctor_state_send_paths registered declared true unset 1)"
+assert_eq "send-paths state: a registration lookup that could not be made -> warn, never na" warn "$(doctor_state_send_paths error declared true set 1)"
+assert_eq "send-paths state: a non-numeric maildir count -> na (never ok)" na "$(doctor_state_send_paths registered declared true set '')"
 
 SP="${TMP}/sp"; mkdir -p "${SP}/home" "${SP}/root/projects"; chmod 700 "${SP}/root" "${SP}/root/projects"
 SPROJ_D="${SP}/proj"; mkdir -p "${SPROJ_D}"
@@ -737,8 +739,8 @@ SPCOMMON="$(cd "${SPROJ_D}" && realpath "$(git rev-parse --git-common-dir)")"; S
 SPENTRY="$(jq -n -c --arg r "${SPCOMMON}" '{v:1, repo:$r, channels:{
   session:{kind:"log", path:"proj-session.jsonl", producer:"platform", stale_after_s:0},
   "peer-mail":{kind:"maildir", namespace:"agent-mail/peer", read:"to-proj", write:"to-peer", identity:"proj"}}}')"
-sp_run() { # sp_run <reachable> [home-config-json]  -> the send-paths finding(s)
-  ( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE="$1" doctor_check_send_paths "${SPENTRY}" "." )
+sp_run() { # sp_run <reachable> [bearer]  -> the send-paths finding(s); bearer defaults to a fixture
+  ( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE="$1" ATHENA_MCP_BEARER="${2-fixture-bearer}" doctor_check_send_paths "${SPENTRY}" "." )
 }
 rm -f "${SP}/home/.claude.json"
 RO="$(sp_run true)"
@@ -753,6 +755,14 @@ RO="$(sp_run true)"
 assert_eq "send-paths: registered + session + reachable -> ok" ok "$(state_of "${RO}" send-paths)"
 assert_contains "... says a server-addressed send ROUTES" "server-addressed send ROUTES" "${RO}"
 assert_contains "... names the registration it found" "athena MCP registered for this project" "${RO}"
+RO="$(sp_run true "")"
+assert_eq "send-paths: ready but ATHENA_MCP_BEARER unset -> warn, never ok (send-mail would refuse)" warn "$(state_of "${RO}" send-paths)"
+assert_contains "... names the missing bearer" "ATHENA_MCP_BEARER unset in this shell" "${RO}"
+assert_contains "... says the server-addressed send is REFUSED" "server-addressed send is REFUSED" "${RO}"
+assert_contains "... its Fix names the launcher" "scripts/athena" "${RO}"
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true ATHENA_MCP_BEARER=fixture-bearer doctor_check_send_paths "${SPENTRY}" "${TMP}" )"
+assert_eq "send-paths: a registration lookup that cannot be made (not a repo) -> warn, never 'not configured'" warn "$(state_of "${RO}" send-paths)"
+assert_contains "... says the lookup itself failed, with its words" "the registration lookup itself failed: athena:inbox: the athena MCP registration cannot be looked up" "${RO}"
 RO="$(sp_run false)"
 assert_eq "send-paths: registered, this machine unreachable -> warn" warn "$(state_of "${RO}" send-paths)"
 assert_contains "... says the no-flag server-addressed send is REFUSED" "REFUSED (use --routed for another machine, --local for this one)" "${RO}"
@@ -766,7 +776,7 @@ assert_eq "send-paths: an unreadable ~/.claude.json -> warn, never 'not register
 assert_contains "... says the registration is broken" "athena MCP broken for this project" "${RO}"
 jq -n --arg p "${SPMAIN}" '{projects: {($p): {mcpServers: {athena: {type: "http", url: "https://x.test/mcp"}}}}}' > "${SP}/home/.claude.json"
 SPENTRY_NOSESS="$(printf '%s' "${SPENTRY}" | jq -c 'del(.channels.session)')"
-RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true doctor_check_send_paths "${SPENTRY_NOSESS}" "." )"
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true ATHENA_MCP_BEARER=fixture-bearer doctor_check_send_paths "${SPENTRY_NOSESS}" "." )"
 assert_eq "send-paths: registered but no session inbox -> warn" warn "$(state_of "${RO}" send-paths)"
 assert_contains "... says the session inbox is missing" "session inbox missing" "${RO}"
 RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true doctor_check_send_paths "" "." )"
@@ -776,13 +786,13 @@ assert_eq "send-paths: no matched entry -> no finding at all (the entry check re
 # recorded in the SAME shell (collect_findings runs them in one subshell). A
 # canned false must reach send-paths as false, not as the not-asked default.
 printf '{"reachable":false,"basis":"ack_silence","pending_deliveries":1,"unreachable_since":"2026-09-22T15:40:00Z"}' > "${SP}/reach.json"
-RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_MCP_BEARER=fixture-bearer ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
   bash -c 'for f in err names descriptor logchan maildir fence session fs lock inbox doctor; do . "$0/${f}.sh"; done
            doctor_check_server_reachability >/dev/null; doctor_check_send_paths "$1" "."' "${LIB}" "${SPENTRY}" )"
 assert_eq "handoff: server-reachability's recorded false reaches send-paths (warn)" warn "$(state_of "${RO}" send-paths)"
 assert_contains "handoff: ... and is named in the facts" "this machine reachable: false" "${RO}"
 printf 'UNAVAILABLE:tool machine_reachable not found' > "${SP}/reach.json"
-RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_MCP_BEARER=fixture-bearer ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
   bash -c 'for f in err names descriptor logchan maildir fence session fs lock inbox doctor; do . "$0/${f}.sh"; done
            doctor_check_server_reachability >/dev/null; doctor_check_send_paths "$1" "."' "${LIB}" "${SPENTRY}" )"
 assert_contains "handoff: an UNAVAILABLE reachability reaches send-paths as unavailable, never as reachable" "this machine reachable: unavailable" "${RO}"
