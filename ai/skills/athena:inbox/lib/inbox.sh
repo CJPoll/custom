@@ -1662,29 +1662,48 @@ inbox_mcp_registration() {
 # NAME"). Always prints a state and returns 0: a name is display, so no failure
 # here may fail a read or stop an ack. Every way the lookup cannot happen is an
 # unresolved state with its OWN reason -- not registered, registration
-# unreadable, bearer unset, the call failed, the server answered an error, no
-# answer -- so the render says which, never a blank or a guess.
+# unreadable, bearer unset, the call failed, it ran out of time, the server
+# answered an error, no answer -- so the render says which, never a blank or a
+# guess.
 #
 # The server's error words are NOT carried into the reason: the reason is
 # printed outside the untrusted fence. mcp_call_tool's own reasons (this
 # client's text, naming an already-validated URL and an HTTP status) are.
 #
-# The wait is bounded at 10s unless ATHENA_MCP_HTTP_TIMEOUT says otherwise: a
-# display lookup must not hold a read (and its channel lock) for the send
-# path's 30s.
+# ONE TOTAL DEADLINE. mcp_call_tool makes three POSTs, each bounded by curl's
+# max-time, so a per-request bound would let a slow endpoint hold the read (and
+# its channel lock) for three of them. The whole call instead runs under
+# `timeout`, in a child bash that sources only names.sh and mcp.sh, for
+# inbox_names_deadline seconds (default 10). `timeout` signals the child's whole
+# process group, so curl dies with it. The child's temp dir is inside one this
+# function owns and removes, so a killed call leaves no request/response body
+# behind.
 inbox_machine_names() {
-  local cwd="${1:-.}" url rc out res
+  local cwd="${1:-.}" url rc out res lib tmp secs
   url="$(inbox_mcp_registration "${cwd}" 2>/dev/null)"; rc=$?
   case "${rc}" in
     0) ;;
     1) routed_names_unresolved "the athena MCP is not registered for this project"; return 0 ;;
     3) routed_names_unresolved "this project's athena MCP registration cannot be read"; return 0 ;;
-    *) routed_names_unresolved "the athena MCP registration could not be looked up"; return 0 ;;
+    *) routed_names_unresolved "internal error computing the athena MCP lookup key (send-mail --routed shows the detail)"; return 0 ;;
   esac
   if [ -z "${ATHENA_MCP_BEARER:-}" ]; then
     routed_names_unresolved "ATHENA_MCP_BEARER is not set in this session"; return 0
   fi
-  out="$(ATHENA_MCP_HTTP_TIMEOUT="${ATHENA_MCP_HTTP_TIMEOUT:-10}" mcp_call_tool "${url}" list_my_machines '{}')"; rc=$?
+  command -v timeout >/dev/null 2>&1 || { routed_names_unresolved "timeout (coreutils) is not on PATH, so the lookup cannot be bounded"; return 0; }
+  lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  secs="$(inbox_names_deadline)"
+  tmp="$(mktemp -d 2>/dev/null)" || { routed_names_unresolved "could not create a private temp dir for the lookup"; return 0; }
+  chmod 700 "${tmp}"
+  # ATHENA_MCP_BEARER is exported for the child: it reaches curl on stdin only,
+  # exactly as in the parent (lib/mcp.sh), never argv or a file.
+  out="$(ATHENA_MCP_BEARER="${ATHENA_MCP_BEARER}" TMPDIR="${tmp}" timeout "${secs}" bash -c \
+    '. "$1/err.sh"; . "$1/names.sh"; . "$1/mcp.sh"; mcp_call_tool "$2" list_my_machines "{}"' \
+    _ "${lib}" "${url}")"; rc=$?
+  rm -rf "${tmp}"
+  if [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
+    routed_names_unresolved "list_my_machines did not answer within ${secs}s"; return 0
+  fi
   if [ "${rc}" -ne 0 ]; then
     routed_names_unresolved "list_my_machines failed: $(printf '%s' "${out}" | head -n 1)"; return 0
   fi
@@ -1695,6 +1714,16 @@ inbox_machine_names() {
     *) routed_names_unresolved "list_my_machines answered an error" ;;
   esac
   return 0
+}
+
+# inbox_names_deadline -- ATHENA_INBOX_NAMES_DEADLINE_S when it is a plain 1-2
+# digit number of seconds, else 10. It reaches `timeout` as an argument, so
+# anything else is never passed through.
+inbox_names_deadline() {
+  case "${ATHENA_INBOX_NAMES_DEADLINE_S:-}" in
+    [1-9]|[1-9][0-9]) printf '%s\n' "${ATHENA_INBOX_NAMES_DEADLINE_S}" ;;
+    *) printf '10\n' ;;
+  esac
 }
 
 # inbox_self_reachable <url>
