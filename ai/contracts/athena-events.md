@@ -481,8 +481,10 @@ miss.
       newer transition superseded mid-send, releases nothing, and the next
       report carries them again. So a kept outage can be reported twice, never
       zero times. A transition on a row whose exemplar was reported, or that
-      the owner has read, replaces the exemplar and starts the list empty: the
-      owner already has that detail.
+      the owner has read, replaces the exemplar, starts the list empty and
+      resets the omitted count to 0: the owner already has that detail.
+      "Delivered" means the owner channel's transport accepted the report; a
+      later bounce is outside what the platform observes.
     - **The two stated exceptions to never-destroy-unread.** Only these two
       cases discard an unread outage's detail from the store, and each leaves a
       trace:
