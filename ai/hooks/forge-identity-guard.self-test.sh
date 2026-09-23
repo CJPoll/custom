@@ -401,6 +401,18 @@ run "$(bash_json_cwd "$TMP/gh_scp" "W='~/dev/custom/ai/bin/gh-athena' ; \"\$W\" 
 check_text "C38. a single-quoted value (no ~ expansion) is not blessed -> warns" 'to a github.com remote'
 
 
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'W=~/dev/custom/ai/bin/gh-athena\nW=/usr/bin/env\n"$W" git push origin HEAD')")"
+check_text "C39. a reassignment on its own line is a statement, not a prefix -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'W=~/dev/custom/ai/bin/gh-athena; "$W"\ngit push origin HEAD')")"
+check_text "C40. \"\$W\" then git push on the NEXT line is a plain push -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'export\nW=~/dev/custom/ai/bin/gh-athena; "$W" git push origin HEAD')")"
+check_text "C41. export on its own line is not part of the assignment -> not blessed, warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'W=~/dev/custom/ai/bin/gh-athena\n\n  GIT_TERMINAL_PROMPT=0 "$W" git push origin x')")"
+check "V8. blank line between the assignment and a prefixed use" allow
+
 echo
 echo "--- MUST-NOT-WARN cases (wrapper / reads / unrelated) ---"
 

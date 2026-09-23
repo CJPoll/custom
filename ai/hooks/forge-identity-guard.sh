@@ -125,6 +125,11 @@ fi
 #   * it is ended directly by `;`, `&&` or a newline;
 #   * the VERY NEXT statement's command word — after simple `NAME=val` prefixes —
 #     is `$W`, `"$W"`, `${W}` or `"${W}"`, followed by `git`.
+# Whitespace INSIDE a statement is matched as [ \t] only: a newline ends a
+# statement, so `W=…⏎W=/usr/bin/env⏎"$W" git push` (a reassignment, not a
+# prefix) and `"$W"⏎git push` (the wrapper alone, then a plain push) are never
+# read as one statement. A newline is accepted only as the separator itself
+# and as blank lines around it.
 # Only that one use is rewritten to the wrapper form. A first statement always
 # runs in the shell the next statement runs in, so W is set there; nothing sits
 # between them to unset, shadow or re-scope it. Every other shape — a use later
@@ -137,16 +142,16 @@ bless_wrapper_var() {
     END {
       s = src
       VAL = "(~|[$]HOME|[$][{]HOME[}])?([A-Za-z0-9._-]*/)*(gh|glab)-athena"
-      if (!match(s, "^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=")) { printf "%s", s; exit }
+      if (!match(s, "^[[:space:]]*(export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=")) { printf "%s", s; exit }
       head = substr(s, 1, RLENGTH); rest = substr(s, RLENGTH + 1)
-      name = head; sub(/=$/, "", name); sub(/^[[:space:]]*(export[[:space:]]+)?/, "", name)
+      name = head; sub(/=$/, "", name); sub(/^[[:space:]]*(export[ \t]+)?/, "", name)
       q = ""; if (substr(rest, 1, 1) == "\"") q = "\""
-      if (!match(rest, "^" q VAL q "[[:space:]]*(;|&&|\n)[[:space:]]*")) { printf "%s", s; exit }
+      if (!match(rest, "^" q VAL q "[ \t]*(;|&&|\n)[[:space:]]*")) { printf "%s", s; exit }
       head = head substr(rest, 1, RLENGTH); rest = substr(rest, RLENGTH + 1)
-      if (match(rest, "^([A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9._/:=-]*[[:space:]]+)+")) {
+      if (match(rest, "^([A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9._/:=-]*[ \t]+)+")) {
         head = head substr(rest, 1, RLENGTH); rest = substr(rest, RLENGTH + 1)
       }
-      if (!match(rest, "^(\"[$]" name "\"|\"[$][{]" name "[}]\"|[$]" name "|[$][{]" name "[}])[[:space:]]+git[[:space:]]")) { printf "%s", s; exit }
+      if (!match(rest, "^(\"[$]" name "\"|\"[$][{]" name "[}]\"|[$]" name "|[$][{]" name "[}])[ \t]+git[ \t]")) { printf "%s", s; exit }
       printf "%s", head "FORGE_ATHENA_GIT " substr(rest, RLENGTH + 1)
     }'
 }
