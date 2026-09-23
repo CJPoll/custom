@@ -107,12 +107,121 @@ if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])glab[[:space:]]+([^;|&]* )?
 fi
 
 # ---- Plain `git push` to a github.com remote (DND-389) ----------------------
+# DND-397: before matching, drop text that only MENTIONS a push. mask_data
+# removes heredoc bodies and replaces multi-word quoted strings with a
+# placeholder, so `python3 - <<'EOF' … git push … EOF`, `grep -n "git push" f`
+# and `echo 'git push'` no longer warn. It never hides text a shell will run:
+#   * If the command invokes a shell or evaluator anywhere (sh, bash, zsh,
+#     dash, ksh, fish, su, eval, ssh, watch, source — bare or path-qualified,
+#     outside quotes and heredoc bodies), NOTHING is masked. `bash -c '…'`,
+#     `bash <<EOF`, `… | sh` and `eval "…"` are scanned exactly as before.
+#   * A double-quoted string containing `$(` or a backtick is RE-SCANNED with
+#     these same rules, not masked: its command substitution runs. So
+#     `echo "$(git push …)"` still warns, while the heredoc inside
+#     `git commit -m "$(cat <<'EOF' … EOF)"` is still dropped.
+#   * An unquoted-delimiter heredoc body containing `$(` or a backtick is kept:
+#     its command substitution runs.
+#   * A ONE-word quoted string is kept (`"origin"`, `-C "/dir"`, `"$W"`), so a
+#     quoted remote, dir or command word still resolves.
+#   * An unterminated quote or heredoc is kept as-is.
+# Residual (named, not hidden): a push a NON-shell interpreter spawns from its
+# own quoted code or heredoc (`python3 -c "os.system('git push')"`) is not
+# seen. It was only seen before by accident of the dequote, and
+# `subprocess.run(['git','push'])` never was.
+mask_data() {
+  awk '
+    function shellword(w,   b) {
+      b = w; sub(/.*\//, "", b)
+      return b ~ /^(sh|bash|zsh|dash|ksh|fish|su|eval|ssh|watch|source)$/
+    }
+    # flush(w): end an unquoted word; a shell word anywhere sets `shell`.
+    function flush(w) { if (w != "" && shellword(w)) shell = 1; return "" }
+    function quoted(body, q) {
+      if (body !~ /[ \t\n]/) return q body q
+      # A double-quoted $(...) or `...` runs: re-scan it with the same rules.
+      if (q == "\"" && (index(body, "$(") || index(body, "`"))) return q mask(body) q
+      return q "FORGE_QUOTED_TEXT" q
+    }
+    function mask(s,   n, i, c, t, j, d, body, k, strip, dl, qd, h, e, line, cmp, found, out, w, nhd, hd, hs, hq) {
+      n = length(s); i = 1; out = ""; w = ""; nhd = 0
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == "\\") { t = substr(s, i, 2); out = out t; w = w t; i += 2; continue }
+        if (c == "\047") {
+          j = index(substr(s, i + 1), "\047")
+          if (j == 0) { out = out substr(s, i); break }
+          body = substr(s, i + 1, j - 1); out = out quoted(body, "\047"); w = w body
+          i += j + 1; continue
+        }
+        if (c == "\"") {
+          j = i + 1
+          while (j <= n) { d = substr(s, j, 1); if (d == "\\") { j += 2; continue }; if (d == "\"") break; j++ }
+          if (j > n) { out = out substr(s, i); break }
+          body = substr(s, i + 1, j - i - 1); out = out quoted(body, "\""); w = w body
+          i = j + 1; continue
+        }
+        if (substr(s, i, 3) == "<<<") { w = flush(w); out = out "<<<"; i += 3; continue }
+        if (substr(s, i, 2) == "<<") {
+          w = flush(w); k = i + 2; strip = 0
+          if (substr(s, k, 1) == "-") { strip = 1; k++ }
+          while (substr(s, k, 1) == " " || substr(s, k, 1) == "\t") k++
+          dl = ""; qd = 0
+          while (k <= n) {
+            d = substr(s, k, 1)
+            if (d ~ /[ \t\n;&|()<>]/) break
+            if (d == "\047" || d == "\"" || d == "\\") qd = 1; else dl = dl d
+            k++
+          }
+          if (dl != "") { nhd++; hd[nhd] = dl; hs[nhd] = strip; hq[nhd] = qd }
+          out = out substr(s, i, k - i); i = k; continue
+        }
+        if (c == "\n") {
+          w = flush(w); out = out c; i++
+          for (h = 1; h <= nhd; h++) {
+            body = ""; found = 0
+            while (i <= n) {
+              e = index(substr(s, i), "\n")
+              if (e == 0) { line = substr(s, i); i = n + 1 } else { line = substr(s, i, e - 1); i += e }
+              cmp = line; if (hs[h]) sub(/^\t+/, "", cmp)
+              if (cmp == hd[h]) { found = 1; break }
+              body = body line "\n"
+            }
+            if (!found) { out = out body; continue }   # unterminated: keep
+            if (!hq[h] && (index(body, "$(") || index(body, "`"))) out = out body
+            out = out line "\n"
+          }
+          nhd = 0; continue
+        }
+        if (c ~ /[ \t;&|()]/) { w = flush(w); out = out c; i++; continue }
+        out = out c; w = w c; i++
+      }
+      w = flush(w)
+      return out
+    }
+    { src = src (NR > 1 ? "\n" : "") $0 }
+    END { shell = 0; m = mask(src); printf "%s", (shell ? src : m) }'
+}
+
+# wrapper_vars: the names assigned a wrapper path (`W=~/…/glab-athena`,
+# `export W="$HOME/…/gh-athena"`) whose LAST assignment in the command is still
+# a wrapper, one per line. Reads GFLAT, which is already dequoted.
+wrapper_vars() {
+  printf '%s' "$GFLAT" | grep -Eo '(^|[[:space:];&|(])[A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|)]*' \
+    | sed -E 's#^[[:space:];&|(]##' | awk -F= '
+      { v = substr($0, length($1) + 2); last[$1] = (v ~ /(^|\/)(gh|glab)-athena$/) }
+      END { for (k in last) if (last[k]) print k }'
+}
+
 # Dequote (as forge-auth-guard does) so quoting cannot split the pattern, and
 # mask the wrapper forms `gh-athena git` / `glab-athena git` first so they are
-# never matched.
+# never matched. DND-397: `$W git` / `${W} git` count as the wrapper form too
+# when W is a wrapper_vars name.
 # Newlines become `;` here (not spaces, as in FLAT): a push's arguments end at
 # the end of its line, so `git push<NL>echo done` never reads `echo` as a remote.
-GFLAT=$(printf '%s' "$CMD" | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g')
+GFLAT=$(printf '%s' "$CMD" | mask_data | tr '\n\t' '; ' | tr -d "'\"\\\\" | sed -E 's#(gh|glab)-athena[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\2#g')
+for _v in $(wrapper_vars); do
+  GFLAT=$(printf '%s' "$GFLAT" | sed -E "s#\\\$(${_v}|\\{${_v}\\})[[:space:]]+git([[:space:]])#FORGE_ATHENA_GIT\\2#g")
+done
 # `git`, bare or path-qualified, then only GLOBAL options (-C/-c take a value),
 # then `push`. `git commit -m "push"` does not match: `commit` is not an option.
 GIT_PUSH_RE='(^|[[:space:];&|(/])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:];&|]+|--?[^[:space:];&|]+))*[[:space:]]+push([[:space:]]|$|[;&|)])'

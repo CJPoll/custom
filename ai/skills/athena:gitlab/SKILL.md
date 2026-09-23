@@ -130,9 +130,13 @@ glab api 'projects/:id/events?action=pushed&per_page=20' \
       | .author.username+" "+.push_data.ref+" "+.push_data.commit_to' | head -n1
 ```
 
-It must print `athena-amby <branch> <your head SHA>`. Any other author, or no
-event for your ref and SHA, means the push did not go out as Athena. Handle it,
-and a refusal, by **athena:github** → *When a forge write can't be done as
+It must print `athena-amby <branch> <your head SHA>`. Any other author means the
+push did not go out as Athena. The events API lags a push by a few seconds, so
+**no event for your ref and SHA counts as a failure only after re-reading for
+~20s**, sleeping between reads. `ai/bin/push-actor-check <branch>` does that
+bounded re-read and exits 0 (Athena), 1 (another author), 3 (could not read
+the API: not evidence either way) or 4 (no event in the window). Handle a 1, a
+4, and a refusal by **athena:github** → *When a forge write can't be done as
 Athena*.
 
 ## Relationship to the fleet agents

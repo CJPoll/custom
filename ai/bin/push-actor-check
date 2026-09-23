@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+#
+# push-actor-check — after an agent push, confirm the forge recorded it as
+# Athena, re-reading for a bounded window because the events API lags.
+#
+# athena:github / athena:gitlab -> "Pushing as Athena" end with an actor check:
+# the push must show up as athena-harness[bot] (GitHub activity API) or
+# athena-amby (GitLab events API). Those APIs can lag a push by several seconds,
+# so one read that finds "no event for your ref and SHA" is not yet a failure
+# (DND-397; measured on the DND-393 live probe). This re-reads for up to
+# --window seconds (default 20), SLEEPING --interval seconds between reads
+# (default 4, minimum 1) — bounded, never a spin (~/.claude/CLAUDE.md -> the
+# safe-wait rule).
+#
+# Reads only, on PLAIN gh/glab — the reads-stay-on-plain-CLI convention. It
+# never pushes, never mints a token, never touches auth.
+#
+# Exit codes — the three bad outcomes are distinct, because a failed read must
+# never look like an empty one (~/dev/custom/CLAUDE.md):
+#   0  the event for <branch> at <sha> has the Athena actor
+#   1  the event exists and the actor is NOT Athena (final; not re-read)
+#   2  usage / prerequisite error (bad args, not a repo, remote on neither forge)
+#   3  no read succeeded in the window: cannot tell who pushed
+#   4  reads succeeded but no event for <branch> at <sha> appeared in the window
+#
+# Test seams (self-test only): PUSH_ACTOR_CHECK_GH / PUSH_ACTOR_CHECK_GLAB name
+# a stub gh / glab. Self-test: ai/test/push-actor-check/self-test.sh.
+
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: push-actor-check [--remote NAME] [--sha SHA] [--window SECS] [--interval SECS] <branch>
+
+Run inside the repo you pushed from. Confirms the forge recorded the push of
+<branch> at <sha> (default: HEAD) as Athena: athena-harness[bot] on github.com,
+athena-amby on gitlab.com. The forge is read from the push URL of --remote
+(default: origin).
+
+The events API lags, so an absent event is re-read every --interval seconds
+(default 4, min 1) for up to --window seconds (default 20, max 300) before it
+counts as a failure.
+
+Exit: 0 Athena · 1 another actor · 2 usage · 3 could not read · 4 no event in window
+EOF
+}
+
+die_usage() { printf 'push-actor-check: %s\nFix: %s\n' "$1" "$2" >&2; exit 2; }
+
+REMOTE=origin SHA="" WINDOW=20 INTERVAL=4 BRANCH=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --remote) REMOTE=${2:-}; shift 2 || die_usage "--remote needs a value" "pass --remote <name>" ;;
+    --sha) SHA=${2:-}; shift 2 || die_usage "--sha needs a value" "pass --sha <40-hex sha>" ;;
+    --window) WINDOW=${2:-}; shift 2 || die_usage "--window needs a value" "pass --window <seconds>" ;;
+    --interval) INTERVAL=${2:-}; shift 2 || die_usage "--interval needs a value" "pass --interval <seconds>" ;;
+    -*) die_usage "unknown option '$1'" "see push-actor-check --help" ;;
+    *) [ -z "${BRANCH}" ] || die_usage "more than one branch given" "pass exactly one <branch>"; BRANCH=$1; shift ;;
+  esac
+done
+
+[ -n "${BRANCH}" ] || die_usage "no branch given" "pass the branch you pushed: push-actor-check <branch>"
+BRANCH=${BRANCH#refs/heads/}
+case "${WINDOW}" in ''|*[!0-9]*) die_usage "--window '${WINDOW}' is not a whole number" "pass --window 0..300" ;; esac
+case "${INTERVAL}" in ''|*[!0-9]*) die_usage "--interval '${INTERVAL}' is not a whole number" "pass --interval 1..60" ;; esac
+[ "${WINDOW}" -le 300 ] || die_usage "--window ${WINDOW} exceeds the 300s cap" "pass --window 300 or less"
+[ "${INTERVAL}" -ge 1 ] && [ "${INTERVAL}" -le 60 ] || die_usage "--interval ${INTERVAL} is outside 1..60 (below 1 would spin)" "pass --interval 1..60"
+command -v jq >/dev/null 2>&1 || die_usage "jq is required" "install jq"
+
+git rev-parse --git-dir >/dev/null 2>&1 || die_usage "not inside a git repository" "cd into the repo you pushed from"
+if [ -z "${SHA}" ]; then
+  SHA=$(git rev-parse HEAD 2>/dev/null) || die_usage "cannot resolve HEAD" "pass --sha <the pushed sha>"
+fi
+printf '%s' "${SHA}" | grep -Eqx '[0-9a-f]{40}' || die_usage "--sha '${SHA}' is not a full 40-hex sha" "pass the full sha: git rev-parse <ref>"
+
+URL=$(git remote get-url --push "${REMOTE}" 2>/dev/null) || die_usage "no remote '${REMOTE}'" "pass --remote <name> for the remote you pushed to"
+
+# host + path from https://host/p, ssh://user@host[:port]/p, or user@host:p.
+case "${URL}" in
+  *://*) HP=${URL#*://}; HOST=${HP%%/*}; HOST=${HOST##*@}; HOST=${HOST%%:*}; PATH_=${HP#*/} ;;
+  *:*)   HOST=${URL%%:*}; HOST=${HOST##*@}; PATH_=${URL#*:} ;;
+  *)     HOST=""; PATH_="" ;;
+esac
+HOST=$(printf '%s' "${HOST}" | tr 'A-Z' 'a-z')
+PATH_=${PATH_#/}; PATH_=${PATH_%/}; PATH_=${PATH_%.git}
+
+GH_BIN=${PUSH_ACTOR_CHECK_GH:-gh}
+GLAB_BIN=${PUSH_ACTOR_CHECK_GLAB:-glab}
+
+case "${HOST}" in
+  github.com)
+    FORGE=github; EXPECT='athena-harness[bot]'
+    read_events() { "${GH_BIN}" api "repos/${PATH_}/activity?ref=refs/heads/${BRANCH}&per_page=30"; }
+    ACTOR_JQ='if type != "array" then error("not an array") else
+      first(.[] | select(.ref == ("refs/heads/" + $b) and .after == $s) | .actor.login) // "" end' ;;
+  gitlab.com)
+    FORGE=gitlab; EXPECT='athena-amby'
+    ENC=$(printf '%s' "${PATH_}" | sed 's#/#%2F#g')
+    read_events() { "${GLAB_BIN}" api "projects/${ENC}/events?action=pushed&per_page=50"; }
+    ACTOR_JQ='if type != "array" then error("not an array") else
+      first(.[] | select(.push_data.ref == $b and .push_data.commit_to == $s) | .author.username) // "" end' ;;
+  *)
+    die_usage "remote '${REMOTE}' (${URL}) is on neither github.com nor gitlab.com" \
+      "run this only for a push to github.com or gitlab.com; pass --remote for the right remote" ;;
+esac
+
+START=$(date +%s)
+MAX_READS=$(( WINDOW / INTERVAL + 2 ))
+READS=0 OK_READS=0 LAST_ERR=""
+while :; do
+  READS=$((READS + 1))
+  if RAW=$(read_events 2>&1) && ACTOR=$(printf '%s' "${RAW}" | jq -r --arg b "${BRANCH}" --arg s "${SHA}" "${ACTOR_JQ}" 2>/dev/null); then
+    OK_READS=$((OK_READS + 1))
+    if [ -n "${ACTOR}" ]; then
+      if [ "${ACTOR}" = "${EXPECT}" ]; then
+        printf 'push-actor-check: %s %s %s pushed by %s (read %d)\n' "${FORGE}" "${BRANCH}" "${SHA}" "${ACTOR}" "${READS}"
+        exit 0
+      fi
+      printf 'push-actor-check: %s %s %s was pushed by %s, not %s.\nFix: this push did not go out as Athena. Stop and escalate to your admiral with the push command, this output and the intent (athena:github -> "When a forge write can'"'"'t be done as Athena"). Do not re-push as the owner.\n' \
+        "${FORGE}" "${BRANCH}" "${SHA}" "${ACTOR}" "${EXPECT}" >&2
+      exit 1
+    fi
+  else
+    LAST_ERR=$(printf '%s' "${RAW:-}" | head -c 300)
+  fi
+  NOW=$(date +%s)
+  if [ $((NOW - START)) -ge "${WINDOW}" ] || [ "${READS}" -ge "${MAX_READS}" ]; then break; fi
+  sleep "${INTERVAL}"
+done
+
+if [ "${OK_READS}" -eq 0 ]; then
+  printf 'push-actor-check: could not read the %s events API in %d read(s) over %ds; cannot tell who pushed %s %s. Last error: %s\nFix: check the read works by hand (plain gh/glab, e.g. `%s`); if it is an auth error, escalate to your admiral — never run a login/refresh. This is NOT evidence the push was or was not Athena.\n' \
+    "${FORGE}" "${READS}" "${WINDOW}" "${BRANCH}" "${SHA}" "${LAST_ERR:-none}" \
+    "$([ "${FORGE}" = github ] && echo "gh api repos/${PATH_}/activity?per_page=3" || echo "glab api projects/${ENC}/events?action=pushed&per_page=5")" >&2
+  exit 3
+fi
+printf 'push-actor-check: no event for %s %s on %s after %d read(s) over %ds.\nFix: confirm the push succeeded and the sha is the one pushed (git ls-remote %s refs/heads/%s). If it did, re-run with a longer --window; if the event never appears, treat the push as not verified as Athena and escalate to your admiral.\n' \
+  "${BRANCH}" "${SHA}" "${FORGE}" "${READS}" "${WINDOW}" "${REMOTE}" "${BRANCH}" >&2
+exit 4

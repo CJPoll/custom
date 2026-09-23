@@ -196,6 +196,110 @@ run "$(bash_json_cwd "$TMP/gl" 'GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/glab-a
 check "G8. the documented glab-athena push form -> allow" allow
 
 echo
+echo "--- DND-397: text that only MENTIONS a push must not warn ---"
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "python3 - <<'EOF'\nimport subprocess\nprint('run git push origin x later')\nEOF")")"
+check "Q1. python3 heredoc whose body says git push (github cwd)" allow
+
+run "$(bash_json_cwd "$TMP/norepo" "$(printf "python3 - <<'EOF'\nprint(\"git push\")\nEOF")")"
+check "Q2. python3 heredoc body, no repo (was the could-not-resolve noise)" allow
+
+run "$(bash_json_cwd "$TMP/norepo" "$(printf "cat > notes.md <<EOF\nthen git push origin main\nEOF")")"
+check "Q3. unquoted-delimiter heredoc body with no expansion" allow
+
+run "$(bash_json_cwd "$TMP/norepo" "$(printf "cat > notes.md <<-'END'\n\tgit push origin main\n\tEND\necho ok")")"
+check "Q4. <<- heredoc with a tab-indented delimiter" allow
+
+run "$(bash_json_cwd "$TMP/norepo" 'grep -n "git push" notes.md')"
+check "Q5. grep -n \"git push\" <file> (no repo)" allow
+run "$(bash_json_cwd "$TMP/gh_scp" 'grep -n "git push origin" scripts/wt')"
+check "Q5b. grep -n \"git push origin\" <file> (github cwd)" allow
+
+run "$(bash_json_cwd "$TMP/gh_scp" "echo 'git push'")"
+check "Q6. echo 'git push'" allow
+
+run "$(bash_json_cwd "$TMP/gh_scp" "rg -n 'git -C x push' . && grep -c \"git push origin\" f")"
+check "Q7. several quoted mentions in one command" allow
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "git commit -q -m \"\$(cat <<'EOF'\nDND-1: then git push origin main\nEOF\n)\"")")"
+check "Q8. commit message heredoc inside \"\$(cat <<'EOF' … EOF)\"" allow
+
+echo
+echo "--- DND-397: a wrapper invoked through a shell variable must not warn ---"
+
+run "$(bash_json_cwd "$TMP/gl" 'W=~/dev/custom/ai/bin/glab-athena; "$W" git push origin x')"
+check "V1. W=glab-athena; \"\$W\" git push" allow
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena; "$W" git push origin x')"
+check "V2. W=gh-athena; \"\$W\" git push" allow
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena; $W git push origin x')"
+check "V3. unquoted \$W git push" allow
+
+run "$(bash_json_cwd "$TMP/gl" 'W="$HOME/dev/custom/ai/bin/glab-athena" && GIT_TERMINAL_PROMPT=0 "${W}" git push -u origin x')"
+check "V4. \${W} with a quoted \$HOME assignment" allow
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'export GHA=~/dev/custom/ai/bin/gh-athena; "$GHA" git -c credential.helper= push origin x')"
+check "V5. export-assigned var, global options before push" allow
+
+echo
+echo "--- DND-397: a REAL plain push must still warn ---"
+
+run "$(bash_json_cwd "$TMP/gh_scp" "bash -c 'git push origin HEAD'")"
+check_text "R1. bash -c '<push>' still warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/norepo" "sh -c \"cd $TMP/gh_scp && git push\"")"
+check_text "R2. sh -c \"cd <gh repo> && git push\" still warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "bash <<'EOF'\ngit push origin HEAD\nEOF")")"
+check_text "R3. heredoc fed to bash still warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "cat <<'EOF' | sh\ngit push origin HEAD\nEOF")")"
+check_text "R4. heredoc piped into sh still warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'python3 - <<EOF\nx = \"$(git push origin HEAD)\"\nEOF')")"
+check_text "R5. unquoted-delimiter heredoc whose body runs \$(git push) still warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'echo "$(git push origin HEAD)"')"
+check_text "R6. \$(git push) inside a double-quoted string still warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'eval "git push origin HEAD"')"
+check_text "R7. eval \"git push ...\" still warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "echo 'git push' ; git push origin HEAD")"
+check_text "R8. a quoted mention AND a real push -> the real one warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "cat > f <<'EOF'\ngit push\nEOF\ngit push origin HEAD")")"
+check_text "R9. a real push AFTER a heredoc's terminator still warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'git push "origin" HEAD')"
+check_text "R10. a quoted one-word remote still resolves" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/norepo" "git -C \"$TMP/gh_scp\" push origin HEAD")"
+check_text "R11. a quoted -C dir still resolves" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena; git push origin HEAD')"
+check_text "R12. a wrapper var is assigned but the push is plain -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'X=~/dev/custom/ai/bin/gh-athena; "$W" git push origin HEAD')"
+check_text "R13. \$W was never assigned a wrapper -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena; W=/usr/bin/env; "$W" git push origin HEAD')"
+check_text "R14. \$W reassigned away from the wrapper -> warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gl" "zsh -c 'git push origin HEAD'")"
+check_text "R15. zsh -c '<push>' to gitlab still warns" 'to a gitlab.com remote'
+
+run "$(bash_json_cwd "$TMP/norepo" "$(printf "python3 - <<'EOF'\nprint(1)\nEOF\ngit push origin HEAD")")"
+check_text "R16. unresolvable real push after a heredoc keeps DND-389's warn" 'could not resolve its remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "echo \"\$(bash -c 'git push origin HEAD')\"")"
+check_text "R17. a shell nested inside \"\$(…)\" -> nothing masked, still warns" 'to a github.com remote'
+
+run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "git commit -m \"\$(cat <<'EOF'\nmsg\nEOF\n)\" && git push origin HEAD")")"
+check_text "R18. a commit-message heredoc then a real push -> warns" 'to a github.com remote'
+
+echo
 echo "--- MUST-NOT-WARN cases (wrapper / reads / unrelated) ---"
 
 run "$(bash_json_cwd "$TMP/gh_scp" '~/dev/custom/ai/bin/gh-athena git push origin HEAD')"
