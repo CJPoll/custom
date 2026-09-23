@@ -53,8 +53,17 @@
 # THERE IS NO SUPPRESSION MARKER, on purpose: an inline "ignore this line"
 # comment is writable by the same diff it would excuse. Convert the site.
 #
-# A FILE THAT CANNOT BE READ IS A FAILURE, NOT A PASS: "found nothing" and
-# "could not look" must never print the same line.
+# A FILE THAT CANNOT BE READ -- or whose heredoc never closes, so its tail was
+# skipped as data -- IS A FAILURE, NOT A PASS: "found nothing" and "could not
+# look" must never print the same line.
+#
+# KNOWN LIMITS (documented, not hidden):
+#   * Quoting is tracked per line. A quoted string spanning lines (a long
+#     `bash -c '...'`) resets at each newline, so a pipe inside its later lines
+#     is scanned as code (a false positive, fixed by rewording) and a real pipe
+#     after an odd quote on the same line could be missed.
+#   * Pipefail inheritance is ONE level: a file `source`d by a pipefail file is
+#     held to the rule; a lib sourced only by such a lib is not.
 #
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 
@@ -102,7 +111,7 @@ end
 
 # `set -o pipefail`, `set -euo pipefail`, `set -eu -o pipefail`, and friends,
 # on a non-comment line. `set +o pipefail` (turning it OFF) does not match.
-PIPEFAIL_RE = /^\s*set\s+(?:[-+][A-Za-z]+\s+)*-[A-Za-z]*o\s+pipefail\b/.freeze
+PIPEFAIL_RE = /^\s*set\s+(?:(?:[-+]o\s+[a-z]+|[-+][A-Za-z]+)\s+)*-[A-Za-z]*o\s+pipefail\b/.freeze
 
 def sets_pipefail?(text)
   text.each_line.any? { |l| l =~ PIPEFAIL_RE }
@@ -157,13 +166,20 @@ def quiet_grep?(rest)
   false
 end
 
-# Offsets of the unquoted pipes in one line (the command follows each offset).
+HEREDOC_AT = /\A<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.freeze
+
+# One line, scanned in CODE context only. Returns [pipes, heredocs]:
+#   pipes    -- offsets of unquoted pipes (the command follows each offset)
+#   heredocs -- [[strip_tabs?, delimiter], ...] for each `<<WORD` / `<<-WORD`
+#               opened in code (never one inside quotes or a comment, which
+#               would otherwise swallow the rest of the file as "data")
 # Quote-aware on a single line: '...' and "..." are text, except that `$( ... )`
 # inside double quotes opens a new code context. A `#` at a word start in code
 # ends the line.
-def unquoted_pipes(line)
+def scan_line(line)
   stack = [:code] # :code, :dq, :sq, :subst (a $( ... ) code context)
   pipes = []
+  heredocs = []
   i = 0
   prev = nil
   while i < line.size
@@ -193,6 +209,15 @@ def unquoted_pipes(line)
       elsif c == "$" && line[i + 1] == "("
         stack.push(:subst)
         i += 1
+      elsif c == "<" && line[i + 1] == "<"
+        if line[i + 2] == "<"
+          i += 2 # a here-STRING, not a heredoc
+        elsif (m = line[i..].match(HEREDOC_AT))
+          heredocs << [m[1] == "-", m[3]]
+          i += m[0].size - 1
+        else
+          i += 1
+        end
       elsif c == "(" && top == :subst
         stack.push(:subst)
       elsif c == ")" && top == :subst
@@ -211,27 +236,29 @@ def unquoted_pipes(line)
     prev = c
     i += 1
   end
-  pipes
+  [pipes, heredocs]
 end
 
-HEREDOC_RE = /<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.freeze
-
-# [[lineno, line], ...] for every offending line of text.
-def offending_lines(text)
+# [hits, unterminated] for a file's text. hits is [[lineno, line], ...];
+# unterminated is the delimiter of a heredoc still open at end of file (nil
+# when every heredoc closed). An open heredoc means every line after it was
+# skipped as data, so the caller must treat it as "could not scan", never as
+# clean.
+def scan_text(text)
   hits = []
-  heredoc_end = nil
-  heredoc_strip = false
+  open_docs = [] # [[strip_tabs?, delimiter], ...] still to be closed, in order
   pending_pipe = false # previous code line ended in a bare `|`
   text.each_line.with_index(1) do |raw, n|
     line = raw.chomp
-    if heredoc_end
-      body = heredoc_strip ? line.sub(/\A\t+/, "") : line
-      heredoc_end = nil if body == heredoc_end
+    unless open_docs.empty?
+      strip, word = open_docs.first
+      body = strip ? line.sub(/\A\t+/, "") : line
+      open_docs.shift if body == word
       next
     end
     next if line =~ /\A\s*#/
 
-    pipes = unquoted_pipes(line)
+    pipes, heredocs = scan_line(line)
     hit = pending_pipe && quiet_grep?(line)
     hit ||= pipes.any? { |p| quiet_grep?(line[(p + 1)..]) }
     hits << [n, line] if hit
@@ -239,14 +266,15 @@ def offending_lines(text)
     stripped = line.rstrip.sub(/\\\z/, "").rstrip
     pending_pipe = !pipes.empty? && pipes.last == stripped.size - 1
 
-    # A heredoc (not a here-STRING `<<<`) starts a body that is data.
-    m = line.gsub("<<<", "   ").match(HEREDOC_RE)
-    if m
-      heredoc_strip = m[1] == "-"
-      heredoc_end = m[3]
-    end
+    # A heredoc opened in code starts a body that is data (a fixture script a
+    # test writes out), up to its delimiter line.
+    open_docs.concat(heredocs)
   end
-  hits
+  [hits, open_docs.first&.last]
+end
+
+def offending_lines(text)
+  scan_text(text).first
 end
 
 # ---------------------------------------------------------------------------
@@ -295,8 +323,11 @@ def scan(root)
     direct.key?(rel) || inherited_names.include?(File.basename(rel))
   end
 
-  findings = pipefail.sort.flat_map do |rel, text|
-    offending_lines(text).map { |(n, line)| [rel, n, line] }
+  findings = []
+  pipefail.sort.each do |rel, text|
+    hits, open_doc = scan_text(text)
+    hits.each { |(n, line)| findings << [rel, n, line] }
+    unreadable << [rel, "heredoc <<#{open_doc} never closes; the rest of the file was not scanned"] if open_doc
   end
   { findings: findings, unreadable: unreadable, shell: shells.size, pipefail: pipefail.size }
 end
@@ -304,10 +335,13 @@ end
 def run_check(root = REPO)
   r = scan(root)
   unless r[:unreadable].empty?
-    warn "check-pipefail-grep: FAILED -- could not read #{r[:unreadable].size} file(s); " \
-         "a file never read is not a file found clean:"
+    warn "check-pipefail-grep: FAILED -- could not read or fully scan " \
+         "#{r[:unreadable].size} file(s); a file never read is not a file found clean:"
     r[:unreadable].each { |(rel, why)| warn "  - #{rel}: #{why}" }
-    warn "  Fix: make each file readable (permissions, a broken checkout) and re-run."
+    warn "  Fix: make each file readable (permissions, a broken checkout); for an " \
+         "unclosed heredoc, close it with its delimiter on a line of its own (or, " \
+         "if the scanner misread a `<<WORD` as a heredoc, repair scan_line in " \
+         "ai/bin/check-pipefail-grep) and re-run."
     return 1
   end
   if r[:shell].zero? || r[:pipefail].zero?
@@ -363,6 +397,9 @@ def run_self_test
     ["trailing comment not flagged", "grep -q x \"$f\" # not printf | grep -q\n", []],
     ["single-quoted text not flagged", "ok 'never a printf | grep -q pipe'\n", []],
     ["double-quoted text not flagged", "ok \"never a printf | grep -q pipe\"\n", []],
+    ["quoted <<'EOF' is not a heredoc", "check \"cat <<'EOF' | x\"\ncmd | grep -q x\n", [2]],
+    ["commented <<EOF is not a heredoc", "grep -q x \"$f\"  # see <<EOF\ncmd | grep -q x\n", [2]],
+    ["<<- heredoc closes on a tab-indented delimiter", "cat <<-EOF\n\tprintf x | grep -q x\n\tEOF\ncmd | grep -q x\n", [4]],
     ["heredoc body not flagged", "cat >f <<'EOF'\nprintf x | grep -q x\nEOF\ngrep -q x f\n", []],
     ["line after heredoc still scanned", "cat >f <<EOF\nhi\nEOF\ncmd | grep -q x\n", [4]],
   ]
@@ -374,7 +411,8 @@ def run_self_test
   pf_cases = [
     ["set -euo pipefail", true], ["set -o pipefail", true], ["  set -uo pipefail", true],
     ["set -eu -o pipefail", true], ["set +o pipefail", false], ["# set -o pipefail", false],
-    ["set -e", false],
+    ["set -e", false], ["set -o errexit -o pipefail", true],
+    ["set -e -o nounset -o pipefail", true],
   ]
   pf_cases.each do |(line, want)|
     got = sets_pipefail?("#{line}\n")
@@ -408,6 +446,11 @@ def run_self_test
     if run_check_quiet(dir) != 0
       fail_case.call("run_check on a clean fixture tree", "did not exit 0")
     end
+    w.call("scripts/open.sh", "#!/bin/bash\nset -o pipefail\ncat <<EOF\nnever closed\n")
+    if run_check_quiet(dir) != 1
+      fail_case.call("an unclosed heredoc", "read as clean instead of 'could not scan'")
+    end
+    FileUtils.rm_f(File.join(dir, "scripts/open.sh"))
     FileUtils.rm_f(File.join(dir, "scripts/clean"))
     if run_check_quiet(dir) != 1
       fail_case.call("zero pipefail files", "read as clean instead of a broken scan")
@@ -433,7 +476,9 @@ def run_self_test
     File.chmod(0o755, repro)
     out, _st = Open3.capture2e("bash", repro)
     unless out.include?("rc=141") && out.include?("herestring_rc=0")
-      fail_case.call("141 reproduction", "expected rc=141 (pipe) and herestring_rc=0, got #{out.inspect}")
+      fail_case.call("141 reproduction", "expected rc=141 (pipe) and herestring_rc=0, got #{out.inspect} " \
+                     "(an rc=1 here means SIGPIPE is IGNORED in this environment, so " \
+                     "the writer got EPIPE instead; run the gate with SIGPIPE at default)")
     end
     unless offending_lines(File.read(repro)).map(&:first) == [4]
       fail_case.call("141 reproduction is flagged", "the reproducing pipe (line 4) was not flagged")
@@ -443,7 +488,7 @@ def run_self_test
   end
 
   if ok
-    puts "check-pipefail-grep: self-test OK (#{line_cases.size + pf_cases.size + 6} cases)"
+    puts "check-pipefail-grep: self-test OK (#{line_cases.size + pf_cases.size + 7} cases)"
     0
   else
     warn "check-pipefail-grep: self-test FAILED"
