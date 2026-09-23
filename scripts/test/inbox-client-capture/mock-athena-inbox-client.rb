@@ -20,6 +20,10 @@
 #   MOCK_TOKEN      embedded in the dump, so redaction can be asserted
 #   MOCK_LINE       the line number in the top frame (signature must ignore it)
 #   MOCK_STEP       the dump's current_step (default tls)
+#   MOCK_FLIGHT_LINES  flight-recorder lines in the dump (default 1); a large
+#                   value makes the dump the capture's largest file, so the
+#                   size cap truncates it -- and, the recorder coming before
+#                   the threads, cuts the frames (DND-334 verify case)
 
 mode = ENV.fetch("MOCK_MODE", "dump")
 dump_dir = ENV.fetch("MOCK_DUMP_DIR")
@@ -38,7 +42,9 @@ write_dump = lambda do
   body << "pid: #{Process.pid}\n"
   body << "current_step: #{step}\n"
   body << "socket:\n  (no active socket)\n"
-  body << "flight recorder (1 lines):\n  #{now.strftime('%Y-%m-%dT%H:%M:%S.000Z')} step #{step} begin auth=#{token}\n"
+  flight = ENV.fetch("MOCK_FLIGHT_LINES", "1").to_i
+  body << "flight recorder (#{flight} lines):\n  #{now.strftime('%Y-%m-%dT%H:%M:%S.000Z')} step #{step} begin auth=#{token}\n"
+  (flight - 1).times { |i| body << "  #{now.strftime('%Y-%m-%dT%H:%M:%S.000Z')} pad #{i} ................................................\n" }
   body << "threads (3):\n"
   body << "  thread 0x100 status=\"sleep\" name=nil\n"
   body << "    /home/x/athena-inbox-client.rb:#{line}:in `join'\n"

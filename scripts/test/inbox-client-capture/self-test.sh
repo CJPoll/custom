@@ -116,6 +116,24 @@ SIG1="$(field "${out}" signature)"
 if kill -0 "${M1}" 2>/dev/null && [ ! -e "${TMP}/m1.term" ]; then ok "capture never kills or signals TERM (restart is the caller's, after)"; else bad "capture never kills or signals TERM (restart is the caller's, after)" "mock gone or TERMed"; fi
 
 # ---------------------------------------------------------------------------
+printf '\nC-7  the summary facts the harness-alerts message reads (DND-334)\n'
+# shellcheck source=ai/skills/athena:inbox/lib/wedge.sh
+. "${SCRIPTS}/../ai/skills/athena:inbox/lib/wedge.sh"
+if grep -qx 'reconnecting_since: 0 (log start)' "${CAP}/capture.txt" && grep -qx 'connected_since: 0 (log start)' "${CAP}/capture.txt" \
+   && grep -q '^uptime_s: [0-9][0-9]*$' "${CAP}/capture.txt"; then
+  ok "the manifest records uptime and the cycle counts (C-1's log has no restart line: since log start)"
+else bad "the manifest records uptime and the cycle counts" "$(cat "${CAP}/capture.txt")"; fi
+CL="${TMP}/counts.log"
+{
+  printf '2026-09-23T09:00:00Z WARN reconnecting in 1.0s\n2026-09-23T09:00:02Z INFO connected to wss://x\n'
+  printf '2026-09-23T09:00:03Z SUPERVISOR client exited 143 after 9s; restart 1 in 1s\n'
+  printf '2026-09-23T09:00:05Z INFO reconnecting in 2.0s\n2026-09-23T09:00:06Z WARN reconnecting in 4.0s\n2026-09-23T09:00:09Z INFO connected to wss://x\n'
+} >"${CL}"
+if [ "$(wedge_cycle_counts "${CL}")" = "$(printf '2\t1\tlast restart')" ]; then ok "counts reset at the last supervisor restart line (any log level)"; else bad "counts reset at the last supervisor restart line" "$(wedge_cycle_counts "${CL}")"; fi
+if [ "$(wedge_cycle_counts "${TMP}/no-such.log")" = "$(printf 'n/a\tn/a\tno log')" ]; then ok "a missing log is n/a, never a measured 0"; else bad "a missing log is n/a, never 0" "$(wedge_cycle_counts "${TMP}/no-such.log")"; fi
+if [ "$(wedge_signature tls "$(wedge_frames "${CAP}/dump.txt")")" = "${SIG1}" ]; then ok "lib/wedge.sh recomputes the capture's own signature from its dump (one algorithm)"; else bad "lib/wedge.sh recomputes the capture's signature" "want ${SIG1}"; fi
+
+# ---------------------------------------------------------------------------
 printf '\nC-2  the signature: stable across line numbers, sensitive to the step\n'
 start_mock m2 MOCK_MODE=dump MOCK_LINE=9999; M2="${MOCK_PID}"
 SIG2="$(field "$("${CAPTURE}" "${M2}" --step tls 2>/dev/null)" signature)"
@@ -188,6 +206,24 @@ total="$(find "${CAPB}" -type f -printf '%s\n' | awk '{s+=$1} END {print s+0}')"
 if [ "${total}" -le 8000 ] && grep -q 'truncated by inbox-client-capture' "${CAPB}/log-tail.txt"; then ok "the size cap holds (${total} <= 8000) and the largest file carries the marker"; else bad "the size cap holds and the largest file carries the marker" "total=${total}"; fi
 if [ -s "${CAPB}/signature.txt" ] && [ -s "${CAPB}/capture.txt" ]; then ok "the signature and manifest survive the cap"; else bad "the signature and manifest survive the cap" "$(command ls -la "${CAPB}")"; fi
 printf '2026-09-23T09:00:00Z INFO step tcp_connect 30ms\n' > "${LOG}"
+# DND-334: a dump big enough to be capped loses its frames (the recorder comes
+# first and the cap keeps the head). The signature was taken BEFORE the cap, so
+# the attendant's verifier must still accept this REAL capture -- from the
+# frames signature.txt recorded -- rather than call it tampered.
+start_mock m6 MOCK_MODE=dump MOCK_FLIGHT_LINES=400; M6="${MOCK_PID}"
+out="$(ATHENA_INBOX_CAPTURE_MAX_BYTES=12000 "${CAPTURE}" "${M6}" --step tls 2>&1)"
+CAPD="$(field "${out}" dir)"
+if grep -qF 'truncated by inbox-client-capture' "${CAPD}/dump.txt" 2>/dev/null && ! grep -q 'with_deadline' "${CAPD}/dump.txt"; then
+  ok "the size cap truncated dump.txt and cut its frames (the case the verifier must survive)"
+else bad "the size cap truncated dump.txt and cut its frames" "$(command ls -la "${CAPD}" 2>&1 | tr '\n' '|')"; fi
+WF_REPO="$(cd -- "${SCRIPTS}/.." && pwd -P)"
+# shellcheck source=scripts/test/inbox-client-alert/wedge-fixture.bash
+. "${SCRIPTS}/test/inbox-client-alert/wedge-fixture.bash"
+V="$(ATHENA_INBOX_ROOT="${TMP}/inbox-root" "${SCRIPTS}/../ai/skills/athena:inbox-attend/bin/wedge-ticket-decide" \
+      --message "$(wf_make_message "${TMP}/msgs" "${CAPD}" "$(field "${out}" signature)")" --verify-only 2>&1)"
+if printf '%s\n' "${V}" | grep -qx 'decision	verified' && printf '%s\n' "${V}" | grep -q '^frames_from	signature.txt (dump.txt was truncated'; then
+  ok "a REAL capped capture still verifies, from signature.txt's frames, and says so"
+else bad "a real capped capture still verifies" "${V}"; fi
 
 # ---------------------------------------------------------------------------
 printf '\nC-5  identity: the supervisor'"'"'s ONE child, and exit 3 is distinct\n'

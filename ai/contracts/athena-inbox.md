@@ -2295,6 +2295,15 @@ also reports:
   dump status, so recurrence is visible without a ticket lookup. The capture
   happens BEFORE any restart: the supervisor's `*/5` watchdog judges the client
   wedged, captures it, and only then SIGTERMs it.
+  After the restart (or its decision not to signal a client that changed
+  identity mid-capture) it drops ONE message on the `custom` entry's
+  `harness-alerts` maildir (DND-334). Both sides of that conversation are
+  declared in the one `custom` entry, mirrored: `harness-alerts` (identity
+  `custom`, reads `to-custom`) and `harness-alerts-detector` (identity
+  `inbox-client-detector`, writes `to-custom`), because both parties run from
+  that repo. The message is untrusted like any other. The reader acts only on
+  what it recomputes from the capture directory named in `re:`, which must sit
+  directly in the client dump directory.
 - **`watchdog`** — the watchdog's two tools (the liveness library and
   `scripts/inbox-client-capture`) are present. Missing either, the supervisor
   keeps the client running, but a wedge is then restarted with no evidence (no

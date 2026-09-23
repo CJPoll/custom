@@ -266,6 +266,11 @@ fi
 #               fds, status, log tail, signature. It must FINISH before step 4.
 #   4. restart — only now SIGTERM the client (bounded wait, then SIGKILL); the
 #               owning supervisor sees it exit and relaunches it with backoff.
+#   5. alert  — (DND-334) inbox-client-alert drops ONE message on the local
+#               harness-alerts maildir, for the harness session to verify and
+#               file or increment the [wedge:<sig8>] ticket. AFTER the restart
+#               (or after the decision not to signal), bounded, and a failure
+#               is logged, never fatal.
 #
 # NEVER RESTART FIRST. On 2026-09-22 the wedged client was SIGTERM'd first and
 # the evidence of the wedge was destroyed; the root cause is still unknown.
@@ -286,10 +291,11 @@ fi
 # is not captured twice; a new wedge has a new last line because the restart
 # writes new ones.
 CAPTURE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)/inbox-client-capture"
+ALERT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)/inbox-client-alert"
 WATCHDOG_MARK="${STATE_DIR}/athena-inbox-client.watchdog"
 
 watchdog_pass() {
-  local v state step age detail line c out rc dir sig dump
+  local v state step age detail line c out rc dir="" sig dump
   if [ "$HAVE_LIVENESS" -ne 1 ]; then
     say "WATCHDOG: skipped — the liveness library is missing, so a wedge cannot be judged"
     return 0
@@ -347,9 +353,40 @@ watchdog_pass() {
   # still our ruby client. Anything else is logged and NOT signalled.
   if ! still_client "$c"; then
     say "WATCHDOG: client pid ${c} is no longer the supervised client after the capture; not signalling"
+    alert_capture "$dir"
     return 0
   fi
   restart_client "$c" "$line"
+  alert_capture "$dir"
+  return 0
+}
+
+# alert_capture <capture-dir> -- step 5 (DND-334): drop ONE harness-alerts
+# message for a capture that exists. It runs AFTER the restart -- or after the
+# decision NOT to signal a client that changed identity mid-capture (the capture
+# is still evidence of a wedge) -- so a slow or
+# failed send can neither delay the restart nor undo the capture; the send is
+# bounded by inbox-client-alert's own timeout. A failure is logged loudly with
+# its Fix: and the watchdog carries on -- the capture on disk is intact and the
+# message can be re-sent by hand. No capture (it failed, or the tool is
+# missing) means no message: there is nothing for the attendant to verify.
+alert_capture() {
+  local d="$1" out rc fixline
+  [ -n "$d" ] || return 0
+  if [ ! -x "$ALERT" ]; then
+    say "WATCHDOG: ALERT NOT SENT for ${d} — $ALERT is missing"
+    say "  Fix: restore scripts/inbox-client-alert (git), then send it by hand: scripts/inbox-client-alert ${d}"
+    return 0
+  fi
+  out="$("$ALERT" "$d" 9>&- 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    say "WATCHDOG: alert sent on harness-alerts ($(printf '%s\n' "$out" | awk -F'\t' '$1=="sent"{print $2}'))"
+  else
+    say "WATCHDOG: ALERT NOT SENT for ${d} (exit ${rc}): $(printf '%s' "$out" | grep -v -e '^  Fix:' -e '^note: ' | head -n 1)"
+    fixline="$(printf '%s\n' "$out" | grep -m1 '^  Fix:' | sed 's/^ *//')"
+    [ -n "$fixline" ] && say "  $fixline"
+  fi
+  printf '%s\n' "$out" | grep '^note: ' | while IFS= read -r n; do say "WATCHDOG: alert ${n}"; done
   return 0
 }
 

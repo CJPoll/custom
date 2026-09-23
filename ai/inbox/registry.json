@@ -2,6 +2,7 @@
   "_meta": {
     "about": "Committed source of truth for the Athena Inbox tenancy registry — which projects this machine expects to have a registry entry for, and what each entry says. The live entries are untracked machine-local files at $ATHENA_INBOX_ROOT/projects/<file> (0600, in a 0700 directory); `scripts/setup-inbox-registry --install` materialises them from here by MERGING (it touches only the files declared here and never the rest of the directory), and `ai/bin/check-inbox-registry` fails naming each entry that is missing or drifted. Without these three artifacts a clobbered entry is silent by contract — zero channels, exit 0 — and unrecoverable from git, the 2026-09-17 hook-clobber class. See ai/contracts/athena-inbox.md -> Provisioning, Tenancy: the registry. NO SECRET EVER GOES IN THIS FILE: the machine token lives at ~/.config/athena-inbox-client/config.json and nowhere else. `repo` is the realpath of the project's git common dir and MAY be written with a leading ~/ , which is expanded (and realpath'd, when the path exists) at install and check time.",
     "stale_after_s": "DND-316: per-channel staleness thresholds, set from MEASURED delivery gaps (client log, 2026-09-22/23): slack and flaky each went up to ~5.6h between deliveries while healthy, so the 1800s code default would print STALE most of the day and train every reader to ignore it. 21600 (6h) sits above the measured maximum. agent-messages is on-demand (zero deliveries measured), so 0 disables it. Staleness cannot tell quiet from dark by itself; the relay checks that can (inbox-doctor client-liveness, server-reachability, and the supervisor watchdog) do not depend on these values. Re-measure before lowering.",
+    "harness_alerts": "DND-334: ONE maildir conversation, declared from BOTH sides in the custom entry (the contract's mirrored read/write model), because both parties run from this repo: `harness-alerts` is the harness session's side (identity custom, reads to-custom) and `harness-alerts-detector` is the supervisor watchdog's side (identity inbox-client-detector, writes to-custom; it sends through send-mail, which resolves a channel only from the registry entry of its cwd's repo). The harness session reads `harness-alerts` and never sends on either; the detector only sends. harness-alerts is declared FIRST so a delivery's shared to-custom doorbell is attributed to it by inbox-wait's rang-channels.",
     "obligation_1a": "walt_ui's `flaky` log channel is declared with producer:\"platform\" in this same change as one unit with the reader ingestion + DESCRIPTOR_LOG_PRODUCERS admission, per DND-260 obligation-1a. Declaring a platform channel before the reader exists is a silent-loss trap (logchan_scan consumes complete-but-unreadable lines past its offset and the new>0 count gate hides a platform-only channel), so the declaration and the reader are inseparable and ship together — this is intended scope, not scope-creep."
   },
   "v": 1,
@@ -25,6 +26,20 @@
             "read": "to-custom",
             "write": "to-walt_ui",
             "identity": "custom"
+          },
+          "harness-alerts": {
+            "kind": "maildir",
+            "namespace": "harness-alerts",
+            "read": "to-custom",
+            "write": "to-inbox-client-detector",
+            "identity": "custom"
+          },
+          "harness-alerts-detector": {
+            "kind": "maildir",
+            "namespace": "harness-alerts",
+            "read": "to-inbox-client-detector",
+            "write": "to-custom",
+            "identity": "inbox-client-detector"
           }
         }
       }

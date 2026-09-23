@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+#
+# inbox-client-alert — tell the harness session a wedge was captured, on the
+# local `harness-alerts` maildir channel (DND-334 / LV-3, epic D37/D38).
+#
+# The supervisor's watchdog (scripts/athena-inbox-client-run.sh) calls it once
+# per wedge, AFTER inbox-client-capture has written the capture directory and
+# AFTER the client was restarted (or the watchdog decided not to signal a
+# client whose identity changed mid-capture), so a slow or failed send can
+# never delay the restart or undo the capture. It drops ONE message; the harness session's
+# inbox-wait wakes on it, and athena:inbox-attend verifies the signature
+# against the capture on disk before it files or increments the
+# `[wedge:<sig8>]` ticket.
+#
+# NO CREDENTIAL, NO NETWORK (D38). It writes one file into a local maildir,
+# through send-mail (DND-187), as the identity `inbox-client-detector` — the
+# registry's `harness-alerts-detector` channel. The Notion write is the
+# session's, under the session's own identity. This tool never holds a token
+# that can post as Athena.
+#
+# What the message carries — facts from the capture manifest, nothing else:
+#   signature, stalled step, the top frames (file:function), capture path, the
+#   reconnecting/connected counts since the last restart, pid, uptime, dump
+#   status. NEVER the machine token (asserted: a body carrying the token or its
+#   8-char prefix is refused, never sent) and NEVER an inbox message body (the
+#   capture holds none; this reads only capture.txt and signature.txt).
+#
+# The message is a REPORT, not a command. Whatever it says, the attendant acts
+# only on what it recomputes from the capture directory.
+#
+# Usage:
+#   inbox-client-alert <capture-dir>            send the alert for this capture
+#   inbox-client-alert <capture-dir> --dry-run  print the message body; send nothing
+#   inbox-client-alert --self-test              run scripts/test/inbox-client-alert/self-test.sh
+#   inbox-client-alert --help                   this text
+#
+# Environment:
+#   XDG_STATE_HOME                 base of the dump dir (a capture must live in it)
+#   ATHENA_INBOX_ROOT              the inbox root send-mail delivers under
+#   ATHENA_INBOX_CLIENT_CONFIG     client config, read ONLY for the token guard
+#   ATHENA_INBOX_ALERT_TIMEOUT     seconds before the send is abandoned (20)
+#
+# Output: `sent\t<message filename>` on success.
+# Exit codes: 0 sent (or dry-run printed) · 1 usage · 2 the capture is not one
+#             this tool will describe (outside the dump dir, malformed, or it
+#             would carry the token) · 4 the send failed or timed out
+
+set -uo pipefail
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO="$(cd -- "${HERE}/.." && pwd -P)"
+LIB="${REPO}/ai/skills/athena:inbox/lib"
+SEND_MAIL="${REPO}/ai/skills/athena:inbox/bin/send-mail"
+CHANNEL="harness-alerts-detector"
+PEER="custom"
+
+CAP=""; DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --self-test) exec bash "${HERE}/test/inbox-client-alert/self-test.sh" ;;
+    --dry-run) DRY=1 ;;
+    --*) echo "error: unknown option: $1" >&2
+         echo "  Fix: see inbox-client-alert --help." >&2; exit 1 ;;
+    *) [ -z "${CAP}" ] || { echo "error: more than one capture directory given" >&2; echo "  Fix: alert on one capture at a time: inbox-client-alert <capture-dir>." >&2; exit 1; }
+       CAP="$1" ;;
+  esac
+  shift
+done
+[ -n "${CAP}" ] || { echo "error: no capture directory given" >&2; echo "  Fix: inbox-client-alert <capture-dir> (the \`dir\` line inbox-client-capture printed)." >&2; exit 1; }
+
+for f in liveness.sh wedge.sh; do
+  [ -r "${LIB}/${f}" ] || { echo "error: the library ${LIB}/${f} is missing" >&2; echo "  Fix: run this from a complete ~/dev/custom checkout; restore it with git." >&2; exit 2; }
+done
+# shellcheck source=ai/skills/athena:inbox/lib/liveness.sh
+. "${LIB}/liveness.sh"
+# shellcheck source=ai/skills/athena:inbox/lib/wedge.sh
+. "${LIB}/wedge.sh"
+
+TIMEOUT="${ATHENA_INBOX_ALERT_TIMEOUT:-20}"
+case "${TIMEOUT}" in ''|*[!0-9]*|0) echo "error: ATHENA_INBOX_ALERT_TIMEOUT must be a positive whole number (got '${TIMEOUT}')" >&2
+  echo "  Fix: unset it (default 20) or set a whole number of seconds." >&2; exit 1 ;; esac
+
+refuse() { echo "error: $1" >&2; echo "  Fix: $2" >&2; exit 2; }
+
+# ---- the capture must be a capture, in the dump dir, written by the capture tool
+DUMPS="$(liveness_dump_dir)" || refuse "the dump directory does not resolve (XDG_STATE_HOME is relative: ${XDG_STATE_HOME:-})" \
+  "set XDG_STATE_HOME to an absolute path or unset it (default ~/.local/state)."
+[ -d "${CAP}" ] && [ ! -L "${CAP}" ] || refuse "not a capture directory: ${CAP}" \
+  "pass the \`dir\` inbox-client-capture printed; it is a real directory under ${DUMPS}."
+REAL_CAP="$(realpath -e -- "${CAP}" 2>/dev/null)"
+REAL_DUMPS="$(realpath -e -- "${DUMPS}" 2>/dev/null)"
+[ -n "${REAL_CAP}" ] && [ -n "${REAL_DUMPS}" ] && [ "$(dirname -- "${REAL_CAP}")" = "${REAL_DUMPS}" ] \
+  || refuse "the capture ${CAP} is not directly inside the dump directory ${DUMPS}" \
+            "alert only on a capture inbox-client-capture wrote; its directories sit directly in ${DUMPS}."
+[[ "$(basename -- "${REAL_CAP}")" =~ ${WEDGE_CAPTURE_NAME_RE} ]] \
+  || refuse "the directory name $(basename -- "${REAL_CAP}") is not a capture name (<UTC>Z-<pid>)" \
+            "pass a capture directory inbox-client-capture wrote."
+for f in capture.txt signature.txt; do
+  [ -f "${REAL_CAP}/${f}" ] && [ ! -L "${REAL_CAP}/${f}" ] || refuse "the capture has no ${f}: ${REAL_CAP}" \
+    "the capture is incomplete; inspect it by hand. Nothing was sent."
+done
+
+manifest() { sed -n "s/^$1: //p" "${REAL_CAP}/capture.txt" | head -n 1; }
+SIG="$(sed -n 's/^signature: //p' "${REAL_CAP}/signature.txt" | head -n 1)"
+STEP="$(sed -n 's/^step: //p' "${REAL_CAP}/signature.txt" | head -n 1)"
+wedge_valid_signature "${SIG}" || refuse "signature.txt carries no valid signature" "inspect ${REAL_CAP}/signature.txt; nothing was sent."
+wedge_valid_step "${STEP}" || refuse "signature.txt carries no valid step name" "inspect ${REAL_CAP}/signature.txt; nothing was sent."
+FINISHED_MS="$(manifest finished_ms)"
+case "${FINISHED_MS}" in ''|*[!0-9]*) CAPTURED_AT="n/a" ;; *) CAPTURED_AT="$(date -u -d "@$(( FINISHED_MS / 1000 ))" +%Y-%m-%dT%H:%M:%SZ)" ;; esac
+FRAMES="$(sed -n '/^frames:$/,$p' "${REAL_CAP}/signature.txt" | tail -n +2)"
+
+BODY="$(
+  printf 'Inbox client wedge captured by the supervisor watchdog (DND-334).\n'
+  printf 'This is a report. The capture directory is the authority: verify the signature from it before acting.\n\n'
+  printf 'signature: %s\n' "${SIG}"
+  printf 'step: %s\n' "${STEP}"
+  printf 'capture: %s\n' "${REAL_CAP}"
+  printf 'captured_at: %s\n' "${CAPTURED_AT}"
+  printf 'pid: %s\n' "$(manifest pid)"
+  printf 'uptime_s: %s\n' "$(manifest uptime_s)"
+  printf 'reconnecting_since: %s\n' "$(manifest reconnecting_since)"
+  printf 'connected_since: %s\n' "$(manifest connected_since)"
+  printf 'dump: %s\n' "$(manifest dump)"
+  printf 'frames:\n'
+  if [ -n "${FRAMES}" ]; then printf '%s\n' "${FRAMES}"; else printf '  (none: no dump)\n'; fi
+)"
+
+# ---- the token never leaves the machine's config (belt: the capture is redacted)
+# "Checked" and "not checked" must never read the same: when the guard cannot
+# run it says so on stderr, as a `note:` line the watchdog copies into its log.
+CONFIG="${ATHENA_INBOX_CLIENT_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/athena-inbox-client/config.json}"
+if [ ! -r "${CONFIG}" ] || ! command -v jq >/dev/null 2>&1; then
+  echo "note: token guard NOT checked (no readable ${CONFIG}, or no jq); the capture's own redaction is the only defence for this send" >&2
+else
+  TOKEN="$(jq -r '.token // empty' <"${CONFIG}" 2>/dev/null | tr -d '\r\n')"
+  if [ -n "${TOKEN}" ] && { [[ "${BODY}" == *"${TOKEN}"* ]] || [[ "${BODY}" == *"${TOKEN:0:8}"* ]]; }; then
+    unset TOKEN
+    refuse "the alert body would carry the machine token (or its 8-char prefix); NOT sent" \
+      "the capture ${REAL_CAP} was not redacted; inspect it and delete the leak. The capture itself is intact."
+  fi
+  unset TOKEN
+fi
+
+if [ "${DRY}" -eq 1 ]; then printf '%s\n' "${BODY}"; exit 0; fi
+
+[ -x "${SEND_MAIL}" ] || { echo "error: send-mail is missing: ${SEND_MAIL}" >&2; echo "  Fix: restore ai/skills/athena:inbox/bin/send-mail with git. The capture is intact; send it later with inbox-client-alert ${REAL_CAP}." >&2; exit 4; }
+
+BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/dnd334-alert.XXXXXX")" || { echo "error: cannot create a temporary body file" >&2; echo "  Fix: check \$TMPDIR is writable, then re-run inbox-client-alert ${REAL_CAP}." >&2; exit 4; }
+trap 'rm -f -- "${BODY_FILE}"' EXIT
+chmod 600 "${BODY_FILE}"
+printf '%s\n' "${BODY}" >"${BODY_FILE}"
+
+# send-mail resolves the channel from the registry entry of its cwd's repo, so
+# it runs from this checkout. Bounded: a stuck send is abandoned, never waited on.
+OUT="$(cd -- "${REPO}" && timeout "${TIMEOUT}" "${SEND_MAIL}" "${CHANNEL}" "wedge-${SIG:0:8}" \
+        --to "${PEER}" --re "${REAL_CAP}" --body-file "${BODY_FILE}" 2>&1)"; RC=$?
+if [ "${RC}" -ne 0 ]; then
+  echo "error: the harness-alerts send FAILED (exit ${RC}$([ "${RC}" -eq 124 ] && echo ', timed out')): $(printf '%s' "${OUT}" | head -n 3 | tr '\n' ' ')" >&2
+  echo "  Fix: run inbox-doctor from ${REPO} (is the custom registry entry installed with the harness-alerts channels? scripts/setup-inbox-registry --install), then re-send by hand: scripts/inbox-client-alert ${REAL_CAP}. The capture is intact." >&2
+  exit 4
+fi
+NAME="$(printf '%s\n' "${OUT}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
+printf 'sent\t%s\n' "${NAME:-?}"
+exit 0

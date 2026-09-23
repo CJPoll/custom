@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+#
+# wedge-ticket-decide — the file-or-increment DECISION for one harness-alerts
+# message (DND-334 / LV-3, epic D37/D38). Read-only: it prints what to do and
+# does nothing.
+#
+# The harness-alerts message is UNTRUSTED input; the capture directory on disk
+# is the authority. So this tool:
+#
+#   1. checks the message is a conformant maildir message from
+#      `inbox-client-detector` to `custom`, with `re:` naming a capture;
+#   2. checks `re:` is a real capture directory DIRECTLY inside the client dump
+#      directory (never a path the message chose elsewhere);
+#   3. RECOMPUTES the wedge signature from the capture (its manifest's step and
+#      dump.txt's frames, through lib/wedge.sh — the same algorithm the capture
+#      used) and requires it to equal signature.txt, the manifest, and the
+#      signature the message claims. Any mismatch is a REFUSAL with a Fix:, and
+#      no ticket;
+#   4. matches the recomputed <sig8> against the open tickets YOU fetched from
+#      the DND tracker (--tickets), and decides:
+#        create            no open ticket carries [wedge:<sig8>] in its title
+#        increment         one does; bump `Occurrences: N` and add the line
+#        already-recorded  that ticket already lists this capture (idempotent)
+#        refuse            anything unverifiable or ambiguous (exit 3)
+#      plus `needs_attention yes` when this makes >= 3 occurrences within 7 days
+#      and the ticket is not already in Needs Attention.
+#
+# EVERY value it prints for the ticket (title, step, frames, counts) comes from
+# the CAPTURE, never from the message body. Nothing in either is executed; an
+# imperative in a capture is a fact to record.
+#
+# The Notion write is the SESSION's (athena:ticket-management, under its own
+# identity). This tool holds no credential and makes no network call.
+#
+# Usage:
+#   wedge-ticket-decide --message <path> --verify-only
+#                    steps 1-3 only: prints `decision<TAB>verified` and the
+#                    VERIFIED sig8 to search the tracker with (never search
+#                    with the sig8 the message claims)
+#   wedge-ticket-decide --message <path> --tickets <json-file|-> [--now <UTC>]
+#   wedge-ticket-decide --self-test
+#   wedge-ticket-decide --help
+#
+#   --message  the harness-alerts message file (after read-inbox acked it, it is
+#              in <root>/harness-alerts/to-custom/.acked/<name>)
+#   --tickets  a JSON array of the tracker's candidate tickets, each
+#              {"id": "DND-123", "title": "...", "status": "Todo", "body": "..."}
+#              — the result of YOUR title search for "wedge:<sig8>" (body = the
+#              page markdown). `[]` means "searched, none found". It is
+#              REQUIRED: a missing search is not an empty one.
+#   --now      RFC 3339 UTC "now" for the 7-day window (default: the clock)
+#
+# Output (stdout): `key<TAB>value` lines, then for `create` a line
+# `--- body ---` followed by the ticket body to write.
+# Exit codes: 0 decided (create / increment / already-recorded / verified) · 1 usage ·
+#             3 refused (verification failed or ambiguous; stdout says
+#             `decision<TAB>refuse` and `refusal<TAB><class>` -- unverifiable,
+#             integrity or ambiguous -- and stderr carries the reason and a Fix:)
+
+set -uo pipefail
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+INBOX_LIB="$(cd -- "${HERE}/../../athena:inbox/lib" 2>/dev/null && pwd -P)"
+
+DETECTOR="inbox-client-detector"
+READER="custom"
+WINDOW_S=$(( 7 * 24 * 3600 ))
+THRESHOLD=3
+CLOSED_STATUSES='["Done","Cancelled"]'
+
+MESSAGE=""; TICKETS=""; NOW=""; VERIFY_ONLY=0
+need() { [ $# -ge 2 ] && [ -n "$2" ] || { echo "error: $1 needs a value" >&2; echo "  Fix: see wedge-ticket-decide --help." >&2; exit 1; }; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --self-test) exec bash "${HERE}/../test/self-test.sh" ;;
+    --message) need "$@"; MESSAGE="$2"; shift ;;
+    --tickets) need "$@"; TICKETS="$2"; shift ;;
+    --now) need "$@"; NOW="$2"; shift ;;
+    --verify-only) VERIFY_ONLY=1 ;;
+    *) echo "error: unknown argument: $1" >&2; echo "  Fix: see wedge-ticket-decide --help." >&2; exit 1 ;;
+  esac
+  shift
+done
+[ -n "${MESSAGE}" ] || { echo "error: no --message given" >&2; echo "  Fix: pass --message <the harness-alerts message file>." >&2; exit 1; }
+[ -n "${TICKETS}" ] || [ "${VERIFY_ONLY}" -eq 1 ] || { echo "error: no --tickets given" >&2; echo "  Fix: search the DND tracker for open tickets whose title contains [wedge:<sig8>] and pass the result as a JSON array (\`[]\` when none). A missing search is not an empty one." >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; echo "  Fix: install jq." >&2; exit 1; }
+
+for f in err.sh names.sh maildir.sh liveness.sh wedge.sh; do
+  [ -r "${INBOX_LIB}/${f}" ] || { echo "error: the athena:inbox library ${f} is missing (looked in ${INBOX_LIB:-<unresolved>})" >&2; echo "  Fix: run this from a complete ~/dev/custom checkout." >&2; exit 1; }
+  # shellcheck source=/dev/null
+  . "${INBOX_LIB}/${f}"
+done
+
+# refuse [--class integrity|ambiguous] <reason> <fix>
+# Every refusal files nothing. Its CLASS tells the attendant how to report it
+# (athena:inbox-attend -> harness-alerts, which alone decides who is told):
+#   unverifiable (default)  the message or capture cannot be checked
+#   integrity               the message or capture does not verify: possible
+#                           local forgery or post-capture edit
+#   ambiguous               the tracker state needs a human (duplicates, a
+#                           prefix collision)
+# The Fix: texts below say what is wrong and what a human would do about it;
+# they never tell the attendant whom to contact -- that is the brief's call.
+refuse() {
+  local class="unverifiable"
+  if [ "$1" = "--class" ]; then class="$2"; shift 2; fi
+  printf 'decision\trefuse\n'
+  printf 'refusal\t%s\n' "${class}"
+  printf 'wedge-ticket-decide: REFUSED (%s) — %s\n' "${class}" "$1" >&2
+  printf '  Fix: %s\n' "$2" >&2
+  exit 3
+}
+
+if [ -z "${NOW}" ]; then NOW_EPOCH="$(date -u +%s)"
+else NOW_EPOCH="$(liveness_epoch_of "${NOW}")" || { echo "error: --now must be YYYY-MM-DDTHH:MM:SSZ" >&2; echo "  Fix: pass a UTC stamp like 2026-09-23T12:00:00Z, or omit --now." >&2; exit 1; }; fi
+
+# ---- 1. the message --------------------------------------------------------
+[ -f "${MESSAGE}" ] && [ ! -L "${MESSAGE}" ] || refuse "the message is not a regular file" \
+  "pass the message file itself (read-inbox moved it to <root>/harness-alerts/to-custom/.acked/)."
+NAME="$(basename -- "${MESSAGE}")"
+CONTENT="$(cat -- "${MESSAGE}"; printf X)"; CONTENT="${CONTENT%X}"
+FM="$(printf '%s' "${CONTENT}" | maildir_parse_frontmatter)"
+maildir_validate_message "${NAME}" "${FM}" 2>/dev/null || refuse "the message is not a conformant maildir message" \
+  "nothing to file; leave it in .acked/ for the record. A detector message has a contract filename and from/to/sent_at frontmatter."
+fmv() { printf '%s' "${FM}" | jq -r --arg k "$1" '.[$k] // empty'; }
+[ "$(fmv from)" = "${DETECTOR}" ] && [ "$(fmv to)" = "${READER}" ] || refuse "the message is not from ${DETECTOR} to ${READER}" \
+  "only the supervisor watchdog's alerts are filed; nothing was filed. Leave the message in .acked/ as the record."
+RE="$(fmv re)"
+[ -n "${RE}" ] || refuse "the message names no capture (no re:)" "nothing to verify, so nothing was filed. Leave the message in .acked/ as the record."
+BODY="$(printf '%s' "${CONTENT}" | maildir_body)"
+CLAIMED="$(printf '%s\n' "${BODY}" | sed -n 's/^signature: //p' | head -n 1)"
+wedge_valid_signature "${CLAIMED}" || refuse "the message carries no valid signature line" \
+  "nothing to verify, so nothing was filed. Leave the message in .acked/ as the record."
+BODY_CAP="$(printf '%s\n' "${BODY}" | sed -n 's/^capture: //p' | head -n 1)"
+[ -z "${BODY_CAP}" ] || [ "${BODY_CAP}" = "${RE}" ] || refuse "the message body's capture: disagrees with its re:" \
+  "a message that names two captures cannot be believed about either; nothing was filed."
+
+# ---- 2. the capture directory ---------------------------------------------
+DUMPS="$(liveness_dump_dir)" || refuse "the dump directory does not resolve (XDG_STATE_HOME is relative)" \
+  "set XDG_STATE_HOME to an absolute path or unset it."
+case "${RE}" in /*) ;; *) refuse "re: is not an absolute path" "a capture path is absolute; nothing was filed." ;; esac
+[ -d "${RE}" ] && [ ! -L "${RE}" ] || refuse "re: is not an existing capture directory" \
+  "the capture may have been pruned (the capture keeps the newest 5). Without it nothing can be verified, so nothing was filed; if wedges outrun the attendant, raise ATHENA_INBOX_CAPTURE_KEEP."
+REAL_CAP="$(realpath -e -- "${RE}" 2>/dev/null)"
+REAL_DUMPS="$(realpath -e -- "${DUMPS}" 2>/dev/null)"
+[ -n "${REAL_CAP}" ] && [ -n "${REAL_DUMPS}" ] && [ "$(dirname -- "${REAL_CAP}")" = "${REAL_DUMPS}" ] \
+  || refuse "re: is not directly inside the client dump directory ${DUMPS}" \
+            "only a capture inbox-client-capture wrote is evidence; a path elsewhere is refused and nothing was filed."
+[[ "$(basename -- "${REAL_CAP}")" =~ ${WEDGE_CAPTURE_NAME_RE} ]] || refuse "re: does not name a capture directory (<UTC>Z-<pid>)" \
+  "nothing was filed; a capture directory is named <UTC>Z-<pid>."
+[ "$(stat -c %u -- "${REAL_CAP}")" = "$(id -u)" ] || refuse --class integrity "the capture is not owned by this user" "nothing was filed; inspect who wrote it."
+for f in capture.txt signature.txt; do
+  [ -f "${REAL_CAP}/${f}" ] && [ ! -L "${REAL_CAP}/${f}" ] || refuse "the capture has no ${f}" \
+    "the capture is incomplete; inspect ${REAL_CAP} by hand. Nothing was filed."
+done
+manifest() { sed -n "s/^$1: //p" "${REAL_CAP}/capture.txt" | head -n 1; }
+
+# ---- 3. recompute the signature from the capture ---------------------------
+STEP="$(manifest step)"
+wedge_valid_step "${STEP}" || refuse "the capture manifest carries no valid step" "inspect ${REAL_CAP}/capture.txt; nothing was filed."
+FRAMES=""
+FRAMES_FROM="none (no dump)"
+DUMP="${REAL_CAP}/dump.txt"
+TRUNC_MARK='[truncated by inbox-client-capture'
+if [ -e "${DUMP}" ]; then
+  [ -f "${DUMP}" ] && [ ! -L "${DUMP}" ] || refuse "the capture's dump.txt is not a regular file" "inspect ${REAL_CAP}; nothing was filed."
+  if grep -qF -- "${TRUNC_MARK}" "${DUMP}"; then
+    # The capture takes its signature BEFORE its size cap, and the cap keeps the
+    # head of dump.txt -- so a capped dump can have lost the very frames the
+    # signature was taken over. Recomputing from it would refuse every real
+    # wedge big enough to hit the cap, as a false tamper alarm. Verify instead
+    # against the frames signature.txt recorded at capture time (the cap never
+    # touches signature.txt). That still proves signature.txt's own frames and
+    # step hash to its signature; it no longer cross-checks the dump, which the
+    # cap made impossible. Said in the output (frames_from), never silently.
+    FRAMES="$(sed -n '/^frames:$/,$p' "${REAL_CAP}/signature.txt" | tail -n +2 | sed 's/^  //')"
+    FRAMES_FROM="signature.txt (dump.txt was truncated by the size cap)"
+  else
+    FRAMES="$(wedge_frames "${DUMP}")"
+    FRAMES_FROM="dump.txt"
+  fi
+fi
+RECOMPUTED="$(wedge_signature "${STEP}" "${FRAMES}")"
+ON_DISK="$(sed -n 's/^signature: //p' "${REAL_CAP}/signature.txt" | head -n 1)"
+IN_MANIFEST="$(manifest signature)"
+if [ "${RECOMPUTED}" != "${ON_DISK}" ] || [ "${RECOMPUTED}" != "${IN_MANIFEST}" ]; then
+  why="the capture's own signature does not recompute from its step and frames (${FRAMES_FROM})"
+  refuse --class integrity "${why}" "the capture was altered after it was written, so it is not evidence; inspect ${REAL_CAP}. Nothing was filed."
+fi
+[ "${CLAIMED}" = "${RECOMPUTED}" ] || refuse --class integrity "the message's signature does not match the capture it names (tampered or mis-addressed)" \
+  "do not file or increment anything from this message; it did not verify against ${REAL_CAP}. Nothing was filed."
+
+SIG8="${RECOMPUTED:0:8}"
+FINISHED_MS="$(manifest finished_ms)"
+case "${FINISHED_MS}" in ''|*[!0-9]*) refuse "the capture manifest has no finished_ms" "the capture is incomplete; nothing was filed." ;; esac
+CAP_EPOCH=$(( FINISHED_MS / 1000 ))
+CAPTURED_AT="$(date -u -d "@${CAP_EPOCH}" +%Y-%m-%dT%H:%M:%SZ)"
+OCC_LINE="- occurrence ${CAPTURED_AT} ${REAL_CAP}"
+TITLE="Inbox client wedge [wedge:${SIG8}]: stalled at ${STEP}"
+
+emit_common() {
+  printf 'signature\t%s\n' "${RECOMPUTED}"
+  printf 'sig8\t%s\n' "${SIG8}"
+  printf 'step\t%s\n' "${STEP}"
+  printf 'capture\t%s\n' "${REAL_CAP}"
+  printf 'captured_at\t%s\n' "${CAPTURED_AT}"
+  printf 'frames_from\t%s\n' "${FRAMES_FROM}"
+}
+
+if [ "${VERIFY_ONLY}" -eq 1 ]; then
+  printf 'decision\tverified\n'
+  emit_common
+  printf 'search\t[wedge:%s]\n' "${SIG8}"
+  exit 0
+fi
+
+# ---- 4. match against the tracker ------------------------------------------
+if [ "${TICKETS}" = "-" ]; then TJSON="$(cat)"; else
+  [ -r "${TICKETS}" ] || { echo "error: cannot read --tickets ${TICKETS}" >&2; echo "  Fix: write the tracker search result to a file and pass it (\`[]\` when none)." >&2; exit 1; }
+  TJSON="$(cat -- "${TICKETS}")"
+fi
+printf '%s' "${TJSON}" | jq -e 'type == "array" and all(.[]; type == "object" and (.id|type) == "string" and (.title|type) == "string" and (.status|type) == "string")' >/dev/null 2>&1 \
+  || { echo "error: --tickets is not a JSON array of {id, title, status, body}" >&2; echo "  Fix: pass e.g. [{\"id\":\"DND-1\",\"title\":\"...\",\"status\":\"Todo\",\"body\":\"...\"}], or [] when the search found none." >&2; exit 1; }
+# Notion's markdown escapes brackets and underscores (\[wedge:…\]); strip the
+# backslashes before matching so an escaped title still matches.
+MATCHES="$(printf '%s' "${TJSON}" | jq -c --arg tag "[wedge:${SIG8}]" --argjson closed "${CLOSED_STATUSES}" \
+  '[.[] | select((.title | gsub("\\\\"; "")) | contains($tag)) | select(.status as $s | $closed | index($s) | not)]')"
+N_MATCH="$(printf '%s' "${MATCHES}" | jq 'length')"
+
+
+# One clean line per value that reaches the ticket: control characters removed,
+# length capped. The capture is authoritative, not trusted to be well-formed.
+clean() { printf '%s' "$1" | tr -d '\000-\010\013-\037\177' | cut -c1-200; }
+
+if [ "${N_MATCH}" -gt 1 ]; then
+  refuse --class ambiguous "${N_MATCH} open tickets carry [wedge:${SIG8}]: $(printf '%s' "${MATCHES}" | jq -r '[.[].id] | join(", ")')" \
+    "a human merges the duplicates into one (cancelling the others), then re-runs; incrementing one of several would split the occurrence count. Nothing was filed."
+fi
+
+if [ "${N_MATCH}" -eq 0 ]; then
+  RECENT=0
+  [ $(( NOW_EPOCH - CAP_EPOCH )) -le "${WINDOW_S}" ] && RECENT=1
+  printf 'decision\tcreate\n'
+  emit_common
+  printf 'title\t%s\n' "${TITLE}"
+  printf 'status\tTodo\n'
+  printf 'assignee\t(none)\n'
+  printf 'occurrences\t1\n'
+  printf 'recent_7d\t%s\n' "${RECENT}"
+  printf 'needs_attention\tno\n'
+  printf -- '--- body ---\n'
+  printf 'Occurrences: 1\n\n'
+  printf 'Signature: %s\n\n' "${RECOMPUTED}"
+  printf 'Auto-filed by the harness session from a verified harness-alerts capture (DND-334, D37). The supervisor watchdog restarts a wedged inbox client; restart is the mitigation, this ticket is the fix. Each recurrence adds an occurrence line and bumps the count, and the count is the priority: 3 within 7 days moves it to Needs Attention.\n\n'
+  printf 'Stalled step: %s\n' "${STEP}"
+  printf 'Dump: %s\n' "$(clean "$(manifest dump)")"
+  printf 'Pid: %s · uptime_s: %s\n' "$(clean "$(manifest pid)")" "$(clean "$(manifest uptime_s)")"
+  printf 'Reconnecting: %s · connected: %s\n' "$(clean "$(manifest reconnecting_since)")" "$(clean "$(manifest connected_since)")"
+  printf 'Top frames (file:function):\n```\n'
+  if [ -n "${FRAMES}" ]; then printf '%s\n' "${FRAMES}" | while IFS= read -r l; do clean "${l}"; printf '\n'; done; else printf '(none: no dump)\n'; fi
+  printf '```\n\nOccurrences:\n%s\n' "${OCC_LINE}"
+  exit 0
+fi
+
+# exactly one open ticket
+T_ID="$(printf '%s' "${MATCHES}" | jq -r '.[0].id')"
+T_STATUS="$(printf '%s' "${MATCHES}" | jq -r '.[0].status')"
+T_BODY="$(printf '%s' "${MATCHES}" | jq -r '.[0].body // ""' | sed 's/\\\(.\)/\1/g')"
+BODY_SIG="$(printf '%s\n' "${T_BODY}" | sed -n 's/^.*Signature:\** *\([0-9a-f]\{64\}\).*$/\1/p' | head -n 1)"
+if [ -n "${BODY_SIG}" ] && [ "${BODY_SIG}" != "${RECOMPUTED}" ]; then
+  refuse --class ambiguous "ticket ${T_ID} carries [wedge:${SIG8}] but a different full signature (an 8-char prefix collision)" \
+    "the two wedges are different: a human files this one by hand with a longer tag (e.g. [wedge:${RECOMPUTED:0:12}]). Nothing was filed."
+fi
+# EXACT path match on an occurrence line. A substring match would read
+# .../<UTC>Z-4242 as already recorded when only .../<UTC>Z-4242-1 is (the
+# capture tool's collision suffix), silently dropping an occurrence.
+# (Everything after "- occurrence <ts> " is the path, so a path with a space in
+# it still compares whole.)
+if printf '%s\n' "${T_BODY}" | awk -v p="${REAL_CAP}" '/^- occurrence [^ ]+ / { r = $0; sub(/^- occurrence [^ ]+ /, "", r); if (r == p) f = 1 } END { exit !f }'; then
+  printf 'decision\talready-recorded\n'
+  printf 'ticket\t%s\n' "${T_ID}"
+  emit_common
+  exit 0
+fi
+PREV="$(printf '%s\n' "${T_BODY}" | sed -n 's/^\**Occurrences:\** *\([0-9][0-9]*\) *$/\1/p' | head -n 1)"
+LINES="$(printf '%s\n' "${T_BODY}" | grep -cE '^- occurrence [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z /')"
+[ -n "${PREV}" ] || PREV=0
+# The count on the ticket is the priority; never let it fall below what the
+# occurrence lines prove.
+[ "${LINES}" -gt "${PREV}" ] && PREV="${LINES}"
+NEW=$(( PREV + 1 ))
+RECENT=0
+while IFS= read -r ts; do
+  [ -n "${ts}" ] || continue
+  e="$(liveness_epoch_of "${ts}")" || continue
+  [ $(( NOW_EPOCH - e )) -le "${WINDOW_S}" ] && RECENT=$(( RECENT + 1 ))
+done < <(printf '%s\n' "${T_BODY}" | sed -n 's/^- occurrence \([0-9TZ:-]\{20\}\) \/.*$/\1/p')
+[ $(( NOW_EPOCH - CAP_EPOCH )) -le "${WINDOW_S}" ] && RECENT=$(( RECENT + 1 ))
+if [ "${RECENT}" -ge "${THRESHOLD}" ]; then
+  if [ "${T_STATUS}" = "Needs Attention" ]; then NA="already"; else NA="yes"; fi
+else NA="no"; fi
+
+printf 'decision\tincrement\n'
+printf 'ticket\t%s\n' "${T_ID}"
+printf 'ticket_status\t%s\n' "${T_STATUS}"
+emit_common
+printf 'occurrences\t%s\n' "${NEW}"
+printf 'occurrences_line\tOccurrences: %s\n' "${NEW}"
+printf 'occurrence_line\t%s\n' "${OCC_LINE}"
+printf 'recent_7d\t%s\n' "${RECENT}"
+printf 'needs_attention\t%s\n' "${NA}"
+exit 0

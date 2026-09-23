@@ -514,6 +514,12 @@ checks now answer the question a pid cannot:
   suspects a wedge runs `scripts/inbox-client-capture --now` (capture, no
   restart). SIGQUIT is only sent to a client whose running code is known to
   trap it: Ruby's default SIGQUIT action would kill a pre-LV-1 client.
+  After the restart (or the decision not to signal) the watchdog drops ONE message on the `custom` entry's
+  `harness-alerts` maildir (`scripts/inbox-client-alert`, DND-334); the
+  harness session verifies it against the capture and files or increments the
+  `[wedge:<sig8>]` ticket (`athena:inbox-attend` → *harness-alerts*). The
+  mirror channel `harness-alerts-detector` is the detector's sending side:
+  never read or send on it.
 - `watchdog` fails when the supervisor's watchdog tools are missing (the
   supervisor keeps the client running, but a wedge is then restarted without
   evidence, or not detected at all).

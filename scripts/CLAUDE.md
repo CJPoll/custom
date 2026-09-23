@@ -331,6 +331,17 @@ loop above.
   liveness library is missing, the supervisor still supervises (degraded,
   loudly) and inbox-doctor's `watchdog` finding fails. Self-test:
   `test/inbox-client-capture/`.
+- `inbox-client-alert` — after the watchdog has captured AND restarted a
+  wedged client (or decided not to signal one that changed identity), drops ONE message on the local `harness-alerts` maildir
+  (DND-334): signature, stalled step, top frames, capture path, cycle counts,
+  pid, uptime. It sends through `send-mail` as `inbox-client-detector` (the
+  custom registry entry's `harness-alerts-detector` channel), holds no token and
+  makes no network call; a body carrying the machine token is refused. A failed
+  or timed-out send is exit 4 and a `WATCHDOG: ALERT NOT SENT` log line with a
+  `Fix:`; it never delays the restart. The harness session verifies the
+  signature against the capture and files the ticket (`athena:inbox-attend` →
+  *harness-alerts*). `--dry-run` prints the body. Self-test:
+  `test/inbox-client-alert/`.
 - `setup-athena-inbox-client` — the committed idempotent installer:
   `--install` (default) · `--check` · `--dry-run` · `--remove` · `--self-test` ·
   `-h`, order-independent. It installs `@reboot` and `*/5 * * * *` entries,

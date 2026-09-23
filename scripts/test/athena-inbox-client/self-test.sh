@@ -52,6 +52,11 @@ TMP="$(mktemp -d)"
 # ~/.local/state/athena/inbox-client-dumps (measured 2026-09-23 on this suite's
 # first DND-316 run). setup_case re-pins it into each case dir.
 export XDG_STATE_HOME="${TMP}/xdg"
+# The watchdog now SENDS a harness-alerts message (DND-334) through send-mail,
+# which resolves the inbox root from ATHENA_INBOX_ROOT (default: the LIVE
+# ~/.local/share/athena). Pinned for the whole suite and re-pinned per case, so
+# no case can deliver into, or even read, the live inbox.
+export ATHENA_INBOX_ROOT="${TMP}/inbox-root"
 
 # Reap anything this suite backgrounded, BY PID. A `pkill -f` here could match
 # a real supervisor, or a sibling worktree's test run.
@@ -81,6 +86,7 @@ setup_case() {
   CASE_DIR="${TMP}/$(printf '%02d' "$CASE_N")-$1"
   mkdir -p "${CASE_DIR}"
   export XDG_STATE_HOME="${CASE_DIR}/xdg"
+  export ATHENA_INBOX_ROOT="${CASE_DIR}/inbox-root"
   FAKE_CRONTAB="${CASE_DIR}/crontab.txt"
   STATE_DIR="${CASE_DIR}/state"
   STUB="${CASE_DIR}/stub-client"
@@ -642,7 +648,7 @@ fi
 #     SABOTAGE_RECORDS S28a, a measured zero.
 setup_case minimal_path
 make_stub 0 0
-out="$(env -i HOME="${HOME}" PATH=/bin:/usr/bin XDG_STATE_HOME="${CASE_DIR}/xdg" \
+out="$(env -i HOME="${HOME}" PATH=/bin:/usr/bin XDG_STATE_HOME="${CASE_DIR}/xdg" ATHENA_INBOX_ROOT="${CASE_DIR}/inbox-root" \
         ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
         ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
         ATHENA_INBOX_CLIENT_MAX_RESTARTS=1 \
@@ -1013,6 +1019,21 @@ stop_wd_supervisor() {
   for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && kill -9 "${p}" 2>/dev/null; done
   SUPERVISOR_PID=""
 }
+# install_alert_registry — the COMMITTED custom registry entry (both
+# harness-alerts sides), re-keyed to this checkout's git common dir, installed
+# into the CASE's inbox root only. Without it the alert send fails (the
+# ALERT NOT SENT case relies on that).
+REPO_ROOT="$(cd -- "${SCRIPTS}/.." && pwd -P)"
+install_alert_registry() {
+  local root="${ATHENA_INBOX_ROOT}" common
+  common="$(cd -- "${REPO_ROOT}" && realpath -- "$(git rev-parse --git-common-dir)")"
+  mkdir -p "${root}/projects"; chmod 700 "${root}" "${root}/projects"
+  jq --arg r "${common}" '.projects[] | select(.file == "custom.json") | .entry | .repo = $r' \
+    "${REPO_ROOT}/ai/inbox/registry.json" >"${root}/projects/custom.json"
+  chmod 600 "${root}/projects/custom.json"
+}
+alerts() { find "${ATHENA_INBOX_ROOT}/harness-alerts/to-custom" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort; }
+line_of() { grep -n "$1" "${LOG}" | head -n1 | cut -d: -f1; }
 backdated() { date -u -d "@$(( $(date -u +%s) - $1 ))" +%Y-%m-%dT%H:%M:%SZ; }
 caps() { find "${CASE_DIR}/xdg/athena/inbox-client-dumps" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort; }
 
@@ -1032,9 +1053,15 @@ stop_wd_supervisor
 
 # 40-43. THE WEDGE: captured FIRST, then SIGTERM, then relaunched.
 setup_case wd_wedge
+install_alert_registry
 start_wd_supervisor dump
 FIRST_CLIENT="${CLIENT_PID}"
 printf '%s INFO step tcp_connect 30ms\n' "$(backdated 600)" >> "${LOG}"
+# Clear the ready file BEFORE the watchdog, never after: the watchdog now
+# sends its alert after the SIGTERM (DND-334), so the relaunched client can
+# write its ready file while run_watchdog is still returning -- an rm after it
+# would delete the very evidence of the relaunch (measured: one red under load).
+rm -f "${CASE_DIR}/ready"
 run_watchdog
 CAPDIR="$(caps | tail -n 1)"
 if [ -n "${CAPDIR}" ] && [ -s "${CAPDIR}/dump.txt" ] && [ -s "${CAPDIR}/socket.txt" ] && [ -s "${CAPDIR}/fds.txt" ] \
@@ -1056,7 +1083,6 @@ if grep -q 'WATCHDOG: client pid .* WEDGED' "${LOG}" && grep -q 'WATCHDOG: captu
 else
   bad "the log records wedge -> captured -> SIGTERM, in that order" "$(grep WATCHDOG "${LOG}" | tr '\n' '|')"
 fi
-rm -f "${CASE_DIR}/ready"
 if wait_for_nonempty "${CASE_DIR}/ready" 100 && [ "$(cat "${CASE_DIR}/ready")" != "${FIRST_CLIENT}" ] && kill -0 "${SUPERVISOR_PID}" 2>/dev/null; then
   WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
   ok "the owning supervisor relaunched a NEW client after the SIGTERM"
@@ -1064,6 +1090,24 @@ else
   bad "the owning supervisor relaunched a NEW client after the SIGTERM" "ready=$(cat "${CASE_DIR}/ready" 2>/dev/null) first=${FIRST_CLIENT}"
 fi
 if grep -rqF 'SEKRETtok' "${CAPDIR}" 2>/dev/null; then bad "the watchdog's capture carries no machine token" "token found"; else ok "the watchdog's capture carries no machine token"; fi
+# DND-334: step 5, the harness-alerts message — AFTER the restart, ONE of it.
+if grep -q '^uptime_s: [0-9]' "${CAPDIR}/capture.txt" && grep -q '^reconnecting_since: [0-9]* (' "${CAPDIR}/capture.txt" \
+   && grep -q '^connected_since: [0-9]* (' "${CAPDIR}/capture.txt"; then
+  ok "the capture manifest records uptime and the reconnecting/connected counts (DND-334)"
+else bad "the capture manifest records uptime and the counts" "$(cat "${CAPDIR}/capture.txt")"; fi
+AL="$(alerts)"
+if [ "$(printf '%s\n' "${AL}" | grep -c .)" -eq 1 ] && grep -qx 'from: inbox-client-detector' "${AL}" && grep -qx "re: ${CAPDIR}" "${AL}" \
+   && ! grep -qF 'SEKRETtok' "${AL}"; then
+  ok "the watchdog dropped ONE harness-alerts message from inbox-client-detector, re: the capture, no token"
+else bad "the watchdog dropped ONE harness-alerts message" "alerts=${AL} log=$(grep WATCHDOG "${LOG}" | tr '\n' '|')"; fi
+if [ -n "$(line_of 'WATCHDOG: alert sent on harness-alerts')" ] && [ "$(line_of 'WATCHDOG: SIGTERM')" -lt "$(line_of 'WATCHDOG: alert sent on harness-alerts')" ]; then
+  ok "the alert is sent only AFTER the SIGTERM: a send can never delay the restart"
+else bad "the alert is sent only after the SIGTERM" "$(grep WATCHDOG "${LOG}" | tr '\n' '|')"; fi
+printf '[]' >"${CASE_DIR}/none.json"
+D="$(bash "${REPO_ROOT}/ai/skills/athena:inbox-attend/bin/wedge-ticket-decide" --message "${AL}" --tickets "${CASE_DIR}/none.json" 2>&1)"
+if printf '%s\n' "${D}" | grep -qx 'decision	create' && printf '%s\n' "${D}" | grep -qx "sig8	$(sed -n 's/^signature: //p' "${CAPDIR}/signature.txt" | cut -c1-8)"; then
+  ok "end to end: a REAL capture's alert verifies against the capture and resolves create"
+else bad "end to end: a real capture's alert verifies and resolves create" "${D}"; fi
 stop_wd_supervisor
 
 # 44. A client that IGNORES SIGQUIT: the capture records the absent dump and
@@ -1072,6 +1116,7 @@ stop_wd_supervisor
 setup_case wd_ignore
 start_wd_supervisor ignore
 printf '%s INFO reconnecting in 1.0s\n' "$(backdated 600)" >> "${LOG}"
+rm -f "${CASE_DIR}/ready"   # before the watchdog: see case 40-43
 run_watchdog 2
 CAPDIR="$(caps | tail -n 1)"
 if [ -n "${CAPDIR}" ] && grep -q '^dump: absent (handler did not respond within 2s)$' "${CAPDIR}/capture.txt" && [ -s "${CASE_DIR}/term" ]; then
@@ -1079,13 +1124,20 @@ if [ -n "${CAPDIR}" ] && grep -q '^dump: absent (handler did not respond within 
 else
   bad "an ignored SIGQUIT is recorded as 'dump: absent', and the client is still restarted" "cap=${CAPDIR} term=$(cat "${CASE_DIR}/term" 2>/dev/null)"
 fi
+# DND-334: this case's inbox root has NO registry entry, so the alert send
+# fails. It must be loud (with a Fix:) and must not have held up the restart.
+if [ -n "$(line_of 'WATCHDOG: ALERT NOT SENT')" ] && grep -q 'SUPERVISOR   Fix: .*inbox-client-alert' "${LOG}" \
+   && [ "$(line_of 'WATCHDOG: SIGTERM')" -lt "$(line_of 'WATCHDOG: ALERT NOT SENT')" ] && [ -s "${CASE_DIR}/term" ] && [ -z "$(alerts)" ]; then
+  ok "a failed alert send is logged loudly with a Fix:, after the restart, which it never blocked"
+else bad "a failed alert send is logged loudly with a Fix:, after the restart" "$(grep -A1 'WATCHDOG' "${LOG}" | tr '\n' '|')"; fi
 
 # 45. The same wedge line is acted on ONCE. The restart writes new lines, so a
 #     new wedge has a new last line; re-seeing the old one must not capture and
 #     kill the fresh client.
 n_before="$(caps | wc -l)"
-rm -f "${CASE_DIR}/term" "${CASE_DIR}/ready"
+rm -f "${CASE_DIR}/term"
 wait_for_nonempty "${CASE_DIR}/ready" 100 && WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
+rm -f "${CASE_DIR}/ready"
 tail -n 1 "${LOG}" >/dev/null
 grep 'INFO reconnecting in 1.0s' "${LOG}" | head -n 1 >> "${LOG}"
 run_watchdog 2
@@ -1101,6 +1153,7 @@ stop_wd_supervisor
 #      right before the signal, so the watchdog signals NOTHING rather than
 #      TERMing the fresh client or an unrelated process.
 setup_case wd_dies_mid_capture
+install_alert_registry
 start_wd_supervisor exit
 printf '%s INFO step tls 48ms\n' "$(backdated 600)" >> "${LOG}"
 run_watchdog 3
@@ -1110,6 +1163,12 @@ if grep -q 'no longer the supervised client after the capture; not signalling' "
 else
   bad "a client that died mid-capture is not signalled: identity is re-checked before SIGTERM" "$(grep WATCHDOG "${LOG}" | tr '\n' '|') term=$(cat "${CASE_DIR}/term" 2>/dev/null)"
 fi
+# DND-334: nothing was restarted, but a wedge WAS captured -- so it still alerts.
+CAPDIR="$(caps | tail -n 1)"; AL="$(alerts)"
+if [ -n "${CAPDIR}" ] && [ "$(printf '%s\n' "${AL}" | grep -c .)" -eq 1 ] && grep -qx "re: ${CAPDIR}" "${AL}" \
+   && [ "$(line_of 'not signalling')" -lt "$(line_of 'WATCHDOG: alert sent on harness-alerts')" ]; then
+  ok "the not-signalling path still sends ONE alert for its capture, after the decision"
+else bad "the not-signalling path still sends ONE alert for its capture" "cap=${CAPDIR} alerts=${AL} $(grep WATCHDOG "${LOG}" | tr '\n' '|')"; fi
 [ -s "${CASE_DIR}/ready" ] && WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
 stop_wd_supervisor
 
