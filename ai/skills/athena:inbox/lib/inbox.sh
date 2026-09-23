@@ -1655,6 +1655,48 @@ inbox_mcp_registration() {
   mcp_registered_url "${main}" "${top}"
 }
 
+# inbox_machine_names [cwd]
+#
+# read-inbox's ONE machine-name lookup (DND-376): `list_my_machines` through the
+# launcher bearer, as a names-state (lib/routed.sh -> "the sender's machine
+# NAME"). Always prints a state and returns 0: a name is display, so no failure
+# here may fail a read or stop an ack. Every way the lookup cannot happen is an
+# unresolved state with its OWN reason -- not registered, registration
+# unreadable, bearer unset, the call failed, the server answered an error, no
+# answer -- so the render says which, never a blank or a guess.
+#
+# The server's error words are NOT carried into the reason: the reason is
+# printed outside the untrusted fence. mcp_call_tool's own reasons (this
+# client's text, naming an already-validated URL and an HTTP status) are.
+#
+# The wait is bounded at 10s unless ATHENA_MCP_HTTP_TIMEOUT says otherwise: a
+# display lookup must not hold a read (and its channel lock) for the send
+# path's 30s.
+inbox_machine_names() {
+  local cwd="${1:-.}" url rc out res
+  url="$(inbox_mcp_registration "${cwd}" 2>/dev/null)"; rc=$?
+  case "${rc}" in
+    0) ;;
+    1) routed_names_unresolved "the athena MCP is not registered for this project"; return 0 ;;
+    3) routed_names_unresolved "this project's athena MCP registration cannot be read"; return 0 ;;
+    *) routed_names_unresolved "the athena MCP registration could not be looked up"; return 0 ;;
+  esac
+  if [ -z "${ATHENA_MCP_BEARER:-}" ]; then
+    routed_names_unresolved "ATHENA_MCP_BEARER is not set in this session"; return 0
+  fi
+  out="$(ATHENA_MCP_HTTP_TIMEOUT="${ATHENA_MCP_HTTP_TIMEOUT:-10}" mcp_call_tool "${url}" list_my_machines '{}')"; rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    routed_names_unresolved "list_my_machines failed: $(printf '%s' "${out}" | head -n 1)"; return 0
+  fi
+  res="$(routed_tool_result "${out}")"; rc=$?
+  case "${rc}" in
+    0) routed_names_from_list "${res}" ;;
+    1) routed_names_unresolved "list_my_machines returned no answer" ;;
+    *) routed_names_unresolved "list_my_machines answered an error" ;;
+  esac
+  return 0
+}
+
 # inbox_self_reachable <url>
 # `machine_reachable {}` -- THIS machine (no machine_id = self; gen_saas HG-20),
 # through the launcher bearer. Prints "<verdict>\t<self_id>\t<detail>":

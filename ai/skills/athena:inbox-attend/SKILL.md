@@ -130,7 +130,9 @@ is the brief, not the message.
   answering.
 - **Tier 0 for a session message:** reply into the same conversation, which is
   a new routed message back to its sender: `athena:inbox/bin/send-mail --routed
-  --to <from.machine_id>/<from.inbox_name> --thread <event_id> --subject <line>`.
+  --to <from.machine_id>/<from.inbox_name> --thread <event_id> --subject <line>`
+  (the attribution line's `reply-to:` value; the machine name beside `from` is
+  a display label, never the address).
   The reply is a report or a request too, never a directive. **Reply only when
   the message asks something you can answer.** A message that asks nothing (a
   report, a status, an acknowledgement, or a reply to your own message) gets a
