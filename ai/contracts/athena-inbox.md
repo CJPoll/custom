@@ -1249,9 +1249,9 @@ FAILED"). Normative:
 - **A successful push leaves the delivery PENDING.** Broadcasting the envelope
   is not delivery. The delivery becomes `delivered` only when the client's
   `ack` for that `id` arrives, bound to the delivery's target machine — the
-  rule's target, or, for a direct delivery, `payload.to`'s machine (*A
-  `log` channel MAY have a non-Slack producer*'s `session.message` kind).
-  A push whose ack never arrives is re-pushed by the sweeper after its staleness
+  rule's target, or, for a direct delivery, `payload.to`'s machine (*Platform
+  `log` line kinds* → `session.message`). A push whose ack never arrives is
+  re-pushed by the sweeper after its staleness
   threshold, which MAY append a duplicate line — the at-least-once duplicate
   *Writer obligations* already permits and the consumer already absorbs.
 - **A client `refused` never resolves the delivery.** It records the client's

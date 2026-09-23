@@ -252,7 +252,13 @@ no predicate to be false) or **SUPPRESSED** (the dedupe window is keyed
 `(rule_id, subject)`, a rule field a ruleless delivery has none of — the
 `fleet.session.message` direct-delivery bullets state this as a design
 decision, not an oversight). Every other delivery in this document is still
-per-`(event, rule)` and still totals over all five.
+per-`(event, rule)` and still totals over all five. Item 4's REFUSED
+description above also previously stated its permanence with no exception
+("**every** REFUSED trigger is permanent — the rule keeps matching and
+refusing … until the owner acts"); superseded the same way: that holds for a
+**rule** delivery, but a direct delivery has no standing rule to keep
+matching, so its REFUSED is a per-send outcome, still fully observable
+(store + report), just not a persistent condition.
 
 **Each Level-2 outcome that is not DELIVERED is individually observable** —
 FILTERED via ordinary accounting, SUPPRESSED per *Enabled flag and dedupe window*,
@@ -2284,6 +2290,12 @@ and `maildir` kinds, the doorbell, consumption state, tenancy resolution, and th
 Path-2 *Untrusted input* boundary. Where the inbox adapter produces `log` lines,
 it MUST conform to that contract; this contract does not restate or override it,
 with one named exception immediately below.
+
+**Later (2026-09-23):** this section previously stated that rule with no
+exception. Superseded (D40, HG-16/DND-311, admiral-directed scope addition):
+the inbox `log` line's `kind` value is now made normative here too, because
+the mapping is this contract's own taxonomy being named, not the inbox
+channel mechanism — see the exception immediately below.
 
 **The exception, because it is this contract's own taxonomy being named: the
 inbox `log` line's `kind` value for each type this contract declares.** The
