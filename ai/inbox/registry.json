@@ -45,6 +45,11 @@
             "path": "walt_ui-flaky.jsonl",
             "producer": "platform"
           },
+          "agent-messages": {
+            "kind": "log",
+            "path": "walt_ui-agent-messages.jsonl",
+            "producer": "platform"
+          },
           "custom-mail": {
             "kind": "maildir",
             "namespace": "agent-mail/walt_ui",
