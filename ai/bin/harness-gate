@@ -282,12 +282,27 @@ end
 # discover_self_tests(root) directly, not just through this constant), and
 # THAT raise is caught by the rescue around the dispatch below, which reports
 # it with a Fix: line instead of a bare Ruby backtrace.
+# DND-404: runs LAST, after every discovered self-test — never merged into
+# STATIC_CHECKS (which precedes self_test_checks below) or discovery order
+# would put it before the suite it backstops.
+# scripts/test/inbox-client-capture/self-test.sh starts real
+# mock-athena-inbox-client.rb processes and reaps them by pid in its own
+# trap; a trap cannot survive a SIGKILL of the suite itself. This is the
+# gate-level backstop, scoped to THIS run via MOCK_ORPHAN_MARKER_VAR (set
+# below, inherited by every child this process spawns).
+FINAL_CHECKS = [
+  ["check-inbox-mock-orphans", %w[ai/bin/check-inbox-mock-orphans]],
+].freeze
+
 CHECKS =
   begin
-    (STATIC_CHECKS + self_test_checks).freeze
+    (STATIC_CHECKS + self_test_checks + FINAL_CHECKS).freeze
   rescue GitTrackingError
-    STATIC_CHECKS
+    STATIC_CHECKS + FINAL_CHECKS
   end
+
+# Must match ai/bin/check-inbox-mock-orphans's MARKER_VAR exactly.
+MOCK_ORPHAN_MARKER_VAR = "ATHENA_HARNESS_GATE_RUN_MARKER"
 
 # The discovery CONTRACT is the exact filename `self-test.sh` — anything else
 # (a suite named tests.sh, foo_test.sh, ...) is invisible to the glob with no
@@ -463,6 +478,15 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
          "just risks trading this failure for the zero-discovery failure above."
     return 1
   end
+
+  # DND-404: a fresh marker per real gate run, exported so every check we
+  # spawn below (Open3.capture2e inherits the ambient ENV) — and, through
+  # scripts/test/inbox-client-capture/self-test.sh forwarding it into each
+  # mock's argv, every mock-athena-inbox-client.rb this run starts — carries
+  # it. check-inbox-mock-orphans (FINAL_CHECKS, runs last) scopes its sweep to
+  # this exact value, so it can never touch a concurrent gate run's own,
+  # still-live mock in a different worktree.
+  ENV[MOCK_ORPHAN_MARKER_VAR] = "gate-#{Process.pid}-#{(Time.now.to_f * 1_000_000).to_i}"
 
   failures = []
   CHECKS.each do |(label, argv)|

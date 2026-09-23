@@ -1,0 +1,254 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# check-inbox-mock-orphans — DND-404: PT-919-class backstop for
+# scripts/test/inbox-client-capture/self-test.sh.
+#
+# That suite starts real `mock-athena-inbox-client.rb` processes and reaps
+# them BY PID in its own `trap ... EXIT INT TERM`. A trap is airtight against
+# every signal the suite can catch — but not against a SIGKILL of the suite
+# itself (an operator or a timeout wrapper hard-killing a hung/slow
+# harness-gate run), which no trap anywhere can observe. That is exactly what
+# was measured 2026-09-23: a DND-397 captain's harness-gate run left
+# `mock-athena-inbox-client.rb` (PID 359291) running, PPID 1, ~81 min old,
+# after its own worktree's gate had long since returned.
+#
+# This is the gate-level backstop for that unavoidable gap: it runs as the
+# LAST check in harness-gate (ai/bin/harness-gate appends it after every
+# discovered self-test), scoped to THIS gate invocation's run marker
+# (ATHENA_HARNESS_GATE_RUN_MARKER, set once by harness-gate and inherited by
+# every child process it spawns, including every self-test and — because
+# scripts/test/inbox-client-capture/self-test.sh forwards it into each mock's
+# argv — every mock it starts). Matching on the marker, never on the bare
+# filename, is deliberate: a bare `mock-athena-inbox-client.rb` match would
+# also catch a SIBLING gate run's own mock in a different worktree, mid-suite
+# and not yet reaped — a live process this check must never touch.
+#
+# Usage:
+#   ai/bin/check-inbox-mock-orphans            scoped to $ATHENA_HARNESS_GATE_RUN_MARKER
+#   ai/bin/check-inbox-mock-orphans --self-test
+#   ai/bin/check-inbox-mock-orphans --help
+
+require "open3"
+
+MARKER_VAR = "ATHENA_HARNESS_GATE_RUN_MARKER"
+
+HELP = <<~HELP
+  check-inbox-mock-orphans — fail if a mock-athena-inbox-client.rb process
+  (scripts/test/inbox-client-capture's self-test double) outlived this gate
+  run's self-tests.
+
+  Usage:
+    ai/bin/check-inbox-mock-orphans            scoped to $#{MARKER_VAR}
+    ai/bin/check-inbox-mock-orphans --self-test
+    ai/bin/check-inbox-mock-orphans --help
+
+  With no #{MARKER_VAR} set (not invoked from harness-gate), this passes with
+  a note: there is nothing to scope the check to, and matching the bare
+  filename would risk killing a concurrent gate run's own live mock.
+HELP
+
+# Pure: given `ps -eo pid=,ppid=,args=` lines and a run marker, the matching
+# [pid, ppid, args] triples. Matches BOTH the literal mock filename and the
+# marker — never either alone (see the file banner for why).
+def find_orphans(ps_lines, marker)
+  ps_lines.filter_map do |line|
+    line = line.chomp
+    next if line.strip.empty?
+
+    pid, ppid, args = line.strip.split(/\s+/, 3)
+    next unless args
+    next unless args.include?("mock-athena-inbox-client.rb") && args.include?(marker)
+
+    [pid, ppid, args]
+  end
+end
+
+def live_ps_lines
+  out, _err, status = Open3.capture3("ps", "-eo", "pid=,ppid=,args=")
+  return [] unless status.success?
+
+  out.lines
+end
+
+def kill_orphans(orphans)
+  orphans.each do |(pid, _ppid, _args)|
+    begin
+      Process.kill("KILL", pid.to_i)
+    rescue Errno::ESRCH, Errno::EPERM
+      nil
+    end
+  end
+end
+
+def run_check(ps_lines: nil)
+  marker = ENV[MARKER_VAR]
+  if marker.nil? || marker.empty?
+    puts "check-inbox-mock-orphans: no $#{MARKER_VAR} set (not invoked from " \
+         "harness-gate) -- nothing scoped to check."
+    return 0
+  end
+
+  orphans = find_orphans(ps_lines || live_ps_lines, marker)
+  if orphans.empty?
+    puts "check-inbox-mock-orphans: no mock-athena-inbox-client.rb process " \
+         "outlived this gate run (marker #{marker})."
+    return 0
+  end
+
+  kill_orphans(orphans)
+  warn "check-inbox-mock-orphans: FAILED -- #{orphans.size} " \
+       "mock-athena-inbox-client.rb process(es) outlived this gate run's " \
+       "self-tests (the PT-919 class):"
+  orphans.each { |(pid, ppid, args)| warn "  pid=#{pid} ppid=#{ppid} args=#{args}" }
+  warn "  Each was just killed by PID (SIGKILL) as a backstop."
+  warn "  Fix: the self-test that started this mock exited (crashed, was " \
+       "hard-killed, or its host process was killed) without its own EXIT/" \
+       "INT/TERM trap running -- a trap cannot survive SIGKILL. Find the " \
+       "suite under scripts/test/**/self-test.sh that starts " \
+       "mock-athena-inbox-client.rb, confirm every backgrounded mock is " \
+       "tracked by pid and reaped on every exit path, and if the run above was " \
+       "hard-killed rather than exiting on its own, no further action is " \
+       "needed beyond confirming the pid(s) above are gone (this check just " \
+       "did that)."
+  1
+end
+
+# --- --self-test ------------------------------------------------------------
+#
+# Fabricates a real orphan process whose argv contains the literal mock
+# filename and a marker, via bash's `exec -a` (renames argv[0] of the exec'd
+# `sleep`, no ruby/perl dependency, no real mock needed) -- then drives
+# run_check against REAL `ps` output, proving both directions:
+#   * an injected orphan is found, reported with a Fix:, and killed (FAIL);
+#   * once it is gone (or was never there), the same marker is clean (PASS);
+#   * a decoy process carrying the filename but a DIFFERENT marker is left
+#     alone (never touched, never reported) -- the sibling-gate-run case.
+def self_test
+  pass = 0
+  fail_count = 0
+  ok = lambda do |label|
+    puts "  ok    #{label}"
+    pass += 1
+  end
+  bad = lambda do |label, detail|
+    puts "  FAIL  #{label}"
+    puts "        #{detail}"
+    fail_count += 1
+  end
+
+  # 1. Pure matcher: marker+filename both required; a decoy with the filename
+  #    but a different marker (a sibling gate run's own live mock) is ignored.
+  fixture = [
+    "111  222  ruby /x/mock-athena-inbox-client.rb marker-A\n",
+    "112  1    ruby /x/mock-athena-inbox-client.rb marker-B\n",
+    "113  222  ruby /x/athena-inbox-client.rb --config c\n",
+    "\n",
+  ]
+  got = find_orphans(fixture, "marker-A")
+  if got == [["111", "222", "ruby /x/mock-athena-inbox-client.rb marker-A"]]
+    ok.call("find_orphans matches filename+marker, ignores a decoy with a different marker")
+  else
+    bad.call("find_orphans matches filename+marker, ignores a decoy", got.inspect)
+  end
+  if find_orphans(fixture, "marker-C").empty?
+    ok.call("an unused marker matches nothing")
+  else
+    bad.call("an unused marker matches nothing", find_orphans(fixture, "marker-C").inspect)
+  end
+
+  # 2. No marker set: environment-safe pass, nothing touched.
+  saved = ENV.delete(MARKER_VAR)
+  rc = run_check(ps_lines: fixture)
+  if rc.zero?
+    ok.call("no #{MARKER_VAR} set: exit 0, nothing scoped to check")
+  else
+    bad.call("no #{MARKER_VAR} set: exit 0", "rc=#{rc}")
+  end
+  ENV[MARKER_VAR] = saved if saved
+
+  # 3. A REAL injected orphan, via real `ps` (not the fixture): the
+  #    unfixed-vs-fixed proof the bug-fix rule asks for. Before this checker
+  #    existed, nothing would ever find or kill this process; run_check finds
+  #    it, reports it with a Fix:, and kills it.
+  marker = "selftest-#{Process.pid}-#{(Time.now.to_f * 1_000_000).to_i}"
+  pid = Process.spawn(
+    "bash", "-c", 'exec -a "$1" sleep 300', "_", "mock-athena-inbox-client.rb #{marker}",
+    out: "/dev/null", err: "/dev/null"
+  )
+  Process.detach(pid)
+  # Bounded poll: wait until the fabricated process is actually visible to
+  # `ps` under its renamed argv before asserting on it (never a fixed sleep).
+  visible = false
+  40.times do
+    visible = find_orphans(live_ps_lines, marker).any? { |(p, _, _)| p == pid.to_s }
+    break if visible
+
+    sleep 0.05
+  end
+  unless visible
+    bad.call("the fabricated orphan is visible to ps before the assertion", "never appeared (pid #{pid})")
+  end
+
+  ENV[MARKER_VAR] = marker
+  rc = run_check
+  ENV.delete(MARKER_VAR)
+
+  if rc == 1
+    ok.call("a real injected orphan (this run's marker) -> exit 1 (FAIL), Fix: printed")
+  else
+    bad.call("a real injected orphan -> exit 1", "rc=#{rc}")
+  end
+
+  # Bounded poll: SIGKILL delivery/reap is not synchronous with the kill(2)
+  # call returning, so check with a real (short) wait, never a fixed sleep.
+  still_alive = true
+  40.times do
+    still_alive = begin
+      Process.kill(0, pid)
+      true
+    rescue Errno::ESRCH
+      false
+    end
+    break unless still_alive
+
+    sleep 0.05
+  end
+  if still_alive
+    bad.call("the injected orphan was killed by the check", "pid #{pid} still alive")
+  else
+    ok.call("the injected orphan was killed by the check (pid #{pid} gone)")
+  end
+
+  ENV[MARKER_VAR] = marker
+  rc2 = run_check
+  ENV.delete(MARKER_VAR)
+  if rc2.zero?
+    ok.call("re-running with the same (now-clean) marker -> exit 0 (PASS)")
+  else
+    bad.call("re-running with the same, now-clean marker -> exit 0", "rc=#{rc2}")
+  end
+
+  puts ""
+  if fail_count.zero?
+    puts "VERDICT: PASS (#{pass} cases)"
+    0
+  else
+    puts "VERDICT: FAIL (#{fail_count} of #{pass + fail_count} cases failed)"
+    1
+  end
+end
+
+case ARGV.first
+when "--help"
+  puts HELP
+  exit 0
+when "--self-test"
+  exit self_test
+when nil
+  exit run_check
+else
+  warn "check-inbox-mock-orphans: unknown argument #{ARGV.first.inspect}"
+  warn "  Fix: run with no arguments, --self-test, or --help."
+  exit 1
+end
