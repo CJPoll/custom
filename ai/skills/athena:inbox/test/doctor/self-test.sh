@@ -493,6 +493,11 @@ assert_eq "message-mode is counted in the info bucket" true "$(printf '%s' "${JM
 assert_eq "message-mode does NOT flip healthy" true "$(printf '%s' "${JMM}" | jq -r '.summary.healthy')"
 assert_eq "message-mode does not set a non-zero exit" 0 "$( ( cd "${RMM}" && ATHENA_INBOX_REGISTRY="${DECLMM}" ATHENA_INBOX_CLIENT_CONFIG="${TMP}/none.json" ATHENA_INBOX_DOCTOR_CRON_CHECK=true bash "${BIN}" --no-server >/dev/null 2>&1 ); echo $? )"
 assert_not_contains "the bin output never leaks a message slug" "drift.md" "$(printf '%s' "${JMM}" | jq -r '.findings[]|select(.check=="message-mode")|.message + " " + .fix')"
+# The bin actually RUNS both owner-report checks: a check a later edit drops from
+# collect_findings must turn this red, not just go quiet for users.
+for owner_check in server-failed-deliveries server-refused-deliveries; do
+  assert_eq "the bin runs ${owner_check} (na under --no-server)" na "$(printf '%s' "${JMM}" | jq -r --arg c "${owner_check}" '[.findings[]|select(.check==$c)|.state]|join(",")')"
+done
 
 # ============================================================================
 echo "== DND-316: client-liveness (never pid existence) =="
