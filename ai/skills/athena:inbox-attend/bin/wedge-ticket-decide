@@ -21,7 +21,7 @@
 #        create            no open ticket carries [wedge:<sig8>] in its title
 #        increment         one does; bump `Occurrences: N` and add the line
 #        already-recorded  that ticket already lists this capture (idempotent)
-#        refuse            anything unverifiable, pruned or ambiguous (exit 3)
+#        refuse            anything unverifiable, pruned, ambiguous or manual (exit 3)
 #      plus `needs_attention yes` when this makes >= 3 occurrences within 7 days
 #      and the ticket is not already in Needs Attention.
 #
@@ -53,10 +53,10 @@
 # Output (stdout): `key<TAB>value` lines, then for `create` a line
 # `--- body ---` followed by the ticket body to write.
 # Exit codes: 0 decided (create / increment / already-recorded / verified) · 1 usage ·
-#             3 refused (verification failed or ambiguous; stdout says
+#             3 refused (verification failed, ambiguous or manual; stdout says
 #             `decision<TAB>refuse` and `refusal<TAB><class>` -- unverifiable,
-#             pruned, integrity or ambiguous -- and stderr carries the reason
-#             and a Fix:)
+#             pruned, integrity, ambiguous or manual -- and stderr carries the
+#             reason and a Fix:)
 
 set -uo pipefail
 export LC_ALL="${LC_ALL:-C.UTF-8}"
@@ -96,7 +96,7 @@ for f in err.sh names.sh maildir.sh liveness.sh wedge.sh; do
   . "${INBOX_LIB}/${f}"
 done
 
-# refuse [--class pruned|integrity|ambiguous] <reason> <fix>
+# refuse [--class pruned|integrity|ambiguous|manual] <reason> <fix>
 # Every refusal files nothing. Its CLASS tells the attendant how to report it
 # (athena:inbox-attend -> harness-alerts, which alone decides who is told):
 #   unverifiable (default)  the message or capture cannot be checked
@@ -107,6 +107,9 @@ done
 #                           local forgery or post-capture edit
 #   ambiguous               the tracker state needs a human (duplicates, a
 #                           prefix collision)
+#   manual                  the capture is trigger: manual (DND-362) -- a
+#                           healthy-client capture, never a wedge, regardless
+#                           of what the message claims
 # The Fix: texts below say what is wrong and what a human would do about it;
 # they never tell the attendant whom to contact -- that is the brief's call.
 refuse() {
@@ -182,6 +185,15 @@ for f in capture.txt signature.txt; do
 done
 manifest() { sed -n "s/^$1: //p" "${REAL_CAP}/capture.txt" | head -n 1; }
 
+# DND-362: a MANUAL capture (scripts/inbox-client-capture --now, or a direct
+# pid, run by a human) is not a wedge -- it proves nothing about the client
+# being stuck, even if a message somehow named it (untrusted input; the
+# capture on disk is authoritative). A LEGACY capture with no trigger field
+# (written before DND-362) is treated as watchdog, the pre-existing behaviour.
+TRIGGER="$(manifest trigger)"
+[ "${TRIGGER}" != "manual" ] || refuse --class manual "the capture is a MANUAL capture (trigger: manual), not a wedge the watchdog captured" \
+  "nothing was filed; a manual inbox-client-capture --now (or a directly-invoked capture) on a healthy client is never a wedge, however this message came to name it. If this really is a recurring wedge, let the supervisor watchdog capture it, or file the ticket by hand."
+
 # ---- 3. recompute the signature from the capture ---------------------------
 STEP="$(manifest step)"
 wedge_valid_step "${STEP}" || refuse "the capture manifest carries no valid step" "inspect ${REAL_CAP}/capture.txt; nothing was filed."
@@ -232,6 +244,9 @@ emit_common() {
   printf 'capture\t%s\n' "${REAL_CAP}"
   printf 'captured_at\t%s\n' "${CAPTURED_AT}"
   printf 'frames_from\t%s\n' "${FRAMES_FROM}"
+  # DND-362: never silent -- a legacy capture with no trigger field says so
+  # here rather than reading as an ordinary watchdog capture with no comment.
+  printf 'trigger\t%s\n' "${TRIGGER:-unrecorded}"
 }
 
 if [ "${VERIFY_ONLY}" -eq 1 ]; then

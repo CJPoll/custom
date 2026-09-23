@@ -132,6 +132,7 @@ for f in capture.txt dump.txt socket.txt fds.txt status.txt log-tail.txt signatu
   if [ -s "${CAP}/${f}" ]; then ok "capture holds ${f}"; else bad "capture holds ${f}" "missing or empty in ${CAP}"; fi
 done
 if grep -q '^dump: present' "${CAP}/capture.txt"; then ok "the manifest says the dump is present"; else bad "the manifest says the dump is present" "$(cat "${CAP}/capture.txt")"; fi
+if grep -q '^trigger: manual$' "${CAP}/capture.txt"; then ok "a direct-pid capture with no --trigger defaults to trigger: manual (DND-362)"; else bad "a direct-pid capture defaults to trigger: manual" "$(cat "${CAP}/capture.txt")"; fi
 if [ -z "$(find "${DUMPS}" -maxdepth 1 -type f -name "*-${M1}.txt")" ]; then ok "the loose LV-1 dump was MOVED into the capture (one owner)"; else bad "the loose LV-1 dump was MOVED into the capture (one owner)" "still loose"; fi
 if [ "$(stat -c %a "${CAP}")" = "700" ] && [ -z "$(find "${CAP}" -type f ! -perm 600)" ]; then ok "the capture is 0700 with 0600 files"; else bad "the capture is 0700 with 0600 files" "$(stat -c '%a %n' "${CAP}" "${CAP}"/*)"; fi
 if grep -rqF -- "${TOKEN:0:8}" "${CAP}"; then bad "the machine token (and its 8-char prefix) never appears in the capture" "$(grep -rlF -- "${TOKEN:0:8}" "${CAP}")"; else ok "the machine token (and its 8-char prefix) never appears in the capture"; fi
@@ -141,6 +142,14 @@ EXPECT_FRAMES="$(printf '  %s\n' 'athena-inbox-client.rb:connect_nonblock' 'athe
 if [ "$(sed -n '/^frames:$/,$p' "${CAP}/signature.txt" | tail -n +2)" = "${EXPECT_FRAMES}" ]; then ok "the signature uses the step worker's top 5 frames, file:function only"; else bad "the signature uses the step worker's top 5 frames, file:function only" "$(cat "${CAP}/signature.txt")"; fi
 SIG1="$(field "${out}" signature)"
 if kill -0 "${M1}" 2>/dev/null && [ ! -e "${TMP}/m1.term" ]; then ok "capture never kills or signals TERM (restart is the caller's, after)"; else bad "capture never kills or signals TERM (restart is the caller's, after)" "mock gone or TERMed"; fi
+
+# ---------------------------------------------------------------------------
+printf '\nC-1b  --trigger (DND-362): only the supervisor watchdog claims watchdog\n'
+out="$("${CAPTURE}" "${M1}" --step tls --trigger watchdog 2>&1)"; rc=$?
+CAPW="$(field "${out}" dir)"
+if [ "${rc}" -eq 0 ] && grep -q '^trigger: watchdog$' "${CAPW}/capture.txt"; then ok "--trigger watchdog is recorded verbatim (the watchdog's own invocation)"; else bad "--trigger watchdog is recorded verbatim" "rc=${rc} $(cat "${CAPW}/capture.txt" 2>/dev/null)"; fi
+out="$("${CAPTURE}" "${M1}" --trigger bogus 2>&1)"; rc=$?
+if [ "${rc}" -eq 1 ] && grep -q 'Fix:' <<<"${out}"; then ok "--trigger bogus is a usage error with a Fix: (only watchdog|manual)"; else bad "--trigger bogus is a usage error with a Fix:" "rc=${rc} ${out}"; fi
 
 # ---------------------------------------------------------------------------
 printf '\nC-7  the summary facts the harness-alerts message reads (DND-334)\n'
@@ -260,7 +269,9 @@ printf '2026-09-23T09:00:00Z INFO step tcp_connect 30ms\n' > "${LOG}"
 # the attendant's verifier must still accept this REAL capture -- from the
 # frames signature.txt recorded -- rather than call it tampered.
 start_mock m6 MOCK_MODE=dump MOCK_FLIGHT_LINES=400; M6="${MOCK_PID}"
-out="$(ATHENA_INBOX_CAPTURE_MAX_BYTES=12000 "${CAPTURE}" "${M6}" --step tls 2>&1)"
+# This simulates the watchdog's own capture-before-restart, which always
+# claims --trigger watchdog (DND-362); wedge-ticket-decide refuses a manual one.
+out="$(ATHENA_INBOX_CAPTURE_MAX_BYTES=12000 "${CAPTURE}" "${M6}" --step tls --trigger watchdog 2>&1)"
 CAPD="$(field "${out}" dir)"
 if grep -qF 'truncated by inbox-client-capture' "${CAPD}/dump.txt" 2>/dev/null && ! grep -q 'with_deadline' "${CAPD}/dump.txt"; then
   ok "the size cap truncated dump.txt and cut its frames (the case the verifier must survive)"
@@ -343,6 +354,7 @@ got="$("${CAPTURE}" --resolve-client 2>&1)"; rc=$?
 if [ "${rc}" -eq 0 ] && [ "${got}" = "${CHILD}" ]; then ok "--resolve-client finds the supervisor's child, not a pattern match"; else bad "--resolve-client finds the supervisor's child, not a pattern match" "rc=${rc} got=${got} want=${CHILD}"; fi
 out="$("${CAPTURE}" --now 2>&1)"; rc=$?
 if [ "${rc}" -eq 0 ] && grep -q "^pid: ${CHILD}$" "$(field "${out}" dir)/capture.txt" && grep -q '^reason: manual (--now)$' "$(field "${out}" dir)/capture.txt"; then ok "--now captures the supervised client"; else bad "--now captures the supervised client" "rc=${rc} ${out}"; fi
+if grep -q '^trigger: manual$' "$(field "${out}" dir)/capture.txt"; then ok "--now defaults trigger: manual too (DND-362: only the watchdog claims watchdog)"; else bad "--now defaults trigger: manual too" "$(cat "$(field "${out}" dir)/capture.txt" 2>/dev/null)"; fi
 if kill -0 "${CHILD}" 2>/dev/null && [ ! -e "${TMP}/sup.term" ]; then ok "--now never restarts or signals TERM"; else bad "--now never restarts or signals TERM" "child gone"; fi
 
 # During a restart backoff the supervisor's child is a `sleep`.

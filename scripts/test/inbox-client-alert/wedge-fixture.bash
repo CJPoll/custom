@@ -14,10 +14,12 @@
 # shellcheck source=ai/skills/athena:inbox/lib/wedge.sh
 . "${WF_REPO}/ai/skills/athena:inbox/lib/wedge.sh"
 
-# wf_make_capture <dumps-dir> <name> <step> [top-frame-function]
+# wf_make_capture <dumps-dir> <name> <step> [top-frame-function] [trigger]
 # Creates <dumps-dir>/<name>/ and prints its path. The capture "finished" now.
+# trigger defaults to `watchdog` (DND-362): every D37/D38 fixture is shaped
+# like a real watchdog-triggered wedge capture unless a suite says otherwise.
 wf_make_capture() {
-  local dumps="$1" name="$2" step="$3" top="${4:-connect_nonblock}" d frames sig now_ms
+  local dumps="$1" name="$2" step="$3" top="${4:-connect_nonblock}" trigger="${5:-watchdog}" d frames sig now_ms
   d="${dumps}/${name}"
   mkdir -p "${dumps}" && chmod 700 "${dumps}"
   mkdir -m 700 "${d}" || return 1
@@ -50,7 +52,7 @@ EOF
   } >"${d}/signature.txt"
   {
     printf 'inbox-client-capture (DND-333)\n'
-    printf 'pid: 4242\nreason: watchdog: test\nstep: %s\ndump: present\n' "${step}"
+    printf 'pid: 4242\nreason: watchdog: test\ntrigger: %s\nstep: %s\ndump: present\n' "${trigger}" "${step}"
     printf 'dump_current_step: %s\nsignature: %s\n' "${step}" "${sig}"
     printf 'redaction: token and its 8-char prefix replaced with [REDACTED]\n'
     printf 'started_ms: %s\nsigquit_ms: %s\nfinished_ms: %s\n' "${now_ms}" "${now_ms}" "${now_ms}"

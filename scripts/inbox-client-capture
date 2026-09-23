@@ -14,7 +14,7 @@
 # no restart.
 #
 # Usage:
-#   inbox-client-capture <pid> [--step STEP] [--reason TEXT]
+#   inbox-client-capture <pid> [--step STEP] [--reason TEXT] [--trigger T]
 #                               capture the client <pid> (identity asserted)
 #   inbox-client-capture --now [--step STEP] [--reason TEXT]
 #                               resolve the supervised client and capture it
@@ -23,11 +23,21 @@
 #   inbox-client-capture --self-test   run scripts/test/inbox-client-capture/self-test.sh
 #   inbox-client-capture --help        this text
 #
+#   --trigger watchdog|manual  who is capturing (DND-362, LV-2 finding). The
+#              SUPERVISOR watchdog (scripts/athena-inbox-client-run.sh) passes
+#              `--trigger watchdog` explicitly; every other caller -- `--now`
+#              or a direct pid, run by a human -- defaults to `manual` and
+#              never needs to pass it. This is what tells the doctor's
+#              `captures` check and LV-3's wedge-ticket-decide a capture is
+#              NOT a wedge the watchdog captured: a manual capture on a
+#              healthy client is not evidence of anything wedged.
+#
 # What one capture holds — ONE directory, 0700, files 0600:
 #   $XDG_STATE_HOME/athena/inbox-client-dumps/<utc>-<pid>/
-#     capture.txt    manifest: pid, reason, step, timestamps (ms), dump status,
-#                    uptime, reconnecting/connected counts since the last
-#                    (re)start (DND-334: the harness-alerts summary reads them)
+#     capture.txt    manifest: pid, reason, trigger (watchdog|manual), step,
+#                    timestamps (ms), dump status, uptime, reconnecting/
+#                    connected counts since the last (re)start (DND-334: the
+#                    harness-alerts summary reads them)
 #     dump.txt       the LV-1 client's own SIGQUIT dump (threads, flight
 #                    recorder, current_step, socket state) — MOVED in from the
 #                    loose <utc>-<pid>.txt the client writes beside this dir
@@ -134,7 +144,7 @@ WEDGE_LIB="${HERE}/../ai/skills/athena:inbox/lib/wedge.sh"
 REPO="$(cd -- "${HERE}/.." && pwd -P)"
 INBOX_LIB_DIR="${HERE}/../ai/skills/athena:inbox/lib"
 
-MODE="capture"; PID=""; STEP=""; REASON="manual"
+MODE="capture"; PID=""; STEP=""; REASON="manual"; TRIGGER="manual"
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -143,6 +153,12 @@ while [ $# -gt 0 ]; do
     --resolve-client) MODE="resolve" ;;
     --step) shift; [ $# -gt 0 ] || { echo "error: --step needs a value" >&2; echo "  Fix: pass --step <name>, e.g. --step tls." >&2; exit 1; }; STEP="$1" ;;
     --reason) shift; [ $# -gt 0 ] || { echo "error: --reason needs a value" >&2; echo "  Fix: pass --reason <text>." >&2; exit 1; }; REASON="$1" ;;
+    --trigger) shift; [ $# -gt 0 ] || { echo "error: --trigger needs a value" >&2; echo "  Fix: pass --trigger watchdog or --trigger manual." >&2; exit 1; }
+       case "$1" in
+         watchdog|manual) TRIGGER="$1" ;;
+         *) echo "error: --trigger must be watchdog or manual (got '$1')" >&2
+            echo "  Fix: pass --trigger watchdog (the supervisor watchdog only) or --trigger manual; omit it to default to manual." >&2; exit 1 ;;
+       esac ;;
     --*) echo "error: unknown option: $1" >&2
          echo "  Fix: see inbox-client-capture --help." >&2; exit 1 ;;
     *) [ -z "${PID}" ] || { echo "error: more than one pid given" >&2; echo "  Fix: capture one client at a time: inbox-client-capture <pid>." >&2; exit 1; }
@@ -548,6 +564,7 @@ FINISHED_MS="$(now_ms)"
   printf 'inbox-client-capture (DND-333)\n'
   printf 'pid: %s\n' "${PID}"
   printf 'reason: %s\n' "${REASON}"
+  printf 'trigger: %s\n' "${TRIGGER}"
   printf 'step: %s\n' "${SIG_STEP}"
   printf 'dump: %s\n' "${DUMP_STATUS}"
   printf 'dump_current_step: %s\n' "${DUMP_STEP:-n/a}"

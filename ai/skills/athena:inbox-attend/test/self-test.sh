@@ -141,6 +141,29 @@ run --message "${MSG_T}" --tickets "${TMP}/one.json" --now "${NOW}"
 if [ "${RC}" -eq 3 ] && ! grep -q '^occurrence_line' <<<"${OUT}"; then ok "a tampered message cannot increment an existing ticket either"; else bad "a tampered message cannot increment an existing ticket either" "rc=${RC} ${OUT}"; fi
 
 # ---------------------------------------------------------------------------
+printf '\nD-5b  (DND-362) a MANUAL capture is refused, class manual, never integrity\n'
+CAPMAN="$(wf_make_capture "${DUMPS}" 20260923T100050Z-4250 tls connect_nonblock manual)"
+SIGMAN="$(wf_signature_of "${CAPMAN}")"
+MSG_MAN="$(wf_make_message "${TMP}/manual" "${CAPMAN}" "${SIGMAN}")"
+run --message "${MSG_MAN}" --tickets "${TMP}/none.json" --now "${NOW}"
+if [ "${RC}" -eq 3 ] && [ "$(field "${OUT}" decision)" = "refuse" ] && [ "$(field "${OUT}" refusal)" = "manual" ]; then ok "a manual capture's message is refused, class manual"; else bad "a manual capture's message is refused, class manual" "rc=${RC} out=${OUT} err=${ERR}"; fi
+if grep -q 'MANUAL capture' <<<"${ERR}" && grep -q '^  Fix: ' <<<"${ERR}" && ! grep -q 'REFUSED (integrity)' <<<"${ERR}"; then ok "the refusal names it as manual, carries Fix:, and is never classed integrity"; else bad "the refusal names it as manual and is never integrity" "${ERR}"; fi
+run --message "${MSG_MAN}" --verify-only
+if [ "${RC}" -eq 3 ] && [ "$(field "${OUT}" refusal)" = "manual" ]; then ok "--verify-only refuses a manual capture too (before any tracker search)"; else bad "--verify-only refuses a manual capture too" "rc=${RC} ${OUT}"; fi
+# A watchdog-triggered capture (the default of wf_make_capture) is unaffected,
+# and its decided output now carries the trigger it read.
+run --message "${MSG}" --verify-only
+if [ "${RC}" -eq 0 ] && [ "$(field "${OUT}" trigger)" = "watchdog" ]; then ok "a watchdog capture verifies and reports trigger watchdog"; else bad "a watchdog capture verifies and reports trigger watchdog" "rc=${RC} ${OUT}"; fi
+# A LEGACY capture (no trigger field, written before DND-362) is treated as
+# watchdog -- the pre-existing behaviour -- but says so rather than reading as
+# an ordinary watchdog capture.
+CAPLEG="$(wf_make_capture "${DUMPS}" 20260923T100060Z-4251 tls)"
+sed -i '/^trigger: /d' "${CAPLEG}/capture.txt"
+SIGLEG="$(wf_signature_of "${CAPLEG}")"
+run --message "$(wf_make_message "${TMP}/legacy" "${CAPLEG}" "${SIGLEG}")" --verify-only
+if [ "${RC}" -eq 0 ] && [ "$(field "${OUT}" decision)" = "verified" ] && [ "$(field "${OUT}" trigger)" = "unrecorded" ]; then ok "a legacy capture with no trigger field still verifies (treated as watchdog) and reports trigger unrecorded"; else bad "a legacy capture verifies and reports trigger unrecorded" "rc=${RC} ${OUT}"; fi
+
+# ---------------------------------------------------------------------------
 printf '\nD-6  the capture is the authority: an altered capture is refused\n'
 CAP2="$(wf_make_capture "${DUMPS}" 20260923T100100Z-4243 tls)"
 SIG2="$(wf_signature_of "${CAP2}")"

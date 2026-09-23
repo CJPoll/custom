@@ -327,7 +327,7 @@ watchdog_pass() {
   fi
 
   say "WATCHDOG: client pid ${c} WEDGED (${detail}); capturing BEFORE restart (D35)"
-  out="$("$CAPTURE" "$c" --step "$step" --reason "watchdog: ${detail}" 9>&- 2>&1)"; rc=$?
+  out="$("$CAPTURE" "$c" --step "$step" --reason "watchdog: ${detail}" --trigger watchdog 9>&- 2>&1)"; rc=$?
   case "$rc" in
     0)
       dir="$(printf '%s\n' "$out" | awk -F'\t' '$1=="dir"{print $2}')"

@@ -411,8 +411,18 @@ doctor_check_watchdog() {
 # is a past wedge already restarted, not a degraded running chain; the live
 # state is client-liveness's to grade. Only facts the capture tool wrote are
 # read (step, signature, dump status) -- never a dump body.
+#
+# DND-362: a capture's `trigger:` line (watchdog|manual, written by
+# scripts/inbox-client-capture) says WHO captured it. Only a watchdog capture
+# is a wedge -- a MANUAL `--now`/direct-pid capture on a healthy client proves
+# nothing wedged, so it is listed separately (its own `manual-captures`
+# finding) and never counted toward the `captures` wedge count or its
+# recurrence signal. A LEGACY capture with no trigger field (written before
+# this field existed) is treated as watchdog, the pre-existing behaviour --
+# but the listing says `(trigger unrecorded)` for it, never silently folding
+# it in as if the field had been read.
 doctor_check_captures() {
-  local dir names n shown="" name sig step dump
+  local dir names n shown="" mshown="" name sig step dump trigger label wn=0 mn=0
   [ -e "$(doctor_client_config_path)" ] || return 0
   dir="$(liveness_dump_dir 2>/dev/null)" || return 0
   [ -d "${dir}" ] || return 0
@@ -428,10 +438,26 @@ doctor_check_captures() {
     sig="$(sed -n 's/^signature: //p' "${dir}/${name}/signature.txt" 2>/dev/null | head -n1 | cut -c1-8)"
     step="$(sed -n 's/^step: //p' "${dir}/${name}/signature.txt" 2>/dev/null | head -n1)"
     dump="$(sed -n 's/^dump: //p' "${dir}/${name}/capture.txt" 2>/dev/null | head -n1 | cut -d' ' -f1)"
-    shown="${shown:+${shown}; }${name} sig ${sig:-?} step ${step:-?} dump ${dump:-?}"
-  done < <(printf '%s\n' "${names}" | head -n 5)
-  doctor_finding warn "captures" "${n} wedge capture(s) on disk (newest first): ${shown}" \
-    "each is a wedge the watchdog captured and then restarted. The same signature more than once is the same wedge recurring -- read that capture's dump.txt and signature.txt (${dir}/<name>/) and file or bump the [wedge:<sig8>] ticket. Retention keeps the newest ATHENA_INBOX_CAPTURE_KEEP (5), plus any an unread harness-alerts message references, up to ATHENA_INBOX_CAPTURE_HARD_MAX (25); prunes are recorded in ${dir}/pruned-captures.log."
+    trigger="$(sed -n 's/^trigger: //p' "${dir}/${name}/capture.txt" 2>/dev/null | head -n1)"
+    if [ "${trigger}" = "manual" ]; then
+      mn=$((mn + 1))
+      [ "${mn}" -gt 5 ] || mshown="${mshown:+${mshown}; }${name} sig ${sig:-?} step ${step:-?} dump ${dump:-?}"
+    else
+      wn=$((wn + 1))
+      label=""; [ -n "${trigger}" ] || label=" (trigger unrecorded)"
+      [ "${wn}" -gt 5 ] || shown="${shown:+${shown}; }${name} sig ${sig:-?} step ${step:-?} dump ${dump:-?}${label}"
+    fi
+  done < <(printf '%s\n' "${names}")
+  if [ "${wn}" -gt 0 ]; then
+    doctor_finding warn "captures" "${wn} wedge capture(s) on disk (newest first): ${shown}" \
+      "each is a wedge the watchdog captured and then restarted. The same signature more than once is the same wedge recurring -- read that capture's dump.txt and signature.txt (${dir}/<name>/) and file or bump the [wedge:<sig8>] ticket. Retention keeps the newest ATHENA_INBOX_CAPTURE_KEEP (5), plus any an unread harness-alerts message references, up to ATHENA_INBOX_CAPTURE_HARD_MAX (25); prunes are recorded in ${dir}/pruned-captures.log. '(trigger unrecorded)' means the capture predates the trigger field (DND-362) and is treated as a watchdog capture."
+  else
+    doctor_finding ok "captures" "no wedge captures in ${dir}"
+  fi
+  if [ "${mn}" -gt 0 ]; then
+    doctor_finding ok "manual-captures" "${mn} manual capture(s) on disk (not wedges, newest first): ${mshown}" \
+      "each is a manual inbox-client-capture --now (or a directly-invoked capture) taken on a client that was not judged wedged. These are never counted as wedges, never trip the recurrence signal, and LV-3's wedge-ticket-decide refuses to file or bump a [wedge:<sig8>] ticket from one."
+  fi
 }
 
 # doctor_check_cron

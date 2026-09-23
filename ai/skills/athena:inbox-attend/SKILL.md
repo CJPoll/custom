@@ -208,6 +208,12 @@ nothing. Name it in your turn output and put it in the ledger as `declined
 
 - `unverifiable` (not from the detector, no capture with no prune on record,
   outside the dump directory, malformed): the ledger and the turn output only.
+- `manual` (DND-362: the capture's `trigger: manual` — a healthy-client capture,
+  never a wedge, however the message came to name it): the ledger and the turn
+  output only, same as `unverifiable`. This should not happen through the real
+  pipeline (harness-alerts messages come only from the watchdog's own
+  captures), so seeing it names a mismatch worth a second look, but it is not
+  itself evidence of tampering and needs no DM.
 - `pruned` (capture retention removed the capture before you processed the
   alert, and its prune ledger says so; DND-367): the occurrence is LOST, not
   tampered. Retention keeps a capture an unread alert references and drops one
