@@ -105,6 +105,12 @@
             "read": "to-server",
             "write": "from-server",
             "identity": "gen_saas-server"
+          },
+          "session": {
+            "kind": "log",
+            "path": "gen_saas-session.jsonl",
+            "producer": "platform",
+            "stale_after_s": 0
           }
         }
       }
