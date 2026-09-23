@@ -16,6 +16,11 @@
 # removes. No network, ever — nothing here makes a request.
 #
 # Run: bash ai/inbox/test/self-test.sh
+#
+# Assertions read captured output with a here-string (`grep -q X <<<"$out"`),
+# never `printf ... | grep -q X`: under pipefail, grep -q exiting on its first
+# match can SIGPIPE the printf and turn a match into a failure (DND-365; seen
+# here as a one-off C5 red in a loaded gate run).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -629,8 +634,8 @@ d['projects'] << {'file' => 'peer.json', 'entry' => {'v' => 1, 'repo' => '~/dev/
 out37="$(setup --install 2>&1)"; rc37=$?
 out37c="$("${CHECK}" 2>&1)"; rc37c=$?
 if [ ${rc37} -eq 2 ] && [ ${rc37c} -eq 2 ] \
-   && printf '%s' "${out37c}" | grep -q 'channel "demo-session" in peer.json has the same name as the routed session inbox' \
-   && printf '%s' "${out37c}" | grep -q "Fix: rename channel" && [ ! -e "${PROJECTS}/peer.json" ]; then
+   && grep -q 'channel "demo-session" in peer.json has the same name as the routed session inbox' <<<"${out37c}" \
+   && grep -q "Fix: rename channel" <<<"${out37c}" && [ ! -e "${PROJECTS}/peer.json" ]; then
   ok "C37 a channel named like another entry's session-inbox stem is refused by both tools, exit 2, nothing installed"
 else
   bad "C37 a channel named like another entry's session-inbox stem is refused by both tools, exit 2, nothing installed" \
