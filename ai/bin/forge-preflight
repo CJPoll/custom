@@ -149,7 +149,7 @@ case "$host" in
       echo "attributed to the wrong identity (the DND-203 failure). The wrapper reported:"
       printf '  %s\n' "$out"
       echo "Fix: the athena-amby token needs refreshing, which is OWNER-GATED (the refresh mints it"
-      echo "  with the owner's glab session; agents never run it, and forge-auth-guard denies it)."
+      echo "  with the owner's glab session)."
       echo "  Do NOT fall back to bare \`glab\` — do not work around this; escalate to your admiral"
       echo "  with the command + error and wait (athena:github -> \"When a forge write can't be done"
       echo "  as Athena\"). Only the owner refreshes it, in their own terminal (the guard denies it"

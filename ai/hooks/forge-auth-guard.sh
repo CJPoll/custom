@@ -63,6 +63,12 @@
 # text through a file, or `git commit -F`), while a miss lets owner-gated auth
 # state change. Do not "fix" it by parsing argv; that reopens every
 # quoting/indirection bypass the flattening closes.
+# Two rule-4 shapes are in the same accepted class: a command word built by
+# expansion whose own arguments name a forge config path (`$PAGER
+# ~/.config/gh/hosts.yml`) is treated as a write, since it may be $EDITOR (read
+# with a literal cat/grep instead); and any directory named `.config` (a
+# project-local `.config/gh`, a cwd ending in `/.config`) counts as a config
+# location.
 #
 # NOT CATCHABLE IN PRINCIPLE (a tripwire for the direct and lightly-indirected
 # forms, not a sandbox). Anything where the denied TEXT never appears in the
@@ -75,6 +81,10 @@
 #     argument position (`sudo -u x $G refresh` puts `-u x` first);
 #   * a body piped into a command word built by expansion (`echo {} | $H url`):
 #     denying every `| $X` on a token path would deny `curl ... | $JQ .`;
+#   * a writer built by expansion that READS a pipe inside a config dir, or
+#     follows `||` (`cat x | $TEE hosts.yml`): an expanded word counts as a
+#     writer there only when it heads a command, so `cat hosts.yml | $JQ .`
+#     stays a read;
 #   * a glob operand other than `*` / `./*` that happens to match gh or
 #     glab-cli at a config root (`cd ~/.config && rm -rf g?`);
 #   * a script file, alias, or shell function defined in one call and run in a
@@ -181,6 +191,10 @@ EXPANDED='[$`]'
 CMD_POS='(^|[;&|(`{][[:space:]]*|(^|[[:space:]])(then|do|else|sudo|env|command|exec|nohup|xargs|time|eval|builtin)[[:space:]]+)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
 EXP_WORD='([^[:space:];&|()`=]*[$](\{[^}]*\}|[[:alnum:]_]+|[(][^)]*[)])[^[:space:];&|()`]*|`[^`]*`)'
 EXP_CMD="${CMD_POS}${EXP_WORD}"
+# EXP_HEAD: the same word, but only where it HEADS a command (not after a `|`),
+# so a pipe's reader (`cat f | $JQ .`) is not taken for a writer.
+CMD_HEAD='(^|[;&(`{][[:space:]]*|(^|[[:space:]])(then|do|else|sudo|env|command|exec|nohup|xargs|time|eval|builtin)[[:space:]]+)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+EXP_HEAD="${CMD_HEAD}${EXP_WORD}"
 
 # ---- 1: gh auth <mutation> (bare, path-qualified, or -athena wrapper) ------
 # `gh` or `gh-athena`, then `auth`, then a mutating (or expanded) subcommand.
@@ -243,7 +257,7 @@ fi
 WRITES=$(printf '%s' "$FLAT" | sed -E 's#[0-9]*>>?[[:space:]]*/dev/null##g; s#[0-9]*>&[0-9-]##g')
 writes() { printf '%s' "$WRITES" | grep -Eq "$1"; }
 MUT_TOOL='(tee|rm|unlink|shred|mv|cp|install|ln|dd|truncate|vim?|nvim|nano|emacs)'
-WRITE_OP="(>|${CMD_START}${MUT_TOOL}[[:space:]]|${EXP_CMD}[[:space:]]|${CMD_START}g?(sed|perl)[[:space:]]([^|;&]*[[:space:]])?(-[nprlaswWXtTcEuz]*i|--in-place))"
+WRITE_OP="(>|${CMD_START}${MUT_TOOL}[[:space:]]|${CMD_START}g?(sed|perl)[[:space:]]([^|;&]*[[:space:]])?(-[nprlaswWXtTcEuz]*i|--in-place))"
 FORGE_LOC='((\.config|XDG_CONFIG_HOME)\}?/(gh|glab-cli)([^[:alnum:]_.-]|$)|(GH|GLAB)_CONFIG_DIR([^[:alnum:]_]|$)|(^|[^[:alnum:]_.-])(gh|glab-cli)/(hosts|config)\.yml)'
 # ---- 4b: the same write, by BARE NAME, after reaching the location (DND-390)
 # The location never appears as a path in the command when the agent first
@@ -316,9 +330,16 @@ cwd_at_config_root() {
   return 1
 }
 
+# Rule 4 treats a command word built by expansion as a writer ONLY where it is
+# plausibly the writer (DND-390 r8): in 4a the forge path must be one of its
+# own arguments (same simple command); in 4b the bare name must be its
+# operand (BARE_OP); in 4c and after `cd gh` it must head a command
+# (EXP_HEAD). So `cat ~/.config/gh/hosts.yml | $JQ .` stays an allowed read.
+WRITE_OP_HEAD="(${WRITE_OP}|${EXP_HEAD}[[:space:]])"
 if { has "$FORGE_LOC" && writes "$WRITE_OP"; } \
+  || writes "${EXP_CMD}[^|;&]*${FORGE_LOC}" \
   || { { has "$CD_ROOT" || cwd_at_config_root; } \
-    && { writes "$BARE_OP" || { has "$CD_FORGE_BARE" && writes "$WRITE_OP"; }; }; }; then
+    && { writes "$BARE_OP" || { has "$CD_FORGE_BARE" && writes "$WRITE_OP_HEAD"; }; }; }; then
   deny 'forge-auth: this writes to a forge credential/config file (gh hosts.yml/config.yml or glab-cli config.yml), which is OWNER-GATED — the agent never edits forge auth config. Fix: do NOT modify it — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). The owner provisions forge auth out of band; reading the file (cat/grep) is allowed.'
 fi
 
@@ -327,8 +348,8 @@ fi
 # over-denies a write that lands elsewhere (`gh pr list > /tmp/out`), so the
 # message names the cwd and the one recovery that works: a `cd` out of the dir
 # in its OWN Bash call (the hook sees the cwd from before this command runs).
-if cwd_in_forge_dir && writes "$WRITE_OP"; then
-  deny "forge-auth: the session cwd ($CWD_ABS) is inside a forge credential/config dir (gh or glab-cli config), and this command writes (a redirect, tee/rm/mv/cp/ln/truncate, sed -i, or an editor), so it may modify forge auth config by bare name, which is OWNER-GATED. Fix: run \`cd ~\` (or cd to your worktree) as its OWN Bash call first, then re-run this command; a cd inside this same command does not help, because the guard checks the cwd before the command runs. If you meant to change forge config, do NOT — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> \"When a forge write can't be done as Athena\")."
+if cwd_in_forge_dir && writes "$WRITE_OP_HEAD"; then
+  deny "forge-auth: the session cwd ($CWD_ABS) is inside a forge credential/config dir (gh or glab-cli config), and this command writes (a redirect, tee/rm/mv/cp/ln/truncate, sed -i, an editor, or a command word built from a variable), so it may modify forge auth config by bare name, which is OWNER-GATED. Fix: run \`cd ~\` (or cd to your worktree) as its OWN Bash call first, then re-run this command; a cd inside this same command does not help, because the guard checks the cwd before the command runs. If you meant to change forge config, do NOT — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> \"When a forge write can't be done as Athena\")."
 fi
 
 # ---- 5: auth <mutation> after an EXPANDED command word (DND-390) ------------

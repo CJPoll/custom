@@ -501,6 +501,12 @@ check "X8. cwd ~/.config: rm -rf ./* (rule 4b)" deny
 run "$(bash_json 'sudo $R ~/.config/glab-cli/config.yml')"
 check "X9. prefix keyword then an expanded command word (rule 4)" deny
 
+run "$(bash_json 'cd ~/.config; cd gh && $RM hosts.yml')"
+check "X10. cd to the root, cd gh, then \$RM (rule 4b, heads a command)" deny
+
+run "$(bash_json '$PAGER ~/.config/gh/hosts.yml')"
+check "X11. expanded word naming a config path (accepted FP: may be \$EDITOR)" deny
+
 echo
 echo "--- MUST-NOT-BLOCK cases (reads / ordinary forge use) ---"
 
@@ -681,6 +687,15 @@ check "N32. a glob at the config root that cannot match gh" allow
 
 run "$(bash_json '$CURL -s https://gitlab.com/oauth/token/info')"
 check "N33. variable curl GET of a token path" allow
+
+run "$(bash_json 'cat ~/.config/gh/hosts.yml | $JQ .')"
+check "N34. read of gh hosts.yml piped into a variable command" allow
+
+run_ctx /home/u/.config/gh 'cat hosts.yml | $JQ .'
+check "N35. cwd in ~/.config/gh: a read piped into a variable command" allow
+
+run "$(bash_json 'grep host ~/.config/glab-cli/config.yml | $PAGER')"
+check "N36. grep of glab config piped into \$PAGER" allow
 
 echo
 echo "--- FAIL-OPEN cases (never wedge Bash) ---"
