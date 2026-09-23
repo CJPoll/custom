@@ -804,7 +804,7 @@ failed-delivery store*).
   | `generic-webhook-egress` | generic-webhook egress | correct the owner allowlist or the destination |
   | `owner-verified-recipient` | email/SMS owner-verified-recipient | verify the recipient or the sending domain for this owner, or correct the rule |
 
-  A check that declares a new cause adds its row here with its remediation. An implementation MUST NOT render a rule marker whose cause has no entry as another cause's remedy or as an empty clause; since an undeclared cause cannot be recorded (the declared set above), a renderer that meets one anyway says `no remediation is declared for this cause (a platform defect; see the server log)`.
+  A check that declares a new cause adds its row here with its remediation. An implementation MUST NOT render a rule marker whose cause has no entry as another cause's remedy or as an empty clause. An undeclared cause cannot be recorded (the declared set above), so only a row stored under a cause since removed from the set reaches this case; its marker says `no remediation is declared for this cause (a platform defect: the cause is not in the declared set)`.
 
   **Later (2026-09-23):** the rule marker's remediation clause listed every declared cause's remediation after `declares for <cause>:`, each prefixed with its check's name (`target-bind re-assertion → …; generic-webhook egress → …; owner-verified-recipient (email/SMS) → …`). Superseded (DND-395, gen_saas): the clause carries only the row's own cause's remediation, from the table above. Why: the full list put another cause's remedy first in the owner email, so an owner read the wrong fix for their row.
 
