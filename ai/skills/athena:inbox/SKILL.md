@@ -575,9 +575,10 @@ checks now answer the question a pid cannot:
   maildir channels' own health is their per-channel findings.
 - `server-failed-deliveries` asks the same MCP, with the same token, for the
   account's UNREAD failed-delivery records (`failed_deliveries`; every terminal
-  delivery failure and every machine-unreachable transition). N > 0 unread is a
-  `warn` listing each record's cause, count and id, with a Fix naming the tool's
-  `mark_read`. "checked: 0 unread" is `ok`; "UNAVAILABLE" (asked, no answer, or
+  delivery failure, and every other row kind the store declares:
+  machine-unreachable transitions, sweeper dispatch crashes, reconciliation
+  re-emit failures). N > 0 unread is a `warn` listing each record's cause,
+  count and id, with a Fix naming the tool's `mark_read`. "checked: 0 unread" is `ok`; "UNAVAILABLE" (asked, no answer, or
   an answer with no numeric `unread_count`) is `na` and says it is NOT 0 unread.
   The server also emails the owner once per new or re-opened record.
 - `server-refused-deliveries` does the same for the account's UNREAD

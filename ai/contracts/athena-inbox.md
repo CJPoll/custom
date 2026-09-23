@@ -2481,7 +2481,8 @@ also reports:
   `umask 077` config file.
 - **`server-failed-deliveries`** — the same machine token and MCP, calling the
   server's `failed_deliveries` for the account's UNREAD failed-delivery records
-  (terminal delivery failures and machine-unreachable transitions, DND-373). N
+  (terminal delivery failures and every row kind `athena-events.md` →
+  *Terminal delivery failure — the failed-delivery store* declares, DND-373). N
   > 0 unread is a `warn` naming how many it lists of how many, each record's
   cause, count and id, with a `Fix:` naming the tool's `mark_read`; "checked, 0
   unread" is `ok`. "skipped", "unavailable" (asked, no usable answer, or an

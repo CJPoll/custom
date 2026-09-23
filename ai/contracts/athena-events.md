@@ -159,7 +159,20 @@ which cost differently:
   4. **Its origination membership** — which ingress kind may originate it, added
      to that ingress's **finite registered origination set** (see *Which event
      types an ingress kind may originate*). A source-emitted family is
-     verified-ingress-only; a `fleet.*` family is harness-emit-only.
+     verified-ingress-only; a `fleet.*` family is harness-emit-only, except a
+     family the platform itself originates (*Which event types an ingress kind
+     may originate* → *Platform-originated*).
+
+     **Later (2026-09-23):** this item said every `fleet.*` family is
+     harness-emit-only, with no exception. Superseded (DND-395): the
+     `fleet.machine.*` family (gen_saas HG-20/DND-315) is originated by the
+     platform's own reachability sweeper, never by harness-emit, and is
+     declared as such. Why an exception rather than a rename: the name
+     describes fleet state, which is what the family reports; owner rules
+     already match `fleet.machine.unreachable`, and inbox lines already carry
+     it as their `kind`, so a rename would break every one of them for no gain
+     in safety. What matters is that no machine token can mint one, and the
+     exception states that.
   5. **Its enrichment posture** — whether its ingress enriches a metadata-only
      signal before emitting (declaring the **on-demand read** enrichment fetch,
      least-privilege enforced server-side per-caller rather than by token scope,
@@ -344,9 +357,11 @@ miss.
     failure sharing one key upserts into one row, `nil` components included —
     never a row per occurrence, and never a collision between a direct row and a
     rule's.
-  - The store holds one row kind that is not a delivery, keyed on this same
-    tuple with its own cause: *Machine-unreachable rows* below states how it
-    fills each component.
+  - The store also holds three row kinds whose cause is the platform's, not
+    the owner's rule or target, each keyed on this same tuple under its own
+    reserved cause: *Machine-unreachable rows*, *Sweeper dispatch-crash rows*
+    and *Reconciliation re-emit rows* below each state how they fill each
+    component.
 
   So each recipient machine's failures are a row of their own: one machine's
   unread row never absorbs another machine's failures. The **exemplar** is the
@@ -361,8 +376,9 @@ miss.
   row's life; only the exemplar restarts. A row aged out after triage (see
   *Retention* below) starts again at 1. This bounds the store by a
   **structural quantity** — per owner, distinct `(rule, cause)` pairs plus
-  distinct `(direct recipient machine, cause)` pairs plus one
-  machine-unreachable row per machine, a finite set —
+  distinct `(direct recipient machine, cause)` pairs (a sweeper dispatch-crash
+  row is one of these pairs) plus one machine-unreachable row per machine plus
+  one reconciliation re-emit row, a finite set —
   **independent of traffic volume**: a revoked credential failing a million
   deliveries collapses to one exemplar + count 1,000,000, not a million rows.
 
@@ -380,6 +396,14 @@ miss.
   row, a second machine's failures were counted silently into the first
   machine's unread row — no new exemplar, no new report. One row per recipient
   machine makes each machine's failure visible, and reported, on its own.
+
+  **Later (2026-09-23):** the grain above, and the machine-unreachable bullet
+  below (then titled *the one row kind that is not a delivery*), said the
+  store held exactly one row kind besides failed deliveries.
+  Superseded (DND-395): the store holds three — machine-unreachable, sweeper
+  dispatch-crash (gen_saas DND-387) and reconciliation re-emit (gen_saas
+  DND-391). Why: the code already recorded the last two, undeclared, so an
+  implementation or reader following this contract did not know they exist.
 - **Never merely counted; observable.** As with the dead-letter store, the
   exemplar is retained so the store *names* the failed delivery; the count is
   added scale metadata, never a replacement. The exemplar payload carries
@@ -405,8 +429,25 @@ miss.
   exemplar names only one of them. A direct row recorded before this grain
   may have `machine_id` `nil` (an implementation need not attribute it), and
   such a row may span machines; its named target still names only one
-  machine. A machine-unreachable row is not a delivery and carries neither
-  form; its marker is its own (*Machine-unreachable rows* below).
+  machine. A row of the three platform-cause kinds under *Grain* carries
+  neither form; each kind states its own marker below.
+
+  **A failure that knows its own remedy carries it.** When a delivery
+  failure's terminal error carries a non-empty `fix` — the producer knows the
+  remedy, as for a line the inbox adapter cannot encode (gen_saas DND-346),
+  where the fix belongs to the producer's payload, not the target or the rule
+  — that `fix` replaces the generic remedy clause in either form above
+  (`check the target/credential or disable the rule`, or `check the recipient
+  machine is connected and still declares the inbox, then re-send`). Every
+  other part of the marker is unchanged. The sweeper dispatch-crash and
+  reconciliation re-emit markers below carry their exemplar's `fix` the same
+  way.
+
+  **Later (2026-09-23):** the two markers above always carried their generic
+  remedy clause. Superseded (DND-395, declaring gen_saas DND-346): a
+  failure's own `fix` replaces it. Why: the generic clause tells the owner to
+  check a target or disable a rule when the target and the rule are fine,
+  and the producer's payload is what must change.
 
   **Later (2026-09-23):** both markers above read `… for the first-seen event`,
   and the direct form read `(first seen: <adapter>:<target>)`. The exemplar
@@ -416,7 +457,7 @@ miss.
   `first since last triage`. Why: a re-opened row is reported to the owner
   again, and its report must name the failure that re-opened it, not one the
   owner already triaged.
-- **Machine-unreachable rows — the one row kind that is not a delivery.** The
+- **Machine-unreachable rows — a row kind that is not a delivery.** The
   store also records each time a machine **becomes unreachable**, so the owner is
   told without having to write a rule for it.
   - **Cause and trigger.** Cause class `machine-unreachable`. The server judges a
@@ -505,6 +546,109 @@ miss.
     `machine <machine_id>`, else `unknown machine`. A missing `<machine_id>`,
     `<unreachable_since>` or `<pending>` renders `?`. A missing pending count
     never renders `0`, which would read as "nothing waiting".
+- **Sweeper dispatch-crash rows — a platform defect on a delivery.** The
+  store also records a delivery whose dispatch **raised** on the periodic
+  sweeper, so the owner hears of a platform defect that is holding a delivery
+  back, while it is still being retried.
+  - **Cause and trigger.** Cause class `sweeper-dispatch-crash`. A dispatch
+    that raises (a store write raising, a bug on the dispatch path) never halts
+    the sweep: the crash is logged with a `Fix:`, counted on the delivery, and
+    the delivery stays pending, moves to the back of the sweep order, and is
+    retried on the next pass. The crash count is cumulative over the
+    delivery's life, so separate crash windows add up. A crashed dispatch is
+    budget-neutral: it never spends the delivery's at-least-once retry budget
+    (*Idempotency is per (event, rule)*), and never ends it as an ack timeout.
+    When the count reaches the crash budget the crash is treated as permanent
+    and the delivery terminates FAILED with this cause. The budget is the
+    implementation's (gen_saas defaults to 240 crashes, at least an hour at
+    its 15 s sweep cadence), so a transient window delays a delivery without
+    failing it; like every cap here, the number is not a MUST.
+  - **When a row is written.** Once per delivery episode, never per crash: on
+    the delivery's **first** crash, on its **terminal** crash, and on a crash
+    that finds the delivery already terminal FAILED or REFUSED with no later
+    ack. In that last case the delivery's own owner-report write may be what
+    raised, so this row is its only report. A delivery that left pending
+    because it was acked is not reported. The crashes between log only. Unlike
+    a delivery failure, the first row is written while the delivery is still
+    pending, so this is the one delivery-cause row that is not always
+    terminal (*Reconciled with idempotency* below still governs the terminal
+    one).
+  - **Key.** The crashed delivery's own key under *Grain* above: its
+    `rule_id` (or `nil` for a direct delivery), the cause
+    `sweeper-dispatch-crash`, and its `machine_id` (the direct recipient, `nil`
+    for a rule). The cause is **reserved** for the dispatch-crash path: an
+    adapter's own failure MUST NOT be recorded under it. So a delivery's crash
+    reports never merge into its ordinary failure row, and the count is crash
+    **reports** (first, terminal, or only-report), not crashes and not
+    deliveries. A crash row takes no late-ack credit; the owner clears it.
+  - **Exemplar.** The event plus the terminal error: adapter, target, the
+    cause, the `delivery_id`, a summary of the exception, the crash count
+    (`nil` when the crash found the delivery already out of pending), the
+    disposition (`retrying`, `failed` or `not-pending`), and a `fix` saying
+    this is the platform's defect, not the owner's rule or target.
+  - **Marker.** `Fix: <rule <rule_id> | direct (addressed) delivery> has
+    <count> dispatch crash report(s) for <adapter>:<target> (cause:
+    sweeper-dispatch-crash; first: delivery <delivery_id>, <disposition>);
+    <fix> — see the failed-delivery store exemplar for the first event since
+    last triage.` A direct row names its target as the direct delivery
+    marker above does (`<adapter> recipients (first since last triage:
+    <adapter>:<target>)`). `<fix>` is the exemplar's `fix`, else `a platform
+    defect; see the server log`. A missing value renders `?`.
+- **Reconciliation re-emit rows — a source change the backstop could not
+  re-emit.** The store also records a Notion ticket-page change that the
+  reconciliation backstop (*Poller (fallback only)*) found missing and then
+  failed to re-emit, so a change that never entered the platform is not lost
+  silently.
+  - **Cause and trigger.** Cause class `reconcile-reemit-failed`. A failed
+    re-emit (the router returns an error, or the re-emit raises) puts the page
+    into a **per-page retry set**, persisted per binding. The set is retried on
+    every backstop run, independent of the run's watermark and of whether the
+    run's snapshot succeeded, and each attempt is logged. A page leaves the set
+    when it re-emits, when the platform ingests that revision (or a newer one)
+    some other way, or when a newer revision supersedes it; a superseding
+    revision is a new change and starts its attempts again at 1. Holding the
+    watermark for a failed page is not the mechanism: one page that always
+    fails would hold the window open without limit.
+  - **Dispositions.** A row is written, and the owner told, in exactly three
+    cases, named in the exemplar's `disposition`:
+    - `exhausted` — the page is still failing at the per-revision attempt cap.
+      It is reported and removed from the set in one transaction.
+    - `retry-set-full` — a new failure finds the binding's set at its entry
+      cap. It is reported at once and not queued.
+    - `untracked` — the set's own store cannot hold the page. It is reported
+      at once, unless the set already holds that revision.
+
+    Both caps are the implementation's (gen_saas defaults to 12 attempts per
+    revision and 500 entries per binding); like every cap here, neither number
+    is a MUST. What is a MUST is that every page either stays in the set, is
+    re-emitted or ingested, or is reported: none leaves silently.
+  - **Key.** `rule_id` `nil` (no rule is involved), the cause
+    `reconcile-reemit-failed`, and `machine_id` `nil` (no machine is
+    involved), under *Grain* above. So there is one row per owner. The cause
+    is **reserved** for this row kind: a delivery's failure MUST NOT be
+    recorded under it. That is what keeps this row from colliding with a
+    legacy direct row that has no machine.
+  - **Exemplar.** The first page since last triage, as under *Grain* above.
+    Its event carries only the page's `entity_id` and `revision`, never page
+    content, and is never routed. The terminal error names adapter
+    `notion-reconciliation`, the page's `entity_id` as target, the cause, the
+    binding, database and page ids, the revision, the attempts made, both
+    caps, the disposition, the router's `last_error` (truncated) and a `fix`.
+    `last_error` can quote a store error's detail, so the owner report never
+    carries it; the exemplar and the server log do.
+  - **Count.** Nothing was delivered, so nothing can be acked late and the
+    row takes no late-ack credit. The count is reports over the row's life,
+    across episodes. It is not a delivery, so *Reconciled with idempotency*
+    below does not govern it; the backstop's own retry set is its retry.
+  - **Marker.** `Fix: the Notion reconciliation backstop could not re-emit
+    ticket page changes (<count> report(s) on this record, all episodes;
+    cause: reconcile-reemit-failed; first since last triage: page <page_id>
+    at revision <revision> of database <database_id>, <disposition phrase>);
+    <fix> — see the failed-delivery store exemplar for the page and the last
+    error.` The disposition phrase is `exhausted after <attempts> attempt(s)`,
+    `retry set full, not queued for retry`, or `the retry set could not hold
+    it, not queued for retry`. `<fix>` is the exemplar's `fix`, else `a
+    platform defect; see the server log`. A missing value renders `?`.
 - **Retention — the never-destroy-unread doctrine applies, made safe by the
   grain.** Follow the sibling inbox doctrine (`ai/contracts/athena-inbox.md` →
   *Retention* → *The principle*), exactly as the dead-letter store does: an
@@ -622,7 +766,19 @@ failed-delivery store*).
   read into an LLM (see *Trust posture — two paths*), and read access is the **owning account's**
   only.
 - **Reported, not merely stored.** REFUSED MUST be **reported to the owner, never left silently
-  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count> refused deliveries to <adapter>:<target> (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>: target-bind re-assertion → re-author the rule against a machine registered to its owner; generic-webhook egress → correct the owner allowlist or the destination; owner-verified-recipient (email/SMS) → verify the recipient or the sending domain for this owner, or correct the rule. See the refused-delivery store exemplar for the first event since last triage and its declared refusal detail.` A direct row (`rule_id: nil`) carries the direct form instead: `Fix: direct (addressed) delivery has <count> refused deliveries to <adapter> recipients on machine <machine_id> (first since last triage: <adapter>:<target>) (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>; a direct delivery has no rule to re-author. See the refused-delivery store exemplar for the first event since last triage and its declared refusal detail.` The row is one recipient machine's (see *Grain* above) but may span several of its inboxes, so the exemplar names only one target. A direct row recorded before this grain may have `machine_id` `nil` (an implementation need not attribute it); its marker omits the `on machine <machine_id>` clause, because that row may span machines.
+  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count> refused deliveries to <adapter>:<target> (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>: <remediation>. See the refused-delivery store exemplar for the first event since last triage and its declared refusal detail.` `<remediation>` is the row's own cause's entry in the table below, and only that entry: another cause's remedy would send the owner to fix the wrong thing. A direct row (`rule_id: nil`) carries the direct form instead: `Fix: direct (addressed) delivery has <count> refused deliveries to <adapter> recipients on machine <machine_id> (first since last triage: <adapter>:<target>) (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>; a direct delivery has no rule to re-author. See the refused-delivery store exemplar for the first event since last triage and its declared refusal detail.` The row is one recipient machine's (see *Grain* above) but may span several of its inboxes, so the exemplar names only one target. A direct row recorded before this grain may have `machine_id` `nil` (an implementation need not attribute it); its marker omits the `on machine <machine_id>` clause, because that row may span machines.
+
+  The per-cause remediation table, one entry per declared refusal-cause (the cause ids are the refused-delivery store's `refusal-cause` values):
+
+  | `refusal-cause` | Refusing check | `<remediation>` |
+  | --- | --- | --- |
+  | `target-bind` | target-bind re-assertion | re-author the rule against a machine registered to its owner |
+  | `generic-webhook-egress` | generic-webhook egress | correct the owner allowlist or the destination |
+  | `owner-verified-recipient` | email/SMS owner-verified-recipient | verify the recipient or the sending domain for this owner, or correct the rule |
+
+  A check that declares a new cause adds its row here with its remediation. An implementation MUST NOT render a rule marker whose cause has no entry as another cause's remedy or as an empty clause; since an undeclared cause cannot be recorded (the declared set above), a renderer that meets one anyway says `no remediation is declared for this cause (a platform defect; see the server log)`.
+
+  **Later (2026-09-23):** the rule marker's remediation clause listed every declared cause's remediation after `declares for <cause>:`, each prefixed with its check's name (`target-bind re-assertion → …; generic-webhook egress → …; owner-verified-recipient (email/SMS) → …`). Superseded (DND-395, gen_saas): the clause carries only the row's own cause's remediation, from the table above. Why: the full list put another cause's remedy first in the owner email, so an owner read the wrong fix for their row.
 
   **Later (2026-09-23):** both markers above read `… for the first-seen event …`, and the direct
   form read `(first seen: <adapter>:<target>)`. The exemplar (under *Grain* above) was the
@@ -841,11 +997,11 @@ preserving their identity-only property. `slack.message.received` carries **no**
 `revision`: a Slack message is transient and never updated, and its
 `payload.event_id` is already unique.
 
-### Declared families beyond the first pass — `fleet.session.message` and `notion.agent_message.*`
+### Declared families beyond the first pass — `fleet.session.message`, `notion.agent_message.*` and `fleet.machine.*`
 
-Two type families are **declared** here per *Extending the taxonomy — a new type
+Three type families are **declared** here per *Extending the taxonomy — a new type
 family declares its model* (each declares its five things), so a later increment
-that lands their ingress is a natural addition, not a rewrite. Neither is one of
+that lands their ingress is a natural addition, not a rewrite. None is one of
 the enumerated first-pass source-webhook types above.
 
 **The `fleet.session.message` family** (session-to-session messaging):
@@ -895,7 +1051,7 @@ the enumerated first-pass source-webhook types above.
    `notion.agent_message.*`'s `entity_id`.
 3. **Change/revision token** — none: a session message is **transient and never
    updated**, so identity alone is unique and no revision token exists.
-4. **Origination membership** — **harness-emit only** (a `fleet.*` family; see
+4. **Origination membership** — **harness-emit only** (a harness-emitted `fleet.*` family; see
    *Harness-emit* and *Which event types an ingress kind may originate*). No
    source ingress and no reconciliation poller originates it; a source-emitted
    ingress that tried would be rejected.
@@ -1008,6 +1164,40 @@ routing):
 5. **Enrichment posture** — **yes**: the metadata-only Notion webhook is enriched
    on the verified event (per *Sender verification and payload completeness*),
    minus the body (no body is ever carried).
+
+**The `fleet.machine.{unreachable,reachable}` family** (machine reachability
+transitions, gen_saas HG-20/DND-315):
+
+1. **Payload schema** — the addressable leaves, each a scalar: `entity_id`
+   (string, `machine:<machine_id>`), `machine_id` (string), `machine_name`
+   (string), `unreachable_since` (timestamp), `last_ack_at` (timestamp),
+   `last_joined_at` (timestamp). The payload also carries `last_heartbeat_at`
+   and `pending_deliveries` (an integer count, which the declared field types
+   cannot type); neither is addressable, so a predicate or template slot on
+   either is the ordinary unknown-path save-time error. A missing
+   `pending_deliveries` is absent, never `0`.
+2. **Identity field** — `payload.machine_id`, the machine the transition is
+   about; it is the `subject` of the dedupe window. `payload.entity_id`
+   (`machine:<machine_id>`) names the same machine and is the inbox line's
+   `entity_id` (`ai/contracts/athena-inbox.md` → *Platform `log` line kinds*).
+3. **Change/revision token** — none in the payload: each event is one
+   transition and is never updated. The transition instant
+   (`unreachable_since` for `unreachable`, the emit time for `reachable`) is
+   folded into the event's `idempotency_key`
+   (`<type>:<machine_id>:<instant>`) as provenance a consumer may dedupe on.
+   The platform does not dedupe on it (*Idempotency is per (event, rule)*).
+4. **Origination membership** — **platform-originated only** (*Which event
+   types an ingress kind may originate* → *Platform-originated*). Harness-emit
+   and every source ingress are refused.
+5. **Enrichment posture** — **none**. The server already holds every field.
+
+`owner` is the machine's owner and `source` is `platform`. The sweeper emits
+`unreachable` once per transition into unreachable, and `reachable` once per
+recovery that an ack or a join proves (a heartbeat alone never announces a
+recovery). The unreachable transition's owner report does not depend on this
+event reaching a rule: the failed-delivery store records it too (*Terminal
+delivery failure — the failed-delivery store* → *Machine-unreachable rows*),
+committed together with this event and the machine's latch.
 
 **Ingress rule (AM-1): an unbound parent database is dead-lettered, never
 enriched or emitted.** One Notion callback carries N per-database bindings
@@ -1306,8 +1496,27 @@ The first-pass permitted-origination rule:
   source ingress that tried to originate it would be rejected. The
   `fleet.*` namespace bounds what MAY be registered; origination is bounded to the
   **registered members** of it, not the open prefix (see the finite-set rule
-  above). An event whose `type` is a well-formed but unregistered `fleet.*` value
-  is rejected at ingress: `Fix: harness-emit is not permitted to originate type '<type>' — it may originate only the fleet.* type values registered to this machine token. Register the type into this token's origination set (config, no code change); if it belongs to a fleet.* family the platform has no model for yet, that family MUST first declare its payload schema, identity field, revision token, origination membership, and enrichment posture (see 'Extending the taxonomy — a new type family declares its model'). Otherwise correct the emitter.`
+  above). A platform-originated type (next bullet) is never a member, whatever
+  a token's registration says. An event whose `type` is a well-formed but
+  unregistered `fleet.*` value is rejected at ingress: `Fix: harness-emit is not permitted to originate type '<type>' — it may originate only the fleet.* type values registered to this machine token. Register the type into this token's origination set (config, no code change); if it belongs to a fleet.* family the platform has no model for yet, that family MUST first declare its payload schema, identity field, revision token, origination membership, and enrichment posture (see 'Extending the taxonomy — a new type family declares its model'). Otherwise correct the emitter.`
+
+- **Platform-originated.** The platform itself originates a `fleet.*` family
+  that reports the platform's own view of the fleet, which no machine can be
+  trusted to report about itself or another machine. The one such family is
+  **`fleet.machine.{unreachable,reachable}`** (*Declared families beyond the
+  first pass*), emitted by the server's reachability sweeper with `source`
+  `platform`. This producer is not a fourth ingress kind: it runs inside the
+  server, takes no request, and holds no token, so nothing outside the
+  platform can drive it. A platform-originated type is **excluded from
+  harness-emit's family-level origination set**, so a machine token can never
+  originate one, even for its own machine: a forged `fleet.machine.unreachable`
+  would page the owner about a healthy machine, and a forged `reachable` would
+  mask a real outage. Harness-emit refuses it at ingress with a `Fix:`,
+  before any per-token registration is consulted, and a source ingress
+  refuses it as a non-member of its set.
+  This is an exception for a declared family, not a namespace licence: a new
+  platform-originated family declares its model like any other and is named
+  here.
 
 This is the origination dual of the `source`-is-not-authz rule: `source` governs
 what a label may *earn*, and this governs what an ingress may *mint*. Both are
@@ -2570,7 +2779,8 @@ wins**. The roles are those of *Conformance language* (ingress / router / adapte
   rejects an event whose owner cannot be resolved (*The event*);
 - originates only the **finite, registered set** of `type` values permitted to its kind, and
   rejects any other `type` at ingress with a `Fix:` — harness-emit can never synthesize a
-  source-emitted `slack.*`/`notion.*` type (*Which event types an ingress kind may originate*);
+  source-emitted `slack.*`/`notion.*` type or a platform-originated `fleet.machine.*` type
+  (*Which event types an ingress kind may originate*);
 - resolves a metadata-only source by an **on-demand read** enrichment fetch (least-privilege
   enforced server-side per-caller, not by token scope — *Secret custody*; *Sender verification and payload completeness*),
   and on enrichment failure **neither emits un-enriched nor silently drops** — retrying transients
