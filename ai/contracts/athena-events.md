@@ -189,17 +189,30 @@ Every event resolves through a **two-level** model. The dead-letter trigger keys
 on the first level ONLY; the per-delivery outcomes live at the second.
 
 **Level 1 — event ROUTING disposition (total over exactly two outcomes)**, keyed
-on *"does any of the event owner's enabled rules apply to this event's `type`?"*:
+on *"does any of the event owner's enabled rules apply to this event's `type`, or
+did the event carry its own direct delivery?"*:
 
 - **HANDLED** — at least one of the **event owner's** enabled rules declares an
   `event_type(s)` that includes this event's `type` (≥1 of the owner's rules
-  *applied*). **Not** dead-lettered, regardless of what then happens to the
-  individual deliveries.
+  *applied*), **or** the event is an addressed `fleet.session.message` that
+  received its own direct (rule-less) delivery (D40; *Declared families beyond
+  the first pass* — `fleet.session.message`). **Not** dead-lettered, regardless
+  of what then happens to the individual deliveries.
 - **UNMATCHED** — **none** of the **event owner's** enabled rules applies to the
-  event's `type` at all (no owner rule's declared `event_type(s)` includes it).
-  **This is the sole dead-letter trigger.** Scoping to the owner's own rules is
-  required so that another account's rules can neither mark an event HANDLED nor
-  suppress the owner's dead-letter record.
+  event's `type` at all (no owner rule's declared `event_type(s)` includes it),
+  **and** the event carries no direct delivery. **This is the sole dead-letter
+  trigger.** Scoping to the owner's own rules is required so that another
+  account's rules can neither mark an event HANDLED nor suppress the owner's
+  dead-letter record.
+
+  **Later (2026-09-23):** the HANDLED/UNMATCHED split above previously keyed
+  Level 1 on owner-rule matches alone. Superseded (D40, HG-16/DND-311): an
+  addressed `fleet.session.message` with zero matching owner rules still has a
+  delivery — the direct delivery the router creates unconditionally for an
+  addressed event (below) — so treating it as UNMATCHED would dead-letter an
+  event that in fact delivered. The direct delivery is the second way an event
+  can be HANDLED; it does not touch UNMATCHED's dead-letter trigger for a truly
+  rule-less, unaddressed event.
 
 An **UNMATCHED** event MUST be **dead-lettered and persisted** to queryable
 storage for audit and debugging; it MUST NOT be silently dropped, and it MUST NOT
@@ -641,7 +654,14 @@ the enumerated first-pass source-webhook types above.
    before opening its body; the referent rule is R9.
 2. **Identity field** — the **platform event id** (per-event, as
    `slack.message.received` uses `payload.event_id`). It is the `subject` of the
-   dedupe window.
+   dedupe window. The `session.message` inbox line's `entity_id`
+   (`ai/contracts/athena-inbox.md` → *Platform `log` line kinds*) is
+   `"session:<event_id>"` (D40), where `event_id` is this identity field — the
+   persisted `event_router_events` row id, not a payload field, because the
+   line is built at delivery time from the persisted event, not from its own
+   payload. That form is stated here, once; `athena-inbox.md` defers to it by
+   name, the same pattern *Declared families beyond the first pass* uses for
+   `notion.agent_message.*`'s `entity_id`.
 3. **Change/revision token** — none: a session message is **transient and never
    updated**, so identity alone is unique and no revision token exists.
 4. **Origination membership** — **harness-emit only** (a `fleet.*` family; see
@@ -687,7 +707,20 @@ An addressed message's direct delivery, made normative (D40, HG-16/DND-311):
   No live agent instance on the (same-owner) target machine declaring
   `to.inbox_name` is both-ends-or-dark, not a silent drop: the refusal names
   the HG-17/HG-18 registration convention, and nothing is persisted.
-
+- **The direct delivery's key is `(event, direct-target)`, not `(event,
+  rule)` — `rule_id` is `nil`.** Level 2 above is defined per `(event, rule)`;
+  a direct delivery has no rule, so it is the one delivery-row shape keyed
+  instead on the event alone (at most one direct delivery per event, owner-
+  scoped). Every Level-2 store that keys on `rule_id` accepts a `nil` there as
+  this row's own key, never a collision with a rule's bucket: the
+  failed-delivery store's `(owner, rule_id, terminal-cause)` key and the
+  refused-delivery store's `(owner, rule_id, refusal-cause)` key both admit a
+  `nil` `rule_id` as the direct delivery's own exemplar-plus-count bucket,
+  distinct from any rule's. Retry (*Idempotency is per (event, rule)*'s
+  deliver→ack→retry loop) applies unchanged to this row — the sweeper's
+  staleness query selects by delivery status and `last_pushed_at`, not by
+  `rule_id`, so a direct delivery is retried and can terminally FAIL exactly
+  like a rule delivery, just keyed on the event instead of the rule.
 **The `notion.agent_message.{created,updated,deleted}` family** (Agent Messages
 routing):
 

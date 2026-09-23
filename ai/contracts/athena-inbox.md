@@ -1113,7 +1113,11 @@ producer. Made explicit:
   present in the payload is **overwritten** by this stamp, never trusted from
   the event. This binds every platform producer line, lane and the three
   delivery kinds alike; it does not touch the Slack receiver's `log` line, whose
-  `kind` is that separate encoder's own enum (*Line format*).
+  `kind` is that separate encoder's own enum (*Line format*). Implemented in
+  `Athena.Events.InboxLine.kind/1` (build_state_line and build_session_line
+  both call it and set `"kind"` from its result, never from the payload) — D40
+  (HG-16/DND-311) landed this general stamp; before that landing no producer
+  stamped `kind` on this line.
 
 ### Platform `log` line kinds: `slack.interaction`, `session.message`, `agent_message`
 
@@ -1130,10 +1134,13 @@ change stream of state-change events*), unchanged by this section.
   is_owner}`). It carries **no body of its own** beyond these; the click is a
   signal, and its `value` is Path-2 untrusted (*Untrusted input*).
 - **`session.message`** — a routed `fleet.session.message`
-  (`athena-events.md`). Fields: `entity_id` = `"session:<event_id>"` (D40) —
-  the line's reconciliation identity, **not** a dedupe key (D25 stands: no
-  platform channel line carries a dedupe key, *Notify-consumer idempotency uses
-  the existing seen-sets*); `from` (`{machine_id, inbox_name}` — `machine_id`
+  (`athena-events.md`). Fields: `entity_id` — its form (`"session:<event_id>"`,
+  D40) is stated once, in `athena-events.md` → *Declared families beyond the
+  first pass* → `fleet.session.message`, the same pattern that section uses for
+  `notion.agent_message.*`'s `entity_id`; here it is only the line's
+  reconciliation identity, **not** a dedupe key (D25 stands: no platform
+  channel line carries a dedupe key, *Notify-consumer idempotency uses the
+  existing seen-sets*); `from` (`{machine_id, inbox_name}` — `machine_id`
   **server-stamped** from the sending machine's token record, `inbox_name` the
   sender's declared instance on that machine, server-verified; never
   client-set free-form), `to` (`{machine_id, inbox_name}`), `subject`
@@ -1231,6 +1238,14 @@ FAILED"). Normative:
   **both** the Slack event store and the platform delivery store, each scoped
   to the acking machine, so an id matching neither is `not_found` — never a
   silent no-op.
+
+  **Later (2026-09-23):** this bullet previously read "**Neither is on the
+  line**, and the line gains no field for them" with no carve-out. Superseded
+  (D40, HG-16/DND-311): a `session.message` line carries `event_id` and
+  `delivery_id` as references (*Platform `log` line kinds* → `session.message`),
+  so the blanket "neither is on the line" no longer held for that one kind. The
+  rule is unchanged for every other regular (non-lane, non-session.message)
+  line, and the lane carve-out already stood.
 - **A successful push leaves the delivery PENDING.** Broadcasting the envelope
   is not delivery. The delivery becomes `delivered` only when the client's
   `ack` for that `id` arrives, bound to the machine the rule targets. A push
