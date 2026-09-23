@@ -30,7 +30,10 @@
 # git-lfs transfers; third-party `git-<name>` subcommands; any subcommand not
 # named above.
 #
-# The caller sets, before calling fg_git_passthrough:
+# Usage: set the variables below, then call `fg_refuse_non_https "$@"` (it
+# exits 3 on a refusal) and then `fg_git_exec <basic-user> <token> "$@"` (it
+# execs git, or prints under FG_DRY_RUN=1). Both gh-athena and glab-athena do.
+# The variables:
 #   FG_TOOL      the wrapper's name, for messages (gh-athena / glab-athena)
 #   FG_HOST      the forge host (github.com / gitlab.com); subdomains match too
 #   FG_BOT       the bot identity pushes must carry (athena-harness[bot] / athena-amby)
