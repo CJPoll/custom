@@ -64,7 +64,7 @@ case "\$mode" in
     # authenticates fine, but as the OWNER, not the service account.
     echo '{"username":"cjpoll","name":"Cody","bot":false,"state":"active"}'; exit 0 ;;
   glab_broken)
-    echo "glab-athena: token file \${HOME}/.claude/gitlab-athena-token missing/unreadable (run: glab-athena refresh)" >&2
+    echo "glab-athena: token file \${HOME}/.claude/gitlab-athena-token missing/unreadable. Fix: do not refresh it yourself (owner-gated); escalate to your admiral with the command + error and wait — the owner runs the refresh" >&2
     exit 1 ;;
 esac
 EOF
@@ -179,12 +179,16 @@ if [[ "${RC}" == 0 && -z "${OUT}" && -z "${ERR}" ]] && grep -q 'api user' "${ARG
 else bad "healthy gitlab: passes silently via 'api user'" "rc=${RC} out='${OUT}' err='${ERR}' argv='$(cat "${ARGV}")'"; fi
 
 # 5. GitLab wrapper broken (token file missing): refuse with a Fix: line that
-#    names the remedy (the refresh command), same contract as the GitHub half.
+#    names the remedy. The token refresh is OWNER-GATED (DND-390: the refresh
+#    mints with the owner's glab session, and forge-auth-guard denies it), so
+#    the remedy is to escalate, and the output must NOT tell the agent to run
+#    the refresh itself.
 setup_case
 run_preflight "git@gitlab.com:amby_ai/walt_ui.git" "/nonexistent/gh" "$(make_shim glab_broken)"
-if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"glab-athena refresh"* ]]; then
-  ok "gitlab broken: refuses with a Fix: line naming 'glab-athena refresh'"
-else bad "gitlab broken: refuses with a Fix: line" "rc=${RC} err='${ERR}'"; fi
+if [[ "${RC}" != 0 ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ "${ERR}" == *"escalate to your admiral"* ]] \
+   && [[ "${ERR}" != *"glab-athena refresh"* ]]; then
+  ok "gitlab broken: refuses with a Fix: line that escalates (never 'run the refresh')"
+else bad "gitlab broken: refuses with an escalate Fix: line, no self-refresh" "rc=${RC} err='${ERR}'"; fi
 
 # 5b. GitLab authenticates, but as the OWNER not the athena-amby service account
 #     (a token file holding the owner's PAT, or an empty file glab falls back

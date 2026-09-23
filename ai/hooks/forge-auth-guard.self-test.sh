@@ -360,6 +360,15 @@ check "C5d. cd to the root, then rm -rf \${PWD}/glab-cli" deny
 run_ctx /home/u/.config 'mv ././glab-cli /tmp/x'
 check "C5e. cwd ~/.config: mv ././glab-cli" deny
 
+run "$(bash_json 'cd -- ~/.config && rm -rf gh')"
+check "C5f. cd -- to the root (option before the path)" deny
+
+run "$(bash_json 'cd -P ~/.config && rm -rf glab-cli')"
+check "C5g. cd -P to the root" deny
+
+run "$(bash_json 'pushd -n $XDG_CONFIG_HOME; cd -L gh && rm hosts.yml')"
+check "C5h. pushd -n to the root, then cd -L gh" deny
+
 run_ctx /home/u/.config/gh 'rm hosts.yml'
 check "C6. cwd ~/.config/gh (earlier cd): rm hosts.yml" deny
 
@@ -578,6 +587,9 @@ check "N15. cd to the root, write a non-forge dir, then gh" allow
 
 run "$(bash_json 'rm -rf ~/src/gh; cd /tmp && rm -rf gh')"
 check "N16. bare gh operand with no config-root context" allow
+
+run "$(bash_json 'cd -P /tmp && rm -rf gh')"
+check "N16b. cd with an option to a non-config dir, then rm gh" allow
 
 run_ctx /tmp/work 'rm x' GH_CONFIG_DIR=
 check "N17. empty \$GH_CONFIG_DIR is not read as matching every cwd" allow

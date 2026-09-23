@@ -60,8 +60,8 @@ GH_ATHENA="${GH_ATHENA_BIN:-$SELF_DIR/gh-athena}"
 GLAB_ATHENA="${GLAB_ATHENA_BIN:-$SELF_DIR/glab-athena}"
 
 # jq is required for the GitLab identity assertion below. Fail loudly HERE with
-# an actionable remedy rather than fail-closing later with a misleading "run
-# glab-athena refresh" message that would not fix a missing jq.
+# an actionable remedy rather than fail-closing later with a misleading
+# "the athena-amby token needs refreshing" message that would not fix a missing jq.
 command -v jq >/dev/null 2>&1 || {
   echo "forge-preflight: jq not found, but it is needed to verify the forge identity." >&2
   echo "Fix: install jq (it is already a hard dependency of gh-athena/glab-athena)." >&2
@@ -148,9 +148,12 @@ case "$host" in
       echo "active athena-amby service account, so any MR opened now would be silently"
       echo "attributed to the wrong identity (the DND-203 failure). The wrapper reported:"
       printf '  %s\n' "$out"
-      echo "Fix: mint the athena-amby service-account token into ~/.claude/gitlab-athena-token"
-      echo "  by running \`~/dev/custom/ai/bin/glab-athena refresh\`, then re-verify with"
-      echo "  \`~/dev/custom/ai/bin/glab-athena api user\`. Do NOT fall back to bare \`glab\`."
+      echo "Fix: the athena-amby token needs refreshing, which is OWNER-GATED (the refresh mints it"
+      echo "  with the owner's glab session; agents never run it, and forge-auth-guard denies it)."
+      echo "  Do NOT fall back to bare \`glab\` — do not work around this; escalate to your admiral"
+      echo "  with the command + error and wait (athena:github -> \"When a forge write can't be done"
+      echo "  as Athena\"). The owner (or the coordinator on the owner's explicit go) refreshes it;"
+      echo "  afterwards re-verify with \`~/dev/custom/ai/bin/glab-athena api user\`."
     } >&2
     exit 1
     ;;

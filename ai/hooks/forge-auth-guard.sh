@@ -239,8 +239,10 @@ FORGE_LOC='((\.config|XDG_CONFIG_HOME)\}?/(gh|glab-cli)([^[:alnum:]_.-]|$)|(GH|G
 # `./gh`, `././gh`, `$PWD/gh`, `${PWD}/gh`.
 BARE_NAME='(\./|[$]\{?PWD\}?/)*(gh|glab-cli)'
 BARE_OP="${CMD_START}${MUT_TOOL}[[:space:]]([^|;&]*[[:space:]])?${BARE_NAME}([/*{][^[:space:];&|]*)?([[:space:];&|)]|\$)|>[[:space:]]*${BARE_NAME}/"
-CD_ROOT="${CMD_START}(cd|pushd)[[:space:]]+(([^[:space:];&|]*/)?\.config\}?|[$]\{?XDG_CONFIG_HOME(:-[^}]*)?\}?)/?([[:space:];&|)]|\$)"
-CD_FORGE_BARE="${CMD_START}(cd|pushd)[[:space:]]+${BARE_NAME}/?([[:space:];&|)]|\$)"
+# `cd`/`pushd` may carry options before the path (`cd --`, `cd -P`, `pushd -n`).
+CD_WORD="${CMD_START}(cd|pushd)([[:space:]]+-[^[:space:];&|]*)*[[:space:]]+"
+CD_ROOT="${CD_WORD}(([^[:space:];&|]*/)?\.config\}?|[$]\{?XDG_CONFIG_HOME(:-[^}]*)?\}?)/?([[:space:];&|)]|\$)"
+CD_FORGE_BARE="${CD_WORD}${BARE_NAME}/?([[:space:];&|)]|\$)"
 
 # abs_dir <path> : print <path> without trailing slashes iff it is absolute and
 # not the root; print nothing otherwise.
