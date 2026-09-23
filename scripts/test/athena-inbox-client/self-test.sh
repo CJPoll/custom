@@ -36,6 +36,13 @@
 
 set -uo pipefail
 
+# Match captured output with a here-string (`grep -q PAT <<<"$out"`), never
+# `printf '%s' "$out" | grep -q PAT`. Under pipefail that pipe is a race:
+# bash's printf writes line by line, `grep -q` exits at its first match, and a
+# later write then takes SIGPIPE -- so the pipeline reads 141 (a false FAIL, or
+# a false PASS under `!`) whenever grep is scheduled mid-write. Measured: one
+# red "--dry-run previews and changes nothing" in five runs under load (DND-365).
+
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$(cd -- "${HERE}/../.." && pwd -P)"
 RUNNER="${SCRIPTS}/athena-inbox-client-run.sh"
@@ -219,9 +226,9 @@ run_installer --install >/dev/null 2>&1
 rc=$?
 after="$(cat "${FAKE_CRONTAB}" 2>/dev/null)"
 if [ "$rc" -eq 0 ] \
-   && printf '%s\n' "$after" | grep -qxF -- "$UNRELATED" \
-   && printf '%s\n' "$after" | grep -qxF -- "@reboot ${EXP_RUNNER}" \
-   && printf '%s\n' "$after" | grep -qxF -- "*/5 * * * * ${EXP_RUNNER}"; then
+   && grep -qxF -- "$UNRELATED" <<<"$after" \
+   && grep -qxF -- "@reboot ${EXP_RUNNER}" <<<"$after" \
+   && grep -qxF -- "*/5 * * * * ${EXP_RUNNER}" <<<"$after"; then
   ok "install adds @reboot and */5 and preserves the unrelated entry"
 else
   bad "install adds @reboot and */5 and preserves the unrelated entry" \
@@ -253,7 +260,7 @@ fi
 
 # 4. --check is the read-only report an agent or CI is allowed to run.
 out="$(run_installer --check 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^OK'; then
+if [ "$rc" -eq 0 ] && grep -q '^OK' <<<"$out"; then
   ok "--check reports OK and exits 0 while both entries are installed"
 else
   bad "--check reports OK and exits 0 while both entries are installed" \
@@ -277,7 +284,7 @@ snapshot="$(cat "${FAKE_CRONTAB}")"
 out="$(run_installer --install --dry-run 2>&1)"; rc=$?
 if [ "$rc" -eq 0 ] \
    && [ "$(cat "${FAKE_CRONTAB}")" = "$snapshot" ] \
-   && printf '%s' "$out" | grep -q 'dry-run'; then
+   && grep -q 'dry-run' <<<"$out"; then
   ok "--dry-run previews and changes nothing"
 else
   bad "--dry-run previews and changes nothing" \
@@ -303,8 +310,8 @@ run_installer --remove >/dev/null 2>&1
 rc=$?
 after="$(cat "${FAKE_CRONTAB}" 2>/dev/null)"
 if [ "$rc" -eq 0 ] \
-   && printf '%s\n' "$after" | grep -qxF -- "$UNRELATED" \
-   && ! printf '%s\n' "$after" | grep -qF -- "${EXP_RUNNER}"; then
+   && grep -qxF -- "$UNRELATED" <<<"$after" \
+   && ! grep -qF -- "${EXP_RUNNER}" <<<"$after"; then
   ok "--remove deletes both of our entries and keeps the unrelated one"
 else
   bad "--remove deletes both of our entries and keeps the unrelated one" \
@@ -316,8 +323,8 @@ fi
 #    is the silent-failure mode this whole facility exists to close.
 err="$(run_installer --check 2>&1 >/dev/null)"; rc=$?
 if [ "$rc" -eq 1 ] \
-   && printf '%s' "$err" | grep -q 'MISSING' \
-   && printf '%s' "$err" | grep -q 'Fix:'; then
+   && grep -q 'MISSING' <<<"$err" \
+   && grep -q 'Fix:' <<<"$err"; then
   ok "--check exits 1 with MISSING and a Fix: line when the entries are gone"
 else
   bad "--check exits 1 with MISSING and a Fix: line when the entries are gone" \
@@ -330,7 +337,7 @@ setup_case nocrontab
 make_stub 0 0
 rm -f "${FAKE_CRONTAB}"
 err="$(run_installer --check 2>&1 >/dev/null)"; rc=$?
-if [ "$rc" -eq 1 ] && printf '%s' "$err" | grep -q 'Fix:'; then
+if [ "$rc" -eq 1 ] && grep -q 'Fix:' <<<"$err"; then
   ok "--check handles an absent crontab as MISSING, with a Fix: line"
 else
   bad "--check handles an absent crontab as MISSING, with a Fix: line" \
@@ -343,7 +350,7 @@ fi
 setup_case badflag
 make_stub 0 0
 err="$(run_installer --instal 2>&1 >/dev/null)"; rc=$?
-if [ "$rc" -eq 1 ] && printf '%s' "$err" | grep -q 'Fix:'; then
+if [ "$rc" -eq 1 ] && grep -q 'Fix:' <<<"$err"; then
   ok "an unknown installer flag exits 1 with a Fix: line"
 else
   bad "an unknown installer flag exits 1 with a Fix: line" "rc=$rc stderr=${err}"
@@ -352,7 +359,7 @@ fi
 # 12. The help text IS the leading comment block. If the awk extractor breaks,
 #     --help prints nothing and the script becomes undocumented in place.
 out="$(run_installer --help 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q -- '--self-test'; then
+if [ "$rc" -eq 0 ] && grep -q -- '--self-test' <<<"$out"; then
   ok "installer --help prints the header block (the awk extractor works)"
 else
   bad "installer --help prints the header block (the awk extractor works)" \
@@ -360,7 +367,7 @@ else
 fi
 
 out="$(bash "${RUNNER}" --help 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'Exit codes'; then
+if [ "$rc" -eq 0 ] && grep -q 'Exit codes' <<<"$out"; then
   ok "runner --help prints the header block"
 else
   bad "runner --help prints the header block" "rc=$rc out=${out}"
@@ -376,8 +383,8 @@ err="$(PATH="${SHIMBIN}:${PATH}" ATHENA_INBOX_CLIENT_LAUNCHER="${CASE_DIR}/absen
         bash "${INSTALLER}" --install 2>&1 >/dev/null)"; rc=$?
 # ...and the message must name the LAUNCHER, so this cannot pass by exiting 2
 # for some other missing prerequisite.
-if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q 'Fix:' \
-   && printf '%s' "$err" | grep -q 'launcher'; then
+if [ "$rc" -eq 2 ] && grep -q 'Fix:' <<<"$err" \
+   && grep -q 'launcher' <<<"$err"; then
   ok "install refuses a missing client launcher with exit 2 and a Fix: line"
 else
   bad "install refuses a missing client launcher with exit 2 and a Fix: line" \
@@ -411,8 +418,8 @@ if [ -x "${WT_INSTALLER}" ]; then
   PATH="${SHIMBIN}:${PATH}" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
     bash "${WT_INSTALLER}" --install >/dev/null 2>&1
   after="$(cat "${FAKE_CRONTAB}" 2>/dev/null)"
-  if printf '%s\n' "$after" | grep -qF -- "${MAIN_REAL}/scripts/athena-inbox-client-run.sh" \
-     && ! printf '%s\n' "$after" | grep -qF -- "${WT_REAL}/scripts/"; then
+  if grep -qF -- "${MAIN_REAL}/scripts/athena-inbox-client-run.sh" <<<"$after" \
+     && ! grep -qF -- "${WT_REAL}/scripts/" <<<"$after"; then
     ok "installing from a worktree schedules the MAIN checkout's runner path"
   else
     bad "installing from a worktree schedules the MAIN checkout's runner path" \
@@ -436,8 +443,8 @@ snapshot="$(cat "${FAKE_CRONTAB}")"
 out="$(CRONTAB_SHIM_FAIL=1 run_installer --install 2>/dev/null)"; rc=$?
 err="$(CRONTAB_SHIM_FAIL=1 run_installer --install 2>&1 >/dev/null)"
 if [ "$rc" -eq 2 ] \
-   && printf '%s' "$err" | grep -q 'Fix:' \
-   && ! printf '%s' "$out" | grep -q 'installed:' \
+   && grep -q 'Fix:' <<<"$err" \
+   && ! grep -q 'installed:' <<<"$out" \
    && [ "$(cat "${FAKE_CRONTAB}")" = "$snapshot" ]; then
   ok "a failed crontab write exits 2 with a Fix: and never claims 'installed'"
 else
@@ -618,7 +625,7 @@ setup_case nolauncher_run
 err="$(ATHENA_INBOX_CLIENT_LAUNCHER="${CASE_DIR}/absent" \
        ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
        bash "${RUNNER}" 2>&1 >/dev/null)"; rc=$?
-if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q 'Fix:'; then
+if [ "$rc" -eq 2 ] && grep -q 'Fix:' <<<"$err"; then
   ok "the runner refuses a missing launcher with exit 2 and a Fix: line"
 else
   bad "the runner refuses a missing launcher with exit 2 and a Fix: line" \
@@ -678,7 +685,7 @@ out="$(env -i HOME="${HOME}" PATH=/bin:/usr/bin XDG_STATE_HOME="${CASE_DIR}/xdg"
         ATHENA_INBOX_CLIENT_MAX_RESTARTS=1 \
         bash "${RUNNER}" 2>&1)"; rc=$?
 if [ "$rc" -eq 0 ] && [ "$(calls)" = "1" ] \
-   && ! printf '%s' "$out" | grep -q 'flock'; then
+   && ! grep -q 'flock' <<<"$out"; then
   ok "the runner finds flock under a cron-like minimal PATH"
 else
   bad "the runner finds flock under a cron-like minimal PATH" \
@@ -957,8 +964,8 @@ cp "${RUNNER}" "${CASE_DIR}/lonely/scripts/athena-inbox-client-run.sh"
 cp "${SCRIPTS}/inbox-client-capture" "${CASE_DIR}/lonely/scripts/inbox-client-capture"
 err="$(XDG_STATE_HOME="${CASE_DIR}/xdg" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
   ATHENA_INBOX_CLIENT_MAX_RESTARTS=1 bash "${CASE_DIR}/lonely/scripts/athena-inbox-client-run.sh" 2>&1 >/dev/null)"; rc=$?
-if [ "$rc" -eq 0 ] && [ "$(calls)" = "1" ] && printf '%s' "$err" | grep -q 'liveness library is missing' \
-   && printf '%s' "$err" | grep -q 'Fix:' && grep -q 'DEGRADED: the liveness library is missing' "${LOG}"; then
+if [ "$rc" -eq 0 ] && [ "$(calls)" = "1" ] && grep -q 'liveness library is missing' <<<"$err" \
+   && grep -q 'Fix:' <<<"$err" && grep -q 'DEGRADED: the liveness library is missing' "${LOG}"; then
   ok "a missing liveness library still supervises the client, and says so (stderr Fix: + log)"
 else
   bad "a missing liveness library still supervises the client, and says so (stderr Fix: + log)" "rc=$rc calls=$(calls) err=${err}"
@@ -1142,7 +1149,7 @@ if [ -n "$(line_of 'WATCHDOG: alert sent on harness-alerts')" ] && [ "$(line_of 
 else bad "the alert is sent only after the SIGTERM" "$(grep WATCHDOG "${LOG}" | tr '\n' '|')"; fi
 printf '[]' >"${CASE_DIR}/none.json"
 D="$(bash "${REPO_ROOT}/ai/skills/athena:inbox-attend/bin/wedge-ticket-decide" --message "${AL}" --tickets "${CASE_DIR}/none.json" 2>&1)"
-if printf '%s\n' "${D}" | grep -qx 'decision	create' && printf '%s\n' "${D}" | grep -qx "sig8	$(sed -n 's/^signature: //p' "${CAPDIR}/signature.txt" | cut -c1-8)"; then
+if grep -qx 'decision	create' <<<"${D}" && grep -qx "sig8	$(sed -n 's/^signature: //p' "${CAPDIR}/signature.txt" | cut -c1-8)" <<<"${D}"; then
   ok "end to end: a REAL capture's alert verifies against the capture and resolves create"
 else bad "end to end: a real capture's alert verifies and resolves create" "${D}"; fi
 stop_wd_supervisor

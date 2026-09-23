@@ -28,6 +28,13 @@
 #      (or: scripts/inbox-client-capture --self-test)
 set -uo pipefail
 
+# Match captured output with a here-string (`grep -q PAT <<<"$out"`), never
+# `printf '%s' "$out" | grep -q PAT`. Under pipefail that pipe is a race:
+# bash's printf writes line by line, `grep -q` exits at its first match, and a
+# later write then takes SIGPIPE -- so the pipeline reads 141 (a false FAIL, or
+# a false PASS under `!`) whenever grep is scheduled mid-write. Measured: one
+# red "--dry-run previews and changes nothing" in five runs under load (DND-365).
+
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$(cd -- "${HERE}/../.." && pwd -P)"
 CAPTURE="${SCRIPTS}/inbox-client-capture"
@@ -258,7 +265,7 @@ WF_REPO="$(cd -- "${SCRIPTS}/.." && pwd -P)"
 . "${SCRIPTS}/test/inbox-client-alert/wedge-fixture.bash"
 V="$(ATHENA_INBOX_ROOT="${TMP}/inbox-root" "${SCRIPTS}/../ai/skills/athena:inbox-attend/bin/wedge-ticket-decide" \
       --message "$(wf_make_message "${TMP}/msgs" "${CAPD}" "$(field "${out}" signature)")" --verify-only 2>&1)"
-if printf '%s\n' "${V}" | grep -qx 'decision	verified' && printf '%s\n' "${V}" | grep -q '^frames_from	signature.txt (dump.txt was truncated'; then
+if grep -qx 'decision	verified' <<<"${V}" && grep -q '^frames_from	signature.txt (dump.txt was truncated' <<<"${V}"; then
   ok "a REAL capped capture still verifies, from signature.txt's frames, and says so"
 else bad "a real capped capture still verifies" "${V}"; fi
 
@@ -339,19 +346,19 @@ i=0; while [ -z "$(pgrep -P "${SB}")" ] && [ "${i}" -lt 50 ]; do sleep 0.1; i=$(
 printf '%s\n' "${SB}" > "${PF}"
 before="$(find "${DUMPS}" -mindepth 1 -maxdepth 1 -type d | wc -l)"
 out="$("${CAPTURE}" --resolve-client 2>&1)"; rc=$?
-if [ "${rc}" -eq 3 ] && printf '%s' "${out}" | grep -q 'could not identify the client: .*not the ruby client (exe .*sleep)'; then ok "a backoff sleep child -> exit 3 'could not identify', naming the exe"; else bad "a backoff sleep child -> exit 3 'could not identify', naming the exe" "rc=${rc} ${out}"; fi
+if [ "${rc}" -eq 3 ] && grep -q 'could not identify the client: .*not the ruby client (exe .*sleep)' <<<"${out}"; then ok "a backoff sleep child -> exit 3 'could not identify', naming the exe"; else bad "a backoff sleep child -> exit 3 'could not identify', naming the exe" "rc=${rc} ${out}"; fi
 out="$("${CAPTURE}" --now 2>&1)"; rc=$?
 after="$(find "${DUMPS}" -mindepth 1 -maxdepth 1 -type d | wc -l)"
-if [ "${rc}" -eq 3 ] && [ "${before}" = "${after}" ] && printf '%s' "${out}" | grep -q 'Fix:'; then ok "--now on an unidentifiable client captures NOTHING, exit 3 with a Fix:"; else bad "--now on an unidentifiable client captures NOTHING, exit 3 with a Fix:" "rc=${rc} dirs ${before}->${after}"; fi
+if [ "${rc}" -eq 3 ] && [ "${before}" = "${after}" ] && grep -q 'Fix:' <<<"${out}"; then ok "--now on an unidentifiable client captures NOTHING, exit 3 with a Fix:"; else bad "--now on an unidentifiable client captures NOTHING, exit 3 with a Fix:" "rc=${rc} dirs ${before}->${after}"; fi
 
 bash -c 'sleep 60 & sleep 60 & wait' >/dev/null 2>&1 & S2=$!; PIDS+=("${S2}")
 i=0; while [ "$(pgrep -P "${S2}" | wc -l)" -lt 2 ] && [ "${i}" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
 printf '%s\n' "${S2}" > "${PF}"
 out="$("${CAPTURE}" --resolve-client 2>&1)"; rc=$?
-if [ "${rc}" -eq 3 ] && printf '%s' "${out}" | grep -q 'has 2 children, expected exactly 1'; then ok "two children -> exit 3, never a guess"; else bad "two children -> exit 3, never a guess" "rc=${rc} ${out}"; fi
+if [ "${rc}" -eq 3 ] && grep -q 'has 2 children, expected exactly 1' <<<"${out}"; then ok "two children -> exit 3, never a guess"; else bad "two children -> exit 3, never a guess" "rc=${rc} ${out}"; fi
 rm -f "${PF}"
 out="$("${CAPTURE}" --resolve-client 2>&1)"; rc=$?
-if [ "${rc}" -eq 3 ] && printf '%s' "${out}" | grep -q 'no supervisor pidfile'; then ok "no pidfile -> exit 3 naming the missing pidfile"; else bad "no pidfile -> exit 3 naming the missing pidfile" "rc=${rc} ${out}"; fi
+if [ "${rc}" -eq 3 ] && grep -q 'no supervisor pidfile' <<<"${out}"; then ok "no pidfile -> exit 3 naming the missing pidfile"; else bad "no pidfile -> exit 3 naming the missing pidfile" "rc=${rc} ${out}"; fi
 
 # A pid that is not the client at all (a plain sleep) is refused before any
 # directory is made and before any signal is sent.
@@ -361,16 +368,16 @@ out="$("${CAPTURE}" "${SL}" 2>&1)"; rc=$?
 after="$(find "${DUMPS}" -mindepth 1 -maxdepth 1 -type d | wc -l)"
 if [ "${rc}" -eq 3 ] && [ "${before}" = "${after}" ] && kill -0 "${SL}" 2>/dev/null; then ok "a non-client pid -> exit 3, nothing captured, not signalled"; else bad "a non-client pid -> exit 3, nothing captured, not signalled" "rc=${rc} dirs ${before}->${after}"; fi
 out="$("${CAPTURE}" 1 2>&1)"; rc=$?
-if [ "${rc}" -eq 3 ] && printf '%s' "${out}" | grep -q 'uid'; then ok "another user's process (pid 1) -> exit 3 on the uid check"; else bad "another user's process (pid 1) -> exit 3 on the uid check" "rc=${rc} ${out}"; fi
+if [ "${rc}" -eq 3 ] && grep -q 'uid' <<<"${out}"; then ok "another user's process (pid 1) -> exit 3 on the uid check"; else bad "another user's process (pid 1) -> exit 3 on the uid check" "rc=${rc} ${out}"; fi
 
 # ---------------------------------------------------------------------------
 printf '\nC-6  usage\n'
 out="$("${CAPTURE}" --help 2>&1)"; rc=$?
-if [ "${rc}" -eq 0 ] && printf '%s' "${out}" | grep -q 'Exit codes'; then ok "--help prints the header, exit 0"; else bad "--help prints the header, exit 0" "rc=${rc}"; fi
+if [ "${rc}" -eq 0 ] && grep -q 'Exit codes' <<<"${out}"; then ok "--help prints the header, exit 0"; else bad "--help prints the header, exit 0" "rc=${rc}"; fi
 out="$("${CAPTURE}" --bogus 2>&1)"; rc=$?
-if [ "${rc}" -eq 1 ] && printf '%s' "${out}" | grep -q 'Fix:'; then ok "an unknown option is exit 1 with a Fix:"; else bad "an unknown option is exit 1 with a Fix:" "rc=${rc}"; fi
+if [ "${rc}" -eq 1 ] && grep -q 'Fix:' <<<"${out}"; then ok "an unknown option is exit 1 with a Fix:"; else bad "an unknown option is exit 1 with a Fix:" "rc=${rc}"; fi
 out="$(XDG_STATE_HOME=relative "${CAPTURE}" "${M1}" 2>&1)"; rc=$?
-if [ "${rc}" -eq 2 ] && printf '%s' "${out}" | grep -q 'Fix:'; then ok "a relative XDG_STATE_HOME is exit 2 with a Fix: (a wrongly computed key)"; else bad "a relative XDG_STATE_HOME is exit 2 with a Fix:" "rc=${rc} ${out}"; fi
+if [ "${rc}" -eq 2 ] && grep -q 'Fix:' <<<"${out}"; then ok "a relative XDG_STATE_HOME is exit 2 with a Fix: (a wrongly computed key)"; else bad "a relative XDG_STATE_HOME is exit 2 with a Fix:" "rc=${rc} ${out}"; fi
 
 printf '\n'
 if [ "${FAIL}" -eq 0 ]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0; fi
