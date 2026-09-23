@@ -588,9 +588,8 @@ miss.
     a delivery failure, the first row is written while the delivery is still
     pending, so this is the one delivery-cause row that is not always
     terminal. The terminal crash ends the delivery FAILED because its crash
-    budget, not its retry budget, is spent; a later redelivery of that same
-    delivery still records nothing new, because the row is keyed on *Grain*
-    above.
+    budget, not its retry budget, is spent (*Reconciled with idempotency*
+    below).
   - **Key.** The crashed delivery's own key under *Grain* above: its
     `rule_id` (or `nil` for a direct delivery), the cause
     `sweeper-dispatch-crash`, and its `machine_id` (the direct recipient, `nil`
@@ -700,12 +699,23 @@ miss.
   transition, the replace destroyed that outage's detail silently, and only
   the count remained.
 - **Reconciled with idempotency.** "Terminal" means the per-`(event, rule)`
-  at-least-once retry budget of *Idempotency is per (event, rule)* is exhausted;
-  the failed-delivery record is that delivery's terminal state. A later
+  at-least-once retry budget of *Idempotency is per (event, rule)* is exhausted,
+  or, for a dispatch that keeps raising, its crash budget is (*Sweeper
+  dispatch-crash rows* above); the failed-delivery record is that delivery's
+  terminal state. The one delivery-cause record written before its delivery
+  is terminal is a dispatch-crash row's first report, which that bullet
+  states. A later
   at-least-once redelivery of the same `(event, rule)` is absorbed by the
   idempotent consumer and does **not** manufacture a second failure record; the
   record is keyed on the store's *Grain* above, not on any per-change dedupe
   key.
+
+  **Later (2026-09-23):** "terminal" meant only the retry budget exhausted, and
+  every delivery-cause record was a terminal state. Superseded (DND-395,
+  declaring gen_saas DND-387): a crashed dispatch spends a separate crash
+  budget, never the retry budget, and its first crash is reported while the
+  delivery is still pending. Why: so a platform defect is neither charged to
+  the owner's retry budget nor left unreported until it ends.
 
 #### Delivery refusal — the refused-delivery store
 
