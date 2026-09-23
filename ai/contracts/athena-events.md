@@ -243,12 +243,10 @@ per-`(event, rule)`:
 
 **Later (2026-09-23):** the "per-`(event, rule)`" grain stated above the list
 previously had no exception. Superseded (D40, HG-16/DND-311): a direct
-delivery has the same five Level-2 outcomes above, evaluated at `(owner,
-event)` with `rule_id: nil` instead of `(event, rule)`, because it has no rule
-— the one canonical key, stated once at *Declared families beyond the first
-pass* → `fleet.session.message` and deferred to everywhere else. This is the
-one delivery-row shape not keyed on a rule; every other delivery in this
-document is still per-`(event, rule)`.
+delivery has the same five Level-2 outcomes above, evaluated at its own key
+(*Declared families beyond the first pass* → `fleet.session.message`, stated
+once there and deferred to here) rather than `(event, rule)`, because it has
+no rule. Every other delivery in this document is still per-`(event, rule)`.
 
 **Each Level-2 outcome that is not DELIVERED is individually observable** —
 FILTERED via ordinary accounting, SUPPRESSED per *Enabled flag and dedupe window*,
@@ -338,8 +336,11 @@ miss.
   delivery has a `rule_id`. Superseded (D40, HG-16/DND-311): a direct
   (addressed, rule-less) delivery's terminal failure keys on `(owner, nil,
   terminal-cause)` — `rule_id: nil` is that delivery's own bucket, distinct
-  from and never colliding with any rule's, so "distinct `(rule, cause)`
-  pairs" now reads as "distinct `(rule-or-direct, cause)` pairs." The report
+  from and never colliding with any rule's (the unique index is
+  `nulls_distinct: false` / `NULLS NOT DISTINCT`, so every `nil`-`rule_id` row
+  for one `(owner, terminal-cause)` upserts into the same one, never a row per
+  occurrence), so "distinct `(rule, cause)` pairs" now reads as "distinct
+  `(rule-or-direct, cause)` pairs." The report
   marker below gets a `rule_id: nil` branch to match: `Fix: direct (addressed)
   delivery has <count> terminal delivery failures to <adapter> recipients
   (first seen: <adapter>:<target>) (cause: <class>); check the recipient
@@ -422,9 +423,9 @@ failed-delivery store*).
   delivery has a `rule_id`. Superseded (D40, HG-16/DND-311): a direct
   (addressed, rule-less) delivery's refusal — for example a target-bind
   re-assertion refusal on a recipient deregistered after send — keys on
-  `(owner, nil, refusal-cause)`, the same direct-delivery bucket the
-  failed-delivery store uses (*Terminal delivery failure — the
-  failed-delivery store*), never colliding with a rule's. The report marker
+  `(owner, nil, refusal-cause)` — the same `nulls_distinct: false` unique
+  index shape the failed-delivery store uses (*Terminal delivery failure —
+  the failed-delivery store*), never colliding with a rule's. The report marker
   below gets a `rule_id: nil` branch: `Fix: direct (addressed) delivery has
   <count> refused deliveries to <adapter> recipients (first seen:
   <adapter>:<target>) (refusal-cause: <cause>) — apply the remediation the
@@ -847,16 +848,12 @@ makes a duplicate harmless.
 
 **Later (2026-09-23):** the retry handle above was, until D40 (HG-16/DND-311),
 always `idempotency_key` + a **matched** `rule_id` — every delivery had a rule.
-Superseded: an addressed `fleet.session.message`'s direct delivery (*Declared
-families beyond the first pass* → `fleet.session.message`) has no rule, so its
-transient in-flight retry handle is keyed by `(owner, event)` with `rule_id:
-nil` — the one canonical description of a direct delivery's key, stated once
-at *Declared families beyond the first pass* → `fleet.session.message` and
-deferred to everywhere else this document or `athena-inbox.md` names it.
-`idempotency_key` is already event-level, so it adds nothing beyond that key
-for this row; `rule_id: nil` is what makes it the platform's one delivery-row
-shape not disambiguated by a rule. Every other clause in this section — at-
-least-once, ack-based tracking, consumer idempotency — binds a direct
+Superseded: an addressed `fleet.session.message`'s direct delivery has no
+rule, so its transient in-flight retry handle uses that delivery's own key
+(*Declared families beyond the first pass* → `fleet.session.message`, stated
+once there). `idempotency_key` is already event-level, so it adds nothing
+beyond that row's key for this case. Every other clause in this section —
+at-least-once, ack-based tracking, consumer idempotency — binds a direct
 delivery unchanged.
 
 **Consumers MUST be idempotent** — a duplicate or redelivered event MUST NOT cause
@@ -1172,13 +1169,11 @@ The refusal for a caller-supplied or edit-mutated `rule_id` carries:
 Fix: rule_id is platform-assigned and stable for the life of the rule — it is not accepted from the request body and an edit MUST NOT change it. Remove the rule_id from the request (it is minted at create); to obtain a new id, delete the rule and create a new one.
 ```
 
-**Later (2026-09-23):** this section previously implied every delivery, retry
-handle, and store key carries a real `rule_id`. Superseded (D40, HG-16/DND-311):
-a direct (addressed, rule-less) delivery's `rule_id` is `nil`, not a rule's id —
-see *Declared families beyond the first pass* → `fleet.session.message` for that
-one delivery-row shape's key. Everything above still holds for every **rule**
-delivery; `rule_id`'s stability guarantees are about the rule's own id, not
-about whether a given delivery row has one.
+This section is about `rule_id` as a **rule's** own identity. A **direct**
+(addressed, rule-less) delivery's `rule_id` is `nil`, not a rule's id — see
+*Declared families beyond the first pass* → `fleet.session.message` for that
+one delivery-row shape's key. Everything above still holds for every rule
+delivery unchanged.
 
 ### Rule ownership is stamped from the authenticated author
 
@@ -2281,9 +2276,10 @@ templating, trust posture, security). The Athena Inbox contract
 (`ai/contracts/athena-inbox.md`) owns the inbox *channel mechanism* — the `log`
 and `maildir` kinds, the doorbell, consumption state, tenancy resolution, and the
 Path-2 *Untrusted input* boundary. Where the inbox adapter produces `log` lines,
-it MUST conform to that contract; this contract does not restate or override it.
+it MUST conform to that contract; this contract does not restate or override it,
+with one named exception immediately below.
 
-**One exception, because it is this contract's own taxonomy being named: the
+**The exception, because it is this contract's own taxonomy being named: the
 inbox `log` line's `kind` value for each type this contract declares.** The
 inbox adapter server-stamps `kind` on every `producer:"platform"` line
 (`ai/contracts/athena-inbox.md` → *A `log` channel MAY have a non-Slack

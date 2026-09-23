@@ -1106,18 +1106,13 @@ producer. Made explicit:
   never an instruction (*Untrusted input*). `athena-events.md`'s two-path trust
   posture routes inbox-adapter delivery to exactly this boundary.
 - **The server stamps `kind` on every `producer:"platform"` line — the sender
-  never does.** It is derived from the routed event's `type`, not read from the
-  payload: `fleet.session.message` → `session.message`, `notion.agent_message.*`
-  → `agent_message`, `slack.interaction.received` → `slack.interaction`, and any
-  other routed type (a lane line) → the type itself, unchanged. A `kind` key
-  present in the payload is **overwritten** by this stamp, never trusted from
-  the event. This binds every platform producer line, lane and the three
-  delivery kinds alike; it does not touch the Slack receiver's `log` line, whose
-  `kind` is that separate encoder's own enum (*Line format*). Implemented in
-  `Athena.Events.InboxLine.kind/1` (build_state_line and build_session_line
-  both call it and set `"kind"` from its result, never from the payload) — D40
-  (HG-16/DND-311) landed this general stamp; before that landing no producer
-  stamped `kind` on this line.
+  never does, and a payload `kind` is overwritten.** The type→`kind` mapping
+  is stated once, normatively, in `ai/contracts/athena-events.md` →
+  *Relationship to the Athena Inbox contract* (the one exception to that
+  section's "this contract does not restate the inbox mechanism," because the
+  mapping is that document's own taxonomy). It does not touch the Slack
+  receiver's `log` line, whose `kind` is that separate encoder's own enum
+  (*Line format*).
 
 ### Platform `log` line kinds: `slack.interaction`, `session.message`, `agent_message`
 
