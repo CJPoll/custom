@@ -382,7 +382,8 @@ assert_contains "the unknown-producer refusal carries a Fix: clause" "Fix:" "${e
 assert_contains "the unknown-producer refusal names the accepted set (slack, platform)" "platform" "${err}"
 
 # DND-260 round-6: a `producer:"platform"` lane is a KEYLESS change stream --
-# logchan_scan's platform branch computes no dedupe key and holds no seen-set --
+# logchan_scan's platform branch computes no dedupe key and holds no declarable
+# seen-set (its delivery_id frame ring, DND-372, is built in) --
 # so a `dedupe` declaration on it would be honoured by nothing. That is the same
 # "silently deduping on nothing" the recognised-member check refuses, reached
 # from the other side, so the validator rejects `dedupe` on a platform channel
@@ -1444,10 +1445,10 @@ setup_case
 cproj="$(make_repo cproj)"
 register cproj "${cproj}" '{"c":{"kind":"log","path":"c.jsonl"}}'
 printf '%s\n%s\n' "${L1}" "${L2}" > "${ATHENA_INBOX_ROOT}/c.jsonl"
-for corrupt in '{ not json' '[]' '{"offset":"twelve","seen_event_ids":[],"seen_keys":[]}' '{"offset":0,"seen_event_ids":"Ev1","seen_keys":[]}' '{"offset":0,"seen_event_ids":[7],"seen_keys":[]}'; do
+for corrupt in '{ not json' '[]' '{"offset":"twelve","seen_event_ids":[],"seen_keys":[]}' '{"offset":0,"seen_event_ids":"Ev1","seen_keys":[]}' '{"offset":0,"seen_event_ids":[7],"seen_keys":[]}' '{"offset":0,"seen_event_ids":[],"seen_keys":[],"seen_delivery_ids":"x"}' '{"offset":0,"seen_event_ids":[],"seen_keys":[],"seen_delivery_ids":[7]}'; do
   printf '%s' "${corrupt}" > "${ATHENA_INBOX_ROOT}/c.state.json"
   jout="$(cd "${cproj}" && "${BIN}/inbox-status" --json 2>/dev/null)"
-  assert_eq "a corrupt state file is REPORTED, not silently absorbed: [$(printf '%s' "${corrupt}" | cut -c1-26)…]" "true" \
+  assert_eq "a corrupt state file is REPORTED, not silently absorbed: [$(printf '%s' "${corrupt}" | cut -c1-26)…$(printf '%s' "${corrupt}" | rev | cut -c1-12 | rev)]" "true" \
     "$(jq -r '.channels[] | select(.name=="c") | .state_unreadable' <<<"${jout}")"
 done
 # It recovers rather than refusing -- re-reading over-reports, which is
