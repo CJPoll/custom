@@ -754,6 +754,30 @@ run "$(bash_json 'glab-athena refresh')"
 check_escalate "T7. rule 6 (glab-athena refresh) deny says escalate"
 
 echo
+echo "--- DENY TEXT: rule 1/2 messages name every subcommand they deny (DND-401) ---"
+
+# check_names <label> <substring> : the last run denied AND its reason
+# contains <substring> verbatim. Proves the message text was not left stale
+# relative to the matcher's own subcommand list (GH_MUT / GLAB_MUT).
+check_names() {
+  if is_deny && printf '%s' "$OUT" | grep -qF "$2"; then
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "$1"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s (want substring: %s) out=[%s]\n' "$1" "$2" "$OUT"
+  fi
+}
+
+for _sub in login logout refresh token setup-git switch; do
+  run "$(bash_json "gh auth $_sub")"
+  check_names "N1-gh-${_sub}. rule 1 deny names $_sub" "$_sub"
+done
+
+for _sub in login logout refresh configure-docker docker-helper dpop-gen; do
+  run "$(bash_json "glab auth $_sub")"
+  check_names "N2-glab-${_sub}. rule 2 deny names $_sub" "$_sub"
+done
+
+echo
 echo "==================================================="
 printf 'RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
 echo "==================================================="

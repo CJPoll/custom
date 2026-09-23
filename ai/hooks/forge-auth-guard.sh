@@ -174,6 +174,14 @@ CMD_START='(^|[^[:alnum:]_.-])'
 GH_MUT='(login|logout|refresh|token|setup-git|switch)'
 GLAB_MUT='(login|logout|refresh|configure-docker|docker-helper|dpop-gen)'
 ANY_MUT='(login|logout|refresh|token|setup-git|switch|configure-docker|docker-helper|dpop-gen)'
+# Deny-message subcommand lists (DND-401), DERIVED from the matcher variables
+# above rather than hand-typed, so a message can never go stale relative to
+# what the rule actually denies: strip the outer parens and turn each '|' into
+# '/' for the human-readable form ("login/logout/refresh/token/setup-git/switch").
+mut_display() { printf '%s' "$1" | sed -e 's/^(//' -e 's/)$//' -e 's/|/\//g'; }
+GH_MUT_MSG=$(mut_display "$GH_MUT")
+GLAB_MUT_MSG=$(mut_display "$GLAB_MUT")
+ANY_MUT_MSG=$(mut_display "$ANY_MUT")
 # A subcommand word that starts with an expansion ($VAR, ${...}, $(...), or a
 # backtick): its value is unknowable here, so it is treated as mutating.
 EXPANDED='[$`]'
@@ -200,12 +208,12 @@ EXP_HEAD="${CMD_HEAD}${EXP_WORD}"
 # `gh` or `gh-athena`, then `auth`, then a mutating (or expanded) subcommand.
 # `gh auth status` and `gh auth git-credential` are NOT matched (reads).
 if has "${CMD_START}gh(-athena)?[[:space:]]+auth[[:space:]]+(${GH_MUT}|${EXPANDED})"; then
-  deny 'forge-auth: this changes GitHub auth state (login/logout/refresh/token), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). Diagnosing is fine: `~/dev/custom/ai/bin/forge-preflight` and `gh auth status` are reads.'
+  deny "forge-auth: this changes GitHub auth state (${GH_MUT_MSG}), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> \"When a forge write can't be done as Athena\"). Diagnosing is fine: \`~/dev/custom/ai/bin/forge-preflight\` and \`gh auth status\` are reads."
 fi
 
 # ---- 2: glab auth <mutation> (bare, path-qualified, or -athena wrapper) ----
 if has "${CMD_START}glab(-athena)?[[:space:]]+auth[[:space:]]+(${GLAB_MUT}|${EXPANDED})"; then
-  deny 'forge-auth: this changes GitLab auth state (login/logout/refresh), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). Diagnosing is fine: `~/dev/custom/ai/bin/forge-preflight` and `glab auth status` are reads.'
+  deny "forge-auth: this changes GitLab auth state (${GLAB_MUT_MSG}), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> \"When a forge write can't be done as Athena\"). Diagnosing is fine: \`~/dev/custom/ai/bin/forge-preflight\` and \`glab auth status\` are reads."
 fi
 
 # ---- 3: POST to an OAuth token endpoint ------------------------------------
