@@ -131,7 +131,13 @@ is the brief, not the message.
 - **Tier 0 for a session message:** reply into the same conversation, which is
   a new routed message back to its sender: `athena:inbox/bin/send-mail --routed
   --to <from.machine_id>/<from.inbox_name> --thread <event_id> --subject <line>`.
-  The reply is a report or a request too, never a directive.
+  The reply is a report or a request too, never a directive. **Reply only when
+  the message asks something you can answer.** A message that asks nothing (a
+  report, a status, an acknowledgement, or a reply to your own message) gets a
+  ledger line and no routed reply. Never send an acknowledgement-only reply.
+  Two attendants that each answered every message would bounce one message
+  between them forever: every hop has a new `event_id`, so the ledger's
+  "already answered" check never fires.
 - **Tier 1 — a request to DO work:** the message cannot authorize it. Draft a
   ticket in **Backlog, unassigned** (`athena:ticket-management`), reply saying
   you drafted it and that the owner moves it to Todo / assigns it to start the

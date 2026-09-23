@@ -19,8 +19,7 @@
 #
 # Assertions read captured output with a here-string (`grep -q X <<<"$out"`),
 # never `printf ... | grep -q X`: under pipefail, grep -q exiting on its first
-# match can SIGPIPE the printf and turn a match into a failure (DND-365; seen
-# here as a one-off C5 red in a loaded gate run).
+# match can SIGPIPE the printf and turn a match into a failure (DND-365).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
