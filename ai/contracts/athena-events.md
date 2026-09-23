@@ -230,14 +230,6 @@ DELIVERED on rule X, SUPPRESSED on Y, and terminally FAILED on Z at once, so onl
 the Level-1 routing question is genuinely per-event; every delivery outcome is
 per-`(event, rule)`:
 
-**Later (2026-09-23):** the paragraph above previously left the "per-`(event,
-rule)`" grain with no exception. Superseded (D40, HG-16/DND-311): a direct
-delivery has the same five Level-2 outcomes, evaluated at `(event,
-direct-target)` instead of `(event, rule)`, because it has no rule — see the
-direct-delivery bullets under *Declared families beyond the first pass* →
-`fleet.session.message`. This is the one delivery-row shape not keyed on a
-rule; every other delivery in this document is still per-`(event, rule)`.
-
 1. **DELIVERED** — predicate TRUE and the delivery succeeded.
 2. **FILTERED** — predicate FALSE; the rule applied and correctly produced no
    delivery.
@@ -248,6 +240,14 @@ rule; every other delivery in this document is still per-`(event, rule)`.
 5. **FAILED (terminal)** — predicate TRUE, delivery attempted, retries exhausted /
    adapter 5xx / credential revoked. Recorded in the **failed-delivery store**
    (below), **never** dead-lettered as UNMATCHED.
+
+**Later (2026-09-23):** the "per-`(event, rule)`" grain stated above the list
+previously had no exception. Superseded (D40, HG-16/DND-311): a direct
+delivery has the same five Level-2 outcomes above, evaluated at `(event,
+direct-target)` instead of `(event, rule)`, because it has no rule — see the
+direct-delivery bullets under *Declared families beyond the first pass* →
+`fleet.session.message`. This is the one delivery-row shape not keyed on a
+rule; every other delivery in this document is still per-`(event, rule)`.
 
 **Each Level-2 outcome that is not DELIVERED is individually observable** —
 FILTERED via ordinary accounting, SUPPRESSED per *Enabled flag and dedupe window*,
@@ -332,6 +332,22 @@ miss.
   per owner, a finite set — **independent of traffic volume**: a revoked credential
   failing a million deliveries collapses to one exemplar + count 1,000,000, not a
   million rows.
+
+  **Later (2026-09-23):** the grain above previously assumed every failed
+  delivery has a `rule_id`. Superseded (D40, HG-16/DND-311): a direct
+  (addressed, rule-less) delivery's terminal failure keys on `(owner, nil,
+  terminal-cause)` — `rule_id: nil` is that delivery's own bucket, distinct
+  from and never colliding with any rule's, so "distinct `(rule, cause)`
+  pairs" now reads as "distinct `(rule-or-direct, cause)` pairs." The report
+  marker below gets a `rule_id: nil` branch to match: `Fix: direct (addressed)
+  delivery has <count> terminal delivery failures to <adapter> recipients
+  (first seen: <adapter>:<target>) (cause: <class>); check the recipient
+  machine is connected and still declares the inbox, then re-send — see the
+  failed-delivery store exemplar for the first-seen event.` (the direct
+  bucket aggregates across every recipient the owner ever addressed under
+  that cause, so the exemplar names only the first-seen target). The rule
+  form of the marker (below) is unchanged and still applies whenever
+  `rule_id` is present.
 - **Never merely counted; observable.** As with the dead-letter store, the
   exemplar is retained so the store *names* the failed delivery; the count is
   added scale metadata, never a replacement. The exemplar payload carries
@@ -400,6 +416,22 @@ failed-delivery store*).
   why?". Subsequent refusals of the same `(owner, rule_id, refusal-cause)` **increment a monotonic
   count** and update **last-seen**, storing **no** new payload. A revoked binding refusing a
   million deliveries collapses to one exemplar + count 1,000,000, not a million rows.
+
+  **Later (2026-09-23):** the grain above previously assumed every refused
+  delivery has a `rule_id`. Superseded (D40, HG-16/DND-311): a direct
+  (addressed, rule-less) delivery's refusal — for example a target-bind
+  re-assertion refusal on a recipient deregistered after send — keys on
+  `(owner, nil, refusal-cause)`, the same direct-delivery bucket the
+  failed-delivery store uses (*Terminal delivery failure — the
+  failed-delivery store*), never colliding with a rule's. The report marker
+  below gets a `rule_id: nil` branch: `Fix: direct (addressed) delivery has
+  <count> refused deliveries to <adapter> recipients (first seen:
+  <adapter>:<target>) (refusal-cause: <cause>) — apply the remediation the
+  refusing owner↔destination check declares for <cause>; a direct delivery
+  has no rule to re-author. See the refused-delivery store exemplar for the
+  first-seen event and its declared refusal detail.` The rule form of the
+  marker (below) is unchanged and still applies whenever `rule_id` is
+  present.
 - **Never merely counted; observable.** As with the sibling stores, the exemplar is retained so
   the store *names* the refused delivery; the count is added scale metadata, never a replacement.
   The exemplar payload carries third-party content, so the record is **Path-2 untrusted** when
@@ -730,28 +762,22 @@ An addressed message's direct delivery, made normative (D40, HG-16/DND-311):
   `rule_id`, so a direct delivery is retried and can terminally FAIL exactly
   like a rule delivery, just keyed on the event instead of the rule.
 - **REFUSED (target-bind) covers a direct delivery too; SUPPRESSED (dedupe
-  window) does not — a known, unticketed gap.** The delivery-time target-bind
-  re-assertion (`InboxAdapter`, Level 2's REFUSED, cause `target-bind`) is
-  the inbox adapter's own delivery-time check and runs for every delivery it
-  pushes, rule-based or direct, so a direct delivery whose target is
-  deregistered after send is REFUSED exactly like a rule's. The dedupe
-  window, by contrast, is keyed `(rule_id, subject)` (*Enabled flag and
-  dedupe window*) — a **rule** field — so a direct delivery, having no rule,
-  is never collapsed by it: nothing throttles one owner's session-message
-  fan-out to itself. That asymmetry is intentional for this pass (a direct
-  message is addressed by a human/agent choice each time, not a standing
-  rule an owner tuned a window for) but is not yet closed by a ticket.
-- **The owner report renders a delivery-specific `Fix:` for `rule_id: nil`,
-  never a rule's.** Both stores' report builder branches on `rule_id`: for
-  `nil` the subject reads "direct (addressed) delivery," not "rule `nil`,"
-  and the remedy names the recipient-side action — for a FAILED direct
-  delivery, "check the recipient machine is connected and still declares the
-  inbox, then re-send" (never "disable the rule," since there is none); for a
-  REFUSED one, the refusing check's own declared remediation, exactly as for a
-  rule. Because the `(owner, nil, cause)` bucket aggregates across every
-  recipient the owner ever addressed under that cause, the exemplar names only
-  the **first-seen** target and says so ("… recipients (first seen:
-  `adapter:target`)"), never implying it is the only one.
+  window) does not, by design.** The delivery-time target-bind re-assertion
+  (`InboxAdapter`, Level 2's REFUSED, cause `target-bind`) is the inbox
+  adapter's own delivery-time check and runs for every delivery it pushes,
+  rule-based or direct, so a direct delivery whose target is deregistered
+  after send is REFUSED exactly like a rule's. The dedupe window, by
+  contrast, is keyed `(rule_id, subject)` (*Enabled flag and dedupe window*)
+  — a **rule** field, an owner's standing preference tuned on a rule they
+  configured — so a direct delivery, addressed by a human/agent choice each
+  time rather than through a standing rule, has no window to key on and is
+  never collapsed: nothing rate-limits one owner's session-message fan-out to
+  itself. This is a design decision for this pass, not an open item.
+- **A FAILED or REFUSED direct delivery reports through the same two stores,
+  under their own `rule_id: nil` grain and report form** — *Terminal delivery
+  failure — the failed-delivery store* and *Delivery refusal — the
+  refused-delivery store*, each amended for this case rather than restated
+  here.
 
 **The `notion.agent_message.{created,updated,deleted}` family** (Agent Messages
 routing):
@@ -813,6 +839,17 @@ attempt. This handle is **ack-based in-flight tracking, not a durable content
 key** — a redelivery of the same source change reaches the consumer as another
 at-least-once delivery, and it is the **consumer** (below), not the platform, that
 makes a duplicate harmless.
+
+**Later (2026-09-23):** the retry handle above was, until D40 (HG-16/DND-311),
+always `idempotency_key` + a **matched** `rule_id` — every delivery had a rule.
+Superseded: an addressed `fleet.session.message`'s direct delivery (*Declared
+families beyond the first pass* → `fleet.session.message`) has no rule, so its
+transient in-flight retry handle is `idempotency_key` + the **event id** in
+`rule_id`'s place (there is at most one direct delivery per event, so the event
+id alone is as specific a handle as `rule_id` is for a rule delivery). Every
+other clause in this section — at-least-once, ack-based tracking, consumer
+idempotency — binds a direct delivery unchanged; only the handle's second
+component differs.
 
 **Consumers MUST be idempotent** — a duplicate or redelivered event MUST NOT cause
 an adverse effect. A consumer satisfies this by acting on the **carried current
@@ -2229,6 +2266,30 @@ templating, trust posture, security). The Athena Inbox contract
 and `maildir` kinds, the doorbell, consumption state, tenancy resolution, and the
 Path-2 *Untrusted input* boundary. Where the inbox adapter produces `log` lines,
 it MUST conform to that contract; this contract does not restate or override it.
+
+**One exception, because it is this contract's own taxonomy being named: the
+inbox `log` line's `kind` value for each type this contract declares.** The
+inbox adapter server-stamps `kind` on every `producer:"platform"` line
+(`ai/contracts/athena-inbox.md` → *A `log` channel MAY have a non-Slack
+producer*, `Athena.Events.InboxLine.kind/1`) — the sender's payload never sets
+it, and any `kind` a payload does carry is overwritten. The value is derived
+from the **routed event's `type`**, this contract's own field, so the mapping
+is normative here:
+
+| Routed event `type` | Line `kind` |
+| --- | --- |
+| `fleet.session.message` | `session.message` |
+| `notion.agent_message.*` | `agent_message` |
+| `slack.interaction.received` | `slack.interaction` |
+| any other (a lane state-change line) | the `type` itself, verbatim (e.g. `notion.ticket.updated`) |
+
+This binds every platform-producer `log` line — lane and the three named
+delivery kinds alike. It does not touch the Slack receiver's own `log` line,
+whose `kind` is that separate encoder's `im|mpim|channel|mention|thread_reply`
+enum (`ai/contracts/athena-inbox.md` → *Line format*) — a different producer,
+outside this contract's taxonomy. The byte-level framing this value sits inside
+(`{v, kind}`, compact JSON, no trailing newline) remains `athena-inbox.md`'s,
+unrestated here.
 
 The **local session wake** — pushing a delivered inbox line into a running
 session — is **consumer-side**, done by the `inbox-wait` background waiter the

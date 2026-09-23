@@ -1144,11 +1144,12 @@ change stream of state-change events*), unchanged by this section.
   **server-stamped** from the sending machine's token record, `inbox_name` the
   sender's declared instance on that machine, server-verified; never
   client-set free-form), `to` (`{machine_id, inbox_name}`), `subject`
-  (required), `body`, `re` and `thread` (at least one present), `event_id` —
-  the **platform event id**, the `event_router_events` row this session
-  message is persisted as, and the identity a reply's `thread` names — and
-  `delivery_id` (references for `delivery_status`, **not** dedupe keys — *A
-  `log` channel MAY have a non-Slack producer*), `sent_at` (ISO-8601 UTC).
+  (required), `body`, `re` and `thread` (at least one present), and two
+  **references, neither a dedupe key** (*A `log` channel MAY have a
+  non-Slack producer*): `event_id` — the **platform event id**, the
+  `event_router_events` row this session message is persisted as, and the
+  identity a reply's `thread` names — and `delivery_id`, for
+  `delivery_status`. `sent_at` (ISO-8601 UTC).
 
   **`sent_at` MUST be server-stamped** — the delivery's own timestamp, never a
   value the sender's payload can set — and is a field **separate from**
