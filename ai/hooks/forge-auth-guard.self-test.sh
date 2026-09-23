@@ -461,6 +461,46 @@ check "R6. inside a subshell" deny
 run "$(bash_json "bash -c '/home/u/dev/custom/ai/bin/glab-athena refresh'")"
 check "R7. inside bash -c" deny
 
+run "$(bash_json 'G=~/dev/custom/ai/bin/glab-athena; $G refresh')"
+check "R8. \$G refresh (variable command word)" deny
+
+run "$(bash_json '${GA:-glab-athena} refresh')"
+check "R9. \${GA:-glab-athena} refresh" deny
+
+run "$(bash_json 'glab-athena $(echo refresh)')"
+check "R10. glab-athena \$(...) (expanded first argument)" deny
+
+run "$(bash_json '$(which glab-athena) refresh')"
+check "R11. \$(which glab-athena) refresh" deny
+
+run "$(bash_json '$NPM refresh')"
+check "R12. any expanded command word + refresh (accepted text-match FP)" deny
+
+# X: the same expanded-command-word class in rules 3 and 4.
+run "$(bash_json '$GH api /login/oauth/access_token -f code=x')"
+check "X1. \$GH api oauth token with -f (rule 3)" deny
+
+run "$(bash_json '$H https://gitlab.com/oauth/token grant_type=x')"
+check "X2. \$H url data item (rule 3, httpie by variable)" deny
+
+run "$(bash_json 'R=rm; $R ~/.config/gh/hosts.yml')"
+check "X4. \$R on gh hosts.yml (rule 4)" deny
+
+run "$(bash_json 'cd ~/.config && $RM -rf gh')"
+check "X5. cd to the root, then \$RM -rf gh (rule 4b)" deny
+
+run_ctx /home/u/.config/gh '$EDITOR hosts.yml'
+check "X6. cwd in ~/.config/gh: \$EDITOR hosts.yml (rule 4c)" deny
+
+run "$(bash_json 'cd ~/.config && rm -rf *')"
+check "X7. cd to the root, then rm -rf * (rule 4b)" deny
+
+run_ctx /home/u/.config 'rm -rf ./*'
+check "X8. cwd ~/.config: rm -rf ./* (rule 4b)" deny
+
+run "$(bash_json 'sudo $R ~/.config/glab-cli/config.yml')"
+check "X9. prefix keyword then an expanded command word (rule 4)" deny
+
 echo
 echo "--- MUST-NOT-BLOCK cases (reads / ordinary forge use) ---"
 
@@ -623,6 +663,24 @@ check "N26. gh-athena api /user (read)" allow
 
 run "$(bash_json 'glab-athena mr list --search refresh')"
 check "N27. refresh as a later argument, not the subcommand" allow
+
+run "$(bash_json '$GA mr list; $X --refresh; echo refresh')"
+check "N28. expanded command word without a bare refresh subcommand" allow
+
+run "$(bash_json 'T=$(cat ~/.config/gh/hosts.yml)')"
+check "N29. assignment of a read of gh hosts.yml (not a command word)" allow
+
+run "$(bash_json 'echo $HOME/.config/gh/hosts.yml; ls $XDG_CONFIG_HOME/glab-cli')"
+check "N30. expanded words in argument position, config path named" allow
+
+run "$(bash_json 'curl -s https://gitlab.com/oauth/token/info | $JQ .scope')"
+check "N31. GET of a token path piped into a variable command, no body" allow
+
+run "$(bash_json 'cd ~/.config && rm -rf *.bak')"
+check "N32. a glob at the config root that cannot match gh" allow
+
+run "$(bash_json '$CURL -s https://gitlab.com/oauth/token/info')"
+check "N33. variable curl GET of a token path" allow
 
 echo
 echo "--- FAIL-OPEN cases (never wedge Bash) ---"

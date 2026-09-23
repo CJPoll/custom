@@ -39,8 +39,11 @@
 #      (`$G auth login`, `${GH:-gh} auth setup-git`, `"$GH" auth token`) or a
 #      command substitution (`$(which gh) auth login`). The command it names is
 #      unknowable here, so ANY expanded command word followed by `auth` and a
-#      gh/glab mutating subcommand is denied.
-#   6. `glab-athena refresh` (bare, path-qualified, quoted or chained): it mints
+#      gh/glab mutating subcommand is denied. The same expanded-command-word
+#      pattern (EXP_CMD) extends rules 3, 4 and 6: `$GH api ...`, `$H url k=v`,
+#      `R=rm; $R ~/.config/gh/hosts.yml`, `cd ~/.config && $RM -rf gh`.
+#   6. `glab-athena refresh` (bare, path-qualified, quoted, chained, or through
+#      an expanded command word or first argument): it mints
 #      a new PAT for the Athena GitLab service account with the OWNER's glab
 #      session. An expired Athena token is escalated, never self-healed.
 #      The deny has no exception, so it binds EVERY Claude Code session
@@ -67,6 +70,13 @@
 #   * a string computed and then executed: `eval "$(printf 'gh au%sh login' t)"`,
 #     `a=au; gh ${a}th login`, `echo Z2ggYXV0aCBsb2dpbg== | base64 -d | sh`;
 #   * the subcommand or command supplied through a pipe: `echo login | xargs gh auth`;
+#   * BOTH the command word and its subcommand expanded: `$G $S` (denying every
+#     `$A $B` would deny ordinary `$EDITOR $FILE`); an expanded word in
+#     argument position (`sudo -u x $G refresh` puts `-u x` first);
+#   * a body piped into a command word built by expansion (`echo {} | $H url`):
+#     denying every `| $X` on a token path would deny `curl ... | $JQ .`;
+#   * a glob operand other than `*` / `./*` that happens to match gh or
+#     glab-cli at a config root (`cd ~/.config && rm -rf g?`);
 #   * a script file, alias, or shell function defined in one call and run in a
 #     later one, or another interpreter (`python -c`, `node -e`) that builds
 #     the argv itself;
@@ -158,6 +168,20 @@ ANY_MUT='(login|logout|refresh|token|setup-git|switch|configure-docker|docker-he
 # backtick): its value is unknowable here, so it is treated as mutating.
 EXPANDED='[$`]'
 
+# EXP_CMD: a COMMAND WORD built by expansion (DND-390 class root). Every rule
+# that keys on a literal command word (gh, glab, glab-athena, httpie, rm, ...)
+# also treats an expanded word in COMMAND POSITION as possibly that command,
+# because its value is unknowable here. Command position: start of line, after
+# ; & | ( ` {, or after a prefix keyword (sudo env command exec nohup xargs time
+# eval builtin then do else), past any VAR=value assignments. The word is a
+# variable (`$G`, `${GA:-glab-athena}`, `$HOME/bin/$X`), a `$(...)`, or a
+# backtick substitution. An assignment's own value (`T=$(cat f)`) is NOT a
+# command word ('=' may not precede the '$'). An expanded word in ARGUMENT
+# position (`echo $HOME/...`) is not matched.
+CMD_POS='(^|[;&|(`{][[:space:]]*|(^|[[:space:]])(then|do|else|sudo|env|command|exec|nohup|xargs|time|eval|builtin)[[:space:]]+)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+EXP_WORD='([^[:space:];&|()`=]*[$](\{[^}]*\}|[[:alnum:]_]+|[(][^)]*[)])[^[:space:];&|()`]*|`[^`]*`)'
+EXP_CMD="${CMD_POS}${EXP_WORD}"
+
 # ---- 1: gh auth <mutation> (bare, path-qualified, or -athena wrapper) ------
 # `gh` or `gh-athena`, then `auth`, then a mutating (or expanded) subcommand.
 # `gh auth status` and `gh auth git-credential` are NOT matched (reads).
@@ -189,11 +213,11 @@ fi
 # curl's `-f` (`--fail`) and `-D` (`--dump-header`) are NOT POST flags, so a
 # plain GET of a token path (e.g. `curl -fsSL .../oauth/token/info`) does NOT
 # match; neither does `http .../oauth/token/info Authorization:Bearer\ x`.
-HTTPIE="${CMD_START}(https?|xhs?)[[:space:]]"
+HTTPIE="(${CMD_START}(https?|xhs?)|${EXP_CMD})[[:space:]]"
 if has 'oauth/(token|access_token)' \
   && { hasi '((-X|--request|--method)([[:space:]]*|=)post|(^|[[:space:]])post([[:space:]]|$))' \
     || has '(^|[[:space:]])(-[[:alnum:]]*d|-F|--(data|json|form|post-data|post-file))' \
-    || { has "${CMD_START}glab(-athena)?[[:space:]]+api[[:space:]]|${CMD_START}gh(-athena)?[[:space:]]+api[[:space:]]" \
+    || { has "${CMD_START}glab(-athena)?[[:space:]]+api[[:space:]]|${CMD_START}gh(-athena)?[[:space:]]+api[[:space:]]|${EXP_CMD}[[:space:]]+api[[:space:]]" \
       && has '(^|[[:space:]])(-f|--field|--raw-field|--input)'; } \
     || has "${HTTPIE}([^|;&]*[[:space:]])?([^[:space:]=:/@-][^[:space:]=:/@]*(:?=([^=]|\$)|@)|--raw)" \
     || has "${HTTPIE}[^|;&]*<" \
@@ -219,7 +243,7 @@ fi
 WRITES=$(printf '%s' "$FLAT" | sed -E 's#[0-9]*>>?[[:space:]]*/dev/null##g; s#[0-9]*>&[0-9-]##g')
 writes() { printf '%s' "$WRITES" | grep -Eq "$1"; }
 MUT_TOOL='(tee|rm|unlink|shred|mv|cp|install|ln|dd|truncate|vim?|nvim|nano|emacs)'
-WRITE_OP="(>|${CMD_START}${MUT_TOOL}[[:space:]]|${CMD_START}g?(sed|perl)[[:space:]]([^|;&]*[[:space:]])?(-[nprlaswWXtTcEuz]*i|--in-place))"
+WRITE_OP="(>|${CMD_START}${MUT_TOOL}[[:space:]]|${EXP_CMD}[[:space:]]|${CMD_START}g?(sed|perl)[[:space:]]([^|;&]*[[:space:]])?(-[nprlaswWXtTcEuz]*i|--in-place))"
 FORGE_LOC='((\.config|XDG_CONFIG_HOME)\}?/(gh|glab-cli)([^[:alnum:]_.-]|$)|(GH|GLAB)_CONFIG_DIR([^[:alnum:]_]|$)|(^|[^[:alnum:]_.-])(gh|glab-cli)/(hosts|config)\.yml)'
 # ---- 4b: the same write, by BARE NAME, after reaching the location (DND-390)
 # The location never appears as a path in the command when the agent first
@@ -241,7 +265,7 @@ FORGE_LOC='((\.config|XDG_CONFIG_HOME)\}?/(gh|glab-cli)([^[:alnum:]_.-]|$)|(GH|G
 # A bare name may carry a relative prefix that still names the same entry:
 # `./gh`, `././gh`, `$PWD/gh`, `${PWD}/gh`.
 BARE_NAME='(\./|[$]\{?PWD\}?/)*(gh|glab-cli)'
-BARE_OP="${CMD_START}${MUT_TOOL}[[:space:]]([^|;&]*[[:space:]])?${BARE_NAME}([/*{][^[:space:];&|]*)?([[:space:];&|)]|\$)|>[[:space:]]*${BARE_NAME}/"
+BARE_OP="(${CMD_START}${MUT_TOOL}|${EXP_CMD})[[:space:]]([^|;&]*[[:space:]])?(${BARE_NAME}([/*{][^[:space:];&|]*)?|(\./)*\*)([[:space:];&|)]|\$)|>[[:space:]]*${BARE_NAME}/"
 # `cd`/`pushd` may carry options before the path (`cd --`, `cd -P`, `pushd -n`).
 CD_WORD="${CMD_START}(cd|pushd)([[:space:]]+-[^[:space:];&|]*)*[[:space:]]+"
 CD_ROOT="${CD_WORD}(([^[:space:];&|]*/)?\.config\}?|[$]\{?XDG_CONFIG_HOME(:-[^}]*)?\}?)/?([[:space:];&|)]|\$)"
@@ -324,7 +348,11 @@ fi
 # The wrapper intercepts `refresh` only as its FIRST argument, so only that
 # shape is matched: `glab-athena mr list --search refresh` or
 # `glab-athena api user` stay allowed. Bare `glab refresh` is not a glab command.
-if has "${CMD_START}glab-athena[[:space:]]+refresh([[:space:];&|)]|\$)"; then
+# Expansion is treated as in rules 1/2/5: an expanded first argument
+# (`glab-athena $(echo refresh)`) and an expanded command word followed by
+# `refresh` (`$G refresh`, `${GA:-glab-athena} refresh`) are denied. The latter
+# also denies another tool's `$X refresh` (the deliberate text-match FP).
+if has "${CMD_START}glab-athena[[:space:]]+(refresh([[:space:];&|)]|\$)|${EXPANDED})|${EXP_CMD}[[:space:]]+refresh([[:space:];&|)]|\$)"; then
   deny 'forge-auth: `glab-athena refresh` mints a new token for the Athena GitLab service account using the OWNER'\''s glab session, which is OWNER-GATED: an expired Athena token is escalated, never self-healed. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). The admiral escalates to the coordinator, who asks the owner: only the owner runs the refresh, in their own terminal (this guard denies it in every Claude Code session). Diagnosing is fine: `~/dev/custom/ai/bin/forge-preflight` is a read.'
 fi
 
