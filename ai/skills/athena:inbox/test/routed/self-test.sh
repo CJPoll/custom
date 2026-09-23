@@ -653,20 +653,22 @@ assert_contains "R2: with a threshold set, the session channel prints STALE like
 # ===========================================================================
 echo "== HG-19 domain: routed_default_path =="
 DP() { ( . "${LIB}/err.sh"; . "${LIB}/names.sh"; . "${LIB}/fence.sh"; . "${LIB}/routed.sh"; routed_default_path "$@" ); }
-assert_eq "domain: a maildir address is local, whatever the server says" "local" "$(DP maildir registered set true | cut -f1)"
+assert_eq "domain: a maildir address is local, whatever the server says" "local" "$(DP maildir registered set declared true | cut -f1)"
 assert_contains "domain: ... and the reason names the missing self id (the gap), not a guess" "own server id" \
-  "$(DP maildir registered set true | cut -f2)"
-assert_eq "domain: server + unregistered -> refuse" "refuse" "$(DP server unregistered set unasked | cut -f1)"
-assert_eq "domain: server + broken registration -> refuse (never read as unregistered)" "refuse" "$(DP server broken set unasked | cut -f1)"
-assert_contains "domain: the broken-registration reason says it cannot be read" "cannot be read" "$(DP server broken set unasked)"
-assert_eq "domain: server + bearer unset -> refuse" "refuse" "$(DP server registered unset unasked | cut -f1)"
-assert_eq "domain: server, registered, bearer, not yet asked -> ask" "ask" "$(DP server registered set unasked | cut -f1)"
-assert_eq "domain: server + reachable true -> routed" "routed" "$(DP server registered set true | cut -f1)"
+  "$(DP maildir registered set declared true | cut -f2)"
+assert_eq "domain: server + unregistered -> refuse" "refuse" "$(DP server unregistered set declared unasked | cut -f1)"
+assert_eq "domain: server + broken registration -> refuse (never read as unregistered)" "refuse" "$(DP server broken set declared unasked | cut -f1)"
+assert_contains "domain: the broken-registration reason says it cannot be read" "cannot be read" "$(DP server broken set declared unasked)"
+assert_eq "domain: server + bearer unset -> refuse" "refuse" "$(DP server registered unset declared unasked | cut -f1)"
+assert_eq "domain: server + session inbox missing -> refuse before asking" "refuse" "$(DP server registered set missing unasked | cut -f1)"
+assert_eq "domain: server + session inbox invalid -> refuse before asking" "refuse" "$(DP server registered set invalid true | cut -f1)"
+assert_eq "domain: server, registered, bearer, not yet asked -> ask" "ask" "$(DP server registered set declared unasked | cut -f1)"
+assert_eq "domain: server + reachable true -> routed" "routed" "$(DP server registered set declared true | cut -f1)"
 for v in false unknown unavailable; do
-  assert_eq "domain: server + reachable ${v} -> refuse (only true routes)" "refuse" "$(DP server registered set "${v}" | cut -f1)"
+  assert_eq "domain: server + reachable ${v} -> refuse (only true routes)" "refuse" "$(DP server registered set declared "${v}" | cut -f1)"
 done
 # THE MISS: a wrongly computed input is an error, never a path.
-for bad in "mail registered set true" "server yes set true" "server registered maybe true" "server registered set TRUE" "server registered set ''"; do
+for bad in "mail registered set declared true" "server yes set declared true" "server registered maybe declared true" "server registered set declared TRUE" "server registered set declared ''" "server registered set present true" "server registered set true"; do
   eval "set -- ${bad}"; o="$(DP "$@")"; rc=$?
   assert_eq "domain: out-of-vocabulary input [${bad}] -> status 1, nothing printed" "1|" "${rc}|${o}"
 done
@@ -776,6 +778,23 @@ assert_eq "no flag, --to-project, reachable: routes" "0|routed" "${RC}|$(printf 
 assert_eq "no flag, --to-project: reachable asked, then resolved, then sent" \
   "tools/call machine_reachable|tools/call list_my_machines|tools/call session_send" "$(calls | grep '^tools/call' | paste -sd'|')"
 
+shim_reset; reach_answer "${REACH_TRUE}"
+register '{"peer-mail":{"kind":"maildir","namespace":"agent-mail/peer","read":"to-cproj","write":"to-peer","identity":"cproj"}}'
+send --to m-lap/walt_ui-session.jsonl --subject s --re /x
+refused_no_path "no flag, this project declares no session inbox" "session inbox is missing"
+assert_eq "no flag, no session inbox: refused before machine_reachable was asked" "" "$(calls)"
+register '{"session":{"kind":"log","path":"cproj-mail.jsonl","producer":"platform"}}'; shim_reset; reach_answer "${REACH_TRUE}"
+send --to m-lap/walt_ui-session.jsonl --subject s --re /x
+refused_no_path "no flag, an invalid session inbox" "session inbox is invalid"
+register "${SESSION_CH}"
+
+rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"; shim_reset; reach_answer "${REACH_TRUE}"
+EDITOR="${TMP}/no-such-editor" send peer-mail x --to m-lap/walt_ui-session.jsonl
+if [ "${RC}" -ne 0 ]; then ok "no flag, a channel with a server --to: refused"; else bad "no flag, a channel with a server --to: refused" "exit 0"; fi
+assert_contains "no flag, channel + server --to: names the mismatch" "--to is a server address" "${ERR}"
+assert_contains "no flag, channel + server --to: Fix:" "Fix:" "${ERR}"
+assert_eq "no flag, channel + server --to: refused before any path line, write or call" "|||" "${OUT}|$(maildir_files)|$(calls)|"
+
 echo "== HG-19 --local and --routed: the flag is the path, and it is printed =="
 rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"; shim_reset; reach_answer "${REACH_TRUE}"
 send --local peer-mail explicit-local --to peer
@@ -787,7 +806,7 @@ rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"
 
 shim_reset; send --local peer-mail x --to m-lap/walt_ui-session.jsonl
 if [ "${RC}" -ne 0 ]; then ok "--local with a server address: refused"; else bad "--local with a server address: refused" "exit 0"; fi
-assert_contains "--local with a server address: names it" "given a server address" "${ERR}"
+assert_contains "--local with a server address: names it" "--to is a server address" "${ERR}"
 assert_contains "--local with a server address: Fix:" "Fix:" "${ERR}"
 assert_eq "--local with a server address: no maildir written, nothing sent" "|" "$(maildir_files)|$(calls)"
 

@@ -1660,6 +1660,25 @@ inbox_self_reachable() {
   esac
 }
 
+# inbox_session_inbox_state [cwd]
+# This project's session inbox, as routed_default_path reads it: `declared`
+# (routed_select_from_inbox accepts it), `missing` (the entry has no `session`
+# channel, or this cwd owns no valid entry), or `invalid` (a `session` channel
+# the routed send would refuse). The refusal text is inbox_send_routed's to
+# give; here only the state is needed, so stderr is dropped.
+inbox_session_inbox_state() {
+  local entry
+  entry="$(inbox_entry "${1:-.}" 2>/dev/null)" || { printf 'missing\n'; return 0; }
+  descriptor_validate "${entry}" >/dev/null 2>&1 || { printf 'invalid\n'; return 0; }
+  if [ -z "$(printf '%s' "${entry}" | jq -r --arg n "${ROUTED_SESSION_CHANNEL}" '.channels[$n] // empty' 2>/dev/null)" ]; then
+    printf 'missing\n'
+  elif routed_select_from_inbox "${entry}" >/dev/null 2>&1; then
+    printf 'declared\n'
+  else
+    printf 'invalid\n'
+  fi
+}
+
 # inbox_default_path <maildir|server> [cwd]
 #
 # The no-flag `send-mail` decision (HG-19): "<path>\t<reason>" on stdout,
@@ -1669,9 +1688,9 @@ inbox_self_reachable() {
 # local reads, and machine_reachable is asked ONLY when the rule says the
 # answer decides it (a maildir address never makes a network call).
 inbox_default_path() {
-  local address="$1" cwd="${2:-.}" url rc reg bearer decision probe reach detail
+  local address="$1" cwd="${2:-.}" url rc reg bearer session entry decision probe reach detail
   if [ "${address}" = "maildir" ]; then
-    routed_default_path maildir unregistered unset unasked || return 2
+    routed_default_path maildir unregistered unset missing unasked || return 2
     return 0
   fi
   url="$(inbox_mcp_registration "${cwd}")"; rc=$?
@@ -1682,11 +1701,12 @@ inbox_default_path() {
     *) return 2 ;;
   esac
   if [ -n "${ATHENA_MCP_BEARER:-}" ]; then bearer=set; else bearer=unset; fi
-  decision="$(routed_default_path server "${reg}" "${bearer}" unasked)" || return 2
+  session="$(inbox_session_inbox_state "${cwd}")"
+  decision="$(routed_default_path server "${reg}" "${bearer}" "${session}" unasked)" || return 2
   if [ "${decision%%$'\t'*}" = "ask" ]; then
     probe="$(inbox_self_reachable "${url}")"
     reach="${probe%%$'\t'*}"; detail="${probe#*$'\t'}"
-    decision="$(routed_default_path server "${reg}" "${bearer}" "${reach}")" || return 2
+    decision="$(routed_default_path server "${reg}" "${bearer}" "${session}" "${reach}")" || return 2
     [ -z "${detail}" ] || decision="${decision} (${detail})"
   fi
   printf '%s\n' "${decision}"

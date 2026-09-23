@@ -730,6 +730,8 @@ assert_eq "send-paths state: registration unreadable -> warn (never read as unre
 assert_eq "send-paths state: not registered -> na (routed not configured; local only)" na "$(doctor_state_send_paths unregistered declared true set 2)"
 assert_eq "send-paths state: ready but NO bearer in this shell -> warn (send-mail would refuse)" warn "$(doctor_state_send_paths registered declared true unset 1)"
 assert_eq "send-paths state: a registration lookup that could not be made -> warn, never na" warn "$(doctor_state_send_paths error declared true set 1)"
+assert_eq "send-paths state: a broken registration is warn even when the maildir count is unreadable" warn "$(doctor_state_send_paths broken declared true set '')"
+assert_eq "send-paths state: no machine token to ask with -> na, never ok" na "$(doctor_state_send_paths registered declared skipped-no-token set 1)"
 assert_eq "send-paths state: a non-numeric maildir count -> na (never ok)" na "$(doctor_state_send_paths registered declared true set '')"
 
 SP="${TMP}/sp"; mkdir -p "${SP}/home" "${SP}/root/projects"; chmod 700 "${SP}/root" "${SP}/root/projects"
@@ -770,6 +772,11 @@ assert_contains "... warn carries a Fix naming both explicit flags" "with --rout
 RO="$(sp_run not-asked)"
 assert_eq "send-paths: --no-server -> na, never ok" na "$(state_of "${RO}" send-paths)"
 assert_contains "... says the answer depends on machine_reachable at send time" "only if machine_reachable answers true" "${RO}"
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" ATHENA_MCP_BEARER=fixture-bearer ATHENA_INBOX_CLIENT_CONFIG="${SP}/no-client.json" DOCTOR_NO_SERVER=0 \
+  bash -c 'for f in err names descriptor logchan maildir fence session fs lock inbox doctor; do . "$0/${f}.sh"; done
+           doctor_check_server_reachability >/dev/null; doctor_check_send_paths "$1" "."' "${LIB}" "${SPENTRY}" )"
+assert_eq "send-paths: no client token (reachability SKIPPED) -> na" na "$(state_of "${RO}" send-paths)"
+assert_contains "... names skipped-no-token, not the --no-server case" "this machine reachable: skipped-no-token" "${RO}"
 printf '{"projects": {broken' > "${SP}/home/.claude.json"
 RO="$(sp_run true)"
 assert_eq "send-paths: an unreadable ~/.claude.json -> warn, never 'not registered'" warn "$(state_of "${RO}" send-paths)"

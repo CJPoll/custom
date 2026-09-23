@@ -1402,7 +1402,8 @@ doctor_check_server_reachability() {
   local canned_note=""
   [ -n "${ATHENA_INBOX_DOCTOR_REACHABLE_FILE:-}" ] && canned_note=" [CANNED answer from ATHENA_INBOX_DOCTOR_REACHABLE_FILE, not the live server]"
   case "${rc}" in
-    2) doctor_finding na "server-reachability" "server reachability check SKIPPED -- no client config or machine token on this machine" \
+    2) DOCTOR_REACHABLE="skipped-no-token"
+       doctor_finding na "server-reachability" "server reachability check SKIPPED -- no client config or machine token on this machine" \
          "this check authenticates with the inbox client's machine token (~/.config/athena-inbox-client/config.json); a machine that only reads delivered mail has none, and this is expected there."
        return 0 ;;
     4) DOCTOR_REACHABLE="unavailable"
@@ -1440,7 +1441,7 @@ doctor_check_server_reachability() {
 
 # --- the two send paths (HG-19 / DND-314) -----------------------------------
 #
-# `send-mail` has two paths: the LOCAL maildir (a rename into a directory on
+# `send-mail` has two paths: the LOCAL maildir (a link(2) into a directory on
 # this machine, no server) and the ROUTED server path (the athena MCP's
 # session_send). The per-channel checks above already report each maildir
 # channel's health and the session log channel's; this finding says what a
@@ -1448,7 +1449,8 @@ doctor_check_server_reachability() {
 # would pick -- so "routed is broken" never has to be discovered by a send.
 #
 # DOCTOR_REACHABLE is the machine_reachable verdict doctor_check_server_
-# reachability recorded (true | false | unknown | unavailable | not-asked); it
+# reachability recorded (true | false | unknown | unavailable | not-asked |
+# skipped-no-token); it
 # must run first, in the same shell.
 DOCTOR_REACHABLE="not-asked"
 
@@ -1469,17 +1471,19 @@ DOCTOR_REACHABLE="not-asked"
 #        reachability was not asked (--no-server): nothing to grade.
 doctor_state_send_paths() {
   local reg="$1" session="$2" reach="$3" bearer="$4" maildirs="$5"
-  case "${maildirs}" in ''|*[!0-9]*) printf 'na\n'; return 0 ;; esac
+  # The routed grade first: a broken or failed registration lookup is a warn
+  # whatever the maildir count says -- the count is the LOCAL path's fact.
   case "${reg}" in
     broken|error) printf 'warn\n'; return 0 ;;
     registered) ;;
     *) printf 'na\n'; return 0 ;;
   esac
+  case "${maildirs}" in ''|*[!0-9]*) printf 'na\n'; return 0 ;; esac
   [ "${session}" = "declared" ] || { printf 'warn\n'; return 0; }
   [ "${bearer}" = "set" ] || { printf 'warn\n'; return 0; }
   case "${reach}" in
     true) printf 'ok\n' ;;
-    not-asked) printf 'na\n' ;;
+    not-asked|skipped-no-token) printf 'na\n' ;;
     *) printf 'warn\n' ;;
   esac
 }
@@ -1501,7 +1505,8 @@ doctor_check_send_paths() {
   state="$(doctor_state_send_paths "${reg}" "${session}" "${DOCTOR_REACHABLE}" "${bearer}" "${maildirs}")"
   case "${state}" in
     ok) dflt="a server-addressed send ROUTES" ;;
-    *)  if [ "${reg}" = "registered" ] && [ "${session}" = "declared" ] && [ "${bearer}" = "set" ] && [ "${DOCTOR_REACHABLE}" = "not-asked" ]; then
+    *)  if [ "${reg}" = "registered" ] && [ "${session}" = "declared" ] && [ "${bearer}" = "set" ] \
+             && { [ "${DOCTOR_REACHABLE}" = "not-asked" ] || [ "${DOCTOR_REACHABLE}" = "skipped-no-token" ]; }; then
           dflt="a server-addressed send routes only if machine_reachable answers true when it is sent"
         else
           dflt="a server-addressed send is REFUSED (use --routed for another machine, --local for this one)"
@@ -1513,6 +1518,6 @@ doctor_check_send_paths() {
     warn) doctor_finding warn "send-paths" "${facts}" \
             "if ATHENA_MCP_BEARER is unset, launch the session through scripts/athena (it exports it for that launch only); if the registration cannot be read, inspect ~/.claude.json's athena entry for this project by hand; if the session inbox is missing or invalid, declare the \"session\" log channel (ai/inbox/registry.json, scripts/setup-inbox-registry --install); if this machine is not reachable, read client-liveness and server-reachability above. Until then send cross-machine mail with --routed (the server holds it pending) and same-machine mail with --local." ;;
     *)    doctor_finding na "send-paths" "${facts}" \
-            "routed sending is not configured or not checked here. To enable it: scripts/add-athena-mcp from the main checkout, launch through scripts/athena, declare the \"session\" channel; run inbox-doctor without --no-server to ask the server. The local maildir path does not depend on any of this." ;;
+            "routed sending is not configured or not checked here. To enable it: scripts/add-athena-mcp from the main checkout, launch through scripts/athena, declare the \"session\" channel. If reachability was not asked: run inbox-doctor without --no-server (not-asked), or install the inbox client's machine token (skipped-no-token) -- send-mail itself asks at send time with ATHENA_MCP_BEARER. The local maildir path does not depend on any of this." ;;
   esac
 }

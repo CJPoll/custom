@@ -156,7 +156,7 @@ printf '%s\n' "${BODY}" >"${BODY_FILE}"
 
 # send-mail resolves the channel from the registry entry of its cwd's repo, so
 # it runs from this checkout. Bounded: a stuck send is abandoned, never waited on.
-OUT="$(cd -- "${REPO}" && timeout "${TIMEOUT}" "${SEND_MAIL}" "${CHANNEL}" "wedge-${SIG:0:8}" \
+OUT="$(cd -- "${REPO}" && timeout "${TIMEOUT}" "${SEND_MAIL}" --local "${CHANNEL}" "wedge-${SIG:0:8}" \
         --to "${PEER}" --re "${REAL_CAP}" --body-file "${BODY_FILE}" 2>&1)"; RC=$?
 if [ "${RC}" -ne 0 ]; then
   echo "error: the harness-alerts send FAILED (exit ${RC}$([ "${RC}" -eq 124 ] && echo ', timed out')): $(printf '%s' "${OUT}" | head -n 3 | tr '\n' ' ')" >&2

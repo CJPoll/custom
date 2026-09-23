@@ -168,8 +168,8 @@ a `Fix:` clause on any refusal.
 |---|---|
 | `inbox-status [--json] [--repo-key]` | Counts only, one line per waiting channel; `--repo-key` prints this session's repo identity and honours its exit code. Built for the SessionStart hook. |
 | `read-inbox <channel> [--peek] [--json]` | The only place a body enters context; reads AND acks (advancing the offset / `mv` into `.acked/`) unless `--peek`. Acking needs tenancy + not-a-subagent + the channel `flock`. |
-| `send-mail <channel> <slug> --to <identity> [--re P] [--thread F] [--body-file P \| --edit]` | The writer's half of a maildir channel; prints the delivered filename, never the body. `link(2)` then bump `.event`. |
-| `send-mail --routed (--to M/I \| --to-project P[@M]) --subject S (--re P \| --thread E) [--body-file P \| --edit]` | A routed session message through the `athena` MCP `session_send`; prints a JSON receipt `{path, event_id, delivery_id, status, to, from_inbox}`, never the body, and writes no local file. See *Session messages* below. |
+| `send-mail [--local] <channel> <slug> --to <identity> [--re P] [--thread F] [--body-file P \| --edit]` | The writer's half of a maildir channel; prints the path line (`path: local -- <why>`), then the delivered filename, never the body. `link(2)` then bump `.event`. |
+| `send-mail [--routed] (--to M/I \| --to-project P[@M]) --subject S (--re P \| --thread E) [--body-file P \| --edit]` | A routed session message through the `athena` MCP `session_send`; prints the path line, then a JSON receipt `{path, event_id, delivery_id, status, to, from_inbox}` as the last line, never the body, and writes no local file. Without `--routed` it routes or refuses by the no-flag rule. See *Two send paths* and *Session messages* below. |
 | `inbox-wait [--dry-run]` | Blocks until a doorbell rings or the budget elapses; the completion notification is the wake. One waiter covers every channel the project declares. Exit `0`=rang, `75`=budget, `2`=refused, `1`=faulted. |
 | `inbox-doctor [--json] [--no-server]` | Read-only chain-liveness across every link (client, supervisor, config, cron, registry, and — unless `--no-server` — the server). Reports channel/registry FACTS, never a body. |
 
@@ -323,11 +323,16 @@ sender of a routed session message. The body comes from stdin, from
 `--body-file`, or from `$EDITOR` (`--edit`, or by default when stdin is a
 terminal); the body is never printed back.
 
-**Every send prints its path first**, one stdout line, then its result:
-`athena:inbox: path: local -- <why>` then `athena:inbox: delivered <file>`;
-`athena:inbox: path: routed -- <why>` then the JSON receipt as the last line;
-or `athena:inbox: path: refused (nothing was sent) -- <why>` and exit 2. Which
-path, and when, is *Two send paths* below.
+**Once a send chooses its path it prints that choice first**, one stdout line,
+then its result: `athena:inbox: path: local -- <why>` then `athena:inbox:
+delivered <file>`; `athena:inbox: path: routed -- <why>` then the JSON receipt
+as the last line; or, when the no-flag rule can pick neither, `athena:inbox:
+path: refused (nothing was sent) -- <why>` and exit 2. The line records the
+**choice**, not the outcome: a send refused after it (say `--routed` with no
+MCP registered, or `--local` on an undeclared channel) exits non-zero with the
+reason and a `Fix:` on stderr and no result line. An argument error is refused
+before any choice and prints no path line. Which path, and when, is *Two send
+paths* below.
 
 All three sources go through one capture, so a body containing a **NUL** is
 refused rather than delivered silently shortened — the shell drops a NUL on
@@ -788,7 +793,7 @@ guarantees (epic D20). The maildir pair is **kept**, not retired.
 | Same machine, and you are answering a maildir message | **local**: a reply stays on the transport of the message it answers |
 | Same machine, server down / client wedged / offline | **local** (`--local`) |
 | Same machine, relay healthy, and the peer reads its session inbox | either; routed gives one uniform inbox |
-| Unattended writers (the wedge detector, `harness-alerts`) | **local**, always: they must work when the relay is the thing that broke |
+| Unattended writers (the wedge detector, `harness-alerts`) | **local**, always, with `--local` passed explicitly: they must work when the relay is the thing that broke, whatever the no-flag rule becomes |
 
 **The flags.** `--local` sends on the maildir channel named and refuses a
 server address. `--routed` sends through the MCP, refuses a maildir channel by
@@ -809,6 +814,7 @@ the client can know decides which side applies:
 - **A server address** (`--to <machine_id>/<inbox>`, `--to-project`) may be on
   either machine, and which one cannot be decided client-side. It is
   **routed** only when every branch of the rule agrees: registered, bearer set,
+  this project's `session` inbox valid (the reply address a routed send needs),
   and `machine_reachable` for this machine answering `true` (`unknown`, `false`
   and any failure to answer are not `true`). Otherwise it is **refused**, with
   a Fix naming both explicit choices. A recipient that may be on another

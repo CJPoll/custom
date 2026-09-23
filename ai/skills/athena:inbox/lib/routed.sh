@@ -197,7 +197,7 @@ routed_select_from_inbox() {
 # routed_maildir_name_refusal <entry-json> <name>
 # Status 0 (and a refusal printed) when <name> is one of this project's MAILDIR
 # channels -- a routed send pointed at a maildir channel by name. A maildir
-# channel is reached with plain `send-mail <channel> ...`; routing through the
+# channel is reached with `send-mail [--local] <channel> ...`; routing through the
 # MCP to it is not a thing, and guessing what was meant would send somewhere
 # the sender did not name. Status 1 when <name> is not such a channel.
 routed_maildir_name_refusal() {
@@ -235,14 +235,17 @@ routed_maildir_name_refusal() {
 #     provably reaches its peer.
 #   * server address  -> routed only when BOTH branches of the rule agree it
 #     would be routed whichever machine the recipient is on: registered, bearer
-#     set, and this machine confirmed reachable (reachable == true, nothing
-#     else). Any other answer refuses LOUDLY with the two explicit ways out --
-#     it never writes a local maildir for a recipient that may be elsewhere.
+#     set, this project's session inbox valid (a routed send needs it as its
+#     reply address), and this machine confirmed reachable (reachable == true,
+#     nothing else). Any other answer refuses LOUDLY with the two explicit ways
+#     out -- it never writes a local maildir for a recipient that may be
+#     elsewhere.
 #
-# routed_default_path <address> <registration> <bearer> <reachable>
+# routed_default_path <address> <registration> <bearer> <session> <reachable>
 #   address       maildir | server
 #   registration  registered | unregistered | broken
 #   bearer        set | unset
+#   session       declared | missing | invalid  (this project's session inbox)
 #   reachable     unasked | true | false | unknown | unavailable
 # Prints "<path>\t<reason>" and returns 0, where <path> is one of:
 #   local    send on the maildir channel that was named
@@ -253,10 +256,11 @@ routed_maildir_name_refusal() {
 # Any input outside its vocabulary returns 1 with nothing printed: a wrongly
 # computed input is an error, never a path.
 routed_default_path() {
-  local address="$1" reg="$2" bearer="$3" reach="$4"
+  local address="$1" reg="$2" bearer="$3" session="$4" reach="$5"
   case "${address}" in maildir|server) ;; *) return 1 ;; esac
   case "${reg}" in registered|unregistered|broken) ;; *) return 1 ;; esac
   case "${bearer}" in set|unset) ;; *) return 1 ;; esac
+  case "${session}" in declared|missing|invalid) ;; *) return 1 ;; esac
   case "${reach}" in unasked|true|false|unknown|unavailable) ;; *) return 1 ;; esac
 
   if [ "${address}" = "maildir" ]; then
@@ -275,6 +279,10 @@ routed_default_path() {
     printf 'refuse\tthe recipient was addressed on the server, but ATHENA_MCP_BEARER is not set in this session, so the athena MCP cannot be asked or used\n'
     return 0
   fi
+  if [ "${session}" != "declared" ]; then
+    printf 'refuse\tthe recipient was addressed on the server, but this project'"'"'s session inbox is %s, so a routed message from here could not be answered\n' "${session}"
+    return 0
+  fi
   case "${reach}" in
     unasked) printf 'ask\tmachine_reachable for this machine decides it\n' ;;
     true)    printf 'routed\tthe athena MCP is registered and the server reports this machine reachable\n' ;;
@@ -291,9 +299,11 @@ routed_default_refusal_fix() {
 }
 
 # routed_path_line <path> <reason> -- the one stdout line that says which path
-# a send took (or that none was taken). Printed on EVERY send-mail that reaches
-# a path decision, first, so the maildir and the routed result can never be
-# mistaken for each other by whoever reads the output.
+# a send CHOSE (or that none could be chosen). Printed first by every send-mail
+# that reaches a path decision, so the maildir and the routed result can never
+# be mistaken for each other. It records the choice, not the outcome: a send
+# refused after the choice exits non-zero with the reason on stderr, and an
+# argument error refused before any choice prints no path line.
 routed_path_line() {
   case "$1" in
     local|routed) printf 'athena:inbox: path: %s -- %s\n' "$1" "$2" ;;

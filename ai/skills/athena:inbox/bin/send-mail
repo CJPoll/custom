@@ -14,11 +14,16 @@
 #
 # ============================ WHICH PATH (HG-19) ===========================
 #
-# EVERY send prints its path FIRST, on stdout, as one line:
+# Once a send CHOOSES its path it prints that choice FIRST, on stdout, as one
+# line:
 #   athena:inbox: path: local -- <why>        then  athena:inbox: delivered <file>
 #   athena:inbox: path: routed -- <why>       then  the JSON receipt (last line)
-#   athena:inbox: path: refused (nothing was sent) -- <why>   (and exit 2)
+#   athena:inbox: path: refused (nothing was sent) -- <why>   (no-flag, exit 2)
 # so a maildir delivery and a routed one can never be mistaken for each other.
+# The line records the CHOICE: a send refused after it (an unregistered MCP
+# under --routed, an undeclared channel under --local) exits non-zero with the
+# reason and a Fix on stderr and prints no result line. An argument error is
+# refused before any choice and prints no path line.
 #
 #   --local   the maildir channel named. Refuses a server address.
 #   --routed  the athena MCP. Refuses a maildir channel. Never falls back.
@@ -35,9 +40,9 @@
 # --routed (HG-17) sends through the `athena` MCP `session_send` tool instead of
 # a maildir: the server stamps `from` = {this machine, this project's
 # <project>-session.jsonl} and delivers into the recipient's session inbox, a
-# `log` channel. It prints one JSON receipt -- {path:"routed", event_id,
-# delivery_id, status:"pending", to, from_inbox} -- and NEVER writes a local
-# maildir. --subject and at least one of --re / --thread are required. It
+# `log` channel. After the path line it prints one JSON receipt as the LAST
+# line -- {path:"routed", event_id, delivery_id, status:"pending", to,
+# from_inbox} -- and NEVER writes a local maildir. --subject and at least one of --re / --thread are required. It
 # refuses (never falls back) when the MCP is not registered for this project
 # (Fix: scripts/add-athena-mcp), when ${ATHENA_MCP_BEARER} is unset (launch via
 # scripts/athena), or when this project declares no <project>-session.jsonl
@@ -123,7 +128,7 @@ need_value() {
   case "${val}" in
     ""|--*)
       inbox_fail "option \"${opt}\" needs a value" \
-        "run: send-mail <channel> <slug> --to <identity>. Run send-mail -h for the full synopsis."
+        "run: send-mail [--local] <channel> <slug> --to <identity>, or send-mail [--routed] --to <machine_id>/<inbox_name> --subject <line> --re <path-or-url>. Run send-mail -h for the full synopsis."
       exit 2
       ;;
   esac
@@ -144,7 +149,7 @@ while [ "$#" -gt 0 ]; do
     -h|--help)   usage; exit 0 ;;
     -*)
       inbox_fail "unknown option \"$1\"" \
-        "run: send-mail <channel> <slug> --to <identity> [--re <path-or-url>] [--thread <message-filename>] [--body-file <path> | --edit], or send-mail --routed --to <machine_id>/<inbox_name> --subject <line> --re <path-or-url>. Run send-mail -h for both synopses."
+        "run: send-mail [--local] <channel> <slug> --to <identity> [--re <path-or-url>] [--thread <message-filename>] [--body-file <path> | --edit], or send-mail [--routed] --to <machine_id>/<inbox_name> --subject <line> --re <path-or-url>. Run send-mail -h for both synopses."
       exit 2
       ;;
     *)
@@ -212,14 +217,17 @@ elif [ -n "${TO_PROJECT}" ] || [ -n "${SUBJECT}" ]; then
       "add --routed to send through the athena MCP, or drop them for a maildir send (send-mail <channel> <slug> --to <identity>)."
   fi
   exit 2
-elif [ "${LOCAL}" -eq 1 ]; then
+else
+  # A maildir address whose --to is a SERVER address (<machine_id>/<inbox>) is
+  # refused here, before a path line is printed or $EDITOR opened: a maildir
+  # identity never carries a "/".
   case "${TO}" in
     */*)
-      inbox_fail "--local was given a server address (--to ${TO%%/*}/...), not a maildir peer identity" \
-        "a --local send names a maildir channel and the peer's identity: send-mail --local <channel> <slug> --to <identity>. To send to <machine_id>/<inbox>, use --routed."
+      inbox_fail "a maildir channel was named but --to is a server address (${TO%%/*}/...), not the peer's maildir identity (nothing was sent)" \
+        "on the maildir: send-mail [--local] <channel> <slug> --to <identity>. To send to <machine_id>/<inbox> on the server, drop the channel and use --routed (or no flag)."
       exit 2 ;;
   esac
-  PATH_REASON="--local was given"
+  [ "${LOCAL}" -eq 0 ] || PATH_REASON="--local was given"
 fi
 
 # EVERY MISSING INPUT IS NAMED SEPARATELY. A single "usage" line for all of
@@ -367,7 +375,7 @@ trap 'inbox_release_consumer; rm -f "${DRAFT:-}" 2>/dev/null || true' EXIT
 
 if [ "${ROUTED}" -eq 1 ]; then
   routed_path_line routed "${PATH_REASON}"
-  # THE RECEIPT, AND NOTHING ELSE -- the same rule as the filename below: the
+  # THE PATH LINE, THEN THE RECEIPT, AND NOTHING ELSE -- the same rule as the filename below: the
   # body is never echoed back. `event_id` is what a reply's --thread names;
   # `delivery_id` is the handle for the server's delivery status. "pending"
   # is literal: a platform delivery is delivered only on the recipient's ack.
@@ -378,7 +386,7 @@ fi
 routed_path_line local "${PATH_REASON}"
 NAME="$(printf '%s' "${BODY}" | inbox_send_mail "${CHANNEL}" "${SLUG}" "${TO}" "." "${RE}" "${THREAD}")" || exit 1
 
-# THE FILENAME, AND NOTHING ELSE. Not the body -- echoing it back would put the
+# THE PATH LINE, THEN THE FILENAME, AND NOTHING ELSE. Not the body -- echoing it back would put the
 # text a second time in the context that composed it, for no information. The
 # filename is what the peer will see, what a `thread:` in a later message
 # points at, and the only handle this side has on the message afterwards.
