@@ -255,6 +255,18 @@ nothing. Two patterns close that, both for later:
 Real push (Socket Mode, `~/.claude/slack-app-token`) is the actual answer and is
 out of scope here.
 
+**Later (2026-09-22):** the "actual answer" named just above — **Socket Mode + an
+app-level token (`~/.claude/slack-app-token`)** — is superseded (DND-300 / the
+harness↔gen_saas interactivity design, `ai/contracts/athena-events.md` →
+`slack.interaction.received` and *Machine↔owner API binding and the outbound
+return-address dual*): the go-forward push/interactivity path is gen_saas's
+**signature-verified HTTP interactivity endpoint** (HMAC over raw bytes +
+stale-timestamp reject), which routes the verified click as a
+`slack.interaction` platform line to the originating session's inbox — **not**
+Socket Mode and **not** an app-level token held by the harness. The unchanged
+line "this skill uses no Socket Mode" (top of this file) stays true of *this
+skill*; what changed is what the eventual push mechanism is.
+
 ## See also — `athena:inbox`
 
 This skill is the **Slack-specific** side: Athena's own bot identity, the Web API

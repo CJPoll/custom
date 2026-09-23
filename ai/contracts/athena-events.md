@@ -161,10 +161,11 @@ which cost differently:
      types an ingress kind may originate*). A source-emitted family is
      verified-ingress-only; a `fleet.*` family is harness-emit-only.
   5. **Its enrichment posture** — whether its ingress enriches a metadata-only
-     signal before emitting (declaring the least-privilege, read-only, on-demand
-     fetch per *Sender verification and payload completeness*), or — like
-     harness-emit — does not enrich at all. Harness-emitted families (`fleet.*`)
-     do not enrich.
+     signal before emitting (declaring the **on-demand read** enrichment fetch,
+     least-privilege enforced server-side per-caller rather than by token scope,
+     per *Sender verification and payload completeness* and *Secret custody*), or
+     — like harness-emit — does not enrich at all. Harness-emitted families
+     (`fleet.*`) do not enrich.
 
   Declaring these is a **registration-time config act** (no code change) and
   introduces **no platform routing, membership, or per-change sequence state** —
@@ -408,6 +409,11 @@ implementation MUST NOT reject or hard-code against an unknown well-formed `type
 source):
 
 - `slack.message.received`
+- `slack.interaction.received` — a verified Slack **interactivity** callback (a
+  block-action click). Originated **only** by the Slack inbound-webhook ingress
+  after signature verification; **harness-emit can never mint it** (see *Which
+  event types an ingress kind may originate*). Its payload and identity are in
+  *Payload fields and their types per event type*.
 - `notion.ticket.created`
 - `notion.ticket.updated` — the coarse "a property changed" signal; its payload
   carries the changed property identifiers (`changed_properties`) plus the
@@ -486,6 +492,13 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `ts` | string | scalar |
 | | `thread_ts` | string | scalar |
 | | `event_id` | string | scalar |
+| `slack.interaction.received` (a verified block-action click — transient, never updated) | `channel` | string | scalar |
+| | `ts` — the message the interactive element lives on | string | scalar |
+| | `action_id` | string | scalar |
+| | `action_ts` — Slack's action timestamp | string | scalar |
+| | `value` — the interactive element's opaque `value` (carries the server-stamped tagged return address — see *Machine↔owner API binding and the outbound return-address dual*); Path-2 untrusted until its tag verifies | string | scalar |
+| | `actor.user_id` — the clicking Slack user | string | scalar |
+| | `actor.is_owner` — whether that user is the account's expected owner | boolean | scalar |
 
 **`entity_id` is the declared, bindable entity handle carried by every
 source-emitted type that names a persistent ENTITY** — the Notion ticket types
@@ -554,6 +567,18 @@ updated) as well.`
 are part of the closed schema so a rule may bind them and the dedupe pairing is
 expressible.
 
+**`slack.interaction.received` is a transient event, not a persistent entity** —
+like `slack.message.received`, it carries **no `entity_id`** and **no
+`revision`**. Its identity is the tuple **`{channel, ts, action_ts}`** (the
+message the element lives on plus Slack's action timestamp), unique per click; a
+consumer that must dedupe clicks keys on that tuple. The `value` and (phase-2
+modal) `private_metadata` it returns are **source-supplied and Path-2 untrusted**
+— they carry the server-stamped tagged return address, and a returned `value` /
+`private_metadata` is trusted **only after its tag verifies AND its account
+equals the owner of the app the click arrived on** (see *Machine↔owner API
+binding and the outbound return-address dual*). Neither field is
+trusted-slot-eligible.
+
 **`payload.revision` is an OPTIONAL source-supplied provenance / ordering hint
 for a Notion entity type.** It is the source's own revision/version indicator for
 the entity state the event reflects (Notion: `last_edited_time`, or a finer
@@ -571,6 +596,74 @@ source it from the deletion **webhook event itself, not an enrichment fetch** �
 preserving their identity-only property. `slack.message.received` carries **no**
 `revision`: a Slack message is transient and never updated, and its
 `payload.event_id` is already unique.
+
+### Declared families beyond the first pass — `fleet.session.message` and `notion.agent_message.*`
+
+Two type families are **declared** here per *Extending the taxonomy — a new type
+family declares its model* (each declares its five things), so a later increment
+that lands their ingress is a natural addition, not a rewrite. Neither is one of
+the enumerated first-pass source-webhook types above.
+
+**The `fleet.session.message` family** (session-to-session messaging):
+
+1. **Payload schema** — `to` (string, scalar, OPTIONAL — the router target
+   `owner/machine/inbox`; its presence makes the message *addressed*), `from`
+   (string, scalar — **server-stamped**, see origination), `subject` (string,
+   scalar, optional), `body` (string, scalar), `re` (string, scalar, optional),
+   `thread` (string, scalar, optional). A `payload.*` leaf not in this schema is
+   the ordinary unknown-path save-time error.
+2. **Identity field** — the **platform event id** (per-event, as
+   `slack.message.received` uses `payload.event_id`). It is the `subject` of the
+   dedupe window.
+3. **Change/revision token** — none: a session message is **transient and never
+   updated**, so identity alone is unique and no revision token exists.
+4. **Origination membership** — **harness-emit only** (a `fleet.*` family; see
+   *Harness-emit* and *Which event types an ingress kind may originate*). No
+   source ingress and no reconciliation poller originates it; a source-emitted
+   ingress that tried would be rejected.
+5. **Enrichment posture** — **none**. Harness-emitted; nothing is fetched.
+
+`from` is **server-stamped from the machine-token registration record** — the
+same record harness-emit resolves `owner` from and the target-bind check reads
+(*Machine↔owner API binding and the outbound return-address dual*; *Mechanism vs
+config boundary, and both-ends-or-dark*). A caller-supplied `from` (or `owner`,
+or `type`) is **refused with a `Fix:`** — the 6D principle for this family:
+`Fix: fleet.session.message 'from' is stamped server-side from the authenticated
+machine token, not the request body — remove it and re-emit.` An **addressed**
+message (`payload.to` present) is delivered **directly to the same-owner target**
+(the target machine's session inbox), in addition to ordinary rule fan-out — the
+delivery dual of the Slack-click direct route (design §4/§D6), same-owner only; a
+**broadcast** (no `payload.to`) fans out through rules alone.
+
+**The `notion.agent_message.{created,updated,deleted}` family** (Agent Messages
+routing):
+
+1. **Payload schema** — `row_id` (string, scalar — the Notion page id),
+   `from` (string, scalar), `subject` (string, scalar), `sent_at` (timestamp,
+   scalar), `to` (string, **collection**), `acked_by` (string, **collection**),
+   `thread` (string, **collection**), `re` (string, scalar, optional),
+   `sending_owner` (string, **collection**), `recipient_owner` (string,
+   **collection**), `revision` (string, scalar). **NO `body` field** — the line
+   is a **trigger**; the Notion row is the authority (the consumer re-fetches the
+   row).
+2. **Identity field** — the **page id** (`row_id`).
+3. **Change/revision token** — `revision` = the row's `last_edited_time` (a
+   persistent entity that is updated).
+4. **Origination membership** — the **Notion inbound-webhook ingress** and the
+   **reconciliation poller** only (verified-ingress-only, exactly as the other
+   `notion.*` families). Harness-emit can never mint it.
+5. **Enrichment posture** — **yes**: the metadata-only Notion webhook is enriched
+   on the verified event (per *Sender verification and payload completeness*),
+   minus the body (no body is ever carried).
+
+**Ingress rule (AM-1): an unbound parent database is dead-lettered, never
+enriched or emitted.** One Notion callback carries N per-database bindings
+`{database_id, family}`. A verified webhook page **whose parent database has no
+binding on the callback's subscription** is **DEAD-LETTERED with reason
+`:unbound_database`** — it is **not** enriched and **not** emitted as an event.
+This is the failed-lookup discipline applied at ingress (`~/dev/custom/ai/CLAUDE.md`
+→ *A failed lookup must never look like an empty one*): an unrecognised parent is
+a named dead-letter, never a silently mis-mapped `notion.ticket.*`.
 
 ### Idempotency is per (event, rule)
 
@@ -831,13 +924,23 @@ The first-pass permitted-origination rule:
   types*, extended only by *registering* a new type for that source — because the
   ingress adapter normalizes to exactly that set; `slack.*` / `notion.*` denote
   the **registered members**, never an open licence to originate an arbitrary
-  `slack.<x>` / `notion.<x>`. **Harness-emit MUST NOT be
+  `slack.<x>` / `notion.<x>`. The **registered Slack members** include
+  `slack.message.received` and **`slack.interaction.received`** (the verified
+  block-action click of *Enumerated first-pass event types*); the registered
+  Notion members include the `notion.ticket.*` / `notion.comment.*` types and the
+  **`notion.agent_message.{created,updated,deleted}`** family (*Declared families
+  beyond the first pass*), the latter originated by the Notion inbound-webhook
+  ingress and the reconciliation poller. **Harness-emit MUST NOT be
   able to synthesize a source-emitted webhook type** — a machine-token holder
-  cannot mint a `notion.ticket.deleted` or a `slack.message.received` that no
-  verified webhook produced; such an event MUST be rejected with a `Fix:`.
+  cannot mint a `notion.ticket.deleted`, a `slack.message.received`, a
+  `slack.interaction.received`, or a `notion.agent_message.*` that no verified
+  webhook produced; such an event MUST be rejected with a `Fix:`.
 - **Harness-emit** may originate only the **finite set of `fleet.*` `type` values
   registered to its machine token** at ingress registration — never a
   source-emitted type, and never an unenumerated `fleet.<arbitrary>` value. The
+  first registered `fleet.*` member is **`fleet.session.message`** (*Declared
+  families beyond the first pass*); a session message is harness-emit-only, and a
+  source ingress that tried to originate it would be rejected. The
   `fleet.*` namespace bounds what MAY be registered; origination is bounded to the
   **registered members** of it, not the open prefix (see the finite-set rule
   above). An event whose `type` is a well-formed but unregistered `fleet.*` value
@@ -1390,7 +1493,8 @@ adapter.
 adapter's **own credential**, or **supplied by the owner**?):
 
 - **Credential-scopes-destination** — **Slack** (workspace-scoped bot token),
-  **Notion** (tenant/DB-scoped token), and **Discord** when it delivers via a bot
+  **Notion** (per-account, workspace/integration-scoped token — *Secret custody*,
+  the D13 general integration token), and **Discord** when it delivers via a bot
   token to a guild the bot was authorized into. The credential cannot reach
   another account's destination, so the owner↔destination bind is **implied by the
   credential** — no explicit destination check is required.
@@ -1677,17 +1781,28 @@ under-encrypted**:
   "v0:"+X-Slack-Request-Timestamp+":"+raw_body)`, verified constant-time against
   `X-Slack-Signature` with the timestamp inside a freshness window (per *Inbound
   webhook*); the **Notion per-subscription `verification_token`** (the Notion
-  inbound-webhook HMAC key); and a **read-only, DB-scoped Notion enrichment
-  token**. Every first-pass inbound-webhook ingress therefore has its inbound-auth
+  inbound-webhook HMAC key); and one **general, per-account Notion integration
+  token** (`:notion_integration_token`). Every first-pass inbound-webhook ingress
+  therefore has its inbound-auth
   key named here — Slack's signing secret (per **app**) and Notion's
   `verification_token` (per **subscription**) — under the same KMS
   envelope-encryption custody, least-privilege at-use-only decrypt, and
   never-logged/never-on-`argv`/never-in-inbox-root posture as every other secret.
   The reconciliation poller carries no HMAC key: it reads the source under a
   per-account, source-scoped read token (for Notion first-pass reconciliation the
-  read-only DB-scoped enrichment token above serves; a source needing a distinct
-  poller token adds it here under the same custody). Any future adapter credential
+  general integration token above serves; a source needing a distinct poller
+  token adds it here under the same custody). Any future adapter credential
   (SMTP, SMS, Discord bot) joins this set under the same story.
+
+  **Later (2026-09-22):** this named the Notion read token a **"read-only,
+  DB-scoped Notion enrichment token"** — a token whose *scope* was the
+  least-privilege mitigation. Superseded (epic D13/HG-13): the server now holds
+  **one general per-account Notion integration token** (`:notion_integration_token`,
+  `scope_ref` = the workspace/integration id, never empty) that **enrichment, MCP
+  reads, and MCP writes all share**. Least-privilege therefore no longer rests on
+  token scope; the mitigation moves to **server-side per-caller authorization +
+  audit** (every read/write is authz-checked and audited per caller — design §10
+  D15). The custody, at-use-only decrypt, and never-logged posture are unchanged.
 
 ### Sender verification and payload completeness
 
@@ -1697,8 +1812,11 @@ under-encrypted**:
 - Where a source's webhook is **metadata-only** (it signals *that* something
   changed and carries entity IDs, but not the changed values — Notion's API
   webhook is so by design), building a useful event **requires an enrichment API
-  fetch** on the verified event. Enrichment uses a **least-privilege, read-only,
-  DB-scoped** token, **on-demand only** (never on a timer). Enrichment targets a
+  fetch** on the verified event. Enrichment is a **read**, performed **on-demand
+  only** (never on a timer), using the per-account Notion integration token
+  (*Secret custody* — one general token shared by enrichment and the MCP;
+  least-privilege is enforced **server-side per-caller + audit**, not by token
+  scope). Enrichment targets a
   **fixed destination**, so it carries **no** generic-webhook egress surface.
 - **When the enrichment fetch FAILS, the ingress MUST NOT emit an un-enriched
   event and MUST NOT silently drop** — either is the silent miss this contract
@@ -1722,7 +1840,7 @@ under-encrypted**:
     and requires **no platform membership or sequence state**. A fetch that
     succeeds within budget emits the enriched event normally.
   - **Exhausted or permanent failure (retry budget exhausted; a revoked/expired
-    enrichment token → `401`/`403`; persistent `5xx`).** The ingress MUST record
+    Notion integration token → `401`/`403`; persistent `5xx`).** The ingress MUST record
     an **observable ingress-enrichment-failure** and MUST NOT emit. The record
     lives in an **ingress-failure store**, **distinct from both the dead-letter
     store and the failed-delivery store**: the event never reached routing, so it
@@ -1752,7 +1870,7 @@ under-encrypted**:
     ops/owner config, outside this contract's MUST surface. The failure MUST be
     **reported to the owner, never left silently quiet**, carrying the
     LLM-actionable marker:
-    `Fix: enrichment fetch failed for a <type> event on entity <entity_id> (owner <owner>; cause: <class>, <status>). Emit is rejected: emitting un-enriched would read the known fields (status, labels, assignee, title, ticket_number) as absent, silently FILTER at rule evaluation, and — being Level-1 HANDLED — never dead-letter, an invisible miss. The ingress-side enrichment-retry budget is exhausted; check the read-only enrichment token/scope or the source, then the event re-enriches on source redelivery. See the ingress-failure store exemplar for the first-seen event.`
+    `Fix: enrichment fetch failed for a <type> event on entity <entity_id> (owner <owner>; cause: <class>, <status>). Emit is rejected: emitting un-enriched would read the known fields (status, labels, assignee, title, ticket_number) as absent, silently FILTER at rule evaluation, and — being Level-1 HANDLED — never dead-letter, an invisible miss. The ingress-side enrichment-retry budget is exhausted; check the Notion integration token (Secret custody) or the source, then the event re-enriches on source redelivery. See the ingress-failure store exemplar for the first-seen event.`
   - **Entity deleted between the webhook and the fetch is NOT an enrichment
     failure.** A **definitive not-found / gone** signal (a `404` on a change
     webhook whose entity has since been deleted) resolves to the **identity-only
@@ -1765,9 +1883,14 @@ under-encrypted**:
     failure (`401`/`403` → the permanent case above) and a **transient** failure
     (`429`/`5xx` → the transient case above): only a not-found/deleted signal maps
     here.
-- A write-scoped token (e.g. Notion outbound: post comment / update page) MUST be
-  **separate** from the read-only enrichment token; do not widen the read token
-  to gain write.
+- Notion **writes** (e.g. outbound: post comment / update page) and reads share
+  the **one** general per-account integration token (*Secret custody* — the D13
+  supersession); there is **no** separate write-scoped token to keep apart, and
+  no read token to "widen." The read/write **token boundary** the old model gave
+  is deliberately removed (D13); its replacement is **not** a server-side
+  read/write split but **per-caller authorization (owner-scoping — a caller
+  reaches only its own owner's workspace) + per-write audit** (design §10 D15),
+  which bounds cross-account reach and makes every write attributable.
 
 ---
 
@@ -1812,7 +1935,8 @@ Therefore:
   account MUST be refused with a `Fix:` (name the target and that it is not
   registered to the rule's owner). An adapter whose **credential itself scopes the
   destination** gets this binding for free — **Slack** (workspace-scoped bot token)
-  and **Notion** (tenant/DB-scoped token) deliver only through the owner's own
+  and **Notion** (per-account, workspace/integration-scoped token — *Secret
+  custody*) deliver only through the owner's own
   KMS-custodied per-account credential, which cannot reach another account's
   destination. This is a property of *those* credentials, **not** of every
   fixed-host adapter: an adapter whose **destination is owner-supplied** carries no
@@ -1922,6 +2046,47 @@ whole rule is the failed-lookup discipline (`~/dev/custom/ai/CLAUDE.md` → *A f
 lookup must never look like an empty one*): a dark channel is a lookup that
 matched nothing and said nothing, and it MUST be made observable at every join.
 
+### Machine↔owner API binding and the outbound return-address dual
+
+The machine-token registration record above is not only what the target-bind
+check reads. **Harness → gen_saas API calls authenticate with the SAME
+machine-token registration record** — the one server-side per-account record from
+which harness-emit resolves `owner` (*Harness-emit*) and the target-bind resolves
+a machine's owning account (above). One machine, one token, one record: the API
+caller identity, the harness-emit owner, and the target-bind owner are the same
+`{owning account, machine id}` binding, resolved server-side, never from a
+request body. No second credential is minted for the API.
+
+**The outbound dual of owner-from-auth is a server-stamped return address.**
+Owner-from-auth stamps an inbound event's `owner` from the authenticated ingress,
+never the payload. Its **outbound** counterpart: when the harness posts through
+the API (a Slack message with interactive elements), the server **stamps a return
+address from the authenticated caller's registration record** — `{account,
+machine, inbox}` — and it travels in the outbound message as a **tagged opaque
+value** (an integrity-tagged, server-keyed blob carried as the interactive
+element's `value`, or a modal's `private_metadata`). The harness does **not**
+supply it: a **caller-supplied return address is refused with a `Fix:`**, never
+silently honoured or ignored — an ignored field is one a later reader starts
+trusting: `Fix: the return address is stamped server-side from the authenticated
+machine token, not supplied by the caller — remove the caller-supplied return
+address and re-post.` This is the egress dual of *Which event types an ingress
+kind may originate*: origination stops a caller minting another's events; the
+server-stamped return address stops a caller routing a reply into another
+machine's inbox.
+
+**A returned `value` / `private_metadata` is untrusted until it is verified on
+BOTH counts.** When Slack sends the interactive callback back
+(`slack.interaction.received`), the returned `value` (or `private_metadata`) is
+**not trusted** until (1) its **integrity tag verifies** against the server key,
+AND (2) the account it decodes to **equals the owner of the app the click arrived
+on**. A blob whose tag fails, or whose account differs from the click's app
+owner, is **rejected and recorded, never forwarded** as a return route — a
+workspace member who can read a message's `value` could otherwise craft a click
+routing into another machine's inbox. Both checks are required: the tag alone
+proves the server minted it; the account-equality check proves it came back on
+the app that owns that account. (Design §3 6D and §4 are the mechanism; this
+section states the invariant it rests on.)
+
 ---
 
 ## Relationship to the Athena Inbox contract
@@ -1964,7 +2129,8 @@ wins**. The roles are those of *Conformance language* (ingress / router / adapte
 - originates only the **finite, registered set** of `type` values permitted to its kind, and
   rejects any other `type` at ingress with a `Fix:` — harness-emit can never synthesize a
   source-emitted `slack.*`/`notion.*` type (*Which event types an ingress kind may originate*);
-- resolves a metadata-only source by a **least-privilege, read-only, on-demand** enrichment fetch,
+- resolves a metadata-only source by an **on-demand read** enrichment fetch (least-privilege
+  enforced server-side per-caller, not by token scope — *Secret custody*; *Sender verification and payload completeness*),
   and on enrichment failure **neither emits un-enriched nor silently drops** — retrying transients
   under a bounded budget, recording a permanent/exhausted failure in the **ingress-failure store**
   and **reporting it to the owner**, and mapping a definitive not-found to the identity-only delete
