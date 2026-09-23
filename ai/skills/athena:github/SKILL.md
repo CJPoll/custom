@@ -57,9 +57,82 @@ arguments as `gh`, plus a `git` passthrough for authenticated pushes. Auth uses
 ~/dev/custom/ai/bin/gh-athena pr create --fill --base main
 ~/dev/custom/ai/bin/gh-athena pr comment 42 --body "…"
 ~/dev/custom/ai/bin/gh-athena pr merge 42 --squash --auto
-~/dev/custom/ai/bin/gh-athena git push origin HEAD
 ~/dev/custom/ai/bin/gh-athena --check          # verify auth + print the reachable installation
 ```
+
+Pushes have their own form — see *Pushing as Athena* below.
+
+## Pushing as Athena
+
+A plain `git push` authenticates with the **owner's** SSH key or credential
+helper, so GitHub records the push as CJPoll. Measured 2026-09-23: every
+captain and admiral branch push on gen_saas showed `actor=CJPoll`; only the PR
+merges showed `athena-harness[bot]`. **Every agent push goes through the
+wrapper's `git` passthrough, in this form** (verified bot-attributed on both
+`custom` and `gen_saas`):
+
+```sh
+GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git \
+  -c credential.helper= -c 'url.https://github.com/.insteadOf=git@github.com:' \
+  push -u origin HEAD
+```
+
+What each part does:
+
+- The passthrough adds an App-token `Authorization` header for that one
+  command. It reaches git only over **HTTPS**.
+- `credential.helper=` (empty) clears every helper, URL-scoped ones included,
+  so the owner's `gh auth git-credential` cannot answer.
+- The `insteadOf` rewrite turns an SSH-form remote (`git@github.com:o/r.git`)
+  into HTTPS for that command. Without it the push goes over SSH as the owner.
+- `GIT_TERMINAL_PROMPT=0` makes a bot-auth failure **fail** instead of prompting.
+
+The wrapper (DND-389 and later) applies the helper reset, the rewrite, and the
+no-prompt setting itself, so the flags above are belt-and-braces. It also
+**refuses**, exit 3 with a `Fix:`, any push or other network git op that would
+still reach github.com over SSH or plain HTTP after the rewrite: an `ssh://`
+URL, a `pushurl` override, or an `insteadOf`/`pushInsteadOf` that forces SSH.
+Handle that refusal by the rule in the next section. The
+`forge-identity-guard.sh` hook warns on a plain `git push` to a github.com
+remote.
+
+Afterwards, check who the push was attributed to:
+
+```sh
+gh api 'repos/<owner>/<repo>/activity?per_page=3' -q '.[]|.activity_type+" "+.ref+" "+.actor.login'
+```
+
+It must show `athena-harness[bot]`. If it does not, that is the next section's
+case.
+
+GitLab: `glab-athena` has **no** git passthrough, so there is no Athena push
+path on GitLab yet; a `git push` to a gitlab.com remote runs under the owner's
+SSH key. That gap was escalated with DND-389 rather than decided here. Until
+it is ruled on, follow your brief for GitLab pushes.
+
+## When a forge write can't be done as Athena
+
+**The owner's standing rule, for every forge (GitHub and GitLab) and every
+agent.** Some GitHub or GitLab operation cannot be done under the Athena
+identity. The cause does not matter: a wrapper error, a 401/403, the token not
+resolving to the bot, a guard denial or refusal, anything. Then:
+
+1. **Stop that operation.** Do not fall back to the owner's `gh`/`glab` login,
+   a plain `git push`, the owner's credential helper, or any
+   auth/setup/login subcommand.
+2. **Escalate** to your admiral with the exact command, the full error, and
+   the intent. The admiral escalates to its coordinator and waits. Nobody works
+   around it.
+3. **Keep working** on anything the failure does not block.
+
+**Why (owner):** coordinating gets the root problem fixed faster than detecting
+violations after the fact. A workaround hides the broken identity path, and the
+fleet goes on attributing work to the owner.
+
+This is the one home of the rule. Other skills, briefs, and agent blocks cite
+this section by name and do not restate it. The `Fix:` text in
+`forge-auth-guard.sh`, `forge-identity-guard.sh`, and the `gh-athena` refusal
+points here.
 
 ## Vocabulary map (GitLab → GitHub)
 
@@ -173,7 +246,7 @@ each is recorded with the response it actually returns.
 
 | You run | You get | What it means | What to do instead |
 |---|---|---|---|
-| `gh-athena run rerun <id>` (`--failed` too) | `Resource not accessible by integration` | The Athena App has no `actions:write`. Permanent; no token refresh or `forge-preflight` clears it. | Trigger a **fresh run with a branch push** — Athena's own path, and it re-runs against current code rather than replaying a stale SHA. A literal re-run of that same run needs the **owner's** `gh` (plain, not `gh-athena`), which makes it an owner step to surface, not a retry to attempt. |
+| `gh-athena run rerun <id>` (`--failed` too) | `Resource not accessible by integration` | The Athena App has no `actions:write`. Permanent; no token refresh or `forge-preflight` clears it. | Trigger a **fresh run with a branch push** (see *Pushing as Athena*) — Athena's own path, and it re-runs against current code rather than replaying a stale SHA. A literal re-run of that same run needs the **owner's** `gh` (plain, not `gh-athena`), which makes it an owner step to surface, not a retry to attempt. |
 | `gh api repos/<owner>/<repo>/branches/<b>/protection` | HTTP 403 `Upgrade to GitHub Pro` | This repo is on a **free private** plan, where branch protection does not exist. | Treat the merge bar as entirely your own — see below. |
 
 **The second one changes what `--auto` means, so read it before merging.** The

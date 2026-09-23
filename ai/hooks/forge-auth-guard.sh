@@ -90,12 +90,12 @@ CMD_START='(^|[^[:alnum:]_.-])'
 # `gh` or `gh-athena`, then `auth`, then a mutating subcommand (`switch` changes
 # the active account in hosts.yml). `gh auth status` is NOT matched (a read).
 if has "${CMD_START}gh(-athena)?[[:space:]]+auth[[:space:]]+(login|logout|refresh|token|setup-git|switch)"; then
-  deny 'forge-auth: this changes GitHub auth state (login/logout/refresh/token), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this. If a forge write is failing on auth, STOP and report to the owner that gh auth needs attention; verify the identity wrapper with `~/dev/custom/ai/bin/forge-preflight` (reads only). Reading status is fine: `gh auth status`.'
+  deny 'forge-auth: this changes GitHub auth state (login/logout/refresh/token), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). Diagnosing is fine: `~/dev/custom/ai/bin/forge-preflight` and `gh auth status` are reads.'
 fi
 
 # ---- 2: glab auth <mutation> (bare, path-qualified, or -athena wrapper) ----
 if has "${CMD_START}glab(-athena)?[[:space:]]+auth[[:space:]]+(login|logout|refresh)"; then
-  deny 'forge-auth: this changes GitLab auth state (login/logout/refresh), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this. If a forge write is failing on auth, STOP and report to the owner that glab auth needs attention; verify the identity wrapper with `~/dev/custom/ai/bin/forge-preflight` (reads only). Reading status is fine: `glab auth status`.'
+  deny 'forge-auth: this changes GitLab auth state (login/logout/refresh), which is OWNER-GATED — the agent never touches forge credentials. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). Diagnosing is fine: `~/dev/custom/ai/bin/forge-preflight` and `glab auth status` are reads.'
 fi
 
 # ---- 3: POST to an OAuth token endpoint ------------------------------------
@@ -116,7 +116,7 @@ if has 'oauth/(token|access_token)' \
     || has '(^|[[:space:]])(-[[:alnum:]]*d|-F|--(data|json|form|post-data|post-file))' \
     || { has "${CMD_START}glab(-athena)?[[:space:]]+api[[:space:]]|${CMD_START}gh(-athena)?[[:space:]]+api[[:space:]]" \
       && has '(^|[[:space:]])(-f|--field|--raw-field|--input)'; }; }; then
-  deny 'forge-auth: this POSTs to an OAuth token endpoint (minting/refreshing a forge token), which is OWNER-GATED — the agent never mints forge credentials. Fix: do NOT run this. Report to the owner if a token is expired or missing; the owner provisions forge auth out of band.'
+  deny 'forge-auth: this POSTs to an OAuth token endpoint (minting/refreshing a forge token), which is OWNER-GATED — the agent never mints forge credentials. Fix: do NOT run this — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). The owner provisions forge auth out of band.'
 fi
 
 # ---- 4: a WRITE to a known forge credential/config file --------------------
@@ -137,7 +137,7 @@ fi
 WRITES=$(printf '%s' "$FLAT" | sed -E 's#[0-9]*>>?[[:space:]]*/dev/null##g; s#[0-9]*>&[0-9-]##g')
 if has '((\.config|XDG_CONFIG_HOME)\}?/(gh|glab-cli)([^[:alnum:]_.-]|$)|(GH|GLAB)_CONFIG_DIR([^[:alnum:]_]|$)|(^|[^[:alnum:]_.-])(gh|glab-cli)/(hosts|config)\.yml)' \
   && printf '%s' "$WRITES" | grep -Eq "(>|${CMD_START}(tee|rm|unlink|shred|mv|cp|install|ln|dd|truncate|vim?|nvim|nano|emacs)[[:space:]]|${CMD_START}g?(sed|perl)[[:space:]]([^|;&]*[[:space:]])?(-[nprlaswWXtTcEuz]*i|--in-place))"; then
-  deny 'forge-auth: this writes to a forge credential/config file (gh hosts.yml/config.yml or glab-cli config.yml), which is OWNER-GATED — the agent never edits forge auth config. Fix: do NOT modify it. If the config is wrong, report to the owner, who provisions forge auth out of band. Reading the file (cat/grep) is allowed.'
+  deny 'forge-auth: this writes to a forge credential/config file (gh hosts.yml/config.yml or glab-cli config.yml), which is OWNER-GATED — the agent never edits forge auth config. Fix: do NOT modify it — do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena"). The owner provisions forge auth out of band; reading the file (cat/grep) is allowed.'
 fi
 
 # No auth-mutating construct detected -> allow silently.

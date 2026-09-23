@@ -18,6 +18,7 @@
 #   gh-athena pr create ...           # opens the PR as athena-harness[bot]
 #   gh-athena pr merge ... / pr comment ... / api ...
 #   gh-athena git push origin HEAD    # pushes over HTTPS authed as the app
+#                                     # (see "The git passthrough" below)
 #   gh-athena --check                 # verify config + mint a token + print the bot slug
 #
 # Reads may use plain `gh`; use gh-athena for anything that should be attributed
@@ -92,12 +93,196 @@ if [ "${1:-}" = "--check" ]; then
   exit 0
 fi
 
-TOKEN="$(get_token)"
+# ---- The git passthrough (DND-389) -----------------------------------------
+# `gh-athena git <args>` runs git authenticated as the App for ONE command. The
+# App token only reaches git over HTTPS (an http.https://github.com/.extraheader),
+# so everything else about the command must keep the owner's identity OUT:
+#
+#   * url.https://github.com/.insteadOf=git@github.com:  — an SSH-form remote
+#     (the default a `git clone git@github.com:...` leaves) is rewritten to HTTPS,
+#     so the plain `gh-athena git push origin HEAD` is correct by default. Without
+#     it the push goes over SSH with the OWNER's key and GitHub records CJPoll.
+#   * credential.helper= (empty resets the list, URL-scoped helpers included),
+#     core.askPass= , GIT_ASKPASS/SSH_ASKPASS unset, GIT_TERMINAL_PROMPT=0 — no
+#     fallback source of the owner's credentials; a bot-auth failure FAILS.
+#   * git_refuse_non_https: before exec, every URL the command would reach is
+#     resolved (with the rewrite applied, pushurl and pushInsteadOf included) and
+#     the command is REFUSED if any of them still reaches github.com over SSH or
+#     another non-HTTPS transport (ssh://, git://, http://, a pushurl override, a
+#     global insteadOf that forces SSH). A refusal is exit 3 with a Fix: line.
+#
+# Test seam: GH_ATHENA_GIT_DRY_RUN=1 runs the resolution and refusal, then prints
+# the resolved URLs and the git argv (token redacted) instead of exec'ing git.
+# Residual (not detectable from git config): an ~/.ssh/config Host alias for
+# github.com (`myalias:owner/repo`) and ext:: transports.
+
+GH_HTTPS_REWRITE='url.https://github.com/.insteadOf=git@github.com:'
+
+# url_host_scheme <url> -> "<scheme> <host>" (lowercased); empty for a local path.
+url_host_scheme() {
+  local url="$1" scheme rest hostport host
+  case "$url" in
+    /*|./*|../*|\~*|file://*) return 0 ;;
+    *://*)
+      scheme="${url%%://*}"; rest="${url#*://}"; hostport="${rest%%/*}"
+      host="${hostport##*@}"; host="${host%%:*}" ;;
+    *:*)
+      # scp-like [user@]host:path — only when no '/' precedes the first ':'.
+      hostport="${url%%:*}"
+      case "$hostport" in */*) return 0 ;; esac
+      scheme=ssh; host="${hostport##*@}" ;;
+    *) return 0 ;;
+  esac
+  printf '%s %s' "$(tr 'A-Z' 'a-z' <<<"$scheme")" "$(tr 'A-Z' 'a-z' <<<"$host")"
+}
+
+# reaches_github_insecurely <url> : true when <url> targets github.com (or a
+# subdomain) over anything but https.
+reaches_github_insecurely() {
+  local sh scheme host
+  sh="$(url_host_scheme "$1")"
+  [ -n "$sh" ] || return 1
+  scheme="${sh%% *}"; host="${sh#* }"
+  case "$host" in github.com|*.github.com) ;; *) return 1 ;; esac
+  [ "$scheme" != "https" ]
+}
+
+git_refuse() {
+  # $1 subcommand, $2 what (remote name or literal), $3 resolved url
+  cat >&2 <<EOF
+gh-athena: REFUSING \`git $1\`: '$2' resolves to $3, which reaches github.com over SSH or another non-HTTPS transport.
+  The App token only authenticates HTTPS, so this would run as the machine OWNER (CJPoll), not athena-harness[bot].
+  Fix: push to the HTTPS URL instead — \`~/dev/custom/ai/bin/gh-athena git $1 https://github.com/<owner>/<repo>.git <refspec>\` — or point the remote at https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git (the wrapper rewrites that form); drop any ssh:// pushurl override or global insteadOf/pushInsteadOf that forces SSH. Do not work around this with a plain \`git push\` or the owner's credentials; if it cannot be done as Athena, escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can't be done as Athena").
+EOF
+  exit 3
+}
+
+# git_refuse_non_https <git args...> : resolve every URL the network op would
+# reach and refuse on the first one that goes to github.com over non-HTTPS.
+# Sets RESOLVED_URLS (newline-separated) for the dry-run report.
+RESOLVED_URLS=""
+git_refuse_non_https() {
+  local -a glob=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix)
+        [ $# -ge 2 ] || return 0; glob+=("$1" "$2"); shift 2 ;;
+      -*) glob+=("$1"); shift ;;
+      *) break ;;
+    esac
+  done
+  [ $# -gt 0 ] || return 0
+  local sub="$1" mode; shift
+  case "$sub" in
+    push) mode=push ;;
+    fetch|pull|ls-remote|clone) mode=fetch ;;
+    remote) [ "${1:-}" = update ] || return 0; mode=fetch ;;
+    *) return 0 ;;
+  esac
+
+  G() { git "${glob[@]}" -c "$GH_HTTPS_REWRITE" "$@"; }
+
+  local -a remotes=()
+  mapfile -t remotes < <(G remote 2>/dev/null || true)
+  is_remote() { local r; for r in "${remotes[@]}"; do [ "$r" = "$1" ] && return 0; done; return 1; }
+
+  # Walk the subcommand's args: options that take a separate value are skipped
+  # with it; the first remaining positional is the repository. Independently,
+  # EVERY token that names a configured remote or mentions github.com is also
+  # checked, so a mis-parsed option value can only add a check, never drop one.
+  local -a targets=() ; local positional="" all=0 has_repo=0 a takes_value
+  if [ "$mode" = push ]; then
+    takes_value='^(-o|--push-option|--receive-pack|--exec|--repo)$'
+  else
+    takes_value='^(-o|--upload-pack|-j|--jobs|--depth|--deepen|--shallow-since|--shallow-exclude|--refmap|--server-option|--negotiation-tip|-s|--strategy|-X|--strategy-option|--origin|-b|--branch|-u|--reference|--reference-if-able|--separate-git-dir|-c|--config|--template|--filter|--bundle-uri|--ref-format)$'
+  fi
+  local dd=0
+  while [ $# -gt 0 ]; do
+    a="$1"; shift
+    if [ "$dd" = 0 ]; then
+      case "$a" in
+        --) dd=1; continue ;;
+        --all|--multiple) [ "$mode" = fetch ] && all=1 ;;
+        --repo=*) has_repo=1; targets+=("${a#--repo=}") ;;
+      esac
+      if [[ "$a" =~ $takes_value ]]; then
+        [ "$a" = --repo ] && [ $# -gt 0 ] && { has_repo=1; targets+=("$1"); }
+        [ $# -gt 0 ] && { is_remote "$1" || [[ "$1" == *github.com* ]]; } && targets+=("$1")
+        [ $# -gt 0 ] && shift
+        continue
+      fi
+      case "$a" in -*) continue ;; esac
+    fi
+    if [ -z "$positional" ]; then positional="$a"; targets+=("$a")
+    elif is_remote "$a" || [[ "$a" == *github.com* ]]; then targets+=("$a"); fi
+  done
+  [ "$sub" = remote ] && all=1
+  [ "$all" = 1 ] && targets+=("${remotes[@]}")
+
+  if [ -z "$positional" ] && [ "$all" = 0 ] && [ "$has_repo" = 0 ] && [ "$sub" != clone ]; then
+    # Default remote, as git resolves it: pushRemote / pushDefault (push only),
+    # then branch.<cur>.remote, then origin.
+    local cur def=""
+    cur="$(G symbolic-ref -q --short HEAD 2>/dev/null || true)"
+    if [ "$mode" = push ]; then
+      [ -n "$cur" ] && def="$(G config --get "branch.$cur.pushRemote" 2>/dev/null || true)"
+      [ -n "$def" ] || def="$(G config --get remote.pushDefault 2>/dev/null || true)"
+    fi
+    [ -n "$def" ] || { [ -n "$cur" ] && def="$(G config --get "branch.$cur.remote" 2>/dev/null || true)"; }
+    [ -n "$def" ] || def=origin
+    targets+=("$def")
+  fi
+
+  local t u ; local -a urls
+  for t in "${targets[@]}"; do
+    urls=()
+    if is_remote "$t"; then
+      if [ "$mode" = push ]; then mapfile -t urls < <(G remote get-url --push --all "$t" 2>/dev/null || true)
+      else mapfile -t urls < <(G remote get-url --all "$t" 2>/dev/null || true); fi
+    else
+      # A URL literal (or an unknown name: git treats it as a URL). Apply
+      # pushInsteadOf (push only, longest prefix wins), else insteadOf.
+      local rewritten="" best=0 key base prefix
+      if [ "$mode" = push ]; then
+        while read -r key prefix; do
+          base="${key#url.}"; base="${base%.pushinsteadof}"
+          if [ -n "$prefix" ] && [[ "$t" == "$prefix"* ]] && [ "${#prefix}" -gt "$best" ]; then
+            best="${#prefix}"; rewritten="$base${t#"$prefix"}"
+          fi
+        done < <(G config --get-regexp '^url\..*\.pushinsteadof$' 2>/dev/null || true)
+      fi
+      [ -n "$rewritten" ] || rewritten="$(G ls-remote --get-url "$t" 2>/dev/null || printf '%s' "$t")"
+      urls=("$rewritten")
+    fi
+    for u in "${urls[@]}"; do
+      [ -n "$u" ] || continue
+      RESOLVED_URLS+="$u"$'\n'
+      reaches_github_insecurely "$u" && git_refuse "$sub" "$t" "$u"
+    done
+  done
+  return 0
+}
 
 if [ "${1:-}" = "git" ]; then
   shift
+  git_refuse_non_https "$@"
+  TOKEN="$(get_token)"
   # HTTPS git authenticated as the app: x-access-token:<token> basic auth.
-  exec git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | openssl base64 -A)" "$@"
+  AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | openssl base64 -A)"
+  set -- -c credential.helper= -c core.askPass= -c "$GH_HTTPS_REWRITE" \
+    -c "http.https://github.com/.extraheader=$AUTH" "$@"
+  if [ "${GH_ATHENA_GIT_DRY_RUN:-}" = 1 ]; then
+    printf '%s' "$RESOLVED_URLS" | sed 's/^/gh-athena: dry-run: url /'
+    printf 'gh-athena: dry-run: exec git'
+    for a in "$@"; do
+      case "$a" in http.https://github.com/.extraheader=*) a="http.https://github.com/.extraheader=AUTHORIZATION: basic <x-access-token:REDACTED>" ;; esac
+      printf ' [%s]' "$a"
+    done
+    printf '\n'
+    exit 0
+  fi
+  exec env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=0 git "$@"
 fi
 
+TOKEN="$(get_token)"
 exec env GH_TOKEN="$TOKEN" GH_HOST=github.com gh "$@"

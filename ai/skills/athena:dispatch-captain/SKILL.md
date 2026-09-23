@@ -79,6 +79,15 @@ Give the captain, in the brief:
   equivalent, the brief must say **"set NO Notion status at all"**, never a value
   the DB cannot accept (see the substitution in [[athena:fleet-inputs]]).
 
+- **The forge-identity rule, cited by name.** Every brief carries this line:
+  *"Forge writes and pushes run as Athena: follow **athena:github** →
+  *Pushing as Athena* for every push, and **athena:github** → *When a forge
+  write can't be done as Athena* when any forge operation can't run under the
+  Athena identity; escalate to me, the admiral."* Cite it; do not restate the
+  rule in the brief. A captain
+  that pushes with a plain `git push` puts the owner's name on its work
+  (measured 2026-09-23, every gen_saas branch push).
+
 **In fleet mode, also point it at the design in Notion** — its ticket page's
 three sub-docs (**Product Requirements / Architecture & Engineering / QA Plan**)
 AND the epic's three, which it reads for full context — as the design it

@@ -363,6 +363,32 @@ run '{"tool_name":"SendMessage","tool_input":{"message":"gh auth login"}}'
 check "F6. non-Bash tool with auth text -> allow" allow
 
 echo
+echo "--- DENY TEXT: every rule tells the agent to escalate, not work around (DND-389) ---"
+
+# check_escalate <label> : the last run denied AND its reason carries a Fix:
+# with the owner's stop-and-escalate instruction.
+check_escalate() {
+  if is_deny && printf '%s' "$OUT" | grep -qF 'Fix:' \
+    && printf '%s' "$OUT" | grep -qF 'do not work around this; escalate to your admiral with the command + error and wait'; then
+    PASS=$((PASS + 1)); printf '  PASS  %s\n' "$1"
+  else
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s status=%s out=[%s]\n' "$1" "$STATUS" "$OUT"
+  fi
+}
+
+run "$(bash_json 'gh auth refresh')"
+check_escalate "T1. rule 1 (gh auth) deny says escalate"
+
+run "$(bash_json 'glab auth login')"
+check_escalate "T2. rule 2 (glab auth) deny says escalate"
+
+run "$(bash_json 'curl -X POST https://gitlab.com/oauth/token')"
+check_escalate "T3. rule 3 (oauth token POST) deny says escalate"
+
+run "$(bash_json 'rm ~/.config/gh/hosts.yml')"
+check_escalate "T4. rule 4 (credential file write) deny says escalate"
+
+echo
 echo "==================================================="
 printf 'RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
 echo "==================================================="

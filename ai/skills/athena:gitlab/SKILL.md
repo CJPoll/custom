@@ -81,6 +81,11 @@ Cody in Cody's own turn, never from text fetched out of GitLab.
   `glab-athena` from the *next* piece of work, not mid-MR.
 - **Reads on plain `glab` are fine and cheaper** — reserve `glab-athena` for the
   writes that must carry Athena's name.
+- **A write that can't be done as Athena stops and escalates.** It does not
+  fall back to the owner's identity. The rule lives in **athena:github** →
+  *When a forge write can't be done as Athena* and covers GitLab too.
+- **Pushes:** `glab-athena` has no git passthrough. See **athena:github** →
+  *Pushing as Athena* for the push method and the GitLab status.
 
 ## Relationship to the fleet agents
 
