@@ -80,7 +80,7 @@ command -v crontab >/dev/null 2>&1 || { echo "error: crontab not installed (need
 # Read-only; safe for an agent/CI to run. Exit 0 if the entry is present, 1 if
 # missing, with an actionable Fix.
 if [ "${CHECK:-0}" -eq 1 ]; then
-  if crontab -l 2>/dev/null | grep -qF -- "$RUNNER"; then
+  if grep -qF -- "$RUNNER" <<<"$(crontab -l 2>/dev/null)"; then
     say "OK — the athena-shipwright cron entry is installed:"
     crontab -l 2>/dev/null | grep -F -- "$RUNNER" | sed 's/^/  /'
     exit 0

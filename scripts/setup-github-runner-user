@@ -40,7 +40,7 @@ fi
 
 # Guard rail: the runner user must never have root.
 if getent passwd "$USER_NAME" >/dev/null \
-   && id -nG "$USER_NAME" | tr ' ' '\n' | grep -qxE 'wheel|sudo|docker'; then
+   && grep -qxE 'wheel|sudo|docker' <<<"$(id -nG "$USER_NAME" | tr ' ' '\n')"; then
   die "$USER_NAME is in wheel/sudo/docker — those are root-equivalent; remove it
       (e.g. gpasswd -d $USER_NAME docker). The runner user must have no root."
 fi

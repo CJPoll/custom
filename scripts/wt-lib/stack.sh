@@ -332,7 +332,7 @@ set_stack_parent() {
     # If no parent branch specified, show the current parent
     if [ -z "$parent_branch" ]; then
         # Check if branch is tracked first
-        if ! gt ls --no-interactive 2>/dev/null | grep -q "^[◯◉][[:space:]]*$current_branch"; then
+        if ! grep -q "^[◯◉][[:space:]]*$current_branch" <<<"$(gt ls --no-interactive 2>/dev/null)"; then
             echo "Branch '$current_branch' is not tracked by Graphite"
             echo "Run 'wt stack parent <parent-branch>' to track it and set a parent"
             return 0
@@ -368,7 +368,7 @@ set_stack_parent() {
 
     # Check if branch is tracked by Graphite
     local is_tracked=false
-    if gt ls --no-interactive 2>/dev/null | grep -q "^[◯◉][[:space:]]*$current_branch"; then
+    if grep -q "^[◯◉][[:space:]]*$current_branch" <<<"$(gt ls --no-interactive 2>/dev/null)"; then
         is_tracked=true
     fi
 

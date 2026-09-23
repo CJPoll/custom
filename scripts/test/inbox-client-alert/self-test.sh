@@ -106,19 +106,19 @@ printf '\nA-2  the alert body: the capture summary, never the token\n'
 CAP="$(wf_make_capture "${DUMPS}" 20260923T100000Z-4242 tls)"
 SIG="$(wf_signature_of "${CAP}")"
 out="$("${ALERT}" "${CAP}" --dry-run 2>&1)"; rc=$?
-if [ "${rc}" -eq 0 ] && printf '%s\n' "${out}" | grep -qx "signature: ${SIG}" && printf '%s\n' "${out}" | grep -qx 'step: tls' \
-   && printf '%s\n' "${out}" | grep -qx "capture: ${CAP}" && printf '%s\n' "${out}" | grep -qx 'pid: 4242' \
-   && printf '%s\n' "${out}" | grep -qx 'uptime_s: 3600' && printf '%s\n' "${out}" | grep -qx 'reconnecting_since: 113 (last restart)' \
-   && printf '%s\n' "${out}" | grep -qx 'connected_since: 42 (last restart)' && printf '%s\n' "${out}" | grep -qx '  athena-inbox-client.rb:connect_nonblock'; then
+if [ "${rc}" -eq 0 ] && grep -qx "signature: ${SIG}" <<<"${out}" && grep -qx 'step: tls' <<<"${out}" \
+   && grep -qx "capture: ${CAP}" <<<"${out}" && grep -qx 'pid: 4242' <<<"${out}" \
+   && grep -qx 'uptime_s: 3600' <<<"${out}" && grep -qx 'reconnecting_since: 113 (last restart)' <<<"${out}" \
+   && grep -qx 'connected_since: 42 (last restart)' <<<"${out}" && grep -qx '  athena-inbox-client.rb:connect_nonblock' <<<"${out}"; then
   ok "signature, step, capture, pid, uptime, counts and frames"
 else bad "signature, step, capture, pid, uptime, counts and frames" "rc=${rc} ${out}"; fi
 if [ -z "$(msgs)" ]; then ok "--dry-run delivers nothing"; else bad "--dry-run delivers nothing" "$(msgs)"; fi
 out="$(ATHENA_INBOX_CLIENT_CONFIG="${TMP}/no-such-config.json" "${ALERT}" "${CAP}" --dry-run 2>&1 >/dev/null)"; rc=$?
-if [ "${rc}" -eq 0 ] && printf '%s\n' "${out}" | grep -q '^note: token guard NOT checked'; then ok "an unrunnable token guard says so ('not checked' never reads as 'checked')"; else bad "an unrunnable token guard says so" "rc=${rc} ${out}"; fi
+if [ "${rc}" -eq 0 ] && grep -q '^note: token guard NOT checked' <<<"${out}"; then ok "an unrunnable token guard says so ('not checked' never reads as 'checked')"; else bad "an unrunnable token guard says so" "rc=${rc} ${out}"; fi
 CAPT="$(wf_make_capture "${DUMPS}" 20260923T100500Z-4245 tls "leak_${TOKEN:0:8}_here")"
 out="$("${ALERT}" "${CAPT}" 2>&1)"; rc=$?
-if [ "${rc}" -eq 2 ] && printf '%s\n' "${out}" | grep -q 'would carry the machine token' && printf '%s\n' "${out}" | grep -q '^  Fix: ' && [ -z "$(msgs)" ] \
-   && ! printf '%s\n' "${out}" | grep -qF -- "${TOKEN:0:8}"; then
+if [ "${rc}" -eq 2 ] && grep -q 'would carry the machine token' <<<"${out}" && grep -q '^  Fix: ' <<<"${out}" && [ -z "$(msgs)" ] \
+   && ! grep -qF -- "${TOKEN:0:8}" <<<"${out}"; then
   ok "a capture carrying the token prefix is REFUSED (exit 2, Fix:), nothing delivered, the token not echoed"
 else bad "a capture carrying the token prefix is refused" "rc=${rc} ${out} msgs=$(msgs)"; fi
 
@@ -126,13 +126,15 @@ else bad "a capture carrying the token prefix is refused" "rc=${rc} ${out} msgs=
 printf '\nA-3  refusals: only a capture in the dump dir\n'
 OUTSIDE="$(wf_make_capture "${TMP}/elsewhere" 20260923T100000Z-4242 tls)"
 out="$("${ALERT}" "${OUTSIDE}" 2>&1)"; rc=$?
-if [ "${rc}" -eq 2 ] && printf '%s\n' "${out}" | grep -q '^  Fix: '; then ok "a capture outside the dump dir is exit 2 with a Fix:"; else bad "a capture outside the dump dir is exit 2" "rc=${rc} ${out}"; fi
+if [ "${rc}" -eq 2 ] && grep -q '^  Fix: ' <<<"${out}"; then ok "a capture outside the dump dir is exit 2 with a Fix:"; else bad "a capture outside the dump dir is exit 2" "rc=${rc} ${out}"; fi
 mkdir -p "${DUMPS}/not-a-capture"
 out="$("${ALERT}" "${DUMPS}/not-a-capture" 2>&1)"; rc=$?
 if [ "${rc}" -eq 2 ]; then ok "a directory that is not a capture name is refused"; else bad "a directory that is not a capture name is refused" "rc=${rc} ${out}"; fi
 out="$("${ALERT}" 2>&1)"; rc=$?
-if [ "${rc}" -eq 1 ] && printf '%s\n' "${out}" | grep -q '^  Fix: '; then ok "no argument is exit 1 with a Fix:"; else bad "no argument is exit 1 with a Fix:" "rc=${rc} ${out}"; fi
-if "${ALERT}" --help | grep -q 'inbox-client-alert'; then ok "--help prints the header, exit 0"; else bad "--help prints the header" "no"; fi
+if [ "${rc}" -eq 1 ] && grep -q '^  Fix: ' <<<"${out}"; then ok "no argument is exit 1 with a Fix:"; else bad "no argument is exit 1 with a Fix:" "rc=${rc} ${out}"; fi
+# The exit status is asserted separately: a here-string drops the producer's
+# status, which the old `--help | grep -q` pipe carried through pipefail.
+if help_out="$("${ALERT}" --help)" && grep -q 'inbox-client-alert' <<<"${help_out}"; then ok "--help prints the header, exit 0"; else bad "--help prints the header" "no"; fi
 
 # ---------------------------------------------------------------------------
 printf '\nA-4  a send wakes the harness session'"'"'s waiter (existing inbox-wait behaviour)\n'
@@ -163,8 +165,8 @@ else bad "inbox-wait woke and named harness-alerts" "rc=${WRC} out=$(cat "${TMP}
 printf '\nA-5  the delivered message\n'
 M="$(msgs)"
 if [ "$(printf '%s\n' "${M}" | grep -c .)" -eq 1 ] && [ "$(basename -- "${M}")" = "$(field "${SENT}" sent)" ]; then ok "exactly ONE message in harness-alerts/to-custom"; else bad "exactly ONE message in harness-alerts/to-custom" "${M}"; fi
-if sed -n '2,5p' "${M}" | grep -qx 'from: inbox-client-detector' && sed -n '2,6p' "${M}" | grep -qx 'to: custom' \
-   && sed -n '2,7p' "${M}" | grep -qx "re: ${CAP}" && sed -n '2,7p' "${M}" | grep -q '^sent_at: [0-9T:-]*Z$'; then
+if grep -qx 'from: inbox-client-detector' <<<"$(sed -n '2,5p' "${M}")" && grep -qx 'to: custom' <<<"$(sed -n '2,6p' "${M}")" \
+   && grep -qx "re: ${CAP}" <<<"$(sed -n '2,7p' "${M}")" && grep -q '^sent_at: [0-9T:-]*Z$' <<<"$(sed -n '2,7p' "${M}")"; then
   ok "frontmatter: from inbox-client-detector, to custom, sent_at, re: the capture"
 else bad "frontmatter: from/to/sent_at/re" "$(head -n 8 "${M}")"; fi
 if ! grep -qF -- "${TOKEN:0:8}" "${M}"; then ok "the message carries no token"; else bad "the message carries no token" "leak"; fi
@@ -187,8 +189,8 @@ else bad "the real delivered message verifies and resolves create" "rc=${DRC} ${
 printf '\nA-7  a failed send is loud and never reads as sent\n'
 EMPTY_ROOT="${TMP}/empty-root"; mkdir -p "${EMPTY_ROOT}/projects"; chmod 700 "${EMPTY_ROOT}" "${EMPTY_ROOT}/projects"
 out="$(ATHENA_INBOX_ROOT="${EMPTY_ROOT}" "${ALERT}" "${CAP}" 2>&1)"; rc=$?
-if [ "${rc}" -eq 4 ] && printf '%s\n' "${out}" | grep -q 'harness-alerts send FAILED' && printf '%s\n' "${out}" | grep -q '^  Fix: .*setup-inbox-registry' \
-   && ! printf '%s\n' "${out}" | grep -q '^sent'; then
+if [ "${rc}" -eq 4 ] && grep -q 'harness-alerts send FAILED' <<<"${out}" && grep -q '^  Fix: .*setup-inbox-registry' <<<"${out}" \
+   && ! grep -q '^sent' <<<"${out}"; then
   ok "no registry entry -> exit 4, 'send FAILED', a Fix: naming the registry install"
 else bad "no registry entry -> exit 4 with a Fix:" "rc=${rc} ${out}"; fi
 if [ -z "$(find "${EMPTY_ROOT}" -name '*.md')" ]; then ok "nothing was delivered anywhere on the failed send"; else bad "nothing was delivered on the failed send" "$(find "${EMPTY_ROOT}" -name '*.md')"; fi

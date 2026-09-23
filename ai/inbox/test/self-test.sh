@@ -144,7 +144,7 @@ fi
 before="$(snapshot)"
 out2="$(setup --install 2>&1)"
 after="$(snapshot)"
-if printf '%s' "${out2}" | grep -q "nothing to do" && [ "${before}" = "${after}" ]; then
+if grep -q "nothing to do" <<<"${out2}" && [ "${before}" = "${after}" ]; then
   ok "C2 a second install is a no-op"
 else
   bad "C2 a second install is a no-op" "output: ${out2}"
@@ -168,7 +168,7 @@ fi
 # declare. Naming it would turn the check into a cross-tenant disclosure path,
 # which the contract forbids of every refusal.
 outc="$("${CHECK}" 2>&1)"; rc4=$?
-if [ ${rc4} -eq 0 ] && ! printf '%s' "${outc}" | grep -q "stranger"; then
+if [ ${rc4} -eq 0 ] && ! grep -q "stranger" <<<"${outc}"; then
   ok "C4 an undeclared entry is neither failed nor named by the check"
 else
   bad "C4 an undeclared entry is neither failed nor named by the check" "${outc}"
@@ -180,7 +180,7 @@ fi
 printf '%s\n' '{"v":1,"repo":"/wrong/.git","channels":{}}' > "${PROJECTS}/demo.json"
 chmod 600 "${PROJECTS}/demo.json"
 out5="$("${CHECK}" 2>&1)"; rc5=$?
-if [ ${rc5} -ne 0 ] && printf '%s' "${out5}" | grep -q "demo.json"; then
+if [ ${rc5} -ne 0 ] && grep -q "demo.json" <<<"${out5}"; then
   ok "C5 a hand-edited entry fails the check, naming the entry"
 else
   bad "C5 a hand-edited entry fails the check, naming the entry" "rc=${rc5}: ${out5}"
@@ -189,7 +189,7 @@ fi
 # --- C6: the failure carries the greppable Fix: clause (CLAUDE.md, guard
 # messages are written for the LLM). A bare failure tells an agent nothing about
 # how to self-correct.
-if printf '%s' "${out5}" | grep -q "Fix:"; then
+if grep -q "Fix:" <<<"${out5}"; then
   ok "C6 the drift failure carries an actionable Fix: line"
 else
   bad "C6 the drift failure carries an actionable Fix: line" "${out5}"
@@ -244,7 +244,7 @@ fi
 # machine will ever mention it.
 rm -f "${PROJECTS}/demo.json"
 out9="$("${CHECK}" 2>&1)"; rc9=$?
-if [ ${rc9} -ne 0 ] && printf '%s' "${out9}" | grep -q "demo.json is missing"; then
+if [ ${rc9} -ne 0 ] && grep -q "demo.json is missing" <<<"${out9}"; then
   ok "C9 a deleted entry fails the check"
 else
   bad "C9 a deleted entry fails the check" "rc=${rc9}: ${out9}"
@@ -264,7 +264,7 @@ fi
 # readable still violates the contract, and nothing else would report it.
 chmod 644 "${PROJECTS}/demo.json"
 out11="$("${CHECK}" 2>&1)"
-if printf '%s' "${out11}" | grep -q "0644"; then
+if grep -q "0644" <<<"${out11}"; then
   ok "C11 a 0644 entry is reported as drift"
 else
   bad "C11 a 0644 entry is reported as drift" "${out11}"
@@ -277,7 +277,7 @@ setup --install >/dev/null 2>&1
 rm -f "${PROJECTS}/demo.json"
 snap_before="$(snapshot)"
 out12="$(setup --install --dry-run 2>&1)"
-if [ "$(snapshot)" = "${snap_before}" ] && printf '%s' "${out12}" | grep -q "dry-run"; then
+if [ "$(snapshot)" = "${snap_before}" ] && grep -q "dry-run" <<<"${out12}"; then
   ok "C12 --dry-run writes nothing"
 else
   bad "C12 --dry-run writes nothing" "${out12}"
@@ -307,7 +307,7 @@ fi
 # there gets disabled, and then it is not protecting anything.
 rm -rf "${ATHENA_INBOX_ROOT}"
 out14="$("${CHECK}" 2>&1)"; rc14=$?
-if [ ${rc14} -eq 0 ] && printf '%s' "${out14}" | grep -q "not this environment"; then
+if [ ${rc14} -eq 0 ] && grep -q "not this environment" <<<"${out14}"; then
   ok "C14 no inbox root -> the check passes with a note"
 else
   bad "C14 no inbox root -> the check passes with a note" "rc=${rc14}: ${out14}"
@@ -363,7 +363,7 @@ mkdir -p "${TMP}/gitrepo/wt"
 if [ -d "${TMP}/gitwt" ]; then
   edit_registry "d['projects'][0]['entry']['repo'] = '${TMP}/gitwt/.git'"
   out18="$("${CHECK}" 2>&1)"; rc18=$?
-  if [ ${rc18} -ne 0 ] && printf '%s' "${out18}" | grep -q "resolves to"; then
+  if [ ${rc18} -ne 0 ] && grep -q "resolves to" <<<"${out18}"; then
     ok "C18 a declared repo git disagrees with is drift"
   else
     bad "C18 a declared repo git disagrees with is drift" "rc=${rc18}: ${out18}"
@@ -381,7 +381,7 @@ out19="$(setup --install 2>&1)"; rc19=$?
 if ! command -v jq >/dev/null 2>&1; then
   skip "C19 an entry the reader refuses is not installed" \
        "jq is absent, so the athena:inbox validator cannot run here"
-elif [ ${rc19} -ne 0 ] && [ ! -f "${PROJECTS}/demo.json" ] && printf '%s' "${out19}" | grep -q "Fix:"; then
+elif [ ${rc19} -ne 0 ] && [ ! -f "${PROJECTS}/demo.json" ] && grep -q "Fix:" <<<"${out19}"; then
   ok "C19 an entry the reader refuses is not installed"
 else
   bad "C19 an entry the reader refuses is not installed" "rc=${rc19}: ${out19}"
@@ -395,7 +395,7 @@ fi
 # stay green while a typo'd flag silently installed (measured).
 reset_sandbox
 out20="$(setup --instal 2>&1)"; rc20=$?
-if [ ${rc20} -ne 0 ] && [ ! -f "${PROJECTS}/demo.json" ] && printf '%s' "${out20}" | grep -q "Fix:"; then
+if [ ${rc20} -ne 0 ] && [ ! -f "${PROJECTS}/demo.json" ] && grep -q "Fix:" <<<"${out20}"; then
   ok "C20 an unknown flag is refused with a Fix: line"
 else
   bad "C20 an unknown flag is refused with a Fix: line" "rc=${rc20}: ${out20}"
@@ -406,7 +406,7 @@ fi
 # read as ordinary drift.
 printf '%s' '{ not json' > "${ATHENA_INBOX_REGISTRY}"
 out21="$("${CHECK}" 2>&1)"; rc21=$?
-if [ ${rc21} -eq 2 ] && printf '%s' "${out21}" | grep -q "Fix:"; then
+if [ ${rc21} -eq 2 ] && grep -q "Fix:" <<<"${out21}"; then
   ok "C21 a malformed source of truth exits 2 with a Fix: line"
 else
   bad "C21 a malformed source of truth exits 2 with a Fix: line" "rc=${rc21}: ${out21}"
@@ -475,7 +475,7 @@ fi
 rm -f "${PROJECTS}/demo.json"
 ln -s "${outside}" "${PROJECTS}/demo.json"
 out26="$("${CHECK}" 2>&1)"; rc26=$?
-if [ ${rc26} -ne 0 ] && printf '%s' "${out26}" | grep -q "not a regular file"; then
+if [ ${rc26} -ne 0 ] && grep -q "not a regular file" <<<"${out26}"; then
   ok "C26 the check reports a symlinked entry instead of following it"
 else
   bad "C26 the check reports a symlinked entry instead of following it" "rc=${rc26}: ${out26}"
@@ -489,7 +489,7 @@ reset_sandbox
 edit_registry "d['projects'] << {'file' => 'twin.json', 'entry' => d['projects'][0]['entry']}"
 out27="$(setup --install 2>&1)"; rc27=$?
 "${CHECK}" >/dev/null 2>&1; rc27c=$?
-if [ ${rc27} -eq 2 ] && [ ${rc27c} -eq 2 ] && printf '%s' "${out27}" | grep -q "Fix:"; then
+if [ ${rc27} -eq 2 ] && [ ${rc27c} -eq 2 ] && grep -q "Fix:" <<<"${out27}"; then
   ok "C27 two entries claiming one repo are refused by both tools, exit 2"
 else
   bad "C27 two entries claiming one repo are refused by both tools, exit 2" "install rc=${rc27} check rc=${rc27c}: ${out27}"
@@ -515,7 +515,7 @@ reset_sandbox
 long_name="$("${RUBY_BIN}" -e 'print "a" * 130 + ".json"')"
 edit_registry "d['projects'][0]['file'] = '${long_name}'"
 out29="$(setup --install 2>&1)"; rc29=$?
-if [ ${rc29} -eq 2 ] && printf '%s' "${out29}" | grep -q "128"; then
+if [ ${rc29} -eq 2 ] && grep -q "128" <<<"${out29}"; then
   ok "C29 an over-long declared filename is refused, naming the bound"
 else
   bad "C29 an over-long declared filename is refused, naming the bound" "rc=${rc29}: ${out29}"
@@ -530,7 +530,7 @@ reset_sandbox
 setup --install >/dev/null 2>&1
 mv "${PROJECTS}/demo.json" "${PROJECTS}/renamed.json"
 out30="$(setup --install 2>&1)"; rc30=$?
-if [ ${rc30} -ne 0 ] && [ ! -f "${PROJECTS}/demo.json" ] && printf '%s' "${out30}" | grep -q "renamed.json"; then
+if [ ${rc30} -ne 0 ] && [ ! -f "${PROJECTS}/demo.json" ] && grep -q "renamed.json" <<<"${out30}"; then
   ok "C30 a renamed live entry blocks the install instead of being duplicated"
 else
   bad "C30 a renamed live entry blocks the install instead of being duplicated" "rc=${rc30}: ${out30}"
@@ -556,7 +556,7 @@ fi
 # out of this file's own header, so a rename or a reflow can silently yield
 # empty or truncated help with nothing failing.
 out32="$("${SETUP}" -h 2>&1)"
-if printf '%s' "${out32}" | grep -q -- "--dry-run" && printf '%s' "${out32}" | grep -q -- "--self-test"; then
+if grep -q -- "--dry-run" <<<"${out32}" && grep -q -- "--self-test" <<<"${out32}"; then
   ok "C32 -h prints the usage block, listing the flags"
 else
   bad "C32 -h prints the usage block, listing the flags" "${out32}"
@@ -568,7 +568,7 @@ fi
 reset_sandbox
 setup --install >/dev/null 2>&1
 out33="$("${SETUP}" --check 2>&1)"; rc33=$?
-if [ ${rc33} -eq 0 ] && printf '%s' "${out33}" | grep -q "check-inbox-registry"; then
+if [ ${rc33} -eq 0 ] && grep -q "check-inbox-registry" <<<"${out33}"; then
   ok "C33 --check delegates to the read-only check"
 else
   bad "C33 --check delegates to the read-only check" "rc=${rc33}: ${out33}"
@@ -582,7 +582,7 @@ reset_sandbox
 setup --install >/dev/null 2>&1
 chmod 755 "${ATHENA_INBOX_ROOT}"
 out34="$("${CHECK}" 2>&1)"; rc34=$?
-if [ ${rc34} -ne 0 ] && printf '%s' "${out34}" | grep -q "inbox root"; then
+if [ ${rc34} -ne 0 ] && grep -q "inbox root" <<<"${out34}"; then
   ok "C34 a 0755 inbox root is reported as drift"
 else
   bad "C34 a 0755 inbox root is reported as drift" "rc=${rc34}: ${out34}"
@@ -598,7 +598,7 @@ reset_sandbox
 edit_registry "d['projects'][0]['entry']['repo'] = '$(cd "${TMP}/gitrepo" && realpath .git)'"
 rm -rf "${ATHENA_INBOX_ROOT}"
 out35="$("${CHECK}" 2>&1)"; rc35=$?
-if [ ${rc35} -ne 0 ] && printf '%s' "${out35}" | grep -q "Fix:"; then
+if [ ${rc35} -ne 0 ] && grep -q "Fix:" <<<"${out35}"; then
   ok "C35 an absent root is drift when a declared repo is checked out here"
 else
   bad "C35 an absent root is drift when a declared repo is checked out here" "rc=${rc35}: ${out35}"
@@ -612,7 +612,7 @@ ln -s "${REPO}" "${TMP}/with space" 2>/dev/null
 reset_sandbox
 setup --install >/dev/null 2>&1
 out36="$("${TMP}/with space/scripts/setup-inbox-registry" --check 2>&1)"; rc36=$?
-if [ ${rc36} -eq 0 ] && printf '%s' "${out36}" | grep -q "check-inbox-registry"; then
+if [ ${rc36} -eq 0 ] && grep -q "check-inbox-registry" <<<"${out36}"; then
   ok "C36 --check survives a repo path containing a space"
 else
   bad "C36 --check survives a repo path containing a space" "rc=${rc36}: ${out36}"

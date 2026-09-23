@@ -73,7 +73,7 @@ get_token() {
     local line tok exp
     line="$(cat "$CACHE")"; tok="${line%%$'\t'*}"; exp="${line##*$'\t'}"
     if [ -n "$tok" ] && [ "$tok" != "$exp" ] \
-       && printf '%s' "$exp" | grep -Eq '^[0-9]+$' \
+       && grep -Eq '^[0-9]+$' <<<"$exp" \
        && [ "$exp" -gt "$(( $(date +%s) + 300 ))" ]; then
       printf '%s' "$tok"; return
     fi

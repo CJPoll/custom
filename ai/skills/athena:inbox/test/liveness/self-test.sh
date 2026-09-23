@@ -155,7 +155,7 @@ if descriptor_validate "${E}" 2>/dev/null; then ok "descriptor accepts stale_aft
 for badv in '"1800"' '-5' '1.5' 'true'; do
   D="{\"v\":1,\"repo\":\"/x\",\"channels\":{\"l\":{\"kind\":\"log\",\"path\":\"l.jsonl\",\"stale_after_s\":${badv}}}}"
   err="$(descriptor_validate "${D}" 2>&1 >/dev/null)"; rc=$?
-  if [ "${rc}" -ne 0 ] && printf '%s' "${err}" | grep -q 'Fix:'; then ok "stale_after_s ${badv} is refused with a Fix:"; else bad "stale_after_s ${badv} is refused with a Fix:" "rc=${rc} err=${err}"; fi
+  if [ "${rc}" -ne 0 ] && grep -q 'Fix:' <<<"${err}"; then ok "stale_after_s ${badv} is refused with a Fix:"; else bad "stale_after_s ${badv} is refused with a Fix:" "rc=${rc} err=${err}"; fi
 done
 
 # ============================================================================

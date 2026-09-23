@@ -70,6 +70,11 @@ STATIC_CHECKS = [
   ["check-guard-messages",      %w[ai/bin/check-guard-messages]],
   ["check-bin-help",            %w[ai/bin/check-bin-help]],
   ["check-bin-help self-test",  %w[ai/bin/check-bin-help --self-test]],
+  # DND-371: under `set -o pipefail`, `... | grep -q` returns 141 when the
+  # writer takes SIGPIPE after grep's first match -- a false red, or a false
+  # green when negated. Hermetic (fixtures + a live 141 reproduction).
+  ["check-pipefail-grep",       %w[ai/bin/check-pipefail-grep]],
+  ["check-pipefail-grep self-test", %w[ai/bin/check-pipefail-grep --self-test]],
   ["check-tool-risk",           %w[ai/bin/check-tool-risk]],
   ["check-tool-risk self-test", %w[ai/bin/check-tool-risk --self-test]],
   # Live per-user inotify INSTANCE headroom. When orphaned autolaunched

@@ -358,7 +358,7 @@ is_worktree() {
     while [[ "$git_dir" != "/" ]]; do
         if [[ -d "$git_dir/.git" ]] || [[ -f "$git_dir/.git" ]]; then
             # Check if git worktree list contains this directory
-            if git -C "$git_dir" worktree list 2>/dev/null | grep -q "^$dir\s"; then
+            if grep -q "^$dir\s" <<<"$(git -C "$git_dir" worktree list 2>/dev/null)"; then
                 return 0
             else
                 return 2

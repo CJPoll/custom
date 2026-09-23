@@ -22,13 +22,13 @@ log() { logger -t dhcpcd-watchdog "$1"; }
 
 healthy=true
 
-if ! rc-service dhcpcd status 2>/dev/null | grep -q started; then
+if ! grep -q started <<<"$(rc-service dhcpcd status 2>/dev/null)"; then
   healthy=false
   log "rc-service dhcpcd not in 'started' state"
 fi
 
 for iface in "${IFACES[@]}"; do
-  if ! ip -4 addr show dev "$iface" 2>/dev/null | grep -q 'inet '; then
+  if ! grep -q 'inet ' <<<"$(ip -4 addr show dev "$iface" 2>/dev/null)"; then
     healthy=false
     log "$iface has no IPv4 address"
   fi
