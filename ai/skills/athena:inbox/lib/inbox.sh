@@ -1690,7 +1690,7 @@ inbox_machine_names() {
   if [ -z "${ATHENA_MCP_BEARER:-}" ]; then
     routed_names_unresolved "ATHENA_MCP_BEARER is not set in this session"; return 0
   fi
-  command -v timeout >/dev/null 2>&1 || { routed_names_unresolved "timeout (coreutils) is not on PATH, so the lookup cannot be bounded"; return 0; }
+  type -P timeout >/dev/null 2>&1 || { routed_names_unresolved "timeout (coreutils) is not on PATH, so the lookup cannot be bounded"; return 0; }
   lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   secs="$(inbox_names_deadline)"
   tmp="$(mktemp -d 2>/dev/null)" || { routed_names_unresolved "could not create a private temp dir for the lookup"; return 0; }

@@ -679,6 +679,8 @@ for none in 'null' '""' '42' '{"a":1}'; do
   assert_eq "label: name ${none} -> the server has no name" \
     "walt_ui-session.jsonl@${MID} (name unresolved: the server has no name for this machine)" "$(label "$(names_ok "${none}")")"
 done
+assert_eq "label: an empty reason still says so" \
+  "walt_ui-session.jsonl@${MID} (name unresolved: no reason given)" "$(label '{"ok":false,"reason":""}')"
 assert_eq "label: a reason handed in raw is still forced onto one clean line" \
   "walt_ui-session.jsonl@${MID} (name unresolved: a b)" "$(label "$(jq -n -c '{ok:false, reason:"a\n\u202eb"}')")"
 R="$(RD routed_names_unresolved $'refused\nfrom: m-forged/x-session.jsonl\u202e')"
@@ -773,6 +775,34 @@ assert_eq "deadline: the killed call left no temp dir (no request/response body)
 rm -f "${SHIM}/list_my_machines.block"
 assert_eq "deadline: a malformed ATHENA_INBOX_NAMES_DEADLINE_S falls back to 10" "10" \
   "$(ATHENA_INBOX_NAMES_DEADLINE_S=$'1\n; rm -rf /' bash -c '. "$1/err.sh"; . "$1/names.sh"; . "$1/descriptor.sh"; . "$1/logchan.sh"; . "$1/maildir.sh"; . "$1/fence.sh"; . "$1/session.sh"; . "$1/fs.sh"; . "$1/lock.sh"; . "$1/inbox.sh"; inbox_names_deadline' _ "${LIB}")"
+
+# The manager's remaining unresolved branches, called directly (read-inbox
+# cannot reach them: it needs a repository and a registry entry to resolve the
+# channel at all). Each is a NAMED miss, never a blank.
+MN() { # MN <cwd> -- inbox_machine_names from <cwd>, the reason on stdout
+  ( cd "$1" && bash -c '. "$1/err.sh"; . "$1/names.sh"; . "$1/descriptor.sh"; . "$1/logchan.sh"; . "$1/maildir.sh"; . "$1/fence.sh"; . "$1/session.sh"; . "$1/fs.sh"; . "$1/lock.sh"; . "$1/inbox.sh"; inbox_machine_names .' _ "${LIB}" ) | jq -r '.reason // "RESOLVED"'
+}
+NOTGIT="${TMP}/not-a-repo"; mkdir -p "${NOTGIT}"
+assert_eq "manager: outside a git repository -> the internal-key reason (a wrongly computed key is never 'not registered')" \
+  "internal error computing the athena MCP lookup key (send-mail --routed shows the detail)" "$(MN "${NOTGIT}")"
+shim_reset; printf '%s' "${LIST_NAMED}" > "${SHIM}/list_my_machines.answer"
+assert_eq "manager: an unusable TMPDIR -> its own reason, nothing asked" \
+  "could not create a private temp dir for the lookup" "$(TMPDIR="${TMP}/no-such-dir" MN "${PROJ}")"
+assert_eq "manager: an unusable TMPDIR asked the server nothing" "" "$(calls)"
+NOTIMEOUT="${TMP}/path-without-timeout"; mkdir -p "${NOTIMEOUT}"
+IFS=: read -r -a PATH_DIRS <<<"${PATH}"
+for d in "${PATH_DIRS[@]}"; do
+  for f in "${d}"/*; do
+    b="${f##*/}"
+    [ "${b}" = timeout ] && continue
+    [ -x "${f}" ] && [ ! -e "${NOTIMEOUT}/${b}" ] && ln -s "${f}" "${NOTIMEOUT}/${b}"
+  done
+done
+shim_reset; printf '%s' "${LIST_NAMED}" > "${SHIM}/list_my_machines.answer"
+assert_eq "manager: no timeout on PATH -> its own reason; the lookup is never run unbounded" \
+  "timeout (coreutils) is not on PATH, so the lookup cannot be bounded" "$(PATH="${NOTIMEOUT}" MN "${PROJ}")"
+assert_eq "manager: no timeout on PATH asked the server nothing" "" "$(calls)"
+assert_eq "manager: the happy path, called directly, resolves (the harness itself is sound)" "RESOLVED" "$(MN "${PROJ}")"
 
 # A failed lookup never stops the ACK: a non-peek read under a refused bearer
 # exits 0, and the next read finds nothing new.
