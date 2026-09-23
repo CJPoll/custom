@@ -25,7 +25,7 @@
 # refused: a message nobody can answer is worse than one that was not sent.
 #
 # WHY `-session`, NOT `-mail` (D41). The first draft of the convention named the
-# file `<project>-session.jsonl`, and custom's entry already had a MAILDIR channel
+# file `<project>-mail.jsonl`, and custom's entry already had a MAILDIR channel
 # named `walt_ui-mail` (custom's outbound mail to walt_ui). walt_ui's routed
 # inbox `walt_ui-mail.jsonl` would then have printed as "walt_ui-mail" too, for
 # the opposite direction of a different transport.
