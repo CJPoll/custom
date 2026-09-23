@@ -479,7 +479,7 @@ miss.
       releases the earlier outages it carried and resets the omitted count to
       0; a report that fails, or that a
       newer transition superseded mid-send, releases nothing, and the next
-      report carries them again. So an outage can be reported twice, never
+      report carries them again. So a kept outage can be reported twice, never
       zero times. A transition on a row whose exemplar was reported, or that
       the owner has read, replaces the exemplar and starts the list empty: the
       owner already has that detail.
