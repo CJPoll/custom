@@ -283,13 +283,17 @@ end
 # THAT raise is caught by the rescue around the dispatch below, which reports
 # it with a Fix: line instead of a bare Ruby backtrace.
 # DND-404: runs LAST, after every discovered self-test — never merged into
-# STATIC_CHECKS (which precedes self_test_checks below) or discovery order
+# STATIC_CHECKS (which precedes self_test_checks below), or discovery order
 # would put it before the suite it backstops.
 # scripts/test/inbox-client-capture/self-test.sh starts real
 # mock-athena-inbox-client.rb processes and reaps them by pid in its own
-# trap; a trap cannot survive a SIGKILL of the suite itself. This is the
-# gate-level backstop, scoped to THIS run via MOCK_ORPHAN_MARKER_VAR (set
-# below, inherited by every child this process spawns).
+# trap; a trap cannot survive a SIGKILL of the suite (or of this gate
+# process) itself. check-inbox-mock-orphans matches PPID == 1 — proof of
+# orphanhood that survives any kill of whatever started the mock, no marker
+# or environment plumbing required — so it never depends on this process
+# still being alive to run it; it just as usefully sweeps up whatever an
+# EARLIER killed gate run left behind, which is the case that actually
+# matters (see the script's own banner).
 FINAL_CHECKS = [
   ["check-inbox-mock-orphans", %w[ai/bin/check-inbox-mock-orphans]],
 ].freeze
@@ -300,9 +304,6 @@ CHECKS =
   rescue GitTrackingError
     STATIC_CHECKS + FINAL_CHECKS
   end
-
-# Must match ai/bin/check-inbox-mock-orphans's MARKER_VAR exactly.
-MOCK_ORPHAN_MARKER_VAR = "ATHENA_HARNESS_GATE_RUN_MARKER"
 
 # The discovery CONTRACT is the exact filename `self-test.sh` — anything else
 # (a suite named tests.sh, foo_test.sh, ...) is invisible to the glob with no
@@ -478,15 +479,6 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
          "just risks trading this failure for the zero-discovery failure above."
     return 1
   end
-
-  # DND-404: a fresh marker per real gate run, exported so every check we
-  # spawn below (Open3.capture2e inherits the ambient ENV) — and, through
-  # scripts/test/inbox-client-capture/self-test.sh forwarding it into each
-  # mock's argv, every mock-athena-inbox-client.rb this run starts — carries
-  # it. check-inbox-mock-orphans (FINAL_CHECKS, runs last) scopes its sweep to
-  # this exact value, so it can never touch a concurrent gate run's own,
-  # still-live mock in a different worktree.
-  ENV[MOCK_ORPHAN_MARKER_VAR] = "gate-#{Process.pid}-#{(Time.now.to_f * 1_000_000).to_i}"
 
   failures = []
   CHECKS.each do |(label, argv)|
@@ -1170,6 +1162,21 @@ def run_self_test
   unless failure_lines(clean).empty?
     warn "self-test: FAIL — failure_lines matched a clean suite's output " \
          "(#{failure_lines(clean).inspect})"
+    ok = false
+  end
+
+  # 10 (DND-404). check-inbox-mock-orphans (FINAL_CHECKS) must stay the LAST
+  #    entry in CHECKS — it backstops scripts/test/inbox-client-capture's
+  #    self-test, and discovery order would put it BEFORE that suite (a
+  #    self-test label sorts by path, and "scripts/test/inbox-client-capture"
+  #    < "ai/bin/check-inbox-mock-orphans" is not how CHECKS is built, but a
+  #    future refactor that reordered the concatenation could silently move it
+  #    earlier with no other symptom).
+  unless CHECKS.last == ["check-inbox-mock-orphans", %w[ai/bin/check-inbox-mock-orphans]]
+    warn "self-test: FAIL — check-inbox-mock-orphans is not the LAST entry in " \
+         "CHECKS (currently: #{CHECKS.last.inspect}). Fix: keep " \
+         "`STATIC_CHECKS + self_test_checks + FINAL_CHECKS`, in that order, in " \
+         "the CHECKS assignment — FINAL_CHECKS must be concatenated last."
     ok = false
   end
 

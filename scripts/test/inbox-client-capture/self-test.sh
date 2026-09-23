@@ -44,18 +44,6 @@ PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 
-# DND-404: a marker tagging every mock-athena-inbox-client.rb this run starts
-# (passed as its trailing argv below — the mock ignores ARGV entirely, so this
-# is inert to its behaviour). Inherited from harness-gate when run under the
-# gate (ATHENA_HARNESS_GATE_RUN_MARKER, one per gate invocation, shared with
-# ai/bin/check-inbox-mock-orphans -- the gate-level backstop for exactly the
-# case a bash trap cannot cover: this suite's OWN process being SIGKILLed,
-# which no EXIT/INT/TERM trap can observe); synthesized for a standalone run
-# so this suite's own regression case (C-10 below) always has something to
-# scope to.
-RUN_MARKER="${ATHENA_HARNESS_GATE_RUN_MARKER:-standalone-$$-$(date +%s%N 2>/dev/null || date +%s)}"
-export ATHENA_HARNESS_GATE_RUN_MARKER="${RUN_MARKER}"
-
 TMP="$(mktemp -d)"
 PIDS=()
 cleanup() {
@@ -65,11 +53,6 @@ cleanup() {
   for p in "${PIDS[@]}"; do pkill -9 -P "${p}" 2>/dev/null; done
   for p in "${PIDS[@]}"; do kill -9 "${p}" 2>/dev/null; done
   for p in "${PIDS[@]}"; do wait "${p}" 2>/dev/null; done
-  # DND-404 belt-and-suspenders: a final sweep by THIS run's marker, in case a
-  # mock's pid was ever missed above. pkill/pgrep exclude their own process by
-  # design, so this cannot self-match; scoping to the marker (never the bare
-  # filename) means it can never touch a sibling worktree's own gate run.
-  pkill -9 -f "mock-athena-inbox-client.rb.*${RUN_MARKER}" 2>/dev/null
   rm -rf -- "${TMP}"
 }
 # INT/TERM must END the suite, not just run cleanup and carry on: a handler
@@ -127,7 +110,7 @@ start_mock() {
   rm -f "${ready}"
   env MOCK_DUMP_DIR="${DUMPS}" MOCK_LOG="${LOG}" MOCK_READY="${ready}" \
       MOCK_TERM_FILE="${TMP}/${name}.term" MOCK_TOKEN="${TOKEN}" "$@" \
-      ruby "${MOCK}" "${RUN_MARKER}" >/dev/null 2>&1 &
+      ruby "${MOCK}" >/dev/null 2>&1 &
   PIDS+=("$!")
   MOCK_PID=""
   wait_file "${ready}" 100 || { echo "mock ${name} never became ready" >&2; return 1; }
@@ -361,8 +344,8 @@ if [ "${rc}" -eq 1 ] && grep -q 'Fix:' <<<"${out}"; then ok "HARD_MAX below KEEP
 printf '\nC-5  identity: the supervisor'"'"'s ONE child, and exit 3 is distinct\n'
 PF="${ATHENA_INBOX_CLIENT_STATE_DIR}/athena-inbox-client.pid"
 # A fake supervisor whose single child is the mock client.
-bash -c 'env MOCK_DUMP_DIR="$1" MOCK_LOG="$2" MOCK_READY="$3" MOCK_TERM_FILE="$4" MOCK_MODE=dump ruby "$5" "$6" & wait' _ \
-  "${DUMPS}" "${LOG}" "${TMP}/sup.ready" "${TMP}/sup.term" "${MOCK}" "${RUN_MARKER}" >/dev/null 2>&1 &
+bash -c 'env MOCK_DUMP_DIR="$1" MOCK_LOG="$2" MOCK_READY="$3" MOCK_TERM_FILE="$4" MOCK_MODE=dump ruby "$5" & wait' _ \
+  "${DUMPS}" "${LOG}" "${TMP}/sup.ready" "${TMP}/sup.term" "${MOCK}" >/dev/null 2>&1 &
 SUP=$!; PIDS+=("${SUP}")
 wait_file "${TMP}/sup.ready" 100
 CHILD="$(cat "${TMP}/sup.ready")"; PIDS+=("${CHILD}")
@@ -434,22 +417,23 @@ fi
 # mock it started is still alive. No EXIT/INT/TERM trap -- in this suite, in
 # the fake one below, or anywhere else -- can observe a SIGKILL of its own
 # process, so the mock is orphaned (reparented to PID 1) no matter how good
-# the trap is. This is why the fix cannot be trap-only: it proves the trap
-# CANNOT close this gap, then proves ai/bin/check-inbox-mock-orphans (scoped to
-# a marker, never the bare filename) does.
+# the trap is. This is why the fix cannot be trap-only, and cannot be a marker
+# either (a marker dies with whatever process was carrying it): it proves the
+# trap CANNOT close this gap, then proves ai/bin/check-inbox-mock-orphans --
+# which matches PPID == 1 (unconditional and unambiguous once a parent dies,
+# no cooperation required) -- does.
 printf '\nC-10  DND-404: a SIGKILLed launcher orphans its mock -- the gate backstop reaps what no trap can\n'
-NESTED_MARKER="nested-$$-$(date +%s%N 2>/dev/null || date +%s)"
 FAKE_SUITE="${TMP}/fake-suite.sh"
 cat >"${FAKE_SUITE}" <<'FAKE'
 #!/usr/bin/env bash
 set -uo pipefail
 env MOCK_DUMP_DIR="$1" MOCK_LOG="$2" MOCK_READY="$3" MOCK_TERM_FILE="$4" MOCK_TOKEN="$5" MOCK_MODE=dump \
-    ruby "$6" "$7" >/dev/null 2>&1 &
+    ruby "$6" >/dev/null 2>&1 &
 wait
 FAKE
 chmod +x "${FAKE_SUITE}"
 rm -f "${TMP}/nested.ready"
-"${FAKE_SUITE}" "${DUMPS}" "${LOG}" "${TMP}/nested.ready" "${TMP}/nested.term" "${TOKEN}" "${MOCK}" "${NESTED_MARKER}" &
+"${FAKE_SUITE}" "${DUMPS}" "${LOG}" "${TMP}/nested.ready" "${TMP}/nested.term" "${TOKEN}" "${MOCK}" &
 FAKE_SUITE_PID=$!
 if wait_file "${TMP}/nested.ready" 100; then
   NESTED_CHILD="$(cat "${TMP}/nested.ready")"
@@ -469,22 +453,24 @@ if wait_file "${TMP}/nested.ready" 100; then
     bad "reproduces the incident (mock outlives its SIGKILLed launcher)" "mock ${NESTED_CHILD} is already gone -- cannot demonstrate the gap this run"
   fi
   GATE="${SCRIPTS}/../ai/bin/check-inbox-mock-orphans"
-  GATE_OUT="$(ATHENA_HARNESS_GATE_RUN_MARKER="${NESTED_MARKER}" "${GATE}" 2>&1)"; GATE_RC=$?
+  # --min-age 0: this fixture's whole point is that PPID == 1 alone is proof,
+  # with no wait required (the real gate run uses the 60s default).
+  GATE_OUT="$("${GATE}" --min-age 0 2>&1)"; GATE_RC=$?
   if [ "${GATE_RC}" -eq 1 ] && grep -q "pid=${NESTED_CHILD} " <<<"${GATE_OUT}" && grep -q 'Fix:' <<<"${GATE_OUT}"; then
-    ok "check-inbox-mock-orphans, scoped to this run's marker, finds it: exit 1 with a Fix:"
+    ok "check-inbox-mock-orphans finds it by PPID == 1 alone: exit 1 with a Fix:"
   else
-    bad "check-inbox-mock-orphans finds the orphan by this run's marker" "rc=${GATE_RC} ${GATE_OUT}"
+    bad "check-inbox-mock-orphans finds the orphan" "rc=${GATE_RC} ${GATE_OUT}"
   fi
   if ! kill -0 "${NESTED_CHILD}" 2>/dev/null; then
     ok "the orphan is gone once the backstop has run (what no trap could do)"
   else
     bad "the orphan is gone once the backstop has run" "pid ${NESTED_CHILD} still alive"
   fi
-  GATE_OUT2="$(ATHENA_HARNESS_GATE_RUN_MARKER="${NESTED_MARKER}" "${GATE}" 2>&1)"; GATE_RC2=$?
+  GATE_OUT2="$("${GATE}" --min-age 0 2>&1)"; GATE_RC2=$?
   if [ "${GATE_RC2}" -eq 0 ]; then
-    ok "re-running the backstop on the same, now-clean marker is exit 0 (PASS)"
+    ok "re-running the backstop once clean is exit 0 (PASS)"
   else
-    bad "re-running the backstop on the same, now-clean marker is exit 0" "rc=${GATE_RC2} ${GATE_OUT2}"
+    bad "re-running the backstop once clean is exit 0" "rc=${GATE_RC2} ${GATE_OUT2}"
   fi
   # Safety net for THIS regression test itself, independent of the assertions
   # above: never let this case be the thing that leaves an orphan behind.
