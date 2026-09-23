@@ -1574,13 +1574,17 @@ doctor_failed_deliveries() {
 }
 
 # doctor_state_failed_deliveries <unread-count>
-# Pure. 0 -> ok · a positive integer -> warn · anything else -> na.
+# Pure. 0 -> ok · a positive integer -> warn · anything else -> na, including a
+# digit string too large for a shell integer: an unmeasurable count must never
+# fall through to "0 unread".
 doctor_state_failed_deliveries() {
   case "$1" in
-    ''|*[!0-9]*) printf 'na\n' ;;
-    0) printf 'ok\n' ;;
-    *) [ "$1" -gt 0 ] && printf 'warn\n' || printf 'ok\n' ;;
+    ''|*[!0-9]*) printf 'na\n'; return 0 ;;
   esac
+  if [ "$1" -gt 0 ] 2>/dev/null; then printf 'warn\n'
+  elif [ "$1" -eq 0 ] 2>/dev/null; then printf 'ok\n'
+  else printf 'na\n'
+  fi
 }
 
 # doctor_check_server_failed_deliveries

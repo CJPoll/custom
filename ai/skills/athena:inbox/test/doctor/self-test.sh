@@ -752,6 +752,8 @@ assert_eq "doctor_state_failed_deliveries: 0 -> ok" ok "$(doctor_state_failed_de
 assert_eq "doctor_state_failed_deliveries: 7 -> warn" warn "$(doctor_state_failed_deliveries 7)"
 assert_eq "doctor_state_failed_deliveries: empty -> na" na "$(doctor_state_failed_deliveries '')"
 assert_eq "doctor_state_failed_deliveries: -1 -> na" na "$(doctor_state_failed_deliveries -1)"
+assert_eq "doctor_state_failed_deliveries: 00 -> ok" ok "$(doctor_state_failed_deliveries 00)"
+assert_eq "doctor_state_failed_deliveries: a count too large to compare -> na, never ok" na "$(doctor_state_failed_deliveries 100000000000000000000)"
 
 # The real protocol path: the SAME shim, asked for failed_deliveries by name.
 : > "${SHIM_LOG}.argv"; : > "${SHIM_LOG}.tools"
