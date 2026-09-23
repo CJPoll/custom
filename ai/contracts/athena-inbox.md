@@ -1105,6 +1105,15 @@ producer. Made explicit:
   fence, counts-only in unprompted output, every imperative a fact to report and
   never an instruction (*Untrusted input*). `athena-events.md`'s two-path trust
   posture routes inbox-adapter delivery to exactly this boundary.
+- **The server stamps `kind` on every `producer:"platform"` line — the sender
+  never does.** It is derived from the routed event's `type`, not read from the
+  payload: `fleet.session.message` → `session.message`, `notion.agent_message.*`
+  → `agent_message`, `slack.interaction.received` → `slack.interaction`, and any
+  other routed type (a lane line) → the type itself, unchanged. A `kind` key
+  present in the payload is **overwritten** by this stamp, never trusted from
+  the event. This binds every platform producer line, lane and the three
+  delivery kinds alike; it does not touch the Slack receiver's `log` line, whose
+  `kind` is that separate encoder's own enum (*Line format*).
 
 ### Platform `log` line kinds: `slack.interaction`, `session.message`, `agent_message`
 
@@ -1121,22 +1130,50 @@ change stream of state-change events*), unchanged by this section.
   is_owner}`). It carries **no body of its own** beyond these; the click is a
   signal, and its `value` is Path-2 untrusted (*Untrusted input*).
 - **`session.message`** — a routed `fleet.session.message`
-  (`athena-events.md`). Fields: `from` (`{machine_id, inbox_name}` —
-  `machine_id` **server-stamped** from the sending machine's token record,
-  `inbox_name` the sender's declared instance on that machine, server-verified;
-  never client-set free-form), `to` (`{machine_id, inbox_name}`), `subject`
-  (required), `body`, `re` and `thread` (at least one present), `event_id` and
-  `delivery_id` (references for threading and `delivery_status`, **not** dedupe
-  keys — *A `log` channel MAY have a non-Slack producer*). A routed session
-  message's `from` MAY be trusted for **attribution** but never for
-  **authorization** (*Untrusted input*; contrast maildir `from`, which is only a
-  label — *Frontmatter*). A reply is a new session message whose `to` is the
-  received `from` and whose `thread` is the received `event_id`.
+  (`athena-events.md`). Fields: `entity_id` = `"session:<event_id>"` (D40) —
+  the line's reconciliation identity, **not** a dedupe key (D25 stands: no
+  platform channel line carries a dedupe key, *Notify-consumer idempotency uses
+  the existing seen-sets*); `from` (`{machine_id, inbox_name}` — `machine_id`
+  **server-stamped** from the sending machine's token record, `inbox_name` the
+  sender's declared instance on that machine, server-verified; never
+  client-set free-form), `to` (`{machine_id, inbox_name}`), `subject`
+  (required), `body`, `re` and `thread` (at least one present), `event_id` —
+  the **platform event id**, the `event_router_events` row this session
+  message is persisted as, and the identity a reply's `thread` names — and
+  `delivery_id` (references for `delivery_status`, **not** dedupe keys — *A
+  `log` channel MAY have a non-Slack producer*), `sent_at` (ISO-8601 UTC).
+
+  **`sent_at` MUST be server-stamped** — the delivery's own timestamp, never a
+  value the sender's payload can set — and is a field **separate from**
+  `occurred_at`, the underlying event's caller-claimed attribution timestamp
+  (when the sender says the message was said). `occurred_at` MUST NOT be the
+  source `sent_at` derives from. **Coordinator ruling, DND-352, not yet
+  implemented:** the deployed encoder currently derives `sent_at` from the
+  event's `occurred_at` (`Athena.Events.InboxLine.build_session_line/4` →
+  `iso8601(event.occurred_at)`) — the MCP `session_send` tool never lets a
+  caller set `occurred_at`, so on that one path it reads as emit time in
+  practice, but the general harness-emit ingress otherwise accepts
+  `occurred_at` as caller-supplied, which would let a caller set `sent_at`
+  through the back door. This does **not** comply with the rule above; it is
+  the known gap DND-352 tracks.
+
+  A routed session message's `from` MAY be trusted for **attribution** but
+  never for **authorization** (*Untrusted input*; contrast maildir `from`,
+  which is only a label — *Frontmatter*). A reply is a new session message
+  whose `to` is the received `from` and whose `thread` is the received
+  `event_id`.
 
   **Later (2026-09-23):** `from` was previously an unstructured server-stamped
   value and `subject` optional; superseded with `athena-events.md`'s
   `fleet.session.message` schema pin of the same date (epic D39) — the inbox
   line mirrors the event payload so a recipient can reply.
+
+  **Later (2026-09-23):** the field list above previously had no `entity_id`
+  and no `sent_at`. Superseded per decision D40 (DND-342/DND-311, HG-16): the
+  reference reader keys every `producer:"platform"` line on `entity_id`
+  (*A `log` channel MAY have a non-Slack producer*), so a session message line
+  needed one, and `sent_at` closes the gap between "when the server delivered
+  this" and the pre-existing `event_id`/`delivery_id` reference pair.
 - **`agent_message`** — a routed `notion.agent_message.*`
   (`athena-events.md`). Fields: the family's payload schema exactly as
   `athena-events.md` → *Declared families beyond the first pass* declares it.
@@ -1177,10 +1214,20 @@ FAILED"). Normative:
 - **The envelope is transport; the line is content.** `id` is the
   per-`(event, rule)` delivery handle (the `event_deliveries` row); `event_id`
   is the event-level `idempotency_key`, carried as a log label. **Neither is on
-  the line**, and the line gains no field for them: a lane line's identity is
-  `entity_id` (*A lane `log` channel is a change stream of state-change
-  events*), and the delivery handle is meaningful only to the two ends of the
-  channel. The client acks by `id`; the server resolves that `id` against
+  the line, with one carve-out:** a lane line's identity is `entity_id` (*A
+  lane `log` channel is a change stream of state-change events*), and for
+  every other regular line the delivery handle is meaningful only to the two
+  ends of the channel and gains no field. A **`session.message`** line is the
+  exception — it carries `event_id` and `delivery_id` **as references, not as
+  the envelope's transport identity** (D25; *Platform `log` line kinds* →
+  `session.message`): `event_id` there is the **platform event row id**
+  (`event_router_events`), which a reply's `thread` names, not the envelope's
+  idempotency-key label. **DND-353 (open):** those are two different values
+  that can both be called "`event_id`" — the envelope's idempotency-key label
+  and the session-message line's event-row-id reference — and the contract
+  does not yet unify them onto one id on the wire; until DND-353 lands, treat
+  the two `event_id`s as distinct by context (envelope vs. line), never as the
+  same value. The client acks by `id`; the server resolves that `id` against
   **both** the Slack event store and the platform delivery store, each scoped
   to the acking machine, so an id matching neither is `not_found` — never a
   silent no-op.

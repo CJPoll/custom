@@ -668,6 +668,26 @@ message (`payload.to` present) is delivered **directly to the same-owner target*
 delivery dual of the Slack-click direct route (design §4/§D6), same-owner only; a
 **broadcast** (no `payload.to`) fans out through rules alone.
 
+An addressed message's direct delivery, made normative (D40, HG-16/DND-311):
+
+- **One direct, rule-less delivery, atomically with the event and its rule
+  fan-out.** The router creates exactly one direct delivery row to
+  `payload.to` in the same transaction it persists the event and matches
+  owner rules; owner rules on `fleet.session.message` still fan out, in
+  addition to the direct delivery, never instead of it.
+- **HANDLED even with no matching rule.** An addressed event with zero
+  matching owner rules is not dead-lettered: the direct delivery alone makes
+  the event `handled`. Only a broadcast (`payload.to` absent) with no
+  matching rule is `unmatched`.
+- **A recipient machine not owned by the sender's owner is refused as
+  `not_found`, with no write.** Same answer as a nonexistent machine (D19, no
+  existence disclosure) — nothing is persisted, and the refusal happens
+  before the event or any delivery row is created.
+- **An undeclared recipient inbox is refused with a `Fix:`, with no write.**
+  No live agent instance on the (same-owner) target machine declaring
+  `to.inbox_name` is both-ends-or-dark, not a silent drop: the refusal names
+  the HG-17/HG-18 registration convention, and nothing is persisted.
+
 **The `notion.agent_message.{created,updated,deleted}` family** (Agent Messages
 routing):
 
