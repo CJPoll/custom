@@ -127,11 +127,14 @@ register_mcp() { # register_mcp [url]
 }
 
 # send <args...>  -- runs send-mail from the project with a fixed body; sets
-# OUT (stdout), ERR (stderr), RC.
+# OUT (stdout), ERR (stderr), RC, PATHLINE (stdout's FIRST line: the path send-mail
+# says it took, HG-19) and RECEIPT (stdout's LAST line, when it is a JSON object).
 send() {
   local o="${TMP}/send.out" e="${TMP}/send.err"
   ( cd "${PROJ}" && printf 'hello from cproj\n' | "${BIN}/send-mail" "$@" ) >"${o}" 2>"${e}"; RC=$?
   OUT="$(cat "${o}")"; ERR="$(cat "${e}")"
+  PATHLINE="$(head -n 1 "${o}")"
+  RECEIPT="$(tail -n 1 "${o}")"; case "${RECEIPT}" in "{"*) ;; *) RECEIPT="" ;; esac
 }
 # refused_before_network <claim> <needle>
 refused_before_network() {
@@ -147,10 +150,12 @@ register "${SESSION_CH}"; register_mcp; shim_reset
 export ATHENA_MCP_BEARER="${BEARER}"
 send --routed --to m-walt/walt_ui-session.jsonl --subject "status of HG-17" --re https://example.test/pr/1
 assert_eq "hit: exit 0" 0 "${RC}"
-assert_eq "hit: prints the receipt's event_id" "ev-111" "$(printf '%s' "${OUT}" | jq -r .event_id)"
-assert_eq "hit: prints the receipt's delivery_id" "dl-222" "$(printf '%s' "${OUT}" | jq -r .delivery_id)"
-assert_eq "hit: the receipt names the path taken" "routed" "$(printf '%s' "${OUT}" | jq -r .path)"
-assert_eq "hit: status is pending, never delivered" "pending" "$(printf '%s' "${OUT}" | jq -r .status)"
+assert_eq "hit: the FIRST stdout line says the path, and why" "athena:inbox: path: routed -- --routed was given" "${PATHLINE}"
+assert_eq "hit: stdout is exactly the path line and the receipt" 2 "$(printf '%s\n' "${OUT}" | wc -l | tr -d ' ')"
+assert_eq "hit: prints the receipt's event_id" "ev-111" "$(printf '%s' "${RECEIPT}" | jq -r .event_id)"
+assert_eq "hit: prints the receipt's delivery_id" "dl-222" "$(printf '%s' "${RECEIPT}" | jq -r .delivery_id)"
+assert_eq "hit: the receipt names the path taken" "routed" "$(printf '%s' "${RECEIPT}" | jq -r .path)"
+assert_eq "hit: status is pending, never delivered" "pending" "$(printf '%s' "${RECEIPT}" | jq -r .status)"
 assert_contains "hit: session_send was called" "tools/call session_send" "$(calls)"
 A="$(cat "${SHIM}/args.session_send.json" 2>/dev/null)"
 assert_eq "hit: from_inbox is THIS project's session inbox, a TOP-LEVEL argument" "cproj-session.jsonl" "$(printf '%s' "${A}" | jq -r .from_inbox)"
@@ -292,7 +297,7 @@ echo "== refusals: a routed send pointed at a MAILDIR channel by name =="
 shim_reset
 send --routed peer-mail --to m-walt/walt_ui-session.jsonl --subject s --re /x
 refused_before_network "--routed given this project's maildir channel as a positional" "is one of this project's MAILDIR channels"
-assert_contains "maildir by name: the Fix shows the maildir path without --routed" "send-mail peer-mail <slug> --to <identity>" "${ERR}"
+assert_contains "maildir by name: the Fix shows the explicit maildir path" "send-mail --local peer-mail <slug> --to <identity>" "${ERR}"
 shim_reset
 send --routed --to-project peer-mail --subject s --re /x
 refused_before_network "--to-project naming this project's maildir channel" "is one of this project's MAILDIR channels"
@@ -313,7 +318,8 @@ if [ "${RC}" -ne 0 ]; then ok "server refusal: exit non-zero"; else bad "server 
 assert_contains "server refusal: the server's words reach the sender" "no machine registered to your account" "${ERR}"
 assert_contains "server refusal: its Fix is carried" "Fix: address one of your own machines" "${ERR}"
 assert_contains "server refusal: says nothing was sent" "nothing was sent" "${ERR}"
-assert_eq "server refusal: no receipt printed" "" "${OUT}"
+assert_eq "server refusal: no receipt printed" "" "${RECEIPT}"
+assert_eq "server refusal: stdout is the path line alone" "athena:inbox: path: routed -- --routed was given" "${OUT}"
 
 # How gen_saas actually refuses: a JSON-RPC error with code -32000
 # (Hermes.MCP.Error.execution), carrying the server's Fix.
@@ -421,7 +427,7 @@ data: {"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"
 
 SSE
 send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
-assert_eq "SSE: the response is found by id across a multi-line event and a trailing notification" "ev-sse" "$(printf '%s' "${OUT}" | jq -r .event_id 2>/dev/null)"
+assert_eq "SSE: the response is found by id across a multi-line event and a trailing notification" "ev-sse" "$(printf '%s' "${RECEIPT}" | jq -r .event_id 2>/dev/null)"
 
 # A server Fix written without the space after the colon.
 shim_reset
@@ -636,6 +642,168 @@ assert_eq "R2: stale_after_s 0 (on-demand) keeps it from reading STALE" "false" 
 register '{"session":{"kind":"log","path":"cproj-session.jsonl","producer":"platform","stale_after_s":3600}}'
 S="$(cd "${PROJ}" && "${BIN}/inbox-status" 2>&1)"
 assert_contains "R2: with a threshold set, the session channel prints STALE like any log channel" "session — STALE: last delivery 2h" "${S}"
+
+# ===========================================================================
+# HG-19 / DND-314: the path choice. --local, --routed, and neither.
+#
+# The acceptance cases, and every MISS beside them: each refusal is asserted to
+# print "path: refused" on stdout, carry a Fix: naming BOTH explicit choices,
+# reach no session_send, and write no maildir; each path print is asserted
+# exactly. machine_reachable is the shim's canned answer -- never the server.
+# ===========================================================================
+echo "== HG-19 domain: routed_default_path =="
+DP() { ( . "${LIB}/err.sh"; . "${LIB}/names.sh"; . "${LIB}/fence.sh"; . "${LIB}/routed.sh"; routed_default_path "$@" ); }
+assert_eq "domain: a maildir address is local, whatever the server says" "local" "$(DP maildir registered set true | cut -f1)"
+assert_eq "domain: ... and the reason names the missing self id (the gap), not a guess" "true" \
+  "$(DP maildir registered set true | cut -f2 | grep -q "own server id" && echo true || echo false)"
+assert_eq "domain: server + unregistered -> refuse" "refuse" "$(DP server unregistered set unasked | cut -f1)"
+assert_eq "domain: server + broken registration -> refuse (never read as unregistered)" "refuse" "$(DP server broken set unasked | cut -f1)"
+assert_contains "domain: the broken-registration reason says it cannot be read" "cannot be read" "$(DP server broken set unasked)"
+assert_eq "domain: server + bearer unset -> refuse" "refuse" "$(DP server registered unset unasked | cut -f1)"
+assert_eq "domain: server, registered, bearer, not yet asked -> ask" "ask" "$(DP server registered set unasked | cut -f1)"
+assert_eq "domain: server + reachable true -> routed" "routed" "$(DP server registered set true | cut -f1)"
+for v in false unknown unavailable; do
+  assert_eq "domain: server + reachable ${v} -> refuse (only true routes)" "refuse" "$(DP server registered set "${v}" | cut -f1)"
+done
+# THE MISS: a wrongly computed input is an error, never a path.
+for bad in "mail registered set true" "server yes set true" "server registered maybe true" "server registered set TRUE" "server registered set ''"; do
+  eval "set -- ${bad}"; o="$(DP "$@")"; rc=$?
+  assert_eq "domain: out-of-vocabulary input [${bad}] -> status 1, nothing printed" "1|" "${rc}|${o}"
+done
+
+# Setup: registered MCP, bearer set, a maildir channel peer-mail on this
+# project (write to-peer), and the canned machine_reachable answer.
+register "${SESSION_CH}"; register_mcp; export ATHENA_MCP_BEARER="${BEARER}"
+MAILDIR_OUT="${ATHENA_INBOX_ROOT}/agent-mail/peer/to-peer"
+reach_answer() { # reach_answer <json-rpc message>
+  printf '%s' "$1" > "${SHIM}/machine_reachable.answer"
+}
+REACH_FALSE='{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"reachable":false,"basis":"silence","pending_deliveries":3,"unreachable_since":"2026-09-23T06:00:00Z"}}}'
+REACH_TRUE='{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"reachable":true,"basis":"recent_ack","pending_deliveries":0}}}'
+REACH_UNKNOWN='{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"reachable":"unknown","basis":"quiet","pending_deliveries":0}}}'
+maildir_files() { find "${ATHENA_INBOX_ROOT}/agent-mail" -name '*.md' -type f 2>/dev/null; }
+# refused_no_path <claim> <needle>: a no-flag refusal, loudly.
+refused_no_path() {
+  if [ "${RC}" -ne 0 ]; then ok "$1: refused (exit ${RC})"; else bad "$1: refused" "exit 0: ${OUT}"; fi
+  assert_contains "$1: stdout says no path was taken" "athena:inbox: path: refused (nothing was sent) -- " "${PATHLINE}"
+  assert_contains "$1: stdout names the cause" "$2" "${PATHLINE}"
+  assert_contains "$1: stderr carries a Fix:" "Fix:" "${ERR}"
+  assert_contains "$1: the Fix names the explicit routed choice" "send-mail --routed" "${ERR}"
+  assert_contains "$1: the Fix names the explicit local choice" "send-mail --local <maildir-channel>" "${ERR}"
+  assert_not_contains "$1: session_send was never called" "session_send" "$(calls)"
+  assert_eq "$1: no maildir was written" "" "$(maildir_files)"
+  assert_eq "$1: no receipt was printed" "" "${RECEIPT}"
+}
+
+echo "== HG-19 ACCEPTANCE 1: no flag, same machine, server unreachable -> local, and says so =="
+rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"; shim_reset; reach_answer "${REACH_FALSE}"
+send peer-mail status-note --to peer --re /x
+assert_eq "acc-1: exit 0" 0 "${RC}"
+assert_contains "acc-1: the FIRST stdout line says local" "athena:inbox: path: local -- a maildir channel was named" "${PATHLINE}"
+assert_contains "acc-1: ... and why routed was not taken" "own server id" "${PATHLINE}"
+assert_contains "acc-1: then the delivered filename" "athena:inbox: delivered " "$(printf '%s\n' "${OUT}" | sed -n 2p)"
+assert_eq "acc-1: exactly one message is in the peer's maildir" 1 "$(maildir_files | grep -c . )"
+assert_eq "acc-1: it is in THIS channel's write dir" "${MAILDIR_OUT}" "$(dirname "$(maildir_files | head -n 1)")"
+assert_eq "acc-1: a same-machine maildir send makes NO network call at all" "" "$(calls)"
+
+rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"; rm -f "${HOME}/.claude.json"; shim_reset
+send peer-mail unregistered-note --to peer
+assert_eq "acc-1 (MCP not registered): exit 0, local" "0|local" "${RC}|$(printf '%s' "${PATHLINE}" | sed -n 's/^athena:inbox: path: \([a-z]*\) .*/\1/p')"
+assert_eq "acc-1 (MCP not registered): delivered to the maildir" 1 "$(maildir_files | grep -c .)"
+register_mcp
+
+echo "== HG-19 ACCEPTANCE 2: no flag, recipient addressed on the server -> routes, or refuses loudly =="
+rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"; shim_reset; reach_answer "${REACH_TRUE}"
+send --to m-lap/walt_ui-session.jsonl --subject "cross-machine" --re /x
+assert_eq "acc-2 routes: exit 0" 0 "${RC}"
+assert_eq "acc-2 routes: the FIRST stdout line says routed, and why" \
+  "athena:inbox: path: routed -- the athena MCP is registered and the server reports this machine reachable" "${PATHLINE}"
+assert_eq "acc-2 routes: the receipt is the last line" "ev-111" "$(printf '%s' "${RECEIPT}" | jq -r .event_id 2>/dev/null)"
+assert_eq "acc-2 routes: machine_reachable was asked, THEN session_send was called" \
+  "tools/call machine_reachable|tools/call session_send" "$(calls | grep '^tools/call' | paste -sd'|')"
+assert_eq "acc-2 routes: machine_reachable was asked for THIS machine (no machine_id)" "{}" "$(cat "${SHIM}/args.machine_reachable.json" 2>/dev/null)"
+assert_eq "acc-2 routes: no maildir was written" "" "$(maildir_files)"
+
+shim_reset; reach_answer "${REACH_FALSE}"
+send --to m-lap/walt_ui-session.jsonl --subject "cross-machine" --re /x
+refused_no_path "acc-2 refuses (server reports this machine unreachable)" "machine_reachable: false"
+
+shim_reset; reach_answer "${REACH_UNKNOWN}"
+send --to m-lap/walt_ui-session.jsonl --subject s --re /x
+refused_no_path "no flag, reachable \"unknown\" (quiet is not reachable)" "machine_reachable: unknown"
+
+shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found: machine_reachable"}}'
+send --to m-lap/walt_ui-session.jsonl --subject s --re /x
+refused_no_path "no flag, machine_reachable not deployed (never guessed reachable)" "machine_reachable: unavailable"
+assert_contains "no flag, tool missing: the server's own words say why" "Method not found" "${PATHLINE}"
+
+shim_reset; printf 500 > "${SHIM}/machine_reachable.code"
+send --to m-lap/walt_ui-session.jsonl --subject s --re /x
+refused_no_path "no flag, machine_reachable HTTP 500" "machine_reachable: unavailable"
+
+shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"basis":"silence"}}}'
+send --to m-lap/walt_ui-session.jsonl --subject s --re /x
+refused_no_path "no flag, an answer with no reachable verdict" "carried no reachable verdict"
+
+shim_reset; reach_answer '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"reachable":"yes"}}}'
+send --to m-lap/walt_ui-session.jsonl --subject s --re /x
+refused_no_path "no flag, a reachable value outside true|false|unknown" "machine_reachable: unavailable"
+
+rm -f "${HOME}/.claude.json"; shim_reset
+send --to m-lap/walt_ui-session.jsonl --subject s --re /x
+refused_no_path "no flag, server address, MCP not registered" "not registered"
+assert_eq "no flag, not registered: nothing reached the server" "" "$(calls)"
+printf '{"projects": {broken' > "${HOME}/.claude.json"; shim_reset
+send --to m-lap/walt_ui-session.jsonl --subject s --re /x
+refused_no_path "no flag, server address, unreadable ~/.claude.json" "cannot be read"
+register_mcp
+
+unset ATHENA_MCP_BEARER; shim_reset
+send --to-project walt_ui --subject s --re /x
+refused_no_path "no flag, --to-project, bearer unset" "ATHENA_MCP_BEARER is not set"
+assert_eq "no flag, bearer unset: nothing reached the server" "" "$(calls)"
+export ATHENA_MCP_BEARER="${BEARER}"
+
+shim_reset; reach_answer "${REACH_TRUE}"
+send --to m-lap/walt_ui-session.jsonl --re /x
+if [ "${RC}" -ne 0 ]; then ok "no flag, malformed (no --subject): refused"; else bad "no flag, malformed (no --subject): refused" "exit 0"; fi
+assert_eq "no flag, malformed: refused BEFORE the path is asked (no network)" "" "$(calls)"
+assert_eq "no flag, malformed: no path line (no path was reached)" "" "${OUT}"
+
+shim_reset; reach_answer "${REACH_TRUE}"; printf '%s' "${LIST_TWO}" > "${SHIM}/list_my_machines.answer"
+send --to-project walt_ui --subject s --re /x
+assert_eq "no flag, --to-project, reachable: routes" "0|routed" "${RC}|$(printf '%s' "${PATHLINE}" | sed -n 's/^athena:inbox: path: \([a-z]*\) .*/\1/p')"
+assert_eq "no flag, --to-project: reachable asked, then resolved, then sent" \
+  "tools/call machine_reachable|tools/call list_my_machines|tools/call session_send" "$(calls | grep '^tools/call' | paste -sd'|')"
+
+echo "== HG-19 --local and --routed: the flag is the path, and it is printed =="
+rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"; shim_reset; reach_answer "${REACH_TRUE}"
+send --local peer-mail explicit-local --to peer
+assert_eq "--local: exit 0" 0 "${RC}"
+assert_eq "--local: the path line" "athena:inbox: path: local -- --local was given" "${PATHLINE}"
+assert_eq "--local: delivered to the maildir" 1 "$(maildir_files | grep -c .)"
+assert_eq "--local: no network call, even with the server reachable" "" "$(calls)"
+rm -rf "${ATHENA_INBOX_ROOT}/agent-mail"
+
+shim_reset; send --local peer-mail x --to m-lap/walt_ui-session.jsonl
+if [ "${RC}" -ne 0 ]; then ok "--local with a server address: refused"; else bad "--local with a server address: refused" "exit 0"; fi
+assert_contains "--local with a server address: names it" "given a server address" "${ERR}"
+assert_contains "--local with a server address: Fix:" "Fix:" "${ERR}"
+assert_eq "--local with a server address: no maildir written, nothing sent" "|" "$(maildir_files)|$(calls)"
+
+shim_reset; send --local --to-project walt_ui --subject s --re /x
+if [ "${RC}" -ne 0 ]; then ok "--local with --to-project/--subject: refused"; else bad "--local with --to-project/--subject: refused" "exit 0"; fi
+assert_contains "--local with routed-only flags: names the conflict" "--local sends on a maildir channel" "${ERR}"
+assert_eq "--local with routed-only flags: no maildir written, nothing sent" "|" "$(maildir_files)|$(calls)"
+
+shim_reset; send --local --routed peer-mail x --to peer
+if [ "${RC}" -ne 0 ]; then ok "--local and --routed together: refused"; else bad "--local and --routed together: refused" "exit 0"; fi
+assert_contains "--local and --routed together: names both" "both --routed and --local" "${ERR}"
+assert_eq "--local and --routed together: no maildir written, nothing sent, no path" "||" "$(maildir_files)|$(calls)|${OUT}"
+
+shim_reset; send --local walt_ui-session x --to peer
+if [ "${RC}" -ne 0 ]; then ok "--local naming a channel this project does not declare: refused"; else bad "--local naming an undeclared channel: refused" "exit 0"; fi
+assert_eq "--local naming an undeclared channel: nothing sent" "|" "$(maildir_files)|$(calls)"
 
 echo
 if [ "${FAIL}" -eq 0 ]; then

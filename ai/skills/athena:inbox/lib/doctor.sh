@@ -1390,6 +1390,7 @@ doctor_state_reachable() {
 # doctor_check_server_reachability
 doctor_check_server_reachability() {
   local out rc r basis pending last_ack since joined facts now ack_age ack_epoch
+  DOCTOR_REACHABLE="not-asked"
   if [ "${DOCTOR_NO_SERVER:-0}" = "1" ]; then
     doctor_finding na "server-reachability" "server reachability check not run (disabled for this invocation)" \
       "run inbox-doctor by hand (without --no-server) to ask the server whether it can reach this machine; the unprompted SessionStart path deliberately makes no network request."
@@ -1404,15 +1405,18 @@ doctor_check_server_reachability() {
     2) doctor_finding na "server-reachability" "server reachability check SKIPPED -- no client config or machine token on this machine" \
          "this check authenticates with the inbox client's machine token (~/.config/athena-inbox-client/config.json); a machine that only reads delivered mail has none, and this is expected there."
        return 0 ;;
-    4) doctor_finding na "server-reachability" "server reachability check UNAVAILABLE (tried, got no answer): $(printf '%s' "${out}" | head -n 1)${canned_note}" \
+    4) DOCTOR_REACHABLE="unavailable"
+       doctor_finding na "server-reachability" "server reachability check UNAVAILABLE (tried, got no answer): $(printf '%s' "${out}" | head -n 1)${canned_note}" \
          "this is not a skip and not a clean bill: the server was asked and could not answer. If machine_reachable is not deployed yet (DND-315), this is expected until it is; otherwise check the network, the /mcp endpoint, and that the machine token in the client config is current."
        return 0 ;;
     0) ;;
-    *) doctor_finding na "server-reachability" "server reachability check UNAVAILABLE (unexpected status ${rc})" \
+    *) DOCTOR_REACHABLE="unavailable"
+       doctor_finding na "server-reachability" "server reachability check UNAVAILABLE (unexpected status ${rc})" \
          "re-run inbox-doctor; if it persists, check doctor_machine_reachable in lib/doctor.sh."
        return 0 ;;
   esac
   r="$(printf '%s' "${out}" | jq -r '.reachable | tostring')"
+  case "${r}" in true|false|unknown) DOCTOR_REACHABLE="${r}" ;; *) DOCTOR_REACHABLE="unavailable" ;; esac
   basis="$(printf '%s' "${out}" | jq -r '.basis // "unknown"')"
   pending="$(printf '%s' "${out}" | jq -r '(.pending_deliveries // 0) | tostring')"
   last_ack="$(printf '%s' "${out}" | jq -r '.last_ack_at // "never"')"
@@ -1431,5 +1435,76 @@ doctor_check_server_reachability() {
     ok)   doctor_finding ok "server-reachability" "checked: reachable ${r}, 0 pending (${facts})${canned_note}" ;;
     na)   doctor_finding na "server-reachability" "the server answered machine_reachable with no usable verdict (reachable: ${r})" \
             "the answer shape may have changed; machine_reachable should return reachable true|false|\"unknown\"." ;;
+  esac
+}
+
+# --- the two send paths (HG-19 / DND-314) -----------------------------------
+#
+# `send-mail` has two paths: the LOCAL maildir (a rename into a directory on
+# this machine, no server) and the ROUTED server path (the athena MCP's
+# session_send). The per-channel checks above already report each maildir
+# channel's health and the session log channel's; this finding says what a
+# SENDER from this project can do right now, and what the no-flag default
+# would pick -- so "routed is broken" never has to be discovered by a send.
+#
+# DOCTOR_REACHABLE is the machine_reachable verdict doctor_check_server_
+# reachability recorded (true | false | unknown | unavailable | not-asked); it
+# must run first, in the same shell.
+DOCTOR_REACHABLE="not-asked"
+
+# doctor_state_send_paths <registration> <session> <reachable> <maildir-count>
+#   registration  registered | unregistered | broken | unknown
+#   session       declared | missing | invalid
+# Pure.
+#   ok   the routed path is ready (registered, session inbox declared, this
+#        machine reachable) -- the no-flag default routes a server address;
+#   warn the routed path is configured but not usable right now, or its
+#        registration cannot be read: a no-flag server-addressed send will be
+#        REFUSED, and a cross-machine message needs an explicit --routed;
+#   na   routed is not configured for this project (not registered) or the
+#        reachability was not asked (--no-server): nothing to grade.
+doctor_state_send_paths() {
+  local reg="$1" session="$2" reach="$3" maildirs="$4"
+  case "${maildirs}" in ''|*[!0-9]*) printf 'na\n'; return 0 ;; esac
+  case "${reg}" in
+    broken) printf 'warn\n'; return 0 ;;
+    registered) ;;
+    *) printf 'na\n'; return 0 ;;
+  esac
+  [ "${session}" = "declared" ] || { printf 'warn\n'; return 0; }
+  case "${reach}" in
+    true) printf 'ok\n' ;;
+    not-asked) printf 'na\n' ;;
+    *) printf 'warn\n' ;;
+  esac
+}
+
+# doctor_check_send_paths <entry> [cwd]
+doctor_check_send_paths() {
+  local entry="$1" cwd="${2:-.}" rc reg session maildirs names state facts dflt
+  [ -n "${entry}" ] || return 0
+  inbox_mcp_registration "${cwd}" >/dev/null 2>&1; rc=$?
+  case "${rc}" in 0) reg=registered ;; 1) reg=unregistered ;; 3) reg=broken ;; *) reg=unknown ;; esac
+  if [ -z "$(printf '%s' "${entry}" | jq -r '.channels.session // empty' 2>/dev/null)" ]; then session=missing
+  elif routed_select_from_inbox "${entry}" >/dev/null 2>&1; then session=declared
+  else session=invalid; fi
+  names="$(printf '%s' "${entry}" | jq -r '[.channels // {} | to_entries[] | select(.value.kind == "maildir") | .key] | join(", ")' 2>/dev/null)"
+  maildirs="$(printf '%s' "${entry}" | jq -r '[.channels // {} | to_entries[] | select(.value.kind == "maildir")] | length' 2>/dev/null)"
+  state="$(doctor_state_send_paths "${reg}" "${session}" "${DOCTOR_REACHABLE}" "${maildirs}")"
+  case "${state}" in
+    ok) dflt="a server-addressed send ROUTES" ;;
+    *)  if [ "${reg}" = "registered" ] && [ "${session}" = "declared" ] && [ "${DOCTOR_REACHABLE}" = "not-asked" ]; then
+          dflt="a server-addressed send routes only if machine_reachable answers true when it is sent"
+        else
+          dflt="a server-addressed send is REFUSED (use --routed for another machine, --local for this one)"
+        fi ;;
+  esac
+  facts="routed: athena MCP ${reg} for this project, session inbox ${session}, this machine reachable: ${DOCTOR_REACHABLE}, ATHENA_MCP_BEARER $( [ -n "${ATHENA_MCP_BEARER:-}" ] && printf 'set' || printf 'unset') in this shell; local: ${maildirs:-0} maildir channel(s)${names:+ (${names})}; no-flag default: a maildir-addressed send goes LOCAL, ${dflt}. Neither path carries authority."
+  case "${state}" in
+    ok)   doctor_finding ok "send-paths" "${facts}" ;;
+    warn) doctor_finding warn "send-paths" "${facts}" \
+            "if the registration cannot be read, inspect ~/.claude.json's athena entry for this project by hand; if the session inbox is missing or invalid, declare the \"session\" log channel (ai/inbox/registry.json, scripts/setup-inbox-registry --install); if this machine is not reachable, read client-liveness and server-reachability above. Until then send cross-machine mail with --routed (the server holds it pending) and same-machine mail with --local." ;;
+    *)    doctor_finding na "send-paths" "${facts}" \
+            "routed sending is not configured or not checked here. To enable it: scripts/add-athena-mcp from the main checkout, launch through scripts/athena, declare the \"session\" channel; run inbox-doctor without --no-server to ask the server. The local maildir path does not depend on any of this." ;;
   esac
 }

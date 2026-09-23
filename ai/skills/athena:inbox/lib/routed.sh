@@ -13,7 +13,8 @@
 # machines and a declared inbox on it, and delivers a `session.message` line
 # into that inbox's `log` channel. It NEVER writes a local maildir: a routed
 # send that fell back to one silently would deliver to a peer who may not read
-# that channel, and say "sent". The fallback rule is HG-19's, and it is explicit.
+# that channel, and say "sent". The fallback rule is HG-19's (routed_default_path
+# below), and it is explicit: it applies only when neither flag was given.
 #
 # THE SENDER'S OWN INBOX (`from_inbox`) IS RESOLVED, NEVER TYPED. The server
 # requires it (D39) so the recipient can reply: `from = {machine_id, inbox_name}`
@@ -204,8 +205,101 @@ routed_maildir_name_refusal() {
   [ -n "${name}" ] || return 1
   [ "$(printf '%s' "${entry}" | jq -r --arg n "${name}" '(.channels[$n].kind // "") | tostring' 2>/dev/null)" = "maildir" ] || return 1
   inbox_fail "\"${name}\" is one of this project's MAILDIR channels; a routed send goes through the athena MCP to a peer's session inbox, never to a maildir channel (nothing was sent)" \
-    "to use that maildir, drop --routed: send-mail ${name} <slug> --to <identity>. To route to the peer project instead, name its project: --to-project <project>[@<machine>] (its <project>${ROUTED_SESSION_SUFFIX})."
+    "to use that maildir, send on it explicitly: send-mail --local ${name} <slug> --to <identity>. To route to the peer project instead, name its project: --to-project <project>[@<machine>] (its <project>${ROUTED_SESSION_SUFFIX})."
   return 0
+}
+
+# --- the no-flag default: routed or local (HG-19 / DND-314, epic D20) --------
+#
+# `send-mail` with neither --routed nor --local picks ONE path and says which.
+# The rule (D20): routed when the `athena` MCP is registered AND (the recipient
+# is on another machine OR (it is on this machine AND the server reports this
+# machine reachable)); otherwise the local maildir. NEVER a silent local write
+# for a cross-machine recipient.
+#
+# WHAT THE CLIENT CAN KNOW. The address says which side of the rule applies:
+#   * a MAILDIR address (`<channel> <slug> --to <identity>`) names a local
+#     directory under the inbox root. Its peer reads it on THIS machine, by
+#     construction -- same machine is proven.
+#   * a SERVER address (`--to <machine_id>/<inbox>`, `--to-project`) names a
+#     recipient the server resolves. Whether it is THIS machine is not
+#     decidable client-side: no harness surface names this machine's own server
+#     id (list_my_machines does not mark the caller's machine, machine_reachable
+#     for self does not return it, and the client config holds none). The
+#     locality is UNKNOWN, never guessed.
+#
+# SO THE RULE, APPLIED WITHOUT GUESSING:
+#   * maildir address -> local. The rule's same-machine routed branch needs a
+#     server address for THIS machine, which is the missing id above; until a
+#     surface exposes it, a same-machine message goes on the maildir that
+#     provably reaches its peer.
+#   * server address  -> routed only when BOTH branches of the rule agree it
+#     would be routed whichever machine the recipient is on: registered, bearer
+#     set, and this machine confirmed reachable (reachable == true, nothing
+#     else). Any other answer refuses LOUDLY with the two explicit ways out --
+#     it never writes a local maildir for a recipient that may be elsewhere.
+#
+# routed_default_path <address> <registration> <bearer> <reachable>
+#   address       maildir | server
+#   registration  registered | unregistered | broken
+#   bearer        set | unset
+#   reachable     unasked | true | false | unknown | unavailable
+# Prints "<path>\t<reason>" and returns 0, where <path> is one of:
+#   local    send on the maildir channel that was named
+#   routed   send through session_send
+#   ask      the answer depends on machine_reachable for self: ask, call again
+#   refuse   nothing may be sent; <reason> is the refusal, and the caller adds
+#            routed_default_refusal_fix as its Fix
+# Any input outside its vocabulary returns 1 with nothing printed: a wrongly
+# computed input is an error, never a path.
+routed_default_path() {
+  local address="$1" reg="$2" bearer="$3" reach="$4"
+  case "${address}" in maildir|server) ;; *) return 1 ;; esac
+  case "${reg}" in registered|unregistered|broken) ;; *) return 1 ;; esac
+  case "${bearer}" in set|unset) ;; *) return 1 ;; esac
+  case "${reach}" in unasked|true|false|unknown|unavailable) ;; *) return 1 ;; esac
+
+  if [ "${address}" = "maildir" ]; then
+    printf 'local\ta maildir channel was named, so the recipient is on this machine; a same-machine routed send needs this machine'"'"'s own server id, which no harness surface exposes yet (DND-314 gap)\n'
+    return 0
+  fi
+  case "${reg}" in
+    unregistered)
+      printf 'refuse\tthe recipient was addressed on the server and may be on another machine, but the athena MCP is not registered for this project; a message for another machine is never written to a local maildir\n'
+      return 0 ;;
+    broken)
+      printf 'refuse\tthe recipient was addressed on the server and may be on another machine, but this project'"'"'s athena MCP registration (in $HOME/.claude.json) cannot be read; a message for another machine is never written to a local maildir\n'
+      return 0 ;;
+  esac
+  if [ "${bearer}" = "unset" ]; then
+    printf 'refuse\tthe recipient was addressed on the server, but ATHENA_MCP_BEARER is not set in this session, so the athena MCP cannot be asked or used\n'
+    return 0
+  fi
+  case "${reach}" in
+    unasked) printf 'ask\tmachine_reachable for this machine decides it\n' ;;
+    true)    printf 'routed\tthe athena MCP is registered and the server reports this machine reachable\n' ;;
+    *)       printf 'refuse\tthe server does not confirm this machine reachable (machine_reachable: %s), and whether the recipient is on this machine cannot be decided client-side, so neither path is safe to pick for you\n' "${reach}" ;;
+  esac
+  return 0
+}
+
+# routed_default_refusal_fix -- the one Fix every no-flag refusal carries: the
+# two explicit choices, because the sender knows where the recipient is and
+# this client cannot.
+routed_default_refusal_fix() {
+  printf '%s\n' "choose the path yourself. If the recipient is on ANOTHER machine: send-mail --routed ... (the server holds the delivery pending until the recipient acks; register the MCP with scripts/add-athena-mcp and launch through scripts/athena if either is missing). If it is on THIS machine: send-mail --local <maildir-channel> <slug> --to <identity>. Run inbox-doctor to see both paths' health."
+}
+
+# routed_path_line <path> <reason> -- the one stdout line that says which path
+# a send took (or that none was taken). Printed on EVERY send-mail that reaches
+# a path decision, first, so the maildir and the routed result can never be
+# mistaken for each other by whoever reads the output.
+routed_path_line() {
+  case "$1" in
+    local|routed) printf 'athena:inbox: path: %s -- %s\n' "$1" "$2" ;;
+    refused)      printf 'athena:inbox: path: refused (nothing was sent) -- %s\n' "$2" ;;
+    *) return 1 ;;
+  esac
 }
 
 # routed_pick_machine <machines-json> <inbox_name> <selector>

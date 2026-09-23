@@ -42,6 +42,11 @@
 # (HG-20 machine_reachable): "skipped" (no token), "UNAVAILABLE" (asked, no
 # answer) and "checked, 0 pending" never read the same.
 #
+# SEND PATHS (DND-314). send-paths reports both of send-mail's paths for this
+# project -- routed (athena MCP registration, the session inbox, this machine's
+# reachability) and local (the maildir channels) -- and what the no-flag
+# default would pick.
+#
 # Tests: test/doctor/self-test.sh. Every probe is stubbed there; the suite never
 # opens a socket or reads a real pidfile.
 #--- end usage ---
@@ -133,6 +138,7 @@ collect_findings() {
   doctor_check_channels "${DOCTOR_MATCHED_ENTRY}" "."
   doctor_check_server "."
   doctor_check_server_reachability
+  doctor_check_send_paths "${DOCTOR_MATCHED_ENTRY}" "."
 }
 
 FINDINGS="$(collect_findings)"

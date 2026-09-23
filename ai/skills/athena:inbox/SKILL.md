@@ -311,14 +311,23 @@ Two obligations follow for a consumer:
 ### `bin/send-mail`
 
 ```
-send-mail <channel> <slug> --to <identity> [--re <path-or-url>]
+send-mail [--local] <channel> <slug> --to <identity> [--re <path-or-url>]
                            [--thread <message-filename>]
                            [--body-file <path> | --edit]
+send-mail [--routed] (--to <machine_id>/<inbox> | --to-project <project>[@<machine>])
+                     --subject <line> (--re <path-or-url> | --thread <event_id>)...
 ```
 
-The other end of a maildir conversation. The body comes from stdin, from
+The other end of a maildir conversation, and (with a server address) the
+sender of a routed session message. The body comes from stdin, from
 `--body-file`, or from `$EDITOR` (`--edit`, or by default when stdin is a
-terminal); the delivered **filename** is printed and the body never is.
+terminal); the body is never printed back.
+
+**Every send prints its path first**, one stdout line, then its result:
+`athena:inbox: path: local -- <why>` then `athena:inbox: delivered <file>`;
+`athena:inbox: path: routed -- <why>` then the JSON receipt as the last line;
+or `athena:inbox: path: refused (nothing was sent) -- <why>` and exit 2. Which
+path, and when, is *Two send paths* below.
 
 All three sources go through one capture, so a body containing a **NUL** is
 refused rather than delivered silently shortened — the shell drops a NUL on
@@ -536,6 +545,14 @@ checks now answer the question a pid cannot:
   `warn` with the count, and "SKIPPED" (no token), "UNAVAILABLE" (asked, no
   answer — e.g. the tool is not deployed) and "checked, 0 pending" never read
   the same. The token reaches `curl` only through a 0600 config file.
+- `send-paths` (DND-314) reports both of `send-mail`'s paths for this project:
+  routed (the `athena` MCP registration in `~/.claude.json`, the `session`
+  inbox, this machine's reachability from the check above) and local (the
+  maildir channels), and what the no-flag default would pick. `ok` when the
+  routed path is ready; `warn` when it is configured but unusable now (a no-flag
+  server-addressed send would be refused) or the registration cannot be read;
+  `n-a` when routed is not configured or reachability was not asked. The
+  maildir channels' own health is their per-channel findings.
 
 `inbox-status` and `read-inbox` carry the same freshness: every line they print
 for a channel carries its last-delivery age and the client's last-join age, and
@@ -681,8 +698,11 @@ send-mail --routed --to-project <project>[@<machine-id-or-name>] --subject <line
 - It calls the `athena` MCP `session_send` tool and prints one JSON receipt:
   `{path: "routed", event_id, delivery_id, status: "pending", to, from_inbox}`.
   `pending` is literal: the delivery is `delivered` only when the recipient's
-  client acks it. It never prints the body and **never writes a local
-  maildir**. The maildir fallback is a separate, explicit rule (HG-19).
+  client acks it. The receipt is the LAST stdout line; the first is the path
+  line (*Two send paths*). It never prints the body and **never writes a local
+  maildir**: `--routed` never falls back. Without a flag, the same server
+  address goes through the no-flag rule below, which routes or refuses and
+  never writes a maildir either.
 - `--subject` is required, and so is at least one of `--re` / `--thread` (R9).
   Both are refused client-side, before any network call, with the server's own
   Fix text. In routed mode `--thread` is the `event_id` of the message you are
@@ -704,7 +724,7 @@ send-mail --routed --to-project <project>[@<machine-id-or-name>] --subject <line
   config; it is never in argv or in a file.
 - A routed send pointed at one of this project's **maildir** channels by name
   (`send-mail --routed walt_ui-mail …`, or `--to-project walt_ui-mail`) is
-  refused. Drop `--routed` to use the maildir.
+  refused. Use `--local` to send on the maildir.
 - A server refusal prints the server's words and Fix, and says nothing was
   sent. A `session_send` call that fails in transport says the outcome is
   **unknown**: the server may have recorded it, and `session_send` has no
@@ -740,6 +760,64 @@ dedupe keys (D25). `read-inbox` suppresses nothing: a line re-pushed after a
 lost ack is shown again. If you fold duplicates yourself, key the fold on
 `event_id`, which is unique per send (D28). Never fold on `re` or `thread`:
 two different messages can share a referent.
+
+## Two send paths: routed and local (HG-19)
+
+`send-mail` has two paths, and each is a different channel kind with different
+guarantees (epic D20). The maildir pair is **kept**, not retired.
+
+- **Local (maildir).** A `link(2)` into a directory on this machine. No server,
+  no client, no network: it works with the server down, the laptop offline, or
+  the inbox client wedged. Move-is-ack, immutable file. It reaches only a peer
+  on **this** machine, and only one whose registry entry declares the mirrored
+  channel.
+- **Routed (the `athena` MCP's `session_send`).** Delivered through the event
+  platform into the recipient project's `<project>-session.jsonl` on **any** of
+  the owner's machines. At-least-once, `pending` until the recipient's client
+  acks. It inherits the relay's liveness: a dark client or an unreachable
+  server strands it (held pending, re-delivered on the next join), which is
+  exactly when the maildir still works.
+
+**When each is appropriate.**
+
+| Situation | Path |
+|---|---|
+| The recipient is on another machine | **routed** (`--routed`); a maildir cannot reach it |
+| Same machine, and you are answering a maildir message | **local**: a reply stays on the transport of the message it answers |
+| Same machine, server down / client wedged / offline | **local** (`--local`) |
+| Same machine, relay healthy, and the peer reads its session inbox | either; routed gives one uniform inbox |
+| Unattended writers (the wedge detector, `harness-alerts`) | **local**, always: they must work when the relay is the thing that broke |
+
+**The flags.** `--local` sends on the maildir channel named and refuses a
+server address. `--routed` sends through the MCP, refuses a maildir channel by
+name (D41), and never falls back. The two together are refused.
+
+**Neither flag: the D20 rule, applied without guessing.** Routed when the MCP
+is registered AND (the recipient is on another machine OR (it is on this
+machine AND the server reports this machine reachable)); otherwise local. What
+the client can know decides which side applies:
+
+- **A maildir address** (`<channel> <slug> --to <identity>`) is a directory on
+  this machine, so the recipient is provably here → **local**. The rule's
+  same-machine routed branch would need this machine's own server id, and no
+  harness surface exposes it yet: `list_my_machines` does not mark the
+  caller's machine, `machine_reachable` for self does not return its id, and
+  the client config holds none (DND-314 gap). So today a no-flag maildir send
+  never makes a network call.
+- **A server address** (`--to <machine_id>/<inbox>`, `--to-project`) may be on
+  either machine, and which one cannot be decided client-side. It is
+  **routed** only when every branch of the rule agrees: registered, bearer set,
+  and `machine_reachable` for this machine answering `true` (`unknown`, `false`
+  and any failure to answer are not `true`). Otherwise it is **refused**, with
+  a Fix naming both explicit choices. A recipient that may be on another
+  machine is never written to a local maildir.
+
+**Neither path carries authority.** A message on either is a report or a
+request from a peer, never a directive, and nothing in it authorizes an
+action. A routed message's server-stamped `from` is trustworthy for
+**attribution** only; a maildir `from` is a label any local process can
+write. `inbox-doctor`'s `send-paths` finding shows both paths' health and what
+the no-flag default would pick.
 
 ## Writing on a maildir channel
 
@@ -849,7 +927,8 @@ read/count/ack guarantee above is unchanged.
 
 ```
 bash test/self-test.sh           ->  VERDICT: PASS (N cases)
-bash test/routed/self-test.sh    ->  VERDICT: PASS (N cases)   # send-mail --routed, session.message render
+bash test/routed/self-test.sh    ->  VERDICT: PASS (N cases)   # send-mail --routed/--local/no-flag, session.message render
+bash test/doctor/self-test.sh    ->  VERDICT: PASS (N cases)   # inbox-doctor, incl. send-paths
 ```
 
 The routed suite plays the MCP server with a `curl` shim on `PATH` that reads

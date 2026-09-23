@@ -1586,7 +1586,8 @@ inbox_doorbell_channel() {
 #
 # There is NO fallback. A missing registration, a missing bearer, a refused
 # send and an unreachable server are each a refusal with its own Fix; none of
-# them writes a maildir. The explicit maildir fallback rule is HG-19's.
+# them writes a maildir. The maildir fallback is HG-19's no-flag rule
+# (inbox_default_path), which never applies once --routed was given.
 # inbox_routed_precheck <to-spec> <to-project-spec> <subject> <re> <thread>
 # The pure refusals alone, so the Framework can run them BEFORE it captures a
 # body (an $EDITOR opened for a message that is then refused for a missing
@@ -1612,10 +1613,89 @@ inbox_routed_channel_refusal() {
   return 1
 }
 
+# inbox_mcp_main_checkout [cwd]
+# The directory Claude Code keys this project's local-scope MCP registration by:
+# the MAIN checkout (where `add-athena-mcp` is told to run), which for a
+# worktree session is the parent of the git common dir. Status 1 outside a repo.
+inbox_mcp_main_checkout() {
+  local common
+  common="$(fs_git_common_dir "${1:-.}")" || return 1
+  case "${common}" in */.git) printf '%s\n' "${common%/.git}" ;; *) printf '%s\n' "${common}" ;; esac
+}
+
+# inbox_mcp_registration [cwd]
+# The registered `athena` MCP url for this project, on stdout, status 0.
+# Otherwise mcp_registered_url's statuses, never folded together:
+#   1 not registered · 3 registered but unreadable/broken · 2 internal (a lookup
+#   key computed wrongly, or no repository at all -- refused on stderr).
+inbox_mcp_registration() {
+  local cwd="${1:-.}" main top
+  main="$(inbox_mcp_main_checkout "${cwd}")" || {
+    inbox_fail "the athena MCP registration cannot be looked up: this directory is not inside a git repository" \
+      "run send-mail from inside the project's checkout (or one of its worktrees)."
+    return 2
+  }
+  top="$(mcp_toplevel "${cwd}")" || top="${main}"
+  mcp_registered_url "${main}" "${top}"
+}
+
+# inbox_self_reachable <url>
+# `machine_reachable` for THIS machine (no machine_id = self; gen_saas HG-20),
+# through the launcher bearer. Prints "<verdict>\t<detail>" where verdict is the
+# server's own three-valued answer (true | false | unknown) or `unavailable`
+# when anything stood between the question and an answer -- transport, HTTP, an
+# MCP error, the tool missing, a shape with no `reachable`. An unavailable
+# answer is NEVER read as reachable; <detail> says why, so "could not ask"
+# never looks like "asked, and it is fine".
+inbox_self_reachable() {
+  local out rc res r
+  out="$(mcp_call_tool "$1" machine_reachable '{}')"; rc=$?
+  if [ "${rc}" -ne 0 ]; then printf 'unavailable\t%s\n' "$(printf '%s' "${out}" | head -n 1)"; return 0; fi
+  res="$(routed_tool_result "${out}")"; rc=$?
+  if [ "${rc}" -ne 0 ]; then printf 'unavailable\tthe server answered machine_reachable with an error: %s\n' "$(printf '%s' "${res:-no result}" | head -n 1)"; return 0; fi
+  r="$(printf '%s' "${res}" | jq -r 'if type == "object" and has("reachable") then (.reachable | tostring) else "" end' 2>/dev/null)"
+  case "${r}" in
+    true|false|unknown) printf '%s\t\n' "${r}" ;;
+    *) printf 'unavailable\tthe machine_reachable answer carried no reachable verdict\n' ;;
+  esac
+}
+
+# inbox_default_path <maildir|server> [cwd]
+#
+# The no-flag `send-mail` decision (HG-19): "<path>\t<reason>" on stdout,
+# status 0, with <path> local | routed | refuse. Status 2 on an internal error
+# (already refused on stderr). The rule is routed_default_path's; this only
+# gathers its inputs, cheapest first: the registration and the bearer are
+# local reads, and machine_reachable is asked ONLY when the rule says the
+# answer decides it (a maildir address never makes a network call).
+inbox_default_path() {
+  local address="$1" cwd="${2:-.}" url rc reg bearer decision probe reach detail
+  if [ "${address}" = "maildir" ]; then
+    routed_default_path maildir unregistered unset unasked || return 2
+    return 0
+  fi
+  url="$(inbox_mcp_registration "${cwd}")"; rc=$?
+  case "${rc}" in
+    0) reg=registered ;;
+    1) reg=unregistered ;;
+    3) reg=broken ;;
+    *) return 2 ;;
+  esac
+  if [ -n "${ATHENA_MCP_BEARER:-}" ]; then bearer=set; else bearer=unset; fi
+  decision="$(routed_default_path server "${reg}" "${bearer}" unasked)" || return 2
+  if [ "${decision%%$'\t'*}" = "ask" ]; then
+    probe="$(inbox_self_reachable "${url}")"
+    reach="${probe%%$'\t'*}"; detail="${probe#*$'\t'}"
+    decision="$(routed_default_path server "${reg}" "${bearer}" "${reach}")" || return 2
+    [ -z "${detail}" ] || decision="${decision} (${detail})"
+  fi
+  printf '%s\n' "${decision}"
+}
+
 inbox_send_routed() {
   local to_spec="$1" project_spec="$2" subject="$3" re="$4" thread="$5" cwd="${6:-.}"
   local to_machine="" to_inbox="" project="" sel="" parsed body entry rc from_inbox
-  local common main top url out machines res args receipt
+  local main url out machines res args receipt
 
   inbox_routed_precheck "${to_spec}" "${project_spec}" "${subject}" "${re}" "${thread}" || return 1
   if [ -n "${to_spec}" ]; then
@@ -1645,13 +1725,8 @@ inbox_send_routed() {
   # say) is a routed send pointed at a maildir by name: refused, not guessed.
   if [ -n "${project}" ] && routed_maildir_name_refusal "${entry}" "${project}"; then return 1; fi
 
-  # Where Claude Code registered the `athena` MCP for this project. Local scope
-  # is keyed by the directory `add-athena-mcp` ran in -- the MAIN checkout --
-  # which for a worktree session is the parent of the git common dir.
-  common="$(fs_git_common_dir "${cwd}")" || { _inbox_no_entry_refusal "${cwd}"; return 1; }
-  case "${common}" in */.git) main="${common%/.git}" ;; *) main="${common}" ;; esac
-  top="$(mcp_toplevel "${cwd}")" || top="${main}"
-  url="$(mcp_registered_url "${main}" "${top}")"; rc=$?
+  main="$(inbox_mcp_main_checkout "${cwd}")" || { _inbox_no_entry_refusal "${cwd}"; return 1; }
+  url="$(inbox_mcp_registration "${cwd}")"; rc=$?
   [ "${rc}" -ne 2 ] || return 1
   if [ "${rc}" -eq 3 ]; then
     inbox_fail "the Claude Code config (\$HOME/.claude.json) could not be read, or its athena MCP entry has no url, so the registration cannot be trusted (nothing was sent)" \
@@ -1660,7 +1735,7 @@ inbox_send_routed() {
   fi
   if [ "${rc}" -ne 0 ]; then
     inbox_fail "the athena MCP server is not registered for this project, so a routed message cannot be sent (nothing was sent, and no maildir was written)" \
-      "run scripts/add-athena-mcp from this project's main checkout (${main}), then restart the session through scripts/athena. There is no silent fallback to a maildir channel; send-mail <channel> <slug> --to <identity> is the explicit maildir path."
+      "run scripts/add-athena-mcp from this project's main checkout (${main}), then restart the session through scripts/athena. There is no silent fallback to a maildir channel; send-mail --local <channel> <slug> --to <identity> is the explicit maildir path."
     return 1
   fi
   if [ -z "${ATHENA_MCP_BEARER:-}" ]; then
