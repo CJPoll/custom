@@ -111,10 +111,7 @@ gh api 'repos/<owner>/<repo>/activity?per_page=3' -q '.[]|.activity_type+" "+.re
 It must show `athena-harness[bot]`. If it does not, that is the next section's
 case.
 
-GitLab: `glab-athena` has **no** git passthrough, so there is no Athena push
-path on GitLab yet; a `git push` to a gitlab.com remote runs under the owner's
-SSH key. That gap was escalated with DND-389 rather than decided here. Until
-it is ruled on, follow your brief for GitLab pushes.
+GitLab pushes: see **athena:gitlab** → *Rules & etiquette* (the pushes item).
 
 ## When a forge write can't be done as Athena
 
