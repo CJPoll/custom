@@ -907,20 +907,265 @@ else
       "client saw: $(cat "${CASE_DIR}/seen-dump-mode" 2>/dev/null)"
 fi
 
-# 38. The liveness library is a prerequisite: a supervisor that cannot tell a
-#     wedged client from a working one is the silence DND-316 closes, so its
-#     absence is a loud exit 2 with a Fix:, never a quiet degraded run.
+# 38. A missing liveness library DEGRADES the supervisor, it never stops it:
+#     delivery outranks diagnostics, so a missing diagnostic tool must not be
+#     the reason the relay goes dark. The client is still started, and the gap
+#     is said loudly — on stderr (cron mails it) with a Fix:, and in the log.
 setup_case no_liveness_lib
 make_stub 0 0
 mkdir -p "${CASE_DIR}/lonely/scripts"
 cp "${RUNNER}" "${CASE_DIR}/lonely/scripts/athena-inbox-client-run.sh"
+cp "${SCRIPTS}/inbox-client-capture" "${CASE_DIR}/lonely/scripts/inbox-client-capture"
 err="$(XDG_STATE_HOME="${CASE_DIR}/xdg" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
-  bash "${CASE_DIR}/lonely/scripts/athena-inbox-client-run.sh" 2>&1 >/dev/null)"; rc=$?
-if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q 'liveness library is missing' && printf '%s' "$err" | grep -q 'Fix:' \
-   && [ "$(calls)" = "0" ]; then
-  ok "a missing liveness library is exit 2 with a Fix:, and no client is started"
+  ATHENA_INBOX_CLIENT_MAX_RESTARTS=1 bash "${CASE_DIR}/lonely/scripts/athena-inbox-client-run.sh" 2>&1 >/dev/null)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(calls)" = "1" ] && printf '%s' "$err" | grep -q 'liveness library is missing' \
+   && printf '%s' "$err" | grep -q 'Fix:' && grep -q 'DEGRADED: the liveness library is missing' "${LOG}"; then
+  ok "a missing liveness library still supervises the client, and says so (stderr Fix: + log)"
 else
-  bad "a missing liveness library is exit 2 with a Fix:, and no client is started" "rc=$rc calls=$(calls) err=${err}"
+  bad "a missing liveness library still supervises the client, and says so (stderr Fix: + log)" "rc=$rc calls=$(calls) err=${err}"
+fi
+
+# 38b. Same for the capture tool: the client is still supervised and the gap is
+#      loud. A watchdog pass on a WEDGED client follows the one no-capture rule
+#      (a dark relay outranks the evidence): it says NO CAPTURE POSSIBLE and
+#      still restarts it, identity-checked. The stub is not ruby, so here the
+#      identity check refuses and nothing is signalled -- which is also asserted.
+setup_case no_capture_tool
+make_stub 0 30
+mkdir -p "${CASE_DIR}/lonely/scripts" "${CASE_DIR}/lonely/ai/skills/athena:inbox/lib"
+cp "${RUNNER}" "${CASE_DIR}/lonely/scripts/athena-inbox-client-run.sh"
+cp "${SCRIPTS}/../ai/skills/athena:inbox/lib/liveness.sh" "${CASE_DIR}/lonely/ai/skills/athena:inbox/lib/"
+env XDG_STATE_HOME="${CASE_DIR}/xdg" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
+    ATHENA_INBOX_CLIENT_MAX_RESTARTS=1 bash "${CASE_DIR}/lonely/scripts/athena-inbox-client-run.sh" >/dev/null 2>"${CASE_DIR}/err" &
+SUPERVISOR_PID=$!
+if wait_for_nonempty "${CALLS}" 100; then
+  printf '%s INFO step dns 2ms\n' "$(date -u -d "@$(( $(date -u +%s) - 600 ))" +%Y-%m-%dT%H:%M:%SZ)" >> "${LOG}"
+  timeout 30 env XDG_STATE_HOME="${CASE_DIR}/xdg" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
+      bash "${CASE_DIR}/lonely/scripts/athena-inbox-client-run.sh" >/dev/null 2>&1
+  if grep -q 'inbox-client-capture is missing' "${CASE_DIR}/err" && grep -q 'Fix:' "${CASE_DIR}/err" \
+     && grep -q 'is missing — NO CAPTURE POSSIBLE; restarting anyway' "${LOG}" \
+     && grep -q 'WATCHDOG: could not identify the client — pid .* is not the ruby client' "${LOG}" && kill -0 "$(cat "${STUB_PID}")" 2>/dev/null; then
+    ok "a missing capture tool still supervises; the watchdog says NO CAPTURE POSSIBLE and still identity-checks before any signal"
+  else
+    bad "a missing capture tool still supervises; the watchdog says NO CAPTURE POSSIBLE and still identity-checks before any signal" "err=$(cat "${CASE_DIR}/err") log=$(grep -E 'WATCHDOG|DEGRADED' "${LOG}" | tr '\n' '|')"
+  fi
+else
+  bad "a missing capture tool still supervises; the watchdog says NO CAPTURE POSSIBLE and still identity-checks before any signal" "the client never started"
+fi
+# The stub's own `sleep 30` first, by parent pid, so nothing is orphaned.
+pkill -P "$(cat "${STUB_PID}" 2>/dev/null)" 2>/dev/null
+kill "$(cat "${STUB_PID}" 2>/dev/null)" 2>/dev/null
+kill "${SUPERVISOR_PID}" 2>/dev/null; timeout 15 tail --pid="${SUPERVISOR_PID}" -f /dev/null 2>/dev/null
+SUPERVISOR_PID=""
+
+# ---------------------------------------------------------------------------
+printf '\nI-13 watchdog: a wedge is CAPTURED, then restarted; a progressing client is never touched (DND-316/333)\n'
+#
+# The client here is the capture suite's ruby mock (mock-athena-inbox-client.rb)
+# started through a launcher that execs it, so the supervisor's child IS the
+# ruby process and inbox-client-capture's identity check is the production
+# one. The wedge is the LOG's last connect-cycle line — exactly what the
+# watchdog reads — backdated past its allowance.
+MOCK="${SCRIPTS}/test/inbox-client-capture/mock-athena-inbox-client.rb"
+WD_PIDS=()
+if ! command -v ruby >/dev/null 2>&1; then
+  bad "the watchdog cases need ruby for the mock client" "no ruby on PATH"
+else
+
+# start_wd_supervisor <mode> — a supervised mock client. Sets SUPERVISOR_PID
+# and CLIENT_PID (the ruby child). Launched via env so $! is the supervisor.
+start_wd_supervisor() {
+  cat > "${STUB}" <<STUBEOF
+#!/bin/sh
+exec ruby '${MOCK}'
+STUBEOF
+  chmod +x "${STUB}"
+  rm -f "${CASE_DIR}/ready"
+  env XDG_STATE_HOME="${CASE_DIR}/xdg" \
+      ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+      ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
+      ATHENA_INBOX_CLIENT_CONFIG="${CASE_DIR}/config.json" \
+      ATHENA_INBOX_CLIENT_MIN_BACKOFF=1 ATHENA_INBOX_CLIENT_MAX_BACKOFF=1 \
+      ATHENA_INBOX_CLIENT_MAX_RESTARTS=3 \
+      MOCK_MODE="$1" MOCK_DUMP_DIR="${CASE_DIR}/xdg/athena/inbox-client-dumps" MOCK_LOG="${LOG}" \
+      MOCK_READY="${CASE_DIR}/ready" MOCK_TERM_FILE="${CASE_DIR}/term" MOCK_TOKEN="SEKRETtok-watchdog-0123456789" \
+      MOCK_IGNORE_TERM="${WD_IGNORE_TERM:-0}" \
+      bash "${RUNNER}" >/dev/null 2>&1 &
+  SUPERVISOR_PID=$!
+  WD_PIDS+=("${SUPERVISOR_PID}")
+  CLIENT_PID=""
+  if wait_for_nonempty "${CASE_DIR}/ready" 100; then CLIENT_PID="$(cat "${CASE_DIR}/ready")"; WD_PIDS+=("${CLIENT_PID}"); fi
+  printf '{"token":"SEKRETtok-watchdog-0123456789"}' > "${CASE_DIR}/config.json"
+}
+run_watchdog() {
+  timeout 60 env XDG_STATE_HOME="${WD_XDG:-${CASE_DIR}/xdg}" \
+      ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" \
+      ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
+      ATHENA_INBOX_CLIENT_CONFIG="${CASE_DIR}/config.json" \
+      ATHENA_INBOX_CAPTURE_DUMP_WAIT="${1:-5}" \
+      bash "${RUNNER}" >/dev/null 2>&1
+}
+stop_wd_supervisor() {
+  kill "${SUPERVISOR_PID}" 2>/dev/null
+  timeout 15 tail --pid="${SUPERVISOR_PID}" -f /dev/null 2>/dev/null
+  # Children first (a stub's `sleep` would be orphaned to PID 1), then the pids.
+  local p; for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && pkill -9 -P "${p}" 2>/dev/null; done
+  for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && kill -9 "${p}" 2>/dev/null; done
+  SUPERVISOR_PID=""
+}
+backdated() { date -u -d "@$(( $(date -u +%s) - $1 ))" +%Y-%m-%dT%H:%M:%SZ; }
+caps() { find "${CASE_DIR}/xdg/athena/inbox-client-dumps" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort; }
+
+# 39. A PROGRESSING client — connected, quiet for an hour — is never captured
+#     and never signalled. A watchdog that killed idle healthy clients would be
+#     worse than none.
+setup_case wd_progressing
+start_wd_supervisor dump
+printf '%s INFO joined machine:self; instances: []\n' "$(backdated 3600)" >> "${LOG}"
+run_watchdog
+if [ -n "${CLIENT_PID}" ] && kill -0 "${CLIENT_PID}" 2>/dev/null && [ ! -e "${CASE_DIR}/term" ] && [ -z "$(caps)" ]; then
+  ok "a connected, quiet client is neither captured nor killed"
+else
+  bad "a connected, quiet client is neither captured nor killed" "client=${CLIENT_PID} term=$(cat "${CASE_DIR}/term" 2>/dev/null) caps=$(caps)"
+fi
+stop_wd_supervisor
+
+# 40-43. THE WEDGE: captured FIRST, then SIGTERM, then relaunched.
+setup_case wd_wedge
+start_wd_supervisor dump
+FIRST_CLIENT="${CLIENT_PID}"
+printf '%s INFO step tcp_connect 30ms\n' "$(backdated 600)" >> "${LOG}"
+run_watchdog
+CAPDIR="$(caps | tail -n 1)"
+if [ -n "${CAPDIR}" ] && [ -s "${CAPDIR}/dump.txt" ] && [ -s "${CAPDIR}/socket.txt" ] && [ -s "${CAPDIR}/fds.txt" ] \
+   && [ -s "${CAPDIR}/log-tail.txt" ] && [ -s "${CAPDIR}/signature.txt" ] && grep -q '^step: tls$' "${CAPDIR}/signature.txt"; then
+  ok "a wedged client is captured: dump + sockets + fds + log tail + signature (step tls)"
+else
+  bad "a wedged client is captured: dump + sockets + fds + log tail + signature (step tls)" "cap=${CAPDIR} $(command ls "${CAPDIR}" 2>/dev/null | tr '\n' ' ')"
+fi
+FIN="$(sed -n 's/^finished_ms: //p' "${CAPDIR}/capture.txt" 2>/dev/null)"
+TERM_AT="$(cat "${CASE_DIR}/term" 2>/dev/null)"
+if [ -n "${FIN}" ] && [ -n "${TERM_AT}" ] && [ "${FIN}" -le "${TERM_AT}" ]; then
+  ok "the capture FINISHED before the client received SIGTERM (${FIN} <= ${TERM_AT} ms) — never restart first"
+else
+  bad "the capture FINISHED before the client received SIGTERM — never restart first" "finished_ms=${FIN:-none} term_ms=${TERM_AT:-none}"
+fi
+if grep -q 'WATCHDOG: client pid .* WEDGED' "${LOG}" && grep -q 'WATCHDOG: captured ' "${LOG}" && grep -q 'WATCHDOG: SIGTERM client pid' "${LOG}" \
+   && [ "$(grep -n 'WATCHDOG: captured ' "${LOG}" | head -n1 | cut -d: -f1)" -lt "$(grep -n 'WATCHDOG: SIGTERM' "${LOG}" | head -n1 | cut -d: -f1)" ]; then
+  ok "the log records wedge -> captured -> SIGTERM, in that order, with the signature"
+else
+  bad "the log records wedge -> captured -> SIGTERM, in that order" "$(grep WATCHDOG "${LOG}" | tr '\n' '|')"
+fi
+rm -f "${CASE_DIR}/ready"
+if wait_for_nonempty "${CASE_DIR}/ready" 100 && [ "$(cat "${CASE_DIR}/ready")" != "${FIRST_CLIENT}" ] && kill -0 "${SUPERVISOR_PID}" 2>/dev/null; then
+  WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
+  ok "the owning supervisor relaunched a NEW client after the SIGTERM"
+else
+  bad "the owning supervisor relaunched a NEW client after the SIGTERM" "ready=$(cat "${CASE_DIR}/ready" 2>/dev/null) first=${FIRST_CLIENT}"
+fi
+if grep -rqF 'SEKRETtok' "${CAPDIR}" 2>/dev/null; then bad "the watchdog's capture carries no machine token" "token found"; else ok "the watchdog's capture carries no machine token"; fi
+stop_wd_supervisor
+
+# 44. A client that IGNORES SIGQUIT: the capture records the absent dump and
+#     the client is STILL restarted — an absent dump is evidence, not a reason
+#     to leave a wedged client up.
+setup_case wd_ignore
+start_wd_supervisor ignore
+printf '%s INFO reconnecting in 1.0s\n' "$(backdated 600)" >> "${LOG}"
+run_watchdog 2
+CAPDIR="$(caps | tail -n 1)"
+if [ -n "${CAPDIR}" ] && grep -q '^dump: absent (handler did not respond within 2s)$' "${CAPDIR}/capture.txt" && [ -s "${CASE_DIR}/term" ]; then
+  ok "an ignored SIGQUIT is recorded as 'dump: absent', and the client is still restarted"
+else
+  bad "an ignored SIGQUIT is recorded as 'dump: absent', and the client is still restarted" "cap=${CAPDIR} term=$(cat "${CASE_DIR}/term" 2>/dev/null)"
+fi
+
+# 45. The same wedge line is acted on ONCE. The restart writes new lines, so a
+#     new wedge has a new last line; re-seeing the old one must not capture and
+#     kill the fresh client.
+n_before="$(caps | wc -l)"
+rm -f "${CASE_DIR}/term" "${CASE_DIR}/ready"
+wait_for_nonempty "${CASE_DIR}/ready" 100 && WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
+tail -n 1 "${LOG}" >/dev/null
+grep 'INFO reconnecting in 1.0s' "${LOG}" | head -n 1 >> "${LOG}"
+run_watchdog 2
+if [ "$(caps | wc -l)" = "${n_before}" ] && [ ! -e "${CASE_DIR}/term" ]; then
+  ok "the same wedge line is not captured or killed twice"
+else
+  bad "the same wedge line is not captured or killed twice" "caps ${n_before} -> $(caps | wc -l), term=$(cat "${CASE_DIR}/term" 2>/dev/null)"
+fi
+stop_wd_supervisor
+
+# 45b. The client DIES during the capture window. Its supervisor relaunches a
+#      new client (a new pid) — or its pid is reused. Identity is re-asserted
+#      right before the signal, so the watchdog signals NOTHING rather than
+#      TERMing the fresh client or an unrelated process.
+setup_case wd_dies_mid_capture
+start_wd_supervisor exit
+printf '%s INFO step tls 48ms\n' "$(backdated 600)" >> "${LOG}"
+run_watchdog 3
+if grep -q 'no longer the supervised client after the capture; not signalling' "${LOG}" && [ ! -e "${CASE_DIR}/term" ] \
+   && ! grep -q 'WATCHDOG: SIGTERM' "${LOG}"; then
+  ok "a client that died mid-capture is not signalled: identity is re-checked before SIGTERM"
+else
+  bad "a client that died mid-capture is not signalled: identity is re-checked before SIGTERM" "$(grep WATCHDOG "${LOG}" | tr '\n' '|') term=$(cat "${CASE_DIR}/term" 2>/dev/null)"
+fi
+[ -s "${CASE_DIR}/ready" ] && WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
+stop_wd_supervisor
+
+# 45c. A client that IGNORES SIGTERM is escalated to SIGKILL after 10s — and
+#      only after its identity is re-checked.
+setup_case wd_sigkill
+WD_IGNORE_TERM=1 start_wd_supervisor dump
+STUBBORN="${CLIENT_PID}"
+printf '%s INFO step ws_upgrade 111ms\n' "$(backdated 600)" >> "${LOG}"
+run_watchdog 3
+if [ -s "${CASE_DIR}/term" ] && grep -q "WATCHDOG: client ${STUBBORN} ignored SIGTERM for 10s; sending SIGKILL" "${LOG}" \
+   && ! kill -0 "${STUBBORN}" 2>/dev/null; then
+  ok "a client that ignores SIGTERM is SIGKILLed after 10s (identity re-checked first)"
+else
+  bad "a client that ignores SIGTERM is SIGKILLed after 10s (identity re-checked first)" "$(grep WATCHDOG "${LOG}" | tr '\n' '|') alive=$(kill -0 "${STUBBORN}" 2>/dev/null && echo y || echo n)"
+fi
+[ -s "${CASE_DIR}/ready" ] && WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
+stop_wd_supervisor
+
+# 45d. The capture itself FAILS (no dump directory can be made). The client is
+#      still restarted — a dark relay outranks the evidence — but only after
+#      the attempt, and the failure is in the log where the capture would be.
+setup_case wd_capture_fails
+start_wd_supervisor dump
+mkdir -p "${CASE_DIR}/badxdg"; : > "${CASE_DIR}/badxdg/athena"
+printf '%s INFO step dns 2ms\n' "$(backdated 600)" >> "${LOG}"
+WD_XDG="${CASE_DIR}/badxdg" run_watchdog 2
+if grep -q 'WATCHDOG: capture FAILED (exit 2' "${LOG}" && grep -q 'restarting anyway' "${LOG}" && [ -s "${CASE_DIR}/term" ] \
+   && [ "$(grep -n 'capture FAILED' "${LOG}" | head -n1 | cut -d: -f1)" -lt "$(grep -n 'WATCHDOG: SIGTERM' "${LOG}" | head -n1 | cut -d: -f1)" ]; then
+  ok "a failed capture is logged, and only THEN is the client restarted"
+else
+  bad "a failed capture is logged, and only THEN is the client restarted" "$(grep WATCHDOG "${LOG}" | tr '\n' '|')"
+fi
+[ -s "${CASE_DIR}/ready" ] && WD_PIDS+=("$(cat "${CASE_DIR}/ready")")
+stop_wd_supervisor
+
+# 46. Could not identify the client (the supervisor's child is not the ruby
+#     client): NOTHING is captured or signalled, and the log says so in words
+#     that are not a capture outcome.
+setup_case wd_unidentified
+make_stub 0 30
+env XDG_STATE_HOME="${CASE_DIR}/xdg" ATHENA_INBOX_CLIENT_LAUNCHER="${STUB}" ATHENA_INBOX_CLIENT_STATE_DIR="${STATE_DIR}" \
+    ATHENA_INBOX_CLIENT_MAX_RESTARTS=1 bash "${RUNNER}" >/dev/null 2>&1 &
+SUPERVISOR_PID=$!; WD_PIDS+=("${SUPERVISOR_PID}")
+wait_for_nonempty "${CALLS}" 100
+printf '%s INFO step dns 2ms\n' "$(backdated 600)" >> "${LOG}"
+run_watchdog
+if grep -q 'could not identify the client' "${LOG}" && [ -z "$(caps)" ] && [ "$(calls)" = "1" ] && kill -0 "$(cat "${STUB_PID}")" 2>/dev/null; then
+  ok "an unidentifiable client: 'could not identify', nothing captured, nothing killed"
+else
+  bad "an unidentifiable client: 'could not identify', nothing captured, nothing killed" "$(grep WATCHDOG "${LOG}" | tr '\n' '|') caps=$(caps)"
+fi
+WD_PIDS+=("$(cat "${STUB_PID}" 2>/dev/null)")
+pkill -9 -P "$(cat "${STUB_PID}" 2>/dev/null)" 2>/dev/null
+stop_wd_supervisor
+
 fi
 
 # ---------------------------------------------------------------------------

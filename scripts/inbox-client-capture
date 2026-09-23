@@ -1,0 +1,468 @@
+#!/usr/bin/env bash
+#
+# inbox-client-capture — capture a wedged inbox client's evidence BEFORE anyone
+# restarts it (DND-333 / LV-2, epic decision D35).
+#
+# On 2026-09-22 the wedged client was SIGTERM'd first and the evidence of the
+# wedge — which step it was stuck in, its threads, its sockets — died with it.
+# The root cause is still unknown. This tool exists so the NEXT wedge leaves a
+# capture behind, and so a recurring wedge is recognisable by its signature.
+#
+# It never restarts or kills anything. The supervisor's watchdog
+# (scripts/athena-inbox-client-run.sh) calls it, waits for it, and only THEN
+# sends SIGTERM. A human who suspects a wedge runs `--now`: the same capture,
+# no restart.
+#
+# Usage:
+#   inbox-client-capture <pid> [--step STEP] [--reason TEXT]
+#                               capture the client <pid> (identity asserted)
+#   inbox-client-capture --now [--step STEP] [--reason TEXT]
+#                               resolve the supervised client and capture it
+#   inbox-client-capture --resolve-client
+#                               print the supervised client's pid, or say why not
+#   inbox-client-capture --self-test   run scripts/test/inbox-client-capture/self-test.sh
+#   inbox-client-capture --help        this text
+#
+# What one capture holds — ONE directory, 0700, files 0600:
+#   $XDG_STATE_HOME/athena/inbox-client-dumps/<utc>-<pid>/
+#     capture.txt    manifest: pid, reason, step, timestamps (ms), dump status
+#     dump.txt       the LV-1 client's own SIGQUIT dump (threads, flight
+#                    recorder, current_step, socket state) — MOVED in from the
+#                    loose <utc>-<pid>.txt the client writes beside this dir
+#     socket.txt     `ss -tnpi` filtered to the pid (CLOSE-WAIT / ESTAB, unread
+#                    bytes). Recorded as evidence only: CLOSE-WAIT is NOT a
+#                    wedge signature (it appears on healthy clients too)
+#     fds.txt        ls -l /proc/<pid>/fd
+#     status.txt     /proc/<pid>/status (state, threads)
+#     log-tail.txt   the last 200 lines of the client log
+#     signature.txt  the WEDGE SIGNATURE (below)
+#
+# LAYOUT (reconciling LV-1 and LV-2). The LV-1 client writes its dump as a
+# loose file <dumps>/<utc>-<pid>.txt; LV-2 asked for capture DIRECTORIES
+# <dumps>/<utc>-<pid>/ in the same parent. Both live in the one dump directory
+# (derived exactly as the client derives it, lib/liveness.sh → liveness_dump_dir).
+# The capture waits for the NEW loose dump this SIGQUIT produced and moves it
+# into its own directory as dump.txt, so each dump belongs to exactly one
+# capture and retention bounds both. A loose dump from a hand-sent SIGQUIT
+# outside a capture is left alone.
+#
+# SIGQUIT IS ONLY SENT TO A CLIENT KNOWN TO HANDLE IT. Ruby's default SIGQUIT
+# action exits the process, so a pre-LV-1 client would be killed by the very
+# signal meant to preserve its evidence. The capture sends it only when the
+# client script named in the pid's cmdline installs a QUIT trap and has not
+# changed since the process started; otherwise the manifest says `dump: not
+# requested (...)` and the rest of the capture still happens.
+#
+# AN ABSENT DUMP IS EVIDENCE. The capture waits (bounded, default 10 s) for the
+# client's dump. If none appears it records `dump: absent (handler did not
+# respond within 10s)` — a client whose signal handler cannot run is itself a
+# finding — and the rest of the capture still happens. It is never read as
+# "nothing to capture".
+#
+# THE WEDGE SIGNATURE, what LV-3 dedupes on: sha256 over the stalled step name
+# and the top 5 frames of the thread blocked in that step, each frame reduced to
+# `file:function` (no directories, line numbers or addresses), so the same
+# wedge after a code shuffle keeps its signature. The step comes from --step
+# (the watchdog's judgement from the log), else the dump's `current_step`, else
+# `unknown`. The thread is the step's worker (a frame `block in ...with_deadline`)
+# when there is one, else the first thread listed (MRI lists the main thread,
+# which runs the reconnect loop, first). With no dump, the frames are empty and
+# signature.txt says `source: no-dump`.
+#
+# ACCESS CONTROL. It runs as the user, on the user's OWN client only: the pid's
+# uid must be ours, its executable must be ruby, and its cmdline must name
+# athena-inbox-client.rb. `--now` / `--resolve-client` find the client as the
+# SUPERVISOR'S CHILD — the pid in the supervisor's pidfile, then `pgrep -P` of
+# it, asserting exactly one child — and never by pattern-matching the process
+# table (`pgrep -f` self-matches its own caller; measured twice). "Could not
+# identify the client" is its own exit code (3) and its own message, distinct
+# from a capture whose dump was absent.
+#
+# THE MACHINE TOKEN NEVER APPEARS. Every file is scanned for the token read from
+# the client config and for its first 8 characters, both replaced with
+# [REDACTED]; a file that still carries the prefix after that is deleted and
+# the manifest says so.
+#
+# RETENTION: keep the newest N capture directories (default 5); prune oldest
+# first BEFORE writing a new one, and never prune the one being written. SIZE:
+# each capture is capped (default 4 MiB total); the largest file is truncated
+# first, with a marker, until the capture fits.
+#
+# Environment (defaults are the production values):
+#   ATHENA_INBOX_CLIENT_STATE_DIR   supervisor state dir: pidfile, log (~/.local/state)
+#   XDG_STATE_HOME                  base of the dump dir, as the client derives it
+#   ATHENA_INBOX_CLIENT_CONFIG      client config, read ONLY for redaction
+#                                   (~/.config/athena-inbox-client/config.json)
+#   ATHENA_INBOX_CAPTURE_KEEP       capture dirs kept (5)
+#   ATHENA_INBOX_CAPTURE_MAX_BYTES  per-capture cap in bytes (4194304)
+#   ATHENA_INBOX_CAPTURE_DUMP_WAIT  seconds to wait for the dump (10)
+#
+# Output (stdout, on success): TAB-separated `dir`, `signature`, `dump` lines.
+# Exit codes: 0 captured (dump present OR absent) · 1 usage · 2 prerequisite
+#             (no dump dir, cannot create the capture) · 3 could not identify
+#             the client (nothing captured, nothing signalled)
+
+set -uo pipefail
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+LIVENESS_LIB="${HERE}/../ai/skills/athena:inbox/lib/liveness.sh"
+
+MODE="capture"; PID=""; STEP=""; REASON="manual"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --self-test) exec bash "${HERE}/test/inbox-client-capture/self-test.sh" ;;
+    --now) MODE="now" ;;
+    --resolve-client) MODE="resolve" ;;
+    --step) shift; [ $# -gt 0 ] || { echo "error: --step needs a value" >&2; echo "  Fix: pass --step <name>, e.g. --step tls." >&2; exit 1; }; STEP="$1" ;;
+    --reason) shift; [ $# -gt 0 ] || { echo "error: --reason needs a value" >&2; echo "  Fix: pass --reason <text>." >&2; exit 1; }; REASON="$1" ;;
+    --*) echo "error: unknown option: $1" >&2
+         echo "  Fix: see inbox-client-capture --help." >&2; exit 1 ;;
+    *) [ -z "${PID}" ] || { echo "error: more than one pid given" >&2; echo "  Fix: capture one client at a time: inbox-client-capture <pid>." >&2; exit 1; }
+       PID="$1" ;;
+  esac
+  shift
+done
+
+[ -r "${LIVENESS_LIB}" ] || {
+  echo "error: the liveness library is missing: ${LIVENESS_LIB}" >&2
+  echo "  Fix: run this from a complete ~/dev/custom checkout; restore ai/skills/athena:inbox/lib/liveness.sh with git." >&2
+  exit 2
+}
+# shellcheck source=ai/skills/athena:inbox/lib/liveness.sh
+. "${LIVENESS_LIB}"
+
+KEEP="${ATHENA_INBOX_CAPTURE_KEEP:-5}"
+MAX_BYTES="${ATHENA_INBOX_CAPTURE_MAX_BYTES:-4194304}"
+DUMP_WAIT="${ATHENA_INBOX_CAPTURE_DUMP_WAIT:-10}"
+for v in KEEP MAX_BYTES DUMP_WAIT; do
+  case "${!v}" in ''|*[!0-9]*) echo "error: ${v} must be a whole number (got '${!v}')" >&2
+    echo "  Fix: unset ATHENA_INBOX_CAPTURE_${v} or set it to a whole number." >&2; exit 1 ;; esac
+done
+[ "${KEEP}" -ge 1 ] || { echo "error: ATHENA_INBOX_CAPTURE_KEEP must be at least 1" >&2; echo "  Fix: keep at least the capture being written." >&2; exit 1; }
+CONFIG="${ATHENA_INBOX_CLIENT_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/athena-inbox-client/config.json}"
+
+# ---- identity ---------------------------------------------------------------
+
+# assert_client <pid> — status 0 when <pid> is OUR ruby athena-inbox-client;
+# otherwise status 3 and the reason on stdout. Read from /proc, never from a
+# process-table pattern match.
+assert_client() {
+  local p="$1" uid exe cmd
+  case "${p}" in ''|*[!0-9]*) printf 'not a pid: "%s"\n' "${p}"; return 3 ;; esac
+  [ -d "/proc/${p}" ] || { printf 'pid %s is not running\n' "${p}"; return 3; }
+  uid="$(stat -c %u "/proc/${p}" 2>/dev/null)"
+  [ "${uid}" = "$(id -u)" ] || { printf 'pid %s belongs to uid %s, not this user (%s)\n' "${p}" "${uid:-?}" "$(id -u)"; return 3; }
+  exe="$(readlink "/proc/${p}/exe" 2>/dev/null)"
+  case "${exe##*/}" in
+    ruby|ruby[0-9]*) ;;
+    *) printf 'pid %s is not the ruby client (exe %s) — during a restart backoff the supervisor'"'"'s child is a transient sleep\n' "${p}" "${exe:-unreadable}"; return 3 ;;
+  esac
+  cmd="$(tr '\0' ' ' <"/proc/${p}/cmdline" 2>/dev/null)"
+  case "${cmd}" in
+    *athena-inbox-client.rb*) ;;
+    *) printf 'pid %s is ruby but its cmdline does not name athena-inbox-client.rb\n' "${p}"; return 3 ;;
+  esac
+  return 0
+}
+
+# resolve_client — the supervised client: the ONE child of the supervisor pid
+# in the pidfile, asserted by assert_client. Prints the pid (status 0) or the
+# reason (status 3).
+resolve_client() {
+  local pf s kids n c why
+  pf="$(liveness_supervisor_pidfile)"
+  [ -r "${pf}" ] || { printf 'no supervisor pidfile at %s\n' "${pf}"; return 3; }
+  s="$(tr -d '[:space:]' <"${pf}" 2>/dev/null)"
+  case "${s}" in ''|*[!0-9]*) printf 'the supervisor pidfile %s holds no pid\n' "${pf}"; return 3 ;; esac
+  kill -0 "${s}" 2>/dev/null || { printf 'the supervisor pid %s is not running\n' "${s}"; return 3; }
+  kids="$(pgrep -P "${s}" 2>/dev/null)"
+  n="$(printf '%s' "${kids}" | grep -c '[0-9]')"
+  [ "${n}" -eq 1 ] || { printf 'the supervisor (pid %s) has %s children, expected exactly 1 (%s)\n' "${s}" "${n}" "$(printf '%s' "${kids}" | tr '\n' ' ')"; return 3; }
+  c="$(printf '%s' "${kids}" | tr -d '[:space:]')"
+  if ! why="$(assert_client "${c}")"; then printf '%s\n' "${why}"; return 3; fi
+  printf '%s\n' "${c}"
+}
+
+if [ "${MODE}" = "resolve" ]; then
+  if out="$(resolve_client)"; then printf '%s\n' "${out}"; exit 0; fi
+  printf 'could not identify the client: %s\n' "${out}"
+  exit 3
+fi
+
+if [ "${MODE}" = "now" ]; then
+  [ -z "${PID}" ] || { echo "error: --now resolves the client itself; do not also pass a pid" >&2; echo "  Fix: run either inbox-client-capture --now or inbox-client-capture <pid>." >&2; exit 1; }
+  if ! PID="$(resolve_client)"; then
+    echo "could not identify the client: ${PID}" >&2
+    echo "  Fix: check the supervisor is running (its pid is in $(liveness_supervisor_pidfile)) and not in a restart backoff; retry in a few seconds, or pass the client pid explicitly." >&2
+    exit 3
+  fi
+  [ "${REASON}" = "manual" ] && REASON="manual (--now)"
+fi
+
+[ -n "${PID}" ] || { echo "error: no pid given" >&2; echo "  Fix: inbox-client-capture <pid>, or --now to find the supervised client." >&2; exit 1; }
+if ! WHY="$(assert_client "${PID}")"; then
+  echo "could not identify the client: ${WHY}" >&2
+  echo "  Fix: pass the pid of THIS user's athena-inbox-client (ruby … athena-inbox-client.rb), or use --now; nothing was captured or signalled." >&2
+  exit 3
+fi
+
+# ---- the capture directory --------------------------------------------------
+
+now_ms() { date -u +%s%3N; }
+STARTED_MS="$(now_ms)"
+if ! DUMPS="$(liveness_dump_dir)"; then
+  echo "error: the dump directory does not resolve (XDG_STATE_HOME is relative: ${XDG_STATE_HOME:-})" >&2
+  echo "  Fix: set XDG_STATE_HOME to an absolute path or unset it (default ~/.local/state)." >&2
+  exit 2
+fi
+if ! { mkdir -p -- "${DUMPS}" 2>/dev/null && chmod 700 -- "${DUMPS}" 2>/dev/null && [ -d "${DUMPS}" ] && [ ! -L "${DUMPS}" ]; }; then
+  echo "error: cannot create the dump directory ${DUMPS} (0700)" >&2
+  echo "  Fix: make its parent writable or remove whatever sits there; inbox-doctor's dump-dir finding has the detail." >&2
+  exit 2
+fi
+
+# capture_dirs — existing capture directories, oldest first. Their names start
+# with a UTC stamp, so lexical order IS chronological order.
+capture_dirs() {
+  find "${DUMPS}" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended \
+    -regex '.*/[0-9]{8}T[0-9]{6}Z-[0-9]+(-[0-9]+)?' -printf '%f\n' 2>/dev/null | sort
+}
+
+# Retention, BEFORE the new capture exists: keep KEEP-1, so with the new one
+# there are KEEP. The capture being written is never a candidate.
+EXISTING="$(capture_dirs)"
+N_EXISTING="$(printf '%s' "${EXISTING}" | grep -c .)"
+if [ "${N_EXISTING}" -gt $(( KEEP - 1 )) ]; then
+  printf '%s\n' "${EXISTING}" | head -n $(( N_EXISTING - (KEEP - 1) )) | while IFS= read -r old; do
+    [ -n "${old}" ] && rm -rf -- "${DUMPS:?}/${old}"
+  done
+fi
+
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+CAP="${DUMPS}/${STAMP}-${PID}"
+i=1
+while ! mkdir -m 700 -- "${CAP}" 2>/dev/null; do
+  i=$(( i + 1 ))
+  [ "${i}" -le 20 ] || { echo "error: cannot create a capture directory under ${DUMPS}" >&2; echo "  Fix: check ${DUMPS} is writable (inbox-doctor dump-dir)." >&2; exit 2; }
+  CAP="${DUMPS}/${STAMP}-${PID}-${i}"
+done
+umask 077
+
+# ---- SIGQUIT, then the cheap evidence while the dump is written --------------
+
+# quit_handled <pid> — status 0 only when the RUNNING client is known to catch
+# SIGQUIT and dump (LV-1). Ruby's default SIGQUIT action raises SignalException
+# and the process exits, so sending it to a pre-LV-1 client would kill it and
+# destroy exactly the evidence this tool exists to keep. /proc SigCgt cannot
+# tell them apart (Ruby catches QUIT by default either way; measured), so the
+# check is on the code: the client script named in the cmdline must install a
+# QUIT trap, and must not have changed since the process started (else the
+# running code may not be the code on disk).
+quit_handled() {
+  local p="$1" src started mt
+  src="$(tr '\0' '\n' <"/proc/${p}/cmdline" 2>/dev/null | grep -m1 'athena-inbox-client\.rb$')"
+  [ -n "${src}" ] || return 1
+  case "${src}" in /*) ;; *) src="/proc/${p}/cwd/${src}" ;; esac
+  [ -r "${src}" ] || return 1
+  # Any spelling of a QUIT trap: trap("QUIT"), trap('QUIT'), trap(:QUIT),
+  # trap("SIGQUIT"). The LV-1 client writes Signal.trap("QUIT") (verified
+  # 2026-09-23 against gen_saas clients/athena-inbox-client, line 568).
+  grep -qE "trap\(\s*(:|[\"'])?(SIG)?QUIT" "${src}" 2>/dev/null || return 1
+  started="$(proc_start_epoch "${p}")" || return 1
+  mt="$(stat -c %Y -- "${src}" 2>/dev/null)" || return 1
+  # STRICTLY older: both clocks are whole seconds, so a source touched in the
+  # same second the process started cannot be ordered -- treat it as changed
+  # (the safe side: no SIGQUIT) rather than guess.
+  [ "${mt}" -lt "${started}" ]
+}
+
+# proc_start_epoch <pid> — the process's real start time (boot time + field 22
+# of /proc/<pid>/stat). NOT the mtime of /proc/<pid>: that inode is made when
+# someone first looks at it, which can be long after the process started.
+proc_start_epoch() {
+  local p="$1" btime ticks hz rest
+  btime="$(awk '$1=="btime"{print $2; exit}' /proc/stat 2>/dev/null)"
+  rest="$(sed 's/^.*) //' "/proc/${p}/stat" 2>/dev/null)" || return 1
+  ticks="$(printf '%s\n' "${rest}" | awk '{print $20}')"
+  hz="$(getconf CLK_TCK 2>/dev/null)"
+  case "${btime}:${ticks}:${hz}" in *[!0-9:]*|:*|*::*|*:) return 1 ;; esac
+  printf '%s\n' $(( btime + ticks / hz ))
+}
+
+BEFORE="$(find "${DUMPS}" -maxdepth 1 -type f -name "*-${PID}.txt" -printf '%f\n' 2>/dev/null | sort)"
+QUIT_MS="$(now_ms)"
+QUIT_RC=0
+QUIT_SENT=0
+if quit_handled "${PID}"; then
+  kill -QUIT "${PID}" 2>/dev/null || QUIT_RC=$?
+  QUIT_SENT=1
+fi
+
+if command -v ss >/dev/null 2>&1; then
+  # A socket record is its first line plus the indented -i lines under it; keep
+  # the records whose users:(...) names this pid.
+  ss -tnpi 2>/dev/null | awk -v p="pid=${PID}," '
+    /^[^ \t]/ { keep = (index($0, p) > 0) || (NR == 1) }
+    keep { print }' >"${CAP}/socket.txt"
+else
+  printf 'ss: not available on this machine\n' >"${CAP}/socket.txt"
+fi
+{ ls -l "/proc/${PID}/fd" 2>&1 || true; } >"${CAP}/fds.txt"
+{ cat "/proc/${PID}/status" 2>&1 || true; } >"${CAP}/status.txt"
+LOG="$(liveness_client_log)"
+if [ -r "${LOG}" ]; then tail -n 200 -- "${LOG}" >"${CAP}/log-tail.txt" 2>/dev/null
+else printf 'no client log at %s\n' "${LOG}" >"${CAP}/log-tail.txt"; fi
+
+# ---- wait (bounded) for the LV-1 dump ---------------------------------------
+# A real sleep between checks and a hard iteration bound: never a spin. The
+# dump is complete when the client has logged `diagnostics: wrote <path>`, or,
+# failing that line, when its size holds still across two polls.
+DUMP_STATUS=""; DUMP_FILE=""
+# One poll per second: the client writes its dump within about a second, so a
+# faster cadence would only hammer the directory.
+deadline_polls="${DUMP_WAIT}"
+polls=0; last_size=-1
+if [ "${QUIT_SENT}" -eq 0 ]; then
+  DUMP_STATUS="not requested (cannot confirm the running client handles SIGQUIT; a pre-LV-1 client would die of it and the evidence with it)"
+elif [ "${QUIT_RC}" -ne 0 ]; then
+  DUMP_STATUS="absent (SIGQUIT could not be delivered)"
+else
+  while [ "${polls}" -lt "${deadline_polls}" ]; do
+    if [ -z "${DUMP_FILE}" ]; then
+      NEW="$(find "${DUMPS}" -maxdepth 1 -type f -name "*-${PID}.txt" -printf '%f\n' 2>/dev/null | sort | comm -13 <(printf '%s\n' "${BEFORE}") - | tail -n 1)"
+      [ -n "${NEW}" ] && DUMP_FILE="${DUMPS}/${NEW}"
+    fi
+    if [ -n "${DUMP_FILE}" ]; then
+      if grep -qF "diagnostics: wrote ${DUMP_FILE}" "${LOG}" 2>/dev/null; then DUMP_STATUS="present"; break; fi
+      size="$(stat -c %s -- "${DUMP_FILE}" 2>/dev/null || echo -1)"
+      if [ "${size}" -gt 0 ] && [ "${size}" = "${last_size}" ]; then DUMP_STATUS="present (completion inferred from a stable size; no 'diagnostics: wrote' log line)"; break; fi
+      last_size="${size}"
+    fi
+    sleep 1
+    polls=$(( polls + 1 ))
+  done
+  if [ -z "${DUMP_STATUS}" ]; then
+    if [ -n "${DUMP_FILE}" ]; then DUMP_STATUS="partial (a dump file appeared but did not complete within ${DUMP_WAIT}s)"
+    else DUMP_STATUS="absent (handler did not respond within ${DUMP_WAIT}s)"; fi
+  fi
+fi
+if [ -n "${DUMP_FILE}" ] && [ -f "${DUMP_FILE}" ]; then
+  mv -f -- "${DUMP_FILE}" "${CAP}/dump.txt" 2>/dev/null || cp -- "${DUMP_FILE}" "${CAP}/dump.txt" 2>/dev/null
+fi
+
+# ---- redaction -----------------------------------------------------------------
+REDACTION="no token available to redact (no readable client config)"
+TOKEN=""
+if [ -r "${CONFIG}" ] && command -v jq >/dev/null 2>&1; then
+  TOKEN="$(jq -r '.token // empty' <"${CONFIG}" 2>/dev/null | tr -d '\r\n')"
+fi
+if [ -n "${TOKEN}" ]; then
+  PREFIX="${TOKEN:0:8}"
+  REDACTION="token and its 8-char prefix replaced with [REDACTED]"
+  for f in "${CAP}"/*; do
+    [ -f "${f}" ] || continue
+    # The token travels in the environment, never in argv (/proc/<pid>/cmdline
+    # is world-readable; environ is not).
+    TOK="${TOKEN}" PFX="${PREFIX}" awk '
+      BEGIN { t = ENVIRON["TOK"]; p = ENVIRON["PFX"] }
+      {
+        line = $0
+        while ((i = index(line, t)) > 0) line = substr(line, 1, i - 1) "[REDACTED]" substr(line, i + length(t))
+        while ((i = index(line, p)) > 0) line = substr(line, 1, i - 1) "[REDACTED]" substr(line, i + length(p))
+        print line
+      }' "${f}" >"${f}.redacted" && mv -f -- "${f}.redacted" "${f}"
+    if grep -qF -- "${PREFIX}" "${f}" 2>/dev/null; then
+      rm -f -- "${f}"
+      REDACTION="${REDACTION}; ${f##*/} still carried the token prefix after redaction and was DELETED"
+    fi
+  done
+fi
+unset TOKEN PREFIX
+
+# ---- the wedge signature --------------------------------------------------------
+DUMP_STEP=""
+[ -f "${CAP}/dump.txt" ] && DUMP_STEP="$(sed -n 's/^current_step: //p' "${CAP}/dump.txt" | head -n 1)"
+SIG_STEP="${STEP:-${DUMP_STEP:-unknown}}"
+[ "${SIG_STEP}" = "(none)" ] && SIG_STEP="unknown"
+FRAMES=""
+SOURCE="no-dump"
+if [ -f "${CAP}/dump.txt" ]; then
+  SOURCE="dump"
+  # One thread block = the "  thread 0x…" line and its "    frame" lines. Pick
+  # the step's worker (a `block in …with_deadline` frame) if any, else the
+  # first thread; keep its top 5 frames as basename:function.
+  FRAMES="$(awk '
+    /^threads \(/ { inth = 1; next }
+    inth && /^  thread / { t++; next }
+    inth && /^    / {
+      f = $0; sub(/^ +/, "", f)
+      if (f ~ /^\(no backtrace/) next
+      n[t]++; fr[t, n[t]] = f
+      if (f ~ /block in .*with_deadline/) w[t] = 1
+      next
+    }
+    inth && /^[^ ]/ { inth = 0 }
+    END {
+      pick = 0
+      for (i = 1; i <= t; i++) if (w[i]) { pick = i; break }
+      if (!pick && t >= 1) pick = 1
+      for (j = 1; j <= n[pick] && j <= 5; j++) {
+        f = fr[pick, j]
+        fn = f; sub(/^.*:in [`'"'"']/, "", fn); sub(/'"'"'$/, "", fn)
+        file = f; sub(/:[0-9]+:in .*$/, "", file); sub(/^.*\//, "", file)
+        print file ":" fn
+      }
+    }' "${CAP}/dump.txt")"
+fi
+SIGNATURE="$(printf 'step:%s\n%s\n' "${SIG_STEP}" "${FRAMES}" | sha256sum | cut -d' ' -f1)"
+{
+  printf 'signature: %s\n' "${SIGNATURE}"
+  printf 'step: %s\n' "${SIG_STEP}"
+  printf 'source: %s\n' "${SOURCE}"
+  printf 'frames:\n'
+  [ -n "${FRAMES}" ] && printf '%s\n' "${FRAMES}" | sed 's/^/  /'
+} >"${CAP}/signature.txt"
+
+# ---- size cap: truncate the largest file first, with a marker ------------------
+MARKER="
+...[truncated by inbox-client-capture: capture exceeded ${MAX_BYTES} bytes]...
+"
+cap_total() { find "${CAP}" -type f -printf '%s\n' | awk '{s += $1} END {print s + 0}'; }
+rounds=0
+while [ "$(cap_total)" -gt "${MAX_BYTES}" ] && [ "${rounds}" -lt 10 ]; do
+  rounds=$(( rounds + 1 ))
+  big="$(find "${CAP}" -type f ! -name signature.txt -printf '%s %p\n' | sort -n | tail -n 1 | cut -d' ' -f2-)"
+  [ -n "${big}" ] || break
+  over=$(( $(cap_total) - MAX_BYTES ))
+  size="$(stat -c %s -- "${big}")"
+  keep=$(( size - over - ${#MARKER} - 1024 ))
+  [ "${keep}" -ge 0 ] || keep=0
+  { head -c "${keep}" -- "${big}"; printf '%s' "${MARKER}"; } >"${big}.cap" && mv -f -- "${big}.cap" "${big}"
+done
+
+FINISHED_MS="$(now_ms)"
+{
+  printf 'inbox-client-capture (DND-333)\n'
+  printf 'pid: %s\n' "${PID}"
+  printf 'reason: %s\n' "${REASON}"
+  printf 'step: %s\n' "${SIG_STEP}"
+  printf 'dump: %s\n' "${DUMP_STATUS}"
+  printf 'dump_current_step: %s\n' "${DUMP_STEP:-n/a}"
+  printf 'signature: %s\n' "${SIGNATURE}"
+  printf 'redaction: %s\n' "${REDACTION}"
+  printf 'started_ms: %s\n' "${STARTED_MS}"
+  printf 'sigquit_ms: %s\n' "${QUIT_MS}"
+  printf 'finished_ms: %s\n' "${FINISHED_MS}"
+  printf 'cap_bytes: %s (truncation rounds: %s)\n' "${MAX_BYTES}" "${rounds}"
+} >"${CAP}/capture.txt"
+chmod 600 "${CAP}"/* 2>/dev/null
+chmod 700 "${CAP}"
+
+printf 'dir\t%s\n' "${CAP}"
+printf 'signature\t%s\n' "${SIGNATURE}"
+printf 'dump\t%s\n' "${DUMP_STATUS}"
+exit 0

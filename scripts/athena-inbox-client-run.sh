@@ -47,8 +47,18 @@
 # installer refuses to schedule a missing launcher in the first place, so this
 # should only fire when something was removed out from under a working setup.
 #
+# Watchdog (DND-316 / DND-333): the invocation that finds the lock HELD — the
+# */5 cron tick while a supervisor is alive — is no longer a bare no-op. It
+# judges the client from its log (lib/liveness.sh). A client stuck mid-
+# reconnect past its allowance is WEDGED: the tick CAPTURES it
+# (scripts/inbox-client-capture) and only then SIGTERMs it, and the owning
+# supervisor relaunches it. Never restart first. A progressing client is never
+# captured or signalled. Run this script by hand to force a watchdog pass now.
+#
 # Usage:
-#   athena-inbox-client-run.sh            supervise the client (blocks)
+#   athena-inbox-client-run.sh            supervise the client (blocks), or, if
+#                                         a supervisor already holds the lock,
+#                                         run one watchdog pass and exit 0
 #   athena-inbox-client-run.sh --help     show this help
 #
 # Environment (all optional; the defaults are the production values):
@@ -63,6 +73,10 @@
 #   ATHENA_INBOX_CLIENT_MAX_LOG_LINES trim the log to this many lines between
 #                                     client runs (2000). See the caveat under
 #                                     "Log size" below.
+#   ATHENA_INBOX_CLIENT_WEDGE_AFTER   seconds past a reconnect step's declared
+#                                     backoff before the client is WEDGED (60)
+#   XDG_STATE_HOME                    base of the client's dump directory, as
+#                                     the client derives it (~/.local/state)
 #
 # Stopping it: kill the pid in ~/.local/state/athena-inbox-client.pid. SIGTERM
 # and SIGINT reap the client and stop the SUPERVISOR — they do not fall back
@@ -88,13 +102,18 @@
 # Liveness (DND-316) and the dump directory: the supervisor sources
 # ai/skills/athena:inbox/lib/liveness.sh — the ONE wedge predicate and the ONE
 # dump-dir derivation this machine has — and creates the client's SIGQUIT dump
-# directory (0700) before every client start. The client creates it lazily on
+# directory (0700) before every client start. (Missing, it degrades loudly
+# rather than refusing to supervise: see degraded_notice.) The client creates it lazily on
 # its first dump, so without this "no dumps yet" and "the dump path is broken"
 # read the same until the wedge whose evidence has nowhere to go.
 #
-# Exit codes: 0 ok (client exited cleanly, or another instance holds the lock,
-#             or the stop marker is present) · 1 usage/arg error
+# Exit codes: 0 ok (client exited cleanly, or another instance holds the lock
+#             and the watchdog pass ran, or the stop marker is present)
+#             · 1 usage/arg error
 #             · 2 missing prerequisite (no launcher, no flock, unusable state dir)
+#             A missing liveness library or inbox-client-capture is NOT fatal:
+#             the client is still supervised, the gap is reported on stderr and
+#             in the log, and inbox-doctor's `watchdog` finding fails.
 #             · 130 interrupted (SIGINT) · 143 terminated (SIGTERM)
 
 set -uo pipefail
@@ -183,19 +202,38 @@ command -v flock >/dev/null 2>&1 || {
   exit 2
 }
 
-# The liveness library: the wedge predicate and the dump-dir derivation, shared
-# with inbox-doctor so the two can never disagree about either. Its absence is
-# a broken checkout, not a mode to run in: without it the supervisor could not
-# tell a wedged client from a working one, which is the silence DND-316 closes.
+# The liveness library (the wedge predicate and the dump-dir derivation, shared
+# with inbox-doctor so the two can never disagree) and inbox-client-capture are
+# the watchdog's two tools. Their absence DEGRADES the supervisor, it never
+# stops it: delivery outranks diagnostics, so a missing diagnostic tool must not
+# be the reason the relay goes dark. Missing either one, the supervise path
+# still keeps the client alive and says so loudly (stderr once per supervisor
+# start, so cron mails it, and the log), and the watchdog pass is skipped with
+# a log line; inbox-doctor's `watchdog` finding fails until they are restored.
 __liveness_lib="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)/../ai/skills/athena:inbox/lib/liveness.sh"
-[ -r "$__liveness_lib" ] || {
-  echo "error: the liveness library is missing: $__liveness_lib" >&2
-  echo "  Fix: run this script from a complete ~/dev/custom checkout (it needs" \
-       "ai/skills/athena:inbox/lib/liveness.sh beside scripts/); restore the file with git." >&2
-  exit 2
+HAVE_LIVENESS=0
+if [ -r "$__liveness_lib" ]; then
+  # shellcheck source=ai/skills/athena:inbox/lib/liveness.sh
+  . "$__liveness_lib" && HAVE_LIVENESS=1
+fi
+HAVE_CAPTURE=0
+[ -x "$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)/inbox-client-capture" ] && HAVE_CAPTURE=1
+
+# degraded_notice <to-stderr:0/1> — name each missing watchdog tool, with a Fix:.
+degraded_notice() {
+  local loud="$1" msg
+  [ "$HAVE_LIVENESS" -eq 1 ] || {
+    msg="the liveness library is missing ($__liveness_lib): no wedge detection, no dump directory"
+    say "DEGRADED: $msg"
+    [ "$loud" -eq 1 ] && { echo "warning: $msg" >&2; echo "  Fix: restore ai/skills/athena:inbox/lib/liveness.sh with git; the client is still supervised meanwhile." >&2; }
+  }
+  [ "$HAVE_CAPTURE" -eq 1 ] || {
+    msg="scripts/inbox-client-capture is missing or not executable: a wedge cannot be captured before restart (D35); the watchdog will restart it with NO evidence"
+    say "DEGRADED: $msg"
+    [ "$loud" -eq 1 ] && { echo "warning: $msg" >&2; echo "  Fix: restore scripts/inbox-client-capture with git and chmod +x it; the client is still supervised meanwhile." >&2; }
+  }
+  return 0
 }
-# shellcheck source=ai/skills/athena:inbox/lib/liveness.sh
-. "$__liveness_lib"
 
 # ---- the stop marker refuses the start ------------------------------------
 # Checked BEFORE taking the lock so the state is reported even if a stale
@@ -211,6 +249,155 @@ if [ -e "$STOPFILE" ]; then
   exit 0
 fi
 
+# ---- the watchdog (DND-316 detector + DND-333 capture, epic D35) ------------
+# Runs on the lock-held path, i.e. in the */5 cron invocation that finds a live
+# supervisor. The ORDER is the whole point and is fixed:
+#
+#   1. judge  — liveness_verdict on the client log. Anything but `wedged` is a
+#               no-op: a client that is connected (however quiet) or still
+#               inside its reconnect allowance is never captured or killed.
+#   2. find   — the client is the supervisor's ONE child (inbox-client-capture
+#               --resolve-client: pidfile → pgrep -P → uid/exe/cmdline
+#               asserted). Never a pattern match. If it cannot be identified
+#               (e.g. the child is the backoff `sleep`), NOTHING is signalled,
+#               and the log says "could not identify", distinct from any
+#               capture outcome.
+#   3. capture — inbox-client-capture <pid>: SIGQUIT for the LV-1 dump, sockets,
+#               fds, status, log tail, signature. It must FINISH before step 4.
+#   4. restart — only now SIGTERM the client (bounded wait, then SIGKILL); the
+#               owning supervisor sees it exit and relaunches it with backoff.
+#
+# NEVER RESTART FIRST. On 2026-09-22 the wedged client was SIGTERM'd first and
+# the evidence of the wedge was destroyed; the root cause is still unknown.
+#
+# If NO capture is possible — the capture FAILS (exit 2: no dump directory) or
+# the capture tool is missing — the client is still restarted: a dark relay
+# outranks the evidence. One rule for both, applied only after the attempt (or
+# the finding that none can be made), and logged where the capture would have
+# been named. An absent DUMP is not a capture failure (it is recorded evidence).
+#
+# The wedge allowance (ATHENA_INBOX_CLIENT_WEDGE_AFTER, 60 s past any declared
+# backoff) is above every LV-1 per-step deadline (dns 10 s, tcp 10 s, tls 15 s,
+# ws_upgrade 15 s, join 10 s), so a client that is failing SLOWLY during a
+# server outage logs its failed step and reconnects before it can read as
+# wedged. Only a step that outlives its own deadline trips the watchdog.
+#
+# The last wedge acted on is remembered (its log line) so the SAME wedge line
+# is not captured twice; a new wedge has a new last line because the restart
+# writes new ones.
+CAPTURE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)/inbox-client-capture"
+WATCHDOG_MARK="${STATE_DIR}/athena-inbox-client.watchdog"
+
+watchdog_pass() {
+  local v state step age detail line c out rc dir sig dump
+  if [ "$HAVE_LIVENESS" -ne 1 ]; then
+    say "WATCHDOG: skipped — the liveness library is missing, so a wedge cannot be judged"
+    return 0
+  fi
+  v="$(liveness_verdict "$LOG")"
+  IFS=$'\t' read -r state step age detail <<<"$v"
+  [ "$state" = "wedged" ] || return 0
+
+  line="$(liveness_last_event "$LOG" 2>/dev/null)"
+  if [ -n "$line" ] && [ "$(cat "$WATCHDOG_MARK" 2>/dev/null)" = "$line" ]; then
+    return 0
+  fi
+
+  if [ ! -x "$CAPTURE" ]; then
+    # ONE rule for "no capture is possible", whether the tool is missing or the
+    # capture fails: a dark relay outranks the evidence, so the client is still
+    # restarted -- after saying loudly that nothing was captured. Identity is
+    # still asserted (without the tool, from the pidfile's one child directly).
+    say "WATCHDOG: client WEDGED (${detail}) but $CAPTURE is missing — NO CAPTURE POSSIBLE; restarting anyway (a dark relay outranks the evidence)"
+    say "  Fix: restore scripts/inbox-client-capture (git); inbox-doctor's watchdog finding fails until then."
+    c="$(fallback_client)" || { say "WATCHDOG: could not identify the client — ${c}; nothing signalled"; return 0; }
+    restart_client "$c" "$line"
+    return 0
+  fi
+
+  if ! c="$("$CAPTURE" --resolve-client 9>&- 2>/dev/null)"; then
+    say "WATCHDOG: client WEDGED (${detail}) but could not identify the client — ${c#could not identify the client: }; nothing captured, nothing signalled"
+    return 0
+  fi
+
+  say "WATCHDOG: client pid ${c} WEDGED (${detail}); capturing BEFORE restart (D35)"
+  out="$("$CAPTURE" "$c" --step "$step" --reason "watchdog: ${detail}" 9>&- 2>&1)"; rc=$?
+  case "$rc" in
+    0)
+      dir="$(printf '%s\n' "$out" | awk -F'\t' '$1=="dir"{print $2}')"
+      sig="$(printf '%s\n' "$out" | awk -F'\t' '$1=="signature"{print substr($2,1,8)}')"
+      dump="$(printf '%s\n' "$out" | awk -F'\t' '$1=="dump"{print $2}')"
+      say "WATCHDOG: captured ${dir} (signature ${sig}, dump ${dump})"
+      ;;
+    3)
+      # The client changed identity between resolve and capture (it exited, or
+      # the pid is a backoff sleep now). Nothing was signalled; do not kill it.
+      say "WATCHDOG: could not identify the client at capture time — $(printf '%s' "$out" | head -n 1); nothing signalled"
+      return 0
+      ;;
+    *)
+      say "WATCHDOG: capture FAILED (exit ${rc}: $(printf '%s' "$out" | head -n 1)); restarting anyway — a dark relay outranks the evidence"
+      ;;
+  esac
+
+  # The capture took up to ~10s. In that window the client may have exited and
+  # been relaunched (a new pid), or its pid may even have been reused by an
+  # unrelated process of this user. So identity is RE-ASSERTED immediately
+  # before every signal: the pid must still be the supervisor's one child and
+  # still our ruby client. Anything else is logged and NOT signalled.
+  if ! still_client "$c"; then
+    say "WATCHDOG: client pid ${c} is no longer the supervised client after the capture; not signalling"
+    return 0
+  fi
+  restart_client "$c" "$line"
+  return 0
+}
+
+# restart_client <pid> <wedge-line> — SIGTERM, bounded wait, re-assert, SIGKILL.
+restart_client() {
+  local c="$1" line="$2"
+  say "WATCHDOG: SIGTERM client pid ${c}; its supervisor relaunches it"
+  printf '%s\n' "$line" >"$WATCHDOG_MARK" 2>/dev/null || true
+  kill -TERM "$c" 2>/dev/null
+  timeout 10 tail --pid="$c" -f /dev/null >/dev/null 2>&1
+  if kill -0 "$c" 2>/dev/null; then
+    if still_client "$c"; then
+      say "WATCHDOG: client ${c} ignored SIGTERM for 10s; sending SIGKILL"
+      kill -KILL "$c" 2>/dev/null
+    else
+      say "WATCHDOG: pid ${c} is alive but no longer the supervised client; not sending SIGKILL"
+    fi
+  fi
+}
+
+# still_client <pid> — status 0 only while <pid> is STILL the supervisor's one
+# child and our ruby client (inbox-client-capture --resolve-client, re-run; the
+# fallback check when that tool is missing).
+still_client() {
+  local now
+  if [ -x "$CAPTURE" ]; then now="$("$CAPTURE" --resolve-client 9>&- 2>/dev/null)" || return 1
+  else now="$(fallback_client)" || return 1; fi
+  [ "$now" = "$1" ]
+}
+
+# fallback_client — the same identity rule as inbox-client-capture
+# --resolve-client, for when that tool is missing: the ONE child of the pid in
+# the pidfile, our uid, a ruby executable, a cmdline naming
+# athena-inbox-client.rb. Prints the pid, or the reason (status 1).
+fallback_client() {
+  local s kids n c exe
+  s="$(tr -d '[:space:]' <"$PIDFILE" 2>/dev/null)"
+  case "$s" in ''|*[!0-9]*) echo "no supervisor pid in $PIDFILE"; return 1 ;; esac
+  kids="$(pgrep -P "$s" 2>/dev/null)"; n="$(printf '%s' "$kids" | grep -c '[0-9]')"
+  [ "$n" -eq 1 ] || { echo "the supervisor has $n children, expected 1"; return 1; }
+  c="$(printf '%s' "$kids" | tr -d '[:space:]')"
+  [ "$(stat -c %u "/proc/$c" 2>/dev/null)" = "$(id -u)" ] || { echo "pid $c is not ours"; return 1; }
+  exe="$(readlink "/proc/$c/exe" 2>/dev/null)"
+  case "${exe##*/}" in ruby|ruby[0-9]*) ;; *) echo "pid $c is not the ruby client (exe ${exe:-?})"; return 1 ;; esac
+  case "$(tr '\0' ' ' <"/proc/$c/cmdline" 2>/dev/null)" in *athena-inbox-client.rb*) ;; *) echo "pid $c cmdline does not name athena-inbox-client.rb"; return 1 ;; esac
+  printf '%s\n' "$c"
+}
+
 # ---- single instance -------------------------------------------------------
 # Opened append-only: a truncating redirect would clobber the recorded pid
 # BEFORE the lock is known to be ours. Writability is probed first because a
@@ -224,8 +411,13 @@ touch -- "$PIDFILE" 2>/dev/null || {
 exec 9>>"$PIDFILE"
 
 if ! flock -n 9; then
-  # Normal, expected path for the */5 relaunch entry while the client is
-  # healthy. Silent by design — see the output discipline note above.
+  # Normal, expected path for the */5 relaunch entry: another supervisor is
+  # alive. Before DND-316 this exited at once, which is exactly why a wedged
+  # client could hold the lock forever while nothing ever healed it. Now the
+  # tick is the WATCHDOG: it judges the client from its log and, only when the
+  # client is wedged, captures and then restarts it. A progressing client is
+  # never touched. Silent (log only) by design — see the output discipline note.
+  watchdog_pass
   exit 0
 fi
 
@@ -233,6 +425,7 @@ fi
 printf '%s\n' "$$" >"$PIDFILE" 2>/dev/null || true
 
 say "supervising $LAUNCHER (pid $$)"
+degraded_notice 1
 
 # --- suppress D-Bus autolaunch, and reap any orphaned daemons ---------------
 # See scripts/lib/dbus-env.sh: a cron process with no DBUS_SESSION_BUS_ADDRESS
@@ -289,6 +482,7 @@ reap_orphaned_client
 # exactly this state.
 ensure_dump_dir() {
   local d
+  [ "$HAVE_LIVENESS" -eq 1 ] || return 0   # already reported by degraded_notice
   if ! d="$(liveness_dump_dir)"; then
     say "cannot derive the client dump directory: XDG_STATE_HOME is relative (${XDG_STATE_HOME:-})"
     say "  Fix: set XDG_STATE_HOME to an absolute path or unset it; a wedge dump would otherwise land where nothing looks."
@@ -334,9 +528,12 @@ while :; do
   # supervise again. See reap_orphaned_client above for the other half.
   #
   # ATHENA_INBOX_CLIENT_LOG hands the client its own log file so its size-capped
-  # rotation is live (it is dormant while the variable is unset). stdout/stderr
-  # still append here, so a fatal message printed before the logger exists, or
-  # the exit-2 partial-write text, is never lost.
+  # rotation is live (it is dormant while the variable is unset). With it set,
+  # the client's logger writes ONLY to that file (never also to stderr), so no
+  # line is doubled. stdout/stderr still append here, so a fatal message printed
+  # before the logger exists, or the exit-2 partial-write text, is never lost --
+  # though after a rotation this descriptor still points at the renamed file, so
+  # such a line lands in <log>.1. The liveness reader falls back to <log>.1.
   ATHENA_INBOX_CLIENT_LOG="$LOG" "$LAUNCHER" 9>&- >>"$LOG" 2>&1 &
   child=$!
   printf '%s\n' "$child" >"$CLIENT_PIDFILE" 2>/dev/null || true

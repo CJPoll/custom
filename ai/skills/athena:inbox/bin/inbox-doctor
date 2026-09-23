@@ -126,6 +126,8 @@ collect_findings() {
   doctor_check_client_running "${STOPPED}"
   doctor_check_client_liveness "${STOPPED}"
   doctor_check_dump_dir
+  doctor_check_captures
+  doctor_check_watchdog
   doctor_check_cron
   doctor_check_entry "."
   doctor_check_channels "${DOCTOR_MATCHED_ENTRY}" "."
@@ -169,7 +171,11 @@ N_NA="$(count_state na)"
 # `healthy`, or the hook would nag every opted-in repo forever. The durable fix
 # is the peer's writer, tracked separately; the mode of files THIS side writes
 # is already set at delivery.
-INFO_SET=" undeclared-entry server-instance never-delivered stray-file stale-lock message-mode "
+# `captures` (DND-333) is here too: a capture is a PAST wedge the watchdog
+# already captured and restarted. The live state belongs to client-liveness,
+# which fails while a wedge is current; nagging every session about a wedge
+# that has been handled would bury the next current one.
+INFO_SET=" undeclared-entry server-instance never-delivered stray-file stale-lock message-mode captures "
 N_INFO="$(printf '%s\n' "${FINDINGS}" | awk -F'\t' -v set="${INFO_SET}" '$1=="warn" && index(set," "$2" ")>0{n++} END{print n+0}')"
 
 if [ "${JSON}" -eq 1 ]; then

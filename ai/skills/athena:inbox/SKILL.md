@@ -507,6 +507,16 @@ checks now answer the question a pid cannot:
 - `dump-dir` asserts the client's SIGQUIT dump directory resolves and is
   writable (the client creates it lazily; the supervisor now creates it at
   start).
+- `captures` (informational) lists the newest wedge captures with their
+  signatures. The supervisor's `*/5` watchdog captures a wedged client
+  (`scripts/inbox-client-capture`: SIGQUIT dump, sockets, fds, log tail,
+  signature) and only THEN restarts it — never the reverse. A human who
+  suspects a wedge runs `scripts/inbox-client-capture --now` (capture, no
+  restart). SIGQUIT is only sent to a client whose running code is known to
+  trap it: Ruby's default SIGQUIT action would kill a pre-LV-1 client.
+- `watchdog` fails when the supervisor's watchdog tools are missing (the
+  supervisor keeps the client running, but a wedge is then restarted without
+  evidence, or not detected at all).
 - `server-reachability` asks the server, with the **machine token** from the
   client config, whether it can reach this machine (the `athena` MCP's
   `machine_reachable`): `reachable:false` is `fail`, pending deliveries are a
@@ -517,7 +527,11 @@ checks now answer the question a pid cannot:
 `inbox-status` and `read-inbox` carry the same freshness: every line they print
 for a channel carries its last-delivery age and the client's last-join age, and
 a stale channel prints a `STALE` fault line even at zero new — "quiet" and
-"dark" must not read the same.
+"dark" must not read the same. STALE is a BACKSTOP, not the wedge detector:
+the committed registry sets walt_ui's `slack` and `flaky` thresholds to 6 h
+(measured healthy gaps reach ~5.6 h), so a 96-minute outage like 2026-09-22
+prints no STALE line. What catches that outage is `client-liveness` and the
+supervisor's watchdog, which read the connect cycle directly.
 
 The SessionStart hook runs `inbox-doctor --json --no-server` (never a network
 request on that path) and, when the chain is not `healthy`, folds one

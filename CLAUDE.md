@@ -463,9 +463,14 @@ The durable fix, defense in depth:
   set.
 - **The cron wrappers** (`athena-shipwright-run.sh`,
   `athena-inbox-client-run.sh`) source it after their early-exit arg parsing and
-  single-run lock, so `--help`/`--dry-run` and the `*/5` no-op relaunch never
-  trigger it. `notify-idle.sh` sources it too, so the Stop hook is guarded in
-  every session regardless of how launched.
+  single-run lock, so `--help`/`--dry-run` and the `*/5` lock-held relaunch
+  never trigger it. `notify-idle.sh` sources it too, so the Stop hook is guarded
+  in every session regardless of how launched.
+  **Later (2026-09-23):** this called the lock-held `*/5` invocation a "no-op
+  relaunch". Since DND-316/DND-333 it is a watchdog pass that may capture and
+  SIGTERM a wedged client. It still runs before `dbus-env.sh` is sourced, and
+  nothing it starts (`inbox-client-capture`: `ss`, `/proc` reads, `kill`) is a
+  D-Bus client, so the autolaunch reasoning above is unchanged.
 - **`scripts/reap-orphan-dbus`** — belt-and-suspenders. Kills orphaned
   autolaunch session daemons (comm `dbus-daemon`; argv has `--fork` + `--session`
   + `--syslog`/`--syslog-only`; NOT `--system`/`--nofork`/`--config-file`;

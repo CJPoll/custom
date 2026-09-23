@@ -343,8 +343,11 @@ doctor_check_dump_dir() {
     parent="$(dirname "${dir}")"
     while [ ! -e "${parent}" ] && [ "${parent}" != "/" ]; do parent="$(dirname "${parent}")"; done
     if [ -d "${parent}" ] && [ -w "${parent}" ]; then
-      doctor_finding warn "dump-dir" "the client dump directory ${dir} does not exist yet (the supervisor creates it at client start; it can be created)" \
-        "restart the supervised client so it creates ${dir} (0700), or mkdir -m 0700 -p ${dir}. Until it exists, \"no dumps\" and \"dump path broken\" read the same."
+      # Not a fault: the client creates it on its first dump and the supervisor
+      # at the next client start, and the parent is writable -- so a dump would
+      # land. What this check exists to separate is THIS state from the one
+      # below, where a dump could not be written at all.
+      doctor_finding ok "dump-dir" "the client dump directory ${dir} does not exist yet, but CAN be created (the client makes it on its first dump; the supervisor at the next client start)"
     else
       doctor_finding fail "dump-dir" "the client dump directory ${dir} does not exist and cannot be created (nearest existing ancestor ${parent} is not a writable directory)" \
         "make ${parent} writable by this user, or point XDG_STATE_HOME elsewhere; a SIGQUIT dump from a wedged client would otherwise fail to write and the evidence would be lost."
@@ -363,6 +366,68 @@ doctor_check_dump_dir() {
     return 0
   fi
   doctor_finding ok "dump-dir" "the client dump directory ${dir} exists, is writable, and is mode 0700"
+}
+
+# doctor_check_watchdog
+# The supervisor's watchdog needs two tools: the liveness library (the wedge
+# predicate) and scripts/inbox-client-capture (capture before restart, D35).
+# Missing either, the supervisor DEGRADES rather than stopping -- the client is
+# still supervised -- but a wedge is then restarted with no evidence (no
+# capture tool) or not detected at all (no liveness library). That is a fault
+# the owner must see, so it is a `fail` here, not a log line nobody reads.
+doctor_check_watchdog() {
+  local repo missing=""
+  [ -e "$(doctor_client_config_path)" ] || {
+    doctor_finding na "watchdog" "no client config, so no supervisor watchdog is expected here" \
+      "if this machine should run the inbox client, install it with scripts/setup-athena-inbox-client; if it only reads delivered mail, this is expected."
+    return 0
+  }
+  repo="${DOCTOR_REPO_DIR:-}"
+  if [ -z "${repo}" ]; then
+    doctor_finding na "watchdog" "the repo root is unknown, so the watchdog's tools cannot be checked" \
+      "run inbox-doctor from the ~/dev/custom checkout (bin/inbox-doctor sets DOCTOR_REPO_DIR itself)."
+    return 0
+  fi
+  [ -r "${repo}/ai/skills/athena:inbox/lib/liveness.sh" ] || missing="ai/skills/athena:inbox/lib/liveness.sh"
+  [ -x "${repo}/scripts/inbox-client-capture" ] || missing="${missing:+${missing}, }scripts/inbox-client-capture (executable)"
+  if [ -n "${missing}" ]; then
+    doctor_finding fail "watchdog" "the supervisor watchdog is missing ${missing}: without the capture tool a wedge is restarted with NO evidence; without the liveness library a wedge is not even detected" \
+      "restore ${missing} in ${repo} with git (chmod +x the capture script). The supervisor keeps the client running meanwhile, but only a human would notice the next wedge."
+  else
+    doctor_finding ok "watchdog" "the supervisor watchdog's tools are present (liveness library, inbox-client-capture)"
+  fi
+}
+
+# doctor_check_captures
+# DND-316 / DND-333: the wedge captures on disk, newest first, with their
+# signatures, so a human sees RECURRENCE without a ticket lookup (the same
+# signature twice is the same wedge twice). A capture is written by
+# scripts/inbox-client-capture into <dump dir>/<utc>-<pid>/, with signature.txt
+# and capture.txt beside the evidence. INFORMATIONAL (in INFO_SET): a capture
+# is a past wedge already restarted, not a degraded running chain; the live
+# state is client-liveness's to grade. Only facts the capture tool wrote are
+# read (step, signature, dump status) -- never a dump body.
+doctor_check_captures() {
+  local dir names n shown="" name sig step dump
+  [ -e "$(doctor_client_config_path)" ] || return 0
+  dir="$(liveness_dump_dir 2>/dev/null)" || return 0
+  [ -d "${dir}" ] || return 0
+  names="$(find "${dir}" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended \
+             -regex '.*/[0-9]{8}T[0-9]{6}Z-[0-9]+(-[0-9]+)?' -printf '%f\n' 2>/dev/null | sort -r)"
+  n="$(printf '%s' "${names}" | grep -c .)"
+  if [ "${n}" -eq 0 ]; then
+    doctor_finding ok "captures" "no wedge captures in ${dir}"
+    return 0
+  fi
+  while IFS= read -r name; do
+    [ -n "${name}" ] || continue
+    sig="$(sed -n 's/^signature: //p' "${dir}/${name}/signature.txt" 2>/dev/null | head -n1 | cut -c1-8)"
+    step="$(sed -n 's/^step: //p' "${dir}/${name}/signature.txt" 2>/dev/null | head -n1)"
+    dump="$(sed -n 's/^dump: //p' "${dir}/${name}/capture.txt" 2>/dev/null | head -n1 | cut -d' ' -f1)"
+    shown="${shown:+${shown}; }${name} sig ${sig:-?} step ${step:-?} dump ${dump:-?}"
+  done < <(printf '%s\n' "${names}" | head -n 5)
+  doctor_finding warn "captures" "${n} wedge capture(s) on disk (newest first): ${shown}" \
+    "each is a wedge the watchdog captured and then restarted. The same signature more than once is the same wedge recurring -- read that capture's dump.txt and signature.txt (${dir}/<name>/) and file or bump the [wedge:<sig8>] ticket. Retention keeps the newest 5."
 }
 
 # doctor_check_cron
@@ -1209,6 +1274,10 @@ doctor_machine_reachable() {
   # shellcheck disable=SC2064
   trap "rm -rf '${w}'; trap - RETURN" RETURN
   ( umask 077; jq -r '.token' <"${cfg}" | tr -d '\r\n' >"${w}/token" ) || { printf 'could not stage the machine token\n'; return 4; }
+  # The token is written into a double-quoted curl config value, so a quote,
+  # backslash or whitespace in it would corrupt the header. Refuse such a token
+  # (UNAVAILABLE, never silently sent malformed); the token is never printed.
+  if grep -q '["\\[:space:]]' "${w}/token"; then printf 'the machine token contains a quote, backslash or whitespace and cannot be sent safely\n'; return 4; fi
 
   http="$(doctor_mcp_post "${w}" "${url}" "" "$(jq -n -c --arg v "${DOCTOR_MCP_PROTOCOL}" \
     '{jsonrpc:"2.0", id:1, method:"initialize", params:{protocolVersion:$v, capabilities:{}, clientInfo:{name:"inbox-doctor", version:"1"}}}')")" \
@@ -1264,11 +1333,15 @@ doctor_check_server_reachability() {
     return 0
   fi
   out="$(doctor_machine_reachable)"; rc=$?
+  # A canned answer is a diagnostic/test seam; say so on every finding it
+  # produces, so a canned "reachable" can never pass for a live one.
+  local canned_note=""
+  [ -n "${ATHENA_INBOX_DOCTOR_REACHABLE_FILE:-}" ] && canned_note=" [CANNED answer from ATHENA_INBOX_DOCTOR_REACHABLE_FILE, not the live server]"
   case "${rc}" in
     2) doctor_finding na "server-reachability" "server reachability check SKIPPED -- no client config or machine token on this machine" \
          "this check authenticates with the inbox client's machine token (~/.config/athena-inbox-client/config.json); a machine that only reads delivered mail has none, and this is expected there."
        return 0 ;;
-    4) doctor_finding na "server-reachability" "server reachability check UNAVAILABLE (tried, got no answer): $(printf '%s' "${out}" | head -n 1)" \
+    4) doctor_finding na "server-reachability" "server reachability check UNAVAILABLE (tried, got no answer): $(printf '%s' "${out}" | head -n 1)${canned_note}" \
          "this is not a skip and not a clean bill: the server was asked and could not answer. If machine_reachable is not deployed yet (DND-315), this is expected until it is; otherwise check the network, the /mcp endpoint, and that the machine token in the client config is current."
        return 0 ;;
     0) ;;
@@ -1288,11 +1361,11 @@ doctor_check_server_reachability() {
   fi
   facts="basis ${basis}; ${pending} pending deliver(y/ies) for this machine; server last ack ${last_ack}${ack_age}${joined:+; server last join ${joined}}"
   case "$(doctor_state_reachable "${r}" "${pending}")" in
-    fail) doctor_finding fail "server-reachability" "the server reports this machine UNREACHABLE${since:+ since ${since}}: ${facts}" \
+    fail) doctor_finding fail "server-reachability" "the server reports this machine UNREACHABLE${since:+ since ${since}}: ${facts}${canned_note}" \
             "the relay is dark from the server's side. Read client-liveness: a wedged client is captured and restarted by the */5 supervisor watchdog (run scripts/athena-inbox-client-run.sh by hand to act now -- capture first, never SIGTERM first). Pending deliveries, including exhausted-offline ones, are held server-side and re-delivered on the next join." ;;
-    warn) doctor_finding warn "server-reachability" "checked: the server holds ${pending} pending deliver(y/ies) for this machine (reachable: ${r}; ${facts})" \
+    warn) doctor_finding warn "server-reachability" "checked: the server holds ${pending} pending deliver(y/ies) for this machine (reachable: ${r}; ${facts})${canned_note}" \
             "a pending count that does not drain means the client is not acking. Check client-liveness and the client log; exhausted-offline deliveries count here as evidence of a dark relay, not as resolved failures." ;;
-    ok)   doctor_finding ok "server-reachability" "checked: reachable ${r}, 0 pending (${facts})" ;;
+    ok)   doctor_finding ok "server-reachability" "checked: reachable ${r}, 0 pending (${facts})${canned_note}" ;;
     na)   doctor_finding na "server-reachability" "the server answered machine_reachable with no usable verdict (reachable: ${r})" \
             "the answer shape may have changed; machine_reachable should return reachable true|false|\"unknown\"." ;;
   esac

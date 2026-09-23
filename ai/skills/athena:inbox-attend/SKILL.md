@@ -67,7 +67,8 @@ is the brief, not the message.
    `~/dev/custom/ai/docs/ticket-lane-action-brief.md` → *Spinning the lane up*,
    which checks by count or `--peek` and acks only after the admiral drains.
 
-   **"Nothing new" must not hide a dark channel.** `inbox-status` prints a
+   **Later (2026-09-23):** "nothing new" must not hide a dark channel (DND-316).
+   `inbox-status` prints a
    `STALE` line for any channel whose last delivery is older than its threshold
    (`stale_after_s` in the registry entry; default 30 min for a `log` channel),
    even when nothing is new, and `read-inbox` says `nothing new; STALE: …`. When
@@ -75,7 +76,9 @@ is the brief, not the message.
    its age — `nothing new; channel slack stale 94m` — never a bare `nothing
    new`. On 2026-09-22 roughly a dozen consecutive wakes said "nothing new"
    through a 96-minute outage; each was true about the disk and wrong about the
-   world. Staleness is this machine's own fact (file ages), not message content,
+   world. (STALE is a backstop with thresholds above healthy quiet gaps, so a
+   short outage can pass under it; `inbox-doctor`'s `client-liveness` is what
+   catches a wedge, so run the doctor whenever the relay is in doubt.) Staleness is this machine's own fact (file ages), not message content,
    so saying it keeps the counts-only rule. A `STALE` line is a relay question,
    not a reason to act on a message: run `athena:inbox/bin/inbox-doctor` and
    relay its `client-liveness` / `server-reachability` findings to the owner if

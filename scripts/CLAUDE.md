@@ -310,6 +310,27 @@ loop above.
   so `MAX_LOG_LINES` bounds a crash-looping client rather than the steady state.
   Rotate out of band (logrotate `copytruncate`) if the steady-state log ever
   needs bounding.
+  **Later (2026-09-23):** two statements above no longer hold (DND-316 /
+  DND-333). A second invocation no longer "exits 0 silently" as a bare no-op: on
+  the lock-held path it runs a **watchdog pass** — it judges the client from its
+  log (`ai/skills/athena:inbox/lib/liveness.sh`), and only when the client is
+  WEDGED mid-reconnect does it capture it with `inbox-client-capture` and THEN
+  SIGTERM it (the owning supervisor relaunches). A progressing client is never
+  touched; the pass is still silent on stdout/stderr. And the steady-state log
+  is now bounded by the CLIENT: the supervisor exports
+  `ATHENA_INBOX_CLIENT_LOG`, which turns on the client's own size-capped
+  rotation, so out-of-band logrotate is not needed.
+- `inbox-client-capture` — captures a wedged client's evidence before any
+  restart (D35): SIGQUIT for the client's own dump, `ss`, `/proc` fds and
+  status, the log tail, and a signature (sha256 of the stalled step + the top 5
+  frames) into `$XDG_STATE_HOME/athena/inbox-client-dumps/<utc>-<pid>/`. Keeps
+  the newest 5, each capped at 4 MiB; redacts the machine token. `--now` for a
+  human, `--resolve-client` finds the client as the supervisor's one child.
+  Never kills anything, and sends SIGQUIT only to a client whose running code
+  traps it (Ruby's default would kill a pre-LV-1 client). If it or the
+  liveness library is missing, the supervisor still supervises (degraded,
+  loudly) and inbox-doctor's `watchdog` finding fails. Self-test:
+  `test/inbox-client-capture/`.
 - `setup-athena-inbox-client` — the committed idempotent installer:
   `--install` (default) · `--check` · `--dry-run` · `--remove` · `--self-test` ·
   `-h`, order-independent. It installs `@reboot` and `*/5 * * * *` entries,

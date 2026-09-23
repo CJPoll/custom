@@ -331,6 +331,10 @@ channel is normal — so the misconfiguration is invisible. Therefore:
   bumps it on every delivery and it survives rotation — or the inbox file's
   mtime when that is newer. Staleness is the reader's own fact about its own
   files, never message content, so reporting it is within the counts-only rule.
+  STALE is a backstop, not the wedge detector: a threshold must sit above the
+  channel's healthy quiet gaps or it is noise, so a short outage can pass under
+  it. The client's connect cycle (*The diagnostic: `inbox-doctor`* →
+  `client-liveness`, and the supervisor's watchdog) is what catches a wedge.
 
 ### Repo identity: the git common dir
 
@@ -2234,7 +2238,10 @@ must not enumerate `projects/`, but the tool someone runs to look may:
   second rate limit); a **stray non-entry file** in `projects/` (a backup or
   swapfile that was never a registry entry); and a **dead-pid consumer lock**
   (the lock file is deliberately left behind on release, so every channel ever
-  read carries one — reporting it is a courtesy, not a fault). A **collision is
+  read carries one — reporting it is a courtesy, not a fault); and the **wedge
+  captures on disk** (`captures`: each is a past wedge the supervisor's
+  watchdog already captured and restarted — the live state is
+  `client-liveness`'s to grade). A **collision is
   NOT** informational — one tenant's mail landing in another's file is a live
   cross-wiring, so it counts against `healthy`; likewise a **failed candidate**
   (a conformant `*.json` that does not parse or has no `repo`) is a `fail`, since
@@ -2283,6 +2290,16 @@ also reports:
 - **`freshness:<channel>`** — `fail` past the channel's `stale_after_s`.
 - **`dump-dir`** — the client's diagnostics dump directory resolves and is
   writable, so "no dumps yet" and "dump path broken" do not read the same.
+- **`captures`** (informational) — the newest wedge captures written by
+  `scripts/inbox-client-capture`, each with its signature, stalled step and
+  dump status, so recurrence is visible without a ticket lookup. The capture
+  happens BEFORE any restart: the supervisor's `*/5` watchdog judges the client
+  wedged, captures it, and only then SIGTERMs it.
+- **`watchdog`** — the watchdog's two tools (the liveness library and
+  `scripts/inbox-client-capture`) are present. Missing either, the supervisor
+  keeps the client running, but a wedge is then restarted with no evidence (no
+  capture tool) or not detected at all (no liveness library), so this is a
+  `fail`.
 - **`server-reachability`** — authenticated with the **machine token** the
   client already holds, it calls the server's `machine_reachable` (the `athena`
   MCP; self when no machine is named): `reachable:false` is `fail`, a non-zero
