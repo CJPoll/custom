@@ -45,7 +45,7 @@ getent passwd "$USER_NAME" >/dev/null \
   || die "user $USER_NAME does not exist — run setup-github-runner-user first"
 command -v loginctl >/dev/null || die "loginctl (elogind) not found — needed for linger"
 
-if id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx docker; then
+if grep -qx docker <<<"$(id -nG "$USER_NAME" | tr ' ' '\n')"; then
   die "$USER_NAME is in the 'docker' group — root-equivalent, defeats rootless.
       Remove it:  gpasswd -d $USER_NAME docker"
 fi
@@ -84,7 +84,7 @@ for f in /etc/subuid /etc/subgid; do
 done
 
 # --- 4. persistent runtime dir via linger ------------------------------------
-if loginctl show-user "$USER_NAME" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
+if grep -q 'Linger=yes' <<<"$(loginctl show-user "$USER_NAME" -p Linger 2>/dev/null)"; then
   log "lingering already enabled for $USER_NAME"
 else
   log "enabling linger for $USER_NAME (creates /run/user/<uid> at boot)"

@@ -140,13 +140,13 @@ if [ "$rc" -eq 0 ] && [ "$files" = "ai/agents/ours.md " ]; then
 else
   bad "commits exactly the named path" "rc=$rc files='$files' out=$out"
 fi
-if git -C "$r" status --porcelain | grep -q 'bystander.conf$' \
-   && git -C "$r" status --porcelain | grep -q '?? bystander.conf.bak'; then
+if grep -q 'bystander.conf$' <<<"$(git -C "$r" status --porcelain)" \
+   && grep -q '?? bystander.conf.bak' <<<"$(git -C "$r" status --porcelain)"; then
   ok "leaves the bystander's modified file AND untracked stray dirty and uncommitted"
 else
   bad "leaves the bystander's work alone" "$(git -C "$r" status --porcelain)"
 fi
-if printf '%s' "$out" | grep -q 'dirty outside this commit'; then
+if grep -q 'dirty outside this commit' <<<"$out"; then
   ok "reports foreign dirt instead of silently absorbing it"
 else
   bad "reports foreign dirt" "$out"
@@ -166,7 +166,7 @@ if [ "$files" = "ai/agents/ours.md " ]; then
 else
   bad "pre-staged foreign content is excluded" "files='$files'"
 fi
-if git -C "$r" diff --cached --name-only | grep -q 'bystander.conf'; then
+if grep -q 'bystander.conf' <<<"$(git -C "$r" diff --cached --name-only)"; then
   ok "and that foreign content is left staged exactly as the other session had it"
 else
   bad "foreign staged content survives untouched" "$(git -C "$r" status --porcelain)"
@@ -185,7 +185,7 @@ printf 'one\n' >"$r/ai/new-dir/a.md"
 printf 'two\n' >"$r/ai/new-dir/b.md"
 printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
 out="$(cd "$r" && "$COMMIT" -m 'new dir' -- ai/new-dir/a.md ai/new-dir/b.md 2>&1)"
-if printf '%s' "$out" | grep -q 'bystander.conf'; then
+if grep -q 'bystander.conf' <<<"$out"; then
   ok "the foreign-dirt notice names the bystander even when the commit adds a new untracked directory"
 else
   bad "foreign-dirt notice survives the untracked-directory shape" "$out"
@@ -208,7 +208,7 @@ mkdir -p "$r/ai-artifacts/shipwright/runs"
 printf 'log\n' >"$r/ai-artifacts/shipwright/runs/2026.log"
 printf 'edit\n' >"$r/ai/agents/ours.md"
 out="$(cd "$r" && "$COMMIT" -m 'narrow' -- ai/agents/ours.md 2>&1)"
-if ! printf '%s' "$out" | grep -q 'ai-artifacts'; then
+if ! grep -q 'ai-artifacts' <<<"$out"; then
   ok "the shipwright's own runtime artifacts are not reported as foreign dirt"
 else
   bad "ai-artifacts excluded from the foreign-dirt notice" "$out"
@@ -216,7 +216,7 @@ fi
 printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
 printf 'edit2\n' >"$r/ai/agents/ours.md"
 out="$(cd "$r" && "$COMMIT" -m 'narrow again' -- ai/agents/ours.md 2>&1)"
-if printf '%s' "$out" | grep -q 'bystander.conf'; then
+if grep -q 'bystander.conf' <<<"$out"; then
   ok "and a real bystander is still reported alongside them"
 else
   bad "real dirt still reported with ai-artifacts present" "$out"
@@ -231,7 +231,7 @@ printf 'x\n' >"$r/solo/only.txt"
 git -C "$r" add -A >/dev/null 2>&1; git -C "$r" commit -qm 'solo' >/dev/null 2>&1
 rm -rf "$r/solo"
 o="$(cd "$r" && "$COMMIT" -m msg -- solo 2>&1)"; rc=$?
-if [ "$rc" -eq 2 ] && printf '%s' "$o" | grep -q 'Fix:'; then
+if [ "$rc" -eq 2 ] && grep -q 'Fix:' <<<"$o"; then
   ok "a deleted directory holding exactly one file is still refused"
 else
   bad "single-file deleted directory is refused" "rc=$rc out=$o"
@@ -275,7 +275,7 @@ refuses() { # refuses <label> <expected-rc> <args...>
   if [ "$rc" -ne "$want" ]; then
     bad "$label" "rc=$rc (want $want) out=$o"; return
   fi
-  if ! printf '%s' "$o" | grep -q 'Fix:'; then
+  if ! grep -q 'Fix:' <<<"$o"; then
     bad "$label (no Fix: line — a guard message must tell the agent how to self-correct)" "$o"; return
   fi
   ok "$label"
@@ -346,7 +346,7 @@ fi
 r="$(new_repo)"
 printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
 o="$(cd "$r" && "$COMMIT" -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
-if [ "$rc" -eq 3 ] && printf '%s' "$o" | grep -q 'Fix:'; then
+if [ "$rc" -eq 3 ] && grep -q 'Fix:' <<<"$o"; then
   ok "a path set with no changes exits 3 with a Fix: line (never commits the dirty bystander instead)"
 else
   bad "clean path set exits 3" "rc=$rc out=$o"
@@ -368,7 +368,7 @@ if [ "$files" = "ai/agents/NOTES.md " ]; then
 else
   bad "subdirectory-relative paths resolve correctly" "committed '$files' (the root NOTES.md is a different file and must not be the one committed)"
 fi
-if git -C "$r" status --porcelain | grep -q 'NOTES.md'; then
+if grep -q 'NOTES.md' <<<"$(git -C "$r" status --porcelain)"; then
   ok "and the root file of the same name is left dirty and untouched"
 else
   bad "root file untouched" "$(git -C "$r" status --porcelain)"
@@ -396,7 +396,7 @@ printf 'subject line\n\nbody paragraph\n' >"$(aux "$r")/m.txt"
 printf 'edit\n' >"$r/ai/agents/ours.md"
 (cd "$r" && "$COMMIT" -F "$(aux "$r")/m.txt" -- ai/agents/ours.md >/dev/null 2>&1)
 if [ "$(git -C "$r" log -1 --format=%s)" = "subject line" ] \
-   && git -C "$r" log -1 --format=%b | grep -q 'body paragraph'; then
+   && grep -q 'body paragraph' <<<"$(git -C "$r" log -1 --format=%b)"; then
   ok "-F with an absolute path carries subject and body through"
 else
   bad "-F absolute path" "$(git -C "$r" log -1 --format='%s|%b')"
@@ -416,7 +416,7 @@ fi
 r="$(new_repo)"
 printf 'edit\n' >"$r/ai/agents/ours.md"
 o="$(cd "$r" && "$COMMIT" -F no-such-message.txt -- ai/agents/ours.md 2>&1)"; rc=$?
-if [ "$rc" -eq 2 ] && printf '%s' "$o" | grep -q 'Fix:'; then
+if [ "$rc" -eq 2 ] && grep -q 'Fix:' <<<"$o"; then
   ok "an unreadable -F file exits 2 with a Fix: line, before git is involved"
 else
   bad "unreadable -F is a caller error" "rc=$rc out=$o"
@@ -426,14 +426,14 @@ fi
 # codes:" header printed the header and none of the codes — the reader most
 # likely to run --help is the one who just got a non-zero exit.
 o="$("$COMMIT" --help 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'Usage:' \
-   && printf '%s' "$o" | grep -q 'nothing to commit'; then
+if [ "$rc" -eq 0 ] && grep -q 'Usage:' <<<"$o" \
+   && grep -q 'nothing to commit' <<<"$o"; then
   ok "--help prints usage through the last exit code"
 else
   bad "--help is complete" "rc=$rc out=$o"
 fi
 o="$("$RUNNER" --help 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'SHIPWRIGHT_FAIL_ESCALATE'; then
+if [ "$rc" -eq 0 ] && grep -q 'SHIPWRIGHT_FAIL_ESCALATE' <<<"$o"; then
   ok "the runner's --help lists the environment knobs its Fix: lines mention"
 else
   bad "runner --help" "rc=$rc out=$o"
@@ -479,7 +479,7 @@ fi
 r="$(new_repo)"
 printf 'shipwright edit\n' >"$r/ai/agents/ours.md"
 o="$(cd "$r" && "$COMMIT" --dry-run -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'ai/agents/ours.md' \
+if [ "$rc" -eq 0 ] && grep -q 'ai/agents/ours.md' <<<"$o" \
    && [ "$(git -C "$r" rev-list --count HEAD)" = "1" ] \
    && [ -z "$(git -C "$r" diff --cached --name-only)" ]; then
   ok "--dry-run prints the path set and neither stages nor commits"
@@ -521,8 +521,8 @@ stub_git_bare_status_fails "$sdir"
 printf 'shipwright edit\n' >"$r/ai/agents/ours.md"
 printf 'AGENT MID-EDIT\n'  >"$r/bystander.conf"
 o="$(cd "$r" && PATH="$sdir:$PATH" "$COMMIT" --dry-run -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
-if [ "$rc" -eq 1 ] && printf '%s' "$o" | grep -q 'Fix:' \
-   && printf '%s' "$o" | grep -q 'nothing was measured'; then
+if [ "$rc" -eq 1 ] && grep -q 'Fix:' <<<"$o" \
+   && grep -q 'nothing was measured' <<<"$o"; then
   ok "a failed whole-tree scan exits 1 naming that nothing was measured, not a silent clean notice"
 else
   bad "broken foreign scan must not read as clean" "rc=$rc out=$o"
@@ -531,7 +531,7 @@ fi
 # ...and the refusal must be DISTINGUISHABLE from the real "nothing to commit"
 # (exit 3). Reporting a failed measurement as an empty result is the same defect
 # wearing the other exit code: it sends the reader off to name different paths.
-if printf '%s' "$o" | grep -q 'nothing to commit in the named paths'; then
+if grep -q 'nothing to commit in the named paths' <<<"$o"; then
   bad "a broken scan must not claim 'nothing to commit'" "out=$o"
 else
   ok "a broken scan is textually distinct from a genuinely empty one (exit 3)"
@@ -561,7 +561,7 @@ r="$(new_repo)"; sdir="$(dirname "$r")/gitstub2"
 stub_git_pathspec_status_fails "$sdir"
 printf 'shipwright edit\n' >"$r/ai/agents/ours.md"
 o="$(cd "$r" && PATH="$sdir:$PATH" "$COMMIT" --dry-run -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
-if [ "$rc" -eq 1 ] && printf '%s' "$o" | grep -q 'nothing was measured'; then
+if [ "$rc" -eq 1 ] && grep -q 'nothing was measured' <<<"$o"; then
   ok "a failed pathspec scan exits 1, never the exit-3 'you named the wrong paths'"
 else
   bad "broken pathspec scan must not read as nothing-to-commit" "rc=$rc out=$o"
@@ -574,7 +574,7 @@ r="$(new_repo)"
 printf 'shipwright edit\n' >"$r/ai/agents/ours.md"
 printf 'AGENT MID-EDIT\n'  >"$r/bystander.conf"
 o="$(cd "$r" && "$COMMIT" --dry-run -m msg -- ai/agents/ours.md 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'bystander.conf'; then
+if [ "$rc" -eq 0 ] && grep -q 'bystander.conf' <<<"$o"; then
   ok "a healthy scan still reports foreign dirt (the notice was not disabled)"
 else
   bad "healthy foreign-dirt notice" "rc=$rc out=$o"
@@ -717,9 +717,9 @@ fi
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
 printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
 o="$(env DRY_RUN=1 SHIPWRIGHT_REPO="$r" SHIPWRIGHT_CLAUDE="$a/stub-claude" "$RUNNER" 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'athena-shipwright agent' \
-   && ! printf '%s' "$o" | grep -q 'dev/custom' \
-   && printf '%s' "$o" | grep -q 'Sync your tree'; then
+if [ "$rc" -eq 0 ] && grep -q 'athena-shipwright agent' <<<"$o" \
+   && ! grep -q 'dev/custom' <<<"$o" \
+   && grep -q 'Sync your tree' <<<"$o"; then
   ok "DRY_RUN=1 prints the brief from a dirty tree and names no checkout path"
 else
   bad "DRY_RUN brief" "rc=$rc out=$o"
@@ -901,7 +901,7 @@ fi
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 7
 codes=""
 for _ in 1 2 3 4 5 6 7; do codes="${codes}$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=notanumber) "; done
-if printf '%s' "$codes" | grep -q '75'; then
+if grep -q '75' <<<"$codes"; then
   ok "a non-numeric SHIPWRIGHT_FAIL_ESCALATE falls back to the default and still escalates"
 else
   bad "bad SHIPWRIGHT_FAIL_ESCALATE does not disable escalation" "exit codes '${codes% }' — none was 75"
@@ -1165,7 +1165,7 @@ m="$(cat "$(sd "$r")/runs/"*.blocked 2>/dev/null || true)"
 if [ "$rc" -eq 69 ] && grep -q 'UNCLASSIFIED' "$a/runner.err" \
    && grep -q 'Fix:' "$a/runner.err" \
    && grep -q 'BLOCK_PATTERNS' "$a/runner.err" \
-   && printf '%s' "$m" | grep -q 'classification=UNCLASSIFIED'; then
+   && grep -q 'classification=UNCLASSIFIED' <<<"$m"; then
   ok "an UNMATCHED block signature still exits 69, says UNCLASSIFIED, and names BLOCK_PATTERNS to fix"
 else
   bad "detector miss is loud" "rc=$rc err=$(cat "$a/runner.err") marker=$m"
@@ -1316,9 +1316,9 @@ fi
 # instruction UNEXPANDED (an expanded one would leak the path into the brief).
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
 o="$(env DRY_RUN=1 SHIPWRIGHT_REPO="$r" SHIPWRIGHT_CLAUDE="$a/stub-claude" "$RUNNER" 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$o" | grep -q 'SHIPWRIGHT_RECEIPT' \
-   && ! printf '%s' "$o" | grep -q 'dev/custom' \
-   && printf '%s' "$o" | grep -q 'Sync your tree'; then
+if [ "$rc" -eq 0 ] && grep -q 'SHIPWRIGHT_RECEIPT' <<<"$o" \
+   && ! grep -q 'dev/custom' <<<"$o" \
+   && grep -q 'Sync your tree' <<<"$o"; then
   ok "the brief carries the receipt instruction unexpanded and still names no checkout path"
 else
   bad "brief receipt instruction" "rc=$rc out=$o"

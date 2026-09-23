@@ -204,8 +204,8 @@ RELAUNCH_LINE="${RELAUNCH_SCHEDULE} ${RUNNER}"
 if [ "$MODE" = "check" ]; then
   current="$(read_crontab)"
   have_reboot=0; have_relaunch=0
-  printf '%s\n' "$current" | grep -qxF -- "$REBOOT_LINE"   && have_reboot=1
-  printf '%s\n' "$current" | grep -qxF -- "$RELAUNCH_LINE" && have_relaunch=1
+  grep -qxF -- "$REBOOT_LINE" <<<"$current"   && have_reboot=1
+  grep -qxF -- "$RELAUNCH_LINE" <<<"$current" && have_relaunch=1
 
   if [ "$have_reboot" -eq 1 ] && [ "$have_relaunch" -eq 1 ]; then
     say "OK — both Athena inbox client crontab entries are installed:"

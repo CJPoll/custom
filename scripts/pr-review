@@ -75,7 +75,7 @@ echo "Creating worktree for branch: $BRANCH"
 # Try to create the worktree, but don't fail if it already exists
 if ! wt create "$BRANCH" 2>/dev/null; then
     # Check if the error is because worktree already exists
-    if wt list | grep -q "^  $BRANCH"; then
+    if grep -q "^  $BRANCH" <<<"$(wt list)"; then
         echo "Worktree already exists for branch: $BRANCH"
     else
         echo "Error: Failed to create worktree for branch: $BRANCH" >&2

@@ -429,9 +429,9 @@ so the list was stale from that moment and nothing could have caught it.
   passes with a note when there is no inbox root (CI/agent env). Recover drift
   with `scripts/setup-inbox-registry --install` (writes only the declared
   entries, backs up what it replaces, never touches another entry).
-- `ai/bin/check-guard-messages` — every first-party guard/hook/check emits an
-  actionable `Fix:` message on failure (LLM-facing errors); run its `--self-test`
-  too if you touched the checker.
+- `ai/bin/check-guard-messages` — every guard/hook/check emits a `Fix:` on
+  failure (run its `--self-test` if touched). `ai/bin/check-pipefail-grep` (+ its
+  `--self-test`) — no `| grep -q` under pipefail (SIGPIPE 141); use a here-string.
 - `ai/bin/check-bin-help` (+ its `--self-test`) — every tracked `ai/bin/`
   executable answers `--help` on stdout, exit 0, doing nothing else; one with no
   `--help` branch runs its DEFAULT action (measured: a model call, an agent

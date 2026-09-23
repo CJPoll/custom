@@ -109,7 +109,7 @@ if [ "$DO_FETCH" -eq 1 ]; then
     */*) REMOTE="${TARGET%%/*}" ;;
     *)   REMOTE="" ;;
   esac
-  if [ -n "$REMOTE" ] && git remote | grep -qx -- "$REMOTE"; then
+  if [ -n "$REMOTE" ] && grep -qx -- "$REMOTE" <<<"$(git remote)"; then
     git fetch "$REMOTE" >/dev/null 2>&1 || \
       echo "${PROG}: WARN fetch of '${REMOTE}' failed; comparing against the ref as it stands locally." >&2
   fi

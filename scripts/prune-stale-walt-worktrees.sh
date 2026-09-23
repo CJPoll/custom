@@ -53,7 +53,7 @@ for wt in "${candidates[@]}"; do
     age=$(( (now - $(stat -c %Y "$wt")) / 86400 ))
     br=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
     dirty=""
-    if git -C "$wt" status --porcelain 2>/dev/null | grep -q .; then dirty="  ** DIRTY (uncommitted) **"; fi
+    if grep -q . <<<"$(git -C "$wt" status --porcelain 2>/dev/null)"; then dirty="  ** DIRTY (uncommitted) **"; fi
     printf '  %4sd  %-52s  %s%s\n' "$age" "$br" "$wt" "$dirty"
   else
     printf '  gone   %-52s  %s\n' "(dir missing)" "$wt"

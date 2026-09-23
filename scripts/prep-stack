@@ -115,7 +115,7 @@ if ! check_graphite; then
 fi
 
 # Validate branch is tracked
-if ! gt ls --no-interactive 2>/dev/null | grep -qE "[◯◉][[:space:]]+${STACK_TOP}$"; then
+if ! grep -qE "[◯◉][[:space:]]+${STACK_TOP}$" <<<"$(gt ls --no-interactive 2>/dev/null)"; then
   echo "Error: Branch '$STACK_TOP' is not tracked by Graphite" >&2
   echo "Run 'wt stack track --parent <parent>' to track this branch" >&2
   exit 1

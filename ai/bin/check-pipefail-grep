@@ -1,0 +1,473 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# check-pipefail-grep -- no shell file under ai/ or scripts/ that runs under
+# `set -o pipefail` may feed `grep -q` through a PIPE.
+#
+# WHY THIS EXISTS (DND-365 found it, DND-371 swept it)
+#
+#   set -o pipefail
+#   printf '%s' "$out" | grep -q PAT
+#
+# grep -q exits at its FIRST match. If the writer still has output to send, its
+# next write hits a closed pipe, it dies of SIGPIPE, and under pipefail the
+# pipeline's status is 141 -- not 0. So a check that MATCHED reads as a miss:
+#
+#   * a positive check (`if ... | grep -q X`) goes FALSE RED, intermittently,
+#     under load (reproduced 2/30 standalone with a delayed writer);
+#   * a NEGATED check (`! ... | grep -q X`) goes FALSE GREEN -- a guard that
+#     cannot fire. That is the dangerous half.
+#
+# It reached production, not only tests: inbox-client-capture's retention
+# check read a SIGPIPE'd match as "unreferenced", so a capture an unread
+# harness-alert pointed at could be pruned (DND-365/367).
+#
+# The fix is a here-string, which has no second process to kill:
+#
+#   grep -q PAT <<<"$out"
+#   grep -q PAT <<<"$(some command)"
+#
+# WHAT IS FLAGGED
+#
+#   A `|` or `|&` (not `||`) outside quotes, whose right-hand command is
+#   `grep` with -q / --quiet / --silent among its options, in a tracked shell
+#   file under ai/ or scripts/ that EITHER sets pipefail itself (`set -o
+#   pipefail`, `set -euo pipefail`, ...) OR is `source`d / `.`-included by a
+#   file that does (scripts/wt-lib/*.sh inherits scripts/wt's pipefail).
+#
+# WHAT IS NOT FLAGGED (each has a --self-test case)
+#
+#   * a here-string, or `grep -q PAT file`       -- no pipe
+#   * a pipe in a file with no pipefail           -- status is grep's own
+#   * `a || grep -q X file`                       -- `||` is not a pipe
+#   * comment lines and trailing `# ...` comments
+#   * text inside single/double quotes (a message that MENTIONS the pattern);
+#     `$( ... )` inside double quotes IS code and IS scanned
+#   * heredoc bodies (a fixture script a test writes out)
+#
+# Deliberately NOT flagged: `grep -m1` / `grep -l` fed by a pipe. They exit
+# early too, but they are used for their OUTPUT, and where their status is
+# consumed at all it is behind `|| true`. Widening to them would flag sites
+# whose status nobody reads. Named here so the omission is a decision.
+#
+# THERE IS NO SUPPRESSION MARKER, on purpose: an inline "ignore this line"
+# comment is writable by the same diff it would excuse. Convert the site.
+#
+# A FILE THAT CANNOT BE READ IS A FAILURE, NOT A PASS: "found nothing" and
+# "could not look" must never print the same line.
+#
+# Deliberately gem-free (stdlib only); run with bare `ruby`.
+
+require "open3"
+require "tmpdir"
+require "fileutils"
+
+REPO = File.expand_path("../..", __dir__)
+SCAN_ROOTS = %w[ai scripts].freeze
+
+USAGE = <<~TXT.freeze
+  Usage:
+    ai/bin/check-pipefail-grep              fail (listing file:line) on any
+                                            `... | grep -q` in a tracked shell
+                                            file under ai/ or scripts/ that runs
+                                            under `set -o pipefail`
+    ai/bin/check-pipefail-grep --self-test  deterministic, hermetic suite
+                                            (fixtures only; includes a live
+                                            reproduction of the 141)
+    ai/bin/check-pipefail-grep --help       this text
+
+  Exit 0 = no such pipe. Exit 1 = at least one (each named), or a file that
+  could not be read.
+TXT
+
+FIX_TEXT = "Fix: replace the pipe with a here-string -- `grep -q PAT <<<\"$var\"` " \
+           "or `grep -q PAT <<<\"$(cmd)\"` -- keeping every grep flag (-x/-F/-E, " \
+           "`--` before a pattern starting with `-`) and any `!` negation exactly. " \
+           "Under pipefail, grep -q exits at its first match, the writer takes " \
+           "SIGPIPE, and the pipeline returns 141: a positive check goes falsely " \
+           "red, a negated one falsely green. There is no suppression marker; " \
+           "convert the site."
+
+# ---------------------------------------------------------------------------
+# File classification
+
+SHELL_SHEBANG = %r{\A#!\s*\S*(?:/|\s)(?:env\s+)?(?:ba|z|k|da)?sh\b}.freeze
+SHELL_EXT = /\.(?:sh|bash)\z/.freeze
+
+def shell_file?(path, text)
+  return true if path =~ SHELL_EXT
+
+  text.lines.first.to_s =~ SHELL_SHEBANG ? true : false
+end
+
+# `set -o pipefail`, `set -euo pipefail`, `set -eu -o pipefail`, and friends,
+# on a non-comment line. `set +o pipefail` (turning it OFF) does not match.
+PIPEFAIL_RE = /^\s*set\s+(?:[-+][A-Za-z]+\s+)*-[A-Za-z]*o\s+pipefail\b/.freeze
+
+def sets_pipefail?(text)
+  text.each_line.any? { |l| l =~ PIPEFAIL_RE }
+end
+
+# Basenames a file pulls in with `source X` / `. X` -- the target inherits the
+# includer's shell options. Matched by basename because includes are written
+# through variables ("${LIB_DIR}/worktree.sh"); over-inclusion only means a
+# lib is held to the pipefail rule, which is the safe direction.
+SOURCE_RE = /^\s*(?:source|\.)\s+["']?([^\s"';]+)/.freeze
+
+def sourced_basenames(text)
+  text.each_line.filter_map do |l|
+    m = l.match(SOURCE_RE)
+    m && File.basename(m[1].delete("\"'"))
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Line scanning
+
+GREP_ARG_SHORT = "efmABCdD" # short options that take an argument
+
+# True when the command text starting right after a pipe is `grep` with a
+# quiet flag among its options.
+def quiet_grep?(rest)
+  toks = rest.strip.split(/\s+/)
+  return false unless toks.first == "grep"
+
+  i = 1
+  while i < toks.size
+    t = toks[i]
+    break unless t.start_with?("-")
+    break if t == "--" || t == "-"
+
+    if t.start_with?("--")
+      return true if %w[--quiet --silent].include?(t)
+
+      i += 1 if %w[--regexp --file --max-count --context --before-context
+                   --after-context --directories --devices].include?(t)
+    else
+      t[1..].each_char.with_index do |c, idx|
+        return true if c == "q"
+        next unless GREP_ARG_SHORT.include?(c)
+
+        i += 1 if idx == t.size - 2 # argument is the next token
+        break
+      end
+    end
+    i += 1
+  end
+  false
+end
+
+# Offsets of the unquoted pipes in one line (the command follows each offset).
+# Quote-aware on a single line: '...' and "..." are text, except that `$( ... )`
+# inside double quotes opens a new code context. A `#` at a word start in code
+# ends the line.
+def unquoted_pipes(line)
+  stack = [:code] # :code, :dq, :sq, :subst (a $( ... ) code context)
+  pipes = []
+  i = 0
+  prev = nil
+  while i < line.size
+    c = line[i]
+    top = stack.last
+    case top
+    when :sq
+      stack.pop if c == "'"
+    when :dq
+      if c == "\\"
+        i += 1
+      elsif c == '"'
+        stack.pop
+      elsif c == "$" && line[i + 1] == "("
+        stack.push(:subst)
+        i += 1
+      end
+    else # :code or :subst
+      if c == "\\"
+        i += 1
+      elsif c == "'"
+        stack.push(:sq)
+      elsif c == '"'
+        stack.push(:dq)
+      elsif c == "#" && (prev.nil? || prev =~ /\s/ || prev == ";")
+        break
+      elsif c == "$" && line[i + 1] == "("
+        stack.push(:subst)
+        i += 1
+      elsif c == "(" && top == :subst
+        stack.push(:subst)
+      elsif c == ")" && top == :subst
+        stack.pop
+      elsif c == "|"
+        if line[i + 1] == "|"
+          i += 1 # `||` is a list operator, not a pipe
+        elsif line[i + 1] == "&"
+          i += 1 # `|&` IS a pipe (stdout+stderr); the command follows the `&`
+          pipes << i
+        else
+          pipes << i
+        end
+      end
+    end
+    prev = c
+    i += 1
+  end
+  pipes
+end
+
+HEREDOC_RE = /<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.freeze
+
+# [[lineno, line], ...] for every offending line of text.
+def offending_lines(text)
+  hits = []
+  heredoc_end = nil
+  heredoc_strip = false
+  pending_pipe = false # previous code line ended in a bare `|`
+  text.each_line.with_index(1) do |raw, n|
+    line = raw.chomp
+    if heredoc_end
+      body = heredoc_strip ? line.sub(/\A\t+/, "") : line
+      heredoc_end = nil if body == heredoc_end
+      next
+    end
+    next if line =~ /\A\s*#/
+
+    pipes = unquoted_pipes(line)
+    hit = pending_pipe && quiet_grep?(line)
+    hit ||= pipes.any? { |p| quiet_grep?(line[(p + 1)..]) }
+    hits << [n, line] if hit
+
+    stripped = line.rstrip.sub(/\\\z/, "").rstrip
+    pending_pipe = !pipes.empty? && pipes.last == stripped.size - 1
+
+    # A heredoc (not a here-STRING `<<<`) starts a body that is data.
+    m = line.gsub("<<<", "   ").match(HEREDOC_RE)
+    if m
+      heredoc_strip = m[1] == "-"
+      heredoc_end = m[3]
+    end
+  end
+  hits
+end
+
+# ---------------------------------------------------------------------------
+# Repository scan
+
+# Tracked files under the scan roots; nil when root is not a git worktree
+# (a --self-test fixture), in which case every file on disk is a candidate.
+def candidate_files(root)
+  _o, _e, probe = Open3.capture3("git", "-C", root, "rev-parse", "--is-inside-work-tree")
+  if probe.success?
+    out, err, st = Open3.capture3("git", "-C", root, "ls-files", "--", *SCAN_ROOTS)
+    raise "git -C #{root} ls-files failed: #{err.strip}" unless st.success?
+
+    out.split("\n")
+  else
+    SCAN_ROOTS.flat_map do |d|
+      Dir.glob(File.join(root, d, "**", "*"), File::FNM_DOTMATCH)
+         .select { |p| File.file?(p) }
+         .map { |p| p.sub("#{root}/", "") }
+    end
+  end
+end
+
+# => { findings: [[rel, lineno, line]], unreadable: [[rel, why]],
+#      shell: Integer, pipefail: Integer }
+def scan(root)
+  shells = {}
+  unreadable = []
+  candidate_files(root).sort.each do |rel|
+    path = File.join(root, rel)
+    next if File.symlink?(path) || !File.file?(path)
+
+    begin
+      text = File.read(path, encoding: "UTF-8")
+      text = text.scrub unless text.valid_encoding?
+    rescue SystemCallError, IOError => e
+      unreadable << [rel, e.message]
+      next
+    end
+    shells[rel] = text if shell_file?(rel, text)
+  end
+
+  direct = shells.select { |_r, t| sets_pipefail?(t) }
+  inherited_names = direct.values.flat_map { |t| sourced_basenames(t) }.uniq
+  pipefail = shells.select do |rel, _t|
+    direct.key?(rel) || inherited_names.include?(File.basename(rel))
+  end
+
+  findings = pipefail.sort.flat_map do |rel, text|
+    offending_lines(text).map { |(n, line)| [rel, n, line] }
+  end
+  { findings: findings, unreadable: unreadable, shell: shells.size, pipefail: pipefail.size }
+end
+
+def run_check(root = REPO)
+  r = scan(root)
+  unless r[:unreadable].empty?
+    warn "check-pipefail-grep: FAILED -- could not read #{r[:unreadable].size} file(s); " \
+         "a file never read is not a file found clean:"
+    r[:unreadable].each { |(rel, why)| warn "  - #{rel}: #{why}" }
+    warn "  Fix: make each file readable (permissions, a broken checkout) and re-run."
+    return 1
+  end
+  if r[:shell].zero? || r[:pipefail].zero?
+    warn "check-pipefail-grep: FAILED -- scanned #{r[:shell]} shell file(s), " \
+         "#{r[:pipefail]} under pipefail under #{root}; this repo has both, so " \
+         "the scan itself is broken."
+    warn "  Fix: check candidate_files/shell_file?/PIPEFAIL_RE in " \
+         "ai/bin/check-pipefail-grep; do not treat zero as clean."
+    return 1
+  end
+  if r[:findings].empty?
+    puts "check-pipefail-grep: OK -- #{r[:shell]} shell file(s) scanned, " \
+         "#{r[:pipefail]} under pipefail, 0 `| grep -q` pipes."
+    return 0
+  end
+
+  warn "check-pipefail-grep: FAILED -- #{r[:findings].size} `... | grep -q` pipe(s) " \
+       "in file(s) running under `set -o pipefail`:"
+  r[:findings].each { |(rel, n, line)| warn "  #{rel}:#{n}: #{line.strip}" }
+  warn "  #{FIX_TEXT}"
+  1
+end
+
+# ---------------------------------------------------------------------------
+# Self-test
+
+def run_self_test
+  ok = true
+  fail_case = lambda do |name, detail|
+    warn "self-test: FAIL -- #{name}: #{detail}"
+    ok = false
+  end
+
+  line_cases = [
+    # [name, text, expected_hit_line_numbers]
+    ["classic printf pipe flagged", "printf '%s' \"$out\" | grep -q PAT\n", [1]],
+    ["negated pipe flagged", "if ! printf '%s' \"$out\" | grep -q PAT; then :; fi\n", [1]],
+    ["echo pipe with -qxF flagged", "echo \"$x\" | grep -qxF -- \"$y\"\n", [1]],
+    ["-Eq cluster flagged", "cmd | grep -Eq 'a|b'\n", [1]],
+    ["--quiet flagged", "cmd | grep --quiet x\n", [1]],
+    ["command producer flagged", "if git status --porcelain | grep -q x; then :; fi\n", [1]],
+    ["$( ) inside double quotes flagged", "v=\"$(cmd | grep -q x && echo y)\"\n", [1]],
+    ["pipe at end of line, grep on next flagged", "cmd |\n  grep -q x\n", [2]],
+    ["pipe then backslash, grep on next flagged", "cmd | \\\n  grep -q x\n", [2]],
+    ["here-string not flagged", "grep -q PAT <<<\"$out\"\n", []],
+    ["here-string of $( ) not flagged", "grep -q PAT <<<\"$(cmd | sort)\"\n", []],
+    ["grep on a file not flagged", "grep -q PAT \"$f\"\n", []],
+    ["|| grep not flagged", "a || grep -q x \"$f\"\n", []],
+    ["|& grep flagged", "cmd |& grep -q x\n", [1]],
+    ["pipe to grep without -q not flagged", "cmd | grep x | wc -l\n", []],
+    ["-e q is a pattern, not -q", "cmd | grep -e q\n", []],
+    ["comment line not flagged", "# never write printf | grep -q x\n", []],
+    ["trailing comment not flagged", "grep -q x \"$f\" # not printf | grep -q\n", []],
+    ["single-quoted text not flagged", "ok 'never a printf | grep -q pipe'\n", []],
+    ["double-quoted text not flagged", "ok \"never a printf | grep -q pipe\"\n", []],
+    ["heredoc body not flagged", "cat >f <<'EOF'\nprintf x | grep -q x\nEOF\ngrep -q x f\n", []],
+    ["line after heredoc still scanned", "cat >f <<EOF\nhi\nEOF\ncmd | grep -q x\n", [4]],
+  ]
+  line_cases.each do |(name, text, want)|
+    got = offending_lines(text).map(&:first)
+    fail_case.call(name, "want lines #{want.inspect}, got #{got.inspect}") unless got == want
+  end
+
+  pf_cases = [
+    ["set -euo pipefail", true], ["set -o pipefail", true], ["  set -uo pipefail", true],
+    ["set -eu -o pipefail", true], ["set +o pipefail", false], ["# set -o pipefail", false],
+    ["set -e", false],
+  ]
+  pf_cases.each do |(line, want)|
+    got = sets_pipefail?("#{line}\n")
+    fail_case.call("pipefail detection #{line.inspect}", "want #{want}, got #{got}") unless got == want
+  end
+
+  dir = Dir.mktmpdir("check-pipefail-grep-selftest-")
+  begin
+    FileUtils.mkdir_p(File.join(dir, "ai", "lib"))
+    FileUtils.mkdir_p(File.join(dir, "scripts"))
+    w = ->(rel, body) { File.write(File.join(dir, rel), body) }
+    w.call("scripts/pf.sh", "#!/usr/bin/env bash\nset -euo pipefail\nsource \"$D/inc.sh\"\n" \
+                            "printf '%s' \"$o\" | grep -q x\n")
+    w.call("scripts/nopf.sh", "#!/usr/bin/env bash\nset -eu\nprintf '%s' \"$o\" | grep -q x\n")
+    w.call("ai/lib/inc.sh", "f() { cmd | grep -q y; }\n")
+    w.call("ai/lib/other.sh", "g() { cmd | grep -q y; }\n")
+    w.call("scripts/clean", "#!/bin/bash\nset -o pipefail\ngrep -q x <<<\"$o\"\n")
+    w.call("scripts/notes.md", "set -o pipefail\nprintf x | grep -q x\n")
+    r = scan(dir)
+    got = r[:findings].map { |(rel, n, _)| "#{rel}:#{n}" }.sort
+    want = ["ai/lib/inc.sh:1", "scripts/pf.sh:4"]
+    unless got == want
+      fail_case.call("tree scan (direct + inherited pipefail; no-pipefail, clean, " \
+                     "unsourced lib and non-shell ignored)", "want #{want}, got #{got}")
+    end
+    if run_check_quiet(dir) != 1
+      fail_case.call("run_check on a dirty fixture tree", "did not exit 1")
+    end
+    FileUtils.rm_f(File.join(dir, "scripts/pf.sh"))
+    FileUtils.rm_f(File.join(dir, "ai/lib/inc.sh"))
+    if run_check_quiet(dir) != 0
+      fail_case.call("run_check on a clean fixture tree", "did not exit 0")
+    end
+    FileUtils.rm_f(File.join(dir, "scripts/clean"))
+    if run_check_quiet(dir) != 1
+      fail_case.call("zero pipefail files", "read as clean instead of a broken scan")
+    end
+
+    # The live reproduction. A writer that emits the match first and then keeps
+    # writing ~3MB -- far more than a pipe buffer plus grep's read buffer, so
+    # this is deterministic, not timing-dependent: grep -q exits on the match,
+    # a later write takes SIGPIPE, and under
+    # pipefail the pipeline reports 141 although the pattern DID match. The
+    # fixture must (a) actually produce that 141 here and (b) be flagged.
+    repro = File.join(dir, "scripts", "repro.sh")
+    File.write(repro, <<~'SH')
+      #!/usr/bin/env bash
+      set -o pipefail
+      writer() { echo MATCH; seq 1 500000; }
+      writer | grep -q MATCH
+      echo "rc=$?"
+      out="$(writer)"
+      grep -q MATCH <<<"$out"
+      echo "herestring_rc=$?"
+    SH
+    File.chmod(0o755, repro)
+    out, _st = Open3.capture2e("bash", repro)
+    unless out.include?("rc=141") && out.include?("herestring_rc=0")
+      fail_case.call("141 reproduction", "expected rc=141 (pipe) and herestring_rc=0, got #{out.inspect}")
+    end
+    unless offending_lines(File.read(repro)).map(&:first) == [4]
+      fail_case.call("141 reproduction is flagged", "the reproducing pipe (line 4) was not flagged")
+    end
+  ensure
+    FileUtils.rm_rf(dir)
+  end
+
+  if ok
+    puts "check-pipefail-grep: self-test OK (#{line_cases.size + pf_cases.size + 6} cases)"
+    0
+  else
+    warn "check-pipefail-grep: self-test FAILED"
+    warn "  Fix: the scanner in ai/bin/check-pipefail-grep no longer classifies " \
+         "the cases above correctly; repair it (do not weaken a case)."
+    1
+  end
+end
+
+def run_check_quiet(root)
+  saved = $stderr.dup
+  saved_out = $stdout.dup
+  File.open(File::NULL, "w") do |null|
+    $stderr.reopen(null)
+    $stdout.reopen(null)
+    return run_check(root)
+  end
+ensure
+  $stderr.reopen(saved)
+  $stdout.reopen(saved_out)
+end
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts USAGE
+  exit 0
+end
+exit(ARGV.include?("--self-test") ? run_self_test : run_check)

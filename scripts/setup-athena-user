@@ -65,7 +65,7 @@ chown -R "$USER_NAME":"$USER_NAME" "$USER_HOME"
 chmod 700 "$USER_HOME"
 
 # guard rail: make sure we did NOT grant sudo
-if id -nG "$USER_NAME" | tr ' ' '\n' | grep -qxE 'wheel|sudo'; then
+if grep -qxE 'wheel|sudo' <<<"$(id -nG "$USER_NAME" | tr ' ' '\n')"; then
   die "$USER_NAME is in wheel/sudo — that should not happen; investigate"
 fi
 log "confirmed $USER_NAME has no sudo/wheel membership: $(id -nG "$USER_NAME")"
@@ -130,7 +130,7 @@ done
 # =============================================================================
 # 5. password (interactive only)
 # =============================================================================
-if passwd -S "$USER_NAME" 2>/dev/null | grep -q ' L '; then
+if grep -q ' L ' <<<"$(passwd -S "$USER_NAME" 2>/dev/null)"; then
   if [ -t 0 ]; then
     log "set a password for $USER_NAME:"
     passwd "$USER_NAME"

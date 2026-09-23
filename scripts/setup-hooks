@@ -239,11 +239,11 @@ case "$ACTION" in
     printf '{\n    "model": "x"\n}\n' > "$HOOKS_SETTINGS_FILE"
     ok=1
     r1="$(apply install "$HOOKS_SETTINGS_FILE" 0)"
-    echo "$r1" | grep -q "MARKER:changed" || { echo "  FAIL first install should change"; ok=0; }
+    grep -q "MARKER:changed" <<<"$r1" || { echo "  FAIL first install should change"; ok=0; }
     python3 -c "import json;json.load(open('$HOOKS_SETTINGS_FILE'))" || { echo "  FAIL result not valid JSON"; ok=0; }
     "$CHECKER" >/dev/null 2>&1 && echo "  ok   check passes after install" || { echo "  FAIL check should pass after install"; ok=0; }
     r2="$(apply install "$HOOKS_SETTINGS_FILE" 0)"
-    echo "$r2" | grep -q "MARKER:nochange" || { echo "  FAIL second install should be a no-op (idempotent)"; ok=0; }
+    grep -q "MARKER:nochange" <<<"$r2" || { echo "  FAIL second install should be a no-op (idempotent)"; ok=0; }
     # Symlink dedup: a settings file that references the hooks through a symlinked
     # dir (mirrors this machine's ~/.claude/hooks -> repo ai/hooks) must be seen as
     # already wired — install must NOT append duplicate entries.
@@ -262,7 +262,7 @@ for e in reg:
 json.dump({"hooks": hooks}, open(os.environ["SLINK"], "w"), indent=4)
 PY
     rs="$(apply install "$slink" 0)"
-    echo "$rs" | grep -q "MARKER:nochange" || { echo "  FAIL symlink-spelled hooks should be seen as wired (no duplicate install)"; ok=0; }
+    grep -q "MARKER:nochange" <<<"$rs" || { echo "  FAIL symlink-spelled hooks should be seen as wired (no duplicate install)"; ok=0; }
     HOOKS_SETTINGS_FILE="$slink" "$CHECKER" >/dev/null 2>&1 && echo "  ok   symlink-spelled hooks recognized as wired" || { echo "  FAIL check should pass on symlink-spelled hooks"; ok=0; }
     # ...and the same, for a hook whose FILE IS NOT THERE, driving the SHIPPED
     # code path rather than a copy of norm(). `norm` resolves the directory
@@ -286,7 +286,7 @@ json.dump({"hooks": {"SessionStart": [
     open(os.environ["SLINK"], "w"), indent=4)
 PY2
     rg="$(REGISTRY="$ghostreg" apply install "$ghost" 0)"
-    echo "$rg" | grep -q "MARKER:nochange" \
+    grep -q "MARKER:nochange" <<<"$rg" \
       && echo "  ok   a symlink-spelled hook whose file is absent is still seen as wired" \
       || { echo "  FAIL an absent hook file must not make install duplicate the wiring"; ok=0; }
     HOOKS_REGISTRY_FILE="$ghostreg" HOOKS_SETTINGS_FILE="$ghost" "$CHECKER" >/dev/null 2>&1 \
@@ -332,7 +332,7 @@ sys.exit(0 if cmds and all(c.startswith(root) for c in cmds) else 1)
 PY2
 
     r3="$(apply remove "$HOOKS_SETTINGS_FILE" 0)"
-    echo "$r3" | grep -q "MARKER:changed" || { echo "  FAIL remove should change"; ok=0; }
+    grep -q "MARKER:changed" <<<"$r3" || { echo "  FAIL remove should change"; ok=0; }
     "$CHECKER" >/dev/null 2>&1 && { echo "  FAIL check should fail after remove"; ok=0; } || echo "  ok   check fails after remove"
     # The original "model" key must survive install+remove (merge, not clobber).
     python3 -c "import json,sys; sys.exit(0 if json.load(open('$HOOKS_SETTINGS_FILE')).get('model')=='x' else 1)" \
@@ -348,9 +348,9 @@ PY2
     fi
     out="$(apply "$ACTION" "$SETTINGS" "$DRY_RUN")"
     echo "$out" | grep -v '^MARKER:' || true
-    if echo "$out" | grep -q "MARKER:nochange"; then
+    if grep -q "MARKER:nochange" <<<"$out"; then
       say "setup-hooks: nothing to do — all registry hooks already ${ACTION%e}ed."
-    elif echo "$out" | grep -q "MARKER:wouldchange"; then
+    elif grep -q "MARKER:wouldchange" <<<"$out"; then
       say "setup-hooks: (dry-run) the above would be applied to ${SETTINGS}."
     else
       say "setup-hooks: ${ACTION} applied to ${SETTINGS}. Hooks load at session start — reload to activate."
