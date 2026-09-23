@@ -147,7 +147,7 @@ Environment:
                     Graphite token and opens PRs as the owner), so an agent
                     stacks with plain branches: push each through wt or
                     gh-athena git, then open each PR with
-                    `gh-athena pr create --base <parent-branch>`.
+                    gh-athena pr create --base <parent-branch>.
                     Unset or 0 (the default, a human's use): plain git push,
                     unchanged. See scripts/wt-lib/push.sh.
 

@@ -120,9 +120,9 @@ The `forge-identity-guard.sh` hook warns on a plain `git push` to a gitlab.com
 remote.
 
 An agent driving `wt` sets `WT_AGENT_PUSH=1` so `wt`'s own pushes take this
-path; see the header of `scripts/wt-lib/push.sh`. Graphite does not support
-GitLab, so an agent stacks with plain branches and opens each MR with
-`glab-athena mr create --target-branch <parent-branch>`.
+path; see the header of `scripts/wt-lib/push.sh`.
+Graphite does not support GitLab, so an agent stacks with plain branches and
+opens each MR with `glab-athena mr create --target-branch <parent-branch>`.
 
 Afterwards, run this in the repo to check who the push was attributed to:
 

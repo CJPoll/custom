@@ -57,7 +57,7 @@ Subcommands:
                     Refused under WT_AGENT_PUSH=1: gt submits as the owner,
                     and Graphite has no Athena route. An agent pushes plain
                     branches and opens each PR with
-                    `gh-athena pr create --base <parent-branch>`
+                    gh-athena pr create --base <parent-branch>
                     (see scripts/wt-lib/push.sh)
 
   sync              Sync the stack with remote changes using Graphite (gt sync)

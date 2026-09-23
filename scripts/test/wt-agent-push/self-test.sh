@@ -250,16 +250,29 @@ if has "$err" "Fix:" && has "$err" "gh-athena pr create --base <parent-branch>" 
   pass "agent: the gt refusal's Fix: names the plain-branch + gh-athena pr create --base path"
 else fail "agent: gt refusal Fix: text [$err]"; fi
 
-wt_help="$("${scripts_dir}/wt" --help 2>&1)"
-stack_help="$("${scripts_dir}/wt-subcommands/wt-stack" --help 2>&1)"
+# Help is read from STDOUT only, and its stderr must be empty: an unquoted
+# heredoc turns a backticked command into a command substitution whose syntax
+# error echoes the command text on stderr, which would otherwise satisfy the
+# assertion while the printed help is missing the line.
+wt_help="$("${scripts_dir}/wt" --help 2>"${tmp}/help-err-wt")"
+stack_help="$("${scripts_dir}/wt-subcommands/wt-stack" --help 2>"${tmp}/help-err-stack")"
 gh_skill="${scripts_dir}/../ai/skills/athena:github/SKILL.md"
+gl_skill="${scripts_dir}/../ai/skills/athena:gitlab/SKILL.md"
 for pair in "wt --help|${wt_help}" "wt stack --help|${stack_help}" \
             "athena:github SKILL.md|$(cat "${gh_skill}" 2>/dev/null)"; do
   name="${pair%%|*}"; text="${pair#*|}"
-  if has "$text" "gh-athena pr create --base" && has "$text" "no Athena route"; then
+  if has "$text" "gh-athena pr create --base <parent-branch>" && has "$text" "no Athena route"; then
     pass "docs: ${name} names the agent stack path (no Athena route for Graphite)"
   else fail "docs: ${name} does not name the agent stack path"; fi
 done
+for f in "${tmp}/help-err-wt" "${tmp}/help-err-stack"; do
+  if [ ! -s "$f" ]; then pass "docs: $(basename "$f") help writes nothing to stderr"
+  else fail "docs: $(basename "$f") help wrote to stderr: [$(cat "$f")]"; fi
+done
+if has "$(cat "${gl_skill}" 2>/dev/null)" "glab-athena mr create --target-branch <parent-branch>" \
+   && has "$(cat "${gl_skill}" 2>/dev/null)" "Graphite does not support GitLab"; then
+  pass "docs: athena:gitlab SKILL.md names the agent stack path (Graphite has no GitLab support)"
+else fail "docs: athena:gitlab SKILL.md does not name the agent stack path"; fi
 
 # --- 14. no push site bypasses the helper ------------------------------------
 # Every `git push` in wt lives in push.sh. A new raw push elsewhere would push
