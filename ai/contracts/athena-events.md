@@ -338,12 +338,8 @@ miss.
   - `rule_id` is the matched rule, or `nil` for a direct (addressed, rule-less)
     delivery (the direct delivery's key is stated once in *Declared families
     beyond the first pass* → `fleet.session.message`).
-  - `machine_id` is the machine a row is about where the rule does not already
-    pin one: a direct delivery's **recipient machine**. It is `nil` for a rule
-    delivery, because a rule has exactly one target. (The implementation also
-    files each machine-unreachable transition in this store, with `rule_id: nil`
-    and the machine that went unreachable — `athena-inbox.md` →
-    `server-failed-deliveries`.)
+  - `machine_id` is a direct delivery's **recipient machine**. It is `nil` for a
+    rule delivery, because a rule has exactly one target.
   - The unique index is `NULLS NOT DISTINCT` (`nulls_distinct: false`), so every
     failure sharing one key upserts into one row, `nil` components included —
     never a row per occurrence, and never a collision between a direct row and a
@@ -357,8 +353,7 @@ miss.
   Subsequent failures of the same key **increment a monotonic count** and update
   **last-seen**, storing **no** new payload. This bounds the store by a
   **structural quantity** — per owner, distinct `(rule, cause)` pairs plus
-  distinct `(machine, cause)` pairs for the rows keyed on a machine, a finite
-  set —
+  distinct `(direct recipient machine, cause)` pairs, a finite set —
   **independent of traffic volume**: a revoked credential failing a million
   deliveries collapses to one exemplar + count 1,000,000, not a million rows.
 
@@ -399,7 +394,9 @@ miss.
   the inbox target is `<machine_id>:<inbox_name>`, so the first-seen target
   names that machine; the row may span several of its inboxes, which is why the
   exemplar is only the first-seen one. A direct row recorded before this grain
-  may keep `machine_id` `nil`, and such a row may span machines.
+  may have `machine_id` `nil` (an implementation need not attribute it), and
+  such a row may span machines; its first-seen target still names the first
+  machine.
 - **Retention — the never-destroy-unread doctrine applies, made safe by the
   grain.** Follow the sibling inbox doctrine (`ai/contracts/athena-inbox.md` →
   *Retention* → *The principle*), exactly as the dead-letter store does: an
@@ -491,7 +488,7 @@ failed-delivery store*).
   read into an LLM (see *Trust posture — two paths*), and read access is the **owning account's**
   only.
 - **Reported, not merely stored.** REFUSED MUST be **reported to the owner, never left silently
-  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count> refused deliveries to <adapter>:<target> (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>: target-bind re-assertion → re-author the rule against a machine registered to its owner; generic-webhook egress → correct the owner allowlist or the destination; owner-verified-recipient (email/SMS) → verify the recipient or the sending domain for this owner, or correct the rule. See the refused-delivery store exemplar for the first-seen event and its declared refusal detail.` A direct row (`rule_id: nil`) carries the direct form instead: `Fix: direct (addressed) delivery has <count> refused deliveries to <adapter> recipients on machine <machine_id> (first seen: <adapter>:<target>) (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>; a direct delivery has no rule to re-author. See the refused-delivery store exemplar for the first-seen event and its declared refusal detail.` The row is one recipient machine's (see *Grain* above) but may span several of its inboxes, so the exemplar names only the first-seen target. A direct row recorded before this grain whose machine could not be attributed has `machine_id` `nil`; its marker omits the `on machine <machine_id>` clause, because that row may span machines.
+  quiet**, carrying the LLM-actionable marker: `Fix: rule <rule_id> has <count> refused deliveries to <adapter>:<target> (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>: target-bind re-assertion → re-author the rule against a machine registered to its owner; generic-webhook egress → correct the owner allowlist or the destination; owner-verified-recipient (email/SMS) → verify the recipient or the sending domain for this owner, or correct the rule. See the refused-delivery store exemplar for the first-seen event and its declared refusal detail.` A direct row (`rule_id: nil`) carries the direct form instead: `Fix: direct (addressed) delivery has <count> refused deliveries to <adapter> recipients on machine <machine_id> (first seen: <adapter>:<target>) (refusal-cause: <cause>) — apply the remediation the refusing owner↔destination check declares for <cause>; a direct delivery has no rule to re-author. See the refused-delivery store exemplar for the first-seen event and its declared refusal detail.` The row is one recipient machine's (see *Grain* above) but may span several of its inboxes, so the exemplar names only the first-seen target. A direct row recorded before this grain may have `machine_id` `nil` (an implementation need not attribute it); its marker omits the `on machine <machine_id>` clause, because that row may span machines.
 - **Retention — the never-destroy-unread doctrine applies, made safe by the grain**, exactly as
   the dead-letter, failed-delivery, and ingress-failure stores (see *Event disposition and
   dead-letter*): an un-triaged refused-delivery exemplar has an **unbounded** lifetime (it is the
