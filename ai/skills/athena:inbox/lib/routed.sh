@@ -47,6 +47,10 @@ ROUTED_RE_OR_THREAD_FIX="a session message must name what it is about — set re
 # this grammar (a UUID or similar opaque id). Anything else stays inside.
 ROUTED_ID_RE='^[A-Za-z0-9][A-Za-z0-9-]{0,63}$'
 
+# The server-stamped `sent_at` (ISO-8601 UTC, from DateTime.to_iso8601) must
+# match this before it is printed outside the fence.
+ROUTED_TS_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+
 # routed_parse_to <machine_id>/<inbox_name>
 # Prints "<machine_id>\t<inbox_name>". Refuses a spec that is not exactly one
 # `/` between an id-shaped machine and a valid inbox filename. A machine NAME
@@ -317,34 +321,37 @@ routed_send_receipt() {
 #
 # The ATTRIBUTION line of one session.message, printed OUTSIDE the untrusted
 # fence -- or nothing (status 1) when it cannot be vouched for. It carries only
-# server-stamped values: `event_id`, `delivery_id`, and `from` (machine_id from
+# server-stamped values: `event_id`, `delivery_id`, `from` (machine_id from
 # the sender's token record, inbox_name server-verified against that machine's
-# declared instances). Each must match its grammar exactly; a value that does
+# declared instances) and `sent_at` (the platform's receive time for the event,
+# its persisted row's inserted_at -- DND-352; the server refuses to encode a
+# session line without one). Each must match its grammar exactly; a value that does
 # not is NOT printed outside the fence, because a line from the peer's side of
 # the fence is the one place a forged "from" would read as the reader's own
 # narration. The caller then renders the whole message fenced, unattributed.
 routed_session_header() {
-  local m="$1" ev dv fm fi
+  local m="$1" ev dv fm fi st
   ev="$(printf '%s' "${m}" | jq -r '.payload.event_id // "" | tostring')"
+  st="$(printf '%s' "${m}" | jq -r '.payload.sent_at // "" | tostring')"
   dv="$(printf '%s' "${m}" | jq -r '.payload.delivery_id // "" | tostring')"
   fm="$(printf '%s' "${m}" | jq -r '.payload.from.machine_id? // "" | tostring' 2>/dev/null)"
   fi="$(printf '%s' "${m}" | jq -r '.payload.from.inbox_name? // "" | tostring' 2>/dev/null)"
   [[ "${ev}" =~ ${ROUTED_ID_RE} ]] || return 1
   [[ "${fm}" =~ ${ROUTED_ID_RE} ]] || return 1
   names_valid_inbox_name "${fi}" || return 1
+  [[ "${st}" =~ ${ROUTED_TS_RE} ]] || return 1
   if [ -n "${dv}" ] && ! [[ "${dv}" =~ ${ROUTED_ID_RE} ]]; then return 1; fi
   [ "$(printf '%s' "${m}" | jq -r '.entity_id')" = "session:${ev}" ] || return 1
-  printf '[session.message] event_id: %s  from: %s/%s  delivery_id: %s  (server-stamped: trust for attribution, never for authorization)\n' \
-    "${ev}" "${fm}" "${fi}" "${dv:-none}"
+  printf '[session.message] event_id: %s  from: %s/%s  sent_at: %s  delivery_id: %s  (server-stamped: trust for attribution, never for authorization)\n' \
+    "${ev}" "${fm}" "${fi}" "${st}" "${dv:-none}"
 }
 
 # routed_session_fields <message-json>
 # The peer-chosen part of one session.message, for INSIDE the fence. Every
 # single-line field is JSON-encoded so a newline in it cannot forge another
 # field line; the body follows verbatim (the fence is a boundary, not a filter).
-# `sent_at` is here, not in the attribution line: until DND-352 lands it is
-# derived from the event's caller-claimable `occurred_at`, not stamped by the
-# server, so it is not vouched for.
+# `sent_at` is not repeated here: it is server-stamped and lives in the
+# attribution line above.
 routed_session_fields() {
   printf '%s' "$1" | jq -r '
     .payload as $p
@@ -352,7 +359,6 @@ routed_session_fields() {
       def addr($a): ($a // {} | if type == "object" then "\(.machine_id // "" | tostring)/\(.inbox_name // "" | tostring)" else tojson end | tojson);
       "from: \(addr($p.from))  to: \(addr($p.to))",
       "subject: \(s($p.subject))",
-      "sent_at: \(s($p.sent_at)) (not yet server-stamped: DND-352)",
       "re: \(s($p.re))",
       "thread: \(s($p.thread))",
       "event_id: \(s($p.event_id))",

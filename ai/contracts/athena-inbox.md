@@ -1146,23 +1146,25 @@ change stream of state-change events*), unchanged by this section.
   identity a reply's `thread` names — and `delivery_id`, for
   `delivery_status`. `sent_at` (ISO-8601 UTC).
 
-  **`sent_at` MUST be server-stamped** — the delivery's own timestamp, never a
-  value the sender's payload can set — and is a field **separate from**
-  `occurred_at`, the underlying event's caller-claimed attribution timestamp
-  (when the sender says the message was said). `occurred_at` MUST NOT be the
-  source `sent_at` derives from. **Coordinator ruling, DND-352, not yet
-  implemented:** the deployed encoder currently derives `sent_at` from the
-  event's `occurred_at` (`Athena.Events.InboxLine.build_session_line/4` →
-  `iso8601(event.occurred_at)`) — the MCP `session_send` tool never lets a
-  caller set `occurred_at`, so on that one path it reads as emit time in
-  practice, but the general harness-emit ingress otherwise accepts
-  `occurred_at` as caller-supplied, which would let a caller set `sent_at`
-  through the back door. This does **not** comply with the rule above; it is
-  the known gap DND-352 tracks.
+  **`sent_at` MUST be server-stamped** — the platform's receive time for the
+  event (its persisted event row's `inserted_at`), never a value the sender's
+  payload can set — and is a field **separate from** `occurred_at`, the
+  underlying event's caller-claimed attribution timestamp (when the sender
+  says the message was said). `occurred_at` MUST NOT be the source `sent_at`
+  derives from, and it is not carried on the line. An event with no receive
+  time is refused at encode rather than emitted with `sent_at: null`.
 
-  A routed session message's `from` MAY be trusted for **attribution** but
-  never for **authorization** (*Untrusted input*; contrast maildir `from`,
-  which is only a label — *Frontmatter*). A reply is a new session message
+  **Later (2026-09-23):** this rule read "the delivery's own timestamp", and a
+  following paragraph recorded that the deployed encoder derived `sent_at` from
+  the caller-claimable `occurred_at` (a known gap). Superseded by DND-352
+  (gen_saas PR #302): the encoder stamps `sent_at` from the event's receive
+  time, so the gap paragraph was removed. The receive time was chosen over a
+  per-delivery time because it is one value per message, the same on every
+  re-push.
+
+  A routed session message's `from` and `sent_at` MAY be trusted for
+  **attribution** but never for **authorization** (*Untrusted input*; contrast
+  maildir `from`, which is only a label — *Frontmatter*). A reply is a new session message
   whose `to` is the received `from` and whose `thread` is the received
   `event_id`.
 
