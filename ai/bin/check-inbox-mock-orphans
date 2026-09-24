@@ -48,9 +48,15 @@
 # `mock-athena-inbox-client.rb`, no ancestor (walking PPID up to PID 1) is a
 # live process whose args match the self-test/fake-suite launcher pattern,
 # owned by the current user, at least --min-age seconds old (ps `etimes`).
-# WHAT IT NEVER TOUCHES: any mock still parented to a live process (this
-# run's own, or a concurrent gate's, in a different worktree — untouched by
-# construction, not by scoping).
+# WHAT IT NEVER TOUCHES: a mock with a live self-test.sh/fake-suite.sh
+# ancestor anywhere in its lineage (this run's own suite, or a concurrent
+# gate's, in a different worktree — untouched by construction, not by
+# scoping). A mock parented to some OTHER live process that is not itself
+# running the suite (an interactive shell, a debugger, a manual invocation
+# outside any self-test) is NOT spared by that alone — it is only ever
+# legitimate as a child of the suite, so a live-but-non-suite parent does not
+# prove anything about it and does not stop it from being reaped once aged
+# past --min-age.
 #
 # This is declared in ai/bin/harness-gate as the LAST check (FINAL_CHECKS,
 # after every discovered self-test) — the honest claim it can make is not
@@ -232,9 +238,10 @@ end
 #   * a genuinely orphaned, aged mock (real PPID 1, the reparent-to-init case)
 #     is found, reported with a Fix:, and killed (FAIL);
 #   * once it is gone, the check is clean (PASS);
-#   * a mock still parented to a LIVE process is left alone at any age --
-#     the case that makes this safe for a concurrent sibling gate run, by
-#     construction rather than by a marker;
+#   * a mock with a LIVE self-test.sh/fake-suite.sh ancestor is left alone at
+#     any age -- the case that makes this safe for a concurrent sibling gate
+#     run, by construction rather than by a marker (a live parent that is
+#     NOT running the suite does not spare it -- see the file banner);
 #   * a SUBREAPER-shaped ancestry (PPID != 1, but no ancestor anywhere in the
 #     chain is a live suite/gate launcher) is caught by the pure matcher
 #     against a fixture -- this is the case PPID==1 alone could not see. It is

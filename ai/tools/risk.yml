@@ -62,7 +62,8 @@ tools:
   build-agents:            { class: idempotent, reason: render }
   # Kills only this uid's mock-athena-inbox-client.rb processes with no live
   # self-test.sh/fake-suite.sh ancestor anywhere in their process lineage
-  # (unambiguous orphans, never a live process) -- local process state, never
+  # (unambiguous orphans by that measure -- a live parent that is not itself
+  # running the suite does NOT spare one) -- local process state, never
   # repo/forge/tracker/remote, so idempotent (re-running once clean is a
   # no-op).
   check-inbox-mock-orphans: { class: idempotent, reason: reap }
