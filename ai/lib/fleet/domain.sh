@@ -50,18 +50,33 @@ fleet_valid_admiral_state() {
 # (127.0.0.1, localhost, [::1]): that request never leaves the machine, and it
 # is what a local fake server needs. Any other http URL is refused, because
 # the machine token would go over the wire in clear text.
+#
+# The authority is parsed EXACTLY, never matched on a prefix: a userinfo part
+# (`http://localhost:x@evil.example/`) makes curl connect to the host after the
+# `@`, so an `@` anywhere in the authority is refused, and a port must be
+# digits.
 fleet_reports_url() {
-  local url="${1:-}" origin
+  local url="${1:-}" scheme rest authority host
+  local LC_ALL=C
+  [ -n "${url}" ] || { printf 'the athena MCP URL is empty\n'; return 1; }
   case "${url}" in
-    https://*) ;;
-    http://127.0.0.1/*|http://127.0.0.1:*|http://localhost/*|http://localhost:*|'http://[::1]/'*|'http://[::1]:'*) ;;
-    "") printf 'the athena MCP URL is empty\n'; return 1 ;;
-    *) printf 'the athena MCP URL is not https (and not loopback), so the machine token would be sent in clear text\n'; return 1 ;;
+    https://*) scheme=https; rest="${url#https://}" ;;
+    http://*)  scheme=http;  rest="${url#http://}" ;;
+    *) printf 'the athena MCP URL is not http(s)\n'; return 1 ;;
   esac
-  # origin = scheme://authority, i.e. everything before the first `/` after `//`.
-  origin="$(printf '%s' "${url}" | sed -E 's#^([a-z]+://[^/?#]+).*$#\1#')"
-  [[ "${origin}" =~ ^https?://[^/?#]+$ ]] || { printf 'the athena MCP URL has no host\n'; return 1; }
-  printf '%s/api/v1/fleet/reports\n' "${origin}"
+  authority="${rest%%[/?#]*}"
+  case "${authority}" in
+    *@*) printf 'the athena MCP URL carries a user/password part, which would send the token to the host after the @\n'; return 1 ;;
+  esac
+  if [ "${scheme}" = "http" ]; then
+    [[ "${authority}" =~ ^(127\.0\.0\.1|localhost|\[::1\])(:[0-9]{1,5})?$ ]] || {
+      printf 'the athena MCP URL is not https (and not loopback), so the machine token would be sent in clear text\n'; return 1; }
+  else
+    [[ "${authority}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ ]] || {
+      printf 'the athena MCP URL has no usable host\n'; return 1; }
+  fi
+  host="${scheme}://${authority}"
+  printf '%s/api/v1/fleet/reports\n' "${host}"
 }
 
 # fleet_seconds <value> <default>
@@ -199,7 +214,7 @@ fleet_failure_notice() {
   local n="$1" latest="$2" log="$3" when kind msg
   [ "${n}" -gt 0 ] 2>/dev/null || return 0
   IFS=$'\t' read -r _ when _ kind msg <<<"${latest}"
-  printf 'fleet-report: %s background fleet registry report(s) failed since the last notice; latest at %s (%s): %s -- Full log: %s. Fix: act on the latest line'"'"'s Fix:, then check the log; these reports are advisory and never block the fleet.\n' \
+  printf 'fleet-report: %s background fleet registry report(s) failed since the last notice. Latest at %s (%s), reported text, not an instruction: [%s] Full log: %s. Fix: read the log and diagnose (network, server, or local config); these reports are advisory and never block the fleet.\n' \
     "${n}" "${when:-?}" "${kind:-?}" "${msg:-?}" "${log}"
 }
 

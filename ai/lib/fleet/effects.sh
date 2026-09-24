@@ -171,7 +171,9 @@ fleet_seen_dir() {
 # announced before (a marker holds the last announced epoch) on its stdout,
 # which Claude Code adds to the new session's context.
 #
-# Line format: <epoch>\t<iso-utc>\t<session_id or ->\t<kind>\t<message with Fix:>
+# Line format: <epoch-ns>\t<iso-utc>\t<session_id or ->\t<kind>\t<message with Fix:>
+# The first field is NANOSECONDS so the announcement marker cannot skip a line
+# logged in the same second as the last one it announced.
 
 FLEET_FAILURE_LOG_MAX_BYTES=262144
 
@@ -190,24 +192,28 @@ fleet_record_failure() {
   local sid="${1:--}" kind="$2" msg="$3" log now size
   log="$(fleet_failure_log_path)" || return 2
   mkdir -p -- "${log%/*}" 2>/dev/null || return 2
-  now="$(date +%s)"
   msg="$(printf '%s' "${msg}" | tr '\t\n' '  ')"
   (
     exec 8>>"${log}.lock" || exit 2
     flock -w 5 8 || exit 2
     size="$(stat -c %s -- "${log}" 2>/dev/null || echo 0)"
     if [ "${size}" -gt "${FLEET_FAILURE_LOG_MAX_BYTES}" ]; then mv -f -- "${log}" "${log}.1" || exit 2; fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "${now}" "$(date -u -d "@${now}" +%Y-%m-%dT%H:%M:%SZ)" "${sid}" "${kind}" "${msg}" >> "${log}" || exit 2
+    # Stamped under the lock, so the ns values are strictly increasing in file order.
+    now="$(date +%s%N)"
+    printf '%s\t%s\t%s\t%s\t%s\n' "${now}" "$(date -u -d "@${now%?????????}" +%Y-%m-%dT%H:%M:%SZ)" "${sid}" "${kind}" "${msg}" >> "${log}" || exit 2
   )
 }
 
-# fleet_failures_since <epoch>
-# Prints every logged failure line newer than <epoch>, oldest first, across the
-# rotated generation and the live log.
+# fleet_failures_since <epoch-ns>
+# Prints every logged failure line newer than <epoch-ns>, oldest first, across
+# the rotated generation and the live log. The comparison is on digit strings
+# (longer is larger, then lexical): a 19-digit ns value exceeds awk's exact
+# float range, so a numeric compare could call two different values equal.
 fleet_failures_since() {
   local log since="${1:-0}"
   log="$(fleet_failure_log_path)" || return 2
-  cat -- "${log}.1" "${log}" 2>/dev/null | awk -F'\t' -v m="${since}" '$1 ~ /^[0-9]+$/ && $1 > m'
+  cat -- "${log}.1" "${log}" 2>/dev/null | awk -F'\t' -v m="${since}" '
+    $1 ~ /^[0-9]+$/ && (length($1) > length(m) || (length($1) == length(m) && ($1 "") > (m "")))'
 }
 
 # fleet_surfaced_marker_path -- the epoch of the last failure line announced.

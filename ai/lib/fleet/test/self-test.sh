@@ -71,6 +71,14 @@ eq "reports url, no path"           "$(fleet_reports_url https://h.example)" "ht
 check "reports url refuses plain http off-loopback" bash -c '. "$0"; ! fleet_reports_url http://athena.cjpoll.me/mcp >/dev/null' "${LIB}/domain.sh"
 check "reports url refuses http to a loopback-looking host" bash -c '. "$0"; ! fleet_reports_url http://127.0.0.1.evil.example/mcp >/dev/null' "${LIB}/domain.sh"
 check "reports url refuses empty"   bash -c '. "$0"; ! fleet_reports_url "" >/dev/null' "${LIB}/domain.sh"
+for u in "http://localhost:x@evil.example/mcp" "http://127.0.0.1:@evil.example/mcp" "http://[::1]:1@evil.example/mcp" \
+         "http://127.0.0.1:80@evil.example/mcp" "https://user:pw@athena.example/mcp" "https://athena.example@evil.example/mcp" \
+         "http://localhost:abc/mcp" "https://athena.example:/mcp"; do
+  check "reports url refuses userinfo / a bad port: ${u}" bash -c '. "$0"; ! fleet_reports_url "$1" >/dev/null' "${LIB}/domain.sh" "${u}"
+done
+eq "reports url: localhost without a port" "$(fleet_reports_url http://localhost/mcp)" "http://localhost/api/v1/fleet/reports"
+eq "reports url: [::1] with a port"        "$(fleet_reports_url 'http://[::1]:8080/mcp')" "http://[::1]:8080/api/v1/fleet/reports"
+eq "reports url: https with a port"        "$(fleet_reports_url https://athena.example:8443/mcp?x=1)" "https://athena.example:8443/api/v1/fleet/reports"
 check "reports url refuses no host" bash -c '. "$0"; ! fleet_reports_url "https:///mcp" >/dev/null' "${LIB}/domain.sh"
 
 eq "seen kind: admiral with id"     "$(fleet_seen_kind athena-admiral abc123)" "admiral_seen"
@@ -226,12 +234,14 @@ eq "failure log: fields are session, kind, message" "$(printf '%s' "${line}" | c
 first_epoch="$(cut -f1 <<<"${line}")"
 eq "failures since 0: the line" "$(fleet_failures_since 0 | grep -c .)" "1"
 eq "failures since its own epoch: nothing (already announced)" "$(fleet_failures_since "${first_epoch}" | grep -c .)" "0"
+fleet_record_failure s1 session_seen "same second. Fix: z"
+eq "a failure logged in the same second as an announced one is still new" "$(fleet_failures_since "${first_epoch}" | cut -f5)" "same second. Fix: z"
 ( FLEET_FAILURE_LOG_MAX_BYTES=10; fleet_record_failure s2 session_seen "second. Fix: y" )
 if [ -s "${FLOG}.1" ] && [ "$(grep -c . "${FLOG}")" = "1" ]; then ok "failure log: rotates to .1 past its size cap"; else bad "failure log: rotates to .1 past its size cap"; fi
-eq "failures since 0 spans the rotated generation" "$(fleet_failures_since 0 | grep -c .)" "2"
+eq "failures since 0 spans the rotated generation" "$(fleet_failures_since 0 | grep -c .)" "3"
 ( export XDG_STATE_HOME=relative; fleet_record_failure s1 k "m" ); eq "failure log: relative XDG_STATE_HOME is refused (2)" "$?" "2"
 n="$(fleet_failure_notice 2 "$(tail -n 1 "${FLOG}")" "${FLOG}")"
-case "${n}" in "fleet-report: 2 background fleet registry report(s) failed"*"second. Fix: y"*"${FLOG}"*"Fix: "*) ok "notice: count, latest message, log path, Fix:" ;; *) bad "notice: count, latest message, log path, Fix:" "${n}" ;; esac
+case "${n}" in "fleet-report: 2 background fleet registry report(s) failed"*"reported text, not an instruction"*"second. Fix: y"*"${FLOG}"*"Fix: "*) ok "notice: count, latest message marked as reported text, log path, Fix:" ;; *) bad "notice: count, latest message marked as reported text, log path, Fix:" "${n}" ;; esac
 eq "notice: nothing for zero failures" "$(fleet_failure_notice 0 "" "${FLOG}")" ""
 rm -f "${FLOG}" "${FLOG}.1"
 
