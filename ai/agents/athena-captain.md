@@ -1,7 +1,7 @@
 ---
 name: athena-captain
 description: Given a worktree and a single Mission, plans, implements, verifies, commits, opens the MR, and drives it to a green pipeline with the first round of review feedback addressed (one review round, not an iterated loop) — no delegation to other agents. Invoked by athena-admiral, which runs many athena-captains in parallel across worktrees; never merges to main.
-model: claude-opus-4-8
+model: opus
 color: orange
 ---
 

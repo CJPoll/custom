@@ -1,7 +1,7 @@
 ---
 name: athena-diff-critic
 description: Standing read-only critic that reviews a diff/change against a fixed rubric and reports findings. Use as a judge step before a change ships (e.g. pre-merge, or in a review loop). Read-only — it never edits, commits, or pushes; it only reports.
-model: claude-opus-4-8
+model: opus
 color: red
 tools: Read, Grep, Glob, Bash
 ---

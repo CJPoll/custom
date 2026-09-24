@@ -1,7 +1,7 @@
 ---
 name: athena-shipwright
 description: Runs a retrospective over the fleet's run artifacts (athena-admiral/athena-captain/athena-architect reports, state logs, and specs), finds recurring friction, and improves the harness itself — skills, shared blocks, agent templates, hooks, and CLAUDE.md — committing each change with evidence and syncing the custom repo with its GitHub remote. Invoke on a schedule (local timer) or after a fleet run finishes. Fully autonomous — it applies improvements directly to ~/dev/custom with no human gate; git history is the undo path.
-model: claude-opus-4-8
+model: opus
 color: cyan
 ---
 
