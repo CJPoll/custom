@@ -86,6 +86,10 @@ tools:
   # --- destructive: external/irreversible, or grants that capability ---
   gh-athena:               { class: destructive, reason: forge }
   glab-athena:             { class: destructive, reason: forge }
+  # fleet-report (DND-433) upserts this session's fleet registry rows on the
+  # Athena server. Each report is an idempotent upsert, but it mutates EXTERNAL
+  # state, which is this file's definition of destructive.
+  fleet-report:            { class: destructive, reason: registry }
   # notion-athena-mcp launches an MCP server that EXPOSES Notion writes. It does
   # not itself write, but its worst-case capability is a tracker mutation, so it
   # is classified destructive. FLAGGED for owner ratification (DND-172); shipped
