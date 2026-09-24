@@ -60,7 +60,8 @@ tools:
   # --- idempotent: deterministic local mutation (writes an in-repo artifact;
   #     re-running yields the same result; no external/irreversible effect) ---
   build-agents:            { class: idempotent, reason: render }
-  # Kills only this uid's mock-athena-inbox-client.rb processes with PPID 1
+  # Kills only this uid's mock-athena-inbox-client.rb processes with no live
+  # self-test.sh/fake-suite.sh ancestor anywhere in their process lineage
   # (unambiguous orphans, never a live process) -- local process state, never
   # repo/forge/tracker/remote, so idempotent (re-running once clean is a
   # no-op).
