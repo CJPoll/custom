@@ -78,6 +78,12 @@ eq "seen kind: admiral without id"  "$(fleet_seen_kind athena-admiral "")" "sess
 eq "seen kind: captain"             "$(fleet_seen_kind athena-captain abc123)" "session_seen"
 eq "seen kind: top level"           "$(fleet_seen_kind "" "")" "session_seen"
 
+eq "seconds: a plain number passes"  "$(fleet_seconds 10 30)" "10"
+eq "seconds: empty -> default"      "$(fleet_seconds "" 30)" "30"
+eq "seconds: zero -> default"       "$(fleet_seconds 0 30)" "30"
+eq "seconds: a curl-config injection -> default" "$(fleet_seconds "$(printf '5\nurl = "https://evil.example"')" 30)" "30"
+eq "seconds: 5 digits -> default"   "$(fleet_seconds 10000 30)" "30"
+
 eq "throttle key: agent"            "$(fleet_throttle_key s1 a1)" "s1.a1"
 eq "throttle key: top level"        "$(fleet_throttle_key s1 "")" "s1.main"
 

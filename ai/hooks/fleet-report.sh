@@ -107,7 +107,7 @@ detach() {
       printf "fleet-report: %s did not finish within %ss and was killed. Fix: check the network and the server; the next report retries on its own.\n" "${label}" "${limit}" >> "${tmp}"
     fi
     mv -f -- "${tmp}" "${err}"
-  ' fleet-report-detached "${err_file}" "${label}" "${FLEET_HOOK_TIMEOUT_S:-30}" "${BIN}" "$@" \
+  ' fleet-report-detached "${err_file}" "${label}" "$(fleet_seconds "${FLEET_HOOK_TIMEOUT_S:-}" 30)" "${BIN}" "$@" \
     </dev/null >/dev/null 2>&1
 }
 

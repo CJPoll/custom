@@ -64,6 +64,17 @@ fleet_reports_url() {
   printf '%s/api/v1/fleet/reports\n' "${origin}"
 }
 
+# fleet_seconds <value> <default>
+# A timeout in whole seconds: 1..9999 with no leading zero, else <default>.
+# These values are written into a curl config line and handed to timeout(1), so
+# anything else (a newline could add a `url = ...` line) never passes through.
+fleet_seconds() {
+  case "${1:-}" in
+    [1-9]|[1-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]) printf '%s\n' "$1" ;;
+    *) printf '%s\n' "$2" ;;
+  esac
+}
+
 # fleet_seen_kind <agent_type> <agent_id>
 # admiral_seen when the caller is an athena-admiral with an agent_id; otherwise
 # session_seen (contract, *Who sends what*). An admiral_seen needs agent_id, so

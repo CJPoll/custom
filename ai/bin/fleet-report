@@ -39,6 +39,10 @@ Exit codes:
   unresolvable repo)   2 usage   3 server refused (prints its Fix:)
   4 server unreachable   5 server fault (5xx)
 
+Environment (optional): ATHENA_INBOX_CLIENT_CONFIG (token config path),
+FLEET_CLAUDE_JSON (~/.claude.json path), ATHENA_INBOX_ROOT (inbox registry root),
+XDG_STATE_HOME, FLEET_CONNECT_TIMEOUT_S (default 5), FLEET_MAX_TIME_S (default 10).
+
 Every failure prints one stderr line carrying Fix:. The server URL is the origin
 of the `athena` MCP entry in ~/.claude.json; the token is read from
 ~/.config/athena-inbox-client/config.json and fed to curl on stdin, never argv.

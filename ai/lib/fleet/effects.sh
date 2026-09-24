@@ -129,8 +129,8 @@ fleet_post() {
       printf 'data-binary = "@%s/req.json"\n' "${w}"
       printf 'output = "%s/resp"\n' "${w}"
       printf 'write-out = "%%{http_code}"\n'
-      printf 'connect-timeout = %s\n' "${FLEET_CONNECT_TIMEOUT_S:-5}"
-      printf 'max-time = %s\n' "${FLEET_MAX_TIME_S:-10}"
+      printf 'connect-timeout = %s\n' "$(fleet_seconds "${FLEET_CONNECT_TIMEOUT_S:-}" 5)"
+      printf 'max-time = %s\n' "$(fleet_seconds "${FLEET_MAX_TIME_S:-}" 10)"
       printf 'silent\n'
     } | curl --config - 2>/dev/null
   )"
