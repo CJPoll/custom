@@ -57,7 +57,7 @@ Fix: fleet session <claude_session_id> is draining (<reason>, until <until>; bas
 # emits this sentence verbatim at the end of its refusal message (after one
 # sentence of context), pinned by owner_from_auth_test.exs and
 # apps/athena/test/athena/ui/api/machine_controller_test.exs.
-Fix: a machine-token registration's owning account is stamped from the authenticated session, not the request body — re-issue authenticated as the account that will own this machine.
+Fix: a machine's owning account is stamped server-side from the authenticated caller, not supplied in the request body — remove owner_id and re-post.
 # Delivery-time target-bind re-assertion. NOT YET MATCHED: gen_saas emits different
 # text (DND-411 sweep, "wrong text"); pinned here only until the DND-423 remainder
 # decides which side is the design.

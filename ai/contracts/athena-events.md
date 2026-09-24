@@ -2757,9 +2757,9 @@ Therefore:
   authenticated author*) applied at machine-token issuance — it is what makes the
   target-bind sound rather than circular. A create or update whose request body
   carries **any** `owner_id` — whatever its value, the authenticated account's own
-  included — is refused (`422`), never silently dropped: `Fix: a machine-token
-  registration's owning account is stamped from the authenticated session, not the
-  request body — re-issue authenticated as the account that will own this machine.`
+  included — is refused (`422`), never silently dropped: `Fix: a machine's owning
+  account is stamped server-side from the authenticated caller, not supplied in the
+  request body — remove owner_id and re-post.`
   The owner is always stamped from the authenticated caller; a client never
   supplies an identity the server derives (the same rule the machine-token routes
   apply to a body `owner_id`, `machine_id` or `return_to`). Token issuance
@@ -2772,7 +2772,10 @@ Therefore:
   presence is the error whatever it names. gen_saas had been silently dropping it
   on the user-authenticated create/update paths (safe, but a silently ignored
   identity field is one a caller believes it set); it now refuses with the quote
-  above, preceded by one sentence of context.
+  above, preceded by one sentence of context. The quoted remedy changed with the
+  rule: it used to tell the caller to re-issue authenticated as the owning account,
+  which cannot clear a refusal that also fires on the caller's own id, so it now
+  names the actual correction — drop the field and re-post.
 
   **The issuance and custody MECHANISM is server-side** (gen_saas machine-token /
   secret custody, **GS-4**; Notion token custody, **GS-8**) — see *Secret
