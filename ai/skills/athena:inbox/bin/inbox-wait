@@ -50,7 +50,7 @@
 # lock across a wait would break two things outright:
 #
 #   * it would deny every other session's read and ack for the FULL BUDGET --
-#     nine minutes of a channel refusing to drain because somebody is
+#     up to half an hour of a channel refusing to drain because somebody is
 #     listening to it;
 #   * one process cannot hold the locks of N channels. `inbox_lock_acquire`
 #     refuses a second lock by design, because swapping the descriptor would
@@ -94,6 +94,8 @@ LIB="$(dirname "${HERE}")/lib"
 . "${LIB}/lock.sh"
 # shellcheck source=/dev/null
 . "${LIB}/inbox.sh"
+# shellcheck source=/dev/null
+. "${LIB}/budget.sh"
 
 usage() { sed -n '2,/^#--- end usage ---$/p' "${BASH_SOURCE[0]}" | grep -v '^#--- end usage ---$' | sed 's/^# \{0,1\}//'; }
 
@@ -126,44 +128,44 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # ============================================================================
-# THE BUDGET.
+# THE BUDGET. Mode-dependent; the policy is lib/budget.sh (domain), which
+# carries the measurements it rests on.
 #
-# 540s by default, under the 600s ceiling at which an unattended `claude -p`
-# kills background subagents. A waiter killed at the ceiling does not report a
-# timeout -- it vanishes, and the session that armed it waits forever for a
-# notification that is never coming.
+#   interactive `claude`   default 1800s, ceiling 3600s  -- no background kill
+#   headless `claude -p`   default  540s, ceiling  600s  -- the kill at 600s
+#   unknown                the headless values, and the mode line says why
 #
-# THE OVERRIDE IS BOUNDED, NOT FREE, and a value at or over the ceiling is
-# REFUSED rather than clamped. Clamping would mean the caller asked for 900,
+# Headless: an unattended `claude -p` kills background tasks at its 600s
+# background-wait ceiling. A waiter killed there does not report a timeout --
+# it vanishes, and the session that armed it waits forever for a notification
+# that is never coming. When CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS is set the
+# ceiling follows it (ms -> s) and the default stays under it.
+#
+# Interactive: there is no such kill, and each quiet wake is a notification and
+# a re-arm in the transcript, so the budget is 30 minutes (owner, 2026-09-24).
+#
+# THE MODE IS TOLD BY TWO SIGNALS THAT MUST AGREE: CLAUDE_CODE_ENTRYPOINT=cli
+# AND CLAUDE_CODE_SESSION_ATTENDED=1 is interactive. Anything else that is not
+# sdk-cli/0 is UNKNOWN and gets the safe headless values -- "could not tell"
+# never reads as interactive, and the mode line printed below names what was
+# seen, so a miss is observable.
+#
+# THE OVERRIDE IS BOUNDED, NOT FREE, and a value at or over the mode's ceiling
+# is REFUSED rather than clamped. Clamping would mean the caller asked for 900,
 # got 540, and was told nothing -- configuration that silently does something
-# else is the same silent-failure shape in its quietest form. A session that
-# has raised CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS may raise this to match, and
-# must raise BOTH: raising one alone is exactly the failure this pairing
-# exists to prevent.
+# else is the same silent-failure shape in its quietest form.
 # ============================================================================
-BUDGET_DEFAULT=540
-BUDGET_CEILING=600
-BUDGET="${BUDGET_DEFAULT}"
-if [ -n "${ATHENA_INBOX_WAIT_BUDGET:-}" ]; then
-  case "${ATHENA_INBOX_WAIT_BUDGET}" in
-    ''|*[!0-9]*)
-      inbox_fail "ATHENA_INBOX_WAIT_BUDGET is not a positive integer number of seconds (got \"${ATHENA_INBOX_WAIT_BUDGET}\")" \
-        "set it to a whole number of seconds below ${BUDGET_CEILING}, or unset it to use the ${BUDGET_DEFAULT}s default."
-      exit "${EX_REFUSED}"
-      ;;
-  esac
-  if [ "${ATHENA_INBOX_WAIT_BUDGET}" -eq 0 ]; then
-    inbox_fail "ATHENA_INBOX_WAIT_BUDGET is 0, which would arm a waiter that returns immediately" \
-      "set it to a whole number of seconds below ${BUDGET_CEILING}, or unset it to use the ${BUDGET_DEFAULT}s default."
-    exit "${EX_REFUSED}"
-  fi
-  if [ "${ATHENA_INBOX_WAIT_BUDGET}" -ge "${BUDGET_CEILING}" ]; then
-    inbox_fail "ATHENA_INBOX_WAIT_BUDGET is ${ATHENA_INBOX_WAIT_BUDGET}s, at or over the ${BUDGET_CEILING}s ceiling at which an unattended \`claude -p\` kills background subagents" \
-      "set it below ${BUDGET_CEILING}. It is refused rather than clamped so you learn the budget you asked for is not the budget you would have got. A waiter killed at the ceiling does not report a timeout -- it disappears, and the session waiting on it is never told."
-    exit "${EX_REFUSED}"
-  fi
-  BUDGET="${ATHENA_INBOX_WAIT_BUDGET}"
-fi
+BUDGET_LINE="$(inbox_wait_budget "${CLAUDE_CODE_ENTRYPOINT:-}" \
+  "${CLAUDE_CODE_SESSION_ATTENDED:-}" \
+  "${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-}" \
+  "${ATHENA_INBOX_WAIT_BUDGET:-}")" || exit "${EX_REFUSED}"
+IFS=$'\t' read -r BUDGET_MODE BUDGET BUDGET_CEILING BUDGET_WHY <<< "${BUDGET_LINE}"
+
+# ONE LINE NAMING THE MODE AND WHY, on stderr, on every run (dry-run included,
+# so the budget a session WOULD arm with is checkable without arming). stdout
+# stays the doorbell list / the wake lines, which are contracts.
+printf 'athena:inbox: budget %ss, ceiling %ss, mode %s: %s.\n' \
+  "${BUDGET}" "${BUDGET_CEILING}" "${BUDGET_MODE}" "${BUDGET_WHY}" >&2
 
 # ============================================================================
 # THE PREREQUISITE. Probed, and named when absent.
@@ -180,7 +182,7 @@ if ! command -v inotifywait >/dev/null 2>&1; then
 fi
 if ! command -v timeout >/dev/null 2>&1; then
   inbox_fail "timeout(1) was not found on PATH, so the waiter's budget cannot be bounded" \
-    "install coreutils (it provides timeout). The budget is what keeps the waiter under the ${BUDGET_CEILING}s ceiling at which an unattended \`claude -p\` kills background subagents; arming without it would be an unbounded wait, which this harness forbids."
+    "install coreutils (it provides timeout). The budget is what bounds the waiter (under the ${BUDGET_CEILING}s ceiling for this ${BUDGET_MODE}-mode session; headless \`claude -p\` kills background tasks past its ceiling); arming without it would be an unbounded wait, which this harness forbids."
   exit "${EX_REFUSED}"
 fi
 
@@ -333,8 +335,8 @@ case "${RC}" in
     # 124 is `timeout`'s; 2 is `inotifywait -t`'s. Both mean the same thing and
     # both are mapped, so a future change of arming form cannot turn a quiet
     # window into a dead waiter.
-    printf 'athena:inbox: %ss elapsed with no doorbell (%s watched). Re-arm — this is not "all clear".\n' \
-      "${BUDGET}" "${#EVENT_FILES[@]}" >&2
+    printf 'athena:inbox: %ss elapsed with no doorbell (%s watched). Re-arm — this is not "all clear". (the %s-mode budget)\n' \
+      "${BUDGET}" "${#EVENT_FILES[@]}" "${BUDGET_MODE}" >&2
     exit "${EX_REARM}"
     ;;
   *)

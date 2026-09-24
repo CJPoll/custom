@@ -1859,16 +1859,32 @@ timeout "$BUDGET" inotifywait -qq -e attrib,modify,close_write,move_self,delete_
 - Block on the doorbells; **do not poll and do not spin**. A single blocking
   `inotifywait` over every owned `.event` satisfies this directly.
 - One waiter watches **all** the session's doorbells, of **both** kinds.
-- `BUDGET` defaults to **540s**, under the 600s ceiling at which an unattended
-  `claude -p` kills background subagents. `ATHENA_INBOX_WAIT_BUDGET` overrides
-  it, but the override is **bounded, not free**: it MUST be a positive integer,
-  and a value of 600 or more MUST be **refused** — non-zero exit, with a `Fix:`
-  line naming the 600s ceiling. Refuse rather than silently clamping, so the
-  caller learns the budget it asked for is not the budget it got; a tool MAY
-  offer clamping behind an explicit opt-in flag, but never as the default for a
-  bare override. An unbounded override reintroduces the
-  killed-subagent bug in a form that looks like configuration. A session that
-  has raised `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` may raise this to match.
+- `BUDGET` depends on the session mode. **Interactive** (`CLAUDE_CODE_ENTRYPOINT=cli`
+  and `CLAUDE_CODE_SESSION_ATTENDED=1`, both) defaults to **1800s** under a
+  **3600s** ceiling: no background-task kill applies there, and each quiet wake
+  costs context. **Headless** `claude -p` (`sdk-cli` and `0`) defaults to
+  **540s**, under the 600s ceiling at which an unattended `claude -p` kills
+  background tasks; if `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` is set, the
+  ceiling follows it (ms→s, `0` meaning the waiter's own 3600s bound) and the
+  default stays under it. **Any other combination is unknown and MUST get the
+  headless values**, with a line naming the mode and the signals seen, so
+  "could not tell" never reads as interactive. `ATHENA_INBOX_WAIT_BUDGET`
+  overrides the default, but the override is **bounded, not free**: it MUST be
+  a positive integer, and a value at or over the mode's ceiling MUST be
+  **refused** — non-zero exit, with a `Fix:` line naming that ceiling. Refuse
+  rather than silently clamping, so the caller learns the budget it asked for
+  is not the budget it got; a tool MAY offer clamping behind an explicit
+  opt-in flag, but never as the default for a bare override. An unbounded
+  override reintroduces the killed-subagent bug in a form that looks like
+  configuration.
+
+  **Later (2026-09-24):** this rule read "`BUDGET` defaults to **540s**, under
+  the 600s ceiling … a value of 600 or more MUST be **refused** … A session that
+  has raised `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` may raise this to match",
+  for every session. Superseded by the mode split above, on the owner's request
+  (Cody, 2026-09-24): interactive sessions have no 600s kill but paid for a
+  wake every nine minutes in context. The discriminator was measured on Claude
+  Code 2.1.280/281; the evidence is in `athena:inbox`'s `lib/budget.sh`.
 - **A waiter with nothing to watch REFUSES; it does not arm and does not exit
   0.** A session whose repo identity matches no entry, or whose entry declares
   no channels, gets a non-zero exit and a `Fix:` clause. This is the one place
@@ -1894,7 +1910,7 @@ timeout "$BUDGET" inotifywait -qq -e attrib,modify,close_write,move_self,delete_
   Both timeout statuses mean **re-arm**. Any *other* non-zero status is a
   genuine fault and MUST be reported, not silently re-armed. An implementer who
   writes `case $? in 0) read;; 2) rearm;; *) die;; esac` against the `timeout`
-  form gets a waiter that dies after 540 quiet seconds — the exact failure this
+  form gets a waiter that dies after its first quiet budget — the exact failure this
   rule exists to prevent, arriving through the rule itself.
 - **Every doorbell the waiter arms on MUST exist first.** `inotifywait` on a
   missing path prints `Couldn't watch …` and exits **1 immediately** — and

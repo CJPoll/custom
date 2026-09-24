@@ -75,6 +75,15 @@ assert_refused() {
 . "${LIB}/lock.sh"
 # shellcheck source=/dev/null
 . "${LIB}/inbox.sh"
+# shellcheck source=/dev/null
+. "${LIB}/budget.sh"
+
+# THE WAITER'S MODE SIGNALS ARE SCRUBBED, so the suite is hermetic. inbox-wait
+# picks its budget from CLAUDE_CODE_ENTRYPOINT / CLAUDE_CODE_SESSION_ATTENDED /
+# CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, and this suite runs from interactive
+# sessions, headless gates, and plain shells alike. Unset, every case below sees
+# the UNKNOWN mode (the headless-safe 540/600) unless it sets the signals itself.
+unset CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
 
 # A case directory + a private inbox root + a private registry, per case.
 CASE_N=0
@@ -3306,6 +3315,9 @@ assert_contains "W-6 and is diagnosed as a MACHINE condition, not a project one"
 setup_case
 BREPO="$(make_repo budget)"
 register budget "${BREPO}" '{"slack":{"kind":"log","path":"b-slack.jsonl"}}'
+# These W-7/W-8 cases run with the mode signals scrubbed (see the preamble), so
+# they exercise the UNKNOWN mode's headless-safe 540/600; the B-* cases below
+# cover the interactive and explicit-headless rows.
 # THE OVERRIDE IS BOUNDED, AND REFUSED RATHER THAN CLAMPED. A caller that asked
 # for 900 and silently got 540 has configuration that does something else than
 # it says -- and above the 600s ceiling an unattended `claude -p` kills the
@@ -3340,6 +3352,103 @@ for b in 0 "" "abc" "-5" "12.5" "5s"; do
     assert_contains "W-8 and carries a Fix:" "Fix:" "${ERR}"
   fi
 done
+
+# --- the budget follows the session MODE (lib/budget.sh) --------------------
+#
+# Interactive sessions get 1800s because no background-task kill applies to
+# them and every quiet wake costs context; headless `claude -p` keeps 540/600
+# because it kills background tasks at its ceiling. The discriminator was
+# MEASURED (see lib/budget.sh), and anything it cannot classify gets the SAFE
+# values with a line saying so -- "could not tell" must never read as
+# interactive.
+
+# Domain first: the pure policy, every row of its table.
+BL="$(inbox_wait_budget cli 1 "" "")"
+assert_eq "B-1 interactive (cli + attended=1) defaults to 1800s under a 3600s ceiling" \
+  "interactive 1800 3600" "$(printf '%s' "${BL}" | cut -f1-3 | tr '\t' ' ')"
+BL="$(inbox_wait_budget sdk-cli 0 "" "")"
+assert_eq "B-2 headless (sdk-cli + attended=0) keeps 540s under the 600s ceiling" \
+  "headless 540 600" "$(printf '%s' "${BL}" | cut -f1-3 | tr '\t' ' ')"
+for combo in ":" "cli:" ":1" "cli:0" "sdk-cli:1" "claude-vscode:1" "sdk-py:0"; do
+  BL="$(inbox_wait_budget "${combo%%:*}" "${combo#*:}" "" "")"
+  assert_eq "B-3 signals [${combo}] are UNKNOWN and get the headless-safe 540/600, never interactive" \
+    "unknown 540 600" "$(printf '%s' "${BL}" | cut -f1-3 | tr '\t' ' ')"
+done
+BL="$(inbox_wait_budget "" "" "" "")"
+assert_contains "B-3 the unknown verdict names what it saw" "CLAUDE_CODE_ENTRYPOINT=<unset>" "${BL}"
+# THE CEILING_MS PAIRING. The ceiling follows the variable; the default stays
+# under it; 0 ("wait indefinitely") falls back to the waiter's own bound.
+BL="$(inbox_wait_budget sdk-cli 0 3000000 "")"
+assert_eq "B-4 headless ceiling follows CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS (3000000ms -> 3000s), default stays 540" \
+  "headless 540 3000" "$(printf '%s' "${BL}" | cut -f1-3 | tr '\t' ' ')"
+BL="$(inbox_wait_budget sdk-cli 0 300000 "")"
+assert_eq "B-4 a ceiling LOWER than 600 pulls the default under it (300s -> 270s)" \
+  "headless 270 300" "$(printf '%s' "${BL}" | cut -f1-3 | tr '\t' ' ')"
+BL="$(inbox_wait_budget "" "" 300000 "")"
+assert_eq "B-4 the unknown mode honours the pairing too" \
+  "unknown 270 300" "$(printf '%s' "${BL}" | cut -f1-3 | tr '\t' ' ')"
+BL="$(inbox_wait_budget sdk-cli 0 0 "")"
+assert_eq "B-4 CEILING_MS=0 (no kill) bounds the waiter at its own 3600s" \
+  "headless 540 3600" "$(printf '%s' "${BL}" | cut -f1-3 | tr '\t' ' ')"
+BL="$(inbox_wait_budget sdk-cli 0 0900000 "")"
+assert_eq "B-4 a leading zero is decimal, not octal" \
+  "headless 540 900" "$(printf '%s' "${BL}" | cut -f1-3 | tr '\t' ' ')"
+BL="$(inbox_wait_budget sdk-cli 0 3000000 2999)"
+assert_eq "B-4 with a raised ceiling the override may rise to match" \
+  "headless 2999 3000" "$(printf '%s' "${BL}" | cut -f1-3 | tr '\t' ' ')"
+BL="$(inbox_wait_budget cli 1 300000 "")"
+assert_eq "B-4 CEILING_MS is a print-mode setting and does not touch an interactive session" \
+  "interactive 1800 3600" "$(printf '%s' "${BL}" | cut -f1-3 | tr '\t' ' ')"
+for cm in abc 12.5 -1 1500 1234567890123; do
+  ERR="$(inbox_wait_budget sdk-cli 0 "${cm}" "" 2>&1 >/dev/null)"; RC=$?
+  assert_eq "B-5 an unusable CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS [${cm}] is refused, not guessed" "2" "${RC}"
+  assert_contains "B-5 and carries a Fix:" "Fix:" "${ERR}"
+done
+# OVER-CEILING IS REFUSED IN EVERY MODE, never clamped; one under is accepted.
+for row in "cli 1 3600" "cli 1 7200" "sdk-cli 0 600" "sdk-cli 0 900" ": : 600" "cli 1 9999999999"; do
+  set -- ${row}
+  e="${1}"; a="${2}"; [ "${e}" = ":" ] && e=""; [ "${a}" = ":" ] && a=""
+  ERR="$(inbox_wait_budget "${e}" "${a}" "" "$3" 2>&1 >/dev/null)"; RC=$?
+  assert_eq "B-6 override $3s at/over the ceiling is REFUSED for signals [${e}:${a}]" "2" "${RC}"
+  assert_contains "B-6 and the refusal carries a Fix:" "Fix:" "${ERR}"
+done
+BL="$(inbox_wait_budget cli 1 "" 3599)"
+assert_eq "B-6 interactive accepts an override just under its 3600s ceiling" \
+  "interactive 3599" "$(printf '%s' "${BL}" | cut -f1-2 | tr '\t' ' ')"
+BL="$(inbox_wait_budget sdk-cli 0 "" 599)"
+assert_eq "B-6 headless accepts an override just under its 600s ceiling" \
+  "headless 599" "$(printf '%s' "${BL}" | cut -f1-2 | tr '\t' ' ')"
+set --
+
+# Then the command: the mode line on stderr is what makes a miss observable.
+# Proven through --dry-run, which resolves the budget exactly as the arm does
+# but never blocks -- a real 1800s waiter here would be a half-hour hang the
+# moment anything regressed.
+ERR="$(cd "${BREPO}" && CLAUDE_CODE_ENTRYPOINT=cli CLAUDE_CODE_SESSION_ATTENDED=1 timeout 10 "${BIN}/inbox-wait" --dry-run 2>&1 >/dev/null)"; RC=$?
+assert_eq "B-7 an interactive session's --dry-run resolves" "0" "${RC}"
+assert_contains "B-7 and reports the 1800s interactive budget" "budget 1800s, ceiling 3600s, mode interactive" "${ERR}"
+ERR="$(cd "${BREPO}" && CLAUDE_CODE_ENTRYPOINT=sdk-cli CLAUDE_CODE_SESSION_ATTENDED=0 timeout 10 "${BIN}/inbox-wait" --dry-run 2>&1 >/dev/null)"
+assert_contains "B-7 a headless session reports the unchanged 540s budget" "budget 540s, ceiling 600s, mode headless" "${ERR}"
+ERR="$(cd "${BREPO}" && timeout 10 "${BIN}/inbox-wait" --dry-run 2>&1 >/dev/null)"
+assert_contains "B-7 with no signals the mode is UNKNOWN and the budget is the safe 540s" \
+  "budget 540s, ceiling 600s, mode unknown" "${ERR}"
+assert_contains "B-7 and the diagnostic line says it could not tell" "could not tell interactive from headless" "${ERR}"
+ERR="$(cd "${BREPO}" && CLAUDE_CODE_ENTRYPOINT=sdk-cli CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=3000000 timeout 10 "${BIN}/inbox-wait" --dry-run 2>&1 >/dev/null)"
+assert_contains "B-7 the command pairs the ceiling with CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" \
+  "budget 540s, ceiling 3000s, mode headless" "${ERR}"
+for row in "cli 1 3600" "sdk-cli 0 600"; do
+  set -- ${row}
+  ERR="$(cd "${BREPO}" && CLAUDE_CODE_ENTRYPOINT="$1" CLAUDE_CODE_SESSION_ATTENDED="$2" ATHENA_INBOX_WAIT_BUDGET="$3" timeout 10 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; RC=$?
+  assert_eq "B-8 the command REFUSES a $3s override for [$1:$2] (exit 2, not armed)" "2" "${RC}"
+  assert_contains "B-8 and names the ceiling it hit" "$3s ceiling" "${ERR}"
+done
+set --
+# The quiet exit still says 75 and now names the budget and mode it used.
+QUIET_OUT="$(cd "${BREPO}" && CLAUDE_CODE_ENTRYPOINT=cli CLAUDE_CODE_SESSION_ATTENDED=1 ATHENA_INBOX_WAIT_BUDGET=1 "${BIN}/inbox-wait" 2>&1 >/dev/null)"; QUIET_RC=$?
+assert_eq "B-9 an interactive quiet budget still exits 75" "75" "${QUIET_RC}"
+assert_contains "B-9 and the quiet line names the budget and the mode" \
+  "1s elapsed with no doorbell" "${QUIET_OUT}"
+assert_contains "B-9 ... including the mode" "interactive-mode budget" "${QUIET_OUT}"
 
 # A SUBAGENT NEVER ARMS A WAITER. It would wake, read, ack and finish -- and
 # the session that actually reports to Cody would find a clean inbox and say

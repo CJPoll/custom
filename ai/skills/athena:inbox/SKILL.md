@@ -455,15 +455,38 @@ would turn a quiet hour into a lost message with nothing anywhere saying so.
 the same bell — the ack happens inside your `read` directory, which is the
 directory the peer delivers into. Waking to find zero unread is normal.
 
-**The budget, and the ceiling it pairs with.** 540s by default, under the 600s
-ceiling at which an unattended `claude -p` kills background subagents — a
-waiter killed at the ceiling does not report a timeout, it *vanishes*, and the
-session waiting on it is never told. `ATHENA_INBOX_WAIT_BUDGET` overrides it,
-bounded: a value at or over 600 is **refused, not clamped**, so you learn the
-budget you asked for is not the budget you would have got. A session that has
-raised `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` may raise this to match, and must
-raise **both** — raising one alone is the failure the pairing exists to
-prevent.
+**The budget follows the session mode.** The policy lives in `lib/budget.sh`;
+each run prints one stderr line naming the budget, the ceiling, the mode, and
+the signals it read (`athena:inbox: budget 1800s, ceiling 3600s, mode
+interactive: …`), `--dry-run` included, so you can check the budget without
+arming.
+
+| mode | how it is told | default | ceiling |
+|---|---|---|---|
+| interactive | `CLAUDE_CODE_ENTRYPOINT=cli` **and** `CLAUDE_CODE_SESSION_ATTENDED=1` | 1800s | 3600s |
+| headless `claude -p` | `CLAUDE_CODE_ENTRYPOINT=sdk-cli` **and** `CLAUDE_CODE_SESSION_ATTENDED=0` | 540s | 600s |
+| unknown | anything else | 540s | 600s |
+
+- **Headless** keeps 540s under the 600s ceiling at which an unattended
+  `claude -p` kills background tasks. A waiter killed there does not report a
+  timeout; it *vanishes*, and the session waiting on it is never told. If
+  `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` is set, the ceiling follows it
+  (ms→s), and the default drops to 90% of the ceiling if that is lower than
+  540. `0` means no kill; the waiter's own 3600s bound is then the ceiling.
+- **Interactive** has no such kill, and every quiet wake costs a notification
+  and a re-arm in the transcript. So it waits 30 minutes (owner request,
+  2026-09-24). `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` is ignored there.
+- **Unknown** gets the headless values, and the mode line says it could not
+  tell. "Could not tell" never reads as interactive.
+- Claude Code sets both signals itself. A `claude -p` launched from inside an
+  interactive session still reports `sdk-cli` / `0` (measured 2026-09-24), so
+  an inherited value cannot make headless look interactive.
+
+`ATHENA_INBOX_WAIT_BUDGET` overrides the default, bounded: a value at or over
+the mode's ceiling is **refused, not clamped**, so you learn the budget you
+asked for is not the budget you would have got. A headless session that has
+raised `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` may raise this to match. The
+quiet exit (`75`) names the budget and mode it used.
 
 **`attrib` is in the watch set and is not decoration.** The two bump mechanisms
 do not emit the same events: `touch(1)` (the maildir side) sets atime and mtime
@@ -1000,7 +1023,7 @@ agents on the live channel did by hand for fifty-one messages.
 
 | Bucket | Files |
 |---|---|
-| Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` · `lib/routed.sh` (the routed send's refusals and arguments; the `session.message` render) · `lib/doctor.sh`'s `doctor_state_*` decisions · `lib/liveness.sh`'s `liveness_classify_line` / `liveness_judge` |
+| Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` · `lib/budget.sh` (the waiter's mode-dependent budget; `bin/inbox-wait` reads the env and passes it in) · `lib/routed.sh` (the routed send's refusals and arguments; the `session.message` render) · `lib/doctor.sh`'s `doctor_state_*` decisions · `lib/liveness.sh`'s `liveness_classify_line` / `liveness_judge` |
 | Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the read, count, ack and maildir-send paths**) · `lib/mcp.sh` (the routed send's own, a declared deviation: reading the `athena` MCP registration from `~/.claude.json`, one `git rev-parse --show-toplevel`, and the MCP call, whose request and response bodies sit in a private temp dir) · `lib/lock.sh` · `lib/session.sh` · `lib/liveness.sh`'s log and mtime readers (the client log and doorbell ages; shared with `scripts/athena-inbox-client-run.sh`) |
 | Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes · `lib/doctor.sh`'s `doctor_check_*` — the diagnostic orchestration (a **declared deviation** — see below) |
 | Framework | `bin/inbox-status` · `bin/read-inbox` · `bin/send-mail` · `bin/inbox-wait` · `bin/inbox-doctor` |
