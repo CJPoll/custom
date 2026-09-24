@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# fleet-resume -- the ONLY writer and reader of a run's ownership markers in the
+# drain/resume hand-off (DND-443; athena:fleet-drain -> *Resume*). FRAMEWORK:
+# parse argv, hand off to the manager.
+#
+# Joint invariant: at most one admiral owns a run. A drained admiral releases
+# the run (`drained`); the top-level session CLAIMS it (`claim`) BEFORE it spawns
+# the resuming admiral, under the state log's lock, so two wakes (the
+# control_changed inbox line and a draining admiral's hand-back) cannot both
+# spawn; the spawned admiral only confirms (`status` must say RESUMED).
+
+set -u
+
+usage() {
+  cat <<'EOF'
+Usage: fleet-resume <drained|claim|status> [flags]
+
+The run-ownership markers of the drain/resume hand-off (athena:fleet-drain).
+Each is ONE line appended to <coordination>/<run-id>/state.md, only by this
+tool, under a lock on that state log:
+  DRAINED session=<id> run=<run-id> at=<ISO 8601 UTC>
+  RESUMED session=<id> run=<run-id> at=<ISO 8601 UTC>
+A run is resumable when its LAST marker for the session is DRAINED.
+
+Subcommands:
+  drained --run-id R  The admiral's LAST act of a drain (after its final
+                      report): release the run. Also the top-level session's
+                      release when a claimed resume spawn did not happen.
+                      Idempotent.
+  claim               The top-level session, BEFORE spawning: claim every
+                      drained run of this session (appends RESUMED under the
+                      lock). Prints `CLAIMED run=<run-id> state=<path>` per claim
+                      and one summary line. Spawn one admiral per CLAIMED line,
+                      and only for those.
+  status --run-id R   Print this session's last marker for the run: DRAINED,
+                      RESUMED or none. A resumed admiral must see RESUMED before
+                      it acts; anything else means it does not own the run.
+
+Flags (any order):
+  --session-id S   top-level session id (default: $CLAUDE_CODE_SESSION_ID)
+  --root DIR       coordination root (default: <main checkout of this
+                   harness>/ai-artifacts/coordination)
+  --help           this text
+  --self-test      run the fleet-resume suite (temp dirs only)
+
+Exit: 0 ok; 1 local problem (no state log, unreadable, lock timeout);
+2 usage; 4 a marker line is malformed, so that run cannot be judged (it is
+never claimed or marked; the line is named with a Fix:).
+EOF
+}
+
+SELF="$(realpath -- "${BASH_SOURCE[0]}")"
+AI="$(cd -- "$(dirname -- "${SELF}")/.." && pwd -P)"
+
+die_usage() {
+  printf 'fleet-resume: %s. Fix: %s\n' "$1" "${2:-run fleet-resume --help for the subcommands and flags.}" >&2
+  exit 2
+}
+
+for a in "$@"; do
+  case "${a}" in
+    -h|--help) usage; exit 0 ;;
+    --self-test) exec "${AI}/lib/fleet/test/resume/self-test.sh" ;;
+  esac
+done
+
+for dep in git flock find; do
+  command -v "${dep}" >/dev/null 2>&1 || { printf 'fleet-resume: %s is not on PATH. Fix: install %s.\n' "${dep}" "${dep}" >&2; exit 1; }
+done
+
+# shellcheck source=../lib/fleet/domain.sh
+. "${AI}/lib/fleet/domain.sh"
+# shellcheck source=../lib/fleet/resume-domain.sh
+. "${AI}/lib/fleet/resume-domain.sh"
+# shellcheck source=../lib/fleet/resume-effects.sh
+. "${AI}/lib/fleet/resume-effects.sh"
+# shellcheck source=../lib/fleet/resume-manager.sh
+. "${AI}/lib/fleet/resume-manager.sh"
+
+sub="" session_id="${CLAUDE_CODE_SESSION_ID:-}" run_id="" root=""
+need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die_usage "$1 needs a value"; }
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-id) need_value "$@"; session_id="$2"; shift 2 ;;
+    --run-id)     need_value "$@"; run_id="$2"; shift 2 ;;
+    --root)       need_value "$@"; root="$2"; shift 2 ;;
+    -*)           die_usage "unknown flag $1" ;;
+    *) [ -z "${sub}" ] || die_usage "unexpected argument $1 (subcommand already ${sub})"; sub="$1"; shift ;;
+  esac
+done
+
+[ -n "${sub}" ] || die_usage "no subcommand given"
+case "${sub}" in drained|claim|status) ;; *) die_usage "unknown subcommand ${sub@Q}" ;; esac
+[ -n "${session_id}" ] || die_usage "no session id: --session-id is unset and so is \$CLAUDE_CODE_SESSION_ID" \
+  "pass --session-id <top-level claude session id>, or run from inside a Claude Code session."
+fleet_valid_id "${session_id}" || die_usage "session id ${session_id@Q} is not a valid id"
+if [ "${sub}" = "claim" ]; then
+  [ -z "${run_id}" ] || die_usage "claim takes no --run-id: it claims every drained run of this session"
+else
+  [ -n "${run_id}" ] || die_usage "${sub} needs --run-id"
+  fleet_valid_id "${run_id}" || die_usage "run id ${run_id@Q} is not a valid id" "pass the run's coordination directory name."
+fi
+if [ -z "${root}" ]; then
+  root="$(fleet_coordination_root "${AI}")" || { printf 'fleet-resume: git could not resolve the main checkout of %s, so the coordination root is unknown. Fix: pass --root <coordination dir>.\n' "${AI}" >&2; exit 1; }
+fi
+case "${root}" in /*) ;; *) die_usage "--root ${root@Q} is not absolute" ;; esac
+
+if [ "${sub}" = "claim" ]; then
+  fleet_resume_claim "${root}" "${session_id}"
+else
+  fleet_resume_one "${root}" "${session_id}" "${run_id}" "${sub}"
+fi
+exit $?

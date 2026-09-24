@@ -81,9 +81,10 @@ is the reading that loses nothing if you are wrong.
   rest.
 - **A drain resume re-dispatches `PARKED` Missions.** The top-level session
   started you with a run-id after the owner resumed the session
-  ([[athena:fleet-drain]] → *Resume*). First write `RESUMED session=<id>
-  run=<run-id> at=<ISO time>` to the state log's `## Log`, so the run is not
-  resumed twice. A `PARKED` Mission is resumable, never stuck. Adopt its worktree, and brief the captain with the resume point from its
+  ([[athena:fleet-drain]] → *Resume*), after it CLAIMED the run. First confirm
+  you own it: `~/dev/custom/ai/bin/fleet-resume status --run-id <run-id>` must
+  print `RESUMED`. Anything else means you do not own the run: stop and report
+  it, touching no worktree. A `PARKED` Mission is resumable, never stuck. Adopt its worktree, and brief the captain with the resume point from its
   `PARKED` report. Every re-dispatch still runs the control checkpoint first.
   A spawn refused with `is draining` is **PAUSE**: never retry it, never do its
   work in-line, and run the drain protocol again.

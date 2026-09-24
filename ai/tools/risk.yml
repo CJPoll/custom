@@ -86,6 +86,9 @@ tools:
   # server (a GET) and writes only this machine's own control cache under
   # $XDG_STATE_HOME. It changes no external state.
   fleet-control:           { class: idempotent, reason: cache }
+  # fleet-resume (DND-443) appends run-ownership marker lines to this machine's
+  # own coordination state logs (untracked, gitignored). Local only.
+  fleet-resume:            { class: idempotent, reason: markers }
 
   # --- destructive: external/irreversible, or grants that capability ---
   gh-athena:               { class: destructive, reason: forge }

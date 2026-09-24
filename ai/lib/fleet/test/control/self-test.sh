@@ -367,6 +367,15 @@ eq "watch: a steady run prints no CONTROL line" "$(grep -c '^CONTROL:' <<<"${out
 fleet_respond "{\"status\":200,\"body\":${DRAIN_Q}}"
 out="$(watch --session-id "${SID}" --max-loops 3)"
 eq "watch: a first answer of drain prints once" "$(grep -c '^CONTROL: drain' <<<"${out}")" 1
+rm -f "${CACHE}"
+fleet_respond '{"status":503,"body":{}}'
+out="$(cd "${CU}" && watch --session-id "${SID}" --max-loops 3)"
+eq "watch: a non-server run is announced once" "$(grep -c '^CONTROL: run on basis' <<<"${out}")" 1
+has "watch: ... names its basis" "${out}" "CONTROL: run on basis local-rule:malformed-answer,no-cache, NOT the server"
+has "watch: ... carries fleet-control's warning" "${out}" "WARNING control state is unknown"
+fleet_respond "[{\"status\":503,\"body\":{}},{\"status\":200,\"body\":${GOOD}}]"
+out="$(cd "${CU}" && watch --session-id "${SID}" --max-loops 2)"
+has "watch: back to a server run is announced" "$(grep '^CONTROL:' <<<"${out}" | tail -n 1)" "CONTROL: run — desired=run"
 out="$(unset CLAUDE_CODE_SESSION_ID; watch --max-loops 3)"
 eq "watch: no session id says so once" "$(grep -c '^CONTROL: unavailable' <<<"${out}")" 1
 has "watch: ... with a Fix:" "${out}" "Fix:"

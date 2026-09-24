@@ -3246,9 +3246,14 @@ On drain the admiral MUST, in this order:
 
 A transition to `run` emits `fleet.session.control_changed`, whose direct
 delivery lands on the session's inbox and wakes the top-level session through
-`inbox-wait`. The session then runs `fleet-control check`. On exit 0 it spawns
-a fresh admiral with `athena:admiral-resume`, pointed at the run's `run_id`,
-which salvages, adopts worktrees and re-dispatches `PARKED` missions. That spawn
+`inbox-wait`. The session then runs `fleet-control check`. On exit 0 on basis
+`server` it claims the drained runs with `ai/bin/fleet-resume claim`, and spawns
+one fresh admiral with `athena:admiral-resume` per claimed `run_id`. That admiral
+salvages, adopts worktrees and re-dispatches `PARKED` missions. At most one
+admiral owns a run: the claim appends a `RESUMED` marker to the run's state log
+under a lock BEFORE the spawn, so two wakes for one run (a duplicated line, and a
+draining admiral's hand-back) claim it once (`athena:fleet-drain` → *Run
+ownership*). That spawn
 passes layer 1 too. Layer 1 asks the server before it reads the cache, so a
 stale `drain` cache cannot refuse a resume while the server answers. When the
 event carries no `to`, nothing wakes the session. The fleet page names that

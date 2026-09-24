@@ -1,8 +1,10 @@
-# AE-19c — I7, end of drain: the last captain returned, so report drained,
-# write the final report, and only then end the turn.
-invariant = drain completes: admiral-state drained, then the final report, then end-turn
+# AE-19c — I7, end of drain: the last captain returned, so report drained and
+# write the final report, then release the run (fleet-resume drained, the LAST
+# act on it: after it the admiral owns nothing), and only then end the turn.
+invariant = drain completes: drained + final report, then release the run, then end-turn
 home      = athena:fleet-drain (drain protocol step 5) + athena:admiral-final-report
 mode      = next-action
-expect_order = fleet-report.admiral-state:drained < invoke:admiral-final-report
-expect_order = invoke:admiral-final-report < end-turn
+expect_action = fleet-report.admiral-state:drained
+expect_order = invoke:admiral-final-report < fleet-resume.drained
+expect_order = fleet-resume.drained < end-turn
 forbid_action = agent.spawn-captain

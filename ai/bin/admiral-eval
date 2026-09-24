@@ -105,6 +105,7 @@ ACTION_VOCABULARY = %w[
   wt-preflight:<branch> wait report-and-wait end-turn
   fleet-control.check mark-parked:<mission> sendmessage.park:<mission>
   fleet-report.admiral-state:<state> invoke:admiral-final-report
+  fleet-resume.status:<run> fleet-resume.drained:<run>
 ].freeze
 
 # Appended to every T2 scenario. Plan-only framing (guard 1) + the required

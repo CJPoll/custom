@@ -10,8 +10,10 @@
 # Enforcement layers -> Layer 2): about every 60 s it runs
 # `ai/bin/fleet-control check` (which asks the server and refreshes the control
 # cache), and prints `CONTROL: drain ...` when the session turns to drain,
-# `CONTROL: run ...` when it returns to run, and `CONTROL: unknown ...` when the
-# check errors. A waiting admiral wakes on the line and runs its drain protocol
+# `CONTROL: run ...` when it returns to run, `CONTROL: run on basis <b>, NOT the
+# server ...` (with fleet-control's own warning) when the answer is the owner's
+# fail-mode rule rather than the server, and `CONTROL: unknown ...` when the
+# check errors. With no session id it says so, once, with a Fix:. A waiting admiral wakes on the line and runs its drain protocol
 # (athena:fleet-drain). The first answer prints only when it is not run.
 #
 # CONTRACT: run this under the harness `Monitor` primitive with
@@ -90,33 +92,37 @@ last_sweep=$(date +%s)
 # runs), and the trap reaps the child: nothing outlives the Monitor.
 child=""
 ctl_out="$(mktemp)"
-trap '[ -n "${child}" ] && kill "${child}" 2>/dev/null; rm -f -- "${ctl_out}"' EXIT
+ctl_err="$(mktemp)"
+trap '[ -n "${child}" ] && kill "${child}" 2>/dev/null; rm -f -- "${ctl_out}" "${ctl_err}"' EXIT
 trap 'exit 143' TERM INT HUP
 
-control_state=""   # "" = never read; else run | drain | unknown:<rc>
+control_state=""   # "" = never read; else run | run-unknown:<basis> | drain | unknown:<rc>
 last_control=0
 
 check_control() {
-  local rc state line
+  local rc state line basis warn
   if [ -z "${session_id}" ]; then
     [ "${control_state}" = "off" ] || echo "CONTROL: unavailable — no session id (\$CLAUDE_CODE_SESSION_ID is unset). Fix: restart this watcher with --session-id <top-level session id>; until then run ai/bin/fleet-control check before every dispatch yourself."
     control_state="off"
     return 0
   fi
-  timeout 30 "${fleet_control}" check --session-id "${session_id}" >"${ctl_out}" 2>/dev/null &
+  timeout 30 "${fleet_control}" check --session-id "${session_id}" >"${ctl_out}" 2>"${ctl_err}" &
   child=$!
   wait "${child}"; rc=$?
   child=""
   line="$(head -n 1 "${ctl_out}")"
+  warn="$(grep -v '^[[:space:]]*$' "${ctl_err}" | tr '\n' ' ' | sed 's/ *$//')"
+  basis="${line##*basis=}"
   case "${rc}" in
-    0) state=run ;;
+    0) if [ "${basis}" = "server" ]; then state=run; else state="run-unknown:${basis}"; fi ;;
     3) state=drain ;;
     *) state="unknown:${rc}" ;;
   esac
   [ "${state}" = "${control_state}" ] && return 0
   case "${state}" in
-    drain) echo "CONTROL: drain — ${line}. Run the drain protocol now (athena:fleet-drain): dispatch nothing." ;;
+    drain) echo "CONTROL: drain — ${line}. Run the drain protocol now (athena:fleet-drain): dispatch nothing.${warn:+ ${warn}}" ;;
     run)   [ -n "${control_state}" ] && echo "CONTROL: run — ${line}. The session is back to run; a drained admiral is resumed by the top-level session (athena:fleet-drain → Resume)." ;;
+    run-unknown:*) echo "CONTROL: run on basis ${basis}, NOT the server — ${line}. ${warn:-fleet-control printed no warning.} This is the owner's fail-mode rule, never a confirmed run; note it in your state log." ;;
     *)     echo "CONTROL: unknown — fleet-control check exited ${rc#unknown:} (${line:-no answer}). Fix: run ai/bin/fleet-control check by hand; never read an error as run, so dispatch nothing until it answers 0." ;;
   esac
   control_state="${state}"

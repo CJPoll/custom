@@ -27,9 +27,9 @@ registry; a ceiling or an interruption reports nothing
 
 **A drain is its own end reason, `drained`.** The owner paused the session, and
 you ended only after your last captain returned. Report `admiral-state drained`
-(not `finished`). List the `PARKED` Missions with each resume point, and name
-the `DRAINED session=… run=…` line you wrote to the state log once the last
-captain returned, which is what the resume finds ([[athena:fleet-drain]]).
+(not `finished`). List the `PARKED` Missions with each resume point. Write this
+report BEFORE you release the run with `fleet-resume drained`: after the
+release you own nothing ([[athena:fleet-drain]] → *Run ownership*).
 
 ## Before you write it, reconcile the tracker against the forge
 

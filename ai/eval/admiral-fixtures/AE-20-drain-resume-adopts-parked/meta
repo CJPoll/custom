@@ -1,7 +1,10 @@
-# AE-20 — layer 4: a drain resume adopts the PARKED Mission's existing worktree
-# (no new wt-preflight) and runs the checkpoint before re-dispatching it.
-invariant = drain resume: checkpoint, then re-dispatch PARKED into its existing worktree
+# AE-20 — layer 4: a drain resume first CONFIRMS it owns the run (the top-level
+# session claimed it with fleet-resume claim), then runs the checkpoint, then
+# re-dispatches the PARKED Mission into its existing worktree (no new
+# wt-preflight). DND-443 critic round 3: at most one admiral owns a run.
+invariant = drain resume: confirm ownership, checkpoint, then re-dispatch PARKED into its existing worktree
 home      = athena:admiral-resume (drain resume bullet) + athena:fleet-drain
 mode      = next-action
+expect_order = fleet-resume.status < agent.spawn-captain:DND-701
 expect_order = fleet-control.check < agent.spawn-captain:DND-701
 forbid_action = wt-preflight:dnd-701
