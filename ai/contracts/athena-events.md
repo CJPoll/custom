@@ -2132,15 +2132,16 @@ tempting; it is deliberately kept out of the platform.
 This state lives client-side (the consumer's own action brief), never delivered
 as an instruction in a message. A consumer that **cannot** hold its own state (a
 dashboard, an email recipient) is **out of first-pass scope** — it would need a
-platform-held view, which is a later re-architecture, and no hook, seam, or
-"designed-for-now" interface for it is built now.
+platform-held view. The one platform-held view this contract specifies is the
+priority index (*Priority index*): a consumer of persisted events inside the
+server, not the router. No rule reads it, and no other platform-held view, hook
+or seam is built.
 
-**Later (2026-09-24):** this paragraph said no platform-held view is built.
-Superseded for one view (DND-430): the priority index is a platform-held
-view, specified in *Priority index*. It is a consumer of persisted events
-inside the server, not the router. Everything else here still holds: the router
-keeps no membership state, no rule reads the index, and a lane consumer still
-owns its own set.
+**Later (2026-09-24):** this paragraph said no platform-held view is built at
+all ("a later re-architecture, and no hook, seam, or 'designed-for-now'
+interface for it is built now"). Superseded for one view (DND-430): the
+priority index. Everything else here still holds: the router keeps no
+membership state, and a lane consumer still owns its own set.
 
 ---
 
@@ -3613,12 +3614,22 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 | `active` → `done` | the owner | `closed_by: owner` |
 | `active` → `done` | ingest, when the source status is terminal | `closed_by: source_status` |
 | `active` → `done` | ingest, on the source's delete event | `closed_by: source_deleted` |
-| `done` → `active` (reopen) | ingest, only for `closed_by` `source_status` or `source_deleted`, when the source status becomes non-terminal or the item is undeleted | |
+| `done` → `active` (reopen) | ingest, for `closed_by: source_status`, on an event whose revision is later than the row's and whose status is non-terminal | |
+| `done` → `active` (reopen) | ingest, for `closed_by: source_deleted`, on `notion.ticket.undeleted` only | |
 
 - **Ingest never undoes an owner's decision or a completed lease.** It never
   promotes, never restores a dismissed item, and never reopens an item closed
   by `lease_complete` or `owner`. On those items it still updates the
   pointer fields.
+- **A reopen needs evidence newer than the close.** Redelivery and reordering
+  are normal (*Idempotency is per (event, item)*). So an update whose revision
+  equals the row's, or that has none, never reopens a `source_status` close.
+  A family with no revision token (the forge family, DND-439) declares how it
+  orders a reopen when it registers, and cannot reopen an item until it does.
+  No update reopens a `source_deleted` close: a pre-delete update delivered
+  again after the delete must not bring the item back. A delete that carries a
+  revision sets `source_revision`, and an `undeleted` older than it is not
+  applied.
 - **Terminal statuses are owner config, per source.** For `notion_personal`
   the default is `Done` and `Cancelled`. `notion_work` gets its default from
   DND-438. A status outside the source's declared set is stored and treated as
@@ -3699,6 +3710,11 @@ or a digest can render them:
   stored as an id.
 - **A new reason id is an amendment to this table.** A renderer that meets an
   id it does not know shows the id as it is. It never drops the reason.
+- **A reason fires only on a field its source fills.** Today only `manual`
+  fills `source_priority` and `due_on` (*The storage boundary*), so
+  `source_priority`, `due_soon` and `overdue` fire only for `manual` items.
+  A source gains them when its declared payload carries the field and its
+  allow-list row adds it.
 - **Rank at `now`.** `priority_next` ranks by a score computed at the call.
   The stored `score`, `reasons` and `scored_at` are the last computation, kept
   for display.
@@ -3716,7 +3732,10 @@ machine are stamped from the token*).
   `not_found` (*Fleet identity: owner and machine are stamped from the token*).
   A session that reported `session_ended` is refused as `session_ended`. A
   session whose desired state is `drain` (*Session control: desired state*) is
-  refused as `session_draining`.
+  refused as `session_draining`. Its `Fix:` names the drain reason and says to
+  run the drain protocol rather than retry (*Enforcement layers* → *Layer 3:
+  the drain protocol*). The `session_ended` refusal's `Fix:` says to pull work
+  from a live session.
 - **An item is eligible** when all of these hold. It is the machine owner's
   item. It is `active`, and it is not `owner_only`. It has no live lease. Its
   domain is one the session may serve. A session may serve its effective
