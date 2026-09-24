@@ -1658,15 +1658,16 @@ The first-pass permitted-origination rule:
   use the owner's control on the fleet page.` gen_saas emits both (DND-441
   added `fleet.session.control_changed` to the platform-originated set). A
   source ingress refuses either as a non-member of its set.
-
-  **Later (2026-09-24):** this said the second refusal was an obligation on
-  DND-441, and that until it landed harness-emit refused the type as an
-  unmodeled `fleet.*` value. DND-441 shipped it: gen_saas
-  `Athena.Events.HarnessEmit.Origination` emits the quoted text, pinned by
-  `harness_emit/fix_text_test.exs`, so the fixture now pins it on both sides.
   This is an exception for a declared family, not a namespace licence: a new
   platform-originated family declares its model like any other and is named
   here.
+
+  **Later (2026-09-24):** this bullet said the second refusal was an
+  obligation on DND-441, and that until it landed harness-emit refused the
+  type as an unmodeled `fleet.*` value. DND-441 shipped it (gen_saas PR #339,
+  `a7c1cc70`): `Athena.Events.HarnessEmit.Origination` emits the quoted text,
+  pinned by `harness_emit/fix_text_test.exs`, so the fixture now pins it on
+  both sides.
 
 This is the origination dual of the `source`-is-not-authz rule: `source` governs
 what a label may *earn*, and this governs what an ingress may *mint*. Both are
@@ -2973,6 +2974,16 @@ them. It stays true for DND-443's `ai/bin/fleet-control` and
 both, with the admiral drain protocol (`athena:fleet-drain`) and the
 `CONTROL:` lines of `ai/bin/admiral-report-watch`. The server side of control
 (DND-441) is still an obligation on its implementer.
+
+**Later (2026-09-24):** DND-441: the label above said the server side of
+control was still an obligation. DND-441 shipped it (gen_saas PR #339,
+`a7c1cc70`): `ControlPolicy.desired/3`, `Fleet.set_control/4` with its one
+`fleet.session.control_changed` per committed transition and direct delivery,
+the `session_control` read over MCP and `GET
+/api/v1/fleet/sessions/<claude_session_id>/control`, and the fleet page's
+Pause, Resume and Keep running. One piece is still owed: an override whose
+`expires_at` lapses emits no `fleet.session.control_changed`, so nothing wakes
+a drained session when a timed pause ends. That wake is DND-448's.
 
 ### Fleet reports are state upserts, not events
 
