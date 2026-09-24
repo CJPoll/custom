@@ -1295,9 +1295,21 @@ itself, so nothing is refused at ingress. The platform stamps `to` only when
 the session resolved to a project (its `session_started` report named one) AND
 the session's machine has a live agent instance declaring that session inbox.
 Otherwise the event carries no `to`, gets no direct delivery, and fans out
-through owner rules alone. The wake is then missing, so the control write's
-answer and the fleet page MUST name why the session cannot be woken (no project
-reported, or no declared session inbox), never show a normal pause.
+through owner rules alone. Only the inbox fast path is then missing: the
+session's own resume waiter still resumes it (*Enforcement layers* → *Layer 4:
+resume*). The control write's answer and the fleet page MUST name why the line
+cannot be delivered (no project reported, or no declared session inbox), never
+show a normal pause.
+
+**Later (2026-09-24):** DND-484: this paragraph said "The wake is then missing"
+and required the answer and the fleet page to name why "the session cannot be
+woken". Superseded: the inbox line was never a guaranteed wake. It is addressed
+to one session but delivered to the project's session channel, whose one
+designated consumer reads every session's line (`ai/contracts/athena-inbox.md`
+→ *The designated consumer*), so a second session in the project never saw its
+own. Resume now rests on the session's resume waiter, which reads the server,
+and the line is a fast path. The naming requirement stays; only what it names
+changed.
 
 The line is a **wake, never an authority**. A session that receives it re-reads
 its control state (*Fleet registry and session control* → *Reading control
@@ -3354,21 +3366,54 @@ On drain the admiral MUST, in this order:
 
 #### Layer 4: resume
 
-A transition to `run` emits `fleet.session.control_changed`, whose direct
-delivery lands on the session's inbox and wakes the top-level session through
-`inbox-wait`. The session then runs `fleet-control check`. On exit 0 on basis
-`server` it claims the drained runs with `ai/bin/fleet-resume claim`, and spawns
-one fresh admiral with `athena:admiral-resume` per claimed `run_id`. That admiral
-salvages, adopts worktrees and re-dispatches `PARKED` missions. At most one
-admiral owns a run: the claim appends a `RESUMED` marker to the run's state log
-under a lock BEFORE the spawn, so two wakes for one run (a duplicated line, and a
-draining admiral's hand-back) claim it once (`athena:fleet-drain` → *Run
-ownership*). That spawn
-passes layer 1 too. Layer 1 asks the server before it reads the cache, so a
-stale `drain` cache cannot refuse a resume while the server answers. When the
-event carries no `to`, nothing wakes the session. The fleet page names that
-case (*Declared families beyond the first pass* →
-`fleet.session.control_changed`), and the owner resumes the session by hand.
+**The guaranteed wake is the session's own resume waiter.** When an admiral
+the top-level session launched ends with reason `drained`, the session arms
+`ai/bin/fleet-control wait` in the background (`athena:fleet-drain` → *Arming
+the resume waiter*; a subagent never arms it). The waiter polls the session's
+own `GET /api/v1/fleet/sessions/<id>/control` (*Reading control state and the
+control cache*), by default every 60 s, within the inbox waiter's mode budget.
+It exits 0 only on `desired=run` with basis `server`. A drain, and any
+`recomputed:*` or `local-rule:*` answer, keeps it polling. It exits 75 when the
+budget elapses (re-arm), and 2 with a `Fix:` on `session-unregistered`,
+`server-refused`, `server-unconfigured` or `invalid-cache-path`, where
+re-polling cannot help. It reads no inbox file, lock or offset, so it fires
+whichever session holds the project's inbox consumer lock.
+
+**The inbox line is a fast path.** A transition to `run` emits
+`fleet.session.control_changed`. Its direct delivery lands on the PROJECT's
+session inbox, which only the project's designated consumer reads
+(`ai/contracts/athena-inbox.md` → *The designated consumer*). So it reaches the
+addressed session only when that session is the consumer. A consumer that reads
+a line whose `claude_session_id` is not its own acks it, reports it only as a
+count, and runs no check, claim or spawn for it: control is per session, and an
+admiral that session spawns runs under its own control state, not the drained
+session's.
+
+Either wake runs the same steps. The session runs `fleet-control check`. On exit
+0 on basis `server` it claims the drained runs with `ai/bin/fleet-resume claim`,
+and spawns one fresh admiral with `athena:admiral-resume` per claimed `run_id`.
+That admiral salvages, adopts worktrees and re-dispatches `PARKED` missions. At
+most one admiral owns a run: the claim appends a `RESUMED` marker to the run's
+state log under a lock BEFORE the spawn, so two wakes for one run (the waiter
+and the line, or a duplicated line) claim it once (`athena:fleet-drain` → *Run
+ownership*). That spawn passes layer 1 too. Layer 1 asks the server before it
+reads the cache, so a stale `drain` cache cannot refuse a resume while the
+server answers. A resume that lands while the admiral is still draining is
+picked up by the waiter the session arms when that admiral completes: its first
+poll already sees `run`. When the event carries no `to`, only the fast path is
+missing; the fleet page names why (*Declared families beyond the first pass* →
+`fleet.session.control_changed`).
+
+**Later (2026-09-24):** DND-484: this section said the line's direct delivery
+"wakes the top-level session through `inbox-wait`", that a draining admiral
+that saw `run` sent the top-level session a hand-back message (drain step 5),
+and that with no `to` "nothing wakes the session" and the owner resumes it by
+hand. All three are superseded. The line is delivered per project and read only
+by the project's designated consumer, so with two sessions in one project the
+second never saw its own wake (observed 2026-09-24 06:10Z). The resume waiter
+replaces the inbox-wait wake as the guarantee and subsumes the hand-back, which
+is removed; the line stays as a fast path. Architect decision: epic page,
+*DND-484 wake-delivery decision*.
 
 **Later (2026-09-24):** DND-443: this paragraph said the session spawns a fresh
 admiral "on exit 0" of `fleet-control check`. Two changes replaced that. Resume

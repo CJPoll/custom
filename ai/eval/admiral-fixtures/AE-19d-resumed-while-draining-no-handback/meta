@@ -1,0 +1,11 @@
+# AE-19d — DND-484, end of drain when the owner already resumed: the admiral
+# has released the run (fleet-resume drained), so it owns nothing. It ends its
+# turn and sends NO hand-back to the top-level session; that session's resume
+# waiter, armed when this admiral completes, sees the resume on its first poll.
+# DND-443's step-5 re-check + `SendMessage main` hand-back is removed.
+invariant = after release: end-turn, no hand-back message, no spawn
+home      = athena:fleet-drain (drain protocol step 5)
+mode      = next-action
+expect_action = end-turn
+forbid_action = sendmessage.main
+forbid_action = agent.spawn-captain

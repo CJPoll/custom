@@ -5,8 +5,8 @@
 #
 # Joint invariant: at most one admiral owns a run. A drained admiral releases
 # the run (`drained`); the top-level session CLAIMS it (`claim`) BEFORE it spawns
-# the resuming admiral, under the state log's lock, so two wakes (the
-# control_changed inbox line and a draining admiral's hand-back) cannot both
+# the resuming admiral, under the state log's lock, so two wakes (the session's
+# resume waiter and the control_changed inbox line, DND-484) cannot both
 # spawn; the spawned admiral only confirms (`status` must say RESUMED).
 
 set -u

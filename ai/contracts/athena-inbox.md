@@ -1287,7 +1287,20 @@ beyond the first pass* → `fleet.session.control_changed`). Its `kind` is the
 type itself (`athena-events.md` → *Relationship to the Athena Inbox contract*),
 and it carries `entity_id`. It is a wake, never an authority: the consumer
 re-reads the session's control state (`athena-events.md` → *Fleet registry and
-session control*) and never acts on the line's own values.
+session control*) and never acts on the line's own values. The line is
+addressed to ONE session (its `claude_session_id`) but delivered to the
+project's session inbox, whose designated consumer reads every session's lines
+(*The designated consumer*). A line for another session is **foreign**: the
+consumer acks it, reports it only as a count, and never runs a check, a claim or
+a spawn for it. So the line is only a fast path to the session it names; that
+session's guaranteed wake is its own resume waiter (`athena-events.md` →
+*Enforcement layers* → *Layer 4: resume*).
+
+**Later (2026-09-24):** DND-484: this paragraph named the consumer as the
+session the line wakes. Superseded: with two sessions in one project, only the
+lock holder reads the channel, so the other session never saw its own line, and
+the holder received lines that were not its own. The foreign-line rule and the
+resume waiter replace that reading; the line itself is unchanged.
 
 **Registry convention for a session inbox.** A project's session inbox is the
 per-project `log` channel named **`session`**, path

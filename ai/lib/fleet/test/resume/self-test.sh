@@ -4,8 +4,9 @@
 #
 # The invariant under test: at most one admiral owns a run. So the cases that
 # matter are the MISSES and the RACES:
-#   - two resume triggers at once (the control_changed inbox line AND a draining
-#     admiral's hand-back) claim each drained run exactly once;
+#   - resume triggers at once (the session's resume waiter AND the
+#     control_changed inbox line, possibly duplicated) claim each drained run
+#     exactly once;
 #   - a marker that is reformatted (a timestamp prefix, a list bullet) is LOUD,
 #     never silently skipped (that would be a run never resumed);
 #   - a marker copied from another run's log is refused.
@@ -84,7 +85,7 @@ has "a release (drained after a failed spawn) makes it claimable again" "$(fr cl
 out="$("${BIN}" claim --session-id "${OTHER}" --root "${ROOT}")"
 has "another session claims nothing of ours" "${out}" "claimed 0"
 
-echo "== the race: three triggers at once (the inbox line, the hand-back, a resume waiter)"
+echo "== the race: three triggers at once (the resume waiter, the inbox line, a duplicate of it)"
 for i in $(seq 1 20); do newrun "race-${i}"; fr drained --run-id "race-${i}" >/dev/null; done
 fr claim > "${TMP}/c1" 2>&1 &
 p1=$!

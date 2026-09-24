@@ -1,6 +1,6 @@
 ---
 name: athena:fleet-drain
-description: The fleet's pause/resume procedure — the admiral's control checkpoint before every dispatch, reading a spawn refused by the drain guard as PAUSE (never retry, never do the work in-line), the drain protocol (park QUEUED missions, let running captains finish or park by reason class, never end the turn while a captain runs, then report drained), a captain parking on request, and the top-level session resuming a drained run. Use at every dispatch point, on a `CONTROL:` line from admiral-report-watch, on any refused athena-admiral/athena-captain spawn, on a park message, and on a fleet.session.control_changed inbox line.
+description: The fleet's pause/resume procedure — the admiral's control checkpoint before every dispatch, reading a spawn refused by the drain guard as PAUSE (never retry, never do the work in-line), the drain protocol (park QUEUED missions, let running captains finish or park by reason class, never end the turn while a captain runs, then report drained), a captain parking on request, and the top-level session arming its resume waiter and resuming a drained run. Use at every dispatch point, on a `CONTROL:` line from admiral-report-watch, on any refused athena-admiral/athena-captain spawn, on a park message, when an admiral you launched ends with reason `drained`, when a `fleet-control wait` you armed exits, and on a fleet.session.control_changed inbox line.
 ---
 
 # athena:fleet-drain
@@ -87,12 +87,9 @@ Do these in order.
      `~/dev/custom/ai/bin/fleet-resume drained --run-id <run-id>`. From here on
      you own nothing (*Run ownership* below), so touch no Mission, worktree or
      state-log row after it;
-   - run the checkpoint once more. If it exits 0 on `basis=server`, the owner
-     resumed while you drained, and no new control event will wake the
-     top-level session. So `SendMessage` `main`:
-     `run <run-id> drained, and the session is back to run: resume it
-     (athena:fleet-drain → Resume)`;
-   - then end your turn.
+   - then end your turn. Send no resume message: the top-level session arms its
+     resume waiter when your completion arrives, and the waiter's first poll
+     sees a resume that landed while you drained (*Arming the resume waiter*).
 
 A captain that returns `DONE` during the grace goes through the normal DONE
 path, including boarding. Merging is not a spawn, so drain does not stop it.
@@ -100,7 +97,8 @@ path, including boarding. Merging is not a spawn, so drain does not stop it.
 **Wake-ups.** `admiral-report-watch` prints `CONTROL: drain` when the session
 turns to drain, and `CONTROL: unknown` when the check errors. Treat either as
 "run the checkpoint now". `CONTROL: run` while you are still draining changes
-nothing for you. Finish the drain; step 5 hands the run back for resume.
+nothing for you. Finish the drain; the top-level session's resume waiter
+resumes the run after you release it.
 
 ## Parking (captain)
 
@@ -135,9 +133,43 @@ naming the line), and never claims it.
 Every path that can trigger a resume runs the same two commands, so none of
 them needs to know about the others:
 
-- the `fleet.session.control_changed` inbox line (possibly delivered twice);
-- a draining admiral's hand-back message (step 5);
+- the session's resume waiter exiting 0 (*Arming the resume waiter*): the
+  guaranteed wake;
+- the `fleet.session.control_changed` inbox line, when this session is its
+  project's inbox consumer (possibly delivered twice): a fast path only;
 - the owner asking the session to resume by hand.
+
+## Arming the resume waiter (top-level session)
+
+The `control_changed` line is addressed to one session but delivered to its
+PROJECT's session channel, and only the project's designated inbox consumer
+reads that ([[athena:inbox]]). A second session in the same project never sees
+its own wake. So a drained session wakes itself: it polls its own control read.
+A subagent never arms it.
+
+- **When:** an athena-admiral you launched completes and its final report's
+  reason is `drained`. Confirm the run is released:
+  `~/dev/custom/ai/bin/fleet-resume status --run-id <run-id>` must print
+  `DRAINED`. Then arm, in the background (`run_in_background`):
+  ```sh
+  ~/dev/custom/ai/bin/fleet-control wait
+  ```
+  One waiter covers every drained run of this session: arm it once, not once
+  per run.
+- **Exit 0** (`desired=run … basis=server` on stdout): run *Resume* below:
+  check, claim, spawn.
+- **Exit 75** (budget elapsed): re-arm while `fleet-resume status` still prints
+  `DRAINED` for a run you drained. It is not "all clear".
+- **Exit 2** (`Fix:` on stderr): the server will not answer for this session
+  (`session-unregistered`, `server-refused`, `server-unconfigured`) or its
+  answers cannot be cached (`invalid-cache-path`). Re-arming will not help.
+  Relay the `Fix:` to the owner, and resume by hand once it is fixed.
+- **Exit 1:** faulted. Report it and resume by hand.
+
+A drain, and any `recomputed:*` or `local-rule:*` run, keeps the waiter
+polling: only the server's `run` is a resume. The default interval is 60 s, so
+a resume lands within about a minute. The budget follows the inbox waiter's
+mode policy (1800 s interactive, 540 s headless).
 
 ## Resume (top-level session)
 
@@ -170,14 +202,24 @@ control instead:
   The spawn passes the drain guard, which asks the server first, so a stale
   `drain` cache cannot refuse it while the server answers. A run whose admiral
   is still draining has no final `DRAINED` marker yet, so it is never claimed
-  under a live admiral; that admiral hands it back itself (step 5).
+  under a live admiral. When that admiral releases the run, your waiter
+  (armed on its completion) resumes it.
 - **Run on any other basis:** do not claim. A recomputed or local-rule run is
-  the owner's fail-mode rule, not the owner's decision to resume. Say so, and
-  wait for the next wake, or resume by hand.
+  the owner's fail-mode rule, not the owner's decision to resume. Say so. Keep
+  (or re-arm) your resume waiter, or resume by hand.
 
-The claim is keyed by session and run, not by who is asking.
-`fleet-resume claim --session-id <id>` lets another actor claim a session's
-drained runs, if that session's wakes are delivered elsewhere.
+The claim is keyed by session and run, not by who is asking. Never claim
+another session's runs: an admiral you spawn runs under YOUR session's control
+state, so resuming another session's run would move it out from under that
+session's pause.
+
+**A `control_changed` line for another session** is foreign. The project's
+inbox consumer receives every session's line, so check whose it is:
+`~/dev/custom/ai/bin/fleet-control own --line-session-id '<the line's
+claude_session_id>'` (a plain id only; anything else is foreign without running
+it). `foreign` (exit 3): the read already acked it; report it only as a count
+("1 control wake for another session"). Run no check, no claim and no spawn for
+it. That session's own waiter wakes it.
 
 The resumed admiral confirms before it acts:
 `fleet-resume status --run-id <run-id>` must print `RESUMED`. Anything else

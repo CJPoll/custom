@@ -270,3 +270,61 @@ fleet_drain_fix() {
 fleet_unknown_warning() {
   printf 'fleet-control: WARNING control state is unknown, so this answer is basis %s, not the server: %s. Fix: restore the server read (run ai/bin/fleet-control fetch to see its error); until then this answer is the owner'"'"'s fail-mode rule (athena-events.md -> Unknown control state), never a confirmed run.\n' "$1" "$2"
 }
+
+# ---- The resume waiter (DND-484) -------------------------------------------
+# A drained session guarantees its own wake by polling its OWN control read
+# (`fleet-control wait`), because the fleet.session.control_changed line is
+# delivered per PROJECT and only the project's designated consumer reads it
+# (athena-events.md -> *Enforcement layers* -> *Layer 4: resume*).
+
+# Causes after which re-polling cannot help: the server will not answer this
+# session, or no answer could be cached. The waiter stops with a Fix: instead
+# of burning its budget on them.
+FLEET_WAIT_REFUSED_CAUSES="session-unregistered server-refused server-unconfigured invalid-cache-path"
+
+# fleet_wait_outcome <check_exit> <basis> [cause]
+# One poll's meaning. Prints `<outcome>\t<cause>`, outcome one of:
+#   resume    exit 0 on basis `server`: the owner's resume. The ONLY resume.
+#   continue  drain on basis `server`, or any run/drain on a recomputed or
+#             local-rule basis whose causes may clear (a non-server run is the
+#             owner's fail-mode rule, never a resume);
+#   refused   a cause in FLEET_WAIT_REFUSED_CAUSES, named in the second field;
+#   fault     anything this rule does not recognise (an error exit, an empty or
+#             unknown basis, an unknown cause token). Never a resume.
+# A non-empty <cause> is a refusal the caller found before polling; it is
+# judged on its own, whatever the other two arguments say.
+fleet_wait_outcome() {
+  local rc="${1:-}" basis="${2:-}" cause="${3:-}" kind rest c known=" ${FLEET_SERVER_CAUSES} ${FLEET_CACHE_CAUSES} " refused=""
+  if [ -n "${cause}" ]; then
+    case " ${FLEET_WAIT_REFUSED_CAUSES} " in
+      *" ${cause} "*) printf 'refused\t%s\n' "${cause}" ;;
+      *) printf 'fault\t%s\n' "${cause}" ;;
+    esac
+    return 0
+  fi
+  case "${rc}" in 0|3) ;; *) printf 'fault\t\n'; return 0 ;; esac
+  if [ "${basis}" = "server" ]; then
+    if [ "${rc}" = "0" ]; then printf 'resume\t\n'; else printf 'continue\t\n'; fi
+    return 0
+  fi
+  kind="${basis%%:*}"; rest="${basis#*:}"
+  case "${kind}" in recomputed|local-rule) ;; *) printf 'fault\t\n'; return 0 ;; esac
+  [ "${basis}" != "${kind}" ] && [ -n "${rest}" ] || { printf 'fault\t\n'; return 0; }
+  for c in ${rest//,/ }; do
+    case "${known}" in *" ${c} "*) ;; *) printf 'fault\t%s\n' "${c}"; return 0 ;; esac
+    case " ${FLEET_WAIT_REFUSED_CAUSES} " in *" ${c} "*) [ -n "${refused}" ] || refused="${c}" ;; esac
+  done
+  if [ -n "${refused}" ]; then printf 'refused\t%s\n' "${refused}"; else printf 'continue\t\n'; fi
+}
+
+# fleet_control_line_is_own <line_claude_session_id> <own_claude_session_id>
+# Is an inbox control_changed line addressed to THIS session? Prints `own`
+# (status 0) only when both ids are valid and equal. Empty, absent, unsafe or
+# mismatched is `foreign` (status 1), never `own`: a foreign line never starts a
+# check, a claim or a spawn in the session that happened to read it.
+fleet_control_line_is_own() {
+  if fleet_valid_id "${1:-}" && fleet_valid_id "${2:-}" && [ "$1" = "$2" ]; then
+    printf 'own\n'; return 0
+  fi
+  printf 'foreign\n'; return 1
+}
