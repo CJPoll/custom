@@ -1,0 +1,35 @@
+# The exact refusal text ai/contracts/athena-events.md quotes, per section.
+# `@section <heading>` starts a section (the heading text, without the #s).
+# Each following line is one quoted span, in document order, whitespace
+# collapsed. A span is pinned when it contains `Fix:` and is more than the bare
+# word. `<...>` is a placeholder the emitter fills in.
+#
+# PINNED ON BOTH SIDES (DND-411):
+#   - here, by ai/contracts/test/self-test.sh: every such span in each listed
+#     section must equal these lines exactly, and no unpinned one may appear;
+#   - in gen_saas, by apps/athena/test/athena/events/harness_emit/fix_text_test.exs
+#     (origination) and apps/athena/test/athena/events/rules_fix_text_test.exs
+#     (rule save-time), which assert the shipped strings equal these.
+# Nothing checks the two repos against each other (separate CI, separate
+# landing). Changing a line means changing the contract, this file, the
+# gen_saas code, and its gen_saas test together.
+
+@section Which event types an ingress kind may originate
+# family-level non-member (an unmodeled fleet.* value; registration cannot allow it)
+Fix: emit one of the enumerated harness-emit types (<permitted types, comma-separated>); a genuinely new fleet.* family must first declare its payload schema, identity field, revision token, origination membership, and enrichment posture (see 'Extending the taxonomy — a new type family declares its model') before it can be originated.
+# family member not registered to this machine token (deny by default)
+Fix: register "<type>" for this machine's origination set (owner-editable, no code change), then retry.
+# platform-originated (fleet.machine.*)
+Fix: stop emitting <type> — it is platform-originated (only the server's reachability sweeper emits it) and no machine token may originate it, whatever its registration says; to act on reachability, write a rule on the platform's own event.
+
+@section Payload fields and their types per event type
+# unknown field-path (e.g. a leaf a delete-only type does not carry)
+field-path "<path>" is not in the union of this rule's declared event_type(s)' payload schemas <types>. Fix: correct the spelling (nearest valid fields: <valid fields, comma-separated> (given: "<path>")); or, if the field lives only on a type this rule does not declare, add that event_type to the rule.
+
+@section The predicate grammar
+# unknown declared event_type (also the per-property redirect)
+unknown event type "<type>" in this rule's event_type(s) — it is not a member of the registered type set. Fix: correct the spelling; or, for a genuinely new type, declare its family's model before authoring rules against it. For a per-property ticket route, declare notion.ticket.updated and filter on {"field":"payload.changed_properties","op":"contains","value":"<property-id>"}.
+
+@section A slot's field-path binds at save time, exactly as a predicate's does
+# misspelled template slot
+template slot '{<path>}' names a field-path that is not in the union of this rule's declared event_type(s)' payload schemas — the same save-time binding a predicate field-path gets. Fix: correct the spelling (valid fields: <valid fields, comma-separated>); or add the event_type that carries it. A misspelled slot otherwise renders empty forever — an invisible content drop.

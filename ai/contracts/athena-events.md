@@ -869,7 +869,16 @@ registered type, an unknown-`event_type` save-time HARD ERROR (see *The predicat
 grammar* → *Evaluation contract*), which fires **even for an envelope-only
 predicate**; and (2) for a predicate that additionally binds a `payload.*` leaf,
 the existing unknown-path save-time HARD ERROR (a finer type has no payload
-schema, so any `payload.*` leaf is unbindable). The redirecting `Fix:` is: `Fix: unknown event type '<type>' — the first pass emits no per-property ticket types (no notion.ticket.status_changed/labels_changed/assignment_changed). Declare notion.ticket.updated and filter on which property changed with a predicate leaf {"field":"payload.changed_properties","op":"contains","value":"<property-id>"}.`
+schema, so any `payload.*` leaf is unbindable). The redirect is ground (1)'s own
+refusal: its per-property sentence names `notion.ticket.updated` and the
+`changed_properties` leaf (quoted in *The predicate grammar* → *Evaluation
+contract*). A finer type is an unknown type, so it gets no refusal of its own.
+
+**Later (2026-09-24):** this paragraph quoted a separate "redirecting" refusal
+("unknown event type '<type>' — the first pass emits no per-property ticket
+types …"). No code emitted it. The shipped code gives a finer type the one
+unknown-`event_type` refusal, which already carries the redirect, and that is
+the design (DND-411).
 
 **Direction is NOT emitted for a metadata-only source; the consumer derives it.**
 "A label was *added*" vs "*removed*", "an assignee was *set*" vs "*cleared*" are
@@ -982,11 +991,16 @@ a save-valid predicate that reads `absent` forever at runtime. The sanctioned
 **union-binding absent-by-design** case (a rule spanning `notion.comment.updated`
 + `notion.comment.deleted`) is unaffected — the enriched type **supplies** the
 field, so the leaf binds against the union and reads `absent` on the delete event.
-The `Fix:` reuses the existing unknown-field-path save-time path, naming the type:
-`Fix: field-path 'payload.comment_text' is not in notion.comment.deleted's payload
-schema (identity-only: entity_id). A delete carries no enrichment — remove the
-leaf, or declare the rule on an enriched comment type (notion.comment.created /
-updated) as well.`
+The refusal is the existing unknown-field-path save-time one, naming the
+declared types: `field-path "<path>" is not in the union of this rule's declared event_type(s)' payload schemas <types>. Fix: correct the spelling (nearest valid fields: <valid fields, comma-separated> (given: "<path>")); or, if the field lives only on a type this rule does not declare, add that event_type to the rule.`
+`<types>` renders as a list, e.g. `["notion.comment.deleted"]`.
+
+**Later (2026-09-24):** this paragraph quoted a delete-specific refusal
+("field-path 'payload.comment_text' is not in notion.comment.deleted's payload
+schema (identity-only: entity_id). A delete carries no enrichment …"). No code
+emitted it; the generic unknown-field-path refusal above is what ships, and
+this quote now matches it (DND-411). The "nearest valid fields" it names is
+every valid field of the declared types, not a computed nearest match.
 
 **`slack.message.received` carries `ts` and `event_id`** (not just
 `occurred_at`): the deployed inbox reader keys cross-source dedupe on
@@ -1547,7 +1561,7 @@ The first-pass permitted-origination rule:
   its first remedy ("register it") cannot succeed for an unmodeled type. The shipped code splits the case in two, as above, and that
   split is the design. The unmodeled-type clause gained the model list from
   the old quote (DND-411). Every quoted `Fix:` in this section is pinned
-  verbatim: `ai/contracts/fixtures/athena-events-origination-fix.txt` (checked
+  verbatim: `ai/contracts/fixtures/athena-events-quoted-fix.txt` (checked
   by `ai/contracts/test/self-test.sh`) and a gen_saas test named in that
   fixture's header. Change all of them together.
 
@@ -1919,7 +1933,13 @@ ALSO typed to the field's declared TYPE*), bounded depth/size. Specifically:
   well-formed `type` which *reaches routing* is **dead-lettered, never rejected**
   (see *Enumerated first-pass event types* and *Event disposition and
   dead-letter*): a rule cannot be authored against an unknown type; an event that
-  arrives carrying one still dead-letters. `Fix: unknown event type '<type>' in this rule's event_type(s) — it is not a member of the registered type set. Correct the spelling; or, for a genuinely new type, declare its family's model before authoring rules against it (see 'Extending the taxonomy — a new type family declares its model'). For a per-property ticket route, declare notion.ticket.updated and filter on {"field":"payload.changed_properties","op":"contains","value":"<property-id>"}.`
+  arrives carrying one still dead-letters. `unknown event type "<type>" in this rule's event_type(s) — it is not a member of the registered type set. Fix: correct the spelling; or, for a genuinely new type, declare its family's model before authoring rules against it. For a per-property ticket route, declare notion.ticket.updated and filter on {"field":"payload.changed_properties","op":"contains","value":"<property-id>"}.`
+
+  **Later (2026-09-24):** this quote began with `Fix:`, single-quoted the
+  type, and ended its model clause with a pointer to *Extending the taxonomy —
+  a new type family declares its model*. The shipped text puts the diagnosis
+  first, double-quotes the type, and has no pointer. The quote now matches the
+  code (DND-411).
 - **An operator incompatible with its field's declared CARDINALITY is a HARD
   ERROR at rule-SAVE time** — a collection operator (`contains` / `intersects`)
   on a scalar field, or a scalar operator (`eq` / `ne` / `lt` / `lte` / `gt` /
@@ -2272,9 +2292,16 @@ field-path; no second mechanism is introduced.
   otherwise renders empty forever, silently dropping content the author believed
   they were emitting — the failed-lookup class this document legislates against
   (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty
-  one*). It reuses the predicate's unknown-field-path path, naming the offending
-  slot and the nearest valid field:
-  `Fix: template slot '{payload.asignee}' names a field-path that is not in the union of this rule's declared event_type(s)' payload schemas — the same save-time binding a predicate field-path gets. Correct the spelling (nearest valid field: payload.assignee); or, if the field lives only on a type this rule does not declare, add that event_type to the rule. A misspelled slot otherwise renders empty forever — an invisible content drop.`
+  one*). It binds by the same field lookup as a predicate leaf and is refused
+  with its own message, naming the offending slot and the declared types' valid
+  fields:
+  `template slot '{<path>}' names a field-path that is not in the union of this rule's declared event_type(s)' payload schemas — the same save-time binding a predicate field-path gets. Fix: correct the spelling (valid fields: <valid fields, comma-separated>); or add the event_type that carries it. A misspelled slot otherwise renders empty forever — an invisible content drop.`
+
+  **Later (2026-09-24):** this bullet said the refusal names "the nearest
+  valid field" and quoted an example with `Fix:` first, "(nearest valid field:
+  payload.assignee)", and a longer add-the-event_type clause. The shipped text
+  lists every valid field of the declared types and puts the diagnosis first.
+  The quote now matches the code (DND-411).
 - **A delete-only (identity-only) type has no display field to slot.** A rule
   declared **solely** on `notion.ticket.deleted` (or `notion.comment.deleted`)
   with a slot on `payload.title` / `status` / `labels` / `assignee` /
