@@ -2831,6 +2831,74 @@ proves the server minted it; the account-equality check proves it came back on
 the app that owns that account. (Design §3 6D and §4 are the mechanism; this
 section states the invariant it rests on.)
 
+### Thread replies route to the thread's claimant
+
+**Why.** The harness posts to Slack with its own bot token, so the server never
+sees a thread's parent `ts`. Without a record, a reply routes by channel alone
+(the app's route for `(team, channel)`), which sends a reply in one project's
+thread to whichever project owns the channel route. A **thread claim** is that
+record. It is the thread-reply analogue of the server-stamped return address
+above: the harness names only its own inbox, and the server stamps the machine
+from the authenticated token. Implementing tickets: DND-487 (claims and the MCP
+tool), DND-490 (the router), DND-491 (the harness claims on post). Until the
+router ships, every reply routes by the channel route, as before.
+
+**The claim.** A claim maps `(slack_app, team_id, channel, thread_ts)` to one
+AgentInstance. It is written by the `athena` MCP tool **`slack_thread_claim`**,
+with exactly five arguments: `bot_id` (selects the app), `team_id`, `channel`,
+`thread_ts` (the parent `ts`), and `inbox_name`.
+
+- **The machine is stamped, never supplied.** The caller's machine comes from
+  its machine token (the dual above). The derived-identity arguments
+  `machine_id`, `owner`, and `agent_instance_id` are **refused with a `Fix:`**,
+  never silently honoured or ignored. The tool declares them precisely so it can
+  refuse them.
+- **The inbox must be a live `<project>-slack.jsonl` instance on the calling
+  machine.** Any other `inbox_name` — a non-Slack inbox, or an instance on
+  another machine — is refused with a `Fix:`. Only a Slack-producer inbox may be
+  claimed, so a Slack line can never land in a platform channel, where the reader
+  would score it unreadable.
+- **Who may claim.** The owner of the app, holder of `:add_slack_route` on it,
+  acting through one of their own machine tokens. The check runs before any
+  write. An unknown app and an app the caller's owner may not route answer the
+  same `not found`, with no detail: a miss must not disclose which apps exist.
+- **First claim wins.** A claim of an unclaimed thread answers `claimed`. A
+  repeat by the same instance answers `already_yours` and changes nothing. A
+  claim of a thread another instance holds answers `already_claimed`, **never
+  naming the holder**, and leaves the existing claim untouched.
+- **A claim seeds thread participation** for the key, so a channel-thread reply
+  to a bot-started thread is routed rather than classified as not addressed to
+  the bot.
+- **The harness claims only threads it starts**: a `post`, or a `dm` without
+  `--thread_ts` (`athena:slack`). It never claims a thread it merely replies in.
+
+**Routing.** For a **thread reply only** (`thread_ts` present and not equal to
+`ts`), a live claim is the destination. Anything else follows the channel route,
+unchanged. **Exactly one destination per event**: a claim replaces the route for
+that reply, it never adds a second copy. So one line lands in one channel, and
+the designated-consumer rule (`ai/contracts/athena-inbox.md` → *The designated
+consumer*) holds unchanged.
+
+**A stale claim falls back and says so.** A claim whose instance or machine is no
+longer live does not drop the reply: dropping it would be the silent-dark class
+(`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty
+one*). The reply follows the channel route, and the server records the event
+outcome **`thread_claim_stale`** naming the claim's key. It is a delivery, not a
+drop. If the channel route also misses, the event is unrouted, and the unrouted
+record names the stale claim's key too.
+
+**The line says how it was routed.** Every Slack line the router writes carries
+`route`: `thread_claim` when a live claim chose the channel, `channel_route`
+otherwise (including a stale-claim fallback). The field is defined in
+`ai/contracts/athena-inbox.md` → *Line format*.
+
+**What it does not guarantee.** A claim is owner-scoped isolation, not a security
+boundary between the owner's own projects. Any of the owner's machines can claim
+any thread of the owner's app, including one another project started; first-wins
+and claim-only-what-you-started limit that, nothing enforces it. The server also
+cannot verify the bot authored `thread_ts`. See `ai/contracts/athena-inbox.md` →
+*What tenancy does and does not guarantee*.
+
 ### Which machine am I — the own-machine id
 
 The machine↔owner binding above is resolved server-side, so the harness does

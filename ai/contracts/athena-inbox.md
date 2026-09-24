@@ -747,7 +747,8 @@ One JSON object per line, UTF-8, no pretty-printing, newline-terminated:
 ```json
 {"v":1,"received_at":"2026-09-01T22:10:03Z","kind":"im|mpim|channel|mention|thread_reply",
  "channel":"C…|D…","user":"U…","ts":"1788….…","thread_ts":"1788….… or null",
- "text":"…raw text…","permalink":"https://… (optional)","event_id":"Ev…"}
+ "text":"…raw text…","permalink":"https://… (optional)","event_id":"Ev…",
+ "route":"thread_claim|channel_route (optional)"}
 ```
 
 `v` **and `kind`** are mandatory on every line, regardless of producer. The
@@ -833,6 +834,18 @@ source, but delivery stays at-least-once, so duplicate frames must collapse end
 to end. The server encoder change that stamps the field on every line is
 DND-372's gen_saas half; until it deploys, lane and `agent_message` lines carry
 none and read as legacy.
+
+**`route` says how the server chose this Slack line's channel**
+(`ai/contracts/athena-events.md` → *Thread replies route to the thread's
+claimant*). `thread_claim`: a live claim on the reply's thread chose it.
+`channel_route`: the app's channel route chose it, including a stale-claim
+fallback. The field is optional and additive:
+
+- **Absent** means a line written before the producer stamped the field. It is
+  read and counted normally.
+- **Not a dedupe key.** Slack identity stays `event_id` / `channel:ts`.
+- A reader MAY display it and MUST NOT fail on it, on an unknown value, or on
+  its absence. It is Slack-producer only; a platform line carries none.
 
 ### `received_at` — what it is and is not
 
