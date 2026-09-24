@@ -33,6 +33,13 @@ PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 
+# Fixtures get a hermetic git config. Case 12 (the live tree) must NOT: it
+# measures what `ai/bin/check-guard-messages` measures when harness-gate runs
+# it directly, so it keeps the caller's git config -- including the user-global
+# excludes file, which is what ignores this repo's ai-artifacts/ (DND-512).
+LIVE_GIT_ENV=(env -u GIT_CONFIG_NOSYSTEM -u GIT_CONFIG_GLOBAL)
+[ -n "${GIT_CONFIG_NOSYSTEM+x}" ] && LIVE_GIT_ENV+=("GIT_CONFIG_NOSYSTEM=${GIT_CONFIG_NOSYSTEM}")
+[ -n "${GIT_CONFIG_GLOBAL+x}" ] && LIVE_GIT_ENV+=("GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL}")
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL="${TMP}/gitconfig"
 : > "${GIT_CONFIG_GLOBAL}"
@@ -234,7 +241,7 @@ else bad "17 --root <dir> measures that tree, not the checker's own" "rc=${RC} o
 echo "== check-guard-messages: live tree =="
 
 # 12. The live tree: every first-party executable is classified and compliant.
-if OUT="$(ruby "${AI_DIR}/bin/check-guard-messages" 2>&1)"; then
+if OUT="$("${LIVE_GIT_ENV[@]}" ruby "${AI_DIR}/bin/check-guard-messages" 2>&1)"; then
   ok "12 the live tree passes check-guard-messages"
 else bad "12 the live tree passes check-guard-messages" "${OUT}"; fi
 
