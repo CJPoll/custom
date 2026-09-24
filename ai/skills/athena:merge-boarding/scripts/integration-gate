@@ -49,8 +49,18 @@ green on that integrated head. Exits 0 only when both hold.
                    after a rebase the original branch point is unrecoverable,
                    so without it the intersection is reported UNAVAILABLE
                    rather than silently empty.
-  --gate '<cmd>'   gate command to run at the repo root
-                   (default: ai/bin/harness-gate when present in the repo)
+  --gate '<cmd>'   gate command to run at the repo root -- ONLY for a repo that
+                   declares no gate. The gate is read from the LANDED target,
+                   never from argv or the working tree: the first of
+                   bin/prep-commit.sh, ai/bin/harness-gate that exists on
+                   <target> is the repo's declared gate and always runs. A
+                   --gate that differs from it is refused (exit 2). With no
+                   declared gate, --gate is required, and a command that can
+                   never fail (true, :, exit 0, echo ..., 'x || true',
+                   'x; true', 'x &', an empty string) is refused (exit 2).
+                   Every OK line names the gate that ran and where it came
+                   from, and marks it EDITED BY THIS BRANCH when the branch
+                   changes the gate script itself.
   --no-fetch       skip the fetch; compare against the target ref as-is
   --critic-override <reason>
                    merge WITHOUT a standing-judge verdict on this head -- and
@@ -72,7 +82,8 @@ green on that integrated head. Exits 0 only when both hold.
   --self-test      run the dedicated test suite and exit
 
 Exit codes: 0 integration OK | 1 gate RED on the integrated head
-            2 usage / unresolvable ref / branch behind target
+            2 usage / unresolvable ref / branch behind target /
+              gate refused (a no-op, or not the gate the target declares)
             3 no green critic verdict on the integrated head
             4 merging performs a real-world action -- owner's call, not the
               fleet's (a security fix carries the owner's standing approval;
@@ -140,6 +151,126 @@ if [ -z "$BASE_SHA" ]; then
 fi
 
 short() { git rev-parse --short "$1"; }
+
+# --- 3b. resolve the gate from the LANDED target (DND-479) ---------------
+# The gate command used to be caller-supplied, so `--gate true` turned this
+# whole script into a pass that printed INTEGRATION OK exactly like a real run
+# (gen_saas PR #337, 2026-09-24). That is ~/dev/custom/CLAUDE.md -> "A check's
+# own bar must not live in the diff it is checking", one step removed: the bar
+# lived in argv. So a repo's gate is DECLARED by convention -- the first of
+# these paths that exists on the target ref, read out of git, never the working
+# tree -- and argv cannot replace it. No file in any tenant repo is needed: the
+# convention matches what gen_saas (bin/prep-commit.sh, verify-only since
+# DND-214) and ~/dev/custom (ai/bin/harness-gate) already ship.
+DECLARED_GATES=( bin/prep-commit.sh ai/bin/harness-gate )
+
+trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf '%s' "$s"; }
+
+# A gate path as git names it: no leading ./, no absolute repo-root prefix.
+norm_path() { local p; p="$(trim "$1")"; p="${p#./}"; case "$p" in "$ROOT"/*) p="${p#"$ROOT"/}" ;; esac; printf '%s' "$p"; }
+
+declared_gate_on() { # <sha> -> the declared gate on <sha>, or return 1
+  local g
+  for g in "${DECLARED_GATES[@]}"; do
+    if [ "$(git cat-file -t "${1}:${g}" 2>/dev/null)" = "blob" ]; then printf '%s\n' "$g"; return 0; fi
+  done
+  return 1
+}
+
+# is_noop_simple <command>: one simple command that can never fail. Quote- and
+# grouping-unaware ON PURPOSE: a false positive refuses (fails closed), and the
+# refusal says how to pass a real gate.
+is_noop_simple() {
+  local s
+  s="$(printf '%s' "$1" | tr -d "'\"(){}" | tr -s '[:space:]' ' ')"; s="$(trim "$s")"
+  while :; do
+    case "$s" in
+      builtin\ *|command\ *|env\ *|exec\ *|nohup\ *|time\ *) s="$(trim "${s#* }")" ;;
+      *) break ;;
+    esac
+  done
+  case "$s" in
+    ''|:|:\ *|true|true\ *|/bin/true|/bin/true\ *|/usr/bin/true|/usr/bin/true\ *) return 0 ;;
+    exit|'exit 0'|return|'return 0'|echo|echo\ *|printf|printf\ *|sleep|sleep\ *) return 0 ;;
+    '! false'|'! /bin/false'|'! /usr/bin/false') return 0 ;;
+    sh\ -c\ *|bash\ -c\ *|zsh\ -c\ *|dash\ -c\ *) is_noop_cmd "${s#* -c }"; return $? ;;
+  esac
+  return 1
+}
+
+# all_parts_noop <chain>: an `&&` / `|` chain never fails only if no part can.
+all_parts_noop() {
+  local chain="${1//&&/$'\001'}" part parts
+  chain="${chain//|/$'\001'}"
+  IFS=$'\001' read -ra parts <<<"$chain"
+  for part in "${parts[@]}"; do is_noop_simple "$part" || return 1; done
+  return 0
+}
+
+# is_noop_cmd <command>: true when the command's exit status is 0 whatever the
+# checks inside it do -- a bare no-op, or a real check whose failure is masked
+# (`x || true`, `x; true`, `x &`). The exit status is the LAST statement's, and
+# an `||` alternative that cannot fail forces that statement green.
+is_noop_cmd() {
+  local cmd last alt rest
+  cmd="$(trim "$(printf '%s' "$1" | tr '\n' ';')")"
+  case "$cmd" in *'&&') ;; *'&') return 0 ;; esac
+  last="$cmd"
+  while :; do last="$(trim "$last")"; case "$last" in *';') last="${last%;}" ;; *) break ;; esac; done
+  [ -z "$last" ] && return 0
+  last="${last##*;}"
+  rest="${last//&&/$'\001'}"; rest="${rest##*&}"; last="${rest//$'\001'/&&}"
+  rest="$last"
+  while :; do
+    alt="${rest%%||*}"
+    all_parts_noop "$alt" && return 0
+    [ "$rest" = "$alt" ] && break
+    rest="${rest#*||}"
+  done
+  return 1
+}
+
+if LANDED_GATE="$(declared_gate_on "$TARGET_SHA")"; then
+  if [ -n "$GATE_CMD" ] && [ "$(norm_path "$GATE_CMD")" != "$LANDED_GATE" ]; then
+    echo "${PROG}: --gate '${GATE_CMD}' refused -- ${TARGET} ($(short "$TARGET_SHA")) declares this repo's gate as ${LANDED_GATE}, and argv may not replace it." >&2
+    echo "Fix: drop --gate; ${LANDED_GATE} (the gate as it stands on ${TARGET}) runs by default. The bar is read from the landed target so neither a caller nor the branch under test can lower it (~/dev/custom/CLAUDE.md -> 'A check's own bar must not live in the diff it is checking'). To change the bar, land that change on ${TARGET} first." >&2
+    exit 2
+  fi
+  GATE_CMD="$LANDED_GATE"
+  GATE_SOURCE="declared on ${TARGET}"
+else
+  if [ -z "$GATE_CMD" ]; then
+    echo "${PROG}: ${TARGET} ($(short "$TARGET_SHA")) declares no gate (looked for: ${DECLARED_GATES[*]}) and no --gate was passed." >&2
+    echo "Fix: pass this repo's real local gate, e.g. --gate 'mix test' or --gate 'cd backend && mix test'. A gate the branch itself adds is not a declaration -- it must be on ${TARGET} first." >&2
+    exit 2
+  fi
+  if is_noop_cmd "$GATE_CMD"; then
+    echo "${PROG}: --gate '${GATE_CMD}' refused -- it can never fail, so it would print INTEGRATION OK without checking anything (DND-479)." >&2
+    echo "Fix: pass a command that runs this repo's checks and exits non-zero when they fail, e.g. --gate 'mix test'. Not: true, :, exit 0, echo ..., an empty string, or a real check masked by '|| true', '; true' or a trailing '&'. If this repo has no gate at all, hold the MR and say so -- do not merge on a no-op." >&2
+    exit 2
+  fi
+  GATE_SOURCE="caller-supplied; no gate declared on ${TARGET}"
+fi
+
+# A gate the branch EDITS is the same class one step removed: the branch picks
+# its own bar. It still runs (a check the branch adds must run on integration,
+# and running the landed copy would mean writing it into this tree -- this
+# script never writes -- or running it out of place, where its sibling-relative
+# paths break). So it is marked, loudly, in the run and in every OK line.
+GATE_EDITED=0
+GATE_FILE="$(norm_path "$GATE_CMD")"; GATE_FILE="${GATE_FILE%% *}"
+if [ -n "$GATE_FILE" ]; then
+  landed_blob="$(git rev-parse -q --verify "${TARGET_SHA}:${GATE_FILE}" 2>/dev/null)"
+  head_blob="$(git rev-parse -q --verify "${HEAD_SHA}:${GATE_FILE}" 2>/dev/null)"
+  if [ -n "${landed_blob}${head_blob}" ]; then
+    if [ "$landed_blob" != "$head_blob" ] || ! git diff --quiet HEAD -- "$GATE_FILE" 2>/dev/null; then
+      GATE_EDITED=1
+      echo "${PROG}: WARN gate '${GATE_FILE}' differs from ${TARGET} ($(short "$TARGET_SHA")) -- this branch (or its working tree) edits the gate that judges it. The copy that runs is the branch's, not the landed one: review that diff (git diff ${TARGET} -- ${GATE_FILE}) before merging." >&2
+    fi
+  fi
+fi
+GATE_LABEL="${GATE_CMD} -- ${GATE_SOURCE}"
+[ "$GATE_EDITED" -eq 1 ] && GATE_LABEL="${GATE_LABEL}; EDITED BY THIS BRANCH"
 
 # The anchor the file sets are measured from. An unresolvable --since is an
 # ERROR, not a silent fallback to the merge-base -- falling back would quietly
@@ -221,16 +352,9 @@ if ! git merge-base --is-ancestor "$TARGET_SHA" HEAD; then
 fi
 
 # --- 8. run the gate ON THE INTEGRATED HEAD -------------------------------
-if [ -z "$GATE_CMD" ]; then
-  if [ -x "${ROOT}/ai/bin/harness-gate" ]; then
-    GATE_CMD="ai/bin/harness-gate"
-  else
-    echo "${PROG}: no gate command and no ai/bin/harness-gate in ${ROOT}." >&2
-    echo "Fix: pass the repo's local gate explicitly, e.g. --gate 'mix test' or --gate 'bin/check'." >&2
-    exit 2
-  fi
-fi
-echo "${PROG}: running gate on the integrated head $(short "$HEAD_SHA"): ${GATE_CMD}"
+# GATE_CMD was resolved in step 3b: the target's declared gate, or a vetted
+# caller-supplied one.
+echo "${PROG}: running gate on the integrated head $(short "$HEAD_SHA"): ${GATE_LABEL}"
 if ! ( cd "$ROOT" && eval "$GATE_CMD" ); then
   echo "${PROG}: gate RED on the integrated head $(short "$HEAD_SHA")." >&2
   echo "Fix: the gate is RED on the integrated head $(short "$HEAD_SHA") although your branch passed alone. A disjoint file set does not imply a disjoint gate (shared budgets/registries). Fix it on this branch and re-run; do not merge." >&2
@@ -309,7 +433,7 @@ if [ ! -x "$BLAST" ]; then
   echo "Fix: run this script from its committed path under ~/dev/custom so the blast-radius classifier resolves. A classifier that cannot be found is an ERROR, never a pass -- 'no surface touched' and 'nothing was checked' must never read the same." >&2
   exit 2
 fi
-BLAST_ARGS=( --base "$TARGET_SHA" --head "$HEAD_SHA" --repo "$ROOT" )
+BLAST_ARGS=( --base "$TARGET_SHA" --head "$HEAD_SHA" --repo "$ROOT" --gate-ran "$GATE_LABEL" )
 if [ -n "$OWNER_APPROVAL" ]; then
   BLAST_ARGS+=( --owner-approval "$OWNER_APPROVAL" )
 fi
@@ -328,5 +452,5 @@ fi
 if [ -n "$OWNER_APPROVAL" ]; then
   SUFFIX="${SUFFIX} (OWNER-APPROVED: ${OWNER_APPROVAL})"
 fi
-echo "INTEGRATION OK ${HEAD_SHA}${SUFFIX}"
+echo "INTEGRATION OK ${HEAD_SHA} (GATE: ${GATE_LABEL})${SUFFIX}"
 exit 0

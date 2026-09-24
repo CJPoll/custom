@@ -179,7 +179,7 @@ o="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/gp.sh" 2>&1 )"; c
 o="$( cd "$R" && "$GATE" --target nope --no-fetch --gate "${R}/g.sh" 2>&1 )"; check_fix bad-target "$o" $?
 o="$( cd "$R" && "$GATE" --bogus 2>&1 )"; check_fix bad-flag "$o" $?
 o="$( cd "$R" && "$GATE" --target 2>&1 )"; check_fix missing-arg "$o" $?
-o="$( cd "${TMP}" && "$GATE" --no-fetch --gate /bin/true 2>&1 )"; check_fix not-a-repo "$o" $?
+o="$( cd "${TMP}" && "$GATE" --no-fetch --gate "${R}/g.sh" 2>&1 )"; check_fix not-a-repo "$o" $?
 [ -z "$fixless" ] && ok "c8 every non-zero exit path carries Fix:" || bad "c8 paths missing Fix::${fixless}"
 
 # ---------------------------------------------------------------- case 9
@@ -341,6 +341,129 @@ record_pass "$R"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "c15 exit 0 when a PASS verdict exists" || bad "c15 expected exit 0, got $rc" "$out"
 grep -q 'CRITIC OVERRIDE \[UNUSED' <<<"$out" && ok "c15 an unnecessary override records itself as UNUSED" || bad "c15 claimed a bypass that did not happen" "$out"
+
+# ---------------------------------------------------------------- case 16
+# THE DND-479 REGRESSION. The gate command was caller-supplied, so `--gate true`
+# turned the whole gate into a pass: on 2026-09-24 a captain ran it on gen_saas
+# PR #337 and got INTEGRATION OK, which read exactly like a real run. The bar
+# lived in the caller's argv. A repo that DECLARES its gate on the landed target
+# must run that gate; argv may not replace it.
+# declared_repo <dir> <gate path> -- a repo whose landed main declares <gate
+# path>; the gate touches GATE_RAN so a test can prove it actually ran.
+declared_repo() {
+  new_repo "$1"
+  mkdir -p "$1/$(dirname "$2")"
+  printf '#!/bin/sh\ntouch "%s/GATE_RAN"\nexit 0\n' "$1" > "$1/$2"; chmod +x "$1/$2"
+  ( cd "$1" && git add "$2" && git commit -qm "declare $2" \
+    && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+  record_pass "$1"
+}
+R="${TMP}/c16"; declared_repo "$R" ai/bin/harness-gate
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate true 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "c16 --gate true is REFUSED where the target declares a gate" || bad "c16 expected exit 2, got $rc" "$out"
+grep -q '^INTEGRATION OK' <<<"$out" && bad "c16 --gate true printed INTEGRATION OK (the DND-479 defect)" "$out" || ok "c16 no INTEGRATION OK for a caller-supplied no-op"
+grep -q 'Fix:.*ai/bin/harness-gate' <<<"$out" && ok "c16 Fix: names the declared gate" || bad "c16 Fix: does not name the declared gate" "$out"
+[ ! -f "${R}/GATE_RAN" ] && ok "c16 nothing ran on a refused gate" || bad "c16 a gate ran despite the refusal"
+# A REAL command that differs from the declared gate is refused too: argv may
+# not swap the landed bar for another one, however plausible.
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate 'mix test' 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "c16 a different --gate is refused where a gate is declared" || bad "c16 different gate expected exit 2, got $rc" "$out"
+# Omitting --gate runs the DECLARED gate, and every OK line names what ran.
+out="$( cd "$R" && "$GATE" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c16 no --gate runs the declared gate" || bad "c16 declared gate expected exit 0, got $rc" "$out"
+[ -f "${R}/GATE_RAN" ] && ok "c16 the declared gate actually RAN" || bad "c16 the declared gate did not run"
+grep -q "INTEGRATION OK [0-9a-f]* (GATE: ai/bin/harness-gate -- declared on main)" <<<"$out" && ok "c16 INTEGRATION OK names the gate and its source" || bad "c16 OK line does not name the gate" "$out"
+# Passing the declared gate explicitly (with or without ./) is the same thing.
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate ./ai/bin/harness-gate 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c16 --gate naming the declared gate is accepted" || bad "c16 explicit declared gate expected exit 0, got $rc" "$out"
+
+# ---------------------------------------------------------------- case 17
+# Declaration order and source. bin/prep-commit.sh (gen_saas) wins over
+# ai/bin/harness-gate (custom), and ONLY the landed target counts: a gate the
+# branch itself adds is not a declaration, because a PR must not set its own bar.
+R="${TMP}/c17"; new_repo "$R"
+mkdir -p "$R/bin" "$R/ai/bin"
+printf '#!/bin/sh\ntouch "%s/PREP_RAN"\nexit 0\n' "$R" > "$R/bin/prep-commit.sh"
+printf '#!/bin/sh\ntouch "%s/HARNESS_RAN"\nexit 0\n' "$R" > "$R/ai/bin/harness-gate"
+chmod +x "$R/bin/prep-commit.sh" "$R/ai/bin/harness-gate"
+( cd "$R" && git add -A && git commit -qm both && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && [ -f "$R/PREP_RAN" ] && [ ! -f "$R/HARNESS_RAN" ] && ok "c17 bin/prep-commit.sh is preferred over ai/bin/harness-gate" || bad "c17 wrong declared gate ran (rc=$rc)" "$out"
+R="${TMP}/c17b"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && mkdir -p ai/bin \
+  && printf '#!/bin/sh\nexit 0\n' > ai/bin/harness-gate && chmod +x ai/bin/harness-gate \
+  && git add -A && git commit -qm "branch adds its own gate" )
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "c17 a gate only the BRANCH adds is not a declaration" || bad "c17 branch-added gate expected exit 2, got $rc" "$out"
+grep -q 'Fix:' <<<"$out" && ok "c17 no-declaration refusal carries Fix:" || bad "c17 missing Fix:" "$out"
+
+# ---------------------------------------------------------------- case 18
+# No declared gate: --gate is required, and a known no-op is refused. The
+# forced-green shapes count too -- a real check whose failure is masked
+# (`x || true`, `x; true`, `x &`) is a no-op with extra steps.
+R="${TMP}/c18"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
+noop_leaked=""; noop_fixless=""
+for g in 'true' ':' '/bin/true' '/usr/bin/true' 'exit 0' 'exit' '   ' 'true;' 'true && :' \
+         "sh -c 'true'" 'bash -c "exit 0"' 'env true' 'command true' 'echo ok' \
+         "${R}/g.sh || true" "${R}/g.sh; true" "${R}/g.sh &" '! false' '( true )'; do
+  o="$( cd "$R" && "$GATE" --target main --no-fetch --gate "$g" 2>&1 )"; c=$?
+  if [ "$c" -ne 2 ] || grep -q '^INTEGRATION OK' <<<"$o"; then noop_leaked="${noop_leaked} [${g}]"; fi
+  grep -q 'Fix:' <<<"$o" || noop_fixless="${noop_fixless} [${g}]"
+done
+[ -z "$noop_leaked" ] && ok "c18 every known no-op / forced-green --gate is refused (exit 2)" || bad "c18 no-op gates accepted:${noop_leaked}"
+[ -z "$noop_fixless" ] && ok "c18 every no-op refusal carries Fix:" || bad "c18 no-op refusals missing Fix:${noop_fixless}"
+[ ! -f "${R}/GATE_RAN" ] && ok "c18 no refused gate ran" || bad "c18 a refused gate still ran"
+# ...and real gate shapes are NOT refused as no-ops (they may fail to run in
+# this fixture -- exit 1 -- but never the exit-2 refusal).
+real_refused=""
+for g in 'mix test' 'cd backend && mix test' 'make test | tee log' 'bin/check --strict' 'npm test && npm run lint'; do
+  o="$( cd "$R" && "$GATE" --target main --no-fetch --gate "$g" 2>&1 )"; c=$?
+  [ "$c" -eq 2 ] && real_refused="${real_refused} [${g}]"
+done
+[ -z "$real_refused" ] && ok "c18 real gate commands are not mistaken for no-ops" || bad "c18 real gates refused:${real_refused}"
+# ...while a real caller-supplied gate still works, and is NAMED with its source.
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh || ${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c18 a real fallback chain is not mistaken for a no-op" || bad "c18 real chain expected exit 0, got $rc" "$out"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+grep -q "INTEGRATION OK [0-9a-f]* (GATE: ${R}/g.sh -- caller-supplied; no gate declared on main)" <<<"$out" && ok "c18 OK line names a caller-supplied gate as such" || bad "c18 OK line does not name the caller gate" "$out"
+
+# ---------------------------------------------------------------- case 19
+# A gate the BRANCH edits is the same class one step removed: the branch picks
+# its own bar. The gate still runs (a new check must run on integration), but
+# the run says so loudly and the OK line carries it into the state log.
+R="${TMP}/c19"; declared_repo "$R" ai/bin/harness-gate
+( cd "$R" && printf '#!/bin/sh\nexit 0\n' > ai/bin/harness-gate && git commit -qam "weaken gate" )
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c19 an edited declared gate still runs" || bad "c19 expected exit 0, got $rc" "$out"
+grep -q 'WARN gate .*ai/bin/harness-gate.* differs from main' <<<"$out" && ok "c19 warns that this branch edits its own gate" || bad "c19 no edited-gate warning" "$out"
+grep -q 'INTEGRATION OK [0-9a-f]* (GATE: ai/bin/harness-gate -- declared on main; EDITED BY THIS BRANCH)' <<<"$out" && ok "c19 OK line marks the gate as edited by the branch" || bad "c19 OK line does not mark the edit" "$out"
+R="${TMP}/c19b"; new_repo "$R"
+( cd "$R" && printf '#!/bin/sh\nexit 0\n' > check.sh && chmod +x check.sh && git add check.sh && git commit -qm check \
+  && git checkout -qb feature && printf '#!/bin/sh\n# weakened\nexit 0\n' > check.sh && git commit -qam weaken )
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate './check.sh' 2>&1 )"; rc=$?
+grep -q 'EDITED BY THIS BRANCH' <<<"$out" && ok "c19 a caller-supplied gate the branch edits is marked too" || bad "c19 caller gate edit not marked" "$out"
+
+# ---------------------------------------------------------------- case 20
+# The HOT-OWNER-APPROVED line names the gate too: the owner-facing record must
+# say what actually verified the head it authorizes.
+R="${TMP}/c20"; declared_repo "$R" ai/bin/harness-gate
+mkdir -p "${R}/.github/workflows"
+( cd "$R" && git checkout -q main \
+  && printf 'name: post-merge\non:\n  push:\n    branches: [main]\njobs:\n  d:\n    runs-on: ubuntu-latest\n    steps: [{run: terraform apply -auto-approve}]\n' > .github/workflows/post-merge.yml \
+  && git add -A && git commit -qm wf && git checkout -q feature && git rebase -q main \
+  && mkdir -p infra && echo 'resource {}' > infra/kms.tf && git add infra/kms.tf && git commit -qm tf )
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --owner-approval 'owner said go' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c20 owner-approved HOT head lands" || bad "c20 expected exit 0, got $rc" "$out"
+grep -q 'BLAST-RADIUS HOT-OWNER-APPROVED .*(GATE: ai/bin/harness-gate -- declared on main)' <<<"$out" && ok "c20 HOT-OWNER-APPROVED names the gate" || bad "c20 HOT-OWNER-APPROVED line does not name the gate" "$out"
+grep -q 'INTEGRATION OK [0-9a-f]* (GATE: ai/bin/harness-gate -- declared on main) (OWNER-APPROVED: owner said go)' <<<"$out" && ok "c20 OK line names the gate beside the approval" || bad "c20 OK line missing gate beside approval" "$out"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"

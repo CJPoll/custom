@@ -267,9 +267,23 @@ ai/skills/athena:merge-boarding/scripts/integration-gate \
     [--target origin/main] [--since <baseline main SHA>] [--gate '<cmd>']
 ```
 
+**The gate comes from the landed target, not from you.** The first of
+`bin/prep-commit.sh` (gen_saas) and `ai/bin/harness-gate` (`~/dev/custom`) that
+exists on `origin/main` is the repo's declared gate, and it always runs. Omit
+`--gate` there; a `--gate` that differs from it is refused (exit 2). Pass
+`--gate` only in a repo that declares neither, and pass its real gate (e.g.
+`--gate 'cd backend && mix test'`). A command that can never fail — `true`, `:`,
+`exit 0`, `echo …`, an empty string, or a real check masked by `|| true`,
+`; true` or a trailing `&` — is refused (exit 2). "The gate already ran on this
+head" is not a reason to skip it: the integrated head is the one being judged.
+(DND-479: `--gate true` on gen_saas PR #337 printed `INTEGRATION OK` exactly like
+a real run.) A branch that edits its own gate still runs its own copy, but the
+run warns and the OK line says `EDITED BY THIS BRANCH` — review that diff.
+
 Exit 0 means: your HEAD contains current `origin/main`, **and** the local gate
-is green on that integrated head. It prints `INTEGRATION OK <sha>` — merge
-*that* SHA (the same SHA-match discipline as the merge bar's "confirm the head
+is green on that integrated head. It prints `INTEGRATION OK <sha> (GATE: <cmd>
+-- <source>)` — merge *that* SHA, and copy the line whole so the record says
+which gate ran (the same SHA-match discipline as the merge bar's "confirm the head
 you are landing is the one the report names"). Any other exit tells you what to
 do next. It never rebases or writes anything; a rebase can conflict and is your
 judgement call.
