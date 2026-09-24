@@ -10,6 +10,10 @@
 # A new executable or lib/ file that is not listed here FAILS the check. That is
 # the point: an unclassified script is the drift. Never list a guard as
 # anything else to make the gate green; give it a Fix: line instead.
+#
+# This table is ratcheted against its LANDED copy (DND-510): a path that is a
+# guard on origin/main or at the merge-base cannot become a non-guard in a
+# branch. The owner lands a genuine reclassification on main themselves.
 
 # --- ai/hooks and ai/bin default to guard (GUARD_DIRS); only exceptions are listed.
 ai/hooks/main-session-policy.sh	no-fail-path	SessionStart context injector; emits guidance, never denies or fails a turn

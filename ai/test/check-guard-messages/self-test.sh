@@ -46,8 +46,19 @@ export GIT_CONFIG_GLOBAL="${TMP}/gitconfig"
 
 TAB="$(printf '\t')"
 
+# land <root>: commit the whole tree and point a fake refs/remotes/origin/main
+# at it -- "the owner landed this on main". The classification ratchet
+# (DND-510) reads its bar from origin/main and the merge-base, never from the
+# working tree.
+land() {
+  git -C "$1" add -A >/dev/null 2>&1
+  git -C "$1" -c user.name=fixture -c user.email=fixture@example.invalid \
+    commit -q --allow-empty -m landed >/dev/null 2>&1
+  git -C "$1" update-ref refs/remotes/origin/main HEAD
+}
+
 # new_fixture <name>: a git repo holding the checker, one compliant hook, and
-# an empty classification table. Prints its path.
+# an empty classification table, landed on a fake origin/main. Prints its path.
 new_fixture() {
   local root="${TMP}/$1"
   mkdir -p "${root}/ai/bin" "${root}/ai/hooks"
@@ -57,7 +68,15 @@ new_fixture() {
   chmod +x "${root}/ai/hooks/good-guard.sh"
   printf '# path<TAB>class<TAB>reason\n' > "${root}/ai/guard-classification.tsv"
   git -C "${root}" init -q
+  land "${root}"
   printf '%s\n' "${root}"
+}
+
+# reclassify <root> <path> <class> <reason>: replace path's table line.
+reclassify() {
+  local tsv="$1/ai/guard-classification.tsv"
+  grep -v -F "$2${TAB}" "${tsv}" > "${tsv}.new"; mv "${tsv}.new" "${tsv}"
+  classify "$@"
 }
 
 # add_exec <root> <relpath> <body>: write an executable file.
@@ -237,6 +256,156 @@ OUT="$(cd "${A}" && ruby ai/bin/check-guard-messages --root "${B}" 2>&1)"; RC=$?
 if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/only-in-target' >/dev/null; then
   ok "17 --root <dir> measures that tree, not the checker's own"
 else bad "17 --root <dir> measures that tree, not the checker's own" "rc=${RC} out=${OUT}"; fi
+
+echo "== check-guard-messages: classification ratchet against origin/main (DND-510) =="
+
+# DND-510: the table is in the same diff the check judges. A change could
+# relabel a real guard as tool, delete its Fix: line, and the gate stayed green.
+# The bar is now the LANDED classification (origin/main tip and the merge-base),
+# read out of git. Weakening fails; tightening and new entries pass.
+
+GUARDED='#!/bin/sh
+echo "DENY: x. Fix: do y." >&2
+exit 2'
+TOOL_REASON="first-party utility; its only failure is a usage error"
+
+# 18. A guard relabelled tool, its Fix: line deleted -> FAIL, named.
+R="$(new_fixture relabel)"
+add_exec "${R}" scripts/some-gate "${GUARDED}"
+classify "${R}" scripts/some-gate guard ""; land "${R}"
+reclassify "${R}" scripts/some-gate tool "${TOOL_REASON}"
+add_exec "${R}" scripts/some-gate "${BARE}"; track "${R}"; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/some-gate' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'weaken' >/dev/null && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null; then
+  ok "18 a landed guard relabelled tool (Fix: removed) fails as a weakening, named, with Fix:"
+else bad "18 a landed guard relabelled tool (Fix: removed) fails as a weakening, named, with Fix:" "rc=${RC} out=${OUT}"; fi
+
+# 19. An existing ai/bin file (default guard) newly listed no-fail-path -> FAIL.
+R="$(new_fixture bin-nofail)"
+add_exec "${R}" ai/bin/existing-check "${GUARDED}"; land "${R}"
+classify "${R}" ai/bin/existing-check no-fail-path "prints a number and never denies anything"
+add_exec "${R}" ai/bin/existing-check "${BARE}"; track "${R}"; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'ai/bin/existing-check' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'weaken' >/dev/null; then
+  ok "19 a landed ai/bin guard newly listed no-fail-path fails as a weakening"
+else bad "19 a landed ai/bin guard newly listed no-fail-path fails as a weakening" "rc=${RC} out=${OUT}"; fi
+
+# 20. The owner landed that reclassification on main (tip and merge-base) -> PASS.
+R="$(new_fixture owner-landed)"
+add_exec "${R}" ai/bin/existing-check "${GUARDED}"; land "${R}"
+classify "${R}" ai/bin/existing-check no-fail-path "prints a number and never denies anything"
+add_exec "${R}" ai/bin/existing-check "${BARE}"; land "${R}"; run "${R}"
+if [ "${RC}" -eq 0 ] && printf '%s' "${OUT}" | grep -F 'ratchet' >/dev/null; then
+  ok "20 an owner-landed reclassification already on origin/main passes"
+else bad "20 an owner-landed reclassification already on origin/main passes" "rc=${RC} out=${OUT}"; fi
+
+# 21. The owner landed it on origin/main AFTER this branch forked: the
+#     merge-base still says guard, so the lowest landed value is guard -> FAIL
+#     until the branch rebases (the bar is the strictest of tip and merge-base).
+R="$(new_fixture stale-branch)"
+add_exec "${R}" ai/bin/existing-check "${GUARDED}"; land "${R}"
+FORK="$(git -C "${R}" rev-parse HEAD)"
+classify "${R}" ai/bin/existing-check no-fail-path "prints a number and never denies anything"
+add_exec "${R}" ai/bin/existing-check "${BARE}"; land "${R}"
+git -C "${R}" reset -q --soft "${FORK}"   # the branch has the same edit, uncommitted, forked at FORK
+run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'ai/bin/existing-check' >/dev/null; then
+  ok "21 a reclassification on origin/main but not the merge-base still fails (rebase first)"
+else bad "21 a reclassification on origin/main but not the merge-base still fails (rebase first)" "rc=${RC} out=${OUT}"; fi
+
+# 21b. The reverse: main TIGHTENED a tool to guard after this branch forked,
+#      and the branch still says tool. The tip says guard -> FAIL (rebase).
+R="$(new_fixture stale-tightened)"
+add_exec "${R}" scripts/util "${GUARDED}"
+classify "${R}" scripts/util tool "${TOOL_REASON}"; land "${R}"
+FORK="$(git -C "${R}" rev-parse HEAD)"
+reclassify "${R}" scripts/util guard ""; land "${R}"
+git -C "${R}" reset -q --hard "${FORK}"
+run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/util' >/dev/null; then
+  ok "21b a guard tightened on origin/main after the fork binds the branch too"
+else bad "21b a guard tightened on origin/main after the fork binds the branch too" "rc=${RC} out=${OUT}"; fi
+
+# 22. Genuinely new entries pass and are NAMED: a new scripts/ tool and a new
+#     ai/bin tool that did not exist at any landed point.
+R="$(new_fixture new-entry)"
+add_exec "${R}" scripts/brand-new-util "${BARE}"
+classify "${R}" scripts/brand-new-util tool "${TOOL_REASON}"
+add_exec "${R}" ai/bin/brand-new-tool "${BARE}"
+classify "${R}" ai/bin/brand-new-tool tool "${TOOL_REASON}"; track "${R}"; run "${R}"
+if [ "${RC}" -eq 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/brand-new-util' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'ai/bin/brand-new-tool' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'new' >/dev/null; then
+  ok "22 genuinely new entries pass and are named in the output"
+else bad "22 genuinely new entries pass and are named in the output" "rc=${RC} out=${OUT}"; fi
+
+# 23. Tightening (tool -> guard, now with a Fix: line) passes.
+R="$(new_fixture tighten)"
+add_exec "${R}" scripts/util "${BARE}"
+classify "${R}" scripts/util tool "${TOOL_REASON}"; land "${R}"
+reclassify "${R}" scripts/util guard ""
+add_exec "${R}" scripts/util "${GUARDED}"; track "${R}"; run "${R}"
+if [ "${RC}" -eq 0 ]; then ok "23 tightening a tool to guard passes"
+else bad "23 tightening a tool to guard passes" "rc=${RC} out=${OUT}"; fi
+
+# 24. No origin/main: the landed bar cannot be read -> FAIL, "could not
+#     measure", every probe named, never OK.
+R="$(new_fixture no-origin)"; git -C "${R}" update-ref -d refs/remotes/origin/main; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'could not measure' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'refs/remotes/origin/main' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null; then
+  ok "24 no origin/main fails as could-not-measure, probes named, with Fix:"
+else bad "24 no origin/main fails as could-not-measure, probes named, with Fix:" "rc=${RC} out=${OUT}"; fi
+
+# 25. origin/main shares no history with HEAD (no merge-base) -> could-not-measure.
+R="$(new_fixture no-merge-base)"
+git -C "${R}" checkout -q --orphan unrelated
+git -C "${R}" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m unrelated >/dev/null 2>&1
+run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'could not measure' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'merge-base' >/dev/null; then
+  ok "25 no merge-base with origin/main fails as could-not-measure"
+else bad "25 no merge-base with origin/main fails as could-not-measure" "rc=${RC} out=${OUT}"; fi
+
+# 26. A shallow clone cannot prove its merge-base -> could-not-measure.
+R="$(new_fixture shallow-src)"; land "${R}"
+S="${TMP}/shallow"
+git clone -q --depth 1 "file://${R}" "${S}" 2>/dev/null
+git -C "${S}" update-ref refs/remotes/origin/main HEAD   # the ref exists; only depth is missing
+OUT="$(cd "${S}" && ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'could not measure' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'shallow' >/dev/null; then
+  ok "26 a shallow clone fails as could-not-measure"
+else bad "26 a shallow clone fails as could-not-measure" "rc=${RC} out=${OUT}"; fi
+
+# 27. A guard entry removed while its file remains: a guard under a test/
+#     directory falls back to the "test" rule class -> FAIL.
+R="$(new_fixture entry-removed)"
+add_exec "${R}" scripts/test/gatekeeper "${GUARDED}"
+classify "${R}" scripts/test/gatekeeper guard ""; land "${R}"
+grep -v -F "scripts/test/gatekeeper${TAB}" "${R}/ai/guard-classification.tsv" > "${R}/t.new"
+mv "${R}/t.new" "${R}/ai/guard-classification.tsv"
+add_exec "${R}" scripts/test/gatekeeper "${BARE}"; track "${R}"; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/test/gatekeeper' >/dev/null; then
+  ok "27 a removed guard entry whose file remains fails as a weakening"
+else bad "27 a removed guard entry whose file remains fails as a weakening" "rc=${RC} out=${OUT}"; fi
+
+# 28. A landed ai/bin guard that loses its exec bit drops out of discovery; the
+#     file is still there, so that is a weakening, not a deletion -> FAIL.
+R="$(new_fixture lost-exec)"
+add_exec "${R}" ai/bin/existing-check "${GUARDED}"; land "${R}"
+printf '%s\n' "${BARE}" > "${R}/ai/bin/existing-check"; chmod -x "${R}/ai/bin/existing-check"
+track "${R}"; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'ai/bin/existing-check' >/dev/null; then
+  ok "28 a landed guard that lost its exec bit fails as a weakening"
+else bad "28 a landed guard that lost its exec bit fails as a weakening" "rc=${RC} out=${OUT}"; fi
+
+# 29. Deleting a landed guard outright is not a weakening of a classification.
+R="$(new_fixture deleted)"
+add_exec "${R}" ai/bin/retired-check "${GUARDED}"; land "${R}"
+git -C "${R}" rm -q ai/bin/retired-check; run "${R}"
+if [ "${RC}" -eq 0 ]; then ok "29 a deleted landed guard passes (removal, not reclassification)"
+else bad "29 a deleted landed guard passes (removal, not reclassification)" "rc=${RC} out=${OUT}"; fi
 
 echo "== check-guard-messages: live tree =="
 

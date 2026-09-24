@@ -63,13 +63,60 @@
 #   - a classified path no longer exists (the scope would silently shrink);
 #   - the table is missing or malformed, or a non-guard has no reason.
 #
+# THE TABLE'S BAR IS THE LANDED TABLE, NOT THIS DIFF'S (DND-510)
+#
+# The table lives in the same diff this check judges. Before DND-510 a change
+# could relabel a real guard as tool, delete its Fix: line, and stay green: the
+# check compared the change against the bar the change had just written. See
+# ~/dev/custom/CLAUDE.md -> "A check's own bar must not live in the diff it is
+# checking".
+#
+# So every run also reads the LANDED classification out of git, at two points:
+# the tip of refs/remotes/origin/main and merge-base(HEAD, origin/main). A path's
+# landed class is the STRICTEST across both (guard at either point is guard), so
+# neither a stale origin/main nor an old merge-base lets a relabel through.
+# A WEAKENING fails:
+#   - a path that was a guard at a landed point is now any non-guard class --
+#     relabelled, newly listed under a GUARD_DIR, or its guard entry removed so
+#     it falls back to a rule class (test) or to unclassified;
+#   - a landed guard whose file still exists is no longer discovered at all
+#     (it lost its exec bit, or became a symlink).
+# Tightening (non-guard -> guard) passes. A GENUINELY NEW entry -- a path that
+# was not a first-party candidate at any landed point -- passes and is named in
+# the OK output, so a reviewer sees every new non-guard label. Deleting a
+# landed guard outright is a removal, not a reclassification, and passes.
+#
+# Not being able to read the landed table is a FAILURE, never a pass: no
+# origin/main, no merge-base, a shallow clone, or a landed commit without a
+# readable table. The output lists every probe and what it gave, and keeps
+# "could not measure" textually distinct from "0 weakening(s)".
+#
+# There is no in-repo escape hatch -- no env var, approved list, or marker --
+# because anything this check could read, the diff under test could also write.
+# The hatch is outside the diff: the OWNER lands the reclassification on main,
+# and a branch rebased onto it passes.
+#
+# Why here and not a sibling check: the ratchet must judge the landed table
+# with the SAME rules the check applies now (the GUARD_DIRS default, the test
+# rule, the table parser, candidate discovery). A sibling would duplicate those
+# rules, and two copies that drift apart are a second silent hole. It also
+# costs one extra rev-parse/merge-base and two `git show` + `git ls-tree` per
+# run, and harness-gate already runs this check.
+#
+# Residual, stated out loud: this does not stop an actor that can push to main
+# (it can land the relabel itself), nor a diff that edits this file's
+# enforcement path. A guard deleted and re-added under a NEW path as a
+# non-guard reads as a removal plus a new entry: it passes, but the new entry
+# is named in the OK output.
+#
 # Convention idea adapted from riddler's howie/wurk harness ("errors written for
 # the LLM"), reimplemented in our conventions.
 #
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 #
 # Usage:
-#   ai/bin/check-guard-messages              classify + scan; exit 1 on any gap
+#   ai/bin/check-guard-messages              classify + scan + ratchet against the
+#                                            landed table; exit 1 on any gap
 #   ai/bin/check-guard-messages --root DIR   measure the checkout at DIR
 #                                            (read-only; default: this repo)
 #   ai/bin/check-guard-messages --self-test  verify the checker's own logic
@@ -172,13 +219,19 @@ def load_table(root)
   path = File.join(root, TABLE)
   raise MeasureError, "#{TABLE} is missing or unreadable" unless File.file?(path) && File.readable?(path)
 
+  parse_table(File.read(path), TABLE)
+end
+
+# Parse table TEXT (the working tree's, or a landed commit's), so the ratchet
+# reads the landed table with exactly the rules the check applies now.
+def parse_table(text, source)
   entries = {}
   errors = []
-  File.readlines(path, chomp: true).each_with_index do |line, i|
+  text.to_s.each_line(chomp: true).with_index do |line, i|
     next if line.strip.empty? || line.start_with?("#")
 
     rel, klass, reason, *extra = line.split("\t", -1)
-    where = "#{TABLE}:#{i + 1}"
+    where = "#{source}:#{i + 1}"
     reason = reason.to_s.strip
     if rel.to_s.empty? || klass.nil? || !extra.empty?
       errors << "#{where}: expected 'path<TAB>class<TAB>reason', got #{line.inspect}"
@@ -240,8 +293,147 @@ def evaluate(root)
   }
 end
 
+# --- the classification ratchet (DND-510) ------------------------------------
+
+LANDED_REF = "refs/remotes/origin/main"
+
+# The landed bar could not be read. Carries every probe and what it gave, so
+# "could not look" is printed as a list of places looked, never as a clean run.
+class LandedUnreadable < StandardError
+  attr_reader :probes
+
+  def initialize(probes)
+    @probes = probes
+    super("the landed classification could not be read")
+  end
+end
+
+def git_read(root, *args)
+  out, _err, status = Open3.capture3({ "GIT_OPTIONAL_LOCKS" => "0" }, "git", "-C", root, *args)
+  [out, status.success?]
+rescue Errno::ENOENT
+  ["", false]
+end
+
+# Was rel a discovery candidate at a landed commit? Mirrors candidate?: an
+# executable blob, or a lib/ or ai/hooks/*.sh blob. Symlinks (120000) and
+# submodules (160000) never are.
+def landed_candidate?(mode, rel)
+  return true if mode == "100755"
+
+  mode == "100644" && (lib_path?(rel) || hook_script?(rel))
+end
+
+# rel -> landed class at one commit, for every landed candidate there.
+def classes_at(root, sha, label)
+  text, ok = git_read(root, "show", "#{sha}:#{TABLE}")
+  raise LandedUnreadable.new([[label, "#{sha[0, 12]}: no readable #{TABLE}"]]) unless ok
+
+  entries, errors = parse_table(text, "#{label}:#{TABLE}")
+  unless errors.empty?
+    raise LandedUnreadable.new([[label, "#{sha[0, 12]}: landed #{TABLE} is malformed (#{errors.first})"]])
+  end
+
+  tree, ok = git_read(root, "ls-tree", "-r", "-z", sha)
+  raise LandedUnreadable.new([[label, "#{sha[0, 12]}: git ls-tree failed"]]) unless ok
+
+  tree.split("\0").each_with_object({}) do |row, classes|
+    meta, rel = row.split("\t", 2)
+    next if rel.nil?
+
+    mode = meta.split(" ").first
+    next unless landed_candidate?(mode, rel)
+
+    klass = classify(rel, entries)
+    classes[rel] = klass if klass
+  end
+end
+
+# The strictest class per path across points: guard at any point wins.
+def merge_landed(per_point)
+  per_point.each_with_object({}) do |classes, merged|
+    classes.each do |rel, klass|
+      merged[rel] = klass if merged[rel].nil? || klass == "guard"
+    end
+  end
+end
+
+# Resolve the landed points and read each one's classification. Every miss
+# raises LandedUnreadable naming what was probed. Returns [points, classes].
+def landed_classification(root)
+  probes = []
+  unreadable = lambda do |ref, outcome|
+    probes << [ref, outcome]
+    raise LandedUnreadable.new(probes)
+  end
+
+  tip, ok = git_read(root, "rev-parse", "--verify", "--quiet", "#{LANDED_REF}^{commit}")
+  tip = tip.strip
+  unreadable.call(LANDED_REF, "no such ref") if !ok || tip.empty?
+  probes << [LANDED_REF, tip[0, 12]]
+
+  shallow, ok = git_read(root, "rev-parse", "--is-shallow-repository")
+  unreadable.call("git rev-parse --is-shallow-repository", "failed") unless ok
+  if shallow.strip == "true"
+    unreadable.call("history depth", "shallow clone: the merge-base with origin/main cannot be proven")
+  end
+
+  mb, ok = git_read(root, "merge-base", "HEAD", tip)
+  mb = mb.strip
+  unreadable.call("merge-base(HEAD, origin/main)", "no common ancestor (or no HEAD commit)") if !ok || mb.empty?
+  probes << ["merge-base(HEAD, origin/main)", mb[0, 12]]
+
+  points = if mb == tip
+             [["origin/main tip = merge-base(HEAD, origin/main)", tip]]
+           else
+             [["origin/main (tip)", tip], ["merge-base(HEAD, origin/main)", mb]]
+           end
+  per_point = points.map do |label, sha|
+    classes_at(root, sha, label)
+  rescue LandedUnreadable => e
+    raise LandedUnreadable.new(probes + e.probes)
+  end
+  [points, merge_landed(per_point)]
+end
+
+# [rel, landed, now] for every landed guard that is no longer a guard. A landed
+# guard absent from discovery counts only when its file still exists: deleting
+# it is a removal, losing the exec bit is a weakening.
+def weakenings(root, found, entries, landed)
+  found_set = found.to_h { |rel| [rel, true] }
+  landed.filter_map do |rel, klass|
+    next nil unless klass == "guard"
+
+    if found_set[rel]
+      now = classify(rel, entries)
+      now == "guard" ? nil : [rel, klass, now || "unclassified"]
+    elsif File.exist?(File.join(root, rel)) || File.symlink?(File.join(root, rel))
+      [rel, klass, "no longer discovered (lost its exec bit, or became a symlink)"]
+    end
+  end.sort
+end
+
+# Table entries for paths that were not a candidate at any landed point.
+def new_entries(entries, landed)
+  entries.reject { |rel, _| landed.key?(rel) }.map { |rel, (klass, _)| [rel, klass] }.sort
+end
+
+# Adds the ratchet's findings to an evaluate() result.
+def ratchet!(root, result)
+  entries, = load_table(root)
+  points, landed = landed_classification(root)
+  result[:landed_points] = points
+  result[:weakened] = weakenings(root, result[:found], entries, landed)
+  result[:new_entries] = new_entries(entries, landed)
+rescue LandedUnreadable => e
+  result[:landed_probes] = e.probes
+ensure
+  result[:weakened] ||= []
+end
+
 def failed?(result)
-  %i[table_errors empty_dirs unclassified vanished missing_fix].any? { |k| result[k].any? }
+  %i[table_errors empty_dirs unclassified vanished missing_fix].any? { |k| result[k].any? } ||
+    result.fetch(:weakened, []).any? || result.key?(:landed_probes)
 end
 
 def skipped_note(result)
@@ -277,17 +469,41 @@ def report_failure(result)
     warn "  Fix: if the file was deleted or renamed, update its line in #{TABLE}; " \
          "if it should exist, restore it."
   end
-  return if result[:missing_fix].empty?
+  unless result[:missing_fix].empty?
+    warn "  guard(s) with a bare failure message (no '#{MARKER}' self-correction):"
+    result[:missing_fix].each { |rel| warn "    - #{rel}" }
+    warn "  Fix: add a '#{MARKER} <what to change to pass>' clause to each guard's " \
+         "deny/failure output. Reclassify one only if it truly has no guard failure " \
+         "path, with that reason, in #{TABLE}."
+  end
+  report_ratchet_failure(result)
+end
 
-  warn "  guard(s) with a bare failure message (no '#{MARKER}' self-correction):"
-  result[:missing_fix].each { |rel| warn "    - #{rel}" }
-  warn "  Fix: add a '#{MARKER} <what to change to pass>' clause to each guard's " \
-       "deny/failure output. Reclassify one only if it truly has no guard failure " \
-       "path, with that reason, in #{TABLE}."
+def report_ratchet_failure(result)
+  if result.key?(:landed_probes)
+    warn "  could not measure the landed classification, so no weakening could be detected."
+    warn "  This is a missing MEASUREMENT, not a clean result. Probed, and what each gave:"
+    result[:landed_probes].each { |ref, outcome| warn "    #{ref} -> #{outcome}" }
+    warn "  Fix: give the check a landed table to compare against: `git fetch origin main` " \
+         "(so #{LANDED_REF} exists and shares history with HEAD), or `git fetch --unshallow` " \
+         "in a shallow clone. Run from a branch that descends from origin/main."
+  end
+  return if result[:weakened].empty?
+
+  warn "  classification(s) weakened below the landed bar (strictest of origin/main tip and merge-base):"
+  result[:weakened].each { |rel, landed, now| warn "    - #{rel}: landed #{landed} -> now #{now}" }
+  warn "  This diff moved its own bar: the table is in the change this check judges, so a " \
+       "relabel here is self-satisfying."
+  warn "  Fix: restore each path to 'guard' in #{TABLE} (and executable, if it lost its exec " \
+       "bit), and give it a '#{MARKER}' line. If the reclassification is genuinely right, " \
+       "the OWNER lands it on main themselves; rebase onto it and this passes. There is no " \
+       "in-repo approval flag, env var, or marker. If main already landed it after you " \
+       "forked, rebase onto current origin/main."
 end
 
 def run_check(root = REPO)
   result = evaluate(root)
+  ratchet!(root, result)
   if failed?(result)
     report_failure(result)
     return 1
@@ -298,6 +514,12 @@ def run_check(root = REPO)
   puts "check-guard-messages: OK — #{result[:found].size} first-party file(s) " \
        "classified (#{counts}); every guard carries an actionable '#{MARKER}'; " \
        "#{skipped_note(result)}"
+  puts "  classification ratchet: 0 weakening(s) against " +
+       result[:landed_points].map { |label, sha| "#{label} @ #{sha[0, 12]}" }.join(", ")
+  unless result[:new_entries].empty?
+    puts "  new classification entr(ies) with no landed counterpart: " +
+         result[:new_entries].map { |rel, klass| "#{rel} (#{klass})" }.join(", ")
+  end
   0
 rescue MeasureError => e
   warn "check-guard-messages: FAILED — could not measure: #{e.message}"
@@ -330,6 +552,25 @@ def run_self_test
     fail.("scripts/node_modules-x/run read as third-party") if third_party_path?("scripts/node_modules-x/run")
     fail.("vendor/mine/run read as third-party") if third_party_path?("vendor/mine/run")
     fail.("a file NAMED node_modules read as third-party") if third_party_path?("scripts/node_modules")
+
+    # DND-510 ratchet rules, as pure functions (the black-box suite drives them
+    # against real fixture repos with a fake origin/main).
+    fail.("100755 blob not a landed candidate") unless landed_candidate?("100755", "scripts/x")
+    fail.("100644 lib blob not a landed candidate") unless landed_candidate?("100644", "scripts/lib/x.sh")
+    fail.("100644 hook not a landed candidate") unless landed_candidate?("100644", "ai/hooks/x.sh")
+    fail.("symlink read as a landed candidate") if landed_candidate?("120000", "ai/bin/x")
+    fail.("plain 100644 read as a landed candidate") if landed_candidate?("100644", "ai/bin/README")
+    merged = merge_landed([{ "a" => "tool", "b" => "guard" }, { "a" => "guard", "b" => "tool", "c" => "tool" }])
+    unless merged == { "a" => "guard", "b" => "guard", "c" => "tool" }
+      fail.("merge_landed must keep guard from ANY point: got #{merged.inspect}")
+    end
+    w = weakenings(dir, %w[ai/bin/x scripts/y scripts/z], { "ai/bin/x" => ["tool", "r" * 20] },
+                   { "ai/bin/x" => "guard", "scripts/y" => "tool", "scripts/z" => "guard", "gone" => "guard" })
+    unless w == [["ai/bin/x", "guard", "tool"], ["scripts/z", "guard", "unclassified"]]
+      fail.("weakenings: got #{w.inspect}")
+    end
+    fresh = new_entries({ "n" => ["tool", "r"], "o" => ["guard", ""] }, { "o" => "guard" })
+    fail.("new_entries: got #{fresh.inspect}") unless fresh == [["n", "tool"]]
 
     # A git root that tracks nothing: an empty discovery set is an error.
     empty = File.join(dir, "empty")
@@ -390,7 +631,9 @@ if ARGV.include?("--help") || ARGV.include?("-h")
                                                and library (#{TABLE}); assert every
                                                guard emits an actionable `Fix:`
                                                (#{THIRD_PARTY_RULE} are skipped
-                                               as third-party, and counted)
+                                               as third-party, and counted); fail any
+                                               guard weakened below the landed table
+                                               (origin/main tip and merge-base)
       ai/bin/check-guard-messages --root DIR   the same, measuring the checkout at
                                                DIR read-only (its own #{TABLE})
       ai/bin/check-guard-messages --self-test  deterministic suite (no model)
