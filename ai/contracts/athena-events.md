@@ -2135,6 +2135,13 @@ dashboard, an email recipient) is **out of first-pass scope** — it would need 
 platform-held view, which is a later re-architecture, and no hook, seam, or
 "designed-for-now" interface for it is built now.
 
+**Later (2026-09-24):** this paragraph said no platform-held view is built.
+Superseded for one view (DND-430): the priority index is a platform-held
+view, specified in *Priority index*. It is a consumer of persisted events
+inside the server, not the router. Everything else here still holds: the router
+keeps no membership state, no rule reads the index, and a lane consumer still
+owns its own set.
+
 ---
 
 ## The lane channel is a change stream, not the authoritative set
@@ -3108,6 +3115,8 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   sweep (every 2700 s today) makes the admiral sweep its fleet, which is tool
   calls. So the default lost window is 60 min, and a change to either number
   moves the other. A shorter window would read a waiting fleet as `lost`.
+  The lease window of *Priority index* → *Leases* is tied to the lost window
+  the same way.
 - An **admiral run** reads its reported state (`running`, `draining`, `drained`,
   `finished`), except that a `running` or `draining` run reads `lost` when its
   session does. `admiral_seen` shows the admiral's own last activity. It never
@@ -3357,6 +3366,429 @@ now needs exit 0 on basis `server`: a recomputed or local-rule `run` is the
 owner's fail-mode rule, not the owner's decision to resume. And the session
 claims the run with `fleet-resume claim` before it spawns. Without the claim,
 two wakes for one run could each spawn an admiral for it (critic rounds 1 and 3).
+
+---
+
+## Priority index
+
+The server keeps a **priority index** for each owner: one pointer row per work
+item the owner may need to act on, drawn from the owner's trackers, Slack and
+forge. The owner ranks, promotes and dismisses items on the priorities page. A
+session pulls the top item it may serve through a lease. This section is the
+contract for that index. Its implementing tickets cite the subsection they
+build by name:
+
+- DND-432: the schema, the pointer constructor and ranking;
+- DND-436: personal Notion ingest;
+- DND-437: Slack asks;
+- DND-442: the priorities page;
+- DND-445: pull and leases;
+- DND-438: work Notion;
+- DND-439: forge review requests;
+- DND-440: Slack outbound and interactivity;
+- DND-446, DND-447 and DND-449: the digest, meetings and meeting catch-up.
+
+None of the server homes named below exists yet (gen_saas `origin/main`
+`b5f85909`, read 2026-09-24). Every sentence about them is an obligation on its
+implementer, not a description of shipped behaviour.
+
+### The index consumer
+
+`Athena.Priorities.Ingest` is an **internal consumer** of routed events. It is
+not a routing rule and not a delivery adapter. It reads events the router has
+already persisted and writes index rows. It holds the one platform-held view
+this contract allows (*The consumer owns membership*). The router holds no
+state because of it, and no rule reads it.
+
+It consumes exactly these event types. Every other type is not consumed:
+
+| Event type | Index effect | Source | Ticket |
+| --- | --- | --- | --- |
+| `notion.ticket.created`, `notion.ticket.updated`, `notion.ticket.undeleted` | Upsert the item's pointer fields, and reopen it when *States* allows | `notion_personal` or `notion_work`, from the subscription binding (below) | DND-436, DND-438 |
+| `notion.ticket.deleted` | Close the item it names (`closed_by: source_deleted`) | as above | DND-436, DND-438 |
+| `slack.message.received`, when it is an ask (below) | Create a `proposed` item | `slack_ask` | DND-437 |
+| the forge review-request family | Upsert an `owner_only` item | `forge_review` | DND-439 |
+
+- **`notion.comment.*` is never consumed.** No comment reaches the index.
+- **The forge family does not exist yet.** DND-439 declares it per *Extending
+  the taxonomy — a new type family declares its model* before any forge item
+  is indexed. Review requests come from the owner's GitLab `walt_ui` project
+  only (owner decision OQ-10, 2026-09-24). GitHub is not a source.
+- **Action items** (DND-449) arrive as `notion.ticket.*` events on a work
+  subscription bound to `action_item`. **Meetings** (DND-447) come from the
+  calendar adapter, not from an event. Each of those tickets declares its
+  source's `source_ref` format in *Item identity and `source_ref`*
+  before its first item is stored. Until then, a binding to `action_item`
+  or `meeting` is refused with a `Fix:` naming the ticket that declares it.
+
+**Which Slack message is an ask.** The Slack ingress classifies each message
+(`ai/contracts/athena-inbox.md` → *Line format*, the `kind` enum). An ask is a
+message the ingress classified `im` (a direct message to the bot) or `mention`
+(the text mentions the bot). A message authored by the bot itself, or by the
+owner's own Slack user, is not an ask: the owner's messages to the bot are
+commands, and those are the inbox attendant's. The index never re-derives the
+classification from the text.
+
+**No Slack ask can be indexed yet.** Today the Slack ingress writes straight to
+its own inbox path. Nothing routes `slack.message.received` through the router,
+and its declared payload (*Payload fields and their types per event type*) has
+no classification field. DND-437 closes both gaps before the first ask is
+indexed. It routes the type through the router, and it amends that payload
+schema to carry the ingress's classification.
+
+**Where the index gets its source.** A Notion event's source (`notion_personal`,
+`notion_work` or `action_item`) comes from the **subscription the ingress
+verified the event against**. Each subscription binds one source, or none.
+The ingress passes that binding to the index with the event, from its
+authenticated context. It is never read from the payload, never inferred from a
+ticket prefix, and never added to the event envelope (*The event*). A Notion
+event on a subscription with no binding is skipped with cause
+`unbound-subscription`. Deny is the default: a subscription is indexed only
+once the owner binds it. The Slack team id comes the same way, from the Slack
+app the event arrived on, never from the payload.
+
+**At-least-once, row by row.**
+
+- **The obligation to index is recorded in the transaction that persists the
+  event.** The router persists every event, HANDLED and UNMATCHED alike
+  (`Athena.Events.Router.route/2`). So an event of a consumed type gets an
+  index obligation in the same commit, whatever its routing disposition. An
+  event cannot be persisted and then lost before indexing.
+- **The index does not change routing.** Indexing an event does not make it
+  HANDLED. An event no owner rule matches is still UNMATCHED and still
+  dead-lettered (*Event disposition and dead-letter*). The index is not a
+  Level-2 delivery, and its outcomes appear in no delivery store.
+- **A supervised sweeper drains the obligations**, and wraps each one in
+  `Athena.PerRow.run/2`. One failing obligation never stops the others, and the
+  next pass still runs. A transient failure is retried under a bounded budget.
+- **Each obligation ends in exactly one outcome:**
+  - `indexed`: an item was created, updated or closed;
+  - `skipped:<cause>`: the event is legitimately not an item. The causes are
+    `not-an-ask`, `unbound-subscription` and `unknown-item` (a delete for an
+    item never indexed);
+  - `failed:<cause>`: the event should have been an item and is not. The
+    causes are `no-source-ref` (*Item identity and `source_ref`*),
+    `forbidden-field` (*The storage boundary*), `malformed-payload` and
+    `retries-exhausted`.
+- **A skip is counted, and a failure is recorded and reported**
+  (`~/.claude/CLAUDE.md` → *A failed lookup must never look like an empty
+  one*). Skips are counted per (owner, event type, cause), and the priorities
+  page shows the counts. A failure goes to the **index-failure record**: one
+  exemplar-plus-count per (owner, source, cause). Its exemplar is the event id,
+  the event type, the cause and any field names. It holds no payload value,
+  because the payload may carry a field the boundary refuses. A failure is
+  reported to the owner the way a failed-delivery row is (*Terminal delivery
+  failure — the failed-delivery store* → *Reported, not merely stored*). The
+  page shows unread failures apart from an empty index.
+
+**Idempotency is per (event, item).** The obligation's grain is the event
+(its `idempotency_key`) and the item it resolves to. Ingest is an upsert on the
+item's identity (next subsection), so a redelivered or duplicated event
+converges on the same row. The index does not rely on unique event keys: the
+event store does not enforce one. Each row keeps `source_revision`, the
+event's `payload.revision`. An event whose revision is older than the row's
+does not overwrite the row. An event with an equal revision, or with none, is
+applied in processing order. Notion's revision is minute-granular, so two
+same-minute events processed out of order can leave the older state until the
+item's next change. The index claims no finer ordering than that.
+
+### Item identity and `source_ref`
+
+Each item has a **source** and an **identity key**, unique per (owner,
+source). This `source` is the item's origin kind. It is not the event
+envelope's diagnostic `source` (*The event*).
+
+| Source | Identity key | `source_ref` format | Declared by |
+| --- | --- | --- | --- |
+| `notion_personal` | `payload.entity_id` (`notion:<page_id>`) | `notion_personal:<ticket_number>`, e.g. `notion_personal:DND-430` | this section |
+| `notion_work` | `payload.entity_id` | `notion_work:<ticket_number>`, e.g. `notion_work:PT-123` | this section |
+| `slack_ask` | the `source_ref` | `slack:<team_id>:<channel_id>:<ts>` | this section |
+| `forge_review` | the `source_ref` | `forge:<host>:<project_path>:<mr_iid>` | this section; the event family is DND-439's |
+| `manual` | the item id | `manual:<item_id>` | this section |
+| `action_item` | declared by DND-449 | declared by DND-449 | DND-449 |
+| `meeting` | declared by DND-447 | declared by DND-447 | DND-447 |
+
+- **A Notion item is keyed on `entity_id`, not on its ticket number.** A delete
+  carries only `entity_id` (*Payload fields and their types per event type*),
+  and a ticket number can change with its database's prefix. `source_ref` is
+  the handle a person reads. It is refreshed on each upsert. It is unique per
+  (owner, source) too.
+- **Computing the key is its own step with its own failure.** A Notion ticket
+  with no `ticket_number`, or with a bare number that has no prefix, fails with
+  `no-source-ref`. So does any component that is empty or contains `:`, the
+  delimiter. That includes a forge host written with a port. The index never
+  keys such an item on anything else.
+- `<channel_id>` is the Slack channel id, never its name. `<ts>` is the
+  message's own `ts`, which is Slack's message id. `<host>` is the forge
+  hostname. `<project_path>` is the project's full path, and `<mr_iid>` is the
+  merge request's project-scoped number.
+- `manual` items are created by the owner on the priorities page. Only the
+  owner creates them.
+
+### The storage boundary
+
+**The index stores work-item metadata only.** Every stored field is on one
+closed list. The list has three parts:
+
+1. **Pointer fields**, which any source may fill when it supplies them:
+   `source`, `source_ref`, `entity_id` (Notion sources only), `url`, `title`,
+   `status`, `source_priority`, `due_on` and `source_revision`.
+2. **Server-derived fields**, computed by the server, never copied from
+   content: `domain`, `domain_basis`, `project`, `asker_ref` (a Slack user id),
+   `owner_only`, `state`, `closed_by`, `score`, `reasons`, `scored_at`,
+   `override`, `lease_session_id`, `leased_at` and timestamps.
+3. **Permissive fields**, allowed by the owner's decision on OQ-5 (2026-09-24:
+   "Let's default to more permissive here and pull back if something bothers
+   me"). Each is named here, stored in its own column, and removable on its
+   own:
+
+   | Field | Sources | Holds |
+   | --- | --- | --- |
+   | `assignee` | `notion_work`, `action_item` | person ids, never names |
+   | `labels` | `notion_work`, `action_item` | label strings |
+   | `message_text` | `slack_ask` | the message's text |
+   | `slack_thread_ts` | `slack_ask` | the thread's `ts`, or `null` when the message is not in a thread |
+   | `starts_at` | `meeting` | the meeting's start time |
+
+**Each source has a closed allow-list.**
+
+| Source | Pointer fields it fills | Permissive fields |
+| --- | --- | --- |
+| `notion_personal` | `source_ref`, `entity_id`, `url`, `title`, `status`, `source_revision` | none |
+| `notion_work` | `source_ref`, `entity_id`, `url`, `title`, `status`, `source_revision` | `assignee`, `labels` |
+| `action_item` | declared by DND-449, from the `notion_work` list | `assignee`, `labels` |
+| `slack_ask` | `source_ref`, `url` (a link built from the ids alone) | `message_text`, `slack_thread_ts` |
+| `forge_review` | `source_ref`, `url`, `title`, `status` | none |
+| `meeting` | `source_ref`, `url`, `title` | `starts_at` |
+| `manual` | `source_ref`, `url`, `title`, `source_priority`, `due_on` | none |
+
+- **Everything else is refused by name.** That includes a body, a comment or
+  `comment_text`, a description, a summary, an attachment, attendees, a
+  message's `text` under any other name, and a permissive field on a source
+  whose row does not list it. A Slack ask stores no `title`.
+- **The pointer constructor enforces the list.** `Athena.Priorities.Pointer`
+  (Domain) takes a source and a field map. It refuses any field that is not on
+  that source's allow-list, and names every such field in one refusal. It
+  names fields, never values. It never drops a field silently. The mappers
+  extract only allowed fields, so a refusal means a mapper defect. The
+  obligation then fails with `forbidden-field`, naming the fields.
+- **A mapper may read a field it may not store.** Deriving `owner_only` for a
+  personal ticket reads the payload's `assignee` (*Domain and owner-only items*), and
+  never stores it.
+- **The boundary covers every store the index writes:** the items, the index
+  obligations, the skip counts and the index-failure record. It does not make
+  upstream stores content-free. The event store and the Slack ingress's own
+  store hold what their ingress persists. Keeping work-Notion content out of
+  the event store is DND-438's `metadata_only` subscription obligation. It is
+  not a property of this boundary.
+- **Mission pointers are a separate schema.** *Mission pointers are metadata
+  only* keeps its own closed list, which refuses labels and assignees. This
+  section does not change it.
+
+**Removing a permissive field.** When the owner pulls one back, the change
+does three things:
+
+1. It removes the field from the allow-list. The constructor then refuses it
+   by name, and the mappers stop extracting it.
+2. It sets the field to `null` in every stored row.
+3. It drops the column.
+
+No identity, state, eligibility or `owner_only` rule reads a permissive field,
+so removing one changes none of them. Ranking may read one (`vip_assignee`).
+After the field is removed, that reason stops firing. The owner accepts that
+when removing the field.
+
+### States
+
+An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
+
+| Transition | Who | Recorded as |
+| --- | --- | --- |
+| created `proposed` | ingest, for a `slack_ask` | |
+| created `active` | ingest, for every other source; the owner, for `manual` | |
+| `proposed` → `active` (promote) | the owner only | |
+| `dismissed` or `done` → `active` (restore) | the owner only | |
+| `proposed` or `active` → `dismissed` | the owner only | |
+| `active` → `done` | the lease holder, through `priority_complete` | `closed_by: lease_complete` |
+| `active` → `done` | the owner | `closed_by: owner` |
+| `active` → `done` | ingest, when the source status is terminal | `closed_by: source_status` |
+| `active` → `done` | ingest, on the source's delete event | `closed_by: source_deleted` |
+| `done` → `active` (reopen) | ingest, only for `closed_by` `source_status` or `source_deleted`, when the source status becomes non-terminal or the item is undeleted | |
+
+- **Ingest never undoes an owner's decision or a completed lease.** It never
+  promotes, never restores a dismissed item, and never reopens an item closed
+  by `lease_complete` or `owner`. On those items it still updates the
+  pointer fields.
+- **Terminal statuses are owner config, per source.** For `notion_personal`
+  the default is `Done` and `Cancelled`. `notion_work` gets its default from
+  DND-438. A status outside the source's declared set is stored and treated as
+  non-terminal. The priorities page flags it as undeclared. It is never
+  silently read as open.
+- **Only an owner path promotes, restores or dismisses:** the owner's web
+  session, or a verified Slack click by the owner (*Machine↔owner API binding
+  and the outbound return-address dual*; `slack.interaction.received`, whose
+  verification DND-440 builds). No machine token can do these. No message
+  content can either: a Slack ask, an inbox line or a fleet report
+  informs, and never authorizes (*Trust posture — two paths*).
+- **A `proposed` item is inert.** No machine-token call returns it, counts it
+  or leases it. Only the owner sees it, on the priorities page and in the
+  digest.
+
+### Domain and owner-only items
+
+**`domain`** is `work`, `blend` or `personal`, the values *Session control:
+desired state* uses. It is derived per source, and `domain_basis` records how:
+
+- `notion_work`, `action_item`, `slack_ask` (the connected Slack is the work
+  Slack, owner decision OQ-6), `forge_review` and `meeting` are `work`, with
+  basis `source`.
+- `notion_personal` takes its domain from the ticket's project (an `Athena -`
+  project is `blend`), with basis `project:<name>`. When the event carries no
+  project, the domain is `personal` and the basis is `source-default`, and
+  the page shows that basis. The declared ticket payload has no project field
+  today (*Payload fields and their types per event type*). So until DND-436
+  adds one, every personal ticket is `personal` by `source-default`.
+- `manual` takes the domain the owner gives it, with basis `owner`.
+
+`project` is the ticket's project name when the event carries it, and `null`
+otherwise.
+
+**`owner_only`** marks an item only the owner can act on. It is never
+leasable. It is true for:
+
+- every `forge_review` item (a review request to the owner) and every
+  `meeting` item;
+- a Notion item whose status is `Needs Attention` and whose assignees include
+  the owner's own person id in that workspace. The owner's person id per
+  workspace is owner config. When it is not configured, a `Needs Attention`
+  item is `owner_only` and the page flags the missing id. That is the
+  restrictive reading of an unknown;
+- a `manual` item the owner marks so.
+
+It is false for everything else.
+
+### Ranking
+
+`Athena.Priorities.Ranking.score/3` is pure. It maps (item, the owner's rules,
+`now`) to `{score, reasons}`. `reasons` is a list of `{id, delta}`, and the
+score is the sum of the deltas. The reason ids are a **closed set**, so a page
+or a digest can render them:
+
+| Reason id | Fires when |
+| --- | --- |
+| `owner_override` | the owner set an override on the item |
+| `vip_asker` | a `slack_ask`'s `asker_ref` is a VIP Slack user id |
+| `vip_assignee` | a `notion_work` or `action_item` item's `assignee` includes a VIP person id |
+| `source_priority` | the item has a `source_priority` |
+| `source_weight` | the owner weights the item's source |
+| `due_soon` | `due_on` is within the owner's horizon |
+| `overdue` | `due_on` is before `now` |
+| `age` | the owner's age curve gives the item's age a weight |
+| `domain_hours` | the owner weights the item's domain for the current time (work hours or not, per the owner's policy) |
+
+- **An override always wins.** `pin_top` ranks the item above every item
+  without it, `pin_bottom` below every item without it, and `score` replaces
+  the computed score. `owner_override` then leads the reasons. The computed
+  reasons stay in the list for display.
+- **Ties** break by the older `inserted_at`, then by item id, so the order is
+  deterministic.
+- **VIPs are matched by id, never by name.** The VIP list holds (namespace,
+  id) pairs. It is seeded with Mike Peregrina's notion-work person id,
+  `c3fe57ad-9b1c-4d69-937b-9fc43afd234e` (owner decision OQ-9). DND-432
+  resolves his Slack user id by the same rule: an exact match on one user, then
+  stored as an id.
+- **A new reason id is an amendment to this table.** A renderer that meets an
+  id it does not know shows the id as it is. It never drops the reason.
+- **Rank at `now`.** `priority_next` ranks by a score computed at the call.
+  The stored `score`, `reasons` and `scored_at` are the last computation, kept
+  for display.
+
+### Leases
+
+A session pulls work through three `athena` MCP tools, authenticated by the
+machine token. Their arguments are closed schemas. An argument naming an owner
+or a machine is refused, as for fleet reports (*Fleet identity: owner and
+machine are stamped from the token*).
+
+**`priority_next {claude_session_id, domains?}`** leases the top eligible item.
+
+- The session must be bound to the calling machine. Otherwise the answer is
+  `not_found` (*Fleet identity: owner and machine are stamped from the token*).
+  A session that reported `session_ended` is refused as `session_ended`. A
+  session whose desired state is `drain` (*Session control: desired state*) is
+  refused as `session_draining`.
+- **An item is eligible** when all of these hold. It is the machine owner's
+  item. It is `active`, and it is not `owner_only`. It has no live lease. Its
+  domain is one the session may serve. A session may serve its effective
+  domain, as `session_control` reports it in `policy_snapshot` (*Reading
+  control state and the control cache*). When the call gives `domains`, the
+  session serves only the domains in both sets. A `domains` value outside
+  `work`, `blend` and `personal` is refused.
+- The lease is taken **atomically**, in one transaction that locks and skips
+  locked rows. Two concurrent calls never lease the same item.
+- The answer is `leased`, with the item's stored pointer fields and the lease
+  window. Or it is `none`, with:
+  - `considered`: the owner's `active` items;
+  - `eligible`: always 0 in a `none` answer;
+  - `excluded`: counts per cause (`owner_only`, `leased`, `domain`). Each
+    considered item is counted once, under the first of those causes it
+    meets, so the counts sum to `considered`;
+  - `ingest_failures_unread`: the owner's unread index-failure rows.
+
+  So `none` on an empty index (`considered: 0`) reads differently from `none`
+  when everything is leased, and from `none` while ingest is failing.
+
+**A lease stays live while its holder session is seen.** The lease is live
+while `now` is within the lease window of the later of `leased_at` and the
+holder session's last-seen time. That last-seen time is the one *Fleet
+liveness* keeps, refreshed by reports from the session. The periodic ones are
+`session_seen` and `admiral_seen`, sent by the PostToolUse hook path
+(*Fleet report kinds and their closed schema*). Nothing else renews a lease:
+not the machine socket's heartbeat, not an inbox ack, and not a `priority_*`
+call. The socket's heartbeat identifies the machine, not the session, so it
+would keep a dead session's lease alive.
+
+- **The lease window MUST NOT be shorter than the lost window** of *Fleet
+  liveness* (60 min by default), for the same reason. A healthy session can
+  be silent that long while its fleet waits, and a shorter window would hand
+  its item to a second session. The default lease window equals the lost
+  window. A change to either moves the other.
+- **`session_ended` releases every lease the session holds** at once. A
+  cleanly ended session gives its items back without waiting out the window.
+- A lease that is not live makes its item eligible again. Eligibility is
+  computed when a lease is requested, so the correctness of expiry does not
+  depend on a sweeper. A sweeper that clears expired lease columns for
+  display wraps each row in `Athena.PerRow.run/2`.
+
+**`priority_release {claude_session_id, item_id}`** gives the item back.
+**`priority_complete {claude_session_id, item_id}`** moves it to `done`
+(*States*). Each answers exactly one of:
+
+- `ok`;
+- `not_found`: the item is not the machine owner's, or the session is not
+  bound to this machine. A foreign item's existence is never disclosed;
+- `not_lease_holder`: another session holds a live lease on the item;
+- `not_leased`: nobody holds a live lease. That includes this session's own
+  expired lease. The holder leases the item again, or closes it in its
+  tracker.
+
+**Leasing never writes to the source tracker.** An admiral still takes scope
+in Notion per `athena:ticket-management`.
+
+### Access control
+
+| Operation | Who | Resource | Where checked | On denial |
+| --- | --- | --- | --- | --- |
+| View the priorities page | the logged-in owner | only the owner's items, failures and skip counts | `Athena.Priorities` list functions, through aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
+| Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or a verified owner Slack click where that path exists | the owner's items and rules | `Athena.Priorities` manager functions, RBAC `update`, checked before any write | `not_found`; the Slack path rejects and records |
+| `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
+
+- **Deny by default.** A machine token reaches the index only through the three
+  lease tools. No machine-token path promotes, restores, dismisses, overrides,
+  lists, or reads a `proposed` item, a failure or another owner's item.
+- **Every query is owner-scoped.** Ingest writes only to the event's owner, as
+  stamped from its authenticated ingress (*The event*).
+- **Every refusal carries a `Fix:`**, per this contract's opening rule.
 
 ---
 
