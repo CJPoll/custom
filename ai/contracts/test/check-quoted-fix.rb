@@ -12,7 +12,7 @@
 # non-blank, non-`#` line is one pinned span. In each listed section, every
 # inline-code span that contains `Fix:` (and is more than the bare word) must
 # equal the pinned lines, in order, whitespace collapsed. Fenced code blocks are
-# skipped.
+# skipped (a `#` line inside one is not a heading).
 #
 # Usage:
 #   check-quoted-fix.rb --contract FILE --fixture FILE
@@ -21,7 +21,8 @@
 #   0  every listed section's quoted spans equal the fixture
 #   1  a section's quotes and the fixture differ (each difference is printed)
 #   2  the check could not measure: missing file, a section heading not found,
-#      a section with zero quoted spans, or a fixture with no sections/lines
+#      a section with zero quoted spans or unbalanced backticks, or a fixture
+#      with no sections/lines
 #
 # Deliberately gem-free (stdlib only).
 
@@ -83,26 +84,46 @@ def parse_fixture(path)
   sections
 end
 
+# Per line: true when the line is a fence marker or inside a fenced block. A
+# `#` line inside a fence is code, never a heading.
+def fence_mask(lines)
+  in_fence = false
+  lines.map do |l|
+    marker = l.lstrip.start_with?("```")
+    in_fence = !in_fence if marker
+    marker || in_fence
+  end
+end
+
+def heading_at(lines, fenced, i)
+  !fenced[i] && lines[i] =~ /\A(#+)\s+(.*?)\s*\z/ && [Regexp.last_match(1).length, Regexp.last_match(2)]
+end
+
 # The body of the section whose heading text is `heading`, or nil.
-def section_body(lines, heading)
-  start = lines.index { |l| l =~ /\A(#+)\s+(.*?)\s*\z/ && Regexp.last_match(2) == heading }
+def section_body(lines, fenced, heading)
+  start = lines.each_index.find { |i| (h = heading_at(lines, fenced, i)) && h[1] == heading }
   return nil if start.nil?
 
-  level = lines[start][/\A#+/].length
+  level = heading_at(lines, fenced, start)[0]
   stop = ((start + 1)...lines.length).find do |i|
-    lines[i] == "---" || (lines[i] =~ /\A(#+)\s/ && Regexp.last_match(1).length <= level)
+    (!fenced[i] && lines[i] == "---") || ((h = heading_at(lines, fenced, i)) && h[0] <= level)
   end
-  lines[(start + 1)...(stop || lines.length)]
+  range = (start + 1)...(stop || lines.length)
+  lines[range].zip(fenced[range])
 end
 
 # Inline-code spans containing `Fix:` (not the bare word), whitespace collapsed.
-def quoted_spans(body_lines)
-  in_fence = false
-  prose = body_lines.reject do |l|
-    in_fence = !in_fence if l.lstrip.start_with?("```")
-    in_fence || l.lstrip.start_with?("```")
+# An odd backtick count would silently re-pair every later span, so it is a
+# measurement failure, not a result.
+def quoted_spans(body, heading)
+  prose = body.reject { |_, in_fence| in_fence }.map(&:first).join("\n")
+  if prose.count("`").odd?
+    cannot_measure(
+      "section #{heading.inspect} has an odd number of backticks outside fences, so its spans cannot be paired",
+      "close the unbalanced inline-code span in that section"
+    )
   end
-  parts = prose.join("\n").split("`", -1)
+  parts = prose.split("`", -1)
   parts.each_with_index
        .select { |_, i| i.odd? }
        .map { |s, _| s.gsub(/\s+/, " ").strip }
@@ -111,10 +132,11 @@ end
 
 opts = parse_args(ARGV)
 lines = File.readlines(opts[:contract], chomp: true)
+fenced = fence_mask(lines)
 drift = false
 
 parse_fixture(opts[:fixture]).each do |heading, pinned|
-  body = section_body(lines, heading)
+  body = section_body(lines, fenced, heading)
   if body.nil?
     cannot_measure(
       "section heading #{heading.inspect} not found in #{opts[:contract]}",
@@ -122,7 +144,7 @@ parse_fixture(opts[:fixture]).each do |heading, pinned|
     )
   end
 
-  quoted = quoted_spans(body)
+  quoted = quoted_spans(body, heading)
   if quoted.empty?
     cannot_measure(
       "section #{heading.inspect} quotes no span containing Fix:",

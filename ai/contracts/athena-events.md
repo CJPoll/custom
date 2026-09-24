@@ -873,6 +873,9 @@ schema, so any `payload.*` leaf is unbindable). The redirect is ground (1)'s own
 refusal: its per-property sentence names `notion.ticket.updated` and the
 `changed_properties` leaf (quoted in *The predicate grammar* → *Evaluation
 contract*). A finer type is an unknown type, so it gets no refusal of its own.
+Ground (1) is also the one that reports: the save checks the declared types
+first and stops at the first refusal, so ground (2) never reaches the author
+for a finer type.
 
 **Later (2026-09-24):** this paragraph quoted a separate "redirecting" refusal
 ("unknown event type '<type>' — the first pass emits no per-property ticket
@@ -1939,7 +1942,9 @@ ALSO typed to the field's declared TYPE*), bounded depth/size. Specifically:
   type, and ended its model clause with a pointer to *Extending the taxonomy —
   a new type family declares its model*. The shipped text puts the diagnosis
   first, double-quotes the type, and has no pointer. The quote now matches the
-  code (DND-411).
+  code (DND-411). The code wins here, unlike the origination refusal, because
+  DND-412 is converting this module's errors with the text held byte-identical;
+  adding the pointer to the code is a follow-up once that lands.
 - **An operator incompatible with its field's declared CARDINALITY is a HARD
   ERROR at rule-SAVE time** — a collection operator (`contains` / `intersects`)
   on a scalar field, or a scalar operator (`eq` / `ne` / `lt` / `lte` / `gt` /

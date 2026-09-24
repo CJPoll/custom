@@ -7,8 +7,9 @@
 #   1. runs check-quoted-fix.rb on the REAL contract against the fixture (the
 #      live pin — red whenever a quote drifts from the pinned text);
 #   2. proves the checker can fire: a reworded quote and an unpinned quote must
-#      fail (exit 1); a renamed section, a section with no quotes, and an empty
-#      fixture must fail as "could not look" (exit 2), never as a match.
+#      fail (exit 1), including one after a fenced `#` line; a renamed section,
+#      a section with no quotes, unbalanced backticks, and an empty fixture must
+#      fail as "could not look" (exit 2), never as a match.
 # Hermetic: temp copies only; no network, no git.
 set -uo pipefail
 
@@ -66,6 +67,16 @@ fi
 
 printf '@section Harness-emit\nFix: anything\n' > "${TMP}/no-quotes.txt"
 expect "a section with no quotes cannot be measured" 2 "${CONTRACT}" "${TMP}/no-quotes.txt"
+
+# A fenced `#` line must not end the section early and hide a later quote.
+printf '### Alpha\n\n```\n# not a heading\n```\n\nrefused: `Fix: pinned one`\n\n### Beta\n' > "${TMP}/fenced.md"
+printf '@section Alpha\nFix: pinned one\n' > "${TMP}/fenced-fixture.txt"
+expect "a # line inside a fence is not a heading" 0 "${TMP}/fenced.md" "${TMP}/fenced-fixture.txt"
+printf '### Alpha\n\n```\n# not a heading\n```\n\nrefused: `Fix: pinned one`, and `Fix: unpinned`\n' > "${TMP}/fenced-extra.md"
+expect "a quote after a fenced # line is still seen" 1 "${TMP}/fenced-extra.md" "${TMP}/fenced-fixture.txt"
+
+printf '### Alpha\n\nrefused: `Fix: pinned one` and a stray ` backtick\n' > "${TMP}/odd.md"
+expect "unbalanced backticks cannot be measured" 2 "${TMP}/odd.md" "${TMP}/fenced-fixture.txt"
 
 grep '^#' "${FIXTURE}" > "${TMP}/empty-fixture.txt"
 expect "an empty fixture cannot be measured" 2 "${CONTRACT}" "${TMP}/empty-fixture.txt"
