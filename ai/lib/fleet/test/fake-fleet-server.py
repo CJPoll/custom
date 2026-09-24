@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""fake-fleet-server.py -- a loopback stand-in for POST /api/v1/fleet/reports.
+"""fake-fleet-server.py -- a loopback stand-in for POST /api/v1/fleet/reports
+and GET /api/v1/fleet/sessions/<id>/control (DND-443).
 
 Test fixture for the fleet-report suites (DND-433). It is NOT the server: the
 real one is DND-431. It answers the way the contract says the real one does
 (ai/contracts/athena-events.md -> Fleet registry and session control):
 202 on success, 422 {"error","fix"} on a refusal, 404 {"error":"not_found"},
 401 {"error":"unauthorized","fix"}, with the answer chosen per request by the
-test through a JSON "responses" file.
+test through a JSON "responses" file (one spec, or a queue of them).
 
 While each request is IN FLIGHT (the client is still waiting), it scans every
 other process's /proc/<pid>/cmdline and /proc/<pid>/environ for the machine
@@ -43,9 +44,34 @@ def scan(name):
     return hits
 
 
+def next_spec():
+    """The answer for this request. The responses file holds one spec object
+    (answered every time) or a JSON array of specs (a queue: each request pops
+    the first; the last one left keeps answering)."""
+    default = {"status": 202, "body": {"ok": True}}
+    try:
+        with open(RESPONSES_FILE) as fh:
+            spec = json.load(fh)
+    except (OSError, ValueError):
+        return default
+    if isinstance(spec, list):
+        if not spec:
+            return default
+        head = spec[0]
+        if len(spec) > 1:
+            with open(RESPONSES_FILE + ".tmp", "w") as fh:
+                json.dump(spec[1:], fh)
+            os.rename(RESPONSES_FILE + ".tmp", RESPONSES_FILE)
+        return head
+    return spec
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+    def do_GET(self):
+        self.answer(None)
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -54,8 +80,12 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw)
         except ValueError:
             body = raw.decode("utf-8", "replace")
+        self.answer(body)
+
+    def answer(self, body):
         auth = self.headers.get("Authorization") or ""
         entry = {
+            "method": self.command,
             "path": self.path,
             "auth_ok": auth == "Bearer " + TOKEN.decode(),
             "auth_present": bool(auth),
@@ -64,11 +94,7 @@ class Handler(BaseHTTPRequestHandler):
             "argv_leak": scan("cmdline"),
             "environ_leak": scan("environ"),
         }
-        try:
-            with open(RESPONSES_FILE) as fh:
-                spec = json.load(fh)
-        except (OSError, ValueError):
-            spec = {"status": 202, "body": {"ok": True}}
+        spec = next_spec()
         with open(LOG_FILE, "a") as fh:
             fh.write(json.dumps(entry) + "\n")
         time.sleep(float(spec.get("delay_s", 0)))

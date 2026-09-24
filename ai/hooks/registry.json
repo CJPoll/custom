@@ -7,6 +7,7 @@
     { "event": "PreToolUse", "matcher": "Bash", "script": "ai/hooks/workflow-phase-guard.sh" },
     { "event": "PreToolUse", "matcher": "Bash|SendMessage|mcp__notion.*", "script": "ai/hooks/pronoun-guard.sh" },
     { "event": "PreToolUse", "matcher": "Edit|Write|MultiEdit|NotebookEdit", "script": "ai/hooks/inbox-untrusted-guard.sh" },
+    { "event": "PreToolUse", "matcher": "Agent|Task", "script": "ai/hooks/fleet-drain-guard.sh" },
     { "event": "PostToolUse", "matcher": "Bash", "script": "ai/hooks/inbox-untrusted-guard.sh" },
     { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/harness-event.sh" },
     { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/fleet-report.sh" },

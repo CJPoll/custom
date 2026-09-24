@@ -50,7 +50,13 @@ boarded on the head would have merged a twelve-round-old SHA.
 
 `DONE`, `BLOCKED_ON_DEPENDENCY`, and `STUCK` each free a concurrency slot —
 **immediately dispatch the next `QUEUED` Mission, if any** (via
-[[athena:dispatch-captain]]).
+[[athena:dispatch-captain]], whose first step is the control checkpoint).
+
+**`PARKED`** is the fourth return, and only on drain: the captain committed and
+pushed its work in progress and names a resume point. Record the Mission
+`PARKED` with the head SHA and the resume point. Do not refill the slot: a
+draining admiral dispatches nothing. When no captain is left running, finish
+the drain protocol ([[athena:fleet-drain]]).
 
 **"Record it in your state log" means BOTH surfaces, and the row is the one
 that goes stale.** The state log is a `## Mission state` table plus a `## Log`

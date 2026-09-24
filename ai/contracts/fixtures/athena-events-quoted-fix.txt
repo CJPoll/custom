@@ -45,6 +45,8 @@ template slot '{<path>}' names a field-path that is not in the union of this rul
 
 @section Layer 1: the drain guard hook
 # the drain guard's deny reason (the caller sees it as `PreToolUse:Agent hook error: <reason>`).
-# NOT YET EMITTED: the harness side is ai/hooks/fleet-drain-guard.sh (DND-443), whose
-# --self-test must assert its deny reason equals this line. No gen_saas side.
+# EMITTED (DND-443) by ai/hooks/fleet-drain-guard.sh through fleet_drain_fix in
+# ai/lib/fleet/control-domain.sh. ai/hooks/fleet-drain-guard.self-test.sh asserts
+# the rendered reason equals this line (placeholders included), and that a real
+# drain deny carries it filled in. No gen_saas side.
 Fix: fleet session <claude_session_id> is draining (<reason>, until <until>; basis <basis>) — this spawn was refused, not failed: do not retry it and do not do its work in-line; run the drain protocol, then wait for the session to return to run (override on the fleet page to force it).

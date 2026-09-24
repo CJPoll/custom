@@ -79,6 +79,13 @@ is the reading that loses nothing if you are wrong.
   [[athena:fleet-liveness]] for the sweep + staleness discipline.)
 - The **concurrency cap still applies** during a resume: resume 5, queue the
   rest.
+- **A drain resume re-dispatches `PARKED` Missions.** The top-level session
+  started you with a run-id after the owner resumed the session
+  ([[athena:fleet-drain]] → *Resume*). A `PARKED` Mission is resumable, never
+  stuck. Adopt its worktree, and brief the captain with the resume point from its
+  `PARKED` report. Every re-dispatch still runs the control checkpoint first.
+  A spawn refused with `is draining` is **PAUSE**: never retry it, never do its
+  work in-line, and run the drain protocol again.
 
 ---
 

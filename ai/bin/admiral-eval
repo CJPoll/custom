@@ -103,6 +103,8 @@ ACTION_VOCABULARY = %w[
   merge-mr board-merge-train retarget-mr docker.compose-down invoke:teardown-worktree-stack
   invoke:epic-progress-dm sweep-fleet probe-worktree:<mission> list-agents
   wt-preflight:<branch> wait report-and-wait end-turn
+  fleet-control.check mark-parked:<mission> sendmessage.park:<mission>
+  fleet-report.admiral-state:<state> invoke:admiral-final-report
 ].freeze
 
 # Appended to every T2 scenario. Plan-only framing (guard 1) + the required

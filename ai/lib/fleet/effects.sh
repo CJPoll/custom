@@ -110,13 +110,23 @@ fleet_resolve_repo() {
   printf '%s\t%s\n' "${match}" "${key}"
 }
 
-# fleet_post <url> <token> <body-json>
-# One POST. Sets FLEET_CURL_RC, FLEET_HTTP_CODE and FLEET_RESPONSE (the body,
-# at most 4 KiB). Returns 0 once curl ran (whatever it answered), 1 when the
-# request could not be built (no curl, unsafe value, no temp dir): nothing was
-# sent then.
+# fleet_post <url> <token> <body-json> -- one POST (fleet_request).
 fleet_post() {
-  local url="$1" token="$2" body="$3" w
+  fleet_request POST "$1" "$2" "$3"
+}
+
+# fleet_get <url> <token> -- one GET with no body (fleet_request).
+fleet_get() {
+  fleet_request GET "$1" "$2" ""
+}
+
+# fleet_request <method> <url> <token> <body-json-or-empty>
+# One request. Sets FLEET_CURL_RC, FLEET_HTTP_CODE and FLEET_RESPONSE (the
+# body, at most FLEET_RESPONSE_MAX bytes, default 4 KiB). Returns 0 once curl
+# ran (whatever it answered), 1 when the request could not be built (no curl,
+# unsafe value, no temp dir): nothing was sent then.
+fleet_request() {
+  local method="$1" url="$2" token="$3" body="$4" w
   FLEET_CURL_RC=""; FLEET_HTTP_CODE=""; FLEET_RESPONSE=""
   command -v curl >/dev/null 2>&1 || { FLEET_POST_REASON="curl is not on PATH"; return 1; }
   names_safe_curl_config_value "${url}" || { FLEET_POST_REASON="the server URL contains a quote, backslash, whitespace or control character"; return 1; }
@@ -126,15 +136,17 @@ fleet_post() {
   FLEET_POST_TMP="${w}"
   chmod 700 "${w}"
   names_safe_curl_config_value "${w}" || { rm -rf "${w}"; FLEET_POST_REASON="the temp dir path (from \$TMPDIR) is not safe to put in a curl config"; return 1; }
-  printf '%s' "${body}" > "${w}/req.json"
+  [ "${method}" = "POST" ] && printf '%s' "${body}" > "${w}/req.json"
   FLEET_HTTP_CODE="$(
     {
       printf 'url = "%s"\n' "${url}"
-      printf 'request = "POST"\n'
+      printf 'request = "%s"\n' "${method}"
       printf 'header = "Authorization: Bearer %s"\n' "${token}"
-      printf 'header = "Content-Type: application/json"\n'
       printf 'header = "Accept: application/json"\n'
-      printf 'data-binary = "@%s/req.json"\n' "${w}"
+      if [ "${method}" = "POST" ]; then
+        printf 'header = "Content-Type: application/json"\n'
+        printf 'data-binary = "@%s/req.json"\n' "${w}"
+      fi
       printf 'output = "%s/resp"\n' "${w}"
       printf 'write-out = "%%{http_code}"\n'
       printf 'connect-timeout = %s\n' "$(fleet_seconds "${FLEET_CONNECT_TIMEOUT_S:-}" 5)"
@@ -143,7 +155,7 @@ fleet_post() {
     } | curl --config - 2>/dev/null
   )"
   FLEET_CURL_RC=$?
-  FLEET_RESPONSE="$(head -c 4096 "${w}/resp" 2>/dev/null)"
+  FLEET_RESPONSE="$(head -c "${FLEET_RESPONSE_MAX:-4096}" "${w}/resp" 2>/dev/null)"
   rm -rf "${w}"
   FLEET_POST_TMP=""
   return 0

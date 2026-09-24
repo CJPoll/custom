@@ -25,6 +25,12 @@ When the scope is exhausted, also report the run `finished` to the fleet
 registry; a ceiling or an interruption reports nothing
 ([[athena:fleet-liveness]] → *Fleet registry reports*).
 
+**A drain is its own end reason, `drained`.** The owner paused the session, and
+you ended only after your last captain returned. Report `admiral-state drained`
+(not `finished`). List the `PARKED` Missions with each resume point, and name
+the `DRAINED session=… run=…` line you wrote to the state log, which is what the
+resume finds ([[athena:fleet-drain]]).
+
 ## Before you write it, reconcile the tracker against the forge
 
 Take the list of MRs/PRs you confirmed merged (via

@@ -2888,6 +2888,12 @@ below exists yet." DND-433 shipped the reporters, so that is no longer true for
 them. It stays true for DND-443's `ai/bin/fleet-control` and
 `ai/hooks/fleet-drain-guard.sh`.
 
+**Later (2026-09-24):** DND-443: the paragraph above said it stayed true for
+`ai/bin/fleet-control` and `ai/hooks/fleet-drain-guard.sh`. DND-443 shipped
+both, with the admiral drain protocol (`athena:fleet-drain`) and the
+`CONTROL:` lines of `ai/bin/admiral-report-watch`. The server side of control
+(DND-441) is still an obligation on its implementer.
+
 ### Fleet reports are state upserts, not events
 
 A fleet report is a **state upsert**. It goes to `POST /api/v1/fleet/reports`
@@ -3058,6 +3064,40 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   owner's timezone and work windows, and whether the policy is enabled. A
   harness can recompute `desired` from it. A session bound to another machine,
   or never reported, answers `not_found`.
+- **The REST equivalent is `GET /api/v1/fleet/sessions/<claude_session_id>/control`**
+  (DND-443 chose it, as DND-433 chose REST for reports: HTTP codes map cleanly
+  onto outcomes). It sends `Authorization: Bearer <machine token>` and
+  `Accept: application/json` and has no body. Its origin is the registered
+  `athena` MCP URL's, exactly as for `POST /api/v1/fleet/reports`. It answers:
+  - **200** with the same object as `session_control`, and nothing else:
+    `claude_session_id` (the id in the path); `desired` (`run` | `drain`);
+    `reason` (a reason class of *Session control: desired state*, agreeing with
+    `desired`); `until` (an ISO 8601 UTC time ending in `Z`, or `null`); and
+    `policy_snapshot`, exactly `{override, effective_domain, metering}`:
+    - `override`: `null`, or `{desired: "run" | "drain", expires_at}`, where
+      `expires_at` is an ISO 8601 UTC time or `null` (never expires);
+    - `effective_domain`: `work` | `blend` | `personal`;
+    - `metering`: `{enabled: false}`, or `{enabled: true, timezone, work_windows,
+      metered_domains, holidays}` with `timezone` an IANA zone name,
+      `work_windows` a non-empty list of `{days, start, end}` (`days` distinct
+      ISO weekdays 1..7; `start` before `end`, both `HH:MM`), `metered_domains`
+      a list of domains, and `holidays` a list of `YYYY-MM-DD` dates.
+
+    The shape is closed at every level. A key it does not list is a malformed
+    answer, because a snapshot carrying an input the harness does not know
+    would be recomputed wrongly and silently.
+  - **401** `{"error": "unauthorized", "fix": ...}` with no or a bad token;
+    **422** `{"error", "fix"}` for an id that is not a valid session id;
+    **404** `{"error": "not_found"}` for a session never reported, or bound to
+    another machine (the two are indistinguishable by design).
+- **Recomputing is `desired/3` run locally.** Given a snapshot and `now`: an
+  override whose `expires_at` is `null` or later than `now` gives
+  `{override.desired, "override:force_<desired>", expires_at}`. Otherwise, when
+  `metering.enabled` is true and `effective_domain` is in `metered_domains`,
+  and `now` in `timezone` falls on a work window's weekday, is not a holiday,
+  and is at or after `start` and before `end`, it gives
+  `{drain, "metering:<domain>", that window's end}`. Otherwise `{run, default,
+  null}`. P1 has no metering, so its snapshot says `{enabled: false}`.
 - **`ai/bin/fleet-control` is the one harness reader** (DND-443). The drain
   guard hook, the admiral checkpoint and the resume path all read through it.
   It asks the server first, under a bounded timeout. On an answer it writes the
@@ -3081,27 +3121,44 @@ fail-mode decision (OQ-1, 2026-09-24) applies:
   America/Denver, 08:00 to 18:00, Monday to Friday, with no holiday source (the
   owner overrides on a holiday). The domain comes from the repo defaults
   (walt_ui work, custom blend, gen_saas personal). An unmapped project counts as
-  personal. The basis is `local-rule:<cause>`.
+  personal. The basis is `local-rule:<cause>`. `fleet-control` evaluates the
+  rule as a built-in snapshot (metering on for `personal` in that window)
+  through the same recompute, so a local-rule drain reads reason
+  `metering:personal`, until the window's end; the basis says it is local.
 - **Unknown is never read as `run` silently.** Each basis other than `server`
   prints a warning on stderr naming its cause, and the hook surfaces it to the
   transcript.
 - **Each cause is its own observable outcome** (`~/.claude/CLAUDE.md` → *A
   failed lookup must never look like an empty one*). No two share a token:
+  - `server-unconfigured`: the server was never asked, because this machine
+    has no machine token or no usable `athena` MCP URL;
   - `server-unreachable`: no answer within the timeout, or a transport error;
+  - `server-refused`: the server refused the read (HTTP 401, 403 or 422);
   - `session-unregistered`: the server answered `not_found`;
-  - `malformed-answer`: the server answered, but not in the shape above;
+  - `malformed-answer`: the server answered, but not in the shape above (this
+    includes a 5xx, and a 404 with no JSON, which means no endpoint is
+    deployed);
   - `expired-cache`: the cache is older than the stale window (24 h). Its
     snapshot is still used, and the warning names its age;
   - `no-cache`: no cache file exists;
   - `malformed-cache`: the cache file is not the shape above;
-  - `invalid-cache-path`: `$XDG_STATE_HOME` is set but not absolute, or
-    `claude_session_id` is not a safe single path component. `fleet-control`
-    does not read or write any path then.
+  - `invalid-cache-path`: `$XDG_STATE_HOME` is set but not absolute.
+    `fleet-control` does not read or write any path then.
 
-  The first three say why the server gave nothing; the last four say what the
+  The first five say why the server gave nothing; the last four say what the
   cache gave. Both appear in the basis, for example
   `recomputed:server-unreachable` or
-  `local-rule:server-unreachable,malformed-cache`.
+  `local-rule:server-unreachable,malformed-cache`. A cache whose snapshot names
+  a time zone this machine's tz database lacks is `malformed-cache`: an
+  unknown zone would silently compute in UTC.
+
+  **Later (2026-09-24):** DND-443: this list had seven tokens, and
+  `invalid-cache-path` also covered a `claude_session_id` that is not a safe
+  single path component. DND-443 added `server-unconfigured` and
+  `server-refused`: a machine with no token, and a 401, were otherwise forced to
+  share a token with a network failure or a malformed answer. An unsafe
+  session id is now refused before anything is read or asked: `fleet-control`
+  exits 2 (usage) and the drain guard denies the spawn with a `Fix:`.
 
 ### Enforcement layers
 
@@ -3140,6 +3197,11 @@ measured every property it relies on (Claude Code 2.1.281):
   `check-hooks-registered`, and its `--self-test` MUST prove the deny with a
   `drain` answer, the pass-through with `run`, and that each unknown-state
   warning reaches the transcript.
+- A pass on any basis but `server` carries the warning as the hook's
+  `systemMessage` (for the human) and `additionalContext` (for the model).
+  Hook stderr on exit 0 reaches neither. Every fleet-worker decision is also
+  appended to `$XDG_STATE_HOME/athena/fleet/drain-guard.log`, the evidence a
+  live verify reads.
 
 The athena-admiral template, `athena:dispatch-captain` and
 `athena:admiral-resume` MUST each tell the admiral to read a refused spawn
@@ -3153,7 +3215,9 @@ initial dispatch, refill on a captain's return, and re-dispatch on resume. Exit
 0 dispatches. Exit 3 starts the drain protocol. Any other exit is an error the
 admiral reports, never a dispatch. `admiral-report-watch` MUST also print
 `CONTROL: drain` on its existing wait cadence when `fleet-control check` turns
-to `drain`, so a waiting admiral wakes. This layer is cooperative: an admiral
+to `drain`, so a waiting admiral wakes. It checks about every 60 s, and also
+prints `CONTROL: run` on the way back and `CONTROL: unknown` when the check
+errors. The admiral's procedure is `athena:fleet-drain`. This layer is cooperative: an admiral
 that skips it is still stopped by layer 1 at its next spawn, so it costs
 latency, not correctness.
 

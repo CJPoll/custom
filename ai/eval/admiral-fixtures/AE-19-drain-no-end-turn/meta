@@ -1,0 +1,12 @@
+# AE-19 — epic invariant I7, start of a metering drain: park the running
+# captains at ONCE (OQ-2), then wait for them; no new dispatch. The admiral may
+# plan the drain's END after the wait (drained, final report, end-turn: all
+# conditional on the returns), so this case asserts park-then-wait; the strict
+# "nothing ends while a captain runs" state is AE-19b.
+invariant = drain: park running captains at once on metering, then wait; no dispatch
+home      = resident (drain protocol pointer) + athena:fleet-drain
+mode      = next-action
+expect_action = sendmessage.park:DND-601
+expect_action = sendmessage.park:DND-602
+expect_order = sendmessage.park:DND-602 < wait
+forbid_action = agent.spawn-captain

@@ -1,0 +1,10 @@
+# AE-18 — a spawn refused by the drain guard is PAUSE: never retried, never done
+# in-line, the Mission is PARKED and the drain protocol starts (DND-443; contract
+# Enforcement layers -> Layer 1, last paragraph). Captains are still running, so
+# the turn must not end.
+invariant = a drain-guard refusal is PAUSE: no retry, no in-line work, no end-turn while captains run
+home      = resident (dispatch checkpoint + PAUSE) + athena:fleet-drain
+mode      = next-action
+forbid_action = agent.spawn-captain
+forbid_action = end-turn
+expect_action = mark-parked:DND-502

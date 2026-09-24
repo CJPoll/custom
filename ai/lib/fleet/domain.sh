@@ -56,6 +56,16 @@ fleet_valid_admiral_state() {
 # `@`, so an `@` anywhere in the authority is refused, and a port must be
 # digits.
 fleet_reports_url() {
+  local origin
+  origin="$(fleet_api_origin "${1:-}")" || { printf '%s\n' "${origin}"; return 1; }
+  printf '%s/api/v1/fleet/reports\n' "${origin}"
+}
+
+# fleet_api_origin <mcp-url>
+# The scheme://authority of the registered athena MCP URL, under the rules
+# above. Every fleet REST path (reports, DND-433; session control, DND-443) is
+# built on it. Status 1 with a reason on stdout when the URL is unusable.
+fleet_api_origin() {
   local url="${1:-}" scheme rest authority host
   local LC_ALL=C
   [ -n "${url}" ] || { printf 'the athena MCP URL is empty\n'; return 1; }
@@ -76,7 +86,7 @@ fleet_reports_url() {
       printf 'the athena MCP URL has no usable host\n'; return 1; }
   fi
   host="${scheme}://${authority}"
-  printf '%s/api/v1/fleet/reports\n' "${host}"
+  printf '%s\n' "${host}"
 }
 
 # fleet_seconds <value> <default>

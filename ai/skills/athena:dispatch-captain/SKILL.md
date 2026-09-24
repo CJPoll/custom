@@ -10,6 +10,12 @@ a Mission is unblocked and has a free slot (worktree already created via
 `~/dev/custom/scripts/wt-preflight <branch> <repo>`, `PREFLIGHT OK` seen; cap
 ≤5 enforced by the admiral):
 
+0. **Run the control checkpoint first:** `~/dev/custom/ai/bin/fleet-control check`.
+   Exit 0 dispatches. Exit 3, or any other exit, dispatches nothing. If the
+   spawn itself comes back refused with `is draining` (the drain guard hook),
+   that is **PAUSE**: mark the Mission `PARKED`, never retry the spawn, and never
+   do the captain's work in-line. Then run the drain protocol:
+   [[athena:fleet-drain]].
 1. **Move the Mission's Notion status to `In Progress`** and set its `Assignee`
    to **Athena** (the active connection's bot — see [[athena:ticket-management]]).
 2. **Dispatch an athena-captain, named uniquely and Mission-qualified** (e.g.

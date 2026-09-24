@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# fleet-control -- the one harness reader of a fleet session's control state
+# (run or drain). FRAMEWORK: parse argv, hand off to the manager. Normative
+# home: ai/contracts/athena-events.md -> *Fleet registry and session control*
+# (DND-441 server, DND-443 this reader, the drain guard hook, and the admiral
+# checkpoint).
+
+set -u
+
+usage() {
+  cat <<'EOF'
+Usage: fleet-control <check|fetch> [flags]
+
+Read this Claude session's control state from the Athena server
+(GET /api/v1/fleet/sessions/<id>/control; athena-events.md -> Reading control
+state and the control cache).
+
+Subcommands:
+  check   Ask the server (bounded timeout). On an answer, cache it and print it.
+          With no usable answer, recompute from the cached policy snapshot; with
+          no usable cache, apply the owner's local rule. Prints ONE line:
+            desired=<run|drain> reason=<r> until=<ISO time|unbounded> basis=<b>
+          basis: server | recomputed:<cause>[,expired-cache] | local-rule:<cause>,<cause>
+          Every basis but `server` also prints a WARNING line on stderr.
+          Exit 0 = run, 3 = drain. Any other exit is an error: never read it as run.
+  fetch   Ask the server and write the cache; nothing else.
+          Exit 0 cached, 1 local configuration / cache unwritable,
+          3 refused or session unregistered, 4 unreachable, 5 malformed answer.
+
+Flags (any order):
+  --session-id S   top-level Claude session id (default: $CLAUDE_CODE_SESSION_ID)
+  --cwd DIR        the session's directory, for the local rule's project
+                   (default: the current directory)
+  --now EPOCH      evaluate at this instant instead of the clock (check only;
+                   for diagnosis and tests -- the drain guard never passes it)
+  --help           this text
+  --self-test      run the fleet-control suite (fake server; never prod)
+
+Causes (never shared): server-unconfigured, server-unreachable, server-refused,
+session-unregistered, malformed-answer; expired-cache, no-cache,
+malformed-cache, invalid-cache-path.
+
+Cache: $XDG_STATE_HOME/athena/fleet/<session-id>.json (the answer + fetched_at).
+The token is read from ~/.config/athena-inbox-client/config.json and fed to
+curl on stdin, never argv. Environment (optional): ATHENA_INBOX_CLIENT_CONFIG,
+FLEET_CLAUDE_JSON, ATHENA_INBOX_ROOT, XDG_STATE_HOME, FLEET_CONNECT_TIMEOUT_S
+(default 3), FLEET_MAX_TIME_S (default 5).
+EOF
+}
+
+SELF="$(realpath -- "${BASH_SOURCE[0]}")"
+AI="$(cd -- "$(dirname -- "${SELF}")/.." && pwd -P)"
+INBOX_LIB="${AI}/skills/athena:inbox/lib"
+
+die_usage() {
+  printf 'fleet-control: %s. Fix: %s\n' "$1" "${2:-run fleet-control --help for the subcommands and flags.}" >&2
+  exit 2
+}
+
+for a in "$@"; do
+  case "${a}" in
+    -h|--help) usage; exit 0 ;;
+    --self-test) exec "${AI}/lib/fleet/test/control/self-test.sh" ;;
+  esac
+done
+
+for dep in jq curl date; do
+  command -v "${dep}" >/dev/null 2>&1 || { printf 'fleet-control: %s is not on PATH, so control state cannot be read. Fix: install %s.\n' "${dep}" "${dep}" >&2; exit 1; }
+done
+
+# shellcheck source=../lib/fleet/domain.sh
+. "${AI}/lib/fleet/domain.sh"
+# shellcheck source=../lib/fleet/control-domain.sh
+. "${AI}/lib/fleet/control-domain.sh"
+# shellcheck disable=SC1091
+for f in err names descriptor logchan maildir fence session fs lock inbox; do . "${INBOX_LIB}/${f}.sh"; done
+# shellcheck source=../lib/fleet/effects.sh
+. "${AI}/lib/fleet/effects.sh"
+# shellcheck source=../lib/fleet/control-effects.sh
+. "${AI}/lib/fleet/control-effects.sh"
+# shellcheck source=../lib/fleet/manager.sh
+. "${AI}/lib/fleet/manager.sh"
+# shellcheck source=../lib/fleet/control-manager.sh
+. "${AI}/lib/fleet/control-manager.sh"
+
+# The drain guard waits on this synchronously, so the read is short.
+export FLEET_CONNECT_TIMEOUT_S="${FLEET_CONNECT_TIMEOUT_S:-3}"
+export FLEET_MAX_TIME_S="${FLEET_MAX_TIME_S:-5}"
+
+FLEET_POST_TMP=""
+trap '[ -n "${FLEET_POST_TMP}" ] && rm -rf -- "${FLEET_POST_TMP}"' EXIT
+trap 'exit 143' TERM INT HUP
+
+sub="" session_id="${CLAUDE_CODE_SESSION_ID:-}" cwd="${PWD}" now=""
+
+need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die_usage "$1 needs a value"; }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-id) need_value "$@"; session_id="$2"; shift 2 ;;
+    --cwd)        need_value "$@"; cwd="$2"; shift 2 ;;
+    --now)        need_value "$@"; now="$2"; shift 2 ;;
+    -*)           die_usage "unknown flag $1" ;;
+    *)
+      [ -z "${sub}" ] || die_usage "unexpected argument $1 (subcommand already ${sub})"
+      sub="$1"; shift ;;
+  esac
+done
+
+[ -n "${sub}" ] || die_usage "no subcommand given"
+case "${sub}" in check|fetch) ;; *) die_usage "unknown subcommand ${sub@Q}" ;; esac
+[ -n "${session_id}" ] || die_usage "no session id: --session-id is unset and so is \$CLAUDE_CODE_SESSION_ID" \
+  "pass --session-id <top-level claude session id>, or run from inside a Claude Code session."
+fleet_valid_id "${session_id}" || die_usage "session id ${session_id@Q} is not a valid id" \
+  "pass the top-level session_id exactly as Claude Code gives it (letters, digits, . _ -)."
+case "${cwd}" in /*) ;; *) die_usage "--cwd ${cwd@Q} is not absolute" "pass the session's absolute working directory." ;; esac
+if [ -n "${now}" ]; then
+  [ "${sub}" = "check" ] || die_usage "--now is for check only"
+  [[ "${now}" =~ ^[0-9]{1,12}$ ]] || die_usage "--now ${now@Q} is not epoch seconds"
+fi
+
+if [ "${sub}" = "check" ]; then
+  fleet_control_check "${session_id}" "${cwd}" "${AI}" "${now}"
+else
+  fleet_control_fetch "${session_id}" "${cwd}" "${AI}" "${now}"
+fi
+exit $?

@@ -1,0 +1,9 @@
+# AE-19b — I7, mid-drain: one captain returned PARKED, one still runs. No
+# drained report, no final report, no end-turn yet.
+invariant = drain: no drained report / final report / end-turn before the last captain returns
+home      = athena:fleet-drain (drain protocol step 4)
+mode      = next-action
+forbid_action = end-turn
+forbid_action = fleet-report.admiral-state:drained
+forbid_action = invoke:admiral-final-report
+forbid_action = agent.spawn-captain

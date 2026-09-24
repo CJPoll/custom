@@ -379,7 +379,9 @@ Stop and report immediately, without finishing the rest, in exactly two cases:
 
 In both cases, leave the worktree as-is (don't roll back partial progress)
 and commit anything salvageable, so the next attempt doesn't start from
-scratch.
+scratch. One more stop is not yours to choose: a `PARK:` message from your
+admiral (the session is draining). Commit WIP, push, report `PARKED` naming the
+resume point, and end: [[athena:fleet-drain]] → *Parking (captain)*.
 
 ## Resuming after a pause
 
@@ -399,7 +401,7 @@ Every run — success or early stop — ends with a report:
 
 - **Mission / your unique name / reported-at timestamp**
 - **Worktree / branch**
-- **Status**: `DONE`, `BLOCKED_ON_DEPENDENCY`, or `STUCK`
+- **Status**: `DONE`, `BLOCKED_ON_DEPENDENCY`, `STUCK`, or `PARKED` (on a park message only)
 - **Summary**: what was built, in a sentence or two
 - **Assumptions made**, including any access-control calls, and why
 - **Blast radius**: `ROUTINE` or `IRREVERSIBLE` — what MERGING this causes, not

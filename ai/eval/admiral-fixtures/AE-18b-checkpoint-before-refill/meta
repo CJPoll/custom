@@ -1,0 +1,5 @@
+# AE-18b — layer 2: the control checkpoint runs BEFORE a refill dispatch.
+invariant = fleet-control check runs before every dispatch point (refill)
+home      = resident (dispatch checkpoint) + athena:dispatch-captain step 0
+mode      = next-action
+expect_order = fleet-control.check < agent.spawn-captain

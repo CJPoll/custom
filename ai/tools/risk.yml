@@ -82,6 +82,10 @@ tools:
   # explicitly denies merge/commit/push/forge/--update-baseline — no external
   # or irreversible effect, so idempotent (never destructive).
   variant-eval:            { class: idempotent, reason: measure }
+  # fleet-control (DND-443) READS a session's control state from the Athena
+  # server (a GET) and writes only this machine's own control cache under
+  # $XDG_STATE_HOME. It changes no external state.
+  fleet-control:           { class: idempotent, reason: cache }
 
   # --- destructive: external/irreversible, or grants that capability ---
   gh-athena:               { class: destructive, reason: forge }

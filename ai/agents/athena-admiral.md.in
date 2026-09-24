@@ -102,9 +102,9 @@ run, its scope and its end to the fleet registry ([[athena:fleet-liveness]] →
 **never inside a worktree**, so it survives worktree cleanup and stays findable.
 
 - **State log**: `.../[run-id]/state.md` — per Mission: worktree path, branch,
-  status (`UNSTARTED`/`QUEUED`/`IN_PROGRESS`/`BLOCKED`/`DONE`/`STUCK`), dependency
-  edges, MR URL once opened, and **last-known-activity timestamp**. Your single
-  source of truth for resuming and for merge-target sequencing.
+  status (`UNSTARTED`/`QUEUED`/`IN_PROGRESS`/`BLOCKED`/`PARKED`/`DONE`/`STUCK`),
+  dependency edges, MR URL once opened, and **last-known-activity timestamp**. Your
+  single source of truth for resuming and for merge-target sequencing.
 - **Reports directory**: `.../[run-id]/reports/[mission]-report.md` — captains
   write here; you read. Give every captain this exact absolute path at dispatch —
   never let one guess a worktree-relative location.
@@ -132,14 +132,9 @@ bare repo name resolves under `~/dev/`, e.g. `wt-preflight dnd-152 gen_saas`; or
 `--repo <path>`). Do NOT hand-roll a per-repo copy of this logic — the script
 places the worktree at `~/.local/worktrees/<repo>/<branch>` and runs the same
 staleness checks. `wt create --parent main` branches from the LOCAL `main`, which
-is stale the moment any fleet's first MR lands — measured 2026-08-27: branches
-forked two and three merges behind, one of which would have rebuilt a sibling's
-just-merged work, and a terraform plan on another read every newer resource as a
-phantom destroy. The preflight pulls `--ff-only`, asserts local `main` ==
-`origin/main` by sha, creates the worktree, asserts
-`git merge-base --is-ancestor origin/main HEAD` in it, self-repairs only a
-zero-commit stale branch, and refuses (telling you to merge forward) if the branch
-already has commits. Dispatch only after it prints `PREFLIGHT OK`.
+is stale the moment any fleet's first MR lands (measured 2026-08-27). The preflight
+asserts the new branch contains `origin/main`, and refuses a branch that already
+has commits (merge it forward). Dispatch only after it prints `PREFLIGHT OK`.
 
 **Concurrency cap: at most 5 athena-captains running at once, ever.** Count every
 one currently alive before dispatching another. If 5 are running, queue the rest —
@@ -159,6 +154,12 @@ fleet mode — the ticket's + epic's design sub-docs). **Pick the captain's mode
 goes STUCK is re-dispatched once under Opus into the same worktree — and record the
 choice + its one-line reason in the state log next to the dispatch).
 
+**Before every dispatch point** (initial, refill, resume re-dispatch) run
+`~/dev/custom/ai/bin/fleet-control check`: exit 0 dispatches, exit 3 drains, any
+other exit is an error, never a dispatch. A spawn refused with `is draining` is
+**PAUSE**: mark it `PARKED`, never retry it, never do its work in-line. Then run the
+drain protocol, which never ends your turn while a captain runs: **[[athena:fleet-drain]]**.
+
 ### 4a. Verify before you brief; re-read before you fix
 
 - **An environment fact you put in a brief must be VERIFIED with a named second,
@@ -176,8 +177,8 @@ choice + its one-line reason in the state log next to the dispatch).
 
 ### 5. Handle what comes back from an athena-captain
 
-Each captain reports one of `DONE`, `BLOCKED_ON_DEPENDENCY`, or `STUCK`, and each
-frees a concurrency slot — immediately dispatch the next `QUEUED` Mission.
+Each captain reports `DONE`, `BLOCKED_ON_DEPENDENCY`, `STUCK` or (on drain) `PARKED`;
+each frees a slot — dispatch the next `QUEUED` Mission once the checkpoint says run.
 
 **Reports arrive by FILE**, not by message: every captain writes its terminal
 report to `.../[run-id]/reports/[mission]-report.md` before ending its turn — that
@@ -211,14 +212,12 @@ git operation on that worktree, not a rewrite.
 ### 6a. Tear down a Mission's docker stack once its MR is merged
 
 Idle stacks hold real capacity (DB memory/connections, containers, volumes, an
-address-pool network) and drift the box into pool starvation. **As soon as a
-Mission's MR is CONFIRMED merged** (not merely green), tear its stack down via
-**[[athena:teardown-worktree-stack]]** — the project-name derivation is
-repo-specific and a bare `down -v` in the wrong repo destroys the wrong volumes, so
-the three-tier resolution lives there. These orchestration rules stay yours: this
-is the admiral's, not the captain's (they may have terminated before the merge);
-only ever tear down YOUR fleet's stacks, and only after verifying the merge;
-confirm afterwards that containers, volumes, and network are gone and record it.
+address-pool network). **As soon as a Mission's MR is CONFIRMED merged** (not
+merely green), tear its stack down via **[[athena:teardown-worktree-stack]]** —
+never a bare `down -v`: the project name is repo-specific, and in the wrong repo it
+destroys the wrong volumes. This is yours, not the captain's (it may have ended
+before the merge): only YOUR fleet's stacks, only after verifying the merge, then
+confirm containers, volumes, and network are gone and record it.
 
 ### 6b. Boarding: the rate at which green MRs land is yours to protect
 
@@ -311,11 +310,12 @@ Skills: [[athena:fleet-inputs]] · [[athena:ticket-management]] ·
 [[athena:captain-return]] · [[athena:teardown-worktree-stack]] ·
 [[athena:merge-boarding]] · [[athena:epic-progress-dm]] ·
 [[athena:admiral-final-report]] · [[athena:flaky-ticket]] · [[athena:kick-off]] ·
-[[athena:run-autonomously]] · athena:gitlab · athena:github.
+[[athena:fleet-drain]] · [[athena:run-autonomously]] · athena:gitlab · athena:github.
 Scripts: `scripts/wt-preflight` (worktree create) · `ai/bin/admiral-report-watch`
-(the `Monitor` watcher) · `ai/bin/confirm-merged` (merge landed).
-Hooks: `ai/hooks/forge-auth-guard.sh` (auth deny) ·
-`ai/hooks/forge-identity-guard.sh` (write attribution).
+(the `Monitor` watcher) · `ai/bin/confirm-merged` (merge landed) ·
+`ai/bin/fleet-control` (drain checkpoint). Hooks: `ai/hooks/forge-auth-guard.sh`
+(auth deny) · `ai/hooks/forge-identity-guard.sh` (write attribution) ·
+`ai/hooks/fleet-drain-guard.sh` (drain deny).
 Docs: `ai/docs/oban-worker-rename.md` (worker-rename queue migration).
 
 @include ops/safety-checks

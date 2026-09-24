@@ -6,14 +6,19 @@
 # even when nothing changed — so the admiral's 3b staleness rule fires on a
 # quiet run instead of only in theory.
 #
+# It also watches this session's CONTROL state (DND-443; athena-events.md ->
+# Enforcement layers -> Layer 2): about every 60 s it runs
+# `ai/bin/fleet-control check` (which asks the server and refreshes the control
+# cache), and prints `CONTROL: drain ...` when the session turns to drain,
+# `CONTROL: run ...` when it returns to run, and `CONTROL: unknown ...` when the
+# check errors. A waiting admiral wakes on the line and runs its drain protocol
+# (athena:fleet-drain). The first answer prints only when it is not run.
+#
 # CONTRACT: run this under the harness `Monitor` primitive with
 # `persistent: true` — it is the sanctioned harness-wakeup path (CLAUDE.md
 # safe-wait pattern #1). Do NOT launch it via a bare `Bash` call: its own
 # `while` loop is a legitimate external poll that belongs to Monitor, not a
 # hand-rolled shell spin.
-#
-# Usage:
-#   admiral-report-watch <run-id>
 #
 # The reports directory is
 #   ~/dev/custom/ai-artifacts/coordination/<run-id>/reports
@@ -24,9 +29,20 @@ set -u
 
 usage() {
   cat <<'EOF'
-Usage: admiral-report-watch <run-id>
-  Emit one line per new captain report under the run's reports dir.
+Usage: admiral-report-watch <run-id> [--session-id S] [--reports-dir DIR]
+                            [--poll-s N] [--control-s N] [--max-loops N]
+  Emit one line per new captain report under the run's reports dir, a
+  STALENESS SWEEP DUE line about every 45 min, and a CONTROL: line when this
+  session's control state changes (drain / run / unknown; fleet-control check
+  about every 60 s).
   Run under the harness Monitor primitive (persistent: true), not bare Bash.
+
+  --session-id S    top-level session id (default: $CLAUDE_CODE_SESSION_ID;
+                    with neither, CONTROL watching is off and says so once)
+  --reports-dir D   watch D instead of the run's coordination reports dir
+  --poll-s N        seconds between report scans (default 20)
+  --control-s N     seconds between control checks (default 60)
+  --max-loops N     stop after N scans (default: never; for tests)
 
   admiral-report-watch --help   this text
 EOF
@@ -35,26 +51,78 @@ EOF
 # --help is a SUCCESSFUL outcome: usage on stdout, exit 0. A missing run-id is
 # a real error and keeps stderr + a non-zero code, so the two stay
 # distinguishable to a caller.
-case "${1:-}" in
-  -h|--help) usage; exit 0 ;;
-  "")
-    usage >&2
-    echo "Fix: pass the run-id, e.g. \`admiral-report-watch 2026-09-20-notif-platform\`." >&2
-    exit 2
-    ;;
-esac
+die() {
+  usage >&2
+  echo "Fix: $1" >&2
+  exit 2
+}
 
-run_id="$1"
+run_id="" session_id="${CLAUDE_CODE_SESSION_ID:-}" reports_dir="" poll_s=20 control_s=60 max_loops=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --session-id)  [ "$#" -ge 2 ] || die "--session-id needs a value."; session_id="$2"; shift 2 ;;
+    --reports-dir) [ "$#" -ge 2 ] || die "--reports-dir needs a value."; reports_dir="$2"; shift 2 ;;
+    --poll-s)      [ "$#" -ge 2 ] || die "--poll-s needs a value."; poll_s="$2"; shift 2 ;;
+    --control-s)   [ "$#" -ge 2 ] || die "--control-s needs a value."; control_s="$2"; shift 2 ;;
+    --max-loops)   [ "$#" -ge 2 ] || die "--max-loops needs a value."; max_loops="$2"; shift 2 ;;
+    -*) die "unknown flag $1; see --help." ;;
+    *) [ -z "${run_id}" ] || die "one run-id only (got ${run_id} and $1)."; run_id="$1"; shift ;;
+  esac
+done
+[ -n "${run_id}" ] || die "pass the run-id, e.g. \`admiral-report-watch 2026-09-20-notif-platform\`."
+for n in "${poll_s}" "${control_s}" "${max_loops}"; do
+  [[ "${n}" =~ ^[0-9]{1,6}$ ]] || die "--poll-s, --control-s and --max-loops take whole seconds / counts (got ${n@Q})."
+done
 
 # Resolve the custom repo root (this script lives in <repo>/ai/bin).
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
-reports_dir="$repo_root/ai-artifacts/coordination/$run_id/reports"
+[ -n "${reports_dir}" ] || reports_dir="$repo_root/ai-artifacts/coordination/$run_id/reports"
+fleet_control="$repo_root/ai/bin/fleet-control"
 seen="/tmp/admiral-$run_id-seen"
 
 mkdir -p "$reports_dir"
 : > "$seen"
 last_sweep=$(date +%s)
 
+# The control check runs as a background child we wait on, so a TERM to this
+# watcher is handled at once (bash defers a trap while a FOREGROUND child
+# runs), and the trap reaps the child: nothing outlives the Monitor.
+child=""
+ctl_out="$(mktemp)"
+trap '[ -n "${child}" ] && kill "${child}" 2>/dev/null; rm -f -- "${ctl_out}"' EXIT
+trap 'exit 143' TERM INT HUP
+
+control_state=""   # "" = never read; else run | drain | unknown:<rc>
+last_control=0
+
+check_control() {
+  local rc state line
+  if [ -z "${session_id}" ]; then
+    [ "${control_state}" = "off" ] || echo "CONTROL: unavailable — no session id (\$CLAUDE_CODE_SESSION_ID is unset). Fix: restart this watcher with --session-id <top-level session id>; until then run ai/bin/fleet-control check before every dispatch yourself."
+    control_state="off"
+    return 0
+  fi
+  timeout 30 "${fleet_control}" check --session-id "${session_id}" >"${ctl_out}" 2>/dev/null &
+  child=$!
+  wait "${child}"; rc=$?
+  child=""
+  line="$(head -n 1 "${ctl_out}")"
+  case "${rc}" in
+    0) state=run ;;
+    3) state=drain ;;
+    *) state="unknown:${rc}" ;;
+  esac
+  [ "${state}" = "${control_state}" ] && return 0
+  case "${state}" in
+    drain) echo "CONTROL: drain — ${line}. Run the drain protocol now (athena:fleet-drain): dispatch nothing." ;;
+    run)   [ -n "${control_state}" ] && echo "CONTROL: run — ${line}. The session is back to run; a drained admiral is resumed by the top-level session (athena:fleet-drain → Resume)." ;;
+    *)     echo "CONTROL: unknown — fleet-control check exited ${rc#unknown:} (${line:-no answer}). Fix: run ai/bin/fleet-control check by hand; never read an error as run, so dispatch nothing until it answers 0." ;;
+  esac
+  control_state="${state}"
+}
+
+loops=0
 while true; do
   find "$reports_dir" -name '*-report.md' -newer "$seen" -print
   touch "$seen"
@@ -63,5 +131,11 @@ while true; do
     echo "STALENESS SWEEP DUE: $(date -u +%FT%TZ) — reconcile every IN_PROGRESS Mission"
     last_sweep=$now
   fi
-  sleep 20
+  if [ $((now - last_control)) -ge "${control_s}" ]; then
+    check_control
+    last_control=$now
+  fi
+  loops=$((loops + 1))
+  [ "${max_loops}" -gt 0 ] && [ "${loops}" -ge "${max_loops}" ] && exit 0
+  sleep "${poll_s}"
 done

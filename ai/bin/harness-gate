@@ -62,6 +62,10 @@ STATIC_CHECKS = [
   # 60 s throttle, zero added latency, and surfaced failures. The CLI's own
   # suite (ai/lib/fleet/test/self-test.sh) is discovered, not declared.
   ["fleet-report hook self-test", %w[ai/hooks/fleet-report.self-test.sh]],
+  # fleet-drain-guard (DND-443): the PreToolUse(Agent|Task) drain guard. Its
+  # matrix is a dedicated .self-test.sh; the fleet-control suite
+  # (ai/lib/fleet/test/control/self-test.sh) is discovered, not declared.
+  ["fleet-drain-guard self-test", %w[ai/hooks/fleet-drain-guard.self-test.sh]],
   ["athena-inbox-poll self-test", %w[ai/hooks/athena-inbox-poll.self-test.sh]],
   # flaky-marker-sweep is a SessionStart side-effect hook (DND-277): it ages out
   # a >12h-stale flaky-coordinator marker, independent of lane activity. Its
