@@ -222,7 +222,8 @@ did the event carry its own direct delivery?"*:
   *applied*), **or** the event is an addressed `fleet.session.message` or
   `fleet.session.control_changed` that received its own direct (rule-less)
   delivery (D40; *Declared families beyond the first pass* —
-  `fleet.session.message`, `fleet.session.control_changed`). **Not** dead-lettered, regardless
+  `fleet.session.message`, `fleet.session.control_changed`). **Not**
+  dead-lettered, regardless
   of what then happens to the individual deliveries.
 - **UNMATCHED** — **none** of the **event owner's** enabled rules applies to the
   event's `type` at all (no owner rule's declared `event_type(s)` includes it),
@@ -2983,14 +2984,26 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   - `live` when seen within the live window (default 5 min);
   - `idle` when silent past the live window, with no admiral run in `running`
     or `draining`;
-  - `lost` when silent past the live window while one of its admiral runs is
+  - `quiet` when silent past the live window while one of its admiral runs is
+    `running` or `draining`, but not past the lost window;
+  - `lost` when silent past the lost window while one of its admiral runs is
     `running` or `draining`: a fleet stopped reporting, most likely killed;
   - `ended` when `session_ended` arrived (basis `reported`), or when silent
     past the stale window (default 24 h) with no end report (basis
     `inferred`). The basis is always shown.
+- **"Seen" counts every report from the session**, from any agent in it. A
+  captain's tool calls keep its admiral's session seen.
+- **The lost window MUST exceed the longest interval in which a healthy fleet
+  can make no tool call at all.** An admiral waiting on its captains makes no
+  tool call until `ai/bin/admiral-report-watch` prints a line. Its staleness
+  sweep (every 2700 s today) makes the admiral sweep its fleet, which is tool
+  calls. So the default lost window is 60 min, and a change to either number
+  moves the other. A shorter window would read a waiting fleet as `lost`.
 - An **admiral run** reads its reported state (`running`, `draining`, `drained`,
-  `finished`), except that a `running` or `draining` run with no `admiral_seen`
-  within the live window reads `lost`.
+  `finished`), except that a `running` or `draining` run reads `lost` when its
+  session does. `admiral_seen` shows the admiral's own last activity. It never
+  decides `lost` alone, because a waiting admiral is silent while its captains
+  work.
 - **`scope unreported`** is an admiral run that never sent `admiral_scope`. It
   MUST read differently from an empty scope (`no missions`), which is a
   reported fact. An `admiral_seen` whose `agent_id` matches no started run
@@ -3092,19 +3105,21 @@ measured every property it relies on (Claude Code 2.1.281):
   also list `Task`). PreToolUse fires for Agent calls made by the top-level
   session and by any subagent, foreground or background, headless or
   interactive.
-- It MUST key on `tool_input.subagent_type`, which is always present, and act
-  only when that is a fleet worker (`athena-admiral`, `athena-captain`). Any
-  other spawn passes untouched and without a server call. It MUST NOT key on
+- It MUST key on `tool_input.subagent_type` and act only when that is a fleet
+  worker (`athena-admiral`, `athena-captain`). Any other spawn passes untouched
+  and without a server call. DND-428 saw the field on every spawn it probed. A
+  spawn without it runs the Agent tool's default agent, which is never a fleet
+  worker, so it passes too. It MUST NOT key on
   `tool_input.run_in_background`, which is absent whenever the harness
   backgrounds a spawn on its own, nor on the presence of `agent_id`.
 - It MUST look up control by stdin's `session_id`, the top-level session's id
   at every depth, through `fleet-control check`. So one answer covers admiral
   and captain spawns alike.
 - On `drain` it MUST answer `permissionDecision: deny`. That stops the spawn in
-  default, `auto` and `bypassPermissions` modes. Stdin it cannot parse, or
-  with no `session_id` or no `tool_input.subagent_type`, is never read as a
-  non-fleet spawn: the hook denies it with a `Fix:` naming the missing field,
-  because a spawn it cannot classify is one it cannot clear.
+  default, `auto` and `bypassPermissions` modes. Stdin it cannot parse, and a
+  fleet-worker spawn whose stdin has no `session_id`, are never read as
+  cleared: the hook denies each with a `Fix:` naming the problem, because a
+  spawn it cannot classify, or cannot look up, is one it cannot clear.
 - The caller sees only an error string, `PreToolUse:Agent hook error: <reason>`,
   with `is_error: true`. So the deny reason carries the whole instruction:
   `Fix: fleet session <claude_session_id> is draining (<reason>, until <until>; basis <basis>) — this spawn was refused, not failed: do not retry it and do not do its work in-line; run the drain protocol, then wait for the session to return to run (override on the fleet page to force it).`
