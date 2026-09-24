@@ -524,7 +524,8 @@ def parse_frontmatter(path, block)
   end
 end
 
-# --agent-file PATH selects the subject; the default is THIS checkout's render,
+# --agent-file PATH selects the subject; the default is THIS checkout's render
+# (validated at the same model_argv call in run_model, before any model call),
 # the same file subject_fingerprint records. Returns [absolute_path, nil] or
 # [nil, error_message_with_Fix].
 def resolve_agent_file(argv)
@@ -538,7 +539,7 @@ def resolve_agent_file(argv)
   end
 
   path = File.expand_path(raw)
-  agent_definition(path)
+  model_argv(path) # loads AND size-checks the subject, so every SubjectError surfaces here
   [path, nil]
 rescue SubjectError => e
   [nil, e.message]
@@ -746,6 +747,8 @@ def run_model(runs:, only:, update:, agent_file: AGENT_FILE)
   # load fails here, loudly, instead of per case.
   argv = model_argv(agent_file)
   subject = subject_fingerprint(agent_file)
+  # variant-eval parses this line (confirm_t2_subject!) to prove which render ran;
+  # keep its `subject: ... sha <12 hex> (loaded inline via --agents` shape.
   puts "subject: #{subject['file']} #{subject['lines']} lines sha #{subject['sha256'][0, 12]} " \
        "(loaded inline via --agents as #{SUBJECT_KEY})"
   results = dirs.map { |d| evaluate(d, runs: runs, argv: argv) }
@@ -1137,6 +1140,13 @@ def self_test
     fail.("a valueless --agent-file must be an error with a Fix:") unless err.to_s.include?("Fix:")
     _path, err = resolve_agent_file(["--run", "--agent-file", bad["missing file"]])
     fail.("a missing --agent-file must be an error with a Fix:") unless err.to_s.include?("Fix:")
+    # An over-size render must fail at RESOLUTION (the CLI's exit-2 path), not
+    # as an unrescued raise from run_model.
+    big = File.join(d, "big.md")
+    File.write(big, front + ("x" * (MAX_SUBJECT_ARG_BYTES + 1)) + "\n")
+    path, err = resolve_agent_file(["--run", "--agent-file", big])
+    fail.("an over-size --agent-file must be a resolution error with a Fix:") \
+      unless path.nil? && err.to_s.include?("Fix:") && err.to_s.include?("single-argument limit")
   end
 
   if ok

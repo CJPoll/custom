@@ -60,7 +60,10 @@ symlink to the **main checkout**, whatever the cwd. So baseline and variant
 scored the same admiral and the T2 delta could only show noise. Now each side
 runs `admiral-eval --run --agent-file <its worktree>/ai/agents/athena-admiral.md`,
 and `admiral-eval` passes that file's prose inline (`--agents`) under a key no
-agents directory supplies. The proposal prints both subjects' sha and says
+agents directory supplies. Each side must print a `subject: … sha <12 hex>`
+line matching the render it was handed, or variant-eval refuses to score. A ref
+from before DND-503 ignores `--agent-file` and fails this check, so use a
+`--baseline` at or after it. The proposal prints both subjects' sha and says
 **IDENTICAL** when the variant does not change the render.
 
 Gate short-circuit: before any delta, the variant ref is run through the standing

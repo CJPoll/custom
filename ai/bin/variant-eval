@@ -391,12 +391,32 @@ def t2_subject(wt)
   { "file" => path, "lines" => body.lines.size, "sha256" => Digest::SHA256.hexdigest(body) }
 end
 
+# admiral-eval prints `subject: <file> N lines sha <12 hex> (loaded inline via
+# --agents ...)` before any case runs. Require that line, with the sha of the
+# render t2_subject fingerprinted, before scoring a side. Without it the
+# proposal could print a fingerprint for a render that never ran: a ref from
+# before DND-503 ignores --agent-file and evaluates the main checkout's admiral.
+T2_SUBJECT_LINE = /^subject: .* sha ([0-9a-f]{12}) \(loaded inline via --agents/.freeze
+
+def confirm_t2_subject!(out, expected, side)
+  m = out.to_s.match(T2_SUBJECT_LINE)
+  want = expected["sha256"][0, 12]
+  return if m && m[1] == want
+
+  got = m ? "sha #{m[1]}" : "no `subject:` line"
+  raise "the #{side} T2 run did not confirm it evaluated #{expected['file']} (sha #{want}); its " \
+        "admiral-eval reported #{got}. Fix: the #{side} ref's ai/bin/admiral-eval must support " \
+        "--agent-file (DND-503) — use a ref at or after that change, or run --corpus deterministic; " \
+        "if the admiral-eval run failed, run `#{t2_argv('<wt>', 1).join(' ')}` in that ref to see why."
+end
+
 # Characterize the T2 model-in-loop cases in a worktree by running
 # admiral-eval --run --runs N --agent-file <wt's render> and parsing its
 # per-case rate column. Returns { case_name => pass_fraction }.
-def collect_t2_fractions(wt, runs)
+def collect_t2_fractions(wt, runs, subject, side)
   fractions = {}
   out, _err, _st = capture(t2_argv(wt, runs), chdir: wt)
+  confirm_t2_subject!(out, subject, side)
   out.each_line do |line|
     # Format: "PASS <name> <passes/samples> [<mode>] <detail>"
     m = line.match(/\A(?:PASS|FAIL)\s+(\S+)\s+(\d+)\/(\d+)\b/)
@@ -436,8 +456,8 @@ def measure(variant:, baseline:, corpus:, runs:, out_file:)
 
       if corpus == "full"
         res[:t2_subjects] = { base: t2_subject(base_wt), var: t2_subject(var_wt) }
-        p_base = collect_t2_fractions(base_wt, runs)
-        p_var  = collect_t2_fractions(var_wt, runs)
+        p_base = collect_t2_fractions(base_wt, runs, res[:t2_subjects][:base], "baseline")
+        p_var  = collect_t2_fractions(var_wt, runs, res[:t2_subjects][:var], "variant")
         (p_base.keys | p_var.keys).sort.each do |name|
           pb = p_base[name] || 0.0
           pv = p_var[name] || 0.0
@@ -595,6 +615,31 @@ def self_test
     fail.("identical T2 subjects must be called out") unless same_out.include?("IDENTICAL")
     diff_out = render_proposal(t2_res.merge(t2_subjects: { base: sb, var: sv }))
     fail.("differing T2 subjects must not be called identical") if diff_out.include?("IDENTICAL")
+
+    # The side's admiral-eval must CONFIRM it evaluated that render. A ref from
+    # before DND-503 has an admiral-eval that silently ignores --agent-file and
+    # runs the main checkout's admiral, while t2_subject still fingerprints the
+    # worktree's render: the proposal would certify a subject that never ran.
+    line = "subject: ai/agents/athena-admiral.md 5 lines sha #{sv['sha256'][0, 12]} " \
+           "(loaded inline via --agents as athena-admiral-eval-subject)\n"
+    begin
+      confirm_t2_subject!("PASS AE-01 3/3 [next-action] ok\n" + line, sv, "variant")
+    rescue RuntimeError => e
+      fail.("a matching subject line must confirm the subject (raised: #{e.message})")
+    end
+    {
+      "no subject line (a pre-DND-503 admiral-eval)" => "PASS AE-01 3/3 [next-action] ok\n",
+      "a different subject sha" => line.sub(sv["sha256"][0, 12], sb["sha256"][0, 12])
+    }.each do |label, out|
+      begin
+        confirm_t2_subject!(out, sv, "variant")
+        fail.("#{label}: an unconfirmed T2 subject must raise, never score")
+      rescue RuntimeError => e
+        fail.("#{label}: the refusal must carry a Fix:") unless e.message.include?("Fix:")
+      end
+    end
+    fail.("collect_t2_fractions must confirm the evaluated subject") \
+      unless File.read(__FILE__)[/^def collect_t2_fractions.*?^end$/m].to_s.include?("confirm_t2_subject!(")
 
     # The measurement path must actually USE t2_argv: a correct t2_argv that the
     # runner bypasses would leave both sides on the main checkout's admiral.
