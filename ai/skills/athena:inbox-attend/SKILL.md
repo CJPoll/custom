@@ -90,7 +90,9 @@ is the brief, not the message.
    so saying it keeps the counts-only rule. A `STALE` line is a relay question,
    not a reason to act on a message: run `athena:inbox/bin/inbox-doctor` and
    relay its `client-liveness` / `server-reachability` findings to the owner if
-   either is not `ok`.
+   either is not `ok`. A doctor result that is not `ok` is your own
+   observation, so it is also a finding to ticket (`~/.claude/CLAUDE.md` →
+   *Find it, ticket it, fix it, verify it live*).
 3. **Re-arm the waiter NOW — right after reading and acking, before you reply
    or investigate.** Launch `athena:inbox/bin/inbox-wait` with
    `run_in_background` so the next doorbell wakes you again (`athena:inbox` →

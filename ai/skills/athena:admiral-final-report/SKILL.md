@@ -15,6 +15,9 @@ reason** (see the trigger note below) — produce a summary:
 - Missions still blocked, and on what
 - Missions stuck, and why
 - New Missions created for discovered dependencies
+- Findings ticketed during the run, including captains' proposed tickets you
+  filed, as one batched list with priorities (`~/.claude/CLAUDE.md` → *Find it,
+  ticket it, fix it, verify it live*)
 - Assumptions you made unassisted, and why
 - Location of the full state log for anyone picking this up later
 

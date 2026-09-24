@@ -97,6 +97,12 @@ Give the captain, in the brief:
   judge blocks a fix commit without the evidence, so a captain who learns the
   rule from the critic pays a whole review round for it.
 
+- **The findings rule, cited by name.** Every brief carries this line: *"An
+  anomaly you find outside this Mission follows `~/dev/custom/ai/CLAUDE.md` →
+  *Find it, ticket it, fix it, verify it live*: list it in your report as a
+  proposed ticket with a priority; do not fix it in this MR."* Cite it; do not
+  restate it.
+
 **In fleet mode, also point it at the design in Notion** — its ticket page's
 three sub-docs (**Product Requirements / Architecture & Engineering / QA Plan**)
 AND the epic's three, which it reads for full context — as the design it

@@ -443,6 +443,10 @@ Owner DMs fire on merge for an epic-boundary crossing — see
 [[athena:epic-progress-dm]]. Tear the stack down per
 [[athena:teardown-worktree-stack]] only after this confirmation.
 
+Landed is not working. A post-deploy live verify that disagrees with
+expectation is a finding: ticket it and route it to the fleet
+(`~/.claude/CLAUDE.md` → *Find it, ticket it, fix it, verify it live*).
+
 ## Oban worker-rename gate
 
 Before merging an MR that renames an Oban worker module, confirm it ships its
