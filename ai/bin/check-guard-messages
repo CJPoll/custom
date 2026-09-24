@@ -65,8 +65,9 @@ GUARD_BINS = %w[
   variant-eval
 ].freeze
 
-def hook_guards
-  Dir.glob(File.join(HOOKS_DIR, "*.sh"))
+def hook_guards(hooks_dir = HOOKS_DIR)
+  # FNM_DOTMATCH (DND-422): a dot-prefixed hook still needs its Fix: marker.
+  Dir.glob(File.join(hooks_dir, "*.sh"), File::FNM_DOTMATCH)
      .reject { |p| p.end_with?(".self-test.sh") }
      .reject { |p| EXEMPT.key?(File.basename(p)) }
      .sort
@@ -128,6 +129,17 @@ def run_self_test
     end
     if scan([bad]).empty?
       warn "self-test: FAIL — a guard WITHOUT '#{MARKER}' was not flagged"; ok = false
+    end
+
+    # DND-422: a dot-prefixed hook is enumerated; its .self-test.sh is not.
+    hooks = File.join(dir, "hooks")
+    FileUtils.mkdir_p(hooks)
+    File.write(File.join(hooks, ".hidden-guard.sh"), "#!/bin/sh\n")
+    File.write(File.join(hooks, ".hidden-guard.self-test.sh"), "#!/bin/sh\n")
+    got = hook_guards(hooks).map { |p| File.basename(p) }
+    unless got == [".hidden-guard.sh"]
+      warn "self-test: FAIL — expected hook_guards to enumerate exactly " \
+           "[.hidden-guard.sh], got #{got.inspect}"; ok = false
     end
   ensure
     FileUtils.rm_rf(dir)

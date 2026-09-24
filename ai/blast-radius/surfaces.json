@@ -15,7 +15,12 @@
     "(ai/blocks/ops/safety-checks.md) -- excluding a path to go green is the named",
     "forbidden move, and here it would silently restore the exact hole this exists to",
     "close. If a pattern is genuinely wrong, the OWNER decides, and the change cites",
-    "the evidence."
+    "the evidence.",
+    "",
+    "Matching (ai/bin/blast-radius -> match?): fnmatch with FNM_PATHNAME, FNM_EXTGLOB",
+    "and FNM_DOTMATCH, so `*` and `**/` reach dot-prefixed files and directories",
+    "(gen_saas's .pkg/prod/tf read COLD without it -- DND-422). A leading `**/` also",
+    "matches at the repo root, and a trailing `/**` matches at ANY depth below."
   ],
   "surfaces": [
     {

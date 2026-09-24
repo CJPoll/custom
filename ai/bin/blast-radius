@@ -89,7 +89,12 @@ PROG = "blast-radius"
 # avoid, reintroduced inside the check itself.
 DEFAULT_MANIFEST = File.expand_path("../blast-radius/surfaces.json", __dir__)
 
-FNM = File::FNM_PATHNAME | File::FNM_EXTGLOB
+# FNM_DOTMATCH is load-bearing (DND-422). Without it `*` and `**/` never match
+# a leading `.`, so every `**/` surface silently skipped dot-prefixed
+# directories: gen_saas's auto-applied terraform root .pkg/prod/tf read COLD.
+# The flag only RELAXES matching -- any path matched without it still matches --
+# so it widens every surface and narrows none. Pinned by self-test cases 6b-6d.
+FNM = File::FNM_PATHNAME | File::FNM_EXTGLOB | File::FNM_DOTMATCH
 
 # Branch names treated as the default branch for trigger matching.
 DEFAULT_BRANCHES = %w[main master].freeze
@@ -206,15 +211,22 @@ end
 # `**/*.tf` must also match a REPO-ROOT `main.tf`. Under FNM_PATHNAME a leading
 # `**/` does not match zero directories, so the depth-0 form is tried too. This
 # is pinned by a self-test case; without it every root-level terraform file
-# would read as COLD.
+# would read as COLD. The fallback uses the same FNM (so DOTMATCH too): a
+# repo-root `.terraform.lock.hcl` or a `.x.tf` must not slip through it.
+#
+# A TRAILING `/**` has the mirror-image trap (DND-422): under FNM_PATHNAME it
+# behaves like `/*` and matches ONE level only, so `**/helm/**` missed
+# helm/chart/templates/deploy.yaml and `**/k8s/**` missed k8s/base/app.yaml.
+# The `/**/*` form -- any depth below -- is tried too. Every variant only ADDS
+# to the original pattern, so this widens and never narrows.
 def match?(pattern, path)
-  return true if File.fnmatch?(pattern, path, FNM)
+  pattern_variants(pattern).any? { |p| File.fnmatch?(p, path, FNM) }
+end
 
-  if pattern.start_with?("**/")
-    return File.fnmatch?(pattern.sub(%r{\A\*\*/}, ""), path, FNM)
-  end
-
-  false
+def pattern_variants(pattern)
+  variants = [pattern]
+  variants << pattern.sub(%r{/\*\*\z}, "/**/*") if pattern.end_with?("/**")
+  variants + variants.select { |p| p.start_with?("**/") }.map { |p| p.sub(%r{\A\*\*/}, "") }
 end
 
 # Split an Ecto migration into [region, line] pairs.
@@ -444,6 +456,13 @@ end
 
 # --- automation detection ---------------------------------------------------
 
+# Every workflow file, dot-prefixed ones included (DND-422): a glob without
+# FNM_DOTMATCH skips `.deploy.yml`, and a skipped deploy workflow reads as
+# CONFIRMED-ABSENT -- a WARM pass for a repo that deploys on merge.
+def workflow_files(repo)
+  Dir.glob(File.join(repo, ".github", "workflows", "*.{yml,yaml}"), File::FNM_DOTMATCH).sort
+end
+
 # Returns [state, detail] where state is one of
 # "CONFIRMED" / "UNDETERMINED" / "CONFIRMED-ABSENT".
 #
@@ -454,7 +473,7 @@ end
 def detect_automation(repo)
   wf_dir = File.join(repo, ".github", "workflows")
   if Dir.exist?(wf_dir)
-    files = Dir.glob(File.join(wf_dir, "*.{yml,yaml}")).sort
+    files = workflow_files(repo)
     if files.empty?
       # The directory exists but holds no workflow: fall through to the other
       # forge shapes rather than claiming provable absence.
@@ -541,13 +560,118 @@ def trigger_hit(on)
   nil
 end
 
+# --- terraform apply roots (a NOTE, never a verdict input) ------------------
+#
+# A repo can hold several terraform roots, and merging applies only some of
+# them. gen_saas: post-merge.yml runs `terraform apply -auto-approve` in
+# .pkg/prod/tf on every merge, while .pkg/prod/tf/github and .pkg/prod/tf/kms
+# are applied by the owner by hand, so merging them is inert (DND-408/DND-422).
+# The owner deciding a held MR needs to know which one it is, so each terraform
+# hit names the merge-time apply that covers it -- read from the workflows,
+# never hardcoded.
+#
+# This NEVER changes the verdict. "No apply step found for this directory" is
+# an unproven negative: the directory may be a module the applied root sources,
+# or the apply may run from a script this parse cannot see. Downgrading on it
+# would be the failed-lookup-reads-as-empty class, so such a hit stays HOT and
+# the note says so.
+TF_FILE = /(\A|\/)(\.terraform\.lock\.hcl|[^\/]*\.(tf|tf\.json|tfvars|tfvars\.json|tfstate))\z/
+# The `apply` SUBCOMMAND, after any global flags (`terraform -chdir=x apply`) --
+# never a bare word later on the line (`terraform plan -out=apply.plan`).
+TF_APPLY = /\b(terraform|tofu)(\s+-\S+)*\s+apply\b/
+
+def norm_dir(dir)
+  d = dir.to_s.strip.sub(%r{\A(\./)+}, "").sub(%r{/+\z}, "")
+  d.empty? ? "." : d
+end
+
+# Returns { applies: [{dir:, where:}], scanned: n_workflows, steps: n_apply_steps }.
+# Only workflows that run on a default-branch merge count (trigger_hit).
+def terraform_apply_roots(repo)
+  applies = []
+  scanned = 0
+  workflow_files(repo).each do |f|
+    rel = f.sub("#{repo}/", "")
+    doc = begin
+      YAML.safe_load(File.read(f), aliases: true)
+    rescue StandardError
+      nil # detect_automation already reports an unparseable workflow as UNDETERMINED
+    end
+    next unless doc.is_a?(Hash)
+
+    on = doc.key?("on") ? doc["on"] : doc[true]
+    next if on.nil? || trigger_hit(on).nil?
+
+    scanned += 1
+    wf_dir = doc.dig("defaults", "run", "working-directory")
+    (doc["jobs"].is_a?(Hash) ? doc["jobs"] : {}).each do |job_id, job|
+      next unless job.is_a?(Hash) && job["steps"].is_a?(Array)
+
+      job_dir = job.dig("defaults", "run", "working-directory") || wf_dir
+      job["steps"].each do |step|
+        next unless step.is_a?(Hash) && step["run"].is_a?(String) && step["run"].match?(TF_APPLY)
+
+        chdir = step["run"][/-chdir=("[^"]+"|'[^']+'|\S+)/, 1]&.delete("\"'")
+        base = step["working-directory"] || job_dir || "."
+        dir = chdir ? File.join(base, chdir) : base
+        applies << { dir: norm_dir(dir), where: "#{rel} job #{job_id}" }
+      end
+    end
+  end
+  { applies: applies, scanned: scanned, steps: applies.size }
+end
+
+# The `./x` module sources declared by the top-level .tf files of `root` at head,
+# normalised. Read from the commit being merged, not the working tree. nil when
+# `git grep` itself failed (exit >1), so "could not look" never reads as "no
+# module" (exit 1 is git grep's genuine no-match).
+def module_sources(repo, head, root)
+  spec = root == "." ? ":(glob)*.tf" : ":(glob)#{root}/*.tf"
+  out, _, st = Open3.capture3("git", "-C", repo, "grep", "-h", "-E", "source[[:space:]]*=", head, "--", spec)
+  return nil if st.exitstatus.nil? || st.exitstatus > 1
+
+  out.scan(%r{source\s*=\s*"\./([^"]+)"}).flatten.map { |s| norm_dir(s) }
+end
+
+def apply_note(path, roots, repo, head)
+  return nil unless path.match?(TF_FILE)
+
+  dir = norm_dir(File.dirname(path))
+  if (a = roots[:applies].find { |x| x[:dir] == dir })
+    return "AUTO-APPLIED on merge: #{a[:where]} runs `terraform apply` in #{a[:dir]}"
+  end
+
+  if (a = roots[:applies].find { |x| x[:dir] == "." || dir.start_with?("#{x[:dir]}/") })
+    rel = a[:dir] == "." ? dir : dir.delete_prefix("#{a[:dir]}/")
+    mods = module_sources(repo, head, a[:dir])
+    if mods.nil?
+      return "under auto-applied root #{a[:dir]} (#{a[:where]}); could not read that root's " \
+             "module sources at head, so whether merging applies #{dir} is UNKNOWN -- still HOT."
+    end
+    if mods.any? { |m| rel == m || rel.start_with?("#{m}/") }
+      return "AUTO-APPLIED on merge: #{dir} is a module sourced by root #{a[:dir]}, which " \
+             "#{a[:where]} applies"
+    end
+
+    return "no merge-time `terraform apply` runs in #{dir}: it sits under auto-applied root " \
+           "#{a[:dir]} (#{a[:where]}) but that root's top-level .tf files do not source " \
+           "./#{rel} as a module. Likely a separate owner-applied root, so merging may be " \
+           "inert -- still HOT: an unproven negative fails closed."
+  end
+
+  "no merge-time `terraform apply` runs in #{dir} (scanned #{roots[:scanned]} merge-triggered " \
+    "workflow(s), #{roots[:steps]} apply step(s): " \
+    "#{roots[:applies].map { |x| x[:dir] }.uniq.join(', ').then { |s| s.empty? ? 'none' : s }}). " \
+    "Likely owner-applied, so merging may be inert -- still HOT: an unproven negative fails closed."
+end
+
 # --- reporting --------------------------------------------------------------
 
 def short(sha)
   sha.to_s[0, 7]
 end
 
-def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, automation, examined = [])
+def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, automation, examined = [], notes = {})
   puts "BLAST-RADIUS #{verdict} #{short(head)}"
   puts "  manifest: #{manifest} (#{surfaces.size} class(es), #{pattern_count} pattern(s))"
   # This line is the failed-lookup doctrine discharged: a zero can always name
@@ -576,6 +700,7 @@ def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, 
   width = hits.map { |h| h[:path].length }.max
   hits.each do |h|
     puts format("    %-#{width}s  [%s] %s", h[:path], h[:class], h[:why])
+    puts "      apply: #{notes[h[:path]]}" if notes[h[:path]]
   end
 end
 
@@ -655,10 +780,15 @@ def run(argv)
     return 0
   end
 
+  # Which terraform root merging APPLIES, per hit -- a note for the owner, never
+  # a verdict input (see terraform_apply_roots).
+  roots = terraform_apply_roots(repo)
+  notes = hits.to_h { |hh| [hh[:path], apply_note(hh[:path], roots, repo, head)] }.compact
+
   # HOT. The full block prints in every case -- including under
   # --owner-approval, which RECORDS the authorization, it never HIDES what was
   # authorized.
-  print_report("HOT", head, manifest, surfaces, pattern_count, files, hits, automation, examined)
+  print_report("HOT", head, manifest, surfaces, pattern_count, files, hits, automation, examined, notes)
 
   if owner_approval
     puts "BLAST-RADIUS HOT-OWNER-APPROVED #{short(head)} (OWNER-APPROVED: #{owner_approval})"
@@ -761,6 +891,97 @@ def self_test
     out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
     check.call("HOT: a REPO-ROOT main.tf matches `**/*.tf` (depth-0 trap)",
                code == 4 && out.include?("main.tf"), "exit=#{code} out=#{out}")
+
+    # 6b. DOT-DIRECTORY terraform (DND-422). Without FNM_DOTMATCH, `**/` never
+    # descends into a dot-prefixed directory, so gen_saas's real, auto-applied
+    # root .pkg/prod/tf read COLD: an irreversible credential rotation (#326)
+    # would have merged without the owner stop had the PR not also touched a
+    # workflow. The diff here touches ONLY the tf file -- nothing else can
+    # rescue the verdict.
+    d = File.join(tmp, "dotdir-tf")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) do |r|
+      FileUtils.mkdir_p(File.join(r, ".pkg", "prod", "tf"))
+      File.write(File.join(r, ".pkg", "prod", "tf", "main.tf"), "resource\n")
+    end
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("HOT: a DOT-DIR .pkg/prod/tf/main.tf matches `**/*.tf` (FNM_DOTMATCH trap, DND-422)",
+               code == 4 && out.include?(".pkg/prod/tf/main.tf") && out.include?("infrastructure-as-code"),
+               "exit=#{code} out=#{out}")
+
+    # 6c. The class, not the site: EVERY pattern in the committed manifest must
+    # match a path that reaches it through dot-prefixed directories, with a
+    # dot-prefixed leaf where the leaf is a wildcard, and at more than one level
+    # below a trailing `/**` -- plain and dotted. A sample is BUILT from each
+    # pattern, so a pattern added later is covered with no new case.
+    unmatched = []
+    sampled = 0
+    begin
+      load_manifest(DEFAULT_MANIFEST)[0].each do |s|
+        (s["patterns"] || []).each do |p|
+          [[".hidden/.deep/", ".a/.b/.c", ".x"], ["hidden/deep/", "a/b/c", "x"]].each do |lead, deep, leaf|
+            sample = p.sub(%r{\A\*\*/}, lead).gsub("**", deep).gsub("*", leaf)
+            sampled += 1
+            unmatched << [p, sample] unless match?(p, sample)
+          end
+        end
+      end
+      check.call("every manifest pattern matches through dot-dirs and at depth below a trailing `/**` (#{sampled} samples)",
+                 sampled.positive? && unmatched.empty?,
+                 "unmatched (pattern -> sample): #{unmatched.inspect}")
+    rescue SystemExit
+      bad.call("every manifest pattern matches through dot-dirs and at depth below a trailing `/**`",
+               "load_manifest exited on #{DEFAULT_MANIFEST}")
+    end
+
+    # 6d. A dot-prefixed workflow FILE is still a workflow. Missing it would make
+    # the automation term CONFIRMED-ABSENT (a WARM pass) for a repo that deploys.
+    d = File.join(tmp, "dot-wf")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, ".post-merge.yml", deploy_wf) }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("HOT: a DOT-PREFIXED workflow file is parsed (never a false CONFIRMED-ABSENT)",
+               code == 4 && out.include?(".post-merge.yml"), "exit=#{code} out=#{out}")
+
+    # 6e. Auto-applied vs owner-applied terraform roots (DND-408/DND-422). The
+    # workflow says which root merging APPLIES; each tf hit names it. This is a
+    # NOTE, never a downgrade: a root with no merge-time apply is still HOT,
+    # because "no apply step found" is an unproven negative (a module of the
+    # applied root, a script the parse cannot see) and fails closed.
+    apply_wf = "name: post-merge\non:\n  push:\n    branches: [main]\njobs:\n  terraform:\n    runs-on: ubuntu-latest\n    steps:\n" \
+               "      - name: Init\n        working-directory: .pkg/prod/tf\n        run: terraform init\n" \
+               "      - name: Apply\n        working-directory: .pkg/prod/tf\n        run: terraform apply -auto-approve\n"
+    d = File.join(tmp, "apply-roots")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", apply_wf) }) do |r|
+      %w[.pkg/prod/tf .pkg/prod/tf/kms].each { |dir| FileUtils.mkdir_p(File.join(r, dir)) }
+      File.write(File.join(r, ".pkg/prod/tf/main.tf"), "resource\n")
+      File.write(File.join(r, ".pkg/prod/tf/kms/main.tf"), "resource\n")
+    end
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("apply roots: an auto-applied root AND an owner-applied root are both HOT",
+               code == 4 && out.include?(".pkg/prod/tf/main.tf") && out.include?(".pkg/prod/tf/kms/main.tf"),
+               "exit=#{code} out=#{out}")
+    check.call("apply roots: the auto-applied root is named with its workflow and job",
+               out.match?(%r{\.pkg/prod/tf/main\.tf.*\n\s+apply: AUTO-APPLIED on merge: .*post-merge\.yml.*job terraform}),
+               out)
+    check.call("apply roots: a root with no merge-time apply says so and stays HOT (fails closed)",
+               out.match?(%r{\.pkg/prod/tf/kms/main\.tf.*\n\s+apply: no merge-time `terraform apply` runs in \.pkg/prod/tf/kms}) &&
+                 out.include?("still HOT"),
+               out)
+
+    # 6f. A subdirectory the applied root SOURCES as a module is applied on merge
+    # too; the note must not call it owner-applied.
+    d = File.join(tmp, "apply-module")
+    b, h = mkrepo.call(d, seed: lambda { |r|
+      wf.call(r, "post-merge.yml", apply_wf)
+      FileUtils.mkdir_p(File.join(r, ".pkg/prod/tf"))
+      File.write(File.join(r, ".pkg/prod/tf/main.tf"), "module \"vpc\" {\n  source = \"./vpc\"\n}\n")
+    }) do |r|
+      FileUtils.mkdir_p(File.join(r, ".pkg/prod/tf/vpc"))
+      File.write(File.join(r, ".pkg/prod/tf/vpc/main.tf"), "resource\n")
+    end
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("apply roots: a module the applied root sources is named AUTO-APPLIED",
+               code == 4 && out.match?(%r{\.pkg/prod/tf/vpc/main\.tf.*\n\s+apply: AUTO-APPLIED on merge: \.pkg/prod/tf/vpc is a module sourced by root \.pkg/prod/tf}),
+               "exit=#{code} out=#{out}")
 
     # 7. WARM: .tf but no CI at all
     d = File.join(tmp, "warm")
@@ -909,6 +1130,10 @@ def self_test
     hot_mig.call("destructive-migration: the second migrations path glob (priv/*/migrations) matches",
                  wrap.call("    drop table(:widgets)"),
                  path: "priv/replica_repo/migrations/20240101000000_m.exs")
+    # DND-422: `**/priv/repo/migrations/*.exs` must descend a dot-prefixed dir.
+    hot_mig.call("destructive-migration: a migration under a DOT-DIR (.pkg/app/priv/...) is HOT (FNM_DOTMATCH, DND-422)",
+                 wrap.call("    drop table(:widgets)"),
+                 path: ".pkg/app/priv/repo/migrations/20240101000000_m.exs")
 
     # --- must NOT gate (COLD, exit 0) — the precision cases ---
     cold_mig = lambda do |desc, body, **kw|

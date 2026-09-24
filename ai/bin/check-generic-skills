@@ -75,9 +75,10 @@ def scan(files)
   violations
 end
 
-def generic_skill_files
+def generic_skill_files(skills_dir = SKILLS_DIR)
   GENERIC_SKILL_GLOBS.flat_map do |glob|
-    Dir.glob(File.join(SKILLS_DIR, glob, "**", "*.md"))
+    # FNM_DOTMATCH (DND-422): a .md under a dot-directory is still skill prose.
+    Dir.glob(File.join(skills_dir, glob, "**", "*.md"), File::FNM_DOTMATCH)
   end.uniq.sort
 end
 
@@ -131,6 +132,17 @@ def run_self_test
     end
     unless exempt_hits.empty?
       warn "self-test: FAIL — expected the #{ALLOW_MARKER} marker to exempt the line"
+      ok = false
+    end
+
+    # DND-422: prose under a dot-directory of a generic skill is still scanned.
+    skills = File.join(dir, "skills")
+    hidden = File.join(skills, "review", ".notes", "leak.md")
+    FileUtils.mkdir_p(File.dirname(hidden))
+    File.write(hidden, "x\n")
+    unless generic_skill_files(skills).include?(hidden)
+      warn "self-test: FAIL — a .md under a dot-directory of a generic skill was " \
+           "not enumerated (got #{generic_skill_files(skills).inspect})"
       ok = false
     end
   ensure

@@ -264,7 +264,11 @@ end
 # root is overridable so --self-test can prove discovery against a throwaway
 # fixture tree instead of mutating any real directory in this repo.
 def discover_self_tests(root = CUSTOM_DIR)
-  candidates = Dir.glob(File.join(root, "**/self-test.sh")).map { |p| p.sub("#{root}/", "") }
+  # FNM_DOTMATCH (DND-422): without it `**/` never descends a dot-directory, so
+  # a committed suite under e.g. `.auto-completions/` would silently never run.
+  # The tracked filter below keeps `.git/` (and any shipwright lane inside it)
+  # out, since `git ls-files` never lists it.
+  candidates = Dir.glob(File.join(root, "**/self-test.sh"), File::FNM_DOTMATCH).map { |p| p.sub("#{root}/", "") }
   tracked = tracked_files(root)
   candidates = candidates.select { |p| tracked.include?(p) } if tracked
   candidates.sort
@@ -331,7 +335,7 @@ CHECKS =
 # catch — filtering it out would leave the contract's most likely violation
 # invisible to its own detector.
 def stray_test_scripts(root = CUSTOM_DIR)
-  candidates = Dir.glob(File.join(root, "**/test/**/*.sh"))
+  candidates = Dir.glob(File.join(root, "**/test/**/*.sh"), File::FNM_DOTMATCH) # DND-422: dot-dirs too
                   .reject { |p| File.basename(p) == "self-test.sh" }
                   .map { |p| p.sub("#{root}/", "") }
   tracked = tracked_files(root)
@@ -536,6 +540,13 @@ def run_list
   0
 end
 
+# Every ai/hooks/*.self-test.sh on disk, relative to root. FNM_DOTMATCH
+# (DND-422): a dot-prefixed hook suite must not escape the declared-check audit.
+def hook_self_tests_on_disk(root = CUSTOM_DIR)
+  Dir.glob(File.join(root, "ai/hooks/*.self-test.sh"), File::FNM_DOTMATCH)
+     .map { |p| p.sub("#{root}/", "") }.sort
+end
+
 def run_self_test
   ok = true
 
@@ -558,8 +569,7 @@ def run_self_test
 
   # 3. Every ai/hooks/*.self-test.sh on disk is actually declared (a new hook
   #    must not be able to ship untested by the gate).
-  on_disk = Dir.glob(File.join(CUSTOM_DIR, "ai/hooks/*.self-test.sh"))
-               .map { |p| p.sub("#{CUSTOM_DIR}/", "") }.sort
+  on_disk = hook_self_tests_on_disk
   declared = CHECKS.map { |(_, argv)| argv.first }
   undeclared = on_disk - declared
   unless undeclared.empty?
@@ -746,6 +756,36 @@ def run_self_test
     if labels.uniq.size != labels.size
       warn "self-test: FAIL — two distinct suites produced the same label: " \
            "#{labels.inspect}"
+      ok = false
+    end
+  end
+  end
+
+  # 6-dot. DND-422: discovery must descend dot-directories. Without
+  #    FNM_DOTMATCH `**/` skips them, so a committed suite (or a stray one, or a
+  #    dot-prefixed hook suite) under e.g. `.auto-completions/` would silently
+  #    never run and never be flagged.
+  if fixtures_isolated
+  Dir.mktmpdir("harness-gate-selftest-dotdir") do |fixture_root|
+    { ".hidden/test/self-test.sh" => "#!/bin/sh\nexit 0\n",
+      ".hidden/test/stray.sh" => "#!/bin/sh\nexit 0\n",
+      "ai/hooks/.dotted.self-test.sh" => "#!/bin/sh\nexit 0\n" }.each do |rel, body|
+      FileUtils.mkdir_p(File.dirname(File.join(fixture_root, rel)))
+      File.write(File.join(fixture_root, rel), body)
+    end
+    unless discover_self_tests(fixture_root) == [".hidden/test/self-test.sh"]
+      warn "self-test: FAIL — discover_self_tests missed a suite under a " \
+           "dot-directory (found: #{discover_self_tests(fixture_root).inspect})"
+      ok = false
+    end
+    unless stray_test_scripts(fixture_root) == [".hidden/test/stray.sh"]
+      warn "self-test: FAIL — stray_test_scripts missed a stray under a " \
+           "dot-directory (found: #{stray_test_scripts(fixture_root).inspect})"
+      ok = false
+    end
+    unless hook_self_tests_on_disk(fixture_root) == ["ai/hooks/.dotted.self-test.sh"]
+      warn "self-test: FAIL — hook_self_tests_on_disk missed a dot-prefixed hook " \
+           "suite (found: #{hook_self_tests_on_disk(fixture_root).inspect})"
       ok = false
     end
   end

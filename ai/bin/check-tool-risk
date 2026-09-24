@@ -46,7 +46,9 @@ DENY_DEFAULT = "destructive"
 # Enumerate the tools that MUST be classified: executable regular files under
 # bin_dir, excluding *.self-test.sh, by basename, sorted.
 def enumerate_bins(bin_dir)
-  Dir.glob(File.join(bin_dir, "*"))
+  # FNM_DOTMATCH (DND-422): a dot-prefixed executable is still a tool that must
+  # be classified; check-bin-help already enumerates bins this way.
+  Dir.glob(File.join(bin_dir, "*"), File::FNM_DOTMATCH)
      .select { |p| File.file?(p) && File.executable?(p) }
      .reject { |p| p.end_with?(".self-test.sh") }
      .map    { |p| File.basename(p) }
@@ -220,6 +222,15 @@ def run_self_test
     enum = enumerate_bins(bin_dir)
     unless enum == %w[alpha beta gamma]
       fail.("enumeration wrong: expected [alpha, beta, gamma], got #{enum.inspect}")
+    end
+
+    # DND-422: a dot-prefixed executable is a tool that must be classified.
+    dot_dir = File.join(root, "dotbin")
+    FileUtils.mkdir_p(dot_dir)
+    _write_exec(dot_dir, ".hidden-tool")
+    dot_enum = enumerate_bins(dot_dir)
+    unless dot_enum == %w[.hidden-tool]
+      fail.("a dot-prefixed bin was not enumerated: expected [.hidden-tool], got #{dot_enum.inspect}")
     end
 
     reg = File.join(root, "risk.yml")
