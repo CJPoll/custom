@@ -13,6 +13,12 @@
 # responses/default) with the exit code in responses/N.rc (default 0), and logs
 # its argv so the test can count reads.
 #
+# The repo/branch resolution step (DND-451) is stubbed too, through
+# PUSH_ACTOR_CHECK_GIT, so a fake `git ls-remote` answers whether <branch>
+# exists on the remote and what its head sha is — real DNS/network is never
+# touched, including for the fail-first case (a branch that exists only on
+# some OTHER repo's remote).
+#
 # Run against another copy with PUSH_ACTOR_CHECK_UNDER_TEST=/path/to/bin.
 set -uo pipefail
 
@@ -60,11 +66,41 @@ mkrepo repo_gh 'git@github.com:o/r.git'
 mkrepo repo_gl 'https://gitlab.com/g/sub/r.git'
 mkrepo repo_other 'git@example.com:o/r.git'
 
+# git ls-remote stub for the repo/branch resolution step (PUSH_ACTOR_CHECK_GIT).
+# Emulates: git -C <repo> ls-remote <remote> <refspec> — the LAST arg is the
+# refspec, echoed back with the configured sha so the real query shape is
+# exercised without ever touching a real remote.
+mkdir -p "${TMP}/gitstub"
+cat > "${TMP}/gitstub/bin" <<'EOF'
+#!/usr/bin/env bash
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mode="$(cat "${here}/mode" 2>/dev/null || echo "hit:0000000000000000000000000000000000000000")"
+refspec="${*: -1}"
+case "${mode}" in
+  hit:*) printf '%s\t%s\n' "${mode#hit:}" "${refspec}"; exit 0 ;;
+  miss) exit 0 ;;                                    # rc=0, empty stdout: no matching ref
+  error:*) printf '%s\n' "${mode#error:}" >&2; exit 128 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "${TMP}/gitstub/bin"
+set_git_mode() { printf '%s' "$1" > "${TMP}/gitstub/mode"; }
+set_git_mode "hit:${SHA}"   # default: branch exists on the remote, at --sha
+
 # run_in <repo> <args...> : run the helper there; sets OUT and RC.
 run_in() {
   local repo=$1; shift
   OUT=$(cd "${TMP}/${repo}" && PUSH_ACTOR_CHECK_GH="${TMP}/gh/bin" PUSH_ACTOR_CHECK_GLAB="${TMP}/glab/bin" \
-    "${BIN}" "$@" 2>&1)
+    PUSH_ACTOR_CHECK_GIT="${TMP}/gitstub/bin" "${BIN}" "$@" 2>&1)
+  RC=$?
+}
+
+# run_at <dir> <args...> : run the helper with THAT as cwd (never inside a
+# TMP/repo_* checkout) — for the --repo / wrong-cwd resolution tests.
+run_at() {
+  local dir=$1; shift
+  OUT=$(cd "${dir}" && PUSH_ACTOR_CHECK_GH="${TMP}/gh/bin" PUSH_ACTOR_CHECK_GLAB="${TMP}/glab/bin" \
+    PUSH_ACTOR_CHECK_GIT="${TMP}/gitstub/bin" "${BIN}" "$@" 2>&1)
   RC=$?
 }
 
@@ -147,6 +183,49 @@ expect "8b. gitlab lagging event found on the third read -> 0" 0 'athena-amby'
 reset_stub glab; gl_event feat "${SHA}" 'cjpoll' > "${TMP}/glab/responses/default"
 run_in repo_gl --sha "${SHA}" --window 5 --interval 1 feat
 expect "9. gitlab wrong author -> 1" 1 'cjpoll'
+set_git_mode "hit:${SHA}"   # restore the default for the tests below
+
+# ---- Repo/branch resolution (DND-451) --------------------------------------
+# The fail-first regression this ticket exists for: from a cwd whose resolved
+# remote genuinely does not carry <branch> (the "wrong repo/cwd" case — e.g.
+# the admin's own repo instead of the one just pushed), the tool must fail
+# LOUDLY and distinctly (exit 5, naming the resolved remote), never fall
+# through to the events read and report "no event found" (exit 4). This never
+# reaches the gh/glab stubs at all: reset them first so a stray read would show.
+reset_stub gh; reset_stub glab
+set_git_mode "miss"
+run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
+expect "R1. branch absent on the resolved remote -> 5, not 4 (no event)" 5 "not on remote 'origin'"
+expect "R1a. names the resolved remote URL" 5 'git@github.com:o/r.git'
+expect "R1b. carries Fix:" 5 'Fix:'
+[ "$(reads gh)" = 0 ] && ok "R1c. never reads the events API" || bad "R1c. events API touched" "reads=$(reads gh)"
+
+reset_stub gh
+set_git_mode "hit:${OLD}"   # branch exists, but its remote head is a DIFFERENT sha
+run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
+expect "R2. sha is not the branch's remote head -> 5" 5 "is not the head of 'feat'"
+expect "R2a. names both the given sha and the actual remote head" 5 "${SHA}"
+[ "$(reads gh)" = 0 ] && ok "R2b. never reads the events API" || bad "R2b. events API touched" "reads=$(reads gh)"
+
+reset_stub gh
+set_git_mode "error:ssh: connect to host github.com port 22: Network is unreachable"
+run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
+expect "R3. resolution read itself fails -> 5, distinct from R1/R2" 5 'could not verify'
+expect "R3a. surfaces the underlying error" 5 'Network is unreachable'
+
+# A resolved-and-matching branch/sha still proceeds to the events read as before.
+reset_stub gh; gh_event feat "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
+set_git_mode "hit:${SHA}"
+run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
+expect "R4. resolution passes -> normal event read still runs -> 0" 0 'athena-harness[bot]'
+
+# --repo DIR: run from an unrelated cwd, point --repo at the pushed repo.
+reset_stub gh; gh_event feat "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
+mkdir -p "${TMP}/elsewhere"
+run_at "${TMP}/elsewhere" --repo "${TMP}/repo_gh" --sha "${SHA}" --window 5 --interval 1 feat
+expect "R5. --repo overrides cwd and resolves correctly -> 0" 0 'athena-harness[bot]'
+run_at "${TMP}/elsewhere" --sha "${SHA}" --window 5 --interval 1 feat
+expect "R6. no --repo from an unrelated (non-git) cwd -> 2 (not a git repo)" 2 'Fix:'
 
 # Usage errors.
 run_in repo_other --sha "${SHA}" feat

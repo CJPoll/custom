@@ -15,42 +15,63 @@
 # Reads only, on PLAIN gh/glab — the reads-stay-on-plain-CLI convention. It
 # never pushes, never mints a token, never touches auth.
 #
-# Exit codes — the three bad outcomes are distinct, because a failed read must
+# Exit codes — the bad outcomes are distinct, because a failed read must
 # never look like an empty one (~/dev/custom/CLAUDE.md):
 #   0  the event for <branch> at <sha> has the Athena actor
 #   1  the event exists and the actor is NOT Athena (final; not re-read)
 #   2  usage / prerequisite error (bad args, not a repo, remote on neither forge)
 #   3  no read succeeded in the window: cannot tell who pushed
 #   4  reads succeeded but no event for <branch> at <sha> appeared in the window
+#   5  repo/branch resolution failed: <branch> is not on the resolved remote, or
+#      <sha> is not that branch's remote head — the wrong-cwd/wrong-repo case
+#      (DND-451). Distinct from 4: this never touches the events API at all.
+#
+# The repo/remote key is resolved as its OWN step (DND-451), before any events
+# read: --repo DIR (default: cwd, like confirm-merged) picks the repo, --remote
+# picks the remote inside it, and the tool then asserts <branch> exists on that
+# remote and <sha> is its head via `git ls-remote`. Running this from the wrong
+# checkout (e.g. the admin's own repo instead of the one just pushed) used to
+# resolve `origin` to an unrelated project and report "no event found" — a
+# push-attribution failure — instead of "wrong repo". That is exactly "a
+# failed lookup must never look like an empty one" pointed at this tool's own
+# remote key.
 #
 # Test seams (self-test only): PUSH_ACTOR_CHECK_GH / PUSH_ACTOR_CHECK_GLAB name
-# a stub gh / glab. Self-test: ai/test/push-actor-check/self-test.sh.
+# a stub gh / glab; PUSH_ACTOR_CHECK_GIT names a stub git used only for the
+# ls-remote resolution check. Self-test: ai/test/push-actor-check/self-test.sh.
 
 set -uo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: push-actor-check [--remote NAME] [--sha SHA] [--window SECS] [--interval SECS] <branch>
+Usage: push-actor-check [--repo DIR] [--remote NAME] [--sha SHA] [--window SECS] [--interval SECS] <branch>
 
-Run inside the repo you pushed from. Confirms the forge recorded the push of
-<branch> at <sha> (default: HEAD) as Athena: athena-harness[bot] on github.com,
-athena-amby on gitlab.com. The forge is read from the push URL of --remote
-(default: origin).
+Run inside the repo you pushed from, or pass --repo DIR (default: cwd, like
+confirm-merged) if it isn't the current directory. Confirms the forge recorded
+the push of <branch> at <sha> (default: HEAD) as Athena: athena-harness[bot] on
+github.com, athena-amby on gitlab.com. The forge is read from the push URL of
+--remote (default: origin) inside --repo.
+
+Before reading any event, it asserts <branch> exists on that remote and <sha>
+is its remote head (`git ls-remote`). A mismatch means the wrong repo/cwd was
+resolved, not a missing push event, and fails loudly (exit 5) rather than
+reporting "no event found".
 
 The events API lags, so an absent event is re-read every --interval seconds
 (default 4, min 1) for up to --window seconds (default 20, max 300) before it
 counts as a failure.
 
-Exit: 0 Athena · 1 another actor · 2 usage · 3 could not read · 4 no event in window
+Exit: 0 Athena · 1 another actor · 2 usage · 3 could not read · 4 no event in window · 5 wrong repo/branch/sha
 EOF
 }
 
 die_usage() { printf 'push-actor-check: %s\nFix: %s\n' "$1" "$2" >&2; exit 2; }
 
-REMOTE=origin SHA="" WINDOW=20 INTERVAL=4 BRANCH=""
+REMOTE=origin SHA="" WINDOW=20 INTERVAL=4 BRANCH="" REPO="."
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
+    --repo) REPO=${2:-}; shift 2 || die_usage "--repo needs a value" "pass --repo <path to the repo you pushed from>" ;;
     --remote) REMOTE=${2:-}; shift 2 || die_usage "--remote needs a value" "pass --remote <name>" ;;
     --sha) SHA=${2:-}; shift 2 || die_usage "--sha needs a value" "pass --sha <40-hex sha>" ;;
     --window) WINDOW=${2:-}; shift 2 || die_usage "--window needs a value" "pass --window <seconds>" ;;
@@ -69,13 +90,15 @@ WINDOW=$((10#${WINDOW})) INTERVAL=$((10#${INTERVAL}))   # `08` is decimal, not a
 [ "${INTERVAL}" -ge 1 ] && [ "${INTERVAL}" -le 60 ] || die_usage "--interval ${INTERVAL} is outside 1..60 (below 1 would spin)" "pass --interval 1..60"
 command -v jq >/dev/null 2>&1 || die_usage "jq is required" "install jq"
 
-git rev-parse --git-dir >/dev/null 2>&1 || die_usage "not inside a git repository" "cd into the repo you pushed from"
+[ -n "${REPO}" ] || die_usage "--repo needs a value" "pass --repo <path to the repo you pushed from>"
+[ -d "${REPO}" ] || die_usage "--repo '${REPO}' is not a directory" "point --repo at the repo you pushed from"
+git -C "${REPO}" rev-parse --git-dir >/dev/null 2>&1 || die_usage "'${REPO}' is not inside a git repository" "cd into the repo you pushed from, or pass --repo <path to it>"
 if [ -z "${SHA}" ]; then
-  SHA=$(git rev-parse HEAD 2>/dev/null) || die_usage "cannot resolve HEAD" "pass --sha <the pushed sha>"
+  SHA=$(git -C "${REPO}" rev-parse HEAD 2>/dev/null) || die_usage "cannot resolve HEAD in '${REPO}'" "pass --sha <the pushed sha>"
 fi
 grep -Eqx '[0-9a-f]{40}' <<<"${SHA}" || die_usage "--sha '${SHA}' is not a full 40-hex sha" "pass the full sha: git rev-parse <ref>"
 
-URL=$(git remote get-url --push "${REMOTE}" 2>/dev/null) || die_usage "no remote '${REMOTE}'" "pass --remote <name> for the remote you pushed to"
+URL=$(git -C "${REPO}" remote get-url --push "${REMOTE}" 2>/dev/null) || die_usage "no remote '${REMOTE}' in '${REPO}'" "pass --remote <name> for the remote you pushed to, or --repo <path> if '${REPO}' isn't the repo you pushed ${BRANCH} from"
 
 # host + path from https://host/p, ssh://user@host[:port]/p, or user@host:p.
 case "${URL}" in
@@ -106,6 +129,35 @@ case "${HOST}" in
     die_usage "remote '${REMOTE}' (host '${HOST:-unparsed}') is on neither github.com nor gitlab.com" \
       "run this only for a push to github.com or gitlab.com; pass --remote for the right remote" ;;
 esac
+
+# ---- repo/branch resolution check (DND-451) --------------------------------
+# Its own step, run BEFORE any events read: assert <branch> actually exists on
+# the resolved remote and <sha> is its remote head. A wrong --repo/cwd resolves
+# a real but unrelated remote (e.g. an unrelated github.com project) — without
+# this check that reads as "no event found" (exit 4), a push-attribution
+# failure, rather than "wrong repo" (exit 5). The two must stay textually and
+# exit-code distinct.
+die_resolve() { printf 'push-actor-check: %s\nFix: %s\n' "$1" "$2" >&2; exit 5; }
+RESOLVE_FIX="push-actor-check resolved remote '${REMOTE}' to ${URL} from repo '${REPO}' (cwd unless --repo was given). If that is not the repo you pushed ${BRANCH} from, pass --repo <path> or cd there first."
+
+GIT_BIN=${PUSH_ACTOR_CHECK_GIT:-git}
+LS_ERRF=$(mktemp) || die_usage "mktemp failed" "check TMPDIR is writable"
+LSOUT=$("${GIT_BIN}" -C "${REPO}" ls-remote "${REMOTE}" "refs/heads/${BRANCH}" 2>"${LS_ERRF}")
+LSRC=$?
+LSERR=$(tr '\n' ' ' < "${LS_ERRF}" | cut -c1-300)
+rm -f "${LS_ERRF}"
+
+if [ "${LSRC}" -eq 0 ] && [ -z "${LSOUT}" ]; then
+  die_resolve "branch '${BRANCH}' not on remote '${REMOTE}' (${URL})" "${RESOLVE_FIX}"
+elif [ "${LSRC}" -ne 0 ]; then
+  die_resolve "could not verify '${BRANCH}' on remote '${REMOTE}' (${URL}): ${LSERR:-git ls-remote exited ${LSRC}}" \
+    "${RESOLVE_FIX} If the remote is reachable, this is a transient read error — retry."
+fi
+
+REMOTE_HEAD=$(printf '%s' "${LSOUT}" | head -1 | cut -f1)
+if [ "${REMOTE_HEAD}" != "${SHA}" ]; then
+  die_resolve "sha '${SHA}' is not the head of '${BRANCH}' on remote '${REMOTE}' (${URL}); remote head is '${REMOTE_HEAD}'" "${RESOLVE_FIX}"
+fi
 
 ERRF=$(mktemp) || die_usage "mktemp failed" "check TMPDIR is writable"
 trap 'rm -f "${ERRF}"' EXIT
