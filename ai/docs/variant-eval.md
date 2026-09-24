@@ -79,6 +79,20 @@ Verdict:
 | zero regressions AND ≥1 strict improvement beyond the envelope | **KEEP** — pending human gate |
 | zero regressions, no improvement clears the envelope | **INCONCLUSIVE** — no improvement claim |
 
+**Later (2026-09-24):** a fifth verdict, **UNMEASURED** (DND-504), ranks
+between BLOCKED and REVERT. A side whose corpus ran but did not measure used to
+read as "found nothing": a failed `admiral-eval` returned no T2 fractions, the
+proposal printed `(no T2 cases evaluated)`, and the deterministic set alone
+could print KEEP. Now each side must complete. For T2, `admiral-eval` exits 0
+or 1 (1 is its own baseline-regression verdict), prints its closing
+`admiral-eval: P/T cases pass` summary matching the rows, parses at least one
+T2 row, samples every case, and logs no failed model invocation. For the
+deterministic half, `harness-eval` exits 0 or 1 and rewrites the committed
+`ai/eval/scorecard.json` during this run. Anything else is UNMEASURED, naming
+the side, the corpus and the reason, with a `Fix:`. It is never KEEP or REVERT,
+and it exits 1. A T1 hook that is missing or signaled now scores FAIL, never a
+pass for `expect=clean` (admiral-eval's `:error` rule).
+
 T2 flip classification (envelope Δ_noise): regression iff `p_base - p_var >
 Δ_noise`; improvement iff `p_var - p_base > Δ_noise`; otherwise **inconclusive**.
 A flip **within** the envelope is never a regression and never an improvement.

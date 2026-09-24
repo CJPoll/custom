@@ -57,6 +57,10 @@
 #
 # Verdict:
 #   variant gate red                                  -> BLOCKED (short-circuit)
+#   a side's corpus ran but did not MEASURE           -> UNMEASURED (DND-504;
+#     admiral-eval failed/crashed/parsed 0 T2 cases/its model calls failed, or
+#     harness-eval did not rewrite its scorecard). Never KEEP/REVERT: "could not
+#     measure" must not read as "found nothing".
 #   ANY deterministic regression OR any T2 regression -> REVERT
 #   zero regressions AND >=1 strict improvement        -> KEEP (pending human gate)
 #   zero regressions, no improvement clears envelope   -> INCONCLUSIVE
@@ -118,6 +122,20 @@ MUTATION_COMMAND_STRINGS = [
 # exactly one Open3.capture3( in the whole file).
 # ---------------------------------------------------------------------------
 class MutationAttempt < StandardError; end
+
+# DND-504: a side's corpus RAN but produced no trustworthy measurement. It is a
+# RuntimeError so every "must raise" check that predates it still holds. The
+# message names the side and carries a Fix:; measure turns it into the
+# UNMEASURED verdict rather than a KEEP/REVERT built from what did get measured.
+class Unmeasured < RuntimeError
+  attr_reader :side, :part
+
+  def initialize(side, part, message)
+    @side = side
+    @part = part
+    super(message)
+  end
+end
 
 FORGE_CLIS = %w[gh glab gh-athena glab-athena].freeze
 # git subcommands that only READ or manage a scratch worktree (never mutate
@@ -205,11 +223,13 @@ end
 
 # Pure verdict from gate status + the set of regressions and improvements.
 #   gate red                              -> :blocked
+#   a side not measured (DND-504)         -> :unmeasured (outranks KEEP/REVERT)
 #   any regression                        -> :revert
 #   zero regressions, >=1 improvement     -> :keep
 #   zero regressions, no improvement      -> :inconclusive
-def verdict(gate_ok:, regressions:, improvements:)
+def verdict(gate_ok:, regressions:, improvements:, unmeasured: nil)
   return :blocked unless gate_ok
+  return :unmeasured if unmeasured
   return :revert if regressions.any?
   return :keep   if improvements.any?
 
@@ -236,12 +256,16 @@ def render_proposal(res)
     return lines.join("\n") + "\n"
   end
 
-  d = res[:deterministic] || { regressed: [], fixed: [], new: [] }
+  un = res[:unmeasured]
   lines << "deterministic corpus (exact pass-set diff):"
-  lines << "  regressed (pass->fail): #{d[:regressed].empty? ? 'none' : d[:regressed].join(', ')}"
-  lines << "  fixed (fail->pass):     #{d[:fixed].empty?     ? 'none' : d[:fixed].join(', ')}"
-  lines << "  new cases:              #{d[:new].empty?       ? 'none' : d[:new].join(', ')}"
-
+  if (d = res[:deterministic])
+    lines << "  regressed (pass->fail): #{d[:regressed].empty? ? 'none' : d[:regressed].join(', ')}"
+    lines << "  fixed (fail->pass):     #{d[:fixed].empty?     ? 'none' : d[:fixed].join(', ')}"
+    lines << "  new cases:              #{d[:new].empty?       ? 'none' : d[:new].join(', ')}"
+  else
+    why = un ? " — the #{un[:side]} side's #{un[:part]} run could not be measured (see VERDICT)" : ""
+    lines << "  NOT MEASURED#{why}."
+  end
   if res[:corpus] == "full"
     lines << ""
     lines << "T2 corpus (characterized, envelope Δ_noise=#{DELTA_NOISE}):"
@@ -255,7 +279,9 @@ def render_proposal(res)
                  "below is sampling noise by construction."
       end
     end
-    if (res[:t2] || []).empty?
+    if un && res[:t2].nil?
+      lines << "  T2 NOT MEASURED — the #{un[:side]} side's #{un[:part]} run could not be measured (see VERDICT)."
+    elsif (res[:t2] || []).empty?
       lines << "  (no T2 cases evaluated)"
     else
       res[:t2].each do |c|
@@ -267,6 +293,14 @@ def render_proposal(res)
 
   lines << ""
   case res[:verdict]
+  when :unmeasured
+    lines << "VERDICT: UNMEASURED — the #{un[:side]} side's #{un[:part]} corpus ran but was NOT measured; " \
+             "not scored. This is \"could not measure\", not \"no regressions found\"."
+    lines << "  side: #{un[:side]}  corpus: #{un[:part]}"
+    lines << "  #{un[:reason]}"
+    lines << "  Fix: make the #{un[:side]} ref's #{un[:part]} run complete (see the reason above), then re-run " \
+             "variant-eval. No KEEP/REVERT is proposed from a partial measurement." \
+      unless un[:reason].to_s.include?("Fix:")
   when :revert
     lines << "VERDICT: REVERT — the variant regresses a known case; never trade a known regression for an unproven gain."
     lines << "  regressions: #{res[:regressions].join(', ')}"
@@ -301,7 +335,11 @@ def with_worktree(ref)
     begin
       yield wt
     ensure
-      capture(["git", "worktree", "remove", "--force", wt])
+      _ro, rerr, rst = capture(["git", "worktree", "remove", "--force", wt])
+      unless rst.success?
+        warn "variant-eval: Note: could not remove scratch worktree #{wt}: #{rerr.strip}. " \
+             "Fix: run `git worktree prune` once the path is gone."
+      end
     end
   end
 end
@@ -316,16 +354,25 @@ end
 # Collect the deterministic per-case pass-set in a worktree:
 #   he:<name> from harness-eval's scorecard.json
 #   ae:<name> for every admiral-eval T1 hook-stdin fixture
-def collect_deterministic(wt)
+def collect_deterministic(wt, side)
   set = {}
 
   # harness-eval writes ai/eval/scorecard.json with per-case {name, pass}.
-  _o, _e, _st = capture(["ai/bin/harness-eval"], chdir: wt)
-  scorecard = File.join(wt, SCORECARD_REL)
-  if File.file?(scorecard)
-    data = JSON.parse(File.read(scorecard))
-    (data["cases"] || []).each { |c| set["he:#{c['name']}"] = (c["pass"] == true) }
+  # That file is COMMITTED, so a run that did not rewrite it (a crash, exit 2,
+  # no fixtures) leaves the ref's stale copy behind, which would read as this
+  # run's measurement (DND-504). Exit 1 is harness-eval's own "a case failed /
+  # regressed" verdict and IS a measurement.
+  started = Time.at(Time.now.to_i).utc
+  _o, err, st = capture(["ai/bin/harness-eval"], chdir: wt)
+  why = harness_eval_problem(File.join(wt, SCORECARD_REL), st, started)
+  if why
+    raise Unmeasured.new(side, "deterministic",
+                         "the #{side} side's harness-eval did not measure: #{why}#{stderr_tail(err)}. " \
+                         "Fix: run `ai/bin/harness-eval` in the #{side} ref and make it complete and write " \
+                         "#{SCORECARD_REL}, then re-run variant-eval.")
   end
+  JSON.parse(File.read(File.join(wt, SCORECARD_REL)))["cases"]
+      .each { |c| set["he:#{c['name']}"] = (c["pass"] == true) }
 
   # admiral-eval T1 hook-stdin cases (mode=hook-stdin), run via the same isolated
   # -HOME hook primitive harness-eval/admiral-eval use.
@@ -336,12 +383,44 @@ def collect_deterministic(wt)
     meta = parse_meta(meta_path)
     next unless meta["mode"] == "hook-stdin"
 
-    fired = hook_fires?(wt, meta["guard"], File.join(dir, meta["input"].to_s))
-    pass = (fired && meta["expect"] == "fires") || (!fired && meta["expect"] == "clean")
-    set["ae:#{File.basename(dir)}"] = pass
+    got = hook_verdict(wt, meta["guard"], File.join(dir, meta["input"].to_s))
+    # :error (missing / signaled hook) never passes either expectation — the
+    # admiral-eval hook_pass? rule: a dead guard is not a clean one.
+    set["ae:#{File.basename(dir)}"] = (got == :fires && meta["expect"] == "fires") ||
+                                      (got == :clean && meta["expect"] == "clean")
   end
 
   set
+end
+
+# Why a harness-eval run is not a measurement, or nil when it is.
+def harness_eval_problem(scorecard, st, started)
+  return "it #{exit_phrase(st)}" unless st&.exited? && [0, 1].include?(st.exitstatus)
+  return "it wrote no #{SCORECARD_REL}" unless File.file?(scorecard)
+
+  data = JSON.parse(File.read(scorecard))
+  generated = Time.parse(data["generated"].to_s).utc
+  if generated < started
+    return "#{SCORECARD_REL} was not rewritten by this run (generated #{data['generated']}, run started " \
+           "#{started.iso8601}) — it is the ref's committed copy, not a measurement"
+  end
+  return "#{SCORECARD_REL} lists 0 cases" if Array(data["cases"]).empty?
+
+  nil
+rescue JSON::ParserError, ArgumentError, TypeError => e
+  "#{SCORECARD_REL} is unreadable (#{e.class}: #{e.message[0, 120]})"
+end
+
+def exit_phrase(st)
+  return "did not report a status" unless st
+  return "was killed by signal #{st.termsig}" if st.signaled?
+
+  "exited #{st.exitstatus}"
+end
+
+def stderr_tail(err)
+  tail = err.to_s.lines.map(&:strip).reject(&:empty?).last(2)
+  tail.empty? ? "" : " (stderr: #{tail.join(' | ')[0, 240]})"
 end
 
 def parse_meta(path)
@@ -357,16 +436,20 @@ def parse_meta(path)
 end
 
 # Pipe the fixture JSON into the worktree's ai/hooks/<guard>.sh under an isolated
-# HOME (so per-invocation hook dedup state is fresh every run); true iff it emits
-# a PreToolUse deny.
-def hook_fires?(wt, guard, input_path)
+# HOME (so per-invocation hook dedup state is fresh every run). Three states, as
+# admiral-eval's hook_verdict_at: :fires (ran, emitted a PreToolUse deny),
+# :clean (ran, no deny), :error (missing / not executable / unreadable input /
+# signaled). :error is never :clean — a dead guard must not pass expect=clean.
+def hook_verdict(wt, guard, input_path)
   hook = File.join(wt, "ai", "hooks", "#{guard}.sh")
-  return false unless File.executable?(hook) && File.file?(input_path)
+  return :error unless File.executable?(hook) && File.file?(input_path)
 
   input = File.read(input_path)
   Dir.mktmpdir("variant-eval-home-") do |home|
-    out, _err, _st = capture([hook], chdir: wt, stdin_data: input, env: { "HOME" => home })
-    out.include?('"permissionDecision":"deny"')
+    out, _err, st = capture([hook], chdir: wt, stdin_data: input, env: { "HOME" => home })
+    return :error unless st&.exited?
+
+    out.include?('"permissionDecision":"deny"') ? :fires : :clean
   end
 end
 
@@ -404,35 +487,103 @@ def confirm_t2_subject!(out, expected, side)
   return if m && m[1] == want
 
   got = m ? "sha #{m[1]}" : "no `subject:` line"
-  raise "the #{side} T2 run did not confirm it evaluated #{expected['file']} (sha #{want}); its " \
+  raise Unmeasured.new side, "T2", "the #{side} T2 run did not confirm it evaluated #{expected['file']} (sha #{want}); its " \
         "admiral-eval reported #{got}. Fix: the #{side} ref's ai/bin/admiral-eval must support " \
         "--agent-file (DND-503) — use a ref at or after that change, or run --corpus deterministic; " \
         "if the admiral-eval run failed, run `#{t2_argv('<wt>', 1).join(' ')}` in that ref to see why."
 end
 
+# admiral-eval's closing line once every case has been scored.
+T2_SUMMARY_LINE = %r{^admiral-eval: (\d+)/(\d+) cases pass}.freeze
+# admiral-eval's stderr line for one model call that never answered.
+T2_INVOCATION_FAILED = /^\s*! admiral invocation failed/.freeze
+# T1 rows in admiral-eval's output carry this mode; every other mode is T2.
+T1_MODE = "hook-stdin"
+
 # Characterize the T2 model-in-loop cases in a worktree by running
 # admiral-eval --run --runs N --agent-file <wt's render> and parsing its
 # per-case rate column. Returns { case_name => pass_fraction }.
+#
+# A run that did not MEASURE raises Unmeasured (DND-504) instead of returning
+# {} — which rendered as "(no T2 cases evaluated)" and let the deterministic
+# set alone print KEEP. admiral-eval exits 1 on its own baseline regression, so
+# exit 1 is a measurement when the run COMPLETED: its closing summary is
+# present and agrees with the rows, at least one T2 row parsed, and no model
+# call failed (a failed call scores as a FAIL sample, so p would be the auth
+# outage, not the admiral).
 def collect_t2_fractions(wt, runs, subject, side)
-  fractions = {}
-  out, _err, _st = capture(t2_argv(wt, runs), chdir: wt)
+  out, err, st = capture(t2_argv(wt, runs), chdir: wt)
+  unless st&.exited? && [0, 1].include?(st.exitstatus)
+    raise_t2_unmeasured(side, "admiral-eval #{exit_phrase(st)}#{stderr_tail(err)}")
+  end
   confirm_t2_subject!(out, subject, side)
-  out.each_line do |line|
-    # Format: "PASS <name> <passes/samples> [<mode>] <detail>"
-    m = line.match(/\A(?:PASS|FAIL)\s+(\S+)\s+(\d+)\/(\d+)\b/)
+
+  rows = parse_t2_rows(out)
+  problem = t2_run_problem(out, err, rows)
+  raise_t2_unmeasured(side, "#{problem} (admiral-eval #{exit_phrase(st)})") if problem
+
+  rows.to_h { |r| [r[:name], r[:fraction]] }
+end
+
+# Every "PASS|FAIL <name> <passes>/<samples> [<mode>] ..." row. A row with 0
+# samples (an invalid case config) has fraction nil: it was never sampled.
+def parse_t2_rows(out)
+  out.to_s.each_line.filter_map do |line|
+    m = line.match(%r{\A(?:PASS|FAIL)\s+(\S+)\s+(\d+)/(\d+)\b(?:\s+\[([^\]]+)\])?})
     next unless m
 
-    name, passes, samples = m[1], m[2].to_i, m[3].to_i
-    next if samples.zero?
-
-    fractions[name] = passes.to_f / samples
+    samples = m[3].to_i
+    { name: m[1], fraction: samples.positive? ? m[2].to_f / samples : nil, mode: m[4] }
   end
-  fractions
+end
+
+# Why a run that exited 0/1 is still not a T2 measurement, or nil.
+def t2_run_problem(out, err, rows)
+  summary = out.to_s.match(T2_SUMMARY_LINE)
+  return "no closing `admiral-eval: P/T cases pass` summary — the run stopped before scoring every case" \
+    unless summary
+  if summary[2].to_i != rows.size
+    return "its summary counts #{summary[2]} case(s) but #{rows.size} row(s) parsed"
+  end
+
+  unsampled = rows.select { |r| r[:fraction].nil? }.map { |r| r[:name] }
+  return "#{unsampled.size} case(s) scored 0/0, never sampled: #{unsampled.join(', ')}" if unsampled.any?
+
+  failed = err.to_s.each_line.select { |l| l.match?(T2_INVOCATION_FAILED) }
+  if failed.any?
+    return "#{failed.size} model invocation(s) failed — the model never answered those samples, so their " \
+           "FAILs measure the invocation (auth, quota, network), not the admiral (first: " \
+           "#{failed.first.strip[0, 200]})"
+  end
+  t2 = rows.count { |r| r[:mode] && r[:mode] != T1_MODE }
+  return "0 T2 cases parsed (#{rows.size} T1 row(s) only)" if t2.zero?
+
+  nil
+end
+
+def raise_t2_unmeasured(side, why)
+  raise Unmeasured.new(side, "T2",
+                       "the #{side} side's T2 run did not measure: #{why}. Fix: run " \
+                       "`#{t2_argv('<wt>', 1).join(' ')}` in the #{side} ref to see why (model auth, a crash, " \
+                       "no T2 fixtures), fix it, and re-run; or use --corpus deterministic, which claims no T2.")
 end
 
 def measure(variant:, baseline:, corpus:, runs:, out_file:)
   res = { variant: variant, baseline: baseline, corpus: corpus }
+  measure_sides(res, variant: variant, baseline: baseline, corpus: corpus, runs: runs)
+  emit(res, out_file)
+rescue Unmeasured => e
+  # A side ran but did not measure. What WAS measured stays in res and is
+  # rendered; the verdict is UNMEASURED, never KEEP/REVERT (DND-504).
+  res[:unmeasured] = { side: e.side, part: e.part, reason: e.message }
+  res[:verdict] = verdict(gate_ok: res.fetch(:gate_ok, true), regressions: [], improvements: [],
+                          unmeasured: res[:unmeasured])
+  emit(res, out_file)
+end
 
+# Fill res with the gate result, the deterministic diff and (for --corpus full)
+# the T2 characterization. Raises Unmeasured when a side ran but did not measure.
+def measure_sides(res, variant:, baseline:, corpus:, runs:)
   with_worktree(variant) do |var_wt|
     # Gate short-circuit BEFORE any delta (never-commit-a-broken-harness).
     gate_ok, gate_detail = run_gate(var_wt)
@@ -440,13 +591,13 @@ def measure(variant:, baseline:, corpus:, runs:, out_file:)
     unless gate_ok
       res[:verdict] = :blocked
       res[:gate_detail] = gate_detail
-      return emit(res, out_file)
+      return
     end
 
-    var_det = collect_deterministic(var_wt)
+    var_det = collect_deterministic(var_wt, "variant")
 
     with_worktree(baseline) do |base_wt|
-      base_det = collect_deterministic(base_wt)
+      base_det = collect_deterministic(base_wt, "baseline")
       diff = deterministic_diff(base_det, var_det)
       res[:deterministic] = diff
 
@@ -474,8 +625,6 @@ def measure(variant:, baseline:, corpus:, runs:, out_file:)
       res[:verdict] = verdict(gate_ok: true, regressions: regressions, improvements: improvements)
     end
   end
-
-  emit(res, out_file)
 end
 
 def emit(res, out_file)
@@ -485,9 +634,13 @@ def emit(res, out_file)
     File.write(out_file, text)
     puts "variant-eval: proposal written to #{out_file}"
   end
-  # A "do not adopt" verdict exits non-zero for CLI callers; the tool is not a
-  # gate, so this exit code never affects harness-gate.
-  %i[revert blocked].include?(res[:verdict]) ? 1 : 0
+  verdict_exit_code(res[:verdict])
+end
+
+# A "do not adopt" or "not measured" verdict exits non-zero for CLI callers; the
+# tool is not a gate, so this exit code never affects harness-gate.
+def verdict_exit_code(verdict)
+  %i[revert blocked unmeasured].include?(verdict) ? 1 : 0
 end
 
 # ---------------------------------------------------------------------------
@@ -648,6 +801,184 @@ def self_test
       unless runner.include?("capture(t2_argv(wt, runs)")
   end
 
+  # (h) DND-504: a side whose admiral-eval ran but did not MEASURE must never
+  # read as "no T2 cases". Each stub prints the confirmed subject line first, so
+  # confirm_t2_subject! alone cannot catch it. Every such run must raise
+  # Unmeasured naming the side and the exit/count, with a Fix:.
+  Dir.mktmpdir("variant-eval-t2-unmeasured-") do |d|
+    front = "---\nname: athena-admiral\ndescription: x\nmodel: opus\n---\n\n"
+    row_t2 = "PASS AE-01-confirm-before-done 3/3 [next-action] ok"
+    row_t1 = "PASS AE-13a-forge-auth-deny 1/1 [hook-stdin] ok"
+    summary2 = "admiral-eval: 2/2 cases pass (runs/T2 case = 3)"
+    stubs = {
+      "exit 2 after the subject line" =>
+        [["echo \"$SUBJECT\"", "exit 2"], /exit(ed)? 2/],
+      "a crash after the subject line (exit 1, no summary)" =>
+        [["echo \"$SUBJECT\"", "echo 'boom' >&2", "exit 1"], /summary/],
+      "a signaled run" =>
+        [["echo \"$SUBJECT\"", "kill -9 $$"], /signal/],
+      "zero T2 cases parsed (only a T1 row)" =>
+        [["echo \"$SUBJECT\"", "echo '#{row_t1}'", "echo 'admiral-eval: 1/1 cases pass (runs/T2 case = 3)'",
+          "exit 0"], /0 T2 case/],
+      "exit 2 after complete-looking output" =>
+        [["echo \"$SUBJECT\"", "echo '#{row_t2}'", "echo '#{row_t1}'", "echo '#{summary2}'", "exit 2"],
+         /exited 2/],
+      "the summary disagrees with the parsed rows" =>
+        [["echo \"$SUBJECT\"", "echo '#{row_t2}'", "echo 'admiral-eval: 1/3 cases pass (runs/T2 case = 3)'",
+          "exit 0"], /summary counts 3/],
+      "a T2 case scored 0/0 (never sampled)" =>
+        [["echo \"$SUBJECT\"", "echo '#{row_t2}'", "echo 'FAIL AE-02-bad-config 0/0 [next-action] invalid'",
+          "echo 'admiral-eval: 1/2 cases pass (runs/T2 case = 3)'", "exit 1"], /0\/0/],
+      "model invocations failed (auth)" =>
+        [["echo \"$SUBJECT\"", "echo '  ! admiral invocation failed (exit 1): not logged in' >&2",
+          "echo 'FAIL AE-01-confirm-before-done 0/3 [next-action] no output'", "echo '#{row_t1}'",
+          "echo 'admiral-eval: 1/2 cases pass (runs/T2 case = 3)'", "exit 1"], /invocation/]
+    }
+    stubs.each_with_index do |(label, (body, want)), i|
+      wt = File.join(d, "wt#{i}")
+      FileUtils.mkdir_p(File.join(wt, "ai", "agents"))
+      FileUtils.mkdir_p(File.join(wt, "ai", "bin"))
+      File.write(File.join(wt, ADMIRAL_AGENT_REL), front + "prose #{i}\n")
+      subj = t2_subject(wt)
+      line = "subject: ai/agents/athena-admiral.md #{subj['lines']} lines sha #{subj['sha256'][0, 12]} " \
+             "(loaded inline via --agents as athena-admiral-eval-subject)"
+      stub = File.join(wt, "ai", "bin", "admiral-eval")
+      File.write(stub, "#!/bin/sh\nSUBJECT='#{line}'\n#{body.join("\n")}\n")
+      File.chmod(0o755, stub)
+      begin
+        got = collect_t2_fractions(wt, 3, subj, "variant")
+        fail.("#{label}: an unmeasured T2 run must raise, never read as T2 fractions (got #{got.inspect})")
+      rescue StandardError => e
+        if !defined?(Unmeasured) || !e.is_a?(Unmeasured)
+          fail.("#{label}: must raise Unmeasured (got #{e.class}: #{e.message[0, 160]})")
+        else
+          fail.("#{label}: the refusal must name the side") unless e.message.include?("variant")
+          fail.("#{label}: the refusal must say why (#{want.inspect}): #{e.message[0, 200]}") \
+            unless e.message.match?(want)
+          fail.("#{label}: the refusal must carry a Fix:") unless e.message.include?("Fix:")
+        end
+      end
+    end
+
+    # A completed run (exit 1 is admiral-eval's own regression verdict, with
+    # its closing summary and no failed invocations) IS a measurement.
+    wt = File.join(d, "measured")
+    FileUtils.mkdir_p(File.join(wt, "ai", "agents"))
+    FileUtils.mkdir_p(File.join(wt, "ai", "bin"))
+    File.write(File.join(wt, ADMIRAL_AGENT_REL), front + "measured\n")
+    subj = t2_subject(wt)
+    line = "subject: ai/agents/athena-admiral.md #{subj['lines']} lines sha #{subj['sha256'][0, 12]} " \
+           "(loaded inline via --agents as athena-admiral-eval-subject)"
+    stub = File.join(wt, "ai", "bin", "admiral-eval")
+    File.write(stub, "#!/bin/sh\necho '#{line}'\necho '#{row_t2}'\necho '#{row_t1}'\necho '#{summary2}'\nexit 1\n")
+    File.chmod(0o755, stub)
+    begin
+      got = collect_t2_fractions(wt, 3, subj, "baseline")
+      fail.("a completed run must yield its T2 fraction (got #{got.inspect})") \
+        unless got["AE-01-confirm-before-done"] == 1.0
+    rescue StandardError => e
+      fail.("a completed admiral-eval run (exit 1 = its regression verdict) must be a measurement, not " \
+            "raise #{e.class}: #{e.message[0, 200]}")
+    end
+  end
+
+  # (i) DND-504: an unmeasured side is its own verdict. It outranks KEEP and
+  # REVERT (a measurement that did not happen cannot license either), renders
+  # "could not measure" distinct from "found nothing", and carries a Fix:.
+  begin
+    vu = verdict(gate_ok: true, regressions: ["c1"], improvements: ["c2"], unmeasured: "variant T2")
+    fail.("an unmeasured side must verdict UNMEASURED, never KEEP/REVERT (got #{vu})") unless vu == :unmeasured
+    fail.("a red gate still short-circuits BLOCKED ahead of UNMEASURED") \
+      unless verdict(gate_ok: false, regressions: [], improvements: [], unmeasured: "x") == :blocked
+    fail.("a measured run must not be UNMEASURED") \
+      if verdict(gate_ok: true, regressions: [], improvements: ["c2"], unmeasured: nil) == :unmeasured
+  rescue ArgumentError => e
+    fail.("verdict must accept unmeasured: (#{e.message})")
+  end
+  un_out = render_proposal({
+    variant: "cand", baseline: "origin/main", corpus: "full", gate_ok: true, verdict: :unmeasured,
+    deterministic: { regressed: [], fixed: ["c1"], new: [] }, regressions: [], improvements: ["c1"],
+    unmeasured: { side: "variant", part: "T2", reason: "admiral-eval exited 2. Fix: run it" }
+  })
+  fail.("an UNMEASURED proposal must say UNMEASURED") unless un_out.include?("VERDICT: UNMEASURED")
+  fail.("an UNMEASURED proposal must name the side") unless un_out.include?("variant")
+  fail.("an UNMEASURED proposal must carry a Fix:") unless un_out.include?("Fix:")
+  fail.("an UNMEASURED proposal must not read as 'no T2 cases evaluated'") \
+    if un_out.include?("no T2 cases evaluated")
+  fail.("an UNMEASURED proposal must not carry KEEP") if un_out.include?("KEEP")
+  begin
+    det_un_out = render_proposal({
+    variant: "cand", baseline: "origin/main", corpus: "full", gate_ok: true, verdict: :unmeasured,
+    unmeasured: { side: "baseline", part: "deterministic", reason: "harness-eval exited 2. Fix: run it" }
+  })
+  fail.("an unmeasured deterministic side must render NOT MEASURED, never 'regressed: none'") \
+    if det_un_out.include?("none") || !det_un_out.include?("NOT MEASURED")
+  fail.("an UNMEASURED verdict must exit non-zero") if verdict_exit_code(:unmeasured).zero?
+  rescue NoMethodError => e
+    fail.("the verdict->exit mapping must be a function (#{e.message[0, 80]})")
+  end
+
+  # (j) DND-504 sweep: the deterministic half drops statuses too. A
+  # harness-eval that did not rewrite the scorecard (crash, exit 2) leaves the
+  # COMMITTED ai/eval/scorecard.json behind, which would read as this ref's
+  # measurement. And a T1 hook that is missing or signaled must never pass an
+  # expect=clean case (admiral-eval's :error rule).
+  Dir.mktmpdir("variant-eval-det-unmeasured-") do |d|
+    stale = JSON.generate("generated" => "2000-01-01T00:00:00Z", "cases" => [{ "name" => "x", "pass" => true }])
+    {
+      "harness-eval exits 2 leaving a stale scorecard" => ["exit 2", stale],
+      "harness-eval exits 0 without rewriting the scorecard" => ["exit 0", stale],
+      "harness-eval writes a fresh scorecard, then exits 2" =>
+        ["printf '{\"generated\":\"%s\",\"cases\":[{\"name\":\"x\",\"pass\":true}]}' " \
+         "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" > ai/eval/scorecard.json\nexit 2", stale]
+    }.each_with_index do |(label, (body, card)), i|
+      wt = File.join(d, "wt#{i}")
+      FileUtils.mkdir_p(File.join(wt, "ai", "bin"))
+      FileUtils.mkdir_p(File.join(wt, "ai", "eval"))
+      File.write(File.join(wt, SCORECARD_REL), card)
+      File.write(File.join(wt, "ai", "bin", "harness-eval"), "#!/bin/sh\n#{body}\n")
+      File.chmod(0o755, File.join(wt, "ai", "bin", "harness-eval"))
+      begin
+        got = collect_deterministic(wt, "baseline")
+        fail.("#{label}: must raise, never read a stale scorecard as a measurement (got #{got.inspect})")
+      rescue StandardError => e
+        if !defined?(Unmeasured) || !e.is_a?(Unmeasured)
+          fail.("#{label}: must raise Unmeasured (got #{e.class}: #{e.message[0, 160]})")
+        else
+          fail.("#{label}: the refusal must name the side and carry a Fix:") \
+            unless e.message.include?("baseline") && e.message.include?("Fix:")
+        end
+      end
+    end
+
+    # A fresh scorecard plus a T1 fixture whose hook is missing (expect=clean)
+    # and one whose hook is signaled: both must score FAIL, never PASS.
+    wt = File.join(d, "hooks")
+    FileUtils.mkdir_p(File.join(wt, "ai", "bin"))
+    FileUtils.mkdir_p(File.join(wt, "ai", "hooks"))
+    he = File.join(wt, "ai", "bin", "harness-eval")
+    File.write(he, "#!/bin/sh\nmkdir -p ai/eval\nprintf '{\"generated\":\"%s\",\"cases\":[{\"name\":\"h\"," \
+                   "\"pass\":true}]}' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" > ai/eval/scorecard.json\n")
+    File.chmod(0o755, he)
+    killed = File.join(wt, "ai", "hooks", "killed.sh")
+    File.write(killed, "#!/bin/sh\nkill -9 $$\n")
+    File.chmod(0o755, killed)
+    { "AE-90-missing" => "absent", "AE-91-killed" => "killed" }.each do |name, guard|
+      fx = File.join(wt, ADMIRAL_FIXTURES, name)
+      FileUtils.mkdir_p(fx)
+      File.write(File.join(fx, "meta"), "mode = hook-stdin\nguard = #{guard}\ninput = input.json\nexpect = clean\n")
+      File.write(File.join(fx, "input.json"), "{}\n")
+    end
+    begin
+      set = collect_deterministic(wt, "variant")
+      fail.("a fresh scorecard must be read (got #{set.inspect})") unless set["he:h"] == true
+      fail.("a missing T1 hook must never pass an expect=clean case") unless set["ae:AE-90-missing"] == false
+      fail.("a signaled T1 hook must never pass an expect=clean case") unless set["ae:AE-91-killed"] == false
+    rescue StandardError => e
+      fail.("a fresh scorecard + T1 hooks must be measured, not raise #{e.class}: #{e.message[0, 200]}")
+    end
+  end
+
   # -- STRUCTURAL CONTAINMENT: command_allowed? rejects every mutation family --
   fail.("worktree add must be allowed") unless command_allowed?(%w[git worktree add --detach /tmp/x origin/main])
   fail.("worktree remove must be allowed") unless command_allowed?(%w[git worktree remove --force /tmp/x])
@@ -709,7 +1040,9 @@ def self_test
     warn "variant-eval: self-test FAILED"
     warn "  Fix: the diff/classify/verdict/render logic or the structural containment is broken. A " \
          "deterministic pass->fail must verdict REVERT; a within-envelope flip must be INCONCLUSIVE (never " \
-         "regressed/improved); a red gate must verdict BLOCKED before scoring; no KEEP proposal may contain a " \
+         "regressed/improved); a red gate must verdict BLOCKED before scoring; a side that ran but did not " \
+         "measure (admiral-eval failed / 0 T2 cases / failed model calls, or a stale scorecard) must verdict " \
+         "UNMEASURED, never KEEP/REVERT; no KEEP proposal may contain a " \
          "mutation command; command_allowed? must deny every merge/commit/push/forge/--update-baseline argv; " \
          "all execution must go through the single guarded `capture`; and each side's T2 run must pass " \
          "admiral-eval --agent-file <its worktree>/#{ADMIRAL_AGENT_REL}."
