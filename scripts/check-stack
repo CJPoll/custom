@@ -66,6 +66,7 @@ EOF
 # Function to display error and exit
 error_exit() {
     echo "Error: $1" >&2
+    echo "Fix: resolve the error above, then re-run check-stack (--start-from <branch> resumes at the failing branch)" >&2
     # Ring terminal bell
     echo -e "\a"
     exit 1
@@ -177,6 +178,7 @@ run_check_in_worktree() {
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
         echo "✗ Check failed for branch: $branch" >&2
         echo "  Worktree path: $worktree_path" >&2
+        echo "  Fix: cd $worktree_path, fix what mix check reported, commit, then re-run with --start-from $branch" >&2
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
         # Ring terminal bell
         echo -e "\a"

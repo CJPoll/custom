@@ -300,8 +300,8 @@ echo
 echo "-- the guard-message convention --------------------------------------------"
 
 # 11. check-guard-messages must pass: forge-preflight carries a Fix: line (it is
-#     listed in GUARD_BINS) and the hook carries one too (every ai/hooks/*.sh is
-#     a guard by default). This is the meta-check that a future edit stripping
+#     an ai/bin file, so a guard by default) and the hook carries one too (every
+#     ai/hooks/*.sh is a guard by default). This is the meta-check that a future edit stripping
 #     the Fix: clause would redden.
 setup_case
 set +e

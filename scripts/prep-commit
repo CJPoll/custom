@@ -10,6 +10,7 @@ trap 'echo "Interrupted" | tee -a "$LOG_FILE"; exit 130' INT
 # Check dependencies
 if ! command -v claude &> /dev/null; then
   echo "Error: claude command not found" | tee -a "$LOG_FILE" >&2
+  echo "Fix: put Claude Code's claude on PATH (prep-commit invokes it to repair failures), then re-run" | tee -a "$LOG_FILE" >&2
   exit 1
 fi
 
@@ -32,6 +33,7 @@ until [[ "${COMPLETE}" == "true" ]]; do
     echo "✗ Compilation failed, requesting fixes..." | tee -a "$LOG_FILE"
     if ! claude -p --dangerously-skip-permissions "/fix:compilation" 2>&1 | tee -a "$LOG_FILE"; then
       echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
+      echo "Fix: fix the failure logged in $LOG_FILE by hand (or rerun the named /fix: skill), then re-run prep-commit" | tee -a "$LOG_FILE" >&2
       exit 1
     fi
     echo "Retrying compilation..." | tee -a "$LOG_FILE"
@@ -56,6 +58,7 @@ until [[ "${COMPLETE}" == "true" ]]; do
     echo "✗ Credo failed, requesting fixes..." | tee -a "$LOG_FILE"
     if ! claude -p --dangerously-skip-permissions "/fix:credo" 2>&1 | tee -a "$LOG_FILE"; then
       echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
+      echo "Fix: fix the failure logged in $LOG_FILE by hand (or rerun the named /fix: skill), then re-run prep-commit" | tee -a "$LOG_FILE" >&2
       exit 1
     fi
     echo "Retrying credo..." | tee -a "$LOG_FILE"
@@ -76,6 +79,7 @@ until [[ "${COMPLETE}" == "true" ]]; do
     echo "✗ Tests failed, requesting fixes..." | tee -a "$LOG_FILE"
     if ! claude -p --dangerously-skip-permissions "/fix:tests" 2>&1 | tee -a "$LOG_FILE"; then
       echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
+      echo "Fix: fix the failure logged in $LOG_FILE by hand (or rerun the named /fix: skill), then re-run prep-commit" | tee -a "$LOG_FILE" >&2
       exit 1
     fi
     echo "Retrying tests..." | tee -a "$LOG_FILE"
@@ -101,6 +105,7 @@ until [[ "${COMPLETE}" == "true" ]]; do
     echo "✗ Dialyzer failed, requesting fixes..." | tee -a "$LOG_FILE"
     if ! claude -p --dangerously-skip-permissions "/fix:dialyzer" 2>&1 | tee -a "$LOG_FILE"; then
       echo "Error: Failed to run claude fix command" | tee -a "$LOG_FILE" >&2
+      echo "Fix: fix the failure logged in $LOG_FILE by hand (or rerun the named /fix: skill), then re-run prep-commit" | tee -a "$LOG_FILE" >&2
       exit 1
     fi
     echo "Retrying dialyzer..." | tee -a "$LOG_FILE"

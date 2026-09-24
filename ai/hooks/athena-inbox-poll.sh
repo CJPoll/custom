@@ -110,8 +110,9 @@
 # ------------------------
 # This hook has no deny path: it emits a notice or stays quiet, and it cannot
 # fail a turn. That makes it the same species as main-session-policy.sh and
-# notify-idle.sh, so it is EXEMPT in ai/bin/check-guard-messages with that
-# reason rather than carrying a bolted-on refusal it never performs. The `Fix:`
+# notify-idle.sh, so it is classified `no-fail-path` with that reason in
+# ai/guard-classification.tsv (read by ai/bin/check-guard-messages) rather than
+# carrying a bolted-on refusal it never performs. The `Fix:`
 # clauses below are in the LOG and in the notice, for whoever is diagnosing the
 # silence; they are guidance, not denials.
 #

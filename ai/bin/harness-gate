@@ -77,6 +77,9 @@ STATIC_CHECKS = [
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
   ["check-inbox-registry",      %w[ai/bin/check-inbox-registry]],
   ["check-guard-messages",      %w[ai/bin/check-guard-messages]],
+  # Inline predicate suite (DND-218); the black-box coverage suite is the
+  # discovered ai/test/check-guard-messages/self-test.sh.
+  ["check-guard-messages self-test", %w[ai/bin/check-guard-messages --self-test]],
   ["check-bin-help",            %w[ai/bin/check-bin-help]],
   ["check-bin-help self-test",  %w[ai/bin/check-bin-help --self-test]],
   # DND-371: under `set -o pipefail`, `... | grep -q` returns 141 when the

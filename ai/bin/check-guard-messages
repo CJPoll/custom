@@ -10,9 +10,36 @@
 # an actionable instruction. `check-generic-skills` and the safe-wait /
 # pronoun guards are the exemplars.
 #
-# This meta-check asserts every guard in scope carries the marker, and fails
-# (naming the guard) on a bare failure message. Deny-by-default: any hook under
-# ai/hooks/ is treated as a guard unless it is EXEMPT here with a reason.
+# SCOPE IS EVERY FIRST-PARTY EXECUTABLE, AND EVERY ONE IS CLASSIFIED (DND-218)
+#
+# This check used to scan ai/hooks/*.sh plus a hand-kept GUARD_BINS list under
+# ai/bin/. Nothing under scripts/, git-custom/, or a skill's bin/ was read, and
+# an ai/bin guard missing from the list was never read either -- yet the check
+# printed OK. A check whose scope silently excludes a directory reports success
+# for files it never looked at.
+#
+# So discovery is no longer a list of places to look. It is the repo itself:
+# every file `git ls-files --cached --others --exclude-standard` returns that is
+# executable, or lives under a `lib/` / `wt-lib/` directory (sourced code), or
+# is an ai/hooks/*.sh. Each discovered file must have exactly one class:
+#
+#   guard         must carry `Fix:`. Every file under GUARD_DIRS (ai/hooks,
+#                 ai/bin) defaults to this, so a new hook or bin is covered
+#                 without anyone remembering to list it.
+#   tool          a first-party utility that performs an action; it is not a
+#                 guard, check, or gate, and its failures are usage/precondition
+#                 errors. Reason required.
+#   no-fail-path  has no deny/failure path at all. Reason required.
+#   library       sourced code, never an entry point. Reason required.
+#   test          a test suite (a `test/` path segment or `*.self-test.sh`);
+#                 decided by rule, see TEST_REASON.
+#
+# Per-file classes live in ai/guard-classification.tsv. The shape is an
+# ALLOWLIST on purpose: a new script outside GUARD_DIRS that nobody classified
+# is the drift, and it FAILS here. The check also fails when:
+#   - discovery found nothing, or a GUARD_DIR has no files (cannot measure);
+#   - a classified path no longer exists (the scope would silently shrink);
+#   - the table is missing or malformed, or a non-guard has no reason.
 #
 # Convention idea adapted from riddler's howie/wurk harness ("errors written for
 # the LLM"), reimplemented in our conventions.
@@ -20,62 +47,115 @@
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 #
 # Usage:
-#   ai/bin/check-guard-messages            scan guards; exit 1 if any lacks Fix:
+#   ai/bin/check-guard-messages              classify + scan; exit 1 on any gap
 #   ai/bin/check-guard-messages --self-test  verify the checker's own logic
 #
-# Extending: a new hook is covered automatically. A new guard-type bin goes in
-# GUARD_BINS. A hook with no deny/failure path goes in EXEMPT with a reason.
+# The black-box coverage suite is ai/test/check-guard-messages/self-test.sh.
 
 require "fileutils"
+require "open3"
 require "tmpdir"
 
-AI_DIR    = File.expand_path("..", __dir__)
-HOOKS_DIR = File.join(AI_DIR, "hooks")
+REPO  = File.expand_path("../..", __dir__)
+TABLE = "ai/guard-classification.tsv"
 
 MARKER = "Fix:"
 
-# Hooks that legitimately have NO deny/failure path -> nothing to self-correct.
-EXEMPT = {
-  "main-session-policy.sh" => "SessionStart context injector; emits guidance, never denies/fails",
-  "notify-idle.sh"         => "idle notifier; emits a notification, never denies/fails",
-  "harness-event.sh"       => "PostToolUse telemetry emitter; fail-open, never denies/fails",
-  "athena-inbox-poll.sh"   => "SessionStart inbox count; emits a notice, never denies/fails",
-  "athena-slack-poll.sh"   => "SessionStart Slack backstop poll; emits a notice, never denies/fails",
-}.freeze
+# Every discovered file under these directories is a guard unless the table
+# classifies it otherwise.
+GUARD_DIRS = %w[ai/hooks ai/bin].freeze
 
-# Guard-type scripts under ai/bin/ (not every bin is a guard).
-GUARD_BINS = %w[
-  blast-radius
-  build-agents
-  forge-preflight
-  gh-athena
-  glab-athena
-  confirm-merged
-  check-agent-size
-  check-generic-skills
-  check-hooks-registered
-  check-inbox-registry
-  check-pipefail-grep
-  check-tool-risk
-  harness-eval
-  harness-gate
-  critic-review
-  critic-eval
-  admiral-eval
-  variant-eval
-  test-slot
-].freeze
+# Sourced code is discovered even though it is not executable.
+LIB_SEGMENTS = %w[lib wt-lib].freeze
 
-def hook_guards(hooks_dir = HOOKS_DIR)
-  # FNM_DOTMATCH (DND-422): a dot-prefixed hook still needs its Fix: marker.
-  Dir.glob(File.join(hooks_dir, "*.sh"), File::FNM_DOTMATCH)
-     .reject { |p| p.end_with?(".self-test.sh") }
-     .reject { |p| EXEMPT.key?(File.basename(p)) }
-     .sort
+CLASSES     = %w[guard tool no-fail-path library].freeze
+MIN_REASON  = 20
+
+TEST_REASON = "test suite: its failure output is the failing case and its " \
+              "assertion; ai/bin/harness-gate, which runs every suite, is the " \
+              "gate-wrapper and carries Fix:"
+
+# Raised when the check cannot measure. Always surfaced with a Fix:, never as a
+# backtrace and never as a pass.
+MeasureError = Class.new(StandardError)
+
+def rel_segments(rel)
+  rel.split("/")
 end
 
-def bin_guards
-  GUARD_BINS.map { |b| File.join(AI_DIR, "bin", b) }.select { |p| File.file?(p) }
+def test_path?(rel)
+  segs = rel_segments(rel)
+  segs[0..-2].include?("test") || segs.last.end_with?(".self-test.sh")
+end
+
+def lib_path?(rel)
+  (rel_segments(rel)[0..-2] & LIB_SEGMENTS).any?
+end
+
+def hook_script?(rel)
+  rel.start_with?("ai/hooks/") && rel.end_with?(".sh")
+end
+
+def guard_dir_path?(rel)
+  GUARD_DIRS.any? { |d| rel.start_with?("#{d}/") }
+end
+
+# Every candidate path git knows about (tracked, plus untracked-not-ignored).
+# Not being able to ask git is a measurement failure, not an empty tree.
+def git_paths(root)
+  out, err, status = Open3.capture3("git", "-C", root, "ls-files", "-z",
+                                    "--cached", "--others", "--exclude-standard")
+  raise MeasureError, "git -C #{root} ls-files failed: #{err.strip}" unless status.success?
+
+  out.split("\0").uniq
+rescue Errno::ENOENT
+  raise MeasureError, "git executable not found on PATH"
+end
+
+def discover(root)
+  git_paths(root).select do |rel|
+    abs = File.join(root, rel)
+    next false if File.symlink?(abs) || !File.file?(abs)
+
+    File.executable?(abs) || lib_path?(rel) || hook_script?(rel)
+  end.sort
+end
+
+# Parse the TSV. Returns [entries, errors]; entries maps path -> [class, reason].
+def load_table(root)
+  path = File.join(root, TABLE)
+  raise MeasureError, "#{TABLE} is missing or unreadable" unless File.file?(path) && File.readable?(path)
+
+  entries = {}
+  errors = []
+  File.readlines(path, chomp: true).each_with_index do |line, i|
+    next if line.strip.empty? || line.start_with?("#")
+
+    rel, klass, reason, *extra = line.split("\t", -1)
+    where = "#{TABLE}:#{i + 1}"
+    reason = reason.to_s.strip
+    if rel.to_s.empty? || klass.nil? || !extra.empty?
+      errors << "#{where}: expected 'path<TAB>class<TAB>reason', got #{line.inspect}"
+    elsif !CLASSES.include?(klass)
+      errors << "#{where}: #{rel}: unknown class #{klass.inspect} (one of #{CLASSES.join(', ')})"
+    elsif klass != "guard" && reason.length < MIN_REASON
+      errors << "#{where}: #{rel}: class #{klass} needs a real reason (why it has no " \
+                "guard failure path), got #{reason.inspect}"
+    elsif entries.key?(rel)
+      errors << "#{where}: #{rel}: classified twice"
+    else
+      entries[rel] = [klass, reason]
+    end
+  end
+  [entries, errors]
+end
+
+def classify(rel, entries)
+  return entries[rel][0] if entries.key?(rel)
+  return "test" if test_path?(rel)
+  return "guard" if guard_dir_path?(rel)
+
+  nil
 end
 
 # A guard is compliant if its source contains the Fix: marker somewhere in its
@@ -88,60 +168,137 @@ def scan(paths)
   paths.reject { |p| compliant?(p) }
 end
 
-def run_check
-  guards = hook_guards + bin_guards
-  if guards.empty?
-    warn "check-guard-messages: FAILED — no guards found under ai/hooks or GUARD_BINS"
-    warn "  Fix: confirm ai/hooks/*.sh exist and GUARD_BINS names real ai/bin scripts."
+# The whole evaluation, as data, so --self-test can drive it on fixtures.
+def evaluate(root)
+  found = discover(root)
+  raise MeasureError, "discovered 0 first-party files under #{root}" if found.empty?
+
+  entries, table_errors = load_table(root)
+  empty_dirs = GUARD_DIRS.reject { |d| found.any? { |rel| rel.start_with?("#{d}/") } }
+  by_class = Hash.new { |h, k| h[k] = [] }
+  unclassified = []
+  found.each do |rel|
+    klass = classify(rel, entries)
+    klass ? by_class[klass] << rel : unclassified << rel
+  end
+  {
+    found: found,
+    table_errors: table_errors,
+    empty_dirs: empty_dirs,
+    unclassified: unclassified,
+    vanished: entries.keys.reject { |rel| found.include?(rel) }.sort,
+    missing_fix: scan(by_class["guard"].map { |rel| File.join(root, rel) })
+                   .map { |abs| abs.delete_prefix("#{root}/") },
+    by_class: by_class,
+  }
+end
+
+def failed?(result)
+  %i[table_errors empty_dirs unclassified vanished missing_fix].any? { |k| result[k].any? }
+end
+
+def report_failure(result)
+  warn "check-guard-messages: FAILED"
+  unless result[:table_errors].empty?
+    warn "  malformed #{TABLE}:"
+    result[:table_errors].each { |e| warn "    - #{e}" }
+    warn "  Fix: one line per file, 'path<TAB>class<TAB>reason'; class is one of " \
+         "#{CLASSES.join(', ')}; every class but guard states why the file has no " \
+         "guard failure path."
+  end
+  unless result[:empty_dirs].empty?
+    warn "  guard director(ies) with ZERO discovered files: #{result[:empty_dirs].join(', ')}"
+    warn "  Fix: a guard directory that reads empty cannot be measured; restore it, " \
+         "or remove it from GUARD_DIRS in ai/bin/check-guard-messages if it was retired."
+  end
+  unless result[:unclassified].empty?
+    warn "  unclassified first-party file(s) -- the checker cannot tell whether they must carry '#{MARKER}':"
+    result[:unclassified].each { |rel| warn "    - #{rel}" }
+    warn "  Fix: add each to #{TABLE}: 'guard' if it denies, checks, or gates " \
+         "(then give it a '#{MARKER}' line), else tool / no-fail-path / library with the " \
+         "real reason. Never classify a guard as anything else to make this pass."
+  end
+  unless result[:vanished].empty?
+    warn "  classified file(s) that no longer exist (or lost their exec bit):"
+    result[:vanished].each { |rel| warn "    - #{rel}" }
+    warn "  Fix: if the file was deleted or renamed, update its line in #{TABLE}; " \
+         "if it should exist, restore it."
+  end
+  return if result[:missing_fix].empty?
+
+  warn "  guard(s) with a bare failure message (no '#{MARKER}' self-correction):"
+  result[:missing_fix].each { |rel| warn "    - #{rel}" }
+  warn "  Fix: add a '#{MARKER} <what to change to pass>' clause to each guard's " \
+       "deny/failure output. Reclassify one only if it truly has no guard failure " \
+       "path, with that reason, in #{TABLE}."
+end
+
+def run_check(root = REPO)
+  result = evaluate(root)
+  if failed?(result)
+    report_failure(result)
     return 1
   end
 
-  missing = scan(guards)
-  if missing.empty?
-    puts "check-guard-messages: OK — #{guards.size} guard(s) carry an actionable " \
-         "'#{MARKER}' message (#{EXEMPT.size} exempt: #{EXEMPT.keys.join(', ')})"
-    return 0
-  end
-
-  warn "check-guard-messages: FAILED — guard(s) with a bare failure message " \
-       "(no '#{MARKER}' self-correction):"
-  missing.each do |p|
-    rel = p.start_with?(AI_DIR) ? p.sub("#{AI_DIR}/", "") : p
-    warn "  - #{rel}"
-  end
-  warn "  Fix: add a '#{MARKER} <what to change to pass>' clause to each guard's " \
-       "deny/failure output; or, if the script has no failure path, add it to " \
-       "EXEMPT in ai/bin/check-guard-messages with a reason."
+  counts = (%w[guard] + CLASSES.drop(1) + %w[test])
+           .map { |k| "#{result[:by_class][k].size} #{k}" }.join(", ")
+  puts "check-guard-messages: OK — #{result[:found].size} first-party file(s) " \
+       "classified (#{counts}); every guard carries an actionable '#{MARKER}'"
+  0
+rescue MeasureError => e
+  warn "check-guard-messages: FAILED — could not measure: #{e.message}"
+  warn "  Fix: run from a git checkout of ~/dev/custom with git on PATH and " \
+       "#{TABLE} present; a check that cannot look must not report OK."
   1
 end
 
 def run_self_test
-  dir = File.join(Dir.tmpdir, "check-guard-messages-selftest-#{Process.pid}")
-  FileUtils.mkdir_p(dir)
+  dir = Dir.mktmpdir("check-guard-messages-selftest-")
   ok = true
+  fail = ->(msg) { warn "self-test: FAIL — #{msg}"; ok = false }
   begin
     good = File.join(dir, "good.sh")
     bad  = File.join(dir, "bad.sh")
     File.write(good, "#!/bin/sh\necho 'DENY: bad thing. Fix: do the good thing.'\n")
     File.write(bad,  "#!/bin/sh\necho 'failed'\n")
+    fail.("a guard WITH '#{MARKER}' was flagged") if scan([good]).any?
+    fail.("a guard WITHOUT '#{MARKER}' was not flagged") if scan([bad]).empty?
 
-    if scan([good]).any?
-      warn "self-test: FAIL — a guard WITH '#{MARKER}' was flagged"; ok = false
-    end
-    if scan([bad]).empty?
-      warn "self-test: FAIL — a guard WITHOUT '#{MARKER}' was not flagged"; ok = false
+    # Rules, as pure predicates.
+    fail.("scripts/test/x/self-test.sh not a test") unless test_path?("scripts/test/x/self-test.sh")
+    fail.("ai/hooks/a.self-test.sh not a test") unless test_path?("ai/hooks/a.self-test.sh")
+    fail.("scripts/test-required.sh read as a test") if test_path?("scripts/test-required.sh")
+    fail.("scripts/lib/x.sh not a lib") unless lib_path?("scripts/lib/x.sh")
+    fail.("scripts/libx read as a lib") if lib_path?("scripts/libx")
+
+    # A git root that tracks nothing: an empty discovery set is an error.
+    empty = File.join(dir, "empty")
+    FileUtils.mkdir_p(empty)
+    system("git", "-C", empty, "init", "-q", exception: false)
+    begin
+      evaluate(empty)
+      fail.("an empty discovery set did not raise")
+    rescue MeasureError
+      nil
     end
 
-    # DND-422: a dot-prefixed hook is enumerated; its .self-test.sh is not.
-    hooks = File.join(dir, "hooks")
-    FileUtils.mkdir_p(hooks)
-    File.write(File.join(hooks, ".hidden-guard.sh"), "#!/bin/sh\n")
-    File.write(File.join(hooks, ".hidden-guard.self-test.sh"), "#!/bin/sh\n")
-    got = hook_guards(hooks).map { |p| File.basename(p) }
-    unless got == [".hidden-guard.sh"]
-      warn "self-test: FAIL — expected hook_guards to enumerate exactly " \
-           "[.hidden-guard.sh], got #{got.inspect}"; ok = false
+    # Not a git repo at all: cannot measure, never OK.
+    fail.("a non-git root returned OK") if run_check_quietly(File.join(dir, "nowhere")).zero?
+
+    # DND-422: a dot-prefixed hook is discovered (and defaults to guard); its
+    # .self-test.sh is classified test.
+    dot = File.join(dir, "dot")
+    FileUtils.mkdir_p(File.join(dot, "ai/hooks"))
+    File.write(File.join(dot, TABLE), "")
+    File.write(File.join(dot, "ai/hooks/.hidden-guard.sh"), "#!/bin/sh\n")
+    File.write(File.join(dot, "ai/hooks/.hidden-guard.self-test.sh"), "#!/bin/sh\n")
+    system("git", "-C", dot, "init", "-q", exception: false)
+    r = evaluate(dot)
+    unless r[:by_class]["guard"] == ["ai/hooks/.hidden-guard.sh"] &&
+           r[:by_class]["test"] == ["ai/hooks/.hidden-guard.self-test.sh"]
+      fail.("dot-prefixed hook discovery: got #{r[:by_class].inspect}")
     end
+    fail.("a bare dot-prefixed hook was not flagged") unless r[:missing_fix] == ["ai/hooks/.hidden-guard.sh"]
   ensure
     FileUtils.rm_rf(dir)
   end
@@ -151,17 +308,27 @@ def run_self_test
     0
   else
     warn "check-guard-messages: self-test FAILED"
-    warn "  Fix: the scan predicate is broken — it must flag a bare-failure guard " \
-         "and pass a guard carrying '#{MARKER}'."
+    warn "  Fix: the discovery/classification logic is broken — see the FAIL " \
+         "line(s) above; ai/test/check-guard-messages/self-test.sh covers the " \
+         "black-box cases."
     1
   end
+end
+
+def run_check_quietly(root)
+  orig = $stderr
+  $stderr = File.open(File::NULL, "w")
+  run_check(root)
+ensure
+  $stderr = orig
 end
 
 if ARGV.include?("--help") || ARGV.include?("-h")
   puts <<~TXT
     Usage:
-      ai/bin/check-guard-messages              assert every first-party guard/hook
-                                               emits an actionable `Fix:` on failure
+      ai/bin/check-guard-messages              classify every first-party executable
+                                               and library (#{TABLE}); assert every
+                                               guard emits an actionable `Fix:`
       ai/bin/check-guard-messages --self-test  deterministic suite (no model)
       ai/bin/check-guard-messages --help       this text
   TXT

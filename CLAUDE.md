@@ -271,10 +271,24 @@ from riddler's howie/wurk harness — "errors written for the LLM.")
   actionable instruction: what to change so the next attempt passes. Exemplars:
   `ai/bin/check-generic-skills`, `ai/hooks/safe-wait-guard.sh`,
   `ai/hooks/pronoun-guard.sh`.
-- A script with no deny/failure path (a context injector, a notifier) is exempt;
-  record it in `EXEMPT` in `ai/bin/check-guard-messages` with a reason.
-- `ai/bin/check-guard-messages` enforces this (part of the shipwright gate); a
-  new hook is covered by default, so a bare failure message turns the gate red.
+- Every first-party executable, and every file under a `lib/` or `wt-lib/`
+  directory, is classified in `ai/guard-classification.tsv`: `guard` (must carry
+  `Fix:`), or `tool` / `no-fail-path` / `library` with the real reason it has no
+  guard failure path. Test suites are classified by rule. Files under `ai/hooks/`
+  and `ai/bin/` are guards unless listed.
+- `ai/bin/check-guard-messages` enforces this (part of the shipwright gate). It
+  fails on an unclassified file, a classified file that vanished, an empty
+  discovery set, or a guard with a bare failure message. So a new script
+  anywhere in the repo turns the gate red until someone classifies it.
+
+  **Later (2026-09-24):** this read "record it in `EXEMPT` in
+  `ai/bin/check-guard-messages`", and the check scanned only `ai/hooks/*.sh`
+  plus a hand-kept `GUARD_BINS` list. Superseded by the classification table
+  above (DND-218). Nothing under `scripts/`, `git-custom/`, or a skill's `bin/`
+  was read, nor any `ai/bin` guard missing from the list, and the check still
+  printed OK. Measured: `ai/bin/notion-athena-mcp`, `scripts/wt-preflight`,
+  `scripts/prep-commit`, `scripts/check-stack`, `scripts/prep-stack`, and
+  `scripts/check` all had failure paths with no `Fix:`, and none was read.
 
 ## A claimed mechanism must be able to fire
 

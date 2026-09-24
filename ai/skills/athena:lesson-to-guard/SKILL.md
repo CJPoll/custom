@@ -47,9 +47,9 @@ From the exemplar (`ai/bin/check-generic-skills`):
   hooks read stdin). The self-test proves **fail-on-bad AND pass-on-clean** with
   synthetic fixtures.
 - Its failure output carries an actionable **`Fix:`** line (the `B1` /
-  `check-guard-messages` convention — a new hook is auto-covered; a new
-  guard-type bin goes in that checker's `GUARD_BINS`, or `EXEMPT` if it has no
-  failure path).
+  `check-guard-messages` convention — a new hook or `ai/bin` script is a guard
+  by default; any other new executable or `lib/` file must be classified in
+  `ai/guard-classification.tsv`, or the check fails).
 - It is deny-by-default where that fits (an unclassified/new input is treated as
   the stricter case).
 

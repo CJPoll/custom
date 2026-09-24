@@ -1,0 +1,226 @@
+# ai/guard-classification.tsv -- the classification ai/bin/check-guard-messages
+# enforces (DND-218). One line per first-party file: path<TAB>class<TAB>reason.
+#
+# Classes: guard (must carry Fix:) | tool | no-fail-path | library.
+# Every class but guard states the real reason the file has no guard failure
+# path. Test suites (a test/ path segment, *.self-test.sh) are classified by
+# rule and never listed. Files under ai/hooks and ai/bin are guards unless
+# listed here.
+#
+# A new executable or lib/ file that is not listed here FAILS the check. That is
+# the point: an unclassified script is the drift. Never list a guard as
+# anything else to make the gate green; give it a Fix: line instead.
+
+# --- ai/hooks and ai/bin default to guard (GUARD_DIRS); only exceptions are listed.
+ai/hooks/main-session-policy.sh	no-fail-path	SessionStart context injector; emits guidance, never denies or fails a turn
+ai/hooks/notify-idle.sh	no-fail-path	idle notifier; emits a desktop notification, never denies or fails a turn
+ai/hooks/harness-event.sh	no-fail-path	PostToolUse telemetry emitter; fail-open, never denies or fails a turn
+ai/hooks/athena-inbox-poll.sh	no-fail-path	SessionStart inbox count; emits a notice or stays quiet, never denies or fails a turn (its Fix: text is diagnostic guidance, not a denial)
+ai/hooks/athena-slack-poll.sh	no-fail-path	SessionStart Slack backstop poll; emits a notice, never denies or fails a turn (its Fix: text is diagnostic guidance, not a denial)
+ai/bin/contention-census	tool	reads and prints host load/contention numbers for a report; never denies, gates, or retries anything
+
+# --- Sourced libraries. guard = the library holds refusal text that must keep its Fix:.
+ai/inbox/lib/registry.rb	guard	
+ai/lib/fleet/control-domain.sh	guard	
+ai/lib/fleet/control-manager.sh	guard	
+ai/lib/fleet/control-wait.sh	guard	
+ai/lib/fleet/domain.sh	guard	
+ai/lib/fleet/effects.sh	guard	
+ai/lib/fleet/manager.sh	guard	
+ai/lib/fleet/resume-manager.sh	guard	
+ai/lib/forge-git-passthrough.sh	guard	
+ai/skills/athena:inbox/lib/budget.sh	guard	
+ai/skills/athena:inbox/lib/descriptor.sh	guard	
+ai/skills/athena:inbox/lib/doctor.sh	guard	
+ai/skills/athena:inbox/lib/err.sh	guard	
+ai/skills/athena:inbox/lib/inbox.sh	guard	
+ai/skills/athena:inbox/lib/lock.sh	guard	
+ai/skills/athena:inbox/lib/names.sh	guard	
+ai/skills/athena:inbox/lib/routed.sh	guard	
+scripts/wt-lib/push.sh	guard	
+ai/lib/critic_prompt.rb	library	prompt-text constants required by ai/bin/critic-review; emits nothing and has no failure path of its own
+ai/lib/fleet/control-effects.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:
+ai/lib/fleet/resume-domain.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:
+ai/lib/fleet/resume-effects.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:
+ai/skills/athena:inbox/lib/fence.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
+ai/skills/athena:inbox/lib/fs.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
+ai/skills/athena:inbox/lib/liveness.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
+ai/skills/athena:inbox/lib/logchan.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
+ai/skills/athena:inbox/lib/maildir.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
+ai/skills/athena:inbox/lib/mcp.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
+ai/skills/athena:inbox/lib/session.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
+ai/skills/athena:inbox/lib/wedge.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
+ai/skills/athena:slack/lib/inbox.sh	library	sourced by the athena:slack action bins; its slack_die reports a Slack API error for an action, not a guard denial
+ai/skills/athena:slack/lib/slack.sh	library	sourced by the athena:slack action bins; its slack_die reports a Slack API error for an action, not a guard denial
+scripts/lib/dbus-env.sh	library	sourced by the cron wrappers; always exports a bus address (real or sentinel) and never fails
+scripts/wt-lib/close.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
+scripts/wt-lib/common.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
+scripts/wt-lib/create.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
+scripts/wt-lib/merge.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
+scripts/wt-lib/pr.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
+scripts/wt-lib/stack-advanced.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
+scripts/wt-lib/stack.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
+scripts/wt-lib/tmux.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
+scripts/wt-lib/worktree.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
+
+# --- Skill executables.
+ai/skills/athena:inbox-attend/bin/wedge-ticket-decide	guard	
+ai/skills/athena:inbox/bin/inbox-doctor	guard	
+ai/skills/athena:inbox/bin/inbox-status	guard	
+ai/skills/athena:inbox/bin/inbox-wait	guard	
+ai/skills/athena:inbox/bin/read-inbox	guard	
+ai/skills/athena:inbox/bin/send-mail	guard	
+ai/skills/athena:merge-boarding/scripts/integration-gate	guard	
+ai/skills/athena:slack/bin/read-inbox	guard	
+ai/skills/athena:slack/bin/channels	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:slack/bin/delete	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:slack/bin/dm	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:slack/bin/permalink	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:slack/bin/post	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:slack/bin/react	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:slack/bin/read-channel	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:slack/bin/read-thread	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:slack/bin/reply	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:slack/bin/update	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:slack/bin/upload	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:slack/bin/whoami	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
+ai/skills/athena:standup/scripts/standup-window.sh	tool	computes the standup time window; fails only on an unknown argument
+
+# --- scripts/: guards (deny, check, gate, or preflight).
+scripts/athena	guard	
+scripts/athena-inbox-client-run.sh	guard	
+scripts/athena-shipwright-commit.sh	guard	
+scripts/athena-shipwright-run.sh	guard	
+scripts/check	guard	
+scripts/check-stack	guard	
+scripts/inbox-client-alert	guard	
+scripts/inbox-client-capture	guard	
+scripts/prep-commit	guard	
+scripts/prep-stack	guard	
+scripts/reap-orphan-dbus	guard	
+scripts/setup-athena-inbox-client	guard	
+scripts/setup-hooks	guard	
+scripts/setup-inbox-registry	guard	
+scripts/setup-shipwright-cron	guard	
+scripts/wt	guard	
+scripts/wt-preflight	guard	
+
+# --- scripts/: tools. Each performs an action; failures are usage or precondition errors, not guard denials.
+scripts/add-athena-mcp	tool	registers the Athena MCP server with Claude Code for the current project
+scripts/add-notion	tool	registers a Notion MCP server with Claude Code for the current project
+scripts/admiral	tool	launches the admiral Elixir chat app
+scripts/admiral-remote	tool	attaches a remote IEx node to the admiral app
+scripts/alert-box	tool	shows a macOS dialog; no failure path of its own
+scripts/apply-themes	tool	applies the base16-cyberpunk theme to desktop configs
+scripts/bt-crash-report	tool	summarizes Bluetooth firmware crashes from logs
+scripts/bt-setup	tool	installs Bluetooth diagnostics (root) for the owner to run
+scripts/bt-trace	tool	prints the captured Bluetooth HCI trace
+scripts/bt-watch	tool	logs Bluetooth connects/disconnects as they happen
+scripts/browser	tool	launcher that execs ~/dev/browser/run
+scripts/cap	tool	kills processes matching a name
+scripts/cast	tool	casts a local media file to a Roku
+scripts/cd-facilitator	tool	launches a Claude chat with a fixed system prompt
+scripts/chad	tool	OpenAI prompt helper for local files
+scripts/chad-content	tool	extracts message content from an OpenAI JSON reply
+scripts/chad-diff	tool	writes a git diff to diff.txt for chad
+scripts/chad-request	tool	sends one OpenAI chat request
+scripts/clean-branches	tool	interactive local branch cleanup
+scripts/cleanup	tool	interactive git/worktree cleanup helper
+scripts/clear-containers	tool	stops and removes all docker containers
+scripts/clone-org	tool	clones every repo listed in repos.json
+scripts/count-lines-by-author	tool	git blame line counts per author
+scripts/dcs	tool	docker compose service shortcut
+scripts/desktop	tool	mounts/unmounts the desktop home over sshfs
+scripts/dhcpcd-watchdog	tool	restarts a degraded dhcpcd (system action, run by root)
+scripts/dialyzer-files	tool	lists files named in dialyzer output
+scripts/dr	tool	docker run shortcut for an interactive shell
+scripts/dspace	tool	prints disk usage per directory
+scripts/ecr-login	tool	logs docker into AWS ECR
+scripts/emoji-picker	tool	wofi emoji/icon picker
+scripts/ensure-file	tool	asserts a file exists for an interactive shell user; a precondition helper, not a harness guard
+scripts/ensure-line	tool	appends a line to a file if missing
+scripts/find-largest-files	tool	lists the largest files under a directory
+scripts/finished	tool	desktop notification that a command finished
+scripts/fix-credo	tool	drives Claude to fix credo findings in an Elixir project
+scripts/flash	tool	interactive flashcard study CLI
+scripts/function-names	tool	drives Claude to rename Elixir functions
+scripts/gc	tool	generates a commit message with Claude and commits
+scripts/hard-link	tool	creates a hard link if absent
+scripts/insta	tool	apt install shortcut
+scripts/iterate	tool	git add/commit/push shortcut
+scripts/launch-claude.sh	tool	launches an interactive Claude session
+scripts/line-in-file	tool	predicate: exits 0/1 for whether a line is in a file (callers branch on it)
+scripts/main_pane_height.sh	tool	sets the tmux main-pane height
+scripts/mass-rename	tool	one-off Elixir file move script
+scripts/module-structure	tool	drives Claude to restructure an Elixir module
+scripts/mr-review	tool	drives a Claude review of a GitLab MR / GitHub PR
+scripts/nvimdiff	tool	vimdiff shortcut; execs vimdiff with its args
+scripts/nvrun	tool	runs a program on the NVIDIA dGPU
+scripts/pg-docker	tool	opens psql in a docker container
+scripts/plasma	tool	restarts KDE plasmashell
+scripts/port-bound	tool	reports (optionally kills) the process bound to a port
+scripts/pr-review	tool	drives a Claude review of a GitHub PR
+scripts/prep-worktree	tool	bootstraps an Elixir worktree (deps, compile, plt, test)
+scripts/proj	tool	opens a project tmux session
+scripts/proxy	tool	exports a SOCKS proxy variable
+scripts/prune-stale-walt-worktrees.sh	tool	removes walt_ui worktrees older than N days
+scripts/ralph	tool	autonomous agent loop launcher
+scripts/rebuild	tool	rebuilds a docker compose service
+scripts/refresh-walt-dev	tool	refreshes the local walt_ui dev stack after a merge
+scripts/required	tool	prints a missing-argument message for shell-base callers; never exits non-zero
+scripts/schema-move	tool	one-off Elixir schema move script
+scripts/setup-athena-docker	tool	installer for the Athena docker setup (owner-run)
+scripts/setup-athena-user	tool	installer for the athena system user (owner-run)
+scripts/setup-github-runner	tool	installer for a GitHub Actions runner (owner-run)
+scripts/setup-github-runner-docker	tool	installer for a dockerized GitHub runner (owner-run)
+scripts/setup-github-runner-user	tool	installer for the GitHub runner user (owner-run)
+scripts/setup-gitlab-runner	tool	installer for a GitLab runner (owner-run)
+scripts/setup-gitlab-runner-docker	tool	installer for a dockerized GitLab runner (owner-run)
+scripts/setup-gitlab-runner-user	tool	installer for the GitLab runner user (owner-run)
+scripts/shell-base	tool	argument-parsing framework sourced by personal scripts
+scripts/shh	tool	ssh shortcut to registered hosts
+scripts/single-responsibility	tool	drives Claude to split Elixir functions
+scripts/soft-link	tool	creates a symlink if absent
+scripts/split-module	tool	drives Claude to split an Elixir module
+scripts/sr	tool	find + sed -i search/replace
+scripts/ssh-kill	tool	kills ssh mux processes
+scripts/start-docker	tool	starts containerd/docker services
+scripts/start-hyprland	tool	starts Hyprland with a D-Bus session
+scripts/swp-delete	tool	deletes vim swap files
+scripts/tail-claude-log	tool	tails a Claude JSONL log
+scripts/template	tool	skeleton for new shell-base scripts
+scripts/test-required.sh	tool	demo of shell-base argument validation (not a test suite)
+scripts/tkill	tool	kills other tmux sessions
+scripts/toggle-tui.sh	tool	toggles a TUI app in a Hyprland workspace
+scripts/upload	tool	uploads a movie file to a host
+scripts/vibe	tool	launches a Claude session for a Linear ticket
+scripts/vim-review	tool	opens a branch diff in vim for review
+scripts/waybar-audio-sink	tool	waybar audio sink module
+scripts/waybar-battery	tool	waybar battery module
+scripts/waybar-brightness	tool	waybar brightness module
+scripts/waybar-memory-procs	tool	waybar memory module
+scripts/wt-migrate-to-gt	tool	one-off migration from git-stack to Graphite
+scripts/wt-subcommands/wt-change	tool	wt subcommand: switch worktree; failures are git/tool errors for the action
+scripts/wt-subcommands/wt-clean	tool	wt subcommand: clean merged worktrees; failures are git/tool errors for the action
+scripts/wt-subcommands/wt-migrate-to-gt	tool	wt subcommand: migrate to Graphite; failures are git/tool errors for the action
+scripts/wt-subcommands/wt-stack	tool	wt subcommand: stack operations; failures are git/tool errors for the action
+
+# --- Elsewhere in the repo.
+.auto-completions/_gc	no-fail-path	zsh completion definition; returns completion candidates to compinit, never denies or fails
+.auto-completions/_prep-stack	no-fail-path	zsh completion definition; returns completion candidates to compinit, never denies or fails
+.auto-completions/_wt	no-fail-path	zsh completion definition; returns completion candidates to compinit, never denies or fails
+git-custom/git-amend	tool	personal git alias: git commit --amend shortcut
+git-custom/git-author	tool	personal git alias: prints the last commit's author
+git-custom/git-author-aggregate	tool	personal git alias: aggregates per-author change counts
+git-custom/git-author-changes	tool	personal git alias: per-author change counts
+git-custom/git-cleanup	tool	personal git alias: discards local changes
+git-custom/git-command	tool	personal git alias: opens a new git-custom command in $EDITOR
+git-custom/git-deleted	tool	personal git alias: stages deleted files
+git-custom/git-ds	tool	personal git alias: removes .DS_Store files
+git-custom/git-edited	tool	personal git alias: opens modified files in $EDITOR
+git-custom/git-hub	tool	personal git alias: GitHub clone/create shortcuts
+git-custom/git-rekt	tool	personal git alias: prunes local branches gone from origin
+git-custom/git-stop-tracking	tool	personal git alias: untracks a path and ignores it
+hypr/themes/base16-cyberpunk.sh	tool	theme color export for the desktop
+hypr/themes/grub/generate-assets.sh	tool	generates GRUB theme images with ImageMagick
+system-files/bt-hci-capture	tool	root-run btmon capture daemon behind the btmon OpenRC service

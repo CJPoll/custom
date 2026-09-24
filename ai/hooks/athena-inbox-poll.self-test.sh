@@ -1400,7 +1400,7 @@ fi
 echo "== F-12: the guard-message convention =="
 
 # F-12: a counts-only notifier with no deny path is the same species as
-# main-session-policy.sh, so EXEMPT is the honest classification. Asserted two
+# main-session-policy.sh, so no-fail-path is the honest classification. Asserted two
 # ways: the checker passes, AND the exemption is actually present with a reason
 # (the checker would also pass if a bolted-on `Fix:` line had been added
 # instead, which is exactly the dodge the ticket forbids).
@@ -1412,11 +1412,11 @@ fi
 # The checker would ALSO pass if a bolted-on `Fix:` line had been added to the
 # hook instead of exempting it -- which is exactly the dodge the ticket forbids.
 # So assert the classification itself, with its reason.
-if grep -Eq '"athena-inbox-poll\.sh" +=> +"[^"]+"' "${REPO_DIR}/ai/bin/check-guard-messages"; then
-  ok "F-12 the hook is EXEMPT with a stated reason, not carrying a fake deny path"
+if grep -Eq '^ai/hooks/athena-inbox-poll\.sh[[:blank:]]no-fail-path[[:blank:]].{20,}$' "${REPO_DIR}/ai/guard-classification.tsv"; then
+  ok "F-12 the hook is classified no-fail-path with a stated reason, not carrying a fake deny path"
 else
-  bad "F-12 the hook is EXEMPT with a stated reason, not carrying a fake deny path" \
-      "no EXEMPT entry with a reason in ai/bin/check-guard-messages"
+  bad "F-12 the hook is classified no-fail-path with a stated reason, not carrying a fake deny path" \
+      "no no-fail-path entry with a reason in ai/guard-classification.tsv"
 fi
 
 echo "== hardening: --dry-run, the log bound, and the stdin guard =="

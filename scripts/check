@@ -9,3 +9,9 @@ mix compile --force --warnings-as-errors && \
   MIX_ENV=test mix ecto.drop && \
   mix test && \
   mix dialyzer
+status=$?
+if [ "${status}" -ne 0 ]; then
+  echo "check: FAILED (exit ${status}) at the first failing step above" >&2
+  echo "Fix: fix what that mix step reported, then re-run check (prep-commit automates the repair loop)" >&2
+fi
+exit "${status}"

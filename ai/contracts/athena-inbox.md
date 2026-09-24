@@ -70,9 +70,15 @@ clause** on stderr, naming the corrective action, alongside a non-zero exit.
 That applies to every rejection, refusal, and hard error below, not only to the
 ones that restate it. The convention is `~/dev/custom/CLAUDE.md` →
 *Guard/error messages are written for the LLM*, and `ai/bin/check-guard-messages`
-enforces it — it covers any new hook under `ai/hooks/` by default, so a tool
-implementing this contract with a bare failure message turns the harness gate
-red. The `Fix:` text is subject to the same disclosure limit as the refusal
+enforces it — every first-party executable and `lib/` file must be classified
+in `ai/guard-classification.tsv`, so a tool implementing this contract turns the
+harness gate red until it is classified, and red again if it is a guard with a
+bare failure message.
+
+**Later (2026-09-24):** this said the check "covers any new hook under
+`ai/hooks/` by default", implying it covered this contract's tools. It did not:
+the tools live under `ai/skills/athena:inbox/bin/` and `lib/`, which the check
+never read. DND-218 widened discovery to the whole repo. The `Fix:` text is subject to the same disclosure limit as the refusal
 itself: it MUST NOT name another tenant's channels or paths.
 
 ---

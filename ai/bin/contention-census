@@ -10,8 +10,8 @@
 # than a plausible story.
 #
 # This script NEVER denies, gates, retries, or tolerates anything. It reads and
-# prints. It is not a guard, so it carries no `Fix:` clause and is deliberately
-# absent from GUARD_BINS in ai/bin/check-guard-messages.
+# prints. It is not a guard, so it carries no `Fix:` clause and is classified
+# `tool` in ai/guard-classification.tsv (read by ai/bin/check-guard-messages).
 #
 # A lookup that fails must never read like a lookup that found nothing: when
 # docker cannot be consulted, compose_projects is `unknown` with a reason, never
