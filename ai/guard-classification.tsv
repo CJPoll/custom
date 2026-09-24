@@ -41,6 +41,7 @@ ai/skills/athena:inbox/lib/routed.sh	guard
 scripts/wt-lib/push.sh	guard	
 ai/lib/critic_prompt.rb	library	prompt-text constants required by ai/bin/critic-review; emits nothing and has no failure path of its own
 ai/lib/strict_argv.rb	library	required by ai/bin/admiral-eval / variant-eval / critic-eval; raises StrictArgv::UsageError with a one-line reason, and each caller composes the exit-2 refusal that carries Fix:
+ai/lib/first_party.rb	library	first-party discovery required by ai/bin/harness-gate; raises FirstParty::MeasureError and the caller prints the Fix:
 ai/lib/fleet/control-effects.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:
 ai/lib/fleet/resume-domain.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:
 ai/lib/fleet/resume-effects.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:

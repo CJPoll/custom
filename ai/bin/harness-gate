@@ -25,13 +25,14 @@
 #   ai/bin/harness-gate --list       print the declared checks, run nothing
 #   ai/bin/harness-gate --self-test  verify the runner's own logic
 #
-# Not in the list: harness-gate itself (it would recurse). Its --self-test is
-# the relevant check when this file changes.
+# Not in the list: the gate RUN itself (it would recurse). Its --self-test IS
+# declared (DND-507): it never runs the gate, only `--list` and fixtures.
 
 require "open3"
 require "fileutils"
 require "tmpdir"
 require "stringio"
+require_relative "../lib/first_party"
 
 CUSTOM_DIR = File.expand_path("../..", __dir__)
 
@@ -74,8 +75,11 @@ STATIC_CHECKS = [
   ["flaky-marker-sweep self-test", %w[ai/hooks/flaky-marker-sweep.self-test.sh]],
   ["inbox-untrusted-guard self-test", %w[ai/hooks/inbox-untrusted-guard.self-test.sh]],
   ["check-generic-skills",      %w[ai/bin/check-generic-skills]],
+  ["check-generic-skills self-test", %w[ai/bin/check-generic-skills --self-test]],
   ["check-hooks-registered",    %w[ai/bin/check-hooks-registered]],
+  ["check-hooks-registered self-test", %w[ai/bin/check-hooks-registered --self-test]],
   ["check-inbox-registry",      %w[ai/bin/check-inbox-registry]],
+  ["check-inbox-registry self-test", %w[ai/bin/check-inbox-registry --self-test]],
   ["check-guard-messages",      %w[ai/bin/check-guard-messages]],
   # Inline predicate suite (DND-218); the black-box coverage suite is the
   # discovered ai/test/check-guard-messages/self-test.sh.
@@ -105,6 +109,18 @@ STATIC_CHECKS = [
   # check-inotify-headroom/check-pipefail-grep above.
   ["check-inbox-mock-orphans self-test", %w[ai/bin/check-inbox-mock-orphans --self-test]],
   ["harness-eval",              %w[ai/bin/harness-eval]],
+  # DND-507: these inline suites existed but nothing ran them. Each is
+  # deterministic and hermetic (no model, no network, no live config).
+  ["harness-eval self-test",    %w[ai/bin/harness-eval --self-test]],
+  ["harness-metrics self-test", %w[ai/bin/harness-metrics --self-test]],
+  ["harness-signals self-test", %w[ai/bin/harness-signals --self-test]],
+  # The gate's OWN suite (DND-507). It never runs the gate: it lists (`--list`)
+  # and drives fixtures, so declaring it cannot recurse. It carries the
+  # regression cases for the inline --self-test coverage check (case 11), which
+  # a hand-run-only suite would leave unrun -- the class this ticket closes.
+  # Named cost: ~110 s, almost all of it case 4b proving the two installer
+  # delegations behaviourally (it re-runs those suites).
+  ["harness-gate self-test",    %w[ai/bin/harness-gate --self-test]],
   # Answers the one merge question the rest of the bar never asked -- what
   # merging CAUSES (gen_saas PR #256 / DND-234: merging would have run
   # `terraform apply -auto-approve` on prod AWS). Deterministic and hermetic
@@ -137,6 +153,250 @@ SELF_TEST_DELEGATES = {
   "scripts/setup-inbox-registry"       => "ai/inbox/test/self-test.sh",
   "scripts/setup-athena-inbox-client"  => "scripts/test/athena-inbox-client/self-test.sh",
 }.freeze
+
+# ---------------------------------------------------------------------------
+# INLINE --self-test COVERAGE (DND-507)
+#
+# Discovery above covers every committed `self-test.sh`. It cannot see a suite
+# that lives INSIDE a tool behind a `--self-test` flag, and those were declared
+# by hand in STATIC_CHECKS -- so a tool nobody remembered to declare had a suite
+# that could not go red. Measured at 35be30f: six ai/bin tools
+# (check-generic-skills, check-hooks-registered, check-inbox-registry,
+# harness-eval, harness-metrics, harness-signals) shipped one, none was run,
+# and check-hooks-registered's was red in every worktree.
+#
+# So the gate now derives the list of tools that DEFINE an inline --self-test
+# and fails, naming each, unless every one is accounted for exactly once:
+#   - declared: a STATIC_CHECKS entry runs `<tool> --self-test`;
+#   - delegated: SELF_TEST_DELEGATES (installers; the delegation is proven
+#     behaviourally by --self-test case 4b);
+#   - covered: INLINE_SELF_TEST_COVERED_BY names a check the gate already runs
+#     that runs the same suite -- the tool execs a discovered suite, or a
+#     discovered suite runs `<tool> --self-test`. Declaring the tool too would
+#     run that suite twice under two labels;
+#   - excepted: INLINE_SELF_TEST_EXCEPTIONS, with a real reason the suite is
+#     not gate-safe (model-in-loop, live config, network).
+# An entry in either map whose tool vanished, or no longer defines the flag,
+# is STALE and fails too, so the exceptions cannot outlive their subject.
+#
+# WHICH FILES: the first-party executables of ai/lib/first_party.rb (the
+# discovery DND-218 built for check-guard-messages), minus test suites.
+#
+# WHAT "DEFINES AN INLINE --self-test" MEANS, AND WHY THIS HEURISTIC. A tool is
+# a definer when any NON-COMMENT line contains the token `--self-test` (not a
+# prefix of a longer flag such as `--self-test-case`). Deliberately a token,
+# not a list of dispatch shapes: the shapes in this repo alone include bash
+# `--self-test)`, `[ "$1" = "--self-test" ]`, ruby `ARGV.include?`,
+# `when "--self-test"`, `argv.include?`, and a `%w[--self-test ...]` flag
+# table, and a pattern list is exactly the lookup that misses the next shape
+# silently. The flag name is the contract: every harness tool spells its suite
+# `--self-test`, and check-bin-help makes each ai/bin tool advertise its flags
+# in --help, so a definer mentions the token in code. The errors are
+# asymmetric on purpose. A false positive (a tool that only CALLS another's
+# --self-test) costs one reasoned exception entry and is visible; a false
+# negative would be a silent unrun suite, the defect this closes. Comment
+# lines are excluded because comments cite other tools' suites. Residual, said
+# out loud: a suite behind a differently named flag, or a definer whose only
+# mention is inside a comment, is not seen.
+INLINE_SELF_TEST_RE = /(?<![\w-])--self-test(?![\w-])/.freeze
+
+# tool -> the check (argv[0] of a CHECKS entry) that already runs its suite.
+# Corroborated in the gate: the tool's code names the suite's path (>= the
+# basename plus its parent directory when the basename is the generic
+# self-test.sh), or the suite's code names the tool together with --self-test.
+INLINE_SELF_TEST_COVERED_BY = {
+  # The tool's --self-test execs a discovered/declared suite.
+  "ai/bin/fleet-control"         => "ai/lib/fleet/test/control/self-test.sh",
+  "ai/bin/fleet-report"          => "ai/lib/fleet/test/self-test.sh",
+  "ai/bin/fleet-resume"          => "ai/lib/fleet/test/resume/self-test.sh",
+  "ai/bin/test-slot"             => "ai/test/test-slot/self-test.sh",
+  "ai/hooks/fleet-drain-guard.sh"     => "ai/hooks/fleet-drain-guard.self-test.sh",
+  "ai/hooks/fleet-report.sh"          => "ai/hooks/fleet-report.self-test.sh",
+  "ai/hooks/inbox-untrusted-guard.sh" => "ai/hooks/inbox-untrusted-guard.self-test.sh",
+  "ai/hooks/workflow-phase-guard.sh"  => "ai/hooks/workflow-phase-guard.self-test.sh",
+  "ai/skills/athena:inbox-attend/bin/wedge-ticket-decide" =>
+    "ai/skills/athena:inbox-attend/test/self-test.sh",
+  "ai/skills/athena:merge-boarding/scripts/integration-gate" =>
+    "ai/skills/athena:merge-boarding/test/self-test.sh",
+  "scripts/athena-shipwright-commit.sh" => "scripts/test/athena-shipwright/self-test.sh",
+  "scripts/inbox-client-alert"          => "scripts/test/inbox-client-alert/self-test.sh",
+  "scripts/inbox-client-capture"        => "scripts/test/inbox-client-capture/self-test.sh",
+  # A discovered suite runs `<tool> --self-test` itself.
+  "ai/bin/contention-census"  => "ai/test/contention-census/self-test.sh",
+  "ai/bin/lead-time"          => "ai/test/lead-time/self-test.sh",
+  "ai/bin/ready-and-idle"     => "ai/test/ready-and-idle/self-test.sh",
+  "scripts/reap-orphan-dbus"  => "scripts/test/reap-orphan-dbus/self-test.sh",
+}.freeze
+
+# tool -> why its inline --self-test is NOT run by the gate. Only for a suite
+# that is not gate-safe, or a tool that mentions the flag without defining a
+# suite of its own. Never to turn a red suite green.
+# Empty today: every inline suite found at DND-507 is gate-safe.
+INLINE_SELF_TEST_EXCEPTIONS = {}.freeze
+
+MIN_EXCEPTION_REASON = 20
+
+def comment_line?(line)
+  line.lstrip.start_with?("#")
+end
+
+# The non-comment lines of a text file; [] for a binary or unreadable file.
+def code_lines(abs)
+  data = File.binread(abs)
+  return [] if data.include?("\0")
+
+  data.force_encoding(Encoding::UTF_8).scrub.each_line.reject { |l| comment_line?(l) }
+rescue SystemCallError
+  []
+end
+
+def inline_self_test_definer?(abs)
+  code_lines(abs).any? { |l| l.match?(INLINE_SELF_TEST_RE) }
+end
+
+# Does the tool's code name `suite` specifically enough to be the thing it
+# execs? The basename alone is enough unless it is the generic self-test.sh,
+# which then needs its parent directory too ("control/self-test.sh").
+def names_suite?(tool_lines, suite)
+  segs = suite.split("/")
+  need = segs.last == "self-test.sh" ? 2 : 1
+  tail = segs.last(need).join("/")
+  tool_lines.any? { |l| l.include?(tail) }
+end
+
+def covered_by_corroborated?(root, tool, suite)
+  tool_lines = code_lines(File.join(root, tool))
+  return true if names_suite?(tool_lines, suite)
+
+  suite_lines = code_lines(File.join(root, suite))
+  suite_lines.any? { |l| l.include?(File.basename(tool)) } &&
+    suite_lines.any? { |l| l.match?(INLINE_SELF_TEST_RE) }
+end
+
+# The whole evaluation, as data. Raises FirstParty::MeasureError when it cannot
+# measure: no git, an empty first-party set, or zero definers (this repo has
+# dozens, so zero means the detector broke, not that there is nothing to run).
+def inline_self_test_coverage(root:, checks: STATIC_CHECKS + self_test_checks(root),
+                              delegates: SELF_TEST_DELEGATES,
+                              covered_by: INLINE_SELF_TEST_COVERED_BY,
+                              exceptions: INLINE_SELF_TEST_EXCEPTIONS)
+  tools, found, skipped = FirstParty.executables(root)
+  raise FirstParty::MeasureError, "discovered 0 first-party files under #{root}" if found.empty?
+  raise FirstParty::MeasureError, "discovered 0 first-party executables under #{root}" if tools.empty?
+
+  candidates = tools.select { |rel| inline_self_test_definer?(File.join(root, rel)) }
+  if candidates.empty?
+    raise FirstParty::MeasureError,
+          "found no inline --self-test in #{tools.size} first-party executable(s) under #{root}"
+  end
+
+  run_paths = checks.map { |(_, argv)| argv.first }
+  declared = checks.select { |(_, argv)| argv.drop(1).include?("--self-test") }.map { |(_, argv)| argv.first }
+  errors = []
+
+  accounted = Hash.new { |h, k| h[k] = [] }
+  declared.each { |t| accounted[t] << "STATIC_CHECKS" }
+  delegates.each_key { |t| accounted[t] << "SELF_TEST_DELEGATES" }
+  covered_by.each_key { |t| accounted[t] << "INLINE_SELF_TEST_COVERED_BY" }
+  exceptions.each_key { |t| accounted[t] << "INLINE_SELF_TEST_EXCEPTIONS" }
+  accounted.each do |tool, where|
+    next if where.size < 2
+
+    errors << "#{tool} is accounted for more than one way (#{where.join(', ')}); " \
+              "its suite would run twice or be excepted while declared"
+  end
+
+  exceptions.each do |tool, reason|
+    next if reason.to_s.strip.length >= MIN_EXCEPTION_REASON
+
+    errors << "INLINE_SELF_TEST_EXCEPTIONS[#{tool}] needs a real reason (why the suite " \
+              "is not gate-safe), got #{reason.inspect}"
+  end
+
+  covered_by.merge(delegates).each do |tool, check|
+    next if run_paths.include?(check)
+
+    errors << "#{tool} is marked covered by #{check}, which is not a check the gate runs"
+  end
+
+  uncorroborated = covered_by.select do |tool, suite|
+    candidates.include?(tool) && run_paths.include?(suite) &&
+      !covered_by_corroborated?(root, tool, suite)
+  end.keys.sort
+
+  map_keys = (delegates.keys + covered_by.keys + exceptions.keys).uniq
+  {
+    root: root,
+    tools: tools,
+    skipped: skipped,
+    candidates: candidates,
+    uncovered: (candidates - declared - map_keys).sort,
+    stale: (map_keys - candidates).sort,
+    uncorroborated: uncorroborated,
+    errors: errors,
+  }
+end
+
+def failed_inline_coverage?(result)
+  %i[uncovered stale uncorroborated errors].any? { |k| result[k].any? }
+end
+
+# Prints the verdict; returns 0 or 1.
+def report_inline_self_test_coverage(result)
+  summary = "#{result[:candidates].size} of #{result[:tools].size} first-party " \
+            "executable(s) define an inline --self-test " \
+            "(#{result[:skipped].size} untracked third-party file(s) skipped)"
+  unless failed_inline_coverage?(result)
+    puts "inline --self-test coverage: OK — #{summary}; every one is run or excepted"
+    return 0
+  end
+
+  warn "harness-gate: FAILED — inline --self-test coverage (#{summary}):"
+  unless result[:uncovered].empty?
+    warn "  inline --self-test suite(s) the gate never runs:"
+    result[:uncovered].each { |t| warn "    - #{t}" }
+    warn "  Fix: run `<tool> --self-test` once. If it is gate-safe (no model, no " \
+         "network, no live config), add [\"<tool> self-test\", %w[<tool> --self-test]] " \
+         "to STATIC_CHECKS in ai/bin/harness-gate. If its --self-test only execs a " \
+         "suite the gate already runs (or such a suite runs it), map it in " \
+         "INLINE_SELF_TEST_COVERED_BY instead. Only a suite that truly cannot run " \
+         "in the gate goes in INLINE_SELF_TEST_EXCEPTIONS, with that reason. If the " \
+         "suite is red, fix it; never except it to make this pass."
+  end
+  unless result[:stale].empty?
+    warn "  map entries whose tool no longer exists or no longer defines --self-test:"
+    result[:stale].each { |t| warn "    - #{t}" }
+    warn "  Fix: remove each stale entry from SELF_TEST_DELEGATES / " \
+         "INLINE_SELF_TEST_COVERED_BY / INLINE_SELF_TEST_EXCEPTIONS in " \
+         "ai/bin/harness-gate, or restore the tool if it was removed by mistake."
+  end
+  unless result[:uncorroborated].empty?
+    warn "  INLINE_SELF_TEST_COVERED_BY entries with no evidence the named suite runs the tool's suite:"
+    result[:uncorroborated].each { |t| warn "    - #{t} -> #{INLINE_SELF_TEST_COVERED_BY[t]}" }
+    warn "  Fix: point the entry at the suite the tool's --self-test actually execs " \
+         "(its code must name that path), or at a suite that runs `<tool> --self-test`; " \
+         "otherwise declare the tool in STATIC_CHECKS."
+  end
+  unless result[:errors].empty?
+    warn "  malformed coverage bookkeeping:"
+    result[:errors].each { |e| warn "    - #{e}" }
+    warn "  Fix: account for each tool exactly once, give every exception a real " \
+         "reason, and point every covering entry at a check in CHECKS."
+  end
+  1
+end
+
+# Measure + report, with a measurement failure reported as a failure.
+def run_inline_self_test_coverage(root = CUSTOM_DIR)
+  report_inline_self_test_coverage(inline_self_test_coverage(root: root))
+rescue FirstParty::MeasureError => e
+  warn "harness-gate: FAILED — could not measure inline --self-test coverage: #{e.message}"
+  warn "  Fix: run from a git checkout of ~/dev/custom with git on PATH. A " \
+       "coverage check that cannot look must not pass; if discovery or the " \
+       "--self-test detector in ai/bin/harness-gate / ai/lib/first_party.rb " \
+       "broke, repair it rather than skipping this check."
+  1
+end
 
 # `git ls-files` under root, or nil if root isn't a git worktree (a --self-test
 # fixture root, deliberately never a git repo). Used to keep discovery scoped
@@ -488,6 +748,12 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
          "you are committing."
     return 1
   end
+
+  # INLINE --self-test COVERAGE (DND-507): the check LIST itself must include
+  # every inline suite a first-party tool defines. A gap here means the run
+  # below would report PASS over a suite it never ran, so it fails first, like
+  # the zero-discovery guard above.
+  return 1 unless run_inline_self_test_coverage(CUSTOM_DIR).zero?
 
   missing = missing_executables
   unless missing.empty?
@@ -1225,6 +1491,132 @@ def run_self_test
     ok = false
   end
 
+  # 11 (DND-507). Inline --self-test coverage. A first-party executable that
+  #    defines an inline --self-test nobody runs is a suite that cannot go red
+  #    (six such tools passed only by inspection; one was red in every
+  #    worktree). Driven against throwaway git repos with injected maps, via
+  #    the same inline_self_test_coverage run_gate calls.
+  Dir.mktmpdir("harness-gate-selftest-inline") do |dir|
+    mk_repo = lambda do |name, files|
+      root = File.join(dir, name)
+      FileUtils.mkdir_p(root)
+      Open3.capture3("git", "-c", "init.defaultBranch=main", "init", "-q", root)
+      files.each do |rel, (body, mode)|
+        path = File.join(root, rel)
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, body)
+        FileUtils.chmod(mode || 0o755, path)
+      end
+      root
+    end
+    definer = "#!/bin/sh\ncase \"$1\" in --self-test) exit 0 ;; esac\n"
+    cov = lambda do |root, checks: [], delegates: {}, covered_by: {}, exceptions: {}|
+      inline_self_test_coverage(root: root, checks: checks, delegates: delegates,
+                                covered_by: covered_by, exceptions: exceptions)
+    end
+    expect = lambda do |cond, msg|
+      unless cond
+        warn "self-test: FAIL — inline --self-test coverage: #{msg}"
+        ok = false
+      end
+    end
+
+    # 11a. THE REGRESSION: an undeclared inline --self-test is a gap, named.
+    red = mk_repo.call("red", "ai/bin/fixture-tool" => [definer])
+    r = cov.call(red)
+    expect.call(r[:uncovered] == ["ai/bin/fixture-tool"],
+                "an undeclared inline --self-test was not reported (uncovered: #{r[:uncovered].inspect})")
+    code, _o, err = capture.call { report_inline_self_test_coverage(r) }
+    expect.call(code == 1, "report returned #{code.inspect} for an uncovered tool, expected 1")
+    expect.call(err.include?("ai/bin/fixture-tool") && err.include?("Fix:"),
+                "the failure did not name the tool with a Fix: line (stderr: #{err.inspect})")
+
+    # 11b. Each way of accounting for it clears the gap.
+    r = cov.call(red, checks: [["t", %w[ai/bin/fixture-tool --self-test]]])
+    expect.call(r[:uncovered].empty? && !failed_inline_coverage?(r), "a STATIC_CHECKS declaration did not cover the tool")
+    r = cov.call(red, exceptions: { "ai/bin/fixture-tool" => "model-in-loop: calls claude, never gate-safe" })
+    expect.call(r[:uncovered].empty? && !failed_inline_coverage?(r), "a reasoned exception did not cover the tool")
+
+    # 11c. Comment-only and near-miss mentions do not make a tool a definer;
+    #      test suites are never candidates.
+    quiet = mk_repo.call("quiet",
+                         "ai/bin/commenter" => ["#!/bin/sh\n# see other --self-test\nexit 0\n"],
+                         "ai/bin/near-miss" => ["#!/bin/sh\necho --self-tests --self-test-case\n"],
+                         "ai/bin/real" => [definer],
+                         "scripts/test/x/self-test.sh" => ["#!/bin/sh\nfoo --self-test\n"],
+                         "ai/hooks/h.self-test.sh" => ["#!/bin/sh\nfoo --self-test\n"])
+    r = cov.call(quiet)
+    expect.call(r[:candidates] == ["ai/bin/real"],
+                "candidates should be exactly the one definer, got #{r[:candidates].inspect}")
+
+    # 11d. THE MISS: an empty discovery set, a non-git root, and a set with no
+    #      definer at all are measurement failures, never a quiet pass.
+    empty = mk_repo.call("empty", {})
+    [["an empty discovery set", empty],
+     ["a non-git root", File.join(dir, "nowhere")],
+     ["zero definers", mk_repo.call("nodef", "ai/bin/plain" => ["#!/bin/sh\nexit 0\n"])]].each do |why, root|
+      begin
+        cov.call(root)
+        expect.call(false, "#{why} did not raise FirstParty::MeasureError")
+      rescue FirstParty::MeasureError
+        nil
+      end
+    end
+    code, _o, err = capture.call { run_inline_self_test_coverage(empty) }
+    expect.call(code == 1 && err.include?("Fix:"),
+                "an empty discovery set did not fail with a Fix: line (code #{code.inspect})")
+
+    # 11e. Bookkeeping cannot rot: an entry whose file vanished (or no longer
+    #      defines --self-test) is stale; a short reason is refused; a tool in
+    #      two maps is refused; a covering check that is not in CHECKS is
+    #      refused; an uncorroborated covered_by entry is refused.
+    r = cov.call(red, exceptions: { "ai/bin/fixture-tool" => "model-in-loop: calls claude, never gate-safe",
+                                    "ai/bin/gone" => "was a real tool with a real reason once" })
+    expect.call(r[:stale] == ["ai/bin/gone"], "a vanished exception entry was not stale (#{r[:stale].inspect})")
+    r = cov.call(red, exceptions: { "ai/bin/fixture-tool" => "slow" })
+    expect.call(failed_inline_coverage?(r) && r[:errors].any? { |e| e.include?("reason") },
+                "a too-short exception reason was accepted")
+    r = cov.call(red, checks: [["t", %w[ai/bin/fixture-tool --self-test]]],
+                      exceptions: { "ai/bin/fixture-tool" => "model-in-loop: calls claude, never gate-safe" })
+    expect.call(r[:errors].any? { |e| e.include?("more than one") }, "a tool accounted for twice was accepted")
+
+    pair = mk_repo.call("pair",
+                        "ai/bin/execs" => ["#!/bin/sh\ncase \"$1\" in --self-test) exec \"$HERE/../test/execs/self-test.sh\" ;; esac\n"],
+                        "ai/test/execs/self-test.sh" => ["#!/bin/sh\nexit 0\n"],
+                        "ai/bin/driven" => [definer],
+                        "ai/test/driven/self-test.sh" => ["#!/bin/sh\nexec \"$here/../../bin/driven\" --self-test\n"],
+                        "ai/bin/liar" => [definer],
+                        "ai/test/other/self-test.sh" => ["#!/bin/sh\nexit 0\n"])
+    suites = [["s1", %w[ai/test/execs/self-test.sh]], ["s2", %w[ai/test/driven/self-test.sh]],
+              ["s3", %w[ai/test/other/self-test.sh]]]
+    r = cov.call(pair, checks: suites,
+                       covered_by: { "ai/bin/execs" => "ai/test/execs/self-test.sh",
+                                     "ai/bin/driven" => "ai/test/driven/self-test.sh",
+                                     "ai/bin/liar" => "ai/test/other/self-test.sh" })
+    expect.call(r[:uncorroborated] == ["ai/bin/liar"],
+                "covered_by corroboration wrong: want only ai/bin/liar refused, got #{r[:uncorroborated].inspect}")
+    r = cov.call(pair, checks: [],
+                       covered_by: { "ai/bin/execs" => "ai/test/execs/self-test.sh" },
+                       exceptions: { "ai/bin/driven" => "fixture: accounted elsewhere for this case",
+                                     "ai/bin/liar" => "fixture: accounted elsewhere for this case" })
+    expect.call(r[:errors].any? { |e| e.include?("not a check the gate runs") },
+                "a covered_by entry pointing at a check the gate does not run was accepted")
+  end
+
+  # 11f. The REAL repo: the live maps account for every inline --self-test.
+  #      (The gate enforces this too; asserting it here keeps --self-test red
+  #      whenever a map entry goes stale.)
+  begin
+    live = inline_self_test_coverage(root: CUSTOM_DIR)
+    if failed_inline_coverage?(live)
+      warn "self-test: FAIL — the live repo has inline --self-test gaps; run ai/bin/harness-gate for the named list"
+      ok = false
+    end
+  rescue FirstParty::MeasureError => e
+    warn "self-test: FAIL — could not measure inline --self-test coverage of the live repo: #{e.message}"
+    ok = false
+  end
+
   # 10 (DND-404). check-inbox-mock-orphans's REAP invocation (FINAL_CHECKS)
   #    must stay the LAST entry in CHECKS — it backstops
   #    scripts/test/inbox-client-capture's self-test, so it must run after
@@ -1253,8 +1645,11 @@ def run_self_test
          "finding every real **/self-test.sh, flipping a fixture " \
          "suite red/green, and labeling distinct suites uniquely; keep " \
          "self_tests_found?/stray_test_scripts correct against a fixture " \
-         "root; and keep run_one reporting the child's exit status with " \
-         "stdin closed."
+         "root; keep run_one reporting the child's exit status with " \
+         "stdin closed; and keep inline_self_test_coverage naming every " \
+         "first-party tool whose inline --self-test the gate never runs (case " \
+         "11: declare it in STATIC_CHECKS, map it in " \
+         "INLINE_SELF_TEST_COVERED_BY, or except it with a real reason)."
     1
   end
 end
