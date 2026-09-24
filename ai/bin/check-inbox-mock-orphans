@@ -17,26 +17,37 @@
 # self-test, or harness-gate itself) is the one SIGKILLed, the marker dies
 # with it and nothing survives to hand it to a later check. So, like
 # scripts/reap-orphan-dbus for the analogous dbus-daemon leak, this matches on
-# the one fact that survives ANY kill of the process that started it: once a
-# parent dies, its child is reparented to init and PPID becomes 1 —
-# unconditionally, at kernel level, with no trap or cooperation required. A
-# mock-athena-inbox-client.rb process is NEVER legitimately parented to PID 1
-# (its real parent is always a live self-test bash process), so PPID == 1 is
-# unambiguous proof of orphanhood by construction, not a heuristic — no
-# marker, and no correlation to "this" gate run, is needed to tell an orphan
-# from a sibling gate's own still-live mock: a live mock's PPID is that
-# sibling's still-running self-test, never 1.
+# argv (`mock-athena-inbox-client.rb`) and then asks a PARENTAGE question, not
+# a PPID-value question: is this process a descendant of a still-live
+# self-test/gate process anywhere in its lineage? If yes, it is legitimately
+# in flight (this gate's own suite, or a sibling gate's, still running). If
+# no, its real launcher is gone and it is an orphan, full stop.
+#
+# DND-404 r2 (coordinator direction after r1): matching PPID == 1 alone is
+# NOT parentage-independent. Linux reparents an orphan to the nearest live
+# ancestor that set PR_SET_CHILD_SUBREAPER (a container init, `tmux server`,
+# `systemd --user`, ...), not always to PID 1 — so under a subreaper the
+# orphan's PPID is that subreaper's pid, never 1, and a PPID==1 check would
+# match nothing while the orphan sits there indefinitely. Walking the full
+# ancestor chain and asking "is ANY ancestor actually running the suite"
+# closes that gap: a subreaper's own args never match the suite pattern
+# (`self-test.sh` / the C-10 fixture's `fake-suite.sh`), so the chain never
+# finds a live launcher and the process is correctly still flagged, no matter
+# what sits between it and PID 1. This is the same property PPID==1 was
+# reaching for (a fact that survives ANY kill of what started the mock,
+# subreaper or not) via a check that actually holds under a subreaper.
 #
 # --min-age (default 60s) is a courtesy margin only, mirroring
 # reap-orphan-dbus's convention — a real double-fork race exists there
-# (dbus-launch's handshake window); no such race exists here, since a
-# just-reparented process's PPID is 1 immediately and unconditionally. The
-# margin exists purely so this can never be trigger-happy on a hypothetical
-# process-table timing artifact.
+# (dbus-launch's handshake window); no comparable race exists here (the
+# ancestor-chain check is a snapshot-time fact, not something that resolves
+# itself a moment later), so the margin exists purely so this can never be
+# trigger-happy on a hypothetical process-table timing artifact.
 #
 # WHAT IT KILLS (all conditions required): comm/args contain
-# `mock-athena-inbox-client.rb`, PPID == 1, owned by the current user, at
-# least --min-age seconds old (ps `etimes`).
+# `mock-athena-inbox-client.rb`, no ancestor (walking PPID up to PID 1) is a
+# live process whose args match the self-test/fake-suite launcher pattern,
+# owned by the current user, at least --min-age seconds old (ps `etimes`).
 # WHAT IT NEVER TOUCHES: any mock still parented to a live process (this
 # run's own, or a concurrent gate's, in a different worktree — untouched by
 # construction, not by scoping).
@@ -64,47 +75,95 @@
 #   ai/bin/check-inbox-mock-orphans --help
 
 require "open3"
+require "stringio"
+require "tmpdir"
 
 DEFAULT_MIN_AGE = 60
 
 HELP = <<~HELP
   check-inbox-mock-orphans — fail (and kill) any mock-athena-inbox-client.rb
-  process (scripts/test/inbox-client-capture's self-test double) that has
-  been orphaned (PPID 1) for at least --min-age seconds.
+  process (scripts/test/inbox-client-capture's self-test double) whose full
+  ancestor chain contains no live self-test/gate launcher, once it has been
+  in that state for at least --min-age seconds.
 
   Usage:
-    ai/bin/check-inbox-mock-orphans              reap now; exit 1 if anything was found
+    ai/bin/check-inbox-mock-orphans              reap now; exit 1 if orphans were found,
+                                                  exit 2 if processes could not be enumerated
     ai/bin/check-inbox-mock-orphans --min-age N  minimum age in seconds (default #{DEFAULT_MIN_AGE})
     ai/bin/check-inbox-mock-orphans --pid N      only consider this one pid (tests only)
     ai/bin/check-inbox-mock-orphans --self-test  run the matcher self-tests
     ai/bin/check-inbox-mock-orphans --help
 HELP
 
+# A mock's only legitimate live parent, anywhere in its lineage, is the
+# self-test suite itself (scripts/test/inbox-client-capture/self-test.sh) or
+# the throwaway nested launcher C-10 fabricates to reproduce the incident
+# (a tmp file always named fake-suite.sh). Nothing else -- not a subreaper,
+# not PID 1, not a sibling gate's harness-gate process directly -- runs the
+# suite's own script, so this is the one pattern safe to treat as "still in
+# flight".
+LIVE_LAUNCHER_PATTERN = /self-test\.sh|fake-suite\.sh/
+
+# Raised by live_ps_lines when `ps` itself cannot be run/exits non-zero --
+# distinct from "ran fine, found nothing" (A failed lookup must never look
+# like an empty one).
+class PsFailure < StandardError; end
+
+# Walks the ancestor chain starting at `ppid` (looking each pid up in
+# `by_pid`, a pid -> [ppid, args] map built from the same ps snapshot) up
+# toward PID 1, returning true the instant any ancestor's args match
+# LIVE_LAUNCHER_PATTERN. Stops (returns false) the moment a pid is not found
+# in the snapshot at all (an untracked/vanished ancestor is not evidence of
+# life) or once PID 1 itself has been checked and did not match. depth guards
+# against a corrupt/cyclic ps snapshot.
+def descends_from_live_suite?(ppid, by_pid, depth: 0)
+  return false if ppid.nil? || ppid.empty? || depth > 200
+
+  entry = by_pid[ppid]
+  return false unless entry
+
+  parent_ppid, parent_args = entry
+  return true if parent_args && parent_args =~ LIVE_LAUNCHER_PATTERN
+  return false if ppid == "1"
+
+  descends_from_live_suite?(parent_ppid, by_pid, depth: depth + 1)
+end
+
 # Pure: given `ps -eo pid=,ppid=,etimes=,uid=,args=` lines, this process's
 # uid, a minimum age, and an optional single pid to narrow to, the matching
-# [pid, ppid, etimes, args] tuples. PPID == 1 is the whole proof of
-# orphanhood (see the file banner); uid, age and only_pid are narrowing, not
-# what makes this safe.
+# [pid, ppid, etimes, args] tuples -- every mock-athena-inbox-client.rb
+# process whose ancestor chain contains no live self-test/gate launcher (see
+# descends_from_live_suite?; that parentage question, not any particular PPID
+# value, is the whole proof of orphanhood -- see the file banner). uid, age
+# and only_pid are narrowing, not what makes this safe.
 def find_orphans(ps_lines, my_uid, min_age, only_pid: nil)
-  ps_lines.filter_map do |line|
+  rows = ps_lines.filter_map do |line|
     line = line.chomp
     next if line.strip.empty?
 
     pid, ppid, etimes, uid, args = line.strip.split(/\s+/, 5)
     next unless args
+
+    [pid, ppid, etimes, uid, args]
+  end
+
+  by_pid = {}
+  rows.each { |(pid, ppid, _etimes, _uid, args)| by_pid[pid] = [ppid, args] }
+
+  rows.filter_map do |(pid, ppid, etimes, uid, args)|
     next unless args.include?("mock-athena-inbox-client.rb")
-    next unless ppid == "1"
     next unless uid == my_uid.to_s
     next unless etimes.to_i >= min_age
     next if only_pid && pid != only_pid.to_s
+    next if descends_from_live_suite?(ppid, by_pid)
 
     [pid, ppid, etimes, args]
   end
 end
 
 def live_ps_lines
-  out, _err, status = Open3.capture3("ps", "-eo", "pid=,ppid=,etimes=,uid=,args=")
-  return [] unless status.success?
+  out, err, status = Open3.capture3("ps", "-eo", "pid=,ppid=,etimes=,uid=,args=")
+  raise PsFailure, err.to_s.strip unless status.success?
 
   out.lines
 end
@@ -119,18 +178,36 @@ def kill_orphans(orphans)
   end
 end
 
+# Exit codes: 0 = measured, clean. 1 = measured, orphan(s) found and killed.
+# 2 = COULD NOT MEASURE (ps itself failed) -- never conflated with 0. A run
+# that cannot enumerate processes has looked at nothing, so it must not print
+# or exit as though it looked and found nothing (A failed lookup must never
+# look like an empty one).
 def run_check(min_age, ps_lines: nil, my_uid: Process.uid, only_pid: nil)
-  orphans = find_orphans(ps_lines || live_ps_lines, my_uid, min_age, only_pid: only_pid)
+  begin
+    lines = ps_lines || live_ps_lines
+  rescue PsFailure => e
+    warn "check-inbox-mock-orphans: FAILED -- could not enumerate processes " \
+         "(`ps -eo pid=,ppid=,etimes=,uid=,args=` exited non-zero)#{e.message.empty? ? '' : ": #{e.message}"}"
+    warn "  This is UNMEASURED, not clean -- it is not the same as \"no orphans found\"."
+    warn "  Fix: find out why `ps` failed on this host (missing binary, a " \
+         "restricted /proc, a broken PATH) and fix that; re-run this check " \
+         "once `ps -eo pid=,ppid=,etimes=,uid=,args=` succeeds directly."
+    return 2
+  end
+
+  orphans = find_orphans(lines, my_uid, min_age, only_pid: only_pid)
   if orphans.empty?
-    puts "check-inbox-mock-orphans: no orphaned (PPID 1, >= #{min_age}s old) " \
-         "mock-athena-inbox-client.rb process found#{only_pid ? " (pid #{only_pid})" : ''}."
+    puts "check-inbox-mock-orphans: no orphaned (no live-suite ancestor, " \
+         ">= #{min_age}s old) mock-athena-inbox-client.rb process " \
+         "found#{only_pid ? " (pid #{only_pid})" : ''}."
     return 0
   end
 
   kill_orphans(orphans)
   warn "check-inbox-mock-orphans: FAILED -- #{orphans.size} " \
-       "mock-athena-inbox-client.rb process(es) were orphaned (PPID 1, the " \
-       "PT-919 class):"
+       "mock-athena-inbox-client.rb process(es) have no live self-test/gate " \
+       "ancestor (the PT-919 class):"
   orphans.each { |(pid, ppid, etimes, args)| warn "  pid=#{pid} ppid=#{ppid} age=#{etimes}s args=#{args}" }
   warn "  Each was just killed by PID (SIGKILL) as a backstop."
   warn "  Fix: the self-test (or harness-gate itself) that started this mock " \
@@ -152,12 +229,22 @@ end
 # that is then SIGKILLed -- reproducing the measured incident exactly (the
 # LAUNCHER dies, never the mock) -- then drives run_check against REAL `ps`
 # output, proving:
-#   * a genuinely orphaned (PPID 1), aged mock is found, reported with a
-#     Fix:, and killed (FAIL);
+#   * a genuinely orphaned, aged mock (real PPID 1, the reparent-to-init case)
+#     is found, reported with a Fix:, and killed (FAIL);
 #   * once it is gone, the check is clean (PASS);
 #   * a mock still parented to a LIVE process is left alone at any age --
 #     the case that makes this safe for a concurrent sibling gate run, by
-#     construction rather than by a marker.
+#     construction rather than by a marker;
+#   * a SUBREAPER-shaped ancestry (PPID != 1, but no ancestor anywhere in the
+#     chain is a live suite/gate launcher) is caught by the pure matcher
+#     against a fixture -- this is the case PPID==1 alone could not see. It is
+#     validated against a synthetic ps snapshot rather than a real
+#     PR_SET_CHILD_SUBREAPER process (no portable way to set that from Ruby
+#     without a C extension), while the plain reparent-to-1 case above is
+#     still validated end-to-end against a real, live orphan; together they
+#     cover both the mechanism (fixture) and the OS behavior (real process);
+#   * a failed `ps` is a loud, distinct FAIL (exit 2), never read as "no
+#     orphans found" (exit 0) -- the class this suite's own r1 bug was.
 def self_test
   pass = 0
   fail_count = 0
@@ -175,31 +262,57 @@ def self_test
 
   # 1. Pure matcher, fixture-driven.
   fixture = [
+    # Direct-parent-is-PID-1 orphan (no pid "1" row in the snapshot at all,
+    # same as a real minimal `ps` -- absence is proof, not ambiguity).
     "111  1    9999  #{my_uid}  ruby /x/mock-athena-inbox-client.rb\n",
-    # A live mock (real parent, not 1) -- e.g. a sibling gate's own in-flight
-    # suite -- must NEVER match, at any age.
+    # A live mock whose DIRECT parent (222) is a still-running self-test
+    # suite -- e.g. a sibling gate's own in-flight suite -- must NEVER match,
+    # at any age.
     "112  222  9999  #{my_uid}  ruby /x/mock-athena-inbox-client.rb\n",
+    "222  50   500   #{my_uid}  bash scripts/test/inbox-client-capture/self-test.sh\n",
     # A fresh orphan, younger than min_age -- kept, not yet reapable.
     "113  1    1     #{my_uid}  ruby /x/mock-athena-inbox-client.rb\n",
     # Someone else's orphan (different uid) -- never touched.
     "114  1    9999  0  ruby /x/mock-athena-inbox-client.rb\n",
     "115  222  9999  #{my_uid}  ruby /x/athena-inbox-client.rb --config c\n",
+    # SUBREAPER case: PPID (60) is NOT 1, but that ancestor is a generic
+    # process ("tmux: server", standing in for any PR_SET_CHILD_SUBREAPER
+    # holder) whose own parent IS 1 -- neither matches the live-launcher
+    # pattern, so this must still be flagged an orphan. This is exactly the
+    # case a bare PPID==1 check would miss.
+    "116  60   9999  #{my_uid}  ruby /x/mock-athena-inbox-client.rb\n",
+    "60   1    99999 #{my_uid}  tmux: server\n",
+    # Live mock TWO ancestors removed from the actual suite (an intermediate
+    # generic wrapper, e.g. `sh -c`) -- proves the walk goes past the
+    # immediate parent, not just one hop.
+    "117  70   9999  #{my_uid}  ruby /x/mock-athena-inbox-client.rb\n",
+    "70   71   500   #{my_uid}  sh -c true\n",
+    "71   50   500   #{my_uid}  bash scripts/test/inbox-client-capture/self-test.sh\n",
     "\n",
   ]
   got = find_orphans(fixture, my_uid, 60)
-  if got == [["111", "1", "9999", "ruby /x/mock-athena-inbox-client.rb"]]
-    ok.call("matches only: PPID 1, this uid, >= min-age, the mock filename")
+  want = [
+    ["111", "1", "9999", "ruby /x/mock-athena-inbox-client.rb"],
+    ["116", "60", "9999", "ruby /x/mock-athena-inbox-client.rb"],
+  ]
+  if got == want
+    ok.call("matches: no live-suite ancestor (direct PID 1, or a subreaper), this uid, >= min-age -- and only those")
   else
-    bad.call("matches only PPID 1 + this uid + min-age + filename", got.inspect)
+    bad.call("matches only orphans with no live-suite ancestor + this uid + min-age + filename", got.inspect)
   end
   if find_orphans(fixture, my_uid, 0).map(&:first).include?("113")
     ok.call("min-age 0 catches the fresh orphan too")
   else
     bad.call("min-age 0 catches the fresh orphan too", find_orphans(fixture, my_uid, 0).inspect)
   end
+  if find_orphans(fixture, my_uid, 0).map(&:first).include?("117")
+    bad.call("a mock two ancestors below a LIVE self-test.sh is never touched", find_orphans(fixture, my_uid, 0).inspect)
+  else
+    ok.call("a mock two ancestors below a LIVE self-test.sh is never touched, even at min-age 0")
+  end
 
   # 2. Clean ps (nothing matches): exit 0, nothing touched.
-  rc = run_check(60, ps_lines: fixture.reject { |l| l.start_with?("111") }, my_uid: my_uid)
+  rc = run_check(60, ps_lines: fixture.reject { |l| l.start_with?("111") || l.start_with?("116") }, my_uid: my_uid)
   if rc.zero?
     ok.call("no orphan present -> exit 0")
   else
@@ -225,7 +338,22 @@ def self_test
   File.delete(ready) if File.exist?(ready)
   if mock_pid.nil? || mock_pid.empty?
     bad.call("the fabricated launcher reported its mock's pid", "no #{ready}")
+    # The ready file never showed up, so we never learned the fabricated
+    # sleep's pid that way -- but bash already backgrounded it as
+    # launcher_pid's child before this branch was reached. Find and kill it
+    # directly (in addition to the launcher) so this self-test FAILURE
+    # doesn't leak a real orphaned mock into the process table.
+    begin
+      stray = live_ps_lines.filter_map do |l|
+        p, pp, _et, _uid, a = l.strip.split(/\s+/, 5)
+        [p, pp, a] if a
+      end.select { |(_p, pp, a)| pp == launcher_pid.to_s && a.include?("mock-athena-inbox-client.rb") }
+      stray.each { |(p, _pp, _a)| Process.kill("KILL", p.to_i) rescue nil }
+    rescue PsFailure
+      nil
+    end
     Process.kill("KILL", launcher_pid) rescue nil
+    Process.wait(launcher_pid) rescue nil
   else
     Process.kill("KILL", launcher_pid)
     Process.wait(launcher_pid) rescue nil
@@ -280,34 +408,94 @@ def self_test
     end
   end
 
-  # 4. A mock still parented to a LIVE process, even past min-age, is left
-  #    alone -- the invariant that makes this safe without any marker. Scoped
-  #    to this fabricated pid for the same reason as case 3.
-  live_launcher = Process.spawn(
-    "bash", "-c", 'exec -a "mock-athena-inbox-client.rb" sleep 300',
+  # 4. A mock whose DIRECT parent is a LIVE process that genuinely looks like
+  #    the self-test suite (argv0 "self-test.sh", via Ruby's argv0-override
+  #    spawn form -- no shell-quoting games needed for the outer process) is
+  #    left alone, even past min-age. This is the real safety invariant under
+  #    the new ancestor-chain design: it is not "any live parent", it is
+  #    "a live parent that is actually running the suite" -- proven here
+  #    end-to-end against real processes, not just the fixture in case 1.
+  ready4 = "/tmp/check-inbox-mock-orphans-selftest-#{Process.pid}-live.ready"
+  File.delete(ready4) if File.exist?(ready4)
+  suite_pid = Process.spawn(
+    ["bash", "self-test.sh"], "-c",
+    'exec -a "mock-athena-inbox-client.rb" sleep 300 & echo "$!" >"$1"; wait',
+    "_", ready4,
     out: "/dev/null", err: "/dev/null"
   )
+  child_pid = nil
   begin
-    rc = run_check(0, only_pid: live_launcher)
-    if rc.zero?
-      ok.call("a mock still parented to a LIVE process is never touched, even at min-age 0")
-    else
-      bad.call("a live-parented mock is never touched", "rc=#{rc} (it was reaped!)")
+    40.times do
+      child_pid = File.read(ready4).strip if File.exist?(ready4) && !File.zero?(ready4)
+      break if child_pid && !child_pid.empty?
+
+      sleep 0.05
     end
-    alive = begin
-      Process.kill(0, live_launcher)
-      true
-    rescue Errno::ESRCH
-      false
-    end
-    if alive
-      ok.call("...and it is still alive afterward")
+    File.delete(ready4) if File.exist?(ready4)
+
+    if child_pid.nil? || child_pid.empty?
+      bad.call("case 4 setup: the fabricated live-suite launcher reported its mock's pid", "no #{ready4}")
     else
-      bad.call("the live-parented mock is still alive afterward", "it was killed")
+      rc = run_check(0, only_pid: child_pid)
+      if rc.zero?
+        ok.call("a mock parented to a LIVE self-test.sh-argv0 process is never touched, even at min-age 0")
+      else
+        bad.call("a live-suite-parented mock is never touched", "rc=#{rc} (it was reaped!)")
+      end
+      alive = begin
+        Process.kill(0, child_pid.to_i)
+        true
+      rescue Errno::ESRCH
+        false
+      end
+      if alive
+        ok.call("...and it is still alive afterward")
+      else
+        bad.call("the live-suite-parented mock is still alive afterward", "it was killed")
+      end
     end
   ensure
-    Process.kill("KILL", live_launcher) rescue nil
-    Process.wait(live_launcher) rescue nil
+    Process.kill("KILL", child_pid.to_i) rescue nil if child_pid && !child_pid.empty?
+    Process.kill("KILL", suite_pid) rescue nil
+    Process.wait(suite_pid) rescue nil
+  end
+
+  # 5. A failed `ps` (this run could not enumerate processes at all) must be a
+  #    loud, DISTINCT failure (exit 2) -- never read as "no orphans found"
+  #    (exit 0). This is exactly the r1 bug the critic caught:
+  #    `live_ps_lines` used to `return [] unless status.success?`, so a `ps`
+  #    that could not run silently reported a clean sweep. Proven against
+  #    both code paths is the point: this case FAILS on the pre-fix
+  #    behaviour (rc would be 0, "no orphans found") and PASSES after.
+  Dir.mktmpdir("check-inbox-mock-orphans-selftest-ps-") do |dir|
+    fake_ps = File.join(dir, "ps")
+    File.write(fake_ps, "#!/bin/sh\necho 'ps: fabricated failure for --self-test' 1>&2\nexit 1\n")
+    File.chmod(0o755, fake_ps)
+
+    orig_path = ENV["PATH"]
+    captured = StringIO.new
+    orig_stderr = $stderr
+    rc = nil
+    begin
+      ENV["PATH"] = "#{dir}:#{orig_path}"
+      $stderr = captured
+      rc = run_check(60)
+    ensure
+      $stderr = orig_stderr
+      ENV["PATH"] = orig_path
+    end
+    err = captured.string
+
+    if rc == 2
+      ok.call("a failing `ps` is a distinct FAIL (exit 2), never \"no orphans found\" (exit 0)")
+    else
+      bad.call("a failing ps is a distinct FAIL, not a silent clean pass", "rc=#{rc.inspect}")
+    end
+    if err.include?("could not enumerate processes") && err.include?("Fix:") && !err.include?("no orphaned")
+      ok.call("the failure names itself as unmeasured (not \"no orphans found\") and carries a Fix:")
+    else
+      bad.call("the failure names itself as unmeasured and carries a Fix:", err)
+    end
   end
 
   puts ""

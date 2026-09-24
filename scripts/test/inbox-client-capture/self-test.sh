@@ -420,8 +420,10 @@ fi
 # the trap is. This is why the fix cannot be trap-only, and cannot be a marker
 # either (a marker dies with whatever process was carrying it): it proves the
 # trap CANNOT close this gap, then proves ai/bin/check-inbox-mock-orphans --
-# which matches PPID == 1 (unconditional and unambiguous once a parent dies,
-# no cooperation required) -- does.
+# which walks the mock's full ancestor chain and asks whether ANY of it is
+# still a live self-test/gate launcher (unconditional and unambiguous once
+# the real launcher dies, no cooperation required, and not defeated by a
+# subreaper sitting between the mock and PID 1) -- does.
 printf '\nC-10  DND-404: a SIGKILLed launcher orphans its mock -- the gate backstop reaps what no trap can\n'
 FAKE_SUITE="${TMP}/fake-suite.sh"
 cat >"${FAKE_SUITE}" <<'FAKE'
@@ -447,19 +449,28 @@ if wait_file "${TMP}/nested.ready" 100; then
     [ "${ppid}" = "1" ] && break
     sleep 0.1; i=$((i+1))
   done
-  if kill -0 "${NESTED_CHILD}" 2>/dev/null; then
-    ok "reproduces the incident: mock (pid ${NESTED_CHILD}) outlives its SIGKILLed launcher, ppid now ${ppid:-?} (PT-919 class)"
+  # Assert ppid == 1 DIRECTLY -- not just that the mock is still alive. A
+  # process that is merely alive proves nothing about reparenting; ppid == 1
+  # is the actual, unambiguous kernel fact this fixture exists to reproduce
+  # (the plain reparent-to-init case; a subreaper would instead reparent to
+  # its own pid, which is why the gate itself no longer trusts PPID alone --
+  # see check-inbox-mock-orphans's ancestor-chain walk).
+  if kill -0 "${NESTED_CHILD}" 2>/dev/null && [ "${ppid}" = "1" ]; then
+    ok "reproduces the incident: mock (pid ${NESTED_CHILD}) outlives its SIGKILLed launcher, ppid now 1 (PT-919 class)"
   else
-    bad "reproduces the incident (mock outlives its SIGKILLed launcher)" "mock ${NESTED_CHILD} is already gone -- cannot demonstrate the gap this run"
+    bad "reproduces the incident (mock outlives its SIGKILLed launcher, ppid == 1)" "pid ${NESTED_CHILD} alive=$(kill -0 "${NESTED_CHILD}" 2>/dev/null && echo yes || echo no) ppid=${ppid:-?}"
   fi
   GATE="${SCRIPTS}/../ai/bin/check-inbox-mock-orphans"
-  # --min-age 0: this fixture's whole point is that PPID == 1 alone is proof,
-  # with no wait required (the real gate run uses the 60s default). --pid
-  # scopes this to OUR fabricated orphan: a concurrent gate run in a sibling
-  # worktree fabricating its own for the same reason must never race us.
+  # --min-age 0: this fixture's whole point is that a dead launcher's mock is
+  # proof with no wait required (the real gate run uses the 60s default).
+  # --pid scopes this to OUR fabricated orphan: a concurrent gate run in a
+  # sibling worktree fabricating its own for the same reason must never race
+  # us. The gate detects this by walking the mock's ancestor chain and
+  # finding no live self-test/gate launcher anywhere in it (not by matching
+  # PPID == 1 alone, which a subreaper could otherwise dodge).
   GATE_OUT="$("${GATE}" --min-age 0 --pid "${NESTED_CHILD}" 2>&1)"; GATE_RC=$?
   if [ "${GATE_RC}" -eq 1 ] && grep -q "pid=${NESTED_CHILD} " <<<"${GATE_OUT}" && grep -q 'Fix:' <<<"${GATE_OUT}"; then
-    ok "check-inbox-mock-orphans finds it by PPID == 1 alone: exit 1 with a Fix:"
+    ok "check-inbox-mock-orphans finds it (no live-suite ancestor): exit 1 with a Fix:"
   else
     bad "check-inbox-mock-orphans finds the orphan" "rc=${GATE_RC} ${GATE_OUT}"
   fi

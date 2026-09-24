@@ -294,9 +294,11 @@ end
 # scripts/test/inbox-client-capture/self-test.sh starts real
 # mock-athena-inbox-client.rb processes and reaps them by pid in its own
 # trap; a trap cannot survive a SIGKILL of the suite (or of this gate
-# process) itself. check-inbox-mock-orphans matches PPID == 1 — proof of
-# orphanhood that survives any kill of whatever started the mock, no marker
-# or environment plumbing required — so it never depends on this process
+# process) itself. check-inbox-mock-orphans walks the mock's ancestor chain
+# for a still-live self-test/gate launcher anywhere in it — proof of
+# orphanhood that survives any kill of whatever started the mock (and a
+# subreaper reparenting it to something other than PID 1), no marker or
+# environment plumbing required — so it never depends on this process
 # still being alive to run it; it just as usefully sweeps up whatever an
 # EARLIER killed gate run left behind, which is the case that actually
 # matters (see the script's own banner).
