@@ -2878,9 +2878,15 @@ pause (drain) and resume a session. This section is the contract for that
 registry and that control. Its implementing tickets are DND-431 (server
 registry and `fleet_report`), DND-433 (harness reporters), DND-434 (fleet page),
 DND-441 (server session control) and DND-443 (harness drain enforcement); each
-cites the subsection it builds by name. None of the harness homes named below
-exists yet. Every sentence about them is an obligation on its implementer, not
-a description of shipped behaviour.
+cites the subsection it builds by name. Of the harness homes named below, only
+DND-433's reporters exist: `ai/bin/fleet-report` and `ai/hooks/fleet-report.sh`.
+Every sentence about the others is an obligation on its implementer, not a
+description of shipped behaviour.
+
+**Later (2026-09-24):** this paragraph said "None of the harness homes named
+below exists yet." DND-433 shipped the reporters, so that is no longer true for
+them. It stays true for DND-443's `ai/bin/fleet-control` and
+`ai/hooks/fleet-drain-guard.sh`.
 
 ### Fleet reports are state upserts, not events
 

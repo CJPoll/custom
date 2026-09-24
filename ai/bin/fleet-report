@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# fleet-report -- send one fleet report (a state upsert) to the Athena server's
+# fleet registry. FRAMEWORK: parse argv, build the body (domain), hand it to the
+# manager. Normative home: ai/contracts/athena-events.md -> *Fleet registry and
+# session control* (DND-431 server, DND-433 this reporter).
+
+set -u
+
+usage() {
+  cat <<'EOF'
+Usage: fleet-report <subcommand> [flags]
+
+Send one report to POST /api/v1/fleet/reports (ai/contracts/athena-events.md ->
+Fleet report kinds and their closed schema). Identity is only the machine token:
+owner and machine are stamped server-side, so --machine/--owner are refused.
+
+Subcommands (flags may come in any order):
+  session-start  [--cwd DIR]                        session_started (project + repo_key
+                                                    resolved from DIR's git common dir)
+  session-seen   [--agent-id ID] [--agent-type T]   session_seen
+  session-end    [--reason R]                       session_ended
+  admiral-start  --run-id R --agent-id ID [--scope-label L]   admiral_started
+  admiral-scope  --run-id R --missions FILE         admiral_scope (FILE: JSON array of
+                                                    mission pointers, exactly tracker,
+                                                    ticket_ref, url, title, status,
+                                                    captain_state)
+  admiral-seen   --agent-id ID [--agent-type T]     admiral_seen
+  admiral-state  --run-id R --state draining|drained|finished   admiral_state
+
+Common flags:
+  --session-id S   top-level Claude session id (default: $CLAUDE_CODE_SESSION_ID,
+                   which every agent depth's Bash tool carries)
+  --dry-run        print the JSON body on stdout; read no token, send nothing
+  --help           this text
+  --self-test      run the fleet-report suite (fake server; never prod)
+
+Exit codes:
+  0 ok   1 local configuration (no token / no athena MCP entry / bad state dir /
+  unresolvable repo)   2 usage   3 server refused (prints its Fix:)
+  4 server unreachable   5 server fault (5xx)
+
+Every failure prints one stderr line carrying Fix:. The server URL is the origin
+of the `athena` MCP entry in ~/.claude.json; the token is read from
+~/.config/athena-inbox-client/config.json and fed to curl on stdin, never argv.
+EOF
+}
+
+SELF="$(realpath -- "${BASH_SOURCE[0]}")"
+AI="$(cd -- "$(dirname -- "${SELF}")/.." && pwd -P)"
+INBOX_LIB="${AI}/skills/athena:inbox/lib"
+
+die_usage() {
+  printf 'fleet-report: %s. Fix: %s\n' "$1" "${2:-run fleet-report --help for the subcommands and their flags.}" >&2
+  exit 2
+}
+
+# --help / --self-test anywhere win, before anything else runs.
+for a in "$@"; do
+  case "${a}" in
+    -h|--help) usage; exit 0 ;;
+    --self-test) exec "${AI}/lib/fleet/test/self-test.sh" ;;
+  esac
+done
+
+for dep in jq; do
+  command -v "${dep}" >/dev/null 2>&1 || { printf 'fleet-report: %s is not on PATH. Fix: install %s.\n' "${dep}" "${dep}" >&2; exit 1; }
+done
+
+# shellcheck source=../lib/fleet/domain.sh
+. "${AI}/lib/fleet/domain.sh"
+# shellcheck disable=SC1091
+. "${INBOX_LIB}/err.sh"; . "${INBOX_LIB}/names.sh"; . "${INBOX_LIB}/fs.sh"; . "${INBOX_LIB}/descriptor.sh"
+# shellcheck source=../lib/fleet/effects.sh
+. "${AI}/lib/fleet/effects.sh"
+# shellcheck source=../lib/fleet/manager.sh
+. "${AI}/lib/fleet/manager.sh"
+
+sub="" session_id="${CLAUDE_CODE_SESSION_ID:-}" cwd="${PWD}" agent_id="" agent_type="" run_id=""
+missions_file="" state="" scope_label="" reason="" dry_run="" given=" "
+
+need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die_usage "$1 needs a value"; }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --machine|--machine=*|--machine-id|--machine-id=*|--owner|--owner=*|--owner-id|--owner-id=*)
+      die_usage "${1%%=*} is refused: owner and machine are stamped server-side from the machine token" \
+        "remove ${1%%=*}; the server reads identity only from the token (athena-events.md -> Fleet identity)." ;;
+    --session-id)  need_value "$@"; session_id="$2"; given="${given}session-id "; shift 2 ;;
+    --cwd)         need_value "$@"; cwd="$2"; given="${given}cwd "; shift 2 ;;
+    --agent-id)    need_value "$@"; agent_id="$2"; given="${given}agent-id "; shift 2 ;;
+    --agent-type)  need_value "$@"; agent_type="$2"; given="${given}agent-type "; shift 2 ;;
+    --run-id)      need_value "$@"; run_id="$2"; given="${given}run-id "; shift 2 ;;
+    --missions)    need_value "$@"; missions_file="$2"; given="${given}missions "; shift 2 ;;
+    --state)       need_value "$@"; state="$2"; given="${given}state "; shift 2 ;;
+    --scope-label) need_value "$@"; scope_label="$2"; given="${given}scope-label "; shift 2 ;;
+    --reason)      need_value "$@"; reason="$2"; given="${given}reason "; shift 2 ;;
+    --dry-run)     dry_run=1; shift ;;
+    -*)            die_usage "unknown flag $1" ;;
+    *)
+      [ -z "${sub}" ] || die_usage "unexpected argument $1 (subcommand already ${sub})"
+      sub="$1"; shift ;;
+  esac
+done
+
+[ -n "${sub}" ] || die_usage "no subcommand given"
+
+# allowed_flags <list> -- refuse any given flag the subcommand does not take.
+allowed_flags() {
+  local f
+  for f in ${given}; do
+    case " session-id $1 " in *" ${f} "*) ;; *) die_usage "${sub} does not take --${f}" ;; esac
+  done
+}
+
+[ -n "${session_id}" ] || die_usage "no session id: --session-id is unset and so is \$CLAUDE_CODE_SESSION_ID" \
+  "pass --session-id <top-level claude session id>, or run from inside a Claude Code session."
+fleet_valid_id "${session_id}" || die_usage "session id ${session_id@Q} is not a valid id" \
+  "pass the top-level session_id exactly as Claude Code gives it (letters, digits, . _ -)."
+[ -z "${agent_id}" ] || fleet_valid_id "${agent_id}" || die_usage "agent id ${agent_id@Q} is not a valid id" \
+  "pass your own agentId exactly as SendMessage uses it."
+[ -z "${run_id}" ] || fleet_valid_id "${run_id}" || die_usage "run id ${run_id@Q} is not a valid id" \
+  "pass the run's coordination directory name, e.g. 2026-09-24-p1-fleet."
+
+require() { [ -n "$2" ] || die_usage "${sub} needs --$1"; }
+
+case "${sub}" in
+  session-start)
+    allowed_flags "cwd"
+    rc=0
+    resolved="$(fleet_resolve_repo "${cwd}")" || rc=$?
+    case "${rc}" in
+      0) ;;
+      2) fleet_say_fail session_started "was not sent: --cwd ${cwd@Q} is not an existing absolute directory" \
+           "pass the session's absolute working directory."; exit 1 ;;
+      4) fleet_say_fail session_started "was not sent: two inbox registry entries claim this repo" \
+           "leave exactly one entry in \$ATHENA_INBOX_ROOT/projects/ whose repo is this repo's git common dir."; exit 1 ;;
+      *) fleet_say_fail session_started "was not sent: no registry entry names this repo and some registry file is unparseable, so project cannot be stated" \
+           "run inbox-status (athena:inbox) to find the unparseable entry and repair it."; exit 1 ;;
+    esac
+    body="$(fleet_body_session_started "${session_id}" "${resolved%%$'\t'*}" "${resolved#*$'\t'}")"
+    kind=session_started ;;
+  session-seen)
+    allowed_flags "agent-id agent-type"
+    body="$(fleet_body_seen session_seen "${session_id}" "${agent_id}" "${agent_type}")"
+    kind=session_seen ;;
+  session-end)
+    allowed_flags "reason"
+    body="$(fleet_body_session_ended "${session_id}" "${reason}")"
+    kind=session_ended ;;
+  admiral-start)
+    allowed_flags "run-id agent-id scope-label"
+    require run-id "${run_id}"; require agent-id "${agent_id}"
+    body="$(fleet_body_admiral_started "${session_id}" "${run_id}" "${agent_id}" "${scope_label}")"
+    kind=admiral_started ;;
+  admiral-scope)
+    allowed_flags "run-id missions"
+    require run-id "${run_id}"; require missions "${missions_file}"
+    [ -f "${missions_file}" ] && [ -r "${missions_file}" ] || die_usage "--missions ${missions_file@Q} is not a readable file" \
+      "write the mission pointers as a JSON array to a file and pass its path."
+    missions="$(cat -- "${missions_file}")"
+    if ! problem="$(fleet_missions_problem "${missions}")"; then
+      die_usage "--missions refused: ${problem}" \
+        "a mission pointer carries exactly tracker, ticket_ref, url, title, status, captain_state (athena-events.md -> Mission pointers are metadata only)."
+    fi
+    body="$(fleet_body_admiral_scope "${session_id}" "${run_id}" "$(jq -c . <<<"${missions}")")"
+    kind=admiral_scope ;;
+  admiral-seen)
+    allowed_flags "agent-id agent-type"
+    require agent-id "${agent_id}"
+    body="$(fleet_body_seen admiral_seen "${session_id}" "${agent_id}" "${agent_type}")"
+    kind=admiral_seen ;;
+  admiral-state)
+    allowed_flags "run-id state"
+    require run-id "${run_id}"; require state "${state}"
+    fleet_valid_admiral_state "${state}" || die_usage "--state ${state@Q} is not reportable" \
+      "use one of: ${FLEET_ADMIRAL_STATES} (running is set by admiral-start)."
+    body="$(fleet_body_admiral_state "${session_id}" "${run_id}" "${state}")"
+    kind=admiral_state ;;
+  *) die_usage "unknown subcommand ${sub@Q}" ;;
+esac
+
+if [ -n "${dry_run}" ]; then
+  printf '%s\n' "${body}"
+  exit 0
+fi
+
+fleet_send "${kind}" "${body}" "${cwd}" "${AI}"
+exit $?

@@ -251,6 +251,8 @@ one*).
   none).
 - **Concurrency** — MAX `{{MAX_CAPTAINS}}` captains.
 - **Merge / deploy** — `{{MERGE_POLICY}}`; drain the ENTIRE scope.
+- **Fleet registry** — report the run, its scope and its end, per
+  `athena:fleet-liveness` → *Fleet registry reports*.
 
 ### Add / drop handling — the consumer is bound to the landed (C) model
 

@@ -57,6 +57,11 @@ STATIC_CHECKS = [
   # the hook's inline --self-test just execs this file.
   ["workflow-phase-guard self-test", %w[ai/hooks/workflow-phase-guard.self-test.sh]],
   ["harness-event self-test",   %w[ai/hooks/harness-event.self-test.sh]],
+  # fleet-report hook (DND-433): SessionStart/SessionEnd/PostToolUse reporter to
+  # the fleet registry. Loopback fake server only (never prod); asserts the
+  # 60 s throttle, zero added latency, and surfaced failures. The CLI's own
+  # suite (ai/lib/fleet/test/self-test.sh) is discovered, not declared.
+  ["fleet-report hook self-test", %w[ai/hooks/fleet-report.self-test.sh]],
   ["athena-inbox-poll self-test", %w[ai/hooks/athena-inbox-poll.self-test.sh]],
   # flaky-marker-sweep is a SessionStart side-effect hook (DND-277): it ages out
   # a >12h-stale flaky-coordinator marker, independent of lane activity. Its

@@ -21,6 +21,10 @@ reason** (see the trigger note below) — produce a summary:
 - Assumptions you made unassisted, and why
 - Location of the full state log for anyone picking this up later
 
+When the scope is exhausted, also report the run `finished` to the fleet
+registry; a ceiling or an interruption reports nothing
+([[athena:fleet-liveness]] → *Fleet registry reports*).
+
 ## Before you write it, reconcile the tracker against the forge
 
 Take the list of MRs/PRs you confirmed merged (via

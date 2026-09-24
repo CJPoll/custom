@@ -1,6 +1,6 @@
 ---
 name: athena:fleet-liveness
-description: How an athena-admiral judges whether its captains are alive and its Missions progressing WITHOUT relying on notifications (which drop) or on ListAgents (usually absent) — the full-sweep-on-every-trigger rule, the hard staleness rule, the disk-evidence ladder, and counting the concurrency cap from the state log. Use whenever anything wakes you, and whenever deciding if a quiet Mission is still working.
+description: How an athena-admiral judges whether its captains are alive and its Missions progressing WITHOUT relying on notifications (which drop) or on ListAgents (usually absent) — the full-sweep-on-every-trigger rule, the hard staleness rule, the disk-evidence ladder, and counting the concurrency cap from the state log — plus the run's fleet registry reports (admiral-start, admiral-scope on every Mission status change, admiral-state finished) via ai/bin/fleet-report. Use whenever anything wakes you, whenever deciding if a quiet Mission is still working, and whenever a Mission's status changes.
 ---
 
 # athena:fleet-liveness
@@ -147,8 +147,54 @@ Two consequences:
 phase2-backlog, the 2026-09-08/09/10 flaky-lane runs, 2026-09-09 ecs-build,
 2026-09-10 graphql-feature, and 2026-09-18 athena-inbox.*
 
+## Fleet registry reports
+
+The owner's fleet page shows every session, its admirals and their Missions.
+Normative home: `ai/contracts/athena-events.md` → *Fleet registry and session
+control*. Hooks already report the session and your own activity
+(`admiral_seen`, keyed on your `agentId`). Three reports are yours, each one
+call to `~/dev/custom/ai/bin/fleet-report`. It reads the session id from
+`$CLAUDE_CODE_SESSION_ID`, so pass none.
+
+- **Run start: `admiral-start --run-id <run-id> --agent-id <your agentId>`**
+  (optional `--scope-label "<scope>"`). Send it once you hold both values: the
+  run-id you picked, and the `agentId` you asked `main` for in your first turn.
+  Until then the page shows you as `run unreported`, which is true.
+- **Scope: `admiral-scope --run-id <run-id> --missions <file>`** right after
+  `admiral-start`, and again after **every** Mission status change in your
+  state log's `## Mission state` table. It replaces the list whole, so send
+  every Mission each time. Send `[]` when the scope is empty: `no missions` is a
+  reported fact, while never sending reads as `scope unreported`.
+  - The file is `.../[run-id]/fleet-scope.json`: a JSON array with one object
+    per Mission and **exactly** these fields: `tracker` (`notion-personal` or
+    `notion-work`), `ticket_ref` (e.g. `DND-433`), `url`, `title`, `status`
+    (the tracker's status), `captain_state`.
+  - `captain_state` comes from the row: `UNSTARTED`/`QUEUED` → `queued`,
+    `IN_PROGRESS` → `running`, a Mission you hold or parked → `parked`, `DONE`
+    → `done`, `BLOCKED` → `blocked`, `STUCK` → `stuck`.
+  - No other field. A body, summary, comment, label or assignee is refused
+    before anything is sent (*Mission pointers are metadata only*).
+- **Run end: `admiral-state --run-id <run-id> --state finished`**, only when
+  the scope is exhausted ([[athena:admiral-final-report]]). A usage ceiling or
+  an interruption sends nothing: the server reads the silence as `quiet`, then
+  `lost`, which is the truth. `draining` and `drained` belong to the drain
+  protocol (the contract's *Enforcement layers* → *Layer 3: the drain protocol*).
+
+**A failed report never blocks the fleet.** Every failure prints one stderr
+line with `Fix:`, and the exit code says which failure it was:
+
+- `3`: the server refused. Its `Fix:` is printed; act on it.
+- `4`: the server was unreachable.
+- `5`: server fault.
+- `1`: local configuration.
+- `2`: usage.
+
+Note the failure in your `## Log` and carry on. The reports are upserts, so the
+next status change re-sends the whole scope.
+
 ---
 
 *Source (behavior-preserving relocation): athena-admiral §3b "Notifications can
 be dropped" + §3c "Judging liveness when ListAgents is absent". The admiral
-keeps a resident one-line trigger pointing here.*
+keeps a resident one-line trigger pointing here. *Fleet registry reports* is
+new with DND-433; the admiral's run-id paragraph points here for it.*

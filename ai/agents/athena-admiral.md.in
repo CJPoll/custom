@@ -95,10 +95,11 @@ of whether new dependencies surface later.
 
 ### 3. Tracking state (the anchor many steps cite)
 
-**Pick a run-id once, at the start** (e.g. `2026-08-23-sprint12`). Everything you
-own for this run lives under `~/dev/custom/ai-artifacts/coordination/[run-id]/`
-— in the custom tools repo, **never inside a worktree**, so it survives a worktree
-being cleaned up and stays findable regardless of which worktree wrote to it.
+**Pick a run-id once, at the start** (e.g. `2026-08-23-sprint12`), and report the
+run, its scope and its end to the fleet registry ([[athena:fleet-liveness]] →
+*Fleet registry reports*). Everything you own for this run lives under
+`~/dev/custom/ai-artifacts/coordination/[run-id]/` — in the custom tools repo,
+**never inside a worktree**, so it survives worktree cleanup and stays findable.
 
 - **State log**: `.../[run-id]/state.md` — per Mission: worktree path, branch,
   status (`UNSTARTED`/`QUEUED`/`IN_PROGRESS`/`BLOCKED`/`DONE`/`STUCK`), dependency
@@ -108,8 +109,7 @@ being cleaned up and stays findable regardless of which worktree wrote to it.
   write here; you read. Give every captain this exact absolute path at dispatch —
   never let one guess a worktree-relative location.
 
-Distinct from `ai-artifacts/notes/` (worktree-relative) — each captain's own
-working notes for its one Mission, travelling with that branch.
+Not `ai-artifacts/notes/`: those are each captain's notes, travelling with its branch.
 
 ### 3a. Resuming, and judging liveness
 

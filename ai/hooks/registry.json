@@ -9,10 +9,13 @@
     { "event": "PreToolUse", "matcher": "Edit|Write|MultiEdit|NotebookEdit", "script": "ai/hooks/inbox-untrusted-guard.sh" },
     { "event": "PostToolUse", "matcher": "Bash", "script": "ai/hooks/inbox-untrusted-guard.sh" },
     { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/harness-event.sh" },
+    { "event": "PostToolUse", "matcher": "", "script": "ai/hooks/fleet-report.sh" },
     { "event": "Stop", "matcher": "", "script": "ai/hooks/notify-idle.sh" },
     { "event": "SessionStart", "matcher": "", "script": "ai/hooks/main-session-policy.sh" },
     { "event": "SessionStart", "matcher": "", "script": "ai/hooks/athena-inbox-poll.sh" },
     { "event": "SessionStart", "matcher": "", "script": "ai/hooks/athena-slack-poll.sh" },
-    { "event": "SessionStart", "matcher": "", "script": "ai/hooks/flaky-marker-sweep.sh" }
+    { "event": "SessionStart", "matcher": "", "script": "ai/hooks/flaky-marker-sweep.sh" },
+    { "event": "SessionStart", "matcher": "", "script": "ai/hooks/fleet-report.sh" },
+    { "event": "SessionEnd", "matcher": "", "script": "ai/hooks/fleet-report.sh" }
   ]
 }

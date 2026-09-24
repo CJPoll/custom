@@ -114,7 +114,9 @@ two channels:
 3. **Spawn the athena-admiral** with: the same Notion connection + DB + blocked
    semantics (its required inputs), and its mandate — run the Pass-1 plan-time
    scope review with the architect first, then drive captains (each of which
-   runs its own Pass-2 design review), merge, and ship.
+   runs its own Pass-2 design review), merge, and ship. It reports its run to
+   the fleet registry itself ([[athena:fleet-liveness]] → *Fleet registry
+   reports*); the brief needs nothing for that.
 4. **Wire their identities to each other.** After both are up, give the admiral
    the architect's agent name and the architect the admiral's agent name (relay
    the names, or tell each to locate the other by role via `ListAgents`) so they

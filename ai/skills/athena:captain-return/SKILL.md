@@ -64,7 +64,9 @@ it is describing a different world.
 
 Treat the row update as part of *handling* the return, not as bookkeeping to
 catch up on later — every trigger that moves a Mission (boarded, DONE, blocked,
-parked, re-scoped, cancelled) moves its row in the same breath. The reason is
+parked, re-scoped, cancelled) moves its row in the same breath, and re-sends
+the run's scope to the fleet registry ([[athena:fleet-liveness]] → *Fleet
+registry reports*). The reason is
 resume: [[athena:admiral-resume]] reads the state log FIRST and does not
 re-triage from Notion, and it is the row it reads off. Measured 2026-09-20
 `notif-platform`: DND-245 and DND-246 sat at `UNSTARTED` with empty
