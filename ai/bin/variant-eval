@@ -46,7 +46,9 @@
 #     times for p_var; a fixed envelope Δ_noise separates real delta from noise.
 #     Regression iff p_base - p_var > Δ_noise; improvement iff p_var - p_base >
 #     Δ_noise; otherwise INCONCLUSIVE. A flip within the envelope is NEVER a
-#     regression and NEVER an improvement.
+#     regression and NEVER an improvement. Each side evaluates ITS OWN rendered
+#     admiral (admiral-eval --agent-file <wt>/ai/agents/athena-admiral.md; see
+#     t2_argv), never the main checkout's copy that ~/.claude/agents resolves.
 #
 # Before any delta the variant ref is run through the standing gate
 # (ai/bin/harness-gate: harness-eval + check-* guards + every --self-test). A red
@@ -70,6 +72,7 @@
 # gate (like admiral-eval --run / critic-eval --run). Only --self-test is
 # gate-wired.
 
+require "digest"
 require "json"
 require "open3"
 require "fileutils"
@@ -79,6 +82,9 @@ require "time"
 AI_DIR              = File.expand_path("..", __dir__)
 ADMIRAL_FIXTURES    = File.join("ai", "eval", "admiral-fixtures")
 SCORECARD_REL       = File.join("ai", "eval", "scorecard.json")
+# The rendered admiral each side's T2 run evaluates (DND-503): the worktree's
+# OWN render, passed to admiral-eval via --agent-file.
+ADMIRAL_AGENT_REL   = File.join("ai", "agents", "athena-admiral.md")
 
 DEFAULT_BASELINE    = "origin/main"
 DEFAULT_RUNS        = 10        # T2 characterization depth for the pilot
@@ -239,6 +245,16 @@ def render_proposal(res)
   if res[:corpus] == "full"
     lines << ""
     lines << "T2 corpus (characterized, envelope Δ_noise=#{DELTA_NOISE}):"
+    if (subj = res[:t2_subjects])
+      b = subj[:base]
+      v = subj[:var]
+      lines << "  subject (baseline): #{b['lines']} lines sha #{b['sha256'][0, 12]}"
+      lines << "  subject (variant):  #{v['lines']} lines sha #{v['sha256'][0, 12]}"
+      if b["sha256"] == v["sha256"]
+        lines << "  T2 subjects IDENTICAL: the variant does not change the rendered admiral, so any T2 flip " \
+                 "below is sampling noise by construction."
+      end
+    end
     if (res[:t2] || []).empty?
       lines << "  (no T2 cases evaluated)"
     else
@@ -354,12 +370,33 @@ def hook_fires?(wt, guard, input_path)
   end
 end
 
+# The T2 argv for one side. --agent-file names THIS worktree's rendered admiral
+# (DND-503): a bare `admiral-eval --run` would let `claude --agent` resolve the
+# admiral from ~/.claude/agents — the MAIN checkout — for both sides, so the
+# T2 delta would compare one subject against itself.
+def t2_argv(wt, runs)
+  ["ai/bin/admiral-eval", "--run", "--runs", runs.to_s, "--agent-file", File.join(wt, ADMIRAL_AGENT_REL)]
+end
+
+# Fingerprint of the render a side's T2 run evaluates. A missing render raises:
+# it must never read as "a subject with no T2 cases".
+def t2_subject(wt)
+  path = File.join(wt, ADMIRAL_AGENT_REL)
+  unless File.file?(path)
+    raise "no rendered admiral at #{path}. Fix: the ref must carry #{ADMIRAL_AGENT_REL} " \
+          "(render it with ai/bin/build-agents and commit it) before --corpus full can evaluate it."
+  end
+
+  body = File.read(path)
+  { "file" => path, "lines" => body.lines.size, "sha256" => Digest::SHA256.hexdigest(body) }
+end
+
 # Characterize the T2 model-in-loop cases in a worktree by running
-# admiral-eval --run --runs N and parsing its per-case rate column. Returns
-# { case_name => pass_fraction }.
+# admiral-eval --run --runs N --agent-file <wt's render> and parsing its
+# per-case rate column. Returns { case_name => pass_fraction }.
 def collect_t2_fractions(wt, runs)
   fractions = {}
-  out, _err, _st = capture(["ai/bin/admiral-eval", "--run", "--runs", runs.to_s], chdir: wt)
+  out, _err, _st = capture(t2_argv(wt, runs), chdir: wt)
   out.each_line do |line|
     # Format: "PASS <name> <passes/samples> [<mode>] <detail>"
     m = line.match(/\A(?:PASS|FAIL)\s+(\S+)\s+(\d+)\/(\d+)\b/)
@@ -398,6 +435,7 @@ def measure(variant:, baseline:, corpus:, runs:, out_file:)
       t2 = []
 
       if corpus == "full"
+        res[:t2_subjects] = { base: t2_subject(base_wt), var: t2_subject(var_wt) }
         p_base = collect_t2_fractions(base_wt, runs)
         p_var  = collect_t2_fractions(var_wt, runs)
         (p_base.keys | p_var.keys).sort.each do |name|
@@ -507,6 +545,64 @@ def self_test
   })
   fail.("REVERT proposal must carry a Fix: line") unless revert_out.include?("Fix:")
 
+  # (g) DND-503: each side's T2 run evaluates ITS OWN worktree's rendered
+  # admiral. A bare `admiral-eval --run` resolves the agent from ~/.claude/agents
+  # (the MAIN checkout), so baseline and variant would score one subject twice
+  # and the T2 delta could only ever show noise.
+  Dir.mktmpdir("variant-eval-subject-") do |d|
+    base_wt = File.join(d, "base")
+    var_wt  = File.join(d, "var")
+    same_wt = File.join(d, "same")
+    [base_wt, var_wt, same_wt].each { |w| FileUtils.mkdir_p(File.join(w, "ai", "agents")) }
+    front = "---\nname: athena-admiral\ndescription: x\nmodel: opus\n---\n\n"
+    File.write(File.join(base_wt, ADMIRAL_AGENT_REL), front + "baseline prose\n")
+    File.write(File.join(var_wt, ADMIRAL_AGENT_REL), front + "variant prose\n")
+    File.write(File.join(same_wt, ADMIRAL_AGENT_REL), front + "baseline prose\n")
+
+    argv_b = t2_argv(base_wt, 10)
+    argv_v = t2_argv(var_wt, 10)
+    agent_file = ->(argv) { (i = argv.index("--agent-file")) ? argv[i + 1] : nil }
+    fail.("T2 argv must pass --agent-file for the baseline") \
+      unless agent_file.(argv_b) == File.join(base_wt, ADMIRAL_AGENT_REL)
+    fail.("T2 argv must pass --agent-file for the variant") \
+      unless agent_file.(argv_v) == File.join(var_wt, ADMIRAL_AGENT_REL)
+    fail.("baseline and variant T2 argv must differ in their subject") if argv_b == argv_v
+    fail.("T2 argv must stay allowed by the containment guard") unless command_allowed?(argv_v)
+
+    sb = t2_subject(base_wt)
+    sv = t2_subject(var_wt)
+    fail.("a variant whose render differs must fingerprint differently from baseline") \
+      if sb["sha256"] == sv["sha256"]
+    fail.("an identical render must fingerprint identically") unless t2_subject(same_wt)["sha256"] == sb["sha256"]
+
+    # A worktree with no admiral render must raise with a Fix:, never read as a
+    # subject with no T2 cases.
+    begin
+      t2_subject(File.join(d, "no-such-wt"))
+      fail.("a missing render must raise")
+    rescue RuntimeError => e
+      fail.("a missing render must carry a Fix:") unless e.message.include?("Fix:")
+    end
+
+    # The proposal names both T2 subjects, and says so when they are identical.
+    t2_res = {
+      variant: "cand", baseline: "origin/main", corpus: "full", gate_ok: true, verdict: :inconclusive,
+      deterministic: { regressed: [], fixed: [], new: [] }, t2: [], regressions: [], improvements: [],
+      t2_subjects: { base: sb, var: sb }
+    }
+    same_out = render_proposal(t2_res)
+    fail.("a full proposal must name the T2 subjects") unless same_out.include?(sb["sha256"][0, 12])
+    fail.("identical T2 subjects must be called out") unless same_out.include?("IDENTICAL")
+    diff_out = render_proposal(t2_res.merge(t2_subjects: { base: sb, var: sv }))
+    fail.("differing T2 subjects must not be called identical") if diff_out.include?("IDENTICAL")
+
+    # The measurement path must actually USE t2_argv: a correct t2_argv that the
+    # runner bypasses would leave both sides on the main checkout's admiral.
+    runner = File.read(__FILE__)[/^def collect_t2_fractions.*?^end$/m].to_s
+    fail.("collect_t2_fractions must run admiral-eval via capture(t2_argv(...))") \
+      unless runner.include?("capture(t2_argv(wt, runs)")
+  end
+
   # -- STRUCTURAL CONTAINMENT: command_allowed? rejects every mutation family --
   fail.("worktree add must be allowed") unless command_allowed?(%w[git worktree add --detach /tmp/x origin/main])
   fail.("worktree remove must be allowed") unless command_allowed?(%w[git worktree remove --force /tmp/x])
@@ -570,7 +666,8 @@ def self_test
          "deterministic pass->fail must verdict REVERT; a within-envelope flip must be INCONCLUSIVE (never " \
          "regressed/improved); a red gate must verdict BLOCKED before scoring; no KEEP proposal may contain a " \
          "mutation command; command_allowed? must deny every merge/commit/push/forge/--update-baseline argv; " \
-         "and all execution must go through the single guarded `capture`."
+         "all execution must go through the single guarded `capture`; and each side's T2 run must pass " \
+         "admiral-eval --agent-file <its worktree>/#{ADMIRAL_AGENT_REL}."
     1
   end
 end

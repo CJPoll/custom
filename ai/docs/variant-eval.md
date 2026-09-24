@@ -53,6 +53,16 @@ Corpora (`--corpus`):
   `p_base`, variant `N` times for `p_var` (`--runs N`, default **10** for the
   pilot). A fixed envelope **Δ_noise = 0.3** separates real delta from noise.
 
+**Later (2026-09-24):** as built on 2026-09-19, `--corpus full` could not see a
+prompt variant (DND-503). Both sides ran a bare `admiral-eval --run`, whose
+`claude -p --agent athena-admiral` resolves the agent from `~/.claude/agents`, a
+symlink to the **main checkout**, whatever the cwd. So baseline and variant
+scored the same admiral and the T2 delta could only show noise. Now each side
+runs `admiral-eval --run --agent-file <its worktree>/ai/agents/athena-admiral.md`,
+and `admiral-eval` passes that file's prose inline (`--agents`) under a key no
+agents directory supplies. The proposal prints both subjects' sha and says
+**IDENTICAL** when the variant does not change the render.
+
 Gate short-circuit: before any delta, the variant ref is run through the standing
 gate (`ai/bin/harness-gate`). A red gate short-circuits to **BLOCKED** with a
 `Fix:` line, **before** scoring (never-commit-a-broken-harness).

@@ -98,6 +98,12 @@ T3 as an explicitly-scoped escalation for at most one or two cases.** Rationale:
 
 - **Per case:** one `claude -p --agent athena-admiral` invocation, single turn,
   bounded output (a decision trailer). No lifecycle, no spawned captains.
+
+  **Later (2026-09-24):** a bare `--agent athena-admiral` resolves from
+  `~/.claude/agents`, the main checkout's copy, whatever the cwd (DND-503). The
+  runner now passes the rendered file named by `--agent-file` inline via
+  `--agents` under the key `athena-admiral-eval-subject`; see `model_argv` in
+  `ai/bin/admiral-eval`.
 - **Corpus:** ~17 cases (§3). At K=3 samples/case for the baseline capture (§4
   flakiness handling) that is ~51 model turns for a full `--run`; K=1 for local
   iteration.
