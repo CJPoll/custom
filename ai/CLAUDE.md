@@ -185,7 +185,49 @@ on a human's own machine, merges and deploys where policy requires them, and the
 runner on the owner's laptop is the owner's call because it is the owner's
 machine — a system change under the Hard Rule below — not because of who owns
 the CI/CD lane. "Ownership isn't a gate" never licenses an agent to do an
-owner-gated thing.
+owner-gated thing. A security fix's merge and deploy are not on this list; see
+*Security fixes ship without owner approval* below.
+
+## Security fixes ship without owner approval
+
+**The rule, owner Cody, 2026-09-24 (~00:33Z, harness coordinator session):**
+"fixing security issues does not require asking approval - just fix them." It
+is a standing approval. This section is its one home; other documents cite it
+by name.
+
+- **What it waives: the wait for the owner's go.** A security fix does not ask
+  first, even where a gate would otherwise need the owner's explicit go — for
+  example `integration-gate` exit 4 on a workflow or deploy-automation edit.
+  Do not hold it, and do not DM for a go-ahead.
+- **What it does not waive: the bar.** The fix has a regression test that
+  fails first (*A bug fix starts with a regression test that fails*), a critic
+  PASS, green CI, and a live verify in the environment it protects. The
+  approval removes the wait, never a check.
+- **What it cannot waive: steps only the owner can perform.** Their actual
+  credentials, interactive console or account actions, anything on the owner's
+  own machine (Hard Rule). Escalate that one step with its exact command, and
+  ship the rest of the fix (`athena:run-autonomously` → *Owner-credential
+  gates throttle merging, not progress*).
+- **What counts as a security issue.** A concrete defect that lets someone
+  read, change, or do what they should not: a secret or credential exposure
+  (including a secret in argv, logs, or a world-readable file), an authn or
+  authz bypass, injection (SQL, shell, template, prompt-to-tool), a data leak
+  across a tenant or trust boundary, or privilege escalation. The ticket and the
+  PR name the class and the exposure path, so a reviewer can check the claim.
+  A label does not make a change a security fix. General hardening with no
+  concrete issue, a refactor, or a feature does not qualify. The approval
+  covers only the diff the fix needs; unrelated changes in the same PR do not
+  ride on it.
+- **The record.** For a security fix that hits exit 4, pass `integration-gate
+  --owner-approval 'security-fix standing approval (~/.claude/CLAUDE.md →
+  Security fixes ship without owner approval): "fixing security issues does not
+  require asking approval - just fix them" — Cody, 2026-09-24; <class>, <ticket>'`.
+  Cite the same rule in the PR body and the state log, and copy the
+  `BLAST-RADIUS HOT` block into the PR body and the final report, so the owner
+  sees what merging did.
+- **No in-repo switch carries this approval** — no flag, env var, or marker a
+  diff could set. It stays a quoted owner record, per `~/dev/custom/CLAUDE.md` →
+  *A check's own bar must not live in the diff it is checking*.
 
 ## Hard Rule
 

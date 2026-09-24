@@ -65,14 +65,18 @@ green on that integrated head. Exits 0 only when both hold.
                    merge a head whose blast radius is HOT. Carries the OWNER'S
                    OWN authorization, verbatim, and where it is recorded -- not
                    your reasoning, not an architect sign-off, not a captain
-                   report. Printed into the INTEGRATION OK line.
+                   report. Printed into the INTEGRATION OK line. A security
+                   fix passes the owner's standing approval here (see
+                   ~/.claude/CLAUDE.md -> "Security fixes ship without owner
+                   approval").
   --self-test      run the dedicated test suite and exit
 
 Exit codes: 0 integration OK | 1 gate RED on the integrated head
             2 usage / unresolvable ref / branch behind target
             3 no green critic verdict on the integrated head
             4 merging performs a real-world action -- owner's call, not the
-              fleet's
+              fleet's (a security fix carries the owner's standing approval;
+              see --owner-approval)
 EOF
 }
 

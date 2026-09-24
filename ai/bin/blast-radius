@@ -588,7 +588,11 @@ HOT_FIX = <<~FIX.freeze
   -- the same move), set the Mission to HELD_FOR_OWNER in your state log and Needs
   Attention/Cody in Notion with the PR URL, head SHA and what merging would cause, and
   surface it in your final report. Merge only after the OWNER'S OWN authorization, replayed
-  verbatim via --owner-approval '<the owner's words + where recorded>'.
+  verbatim via --owner-approval '<the owner's words + where recorded>'. EXCEPTION: a
+  SECURITY FIX carries the owner's standing approval (~/.claude/CLAUDE.md -> "Security
+  fixes ship without owner approval") -- do not hold it; pass --owner-approval citing that
+  rule by name, the owner's quote and date, the security class and the ticket, and merge.
+  The full bar still applies, and a non-security change cannot borrow it.
 FIX
 
 # --- main -------------------------------------------------------------------

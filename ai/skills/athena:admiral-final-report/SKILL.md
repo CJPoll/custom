@@ -103,5 +103,11 @@ goes nowhere unless the owner acts. Per Mission:
   `integration-gate --owner-approval '<their words>'`, run from the named
   worktree.
 
+A security fix is here only for a step only the owner can perform (their
+credentials, a console action). An exit 4 alone does not hold it: it merges
+under the owner's standing approval (`~/.claude/CLAUDE.md` → *Security fixes
+ship without owner approval*). List it among the merged work with its `BLAST-RADIUS HOT` block and the approval line
+it merged under.
+
 A held Mission reported only as a status string leaves the owner to reconstruct
 the merge, which is how a held MR becomes a forgotten one.
