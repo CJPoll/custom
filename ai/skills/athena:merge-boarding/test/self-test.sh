@@ -42,6 +42,16 @@ printf '%s\n' '{"type":"user","uuid":"'"${FX_MID}"'","isSidechain":false,"entryp
   > "${FIXTURE_HOME}/.claude/projects/proj/${FX_SID}.jsonl"
 APPROVAL="session:${FX_SID}/${FX_MID} quote:yes, provision the KMS key"
 
+# DND-486: integration-gate runs its gate inside test-slot. Every case uses a
+# private one-slot pool under TMP (test-slot honors these seams only for a
+# non-default pool dir), so this suite never touches or waits on the machine's
+# real pool, whatever fleet is running.
+# A suite launched from inside a real slot (a captain's wrapped harness-gate)
+# must not carry that slot into its fixtures.
+unset ATHENA_TEST_SLOT_HELD ATHENA_TEST_SLOT_HEARTBEAT
+export ATHENA_TEST_SLOT_DIR="${TMP}/slots" ATHENA_TEST_SLOTS=1
+TEST_SLOT="$(cd "${ROOT}/../../bin" && pwd)/test-slot"
+
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; [ -n "${2-}" ] && printf '       %s\n' "$2"; }
 
@@ -871,6 +881,132 @@ okl="$(grep '^INTEGRATION OK' <<<"$out")"
   && grep -q '(CRITIC CARRIED + INTERACTION from ' <<<"$okl" \
   && ok "c32 F5 --with-critic on an unchanged rebase: the judge carries + reviews the interaction, OK line names it" \
   || bad "c32 F5 --with-critic carry (rc $rc)" "$out"
+
+# DND-486: the gate runs inside a machine test slot, and a gate that never ran
+# (no slot within the wait window, or no outcome recorded) is exit 6 -- never
+# INTEGRATION OK, never "gate RED". A missing wrapper is exit 2, never an
+# unslotted run. Cases s1..s8 follow the DND-486 QA plan.
+
+# await_file PATH -- bounded poll (<= 20 s) for a file to appear.
+await_file() { local i; for ((i = 0; i < 400; i++)); do [ -e "$1" ] && return 0; sleep 0.05; done; return 1; }
+
+# slot_repo <dir> <gate body> -- a repo whose landed main declares
+# ai/bin/harness-gate with <gate body> (sh), on a feature branch with a PASS.
+slot_repo() {
+  new_repo "$1"; mkdir -p "$1/ai/bin"
+  printf '#!/bin/sh\n%s\n' "$2" > "$1/ai/bin/harness-gate"; chmod +x "$1/ai/bin/harness-gate"
+  ( cd "$1" && git add -A && git commit -qm gate \
+    && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+  record_pass "$1"
+}
+
+# s1: the gate ran INSIDE a slot of the (test) pool. The marker lives
+# outside the repo: the DND-1011 check refuses a gate that dirties the tree.
+R="${TMP}/s1"; slot_repo "$R" "printf '%s' \"\$ATHENA_TEST_SLOT_HELD\" > '${R}.HELD'"
+out="$( cd "$R" && "$GATE" --target main --no-fetch 2>&1 )"; rc=$?
+pool="$(realpath -m "${TMP}/slots")"
+[ "$rc" -eq 0 ] && ok "s1 exit 0 for a green gate run in a slot" || bad "s1 expected exit 0, got $rc" "$out"
+[ "$(cat "${R}.HELD" 2>/dev/null)" = "${pool}:1" ] && ok "s1 the gate ran holding slot ${pool}:1" || bad "s1 gate did not run in a slot (HELD='$(cat "${R}.HELD" 2>/dev/null)')" "$out"
+
+# s2: slot 1 held by a foreign run; a 1 s slot wait times out -> exit 6.
+R="${TMP}/s2"; slot_repo "$R" "touch '${R}/GATE_RAN'"
+mkfifo "${TMP}/s2.fifo"
+"$TEST_SLOT" --label 's2 foreign holder' -- bash -c ': > "$1"; exec 3<>"$2"; read -t 30 -u 3 _x' _ "${TMP}/s2.started" "${TMP}/s2.fifo" 2>/dev/null &
+holder=$!
+await_file "${TMP}/s2.started" || bad "s2 fixture: the foreign holder never started"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --slot-wait-timeout 1 2>&1 )"; rc=$?
+timeout 5 bash -c 'printf "go\n" > "$1"' _ "${TMP}/s2.fifo"; wait "$holder" 2>/dev/null
+[ "$rc" -eq 6 ] && ok "s2 exit 6 when no slot frees within the wait" || bad "s2 expected exit 6, got $rc" "$out"
+grep -q 'GATE NOT RUN' <<<"$out" && ok "s2 says GATE NOT RUN" || bad "s2 missing GATE NOT RUN" "$out"
+grep -q 'Fix:' <<<"$out" && ok "s2 carries Fix:" || bad "s2 missing Fix:" "$out"
+grep -q 'INTEGRATION OK' <<<"$out" && bad "s2 printed INTEGRATION OK for a gate that never ran" "$out" || ok "s2 no INTEGRATION OK"
+grep -q 'gate RED' <<<"$out" && bad "s2 called a gate that never ran RED" "$out" || ok "s2 no 'gate RED'"
+[ ! -f "${R}/GATE_RAN" ] && ok "s2 the gate did not run" || bad "s2 the gate ran despite the timeout"
+
+# s3: a red gate is still exit 1 RED.
+R="${TMP}/s3"; slot_repo "$R" "exit 1"
+out="$( cd "$R" && "$GATE" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 1 ] && grep -q 'gate RED' <<<"$out" && ok "s3 a failing gate is exit 1 gate RED" || bad "s3 expected exit 1 gate RED, got $rc" "$out"
+
+# s4: a gate that itself exits 75 RAN and failed: RED, never "not run".
+R="${TMP}/s4"; slot_repo "$R" "exit 75"
+out="$( cd "$R" && "$GATE" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 1 ] && grep -q 'gate RED' <<<"$out" && ok "s4 a gate exiting 75 on its own is RED (exit 1), not 6" || bad "s4 expected exit 1 gate RED, got $rc" "$out"
+grep -q 'GATE NOT RUN' <<<"$out" && bad "s4 read the gate's own 75 as a slot timeout" "$out" || ok "s4 not mistaken for a slot timeout"
+
+# layout_copy <dir> -- a copy of the checkout layout integration-gate resolves
+# its siblings from: the script copied (so realpath lands here), critic-review
+# and blast-radius linked to the real ones.
+layout_copy() {
+  mkdir -p "$1/ai/skills/athena:merge-boarding/scripts" "$1/ai/bin"
+  cp "$GATE" "$1/ai/skills/athena:merge-boarding/scripts/integration-gate"
+  ln -s "$(cd "${ROOT}/../../bin" && pwd)/critic-review" "$1/ai/bin/critic-review"
+  ln -s "$(cd "${ROOT}/../../bin" && pwd)/blast-radius" "$1/ai/bin/blast-radius"
+}
+
+# s5: test-slot is not executable beside the script -> exit 2, gate never ran.
+L="${TMP}/s5-layout"; layout_copy "$L"
+printf '#!/bin/sh\nexit 0\n' > "$L/ai/bin/test-slot"; chmod -x "$L/ai/bin/test-slot"
+R="${TMP}/s5"; slot_repo "$R" "touch '${R}/GATE_RAN'"
+out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "s5 exit 2 when test-slot is not executable" || bad "s5 expected exit 2, got $rc" "$out"
+grep -q "Fix:.*${L}/ai/bin/test-slot" <<<"$out" && ok "s5 Fix: names the missing test-slot path" || bad "s5 Fix: does not name the test-slot path" "$out"
+[ ! -f "${R}/GATE_RAN" ] && ok "s5 the gate never ran unslotted" || bad "s5 the gate ran without a slot"
+rm -f "$L/ai/bin/test-slot"
+out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && [ ! -f "${R}/GATE_RAN" ] && ok "s5 exit 2 when test-slot is absent, gate not run" || bad "s5 absent test-slot expected exit 2, got $rc" "$out"
+
+# s6: a test-slot that exits 0 but records no outcome -> exit 6, never OK/RED.
+L="${TMP}/s6-layout"; layout_copy "$L"
+printf '#!/bin/sh\nexit 0\n' > "$L/ai/bin/test-slot"; chmod +x "$L/ai/bin/test-slot"
+R="${TMP}/s6"; slot_repo "$R" "touch '${R}/GATE_RAN'"
+out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 6 ] && ok "s6 exit 6 when test-slot left no outcome" || bad "s6 expected exit 6, got $rc" "$out"
+grep -q 'Fix:.*test-slot left no outcome' <<<"$out" && ok "s6 Fix: names the missing outcome" || bad "s6 Fix: does not name the missing outcome" "$out"
+grep -qE 'INTEGRATION OK|gate RED' <<<"$out" && bad "s6 read a missing outcome as OK or RED" "$out" || ok "s6 neither OK nor RED"
+# ...and an outcome it cannot parse is the same: not a result.
+printf '#!/bin/sh\nwhile [ "$1" != -- ]; do [ "$1" = --outcome-file ] && echo garbage > "$2"; shift; done\nexit 0\n' > "$L/ai/bin/test-slot"
+out="$( cd "$R" && "$L/ai/skills/athena:merge-boarding/scripts/integration-gate" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 6 ] && ! grep -qE 'INTEGRATION OK|gate RED' <<<"$out" && ok "s6 an unparseable outcome is exit 6, neither OK nor RED" || bad "s6 unparseable outcome expected exit 6, got $rc" "$out"
+
+# s7: a green gate keeps the OK line's format, and blast-radius still ran.
+R="${TMP}/s7"; slot_repo "$R" "exit 0"
+out="$( cd "$R" && "$GATE" --target main --no-fetch 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -q "^INTEGRATION OK [0-9a-f]* (GATE: ai/bin/harness-gate -- declared on main)$" <<<"$out" && ok "s7 INTEGRATION OK format unchanged" || bad "s7 OK line changed (rc=$rc)" "$out"
+grep -q 'BLAST-RADIUS' <<<"$out" && ok "s7 blast-radius still ran" || bad "s7 blast-radius did not run" "$out"
+
+# s8: --help needs no test-slot and lists exit 6 (exit 5 is the receipt's).
+out="$( cd "$TMP" && "${TMP}/s5-layout/ai/skills/athena:merge-boarding/scripts/integration-gate" --help 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && grep -qE '^ +6 gate NOT RUN' <<<"$out" && ok "s8 --help exits 0 without test-slot and lists exit 6" || bad "s8 --help expected exit 0 listing exit 6, got $rc" "$out"
+
+# A bad --slot-wait-timeout is a usage error with Fix:.
+out="$( cd "$TMP" && "$GATE" --slot-wait-timeout soon 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && grep -q 'Fix:' <<<"$out" && ok "s9 a non-integer --slot-wait-timeout is exit 2 with Fix:" || bad "s9 expected exit 2 with Fix:, got $rc" "$out"
+
+# s10: the slotted gate keeps the shell semantics it had unslotted, pipefail
+# included: a failing check piped into tee is still RED, never green.
+R="${TMP}/s10"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate 'false | cat' 2>&1 )"; rc=$?
+[ "$rc" -eq 1 ] && grep -q 'gate RED' <<<"$out" && ok "s10 'false | cat' stays RED inside the slot (pipefail kept)" || bad "s10 expected exit 1 gate RED, got $rc" "$out"
+
+# s11: --with-critic and a slot that never frees. The gate never ran (exit
+# 6), but the judge beside it did: it is joined, so its verdict is printed
+# and recorded, and the re-run does not pay for the judge again.
+R="${TMP}/s11"; slot_repo "$R" "touch '${R}/GATE_RAN'"
+rm -rf "${R}/$(cd "$R" && git rev-parse --git-path critic-verdicts)"   # no verdict yet (git-path is relative)
+mkfifo "${TMP}/s11.fifo"
+"$TEST_SLOT" --label 's11 foreign holder' -- bash -c ': > "$1"; exec 3<>"$2"; read -t 30 -u 3 _x' _ "${TMP}/s11.started" "${TMP}/s11.fifo" 2>/dev/null &
+holder=$!
+await_file "${TMP}/s11.started" || bad "s11 fixture: the foreign holder never started"
+out="$( cd "$R" && TMPDIR="$C31TMP" CRITIC_REVIEW_STUB="${TMP}/critic-pass" "$GATE" --target main --no-fetch --with-critic --slot-wait-timeout 1 2>&1 )"; rc=$?
+timeout 5 bash -c 'printf "go\n" > "$1"' _ "${TMP}/s11.fifo"; wait "$holder" 2>/dev/null
+[ "$rc" -eq 6 ] && grep -q 'GATE NOT RUN' <<<"$out" && ok "s11 --with-critic: a slot timeout is still exit 6" || bad "s11 expected exit 6, got $rc" "$out"
+grep -q '^critic-review: PASS' <<<"$out" && ok "s11 the judge was joined and its verdict printed" || bad "s11 judge not joined on GATE NOT RUN" "$out"
+( cd "$R" && "${ROOT}/../../bin/critic-review" --verdict-for "$(git rev-parse HEAD)" >/dev/null 2>&1 ) \
+  && ok "s11 the judge's PASS is recorded for the re-run" || bad "s11 no PASS recorded after GATE NOT RUN"
+[ ! -f "${R}/GATE_RAN" ] && ok "s11 the gate did not run" || bad "s11 the gate ran despite the timeout"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"

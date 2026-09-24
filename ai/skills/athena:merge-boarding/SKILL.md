@@ -348,6 +348,20 @@ gate passed on this SHA" rested on the caller's word, and gen_saas #468 merged
 past a RED gate because a prep script printed READY without reading the exit
 code.
 
+**The gate runs in a machine test slot (DND-486).** `integration-gate` wraps the
+resolved gate in `~/dev/custom/ai/bin/test-slot`, which bounds heavy runs per
+machine; you do nothing extra. A `test-slot: WAITING` line is a queue, not a
+stall. **Exit 6 means GATE NOT RUN**: no slot freed within the wait window (or
+test-slot left no outcome). Nothing was checked, so it is neither OK nor RED.
+Re-run `integration-gate`; never merge on it. A `--with-critic` judge is still
+joined first, so its verdict is recorded and the re-run does not pay for it
+again. `test-slot --status` names what holds the pool. A test-slot missing
+beside the script is exit 2: update the custom checkout; the gate never runs
+unslotted. `--slot-wait-timeout <secs>` shortens the wait. It can only turn a
+wait into exit 6, never into a pass. Running `integration-gate` itself under
+`test-slot` (the captain brief's form) is safe: the inner wrap sees the slot it
+already holds and does not queue again.
+
 **Green-alone is not green-merged.** Two MRs with entirely disjoint file sets
 can each pass the gate and fail together: the admiral's rendered-line budget is
 a single global number (496/500 today — four lines of headroom), and
