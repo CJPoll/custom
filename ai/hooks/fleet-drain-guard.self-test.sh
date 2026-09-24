@@ -66,6 +66,9 @@ answer() {
     '{claude_session_id: $s, desired: $d, reason: $r, until: $u, policy_snapshot: $p}'
 }
 RUN_ANS="$(answer run default null "${P1}")"
+# A cache fetched one minute ago by the REAL clock: the hook never passes --now,
+# so a fixed timestamp would turn stale (or into the future) as days pass.
+FRESH="$(date -u -d '-1 min' +%Y-%m-%dT%H:%M:%SZ)"
 DRAIN_ANS="$(answer drain override:force_drain '"2026-09-24T18:30:00Z"' "${OVD}")"
 
 # stdin <subagent_type-or-empty> [session_id] -- DND-428's measured PreToolUse
@@ -125,7 +128,7 @@ eq "run on basis server: exit 0, no output" "${RC}:${OUT}" "0:"
 has "the allow is logged" "$(tail -n 1 "${GLOG}")" "athena-captain	allow	server"
 
 echo "== resume: the server's run beats a stale drain cache"
-jq -c '.fetched_at = "2026-09-24T15:00:00Z"' <<<"${DRAIN_ANS}" > "${CACHE}"
+jq -c --arg t "${FRESH}" '.fetched_at = $t' <<<"${DRAIN_ANS}" > "${CACHE}"
 hook "$(stdin athena-admiral)"
 eq "resume spawn passes" "${RC}:${OUT}" "0:"
 eq "the cache now says run" "$(jq -r .desired "${CACHE}")" run
@@ -135,8 +138,8 @@ echo "== unknown control state always warns, never a silent run"
 unknown_case() {
   local name="$1" resp="$2" cache="$3" want="$4" basis="$5"
   case "${cache}" in
-    run)   jq -c '.fetched_at = "2026-09-24T15:00:00Z"' <<<"${RUN_ANS}" > "${CACHE}" ;;
-    drain) jq -c '.fetched_at = "2026-09-24T15:00:00Z"' <<<"${DRAIN_ANS}" > "${CACHE}" ;;
+    run)   jq -c --arg t "${FRESH}" '.fetched_at = $t' <<<"${RUN_ANS}" > "${CACHE}" ;;
+    drain) jq -c --arg t "${FRESH}" '.fetched_at = $t' <<<"${DRAIN_ANS}" > "${CACHE}" ;;
     junk)  printf 'junk' > "${CACHE}" ;;
     none)  rm -f "${CACHE}" ;;
   esac
