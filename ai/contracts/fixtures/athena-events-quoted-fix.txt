@@ -25,10 +25,9 @@ Fix: emit one of the enumerated harness-emit types (<permitted types, comma-sepa
 Fix: register "<type>" for this machine's origination set (owner-editable, no code change), then retry.
 # platform-originated (fleet.machine.*)
 Fix: stop emitting <type> — it is platform-originated (only the server's reachability sweeper emits it) and no machine token may originate it, whatever its registration says; to act on reachability, write a rule on the platform's own event.
-# platform-originated (fleet.session.control_changed). NOT YET EMITTED: gen_saas
-# DND-441 adds the type to the platform-originated set, emits this text, and adds
-# it to harness_emit/fix_text_test.exs. Until then gen_saas refuses the type with
-# the family-level non-member text (the first line of this section).
+# platform-originated (fleet.session.control_changed). Emitted since gen_saas
+# DND-441 (Athena.Events.HarnessEmit.Origination), pinned in
+# harness_emit/fix_text_test.exs.
 Fix: stop emitting fleet.session.control_changed — it is platform-originated (only the server emits it, when a session's control state changes) and no machine token may originate it, whatever its registration says; to pause or resume a session, use the owner's control on the fleet page.
 
 @section Payload fields and their types per event type

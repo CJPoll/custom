@@ -1655,11 +1655,15 @@ The first-pass permitted-origination rule:
   fleet.session.control_changed — it is platform-originated (only the server
   emits it, when a session's control state changes) and no machine token may
   originate it, whatever its registration says; to pause or resume a session,
-  use the owner's control on the fleet page.` The second is an obligation on
-  DND-441, which adds the type to the platform-originated set; until it lands,
-  harness-emit refuses the type as an unmodeled `fleet.*` value (the first
-  refusal above), so no machine token can originate it at any point. A source
-  ingress refuses either as a non-member of its set.
+  use the owner's control on the fleet page.` gen_saas emits both (DND-441
+  added `fleet.session.control_changed` to the platform-originated set). A
+  source ingress refuses either as a non-member of its set.
+
+  **Later (2026-09-24):** this said the second refusal was an obligation on
+  DND-441, and that until it landed harness-emit refused the type as an
+  unmodeled `fleet.*` value. DND-441 shipped it: gen_saas
+  `Athena.Events.HarnessEmit.Origination` emits the quoted text, pinned by
+  `harness_emit/fix_text_test.exs`, so the fixture now pins it on both sides.
   This is an exception for a declared family, not a namespace licence: a new
   platform-originated family declares its model like any other and is named
   here.
