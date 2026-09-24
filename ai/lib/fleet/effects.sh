@@ -10,9 +10,10 @@
 # curl reads on STDIN (`--config -`). `ps` and /proc/<pid>/cmdline never see
 # it; the suite proves that by scanning /proc while a request is in flight.
 #
-# Source order: domain.sh, then the athena:inbox libs err.sh, names.sh, fs.sh,
-# descriptor.sh (repo identity and the registry are THAT skill's rules, reused
-# rather than re-implemented), then this file.
+# Source order: domain.sh, then the athena:inbox libs in inbox-status's order
+# ending with inbox.sh (repo identity and the registry are THAT skill's rules,
+# reused rather than re-implemented), then this file. The hook, which never
+# resolves a repo or sends, may source this file without them.
 
 # fleet_client_config_path -- the inbox client's config, which holds the
 # machine token. Same resolution as athena:inbox's doctor.sh.
@@ -75,12 +76,16 @@ fleet_mcp_url() {
 # NOW, at the point of capture, never later (athena-inbox.md -> *Repo identity:
 # the git common dir*):
 #   * repo_key -- the realpath of the git common dir, expanded against <cwd>
-#     (fs_git_common_dir does the DND-183 expansion of the cwd-relative `.git`
-#     a main checkout returns). A cwd in no git repo keys by its own realpath.
+#     (athena:inbox's `inbox_repo_key`, its public identity API, which does the
+#     DND-183 expansion of the cwd-relative `.git` a main checkout returns). A
+#     cwd that git says is DEFINITELY in no work tree keys by its own realpath
+#     (contract, *Fleet report kinds and their closed schema* -> `project`).
 #   * project  -- the basename of the ONE registry entry whose `repo` equals
 #     repo_key; empty (reported as null) when no entry names it.
 # Statuses:
 #   2 -- <cwd> is not an existing absolute directory;
+#   3 -- COULD NOT TELL whether <cwd> is in a repo (no git, dubious ownership,
+#        a corrupt .git): never guessed as "not a repo";
 #   4 -- two registry files claim this repo (ambiguous; never pick one);
 #   5 -- no entry matched AND some registry file was unparseable: the broken
 #        one may be this repo's, so "no project" would be a guess.
@@ -88,7 +93,8 @@ fleet_resolve_repo() {
   local cwd="$1" key json src match="" matches=0 unparseable=0
   case "${cwd}" in /*) ;; *) return 2 ;; esac
   [ -d "${cwd}" ] || return 2
-  if ! key="$(fs_git_common_dir "${cwd}")" || [ -z "${key}" ]; then
+  key="$(inbox_repo_key "${cwd}")" || return 3
+  if [ -z "${key}" ]; then
     key="$(realpath -q -- "${cwd}")" || return 2
   fi
   case "${key}" in /*) ;; *) return 2 ;; esac
@@ -141,6 +147,12 @@ fleet_post() {
   rm -rf "${w}"
   FLEET_POST_TMP=""
   return 0
+}
+
+# fleet_read_file <path> -- a readable regular file's contents; status 1 if not.
+fleet_read_file() {
+  [ -f "$1" ] && [ -r "$1" ] || return 1
+  cat -- "$1"
 }
 
 # fleet_state_dir
@@ -221,6 +233,30 @@ fleet_surfaced_marker_path() {
   local d
   d="$(fleet_state_dir)" || return 2
   printf '%s/report-failures.surfaced\n' "${d}"
+}
+
+# fleet_read_surfaced_marker -- the last announced epoch-ns, or 0 when absent
+# or not digits (status 2 when the state dir is unusable).
+fleet_read_surfaced_marker() {
+  local p v
+  p="$(fleet_surfaced_marker_path)" || return 2
+  v="$(cat -- "${p}" 2>/dev/null)"
+  case "${v}" in ''|*[!0-9]*) v=0 ;; esac
+  printf '%s\n' "${v}"
+}
+
+# fleet_write_surfaced_marker <epoch-ns> -- atomic replace.
+fleet_write_surfaced_marker() {
+  local p
+  p="$(fleet_surfaced_marker_path)" || return 2
+  printf '%s\n' "$1" > "${p}.tmp" && mv -f -- "${p}.tmp" "${p}"
+}
+
+# fleet_delete_stale_stamps <minutes> -- remove throttle stamps older than that.
+fleet_delete_stale_stamps() {
+  local d
+  d="$(fleet_seen_dir)" || return 2
+  find "${d}" -maxdepth 1 -name '*.stamp' -mmin "+$1" -delete 2>/dev/null
 }
 
 # fleet_mtime <path> -- epoch mtime, or nothing when absent.

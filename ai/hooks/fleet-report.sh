@@ -42,6 +42,8 @@ BIN="${AI}/bin/fleet-report"
 . "${AI}/lib/fleet/domain.sh"
 # shellcheck source=../lib/fleet/effects.sh
 . "${AI}/lib/fleet/effects.sh"
+# shellcheck source=../lib/fleet/manager.sh
+. "${AI}/lib/fleet/manager.sh"
 
 # run_detached <session_id> <kind> <limit-s> <command...>
 # The body of one background report. Its stderr goes to a private temp file
@@ -50,9 +52,12 @@ BIN="${AI}/bin/fleet-report"
 run_detached() {
   local sid="$1" kind="$2" limit="$3" tmp rc msg
   shift 3
-  tmp="$(mktemp 2>/dev/null)" || tmp="/dev/null"
-  # shellcheck disable=SC2064
-  trap "rm -f -- '${tmp}'" EXIT
+  if tmp="$(mktemp 2>/dev/null)"; then
+    # shellcheck disable=SC2064
+    trap "rm -f -- '${tmp}'" EXIT
+  else
+    tmp="/dev/null"   # no message capture; never a trap that removes it
+  fi
   trap 'exit 143' TERM INT HUP
   [ -n "${FLEET_HOOK_PIDFILE:-}" ] && printf '%s\n' "$$" >> "${FLEET_HOOK_PIDFILE}"
   timeout "${limit}" "$@" </dev/null >/dev/null 2>"${tmp}"
@@ -64,7 +69,7 @@ run_detached() {
     msg="$(grep -m 1 'Fix:' "${tmp}" 2>/dev/null)"
     [ -n "${msg}" ] || msg="fleet-report: ${kind} failed (exit ${rc}) with no message. Fix: run ai/bin/fleet-report by hand for this kind to see why."
   fi
-  fleet_record_failure "${sid}" "${kind}" "${msg}"
+  fleet_log_failure "${sid}" "${kind}" "${msg}"
 }
 
 case "${1:-}" in
@@ -85,7 +90,7 @@ esac
 # itself: stderr (verbose mode) AND the durable failure log.
 fail() {
   printf 'fleet-report hook: %s\n' "$2" >&2
-  fleet_record_failure "${1:--}" hook "fleet-report hook: $2" 2>/dev/null
+  fleet_log_failure "${1:--}" hook "fleet-report hook: $2" 2>/dev/null
 }
 
 command -v jq >/dev/null 2>&1 || { fail "" "jq is not on PATH, so nothing was reported. Fix: install jq."; exit 0; }
@@ -113,11 +118,10 @@ if ! fleet_valid_id "${sid}"; then
 fi
 [ -n "${agent_id}" ] && ! fleet_valid_id "${agent_id}" && agent_id=""
 
-if ! seen_dir="$(fleet_seen_dir)"; then
+if ! fleet_state_usable; then
   printf 'fleet-report hook: %s\n' "XDG_STATE_HOME (${XDG_STATE_HOME:-}) is not absolute, so nothing was reported and no failure can be logged. Fix: set XDG_STATE_HOME to an absolute path or unset it." >&2
   exit 0
 fi
-mkdir -p -- "${seen_dir}" 2>/dev/null || { printf 'fleet-report hook: cannot create %s, so nothing was reported. Fix: make it writable.\n' "${seen_dir}" >&2; exit 0; }
 
 [ -d "${cwd}" ] && cd -- "${cwd}" 2>/dev/null
 
@@ -130,25 +134,10 @@ detach() {
     </dev/null >/dev/null 2>&1
 }
 
-# announce_failures -- SessionStart only: one stdout line (session context) for
-# failures logged since the last announcement; then advance the marker.
-announce_failures() {
-  local marker since lines n latest
-  marker="$(fleet_surfaced_marker_path)" || return 0
-  since="$(cat -- "${marker}" 2>/dev/null)"
-  case "${since}" in ''|*[!0-9]*) since=0 ;; esac
-  lines="$(fleet_failures_since "${since}")"
-  [ -n "${lines}" ] || return 0
-  n="$(printf '%s\n' "${lines}" | grep -c .)"
-  latest="$(printf '%s\n' "${lines}" | tail -n 1)"
-  fleet_failure_notice "${n}" "${latest}" "$(fleet_failure_log_path)"
-  printf '%s\n' "${latest%%$'\t'*}" > "${marker}.tmp" && mv -f -- "${marker}.tmp" "${marker}"
-}
-
 case "${event}" in
   SessionStart)
     detach session_started session-start --session-id "${sid}" --cwd "${cwd:-${PWD}}"
-    announce_failures ;;
+    fleet_announce_failures ;;
   SessionEnd)
     if [ -n "${reason}" ]; then
       detach session_ended session-end --session-id "${sid}" --reason "${reason}"
@@ -156,7 +145,7 @@ case "${event}" in
       detach session_ended session-end --session-id "${sid}"
     fi ;;
   PostToolUse)
-    fleet_throttle_claim "$(fleet_throttle_key "${sid}" "${agent_id}")" "$(date +%s)" || exit 0
+    fleet_claim_seen "${sid}" "${agent_id}" || exit 0
     kind="$(fleet_seen_kind "${agent_type}" "${agent_id}")"
     if [ "${kind}" = "admiral_seen" ]; then
       detach admiral_seen admiral-seen --session-id "${sid}" --agent-id "${agent_id}" --agent-type "${agent_type}"
@@ -166,8 +155,7 @@ case "${event}" in
       [ -n "${agent_type}" ] && set -- "$@" --agent-type "${agent_type}"
       detach session_seen "$@"
     fi
-    # Opportunistic housekeeping: stamps for sessions silent a day are dead.
-    find "${seen_dir}" -maxdepth 1 -name '*.stamp' -mmin +1440 -delete 2>/dev/null ;;
+    fleet_prune_stamps ;;
   *) ;;
 esac
 exit 0

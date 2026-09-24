@@ -73,7 +73,7 @@ done
 # shellcheck source=../lib/fleet/domain.sh
 . "${AI}/lib/fleet/domain.sh"
 # shellcheck disable=SC1091
-. "${INBOX_LIB}/err.sh"; . "${INBOX_LIB}/names.sh"; . "${INBOX_LIB}/fs.sh"; . "${INBOX_LIB}/descriptor.sh"
+for f in err names descriptor logchan maildir fence session fs lock inbox; do . "${INBOX_LIB}/${f}.sh"; done
 # shellcheck source=../lib/fleet/effects.sh
 . "${AI}/lib/fleet/effects.sh"
 # shellcheck source=../lib/fleet/manager.sh
@@ -135,18 +135,7 @@ require() { [ -n "$2" ] || die_usage "${sub} needs --$1"; }
 case "${sub}" in
   session-start)
     allowed_flags "cwd"
-    rc=0
-    resolved="$(fleet_resolve_repo "${cwd}")" || rc=$?
-    case "${rc}" in
-      0) ;;
-      2) fleet_say_fail session_started "was not sent: --cwd ${cwd@Q} is not an existing absolute directory" \
-           "pass the session's absolute working directory."; exit 1 ;;
-      4) fleet_say_fail session_started "was not sent: two inbox registry entries claim this repo" \
-           "leave exactly one entry in \$ATHENA_INBOX_ROOT/projects/ whose repo is this repo's git common dir."; exit 1 ;;
-      *) fleet_say_fail session_started "was not sent: no registry entry names this repo and some registry file is unparseable, so project cannot be stated" \
-           "run inbox-status (athena:inbox) to find the unparseable entry and repair it."; exit 1 ;;
-    esac
-    body="$(fleet_body_session_started "${session_id}" "${resolved%%$'\t'*}" "${resolved#*$'\t'}")"
+    body="$(fleet_session_started_body "${session_id}" "${cwd}")" || exit 1
     kind=session_started ;;
   session-seen)
     allowed_flags "agent-id agent-type"
@@ -164,14 +153,15 @@ case "${sub}" in
   admiral-scope)
     allowed_flags "run-id missions"
     require run-id "${run_id}"; require missions "${missions_file}"
-    [ -f "${missions_file}" ] && [ -r "${missions_file}" ] || die_usage "--missions ${missions_file@Q} is not a readable file" \
-      "write the mission pointers as a JSON array to a file and pass its path."
-    missions="$(cat -- "${missions_file}")"
-    if ! problem="$(fleet_missions_problem "${missions}")"; then
-      die_usage "--missions refused: ${problem}" \
-        "a mission pointer carries exactly tracker, ticket_ref, url, title, status, captain_state (athena-events.md -> Mission pointers are metadata only)."
-    fi
-    body="$(fleet_body_admiral_scope "${session_id}" "${run_id}" "$(jq -c . <<<"${missions}")")"
+    rc=0
+    missions="$(fleet_load_missions "${missions_file}")" || rc=$?
+    case "${rc}" in
+      0) ;;
+      1) die_usage "--missions ${missions}" "write the mission pointers as a JSON array to a file and pass its path." ;;
+      *) die_usage "--missions refused: ${missions}" \
+           "a mission pointer carries exactly tracker, ticket_ref, url, title, status, captain_state (athena-events.md -> Mission pointers are metadata only)." ;;
+    esac
+    body="$(fleet_body_admiral_scope "${session_id}" "${run_id}" "${missions}")"
     kind=admiral_scope ;;
   admiral-seen)
     allowed_flags "agent-id agent-type"

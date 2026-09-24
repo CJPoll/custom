@@ -162,7 +162,7 @@ echo "== effects"
 
 # shellcheck disable=SC1091
 INBOX_LIB="${AI}/skills/athena:inbox/lib"
-. "${INBOX_LIB}/err.sh"; . "${INBOX_LIB}/names.sh"; . "${INBOX_LIB}/fs.sh"; . "${INBOX_LIB}/descriptor.sh"
+for f in err names descriptor logchan maildir fence session fs lock inbox; do . "${INBOX_LIB}/${f}.sh"; done
 . "${LIB}/effects.sh"
 . "${HERE}/helpers.sh"
 fleet_fixture_env
@@ -214,6 +214,13 @@ mkdir -p "${TMP}/plain"
 got="$(fleet_resolve_repo "${TMP}/plain")"
 eq "a cwd outside git keys by its own realpath" "${got}" "$(printf '\t%s' "$(realpath "${TMP}/plain")")"
 ( fleet_resolve_repo relative/dir >/dev/null ); eq "a relative cwd is refused (2)" "$?" "2"
+# A repo git REFUSES to read (dubious ownership, corrupt .git, no git) is
+# "could not tell" (3), never keyed as a non-repo directory.
+mkdir -p "${TMP}/fakegit"
+printf '#!/bin/sh\necho "fatal: detected dubious ownership in repository at x" >&2\nexit 128\n' > "${TMP}/fakegit/git"
+chmod +x "${TMP}/fakegit/git"
+( PATH="${TMP}/fakegit:${PATH}"; fleet_resolve_repo "${TMP}/repo" >/dev/null ); eq "dubious ownership is could-not-tell (3), not a non-repo" "$?" "3"
+( PATH="${TMP}/fakegit:${PATH}"; fleet_resolve_repo "${TMP}/plain" >/dev/null ); eq "even for a plain dir: git failing is could-not-tell (3)" "$?" "3"
 ( fleet_resolve_repo "${TMP}/does-not-exist" >/dev/null ); eq "a missing cwd is refused (2)" "$?" "2"
 
 now="$(date +%s)"
@@ -267,6 +274,8 @@ run admiral-start --run-id r;       eq "admiral-start without --agent-id is usag
 run admiral-state --run-id r --state running; eq "admiral-state refuses running (2)" "${RC}" "2"
 run session-seen --session-id "a/b"; eq "an unsafe session id is usage (2)" "${RC}" "2"
 OUT="$(env -u CLAUDE_CODE_SESSION_ID "${BIN}" session-seen 2>"${TMP}/err")"; eq "no session id anywhere is usage (2)" "$?" "2"
+OUT="$(PATH="${TMP}/fakegit:${PATH}" "${BIN}" session-start --cwd "${TMP}/repo" 2>"${TMP}/err")"; eq "session-start refuses when git cannot read the repo (1)" "$?" "1"
+case "$(cat "${TMP}/err")" in *"could not say"*"Fix: "*) ok "that refusal names the git failure with Fix:" ;; *) bad "that refusal names the git failure with Fix:" "$(cat "${TMP}/err")" ;; esac
 eq "no request reached the server for any usage error" "$(fleet_log_count)" "0"
 
 printf '%s' "${GOOD_M}" | jq -c '.[0].summary = "leaked prose"' > "${TMP}/bad-missions.json"

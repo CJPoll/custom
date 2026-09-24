@@ -2925,6 +2925,12 @@ at every agent depth). The kinds and the other fields each may carry:
   the git common dir*). `null` means "no registry entry matched this repo". It
   is stated, never omitted, so it stays distinct from "not reported". A
   relative `repo_key` is refused, not stored.
+- **`repo_key`** is the realpath of the session's git common dir. A session
+  whose cwd git says is in no work tree reports the cwd's own realpath, with
+  `project: null`. When git cannot say (it is missing, refuses the repo for
+  dubious ownership, or finds a corrupt `.git`), the harness sends no
+  `session_started` and logs the failure. It never reports such a repo as a
+  plain directory.
 - **`run_id`** identifies an admiral run within its session: the name of the
   run's coordination directory. An `admiral_scope` or `admiral_state` naming a
   `run_id` this session never started is refused with a `Fix:` telling the

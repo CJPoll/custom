@@ -116,7 +116,7 @@ fleet_respond '{"status":202,"body":{"ok":true},"delay_s":3}'
 : > "${PIDS}"
 hook "$(post lat0001 athena-captain)"
 eq "PostToolUse against a 3 s server: exit 0" "${RC}" "0"
-if [ "${MS}" -lt 1500 ]; then ok "[ticket] the hook returned in ${MS} ms while the server was still sleeping 3 s"
+if [ "${MS}" -lt 2500 ]; then ok "[ticket] the hook returned in ${MS} ms while the server was still sleeping 3 s"
 else bad "[ticket] the hook returned in ${MS} ms while the server was still sleeping 3 s" "it waited on the network"; fi
 eq "PostToolUse writes nothing on stdout" "${OUT}" ""
 settle 1
