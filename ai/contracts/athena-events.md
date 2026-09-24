@@ -2845,14 +2845,16 @@ router ships, every reply routes by the channel route, as before.
 
 **The claim.** A claim maps `(slack_app, team_id, channel, thread_ts)` to one
 AgentInstance. It is written by the `athena` MCP tool **`slack_thread_claim`**,
-with exactly five arguments: `bot_id` (selects the app), `team_id`, `channel`,
+which takes five arguments: `bot_id` (selects the app), `team_id`, `channel`,
 `thread_ts` (the parent `ts`), and `inbox_name`.
 
 - **The machine is stamped, never supplied.** The caller's machine comes from
   its machine token (the dual above). The derived-identity arguments
   `machine_id`, `owner`, and `agent_instance_id` are **refused with a `Fix:`**,
-  never silently honoured or ignored. The tool declares them precisely so it can
-  refuse them.
+  never silently honoured or ignored. So the tool's schema declares **eight**
+  arguments: the five it takes, and these three, which it always refuses. They
+  must be declared, because the MCP layer strips undeclared arguments before the
+  tool sees them, and a stripped argument is one silently ignored.
 - **The inbox must be a live `<project>-slack.jsonl` instance on the calling
   machine.** Any other `inbox_name` — a non-Slack inbox, or an instance on
   another machine — is refused with a `Fix:`. Only a Slack-producer inbox may be
@@ -2882,10 +2884,16 @@ consumer*) holds unchanged.
 **A stale claim falls back and says so.** A claim whose instance or machine is no
 longer live does not drop the reply: dropping it would be the silent-dark class
 (`~/dev/custom/ai/CLAUDE.md` → *A failed lookup must never look like an empty
-one*). The reply follows the channel route, and the server records the event
-outcome **`thread_claim_stale`** naming the claim's key. It is a delivery, not a
-drop. If the channel route also misses, the event is unrouted, and the unrouted
-record names the stale claim's key too.
+one*). The reply follows the channel route, and the server records the outcome
+**`thread_claim_stale`** naming the claim's key. It is a delivery, not a drop.
+The record is the Slack receiver's per-event outcome log (gen_saas
+`Athena.SlackEvents.EventOutcome`), which already records every path through the
+receiver, `unrouted` included. It is not the platform router's Level-1/Level-2
+outcome sets (*Event disposition and dead-letter*): the Slack receiver is a
+separate producer. If the channel route also misses, the event is `unrouted`: no
+event row is stored (`ai/contracts/athena-inbox.md` → *The diagnostic:
+`inbox-doctor`*, "dropped without a row"), and its outcome record, the only
+durable trace of an unrouted event, names the stale claim's key too.
 
 **The line says how it was routed.** Every Slack line the router writes carries
 `route`: `thread_claim` when a live claim chose the channel, `channel_route`
