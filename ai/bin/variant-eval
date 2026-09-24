@@ -109,6 +109,19 @@ ENVELOPE_EPS        = EvalScore::ENVELOPE_EPS
 
 KEEP_LABEL = "KEEP — pending human gate (requires gate-green + explicit human adoption; variant-eval NEVER adopts)"
 
+# The canonical verdict set (mirrors the `verdict` function's five branches
+# and render_proposal's `case res[:verdict]`/`if ... :blocked` handling).
+# --help builds its verdict list from this, and the self-test checks --help
+# against it, so a sixth verdict added to `verdict` without updating this
+# constant fails loudly instead of silently drifting out of --help (DND-506).
+VERDICT_LABELS = {
+  keep: "KEEP",
+  revert: "REVERT",
+  inconclusive: "INCONCLUSIVE",
+  blocked: "BLOCKED",
+  unmeasured: "UNMEASURED"
+}.freeze
+
 # Command strings that would constitute a mutation/adoption action. No proposal
 # output may contain any of these (self-test (d)); no command the tool runs may
 # match one (command_allowed?).
@@ -1079,6 +1092,28 @@ def self_test
   fail.("--help must still win over any other argument (stdout Usage, exit 0)") \
     unless st.exitstatus.zero? && out.include?("Usage:")
 
+  # DND-506: --help must match the parser and the verdict set, not a
+  # hand-written description of them — checked against the real values
+  # (CLI_SPEC, DEFAULT_BASELINE, DEFAULT_RUNS, VERDICT_LABELS) so a future
+  # change to any of those, without a matching --help update, fails here
+  # instead of silently desyncing.
+  htxt = help_text
+  fail.("--help and the spawned `--help --bogus` output must be the same text") unless out == htxt
+  CLI_SPEC.each_key do |flag|
+    fail.("--help must document #{flag} (CLI_SPEC)") unless htxt.include?(flag)
+  end
+  fail.("--help must state the real --baseline default (#{DEFAULT_BASELINE})") \
+    unless htxt.include?(DEFAULT_BASELINE)
+  fail.("--help must state the real --runs default (#{DEFAULT_RUNS})") unless htxt.include?(DEFAULT_RUNS.to_s)
+  fail.("--help must state the --runs range (1-99)") unless htxt.include?("1-99")
+  fail.("--help must document --corpus's accepted values (deterministic|full), not a path") \
+    unless htxt.include?("deterministic") && htxt.include?("full") && !htxt.include?("eval corpus directory")
+  VERDICT_LABELS.each_value do |label|
+    fail.("--help must list the #{label} verdict (VERDICT_LABELS)") unless htxt.include?(label)
+  end
+  fail.("--help must state the DND-505 exit-2-on-bad-argument rule") \
+    unless htxt.include?("exits 2") && htxt.include?("refused")
+
   # In-process: the parser behind main, including the cases that carry
   # --variant (unsafe to run black-box on a parser that ignores flags).
   _o, reason = parse_cli(%w[--variant v --corpus-full])
@@ -1184,6 +1219,39 @@ CLI_SPEC = {
   "--out" => :value
 }.freeze
 
+# DND-506: built from CLI_SPEC/DEFAULT_BASELINE/DEFAULT_RUNS/VERDICT_LABELS —
+# the same values the parser and verdict logic actually use — rather than a
+# free-hand description that can silently stop matching them. The self-test
+# asserts this text against those same constants.
+def help_text
+  <<~TXT
+    Usage:
+      ai/bin/variant-eval --variant REF [OPTIONS]   score a candidate harness ref
+                                                    against a baseline over the eval
+                                                    corpus; emits one of
+                                                    #{VERDICT_LABELS.values.join(' / ')}
+      ai/bin/variant-eval --self-test               deterministic suite (no model)
+      ai/bin/variant-eval --help                    this text
+
+    Options:
+      --variant REF                 candidate harness ref to score (required)
+      --baseline REF                ref to compare against (default: #{DEFAULT_BASELINE})
+      --corpus deterministic|full   which eval corpus to run (default: deterministic;
+                                     full adds model-in-loop T2 characterization,
+                                     which stays OUT of harness-gate)
+      --runs N                      samples per case, 1-99 (default: #{DEFAULT_RUNS})
+      --out PATH                    write the scorecard here
+
+    An unrecognised argument, a flag given twice, or a value flag with no value
+    (or `--flag=value`) exits 2 and names the offending flag on stderr — it is
+    refused, never ignored (DND-505).
+
+    PROPOSAL-ONLY and human-gated by design: this tool has no merge/commit/push/
+    adopt path, and a KEEP verdict is never license to adopt a variant
+    automatically. Never wrap it in an auto-adopt loop.
+  TXT
+end
+
 # -> [opts, nil] on a well-formed argv, else [nil, reason naming the argument].
 def parse_cli(argv)
   opts = StrictArgv.parse(argv, CLI_SPEC)
@@ -1243,25 +1311,7 @@ rescue StandardError => e
 end
 
 if ARGV.include?("--help") || ARGV.include?("-h")
-  puts <<~TXT
-    Usage:
-      ai/bin/variant-eval --variant REF [OPTIONS]   score a candidate harness ref
-                                                    against a baseline over the eval
-                                                    corpus; emits KEEP / REVERT /
-                                                    INCONCLUSIVE
-      ai/bin/variant-eval --self-test               deterministic suite (no model)
-      ai/bin/variant-eval --help                    this text
-
-    Options:
-      --baseline REF   ref to compare against (default: the configured baseline)
-      --corpus PATH    eval corpus directory
-      --runs N         samples per case (1-99)
-      --out PATH       write the scorecard here
-
-    PROPOSAL-ONLY and human-gated by design: this tool has no merge/commit/push/
-    adopt path, and a KEEP verdict is never license to adopt a variant
-    automatically. Never wrap it in an auto-adopt loop.
-  TXT
+  puts help_text
   exit 0
 end
 exit main(ARGV)

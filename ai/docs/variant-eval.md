@@ -14,6 +14,11 @@ push / adopt / `--update-baseline` code path; "adoption" is a human choosing to
 merge the variant, and "revert" is the human simply not merging (the tool never
 writes to the harness).
 
+**Later (2026-09-24):** this line names only three of the five verdicts;
+**BLOCKED** and **UNMEASURED** were added after this doc was written (see the
+verdict table below and its own 2026-09-24 annotation) and `--help` now lists
+all five. This line is not rewritten (dated record); see the table.
+
 It runs entirely within git history: for each of {baseline, variant} it creates
 a short-lived `git worktree add --detach`, runs the corpus there, collects the
 per-case result set, and tears the worktree down.
