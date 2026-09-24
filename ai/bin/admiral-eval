@@ -90,6 +90,8 @@ require "digest"
 require "fileutils"
 require "tmpdir"
 require "time"
+require "rbconfig"
+require_relative "../lib/strict_argv"
 
 AI_DIR       = File.expand_path("..", __dir__)
 require File.join(AI_DIR, "lib", "eval_score")
@@ -1218,6 +1220,56 @@ def self_test
   none = score_lines([{ name: "AE-99-bad", mode: "next-action", pass: false, rate: "0/0" }], "x").join("\n")
   fail.("with nothing sampled the aggregate must read n/a, never 0") unless none.include?("aggregate n/a")
 
+  # -- DND-505: the CLI refuses an argument it does not recognise ----------
+  # Black-box through the real CLI first. Every argv here is side-effect-free
+  # even on a parser that ignores unknown flags (the ignored-flag path is
+  # `list`), so this block can never start a model run from inside the gate.
+  cli = ->(*args) { Open3.capture3(RbConfig.ruby, File.expand_path(__FILE__), *args) }
+  [
+    [%w[--rnus 5], "--rnus"],        # typo'd flag
+    [%w[--corpus-full], "--corpus-full"], # a flag this tool never had
+    [%w[--only], "--only"],          # value flag with no value
+    [%w[stray], "stray"]             # positional argument
+  ].each do |args, named|
+    out, err, st = cli.(*args)
+    fail.("`admiral-eval #{args.join(' ')}` must exit 2 (usage), got #{st.exitstatus}") unless st.exitstatus == 2
+    fail.("`admiral-eval #{args.join(' ')}` must name #{named} on stderr: #{err.inspect}") unless err.include?(named)
+    fail.("`admiral-eval #{args.join(' ')}` must carry a Fix: line") unless err.include?("Fix:")
+    fail.("`admiral-eval #{args.join(' ')}` must not run the default list: #{out[0, 80].inspect}") unless out.empty?
+  end
+  out, _err, st = cli.("--help", "--bogus")
+  fail.("--help must still win over any other argument (stdout Usage, exit 0)") \
+    unless st.exitstatus.zero? && out.include?("Usage:")
+
+  # In-process: the parser behind that dispatch, including the cases the
+  # black-box block cannot exercise safely (they carry --run).
+  _o, reason = parse_cli(%w[--run --runs])
+  fail.("--run --runs (no value) must be a usage error naming --runs") unless reason.to_s.include?("--runs")
+  _o, reason = parse_cli(%w[--run --runs many])
+  fail.("a non-integer --runs must be a usage error") unless reason.to_s.include?("integer")
+  _o, reason = parse_cli(%w[--run --rnus 5])
+  fail.("--run --rnus must be a usage error naming --rnus") unless reason.to_s.include?("--rnus")
+  _o, reason = parse_cli(%w[--run --agent-file])
+  fail.("--run --agent-file (no value) must be a usage error") unless reason.to_s.include?("--agent-file")
+  _o, reason = parse_cli(%w[--runs 5])
+  fail.("a --run option without --run must be a usage error, never an ignored flag") \
+    unless reason.to_s.include?("--run")
+  _o, reason = parse_cli(%w[--run --self-test])
+  fail.("--run with --self-test must be a usage error") unless reason.to_s.include?("--self-test")
+  _o, reason = parse_cli(%w[--self-test --only x])
+  fail.("a --run option with --self-test must be a usage error") unless reason.to_s.include?("--only")
+  fwd = %w[--run --runs 4 --only x --update-baseline --agent-file p.md]
+  rev = %w[--agent-file p.md --update-baseline --only x --runs 4 --run]
+  o1, r1 = parse_cli(fwd)
+  o2, r2 = parse_cli(rev)
+  fail.("well-formed --run options must parse (got #{r1.inspect} / #{r2.inspect})") unless r1.nil? && r2.nil?
+  fail.("flag order must not matter: #{o1.inspect} vs #{o2.inspect}") unless o1 == o2
+  fail.("--runs must parse as an Integer") unless o1 && o1["--runs"] == 4
+  [[], %w[--self-test]].each do |args|
+    _o, reason = parse_cli(args)
+    fail.("`admiral-eval #{args.join(' ')}` must parse, got #{reason.inspect}") unless reason.nil?
+  end
+
   if ok
     puts "admiral-eval: self-test OK"
     0
@@ -1230,7 +1282,8 @@ def self_test
          "case; a baseline pass->fail must exit 1; and the inert sandbox must neutralize the PATH-resolved " \
          "forge/comms/container stubs AND block `git push`. The model argv must carry the --agent-file " \
          "subject's prose inline (--agents under #{SUBJECT_KEY}, never a bare --agent #{AGENT}), with " \
-         "--disallowedTools Bash Task last, and an unloadable subject must raise SubjectError with a Fix:."
+         "--disallowedTools Bash Task last, and an unloadable subject must raise SubjectError with a Fix:. An " \
+         "unknown flag, a stray argument, or a value flag with no value must exit 2 naming it (DND-505)."
     1
   end
 end
@@ -1248,49 +1301,82 @@ ensure
 end
 
 # ---------------------------------------------------------------------------
-def arg_value(flag, default = nil)
-  i = ARGV.index(flag)
-  return default unless i && ARGV[i + 1]
-  ARGV[i + 1]
+# DND-505: every argument must be one this tool declares. The old ad-hoc
+# `ARGV.index` lookup ignored anything else, so `--rnus 5`, `--corpus-full`, or
+# a valueless `--only` fell through to `list` and exited 0.
+CLI_SPEC = {
+  "--run" => :switch,
+  "--self-test" => :switch,
+  "--runs" => :integer,
+  "--only" => :value,
+  "--update-baseline" => :switch,
+  "--agent-file" => :value
+}.freeze
+RUN_OPTIONS = %w[--runs --only --update-baseline --agent-file].freeze
+
+# -> [opts, nil] on a well-formed argv, else [nil, reason naming the argument].
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  return [nil, "--run and --self-test are separate modes; pass one"] if opts["--run"] && opts["--self-test"]
+
+  stray = RUN_OPTIONS.find { |f| opts.key?(f) }
+  return [nil, "#{stray} only applies to --run"] if stray && !opts["--run"]
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
 end
 
-if ARGV.include?("--help") || ARGV.include?("-h")
-  puts <<~TXT
-    Usage:
-      ai/bin/admiral-eval                    list the admiral behavioral-eval corpus
-      ai/bin/admiral-eval --run [OPTIONS]    run the eval (MODEL-IN-LOOP: slow;
-                                             NOT part of the gate)
-      ai/bin/admiral-eval --self-test        deterministic suite (no model)
-      ai/bin/admiral-eval --help             this text
+USAGE = <<~TXT
+  Usage:
+    ai/bin/admiral-eval                    list the admiral behavioral-eval corpus
+    ai/bin/admiral-eval --run [OPTIONS]    run the eval (MODEL-IN-LOOP: slow;
+                                           NOT part of the gate)
+    ai/bin/admiral-eval --self-test        deterministic suite (no model)
+    ai/bin/admiral-eval --help             this text
 
-    Options (with --run):
-      --runs N            majority-sampling runs per case (1-99)
-      --only NAME         restrict to one case
-      --update-baseline   rewrite the baseline from this run's results
-      --agent-file PATH   the rendered athena-admiral definition to evaluate
-                          (default: this checkout's ai/agents/athena-admiral.md).
-                          Its prose is passed inline, so the run never falls back
-                          to the ~/.claude/agents copy (the main checkout's).
-  TXT
-  exit 0
-end
-exit(
-  if ARGV.include?("--self-test")
-    self_test
-  elsif ARGV.include?("--run")
-    agent_file, subject_err = resolve_agent_file(ARGV)
-    if subject_err
-      warn "admiral-eval: FAILED — #{subject_err}"
-      2
-    else
-      run_model(
-        runs: (arg_value("--runs", DEFAULT_RUNS).to_i.clamp(1, 99)),
-        only: arg_value("--only"),
-        update: ARGV.include?("--update-baseline"),
-        agent_file: agent_file
-      )
-    end
-  else
-    list
+  Options (with --run):
+    --runs N            majority-sampling runs per case (1-99)
+    --only NAME         restrict to one case
+    --update-baseline   rewrite the baseline from this run's results
+    --agent-file PATH   the rendered athena-admiral definition to evaluate
+                        (default: this checkout's ai/agents/athena-admiral.md).
+                        Its prose is passed inline, so the run never falls back
+                        to the ~/.claude/agents copy (the main checkout's).
+
+  An unrecognised argument, or a value flag with no value, exits 2.
+TXT
+
+def main(argv)
+  # --help is answered before anything else, whatever else is on the line.
+  if argv.include?("--help") || argv.include?("-h")
+    puts USAGE
+    return 0
   end
-)
+
+  opts, reason = parse_cli(argv)
+  if reason
+    warn "admiral-eval: usage error — #{reason}."
+    warn "  Fix: re-run with only the flags `ai/bin/admiral-eval --help` lists, each value flag followed by " \
+         "its value. An unrecognised argument is refused, not ignored: ignoring it would run a different " \
+         "mode (the default list) and exit 0."
+    return 2
+  end
+
+  return self_test if opts["--self-test"]
+  return list unless opts["--run"]
+
+  agent_file, subject_err = resolve_agent_file(argv)
+  if subject_err
+    warn "admiral-eval: FAILED — #{subject_err}"
+    return 2
+  end
+  run_model(
+    runs: opts.fetch("--runs", DEFAULT_RUNS).clamp(1, 99),
+    only: opts["--only"],
+    update: opts.fetch("--update-baseline", false),
+    agent_file: agent_file
+  )
+end
+
+exit main(ARGV)

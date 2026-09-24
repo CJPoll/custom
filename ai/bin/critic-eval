@@ -28,6 +28,7 @@ require "json"
 
 AI_DIR       = File.expand_path("..", __dir__)
 require File.join(AI_DIR, "lib", "critic_prompt")
+require File.join(AI_DIR, "lib", "strict_argv")
 
 FIXTURES_DIR = File.join(AI_DIR, "eval", "critic-fixtures")
 CRITIC       = "athena-diff-critic"
@@ -274,6 +275,36 @@ def run_self_test
   # would be a silent "the eval never runs" rather than a loud one.
   ok = false unless all_sel.all? { |f| unscoreable(f).empty? }
 
+  # DND-505: the CLI refuses an argument it does not recognise. Black-box
+  # through the real CLI; no argv here carries --run, so even a parser that
+  # ignores unknown flags lands on `list` and never starts a model run.
+  require "open3"
+  require "rbconfig"
+  [[%w[--rnu], "--rnu"], [%w[--only], "--only"], [%w[stray], "stray"]].each do |args, named|
+    out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path(__FILE__), *args)
+    unless st.exitstatus == 2 && err.include?(named) && err.include?("Fix:") && out.empty?
+      warn "self-test: FAIL — `critic-eval #{args.join(' ')}` must exit 2 naming #{named} with a Fix: " \
+           "(got exit #{st.exitstatus}, stderr #{err[0, 120].inspect})"
+      ok = false
+    end
+  end
+  out, _err, st = Open3.capture3(RbConfig.ruby, File.expand_path(__FILE__), "--help", "--bogus")
+  ok = false unless st.exitstatus.zero? && out.include?("Usage:")
+
+  # In-process, including the --run cases unsafe to run black-box.
+  { %w[--run --onyl core] => "--onyl", %w[--run --only] => "--only", %w[--only core] => "--run",
+    %w[--run --self-test] => "--self-test" }.each do |args, named|
+    _o, reason = parse_cli(args)
+    next if reason.to_s.include?(named)
+
+    warn "self-test: FAIL — parse_cli(#{args.inspect}) must be a usage error naming #{named}, got #{reason.inspect}"
+    ok = false
+  end
+  o1, r1 = parse_cli(%w[--run --only core])
+  o2, r2 = parse_cli(%w[--only core --run])
+  ok = false unless r1.nil? && r2.nil? && o1 == o2 && o1["--only"] == "core"
+  ok = false unless parse_cli([])[1].nil? && parse_cli(%w[--self-test])[1].nil?
+
   if ok
     puts "critic-eval: self-test OK"
     0
@@ -309,24 +340,35 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   exit 0
 end
 
-only = nil
-if (i = ARGV.index("--only"))
-  only = ARGV[i + 1]
-  if only.nil? || only.start_with?("-")
-    warn "critic-eval: --only needs a since= value."
-    warn "  Fix: pass one, e.g. `ai/bin/critic-eval --run --only core`."
-    exit 1
-  end
-  unless ARGV.include?("--run")
-    warn "critic-eval: --only only applies to --run."
-    warn "  Fix: use `ai/bin/critic-eval --run --only #{only}`."
-    exit 1
-  end
+# DND-505: every argument must be one this tool declares. The old ad-hoc
+# `ARGV.index` lookup ignored anything else, so `--run --onyl core` scored the
+# WHOLE corpus (a different, slower measurement) and `--rnu` listed and exited 0.
+CLI_SPEC = { "--run" => :switch, "--self-test" => :switch, "--only" => :value }.freeze
+
+# -> [opts, nil] on a well-formed argv, else [nil, reason naming the argument].
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  return [nil, "--run and --self-test are separate modes; pass one"] if opts["--run"] && opts["--self-test"]
+  return [nil, "--only only applies to --run"] if opts.key?("--only") && !opts["--run"]
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
 end
 
-exit(
-  if ARGV.include?("--self-test") then run_self_test
-  elsif ARGV.include?("--run") then run_model(only)
-  else list
+def main(argv)
+  opts, reason = parse_cli(argv)
+  if reason
+    warn "critic-eval: usage error — #{reason}."
+    warn "  Fix: re-run with only the flags `ai/bin/critic-eval --help` lists, e.g. " \
+         "`ai/bin/critic-eval --run --only core`. An unrecognised argument is refused, not ignored: " \
+         "ignoring it would run a different mode or score a different fixture set."
+    return 2
   end
-)
+  return run_self_test if opts["--self-test"]
+  return run_model(opts["--only"]) if opts["--run"]
+
+  list
+end
+
+exit main(ARGV)
