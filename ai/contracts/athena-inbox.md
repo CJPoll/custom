@@ -1054,15 +1054,17 @@ section states only what is additive for that producer; it does **not** restate
 `athena-events.md`. The Event envelope, the three ingress kinds and their sender
 verification, the fan-out handling-rule and logic-less predicate model, the
 consumer-owned membership discipline and its authoritative source re-query (the
-platform holds no membership state), the two-path trust posture, and the
+router holds no membership state; the one platform-held view is the priority
+index), the two-path trust posture, and the
 per-adapter escaper contract are that document's, and are referenced by name
 rather than duplicated here. This section is only the inbox
 `log`-channel end of the delivery.
 
-**Later (2026-09-24):** the parenthesis above says "the platform holds no
-membership state". `athena-events.md` now says the **router** holds none, and
-names one platform-held view, the priority index (*The consumer owns
-membership*; *Priority index*). Nothing in this contract depends on it.
+**Later (2026-09-24):** the parenthesis above said "the platform holds no
+membership state". Superseded (DND-430): `athena-events.md` now scopes that to
+the router and specifies one platform-held view, the priority index (*The
+consumer owns membership*; *Priority index*). Nothing in this contract depends
+on it.
 
 Nothing about the `log` kind's on-disk shape, framing, doorbell, consumption
 state, or retention changes for a platform producer. Every rule in *Channel
