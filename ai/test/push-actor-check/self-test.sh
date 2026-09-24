@@ -81,6 +81,16 @@ case "${mode}" in
   hit:*) printf '%s\t%s\n' "${mode#hit:}" "${refspec}"; exit 0 ;;
   miss) exit 0 ;;                                    # rc=0, empty stdout: no matching ref
   error:*) printf '%s\n' "${mode#error:}" >&2; exit 128 ;;
+  # suffixonly:<sha> — a ref whose NAME ONLY suffix-matches the refspec (ls-remote's
+  # own pattern semantics), never an exact "refs/heads/<branch>" line. Exercises the
+  # awk exact-match filter's "not found despite non-empty output" branch.
+  suffixonly:*) printf '%s\trefs/heads/x/%s\n' "${mode#suffixonly:}" "${refspec}"; exit 0 ;;
+  # suffixplusexact:<suffixsha>:<exactsha> — the suffix line comes FIRST, the exact
+  # line second, so a naive `head -1` would pick the wrong one.
+  suffixplusexact:*)
+    rest="${mode#suffixplusexact:}"; s1="${rest%%:*}"; s2="${rest#*:}"
+    printf '%s\trefs/heads/x/%s\n%s\t%s\n' "${s1}" "${refspec}" "${s2}" "${refspec}"
+    exit 0 ;;
   *) exit 0 ;;
 esac
 EOF
@@ -209,6 +219,17 @@ expect "R2c. Fix covers both a moved branch and a wrong repo, not only wrong-rep
 expect "R2a. names both the given sha and the actual remote head" 5 "${SHA}"
 expect "R2a2. and the actual remote head sha" 5 "${OLD}"
 [ "$(reads gh)" = 0 ] && ok "R2b. never reads the events API" || bad "R2b. events API touched" "reads=$(reads gh)"
+
+reset_stub gh
+set_git_mode "suffixonly:${SHA}"   # only a suffix match (refs/heads/x/feat), never exact refs/heads/feat
+run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
+expect "R2d. non-empty output but no EXACT ref match -> treated as not-found, not a sha mismatch" 5 "not on remote 'origin'"
+[ "$(reads gh)" = 0 ] && ok "R2e. never reads the events API" || bad "R2e. events API touched" "reads=$(reads gh)"
+
+reset_stub gh; gh_event feat "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
+set_git_mode "suffixplusexact:${OLD}:${SHA}"   # suffix line FIRST, exact line second
+run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
+expect "R2f. the EXACT ref line's sha is used, not the first (suffix) line" 0 'athena-harness[bot]'
 
 reset_stub gh
 set_git_mode "error:ssh: connect to host github.com port 22: Network is unreachable"

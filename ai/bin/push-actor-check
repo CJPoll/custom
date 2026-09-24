@@ -199,7 +199,7 @@ elif [ "${REMOTE_HEAD}" != "${SHA}" ]; then
   # Word the Fix: to cover both, so an agent isn't sent hunting for a --repo
   # mistake that doesn't exist when the real cause is a stale --sha.
   die_resolve "sha '${SHA}' is not the current head of '${BRANCH}' on remote '${REMOTE}' (${URL}); remote head is now '${REMOTE_HEAD}'" \
-    "the branch exists on '${REMOTE}' but its head has moved past '${SHA}' — either it moved after this push (a later push, force-push, or merge; re-run against the current head, \`git ls-remote '${REMOTE}' refs/heads/${BRANCH}\`), or '${REPO}' (cwd unless --repo was given) isn't the repo you pushed ${BRANCH} from — pass --repo <path> or cd there first."
+    "the branch exists on '${REMOTE}' but its head has moved past '${SHA}' — either it moved after this push (a later push, force-push, or merge; re-run against the current head, \`git -C '${REPO}' ls-remote '${URL}' refs/heads/${BRANCH}\`, the same push URL this check queried), or '${REPO}' (cwd unless --repo was given) isn't the repo you pushed ${BRANCH} from — pass --repo <path> or cd there first."
 fi
 
 START=$(date +%s)
