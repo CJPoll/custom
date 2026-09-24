@@ -3414,7 +3414,7 @@ It consumes exactly these event types. Every other type is not consumed:
 
 | Event type | Index effect | Source | Ticket |
 | --- | --- | --- | --- |
-| `notion.ticket.created`, `notion.ticket.updated`, `notion.ticket.undeleted` | Upsert the item's pointer fields, and reopen it when *States* allows | `notion_personal` or `notion_work`, from the subscription binding (below) | DND-436, DND-438 |
+| `notion.ticket.created`, `notion.ticket.updated`, `notion.ticket.undeleted` | Upsert the item's pointer fields, and reopen it when *States* allows | `notion_personal`, `notion_work` or `action_item`, from the subscription binding (below) | DND-436, DND-438 |
 | `notion.ticket.deleted` | Close the item it names (`closed_by: source_deleted`) | as above | DND-436, DND-438 |
 | `slack.message.received`, when it is an ask (below) | Create a `proposed` item | `slack_ask` | DND-437 |
 | the forge review-request family | Upsert an `owner_only` item | `forge_review` | DND-439 |
@@ -3849,15 +3849,25 @@ in Notion per `athena:ticket-management`.
 
 | Operation | Who | Resource | Where checked | On denial |
 | --- | --- | --- | --- | --- |
-| View the priorities page | the logged-in owner | only the owner's items, failures and skip counts | `Athena.Priorities` list functions, through aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
-| Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or a verified owner Slack click where that path exists | the owner's items and rules | `Athena.Priorities` manager functions, RBAC `update`, checked before any write | `not_found`; the Slack path rejects and records |
-| `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
+| View the priorities page | the logged-in owner | only the owner's items, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
+| Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or a verified owner Slack click where that path exists | the owner's items and rules | `Athena.Priorities` manager functions: the target is loaded with an `owner_id` = actor filter in the query, plus RBAC `update`, both before any write | `not_found`; the Slack path rejects and records |
+| `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction: an `owner_id` = the machine's owner filter in the query, and the session's machine binding | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
 
 - **Deny by default.** A machine token reaches the index only through the three
   lease tools. No machine-token path promotes, restores, dismisses, overrides,
   lists, or reads a `proposed` item, a failure or another owner's item.
-- **Every query is owner-scoped.** Ingest writes only to the event's owner, as
-  stamped from its authenticated ingress (*The event*).
+- **Every query is owner-scoped in the query itself, not by RBAC alone.** An
+  aggregate RBAC `read` or `update` admits anyone holding a role on the row,
+  so it never replaces the `owner_id` filter (gen_saas DND-434 and DND-441
+  added that filter to the fleet reads and to `set_control` for exactly
+  this reason). Every read and write of items, index obligations, skip counts,
+  the index-failure record, re-sync runs, subscription bindings and rules
+  filters by `owner_id`. Ingest and the re-sync write only to the owner
+  stamped from the authenticated ingress (*The event*), or to the item's own
+  owner.
+- **Each owner path has a negative test for role-only access:** a user holding
+  a role on another owner's item neither lists it nor acts on it, and gets
+  `not_found`.
 - **Every refusal carries a `Fix:`**, per this contract's opening rule.
 
 ---
