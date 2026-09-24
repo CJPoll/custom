@@ -1531,8 +1531,25 @@ The first-pass permitted-origination rule:
   `fleet.*` namespace bounds what MAY be registered; origination is bounded to the
   **registered members** of it, not the open prefix (see the finite-set rule
   above). A platform-originated type (next bullet) is never a member, whatever
-  a token's registration says. An event whose `type` is a well-formed but
-  unregistered `fleet.*` value is rejected at ingress: `Fix: harness-emit is not permitted to originate type '<type>' — it may originate only the fleet.* type values registered to this machine token. Register the type into this token's origination set (config, no code change); if it belongs to a fleet.* family the platform has no model for yet, that family MUST first declare its payload schema, identity field, revision token, origination membership, and enrichment posture (see 'Extending the taxonomy — a new type family declares its model'). Otherwise correct the emitter.`
+  a token's registration says. A well-formed but unregistered `fleet.*` value
+  is rejected at ingress by one of two refusals, and each names only the remedy
+  that can succeed for it:
+  - **Not in harness-emit's family-level origination set** (an unmodeled
+    `fleet.*` value). Registration cannot allow it: registering a non-member
+    is itself refused. `Fix: emit one of the enumerated harness-emit types (<permitted types, comma-separated>); a genuinely new fleet.* family must first declare its payload schema, identity field, revision token, origination membership, and enrichment posture (see 'Extending the taxonomy — a new type family declares its model') before it can be originated.`
+  - **A family-level member not registered to this machine token** (deny by
+    default). `Fix: register "<type>" for this machine's origination set (owner-editable, no code change), then retry.`
+
+  **Later (2026-09-24):** this bullet quoted ONE refusal for both cases:
+  "harness-emit is not permitted to originate type '<type>' — it may originate
+  only the fleet.* type values registered to this machine token. Register the
+  type into this token's origination set …". No code emitted that text, and
+  its first remedy ("register it") cannot succeed for an unmodeled type. The shipped code splits the case in two, as above, and that
+  split is the design. The unmodeled-type clause gained the model list from
+  the old quote (DND-411). Every quoted `Fix:` in this section is pinned
+  verbatim: `ai/contracts/fixtures/athena-events-origination-fix.txt` (checked
+  by `ai/contracts/test/self-test.sh`) and a gen_saas test named in that
+  fixture's header. Change all of them together.
 
 - **Platform-originated.** The platform itself originates a `fleet.*` family
   that reports the platform's own view of the fleet, which no machine can be
