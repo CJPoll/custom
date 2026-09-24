@@ -10,8 +10,9 @@
 # fleet_control_cache_path <claude_session_id>
 # $XDG_STATE_HOME/athena/fleet/<id>.json -- beside, never inside, DND-433's
 # seen/ stamps. Status 2 (the contract's `invalid-cache-path`) when
-# XDG_STATE_HOME is set but not absolute, or the id is not one safe path
-# component: no path is read or written then.
+# XDG_STATE_HOME is set but not absolute: no path is read or written then. An
+# unsafe id also gives status 2, as a guard: bin/fleet-control already refuses
+# one as a usage error (exit 2) before anything runs.
 fleet_control_cache_path() {
   local d
   fleet_valid_id "${1:-}" || return 2

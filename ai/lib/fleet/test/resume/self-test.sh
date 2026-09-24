@@ -84,19 +84,23 @@ has "a release (drained after a failed spawn) makes it claimable again" "$(fr cl
 out="$("${BIN}" claim --session-id "${OTHER}" --root "${ROOT}")"
 has "another session claims nothing of ours" "${out}" "claimed 0"
 
-echo "== the race: the inbox line and the hand-back arrive together"
+echo "== the race: three triggers at once (the inbox line, the hand-back, a resume waiter)"
 for i in $(seq 1 20); do newrun "race-${i}"; fr drained --run-id "race-${i}" >/dev/null; done
 fr claim > "${TMP}/c1" 2>&1 &
 p1=$!
 fr claim > "${TMP}/c2" 2>&1 &
 p2=$!
+fr claim > "${TMP}/c3" 2>&1 &
+p3=$!
 timeout 60 tail --pid="${p1}" -f /dev/null
 timeout 60 tail --pid="${p2}" -f /dev/null
+timeout 60 tail --pid="${p3}" -f /dev/null
 wait "${p1}"; r1=$?
 wait "${p2}"; r2=$?
-eq "both claimers exit 0" "${r1}:${r2}" "0:0"
-eq "20 drained runs, 20 claims in total across both triggers" "$(cat "${TMP}/c1" "${TMP}/c2" | grep -c '^CLAIMED run=race-')" 20
-eq "no run claimed twice" "$(cat "${TMP}/c1" "${TMP}/c2" | grep -o '^CLAIMED run=race-[0-9]*' | sort | uniq -d | grep -c .)" 0
+wait "${p3}"; r3=$?
+eq "all three claimers exit 0" "${r1}:${r2}:${r3}" "0:0:0"
+eq "20 drained runs, 20 claims in total across the three triggers" "$(cat "${TMP}/c1" "${TMP}/c2" "${TMP}/c3" | grep -c '^CLAIMED run=race-')" 20
+eq "no run claimed twice" "$(cat "${TMP}/c1" "${TMP}/c2" "${TMP}/c3" | grep -o '^CLAIMED run=race-[0-9]*' | sort | uniq -d | grep -c .)" 0
 twice=0
 for i in $(seq 1 20); do [ "$(resumed_count "race-${i}")" -eq 1 ] || twice=$((twice + 1)); done
 eq "every race run has exactly one RESUMED line" "${twice}" 0

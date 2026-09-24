@@ -102,7 +102,12 @@ fleet_control_cached() {
   fi
   FC_CACHE="${raw}"
   age=$(( now - $(fleet_iso_epoch "$(printf '%s' "${raw}" | jq -r .fetched_at)") ))
-  if [ "${age}" -gt "${FLEET_CACHE_STALE_S}" ]; then
+  if [ "${age}" -lt 0 ]; then
+    # A fetched_at in the future (the clock stepped back) has no measurable
+    # age, so the cache is never trusted as fresh: it is read as expired.
+    FC_CACHE_CAUSE="expired-cache"
+    FC_CACHE_DETAIL="the cache at ${path} says it was fetched $(( -age / 60 )) min in the future (the clock moved back), so its age is unknown and it counts as expired; its snapshot is still used"
+  elif [ "${age}" -gt "${FLEET_CACHE_STALE_S}" ]; then
     FC_CACHE_CAUSE="expired-cache"
     FC_CACHE_DETAIL="the cache at ${path} is $(( age / 3600 )) h old (stale after $(( FLEET_CACHE_STALE_S / 3600 )) h); its snapshot is still used"
   else

@@ -3260,6 +3260,13 @@ event carries no `to`, nothing wakes the session. The fleet page names that
 case (*Declared families beyond the first pass* →
 `fleet.session.control_changed`), and the owner resumes the session by hand.
 
+**Later (2026-09-24):** DND-443: this paragraph said the session spawns a fresh
+admiral "on exit 0" of `fleet-control check`. Two changes replaced that. Resume
+now needs exit 0 on basis `server`: a recomputed or local-rule `run` is the
+owner's fail-mode rule, not the owner's decision to resume. And the session
+claims the run with `fleet-resume claim` before it spawns. Without the claim,
+two wakes for one run could each spawn an admiral for it (critic rounds 1 and 3).
+
 ---
 
 ## Relationship to the Athena Inbox contract

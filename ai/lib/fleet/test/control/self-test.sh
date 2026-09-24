@@ -298,6 +298,9 @@ expect_basis "expired-cache (still used)" 0 "recomputed:malformed-answer,expired
 has "... names its age" "${ERR}" "49 h old"
 jq -c '.fetched_at = "2026-09-24T15:00:00Z"' <<<"${GOOD}" > "${CACHE}"
 expect_basis "fresh cache" 0 "recomputed:malformed-answer" --cwd "${GS}"
+jq -c '.fetched_at = "2026-09-24T18:00:00Z"' <<<"${GOOD}" > "${CACHE}"
+expect_basis "a future fetched_at is expired, never fresh" 0 "recomputed:malformed-answer,expired-cache" --cwd "${GS}"
+has "... says why" "${ERR}" "in the future"
 rm -f "${CACHE}"
 expect_basis "no-cache" 0 "local-rule:malformed-answer,no-cache" --cwd "${CU}"
 (
