@@ -211,8 +211,15 @@ expect "R2a2. and the actual remote head sha" 5 "${OLD}"
 reset_stub gh
 set_git_mode "error:ssh: connect to host github.com port 22: Network is unreachable"
 run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
-expect "R3. resolution read itself fails -> 5, distinct from R1/R2" 5 'could not verify'
-expect "R3a. surfaces the underlying error" 5 'Network is unreachable'
+# A failed resolution READ (couldn't reach the remote at all) is exit 3, the
+# SAME code the events loop uses for "no read succeeded" — it is not evidence
+# of a mismatch, so it must never share exit 5 with a CONFIRMED wrong
+# repo/branch/sha (R1/R2 above). The message text still distinguishes it from
+# the events loop's own "could not read the ... API" wording.
+expect "R3. resolution read itself fails -> 3 (could not verify), NOT 5" 3 'could not verify'
+expect "R3a. surfaces the underlying error" 3 'Network is unreachable'
+expect "R3b. explicitly says this is not evidence of a mismatch" 3 'NOT evidence'
+[ "$(reads gh)" = 0 ] && ok "R3c. never reads the events API" || bad "R3c. events API touched" "reads=$(reads gh)"
 
 # A resolved-and-matching branch/sha still proceeds to the events read as before.
 reset_stub gh; gh_event feat "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"

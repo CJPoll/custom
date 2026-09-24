@@ -20,11 +20,16 @@
 #   0  the event for <branch> at <sha> has the Athena actor
 #   1  the event exists and the actor is NOT Athena (final; not re-read)
 #   2  usage / prerequisite error (bad args, not a repo, remote on neither forge)
-#   3  no read succeeded in the window: cannot tell who pushed
+#   3  no read succeeded: cannot tell who pushed. Covers both a failed events
+#      read (the retry window, below) AND a failed repo/branch resolution read
+#      (e.g. `git ls-remote` couldn't reach the remote) — neither is evidence
+#      the branch/sha is wrong, only that the read itself failed.
 #   4  reads succeeded but no event for <branch> at <sha> appeared in the window
-#   5  repo/branch resolution failed: <branch> is not on the resolved remote, or
-#      <sha> is not that branch's remote head — the wrong-cwd/wrong-repo case
-#      (DND-451). Distinct from 4: this never touches the events API at all.
+#   5  repo/branch resolution CONFIRMED a mismatch: <branch> is not on the
+#      resolved remote, or <sha> is not that branch's remote head — the
+#      wrong-cwd/wrong-repo case (DND-451). Distinct from 4: this never
+#      touches the events API. Distinct from 3: the read succeeded and showed
+#      the wrong thing, rather than failing to read at all.
 #
 # The repo/remote key is resolved as its OWN step (DND-451), before any events
 # read: --repo DIR (default: cwd, like confirm-merged) picks the repo, --remote
@@ -53,15 +58,17 @@ github.com, athena-amby on gitlab.com. The forge is read from the push URL of
 --remote (default: origin) inside --repo.
 
 Before reading any event, it asserts <branch> exists on that remote and <sha>
-is its remote head (`git ls-remote`). A mismatch means the wrong repo/cwd was
-resolved, not a missing push event, and fails loudly (exit 5) rather than
-reporting "no event found".
+is its remote head (`git ls-remote`). A CONFIRMED mismatch means the wrong
+repo/cwd was resolved, not a missing push event, and fails loudly (exit 5)
+rather than reporting "no event found"; a resolution read that itself fails
+(network/auth) is exit 3, same as a failed events read — neither is evidence
+the branch/sha is wrong.
 
 The events API lags, so an absent event is re-read every --interval seconds
 (default 4, min 1) for up to --window seconds (default 20, max 300) before it
 counts as a failure.
 
-Exit: 0 Athena · 1 another actor · 2 usage · 3 could not read · 4 no event in window · 5 wrong repo/branch/sha
+Exit: 0 Athena · 1 another actor · 2 usage · 3 could not read (events or resolution) · 4 no event in window · 5 confirmed wrong repo/branch/sha
 EOF
 }
 
@@ -135,9 +142,19 @@ esac
 # the resolved remote and <sha> is its remote head. A wrong --repo/cwd resolves
 # a real but unrelated remote (e.g. an unrelated github.com project) — without
 # this check that reads as "no event found" (exit 4), a push-attribution
-# failure, rather than "wrong repo" (exit 5). The two must stay textually and
-# exit-code distinct.
+# failure, rather than "wrong repo" (exit 5).
+#
+# Exit 5 is reserved for a CONFIRMED mismatch (the read succeeded and shows the
+# wrong branch/sha) — never for a read that failed. A failed ls-remote (network
+# down, auth) can't tell mismatch from match, so it shares exit 3 with a failed
+# events read ("could not read/verify … not evidence either way"): folding it
+# into 5 would make 5 mean two different things ("wrong repo" and "couldn't
+# check"), exactly the "found nothing" vs "could not look" conflation this tool
+# exists to avoid. The message text still says "could not verify" (distinct
+# from the events loop's "could not read the ... API") so the two exit-3
+# causes are still tellable apart, even though the exit code is shared.
 die_resolve() { printf 'push-actor-check: %s\nFix: %s\n' "$1" "$2" >&2; exit 5; }
+die_could_not_verify() { printf 'push-actor-check: %s\nFix: %s\n' "$1" "$2" >&2; exit 3; }
 RESOLVE_FIX="push-actor-check resolved remote '${REMOTE}' to ${URL} from repo '${REPO}' (cwd unless --repo was given). If that is not the repo you pushed ${BRANCH} from, pass --repo <path> or cd there first."
 
 GIT_BIN=${PUSH_ACTOR_CHECK_GIT:-git}
@@ -156,8 +173,8 @@ LSERR=$(tr '\n' ' ' < "${ERRF}" | cut -c1-300)
 if [ "${LSRC}" -eq 0 ] && [ -z "${LSOUT}" ]; then
   die_resolve "branch '${BRANCH}' not on remote '${REMOTE}' (${URL})" "${RESOLVE_FIX}"
 elif [ "${LSRC}" -ne 0 ]; then
-  die_resolve "could not verify '${BRANCH}' on remote '${REMOTE}' (${URL}): ${LSERR:-git ls-remote exited ${LSRC}}" \
-    "${RESOLVE_FIX} If the remote is reachable, this is a transient read error — retry."
+  die_could_not_verify "could not verify '${BRANCH}' on remote '${REMOTE}' (${URL}): ${LSERR:-git ls-remote exited ${LSRC}}. This is NOT evidence the branch/sha is wrong." \
+    "check the read works by hand (\`git -C '${REPO}' ls-remote '${REMOTE}' refs/heads/${BRANCH}\`); if it is an auth/network error, retry or escalate to your admiral — never run a login/refresh."
 fi
 
 REMOTE_HEAD=$(printf '%s' "${LSOUT}" | head -1 | cut -f1)
