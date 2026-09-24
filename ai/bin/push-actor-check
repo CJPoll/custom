@@ -13,7 +13,12 @@
 # safe-wait rule).
 #
 # Reads only, on PLAIN gh/glab — the reads-stay-on-plain-CLI convention. It
-# never pushes, never mints a token, never touches auth.
+# never pushes, never mints a token, never runs a login/refresh. The repo/
+# branch resolution check (DND-451, below) also does a read-only `git
+# ls-remote` against the push remote, with GIT_TERMINAL_PROMPT=0 so a missing
+# credential fails fast instead of hanging on an interactive prompt — the same
+# ambient credentials a push from this repo already had, never a new auth
+# flow.
 #
 # Exit codes — the bad outcomes are distinct, because a failed read must
 # never look like an empty one (~/dev/custom/CLAUDE.md):
@@ -165,7 +170,7 @@ trap 'rm -f "${ERRF}"' EXIT
 # Query the SAME URL named in every resolution message (the push URL), not the
 # remote's fetch URL — a remote with a separate pushurl would otherwise verify
 # one and name the other.
-LSOUT=$("${GIT_BIN}" -C "${REPO}" ls-remote "${URL}" "refs/heads/${BRANCH}" 2>"${ERRF}")
+LSOUT=$(GIT_TERMINAL_PROMPT=0 "${GIT_BIN}" -C "${REPO}" ls-remote "${URL}" "refs/heads/${BRANCH}" 2>"${ERRF}")
 LSRC=$?
 LSERR=$(tr '\n' ' ' < "${ERRF}" | cut -c1-300)
 : > "${ERRF}"
@@ -174,12 +179,27 @@ if [ "${LSRC}" -eq 0 ] && [ -z "${LSOUT}" ]; then
   die_resolve "branch '${BRANCH}' not on remote '${REMOTE}' (${URL})" "${RESOLVE_FIX}"
 elif [ "${LSRC}" -ne 0 ]; then
   die_could_not_verify "could not verify '${BRANCH}' on remote '${REMOTE}' (${URL}): ${LSERR:-git ls-remote exited ${LSRC}}. This is NOT evidence the branch/sha is wrong." \
-    "check the read works by hand (\`git -C '${REPO}' ls-remote '${REMOTE}' refs/heads/${BRANCH}\`); if it is an auth/network error, retry or escalate to your admiral — never run a login/refresh."
+    "check the read works by hand (\`git -C '${REPO}' ls-remote '${URL}' refs/heads/${BRANCH}\`, the same push URL this check queried); if it is an auth/network error, retry or escalate to your admiral — never run a login/refresh."
 fi
 
-REMOTE_HEAD=$(printf '%s' "${LSOUT}" | head -1 | cut -f1)
-if [ "${REMOTE_HEAD}" != "${SHA}" ]; then
-  die_resolve "sha '${SHA}' is not the head of '${BRANCH}' on remote '${REMOTE}' (${URL}); remote head is '${REMOTE_HEAD}'" "${RESOLVE_FIX}"
+# `git ls-remote <url> <pattern>` matches any ref for which <pattern> is a
+# SUFFIX component, not only an exact ref — an oddly-named ref (e.g.
+# refs/heads/x/refs/heads/<branch>) could sort first. Take the line whose ref
+# column is the exact "refs/heads/<branch>", not just the first line.
+REMOTE_HEAD=$(printf '%s\n' "${LSOUT}" | awk -F'\t' -v r="refs/heads/${BRANCH}" '$2==r{print $1; exit}')
+if [ -z "${REMOTE_HEAD}" ]; then
+  # Non-empty output, but no line was an EXACT refs/heads/<branch> match —
+  # only suffix matches, if any. That is "not found", the same as empty
+  # output above, not a sha mismatch.
+  die_resolve "branch '${BRANCH}' not on remote '${REMOTE}' (${URL})" "${RESOLVE_FIX}"
+elif [ "${REMOTE_HEAD}" != "${SHA}" ]; then
+  # The branch WAS found on the resolved remote — unlike R1 (not found at
+  # all), this could be the right repo whose branch moved (a later push, a
+  # force-push, a merge) since <sha> was pushed, not only a wrong repo/cwd.
+  # Word the Fix: to cover both, so an agent isn't sent hunting for a --repo
+  # mistake that doesn't exist when the real cause is a stale --sha.
+  die_resolve "sha '${SHA}' is not the current head of '${BRANCH}' on remote '${REMOTE}' (${URL}); remote head is now '${REMOTE_HEAD}'" \
+    "the branch exists on '${REMOTE}' but its head has moved past '${SHA}' — either it moved after this push (a later push, force-push, or merge; re-run against the current head, \`git ls-remote '${REMOTE}' refs/heads/${BRANCH}\`), or '${REPO}' (cwd unless --repo was given) isn't the repo you pushed ${BRANCH} from — pass --repo <path> or cd there first."
 fi
 
 START=$(date +%s)

@@ -141,9 +141,10 @@ if it isn't the cwd (a stale cwd silently resolves the WRONG repo's `origin`
 otherwise, DND-412/DND-451) — and exits 0 (Athena), 1 (another author), 3
 (could not read the events API OR the repo/branch resolution check itself:
 not evidence either way), 4 (no event in the window) or 5 (the resolution
-check CONFIRMED the resolved repo/branch/sha don't match — wrong cwd or
-`--repo`, fix that and re-run; it never means the push failed). Handle a 1, a
-4, and a refusal by **athena:github** → *When a forge write can't be done as
+check CONFIRMED the resolved repo/branch/sha don't match — wrong cwd/`--repo`,
+OR the branch simply moved since this push (the tool's own `Fix:` line says
+which); it never means the push failed). Handle a 1, a 4, and a refusal by
+**athena:github** → *When a forge write can't be done as
 Athena*.
 
 ## Relationship to the fleet agents

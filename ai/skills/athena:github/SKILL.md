@@ -121,8 +121,9 @@ otherwise (DND-412/DND-451); `--help` for options). Its exits keep the
 outcomes apart: 0 Athena, 1 another actor, 3 could not read (the events API OR
 the repo/branch resolution check itself — not evidence either way), 4 no
 event in the window, 5 the resolution check CONFIRMED the resolved
-repo/branch/sha don't match (wrong cwd or `--repo` — fix that and re-run, it
-never means the push failed). A 1 or a 4 is the next section's case.
+repo/branch/sha don't match (wrong cwd/`--repo`, OR the branch simply moved
+since this push — the tool's own `Fix:` line says which; it never means the
+push failed). A 1 or a 4 is the next section's case.
 
 GitLab pushes go through `glab-athena git`: see **athena:gitlab** → *Pushing
 as Athena*.

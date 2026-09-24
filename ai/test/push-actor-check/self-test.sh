@@ -75,6 +75,7 @@ cat > "${TMP}/gitstub/bin" <<'EOF'
 #!/usr/bin/env bash
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mode="$(cat "${here}/mode" 2>/dev/null || echo "hit:0000000000000000000000000000000000000000")"
+printf '%s\n' "$*" >> "${here}/argv"
 refspec="${*: -1}"
 case "${mode}" in
   hit:*) printf '%s\t%s\n' "${mode#hit:}" "${refspec}"; exit 0 ;;
@@ -203,7 +204,8 @@ expect "R1b. carries Fix:" 5 'Fix:'
 reset_stub gh
 set_git_mode "hit:${OLD}"   # branch exists, but its remote head is a DIFFERENT sha
 run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
-expect "R2. sha is not the branch's remote head -> 5" 5 "is not the head of 'feat'"
+expect "R2. sha is not the branch's remote head -> 5" 5 "is not the current head of 'feat'"
+expect "R2c. Fix covers both a moved branch and a wrong repo, not only wrong-repo" 5 'moved after this push'
 expect "R2a. names both the given sha and the actual remote head" 5 "${SHA}"
 expect "R2a2. and the actual remote head sha" 5 "${OLD}"
 [ "$(reads gh)" = 0 ] && ok "R2b. never reads the events API" || bad "R2b. events API touched" "reads=$(reads gh)"
@@ -226,6 +228,16 @@ reset_stub gh; gh_event feat "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/respons
 set_git_mode "hit:${SHA}"
 run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
 expect "R4. resolution passes -> normal event read still runs -> 0" 0 'athena-harness[bot]'
+# The stub ignores its args when answering (mode is global), so a wrong
+# URL/refspec would still "pass" the checks above — assert the actual git
+# invocation separately: the PUSH url (not the bare remote name) and the
+# refs/heads/<branch> refspec, so a regression to the remote name (the
+# fetch-vs-push-url bug fixed in critic round 1) or a wrong ref would show up.
+if grep -qF 'git@github.com:o/r.git refs/heads/feat' "${TMP}/gitstub/argv"; then
+  ok "R4a. ls-remote is called with the push URL and refs/heads/<branch>"
+else
+  bad "R4a. ls-remote args" "$(cat "${TMP}/gitstub/argv" 2>/dev/null)"
+fi
 
 # --repo DIR: run from an unrelated cwd, point --repo at the pushed repo.
 reset_stub gh; gh_event feat "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
