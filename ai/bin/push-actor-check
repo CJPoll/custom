@@ -161,6 +161,12 @@ esac
 die_resolve() { printf 'push-actor-check: %s\nFix: %s\n' "$1" "$2" >&2; exit 5; }
 die_could_not_verify() { printf 'push-actor-check: %s\nFix: %s\n' "$1" "$2" >&2; exit 3; }
 RESOLVE_FIX="push-actor-check resolved remote '${REMOTE}' to ${URL} from repo '${REPO}' (cwd unless --repo was given). If that is not the repo you pushed ${BRANCH} from, pass --repo <path> or cd there first."
+# ONE command hint, reused everywhere a message suggests double-checking by
+# hand (Patch the class, not the site — three separate sites each drifted to
+# "git ls-remote <remote-name>" with no -C, asking the WRONG repo's remote
+# under a stale cwd, the exact DND-451 defect living inside the tool's own
+# guidance). Always the same repo, URL and branch this run resolved.
+LS_CMD_HINT="git -C '${REPO}' ls-remote '${URL}' refs/heads/${BRANCH}"
 
 GIT_BIN=${PUSH_ACTOR_CHECK_GIT:-git}
 # One tempfile for both this resolution read and the events-read loop below;
@@ -179,7 +185,7 @@ if [ "${LSRC}" -eq 0 ] && [ -z "${LSOUT}" ]; then
   die_resolve "branch '${BRANCH}' not on remote '${REMOTE}' (${URL})" "${RESOLVE_FIX}"
 elif [ "${LSRC}" -ne 0 ]; then
   die_could_not_verify "could not verify '${BRANCH}' on remote '${REMOTE}' (${URL}): ${LSERR:-git ls-remote exited ${LSRC}}. This is NOT evidence the branch/sha is wrong." \
-    "check the read works by hand (\`git -C '${REPO}' ls-remote '${URL}' refs/heads/${BRANCH}\`, the same push URL this check queried); if it is an auth/network error, retry or escalate to your admiral — never run a login/refresh."
+    "check the read works by hand (\`${LS_CMD_HINT}\`, the same push URL this check queried); if it is an auth/network error, retry or escalate to your admiral — never run a login/refresh."
 fi
 
 # `git ls-remote <url> <pattern>` matches any ref for which <pattern> is a
@@ -199,7 +205,7 @@ elif [ "${REMOTE_HEAD}" != "${SHA}" ]; then
   # Word the Fix: to cover both, so an agent isn't sent hunting for a --repo
   # mistake that doesn't exist when the real cause is a stale --sha.
   die_resolve "sha '${SHA}' is not the current head of '${BRANCH}' on remote '${REMOTE}' (${URL}); remote head is now '${REMOTE_HEAD}'" \
-    "the branch exists on '${REMOTE}' but its head has moved past '${SHA}' — either it moved after this push (a later push, force-push, or merge; re-run against the current head, \`git -C '${REPO}' ls-remote '${URL}' refs/heads/${BRANCH}\`, the same push URL this check queried), or '${REPO}' (cwd unless --repo was given) isn't the repo you pushed ${BRANCH} from — pass --repo <path> or cd there first."
+    "the branch exists on '${REMOTE}' but its head has moved past '${SHA}' — either it moved after this push (a later push, force-push, or merge; re-run against the current head, \`${LS_CMD_HINT}\`, the same push URL this check queried), or '${REPO}' (cwd unless --repo was given) isn't the repo you pushed ${BRANCH} from — pass --repo <path> or cd there first."
 fi
 
 START=$(date +%s)
@@ -233,6 +239,6 @@ if [ "${OK_READS}" -eq 0 ]; then
     "$([ "${FORGE}" = github ] && echo "gh api repos/${PATH_}/activity?per_page=3" || echo "glab api projects/${ENC}/events?action=pushed&per_page=5")" >&2
   exit 3
 fi
-printf 'push-actor-check: no event for %s %s on %s after %d read(s) over %ds.\nFix: confirm the push succeeded and the sha is the one pushed (git ls-remote %s refs/heads/%s). If it did, re-run with a longer --window; if the event never appears, treat the push as not verified as Athena and escalate to your admiral.\n' \
-  "${BRANCH}" "${SHA}" "${FORGE}" "${READS}" "${WINDOW}" "${REMOTE}" "${BRANCH}" >&2
+printf 'push-actor-check: no event for %s %s on %s after %d read(s) over %ds.\nFix: confirm the push succeeded and the sha is the one pushed (%s). If it did, re-run with a longer --window; if the event never appears, treat the push as not verified as Athena and escalate to your admiral.\n' \
+  "${BRANCH}" "${SHA}" "${FORGE}" "${READS}" "${WINDOW}" "${LS_CMD_HINT}" >&2
 exit 4

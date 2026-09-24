@@ -65,6 +65,7 @@ mkrepo() { git init -q "${TMP}/$1" && git -C "${TMP}/$1" remote add origin "$2";
 mkrepo repo_gh 'git@github.com:o/r.git'
 mkrepo repo_gl 'https://gitlab.com/g/sub/r.git'
 mkrepo repo_other 'git@example.com:o/r.git'
+mkdir -p "${TMP}/elsewhere"   # a plain, non-git cwd for the --repo / wrong-cwd tests
 
 # git ls-remote stub for the repo/branch resolution step (PUSH_ACTOR_CHECK_GIT).
 # Emulates: git -C <repo> ls-remote <remote> <refspec> — the LAST arg is the
@@ -168,6 +169,13 @@ expect "5. no event for ref+SHA within the window -> 4" 4 'no event'
 expect "5a. the miss names the ref and the SHA" 4 "feat ${SHA}"
 R=$(reads gh); if [ "${R}" -ge 2 ] && [ "${R}" -le 4 ]; then ok "5b. bounded re-reads (${R})"; else bad "5b. bounded re-reads" "reads=${R}"; fi
 
+# The exit-4 Fix: hint's double-check command must name the resolved --repo,
+# not the cwd's own git — run via --repo from an unrelated (non-git) cwd so a
+# hint naming the WRONG repo (no -C, or the cwd's git) would be caught.
+reset_stub gh; gh_event feat "${OLD}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
+run_at "${TMP}/elsewhere" --repo "${TMP}/repo_gh" --sha "${SHA}" --window 2 --interval 1 feat
+expect "5c. exit-4 hint's double-check command carries -C <the --repo path>" 4 "-C '${TMP}/repo_gh'"
+
 # GitHub: every read fails -> 3, never 4.
 reset_stub gh; printf 'HTTP 502\n' > "${TMP}/gh/responses/default"; printf '1' > "${TMP}/gh/responses/default.rc"
 run_in repo_gh --sha "${SHA}" --window 2 --interval 1 feat
@@ -262,7 +270,6 @@ fi
 
 # --repo DIR: run from an unrelated cwd, point --repo at the pushed repo.
 reset_stub gh; gh_event feat "${SHA}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
-mkdir -p "${TMP}/elsewhere"
 run_at "${TMP}/elsewhere" --repo "${TMP}/repo_gh" --sha "${SHA}" --window 5 --interval 1 feat
 expect "R5. --repo overrides cwd and resolves correctly -> 0" 0 'athena-harness[bot]'
 run_at "${TMP}/elsewhere" --sha "${SHA}" --window 5 --interval 1 feat
