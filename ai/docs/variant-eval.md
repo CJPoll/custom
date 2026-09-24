@@ -99,6 +99,17 @@ A flip **within** the envelope is never a regression and never an improvement.
 Deterministic cases use `N=1` and a 0-width envelope (an exact `1->0` is a
 regression).
 
+**Later (2026-09-24):** DND-225 characterized the noise band that the
+*Deferred* section below left open; see `ai/docs/eval-noise-band.md`. The fixed
+`Δ_noise = 0.3` envelope is no longer the whole T2 rule. `ai/lib/eval_score.rb`
+now classifies each T2 case from its counts: regression = the Newcombe 95%
+interval for `p_var - p_base` lies below 0 **or** the pilot envelope fires;
+improvement = the interval lies above 0 **and** the pilot envelope fires. A
+case measured on one side only is n/a (`:new`) or fails closed (`:missing`); it
+is no longer scored against a coerced `0.0`. A T2 A/B delta is comparable only
+when both refs are at or after `35be30f` (DND-503, each side evaluates its own
+render), with each side's subject sha recorded in the proposal.
+
 ## Safety (structural, self-test-asserted)
 
 variant-eval is security-relevant (a self-modifying-harness-adjacent tool), so

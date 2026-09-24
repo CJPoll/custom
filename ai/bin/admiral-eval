@@ -92,6 +92,7 @@ require "tmpdir"
 require "time"
 
 AI_DIR       = File.expand_path("..", __dir__)
+require File.join(AI_DIR, "lib", "eval_score")
 FIXTURES_DIR = File.join(AI_DIR, "eval", "admiral-fixtures")
 BASELINE     = File.join(AI_DIR, "eval", "admiral-baseline.json")
 HOOKS_DIR    = File.join(AI_DIR, "hooks")
@@ -600,7 +601,8 @@ def evaluate(dir, runs:, argv:)
     # answer_field) must FAIL loudly, not pass vacuously on empty output.
     config_errs = validate_case(meta)
     unless config_errs.empty?
-      return { name: name, mode: mode, pass: false, rate: "0/#{runs}",
+      # Nothing was sampled, so the rate is 0/0 (n/a), not 0/K (DND-225).
+      return { name: name, mode: mode, pass: false, rate: "0/0",
                detail: "invalid case config: #{config_errs.join('; ')}" }
     end
     scenario = File.read(File.join(dir, "scenario.md"))
@@ -734,6 +736,41 @@ def diff_baseline(results, baseline)
   0
 end
 
+# ---------------------------------------------------------------------------
+# Numeric score (DND-225). Each sampled (T2) case scores its pass-rate k/n with
+# a Wilson 95% interval; the aggregate is the mean per-case pass-rate over the
+# SAMPLED cases. T1 cases are deterministic (zero run-to-run variance, measured)
+# and reported apart. A case that sampled nothing (0/0) is n/a, never 0. The
+# aggregate is comparable across runs ONLY at the same corpus fingerprint and
+# the same admiral sha. Method, measured band, and the delta rule:
+# ai/docs/eval-noise-band.md.
+# ---------------------------------------------------------------------------
+def score_lines(results, corpus_id)
+  sampled = results.reject { |r| r[:mode] == "hook-stdin" }
+  t1 = results.select { |r| r[:mode] == "hook-stdin" }
+  counts = sampled.map { |r| EvalScore.parse_rate(r[:rate]) }
+  agg = EvalScore.aggregate(counts)
+  head = agg[:score] ? format("%.2f", agg[:score]) : "n/a"
+  lines = ["score (pass-rate, Wilson 95%): aggregate #{head} over #{agg[:measured]} sampled case(s), " \
+           "n/a: #{agg[:n_a]}; T1 deterministic: #{t1.count { |r| r[:pass] }}/#{t1.size} pass; corpus #{corpus_id}"]
+  sampled.zip(counts).each do |r, c|
+    lines << format("  %-34s %s", r[:name], EvalScore.format_score(EvalScore.case_score(c)))
+  end
+  lines
+end
+
+# sha256 over every fixture file under the selected fixture dirs (path + bytes),
+# first 12 hex. Two aggregates are comparable only when this matches.
+def corpus_fingerprint(dirs)
+  digest = Digest::SHA256.new
+  dirs.sort.each do |d|
+    Dir.glob(File.join(d, "**", "*")).sort.select { |f| File.file?(f) }.each do |f|
+      digest << relpath(f) << "\0" << File.binread(f) << "\0"
+    end
+  end
+  digest.hexdigest[0, 12]
+end
+
 def run_model(runs:, only:, update:, agent_file: AGENT_FILE)
   dirs = fixtures
   dirs = dirs.select { |d| File.basename(d).start_with?(only) } if only
@@ -756,6 +793,7 @@ def run_model(runs:, only:, update:, agent_file: AGENT_FILE)
     printf("%-4s %-34s %-6s [%s] %s\n", r[:pass] ? "PASS" : "FAIL", r[:name], r[:rate], r[:mode], r[:detail])
   end
   puts "admiral-eval: #{results.count { |r| r[:pass] }}/#{results.size} cases pass (runs/T2 case = #{runs})"
+  score_lines(results, corpus_fingerprint(dirs)).each { |l| puts l }
 
   if update
     FileUtils.mkdir_p(File.dirname(BASELINE))
@@ -1148,6 +1186,37 @@ def self_test
     fail.("an over-size --agent-file must be a resolution error with a Fix:") \
       unless path.nil? && err.to_s.include?("Fix:") && err.to_s.include?("single-argument limit")
   end
+
+  # -- DND-225: numeric score ----------------------------------------------
+  # (a) regression: an invalid case config samples NOTHING (no model call), so
+  # its rate is 0/0 (n/a), never "0/K" — which read as K measured failures and
+  # dragged the numeric score down with a config error.
+  Dir.mktmpdir("admiral-eval-selftest-cfg-") do |d|
+    fx = File.join(d, "AE-99-vacuous")
+    FileUtils.mkdir_p(fx)
+    File.write(File.join(fx, "meta"), "mode = next-action\ninvariant = asserts nothing\n")
+    File.write(File.join(fx, "scenario.md"), "x\n")
+    r = evaluate(fx, runs: 3, argv: ["claude-must-not-run"])
+    fail.("an invalid case config must rate 0/0 (n/a), got #{r[:rate].inspect}") unless r[:rate] == "0/0"
+    fail.("an invalid case config must still FAIL") if r[:pass]
+  end
+  # (b) the score block: aggregate over SAMPLED (T2) cases only; a T1 case is
+  # deterministic and reported apart; a 0/0 case is n/a and never a 0.
+  sb = score_lines([
+    { name: "AE-01-a", mode: "next-action", pass: true, rate: "20/20" },
+    { name: "AE-02-b", mode: "next-action", pass: true, rate: "10/20" },
+    { name: "AE-13a-t1", mode: "hook-stdin", pass: true, rate: "1/1" },
+    { name: "AE-99-bad", mode: "next-action", pass: false, rate: "0/0" }
+  ], "abc123def456").join("\n")
+  fail.("score block must print the T2 aggregate 0.75 over 2 sampled cases, got:\n#{sb}") \
+    unless sb.include?("aggregate 0.75 over 2 sampled case(s)")
+  fail.("score block must count the 0/0 case as n/a") unless sb.include?("n/a: 1")
+  fail.("score block must render the 0/0 case as n/a") unless sb.match?(/AE-99-bad\s+n\/a/)
+  fail.("score block must print a Wilson interval per sampled case") unless sb.include?("0.50 [0.30,0.70] (10/20)")
+  fail.("score block must report T1 cases apart, as deterministic") unless sb.include?("T1 deterministic: 1/1 pass")
+  fail.("score block must name the corpus fingerprint") unless sb.include?("corpus abc123def456")
+  none = score_lines([{ name: "AE-99-bad", mode: "next-action", pass: false, rate: "0/0" }], "x").join("\n")
+  fail.("with nothing sampled the aggregate must read n/a, never 0") unless none.include?("aggregate n/a")
 
   if ok
     puts "admiral-eval: self-test OK"

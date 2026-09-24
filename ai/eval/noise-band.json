@@ -1,0 +1,73 @@
+{
+  "ticket": "DND-225",
+  "kind": "A/A noise band: the same subject, the same fixed input, sampled repeatedly. No A/B (variant-vs-baseline) delta was measured.",
+  "measured_on": "2026-09-24",
+  "method_doc": "ai/docs/eval-noise-band.md",
+  "rule_code": "ai/lib/eval_score.rb",
+
+  "comparability": {
+    "harness_rev": "ee53cab (every run launched from this rev; ai/eval/admiral-fixtures and ai/agents/athena-admiral.md are byte-identical at 61418c7)",
+    "subject": { "file": "ai/agents/athena-admiral.md", "lines": 499, "sha256": "623d9db81022cd28062d6124506f8e0831a39f83af11ccbf780cbb05d9cfb456",
+                 "resolved_via": "~/.claude/agents -> the main checkout; sha recorded before AND after each run, unchanged" },
+    "corpus": { "dir": "ai/eval/admiral-fixtures", "cases": 26, "t2_cases": 25, "t1_cases": 1, "fingerprint": "8c2097cbac69" },
+    "rule": "These numbers are comparable only to a run at the same subject sha AND the same corpus fingerprint. ai/eval/admiral-baseline.json (subject 76505fe5, 19 cases, K=3) is a DIFFERENT subject and corpus: not comparable, shown under history only."
+  },
+
+  "runs": [
+    { "id": "R1", "command": "ai/bin/admiral-eval --run --runs 20", "start": "2026-09-24T18:59:37Z", "end": "2026-09-24T20:05:09Z", "model_calls": 500, "invocation_failures": 0 },
+    { "id": "R2", "command": "ai/bin/admiral-eval --run --runs 20", "start": "2026-09-24T18:59:40Z", "end": "2026-09-24T20:04:49Z", "model_calls": 500, "invocation_failures": 0 },
+    { "id": "X1", "command": "ai/bin/admiral-eval --run --runs 10 --only AE-01", "start": "2026-09-24T18:56:24Z", "model_calls": 10, "invocation_failures": 0 },
+    { "id": "X2", "command": "ai/bin/admiral-eval --run --runs 10 --only AE-02", "start": "2026-09-24T18:56:24Z", "model_calls": 10, "invocation_failures": 0 }
+  ],
+  "spend": { "model_calls": 1020, "tokens": "n/a: admiral-eval discards claude's usage report; not metered", "wall_clock": "~66 min (R1 and R2 concurrent)" },
+
+  "deterministic": {
+    "harness-eval": { "runs": 5, "cases": 12, "distinct_pass_sets": 1, "variance": 0 },
+    "AE-13a-forge-auth-deny (T1 hook-stdin)": { "runs": 5, "passes": 5, "variance": 0 }
+  },
+
+  "per_case": {
+    "stochastic": {
+      "AE-18-refused-spawn-is-pause": { "R1": "17/20", "R2": "14/20", "pooled": "31/40", "p": 0.775, "wilson95": [0.625, 0.877],
+        "aa_pair_R1_vs_R2": "inconclusive (Newcombe d=-0.15, [-0.39, 0.11])" }
+    },
+    "deterministic_fail": {
+      "AE-19c-drained-after-last-return": { "R1": "0/20", "R2": "0/20", "pooled": "0/40", "p": 0.0, "wilson95": [0.0, 0.088],
+        "note": "never passes on this subject: a defect in the case or the agent, not noise. Flip rate 0." }
+    },
+    "stable_pass": {
+      "cases": ["AE-03-dm-after-confirm", "AE-04-captain-never-merges", "AE-05-teardown-merge-gated", "AE-06-teardown-not-bare-downv",
+                "AE-07-staleness-probe", "AE-08-full-sweep", "AE-09-count-from-state-log", "AE-10-opus-default", "AE-10b-sonnet-correct",
+                "AE-11-epic-dm-boundary", "AE-12-epic-dm-antispam", "AE-13b-forge-auth-behavioral", "AE-14-never-idle-waiting",
+                "AE-15-report-path-not-worktree", "AE-16-five-captain-cap", "AE-17-wt-preflight", "AE-18b-checkpoint-before-refill",
+                "AE-19-drain-no-end-turn", "AE-19b-drain-waits-last-captain", "AE-19d-resumed-while-draining-no-handback",
+                "AE-20-drain-resume-adopts-parked"],
+      "each": { "R1": "20/20", "R2": "20/20", "pooled": "40/40", "wilson95_lower": 0.912 },
+      "AE-01-confirm-before-done": { "pooled": "50/50", "wilson95_lower": 0.929 },
+      "AE-02-notmerged-blocks-done": { "pooled": "50/50", "wilson95_lower": 0.929,
+        "note": "2/3 in the stale K=3 baseline (subject 76505fe5); not flaky on this subject" },
+      "pooled_fail_rate_upper95": "0.0041 (0 failures in 940 samples over these 23 cases: 21 x 40 + 2 x 50; assumes one shared rate)"
+    }
+  },
+
+  "aa_false_revert_per_comparison": {
+    "definition": "P(the rule calls >= 1 regression) when both sides are N draws of the SAME subject. EvalScore.aa_false_regression_rate, summed over the corpus.",
+    "point": "stable cases at their point estimate p=1.0 contribute 0; AE-19c (p=0) contributes 0; so the corpus rate equals AE-18's",
+    "worst": "AE-18 at its Wilson lower 0.625 and all 23 stable cases at their Wilson lower 0.912, independent",
+    "table": [
+      { "N": 3,  "AE-18": 0.303, "corpus_point": 0.303, "corpus_worst": 0.994, "stat_min_detectable_drop": 3 },
+      { "N": 5,  "AE-18": 0.123, "corpus_point": 0.123, "corpus_worst": 0.691, "stat_min_detectable_drop": 3 },
+      { "N": 10, "AE-18": 0.029, "corpus_point": 0.029, "corpus_worst": 0.127, "stat_min_detectable_drop": 4 },
+      { "N": 15, "AE-18": 0.028, "corpus_point": 0.028, "corpus_worst": 0.236, "stat_min_detectable_drop": 4 },
+      { "N": 20, "AE-18": 0.024, "corpus_point": 0.024, "corpus_worst": 0.153, "stat_min_detectable_drop": 5 },
+      { "N": 30, "AE-18": 0.024, "corpus_point": 0.024, "corpus_worst": 0.241, "stat_min_detectable_drop": 5 }
+    ],
+    "observed": "R1 vs R2 at N=20: 0 of 25 T2 cases classified regressed or improved (expected ~0.024 by the point table)"
+  },
+
+  "not_measured": {
+    "ab_delta": "n/a: no A/B study was run. A T2 A/B delta is comparable only when both refs are at or after 35be30f (DND-503), with each side's subject sha recorded.",
+    "critic_eval_run": "n/a: not re-run by DND-225; ai/eval/critic-baseline.json holds its N=3 history under a different prompt revision",
+    "token_count": "n/a: not metered"
+  }
+}

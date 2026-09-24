@@ -42,13 +42,19 @@
 #       * every admiral-eval T1 hook-stdin case (mode=hook-stdin)
 #     Delta = EXACT pass-set diff (regressed / fixed / new), no sampling, no band.
 #   full — additionally the admiral-eval T2 model-in-loop cases, characterized:
-#     run baseline ref N times for a per-case pass-fraction p_base, variant N
-#     times for p_var; a fixed envelope Δ_noise separates real delta from noise.
-#     Regression iff p_base - p_var > Δ_noise; improvement iff p_var - p_base >
-#     Δ_noise; otherwise INCONCLUSIVE. A flip within the envelope is NEVER a
-#     regression and NEVER an improvement. Each side evaluates ITS OWN rendered
-#     admiral (admiral-eval --agent-file <wt>/ai/agents/athena-admiral.md; see
-#     t2_argv), never the main checkout's copy that ~/.claude/agents resolves.
+#     run baseline ref N times for per-case counts k_base/N, variant N times for
+#     k_var/N, and classify each case with the DND-225 noise-threshold rule
+#     (ai/lib/eval_score.rb, measured in ai/docs/eval-noise-band.md):
+#     regression iff the Newcombe 95% interval for p_var - p_base lies below 0
+#     OR p_base - p_var > Δ_noise (the DND-174 pilot envelope); improvement iff
+#     the interval lies above 0 AND p_var - p_base > Δ_noise; otherwise
+#     INCONCLUSIVE. A case measured on one side only is n/a (new) or fails
+#     closed (missing) — never scored against a coerced 0.
+#     Each side evaluates ITS OWN rendered admiral (admiral-eval --agent-file
+#     <wt>/ai/agents/athena-admiral.md; see t2_argv), never the main checkout's
+#     copy that ~/.claude/agents resolves. A T2 A/B delta is comparable only
+#     when both refs are at or after 35be30f (DND-503), with each side's
+#     subject sha recorded in the proposal.
 #
 # Before any delta the variant ref is run through the standing gate
 # (ai/bin/harness-gate: harness-eval + check-* guards + every --self-test). A red
@@ -84,6 +90,7 @@ require "tmpdir"
 require "time"
 
 AI_DIR              = File.expand_path("..", __dir__)
+require File.join(AI_DIR, "lib", "eval_score")
 ADMIRAL_FIXTURES    = File.join("ai", "eval", "admiral-fixtures")
 SCORECARD_REL       = File.join("ai", "eval", "scorecard.json")
 # The rendered admiral each side's T2 run evaluates (DND-503): the worktree's
@@ -92,14 +99,11 @@ ADMIRAL_AGENT_REL   = File.join("ai", "agents", "athena-admiral.md")
 
 DEFAULT_BASELINE    = "origin/main"
 DEFAULT_RUNS        = 10        # T2 characterization depth for the pilot
-DELTA_NOISE         = 0.3       # fixed envelope: |p_base - p_var| must exceed this
-# Float tolerance for the envelope comparison. With N=10 the reachable fractions
-# are k/10, and some differences that are exactly Δ_noise in rational terms
-# evaluate ABOVE it in float (e.g. 0.9 - 0.6 == 0.30000000000000004). Requiring
-# the difference to exceed the envelope by more than EPS keeps a flip of EXACTLY
-# Δ_noise classified as INCONCLUSIVE, as documented (never a false KEEP/REVERT on
-# what the design calls sampling noise).
-ENVELOPE_EPS        = 1e-9
+# The pilot envelope and its float tolerance live in ai/lib/eval_score.rb
+# (DND-225), the one home of the noise-threshold rule; these names are kept so
+# the proposal text and the self-test read unchanged.
+DELTA_NOISE         = EvalScore::PILOT_ENVELOPE   # |p_base - p_var| must exceed this
+ENVELOPE_EPS        = EvalScore::ENVELOPE_EPS
 
 KEEP_LABEL = "KEEP — pending human gate (requires gate-green + explicit human adoption; variant-eval NEVER adopts)"
 
@@ -206,19 +210,14 @@ def deterministic_diff(base_set, var_set)
   { regressed: regressed.sort, fixed: fixed.sort, new: new_cases.sort }
 end
 
-# Classify a T2 (or any sampled) case's flip against the envelope.
+# The DND-174 pilot envelope rule, alone (now EvalScore.pilot_flip):
 #   :regressed  iff p_base - p_var > envelope
 #   :improved   iff p_var - p_base > envelope
 #   :inconclusive otherwise (any flip WITHIN the envelope)
-# Deterministic cases use N=1 and a 0-width envelope, so an exact 1->0 flip is
-# :regressed and 0->1 is :improved.
+# T2 rows no longer use it alone: t2_rows applies EvalScore.classify, which
+# ORs it with the statistical rule for regressions and ANDs it for improvements.
 def classify_flip(p_base, p_var, envelope = DELTA_NOISE)
-  # Exceed the envelope by more than EPS so a flip of EXACTLY Δ_noise (and its
-  # float-fuzz neighbours) stays INCONCLUSIVE rather than a false KEEP/REVERT.
-  return :regressed if (p_base - p_var) - envelope > ENVELOPE_EPS
-  return :improved  if (p_var - p_base) - envelope > ENVELOPE_EPS
-
-  :inconclusive
+  EvalScore.pilot_flip(p_base, p_var, envelope)
 end
 
 # Pure verdict from gate status + the set of regressions and improvements.
@@ -268,7 +267,8 @@ def render_proposal(res)
   end
   if res[:corpus] == "full"
     lines << ""
-    lines << "T2 corpus (characterized, envelope Δ_noise=#{DELTA_NOISE}):"
+    lines << "T2 corpus (pass-rate, Wilson 95%; regression = Newcombe interval excludes 0 OR " \
+             "|Δp| > #{DELTA_NOISE}; improvement = both):"
     if (subj = res[:t2_subjects])
       b = subj[:base]
       v = subj[:var]
@@ -279,14 +279,16 @@ def render_proposal(res)
                  "below is sampling noise by construction."
       end
     end
+    lines << "  A/B comparability: only when both refs are at or after 35be30f (DND-503), with each side's " \
+             "subject sha recorded; an unrecorded side is n/a."
     if un && res[:t2].nil?
       lines << "  T2 NOT MEASURED — the #{un[:side]} side's #{un[:part]} run could not be measured (see VERDICT)."
     elsif (res[:t2] || []).empty?
       lines << "  (no T2 cases evaluated)"
     else
       res[:t2].each do |c|
-        lines << format("  %-34s p_base=%.2f p_var=%.2f -> %s",
-                        c[:name], c[:p_base], c[:p_var], c[:flip].to_s.upcase)
+        lines << format("  %-34s base=%s var=%s -> %s", c[:name], EvalScore.format_score(c[:base]),
+                        EvalScore.format_score(c[:var]), c[:flip].to_s.upcase)
       end
     end
   end
@@ -312,8 +314,9 @@ def render_proposal(res)
     lines << "  This is a PROPOSAL only. variant-eval performs NO merge/commit/push/adopt. A human adopts the " \
              "variant by merging it AFTER the standing gate is green."
   when :inconclusive
-    lines << "VERDICT: INCONCLUSIVE — no improvement claim. Zero regressions, but no case improves beyond the envelope."
-    lines << "  (Any T2 flip within Δ_noise=#{DELTA_NOISE} is sampling noise, not a measured delta.)"
+    lines << "VERDICT: INCONCLUSIVE — no improvement claim. Zero regressions, but no case improves beyond the noise band."
+    lines << "  (A T2 flip whose Newcombe 95% interval includes 0, or within Δ_noise=#{DELTA_NOISE}, is sampling " \
+             "noise, not a measured delta. See ai/docs/eval-noise-band.md.)"
   end
 
   lines.join("\n") + "\n"
@@ -502,7 +505,8 @@ T1_MODE = "hook-stdin"
 
 # Characterize the T2 model-in-loop cases in a worktree by running
 # admiral-eval --run --runs N --agent-file <wt's render> and parsing its
-# per-case rate column. Returns { case_name => pass_fraction }.
+# per-case rate column. Returns { case_name => EvalScore::Counts } (DND-225:
+# counts, not fractions, so the noise-threshold rule can size each interval).
 #
 # A run that did not MEASURE raises Unmeasured (DND-504) instead of returning
 # {} — which rendered as "(no T2 cases evaluated)" and let the deterministic
@@ -511,7 +515,7 @@ T1_MODE = "hook-stdin"
 # present and agrees with the rows, at least one T2 row parsed, and no model
 # call failed (a failed call scores as a FAIL sample, so p would be the auth
 # outage, not the admiral).
-def collect_t2_fractions(wt, runs, subject, side)
+def collect_t2_counts(wt, runs, subject, side)
   out, err, st = capture(t2_argv(wt, runs), chdir: wt)
   unless st&.exited? && [0, 1].include?(st.exitstatus)
     raise_t2_unmeasured(side, "admiral-eval #{exit_phrase(st)}#{stderr_tail(err)}")
@@ -522,7 +526,7 @@ def collect_t2_fractions(wt, runs, subject, side)
   problem = t2_run_problem(out, err, rows)
   raise_t2_unmeasured(side, "#{problem} (admiral-eval #{exit_phrase(st)})") if problem
 
-  rows.to_h { |r| [r[:name], r[:fraction]] }
+  rows.to_h { |r| [r[:name], r[:counts]] }
 end
 
 # Every "PASS|FAIL <name> <passes>/<samples> [<mode>] ..." row. A row with 0
@@ -533,7 +537,8 @@ def parse_t2_rows(out)
     next unless m
 
     samples = m[3].to_i
-    { name: m[1], fraction: samples.positive? ? m[2].to_f / samples : nil, mode: m[4] }
+    counts = samples.positive? ? EvalScore.counts(m[2].to_i, samples) : nil
+    { name: m[1], fraction: counts && counts.k.to_f / counts.n, counts: counts, mode: m[4] }
   end
 end
 
@@ -566,6 +571,25 @@ def raise_t2_unmeasured(side, why)
                        "the #{side} side's T2 run did not measure: #{why}. Fix: run " \
                        "`#{t2_argv('<wt>', 1).join(' ')}` in the #{side} ref to see why (model auth, a crash, " \
                        "no T2 fixtures), fix it, and re-run; or use --corpus deterministic, which claims no T2.")
+end
+
+# Pure: per-case T2 rows + the regressions/improvements they contribute, under
+# the DND-225 noise-threshold rule (EvalScore.classify): regression = Newcombe
+# interval excludes 0 OR the pilot envelope; improvement = both; a side that
+# was not measured is n/a (:new) or fails closed (:missing), never a 0.
+def t2_rows(base_counts, var_counts)
+  rows = []
+  regressions = []
+  improvements = []
+  (base_counts.keys | var_counts.keys).sort.each do |name|
+    base = base_counts[name]
+    var = var_counts[name]
+    flip = EvalScore.classify(base, var)
+    rows << { name: name, base: EvalScore.case_score(base), var: EvalScore.case_score(var), flip: flip }
+    regressions << "t2:#{name}"  if EvalScore.regression?(flip)
+    improvements << "t2:#{name}" if flip == :improved
+  end
+  { rows: rows, regressions: regressions, improvements: improvements }
 end
 
 def measure(variant:, baseline:, corpus:, runs:, out_file:)
@@ -607,16 +631,11 @@ def measure_sides(res, variant:, baseline:, corpus:, runs:)
 
       if corpus == "full"
         res[:t2_subjects] = { base: t2_subject(base_wt), var: t2_subject(var_wt) }
-        p_base = collect_t2_fractions(base_wt, runs, res[:t2_subjects][:base], "baseline")
-        p_var  = collect_t2_fractions(var_wt, runs, res[:t2_subjects][:var], "variant")
-        (p_base.keys | p_var.keys).sort.each do |name|
-          pb = p_base[name] || 0.0
-          pv = p_var[name] || 0.0
-          flip = classify_flip(pb, pv)
-          t2 << { name: name, p_base: pb, p_var: pv, flip: flip }
-          regressions << "t2:#{name}"  if flip == :regressed
-          improvements << "t2:#{name}" if flip == :improved
-        end
+        t2_out = t2_rows(collect_t2_counts(base_wt, runs, res[:t2_subjects][:base], "baseline"),
+                         collect_t2_counts(var_wt, runs, res[:t2_subjects][:var], "variant"))
+        t2 = t2_out[:rows]
+        regressions.concat(t2_out[:regressions])
+        improvements.concat(t2_out[:improvements])
       end
 
       res[:t2] = t2
@@ -686,6 +705,39 @@ def self_test
   # a within-envelope T2 flip contributes INCONCLUSIVE: no regression/improvement
   vc = verdict(gate_ok: true, regressions: [], improvements: [])
   fail.("no regression + no improvement must verdict INCONCLUSIVE (got #{vc})") unless vc == :inconclusive
+
+  # (g) DND-225 regression: a T2 case present only in the variant has no
+  # baseline measurement. It is n/a (:new), never scored against a coerced 0.0
+  # (which made any new case an "improvement" and could alone yield a KEEP).
+  c = EvalScore::Counts
+  new_only = t2_rows({}, { "AE-new" => c.new(10, 10) })
+  fail.("a variant-only T2 case must NOT be an improvement (got #{new_only[:improvements].inspect})") \
+    unless new_only[:improvements].empty?
+  fail.("a variant-only T2 case must classify :new (n/a)") \
+    unless new_only[:rows].map { |r| r[:flip] } == [:new]
+  # A case measured on the baseline but absent from the variant fails CLOSED.
+  gone = t2_rows({ "AE-gone" => c.new(10, 10) }, {})
+  fail.("a T2 case missing from the variant must count as a regression") \
+    unless gone[:regressions] == ["t2:AE-gone"]
+  # (i) the statistical rule is wired: a drop the pilot envelope misses but the
+  # Newcombe interval excludes 0 on is a regression (never less sensitive) ...
+  stat_reg = t2_rows({ "a" => c.new(30, 30) }, { "a" => c.new(24, 30) })
+  fail.("30/30 -> 24/30 must be a T2 regression via the statistical rule") \
+    unless stat_reg[:regressions] == ["t2:a"]
+  # ... and an improvement needs BOTH rules (a KEEP only gets harder).
+  hard_keep = t2_rows({ "a" => c.new(5, 10) }, { "a" => c.new(9, 10) })
+  fail.("5/10 -> 9/10 must NOT be an improvement (interval includes 0)") unless hard_keep[:improvements].empty?
+  # (j) the full-corpus proposal renders an unmeasured side as n/a (never 0.00)
+  # and states that A/B comparability is blocked on DND-503.
+  full_out = render_proposal({
+    variant: "cand", baseline: "origin/main", corpus: "full", gate_ok: true, verdict: :inconclusive,
+    deterministic: { regressed: [], fixed: [], new: [] }, t2: new_only[:rows],
+    regressions: [], improvements: []
+  })
+  fail.("a variant-only T2 row must render base=n/a") unless full_out.include?("base=n/a")
+  fail.("a variant-only T2 row must not render a 0.00 base") if full_out.include?("base=0.00")
+  fail.("the full proposal must state when an A/B delta is comparable (DND-503, 35be30f)") \
+    unless full_out.include?("at or after 35be30f (DND-503)")
 
   # (d) no KEEP output contains an adopt/commit/merge COMMAND token
   keep_res = {
@@ -791,13 +843,13 @@ def self_test
         fail.("#{label}: the refusal must carry a Fix:") unless e.message.include?("Fix:")
       end
     end
-    fail.("collect_t2_fractions must confirm the evaluated subject") \
-      unless File.read(__FILE__)[/^def collect_t2_fractions.*?^end$/m].to_s.include?("confirm_t2_subject!(")
+    fail.("collect_t2_counts must confirm the evaluated subject") \
+      unless File.read(__FILE__)[/^def collect_t2_counts.*?^end$/m].to_s.include?("confirm_t2_subject!(")
 
     # The measurement path must actually USE t2_argv: a correct t2_argv that the
     # runner bypasses would leave both sides on the main checkout's admiral.
-    runner = File.read(__FILE__)[/^def collect_t2_fractions.*?^end$/m].to_s
-    fail.("collect_t2_fractions must run admiral-eval via capture(t2_argv(...))") \
+    runner = File.read(__FILE__)[/^def collect_t2_counts.*?^end$/m].to_s
+    fail.("collect_t2_counts must run admiral-eval via capture(t2_argv(...))") \
       unless runner.include?("capture(t2_argv(wt, runs)")
   end
 
@@ -846,7 +898,7 @@ def self_test
       File.write(stub, "#!/bin/sh\nSUBJECT='#{line}'\n#{body.join("\n")}\n")
       File.chmod(0o755, stub)
       begin
-        got = collect_t2_fractions(wt, 3, subj, "variant")
+        got = collect_t2_counts(wt, 3, subj, "variant")
         fail.("#{label}: an unmeasured T2 run must raise, never read as T2 fractions (got #{got.inspect})")
       rescue StandardError => e
         if !defined?(Unmeasured) || !e.is_a?(Unmeasured)
@@ -873,9 +925,9 @@ def self_test
     File.write(stub, "#!/bin/sh\necho '#{line}'\necho '#{row_t2}'\necho '#{row_t1}'\necho '#{summary2}'\nexit 1\n")
     File.chmod(0o755, stub)
     begin
-      got = collect_t2_fractions(wt, 3, subj, "baseline")
-      fail.("a completed run must yield its T2 fraction (got #{got.inspect})") \
-        unless got["AE-01-confirm-before-done"] == 1.0
+      got = collect_t2_counts(wt, 3, subj, "baseline")
+      fail.("a completed run must yield its T2 counts (got #{got.inspect})") \
+        unless got["AE-01-confirm-before-done"] == EvalScore::Counts.new(3, 3)
     rescue StandardError => e
       fail.("a completed admiral-eval run (exit 1 = its regression verdict) must be a measurement, not " \
             "raise #{e.class}: #{e.message[0, 200]}")
