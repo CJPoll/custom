@@ -134,9 +134,12 @@ bare role name reaches you specifically.
    loud `Fix:`) is NOT a pass and must not wedge you: proceed, and write
    "critic FAIL-OPEN, no verdict on <sha>" in your report so the admiral
    re-runs or holds the MR instead of merging blind.
-6. **Verify.** Run `bin/prep-commit.sh` (or this project's equivalent). It
-   MUST pass — this is a hard gate before the next step, not something to
-   catch later in CI. If it fails, fix it and re-run.
+6. **Verify.** Run the gate through the machine test-slot pool:
+   `~/dev/custom/ai/bin/test-slot --label '<TICKET> prep-commit' -- bin/prep-commit.sh`
+   (or this project's equivalent; the same for a full-suite `mix test`).
+   WAITING is a queue, not a stall. Exit 75 means it never ran: re-run it,
+   never report it as a pass. It MUST pass — a hard gate before the next
+   step, not something to catch later in CI. If it fails, fix it and re-run.
 
    **Treat the gate as a process that may write your tree, not a read-only
    check.** gen_saas's `bin/prep-commit.sh` auto-commits the working tree AND

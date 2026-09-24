@@ -33,11 +33,12 @@ SINCE=""
 CRITIC_OVERRIDE=""
 OVERRIDE_STATE=""
 OWNER_APPROVAL=""
+SLOT_WAIT=""
 
 usage() {
   cat <<'EOF'
 Usage: integration-gate [--target <ref>] [--since <ref>] [--gate '<cmd>']
-                        [--no-fetch] [--self-test]
+                        [--no-fetch] [--slot-wait-timeout <secs>] [--self-test]
 
 Asserts that HEAD contains the current target ref AND that the local gate is
 green on that integrated head. Exits 0 only when both hold.
@@ -62,6 +63,11 @@ green on that integrated head. Exits 0 only when both hold.
                    from, and marks it EDITED BY THIS BRANCH when the branch
                    changes the gate script itself.
   --no-fetch       skip the fetch; compare against the target ref as-is
+  --slot-wait-timeout <secs>
+                   the gate runs inside the machine's heavy-test slot pool
+                   (~/dev/custom/ai/bin/test-slot, beside this script); give up
+                   waiting for a slot after <secs> (default: test-slot's own).
+                   A give-up is exit 5, GATE NOT RUN -- never OK, never RED.
   --critic-override <reason>
                    merge WITHOUT a standing-judge verdict on this head -- and
                    ONLY that: the receipt is read first either way, and a
@@ -88,6 +94,7 @@ Exit codes: 0 integration OK | 1 gate RED on the integrated head
             4 merging performs a real-world action -- owner's call, not the
               fleet's (a security fix carries the owner's standing approval;
               see --owner-approval)
+            5 gate NOT RUN (no machine test slot; re-run)
 EOF
 }
 
@@ -97,6 +104,7 @@ while [ $# -gt 0 ]; do
     --since)  SINCE="${2-}"; [ -n "$SINCE" ] || { echo "${PROG}: --since needs a ref." >&2; echo "Fix: pass the target SHA your branch was last gated against, e.g. --since 2e0eff3." >&2; exit 2; }; shift 2 ;;
     --gate)   GATE_CMD="${2-}"; [ -n "$GATE_CMD" ] || { echo "${PROG}: --gate needs a command." >&2; echo "Fix: pass a command, e.g. --gate 'ai/bin/harness-gate'." >&2; exit 2; }; shift 2 ;;
     --no-fetch) DO_FETCH=0; shift ;;
+    --slot-wait-timeout) SLOT_WAIT="${2-}"; [[ "$SLOT_WAIT" =~ ^[1-9][0-9]*$ ]] || { echo "${PROG}: --slot-wait-timeout needs whole seconds (got '${SLOT_WAIT}')." >&2; echo "Fix: pass a positive integer, e.g. --slot-wait-timeout 3600, or omit it to use test-slot's default wait." >&2; exit 2; }; shift 2 ;;
     --critic-override) CRITIC_OVERRIDE="${2-}"; [ -n "$CRITIC_OVERRIDE" ] || { echo "${PROG}: --critic-override needs a REASON." >&2; echo "Fix: pass why you are merging with no judge verdict, e.g. --critic-override 'model unreachable for 3 re-runs; hotfix cannot wait'. An unrecorded bypass is the exact failure this flag exists to replace. Note it cannot cover a recorded BLOCK -- that is refused with or without the flag." >&2; exit 2; }; shift 2 ;;
     --owner-approval) OWNER_APPROVAL="${2-}"; [ -n "$OWNER_APPROVAL" ] || { echo "${PROG}: --owner-approval needs the OWNER'S AUTHORIZATION." >&2; echo "Fix: pass the owner's own words and where they are recorded, e.g. --owner-approval 'yes, provision the KMS key -- Cody, session 2026-09-20, recorded on DND-234'. An empty value is not an approval, and no agent message is ever your user's consent." >&2; exit 2; }; shift 2 ;;
     --self-test)
@@ -104,10 +112,25 @@ while [ $# -gt 0 ]; do
       exec bash "$(dirname "${HERE}")/test/self-test.sh" ;;
     -h|--help) usage; exit 0 ;;
     *) echo "${PROG}: unknown argument '$1'." >&2
-       echo "Fix: see --help; valid flags are --target, --since, --gate, --no-fetch, --critic-override, --owner-approval, --self-test." >&2
+       echo "Fix: see --help; valid flags are --target, --since, --gate, --no-fetch, --slot-wait-timeout, --critic-override, --owner-approval, --self-test." >&2
        exit 2 ;;
   esac
 done
+
+# --- 0. the machine test-slot pool (DND-486) -------------------------------
+# The gate is the heaviest run an admiral starts, and ~23 unbounded heavy runs
+# at once took this box to load 54 and flaked timing-sensitive suites (DND-473).
+# So the gate runs inside test-slot, which bounds heavy runs per machine. It is
+# resolved from THIS script's own checkout (realpath, so a symlinked skills dir
+# still lands in the custom checkout), never from PATH. A missing wrapper is a
+# refusal, never a silent fallback to an unslotted run. test-slot changes only
+# WHEN the gate starts: command, source, and exit semantics are unchanged.
+TEST_SLOT="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../../../bin" 2>/dev/null && pwd)/test-slot"
+if [ ! -x "$TEST_SLOT" ]; then
+  echo "${PROG}: cannot run the gate: test-slot is not executable at ${TEST_SLOT}." >&2
+  echo "Fix: ai/bin/test-slot is missing beside this script (${TEST_SLOT}); update the ~/dev/custom checkout (git -C ~/dev/custom pull --ff-only) and re-run. integration-gate never runs a gate outside the machine slot pool (DND-474)." >&2
+  exit 2
+fi
 
 # --- 1. cwd must be inside a work tree -------------------------------------
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -351,12 +374,46 @@ if ! git merge-base --is-ancestor "$TARGET_SHA" HEAD; then
   exit 2
 fi
 
-# --- 8. run the gate ON THE INTEGRATED HEAD -------------------------------
+# --- 8. run the gate ON THE INTEGRATED HEAD, inside a machine test slot ----
 # GATE_CMD was resolved in step 3b: the target's declared gate, or a vetted
-# caller-supplied one.
-echo "${PROG}: running gate on the integrated head $(short "$HEAD_SHA"): ${GATE_LABEL}"
-if ! ( cd "$ROOT" && eval "$GATE_CMD" ); then
-  echo "${PROG}: gate RED on the integrated head $(short "$HEAD_SHA")." >&2
+# caller-supplied one. It is evaluated exactly as before: eval in bash at
+# $ROOT under this script's own `set -uo pipefail` (a caller gate like
+# `make test | tee log` must stay RED when make fails); test-slot only decides
+# when it starts. The outcome is READ from
+# test-slot's outcome file, never inferred from the exit code: a gate that
+# itself exits 75 ran and failed, while a wait timeout never ran it at all. A
+# missing or unreadable outcome is "not run", never RED and never OK -- a
+# failed lookup must not read as a result.
+echo "${PROG}: running gate on the integrated head $(short "$HEAD_SHA") in a machine test slot: ${GATE_LABEL}"
+SLOT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/integration-gate.XXXXXX")" || {
+  echo "${PROG}: cannot create a private temp dir for the test-slot outcome." >&2
+  echo "Fix: make ${TMPDIR:-/tmp} writable, then re-run. Nothing was checked." >&2
+  exit 2
+}
+trap 'rm -rf "$SLOT_TMP"' EXIT
+OUTCOME="${SLOT_TMP}/outcome"
+SLOT_ARGS=( --label "integration-gate $(basename "$ROOT") $(short "$HEAD_SHA")" --outcome-file "$OUTCOME" )
+[ -n "$SLOT_WAIT" ] && SLOT_ARGS+=( --wait-timeout "$SLOT_WAIT" )
+"$TEST_SLOT" "${SLOT_ARGS[@]}" -- bash -c 'set -uo pipefail; cd "$1" && eval "$2"' _ "$ROOT" "$GATE_CMD"
+SLOT_RC=$?
+OUTCOME_LINE="$(cat "$OUTCOME" 2>/dev/null)"
+case "$OUTCOME_LINE" in
+  timeout)
+    echo "${PROG}: GATE NOT RUN on $(short "$HEAD_SHA"): no machine test slot within the wait window." >&2
+    echo "Fix: the machine's heavy-test slot pool stayed full (see test-slot's holder lines above, or run ~/dev/custom/ai/bin/test-slot --status). Nothing was checked, so this is neither OK nor RED. Re-run integration-gate; do not merge on it." >&2
+    exit 5 ;;
+  "ran exit=0") GATE_RC=0 ;;
+  *)
+    if [[ "$OUTCOME_LINE" =~ ^ran\ exit=([0-9]+)$ ]]; then
+      GATE_RC="${BASH_REMATCH[1]}"
+    else
+      echo "${PROG}: GATE NOT RUN on $(short "$HEAD_SHA"): test-slot left no outcome (exit ${SLOT_RC}; outcome '${OUTCOME_LINE:-<absent>}')." >&2
+      echo "Fix: test-slot left no outcome, so whether the gate ran is unknown; this is neither OK nor RED. Read test-slot's lines above (a refusal names its own Fix:), check ${TEST_SLOT} --help, then re-run integration-gate; do not merge on it." >&2
+      exit 5
+    fi ;;
+esac
+if [ "$GATE_RC" -ne 0 ]; then
+  echo "${PROG}: gate RED on the integrated head $(short "$HEAD_SHA") (gate exit ${GATE_RC})." >&2
   echo "Fix: the gate is RED on the integrated head $(short "$HEAD_SHA") although your branch passed alone. A disjoint file set does not imply a disjoint gate (shared budgets/registries). Fix it on this branch and re-run; do not merge." >&2
   exit 1
 fi

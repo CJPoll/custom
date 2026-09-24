@@ -292,6 +292,16 @@ you are landing is the one the report names"). Any other exit tells you what to
 do next. It never rebases or writes anything; a rebase can conflict and is your
 judgement call.
 
+**The gate runs in a machine test slot (DND-486).** `integration-gate` wraps the
+resolved gate in `~/dev/custom/ai/bin/test-slot`, which bounds heavy runs per
+machine; you do nothing extra. A `test-slot: WAITING` line is a queue, not a
+stall. **Exit 5 means GATE NOT RUN**: no slot freed within the wait window (or
+test-slot left no outcome). Nothing was checked, so it is neither OK nor RED.
+Re-run `integration-gate`; never merge on it. `test-slot --status` names what
+holds the pool. A test-slot missing beside the script is exit 2: update the
+custom checkout; the gate never runs unslotted. `--slot-wait-timeout <secs>`
+shortens the wait. It can only turn a wait into exit 5, never into a pass.
+
 **Green-alone is not green-merged.** Two MRs with entirely disjoint file sets
 can each pass the gate and fail together: the admiral's rendered-line budget is
 a single global number (496/500 today — four lines of headroom), and

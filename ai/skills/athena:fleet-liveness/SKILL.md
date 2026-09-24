@@ -75,7 +75,13 @@ Judge a Mission's captain by what it leaves on disk, in this order:
    `git status --porcelain`. A fresh commit cannot be faked, and an agent can be
    alive and stuck, so this outranks a liveness flag even when you have one.
 3. **Harness task-notifications**, as a latency optimization only (above).
-4. **Process inspection**, last resort: tie a process to a worktree by reading
+4. **The machine test-slot pool** (`~/dev/custom/ai/bin/test-slot --status`). A
+   captain whose worktree is quiet but whose label is listed as a waiter or
+   holder is queued or gating, not stalled. An UNSLOTTED line names a heavy run
+   that bypassed the pool; tell its captain to wrap it. A CONTAINER line is a
+   heavy run inside docker whose slot cannot be read; it is not evidence either
+   way.
+5. **Process inspection**, last resort: tie a process to a worktree by reading
    `/proc/<pid>/cwd`. Never `pkill -f`.
 
 Two consequences:
