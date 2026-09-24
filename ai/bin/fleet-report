@@ -20,10 +20,14 @@ Subcommands (flags may come in any order):
   session-seen   [--agent-id ID] [--agent-type T]   session_seen
   session-end    [--reason R]                       session_ended
   admiral-start  --run-id R --agent-id ID [--scope-label L]   admiral_started
-  admiral-scope  --run-id R --missions FILE         admiral_scope (FILE: JSON array of
+  admiral-scope  --run-id R --missions FILE [--notion-project-id ID]
+                                                    admiral_scope (FILE: JSON array of
                                                     mission pointers, exactly tracker,
                                                     ticket_ref, url, title, status,
-                                                    captain_state)
+                                                    captain_state; ID: the scope's
+                                                    Notion Project page id, from which
+                                                    the server classifies the run's
+                                                    domain)
   admiral-seen   --agent-id ID [--agent-type T]     admiral_seen
   admiral-state  --run-id R --state draining|drained|finished   admiral_state
 
@@ -85,7 +89,7 @@ trap '[ -n "${FLEET_POST_TMP}" ] && rm -rf -- "${FLEET_POST_TMP}"' EXIT
 trap 'exit 143' TERM INT HUP
 
 sub="" session_id="${CLAUDE_CODE_SESSION_ID:-}" cwd="${PWD}" agent_id="" agent_type="" run_id=""
-missions_file="" state="" scope_label="" reason="" dry_run="" given=" "
+missions_file="" state="" scope_label="" reason="" notion_project_id="" dry_run="" given=" "
 
 need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die_usage "$1 needs a value"; }
 
@@ -103,6 +107,7 @@ while [ "$#" -gt 0 ]; do
     --state)       need_value "$@"; state="$2"; given="${given}state "; shift 2 ;;
     --scope-label) need_value "$@"; scope_label="$2"; given="${given}scope-label "; shift 2 ;;
     --reason)      need_value "$@"; reason="$2"; given="${given}reason "; shift 2 ;;
+    --notion-project-id) need_value "$@"; notion_project_id="$2"; given="${given}notion-project-id "; shift 2 ;;
     --dry-run)     dry_run=1; shift ;;
     -*)            die_usage "unknown flag $1" ;;
     *)
@@ -129,6 +134,9 @@ fleet_valid_id "${session_id}" || die_usage "session id ${session_id@Q} is not a
   "pass your own agentId exactly as SendMessage uses it."
 [ -z "${run_id}" ] || fleet_valid_id "${run_id}" || die_usage "run id ${run_id@Q} is not a valid id" \
   "pass the run's coordination directory name, e.g. 2026-09-24-p1-fleet."
+[ -z "${notion_project_id}" ] || fleet_valid_notion_id "${notion_project_id}" ||
+  die_usage "--notion-project-id ${notion_project_id@Q} is not a Notion page id" \
+    "pass the Project page's id: 32 hex digits, bare or dashed (e.g. 3e2349da-87fb-81ac-a4f5-ff241e915946), not a URL."
 
 require() { [ -n "$2" ] || die_usage "${sub} needs --$1"; }
 
@@ -151,7 +159,7 @@ case "${sub}" in
     body="$(fleet_body_admiral_started "${session_id}" "${run_id}" "${agent_id}" "${scope_label}")"
     kind=admiral_started ;;
   admiral-scope)
-    allowed_flags "run-id missions"
+    allowed_flags "run-id missions notion-project-id"
     require run-id "${run_id}"; require missions "${missions_file}"
     rc=0
     missions="$(fleet_load_missions "${missions_file}")" || rc=$?
@@ -161,7 +169,7 @@ case "${sub}" in
       *) die_usage "--missions refused: ${missions}" \
            "a mission pointer carries exactly tracker, ticket_ref, url, title, status, captain_state (athena-events.md -> Mission pointers are metadata only)." ;;
     esac
-    body="$(fleet_body_admiral_scope "${session_id}" "${run_id}" "${missions}")"
+    body="$(fleet_body_admiral_scope "${session_id}" "${run_id}" "${missions}" "${notion_project_id}")"
     kind=admiral_scope ;;
   admiral-seen)
     allowed_flags "agent-id agent-type"

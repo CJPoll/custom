@@ -36,6 +36,16 @@ fleet_valid_id() {
   [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
 }
 
+# fleet_valid_notion_id <id> -- a Notion page id: 32 hex digits, bare or dashed
+# 8-4-4-4-12, either case. The server applies the same rule and stores the
+# canonical dashed lowercase form (gen_saas Athena.Fleet.NotionId, DND-444); a
+# URL or a partial id is refused here so it never reaches the wire.
+fleet_valid_notion_id() {
+  local LC_ALL=C h='[0-9A-Fa-f]'
+  [[ "${1:-}" =~ ^${h}{32}$ ]] ||
+    [[ "${1:-}" =~ ^${h}{8}-${h}{4}-${h}{4}-${h}{4}-${h}{12}$ ]]
+}
+
 # fleet_valid_admiral_state <state>
 fleet_valid_admiral_state() {
   case " ${FLEET_ADMIRAL_STATES} " in *" ${1:-} "*) [ -n "${1:-}" ] ;; *) return 1 ;; esac
@@ -262,10 +272,14 @@ fleet_body_admiral_started() {
      + (if $l == "" then {} else {scope_label: $l} end)'
 }
 
+# fleet_body_admiral_scope <sid> <run_id> <missions-json> [notion_project_id]
+# The Notion Project id is optional (DND-444); omitted when empty, never sent
+# as null (the server refuses a null optional field).
 fleet_body_admiral_scope() {
-  local sid="$1" run_id="$2" missions="$3"
-  jq -n -c --arg s "${sid}" --arg r "${run_id}" --argjson m "${missions}" \
-    '{kind: "admiral_scope", claude_session_id: $s, run_id: $r, missions: $m}'
+  local sid="$1" run_id="$2" missions="$3" project="${4:-}"
+  jq -n -c --arg s "${sid}" --arg r "${run_id}" --argjson m "${missions}" --arg p "${project}" \
+    '{kind: "admiral_scope", claude_session_id: $s, run_id: $r, missions: $m}
+     + (if $p == "" then {} else {notion_project_id: $p} end)'
 }
 
 fleet_body_admiral_state() {

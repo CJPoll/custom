@@ -61,6 +61,14 @@ check "invalid id: space"           bash -c '. "$0"; ! fleet_valid_id "a b"' "${
 check "invalid id: newline"         bash -c '. "$0"; ! fleet_valid_id "$(printf "a\nb")"' "${LIB}/domain.sh"
 check "invalid id: 129 bytes"       bash -c '. "$0"; ! fleet_valid_id "$(printf "a%.0s" $(seq 1 129))"' "${LIB}/domain.sh"
 
+check "notion id: dashed"           fleet_valid_notion_id "3e2349da-87fb-81ac-a4f5-ff241e915946"
+check "notion id: bare"             fleet_valid_notion_id "3e2349da87fb81aca4f5ff241e915946"
+check "notion id: upper case"       fleet_valid_notion_id "3E2349DA87FB81ACA4F5FF241E915946"
+for bad_id in "" "Athena" "3e2349da87fb81aca4f5ff241e91594" "3e2349da87fb-81aca4f5ff241e915946" \
+  "https://www.notion.so/3e2349da87fb81aca4f5ff241e915946" " 3e2349da87fb81aca4f5ff241e915946" \
+  "3e2349da87fb81aca4f5ff241e91594g"; do
+  check "notion id refused: ${bad_id@Q}" bash -c '. "$0"; ! fleet_valid_notion_id "$1"' "${LIB}/domain.sh" "${bad_id}"
+done
 check "admiral state: finished"     fleet_valid_admiral_state finished
 check "admiral state: running is not reportable" bash -c '. "$0"; ! fleet_valid_admiral_state running' "${LIB}/domain.sh"
 check "admiral state: empty"        bash -c '. "$0"; ! fleet_valid_admiral_state ""' "${LIB}/domain.sh"
@@ -142,6 +150,8 @@ eq "body admiral_seen" "$(fleet_body_seen admiral_seen S A athena-admiral)" '{"k
 eq "body session_ended with reason" "$(fleet_body_session_ended S other)" '{"kind":"session_ended","claude_session_id":"S","end_reason":"other"}'
 eq "body admiral_started" "$(fleet_body_admiral_started S R A "")" '{"kind":"admiral_started","claude_session_id":"S","run_id":"R","agent_id":"A"}'
 eq "body admiral_scope" "$(fleet_body_admiral_scope S R '[]')" '{"kind":"admiral_scope","claude_session_id":"S","run_id":"R","missions":[]}'
+eq "body admiral_scope: an empty notion id is omitted, never null" "$(fleet_body_admiral_scope S R '[]' "")" '{"kind":"admiral_scope","claude_session_id":"S","run_id":"R","missions":[]}'
+eq "body admiral_scope with a notion project id" "$(fleet_body_admiral_scope S R '[]' 3e2349da87fb81aca4f5ff241e915946)" '{"kind":"admiral_scope","claude_session_id":"S","run_id":"R","missions":[],"notion_project_id":"3e2349da87fb81aca4f5ff241e915946"}'
 eq "body admiral_state" "$(fleet_body_admiral_state S R finished)" '{"kind":"admiral_state","claude_session_id":"S","run_id":"R","state":"finished"}'
 
 # No body builder may ever emit an identity field the server stamps.
@@ -314,6 +324,15 @@ eq "admiral_scope carries the pointers verbatim" "$(fleet_last_request | jq -c .
 printf '[]' > "${TMP}/empty.json"
 run admiral-scope --run-id r1 --missions "${TMP}/empty.json"
 eq "an empty scope is sent as [] (a reported fact)" "$(fleet_last_request | jq -c .body.missions)" "[]"
+eq "no --notion-project-id: the key is absent" "$(fleet_last_request | jq -c '.body | has("notion_project_id")')" "false"
+run admiral-scope --notion-project-id 3e2349da-87fb-81ac-a4f5-ff241e915946 --run-id r1 --missions "${TMP}/empty.json"
+eq "admiral-scope with --notion-project-id sends (0)" "${RC}" "0"
+eq "the notion project id rides the admiral_scope body" "$(fleet_last_request | jq -r .body.notion_project_id)" "3e2349da-87fb-81ac-a4f5-ff241e915946"
+run admiral-scope --run-id r1 --missions "${TMP}/empty.json" --notion-project-id "https://notion.so/x"
+eq "a non-id --notion-project-id is refused locally (2)" "${RC}" "2"
+case "${ERR}" in *"Notion page id"*"Fix: "*) ok "that refusal names the expectation with Fix:" ;; *) bad "that refusal names the expectation with Fix:" "${ERR}" ;; esac
+run admiral-start --run-id r2 --agent-id a1 --notion-project-id 3e2349da87fb81aca4f5ff241e915946
+eq "--notion-project-id belongs to admiral-scope only (2)" "${RC}" "2"
 run admiral-seen --agent-id a5a8eb5540d6e6ab3 --agent-type athena-admiral
 eq "admiral_seen body" "$(fleet_last_request | jq -c '.body | [.kind, .agent_id, .agent_type]')" '["admiral_seen","a5a8eb5540d6e6ab3","athena-admiral"]'
 run admiral-state --run-id r1 --state finished

@@ -3036,7 +3036,7 @@ at every agent depth). The kinds and the other fields each may carry:
 | `session_seen` | `agent_id` (string, optional), `agent_type` (string, optional) | Refreshes the session's last-seen time. |
 | `session_ended` | `end_reason` (string, optional: the SessionEnd hook's `reason`) | Marks the session ended, basis `reported`. |
 | `admiral_started` | `run_id` (string), `agent_id` (string), `scope_label` (string, optional) | Creates the admiral run in state `running`. |
-| `admiral_scope` | `run_id` (string), `missions` (collection of mission pointers, possibly empty) | Replaces the run's whole mission list. |
+| `admiral_scope` | `run_id` (string), `missions` (collection of mission pointers, possibly empty), `notion_project_id` (string, optional) | Replaces the run's whole mission list and its Notion Project. |
 | `admiral_seen` | `agent_id` (string), `agent_type` (string, optional) | Refreshes the last-seen time of the run with that `agent_id` in this session. |
 | `admiral_state` | `run_id` (string), `state` (`draining` \| `drained` \| `finished`) | Sets the run's reported state. |
 
@@ -3061,6 +3061,18 @@ at every agent depth). The kinds and the other fields each may carry:
   run's coordination directory. An `admiral_scope` or `admiral_state` naming a
   `run_id` this session never started is refused with a `Fix:` telling the
   admiral to report `admiral_started` first.
+- **`notion_project_id`** (DND-444) is the page id of the scope's Notion
+  Project (the scope epic's `Project` relation): 32 hex digits, bare or dashed
+  8-4-4-4-12. Anything else, a URL included, is refused with a `Fix:`. The
+  server stores it canonical (dashed, lower case) on the run, and `admiral_scope`
+  replaces it like the mission list, so a scope sent without it clears it. The
+  server classifies the run's domain from it through the owner's policy
+  (`notion_project_domains`; an `Athena —` project is `blend`). A session's
+  effective domain is its owner's `domain_override`, else the most-metered
+  domain of its live runs, else its repo default (`project_domains`), else
+  `unclassified`. The fleet page shows `unclassified` as such; the control
+  answer's closed `effective_domain` enum carries it as `personal`, the owner's
+  default for an unknown project (OQ-4).
 - **`agent_id`** is the admiral's own agentId, the id SendMessage uses, which
   its dispatch briefs already carry. PreToolUse and PostToolUse hook stdin
   carries the same value as `agent_id` inside that admiral (measured, DND-428),
@@ -3071,7 +3083,8 @@ at every agent depth). The kinds and the other fields each may carry:
   `session_seen` otherwise, at most once per 60 s per (session, `agent_id`), in
   the background under a timeout. The admiral itself calls `ai/bin/fleet-report`
   for `admiral_started`, for `admiral_scope` on every mission status change in
-  its `state.md`, and for `admiral_state`.
+  its `state.md` (with `--notion-project-id` when its scope has a Project), and
+  for `admiral_state`.
 
 ### Fleet identity: owner and machine are stamped from the token
 

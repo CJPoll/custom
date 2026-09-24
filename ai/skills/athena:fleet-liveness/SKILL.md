@@ -174,6 +174,13 @@ call to `~/dev/custom/ai/bin/fleet-report`. It reads the session id from
     → `done`, `BLOCKED` → `blocked`, `STUCK` → `stuck`.
   - No other field. A body, summary, comment, label or assignee is refused
     before anything is sent (*Mission pointers are metadata only*).
+  - **Add `--notion-project-id <id>`** when your scope has a Notion Project:
+    the page id in the scope epic's `Project` relation (read it from the epic
+    page's properties once, at run start). The server classifies your run's
+    domain from it (an `Athena —` project is `blend`), so apps/athena work in
+    gen_saas is not metered as the repo's `personal` default. Send it on every
+    `admiral-scope`: each call replaces the last, and a call without it clears
+    it. Omit it only when the scope has no Project.
 - **Run end: `admiral-state --run-id <run-id> --state finished`**, only when
   the scope is exhausted ([[athena:admiral-final-report]]). A usage ceiling or
   an interruption sends nothing: the server reads the silence as `quiet`, then
