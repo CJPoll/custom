@@ -80,9 +80,12 @@ newpool() { # newpool NAME N — fresh (not yet created) pool for one case
 
 # bg NAME ARGS... — run test-slot ARGS in the background, bounded by
 # timeout 60; stdout/stderr land in $W/NAME.out / .err; pid in $W/NAME.bg.
+# BG_PRE (array) is put before test-slot, e.g. to launch it with INT/QUIT at
+# default (a background job of this non-job-control suite starts them ignored).
+BG_PRE=()
 bg() {
   local name=$1; shift
-  timeout 60 "$BIN" "$@" >"$W/$name.out" 2>"$W/$name.err" &
+  timeout 60 "${BG_PRE[@]}" "$BIN" "$@" >"$W/$name.out" 2>"$W/$name.err" &
   echo $! >"$W/$name.bg"
   BG_PIDS+=("$!")
 }
@@ -159,6 +162,12 @@ d	e"
   t eq "$(unslotted_state 'pid:[1]' 'pid:[2]' 1)" container
   t eq "$(unslotted_state 'pid:[1]' 'pid:[2]' 0)" container
   t eq "$(unslotted_state 'pid:[1]' '' 1)" unslotted
+  t eq "$(default_signals 0000000000000000)" "INT,QUIT"
+  t eq "$(default_signals 0000000000000006)" ""
+  t eq "$(default_signals 0000000000000002)" "QUIT"
+  t eq "$(default_signals 0000000000000004)" "INT"
+  t eq "$(default_signals 0000000000001002)" "QUIT"
+  t eq "$(default_signals '')" "INT,QUIT"
   exit "$f"
 )
 if [ $? -eq 0 ]; then ok; else bad helpers "pure helper cases failed (see above)"; fi
@@ -440,6 +449,38 @@ check 26-rotated present "$POOL/events.jsonl.1"
 check 26-new-has-run eq "$(event_count acquired L26)" 1
 check 26-new-small eval '[ "$(stat -c %s "$POOL/events.jsonl")" -lt 1048576 ]'
 check 26-parse eval 'jq -e . "$POOL/events.jsonl" >/dev/null && jq -e . "$POOL/events.jsonl.1" >/dev/null'
+
+# ------------------------------------------------------------------- signals
+# 27: CMD gets the INT/QUIT dispositions test-slot started with, not bash's
+# background-job ignore. SigIgn bits: INT = 0x2, QUIT = 0x4.
+sigign_bits() { # sigign_bits FILE -> INT/QUIT bits of the SigIgn line in FILE
+  local hex; hex=$(sed -n 's/^SigIgn:[[:space:]]*//p' "$1"); echo $(( 16#${hex: -8} & 0x6 ))
+}
+newpool p27 1
+env --default-signal=INT,QUIT "$BIN" -- bash -c 'cat /proc/$$/status' >"$W/27a.status" 2>/dev/null
+check 27-default-restored eq "$(sigign_bits "$W/27a.status")" 0
+env --default-signal=QUIT --ignore-signal=INT "$BIN" -- bash -c 'cat /proc/$$/status' >"$W/27b.status" 2>/dev/null
+check 27-caller-ignore-kept eq "$(sigign_bits "$W/27b.status")" 2
+
+# 28/29: INT and TERM sent to the wrapper reach CMD; CMD's own exit code
+# (130 / 143) comes back, the outcome file and events record it, and CMD did
+# not run to completion. (Under timeout(1) the wrapper is not in a terminal's
+# foreground group, so INT is forwarded.)
+for sig in INT TERM; do
+  case $sig in INT) want=130 ;; TERM) want=143 ;; esac
+  newpool "p28$sig" 1
+  mkfifo "$W/S28$sig.fifo"
+  BG_PRE=(env --default-signal=INT,QUIT)
+  bg "S28$sig" --label "S28$sig" --outcome-file "$W/28$sig.outcome" -- bash -c "$HOLD_CMD" _ "$W/S28$sig"
+  BG_PRE=()
+  await_file "$W/S28$sig.started" 20 || bad "28-$sig-start" "holder never started"
+  kill -s "$sig" "$(cat "$W/S28$sig.wrapper")"
+  reap "S28$sig"
+  check "28-$sig-rc" eq "$RC" "$want"
+  check "28-$sig-cmd-stopped" absent "$W/S28$sig.done"
+  check "28-$sig-outcome" eq "$(cat "$W/28$sig.outcome" 2>/dev/null)" "ran exit=$want"
+  check "28-$sig-event" eq "$(events | jq -s --argjson w "$want" '[.[] | select(.event=="released" and .exit==$w)] | length')" 1
+done
 
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then

@@ -51,7 +51,8 @@
 #   --outcome-file PATH: removed at start, then written with exactly one line:
 #     `timeout`         the wait timed out; CMD never ran
 #     `ran exit=<n>`    CMD ran and exited <n>
-#     (file absent)     test-slot refused before running anything (exit 2)
+#     (file absent)     no outcome recorded: test-slot refused (exit 2), or
+#                       the wrapper was SIGKILLed (see RESIDUALS)
 #   This is how a caller tells "CMD exited 75" from "the wait timed out".
 #
 #   Environment set for CMD: ATHENA_TEST_SLOT_HELD=<pool dir>:<slot>. A nested
@@ -90,6 +91,17 @@
 #     the slot held until it exits. --status names the holder label and cwd.
 #   * Containers started by `docker compose run` belong to dockerd; a SIGKILL
 #     of the whole tree can leave one running after the slot frees.
+#   * Re-entrancy trusts ATHENA_TEST_SLOT_HELD plus "that slot's lock is held
+#     by someone". A process that started inside an earlier slot, outlived
+#     it, and runs test-slot after another run re-took that same slot would
+#     skip the pool. It needs a descendant that survives its slot; rare.
+#   * An absent --outcome-file means test-slot refused (exit 2) OR the
+#     wrapper itself was SIGKILLed before writing it; either way no outcome
+#     was recorded, so a caller must not read absence as "CMD never ran".
+#   * A terminal ^C already reaches CMD (same process group), so INT is
+#     forwarded only when test-slot is NOT in its terminal's foreground
+#     process group; a programmatic `kill -INT` to a foreground wrapper is
+#     therefore not forwarded (TERM/HUP always are).
 #   * --status probes a lock with a non-blocking SHARED flock on a fresh fd; an
 #     acquirer racing that probe sees the slot busy for microseconds and simply
 #     tries the next slot or the next 2 s poll.
@@ -233,6 +245,21 @@ unslotted_state() {
     1) printf 'unslotted\n' ;;
     *) printf 'unknown\n' ;;
   esac
+}
+
+# default_signals SIGIGN_HEX — which of INT/QUIT to reset to default for CMD,
+# given this process's entry SigIgn mask (/proc/self/status, hex). bash starts
+# a backgrounded command with INT and QUIT ignored, and an ignored-at-exec
+# signal cannot be trapped or reset by a script; so each of INT/QUIT that was
+# NOT ignored when test-slot started is reset for CMD, and one the caller
+# deliberately ignored (nohup-style) stays ignored. Prints e.g. "INT,QUIT".
+default_signals() {
+  local mask out=""
+  [[ $1 =~ ^[0-9a-fA-F]+$ ]] || { printf 'INT,QUIT\n'; return; }
+  mask=$((16#${1: -8}))
+  ((mask & 0x2)) || out="INT"
+  ((mask & 0x4)) || out="${out:+$out,}QUIT"
+  printf '%s\n' "$out"
 }
 
 # ============================================================ side effects
@@ -601,12 +628,40 @@ CHILD=""
 forward() { [ -n "$CHILD" ] && kill -s "$1" "$CHILD" 2>/dev/null; }
 forward_int() { in_tty_foreground || forward INT; }
 
-# run_cmd — run CMD as a child that inherits the slot fd(s) and our stdin;
-# forward INT/TERM/HUP; return its exit code.
+# entry_sigign — the SigIgn mask test-slot inherited, or "" when /proc cannot
+# say. Read by a CHILD process (sed reads its own /proc/self/status): bash
+# ignores SIGQUIT in itself, so its own mask cannot tell an inherited QUIT
+# ignore apart, while a foreground child gets exactly the inherited
+# dispositions back. Called before any trap is set.
+entry_sigign() {
+  sed -n 's/^SigIgn:[[:space:]]*//p' /proc/self/status 2>/dev/null
+}
+
+# launch_prefix — sets LAUNCH (array) to what runs CMD with the caller's
+# INT/QUIT dispositions restored (see default_signals).
+launch_prefix() {
+  local sigs
+  LAUNCH=()
+  sigs=$(default_signals "$ENTRY_SIGIGN")
+  [ -n "$sigs" ] || return 0
+  if [[ ${CMD[0]} == *=* ]]; then
+    say "WARN CMD '${CMD[0]}' contains '=', so env(1) cannot launch it; CMD starts with INT/QUIT ignored (^C will not reach it). Fix: invoke it by a path without '=' (e.g. a symlink)."
+    return 0
+  fi
+  if ! env --default-signal=INT true 2>/dev/null; then
+    say "WARN env(1) lacks --default-signal (coreutils < 8.31); CMD starts with INT/QUIT ignored (^C will not reach it). Fix: upgrade coreutils to >= 8.31."
+    return 0
+  fi
+  LAUNCH=(env "--default-signal=$sigs")
+}
+
+# run_cmd — run CMD as a child that inherits the slot fd(s), our stdin, and
+# our entry INT/QUIT dispositions; forward INT/TERM/HUP; return its exit code.
 run_cmd() {
   local in rc prev=0
+  launch_prefix
   exec {in}<&0
-  "${CMD[@]}" <&"$in" {in}<&- &
+  "${LAUNCH[@]}" "${CMD[@]}" <&"$in" {in}<&- &
   CHILD=$!
   exec {in}<&-
   trap forward_int INT
@@ -748,6 +803,7 @@ status() {
 
 main() {
   local mode=run have_dd=0
+  ENTRY_SIGIGN=$(entry_sigign)
   LABEL=""
   WAIT_TIMEOUT_S=$DEFAULT_WAIT_TIMEOUT_S
   OUTCOME_FILE=""
