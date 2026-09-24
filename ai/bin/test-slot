@@ -1,0 +1,864 @@
+#!/usr/bin/env bash
+# test-slot — machine-wide flock slot pool for heavy test runs.
+# DND-485 (DND-474 part 1). Design: Notion DND-485 A&E (architect-474-450).
+#
+# WHY THIS EXISTS
+# On 2026-09-24 ~04:35Z parallel captains and admiral gates ran ~23 heavy test
+# runs at once on a 16-core box (load 54.58) and timing-sensitive suites flaked
+# (DND-473). Nothing bounded how many heavy runs share one machine. test-slot
+# wraps ONE heavy command (a full bin/prep-commit.sh, a full `mix test`, an
+# integration-gate gate) so that at most N wrapped commands run at once per
+# machine, whatever repo, worktree, fleet, or session launched them.
+#
+# FASTER, NEVER WEAKER (ai/blocks/ops/safety-checks.md). test-slot changes only
+# WHEN the command runs. It never edits the command's argv, stdin, stdout,
+# stderr, or exit status, and adds exactly one environment variable
+# (ATHENA_TEST_SLOT_HELD). Nothing is skipped, filtered, or loosened. Its own
+# messages go to stderr, prefixed `test-slot:`.
+#
+# LIVENESS IS THE FLOCK, NEVER A PID. A slot is held exactly while some process
+# holds flock(2) on slot-<i>.lock. The wrapped command inherits that lock's fd,
+# so the slot stays held while the command (or any descendant that kept the fd)
+# lives, even if this wrapper is SIGKILLed; the kernel frees it when the last
+# holder exits. Holder files and pids are diagnostics only, never read to
+# decide availability. Nothing needs reaping.
+#
+# WAITING IS A KERNEL BLOCK. Every acquirer passes through queue.lock. Waiters
+# behind the head block in flock(2) on it. Only the head of the queue polls the
+# N slots, at a 2 s sleep cadence, bounded by --wait-timeout (Hard Rule
+# safe-wait item 3). No spin, no background child. A waiter prints WAITING with
+# the pool, N, and every holder before it waits, and a heartbeat at least every
+# 60 s, so a queued gate never looks like a stall.
+#
+# ---------------------------------------------------------------------------
+# STABLE INTERFACE (DND-486 wraps integration-gate's gate and the captain
+# Verify step in this; DND-489's bench uses --exclusive and events.jsonl).
+# Changing anything in this block is a breaking change for those callers.
+#
+#   test-slot [--label TEXT] [--wait-timeout SECONDS] [--outcome-file PATH]
+#             [--exclusive] -- CMD [ARGS...]
+#   test-slot --status [--json]
+#   test-slot --help | --self-test
+#
+#   Always invoke the MAIN checkout's copy by absolute path
+#   (~/dev/custom/ai/bin/test-slot), so every caller agrees on N.
+#
+#   Exit codes:
+#     <CMD's own code>  CMD ran (including 128+n when a signal killed it)
+#     75                the wait timed out; CMD NEVER ran (`test-slot: TIMEOUT`)
+#     2                 usage/misuse; CMD never ran (bad flag, no `--`/CMD,
+#                       invalid N seam, pool dir unusable)
+#   --outcome-file PATH: removed at start, then written with exactly one line:
+#     `timeout`         the wait timed out; CMD never ran
+#     `ran exit=<n>`    CMD ran and exited <n>
+#     (file absent)     test-slot refused before running anything (exit 2)
+#   This is how a caller tells "CMD exited 75" from "the wait timed out".
+#
+#   Environment set for CMD: ATHENA_TEST_SLOT_HELD=<pool dir>:<slot>. A nested
+#   test-slot that sees it (and finds that slot's lock still held) runs its CMD
+#   directly without taking a second slot, so nesting cannot self-deadlock.
+#
+#   Pool: ${XDG_STATE_HOME:-$HOME/.local/state}/athena/test-slots/ (0700):
+#     slot-<i>.lock      flock = liveness; never deleted
+#     slot-<i>.holder    JSON {label,cwd,pid,started_at,exclusive}; diagnostic
+#     queue.lock         waiters block here
+#     waiters/*.w        one per live waiter, flock-held by it; diagnostic
+#     events.jsonl       one JSON line per event {ts,event,slot,label,cwd,pid,
+#                        exclusive,waited_s,ran_s,exit}; event is one of
+#                        waiting|acquired|released|timeout|reentrant; rotated to
+#                        events.jsonl.1 past 1 MiB (one generation kept)
+#   --exclusive: holds ALL N slots before CMD runs (DND-489's bench quiesces
+#     the fleet with it). Holder lines say EXCLUSIVE.
+#   --status [--json]: N and its basis, held/waiting/unslotted counts, load1,
+#     nproc, then each holder, waiter, and heavy run WITHOUT a slot (UNSLOTTED).
+#     Read-only: never creates the pool.
+#
+#   Test seams (self-test only): ATHENA_TEST_SLOT_DIR (pool dir);
+#   ATHENA_TEST_SLOTS (N) and ATHENA_TEST_SLOT_HEARTBEAT (seconds) are honored
+#   ONLY when ATHENA_TEST_SLOT_DIR is set to a non-default path, so no override
+#   can change the real pool. An honored-but-invalid value is exit 2, never a
+#   fallback.
+# ---------------------------------------------------------------------------
+#
+# RESIDUALS (named, not hidden)
+#   * Cooperative only: a heavy run that never calls test-slot is not bounded.
+#     --status lists it as UNSLOTTED (own uid only). A heavy run inside a
+#     docker container (another pid namespace) never inherits our env, so its
+#     slot cannot be read: it is listed as CONTAINER and counted apart
+#     (in_container=), never as slotted or unslotted.
+#   * A descendant that daemonizes while keeping the inherited lock fd keeps
+#     the slot held until it exits. --status names the holder label and cwd.
+#   * Containers started by `docker compose run` belong to dockerd; a SIGKILL
+#     of the whole tree can leave one running after the slot frees.
+#   * --status probes a lock with a non-blocking SHARED flock on a fresh fd; an
+#     acquirer racing that probe sees the slot busy for microseconds and simply
+#     tries the next slot or the next 2 s poll.
+#
+# Self-test: ai/test/test-slot/self-test.sh (discovered by harness-gate);
+# `test-slot --self-test` execs it.
+
+set -u -o pipefail
+
+PROG=test-slot
+# N: provisional, unmeasured -- DND-489 sets it from data.
+TEST_SLOT_N=3
+TEST_SLOT_N_BASIS="provisional, unmeasured"
+EXIT_USAGE=2
+EXIT_TIMEOUT=75
+POLL_S=2
+DEFAULT_WAIT_TIMEOUT_S=7200
+DEFAULT_HEARTBEAT_S=60
+QUEUE_GRACE_S=1
+WAITER_REAP_AGE_S=10
+EVENTS_MAX_BYTES=1048576
+
+usage() {
+  cat <<'TXT'
+Usage:
+  test-slot [--label TEXT] [--wait-timeout SECONDS] [--outcome-file PATH]
+            [--exclusive] -- CMD [ARGS...]
+  test-slot --status [--json]
+  test-slot --help | --self-test
+
+Run CMD once a machine-wide test slot is free (at most N heavy runs at once).
+CMD's argv, stdin, stdout, stderr, and exit code pass through unchanged.
+
+  --label TEXT          shown to waiters and in --status
+                        (default: "<repo or cwd basename> <CMD basename>")
+  --wait-timeout SECS   give up waiting after SECS (default 7200); exit 75
+  --outcome-file PATH   write `timeout` or `ran exit=<n>` (removed at start)
+  --exclusive           hold ALL N slots while CMD runs
+  --status [--json]     show N, holders, waiters, and UNSLOTTED heavy runs
+  --self-test           run the hermetic self-test suite
+
+Exit: CMD's code if it ran | 75 wait timed out, CMD never ran | 2 usage.
+Pool: ${XDG_STATE_HOME:-~/.local/state}/athena/test-slots/ (flock liveness).
+Invoke the main checkout's copy by absolute path: ~/dev/custom/ai/bin/test-slot
+TXT
+}
+
+# ============================================================ pure helpers
+# (no I/O; exercised directly by the self-test)
+
+# parse_n RAW — print RAW if it is a positive integer <= 64, else return 1.
+parse_n() {
+  [[ $1 =~ ^[1-9][0-9]{0,1}$ ]] || return 1
+  (($1 <= 64)) || return 1
+  printf '%s\n' "$1"
+}
+
+is_pos_int() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
+
+# outcome_line KIND [EXIT] — the one line --outcome-file carries.
+outcome_line() {
+  case $1 in
+    timeout) printf 'timeout\n' ;;
+    ran) printf 'ran exit=%s\n' "$2" ;;
+  esac
+}
+
+# pick_label DIR CMD0 — default label: "<basename DIR> <basename CMD0>".
+pick_label() { printf '%s %s\n' "${1##*/}" "${2##*/}"; }
+
+# json_str S — S as a JSON string literal (quotes included).
+json_str() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  if [[ $s == *[[:cntrl:]]* ]]; then
+    s=$(printf '%s' "$s" | LC_ALL=C tr -d '\000-\037\177')
+  fi
+  printf '"%s"' "$s"
+}
+
+# one_line S — S with newlines/tabs flattened, for a human-readable line.
+one_line() { local s=${1//$'\n'/ }; printf '%s' "${s//$'\t'/ }"; }
+
+# format_holder_line SLOT LABEL CWD SINCE PID EXCLUSIVE
+format_holder_line() {
+  local excl=""
+  [ "$6" = true ] && excl=" EXCLUSIVE"
+  printf 'slot %s: %s in %s since %s (pid %s, diagnostic)%s\n' \
+    "$1" "$(one_line "$2")" "$(one_line "$3")" "$4" "$5" "$excl"
+}
+
+# fmt_ms MS — milliseconds as seconds with 3 decimals.
+fmt_ms() { printf '%d.%03d' $(($1 / 1000)) $(($1 % 1000)); }
+
+# is_heavy_argv ARGV... — 0 when ARGV is a heavy run test-slot should wrap:
+#   * a prep-commit.sh run (argv0, or argv1 after a shell), or
+#   * a FULL `mix test` (no path argument) under mix/elixir/beam/a shell.
+# Anything naming test-slot is the wrapper itself, never a heavy run.
+is_heavy_argv() {
+  local -a v=("$@")
+  local n=${#v[@]} i j a0 a
+  ((n > 0)) || return 1
+  for a in "${v[@]}"; do [[ ${a##*/} == test-slot ]] && return 1; done
+  a0=${v[0]##*/}
+  [[ $a0 == prep-commit.sh ]] && return 0
+  if ((n > 1)) && [[ ${v[1]##*/} == prep-commit.sh ]]; then
+    case $a0 in sh | bash | dash | zsh | env) return 0 ;; esac
+  fi
+  case $a0 in
+    mix | elixir | beam | beam.smp | erl | erlexec | sh | bash | dash | zsh | env) ;;
+    *) return 1 ;;
+  esac
+  for ((i = 0; i < n - 1; i++)); do
+    [[ ${v[i]##*/} == mix && ${v[i + 1]} == test ]] || continue
+    for ((j = i + 2; j < n; j++)); do
+      a=${v[j]}
+      [[ $a == */* || $a == *.exs || $a == *.exs:* ]] && return 1
+    done
+    return 0
+  done
+  return 1
+}
+
+# unslotted_state NS_SELF NS_PID ENV_RC — classify a heavy run for --status:
+#   container  it lives in another pid namespace (docker does not pass our env
+#              in, so its slot cannot be read; never counted as unslotted)
+#   slotted    its environ carries ATHENA_TEST_SLOT_HELD (grep rc 0)
+#   unslotted  its environ lacks it (grep rc 1)
+#   unknown    its environ could not be read (never read as slotted)
+unslotted_state() {
+  if [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$2" ]; then
+    printf 'container\n'
+    return
+  fi
+  case $3 in
+    0) printf 'slotted\n' ;;
+    1) printf 'unslotted\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# ============================================================ side effects
+
+now_ms() { local t=${EPOCHREALTIME/./}; printf '%s\n' $((10#$t / 1000)); }
+iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+say() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+die_usage() { # die_usage MESSAGE FIX
+  printf '%s: %s\n' "$PROG" "$1" >&2
+  printf 'Fix: %s\n' "$2" >&2
+  exit "$EXIT_USAGE"
+}
+
+canon() { realpath -m -- "$1" 2>/dev/null || printf '%s\n' "$1"; }
+
+default_pool_dir() {
+  local base=${XDG_STATE_HOME:-}
+  if [[ $base != /* ]]; then
+    [ -n "${HOME:-}" ] || die_usage "HOME is unset; cannot locate the slot pool." \
+      "run with HOME set (the pool lives under \$HOME/.local/state/athena/test-slots)."
+    base="$HOME/.local/state"
+  fi
+  printf '%s/athena/test-slots\n' "$base"
+}
+
+# resolve_pool — sets POOL, N, HEARTBEAT_S from defaults and the seams.
+resolve_pool() {
+  local def seam
+  def=$(canon "$(default_pool_dir)")
+  POOL=$def
+  N=$TEST_SLOT_N
+  N_BASIS=$TEST_SLOT_N_BASIS
+  HEARTBEAT_S=$DEFAULT_HEARTBEAT_S
+  seam=${ATHENA_TEST_SLOT_DIR:-}
+  if [ -n "$seam" ]; then
+    POOL=$(canon "$seam")
+  fi
+  if [ -n "$seam" ] && [ "$POOL" != "$def" ]; then
+    if [ -n "${ATHENA_TEST_SLOTS+x}" ]; then
+      N=$(parse_n "$ATHENA_TEST_SLOTS") || die_usage \
+        "ATHENA_TEST_SLOTS='$ATHENA_TEST_SLOTS' is not a slot count." \
+        "set ATHENA_TEST_SLOTS to an integer 1..64, or unset it (it is a self-test seam; an invalid value never falls back)."
+      N_BASIS="test seam"
+    fi
+    if [ -n "${ATHENA_TEST_SLOT_HEARTBEAT+x}" ]; then
+      is_pos_int "$ATHENA_TEST_SLOT_HEARTBEAT" || die_usage \
+        "ATHENA_TEST_SLOT_HEARTBEAT='$ATHENA_TEST_SLOT_HEARTBEAT' is not a positive integer." \
+        "set it to whole seconds, or unset it (it is a self-test seam)."
+      HEARTBEAT_S=$ATHENA_TEST_SLOT_HEARTBEAT
+    fi
+  elif [ -n "${ATHENA_TEST_SLOTS+x}" ] || [ -n "${ATHENA_TEST_SLOT_HEARTBEAT+x}" ]; then
+    say "WARN ignoring ATHENA_TEST_SLOTS/ATHENA_TEST_SLOT_HEARTBEAT: they apply only with ATHENA_TEST_SLOT_DIR set to a non-default pool; the real pool uses N=$N."
+  fi
+}
+
+# pool_problem — print why an EXISTING pool path is unusable (empty if fine).
+pool_problem() {
+  local dir=$1 owner mode
+  if [ -L "$dir" ]; then printf 'is a symlink'; return; fi
+  if [ ! -d "$dir" ]; then printf 'is not a directory'; return; fi
+  owner=$(stat -c %u -- "$dir" 2>/dev/null) || { printf 'cannot be stat-ed'; return; }
+  mode=$(stat -c %a -- "$dir" 2>/dev/null) || { printf 'cannot be stat-ed'; return; }
+  if [ "$owner" != "$(id -u)" ]; then printf 'is owned by uid %s, not %s' "$owner" "$(id -u)"; return; fi
+  if [ "$mode" != 700 ]; then printf 'has mode %s, not 700' "$mode"; return; fi
+}
+
+refuse_pool() { # refuse_pool DIR PROBLEM
+  die_usage "slot pool $1 $2." \
+    "make it a real directory owned by you with mode 0700: \`chmod 700 '$1'\` (or remove it if it is not yours to use), then re-run."
+}
+
+ensure_pool() {
+  local problem sub
+  if [ ! -e "$POOL" ] && [ ! -L "$POOL" ]; then
+    mkdir -p -- "$(dirname -- "$POOL")" 2>/dev/null
+    mkdir -m 0700 -- "$POOL" 2>/dev/null || [ -d "$POOL" ] || die_usage \
+      "cannot create slot pool $POOL." \
+      "make its parent directory writable by you, or point XDG_STATE_HOME at a writable state dir."
+  fi
+  problem=$(pool_problem "$POOL")
+  [ -z "$problem" ] || refuse_pool "$POOL" "$problem"
+  sub="$POOL/waiters"
+  if [ ! -d "$sub" ]; then
+    mkdir -m 0700 -- "$sub" 2>/dev/null || [ -d "$sub" ] || die_usage \
+      "cannot create $sub." "check the permissions of $POOL (must be yours, mode 0700)."
+  fi
+}
+
+# lock_held FILE — 0 when some process holds a flock on FILE. Probes with a
+# non-blocking SHARED lock on a fresh open file description; never writes.
+lock_held() {
+  local fd
+  [ -e "$1" ] || return 1
+  { exec {fd}<"$1"; } 2>/dev/null || return 1
+  if flock -n -s "$fd"; then
+    exec {fd}<&-
+    return 1
+  fi
+  exec {fd}<&-
+  return 0
+}
+
+declare -A SLOT_FD=()
+
+# try_slot I — take slot I without blocking; record its fd in SLOT_FD[I].
+try_slot() {
+  local i=$1 fd
+  { exec {fd}>>"$POOL/slot-$i.lock"; } 2>/dev/null || return 1
+  if flock -n "$fd"; then
+    SLOT_FD[$i]=$fd
+    write_holder "$i"
+    return 0
+  fi
+  exec {fd}>&-
+  return 1
+}
+
+# try_acquire — normal: take any one free slot (sets SLOT). Exclusive: take
+# every free slot not yet ours; succeed once all N are ours.
+try_acquire() {
+  local i
+  if ((EXCLUSIVE)); then
+    for ((i = 1; i <= N; i++)); do
+      [ -n "${SLOT_FD[$i]:-}" ] || try_slot "$i" || true
+    done
+    ((${#SLOT_FD[@]} == N)) && SLOT=1 && return 0
+    return 1
+  fi
+  for ((i = 1; i <= N; i++)); do
+    if try_slot "$i"; then SLOT=$i; return 0; fi
+  done
+  return 1
+}
+
+write_holder() {
+  local i=$1 f="$POOL/slot-$1.holder" excl=false
+  ((EXCLUSIVE)) && excl=true
+  if printf '{"label":%s,"cwd":%s,"pid":%s,"started_at":"%s","exclusive":%s}\n' \
+    "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$(iso_now)" "$excl" >"$f.$$.tmp" 2>/dev/null; then
+    mv -f -- "$f.$$.tmp" "$f" 2>/dev/null || rm -f -- "$f.$$.tmp"
+  fi
+}
+
+# append_event EVENT SLOT WAITED_MS RAN_MS EXIT — one line to events.jsonl,
+# rotating past EVENTS_MAX_BYTES. A logging failure warns; it never changes
+# whether or how CMD runs.
+append_event() {
+  local fd size line excl=false
+  ((EXCLUSIVE)) && excl=true
+  line=$(printf '{"ts":"%s","event":"%s","slot":%s,"label":%s,"cwd":%s,"pid":%s,"exclusive":%s,"waited_s":%s,"ran_s":%s,"exit":%s}' \
+    "$(iso_now)" "$1" "${2:-null}" "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$excl" \
+    "${3:+$(fmt_ms "$3")}" "${4:+$(fmt_ms "$4")}" "${5:-null}")
+  line=${line//\"waited_s\":,/\"waited_s\":null,}
+  line=${line//\"ran_s\":,/\"ran_s\":null,}
+  if ! { exec {fd}>>"$POOL/events.lock"; } 2>/dev/null; then
+    say "WARN could not open $POOL/events.lock; event '$1' not logged. Fix: check $POOL is yours with mode 0700."
+    return 0
+  fi
+  if ! flock -w 5 "$fd"; then
+    exec {fd}>&-
+    say "WARN events.lock busy >5s; event '$1' not logged. Fix: look for a process wedged holding $POOL/events.lock."
+    return 0
+  fi
+  size=$(stat -c %s -- "$POOL/events.jsonl" 2>/dev/null || echo 0)
+  if ((size > EVENTS_MAX_BYTES)); then
+    mv -f -- "$POOL/events.jsonl" "$POOL/events.jsonl.1" 2>/dev/null
+  fi
+  printf '%s\n' "$line" >>"$POOL/events.jsonl" 2>/dev/null ||
+    say "WARN could not append to $POOL/events.jsonl. Fix: check disk space and that $POOL is writable."
+  exec {fd}>&-
+}
+
+# holder_lines — one human line per HELD slot (lock actually held).
+holder_lines() {
+  local i f fields
+  for ((i = 1; i <= N; i++)); do
+    lock_held "$POOL/slot-$i.lock" || continue
+    f="$POOL/slot-$i.holder"
+    if command -v jq >/dev/null 2>&1 &&
+      fields=$(jq -r '[.label, .cwd, .started_at, (.pid|tostring), (.exclusive|tostring)] | @tsv' "$f" 2>/dev/null) &&
+      [ -n "$fields" ]; then
+      local label cwd since pid excl
+      IFS=$'\t' read -r label cwd since pid excl <<<"$fields"
+      format_holder_line "$i" "$label" "$cwd" "$since" "$pid" "$excl"
+    else
+      printf 'slot %s: held (holder diagnostics unreadable at %s)\n' "$i" "$f"
+    fi
+  done
+}
+
+held_count() {
+  local i c=0
+  for ((i = 1; i <= N; i++)); do lock_held "$POOL/slot-$i.lock" && c=$((c + 1)); done
+  printf '%s\n' "$c"
+}
+
+# live_waiters — print each live waiter file (flock-held by its waiter).
+# reap_dead_waiters — remove waiter files no live process holds (skipping
+# very young ones, which may be between create and flock).
+live_waiters() {
+  local f
+  for f in "$POOL"/waiters/*.w; do
+    [ -e "$f" ] || continue
+    lock_held "$f" && printf '%s\n' "$f"
+  done
+}
+
+reap_dead_waiters() {
+  local f base epoch now fd
+  now=$(date +%s)
+  for f in "$POOL"/waiters/*.w; do
+    [ -e "$f" ] || continue
+    base=${f##*/}
+    epoch=${base#*-}
+    epoch=${epoch%.w}
+    [[ $epoch =~ ^[0-9]+$ ]] && ((now - epoch < WAITER_REAP_AGE_S)) && continue
+    { exec {fd}>>"$f"; } 2>/dev/null || continue
+    if flock -n "$fd"; then rm -f -- "$f"; fi
+    exec {fd}>&-
+  done
+}
+
+WAITER_FILE=""
+WAITER_FD=""
+register_waiter() {
+  [ -n "$WAITER_FILE" ] && return 0
+  reap_dead_waiters
+  WAITER_FILE="$POOL/waiters/$$-$(date +%s).w"
+  if { exec {WAITER_FD}>"$WAITER_FILE"; } 2>/dev/null && flock -n "$WAITER_FD"; then
+    printf '{"label":%s,"cwd":%s,"pid":%s,"since":"%s"}\n' \
+      "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$(iso_now)" >&"$WAITER_FD"
+  else
+    WAITER_FILE=""
+  fi
+}
+
+unregister_waiter() {
+  [ -n "$WAITER_FILE" ] || return 0
+  rm -f -- "$WAITER_FILE"
+  [ -n "$WAITER_FD" ] && exec {WAITER_FD}>&-
+  WAITER_FILE=""
+  WAITER_FD=""
+}
+
+ANNOUNCED=0
+announce_waiting() {
+  ((ANNOUNCED)) && return 0
+  ANNOUNCED=1
+  register_waiter
+  local held lines waiting
+  held=$(held_count)
+  lines=$(holder_lines)
+  waiting=$(live_waiters | wc -l)
+  {
+    printf '%s: WAITING for a slot -- pool %s, N=%s, %s held:\n' "$PROG" "$POOL" "$N" "$held"
+    [ -n "$lines" ] && printf '%s\n' "$lines" | sed 's/^/  /'
+    printf '  %s waiting (this run: %s)\n' "$waiting" "$(one_line "$LABEL")"
+    ((EXCLUSIVE)) && printf '  this run is --exclusive: it needs all %s slots\n' "$N"
+  } >&2
+  append_event waiting "" "$(($(now_ms) - START_MS))" "" ""
+}
+
+heartbeat() {
+  local waited_s=$((($(now_ms) - START_MS) / 1000))
+  say "still waiting ${waited_s}s for a slot; $(held_count) of $N held (pool $POOL)"
+}
+
+remaining_ms() { printf '%s\n' $((DEADLINE_MS - $(now_ms))); }
+
+write_outcome() { # write_outcome KIND [EXIT]
+  [ -n "$OUTCOME_FILE" ] || return 0
+  outcome_line "$@" >"$OUTCOME_FILE" 2>/dev/null ||
+    say "WARN could not write --outcome-file $OUTCOME_FILE. Fix: pass a path in a directory you own."
+}
+
+timeout_exit() {
+  local waited_ms=$(($(now_ms) - START_MS)) lines
+  lines=$(holder_lines)
+  {
+    printf '%s: TIMEOUT after %ss waiting for a slot (pool %s, N=%s); the command did NOT run.\n' \
+      "$PROG" "$((waited_ms / 1000))" "$POOL" "$N"
+    printf 'Fix: the pool stayed full for %ss. Holders:\n' "$((waited_ms / 1000))"
+    [ -n "$lines" ] && printf '%s\n' "$lines" | sed 's/^/  /'
+    printf '  If a holder above is wedged, stop that process; otherwise re-run later or pass a longer --wait-timeout. Never bypass the pool.\n'
+  } >&2
+  append_event timeout "" "$waited_ms" "" ""
+  write_outcome timeout
+  unregister_waiter
+  exit "$EXIT_TIMEOUT"
+}
+
+# acquire — take a slot (or all N with --exclusive), waiting in the queue.
+acquire() {
+  local qfd rem chunk last_hb nap next_hb
+  exec {qfd}>>"$POOL/queue.lock" || die_usage "cannot open $POOL/queue.lock." \
+    "check $POOL is yours with mode 0700 and writable."
+  if ! flock -n "$qfd" && ! flock -w "$QUEUE_GRACE_S" "$qfd"; then
+    # Others are queued ahead: block in the kernel on queue.lock.
+    announce_waiting
+    last_hb=$(now_ms)
+    while :; do
+      rem=$(remaining_ms)
+      ((rem > 0)) || timeout_exit
+      chunk=$(((rem + 999) / 1000))
+      ((chunk > HEARTBEAT_S)) && chunk=$HEARTBEAT_S
+      flock -w "$chunk" "$qfd" && break
+      if (($(now_ms) - last_hb >= HEARTBEAT_S * 1000)); then
+        heartbeat
+        last_hb=$(now_ms)
+      fi
+    done
+  fi
+  # Head of the queue: poll the slots at POLL_S, bounded by the deadline.
+  if ! try_acquire; then
+    announce_waiting
+    last_hb=$(now_ms)
+    while ! try_acquire; do
+      rem=$(remaining_ms)
+      ((rem > 0)) || timeout_exit
+      if (($(now_ms) - last_hb >= HEARTBEAT_S * 1000)); then
+        heartbeat
+        last_hb=$(now_ms)
+      fi
+      # Sleep until the next poll, heartbeat, or the deadline, whichever is
+      # first (never less than 1 ms: this loop cannot spin).
+      nap=$((POLL_S * 1000))
+      next_hb=$((last_hb + HEARTBEAT_S * 1000 - $(now_ms)))
+      ((next_hb < nap)) && nap=$next_hb
+      ((rem < nap)) && nap=$rem
+      ((nap < 1)) && nap=1
+      sleep "$(fmt_ms "$nap")"
+    done
+  fi
+  exec {qfd}>&-
+  unregister_waiter
+}
+
+# reentrant_slot — 0 when ATHENA_TEST_SLOT_HELD names a held slot of THIS pool.
+reentrant_slot() {
+  local held=${ATHENA_TEST_SLOT_HELD:-} hpool hslot
+  [ -n "$held" ] || return 1
+  hpool=${held%:*}
+  hslot=${held##*:}
+  [ "$(canon "$hpool")" = "$POOL" ] || return 1
+  if [[ $hslot =~ ^[1-9][0-9]*$ ]] && lock_held "$POOL/slot-$hslot.lock"; then
+    SLOT=$hslot
+    return 0
+  fi
+  say "WARN stale ATHENA_TEST_SLOT_HELD=$held (that slot is not held); taking a slot normally."
+  return 1
+}
+
+# in_tty_foreground — 0 when this process is in its terminal's foreground
+# process group (so a terminal ^C already reached CMD directly).
+in_tty_foreground() {
+  local stat rest pgrp tty tpgid
+  stat=$(cat "/proc/$$/stat" 2>/dev/null) || return 1
+  rest=${stat##*) }
+  # fields after comm: state ppid pgrp session tty_nr tpgid
+  read -r _ _ pgrp _ tty tpgid _ <<<"$rest"
+  [ "$tty" != 0 ] && [ "$pgrp" = "$tpgid" ]
+}
+
+CHILD=""
+forward() { [ -n "$CHILD" ] && kill -s "$1" "$CHILD" 2>/dev/null; }
+forward_int() { in_tty_foreground || forward INT; }
+
+# run_cmd — run CMD as a child that inherits the slot fd(s) and our stdin;
+# forward INT/TERM/HUP; return its exit code.
+run_cmd() {
+  local in rc prev=0
+  exec {in}<&0
+  "${CMD[@]}" <&"$in" {in}<&- &
+  CHILD=$!
+  exec {in}<&-
+  trap forward_int INT
+  trap 'forward TERM' TERM
+  trap 'forward HUP' HUP
+  while :; do
+    wait "$CHILD"
+    rc=$?
+    if ((rc == 127)) && ! kill -0 "$CHILD" 2>/dev/null && ((prev != 0)); then
+      rc=$prev
+      break
+    fi
+    ((rc > 128)) && kill -0 "$CHILD" 2>/dev/null && { prev=$rc; continue; }
+    break
+  done
+  trap - INT TERM HUP
+  return "$rc"
+}
+
+# ============================================================ status
+
+scan_unslotted() { # prints "pid<TAB>state<TAB>cwd<TAB>cmd", state unslotted|unknown|container
+  local d pid stat rest ppid cwd cmd st env_rc ns_self ns_pid
+  local -A matched=() parent=()
+  local -a argv
+  ns_self=$(readlink /proc/self/ns/pid 2>/dev/null)
+  for d in /proc/[0-9]*; do
+    [ -O "$d" ] || continue
+    pid=${d#/proc/}
+    [ "$pid" = "$$" ] && continue
+    argv=()
+    mapfile -d '' -t argv <"$d/cmdline" 2>/dev/null || continue
+    ((${#argv[@]})) || continue
+    is_heavy_argv "${argv[@]}" || continue
+    stat=$(cat "$d/stat" 2>/dev/null) || continue
+    rest=${stat##*) }
+    read -r _ ppid _ <<<"$rest"
+    matched[$pid]="${argv[*]}"
+    parent[$pid]=$ppid
+  done
+  for pid in "${!matched[@]}"; do
+    [ -n "${matched[${parent[$pid]}]+x}" ] && continue
+    grep -qza '^ATHENA_TEST_SLOT_HELD=' "/proc/$pid/environ" 2>/dev/null
+    env_rc=$?
+    ns_pid=$(readlink "/proc/$pid/ns/pid" 2>/dev/null)
+    st=$(unslotted_state "$ns_self" "$ns_pid" "$env_rc")
+    [ "$st" = slotted ] && continue
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "?")
+    cmd=$(one_line "${matched[$pid]}")
+    printf '%s\t%s\t%s\t%s\n' "$pid" "$st" "$cwd" "${cmd:0:200}"
+  done | sort -n
+}
+
+status() {
+  local initialised=true problem held=0 waiting=0 load1 nproc lines unslotted wfiles
+  local -a holders_json=() waiters_json=() uns_json=()
+  if [ ! -e "$POOL" ] && [ ! -L "$POOL" ]; then
+    initialised=false
+  else
+    problem=$(pool_problem "$POOL")
+    [ -z "$problem" ] || refuse_pool "$POOL" "$problem"
+  fi
+  load1=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo unknown)
+  nproc=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)
+  unslotted=$(scan_unslotted)
+  local provisional=false
+  [[ $TEST_SLOT_N_BASIS == provisional* ]] && provisional=true
+
+  if [ "$initialised" = true ]; then
+    held=$(held_count)
+    lines=$(holder_lines)
+    wfiles=$(live_waiters)
+    [ -n "$wfiles" ] && waiting=$(printf '%s\n' "$wfiles" | wc -l)
+  fi
+  local ucount=0 ccount=0 _p _st _rest
+  while IFS=$'\t' read -r _p _st _rest; do
+    [ -n "$_p" ] || continue
+    if [ "$_st" = container ]; then ccount=$((ccount + 1)); else ucount=$((ucount + 1)); fi
+  done <<<"$unslotted"
+
+  if ((JSON)); then
+    local i f w pid st cwd cmd
+    if [ "$initialised" = true ]; then
+      for ((i = 1; i <= N; i++)); do
+        lock_held "$POOL/slot-$i.lock" || continue
+        f="$POOL/slot-$i.holder"
+        holders_json+=("$(jq -c --argjson s "$i" '. + {slot: $s}' "$f" 2>/dev/null ||
+          printf '{"slot":%s,"label":null,"diagnostics":"unreadable"}' "$i")")
+      done
+      while IFS= read -r w; do
+        [ -n "$w" ] || continue
+        waiters_json+=("$(jq -c . "$w" 2>/dev/null || printf '{"label":null,"diagnostics":"unreadable"}')")
+      done <<<"$wfiles"
+    fi
+    while IFS=$'\t' read -r pid st cwd cmd; do
+      [ -n "$pid" ] || continue
+      uns_json+=("$(printf '{"pid":%s,"environ":"%s","cwd":%s,"cmd":%s}' "$pid" "$st" "$(json_str "$cwd")" "$(json_str "$cmd")")")
+    done <<<"$unslotted"
+    local IFS=,
+    printf '{"initialised":%s,"pool":%s,"n":%s,"n_basis":%s,"provisional":%s,"held":%s,"waiting":%s,"unslotted":%s,"in_container":%s,"load1":%s,"nproc":%s,"holders":[%s],"waiters":[%s],"unslotted_runs":[%s]}\n' \
+      "$initialised" "$(json_str "$POOL")" "$N" "$(json_str "$N_BASIS")" "$provisional" \
+      "$held" "$waiting" "$ucount" "$ccount" "$(json_str "$load1")" "$(json_str "$nproc")" \
+      "${holders_json[*]}" "${waiters_json[*]}" "${uns_json[*]}"
+    return 0
+  fi
+
+  if [ "$initialised" = false ]; then
+    printf 'N=%s (%s) pool not initialised at %s unslotted=%s in_container=%s load1=%s nproc=%s\n' \
+      "$N" "$N_BASIS" "$POOL" "$ucount" "$ccount" "$load1" "$nproc"
+  else
+    printf 'N=%s (%s) held=%s waiting=%s unslotted=%s in_container=%s load1=%s nproc=%s pool=%s\n' \
+      "$N" "$N_BASIS" "$held" "$waiting" "$ucount" "$ccount" "$load1" "$nproc" "$POOL"
+    [ -n "$lines" ] && printf '%s\n' "$lines"
+    local w label wcwd since wpid
+    while IFS= read -r w; do
+      [ -n "$w" ] || continue
+      if IFS=$'\t' read -r label wcwd since wpid < <(jq -r '[.label, .cwd, .since, (.pid|tostring)] | @tsv' "$w" 2>/dev/null) &&
+        [ -n "$label" ]; then
+        printf 'WAITING: %s in %s since %s (pid %s, diagnostic)\n' "$(one_line "$label")" "$wcwd" "$since" "$wpid"
+      else
+        printf 'WAITING: (waiter diagnostics unreadable at %s)\n' "$w"
+      fi
+    done <<<"$wfiles"
+  fi
+  local pid st cwd cmd
+  while IFS=$'\t' read -r pid st cwd cmd; do
+    [ -n "$pid" ] || continue
+    if [ "$st" = unknown ]; then
+      printf 'UNSLOTTED: %s %s %s (environ unreadable: unknown, not slotted)\n' "$pid" "$cwd" "$cmd"
+    elif [ "$st" = container ]; then
+      printf 'CONTAINER: %s %s %s (another pid namespace: its slot cannot be read; see the host-side run that launched it)\n' "$pid" "$cwd" "$cmd"
+    else
+      printf 'UNSLOTTED: %s %s %s\n' "$pid" "$cwd" "$cmd"
+    fi
+  done <<<"$unslotted"
+}
+
+# ============================================================ main
+
+main() {
+  local mode=run have_dd=0
+  LABEL=""
+  WAIT_TIMEOUT_S=$DEFAULT_WAIT_TIMEOUT_S
+  OUTCOME_FILE=""
+  EXCLUSIVE=0
+  JSON=0
+  CMD=()
+  local wait_raw=""
+  while (($#)); do
+    case $1 in
+      -h | --help) usage; exit 0 ;;
+      --self-test) mode=selftest ;;
+      --status) mode=status ;;
+      --json) JSON=1 ;;
+      --exclusive) EXCLUSIVE=1 ;;
+      --label | --wait-timeout | --outcome-file)
+        (($# >= 2)) || die_usage "$1 needs a value." "pass $1 VALUE before \`--\`."
+        case $1 in
+          --label) LABEL=$2 ;;
+          --wait-timeout) wait_raw=$2 ;;
+          --outcome-file) OUTCOME_FILE=$2 ;;
+        esac
+        shift
+        ;;
+      --label=*) LABEL=${1#*=} ;;
+      --wait-timeout=*) wait_raw=${1#*=} ;;
+      --outcome-file=*) OUTCOME_FILE=${1#*=} ;;
+      --) shift; have_dd=1; CMD=("$@"); break ;;
+      *) die_usage "unknown argument '$1'." \
+        "put test-slot's own flags first, then \`--\`, then the command: test-slot [--label L] -- CMD ARGS (see --help)." ;;
+    esac
+    shift
+  done
+
+  # A stale outcome file must never survive to be read as this run's result.
+  if [ -n "$OUTCOME_FILE" ]; then
+    rm -f -- "$OUTCOME_FILE" 2>/dev/null
+    [ -d "$(dirname -- "$OUTCOME_FILE")" ] && [ -w "$(dirname -- "$OUTCOME_FILE")" ] || die_usage \
+      "--outcome-file $OUTCOME_FILE: its directory is missing or not writable." \
+      "pass a path in an existing directory you own (namespace it per unit of work)."
+  fi
+
+  case $mode in
+    selftest)
+      local suite
+      suite="$(cd "$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")/.." && pwd)/test/test-slot/self-test.sh"
+      [ -x "$suite" ] || die_usage "self-test suite missing: $suite." "restore ai/test/test-slot/self-test.sh (chmod +x)."
+      exec "$suite"
+      ;;
+    status)
+      resolve_pool
+      status
+      exit 0
+      ;;
+  esac
+
+  if [ -n "$wait_raw" ]; then
+    is_pos_int "$wait_raw" || die_usage "--wait-timeout '$wait_raw' is not a positive integer." \
+      "pass whole seconds, e.g. --wait-timeout 3600."
+    WAIT_TIMEOUT_S=$wait_raw
+  fi
+  ((have_dd)) || die_usage "no \`--\` before the command." \
+    "write: test-slot [flags] -- CMD ARGS (the \`--\` is required)."
+  ((${#CMD[@]})) || die_usage "no command after \`--\`." "write: test-slot [flags] -- CMD ARGS."
+  if [ -z "$LABEL" ]; then
+    local top
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=$PWD
+    LABEL=$(pick_label "$top" "${CMD[0]}")
+  fi
+
+  resolve_pool
+  ensure_pool
+  START_MS=$(now_ms)
+  DEADLINE_MS=$((START_MS + WAIT_TIMEOUT_S * 1000))
+  SLOT=""
+
+  local rc
+  if reentrant_slot; then
+    ((EXCLUSIVE)) && say "note: already inside slot $SLOT; --exclusive not re-applied (nested run)."
+    append_event reentrant "$SLOT" 0 "" ""
+    run_cmd
+    rc=$?
+    write_outcome ran "$rc"
+    exit "$rc"
+  fi
+
+  trap 'unregister_waiter; exit 130' INT
+  trap 'unregister_waiter; exit 143' TERM
+  trap 'unregister_waiter; exit 129' HUP
+  acquire
+  trap - INT TERM HUP
+
+  local waited_ms=$(($(now_ms) - START_MS)) ran_start
+  append_event acquired "$SLOT" "$waited_ms" "" ""
+  if ((ANNOUNCED)); then
+    if ((EXCLUSIVE)); then
+      say "all $N slots acquired (exclusive) after $(fmt_ms "$waited_ms")s"
+    else
+      say "slot $SLOT/$N acquired after $(fmt_ms "$waited_ms")s"
+    fi
+  fi
+
+  export ATHENA_TEST_SLOT_HELD="$POOL:$SLOT"
+  ran_start=$(now_ms)
+  run_cmd
+  rc=$?
+  append_event released "$SLOT" "" "$(($(now_ms) - ran_start))" "$rc"
+  write_outcome ran "$rc"
+  exit "$rc"
+}
+
+# Sourced (by the self-test) → define functions only.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

@@ -63,6 +63,7 @@ GUARD_BINS = %w[
   critic-eval
   admiral-eval
   variant-eval
+  test-slot
 ].freeze
 
 def hook_guards(hooks_dir = HOOKS_DIR)
