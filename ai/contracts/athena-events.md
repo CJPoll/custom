@@ -889,8 +889,8 @@ the design (DND-411).
 "A label was *added*" vs "*removed*", "an assignee was *set*" vs "*cleared*" are
 transitions of a value's **direction**. A metadata-only source (a Notion webhook,
 with no before/after — see *Sender verification and payload completeness*) does
-not carry direction, and the platform holds **no prior state** to compute it
-from. Therefore the platform MUST NOT emit direction-resolved value-change types
+not carry direction, and the ingress and router hold **no prior state** to
+compute it from. Therefore the platform MUST NOT emit direction-resolved value-change types
 (`notion.label.added` / `notion.label.removed`) for such a source: it emits a
 coarse **current-state** event, and the **consumer derives direction** by diffing
 that current state against its own held set (see *The consumer owns membership*).
@@ -1514,7 +1514,9 @@ holds no set and diffs no membership: a
 **consumer** that tracks a working set catches any departure the fast path missed
 through its own authoritative re-sync (see *The consumer owns membership*), so
 set correctness never depends on any platform-side set reconciliation. The
-platform holds no set and reconciles none.
+router and its backstop hold no set and reconcile none. The priority index holds
+its own set and runs its own re-sync (*Priority index* → *Re-sync*); it does not
+rely on this backstop for departures.
 
 ### Harness-emit
 
@@ -1799,7 +1801,7 @@ Two owner-facing schema fields carried by every rule:
   disposition and dead-letter*) — and MAY be re-enabled. **Re-enabling a rule is
   lossless**: a routing rule is stateless, so it simply resumes matching present
   events; it holds no set to reconcile. Deleting a rule likewise removes only the
-  rule — there is no platform-held set to tear down.
+  rule — no set is held for a rule, so there is none to tear down.
 - **`dedupe window`** — an **owner-facing rate control**, deliberately distinct
   from the correctness-guaranteeing **consumer idempotency** (see *Idempotency is
   per (event, rule)*). Consumer idempotency makes a **redelivered same delivery**
@@ -1855,7 +1857,7 @@ There is **one** rule kind: a **stateless routing/notify rule**. Its predicate
 matches the present event → render + escape → dispatch to an adapter. It fires
 per event and holds no state — the "DM me when assigned" case, and the "forward
 the owner's ticket changes to the flaky lane's inbox channel" case alike. The
-platform maintains **no** membership set and computes **no** add/retract
+router maintains **no** membership set and computes **no** add/retract
 transition; a consumer that needs a working set derives and holds it itself (see
 *The consumer owns membership*).
 
@@ -2060,7 +2062,7 @@ A predicate tree matches **ONLY the present** — the current event plus its
 enriched payload. It MUST NEVER read prior state; there is no before-value in the
 event to compare against. "Was-a-member / now-not" — deleted-that-had-the-label,
 label-removed, assignee-changed-out — is a **direction**, and direction is **not
-expressible as a predicate**: the platform holds no prior state, so it emits a
+expressible as a predicate**: the router holds no prior state, so it emits a
 coarse current-state event and the **consumer** derives the direction by diffing
 against its own held set (see *The consumer owns membership*).
 
@@ -2096,11 +2098,25 @@ tenant-blind: it takes the owner's rules as input and contains none.
 
 ## The consumer owns membership
 
-The platform holds **no membership state** and computes **no** add/retract
+The router holds **no membership state** and computes **no** add/retract
 transition. A consumer that needs a working set — the flaky admiral is the
 first-pass instance — owns that set in its **own agent state**, and this contract
 specifies the discipline it follows. This is where platform state is most
-tempting; it is deliberately kept out of the platform.
+tempting; it is deliberately kept out of the platform. The one platform-held view
+is the priority index (*Priority index*): a consumer of persisted events inside
+the server, not the router, which keeps and re-syncs its own set under the same
+discipline (*Priority index* → *Re-sync*).
+
+**Later (2026-09-24):** this section said the **platform** holds no membership
+state, and its closing paragraph said no platform-held view is built at all ("a
+later re-architecture, and no hook, seam, or 'designed-for-now' interface for it is
+built now"). Superseded for one view (DND-430): the priority index. The router
+still keeps no membership state, and a lane consumer still owns its own set. The
+same narrowing, from the platform to the router (or the ingress and router),
+was made wherever this contract said the platform holds no set or no prior
+state: *Enumerated first-pass event types*, *Poller (fallback only)*, *Enabled
+flag and dedupe window*, *One rule kind — the stateless routing rule* and
+*Predicates match the present*.
 
 1. **Hold the working set** in the consumer's own state, keyed by `entity_id`,
    with the display fields the consumer needs (it records them when it adds an
@@ -2133,15 +2149,8 @@ This state lives client-side (the consumer's own action brief), never delivered
 as an instruction in a message. A consumer that **cannot** hold its own state (a
 dashboard, an email recipient) is **out of first-pass scope** — it would need a
 platform-held view. The one platform-held view this contract specifies is the
-priority index (*Priority index*): a consumer of persisted events inside the
-server, not the router. No rule reads it, and no other platform-held view, hook
+priority index (above). No rule reads it, and no other platform-held view, hook
 or seam is built.
-
-**Later (2026-09-24):** this paragraph said no platform-held view is built at
-all ("a later re-architecture, and no hook, seam, or 'designed-for-now'
-interface for it is built now"). Superseded for one view (DND-430): the
-priority index. Everything else here still holds: the router keeps no
-membership state, and a lane consumer still owns its own set.
 
 ---
 
@@ -3470,7 +3479,7 @@ app the event arrived on, never from the payload.
   - `failed:<cause>`: the event should have been an item and is not. The
     causes are `no-source-ref` (*Item identity and `source_ref`*),
     `forbidden-field` (*The storage boundary*), `malformed-payload` and
-    `retries-exhausted`.
+    `retries-exhausted`. The re-sync adds `resync-failed` (*Re-sync*).
 - **A skip is counted, and a failure is recorded and reported**
   (`~/.claude/CLAUDE.md` → *A failed lookup must never look like an empty
   one*). Skips are counted per (owner, event type, cause), and the priorities
@@ -3492,6 +3501,37 @@ does not overwrite the row. An event with an equal revision, or with none, is
 applied in processing order. Notion's revision is minute-granular, so two
 same-minute events processed out of order can leave the older state until the
 item's next change. The index claims no finer ordering than that.
+
+### Re-sync
+
+Events only accelerate the index. Like any consumer that holds a set (*The
+consumer owns membership*), it re-syncs against the source of truth, because a
+dropped event would otherwise leave an item that left its source `active` and
+leasable. The Notion reconciliation backstop re-emits missed changes but not
+departures (*Poller (fallback only)*), so the index cannot rely on it.
+
+- **A supervised re-sync reads every `active` item of a source that has a
+  source to read,** on an owner-configured cadence (default 60 min), each item
+  in `Athena.PerRow.run/2`. For `notion_personal`, `notion_work` and
+  `action_item` it is the on-demand read the Notion ingress already uses
+  (*Sender verification and payload completeness*). The read is mapped through
+  the same allow-list as an event (*The storage boundary*), and its result is
+  applied by the same rules as an event carrying that revision (*States*).
+  DND-439 declares the forge read. `slack_ask` and `manual` items have no
+  source state to re-read, and only the owner or a lease closes them.
+- **What the read finds decides the close.** A page the source reports
+  archived, trashed or definitively not found closes `closed_by:
+  source_deleted`. A page that is no longer in the database its subscription
+  binds, or whose subscription binding the owner removed, closes `closed_by:
+  source_out_of_scope`. A transient read failure is retried under a bounded
+  budget. After that the item fails with `resync-failed` in the index-failure
+  record, and it stays as it was.
+- **Each run is recorded on its own,** per (owner, source): when it ran, how
+  many items it read, how many it closed, and how many failed. A run that read
+  zero items still records that. The priorities page shows each source's last
+  run, and flags a source whose last run is older than twice its cadence as
+  `re-sync overdue`. So "nothing left its source" is a checked fact, not an
+  unobserved one.
 
 ### Item identity and `source_ref`
 
@@ -3613,8 +3653,9 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 | `active` → `done` | the lease holder, through `priority_complete` | `closed_by: lease_complete` |
 | `active` → `done` | the owner | `closed_by: owner` |
 | `active` → `done` | ingest, when the source status is terminal | `closed_by: source_status` |
-| `active` → `done` | ingest, on the source's delete event | `closed_by: source_deleted` |
-| `done` → `active` (reopen) | ingest, for `closed_by: source_status`, on an event whose revision is later than the row's and whose status is non-terminal | |
+| `active` → `done` | ingest, on the source's delete event; or the re-sync, when the source reports the item gone | `closed_by: source_deleted` |
+| `active` → `done` | the re-sync, when the item left its subscription's scope | `closed_by: source_out_of_scope` |
+| `done` → `active` (reopen) | ingest, for `closed_by` `source_status` or `source_out_of_scope`, on an event whose revision is later than the row's and whose status is non-terminal | |
 | `done` → `active` (reopen) | ingest, for `closed_by: source_deleted`, on `notion.ticket.undeleted` only | |
 
 - **Ingest never undoes an owner's decision or a completed lease.** It never
@@ -3778,6 +3819,10 @@ would keep a dead session's lease alive.
   be silent that long while its fleet waits, and a shorter window would hand
   its item to a second session. The default lease window equals the lost
   window. A change to either moves the other.
+- **A session silent past the window loses its lease,** whether or not it is
+  healthy. An interactive session left idle is the common case. Its
+  `priority_release` or `priority_complete` then answers `not_leased`, so the
+  holder sees the loss instead of assuming the lease.
 - **`session_ended` releases every lease the session holds** at once. A
   cleanly ended session gives its items back without waiting out the window.
 - A lease that is not live makes its item eligible again. Eligibility is

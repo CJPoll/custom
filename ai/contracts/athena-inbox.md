@@ -1059,6 +1059,11 @@ per-adapter escaper contract are that document's, and are referenced by name
 rather than duplicated here. This section is only the inbox
 `log`-channel end of the delivery.
 
+**Later (2026-09-24):** the parenthesis above says "the platform holds no
+membership state". `athena-events.md` now says the **router** holds none, and
+names one platform-held view, the priority index (*The consumer owns
+membership*; *Priority index*). Nothing in this contract depends on it.
+
 Nothing about the `log` kind's on-disk shape, framing, doorbell, consumption
 state, or retention changes for a platform producer. Every rule in *Channel
 kind: `log`* — *Writer obligations*, *Reader obligations*, *State file*,
