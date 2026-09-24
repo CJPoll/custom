@@ -102,3 +102,11 @@ tools:
   # is classified destructive. FLAGGED for owner ratification (DND-172); shipped
   # destructive because over-restrictive is the safe direction for C2's gating.
   notion-athena-mcp:       { class: destructive, reason: mcp }
+  # test-slot (DND-485) runs an arbitrary caller-supplied CMD once a machine
+  # slot is free. Its own writes are local pool state, but by worst-case
+  # capability it executes whatever CMD is: classifying it lower would let a
+  # phase that permits only readOnly/idempotent tools run `test-slot -- <any
+  # destructive command>`. Destructive until a phase gate can classify by the
+  # wrapped CMD; DND-486 (wiring into integration-gate / captain Verify) must
+  # account for this.
+  test-slot:               { class: destructive, reason: wrapper }
