@@ -3630,6 +3630,12 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   again after the delete must not bring the item back. A delete that carries a
   revision sets `source_revision`, and an `undeleted` older than it is not
   applied.
+- **A close needs an event no older than the row.** An older event is not
+  applied at all, so it cannot close an item. An event with an equal revision
+  can: within one minute, a redelivered terminal status can close an item that
+  was just reopened. That is the safe direction, and it is deliberate. A wrong
+  close drops an item from the queue until its next change. A wrong reopen
+  hands finished work to a second session.
 - **Terminal statuses are owner config, per source.** For `notion_personal`
   the default is `Done` and `Cancelled`. `notion_work` gets its default from
   DND-438. A status outside the source's declared set is stored and treated as
