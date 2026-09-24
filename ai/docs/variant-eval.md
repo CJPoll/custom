@@ -14,10 +14,12 @@ push / adopt / `--update-baseline` code path; "adoption" is a human choosing to
 merge the variant, and "revert" is the human simply not merging (the tool never
 writes to the harness).
 
-**Later (2026-09-24):** this line names only three of the five verdicts;
-**BLOCKED** and **UNMEASURED** were added after this doc was written (see the
-verdict table below and its own 2026-09-24 annotation) and `--help` now lists
-all five. This line is not rewritten (dated record); see the table.
+**Later (2026-09-24):** this line names only three of the five verdicts. It
+always undercounted **BLOCKED** (documented below since the 2026-09-19
+original, gate short-circuit paragraph and the verdict table's first row);
+**UNMEASURED** (DND-504) was genuinely added later, per the table's own
+2026-09-24 annotation. `--help` now lists all five. This line is not rewritten
+(dated record); see the table for the full and current set.
 
 It runs entirely within git history: for each of {baseline, variant} it creates
 a short-lived `git worktree add --detach`, runs the corpus there, collects the

@@ -111,9 +111,12 @@ KEEP_LABEL = "KEEP — pending human gate (requires gate-green + explicit human 
 
 # The canonical verdict set (mirrors the `verdict` function's five branches
 # and render_proposal's `case res[:verdict]`/`if ... :blocked` handling).
-# --help builds its verdict list from this, and the self-test checks --help
-# against it, so a sixth verdict added to `verdict` without updating this
-# constant fails loudly instead of silently drifting out of --help (DND-506).
+# --help builds its verdict list from this constant, and the self-test checks
+# both --help against it AND this constant against the symbols the self-test's
+# own verdict(...) calls actually produce (va/vb/vc/ve/vu below) — so a sixth
+# verdict branch exercised by a new self-test case, but not added here, fails
+# loudly instead of silently drifting out of --help (DND-506). It does NOT by
+# itself prove `verdict` has no unexercised branch; that still needs a case.
 VERDICT_LABELS = {
   keep: "KEEP",
   revert: "REVERT",
@@ -1113,6 +1116,13 @@ def self_test
   end
   fail.("--help must state the DND-505 exit-2-on-bad-argument rule") \
     unless htxt.include?("exits 2") && htxt.include?("refused")
+  # Tie VERDICT_LABELS to the symbols `verdict` actually produced above (va =
+  # REVERT, vb = KEEP, vc = INCONCLUSIVE, ve = BLOCKED, vu = UNMEASURED): a
+  # verdict branch exercised here that VERDICT_LABELS doesn't name would leave
+  # --help silently short one entry.
+  exercised = [va, vb, vc, ve, vu].uniq.sort
+  fail.("VERDICT_LABELS #{VERDICT_LABELS.keys.sort.inspect} must match the verdicts self-test's own verdict(...) " \
+        "calls produced #{exercised.inspect}") unless exercised == VERDICT_LABELS.keys.sort
 
   # In-process: the parser behind main, including the cases that carry
   # --variant (unsafe to run black-box on a parser that ignores flags).
