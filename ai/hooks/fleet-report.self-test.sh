@@ -6,7 +6,8 @@
 #
 # [ticket] cases: the throttle holds (one report per 60 s per (session,
 # agent_id)); the hook never adds latency (it returns while the server is still
-# sleeping); a failed detached report is surfaced with its Fix:.
+# sleeping). Also: a failed detached report is logged durably with its Fix:
+# and announced at the next SessionStart on stdout (session context).
 
 set -u
 
@@ -70,6 +71,11 @@ case "${ERR}" in *"session_id"*"Fix: "*) ok "no session_id says so with Fix:" ;;
 case "$(cat "${TMP}/err")" in *"not absolute"*"Fix: "*) ok "relative XDG_STATE_HOME says so with Fix:" ;; *) bad "relative XDG_STATE_HOME says so with Fix:" ;; esac
 eq "none of those reached the server" "$(fleet_log_count)" "0"
 
+LOG="${XDG_STATE_HOME}/athena/fleet/report-failures.log"
+logn() { local c; c="$(cat "${LOG}.1" "${LOG}" 2>/dev/null | grep -c .)"; printf '%s\n' "${c:-0}"; }
+eq "the two refusals above were logged durably" "$(logn)" "2"
+rm -f -- "${LOG}" "${LOG}.1"
+
 echo "== hook: SessionStart / SessionEnd"
 git init -q "${TMP}/repo"
 jq -n --arg r "$(realpath "${TMP}/repo/.git")" '{v: 1, repo: $r, channels: {}}' > "${ATHENA_INBOX_ROOT}/projects/demo.json"
@@ -116,35 +122,47 @@ eq "PostToolUse writes nothing on stdout" "${OUT}" ""
 settle 1
 fleet_respond '{"status":202,"body":{"ok":true}}'
 
-echo "== hook: a failed background report is surfaced once"
+echo "== hook: a failed background report is recorded and announced"
+before="$(logn)"
 fleet_point_at "http://127.0.0.1:$(fleet_closed_port)/mcp"
 : > "${PIDS}"
 hook "$(post fail001 athena-captain)"
+eq "PostToolUse stays silent on stdout about a failure" "${OUT}" ""
 settle 1
-if [ -s "${SEEN}/${SID}.last-error" ]; then ok "an unreachable server leaves the session's last-error"
-else bad "an unreachable server leaves the session's last-error"; fi
-case "$(cat "${SEEN}/${SID}.last-error" 2>/dev/null)" in *"could not reach"*"Fix: "*) ok "last-error is fleet-report's own Fix: line" ;; *) bad "last-error is fleet-report's own Fix: line" ;; esac
+eq "an unreachable server appends one line to the failure log" "$(logn)" "$((before + 1))"
+line="$(tail -n 1 "${LOG}")"
+case "${line}" in *"${SID}"*"session_seen"*"could not reach"*"Fix: "*) ok "the line names the session, the kind and fleet-report's own Fix:" ;; *) bad "the line names the session, the kind and fleet-report's own Fix:" "${line}" ;; esac
 fleet_point_at "http://127.0.0.1:${SERVER_PORT}/mcp"
-hook "$(post fail001 athena-captain)"
-eq "not due yet: the error waits for the next due report" "${ERR}" ""
-touch -d "@$(( $(date +%s) - 61 ))" "${SEEN}/${SID}.fail001.stamp"
-hook "$(post fail001 athena-captain)"
-eq "the surfacing call still exits 0" "${RC}" "0"
-case "${ERR}" in *"earlier background report failed"*"Fix: "*) ok "the next due call prints the earlier failure with its Fix:" ;; *) bad "the next due call prints the earlier failure with its Fix:" "${ERR}" ;; esac
-if [ -e "${SEEN}/${SID}.last-error" ]; then bad "a surfaced error is removed (printed once)"; else ok "a surfaced error is removed (printed once)"; fi
-settle 2
+: > "${PIDS}"
+hook "$(jq -n -c --arg s "${SID}" --arg c "${TMP}/repo" '{hook_event_name: "SessionStart", session_id: $s, cwd: $c}')"
+settle 1
+case "${OUT}" in *"background fleet registry report(s) failed"*"could not reach"*"report-failures.log"*"Fix: "*) ok "the next SessionStart announces it on stdout (session context), with the log path and Fix:" ;; *) bad "the next SessionStart announces it on stdout (session context), with the log path and Fix:" "${OUT}" ;; esac
+eq "announcing does not delete the log line" "$(logn)" "$((before + 1))"
+hook "$(jq -n -c --arg s "${SID}" --arg c "${TMP}/repo" '{hook_event_name: "SessionStart", session_id: $s, cwd: $c}')"
+eq "a later SessionStart does not announce the same failure twice" "${OUT}" ""
+hook '{"hook_event_name":"PostToolUse","cwd":"/"}'
+case "$(tail -n 1 "${LOG}")" in *"hook"*"no usable session_id"*"Fix: "*) ok "a refusal by the hook itself is logged too" ;; *) bad "a refusal by the hook itself is logged too" "$(tail -n 1 "${LOG}")" ;; esac
+hook "$(jq -n -c --arg s "${SID}" --arg c "${TMP}/repo" '{hook_event_name: "SessionStart", session_id: $s, cwd: $c}')"
+case "${OUT}" in *"1 background fleet registry report(s) failed"*"no usable session_id"*) ok "and announced at the next SessionStart" ;; *) bad "and announced at the next SessionStart" "${OUT}" ;; esac
+settle 3
 
 echo "== hook: the detached report is bounded by timeout"
 fleet_respond '{"status":202,"body":{"ok":true},"delay_s":4}'
 : > "${PIDS}"
 t0="$(date +%s)"
-( export FLEET_HOOK_TIMEOUT_S=1 FLEET_MAX_TIME_S=30; printf '%s' "$(post slow001 athena-captain)" | "${HOOK}" 2>/dev/null )
+mkdir -p "${TMP}/tmpd"
+( export FLEET_HOOK_TIMEOUT_S=1 FLEET_MAX_TIME_S=30 TMPDIR="${TMP}/tmpd"; printf '%s' "$(post slow001 athena-captain)" | "${HOOK}" 2>/dev/null )
 settle 1
 el=$(( $(date +%s) - t0 ))
 if [ "${el}" -lt 4 ]; then ok "the detached reporter was killed at its 1 s limit (${el} s)"; else bad "the detached reporter was killed at its 1 s limit (${el} s)"; fi
-case "$(cat "${SEEN}/${SID}.last-error" 2>/dev/null)" in *"did not finish within 1s"*"Fix: "*) ok "a timeout is recorded as its own Fix: line" ;; *) bad "a timeout is recorded as its own Fix: line" "$(cat "${SEEN}/${SID}.last-error" 2>/dev/null)" ;; esac
-leftover="$(find "${SEEN}" -name '*.tmp' | head -n 1)"
-eq "the trap removed the detached reporter's temp file" "${leftover}" ""
+case "$(tail -n 1 "${LOG}")" in *"did not finish within 1s"*"Fix: "*) ok "a timeout is logged as its own Fix: line" ;; *) bad "a timeout is logged as its own Fix: line" "$(tail -n 1 "${LOG}")" ;; esac
+# The killed fleet-report finishes its in-flight curl (bash defers the TERM
+# trap until the child returns), then its EXIT trap removes its temp dir.
+for i in $(seq 1 200); do
+  [ -z "$(find "${TMP}/tmpd" -mindepth 1 | head -n 1)" ] && break
+  sleep 0.05
+done
+eq "no temp file or dir survives the killed report (traps ran)" "$(find "${TMP}/tmpd" -mindepth 1 | head -n 3)" ""
 fleet_respond '{"status":202,"body":{"ok":true}}'
 
 echo "== hook: the token"

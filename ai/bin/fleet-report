@@ -79,6 +79,11 @@ done
 # shellcheck source=../lib/fleet/manager.sh
 . "${AI}/lib/fleet/manager.sh"
 
+# A report killed mid-request (the hook's timeout) still removes its temp dir.
+FLEET_POST_TMP=""
+trap '[ -n "${FLEET_POST_TMP}" ] && rm -rf -- "${FLEET_POST_TMP}"' EXIT
+trap 'exit 143' TERM INT HUP
+
 sub="" session_id="${CLAUDE_CODE_SESSION_ID:-}" cwd="${PWD}" agent_id="" agent_type="" run_id=""
 missions_file="" state="" scope_label="" reason="" dry_run="" given=" "
 

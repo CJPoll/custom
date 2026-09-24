@@ -116,6 +116,8 @@ fleet_post() {
   names_safe_curl_config_value "${url}" || { FLEET_POST_REASON="the server URL contains a quote, backslash, whitespace or control character"; return 1; }
   names_safe_curl_config_value "${token}" || { FLEET_POST_REASON="the machine token contains a quote, backslash, whitespace or control character"; return 1; }
   w="$(mktemp -d 2>/dev/null)" || { FLEET_POST_REASON="could not create a private temp dir"; return 1; }
+  # The caller's EXIT trap removes this if we are killed mid-request.
+  FLEET_POST_TMP="${w}"
   chmod 700 "${w}"
   names_safe_curl_config_value "${w}" || { rm -rf "${w}"; FLEET_POST_REASON="the temp dir path (from \$TMPDIR) is not safe to put in a curl config"; return 1; }
   printf '%s' "${body}" > "${w}/req.json"
@@ -137,6 +139,7 @@ fleet_post() {
   FLEET_CURL_RC=$?
   FLEET_RESPONSE="$(head -c 4096 "${w}/resp" 2>/dev/null)"
   rm -rf "${w}"
+  FLEET_POST_TMP=""
   return 0
 }
 
@@ -151,13 +154,67 @@ fleet_state_dir() {
   printf '%s/athena/fleet\n' "${base}"
 }
 
-# fleet_seen_dir -- the throttle stamps and per-session last-error files. A
+# fleet_seen_dir -- the throttle stamps. A
 # subdirectory, so nothing here can collide with the control cache
 # (<fleet>/<claude_session_id>.json, DND-443).
 fleet_seen_dir() {
   local d
   d="$(fleet_state_dir)" || return 2
   printf '%s/seen\n' "${d}"
+}
+
+# --- the failure log ----------------------------------------------------------
+# A report the hook sends in the background has nobody to print to: hook stderr
+# on exit 0 reaches neither the model nor, outside verbose mode, the human. So
+# every such failure is APPENDED to one machine-wide log, which is never
+# truncated by being read. The SessionStart hook announces lines it has not
+# announced before (a marker holds the last announced epoch) on its stdout,
+# which Claude Code adds to the new session's context.
+#
+# Line format: <epoch>\t<iso-utc>\t<session_id or ->\t<kind>\t<message with Fix:>
+
+FLEET_FAILURE_LOG_MAX_BYTES=262144
+
+# fleet_failure_log_path -- <fleet>/report-failures.log (status 2 if the state
+# dir is unusable).
+fleet_failure_log_path() {
+  local d
+  d="$(fleet_state_dir)" || return 2
+  printf '%s/report-failures.log\n' "${d}"
+}
+
+# fleet_record_failure <session_id> <kind> <message>
+# Appends one line under an flock, rotating the log to `.1` (one generation)
+# past FLEET_FAILURE_LOG_MAX_BYTES. Status 2 when the log cannot be written.
+fleet_record_failure() {
+  local sid="${1:--}" kind="$2" msg="$3" log now size
+  log="$(fleet_failure_log_path)" || return 2
+  mkdir -p -- "${log%/*}" 2>/dev/null || return 2
+  now="$(date +%s)"
+  msg="$(printf '%s' "${msg}" | tr '\t\n' '  ')"
+  (
+    exec 8>>"${log}.lock" || exit 2
+    flock -w 5 8 || exit 2
+    size="$(stat -c %s -- "${log}" 2>/dev/null || echo 0)"
+    if [ "${size}" -gt "${FLEET_FAILURE_LOG_MAX_BYTES}" ]; then mv -f -- "${log}" "${log}.1" || exit 2; fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "${now}" "$(date -u -d "@${now}" +%Y-%m-%dT%H:%M:%SZ)" "${sid}" "${kind}" "${msg}" >> "${log}" || exit 2
+  )
+}
+
+# fleet_failures_since <epoch>
+# Prints every logged failure line newer than <epoch>, oldest first, across the
+# rotated generation and the live log.
+fleet_failures_since() {
+  local log since="${1:-0}"
+  log="$(fleet_failure_log_path)" || return 2
+  cat -- "${log}.1" "${log}" 2>/dev/null | awk -F'\t' -v m="${since}" '$1 ~ /^[0-9]+$/ && $1 > m'
+}
+
+# fleet_surfaced_marker_path -- the epoch of the last failure line announced.
+fleet_surfaced_marker_path() {
+  local d
+  d="$(fleet_state_dir)" || return 2
+  printf '%s/report-failures.surfaced\n' "${d}"
 }
 
 # fleet_mtime <path> -- epoch mtime, or nothing when absent.

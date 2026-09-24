@@ -192,6 +192,17 @@ fleet_missions_problem() {
   return 1
 }
 
+# fleet_failure_notice <count> <latest-log-line> <log-path>
+# The one line the SessionStart hook adds to a new session's context when
+# background reports failed since the last announcement. Empty for count 0.
+fleet_failure_notice() {
+  local n="$1" latest="$2" log="$3" when kind msg
+  [ "${n}" -gt 0 ] 2>/dev/null || return 0
+  IFS=$'\t' read -r _ when _ kind msg <<<"${latest}"
+  printf 'fleet-report: %s background fleet registry report(s) failed since the last notice; latest at %s (%s): %s -- Full log: %s. Fix: act on the latest line'"'"'s Fix:, then check the log; these reports are advisory and never block the fleet.\n' \
+    "${n}" "${when:-?}" "${kind:-?}" "${msg:-?}" "${log}"
+}
+
 # --- body builders ----------------------------------------------------------
 # Each prints one compact JSON object and nothing else. Optional fields are
 # OMITTED when empty (the closed schema has no null for them), with one

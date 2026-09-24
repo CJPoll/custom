@@ -190,7 +190,10 @@ line with `Fix:`, and the exit code says which failure it was:
 - `2`: usage.
 
 Note the failure in your `## Log` and carry on. The reports are upserts, so the
-next status change re-sends the whole scope.
+next status change re-sends the whole scope. The hooks' own background reports
+cannot print to anyone: their failures go to
+`$XDG_STATE_HOME/athena/fleet/report-failures.log`, and the next session start
+announces them in its context.
 
 ---
 

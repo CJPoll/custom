@@ -218,6 +218,23 @@ fleet_throttle_claim "s1.a1" "${now}"; eq "throttle: due again after 60 s" "$?" 
 eq "throttle: a claim held by a concurrent caller is refused" "$?" "1"
 ( export XDG_STATE_HOME=relative/state; fleet_throttle_claim "s1.a1" "${now}" ); eq "throttle: relative XDG_STATE_HOME is refused (2)" "$?" "2"
 
+FLOG="${XDG_STATE_HOME}/athena/fleet/report-failures.log"
+fleet_record_failure s1 session_seen "$(printf 'fleet-report: x\ty\nz. Fix: do it')"
+line="$(tail -n 1 "${FLOG}")"
+eq "failure log: one line, 5 tab-separated fields (tabs/newlines in the message flattened)" "$(printf '%s' "${line}" | awk -F'\t' '{print NF}')" "5"
+eq "failure log: fields are session, kind, message" "$(printf '%s' "${line}" | cut -f3-5)" "$(printf 's1\tsession_seen\tfleet-report: x y z. Fix: do it')"
+first_epoch="$(cut -f1 <<<"${line}")"
+eq "failures since 0: the line" "$(fleet_failures_since 0 | grep -c .)" "1"
+eq "failures since its own epoch: nothing (already announced)" "$(fleet_failures_since "${first_epoch}" | grep -c .)" "0"
+( FLEET_FAILURE_LOG_MAX_BYTES=10; fleet_record_failure s2 session_seen "second. Fix: y" )
+if [ -s "${FLOG}.1" ] && [ "$(grep -c . "${FLOG}")" = "1" ]; then ok "failure log: rotates to .1 past its size cap"; else bad "failure log: rotates to .1 past its size cap"; fi
+eq "failures since 0 spans the rotated generation" "$(fleet_failures_since 0 | grep -c .)" "2"
+( export XDG_STATE_HOME=relative; fleet_record_failure s1 k "m" ); eq "failure log: relative XDG_STATE_HOME is refused (2)" "$?" "2"
+n="$(fleet_failure_notice 2 "$(tail -n 1 "${FLOG}")" "${FLOG}")"
+case "${n}" in "fleet-report: 2 background fleet registry report(s) failed"*"second. Fix: y"*"${FLOG}"*"Fix: "*) ok "notice: count, latest message, log path, Fix:" ;; *) bad "notice: count, latest message, log path, Fix:" "${n}" ;; esac
+eq "notice: nothing for zero failures" "$(fleet_failure_notice 0 "" "${FLOG}")" ""
+rm -f "${FLOG}" "${FLOG}.1"
+
 # ---------------------------------------------------------------------------
 echo "== fleet-report CLI (fake server)"
 
