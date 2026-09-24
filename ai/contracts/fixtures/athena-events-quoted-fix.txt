@@ -8,8 +8,10 @@
 #   - here, by ai/contracts/test/self-test.sh: every such span in each listed
 #     section must equal these lines exactly, and no unpinned one may appear;
 #   - in gen_saas, by apps/athena/test/athena/events/harness_emit/fix_text_test.exs
-#     (origination) and apps/athena/test/athena/events/rules_fix_text_test.exs
-#     (rule save-time), which assert the shipped strings equal these.
+#     (origination), apps/athena/test/athena/events/rules_fix_text_test.exs
+#     (rule save-time), and apps/athena/test/athena/machines/owner_from_auth_test.exs
+#     (machine create/update body owner_id, DND-423), which assert the shipped
+#     strings equal these.
 # Nothing checks the two repos against each other (separate CI, separate
 # landing). Changing a line means changing the contract, this file, the
 # gen_saas code, and its gen_saas test together.
@@ -49,3 +51,22 @@ template slot '{<path>}' names a field-path that is not in the union of this rul
 # the rendered reason equals this line (placeholders included), and that a real
 # drain deny carries it filled in. No gen_saas side.
 Fix: fleet session <claude_session_id> is draining (<reason>, until <until>; basis <basis>) — this spawn was refused, not failed: do not retry it and do not do its work in-line; run the drain protocol, then wait for the session to return to run (override on the fleet page to force it).
+
+@section Mechanism vs config boundary, and both-ends-or-dark
+# Create authority: any body owner_id on machine create/update (DND-423). gen_saas
+# emits this sentence verbatim at the end of its refusal message (after one
+# sentence of context), pinned by owner_from_auth_test.exs and
+# apps/athena/test/athena/ui/api/machine_controller_test.exs.
+Fix: a machine-token registration's owning account is stamped from the authenticated session, not the request body — re-issue authenticated as the account that will own this machine.
+# Delivery-time target-bind re-assertion. NOT YET MATCHED: gen_saas emits different
+# text (DND-411 sweep, "wrong text"); pinned here only until the DND-423 remainder
+# decides which side is the design.
+Fix: delivery refused — target machine <id> no longer resolves to this rule's owner (deregistered or re-owned). Re-author the rule against a machine registered to its owner.
+# Re-owning an already-bound machine id. NOT YET EMITTED: ownership is immutable
+# in gen_saas and no re-register path exists (DND-411 sweep, "not implemented");
+# pinned here only (DND-423 remainder).
+Fix: machine id <id> is already bound to another account; the binding is immutable in place. Deregister it (authenticated as its current owner, which invalidates dependent rules) before re-registering it under a new owner.
+# Caller-supplied return address. NOT YET MATCHED: gen_saas's
+# RejectDerivedIdentityParams emits different text (DND-411 sweep, "wrong text");
+# pinned here only (DND-423 remainder).
+Fix: the return address is stamped server-side from the authenticated machine token, not supplied by the caller — remove the caller-supplied return address and re-post.

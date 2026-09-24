@@ -2755,10 +2755,24 @@ Therefore:
   because it cannot obtain a token bound to another account's machine. This is the
   **owner-from-auth invariant** (see *Rule ownership is stamped from the
   authenticated author*) applied at machine-token issuance — it is what makes the
-  target-bind sound rather than circular. A create/issuance whose body-supplied
-  owner differs from the authenticated account is refused: `Fix: a machine-token
+  target-bind sound rather than circular. A create or update whose request body
+  carries **any** `owner_id` — whatever its value, the authenticated account's own
+  included — is refused (`422`), never silently dropped: `Fix: a machine-token
   registration's owning account is stamped from the authenticated session, not the
   request body — re-issue authenticated as the account that will own this machine.`
+  The owner is always stamped from the authenticated caller; a client never
+  supplies an identity the server derives (the same rule the machine-token routes
+  apply to a body `owner_id`, `machine_id` or `return_to`). Token issuance
+  (`POST /api/machines/:id/token`) reads no request body at all, so it has no body
+  owner to refuse.
+
+  **Later (2026-09-24):** this refused only a body-supplied owner that *differed
+  from* the authenticated account. Superseded (DND-423): any body `owner_id` is
+  refused, the caller's own included, because the field is not an input and its
+  presence is the error whatever it names. gen_saas had been silently dropping it
+  on the user-authenticated create/update paths (safe, but a silently ignored
+  identity field is one a caller believes it set); it now refuses with the quote
+  above, preceded by one sentence of context.
 
   **The issuance and custody MECHANISM is server-side** (gen_saas machine-token /
   secret custody, **GS-4**; Notion token custody, **GS-8**) — see *Secret
