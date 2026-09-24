@@ -1129,18 +1129,15 @@ def self_test
   fail.("source must invoke the exec library exactly once (the guarded site), found #{exec_calls}") \
     unless exec_calls == 1
 
-  # DND-505: code loaded with require_relative runs in this process, so it is
-  # held to the same rule — no exec primitive of any kind (the one guarded
-  # call site stays in this file). A require_relative whose target is not a
-  # plain string literal cannot be checked, so it fails rather than passing.
-  req_sites = toks.each_index.select { |i| toks[i][1] == :on_ident && toks[i][2] == "require_relative" }
-  req_sites.each do |i|
-    lit = toks[(i + 1)..(i + 4)].find { |t| t[1] == :on_tstring_content }
-    unless lit
-      fail.("require_relative at line #{toks[i][0][0]} has no string-literal target the containment check can read")
-      next
-    end
-    lib = File.expand_path("#{lit[2]}.rb", __dir__)
+  # DND-505: every first-party lib this process has loaded runs in-process, so
+  # it is held to the same rule: no exec primitive of any kind (the one guarded
+  # call site stays in this file). The set is read from $LOADED_FEATURES, the
+  # files actually loaded, so any require form is covered (require_relative,
+  # `require File.join(AI_DIR, "lib", ...)`). A lexer over require call sites
+  # would miss whichever form it did not parse.
+  lib_dir = File.join(AI_DIR, "lib") + File::SEPARATOR
+  libs = $LOADED_FEATURES.select { |f| f.start_with?(lib_dir) }
+  libs.each do |lib|
     ltoks = Ripper.lex(File.read(lib))
     lids = ltoks.select { |t| t[1] == :on_ident }.map { |t| t[2] }
     fail.("#{lib} must contain no backtick/%x command literal") if ltoks.any? { |t| t[1] == :on_backtick }
@@ -1149,8 +1146,12 @@ def self_test
         if lids.include?(prim)
     end
   end
-  fail.("variant-eval must load ai/lib/strict_argv.rb (its CLI parser)") \
-    unless req_sites.any? { |i| toks[(i + 1)..(i + 4)].any? { |t| t[2] == "../lib/strict_argv" } }
+  # The loaded set must be non-empty and name the libs this file requires: an
+  # empty or wrongly-rooted set would make the loop above check nothing.
+  %w[strict_argv.rb eval_score.rb].each do |want|
+    fail.("containment must lex #{lib_dir}#{want}, but it is not in the loaded set #{libs.inspect}") \
+      unless libs.include?(File.join(AI_DIR, "lib", want))
+  end
 
   if ok
     puts "variant-eval: self-test OK"
@@ -1165,7 +1166,7 @@ def self_test
          "mutation command; command_allowed? must deny every merge/commit/push/forge/--update-baseline argv; " \
          "all execution must go through the single guarded `capture`; and each side's T2 run must pass " \
          "admiral-eval --agent-file <its worktree>/#{ADMIRAL_AGENT_REL}. An unknown flag or a value flag with no " \
-         "value must exit 2 naming it, and a require_relative'd lib must hold no exec primitive (DND-505)."
+         "value must exit 2 naming it, and every loaded ai/lib file must hold no exec primitive (DND-505)."
     1
   end
 end
