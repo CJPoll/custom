@@ -13,6 +13,10 @@
 # Nothing checks the two repos against each other (separate CI, separate
 # landing). Changing a line means changing the contract, this file, the
 # gen_saas code, and its gen_saas test together.
+#
+# A line whose comment says NOT YET EMITTED is pinned here only. The comment
+# names the ticket that ships the emitter and pins its side; until then the
+# contract quote is that ticket's obligation, not shipped text.
 
 @section Which event types an ingress kind may originate
 # family-level non-member (an unmodeled fleet.* value; registration cannot allow it)
@@ -21,6 +25,11 @@ Fix: emit one of the enumerated harness-emit types (<permitted types, comma-sepa
 Fix: register "<type>" for this machine's origination set (owner-editable, no code change), then retry.
 # platform-originated (fleet.machine.*)
 Fix: stop emitting <type> — it is platform-originated (only the server's reachability sweeper emits it) and no machine token may originate it, whatever its registration says; to act on reachability, write a rule on the platform's own event.
+# platform-originated (fleet.session.control_changed). NOT YET EMITTED: gen_saas
+# DND-441 adds the type to the platform-originated set, emits this text, and adds
+# it to harness_emit/fix_text_test.exs. Until then gen_saas refuses the type with
+# the family-level non-member text (the first line of this section).
+Fix: stop emitting fleet.session.control_changed — it is platform-originated (only the server emits it, when a session's control state changes) and no machine token may originate it, whatever its registration says; to pause or resume a session, use the owner's control on the fleet page.
 
 @section Payload fields and their types per event type
 # unknown field-path (e.g. a leaf a delete-only type does not carry)
@@ -33,3 +42,9 @@ unknown event type "<type>" in this rule's event_type(s) — it is not a member 
 @section A slot's field-path binds at save time, exactly as a predicate's does
 # misspelled template slot
 template slot '{<path>}' names a field-path that is not in the union of this rule's declared event_type(s)' payload schemas — the same save-time binding a predicate field-path gets. Fix: correct the spelling (valid fields: <valid fields, comma-separated>); or add the event_type that carries it. A misspelled slot otherwise renders empty forever — an invisible content drop.
+
+@section Layer 1: the drain guard hook
+# the drain guard's deny reason (the caller sees it as `PreToolUse:Agent hook error: <reason>`).
+# NOT YET EMITTED: the harness side is ai/hooks/fleet-drain-guard.sh (DND-443), whose
+# --self-test must assert its deny reason equals this line. No gen_saas side.
+Fix: fleet session <claude_session_id> is draining (<reason>, until <until>; basis <basis>) — this spawn was refused, not failed: do not retry it and do not do its work in-line; run the drain protocol, then wait for the session to return to run (override on the fleet page to force it).

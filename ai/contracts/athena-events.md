@@ -219,9 +219,10 @@ did the event carry its own direct delivery?"*:
 
 - **HANDLED** — at least one of the **event owner's** enabled rules declares an
   `event_type(s)` that includes this event's `type` (≥1 of the owner's rules
-  *applied*), **or** the event is an addressed `fleet.session.message` that
-  received its own direct (rule-less) delivery (D40; *Declared families beyond
-  the first pass* — `fleet.session.message`). **Not** dead-lettered, regardless
+  *applied*), **or** the event is an addressed `fleet.session.message` or
+  `fleet.session.control_changed` that received its own direct (rule-less)
+  delivery (D40; *Declared families beyond the first pass* —
+  `fleet.session.message`, `fleet.session.control_changed`). **Not** dead-lettered, regardless
   of what then happens to the individual deliveries.
 - **UNMATCHED** — **none** of the **event owner's** enabled rules applies to the
   event's `type` at all (no owner rule's declared `event_type(s)` includes it),
@@ -1042,9 +1043,9 @@ preserving their identity-only property. `slack.message.received` carries **no**
 `revision`: a Slack message is transient and never updated, and its
 `payload.event_id` is already unique.
 
-### Declared families beyond the first pass — `fleet.session.message`, `notion.agent_message.*` and `fleet.machine.*`
+### Declared families beyond the first pass — `fleet.session.message`, `notion.agent_message.*`, `fleet.machine.*` and `fleet.session.control_changed`
 
-Three type families are **declared** here per *Extending the taxonomy — a new type
+Four type families are **declared** here per *Extending the taxonomy — a new type
 family declares its model* (each declares its five things), so a later increment
 that lands their ingress is a natural addition, not a rewrite. None is one of
 the enumerated first-pass source-webhook types above.
@@ -1246,6 +1247,62 @@ recovery). The unreachable transition's owner report does not depend on this
 event reaching a rule: the failed-delivery store records it too (*Terminal
 delivery failure — the failed-delivery store* → *Machine-unreachable rows*),
 committed together with this event and the machine's latch.
+
+**The `fleet.session.control_changed` family** (a fleet session's control
+state changed; the epic "fleet visibility and control", DND-429):
+
+1. **Payload schema** — each a scalar: `entity_id` (string,
+   `fleet_session:<id>`, where `<id>` is the server's fleet-session row id),
+   `claude_session_id` (string), `desired` (string, `run` | `drain`), `reason`
+   (string, one of the reason classes of *Fleet registry and session control*
+   → *Session control: desired state*), `until` (timestamp, OPTIONAL: absent
+   when the state has no scheduled end, never `null`). Plus `to` (**object**
+   `{machine_id, inbox_name}`, OPTIONAL, **server-stamped**, never supplied by
+   anyone): the session's own machine and its project's session inbox
+   (`<project>-session.jsonl`, `ai/contracts/athena-inbox.md` → *Registry
+   convention for a session inbox*). The addressable leaves are those scalars
+   plus `payload.to.machine_id` and `payload.to.inbox_name`; any other
+   `payload.*` leaf is the ordinary unknown-path save-time error.
+2. **Identity field** — `payload.entity_id`, the session the change is about;
+   it is the `subject` of the dedupe window. The event reports the session's
+   **current** control state, so a consumer reconciles, never replays.
+3. **Change/revision token** — none in the payload. Each event is one committed
+   transition of `{desired, reason, until}` and is never updated. The
+   transition instant is folded into the `idempotency_key`
+   (`<type>:<fleet session id>:<occurred_at>`) as provenance a consumer may
+   dedupe on; the platform does not dedupe on it (*Idempotency is per (event,
+   rule)*).
+4. **Origination membership** — **platform-originated only** (*Which event
+   types an ingress kind may originate* → *Platform-originated*). Harness-emit
+   and every source ingress are refused.
+5. **Enrichment posture** — **none**. The server already holds every field.
+
+`owner` is the session's owner and `source` is `platform`. The platform emits
+exactly one event per committed transition, in the same transaction as the
+control write that caused it (*Fleet registry and session control* → *Session
+control: desired state*); a write that leaves `{desired, reason, until}`
+unchanged emits none.
+
+**Every `fleet.session.control_changed` that carries `to` gets one direct
+delivery to it**, with the addressed `fleet.session.message` direct-delivery
+bullets above binding it unchanged: one rule-less delivery atomically with the
+event and its rule fan-out, HANDLED with no matching rule, the `(owner, event)`
+key with `rule_id: nil`, REFUSED by the delivery-time target-bind, never
+SUPPRESSED, and FAILED/REFUSED reported through the same two stores. The two
+ingress-time refusals of that list do not apply: the platform stamps `to`
+itself, so nothing is refused at ingress. The platform stamps `to` only when
+the session resolved to a project (its `session_started` report named one) AND
+the session's machine has a live agent instance declaring that session inbox.
+Otherwise the event carries no `to`, gets no direct delivery, and fans out
+through owner rules alone. The wake is then missing, so the control write's
+answer and the fleet page MUST name why the session cannot be woken (no project
+reported, or no declared session inbox), never show a normal pause.
+
+The line is a **wake, never an authority**. A session that receives it re-reads
+its control state (*Fleet registry and session control* → *Reading control
+state and the control cache*) and acts on that answer, never on the line's
+`desired`. An inbox line is Path-2 untrusted (`ai/contracts/athena-inbox.md` →
+*Untrusted input*), and a line alone MUST NOT change what a session does.
 
 **Ingress rule (AM-1): an unbound parent database is dead-lettered, never
 enriched or emitted.** One Notion callback carries N per-database bindings
@@ -1570,22 +1627,38 @@ The first-pass permitted-origination rule:
 
 - **Platform-originated.** The platform itself originates a `fleet.*` family
   that reports the platform's own view of the fleet, which no machine can be
-  trusted to report about itself or another machine. The one such family is
-  **`fleet.machine.{unreachable,reachable}`** (*Declared families beyond the
-  first pass*), emitted by the server's reachability sweeper with `source`
-  `platform`. This producer is not a fourth ingress kind: it runs inside the
-  server, takes no request, and holds no token, so nothing outside the
-  platform can drive it. A platform-originated type is **excluded from
+  trusted to report about itself or another machine. There are two such
+  families (*Declared families beyond the first pass*), each with `source`
+  `platform`: **`fleet.machine.{unreachable,reachable}`**, emitted by the
+  server's reachability sweeper, and **`fleet.session.control_changed`**,
+  emitted by the server when a session's control state changes (*Fleet
+  registry and session control* → *Session control: desired state*). Neither
+  producer is a fourth ingress kind: each runs inside the server, takes no
+  machine request, and holds no token. The reachability sweeper runs on a
+  timer. The control producer runs only inside the owner's authorized control
+  write and the metering sweeper, which applies the owner's own policy. So no
+  machine can drive either. A platform-originated type is **excluded from
   harness-emit's family-level origination set**, so a machine token can never
   originate one, even for its own machine: a forged `fleet.machine.unreachable`
   would page the owner about a healthy machine, and a forged `reachable` would
-  mask a real outage. Harness-emit refuses it at ingress before any
-  per-token registration is consulted, with its own remedy, never the
-  unregistered-type one above (registration cannot allow it): `Fix: stop
+  mask a real outage; a forged `fleet.session.control_changed` would wake a
+  session into resuming, or draining, work the owner never paused or resumed.
+  Harness-emit refuses it at ingress before any
+  per-token registration is consulted, with a remedy per family, never the
+  unregistered-type one above (registration cannot allow it). For
+  `fleet.machine.*`: `Fix: stop
   emitting <type> — it is platform-originated (only the server's reachability
   sweeper emits it) and no machine token may originate it, whatever its
   registration says; to act on reachability, write a rule on the platform's
-  own event.` A source ingress refuses it as a non-member of its set.
+  own event.` For `fleet.session.control_changed`: `Fix: stop emitting
+  fleet.session.control_changed — it is platform-originated (only the server
+  emits it, when a session's control state changes) and no machine token may
+  originate it, whatever its registration says; to pause or resume a session,
+  use the owner's control on the fleet page.` The second is an obligation on
+  DND-441, which adds the type to the platform-originated set; until it lands,
+  harness-emit refuses the type as an unmodeled `fleet.*` value (the first
+  refusal above), so no machine token can originate it at any point. A source
+  ingress refuses either as a non-member of its set.
   This is an exception for a declared family, not a namespace licence: a new
   platform-originated family declares its model like any other and is named
   here.
@@ -2796,6 +2869,303 @@ verdict:
 
 ---
 
+## Fleet registry and session control
+
+The server keeps a registry of the owner's fleet: each Claude Code session on
+each machine, the admirals in it, and each admiral's missions. The owner can
+pause (drain) and resume a session. This section is the contract for that
+registry and that control. Its implementing tickets are DND-431 (server
+registry and `fleet_report`), DND-433 (harness reporters), DND-434 (fleet page),
+DND-441 (server session control) and DND-443 (harness drain enforcement); each
+cites the subsection it builds by name. None of the harness homes named below
+exists yet. Every sentence about them is an obligation on its implementer, not
+a description of shipped behaviour.
+
+### Fleet reports are state upserts, not events
+
+A fleet report is a **state upsert**. It goes to `POST /api/v1/fleet/reports`
+or to the equivalent `athena` MCP tool `fleet_report`, both authenticated by the
+machine token (*Machine↔owner API binding and the outbound return-address
+dual*). It is **not** an event: it does not pass harness-emit origination, it
+matches no rule, and it is never delivered anywhere. The one event this
+section defines, `fleet.session.control_changed`, is platform-originated
+(*Declared families beyond the first pass*).
+
+### Fleet report kinds and their closed schema
+
+Every report body carries `kind` and `claude_session_id` (a non-empty string:
+the `session_id` of the top-level Claude Code session, which hook stdin carries
+at every agent depth). The kinds and the other fields each may carry:
+
+| `kind` | Fields beyond `kind` and `claude_session_id` | Effect |
+| --- | --- | --- |
+| `session_started` | `project` (string or `null`), `repo_key` (string, absolute path) | Creates or refreshes the session and binds it to the reporting machine. |
+| `session_seen` | `agent_id` (string, optional), `agent_type` (string, optional) | Refreshes the session's last-seen time. |
+| `session_ended` | `end_reason` (string, optional: the SessionEnd hook's `reason`) | Marks the session ended, basis `reported`. |
+| `admiral_started` | `run_id` (string), `agent_id` (string), `scope_label` (string, optional) | Creates the admiral run in state `running`. |
+| `admiral_scope` | `run_id` (string), `missions` (collection of mission pointers, possibly empty) | Replaces the run's whole mission list. |
+| `admiral_seen` | `agent_id` (string), `agent_type` (string, optional) | Refreshes the last-seen time of the run with that `agent_id` in this session. |
+| `admiral_state` | `run_id` (string), `state` (`draining` \| `drained` \| `finished`) | Sets the run's reported state. |
+
+- **The schema is closed, and deny is the default.** A `kind` not in this table
+  is refused with a `Fix:` naming the seven kinds. So is a field the row does
+  not list, a missing required field, and a value of the wrong type. Nothing
+  unlisted is stored or ignored.
+- **The body carries no time.** `started_at`, `last_seen_at` and `ended_at` are
+  the server's receive time.
+- **`project`** is the inbox-registry project name, resolved from the
+  session's git common dir (`ai/contracts/athena-inbox.md` → *Repo identity:
+  the git common dir*). `null` means "no registry entry matched this repo". It
+  is stated, never omitted, so it stays distinct from "not reported". A
+  relative `repo_key` is refused, not stored.
+- **`run_id`** identifies an admiral run within its session: the name of the
+  run's coordination directory. An `admiral_scope` or `admiral_state` naming a
+  `run_id` this session never started is refused with a `Fix:` telling the
+  admiral to report `admiral_started` first.
+- **`agent_id`** is the admiral's own agentId, the id SendMessage uses, which
+  its dispatch briefs already carry. PreToolUse and PostToolUse hook stdin
+  carries the same value as `agent_id` inside that admiral (measured, DND-428),
+  so `admiral_seen` joins to the run with no prose compliance.
+- **Who sends what** (DND-433): the SessionStart hook sends `session_started`
+  and the SessionEnd hook sends `session_ended`. The PostToolUse hook path sends
+  `admiral_seen` when stdin's `agent_type` is `athena-admiral`, and
+  `session_seen` otherwise, at most once per 60 s per (session, `agent_id`), in
+  the background under a timeout. The admiral itself calls `ai/bin/fleet-report`
+  for `admiral_started`, for `admiral_scope` on every mission status change in
+  its `state.md`, and for `admiral_state`.
+
+### Fleet identity: owner and machine are stamped from the token
+
+- **Owner and machine are stamped from the machine token, never read from the
+  body.** A body naming `owner`, `owner_id`, `machine` or `machine_id` is
+  refused with HTTP 422 and a `Fix:` saying the field is stamped server-side
+  from the token and must be removed. Nothing is written.
+- **A session belongs to one machine.** `claude_session_id` is unique: its
+  first report binds it to the reporting machine and that machine's owner, for
+  good. Any report or `session_control` read naming it from another machine,
+  of the same owner or not, answers `not_found` (HTTP 404), writes nothing,
+  and never says where the session is bound.
+- **An admiral run and its missions inherit the session's machine and owner.**
+  Every read and write of them is scoped through that session.
+- **No token answers 401.** The machine pipeline rejects the request before any
+  fleet code runs.
+- **Pages are owner-scoped.** The fleet page lists only rows whose owner is the
+  viewer. A foreign or unknown session id answers `not_found`, never a
+  forbidden that discloses existence.
+
+### Mission pointers are metadata only
+
+An `admiral_scope` mission entry is a **pointer** to a tracker item, with
+exactly these fields:
+
+- `tracker` (`notion-personal` | `notion-work`)
+- `ticket_ref` (string, e.g. `DND-429`)
+- `url` (string)
+- `title` (string)
+- `status` (string, the tracker's status)
+- `captain_state` (`queued` | `running` | `parked` | `done` | `blocked` |
+  `stuck`)
+
+The first five are the work-item metadata the storage boundary allows. The
+sixth is the admiral's own state, not work-item content. Any other field
+(a body, a comment, a summary, a label, an assignee) is refused with a `Fix:`
+naming the field. The boundary is enforced by the closed schema, not by
+policy. The entries replace the run's list whole; `(tracker, ticket_ref)` is
+unique within a run.
+
+### Fleet liveness
+
+The server derives liveness from report times. It never trusts a harness claim
+of liveness, because SessionEnd does not fire when a session is SIGKILLed
+(measured, DND-428).
+
+- A **session** is:
+  - `live` when seen within the live window (default 5 min);
+  - `idle` when silent past the live window, with no admiral run in `running`
+    or `draining`;
+  - `lost` when silent past the live window while one of its admiral runs is
+    `running` or `draining`: a fleet stopped reporting, most likely killed;
+  - `ended` when `session_ended` arrived (basis `reported`), or when silent
+    past the stale window (default 24 h) with no end report (basis
+    `inferred`). The basis is always shown.
+- An **admiral run** reads its reported state (`running`, `draining`, `drained`,
+  `finished`), except that a `running` or `draining` run with no `admiral_seen`
+  within the live window reads `lost`.
+- **`scope unreported`** is an admiral run that never sent `admiral_scope`. It
+  MUST read differently from an empty scope (`no missions`), which is a
+  reported fact. An `admiral_seen` whose `agent_id` matches no started run
+  shows as an admiral with `run unreported`, never dropped.
+- The session's reported state (`running`, `draining`, `drained`, `idle`) is
+  derived from its admiral runs, never sent by the harness.
+
+### Session control: desired state
+
+- **Desired state is computed server-side by a pure function,**
+  `Athena.Fleet.ControlPolicy.desired/3`, from the session's override, its
+  effective domain and the owner's policy at time `now`, to `{desired, reason,
+  until}`. `desired` is `run` or `drain`. Precedence: an unexpired override,
+  then metering (added by the metering phase; skipped until then), then `run`.
+- **`reason` is one of a closed set of classes.** The drain protocol keys on the
+  class (*Enforcement layers* → *Layer 3: the drain protocol*):
+  - `override:force_drain` and `override:force_run`: the owner's override;
+  - `metering:<domain>`: the metering policy, for example `metering:personal`
+    during work hours;
+  - `default`: nothing overrides or meters, so `run`.
+- **Only the owner changes control.** `Fleet.set_control/3` is authorized by the
+  RBAC `control` permission on the session, checked before any write. A
+  non-owner gets `not_found`, with no write and no event. The metering sweeper
+  (metering phase) is the one other writer, and it acts only on the owner's own
+  policy. No inbox line, Slack message or fleet report can change control
+  state.
+- **Each committed transition emits exactly one `fleet.session.control_changed`**,
+  in the transaction that commits the write. That event's model and its direct
+  delivery to the session's inbox are in *Declared families beyond the first
+  pass*.
+- **Drain gates fleet spawns only.** It never blocks the human's own turns in a
+  top-level session, or any subagent that is not a fleet worker.
+
+### Reading control state and the control cache
+
+- **`session_control {claude_session_id}`** (an `athena` MCP tool,
+  machine-token authenticated) answers `{claude_session_id, desired, reason,
+  until, policy_snapshot}`. `policy_snapshot` holds every input `desired/3`
+  used except `now`: the override and its expiry, the effective domain, the
+  owner's timezone and work windows, and whether the policy is enabled. A
+  harness can recompute `desired` from it. A session bound to another machine,
+  or never reported, answers `not_found`.
+- **`ai/bin/fleet-control` is the one harness reader** (DND-443). The drain
+  guard hook, the admiral checkpoint and the resume path all read through it.
+  It asks the server first, under a bounded timeout. On an answer it writes the
+  control cache, `$XDG_STATE_HOME/athena/fleet/<claude_session_id>.json`, as the
+  answer plus `fetched_at`.
+- **`fleet-control check` exits 0 for `run` and 3 for `drain`.** Every other
+  exit is an error and is never read as `run`. Its stdout names the **basis**
+  of the answer: `server`, `cached`, `recomputed:<cause>` or
+  `local-rule:<cause>` (next subsection).
+
+### Unknown control state
+
+Control state is unknown when the server gives no usable answer. The owner's
+fail-mode decision (OQ-1, 2026-09-24) applies:
+
+- **With a usable cache, recompute.** `fleet-control` computes `desired` from
+  the cached `policy_snapshot` at `now`, honouring the cached override's
+  expiry. The basis is `recomputed:<cause>`.
+- **With no usable cache, apply the local rule.** Work and blend sessions may
+  spawn fleet workers. A personal-domain session may not, during work hours:
+  America/Denver, 08:00 to 18:00, Monday to Friday, with no holiday source (the
+  owner overrides on a holiday). The domain comes from the repo defaults
+  (walt_ui work, custom blend, gen_saas personal). An unmapped project counts as
+  personal. The basis is `local-rule:<cause>`.
+- **Unknown is never read as `run` silently.** Each basis other than `server`
+  prints a warning on stderr naming its cause, and the hook surfaces it to the
+  transcript.
+- **Each cause is its own observable outcome** (`~/.claude/CLAUDE.md` → *A
+  failed lookup must never look like an empty one*). No two share a token:
+  - `server-unreachable`: no answer within the timeout, or a transport error;
+  - `session-unregistered`: the server answered `not_found`;
+  - `malformed-answer`: the server answered, but not in the shape above;
+  - `expired-cache`: the cache is older than the stale window (24 h). Its
+    snapshot is still used, and the warning names its age;
+  - `no-cache`: no cache file exists;
+  - `malformed-cache`: the cache file is not the shape above;
+  - `invalid-cache-path`: `$XDG_STATE_HOME` is set but not absolute, or
+    `claude_session_id` is not a safe single path component. `fleet-control`
+    does not read or write any path then.
+
+  The first three say why the server gave nothing; the last four say what the
+  cache gave. Both appear in the basis, for example
+  `recomputed:server-unreachable` or
+  `local-rule:server-unreachable,malformed-cache`.
+
+### Enforcement layers
+
+Drain is enforced in four layers. Each one names the mechanism that fires it
+and the measurement that shows it can fire.
+
+#### Layer 1: the drain guard hook
+
+`ai/hooks/fleet-drain-guard.sh` (DND-443) is the **primary** layer. DND-428
+measured every property it relies on (Claude Code 2.1.281):
+
+- It is a PreToolUse hook whose matcher MUST cover the `Agent` tool (it MAY
+  also list `Task`). PreToolUse fires for Agent calls made by the top-level
+  session and by any subagent, foreground or background, headless or
+  interactive.
+- It MUST key on `tool_input.subagent_type`, which is always present, and act
+  only when that is a fleet worker (`athena-admiral`, `athena-captain`). Any
+  other spawn passes untouched and without a server call. It MUST NOT key on
+  `tool_input.run_in_background`, which is absent whenever the harness
+  backgrounds a spawn on its own, nor on the presence of `agent_id`.
+- It MUST look up control by stdin's `session_id`, the top-level session's id
+  at every depth, through `fleet-control check`. So one answer covers admiral
+  and captain spawns alike.
+- On `drain` it MUST answer `permissionDecision: deny`. That stops the spawn in
+  default, `auto` and `bypassPermissions` modes. Stdin it cannot parse, or
+  with no `session_id` or no `tool_input.subagent_type`, is never read as a
+  non-fleet spawn: the hook denies it with a `Fix:` naming the missing field,
+  because a spawn it cannot classify is one it cannot clear.
+- The caller sees only an error string, `PreToolUse:Agent hook error: <reason>`,
+  with `is_error: true`. So the deny reason carries the whole instruction:
+  `Fix: fleet session <claude_session_id> is draining (<reason>, until <until>; basis <basis>) — this spawn was refused, not failed: do not retry it and do not do its work in-line; run the drain protocol, then wait for the session to return to run (override on the fleet page to force it).`
+  `<until>` renders `unbounded` when the answer has no `until`.
+- It MUST be registered in `ai/hooks/registry.json` and pass
+  `check-hooks-registered`, and its `--self-test` MUST prove the deny with a
+  `drain` answer, the pass-through with `run`, and that each unknown-state
+  warning reaches the transcript.
+
+The athena-admiral template, `athena:dispatch-captain` and
+`athena:admiral-resume` MUST each tell the admiral to read a refused spawn
+carrying this `Fix:` as **PAUSE**: mark the mission `PARKED`, run the drain
+protocol, never retry the spawn, and never do the captain's work in-line.
+
+#### Layer 2: the admiral checkpoint
+
+The admiral runs `ai/bin/fleet-control check` before every dispatch point:
+initial dispatch, refill on a captain's return, and re-dispatch on resume. Exit
+0 dispatches. Exit 3 starts the drain protocol. Any other exit is an error the
+admiral reports, never a dispatch. `admiral-report-watch` MUST also print
+`CONTROL: drain` on its existing wait cadence when `fleet-control check` turns
+to `drain`, so a waiting admiral wakes. This layer is cooperative: an admiral
+that skips it is still stopped by layer 1 at its next spawn, so it costs
+latency, not correctness.
+
+#### Layer 3: the drain protocol
+
+On drain the admiral MUST, in this order:
+
+1. Stop dispatching.
+2. Mark every `QUEUED` mission `PARKED` in `state.md`, and report
+   `admiral_state draining` and the updated `admiral_scope`.
+3. Let each running captain reach a terminal report, and never end its own turn
+   while a captain runs: ending an admiral's turn kills its running captains.
+   The grace depends on the reason class (OQ-2, owner decision 2026-09-24):
+   - `override:force_drain` (the owner's pause): a running captain may finish
+     its current mission for at most 30 min. Then the admiral SendMessages it
+     to park.
+   - `metering:*`, and a `local-rule:*` drain: the admiral tells every running
+     captain to park at once.
+
+   To park, a captain commits its work in progress, pushes its branch, and
+   reports `PARKED`.
+4. When no captain runs, report `admiral_state drained`, write its final
+   report, and end its turn.
+
+#### Layer 4: resume
+
+A transition to `run` emits `fleet.session.control_changed`, whose direct
+delivery lands on the session's inbox and wakes the top-level session through
+`inbox-wait`. The session then runs `fleet-control check`. On exit 0 it spawns
+a fresh admiral with `athena:admiral-resume`, pointed at the run's `run_id`,
+which salvages, adopts worktrees and re-dispatches `PARKED` missions. That spawn
+passes layer 1 too. Layer 1 asks the server before it reads the cache, so a
+stale `drain` cache cannot refuse a resume while the server answers. When the
+event carries no `to`, nothing wakes the session. The fleet page names that
+case (*Declared families beyond the first pass* →
+`fleet.session.control_changed`), and the owner resumes the session by hand.
+
+---
+
 ## Relationship to the Athena Inbox contract
 
 The inbox is **one delivery adapter** among several. This contract owns the event
@@ -2827,10 +3197,11 @@ is normative here:
 | `fleet.session.message` | `session.message` |
 | `notion.agent_message.*` | `agent_message` |
 | `slack.interaction.received` | `slack.interaction` |
+| `fleet.session.control_changed` | the `type` itself, verbatim: a state-change line on the session's `session` channel, not a lane |
 | any other (a lane state-change line) | the `type` itself, verbatim (e.g. `notion.ticket.updated`) |
 
-This binds every platform-producer `log` line — lane and the three named
-delivery kinds alike. It does not touch the Slack receiver's own `log` line,
+This binds every platform-producer `log` line — lane lines, the three named
+delivery kinds, and the session channel's `fleet.session.control_changed` line alike. It does not touch the Slack receiver's own `log` line,
 whose `kind` is that separate encoder's `im|mpim|channel|mention|thread_reply`
 enum (`ai/contracts/athena-inbox.md` → *Line format*) — a different producer,
 outside this contract's taxonomy. The byte-level framing this value sits inside,
@@ -2866,8 +3237,8 @@ wins**. The roles are those of *Conformance language* (ingress / router / adapte
   rejects an event whose owner cannot be resolved (*The event*);
 - originates only the **finite, registered set** of `type` values permitted to its kind, and
   rejects any other `type` at ingress with a `Fix:` — harness-emit can never synthesize a
-  source-emitted `slack.*`/`notion.*` type or a platform-originated `fleet.machine.*` type
-  (*Which event types an ingress kind may originate*);
+  source-emitted `slack.*`/`notion.*` type or a platform-originated `fleet.machine.*` or
+  `fleet.session.control_changed` type (*Which event types an ingress kind may originate*);
 - resolves a metadata-only source by an **on-demand read** enrichment fetch (least-privilege
   enforced server-side per-caller, not by token scope — *Secret custody*; *Sender verification and payload completeness*),
   and on enrichment failure **neither emits un-enriched nor silently drops** — retrying transients

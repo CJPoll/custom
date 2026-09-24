@@ -1260,6 +1260,15 @@ section.
   all. The field list now defers to `athena-events.md`, so the form of
   `entity_id` is stated in one place.
 
+**A session inbox also carries `fleet.session.control_changed` lines.** The
+server delivers one to a session's inbox when the owner or the metering policy
+changes that session's control state (`athena-events.md` → *Declared families
+beyond the first pass* → `fleet.session.control_changed`). Its `kind` is the
+type itself (`athena-events.md` → *Relationship to the Athena Inbox contract*),
+and it carries `entity_id`. It is a wake, never an authority: the consumer
+re-reads the session's control state (`athena-events.md` → *Fleet registry and
+session control*) and never acts on the line's own values.
+
 **Registry convention for a session inbox.** A project's session inbox is the
 per-project `log` channel named **`session`**, path
 **`<project>-session.jsonl`**, `producer: "platform"`, with no `dedupe`,
@@ -1291,7 +1300,8 @@ FAILED"). Normative:
 
 - **The envelope is transport; the line is content.** `id` is the
   per-`(event, rule)` delivery handle (the `event_deliveries` row) — or, for
-  an addressed `fleet.session.message`'s direct delivery, the `(owner,
+  a direct delivery (an addressed `fleet.session.message` or
+  `fleet.session.control_changed`), the `(owner,
   event)`-keyed row with `rule_id: nil` (`athena-events.md` → *Declared
   families beyond the first pass* → `fleet.session.message`, stated once
   there); `event_id`
