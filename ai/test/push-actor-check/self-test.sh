@@ -205,6 +205,7 @@ set_git_mode "hit:${OLD}"   # branch exists, but its remote head is a DIFFERENT 
 run_in repo_gh --sha "${SHA}" --window 5 --interval 1 feat
 expect "R2. sha is not the branch's remote head -> 5" 5 "is not the head of 'feat'"
 expect "R2a. names both the given sha and the actual remote head" 5 "${SHA}"
+expect "R2a2. and the actual remote head sha" 5 "${OLD}"
 [ "$(reads gh)" = 0 ] && ok "R2b. never reads the events API" || bad "R2b. events API touched" "reads=$(reads gh)"
 
 reset_stub gh

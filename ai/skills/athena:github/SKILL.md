@@ -114,10 +114,14 @@ case.
 **The activity API lags a push by a few seconds.** One read with no event for
 your ref and SHA is not yet a failure: re-read for up to **~20s**, sleeping
 between reads, before it counts as one. `~/dev/custom/ai/bin/push-actor-check
-<branch>` does that bounded re-read (run it in the repo; `--help` for options). Its exits
-keep the outcomes apart: 0 Athena, 1 another actor, 3 could not read the API
-(not evidence either way), 4 no event in the window. A 1 or a 4 is the next
-section's case.
+<branch>` does that bounded re-read (run it in the repo you pushed from, or
+pass `--repo <path>` if it isn't the cwd — a captain's Bash tool resets cwd
+between calls, so a stale cwd silently resolves the WRONG repo's `origin`
+otherwise (DND-412/DND-451); `--help` for options). Its exits keep the
+outcomes apart: 0 Athena, 1 another actor, 3 could not read the API (not
+evidence either way), 4 no event in the window, 5 the resolved repo/branch/sha
+don't match (wrong cwd or `--repo` — fix that and re-run, it never means the
+push failed). A 1 or a 4 is the next section's case.
 
 GitLab pushes go through `glab-athena git`: see **athena:gitlab** → *Pushing
 as Athena*.

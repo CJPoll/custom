@@ -141,11 +141,17 @@ die_resolve() { printf 'push-actor-check: %s\nFix: %s\n' "$1" "$2" >&2; exit 5; 
 RESOLVE_FIX="push-actor-check resolved remote '${REMOTE}' to ${URL} from repo '${REPO}' (cwd unless --repo was given). If that is not the repo you pushed ${BRANCH} from, pass --repo <path> or cd there first."
 
 GIT_BIN=${PUSH_ACTOR_CHECK_GIT:-git}
-LS_ERRF=$(mktemp) || die_usage "mktemp failed" "check TMPDIR is writable"
-LSOUT=$("${GIT_BIN}" -C "${REPO}" ls-remote "${REMOTE}" "refs/heads/${BRANCH}" 2>"${LS_ERRF}")
+# One tempfile for both this resolution read and the events-read loop below;
+# the trap is installed BEFORE the file exists so a signal here can't leak it.
+ERRF=$(mktemp) || die_usage "mktemp failed" "check TMPDIR is writable"
+trap 'rm -f "${ERRF}"' EXIT
+# Query the SAME URL named in every resolution message (the push URL), not the
+# remote's fetch URL — a remote with a separate pushurl would otherwise verify
+# one and name the other.
+LSOUT=$("${GIT_BIN}" -C "${REPO}" ls-remote "${URL}" "refs/heads/${BRANCH}" 2>"${ERRF}")
 LSRC=$?
-LSERR=$(tr '\n' ' ' < "${LS_ERRF}" | cut -c1-300)
-rm -f "${LS_ERRF}"
+LSERR=$(tr '\n' ' ' < "${ERRF}" | cut -c1-300)
+: > "${ERRF}"
 
 if [ "${LSRC}" -eq 0 ] && [ -z "${LSOUT}" ]; then
   die_resolve "branch '${BRANCH}' not on remote '${REMOTE}' (${URL})" "${RESOLVE_FIX}"
@@ -159,8 +165,6 @@ if [ "${REMOTE_HEAD}" != "${SHA}" ]; then
   die_resolve "sha '${SHA}' is not the head of '${BRANCH}' on remote '${REMOTE}' (${URL}); remote head is '${REMOTE_HEAD}'" "${RESOLVE_FIX}"
 fi
 
-ERRF=$(mktemp) || die_usage "mktemp failed" "check TMPDIR is writable"
-trap 'rm -f "${ERRF}"' EXIT
 START=$(date +%s)
 MAX_READS=$(( WINDOW / INTERVAL + 2 ))
 READS=0 OK_READS=0 LAST_ERR=""
