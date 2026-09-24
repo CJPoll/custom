@@ -591,6 +591,27 @@ eq "wait: ... and no descendant (its curl included) survives it" "${left}" ""
 [ -n "${left}" ] && kill ${left} 2>/dev/null
 fleet_respond "{\"status\":200,\"body\":${DRAIN_B}}"
 
+# Without pgrep the trap cannot list the poll's tree: wait refuses to start
+# (exit 1, Fix:), while check -- which the drain guard runs -- does not need it.
+NOPG="${TMP}/no-pgrep-bin"
+mkdir -p "${NOPG}"
+IFS=: read -r -a path_dirs <<<"${PATH}"
+for d in "${path_dirs[@]}"; do
+  [ -d "${d}" ] || continue
+  for f in "${d}"/*; do
+    b="${f##*/}"
+    [ "${b}" = pgrep ] && continue
+    [ -e "${NOPG}/${b}" ] || ln -s "${f}" "${NOPG}/${b}" 2>/dev/null
+  done
+done
+before="$(fleet_log_count)"
+PATH="${NOPG}" "${BIN}" wait --session-id "${SID_B}" --cwd "${CU}" --interval 1 --budget 5 >/dev/null 2>"${TMP}/perr"
+eq "wait: no pgrep on PATH is exit 1" "$?" 1
+has "wait: ... names pgrep with a Fix:" "$(cat "${TMP}/perr")" "pgrep is not on PATH"
+eq "wait: ... and asks nothing" "$(( $(fleet_log_count) - before ))" 0
+PATH="${NOPG}" "${BIN}" check --session-id "${SID_B}" --cwd "${CU}" >/dev/null 2>&1
+eq "check: runs without pgrep (drain answer: exit 3)" "$?" 3
+
 # The foreign-line rule, as the attendant runs it.
 own_rc() { "${BIN}" own --session-id "${SID}" "$@" >"${TMP}/oout" 2>"${TMP}/oerr"; echo "$?"; }
 eq "own: this session's line is own (exit 0)" "$(own_rc --line-session-id "${SID}"):$(cat "${TMP}/oout")" "0:own"

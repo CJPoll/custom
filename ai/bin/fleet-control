@@ -86,7 +86,7 @@ for a in "$@"; do
   esac
 done
 
-for dep in jq curl date pkill; do
+for dep in jq curl date; do
   command -v "${dep}" >/dev/null 2>&1 || { printf 'fleet-control: %s is not on PATH, so control state cannot be read. Fix: install %s.\n' "${dep}" "${dep}" >&2; exit 1; }
 done
 
@@ -159,6 +159,9 @@ case "${sub}" in
     fleet_control_line_is_own "${line_sid}" "${session_id}" && exit 0
     exit 3 ;;
   wait)
+    # The trap lists the in-flight poll's process tree with pgrep before it
+    # kills it; without pgrep an orphaned curl would outlive the waiter.
+    command -v pgrep >/dev/null 2>&1 || { printf 'fleet-control: pgrep is not on PATH, so wait could not reap its in-flight request on exit. Fix: install procps (it provides pgrep).\n' >&2; exit 1; }
     [[ "${interval}" =~ ^[0-9]{1,4}$ ]] && [ "$((10#${interval}))" -ge 1 ] && [ "$((10#${interval}))" -le 3600 ] \
       || die_usage "--interval / FLEET_WAIT_INTERVAL_S ${interval@Q} is not a whole number of seconds from 1 to 3600" \
            "pass --interval <seconds> (default 60); a sub-second poll is the hammering the safe-wait rule forbids."
