@@ -162,6 +162,77 @@ if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'ai/hooks' >/dev/null; th
   ok "11 an empty ai/hooks discovery set fails loudly"
 else bad "11 an empty ai/hooks discovery set fails loudly" "rc=${RC} out=${OUT}"; fi
 
+echo "== check-guard-messages: untracked third-party trees (DND-512) =="
+
+# DND-512: the main checkout held an untracked, un-ignored node_modules tree
+# (ai/skills/athena:inbox/channel/node_modules). Its executables and its lib/
+# files were discovered as 182 unclassified first-party files and the live gate
+# went red in the main checkout while every clean worktree stayed green.
+
+# 13. An untracked node_modules tree (an executable, and a lib/ file inside it),
+#     an untracked .venv, and an untracked vendor/bundle are third-party: they
+#     must not fail, and the skip is counted in the OK line, not silent.
+R="$(new_fixture third-party)"; track "${R}"
+add_exec "${R}" "ai/skills/athena:demo/channel/node_modules/which/bin/node-which" "${BARE}"
+mkdir -p "${R}/ai/skills/athena:demo/channel/node_modules/ajv/lib"
+printf 'export const x = 1\n' > "${R}/ai/skills/athena:demo/channel/node_modules/ajv/lib/ajv.ts"
+add_exec "${R}" "tools/.venv/bin/activate-thing" "${BARE}"
+add_exec "${R}" "vendor/bundle/ruby/3.3.0/bin/rake" "${BARE}"
+run "${R}"
+if [ "${RC}" -eq 0 ] && printf '%s' "${OUT}" | grep -F '4 untracked third-party' >/dev/null; then
+  ok "13 untracked node_modules / .venv / vendor/bundle files do not fail, and are counted"
+else bad "13 untracked node_modules / .venv / vendor/bundle files do not fail, and are counted" "rc=${RC} out=${OUT}"; fi
+
+# 14. The exclusion must never hide a first-party file: with an untracked
+#     node_modules tree present, a NEW untracked script under ai/bin and one
+#     under scripts/ still fail, named -- and the node_modules file is not named.
+R="$(new_fixture third-party-plus-new)"; track "${R}"
+add_exec "${R}" "ai/skills/athena:demo/channel/node_modules/which/bin/node-which" "${BARE}"
+add_exec "${R}" ai/bin/brand-new-check "${BARE}"
+add_exec "${R}" scripts/brand-new-tool "${BARE}"
+run "${R}"
+if [ "${RC}" -ne 0 ] \
+   && printf '%s' "${OUT}" | grep -F 'ai/bin/brand-new-check' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'scripts/brand-new-tool' >/dev/null \
+   && ! printf '%s' "${OUT}" | grep -F 'node-which' >/dev/null; then
+  ok "14 new untracked first-party scripts under ai/bin and scripts/ still fail beside a node_modules tree"
+else bad "14 new untracked first-party scripts under ai/bin and scripts/ still fail beside a node_modules tree" "rc=${RC} out=${OUT}"; fi
+
+# 15. A TRACKED (staged or committed) file inside node_modules is repo content,
+#     not a local install: it is discovered and must be classified.
+R="$(new_fixture tracked-node-modules)"
+add_exec "${R}" "ai/skills/athena:demo/node_modules/pkg/bin/run" "${BARE}"; track "${R}"; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'ai/skills/athena:demo/node_modules/pkg/bin/run' >/dev/null; then
+  ok "15 a tracked file inside node_modules is discovered and must be classified"
+else bad "15 a tracked file inside node_modules is discovered and must be classified" "rc=${RC} out=${OUT}"; fi
+
+# 16. The rule matches whole path segments only: an untracked script in a
+#     directory merely NAMED like one (node_modules-tools/, vendor/ without
+#     bundle/, venv-notes/) is first-party and still fails.
+R="$(new_fixture near-miss)"; track "${R}"
+add_exec "${R}" scripts/node_modules-tools/run "${BARE}"
+add_exec "${R}" vendor/mine/run "${BARE}"
+add_exec "${R}" scripts/.venv-notes/run "${BARE}"
+run "${R}"
+if [ "${RC}" -ne 0 ] \
+   && printf '%s' "${OUT}" | grep -F 'scripts/node_modules-tools/run' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'vendor/mine/run' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'scripts/.venv-notes/run' >/dev/null; then
+  ok "16 look-alike directory names are not third-party; their scripts still fail"
+else bad "16 look-alike directory names are not third-party; their scripts still fail" "rc=${RC} out=${OUT}"; fi
+
+# 17. --root measures the named tree, so the branch's checker can be run
+#     read-only against another checkout (the live main-checkout verify).
+A="$(new_fixture root-runner)"; track "${A}"
+B="$(new_fixture root-target)"; track "${B}"
+add_exec "${B}" scripts/only-in-target "${BARE}"
+OUT="$(cd "${A}" && ruby ai/bin/check-guard-messages --root "${B}" 2>&1)"; RC=$?
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/only-in-target' >/dev/null; then
+  ok "17 --root <dir> measures that tree, not the checker's own"
+else bad "17 --root <dir> measures that tree, not the checker's own" "rc=${RC} out=${OUT}"; fi
+
+echo "== check-guard-messages: live tree =="
+
 # 12. The live tree: every first-party executable is classified and compliant.
 if OUT="$(ruby "${AI_DIR}/bin/check-guard-messages" 2>&1)"; then
   ok "12 the live tree passes check-guard-messages"

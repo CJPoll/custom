@@ -19,9 +19,10 @@
 # for files it never looked at.
 #
 # So discovery is no longer a list of places to look. It is the repo itself:
-# every file `git ls-files --cached --others --exclude-standard` returns that is
-# executable, or lives under a `lib/` / `wt-lib/` directory (sourced code), or
-# is an ai/hooks/*.sh. Each discovered file must have exactly one class:
+# every file `git ls-files --cached --others --exclude-standard` returns (minus
+# untracked third-party trees, see the section below) that is executable, or
+# lives under a `lib/` / `wt-lib/` directory (sourced code), or is an
+# ai/hooks/*.sh. Each discovered file must have exactly one class:
 #
 #   guard         must carry `Fix:`. Every file under GUARD_DIRS (ai/hooks,
 #                 ai/bin) defaults to this, so a new hook or bin is covered
@@ -33,6 +34,27 @@
 #   library       sourced code, never an entry point. Reason required.
 #   test          a test suite (a `test/` path segment or `*.self-test.sh`);
 #                 decided by rule, see TEST_REASON.
+#
+# UNTRACKED THIRD-PARTY TREES ARE NOT FIRST-PARTY (DND-512)
+#
+# Discovery has two sources, and they are not treated alike:
+#   - TRACKED paths (`git ls-files --cached`: committed or staged) are always
+#     candidates. Anything in the index is repo content, even inside a
+#     node_modules/ -- a vendored tree someone commits must be classified.
+#   - UNTRACKED paths (`--others --exclude-standard`) are candidates only as
+#     NEW first-party files. An untracked path with a THIRD_PARTY_SEGMENTS
+#     segment (node_modules, .venv) or a vendor/bundle segment pair is a
+#     package manager's install output, not first-party code, and is skipped.
+#     The skip is counted in the OK/FAILED output, never silent.
+# Why: the main checkout held an untracked, un-ignored node_modules tree
+# (ai/skills/athena:inbox/channel/node_modules). Its executables and lib/ files
+# read as 182 unclassified first-party files, and the gate went red in the main
+# checkout while every clean worktree stayed green.
+# The match is on whole path segments: node_modules-tools/, a bare vendor/,
+# .venv-notes/ are first-party and still discovered.
+# Residual: an untracked first-party script placed INSIDE such a segment is not
+# read until it is staged (`git add`) -- at which point it is a tracked
+# candidate and must be classified. Nothing is skipped once it can be committed.
 #
 # Per-file classes live in ai/guard-classification.tsv. The shape is an
 # ALLOWLIST on purpose: a new script outside GUARD_DIRS that nobody classified
@@ -48,6 +70,8 @@
 #
 # Usage:
 #   ai/bin/check-guard-messages              classify + scan; exit 1 on any gap
+#   ai/bin/check-guard-messages --root DIR   measure the checkout at DIR
+#                                            (read-only; default: this repo)
 #   ai/bin/check-guard-messages --self-test  verify the checker's own logic
 #
 # The black-box coverage suite is ai/test/check-guard-messages/self-test.sh.
@@ -67,6 +91,14 @@ GUARD_DIRS = %w[ai/hooks ai/bin].freeze
 
 # Sourced code is discovered even though it is not executable.
 LIB_SEGMENTS = %w[lib wt-lib].freeze
+
+# Package-manager install directories. An UNTRACKED path with one of these
+# segments is third-party and skipped; a tracked one is still a candidate.
+THIRD_PARTY_SEGMENTS  = %w[node_modules .venv].freeze
+# Consecutive segment pairs with the same meaning (Bundler's --path default).
+THIRD_PARTY_SEQUENCES = [%w[vendor bundle]].freeze
+THIRD_PARTY_RULE = "untracked paths under a node_modules/, .venv/, or " \
+                   "vendor/bundle/ segment"
 
 CLASSES     = %w[guard tool no-fail-path library].freeze
 MIN_REASON  = 20
@@ -96,29 +128,43 @@ def hook_script?(rel)
   rel.start_with?("ai/hooks/") && rel.end_with?(".sh")
 end
 
+def third_party_path?(rel)
+  dirs = rel_segments(rel)[0..-2]
+  return true if (dirs & THIRD_PARTY_SEGMENTS).any?
+
+  THIRD_PARTY_SEQUENCES.any? { |seq| dirs.each_cons(seq.size).include?(seq) }
+end
+
 def guard_dir_path?(rel)
   GUARD_DIRS.any? { |d| rel.start_with?("#{d}/") }
 end
 
-# Every candidate path git knows about (tracked, plus untracked-not-ignored).
-# Not being able to ask git is a measurement failure, not an empty tree.
-def git_paths(root)
-  out, err, status = Open3.capture3("git", "-C", root, "ls-files", "-z",
-                                    "--cached", "--others", "--exclude-standard")
-  raise MeasureError, "git -C #{root} ls-files failed: #{err.strip}" unless status.success?
+# Paths git lists for one ls-files mode. Not being able to ask git is a
+# measurement failure, not an empty tree.
+def git_ls(root, *mode)
+  out, err, status = Open3.capture3("git", "-C", root, "ls-files", "-z", *mode)
+  raise MeasureError, "git -C #{root} ls-files #{mode.join(' ')} failed: #{err.strip}" unless status.success?
 
   out.split("\0").uniq
 rescue Errno::ENOENT
   raise MeasureError, "git executable not found on PATH"
 end
 
-def discover(root)
-  git_paths(root).select do |rel|
-    abs = File.join(root, rel)
-    next false if File.symlink?(abs) || !File.file?(abs)
+def candidate?(root, rel)
+  abs = File.join(root, rel)
+  return false if File.symlink?(abs) || !File.file?(abs)
 
-    File.executable?(abs) || lib_path?(rel) || hook_script?(rel)
-  end.sort
+  File.executable?(abs) || lib_path?(rel) || hook_script?(rel)
+end
+
+# Returns [found, skipped]: found is every first-party candidate; skipped is
+# every untracked third-party path that would otherwise have been one.
+def discover(root)
+  tracked = git_ls(root, "--cached")
+  untracked = git_ls(root, "--others", "--exclude-standard") - tracked
+  third_party, new_files = untracked.partition { |rel| third_party_path?(rel) }
+  found = (tracked + new_files).uniq.select { |rel| candidate?(root, rel) }.sort
+  [found, third_party.select { |rel| candidate?(root, rel) }.sort]
 end
 
 # Parse the TSV. Returns [entries, errors]; entries maps path -> [class, reason].
@@ -170,7 +216,7 @@ end
 
 # The whole evaluation, as data, so --self-test can drive it on fixtures.
 def evaluate(root)
-  found = discover(root)
+  found, skipped = discover(root)
   raise MeasureError, "discovered 0 first-party files under #{root}" if found.empty?
 
   entries, table_errors = load_table(root)
@@ -183,6 +229,7 @@ def evaluate(root)
   end
   {
     found: found,
+    skipped: skipped,
     table_errors: table_errors,
     empty_dirs: empty_dirs,
     unclassified: unclassified,
@@ -197,8 +244,12 @@ def failed?(result)
   %i[table_errors empty_dirs unclassified vanished missing_fix].any? { |k| result[k].any? }
 end
 
+def skipped_note(result)
+  "#{result[:skipped].size} untracked third-party file(s) skipped (#{THIRD_PARTY_RULE})"
+end
+
 def report_failure(result)
-  warn "check-guard-messages: FAILED"
+  warn "check-guard-messages: FAILED (#{skipped_note(result)})"
   unless result[:table_errors].empty?
     warn "  malformed #{TABLE}:"
     result[:table_errors].each { |e| warn "    - #{e}" }
@@ -216,7 +267,9 @@ def report_failure(result)
     result[:unclassified].each { |rel| warn "    - #{rel}" }
     warn "  Fix: add each to #{TABLE}: 'guard' if it denies, checks, or gates " \
          "(then give it a '#{MARKER}' line), else tool / no-fail-path / library with the " \
-         "real reason. Never classify a guard as anything else to make this pass."
+         "real reason. Never classify a guard as anything else to make this pass. " \
+         "Only #{THIRD_PARTY_RULE} are skipped as third-party; never move a " \
+         "first-party script into one to hide it -- it is read again once staged."
   end
   unless result[:vanished].empty?
     warn "  classified file(s) that no longer exist (or lost their exec bit):"
@@ -243,7 +296,8 @@ def run_check(root = REPO)
   counts = (%w[guard] + CLASSES.drop(1) + %w[test])
            .map { |k| "#{result[:by_class][k].size} #{k}" }.join(", ")
   puts "check-guard-messages: OK — #{result[:found].size} first-party file(s) " \
-       "classified (#{counts}); every guard carries an actionable '#{MARKER}'"
+       "classified (#{counts}); every guard carries an actionable '#{MARKER}'; " \
+       "#{skipped_note(result)}"
   0
 rescue MeasureError => e
   warn "check-guard-messages: FAILED — could not measure: #{e.message}"
@@ -270,6 +324,12 @@ def run_self_test
     fail.("scripts/test-required.sh read as a test") if test_path?("scripts/test-required.sh")
     fail.("scripts/lib/x.sh not a lib") unless lib_path?("scripts/lib/x.sh")
     fail.("scripts/libx read as a lib") if lib_path?("scripts/libx")
+    fail.("a/node_modules/b/bin/x not third-party") unless third_party_path?("a/node_modules/b/bin/x")
+    fail.("a/.venv/bin/x not third-party") unless third_party_path?("a/.venv/bin/x")
+    fail.("vendor/bundle/ruby/bin/x not third-party") unless third_party_path?("vendor/bundle/ruby/bin/x")
+    fail.("scripts/node_modules-x/run read as third-party") if third_party_path?("scripts/node_modules-x/run")
+    fail.("vendor/mine/run read as third-party") if third_party_path?("vendor/mine/run")
+    fail.("a file NAMED node_modules read as third-party") if third_party_path?("scripts/node_modules")
 
     # A git root that tracks nothing: an empty discovery set is an error.
     empty = File.join(dir, "empty")
@@ -329,9 +389,25 @@ if ARGV.include?("--help") || ARGV.include?("-h")
       ai/bin/check-guard-messages              classify every first-party executable
                                                and library (#{TABLE}); assert every
                                                guard emits an actionable `Fix:`
+                                               (#{THIRD_PARTY_RULE} are skipped
+                                               as third-party, and counted)
+      ai/bin/check-guard-messages --root DIR   the same, measuring the checkout at
+                                               DIR read-only (its own #{TABLE})
       ai/bin/check-guard-messages --self-test  deterministic suite (no model)
       ai/bin/check-guard-messages --help       this text
   TXT
   exit 0
 end
-exit(ARGV.include?("--self-test") ? run_self_test : run_check)
+exit(run_self_test) if ARGV.include?("--self-test")
+
+root_at = ARGV.index("--root")
+if root_at
+  root = ARGV[root_at + 1]
+  if root.nil? || root.empty? || !File.directory?(root)
+    warn "check-guard-messages: FAILED — --root needs an existing directory, got #{root.inspect}"
+    warn "  Fix: pass --root <path to a git checkout>, e.g. --root ~/dev/custom."
+    exit 1
+  end
+  exit(run_check(File.expand_path(root)))
+end
+exit(run_check)

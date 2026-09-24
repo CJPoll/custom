@@ -279,7 +279,18 @@ from riddler's howie/wurk harness — "errors written for the LLM.")
 - `ai/bin/check-guard-messages` enforces this (part of the shipwright gate). It
   fails on an unclassified file, a classified file that vanished, an empty
   discovery set, or a guard with a bare failure message. So a new script
-  anywhere in the repo turns the gate red until someone classifies it.
+  anywhere in the repo turns the gate red until someone classifies it. The one
+  skip: an UNTRACKED path under a `node_modules/`, `.venv/`, or `vendor/bundle/`
+  segment is a package manager's install output, not first-party code. It is
+  counted in the check's output, and read again the moment it is staged.
+
+  **Later (2026-09-24, DND-512):** the sentence above ended at "until someone
+  classifies it", with no skip. Superseded: an untracked, un-ignored
+  `node_modules` tree in the main checkout
+  (`ai/skills/athena:inbox/channel/node_modules`) read as 182 unclassified
+  first-party files, and the check was red in the main checkout while every
+  clean worktree stayed green. Tracked files are never skipped, whatever their
+  path.
 
   **Later (2026-09-24):** this read "record it in `EXEMPT` in
   `ai/bin/check-guard-messages`", and the check scanned only `ai/hooks/*.sh`
