@@ -240,7 +240,7 @@ out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-
 grep -q 'INTEGRATION OK .* (CRITIC OVERRIDE \[.*\]: model unreachable)' <<<"$out" && ok "c12 the reason is printed into INTEGRATION OK" || bad "c12 override not attributable in the OK line" "$out"
 # ...and the state it overrode is READ from the receipt, not asserted. The old
 # line claimed "NO standing-judge verdict" unconditionally.
-grep -q 'state overridden: judge NEVER RAN on this head' <<<"$out" && ok "c12 names the state actually overridden" || bad "c12 did not name the overridden state" "$out"
+grep -q 'state overridden: NO RECEIPT for this head in any checkout of this repo' <<<"$out" && ok "c12 names the state actually overridden" || bad "c12 did not name the overridden state" "$out"
 # ...and it is not silently available: an empty reason is a usage error.
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override '' 2>&1 )"; rc=$?
 [ "$rc" -eq 2 ] && ok "c12 override without a reason is a usage error" || bad "c12 expected exit 2, got $rc" "$out"
@@ -313,7 +313,7 @@ grep -q 'NO standing-judge verdict' <<<"$out" && bad "c15 printed the FALSE 'no 
 ( cd "$R" && rm -rf "$( git rev-parse --git-path critic-verdicts )" )
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "c15 override still lands a head with NO verdict" || bad "c15 expected exit 0, got $rc" "$out"
-grep -q 'state overridden: judge NEVER RAN on this head' <<<"$out" && ok "c15 names NEVER RAN as the overridden state" || bad "c15 wrong/absent state label" "$out"
+grep -q 'state overridden: NO RECEIPT for this head in any checkout of this repo' <<<"$out" && ok "c15 names NEVER RAN as the overridden state" || bad "c15 wrong/absent state label" "$out"
 
 # (c) a verdict for an OLDER sha is no verdict for THIS head -- and the
 #     override treats it as such, not as a BLOCK and not as a pass.
@@ -322,7 +322,7 @@ parent="$( cd "$R" && git rev-parse HEAD~1 )"
 record_pass "$R" "$parent"
 out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] && ok "c15 a verdict for an older SHA is treated as no verdict" || bad "c15 expected exit 0, got $rc" "$out"
-grep -q 'state overridden: judge NEVER RAN on this head' <<<"$out" && ok "c15 older-SHA verdict is labelled NEVER RAN for this head" || bad "c15 older-SHA state mislabelled" "$out"
+grep -q 'state overridden: NO RECEIPT for this head in any checkout of this repo' <<<"$out" && ok "c15 older-SHA verdict is labelled NEVER RAN for this head" || bad "c15 older-SHA state mislabelled" "$out"
 # ...and that same older-SHA receipt is NOT what a BLOCK looks like: a BLOCK
 # recorded for the OLDER sha must not refuse the CURRENT head.
 record_verdict "$R" block "$parent"
@@ -464,6 +464,24 @@ out="$( cd "$R" && "$GATE" --target main --no-fetch --owner-approval 'owner said
 [ "$rc" -eq 0 ] && ok "c20 owner-approved HOT head lands" || bad "c20 expected exit 0, got $rc" "$out"
 grep -q 'BLAST-RADIUS HOT-OWNER-APPROVED .*(GATE: ai/bin/harness-gate -- declared on main)' <<<"$out" && ok "c20 HOT-OWNER-APPROVED names the gate" || bad "c20 HOT-OWNER-APPROVED line does not name the gate" "$out"
 grep -q 'INTEGRATION OK [0-9a-f]* (GATE: ai/bin/harness-gate -- declared on main) (OWNER-APPROVED: owner said go)' <<<"$out" && ok "c20 OK line names the gate beside the approval" || bad "c20 OK line missing gate beside approval" "$out"
+
+# ---------------------------------------------------------------- case 21
+# DND-457: the verdict for a head is found from ANY checkout of the repo. The
+# PASS is recorded in a linked worktree; the gate runs in the main checkout at
+# the same head. It used to read only its own $GIT_DIR and report the judge as
+# never having run. And a BLOCK in a THIRD checkout still refuses the override.
+R="${TMP}/c21"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f \
+  && git worktree add -q --detach "${TMP}/c21-wt" HEAD && git worktree add -q --detach "${TMP}/c21-wt2" HEAD )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "${TMP}/c21-wt"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c21 main checkout gate finds a PASS recorded in a worktree" || bad "c21 expected exit 0, got $rc" "$out"
+grep -q 'has NOT run' <<<"$out" && bad "c21 claimed the judge has NOT run" "$out" || ok "c21 never claims the judge has NOT run"
+record_verdict "${TMP}/c21-wt2" block
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model unreachable' 2>&1 )"; rc=$?
+[ "$rc" -eq 3 ] && ok "c21 a BLOCK in another checkout refuses the override" || bad "c21 expected exit 3, got $rc" "$out"
+grep -q 'CRITIC OVERRIDE REFUSED' <<<"$out" && ok "c21 names the refusal" || bad "c21 refusal not named" "$out"
 
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"

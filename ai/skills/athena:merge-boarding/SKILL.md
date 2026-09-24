@@ -56,9 +56,13 @@ captain's worktree is still moving.
   the per-SHA verdict `ai/bin/critic-review` records and refuses a head that has
   no recorded PASS for **that exact SHA**, the same SHA-match discipline as
   "confirm the head you are landing is the one the report names". Exit 3 means
-  no green verdict, and its message names WHICH state you are in — none
-  recorded, still running, fail-open, dirty tree, or a verdict for an older
-  commit.
+  no green verdict, and its message names WHICH state you are in — no receipt
+  in any checkout, still running, fail-open, dirty tree, conflicting receipts,
+  could not look, or a verdict for an older commit. The read covers every
+  checkout of the repo (main and all worktrees), so you may gate from the main
+  checkout on a head the captain judged in its worktree. A receipt inside a
+  worktree that has been REMOVED is gone with it, so read the verdict before
+  tearing the worktree down.
 - **On exit 3 you get a verdict, or you hold that ONE MR — you never merge past
   it.** In order: (1) if it reports a run IN PROGRESS, wait for it; (2)
   otherwise re-run the judge yourself in the Mission's worktree

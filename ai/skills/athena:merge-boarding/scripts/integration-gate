@@ -407,7 +407,12 @@ if [ -n "$CRITIC_OVERRIDE" ]; then
     case "$VERDICT_OUT" in
       *"IN PROGRESS"*)          OVERRIDE_STATE="judge run STILL RUNNING" ;;
       *"FAILED OPEN"*)          OVERRIDE_STATE="judge FAILED OPEN (infra/model error)" ;;
-      *"NOT run on this head"*) OVERRIDE_STATE="judge NEVER RAN on this head" ;;
+      # "no receipt recorded" is a searched-and-missed state, never proof the
+      # judge did not run (DND-457: a lookup that only read its own worktree
+      # used to print "has NOT run" for a PASS sitting in another checkout).
+      *"no receipt recorded"*)  OVERRIDE_STATE="NO RECEIPT for this head in any checkout of this repo" ;;
+      *"COULD NOT LOOK"*)       OVERRIDE_STATE="verdict store COULD NOT BE READ (not a miss)" ;;
+      *"CONFLICTING"*)          OVERRIDE_STATE="CONFLICTING receipts across checkouts (none is a BLOCK)" ;;
       *"DIRTY working tree"*)   OVERRIDE_STATE="verdict recorded against a DIRTY tree" ;;
       *)                        OVERRIDE_STATE="no green verdict; state not named -- see the critic-review line above" ;;
     esac
@@ -416,7 +421,7 @@ if [ -n "$CRITIC_OVERRIDE" ]; then
   echo "Fix: copy the INTEGRATION OK line below verbatim into your run's state log and name the override in the final report, so this decision is attributable." >&2
 elif [ "$VERDICT_RC" -ne 0 ]; then
   echo "${PROG}: no green standing-judge verdict on the integrated head $(short "$HEAD_SHA"). NOT safe to merge." >&2
-  echo "Fix: see the critic-review line above — it names WHICH state you are in (none recorded / still running / fail-open / dirty tree / block). Get a verdict (re-run ~/dev/custom/ai/bin/critic-review here), or hold this ONE MR and move to the next Mission. If and ONLY IF the state is an ABSENCE of a verdict, merge past it with --critic-override '<reason>'; a recorded BLOCK is refused even with that flag." >&2
+  echo "Fix: see the critic-review line above — it names WHICH state you are in (no receipt in any checkout / still running / fail-open / dirty tree / conflicting / could not look / block). Get a verdict (re-run ~/dev/custom/ai/bin/critic-review here), or hold this ONE MR and move to the next Mission. If and ONLY IF the state is an ABSENCE of a verdict, merge past it with --critic-override '<reason>'; a recorded BLOCK is refused even with that flag." >&2
   exit 3
 fi
 

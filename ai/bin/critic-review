@@ -34,6 +34,11 @@
 # fail-opened twice and was caught only by the admiral's discretion.
 # `integration-gate` reads these; see athena:merge-boarding -> "The merge bar".
 #
+# Receipts are WRITTEN per checkout but READ from every checkout of the repo
+# (keyed on the realpath of the git common dir), so a verdict recorded in a
+# worktree is found from the main checkout too -- see "The READ side" below
+# (DND-457).
+#
 # Usage: see the USAGE constant below, or run `ai/bin/critic-review --help`.
 # It is stated once, there, so the text a caller is shown cannot drift from the
 # text a reader of this header believes.
@@ -61,7 +66,10 @@ USAGE = <<~TXT.freeze
     ai/bin/critic-review --verdict-for SHA read the RECORDED verdict for SHA;
                                            exit 0 pass / 2 block / 3 no green
                                            verdict (none / running / fail-open /
-                                           stale-tree / malformed -- each named)
+                                           stale-tree / malformed / conflicting
+                                           / could-not-look -- each named).
+                                           Searches every checkout (main and
+                                           worktrees) of the current repo.
     ai/bin/critic-review --self-test       verify the decision, parser, and the
                                            receipt writer+reader (no model)
     ai/bin/critic-review --help            this text (never invokes the model)
@@ -231,64 +239,181 @@ def write_verdict(sha, base, action, findings, dirty)
   true
 end
 
+# --- The READ side: every checkout of the repo (DND-457) ---------------------
+#
+# The WRITER keys receipts per worktree ($GIT_DIR/critic-verdicts, above), and
+# that stays: round counting (rounds_recorded) depends on "every receipt in this
+# dir belongs to this change". The READER used to look only in its OWN $GIT_DIR,
+# so from the main checkout a PASS recorded in a worktree matched nothing and
+# was reported as "the standing judge has NOT run on this head" -- a fact the
+# reader could not know. Measured 2026-09-24: DND-429's head read PASS from its
+# worktree and NO VERDICT from ~/dev/custom. That is ~/.claude/CLAUDE.md -> "A
+# failed lookup must never look like an empty one".
+#
+# So the reader keys on what every checkout of a repo SHARES -- the realpath of
+# its git COMMON dir -- and searches every per-checkout store under it:
+#   <common>/critic-verdicts                  (the main checkout's $GIT_DIR)
+#   <common>/worktrees/<id>/critic-verdicts   (each linked worktree's $GIT_DIR)
+# No receipt moves, so every receipt already on disk is found as-is: there is
+# nothing to migrate. (A receipt inside a REMOVED worktree went with it --
+# `git worktree remove` deletes <common>/worktrees/<id>. That was true before
+# this change and the miss message says so.)
+
+# The repo's git common dir, ABSOLUTE, resolved at the point of capture.
+# Plain `--git-common-dir` is CWD-RELATIVE in a main checkout (".git"), which is
+# the DND-183/DND-202 instance of this class; --path-format=absolute removes it.
+# -> [path, nil] or [nil, reason]
+def git_common_dir
+  out, err, st = Open3.capture3("git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+  return [nil, "git rev-parse --git-common-dir failed (#{err.strip.empty? ? 'not inside a git repository' : err.strip})"] unless st.success?
+  [out.strip, nil]
+end
+
+# Every CANDIDATE store under a common dir, realpath'd. The key is validated
+# for its TYPE first: a relative, empty, or non-directory common dir is an
+# ERROR here, never an empty candidate list -- a wrongly computed key and a key
+# that correctly matches nothing must not read the same.
+# -> [candidates, nil] or [nil, reason]
+def verdict_stores(common)
+  c = common.to_s
+  return [nil, "the git common dir is empty"] if c.strip.empty?
+  return [nil, "the git common dir #{c.inspect} is not absolute (a cwd-relative key matches nothing from any other directory)"] unless c.start_with?("/")
+  return [nil, "the git common dir #{c} is not a directory"] unless File.directory?(c)
+  real = File.realpath(c)
+  wt = File.join(real, "worktrees")
+  if File.directory?(wt) && !(File.readable?(wt) && File.executable?(wt))
+    return [nil, "#{wt} exists but cannot be listed"]
+  end
+  # One candidate per checkout's $GIT_DIR, whether or not its store exists
+  # yet: a checkout that has never run the judge is still a place we looked.
+  gitdirs = Dir.glob(File.join(wt, "*")).select { |d| File.directory?(d) }.sort
+  [[File.join(real, "critic-verdicts")] + gitdirs.map { |d| File.join(d, "critic-verdicts") }, nil]
+end
+
+# The writer's store for THIS checkout, normalised exactly as verdict_stores
+# normalises its candidates (realpath of the $GIT_DIR it hangs off), so the two
+# sides of the comparison provably went through the same function.
+def own_store
+  dir = verdict_dir
+  return nil unless dir && File.directory?(File.dirname(dir))
+  File.join(File.realpath(File.dirname(dir)), File.basename(dir))
+end
+
+# Judge ONE receipt. Pure: returns [code, stream, lines] and prints nothing,
+# so several stores' receipts can be compared before anything is said.
+def judge_receipt(sha, full)
+  data = begin
+    JSON.parse(File.read(full))
+  rescue StandardError => e
+    return [3, :err, ["critic-review: verdict receipt for #{sha} is unreadable (#{e.message}).",
+                      "  Fix: delete #{full} and re-run ai/bin/critic-review. A corrupt receipt is an error, never a pass."]]
+  end
+  if data["dirty"]
+    return [3, :err, ["critic-review: the verdict for #{sha} was recorded against a DIRTY working tree — it did not judge what you are about to merge.",
+                      "  Fix: commit or discard the working-tree changes, then re-run ai/bin/critic-review so the verdict matches the head being merged."]]
+  end
+  case data["verdict"]
+  when "pass"
+    [0, :out, ["critic-review: VERDICT PASS for #{sha} (recorded #{data['at']}, base #{data['base']}; receipt #{full})."]]
+  when "block"
+    [2, :err, ["critic-review: VERDICT BLOCK for #{sha} — findings: #{Array(data['findings']).join(', ')}",
+               "  Fix: the standing judge found issues on this head. Have them addressed and re-run ai/bin/critic-review before merging."]]
+  when "fail-open"
+    [3, :err, ["critic-review: NO VERDICT for #{sha} — the judge FAILED OPEN (infra/model error) at #{data['at']}; it did not look at this diff.",
+               "  Fix: re-run ai/bin/critic-review in this worktree. If it fails open again the model is unreachable — HOLD this one MR and move to the next Mission, or take the named escape hatch (integration-gate --critic-override '<reason>'). A fail-open is not a pass."]]
+  else
+    [3, :err, ["critic-review: verdict receipt for #{sha} records an unknown verdict #{data['verdict'].inspect}.",
+               "  Fix: delete #{full} and re-run ai/bin/critic-review."]]
+  end
+end
+
+def say(stream, lines)
+  lines.each { |l| stream == :out ? puts(l) : warn(l) }
+end
+
 # Reader. THE ONE PLACE the rules live -- integration-gate calls this rather
 # than parsing the JSON itself, so there is never a second copy of the
 # semantics that could drift from the writer's.
 #   0 = recorded PASS for exactly this sha, on a clean tree
 #   2 = recorded BLOCK
 #   3 = no green verdict; the REASON is always named on stderr
+#
+# Precedence: this checkout's own receipt wins (it is the one this checkout's
+# own runs overwrite). Otherwise every other store is read; receipts that
+# DISAGREE are an error naming each one, never a pick.
 def verdict_for(sha)
   unless sha.to_s =~ /\A[0-9a-f]{7,40}\z/
     warn "critic-review: --verdict-for needs a commit SHA (got #{sha.inspect})."
     warn "  Fix: pass the 40-char SHA of the head you intend to merge, e.g. --verdict-for $(git rev-parse HEAD)."
     return 3
   end
-  dir = verdict_dir
-  unless dir
-    warn "critic-review: cannot resolve the verdict directory (not inside a git work tree)."
-    warn "  Fix: run this from the Mission's worktree. An unresolvable verdict store is an ERROR, never a pass."
+  common, why = git_common_dir
+  stores, why = verdict_stores(common) unless why
+  if why
+    warn "critic-review: COULD NOT LOOK for a verdict for #{sha} — #{why}."
+    warn "  Fix: run this from inside a checkout (main or worktree) of the repo that holds the commit. An unresolvable verdict store is an ERROR, never a pass, and it says nothing about whether the judge ran."
     return 3
   end
-  full = Dir.glob(File.join(dir, "#{sha}*.json")).first
-  unless full
-    if (run = Dir.glob(File.join(dir, "#{sha}*.running")).first)
-      warn "critic-review: NO VERDICT for #{sha} — a judge run is IN PROGRESS (started #{File.read(run).strip})."
-      warn "  Fix: wait for that run to finish, then re-read. Do NOT merge while the judge is still running (DND-194 landed a factual error on main exactly this way). If the run is a corpse, re-run ai/bin/critic-review in this worktree."
+  own = own_store
+  if own && !stores.include?(own)
+    warn "critic-review: COULD NOT LOOK reliably — this checkout writes receipts to #{own}, which is not among the #{stores.size} store(s) the reader derives from #{File.realpath(common)}."
+    warn "  Fix: the writer and reader key the store differently (a git layout this tool does not model, e.g. GIT_DIR/GIT_COMMON_DIR overrides). Unset those overrides and re-run; do not read this as 'no verdict'."
+    return 3
+  end
+  unreadable = stores.select { |d| File.exist?(d) && !(File.readable?(d) && File.executable?(d)) }
+  unless unreadable.empty?
+    warn "critic-review: COULD NOT LOOK in #{unreadable.join(', ')} (exists but cannot be listed)."
+    warn "  Fix: restore read+search permission on #{unreadable.first}. An unreadable store is an ERROR, never a pass."
+    return 3
+  end
+
+  existing = stores.select { |d| File.directory?(d) }
+  ordered = ([own] & existing) + (existing - [own])
+  hits = ordered.flat_map { |d| Dir.glob(File.join(d, "#{sha}*.json")).sort }
+  considered = existing.sum { |d| Dir.glob(File.join(d, "*.json")).size }
+
+  full_shas = hits.map { |p| File.basename(p, ".json") }.uniq
+  if full_shas.size > 1
+    warn "critic-review: AMBIGUOUS SHA #{sha} — it prefixes receipts for #{full_shas.size} different commits (#{full_shas.join(', ')})."
+    warn "  Fix: pass the full 40-char SHA, e.g. --verdict-for $(git rev-parse <ref>)."
+    return 3
+  end
+
+  if hits.empty?
+    if (run_marker = ordered.flat_map { |d| Dir.glob(File.join(d, "#{sha}*.running")) }.first)
+      warn "critic-review: NO VERDICT for #{sha} — a judge run is IN PROGRESS (started #{File.read(run_marker).strip}; marker #{run_marker})."
+      warn "  Fix: wait for that run to finish, then re-read. Do NOT merge while the judge is still running (DND-194 landed a factual error on main exactly this way). If the run is a corpse, re-run ai/bin/critic-review in the worktree that owns that marker."
       return 3
     end
-    warn "critic-review: NO VERDICT for #{sha} — the standing judge has NOT run on this head."
-    warn "  Fix: run ~/dev/custom/ai/bin/critic-review in this worktree to produce a verdict for #{sha}. A verdict recorded for a DIFFERENT commit does not count; 'no verdict' is not a pass."
+    warn "critic-review: NO VERDICT for #{sha} — no receipt recorded for it in any checkout of this repo."
+    warn "  Searched key: git common dir #{File.realpath(common)}; #{existing.size} of #{stores.size} candidate store(s) exist; #{considered} receipt(s) considered, 0 match #{sha}."
+    existing.each { |d| warn "    searched: #{d}" }
+    warn "  Fix: run ~/dev/custom/ai/bin/critic-review in the Mission's worktree (at #{sha}) to record a verdict. A verdict for a DIFFERENT commit does not count, and a receipt in a worktree that has since been REMOVED went with it; 'no verdict' is not a pass."
     return 3
   end
-  data = begin
-    JSON.parse(File.read(full))
-  rescue StandardError => e
-    warn "critic-review: verdict receipt for #{sha} is unreadable (#{e.message})."
-    warn "  Fix: delete #{full} and re-run ai/bin/critic-review. A corrupt receipt is an error, never a pass."
-    return 3
+
+  own_hit = own && hits.find { |p| File.dirname(p) == own }
+  if own_hit
+    code, stream, lines = judge_receipt(sha, own_hit)
+    say(stream, lines)
+    return code
   end
-  if data["dirty"]
-    warn "critic-review: the verdict for #{sha} was recorded against a DIRTY working tree — it did not judge what you are about to merge."
-    warn "  Fix: commit or discard the working-tree changes, then re-run ai/bin/critic-review so the verdict matches the head being merged."
-    return 3
+
+  judged = hits.map { |p| [p, *judge_receipt(sha, p)] }
+  codes = judged.map { |j| j[1] }
+  if codes.uniq.size > 1
+    # A recorded BLOCK anywhere keeps its exit 2, so integration-gate's
+    # --critic-override (which covers only the ABSENCE of a verdict) can never
+    # merge past it by way of a conflict.
+    code = codes.include?(2) ? 2 : 3
+    warn "critic-review: CONFLICTING verdicts for #{sha} across checkouts of this repo — not choosing between them#{code == 2 ? '; one of them is a recorded BLOCK' : ''}."
+    judged.each { |p, c, _s, l| warn "    exit #{c} from #{p}: #{l.first}" }
+    warn "  Fix: re-run ~/dev/custom/ai/bin/critic-review at #{sha} in the Mission's worktree; its own receipt then takes precedence there. Conflicting receipts are never a pass."
+    return code
   end
-  case data["verdict"]
-  when "pass"
-    puts "critic-review: VERDICT PASS for #{sha} (recorded #{data['at']}, base #{data['base']})."
-    0
-  when "block"
-    warn "critic-review: VERDICT BLOCK for #{sha} — findings: #{Array(data['findings']).join(', ')}"
-    warn "  Fix: the standing judge found issues on this head. Have them addressed and re-run ai/bin/critic-review before merging."
-    2
-  when "fail-open"
-    warn "critic-review: NO VERDICT for #{sha} — the judge FAILED OPEN (infra/model error) at #{data['at']}; it did not look at this diff."
-    warn "  Fix: re-run ai/bin/critic-review in this worktree. If it fails open again the model is unreachable — HOLD this one MR and move to the next Mission, or take the named escape hatch (integration-gate --critic-override '<reason>'). A fail-open is not a pass."
-    3
-  else
-    warn "critic-review: verdict receipt for #{sha} records an unknown verdict #{data['verdict'].inspect}."
-    warn "  Fix: delete #{full} and re-run ai/bin/critic-review."
-    3
-  end
+  _p, code, stream, lines = judged.first
+  say(stream, lines)
+  code
 end
 
 # The round at which the per-cluster rungs stop being the bound and a kind-3
@@ -511,10 +636,14 @@ def run_receipt_self_test
       dir = verdict_dir
       ok &&= !dir.nil?
 
-      # (2) never ran -> 3, and it must NOT read as a pass.
+      # (2) no receipt -> 3, and it must NOT read as a pass. It names what was
+      # searched (DND-457) and never claims to know the judge did not run.
       code, err = capture_err { verdict_for(sha) }
       ok &&= (code == 3)
-      ok &&= err.match?(/NOT run/)
+      ok &&= err.match?(/no receipt recorded/)
+      ok &&= err.include?("Searched key: git common dir #{File.realpath(File.join(repo, '.git'))}")
+      ok &&= err.include?("receipt(s) considered")
+      ok &&= !err.match?(/has NOT run/)
       ok &&= err.include?("Fix:")
 
       # (4) still running (the DND-194 state) -> 3, named DISTINCTLY from (2).
@@ -782,9 +911,166 @@ def run_receipt_self_test
   ok
 end
 
+# DND-457: a verdict recorded in ONE checkout of a repo must be found from ANY
+# checkout of it. The writer keys per-worktree ($GIT_DIR/critic-verdicts); the
+# reader used to look ONLY in its own $GIT_DIR, so the main checkout said "the
+# judge has NOT run" for a SHA whose PASS sat in a worktree -- a failed lookup
+# reading as a fact it could not know. Each case names itself on failure, so
+# the fail-first run says WHICH property broke.
+def run_cross_checkout_self_test
+  require "tmpdir"
+  ok = true
+  check = lambda do |name, cond|
+    warn "critic-review --self-test: FAILED cross-checkout case: #{name}" unless cond
+    ok &&= cond
+  end
+  stubs = Dir.mktmpdir("critic-review-xstubs-")
+  clean_out = File.join(stubs, "c"); File.write(clean_out, "looks good\nFINDINGS: none\n")
+
+  Dir.mktmpdir("critic-review-xrepo-") do |root|
+    main_co = File.join(root, "main")
+    wt_a = File.join(root, "wt-a")
+    wt_b = File.join(root, "wt-b")
+    sh = ->(*a) { system(*a, out: File::NULL, err: File::NULL) }
+    FileUtils.mkdir_p(main_co)
+    Dir.chdir(main_co) do
+      sh.call("git", "init", "-q", "-b", "main", ".")
+      sh.call("git", "config", "user.email", "t@example.invalid")
+      sh.call("git", "config", "user.name", "t")
+      File.write("a.txt", "one\n")
+      sh.call("git", "add", "-A")
+      sh.call("git", "-c", "commit.gpgsign=false", "commit", "-qm", "one")
+      sh.call("git", "worktree", "add", "-q", "-b", "feat-a", wt_a)
+      sh.call("git", "worktree", "add", "-q", "-b", "feat-b", wt_b)
+    end
+
+    sha = nil
+    Dir.chdir(wt_a) do
+      File.write("a.txt", "two\n")
+      sh.call("git", "-c", "commit.gpgsign=false", "commit", "-qam", "two")
+      sha = head_sha
+      ENV["CRITIC_REVIEW_STUB"] = clean_out
+      capture_err { capture_out { run(["--base", "main"]) } }
+      ENV.delete("CRITIC_REVIEW_STUB")
+      code, = capture_err { capture_out { verdict_for(sha) }[0] }
+      check.call("x0 the recording worktree reads its own PASS", code == 0)
+    end
+
+    # x1 THE DND-457 REPRO: the PASS was recorded in wt-a; the main checkout
+    # must find it, not report "has NOT run".
+    Dir.chdir(main_co) do
+      (code, out), err = capture_err { capture_out { verdict_for(sha) } }
+      check.call("x1 main checkout finds a PASS recorded in a worktree (exit #{code}; #{err.lines.first.to_s.strip})", code == 0)
+      check.call("x1 the PASS line names the store it was found in", out.include?("worktrees/wt-a/critic-verdicts"))
+      check.call("x1 never claims the judge has NOT run", !err.match?(/has NOT run/))
+    end
+
+    # x2 a sibling worktree finds it too.
+    Dir.chdir(wt_b) do
+      code, = capture_err { capture_out { verdict_for(sha) }[0] }
+      check.call("x2 sibling worktree finds a PASS recorded in another worktree (exit #{code})", code == 0)
+    end
+
+    # x3 A WRONGLY COMPUTED KEY IS AN ERROR, NOT AN EMPTY RESULT. ".git" is
+    # exactly what plain `--git-common-dir` returns in a main checkout.
+    stores, why = verdict_stores(".git")
+    check.call("x3 a relative common dir is refused", stores.nil? && why.to_s.include?("not absolute"))
+    stores, why = verdict_stores("")
+    check.call("x3 an empty common dir is refused", stores.nil? && why.to_s.include?("empty"))
+    stores, why = verdict_stores(File.join(root, "no-such-dir"))
+    check.call("x3 a missing common dir is refused", stores.nil? && why.to_s.include?("not a directory"))
+
+    # x4 BOTH SIDES NORMALISE THE SAME WAY: from every checkout -- including one
+    # reached through a symlinked path -- the writer's store is one of the
+    # reader's candidates, and the resolver hands back an absolute key.
+    link = File.join(root, "link-to-main")
+    File.symlink(main_co, link)
+    [main_co, wt_a, wt_b, link].each do |co|
+      Dir.chdir(co) do
+        common, why = git_common_dir
+        check.call("x4 #{File.basename(co)}: common dir resolves absolute (#{common.inspect})", why.nil? && common.start_with?("/"))
+        cands, = verdict_stores(common)
+        check.call("x4 #{File.basename(co)}: writer's store is among the reader's candidates", cands.to_a.include?(own_store))
+        code, = capture_err { capture_out { verdict_for(sha) }[0] }
+        check.call("x4 #{File.basename(co)}: finds the PASS (exit #{code})", code == 0)
+      end
+    end
+
+    # x5 A REAL MISS NAMES WHAT IT SEARCHED and how many receipts it read.
+    Dir.chdir(main_co) do
+      code, err = capture_err { verdict_for("b" * 40) }
+      check.call("x5 miss exits 3", code == 3)
+      check.call("x5 miss says no receipt in any checkout", err.include?("no receipt recorded for it in any checkout"))
+      check.call("x5 miss names the key", err.include?("git common dir #{File.realpath(File.join(main_co, '.git'))}"))
+      check.call("x5 miss lists the worktree store it searched", err.include?("worktrees/wt-a/critic-verdicts"))
+      check.call("x5 miss counts the receipts considered", err.include?("1 receipt(s) considered"))
+      check.call("x5 miss carries Fix:", err.include?("Fix:"))
+      check.call("x5 miss never claims the judge has NOT run", !err.match?(/has NOT run/))
+    end
+
+    # x6 CONFLICTING receipts: never pick one. The checkout's OWN receipt
+    # still wins inside that checkout.
+    b_store = Dir.chdir(wt_b) { verdict_dir }
+    FileUtils.mkdir_p(b_store)
+    File.write(File.join(b_store, "#{sha}.json"), JSON.generate(
+      "schema" => VERDICT_SCHEMA, "sha" => sha, "base" => "main", "verdict" => "block",
+      "findings" => ["correctness"], "dirty" => false, "at" => Time.now.utc.iso8601
+    ))
+    Dir.chdir(main_co) do
+      code, err = capture_err { capture_out { verdict_for(sha) }[0] }
+      check.call("x6 PASS vs BLOCK is CONFLICTING and keeps the BLOCK's exit 2 (exit #{code})", code == 2 && err.include?("CONFLICTING") && err.include?("recorded BLOCK"))
+      check.call("x6 conflict names each receipt", err.include?("wt-a") && err.include?("wt-b") && err.include?("Fix:"))
+    end
+    Dir.chdir(wt_b) { check.call("x6 own BLOCK wins in wt-b", capture_err { verdict_for(sha) }[0] == 2) }
+    Dir.chdir(wt_a) { check.call("x6 own PASS wins in wt-a", capture_err { capture_out { verdict_for(sha) }[0] }[0] == 0) }
+    # PASS vs FAIL-OPEN disagree without a BLOCK: exit 3, still CONFLICTING.
+    File.write(File.join(b_store, "#{sha}.json"), JSON.generate(
+      "schema" => VERDICT_SCHEMA, "sha" => sha, "base" => "main", "verdict" => "fail-open",
+      "findings" => [], "dirty" => false, "at" => Time.now.utc.iso8601
+    ))
+    Dir.chdir(main_co) do
+      code, err = capture_err { capture_out { verdict_for(sha) }[0] }
+      check.call("x6 PASS vs FAIL-OPEN is CONFLICTING exit 3 (exit #{code})", code == 3 && err.include?("CONFLICTING"))
+    end
+    FileUtils.rm_f(File.join(b_store, "#{sha}.json"))
+
+    # x7 a run IN PROGRESS in another worktree is seen from the main checkout.
+    other = "c" * 40
+    File.write(File.join(b_store, "#{other}.running"), "2026-09-24T00:00:00Z")
+    Dir.chdir(main_co) do
+      code, err = capture_err { verdict_for(other) }
+      check.call("x7 a running marker in a worktree reads IN PROGRESS from main", code == 3 && err.include?("IN PROGRESS") && err.include?("worktrees/wt-b"))
+    end
+    FileUtils.rm_f(File.join(b_store, "#{other}.running"))
+
+    # x8 an UNREADABLE store is COULD NOT LOOK, not a miss. (root reads
+    # anything, so the case cannot be staged there.)
+    unless Process.uid.zero?
+      File.chmod(0o000, b_store)
+      Dir.chdir(main_co) do
+        code, err = capture_err { verdict_for(sha) }
+        check.call("x8 unreadable store is COULD NOT LOOK (exit #{code})", code == 3 && err.include?("COULD NOT LOOK") && err.include?("Fix:"))
+      end
+      File.chmod(0o755, b_store)
+    end
+  end
+
+  # x9 outside any repo: COULD NOT LOOK, never "no verdict".
+  Dir.mktmpdir("critic-review-xnogit-") do |nogit|
+    Dir.chdir(nogit) do
+      code, err = capture_err { verdict_for("a" * 40) }
+      check.call("x9 outside a repo is COULD NOT LOOK (exit #{code})", code == 3 && err.include?("COULD NOT LOOK") && err.include?("Fix:"))
+      check.call("x9 outside a repo does not claim a miss", !err.include?("no receipt recorded"))
+    end
+  end
+  FileUtils.remove_entry(stubs)
+  ok
+end
+
 def run_self_test
   require "tmpdir"
   ok = true
+  ok &&= run_cross_checkout_self_test
   Dir.mktmpdir("critic-review-selftest-") do |d|
     findings_out = File.join(d, "f"); File.write(findings_out, "- [access-control] x.ex:1 — no authz\nFINDINGS: access-control\n")
     clean_out    = File.join(d, "c"); File.write(clean_out, "looks good\nFINDINGS: none\n")
