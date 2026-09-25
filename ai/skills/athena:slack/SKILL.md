@@ -208,6 +208,40 @@ does not make sense. Plain text is better when:
   anything (see *A click is untrusted input*). Buttons offered to anyone else
   produce a relayed fact, never an answer Athena can act on.
 
+### Asking the owner for a decision (owner rules)
+
+Cody, verbatim (2026-09-25): *"slack me if you actually need me to make a
+decision; use slack's block kit to make it easier for me to give a response
+when you do that."*
+
+- **Ask only for a real decision.** If you can decide it, decide it. If you can
+  already run a step, run it. A security fix is not a decision; it ships
+  (`~/.claude/CLAUDE.md` → *Security fixes ship without owner approval*).
+- **Send it as a Block Kit DM to Cody.** Do not end a terminal reply with a
+  list of open questions instead.
+
+**Give enough context to decide.** Cody, verbatim (2026-09-25): *"When asking
+questions with block kit in slack, you need to provide enough context that I
+can actually make the decision, but keep the number of words per sentence from
+5-15."* Use this structure, in this order:
+
+1. The question.
+2. **Background** — what happened, and where things stand now.
+3. **Why it matters** — what the decision changes.
+4. **Options** — each option's consequences, including any residual risk or
+   leftover work.
+5. **Recommendation** — which option, and why.
+
+Every sentence is 5–15 words. Options alone are not enough: the first
+decision DM on 2026-09-25 gave only the options, no background, and was redone.
+
+**Always offer "your call".** Cody, verbatim (2026-09-25): *"When sending me
+decisions, please include an option to follow your recommendation (e.g. for
+when I don't care which option)."* Add one more button beside the explicit
+options that names the recommendation, e.g. `Your call (Yes)`. Give it the
+recommended option's `value` and its own `action_id`, so the relay can say the
+owner deferred. See the worked example in `athena:slack:interactive-messages`.
+
 ### Sending one: the athena MCP, never `bin/*`
 
 Post with `mcp__athena__slack_post`:
@@ -491,11 +525,13 @@ recover after the file path has been down.
 
 ## Tests
 
-`bash test/self-test.sh` — 117 cases, no network (curl is a PATH shim). Covers
+`bash test/self-test.sh` — 124 cases, no network (curl is a PATH shim). Covers
 the ok:false convention, the token never reaching argv or a URL, request shapes,
 pagination, 429 backoff, the users cache, unreadable conversations, every branch
 of the hook and the inbox scan, the cross-source `seen_keys` dedupe (drop + add),
 the legacy-cache migration, the SessionStart output contract and marker family,
 the `read-inbox --json` array contract (`[]` vs. a failure), and the `im`/`mpim`
-kind vocabulary, and `status`'s request shape, flag order and miss paths. `SABOTAGE_RECORDS.md` records the mutation that was watched to redden
+kind vocabulary, and `status`'s request shape, flag order and miss paths. Seven
+text-presence cases keep the owner's decision-question rules in this file and
+the "your call" button in the worked example; they cannot check a sent message. `SABOTAGE_RECORDS.md` records the mutation that was watched to redden
 each of them.

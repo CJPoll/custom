@@ -201,7 +201,9 @@ by name.
 - **What it waives: the wait for the owner's go.** A security fix does not ask
   first, even where a gate would otherwise need the owner's explicit go — for
   example `integration-gate` exit 4 on a workflow or deploy-automation edit.
-  Do not hold it, and do not DM for a go-ahead.
+  Do not hold it, and do not DM for a go-ahead. Do not offer to hold it or
+  ask to re-confirm it either. Cody, 2026-09-25: "Please just ship. We just
+  ship security fixes."
 - **What it does not waive: the bar.** The fix has a regression test that
   fails first (*A bug fix starts with a regression test that fails*), a critic
   PASS, green CI, and a live verify in the environment it protects. The
@@ -210,7 +212,9 @@ by name.
   credentials, interactive console or account actions, anything on the owner's
   own machine (Hard Rule). Escalate that one step with its exact command, and
   ship the rest of the fix (`athena:run-autonomously` → *Owner-credential
-  gates throttle merging, not progress*).
+  gates throttle merging, not progress*). A read-only step you can already
+  run is not owner-only. An audit with a session you already hold is one. Run
+  it; do not ask for it.
 - **What counts as a security issue.** A concrete defect that lets someone
   read, change, or do what they should not: a secret or credential exposure
   (including a secret in argv, logs, or a world-readable file), an authn or

@@ -113,25 +113,39 @@ answers "will the athena MCP send it".
 [
   {"type": "section",
    "text": {"type": "mrkdwn",
-            "text": "*harness session (~/dev/custom):*\nWhich ticket next?\nQueue checked 2:14 PM MT."}},
+            "text": "*harness session (~/dev/custom):*\nWhich ticket should I start next?"}},
+  {"type": "section",
+   "text": {"type": "mrkdwn",
+            "text": "*Background*\nTwo tickets are ready, and I checked the queue at 2:14 PM MT.\n*Why it matters*\nOnly one captain slot is free until the current merge lands."}},
+  {"type": "section",
+   "text": {"type": "mrkdwn",
+            "text": "*DND-542:* fixes the flaky inbox test first. DND-301 waits about a day.\n*DND-301:* ships the lesson export sooner. The flake keeps failing some CI runs.\n*Recommendation:* DND-542, because the flake slows every other merge."}},
   {"type": "actions",
    "elements": [
      {"type": "button", "action_id": "next_dnd_542",
       "text": {"type": "plain_text", "text": "DND-542"},
-      "style": "primary", "value": "dnd-542"},
+      "value": "dnd-542"},
      {"type": "button", "action_id": "next_dnd_301",
       "text": {"type": "plain_text", "text": "DND-301"},
-      "value": "dnd-301"}]}
+      "value": "dnd-301"},
+     {"type": "button", "action_id": "next_your_call",
+      "text": {"type": "plain_text", "text": "Your call (DND-542)"},
+      "style": "primary", "value": "dnd-542"}]}
 ]
 ```
 
+The shape is `athena:slack` → *Asking the owner for a decision*: the question,
+background, why it matters, each option's consequences, the recommendation,
+and a "your call" button.
+
 Sent with `mcp__athena__slack_post`, `text: "harness session (~/dev/custom):
-which ticket next? Queue checked 2:14 PM MT."`, the DM's `channel`, and
+which ticket should I start next? I recommend DND-542."`, the DM's `channel`, and
 `inbox_name: "custom-session.jsonl"`. Keep the returned `{channel, ts}`. An
 owner click on `DND-542` arrives as a `slack.interaction` line with
 `action_id: "next_dnd_542"` and `value: "dnd-542"`. The session relays it as
 the owner's choice, and the phase-2 `slack_update` replaces the question with
-the outcome. Both options are ones the session could pick on its own
+the outcome. A click on `Your call (DND-542)` carries the same `value` under
+`action_id: "next_your_call"`, so the relay can say the owner deferred. Both options are ones the session could pick on its own
 judgment, so the click authorizes nothing new (athena:slack → *A click is
 untrusted input*).
 

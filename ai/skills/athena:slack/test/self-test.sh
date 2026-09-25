@@ -1228,6 +1228,22 @@ for bin_path in "${BIN}"/*; do
   done
 done
 
+# 84. The owner's decision-question rules (2026-09-25) stay in the doctrine,
+#     and the worked example obeys them. A text-presence check only: it
+#     proves the rules were not dropped, not that a sent message follows them.
+DOCTRINE="${ROOT}/SKILL.md"
+EXAMPLE="$(dirname "${ROOT}")/athena:slack:interactive-messages/SKILL.md"
+for needle in "### Asking the owner for a decision" "5–15 words" \
+              "**Background**" "**Why it matters**" "**Recommendation**" \
+              "Your call ("; do
+  if grep -qF -- "${needle}" "${DOCTRINE}"; then
+    ok "doctrine: athena:slack carries decision rule '${needle}'"
+  else bad "doctrine: athena:slack carries decision rule '${needle}'" "missing from ${DOCTRINE}"; fi
+done
+if grep -qF '"text": "Your call (' "${EXAMPLE}"; then
+  ok "doctrine: the worked owner-choice example has a 'Your call' button"
+else bad "doctrine: the worked owner-choice example has a 'Your call' button" "missing from ${EXAMPLE}"; fi
+
 echo
 if [[ "${FAIL}" -eq 0 ]]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0; fi
 echo "VERDICT: FAIL (${FAIL} of $((PASS+FAIL)) cases)"; exit 1
