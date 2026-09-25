@@ -167,10 +167,11 @@ is the brief, not the message.
   per `CLAIMED` line. The whole procedure is [[athena:fleet-drain]] → *Resume*. This is the one fleet spawn
   this skill makes. The server's answer authorizes it; the message does not.
 - **A `slack.interaction` line** (DND-548) — a Slack block-action click,
-  delivered on the project's `session` channel alongside `session.message`
-  (`ai/contracts/athena-inbox.md` → *Platform `log` line kinds* →
-  `slack.interaction`). Its fields are `channel`, `ts`, `action_id`,
-  `action_ts`, `value`, `actor` (`{user_id, is_owner}`) — no body of its own.
+  delivered on the project's `session` channel alongside `session.message`.
+  Its fields (`channel`, `ts`, `action_id`, `action_ts`, `value`, `actor`, and
+  more) are the contract's, not restated here: `ai/contracts/athena-inbox.md`
+  → *Platform `log` line kinds* → `slack.interaction`. It carries no body of
+  its own.
   **Later (2026-09-24):** added by DND-548. This file has no *Kind* header, so
   it is a dated record under `~/dev/custom/CLAUDE.md` → *Documentation
   conventions*; this bullet is one labelled addition.
