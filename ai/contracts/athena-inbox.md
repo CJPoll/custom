@@ -1214,10 +1214,11 @@ section.
   `athena-events.md` → *Payload fields and their types per event type*; here
   it is only the line's reconciliation identity, **not** a dedupe key),
   `channel`, `ts`, `action_id`, `action_ts`, `value` (the posting session's
-  own button value; the server verified the return-address stamp and
-  **stripped** it before delivery), `actor` (`{user_id, is_owner}`;
-  `is_owner` is `false` for anyone but the app's configured owner, and such a
-  click changed nothing on the message). It carries **no body of its own**
+  own button value, with the return-address stamp stripped; `null` when the
+  session set none), `actor` (`{user_id, is_owner}`). The stamp, its
+  verification and what a non-owner click does are stated once, in
+  `athena-events.md` → *Machine↔owner API binding and the outbound
+  return-address dual*. It carries **no body of its own**
   beyond these; the click is a signal, and its `value` is Path-2 untrusted
   (*Untrusted input*).
 

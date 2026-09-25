@@ -950,6 +950,8 @@ app's configured owner Slack user. It is a boolean, which the declared field
 types cannot type, so it is **not addressable**: a predicate or template slot
 on it is the ordinary unknown-path save-time error. It is still delivered on
 the inbox line (`ai/contracts/athena-inbox.md` → *Platform `log` line kinds*).
+This row was once a bindable `boolean` (see the Later note under
+*`slack.interaction.received` is a transient event*).
 
 **`entity_id` is the declared, bindable entity handle carried by every
 source-emitted type that names a persistent ENTITY** — the Notion ticket types
@@ -1054,7 +1056,7 @@ the caller's own; the identity adds `user_id`, so two users' clicks on one
 button are two events; and `actor.is_owner` is delivered but not addressable,
 because the declared field types have no boolean. The phase-2 modal
 `private_metadata` this paragraph also named is not shipped; the server refuses
-every non-button interaction by name.
+every other interaction type, container and multi-action payload by name.
 
 **`payload.revision` is an OPTIONAL source-supplied provenance / ordering hint
 for a Notion entity type.** It is the source's own revision/version indicator for
@@ -2603,14 +2605,9 @@ under-encrypted**:
   **return-address key** (`:return_address_key`): the server's own
   per-account HMAC key for the Slack return address (*Machine↔owner API binding
   and the outbound return-address dual*). Unlike the others, no one outside the
-  server ever holds it, so the owner never stores it: the server mints it on the
-  account's first interactive post and never replaces it. Any future adapter
+  server ever holds it, so the owner never stores it: the server mints it on
+  first use and never replaces it. Any future adapter
   credential (SMTP, SMS, Discord bot) joins this set under the same story.
-
-  **Later (2026-09-25):** DND-519. The first-pass secret set did not list the
-  return-address key, and the design called that key platform-scoped. gen_saas
-  shipped it per account (DND-241), because every custodied secret is bound to
-  an owning account.
 
   **Later (2026-09-22):** this named the Notion read token a **"read-only,
   DB-scoped Notion enrichment token"** — a token whose *scope* was the
@@ -2902,13 +2899,13 @@ an integrity-tagged token carried in **each button's** `value`, as
   depend on it. A mint that fails sends nothing.
 
 The harness does **not** supply the return address: a **caller-supplied return
-address is refused with a `Fix:`**, never silently honoured or ignored — an ignored field is one a later reader starts
-trusting: `Fix: the return address is stamped server-side from the authenticated
-machine token, not supplied by the caller — remove the caller-supplied return
-address and re-post.` This is the egress dual of *Which event types an ingress
-kind may originate*: origination stops a caller minting another's events; the
-server-stamped return address stops a caller routing a reply into another
-machine's inbox.
+address is refused with a `Fix:`**, never silently honoured or ignored — an
+ignored field is one a later reader starts trusting: `Fix: the return address
+is stamped server-side from the authenticated machine token, not supplied by the
+caller — remove the caller-supplied return address and re-post.` This is the
+egress dual of *Which event types an ingress kind may originate*: origination
+stops a caller minting another's events; the server-stamped return address
+stops a caller routing a reply into another machine's inbox.
 
 **A returned `value` is untrusted until it is verified on BOTH counts.** When
 Slack sends the interactive callback back (`slack.interaction.received`), the
@@ -2945,9 +2942,7 @@ refused, because an option `value` caps at 150 characters; modal
 `private_metadata` is not shipped. The key is **per account**, minted on first
 use, not one platform key, because secret custody is bound to an owning
 account. `inbox_name` is required on interactive posts, because no default
-inbox exists. The delivered `value` has the stamp stripped. The non-owner rule
-above is new: an earlier design let a non-owner click disable the owner's
-controls.
+inbox exists. The delivered `value` has the stamp stripped.
 
 ### Thread replies route to the thread's claimant
 
@@ -4144,7 +4139,8 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 - **Only an owner path promotes, restores or dismisses:** the owner's web
   session, or a verified Slack click by the owner (*Machine↔owner API binding
   and the outbound return-address dual*; `slack.interaction.received`, whose
-  verification DND-290 built and whose action dispatch DND-440 builds). No machine token can do these. No message
+  verification DND-290 built and whose action dispatch DND-440 builds). No
+  machine token can do these. No message
   content can either: a Slack ask, an inbox line or a fleet report
   informs, and never authorizes (*Trust posture — two paths*).
 - **A `proposed` item is inert.** No machine-token call returns it, counts it
