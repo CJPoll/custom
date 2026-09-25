@@ -110,9 +110,27 @@
 # silently skip detection. A detection that fails is "could not measure".
 #
 # Not being able to read the landed table is a FAILURE, never a pass: no
-# origin/main, no merge-base, a shallow clone, or a landed commit without a
-# readable table. The output lists every probe and what it gave, and keeps
+# origin/main, no merge-base, a shallow clone, an origin that cannot be asked
+# (see DND-538 below), or a landed commit without a readable table. The output lists every probe and what it gave, and keeps
 # "could not measure" textually distinct from "0 weakening(s)".
+#
+# THE LANDED TIP IS ORIGIN'S, NOT A LOCAL REF (DND-538)
+#
+# refs/remotes/origin/main is a local ref. Anyone who can run `git update-ref`
+# can point it at a commit carrying the relabel, and the "landed" bar becomes
+# the diff's own bar again. So the local tip is cross-checked against
+# `git ls-remote origin refs/heads/main`, one network round trip:
+#   - it matches: the ratchet runs, and the OK line says the tip was checked;
+#   - it differs: FAIL, naming both SHAs. Stale and forged are indistinguishable
+#     from here, and both mean the local bar is not the landed one;
+#   - origin is unreachable, times out (LS_REMOTE_TIMEOUT), or has no
+#     refs/heads/main: FAIL as "could not measure". Never a fallback to the
+#     local ref.
+# The check does NOT fetch the remote tip when the local ref is behind. A fetch
+# writes objects, FETCH_HEAD, and refs, and this check must stay read-only (the
+# live verify runs it with --root against the owner's main checkout). The Fix:
+# is `git fetch origin`, which a branch needs anyway before it rebases onto
+# what landed. Cost: one `git ls-remote` per run, ~1.4 s over SSH to github.com.
 #
 # There is no in-repo escape hatch -- no env var, approved list, or marker --
 # because anything this check could read, the diff under test could also write.
@@ -128,7 +146,8 @@
 #
 # Residual, stated out loud: this does not stop an actor that can push to main
 # (it can land the relabel itself), nor a diff that edits this file's
-# enforcement path. A guard moved to a new path is caught while git's rename
+# enforcement path, nor one that points the `origin` remote's URL at a repo it
+# controls (the cross-check asks whatever `origin` names). A guard moved to a new path is caught while git's rename
 # detection still pairs the two (>= 50% similar); one rewritten beyond that
 # reads as a removal plus a new entry: it passes, and the new entry is named in
 # the OK output. Git pairs each removed guard with at most one new file, so a
@@ -323,6 +342,14 @@ end
 # --- the classification ratchet (DND-510) ------------------------------------
 
 LANDED_REF = "refs/remotes/origin/main"
+# The authority the local LANDED_REF is cross-checked against (DND-538).
+LANDED_REMOTE = "origin"
+LANDED_REMOTE_REF = "refs/heads/main"
+LS_REMOTE_PROBE = "git ls-remote #{LANDED_REMOTE} #{LANDED_REMOTE_REF}".freeze
+# One network round trip, measured at ~1.4 s over SSH to github.com. The bound
+# only stops a hung transport from hanging the gate; hitting it is "could not
+# measure", never a pass.
+LS_REMOTE_TIMEOUT = 30
 
 # The landed bar could not be read. Carries every probe and what it gave, so
 # "could not look" is printed as a list of places looked, never as a clean run.
@@ -333,6 +360,67 @@ class LandedUnreadable < StandardError
     @probes = probes
     super("the landed classification could not be read")
   end
+end
+
+# The local LANDED_REF disagrees with origin's LANDED_REMOTE_REF: the bar this
+# checkout would compare against is not the one that landed (stale, or moved by
+# hand). A distinct failure from "could not read", with both SHAs.
+class LandedMismatch < StandardError
+  attr_reader :local, :remote
+
+  def initialize(local, remote)
+    @local = local
+    @remote = remote
+    super("#{LANDED_REF} disagrees with #{LANDED_REMOTE} #{LANDED_REMOTE_REF}")
+  end
+end
+
+# Runs cmd with no stdin; kills its whole process group after timeout seconds.
+# Returns [stdout, stderr, status], status nil on a timeout.
+def capture_with_timeout(env, cmd, timeout)
+  Open3.popen3(env, *cmd, pgroup: true) do |stdin, out, err, wait|
+    stdin.close
+    readers = [Thread.new { out.read }, Thread.new { err.read }]
+    status = wait.join(timeout)&.value
+    unless status
+      begin
+        Process.kill("KILL", -wait.pid)
+      rescue Errno::ESRCH
+        nil
+      end
+      wait.join
+    end
+    [readers[0].value, readers[1].value, status]
+  end
+end
+
+# origin's LANDED_REMOTE_REF, read over the network. Every outcome but a single
+# 40-hex SHA raises LandedUnreadable with the probes so far: an unreachable or
+# empty remote is a missing measurement, and the local ref is never used in
+# its place.
+def remote_tip(root, probes)
+  env = { "GIT_TERMINAL_PROMPT" => "0", "GIT_OPTIONAL_LOCKS" => "0" }
+  out, err, status = capture_with_timeout(env, ["git", "-C", root, "ls-remote", "--exit-code",
+                                                LANDED_REMOTE, LANDED_REMOTE_REF], LS_REMOTE_TIMEOUT)
+  outcome = if status.nil?
+              "timed out after #{LS_REMOTE_TIMEOUT}s (origin unreachable)"
+            elsif status.exitstatus == 2
+              "origin is reachable but has no #{LANDED_REMOTE_REF}"
+            elsif !status.success?
+              "failed (exit #{status.exitstatus}, origin unreachable): #{err.strip.lines.first.to_s.strip}"
+            end
+  sha = out.split("\n").map { |l| l.split("\t") }.select { |_, ref| ref == LANDED_REMOTE_REF }.map(&:first)
+  outcome ||= "no single #{LANDED_REMOTE_REF} line in the reply: #{out.strip.inspect}" unless
+    sha.size == 1 && sha[0].match?(/\A\h{40}\z/)
+  if outcome
+    probes << [LS_REMOTE_PROBE, outcome]
+    raise LandedUnreadable.new(probes)
+  end
+  probes << [LS_REMOTE_PROBE, sha[0][0, 12]]
+  sha[0]
+rescue Errno::ENOENT
+  probes << [LS_REMOTE_PROBE, "git executable not found on PATH"]
+  raise LandedUnreadable.new(probes)
 end
 
 def git_read(root, *args)
@@ -391,7 +479,8 @@ def merge_landed(per_point)
 end
 
 # Resolve the landed points and read each one's classification. Every miss
-# raises LandedUnreadable naming what was probed. Returns [points, classes,
+# raises LandedUnreadable naming what was probed; a local tip that disagrees
+# with origin raises LandedMismatch. Returns [points, classes,
 # blobs], blobs mapping each landed candidate to its blob(s) across the points.
 def landed_classification(root)
   probes = []
@@ -410,6 +499,9 @@ def landed_classification(root)
   if shallow.strip == "true"
     unreadable.call("history depth", "shallow clone: the merge-base with origin/main cannot be proven")
   end
+
+  remote = remote_tip(root, probes)
+  raise LandedMismatch.new(tip, remote) unless remote == tip
 
   mb, ok = git_read(root, "merge-base", "HEAD", tip)
   mb = mb.strip
@@ -551,13 +643,15 @@ def ratchet!(root, result)
   result[:new_entries] = new_entries(entries, landed)
 rescue LandedUnreadable => e
   result[:landed_probes] = e.probes
+rescue LandedMismatch => e
+  result[:landed_mismatch] = [e.local, e.remote]
 ensure
   result[:weakened] ||= []
 end
 
 def failed?(result)
   %i[table_errors empty_dirs unclassified vanished missing_fix].any? { |k| result[k].any? } ||
-    result.fetch(:weakened, []).any? || result.key?(:landed_probes)
+    result.fetch(:weakened, []).any? || result.key?(:landed_probes) || result.key?(:landed_mismatch)
 end
 
 def skipped_note(result)
@@ -604,13 +698,25 @@ def report_failure(result)
 end
 
 def report_ratchet_failure(result)
+  if result.key?(:landed_mismatch)
+    local, remote = result[:landed_mismatch]
+    warn "  the local landed ref disagrees with origin, so it is not the landed bar and no " \
+         "weakening was measured:"
+    warn "    #{LANDED_REF} (local) -> #{local}"
+    warn "    #{LS_REMOTE_PROBE} -> #{remote}"
+    warn "  Fix: `git fetch #{LANDED_REMOTE}` so #{LANDED_REF} matches what landed, rebase onto " \
+         "it, and re-run. A local ref moved by hand (git update-ref) does not move the bar: " \
+         "the check compares against origin's #{LANDED_REMOTE_REF}."
+  end
   if result.key?(:landed_probes)
     warn "  could not measure the landed classification, so no weakening could be detected."
     warn "  This is a missing MEASUREMENT, not a clean result. Probed, and what each gave:"
     result[:landed_probes].each { |ref, outcome| warn "    #{ref} -> #{outcome}" }
     warn "  Fix: give the check a landed table to compare against: `git fetch origin main` " \
          "(so #{LANDED_REF} exists and shares history with HEAD), or `git fetch --unshallow` " \
-         "in a shallow clone. Run from a branch that descends from origin/main."
+         "in a shallow clone. Run from a branch that descends from origin/main. If the " \
+         "failing probe is `#{LS_REMOTE_PROBE}`, make #{LANDED_REMOTE} reachable (network, " \
+         "remote URL, credentials) and re-run: the check never falls back to the local ref."
   end
   return if result[:weakened].empty?
 
@@ -639,7 +745,8 @@ def run_check(root = REPO)
        "classified (#{counts}); every guard carries an actionable '#{MARKER}'; " \
        "#{skipped_note(result)}"
   puts "  classification ratchet: 0 weakening(s) against " +
-       result[:landed_points].map { |label, sha| "#{label} @ #{sha[0, 12]}" }.join(", ")
+       result[:landed_points].map { |label, sha| "#{label} @ #{sha[0, 12]}" }.join(", ") +
+       "; the tip matches `#{LS_REMOTE_PROBE}`"
   unless result[:moved_kept].empty?
     puts "  landed guard(s) moved to a new path, still guard: " +
          result[:moved_kept].map { |old, new, score| "#{old} -> #{new} (#{score}% similar)" }.join(", ")
@@ -701,6 +808,10 @@ def run_self_test
     unless renames == [["src/s00000", "dst/d00001", 100], ["src/s00001", "dst/d00002", 62]]
       fail.("parse_renames: got #{renames.inspect}")
     end
+    _o, _e, st = capture_with_timeout({}, %w[sleep 5], 0.2)
+    fail.("capture_with_timeout did not time out a 5 s sleep at 0.2 s") unless st.nil?
+    o, _e, st = capture_with_timeout({}, ["echo", "hi"], 5)
+    fail.("capture_with_timeout: got #{o.inspect} #{st.inspect}") unless st&.success? && o == "hi\n"
     fresh = new_entries({ "n" => ["tool", "r"], "o" => ["guard", ""] }, { "o" => "guard" })
     fail.("new_entries: got #{fresh.inspect}") unless fresh == [["n", "tool"]]
 
@@ -765,7 +876,8 @@ if ARGV.include?("--help") || ARGV.include?("-h")
                                                (#{THIRD_PARTY_RULE} are skipped
                                                as third-party, and counted); fail any
                                                guard weakened below the landed table
-                                               (origin/main tip and merge-base),
+                                               (origin/main tip, cross-checked with
+                                               `git ls-remote origin`, and merge-base),
                                                including one moved to a new path
       ai/bin/check-guard-messages --root DIR   the same, measuring the checkout at
                                                DIR read-only (its own #{TABLE})

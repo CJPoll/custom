@@ -46,19 +46,22 @@ export GIT_CONFIG_GLOBAL="${TMP}/gitconfig"
 
 TAB="$(printf '\t')"
 
-# land <root>: commit the whole tree and point a fake refs/remotes/origin/main
-# at it -- "the owner landed this on main". The classification ratchet
-# (DND-510) reads its bar from origin/main and the merge-base, never from the
-# working tree.
+# land <root>: commit the whole tree, push it to the fixture's bare origin as
+# refs/heads/main, and point refs/remotes/origin/main at it -- "the owner
+# landed this on main". The classification ratchet (DND-510) reads its bar from
+# origin/main and the merge-base, never from the working tree, and (DND-538)
+# cross-checks the local ref against `git ls-remote origin refs/heads/main`.
 land() {
   git -C "$1" add -A >/dev/null 2>&1
   git -C "$1" -c user.name=fixture -c user.email=fixture@example.invalid \
     commit -q --allow-empty -m landed >/dev/null 2>&1
+  git -C "$1" push -q -f origin HEAD:refs/heads/main >/dev/null 2>&1
   git -C "$1" update-ref refs/remotes/origin/main HEAD
 }
 
 # new_fixture <name>: a git repo holding the checker, one compliant hook, and
-# an empty classification table, landed on a fake origin/main. Prints its path.
+# an empty classification table, landed on a local bare origin (<name>.origin.git)
+# and its refs/remotes/origin/main. Prints its path.
 new_fixture() {
   local root="${TMP}/$1"
   mkdir -p "${root}/ai/bin" "${root}/ai/hooks"
@@ -68,6 +71,8 @@ new_fixture() {
   chmod +x "${root}/ai/hooks/good-guard.sh"
   printf '# path<TAB>class<TAB>reason\n' > "${root}/ai/guard-classification.tsv"
   git -C "${root}" init -q
+  git init -q --bare "${root}.origin.git"
+  git -C "${root}" remote add origin "${root}.origin.git"
   land "${root}"
   printf '%s\n' "${root}"
 }
@@ -505,6 +510,64 @@ if [ "${RC}" -eq 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/fresh-util' >/de
    && printf '%s' "${OUT}" | grep -F 'new' >/dev/null; then
   ok "32 a genuinely new tool beside an unrelated guard deletion passes, named"
 else bad "32 a genuinely new tool beside an unrelated guard deletion passes, named" "rc=${RC} out=${OUT}"; fi
+
+echo "== check-guard-messages: the landed tip is origin's, not a local ref (DND-538) =="
+
+# DND-538: the ratchet trusted the LOCAL refs/remotes/origin/main. Anyone who
+# can run `git update-ref` could point it at a commit carrying the relabel, and
+# the "landed" bar became the diff's own bar again. The local tip is now
+# cross-checked against `git ls-remote origin refs/heads/main`.
+
+# 33. A forged local origin/main: the relabel is committed and the local ref
+#     moved onto it with update-ref, never pushed -> FAIL, both SHAs named.
+R="$(new_fixture forged-ref)"
+add_exec "${R}" scripts/some-gate "${GUARDED}"
+classify "${R}" scripts/some-gate guard ""; land "${R}"
+REAL="$(git -C "${R}" rev-parse HEAD)"
+reclassify "${R}" scripts/some-gate tool "${TOOL_REASON}"
+add_exec "${R}" scripts/some-gate "${BARE}"; track "${R}"
+git -C "${R}" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m relabel >/dev/null 2>&1
+git -C "${R}" update-ref refs/remotes/origin/main HEAD
+FORGED="$(git -C "${R}" rev-parse HEAD)"; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${REAL}" >/dev/null \
+   && printf '%s' "${OUT}" | grep -F "${FORGED}" >/dev/null && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null \
+   && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+  ok "33 a forged local origin/main fails, naming the local and the remote SHA, with Fix:"
+else bad "33 a forged local origin/main fails, naming the local and the remote SHA, with Fix:" "rc=${RC} out=${OUT}"; fi
+
+# 34. origin is unreachable -> FAIL as could-not-measure; never a fallback to
+#     the local ref, never OK.
+R="$(new_fixture unreachable)"; track "${R}"
+git -C "${R}" remote set-url origin "${TMP}/no-such-remote.git"; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'could not measure' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'ls-remote' >/dev/null && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null \
+   && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+  ok "34 an unreachable origin fails as could-not-measure, with Fix:"
+else bad "34 an unreachable origin fails as could-not-measure, with Fix:" "rc=${RC} out=${OUT}"; fi
+
+# 34b. No origin remote at all (the local ref left behind) -> could-not-measure.
+R="$(new_fixture no-remote)"; track "${R}"
+git -C "${R}" config --remove-section remote.origin; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'could not measure' >/dev/null; then
+  ok "34b a missing origin remote fails as could-not-measure"
+else bad "34b a missing origin remote fails as could-not-measure" "rc=${RC} out=${OUT}"; fi
+
+# 34c. origin is reachable but has no refs/heads/main -> could-not-measure.
+R="$(new_fixture no-remote-main)"; track "${R}"
+git -C "${R}.origin.git" update-ref -d refs/heads/main; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'could not measure' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'refs/heads/main' >/dev/null; then
+  ok "34c an origin with no refs/heads/main fails as could-not-measure"
+else bad "34c an origin with no refs/heads/main fails as could-not-measure" "rc=${RC} out=${OUT}"; fi
+
+# 35. A local ref that agrees with origin passes, and the OK output says the
+#     tip was cross-checked (so a pass that skipped the check cannot read the same).
+R="$(new_fixture consistent)"; track "${R}"; run "${R}"
+TIP="$(git -C "${R}" rev-parse refs/remotes/origin/main)"
+if [ "${RC}" -eq 0 ] && printf '%s' "${OUT}" | grep -F 'ls-remote' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F "${TIP:0:12}" >/dev/null; then
+  ok "35 a local origin/main that matches origin passes, the cross-check named"
+else bad "35 a local origin/main that matches origin passes, the cross-check named" "rc=${RC} out=${OUT}"; fi
 
 echo "== check-guard-messages: live tree =="
 
