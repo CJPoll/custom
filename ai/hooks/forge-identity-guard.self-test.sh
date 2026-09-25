@@ -1,10 +1,13 @@
 #!/bin/sh
 # Self-test for forge-identity-guard.sh.
 #
-# Pipes crafted PreToolUse stdin JSON into the hook and asserts the WARN/allow
-# behavior described in the spec. This guard WARNS (non-blocking
-# additionalContext) — it never denies — so "warn" here means the hook emitted
-# a hookSpecificOutput.additionalContext and "allow" means it emitted nothing.
+# Pipes crafted PreToolUse stdin JSON into the hook and asserts the DENY/allow
+# behavior described in the spec. DND-577: this guard DENIES (a PreToolUse
+# permissionDecision "deny", which stops the command BEFORE it runs) — a
+# non-blocking additionalContext warn reached the model only with the tool
+# result, after the owner-attributed push had already gone out. So "deny" here
+# means the hook emitted permissionDecision "deny" with a reason, and "allow"
+# means it emitted nothing.
 # Hermetic: no network, no state mutation outside a mktemp dir; the git-push
 # cases (DND-389) build throwaway repos there so the hook can resolve a remote.
 #
@@ -23,20 +26,21 @@ run() {
   STATUS=$?
 }
 
-is_warn() {
-  [ "$STATUS" -eq 0 ] && printf '%s' "$OUT" | grep -q '"additionalContext"'
+is_deny() {
+  [ "$STATUS" -eq 0 ] && printf '%s' "$OUT" | grep -q '"permissionDecision":"deny"' \
+    && printf '%s' "$OUT" | grep -q '"permissionDecisionReason":"forge-identity:'
 }
 
 is_allow() {
   [ "$STATUS" -eq 0 ] && [ -z "$OUT" ]
 }
 
-# check <label> <expected: warn|allow>
+# check <label> <expected: deny|allow>
 check() {
   _label=$1
   _expect=$2
-  if [ "$_expect" = "warn" ]; then
-    if is_warn; then _r=PASS; else _r=FAIL; fi
+  if [ "$_expect" = "deny" ]; then
+    if is_deny; then _r=PASS; else _r=FAIL; fi
   else
     if is_allow; then _r=PASS; else _r=FAIL; fi
   fi
@@ -58,14 +62,14 @@ bash_json_cwd() {
   jq -cn --arg d "$1" --arg c "$2" '{tool_name:"Bash",cwd:$d,tool_input:{command:$c}}'
 }
 
-# is_warn_with <needle> : a warn whose text also carries <needle>.
-is_warn_with() {
-  is_warn && printf '%s' "$OUT" | grep -qF -- "$1"
+# is_deny_with <needle> : a deny whose text also carries <needle>.
+is_deny_with() {
+  is_deny && printf '%s' "$OUT" | grep -qF -- "$1"
 }
 
-# check_text <label> <needle> : the last run warned AND carried <needle>.
+# check_text <label> <needle> : the last run denied AND carried <needle>.
 check_text() {
-  if is_warn_with "$2"; then
+  if is_deny_with "$2"; then
     PASS=$((PASS + 1)); printf '  PASS  %s\n' "$1"
   else
     FAIL=$((FAIL + 1)); printf '  FAIL  %s (needle [%s]) status=%s out=[%s]\n' "$1" "$2" "$STATUS" "$OUT"
@@ -97,82 +101,98 @@ echo
 echo "--- WARN cases (bare create/merge = owner-attributed write) ---"
 
 run "$(bash_json 'gh pr create --title x --body y')"
-check "1a. bare gh pr create" warn
+check "1a. bare gh pr create" deny
 
 run "$(bash_json 'gh -R o/r pr create --fill')"
-check "1b. gh pr create with flags before subcommand" warn
+check "1b. gh pr create with flags before subcommand" deny
 
 run "$(bash_json 'glab mr create --fill')"
-check "1c. bare glab mr create" warn
+check "1c. bare glab mr create" deny
 
 run "$(bash_json 'gh pr merge 5 --squash')"
-check "2a. bare gh pr merge" warn
+check "2a. bare gh pr merge" deny
 
 run "$(bash_json 'gh -R o/r pr merge 5 --auto')"
-check "2b. gh pr merge with flags before subcommand" warn
+check "2b. gh pr merge with flags before subcommand" deny
 
 run "$(bash_json 'glab mr merge 42')"
-check "2c. bare glab mr merge" warn
+check "2c. bare glab mr merge" deny
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'git push origin HEAD')"
-check "3a. plain git push, origin git@github.com: (cwd)" warn
+check "3a. plain git push, origin git@github.com: (cwd)" deny
 
 run "$(bash_json_cwd "$TMP/gh_https" 'git push')"
-check "3b. plain git push, default remote -> https github origin" warn
+check "3b. plain git push, default remote -> https github origin" deny
 
 run "$(bash_json_cwd "$TMP/norepo" "git -C $TMP/gh_scp push origin HEAD")"
-check "3c. git -C <github repo> push from another dir" warn
+check "3c. git -C <github repo> push from another dir" deny
 
 run "$(bash_json_cwd "$TMP/norepo" "cd $TMP/gh_scp && git push -u origin HEAD")"
-check "3d. cd <github repo> && git push -u" warn
+check "3d. cd <github repo> && git push -u" deny
 
 run "$(bash_json_cwd "$TMP/gl" 'git push https://github.com/o/r.git HEAD')"
-check "3e. git push to a literal github.com URL" warn
+check "3e. git push to a literal github.com URL" deny
 
 run "$(bash_json_cwd "$TMP/gh_scp" '/usr/bin/git push origin HEAD')"
-check "3f. path-qualified /usr/bin/git push" warn
+check "3f. path-qualified /usr/bin/git push" deny
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'GIT_TERMINAL_PROMPT=0 git -c credential.helper= push origin HEAD')"
-check "3g. helper-disabled plain git push (still the owner, not the wrapper)" warn
+check "3g. helper-disabled plain git push (still the owner, not the wrapper)" deny
 
 run "$(bash_json_cwd "$TMP/gl_ghpush" 'git push')"
-check "3h. gitlab fetch url but a github.com pushurl" warn
+check "3h. gitlab fetch url but a github.com pushurl" deny
 
 run "$(bash_json_cwd "$TMP/norepo" 'git push origin HEAD')"
-check "3i. unresolvable remote (not a repo) -> still warns, never silent" warn
-check_text "3i'. the unresolvable warn says it could not resolve" 'could not resolve its remote'
+check "3i. unresolvable remote (not a repo) -> still denies, never silent" deny
+check_text "3i'. the unresolvable deny says it could not resolve" 'could not resolve its remote'
 
 run "$(bash_json_cwd "$TMP/norepo" "git -C $TMP/local push origin HEAD; git -C $TMP/gh_scp push origin HEAD")"
-check_text "3m. two pushes, the SECOND to github -> warns (every push examined)" 'to a github.com remote'
+check_text "3m. two pushes, the SECOND to github -> denies (every push examined)" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/norepo" "git -C $TMP/gl push origin HEAD; git -C $TMP/gh_scp push origin HEAD")"
-check_text "3m2. gitlab push then github push -> the gitlab warn does not hide the github one" 'to a github.com remote'
+check_text "3m2. gitlab push then github push -> the gitlab deny does not hide the github one" 'to a github.com remote'
 check_text "3m3. ...and the gitlab one is reported too" 'to a gitlab.com remote'
 
 run "$(bash_json_cwd "$TMP" 'cd gh_scp && git push')"
 check_text "3n. relative cd resolved against the input cwd" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'git push\necho done')")"
-check_text "3o. multi-line: push's args end at its line (origin=github still warns)" 'to a github.com remote'
+check_text "3o. multi-line: push's args end at its line (origin=github still denies)" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'git push orgin HEAD')"
-check_text "3p. a target that is neither a remote nor a URL -> could-not-resolve warn" 'could not resolve its remote'
+check_text "3p. a target that is neither a remote nor a URL -> could-not-resolve deny" 'could not resolve its remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'git push origin HEAD')"
-check_text "3j. push warn carries the escalate Fix:" 'Fix: push through the wrapper'
-check_text "3k. push warn says escalate to your admiral" 'escalate to your admiral with the command + error and wait'
+check_text "3j. push deny carries the escalate Fix:" 'Fix: push through the wrapper'
+check_text "3k. push deny says escalate to your admiral" 'escalate to your admiral with the command + error and wait'
 
 run "$(bash_json 'gh pr create --fill')"
-check_text "3l. create warn carries the escalate clause" 'escalate to your admiral with the command + error and wait'
+check_text "3l. create deny carries the escalate clause" 'escalate to your admiral with the command + error and wait'
+
+echo
+echo "--- DND-577: the 2026-09-24 incident — a plain push is STOPPED, not warned about ---"
+
+mkrepo custom_incident 'git@github.com:CJPoll/custom.git'
+run "$(bash_json_cwd "$TMP/custom_incident" 'git push -u origin hyprpaper-08-syntax')"
+check "D1. captain's plain push of hyprpaper-08-syntax to CJPoll/custom -> deny" deny
+check_text "D1a. the deny names the gh-athena push form" '~/dev/custom/ai/bin/gh-athena git'
+if printf '%s' "$OUT" | grep -q '"additionalContext"'; then
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s out=[%s]\n' "D1b. no after-the-fact additionalContext-only warn" "$OUT"
+else
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "D1b. no after-the-fact additionalContext-only warn"
+fi
+
+run "$(bash_json_cwd "$TMP/norepo" "cd $TMP/custom_incident && git push -u origin HEAD")"
+check "D2. admiral's cd <repo> && git push -u (first push of a PR branch) -> deny" deny
 
 echo
 echo "--- GitLab push cases (DND-393) ---"
 
 run "$(bash_json_cwd "$TMP/gl" 'git push origin HEAD')"
-check "G1. plain git push, origin git@gitlab.com: (cwd)" warn
-check_text "G1a. gitlab push warn names gitlab.com" 'to a gitlab.com remote'
-check_text "G1b. gitlab push warn points at glab-athena git" '~/dev/custom/ai/bin/glab-athena git push'
-check_text "G1c. gitlab push warn carries the escalate Fix:" 'escalate to your admiral with the command + error and wait'
+check "G1. plain git push, origin git@gitlab.com: (cwd)" deny
+check_text "G1a. gitlab push deny names gitlab.com" 'to a gitlab.com remote'
+check_text "G1b. gitlab push deny points at glab-athena git" '~/dev/custom/ai/bin/glab-athena git push'
+check_text "G1c. gitlab push deny carries the escalate Fix:" 'escalate to your admiral with the command + error and wait'
 
 run "$(bash_json_cwd "$TMP/gl_https" 'git push')"
 check_text "G2. plain git push, default remote -> https gitlab origin" 'to a gitlab.com remote'
@@ -196,7 +216,7 @@ run "$(bash_json_cwd "$TMP/gl" 'GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/glab-a
 check "G8. the documented glab-athena push form -> allow" allow
 
 echo
-echo "--- DND-397: a wrapper invoked through a shell variable must not warn ---"
+echo "--- DND-397: a wrapper invoked through a shell variable must not be denied ---"
 
 run "$(bash_json_cwd "$TMP/gl" 'W=~/dev/custom/ai/bin/glab-athena; "$W" git push origin x')"
 check "V1. W=glab-athena; \"\$W\" git push" allow
@@ -214,34 +234,34 @@ run "$(bash_json_cwd "$TMP/gh_scp" 'export GHA=~/dev/custom/ai/bin/gh-athena; "$
 check "V5. export-assigned var, global options before push" allow
 
 echo
-echo "--- DND-397: a REAL plain push must still warn ---"
+echo "--- DND-397: a REAL plain push must still deny ---"
 
 run "$(bash_json_cwd "$TMP/gh_scp" "bash -c 'git push origin HEAD'")"
-check_text "R1. bash -c '<push>' still warns" 'to a github.com remote'
+check_text "R1. bash -c '<push>' still denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/norepo" "sh -c \"cd $TMP/gh_scp && git push\"")"
-check_text "R2. sh -c \"cd <gh repo> && git push\" still warns" 'to a github.com remote'
+check_text "R2. sh -c \"cd <gh repo> && git push\" still denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "bash <<'EOF'\ngit push origin HEAD\nEOF")")"
-check_text "R3. heredoc fed to bash still warns" 'to a github.com remote'
+check_text "R3. heredoc fed to bash still denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "cat <<'EOF' | sh\ngit push origin HEAD\nEOF")")"
-check_text "R4. heredoc piped into sh still warns" 'to a github.com remote'
+check_text "R4. heredoc piped into sh still denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'python3 - <<EOF\nx = \"$(git push origin HEAD)\"\nEOF')")"
-check_text "R5. unquoted-delimiter heredoc whose body runs \$(git push) still warns" 'to a github.com remote'
+check_text "R5. unquoted-delimiter heredoc whose body runs \$(git push) still denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'echo "$(git push origin HEAD)"')"
-check_text "R6. \$(git push) inside a double-quoted string still warns" 'to a github.com remote'
+check_text "R6. \$(git push) inside a double-quoted string still denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'eval "git push origin HEAD"')"
-check_text "R7. eval \"git push ...\" still warns" 'to a github.com remote'
+check_text "R7. eval \"git push ...\" still denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "echo 'git push' ; git push origin HEAD")"
-check_text "R8. a quoted mention AND a real push -> the real one warns" 'to a github.com remote'
+check_text "R8. a quoted mention AND a real push -> the real one denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "cat > f <<'EOF'\ngit push\nEOF\ngit push origin HEAD")")"
-check_text "R9. a real push AFTER a heredoc's terminator still warns" 'to a github.com remote'
+check_text "R9. a real push AFTER a heredoc's terminator still denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'git push "origin" HEAD')"
 check_text "R10. a quoted one-word remote still resolves" 'to a github.com remote'
@@ -250,28 +270,28 @@ run "$(bash_json_cwd "$TMP/norepo" "git -C \"$TMP/gh_scp\" push origin HEAD")"
 check_text "R11. a quoted -C dir still resolves" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena; git push origin HEAD')"
-check_text "R12. a wrapper var is assigned but the push is plain -> warns" 'to a github.com remote'
+check_text "R12. a wrapper var is assigned but the push is plain -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'X=~/dev/custom/ai/bin/gh-athena; "$W" git push origin HEAD')"
-check_text "R13. \$W was never assigned a wrapper -> warns" 'to a github.com remote'
+check_text "R13. \$W was never assigned a wrapper -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena; W=/usr/bin/env; "$W" git push origin HEAD')"
-check_text "R14. \$W reassigned away from the wrapper -> warns" 'to a github.com remote'
+check_text "R14. \$W reassigned away from the wrapper -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gl" "zsh -c 'git push origin HEAD'")"
-check_text "R15. zsh -c '<push>' to gitlab still warns" 'to a gitlab.com remote'
+check_text "R15. zsh -c '<push>' to gitlab still denies" 'to a gitlab.com remote'
 
 run "$(bash_json_cwd "$TMP/norepo" "$(printf "python3 - <<'EOF'\nprint(1)\nEOF\ngit push origin HEAD")")"
-check_text "R16. unresolvable real push after a heredoc keeps DND-389's warn" 'could not resolve its remote'
+check_text "R16. unresolvable real push after a heredoc keeps DND-389's deny" 'could not resolve its remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "echo \"\$(bash -c 'git push origin HEAD')\"")"
-check_text "R17. a shell nested inside \"\$(…)\" -> nothing masked, still warns" 'to a github.com remote'
+check_text "R17. a shell nested inside \"\$(…)\" -> nothing masked, still denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "$(printf "git commit -m \"\$(cat <<'EOF'\nmsg\nEOF\n)\" && git push origin HEAD")")"
-check_text "R18. a commit-message heredoc then a real push -> warns" 'to a github.com remote'
+check_text "R18. a commit-message heredoc then a real push -> denies" 'to a github.com remote'
 
 echo
-echo "--- DND-397: a quoted command string run by any runner still warns ---"
+echo "--- DND-397: a quoted command string run by any runner still denies ---"
 
 run "$(bash_json_cwd "$TMP/gh_scp" '$SHELL -c "git push origin HEAD"')"
 check_text "C1. \$SHELL -c \"<push>\"" 'to a github.com remote'
@@ -310,10 +330,10 @@ run "$(bash_json_cwd "$TMP/gh_scp" 'W=/usr/bin/env; "$W" git push origin HEAD; W
 check_text "C12. a wrapper assigned AFTER the use does not bless it" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena; "$W" git push origin x; W=/usr/bin/env; "$W" git push origin HEAD')"
-check_text "C13. same var: wrapper use, reassignment, plain use -> the plain one warns" 'to a github.com remote'
+check_text "C13. same var: wrapper use, reassignment, plain use -> the plain one denies" 'to a github.com remote'
 
 echo
-echo "--- DND-397: text runners the parked mention-masking missed — must warn ---"
+echo "--- DND-397: text runners the parked mention-masking missed — must be denied ---"
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'git rebase --exec "git push origin HEAD" main')"
 check_text "C14. git rebase --exec \"<push>\"" 'to a github.com remote'
@@ -349,7 +369,7 @@ run "$(bash_json_cwd "$TMP/gh_scp" "git -C . -c 'alias.p=!git push origin HEAD' 
 check_text "C24. git -C . -c '<alias>' (value before the subcommand)" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "grep -rn 'git push' . || sh -c 'git push origin HEAD'")"
-check_text "C25. || then a shell still warns" 'to a github.com remote'
+check_text "C25. || then a shell still denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "git grep -O\"sh -c 'git push origin HEAD'\" x")"
 check_text "C26. git grep -O\"<pager that pushes>\"" 'to a github.com remote'
@@ -361,60 +381,60 @@ run "$(bash_json_cwd "$TMP/gh_scp" "python3 -c \"import os; os.system('git push 
 check_text "C28. python3 -c running a push" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" '(W=~/dev/custom/ai/bin/gh-athena); $W git push origin HEAD')"
-check_text "C29. W set only in a subshell -> the later \$W git push is plain, warns" 'to a github.com remote'
+check_text "C29. W set only in a subshell -> the later \$W git push is plain, denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena true; $W git push origin HEAD')"
-check_text "C30. W as a command-prefix assignment does not persist -> warns" 'to a github.com remote'
+check_text "C30. W as a command-prefix assignment does not persist -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena | cat; $W git push origin HEAD')"
-check_text "C31. W set in a pipeline element does not persist -> warns" 'to a github.com remote'
+check_text "C31. W set in a pipeline element does not persist -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'X=$(W=~/dev/custom/ai/bin/gh-athena; echo); $W git push origin HEAD')"
-check_text "C32. W set inside \$( … ) does not persist -> warns" 'to a github.com remote'
+check_text "C32. W set inside \$( … ) does not persist -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'W=~/dev/custom/ai/bin/gh-athena && (cd . && "$W" git push origin x)')"
-check "V6. only the next-statement shape is blessed; a use in a later subshell still warns" warn
+check "V6. only the next-statement shape is blessed; a use in a later subshell still denies" deny
 
 run "$(bash_json_cwd "$TMP/gl" "$(printf 'W=~/dev/custom/ai/bin/glab-athena\n"$W" git push origin x')")"
 check "V7. newline-separated W=glab-athena then \"\$W\" git push" allow
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'echo W=~/dev/custom/ai/bin/gh-athena; $W git push origin HEAD')"
-check_text "C33. W=… as an echo ARGUMENT sets nothing -> warns" 'to a github.com remote'
+check_text "C33. W=… as an echo ARGUMENT sets nothing -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'false && W=~/dev/custom/ai/bin/gh-athena; $W git push origin HEAD')"
-check_text "C34. a conditional assignment -> warns" 'to a github.com remote'
+check_text "C34. a conditional assignment -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" '(W=~/dev/custom/ai/bin/gh-athena; echo "("); $W git push origin HEAD')"
-check_text "C35. subshell assignment with a quoted paren -> warns" 'to a github.com remote'
+check_text "C35. subshell assignment with a quoted paren -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "W=~/dev/custom/ai/bin/gh-athena; bash -c '\$W git push origin HEAD'")"
-check_text "C36. \$W used in a child shell where W is unset -> warns" 'to a github.com remote'
+check_text "C36. \$W used in a child shell where W is unset -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "W=\"\$HOME/dev/custom/ai/bin/gh-athena\" ; \"\$W\" git push origin x ; \$W git -C $TMP/gl push origin HEAD")"
-if is_warn_with 'to a gitlab.com remote' && ! is_warn_with 'to a github.com remote'; then
-  PASS=$((PASS + 1)); printf '  PASS  %s\n' "C37. the next statement's use is blessed (no github warn); a second use still warns (gitlab)"
+if is_deny_with 'to a gitlab.com remote' && ! is_deny_with 'to a github.com remote'; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "C37. the next statement's use is blessed (no github deny); a second use still denies (gitlab)"
 else
-  FAIL=$((FAIL + 1)); printf '  FAIL  %s status=%s out=[%s]\n' "C37. blessed first use, warned second use" "$STATUS" "$OUT"
+  FAIL=$((FAIL + 1)); printf '  FAIL  %s status=%s out=[%s]\n' "C37. blessed first use, denied second use" "$STATUS" "$OUT"
 fi
 
 run "$(bash_json_cwd "$TMP/gh_scp" "W='~/dev/custom/ai/bin/gh-athena' ; \"\$W\" git push origin HEAD")"
-check_text "C38. a single-quoted value (no ~ expansion) is not blessed -> warns" 'to a github.com remote'
+check_text "C38. a single-quoted value (no ~ expansion) is not blessed -> denies" 'to a github.com remote'
 
 
 run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'W=~/dev/custom/ai/bin/gh-athena\nW=/usr/bin/env\n"$W" git push origin HEAD')")"
-check_text "C39. a reassignment on its own line is a statement, not a prefix -> warns" 'to a github.com remote'
+check_text "C39. a reassignment on its own line is a statement, not a prefix -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'W=~/dev/custom/ai/bin/gh-athena; "$W"\ngit push origin HEAD')")"
-check_text "C40. \"\$W\" then git push on the NEXT line is a plain push -> warns" 'to a github.com remote'
+check_text "C40. \"\$W\" then git push on the NEXT line is a plain push -> denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'export\nW=~/dev/custom/ai/bin/gh-athena; "$W" git push origin HEAD')")"
-check_text "C41. export on its own line is not part of the assignment -> not blessed, warns" 'to a github.com remote'
+check_text "C41. export on its own line is not part of the assignment -> not blessed, denies" 'to a github.com remote'
 
 run "$(bash_json_cwd "$TMP/gh_scp" "$(printf 'W=~/dev/custom/ai/bin/gh-athena\n\n  GIT_TERMINAL_PROMPT=0 "$W" git push origin x')")"
 check "V8. blank line between the assignment and a prefixed use" allow
 
 echo
-echo "--- MUST-NOT-WARN cases (wrapper / reads / unrelated) ---"
+echo "--- MUST-NOT-DENY cases (wrapper / reads / unrelated) ---"
 
 run "$(bash_json_cwd "$TMP/gh_scp" '~/dev/custom/ai/bin/gh-athena git push origin HEAD')"
 check "M7. gh-athena git push (wrapper)" allow
@@ -438,8 +458,8 @@ run "$(bash_json_cwd "$TMP/gopath" 'git push origin HEAD')"
 check "M13. push to a LOCAL path containing github.com (Go workspace) is not GitHub" allow
 
 run "$(bash_json_cwd "$TMP/gl" 'git push origin fix/github.com-links')"
-if is_warn && ! is_warn_with 'to a github.com remote'; then
-  PASS=$((PASS + 1)); printf '  PASS  %s\n' "M14. GitLab push of a branch whose NAME mentions github.com -> gitlab warn only, never a github one"
+if is_deny && ! is_deny_with 'to a github.com remote'; then
+  PASS=$((PASS + 1)); printf '  PASS  %s\n' "M14. GitLab push of a branch whose NAME mentions github.com -> gitlab deny only, never a github one"
 else
   FAIL=$((FAIL + 1)); printf '  FAIL  %s status=%s out=[%s]\n' "M14. branch name mentioning github.com" "$STATUS" "$OUT"
 fi
