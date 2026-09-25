@@ -211,7 +211,9 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
     # Alias names are config keys, so git matches them case-insensitively
     # (`git SP` runs alias.sp); --get-regexp prints them lower-cased.
     sc = tolower(sc)
-    if (depth > 10 || !(sc in nal)) return ""
+    if (!(sc in nal)) return ""
+    # Past the bound, a chain still resolving is treated as a stash write.
+    if (depth > 10) return "alias"
     for (i = 1; i <= nal[sc]; i++) {
       v = aval[sc, i]
       # A shell alias runs its body with sh: read the body as a command (so
@@ -259,7 +261,8 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
   # analyze(text, depth): the verdict for one command text, and for every
   # quoted word in it that may itself be a command.
   function analyze(text, depth,    W, QF, SB, n, k, e, r, sw, m, i) {
-    if (depth > 8) return ""
+    # Past the nesting bound, text that still names stash is a deny.
+    if (depth > 8) return mentions_stash(text) ? "stash" : ""
     n = tokenize(text, W, QF, SB)
     for (k = 1; k <= n; k++) if (QF[k]) { r = analyze(W[k], depth + 1); if (r != "") return r }
     for (k = 1; k <= n; k++) {

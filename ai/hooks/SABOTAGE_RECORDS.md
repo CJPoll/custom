@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 107 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27).
+- **Baseline:** `RESULT: 109 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1).
 
 ### Fail-first (no guard)
 
@@ -353,3 +353,19 @@ After the fix: `RESULT: 107 passed, 0 failed`. Class-closed assertion: every
 path that turns an alias value into words now reaches `git_verdict` or
 `analyze` — `grep -nE 'mentions_stash\(v\)' ai/hooks/git-stash-guard.sh`
 shows the one remaining literal check is OR-ed with `analyze`, never alone.
+
+### Self-review after round 4 (the recursion bounds failed open)
+
+Both recursion bounds returned "allow" when exceeded: an alias chain deeper
+than 10, and a command nested in more than 8 levels of quoted `sh -c`. A bound
+that allows is a bypass by construction. Now an alias chain still resolving
+at the bound is denied, and nested text past the bound is denied when it
+names stash. The new cases against the round-4 hook:
+
+```
+FAIL  A28. an alias chain past the resolution bound (12 deep) (expected deny) status=0 out=[]
+FAIL  N1. a stash write nested past the re-read bound (expected deny) status=0 out=[]
+RESULT: 107 passed, 2 failed
+```
+
+After the fix: `RESULT: 109 passed, 0 failed`.

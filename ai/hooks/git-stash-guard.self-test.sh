@@ -47,6 +47,18 @@ cat > "$GIT_CONFIG_GLOBAL" <<'EOF'
 	x2 = !git sp
 	x3 = !git st"a"sh pop
 	x4 = !git status
+	c1 = c2
+	c2 = c3
+	c3 = c4
+	c4 = c5
+	c5 = c6
+	c6 = c7
+	c7 = c8
+	c8 = c9
+	c9 = c10
+	c10 = c11
+	c11 = c12
+	c12 = stash pop
 EOF
 
 run() {
@@ -234,6 +246,13 @@ case_cmd "A24. shell alias with an unrelated body: x4 = !git status" allow 'git 
 case_cmd "A25. a stash alias through an expanded command word: \$GIT sp" deny '$GIT sp'
 case_cmd "A26. an expanded word with an expanded argument" allow '$EDITOR $FILE'
 case_cmd "A27. a quote-split git word running a stash alias" deny 'g"i"t sp'
+case_cmd "A28. an alias chain past the resolution bound (12 deep)" deny 'git c1'
+# N1: `git stash pop` nested in 10 levels of bash -c "...", past the re-read bound.
+_nest='git stash pop'
+for _k in 1 2 3 4 5 6 7 8 9 10; do
+  _nest="bash -c \"$(printf '%s' "$_nest" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')\""
+done
+case_cmd "N1. a stash write nested past the re-read bound" deny "$_nest"
 
 echo "== R: stash refs written without the stash subcommand =="
 case_cmd "R1. git update-ref -d refs/stash" deny 'git update-ref -d refs/stash'
