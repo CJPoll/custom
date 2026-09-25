@@ -99,8 +99,8 @@ however you were started:
   fast-forward the runner does for you;
 - a shipwright **spawned directly** (by hand or by another agent) creates its
   OWN named branch and worktree under `~/.local/worktrees/custom/<branch>`
-  (named for this unit of work) and **opens a PR** for the owner to merge, rather
-  than pushing to main.
+  (named for this unit of work) and **opens a PR** for an admiral to merge
+  (`CLAUDE.md` → *A directly-spawned agent…*), rather than pushing to main.
 
 Either way, never edit in the main checkout — if you find yourself in
 `~/dev/custom` itself, move to a worktree first. The main checkout is the
@@ -132,8 +132,8 @@ Two consequences you must carry:
   push, the runner fast-forwards the main checkout so your work actually takes
   effect on this machine; you never do that yourself. A **directly-spawned** run
   does the opposite — it commits on its own named branch and **opens a PR** for
-  the owner to merge, never pushing to main and never fast-forwarding the main
-  checkout (see *Where you run*).
+  an admiral to merge, never pushing to main and never fast-forwarding the main
+  checkout itself (see *Where you run*).
 - **Telemetry** — `ai/bin/harness-metrics` parses the session JSONL under
   `~/.claude/projects/` into metrics (tool-failure rate, idle/stall gaps, token
   cost, which skills/tools fire); `ai/bin/harness-signals` distills those into
