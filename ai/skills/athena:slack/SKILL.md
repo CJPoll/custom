@@ -348,13 +348,19 @@ only**. A `thread_reply` the file channel misses is simply lost: it depends on
 no second path to it. If a threaded reply to Athena seems to have gone
 unheard, it will not turn up here.
 
-**Later (2026-09-25):** the closing sentence above read generally enough to
-suggest *any* threaded reply is at risk. Narrowed: the classifier checks
-`im`/`mpim` ahead of `thread_reply` (`ai/contracts/athena-inbox.md` → *Channel
-kind: `log`* → *Precedence*), so a reply inside a DM or MPIM thread is stamped
-`kind: "im"`/`"mpim"` and **is** covered by this backstop — `thread_reply`
-(and this gap) applies only to a reply in a non-DM channel thread the bot is
-already in.
+**This gap is about what the poll can fetch, not about `kind`.** The file
+channel's classifier checks `im`/`mpim` ahead of `thread_reply`
+(`ai/contracts/athena-inbox.md` → *Channel kind: `log`* → *Line format* →
+*Precedence*), so a reply inside a DM or MPIM thread is stamped `kind:
+"im"`/`"mpim"` there, never `thread_reply` — but that fact is about which
+label the *file channel* would give it, not about whether *this* backstop can
+see it. The poll's only call is `conversations.history`
+(`ai/skills/athena:slack/lib/inbox.sh` → `_inbox_scan_list`), which returns
+top-level messages, not thread replies (`conversations.replies` is a separate
+call this poll never makes). So a reply in **any** thread — DM, MPIM, or
+channel — is invisible to this backstop regardless of the `kind` it would
+have been given: the closing sentence above holds for a DM/MPIM thread reply
+too, not only a channel one.
 
 ### The polling hook
 
