@@ -203,7 +203,12 @@ end
 
 def run_json(registry_path: REGISTRY_PATH, root: REPO_ROOT)
   require "json"
-  bins, = enumerate_tools(root)
+  begin
+    bins, = enumerate_tools(root)
+  rescue FirstParty::MeasureError => e
+    return [1, ["check-tool-risk: --json could not discover the harness tools: #{e.message}",
+                "  Fix: run from a git checkout of ~/dev/custom; see ai/lib/harness_tools.rb for the scope rule."]]
+  end
   map = bins.each_with_object({}) { |name, h| h[name] = class_of(name, registry_path) }
   [0, [JSON.pretty_generate(map)]]
 end
@@ -270,6 +275,14 @@ def discovery_cases(fail)
     code, = run_check(root: root, registry_path: reg)
     fail.("an unscoped executable should fail") unless code == 1
     FileUtils.rm_f(stray)
+  end
+
+  # --json on a root git cannot answer fails cleanly (the phase guard then
+  # fails open with a logged WARN), never with a stack trace or an empty map.
+  Dir.mktmpdir("check-tool-risk-nogit-") do |root|
+    code, lines = run_json(root: root, registry_path: File.join(root, "risk.yml"))
+    fail.("--json on a non-git root should exit 1, got #{code}") unless code == 1
+    fail.("--json failure should carry a Fix:") unless lines.join("\n").include?("Fix:")
   end
 
   # Empty discovery is an ERROR, never "0 tools, all classified".
@@ -458,7 +471,8 @@ elsif (i = ARGV.index("--class-of"))
   exit 0
 elsif ARGV.include?("--json")
   code, lines = run_json
-  lines.each { |l| puts l }
+  out = code.zero? ? $stdout : $stderr
+  lines.each { |l| out.puts l }
   exit code
 else
   code, lines = run_check
