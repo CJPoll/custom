@@ -644,11 +644,33 @@ hand is not a thing anyone does.
 **A directly-spawned agent stays out of another lane's branch and worktree.**
 A shipwright spawned by hand (or by another agent) is a *different unit of
 work*: it takes its own named branch and worktree under
-`~/.local/worktrees/<project>/<branch>`, never a cron lane's, and opens a PR for
-the owner to merge rather than pushing to main. Two actors sharing one branch or
-worktree is the same no-lock race as sharing the main checkout — on 2026-09-18 a
-cron run and a hand-spawned shipwright both operated on one shared shipwright
-branch and pushed to main inside one window, serialized only by luck.
+`~/.local/worktrees/<project>/<branch>`, never a cron lane's, and opens a PR
+rather than pushing to main. Two actors sharing one branch or worktree is the
+same no-lock race as sharing the main checkout — on 2026-09-18 a cron run and a
+hand-spawned shipwright both operated on one shared shipwright branch and pushed
+to main inside one window, serialized only by luck.
+
+**An admiral merges that PR; nobody waits for the owner.** Once the PR meets
+the bar (`athena:merge-boarding` → *The merge bar*: the author's DONE and
+report, a recorded critic PASS on the head, the gate green), an admiral lands
+it per `athena:merge-boarding`:
+1. rebase onto `origin/main`;
+2. re-gate the integrated head (`integration-gate`);
+3. merge, then confirm it landed (`ai/bin/confirm-merged`);
+4. fast-forward the main checkout (`git merge --ff-only`).
+
+The author still never pushes to main and never merges its own PR. Owner-gated
+merges stay gated: an `integration-gate` exit 4 is held for the owner unless it
+is a security fix (`~/.claude/CLAUDE.md` → *Security fixes ship without owner
+approval*).
+
+**Later (2026-09-24):** this rule said a hand-spawned agent "opens a PR for the
+owner to merge rather than pushing to main", so its green PRs sat until the
+owner merged them by hand. Superseded by owner decision (Cody, 2026-09-24,
+coordinator session). Asked "If you want admirals to merge hand-spawned PRs in
+`~/dev/custom` from now on, say so and I'll write that into the repo rule," the
+owner answered: "Yes, please just ship things." The branch, worktree and PR
+discipline is unchanged; only who merges moved, from the owner to an admiral.
 
 **Later (2026-09-19):** this rule used to rest on the cron owning a *named*
 standing lane — **`shipwright/auto` at `.git/athena-shipwright`**, said to be
