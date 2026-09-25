@@ -72,6 +72,7 @@ require "open3"
 require "tmpdir"
 require "fileutils"
 require_relative "../lib/harness_tools"
+require_relative "../lib/landed"
 
 PROG = File.basename($PROGRAM_NAME)
 REPO = File.expand_path("../..", __dir__)
@@ -82,7 +83,9 @@ USAGE = <<~TXT.freeze
     ai/bin/check-bin-help              assert every harness tool (the executables
                                        ai/lib/harness_tools.rb scopes in: ai/bin,
                                        ai/skills/*/bin, ...) answers --help on
-                                       stdout with exit 0 and no side effects
+                                       stdout with exit 0 and no side effects,
+                                       and that EXEMPT gained no entry beyond
+                                       what landed on origin/main (DND-543)
     ai/bin/check-bin-help --self-test  deterministic, hermetic suite (no model,
                                        fixtures only -- never the live tools)
     ai/bin/check-bin-help --help       this text
@@ -113,9 +116,115 @@ def harness_executables(repo = REPO)
   HarnessTools.discover(repo).tools.map { |rel| File.join(repo, rel) }
 end
 
+# ---- the EXEMPT ratchet: the table is judged against what LANDED (DND-543) ----
+#
+# EXEMPT lives in this file, in the diff this check judges. Before DND-543 a
+# change could exempt a tool with no --help branch -- the DND-246 hang class --
+# and the check honoured the exemption it had just been given. See
+# ~/dev/custom/CLAUDE.md -> "A check's own bar must not live in the diff it is
+# checking".
+#
+# So the gate path also reads EXEMPT out of this file at the landed points
+# (ai/lib/landed.rb: the origin/main tip, cross-checked with `git ls-remote
+# origin refs/heads/main`, and merge-base(HEAD, origin/main)). A key in the
+# current table that is in NO landed table is a NEW exemption, and a new
+# exemption is always a weakening: it takes a tool out of the probe. It fails,
+# named. Removing an exemption is a tightening and passes. A landed key with no
+# `/` is the pre-DND-508 schema (keyed by ai/bin basename) and reads as
+# ai/bin/<key>. A file absent at every landed point is a table introduced by
+# this diff; it passes with every entry named.
+#
+# The ratchet reads the table from the file's TEXT, the same way at every
+# point, so the running EXEMPT must equal the parsed one: an entry written in a
+# form the reader cannot parse fails as could-not-measure. Could not measure
+# (no origin/main, no merge-base, shallow, origin unreachable, a malformed
+# landed table) and a local tip that disagrees with origin both FAIL, with Fix:.
+#
+# No in-repo escape hatch: the OWNER lands a new exemption on main, and a
+# branch rebased onto it passes. Residual: an actor that can push to main, a
+# diff that edits this ratchet's code or the parser, one that repoints the
+# `origin` remote, or a landed exemption that is kept while its tool is swapped
+# for different content at the same path.
+
+SELF_REL = "ai/bin/check-bin-help"
+EXEMPT_ENTRY = /\A\s*"([^"\\]+)"\s*=>/.freeze
+
+def exempt_key(key)
+  key.include?("/") ? key : "ai/bin/#{key}"
+end
+
+# The EXEMPT keys in this file's TEXT, normalised. Raises ArgumentError when
+# the table is absent. An empty table is a valid (strictest) table.
+def parse_exempt(text)
+  lines = text.lines
+  start = lines.index { |l| l.match?(/\AEXEMPT = \{\s*\z/) }
+  raise ArgumentError, "no `EXEMPT = {` line" unless start
+
+  stop = lines[start..].index { |l| l.match?(/\A\}\.freeze\s*\z/) }
+  raise ArgumentError, "no `}.freeze` closing EXEMPT" unless stop
+
+  lines[start + 1, stop - 1].filter_map { |l| (m = EXEMPT_ENTRY.match(l)) && exempt_key(m[1]) }.uniq
+end
+
+# {points:, weakened: [key], new_introduced: [key], introduced: bool} or
+# {unreadable: probes} / {mismatch: [local, remote]}.
+def exempt_ratchet(repo, exempt)
+  begin
+    parsed = parse_exempt(File.read(File.join(repo, SELF_REL)))
+  rescue ArgumentError, SystemCallError => e
+    raise Landed::Unreadable.new([[SELF_REL, "the working-tree EXEMPT cannot be read (#{e.message})"]])
+  end
+  running = exempt.keys.map { |k| exempt_key(k) }.uniq
+  unless parsed.sort == running.sort
+    raise Landed::Unreadable.new(
+      [[SELF_REL, "the ratchet parsed #{parsed.size} EXEMPT entr(ies) but the check runs with " \
+                  "#{running.size}; missed: #{(running - parsed).join(', ')}. Write each entry as " \
+                  "`\"repo/relative/path\" => \"reason\",` on its own line"]]
+    )
+  end
+  points, bars = Landed.read_bar(repo, SELF_REL) do |text, label, sha|
+    parse_exempt(text)
+  rescue ArgumentError => e
+    raise Landed::Unreadable.new([[label, "#{sha[0, 12]}: landed #{SELF_REL} EXEMPT is malformed (#{e.message})"]])
+  end
+  landed = bars.flatten.uniq
+  fresh = (running - landed).sort
+  { points: points, weakened: bars.empty? ? [] : fresh, introduced: bars.empty? ? fresh : [] }
+rescue Landed::Unreadable => e
+  { unreadable: e.probes }
+rescue Landed::Mismatch => e
+  { mismatch: [e.local, e.remote] }
+end
+
+def exempt_ratchet_failed?(r)
+  r.key?(:unreadable) || r.key?(:mismatch) || r[:weakened].any?
+end
+
+def exempt_ratchet_failure_lines(r)
+  return Landed.mismatch_lines(*r[:mismatch]) if r.key?(:mismatch)
+  return Landed.unreadable_lines("EXEMPT table", r[:unreadable]) if r.key?(:unreadable)
+
+  ["  new EXEMPT entr(ies) with no landed counterpart (#{Landed.describe(r[:points])}):",
+   *r[:weakened].map { |key| "    - #{key}" },
+   "  A new exemption takes a tool out of the --help probe, and this diff wrote the bar it is judged by.",
+   "  Fix: remove each new entry from EXEMPT in #{SELF_REL} and give the tool a --help branch. If the " \
+   "exemption is genuinely right (a passthrough wrapper), the OWNER lands it on main themselves; rebase " \
+   "onto it and this passes. There is no in-repo approval flag, env var, or marker."]
+end
+
+def exempt_ratchet_ok_lines(r)
+  lines = ["  EXEMPT ratchet: 0 new exemption(s) against #{Landed.describe(r[:points])}; " \
+           "the tip matches `#{Landed::LS_REMOTE_PROBE}`"]
+  unless r[:introduced].empty?
+    lines << "  no landed #{SELF_REL}: EXEMPT is introduced by this diff with #{r[:introduced].join(', ')}"
+  end
+  lines
+end
+
 # Discover, scope, and probe. A discovery that cannot run or finds nothing is a
-# FAIL, never "0 bins, OK".
-def check_repo(repo = REPO, exempt: EXEMPT, quiet: false)
+# FAIL, never "0 bins, OK". ratchet: true (the gate path) also judges EXEMPT
+# against what landed.
+def check_repo(repo = REPO, exempt: EXEMPT, quiet: false, ratchet: true)
   found = HarnessTools.discover(repo)
 rescue FirstParty::MeasureError => e
   unless quiet
@@ -124,8 +233,9 @@ rescue FirstParty::MeasureError => e
   end
   1
 else
+  r = ratchet ? exempt_ratchet(repo, exempt) : nil
   run_check(found.tools.map { |rel| File.join(repo, rel) },
-            exempt: exempt, repo: repo, quiet: quiet, unscoped: found.unscoped)
+            exempt: exempt, repo: repo, quiet: quiet, unscoped: found.unscoped, ratchet_result: r)
 end
 
 def git_status(repo)
@@ -221,7 +331,7 @@ def probe_one(path, shim:, home:, cwd:, repo:)
   [true, nil]
 end
 
-def run_check(bins, exempt: EXEMPT, repo: REPO, quiet: false, unscoped: [])
+def run_check(bins, exempt: EXEMPT, repo: REPO, quiet: false, unscoped: [], ratchet_result: nil)
   failures = []
   rel_of = ->(path) { path.delete_prefix("#{repo}/") }
 
@@ -260,14 +370,21 @@ def run_check(bins, exempt: EXEMPT, repo: REPO, quiet: false, unscoped: [])
     end
   end
 
-  if failures.empty?
-    puts "#{PROG}: OK — #{checked} harness tool(s) answer --help cheaply; #{exempt.size} exempt." unless quiet
+  ratchet_failed = ratchet_result && exempt_ratchet_failed?(ratchet_result)
+  if failures.empty? && !ratchet_failed
+    unless quiet
+      puts "#{PROG}: OK — #{checked} harness tool(s) answer --help cheaply; #{exempt.size} exempt."
+      exempt_ratchet_ok_lines(ratchet_result).each { |l| puts l } if ratchet_result
+    end
     return 0
   end
 
   return 1 if quiet   # negative self-test cases assert the CODE, not the prose
 
-  warn "#{PROG}: FAIL — #{failures.size} problem(s):"
+  warn "#{PROG}: FAIL — #{failures.size + (ratchet_failed ? 1 : 0)} problem(s):"
+  exempt_ratchet_failure_lines(ratchet_result).each { |l| warn l } if ratchet_failed
+  return 1 if failures.empty?
+
   failures.each { |name, reason| warn "  - #{name}: #{reason}" }
   warn ""
   warn "  Fix: give each bin above a --help branch checked BEFORE every other flag, printing its usage to STDOUT and exiting 0 without doing anything else. Ruby: `if ARGV.include?(\"--help\") || ARGV.include?(\"-h\") then puts USAGE; exit 0 end`. POSIX sh: `case \"${1:-}\" in -h|--help) usage; exit 0 ;; esac`. A bin that genuinely cannot (a passthrough wrapper that forwards argv) goes in EXEMPT in #{PROG}, keyed by its repo-relative path, with a reason. An unscoped executable needs a SCOPE entry in ai/lib/harness_tools.rb."
@@ -330,10 +447,10 @@ def discovery_cases(assert)
     # A skill bin with a bad --help is probed, and fails the check.
     assert.call("skill bin is discovered", harness_executables(repo).include?(bad))
     assert.call("skill bin with a bad --help fails the check",
-                check_repo(repo, exempt: {}, quiet: true) == 1)
+                check_repo(repo, exempt: {}, quiet: true, ratchet: false) == 1)
     FileUtils.rm_rf(File.join(repo, "ai", "skills"))
     commit_fixtures(repo)
-    assert.call("clean discovered set passes", check_repo(repo, exempt: {}, quiet: true).zero?)
+    assert.call("clean discovered set passes", check_repo(repo, exempt: {}, quiet: true, ratchet: false).zero?)
 
     # An ignored scratch executable is not first-party; a NEW untracked one is.
     File.write(File.join(repo, ".git", "info", "exclude"), "scratch-*\n")
@@ -341,18 +458,18 @@ def discovery_cases(assert)
     assert.call("ignored scratch executable is not discovered",
                 !harness_executables(repo).include?(scratch))
     assert.call("ignored scratch executable does not fail the check",
-                check_repo(repo, exempt: {}, quiet: true).zero?)
+                check_repo(repo, exempt: {}, quiet: true, ratchet: false).zero?)
     fresh = write_fixture(bindir, "fresh-tool", "#!/bin/sh\nexit 3\n")
     assert.call("new untracked executable is discovered", harness_executables(repo).include?(fresh))
     assert.call("new untracked executable without --help fails the check",
-                check_repo(repo, exempt: {}, quiet: true) == 1)
+                check_repo(repo, exempt: {}, quiet: true, ratchet: false) == 1)
     FileUtils.rm_f(fresh)
 
     # An executable no scope rule covers fails: a new top-level directory of
     # executables is a scope decision, not a silent pass.
     FileUtils.mkdir_p(File.join(repo, "tools"))
     write_fixture(File.join(repo, "tools"), "stray", good)
-    assert.call("unscoped executable fails the check", check_repo(repo, exempt: {}, quiet: true) == 1)
+    assert.call("unscoped executable fails the check", check_repo(repo, exempt: {}, quiet: true, ratchet: false) == 1)
   end
 
   # Empty discovery is an ERROR, never a pass.
@@ -360,7 +477,7 @@ def discovery_cases(assert)
     fixture_repo(repo)
     File.write(File.join(repo, "README"), "no executables\n")
     commit_fixtures(repo)
-    assert.call("empty discovery fails the check", check_repo(repo, exempt: {}, quiet: true) == 1)
+    assert.call("empty discovery fails the check", check_repo(repo, exempt: {}, quiet: true, ratchet: false) == 1)
   end
 end
 
@@ -483,6 +600,21 @@ def run_self_test
   end
 
   discovery_cases(assert)
+
+  # DND-543: the EXEMPT reader. The landed/origin cases are black-box, in
+  # ai/test/check-bin-help/self-test.sh.
+  assert.call("parse_exempt reads the live EXEMPT exactly",
+              parse_exempt(File.read(__FILE__)).sort == EXEMPT.keys.sort)
+  assert.call("a pre-DND-508 bare key reads as ai/bin/<key>",
+              parse_exempt("EXEMPT = {\n  \"gh-athena\" => \"r\",\n}.freeze\n") == ["ai/bin/gh-athena"])
+  assert.call("an empty EXEMPT is a valid table", parse_exempt("EXEMPT = {\n}.freeze\n") == [])
+  assert.call("a file with no EXEMPT table is an error, not an empty table",
+              begin
+                parse_exempt("X = 1\n")
+                false
+              rescue ArgumentError
+                true
+              end)
 
   if ok
     puts "#{PROG}: self-test OK"

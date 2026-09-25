@@ -27,6 +27,12 @@
 #
 # Each `tools` entry: `class` (one of `classes`, required) + `reason` (a
 # one-word token naming why, required).
+#
+# RATCHETED AGAINST WHAT LANDED (DND-543): this file is in the diff the check
+# judges, so `ai/bin/check-tool-risk` also reads it at origin/main (cross-checked
+# with `git ls-remote origin`) and the merge-base, and FAILS any class moved down
+# the order above (a weakening). Moving a class up passes; a new key passes and
+# is named. To lower a class, the owner lands the change on main.
 
 version: 1
 default: destructive

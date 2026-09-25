@@ -22,6 +22,13 @@
 # top-level directory of executables is a scope decision someone has to make,
 # not a silent pass. Each OUT entry carries its reason, which the checks print.
 #
+# RATCHETED AGAINST WHAT LANDED (DND-543): ai/bin/check-tool-risk reads this
+# table's TEXT at origin/main and the merge-base, and FAILS any path that was IN
+# there and is OUT or unscoped now. Keep each entry as `["prefix", :in|:out,`
+# on its own line: the ratchet reads that form, and an entry written any other
+# way fails the gate as could-not-measure. To carve a path out, the owner lands
+# the change on main.
+#
 # Deliberately gem-free (stdlib only).
 
 require_relative "first_party"
