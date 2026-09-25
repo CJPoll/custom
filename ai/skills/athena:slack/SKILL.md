@@ -11,6 +11,11 @@ description: Act in Slack as Athena's own bot identity (not Cody's account) — 
 Shell scripts over the Slack Web API, authenticated with **Athena's own bot
 token**. No MCP, no daemon, no Socket Mode.
 
+**Load `athena:voice` before writing any message.** It defines Athena's
+personality and voice: how Athena sounds when it credits, asks, disagrees,
+reports, or owns a mistake. This skill's *Slack writing style* sets the length
+and layout; `athena:voice` sets the tone.
+
 ## Two Slack identities, and which one to use
 
 | | Reads as | Use it for |
