@@ -192,6 +192,15 @@ case_cmd "I27. git --attr-source <tree> stash pop (two-word option)" deny 'git -
 case_cmd "I28. an unknown two-word option before stash" deny 'git --some-future-opt val stash pop'
 case_cmd "I29. \$GIT with an unknown two-word option" deny '$GIT --some-future-opt val stash'
 case_cmd "I30. unknown option then a read" allow 'git --some-future-opt val stash list'
+case_cmd "I31. -C with a quoted dir holding a space" deny 'git -C "/tmp/a b" stash pop'
+case_cmd "I32. -c with a quoted value holding a space" deny 'git -c "user.name=A B" stash pop'
+case_cmd "I33. --git-dir= with a quoted space" deny 'git --git-dir="/x y/.git" stash drop'
+case_cmd "I34. -c k=\"v w\" (quote mid-word)" deny 'git -c core.editor="code --wait" stash'
+case_cmd "I35. nested quotes inside bash -c" deny 'bash -c "git -c \"k=v w\" stash pop"'
+case_cmd "I36. single-quoted value with a space" deny "git -c 'user.name=A B' stash pop"
+case_cmd "I37. backslash-escaped space in -C" deny 'git -C /tmp/a\ b stash pop'
+case_cmd "I38. quoted read with a spaced option value" allow 'git -c "user.name=A B" stash list'
+case_cmd "I39. a quoted format string (no stash)" allow 'git log --format="%h %s" -3'
 
 echo "== A: aliases =="
 case_cmd "A1. configured alias sp = stash pop" deny 'git sp'
@@ -233,6 +242,7 @@ case_cmd "OK7. git commit -F msg" allow 'git commit -F /tmp/msg'
 case_cmd "OK8. a word containing stash" allow 'echo stashing; ls stashes'
 case_cmd "OK9. git log --grep=stash" allow 'git log --grep=stash'
 case_cmd "OK10. rebase --autostash (out of scope, see header)" allow 'git rebase --autostash origin/main'
+case_cmd "OK11. -C a dir named stash, then a read-only subcommand" allow 'git -C stash status'
 
 echo "== T: the deny text =="
 run "$(json "$WT" 'git stash pop')"

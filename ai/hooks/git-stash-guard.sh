@@ -31,9 +31,13 @@
 # object and no ref, so it cannot touch the list; athena:admiral-resume and
 # athena:teardown-worktree-stack use it to salvage a dirty worktree.
 #
-# INDIRECTION (the DND-390 lesson): matching runs on the command TEXT after it
-# is flattened (newline -> `;`) and dequoted (' " \ removed), then split into
-# simple commands at ; & | ( ) and backtick. Inside each, every `git` word
+# INDIRECTION (the DND-390 lesson): the command TEXT is split into shell words
+# the way sh splits it (quotes and backslashes honoured, then removed), so a
+# quoted value stays one word: `git -C "/a b" stash pop` is git, -C, /a b,
+# stash, pop. Simple commands end at ; & | ( ) backtick and newline outside
+# quotes. A quoted word that held whitespace or a separator is re-read as a
+# command of its own (`sh -c 'git stash'`, nested `bash -c "... \"...\" ..."`).
+# Inside each simple command, every `git` word
 # counts (bare, path-qualified, `git-stash`), wherever it sits: after `sh -c`,
 # `bash -c`, `env`, `command`, `sudo`, `xargs`, `nohup`, in a subshell, after a
 # `cd`. Git global options are skipped (`-C <dir>`, `-c k=v`, `--git-dir[=]`,
@@ -45,8 +49,8 @@
 #   * `git <expanded subcommand>` (`git $SUB`): its value is unknowable here;
 #   * a git ALIAS that resolves to a mutating stash (its value parsed like a
 #     command line, global options included, and resolved through chains,
-#     from the global config and the repo config of the cwd and every `-C`
-#     dir), a shell alias (`!...`) mentioning stash, and DEFINING an alias whose
+#     from the global config and the repo config of the cwd and every `-C` /
+#     `cd` dir), a shell alias (`!...`) mentioning stash, and DEFINING an alias whose
 #     value names stash (`git -c alias.p=stash p`, `git config alias.p ...`).
 #
 # ACCEPTED FALSE POSITIVE (the class forge-auth-guard documents): matching is
@@ -85,8 +89,10 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) |
 
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
 
-# Flatten (a newline ends a command, so it becomes `;`), dequote, and spell the
-# `git-stash` binary as `git stash`.
+# FLAT feeds only the LEXICAL checks below (the prefilter, refs/stash writes,
+# alias definitions, the dirs aliases are read from): flattened (a newline ends
+# a command, so it becomes `;`), dequoted, `git-stash` spelled `git stash`.
+# The stash verdict itself tokenizes the raw command (see the awk block).
 FLAT=$(printf '%s' "$CMD" | tr '\n\t' '; ' | tr -d "'\"\\\\" \
   | sed -E 's#(^|[^[:alnum:]_.-])git-stash([^[:alnum:]_.-]|$)#\1git stash\2#g')
 
@@ -142,22 +148,57 @@ $(alias_read "$_d")"
 fi
 
 # ---- git stash, through every head the header lists -------------------------
-VERDICT=$(printf '%s' "$FLAT" | GSG_ALIASES="$ALIASES" awk '
+VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
   function is_read(v) { sub(/[<>].*/, "", v); return v ~ /^(list|show|create)$/ }
   function mentions_stash(v) { return v ~ /(^|[^[:alnum:]_.-])stash([^[:alnum:]_.-]|$)/ }
+  function is_sep(c) { return c ~ /[ \t\n;&|()`]/ }
+  # tokenize(text, W, QF, SB): split text into shell words, honouring quotes
+  # and backslashes the way sh does, so a quoted value stays ONE word
+  # (`git -C "/a b" stash` is git, -C, /a b, stash). Quotes and backslashes are
+  # removed from the word. SB[k] is 1 when word k starts a simple command
+  # (after ; & | ( ) backtick or a newline, outside quotes). QF[k] is 1 when a
+  # quoted part of word k held whitespace or a separator: its content may be a
+  # command (`sh -c "git stash"`), so analyze re-reads it.
+  function tokenize(text, W, QF, SB,    n, i, L, c, st, cur, has, q, ns) {
+    n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; L = length(text)
+    for (i = 1; i <= L; i++) {
+      c = substr(text, i, 1)
+      if (st == 1) {
+        if (c == "\047") st = 0; else { cur = cur c; if (is_sep(c)) q = 1 }
+        continue
+      }
+      if (st == 2) {
+        if (c == "\"") st = 0
+        else if (c == "\\" && i < L && substr(text, i + 1, 1) ~ /["\\$`]/) { i++; cur = cur substr(text, i, 1) }
+        else { cur = cur c; if (is_sep(c)) q = 1 }
+        continue
+      }
+      if (c == "\\") { if (i < L) { i++; c = substr(text, i, 1); if (c != "\n") { cur = cur c; has = 1 } } continue }
+      if (c == "\047") { st = 1; has = 1; continue }
+      if (c == "\"") { st = 2; has = 1; continue }
+      if (is_sep(c)) {
+        if (has) { n++; W[n] = cur; QF[n] = q; SB[n] = ns; ns = 0 }
+        cur = ""; has = 0; q = 0
+        if (c !~ /[ \t]/) ns = 1
+        continue
+      }
+      cur = cur c; has = 1
+    }
+    if (has) { n++; W[n] = cur; QF[n] = q; SB[n] = ns }
+    return n
+  }
   # decide(sc, nxt, depth): "" when allowed, else what was found.
-  # A non-`!` alias value is parsed exactly as a command line is: git runs it
-  # through its own option parser, so `-c k=v stash pop` in an alias pops. The
-  # user'"'"'s next word follows the value.
-  function decide(sc, nxt, depth,    i, v, a, n, r) {
+  # A non-`!` alias value is parsed exactly as a command line is: git splits
+  # it like a shell and runs it through its own option parser, so
+  # `-c k=v stash pop` in an alias pops. The user'"'"'s next word follows it.
+  function decide(sc, nxt, depth,    i, v, a, aq, as, n, r) {
     if (sc == "stash") return is_read(nxt) ? "" : "stash"
     if (sc ~ /[$`]/) return "expanded"
     if (depth > 10 || !(sc in nal)) return ""
     for (i = 1; i <= nal[sc]; i++) {
       v = aval[sc, i]
       if (v ~ /^!/) { if (mentions_stash(v)) return "alias"; continue }
-      sub(/^[ ]+/, "", v)
-      n = split(v, a, /[ ]+/)
+      n = tokenize(v, a, aq, as)
       if (nxt != "") a[++n] = nxt
       r = git_verdict(a, n, 1, 0, depth + 1)
       if (r != "") return "alias"
@@ -168,12 +209,13 @@ VERDICT=$(printf '%s' "$FLAT" | GSG_ALIASES="$ALIASES" awk '
   function two_word(t) {
     return t ~ /^-[Cc]$/ || t ~ /^--(git-dir|work-tree|namespace|config-env|super-prefix|attr-source)$/
   }
-  # git_verdict(w, n, j, expanded_head, depth): decide the git invocation whose words
-  # start at w[j]. Known two-word options skip their value. A word right after
-  # an UNKNOWN dash option may be that option'"'"'s value (a newer git adds such
-  # options: --attr-source did), so it is decided as a candidate AND the scan
-  # continues past it. That over-denies `git --flag word stash`, never misses.
-  # An expanded head (`$GIT`) only counts when a candidate is literally stash.
+  # git_verdict(w, n, j, expanded_head, depth): decide the git invocation
+  # whose words are w[j..n]. Known two-word options skip their value. A word
+  # right after an UNKNOWN dash option may be that option'"'"'s value (a newer
+  # git adds such options: --attr-source did), so it is decided as a candidate
+  # AND the scan continues past it. That over-denies `git --flag word stash`,
+  # never misses. An expanded head (`$GIT`) only counts when a candidate is
+  # literally stash.
   function git_verdict(w, n, j, expanded_head, depth,    r) {
     while (j <= n) {
       if (two_word(w[j])) { j += 2; continue }
@@ -184,8 +226,30 @@ VERDICT=$(printf '%s' "$FLAT" | GSG_ALIASES="$ALIASES" awk '
         r = decide(w[j], (j + 1 <= n ? w[j + 1] : ""), depth)
         if (r != "") return r
       }
-      if (w[j - 1] ~ /^-/ && w[j - 1] !~ /=/ && !two_word(w[j - 1])) { j++; continue }
+      if (j > 1 && w[j - 1] ~ /^-/ && w[j - 1] !~ /=/ && !two_word(w[j - 1])) { j++; continue }
       break
+    }
+    return ""
+  }
+  # analyze(text, depth): the verdict for one command text, and for every
+  # quoted word in it that may itself be a command.
+  function analyze(text, depth,    W, QF, SB, n, k, e, r, sw, m, i) {
+    if (depth > 8) return ""
+    n = tokenize(text, W, QF, SB)
+    for (k = 1; k <= n; k++) if (QF[k]) { r = analyze(W[k], depth + 1); if (r != "") return r }
+    for (k = 1; k <= n; k++) {
+      for (e = k; e < n && !SB[e + 1]; e++) ;
+      # the words of this simple command from k on, as their own array
+      delete sw; m = 0
+      for (i = k + 1; i <= e; i++) sw[++m] = W[i]
+      # A simple command that starts at `stash` followed a `)` or backtick:
+      # the tail of `$(command -v git) stash`.
+      if (SB[k] && W[k] == "stash" && !is_read(m >= 1 ? sw[1] : "")) return "stash"
+      if (W[k] ~ /(^|\/)git-stash$/ && !is_read(m >= 1 ? sw[1] : "")) return "stash"
+      if (W[k] ~ /(^|\/)git$/) r = git_verdict(sw, m, 1, 0, 0)
+      else if (W[k] ~ /[$`]/) r = git_verdict(sw, m, 1, 1, 0)
+      else r = ""
+      if (r != "") return r
     }
     return ""
   }
@@ -199,23 +263,8 @@ VERDICT=$(printf '%s' "$FLAT" | GSG_ALIASES="$ALIASES" awk '
       if (sp > 0) { val = substr(name, sp + 1); name = substr(name, 1, sp - 1) }
       nal[name]++; aval[name, nal[name]] = val
     }
-  }
-  {
-    ns = split($0, segs, /[;&|()`]/)
-    for (s = 1; s <= ns; s++) {
-      seg = segs[s]; sub(/^[ ]+/, "", seg); sub(/[ ]+$/, "", seg)
-      if (seg == "") continue
-      n = split(seg, w, /[ ]+/)
-      # A simple command that starts at `stash` followed a `)` or backtick:
-      # the tail of `$(command -v git) stash`.
-      if (w[1] == "stash" && !is_read(w[2])) { print "stash"; exit }
-      for (i = 1; i <= n; i++) {
-        if (w[i] ~ /(^|\/)git$/) r = git_verdict(w, n, i + 1, 0, 0)
-        else if (w[i] ~ /[$]/) r = git_verdict(w, n, i + 1, 1, 0)
-        else r = ""
-        if (r != "") { print r; exit }
-      }
-    }
+    r = analyze(ENVIRON["GSG_CMD"], 0)
+    if (r != "") print r
   }' 2>/dev/null)
 
 case "$VERDICT" in

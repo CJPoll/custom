@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 88 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 added A15-A18).
+- **Baseline:** `RESULT: 98 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11).
 
 ### Fail-first (no guard)
 
@@ -242,15 +242,16 @@ FAIL  W3. owner stash list byte-identical after the guarded attempts status=0 ou
 RESULT: 21 passed, 58 failed
 ```
 
-### Sabotage rows (each MEASURED 2026-09-25, restored with `cp` from a backup)
+### Sabotage rows (re-MEASURED 2026-09-25 on the round-3 tokenizer, restored with `cp` from a backup)
 
 | id | Mutation | Observed failure |
 |---|---|---|
-| S-DND670-1 | Read allowlist `^(list\|show\|create)$` also admits `pop` | W1, W3 (the owner's entry is popped through the guard), I1/I2/I6/I8/I13/I14/I16/I19/I22/I24, A1/A3/A5/A6/A10, T1, F5, F6 — `RESULT: 59 passed, 20 failed` |
-| S-DND670-2 | Global-option skipping disabled for `-C`/`-c`/spaced long options | I2 `git -C <wt> stash`, I3 `git -c k=v stash`, I5 `git --work-tree <d> stash`, A10 — `75 passed, 4 failed` |
-| S-DND670-3 | Alias resolution removed (`decide` returns "" for any non-`stash` word) | A1-A6, A10, F6 — `71 passed, 8 failed` |
-| S-DND670-4 | Dequoting removed (`tr -d` of quotes/backslash replaced by `cat`) | I7 `sh -c 'git stash'`, I14 `git st"a"sh pop`, I15 `g\it stash` — `76 passed, 3 failed` |
-| S-DND670-5 | The unknown-option continuation removed from `git_verdict` (a word after an unknown dash option is no longer also read as that option's value) | I28 `git --some-future-opt val stash pop`, I29 the same through `$GIT` — `82 passed, 2 failed` |
+| S-DND670-1 | Read allowlist `^(list\|show\|create)$` also admits `pop` | W1, W3 (the owner's entry is popped through the guard), and 28 more — `RESULT: 67 passed, 30 failed` |
+| S-DND670-2 | Known two-word option list emptied (`two_word` returns 0) | OK11 `git -C stash status` over-denied — `97 passed, 1 failed`. No deny case fails: the unknown-option continuation (S-5) covers every two-word option, so this list only prevents over-denial |
+| S-DND670-3 | Alias resolution removed (`decide` returns "" for any non-`stash` word) | A1-A6, A10, A14-A17, F6 — `85 passed, 12 failed` |
+| S-DND670-4 | Tokenizer quote states removed (a quote char is dropped, not honoured) | I31-I33, I35, I36 (a quoted value holding a space splits into words) — `92 passed, 5 failed` |
+| S-DND670-5 | The unknown-option continuation removed from `git_verdict` | I28 `git --some-future-opt val stash pop`, I29 the same through `$GIT` — `95 passed, 2 failed` |
+| S-DND670-6 | Quoted words no longer re-read as commands | I7 `sh -c 'git stash'`, I8 `bash -c "cd x && git stash pop"`, I35 — `94 passed, 3 failed` |
 
 ### Critic round 1 regression (the `--attr-source` miss)
 
@@ -289,3 +290,26 @@ RESULT: 85 passed, 3 failed
 After the fix: `RESULT: 88 passed, 0 failed`. Class-closed assertion: `grep -c
 'decide(a\[1\]' ai/hooks/git-stash-guard.sh` returns 0 — no path decides a
 word list without the option parser.
+
+### Critic round 3 regression (a quoted option value holding a space)
+
+The critic found `git -C "/tmp/a b" stash pop` and `git -c "user.name=A B"
+stash pop` allowed: the hook dequoted the whole command before splitting it on
+spaces, so one quoted value became two words and the scan stopped on the
+second. Same class as rounds 1 and 2 (the scan ends early after a git head);
+its root is that dequoting destroyed shell word boundaries. Fixed at the root:
+the verdict now tokenizes the raw command like sh (quotes and backslashes
+honoured), and re-reads a quoted word that held whitespace or a separator as a
+command of its own. The new cases against the round-2 hook:
+
+```
+FAIL  I31. -C with a quoted dir holding a space (expected deny) status=0 out=[]
+FAIL  I32. -c with a quoted value holding a space (expected deny) status=0 out=[]
+FAIL  I33. --git-dir= with a quoted space (expected deny) status=0 out=[]
+FAIL  I35. nested quotes inside bash -c (expected deny) status=0 out=[]
+FAIL  I36. single-quoted value with a space (expected deny) status=0 out=[]
+FAIL  I37. backslash-escaped space in -C (expected deny) status=0 out=[]
+RESULT: 91 passed, 6 failed
+```
+
+After the fix: `RESULT: 98 passed, 0 failed`.
