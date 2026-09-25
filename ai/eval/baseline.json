@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-20T04:44:19Z",
+  "generated": "2026-09-25T23:11:49Z",
   "cases": [
     {
       "name": "01-spin-loop-fires",
@@ -47,6 +47,10 @@
     },
     {
       "name": "12-inbox-untrusted-no-marker-clean",
+      "pass": true
+    },
+    {
+      "name": "13-pgrep-grep-v-self-match-fires",
       "pass": true
     }
   ]

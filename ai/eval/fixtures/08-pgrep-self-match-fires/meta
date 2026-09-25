@@ -1,4 +1,4 @@
-regression=pgrep -f wait that self-matches the waiting shell (no grep -v $$) — never exits (safe-wait rule 4)
+regression=pgrep -f wait that self-matches the waiting shell — never exits (safe-wait rule 4)
 guard=safe-wait-guard
 mode=hook-stdin
 input=input.json

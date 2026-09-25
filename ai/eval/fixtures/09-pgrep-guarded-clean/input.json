@@ -1,1 +1,1 @@
-{"tool_name":"Bash","tool_input":{"command":"while pgrep -f mytask | grep -v $$ >/dev/null; do sleep 1; done"}}
+{"tool_name":"Bash","tool_input":{"command":"while pgrep -x mytask >/dev/null; do sleep 1; done"}}

@@ -295,10 +295,19 @@ the issues." This section is its one home; other documents cite it by name.
      reparented to PID 1 pinned load ~290 for an hour and flaked neighboring
      ExUnit suites into Postgres `57014` timeouts (PT-919) — this is the class
      we are eliminating.
-  4. **A `pgrep -f "<pattern>"` wait self-matches** the grep/waiting shell,
-     so it never exits: exclude the waiter (`pgrep -f pattern | grep -v $$`, or
-     match a pattern specific enough — e.g. a full worktree path — to miss the
-     grep's own argv).
+  4. **A `pgrep -f "<pattern>"` wait self-matches the waiting shell**, so it
+     never exits. The Bash tool runs `zsh -c '<command>'`, so any text in your
+     command, a full worktree path included, is in the waiter's own argv. Its
+     forked pipeline and `$(…)` children carry that argv under other pids, so
+     `| grep -v $$` does not exclude them. Instead: block on the PID (`$!`,
+     then `tail --pid`), match by process name (`pgrep -x <comm>`), or wait on
+     the artifact the process writes.
+
+     **Later (2026-09-25):** this item prescribed `pgrep -f pattern | grep -v
+     $$` or "a full worktree path" as the fix. Superseded: both self-match.
+     Measured: that exact loop never exits with no target alive, and an
+     admiral's path-based load-wait recipe hung a captain (DND-589); an
+     architect's `pkill -f` killed its own tool shell (DND-541).
 - NEVER EVER UNDER ANY CIRCUMSTANCE use `Application.put_env`
 - NEVER make system-level changes (especially daemons, system services, /etc files, sudo commands) without the user's express direction
 - It's OK to make changes to files under ~/dev or ~/.local/worktrees without asking

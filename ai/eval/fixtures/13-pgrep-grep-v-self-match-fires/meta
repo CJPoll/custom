@@ -1,0 +1,5 @@
+regression=pgrep -f wait "excluded" with grep -v $$ still self-matches (forked pipeline children carry the zsh -c argv) — never exits (safe-wait rule 4; DND-589)
+guard=safe-wait-guard
+mode=hook-stdin
+input=input.json
+expect=fires

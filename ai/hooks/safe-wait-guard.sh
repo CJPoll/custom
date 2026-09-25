@@ -14,9 +14,11 @@
 #   2. Unreaped bg loop    — a while/until/for loop that is backgrounded
 #                            (`done &`, `( … ) &`, `{ …; } &`) with no
 #                            trap/kill/pkill reaper.
-#   4. pgrep -f self-match — a `pgrep -f "<pattern>"` inside a while/until wait
-#                            with no `grep -v $$` self-exclusion (it matches the
-#                            waiting shell's own argv, so it never exits).
+#   4. pgrep -f self-match — any `pgrep -f "<pattern>"` inside a while/until
+#                            wait. It matches the waiting shell's own argv, so
+#                            it never exits. `grep -v $$` does not help: the
+#                            forked pipeline children carry the same argv under
+#                            other pids (measured 2026-09-25, DND-589/DND-541).
 # (Rule #3, the foreground-`sleep`-returns-immediately gotcha, is surfaced inside
 #  the messages above rather than as a standalone block, because every sanctioned
 #  poll uses a foreground `sleep` — blocking on it would nuke the good pattern.)
@@ -198,11 +200,12 @@ HAS_LOOP_KW=false
 if [ "$HAS_WHILE_UNTIL" = true ] || has_word 'for'; then HAS_LOOP_KW=true; fi
 
 # ---- Shape 4: pgrep -f self-match inside a while/until wait ----------------
-# pgrep -f (or -lf, -af, …) in a while/until loop with no `$$` self-exclusion.
+# pgrep -f (or -lf, -af, …) in a while/until loop. A `$$` exclusion is NOT an
+# escape: the Bash tool runs `zsh -c '<command>'`, and every forked pipeline or
+# $(…) child carries that argv (pattern included) under a pid other than $$.
 if [ "$HAS_WHILE_UNTIL" = true ] \
-  && has 'pgrep[[:space:]]+-[[:alnum:]]*f' \
-  && ! has '\$\$'; then
-  deny 'SAFE-WAIT (pgrep -f self-match): `pgrep -f "<pattern>"` inside a wait loop matches the waiting shell'"'"'s own argv, so the loop never exits. Fix: exclude the waiter — `pgrep -f "<pattern>" | grep -v $$`, or block on the known PID instead: `timeout N tail --pid=<pid> -f /dev/null`. (A foreground `sleep` used to pace a poll can also return immediately in this harness — prefer blocking on the child or a harness wakeup.)'
+  && has 'pgrep[[:space:]]+-[[:alnum:]]*f'; then
+  deny 'SAFE-WAIT (pgrep -f self-match): `pgrep -f "<pattern>"` inside a wait loop matches the waiting shell'"'"'s own argv, so the loop never exits. `| grep -v $$` does not fix it: the forked pipeline children carry the same argv under other pids. Fix: block on the known PID — `timeout N tail --pid=<pid> -f /dev/null` (capture it with `$!` when you start the process) — or match by process name, not argv (`pgrep -x <comm>`), or wait on the output artifact the process writes.'
 fi
 
 # ---- Shape 1: busy-spin loop (while/until with no sleep) -------------------

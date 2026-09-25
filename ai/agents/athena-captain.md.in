@@ -383,8 +383,8 @@ subprocess) still alive when its turn ended, so the harness's
 Before your literal last action, confirm nothing you spawned is still
 running:
 - Check for live children rooted in your own worktree, e.g.
-  `pgrep -af -- "$(pwd)"` or by matching the worktree path in the process
-  list — never a generic name match.
+  `pgrep -af -- "$(pwd)"` — never a generic name match. The probe's own
+  `zsh -c` shell can appear in that list; it is not a child.
 - If you find one, kill it **by PID**, never `pkill -f <name>`. A sibling
   athena-captain's `prep-commit.sh` or `claude fix` in a different worktree
   can share the same process name; a name-based kill can take down someone

@@ -122,8 +122,15 @@ check "M7. ordinary command, no loop" allow
 run "$(bash_json "find . -name '*.ex' | xargs grep foo")"
 check "M8. pipeline, no loop" allow
 
+# `grep -v $$` does NOT exclude the waiter: the Bash tool runs `zsh -c
+# '<command>'`, and the forked pipeline/substitution children carry that same
+# argv (pattern included) under pids other than $$. Measured 2026-09-25: this
+# exact loop never exits with no target process alive (DND-589, DND-541).
 run "$(bash_json 'while pgrep -f "mypattern" | grep -v $$; do sleep 1; done')"
-check "M9. pgrep wait WITH grep -v \$\$ exclusion" allow
+check "4b. pgrep -f wait with grep -v \$\$ still self-matches" deny
+
+run "$(bash_json 'while pgrep -x beam.smp >/dev/null; do sleep 5; done')"
+check "M9. pgrep -x (comm match, cannot self-match) wait" allow
 
 run "$(bash_json 'for f in *.txt; do process "$f"; done')"
 check "M10. plain for loop, not backgrounded" allow
