@@ -18,6 +18,7 @@
 set -eu
 SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 . "$SELF_DIR/../lib/slack.sh"
+case "${1:-}" in -h|--help) slack_help "$0"; exit 0 ;; esac
 . "$SELF_DIR/../lib/inbox.sh"
 
 # read-inbox's contract to its callers (the walt_ui backstop consumer among

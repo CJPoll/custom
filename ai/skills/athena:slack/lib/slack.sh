@@ -38,6 +38,15 @@ slack_die() {
   exit 1
 }
 
+# Prints a script's header comment -- its usage block -- on STDOUT. Each bin
+# calls it from a `-h|--help` branch placed BEFORE slack_need_tools and any
+# argument parsing, so help never touches the token, the network, or stdin
+# (DND-508: `post --help` used to take "--help" as the channel and read stdin as
+# the message).
+slack_help() {
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$1"
+}
+
 slack_need_tools() {
   for _tool in curl jq; do
     command -v "$_tool" >/dev/null 2>&1 || slack_die "missing required tool: $_tool"

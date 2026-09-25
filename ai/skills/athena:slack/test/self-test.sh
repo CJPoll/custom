@@ -1118,6 +1118,25 @@ if [[ "${OUT}" == *"2 new DM(s)"* ]]; then
   ok "kind: im + mpim are both counted as DMs"
 else bad "kind: im + mpim are both counted as DMs" "out='${OUT}'"; fi
 
+# 76. DND-508: every bin answers --help (and -h) with its usage on STDOUT, exit
+#     0, and no Slack call. Before this, `post --help` took "--help" as the
+#     channel and read stdin as the message, `whoami --help` called auth.test,
+#     and the rest printed usage to stderr with exit 2 -- a help request that
+#     ran the tool's default action or read as a failure.
+for bin_path in "${BIN}"/*; do
+  name="$(basename "${bin_path}")"
+  for flag in --help -h; do
+    setup_case
+    run_bin_stdin "" "${name}" "${flag}"
+    if [[ "${RC}" -eq 0 && "${OUT}" == *"${name}"* ]] && ! any_curl; then
+      ok "help: ${name} ${flag} prints usage on stdout, exit 0, no Slack call"
+    else
+      bad "help: ${name} ${flag} prints usage on stdout, exit 0, no Slack call" \
+          "rc=${RC} curl_calls=$(cat "${SHIM_DIR}/calls" 2>/dev/null | tr '\n' ' ') out='${OUT}' err='${ERR}'"
+    fi
+  done
+done
+
 echo
 if [[ "${FAIL}" -eq 0 ]]; then echo "VERDICT: PASS (${PASS} cases)"; exit 0; fi
 echo "VERDICT: FAIL (${FAIL} of $((PASS+FAIL)) cases)"; exit 1

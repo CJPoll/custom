@@ -324,3 +324,24 @@ older name ("prints exactly one line"); the case is now "emits exactly one
 SessionStart object with the right DM and mention counts" (see S58). The row is
 left as written on its date, per `~/dev/custom/CLAUDE.md` → *Documentation
 conventions* (annotate a dated record, do not rewrite it).
+
+---
+
+## 2026-09-24 — DND-508: every bin answers `--help`
+
+`check-bin-help` now probes skill executables, not only `ai/bin/`. All 13
+`athena:slack` bins failed its bar: none had a `--help` branch. `post --help`
+took `--help` as the channel and read stdin as the message; `whoami --help`
+called `auth.test`; the rest printed usage to stderr and exited 2. Each bin now
+checks `-h|--help` first, before `slack_need_tools`, and `lib/slack.sh`'s
+`slack_help` prints the bin's header comment on stdout.
+
+Case 76 runs every bin with `--help` and with `-h` (26 cases): exit 0, stdout
+names the bin, no curl call.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S59 | the unfixed bins (no `-h\|--help` branch; measured before the fix) | 26 | `FAIL help: delete --help prints usage on stdout, exit 0, no Slack call` (`rc=2 err='usage: delete <channel_id\|#name> <ts>'`) / `FAIL help: post --help …` (`rc=2 err='post: refusing to send an empty message'`) / `FAIL help: whoami --help …` (`rc=0 curl_calls=auth.test`) |
+| S60 | `lib/slack.sh`: `slack_help`'s awk output redirected `>&2` | 26 | `FAIL help: channels --help prints usage on stdout, exit 0, no Slack call` |
+
+After each, the suite returned to `VERDICT: PASS (101 cases)`.
