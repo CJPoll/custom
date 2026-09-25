@@ -43,7 +43,8 @@
 #   * a command word built by expansion followed by `stash` (`$GIT stash`,
 #     `${GIT:-git} stash`, `$(command -v git) stash`, a backtick form);
 #   * `git <expanded subcommand>` (`git $SUB`): its value is unknowable here;
-#   * a git ALIAS that resolves to a mutating stash (resolved through chains,
+#   * a git ALIAS that resolves to a mutating stash (its value parsed like a
+#     command line, global options included, and resolved through chains,
 #     from the global config and the repo config of the cwd and every `-C`
 #     dir), a shell alias (`!...`) mentioning stash, and DEFINING an alias whose
 #     value names stash (`git -c alias.p=stash p`, `git config alias.p ...`).
@@ -145,6 +146,9 @@ VERDICT=$(printf '%s' "$FLAT" | GSG_ALIASES="$ALIASES" awk '
   function is_read(v) { sub(/[<>].*/, "", v); return v ~ /^(list|show|create)$/ }
   function mentions_stash(v) { return v ~ /(^|[^[:alnum:]_.-])stash([^[:alnum:]_.-]|$)/ }
   # decide(sc, nxt, depth): "" when allowed, else what was found.
+  # A non-`!` alias value is parsed exactly as a command line is: git runs it
+  # through its own option parser, so `-c k=v stash pop` in an alias pops. The
+  # user'"'"'s next word follows the value.
   function decide(sc, nxt, depth,    i, v, a, n, r) {
     if (sc == "stash") return is_read(nxt) ? "" : "stash"
     if (sc ~ /[$`]/) return "expanded"
@@ -152,8 +156,10 @@ VERDICT=$(printf '%s' "$FLAT" | GSG_ALIASES="$ALIASES" awk '
     for (i = 1; i <= nal[sc]; i++) {
       v = aval[sc, i]
       if (v ~ /^!/) { if (mentions_stash(v)) return "alias"; continue }
+      sub(/^[ ]+/, "", v)
       n = split(v, a, /[ ]+/)
-      r = decide(a[1], (n >= 2 ? a[2] : nxt), depth + 1)
+      if (nxt != "") a[++n] = nxt
+      r = git_verdict(a, n, 1, 0, depth + 1)
       if (r != "") return "alias"
     }
     return ""
@@ -162,20 +168,20 @@ VERDICT=$(printf '%s' "$FLAT" | GSG_ALIASES="$ALIASES" awk '
   function two_word(t) {
     return t ~ /^-[Cc]$/ || t ~ /^--(git-dir|work-tree|namespace|config-env|super-prefix|attr-source)$/
   }
-  # git_verdict(w, n, j, expanded_head): decide the git invocation whose words
+  # git_verdict(w, n, j, expanded_head, depth): decide the git invocation whose words
   # start at w[j]. Known two-word options skip their value. A word right after
   # an UNKNOWN dash option may be that option'"'"'s value (a newer git adds such
   # options: --attr-source did), so it is decided as a candidate AND the scan
   # continues past it. That over-denies `git --flag word stash`, never misses.
   # An expanded head (`$GIT`) only counts when a candidate is literally stash.
-  function git_verdict(w, n, j, expanded_head,    r) {
+  function git_verdict(w, n, j, expanded_head, depth,    r) {
     while (j <= n) {
       if (two_word(w[j])) { j += 2; continue }
       if (w[j] ~ /^-/) { j++; continue }
       if (expanded_head) {
         if (w[j] == "stash" && !is_read(j + 1 <= n ? w[j + 1] : "")) return "expanded-git"
       } else {
-        r = decide(w[j], (j + 1 <= n ? w[j + 1] : ""), 0)
+        r = decide(w[j], (j + 1 <= n ? w[j + 1] : ""), depth)
         if (r != "") return r
       }
       if (w[j - 1] ~ /^-/ && w[j - 1] !~ /=/ && !two_word(w[j - 1])) { j++; continue }
@@ -204,8 +210,8 @@ VERDICT=$(printf '%s' "$FLAT" | GSG_ALIASES="$ALIASES" awk '
       # the tail of `$(command -v git) stash`.
       if (w[1] == "stash" && !is_read(w[2])) { print "stash"; exit }
       for (i = 1; i <= n; i++) {
-        if (w[i] ~ /(^|\/)git$/) r = git_verdict(w, n, i + 1, 0)
-        else if (w[i] ~ /[$]/) r = git_verdict(w, n, i + 1, 1)
+        if (w[i] ~ /(^|\/)git$/) r = git_verdict(w, n, i + 1, 0, 0)
+        else if (w[i] ~ /[$]/) r = git_verdict(w, n, i + 1, 1, 0)
         else r = ""
         if (r != "") { print r; exit }
       }

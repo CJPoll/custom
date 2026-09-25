@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 84 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14).
+- **Baseline:** `RESULT: 88 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 added A15-A18).
 
 ### Fail-first (no guard)
 
@@ -269,3 +269,23 @@ RESULT: 80 passed, 4 failed
 ```
 
 After the fix: `RESULT: 84 passed, 0 failed`.
+
+### Critic round 2 regression (an alias value that starts with an option)
+
+The critic found `alias.z = -c color.ui=never stash pop` allowed: `decide`
+took the alias value's first word (`-c`) as the subcommand, while git runs an
+alias value through its own option parser. Fixed at the root: an alias value
+is now parsed by the same `git_verdict` as a command line (option skipping and
+the unknown-option continuation included). The new cases against the round-1
+hook:
+
+```
+FAIL  A15. alias value with a global option: z = -c k=v stash pop (expected deny) status=0 out=[]
+FAIL  A16. alias np = --no-pager stash (bare) (expected deny) status=0 out=[]
+FAIL  A17. alias np + pop (expected deny) status=0 out=[]
+RESULT: 85 passed, 3 failed
+```
+
+After the fix: `RESULT: 88 passed, 0 failed`. Class-closed assertion: `grep -c
+'decide(a\[1\]' ai/hooks/git-stash-guard.sh` returns 0 — no path decides a
+word list without the option parser.

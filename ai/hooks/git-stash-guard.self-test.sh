@@ -41,6 +41,9 @@ cat > "$GIT_CONFIG_GLOBAL" <<'EOF'
 	x = !git stash
 	y = sp
 	st = status
+	z = -c color.ui=never stash pop
+	np = --no-pager stash
+	npl = --no-pager stash list
 EOF
 
 run() {
@@ -206,6 +209,10 @@ case_cmd "A12. configured alias s + list" allow 'git s list'
 case_cmd "A13. unrelated alias st = status" allow 'git st'
 run "$(json / "cd $OWNER && git lp")"
 check "A14. repo-local alias reached by a same-command cd" deny
+case_cmd "A15. alias value with a global option: z = -c k=v stash pop" deny 'git z'
+case_cmd "A16. alias np = --no-pager stash (bare)" deny 'git np'
+case_cmd "A17. alias np + pop" deny 'git np pop'
+case_cmd "A18. alias npl = --no-pager stash list (read)" allow 'git npl'
 
 echo "== R: stash refs written without the stash subcommand =="
 case_cmd "R1. git update-ref -d refs/stash" deny 'git update-ref -d refs/stash'
