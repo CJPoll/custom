@@ -214,7 +214,9 @@ module Landed
      "(so #{REF} exists and shares history with HEAD), or `git fetch --unshallow` " \
      "in a shallow clone. Run from a branch that descends from origin/main. If the " \
      "failing probe is `#{LS_REMOTE_PROBE}`, make #{REMOTE} reachable (network, " \
-     "remote URL, credentials) and re-run: the check never falls back to the local ref."]
+     "remote URL, credentials) and re-run: the check never falls back to the local ref. " \
+     "If a probe names a malformed landed file, the bar on main itself is broken: it is " \
+     "repaired on main, then this branch rebases onto it."]
   end
 
   # The failure lines for a local tip that is not origin's.

@@ -38,7 +38,10 @@
 # "Guard/error messages are written for the LLM").
 #
 # Usage:
-#   ai/bin/check-tool-risk               coverage + well-formedness; exit 1 on fail
+#   ai/bin/check-tool-risk               coverage + well-formedness + the landed
+#                                        ratchets (DND-543); exit 1 on fail
+#   ai/bin/check-tool-risk --root DIR    the same, measuring the checkout at DIR
+#                                        (read-only)
 #   ai/bin/check-tool-risk --class-of X  print X's risk class (deny-by-default)
 #   ai/bin/check-tool-risk --json        dump the resolved {tool: class} map
 #   ai/bin/check-tool-risk --self-test   verify the checker's own logic
@@ -47,6 +50,7 @@ require "yaml"
 require "fileutils"
 require "tmpdir"
 require_relative "../lib/harness_tools"
+require_relative "../lib/landed"
 
 AI_DIR        = File.expand_path("..", __dir__)
 REPO_ROOT     = File.expand_path("..", AI_DIR)
@@ -62,8 +66,8 @@ DENY_DEFAULT = "destructive"
 # paths]. Test suites (*.self-test.sh, test/) are excluded by first-party
 # discovery; dot-prefixed executables are included (DND-422). Raises
 # FirstParty::MeasureError when discovery fails or finds nothing.
-def enumerate_tools(root)
-  found = HarnessTools.discover(root)
+def enumerate_tools(root, scope = HarnessTools::SCOPE)
+  found = HarnessTools.discover(root, scope)
   [found.tools.map { |rel| HarnessTools.risk_key(rel) }.sort, found.unscoped]
 end
 
@@ -149,14 +153,281 @@ def class_of(name, registry_path)
   cls.is_a?(String) ? cls : DENY_DEFAULT
 end
 
-# Coverage + well-formedness. Returns [exit_code, lines].
-def run_check(root: REPO_ROOT, registry_path: REGISTRY_PATH)
+# ---- the ratchets: the registry and SCOPE are judged against what LANDED (DND-543)
+#
+# ai/tools/risk.yml and the SCOPE table in ai/lib/harness_tools.rb live in the
+# diff this check judges. Before DND-543 a change could relabel a destructive
+# tool readOnly -- which loosens ai/hooks/workflow-phase-guard.sh, the registry's
+# consumer -- or move a directory from IN to OUT of scope and drop its entries,
+# and the check compared the change against the bar the change had just
+# written. See ~/dev/custom/CLAUDE.md -> "A check's own bar must not live in the
+# diff it is checking".
+#
+# So every gate run also reads both bars out of git at the landed points
+# (ai/lib/landed.rb: the origin/main tip, cross-checked with `git ls-remote
+# origin refs/heads/main`, and merge-base(HEAD, origin/main)), and takes the
+# STRICTEST value across the points.
+#
+# THE STRICTNESS ORDER, readOnly < idempotent < destructive, is risk.yml's own:
+#   - its header orders the classes "least -> most restrictive", and defines
+#     each as a superset of the one before (readOnly mutates nothing;
+#     idempotent adds deterministic LOCAL mutation; destructive adds external or
+#     irreversible mutation);
+#   - its deny-by-default `default` is the top of the order;
+#   - the consumer ranks them the same way: workflow-phase-guard.sh allows a
+#     tool in a phase iff its rank <= the phase ceiling (read-only 0, local 1),
+#     so a LOWER class is permitted in strictly MORE phases.
+# A move DOWN the order is a weakening and fails. A move up (tightening) passes.
+# A key absent at every landed point is a NEW entry: it passes and is named in
+# the OK output, so a reviewer sees each new class. The order is fixed here,
+# not read from risk.yml's `classes:`, because that list is in the diff too: a
+# class the order cannot rank fails.
+#
+# SCOPE: a path whose landed verdict is IN (at any landed point) and whose
+# current verdict is OUT or unscoped is a weakening. The check evaluates one
+# probe per prefix in the union of the landed and current tables (prefix + NUL).
+# That is complete, not a sample: a path's verdict depends only on which table
+# prefixes it starts with, and for any path P those are exactly the ones that
+# prefix q, the longest union prefix of P, so verdict(P) = verdict(q + NUL) in
+# both tables. It therefore catches a pre-emptive carve-out of a directory
+# that holds no tool yet. unscoped -> OUT is a new scope decision, not a
+# weakening (unscoped already fails), and is named.
+#
+# The ratchet reads SCOPE from the file's TEXT, the same way at every point.
+# So the running table must equal the parsed one: an entry written in a form
+# the reader cannot parse fails as could-not-measure, never slips past.
+#
+# Could not measure is a FAILURE: no origin/main, no merge-base, a shallow
+# clone, origin unreachable or disagreeing with the local ref, or a landed file
+# that is malformed. The OK line names the points and the ls-remote
+# cross-check. A file absent at every landed point is a bar being introduced by
+# this diff; it passes with every entry named.
+#
+# No in-repo escape hatch: the OWNER lands a relabel or a carve-out on main,
+# and a branch rebased onto it passes.
+#
+# Residual, stated out loud: this does not stop an actor that can push to main,
+# a diff that edits this file's enforcement path (STRICTNESS, the parsers), or
+# one that repoints the `origin` remote. A tool MOVED to a new path reads as a
+# removal plus a new entry, so a destructive tool renamed and relabelled
+# readOnly passes, named as new in the OK output. Only the gate path (no
+# arguments) ratchets; --class-of and --json, which workflow-phase-guard calls
+# at runtime, read the working-tree registry as before.
+
+STRICTNESS = %w[readOnly idempotent destructive].freeze
+REGISTRY_REL = "ai/tools/risk.yml"
+SCOPE_REL = "ai/lib/harness_tools.rb"
+
+# One SCOPE entry as ai/lib/harness_tools.rb writes it: `["prefix", :in|:out,`.
+SCOPE_ENTRY = /\A\s*\[\s*"([^"\\]+)"\s*,\s*:(in|out)\s*,/.freeze
+
+def rank(klass)
+  STRICTNESS.index(klass)
+end
+
+# {key => class} from registry TEXT. Raises ArgumentError naming the problem.
+def parse_registry_classes(text)
+  data = YAML.safe_load(text)
+  raise ArgumentError, "top level is not a mapping" unless data.is_a?(Hash)
+
+  tools = data["tools"]
+  raise ArgumentError, "`tools` is not a mapping" unless tools.is_a?(Hash)
+
+  tools.to_h do |key, entry|
+    klass = entry.is_a?(Hash) ? entry["class"] : nil
+    raise ArgumentError, "tools['#{key}'].class #{klass.inspect} is not one of #{STRICTNESS.join(' < ')}" unless rank(klass)
+
+    [key, klass]
+  end
+rescue Psych::Exception => e
+  raise ArgumentError, "not parseable YAML (#{e.message.lines.first.to_s.strip})"
+end
+
+# [[prefix, :in | :out], ...] in table order, from harness_tools.rb TEXT: the
+# lines between `SCOPE = [` and `].freeze` that open an entry. Raises
+# ArgumentError when the table is absent or empty.
+def parse_scope(text)
+  lines = text.lines
+  start = lines.index { |l| l.match?(/\A\s*SCOPE = \[\s*\z/) }
+  raise ArgumentError, "no `SCOPE = [` line" unless start
+
+  stop = lines[start..].index { |l| l.match?(/\A\s*\]\.freeze\s*\z/) }
+  raise ArgumentError, "no `].freeze` closing the SCOPE table" unless stop
+
+  entries = lines[start + 1, stop - 1].filter_map do |l|
+    m = SCOPE_ENTRY.match(l)
+    m && [m[1], m[2].to_sym]
+  end
+  raise ArgumentError, "the SCOPE table has no entries" if entries.empty?
+
+  entries
+end
+
+def scope_verdict(path, scope)
+  entry = scope.find { |prefix, _| path.start_with?(prefix) }
+  entry && entry[1]
+end
+
+# The registry and SCOPE at each landed point. Returns [points, registries,
+# scopes], one parsed value per point that has the file.
+def landed_bars(root)
+  points, probes = Landed.points(root)
+  registries = []
+  scopes = []
+  points.each do |label, sha|
+    { REGISTRY_REL => [registries, method(:parse_registry_classes)],
+      SCOPE_REL => [scopes, method(:parse_scope)] }.each do |rel, (into, parse)|
+      text = Landed.file_at(root, sha, rel, label)
+      next unless text
+
+      begin
+        into << parse.call(text)
+      rescue ArgumentError => e
+        raise Landed::Unreadable.new([[label, "#{sha[0, 12]}: landed #{rel} is malformed (#{e.message})"]])
+      end
+    end
+  rescue Landed::Unreadable => e
+    raise Landed::Unreadable.new(probes + e.probes)
+  end
+  [points, registries, scopes]
+end
+
+# The strictest class per key across points.
+def merge_registries(registries)
+  registries.each_with_object({}) do |classes, merged|
+    classes.each { |key, klass| merged[key] = klass if merged[key].nil? || rank(klass) > rank(merged[key]) }
+  end
+end
+
+# [[prefix, now]] for every probe that was IN at a landed point and is not now.
+def scope_weakenings(landed_scopes, current)
+  prefixes = (landed_scopes.flatten(1) + current).map(&:first).uniq
+  prefixes.filter_map do |prefix|
+    probe = "#{prefix}\0"
+    next unless landed_scopes.any? { |s| scope_verdict(probe, s) == :in }
+
+    now = scope_verdict(probe, current)
+    [prefix, now || :unscoped] unless now == :in
+  end.sort
+end
+
+# The current SCOPE, parsed from root's file. When root is this checker's own
+# repo the parsed table must equal the one the checks run with, so no entry can
+# be written in a form the ratchet does not read. Raises Landed::Unreadable.
+def current_scope(root)
+  path = File.join(root, SCOPE_REL)
+  begin
+    parsed = parse_scope(File.read(path))
+  rescue ArgumentError, SystemCallError => e
+    raise Landed::Unreadable.new([[SCOPE_REL, "the working-tree table cannot be read (#{e.message})"]])
+  end
+  if File.expand_path(root) == REPO_ROOT
+    running = HarnessTools::SCOPE.map { |prefix, verdict, _| [prefix, verdict] }
+    unless parsed == running
+      raise Landed::Unreadable.new(
+        [[SCOPE_REL, "the ratchet parsed #{parsed.size} entr(ies) but the checks run with " \
+                     "#{running.size}; missed: #{(running - parsed).map(&:first).join(', ')}. Write each " \
+                     "entry as `[\"prefix\", :in|:out, \"reason\"],` on its own line"]]
+      )
+    end
+  end
+  parsed
+end
+
+# The ratchet's findings for a gate run: :points, :risk_weakened
+# [[key, landed, now]], :risk_new [[key, class]], :scope_weakened
+# [[prefix, now]], :scope_new [[prefix, verdict]], :scope_introduced; or
+# :unreadable (probes) / :mismatch ([local, remote]).
+def ratchet(root, current_classes, scope)
+  points, registries, scopes = landed_bars(root)
+  landed = merge_registries(registries)
+  landed_prefixes = scopes.flatten(1).map(&:first)
+  {
+    points: points,
+    risk_weakened: current_classes.filter_map do |key, now|
+      was = landed[key]
+      [key, was, now] if was && rank(now) < rank(was)
+    end.sort,
+    risk_new: current_classes.reject { |key, _| landed.key?(key) }.sort,
+    registry_introduced: registries.empty?,
+    scope_weakened: scope_weakenings(scopes, scope),
+    scope_new: scope.reject { |prefix, _| landed_prefixes.include?(prefix) },
+    scope_introduced: scopes.empty?,
+  }
+rescue Landed::Unreadable => e
+  { unreadable: e.probes }
+rescue Landed::Mismatch => e
+  { mismatch: [e.local, e.remote] }
+end
+
+def ratchet_failed?(r)
+  r.key?(:unreadable) || r.key?(:mismatch) || r[:risk_weakened].any? || r[:scope_weakened].any?
+end
+
+HATCH = "If the change is genuinely right, the OWNER lands it on main themselves; rebase onto it " \
+        "and this passes. There is no in-repo approval flag, env var, or marker. If main already " \
+        "landed it after you forked, rebase onto current origin/main."
+
+def ratchet_failure_lines(r)
+  return Landed.mismatch_lines(*r[:mismatch]) if r.key?(:mismatch)
+  return Landed.unreadable_lines("risk registry and SCOPE", r[:unreadable]) if r.key?(:unreadable)
+
+  lines = []
+  unless r[:risk_weakened].empty?
+    lines << "  risk class(es) weakened below the landed bar (strictest of #{Landed.describe(r[:points])}; " \
+             "order #{STRICTNESS.join(' < ')}):"
+    r[:risk_weakened].each { |key, was, now| lines << "    - #{key}: landed #{was} -> now #{now}" }
+    lines << "  A lower class lets ai/hooks/workflow-phase-guard.sh allow the tool in more phases, and " \
+             "this diff wrote the bar it is judged by."
+    lines << "  Fix: restore each tool's landed class in #{REGISTRY_REL}. #{HATCH}"
+  end
+  unless r[:scope_weakened].empty?
+    lines << "  SCOPE weakened below the landed bar: path(s) that were IN are now out of scope " \
+             "(strictest of #{Landed.describe(r[:points])}):"
+    r[:scope_weakened].each { |prefix, now| lines << "    - #{prefix}: landed in -> now #{now}" }
+    lines << "  An OUT path is never risk-classified or --help-probed, so this diff shrank the set it is judged on."
+    lines << "  Fix: restore the IN verdict for each prefix in #{SCOPE_REL}. #{HATCH}"
+  end
+  lines
+end
+
+def ratchet_ok_lines(r)
+  lines = ["  risk + SCOPE ratchet: 0 weakening(s) against #{Landed.describe(r[:points])}; " \
+           "the tip matches `#{Landed::LS_REMOTE_PROBE}`"]
+  lines << "  no landed #{REGISTRY_REL}: the registry is introduced by this diff" if r[:registry_introduced]
+  unless r[:risk_new].empty?
+    lines << "  new risk entr(ies) with no landed counterpart: " +
+             r[:risk_new].map { |key, klass| "#{key} (#{klass})" }.join(", ")
+  end
+  lines << "  no landed #{SCOPE_REL}: the SCOPE table is introduced by this diff" if r[:scope_introduced]
+  unless r[:scope_new].empty?
+    lines << "  new SCOPE entr(ies) with no landed counterpart: " +
+             r[:scope_new].map { |prefix, verdict| "#{prefix} (#{verdict})" }.join(", ")
+  end
+  lines
+end
+
+# Coverage + well-formedness, then (ratchet: true, the gate path) the landed
+# ratchets above. Returns [exit_code, lines].
+def run_check(root: REPO_ROOT, registry_path: REGISTRY_PATH, ratchet: true)
   lines = []
   data, errors = load_registry(registry_path)
   tools = data["tools"].is_a?(Hash) ? data["tools"] : {}
 
   begin
-    bins, unscoped = enumerate_tools(root)
+    scope = ratchet ? current_scope(root) : HarnessTools::SCOPE
+  rescue Landed::Unreadable => e
+    lines << "check-tool-risk: FAILED — could not measure the working-tree SCOPE table, so the " \
+             "SCOPE ratchet cannot judge it:"
+    e.probes.each { |ref, outcome| lines << "    #{ref} -> #{outcome}" }
+    lines << "  Fix: keep #{SCOPE_REL}'s table as `SCOPE = [` ... `].freeze` with each entry opening " \
+             "`[\"prefix\", :in|:out,` on its own line. The ratchet reads that text at every landed point, " \
+             "so an entry written any other way would escape it."
+    return [1, lines]
+  end
+
+  begin
+    bins, unscoped = enumerate_tools(root, scope)
   rescue FirstParty::MeasureError => e
     lines << "check-tool-risk: FAILED — could not discover the harness tools: #{e.message}"
     lines << "  Fix: this repo always has harness tools, so an empty or failed discovery means " \
@@ -189,15 +460,31 @@ def run_check(root: REPO_ROOT, registry_path: REGISTRY_PATH)
     end
   end
 
-  if errors.empty?
+  # DND-543: the ratchet ranks classes by STRICTNESS, so the registry may not
+  # declare or use a class the order cannot rank.
+  if data["classes"].is_a?(Array) && data["classes"] != STRICTNESS
+    errors << "`classes` is #{data['classes'].inspect}, not #{STRICTNESS.inspect}. The ratchet ranks " \
+              "classes in that fixed order, so a class it cannot rank would escape it. " \
+              "Fix: set `classes: [#{STRICTNESS.join(', ')}]`; a new class is a change to STRICTNESS in " \
+              "ai/bin/check-tool-risk, landed by the owner."
+  end
+  current = tools.each_with_object({}) do |(key, entry), h|
+    klass = entry.is_a?(Hash) ? entry["class"] : nil
+    h[key] = klass if rank(klass)
+  end
+
+  r = ratchet ? ratchet(root, current, scope) : nil
+  if errors.empty? && !(r && ratchet_failed?(r))
     lines << "check-tool-risk: OK — #{bins.size} harness tools, all classified " \
              "(#{bins.size} considered, #{tools.size} entries)"
+    lines.concat(ratchet_ok_lines(r)) if r
     return [0, lines]
   end
 
-  lines << "check-tool-risk: FAILED — #{errors.size} problem(s) " \
+  lines << "check-tool-risk: FAILED — #{errors.size + (r && ratchet_failed?(r) ? 1 : 0)} problem(s) " \
            "(#{bins.size} harness tools considered, #{tools.size} classified):"
   errors.each { |e| lines << "  - #{e}" }
+  lines.concat(ratchet_failure_lines(r)) if r && ratchet_failed?(r)
   [1, lines]
 end
 
@@ -247,32 +534,32 @@ def discovery_cases(fail)
 
     # An unclassified skill executable fails, named by its path under ai/.
     File.write(reg, _complete_registry(%w[alpha]))
-    code, lines = run_check(root: root, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg, ratchet: false)
     fail.("an unclassified skill executable should fail") unless code == 1
     unless lines.join("\n").include?("skills/athena:demo/bin/tool")
       fail.("the failure should name the skill tool by its key skills/athena:demo/bin/tool")
     end
 
     File.write(reg, _complete_registry(%w[alpha skills/athena:demo/bin/tool]))
-    code, lines = run_check(root: root, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg, ratchet: false)
     fail.("a fully classified set should pass, got #{lines.join(' / ')}") unless code.zero?
 
     # An ignored scratch executable in ai/bin does not skew the check.
     File.write(File.join(root, ".git", "info", "exclude"), "scratch-*\n")
     _write_exec(bin, "scratch-dnd")
-    code, lines = run_check(root: root, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg, ratchet: false)
     fail.("an ignored scratch executable in ai/bin must not skew the check: #{lines.join(' / ')}") unless code.zero?
 
     # A NEW untracked first-party executable still fails until classified.
     fresh = _write_exec(bin, "fresh-tool")
-    code, = run_check(root: root, registry_path: reg)
+    code, = run_check(root: root, registry_path: reg, ratchet: false)
     fail.("a new untracked first-party executable should fail unclassified") unless code == 1
     FileUtils.rm_f(fresh)
 
     # An executable no scope rule covers fails.
     FileUtils.mkdir_p(File.join(root, "tools"))
     stray = _write_exec(File.join(root, "tools"), "stray")
-    code, = run_check(root: root, registry_path: reg)
+    code, = run_check(root: root, registry_path: reg, ratchet: false)
     fail.("an unscoped executable should fail") unless code == 1
     FileUtils.rm_f(stray)
   end
@@ -292,9 +579,47 @@ def discovery_cases(fail)
     _commit_all(root)
     reg = File.join(root, "risk.yml")
     File.write(reg, _complete_registry([]).sub("tools:\n", "tools: {}\n"))
-    code, lines = run_check(root: root, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg, ratchet: false)
     fail.("empty discovery should fail") unless code == 1
     fail.("empty-discovery failure should carry a Fix:") unless lines.join("\n").include?("Fix:")
+  end
+end
+
+# DND-543: the ratchets' pure parts. The black-box cases (landed fixtures, a
+# bare origin) are ai/test/check-tool-risk/self-test.sh.
+def ratchet_unit_cases(fail)
+  text = File.read(File.join(AI_DIR, "lib", "harness_tools.rb"))
+  running = HarnessTools::SCOPE.map { |prefix, verdict, _| [prefix, verdict] }
+  fail.("parse_scope must read the live SCOPE exactly: got #{parse_scope(text).inspect}") unless parse_scope(text) == running
+  begin
+    parse_scope("module X\nend\n")
+    fail.("parse_scope accepted a file with no SCOPE table")
+  rescue ArgumentError
+    nil
+  end
+  merged = merge_registries([{ "a" => "readOnly", "b" => "destructive" }, { "a" => "idempotent", "b" => "readOnly" }])
+  fail.("merge_registries must keep the strictest class: got #{merged.inspect}") unless
+    merged == { "a" => "idempotent", "b" => "destructive" }
+  landed = [[["ai/hooks/", :out], ["ai/", :in], ["scripts/", :out]]]
+  cases = {
+    "in -> out" => [[["ai/hooks/", :out], ["ai/x/", :out], ["ai/", :in], ["scripts/", :out]], [["ai/x/", :out]]],
+    "in -> unscoped" => [[["ai/hooks/", :out], ["scripts/", :out]], [["ai/", :unscoped]]],
+    "narrowed prefix" => [[["ai/hooks/", :out], ["ai/bin/", :in], ["scripts/", :out]], [["ai/", :unscoped]]],
+    "unscoped -> out" => [[["ai/hooks/", :out], ["ai/", :in], ["scripts/", :out], ["docs/", :out]], []],
+    "out -> in" => [[["ai/", :in], ["scripts/", :out]], []],
+  }
+  cases.each do |name, (current, want)|
+    got = scope_weakenings(landed, current)
+    fail.("scope_weakenings #{name}: want #{want.inspect}, got #{got.inspect}") unless got == want
+  end
+  fail.("no landed SCOPE must weaken nothing") unless scope_weakenings([], [["ai/", :out]]).empty?
+  fail.("rank must order readOnly < idempotent < destructive") unless
+    rank("readOnly") < rank("idempotent") && rank("idempotent") < rank("destructive") && rank("x").nil?
+  begin
+    parse_registry_classes("tools:\n  a: { class: harmless }\n")
+    fail.("parse_registry_classes accepted an unranked class")
+  rescue ArgumentError
+    nil
   end
 end
 
@@ -355,12 +680,12 @@ def run_self_test
 
     # Case 1: complete fixture passes.
     File.write(reg, _complete_registry(%w[alpha beta gamma]))
-    code, lines = run_check(root: root, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg, ratchet: false)
     fail.("complete fixture should pass, got exit #{code}: #{lines.join(' / ')}") unless code.zero?
 
     # Case 2: a new unclassified bin fails, naming it + a Fix line.
     File.write(reg, _complete_registry(%w[alpha beta]))
-    code, lines = run_check(root: root, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg, ratchet: false)
     body = lines.join("\n")
     fail.("unclassified bin should fail") unless code == 1
     fail.("failure should name the missing 'gamma'") unless body.include?("gamma")
@@ -376,7 +701,7 @@ def run_self_test
         beta:  { class: readOnly, reason: t }
         gamma: { class: readOnly, reason: t }
     YAML
-    code, lines = run_check(root: root, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg, ratchet: false)
     fail.("bad class value should fail") unless code == 1
     fail.("bad class failure should carry a Fix:") unless lines.join("\n").include?("Fix:")
 
@@ -390,7 +715,7 @@ def run_self_test
         beta:  { class: readOnly, reason: t }
         gamma: { class: readOnly, reason: t }
     YAML
-    code, = run_check(root: root, registry_path: reg)
+    code, = run_check(root: root, registry_path: reg, ratchet: false)
     fail.("missing reason should fail") unless code == 1
 
     # Case 5: default != destructive fails.
@@ -403,13 +728,13 @@ def run_self_test
         beta:  { class: readOnly, reason: t }
         gamma: { class: readOnly, reason: t }
     YAML
-    code, lines = run_check(root: root, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg, ratchet: false)
     fail.("default: readOnly should fail") unless code == 1
     fail.("default failure should carry a Fix:") unless lines.join("\n").include?("Fix:")
 
     # Case 6: a stale entry fails, naming it.
     File.write(reg, _complete_registry(%w[alpha beta gamma delta]))
-    code, lines = run_check(root: root, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg, ratchet: false)
     fail.("stale entry should fail") unless code == 1
     fail.("stale failure should name 'delta'") unless lines.join("\n").include?("delta")
 
@@ -428,6 +753,7 @@ def run_self_test
     fail.("class_of gamma") unless class_of("gamma", reg) == "destructive"
     fail.("class_of unknown must deny-by-default") unless class_of("nonesuch", reg) == "destructive"
     discovery_cases(fail)
+    ratchet_unit_cases(fail)
   ensure
     FileUtils.rm_rf(root)
   end
@@ -450,7 +776,14 @@ if ARGV.include?("--help") || ARGV.include?("-h")
     Usage:
       ai/bin/check-tool-risk                    assert every tool the harness can
                                                 call carries a risk annotation in
-                                                ai/tools/risk.yml
+                                                ai/tools/risk.yml, and that neither
+                                                a class nor the SCOPE table is
+                                                weaker than what landed on
+                                                origin/main (cross-checked with
+                                                `git ls-remote origin`)
+      ai/bin/check-tool-risk --root DIR         the same, measuring the checkout at
+                                                DIR read-only (its own risk.yml
+                                                and SCOPE table)
       ai/bin/check-tool-risk --json             emit the check result as JSON
       ai/bin/check-tool-risk --class-of TOOL    print one tool's risk class
       ai/bin/check-tool-risk --self-test        deterministic suite (no model)
@@ -475,7 +808,17 @@ elsif ARGV.include?("--json")
   lines.each { |l| out.puts l }
   exit code
 else
-  code, lines = run_check
+  root = REPO_ROOT
+  if (r = ARGV.index("--root"))
+    root = ARGV[r + 1]
+    if root.nil? || root.empty? || !File.directory?(root)
+      warn "check-tool-risk: FAILED — --root needs an existing directory, got #{root.inspect}"
+      warn "  Fix: pass --root <path to a git checkout>, e.g. --root ~/dev/custom."
+      exit 1
+    end
+    root = File.expand_path(root)
+  end
+  code, lines = run_check(root: root, registry_path: File.join(root, REGISTRY_REL))
   out = code.zero? ? $stdout : $stderr
   lines.each { |l| out.puts l }
   exit code
