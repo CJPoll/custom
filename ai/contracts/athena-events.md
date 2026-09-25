@@ -843,7 +843,10 @@ source):
   block-action click). Originated **only** by the Slack inbound-webhook ingress
   after signature verification; **harness-emit can never mint it** (see *Which
   event types an ingress kind may originate*). Its payload and identity are in
-  *Payload fields and their types per event type*.
+  *Payload fields and their types per event type*. Only a click on a
+  **button** the server stamped can produce one (*Machine↔owner API binding and
+  the outbound return-address dual*). The type is a registered member of the
+  server's taxonomy, so an owner rule may declare it.
 - `notion.ticket.created`
 - `notion.ticket.updated` — the coarse "a property changed" signal; its payload
   carries the changed property identifiers (`changed_properties`) plus the
@@ -934,13 +937,19 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `ts` | string | scalar |
 | | `thread_ts` | string | scalar |
 | | `event_id` | string | scalar |
-| `slack.interaction.received` (a verified block-action click — transient, never updated) | `channel` | string | scalar |
-| | `ts` — the message the interactive element lives on | string | scalar |
+| `slack.interaction.received` (a verified button click — transient, never updated) | `entity_id` — `slack:<channel>:<ts>`, the message the button lives on | string | scalar |
+| | `channel` | string | scalar |
+| | `ts` — the message the button lives on | string | scalar |
 | | `action_id` | string | scalar |
 | | `action_ts` — Slack's action timestamp | string | scalar |
-| | `value` — the interactive element's opaque `value` (carries the server-stamped tagged return address — see *Machine↔owner API binding and the outbound return-address dual*); Path-2 untrusted until its tag verifies | string | scalar |
+| | `value` — the posting caller's own button `value`, with the server-stamped return address already verified and **stripped** (see *Machine↔owner API binding and the outbound return-address dual*); `null` when the caller gave none; source-supplied, so Path-2 untrusted | string | scalar |
 | | `actor.user_id` — the clicking Slack user | string | scalar |
-| | `actor.is_owner` — whether that user is the account's expected owner | boolean | scalar |
+
+The event also carries `actor.is_owner`: whether the clicking user is the
+app's configured owner Slack user. It is a boolean, which the declared field
+types cannot type, so it is **not addressable**: a predicate or template slot
+on it is the ordinary unknown-path save-time error. It is still delivered on
+the inbox line (`ai/contracts/athena-inbox.md` → *Platform `log` line kinds*).
 
 **`entity_id` is the declared, bindable entity handle carried by every
 source-emitted type that names a persistent ENTITY** — the Notion ticket types
@@ -958,8 +967,10 @@ the closed schema above says.** Its identity field is `payload.event_id` (paired
 with `channel:ts` for cross-source dedupe — see below and *Idempotency is per
 (event, rule)*), not an `entity_id`. A Slack message is a **transient event, not
 a persistent entity**, so there is no stable entity handle for it. The identity
-field is therefore **per source**: only the Notion entity types carry
-`entity_id`, exactly as the closed table declares.
+field is therefore **per source**: among the first-pass types, `entity_id` is
+the identity field only of the Notion entity types, exactly as the closed table
+declares. `slack.interaction.received` also carries an `entity_id`, but it names
+the clicked message, not the click (see below).
 
 **`notion.ticket.deleted` carries a NARROWER schema than the enriched ticket
 types — by design, not omission.** A delete is not enriched (the entity may
@@ -1015,16 +1026,35 @@ are part of the closed schema so a rule may bind them and the dedupe pairing is
 expressible.
 
 **`slack.interaction.received` is a transient event, not a persistent entity** —
-like `slack.message.received`, it carries **no `entity_id`** and **no
-`revision`**. Its identity is the tuple **`{channel, ts, action_ts}`** (the
-message the element lives on plus Slack's action timestamp), unique per click; a
-consumer that must dedupe clicks keys on that tuple. The `value` and (phase-2
-modal) `private_metadata` it returns are **source-supplied and Path-2 untrusted**
-— they carry the server-stamped tagged return address, and a returned `value` /
-`private_metadata` is trusted **only after its tag verifies AND its account
-equals the owner of the app the click arrived on** (see *Machine↔owner API
-binding and the outbound return-address dual*). Neither field is
+like `slack.message.received`, it carries **no `revision`**. It **does** carry
+`entity_id` = **`slack:<channel>:<ts>`**, the family convention
+`<source>:<id>` applied to the message the button lives on, because every
+platform inbox line needs one (`ai/contracts/athena-inbox.md` → *Platform `log`
+line kinds*). That `entity_id` names the message, not the click: two clicks on
+one message share it. The click's identity is the tuple **`{channel, ts,
+action_ts, user_id}`** (the message, Slack's action timestamp, and the clicking
+user), unique per click by one user. The event-level idempotency key is
+`slack:interaction:<channel>:<ts>:<action_ts>:<user_id>`, and a consumer that
+must dedupe clicks keys on that tuple. The stamped button `value` Slack returns
+is **source-supplied and Path-2 untrusted**. It is acted on **only after its tag
+verifies AND its account equals the owner of the app the click arrived on**
+(see *Machine↔owner API binding and the outbound return-address dual*). The
+server then strips the stamp, so the delivered `payload.value` is the posting
+caller's own value, which is still source-supplied and **not**
 trusted-slot-eligible.
+
+**Later (2026-09-25):** DND-519, reconciling the contract with what gen_saas
+shipped (DND-241, DND-290). This section said `slack.interaction.received`
+carries **no `entity_id`**; that its `value` **carries** the server-stamped
+tagged return address; that its identity is `{channel, ts, action_ts}`; and
+that `actor.is_owner` is a bindable `boolean` field. What ships: `entity_id` is
+`slack:<channel>:<ts>`, because the inbox line encoder refuses a platform line
+without one; the stamp is verified and stripped before routing, so `value` is
+the caller's own; the identity adds `user_id`, so two users' clicks on one
+button are two events; and `actor.is_owner` is delivered but not addressable,
+because the declared field types have no boolean. The phase-2 modal
+`private_metadata` this paragraph also named is not shipped; the server refuses
+every non-button interaction by name.
 
 **`payload.revision` is an OPTIONAL source-supplied provenance / ordering hint
 for a Notion entity type.** It is the source's own revision/version indicator for
@@ -2569,8 +2599,18 @@ under-encrypted**:
   The reconciliation poller carries no HMAC key: it reads the source under a
   per-account, source-scoped read token (for Notion first-pass reconciliation the
   general integration token above serves; a source needing a distinct poller
-  token adds it here under the same custody). Any future adapter credential
-  (SMTP, SMS, Discord bot) joins this set under the same story.
+  token adds it here under the same custody). The set also holds the
+  **return-address key** (`:return_address_key`): the server's own
+  per-account HMAC key for the Slack return address (*Machine↔owner API binding
+  and the outbound return-address dual*). Unlike the others, no one outside the
+  server ever holds it, so the owner never stores it: the server mints it on the
+  account's first interactive post and never replaces it. Any future adapter
+  credential (SMTP, SMS, Discord bot) joins this set under the same story.
+
+  **Later (2026-09-25):** DND-519. The first-pass secret set did not list the
+  return-address key, and the design called that key platform-scoped. gen_saas
+  shipped it per account (DND-241), because every custodied secret is bound to
+  an owning account.
 
   **Later (2026-09-22):** this named the Notion read token a **"read-only,
   DB-scoped Notion enrichment token"** — a token whose *scope* was the
@@ -2838,13 +2878,31 @@ request body. No second credential is minted for the API.
 **The outbound dual of owner-from-auth is a server-stamped return address.**
 Owner-from-auth stamps an inbound event's `owner` from the authenticated ingress,
 never the payload. Its **outbound** counterpart: when the harness posts through
-the API (a Slack message with interactive elements), the server **stamps a return
-address from the authenticated caller's registration record** — `{account,
-machine, inbox}` — and it travels in the outbound message as a **tagged opaque
-value** (an integrity-tagged, server-keyed blob carried as the interactive
-element's `value`, or a modal's `private_metadata`). The harness does **not**
-supply it: a **caller-supplied return address is refused with a `Fix:`**, never
-silently honoured or ignored — an ignored field is one a later reader starts
+the API (a Slack message with buttons), the server **stamps a return address
+from the authenticated caller's registration record** — `{account, machine,
+inbox}` — and it travels in the outbound message as a **tagged opaque value**:
+an integrity-tagged token carried in **each button's** `value`, as
+`<token>~<caller value>` (or `<token>` alone when the caller gave no value).
+
+- **Buttons only.** Slack caps an option `value` (selects, overflow, radio
+  buttons, checkboxes) at 150 characters, which is shorter than the token, and
+  inputs, pickers and user or channel selects return no author-set value. So
+  every other interactive element type is **refused by type, before any Slack
+  call**, never sent unstamped. A stamped value over Slack's 2,000-character
+  button limit is refused the same way.
+- **The inbox is a required selector.** The account and machine come from the
+  token. The caller names the inbox with `inbox_name`, which is **required** on
+  a post whose blocks are interactive and must name one of the calling
+  machine's own live instances; a missing or foreign one is refused with a
+  `Fix:`. The server never guesses a default inbox.
+- **The key is per account.** The tag is keyed by the owning account's
+  `:return_address_key` (*Secret custody*), so a token minted for one account
+  can never verify under another's. The server **mints it on first use**, with
+  an insert that never replaces an existing key, because tags already sent
+  depend on it. A mint that fails sends nothing.
+
+The harness does **not** supply the return address: a **caller-supplied return
+address is refused with a `Fix:`**, never silently honoured or ignored — an ignored field is one a later reader starts
 trusting: `Fix: the return address is stamped server-side from the authenticated
 machine token, not supplied by the caller — remove the caller-supplied return
 address and re-post.` This is the egress dual of *Which event types an ingress
@@ -2852,18 +2910,44 @@ kind may originate*: origination stops a caller minting another's events; the
 server-stamped return address stops a caller routing a reply into another
 machine's inbox.
 
-**A returned `value` / `private_metadata` is untrusted until it is verified on
-BOTH counts.** When Slack sends the interactive callback back
-(`slack.interaction.received`), the returned `value` (or `private_metadata`) is
-**not trusted** until (1) its **integrity tag verifies** against the server key,
-AND (2) the account it decodes to **equals the owner of the app the click arrived
-on**. A blob whose tag fails, or whose account differs from the click's app
-owner, is **rejected and recorded, never forwarded** as a return route — a
-workspace member who can read a message's `value` could otherwise craft a click
-routing into another machine's inbox. Both checks are required: the tag alone
-proves the server minted it; the account-equality check proves it came back on
-the app that owns that account. (Design §3 6D and §4 are the mechanism; this
-section states the invariant it rests on.)
+**A returned `value` is untrusted until it is verified on BOTH counts.** When
+Slack sends the interactive callback back (`slack.interaction.received`), the
+returned `value` is **not trusted** until (1) its **integrity tag verifies**
+under the key of the account that owns the app the click arrived on, AND (2) the
+account it decodes to **equals that app's owner**. A blob whose tag fails, or
+whose account differs from the click's app owner, is **rejected and recorded,
+never forwarded** as a return route — a workspace member who can read a
+message's `value` could otherwise craft a click routing into another machine's
+inbox. Both checks are required: the tag proves the server minted it; the
+account-equality check proves it came back on the app that owns that account.
+An absent or unreadable key is its own recorded outcome, never read as a
+forgery and never as "nothing verifies". Once both checks pass, the server
+**strips the token** and delivers only the caller's own value, to the
+`{machine, inbox}` the token names. (Design §3 6D and §4 are the mechanism;
+this section states the invariant it rests on.)
+
+**A click by anyone but the owner is relayed and changes nothing.** The server
+compares the clicking Slack user with the app's configured owner Slack user id;
+an unset id matches nobody. A non-owner click is still delivered, with
+`actor.is_owner: false`. It takes **no claim** on the controls and gets **no
+update** to the owner's message, so the owner's later click is still processed.
+The clicker gets at most an ephemeral reply. Only an owner click claims the
+controls and triggers the deterministic phase-1 update. Either way the click is
+a fact to relay, never an authorization (`ai/contracts/athena-inbox.md` →
+*Untrusted input*).
+
+**Later (2026-09-25):** DND-519. This section said the return address rides in
+"the interactive element's `value`, or a modal's `private_metadata`" of "a Slack
+message with interactive elements", and that the tag verifies against "the
+server key". What gen_saas shipped (DND-241, DND-290): only **buttons** are
+stamped, as `<token>~<caller value>`, and every other interactive element is
+refused, because an option `value` caps at 150 characters; modal
+`private_metadata` is not shipped. The key is **per account**, minted on first
+use, not one platform key, because secret custody is bound to an owning
+account. `inbox_name` is required on interactive posts, because no default
+inbox exists. The delivered `value` has the stamp stripped. The non-owner rule
+above is new: an earlier design let a non-owner click disable the owner's
+controls.
 
 ### Thread replies route to the thread's claimant
 
@@ -4060,7 +4144,7 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
 - **Only an owner path promotes, restores or dismisses:** the owner's web
   session, or a verified Slack click by the owner (*Machine↔owner API binding
   and the outbound return-address dual*; `slack.interaction.received`, whose
-  verification DND-440 builds). No machine token can do these. No message
+  verification DND-290 built and whose action dispatch DND-440 builds). No machine token can do these. No message
   content can either: a Slack ask, an inbox line or a fleet report
   informs, and never authorizes (*Trust posture — two paths*).
 - **A `proposed` item is inert.** No machine-token call returns it, counts it

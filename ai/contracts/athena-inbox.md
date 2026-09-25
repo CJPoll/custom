@@ -1209,11 +1209,23 @@ dedupe key — a platform channel's lines are read keyless (*Schema*; *A lane
 section.
 
 - **`slack.interaction`** — a routed verified Slack block-action click
-  (`athena-events.md` → `slack.interaction.received`). Fields: `channel`, `ts`,
-  `action_id`, `action_ts`, `value` (the interactive element's opaque value —
-  carries the server-stamped tagged return address), `actor` (`{user_id,
-  is_owner}`). It carries **no body of its own** beyond these; the click is a
-  signal, and its `value` is Path-2 untrusted (*Untrusted input*).
+  (`athena-events.md` → `slack.interaction.received`). Fields: `entity_id`
+  (it names the clicked message; its form is stated once, in
+  `athena-events.md` → *Payload fields and their types per event type*; here
+  it is only the line's reconciliation identity, **not** a dedupe key),
+  `channel`, `ts`, `action_id`, `action_ts`, `value` (the posting session's
+  own button value; the server verified the return-address stamp and
+  **stripped** it before delivery), `actor` (`{user_id, is_owner}`;
+  `is_owner` is `false` for anyone but the app's configured owner, and such a
+  click changed nothing on the message). It carries **no body of its own**
+  beyond these; the click is a signal, and its `value` is Path-2 untrusted
+  (*Untrusted input*).
+
+  **Later (2026-09-25):** DND-519. This bullet said `value` "carries the
+  server-stamped tagged return address" and listed no `entity_id`. What gen_saas
+  ships (DND-290): the line carries `entity_id`, because the encoder refuses a
+  platform line without one, and `value` is the caller's own, because the
+  server strips the stamp once it verifies.
 - **`session.message`** — a routed `fleet.session.message`
   (`athena-events.md`). Fields: `entity_id` (D40) — its form is stated once, in
   `athena-events.md` → *Declared families beyond the first pass* →
