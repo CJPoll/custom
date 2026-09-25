@@ -370,3 +370,19 @@ After each, the suite returned to `VERDICT: PASS (101 cases)`.
 S66 first measured **zero**: no case covered a trailing `--help`. Case 83 was
 added for it, then S66 was re-applied and reddened it. After each row the suite
 returned to `VERDICT: PASS (117 cases)`.
+
+## Owner decision-question rules (2026-09-25)
+
+- **Code under test:** `SKILL.md` → *Asking the owner for a decision*, and the
+  worked example in `athena:slack:interactive-messages`.
+- **Suite run:** `bash test/self-test.sh`
+- **Baseline:** `VERDICT: PASS (124 cases)`. Before the doctrine was written,
+  all seven new case-84 checks failed (`VERDICT: FAIL (7 of 124 cases)`).
+- **Scope:** text-presence only. No case checks a message actually sent.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S67 | example button label `Your call (DND-542)` renamed `Defer (DND-542)` | 1 | `FAIL doctrine: the worked owner-choice example has a 'Your call' button` |
+| S68 | the `**Background**` step deleted from the structure list | 1 | `FAIL doctrine: athena:slack carries decision rule '**Background**'` |
+
+After each row the suite returned to `VERDICT: PASS (124 cases)`.
