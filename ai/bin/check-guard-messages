@@ -86,6 +86,29 @@
 # the OK output, so a reviewer sees every new non-guard label. Deleting a
 # landed guard outright is a removal, not a reclassification, and passes.
 #
+# A MOVED GUARD KEEPS ITS BAR (DND-539)
+#
+# The ratchet above keys on PATH. Before DND-539, a landed guard deleted at its
+# old path and re-added at a new one read as a removal plus a genuinely new
+# entry, so the new copy could be labelled tool, lose its Fix: line, and pass.
+# So a NEW candidate whose content maps to a REMOVED landed guard (its path no
+# longer exists) inherits that guard's bar: if it is not a guard now, that is a
+# weakening, named with both paths. "Maps" is git's own rename detection,
+# `git diff --no-index -M50%`, over the removed guards' landed blobs (every
+# distinct blob at either landed point) and the new candidates' working-tree
+# content, copied to a temp dir so the repo is only read. That covers the same
+# blob (an exact rename) and an edited move alike, tracked or untracked.
+#
+# Why 50%: it is git's default, the definition of "this file was moved" that
+# `git diff -M`, `git log --follow`, merge rename handling, and the forge's
+# rename display all use. A reviewer who sees "renamed" in the diff sees the
+# same verdict here. Lower thresholds match small scripts that share only a
+# shebang, `set -euo pipefail`, and usage boilerplate, and would fail genuinely
+# new tools. Higher ones let a guard through after light edits (its Fix: lines
+# deleted is already a few percent). No threshold stops a full rewrite; see the
+# residual below. `-l0` lifts git's rename limit, so a large diff cannot
+# silently skip detection. A detection that fails is "could not measure".
+#
 # Not being able to read the landed table is a FAILURE, never a pass: no
 # origin/main, no merge-base, a shallow clone, or a landed commit without a
 # readable table. The output lists every probe and what it gave, and keeps
@@ -105,9 +128,13 @@
 #
 # Residual, stated out loud: this does not stop an actor that can push to main
 # (it can land the relabel itself), nor a diff that edits this file's
-# enforcement path. A guard deleted and re-added under a NEW path as a
-# non-guard reads as a removal plus a new entry: it passes, but the new entry
-# is named in the OK output.
+# enforcement path. A guard moved to a new path is caught while git's rename
+# detection still pairs the two (>= 50% similar); one rewritten beyond that
+# reads as a removal plus a new entry: it passes, and the new entry is named in
+# the OK output. Git pairs each removed guard with at most one new file, so a
+# guard copied to two new paths is judged by the copy git picks. A guard moved
+# to a path discovery does not read (not executable, not under lib/ or
+# ai/hooks) is not a candidate there and reads as a removal.
 #
 # Convention idea adapted from riddler's howie/wurk harness ("errors written for
 # the LLM"), reimplemented in our conventions.
@@ -324,8 +351,10 @@ def landed_candidate?(mode, rel)
   mode == "100644" && (lib_path?(rel) || hook_script?(rel))
 end
 
-# rel -> landed class at one commit, for every landed candidate there.
-def classes_at(root, sha, label)
+# rel -> landed class at one commit, for every landed candidate there. When
+# blobs is given, it also collects rel -> [blob sha, ...] for those candidates,
+# so a guard removed at its path can be traced to where its content went.
+def classes_at(root, sha, label, blobs = nil)
   text, ok = git_read(root, "show", "#{sha}:#{TABLE}")
   raise LandedUnreadable.new([[label, "#{sha[0, 12]}: no readable #{TABLE}"]]) unless ok
 
@@ -341,11 +370,14 @@ def classes_at(root, sha, label)
     meta, rel = row.split("\t", 2)
     next if rel.nil?
 
-    mode = meta.split(" ").first
+    mode, _type, blob = meta.split(" ")
     next unless landed_candidate?(mode, rel)
 
     klass = classify(rel, entries)
-    classes[rel] = klass if klass
+    next unless klass
+
+    classes[rel] = klass
+    (blobs[rel] ||= []) << blob if blobs && !blobs.fetch(rel, []).include?(blob)
   end
 end
 
@@ -359,7 +391,8 @@ def merge_landed(per_point)
 end
 
 # Resolve the landed points and read each one's classification. Every miss
-# raises LandedUnreadable naming what was probed. Returns [points, classes].
+# raises LandedUnreadable naming what was probed. Returns [points, classes,
+# blobs], blobs mapping each landed candidate to its blob(s) across the points.
 def landed_classification(root)
   probes = []
   unreadable = lambda do |ref, outcome|
@@ -388,12 +421,13 @@ def landed_classification(root)
            else
              [["origin/main (tip)", tip], ["merge-base(HEAD, origin/main)", mb]]
            end
+  blobs = {}
   per_point = points.map do |label, sha|
-    classes_at(root, sha, label)
+    classes_at(root, sha, label, blobs)
   rescue LandedUnreadable => e
     raise LandedUnreadable.new(probes + e.probes)
   end
-  [points, merge_landed(per_point)]
+  [points, merge_landed(per_point), blobs]
 end
 
 # [rel, landed, now] for every landed guard that is no longer a guard. A landed
@@ -413,6 +447,94 @@ def weakenings(root, found, entries, landed)
   end.sort
 end
 
+# --- a guard moved to a new path keeps its bar (DND-539) ---------------------
+
+# git's own default rename threshold. See "A MOVED GUARD" in the header.
+RENAME_SIMILARITY = 50
+RENAME_PROBE = "git diff --no-index -M#{RENAME_SIMILARITY}% (rename detection)".freeze
+
+# Pairs each REMOVED landed guard (its path no longer exists) with the NEW
+# candidate its content moved to, using git's rename detection: the same blob,
+# or >= RENAME_SIMILARITY% similar. Returns [weakened, kept]:
+#   weakened  [new_rel, "guard at <old> (moved, R<score>)", now] where the new
+#             path is not a guard;
+#   kept      [old_rel, new_rel, score] where it still is.
+# Git pairs each source with at most one destination (exact matches first,
+# then best score). A failed detection raises LandedUnreadable: it is a missing
+# measurement, never "nothing moved".
+def moved_guards(root, found, entries, landed, blobs)
+  removed = landed.select do |rel, klass|
+    klass == "guard" && !File.exist?(File.join(root, rel)) && !File.symlink?(File.join(root, rel))
+  end.keys.sort
+  added = found.reject { |rel| landed.key?(rel) }
+  return [[], []] if removed.empty? || added.empty?
+
+  pairs = rename_pairs(root, removed.flat_map { |rel| blobs.fetch(rel, []).map { |b| [rel, b] } }, added)
+  weakened = []
+  kept = []
+  pairs.each do |old_rel, new_rel, score|
+    now = classify(new_rel, entries)
+    if now == "guard"
+      kept << [old_rel, new_rel, score]
+    else
+      weakened << [new_rel, "guard at #{old_rel} (moved here, #{score}% similar)", now || "unclassified"]
+    end
+  end
+  [weakened.sort, kept.sort]
+end
+
+# [[old_rel, new_rel, score]] for every (landed blob -> working-tree file) pair
+# git's rename detection finds. The comparison runs on copies in a temp dir, so
+# the repo is only read: no index, no object store, no ref is written.
+def rename_pairs(root, sources, added)
+  Dir.mktmpdir("check-guard-messages-moved-") do |tmp|
+    src_names = write_rename_side(File.join(tmp, "src"), "s", sources) do |(_rel, blob)|
+      text, ok = git_read(root, "cat-file", "blob", blob)
+      raise LandedUnreadable.new([[RENAME_PROBE, "git cat-file blob #{blob[0, 12]} failed"]]) unless ok
+
+      text
+    end
+    dst_names = write_rename_side(File.join(tmp, "dst"), "d", added) { |rel| File.binread(File.join(root, rel)) }
+    out, err, status = Open3.capture3("git", "diff", "--no-index", "--no-ext-diff", "-M#{RENAME_SIMILARITY}%",
+                                      "-l0", "--name-status", "-z", "src", "dst", chdir: tmp)
+    # --no-index exits 1 both for "differences found" and for an error, so a
+    # non-empty stderr is what tells them apart.
+    unless [0, 1].include?(status.exitstatus) && err.strip.empty?
+      raise LandedUnreadable.new([[RENAME_PROBE, "failed (exit #{status.exitstatus}): #{err.strip}"]])
+    end
+
+    parse_renames(out).map do |src, dst, score|
+      [src_names.fetch(src)[0], dst_names.fetch(dst), score]
+    end
+  end
+rescue Errno::ENOENT
+  raise LandedUnreadable.new([[RENAME_PROBE, "git executable not found on PATH"]])
+end
+
+# Writes one file per item under dir, named <prefix><n>, from the block's
+# content. Returns { "<side>/<name>" => item }.
+def write_rename_side(dir, prefix, items)
+  FileUtils.mkdir_p(dir)
+  side = File.basename(dir)
+  items.each_with_index.to_h do |item, i|
+    name = format("%s%05d", prefix, i)
+    File.binwrite(File.join(dir, name), yield(item))
+    ["#{side}/#{name}", item]
+  end
+end
+
+# [[src, dst, score]] from `--name-status -z` output: "R<score>\0src\0dst\0".
+def parse_renames(out)
+  tokens = out.split("\0")
+  renames = []
+  until tokens.empty?
+    status = tokens.shift
+    paths = tokens.shift(status.start_with?("R", "C") ? 2 : 1)
+    renames << [paths[0], paths[1], status[1..].to_i] if status.start_with?("R")
+  end
+  renames
+end
+
 # Table entries for paths that were not a candidate at any landed point.
 def new_entries(entries, landed)
   entries.reject { |rel, _| landed.key?(rel) }.map { |rel, (klass, _)| [rel, klass] }.sort
@@ -421,9 +543,11 @@ end
 # Adds the ratchet's findings to an evaluate() result.
 def ratchet!(root, result)
   entries, = load_table(root)
-  points, landed = landed_classification(root)
+  points, landed, blobs = landed_classification(root)
   result[:landed_points] = points
-  result[:weakened] = weakenings(root, result[:found], entries, landed)
+  moved, kept = moved_guards(root, result[:found], entries, landed, blobs)
+  result[:weakened] = (weakenings(root, result[:found], entries, landed) + moved).sort
+  result[:moved_kept] = kept
   result[:new_entries] = new_entries(entries, landed)
 rescue LandedUnreadable => e
   result[:landed_probes] = e.probes
@@ -516,6 +640,10 @@ def run_check(root = REPO)
        "#{skipped_note(result)}"
   puts "  classification ratchet: 0 weakening(s) against " +
        result[:landed_points].map { |label, sha| "#{label} @ #{sha[0, 12]}" }.join(", ")
+  unless result[:moved_kept].empty?
+    puts "  landed guard(s) moved to a new path, still guard: " +
+         result[:moved_kept].map { |old, new, score| "#{old} -> #{new} (#{score}% similar)" }.join(", ")
+  end
   unless result[:new_entries].empty?
     puts "  new classification entr(ies) with no landed counterpart: " +
          result[:new_entries].map { |rel, klass| "#{rel} (#{klass})" }.join(", ")
@@ -568,6 +696,10 @@ def run_self_test
                    { "ai/bin/x" => "guard", "scripts/y" => "tool", "scripts/z" => "guard", "gone" => "guard" })
     unless w == [["ai/bin/x", "guard", "tool"], ["scripts/z", "guard", "unclassified"]]
       fail.("weakenings: got #{w.inspect}")
+    end
+    renames = parse_renames("R100\0src/s00000\0dst/d00001\0A\0dst/d00000\0R062\0src/s00001\0dst/d00002\0D\0src/s00002\0")
+    unless renames == [["src/s00000", "dst/d00001", 100], ["src/s00001", "dst/d00002", 62]]
+      fail.("parse_renames: got #{renames.inspect}")
     end
     fresh = new_entries({ "n" => ["tool", "r"], "o" => ["guard", ""] }, { "o" => "guard" })
     fail.("new_entries: got #{fresh.inspect}") unless fresh == [["n", "tool"]]
@@ -633,7 +765,8 @@ if ARGV.include?("--help") || ARGV.include?("-h")
                                                (#{THIRD_PARTY_RULE} are skipped
                                                as third-party, and counted); fail any
                                                guard weakened below the landed table
-                                               (origin/main tip and merge-base)
+                                               (origin/main tip and merge-base),
+                                               including one moved to a new path
       ai/bin/check-guard-messages --root DIR   the same, measuring the checkout at
                                                DIR read-only (its own #{TABLE})
       ai/bin/check-guard-messages --self-test  deterministic suite (no model)

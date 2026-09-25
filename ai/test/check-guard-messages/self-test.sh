@@ -407,6 +407,105 @@ git -C "${R}" rm -q ai/bin/retired-check; run "${R}"
 if [ "${RC}" -eq 0 ]; then ok "29 a deleted landed guard passes (removal, not reclassification)"
 else bad "29 a deleted landed guard passes (removal, not reclassification)" "rc=${RC} out=${OUT}"; fi
 
+echo "== check-guard-messages: a guard moved to a new path keeps its bar (DND-539) =="
+
+# DND-539: the ratchet keyed on PATH. A landed guard deleted at its old path and
+# re-added at a new one read as a removal plus a genuinely new entry, so it
+# could be classified tool and lose its Fix: line while the gate stayed green.
+# A new entry whose content maps to a removed landed guard -- the same blob, or
+# a git rename at >= 50% similarity -- now inherits that guard's bar.
+
+# A realistic guard: long enough that git's similarity score means something.
+LONG_GUARD='#!/usr/bin/env bash
+# some-guard: refuse a command that would do the wrong thing.
+set -euo pipefail
+input="$(cat)"
+command="$(printf "%s" "${input}" | jq -r ".tool_input.command // empty")"
+if [ -z "${command}" ]; then
+  exit 0
+fi
+case "${command}" in
+  *"rm -rf /"*)
+    echo "DENY: refusing to delete the filesystem root." >&2
+    echo "Fix: name the exact directory you meant to delete." >&2
+    exit 2
+    ;;
+  *"git push --force"*)
+    echo "DENY: refusing a force push." >&2
+    echo "Fix: push without --force, or use --force-with-lease on your own branch." >&2
+    exit 2
+    ;;
+esac
+exit 0'
+
+# 30. A landed guard moved (same blob) to a new path and classified tool -> FAIL.
+R="$(new_fixture moved-to-tool)"
+add_exec "${R}" ai/bin/moving-check "${LONG_GUARD}"; land "${R}"
+mkdir -p "${R}/scripts"; git -C "${R}" mv ai/bin/moving-check scripts/moved-util
+classify "${R}" scripts/moved-util tool "${TOOL_REASON}"; track "${R}"; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/moved-util' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'ai/bin/moving-check' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'weaken' >/dev/null && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null; then
+  ok "30 a landed guard moved to a new path and classified tool fails as a weakening, both paths named"
+else bad "30 a landed guard moved to a new path and classified tool fails as a weakening, both paths named" "rc=${RC} out=${OUT}"; fi
+
+# 30b. The same move with the content edited (its Fix: lines deleted), left
+#      UNTRACKED at the new path (plain mv, no git add), and listed no-fail-path
+#      -> FAIL: git's rename detection still maps it to the removed guard.
+R="$(new_fixture moved-edited)"
+add_exec "${R}" ai/hooks/old-guard.sh "${LONG_GUARD}"; land "${R}"
+grep -v 'Fix:' "${R}/ai/hooks/old-guard.sh" > "${R}/ai/bin/renamed-report"
+chmod +x "${R}/ai/bin/renamed-report"; rm -f "${R}/ai/hooks/old-guard.sh"
+classify "${R}" ai/bin/renamed-report no-fail-path "prints a report and never denies anything"; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'ai/bin/renamed-report' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'ai/hooks/old-guard.sh' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'weaken' >/dev/null; then
+  ok "30b a landed guard moved, edited, untracked and listed no-fail-path fails as a weakening"
+else bad "30b a landed guard moved, edited, untracked and listed no-fail-path fails as a weakening" "rc=${RC} out=${OUT}"; fi
+
+# 30c. A guard moved under a test/ directory with no table line falls to the
+#      "test" rule class -> FAIL.
+R="$(new_fixture moved-to-test)"
+add_exec "${R}" scripts/gatekeeper "${LONG_GUARD}"
+classify "${R}" scripts/gatekeeper guard ""; land "${R}"
+mkdir -p "${R}/scripts/test"; git -C "${R}" mv scripts/gatekeeper scripts/test/gatekeeper
+grep -v -F "scripts/gatekeeper${TAB}" "${R}/ai/guard-classification.tsv" > "${R}/t.new"
+mv "${R}/t.new" "${R}/ai/guard-classification.tsv"; track "${R}"; run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/test/gatekeeper' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'weaken' >/dev/null; then
+  ok "30c a landed guard moved into a test/ directory fails as a weakening"
+else bad "30c a landed guard moved into a test/ directory fails as a weakening" "rc=${RC} out=${OUT}"; fi
+
+# 31. A landed guard moved and KEPT guard (ai/bin default) -> PASS.
+R="$(new_fixture moved-kept)"
+add_exec "${R}" ai/bin/moving-check "${LONG_GUARD}"; land "${R}"
+git -C "${R}" mv ai/bin/moving-check ai/bin/moved-check; track "${R}"; run "${R}"
+if [ "${RC}" -eq 0 ] && printf '%s' "${OUT}" | grep -F 'ai/bin/moving-check -> ai/bin/moved-check' >/dev/null; then ok "31 a landed guard moved and kept guard passes, the move named"
+else bad "31 a landed guard moved and kept guard passes, the move named" "rc=${RC} out=${OUT}"; fi
+
+# 31b. A table-listed guard moved and re-listed guard at its new path -> PASS.
+R="$(new_fixture moved-kept-listed)"
+add_exec "${R}" scripts/gatekeeper "${LONG_GUARD}"
+classify "${R}" scripts/gatekeeper guard ""; land "${R}"
+git -C "${R}" mv scripts/gatekeeper scripts/gatekeeper-v2
+grep -v -F "scripts/gatekeeper${TAB}" "${R}/ai/guard-classification.tsv" > "${R}/t.new"
+mv "${R}/t.new" "${R}/ai/guard-classification.tsv"
+classify "${R}" scripts/gatekeeper-v2 guard ""; track "${R}"; run "${R}"
+if [ "${RC}" -eq 0 ]; then ok "31b a listed guard moved and re-listed guard passes"
+else bad "31b a listed guard moved and re-listed guard passes" "rc=${RC} out=${OUT}"; fi
+
+# 32. A genuinely new tool with unrelated content, in the same diff that
+#     deletes an unrelated landed guard -> PASS, and the new entry is named.
+R="$(new_fixture new-beside-removal)"
+add_exec "${R}" ai/bin/retired-check "${LONG_GUARD}"; land "${R}"
+git -C "${R}" rm -q ai/bin/retired-check
+add_exec "${R}" scripts/fresh-util "${BARE}"
+classify "${R}" scripts/fresh-util tool "${TOOL_REASON}"; track "${R}"; run "${R}"
+if [ "${RC}" -eq 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/fresh-util' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'new' >/dev/null; then
+  ok "32 a genuinely new tool beside an unrelated guard deletion passes, named"
+else bad "32 a genuinely new tool beside an unrelated guard deletion passes, named" "rc=${RC} out=${OUT}"; fi
+
 echo "== check-guard-messages: live tree =="
 
 # 12. The live tree: every first-party executable is classified and compliant.
