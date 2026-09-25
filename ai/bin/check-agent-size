@@ -70,10 +70,12 @@
 # exactly CLAUDE.md's "a failed lookup must never look like an empty one".
 
 require "fileutils"
+require "stringio"
 require "tmpdir"
+require_relative "../lib/first_party"
 
 AI_DIR     = File.expand_path("..", __dir__)
-AGENTS_DIR = File.join(AI_DIR, "agents")
+REPO_ROOT  = File.expand_path("..", AI_DIR)
 
 # Rendered-line budgets, keyed by the <name> in ai/agents/athena-<name>.md.
 # admiral => 500 is the target the admiral-500 shrink delivers
@@ -261,13 +263,22 @@ def new_entries(current, baseline)
 end
 
 # Every rendered ai/agents/athena-*.md, as [name, absolute-path, line-count].
-def rendered_agents(dir = AGENTS_DIR)
-  Dir.glob(File.join(dir, "athena-*.md")).sort.map do |path|
-    m = File.basename(path).match(FILE_RE)
+#
+# Discovered from git through ai/lib/first_party.rb (DND-508), never globbed:
+# tracked files plus untracked first-party ones, so a NEW agent rendered but not
+# yet committed is still counted (and fails until budgeted), while a scratch
+# copy the repo ignores does not skew the check. Raises FirstParty::MeasureError
+# when git cannot be asked.
+def rendered_agents(root = REPO_ROOT)
+  FirstParty.files(root, "ai/agents").filter_map do |rel|
+    next nil unless File.dirname(rel) == "ai/agents"
+
+    m = File.basename(rel).match(FILE_RE)
     next nil unless m
 
+    path = File.join(root, rel)
     [m[1], path, File.readlines(path).size]
-  end.compact
+  end
 end
 
 # Evaluate agents against a budget table; returns [overages, missing] where each
@@ -301,11 +312,19 @@ def exhausted(agents, budgets = BUDGETS, threshold = HEADROOM_NOTICE)
   end
 end
 
-def run_check
-  agents = rendered_agents
+def run_check(root: REPO_ROOT)
+  begin
+    agents = rendered_agents(root)
+  rescue FirstParty::MeasureError => e
+    warn "check-agent-size: FAILED — could not list ai/agents from git: #{e.message}"
+    warn "  Fix: run this from a git checkout of ~/dev/custom; the rendered agents are read from"
+    warn "  `git ls-files ai/agents` (tracked plus untracked, not ignored), never from a glob."
+    return 1
+  end
   if agents.empty?
-    warn "check-agent-size: FAILED — no rendered ai/agents/athena-*.md found"
-    warn "  Fix: run ai/bin/build-agents to render the agent templates, then re-check."
+    warn "check-agent-size: FAILED — no rendered ai/agents/athena-*.md found in git (tracked or untracked)"
+    warn "  Fix: run ai/bin/build-agents to render the agent templates, then re-check. If they exist on"
+    warn "  disk, check that `git ls-files ai/agents` lists them (not ignored)."
     return 1
   end
 
@@ -427,6 +446,58 @@ def run_check
   end
 
   1
+end
+
+def agents_fixture_repo(root)
+  FileUtils.mkdir_p(File.join(root, "ai", "agents"))
+  sh = ->(*a) { system(*a, chdir: root, out: File::NULL, err: File::NULL) }
+  sh.call("git", "init", "-q", ".")
+  # A global core.excludesFile could hide a fixture from git ls-files.
+  sh.call("git", "config", "core.excludesFile", "/dev/null")
+end
+
+def quietly
+  prev = $stderr
+  $stderr = StringIO.new
+  yield
+ensure
+  $stderr = prev
+end
+
+# DND-508: the agents are discovered from git (tracked plus untracked
+# first-party), never globbed from the filesystem.
+def discovery_cases(root)
+  ok = true
+  fail_case = ->(msg) { warn "self-test: FAIL — #{msg}"; ok = false }
+  agents_fixture_repo(root)
+  dir = File.join(root, "ai", "agents")
+  File.write(File.join(dir, "athena-ten.md"), "line\n" * 10)
+  system("git", "-C", root, "add", "-A", out: File::NULL, err: File::NULL)
+
+  # An ignored scratch copy does not skew the check.
+  File.write(File.join(root, ".git", "info", "exclude"), "athena-scratch*\n")
+  File.write(File.join(dir, "athena-scratch.md"), "line\n" * 900)
+  names = rendered_agents(root).map(&:first)
+  fail_case.call("an ignored scratch agent was counted: #{names.inspect}") if names.include?("scratch")
+  fail_case.call("the tracked agent was not counted: #{names.inspect}") unless names.include?("ten")
+
+  # A NEW untracked agent is first-party: it is counted, and fails unbudgeted.
+  File.write(File.join(dir, "athena-new.md"), "line\n" * 3)
+  _o, missing = evaluate(rendered_agents(root), { "ten" => 10 })
+  fail_case.call("a new untracked agent was not flagged as missing a budget") unless missing.map(&:first) == ["new"]
+
+  # Empty discovery, and a failed one, are ERRORS.
+  empty = File.join(root, "empty")
+  agents_fixture_repo(empty)
+  File.write(File.join(empty, "README"), "no agents\n")
+  rc = quietly { run_check(root: empty) }
+  fail_case.call("an empty ai/agents discovery did not fail (rc=#{rc})") unless rc == 1
+  not_git = File.join(root, "not-git")
+  FileUtils.mkdir_p(File.join(not_git, "ai", "agents"))
+  File.write(File.join(not_git, "ai", "agents", "athena-ten.md"), "line\n")
+  rc = quietly { run_check(root: not_git) }
+  fail_case.call("a discovery git could not answer did not fail (rc=#{rc})") unless rc == 1
+  ok
 end
 
 # Source text for a fixture copy of this file carrying a given BUDGETS table.
@@ -580,18 +651,19 @@ end
 
 def run_self_test
   dir = File.join(Dir.tmpdir, "check-agent-size-selftest-#{Process.pid}")
-  agents_dir = File.join(dir, "agents")
-  FileUtils.mkdir_p(agents_dir)
+  agents_root = File.join(dir, "agents-repo")
+  agents_fixture_repo(agents_root)
+  agents_dir = File.join(agents_root, "ai", "agents")
   ok = true
   begin
     # A fixture agent of exactly 10 lines.
     ten = File.join(agents_dir, "athena-ten.md")
     File.write(ten, Array.new(10) { "line" }.join("\n") + "\n")
 
-    over  = evaluate(rendered_agents(agents_dir), { "ten" => 9 })[0]
-    under = evaluate(rendered_agents(agents_dir), { "ten" => 11 })[0]
-    exact = evaluate(rendered_agents(agents_dir), { "ten" => 10 })[0]
-    _o, missing = evaluate(rendered_agents(agents_dir), {})
+    over  = evaluate(rendered_agents(agents_root), { "ten" => 9 })[0]
+    under = evaluate(rendered_agents(agents_root), { "ten" => 11 })[0]
+    exact = evaluate(rendered_agents(agents_root), { "ten" => 10 })[0]
+    _o, missing = evaluate(rendered_agents(agents_root), {})
 
     if over.empty?
       warn "self-test: FAIL — a 10-line agent against budget 9 was NOT flagged as over"; ok = false
@@ -609,7 +681,7 @@ def run_self_test
     # HEADROOM REPORTER. Asserted as a real red/green flip on the boundary, not
     # merely "it returns something": the case that matters is an EXHAUSTED
     # budget, which passes evaluate() and so is invisible to every case above.
-    ten_agents = rendered_agents(agents_dir)
+    ten_agents = rendered_agents(agents_root)
     zero = exhausted(ten_agents, { "ten" => 10 }, 10)
     unless zero.map { |n, c, b, l| [n, c, b, l] } == [["ten", 10, 10, 0]]
       warn "self-test: FAIL — a 10-line agent at budget 10 was not reported as ZERO headroom"; ok = false
@@ -637,6 +709,7 @@ def run_self_test
     end
 
     ok = false unless ratchet_cases(File.join(dir, "repo"))
+    ok = false unless discovery_cases(File.join(dir, "disc"))
   ensure
     FileUtils.rm_rf(dir)
   end
