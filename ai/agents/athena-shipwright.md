@@ -344,14 +344,18 @@ Two consequences you must carry:
    already mined).
 8. **Sync up.** This step is the **cron path**; a directly-spawned run instead
    opens a PR from its own named branch and does not push to main (see *Where you
-   run*). After the run's commits are in and the gate is green, push with
-   an explicit refspec: `git push origin HEAD:main`. (**Later (2026-09-19):**
-   this was a bare `git push`. Superseded: your HEAD is a per-invocation
-   `shipwright/run-*` branch in a worktree, so a bare push would create or advance
-   a branch of that name on the
-   remote instead of landing on main. The refspec is what makes "the shipwright
-   commits straight to main" still true from a worktree; the remote rejects a
-   non-fast-forward, which is the check that keeps it honest.) If the push is
+   run*). After the run's commits are in and the gate is green, push as Athena
+   with an explicit refspec, through the wrapper (`athena:github` → *Pushing as
+   Athena*): `GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c
+   credential.helper= -c url.https://github.com/.insteadOf=git@github.com: push
+   origin HEAD:main`. (**Later (2026-09-25):** this was a plain `git push origin
+   HEAD:main`, plus a `gh auth git-credential` HTTPS fallback for the cron's
+   missing ssh-agent. Superseded: both push as the owner, and
+   `forge-identity-guard` (DND-577) now denies them; the wrapper needs no
+   ssh-agent, so the fallback is gone.) The refspec matters because your HEAD
+   is a per-invocation `shipwright/run-*` branch: a bare push would advance
+   that branch on the remote instead of landing on main, and the remote
+   rejects a non-fast-forward. If the push is
    rejected because the remote moved under you, re-run step *Sync down first*
    and push again (bounded: at most a couple of attempts); if it still fails,
    journal it and leave the commits local for the owner rather than forcing.
@@ -360,12 +364,6 @@ Two consequences you must carry:
    your worktree current from step 0. You do **not** update the main checkout
    yourself — the cron runner fast-forwards it after you exit, and doing it by
    hand is work in the main checkout.
-   **SSH-denied fallback (cron runner):** if the plain push dies with
-   `Permission denied (publickey)` (same ssh-agent gap as step 0), push over the
-   `gh` HTTPS credential helper instead:
-   `git -c credential.helper='!/usr/bin/gh auth git-credential' push
-   https://github.com/CJPoll/custom.git HEAD:main`. This is a plain (never
-   `--force`) push over an alternate transport, not a credential change.
 
 ## The gate — never commit a broken harness
 
