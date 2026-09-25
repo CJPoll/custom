@@ -1,7 +1,7 @@
 # Actions block
 
 Slack doc: <https://docs.slack.dev/reference/block-kit/blocks/actions-block>
-(verified 2026-09-24). Surfaces: messages, modals, Home tabs.
+(verified 2026-09-25). Surfaces: messages, modals, Home tabs.
 
 Holds interactive elements in a row. This is where a question's answer buttons
 go.
@@ -28,7 +28,7 @@ go.
 ## Limits
 
 - `elements`: at most **25**. `blocks.validate` rejects 26 with
-  `max_items` (probed 2026-09-24).
+  `max_items` (probed 2026-09-25).
 - `block_id`: at most 255 characters, unique per message and per revision.
 - Each element's `action_id` should be unique within the block.
 

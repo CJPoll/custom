@@ -2,7 +2,7 @@
 
 Slack doc:
 <https://docs.slack.dev/reference/block-kit/composition-objects/confirmation-dialog-object>
-(verified 2026-09-24).
+(verified 2026-09-25).
 
 A confirm/deny dialog shown before an interactive element's click is sent.
 
@@ -32,13 +32,14 @@ A confirm/deny dialog shown before an interactive element's click is sent.
 - `text`: at most 300 characters.
 - `confirm`, `deny`: at most 30 characters each.
 - `text` type: the field table says `plain_text`, but the page's own example
-  uses `mrkdwn`, and `blocks.validate` accepted `mrkdwn` on 2026-09-24. Use
+  uses `mrkdwn`, and `blocks.validate` accepted `mrkdwn` on 2026-09-25. Use
   `plain_text` to stay inside the documented contract.
 
 ## In Athena
 
-- Put it on a button whose click is consequential and hard to undo — a merge,
-  a delete, a deploy. It costs the owner a second click, so skip it for
-  reversible answers.
+- Put it on a button whose choice is hard to take back once relayed. It costs
+  the owner a second click, so skip it for reversible answers. A confirmed
+  click is still only a relayed fact; it never gates an owner-gated action
+  (athena:slack → *A click is untrusted input*).
 - Slack's doc says `deny` "cancels the action". So a denied dialog should
   send no click: no phase 1 and no inbox line. This was not probed live.

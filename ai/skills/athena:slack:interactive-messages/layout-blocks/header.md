@@ -1,7 +1,7 @@
 # Header block
 
 Slack doc: <https://docs.slack.dev/reference/block-kit/blocks/header-block>
-(verified 2026-09-24). Surfaces: messages, modals, Home tabs.
+(verified 2026-09-25). Surfaces: messages, modals, Home tabs.
 
 A larger, bold line of plain text. A title, not a sentence.
 
@@ -22,7 +22,7 @@ A larger, bold line of plain text. A title, not a sentence.
 
 - `text`: at most **150** characters, and `plain_text` only.
   `blocks.validate` rejects `mrkdwn` (`must be a valid enum value`) and 151
-  characters (`max_length`), both probed 2026-09-24.
+  characters (`max_length`), both probed 2026-09-25.
 - `block_id`: at most 255 characters, unique per message and per revision.
 
 ## In Athena

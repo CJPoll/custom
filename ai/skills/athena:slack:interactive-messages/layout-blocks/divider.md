@@ -1,7 +1,7 @@
 # Divider block
 
 Slack doc: <https://docs.slack.dev/reference/block-kit/blocks/divider-block>
-(verified 2026-09-24). Surfaces: messages, modals, Home tabs.
+(verified 2026-09-25). Surfaces: messages, modals, Home tabs.
 
 A horizontal rule.
 

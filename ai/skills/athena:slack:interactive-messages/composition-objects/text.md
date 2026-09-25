@@ -2,7 +2,7 @@
 
 Slack doc:
 <https://docs.slack.dev/reference/block-kit/composition-objects/text-object>
-(verified 2026-09-24).
+(verified 2026-09-25).
 
 Every piece of text inside a block or element.
 

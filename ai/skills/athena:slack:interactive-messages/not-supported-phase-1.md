@@ -6,8 +6,9 @@ interactive element is **refused server-side**, by type, before any Slack call
 
 ## Why
 
-The server stamps a signed return address into each interactive element's
-`value`, and the click comes back to the inbox that address names.
+The server stamps a signed return address into each button's `value`, and
+the click comes back to the inbox that address names. No other element can
+carry the stamp:
 
 - **Option values are too short.** Slack caps an option `value` at 150
   characters (option object:
@@ -18,6 +19,10 @@ The server stamps a signed return address into each interactive element's
 
 An unstamped control cannot be routed, so the server refuses it rather than
 send a control whose click would go nowhere.
+
+The contract home for the stamp is `ai/contracts/athena-events.md` →
+*Machine↔owner API binding and the outbound return-address dual*. Its
+"buttons only" amendment is DND-519, not yet landed.
 
 ## Refused elements
 

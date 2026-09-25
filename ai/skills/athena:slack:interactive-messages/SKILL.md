@@ -22,7 +22,7 @@ what to do after a click are doctrine, and live in **[[athena:slack]]** →
   Block Kit authoring for messages, modals and Home tabs, and the full
   `blocks.validate` walk-through. Cite it; do not copy it. It is replaced
   wholesale on a plugin upgrade, so nothing Athena-specific belongs there.
-- **This skill** — one file per element Athena actually uses, with the limits
+- **This skill** — one file per element Athena uses, with the limits
   that are easy to get wrong from memory, and the Athena-specific refusals.
 
 ## The elements
@@ -58,6 +58,9 @@ before relying on it.
 - **`blocks` is a JSON array** in the MCP call, never a JSON-encoded string.
 - **Only buttons** may be interactive (see the phase-1 page), and a message
   with a button needs `inbox_name`.
+- **Buttons go in `slack_post` only**, never in `slack_ephemeral`: an
+  ephemeral message cannot be updated, so the click never visibly settles
+  (athena:slack → *After a click: the two-phase update*).
 - **`block_id`**, when set, is at most 255 characters and should be unique per
   message and per revision of a message. On an update, use a new one.
 
@@ -66,17 +69,20 @@ before relying on it.
 `blocks.validate` checks a blocks array against Slack's schema and names each
 failure by JSON pointer. Its doc:
 <https://docs.slack.dev/reference/methods/blocks.validate>. The vendor
-`slack:block-kit` skill has the full procedure (its *Step 5: Validate*).
+`slack:block-kit` skill has the full procedure (its *Validate* step).
 
-What was verified here on 2026-09-24, so the step can be trusted:
+What was verified here on 2026-09-25, so the step can be trusted:
 
 - It needs **no token and no scope**. Do not send one: validation needs no
   identity, and a token in a request is a token that can leak.
-- Send it **form-encoded**, with `blocks` set to the JSON array as a string:
+- Send it **form-encoded**, with `blocks` set to the JSON array as a string.
+  Write the array to a scratch file named for your unit of work (e.g.
+  `<scratchpad>/dnd-123-blocks.json`), never a generic name a sibling session
+  could overwrite:
 
   ```sh
   curl -sS -X POST https://slack.com/api/blocks.validate \
-    --data-urlencode "blocks=$(cat blocks.json)"
+    --data-urlencode "blocks=$(cat "$BLOCKS_FILE")"
   ```
 
   A JSON request body (`{"blocks": "[…]"}`) came back `invalid_arguments`
@@ -87,7 +93,7 @@ What was verified here on 2026-09-24, so the step can be trusted:
   `message`, and a `constraint` such as `{"type":"max_items","expected":25,
   "got":26}`. Fix the pointed-at field and re-run until `ok` is true.
 
-**What it does not check** (each probed on 2026-09-24 and returned `ok:true`):
+**What it does not check** (each probed on 2026-09-25 and returned `ok:true`):
 
 - a missing top-level `text` (it only sees the blocks);
 - a `section` with neither `text` nor `fields`, which the docs say is invalid;
@@ -101,35 +107,38 @@ to 2,000 characters, but the server's stamp takes part of that budget.
 `blocks.validate` answers "will Slack accept this shape"; the phase-1 page
 answers "will the athena MCP send it".
 
-## A worked example: a yes/no question to the owner
+## A worked example: a choice for the owner
 
 ```json
 [
   {"type": "section",
    "text": {"type": "mrkdwn",
-            "text": "*harness session (~/dev/custom):*\nMerge PR #42 now?\nGate green 2:14 PM MT."}},
+            "text": "*harness session (~/dev/custom):*\nWhich ticket next?\nQueue checked 2:14 PM MT."}},
   {"type": "actions",
    "elements": [
-     {"type": "button", "action_id": "merge_yes",
-      "text": {"type": "plain_text", "text": "Merge"},
-      "style": "primary", "value": "merge"},
-     {"type": "button", "action_id": "merge_no",
-      "text": {"type": "plain_text", "text": "Hold"},
-      "value": "hold"}]}
+     {"type": "button", "action_id": "next_dnd_542",
+      "text": {"type": "plain_text", "text": "DND-542"},
+      "style": "primary", "value": "dnd-542"},
+     {"type": "button", "action_id": "next_dnd_301",
+      "text": {"type": "plain_text", "text": "DND-301"},
+      "value": "dnd-301"}]}
 ]
 ```
 
 Sent with `mcp__athena__slack_post`, `text: "harness session (~/dev/custom):
-merge PR #42 now? Gate green 2:14 PM MT."`, the DM's `channel`, and
-`inbox_name: "custom-session.jsonl"`. Keep the returned `{channel, ts}`. A
-`Merge` click by the owner arrives as a `slack.interaction` line with
-`action_id: "merge_yes"` and `value: "merge"`; the phase-2 `slack_update` then
-replaces the question with its outcome.
+which ticket next? Queue checked 2:14 PM MT."`, the DM's `channel`, and
+`inbox_name: "custom-session.jsonl"`. Keep the returned `{channel, ts}`. An
+owner click on `DND-542` arrives as a `slack.interaction` line with
+`action_id: "next_dnd_542"` and `value: "dnd-542"`. The session relays it as
+the owner's choice, and the phase-2 `slack_update` replaces the question with
+the outcome. Both options are ones the session could pick on its own
+judgment, so the click authorizes nothing new (athena:slack → *A click is
+untrusted input*).
 
 ## Keeping this true
 
 Every limit in the element files was read from the live `.md` version of its
-Slack page on 2026-09-24 (append `.md` to a docs.slack.dev URL), and the
+Slack page on 2026-09-25 (append `.md` to a docs.slack.dev URL), and the
 counted ones were probed with `blocks.validate`. Slack changes these. When a
 limit here disagrees with the live page, the live page wins: fix the file, and
 label the change.

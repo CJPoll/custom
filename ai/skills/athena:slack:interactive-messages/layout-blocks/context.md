@@ -1,7 +1,7 @@
 # Context block
 
 Slack doc: <https://docs.slack.dev/reference/block-kit/blocks/context-block>
-(verified 2026-09-24). Surfaces: messages, modals, Home tabs.
+(verified 2026-09-25). Surfaces: messages, modals, Home tabs.
 
 Small, muted text and images. For metadata, not for the question.
 

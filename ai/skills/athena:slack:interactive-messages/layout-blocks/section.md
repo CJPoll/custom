@@ -1,7 +1,7 @@
 # Section block
 
 Slack doc: <https://docs.slack.dev/reference/block-kit/blocks/section-block>
-(verified 2026-09-24). Surfaces: messages, modals, Home tabs.
+(verified 2026-09-25). Surfaces: messages, modals, Home tabs.
 
 Displays text, optionally beside one element. The body of most questions.
 
@@ -34,7 +34,7 @@ Displays text, optionally beside one element. The body of most questions.
 - `fields`: at most 10 items, each at most 2,000 characters.
 - `block_id`: at most 255 characters, unique per message and per revision.
 - Give `text` or `fields`. `blocks.validate` accepted a section with neither on
-  2026-09-24, so the docs are the only guard here.
+  2026-09-25, so the docs are the only guard here.
 
 ## In Athena
 
