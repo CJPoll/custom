@@ -1,6 +1,6 @@
 ---
 name: athena:github
-description: Act on GitHub as Athena's own App identity (athena-harness[bot]) via the gh-athena wrapper — PR create/comment/review, Actions-checks watching, and merges (gh pr merge --squash --auto, gated by branch protection). The GitHub-forge alternative to athena:gitlab, used when the repo's remote is github.com; GitLab stays Athena's default vocabulary. Reads stay on plain gh. Use whenever a GitHub WRITE should be authored by the agent.
+description: Act on GitHub as Athena's own App identity (athena-harness[bot]) via the gh-athena wrapper — PR create/comment/review, Actions-checks watching, and merges (gh-athena pr merge --squash --match-head-commit <sha>; the wrapper refuses a merge whose pinned head is not all green, and refuses --auto where no required checks gate it). The GitHub-forge alternative to athena:gitlab, used when the repo's remote is github.com; GitLab stays Athena's default vocabulary. Reads stay on plain gh. Use whenever a GitHub WRITE should be authored by the agent.
 ---
 
 # athena:github
@@ -56,7 +56,7 @@ arguments as `gh`, plus a `git` passthrough for authenticated pushes. Auth uses
 ```sh
 ~/dev/custom/ai/bin/gh-athena pr create --fill --base main
 ~/dev/custom/ai/bin/gh-athena pr comment 42 --body "…"
-~/dev/custom/ai/bin/gh-athena pr merge 42 --squash --auto
+~/dev/custom/ai/bin/gh-athena pr merge 42 --squash --match-head-commit <head-sha>
 ~/dev/custom/ai/bin/gh-athena --check          # verify auth + print the reachable installation
 ```
 
@@ -177,8 +177,8 @@ GitLab terms are primary; reach for the GitHub column only under this skill.
 | `glab mr create --fill` | `gh-athena pr create --fill --base <target>` |
 | `glab mr update --target-branch <b>` (retarget) | `gh-athena pr edit <n> --base <b>` |
 | one **pipeline**; `glab ci status` / poll `.../pipelines/<id>` | Actions **checks** (per-workflow check-runs, no single pipeline object); `gh pr checks <n> --watch` |
-| `detailed_merge_status == mergeable` | **branch protection**: required checks + required approvals |
-| **merge train** (`POST merge_trains/...`, boarding) | `gh-athena pr merge <n> --squash --auto` (no train/queue — see Merging) |
+| `detailed_merge_status == mergeable` | every check on the exact head green, asserted by `gh-athena` itself (branch protection only where the plan has it) |
+| **merge train** (`POST merge_trains/...`, boarding) | `gh-athena pr merge <n> --squash --match-head-commit <sha>` (no train/queue — see Merging) |
 | `Auto-Deploy` label + `release:watch` job pace the deploy | the repo's own post-merge deploy workflow (no label convention) |
 
 ## Opening and retargeting a PR
@@ -246,21 +246,36 @@ There is **no merge train and no merge queue** on Athena's GitHub repos (owner
 decision). Merge with:
 
 ```sh
-~/dev/custom/ai/bin/gh-athena pr merge <n> --squash --auto
+gh pr checks <n> --watch                         # block until every check concludes
+gh pr view <n> --json headRefOid -q .headRefOid  # the exact head you checked
+~/dev/custom/ai/bin/gh-athena pr merge <n> --squash --match-head-commit <sha>
 ```
 
 - **`--squash` is the default merge method.** The real method is a per-repo
   fact — resolve it from the consumer repo's CLAUDE.md if it states one, and
   default to `--squash` otherwise.
-- **`--auto`** lands the PR the moment its required checks and approvals pass —
-  the closest analog to GitLab boarding, but the platform holds and lands it;
-  there is nothing to re-POST.
-- **Branch protection** (required checks + required approvals) is the gate
-  **where it exists**. A `gh pr merge` that is refused for unmet protection is
-  **expected, not an auth error** — do not retry it as an auth failure; surface
-  what protection is unmet. On a free private repo there is no protection at
-  all, and then `--auto` gates on nothing — see *Expected refusals* below before
-  merging on such a repo.
+- **`gh-athena` enforces a merge floor itself (DND-609).** Before gh runs, the
+  wrapper reads the PR and REFUSES (exit 3, `Fix:`) a merge unless it pins the
+  head with `--match-head-commit <sha>`, that sha IS the PR's head, and every
+  check reported on it concluded green (CheckRun `SUCCESS`/`NEUTRAL`/`SKIPPED`,
+  commit status `SUCCESS`). Zero reported checks is refused: no evidence is not
+  green. The pin also makes GitHub refuse the merge if the head moves after the
+  read. The mechanism and its named residuals (`gh api` merge calls, gh
+  extensions, a workflow that never reported) are in `ai/lib/gh-merge-guard.sh`.
+- **`--auto` is refused wherever no required checks gate it.** `--auto` waits
+  only on the base branch's **required** checks. The wrapper asks branch
+  protection and rulesets for that set, and refuses `--auto` unless it can READ
+  at least one required check. A 403, a 404, an empty set, or a failed lookup
+  all read as "could not establish a gate". On gen_saas both lookups 403 (free
+  private plan), and `--auto` merged PR #362 while its CI was still queued
+  (2026-09-25). So on Athena's repos today `--auto` is refused; merge with the
+  pinned form above. The App cannot read classic protection at all (no
+  Administration permission), so only a **ruleset** requiring checks can let
+  `--auto` pass.
+- **A refusal from the wrapper or from GitHub is expected, not an auth error.**
+  Do not retry it as an auth failure. Read its `Fix:` and surface what is unmet.
+- **Dry run:** `GH_ATHENA_MERGE_DRY_RUN=1 gh-athena pr merge …` runs the guard
+  (reads only) and prints the command instead of running it.
 - **Deploy** is whatever the repo ships (typically a post-merge Actions
   workflow that fires automatically on merge to the default branch). There is
   **no `Auto-Deploy` label and no `release:watch` job** — watch the deploy run
@@ -282,23 +297,20 @@ each is recorded with the response it actually returns.
 | `gh-athena run rerun <id>` (`--failed` too) | `Resource not accessible by integration` | The Athena App has no `actions:write`. Permanent; no token refresh or `forge-preflight` clears it. | Trigger a **fresh run with a branch push** (see *Pushing as Athena*) — Athena's own path, and it re-runs against current code rather than replaying a stale SHA. A literal re-run of that same run needs the **owner's** `gh` (plain, not `gh-athena`), which makes it an owner step to surface, not a retry to attempt. |
 | `gh api repos/<owner>/<repo>/branches/<b>/protection` | HTTP 403 `Upgrade to GitHub Pro` | This repo is on a **free private** plan, where branch protection does not exist. | Treat the merge bar as entirely your own — see below. |
 
-**The second one changes what `--auto` means, so read it before merging.** The
-Merging section above calls branch protection "the gate" and says `--auto` lands
-the PR once required checks and approvals pass. With no protection, the required
-set is **empty**: there is nothing for `--auto` to wait on, and a **red PR is
-mechanically mergeable**. Measured 2026-09-20 on `gen_saas` (probe P9) and again
-in the same run on `custom`.
+**The second one is why `--auto` is refused here.** With no protection, the
+required set is **empty**: there is nothing for `--auto` to wait on, and a **red
+PR is mechanically mergeable**. Measured 2026-09-20 on `gen_saas` (probe P9) and
+again in the same run on `custom`; on 2026-09-25 `--auto` merged gen_saas PR
+#362 while its CI was still queued. `gh-athena` now refuses `--auto` on such a
+repo, and refuses any merge whose pinned head is not all green (see Merging).
 
-So on a repo that answers 403 there, the platform is enforcing nothing and the
-admiral's own bar is the only thing standing between a red pipeline and `main`.
-That bar does not relax to match — it **tightens**, because nothing else is
-checking:
+The wrapper's check is a floor, not the whole bar. It sees only checks that
+have **reported** on the head:
 
-- Read the check-run conclusions yourself and confirm every required-by-policy
-  check is genuinely green before merging. Do not infer green from a `gh pr
-  merge` that succeeded; it would have succeeded either way.
-- `--auto` on such a repo may land the PR **immediately**. If you are not ready
-  for it to land this second, do not pass `--auto`.
+- Before merging, confirm every check your policy requires has reported and is
+  green (`gh pr checks <n>`). A workflow that never queued a run is invisible to
+  the wrapper.
+- Do not infer green from a merge that succeeded. Read the checks.
 - **"No lock on the door" is not consent.** Discovering that nothing blocks a
   merge is never the reason to make one — and reaching for the owner's admin
   token to force past a bar you set is out of scope regardless.

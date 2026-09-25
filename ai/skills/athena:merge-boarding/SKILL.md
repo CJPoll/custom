@@ -403,9 +403,14 @@ car of a batch you intend to deploy, assert at least the tail MR carries
 ## GitHub path (no merge train)
 
 On a `github.com` remote there is **no merge train or queue**: merge with
-`~/dev/custom/ai/bin/gh-athena pr merge <n> --squash --auto` (branch protection
-is the gate, and a refusal for unmet protection is expected, not an auth error),
-and the deploy is the repo's own post-merge Actions workflow — no `Auto-Deploy`
+`~/dev/custom/ai/bin/gh-athena pr merge <n> --squash --match-head-commit <sha>`,
+after `gh pr checks <n> --watch` shows every check green on that exact head. The
+wrapper is the floor that fires (DND-609): it REFUSES a merge whose pinned head
+is not all green, and REFUSES `--auto` wherever it cannot read a non-empty
+required-checks set. Athena's repos have no branch protection (free private
+plan), so `--auto` there would merge immediately; it is refused, and branch
+protection is NOT the gate. A refusal is expected, not an auth error: follow its
+`Fix:`. The deploy is the repo's own post-merge Actions workflow — no `Auto-Deploy`
 label; watch it with `gh run watch <run-id>`. See [[athena:github]]; GitLab
 forge mechanics are in [[athena:gitlab]].
 

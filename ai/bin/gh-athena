@@ -118,5 +118,25 @@ if [ "${1:-}" = "git" ]; then
   fg_git_exec x-access-token "$TOKEN" "$@"
 fi
 
+# ---- The merge guard (DND-609) ---------------------------------------------
+# `pr merge --auto` is REFUSED unless the PR's base branch has a READABLE,
+# non-empty required-checks set (on a free private repo it has none, and --auto
+# merges immediately). A non-auto `pr merge` is REFUSED unless it pins the head
+# with --match-head-commit <sha> and every check on that head is green. The
+# mechanism, its coverage and its named residuals live in ai/lib/gh-merge-guard.sh.
+#
+# Test seam: GH_ATHENA_MERGE_DRY_RUN=1 runs the guard (reads only) and then
+# prints the command instead of exec'ing gh, for ANY command.
+
 TOKEN="$(get_token)"
-exec env GH_TOKEN="$TOKEN" GH_HOST=github.com gh "$@"
+export GH_TOKEN="$TOKEN" GH_HOST=github.com
+# shellcheck source=../lib/gh-merge-guard.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/gh-merge-guard.sh" \
+  || die "cannot load ai/lib/gh-merge-guard.sh. Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
+GMG_TOOL=gh-athena
+gmg_guard "$@"
+if [ -n "${GH_ATHENA_MERGE_DRY_RUN:-}" ]; then
+  printf 'gh-athena: dry-run: would exec gh %s\n' "$*"
+  exit 0
+fi
+exec gh "$@"
