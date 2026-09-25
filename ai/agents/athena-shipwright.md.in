@@ -382,10 +382,10 @@ so the list was stale from that moment and nothing could have caught it.
 - `ai/bin/check-guard-messages` — every first-party executable/lib is classified
   in `ai/guard-classification.tsv`, and every guard emits an actionable `Fix:`
   message on failure (LLM-facing errors); a new script must be classified there.
-- `ai/bin/check-bin-help` (+ its `--self-test`) — every tracked `ai/bin/`
-  executable answers `--help` on stdout, exit 0, doing nothing else; one with no
-  `--help` branch runs its DEFAULT action (measured: a model call, an agent
-  rewrite, a minted token). Detail + `EXEMPT` rule: the check's own header.
+- `ai/bin/check-bin-help` (+ its `--self-test`) — every harness tool (scope:
+  `ai/lib/harness_tools.rb`) answers `--help` on stdout, exit 0, doing nothing
+  else; one with no `--help` branch runs its DEFAULT action (measured: a model
+  call, an agent rewrite, a minted token). Detail + `EXEMPT`: the check's header.
 - `ai/bin/check-tool-risk` (+ its `--self-test`) — every tool the harness can
   call carries a risk annotation in the registry, and no annotated tool has been
   added or renamed without one. Pairs with the `workflow-phase-guard` hook above,

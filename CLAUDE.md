@@ -113,9 +113,17 @@ sudo ln -sf ~/dev/custom/system-files/greetd-config.toml /etc/greetd/config.toml
 - Use clear, descriptive names
 - Include usage information in the script
 - Handle errors gracefully with meaningful exit codes
-- Every executable under `ai/bin/` MUST answer `--help` on **stdout** with
-  **exit 0**, doing nothing else — no model call, no network, no write,
-  anywhere. `ai/bin/check-bin-help` enforces this in the shipwright gate.
+- Every harness tool MUST answer `--help` on **stdout** with **exit 0**, doing
+  nothing else — no model call, no network, no write, anywhere. A harness tool
+  is a first-party executable that `ai/lib/harness_tools.rb` scopes in:
+  `ai/bin/*`, `ai/skills/*/bin/*`, `ai/skills/*/scripts/*`, and any future
+  executable under `ai/`. That file names each directory it leaves out, with
+  the reason. `ai/bin/check-bin-help` enforces this in the shipwright gate.
+
+  **Later (2026-09-24):** this read "Every executable under `ai/bin/`", and the
+  check globbed `ai/bin` only. Superseded by the harness-tool scope (DND-508).
+  The 13 `athena:slack` bins had no `--help` branch and nothing probed them:
+  `post --help` took `--help` as its channel and read stdin as the message.
 
   **Later (2026-09-21):** this read "Support `--help` where appropriate."
   Superseded by the MUST above. "Where appropriate" let a tool ship with no

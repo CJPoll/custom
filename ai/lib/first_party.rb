@@ -3,10 +3,13 @@
 # ai/lib/first_party.rb — WHICH FILES ARE FIRST-PARTY CODE in this repo.
 #
 # One definition, meant for every check that needs "every first-party
-# executable": ai/bin/check-guard-messages (DND-218, which classifies them) and
+# executable": ai/bin/check-guard-messages (DND-218, which classifies them),
 # ai/bin/harness-gate (DND-507, which asserts every inline --self-test they
-# define is run). Two checks that each keep their own idea of the scope drift
-# apart silently: one of them stops reading a directory, and prints OK anyway.
+# define is run), and, through ai/lib/harness_tools.rb, ai/bin/check-bin-help
+# and ai/bin/check-tool-risk (DND-508). ai/bin/check-agent-size reads its
+# rendered agents through `files` (DND-508). Two checks that each keep their
+# own idea of the scope drift apart silently: one of them stops reading a
+# directory, and prints OK anyway.
 # ai/bin/check-pipefail-grep (DND-509) reuses only `git_ls`: it scans every
 # TRACKED shell file, and its shell test is by content, not by this rule.
 #
@@ -90,13 +93,35 @@ module FirstParty
     File.executable?(abs) || lib_path?(rel) || hook_script?(rel)
   end
 
+  # [first_party, third_party]: the paths the rule admits, and the untracked
+  # third-party paths it set aside, both unfiltered by kind. `pathspecs`
+  # narrows the listing (e.g. "ai/agents"); none means the whole tree.
+  # Gitignored untracked files are never listed: a scratch file the repo
+  # ignores is not first-party code.
+  def listed(root, *pathspecs)
+    spec = pathspecs.empty? ? [] : ["--", *pathspecs]
+    tracked = git_ls(root, "--cached", *spec)
+    untracked = git_ls(root, "--others", "--exclude-standard", *spec) - tracked
+    third_party, new_files = untracked.partition { |rel| third_party_path?(rel) }
+    [(tracked + new_files).uniq, third_party]
+  end
+
+  # Every first-party regular file (never a symlink) under `pathspecs`,
+  # sorted. For checks that judge files by name rather than by kind, such as
+  # ai/bin/check-agent-size's rendered agents.
+  def files(root, *pathspecs)
+    first_party, = listed(root, *pathspecs)
+    first_party.select do |rel|
+      abs = File.join(root, rel)
+      !File.symlink?(abs) && File.file?(abs)
+    end.sort
+  end
+
   # [found, skipped]: found is every first-party candidate, sorted; skipped is
   # every untracked third-party path that would otherwise have been one.
   def discover(root)
-    tracked = git_ls(root, "--cached")
-    untracked = git_ls(root, "--others", "--exclude-standard") - tracked
-    third_party, new_files = untracked.partition { |rel| third_party_path?(rel) }
-    found = (tracked + new_files).uniq.select { |rel| candidate?(root, rel) }.sort
+    first_party, third_party = listed(root)
+    found = first_party.select { |rel| candidate?(root, rel) }.sort
     [found, third_party.select { |rel| candidate?(root, rel) }.sort]
   end
 

@@ -1,8 +1,17 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 #
-# check-bin-help -- every executable under ai/bin/ MUST answer `--help` on
-# stdout, with exit 0, and do NOTHING else.
+# check-bin-help -- every harness tool MUST answer `--help` on stdout, with
+# exit 0, and do NOTHING else.
+#
+# WHICH TOOLS (DND-508): every first-party executable ai/lib/harness_tools.rb
+# scopes IN -- ai/bin/*, ai/skills/*/bin/*, ai/skills/*/scripts/*, and any
+# future executable under ai/. That file holds the scope rule and the reason for
+# each directory it leaves OUT (ai/hooks, scripts/, personal config). Until
+# DND-508 this check read `git ls-files ai/bin` only, so the 13 athena:slack
+# bins -- none of which had a --help branch, and one of which (`post --help`)
+# took "--help" as its channel and read stdin as the message -- were never
+# probed. An executable no scope rule covers FAILS here.
 #
 # WHY THIS EXISTS
 #
@@ -62,6 +71,7 @@
 require "open3"
 require "tmpdir"
 require "fileutils"
+require_relative "../lib/harness_tools"
 
 PROG = File.basename($PROGRAM_NAME)
 REPO = File.expand_path("../..", __dir__)
@@ -69,11 +79,12 @@ PROBE_TIMEOUT = 10
 
 USAGE = <<~TXT.freeze
   Usage:
-    ai/bin/check-bin-help              assert every tracked executable under
-                                       ai/bin/ answers --help on stdout with
-                                       exit 0 and no side effects
+    ai/bin/check-bin-help              assert every harness tool (the executables
+                                       ai/lib/harness_tools.rb scopes in: ai/bin,
+                                       ai/skills/*/bin, ...) answers --help on
+                                       stdout with exit 0 and no side effects
     ai/bin/check-bin-help --self-test  deterministic, hermetic suite (no model,
-                                       fixtures only -- never the live ai/bin/)
+                                       fixtures only -- never the live tools)
     ai/bin/check-bin-help --help       this text
 
   Exit 0 = all bins conform. Exit 1 = at least one does not (each named).
@@ -84,24 +95,37 @@ TXT
 # definition. This is also why the unrecognised-argument refusal that
 # critic-review now does is NOT generalised to every bin.
 #
-# An entry with an empty reason is red. An entry naming a file that does not
-# exist is red (a stale exemption hides a bin that stopped being exempt).
+# Keyed by repo-relative path: two skills can ship a bin of the same name.
+# An entry with an empty reason is red. An entry naming a file that is not a
+# discovered harness tool is red (a stale exemption hides a bin that stopped
+# being exempt).
 EXEMPT = {
-  "gh-athena"         => "passthrough wrapper: exec's gh \"$@\"; forwarding argv IS its contract, so --help means gh's own --help",
-  "glab-athena"       => "passthrough wrapper: exec's glab \"$@\"; forwarding argv IS its contract",
-  "notion-athena-mcp" => "passthrough wrapper: exec's the Notion MCP server; forwarding argv IS its contract",
+  "ai/bin/gh-athena"         => "passthrough wrapper: exec's gh \"$@\"; forwarding argv IS its contract, so --help means gh's own --help",
+  "ai/bin/glab-athena"       => "passthrough wrapper: exec's glab \"$@\"; forwarding argv IS its contract",
+  "ai/bin/notion-athena-mcp" => "passthrough wrapper: exec's the Notion MCP server; forwarding argv IS its contract",
 }.freeze
 
-# The bin list is a property of the COMMIT, not of whatever is lying around
-# in the checkout, so it comes from git -- same reasoning as harness-gate's
-# tracked-file filter. An untracked scratch script never becomes a blocking
-# gate entry.
-def tracked_bins(repo = REPO)
-  out, _, st = Open3.capture3("git", "-C", repo, "ls-files", "ai/bin")
-  raise "git ls-files failed in #{repo}" unless st.success?
-  out.lines.map(&:chomp).map { |rel| File.join(repo, rel) }
-     .select { |p| File.file?(p) && File.executable?(p) }
-     .sort
+# The tools to probe, as absolute paths: ai/lib/harness_tools.rb's in-scope
+# set. Discovery is git's, not a glob: an ignored scratch file is never a gate
+# entry, while a new untracked first-party tool is (it is about to be
+# committed). Raises FirstParty::MeasureError when discovery fails or is empty.
+def harness_executables(repo = REPO)
+  HarnessTools.discover(repo).tools.map { |rel| File.join(repo, rel) }
+end
+
+# Discover, scope, and probe. A discovery that cannot run or finds nothing is a
+# FAIL, never "0 bins, OK".
+def check_repo(repo = REPO, exempt: EXEMPT, quiet: false)
+  found = HarnessTools.discover(repo)
+rescue FirstParty::MeasureError => e
+  unless quiet
+    warn "#{PROG}: FAIL -- could not discover the harness tools: #{e.message}"
+    warn "  Fix: this repo always has harness tools, so an empty or failed discovery means the lookup broke, not that there is nothing to check. Run `git -C #{repo} ls-files ai/bin` and check the executable bits; see ai/lib/harness_tools.rb for the scope rule."
+  end
+  1
+else
+  run_check(found.tools.map { |rel| File.join(repo, rel) },
+            exempt: exempt, repo: repo, quiet: quiet, unscoped: found.unscoped)
 end
 
 def git_status(repo)
@@ -197,24 +221,29 @@ def probe_one(path, shim:, home:, cwd:, repo:)
   [true, nil]
 end
 
-def run_check(bins, exempt: EXEMPT, repo: REPO, quiet: false)
+def run_check(bins, exempt: EXEMPT, repo: REPO, quiet: false, unscoped: [])
   failures = []
+  rel_of = ->(path) { path.delete_prefix("#{repo}/") }
 
   # An exemption must be honest: a reason, and a file it still applies to.
-  exempt.each do |name, reason|
+  exempt.each do |rel, reason|
     if reason.to_s.strip.empty?
-      failures << [name, "EXEMPT entry has no reason. Every exemption states why the bin cannot answer --help."]
+      failures << [rel, "EXEMPT entry has no reason. Every exemption states why the bin cannot answer --help."]
     end
-    unless bins.any? { |b| File.basename(b) == name }
-      failures << [name, "EXEMPT entry names a bin that is not a tracked executable under ai/bin/. A stale exemption silently excuses nothing, or worse, excuses a future bin that reuses the name."]
+    unless bins.any? { |b| rel_of.call(b) == rel }
+      failures << [rel, "EXEMPT entry names a path that is not a discovered harness tool. A stale exemption silently excuses nothing, or worse, excuses a future bin that reuses the path."]
     end
+  end
+
+  unscoped.each do |rel|
+    failures << [rel, "no scope rule in ai/lib/harness_tools.rb covers this executable, so nothing decided whether it is a harness tool. Add a SCOPE entry for its directory: IN (it is probed here) or OUT with the reason."]
   end
 
   # A failed lookup must never look like an empty one: zero bins is an ERROR.
   if bins.empty?
     unless quiet
-      warn "#{PROG}: FAIL -- enumerated ZERO executables under ai/bin/."
-      warn "  Fix: this repo always has committed bins, so zero means the enumeration broke (not a clean checkout, or `git ls-files ai/bin` returned nothing), not that there is nothing to check. Run `git ls-files ai/bin` and check the executable bit."
+      warn "#{PROG}: FAIL -- enumerated ZERO harness tools."
+      warn "  Fix: this repo always has harness tools, so zero means the enumeration broke, not that there is nothing to check. Run `git ls-files ai/bin` and check the executable bit; see ai/lib/harness_tools.rb for the scope rule."
     end
     return 1
   end
@@ -223,16 +252,16 @@ def run_check(bins, exempt: EXEMPT, repo: REPO, quiet: false)
   Dir.mktmpdir("check-bin-help-") do |root|
     shim, home, cwd = build_sandbox(root)
     bins.each do |path|
-      name = File.basename(path)
-      next if exempt.key?(name)   # never executed
+      rel = rel_of.call(path)
+      next if exempt.key?(rel)   # never executed
       checked += 1
       ok, reason = probe_one(path, shim: shim, home: home, cwd: cwd, repo: repo)
-      failures << [name, reason] unless ok
+      failures << [rel, reason] unless ok
     end
   end
 
   if failures.empty?
-    puts "#{PROG}: OK — #{checked} bin(s) answer --help cheaply; #{exempt.size} exempt." unless quiet
+    puts "#{PROG}: OK — #{checked} harness tool(s) answer --help cheaply; #{exempt.size} exempt." unless quiet
     return 0
   end
 
@@ -241,13 +270,13 @@ def run_check(bins, exempt: EXEMPT, repo: REPO, quiet: false)
   warn "#{PROG}: FAIL — #{failures.size} problem(s):"
   failures.each { |name, reason| warn "  - #{name}: #{reason}" }
   warn ""
-  warn "  Fix: give each bin above a --help branch checked BEFORE every other flag, printing its usage to STDOUT and exiting 0 without doing anything else. Ruby: `if ARGV.include?(\"--help\") || ARGV.include?(\"-h\") then puts USAGE; exit 0 end`. POSIX sh: `case \"${1:-}\" in -h|--help) usage; exit 0 ;; esac`. A bin that genuinely cannot (a passthrough wrapper that forwards argv) goes in EXEMPT in #{PROG} with a reason."
+  warn "  Fix: give each bin above a --help branch checked BEFORE every other flag, printing its usage to STDOUT and exiting 0 without doing anything else. Ruby: `if ARGV.include?(\"--help\") || ARGV.include?(\"-h\") then puts USAGE; exit 0 end`. POSIX sh: `case \"${1:-}\" in -h|--help) usage; exit 0 ;; esac`. A bin that genuinely cannot (a passthrough wrapper that forwards argv) goes in EXEMPT in #{PROG}, keyed by its repo-relative path, with a reason. An unscoped executable needs a SCOPE entry in ai/lib/harness_tools.rb."
   1
 end
 
 # ---------------------------------------------------------------------------
 # Self-test: deterministic, model-free, hermetic. Fixtures only -- it never
-# probes the live ai/bin/.
+# probes the live harness tools.
 # ---------------------------------------------------------------------------
 
 def write_fixture(dir, name, body)
@@ -275,6 +304,64 @@ def probe_fixture(path, repo)
     ok = probe_one(path, shim: shim, home: home, cwd: cwd, repo: repo)
   end
   ok
+end
+
+def commit_fixtures(repo)
+  system("git", "-C", repo, "add", "-A", out: File::NULL, err: File::NULL)
+  system("git", "-C", repo, "-c", "commit.gpgsign=false", "commit", "-qm", "fixtures",
+         out: File::NULL, err: File::NULL)
+end
+
+# DND-508: WHICH bins are probed. Every harness tool from ai/lib/harness_tools.rb
+# (first-party discovery, scoped), not a glob of ai/bin.
+def discovery_cases(assert)
+  good = "#!/bin/sh\ncase \"${1:-}\" in --help) echo \"usage: $(basename \"$0\")\"; exit 0 ;; esac\nexit 0\n"
+
+  Dir.mktmpdir("check-bin-help-disc-") do |repo|
+    fixture_repo(repo)
+    bindir = File.join(repo, "ai", "bin")
+    write_fixture(bindir, "good-tool", good)
+    skilldir = File.join(repo, "ai", "skills", "athena:demo", "bin")
+    FileUtils.mkdir_p(skilldir)
+    bad = write_fixture(skilldir, "bad-help",
+                        "#!/bin/sh\ncase \"${1:-}\" in --help) echo 'usage: bad-help' >&2; exit 2 ;; esac\nexit 0\n")
+    commit_fixtures(repo)
+
+    # A skill bin with a bad --help is probed, and fails the check.
+    assert.call("skill bin is discovered", harness_executables(repo).include?(bad))
+    assert.call("skill bin with a bad --help fails the check",
+                check_repo(repo, exempt: {}, quiet: true) == 1)
+    FileUtils.rm_rf(File.join(repo, "ai", "skills"))
+    commit_fixtures(repo)
+    assert.call("clean discovered set passes", check_repo(repo, exempt: {}, quiet: true).zero?)
+
+    # An ignored scratch executable is not first-party; a NEW untracked one is.
+    File.write(File.join(repo, ".git", "info", "exclude"), "scratch-*\n")
+    scratch = write_fixture(bindir, "scratch-dnd", "#!/bin/sh\nexit 3\n")
+    assert.call("ignored scratch executable is not discovered",
+                !harness_executables(repo).include?(scratch))
+    assert.call("ignored scratch executable does not fail the check",
+                check_repo(repo, exempt: {}, quiet: true).zero?)
+    fresh = write_fixture(bindir, "fresh-tool", "#!/bin/sh\nexit 3\n")
+    assert.call("new untracked executable is discovered", harness_executables(repo).include?(fresh))
+    assert.call("new untracked executable without --help fails the check",
+                check_repo(repo, exempt: {}, quiet: true) == 1)
+    FileUtils.rm_f(fresh)
+
+    # An executable no scope rule covers fails: a new top-level directory of
+    # executables is a scope decision, not a silent pass.
+    FileUtils.mkdir_p(File.join(repo, "tools"))
+    write_fixture(File.join(repo, "tools"), "stray", good)
+    assert.call("unscoped executable fails the check", check_repo(repo, exempt: {}, quiet: true) == 1)
+  end
+
+  # Empty discovery is an ERROR, never a pass.
+  Dir.mktmpdir("check-bin-help-empty-") do |repo|
+    fixture_repo(repo)
+    File.write(File.join(repo, "README"), "no executables\n")
+    commit_fixtures(repo)
+    assert.call("empty discovery fails the check", check_repo(repo, exempt: {}, quiet: true) == 1)
+  end
 end
 
 def run_self_test
@@ -365,15 +452,15 @@ def run_self_test
 
     # 12: an EXEMPT bin is skipped AND never executed (sentinel again).
     FileUtils.rm_f(sentinel)
-    rc = run_check([no_help], exempt: { "no-help" => "fixture exemption" }, repo: repo, quiet: true)
+    rc = run_check([no_help], exempt: { "ai/bin/no-help" => "fixture exemption" }, repo: repo, quiet: true)
     assert.call("exempt bin passes", rc.zero?)
     assert.call("exempt bin never executed", !File.exist?(sentinel))
 
     # 13-14: dishonest exemptions are red.
     assert.call("empty-reason exemption fails",
-                run_check([good_sh], exempt: { "good-sh" => "  " }, repo: repo, quiet: true) == 1)
+                run_check([good_sh], exempt: { "ai/bin/good-sh" => "  " }, repo: repo, quiet: true) == 1)
     assert.call("stale exemption fails",
-                run_check([good_sh], exempt: { "gone-bin" => "reason" }, repo: repo, quiet: true) == 1)
+                run_check([good_sh], exempt: { "ai/bin/gone-bin" => "reason" }, repo: repo, quiet: true) == 1)
 
     # 15: an empty enumeration is an ERROR, never a pass.
     assert.call("empty enumeration fails",
@@ -395,6 +482,8 @@ def run_self_test
     assert.call("failure output carries Fix:", errtxt.include?("Fix:"))
   end
 
+  discovery_cases(assert)
+
   if ok
     puts "#{PROG}: self-test OK"
     0
@@ -411,4 +500,4 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   puts USAGE
   exit 0
 end
-exit(ARGV.include?("--self-test") ? run_self_test : run_check(tracked_bins))
+exit(ARGV.include?("--self-test") ? run_self_test : check_repo)
