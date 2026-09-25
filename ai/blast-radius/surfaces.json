@@ -57,8 +57,49 @@
         ".gitlab/ci/**",
         ".buildkite/**",
         ".circleci/**",
-        "Jenkinsfile"
-      ]
+        "Jenkinsfile",
+        ".github/actions/**",
+        "**/action.yml",
+        "**/action.yaml"
+      ],
+      "references": {
+        "evaluator": "ci-local-references-v1",
+        "comment": [
+          "DND-589 (the DND-422 class): the patterns above name the CI CONFIG files,",
+          "but merge-time CI also EXECUTES other repo files by relative path, and",
+          "those decide what a merge does just as much. Measured: gen_saas's",
+          "post-merge.yml runs .pkg/prod/bin/deploy-guard.sh (the guard that refuses",
+          "stale prod deploys) and ships .pkg/prod/docker-compose.production.yml;",
+          "walt_ui's .gitlab-ci.yml includes backend/.pkg/gitlab/terraform-aws.yml.",
+          "All read COLD, so editing them bypassed the owner stop.",
+          "",
+          "`.github/actions/**` and `**/action.y{a,}ml` are static: a local action is",
+          "deploy-automation wherever it lives. This key adds the DYNAMIC part: every",
+          "file named by path, at head, in a merge-time CI config -- a GitHub workflow",
+          "whose triggers fire on a default-branch merge (the same trigger_hit the",
+          "automation term uses) and every GitLab CI file (GitLab absence is not",
+          "provable) -- is a hit, and so is every file named by one of THOSE,",
+          "transitively. A `uses: ./dir` naming a local action pulls in its whole",
+          "directory (Dockerfile, entry point). Only paths that exist at head count,",
+          "so a word that merely looks like a path matches nothing.",
+          "",
+          "Bounds (each pinned by a self-test case, and each measured on walt_ui,",
+          "where the unbounded walk reached 372 files): only CI YAML, action",
+          "metadata and scripts are FOLLOWED (a data file a step reads is a hit, not",
+          "a source of further hits); YAML is read structurally, skipping subtrees",
+          "that select or cache files (`changes:`, `paths:`, `cache:` ...); script",
+          "comment lines are dropped; a bare name in a script resolves beside the",
+          "script, not at the repo root; `.md` is never a hit (documentation is not",
+          "executed). With them, gen_saas reads 12 files and walt_ui 61."
+        ],
+        "known_gaps": [
+          "Implicit build entry points are NOT followed: `make` reads Makefile, `mix`/`npm run` read mix.exs/package.json, `docker build .` reads Dockerfile, and none is named by path. They are the application's build definition, touched by every feature merge; gating them would gate every deploy. The captain's `Blast radius: IRREVERSIBLE` channel is their only cover.",
+          "A plain DIRECTORY named in CI (`cp -r .pkg/prod dest`, `cd apps/web`) is not expanded unless it holds an action.yml/action.yaml: expanding every named directory would gate every app change in a repo whose deploy `cd`s into the app.",
+          "A path an executed script names as DATA -- a grep pattern, an echo -- is a hit, since no lexical rule separates it from a path the script runs. This fails WIDE. Measured: walt_ui's backend/mix.lock is a hit because backend/bin/checks/self-test.sh greps CI for the string 'backend/mix.lock'.",
+          "A path built at runtime (a loop variable, string concatenation, an absolute runner path such as /home/runner/work/...) is not resolved.",
+          "pull_request_target, schedule and workflow_dispatch roots are exactly as covered as trigger_hit makes them (DND-590); this key widens with trigger_hit and never narrows it."
+        ]
+      }
     },
     {
       "class": "destructive-migration",

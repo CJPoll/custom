@@ -84,6 +84,7 @@ require "yaml"
 require "open3"
 require "tmpdir"
 require "fileutils"
+require "set"
 
 PROG = "blast-radius"
 
@@ -115,6 +116,11 @@ KNOWN_CONTENT_KEYS = %w[
   exempt_region region_def region_other_def executable_regions
   exclude_first match_line match_region
 ].freeze
+
+# DND-589: a surface may declare `references` -- files merge-time CI EXECUTES
+# by relative path are hits too (see ci_references).
+CI_REFERENCES_EVALUATOR = "ci-local-references-v1"
+KNOWN_REFERENCES_KEYS = %w[evaluator comment known_gaps].freeze
 
 def die(msg, fix, code = 2)
   warn "#{PROG}: #{msg}"
@@ -198,6 +204,31 @@ def load_manifest(path)
           "disabling this surface while the manifest still lists it. Restore the " \
           "match_line / match_region rules.")
     end
+  end
+
+  # `references` has the same two silent failure modes as `content`: an
+  # unimplemented evaluator ignored would drop the executed-file surface (COLD),
+  # and an unknown key ignored would make the rule mean less than it says.
+  surfaces.each do |s|
+    r = s["references"]
+    next if r.nil?
+
+    unless r.is_a?(Hash) && r["evaluator"] == CI_REFERENCES_EVALUATOR
+      die("surface '#{s['class']}' declares references evaluator " \
+          "#{r.is_a?(Hash) ? r['evaluator'].inspect : r.inspect}, which this blast-radius does not implement.",
+          "this script implements `references: {evaluator: \"#{CI_REFERENCES_EVALUATOR}\"}` only. " \
+          "Either implement the evaluator in ci_references or correct the manifest. " \
+          "An unevaluable references rule is an ERROR -- ignoring it would read every " \
+          "file CI executes as COLD.")
+    end
+
+    unknown = r.keys - KNOWN_REFERENCES_KEYS
+    next if unknown.empty?
+
+    die("surface '#{s['class']}' declares unknown references key(s): #{unknown.join(', ')}.",
+        "this script would IGNORE those keys. Remove them, or implement them in " \
+        "ci_references. Silently ignoring part of a safety rule is the defect this " \
+        "check exists to prevent.")
   end
 
   pattern_count = surfaces.sum { |s| (s["patterns"] || []).size }
@@ -392,12 +423,24 @@ def content_hit?(repo, head, path, rule)
   [:miss, nil]
 end
 
-def hits_for(files, surfaces, repo = nil, head = nil)
+# `refs` is a lazily-computed ci_references result, shared with the caller so
+# the report can print it. It is computed only when a changed file matched no
+# pattern of a surface that declares `references`.
+def hits_for(files, surfaces, repo = nil, head = nil, refs = {})
   hits = []
   examined = []
   files.each do |f|
     surfaces.each do |s|
-      next unless (s["patterns"] || []).any? { |p| match?(p, f) }
+      unless (s["patterns"] || []).any? { |p| match?(p, f) }
+        next unless s["references"] && repo && head
+
+        refs[:result] ||= ci_references(repo, head)
+        via = refs[:result][:files][f]
+        next unless via
+
+        hits << { path: f, class: s["class"], why: s["why"], via: via }
+        break
+      end
 
       if (rule = s["content"])
         verdict, detail = content_hit?(repo, head, f, rule)
@@ -565,6 +608,203 @@ def trigger_hit(on)
   nil
 end
 
+# --- files merge-time CI executes by relative path (DND-589) ----------------
+#
+# The deploy-automation patterns name CI CONFIG files. What merging makes CI DO
+# is also decided by the files those configs EXECUTE: a local action
+# (`uses: ./tools/release`), a script a deploy step runs
+# (.pkg/prod/bin/deploy-guard.sh), a GitLab `include: local:` file, and whatever
+# THOSE name in turn. Each read COLD before DND-589.
+#
+# Everything is read AT HEAD (git ls-tree / git show), never from the working
+# tree: the question is what the commit being merged will execute.
+#
+# The roots are the configs whose jobs run on a default-branch merge: a GitHub
+# workflow whose triggers pass trigger_hit (so this widens with it, DND-590),
+# every GitLab CI file (GitLab absence is not provable, as in detect_automation),
+# and a workflow whose YAML does not parse (its triggers are unknown, so it
+# fails WIDE). A pull_request workflow is not a root: it runs the PR's own head
+# before merge, and merging does not change what it executes.
+#
+# A reference is a path-shaped token that NAMES A FILE AT HEAD, resolved
+# against the repo root, the referring file's directory and every
+# `working-directory:` in it. A token that names nothing is not a reference --
+# that existence check is what keeps prose, URLs and command words out. A token
+# preceded by `*` or `/` is part of a glob or a longer path, never its own
+# reference (`hashFiles('**/mix.lock')` executes nothing). A directory counts
+# only when it holds an action.yml/action.yaml, and then all of it does.
+#
+# The walk is transitive, but it only FOLLOWS files that execute: CI YAML,
+# action metadata, and scripts (a shebang or a script extension). A data file a
+# deploy script ships (a compose file, a Caddyfile) is a hit but is not itself
+# followed further unless it is YAML. A script's full-line comments are stripped
+# first. YAML is read STRUCTURALLY: its comments are gone, and the subtrees under
+# keys that SELECT or CACHE files rather than run them (`changes:`, `paths:`,
+# `cache:`, `artifacts:`, the `on:` trigger block ...) are skipped. That list is
+# a deny-list on purpose: an unknown key is scanned, so a key this code has
+# never seen widens, never narrows. A YAML file that does not parse is scanned
+# as raw text instead, which also only widens. These bounds are measured, not
+# taste: unbounded, walt_ui's CI reached 372 files -- every ADR, through a
+# CLAUDE.md a check script mentions in a comment -- and with raw YAML text, 91,
+# including LiveView source files named in a `changes:` list. A gate that fires
+# on every feature MR is bypassed in practice, which is a weakening in effect.
+REF_TOKEN = %r{(?<![\w./*~-])(?:\.{1,2}/|/)?[\w.-]+(?:/[\w.-]+)*}
+REF_EXPANSION = /\$\{\{[^}]*\}\}|\$\{[^}]*\}|\$\w+/
+REF_WORKDIR = /working-directory:\s*["']?([^\s"'#]+)/
+REF_SCAN_LIMIT = 1_048_576
+REF_FOLLOW_EXT = /\.(ya?ml|sh|bash|zsh|ksh|rb|py|pl|ps1)\z/
+REF_COMMENT_LINE = /^[ \t]*#.*$/
+# Documentation is read, never executed: a runbook an error message links, or a
+# CLAUDE.md a check greps, decides nothing a merge does. Measured on walt_ui,
+# these were the bulk of the false hits that remained after the bounds above.
+REF_NEVER_EXECUTED = /\.(md|markdown)\z/i
+
+# Keys whose subtree names files to SELECT on (rules, triggers), CACHE or UPLOAD,
+# or is display text -- never files the job executes.
+REF_YAML_SKIP = %w[
+  changes exists paths paths-ignore branches branches-ignore tags tags-ignore
+  cache artifacts name description if on
+].to_set.freeze
+
+# [text-of-executed-strings, working-directories] from a parsed YAML document.
+#
+# A TOP-LEVEL hidden key (`.name:`) whose value is not a mapping is an anchor
+# definition -- GitLab's idiom for a shared `changes:` list
+# (`.ci:image-paths: &image-paths`) -- not a job. Aliases are resolved by the
+# parser, so wherever that anchor is USED its strings are scanned (or skipped)
+# by the key it is used under; skipping the bare definition loses nothing that
+# executes. A hidden MAPPING is a job template and is always scanned.
+def yaml_exec_strings(node, out = [], dirs = [], top: true)
+  case node
+  when Hash
+    node.each do |k, v|
+      next if k == true || REF_YAML_SKIP.include?(k.to_s)
+      next if top && k.to_s.start_with?(".") && !v.is_a?(Hash)
+
+      dirs << v if k.to_s == "working-directory" && v.is_a?(String)
+      yaml_exec_strings(v, out, dirs, top: false)
+    end
+  when Array
+    node.each { |v| yaml_exec_strings(v, out, dirs, top: false) }
+  when String
+    out << node
+  end
+  [out, dirs]
+end
+
+def followable?(path, text)
+  path.match?(REF_FOLLOW_EXT) || text.start_with?("#!")
+end
+
+def show_at(repo, head, path)
+  out, err, ok = git(repo, "show", "#{head}:#{path}")
+  return out if ok
+
+  die("cannot read #{path} at #{short(head)} (#{err.strip}).",
+      "`git ls-tree` listed this file, so an unreadable blob means the object store " \
+      "is damaged or the ref moved. The set of files CI executes is UNKNOWN, not " \
+      "empty -- resolve the git error and re-run.")
+end
+
+# Returns { files: {path => referrer}, roots: [path], notes: [String] }.
+def ci_references(repo, head)
+  out, err, ok = git(repo, "ls-tree", "-r", "-z", "--name-only", head)
+  unless ok
+    die("`git ls-tree -r #{head}` failed in #{repo}: #{err.strip}",
+        "the file list at head is UNKNOWN, not empty, so the files CI executes " \
+        "cannot be computed. Resolve the git error and re-run.")
+  end
+  tree = out.split("\0")
+  tree_set = tree.to_set
+  action_dirs = tree.select { |p| File.basename(p).match?(/\Aaction\.ya?ml\z/) }
+                    .map { |p| norm_dir(File.dirname(p)) }.to_set
+
+  notes = []
+  roots = tree.select do |p|
+    if p.match?(%r{\A\.github/workflows/[^/]+\.ya?ml\z})
+      begin
+        doc = YAML.safe_load(show_at(repo, head, p), aliases: true)
+        on = doc.is_a?(Hash) ? (doc.key?("on") ? doc["on"] : doc[true]) : nil
+        !on.nil? && !trigger_hit(on).nil?
+      rescue Psych::Exception => e
+        notes << "#{p}: unparseable YAML (#{e.class}) -- triggers unknown, scanned as a root"
+        true
+      end
+    else
+      p == ".gitlab-ci.yml" || p.start_with?(".gitlab/ci/")
+    end
+  end
+
+  files = {}
+  queue = roots.dup
+  seen = roots.to_set
+  until queue.empty?
+    f = queue.shift
+    text = show_at(repo, head, f)
+    next unless roots.include?(f) || followable?(f, text)
+
+    if text.bytesize > REF_SCAN_LIMIT || text.include?("\0")
+      notes << "#{f}: not scanned (binary or over #{REF_SCAN_LIMIT} bytes) -- anything it names is not followed"
+      next
+    end
+    references_in(text, f, tree, tree_set, action_dirs, notes).each do |r|
+      next if seen.include?(r)
+
+      seen << r
+      files[r] = f
+      queue << r
+    end
+  end
+  { files: files, roots: roots, notes: notes }
+end
+
+def references_in(text, referrer, tree, tree_set, action_dirs, notes = [])
+  text = text.scrub(" ")
+  doc = nil
+  if referrer.match?(/\.ya?ml\z/)
+    begin
+      doc = YAML.safe_load(text, aliases: true)
+    rescue Psych::Exception => e
+      notes << "#{referrer}: unparseable YAML (#{e.class}) -- scanned as raw text"
+    end
+  end
+  structured = doc.is_a?(Hash) || doc.is_a?(Array)
+  if structured
+    strings, workdirs = yaml_exec_strings(doc)
+    flat = strings.join("\n").gsub(REF_EXPANSION, " ")
+  else
+    flat = text.gsub(REF_COMMENT_LINE, "").gsub(REF_EXPANSION, " ")
+    workdirs = flat.scan(REF_WORKDIR).flatten
+  end
+  bases = ["", norm_dir(File.dirname(referrer))]
+  bases += workdirs.reject { |w| w.include?("$") }.map { |w| norm_dir(w.sub(%r{\A/+}, "")) }
+  bases = bases.map { |b| b == "." ? "" : b }.uniq
+
+  found = Set.new
+  flat.scan(REF_TOKEN).uniq.each do |tok|
+    rel = tok.sub(%r{\A/+}, "")
+    next if rel.empty?
+
+    # A BARE name (no `/`) in a script is resolved beside the script, never at
+    # the repo root: a CI step's cwd is the repo root, a script's is not, and a
+    # root lookup turns every quoted word (`"mix.lock"` in a test fixture) into
+    # a reference.
+    tok_bases = !structured && !tok.include?("/") ? bases - [""] : bases
+    tok_bases.each do |b|
+      p = File.expand_path(rel, "/#{b}").delete_prefix("/")
+      next if p.empty? || p.match?(REF_NEVER_EXECUTED)
+
+      if tree_set.include?(p)
+        found << p
+      elsif action_dirs.include?(p)
+        tree.each { |t| found << t if t.start_with?("#{p}/") }
+      end
+    end
+  end
+  found.delete(referrer)
+  found.to_a.sort
+end
+
 # --- terraform apply roots (a NOTE, never a verdict input) ------------------
 #
 # A repo can hold several terraform roots, and merging applies only some of
@@ -676,7 +916,7 @@ def short(sha)
   sha.to_s[0, 7]
 end
 
-def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, automation, examined = [], notes = {})
+def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, automation, examined = [], notes = {}, refs = nil)
   puts "BLAST-RADIUS #{verdict} #{short(head)}"
   puts "  manifest: #{manifest} (#{surfaces.size} class(es), #{pattern_count} pattern(s))"
   # This line is the failed-lookup doctrine discharged: a zero can always name
@@ -694,6 +934,13 @@ def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, 
       puts "    #{e[:path]}  [#{e[:class]}] #{label}#{e[:detail] ? " -- #{e[:detail]}" : ''}"
     end
   end
+  # DND-589: the executed-file set is a lookup too, so it names its key: how
+  # many files, from which configs. "None referenced" and "never looked" differ.
+  if refs
+    puts "  ci-references: #{refs[:files].size} file(s) executed by #{refs[:roots].size} " \
+         "merge-time CI config(s)#{refs[:roots].empty? ? '' : " (#{refs[:roots].join(', ')})"}"
+    refs[:notes].each { |n| puts "    #{n}" }
+  end
   if automation
     puts "  merge-time automation: #{automation[0]} (#{automation[1]})"
   else
@@ -705,6 +952,7 @@ def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, 
   width = hits.map { |h| h[:path].length }.max
   hits.each do |h|
     puts format("    %-#{width}s  [%s] %s", h[:path], h[:class], h[:why])
+    puts "      via: executed by #{h[:via]} (a merge-time CI config names it, directly or through a file it runs)" if h[:via]
     puts "      apply: #{notes[h[:path]]}" if notes[h[:path]]
   end
 end
@@ -777,17 +1025,19 @@ def run(argv)
 
   surfaces, pattern_count = load_manifest(manifest)
   files = changed_files(repo, base, head)
-  hits, examined = hits_for(files, surfaces, repo, head)
+  refs = {}
+  hits, examined = hits_for(files, surfaces, repo, head, refs)
+  refs = refs[:result]
 
   if hits.empty?
-    print_report("COLD", head, manifest, surfaces, pattern_count, files, hits, nil, examined)
+    print_report("COLD", head, manifest, surfaces, pattern_count, files, hits, nil, examined, {}, refs)
     return 0
   end
 
   automation = detect_automation(repo)
 
   if automation[0] == "CONFIRMED-ABSENT"
-    print_report("WARM", head, manifest, surfaces, pattern_count, files, hits, automation, examined)
+    print_report("WARM", head, manifest, surfaces, pattern_count, files, hits, automation, examined, {}, refs)
     puts "  -> a declared surface is touched, but merging triggers no automation: merging lands code only."
     return 0
   end
@@ -800,7 +1050,7 @@ def run(argv)
   # HOT. The full block prints in every case -- including under
   # --owner-approval, which RECORDS the authorization, it never HIDES what was
   # authorized.
-  print_report("HOT", head, manifest, surfaces, pattern_count, files, hits, automation, examined, notes)
+  print_report("HOT", head, manifest, surfaces, pattern_count, files, hits, automation, examined, notes, refs)
 
   if owner_approval
     gate_note = gate_ran ? " (GATE: #{gate_ran})" : ""
@@ -1041,6 +1291,170 @@ def self_test
     check.call("HOT: changing .github/workflows/** is the deploy-automation class",
                code == 4 && out.include?("deploy-automation"), "exit=#{code} out=#{out}")
 
+    # 12b-12p. deploy-automation: every file merge-time CI EXECUTES by relative
+    # path (DND-589, the DND-422 class). The class covered only the CI config
+    # files themselves, so a local action (`uses: ./...`), a script a deploy
+    # step runs, or a GitLab `include: local:` file read COLD: editing
+    # gen_saas's .pkg/prod/bin/deploy-guard.sh -- the guard that refuses stale
+    # prod deploys -- merged with no owner stop. Each case's diff touches ONLY
+    # the executed file, so nothing else can rescue the verdict.
+    ci_n = 0
+    ci_case = lambda do |seed:, change:|
+      ci_n += 1
+      d = File.join(tmp, "ci-ref#{ci_n}")
+      b2, h2 = mkrepo.call(d, seed: seed) { |r| change.call(r) }
+      run_br.call(["--base", b2, "--head", h2, "--repo", d])
+    end
+    put = lambda do |r, path, body = "x\n"|
+      FileUtils.mkdir_p(File.dirname(File.join(r, path)))
+      File.write(File.join(r, path), body)
+    end
+    deploy_run = lambda do |steps, extra = ""|
+      "name: post-merge\non:\n  push:\n    branches: [main]\n#{extra}jobs:\n  d:\n    runs-on: ubuntu-latest\n    steps:\n#{steps}"
+    end
+    hot_ci = lambda do |desc, seed, path, via = nil|
+      out, _, code = ci_case.call(seed: seed, change: ->(r) { put.call(r, path, "changed\n") })
+      check.call(desc,
+                 code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?(path) &&
+                   out.include?("deploy-automation") && (via.nil? || out.include?(via)),
+                 "exit=#{code} out=#{out}")
+    end
+    cold_ci = lambda do |desc, seed, path|
+      out, _, code = ci_case.call(seed: seed, change: ->(r) { put.call(r, path, "changed\n") })
+      check.call(desc, code.zero? && out.include?("BLAST-RADIUS COLD"), "exit=#{code} out=#{out}")
+    end
+    deploy_seed = ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }
+
+    # The ticket's own case: a composite action under .github/actions, which the
+    # workflow does not even have to name -- the conventional location is enough.
+    hot_ci.call("HOT: .github/actions/deploy/action.yml is deploy-automation (DND-589)",
+                deploy_seed, ".github/actions/deploy/action.yml")
+    hot_ci.call("HOT: a script INSIDE .github/actions/** is deploy-automation",
+                deploy_seed, ".github/actions/deploy/entrypoint.sh")
+    hot_ci.call("HOT: an action.yaml OUTSIDE .github (a `uses: ./tools/release` target) is deploy-automation",
+                deploy_seed, "tools/release/action.yaml")
+    # A local action's other files -- its Dockerfile, its JS entry point -- are
+    # executed too; the workflow names only the directory.
+    hot_ci.call("HOT: a Dockerfile beside a local action a deploy workflow `uses: ./` is deploy-automation",
+                lambda { |r|
+                  put.call(r, "tools/release/action.yml", "runs:\n  using: docker\n  image: Dockerfile\n")
+                  put.call(r, "tools/release/Dockerfile", "FROM x\n")
+                  wf.call(r, "post-merge.yml", deploy_run.call("      - uses: ./tools/release\n"))
+                },
+                "tools/release/Dockerfile", ".github/workflows/post-merge.yml")
+    # gen_saas's real shape: the deploy workflow runs .pkg/prod/bin/deploy-guard.sh.
+    hot_ci.call("HOT: a script a deploy workflow `run:`s by relative path is deploy-automation (names the referrer)",
+                lambda { |r|
+                  put.call(r, ".pkg/prod/bin/deploy-guard.sh", "#!/bin/sh\n")
+                  wf.call(r, "post-merge.yml", deploy_run.call("      - run: .pkg/prod/bin/deploy-guard.sh --require-tip main\n"))
+                },
+                ".pkg/prod/bin/deploy-guard.sh", ".github/workflows/post-merge.yml")
+    hot_ci.call("HOT: a `${{ github.workspace }}/scripts/ship.sh` reference resolves to the repo file",
+                lambda { |r|
+                  put.call(r, "scripts/ship.sh")
+                  wf.call(r, "post-merge.yml", deploy_run.call("      - run: bash ${{ github.workspace }}/scripts/ship.sh\n"))
+                },
+                "scripts/ship.sh")
+    hot_ci.call("HOT: `./rollout.sh` under `working-directory: ops` resolves to ops/rollout.sh",
+                lambda { |r|
+                  put.call(r, "ops/rollout.sh")
+                  wf.call(r, "post-merge.yml",
+                          deploy_run.call("      - run: ./rollout.sh\n        working-directory: ops\n"))
+                },
+                "ops/rollout.sh")
+    # A deploy script that calls another script: the callee is executed on merge
+    # just the same, and nothing in the workflow names it.
+    hot_ci.call("HOT: a script called only BY a referenced script is deploy-automation (transitive)",
+                lambda { |r|
+                  put.call(r, "bin/deploy.sh", "#!/bin/sh\n. bin/lib/push.sh\n")
+                  put.call(r, "bin/lib/push.sh")
+                  wf.call(r, "post-merge.yml", deploy_run.call("      - run: bin/deploy.sh\n"))
+                },
+                "bin/lib/push.sh", "bin/deploy.sh")
+    # GitLab's analogue of a reusable workflow: `include: local:` outside
+    # .gitlab/ci -- walt_ui includes backend/.pkg/gitlab/terraform-aws.yml.
+    gl_seed = lambda do |r|
+      put.call(r, ".gitlab-ci.yml", "include:\n  - local: /ci/deploy.yml\n")
+      put.call(r, "ci/deploy.yml", "deploy:\n  script:\n    - scripts/release.sh\n")
+      put.call(r, "scripts/release.sh")
+    end
+    hot_ci.call("HOT: a GitLab `include: local:` file is deploy-automation", gl_seed, "ci/deploy.yml", ".gitlab-ci.yml")
+    hot_ci.call("HOT: a script an INCLUDED GitLab file runs is deploy-automation", gl_seed, "scripts/release.sh", "ci/deploy.yml")
+
+    # The miss. A path that merely LOOKS like an action, or a script no
+    # merge-time CI references, must stay COLD -- a gate that fires on every
+    # feature MR is bypassed in practice, which is a weakening in effect.
+    ref_seed = lambda do |r|
+      put.call(r, "scripts/ship.sh")
+      put.call(r, "scripts/other.sh")
+      wf.call(r, "post-merge.yml",
+              deploy_run.call("      - uses: actions/cache@v4\n        with:\n          key: ${{ hashFiles('**/mix.lock') }}\n      - run: scripts/ship.sh\n"))
+    end
+    cold_ci.call("COLD: lib/actions/action_helper.ex is not an action", ref_seed, "lib/actions/action_helper.ex")
+    cold_ci.call("COLD: docs/github-actions.md is not an action", ref_seed, "docs/github-actions.md")
+    cold_ci.call("COLD: a script beside a referenced one, but itself unreferenced", ref_seed, "scripts/other.sh")
+    cold_ci.call("COLD: a file named only inside a glob (`hashFiles('**/mix.lock')`) is not executed",
+                 ->(r) { ref_seed.call(r); put.call(r, "mix.lock") }, "mix.lock")
+    # The same glob OUTSIDE a `${{ }}` expression, which the expansion strip
+    # does not remove: only the `*` lookbehind keeps it out.
+    cold_ci.call("COLD: a file named only inside a bare shell glob (`**/mix.lock`) is not executed",
+                 lambda { |r|
+                   put.call(r, "mix.lock")
+                   wf.call(r, "post-merge.yml", deploy_run.call("      - run: sha256sum **/mix.lock > lock.sum\n"))
+                 },
+                 "mix.lock")
+    # A DATA file a deploy step reads is a hit, but it is not followed: what it
+    # names is not executed by naming.
+    data_seed = lambda do |r|
+      put.call(r, "deploy/settings.json", "{\"hook\": \"lib/other.sh\"}\n")
+      put.call(r, "lib/other.sh")
+      wf.call(r, "post-merge.yml", deploy_run.call("      - run: jq . deploy/settings.json\n"))
+    end
+    hot_ci.call("HOT: a data file a deploy step reads is deploy-automation", data_seed, "deploy/settings.json")
+    cold_ci.call("COLD: a path named only INSIDE a data file is not followed", data_seed, "lib/other.sh")
+    # A pull_request workflow runs the PR's OWN head before merge; merging does
+    # not change what it executes. Only merge-triggered roots count.
+    cold_ci.call("COLD: a script referenced ONLY by a pull_request workflow",
+                 lambda { |r|
+                   put.call(r, "scripts/lint.sh")
+                   wf.call(r, "ci.yml", "name: ci\non:\n  pull_request:\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: scripts/lint.sh\n")
+                 },
+                 "scripts/lint.sh")
+    # Each precision bound is pinned from BOTH sides, so neither a bound that
+    # stops firing nor one that starts swallowing real references goes unseen.
+    gl_anchor = lambda do |r|
+      put.call(r, "lib/app.ex")
+      put.call(r, "scripts/tpl.sh")
+      put.call(r, ".gitlab-ci.yml",
+               ".app-paths: &app-paths\n  - lib/app.ex\n" \
+               ".deploy-tpl:\n  script:\n    - scripts/tpl.sh\n" \
+               "test:\n  rules:\n    - changes: *app-paths\n  script:\n    - echo test\n" \
+               "deploy:\n  extends: .deploy-tpl\n")
+    end
+    cold_ci.call("COLD: a file named only in a hidden anchor list aliased into `changes:`", gl_anchor, "lib/app.ex")
+    hot_ci.call("HOT: a hidden MAPPING template's `script:` is still scanned", gl_anchor, "scripts/tpl.sh")
+    script_seed = lambda do |r|
+      put.call(r, "bin/deploy.sh", "#!/bin/sh\n# historical: lib/notes.sh\n. ./common.sh\necho \"see docs/runbook.md\"\ncat \"VERSION\"\n")
+      put.call(r, "bin/common.sh")
+      put.call(r, "lib/notes.sh")
+      put.call(r, "docs/runbook.md")
+      put.call(r, "VERSION")
+      put.call(r, "ship.sh")
+      wf.call(r, "post-merge.yml", deploy_run.call("      - run: bin/deploy.sh\n      - run: bash ship.sh\n"))
+    end
+    hot_ci.call("HOT: a script SOURCED beside a referenced script (`. ./common.sh`)", script_seed, "bin/common.sh", "bin/deploy.sh")
+    hot_ci.call("HOT: a bare name a workflow step runs from the repo root (`bash ship.sh`)", script_seed, "ship.sh")
+    cold_ci.call("COLD: a path named only in a script's COMMENT line", script_seed, "lib/notes.sh")
+    cold_ci.call("COLD: documentation a script names (a runbook link) is not executed", script_seed, "docs/runbook.md")
+    cold_ci.call("COLD: a bare quoted word in a SCRIPT is not resolved at the repo root", script_seed, "VERSION")
+
+    # The miss must be observable: a COLD verdict names how many executed
+    # files it compared against, so "none referenced" and "never looked" differ.
+    out, _, code = ci_case.call(seed: ref_seed, change: ->(r) { put.call(r, "lib/a.ex") })
+    check.call("COLD: prints the ci-references count and the merge-time CI configs it read",
+               code.zero? && out.match?(/ci-references: \d+ file\(s\) executed by 1 merge-time CI config\(s\)/),
+               "exit=#{code} out=#{out}")
+
     # 13. --owner-approval records without hiding
     d = File.join(tmp, "approved")
     b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
@@ -1273,6 +1687,19 @@ def self_test
     _, err, code = run_br.call(["--base", mb, "--head", mh, "--repo", mig_d, "--manifest", unknown_key])
     check.call("an unknown content key is refused rather than SILENTLY IGNORED",
                code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+
+    # DND-589: the `references` key fails the same two ways `content` does.
+    [["an UNIMPLEMENTED references evaluator is an ERROR, not a silently dropped surface",
+      { "evaluator" => "some-future-thing-v9" }],
+     ["an unknown references key is refused rather than SILENTLY IGNORED",
+      { "evaluator" => CI_REFERENCES_EVALUATOR, "follow_dirs_typoed" => true }]].each do |desc, refs_rule|
+      f = File.join(tmp, "refs-#{desc.hash.abs}.json")
+      File.write(f, JSON.dump({ "schema" => MANIFEST_SCHEMA, "surfaces" => [
+        { "class" => "x", "why" => "y", "patterns" => [".github/workflows/**"], "references" => refs_rule }
+      ] }))
+      _, err, code = run_br.call(["--base", mb, "--head", mh, "--repo", mig_d, "--manifest", f])
+      check.call(desc, code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+    end
 
     norules = File.join(tmp, "norules.json")
     File.write(norules, JSON.dump({ "schema" => MANIFEST_SCHEMA, "surfaces" => [
