@@ -5,6 +5,7 @@
     { "event": "PreToolUse", "matcher": "Bash", "script": "ai/hooks/forge-identity-guard.sh" },
     { "event": "PreToolUse", "matcher": "Bash", "script": "ai/hooks/forge-auth-guard.sh" },
     { "event": "PreToolUse", "matcher": "Bash", "script": "ai/hooks/workflow-phase-guard.sh" },
+    { "event": "PreToolUse", "matcher": "Bash", "script": "ai/hooks/git-stash-guard.sh" },
     { "event": "PreToolUse", "matcher": "Bash|SendMessage|mcp__notion.*", "script": "ai/hooks/pronoun-guard.sh" },
     { "event": "PreToolUse", "matcher": "Edit|Write|MultiEdit|NotebookEdit", "script": "ai/hooks/inbox-untrusted-guard.sh" },
     { "event": "PreToolUse", "matcher": "Agent|Task", "script": "ai/hooks/fleet-drain-guard.sh" },

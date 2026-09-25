@@ -558,6 +558,8 @@ has no `VERDICT:` line, the run did not finish: re-run it, do not interpret it.
 - Never open the MR before `bin/prep-commit.sh` (or this project's
   equivalent) passes locally — that gate comes first, every time.
 - Never work outside your assigned worktree.
+- Never `git stash`: every worktree shares the owner's stash list (DND-670; the
+  `git-stash-guard` hook denies it). To park WIP, commit it to your worktree branch.
 - Never move the Mission to any status but `In Review`, and only once the MR
   is actually open — every other status transition belongs to the
   athena-admiral. If no `In Review` value was given, set NO status rather than

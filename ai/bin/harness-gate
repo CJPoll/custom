@@ -53,6 +53,7 @@ STATIC_CHECKS = [
   ["main-session-policy self-test", %w[ai/hooks/main-session-policy.self-test.sh]],
   ["forge-identity-guard self-test", %w[ai/hooks/forge-identity-guard.self-test.sh]],
   ["forge-auth-guard self-test", %w[ai/hooks/forge-auth-guard.self-test.sh]],
+  ["git-stash-guard self-test", %w[ai/hooks/git-stash-guard.self-test.sh]],
   # workflow-phase-guard's self-test is a dedicated .self-test.sh (NOT the
   # false-green `<hook>.sh --self-test` form the gate's own self-test forbids);
   # the hook's inline --self-test just execs this file.

@@ -109,6 +109,14 @@ Give the captain, in the brief:
   proposed ticket with a priority; do not fix it in this MR."* Cite it; do not
   restate it.
 
+- **The no-stash rule.** Every brief carries this line: *"Never `git stash`. To
+  park WIP, commit it to your worktree branch."* A linked worktree shares ONE
+  stash list with the owner's main checkout (`refs/stash` lives in the common
+  git dir), so a captain's `git stash pop` can pop the owner's entry. Measured
+  2026-09-25 on walt_ui: the PT-1709 captain popped the owner's PT-822 entry
+  (DND-670). The `git-stash-guard` hook denies every stash write; the line saves
+  the captain the denied call.
+
 **In fleet mode, also point it at the design in Notion** — its ticket page's
 three sub-docs (**Product Requirements / Architecture & Engineering / QA Plan**)
 AND the epic's three, which it reads for full context — as the design it

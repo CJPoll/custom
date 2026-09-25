@@ -117,6 +117,7 @@ Not `ai-artifacts/notes/`: those are each captain's notes, travelling with its b
   **[[athena:admiral-resume]]** — read the state log first; snapshot every
   worktree's uncommitted work BEFORE any re-dispatch; adopt existing worktrees and
   branches, never recreate; sweep every in-flight Mission; the ≤5 cap still holds.
+  Never `git stash` (the stash list is the owner's too; DND-670): park WIP as a commit.
 - **Notifications (incl. your `Monitor`) are a latency hint, never proof nothing
   happened**, and `ListAgents` is usually absent (an admiral is itself a subagent).
   Judge a captain by what it leaves on disk, full-sweep the whole fleet on every

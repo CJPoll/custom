@@ -216,3 +216,37 @@ false positive this change removes. Accepted because the only settings-writing
 tool this suite invokes is `scripts/setup-hooks`, which is covered on BOTH
 prongs: it changes the hooks block, and it leaves a `settings.json.bak-<ts>`
 behind.
+
+---
+
+## 2026-09-25 — DND-670, git-stash-guard
+
+- **Domain:** the PreToolUse(Bash) guard that denies writes to the shared git
+  stash list (`ai/hooks/git-stash-guard.sh`).
+- **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
+  repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
+  `GIT_CONFIG_NOSYSTEM=1`).
+- **Baseline:** `RESULT: 79 passed, 0 failed` / `VERDICT: PASS`.
+
+### Fail-first (no guard)
+
+The hook replaced by a stub that reads stdin and exits 0 (what a session has
+with no guard). The mechanism cases M1a/M1b pass (the fixture reproduces the
+incident: the worktree's refs/stash is the owner's, and an unguarded pop
+consumes the owner's entry). The incident cases fail:
+
+```
+FAIL  W1. git stash pop from the linked worktree (expected deny) status=0 out=[]
+FAIL  W2. bare git stash from the linked worktree (expected deny) status=0 out=[]
+FAIL  W3. owner stash list byte-identical after the guarded attempts status=0 out=[before=[stash@{0}: On main: OWNER-ENTRY
+RESULT: 21 passed, 58 failed
+```
+
+### Sabotage rows (each MEASURED 2026-09-25, restored with `cp` from a backup)
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-DND670-1 | Read allowlist `^(list\|show\|create)$` also admits `pop` | W1, W3 (the owner's entry is popped through the guard), I1/I2/I6/I8/I13/I14/I16/I19/I22/I24, A1/A3/A5/A6/A10, T1, F5, F6 — `RESULT: 59 passed, 20 failed` |
+| S-DND670-2 | Global-option skipping disabled for `-C`/`-c`/spaced long options | I2 `git -C <wt> stash`, I3 `git -c k=v stash`, I5 `git --work-tree <d> stash`, A10 — `75 passed, 4 failed` |
+| S-DND670-3 | Alias resolution removed (`decide` returns "" for any non-`stash` word) | A1-A6, A10, F6 — `71 passed, 8 failed` |
+| S-DND670-4 | Dequoting removed (`tr -d` of quotes/backslash replaced by `cat`) | I7 `sh -c 'git stash'`, I14 `git st"a"sh pop`, I15 `g\it stash` — `76 passed, 3 failed` |
