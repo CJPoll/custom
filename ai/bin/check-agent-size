@@ -492,11 +492,23 @@ def discovery_cases(root)
   File.write(File.join(empty, "README"), "no agents\n")
   rc = quietly { run_check(root: empty) }
   fail_case.call("an empty ai/agents discovery did not fail (rc=#{rc})") unless rc == 1
-  not_git = File.join(root, "not-git")
-  FileUtils.mkdir_p(File.join(not_git, "ai", "agents"))
-  File.write(File.join(not_git, "ai", "agents", "athena-ten.md"), "line\n")
-  rc = quietly { run_check(root: not_git) }
-  fail_case.call("a discovery git could not answer did not fail (rc=#{rc})") unless rc == 1
+  # Outside ANY work tree (a subdirectory of `root` would be answered by
+  # root's repo), so git genuinely cannot list it.
+  Dir.mktmpdir("check-agent-size-nogit-") do |not_git|
+    FileUtils.mkdir_p(File.join(not_git, "ai", "agents"))
+    File.write(File.join(not_git, "ai", "agents", "athena-ten.md"), "line\n")
+    err = StringIO.new
+    prev = $stderr
+    $stderr = err
+    rc = begin
+      run_check(root: not_git)
+    ensure
+      $stderr = prev
+    end
+    unless rc == 1 && err.string.include?("could not list ai/agents from git")
+      fail_case.call("a discovery git could not answer did not fail as such (rc=#{rc}): #{err.string.lines.first}")
+    end
+  end
   ok
 end
 
