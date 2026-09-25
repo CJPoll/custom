@@ -3014,6 +3014,15 @@ Pause, Resume and Keep running. One piece is still owed: an override whose
 `expires_at` lapses emits no `fleet.session.control_changed`, so nothing wakes
 a drained session when a timed pause ends. That wake is DND-448's.
 
+DND-541 adds hook-driven agent lifecycle and per-run aging. Its tickets are
+DND-556 (this amendment), DND-557 (per-run aging), DND-558 (lifecycle ingest),
+DND-559 (fleet page rendering), DND-560 (`ai/hooks/fleet-lifecycle.sh`, the
+`ai/bin/fleet-report` lifecycle subcommands and the drain guard's
+`spawn_denied` report) and DND-561 (the admiral skills). None of them has
+shipped. Every sentence about the four lifecycle kinds, `admiral_state`
+`parked`, *Agent lifecycle*, hook missions and per-run aging is an obligation on
+the ticket that builds it, not a description of shipped behaviour.
+
 ### Fleet reports are state upserts, not events
 
 A fleet report is a **state upsert**. It goes to `POST /api/v1/fleet/reports`
@@ -3035,15 +3044,50 @@ at every agent depth). The kinds and the other fields each may carry:
 | `session_started` | `project` (string or `null`), `repo_key` (string, absolute path) | Creates or refreshes the session and binds it to the reporting machine. |
 | `session_seen` | `agent_id` (string, optional), `agent_type` (string, optional) | Refreshes the session's last-seen time. |
 | `session_ended` | `end_reason` (string, optional: the SessionEnd hook's `reason`) | Marks the session ended, basis `reported`. |
-| `admiral_started` | `run_id` (string), `agent_id` (string), `scope_label` (string, optional) | Creates the admiral run in state `running`. |
-| `admiral_scope` | `run_id` (string), `missions` (collection of mission pointers, possibly empty), `notion_project_id` (string, optional) | Replaces the run's whole mission list and its Notion Project. |
+| `admiral_started` | `run_id` (string), `agent_id` (string), `scope_label` (string, optional) | Creates the admiral run in state `running`. A run this session already holds under that `run_id` is re-armed instead (a resume), and a run of that `agent_id` with no `run_id` yet is adopted and named (*Agent lifecycle* → *Run binding*). |
+| `admiral_scope` | `run_id` (string), `missions` (collection of mission pointers, possibly empty), `notion_project_id` (string, optional) | Replaces the run's reported mission list and its Notion Project. |
 | `admiral_seen` | `agent_id` (string), `agent_type` (string, optional) | Refreshes the last-seen time of the run with that `agent_id` in this session. |
-| `admiral_state` | `run_id` (string), `state` (`draining` \| `drained` \| `finished`) | Sets the run's reported state. |
+| `admiral_state` | `run_id` (string), `state` (`draining` \| `drained` \| `finished` \| `parked`) | Sets the run's reported state. `parked`: the admiral stopped at a usage ceiling or on a park request, and the run is resumable. |
+| `agent_spawn` | `tool_use_id` (string), `subagent_type` (a fleet worker), `caller_agent_id` (string, optional; absent means the top-level session spawned it), `mapping` (`mapped` \| `unmapped` \| `not_applicable`), `ticket_ref` (string, required when `mapping` is `mapped`, absent otherwise), `run_hint` (string, optional) | Records a requested fleet-worker spawn (*Agent lifecycle*). |
+| `agent_bound` | `tool_use_id` (string), `agent_id` (string), `agent_type` (a fleet worker) | Joins the spawn to the child agent. For an admiral, adopts or creates its run (*Agent lifecycle* → *Run binding*). |
+| `agent_start` | `agent_id` (string), `agent_type` (a fleet worker) | Creates the agent, or reopens an ended one, in lifecycle `running`. For an admiral, adopts or creates its run (*Agent lifecycle* → *Run binding*). |
+| `agent_end` | exactly one of `agent_id` / `tool_use_id` (string), `agent_type` (a fleet worker), `outcome` (`stopped` \| `api_error` \| `spawn_failed` \| `spawn_denied`), `error_class` (an error class, required when `outcome` is `api_error` or `spawn_failed`, absent otherwise) | Ends the agent (by `agent_id`) or the spawn (by `tool_use_id`). |
 
 - **The schema is closed, and deny is the default.** A `kind` not in this table
-  is refused with a `Fix:` naming the seven kinds. So is a field the row does
+  is refused with a `Fix:` naming the eleven kinds. So is a field the row does
   not list, a missing required field, and a value of the wrong type. Nothing
   unlisted is stored or ignored.
+
+  **Later (2026-09-25):** DND-541: the table had seven rows, and this refusal
+  named those seven. It gained the four lifecycle kinds (`agent_spawn`,
+  `agent_bound`, `agent_start`, `agent_end`), `admiral_state` gained `parked`,
+  and `admiral_started`'s effect now names the re-arm and adoption the server
+  already performed. Before this, a run's lifecycle came only from admiral
+  prose, which an admiral forgot twice on 2026-09-24 (after a resume and at a
+  park), and the fleet page showed dead runs as `running`.
+- **A fleet worker** is `athena-admiral` or `athena-captain`. `subagent_type`
+  and `agent_type` on the lifecycle kinds take only those two values; any other
+  value is refused.
+- **The lifecycle kinds' field combinations are closed too.** `mapping` is
+  `not_applicable` exactly when `subagent_type` is `athena-admiral`. An
+  `agent_end` carries `agent_id` with `stopped` or `api_error`, and
+  `tool_use_id` with `spawn_failed` or `spawn_denied`. Any other combination is
+  refused.
+- **An error class** is one of the values Claude Code 2.1.282's StopFailure
+  hook reports in `error` (measured, DND-541): `rate_limit`, `overloaded`,
+  `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`,
+  `verification_required`, `billing_error`, `invalid_request`,
+  `model_not_found`, `server_error`, `max_output_tokens`,
+  `cloud_credential_error`, `unknown`; or `other`. The harness maps any value
+  outside that list to `other` before sending, so a Claude Code upgrade that
+  adds a class never gets a report refused.
+- **`ticket_ref`** on `agent_spawn` matches
+  `^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,6}$` (e.g. `DND-541`, `PT-1289`), checked
+  by the harness before sending and by the server on receipt.
+- **No lifecycle field can carry prompt text.** The Agent tool's prompt and
+  description, a last assistant message and a transcript path never leave the
+  machine; a body naming any of them is refused as unlisted (*Mission pointers
+  are metadata only*).
 - **The body carries no time.** `started_at`, `last_seen_at` and `ended_at` are
   the server's receive time.
 - **`project`** is the inbox-registry project name, resolved from the
@@ -3058,9 +3102,17 @@ at every agent depth). The kinds and the other fields each may carry:
   `session_started` and logs the failure. It never reports such a repo as a
   plain directory.
 - **`run_id`** identifies an admiral run within its session: the name of the
-  run's coordination directory. An `admiral_scope` or `admiral_state` naming a
-  `run_id` this session never started is refused with a `Fix:` telling the
-  admiral to report `admiral_started` first.
+  run's coordination directory, a single path component (non-empty, at most
+  200 characters, no `/`, not `.` or `..`). `run_hint` has the same shape. An
+  `admiral_scope` or `admiral_state` naming a `run_id` that no run in this
+  session holds, whether started by `admiral_started` or bound by the lifecycle
+  kinds (*Agent lifecycle* → *Run binding*), is refused with a `Fix:` telling
+  the admiral to report `admiral_started` first.
+
+  **Later (2026-09-25):** DND-541: this refused a `run_id` the session had not
+  started with `admiral_started`, the only way a run got a name. The lifecycle
+  kinds now also name a run, from a coordination path in a spawn prompt, so a
+  run bound that way is accepted too.
 - **`notion_project_id`** (DND-444) is the page id of the scope's Notion
   Project (the scope epic's `Project` relation): 32 hex digits, bare or dashed
   8-4-4-4-12. Anything else, a URL included, is refused with a `Fix:`. The
@@ -3077,14 +3129,158 @@ at every agent depth). The kinds and the other fields each may carry:
   its dispatch briefs already carry. PreToolUse and PostToolUse hook stdin
   carries the same value as `agent_id` inside that admiral (measured, DND-428),
   so `admiral_seen` joins to the run with no prose compliance.
-- **Who sends what** (DND-433): the SessionStart hook sends `session_started`
-  and the SessionEnd hook sends `session_ended`. The PostToolUse hook path sends
-  `admiral_seen` when stdin's `agent_type` is `athena-admiral`, and
-  `session_seen` otherwise, at most once per 60 s per (session, `agent_id`), in
-  the background under a timeout. The admiral itself calls `ai/bin/fleet-report`
-  for `admiral_started`, for `admiral_scope` on every mission status change in
-  its `state.md` (with `--notion-project-id` when its scope has a Project), and
-  for `admiral_state`.
+- **Who sends what** (DND-433, DND-541). Hooks send facts. Every state is
+  derived by the server (*Agent lifecycle*, *Fleet liveness*).
+  - The SessionStart hook sends `session_started` and the SessionEnd hook
+    sends `session_ended`. The PostToolUse hook path sends `admiral_seen` when
+    stdin's `agent_type` is `athena-admiral`, and `session_seen` otherwise, at
+    most once per 60 s per (session, `agent_id`), in the background under a
+    timeout.
+  - The lifecycle hook, `ai/hooks/fleet-lifecycle.sh`, sends the four
+    lifecycle kinds for fleet workers only. PreToolUse on the Agent tool sends
+    `agent_spawn`. PostToolUse on it, when `tool_response.agentId` is present,
+    sends `agent_bound`. PostToolUseFailure on it sends `agent_end`
+    `spawn_failed`. SubagentStart sends `agent_start`, SubagentStop sends
+    `agent_end` `stopped`, and StopFailure with an `agent_id` sends `agent_end`
+    `api_error`. A StopFailure with no `agent_id` (the top-level session's own)
+    and any non-fleet agent type send nothing. It runs detached under a
+    timeout, always exits 0, never denies, and logs each failure with a `Fix:`
+    to `$XDG_STATE_HOME/athena/fleet/report-failures.log`, which the next
+    SessionStart announces.
+  - The drain guard (*Enforcement layers* → *Layer 1: the drain guard hook*)
+    sends `agent_end` `spawn_denied` for each fleet-worker spawn it denies, so
+    a refused spawn never reads as a pending captain.
+  - The admiral's own reports are enrichment, except its final state. It sends
+    `admiral_state` `finished` when its scope is exhausted, `parked` at a usage
+    ceiling or on a park request, and `draining` / `drained` in the drain
+    protocol. With none of those, a run whose admiral ended reads
+    `ended_unexpectedly` (*Fleet liveness*). It sends `admiral_scope` at run
+    start and when its queue changes, to add queued, blocked and parked
+    missions, titles, URLs and statuses; a missed send shows as `stale`, not
+    as wrong (*Mission pointers are metadata only*). `admiral_started` is
+    optional: it names the run and adds a scope label. A resumed admiral sends
+    it first, for its resumed `run_id`.
+  - **Until the lifecycle hook is installed and live-verified on a machine,
+    and DND-561 has moved the admiral skills onto the rule above, admirals on
+    that machine keep the DND-433 rule:** `admiral_started` at run start,
+    `admiral_scope` after each mission status change in `state.md` (with
+    `--notion-project-id` when the scope has a Project), and `admiral_state`.
+    The server refuses `parked` until DND-558 ships, and `ai/bin/fleet-report`
+    refuses it until DND-560 ships, so no admiral sends it before then.
+
+  **Later (2026-09-25):** DND-541: this bullet said the admiral calls
+  `ai/bin/fleet-report` for `admiral_started`, for `admiral_scope` on each
+  mission status change, and for `admiral_state`. That made a run's freshness
+  depend on admiral prose, which failed twice on 2026-09-24. Hooks now report
+  spawns, starts and ends, and the admiral's reports are enrichment. The old
+  rule stays in force per machine until the hook ships there, as the last item
+  above says.
+
+### Agent lifecycle
+
+The server keeps each fleet worker's lifecycle from the four lifecycle kinds.
+The hooks report facts; the rules below derive state from them. DND-541
+measured which hook fires in which case (Claude Code 2.1.282, 2026-09-25;
+headless `claude -p` with one logging hook, API errors injected by a local
+proxy; raw logs in the gitignored
+`ai-artifacts/coordination/2026-09-24-harness-epics-ab/reports/DND-541-raw/`):
+
+| Case | SubagentStop fires? | What fires instead, or as well |
+| --- | --- | --- |
+| Normal end, foreground child | yes | then the caller's PostToolUse(Agent), `tool_response.status: completed`, with `agentId` |
+| Normal end, background child | yes, at the child's own end | PostToolUse(Agent) at launch, `status: async_launched`, with `agentId` |
+| Resume by SendMessage | yes, again | SubagentStart fires again with the same `agent_id` first |
+| HTTP 429, foreground child | no | StopFailure `{agent_id, agent_type, error: rate_limit}`, and the caller's PostToolUseFailure(Agent) with `tool_use_id` |
+| HTTP 429, background child | no | StopFailure only |
+| HTTP 429, the admiral itself | no | StopFailure with the admiral's `agent_id` |
+| HTTP 400 | no | StopFailure `error: unknown`, and PostToolUseFailure |
+| An admiral ends its turn with a background child alive | yes, for the admiral, at once | the child keeps running and its own SubagentStop fires later |
+| The top-level turn ends with a child alive (headless) | the child is unaffected | the child's SubagentStop fires when it ends |
+| The headless background-wait ceiling kills a live child | no | nothing at all |
+| SIGKILL of the `claude` process | no | nothing at all |
+| SIGTERM of the `claude` process | no | SessionEnd `reason: other` only |
+
+Not measured: an interactive top-level turn end, whether a real usage-limit 429
+reports `rate_limit`, and whether PostToolUseFailure fires for a spawn that a
+PreToolUse hook denied. SubagentStop carries no stop reason and no parent id.
+Its `background_tasks` lists the whole session's tasks, not the ending agent's
+own children, so it cannot count orphans.
+
+- **Join keys.** `tool_use_id` joins `agent_spawn`, `agent_bound` and a
+  spawn-level `agent_end`. `agent_id` joins `agent_bound`, `agent_start`, an
+  agent-level `agent_end`, and the seen reports. `agent_bound` is the only kind
+  carrying both, because PostToolUse(Agent) is the only hook that sees both.
+  Each key is scoped to its session. A background spawn is joined at launch,
+  but a foreground spawn only when it ends, because its PostToolUse fires then
+  (measured). Until then its spawn and its agent are separate rows.
+- **Every lifecycle report is an order-independent upsert.** Hook reports are
+  detached and can arrive in any order; measured: SubagentStop before the
+  caller's PostToolUse. An `agent_end` for an unknown `agent_id` creates the
+  agent already ended. An `agent_bound` joins whatever exists.
+- **An agent's lifecycle** is `running`, `ended` or `ended_unexpectedly`, with
+  an end basis:
+  - `agent_end` `stopped` gives `ended`, basis `stopped`;
+  - `agent_end` `api_error` gives `ended_unexpectedly`, basis
+    `api_error:<error_class>`;
+  - `agent_end` `spawn_failed` ends the spawn, and its agent if one is bound,
+    as `ended_unexpectedly`, basis `spawn_failed`;
+  - `agent_end` `spawn_denied` marks the spawn denied and ends no agent. A
+    denied spawn stays denied if a `spawn_failed` for it also arrives.
+  - `ended_unexpectedly` is sticky over `ended`: a `stopped` after an
+    `api_error` leaves it `ended_unexpectedly`.
+  - An `api_error` basis wins over a `spawn_failed` one, in whichever order
+    they arrive: a foreground child's API death fires both StopFailure and
+    the caller's PostToolUseFailure (measured).
+- **Only `agent_start` reopens an agent.** It sets the lifecycle to `running`
+  and clears the end, because a SendMessage resume fires SubagentStart again.
+  A later seen report moves only the agent's last-seen time.
+- **An agent's last-seen time** moves on every report naming its `agent_id`:
+  `session_seen` and `admiral_seen` with that `agent_id`, and the lifecycle
+  kinds.
+- **`session_ended` ends every agent still `running` in its session** as
+  `ended_unexpectedly`, basis `session_ended`. SIGTERM and SIGHUP give only
+  SessionEnd, so this is the only signal those ends leave. Agents in other
+  sessions are untouched.
+- **A SIGKILL, and the headless background-wait ceiling kill, fire no hook.**
+  Nothing in this subsection can see them. Per-run aging (*Fleet liveness*) is
+  the required backstop, not an optional one.
+- **The lifecycle hook is advisory, never a gate.** It never denies a spawn.
+  Enforcement stays in the drain guard.
+
+#### Run binding
+
+An admiral run's identity is its admiral's `agent_id`; the agent whose
+`agent_id` the run holds is the run's current admiral agent, and every admiral
+agent that has held it is an admiral agent of the run. Its `run_id` is a name,
+bound once, by the first of:
+
+- **`agent_start` or `agent_bound` for an admiral** gives it a run: the run
+  whose `agent_id` matches, else a new run with no `run_id` (a placeholder).
+  Both do this because they can arrive in either order, and a foreground
+  admiral is bound only when it ends, so its `agent_start` is the first report
+  naming it while it runs.
+- **The `run_hint` of an admiral's own spawn**, once `agent_bound` joins the
+  spawn to the admiral, names the admiral's run if it has no `run_id` yet. When
+  another run in the session already holds that `run_id`, that is a resume:
+  the named run is re-armed to `running` and takes the admiral's `agent_id`,
+  and the placeholder is folded into it, as `admiral_started` does.
+- **A captain's `agent_spawn` or `agent_bound` with a `run_hint`.** When the
+  caller's run has no `run_id` and no other run in the session holds that
+  `run_hint`, the run is named by it. A captain brief always carries its
+  reports-dir path (`athena:dispatch-captain`), so an admiral's first captain
+  spawn names its run.
+- **`admiral_started`** adopts and names the placeholder run of its `agent_id`
+  (*Fleet report kinds and their closed schema*).
+
+The lifecycle hook sets `run_hint` from the spawn prompt: the one distinct
+`ai-artifacts/coordination/<dir>/` path in it, where `<dir>` has the `run_id`
+shape. Zero paths, or several distinct ones, give no hint. The prompt itself is
+never sent.
+
+A `run_id`, once bound, never changes. A captain's `run_hint` naming a
+`run_id` another run in the session already holds binds nothing, and the server
+logs a warning naming both runs. The caller's run is the run whose admiral agent made the
+spawn (`caller_agent_id`).
 
 ### Fleet identity: owner and machine are stamped from the token
 
@@ -3098,7 +3294,10 @@ at every agent depth). The kinds and the other fields each may carry:
   of the same owner or not, answers `not_found` (HTTP 404), writes nothing,
   and never says where the session is bound.
 - **An admiral run and its missions inherit the session's machine and owner.**
-  Every read and write of them is scoped through that session.
+  Every read and write of them is scoped through that session. So are the
+  spawns and agents the lifecycle kinds record: a lifecycle report reaches
+  rows only through its own session, so one naming a session bound to another
+  machine answers `not_found` and writes nothing, like any other report.
 - **No token answers 401.** The machine pipeline rejects the request before any
   fleet code runs.
 - **Pages are owner-scoped.** The fleet page lists only rows whose owner is the
@@ -3122,8 +3321,59 @@ The first five are the work-item metadata the storage boundary allows. The
 sixth is the admiral's own state, not work-item content. Any other field
 (a body, a comment, a summary, a label, an assignee) is refused with a `Fix:`
 naming the field. The boundary is enforced by the closed schema, not by
-policy. The entries replace the run's list whole; `(tracker, ticket_ref)` is
-unique within a run.
+policy. An `admiral_scope` replaces the run's reported entries whole;
+`(tracker, ticket_ref)` is unique among them.
+
+**Later (2026-09-25):** DND-541: this said the entries replace the run's list
+whole, when `admiral_scope` was a run's only source of missions. The replace
+now covers only the reported entries. The missions the lifecycle kinds record
+from captain spawns (below) are never removed by an `admiral_scope`, so a
+missed or late scope report cannot hide a running captain.
+
+**Hook missions carry `ticket_ref` only.** A captain's `agent_spawn` names its
+mission by `ticket_ref` and nothing else. The lifecycle hook parses the ref
+locally, and never sends the Agent tool's description or prompt:
+
+1. The distinct refs in the description, each word-bounded (a ref inside a
+   longer token, such as `XDND-5Y`, does not count). Exactly one gives
+   `mapped` with that ref.
+2. Else the first prompt line of the form `Mission: <REF>`, with optional
+   markdown bold around `Mission`, gives `mapped` with that ref.
+3. Else `unmapped`. Two or more distinct refs in the description are
+   ambiguous and give `unmapped`, never a guess.
+
+An admiral spawn carries `mapping: not_applicable`. A ref is only ever
+`ticket_ref`'s grammar (*Fleet report kinds and their closed schema*).
+
+**An unmapped captain is loud, and never denied.** The spawn proceeds, and it
+shows three ways:
+
+- `agent_spawn` is still sent, with `mapping: unmapped` and no `ticket_ref`.
+  The fleet page shows an `unmapped captain` row under the run, highlighted,
+  never merged into a mission.
+- The hook appends a line with a `Fix:` to
+  `$XDG_STATE_HOME/athena/fleet/report-failures.log`, which the next
+  SessionStart announces.
+- The hook prints PreToolUse `hookSpecificOutput.additionalContext`, with no
+  `permissionDecision`, so the spawning admiral sees it and the call proceeds
+  (measured 2026-09-24, DND-443). The text is exactly
+  `fleet-lifecycle: this athena-captain spawn names no ticket, so the fleet page shows it as an unmapped captain. Fix: start the Agent description with the Mission's ticket ref (for example DND-541 captain) and put a line of the form Mission: DND-541 in the brief.`
+
+**Reported and hook missions merge by `ticket_ref`.** Hook missions come from
+the spawns whose caller is any admiral agent of the run. A mission's captain
+state from the hooks is the lifecycle of its latest spawn's agent: `running`,
+`ended`, `ended_unexpectedly` with its basis, `lost` (still `running` but
+silent past the lost window of *Fleet liveness*), or `denied`. A spawn not
+yet joined to an agent, with no end, reads `running`; it is never `lost` on its
+own silence, because a foreground spawn is joined only when it ends. The hook
+captain state wins over the reported `captain_state` when it is newer. A hook mission whose `ticket_ref`
+more than one reported entry carries (two trackers) merges with none and shows
+on its own row.
+
+**A reported status older than hook evidence is `stale`.** The fleet page marks
+a mission's reported `status` `stale` when a lifecycle report for that ticket is
+newer than the run's last `admiral_scope`. Reading the status from the
+tracker's own item in the *Priority index* is DND-562's, and waits on DND-436.
 
 ### Fleet liveness
 
@@ -3142,6 +3392,9 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   - `ended` when `session_ended` arrived (basis `reported`), or when silent
     past the stale window (default 24 h) with no end report (basis
     `inferred`). The basis is always shown.
+
+  In these session rules a run's state is its reported state, not the display
+  state an admiral run derives below.
 - **"Seen" counts every report from the session**, from any agent in it. A
   captain's tool calls keep its admiral's session seen.
 - **The lost window MUST exceed the longest interval in which a healthy fleet
@@ -3152,17 +3405,65 @@ of liveness, because SessionEnd does not fire when a session is SIGKILLed
   moves the other. A shorter window would read a waiting fleet as `lost`.
   The lease window of *Priority index* → *Leases* is tied to the lost window
   the same way.
-- An **admiral run** reads its reported state (`running`, `draining`, `drained`,
-  `finished`), except that a `running` or `draining` run reads `lost` when its
-  session does. `admiral_seen` shows the admiral's own last activity. It never
-  decides `lost` alone, because a waiting admiral is silent while its captains
-  work.
+- An **admiral run** ages on its own activity, not its session's. It reads
+  one of `running`, `quiet`, `lost`, `draining`, `drained`, `parked`,
+  `finished` or `ended_unexpectedly`, or `run unreported` for a run with no
+  `run_id` (below). First match wins:
+  1. The reported state is `finished`, `parked` or `drained`: that state.
+  2. The run's current admiral agent (*Agent lifecycle*) is
+     `ended_unexpectedly`: `ended_unexpectedly`, with that agent's basis
+     (`api_error:<error_class>`, `spawn_failed` or `session_ended`).
+  3. That agent is `ended` and the reported state is `running` or `draining`:
+     `ended_unexpectedly`, basis `no_final_state`, shown as "turn ended with no
+     final state; resumes on message". An `agent_start` for that agent reverses
+     it.
+  4. The session is `lost` or `ended`: `lost`.
+  5. The run is silent past the lost window: `lost`. Silent past the live
+     window: `quiet`. The run's silence is measured from the latest of its own
+     last-seen time, the last-seen time of each admiral agent of the run, and
+     the last-seen time of each captain still `running` whose spawn's caller is
+     an admiral agent of the run. An ended captain's last-seen time never
+     keeps a run live.
+  6. Otherwise the reported state (`running` or `draining`).
+
+  Until the lifecycle hook reports on a machine, a run there has no admiral
+  agent, so steps 2 and 3 never match and step 5 is its only backstop.
+
+  **Later (2026-09-25):** DND-541: this bullet said an admiral run reads its
+  reported state, except that a `running` or `draining` run reads `lost` when
+  its session does, and that `admiral_seen` was never to decide `lost` alone
+  because a waiting admiral is silent while its captains work. A live
+  coordinator session keeps its session seen for hours, so a dead admiral's run
+  read `running` 15 h after it parked (observed 2026-09-25). A run now ages on
+  its own activity, counting its live captains', so a waiting admiral still
+  never reads `lost`. The lifecycle hooks end a run whose admiral stopped.
+- **The lost window ages runs for the same reason it ages sessions.** A
+  healthy admiral waiting on its background captains makes a tool call at
+  least once per `admiral-report-watch` sweep (2700 s), which `admiral_seen`
+  reports, and its live captains refresh the run in between. So one set of
+  windows serves sessions and runs, and the lost window MUST exceed 2700 s for
+  runs too.
+- **A foreground captain is the known limit.** An admiral blocked on a
+  foreground captain makes no tool call until that captain ends, and the
+  captain's own activity cannot refresh the run, because a foreground spawn is
+  joined to its agent only when it ends (*Agent lifecycle*). Such a run reads
+  `quiet`, then `lost` past the lost window, while the captain works. An
+  admiral runs up to five captains in parallel (athena-admiral), which takes
+  background spawns, so this is not the normal case.
+- **`quiet` is a normal wait,** rendered neutral ("waiting, no activity for
+  Xm"), never as an alarm.
+- **Orphaned captains are shown, not reported.** A run at step 2 or 3 with
+  captains still `running` shows "N captains still running".
 - **`scope unreported`** is an admiral run that never sent `admiral_scope`. It
   MUST read differently from an empty scope (`no missions`), which is a
   reported fact. An `admiral_seen` whose `agent_id` matches no started run
-  shows as an admiral with `run unreported`, never dropped.
+  shows as an admiral with `run unreported`, never dropped. So does a run with
+  no `run_id` yet (*Agent lifecycle* → *Run binding*). Such a run carries steps
+  2 to 5 above like any other, so an unnamed dead admiral ages to `lost`. When
+  none of them matches, it reads `run unreported`.
 - The session's reported state (`running`, `draining`, `drained`, `idle`) is
-  derived from its admiral runs, never sent by the harness.
+  derived from its admiral runs, never sent by the harness. A `parked` run,
+  like a `finished` one, counts toward none of them.
 
 ### Session control: desired state
 

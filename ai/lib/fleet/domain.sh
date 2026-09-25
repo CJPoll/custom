@@ -12,7 +12,10 @@
 #
 # Source order: this file only. Requires jq.
 
-# The seven kinds, exactly as the contract names them.
+# The kinds and admiral states this reporter sends today, as the contract
+# names them. The contract (*Fleet report kinds and their closed schema*) also
+# names the lifecycle kinds agent_spawn, agent_bound, agent_start and agent_end,
+# and admiral_state parked; DND-560 adds them here (DND-541).
 FLEET_KINDS="session_started session_seen session_ended admiral_started admiral_scope admiral_seen admiral_state"
 FLEET_ADMIRAL_STATES="draining drained finished"
 FLEET_TRACKERS='["notion-personal","notion-work"]'

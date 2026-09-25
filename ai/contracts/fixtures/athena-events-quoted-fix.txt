@@ -49,3 +49,10 @@ template slot '{<path>}' names a field-path that is not in the union of this rul
 # the rendered reason equals this line (placeholders included), and that a real
 # drain deny carries it filled in. No gen_saas side.
 Fix: fleet session <claude_session_id> is draining (<reason>, until <until>; basis <basis>) — this spawn was refused, not failed: do not retry it and do not do its work in-line; run the drain protocol, then wait for the session to return to run (override on the fleet page to force it).
+
+@section Mission pointers are metadata only
+# the unmapped-captain notice the lifecycle hook prints as PreToolUse
+# additionalContext (no permissionDecision: the spawn proceeds).
+# NOT YET EMITTED: DND-560 ships ai/hooks/fleet-lifecycle.sh and pins its side in
+# ai/hooks/fleet-lifecycle.self-test.sh. No gen_saas side.
+fleet-lifecycle: this athena-captain spawn names no ticket, so the fleet page shows it as an unmapped captain. Fix: start the Agent description with the Mission's ticket ref (for example DND-541 captain) and put a line of the form Mission: DND-541 in the brief.
