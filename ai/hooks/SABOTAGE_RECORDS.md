@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 98 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11).
+- **Baseline:** `RESULT: 101 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21).
 
 ### Fail-first (no guard)
 
@@ -313,3 +313,21 @@ RESULT: 91 passed, 6 failed
 ```
 
 After the fix: `RESULT: 98 passed, 0 failed`.
+
+### Self-review after round 3 (alias lookup misses)
+
+A sweep of the alias class before the next critic round found two more
+misses: git matches alias names case-insensitively (`git SP` runs alias.sp;
+verified on git 2.55 with a fixture alias), and an alias can be defined
+through an environment variable whose value is not in the command text
+(`--config-env=alias.p=P`, `GIT_CONFIG_KEY_0=alias.p`). The new cases against
+the round-3 hook:
+
+```
+FAIL  A19. alias names match case-insensitively (git SP) (expected deny) status=0 out=[]
+FAIL  A20. alias through --config-env (expected deny) status=0 out=[]
+FAIL  A21. alias through GIT_CONFIG_KEY_n (expected deny) status=0 out=[]
+RESULT: 98 passed, 3 failed
+```
+
+After the fix: `RESULT: 101 passed, 0 failed`.

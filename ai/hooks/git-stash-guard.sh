@@ -65,7 +65,11 @@
 # call and run in a later one; another interpreter building argv (`python -c`);
 # `--autostash` on rebase/pull/merge, which stores into the list only on a
 # conflict and is used by the shipwright (out of scope, proposed separately);
-# reflog expiry by `git gc`.
+# reflog expiry by `git gc`; git arguments supplied through a pipe
+# (`printf 'stash pop' | xargs git`); an alias defined in a file the command
+# only names (`git -c include.path=<file>`, a `.gitconfig` written with the
+# Write tool in an earlier call is caught when the alias is USED, since
+# aliases are read at decision time).
 #
 # Design guarantees (mirror forge-identity-guard):
 #   * FAIL-OPEN — any error (missing jq, unparseable input, non-Bash tool, no
@@ -118,6 +122,12 @@ fi
 # ---- defining an alias whose value names stash ------------------------------
 if printf '%s' "$FLAT" | grep -Eq 'alias\.[^[:space:]=;&|]+[=[:space:]]([^;&|]*[^[:alnum:]_.-])?stash([^[:alnum:]_.-]|$)'; then
   deny 'this command defines a git alias whose value names `stash` (via `-c alias.<x>=...` or `git config alias.<x> ...`), a way to run a stash write under another name.'
+fi
+# An alias whose value arrives through an environment variable
+# (`--config-env=alias.<x>=<VAR>`, `GIT_CONFIG_KEY_<n>=alias.<x>`): the value
+# is not in the command text, so any such alias definition is denied.
+if printf '%s' "$FLAT" | grep -Eq '(--config-env[=[:space:]]+|GIT_CONFIG_KEY_[0-9]+=)alias\.'; then
+  deny 'this command defines a git alias through an environment variable (`--config-env=alias.<x>=<VAR>` or `GIT_CONFIG_KEY_<n>=alias.<x>`), whose value this guard cannot read and which may run a stash write under another name. Define aliases in your git config instead.'
 fi
 
 # ---- git aliases in scope ----------------------------------------------------
@@ -194,6 +204,9 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
   function decide(sc, nxt, depth,    i, v, a, aq, as, n, r) {
     if (sc == "stash") return is_read(nxt) ? "" : "stash"
     if (sc ~ /[$`]/) return "expanded"
+    # Alias names are config keys, so git matches them case-insensitively
+    # (`git SP` runs alias.sp); --get-regexp prints them lower-cased.
+    sc = tolower(sc)
     if (depth > 10 || !(sc in nal)) return ""
     for (i = 1; i <= nal[sc]; i++) {
       v = aval[sc, i]

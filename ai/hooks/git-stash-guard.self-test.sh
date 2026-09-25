@@ -222,6 +222,9 @@ case_cmd "A15. alias value with a global option: z = -c k=v stash pop" deny 'git
 case_cmd "A16. alias np = --no-pager stash (bare)" deny 'git np'
 case_cmd "A17. alias np + pop" deny 'git np pop'
 case_cmd "A18. alias npl = --no-pager stash list (read)" allow 'git npl'
+case_cmd "A19. alias names match case-insensitively (git SP)" deny 'git SP'
+case_cmd "A20. alias through --config-env" deny 'P="stash pop" git --config-env=alias.p=P p'
+case_cmd "A21. alias through GIT_CONFIG_KEY_n" deny 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=x git p'
 
 echo "== R: stash refs written without the stash subcommand =="
 case_cmd "R1. git update-ref -d refs/stash" deny 'git update-ref -d refs/stash'
