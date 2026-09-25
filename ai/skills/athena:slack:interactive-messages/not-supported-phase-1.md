@@ -21,8 +21,8 @@ An unstamped control cannot be routed, so the server refuses it rather than
 send a control whose click would go nowhere.
 
 The contract home for the stamp is `ai/contracts/athena-events.md` →
-*Machine↔owner API binding and the outbound return-address dual*. Its
-"buttons only" amendment is DND-519, not yet landed.
+*Machine↔owner API binding and the outbound return-address dual*, which
+states the buttons-only rule (DND-519).
 
 ## Refused elements
 

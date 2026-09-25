@@ -224,6 +224,11 @@ Rules that apply to every row:
   the contract has not caught up with: the line also carries `entity_id`
   (`slack:<channel>:<ts>`), and its `value` is the caller's own value with the
   return-address stamp stripped, not the stamped value.
+
+  **Later (2026-09-25):** DND-519 amended the contract to the shipped line, so
+  the two differences named above no longer exist. The field set is the
+  contract's, with nothing to add: `ai/contracts/athena-inbox.md` →
+  *Platform `log` line kinds* → `slack.interaction`.
 - **A click on a message this session did not post is relayed, not handled.**
   The `session` inbox is per project, so a sibling session of the same project
   may have posted it.
