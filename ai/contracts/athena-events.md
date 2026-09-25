@@ -3202,7 +3202,9 @@ proxy; raw logs in the gitignored
 
 Not measured: an interactive top-level turn end, whether a real usage-limit 429
 reports `rate_limit`, and whether PostToolUseFailure fires for a spawn that a
-PreToolUse hook denied. SubagentStop carries no stop reason and no parent id.
+PreToolUse hook denied. Every case ran headless. *Layer 3: the drain protocol*
+says ending an admiral's turn kills its running captains; the headless case
+above did not show that, and the two are not yet reconciled. SubagentStop carries no stop reason and no parent id.
 Its `background_tasks` lists the whole session's tasks, not the ending agent's
 own children, so it cannot count orphans.
 
@@ -3238,9 +3240,10 @@ own children, so it cannot count orphans.
   `session_seen` and `admiral_seen` with that `agent_id`, and the lifecycle
   kinds.
 - **`session_ended` ends every agent still `running` in its session** as
-  `ended_unexpectedly`, basis `session_ended`. SIGTERM and SIGHUP give only
-  SessionEnd, so this is the only signal those ends leave. Agents in other
-  sessions are untouched.
+  `ended_unexpectedly`, basis `session_ended`, and every spawn in it that is
+  neither joined to an agent nor ended, the same way. SIGTERM and SIGHUP give
+  only SessionEnd, so this is the only signal those ends leave. Agents and
+  spawns in other sessions are untouched.
 - **A SIGKILL, and the headless background-wait ceiling kill, fire no hook.**
   Nothing in this subsection can see them. Per-run aging (*Fleet liveness*) is
   the required backstop, not an optional one.
@@ -3336,11 +3339,11 @@ locally, and never sends the Agent tool's description or prompt:
 
 1. The distinct refs in the description, each word-bounded (a ref inside a
    longer token, such as `XDND-5Y`, does not count). Exactly one gives
-   `mapped` with that ref.
-2. Else the first prompt line of the form `Mission: <REF>`, with optional
-   markdown bold around `Mission`, gives `mapped` with that ref.
-3. Else `unmapped`. Two or more distinct refs in the description are
-   ambiguous and give `unmapped`, never a guess.
+   `mapped` with that ref. Two or more are ambiguous and give `unmapped`,
+   never a guess; the prompt is not consulted. None goes to step 2.
+2. The first prompt line of the form `Mission: <REF>`, with optional markdown
+   bold around `Mission`, gives `mapped` with that ref.
+3. Otherwise `unmapped`.
 
 An admiral spawn carries `mapping: not_applicable`. A ref is only ever
 `ticket_ref`'s grammar (*Fleet report kinds and their closed schema*).
@@ -3364,9 +3367,11 @@ the spawns whose caller is any admiral agent of the run. A mission's captain
 state from the hooks is the lifecycle of its latest spawn's agent: `running`,
 `ended`, `ended_unexpectedly` with its basis, `lost` (still `running` but
 silent past the lost window of *Fleet liveness*), or `denied`. A spawn not
-yet joined to an agent, with no end, reads `running`; it is never `lost` on its
-own silence, because a foreground spawn is joined only when it ends. The hook
-captain state wins over the reported `captain_state` when it is newer. A hook mission whose `ticket_ref`
+yet joined to an agent, with no end, reads `running`, and is never `lost` on
+its own silence, because a foreground spawn is joined only when it ends. It
+reads `lost` when its run reads `lost` or `ended_unexpectedly`, and
+`session_ended` ends it (*Agent lifecycle*). The hook captain state wins over
+the reported `captain_state` when it is newer. A hook mission whose `ticket_ref`
 more than one reported entry carries (two trackers) merges with none and shows
 on its own row.
 
