@@ -769,6 +769,21 @@ replaced by the finer conversation kinds, giving
 recognise the new members; a line whose `kind` it does not recognise degrades per
 *Reader obligations* (counted, never fatal).
 
+**Precedence, and how a threaded reply is actually identified.** The Slack
+receiver assigns exactly one `kind` per line, decided in this priority order —
+`im` (a 1:1 DM), then `mpim` (a group DM), then `mention`, then `thread_reply`
+(`thread_ts` set and the bot already participated in that thread)
+(`Athena.SlackEvents.Classifier.classify/3`, gen_saas). Because `im`/`mpim` are
+checked ahead of `thread_reply`, **a reply inside a DM or MPIM thread is
+stamped `kind: "im"` or `"mpim"`, never `"thread_reply"`**: `thread_reply` only
+ever fires for a non-DM (channel) thread the bot is already in. A reader that
+needs to tell a DM/MPIM thread's later replies apart from its opening message
+MUST NOT key on `kind` for that — it MUST compare `thread_ts` to `ts`:
+`thread_ts` set and `thread_ts != ts` is a reply; `thread_ts` absent/null or
+`thread_ts == ts` is the thread's first message. Which inbox a DM-thread reply
+is routed to (thread-claim vs. channel-route) is routing, not this contract's
+concern (DND-450), and is unaffected by this precedence note.
+
 **Later (2026-09-22):** this said **only `v`** (plus the framing rules) was
 universal, each other producer supplying its own fields. Superseded (customer
 requirement R4, as reconciled with the GS-2/DND-317 ruling): the **mandatory

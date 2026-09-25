@@ -348,6 +348,14 @@ only**. A `thread_reply` the file channel misses is simply lost: it depends on
 no second path to it. If a threaded reply to Athena seems to have gone
 unheard, it will not turn up here.
 
+**Later (2026-09-25):** the closing sentence above read generally enough to
+suggest *any* threaded reply is at risk. Narrowed: the classifier checks
+`im`/`mpim` ahead of `thread_reply` (`ai/contracts/athena-inbox.md` → *Channel
+kind: `log`* → *Precedence*), so a reply inside a DM or MPIM thread is stamped
+`kind: "im"`/`"mpim"` and **is** covered by this backstop — `thread_reply`
+(and this gap) applies only to a reply in a non-DM channel thread the bot is
+already in.
+
 ### The polling hook
 
 `ai/hooks/athena-slack-poll.sh` is a **`SessionStart`** hook (registered in
