@@ -241,6 +241,75 @@ if [ "${RC}" -eq 0 ] && has "ratchet" && has "ls-remote" && has "${TIP:0:12}"; t
   ok "14 the OK output names the ratchet and the cross-checked tip"
 else bad "14 the OK output names the ratchet and the cross-checked tip" "rc=${RC} out=${OUT}"; fi
 
+echo "== check-tool-risk: a tool moved to a new path keeps its landed class (DND-551) =="
+
+# The ratchet keys on the registry key, i.e. the tool's PATH. Before DND-551 a
+# destructive tool renamed and relabelled readOnly read as a removal plus a new
+# entry, and passed. A new key whose content maps to a REMOVED landed key (the
+# same blob, or git's rename detection at 50%) inherits that key's class.
+
+# A realistic, distinctive body for the landed post, so similarity means something.
+POST_BODY='#!/bin/sh
+# post -- send a message to a Slack channel as the Athena bot.
+case "${1:-}" in -h|--help) echo "usage: post <channel> [text]"; exit 0 ;; esac
+channel="${1:?channel required}"; shift
+text="${*:-$(cat)}"
+token="$(cat "${HOME}/.config/athena-slack/token")"
+curl -sS -X POST -H "Authorization: Bearer ${token}" \
+  --data-urlencode "channel=${channel}" --data-urlencode "text=${text}" \
+  https://slack.com/api/chat.postMessage'
+
+# moved_fixture <name>: new_fixture with post's distinctive body landed.
+moved_fixture() {
+  local root; root="$(new_fixture "$1")"
+  printf '%s\n' "${POST_BODY}" > "${root}/ai/${POST}"; land "${root}"
+  printf '%s\n' "${root}"
+}
+
+# 16. THE DEFECT: post -> post2, relabelled readOnly.
+R="$(moved_fixture moved-relabel)"
+git -C "${R}" mv "ai/${POST}" "ai/${POST}2"
+registry "${R}" check-tool-risk=readOnly "${POST}2=readOnly" "${PEEK}=readOnly"; run "${R}"
+if [ "${RC}" -ne 0 ] && has "${POST}2" && has "${POST} (moved here" && has "% similar" \
+   && has "destructive" && has "Fix:"; then
+  ok "16 post -> post2 relabelled readOnly fails, both paths and the similarity named, with Fix:"
+else bad "16 post -> post2 relabelled readOnly fails, both paths and the similarity named, with Fix:" "rc=${RC} out=${OUT}"; fi
+
+# 16b. Moved, edited (still >= 50% similar), untracked, relabelled idempotent.
+R="$(moved_fixture moved-edited)"
+mv "${R}/ai/${POST}" "${R}/ai/skills/athena:slack/bin/send"
+printf '# send: renamed from post\n' >> "${R}/ai/skills/athena:slack/bin/send"
+registry "${R}" check-tool-risk=readOnly skills/athena:slack/bin/send=idempotent "${PEEK}=readOnly"; run "${R}"
+if [ "${RC}" -ne 0 ] && has "skills/athena:slack/bin/send" && has "${POST} (moved here" && has "idempotent"; then
+  ok "16b post moved, edited, untracked and relabelled idempotent fails"
+else bad "16b post moved, edited, untracked and relabelled idempotent fails" "rc=${RC} out=${OUT}"; fi
+
+# 16c. Moved into ai/bin, whose registry key is the bare name: the key schema
+#      changes with the path, the class still follows the content.
+R="$(moved_fixture moved-to-bin)"
+git -C "${R}" mv "ai/${POST}" ai/bin/slack-post
+registry "${R}" check-tool-risk=readOnly slack-post=readOnly "${PEEK}=readOnly"; run "${R}"
+if [ "${RC}" -ne 0 ] && has "slack-post" && has "${POST} (moved here"; then
+  ok "16c post moved into ai/bin as slack-post and relabelled readOnly fails"
+else bad "16c post moved into ai/bin as slack-post and relabelled readOnly fails" "rc=${RC} out=${OUT}"; fi
+
+# 17. post -> post2 KEPT destructive: passes, and the move is named.
+R="$(moved_fixture moved-kept)"
+git -C "${R}" mv "ai/${POST}" "ai/${POST}2"
+registry "${R}" check-tool-risk=readOnly "${POST}2=destructive" "${PEEK}=readOnly"; run "${R}"
+if [ "${RC}" -eq 0 ] && has "${POST} -> ${POST}2"; then
+  ok "17 post -> post2 kept destructive passes, the move named"
+else bad "17 post -> post2 kept destructive passes, the move named" "rc=${RC} out=${OUT}"; fi
+
+# 18. A genuinely new tool beside an unrelated removal passes and is named.
+R="$(moved_fixture new-beside-removal)"
+git -C "${R}" rm -q "ai/${POST}"
+add_exec "${R}" ai/skills/athena:demo/bin/fresh
+registry "${R}" check-tool-risk=readOnly "${PEEK}=readOnly" skills/athena:demo/bin/fresh=readOnly; run "${R}"
+if [ "${RC}" -eq 0 ] && has "skills/athena:demo/bin/fresh (readOnly)" && has "new"; then
+  ok "18 a genuinely new tool beside a removed one passes, named"
+else bad "18 a genuinely new tool beside a removed one passes, named" "rc=${RC} out=${OUT}"; fi
+
 echo "== check-tool-risk: live tree =="
 
 # 15. The live tree passes (DND-512: keeps the caller's git config).

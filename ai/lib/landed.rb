@@ -35,9 +35,25 @@
 # read, the diff under test could write. The owner lands a new bar on main, and
 # a branch rebased onto it passes.
 #
+# CONTENT THAT MOVED (DND-539, shared since DND-551). A ratchet keyed on a path
+# is blind to a move: the landed path disappears and a "new" entry appears. So
+# Landed.rename_pairs traces landed blobs to working-tree files with git's own
+# rename detection, `git diff --no-index -M50% -l0`, over copies in a temp dir
+# (the repo is only read). The same blob and an edited move alike map. 50% is
+# git's default, the "this was moved" verdict `git diff -M`, `log --follow`,
+# merges, and the forge all use: lower matches scripts that share only a
+# shebang and boilerplate, higher lets a lightly edited copy through. `-l0`
+# lifts the rename limit, so a large diff cannot skip detection. A detection
+# that fails raises Unreadable ("could not measure"), never "nothing moved".
+# Callers: check-guard-messages (a moved guard keeps its bar), check-tool-risk
+# (a moved tool keeps its landed class), check-bin-help (an exemption covers
+# only its landed content).
+#
 # Deliberately gem-free (stdlib only).
 
+require "fileutils"
 require "open3"
+require "tmpdir"
 
 module Landed
   REF = "refs/remotes/origin/main"
@@ -47,6 +63,9 @@ module Landed
   # The bound only stops a hung transport from hanging the gate; hitting it is
   # "could not measure", never a pass.
   LS_REMOTE_TIMEOUT = 30
+  # git's own default rename threshold. See "CONTENT THAT MOVED" above.
+  RENAME_SIMILARITY = 50
+  RENAME_PROBE = "git diff --no-index -M#{RENAME_SIMILARITY}% (rename detection)".freeze
 
   # The landed bar could not be read. Carries every probe and what it gave.
   class Unreadable < StandardError
@@ -164,10 +183,10 @@ module Landed
     [pts, probes]
   end
 
-  # The text of path at commit sha, or nil when the commit's tree has no such
-  # path. "No such path" is a MEASUREMENT (the bar had not landed at that
+  # The blob sha of path at commit sha, or nil when the commit's tree has no
+  # such path. "No such path" is a MEASUREMENT (it had not landed at that
   # point); anything else that stops the read raises Unreadable.
-  def file_at(root, sha, path, label)
+  def blob_at(root, sha, path, label)
     listing, ok = git_read(root, "ls-tree", "-z", sha, "--", path)
     raise Unreadable.new([[label, "#{sha[0, 12]}: git ls-tree failed for #{path}"]]) unless ok
 
@@ -176,6 +195,15 @@ module Landed
 
     _mode, type, blob = row.split("\t", 2)[0].split(" ")
     raise Unreadable.new([[label, "#{sha[0, 12]}: #{path} is a #{type}, not a file"]]) unless type == "blob"
+
+    blob
+  end
+
+  # The text of path at commit sha, or nil when the commit's tree has no such
+  # path (see blob_at).
+  def file_at(root, sha, path, label)
+    blob = blob_at(root, sha, path, label)
+    return nil unless blob
 
     text, ok = git_read(root, "cat-file", "blob", blob)
     raise Unreadable.new([[label, "#{sha[0, 12]}: #{path} could not be read"]]) unless ok
@@ -228,5 +256,73 @@ module Landed
      "  Fix: `git fetch #{REMOTE}` so #{REF} matches what landed, rebase onto " \
      "it, and re-run. A local ref moved by hand (git update-ref) does not move the bar: " \
      "the check compares against origin's #{REMOTE_REF}."]
+  end
+
+  # [[tag, rel, score]] for every (landed blob -> working-tree file) pair git's
+  # rename detection finds. sources is [[tag, blob_sha], ...] (a tag may carry
+  # several blobs, one per landed point); added is [rel, ...] under root. Git
+  # pairs each file with at most one source: exact matches first, then the best
+  # score. Runs on copies in a temp dir, so no index, object, or ref is
+  # written. Raises Unreadable when detection cannot run.
+  def rename_pairs(root, sources, added)
+    return [] if sources.empty? || added.empty?
+
+    Dir.mktmpdir("landed-renames-") do |tmp|
+      src_names = write_rename_side(File.join(tmp, "src"), "s", sources) do |(_tag, blob)|
+        text, ok = git_read(root, "cat-file", "blob", blob)
+        raise Unreadable.new([[RENAME_PROBE, "git cat-file blob #{blob[0, 12]} failed"]]) unless ok
+
+        text
+      end
+      dst_names = write_rename_side(File.join(tmp, "dst"), "d", added) { |rel| File.binread(File.join(root, rel)) }
+      out, err, status = Open3.capture3("git", "diff", "--no-index", "--no-ext-diff", "-M#{RENAME_SIMILARITY}%",
+                                        "-l0", "--name-status", "-z", "src", "dst", chdir: tmp)
+      # --no-index exits 1 both for "differences found" and for an error, so a
+      # non-empty stderr is what tells them apart.
+      unless [0, 1].include?(status.exitstatus) && err.strip.empty?
+        raise Unreadable.new([[RENAME_PROBE, "failed (exit #{status.exitstatus}): #{err.strip}"]])
+      end
+
+      parse_renames(out).map { |src, dst, score| [src_names.fetch(src)[0], dst_names.fetch(dst), score] }
+    end
+  rescue Errno::ENOENT
+    raise Unreadable.new([[RENAME_PROBE, "git executable not found on PATH"]])
+  end
+
+  # The similarity score (100 for the same blob) at which the working-tree file
+  # rel carries one of blobs' content, or nil when it maps to none of them.
+  # One file against one tag's blobs, so git cannot pair rel with some other
+  # tag's content instead. Raises Unreadable when it cannot be measured.
+  def maps_to(root, blobs, rel)
+    out, ok = git_read(root, "hash-object", "--", rel)
+    raise Unreadable.new([[RENAME_PROBE, "git hash-object #{rel} failed"]]) unless ok
+    return 100 if blobs.include?(out.strip)
+
+    pair = rename_pairs(root, blobs.map { |blob| [blob, blob] }, [rel]).first
+    pair && pair[2]
+  end
+
+  # Writes one file per item under dir, named <prefix><n>, from the block's
+  # content. Returns { "<side>/<name>" => item }.
+  def write_rename_side(dir, prefix, items)
+    FileUtils.mkdir_p(dir)
+    side = File.basename(dir)
+    items.each_with_index.to_h do |item, i|
+      name = format("%s%05d", prefix, i)
+      File.binwrite(File.join(dir, name), yield(item))
+      ["#{side}/#{name}", item]
+    end
+  end
+
+  # [[src, dst, score]] from `--name-status -z` output: "R<score>\0src\0dst\0".
+  def parse_renames(out)
+    tokens = out.split("\0")
+    renames = []
+    until tokens.empty?
+      status = tokens.shift
+      paths = tokens.shift(status.start_with?("R", "C") ? 2 : 1)
+      renames << [paths[0], paths[1], status[1..].to_i] if status.start_with?("R")
+    end
+    renames
   end
 end

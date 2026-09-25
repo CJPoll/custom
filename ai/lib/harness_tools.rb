@@ -100,4 +100,10 @@ module HarnessTools
 
     rel.delete_prefix("ai/")
   end
+
+  # The repo-relative path a registry key names: risk_key's inverse. A bare
+  # name is an ai/bin tool; anything else is a path under ai/.
+  def risk_path(key)
+    key.include?("/") ? "ai/#{key}" : "ai/bin/#{key}"
+  end
 end

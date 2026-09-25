@@ -206,13 +206,30 @@ end
 # No in-repo escape hatch: the OWNER lands a relabel or a carve-out on main,
 # and a branch rebased onto it passes.
 #
+# A TOOL MOVED TO A NEW PATH KEEPS ITS LANDED CLASS (DND-551). The registry key
+# IS the tool's path (HarnessTools.risk_key), so before DND-551 a destructive
+# tool renamed (post -> post2) and relabelled readOnly read as a removal plus a
+# genuinely new entry, and passed. Now a NEW key whose content maps to a
+# REMOVED landed key (a key in the landed registry and not in the current one)
+# inherits that key's landed class: classed lower, it is a weakening named with
+# both keys and the similarity. Classed the same or higher, the move passes and
+# is named. "Maps" is Landed.rename_pairs, the same git rename detection
+# (`git diff --no-index -M50%`) check-guard-messages uses for a moved guard
+# (DND-539), over every distinct landed blob of each removed key's path and the
+# new keys' working-tree files. It runs only when some key was removed AND some
+# key is new, so the common case costs nothing. A detection that fails is
+# "could not measure".
+#
 # Residual, stated out loud: this does not stop an actor that can push to main,
 # a diff that edits this file's enforcement path (STRICTNESS, the parsers), or
-# one that repoints the `origin` remote. A tool MOVED to a new path reads as a
-# removal plus a new entry, so a destructive tool renamed and relabelled
-# readOnly passes, named as new in the OK output. Only the gate path (no
-# arguments) ratchets; --class-of and --json, which workflow-phase-guard calls
-# at runtime, read the working-tree registry as before.
+# one that repoints the `origin` remote. A tool rewritten below 50% similarity
+# reads as a removal plus a new entry: it passes, named as new in the OK output.
+# A tool COPIED to a new key while its landed key stays is judged only as new
+# (its landed key keeps its class): the copy's class is named, not inherited.
+# Git pairs each new file with one removed source, so a tool split in two is
+# judged by the half git picks. Only the gate path (no arguments) ratchets;
+# --class-of and --json, which workflow-phase-guard calls at runtime, read the
+# working-tree registry as before.
 
 STRICTNESS = %w[readOnly idempotent destructive].freeze
 REGISTRY_REL = "ai/tools/risk.yml"
@@ -334,21 +351,57 @@ def current_scope(root)
   parsed
 end
 
+# Pairs each NEW registry key with the REMOVED landed key its content moved
+# from (Landed.rename_pairs; see "A TOOL MOVED" above). Returns [weakened,
+# kept]:
+#   weakened  [new_key, "<class> at <old_key> (moved here, N% similar)", now]
+#             where now ranks below the landed class;
+#   kept      [old_key, new_key, score] otherwise.
+# Raises Landed::Unreadable when a landed blob or the detection cannot be read.
+def moved_tools(root, points, landed, current)
+  removed = landed.keys.reject { |key| current.key?(key) }.sort
+  added = current.keys.reject { |key| landed.key?(key) }.sort.to_h { |key| [HarnessTools.risk_path(key), key] }
+  added.select! { |rel, _| File.file?(File.join(root, rel)) }
+  return [[], []] if removed.empty? || added.empty?
+
+  sources = removed.flat_map do |key|
+    points.filter_map { |label, sha| Landed.blob_at(root, sha, HarnessTools.risk_path(key), label) }
+          .uniq.map { |blob| [key, blob] }
+  end
+  weakened = []
+  kept = []
+  Landed.rename_pairs(root, sources, added.keys).each do |old_key, rel, score|
+    new_key = added.fetch(rel)
+    was = landed.fetch(old_key)
+    now = current.fetch(new_key)
+    if rank(now) < rank(was)
+      weakened << [new_key, "#{was} at #{old_key} (moved here, #{score}% similar)", now]
+    else
+      kept << [old_key, new_key, score]
+    end
+  end
+  [weakened, kept.sort]
+end
+
 # The ratchet's findings for a gate run: :points, :risk_weakened
-# [[key, landed, now]], :risk_new [[key, class]], :scope_weakened
+# [[key, landed, now]] (a moved key's landed names its source), :risk_moved
+# [[old_key, new_key, score]], :risk_new [[key, class]], :scope_weakened
 # [[prefix, now]], :scope_new [[prefix, verdict]], :scope_introduced; or
 # :unreadable (probes) / :mismatch ([local, remote]).
 def ratchet(root, current_classes, scope)
   points, registries, scopes = landed_bars(root)
   landed = merge_registries(registries)
   landed_prefixes = scopes.flatten(1).map(&:first)
+  moved_weakened, moved_kept = moved_tools(root, points, landed, current_classes)
+  moved_keys = moved_weakened.map(&:first) + moved_kept.map { |_, new_key, _| new_key }
   {
     points: points,
-    risk_weakened: current_classes.filter_map do |key, now|
+    risk_weakened: (current_classes.filter_map do |key, now|
       was = landed[key]
       [key, was, now] if was && rank(now) < rank(was)
-    end.sort,
-    risk_new: current_classes.reject { |key, _| landed.key?(key) }.sort,
+    end + moved_weakened).sort,
+    risk_moved: moved_kept,
+    risk_new: current_classes.reject { |key, _| landed.key?(key) || moved_keys.include?(key) }.sort,
     registry_introduced: registries.empty?,
     scope_weakened: scope_weakenings(scopes, scope),
     scope_new: scope.reject { |prefix, _| landed_prefixes.include?(prefix) },
@@ -378,8 +431,9 @@ def ratchet_failure_lines(r)
              "order #{STRICTNESS.join(' < ')}):"
     r[:risk_weakened].each { |key, was, now| lines << "    - #{key}: landed #{was} -> now #{now}" }
     lines << "  A lower class lets ai/hooks/workflow-phase-guard.sh allow the tool in more phases, and " \
-             "this diff wrote the bar it is judged by."
-    lines << "  Fix: restore each tool's landed class in #{REGISTRY_REL}. #{HATCH}"
+             "this diff wrote the bar it is judged by. A tool moved to a new key keeps the class its " \
+             "content landed with (git rename detection, >= #{Landed::RENAME_SIMILARITY}% similar)."
+    lines << "  Fix: restore each tool's landed class in #{REGISTRY_REL}, at its new key if it moved. #{HATCH}"
   end
   unless r[:scope_weakened].empty?
     lines << "  SCOPE weakened below the landed bar: path(s) that were IN are now out of scope " \
@@ -395,6 +449,10 @@ def ratchet_ok_lines(r)
   lines = ["  risk + SCOPE ratchet: 0 weakening(s) against #{Landed.describe(r[:points])}; " \
            "the tip matches `#{Landed::LS_REMOTE_PROBE}`"]
   lines << "  no landed #{REGISTRY_REL}: the registry is introduced by this diff" if r[:registry_introduced]
+  unless r[:risk_moved].empty?
+    lines << "  landed tool(s) moved to a new key, landed class kept: " +
+             r[:risk_moved].map { |old, new, score| "#{old} -> #{new} (#{score}% similar)" }.join(", ")
+  end
   unless r[:risk_new].empty?
     lines << "  new risk entr(ies) with no landed counterpart: " +
              r[:risk_new].map { |key, klass| "#{key} (#{klass})" }.join(", ")
@@ -613,6 +671,11 @@ def ratchet_unit_cases(fail)
     fail.("scope_weakenings #{name}: want #{want.inspect}, got #{got.inspect}") unless got == want
   end
   fail.("no landed SCOPE must weaken nothing") unless scope_weakenings([], [["ai/", :out]]).empty?
+  # DND-551: moved_tools maps a registry key back to its path; it must invert risk_key.
+  %w[ai/bin/x ai/skills/athena:slack/bin/post ai/bin/sub/y ai/skills/a/scripts/.z].each do |rel|
+    back = HarnessTools.risk_path(HarnessTools.risk_key(rel))
+    fail.("risk_path(risk_key(#{rel})) = #{back}") unless back == rel
+  end
   fail.("rank must order readOnly < idempotent < destructive") unless
     rank("readOnly") < rank("idempotent") && rank("idempotent") < rank("destructive") && rank("x").nil?
   begin

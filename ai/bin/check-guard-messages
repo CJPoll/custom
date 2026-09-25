@@ -442,9 +442,11 @@ end
 
 # --- a guard moved to a new path keeps its bar (DND-539) ---------------------
 
-# git's own default rename threshold. See "A MOVED GUARD" in the header.
-RENAME_SIMILARITY = 50
-RENAME_PROBE = "git diff --no-index -M#{RENAME_SIMILARITY}% (rename detection)".freeze
+# git's own default rename threshold, and the detection itself, live in
+# ai/lib/landed.rb (shared with check-tool-risk and check-bin-help, DND-551).
+# See "A MOVED GUARD" in the header.
+RENAME_SIMILARITY = Landed::RENAME_SIMILARITY
+RENAME_PROBE = Landed::RENAME_PROBE
 
 # Pairs each REMOVED landed guard (its path no longer exists) with the NEW
 # candidate its content moved to, using git's rename detection: the same blob,
@@ -477,55 +479,13 @@ def moved_guards(root, found, entries, landed, blobs)
 end
 
 # [[old_rel, new_rel, score]] for every (landed blob -> working-tree file) pair
-# git's rename detection finds. The comparison runs on copies in a temp dir, so
-# the repo is only read: no index, no object store, no ref is written.
+# git's rename detection finds (Landed.rename_pairs).
 def rename_pairs(root, sources, added)
-  Dir.mktmpdir("check-guard-messages-moved-") do |tmp|
-    src_names = write_rename_side(File.join(tmp, "src"), "s", sources) do |(_rel, blob)|
-      text, ok = git_read(root, "cat-file", "blob", blob)
-      raise LandedUnreadable.new([[RENAME_PROBE, "git cat-file blob #{blob[0, 12]} failed"]]) unless ok
-
-      text
-    end
-    dst_names = write_rename_side(File.join(tmp, "dst"), "d", added) { |rel| File.binread(File.join(root, rel)) }
-    out, err, status = Open3.capture3("git", "diff", "--no-index", "--no-ext-diff", "-M#{RENAME_SIMILARITY}%",
-                                      "-l0", "--name-status", "-z", "src", "dst", chdir: tmp)
-    # --no-index exits 1 both for "differences found" and for an error, so a
-    # non-empty stderr is what tells them apart.
-    unless [0, 1].include?(status.exitstatus) && err.strip.empty?
-      raise LandedUnreadable.new([[RENAME_PROBE, "failed (exit #{status.exitstatus}): #{err.strip}"]])
-    end
-
-    parse_renames(out).map do |src, dst, score|
-      [src_names.fetch(src)[0], dst_names.fetch(dst), score]
-    end
-  end
-rescue Errno::ENOENT
-  raise LandedUnreadable.new([[RENAME_PROBE, "git executable not found on PATH"]])
+  Landed.rename_pairs(root, sources, added)
 end
 
-# Writes one file per item under dir, named <prefix><n>, from the block's
-# content. Returns { "<side>/<name>" => item }.
-def write_rename_side(dir, prefix, items)
-  FileUtils.mkdir_p(dir)
-  side = File.basename(dir)
-  items.each_with_index.to_h do |item, i|
-    name = format("%s%05d", prefix, i)
-    File.binwrite(File.join(dir, name), yield(item))
-    ["#{side}/#{name}", item]
-  end
-end
-
-# [[src, dst, score]] from `--name-status -z` output: "R<score>\0src\0dst\0".
 def parse_renames(out)
-  tokens = out.split("\0")
-  renames = []
-  until tokens.empty?
-    status = tokens.shift
-    paths = tokens.shift(status.start_with?("R", "C") ? 2 : 1)
-    renames << [paths[0], paths[1], status[1..].to_i] if status.start_with?("R")
-  end
-  renames
+  Landed.parse_renames(out)
 end
 
 # Table entries for paths that were not a candidate at any landed point.

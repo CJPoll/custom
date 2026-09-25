@@ -140,11 +140,24 @@ end
 # (no origin/main, no merge-base, shallow, origin unreachable, a malformed
 # landed table) and a local tip that disagrees with origin both FAIL, with Fix:.
 #
+# AN EXEMPTION COVERS ONLY THE CONTENT IT LANDED WITH (DND-551). EXEMPT is
+# keyed by path, so before DND-551 a landed exemption kept while its tool was
+# swapped for different content at the same path passed, and the new content
+# was never probed. Now each landed key's working-tree file must map to one of
+# its landed blobs (at the points where the key was exempt): the same blob, or
+# git's rename detection at 50% (Landed.maps_to, the machinery check-guard-
+# messages uses for a moved guard, DND-539). A light edit of a wrapper maps; a
+# different tool at the same path does not, and is a weakening. The exemption
+# is NOT carried by a move: the wrapper moved to a new path and exempted there
+# is a new key, and a new exemption fails as above. That is the stricter
+# reading: a move is one owner landing away, and relaxing it would let a diff
+# re-point an exemption.
+#
 # No in-repo escape hatch: the OWNER lands a new exemption on main, and a
 # branch rebased onto it passes. Residual: an actor that can push to main, a
 # diff that edits this ratchet's code or the parser, one that repoints the
-# `origin` remote, or a landed exemption that is kept while its tool is swapped
-# for different content at the same path.
+# `origin` remote, or a swap that keeps >= 50% of the landed wrapper's text
+# while changing what it does (no similarity threshold judges behaviour).
 
 SELF_REL = "ai/bin/check-bin-help"
 EXEMPT_ENTRY = /\A\s*"([^"\\]+)"\s*=>/.freeze
@@ -183,37 +196,71 @@ def exempt_ratchet(repo, exempt)
     )
   end
   points, bars = Landed.read_bar(repo, SELF_REL) do |text, label, sha|
-    parse_exempt(text)
+    [sha, parse_exempt(text)]
   rescue ArgumentError => e
     raise Landed::Unreadable.new([[label, "#{sha[0, 12]}: landed #{SELF_REL} EXEMPT is malformed (#{e.message})"]])
   end
-  landed = bars.flatten.uniq
+  landed = bars.flat_map { |_, keys| keys }.uniq
   fresh = (running - landed).sort
-  { points: points, weakened: bars.empty? ? [] : fresh, introduced: bars.empty? ? fresh : [] }
+  { points: points, weakened: bars.empty? ? [] : fresh, introduced: bars.empty? ? fresh : [],
+    swapped: exempt_content_swaps(repo, (running & landed).sort, bars) }
 rescue Landed::Unreadable => e
   { unreadable: e.probes }
 rescue Landed::Mismatch => e
   { mismatch: [e.local, e.remote] }
 end
 
-def exempt_ratchet_failed?(r)
-  r.key?(:unreadable) || r.key?(:mismatch) || r[:weakened].any?
+# [[key, detail]] for each landed exemption whose working-tree file no longer
+# carries the content it was exempted for. bars is [[sha, keys], ...], one per
+# landed point that had the table. A file missing from the working tree is the
+# stale-exemption failure in run_check, not this one. Raises Landed::Unreadable.
+def exempt_content_swaps(repo, keys, bars)
+  keys.filter_map do |key|
+    next nil unless File.file?(File.join(repo, key))
+
+    blobs = bars.filter_map do |sha, exempt_keys|
+      Landed.blob_at(repo, sha, key, "landed content of #{key}") if exempt_keys.include?(key)
+    end.uniq
+    next [key, "no file was at this path where it landed exempt, so the exemption covers no content"] if blobs.empty?
+    next nil if Landed.maps_to(repo, blobs, key)
+
+    [key, "does not map to its landed content (blob #{blobs.map { |b| b[0, 12] }.join(', ')}; git rename " \
+          "detection finds it < #{Landed::RENAME_SIMILARITY}% similar)"]
+  end
 end
+
+def exempt_ratchet_failed?(r)
+  r.key?(:unreadable) || r.key?(:mismatch) || r[:weakened].any? || r[:swapped].any?
+end
+
+EXEMPT_HATCH = "If the exemption is genuinely right (a passthrough wrapper), the OWNER lands it on main " \
+               "themselves; rebase onto it and this passes. There is no in-repo approval flag, env var, or marker."
 
 def exempt_ratchet_failure_lines(r)
   return Landed.mismatch_lines(*r[:mismatch]) if r.key?(:mismatch)
   return Landed.unreadable_lines("EXEMPT table", r[:unreadable]) if r.key?(:unreadable)
 
-  ["  new EXEMPT entr(ies) with no landed counterpart (#{Landed.describe(r[:points])}):",
-   *r[:weakened].map { |key| "    - #{key}" },
-   "  A new exemption takes a tool out of the --help probe, and this diff wrote the bar it is judged by.",
-   "  Fix: remove each new entry from EXEMPT in #{SELF_REL} and give the tool a --help branch. If the " \
-   "exemption is genuinely right (a passthrough wrapper), the OWNER lands it on main themselves; rebase " \
-   "onto it and this passes. There is no in-repo approval flag, env var, or marker."]
+  lines = []
+  unless r[:weakened].empty?
+    lines.push("  new EXEMPT entr(ies) with no landed counterpart (#{Landed.describe(r[:points])}):",
+               *r[:weakened].map { |key| "    - #{key}" },
+               "  A new exemption takes a tool out of the --help probe, and this diff wrote the bar it is judged by.",
+               "  Fix: remove each new entry from EXEMPT in #{SELF_REL} and give the tool a --help branch. " \
+               "#{EXEMPT_HATCH}")
+  end
+  unless r[:swapped].empty?
+    lines.push("  landed EXEMPT entr(ies) whose path now holds different content (#{Landed.describe(r[:points])}):",
+               *r[:swapped].map { |key, detail| "    - #{key}: #{detail}" },
+               "  An exemption covers only the content it landed with; the new content is never --help-probed.",
+               "  Fix: restore the landed tool at each path, or remove its EXEMPT entry in #{SELF_REL} and give " \
+               "the new tool a --help branch. #{EXEMPT_HATCH}")
+  end
+  lines
 end
 
 def exempt_ratchet_ok_lines(r)
-  lines = ["  EXEMPT ratchet: 0 new exemption(s) against #{Landed.describe(r[:points])}; " \
+  lines = ["  EXEMPT ratchet: 0 new exemption(s), 0 landed exemption(s) holding different content, against " \
+           "#{Landed.describe(r[:points])}; " \
            "the tip matches `#{Landed::LS_REMOTE_PROBE}`"]
   unless r[:introduced].empty?
     lines << "  no landed #{SELF_REL}: EXEMPT is introduced by this diff with #{r[:introduced].join(', ')}"

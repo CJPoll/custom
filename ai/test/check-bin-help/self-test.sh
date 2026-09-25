@@ -167,6 +167,69 @@ if [ "${RC}" -eq 0 ] && has "EXEMPT ratchet" && has "ls-remote" && has "${TIP:0:
   ok "9 the OK output names the EXEMPT ratchet and the cross-checked tip"
 else bad "9 the OK output names the EXEMPT ratchet and the cross-checked tip" "rc=${RC} out=${OUT}"; fi
 
+echo "== check-bin-help: an exemption covers only the landed content (DND-551) =="
+
+# EXEMPT is keyed by path. Before DND-551 a landed exemption kept while its
+# tool was swapped for different content at the same path passed: the new
+# content was never probed. The exemption now covers only what landed there:
+# the current file must map to the landed blob (the same blob, or git's rename
+# detection at 50%).
+WRAPPER='#!/bin/sh
+# wrap -- passthrough wrapper: forward every argument to the real CLI.
+set -eu
+REAL="${WRAP_REAL:-/usr/bin/env}"
+export WRAP_IDENTITY="athena"
+exec "${REAL}" "$@"'
+SWAPPED='#!/usr/bin/env ruby
+# A different tool entirely, at the exempt path: never probed for --help.
+require "json"
+payload = { "action" => ARGV.first, "at" => Time.now.to_i }
+File.write(File.join(Dir.home, ".wrap-state.json"), JSON.generate(payload))
+puts payload.fetch("action")'
+
+# wrapper_fixture <name>: new_fixture with the exempt wrapper's realistic body landed.
+wrapper_fixture() {
+  local root; root="$(new_fixture "$1")"
+  add_exec "${root}" ai/bin/wrap "${WRAPPER}"; land "${root}"
+  printf '%s\n' "${root}"
+}
+
+# 10. THE DEFECT: the exempt path now holds different content.
+R="$(wrapper_fixture content-swap)"
+add_exec "${R}" ai/bin/wrap "${SWAPPED}"; run "${R}"
+if [ "${RC}" -ne 0 ] && has "ai/bin/wrap" && has "EXEMPT" && has "landed" && has "Fix:"; then
+  ok "10 an EXEMPT content swap at the same path fails, named, with Fix:"
+else bad "10 an EXEMPT content swap at the same path fails, named, with Fix:" "rc=${RC} out=${OUT}"; fi
+
+# 10b. The same swap, committed on the branch, fails too.
+R="$(wrapper_fixture content-swap-committed)"
+add_exec "${R}" ai/bin/wrap "${SWAPPED}"
+git -C "${R}" -c user.name=f -c user.email=f@example.invalid commit -qam swap >/dev/null 2>&1; run "${R}"
+if [ "${RC}" -ne 0 ] && has "ai/bin/wrap" && has "landed"; then
+  ok "10b a committed EXEMPT content swap fails"
+else bad "10b a committed EXEMPT content swap fails" "rc=${RC} out=${OUT}"; fi
+
+# 11. A light edit of the exempt wrapper still maps to the landed blob: passes.
+R="$(wrapper_fixture light-edit)"
+add_exec "${R}" ai/bin/wrap "${WRAPPER}
+# forwarding argv IS the contract"; run "${R}"
+if [ "${RC}" -eq 0 ]; then ok "11 a lightly edited exempt wrapper passes"
+else bad "11 a lightly edited exempt wrapper passes" "rc=${RC} out=${OUT}"; fi
+
+# 12. The owner lands the swap: the exemption now covers the new content.
+R="$(wrapper_fixture swap-landed)"
+add_exec "${R}" ai/bin/wrap "${SWAPPED}"; land "${R}"; run "${R}"
+if [ "${RC}" -eq 0 ]; then ok "12 an owner-landed content swap passes"
+else bad "12 an owner-landed content swap passes" "rc=${RC} out=${OUT}"; fi
+
+# 13. The exempt wrapper moved to a new path and exempted there is a NEW
+#     exemption: it still fails (the exemption is not carried by a move).
+R="$(wrapper_fixture moved-exempt)"
+git -C "${R}" mv ai/bin/wrap ai/bin/wrap2; exempt "${R}" ai/bin/wrap2; run "${R}"
+if [ "${RC}" -ne 0 ] && has "ai/bin/wrap2" && has "EXEMPT"; then
+  ok "13 an exempt wrapper moved and re-exempted at a new path fails as a new exemption"
+else bad "13 an exempt wrapper moved and re-exempted at a new path fails as a new exemption" "rc=${RC} out=${OUT}"; fi
+
 echo
 echo "check-bin-help self-test: ${PASS} passed, ${FAIL} failed"
 if [ "${FAIL}" -ne 0 ]; then
