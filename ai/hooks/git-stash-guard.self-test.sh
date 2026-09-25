@@ -185,6 +185,10 @@ git stash'
 case_cmd "I24. inside a subshell" deny '(cd /tmp; git stash pop)'
 case_cmd "I25. nohup git stash" deny 'nohup git stash &'
 case_cmd "I26. sudo git stash" deny 'sudo git stash'
+case_cmd "I27. git --attr-source <tree> stash pop (two-word option)" deny 'git --attr-source HEAD stash pop'
+case_cmd "I28. an unknown two-word option before stash" deny 'git --some-future-opt val stash pop'
+case_cmd "I29. \$GIT with an unknown two-word option" deny '$GIT --some-future-opt val stash'
+case_cmd "I30. unknown option then a read" allow 'git --some-future-opt val stash list'
 
 echo "== A: aliases =="
 case_cmd "A1. configured alias sp = stash pop" deny 'git sp'
@@ -200,6 +204,8 @@ case_cmd "A10. alias through git -C <owner>" deny "git -C $OWNER sp"
 case_cmd "A11. configured read-only alias sl = stash list" allow 'git sl'
 case_cmd "A12. configured alias s + list" allow 'git s list'
 case_cmd "A13. unrelated alias st = status" allow 'git st'
+run "$(json / "cd $OWNER && git lp")"
+check "A14. repo-local alias reached by a same-command cd" deny
 
 echo "== R: stash refs written without the stash subcommand =="
 case_cmd "R1. git update-ref -d refs/stash" deny 'git update-ref -d refs/stash'

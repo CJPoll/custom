@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 79 passed, 0 failed` / `VERDICT: PASS`.
+- **Baseline:** `RESULT: 84 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14).
 
 ### Fail-first (no guard)
 
@@ -250,3 +250,22 @@ RESULT: 21 passed, 58 failed
 | S-DND670-2 | Global-option skipping disabled for `-C`/`-c`/spaced long options | I2 `git -C <wt> stash`, I3 `git -c k=v stash`, I5 `git --work-tree <d> stash`, A10 — `75 passed, 4 failed` |
 | S-DND670-3 | Alias resolution removed (`decide` returns "" for any non-`stash` word) | A1-A6, A10, F6 — `71 passed, 8 failed` |
 | S-DND670-4 | Dequoting removed (`tr -d` of quotes/backslash replaced by `cat`) | I7 `sh -c 'git stash'`, I14 `git st"a"sh pop`, I15 `g\it stash` — `76 passed, 3 failed` |
+| S-DND670-5 | The unknown-option continuation removed from `git_verdict` (a word after an unknown dash option is no longer also read as that option's value) | I28 `git --some-future-opt val stash pop`, I29 the same through `$GIT` — `82 passed, 2 failed` |
+
+### Critic round 1 regression (the `--attr-source` miss)
+
+The critic found `git --attr-source <tree> stash pop` allowed: the hook skipped
+only a hardcoded list of two-word options. Fixed at the class level (any word
+after an unknown dash option is decided and the scan continues), plus
+same-command `cd` dirs for repo-local aliases. The new cases against the first
+commit's hook:
+
+```
+FAIL  I27. git --attr-source <tree> stash pop (two-word option) (expected deny) status=0 out=[]
+FAIL  I28. an unknown two-word option before stash (expected deny) status=0 out=[]
+FAIL  I29. $GIT with an unknown two-word option (expected deny) status=0 out=[]
+FAIL  A14. repo-local alias reached by a same-command cd (expected deny) status=0 out=[]
+RESULT: 80 passed, 4 failed
+```
+
+After the fix: `RESULT: 84 passed, 0 failed`.

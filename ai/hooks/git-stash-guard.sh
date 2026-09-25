@@ -37,7 +37,9 @@
 # counts (bare, path-qualified, `git-stash`), wherever it sits: after `sh -c`,
 # `bash -c`, `env`, `command`, `sudo`, `xargs`, `nohup`, in a subshell, after a
 # `cd`. Git global options are skipped (`-C <dir>`, `-c k=v`, `--git-dir[=]`,
-# `--work-tree`, `--no-pager`, ...). Also denied:
+# `--work-tree`, `--attr-source`, `--no-pager`, ...). A word after an option
+# the hook does not know may be that option's value, so it is decided AND the
+# scan continues past it: a new two-word option cannot hide `stash`. Also denied:
 #   * a command word built by expansion followed by `stash` (`$GIT stash`,
 #     `${GIT:-git} stash`, `$(command -v git) stash`, a backtick form);
 #   * `git <expanded subcommand>` (`git $SUB`): its value is unknowable here;
@@ -113,8 +115,10 @@ fi
 
 # ---- git aliases in scope ----------------------------------------------------
 # From the global config plus the repo config of the cwd and of every `-C <dir>`
-# in the command. A dir that is not a repo still yields the global aliases; a
-# dir that does not exist falls back to a plain read.
+# or `cd`/`pushd <dir>` in the command. A dir that is not a repo still yields
+# the global aliases; a dir that does not exist falls back to a plain read.
+# Not resolved: a dir whose path contains whitespace (it is split into words),
+# or one reached through a variable (`cd "$D"`). Global aliases still apply.
 alias_read() {
   if [ -n "$1" ] && [ -d "$1" ]; then
     git -C "$1" config --get-regexp '^alias\.' 2>/dev/null
@@ -124,8 +128,11 @@ alias_read() {
 }
 ALIASES=""
 if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_.-])git([^[:alnum:]_.-]|$)'; then
-  ALIASES=$(alias_read "$CWD")
-  for _d in $(printf '%s' "$FLAT" | grep -Eo '(^|[[:space:];&|(])-C[[:space:]]+[^[:space:];&|()]+' | sed -E 's#.*-C[[:space:]]+##'); do
+  # The global read stands alone, so a repo git refuses to read (dubious
+  # ownership, a corrupt config) still leaves the global aliases in scope.
+  ALIASES="$(alias_read "")
+$(alias_read "$CWD")"
+  for _d in $(printf '%s' "$FLAT" | grep -Eo '(^|[[:space:];&|(])(-C|cd|pushd)[[:space:]]+[^[:space:];&|()]+' | sed -E 's#.*(-C|cd|pushd)[[:space:]]+##'); do
     case "$_d" in "~"|"~/"*) _d="$HOME${_d#\~}" ;; esac
     case "$_d" in /*) ;; *) [ -n "$CWD" ] && _d="$CWD/$_d" ;; esac
     ALIASES="$ALIASES
@@ -151,14 +158,30 @@ VERDICT=$(printf '%s' "$FLAT" | GSG_ALIASES="$ALIASES" awk '
     }
     return ""
   }
-  # after_opts(w, n, j): index of the first word after git global options.
-  function after_opts(w, n, j) {
+  # two_word(t): a git global option known to take its value as the NEXT word.
+  function two_word(t) {
+    return t ~ /^-[Cc]$/ || t ~ /^--(git-dir|work-tree|namespace|config-env|super-prefix|attr-source)$/
+  }
+  # git_verdict(w, n, j, expanded_head): decide the git invocation whose words
+  # start at w[j]. Known two-word options skip their value. A word right after
+  # an UNKNOWN dash option may be that option'"'"'s value (a newer git adds such
+  # options: --attr-source did), so it is decided as a candidate AND the scan
+  # continues past it. That over-denies `git --flag word stash`, never misses.
+  # An expanded head (`$GIT`) only counts when a candidate is literally stash.
+  function git_verdict(w, n, j, expanded_head,    r) {
     while (j <= n) {
-      if (w[j] ~ /^-[Cc]$/ || w[j] ~ /^--(git-dir|work-tree|namespace|config-env|super-prefix|exec-path)$/) { j += 2; continue }
+      if (two_word(w[j])) { j += 2; continue }
       if (w[j] ~ /^-/) { j++; continue }
+      if (expanded_head) {
+        if (w[j] == "stash" && !is_read(j + 1 <= n ? w[j + 1] : "")) return "expanded-git"
+      } else {
+        r = decide(w[j], (j + 1 <= n ? w[j + 1] : ""), 0)
+        if (r != "") return r
+      }
+      if (w[j - 1] ~ /^-/ && w[j - 1] !~ /=/ && !two_word(w[j - 1])) { j++; continue }
       break
     }
-    return j
+    return ""
   }
   BEGIN {
     na = split(ENVIRON["GSG_ALIASES"], lines, "\n")
@@ -181,15 +204,10 @@ VERDICT=$(printf '%s' "$FLAT" | GSG_ALIASES="$ALIASES" awk '
       # the tail of `$(command -v git) stash`.
       if (w[1] == "stash" && !is_read(w[2])) { print "stash"; exit }
       for (i = 1; i <= n; i++) {
-        if (w[i] ~ /(^|\/)git$/) {
-          j = after_opts(w, n, i + 1)
-          if (j > n) continue
-          r = decide(w[j], (j + 1 <= n ? w[j + 1] : ""), 0)
-          if (r != "") { print r; exit }
-        } else if (w[i] ~ /[$]/) {
-          j = after_opts(w, n, i + 1)
-          if (j <= n && w[j] == "stash" && !is_read(j + 1 <= n ? w[j + 1] : "")) { print "expanded-git"; exit }
-        }
+        if (w[i] ~ /(^|\/)git$/) r = git_verdict(w, n, i + 1, 0)
+        else if (w[i] ~ /[$]/) r = git_verdict(w, n, i + 1, 1)
+        else r = ""
+        if (r != "") { print r; exit }
       }
     }
   }' 2>/dev/null)
