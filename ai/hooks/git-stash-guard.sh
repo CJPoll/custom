@@ -44,13 +44,15 @@
 # `--work-tree`, `--attr-source`, `--no-pager`, ...). A word after an option
 # the hook does not know may be that option's value, so it is decided AND the
 # scan continues past it: a new two-word option cannot hide `stash`. Also denied:
-#   * a command word built by expansion followed by `stash` (`$GIT stash`,
-#     `${GIT:-git} stash`, `$(command -v git) stash`, a backtick form);
+#   * a command word built by expansion followed by `stash` or a stash alias
+#     (`$GIT stash`, `$GIT sp`, `${GIT:-git} stash`, `$(command -v git) stash`,
+#     a backtick form);
 #   * `git <expanded subcommand>` (`git $SUB`): its value is unknowable here;
 #   * a git ALIAS that resolves to a mutating stash (its value parsed like a
 #     command line, global options included, and resolved through chains,
 #     from the global config and the repo config of the cwd and every `-C` /
-#     `cd` dir), a shell alias (`!...`) mentioning stash, and DEFINING an alias whose
+#     `cd` dir), a shell alias (`!...`) whose body mentions stash or runs a
+#     stash write read as a command (`!git sp`), and DEFINING an alias whose
 #     value names stash (`git -c alias.p=stash p`, `git config alias.p ...`).
 #
 # ACCEPTED FALSE POSITIVE (the class forge-auth-guard documents): matching is
@@ -100,8 +102,10 @@ CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
 FLAT=$(printf '%s' "$CMD" | tr '\n\t' '; ' | tr -d "'\"\\\\" \
   | sed -E 's#(^|[^[:alnum:]_.-])git-stash([^[:alnum:]_.-]|$)#\1git stash\2#g')
 
-# Nothing that could be a stash write: no `stash` text and no `git` word.
-printf '%s' "$FLAT" | grep -Eq 'stash|(^|[^[:alnum:]_.-])git([^[:alnum:]_.-]|$)' || exit 0
+# Nothing that could be a stash write: no `stash` text, no `git` word, and no
+# expansion (a `$GIT sp` names neither, but may run a stash alias).
+GIT_OR_EXP='(^|[^[:alnum:]_.-])git([^[:alnum:]_.-]|$)|[$`]'
+printf '%s' "$FLAT" | grep -Eq "stash|$GIT_OR_EXP" || exit 0
 
 deny() {
   jq -cn --arg r "git-stash-guard: $1 Every linked worktree shares ONE stash list with the main checkout (refs/stash lives in the common git dir), so a stash push/pop/apply/drop from a fleet worktree can apply, drop or clobber the OWNER's saved work with no error (DND-670: a captain's \`git stash pop\` popped the owner's PT-822 entry). Agent sessions never write the stash list. Fix: to park WIP, commit it on your worktree branch (\`git add -A && git commit -m \"WIP: <what>\"\`; squash or amend it later); for a clean tree to experiment in, add a scratch tree with \`git worktree add <path> -b <scratch-branch>\` and remove it after. Read-only \`git stash list\`, \`git stash show\` and \`git stash create\` stay allowed. If this command only MENTIONS stash text (a heredoc, a commit message, a grep) and writes no stash, move the text into a file with the Write tool and pass the file (\`git commit -F <file>\`), or use the Grep tool; never rephrase a real stash command to slip past this guard." \
@@ -144,7 +148,7 @@ alias_read() {
   fi
 }
 ALIASES=""
-if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_.-])git([^[:alnum:]_.-]|$)'; then
+if printf '%s' "$FLAT" | grep -Eq "$GIT_OR_EXP"; then
   # The global read stands alone, so a repo git refuses to read (dubious
   # ownership, a corrupt config) still leaves the global aliases in scope.
   ALIASES="$(alias_read "")
@@ -210,7 +214,12 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
     if (depth > 10 || !(sc in nal)) return ""
     for (i = 1; i <= nal[sc]; i++) {
       v = aval[sc, i]
-      if (v ~ /^!/) { if (mentions_stash(v)) return "alias"; continue }
+      # A shell alias runs its body with sh: read the body as a command (so
+      # `!git sp` reaches alias sp), and deny any body naming stash at all.
+      if (v ~ /^!/) {
+        if (mentions_stash(v) || analyze(substr(v, 2), depth + 1) != "") return "alias"
+        continue
+      }
       n = tokenize(v, a, aq, as)
       if (nxt != "") a[++n] = nxt
       r = git_verdict(a, n, 1, 0, depth + 1)
@@ -227,14 +236,17 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
   # right after an UNKNOWN dash option may be that option'"'"'s value (a newer
   # git adds such options: --attr-source did), so it is decided as a candidate
   # AND the scan continues past it. That over-denies `git --flag word stash`,
-  # never misses. An expanded head (`$GIT`) only counts when a candidate is
-  # literally stash.
+  # never misses. After an expanded head (`$GIT`) a candidate counts when it
+  # is stash or a stash alias.
   function git_verdict(w, n, j, expanded_head, depth,    r) {
     while (j <= n) {
       if (two_word(w[j])) { j += 2; continue }
       if (w[j] ~ /^-/) { j++; continue }
       if (expanded_head) {
-        if (w[j] == "stash" && !is_read(j + 1 <= n ? w[j + 1] : "")) return "expanded-git"
+        # A word built by expansion may be git: `stash` or a stash alias after
+        # it counts. An expanded candidate after it does not (`$EDITOR $FILE`).
+        r = decide(w[j], (j + 1 <= n ? w[j + 1] : ""), depth)
+        if (r == "stash" || r == "alias") return "expanded-git"
       } else {
         r = decide(w[j], (j + 1 <= n ? w[j + 1] : ""), depth)
         if (r != "") return r

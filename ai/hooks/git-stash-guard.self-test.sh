@@ -44,6 +44,9 @@ cat > "$GIT_CONFIG_GLOBAL" <<'EOF'
 	z = -c color.ui=never stash pop
 	np = --no-pager stash
 	npl = --no-pager stash list
+	x2 = !git sp
+	x3 = !git st"a"sh pop
+	x4 = !git status
 EOF
 
 run() {
@@ -225,6 +228,12 @@ case_cmd "A18. alias npl = --no-pager stash list (read)" allow 'git npl'
 case_cmd "A19. alias names match case-insensitively (git SP)" deny 'git SP'
 case_cmd "A20. alias through --config-env" deny 'P="stash pop" git --config-env=alias.p=P p'
 case_cmd "A21. alias through GIT_CONFIG_KEY_n" deny 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=x git p'
+case_cmd "A22. shell alias chaining to a stash alias: x2 = !git sp" deny 'git x2'
+case_cmd "A23. shell alias with a quote-split body" deny 'git x3'
+case_cmd "A24. shell alias with an unrelated body: x4 = !git status" allow 'git x4'
+case_cmd "A25. a stash alias through an expanded command word: \$GIT sp" deny '$GIT sp'
+case_cmd "A26. an expanded word with an expanded argument" allow '$EDITOR $FILE'
+case_cmd "A27. a quote-split git word running a stash alias" deny 'g"i"t sp'
 
 echo "== R: stash refs written without the stash subcommand =="
 case_cmd "R1. git update-ref -d refs/stash" deny 'git update-ref -d refs/stash'

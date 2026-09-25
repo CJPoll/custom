@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 101 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21).
+- **Baseline:** `RESULT: 107 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27).
 
 ### Fail-first (no guard)
 
@@ -331,3 +331,25 @@ RESULT: 98 passed, 3 failed
 ```
 
 After the fix: `RESULT: 101 passed, 0 failed`.
+
+### Critic round 4 regression (a shell alias that chains to a stash alias)
+
+The critic found `alias.x2 = !git sp` (with `sp = stash pop`) allowed: a
+shell alias was checked only for the literal text `stash`, never read as a
+command. Same class as round 2 (an alias expansion not parsed the way the
+command line is). Fixed at the root: a shell alias body goes through
+`analyze`, like a `sh -c` word. Swept with it: a stash alias after an
+expanded command word (`$GIT sp`), which also needed the prefilter and the
+alias read to fire on an expansion, not only on a `git` word. The new cases
+against the self-review hook:
+
+```
+FAIL  A22. shell alias chaining to a stash alias: x2 = !git sp (expected deny) status=0 out=[]
+FAIL  A25. a stash alias through an expanded command word: $GIT sp (expected deny) status=0 out=[]
+RESULT: 105 passed, 2 failed
+```
+
+After the fix: `RESULT: 107 passed, 0 failed`. Class-closed assertion: every
+path that turns an alias value into words now reaches `git_verdict` or
+`analyze` — `grep -nE 'mentions_stash\(v\)' ai/hooks/git-stash-guard.sh`
+shows the one remaining literal check is OR-ed with `analyze`, never alone.
