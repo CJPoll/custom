@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 109 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1).
+- **Baseline:** `RESULT: 136 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8).
 
 ### Fail-first (no guard)
 
@@ -252,6 +252,8 @@ RESULT: 21 passed, 58 failed
 | S-DND670-4 | Tokenizer quote states removed (a quote char is dropped, not honoured) | I31-I33, I35, I36 (a quoted value holding a space splits into words) — `92 passed, 5 failed` |
 | S-DND670-5 | The unknown-option continuation removed from `git_verdict` | I28 `git --some-future-opt val stash pop`, I29 the same through `$GIT` — `95 passed, 2 failed` |
 | S-DND670-6 | Quoted words no longer re-read as commands | I7 `sh -c 'git stash'`, I8 `bash -c "cd x && git stash pop"`, I35 — `94 passed, 3 failed` |
+| S-DND670-7 | Tokenizer no longer marks unquoted glob/brace characters | I40-I45, I47, I53, I54, I56, I57 — `125 passed, 11 failed` (measured on the round-6 code) |
+| S-DND670-8 | Shell-alias expansion in command position removed | S1, S3, S4, S5 — `132 passed, 4 failed` (measured on the round-6 code) |
 
 ### Critic round 1 regression (the `--attr-source` miss)
 
@@ -369,3 +371,42 @@ RESULT: 107 passed, 2 failed
 ```
 
 After the fix: `RESULT: 109 passed, 0 failed`.
+
+### Critic round 6 regression (words the shell rewrites), and the shell-alias sweep
+
+The critic found `git {stash,pop}` allowed: brace expansion rewrites the word
+before git sees it. Swept as the class "the shell rewrites a word before the
+command runs": glob (`git st?sh pop`, `git st[a]sh`), brace, and a glob or
+brace in the command word itself (`/usr/bin/g?t`, `git-st*sh`). Fixed at the
+root: the tokenizer marks an unquoted glob/brace character, a marked
+subcommand or verb counts as built by expansion, and a marked command word is
+judged as both git and git-stash. The same sweep found the largest member of
+the class: shell ALIASES. The Bash tool sources a snapshot of the owner's zsh
+profile, and oh-my-zsh's git plugin defines `gstp='git stash pop'`, `gstd`,
+`gstc`, `gsta`, `gstaa`, `gstall` (measured in
+`~/.claude/shell-snapshots/`). A shell alias in command position is now
+expanded from those snapshots and read as a command. The new cases against the
+round-5 hook:
+
+```
+FAIL  I40. brace expansion git {stash,pop} (expected deny) status=0 out=[]
+FAIL  I41. brace expansion git {stash,} pop (expected deny) status=0 out=[]
+FAIL  I42. glob subcommand git st?sh pop (expected deny) status=0 out=[]
+FAIL  I43. glob subcommand git st* (expected deny) status=0 out=[]
+FAIL  I44. glob in the git command word (expected deny) status=0 out=[]
+FAIL  I45. glob in the git-stash command word (expected deny) status=0 out=[]
+FAIL  I47. bracket glob subcommand (expected deny) status=0 out=[]
+FAIL  I53. glob command word after env VAR=x (expected deny) status=0 out=[]
+FAIL  I54. glob command word after a separator (expected deny) status=0 out=[]
+FAIL  I56. glob git-stash word, option-first (implicit push) (expected deny) status=0 out=[]
+FAIL  I57. glob command word running a stash alias (expected deny) status=0 out=[]
+FAIL  S1. shell alias gstp = git stash pop (expected deny) status=0 out=[]
+FAIL  S3. shell alias g = git, then a git stash alias (expected deny) status=0 out=[]
+FAIL  S4. shell alias chain gsp2 -> gstp (expected deny) status=0 out=[]
+FAIL  S5. shell alias after a separator (expected deny) status=0 out=[]
+RESULT: 121 passed, 15 failed
+```
+
+After the fix: `RESULT: 136 passed, 0 failed`. Live, against the real
+snapshots: `gstp`, `gstd`, `gstc`, `gsta`, `gstaa`, `gstall` deny; `gstl`,
+`gsts` allow.

@@ -47,7 +47,17 @@
 #   * a command word built by expansion followed by `stash` or a stash alias
 #     (`$GIT stash`, `$GIT sp`, `${GIT:-git} stash`, `$(command -v git) stash`,
 #     a backtick form);
-#   * `git <expanded subcommand>` (`git $SUB`): its value is unknowable here;
+#   * `git <expanded subcommand>` (`git $SUB`, a glob `git st?sh`, a brace
+#     `git {stash,pop}`): its value is unknowable here, and so is a glob or
+#     brace in the stash verb (`git stash l?st`);
+#   * a command word the shell rewrites by glob or brace (`/usr/bin/g?t`,
+#     `git-st*sh`), in command position (a simple command's first word, or
+#     after env/command/sudo/exec/nohup/xargs/time/eval/nice/setsid or a
+#     VAR=value), judged both as git and as git-stash (no verb, a writing
+#     verb, or an expanded verb is denied). Accepted false positive: a glob
+#     command word with no arguments or only options (`./run-*.sh -v`).
+#     Not caught: a glob command word after a prefix that takes its own
+#     argument (`timeout 5 /usr/bin/g?t stash pop`, `sudo -u x ...`);
 #   * a git ALIAS that resolves to a mutating stash (its value parsed like a
 #     command line, global options included, and resolved through chains,
 #     from the global config and the repo config of the cwd and every `-C` /
@@ -60,6 +70,10 @@
 # `git commit -m`, a `grep`) is denied too. That costs one retry: move the text
 # into a file with the Write tool and pass the file (`git commit -F`), or use
 # the Grep tool. A miss costs the owner's saved work.
+#
+# SHELL ALIASES: a command word that is a shell alias from the Bash tool's
+# shell snapshot (see below) is expanded and read as a command. Shell
+# FUNCTIONS from the snapshot are not read (none on this machine names stash).
 #
 # NOT CATCHABLE (a tripwire, not a sandbox): a string computed then executed
 # (`eval "$(printf ...)"`, base64 | sh); both command word and subcommand
@@ -105,7 +119,43 @@ FLAT=$(printf '%s' "$CMD" | tr '\n\t' '; ' | tr -d "'\"\\\\" \
 # Nothing that could be a stash write: no `stash` text, no `git` word, and no
 # expansion (a `$GIT sp` names neither, but may run a stash alias).
 GIT_OR_EXP='(^|[^[:alnum:]_.-])git([^[:alnum:]_.-]|$)|[$`]'
-printf '%s' "$FLAT" | grep -Eq "stash|$GIT_OR_EXP" || exit 0
+
+# ---- shell aliases the Bash tool's shell carries -----------------------------
+# The Bash tool sources a shell snapshot of the owner's profile before every
+# command, aliases included; here oh-my-zsh's git plugin defines
+# `gstp='git stash pop'`, `gstd`, `gstc`, `gsta`... So a command word may be a
+# shell alias that expands to a stash write. The aliases are read from the same
+# snapshots (every one on disk, so another session's snapshot counts too) and
+# kept only when their value could matter (git, stash, an expansion, a glob,
+# or a chain to such an alias).
+# No snapshot dir means the Bash tool loads no aliases either.
+SNAPDIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/shell-snapshots"
+SHALIASES=""
+if [ -d "$SNAPDIR" ]; then
+  # Relevant: a value naming git, stash, an expansion or a glob, or one whose
+  # first word is itself a relevant alias (a chain), to a fixpoint.
+  SHALIASES=$(find "$SNAPDIR" -maxdepth 1 -type f -name 'snapshot-*.sh' -exec grep -hE '^alias (-- )?[^=[:space:]]+=' {} + 2>/dev/null \
+    | awk '
+      { l = $0; sub(/^alias (-- )?/, "", l); eq = index(l, "=")
+        name[NR] = substr(l, 1, eq - 1); v = substr(l, eq + 1); gsub(/\047|"/, "", v)
+        split(v, w, /[ \t]+/); first[NR] = w[1]; line[NR] = $0
+        if (v ~ /git|stash|[$`*?[{]/) rel[name[NR]] = 1 }
+      END {
+        do { grew = 0
+          for (i = 1; i <= NR; i++) if (!(name[i] in rel) && (first[i] in rel)) { rel[name[i]] = 1; grew = 1 }
+        } while (grew)
+        for (i = 1; i <= NR; i++) if (name[i] in rel) print line[i]
+      }')
+fi
+# A word naming one of those aliases also lets the command past the prefilter.
+SHALIAS_RE=""
+if [ -n "$SHALIASES" ]; then
+  SHALIAS_RE=$(printf '%s\n' "$SHALIASES" | sed -E 's/^alias (-- )?([^=]+)=.*/\2/' \
+    | sed -e 's/[][\.*^$+?(){}|/]/\\&/g' | paste -sd'|' -)
+  SHALIAS_RE="|(^|[^[:alnum:]_.-])($SHALIAS_RE)([^[:alnum:]_.-]|\$)"
+fi
+# A glob or brace can also build a command word (`/usr/bin/g?t`).
+printf '%s' "$FLAT" | grep -Eq "stash|$GIT_OR_EXP|[*?[{]$SHALIAS_RE" || exit 0
 
 deny() {
   jq -cn --arg r "git-stash-guard: $1 Every linked worktree shares ONE stash list with the main checkout (refs/stash lives in the common git dir), so a stash push/pop/apply/drop from a fleet worktree can apply, drop or clobber the OWNER's saved work with no error (DND-670: a captain's \`git stash pop\` popped the owner's PT-822 entry). Agent sessions never write the stash list. Fix: to park WIP, commit it on your worktree branch (\`git add -A && git commit -m \"WIP: <what>\"\`; squash or amend it later); for a clean tree to experiment in, add a scratch tree with \`git worktree add <path> -b <scratch-branch>\` and remove it after. Read-only \`git stash list\`, \`git stash show\` and \`git stash create\` stay allowed. If this command only MENTIONS stash text (a heredoc, a commit message, a grep) and writes no stash, move the text into a file with the Write tool and pass the file (\`git commit -F <file>\`), or use the Grep tool; never rephrase a real stash command to slip past this guard." \
@@ -148,7 +198,7 @@ alias_read() {
   fi
 }
 ALIASES=""
-if printf '%s' "$FLAT" | grep -Eq "$GIT_OR_EXP"; then
+if printf '%s' "$FLAT" | grep -Eq "$GIT_OR_EXP|[*?[{]$SHALIAS_RE"; then
   # The global read stands alone, so a repo git refuses to read (dubious
   # ownership, a corrupt config) still leaves the global aliases in scope.
   ALIASES="$(alias_read "")
@@ -162,7 +212,7 @@ $(alias_read "$_d")"
 fi
 
 # ---- git stash, through every head the header lists -------------------------
-VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
+VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
   function is_read(v) { sub(/[<>].*/, "", v); return v ~ /^(list|show|create)$/ }
   function mentions_stash(v) { return v ~ /(^|[^[:alnum:]_.-])stash([^[:alnum:]_.-]|$)/ }
   function is_sep(c) { return c ~ /[ \t\n;&|()`]/ }
@@ -170,7 +220,8 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
   # and backslashes the way sh does, so a quoted value stays ONE word
   # (`git -C "/a b" stash` is git, -C, /a b, stash). Quotes and backslashes are
   # removed from the word. SB[k] is 1 when word k starts a simple command
-  # (after ; & | ( ) backtick or a newline, outside quotes). QF[k] is 1 when a
+  # (after ; & | ( ) backtick or a newline, outside quotes). An unquoted glob
+  # or brace character is followed by a \001 mark. QF[k] is 1 when a
   # quoted part of word k held whitespace or a separator: its content may be a
   # command (`sh -c "git stash"`), so analyze re-reads it.
   function tokenize(text, W, QF, SB,    n, i, L, c, st, cur, has, q, ns) {
@@ -196,6 +247,10 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
         if (c !~ /[ \t]/) ns = 1
         continue
       }
+      # An unquoted glob or brace character means the shell rewrites the word
+      # before the command sees it (`git {stash,pop}`, `git st?sh`). Mark it
+      # with \001 so the word counts as built by expansion.
+      if (c ~ /[*?[{]/) { cur = cur c "\001"; has = 1; continue }
       cur = cur c; has = 1
     }
     if (has) { n++; W[n] = cur; QF[n] = q; SB[n] = ns }
@@ -207,7 +262,7 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
   # `-c k=v stash pop` in an alias pops. The user'"'"'s next word follows it.
   function decide(sc, nxt, depth,    i, v, a, aq, as, n, r) {
     if (sc == "stash") return is_read(nxt) ? "" : "stash"
-    if (sc ~ /[$`]/) return "expanded"
+    if (sc ~ /[$`\001]/) return "expanded"
     # Alias names are config keys, so git matches them case-insensitively
     # (`git SP` runs alias.sp); --get-regexp prints them lower-cased.
     sc = tolower(sc)
@@ -260,13 +315,30 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
   }
   # analyze(text, depth): the verdict for one command text, and for every
   # quoted word in it that may itself be a command.
-  function analyze(text, depth,    W, QF, SB, n, k, e, r, sw, m, i) {
+  # cmd_prefix(t): a word after which the next word is still a command word.
+  function cmd_prefix(t) {
+    return t ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || t ~ /^(env|command|sudo|exec|nohup|xargs|time|eval|builtin|nice|setsid|then|do|else|if|while|until|!)$/
+  }
+  # squote(w): w as one single-quoted shell word.
+  function squote(w) { gsub(/\047/, "\047\\\047\047", w); return "\047" w "\047" }
+  function analyze(text, depth,    W, QF, SB, n, k, e, r, sw, m, i, cp, t) {
     # Past the nesting bound, text that still names stash is a deny.
     if (depth > 8) return mentions_stash(text) ? "stash" : ""
     n = tokenize(text, W, QF, SB)
     for (k = 1; k <= n; k++) if (QF[k]) { r = analyze(W[k], depth + 1); if (r != "") return r }
+    cp = 0
     for (k = 1; k <= n; k++) {
+      # cp: word k is in command position (starts a simple command, or
+      # follows a prefix such as env/sudo/xargs or a VAR=value assignment).
+      cp = SB[k] || (cp && k > 1 && cmd_prefix(W[k - 1]))
       for (e = k; e < n && !SB[e + 1]; e++) ;
+      # A shell alias in command position: read its value, followed by the
+      # rest of this simple command, as a command of its own.
+      if (cp && (W[k] in shal)) {
+        t = shal[W[k]]
+        for (i = k + 1; i <= e; i++) t = t " " squote(W[i])
+        if (analyze(t, depth + 1) != "") return "shell-alias"
+      }
       # the words of this simple command from k on, as their own array
       delete sw; m = 0
       for (i = k + 1; i <= e; i++) sw[++m] = W[i]
@@ -274,6 +346,16 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
       # the tail of `$(command -v git) stash`.
       if (SB[k] && W[k] == "stash" && !is_read(m >= 1 ? sw[1] : "")) return "stash"
       if (W[k] ~ /(^|\/)git-stash$/ && !is_read(m >= 1 ? sw[1] : "")) return "stash"
+      # A command word the shell rewrites by glob or brace (`/usr/bin/g?t`,
+      # `git-st*sh`) may be git or may be git-stash, so it is judged as both:
+      # as git-stash, no verb (a bare or option-first push), a writing verb,
+      # or a verb built by expansion is denied; as git, the usual verdict.
+      if (cp && W[k] ~ /\001/) {
+        for (i = 1; i <= m && sw[i] ~ /^-/; i++) ;
+        if (i > m || sw[i] ~ /^(push|save|pop|apply|drop|clear|store|branch)$/ || sw[i] ~ /[$`\001]/) return "glob-head"
+        if (git_verdict(sw, m, 1, 0, 0) != "") return "glob-head"
+        continue
+      }
       if (W[k] ~ /(^|\/)git$/) r = git_verdict(sw, m, 1, 0, 0)
       else if (W[k] ~ /[$`]/) r = git_verdict(sw, m, 1, 1, 0)
       else r = ""
@@ -291,14 +373,29 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" awk '
       if (sp > 0) { val = substr(name, sp + 1); name = substr(name, 1, sp - 1) }
       nal[name]++; aval[name, nal[name]] = val
     }
+    ns = split(ENVIRON["GSG_SHALIASES"], slines, "\n")
+    for (k = 1; k <= ns; k++) {
+      l = slines[k]
+      sub(/^alias (-- )?/, "", l)
+      eq = index(l, "="); if (eq == 0) continue
+      name = substr(l, 1, eq - 1)
+      # The value is shell text (usually one single-quoted word): its words,
+      # unquoted, are the command the alias runs.
+      nv = tokenize(substr(l, eq + 1), vw, vq, vs)
+      val = ""
+      for (i = 1; i <= nv; i++) val = val (i > 1 ? " " : "") vw[i]
+      shal[name] = val
+    }
     r = analyze(ENVIRON["GSG_CMD"], 0)
     if (r != "") print r
   }' 2>/dev/null)
 
 case "$VERDICT" in
   stash) deny 'this runs `git stash` with a verb that writes the stash list (bare `git stash`, push/save, pop, apply, drop, clear, store, branch, or an option-first implicit push).' ;;
+  shell-alias) deny 'this runs a shell alias loaded into the Bash tool from the owner profile (oh-my-zsh defines `gstp` = `git stash pop`) that expands to a stash write.' ;;
   alias) deny 'this runs a git alias that resolves to a stash write (or a shell alias that mentions stash).' ;;
-  expanded) deny 'this runs git with a subcommand built by expansion (`git $X`), which may be a stash write and cannot be read here. Write the subcommand literally.' ;;
+  expanded) deny 'this runs git with a subcommand built by expansion (`git $X`, a glob `git st?sh`, a brace `git {stash,pop}`), which may be a stash write and cannot be read here. Write the subcommand literally.' ;;
+  glob-head) deny 'this runs a command word the shell rewrites by glob or brace expansion (`/usr/bin/g?t`, `git-st*sh`), which may be git or git-stash writing the stash list. Spell the command word literally.' ;;
   expanded-git) deny 'this runs `stash` through a command word built by expansion (`$GIT stash`, `$(command -v git) stash`), which may be git writing the stash list.' ;;
 esac
 exit 0

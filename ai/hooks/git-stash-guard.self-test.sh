@@ -30,6 +30,17 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 # Hermetic git identity + config for the fixtures AND for the hook's alias read.
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL="$TMP/gitconfig"
+# A fixture Bash-tool shell snapshot, holding oh-my-zsh style shell aliases.
+export CLAUDE_CONFIG_DIR="$TMP/claude"
+mkdir -p "$CLAUDE_CONFIG_DIR/shell-snapshots"
+cat > "$CLAUDE_CONFIG_DIR/shell-snapshots/snapshot-zsh-1-fixture.sh" <<'EOF'
+alias -- ll='ls -l'
+alias -- gstp='git stash pop'
+alias -- gstl='git stash list'
+alias -- g=git
+alias -- gsp2=gstp
+alias -- gst='git status'
+EOF
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 cat > "$GIT_CONFIG_GLOBAL" <<'EOF'
 [init]
@@ -216,6 +227,35 @@ case_cmd "I36. single-quoted value with a space" deny "git -c 'user.name=A B' st
 case_cmd "I37. backslash-escaped space in -C" deny 'git -C /tmp/a\ b stash pop'
 case_cmd "I38. quoted read with a spaced option value" allow 'git -c "user.name=A B" stash list'
 case_cmd "I39. a quoted format string (no stash)" allow 'git log --format="%h %s" -3'
+case_cmd "I40. brace expansion git {stash,pop}" deny 'git {stash,pop}'
+case_cmd "I41. brace expansion git {stash,} pop" deny 'git {stash,} pop'
+case_cmd "I42. glob subcommand git st?sh pop" deny 'git st?sh pop'
+case_cmd "I43. glob subcommand git st*" deny 'git st*'
+case_cmd "I44. glob in the git command word" deny '/usr/bin/g?t stash pop'
+case_cmd "I45. glob in the git-stash command word" deny '/usr/libexec/git-core/git-st*sh pop'
+case_cmd "I46. glob in the stash verb" deny 'git stash l?st'
+case_cmd "I47. bracket glob subcommand" deny 'git st[a]sh pop'
+case_cmd "I48. glob command word with a read" allow '/usr/bin/g?t stash list'
+case_cmd "I49. a quoted glob is not expanded" allow "git log -- '*.md'"
+case_cmd "I50. a glob in a git argument" allow 'git add ai/hooks/*.sh'
+case_cmd "I51. a glob in another command" allow 'ls ai/hooks/*.sh'
+case_cmd "I52. an unquoted stash ref brace" allow 'git stash show stash@{0}'
+case_cmd "I53. glob command word after env VAR=x" deny 'env A=1 /usr/bin/g?t stash pop'
+case_cmd "I54. glob command word after a separator" deny 'true && /usr/bin/g?t stash'
+case_cmd "I55. glob git-stash word with a read verb" allow '/usr/libexec/git-core/git-st*sh list'
+case_cmd "I56. glob git-stash word, option-first (implicit push)" deny '/usr/libexec/git-core/git-st*sh -u'
+case_cmd "I57. glob command word running a stash alias" deny '/usr/bin/g?t sp'
+case_cmd "I58. glob command word, unrelated subcommand" allow '/usr/bin/g?t status'
+
+echo "== S: shell aliases from the Bash tool snapshot =="
+case_cmd "S1. shell alias gstp = git stash pop" deny 'gstp'
+case_cmd "S2. shell alias gstl = git stash list (read)" allow 'gstl'
+case_cmd "S3. shell alias g = git, then a git stash alias" deny 'g sp'
+case_cmd "S4. shell alias chain gsp2 -> gstp" deny 'gsp2'
+case_cmd "S5. shell alias after a separator" deny 'cd /tmp && gstp'
+case_cmd "S6. shell alias name as an argument only" allow 'echo gstp'
+case_cmd "S7. unrelated shell alias gst = git status" allow 'gst'
+case_cmd "S8. a child sh -c loads no aliases" allow "sh -c 'gstp'"
 
 echo "== A: aliases =="
 case_cmd "A1. configured alias sp = stash pop" deny 'git sp'
