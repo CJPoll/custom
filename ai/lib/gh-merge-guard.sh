@@ -118,10 +118,11 @@ gmg_parse() {
 }
 
 # gmg_expand_alias <args...> : sets GMG_ARGV to the argv gh will really run.
-# gh expands an alias only when it is the FIRST argument, and appends the
-# remaining arguments to the expansion (or, when the expansion has $N
-# placeholders, substitutes them instead). So `gh alias set p pr` turns
-# `p merge 5 --auto` into `pr merge 5 --auto`: the guard must parse the
+# gh expands an alias only when it is the FIRST argument. Each remaining
+# argument fills a `$N` placeholder while the expansion still has a `$`, and
+# is appended after it otherwise (both can happen in one expansion). So
+# `gh alias set p pr` turns `p merge 5 --auto` into `pr merge 5 --auto`, and
+# `x: pr $1` turns `x merge 5 --auto` into the same: the guard must parse the
 # EXPANDED argv, never the alias word. Refused outright: a shell alias (`!…`,
 # it can run anything), an expansion this cannot tokenize the way gh does
 # (quotes or backslashes), and a failed alias lookup (a lookup that fails must
@@ -150,19 +151,28 @@ gmg_expand_alias() {
               "run the expanded command directly — \`~/dev/custom/ai/bin/$GMG_TOOL <the expanded command>\`" ;;
     esac
     shift
-    if [[ "$exp" == *'$'* ]]; then
-      i=1
-      for a in "$@"; do exp="${exp//\$$i/$a}"; i=$((i+1)); done
-      if [[ "$exp" =~ \$[0-9] ]]; then
-        gmg_refuse "gh $first $*" "gh alias '$first' has unfilled placeholders after expansion ('$exp')" \
-          "run the expanded command directly — \`~/dev/custom/ai/bin/$GMG_TOOL <the expanded command>\`"
-      fi
-      read -ra words <<<"$exp"
-      GMG_ARGV=("${words[@]}")
-    else
-      read -ra words <<<"$exp"
-      GMG_ARGV=("${words[@]}" "$@")
+    # gh's own loop (pkg/cmd/root alias expansion), step for step: walk the
+    # remaining args in order; while the expansion still contains a `$`, the
+    # arg fills its `$N` (i = its 1-based position); once no `$` is left, the
+    # arg is APPENDED. So `x: pr $1` + `x merge 5 --auto` -> `pr merge 5 --auto`.
+    local -a extra=()
+    i=1
+    for a in "$@"; do
+      if [[ "$exp" == *'$'* ]]; then exp="${exp//"\$$i"/"$a"}"; else extra+=("$a"); fi
+      i=$((i+1))
+    done
+    if [[ "$exp" =~ \$[0-9] ]]; then
+      gmg_refuse "gh $first $*" "gh alias '$first' has unfilled placeholders after expansion ('$exp')" \
+        "run the expanded command directly — \`~/dev/custom/ai/bin/$GMG_TOOL <the expanded command>\`"
     fi
+    # gh splits the substituted expansion with shlex; read -ra only matches it
+    # when no quote or backslash is present (an argument can bring one in).
+    case "$exp" in
+      *[\'\"\\]*) gmg_refuse "gh $first $*" "the expansion of gh alias '$first' contains quoting after substitution ('$exp'), which $GMG_TOOL does not tokenize the way gh does" \
+              "run the expanded command directly — \`~/dev/custom/ai/bin/$GMG_TOOL <the expanded command>\`" ;;
+    esac
+    read -ra words <<<"$exp"
+    GMG_ARGV=("${words[@]}" "${extra[@]}")
     return 0
   done <<<"$list"
   return 0

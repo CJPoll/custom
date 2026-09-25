@@ -189,6 +189,26 @@ run x merge
 refused && ok "12c. an alias whose \$1 placeholder receives 'merge' -> expanded, refused" \
   || bad "12c. placeholder alias refused" "$(detail)"
 
+reset_fx; pr_view "${QUEUED}"; gate_unreadable
+printf 'x: pr $1\n' > "${FX}/aliases.out"
+run x merge 362 --auto
+refused && grep -q '^pr view 362 ' "${STUB_LOG}" && [[ "${ERR}" == *"could not establish"* ]] \
+  && ok "12c2. placeholder AND appended args in one expansion (x: pr \$1, then \`x merge 362 --auto\`) -> judged as --auto on 362" \
+  || bad "12c2. placeholder + appended args" "$(detail)"
+
+reset_fx; pr_view "${QUEUED}"; gate_unreadable
+printf 'x: pr $1\n' > "${FX}/aliases.out"
+run x '"merge"' 362 --auto
+refused && [[ "${ERR}" == *"quoting"* ]] \
+  && ok "12c3. an argument that brings a quote into the expansion -> refused (gh would shlex it)" \
+  || bad "12c3. substituted quote refused" "$(detail)"
+
+reset_fx; printf 'x: pr $1\n' > "${FX}/aliases.out"
+run x 'view&' 362
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: passthrough"* ]]; then
+  ok "12c4. an argument containing & is substituted literally (no patsub_replacement)"
+else bad "12c4. & substituted literally" "$(detail)"; fi
+
 reset_fx; fx aliases '' 1 'failed to read configuration'
 run p merge 362 --auto
 refused && [[ "${ERR}" == *"alias list"* ]] \
