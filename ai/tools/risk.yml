@@ -1,6 +1,6 @@
 # Tool risk registry (DND-172 / gap 13)
 #
-# Classifies every first-party `ai/bin` script by its WORST-CASE capability, so
+# Classifies every harness tool by its WORST-CASE capability, so
 # a downstream consumer (C2 / DND-173 phase gating) can decide whether a tool is
 # allowed to run in a given phase. Classification is by TOOL, not by subcommand:
 # a tool that CAN mutate external state is destructive even if the invocation at
@@ -17,7 +17,13 @@
 # Deny-by-default: `default` is the class assigned to any tool NOT listed here.
 # It MUST stay `destructive` — an unclassified tool is treated as most
 # restrictive until a human classifies it. `ai/bin/check-tool-risk` asserts both
-# this and full coverage (every executable ai/bin script has an entry).
+# this and full coverage (every harness tool has an entry).
+#
+# A harness tool is a first-party executable that ai/lib/harness_tools.rb scopes
+# in (DND-508): ai/bin/*, ai/skills/*/bin/*, ai/skills/*/scripts/*. An ai/bin
+# tool is keyed by its bare name; any other by its path under ai/ (e.g.
+# `skills/athena:slack/bin/post`), which is unique where basenames collide and
+# is what workflow-phase-guard matches in a command.
 #
 # Each `tools` entry: `class` (one of `classes`, required) + `reason` (a
 # one-word token naming why, required).
@@ -110,3 +116,34 @@ tools:
   # wrapped CMD; DND-486 (wiring into integration-gate / captain Verify) must
   # account for this.
   test-slot:               { class: destructive, reason: wrapper }
+
+  # --- skill executables (DND-508), keyed by their path under ai/ ---
+  # readOnly
+  skills/athena:inbox-attend/bin/wedge-ticket-decide: { class: readOnly, reason: decide }
+  skills/athena:inbox/bin/inbox-doctor:               { class: readOnly, reason: diagnose }
+  skills/athena:inbox/bin/inbox-status:               { class: readOnly, reason: count }
+  skills/athena:slack/bin/channels:                   { class: readOnly, reason: list }
+  skills/athena:slack/bin/permalink:                  { class: readOnly, reason: query }
+  skills/athena:slack/bin/read-channel:               { class: readOnly, reason: read }
+  skills/athena:slack/bin/read-thread:                { class: readOnly, reason: read }
+  skills/athena:slack/bin/whoami:                     { class: readOnly, reason: identity }
+  skills/athena:standup/scripts/standup-window.sh:    { class: readOnly, reason: compute }
+  # idempotent: local state only. inbox-wait provisions this machine's doorbell
+  # files; slack read-inbox advances its own seen-state file; integration-gate
+  # fetches and runs the gate (--gate), which writes ai/eval/scorecard.json like
+  # harness-gate does.
+  skills/athena:inbox/bin/inbox-wait:                 { class: idempotent, reason: doorbell }
+  skills/athena:slack/bin/read-inbox:                 { class: idempotent, reason: state }
+  skills/athena:merge-boarding/scripts/integration-gate: { class: idempotent, reason: gate }
+  # destructive: Slack writes, routed mail through the Athena server, and the
+  # inbox ack, which consumes messages from a view other sessions share (see the
+  # "WHO MAY ACK" note in the bin).
+  skills/athena:inbox/bin/read-inbox:                 { class: destructive, reason: ack }
+  skills/athena:inbox/bin/send-mail:                  { class: destructive, reason: send }
+  skills/athena:slack/bin/delete:                     { class: destructive, reason: slack }
+  skills/athena:slack/bin/dm:                         { class: destructive, reason: slack }
+  skills/athena:slack/bin/post:                       { class: destructive, reason: slack }
+  skills/athena:slack/bin/react:                      { class: destructive, reason: slack }
+  skills/athena:slack/bin/reply:                      { class: destructive, reason: slack }
+  skills/athena:slack/bin/update:                     { class: destructive, reason: slack }
+  skills/athena:slack/bin/upload:                     { class: destructive, reason: slack }

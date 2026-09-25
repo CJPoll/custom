@@ -1,17 +1,31 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# check-tool-risk — guard that every first-party `ai/bin` script is classified
-# in the tool risk registry (ai/tools/risk.yml), and the single consumer
-# contract for reading a tool's risk class.
+# check-tool-risk — guard that every harness tool is classified in the tool
+# risk registry (ai/tools/risk.yml), and the single consumer contract for
+# reading a tool's risk class.
+#
+# WHICH TOOLS (DND-508): every first-party executable ai/lib/harness_tools.rb
+# scopes IN -- ai/bin/*, ai/skills/*/bin/*, ai/skills/*/scripts/*, and any
+# future executable under ai/. That file holds the scope rule and the reason
+# for each directory it leaves OUT. Discovery is git's (tracked, plus untracked
+# first-party), never a filesystem glob: an ignored scratch file in ai/bin does
+# not demand a classification, while a new untracked tool does. An executable
+# no scope rule covers FAILS, and so does an empty discovery.
+#
+# REGISTRY KEYS (HarnessTools.risk_key): an ai/bin tool is its bare name, as it
+# always was. Any other tool is its path under ai/, e.g.
+# `skills/athena:slack/bin/post` -- unique where basenames collide, and a
+# substring of both `ai/skills/...` and `~/.claude/skills/...`, so
+# ai/hooks/workflow-phase-guard.sh's word match finds it either way.
 #
 # The registry (DND-172 / gap 13) classifies each tool by WORST-CASE capability
 # as readOnly / idempotent / destructive (least -> most restrictive). Its
 # purpose is to be the concrete input C2 (DND-173) phase-gating reads. This
 # script owns two responsibilities:
 #
-#   * COVERAGE + WELL-FORMEDNESS (gate entry, no args): every executable ai/bin
-#     script has an entry, no stale entries linger, every entry is well-formed,
+#   * COVERAGE + WELL-FORMEDNESS (gate entry, no args): every harness tool
+#     has an entry, no stale entries linger, every entry is well-formed,
 #     and `default` stays `destructive` (deny-by-default). Exit 0 pass / 1 fail.
 #   * THE CONSUMER CONTRACT (`--class-of <name>`): print exactly one class and
 #     exit 0, applying deny-by-default — an unknown/unlisted tool resolves to
@@ -32,9 +46,10 @@
 require "yaml"
 require "fileutils"
 require "tmpdir"
+require_relative "../lib/harness_tools"
 
 AI_DIR        = File.expand_path("..", __dir__)
-BIN_DIR       = File.join(AI_DIR, "bin")
+REPO_ROOT     = File.expand_path("..", AI_DIR)
 REGISTRY_PATH = File.join(AI_DIR, "tools", "risk.yml")
 
 # Deny-by-default: the most restrictive class, assigned to any unclassified
@@ -43,16 +58,13 @@ REGISTRY_PATH = File.join(AI_DIR, "tools", "risk.yml")
 # the coverage check, so the data file and this code can never silently diverge.
 DENY_DEFAULT = "destructive"
 
-# Enumerate the tools that MUST be classified: executable regular files under
-# bin_dir, excluding *.self-test.sh, by basename, sorted.
-def enumerate_bins(bin_dir)
-  # FNM_DOTMATCH (DND-422): a dot-prefixed executable is still a tool that must
-  # be classified; check-bin-help already enumerates bins this way.
-  Dir.glob(File.join(bin_dir, "*"), File::FNM_DOTMATCH)
-     .select { |p| File.file?(p) && File.executable?(p) }
-     .reject { |p| p.end_with?(".self-test.sh") }
-     .map    { |p| File.basename(p) }
-     .sort
+# The tools that MUST be classified, as [registry keys (sorted), unscoped
+# paths]. Test suites (*.self-test.sh, test/) are excluded by first-party
+# discovery; dot-prefixed executables are included (DND-422). Raises
+# FirstParty::MeasureError when discovery fails or finds nothing.
+def enumerate_tools(root)
+  found = HarnessTools.discover(root)
+  [found.tools.map { |rel| HarnessTools.risk_key(rel) }.sort, found.unscoped]
 end
 
 # Load + structurally validate the registry. Returns [registry_hash, errors].
@@ -138,19 +150,33 @@ def class_of(name, registry_path)
 end
 
 # Coverage + well-formedness. Returns [exit_code, lines].
-def run_check(bin_dir: BIN_DIR, registry_path: REGISTRY_PATH)
+def run_check(root: REPO_ROOT, registry_path: REGISTRY_PATH)
   lines = []
   data, errors = load_registry(registry_path)
   tools = data["tools"].is_a?(Hash) ? data["tools"] : {}
 
-  bins = enumerate_bins(bin_dir)
+  begin
+    bins, unscoped = enumerate_tools(root)
+  rescue FirstParty::MeasureError => e
+    lines << "check-tool-risk: FAILED — could not discover the harness tools: #{e.message}"
+    lines << "  Fix: this repo always has harness tools, so an empty or failed discovery means " \
+             "the lookup broke, not that there is nothing to classify. Run `git -C #{root} ls-files ai/bin` " \
+             "and check the executable bits; see ai/lib/harness_tools.rb for the scope rule."
+    return [1, lines]
+  end
+
+  unscoped.each do |rel|
+    errors << "no scope rule covers executable '#{rel}', so nothing decided whether it is a harness tool. " \
+              "Fix: add a SCOPE entry for its directory in ai/lib/harness_tools.rb: IN (it must then be " \
+              "classified here) or OUT with the reason."
+  end
 
   missing = bins - tools.keys
   stale   = tools.keys - bins
 
   unless missing.empty?
     missing.each do |name|
-      errors << "no risk classification for ai/bin script '#{name}'. " \
+      errors << "no risk classification for harness tool '#{name}'. " \
                 "Fix: add '#{name}: { class: <readOnly|idempotent|destructive>, reason: <one-word> }' " \
                 "to ai/tools/risk.yml (unclassified => destructive by deny-by-default; classify it explicitly)."
     end
@@ -158,31 +184,106 @@ def run_check(bin_dir: BIN_DIR, registry_path: REGISTRY_PATH)
 
   unless stale.empty?
     stale.each do |name|
-      errors << "registry entry '#{name}' is no longer an ai/bin script. " \
+      errors << "registry entry '#{name}' is no longer a harness tool. " \
                 "Fix: remove the '#{name}' entry from ai/tools/risk.yml."
     end
   end
 
   if errors.empty?
-    lines << "check-tool-risk: OK — #{bins.size} ai/bin scripts, all classified " \
+    lines << "check-tool-risk: OK — #{bins.size} harness tools, all classified " \
              "(#{bins.size} considered, #{tools.size} entries)"
     return [0, lines]
   end
 
   lines << "check-tool-risk: FAILED — #{errors.size} problem(s) " \
-           "(#{bins.size} ai/bin scripts considered, #{tools.size} classified):"
+           "(#{bins.size} harness tools considered, #{tools.size} classified):"
   errors.each { |e| lines << "  - #{e}" }
   [1, lines]
 end
 
-def run_json(registry_path: REGISTRY_PATH, bin_dir: BIN_DIR)
+def run_json(registry_path: REGISTRY_PATH, root: REPO_ROOT)
   require "json"
-  bins = enumerate_bins(bin_dir)
+  bins, = enumerate_tools(root)
   map = bins.each_with_object({}) { |name, h| h[name] = class_of(name, registry_path) }
   [0, [JSON.pretty_generate(map)]]
 end
 
 # ---- self-test -------------------------------------------------------------
+
+def _git_fixture(root)
+  sh = ->(*a) { system(*a, chdir: root, out: File::NULL, err: File::NULL) }
+  FileUtils.mkdir_p(root)
+  sh.call("git", "init", "-q", ".")
+  sh.call("git", "config", "user.email", "t@example.invalid")
+  sh.call("git", "config", "user.name", "t")
+  # A global core.excludesFile could hide a fixture from git ls-files.
+  sh.call("git", "config", "core.excludesFile", "/dev/null")
+  FileUtils.mkdir_p(File.join(root, "ai", "bin"))
+end
+
+def _commit_all(root)
+  system("git", "-C", root, "add", "-A", out: File::NULL, err: File::NULL)
+  system("git", "-C", root, "-c", "commit.gpgsign=false", "commit", "-qm", "f",
+         out: File::NULL, err: File::NULL)
+end
+
+# DND-508: WHICH tools must be classified. Every harness tool from
+# ai/lib/harness_tools.rb (git discovery, scoped), not a glob of ai/bin.
+def discovery_cases(fail)
+  Dir.mktmpdir("check-tool-risk-disc-") do |root|
+    _git_fixture(root)
+    bin = File.join(root, "ai", "bin")
+    _write_exec(bin, "alpha")
+    skill = File.join(root, "ai", "skills", "athena:demo", "bin")
+    FileUtils.mkdir_p(skill)
+    _write_exec(skill, "tool")
+    _commit_all(root)
+    reg = File.join(root, "risk.yml")
+
+    # An unclassified skill executable fails, named by its path under ai/.
+    File.write(reg, _complete_registry(%w[alpha]))
+    code, lines = run_check(root: root, registry_path: reg)
+    fail.("an unclassified skill executable should fail") unless code == 1
+    unless lines.join("\n").include?("skills/athena:demo/bin/tool")
+      fail.("the failure should name the skill tool by its key skills/athena:demo/bin/tool")
+    end
+
+    File.write(reg, _complete_registry(%w[alpha skills/athena:demo/bin/tool]))
+    code, lines = run_check(root: root, registry_path: reg)
+    fail.("a fully classified set should pass, got #{lines.join(' / ')}") unless code.zero?
+
+    # An ignored scratch executable in ai/bin does not skew the check.
+    File.write(File.join(root, ".git", "info", "exclude"), "scratch-*\n")
+    _write_exec(bin, "scratch-dnd")
+    code, lines = run_check(root: root, registry_path: reg)
+    fail.("an ignored scratch executable in ai/bin must not skew the check: #{lines.join(' / ')}") unless code.zero?
+
+    # A NEW untracked first-party executable still fails until classified.
+    fresh = _write_exec(bin, "fresh-tool")
+    code, = run_check(root: root, registry_path: reg)
+    fail.("a new untracked first-party executable should fail unclassified") unless code == 1
+    FileUtils.rm_f(fresh)
+
+    # An executable no scope rule covers fails.
+    FileUtils.mkdir_p(File.join(root, "tools"))
+    stray = _write_exec(File.join(root, "tools"), "stray")
+    code, = run_check(root: root, registry_path: reg)
+    fail.("an unscoped executable should fail") unless code == 1
+    FileUtils.rm_f(stray)
+  end
+
+  # Empty discovery is an ERROR, never "0 tools, all classified".
+  Dir.mktmpdir("check-tool-risk-empty-") do |root|
+    _git_fixture(root)
+    File.write(File.join(root, "README"), "no executables\n")
+    _commit_all(root)
+    reg = File.join(root, "risk.yml")
+    File.write(reg, _complete_registry([]).sub("tools:\n", "tools: {}\n"))
+    code, lines = run_check(root: root, registry_path: reg)
+    fail.("empty discovery should fail") unless code == 1
+    fail.("empty-discovery failure should carry a Fix:") unless lines.join("\n").include?("Fix:")
+  end
+end
 
 def _write_exec(dir, name, body = "#!/bin/sh\n:\n")
   path = File.join(dir, name)
@@ -209,8 +310,8 @@ def run_self_test
   fail = ->(msg) { warn "self-test: FAIL — #{msg}"; ok = false }
 
   begin
-    bin_dir = File.join(root, "bin")
-    FileUtils.mkdir_p(bin_dir)
+    _git_fixture(root)
+    bin_dir = File.join(root, "ai", "bin")
     _write_exec(bin_dir, "alpha")
     _write_exec(bin_dir, "beta")
     _write_exec(bin_dir, "gamma")
@@ -219,30 +320,34 @@ def run_self_test
     # A non-executable file must be excluded too.
     File.write(File.join(bin_dir, "notes.txt"), "x")
 
-    enum = enumerate_bins(bin_dir)
+    _commit_all(root)
+
+    enum, = enumerate_tools(root)
     unless enum == %w[alpha beta gamma]
       fail.("enumeration wrong: expected [alpha, beta, gamma], got #{enum.inspect}")
     end
 
     # DND-422: a dot-prefixed executable is a tool that must be classified.
-    dot_dir = File.join(root, "dotbin")
-    FileUtils.mkdir_p(dot_dir)
-    _write_exec(dot_dir, ".hidden-tool")
-    dot_enum = enumerate_bins(dot_dir)
+    dot_root = File.join(root, "dotrepo")
+    _git_fixture(dot_root)
+    _write_exec(File.join(dot_root, "ai", "bin"), ".hidden-tool")
+    dot_enum, = enumerate_tools(dot_root)
     unless dot_enum == %w[.hidden-tool]
       fail.("a dot-prefixed bin was not enumerated: expected [.hidden-tool], got #{dot_enum.inspect}")
     end
+    FileUtils.rm_rf(dot_root)
 
     reg = File.join(root, "risk.yml")
+    File.write(File.join(root, ".git", "info", "exclude"), "risk.yml\n")
 
     # Case 1: complete fixture passes.
     File.write(reg, _complete_registry(%w[alpha beta gamma]))
-    code, lines = run_check(bin_dir: bin_dir, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg)
     fail.("complete fixture should pass, got exit #{code}: #{lines.join(' / ')}") unless code.zero?
 
     # Case 2: a new unclassified bin fails, naming it + a Fix line.
     File.write(reg, _complete_registry(%w[alpha beta]))
-    code, lines = run_check(bin_dir: bin_dir, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg)
     body = lines.join("\n")
     fail.("unclassified bin should fail") unless code == 1
     fail.("failure should name the missing 'gamma'") unless body.include?("gamma")
@@ -258,7 +363,7 @@ def run_self_test
         beta:  { class: readOnly, reason: t }
         gamma: { class: readOnly, reason: t }
     YAML
-    code, lines = run_check(bin_dir: bin_dir, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg)
     fail.("bad class value should fail") unless code == 1
     fail.("bad class failure should carry a Fix:") unless lines.join("\n").include?("Fix:")
 
@@ -272,7 +377,7 @@ def run_self_test
         beta:  { class: readOnly, reason: t }
         gamma: { class: readOnly, reason: t }
     YAML
-    code, = run_check(bin_dir: bin_dir, registry_path: reg)
+    code, = run_check(root: root, registry_path: reg)
     fail.("missing reason should fail") unless code == 1
 
     # Case 5: default != destructive fails.
@@ -285,13 +390,13 @@ def run_self_test
         beta:  { class: readOnly, reason: t }
         gamma: { class: readOnly, reason: t }
     YAML
-    code, lines = run_check(bin_dir: bin_dir, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg)
     fail.("default: readOnly should fail") unless code == 1
     fail.("default failure should carry a Fix:") unless lines.join("\n").include?("Fix:")
 
     # Case 6: a stale entry fails, naming it.
     File.write(reg, _complete_registry(%w[alpha beta gamma delta]))
-    code, lines = run_check(bin_dir: bin_dir, registry_path: reg)
+    code, lines = run_check(root: root, registry_path: reg)
     fail.("stale entry should fail") unless code == 1
     fail.("stale failure should name 'delta'") unless lines.join("\n").include?("delta")
 
@@ -309,6 +414,7 @@ def run_self_test
     fail.("class_of beta")  unless class_of("beta", reg) == "idempotent"
     fail.("class_of gamma") unless class_of("gamma", reg) == "destructive"
     fail.("class_of unknown must deny-by-default") unless class_of("nonesuch", reg) == "destructive"
+    discovery_cases(fail)
   ensure
     FileUtils.rm_rf(root)
   end
