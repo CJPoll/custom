@@ -309,8 +309,8 @@ sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.ta
 
 | Screen | Image | Theme |
 |--------|-------|-------|
-| Main Display | `~/Pictures/cyberpunk-main.png` | Blue/cyan cityscape with silhouette |
-| Secondary Display (Rotated) | `~/Pictures/cyberpunk-rotated.jpg` | Rotated variant |
+| Every other display (hyprpaper catch-all) | `~/Pictures/cyberpunk-main.png` | Blue/cyan cityscape with silhouette |
+| Rotated portrait display (`desc:Dell Inc. DELL P2721Q GPCZGH3`, HDMI-A-1 today) | `~/Pictures/cyberpunk-rotated.jpg` | 2160x3840 portrait variant |
 | Lock Screen | `~/Pictures/cyberpunk-lock.jpg` | Orange-dominant futuristic cityscape |
 
 The lock screen wallpaper specifically leans into the neon orange color, which is reflected in hyprlock's UI design.
