@@ -167,7 +167,7 @@ refused && ok "10. combined short flags (-sd) do not hide --auto" || bad "10. -s
 reset_fx; pr_view "${QUEUED}"; gate_unreadable
 printf 'm: pr merge\n' > "${FX}/aliases.out"
 run m 362 --auto
-refused && [[ "${ERR}" == *"alias"* ]] && ok "11. a gh alias expanding to pr merge -> refused" \
+refused && grep -q '^pr view 362 ' "${STUB_LOG}" && ok "11. a gh alias expanding to pr merge -> expanded, judged, refused" \
   || bad "11. alias to pr merge refused" "$(detail)"
 
 reset_fx; pr_view "${QUEUED}"; gate_unreadable
@@ -175,6 +175,37 @@ printf 'sm: !gh pr merge "$1" --auto\n' > "${FX}/aliases.out"
 run sm 362
 refused && [[ "${ERR}" == *"alias"* ]] && ok "12. a gh shell alias (!...) -> refused (cannot be checked)" \
   || bad "12. shell alias refused" "$(detail)"
+
+reset_fx; pr_view "${QUEUED}"; gate_unreadable
+printf 'co: pr checkout\np: pr\n' > "${FX}/aliases.out"
+run p merge 362 --auto
+refused && grep -q '^pr view 362 ' "${STUB_LOG}" \
+  && ok "12b. an alias expanding to only part of it (p: pr, then \`p merge 362 --auto\`) -> expanded, refused" \
+  || bad "12b. partial alias refused" "$(detail)"
+
+reset_fx; pr_view "${QUEUED}"; gate_unreadable
+printf 'x: pr $1 362 --auto\n' > "${FX}/aliases.out"
+run x merge
+refused && ok "12c. an alias whose \$1 placeholder receives 'merge' -> expanded, refused" \
+  || bad "12c. placeholder alias refused" "$(detail)"
+
+reset_fx; fx aliases '' 1 'failed to read configuration'
+run p merge 362 --auto
+refused && [[ "${ERR}" == *"alias list"* ]] \
+  && ok "12d. a non-gh first word when \`gh alias list\` FAILS -> refused (not read as no aliases)" \
+  || bad "12d. failed alias lookup refused" "$(detail)"
+
+reset_fx; fx aliases 'no aliases configured' 1
+run myext do-thing
+if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: passthrough"* ]]; then
+  ok "12e. gh's own 'no aliases configured' (exit 1) is an empty list -> a non-alias word runs"
+else bad "12e. no-aliases passes" "$(detail)"; fi
+
+reset_fx; printf 'pv: pr view\n' > "${FX}/aliases.out"
+run pv 362
+if [ "${RC}" = 0 ] && ! grep -q -- '--json' "${STUB_LOG}"; then
+  ok "12f. an alias to a non-merge command (pv: pr view) runs as-is"
+else bad "12f. non-merge alias passes" "$(detail)"; fi
 
 echo
 echo "--- --auto WITH a readable, non-empty required-checks set passes ---"

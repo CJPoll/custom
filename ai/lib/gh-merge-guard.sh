@@ -25,12 +25,16 @@
 #     SUCCESS/NEUTRAL/SKIPPED, a commit StatusContext SUCCESS. Zero reported
 #     checks is not green. The pin makes GitHub itself refuse the merge if the
 #     head moves between this read and the merge.
-#   * A gh ALIAS that expands to `pr merge`, and a gh shell alias (`!…`), are
-#     refused: the guard cannot see through them.
+#   * A gh ALIAS is expanded the way gh expands it (see gmg_expand_alias) and
+#     the EXPANDED argv is what the guard judges, so `gh alias set p pr` then
+#     `p merge 5 --auto` is refused like `pr merge 5 --auto`. A gh shell alias
+#     (`!…`), an alias with quoting, and a failed alias lookup are refused.
 #
 # `pr merge --disable-auto` (without --auto) merges nothing and passes as-is.
 # Every other command passes as-is with no extra reads, except that a first
 # word gh does not ship as a command is looked up in `gh alias list`.
+# The branch name goes into the API path unencoded (a `/` in it is accepted by
+# GitHub's branch routes); if a lookup fails on it, that fails CLOSED.
 #
 # Residual (NOT checked; each still runs): `gh api` writes that merge directly
 # (PUT …/pulls/<n>/merge, the GraphQL mergePullRequest /
@@ -57,7 +61,7 @@ GMG_SAFE_PATH="assert every check green on the PR's exact head SHA (\`gh pr chec
 
 # gh's own top-level commands (gh 2.83). A first word outside this list may be
 # an alias, which is expanded and checked.
-GMG_BUILTINS=" agent-task alias api attestation auth browse cache co codespace completion config copilot extension gist gpg-key help issue label org pr preview project release repo ruleset run search secret ssh-key status variable version workflow "
+GMG_BUILTINS=" agent-task alias api attestation auth browse cache codespace completion config copilot extension gist gpg-key help issue label org pr preview project release repo ruleset run search secret ssh-key status variable version workflow "
 
 gmg_refuse() {
   # $1 what was refused, $2 why (may be multi-line), $3 the Fix: text
@@ -69,11 +73,11 @@ gmg_refuse() {
 gmg_false_word() { case "$1" in 0|f|F|false|FALSE|False) return 0 ;; esac; return 1; }
 
 # gmg_parse <args...> : sets GMG_IS_MERGE, GMG_AUTO, GMG_DISABLE_AUTO,
-# GMG_REPO, GMG_SELECTOR, GMG_MATCH_SHA, GMG_FIRST (first positional word).
+# GMG_REPO, GMG_SELECTOR, GMG_MATCH_SHA.
 gmg_parse() {
   local -a pos=()
   local a v i c rest
-  GMG_IS_MERGE=0 GMG_AUTO=0 GMG_DISABLE_AUTO=0 GMG_REPO="" GMG_SELECTOR="" GMG_MATCH_SHA="" GMG_FIRST=""
+  GMG_IS_MERGE=0 GMG_AUTO=0 GMG_DISABLE_AUTO=0 GMG_REPO="" GMG_SELECTOR="" GMG_MATCH_SHA=""
   while [ $# -gt 0 ]; do
     a="$1"; shift
     case "$a" in
@@ -107,29 +111,61 @@ gmg_parse() {
       *) pos+=("$a") ;;
     esac
   done
-  GMG_FIRST="${pos[0]:-}"
   if [ "${pos[0]:-}" = pr ] && [ "${pos[1]:-}" = merge ]; then
     GMG_IS_MERGE=1
     GMG_SELECTOR="${pos[2]:-}"
   fi
 }
 
-# gmg_check_alias <first-word> : refuse when a gh alias of that name expands to
-# a merge or is a shell alias.
-gmg_check_alias() {
-  local first="$1" line name exp
+# gmg_expand_alias <args...> : sets GMG_ARGV to the argv gh will really run.
+# gh expands an alias only when it is the FIRST argument, and appends the
+# remaining arguments to the expansion (or, when the expansion has $N
+# placeholders, substitutes them instead). So `gh alias set p pr` turns
+# `p merge 5 --auto` into `pr merge 5 --auto`: the guard must parse the
+# EXPANDED argv, never the alias word. Refused outright: a shell alias (`!…`,
+# it can run anything), an expansion this cannot tokenize the way gh does
+# (quotes or backslashes), and a failed alias lookup (a lookup that fails must
+# not read as "no aliases").
+gmg_expand_alias() {
+  local first="${1:-}" list rc line name exp i a
+  local -a words=()
+  GMG_ARGV=("$@")
   [ -n "$first" ] || return 0
+  case "$first" in -*) return 0 ;; esac
   case "$GMG_BUILTINS" in *" $first "*) return 0 ;; esac
+  if list="$(gh alias list 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "$rc" != 0 ]; then
+    # gh exits 1 with exactly this when no alias is configured.
+    [ "$list" = "no aliases configured" ] && return 0
+    gmg_refuse "gh $*" "'$first' is not a gh command, and \`gh alias list\` failed (exit $rc: $(tr '\n' ' ' <<<"$list")), so $GMG_TOOL cannot tell whether it is an alias that merges" \
+      "run the command by its real gh name (e.g. \`~/dev/custom/ai/bin/$GMG_TOOL pr …\`), not an alias"
+  fi
   while IFS= read -r line; do
     name="${line%%:*}"; exp="${line#*:}"; exp="${exp# }"
     [ "$name" = "$first" ] || continue
     case "$exp" in
-      '!'*) gmg_refuse "gh $first" "it is a gh shell alias ('$exp'), which can run anything, so $GMG_TOOL cannot check whether it merges" \
+      '!'*) gmg_refuse "gh $*" "'$first' is a gh shell alias ('$exp'), which can run anything, so $GMG_TOOL cannot check whether it merges" \
               "run the underlying command directly through the wrapper — \`~/dev/custom/ai/bin/$GMG_TOOL <the expanded command>\`" ;;
-      *merge*) gmg_refuse "gh $first" "it is a gh alias for '$exp', which would merge past this guard" \
-              "run the expanded command directly — \`~/dev/custom/ai/bin/$GMG_TOOL $exp …\` — so the merge guard sees it" ;;
+      *[\'\"\\]*) gmg_refuse "gh $*" "'$first' is a gh alias ('$exp') with quoting $GMG_TOOL does not tokenize the way gh does, so it cannot check whether it merges" \
+              "run the expanded command directly — \`~/dev/custom/ai/bin/$GMG_TOOL <the expanded command>\`" ;;
     esac
-  done < <(gh alias list 2>/dev/null || true)
+    shift
+    if [[ "$exp" == *'$'* ]]; then
+      i=1
+      for a in "$@"; do exp="${exp//\$$i/$a}"; i=$((i+1)); done
+      if [[ "$exp" =~ \$[0-9] ]]; then
+        gmg_refuse "gh $first $*" "gh alias '$first' has unfilled placeholders after expansion ('$exp')" \
+          "run the expanded command directly — \`~/dev/custom/ai/bin/$GMG_TOOL <the expanded command>\`"
+      fi
+      read -ra words <<<"$exp"
+      GMG_ARGV=("${words[@]}")
+    else
+      read -ra words <<<"$exp"
+      GMG_ARGV=("${words[@]}" "$@")
+    fi
+    return 0
+  done <<<"$list"
+  return 0
 }
 
 # gmg_probe_count <label> <jq-count-filter> <gh api args...> : one required-
@@ -158,8 +194,8 @@ gmg_probe_count() {
 # gmg_guard <gh args...> : the entry point. Returns 0 or exits 3.
 gmg_guard() {
   local shown="gh $*" pr_json err rc url owner repo base head n_prot n_rules bad total
-  gmg_parse "$@"
-  gmg_check_alias "$GMG_FIRST"
+  gmg_expand_alias "$@"
+  gmg_parse "${GMG_ARGV[@]}"
   [ "$GMG_IS_MERGE" = 1 ] || return 0
   if [ "$GMG_AUTO" = 0 ] && [ "$GMG_DISABLE_AUTO" = 1 ]; then return 0; fi
 
