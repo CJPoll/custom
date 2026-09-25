@@ -21,6 +21,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AI_DIR="$(cd "${HERE}/../.." && pwd)"
 BIN="${CHECK_GUARD_MESSAGES_UNDER_TEST:-${AI_DIR}/bin/check-guard-messages}"
+BIN_LIB="$(dirname "${BIN}")/../lib/landed.rb"
 
 if [ ! -f "${BIN}" ]; then
   echo "check-guard-messages self-test: FAIL -- ${BIN} does not exist" >&2
@@ -70,6 +71,14 @@ new_fixture() {
   printf '#!/bin/sh\necho "DENY: x. Fix: do y." >&2; exit 2\n' > "${root}/ai/hooks/good-guard.sh"
   chmod +x "${root}/ai/hooks/good-guard.sh"
   printf '# path<TAB>class<TAB>reason\n' > "${root}/ai/guard-classification.tsv"
+  # Since DND-543 the checker requires the shared landed-bar library. A pre-
+  # DND-543 checker under test has none, and the fixture then carries none.
+  if [ -f "${BIN_LIB}" ]; then
+    mkdir -p "${root}/ai/lib"
+    cp "${BIN_LIB}" "${root}/ai/lib/landed.rb"
+    printf 'ai/lib/landed.rb\tlibrary\tshared landed-bar library required by the checker; the caller prints the Fix:\n' \
+      >> "${root}/ai/guard-classification.tsv"
+  fi
   git -C "${root}" init -q
   git init -q --bare "${root}.origin.git"
   git -C "${root}" remote add origin "${root}.origin.git"

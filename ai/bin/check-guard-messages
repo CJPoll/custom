@@ -123,7 +123,7 @@
 #   - it matches: the ratchet runs, and the OK line says the tip was checked;
 #   - it differs: FAIL, naming both SHAs. Stale and forged are indistinguishable
 #     from here, and both mean the local bar is not the landed one;
-#   - origin is unreachable, times out (LS_REMOTE_TIMEOUT), or has no
+#   - origin is unreachable, times out (Landed::LS_REMOTE_TIMEOUT), or has no
 #     refs/heads/main: FAIL as "could not measure". Never a fallback to the
 #     local ref.
 # The check does NOT fetch the remote tip when the local ref is behind. A fetch
@@ -171,6 +171,7 @@
 
 require "fileutils"
 require "open3"
+require_relative "../lib/landed"
 require "tmpdir"
 
 REPO  = File.expand_path("../..", __dir__)
@@ -341,93 +342,22 @@ end
 
 # --- the classification ratchet (DND-510) ------------------------------------
 
-LANDED_REF = "refs/remotes/origin/main"
-# The authority the local LANDED_REF is cross-checked against (DND-538).
-LANDED_REMOTE = "origin"
-LANDED_REMOTE_REF = "refs/heads/main"
-LS_REMOTE_PROBE = "git ls-remote #{LANDED_REMOTE} #{LANDED_REMOTE_REF}".freeze
-# One network round trip, measured at ~1.4 s over SSH to github.com. The bound
-# only stops a hung transport from hanging the gate; hitting it is "could not
-# measure", never a pass.
-LS_REMOTE_TIMEOUT = 30
+# The landed-point resolution (the origin/main tip cross-checked with
+# `git ls-remote`, and the merge-base) lives in ai/lib/landed.rb, shared with
+# the other ratchets (DND-543).
+LANDED_REF = Landed::REF
+LANDED_REMOTE = Landed::REMOTE
+LANDED_REMOTE_REF = Landed::REMOTE_REF
+LS_REMOTE_PROBE = Landed::LS_REMOTE_PROBE
+LandedUnreadable = Landed::Unreadable
+LandedMismatch = Landed::Mismatch
 
-# The landed bar could not be read. Carries every probe and what it gave, so
-# "could not look" is printed as a list of places looked, never as a clean run.
-class LandedUnreadable < StandardError
-  attr_reader :probes
-
-  def initialize(probes)
-    @probes = probes
-    super("the landed classification could not be read")
-  end
-end
-
-# The local LANDED_REF disagrees with origin's LANDED_REMOTE_REF: the bar this
-# checkout would compare against is not the one that landed (stale, or moved by
-# hand). A distinct failure from "could not read", with both SHAs.
-class LandedMismatch < StandardError
-  attr_reader :local, :remote
-
-  def initialize(local, remote)
-    @local = local
-    @remote = remote
-    super("#{LANDED_REF} disagrees with #{LANDED_REMOTE} #{LANDED_REMOTE_REF}")
-  end
-end
-
-# Runs cmd with no stdin; kills its whole process group after timeout seconds.
-# Returns [stdout, stderr, status], status nil on a timeout.
 def capture_with_timeout(env, cmd, timeout)
-  Open3.popen3(env, *cmd, pgroup: true) do |stdin, out, err, wait|
-    stdin.close
-    readers = [Thread.new { out.read }, Thread.new { err.read }]
-    status = wait.join(timeout)&.value
-    unless status
-      begin
-        Process.kill("KILL", -wait.pid)
-      rescue Errno::ESRCH
-        nil
-      end
-      wait.join
-    end
-    [readers[0].value, readers[1].value, status]
-  end
-end
-
-# origin's LANDED_REMOTE_REF, read over the network. Every outcome but a single
-# 40-hex SHA raises LandedUnreadable with the probes so far: an unreachable or
-# empty remote is a missing measurement, and the local ref is never used in
-# its place.
-def remote_tip(root, probes)
-  env = { "GIT_TERMINAL_PROMPT" => "0", "GIT_OPTIONAL_LOCKS" => "0" }
-  out, err, status = capture_with_timeout(env, ["git", "-C", root, "ls-remote", "--exit-code",
-                                                LANDED_REMOTE, LANDED_REMOTE_REF], LS_REMOTE_TIMEOUT)
-  outcome = if status.nil?
-              "timed out after #{LS_REMOTE_TIMEOUT}s (origin unreachable)"
-            elsif status.exitstatus == 2
-              "origin is reachable but has no #{LANDED_REMOTE_REF}"
-            elsif !status.success?
-              "failed (exit #{status.exitstatus}, origin unreachable): #{err.strip.lines.first.to_s.strip}"
-            end
-  sha = out.split("\n").map { |l| l.split("\t") }.select { |_, ref| ref == LANDED_REMOTE_REF }.map(&:first)
-  outcome ||= "no single #{LANDED_REMOTE_REF} line in the reply: #{out.strip.inspect}" unless
-    sha.size == 1 && sha[0].match?(/\A\h{40}\z/)
-  if outcome
-    probes << [LS_REMOTE_PROBE, outcome]
-    raise LandedUnreadable.new(probes)
-  end
-  probes << [LS_REMOTE_PROBE, sha[0][0, 12]]
-  sha[0]
-rescue Errno::ENOENT
-  probes << [LS_REMOTE_PROBE, "git executable not found on PATH"]
-  raise LandedUnreadable.new(probes)
+  Landed.capture_with_timeout(env, cmd, timeout)
 end
 
 def git_read(root, *args)
-  out, _err, status = Open3.capture3({ "GIT_OPTIONAL_LOCKS" => "0" }, "git", "-C", root, *args)
-  [out, status.success?]
-rescue Errno::ENOENT
-  ["", false]
+  Landed.git_read(root, *args)
 end
 
 # Was rel a discovery candidate at a landed commit? Mirrors candidate?: an
@@ -483,36 +413,7 @@ end
 # with origin raises LandedMismatch. Returns [points, classes,
 # blobs], blobs mapping each landed candidate to its blob(s) across the points.
 def landed_classification(root)
-  probes = []
-  unreadable = lambda do |ref, outcome|
-    probes << [ref, outcome]
-    raise LandedUnreadable.new(probes)
-  end
-
-  tip, ok = git_read(root, "rev-parse", "--verify", "--quiet", "#{LANDED_REF}^{commit}")
-  tip = tip.strip
-  unreadable.call(LANDED_REF, "no such ref") if !ok || tip.empty?
-  probes << [LANDED_REF, tip[0, 12]]
-
-  shallow, ok = git_read(root, "rev-parse", "--is-shallow-repository")
-  unreadable.call("git rev-parse --is-shallow-repository", "failed") unless ok
-  if shallow.strip == "true"
-    unreadable.call("history depth", "shallow clone: the merge-base with origin/main cannot be proven")
-  end
-
-  remote = remote_tip(root, probes)
-  raise LandedMismatch.new(tip, remote) unless remote == tip
-
-  mb, ok = git_read(root, "merge-base", "HEAD", tip)
-  mb = mb.strip
-  unreadable.call("merge-base(HEAD, origin/main)", "no common ancestor (or no HEAD commit)") if !ok || mb.empty?
-  probes << ["merge-base(HEAD, origin/main)", mb[0, 12]]
-
-  points = if mb == tip
-             [["origin/main tip = merge-base(HEAD, origin/main)", tip]]
-           else
-             [["origin/main (tip)", tip], ["merge-base(HEAD, origin/main)", mb]]
-           end
+  points, probes = Landed.points(root)
   blobs = {}
   per_point = points.map do |label, sha|
     classes_at(root, sha, label, blobs)

@@ -232,3 +232,4 @@ git-custom/git-stop-tracking	tool	personal git alias: untracks a path and ignore
 hypr/themes/base16-cyberpunk.sh	tool	theme color export for the desktop
 hypr/themes/grub/generate-assets.sh	tool	generates GRUB theme images with ImageMagick
 system-files/bt-hci-capture	tool	root-run btmon capture daemon behind the btmon OpenRC service
+ai/lib/landed.rb	library	landed-bar resolution required by ai/bin/check-guard-messages / check-tool-risk / check-bin-help; raises Landed::Unreadable or Landed::Mismatch and each caller prints the Fix:
