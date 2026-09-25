@@ -3204,7 +3204,9 @@ Not measured: an interactive top-level turn end, whether a real usage-limit 429
 reports `rate_limit`, and whether PostToolUseFailure fires for a spawn that a
 PreToolUse hook denied. Every case ran headless. *Layer 3: the drain protocol*
 says ending an admiral's turn kills its running captains; the headless case
-above did not show that, and the two are not yet reconciled. SubagentStop carries no stop reason and no parent id.
+above did not show that, and the two are not yet reconciled.
+
+SubagentStop carries no stop reason and no parent id.
 Its `background_tasks` lists the whole session's tasks, not the ending agent's
 own children, so it cannot count orphans.
 
@@ -3230,9 +3232,18 @@ own children, so it cannot count orphans.
     denied spawn stays denied if a `spawn_failed` for it also arrives.
   - `ended_unexpectedly` is sticky over `ended`: a `stopped` after an
     `api_error` leaves it `ended_unexpectedly`.
-  - An `api_error` basis wins over a `spawn_failed` one, in whichever order
-    they arrive: a foreground child's API death fires both StopFailure and
-    the caller's PostToolUseFailure (measured).
+  - An `api_error` basis wins over a `spawn_failed` one on the same agent, in
+    whichever order they arrive, so the result never depends on arrival order.
+- **A foreground child's API death leaves two unjoined rows.** It fires
+  StopFailure, an `agent_end` `api_error` by `agent_id`, and the caller's
+  PostToolUseFailure, an `agent_end` `spawn_failed` by `tool_use_id`, but no
+  PostToolUse, so nothing joins them (measured). Its mission shows the spawn
+  row, so the spawn carries the class too: the hook reads it from the failure
+  text's `error type <class>` (measured: `error type rate_limit`) and maps
+  anything else to `other`. The agent row keeps its `api_error` basis and
+  attaches to no mission. A foreground admiral's agent row still ends its run
+  at *Fleet liveness* step 2, because its `agent_start` adopted the run
+  (*Run binding*).
 - **Only `agent_start` reopens an agent.** It sets the lifecycle to `running`
   and clears the end, because a SendMessage resume fires SubagentStart again.
   A later seen report moves only the agent's last-seen time.
@@ -3282,8 +3293,8 @@ never sent.
 
 A `run_id`, once bound, never changes. A captain's `run_hint` naming a
 `run_id` another run in the session already holds binds nothing, and the server
-logs a warning naming both runs. The caller's run is the run whose admiral agent made the
-spawn (`caller_agent_id`).
+logs a warning naming both runs. The caller's run is the run whose admiral
+agent made the spawn (`caller_agent_id`).
 
 ### Fleet identity: owner and machine are stamped from the token
 
