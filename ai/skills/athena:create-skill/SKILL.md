@@ -57,6 +57,16 @@ functional namespace like `fix:` — do **not** prepend another. Examples:
 Detection rule: if the name matches `^[a-z0-9-]+:` it already carries a prefix;
 leave it alone. Otherwise prepend `athena:` (or the user's requested prefix).
 
+### More than one colon is legal
+
+A skill name is not limited to a single `<prefix>:<name>` pair — a name may
+carry more than one colon when it names a sub-topic under an existing skill's
+namespace. Precedents already in this collection: `athena:format:test-matrix`
+and `athena:slack:interactive-messages`. Claude Code itself imposes no limit
+on colon count in a skill name; only the double-prefix rule above (don't
+prepend a second harness prefix onto a name that already has one) governs
+what goes in front.
+
 ## First: is a skill the right home?
 
 A skill is the home for **task-triggered** procedures and long reference
