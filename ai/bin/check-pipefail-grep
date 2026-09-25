@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 #
-# check-pipefail-grep -- no shell file under ai/ or scripts/ that runs under
+# check-pipefail-grep -- no tracked shell file in this repo that runs under
 # `set -o pipefail` may feed `grep -q` through a PIPE.
 #
 # WHY THIS EXISTS (DND-365 found it, DND-371 swept it)
@@ -31,9 +31,31 @@
 #
 #   A `|` or `|&` (not `||`) outside quotes, whose right-hand command is
 #   `grep` with -q / --quiet / --silent among its options, in a tracked shell
-#   file under ai/ or scripts/ that EITHER sets pipefail itself (`set -o
-#   pipefail`, `set -euo pipefail`, ...) OR is `source`d / `.`-included by a
-#   file that does (scripts/wt-lib/*.sh inherits scripts/wt's pipefail).
+#   file (see WHICH FILES) that EITHER sets pipefail itself (`set -o
+#   pipefail`, `set -euo pipefail`, zsh `setopt pipe_fail`, ...) OR is
+#   `source`d / `.`-included by a file that does (scripts/wt-lib/*.sh inherits
+#   scripts/wt's pipefail).
+#
+# WHICH FILES (DND-509)
+#
+#   Every path `git ls-files --cached` lists for the repo -- committed or
+#   staged, anywhere in the tree -- that is a regular file (not a symlink) and
+#   is shell by what it IS, never by where it lives:
+#     * extension .sh / .bash / .zsh / .ksh, or .confd (an OpenRC conf.d file,
+#       sourced by its runscript);
+#     * a shebang naming sh, bash, zsh, ksh, dash or openrc-run;
+#     * a zsh function file: first line `#compdef` or `#autoload` (the
+#       .auto-completions/ completions);
+#     * a shell startup file by name: .bashrc, .bash_profile, .profile,
+#       .zshrc, .zshenv, ... including suffixed variants (.zshrc.functions);
+#     * an executable text file with NO shebang -- execvp's ENOEXEC fallback
+#       runs it with /bin/sh (git-custom/git-amend).
+#   There is no list of roots. Until DND-509 there was one (`ai scripts`), and
+#   git-custom/, system-files/, hypr/ and .auto-completions/ were never read.
+#   An UNTRACKED file is not scanned until it is staged: an owner's work in
+#   progress is not yet first-party code, and staging is when a pre-commit gate
+#   needs to see it. (ai/lib/first_party.rb's discover() also admits untracked
+#   files, but only executables and lib/ code; its git_ls is reused here.)
 #
 # WHAT IS NOT FLAGGED (each has a --self-test case)
 #
@@ -55,7 +77,10 @@
 #
 # A FILE THAT CANNOT BE READ -- or whose heredoc never closes, so its tail was
 # skipped as data -- IS A FAILURE, NOT A PASS: "found nothing" and "could not
-# look" must never print the same line.
+# look" must never print the same line. So is a discovery that git cannot
+# answer (COULD NOT LOOK) and one that answers with no tracked file, no shell
+# file, or no pipefail file (FOUND NOTHING): this repo has all three, so an
+# empty set means the scan is broken, not that the repo is clean.
 #
 # KNOWN LIMITS (documented, not hidden):
 #   * Quoting is tracked per line. A quoted string spanning lines (a long
@@ -70,23 +95,25 @@
 require "open3"
 require "tmpdir"
 require "fileutils"
+require "tempfile"
+
+require_relative "../lib/first_party"
 
 REPO = File.expand_path("../..", __dir__)
-SCAN_ROOTS = %w[ai scripts].freeze
 
 USAGE = <<~TXT.freeze
   Usage:
     ai/bin/check-pipefail-grep              fail (listing file:line) on any
-                                            `... | grep -q` in a tracked shell
-                                            file under ai/ or scripts/ that runs
-                                            under `set -o pipefail`
+                                            `... | grep -q` in any tracked shell
+                                            file in the repo that runs under
+                                            `set -o pipefail`
     ai/bin/check-pipefail-grep --self-test  deterministic, hermetic suite
                                             (fixtures only; includes a live
                                             reproduction of the 141)
     ai/bin/check-pipefail-grep --help       this text
 
-  Exit 0 = no such pipe. Exit 1 = at least one (each named), or a file that
-  could not be read.
+  Exit 0 = no such pipe. Exit 1 = at least one (each named), a file that
+  could not be read, or a discovery that could not run or found nothing.
 TXT
 
 FIX_TEXT = "Fix: replace the pipe with a here-string -- `grep -q PAT <<<\"$var\"` " \
@@ -100,21 +127,32 @@ FIX_TEXT = "Fix: replace the pipe with a here-string -- `grep -q PAT <<<\"$var\"
 # ---------------------------------------------------------------------------
 # File classification
 
-SHELL_SHEBANG = %r{\A#!\s*\S*(?:/|\s)(?:env\s+)?(?:ba|z|k|da)?sh\b}.freeze
-SHELL_EXT = /\.(?:sh|bash)\z/.freeze
+SHELL_SHEBANG = %r{\A#!\s*\S*(?:/|\s)(?:env\s+)?(?:(?:ba|z|k|da)?sh|openrc-run)\b}.freeze
+SHELL_EXT = /\.(?:sh|bash|zsh|ksh|confd)\z/.freeze
+ZSH_FUNCTION_HEADER = /\A#(?:compdef|autoload)\b/.freeze
+SHELL_RC_NAME = /\A\.(?:bashrc|bash_profile|bash_login|bash_logout|profile|
+                     zshrc|zshenv|zprofile|zlogin|zlogout)(?:\..+)?\z/x.freeze
 
-def shell_file?(path, text)
-  return true if path =~ SHELL_EXT
+# The WHICH FILES rule in the header. `executable` is the file's mode bit.
+def shell_file?(path, text, executable = false)
+  return true if path =~ SHELL_EXT || File.basename(path) =~ SHELL_RC_NAME
 
-  text.lines.first.to_s =~ SHELL_SHEBANG ? true : false
+  first = text.lines.first.to_s
+  return true if first =~ SHELL_SHEBANG || first =~ ZSH_FUNCTION_HEADER
+
+  # No shebang: execvp falls back to /bin/sh. A NUL byte means a binary.
+  executable && !first.start_with?("#!") && !text.include?("\0") && !text.empty?
 end
 
 # `set -o pipefail`, `set -euo pipefail`, `set -eu -o pipefail`, and friends,
 # on a non-comment line. `set +o pipefail` (turning it OFF) does not match.
 PIPEFAIL_RE = /^\s*set\s+(?:(?:[-+]o\s+[a-z]+|[-+][A-Za-z]+)\s+)*-[A-Za-z]*o\s+pipefail\b/.freeze
+# zsh spells the option any case, underscores ignored: `setopt pipe_fail`,
+# `setopt PIPEFAIL`, `setopt err_exit pipe_fail`. `setopt no_pipe_fail` is OFF.
+ZSH_PIPEFAIL_RE = /^\s*setopt\s+(?:[A-Za-z_]+\s+)*pipe_*fail\b/i.freeze
 
 def sets_pipefail?(text)
-  text.each_line.any? { |l| l =~ PIPEFAIL_RE }
+  text.each_line.any? { |l| l =~ PIPEFAIL_RE || l =~ ZSH_PIPEFAIL_RE }
 end
 
 # Basenames a file pulls in with `source X` / `. X` -- the target inherits the
@@ -280,30 +318,19 @@ end
 # ---------------------------------------------------------------------------
 # Repository scan
 
-# Tracked files under the scan roots; nil when root is not a git worktree
-# (a --self-test fixture), in which case every file on disk is a candidate.
+# Every tracked path in the repo (WHICH FILES). Raises FirstParty::MeasureError
+# when git cannot answer -- COULD NOT LOOK, never an empty list.
 def candidate_files(root)
-  _o, _e, probe = Open3.capture3("git", "-C", root, "rev-parse", "--is-inside-work-tree")
-  if probe.success?
-    out, err, st = Open3.capture3("git", "-C", root, "ls-files", "--", *SCAN_ROOTS)
-    raise "git -C #{root} ls-files failed: #{err.strip}" unless st.success?
-
-    out.split("\n")
-  else
-    SCAN_ROOTS.flat_map do |d|
-      Dir.glob(File.join(root, d, "**", "*"), File::FNM_DOTMATCH)
-         .select { |p| File.file?(p) }
-         .map { |p| p.sub("#{root}/", "") }
-    end
-  end
+  FirstParty.git_ls(root, "--cached")
 end
 
 # => { findings: [[rel, lineno, line]], unreadable: [[rel, why]],
-#      shell: Integer, pipefail: Integer }
+#      tracked: Integer, shell: Integer, pipefail: Integer }
 def scan(root)
   shells = {}
   unreadable = []
-  candidate_files(root).sort.each do |rel|
+  tracked = candidate_files(root)
+  tracked.sort.each do |rel|
     path = File.join(root, rel)
     next if File.symlink?(path) || !File.file?(path)
 
@@ -314,7 +341,7 @@ def scan(root)
       unreadable << [rel, e.message]
       next
     end
-    shells[rel] = text if shell_file?(rel, text)
+    shells[rel] = text if shell_file?(rel, text, File.executable?(path))
   end
 
   direct = shells.select { |_r, t| sets_pipefail?(t) }
@@ -329,11 +356,21 @@ def scan(root)
     hits.each { |(n, line)| findings << [rel, n, line] }
     unreadable << [rel, "heredoc <<#{open_doc} never closes; the rest of the file was not scanned"] if open_doc
   end
-  { findings: findings, unreadable: unreadable, shell: shells.size, pipefail: pipefail.size }
+  { findings: findings, unreadable: unreadable, tracked: tracked.size,
+    shell: shells.size, pipefail: pipefail.size }
 end
 
 def run_check(root = REPO)
-  r = scan(root)
+  begin
+    r = scan(root)
+  rescue FirstParty::MeasureError => e
+    warn "check-pipefail-grep: FAILED -- COULD NOT LOOK: git could not list the " \
+         "tracked files under #{root}: #{e.message}"
+    warn "  Fix: run from inside the repo's git checkout with `git` on PATH " \
+         "(`git -C #{root} ls-files --cached` must succeed); an unanswered " \
+         "discovery is not a clean scan."
+    return 1
+  end
   unless r[:unreadable].empty?
     warn "check-pipefail-grep: FAILED -- could not read or fully scan " \
          "#{r[:unreadable].size} file(s); a file never read is not a file found clean:"
@@ -344,17 +381,20 @@ def run_check(root = REPO)
          "ai/bin/check-pipefail-grep) and re-run."
     return 1
   end
-  if r[:shell].zero? || r[:pipefail].zero?
-    warn "check-pipefail-grep: FAILED -- scanned #{r[:shell]} shell file(s), " \
-         "#{r[:pipefail]} under pipefail under #{root}; this repo has both, so " \
-         "the scan itself is broken."
+  if r[:tracked].zero? || r[:shell].zero? || r[:pipefail].zero?
+    warn "check-pipefail-grep: FAILED -- FOUND NOTHING: git lists #{r[:tracked]} " \
+         "tracked file(s) under #{root}, #{r[:shell]} of them shell, " \
+         "#{r[:pipefail]} under pipefail; this repo has all three, so the scan " \
+         "itself is broken."
     warn "  Fix: check candidate_files/shell_file?/PIPEFAIL_RE in " \
-         "ai/bin/check-pipefail-grep; do not treat zero as clean."
+         "ai/bin/check-pipefail-grep (and that #{root} is the repo root); do " \
+         "not treat zero as clean."
     return 1
   end
   if r[:findings].empty?
-    puts "check-pipefail-grep: OK -- #{r[:shell]} shell file(s) scanned, " \
-         "#{r[:pipefail]} under pipefail, 0 `| grep -q` pipes."
+    puts "check-pipefail-grep: OK -- #{r[:tracked]} tracked file(s), " \
+         "#{r[:shell]} shell file(s) scanned, #{r[:pipefail]} under pipefail, " \
+         "0 `| grep -q` pipes."
     return 0
   end
 
@@ -413,6 +453,8 @@ def run_self_test
     ["set -eu -o pipefail", true], ["set +o pipefail", false], ["# set -o pipefail", false],
     ["set -e", false], ["set -o errexit -o pipefail", true],
     ["set -e -o nounset -o pipefail", true],
+    ["setopt pipe_fail", true], ["setopt PIPEFAIL", true], ["  setopt err_exit pipe_fail", true],
+    ["setopt no_pipe_fail", false], ["unsetopt pipe_fail", false], ["# setopt pipefail", false],
   ]
   pf_cases.each do |(line, want)|
     got = sets_pipefail?("#{line}\n")
@@ -431,6 +473,7 @@ def run_self_test
     w.call("ai/lib/other.sh", "g() { cmd | grep -q y; }\n")
     w.call("scripts/clean", "#!/bin/bash\nset -o pipefail\ngrep -q x <<<\"$o\"\n")
     w.call("scripts/notes.md", "set -o pipefail\nprintf x | grep -q x\n")
+    stage_fixture(dir)
     r = scan(dir)
     got = r[:findings].map { |(rel, n, _)| "#{rel}:#{n}" }.sort
     want = ["ai/lib/inc.sh:1", "scripts/pf.sh:4"]
@@ -443,15 +486,18 @@ def run_self_test
     end
     FileUtils.rm_f(File.join(dir, "scripts/pf.sh"))
     FileUtils.rm_f(File.join(dir, "ai/lib/inc.sh"))
+    stage_fixture(dir)
     if run_check_quiet(dir) != 0
       fail_case.call("run_check on a clean fixture tree", "did not exit 0")
     end
     w.call("scripts/open.sh", "#!/bin/bash\nset -o pipefail\ncat <<EOF\nnever closed\n")
+    stage_fixture(dir)
     if run_check_quiet(dir) != 1
       fail_case.call("an unclosed heredoc", "read as clean instead of 'could not scan'")
     end
     FileUtils.rm_f(File.join(dir, "scripts/open.sh"))
     FileUtils.rm_f(File.join(dir, "scripts/clean"))
+    stage_fixture(dir)
     if run_check_quiet(dir) != 1
       fail_case.call("zero pipefail files", "read as clean instead of a broken scan")
     end
@@ -487,8 +533,70 @@ def run_self_test
     FileUtils.rm_rf(dir)
   end
 
+  # DND-509: the scan set is every TRACKED file in the repo, classified as shell
+  # by what it is -- never a hand-kept list of roots. A pattern under
+  # git-custom/, hypr/, system-files/ or .auto-completions/ was never read.
+  wide = Dir.mktmpdir("check-pipefail-grep-wide-")
+  begin
+    pf_pipe = "set -o pipefail\nprintf '%s' \"$o\" | grep -q x\n"
+    files = {
+      "git-custom/git-pf" => ["#! /usr/bin/env bash\n#{pf_pipe}", 0o755],
+      "hypr/scripts/pf.sh" => ["#{pf_pipe}", 0o644],
+      "system-files/svc.initd" => ["#!/sbin/openrc-run\n#{pf_pipe}", 0o755],
+      "git-custom/git-bare" => [pf_pipe, 0o755], # no shebang: execvp runs it with /bin/sh
+      ".auto-completions/_tool" => ["#compdef tool\n#{pf_pipe}", 0o644],
+      "dotfiles/.zshrc" => ["setopt PIPE_FAIL\nprintf x | grep -q x\n", 0o644],
+      "git-custom/git-ruby" => ["#!/usr/bin/env ruby\n#{pf_pipe}", 0o755],
+      "hypr/notes.txt" => [pf_pipe, 0o644],
+      # Clean, and inside the old roots: the pre-DND-509 scan saw only this file
+      # and printed OK while every hit above sat outside `ai scripts`.
+      "scripts/ok.sh" => ["#!/usr/bin/env bash\nset -o pipefail\ngrep -q x <<<\"$o\"\n", 0o755],
+    }
+    files.each do |rel, (body, mode)|
+      FileUtils.mkdir_p(File.dirname(File.join(wide, rel)))
+      File.write(File.join(wide, rel), body)
+      File.chmod(mode, File.join(wide, rel))
+    end
+    stage_fixture(wide)
+    # Written AFTER staging: untracked, like the owner's work in progress. It is
+    # not first-party code until it is staged, so it is never read.
+    FileUtils.mkdir_p(File.join(wide, "ai/skills/wip"))
+    File.write(File.join(wide, "ai/skills/wip/draft.sh"), "#!/bin/bash\n#{pf_pipe}")
+    got = scan(wide)[:findings].map { |(rel, n, _)| "#{rel}:#{n}" }.sort
+    want = [".auto-completions/_tool:3", "dotfiles/.zshrc:2", "git-custom/git-bare:2",
+            "git-custom/git-pf:3", "hypr/scripts/pf.sh:2", "system-files/svc.initd:3"]
+    unless got == want
+      fail_case.call("repo-wide tracked scan (extension, shebang incl. openrc-run, " \
+                     "#compdef, rc-file name, shebang-less executable, setopt; ruby, " \
+                     "text and untracked ignored)", "want #{want}, got #{got}")
+    end
+    code, err = run_check_captured(wide)
+    unless code == 1 && err.include?("hypr/scripts/pf.sh:2")
+      fail_case.call("run_check flags a pipe under hypr/", "exit #{code}, stderr #{err.inspect}")
+    end
+  ensure
+    FileUtils.rm_rf(wide)
+  end
+
+  # "Found nothing" and "could not look" both FAIL, and never print the same line.
+  empty = Dir.mktmpdir("check-pipefail-grep-empty-")
+  begin
+    stage_fixture(empty) # a repo with nothing tracked
+    code, err = run_check_captured(empty)
+    unless code == 1 && err.include?("FOUND NOTHING") && !err.include?("COULD NOT LOOK")
+      fail_case.call("empty discovery set", "want exit 1 + FOUND NOTHING, got #{code} #{err.inspect}")
+    end
+    FileUtils.rm_rf(File.join(empty, ".git")) # no repo: git cannot be asked
+    code, err = run_check_captured(empty)
+    unless code == 1 && err.include?("COULD NOT LOOK") && !err.include?("FOUND NOTHING")
+      fail_case.call("discovery that cannot run", "want exit 1 + COULD NOT LOOK, got #{code} #{err.inspect}")
+    end
+  ensure
+    FileUtils.rm_rf(empty)
+  end
+
   if ok
-    puts "check-pipefail-grep: self-test OK (#{line_cases.size + pf_cases.size + 7} cases)"
+    puts "check-pipefail-grep: self-test OK (#{line_cases.size + pf_cases.size + 11} cases)"
     0
   else
     warn "check-pipefail-grep: self-test FAILED"
@@ -496,6 +604,31 @@ def run_self_test
          "the cases above correctly; repair it (do not weaken a case)."
     1
   end
+end
+
+# `git init` + stage everything: a fixture's files are TRACKED (staged counts),
+# exactly as the scan asks git for them. No commit, so no identity is needed.
+def stage_fixture(dir)
+  [%w[init -q], %w[add -A]].each do |args|
+    _o, e, st = Open3.capture3("git", "-c", "init.defaultBranch=main", "-C", dir, *args)
+    raise "self-test fixture: git #{args.join(' ')} failed in #{dir}: #{e.strip}" unless st.success?
+  end
+end
+
+# [exit code, stderr text] of run_check against a fixture root.
+def run_check_captured(root)
+  saved = $stderr.dup
+  saved_out = $stdout.dup
+  Tempfile.create("check-pipefail-grep-err-") do |tmp|
+    $stderr.reopen(tmp)
+    $stdout.reopen(File::NULL, "w")
+    code = run_check(root)
+    $stderr.flush
+    return [code, File.read(tmp.path)]
+  end
+ensure
+  $stderr.reopen(saved)
+  $stdout.reopen(saved_out)
 end
 
 def run_check_quiet(root)

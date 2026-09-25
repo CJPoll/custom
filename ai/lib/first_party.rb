@@ -7,6 +7,8 @@
 # ai/bin/harness-gate (DND-507, which asserts every inline --self-test they
 # define is run). Two checks that each keep their own idea of the scope drift
 # apart silently: one of them stops reading a directory, and prints OK anyway.
+# ai/bin/check-pipefail-grep (DND-509) reuses only `git_ls`: it scans every
+# TRACKED shell file, and its shell test is by content, not by this rule.
 #
 # PROVENANCE AND RECONCILIATION. This is check-guard-messages' `discover`,
 # extracted as a library, including DND-512's untracked-third-party rule; the
