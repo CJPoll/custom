@@ -741,9 +741,9 @@ go through the Athena wrapper: `~/dev/custom/ai/bin/gh-athena` (GitHub) or
 same commands as `gh`/`glab` — so writes are attributed to Athena, not the
 machine owner. The App config is present, so the wrapper works. READS
 may use plain `gh`/`glab`. Verify wrapper health with
-`~/dev/custom/ai/bin/forge-preflight` if a write fails. (This is the rule the
-`forge-identity-guard.sh` hook warns about — the guard warns, the block
-instructs.)
+`~/dev/custom/ai/bin/forge-preflight` if a write fails. (The `forge-identity-guard.sh`
+hook enforces this: it denies a bare create/merge or plain push to a forge
+before it runs, with a `Fix:` — the guard stops, the block instructs.)
 
 Which wrapper follows this repo's forge — **GitLab** (e.g. walt_ui) via
 `glab-athena`, **GitHub** (e.g. gen_saas) via `gh-athena` (which shows as

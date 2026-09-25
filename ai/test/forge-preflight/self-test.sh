@@ -236,20 +236,20 @@ if [[ "${RC}" == 0 ]] && [[ ! -s "${ARGV}" ]]; then
 else bad "unmanaged host: passes and invokes no wrapper" "rc=${RC} argv='$(cat "${ARGV}")'"; fi
 
 echo
-echo "-- the bypass hook: warn, never block --------------------------------------"
+echo "-- the bypass hook: deny before the write, with a Fix: -----------------------"
 
 # 7. A bare `gh pr create` is the silent GitLab-style bypass on GitHub: a
 #    healthy wrapper simply not called, re-attributing the PR to the owner. The
-#    hook must SURFACE it (non-empty output carrying a Fix:) — and, because a
-#    hard block is how the OTHER half of DND-203 stranded a captain, it must
-#    NOT deny: no permissionDecision in the output, exit 0.
+#    hook must STOP it before it runs (DND-577): permissionDecision "deny" with
+#    a Fix: naming gh-athena, exit 0. It used to warn via additionalContext,
+#    which reaches the model only with the tool result, after the write.
 setup_case
 run_hook "gh pr create --fill --base main"
 if [[ "${RC}" == 0 ]] && [[ "${OUT}" == *"Fix:"* ]] \
    && [[ "${OUT}" == *"gh-athena"* ]] \
-   && [[ "${OUT}" != *"permissionDecision"* ]]; then
-  ok "bare 'gh pr create': surfaced with a Fix:, and never denied (warn not block)"
-else bad "bare 'gh pr create': surfaced as a non-blocking warn" "rc=${RC} out='${OUT}'"; fi
+   && [[ "${OUT}" == *'"permissionDecision":"deny"'* ]]; then
+  ok "bare 'gh pr create': denied before it runs, with a Fix:"
+else bad "bare 'gh pr create': denied before it runs, with a Fix:" "rc=${RC} out='${OUT}'"; fi
 
 # 8. The wrapper path must NOT be surfaced — warning on the sanctioned command
 #    would be noise that trains the fix away. `gh-athena pr create` has `gh`

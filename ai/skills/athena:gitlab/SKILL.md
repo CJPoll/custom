@@ -116,8 +116,8 @@ alias, or a push that recurses into submodules. A missing token file is refused
 too; `glab-athena refresh` is owner-gated, so do not run it. The mechanism and
 its named residuals (an `~/.ssh/config` Host alias, `ext::`, git-lfs, …) are
 shared with `gh-athena git` and listed in `ai/lib/forge-git-passthrough.sh`.
-The `forge-identity-guard.sh` hook warns on a plain `git push` to a gitlab.com
-remote.
+The `forge-identity-guard.sh` hook denies a plain `git push` to a gitlab.com
+remote before it runs, with a `Fix:` naming this form (DND-577).
 
 An agent driving `wt` sets `WT_AGENT_PUSH=1` so `wt`'s own pushes take this
 path; see the header of `scripts/wt-lib/push.sh`.

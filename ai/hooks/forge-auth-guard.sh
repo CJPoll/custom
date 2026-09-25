@@ -11,7 +11,7 @@
 # "relocate or STRENGTHEN a check" the safety block (ai/blocks/ops/safety-checks.md)
 # permits.
 #
-# Deny-by-default is correct HERE (unlike forge-identity-guard, which warns):
+# Deny-by-default is correct HERE (forge-identity-guard also denies, since DND-577):
 # there is NO legitimate agent use for changing auth state. A read of auth
 # status (`gh auth status`, `glab auth status`) is NOT a change and is allowed.
 #

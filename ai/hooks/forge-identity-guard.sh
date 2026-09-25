@@ -16,7 +16,7 @@
 # remote/URL argument, else branch.<cur>.pushRemote / remote.pushDefault /
 # branch.<cur>.remote / origin) in the repo the push runs in (`-C <dir>`, else a
 # preceding `cd <dir>`, else the hook's cwd). A push whose remote CANNOT be
-# resolved still warns, naming that it could not tell — an unresolvable remote
+# resolved is still denied, naming that it could not tell — an unresolvable remote
 # must not read as "not GitHub". DND-393 extends the rule to gitlab.com: a plain
 # push there goes out on the owner's SSH key and GitLab records the owner, and
 # `glab-athena git` is now the Athena path to point it at. A remote resolving
@@ -34,20 +34,36 @@
 # further is a follow-up if a bare non-create/merge write is ever observed
 # mis-attributing.
 #
-# WARN, NEVER BLOCK — deliberate (DND-206 scope 2). A hard block is how the
-# OTHER half of the outage happened: an over-eager guard that refuses when the
-# wrapper is legitimately unavailable strands the captain and recreates the
-# outage with a new message. So this guard emits `additionalContext` (guidance
-# the model sees) and ALWAYS allows the command. It is never itself the reason
-# work stops.
+# DENY, WITH A Fix: — DND-577 (2026-09-24). This guard used to WARN and always
+# allow (DND-206 scope 2). A PreToolUse `additionalContext` reaches the model
+# together with the tool RESULT, so the warning arrived after the write had
+# already gone out as the owner: measured 2026-09-24, a captain's plain push of
+# `hyprpaper-08-syntax` (CJPoll/custom PR #76, 97f3793) and an admiral's first
+# push of PR #77's branch were both recorded as CJPoll, each agent reporting the
+# warning only after the push. Detection without prevention.
+# DND-206 feared a block would strand a captain whose wrapper is legitimately
+# unavailable. The warn never offered that captain a legitimate path either: it
+# already said "do not work around this; escalate and wait". So a deny removes
+# only the illegitimate path (the owner-attributed write) and changes no
+# legitimate outcome. Every match now returns permissionDecision "deny" with the
+# same Fix:, which stops the command BEFORE it runs.
 #
-# "Captain context" is approximated as any session: a warn is non-blocking and
-# harmless, reliably detecting a subagent context from a Bash hook is not
-# available, and missing the case is the costly failure — so it warns broadly.
+# SCOPE: every Claude Code session (like forge-auth-guard). Hooks fire only on
+# Claude Code tool calls, so the owner's own terminal is never touched: a push
+# typed in an interactive shell outside Claude Code keeps working. A coordinator
+# session is Athena too, and its writes go through the wrapper as well.
+#
+# ACCEPTED FALSE POSITIVE (the DND-390 class forge-auth-guard documents, and
+# DND-397 below): matching is lexical, so a command that only MENTIONS a bare
+# write (a heredoc body, a `git commit -m`, a grep) is denied too. Rephrasing
+# costs one retry (write the text with the Write tool, pass it with
+# `git commit -F` / `grep -f`); a miss costs an owner-attributed write. The deny
+# reason says so. Tracked for reduction in DND-547.
 #
 # Design guarantees (mirror safe-wait-guard):
 #   * FAIL-OPEN — any error (missing jq, unparseable input, non-Bash tool, no
 #     match) exits 0 and ALLOWS silently. A bug here can never wedge Bash.
+#     A deny is only ever emitted for a positive match.
 #   * NARROW    — only the wrapper-bypassing create commands match. The wrapper
 #     path (`gh-athena pr create`, `glab-athena mr create`) is explicitly NOT
 #     matched: `gh`/`glab` there is followed by `-`, not whitespace.
@@ -68,11 +84,17 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) |
 # Flatten to one logical line so a command split across newlines still matches.
 FLAT=$(printf '%s' "$CMD" | tr '\n\t' '  ')
 
-# warn <context> : emit non-blocking additionalContext and allow. Fail-open if
-# jq cannot encode (which simply allows — consistent with the guarantee).
-warn() {
-  jq -cn --arg c "$1" \
-    '{hookSpecificOutput:{hookEventName:"PreToolUse",additionalContext:$c}}' \
+# Appended to every deny reason: how to proceed when the command only MENTIONS
+# a bare write instead of performing one (the accepted false positive above).
+MENTION_NOTE=' If this command only MENTIONS that text (a heredoc, a commit message, a grep) and performs no such write, move the text into a file with the Write tool and pass the file (`git commit -F <file>`, `grep -f <file>`); never rephrase a real write to slip past this guard.'
+
+# deny <reason> : stop the command BEFORE it runs (DND-577). A PreToolUse
+# `additionalContext` only reaches the model with the tool result, after the
+# write. Fail-open if jq cannot encode (which simply allows — consistent with
+# the guarantee).
+deny() {
+  jq -cn --arg r "$1$MENTION_NOTE" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}' \
     2>/dev/null
   exit 0
 }
@@ -84,37 +106,37 @@ warn() {
 # command separator, so it stays within this one command. `gh-athena pr create`
 # still does NOT match: after `gh` comes `-`, not whitespace.
 if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])gh[[:space:]]+([^;|&]* )?pr[[:space:]]+create'; then
-  warn 'forge-identity: this is a bare `gh pr create`, which attributes the PR to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: open it through the wrapper — `~/dev/custom/ai/bin/gh-athena pr create …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `gh`; writes (create/comment/review/merge) go through gh-athena. If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
+  deny 'forge-identity: this is a bare `gh pr create`, which attributes the PR to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: open it through the wrapper — `~/dev/custom/ai/bin/gh-athena pr create …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `gh`; writes (create/comment/review/merge) go through gh-athena. If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
 fi
 
 # Bare `gh pr merge`: the MERGE write the admiral performs. Same command-word
 # shape and flag tolerance; `gh-athena pr merge` still does NOT match (after
 # `gh` comes `-`, not whitespace).
 if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])gh[[:space:]]+([^;|&]* )?pr[[:space:]]+merge'; then
-  warn 'forge-identity: this is a bare `gh pr merge`, which stamps the merge to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: merge through the wrapper — `~/dev/custom/ai/bin/gh-athena pr merge …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `gh`; writes (create/comment/review/merge) go through gh-athena. If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
+  deny 'forge-identity: this is a bare `gh pr merge`, which stamps the merge to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: merge through the wrapper — `~/dev/custom/ai/bin/gh-athena pr merge …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `gh`; writes (create/comment/review/merge) go through gh-athena. If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
 fi
 
 # Bare `glab mr create`: same shape, same tolerance for flags before the
 # subcommand (`glab -R x mr create`); `glab-athena mr create` does NOT match.
 if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])glab[[:space:]]+([^;|&]* )?mr[[:space:]]+create'; then
-  warn 'forge-identity: this is a bare `glab mr create`, which attributes the MR to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: open it through the wrapper — `~/dev/custom/ai/bin/glab-athena mr create …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `glab`; writes go through glab-athena. If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
+  deny 'forge-identity: this is a bare `glab mr create`, which attributes the MR to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: open it through the wrapper — `~/dev/custom/ai/bin/glab-athena mr create …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `glab`; writes go through glab-athena. If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
 fi
 
 # Bare `glab mr merge`: the MERGE write the admiral performs. Same shape;
 # `glab-athena mr merge` does NOT match.
 if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])glab[[:space:]]+([^;|&]* )?mr[[:space:]]+merge'; then
-  warn 'forge-identity: this is a bare `glab mr merge`, which stamps the merge to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: merge through the wrapper — `~/dev/custom/ai/bin/glab-athena mr merge …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `glab`; writes go through glab-athena. If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
+  deny 'forge-identity: this is a bare `glab mr merge`, which stamps the merge to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: merge through the wrapper — `~/dev/custom/ai/bin/glab-athena mr merge …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `glab`; writes go through glab-athena. If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
 fi
 
 # ---- Plain `git push` to a github.com remote (DND-389) ----------------------
 # DND-397: a push that is only MENTIONED (a heredoc body, `grep -n "git push"`,
-# `echo 'git push'`) still warns. That is deliberate: masking such text was
+# `echo 'git push'`) is still denied. That is deliberate: masking such text was
 # built and reviewed over three critic rounds, and each round found a real push
 # the mask hid (`$SHELL -c "…"`, `git rebase --exec "…"`, `cat <<EOF | perl`,
 # `git grep -O"…"`, an `echo '…' > .git/hooks/post-commit` that the next `git
 # commit` runs). A lexical guard cannot prove quoted text inert, and this guard
-# must never miss a real push, so a mention costs a warning instead. The parked
-# design is on branch dnd-397-mention-masking-parked.
+# must never miss a real push, so a mention costs a deny (one retry) instead.
+# The parked design is on branch dnd-397-mention-masking-parked.
 
 # bless_wrapper_var: the ONE shape in which `$W git …` is provably the Athena
 # wrapper (DND-397, the coordinator's `W=~/…/glab-athena; "$W" git push` probe):
@@ -134,8 +156,8 @@ fi
 # runs in the shell the next statement runs in, so W is set there; nothing sits
 # between them to unset, shadow or re-scope it. Every other shape — a use later
 # in the command, inside `( … )`, `bash -c '…'` or a heredoc, an assignment in
-# argument, prefix or pipeline position — is left alone and warns exactly as it
-# did before DND-397. Reads the raw command (before dequoting).
+# argument, prefix or pipeline position — is left alone and is denied, as it was warned
+# about before DND-397. Reads the raw command (before dequoting).
 bless_wrapper_var() {
   awk '
     { src = src (NR > 1 ? "\n" : "") $0 }
@@ -230,7 +252,7 @@ push_repo_dir() {
 
 # Examine EVERY push in the command, one at a time: after each, GFLAT becomes
 # the text after it (bounded, so a pathological command cannot loop). Every
-# push's warning is collected (a GitLab push must not hide a later GitHub one)
+# push's reason is collected (a GitLab push must not hide a later GitHub one)
 # and they are emitted together after the loop.
 WARNINGS=""
 add_warning() {
@@ -271,12 +293,12 @@ while [ "$N" -lt 10 ] && printf '%s' "$GFLAT" | grep -Eq "$GIT_PUSH_RE"; do
       URLS=$(git -C "$DIR" remote get-url --push --all "$TARGET" 2>/dev/null)
     elif looks_like_url_or_path "$TARGET"; then
       URLS=$TARGET   # a URL literal or a path, classified by host below
-    fi               # else: neither a remote nor a URL -> unresolved (warn below)
+    fi               # else: neither a remote nor a URL -> unresolved (denied below)
   elif [ -n "$TARGET" ] && [ -n "$(forge_of_url "$TARGET")" ]; then
     URLS=$TARGET     # a literal forge URL needs no repo to classify
   fi
   if [ -z "$URLS" ]; then
-    add_warning "forge-identity: this is a plain \`git push\` and the guard could not resolve its remote (repo dir '${DIR:-unknown}', remote '${TARGET:-default}'), so it cannot tell whether it goes to github.com or gitlab.com. If it does, it authenticates as the machine owner (CJPoll), not Athena. GitHub: ${PUSH_FIX} GitLab: ${GITLAB_PUSH_FIX}"
+    add_warning "forge-identity: this is a plain \`git push\` and the guard could not resolve its remote (repo dir '${DIR:-unknown}', remote '${TARGET:-default}'), so it cannot tell whether it goes to github.com or gitlab.com. If it does, it authenticates as the machine owner (CJPoll), not Athena. GitHub: ${PUSH_FIX} GitLab: ${GITLAB_PUSH_FIX} If it genuinely goes elsewhere (a local path), re-run it with the repo as a literal \`git -C <absolute dir>\` and a configured remote or a literal URL, so the guard can resolve it."
   fi
   set -f
   for u in $URLS; do
@@ -291,7 +313,7 @@ while [ "$N" -lt 10 ] && printf '%s' "$GFLAT" | grep -Eq "$GIT_PUSH_RE"; do
   GFLAT=$AFTER
 done
 
-[ -z "$WARNINGS" ] || warn "$WARNINGS"
+[ -z "$WARNINGS" ] || deny "$WARNINGS"
 
 # No bypass detected → allow silently.
 exit 0

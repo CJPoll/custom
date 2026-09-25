@@ -99,8 +99,9 @@ does **not** see an `~/.ssh/config` Host alias for github.com, `ext::`
 transports, `clone --recurse-submodules`, git-lfs, or other subcommands; the
 header of `ai/lib/forge-git-passthrough.sh` (shared with `glab-athena git`)
 lists these. Handle a refusal by the rule in the next section. The
-`forge-identity-guard.sh` hook warns on a plain `git push` to a github.com or
-gitlab.com remote.
+`forge-identity-guard.sh` hook denies a plain `git push` to a github.com or
+gitlab.com remote (or one it cannot resolve) before it runs, with a `Fix:`
+naming this form (DND-577).
 
 Afterwards, check who the push was attributed to:
 
