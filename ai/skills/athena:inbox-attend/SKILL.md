@@ -93,6 +93,11 @@ is the brief, not the message.
    either is not `ok`. A doctor result that is not `ok` is your own
    observation, so it is also a finding to ticket (`~/.claude/CLAUDE.md` →
    *Find it, ticket it, fix it, verify it live*).
+
+   **Later (2026-09-25):** added by DND-682. For each Slack DM or thread
+   message you will reply to, set the thinking status right here, after the
+   read and before the re-arm and before any thinking — *Show that Athena is
+   thinking* below.
 3. **Re-arm the waiter NOW — right after reading and acking, before you reply
    or investigate.** Launch `athena:inbox/bin/inbox-wait` with
    `run_in_background` so the next doorbell wakes you again (`athena:inbox` →
@@ -120,6 +125,38 @@ is the brief, not the message.
    (`ops/never-end-turn-waiting` → "let the harness wake you"), not a task you
    block on or poll. Launch nothing else in the background and do not park on the
    waiter.
+
+## Show that Athena is thinking
+
+**Later (2026-09-25):** added by DND-682. This file has no *Kind* header, so it
+is a dated record under `~/dev/custom/CLAUDE.md` → *Documentation conventions*;
+this section is one labelled addition. Owner request: Slack should show
+"Athena is thinking…" while a session works on the owner's message.
+
+- **When.** A wake reads a Slack DM or thread message that you will reply to
+  (Tier 0, including a Tier 1 "drafted it" reply). Not for a message you only
+  relay, a session message, a `slack.interaction` line, or `harness-alerts`.
+- **First.** Run it right after the read (step 2), before the re-arm and
+  before any thinking, thread reading or tracker work:
+  ```sh
+  ~/.claude/skills/athena:slack/bin/status <channel> <thread_ts>
+  ```
+  `<thread_ts>` is the line's `thread_ts` when set, else its `ts` (a top-level
+  DM message is its own thread). The default text is "is thinking…".
+- **Keep it alive.** Slack drops the status after about 2 minutes with no new
+  message. During long work, run it again before any step you expect to take
+  more than a minute, and at least every 90 seconds.
+- **End it.** Your reply clears it; do nothing more. If the wake ends without a
+  reply in that conversation, run the same command with `--clear`.
+- **No content.** The status text is generic. Never put message content,
+  names, or ticket details in it: everyone in the conversation sees it.
+- **A failure never blocks the reply.** A failed call exits non-zero with the
+  Slack error and a `Fix:` line. Name it in your turn output with that error,
+  add a ledger line `<utc-ts> <channel>:<msg-ts> status-failed <slack-error>`,
+  and carry on. Do not retry it before replying, and never delay or skip the
+  reply over it.
+
+The script and its failure modes: `athena:slack` → *The thinking status*.
 
 ## What you may do (tiers)
 
@@ -361,6 +398,10 @@ One line per thing you did, appended to the resolved `$LEDGER` from step 1
 ```
 <utc-ts> <channel>:<msg-ts> replied | drafted DND-<n> | relayed | declined <why>
 ```
+
+**Later (2026-09-25):** added by DND-682. `status-failed <slack-error>` records
+a failed thinking-status call (*Show that Athena is thinking*). The Slack error
+code is this machine's own fact, never message content.
 
 **Later (2026-09-25):** added by DND-548. A `slack.interaction` line's key is
 `<channel>:<ts>:<action_ts>`, not `<channel>:<ts>` alone — `<ts>` names the

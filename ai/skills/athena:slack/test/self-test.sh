@@ -1118,6 +1118,97 @@ if [[ "${OUT}" == *"2 new DM(s)"* ]]; then
   ok "kind: im + mpim are both counted as DMs"
 else bad "kind: im + mpim are both counted as DMs" "out='${OUT}'"; fi
 
+# 77. DND-682: status sets the thread status with the documented body shape,
+#     default text, and says on stdout where it set it.
+echo
+echo "-- status (assistant.threads.setStatus) -----------------------------------"
+setup_case
+fixture assistant.threads.setStatus '{"ok":true}'
+run_bin status D0DMCHAN 1790360915.980679
+B="$(body_of assistant.threads.setStatus)"
+if [[ "${RC}" == 0 ]] && [[ "$(jq -r '.channel_id' <<<"${B}")" == "D0DMCHAN" ]] \
+   && [[ "$(jq -r '.thread_ts' <<<"${B}")" == "1790360915.980679" ]] \
+   && [[ "$(jq -r '.status' <<<"${B}")" == "is thinking…" ]] \
+   && [[ "${OUT}" == *"status set on D0DMCHAN/1790360915.980679"* ]]; then
+  ok "status: default 'is thinking…' is sent as channel_id/thread_ts/status"
+else bad "status: default 'is thinking…' is sent as channel_id/thread_ts/status" "rc=${RC} body=${B} out='${OUT}' err='${ERR}'"; fi
+
+# 78. --clear sends status "" (Slack's clear), in any flag position.
+for order in first last; do
+  setup_case
+  fixture assistant.threads.setStatus '{"ok":true}'
+  if [[ "${order}" == first ]]; then run_bin status --clear D0DMCHAN 1.2
+  else run_bin status D0DMCHAN 1.2 --clear; fi
+  B="$(body_of assistant.threads.setStatus)"
+  if [[ "${RC}" == 0 ]] && [[ "$(jq -r '.status' <<<"${B}")" == "" ]] \
+     && [[ "$(jq -r 'has("status")' <<<"${B}")" == "true" ]] \
+     && [[ "${OUT}" == *"status cleared on D0DMCHAN/1.2"* ]]; then
+    ok "status: --clear (${order}) sends status \"\""
+  else bad "status: --clear (${order}) sends status \"\"" "rc=${RC} body=${B} out='${OUT}' err='${ERR}'"; fi
+done
+
+# 79. Custom text, and a #name resolves through the channel cache.
+setup_case
+seed_caches
+fixture assistant.threads.setStatus '{"ok":true}'
+run_bin status "#team-engineering" 1.2 "is checking CI…"
+B="$(body_of assistant.threads.setStatus)"
+if [[ "${RC}" == 0 ]] && [[ "$(jq -r '.channel_id' <<<"${B}")" == "${ENG_CHANNEL}" ]] \
+   && [[ "$(jq -r '.status' <<<"${B}")" == "is checking CI…" ]]; then
+  ok "status: custom text is sent and #name resolves to the channel id"
+else bad "status: custom text is sent and #name resolves to the channel id" "rc=${RC} body=${B} err='${ERR}'"; fi
+
+# 80. TEST THE MISS: Slack's own refusals exit non-zero with the error and a
+#     specific Fix:, and print nothing on stdout that reads as success.
+for err in invalid_thread_ts channel_not_found; do
+  setup_case
+  fixture assistant.threads.setStatus "{\"ok\":false,\"error\":\"${err}\"}"
+  run_bin status D0DMCHAN 1.2
+  case "${err}" in
+    invalid_thread_ts) want="PARENT ts" ;;
+    channel_not_found) want="bot must be a member" ;;
+  esac
+  if [[ "${RC}" != 0 ]] && [[ -z "${OUT}" ]] && [[ "${ERR}" == *"${err}"* ]] \
+     && [[ "${ERR}" == *"Fix:"*"${want}"* ]] && [[ "${ERR}" == *"send the reply anyway"* ]]; then
+    ok "status: ${err} exits non-zero with a specific Fix:"
+  else bad "status: ${err} exits non-zero with a specific Fix:" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+done
+
+# 81. ...a missing token is the same: non-zero, Fix:, and no request at all.
+setup_case
+rm -f "${CHOME}/.claude/slack-bot-token"
+run_bin status D0DMCHAN 1.2
+if [[ "${RC}" != 0 ]] && [[ -z "${OUT}" ]] && [[ "${ERR}" == *"no bot token"* ]] \
+   && [[ "${ERR}" == *"Fix:"*"whoami"* ]] && ! any_curl; then
+  ok "status: a missing token exits non-zero with Fix: and no Slack call"
+else bad "status: a missing token exits non-zero with Fix: and no Slack call" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+
+# 82. Malformed input is refused locally, before any Slack call: a ts that is
+#     not digits.digits, --clear with text, empty text, an unknown flag, and a
+#     missing thread_ts.
+st_refuse() { # st_refuse <label> <args...>
+  local label="$1"; shift
+  setup_case
+  run_bin status "$@"
+  if [[ "${RC}" == 2 ]] && [[ "${ERR}" == *"Fix:"* ]] && [[ -z "${OUT}" ]] && ! any_curl; then
+    ok "status: ${label} is a usage error with Fix:, no Slack call"
+  else bad "status: ${label} is a usage error with Fix:, no Slack call" "rc=${RC} out='${OUT}' err='${ERR}'"; fi
+}
+st_refuse "a ts with no dot" D0DMCHAN 1790360915
+st_refuse "a ts with letters" D0DMCHAN abc.def
+st_refuse "--clear with text" D0DMCHAN 1.2 "hi" --clear
+st_refuse "empty text" D0DMCHAN 1.2 ""
+st_refuse "an unknown flag" D0DMCHAN 1.2 --loud
+st_refuse "a missing thread_ts" D0DMCHAN
+
+# 83. --help in a later position is still help, never a set: flag order does
+#     not matter for status, so --help must not either.
+setup_case
+run_bin status D0DMCHAN 1.2 --help
+if [[ "${RC}" == 0 ]] && [[ "${OUT}" == *"usage"* || "${OUT}" == *"status <channel"* ]] && ! any_curl; then
+  ok "status: a trailing --help prints usage, exit 0, no Slack call"
+else bad "status: a trailing --help prints usage, exit 0, no Slack call" "rc=${RC} out='${OUT}' calls=$(cat "${SHIM_DIR}/calls" 2>/dev/null)"; fi
+
 # 76. DND-508: every bin answers --help (and -h) with its usage on STDOUT, exit
 #     0, and no Slack call. Before this, `post --help` took "--help" as the
 #     channel and read stdin as the message, `whoami --help` called auth.test,

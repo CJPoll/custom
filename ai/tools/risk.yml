@@ -151,5 +151,6 @@ tools:
   skills/athena:slack/bin/post:                       { class: destructive, reason: slack }
   skills/athena:slack/bin/react:                      { class: destructive, reason: slack }
   skills/athena:slack/bin/reply:                      { class: destructive, reason: slack }
+  skills/athena:slack/bin/status:                     { class: destructive, reason: slack }
   skills/athena:slack/bin/update:                     { class: destructive, reason: slack }
   skills/athena:slack/bin/upload:                     { class: destructive, reason: slack }

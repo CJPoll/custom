@@ -76,6 +76,7 @@ can thread onto it.
 | `update <channel> <ts> [text]` | Edit — bot's own messages only. |
 | `delete <channel> <ts>` | Delete — bot's own messages only. No undo. |
 | `react <channel> <ts> <emoji> [--remove]` | Add/remove a reaction. Bare name (`eyes`, not `:eyes:`). |
+| `status <channel> <thread_ts> [text] [--clear]` | Shows "Athena is thinking…" (or `text`) in a DM or thread while a session works on it. `--clear` removes it. See *The thinking status* below. |
 | `read-channel <channel> [--since TS] [--limit N] [--json]` | Channel history, oldest-first, ids resolved to names. |
 | `read-thread <channel> <thread_ts> [--json]` | One thread, oldest-first. |
 | `read-inbox [--json] [--peek]` | New DMs + mentions **with bodies**; advances the seen-state unless `--peek`. `--json` emits a JSON **array** (`[]` when empty, never zero bytes); a failure exits non-zero with a `Fix:` line, never an empty inbox. |
@@ -88,6 +89,30 @@ can thread onto it.
 on it is refused by the interactivity endpoint and reaches no session. Never
 put a button through these scripts; use `mcp__athena__slack_post` (*Interactive
 messages (Block Kit)* below).
+
+## The thinking status
+
+`bin/status` calls `assistant.threads.setStatus`. Slack then shows "Athena is
+thinking…" under the bot's name in that DM or thread. Owner request
+(2026-09-25, DND-682): *"'Athena is thinking…' is exactly what I'm looking
+for."*
+
+- **`thread_ts` is the thread's parent.** A top-level DM message is its own
+  thread, so pass its `ts`. A reply passes its `thread_ts`.
+- **Slack clears it by itself** when the bot replies in the thread, and after
+  about 2 minutes with no new message. Set it again at least every 2 minutes
+  during long work. `--clear` is only for ending without a reply.
+- **The text is generic.** It never carries message content. Everyone in the
+  conversation sees it.
+- **It is a courtesy.** A failure exits non-zero with a `Fix:` line. Log it and
+  reply anyway. A failed status never blocks or delays the reply.
+- **Scope:** `chat:write` suffices (verified live 2026-09-25). It works in DMs
+  and threads with the bot. `agents.sessions.setStatus` answers
+  `not_authorized` for this bot; the server-side MCP tool and that migration
+  are DND-683.
+
+When the attendant uses it: `athena:inbox-attend` → *Show that Athena is
+thinking*.
 
 ## The untrusted-input rule
 
@@ -461,11 +486,11 @@ recover after the file path has been down.
 
 ## Tests
 
-`bash test/self-test.sh` — 75 cases, no network (curl is a PATH shim). Covers
+`bash test/self-test.sh` — 117 cases, no network (curl is a PATH shim). Covers
 the ok:false convention, the token never reaching argv or a URL, request shapes,
 pagination, 429 backoff, the users cache, unreadable conversations, every branch
 of the hook and the inbox scan, the cross-source `seen_keys` dedupe (drop + add),
 the legacy-cache migration, the SessionStart output contract and marker family,
 the `read-inbox --json` array contract (`[]` vs. a failure), and the `im`/`mpim`
-kind vocabulary. `SABOTAGE_RECORDS.md` records the mutation that was watched to redden
+kind vocabulary, and `status`'s request shape, flag order and miss paths. `SABOTAGE_RECORDS.md` records the mutation that was watched to redden
 each of them.

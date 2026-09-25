@@ -345,3 +345,28 @@ names the bin, no curl call.
 | S60 | `lib/slack.sh`: `slack_help`'s awk output redirected `>&2` | 26 | `FAIL help: channels --help prints usage on stdout, exit 0, no Slack call` |
 
 After each, the suite returned to `VERDICT: PASS (101 cases)`.
+
+---
+
+## 2026-09-25 — `bin/status` (DND-682)
+
+- **Code under test:** `bin/status` (`assistant.threads.setStatus`)
+- **Suite run:** `bash test/self-test.sh`
+- **Baseline:** `VERDICT: PASS (117 cases)`. Before `bin/status` was
+  executable, the new cases 77–82 and the case-76 help loop failed with
+  `rc=126 … Permission denied` (`VERDICT: FAIL (15 of 116 cases)`).
+- **Runner:** one mutation at a time, exact-substring replace asserted to match
+  once, restored with `cp` from a backup.
+
+| # | Mutation | Cases reddened | Failure string(s) |
+|---|---|---|---|
+| S61 | request body key `status` renamed `text` | 4 | `FAIL status: default 'is thinking…' is sent as channel_id/thread_ts/status` / `FAIL status: --clear (first) sends status ""` |
+| S62 | the `--clear` branch never taken | 3 | `FAIL status: --clear (last) sends status ""` / `FAIL status: --clear with text is a usage error with Fix:, no Slack call` |
+| S63 | ts validation accepts a ts with no dot | 1 | `FAIL status: a ts with no dot is a usage error with Fix:, no Slack call` |
+| S64 | the `invalid_thread_ts` Fix: mapping unreachable | 1 | `FAIL status: invalid_thread_ts exits non-zero with a specific Fix:` |
+| S65 | the redefined `slack_die` exits 0 | 3 | `FAIL status: a missing token exits non-zero with Fix: and no Slack call` |
+| S66 | `--help` honoured only as the first argument | 1 (after case 83 was added; 0 before it) | `FAIL status: a trailing --help prints usage, exit 0, no Slack call` |
+
+S66 first measured **zero**: no case covered a trailing `--help`. Case 83 was
+added for it, then S66 was re-applied and reddened it. After each row the suite
+returned to `VERDICT: PASS (117 cases)`.

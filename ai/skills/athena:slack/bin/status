@@ -1,0 +1,111 @@
+#!/bin/sh
+# status <channel_id|#name> <thread_ts> [text] [--clear]
+#
+# Shows "Athena <text>" under the bot's name in a DM or thread while a session
+# works on a message there (assistant.threads.setStatus). Default text is
+# "is thinking…". --clear removes it. Flags may come in any position.
+#
+# thread_ts is the thread's PARENT ts: a message's thread_ts when it is a
+# reply, its own ts when it is top-level (a DM message is its own thread).
+#
+# Slack clears the status by itself when the bot replies in the thread, and
+# after about 2 minutes with no new message. So: set it before starting work,
+# set it again at least every 2 minutes during long work, and --clear it only
+# when ending without a reply.
+#
+# The text is generic. It NEVER carries message content: anyone in the
+# conversation sees it.
+#
+# A failure exits non-zero with the Slack error and a Fix: line on stderr. A
+# caller must log that and carry on: the status is a courtesy, and a failed one
+# must never block or delay the reply it announces.
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SELF_DIR/../lib/slack.sh"
+for _arg in "$@"; do
+  case "$_arg" in -h|--help) slack_help "$0"; exit 0 ;; esac
+done
+
+# Every failure funnels through slack_die (no token, ok:false, a 429 give-up),
+# so redefining it after sourcing puts a Fix: on all of them. Functions are
+# late-bound, so the lib's own calls resolve to this one.
+slack_die() {
+  printf 'athena-slack: status failed: %s\n' "$1" >&2
+  case "$1" in
+    *invalid_thread_ts*)
+      _fix='pass the thread PARENT ts: the message'"'"'s thread_ts when it is a reply, its own ts when it is top-level.' ;;
+    *channel_not_found*|*"no channel named"*)
+      _fix='pass the id of the DM or channel the message came from (D.../C...); the bot must be a member of it.' ;;
+    *method_not_supported_for_channel_type*)
+      _fix='this conversation type has no thread status; skip the status and reply as normal.' ;;
+    *"no bot token"*|*"not a bot token"*|*invalid_auth*|*not_authed*|*token_revoked*)
+      _fix='run athena:slack/bin/whoami to test the bot token (see athena:slack -> Setup); do not rotate it yourself.' ;;
+    *)
+      _fix='resolve the Slack error above; run athena:slack/bin/whoami to test the token.' ;;
+  esac
+  printf 'Fix: %s The status is a courtesy: log this failure and send the reply anyway.\n' "$_fix" >&2
+  exit 1
+}
+
+usage() {
+  printf 'usage: status <channel_id|#name> <thread_ts> [text] [--clear]\n' >&2
+  printf 'Fix: %s\n' "$1" >&2
+  exit 2
+}
+
+slack_need_tools
+
+CLEAR=false
+POSITIONAL=0
+CHAN_ARG=""; THREAD_TS=""; TEXT=""; HAVE_TEXT=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --clear) CLEAR=true; shift ;;
+    --) shift
+        while [ "$#" -gt 0 ]; do
+          POSITIONAL=$((POSITIONAL + 1))
+          case "$POSITIONAL" in
+            1) CHAN_ARG="$1" ;; 2) THREAD_TS="$1" ;; 3) TEXT="$1"; HAVE_TEXT=true ;;
+            *) usage "too many arguments; quote the status text as one argument." ;;
+          esac
+          shift
+        done ;;
+    -*) usage "unknown flag '$1'; the only flag is --clear." ;;
+    *)
+      POSITIONAL=$((POSITIONAL + 1))
+      case "$POSITIONAL" in
+        1) CHAN_ARG="$1" ;; 2) THREAD_TS="$1" ;; 3) TEXT="$1"; HAVE_TEXT=true ;;
+        *) usage "too many arguments; quote the status text as one argument." ;;
+      esac
+      shift ;;
+  esac
+done
+
+[ "$POSITIONAL" -ge 2 ] || usage "pass the channel id and the thread's parent ts."
+
+# A ts that is malformed for its type is an error here, not a Slack round trip
+# that might read as a miss later.
+case "$THREAD_TS" in
+  *[!0-9.]*|.*|*.|*.*.*|"") usage "thread_ts '$THREAD_TS' is not a Slack ts (digits.digits, e.g. 1790360915.980679)." ;;
+  *.*) ;;
+  *) usage "thread_ts '$THREAD_TS' is not a Slack ts (digits.digits, e.g. 1790360915.980679)." ;;
+esac
+
+if [ "$CLEAR" = true ]; then
+  [ "$HAVE_TEXT" = false ] || usage "--clear takes no text; drop the text or drop --clear."
+  STATUS=""
+else
+  if [ "$HAVE_TEXT" = true ]; then STATUS="$TEXT"; else STATUS="is thinking…"; fi
+  [ -n "$STATUS" ] || usage "empty text would clear the status; use --clear to clear it."
+fi
+
+CHANNEL="$(slack_resolve_channel "$CHAN_ARG")"
+slack_post assistant.threads.setStatus \
+  "$(jq -n --arg c "$CHANNEL" --arg t "$THREAD_TS" --arg s "$STATUS" \
+     '{channel_id: $c, thread_ts: $t, status: $s}')" >/dev/null
+
+if [ "$CLEAR" = true ]; then
+  printf 'status cleared on %s/%s\n' "$CHANNEL" "$THREAD_TS"
+else
+  printf 'status set on %s/%s: %s\n' "$CHANNEL" "$THREAD_TS" "$STATUS"
+fi
