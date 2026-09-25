@@ -5,6 +5,9 @@ description: Act in Slack as Athena's own bot identity (not Cody's account) — 
 
 # athena:slack
 
+**Kind: living normative document.** Amended in place, per
+`~/dev/custom/CLAUDE.md` → *Documentation conventions*.
+
 Shell scripts over the Slack Web API, authenticated with **Athena's own bot
 token**. No MCP, no daemon, no Socket Mode.
 
@@ -147,11 +150,9 @@ Cody, verbatim (2026-09-22): *"Make sure to specify which session you are."*
 
 ## Interactive messages (Block Kit)
 
-**Later (2026-09-25):** added by DND-289. This file has no *Kind* header, so
-it is a dated record under `~/dev/custom/CLAUDE.md` → *Documentation
-conventions*; this whole section is one labelled addition. The per-element
-reference — structure, Slack's limits verified against the live docs, and the
-`blocks.validate` step — is **[[athena:slack:interactive-messages]]**.
+Added by DND-289. The per-element reference — structure, Slack's limits
+verified against the live docs, and the `blocks.validate` step — is
+**[[athena:slack:interactive-messages]]**.
 
 ### Block Kit is the default for asking a person (owner rule)
 
