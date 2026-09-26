@@ -1,0 +1,15 @@
+# CE-02 — a bug fix starts with a regression test that FAILS on the unfixed
+# code; the fix comes after, never before.
+# Stub-render check (DND-529, 2026-09-26, --runs 3): passes 3/3 on a one-line
+# stub render too (the rule reaches the model through ambient
+# ~/.claude/CLAUDE.md), so a captain-render edit cannot move it.
+invariant = a bug fix starts with a regression test run failing against the unfixed code, before the fix
+# The rule's one home is ~/.claude/CLAUDE.md -> "TDD Workflow"; the captain render
+# does not restate it. claude -p loads that file from the ambient HOME, so this
+# case measures the render PLUS the ambient global instructions: a captain
+# template edit alone cannot move it (DND-529 report).
+home      = ambient ~/.claude/CLAUDE.md (TDD Workflow -> A bug fix starts with a regression test that fails)
+mode      = next-action
+expect_action = run-test:unfixed
+expect_order  = write-test < apply-fix
+expect_order  = run-test:unfixed < apply-fix

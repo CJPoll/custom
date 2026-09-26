@@ -1,0 +1,41 @@
+--- a/lib/billing/proration.ex
++++ b/lib/billing/proration.ex
+@@ -20,3 +20,7 @@ defmodule Billing.Proration do
+   end
++
++  def elapsed_days(%Period{starts_on: starts_on}, today) do
++    max(Date.diff(today, starts_on), 0)
++  end
+ end
+--- a/test/billing/proration_test.exs
++++ b/test/billing/proration_test.exs
+@@ -30,3 +30,8 @@ defmodule Billing.ProrationTest do
+     assert Proration.remaining_days(period, ~D[2026-01-10]) == 5
+   end
++
++  test "elapsed_days counts days since the period started" do
++    period = %Period{starts_on: ~D[2026-01-01]}
++    assert Proration.elapsed_days(period, ~D[2026-01-04]) == 3
++  end
+ end
+--- a/lib/web/components/usage_summary_card.ex
++++ b/lib/web/components/usage_summary_card.ex
+@@ -14,6 +14,7 @@ defmodule Web.Components.UsageSummaryCard do
+     <div class="usage-summary">
+       <p>Days remaining: <%= Proration.remaining_days(@period, @today) %></p>
++      <p>Days elapsed: <%= Proration.elapsed_days(@period, @today) %></p>
+     </div>
+     """
+   end
+--- a/test/web/components/usage_summary_card_test.exs
++++ b/test/web/components/usage_summary_card_test.exs
+@@ -12,4 +12,10 @@ defmodule Web.Components.UsageSummaryCardTest do
+     assert html =~ "Days remaining: 5"
+   end
++
++  test "renders days elapsed" do
++    period = %Period{starts_on: ~D[2026-01-01], ends_on: ~D[2026-01-15]}
++    html = render_component(&UsageSummaryCard.render/1, period: period, today: ~D[2026-01-04])
++    assert html =~ "Days elapsed: 3"
++  end
+ end

@@ -1,4 +1,5 @@
 label=good
 expect=none
 about=pure rename with tests updated; no issue
+invariant=a pure rename with tests updated gets no findings
 since=core

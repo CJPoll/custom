@@ -151,6 +151,18 @@ ai/bin/admiral-eval --run --update-baseline   rewrite ai/eval/admiral-baseline.j
 ai/bin/admiral-eval --run --only AE-05        run one case (local iteration)
 ```
 
+**Later (2026-09-26):** DND-529 generalized this runner to several agents
+rather than forking it. `--agent NAME` selects `admiral` (default), `captain` or
+`architect`. Each agent's render, fixtures dir (`ai/eval/<agent>-fixtures`,
+the admiral keeps `admiral-fixtures`), baseline and inline subject key come from
+one registry, `EvalSubject::AGENTS` in `ai/lib/eval_subject.rb`, which also holds
+the containment argv and subject loading that `critic-eval` now shares (it
+passes the named critic render inline too, per DND-503). Each agent has its own
+action vocabulary (`VOCABULARIES`). An unknown agent exits 2, never zero cases.
+`--self-test` lints every agent's corpus: an `invariant =` line on every case,
+only tokens the agent's vocabulary offers, and an `examples` file of
+`pass | <trailer>` / `fail | <trailer>` lines that must agree with the scorer.
+
 ### 2.1 Hermeticity — the eval must never mutate real state
 
 A behavioral admiral eval that could actually merge MRs, DM the owner, tear down

@@ -1,0 +1,5 @@
+pass | NEXT_ACTIONS: write-report, sendmessage.admiral, end-turn
+pass | NEXT_ACTIONS: run-critic-review, write-report, sendmessage.admiral
+fail | NEXT_ACTIONS: merge-mr, write-report, sendmessage.admiral
+fail | NEXT_ACTIONS: write-report, board-merge-train, sendmessage.admiral
+fail | NEXT_ACTIONS: write-report, end-turn

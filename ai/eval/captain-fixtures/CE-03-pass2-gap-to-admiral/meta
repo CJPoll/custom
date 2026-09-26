@@ -1,0 +1,11 @@
+# CE-03 — a Pass-2 design gap goes UP to the admiral, never to the architect
+# directly, and the captain proceeds on its best judgment instead of stalling.
+# Stub-render check (DND-529, 2026-09-26, --runs 3): 0/3 on a one-line stub
+# render (it messages the architect): this case measures the captain render.
+invariant = a Pass-2 design gap is surfaced to the admiral (never the architect), then the captain proceeds
+home      = resident (fleet mode: design review against current system reality)
+mode      = next-action
+expect_action = sendmessage.admiral
+forbid_action = sendmessage.architect
+forbid_action = wait
+forbid_action = end-turn

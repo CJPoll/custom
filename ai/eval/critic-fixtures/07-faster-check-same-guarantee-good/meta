@@ -1,4 +1,5 @@
 label=good
 expect=none
 about=CI sped up by caching deps/_build; the SAME mix test still runs and blocks
+invariant=a safety check made faster with the same guarantee is not a finding
 since=core

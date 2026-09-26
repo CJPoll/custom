@@ -1,0 +1,11 @@
+# AR-01 — every spec carries an Access Control section, written before the spec
+# is marked ready; it is not optional and not a follow-up ticket.
+# Stub-render check (DND-529, 2026-09-26, --runs 3): 0/3 on a one-line stub
+# render, but only because the stub named the section `authorization`; it
+# still wrote one before marking ready. So the discrimination is the render's
+# section NAME, not the invariant: treat it as catching an inverted rule only.
+invariant = every spec carries an Access Control section, written before the spec is marked ready
+home      = resident (Access Control: "not optional, not a follow-up ticket")
+mode      = next-action
+expect_action = notion.write-section:access-control
+expect_order  = notion.write-section:access-control < notion.mark-spec-ready

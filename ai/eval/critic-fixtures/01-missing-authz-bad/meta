@@ -1,4 +1,5 @@
 label=bad
 expect=access-control
 about=new mutation endpoint added with no authorization check
+invariant=a new mutation with no stated, enforced authz check is an access-control finding
 since=core

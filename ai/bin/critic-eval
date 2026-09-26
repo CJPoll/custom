@@ -21,6 +21,15 @@
 #                                    the precision/recall report vs the trust bar
 #   ai/bin/critic-eval               list fixtures + the trust bar + how to run
 #
+# SUBJECT + CONTAINMENT (DND-529): the critic evaluated is the render named by
+# --agent-file (default this checkout's ai/agents/athena-diff-critic.md), passed
+# inline via --agents with admiral-eval's containment (no MCP, no Bash, no Task),
+# all from ai/lib/eval_subject.rb. Before DND-529 this ran `claude -p --agent
+# athena-diff-critic`, which resolves the name from ~/.claude/agents (the MAIN
+# checkout) whatever the cwd: the DND-503 defect admiral-eval had already fixed.
+# Recall/precision recorded before DND-529 were measured WITH Bash available and
+# against main's render, so they are not comparable to a run after it.
+#
 # Trust bar: recall >= 0.8 AND precision >= 0.8 over the labeled set before the
 # critic is wired as a BLOCKING step. Until then it runs advisory-only.
 
@@ -29,9 +38,13 @@ require "json"
 AI_DIR       = File.expand_path("..", __dir__)
 require File.join(AI_DIR, "lib", "critic_prompt")
 require File.join(AI_DIR, "lib", "strict_argv")
+require File.join(AI_DIR, "lib", "eval_subject")
 
 FIXTURES_DIR = File.join(AI_DIR, "eval", "critic-fixtures")
 CRITIC       = "athena-diff-critic"
+REPO_ROOT    = File.expand_path("..", AI_DIR)
+SUBJECT      = EvalSubject.agent("diff-critic", runner: "ai/bin/critic-eval")
+DEFAULT_AGENT_FILE = File.join(REPO_ROOT, SUBJECT.render_rel)
 RECALL_BAR   = 0.8
 PRECISION_BAR = 0.8
 
@@ -131,7 +144,21 @@ def refuse_unscoreable(bad)
   1
 end
 
-def run_model(only = nil)
+# The contained argv for the critic render at agent_file, or [nil, reason]
+# (with a Fix:) when that render cannot be loaded. Resolved before any model
+# call, so a bad --agent-file never spends one.
+def critic_argv(agent_file)
+  [EvalSubject.argv(agent_file, SUBJECT), nil]
+rescue EvalSubject::SubjectError => e
+  [nil, e.message]
+end
+
+def run_model(only = nil, agent_file: DEFAULT_AGENT_FILE)
+  argv, subject_err = critic_argv(agent_file)
+  if subject_err
+    warn "critic-eval: FAILED — #{subject_err}"
+    return 2
+  end
   selected, err = select_fixtures(only)
   if err
     warn "critic-eval: --only #{only} selected NO fixture — refusing to score."
@@ -145,13 +172,16 @@ def run_model(only = nil)
   blocked = selected.map { |fx| [fx, unscoreable(fx)] }.reject { |(_, r)| r.empty? }
   return refuse_unscoreable(blocked) unless blocked.empty?
 
+  fp = EvalSubject.fingerprint(agent_file, agent_file.delete_prefix("#{REPO_ROOT}/"))
+  puts "subject: #{fp['file']} #{fp['lines']} lines sha #{fp['sha256'][0, 12]} " \
+       "(loaded inline via --agents as #{SUBJECT.subject_key})"
   rows = selected.map do |fx|
     args = fx[:requires].to_h do |tok|
       spec = CriticPrompt::INPUTS[tok]
       [spec[:key], File.read(File.join(fx[:dir], spec[:file]))]
     end
     prompt = CriticPrompt.build(**args)
-    out, _e, st = require_open3 { Open3.capture3("claude", "-p", "--agent", CRITIC, stdin_data: prompt) }
+    out, _e, st = require_open3 { Open3.capture3(*argv, stdin_data: prompt) }
     flagged = st&.success? ? parse_findings(out.to_s) : []
     warn "  ! critic invocation failed for #{fx[:name]} (is `claude` on PATH?)" unless st&.success?
     { name: fx[:name], label: fx[:label], expect: fx[:expect], flagged: flagged }
@@ -305,6 +335,42 @@ def run_self_test
   ok = false unless r1.nil? && r2.nil? && o1 == o2 && o1["--only"] == "core"
   ok = false unless parse_cli([])[1].nil? && parse_cli(%w[--self-test])[1].nil?
 
+  # DND-529: the critic under test is the NAMED render, inline, contained.
+  argv, why = critic_argv(DEFAULT_AGENT_FILE)
+  if argv.nil?
+    warn "self-test: FAIL — this checkout's critic render does not load: #{why}"
+    ok = false
+  else
+    di = argv.index("--disallowedTools")
+    ok = false unless argv[0, 4] == ["claude", "-p", "--agent", SUBJECT.subject_key]
+    ok = false unless di && argv[(di + 1)..] == %w[Bash Task] && argv.include?("--strict-mcp-config")
+    ok = false if argv.each_cons(2).include?(["--agent", CRITIC])
+  end
+  _argv, why = critic_argv(File.join(Dir.tmpdir, "critic-eval-no-such-render.md"))
+  ok = false unless why.to_s.include?("Fix:")
+  # The model call must go through that argv: a correct critic_argv the run
+  # ignores would still evaluate main's copy.
+  runner = File.read(__FILE__)[/^def run_model.*?^end$/m].to_s
+  unless runner.include?("Open3.capture3(*argv") && !runner.include?('"--agent", CRITIC')
+    warn "self-test: FAIL — run_model must invoke the critic via critic_argv's argv, never `--agent #{CRITIC}`"
+    ok = false
+  end
+  # A bad --agent-file is refused before any model call (exit 2, Fix:).
+  _out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path(__FILE__), "--run", "--agent-file",
+                                 File.join(Dir.tmpdir, "critic-eval-no-such-render.md"))
+  ok = false unless st.exitstatus == 2 && err.include?("Fix:")
+  _o, reason = parse_cli(%w[--agent-file x.md])
+  ok = false unless reason.to_s.include?("--agent-file")
+  _o, reason = parse_cli(%w[--run --agent-file x.md])
+  ok = false unless reason.nil?
+  # Every fixture names the rule it protects.
+  fixtures.each do |d|
+    next unless parse_meta(File.join(d, "meta"))["invariant"].to_s.strip.empty?
+
+    warn "self-test: FAIL — #{File.basename(d)} has no `invariant=` line naming the rule it protects"
+    ok = false
+  end
+
   if ok
     puts "critic-eval: self-test OK"
     0
@@ -324,6 +390,10 @@ if ARGV.include?("--help") || ARGV.include?("-h")
       ai/bin/critic-eval                  list the critic eval corpus (default)
       ai/bin/critic-eval --run            score the critic against the corpus
                                           (MODEL-IN-LOOP: slow; NOT part of the gate)
+      ai/bin/critic-eval --run --agent-file PATH
+                                          score the critic render at PATH (default:
+                                          this checkout's ai/agents/athena-diff-critic.md),
+                                          passed inline, never the ~/.claude/agents copy
       ai/bin/critic-eval --run --only S   score only fixtures declaring since=S
                                           (e.g. --only core, the frozen 01-07
                                           series that is comparable across steps)
@@ -343,13 +413,14 @@ end
 # DND-505: every argument must be one this tool declares. The old ad-hoc
 # `ARGV.index` lookup ignored anything else, so `--run --onyl core` scored the
 # WHOLE corpus (a different, slower measurement) and `--rnu` listed and exited 0.
-CLI_SPEC = { "--run" => :switch, "--self-test" => :switch, "--only" => :value }.freeze
+CLI_SPEC = { "--run" => :switch, "--self-test" => :switch, "--only" => :value, "--agent-file" => :value }.freeze
 
 # -> [opts, nil] on a well-formed argv, else [nil, reason naming the argument].
 def parse_cli(argv)
   opts = StrictArgv.parse(argv, CLI_SPEC)
   return [nil, "--run and --self-test are separate modes; pass one"] if opts["--run"] && opts["--self-test"]
   return [nil, "--only only applies to --run"] if opts.key?("--only") && !opts["--run"]
+  return [nil, "--agent-file only applies to --run"] if opts.key?("--agent-file") && !opts["--run"]
 
   [opts, nil]
 rescue StrictArgv::UsageError => e
@@ -366,7 +437,9 @@ def main(argv)
     return 2
   end
   return run_self_test if opts["--self-test"]
-  return run_model(opts["--only"]) if opts["--run"]
+  if opts["--run"]
+    return run_model(opts["--only"], agent_file: File.expand_path(opts.fetch("--agent-file", DEFAULT_AGENT_FILE)))
+  end
 
   list
 end

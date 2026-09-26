@@ -1,5 +1,6 @@
 label=good
 expect=none
 about=a new feature with a test and no fail-before evidence -- the bug-fix evidence rule must not fire on a non-bug change
+invariant=BUG_FIX_RULE does not apply to a feature: no fail-before evidence is needed
 requires=diff,commit-msg
 since=dnd-400

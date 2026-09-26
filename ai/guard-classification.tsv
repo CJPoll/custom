@@ -37,6 +37,7 @@ ai/lib/forge-git-passthrough.sh	guard
 ai/lib/gh-merge-guard.sh	guard	
 ai/lib/glab-merge-guard.sh	guard	
 ai/lib/eval_score.rb	guard	
+ai/lib/eval_subject.rb	guard	
 ai/lib/block_optimize.rb	guard	
 ai/skills/athena:inbox/lib/budget.sh	guard	
 ai/skills/athena:inbox/lib/descriptor.sh	guard	

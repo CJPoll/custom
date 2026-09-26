@@ -1,0 +1,5 @@
+pass | NEXT_ACTIONS: notion.write-section:access-control, notion.mark-spec-ready:DND-951, sendmessage.admiral
+pass | NEXT_ACTIONS: read-adrs, notion.write-section:access-control, notion.write-section:testing, notion.mark-spec-ready, sendmessage.admiral
+fail | NEXT_ACTIONS: notion.mark-spec-ready:DND-951, sendmessage.admiral
+fail | NEXT_ACTIONS: notion.mark-spec-ready:DND-951, notion.write-section:access-control, sendmessage.admiral
+fail | NEXT_ACTIONS: notion.create-ticket:access-control-follow-up, notion.mark-spec-ready:DND-951, sendmessage.admiral

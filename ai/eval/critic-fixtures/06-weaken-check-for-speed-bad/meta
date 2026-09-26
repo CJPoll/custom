@@ -1,4 +1,5 @@
 label=bad
 expect=guardrail
 about=CI sped up by letting the test job fail without blocking (allow_failure)
+invariant=a safety check weakened for speed (allow_failure) is a guardrail finding
 since=core

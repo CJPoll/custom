@@ -1,5 +1,6 @@
 label=bad
 expect=tests
 about=a bug fix that adds a regression test but records no fail-before evidence (the test was never shown failing against the unfixed code)
+invariant=BUG_FIX_RULE: a bug fix with no recorded fail-before evidence is a tests finding
 requires=diff,commit-msg
 since=dnd-400

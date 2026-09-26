@@ -1,0 +1,4 @@
+pass | UNLISTED_ROLE_DECISION: deny
+pass | UNLISTED_ROLE_DECISION: Deny
+fail | UNLISTED_ROLE_DECISION: allow
+fail | the answer is deny

@@ -1,4 +1,5 @@
 label=bad
 expect=guardrail
 about=busy-spin wait loop introduced (safe-wait rule)
+invariant=a spinning wait loop is a guardrail finding (safe-wait rule)
 since=core

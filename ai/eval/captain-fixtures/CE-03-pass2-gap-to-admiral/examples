@@ -1,0 +1,6 @@
+pass | NEXT_ACTIONS: sendmessage.admiral, write-plan, write-test:unit, implement:domain
+pass | NEXT_ACTIONS: write-plan, sendmessage.admiral, implement:migration
+fail | NEXT_ACTIONS: sendmessage.architect, write-plan, implement:domain
+fail | NEXT_ACTIONS: sendmessage.admiral, sendmessage.architect, implement:domain
+fail | NEXT_ACTIONS: sendmessage.admiral, wait
+fail | NEXT_ACTIONS: write-plan, implement:domain

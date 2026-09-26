@@ -69,6 +69,10 @@
 #   ai/bin/admiral-eval --run --only AE-05       run one case (local iteration)
 #   ai/bin/admiral-eval --run --agent-file PATH  evaluate that rendered admiral
 #                                       (default: this checkout's ai/agents/athena-admiral.md)
+#   ai/bin/admiral-eval [--run] --agent captain|architect
+#                                       the same runner, containment and scorer over another
+#                                       agent's corpus (ai/eval/<agent>-fixtures), baseline and
+#                                       action vocabulary (DND-529; registry: ai/lib/eval_subject.rb)
 #
 # Baseline PROVENANCE: the baseline records a fingerprint of the agent it was
 # captured against (ai/agents/athena-admiral.md: line count + sha256), and every
@@ -94,35 +98,89 @@ require "rbconfig"
 require_relative "../lib/strict_argv"
 
 AI_DIR       = File.expand_path("..", __dir__)
+REPO_ROOT    = File.expand_path("..", AI_DIR)
 require File.join(AI_DIR, "lib", "eval_score")
-FIXTURES_DIR = File.join(AI_DIR, "eval", "admiral-fixtures")
-BASELINE     = File.join(AI_DIR, "eval", "admiral-baseline.json")
+require File.join(AI_DIR, "lib", "eval_subject")
 HOOKS_DIR    = File.join(AI_DIR, "hooks")
-AGENT        = "athena-admiral"
-AGENT_FILE   = File.join(AI_DIR, "agents", "#{AGENT}.md")
 DEFAULT_RUNS = 3
+
+# DND-529: the subject is one of the agents EvalSubject::AGENTS assigns to this
+# runner (admiral, captain, architect), chosen by --agent (default admiral).
+# Its fixtures dir, baseline, render and inline subject key come from that one
+# table, so each agent reuses this runner's containment and deterministic
+# scorer instead of a forked copy. An agent the table does not assign here is a
+# usage error, never zero cases.
+RUNNER        = "ai/bin/admiral-eval"
+DEFAULT_AGENT = "admiral"
+SubjectError  = EvalSubject::SubjectError
+MAX_SUBJECT_ARG_BYTES = EvalSubject::MAX_SUBJECT_ARG_BYTES
+CONTAINMENT_ARGV      = EvalSubject::CONTAINMENT_ARGV
+
+def eval_agent(key = DEFAULT_AGENT)
+  EvalSubject.agent(key, runner: RUNNER)
+end
+
+def fixtures_dir(agent = eval_agent)
+  File.expand_path(agent.fixtures_rel, REPO_ROOT)
+end
+
+def baseline_path(agent = eval_agent)
+  File.expand_path(agent.baseline_rel, REPO_ROOT)
+end
+
+# The command a Fix: line tells the reader to re-run, for this agent.
+def rerun_hint(agent = eval_agent)
+  agent.key == DEFAULT_AGENT ? RUNNER : "#{RUNNER} --agent #{agent.key}"
+end
+
+# The render evaluated when --agent-file is omitted: THIS checkout's.
+def default_agent_file(agent = eval_agent)
+  File.join(REPO_ROOT, agent.render_rel)
+end
 # DND-537: the one range --runs must fall in, shared by the parser's
 # validation and USAGE's rendered "1-99" so the two can never drift. Out of
 # range is a usage error (exit 2), never a silent clamp — a clamped N would
 # sample a different depth than requested with no sign anything changed.
 RUNS_RANGE = (1..99).freeze
 
-# The fixed action vocabulary shown to the admiral in next-action scenarios. It
+# The fixed action vocabulary shown to each agent in next-action scenarios. It
 # is deliberately BROAD so its mere presence never reveals which invariant is
-# under test (design §3.1).
-ACTION_VOCABULARY = %w[
-  confirm-merged notion.set-status:<value> slack.dm-owner agent.spawn-captain:<mission>
-  merge-mr board-merge-train retarget-mr docker.compose-down invoke:teardown-worktree-stack
-  invoke:epic-progress-dm sweep-fleet probe-worktree:<mission> list-agents
-  wt-preflight:<branch> wait report-and-wait end-turn
-  fleet-control.check mark-parked:<mission> sendmessage.park:<mission> sendmessage.main
-  fleet-report.admiral-state:<state> invoke:admiral-final-report
-  fleet-resume.status:<run> fleet-resume.drained:<run>
-].freeze
+# under test (design §3.1). One list per agent this runner measures; the
+# self-test fails any fixture that asserts a token its agent's list lacks (a
+# forbidden token the model is never offered passes vacuously).
+VOCABULARIES = {
+  "admiral" => %w[
+    confirm-merged notion.set-status:<value> slack.dm-owner agent.spawn-captain:<mission>
+    merge-mr board-merge-train retarget-mr docker.compose-down invoke:teardown-worktree-stack
+    invoke:epic-progress-dm sweep-fleet probe-worktree:<mission> list-agents
+    wt-preflight:<branch> wait report-and-wait end-turn
+    fleet-control.check mark-parked:<mission> sendmessage.park:<mission> sendmessage.main
+    fleet-report.admiral-state:<state> invoke:admiral-final-report
+    fleet-resume.status:<run> fleet-resume.drained:<run>
+  ].freeze,
+  "captain" => %w[
+    read-design-docs probe-code:<path> write-plan write-test:<kind> run-test:<unfixed|fixed>
+    apply-fix implement:<step> run-critic-review run-prep-commit commit push-branch open-mr
+    watch-pipeline address-review merge-mr board-merge-train
+    sendmessage.admiral sendmessage.architect sendmessage.main
+    notion.set-status:<value> notion.comment:<ticket> file-ticket:<title>
+    write-report wait end-turn
+  ].freeze,
+  "architect" => %w[
+    ground:domain-model read-adrs kg.query notion.write-section:<section>
+    notion.update-ticket-body:<ticket> notion.add-inline-pointer:<ticket> notion.create-ticket:<title>
+    notion.mark-spec-ready:<ticket> questions-block:<topic> record-assumption:<topic>
+    sendmessage.admiral sendmessage.captain:<ticket> sendmessage.main wait end-turn
+  ].freeze
+}.freeze
+
+def vocabulary(agent = eval_agent)
+  VOCABULARIES.fetch(agent.key)
+end
 
 # Appended to every T2 scenario. Plan-only framing (guard 1) + the required
 # output shape the deterministic scorer parses.
-def trailer_instructions(mode)
+def trailer_instructions(mode, vocab = vocabulary)
   common = <<~TXT
     ---
     This is an EVALUATION. Do NOT call any tool, do NOT run any command, do NOT
@@ -138,7 +196,7 @@ def trailer_instructions(mode)
       using ONLY tokens from this vocabulary (comma-separated, in order; extra
       prose above the line is ignored):
 
-        #{ACTION_VOCABULARY.join(' ')}
+        #{vocab.join(' ')}
 
       NEXT_ACTIONS: <token>, <token>, ...
     TXT
@@ -177,8 +235,8 @@ def parse_meta(path)
   m
 end
 
-def fixtures
-  Dir.glob(File.join(FIXTURES_DIR, "*")).select { |d| File.file?(File.join(d, "meta")) }.sort
+def fixtures(agent = eval_agent)
+  Dir.glob(File.join(fixtures_dir(agent), "*")).select { |d| File.file?(File.join(d, "meta")) }.sort
 end
 
 # ---------------------------------------------------------------------------
@@ -319,6 +377,79 @@ def score_decision(meta, parsed)
   [reasons.empty?, reasons]
 end
 
+# ---------------------------------------------------------------------------
+# Corpus lint (DND-529, model-free, run by --self-test over EVERY agent this
+# runner measures). A corpus can be well-formed per case and still score
+# nothing real:
+#   - a case with no `invariant =` line cannot say which rule a red protects;
+#   - a token its agent's vocabulary never offers can never be emitted, so a
+#     forbid_action on it passes vacuously and an expect_action on it can never
+#     pass;
+#   - a case whose `examples` file (one `pass | <trailer>` or `fail |
+#     <trailer>` per line) disagrees with the scorer asserts something other
+#     than what its author believed.
+# `examples` is the per-case scorer fixture: required for every agent but the
+# admiral, whose corpus predates it (checked there when present).
+# ---------------------------------------------------------------------------
+T2_MODES = %w[next-action structured-answer].freeze
+KNOWN_MODES = (T2_MODES + %w[hook-stdin]).freeze
+
+def spec_heads(meta)
+  specs = Array(meta["expect_action"]) + Array(meta["forbid_action"]) +
+          Array(meta["expect_order"]).flat_map { |s| s.split("<", 2).map(&:strip) }
+  specs.reject(&:empty?).map { |s| s.partition(":").first }
+end
+
+# -> [[example_line, why], ...] for every example the scorer disagrees with.
+def example_problems(dir, meta)
+  path = File.join(dir, "examples")
+  return [] unless File.file?(path)
+
+  File.readlines(path, chomp: true).reject { |l| l.strip.empty? || l.start_with?("#") }.filter_map do |line|
+    want, sep, trailer = line.partition("|")
+    want = want.strip
+    next [line, "not `pass | <trailer>` or `fail | <trailer>`"] if sep.empty? || !%w[pass fail].include?(want)
+
+    got = score_decision(meta, parse_trailer(trailer.strip))[0]
+    next nil if got == (want == "pass")
+
+    [line, "labeled #{want} but the scorer says #{got ? 'pass' : 'fail'}"]
+  end
+end
+
+# -> list of problem strings for one agent's corpus (empty = clean).
+def corpus_problems(agent)
+  dirs = fixtures(agent)
+  return ["#{agent.fixtures_rel} has no case (zero cases is not a corpus)"] if dirs.empty?
+
+  heads = vocabulary(agent).map { |t| t.partition(":").first }
+  problems = []
+  t2 = 0
+  dirs.each do |d|
+    name = File.basename(d)
+    meta = parse_meta(File.join(d, "meta"))
+    mode = meta["mode"]
+    problems << "#{name}: unknown mode #{mode.inspect}" unless KNOWN_MODES.include?(mode)
+    problems << "#{name}: no `invariant =` line naming the rule it protects" if meta["invariant"].to_s.strip.empty?
+    next unless T2_MODES.include?(mode)
+
+    t2 += 1
+    problems << "#{name}: no scenario.md" unless File.file?(File.join(d, "scenario.md"))
+    validate_case(meta).each { |r| problems << "#{name}: #{r}" }
+    (spec_heads(meta) - heads).uniq.each do |h|
+      problems << "#{name}: asserts token #{h.inspect}, which the #{agent.key} vocabulary never offers"
+    end
+    if agent.key != DEFAULT_AGENT
+      ex = File.readlines(File.join(d, "examples"), chomp: true) rescue []
+      problems << "#{name}: examples needs at least one `pass |` and one `fail |` line" \
+        unless ex.any? { |l| l.start_with?("pass") } && ex.any? { |l| l.start_with?("fail") }
+    end
+    example_problems(d, meta).each { |line, why| problems << "#{name}: example #{line.inspect} #{why}" }
+  end
+  problems << "#{agent.fixtures_rel} has no T2 case" if t2.zero?
+  problems
+end
+
 # strict majority true (design §4.3)
 def majority(bools)
   bools.count(true) * 2 > bools.size
@@ -441,152 +572,69 @@ def model_env(bin)
   { "PATH" => "#{bin}:#{ENV['PATH']}" }
 end
 
-# Structural tool containment (guard 2, hardened — design §2.1). Under the
-# ambient HOME (required, see model_env) the model CAN otherwise reach real MCP
-# servers (Notion/Slack/Agent), spawn a real captain via the Task tool, and run
-# arbitrary Bash — including an absolute-path forge/git/docker call that the PATH
-# stubs never see. The admiral runs unattended, so its ambient settings likely
-# pre-approve those, giving no deny backstop. These CLI flags close all of it
-# STRUCTURALLY, independent of any ambient pre-approval:
-#   --strict-mcp-config --mcp-config {empty}  : load NO MCP server at all — the
-#     Notion/Slack/Agent tools simply do not exist for this run.
-#   --disallowedTools Bash Task               : no shell (which also closes the
-#     absolute-path stub bypass) and no subagent spawn.
-# VERIFIED empirically that the admiral still authenticates and still emits a
-# parseable decision trailer under these flags, and (2026-09-24, DND-503) that an
-# inline --agents subject still loads under them. The variadic flags are ordered so --mcp-config takes exactly one
-# value and --disallowedTools consumes the trailing tokens to argv end.
-EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
-CONTAINMENT_ARGV = [
-  "--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG,
-  "--disallowedTools", "Bash", "Task"
-].freeze
+# Structural tool containment (guard 2, hardened — design §2.1) and SUBJECT
+# SELECTION (DND-503) live in ai/lib/eval_subject.rb, shared with critic-eval
+# (DND-529): every agent this runner measures gets the SAME argv shape. In
+# brief: under the ambient HOME (required, see model_env) the model could
+# otherwise reach real MCP servers, spawn a real captain via Task, and run
+# arbitrary Bash, so the argv loads NO MCP server (--strict-mcp-config with an
+# empty set) and disallows Bash + Task, LAST because --disallowedTools is
+# variadic. And `claude --agent <name>` resolves <name> from ~/.claude/agents
+# (the MAIN checkout) whatever the cwd, so the argv instead carries the NAMED
+# render's prose inline, under `<name>-eval-subject`, a key no agents dir
+# supplies: a lost --agents fails "agent not found" instead of silently
+# evaluating main's copy. VERIFIED 2026-09-24 (claude 2.1.281) for the admiral.
 
-# SUBJECT SELECTION (DND-503). `claude --agent <name>` resolves <name> from
-# ~/.claude/agents — a symlink to the MAIN checkout's ai/agents — whatever the
-# cwd, and a project-local .claude/ is no escape hatch here (a custom worktree's
-# .claude is itself a symlink to the main checkout). So a bare
-# `--agent athena-admiral` evaluates main's admiral even when admiral-eval runs
-# from a variant worktree, and variant-eval's T2 delta measures one subject
-# twice. Instead the argv carries the NAMED file's prose inline:
-#   --agents '{"<SUBJECT_KEY>": {description, model, prompt: <body>}}'
-#   --agent <SUBJECT_KEY>
-# SUBJECT_KEY is a name no agents dir supplies, so if --agents were ever not
-# honored `claude` fails "agent not found" instead of silently falling back to
-# the main checkout's admiral. VERIFIED 2026-09-24 (claude 2.1.281): a canary
-# agent defined only via --agents under a unique key, run with CONTAINMENT_ARGV,
-# answered with its canary token.
-SUBJECT_KEY = "#{AGENT}-eval-subject"
-
-# Frontmatter keys a rendered agent may carry, and where each goes in the
-# --agents definition. `name` is checked, `color` is cosmetic. Any OTHER key is
-# refused: dropping an unknown key silently would evaluate a different agent
-# than the file describes.
-FRONTMATTER_MAP = { "description" => "description", "model" => "model", "tools" => "tools" }.freeze
-FRONTMATTER_IGNORED = %w[name color].freeze
-
-class SubjectError < StandardError; end
-
-def subject_error(path, why)
-  SubjectError.new(
-    "cannot load the eval subject #{path}: #{why}. Fix: pass --agent-file a rendered " \
-    "#{AGENT} definition (e.g. <checkout>/ai/agents/#{AGENT}.md, produced by ai/bin/build-agents) " \
-    "with `---` frontmatter naming `name: #{AGENT}` and a non-empty prompt body."
-  )
-end
-
-# Parse a rendered agent file into an --agents definition. Raises SubjectError.
-def agent_definition(path)
-  raise subject_error(path, "file not found or unreadable") unless File.file?(path) && File.readable?(path)
-
-  text = File.read(path)
-  m = text.match(/\A---\s*\n(.*?)\n---\s*\n(.*)\z/m)
-  raise subject_error(path, "no `---` frontmatter block") unless m
-
-  front = parse_frontmatter(path, m[1])
-  body = m[2].strip
-  raise subject_error(path, "frontmatter name is #{front['name'].inspect}, not #{AGENT}") unless front["name"] == AGENT
-  raise subject_error(path, "empty prompt body") if body.empty?
-
-  unknown = front.keys - FRONTMATTER_MAP.keys - FRONTMATTER_IGNORED
-  raise subject_error(path, "unsupported frontmatter key(s) #{unknown.join(', ')}") unless unknown.empty?
-
-  defn = { "prompt" => body }
-  FRONTMATTER_MAP.each do |key, field|
-    next unless front.key?(key)
-
-    defn[field] = key == "tools" ? front[key].split(",").map(&:strip).reject(&:empty?) : front[key]
-  end
-  defn
-end
-
-# Flat `key: value` frontmatter, the only shape ai/bin/build-agents renders.
-def parse_frontmatter(path, block)
-  block.lines.each_with_object({}) do |line, h|
-    next if line.strip.empty?
-
-    k, sep, v = line.partition(":")
-    raise subject_error(path, "unparseable frontmatter line #{line.strip.inspect}") if sep.empty? || k.strip.empty?
-
-    h[k.strip] = v.strip
-  end
+# Parse a render into an --agents definition. Raises SubjectError.
+def agent_definition(path, agent = eval_agent)
+  EvalSubject.definition(path, agent.name)
 end
 
 # --agent-file PATH selects the subject; the default is THIS checkout's render
-# (validated at the same model_argv call in run_model, before any model call),
-# the same file subject_fingerprint records. Returns [absolute_path, nil] or
-# [nil, error_message_with_Fix].
-def resolve_agent_file(argv)
+# of the selected agent (validated at the same model_argv call in run_model,
+# before any model call), the same file subject_fingerprint records. Returns
+# [absolute_path, nil] or [nil, error_message_with_Fix].
+def resolve_agent_file(argv, agent = eval_agent)
   i = argv.index("--agent-file")
-  return [AGENT_FILE, nil] unless i
+  return [default_agent_file(agent), nil] unless i
 
   raw = argv[i + 1]
   if raw.nil? || raw.start_with?("--")
-    return [nil, "--agent-file needs a path. Fix: pass `--agent-file <path-to-rendered-#{AGENT}.md>`, " \
-                 "or omit it to evaluate this checkout's #{relpath(AGENT_FILE)}."]
+    return [nil, "--agent-file needs a path. Fix: pass `--agent-file <path-to-rendered-#{agent.name}.md>`, " \
+                 "or omit it to evaluate this checkout's #{relpath(default_agent_file(agent))}."]
   end
 
   path = File.expand_path(raw)
-  model_argv(path) # loads AND size-checks the subject, so every SubjectError surfaces here
+  model_argv(path, agent) # loads AND size-checks the subject, so every SubjectError surfaces here
   [path, nil]
 rescue SubjectError => e
   [nil, e.message]
 end
 
-# Linux caps ONE argv string at MAX_ARG_STRLEN (32 pages = 131072 bytes); past it
-# execve fails E2BIG. Refuse early with a Fix: rather than per-case exec errors.
-MAX_SUBJECT_ARG_BYTES = 131_072
-
-def model_argv(agent_file)
-  subject = JSON.generate(SUBJECT_KEY => agent_definition(agent_file))
-  if subject.bytesize >= MAX_SUBJECT_ARG_BYTES
-    raise subject_error(agent_file, "the inline --agents definition is #{subject.bytesize} bytes, over the " \
-                                    "#{MAX_SUBJECT_ARG_BYTES}-byte single-argument limit; switch model_argv to " \
-                                    "`--agents <file>` (claude -p accepts a path)")
-  end
-  # CONTAINMENT_ARGV stays LAST: its variadic --disallowedTools would otherwise
-  # swallow any flag placed after it.
-  ["claude", "-p", "--agent", SUBJECT_KEY, "--agents", subject, *CONTAINMENT_ARGV]
+def model_argv(agent_file, agent = eval_agent)
+  EvalSubject.argv(agent_file, agent)
 end
 
-# Invoke the admiral once for a T2 fixture, return its raw output (or nil on
-# failure). The scenario body + the mode's trailer instructions form the prompt.
-def invoke_admiral(scenario, mode, bin, argv)
-  prompt = "#{scenario}\n\n#{trailer_instructions(mode)}"
+# Invoke the subject once for a T2 fixture, return its raw output (or nil on
+# failure). The scenario body + the mode's trailer instructions form the
+# prompt. The stderr line keeps its `! <key> invocation failed` shape: for the
+# admiral that is byte-identical to what variant-eval's T2_INVOCATION_FAILED
+# parses.
+def invoke_subject(scenario, mode, bin, argv, agent = eval_agent)
+  prompt = "#{scenario}\n\n#{trailer_instructions(mode, vocabulary(agent))}"
   out, err, st = Open3.capture3(model_env(bin), *argv, stdin_data: prompt)
   return out if st&.success?
-  warn "  ! admiral invocation failed (exit #{st ? st.exitstatus : '?'}): #{err.to_s.lines.last(2).join.strip}"
+  warn "  ! #{agent.key} invocation failed (exit #{st ? st.exitstatus : '?'}): #{err.to_s.lines.last(2).join.strip}"
   nil
 rescue StandardError => e
-  warn "  ! admiral invocation failed: #{e.message} (is `claude` on PATH?)"
+  warn "  ! #{agent.key} invocation failed: #{e.message} (is `claude` on PATH?)"
   nil
 end
-
 # ---------------------------------------------------------------------------
 # Evaluate one fixture directory. T1 runs once (deterministic); T2 samples K
 # times and scores by majority. Returns {name, mode, pass, rate, detail}.
 # ---------------------------------------------------------------------------
-def evaluate(dir, runs:, argv:)
+def evaluate(dir, runs:, argv:, agent: eval_agent)
   meta = parse_meta(File.join(dir, "meta"))
   name = File.basename(dir)
   mode = meta["mode"]
@@ -617,9 +665,9 @@ def evaluate(dir, runs:, argv:)
       bin = build_sandbox(sb)
       last_reasons = nil
       samples = Array.new(runs) do
-        out = invoke_admiral(scenario, mode, bin, argv)
+        out = invoke_subject(scenario, mode, bin, argv, agent)
         if out.nil?
-          last_reasons ||= ["admiral produced no output (invocation failed)"]
+          last_reasons ||= ["#{agent.key} produced no output (invocation failed)"]
           next false
         end
         ok, reasons = score_decision(meta, parse_trailer(out))
@@ -642,7 +690,7 @@ end
 # baseline passed but this run fails is the FAIL signal; a newly-fixed case is
 # reported, not failed. --update-baseline is never used to hide a regression.
 # ---------------------------------------------------------------------------
-def load_baseline(path = BASELINE)
+def load_baseline(path = baseline_path)
   return nil unless path && File.file?(path)
   data = JSON.parse(File.read(path))
   data["cases"].each_with_object({}) { |c, h| h[c["name"]] = c["pass"] }
@@ -670,7 +718,7 @@ end
 # model-in-loop and not gate-wired, and a legitimate re-baseline would otherwise
 # be unable to run. The point is that a stale baseline can no longer be SILENT,
 # not that it should block.
-def subject_fingerprint(path = AGENT_FILE)
+def subject_fingerprint(path = default_agent_file)
   return { "file" => relpath(path), "status" => "missing" } unless File.file?(path)
   body = File.read(path)
   {
@@ -685,7 +733,7 @@ def relpath(path)
   path.start_with?(root + "/") ? path[(root.size + 1)..] : path
 end
 
-def load_baseline_subject(path = BASELINE)
+def load_baseline_subject(path = baseline_path)
   return nil unless path && File.file?(path)
   JSON.parse(File.read(path))["subject"]
 rescue StandardError
@@ -694,12 +742,12 @@ end
 
 # Prints the provenance verdict. Returns the verdict symbol so the self-test can
 # assert all three WITHOUT depending on the exact wording.
-def report_provenance(recorded, current = subject_fingerprint)
+def report_provenance(recorded, current = subject_fingerprint, agent: eval_agent)
   if recorded.nil?
     puts "baseline subject: UNKNOWN — this baseline predates subject fingerprinting."
-    warn "admiral-eval: Note: the baseline does not record which #{AGENT} it was captured against, " \
+    warn "admiral-eval: Note: the baseline does not record which #{agent.name} it was captured against, " \
          "so a clean diff does NOT certify today's agent. " \
-         "Fix: re-capture it against the current agent with `ai/bin/admiral-eval --run --update-baseline` " \
+         "Fix: re-capture it against the current agent with `#{rerun_hint(agent)} --run --update-baseline` " \
          "once this run is green; after that, drift is reported automatically."
     return :unknown
   end
@@ -710,19 +758,19 @@ def report_provenance(recorded, current = subject_fingerprint)
     return :match
   end
 
-  puts "baseline subject: STALE — captured against a different #{AGENT}."
+  puts "baseline subject: STALE — captured against a different #{agent.name}."
   warn "admiral-eval: Note: the baseline was captured against #{recorded['file']} at " \
        "#{recorded['lines'] || '?'} lines (sha #{(recorded['sha256'] || '?')[0, 12]}), but this run scored " \
        "#{current['lines'] || '?'} lines (sha #{(current['sha256'] || '?')[0, 12]}). The agent changed since the " \
        "baseline, so '0 regressed' above compares today's results against a DIFFERENT agent's expectations — " \
        "it is not evidence that the change preserved behavior. " \
-       "Fix: if this run is green, re-capture with `ai/bin/admiral-eval --run --update-baseline` to certify the " \
+       "Fix: if this run is green, re-capture with `#{rerun_hint(agent)} --run --update-baseline` to certify the " \
        "current agent; if it is NOT green, treat the failures as caused by the agent change and restore the " \
        "invariant's trigger rather than re-baselining over it."
   :stale
 end
 
-def diff_baseline(results, baseline)
+def diff_baseline(results, baseline, agent: eval_agent)
   now = results.each_with_object({}) { |r, h| h[r[:name]] = r[:pass] }
   regressed = baseline.select { |name, was| was && now[name] == false }.keys
   fixed     = baseline.select { |name, was| !was && now[name] == true }.keys
@@ -734,7 +782,7 @@ def diff_baseline(results, baseline)
   unless regressed.empty?
     warn "admiral-eval: FAILED — regression vs baseline:"
     regressed.each { |n| warn "  - #{n}: baseline pass -> now fail" }
-    warn "  Fix: a change (likely the admiral trim) broke a behavioral case the baseline caught. " \
+    warn "  Fix: a change (likely a #{agent.name} trim or block edit) broke a behavioral case the baseline caught. " \
          "Restore the invariant's TRIGGER (the resident one-liner / JIT-skill pointer that fires it), " \
          "not just its words; do NOT run --update-baseline to hide it. If a 2/3->1/3 case looks like " \
          "sampling noise, re-run --run --only <case> to confirm before attributing it to the trim."
@@ -778,23 +826,25 @@ def corpus_fingerprint(dirs)
   digest.hexdigest[0, 12]
 end
 
-def run_model(runs:, only:, update:, agent_file: AGENT_FILE)
-  dirs = fixtures
+def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agent_file(agent))
+  dirs = fixtures(agent)
   dirs = dirs.select { |d| File.basename(d).start_with?(only) } if only
   if dirs.empty?
-    warn "admiral-eval: no fixtures#{only ? " matching #{only.inspect}" : ''} under #{FIXTURES_DIR}"
-    warn "  Fix: add ai/eval/admiral-fixtures/<AE-NN-name>/meta (+ scenario.md or input.json)."
+    warn "admiral-eval: no fixtures#{only ? " matching #{only.inspect}" : ''} under #{agent.fixtures_rel} " \
+         "(agent #{agent.key}) — zero cases is not a run."
+    warn "  Fix: add #{agent.fixtures_rel}/<NAME>/meta (+ scenario.md or input.json), or fix --only."
     return 1
   end
 
   # Build the subject argv ONCE, before any model call: a subject that cannot
   # load fails here, loudly, instead of per case.
-  argv = model_argv(agent_file)
+  argv = model_argv(agent_file, agent)
   subject = subject_fingerprint(agent_file)
   # variant-eval parses this line (confirm_t2_subject!) to prove which render ran;
   # keep its `subject: ... sha <12 hex> (loaded inline via --agents` shape.
+  puts "agent: #{agent.key} (#{agent.name}), corpus #{agent.fixtures_rel}"
   puts "subject: #{subject['file']} #{subject['lines']} lines sha #{subject['sha256'][0, 12]} " \
-       "(loaded inline via --agents as #{SUBJECT_KEY})"
+       "(loaded inline via --agents as #{agent.subject_key})"
   # DND-525: a ~60min --run prints nothing until every case finishes, so a hung
   # run looks the same as a slow one from outside. Print a per-case completion
   # line as each case finishes, to STDERR only — variant-eval's collect_t2_counts
@@ -803,7 +853,7 @@ def run_model(runs:, only:, update:, agent_file: AGENT_FILE)
   # must see it byte-identical; these lines never touch STDOUT.
   total = dirs.size
   results = dirs.each_with_index.map do |d, i|
-    r = evaluate(d, runs: runs, argv: argv)
+    r = evaluate(d, runs: runs, argv: argv, agent: agent)
     warn "  [#{i + 1}/#{total}] #{r[:name]}: #{r[:pass] ? 'PASS' : 'FAIL'} (#{r[:rate]})"
     r
   end
@@ -814,21 +864,22 @@ def run_model(runs:, only:, update:, agent_file: AGENT_FILE)
   score_lines(results, corpus_fingerprint(dirs)).each { |l| puts l }
 
   if update
-    FileUtils.mkdir_p(File.dirname(BASELINE))
-    File.write(BASELINE, JSON.pretty_generate(
+    FileUtils.mkdir_p(File.dirname(baseline_path(agent)))
+    File.write(baseline_path(agent), JSON.pretty_generate(
       "generated" => Time.now.utc.iso8601,
+      "agent" => agent.name,
       "subject" => subject,
       "cases" => results.map { |r| { "name" => r[:name], "pass" => r[:pass], "rate" => r[:rate] } }
     ))
-    puts "admiral-eval: baseline written to #{BASELINE} " \
+    puts "admiral-eval: baseline written to #{agent.baseline_rel} " \
          "(subject: #{subject['file']} #{subject['lines']} lines sha #{(subject['sha256'] || '?')[0, 12]})"
     return 0
   end
 
-  baseline = load_baseline
+  baseline = load_baseline(baseline_path(agent))
   if baseline
-    code = diff_baseline(results, baseline)
-    report_provenance(load_baseline_subject, subject)
+    code = diff_baseline(results, baseline, agent: agent)
+    report_provenance(load_baseline_subject(baseline_path(agent)), subject, agent: agent)
     return code
   end
 
@@ -837,23 +888,30 @@ def run_model(runs:, only:, update:, agent_file: AGENT_FILE)
   warn ""
   warn "admiral-eval: #{failures.size} case(s) failed (no baseline committed yet — reporting only):"
   failures.each { |r| warn "  - #{r[:name]}: #{r[:detail]}" }
-  warn "  Fix: this run has no ai/eval/admiral-baseline.json to diff against. Capture the baseline " \
-       "against the CURRENT admiral with `ai/bin/admiral-eval --run --update-baseline` once the cases " \
-       "pass on today's admiral; never baseline a case that cannot pass reliably (mark it advisory)."
+  warn "  Fix: this run has no #{agent.baseline_rel} to diff against. Capture the baseline " \
+       "against the CURRENT #{agent.name} with `#{rerun_hint(agent)} --run --update-baseline` once the cases " \
+       "pass on today's #{agent.name}; never baseline a case that cannot pass reliably (mark it advisory)."
   1
 end
 
-def list
-  fx = fixtures
-  puts "admiral-eval: #{fx.size} fixture(s) for #{AGENT}:"
+def list(agent = eval_agent)
+  fx = fixtures(agent)
+  if fx.empty?
+    warn "admiral-eval: no fixtures under #{agent.fixtures_rel} for #{agent.name}."
+    warn "  Fix: add #{agent.fixtures_rel}/<NAME>/meta (+ scenario.md); an agent with zero cases has no " \
+         "behavioral eval, and listing it as empty would read as a covered agent."
+    return 1
+  end
+  puts "admiral-eval: #{fx.size} fixture(s) for #{agent.name} (--agent #{agent.key}; also: " \
+       "#{(EvalSubject.keys_for_runner(RUNNER) - [agent.key]).join(', ')}):"
   fx.each do |d|
     m = parse_meta(File.join(d, "meta"))
     puts "  - #{File.basename(d)} [#{m['mode']}] #{m['invariant']}"
   end
   puts ""
   puts "Trust model: the model PRODUCES a decision; a DETERMINISTIC scorer scores it."
-  puts "  Subject: the rendered #{AGENT} named by --agent-file (default this checkout's"
-  puts "  #{relpath(AGENT_FILE)}), passed inline via --agents, never resolved from"
+  puts "  Subject: the rendered #{agent.name} named by --agent-file (default this checkout's"
+  puts "  #{agent.render_rel}), passed inline via --agents, never resolved from"
   puts "  ~/.claude/agents (the main checkout's copy)."
   puts "  The model runs under the AMBIENT HOME (required for claude auth; design"
   puts "  §2.1's isolated HOME is infeasible). Tool containment is"
@@ -864,7 +922,7 @@ def list
   puts "  framing) is the primary framing; the inert PATH stubs (no-op gh/glab/docker/"
   puts "  git-push) are a residual layer. --run is model-in-loop and NOT in the gate;"
   puts "  the deterministic --self-test IS gate-wired."
-  puts "Run the model-in-loop evaluation with: ai/bin/admiral-eval --run"
+  puts "Run the model-in-loop evaluation with: #{rerun_hint(agent)} --run"
   0
 end
 
@@ -874,6 +932,7 @@ end
 # ---------------------------------------------------------------------------
 def self_test
   ok = true
+  adm = eval_agent(DEFAULT_AGENT)
   fail = ->(msg) { warn "self-test: FAIL — #{msg}"; ok = false }
 
   # -- 1. trailer parser ---------------------------------------------------
@@ -1093,9 +1152,9 @@ def self_test
     unless trailer_instructions("next-action").include?("NEXT_ACTIONS:")
   fail.("structured-answer framing must forbid tool use") \
     unless trailer_instructions("structured-answer").include?("Do NOT call any tool")
-  argv = model_argv(AGENT_FILE)
-  fail.("model argv must invoke the eval subject (claude -p --agent #{SUBJECT_KEY})") \
-    unless argv[0, 4] == ["claude", "-p", "--agent", SUBJECT_KEY]
+  argv = model_argv(default_agent_file(adm))
+  fail.("model argv must invoke the eval subject (claude -p --agent #{adm.subject_key})") \
+    unless argv[0, 4] == ["claude", "-p", "--agent", adm.subject_key]
   # -- 10b. STRUCTURAL tool containment (guard 2, hardened — design §2.1). Assert
   # the actual containment, not merely that HOME is ambient: NO MCP server may
   # load, and Bash + Task must be disallowed. This is what closes the real
@@ -1132,7 +1191,7 @@ def self_test
   # runs in a variant worktree, and a variant-vs-baseline T2 delta measures one
   # subject twice. The argv must carry the NAMED file's prose itself.
   Dir.mktmpdir("admiral-eval-subject-") do |d|
-    front = "---\nname: #{AGENT}\ndescription: eval subject\nmodel: opus\ncolor: red\n---\n\n"
+    front = "---\nname: #{adm.name}\ndescription: eval subject\nmodel: opus\ncolor: red\n---\n\n"
     a = File.join(d, "a.md")
     b = File.join(d, "b.md")
     File.write(a, front + "You are variant A.\n")
@@ -1146,21 +1205,21 @@ def self_test
     defs = ai && argv_a[ai + 1] ? (JSON.parse(argv_a[ai + 1]) rescue nil) : nil
     fail.("model argv must define the subject inline via --agents <json>") unless defs.is_a?(Hash)
     if defs.is_a?(Hash)
-      fail.("--agents must define exactly the subject key #{SUBJECT_KEY} (got #{defs.keys.inspect})") \
-        unless defs.keys == [SUBJECT_KEY]
-      sub = defs[SUBJECT_KEY] || {}
+      fail.("--agents must define exactly the subject key #{adm.subject_key} (got #{defs.keys.inspect})") \
+        unless defs.keys == [adm.subject_key]
+      sub = defs[adm.subject_key] || {}
       fail.("the subject prompt must be the named file's body") unless sub["prompt"].to_s.include?("You are variant A.")
-      fail.("the subject prompt must not carry the frontmatter") if sub["prompt"].to_s.include?("name: #{AGENT}")
+      fail.("the subject prompt must not carry the frontmatter") if sub["prompt"].to_s.include?("name: #{adm.name}")
       fail.("the subject must keep the file's model") unless sub["model"] == "opus"
       fail.("the subject must keep the file's description") unless sub["description"] == "eval subject"
     end
     agent_i = argv_a.index("--agent")
-    fail.("--agent must name the inline subject #{SUBJECT_KEY}") unless agent_i && argv_a[agent_i + 1] == SUBJECT_KEY
-    fail.("model argv must never pass the bare --agent #{AGENT} (resolves from the main checkout)") \
-      if argv_a.each_cons(2).include?(["--agent", AGENT])
+    fail.("--agent must name the inline subject #{adm.subject_key}") unless agent_i && argv_a[agent_i + 1] == adm.subject_key
+    fail.("model argv must never pass the bare --agent #{adm.name} (resolves from the main checkout)") \
+      if argv_a.each_cons(2).include?(["--agent", adm.name])
     shipped = Dir.glob(File.join(AI_DIR, "agents", "*.md")).map { |f| File.basename(f, ".md") }
-    fail.("#{SUBJECT_KEY} must be a name no agents dir supplies, so a lost --agents fails loud") \
-      if shipped.include?(SUBJECT_KEY)
+    fail.("#{adm.subject_key} must be a name no agents dir supplies, so a lost --agents fails loud") \
+      if shipped.include?(adm.subject_key)
     fail.("the subject fingerprint must follow the named file") \
       if subject_fingerprint(a)["sha256"] == subject_fingerprint(b)["sha256"]
 
@@ -1174,7 +1233,7 @@ def self_test
       "empty body" => File.join(d, "empty.md")
     }
     File.write(bad["no frontmatter"], "You are an admiral.\n")
-    File.write(bad["wrong agent name"], front.sub("name: #{AGENT}", "name: athena-captain") + "prose\n")
+    File.write(bad["wrong agent name"], front.sub("name: #{adm.name}", "name: athena-captain") + "prose\n")
     File.write(bad["unknown frontmatter key"], front.sub("color: red", "permissionMode: bypass") + "prose\n")
     File.write(bad["empty body"], front)
     bad.each do |label, path|
@@ -1189,7 +1248,7 @@ def self_test
     # --agent-file resolution: default is THIS checkout's render; an explicit
     # path is absolutized; a flag with no value is an error, not the default.
     path, err = resolve_agent_file(%w[--run])
-    fail.("no --agent-file must default to this checkout's #{AGENT_FILE}") unless path == AGENT_FILE && err.nil?
+    fail.("no --agent-file must default to this checkout's #{default_agent_file(adm)}") unless path == default_agent_file(adm) && err.nil?
     path, err = resolve_agent_file(["--run", "--agent-file", a])
     fail.("--agent-file <path> must select that path") unless path == a && err.nil?
     _path, err = resolve_agent_file(%w[--run --agent-file])
@@ -1296,7 +1355,7 @@ def self_test
   # release) and a release before the final report must both FAIL; the
   # athena:fleet-drain step-5 order must PASS. Deleting or loosening either
   # expect_order turns this red.
-  ae19c_meta = File.join(FIXTURES_DIR, "AE-19c-drained-after-last-return", "meta")
+  ae19c_meta = File.join(fixtures_dir(adm), "AE-19c-drained-after-last-return", "meta")
   if File.file?(ae19c_meta)
     m19c = parse_meta(ae19c_meta)
     s19c = ->(line) { score_decision(m19c, parse_trailer("NEXT_ACTIONS: #{line}"))[0] }
@@ -1340,6 +1399,64 @@ def self_test
   fail.("the progress line must not collide with variant-eval's T2_INVOCATION_FAILED pattern") \
     if err525.match?(/^\s*! admiral invocation failed/)
 
+  # -- DND-529: one runner, several agents --------------------------------
+  # (a) the vocabulary table and the registry agree: every agent this runner
+  # measures has a vocabulary, and no vocabulary names an agent it does not.
+  keys = EvalSubject.keys_for_runner(RUNNER)
+  fail.("VOCABULARIES keys #{VOCABULARIES.keys.sort.inspect} must equal the registry's #{keys.inspect}") \
+    unless VOCABULARIES.keys.sort == keys
+  # (b) every agent's corpus is lint-clean (invariant line, known mode, valid
+  # config, only tokens its vocabulary offers, examples that agree with the scorer).
+  keys.each do |k|
+    corpus_problems(eval_agent(k)).each { |p| fail.("corpus #{k}: #{p}") }
+  end
+  # (c) the lint itself has teeth: a vacuous forbid on an unoffered token, a
+  # missing invariant line, and a mislabeled example must each be caught.
+  Dir.mktmpdir("admiral-eval-lint-") do |root|
+    fake = EvalSubject::Agent.new(key: "captain", name: "athena-captain", runner: RUNNER,
+                                  fixtures_rel: File.join(root, "fx"), baseline_rel: File.join(root, "b.json"))
+    fx = File.join(root, "fx", "CE-99-bad")
+    FileUtils.mkdir_p(fx)
+    File.write(File.join(fx, "meta"), "mode = next-action\nexpect_action = write-report\nforbid_action = fleet-control.check\n")
+    File.write(File.join(fx, "scenario.md"), "x\n")
+    File.write(File.join(fx, "examples"), "pass | NEXT_ACTIONS: end-turn\nfail | NEXT_ACTIONS: write-report\n")
+    lint = corpus_problems(fake).join("\n")
+    fail.("lint must flag a token the agent's vocabulary never offers:\n#{lint}") unless lint.include?("fleet-control.check")
+    fail.("lint must flag a case with no invariant line") unless lint.include?("invariant")
+    fail.("lint must flag an example the scorer disagrees with") unless lint.include?("labeled pass but the scorer says fail")
+    empty = EvalSubject::Agent.new(key: "captain", name: "athena-captain", runner: RUNNER,
+                                   fixtures_rel: File.join(root, "none"), baseline_rel: "x")
+    fail.("lint must flag an agent with zero cases") unless corpus_problems(empty).join.include?("zero cases")
+  end
+  # (d) each agent resolves to its OWN render, corpus and vocabulary.
+  keys.each do |k|
+    ag = eval_agent(k)
+    path, err = resolve_agent_file(%w[--run], ag)
+    fail.("#{k}: no --agent-file must default to #{ag.render_rel}") unless err.nil? && path == default_agent_file(ag)
+    fail.("#{k}: fixtures must come from #{ag.fixtures_rel}") \
+      unless fixtures(ag).all? { |d| d.start_with?(File.join(REPO_ROOT, ag.fixtures_rel) + "/") }
+    fail.("#{k}: the model argv must name #{ag.subject_key}") unless model_argv(path, ag)[3] == ag.subject_key
+  end
+  cap_txt = trailer_instructions("next-action", vocabulary(eval_agent("captain")))
+  fail.("the captain's framing must offer the captain vocabulary") unless cap_txt.include?("sendmessage.architect")
+  fail.("the captain's framing must not offer admiral-only tokens") if cap_txt.include?("fleet-control.check")
+  # (e) the CLI: an unknown agent, or one another runner measures, exits 2 with
+  # a Fix: and runs nothing; a known agent lists its own corpus.
+  [[%w[--agent nope], "nope"], [%w[--agent diff-critic], "ai/bin/critic-eval"], [%w[--agent], "--agent"],
+   [%w[--self-test --agent captain], "--agent"]].each do |args, named|
+    out, err, st = cli.(*args)
+    fail.("`admiral-eval #{args.join(' ')}` must exit 2 naming #{named} with a Fix:, got #{st.exitstatus} #{err[0, 160].inspect}") \
+      unless st.exitstatus == 2 && err.include?(named) && err.include?("Fix:") && out.empty?
+  end
+  keys.each do |k|
+    out, _err, st = cli.("--agent", k)
+    fail.("`admiral-eval --agent #{k}` must list #{eval_agent(k).name}'s corpus (exit #{st.exitstatus})") \
+      unless st.exitstatus.zero? && out.include?(eval_agent(k).name)
+  end
+  o1, r1 = parse_cli(%w[--run --agent captain --runs 2])
+  o2, r2 = parse_cli(%w[--runs 2 --agent captain --run])
+  fail.("--agent must parse with --run in any order") unless r1.nil? && r2.nil? && o1 == o2 && o1["--agent"] == "captain"
+
   if ok
     puts "admiral-eval: self-test OK"
     0
@@ -1351,7 +1468,7 @@ def self_test
          "must be rejected; a broken/absent hook must verdict :error and never satisfy an expect=clean " \
          "case; a baseline pass->fail must exit 1; and the inert sandbox must neutralize the PATH-resolved " \
          "forge/comms/container stubs AND block `git push`. The model argv must carry the --agent-file " \
-         "subject's prose inline (--agents under #{SUBJECT_KEY}, never a bare --agent #{AGENT}), with " \
+         "subject's prose inline (--agents under #{adm.subject_key}, never a bare --agent #{adm.name}), with " \
          "--disallowedTools Bash Task last, and an unloadable subject must raise SubjectError with a Fix:. An " \
          "unknown flag, a stray argument, or a value flag with no value must exit 2 naming it (DND-505). The " \
          "AE-19c meta must fail a drain with no/late `fleet-resume.drained` and pass the fleet-drain step-5 " \
@@ -1382,7 +1499,8 @@ CLI_SPEC = {
   "--runs" => :integer,
   "--only" => :value,
   "--update-baseline" => :switch,
-  "--agent-file" => :value
+  "--agent-file" => :value,
+  "--agent" => :value
 }.freeze
 RUN_OPTIONS = %w[--runs --only --update-baseline --agent-file].freeze
 
@@ -1390,6 +1508,10 @@ RUN_OPTIONS = %w[--runs --only --update-baseline --agent-file].freeze
 def parse_cli(argv)
   opts = StrictArgv.parse(argv, CLI_SPEC)
   return [nil, "--run and --self-test are separate modes; pass one"] if opts["--run"] && opts["--self-test"]
+
+  # --agent picks the subject for the list AND for --run; the self-test covers
+  # every agent, so naming one there would be ignored — refused instead.
+  return [nil, "--agent does not apply to --self-test (it checks every agent)"] if opts["--self-test"] && opts.key?("--agent")
 
   stray = RUN_OPTIONS.find { |f| opts.key?(f) }
   return [nil, "#{stray} only applies to --run"] if stray && !opts["--run"]
@@ -1401,18 +1523,24 @@ end
 
 USAGE = <<~TXT
   Usage:
-    ai/bin/admiral-eval                    list the admiral behavioral-eval corpus
+    ai/bin/admiral-eval [--agent NAME]     list an agent's behavioral-eval corpus
     ai/bin/admiral-eval --run [OPTIONS]    run the eval (MODEL-IN-LOOP: slow;
                                            NOT part of the gate)
     ai/bin/admiral-eval --self-test        deterministic suite (no model)
     ai/bin/admiral-eval --help             this text
 
+  --agent NAME          the agent to evaluate: #{EvalSubject.keys_for_runner(RUNNER).join(', ')}
+                        (default #{DEFAULT_AGENT}; the full athena-<name> also works).
+                        Each has its own corpus, baseline and action vocabulary.
+                        diff-critic is measured by ai/bin/critic-eval. An unknown
+                        agent exits 2, never zero cases.
+
   Options (with --run):
     --runs N            majority-sampling runs per case (#{RUNS_RANGE.first}-#{RUNS_RANGE.last})
     --only NAME         restrict to one case
     --update-baseline   rewrite the baseline from this run's results
-    --agent-file PATH   the rendered athena-admiral definition to evaluate
-                        (default: this checkout's ai/agents/athena-admiral.md).
+    --agent-file PATH   the rendered agent definition to evaluate
+                        (default: this checkout's ai/agents/athena-<agent>.md).
                         Its prose is passed inline, so the run never falls back
                         to the ~/.claude/agents copy (the main checkout's).
 
@@ -1436,7 +1564,14 @@ def main(argv)
   end
 
   return self_test if opts["--self-test"]
-  return list unless opts["--run"]
+
+  agent = begin
+    eval_agent(opts.fetch("--agent", DEFAULT_AGENT))
+  rescue EvalSubject::UnknownAgent => e
+    warn "admiral-eval: usage error — #{e.message}"
+    return 2
+  end
+  return list(agent) unless opts["--run"]
 
   runs = opts.fetch("--runs", DEFAULT_RUNS)
   unless RUNS_RANGE.cover?(runs)
@@ -1447,7 +1582,7 @@ def main(argv)
     return 2
   end
 
-  agent_file, subject_err = resolve_agent_file(argv)
+  agent_file, subject_err = resolve_agent_file(argv, agent)
   if subject_err
     warn "admiral-eval: FAILED — #{subject_err}"
     return 2
@@ -1456,6 +1591,7 @@ def main(argv)
     runs: runs,
     only: opts["--only"],
     update: opts.fetch("--update-baseline", false),
+    agent: agent,
     agent_file: agent_file
   )
 end

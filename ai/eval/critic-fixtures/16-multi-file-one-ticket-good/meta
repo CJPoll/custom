@@ -1,0 +1,6 @@
+label=good
+expect=none
+about=one ticket's feature spanning a domain helper, the component that renders it, and a test for each; every file serves the stated ticket
+invariant=a multi-file change whose every file serves its stated ticket is not a scope finding
+requires=diff,commit-msg
+since=dnd-529

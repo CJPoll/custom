@@ -1,0 +1,5 @@
+pass | NEXT_ACTIONS: questions-block:access-control, end-turn
+pass | NEXT_ACTIONS: record-assumption:labor-lines-hidden, questions-block:contractor-rate-visibility, sendmessage.admiral
+fail | NEXT_ACTIONS: record-assumption:labor-lines-hidden, notion.mark-spec-ready:DND-972, sendmessage.admiral
+fail | NEXT_ACTIONS: questions-block:access-control, notion.mark-spec-ready:DND-972, sendmessage.admiral
+fail | NEXT_ACTIONS: notion.write-section:access-control, sendmessage.admiral

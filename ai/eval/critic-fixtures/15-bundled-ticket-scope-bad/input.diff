@@ -1,0 +1,44 @@
+--- a/lib/billing/proration.ex
++++ b/lib/billing/proration.ex
+@@ -20,3 +20,7 @@ defmodule Billing.Proration do
+   end
++
++  def elapsed_days(%Period{starts_on: starts_on}, today) do
++    max(Date.diff(today, starts_on), 0)
++  end
+ end
+--- a/test/billing/proration_test.exs
++++ b/test/billing/proration_test.exs
+@@ -30,3 +30,8 @@ defmodule Billing.ProrationTest do
+     assert Proration.remaining_days(period, ~D[2026-01-10]) == 5
+   end
++
++  test "elapsed_days counts days since the period started" do
++    period = %Period{starts_on: ~D[2026-01-01]}
++    assert Proration.elapsed_days(period, ~D[2026-01-04]) == 3
++  end
+ end
+--- a/lib/notify/deploy_message.ex
++++ b/lib/notify/deploy_message.ex
+@@ -8,7 +8,7 @@ defmodule Notify.DeployMessage do
+   def heading(%Deploy{status: :succeeded, env: env}) do
+-    "Deploy finished on #{env}"
++    ":rocket: Deploy complete on #{env}"
+   end
+
+   def heading(%Deploy{status: :failed, env: env}) do
+-    "Deploy failed on #{env}"
++    ":rotating_light: Deploy FAILED on #{env}"
+   end
+--- a/test/notify/deploy_message_test.exs
++++ b/test/notify/deploy_message_test.exs
+@@ -5,10 +5,10 @@ defmodule Notify.DeployMessageTest do
+   test "succeeded heading names the env" do
+-    assert DeployMessage.heading(%Deploy{status: :succeeded, env: "prod"}) == "Deploy finished on prod"
++    assert DeployMessage.heading(%Deploy{status: :succeeded, env: "prod"}) == ":rocket: Deploy complete on prod"
+   end
+
+   test "failed heading names the env" do
+-    assert DeployMessage.heading(%Deploy{status: :failed, env: "prod"}) == "Deploy failed on prod"
++    assert DeployMessage.heading(%Deploy{status: :failed, env: "prod"}) == ":rotating_light: Deploy FAILED on prod"
+   end

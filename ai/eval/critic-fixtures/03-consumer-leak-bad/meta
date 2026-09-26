@@ -1,4 +1,5 @@
 label=bad
 expect=guardrail
 about=generic fix:* skill hardcodes a consumer-project constant
+invariant=a consumer-project constant hardcoded in a generic skill is a guardrail finding
 since=core

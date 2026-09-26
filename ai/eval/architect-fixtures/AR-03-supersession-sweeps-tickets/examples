@@ -1,0 +1,5 @@
+pass | NEXT_ACTIONS: notion.update-ticket-body:DND-960, notion.update-ticket-body:DND-961, notion.add-inline-pointer:DND-961, sendmessage.admiral
+pass | NEXT_ACTIONS: notion.update-ticket-body:DND-961, sendmessage.admiral, notion.update-ticket-body:DND-960
+fail | NEXT_ACTIONS: notion.update-ticket-body:DND-961, sendmessage.admiral
+fail | NEXT_ACTIONS: notion.update-ticket-body:DND-960, notion.add-inline-pointer:DND-961
+fail | NEXT_ACTIONS: sendmessage.admiral, end-turn

@@ -1,4 +1,5 @@
 label=good
 expect=none
 about=small correct change with a matching test; nothing to flag
+invariant=a correct, tested change gets no findings (no false confidence)
 since=core

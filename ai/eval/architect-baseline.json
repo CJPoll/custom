@@ -1,0 +1,31 @@
+{
+  "generated": "2026-09-26T22:12:26Z",
+  "agent": "athena-architect",
+  "subject": {
+    "file": "ai/agents/athena-architect.md",
+    "lines": 545,
+    "sha256": "30e84eb8ea9f1e4d72ce04da8ebc093412be8efd082c17162c576dfd1a163cb4"
+  },
+  "cases": [
+    {
+      "name": "AR-01-access-control-section",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AR-02-unlisted-role-denied",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AR-03-supersession-sweeps-tickets",
+      "pass": true,
+      "rate": "3/3"
+    },
+    {
+      "name": "AR-04-authz-questions-not-assumed",
+      "pass": true,
+      "rate": "3/3"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+# AR-02 — the access-control design is deny-by-default: a role the rule table
+# does not list is denied, never allowed by a permissive fallback.
+# Stub-render check (DND-529, 2026-09-26, --runs 3): passes 3/3 on a one-line
+# stub render too, so it catches an INVERTED rule (a permissive default), not
+# a deleted one.
+invariant = access control is deny-by-default: an unlisted role is denied
+home      = resident (Access Control: "Deny by default")
+mode      = structured-answer
+answer_field  = UNLISTED_ROLE_DECISION
+expect_answer = deny

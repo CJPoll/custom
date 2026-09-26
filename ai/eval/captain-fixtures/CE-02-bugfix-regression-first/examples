@@ -1,0 +1,5 @@
+pass | NEXT_ACTIONS: write-test:regression, run-test:unfixed, apply-fix, run-test:fixed, commit
+pass | NEXT_ACTIONS: write-plan, write-test, run-test:unfixed, apply-fix, run-test:fixed, run-prep-commit, commit
+fail | NEXT_ACTIONS: apply-fix, write-test:regression, run-test:fixed, commit
+fail | NEXT_ACTIONS: write-test:regression, apply-fix, run-test:fixed, commit
+fail | NEXT_ACTIONS: write-test:regression, apply-fix, run-test:unfixed, commit

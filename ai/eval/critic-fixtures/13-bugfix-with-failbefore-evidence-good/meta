@@ -1,5 +1,6 @@
 label=good
 expect=none
 about=the same bug fix, with the regression test's recorded failing output against the unfixed code and the passing re-run in the commit message
+invariant=BUG_FIX_RULE: a bug fix with recorded fail-before and pass-after evidence is not a finding
 requires=diff,commit-msg
 since=dnd-400

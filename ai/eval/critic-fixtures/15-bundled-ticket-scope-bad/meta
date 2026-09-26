@@ -1,0 +1,6 @@
+label=bad
+expect=scope
+about=a one-ticket feature commit that also carries an unrelated change to a different subsystem's notification text (a second ticket's work bundled in)
+invariant=a change bundling work unrelated to its stated ticket is a scope finding
+requires=diff,commit-msg
+since=dnd-529

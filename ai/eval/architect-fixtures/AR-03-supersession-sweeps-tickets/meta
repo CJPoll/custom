@@ -1,0 +1,10 @@
+# AR-03 — a supersession sweeps every ticket body that restates the removed
+# mechanism (Todo and In Progress alike), not only the design doc.
+# Stub-render check (DND-529, 2026-09-26, --runs 3): passes 3/3 on a one-line
+# stub render too (ambient ~/dev/custom/CLAUDE.md carries the sweep rule), so
+# it catches an INVERTED rule, not a deleted one.
+invariant = a supersession sweeps every ticket body that restates the removed mechanism, not just the design
+home      = resident (A supersession sweeps the tickets, not just the design)
+mode      = next-action
+expect_action = notion.update-ticket-body:DND-960
+expect_action = notion.update-ticket-body:DND-961
