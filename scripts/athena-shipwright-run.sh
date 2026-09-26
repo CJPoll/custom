@@ -647,10 +647,15 @@ stale_dirt_track() {
     rm -f "${err}"
   fi
 
-  tmp="$(mktemp "${STALE_DIRT_STATE}.XXXXXX")" && {
-    printf 'signature=%s\nfirst_seen=%s\nstreak=%s\nalerted=%s\n' "${sig}" "${first}" "${streak}" "${alerted}" >"${tmp}"
-    mv -f "${tmp}" "${STALE_DIRT_STATE}"
-  }
+  # A failed state write must stay a yield (exit 0), so it is loud instead of
+  # tripping errexit. Losing it only restarts the streak, or repeats an alert.
+  if ! { tmp="$(mktemp "${STALE_DIRT_STATE}.XXXXXX")" \
+         && printf 'signature=%s\nfirst_seen=%s\nstreak=%s\nalerted=%s\n' "${sig}" "${first}" "${streak}" "${alerted}" >"${tmp}" \
+         && mv -f "${tmp}" "${STALE_DIRT_STATE}"; }; then
+    [ -z "${tmp:-}" ] || rm -f "${tmp}"
+    echo "athena-shipwright: could not save the stale-dirt state ${STALE_DIRT_STATE}; the streak restarts next tick, and an alert already sent may repeat." >&2
+    echo "  Fix: check that $(dirname -- "${STALE_DIRT_STATE}") is writable and the disk is not full." >&2
+  fi
 
   [ -z "${name}" ] || printf 'alert: harness-alerts %s\n' "${name}" >>"${record}"
 
