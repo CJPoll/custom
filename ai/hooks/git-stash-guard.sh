@@ -118,8 +118,9 @@
 # docker/gh payloads and python/ruby heredocs with brackets and braces are
 # allowed. Data mode FAILS CLOSED: a payload is data only when every
 # command word in its text is a known non-runner (a data tool, a text or
-# file utility, a keyword, an interpreter; git, gh and glab only with a
-# read-only subcommand; sed only without an `e` command). Any other command
+# file utility, a keyword, an interpreter; git, gh, glab and docker only
+# with a read-only subcommand and, for git, no option that names or turns
+# on a program; sed only without an `e` command). Any other command
 # word, a script by path or bare name included, makes it EXEC and read in
 # full, as are: a runner anywhere in the text (sh/bash/zsh -c, eval,
 # source, xargs, watch, ssh, su, sudo, env -S, trap, alias, tmux, vim -c,
@@ -136,7 +137,9 @@
 #   `git $S`) inside data that something in the same call evaluates anyway
 #   (an interpreter string such as `python3 -c` / `awk system()`, a
 #   variable a program reads as a command such as GIT_SSH_COMMAND, a
-#   string a shell builtin re-evaluates) was caught before and is not now.
+#   string a shell builtin re-evaluates, a script named by a config FILE
+#   written in the same call and run by a read-only git) was caught before
+#   and is not now.
 #   It needs both an evaluator the exec lists miss and a spelling that
 #   hides the verb.
 #
@@ -847,7 +850,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # attribute evaluates arithmetic, which in bash runs a `$(...)` inside
   # an array subscript).
   function safe_word(t) {
-    return t ~ /^(jq|yq|gojq|awk|gawk|mawk|nawk|grep|egrep|fgrep|rg|curl|wget|echo|printf|cat|tac|head|tail|sort|uniq|wc|cut|tr|tee|column|paste|join|comm|diff|cmp|ls|stat|file|date|basename|dirname|realpath|readlink|test|true|false|cd|pushd|popd|export|unset|set|shift|sleep|mkdir|rmdir|touch|cp|mv|rm|ln|chmod|python|python3|ruby|perl|node|xxd|od|base64|sha1sum|sha256sum|md5sum|bc|expr|seq|nl|fold|fmt|rev|iconv|uname|hostname|whoami|id|pwd|which|type|command|builtin|nohup|time|noglob|nocorrect|mktemp|du|df|ps|pgrep|printenv|read|wait|return|exit|break|continue|docker|if|then|else|elif|fi|for|while|until|do|done|case|esac|!|-|:)$/ \
+    return t ~ /^(jq|yq|gojq|awk|gawk|mawk|nawk|grep|egrep|fgrep|rg|curl|wget|echo|printf|cat|tac|head|tail|sort|uniq|wc|cut|tr|tee|column|paste|join|comm|diff|cmp|ls|stat|file|date|basename|dirname|realpath|readlink|test|true|false|cd|pushd|popd|export|unset|set|shift|sleep|mkdir|rmdir|touch|cp|mv|rm|ln|chmod|python|python3|ruby|perl|node|xxd|od|base64|sha1sum|sha256sum|md5sum|bc|expr|seq|nl|fold|fmt|rev|iconv|uname|hostname|whoami|id|pwd|which|type|command|builtin|nohup|time|noglob|nocorrect|mktemp|du|df|ps|pgrep|printenv|read|wait|return|exit|break|continue|if|then|else|elif|fi|for|while|until|do|done|case|esac|!|-|:)$/ \
       || t == "[\001" || t == "[\001[\001" || t == "{\001" || t == "}"
   }
   # gh_read(W, SB, n, k): the gh or glab at word k runs a read-only
@@ -869,20 +872,42 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     if (c1 ~ /^(label|cache|secret|variable)$/) return c2 ~ /^(list|get)$/
     return 0
   }
+  # docker_read(W, SB, n, k): the docker at word k only reads (ps, inspect,
+  # images, logs, ...). exec, run, compose run and the rest run commands.
+  function docker_read(W, SB, n, k,    j, c1, c2) {
+    c1 = ""; c2 = ""
+    for (j = k + 1; j <= n && !SB[j]; j++) {
+      if (W[j] ~ /^-/) continue
+      if (c1 == "") c1 = W[j]; else { c2 = W[j]; break }
+    }
+    if (c1 ~ /^(ps|inspect|images|logs|stats|version|info|top|port|diff|history|events)$/) return 1
+    if (c1 ~ /^(container|image|network|volume|context)$/) return c2 ~ /^(ls|list|inspect|logs|ps)$/
+    if (c1 == "compose") return c2 ~ /^(ps|logs|config|images|ls|top|port|version)$/
+    return 0
+  }
   # git_read(W, SB, n, k): the git at word k runs a read-only subcommand
   # that runs no alias, hook or configured command from the text: a
   # builtin reader, or a listing form of branch, tag, stash, worktree,
   # remote or config (DND-799 batch 7: `git branch -a | grep -E ...`).
-  # A command git runs from argv (`-c core.pager=...`, `--upload-pack=`)
-  # is a quoted word in the git command, read as exec by git_in_cmd.
+  # Options are allowlisted too (critic round 5): before the subcommand
+  # only -C <dir>, --no-pager, -P and the pathspec switches; any other
+  # global option (`-c core.fsmonitor=./p.sh`, --exec-path, --config-env,
+  # --git-dir) makes it exec, and so does an option after the subcommand
+  # that names a program or turns on a configured one (--upload-pack,
+  # --receive-pack, --exec, -O / --open-files-in-pager, --ext-diff,
+  # --textconv, --show-signature, --config). A program git reads from a
+  # config FILE written in the same call is the header RESIDUAL.
   function git_read(W, SB, n, k,    j, sc, a, lst, mut, nonopt) {
     for (j = k + 1; j <= n && !SB[j]; ) {
-      if (two_word(W[j])) { j += 2; continue }
-      if (W[j] ~ /^-/) { j++; continue }
+      if (W[j] == "-C") { j += 2; continue }
+      if (W[j] ~ /^(--no-pager|-P|--no-optional-locks|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs)$/) { j++; continue }
+      if (W[j] ~ /^-/) return 0
       break
     }
     if (j > n || SB[j]) return 1
     sc = W[j]
+    for (a = j + 1; a <= n && !SB[a]; a++)
+      if (W[a] ~ /^(--upload-pack|--receive-pack|--exec|-O|--open-files-in-pager|--ext-diff|--textconv|--show-signature|--config|-c$)/) return 0
     if (sc ~ /^(log|status|diff|show|rev-parse|ls-files|ls-tree|ls-remote|grep|blame|for-each-ref|describe|shortlog|cat-file|merge-base|rev-list|name-rev|show-ref|count-objects|var|help|version|whatchanged|range-diff|cherry|diff-tree|diff-files|diff-index)$/) return 1
     lst = 0; mut = 0; nonopt = 0
     for (a = j + 1; a <= n && !SB[a]; a++) {
@@ -933,6 +958,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (t == "git") { if (!git_read(W, SB, n, k)) return 1; continue }
       if (t == "sed" || t == "gsed") { if (sed_runs(W, SB, n, k)) return 1; continue }
       if (t == "gh" || t == "glab") { if (!gh_read(W, SB, n, k)) return 1; continue }
+      if (t == "docker") { if (!docker_read(W, SB, n, k)) return 1; continue }
       if (!safe_word(t)) return 1
     }
     return 0

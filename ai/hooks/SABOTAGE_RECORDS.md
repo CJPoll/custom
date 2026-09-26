@@ -790,13 +790,14 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (critic rounds 1-4 and admiral batch 7):** `RESULT: 515 passed,
-  0 failed` / `VERDICT: PASS`.
+- **After (critic rounds 1-5 and admiral batches 7-8):** `RESULT: 526
+  passed, 0 failed` / `VERDICT: PASS`.
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
-`RESULT: 468 passed, 47 failed`. The 47 failures, every one an allow case
-or the deny-text check (QA54-QA56 added in round 4 fail on base too):
+`RESULT: 475 passed, 51 failed`. The 51 failures, every one an allow case
+or the deny-text check (QA54-QA58 and QA61-QA62, added in rounds 4-5 and
+batch 8, fail on base too):
 
 ```
 QA2 QA3 QA4 QA5 QA6 QA7 QA8 QA10 QA11 QA12 QA13 QA14 QA15 QA16 QA17 QA18
@@ -836,6 +837,8 @@ are regression guards.
 | S-DND799-17 | `git_read()` always true (every git subcommand read-only) | QX26, QX48, QX65-QX67 — `503 passed, 5 failed` |
 | S-DND799-18 | `gh_read()` always true (any gh/glab command read-only) | QX50, QX68 `gh pr checkout`, QX71 `gh pr merge` — `512 passed, 3 failed` |
 | S-DND799-19 | `git tag` judged by the branch listing flags again | QX69 `git tag -a` (editor), QX70 `git tag -v` (gpg) — `513 passed, 2 failed` |
+| S-DND799-20 | git options skipped unchecked again (round-4 `git_read()`) | QX72 `-c core.fsmonitor=./p.sh status`, QX73 `-c diff.external`, QX74 `--upload-pack=`, QX75 `--exec-path` — `518 passed, 4 failed` |
+| S-DND799-21 | `docker_read()` always true (docker any subcommand read-only) | QX76 `... \| docker run -i img at now` — `521 passed, 1 failed` |
 
 ### Critic rounds
 
@@ -863,3 +866,16 @@ are regression guards.
   list class as rounds 1-2. Swept both lists at the root: gh/glab are
   judged by a read-only (command, subcommand) pair (`gh_read()`), and
   `git tag` lists only bare or with `-l`/`--list` (rows 18, 19).
+- **Round 5 (5b8edbe), git options unchecked.** `git_read()` skipped every
+  option before the subcommand, so `git -c core.fsmonitor=./p.sh status`
+  (an unquoted program path, so not a quoted word `git_in_cmd` sees) was a
+  read. Kind 1, same list class. Swept at the root: git options are
+  allowlisted before the subcommand (-C, --no-pager, -P, pathspec
+  switches), and program-naming options after it make the text exec; the
+  critic's docker note went the same way (`docker_read()`). The
+  `git_in_cmd` comment that credited it with argv programs was removed.
+  Deleting the git/gh/docker read lists was priced and rejected: it
+  would put back the batch-7 false positives (`git branch -a | grep -E`,
+  `gh pr view -q`, `docker ps --format`), the main friction this ticket
+  exists to remove. What stays out of reach is the header RESIDUAL
+  (rows 20, 21).

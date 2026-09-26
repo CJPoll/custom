@@ -866,6 +866,26 @@ case_cmd "QA54. gh pr view with a jq filter stays allowed" allow "gh pr view 3 -
 case_cmd "QA55. git tag --list piped to sort stays allowed" allow "git tag --list 'v*' | awk '{print \$1}' | sort -V"
 case_cmd "QA56. gh run view piped to a grep alternation stays allowed" allow "gh run view 5 --log | grep -E 'FAIL|(error|panic)[:]'"
 
+# QX72+: critic round 5. git options are allowlisted too: an unquoted -c
+# or program-naming option under a read subcommand makes the text exec.
+case_cmd "QX72. git -c core.fsmonitor=<script> status" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; chmod +x p.sh; git -c core.fsmonitor=./p.sh status"
+case_cmd "QX73. git -c diff.external=<script> diff" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; git -c diff.external=./p.sh diff"
+case_cmd "QX74. git ls-remote --upload-pack=<script>" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; git ls-remote --upload-pack=./p.sh ."
+case_cmd "QX75. git --exec-path before a read subcommand" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > d/git-log; git --exec-path=d log"
+case_cmd "QX76. data piped to docker run (runs a command)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' | docker run -i img at now"
+case_cmd "QA57. git -C <dir> log piped to awk stays allowed" allow "git -C /tmp/w log --oneline -5 | awk '{print \$1}'"
+case_cmd "QA58. git --no-pager log piped to a grep alternation stays allowed" allow "git --no-pager log --oneline | grep -E 'DND-(7[0-9]{2}|8[0-9]{2})'"
+
+# QA59+: the harness batch of 2026-09-26 22:24Z (admiral): `$_`, `#{...}`
+# and brackets inside quoted text.
+case_cmd "QA59. perl -ne with \$_ and a class" allow "perl -ne 'print \$_ if /x[0-9]+ (a|b)/' f"
+case_cmd "QA60. ruby -e with #{...} and brackets" allow "ruby -e 'puts \"#{ARGV[0]} [#{ARGV[1]}]\"' a b"
+case_cmd "QA61. quoted prose with \$_, #{x} and [y]" allow "printf '%s\\n' 'uses \$_ and #{x} [y] {z}' | grep -c '#{'"
+case_cmd "QA62. python heredoc with f-string braces and brackets" allow "python3 - <<'EOF'
+xs = {'a': [1]}
+print(f\"{xs['a'][0]} #{1}\", [x for x in xs])
+EOF"
+
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
 case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"
