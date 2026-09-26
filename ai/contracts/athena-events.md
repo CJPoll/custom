@@ -922,9 +922,11 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `ticket_number` | string | scalar |
 | | `revision` — OPTIONAL source-supplied provenance / ordering hint (Notion: `last_edited_time`, or finer); not a dedupe key | string | scalar |
 | | `changed_properties` (`notion.ticket.updated` only) | string | **collection** |
-| | `project_resolution` — how the ticket's project was resolved: `resolved`, `no-epic`, `no-epic-property`, `no-project` or `failed` (*A ticket's project*, below) | string | scalar |
+| | `project_resolution` — how the ticket's project was resolved: `resolved`, `no-epic`, `no-epic-property`, `no-project`, `failed` or `unavailable` (*A ticket's project*, below) | string | scalar |
 | | `project` — only when `project_resolution` is `resolved`: the project page's title | string | scalar |
 | | `project_id` — only when `project_resolution` is `resolved`: the project page's id, dashed and lower case | string | scalar |
+| | `epic_id` — only when `project_resolution` is `unavailable`: the epic page's id, dashed and lower case, the page the priority index re-reads from | string | scalar |
+| | `database_id` — only when `project_resolution` is `unavailable`: the database of the binding the event was enriched under, whose read-only enrichment token reads the hops | string | scalar |
 | `notion.ticket.deleted` (the **un-enriched** delete type — the entity may already be unfetchable, so it carries identity only) | `entity_id` — stable source entity handle | string | scalar |
 | | `revision` — OPTIONAL provenance from the deletion event (not an enrichment fetch); not a dedupe key | string | scalar |
 | `notion.comment.created`, `notion.comment.updated` (the **enriched** comment types) | `entity_id` — stable source entity handle | string | scalar |
@@ -978,13 +980,31 @@ outcome into the payload:
   database has no `Epic` property at all. `no-project`: the epic's `Project`
   relation is empty or absent. Each is a legitimate absence, and neither
   project field is present.
-- `failed`: the project could not be known. A read of the epic or the project
-  failed for any cause after the retry budget (a 404 here is the epic or
-  project being unreadable, never a deletion of the ticket), a relation names
-  more than one page or is truncated, an id is malformed, or the project page
-  is untitled. The ingress logs the ticket's `entity_id`, the reason and a
-  `Fix:`, and still emits the ticket: its own fields were enriched, only its
-  project is unknown. Neither project field is present.
+- `failed`: the project cannot be known. A read of the epic or the project
+  failed permanently (a `401`/`403`, a `404`/`410`, or any other `4xx`; a 404
+  here is the epic or project being unreadable, never a deletion of the
+  ticket), a relation names more than one page or is truncated, an id is
+  malformed, or the project page is untitled. The ingress logs the ticket's
+  `entity_id`, the reason and a `Fix:`, and still emits the ticket: its own
+  fields were enriched, only its project is unknown. Neither project field is
+  present.
+- `unavailable` (DND-797): the project is not known yet. A read of the epic or
+  the project failed only transiently (a `429`, a `5xx` or a transport error)
+  after the retry budget. `epic_id` names the epic (dashed, lower case) and
+  `database_id` names the database of the binding the event was enriched
+  under, so the priority index can re-read the project later under the same
+  token (*Domain and owner-only items*). Neither project field is present. The
+  ingress logs the ticket's `entity_id`, the epic, the reason and a `Fix:`, and
+  still emits the ticket. Every emitter passes its binding's database, and an
+  `unavailable` payload with no non-empty `database_id` cannot be built.
+
+**Later (2026-09-26):** this list had five outcomes, and `failed` covered an
+epic or project read that failed "for any cause", a transient one included.
+Superseded by DND-797 (gen_saas #426): a transient read now resolves
+`unavailable` and names `epic_id` and `database_id`, while `failed` keeps only
+the permanent causes. The priority index turned `failed` into a terminal
+`project-unresolved`, and the stored payload never changes, so one Notion
+blip dropped the ticket's update until its next edit or a backfill.
 
 The relations are read **by property name** (`Epic`, `Project`), never by
 type: a ticket database has other relations (`Depends On`, `Blocks`) that are
@@ -994,7 +1014,7 @@ priority index's one-shot backfill (DND-436) resolve a page exactly this way,
 so every
 `notion.ticket.created`, `.updated` and `.undeleted` event carries
 `project_resolution`. `notion.ticket.deleted` and the comment types carry none
-of the three fields. The Epics and Projects databases must be readable by the
+of these fields. The Epics and Projects databases must be readable by the
 enrichment integration; if they are not, every ticket with an epic reads
 `failed`, which the priority index reports (*Domain and owner-only items*).
 
@@ -4764,6 +4784,8 @@ app the event arrived on, never from the payload.
 - **A supervised sweeper drains the obligations**, and wraps each one in
   `Athena.PerRow.run/2`. One failing obligation never stops the others, and the
   next pass still runs. A transient failure is retried under a bounded budget.
+  A personal ticket whose project stays `unavailable` is one (*Domain and
+  owner-only items*).
 - **Each obligation ends in exactly one outcome:**
   - `indexed`: an item was created, updated or closed;
   - `skipped:<cause>`: the event is legitimately not an item. The causes are
@@ -5021,7 +5043,8 @@ desired state* uses. It is derived per source, and `domain_basis` records how:
   `no-epic-property`, `no-project`), the domain is `personal` and the basis is
   `source-default`, and the page shows that basis. When `project_resolution`
   is `failed` or absent, the event fails `project-unresolved` and is not
-  indexed: an unknown domain is never read as `personal`.
+  indexed: an unknown domain is never read as `personal`. When it is
+  `unavailable`, the project is re-read first (below).
 
   **Later (2026-09-26):** this bullet read "an `Athena -` project is `blend`",
   decided by the project's name, and said the ticket payload had no project
@@ -5034,6 +5057,45 @@ desired state* uses. It is derived per source, and `domain_basis` records how:
 
 `project` is the ticket's project name when its resolution is `resolved`, and
 `null` otherwise.
+
+**An `unavailable` project is re-read, not failed** (DND-797). Before the
+index maps a `notion_personal` `notion.ticket.created`, `.updated` or
+`.undeleted` event whose `project_resolution` is `unavailable`, it re-reads the
+project from the payload's `epic_id` (`Athena.NotionEvents.resolve_ticket_project/4`).
+The re-read makes one attempt per obligation attempt and never sleeps. Its
+result replaces the payload's project fields for that attempt only; the stored
+event is never rewritten. The outcome:
+
+- still `unavailable` (the read failed transiently again, or the owner's
+  enrichment token did not decrypt): the obligation is retried and stays
+  pending. The obligation's backoff is the only retry, and when its budget runs
+  out the obligation fails `retries-exhausted` (*At-least-once, row by row*).
+- `resolved` or `no-project`: mapped as above.
+- `failed` (a permanent read failure, or the access check below refuses the
+  read): the event fails `project-unresolved`, recorded and reported.
+
+**Who may re-read, and what.** The re-read runs only for the obligation's
+owner, the owner the ingress stamped on the event, never an owner read from the
+payload. It runs only when the payload's `database_id` is the database of one
+of that owner's `:ticket` bindings that is enabled, bound to the obligation's
+source, and on an `:active` subscription of the same owner
+(`DatabaseBindingStore.list_indexed/2`). It reads under that owner's read-only
+enrichment token scoped to that database. Anything else is denied: another
+owner, source or database reads nothing and resolves `failed`, logged with a
+`Fix:` that names re-binding the database. An owner with no stored enrichment
+token for the database also resolves `failed`.
+
+**A malformed pointer is refused before any read.** An `unavailable` payload
+must carry an `epic_id` that is a Notion page id and a non-blank `database_id`.
+Otherwise nothing is read, and the event fails `malformed-payload`, naming the
+bad fields. The mapper applies this check to every Notion source.
+
+Only `notion_personal` re-reads. Its domain depends on the project; the other
+Notion sources (`notion_work`, `action_item`) take their domain from the
+source, so an `unavailable` project there is indexed without a project, as a
+`failed` one is. The one-shot backfill (DND-436) maps each page with no
+obligation, so it does not re-read: an `unavailable` page is counted in the
+report's `failed` count and logged, and the next backfill run reads it again.
 
 **`owner_only`** marks an item only the owner can act on. It is never
 leasable. It is true for:
