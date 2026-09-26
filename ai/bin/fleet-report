@@ -29,7 +29,24 @@ Subcommands (flags may come in any order):
                                                     the server classifies the run's
                                                     domain)
   admiral-seen   --agent-id ID [--agent-type T]     admiral_seen
-  admiral-state  --run-id R --state draining|drained|finished   admiral_state
+  admiral-state  --run-id R --state draining|drained|finished|parked   admiral_state
+                                                    (parked: stopped at a usage ceiling
+                                                    or on a park request; resumable)
+
+Lifecycle subcommands (DND-560; sent by ai/hooks/fleet-lifecycle.sh, and by
+ai/hooks/fleet-drain-guard.sh for spawn_denied). T is athena-admiral or
+athena-captain; no flag can carry prompt or description text:
+  agent-spawn  --tool-use-id U --subagent-type T --mapping mapped|unmapped|not_applicable
+               [--caller-agent-id ID] [--ticket-ref REF] [--run-hint R]   agent_spawn
+               (not_applicable exactly for an admiral; --ticket-ref exactly with
+               mapped, matching ^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,6}$)
+  agent-bound  --tool-use-id U --agent-id ID --agent-type T              agent_bound
+  agent-start  --agent-id ID --agent-type T                              agent_start
+  agent-end    (--agent-id ID | --tool-use-id U) --agent-type T --outcome O
+               [--error-class C]                                         agent_end
+               (O: stopped|api_error by --agent-id, spawn_failed|spawn_denied by
+               --tool-use-id; --error-class exactly with api_error/spawn_failed,
+               and a class outside the contract's list is sent as other)
 
 Common flags:
   --session-id S   top-level Claude session id (default: $CLAUDE_CODE_SESSION_ID,
@@ -90,6 +107,7 @@ trap 'exit 143' TERM INT HUP
 
 sub="" session_id="${CLAUDE_CODE_SESSION_ID:-}" cwd="${PWD}" agent_id="" agent_type="" run_id=""
 missions_file="" state="" scope_label="" reason="" notion_project_id="" dry_run="" given=" "
+tool_use_id="" subagent_type="" caller_agent_id="" mapping="" ticket_ref="" run_hint="" outcome="" error_class=""
 
 # need_value FLAG [NEXT...] -- a value flag needs a value that is not the next
 # flag (`--session-id --cwd /x` used to read "--cwd" as the session id), and no
@@ -119,6 +137,14 @@ while [ "$#" -gt 0 ]; do
     --scope-label) need_value "$@"; scope_label="$2"; given="${given}scope-label "; shift 2 ;;
     --reason)      need_value "$@"; reason="$2"; given="${given}reason "; shift 2 ;;
     --notion-project-id) need_value "$@"; notion_project_id="$2"; given="${given}notion-project-id "; shift 2 ;;
+    --tool-use-id)     need_value "$@"; tool_use_id="$2"; given="${given}tool-use-id "; shift 2 ;;
+    --subagent-type)   need_value "$@"; subagent_type="$2"; given="${given}subagent-type "; shift 2 ;;
+    --caller-agent-id) need_value "$@"; caller_agent_id="$2"; given="${given}caller-agent-id "; shift 2 ;;
+    --mapping)         need_value "$@"; mapping="$2"; given="${given}mapping "; shift 2 ;;
+    --ticket-ref)      need_value "$@"; ticket_ref="$2"; given="${given}ticket-ref "; shift 2 ;;
+    --run-hint)        need_value "$@"; run_hint="$2"; given="${given}run-hint "; shift 2 ;;
+    --outcome)         need_value "$@"; outcome="$2"; given="${given}outcome "; shift 2 ;;
+    --error-class)     need_value "$@"; error_class="$2"; given="${given}error-class "; shift 2 ;;
     --dry-run)     once "$1"; dry_run=1; shift ;;
     -*)            die_usage "unknown flag $1" ;;
     *)
@@ -149,7 +175,19 @@ fleet_valid_id "${session_id}" || die_usage "session id ${session_id@Q} is not a
   die_usage "--notion-project-id ${notion_project_id@Q} is not a Notion page id" \
     "pass the Project page's id: 32 hex digits, bare or dashed (e.g. 3e2349da-87fb-81ac-a4f5-ff241e915946), not a URL."
 
+for pair in "tool-use-id:${tool_use_id}" "caller-agent-id:${caller_agent_id}" "run-hint:${run_hint}"; do
+  v="${pair#*:}"
+  [ -z "${v}" ] || fleet_valid_id "${v}" || die_usage "--${pair%%:*} ${v@Q} is not a valid id" \
+    "pass the value exactly as the hook stdin carries it (letters, digits, . _ -; a run hint is a coordination directory name)."
+done
+
 require() { [ -n "$2" ] || die_usage "${sub} needs --$1"; }
+
+# lifecycle_refused <problem> -- a combination the contract's closed schema refuses.
+lifecycle_refused() {
+  die_usage "${sub} refused: $1" \
+    "send the combination athena-events.md -> Fleet report kinds and their closed schema allows (fleet-report --help lists it)."
+}
 
 case "${sub}" in
   session-start)
@@ -194,6 +232,33 @@ case "${sub}" in
       "use one of: ${FLEET_ADMIRAL_STATES} (running is set by admiral-start)."
     body="$(fleet_body_admiral_state "${session_id}" "${run_id}" "${state}")"
     kind=admiral_state ;;
+  agent-spawn)
+    allowed_flags "tool-use-id subagent-type caller-agent-id mapping ticket-ref run-hint"
+    require tool-use-id "${tool_use_id}"; require subagent-type "${subagent_type}"; require mapping "${mapping}"
+    problem="$(fleet_agent_spawn_problem "${subagent_type}" "${mapping}" "${ticket_ref}")" || lifecycle_refused "${problem}"
+    body="$(fleet_body_agent_spawn "${session_id}" "${tool_use_id}" "${subagent_type}" "${caller_agent_id}" "${mapping}" "${ticket_ref}" "${run_hint}")"
+    kind=agent_spawn ;;
+  agent-bound)
+    allowed_flags "tool-use-id agent-id agent-type"
+    require tool-use-id "${tool_use_id}"; require agent-id "${agent_id}"; require agent-type "${agent_type}"
+    fleet_is_fleet_worker "${agent_type}" || lifecycle_refused "agent_type ${agent_type@Q} is not a fleet worker (${FLEET_WORKER_TYPES})"
+    body="$(fleet_body_agent_bound "${session_id}" "${tool_use_id}" "${agent_id}" "${agent_type}")"
+    kind=agent_bound ;;
+  agent-start)
+    allowed_flags "agent-id agent-type"
+    require agent-id "${agent_id}"; require agent-type "${agent_type}"
+    fleet_is_fleet_worker "${agent_type}" || lifecycle_refused "agent_type ${agent_type@Q} is not a fleet worker (${FLEET_WORKER_TYPES})"
+    body="$(fleet_body_agent_start "${session_id}" "${agent_id}" "${agent_type}")"
+    kind=agent_start ;;
+  agent-end)
+    allowed_flags "agent-id tool-use-id agent-type outcome error-class"
+    require agent-type "${agent_type}"; require outcome "${outcome}"
+    # An unlisted class is mapped, not refused (contract: a Claude Code upgrade
+    # that adds a class never gets a report refused).
+    [ -z "${error_class}" ] || error_class="$(fleet_error_class "${error_class}")"
+    problem="$(fleet_agent_end_problem "${agent_id}" "${tool_use_id}" "${agent_type}" "${outcome}" "${error_class}")" || lifecycle_refused "${problem}"
+    body="$(fleet_body_agent_end "${session_id}" "${agent_id}" "${tool_use_id}" "${agent_type}" "${outcome}" "${error_class}")"
+    kind=agent_end ;;
   *) die_usage "unknown subcommand ${sub@Q}" ;;
 esac
 

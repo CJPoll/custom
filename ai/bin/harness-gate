@@ -69,6 +69,10 @@ STATIC_CHECKS = [
   # matrix is a dedicated .self-test.sh; the fleet-control suite
   # (ai/lib/fleet/test/control/self-test.sh) is discovered, not declared.
   ["fleet-drain-guard self-test", %w[ai/hooks/fleet-drain-guard.self-test.sh]],
+  # fleet-lifecycle (DND-560): the PreToolUse/PostToolUse/PostToolUseFailure
+  # (Agent|Task), SubagentStart/Stop and StopFailure lifecycle reporter. Replays
+  # DND-541's measured payloads against the loopback fake server (never prod).
+  ["fleet-lifecycle hook self-test", %w[ai/hooks/fleet-lifecycle.self-test.sh]],
   ["athena-inbox-poll self-test", %w[ai/hooks/athena-inbox-poll.self-test.sh]],
   # flaky-marker-sweep is a SessionStart side-effect hook (DND-277): it ages out
   # a >12h-stale flaky-coordinator marker, independent of lane activity. Its
@@ -227,6 +231,7 @@ INLINE_SELF_TEST_COVERED_BY = {
   "ai/bin/fleet-resume"          => "ai/lib/fleet/test/resume/self-test.sh",
   "ai/bin/test-slot"             => "ai/test/test-slot/self-test.sh",
   "ai/hooks/fleet-drain-guard.sh"     => "ai/hooks/fleet-drain-guard.self-test.sh",
+  "ai/hooks/fleet-lifecycle.sh"       => "ai/hooks/fleet-lifecycle.self-test.sh",
   "ai/hooks/fleet-report.sh"          => "ai/hooks/fleet-report.self-test.sh",
   "ai/hooks/inbox-untrusted-guard.sh" => "ai/hooks/inbox-untrusted-guard.self-test.sh",
   "ai/hooks/workflow-phase-guard.sh"  => "ai/hooks/workflow-phase-guard.self-test.sh",

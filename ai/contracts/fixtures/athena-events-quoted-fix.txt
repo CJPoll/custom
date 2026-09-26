@@ -53,6 +53,8 @@ Fix: fleet session <claude_session_id> is draining (<reason>, until <until>; bas
 @section Mission pointers are metadata only
 # the unmapped-captain notice the lifecycle hook prints as PreToolUse
 # additionalContext (no permissionDecision: the spawn proceeds).
-# NOT YET EMITTED: DND-560 ships ai/hooks/fleet-lifecycle.sh and pins its side in
-# ai/hooks/fleet-lifecycle.self-test.sh. No gen_saas side.
+# EMITTED (DND-560) by ai/hooks/fleet-lifecycle.sh through fleet_unmapped_notice
+# in ai/lib/fleet/domain.sh. ai/lib/fleet/test/self-test.sh asserts the function
+# equals this line, and ai/hooks/fleet-lifecycle.self-test.sh asserts the hook
+# prints it. No gen_saas side.
 fleet-lifecycle: this athena-captain spawn names no ticket, so the fleet page shows it as an unmapped captain. Fix: start the Agent description with the Mission's ticket ref (for example DND-541 captain) and put a line of the form Mission: DND-541 in the brief.

@@ -3933,10 +3933,14 @@ DND-541 adds hook-driven agent lifecycle and per-run aging. Its tickets are
 DND-556 (this amendment), DND-557 (per-run aging), DND-558 (lifecycle ingest),
 DND-559 (fleet page rendering), DND-560 (`ai/hooks/fleet-lifecycle.sh`, the
 `ai/bin/fleet-report` lifecycle subcommands and the drain guard's
-`spawn_denied` report) and DND-561 (the admiral skills). None of them has
-shipped. Every sentence about the four lifecycle kinds, `admiral_state`
-`parked`, *Agent lifecycle*, hook missions and per-run aging is an obligation on
-the ticket that builds it, not a description of shipped behaviour.
+`spawn_denied` report) and DND-561 (the admiral skills). DND-557, DND-558 and
+DND-559 have shipped in gen_saas. DND-560's harness side is in this repository.
+Its `spawn_denied` report is live wherever the drain guard is already wired. A
+machine sends the other lifecycle reports only once `scripts/setup-hooks
+--install` has wired `ai/hooks/fleet-lifecycle.sh` there, an owner-gated step;
+until then that machine keeps the DND-433 rule (*Who sends what*). DND-561 has
+not shipped, so every sentence about the admiral's reports as enrichment is its
+obligation, not a description of shipped behaviour.
 
 ### Fleet reports are state upserts, not events
 
@@ -4290,7 +4294,10 @@ locally, and never sends the Agent tool's description or prompt:
    `mapped` with that ref. Two or more are ambiguous and give `unmapped`,
    never a guess; the prompt is not consulted. None goes to step 2.
 2. The first prompt line of the form `Mission: <REF>`, with optional markdown
-   bold around `Mission`, gives `mapped` with that ref.
+   bold around `Mission`, gives `mapped` with that ref. The line may start with
+   whitespace and may go on after the ref (`Mission: DND-541 (MEDIUM)`); the
+   ref must be word-bounded and match the grammar, and a line whose ref does
+   not is not of this form.
 3. Otherwise `unmapped`.
 
 An admiral spawn carries `mapping: not_applicable`. A ref is only ever
