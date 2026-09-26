@@ -106,9 +106,14 @@ concurrent session's `hypr/hyprland.conf` edit AND a 230-line
 `hyprland.conf.bak-*`, landing them under commit `ce70e04`, whose message was
 entirely about harness-gate self-tests; that session had to push a corrective
 commit. It is also how an unrelated in-flight change gets *attributed* to you
-in `git log`. If the helper reports paths dirty outside your commit, that is
+in `git log` — the audit trail the "commit only what you changed" invariant
+relies on. If the helper reports paths dirty outside your commit, that is
 someone else's work: leave it exactly as it is — do not `git add` it, do not
-`git restore` it, and do not mention it in your message.
+`git restore` it, and do not mention it in your message. When cron starts you,
+the runner has already yielded the tick rather than begin on a dirty MAIN
+CHECKOUT — dirt there means a person is live in the repository, so your own
+lane is freshly created from `origin/main` and always clean. Started by hand
+you get no such check, so in a dirty tree the rule applies harder, not less.
 
 Append a journal entry (format in the agent template). Advance `cursor.txt`
 only after all of a run's qualifying patterns are handled — write it as the

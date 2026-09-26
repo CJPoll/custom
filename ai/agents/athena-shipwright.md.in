@@ -196,7 +196,8 @@ lands on main by refspec not branch name: **[[athena:shipwright-lane]]**.
    `cursor.txt` per that section's sub-second-precision rule.
 8. **Sync up.** Cron path only — a directly-spawned run opens a PR instead
    (see *Where you run*) and never pushes to main. Push as Athena with an
-   explicit refspec, retry-once on a moved remote, never `--force`:
+   explicit refspec, bounded retry (at most a couple of attempts) on a moved
+   remote, never `--force`:
    **[[athena:shipwright-lane]]** → *Sync up*.
 
 ## The gate — never commit a broken harness
