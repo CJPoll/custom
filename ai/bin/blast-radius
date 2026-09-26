@@ -535,6 +535,32 @@ end
 #                 quoted string matches no pattern.
 CHANGED_PATHS_ARGS = %w[diff --no-renames -z --name-only].freeze
 
+# Resolve a --base/--head ref to its commit SHA ONCE, up front in `run` (DND-751).
+# `short(sha) = sha.to_s[0,7]` is a plain string truncation, never a git call --
+# it cannot tell a resolved SHA from a symbolic ref, so a caller passing `HEAD`
+# or a branch name straight through had it echoed back verbatim on the verdict
+# line ("BLAST-RADIUS COLD HEAD") instead of naming the commit judged. That is
+# this file's own doctrine (~/.claude/CLAUDE.md -> "A failed lookup must never
+# look like an empty one") pointed at its own output: the verdict line is a
+# claim about a SPECIFIC commit, and a ref echoed unresolved makes that claim
+# for whichever commit the ref happens to name when someone reads the line
+# later, which is not necessarily the one judged. Resolving here, once, means
+# every downstream site -- changed_files, hits_for, ci_references,
+# merge_time_automation's base side, print_report, grant_eligible -- receives
+# the same SHA the verdict is printed for. An unresolvable ref is an ERROR
+# (exit 2, Fix:), never a verdict, in EITHER mode (plain or --grant-eligible):
+# there is one resolution point, not a per-mode patch.
+def resolve_ref!(repo, flag, ref)
+  out, err, ok = git(repo, "rev-parse", "--verify", "#{ref}^{commit}")
+  unless ok
+    die("cannot resolve #{flag} '#{ref}' in #{repo} (#{err.strip}).",
+        "pass a ref that names a commit in this repo -- the SHA pair integration-gate " \
+        "printed, or a branch/tag/HEAD that resolves here. An unresolvable ref is an " \
+        "ERROR, never a verdict.")
+  end
+  out.strip
+end
+
 def changed_files(repo, base, head)
   _, _, ok = git(repo, "rev-parse", "--verify", "#{base}^{commit}")
   unless ok
@@ -1770,6 +1796,10 @@ def run(argv)
         "pass the worktree whose merge you are classifying.")
   end
 
+  # Resolve once, up front, for BOTH modes below (DND-751): see resolve_ref!.
+  base = resolve_ref!(repo, "--base", base)
+  head = resolve_ref!(repo, "--head", head)
+
   if grant_class
     if owner_approval || gate_ran
       die("--grant-eligible cannot be combined with --owner-approval or --gate-ran.",
@@ -2653,6 +2683,40 @@ def self_test
     check.call("an EMPTY diff is an ERROR (exit 2), never COLD",
                code == 2 && err.include?("EMPTY"), "exit=#{code} err=#{err}")
 
+    # 16b. `short(head)` (DND-751) is a plain string truncation
+    # (`sha.to_s[0,7]`), never a git call -- so a SYMBOLIC ref passed to
+    # --head/--base must be resolved to its commit SHA BEFORE it reaches the
+    # verdict line, or the line echoes the ref text back verbatim
+    # ("BLAST-RADIUS COLD HEAD") instead of naming the commit judged. Run
+    # inside the fixture repo itself (Dir.chdir) so `--head HEAD` resolves
+    # against a real HEAD.
+    Dir.chdir(d) do
+      out, _, code = run_br.call(["--base", b, "--head", "HEAD", "--repo", d])
+      printed = out[/^BLAST-RADIUS \S+ (\S+)/, 1]
+      check.call("--head HEAD prints the resolved commit SHA, not the literal ref text",
+                 [0, 4].include?(code) && printed && printed != "HEAD" && h.start_with?(printed),
+                 "exit=#{code} printed=#{printed.inspect} expected-prefix-of=#{h} out=#{out}")
+    end
+
+    # 16c. --grant-eligible resolves a symbolic --head the same way (the fix
+    # is one resolution point in `run`, shared by both modes, not a
+    # per-mode patch).
+    Dir.chdir(d) do
+      out, _, code = run_br.call(["--grant-eligible", "merge.pr_only_workflow", "--base", b, "--head", "HEAD",
+                                   "--repo", d])
+      printed = out[/head=(\S+)/, 1]
+      check.call("--grant-eligible --head HEAD prints the resolved commit SHA, not the literal ref text",
+                 [0, 4].include?(code) && printed && printed != "HEAD" && printed == h,
+                 "exit=#{code} printed=#{printed.inspect} expected=#{h} out=#{out}")
+    end
+
+    # 16d. An unresolvable --head (not just --base) is an ERROR (exit 2) with
+    # a Fix:, never a verdict -- mirrors case 15 for the other flag.
+    _, err, code = run_br.call(["--base", b, "--head", "deadbeef", "--repo", d])
+    check.call("an unresolvable --head is an ERROR (exit 2) with Fix:, never a verdict",
+               code == 2 && err.include?("Fix:") && err.downcase.include?("resolve"),
+               "exit=#{code} err=#{err}")
+
     # --- destructive-migration (content-gated surface) -----------------------
     #
     # This surface is the first whose predicate is the file's TEXT, not its path.
@@ -2886,26 +2950,41 @@ def self_test
                code.zero? && out.include?("BLAST-RADIUS HOT") && out.include?("destructive-migration"),
                "exit=#{code} out=#{out}")
 
-    # 2/3. manifest failure modes — a wrongly-resolved manifest must say so
+    # 2/3. manifest failure modes — a wrongly-resolved manifest must say so.
+    # These need their OWN valid ref pair rather than reusing `d`/`b`/`h`
+    # above: the `mig` lambda (used just before this block) reassigns the
+    # enclosing `d` on every call (it declares no block-local `d`), while `b`/
+    # `h` are left however an earlier, unrelated case set them -- so by this
+    # point the three name a MISMATCHED repo/SHA pair. That mismatch was
+    # invisible before DND-751 because manifest loading used to run before ref
+    # resolution; now resolve_ref! runs first (deliberately -- see its
+    # comment), so a manifest test reusing the stale pair would fail on
+    # "cannot resolve", not on the manifest defect it means to prove.
+    manifest_d = File.join(tmp, "manifest-checks")
+    manifest_b, manifest_h = mkrepo.call(manifest_d) { |r| File.write(File.join(r, "x.txt"), "x\n") }
+
     empty_manifest = File.join(tmp, "empty.json")
     File.write(empty_manifest, JSON.dump({ "schema" => MANIFEST_SCHEMA, "surfaces" => [] }))
-    _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--manifest", empty_manifest])
+    _, err, code = run_br.call(["--base", manifest_b, "--head", manifest_h, "--repo", manifest_d,
+                                 "--manifest", empty_manifest])
     check.call("a manifest with ZERO surfaces is an ERROR, not 'nothing is sensitive'",
                code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
 
     nopat = File.join(tmp, "nopat.json")
     File.write(nopat, JSON.dump({ "schema" => MANIFEST_SCHEMA, "surfaces" => [{ "class" => "x", "why" => "y", "patterns" => [] }] }))
-    _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--manifest", nopat])
+    _, err, code = run_br.call(["--base", manifest_b, "--head", manifest_h, "--repo", manifest_d, "--manifest", nopat])
     check.call("a manifest with ZERO patterns is an ERROR, not 'nothing is sensitive'",
                code == 2 && err.include?("ZERO patterns"), "exit=#{code} err=#{err}")
 
-    _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--manifest", File.join(tmp, "absent.json")])
+    _, err, code = run_br.call(["--base", manifest_b, "--head", manifest_h, "--repo", manifest_d,
+                                 "--manifest", File.join(tmp, "absent.json")])
     check.call("a MISSING manifest is an ERROR, not an empty surface list",
                code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
 
     bad_schema = File.join(tmp, "schema9.json")
     File.write(bad_schema, JSON.dump({ "schema" => 9, "surfaces" => [{ "class" => "x", "patterns" => ["*"] }] }))
-    _, err, code = run_br.call(["--base", b, "--head", h, "--repo", d, "--manifest", bad_schema])
+    _, err, code = run_br.call(["--base", manifest_b, "--head", manifest_h, "--repo", manifest_d,
+                                 "--manifest", bad_schema])
     check.call("an UNKNOWN manifest schema is refused rather than guessed at",
                code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
 
