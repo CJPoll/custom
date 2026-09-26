@@ -40,6 +40,8 @@ alias -- gstl='git stash list'
 alias -- g=git
 alias -- gsp2=gstp
 alias -- gst='git status'
+alias -g GSP='stash pop'
+alias -s stashfile='git stash apply'
 EOF
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 cat > "$GIT_CONFIG_GLOBAL" <<'EOF'
@@ -284,6 +286,14 @@ case_cmd "S5. shell alias after a separator" deny 'cd /tmp && gstp'
 case_cmd "S6. shell alias name as an argument only" allow 'echo gstp'
 case_cmd "S7. unrelated shell alias gst = git status" allow 'gst'
 case_cmd "S8. a child sh -c loads no aliases" allow "sh -c 'gstp'"
+case_cmd "Z1. zsh =git (EQUALS expansion)" deny '=git stash pop'
+case_cmd "Z2. zsh =git-stash" deny '=git-stash pop'
+case_cmd "Z3. zsh =git after env" deny 'env =git stash'
+case_cmd "Z4. zsh global alias in argument position" deny 'git GSP'
+case_cmd "Z5. zsh suffix alias" deny 'notes.stashfile'
+case_cmd "Z6. noglob precommand with a glob command word" deny 'noglob /usr/bin/g?t stash pop'
+case_cmd "Z7. = in an ordinary test expression" allow '[ a = b ] && git status'
+case_cmd "Z8. =git with a read" allow '=git stash list'
 
 echo "== A: aliases =="
 case_cmd "A1. configured alias sp = stash pop" deny 'git sp'

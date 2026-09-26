@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 194 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c, R7-R41 and I66-I77).
+- **Baseline:** `RESULT: 202 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c, R7-R41, I66-I77 and Z1-Z8).
 
 ### Fail-first (no guard)
 
@@ -539,3 +539,27 @@ RESULT: 186 passed, 8 failed
 ```
 
 After the fix: `RESULT: 194 passed, 0 failed`.
+
+### Fix round, critic round 4 (0e8c9d0): zsh-only word rewrites
+
+The critic found `=git stash pop` allowed. The Bash tool runs zsh, and zsh's
+EQUALS option (on by default; verified with `zsh -fc '[[ -o equals ]]'`)
+expands a leading `=name` to the command's path. Same class as round 6 (a word
+the shell rewrites before the command runs), zsh member. Swept the zsh-only
+rewrites: EQUALS (the tokenizer drops an unquoted leading `=` before a name),
+global aliases (`alias -g`, substituted in any word position), suffix aliases
+(`alias -s`, a `x.ext` command word), and the `noglob` / `nocorrect` / `-`
+precommand modifiers. The snapshot read now keeps `-g` and `-s` aliases (none
+exist on this machine today). The new cases against 0e8c9d0's hook:
+
+```
+FAIL  Z1. zsh =git (EQUALS expansion) (expected deny)
+FAIL  Z2. zsh =git-stash (expected deny)
+FAIL  Z3. zsh =git after env (expected deny)
+FAIL  Z4. zsh global alias in argument position (expected deny)
+FAIL  Z5. zsh suffix alias (expected deny)
+FAIL  Z6. noglob precommand with a glob command word (expected deny)
+RESULT: 196 passed, 6 failed
+```
+
+After the fix: `RESULT: 202 passed, 0 failed`.

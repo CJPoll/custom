@@ -80,6 +80,10 @@
 # into a file with the Write tool and pass the file (`git commit -F`), or use
 # the Grep tool. A miss costs the owner's saved work.
 #
+# ZSH: the Bash tool runs zsh, so zsh-only word rewrites count too: EQUALS
+# (`=git` is git's path), global aliases (`alias -g`, any word position),
+# suffix aliases (`alias -s`), and the noglob/nocorrect/- precommand modifiers.
+#
 # SHELL ALIASES: a command word that is a shell alias from the Bash tool's
 # shell snapshot (see below) is expanded and read as a command. Shell
 # FUNCTIONS from the snapshot are not read (none on this machine names stash).
@@ -147,9 +151,9 @@ SHALIASES=""
 if [ -d "$SNAPDIR" ]; then
   # Relevant: a value naming git, stash, an expansion or a glob, or one whose
   # first word is itself a relevant alias (a chain), to a fixpoint.
-  SHALIASES=$(find "$SNAPDIR" -maxdepth 1 -type f -name 'snapshot-*.sh' -exec grep -hE '^alias (-- )?[^=[:space:]]+=' {} + 2>/dev/null \
+  SHALIASES=$(find "$SNAPDIR" -maxdepth 1 -type f -name 'snapshot-*.sh' -exec grep -hE '^alias (-[gs] )?(-- )?[^=[:space:]]+=' {} + 2>/dev/null \
     | awk '
-      { l = $0; sub(/^alias (-- )?/, "", l); eq = index(l, "=")
+      { l = $0; sub(/^alias (-[gs] )?(-- )?/, "", l); eq = index(l, "=")
         name[NR] = substr(l, 1, eq - 1); v = substr(l, eq + 1); gsub(/\047|"/, "", v)
         split(v, w, /[ \t]+/); first[NR] = w[1]; line[NR] = $0
         if (v ~ /git|stash|[$`*?[{]/) rel[name[NR]] = 1 }
@@ -163,9 +167,10 @@ fi
 # A word naming one of those aliases also lets the command past the prefilter.
 SHALIAS_RE=""
 if [ -n "$SHALIASES" ]; then
-  SHALIAS_RE=$(printf '%s\n' "$SHALIASES" | sed -E 's/^alias (-- )?([^=]+)=.*/\2/' \
+  # A suffix alias (`alias -s ext=...`) is matched as `.ext` at a word's end.
+  SHALIAS_RE=$(printf '%s\n' "$SHALIASES" | sed -E 's/^alias (-[gs] )?(-- )?([^=]+)=.*/\3/' \
     | sed -e 's/[][\.*^$+?(){}|/]/\\&/g' | paste -sd'|' -)
-  SHALIAS_RE="|(^|[^[:alnum:]_.-])($SHALIAS_RE)([^[:alnum:]_.-]|\$)"
+  SHALIAS_RE="|(^|[^[:alnum:]_.-]|[.])($SHALIAS_RE)([^[:alnum:]_.-]|\$)"
 fi
 # A glob or brace can also build a command word (`/usr/bin/g?t`).
 printf '%s' "$FLAT" | grep -Eq "stash|$GIT_OR_EXP|[*?[{]$SHALIAS_RE" || exit 0
@@ -263,6 +268,10 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
         continue
       }
       if (c == "\\") { if (i < L) { i++; c = substr(text, i, 1); if (c != "\n") { cur = cur c; has = 1 } } continue }
+      # zsh EQUALS (on by default; the Bash tool runs zsh): an unquoted
+      # leading `=name` expands to the path of command `name`, so `=git` is
+      # git. The `=` is dropped.
+      if (c == "=" && !has && substr(text, i + 1, 1) ~ /[A-Za-z0-9_.\/-]/) continue
       if (c == "\047") { st = 1; has = 1; continue }
       if (c == "\"") { st = 2; has = 1; continue }
       # A redirection is removed by the shell before the command sees its
@@ -422,7 +431,7 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
   }
   # cmd_prefix(t): a word after which the next word is still a command word.
   function cmd_prefix(t) {
-    return t ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || t ~ /^(env|command|sudo|exec|nohup|xargs|time|eval|builtin|nice|setsid|then|do|else|if|while|until|!)$/
+    return t ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || t ~ /^(env|command|sudo|exec|nohup|xargs|time|eval|builtin|nice|setsid|noglob|nocorrect|-|then|do|else|if|while|until|!)$/
   }
   # squote(w): w as one single-quoted shell word.
   function squote(w) { gsub(/\047/, "\047\\\047\047", w); return "\047" w "\047" }
@@ -442,6 +451,13 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
       if (cp && (W[k] in shal)) {
         t = shal[W[k]]
         for (i = k + 1; i <= e; i++) t = t " " squote(W[i])
+        if (analyze(t, depth + 1) != "") return "shell-alias"
+      }
+      # A zsh SUFFIX alias (`alias -s ext=cmd`): a command word `x.ext` runs
+      # `cmd x.ext ...`.
+      if (cp && match(W[k], /\.[^.\/]+$/) && ((t = substr(W[k], RSTART + 1)) in sal)) {
+        t = sal[t]
+        for (i = k; i <= e; i++) t = t " " squote(W[i])
         if (analyze(t, depth + 1) != "") return "shell-alias"
       }
       # the words of this simple command from k on, as their own array
@@ -481,7 +497,8 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
     ns = split(ENVIRON["GSG_SHALIASES"], slines, "\n")
     for (k = 1; k <= ns; k++) {
       l = slines[k]
-      sub(/^alias (-- )?/, "", l)
+      kind = (l ~ /^alias -g /) ? "g" : ((l ~ /^alias -s /) ? "s" : "")
+      sub(/^alias (-[gs] )?(-- )?/, "", l)
       eq = index(l, "="); if (eq == 0) continue
       name = substr(l, 1, eq - 1)
       # The value is shell text (usually one single-quoted word): its words,
@@ -489,9 +506,29 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
       nv = tokenize(substr(l, eq + 1), vw, vq, vs)
       val = ""
       for (i = 1; i <= nv; i++) val = val (i > 1 ? " " : "") vw[i]
-      shal[name] = val
+      if (kind == "g") gal[name] = val
+      else if (kind == "s") sal[name] = val
+      else shal[name] = val
     }
-    r = analyze(ENVIRON["GSG_CMD"], 0)
+    cmd = ENVIRON["GSG_CMD"]
+    r = analyze(cmd, 0)
+    # zsh GLOBAL aliases (`alias -g`) expand in any word position, not only
+    # command position: also read the command with each one substituted
+    # wherever it stands as a whole word (a quoted occurrence is substituted
+    # too, which can only over-deny).
+    if (r == "") {
+      g = cmd; hit = 0
+      for (name in gal) {
+        re = name; gsub(/[][\\.^$*+?(){}|\/]/, "\\\\&", re)
+        while (match(g, "(^|[ \t\n;&|()`])" re "([ \t\n;&|()`]|$)")) {
+          pre = substr(g, 1, RSTART - 1); m0 = substr(g, RSTART, RLENGTH)
+          lead = substr(m0, 1, 1); if (lead !~ /[ \t\n;&|()`]/) lead = ""
+          tail = substr(m0, RLENGTH, 1); if (tail !~ /[ \t\n;&|()`]/) tail = ""
+          g = pre lead gal[name] tail substr(g, RSTART + RLENGTH); hit = 1
+        }
+      }
+      if (hit) { r = analyze(g, 1); if (r != "") r = "shell-alias" }
+    }
     if (r != "") print r
   }' 2>/dev/null)
 AWK_RC=$?
