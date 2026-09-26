@@ -15,6 +15,15 @@
 # source of truth are all redirected into a mktemp -d that the EXIT trap
 # removes. No network, ever — nothing here makes a request.
 #
+# The check's bar is the registry that LANDED on origin (DND-792), not the file
+# ATHENA_INBOX_REGISTRY names, which is only the branch copy. So the tools under
+# test run from a FIXTURE REPO in the sandbox (a copy of the installer, the
+# check and their libs, with a bare origin there too), and `land` commits the
+# fixture source of truth there and pushes it to that origin before each run:
+# every case below keeps "branch copy == landed copy", which is what it tested
+# before. The landed-versus-branch cases themselves live in
+# ai/test/check-inbox-registry/self-test.sh.
+#
 # Run: bash ai/inbox/test/self-test.sh
 #
 # Assertions read captured output with a here-string (`grep -q X <<<"$out"`),
@@ -25,10 +34,46 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/../../.." && pwd)"
-SETUP="${REPO}/scripts/setup-inbox-registry"
-CHECK="${REPO}/ai/bin/check-inbox-registry"
+REAL_SETUP="${REPO}/scripts/setup-inbox-registry"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+
+# The fixture repo the tools run from (see the header). Built before HOME is
+# faked, so fgit keeps the owner's global and system git config (hooks, signing)
+# out of it; identity is passed per command.
+fgit() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"; }
+FIX="${TMP}/fixture"
+GITC=(-c user.name=fixture -c user.email=fixture@example.invalid)
+for f in ai/bin/check-inbox-registry ai/inbox/lib/registry.rb ai/lib/landed.rb scripts/setup-inbox-registry \
+         "ai/skills/athena:inbox/lib/err.sh" "ai/skills/athena:inbox/lib/names.sh" \
+         "ai/skills/athena:inbox/lib/descriptor.sh" ai/inbox/registry.json; do
+  mkdir -p "$(dirname "${FIX}/${f}")"
+  cp -p "${REPO}/${f}" "${FIX}/${f}"
+done
+fgit init -q --bare "${TMP}/origin.git"
+fgit init -q "${FIX}"
+fgit -C "${FIX}" add -A >/dev/null 2>&1
+fgit -C "${FIX}" "${GITC[@]}" commit -q -m fixture >/dev/null 2>&1
+fgit -C "${FIX}" remote add origin "${TMP}/origin.git"
+fgit -C "${FIX}" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+fgit -C "${FIX}" fetch -q origin >/dev/null 2>&1
+SETUP="${FIX}/scripts/setup-inbox-registry"
+
+# land: the fixture source of truth becomes what landed on the fixture origin.
+# A no-op when it already has, or when no fixture source of truth is set.
+land() {
+  [ -n "${ATHENA_INBOX_REGISTRY:-}" ] || return 0
+  cp "${ATHENA_INBOX_REGISTRY}" "${FIX}/ai/inbox/registry.json"
+  fgit -C "${FIX}" diff --quiet -- ai/inbox/registry.json && return 0
+  fgit -C "${FIX}" add -A >/dev/null 2>&1
+  fgit -C "${FIX}" "${GITC[@]}" commit -q -m land >/dev/null 2>&1
+  fgit -C "${FIX}" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+  fgit -C "${FIX}" fetch -q origin >/dev/null 2>&1
+}
+
+# Every case runs the check as "${CHECK}": land, then the fixture's checker.
+check_landed() { land; "${FIX}/ai/bin/check-inbox-registry" "$@"; }
+CHECK=check_landed
 PASS=0; FAIL=0
 
 SKIP=0
@@ -69,6 +114,7 @@ setup() {
       exit 2
       ;;
   esac
+  land
   "${SETUP}" "$@"
 }
 
@@ -421,11 +467,13 @@ fi
 # would install. A fixture-only suite would pass happily over a broken real one.
 unset ATHENA_INBOX_REGISTRY
 reset_root="${TMP}/realcheck"
-if ATHENA_INBOX_ROOT="${reset_root}" setup --install --dry-run >/dev/null 2>&1; then
+# REAL_SETUP, not the fixture's copy: this case is about the file this repo
+# ships. --dry-run writes nothing, and the root is inside the sandbox anyway.
+if ATHENA_INBOX_ROOT="${reset_root}" "${REAL_SETUP}" --install --dry-run >/dev/null 2>&1; then
   ok "C22 the committed ai/inbox/registry.json is valid and installable"
 else
   bad "C22 the committed ai/inbox/registry.json is valid and installable" \
-      "$(ATHENA_INBOX_ROOT="${reset_root}" setup --install --dry-run 2>&1)"
+      "$(ATHENA_INBOX_ROOT="${reset_root}" "${REAL_SETUP}" --install --dry-run 2>&1)"
 fi
 
 # --- C23: the committed source of truth carries NO credential. It is the one
@@ -572,7 +620,7 @@ fi
 # otherwise surface as a bare Ruby backtrace with no Fix: line.
 reset_sandbox
 setup --install >/dev/null 2>&1
-out33="$("${SETUP}" --check 2>&1)"; rc33=$?
+out33="$(land; "${SETUP}" --check 2>&1)"; rc33=$?
 if [ ${rc33} -eq 0 ] && grep -q "check-inbox-registry" <<<"${out33}"; then
   ok "C33 --check delegates to the read-only check"
 else
@@ -613,10 +661,10 @@ fi
 # --check dispatch is an exec, and a single-string exec is shell-split, so this
 # only ever breaks for a repo whose path has a space in it — which is exactly
 # the machine where nobody is looking. The link keeps the case cheap.
-ln -s "${REPO}" "${TMP}/with space" 2>/dev/null
+ln -s "${FIX}" "${TMP}/with space" 2>/dev/null
 reset_sandbox
 setup --install >/dev/null 2>&1
-out36="$("${TMP}/with space/scripts/setup-inbox-registry" --check 2>&1)"; rc36=$?
+out36="$(land; "${TMP}/with space/scripts/setup-inbox-registry" --check 2>&1)"; rc36=$?
 if [ ${rc36} -eq 0 ] && grep -q "check-inbox-registry" <<<"${out36}"; then
   ok "C36 --check survives a repo path containing a space"
 else

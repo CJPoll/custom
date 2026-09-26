@@ -609,9 +609,20 @@ failure, no diff, no `git` undo. The same three artifacts answer it:
   in `~/.config/athena-inbox-client/config.json`.
 - **Detect drift:** `ai/bin/check-inbox-registry` (in the shipwright gate) fails,
   naming each entry that is missing, malformed, mis-permissioned, or edited away
-  from the committed text. Environment-safe: passes with a note when there is no
-  inbox root (CI/agent env), so it never false-fails; a root that exists with no
-  `projects/` is real drift, not "not this environment".
+  from the committed text **as landed on origin/main** (DND-792). Environment-safe:
+  passes with a note when there is no inbox root and no landed entry's repo is
+  checked out here (CI/agent env), so it never false-fails; a root that exists
+  with no `projects/` is real drift, not "not this environment". An entry or
+  channel a branch adds, retires or edits is reported as *pending* and does not
+  fail; provision it after it lands, from the main checkout. A malformed branch
+  `registry.json` is exit 2; a landed bar it cannot read is exit 3, could not
+  measure.
+
+  **Later (2026-09-26):** this bullet said the check compares against "the
+  committed text", which was the branch's own `registry.json`. Superseded by
+  DND-792, the same defect DND-743 fixed in `check-hooks-registered`. A branch
+  that added a channel failed until the machine was provisioned with it, and a
+  branch that removed an entry lowered its own bar.
 - **Recover:** `scripts/setup-inbox-registry --install` materialises the declared
   entries, copying anything it replaces to
   `$XDG_STATE_HOME/athena/inbox-registry-backups/` first. It **merges**: it

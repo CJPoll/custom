@@ -105,42 +105,51 @@ module InboxRegistry
   FILENAME_MAX_BYTES = 128
 
   def declared
-    raw = File.read(registry_path)
-    doc = JSON.parse(raw)
-    raise Error, "#{registry_path}: top level is not a JSON object" unless doc.is_a?(Hash)
-
-    unknown = doc.keys - WRAPPER_KEYS
-    raise Error, "#{registry_path}: unknown top-level key(s): #{unknown.join(', ')}" unless unknown.empty?
-    raise Error, "#{registry_path}: \"v\" is #{doc['v'].inspect}; this tool understands v=#{SOURCE_V} only" unless doc.fetch("v", SOURCE_V) == SOURCE_V
-
-    projects = doc["projects"]
-    raise Error, "#{registry_path}: top-level \"projects\" must be an array" unless projects.is_a?(Array)
-
-    entries = projects.map { |p| declared_one(p) }
-    reject_duplicates(entries)
-    reject_unreadable(entries)
-    reject_session_stem_collisions(entries)
-    entries
+    parse(File.read(registry_path), registry_path)
   rescue Errno::ENOENT
     raise Error, "committed source of truth not found at #{registry_path}"
+  rescue SystemCallError => e
+    raise Error, "#{registry_path} cannot be read (#{e.message})"
+  end
+
+  # The same rules over registry TEXT, whose origin `where` names in every
+  # error: this checkout's file (declared), or the copy that landed on origin
+  # (check-inbox-registry's bar, DND-792). One parser, so the landed bar and
+  # the branch copy can never be judged by different rules.
+  def parse(raw, where)
+    doc = JSON.parse(raw)
+    raise Error, "#{where}: top level is not a JSON object" unless doc.is_a?(Hash)
+
+    unknown = doc.keys - WRAPPER_KEYS
+    raise Error, "#{where}: unknown top-level key(s): #{unknown.join(', ')}" unless unknown.empty?
+    raise Error, "#{where}: \"v\" is #{doc['v'].inspect}; this tool understands v=#{SOURCE_V} only" unless doc.fetch("v", SOURCE_V) == SOURCE_V
+
+    projects = doc["projects"]
+    raise Error, "#{where}: top-level \"projects\" must be an array" unless projects.is_a?(Array)
+
+    entries = projects.map { |p| declared_one(p, where) }
+    reject_duplicates(entries, where)
+    reject_unreadable(entries, where)
+    reject_session_stem_collisions(entries, where)
+    entries
   rescue JSON::ParserError => e
-    raise Error, "#{registry_path} is not valid JSON (#{e.message})"
+    raise Error, "#{where} is not valid JSON (#{e.message})"
   end
 
   class Error < StandardError; end
 
-  def declared_one(project)
-    raise Error, "#{registry_path}: every \"projects\" member must be an object" unless project.is_a?(Hash)
+  def declared_one(project, where = registry_path)
+    raise Error, "#{where}: every \"projects\" member must be an object" unless project.is_a?(Hash)
 
     unknown = project.keys - PROJECT_KEYS
-    raise Error, "#{registry_path}: unknown key(s) in a project: #{unknown.join(', ')}" unless unknown.empty?
+    raise Error, "#{where}: unknown key(s) in a project: #{unknown.join(', ')}" unless unknown.empty?
 
     file = project["file"]
     entry = project["entry"]
-    raise Error, "#{registry_path}: every project needs a \"file\" and an \"entry\"" unless file.is_a?(String) && entry.is_a?(Hash)
-    raise Error, "#{registry_path}: entry filename #{file.inspect} does not match #{FILENAME_RE.source}" unless FILENAME_RE.match?(file)
-    raise Error, "#{registry_path}: entry filename #{file.inspect} is #{file.bytesize} bytes; the registry grammar allows at most #{FILENAME_MAX_BYTES}" if file.bytesize > FILENAME_MAX_BYTES
-    raise Error, "#{registry_path}: #{file} entry needs a string \"repo\"" unless entry["repo"].is_a?(String)
+    raise Error, "#{where}: every project needs a \"file\" and an \"entry\"" unless file.is_a?(String) && entry.is_a?(Hash)
+    raise Error, "#{where}: entry filename #{file.inspect} does not match #{FILENAME_RE.source}" unless FILENAME_RE.match?(file)
+    raise Error, "#{where}: entry filename #{file.inspect} is #{file.bytesize} bytes; the registry grammar allows at most #{FILENAME_MAX_BYTES}" if file.bytesize > FILENAME_MAX_BYTES
+    raise Error, "#{where}: #{file} entry needs a string \"repo\"" unless entry["repo"].is_a?(String)
 
     { "file" => file, "entry" => entry.merge("repo" => expand_repo(entry["repo"])) }
   end
@@ -150,13 +159,13 @@ module InboxRegistry
   # matching entries refuse outright, so a copy-pasted `repo` here would wedge
   # every session in that repo. A duplicate `file` is quieter and worse — the
   # later entry silently wins and the earlier declaration is never installed.
-  def reject_duplicates(entries)
+  def reject_duplicates(entries, where = registry_path)
     %w[file repo].each do |key|
       seen = {}
       entries.each do |p|
         value = key == "file" ? p["file"] : p["entry"]["repo"]
         if seen[value]
-          raise Error, "#{registry_path}: #{seen[value]} and #{p['file']} both declare #{key} #{value.inspect}; " \
+          raise Error, "#{where}: #{seen[value]} and #{p['file']} both declare #{key} #{value.inspect}; " \
                        "exactly one entry may claim a given #{key}"
         end
         seen[value] = p["file"]
@@ -175,7 +184,7 @@ module InboxRegistry
   # its own. Raised as a defect in the committed file, like the rules above.
   SESSION_SUFFIX = "-session.jsonl"
 
-  def reject_session_stem_collisions(entries)
+  def reject_session_stem_collisions(entries, where = registry_path)
     stems = {}
     entries.each do |p|
       (p["entry"]["channels"] || {}).each do |name, ch|
@@ -191,7 +200,7 @@ module InboxRegistry
         owner = stems[name]
         next if owner.nil? || owner == [p["file"], name]
 
-        raise Error, "#{registry_path}: channel #{name.inspect} in #{p['file']} has the same name as the " \
+        raise Error, "#{where}: channel #{name.inspect} in #{p['file']} has the same name as the " \
                      "routed session inbox #{name}.jsonl (channel #{owner[1].inspect} in #{owner[0]}); " \
                      "the two would print under one name in inbox-status and inbox-doctor. " \
                      "Fix: rename channel #{name.inspect} in #{p['file']} -- a session inbox's file stem is reserved"
@@ -203,12 +212,12 @@ module InboxRegistry
   # state, so it raises here — where both tools already treat a bad source of
   # truth as exit 2 — rather than being reported as drift whose documented
   # recovery (`--install`) refuses the same entry and cannot possibly work.
-  def reject_unreadable(entries)
+  def reject_unreadable(entries, where = registry_path)
     entries.each do |p|
       rejection = reader_rejection(p["entry"])
       next unless rejection.is_a?(String)
 
-      raise Error, "#{registry_path}: entry #{p['file']} is declared in a form the athena:inbox reader refuses: " \
+      raise Error, "#{where}: entry #{p['file']} is declared in a form the athena:inbox reader refuses: " \
                    "#{rejection} (validator: ai/skills/athena:inbox/lib/descriptor.sh)"
     end
   end
