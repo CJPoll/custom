@@ -1579,7 +1579,7 @@ if [ -n "$block" ] && [ "$mblock" = "$block" ]; then
 else
   bad "message paths = record relay_paths" "record=$block message=$mblock"
 fi
-if [ "$(grep -c '^dirt: ' "$rec")" = "1" ] && grep '^dirt: ' "$rec" | grep -q '^dirt: STALE '; then
+if [ "$(grep -c '^dirt: ' "$rec")" = "1" ] && grep -q '^dirt: STALE ' "$rec"; then
   ok "the runner's dirt: line is the record's last line starting 'dirt: ' (the relay block is indented)"
 else
   bad "last dirt: line" "record=$(cat "$rec" 2>&1)"
