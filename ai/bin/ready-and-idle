@@ -720,7 +720,9 @@ def usage
       ready-and-idle --repo DIR [--idle-hours N] [--json] [--no-fetch]
       ready-and-idle --self-test
 
-    Fix: pass --self-test, or --repo pointing at a git checkout.
+    Fix: pass --self-test, or --repo pointing at a git checkout, each value
+    flag followed by its value. Only the flags `ai/bin/ready-and-idle --help`
+    lists are accepted.
   USAGE
   1
 end
@@ -768,25 +770,39 @@ def warn_degraded(repo:, rows:, refs_refreshed:, refs_reason:, target:)
   warn "  count. Do NOT report this run as unavailable — that is exit 3, and this is exit 4."
 end
 
-def main(argv)
-  return self_test if argv.include?("--self-test")
+require_relative "../lib/strict_argv"
 
-  repo = nil
-  idle_hours = 2.0
-  as_json = argv.include?("--json")
-  fetch = !argv.include?("--no-fetch")
-  i = 0
-  while i < argv.length
-    case argv[i]
-    when "--repo"        then repo = argv[i += 1]
-    when "--idle-hours"  then idle_hours = Float(argv[i += 1], exception: false)
-    when "--json", "--no-fetch" then nil
-    else
-      warn "ready-and-idle: unknown argument #{argv[i].inspect}"
-      return usage
-    end
-    i += 1
+# Every argument must be a declared flag, and a value flag must have a value
+# (DND-526). The old loop took whatever came next as the value, so `--repo
+# --no-fetch` scanned a directory named "--no-fetch", and a repeated --repo
+# silently scanned the last one.
+CLI_SPEC = { "--self-test" => :switch, "--json" => :switch, "--no-fetch" => :switch,
+             "--repo" => :value, "--idle-hours" => :value }.freeze
+
+# -> [opts, nil] on success, [nil, reason] on a usage error.
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  if opts["--self-test"] && opts.size > 1
+    return [nil, "--self-test takes no other flag (got #{(opts.keys - ['--self-test']).join(', ')})"]
   end
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+def main(argv)
+  opts, reason = parse_cli(argv)
+  if reason
+    warn "ready-and-idle: usage error — #{reason}."
+    return usage
+  end
+  return self_test if opts["--self-test"]
+
+  repo = opts["--repo"]
+  idle_hours = opts.key?("--idle-hours") ? Float(opts["--idle-hours"], exception: false) : 2.0
+  as_json = opts.fetch("--json", false)
+  fetch = !opts.fetch("--no-fetch", false)
 
   return usage unless repo
   if idle_hours.nil? || idle_hours.negative?

@@ -435,6 +435,37 @@ run --repo "${WORK}" --no-fetch --bogus
   && ok "an unknown argument exits 1 with a Fix: (never a default action)" \
   || bad "an unknown argument exits 1 with a Fix:" "code=${CODE} err=${ERR}"
 
+# 13b (DND-526). Every argument is a declared flag and every value flag has
+# its value. Each of these used to run a scan (or the self-test) anyway, or
+# fail without naming the flag. A refusal is the usage exit (1), names the
+# flag, carries Fix:, emits no rows, and never reaches the repo.
+mk_gitlab 4003 "${SHA_OLD}" false true "$(ago '10 hours')" success 0
+refused() { # refused <label> <needle> <args...>
+  local label="$1" needle="$2"; shift 2
+  run "$@"
+  if [ "${CODE}" -eq 1 ] && grep -qF -- "${needle}" <<<"${ERR}" && grep -q 'Fix:' <<<"${ERR}" \
+     && [ -z "${OUT}" ] && ! grep -q 'not a git worktree' <<<"${ERR}"; then
+    ok "${label}"
+  else
+    bad "${label}" "code=${CODE} out=$(head -c 160 <<<"${OUT}") err=$(head -c 240 <<<"${ERR}")"
+  fi
+}
+refused "a repeated --repo is refused (was: silently scanned the last one)" "--repo" \
+  --repo "${TMP}/not-a-repo" --repo "${WORK}" --no-fetch
+refused "a valueless --repo is refused, naming it" "--repo needs a value" --no-fetch --repo
+refused "--repo swallowing the next flag is refused" "--repo needs a value" --repo --no-fetch
+refused "a valueless --idle-hours is refused, naming it" "--idle-hours needs a value" \
+  --repo "${WORK}" --no-fetch --idle-hours
+refused "--repo=VALUE is refused" "--repo=" --repo="${WORK}" --no-fetch
+refused "a repeated switch is refused" "--no-fetch" --repo "${WORK}" --no-fetch --no-fetch
+refused "--self-test beside another flag is refused (was: ran the self-test)" "--self-test" \
+  --self-test --json
+# --no-fetch prices drift off un-refreshed refs: exit 4, rows complete (case 9c).
+run --no-fetch --json --idle-hours 2 --repo "${WORK}"
+[ "${CODE}" -eq 4 ] && grep -q '4003' <<<"${OUT}" \
+  && ok "flag order still does not matter" \
+  || bad "flag order does not matter" "code=${CODE} err=$(head -c 240 <<<"${ERR}")"
+
 # ---------------------------------------------------------------------------
 printf '\nready-and-idle self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -ne 0 ]; then
