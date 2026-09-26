@@ -243,4 +243,5 @@ hypr/themes/base16-cyberpunk.sh	tool	theme color export for the desktop
 hypr/themes/grub/generate-assets.sh	tool	generates GRUB theme images with ImageMagick
 system-files/bt-hci-capture	tool	root-run btmon capture daemon behind the btmon OpenRC service
 system-files/lib/initd-proc-tree.sh	guard
+system-files/lib/initd-reap-exec	guard
 ai/lib/landed.rb	library	landed-bar resolution required by ai/bin/check-guard-messages / check-tool-risk / check-bin-help; raises Landed::Unreadable or Landed::Mismatch and each caller prints the Fix:

@@ -1,0 +1,128 @@
+#!/bin/sh
+# initd-reap-exec -- end a service instance's leftover process tree, then exec
+# the service's real command (DND-838). POSIX sh.
+#
+# Usage:
+#   initd-reap-exec [--lib FILE] [--timeout SECONDS] [--anchor DIR]... -- COMMAND [ARG...]
+#
+# A system-files/*.initd that runs under supervise-daemon sets this as its
+# `command` and puts its real program after `--` in `command_args`. Installed
+# (copied, root-owned, mode 755) next to the lib:
+#   /usr/local/lib/athena/initd-reap-exec
+#
+# Why: when the supervised command dies, supervise-daemon starts it again
+# itself. That respawn runs no start_pre, so the start-side reap of DND-812
+# never runs, and whatever the dead command forked lives on next to the new
+# copy. A crashed run.sh left its Runner.Listener running, and the respawned
+# run.sh started a second listener for the same registration. This wrapper is
+# what supervise-daemon starts on EVERY start, first or respawn, so the reap
+# is on the path every start takes.
+#
+# It runs as the service user (command_user), so it can only see and signal
+# that user's processes, which is the scope the reap wants. The instance tag is
+# read from ATHENA_SVC_TREE, which the initd passes with --env; the uid is the
+# wrapper's own. It calls proc_tree_reap (lib/initd-proc-tree.sh) with them
+# and the given anchors, and execs COMMAND only when nothing of the old tree is
+# left. Exit codes when it does not exec:
+#   1  something of the old tree survived SIGKILL (the lib prints it, Fix:).
+#      supervise-daemon retries after respawn_delay; it never starts a second
+#      copy next to a survivor.
+#   2  malformed input: no tag, no lib, no command, a bad option (Fix:).
+#
+# The tag is unset while the reap runs, so the helpers the reap execs (grep,
+# readlink, sleep) do not carry it, and it is restored for COMMAND. The reap
+# runs from / so none of those helpers has its cwd under an anchor; COMMAND
+# gets the original cwd back (supervise-daemon's `directory`).
+
+_re_usage() {
+	cat <<'EOF'
+Usage: initd-reap-exec [--lib FILE] [--timeout SECONDS] [--anchor DIR]... -- COMMAND [ARG...]
+
+End every leftover process of this service instance (tag from ATHENA_SVC_TREE,
+uid of the caller, plus any process whose exe or cwd is under an --anchor),
+then exec COMMAND with the tag and the original working directory.
+
+  --lib FILE        the process-tree library
+                    (default: initd-proc-tree.sh next to this file)
+  --timeout SECONDS SIGTERM grace before SIGKILL (default 10)
+  --anchor DIR      also end processes whose exe or cwd is DIR or under it
+  --help            print this and exit 0
+
+Exit 1: a leftover survived SIGKILL. Exit 2: malformed input. Otherwise it
+does not return; COMMAND replaces it.
+EOF
+}
+
+_re_die() { # message fix
+	printf 'initd-reap-exec: %s\nFix: %s\n' "$1" "$2" >&2
+	exit 2
+}
+
+_re_lib=""
+_re_timeout=10
+_re_anchors=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--help | -h) _re_usage; exit 0 ;;
+	--lib)
+		[ $# -ge 2 ] || _re_die "--lib needs a FILE." "pass --lib /usr/local/lib/athena/initd-proc-tree.sh, or leave it out."
+		_re_lib="$2"; shift 2 ;;
+	--timeout)
+		[ $# -ge 2 ] || _re_die "--timeout needs SECONDS." "pass a whole number of seconds, e.g. --timeout 10."
+		_re_timeout="$2"; shift 2 ;;
+	--anchor)
+		[ $# -ge 2 ] || _re_die "--anchor needs a DIR." "pass the instance's absolute directory, e.g. --anchor \${RUNNER_DIR}."
+		case "$2" in
+		*'
+'*) _re_die "anchor '$2' contains a newline." "pass an absolute path without a newline." ;;
+		esac
+		_re_anchors="${_re_anchors}$2
+"
+		shift 2 ;;
+	--) shift; break ;;
+	*) _re_die "unknown option '$1'." "the real command goes after --: initd-reap-exec [options] -- COMMAND [ARG...]." ;;
+	esac
+done
+[ $# -ge 1 ] || _re_die "no COMMAND after --." "set the initd's command_args to '[options] -- <real program> <its args>'."
+
+[ -n "${_re_lib}" ] || _re_lib="$(dirname -- "$0")/initd-proc-tree.sh"
+[ -r "${_re_lib}" ] || _re_die "process-tree library ${_re_lib} is missing." \
+	"sudo install -D -m 644 <custom checkout>/system-files/lib/initd-proc-tree.sh ${_re_lib}"
+
+_re_tag="${ATHENA_SVC_TREE:-}"
+[ -n "${_re_tag}" ] || _re_die "ATHENA_SVC_TREE is unset or empty, so this instance's tree cannot be told from any other." \
+	"run this only as the command of an initd that passes --env ATHENA_SVC_TREE=\${RC_SVCNAME} in supervise_daemon_args."
+
+_re_uid="$(id -u)" || _re_die "cannot read the caller's uid." "check that id(1) is on PATH."
+
+# shellcheck source=initd-proc-tree.sh
+. "${_re_lib}" || _re_die "could not source ${_re_lib}." "reinstall it from system-files/lib/initd-proc-tree.sh."
+
+_re_dir="$(pwd -P)" || _re_die "cannot read the working directory." "check the initd's directory= exists."
+unset ATHENA_SVC_TREE
+cd / || _re_die "cannot cd to /." "this should not happen; check the filesystem."
+
+# Split the anchors on newlines only, with globbing off for that expansion
+# alone: the reap itself globs /proc/[0-9]*, so it must run with both restored.
+_re_ifs="${IFS}"
+_re_reap() {
+	set +f
+	IFS="${_re_ifs}"
+	proc_tree_reap "${_re_tag}" "${_re_uid}" "${_re_timeout}" "$@"
+}
+IFS='
+'
+set -f
+# shellcheck disable=SC2086
+_re_reap ${_re_anchors}
+_re_rc=$?
+case "${_re_rc}" in
+0) ;;
+2) exit 2 ;;
+*) exit 1 ;;
+esac
+
+cd -- "${_re_dir}" || _re_die "cannot return to ${_re_dir}." "check the initd's directory= still exists."
+ATHENA_SVC_TREE="${_re_tag}"
+export ATHENA_SVC_TREE
+exec "$@"

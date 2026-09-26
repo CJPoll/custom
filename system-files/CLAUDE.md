@@ -15,7 +15,8 @@ This directory contains system-level configuration files that require root privi
 - `gitlab-runner-config.toml.example` - non-secret reference shape for the registered `config.toml` (the live token-bearing one is never committed)
 - `gitlab-runner-runbook.md` - the Cody-runs enable steps + the walt_ui `.gitlab-ci.yml` `buildctl` rewrite spec (DND-177)
 - `lib/initd-proc-tree.sh` - sourced by every `*.initd` here: ends a service instance's whole process tree on stop and asserts nothing is left (DND-812)
-- `test/initd-proc-tree/self-test.sh` - hermetic test of that stop path for every initd (discovered by the harness gate)
+- `lib/initd-reap-exec` - the `command` of every supervise-daemon initd here: reaps the instance's leftover tree, then execs the real program, so a respawn after a crash never runs next to the dead copy's children (DND-838)
+- `test/initd-proc-tree/self-test.sh` - hermetic test of the stop, start, and respawn paths for every initd (discovered by the harness gate)
 
 ## Symlink Integration
 
@@ -138,6 +139,36 @@ Consequences to know:
   before the tag existed (any orphan from before this fix) is not found by
   them; clean those by PID once, by hand, when installing.
 
-Not covered: supervise-daemon's own respawn after the command crashes. It runs
-no `start_pre`, so a child that outlives a crashed `run.sh` can still meet a
-respawned one.
+### A respawn reaps too (lib/initd-reap-exec, DND-838)
+
+When the command dies, `supervise-daemon` starts it again itself and runs no
+`start_pre`. So a child that outlived a crashed `run.sh` would meet the
+respawned one: two listeners for one registration. Every initd here that runs
+under `supervise-daemon` (github-runner, gitlab-runner, and both
+`docker-rootless-*-runner`) therefore sets `command` to `initd-reap-exec` and
+puts the real program after `--` in `command_args`:
+
+```
+command_args="--lib <lib> --timeout <s> [--anchor <dir>] -- <real program> <its args>"
+```
+
+`initd-reap-exec` runs as the service user on EVERY start, first or respawn.
+It calls `proc_tree_reap` with the tag from `ATHENA_SVC_TREE`, its own uid,
+and the same anchors as `stop_post`. It execs the real program only when
+nothing of the old tree is left; otherwise it exits non-zero and
+`supervise-daemon` retries after `respawn_delay`. It keeps the pid (exec), the
+tag, and the working directory, so stop, status, and the stop-side reap are
+unchanged. Installed as a root-owned copy at
+`/usr/local/lib/athena/initd-reap-exec` (mode 755; override
+`ATHENA_REAP_EXEC`); `start_pre` refuses to start without it, with the install
+command as its `Fix:`.
+
+Why a wrapper and not "no respawn + a watchdog doing stop/start": the wrapper
+puts the reap on the one path every start takes, keeps `supervise-daemon`'s
+crash recovery and backoff, and adds no second supervisor (a cron or daemon
+that would itself need supervising, and root to run `rc-service`).
+
+The limit: it runs as the service user, so it sees and signals only that uid's
+processes. That is the whole tree for every service here. `btmon` and
+`docker-rootless-athena` run under `start-stop-daemon`, which never respawns,
+so they need no wrapper.

@@ -118,6 +118,10 @@ _pt_under() {
 _pt_scan() {
 	(
 		cd / || exit 2
+		# The scan globs /proc; a caller running under `set -f` would make the
+		# glob a literal and scan nothing (DND-838). This is a subshell, so
+		# turning globbing back on here does not leak to the caller.
+		set +f
 		# /proc/self, opened by the shell's own redirection, is this subshell.
 		read -r _pt_self _pt_rest < /proc/self/stat || exit 2
 		_pt_skip=" ${_pt_self} "
