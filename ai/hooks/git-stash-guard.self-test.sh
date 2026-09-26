@@ -514,6 +514,28 @@ case_cmd "O56. letter sequence brace (conservative)" deny '/usr/bin/{f..h}it sta
 case_cmd "O57. nested brace alternatives that can be git" deny '/usr/bin/{x,{g,y}}it stash pop'
 case_cmd "O58. brace alternatives that cannot be git" allow '{a,b}x --flag'
 case_cmd "O59. zsh \$=var is an expansion" deny '$=G stash pop'
+# Critic round 4: the last `/` inside a quoted expansion is not a literal
+# basename.
+case_cmd "O64. slash inside a quoted command substitution" deny '"$(printf /usr/bin/git)" stash pop'
+case_cmd "O65. slash inside a quoted \${G%/}" deny '"${G%/}" stash pop'
+case_cmd "O66. slash inside a quoted \${G#*/}" deny '"${G#*/}" stash pop'
+case_cmd "O67. slash inside a quoted backtick substitution" deny '"`printf /usr/bin/git`" stash pop'
+case_cmd "O68. inner quotes inside a quoted substitution" deny '"$(printf "/usr/bin/git")" stash pop'
+# The seven Slack-reported shapes (admiral, 2026-09-26).
+case_cmd "O72. grep -E with [)]" allow "grep -E '[)]' f"
+case_cmd "O73. python3 -c string with braces" allow "python3 -c \"d = {'a': 1, 'b': [2]}; print(d)\""
+case_cmd "O74. heredoc holding {:ok, _}" allow "cat > t.exs <<'EOF'
+{:ok, _} = File.read(\"x\")
+{:error, reason} -> IO.inspect(reason)
+EOF"
+case_cmd "O75. a \$(python3 ...) substitution" allow "x=\$(python3 -c 'import re; print(re.sub(r\"[a-z]+\", \"\", \"x1\"))') && echo \"\$x\""
+case_cmd "O76. --include=*.ex" allow 'grep -rn defmodule --include=*.ex lib/'
+case_cmd "O77. a jq .[] filter" allow "jq -r '.[] | .name' f.json"
+case_cmd "O78. python -c with regex classes" allow "python -c 'import re; print(re.findall(r\"[0-9]+|[a-z]*\", \"a1\"))'"
+# Quotes and backslashes the tokenizer removed must not fool the matcher.
+case_cmd "O69. escaped ! in a class is a member, not negation" deny '/usr/bin/[\!g]it stash pop'
+case_cmd "O70. escaped ] inside a class" deny '/usr/bin/[g\]i]it stash pop'
+case_cmd "O71. quoted } inside brace alternatives" deny '/usr/bin/{x"}",g}it stash pop'
 # Case 14: the deny reason names what matched.
 # reason_names <label> <command> <text> : denied, and the reason holds <text>.
 reason_names() {

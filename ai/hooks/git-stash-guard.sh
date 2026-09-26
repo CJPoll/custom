@@ -573,6 +573,10 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     # literal.
     if ((s = index(t, "{\001")) > 0) {
       if (++GBUDGET > 256) return 1
+      # More `}` than marked `{` means a quoted or escaped `}` (or `{`) is
+      # in play, and the first `}` may not be the one that closes: not
+      # modelled (`{x"}",g}it` expands to git).
+      if (gsub(/\}/, "}", t) > gsub(/\{\001/, "{\001", t)) return 1
       L = length(t); dp = 1; nc = 0; e = 0
       for (j = s + 2; j <= L; j++) {
         c = substr(t, j, 1)
@@ -626,9 +630,19 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       set = substr(b, i + 2, j - i - 2); gsub(/\001/, "", set)
       if (neg) set = substr(set, 2)
       if (set ~ /\[/) return 0
-      GT[++GC] = "class"; GV[GC] = set; GN[GC] = neg
+      # The tokenizer drops quotes and backslashes, so a `!`/`^` here may
+      # have been escaped (`[\!g]` is the set {!,g}): a negated class
+      # matches any character.
+      if (neg) { GT[++GC] = "any"; i = j; continue }
+      GT[++GC] = "class"; GV[GC] = set; GN[GC] = 0
       i = j
     }
+    # A class that closed, followed by a literal `]`, means an escaped or
+    # quoted `]` may have closed it early (`[g\]i]it`): not modelled. (`.[]`
+    # closes no class: its `[` and `]` are both literal.)
+    c = 0
+    for (i = 1; i <= GC; i++) if (GT[i] == "class" || GT[i] == "any") c = 1
+      else if (c == 1 && GT[i] == "lit" && GV[i] == "]") return 0
     return 1
   }
   # inset(ch, set): ch is a member of bracket set `set` (ranges included). An
@@ -669,10 +683,14 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # quotes (ux == 0, so it is never split into several words or globbed) and
   # ends in a literal path component that is not git or git-stash
   # (`"$W/t"`). The word is exactly that path, so it is not git.
+  # The last `/` may sit INSIDE an expansion (`"$(printf /usr/bin/git)"`,
+  # `"${G%/}"`), whose text then ends in `)`, `}` or a backtick. So the
+  # basename must be plain filename characters only; anything else is not
+  # a proven literal (critic round 4).
   function literal_non_git(t, ux,    b) {
     if (ux || t !~ /\//) return 0
     b = t; sub(/^.*\//, "", b)
-    return b != "" && b !~ /[$`\001]/ && b != "git" && b != "git-stash"
+    return b ~ /^[A-Za-z0-9._+@%:,=-]+$/ && b != "git" && b != "git-stash"
   }
   # rank(r): how specific a finding is (lower is more specific). analyze
   # reports the most specific finding in the command, so a literal
