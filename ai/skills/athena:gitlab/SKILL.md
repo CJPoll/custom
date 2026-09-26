@@ -194,6 +194,12 @@ What the wrapper refuses, exit 3 with a `Fix:`:
 - Any other method on the merge route: REST `PUT …/merge_requests/<iid>/merge` is
   refused outright. So is GraphQL `mergeRequestAccept`, and `glab mcp serve`.
   GET/DELETE of a train car (read it, take it off the train) pass.
+- `--auto-merge` on anything but `mr merge`, e.g. `mr create --auto-merge`. It
+  schedules a merge of a head nobody pinned.
+- A flag other than `-R`/`--repo` placed before the subcommand (`mr -ym merge`,
+  `-y mr merge`) when any word could make the call a merge. glab's command walk
+  reads such flags differently from the wrapper. Put the command first, flags
+  after it.
 
 A refusal is expected, not an auth error: follow its `Fix:`. Never merge around
 it with plain `glab`, which the `forge-identity-guard` hook denies too. On
