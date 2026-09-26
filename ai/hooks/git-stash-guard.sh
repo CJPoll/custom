@@ -101,36 +101,44 @@
 # ACCEPTED FALSE POSITIVE (the class forge-auth-guard documents): matching is
 # lexical, so a command that only MENTIONS a LITERAL mutating stash (a
 # heredoc, a `git commit -m`, a `grep`) is denied too. That costs one retry:
-# move the text into a file with the Write tool and pass the file (`git
-# commit -F`), or use the Grep tool. A miss costs the owner's saved work.
+# write the command to a script file with the Write tool and run `bash
+# <file>` (a commit message goes to a file passed to `git commit -F`). The
+# deny text names no tool a captain lacks (no Grep tool; DND-799). A miss
+# costs the owner's saved work.
 #
 # QUOTED PAYLOADS ARE DATA (DND-799): a quoted argument or a quoted heredoc
-# body that the shell will not execute is read in DATA mode: a literal stash
-# write, stash-ref plumbing or a stash alias in it still denies (above), but
-# the expansion rules (a glob or brace command word, an expanded command
-# word or subcommand, an unread config) do not fire on it. So jq/awk/sed/
-# grep/curl/docker/gh payloads and python/ruby heredocs with brackets and
-# braces are allowed. Data mode FAILS CLOSED: a payload is data only when
-# every command word in its text is a known non-runner (a data tool, a
-# text or file utility, a keyword, an interpreter; git and gh only with a
-# read-only subcommand). Any other command word, a script by path or bare
-# name included, makes it EXEC and read in full, as are: a runner anywhere
-# in the text (sh/bash/zsh -c, eval, source, xargs, watch, ssh, su, sudo,
-# env -S, trap, alias, tmux, vim -c, `... | sh`, a heredoc fed to a shell),
-# an expanded command word (`$SHELL -c`, `$l`), a quoted word in a git
-# command (a `-c core.pager=...` or alias value git runs), a double-quoted
-# payload with a command
-# substitution, and an unquoted or unterminated heredoc. The arguments of a
-# test (`[`, `[[`, `test`) are data too. The lists are in the awk block
-# (safe_word(), runner(), exec_text()).
+# body that the shell will not execute is read in DATA mode. Every spelling
+# that NAMES the write still denies there: a literal stash write, stash-ref
+# plumbing, a stash alias, and a glob or expanded command word followed by
+# a literal stash verb or a stash-write subcommand (`/usr/bin/g?t stash
+# pop`, `$GIT stash pop`). What data mode drops is the rest of the
+# expansion rules: a glob or brace command word with no arguments or with
+# expanded ones (`.[]`, `{print $1}`, `{{.A}} {{.B}}`), a subcommand built
+# by expansion (`git $SUB`), and an unread config. So jq/awk/sed/grep/curl/
+# docker/gh payloads and python/ruby heredocs with brackets and braces are
+# allowed. Data mode FAILS CLOSED: a payload is data only when every
+# command word in its text is a known non-runner (a data tool, a text or
+# file utility, a keyword, an interpreter; git, gh and glab only with a
+# read-only subcommand; sed only without an `e` command). Any other command
+# word, a script by path or bare name included, makes it EXEC and read in
+# full, as are: a runner anywhere in the text (sh/bash/zsh -c, eval,
+# source, xargs, watch, ssh, su, sudo, env -S, trap, alias, tmux, vim -c,
+# `... | sh`, a heredoc fed to a shell), an expanded command word
+# (`$SHELL -c`, `$l`), a quoted word in a git command (a `-c
+# core.pager=...` or alias value git runs), a double-quoted payload with a
+# command substitution, and an unquoted or unterminated heredoc. The
+# arguments of a test (`[`, `[[`, `test`) are data too. The lists are in
+# the awk block (safe_word(), sed_runs(), runner(), exec_text()).
 #   RESIDUAL (data mode), a deliberate reduction from cbac851/d8cf63e,
-#   which read every payload in full: a stash write spelled ONLY by glob or
-#   expansion inside an INTERPRETER string (`python3 -c`, `ruby -e`, `perl
-#   -e`, `node -e`, and awk: `system()`, `print | "cmd"`, `"cmd" | getline`)
-#   was caught before and is not now; the
-#   literal spelling still is. It is the class NOT CATCHABLE already names
-#   (another interpreter building argv), whose glob-spelled form the old
-#   re-read caught only incidentally.
+#   which read every payload in full: a stash write that names NO stash
+#   verb (a glob git-stash word bare or with options only, `git-st*sh -u`;
+#   a glob or expanded git word with an expanded subcommand, `g?t $S`,
+#   `git $S`) inside data that something in the same call evaluates anyway
+#   (an interpreter string such as `python3 -c` / `awk system()`, a
+#   variable a program reads as a command such as GIT_SSH_COMMAND, a
+#   string a shell builtin re-evaluates) was caught before and is not now.
+#   It needs both an evaluator the exec lists miss and a spelling that
+#   hides the verb.
 #
 # PRECISION (DND-780, narrow cut): the leading test bracket `[` / `[[` and
 # the lone brace-group word `{` are not glob command words (as globs they
@@ -310,7 +318,7 @@ alias_read() {
 }
 
 deny() {
-  jq -cn --arg r "git-stash-guard: $1 Every linked worktree shares ONE stash list with the main checkout (refs/stash lives in the common git dir), so a stash push/pop/apply/drop from a fleet worktree can apply, drop or clobber the OWNER's saved work with no error (DND-670: a captain's \`git stash pop\` popped the owner's PT-822 entry). Agent sessions never write the stash list. Fix: to park WIP, commit it on your worktree branch (\`git add -A && git commit -m \"WIP: <what>\"\`; squash or amend it later); for a clean tree to experiment in, add a scratch tree with \`git worktree add <path> -b <scratch-branch>\` and remove it after. Read-only \`git stash list\`, \`git stash show\` and \`git stash create\` stay allowed. If this command only MENTIONS stash text (a heredoc, a commit message, a grep) and writes no stash, move the text into a file with the Write tool and pass the file (\`git commit -F <file>\`), or use the Grep tool; never rephrase a real stash command to slip past this guard." \
+  jq -cn --arg r "git-stash-guard: $1 Every linked worktree shares ONE stash list with the main checkout (refs/stash lives in the common git dir), so a stash push/pop/apply/drop from a fleet worktree can apply, drop or clobber the OWNER's saved work with no error (DND-670: a captain's \`git stash pop\` popped the owner's PT-822 entry). Agent sessions never write the stash list. Fix: to park WIP, commit it on your worktree branch (\`git add -A && git commit -m \"WIP: <what>\"\`; squash or amend it later); for a clean tree to experiment in, add a scratch tree with \`git worktree add <path> -b <scratch-branch>\` and remove it after. Read-only \`git stash list\`, \`git stash show\` and \`git stash create\` stay allowed. If this command only MENTIONS stash text (a heredoc, a commit message, a grep) and writes no stash, write the command to a script file with the Write tool and run \`bash <file>\` (for a commit message, write it to a file and pass \`git commit -F <file>\`); never rephrase a real stash command to slip past this guard." \
     '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}' \
     2>/dev/null
   exit 0
@@ -791,11 +799,12 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   }
   # QUOTED PAYLOADS ARE DATA (DND-799). A quoted word holding whitespace or
   # a separator, or a heredoc body, is re-read as a command text. Unless the
-  # shell may EXECUTE it, it is read in DATA mode: only the literal findings
-  # count there (a literal stash write, stash-ref plumbing, a stash git alias,
-  # a stash shell alias), never the expansion findings (a glob or brace
-  # command word, a subcommand or command word built by expansion, an
-  # unread config). So `jq \047.[] | .x\047`, `awk \047{print $1}\047`,
+  # shell may EXECUTE it, it is read in DATA mode: only findings that name
+  # the write count there (a literal stash write, stash-ref plumbing, a
+  # stash git or shell alias, a glob or expanded command word followed by a
+  # stash verb), never the rest of the expansion findings (a glob or brace
+  # command word with no or expanded arguments, a subcommand built by
+  # expansion, an unread config). So `jq \047.[] | .x\047`, `awk \047{print $1}\047`,
   # `docker ps --format \047{{.Names}} {{.ID}}\047` and a python heredoc
   # with brackets are data, while `grep \047git stash pop\047` still denies
   # (the accepted false positive in the header).
@@ -819,7 +828,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   #     has no terminating line.
   # A payload nested in a data payload is data too. A payload nested in an
   # exec payload is decided again from the text it sits in.
-  function weak(r) { return r ~ /^(glob-head|expanded|expanded-git|unread-config)$/ }
+  function weak(r) { return r ~ /^(expanded|unread-config)$/ }
   function runner(t) {
     gsub(/\001/, "", t); sub(/^.*\//, "", t)
     return t ~ /^(sh|bash|zsh|dash|ksh|ksh93|mksh|ash|yash|posh|busybox|fish|tcsh|csh|rc|pwsh|powershell)[0-9.-]*$/ \
@@ -852,6 +861,32 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     }
     return 1
   }
+  # git_read(W, SB, n, k): the git at word k runs a read-only subcommand
+  # that runs no alias, hook or configured command from the text: a
+  # builtin reader, or a listing form of branch, tag, stash, worktree,
+  # remote or config (DND-799 batch 7: `git branch -a | grep -E ...`).
+  function git_read(W, SB, n, k,    j, sc, a, lst, mut, nonopt) {
+    for (j = k + 1; j <= n && !SB[j]; ) {
+      if (two_word(W[j])) { j += 2; continue }
+      if (W[j] ~ /^-/) { j++; continue }
+      break
+    }
+    if (j > n || SB[j]) return 1
+    sc = W[j]
+    if (sc ~ /^(log|status|diff|show|rev-parse|ls-files|ls-tree|ls-remote|grep|blame|for-each-ref|describe|shortlog|cat-file|merge-base|rev-list|name-rev|show-ref|count-objects|var|help|version|whatchanged|range-diff|cherry|diff-tree|diff-files|diff-index)$/) return 1
+    lst = 0; mut = 0; nonopt = 0
+    for (a = j + 1; a <= n && !SB[a]; a++) {
+      if (W[a] ~ /^(-l|--list|-a|--all|-r|--remotes|-v|-vv|--verbose|--contains|--no-contains|--merged|--no-merged|--points-at|--show-current|--get|--get-all|--get-regexp|--show-origin|--name-only)$/) lst = 1
+      else if (W[a] ~ /^-/) { if (W[a] !~ /^(--format|--sort|--color|--no-color|--column|--no-column|--abbrev)(=|$)/) mut = 1 }
+      else if (W[a - 1] !~ /^(--contains|--no-contains|--merged|--no-merged|--points-at|--sort|--format|--get|--get-all|--get-regexp)$/) nonopt++
+    }
+    if (sc ~ /^(branch|tag)$/) return !mut && (nonopt == 0 || lst)
+    if (sc == "stash") return j + 1 <= n && !SB[j + 1] && W[j + 1] ~ /^(list|show)$/
+    if (sc == "worktree") return j + 1 <= n && !SB[j + 1] && W[j + 1] == "list"
+    if (sc == "remote") return !mut && (nonopt == 0 || (W[j + 1] ~ /^(show|get-url)$/))
+    if (sc == "config") return lst && !mut && nonopt <= 1
+    return 0
+  }
   # sed_runs(W, SB, n, k): the sed at word k may run a command: a script
   # file (-f, --file), or a script word holding `e` where GNU sed reads a
   # command or an s/// flag (after an address, a separator, a brace, a
@@ -879,7 +914,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (!cp || is_assign(W[k])) continue
       if (W[k] == "." || (W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k]))) return 1
       t = W[k]; sub(/^.*\//, "", t)
-      if (t == "git") { if (!sub_safe(W, SB, n, k, "^(log|status|diff|show|rev-parse|ls-files|ls-tree|ls-remote|grep|blame|for-each-ref|describe|shortlog|cat-file|merge-base|rev-list|name-rev|show-ref|count-objects|var|help|version|whatchanged|range-diff|cherry|diff-tree|diff-files|diff-index)$")) return 1; continue }
+      if (t == "git") { if (!git_read(W, SB, n, k)) return 1; continue }
       if (t == "sed" || t == "gsed") { if (sed_runs(W, SB, n, k)) return 1; continue }
       if (t == "gh" || t == "glab") { if (!sub_safe(W, SB, n, k, "^(pr|mr|issue|run|ci|api|repo|release|search|workflow|label|browse|status|cache|secret|variable|ruleset|project|auth)$")) return 1; continue }
       if (!safe_word(t)) return 1
@@ -888,9 +923,11 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   }
   # git_in_cmd(W, SB, n, k): 1 when the simple command holding word k has a
   # git word.
-  function git_in_cmd(W, SB, n, k,    s, i, t) {
+  function git_in_cmd(W, SB, QF, n, k,    s, i, t) {
     for (s = k; s > 1 && !SB[s]; s--) ;
     for (i = s; i <= n && (i == s || !SB[i]); i++) {
+      # A quoted payload is not the command git word (it may end in one).
+      if (QF[i]) continue
       t = W[i]; gsub(/\001/, "", t)
       if (t ~ /(^|\/)git(-[^\/]*)?$/) return 1
     }
@@ -900,7 +937,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # or "" when it runs no stash write. It stops early only on a literal
   # stash. data is 1 when text is a DATA payload (see above): its expansion
   # findings are dropped.
-  function analyze(text, depth, data,    W, QF, SB, UX, PQ, XQ, HB, HQ, n, k, e, r, sw, m, i, cp, t, j, x, best, ex, h, tst, dm) {
+  function analyze(text, depth, data,    W, QF, SB, UX, PQ, XQ, HB, HQ, n, k, e, r, sw, m, i, cp, t, j, x, best, ex, h, tst, dm, sc, hit) {
     # Past the nesting bound, text that still names stash is a deny.
     if (depth > 8) {
       if (!mentions_stash(text)) return ""
@@ -912,7 +949,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     # is run, so neither is a quoted word or heredoc within it.
     ex = data ? 0 : exec_text(W, SB, UX, n)
     for (k = 1; k <= n; k++) if (QF[k]) {
-      best = better(best, analyze(W[k], depth + 1, data || !(ex || XQ[k] || git_in_cmd(W, SB, n, k))))
+      best = better(best, analyze(W[k], depth + 1, data || !(ex || XQ[k] || git_in_cmd(W, SB, QF, n, k))))
       if (best == "stash") return best
     }
     for (h = 1; h <= HB[0]; h++) {
@@ -975,16 +1012,25 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       # expansion needs a closing `}` in the same word, so it is the brace
       # group keyword, and the word after it keeps command position (see
       # cmd_prefix).
+      # In DATA mode (dm) only a LITERAL stash write counts (see QUOTED
+      # PAYLOADS ARE DATA): git is judged with no unread config (cfgov 0),
+      # and a glob command word denies only when followed by a literal
+      # stash verb or a subcommand that is a stash write (critic round 3:
+      # data mode is not trusted to prove nothing evaluates the string, so
+      # it keeps every spelling that names the write).
+      if (dm) { sc = cfgov; cfgov = 0 }
       if (cp && W[k] ~ /\001/ && W[k] != "[\001" && W[k] != "[\001[\001" && W[k] != "{\001") {
         for (i = 1; i <= m && sw[i] ~ /^-/; i++) ;
-        if (i > m || sw[i] ~ /^(push|save|pop|apply|drop|clear|store|branch)$/ || sw[i] ~ /[$`\001]/ || git_verdict(sw, m, 1, 0, 0) != "") {
-          if (!dm) { best = better(best, "glob-head"); note("glob-head", W, k, e, depth, 0) }
-        }
+        if (dm) hit = (i <= m && sw[i] ~ /^(push|save|pop|apply|drop|clear|store|branch)$/) || git_verdict(sw, m, 1, 0, 0) ~ /^(stash|alias|refwrite)$/
+        else hit = (i > m || sw[i] ~ /^(push|save|pop|apply|drop|clear|store|branch)$/ || sw[i] ~ /[$`\001]/ || git_verdict(sw, m, 1, 0, 0) != "")
+        if (dm) cfgov = sc
+        if (hit) { best = better(best, "glob-head"); note("glob-head", W, k, e, depth, 0) }
         continue
       }
       if (W[k] ~ /(^|\/)git$/) r = git_verdict(sw, m, 1, 0, 0)
       else if (W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k])) r = git_verdict(sw, m, 1, 1, 0)
       else r = ""
+      if (dm) cfgov = sc
       if (dm && weak(r)) r = ""
       note(r, W, k, e, depth, 0)
       if (r == "stash") return r

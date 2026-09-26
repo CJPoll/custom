@@ -685,105 +685,108 @@ case_ga "QB6. gstp still denies beside the grep alias" deny 'gstp'
 case_ga "QB7. an alias chain to gstp still denies" deny 'gg'
 case_ga "QB8. grep then gstp in one command still denies" deny 'grep -i x f; gstp'
 # QX: EXEC contexts. The shell runs each of these payloads, so it is read in
-# full: a stash write spelled by glob or expansion (which data mode drops)
-# still denies. Each would be allowed if the payload were read as data.
-case_cmd "QX1. bash -lc payload" deny "bash -lc 'cd /tmp && /usr/bin/g?t stash pop'"
-case_cmd "QX2. zsh -c payload" deny "zsh -c '/usr/bin/g?t stash pop'"
-case_cmd "QX3. eval payload" deny "eval '/usr/bin/g?t stash pop'"
-case_cmd "QX4. su -c payload" deny "su -c '/usr/bin/g?t stash pop' me"
-case_cmd "QX5. watch payload" deny "watch '/usr/bin/g?t stash pop'"
-case_cmd "QX6. ssh payload" deny "ssh host '/usr/bin/g?t stash pop'"
-case_cmd "QX7. find -exec sh -c payload" deny "find . -exec sh -c '/usr/bin/g?t stash pop' \\;"
-case_cmd "QX8. xargs sh -c payload" deny "echo x | xargs -I{} sh -c '/usr/bin/g?t stash pop {}'"
-case_cmd "QX9. env -S payload" deny "env -S '/usr/bin/g?t stash pop'"
-case_cmd "QX10. trap payload" deny "trap '/usr/bin/g?t stash pop' EXIT"
-case_cmd "QX11. alias defined then used" deny "alias gp='/usr/bin/g?t stash pop'; gp"
-case_cmd "QX12. data piped to sh" deny "echo '/usr/bin/g?t stash pop' | sh"
-case_cmd "QX13. data piped to bash" deny "printf '%s\\n' 'x; /usr/bin/g?t stash pop' | bash"
-case_cmd "QX14. an expanded shell running -c" deny "\$SHELL -c '/usr/bin/g?t stash pop'"
-case_cmd "QX15. sudo sh -c payload" deny "sudo sh -c 'true; /usr/bin/g?t stash pop'"
-case_cmd "QX16. timeout then bash -c payload" deny "timeout 5 bash -c 'true; /usr/bin/g?t stash pop'"
-case_cmd "QX17. tmux payload" deny "tmux new-window '/usr/bin/g?t stash pop'"
-case_cmd "QX18. vim -c ! payload" deny "vim -c '!/usr/bin/g?t stash pop' f"
-case_cmd "QX19. git config alias value" deny "git config alias.p '!/usr/bin/g?t stash pop'"
-case_cmd "QX20. git -c alias value" deny "git -c 'alias.p=!/usr/bin/g?t sp' p"
+# full. Each payload hides the stash verb (`git-st*sh` bare is an implicit
+# push; `true;` in front makes it a multi-word payload, which is what the
+# guard re-reads), a spelling data mode drops, so each case would be allowed if its
+# payload were read as data (round 3 moved the named-verb spellings to QD,
+# which deny in data too).
+case_cmd "QX1. bash -lc payload" deny "bash -lc 'cd /tmp && true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX2. zsh -c payload" deny "zsh -c 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX3. eval payload" deny "eval 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX4. su -c payload" deny "su -c 'true; /usr/libexec/git-core/git-st*sh' me"
+case_cmd "QX5. watch payload" deny "watch 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX6. ssh payload" deny "ssh host 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX7. find -exec sh -c payload" deny "find . -exec sh -c 'true; /usr/libexec/git-core/git-st*sh' \\;"
+case_cmd "QX8. xargs sh -c payload" deny "echo x | xargs -I{} sh -c 'true; /usr/libexec/git-core/git-st*sh {}'"
+case_cmd "QX9. env -S payload" deny "env -S 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX10. trap payload" deny "trap 'true; /usr/libexec/git-core/git-st*sh' EXIT"
+case_cmd "QX11. alias defined then used" deny "alias gp='true; /usr/libexec/git-core/git-st*sh'; gp"
+case_cmd "QX12. data piped to sh" deny "echo 'true; /usr/libexec/git-core/git-st*sh' | sh"
+case_cmd "QX13. data piped to bash" deny "printf '%s\\n' 'x; true; /usr/libexec/git-core/git-st*sh' | bash"
+case_cmd "QX14. an expanded shell running -c" deny "\$SHELL -c 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX15. sudo sh -c payload" deny "sudo sh -c 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX16. timeout then bash -c payload" deny "timeout 5 bash -c 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX17. tmux payload" deny "tmux new-window 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX18. vim -c ! payload" deny "vim -c '!true; /usr/libexec/git-core/git-st*sh' f"
+case_cmd "QX19. git config alias value" deny "git config alias.p '!true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX20. git -c alias value" deny "git -c 'alias.p=!true; /usr/libexec/git-core/git-st*sh' p"
 case_cmd "QX21. quoted heredoc to bash" deny "bash <<'EOF'
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 EOF"
 case_cmd "QX22. quoted heredoc piped to sh" deny "cat <<'EOF' | sh
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 EOF"
 case_cmd "QX23. quoted heredoc to source /dev/stdin" deny "source /dev/stdin <<'EOF'
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 EOF"
 case_cmd "QX24. quoted heredoc read by a loop running each line" deny "while read -r l; do \$l; done <<'EOF'
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 EOF"
 case_cmd "QX25. quoted heredoc to xargs" deny "xargs -L1 <<'EOF'
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 EOF"
 case_cmd "QX26. quoted heredoc to a git shell alias" deny "git -c alias.zq='!sh' zq <<'EOF'
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 EOF"
 case_cmd "QX27. unquoted heredoc (its body is expanded)" deny "cat <<EOF
-\$(/usr/bin/g?t stash pop)
+\$(true; /usr/libexec/git-core/git-st*sh)
 EOF"
 case_cmd "QX28. unterminated quoted heredoc" deny "cat <<'EOF'
-/usr/bin/g?t stash pop"
-case_cmd "QX29. a double-quoted payload with a command substitution" deny "echo \"x \$(/usr/bin/g?t stash pop)\""
-case_cmd "QX30. a double-quoted payload with a backtick" deny "echo \"x \`/usr/bin/g?t stash pop\`\""
+true; /usr/libexec/git-core/git-st*sh"
+case_cmd "QX29. a double-quoted payload with a command substitution" deny "echo \"x \$(true; /usr/libexec/git-core/git-st*sh)\""
+case_cmd "QX30. a double-quoted payload with a backtick" deny "echo \"x \`true; /usr/libexec/git-core/git-st*sh\`\""
 case_cmd "QX31. a heredoc script holding sh -c, then run" deny "cat > x.sh <<'EOF'
-sh -c '/usr/bin/g?t stash pop'
+sh -c 'true; /usr/libexec/git-core/git-st*sh'
 EOF
 sh x.sh"
 case_cmd "QA32. sh -c text written as data that nothing runs" allow "cat > notes.txt <<'EOF'
 Run sh -c 'jq \".[] | .x\" f' to see it.
 EOF"
 case_cmd "QX32. << in a comment is not a heredoc" deny "true # <<'X'
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 X"
 case_cmd "QX33. << in arithmetic is not a heredoc" deny "echo \$((1<<'X'))
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 X"
 case_cmd "QX34. an expanded command in a test's own simple command after it" deny '[ -n "$x" ]; $GIT stash pop'
-case_cmd "QX35. a substitution inside a test" deny '[ -n "$(/usr/bin/g?t stash pop)" ]'
+case_cmd "QX35. a substitution inside a test" deny '[ -n "$(true; /usr/libexec/git-core/git-st*sh)" ]'
 # QX36+: critic round 1. Data mode fails closed: an unknown command word
 # may run the string it is given, so its text stays EXEC.
-case_cmd "QX36. data piped to at" deny "echo '/usr/bin/g?t stash pop' | at now"
+case_cmd "QX36. data piped to at" deny "echo 'true; /usr/libexec/git-core/git-st*sh' | at now"
 case_cmd "QX37. quoted heredoc to at" deny "at now <<'EOF'
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 EOF"
 case_cmd "QX38. quoted heredoc to batch" deny "batch <<'EOF'
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 EOF"
-case_cmd "QX39. sg -c payload" deny "sg wheel -c '/usr/bin/g?t stash pop'"
-case_cmd "QX40. tar --to-command payload" deny "tar -xf a.tar --to-command='/usr/bin/g?t stash pop'"
-case_cmd "QX41. zsh sched payload" deny "sched +1 '/usr/bin/g?t stash pop'"
-case_cmd "QX42. watchexec payload" deny "watchexec '/usr/bin/g?t stash pop'"
-case_cmd "QX43. entr -s payload" deny "ls | entr -s '/usr/bin/g?t stash pop'"
-case_cmd "QX44. npx -c payload" deny "npx -c '/usr/bin/g?t stash pop'"
-case_cmd "QX45. nodemon --exec payload" deny "nodemon --exec '/usr/bin/g?t stash pop'"
+case_cmd "QX39. sg -c payload" deny "sg wheel -c 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX40. tar --to-command payload" deny "tar -xf a.tar --to-command='true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX41. zsh sched payload" deny "sched +1 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX42. watchexec payload" deny "watchexec 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX43. entr -s payload" deny "ls | entr -s 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX44. npx -c payload" deny "npx -c 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX45. nodemon --exec payload" deny "nodemon --exec 'true; /usr/libexec/git-core/git-st*sh'"
 case_cmd "QX46. quoted heredoc script run by path" deny "cat > x.sh <<'EOF'
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 EOF
 ./x.sh"
 case_cmd "QX47. quoted heredoc script run by bare name" deny "cat > ~/bin/f <<'EOF'
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 EOF
 f"
 case_cmd "QX48. quoted heredoc git hook, then a commit" deny "cat > .git/hooks/pre-commit <<'EOF'
-/usr/bin/g?t stash pop
+true; /usr/libexec/git-core/git-st*sh
 EOF
 git commit -m x"
-case_cmd "QX49. timeout prefix hides the next command word" deny "echo '/usr/bin/g?t stash pop' | timeout 5 at now"
-case_cmd "QX50. gh with a non-read subcommand (an alias or extension)" deny "echo '/usr/bin/g?t stash pop' | gh x"
-case_cmd "QX51. git with a non-read subcommand (an alias)" deny "echo '/usr/bin/g?t stash pop' | git x"
-case_ga "QX52. an owner alias to a shell (not a known word)" deny "echo '/usr/bin/g?t stash pop' | xb"
+case_cmd "QX49. timeout prefix hides the next command word" deny "echo 'true; /usr/libexec/git-core/git-st*sh' | timeout 5 at now"
+case_cmd "QX50. gh with a non-read subcommand (an alias or extension)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' | gh x"
+case_cmd "QX51. git with a non-read subcommand (an alias)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' | git x"
+case_ga "QX52. an owner alias to a shell (not a known word)" deny "echo 'true; /usr/libexec/git-core/git-st*sh' | xb"
 case_cmd "QA30. git read subcommand with a data pipe stays allowed" allow "git log --oneline -5 | awk '{print \$1}' | sort -u"
 case_cmd "QA31. gh pr view piped to jq stays allowed" allow "gh pr view 3 --json checks | jq '.checks[] | {n: .name}'"
 
-case_cmd "QX53. a -c pager value git runs, under a read subcommand" deny "git -c core.pager='/usr/bin/g?t stash pop' log -1"
-case_cmd "QX54. a -c editor value git runs" deny "git -c core.editor='true; /usr/bin/g?t stash pop' commit"
+case_cmd "QX53. a -c pager value git runs, under a read subcommand" deny "git -c core.pager='true; /usr/libexec/git-core/git-st*sh' log -1"
+case_cmd "QX54. a -c editor value git runs" deny "git -c core.editor='true; /usr/libexec/git-core/git-st*sh' commit"
 # QA33+: the harness batch of 2026-09-26 20:34Z (admiral).
 case_cmd "QA33. python heredoc with list brackets" allow "python3 - <<'EOF'
 xs = [1, 2]
@@ -801,22 +804,54 @@ case_cmd "QA39. \${p#/proc/} inside a printf argument" allow "for p in /proc/1; 
 case_cmd "QA40. an expanded script path with a literal basename" allow '"$S/x.sh" --flag'
 case_ga "QA41. grep for a count pattern under the grep alias" allow 'grep "[1-9] failure" log.txt'
 
-case_cmd "QX55. a runner after a known tool (docker exec sh -c)" deny "docker exec c sh -c '/usr/bin/g?t stash pop'"
-case_cmd "QX56. data piped into a runner after a known tool" deny "echo '/usr/bin/g?t stash pop' | docker run -i img sh"
+case_cmd "QX55. a runner after a known tool (docker exec sh -c)" deny "docker exec c sh -c 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX56. data piped into a runner after a known tool" deny "echo 'true; /usr/libexec/git-core/git-st*sh' | docker run -i img sh"
 # QX57+: critic round 2. sed runs a string (GNU `e`), and the class sweep of
 # safe_word(): ack/ag pagers, declare/typeset arithmetic.
-case_cmd "QX57. sed e command" deny "sed '1e/usr/bin/g?t stash pop' f"
-case_cmd "QX58. sed s///e flag" deny "sed 's/.*/\\/usr\\/bin\\/g?t stash pop/e' f"
-case_cmd "QX59. sed --expression= with an e command" deny "sed --expression='1e/usr/bin/g?t stash pop' f"
-case_cmd "QX60. sed -e with an e command" deny "sed -n -e '1e/usr/bin/g?t stash pop' f"
+case_cmd "QX57. sed e command" deny "sed '1etrue; /usr/libexec/git-core/git-st*sh' f"
+case_cmd "QX58. sed s///e flag" deny "sed 's/.*/true; \\/usr\\/libexec\\/git-core\\/git-st*sh/e' f"
+case_cmd "QX59. sed --expression= with an e command" deny "sed --expression='1etrue; /usr/libexec/git-core/git-st*sh' f"
+case_cmd "QX60. sed -e with an e command" deny "sed -n -e '1etrue; /usr/libexec/git-core/git-st*sh' f"
 case_cmd "QX61. sed -f script written in the same call" deny "cat > x.sed <<'EOF'
-1e/usr/bin/g?t stash pop
+1etrue; /usr/libexec/git-core/git-st*sh
 EOF
 sed -f x.sed f"
-case_cmd "QX62. ag --pager payload" deny "ag --pager='/usr/bin/g?t stash pop' x"
-case_cmd "QX63. ack --pager payload" deny "ack --pager='/usr/bin/g?t stash pop' x"
-case_cmd "QX64. typeset with a data pipe" deny "typeset -i n='/usr/bin/g?t stash pop'"
+case_cmd "QX62. ag --pager payload" deny "ag --pager='true; /usr/libexec/git-core/git-st*sh' x"
+case_cmd "QX63. ack --pager payload" deny "ack --pager='true; /usr/libexec/git-core/git-st*sh' x"
+case_cmd "QX64. typeset with a data pipe" deny "typeset -i n='true; /usr/libexec/git-core/git-st*sh'"
 case_cmd "QA42. sed substitution with no e command stays allowed" allow "sed -E 's/[a-z]+ ([0-9]+)/\\1/g; /^\$/d' f"
+
+# QD: critic round 3. Data mode is not trusted to prove that nothing in the
+# call evaluates the string, so a spelling that names the write denies even
+# in data (evaluators outside every list: a variable git runs, a shell
+# builtin that re-evaluates a subscript, an interpreter string).
+case_cmd "QD1. GIT_SSH_COMMAND exported, then a read-only git" deny "export GIT_SSH_COMMAND='/usr/bin/g?t stash pop; true'; git ls-remote ssh://h/r"
+case_cmd "QD2. GIT_EXTERNAL_DIFF exported, then git diff" deny "export GIT_EXTERNAL_DIFF='/usr/bin/g?t stash pop; true'; git diff"
+case_cmd "QD3. GIT_PAGER as a prefix assignment" deny "GIT_PAGER='/usr/bin/g?t stash pop; true' git log -1"
+case_cmd "QD4. a subscript a test re-evaluates" deny "[[ -v 'a[\$(/usr/bin/g?t stash pop)]' ]]"
+case_cmd "QD5. read into a subscript" deny "read 'a[\$(/usr/bin/g?t stash pop)]' < /dev/null"
+case_cmd "QD6. an interpreter string with a glob git and a stash verb" deny "python3 -c 'import os; os.system(\"/usr/bin/g?t stash pop\")'"
+case_cmd "QD7. awk system with an expanded git and a stash verb" deny "awk 'BEGIN { system(\"\$GIT stash pop\") }'"
+case_cmd "QD8. a glob git-stash word with a write verb in data" deny "printf '%s\\n' 'x; /usr/libexec/git-core/git-st*sh pop'"
+case_cmd "QD9. a glob git word with a stash alias in data" deny "echo 'x; /usr/bin/g?t sp'"
+case_cmd "QA43. a glob word followed by data words stays allowed" allow "jq '.[] | {a: .b} | select(.x)' f"
+
+# QA44+: the harness batch of 2026-09-26 21:35Z (admiral): quoted regexes
+# after read-only git listings, jq slices and objects, lookbehinds, classes.
+case_ga "QA44. git branch -a piped to a grep -E alternation" allow "git branch -a | grep -E 'dnd-(52[0-9]|53[0-9]|813|820)'"
+case_ga "QA45. git branch --list with a pattern, then grep" allow "git branch --list 'dnd-*' | grep -E '[0-9]+ (a|b)'"
+case_ga "QA46. git stash list piped to grep" allow "git stash list | grep -E 'On (main|dev): [a-z]+'"
+case_ga "QA47. git worktree list piped to awk" allow "git worktree list | awk '{print \$1, \$3}'"
+case_cmd "QA48. jq slice and object" allow "jq '.items[2:5] | {name: .n, tags: [.t[]]}' f.json"
+case_ga "QA49. grep -P lookbehind" allow "grep -oP '(?<=sha: )[0-9a-f]{7,}' log.txt"
+case_ga "QA50. grep with a POSIX class" allow "grep -E '^[[:space:]]*(def|defp) [a-z_]+' lib/x.ex"
+case_ga "QA51. git log piped to grep with a class" allow "git log --oneline -20 | grep -E '[A-Z]+-[0-9]+: (fix|feat)'"
+case_ga "QA52. git remote -v piped to awk" allow "git remote -v | awk '{print \$2}' | sort -u"
+case_ga "QA53. git config --get-regexp piped to awk" allow "git config --get-regexp '^alias\\.' | awk '{print \$1}'"
+# Listing forms only: a mutating branch/config/stash keeps the text exec.
+case_cmd "QX65. git branch -m after writing a payload" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > .git/hooks/reference-transaction; git branch -m a b"
+case_cmd "QX66. git config set after writing a payload" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > h.sh; git config core.hooksPath ."
+case_cmd "QX67. a git worktree add (runs a checkout hook) after writing a payload" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > h.sh; git stash show -p; git worktree add x"
 
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
@@ -841,6 +876,19 @@ if printf '%s' "$OUT" | grep -q 'git worktree add' && printf '%s' "$OUT" | grep 
   record "T1. Fix: names a WIP commit and git worktree add" PASS
 else
   record "T1. Fix: names a WIP commit and git worktree add" FAIL
+fi
+# T2 (DND-799): the deny text names only actions a captain can take. Captain
+# and admiral sessions have no Grep tool, so a Fix: naming it cannot be
+# followed. Checked over every deny reason the hook can emit.
+_t2=0
+for _c in 'git stash pop' 'gstp' 'git sp' '/usr/bin/g?t stash pop' 'git $SUB' '$GIT stash' 'git update-ref -d refs/stash' 'git -c help.autocorrect=1 x' 'git -c gc.reflogExpire=now gc' 'git -c alias.p=stash p' 'git --git-dir=x zz'; do
+  run "$(json "$WT" "$_c")"
+  if ! is_deny || printf '%s' "$OUT" | grep -qi 'grep tool'; then _t2=1; fi
+done
+if [ "$_t2" -eq 0 ] && printf '%s' "$OUT" | grep -q 'bash <file>'; then
+  record "T2. no deny reason names the Grep tool; the Fix names a script file run with bash" PASS
+else
+  record "T2. no deny reason names the Grep tool; the Fix names a script file run with bash" FAIL
 fi
 
 echo "== B: inputs past one exec argument's limit (MAX_ARG_STRLEN, 128 KiB) =="
