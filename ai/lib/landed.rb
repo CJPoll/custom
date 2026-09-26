@@ -45,6 +45,18 @@
 # not apply there: that repository reads its own origin live. Run by hand,
 # with no pin, a check reads origin itself exactly as before.
 #
+# ANYONE CAN SET AN ENVIRONMENT VARIABLE, so a pin is not trusted on its own
+# (no side channel would help: whatever the gate can hand a child, any caller
+# can hand it too; only origin cannot be forged). A pinned check still runs
+# its ls-remote and requires the pin to be ON origin's main: origin's tip is
+# the pin, or is present here and descends from it. A pin at a commit origin
+# never landed (the relabel commit itself) is a Mismatch. Said out loud, the
+# residual: a hand-set pin can name an OLDER landed commit, which lowers the
+# tip point to that commit's bar; and when origin's current tip has not been
+# fetched here, the pin cannot be checked against it and is taken as given.
+# harness-gate itself never inherits a pin: it sets both variables from its
+# own ls-remote, or clears both.
+#
 # NOT BEING ABLE TO READ THE BAR IS A FAILURE, never a pass. Every miss raises
 # Unreadable carrying each probe and what it gave, so the caller prints "could
 # not measure" as a list of places looked, distinct from "0 weakening(s)".
@@ -223,6 +235,22 @@ module Landed
     ok
   end
 
+  # Is the pin on origin's main as origin reports it now (remote)? Proven when
+  # remote IS the pin, or remote is present here and descends from it. When
+  # remote is not present here (origin moved and nothing here fetched it),
+  # there is nothing to prove against: the pin is taken as read at gate start,
+  # and a probe says so. See "ONE READ PER GATE RUN" for that residual.
+  def pin_on_origin?(root, pinned, remote, probes)
+    return true if remote == pinned
+
+    _out, present = git_read(root, "cat-file", "-e", "#{remote}^{commit}")
+    return ancestor?(root, pinned, remote) if present
+
+    probes << [PIN_PROBE, "origin moved to #{remote[0, 12]}, not fetched here; " \
+                          "pin #{pinned[0, 12]} taken as read at gate start"]
+    true
+  end
+
   # What harness-gate hands its checks: origin's main for root's repository,
   # read once. Returns { PIN_SHA_ENV => sha, PIN_REPO_ENV => key }. Raises
   # Unreadable, with its probes, when origin or the key cannot be read.
@@ -255,13 +283,15 @@ module Landed
     end
 
     pinned = pinned_tip(root, probes)
+    remote = remote_tip(root, probes)
     if pinned
       raise Mismatch.new(tip, pinned, PIN_PROBE) unless tip == pinned || ancestor?(root, pinned, tip)
+      # A pin anyone could set: it must still be on origin's main.
+      raise Mismatch.new(tip, remote) unless pin_on_origin?(root, pinned, remote, probes)
 
       # The bar is the pin, never a local ref that moved past it.
       tip = pinned
     else
-      remote = remote_tip(root, probes)
       raise Mismatch.new(tip, remote) unless remote == tip
     end
 
@@ -351,8 +381,10 @@ module Landed
      "    #{REF} (local) -> #{local}",
      "    #{source} -> #{remote}",
      "  Fix: `git fetch #{REMOTE}` so #{REF} matches what landed, rebase onto " \
-     "it, and re-run. A local ref moved by hand (git update-ref) does not move the bar: " \
-     "the check compares against origin's #{REMOTE_REF}."]
+     "it, and re-run. A local ref moved by hand (git update-ref) does not move the bar, " \
+     "and neither does a hand-set #{PIN_SHA_ENV}: the check compares against origin's " \
+     "#{REMOTE_REF} (under harness-gate, as read once at gate start, and still required " \
+     "to be on origin's #{REMOTE_REF})."]
   end
 
   # [[tag, rel, score]] for every (landed blob -> working-tree file) pair git's

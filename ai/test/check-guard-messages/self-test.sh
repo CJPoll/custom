@@ -652,6 +652,25 @@ if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/some-gate' >/dev
   ok "37 a forged local ref cannot move a pinned bar: the relabel still fails"
 else bad "37 a forged local ref cannot move a pinned bar: the relabel still fails" "rc=${RC} out=${OUT}"; fi
 
+# 37a. A FORGED PIN: the relabel is committed, the local ref moved onto it,
+#      and the pin set to that same commit by hand. Anyone can set an env var,
+#      so the pin must still be on origin's main; this one is not -> FAIL,
+#      naming the forged and the real SHA, no OK.
+R="$(new_fixture pinned-forged-pin)"
+add_exec "${R}" scripts/some-gate "${GUARDED}"
+classify "${R}" scripts/some-gate guard ""; land "${R}"
+REAL="$(git -C "${R}" rev-parse HEAD)"
+reclassify "${R}" scripts/some-gate tool "${TOOL_REASON}"
+add_exec "${R}" scripts/some-gate "${BARE}"; track "${R}"
+git -C "${R}" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m relabel >/dev/null 2>&1
+git -C "${R}" update-ref refs/remotes/origin/main HEAD
+FORGED="$(git -C "${R}" rev-parse HEAD)"; pin "${R}" "${FORGED}"; run_pinned "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${REAL}" >/dev/null \
+   && printf '%s' "${OUT}" | grep -F "${FORGED}" >/dev/null && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null \
+   && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+  ok "37a a hand-set pin at a commit origin never landed fails, both SHAs named"
+else bad "37a a hand-set pin at a commit origin never landed fails, both SHAs named" "rc=${RC} out=${OUT}"; fi
+
 # 37b. The local ref is BEHIND the pin (origin moved before the gate started and
 #      nobody fetched) -> FAIL, both SHAs named, with Fix:.
 R="$(new_fixture pinned-behind)"; track "${R}"
