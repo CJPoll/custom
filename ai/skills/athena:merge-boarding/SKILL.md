@@ -401,6 +401,13 @@ coordinator what the extra forward costs. Measured 2026-09-26 on gen_saas:
   `POST merge_trains/merge_requests/<iid>` in that window returns without error
   and does NOTHING (measured 2026-08-28, !568). Read the status first, then POST,
   then confirm the car appears in `merge_trains?scope=active`.
+- **The POST pins the head** (DND-742): `~/dev/custom/ai/bin/glab-athena api -X
+  POST "projects/:id/merge_trains/merge_requests/<iid>" -f sha=<head sha>`.
+  `glab-athena` refuses a boarding with no `sha` field, a sha that is not the
+  head, or a head pipeline that has not passed on that head. That enforces the
+  first checklist item below; the other two stay yours. A refusal carries a
+  `Fix:`; follow it, never board with plain `glab`. See [[athena:gitlab]] →
+  *Merging*.
 - **Board in parallel.** Every MR at the bar goes on the train immediately, all
   at once; never hold one to compose a batch.
 - **The boarding checklist is exactly three items**: pipeline green on the

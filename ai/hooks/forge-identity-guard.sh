@@ -177,10 +177,25 @@ if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])glab[[:space:]]+([^;|&]* )?
   deny 'forge-identity: this is a bare `glab mr create`, which attributes the MR to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: open it through the wrapper — `~/dev/custom/ai/bin/glab-athena mr create …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `glab`; writes go through glab-athena. If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
 fi
 
-# Bare `glab mr merge`: the MERGE write the admiral performs. Same shape;
-# `glab-athena mr merge` does NOT match.
-if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])glab[[:space:]]+([^;|&]* )?mr[[:space:]]+merge'; then
-  deny 'forge-identity: this is a bare `glab mr merge`, which stamps the merge to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: merge through the wrapper — `~/dev/custom/ai/bin/glab-athena mr merge …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `glab`; writes go through glab-athena. If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
+# Bare `glab mr merge` (or its alias `glab mr accept`, DND-742): the MERGE write
+# the admiral performs. It runs as the owner AND skips glab-athena's merge guard
+# (pinned head, passed head pipeline). Same shape; `glab-athena mr merge` does
+# NOT match.
+if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])glab[[:space:]]+([^;|&]* )?mr[[:space:]]+(merge|accept)'; then
+  deny 'forge-identity: this is a bare `glab mr merge` / `glab mr accept`, which stamps the merge to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent — AND skips the pinned-head, passed-pipeline merge guard (DND-742). Fix: board the merge train through the wrapper — `~/dev/custom/ai/bin/glab-athena api -X POST "projects/:id/merge_trains/merge_requests/<iid>" -f sha=<head sha>` — or, with no train, `~/dev/custom/ai/bin/glab-athena mr merge <iid> --sha <head sha> --yes`, once the head pipeline passed on that head, after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `glab`; writes go through glab-athena. If the wrapper refuses or fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
+fi
+
+# Bare `glab api` that merges (DND-742): the REST merge route
+# (…/merge_requests/<iid>/merge), a merge-train car (…/merge_trains/
+# merge_requests/<iid>), or the GraphQL mergeRequestAccept, in the same command
+# segment as `glab … api`. It runs as the owner AND skips glab-athena's merge
+# guard. `glab-athena api …` does NOT match (after `glab` comes `-`); the wrapper
+# judges those itself. Lexical, so a query read from a file or a %-encoded route
+# is not seen here (the wrapper sees both). A plain-glab READ of a train car is
+# denied too; its Fix names the reads that do not need it. `…/merge_ref` and
+# `…/merge_trains?scope=…` do not match.
+if printf '%s' "$FLAT" | grep -Eiq '(^|[^[:alnum:]_-])glab[[:space:]]+([^;|&]* )?api[[:space:]][^;|&]*(merge_requests/[^[:space:];|&/]+/merge([^[:alnum:]_-]|$)|merge_trains/merge_requests|(^|[^[:alnum:]_])mergeRequestAccept([^[:alnum:]_]|$))'; then
+  deny 'forge-identity: this is a bare `glab api` call on a merge route, a merge-train car, or with the merge mutation (REST …/merge_requests/<iid>/merge; …/merge_trains/merge_requests/<iid>; GraphQL mergeRequestAccept). It merges as the machine owner AND skips the pinned-head, passed-pipeline merge guard (DND-742). Fix: board through the one guarded path — `~/dev/custom/ai/bin/glab-athena api -X POST "projects/:id/merge_trains/merge_requests/<iid>" -f sha=<head sha>` once the head pipeline passed on that head (or `~/dev/custom/ai/bin/glab-athena mr merge <iid> --sha <head sha> --yes` where there is no train). To only READ merge state, use `glab mr view <iid> -F json` or `glab api "projects/:id/merge_trains?scope=active"`. If the wrapper refuses, do not work around it; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
 fi
 
 # ---- Plain `git push` to a github.com remote (DND-389) ----------------------

@@ -35,6 +35,7 @@ ai/lib/fleet/resume-manager.sh	guard
 ai/lib/forge-cli-isolation.sh	guard	
 ai/lib/forge-git-passthrough.sh	guard	
 ai/lib/gh-merge-guard.sh	guard	
+ai/lib/glab-merge-guard.sh	guard	
 ai/lib/eval_score.rb	guard	
 ai/skills/athena:inbox/lib/budget.sh	guard	
 ai/skills/athena:inbox/lib/descriptor.sh	guard	
@@ -45,6 +46,7 @@ ai/skills/athena:inbox/lib/lock.sh	guard
 ai/skills/athena:inbox/lib/names.sh	guard	
 ai/skills/athena:inbox/lib/routed.sh	guard	
 scripts/wt-lib/push.sh	guard	
+ai/lib/forge-api-scan.sh	library	sourced by ai/lib/gh-merge-guard.sh and ai/lib/glab-merge-guard.sh; returns status codes with a why and a how, and each guard composes the exit-3 refusal that carries Fix:
 ai/lib/critic_prompt.rb	library	prompt-text constants required by ai/bin/critic-review; emits nothing and has no failure path of its own
 ai/lib/strict_argv.rb	library	required by ai/bin/admiral-eval / variant-eval / critic-eval; raises StrictArgv::UsageError with a one-line reason, and each caller composes the exit-2 refusal that carries Fix:
 ai/lib/first_party.rb	library	first-party discovery required by ai/bin/harness-gate; raises FirstParty::MeasureError and the caller prints the Fix:

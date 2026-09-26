@@ -117,6 +117,50 @@ check "2b. gh pr merge with flags before subcommand" deny
 
 run "$(bash_json 'glab mr merge 42')"
 check "2c. bare glab mr merge" deny
+check_text "2c2. the deny names the pinned glab-athena path" 'glab-athena mr merge <iid> --sha <head sha>'
+
+# DND-742: bare glab merges beyond `mr merge` run as the owner and skip
+# glab-athena's merge guard.
+run "$(bash_json 'glab mr accept 42 --yes')"
+check "2q. bare glab mr accept (merge's alias)" deny
+
+run "$(bash_json 'glab -R g/r mr accept 42')"
+check "2r. glab mr accept with flags before the subcommand" deny
+
+run "$(bash_json 'glab api -X PUT "projects/:id/merge_requests/42/merge"')"
+check "2s. bare glab api PUT …/merge_requests/<iid>/merge" deny
+
+run "$(bash_json 'glab api --method PUT projects/g%2Fr/merge_requests/42/merge?sha=abc')"
+check "2t. bare glab api merge route with a query string" deny
+
+run "$(bash_json 'glab api -X POST "projects/:id/merge_trains/merge_requests/42" -f sha=abc')"
+check "2u. bare glab api merge-train boarding" deny
+# (The reason is JSON, so its double quotes arrive escaped.)
+check_text "2u2. the deny names the guarded boarding path" 'glab-athena api -X POST \"projects/:id/merge_trains/merge_requests/<iid>\" -f sha=<head sha>'
+
+run "$(bash_json "glab api graphql -f query='mutation { mergeRequestAccept(input: {projectPath: \"g/r\", iid: \"42\", sha: \"x\"}) { errors } }'")"
+check "2v. bare glab api graphql mergeRequestAccept" deny
+
+run "$(bash_json 'cd /tmp && /usr/bin/glab api -X PUT projects/1/merge_requests/42/merge')"
+check "2w. path-qualified glab after a separator" deny
+
+run "$(bash_json '~/dev/custom/ai/bin/glab-athena api -X POST "projects/:id/merge_trains/merge_requests/42" -f sha=abc')"
+check "2x. glab-athena train boarding (the wrapper judges it)" allow
+
+run "$(bash_json '~/dev/custom/ai/bin/glab-athena mr accept 42 --sha abc')"
+check "2y. glab-athena mr accept (the wrapper judges it)" allow
+
+run "$(bash_json 'glab api "projects/:id/merge_trains?scope=active"')"
+check "2z. bare glab api read of the active train" allow
+
+run "$(bash_json 'glab api projects/:id/merge_requests/42/merge_ref')"
+check "2z2. bare glab api read of merge_ref" allow
+
+run "$(bash_json 'glab api -X POST projects/:id/merge_requests/42/notes -f body=merge')"
+check "2z3. bare glab api note (not a merge route)" allow
+
+run "$(bash_json "glab api graphql -f query='mutation { mergeRequestSetLabels(input: {}) { errors } }'")"
+check "2z4. bare glab api graphql mergeRequestSetLabels" allow
 
 # DND-728: a bare `gh api` merge runs as the owner and skips gh-athena's guard.
 run "$(bash_json 'gh api -X PUT repos/o/r/pulls/5/merge -f merge_method=squash')"
