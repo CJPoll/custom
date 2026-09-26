@@ -141,12 +141,20 @@ EOF
 
 # A session that dies before it ever reaches the model: prints whatever the
 # provider said, exits 0, and touches NOTHING. This is the 2026-09-19 shape.
+# The message goes to a fixture file beside the stub, never into the stub's
+# source: expanded inside an unquoted heredoc, a message with double quotes in
+# it (a vendor's JSON body) lost them, so the case tested a different string
+# from the one it named.
 stub_claude_blocked() { # $1 = path, $2 = message
+  stub_claude_blocked_rc "$1" "$2" 0
+}
+stub_claude_blocked_rc() { # $1 = path, $2 = message, $3 = exit code
+  printf '%s\n' "$2" >"$1.msg"
   cat >"$1" <<EOF
 #!/usr/bin/env bash
 echo "\$@" >>"\$(dirname "\$0")/claude-was-invoked"
-printf '%s\n' "$2"
-exit 0
+cat -- "\$0.msg"
+exit $3
 EOF
   chmod +x "$1"
 }
@@ -1235,16 +1243,6 @@ fi
 # class applied to exit 0 only. The sixth wedged the lane, and every tick since
 # has exited 75 without spawning a session: the loop went dark on a provider
 # outage that cleared by itself the next morning.
-stub_claude_blocked_rc() { # $1 = path, $2 = message, $3 = exit code
-  cat >"$1" <<EOF
-#!/usr/bin/env bash
-echo "\$@" >>"\$(dirname "\$0")/claude-was-invoked"
-printf '%s\n' "$2"
-exit $3
-EOF
-  chmod +x "$1"
-}
-
 r="$(new_repo)"; a="$(aux "$r")"
 stub_claude_blocked_rc "$a/stub-claude" "You've hit your weekly limit · resets Sep 24, 8am (America/Denver)" 1
 rc="$(run_runner "$r")"
@@ -1367,12 +1365,57 @@ for msg in 'API Error: 429 {"type":"error"}' 'HTTP 429' 'upstream returned statu
   stub_claude_blocked_rc "$a/stub-claude" "$msg" 1
   rc="$(run_runner "$r")"
   m="$(cat "$(sd "$r")/runs/"*.blocked 2>/dev/null || true)"
-  if [ "$rc" -eq 69 ] && grep -q 'classification=blocked' <<<"$m"; then
-    ok "a real HTTP 429 is still a block signature ('$msg')"
+  # The session log must hold the message byte-for-byte, quotes included, or
+  # the case is not testing the string it names.
+  if [ "$rc" -eq 69 ] && grep -q 'classification=blocked' <<<"$m" \
+     && grep -qxF -- "$msg" "$(sd "$r")"/runs/*.log; then
+    ok "a real HTTP 429 is still a block signature ('$msg', verbatim in the log)"
   else
-    bad "HTTP 429 still matches ('$msg')" "rc=$rc marker=$m"
+    bad "HTTP 429 still matches ('$msg')" "rc=$rc marker=$m log=$(cat "$(sd "$r")"/runs/*.log 2>/dev/null)"
   fi
 done
+
+# A session that removes its own log (DND-833 critic round 1). Under
+# `set -euo pipefail` the byte count of a missing log used to kill the runner
+# on the spot: no teardown, no counter, no record, which is the silent outcome
+# DND-833 exists to remove. And teardown's `>>"${log}"` re-creates the file, so
+# the log's state must be taken when the session exits, not in section 8.
+stub_claude_removes_log() { # $1 = path, $2 = exit code
+  cat >"$1" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >>"\$(dirname "\$0")/claude-was-invoked"
+echo "about to vanish"
+rm -f -- "\${SHIPWRIGHT_RECEIPT%.receipt}.log"
+exit $2
+EOF
+  chmod +x "$1"
+}
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_removes_log "$a/stub-claude" 3
+rc="$(run_runner "$r")"
+f="$(cat "$(sd "$r")/runs/"*.failed 2>/dev/null || true)"
+if [ "$rc" -eq 3 ] && grep -q 'session_output=missing' <<<"$f" \
+   && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "1" ] \
+   && grep -q 'never reported for duty' "$a/runner.err"; then
+  ok "a receipt-less failure whose log VANISHED is recorded as session_output=missing, and counted"
+else
+  bad "missing-log failure is recorded" "rc=$rc record=$f err=$(cat "$a/runner.err")"
+fi
+if [ -z "$(run_worktrees "$r")" ] && [ -z "$(run_branches "$r")" ]; then
+  ok "and the runner survived to tear its lane down"
+else
+  bad "missing log does not abort teardown" "worktrees='$(run_worktrees "$r")' branches='$(run_branches "$r")'"
+fi
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_removes_log "$a/stub-claude" 0
+rc="$(run_runner "$r")"
+m="$(cat "$(sd "$r")/runs/"*.blocked 2>/dev/null || true)"
+if [ "$rc" -eq 69 ] && grep -q 'session_output=missing' <<<"$m" \
+   && grep -q 'classification=UNCLASSIFIED' <<<"$m"; then
+  ok "an exit-0 tick whose log vanished is BLOCKED, UNCLASSIFIED, and its marker says the log was missing"
+else
+  bad "missing-log blocked tick is recorded" "rc=$rc marker=$m err=$(cat "$a/runner.err")"
+fi
 
 # --- receipt RETENTION ------------------------------------------------------
 #
