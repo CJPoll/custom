@@ -1805,9 +1805,21 @@ lenient about what I receive.
 
 ### Writer obligations
 
-- **Exactly one writer per `write` directory per identity**, mirroring the
-  `log` kind's one-writer rule. Two concurrent senders sharing an identity race
-  on `<seq>` allocation, which is a read-then-create with no interlock.
+- **One writer at a time per `write` directory per identity.** Two concurrent
+  senders sharing an identity would race on `<seq>` allocation, a
+  read-then-create with no interlock of its own. `<write>/.sender.lock` (next
+  item) is that interlock: it is held across scan, name and delivery, so two
+  PROGRAMS may share an identity provided each sends through `send-mail` (which
+  takes the lock) and treats a refused lock as a failed send, never as sent.
+  Today that is the `harness-alerts-detector` side: the inbox-client watchdog
+  and the shipwright runner's stale-dirt report (DND-692).
+
+  **Later (2026-09-26):** this item read "Exactly one writer per `write`
+  directory per identity". Superseded by DND-692, which added the shipwright
+  as a second program on the detector identity. The race the rule prevented is
+  closed by the lock, which predates the rule's wording; a lock refusal is loud
+  on both writers (the watchdog logs `ALERT NOT SENT`; the shipwright retries
+  briefly, then reports it and retries on its next tick).
 - **The write lock is `<write>/.sender.lock`, and it is NOT a consumer lock.**
   *Message filename* requires a sender to hold "its `write` directory's lock"
   across *scan, build name, deliver*, and left the file unnamed; this names it,
