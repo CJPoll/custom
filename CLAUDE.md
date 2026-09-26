@@ -452,6 +452,19 @@ across sessions — it is not a one-shot queue drain.
   entry is live (read-only); `--backup <file>` snapshots the current crontab to a
   local (gitignored) file. The committed installer is the canonical source, so
   the loop is always restorable even without the snapshot.
+- **A dirty main checkout yields the tick; STALE dirt escalates once
+  (DND-692).** The yield is exit 0 and never feeds the wedge counter, so on
+  2026-09-22..25 one machine skipped 84 consecutive ticks on days-old leftovers
+  (an abandoned `node_modules`, an `erl_crash.dump`) with no signal at all.
+  Every skip now classifies its dirt, and the verdict is in its `.skipped`
+  record: LIVE if some dirty path changed within `SHIPWRIGHT_STALE_DIRT_AGE_S`
+  (6h), else STALE. After `SHIPWRIGHT_STALE_DIRT_ESCALATE` (3) consecutive
+  STALE skips on one unchanged signature (sorted path list + newest mtime), ONE
+  `harness-alerts` message names the paths, the first-seen tick and the owner's
+  options: commit, gitignore, or remove. No repeat until the signature changes.
+  The runner never touches the dirt. The thresholds and their reasons are in
+  `scripts/athena-shipwright-run.sh`; the classifier is
+  `scripts/lib/shipwright-stale-dirt.sh`.
 - **Lead-time feedback loop.** The same cron also drives fleet **lead time**
   (earliest branch commit → fully deployed) down over time. `ai/bin/lead-time`
   derives it per ticket from git + the forge's CI (GitHub `gh` / GitLab `glab`,

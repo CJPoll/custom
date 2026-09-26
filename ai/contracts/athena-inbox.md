@@ -2599,6 +2599,13 @@ also reports:
   ordinary bound; only its hard maximum can, and every prune is recorded in
   `<dump dir>/pruned-captures.log`, so the reader reports a vanished capture as
   "pruned before processing" (refusal class `pruned`), never as tampering.
+  A second writer shares the detector side (DND-692):
+  `scripts/athena-shipwright-run.sh` sends ONE `shipwright-stale-dirt` message
+  per dirt signature when its main checkout has held the same stale dirt for
+  `SHIPWRIGHT_STALE_DIRT_ESCALATE` consecutive skips. Its `re:` is the tick's
+  `.skipped` record in the shipwright `runs/` directory, which is that
+  message's authority; it names no capture, so retention ignores it. The
+  reader relays it to the owner (`athena:inbox-attend` → *harness-alerts*).
 - **`watchdog`** — the watchdog's three tools (the liveness library,
   `scripts/inbox-client-capture` and `scripts/inbox-client-alert`) are present.
   Missing any, the supervisor keeps the client running, but a wedge is then

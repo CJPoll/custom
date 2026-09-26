@@ -49,6 +49,14 @@
 #                             repeats during a blocked streak (default 3). Mail
 #                             volume only: it never changes the exit code and
 #                             never silences the class.
+#   SHIPWRIGHT_STALE_DIRT_AGE_S  seconds since the newest change to the main
+#                             checkout's dirty paths before that dirt is STALE
+#                             rather than a live editor (default 21600 = 6h)
+#   SHIPWRIGHT_STALE_DIRT_ESCALATE  consecutive STALE skips on one unchanged
+#                             dirt signature before ONE harness-alert is sent
+#                             (default 3). No repeat until the signature changes.
+#   ATHENA_INBOX_ROOT         the inbox root the stale-dirt alert is delivered
+#                             under (default ~/.local/share/athena)
 #   SHIPWRIGHT_REPO           repo to operate on   (default ~/dev/custom)
 #   SHIPWRIGHT_CLAUDE         claude binary to run (default ~/.local/bin/claude)
 #   SHIPWRIGHT_LANES_DIR      dir the per-run lanes live in
@@ -62,7 +70,9 @@
 #
 # Exit codes:
 #   0   the session ran and exited 0, OR this tick was skipped (a run already in
-#       flight, or a dirty main checkout) — a skip is not a failure
+#       flight, or a dirty main checkout) — a skip is not a failure. A dirty
+#       skip on STALE dirt (see section 4) is still exit 0; it escalates by
+#       ONE harness-alert instead, never through the exit code or the wedge
 #   75  EX_TEMPFAIL: refused to spawn because the lane is WEDGED — this was the
 #       SKIP_ESCALATE'th consecutive UNSUCCESSFUL outcome (a failing session, a
 #       stranded push, or reaped dead cron corpses)
@@ -222,6 +232,36 @@ case "${BLOCK_ESCALATE}" in
     BLOCK_ESCALATE=3 ;;
 esac
 
+# The STALE-DIRT escalation (DND-692; section 4). The dirty-tree yield is exit
+# 0 and never feeds the wedge, by design. Measured 2026-09-22..25, that let 84
+# consecutive hourly skips on days-old inert leftovers go by with no signal at
+# all. These two thresholds decide when yielding stops being "a live editor"
+# and becomes something the owner has to hear about.
+#   AGE 6h: a person or agent mid-change touches some dirty path far more often
+#     than every 6 hours; the inbox registry's staleness thresholds use the same
+#     6h figure for "longer than any measured healthy quiet". Overnight pauses
+#     can cross it; the cost of that false positive is one message.
+#   ESCALATE 3: age alone is not enough. Files extracted from an archive or
+#     installed by npm keep their packaged mtimes (npm writes 1985), so a
+#     brand-new node_modules reads as ancient. Three unchanged hourly ticks
+#     prove nobody is working on the tree. Earliest alert: about 8h after the
+#     last change.
+STALE_DIRT_STATE="${STATE_DIR}/stale-dirt"
+STALE_DIRT_AGE_S="${SHIPWRIGHT_STALE_DIRT_AGE_S:-21600}"
+case "${STALE_DIRT_AGE_S}" in
+  ''|*[!0-9]*|0)
+    echo "athena-shipwright: SHIPWRIGHT_STALE_DIRT_AGE_S='${STALE_DIRT_AGE_S}' is not a positive integer; using 21600." >&2
+    echo "  Fix: set SHIPWRIGHT_STALE_DIRT_AGE_S to a positive whole number of seconds (or unset it to accept the default 21600 = 6h). Left unfixed, stale dirt in the main checkout would never be told apart from a live editor." >&2
+    STALE_DIRT_AGE_S=21600 ;;
+esac
+STALE_DIRT_ESCALATE="${SHIPWRIGHT_STALE_DIRT_ESCALATE:-3}"
+case "${STALE_DIRT_ESCALATE}" in
+  ''|*[!0-9]*|0)
+    echo "athena-shipwright: SHIPWRIGHT_STALE_DIRT_ESCALATE='${STALE_DIRT_ESCALATE}' is not a positive integer; using 3." >&2
+    echo "  Fix: set SHIPWRIGHT_STALE_DIRT_ESCALATE to a positive whole number of consecutive stale skips (or unset it to accept the default 3). Left unfixed, the stale-dirt alert would never fire." >&2
+    STALE_DIRT_ESCALATE=3 ;;
+esac
+
 # Known block signatures. This list is a CLASSIFIER, NEVER the detector — the
 # detector is the missing receipt in section 8. A signature the vendor reworded
 # away therefore CANNOT make a blocked tick read as healthy; it can only
@@ -337,6 +377,8 @@ __wrapper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
 # shellcheck source=scripts/lib/dbus-env.sh
 . "${__wrapper_dir}/lib/dbus-env.sh"
 athena_dbus_env_setup
+# shellcheck source=scripts/lib/shipwright-stale-dirt.sh
+. "${__wrapper_dir}/lib/shipwright-stale-dirt.sh"
 "${__wrapper_dir}/reap-orphan-dbus" --min-age 300 >/dev/null 2>&1 || true
 
 # Record who holds it, for the message above in the NEXT tick. Written to the
@@ -486,6 +528,116 @@ fi
 # skip records) and is gitignored only by the user's MACHINE-LOCAL
 # ~/.config/git/gitignore, which is not in this repository. Leaning on that would
 # make the runner's own output count as dirt on any checkout without that rule.
+#
+# STALE DIRT ESCALATES (DND-692). A yield is exit 0 and never feeds the wedge,
+# so a yield that never ends is invisible: measured 2026-09-22..25, 84 hourly
+# skips on days-old leftovers and not one signal. So every dirty skip also
+# classifies its dirt (scripts/lib/shipwright-stale-dirt.sh): LIVE when some
+# dirty path changed within STALE_DIRT_AGE_S, else STALE. After
+# STALE_DIRT_ESCALATE consecutive STALE skips on one unchanged signature, ONE
+# message goes to the harness-alerts maildir naming the paths, the first-seen
+# tick and the owner's options. It is not repeated until the signature changes.
+# A failed send is loud and is NOT recorded as sent, so the next tick retries.
+# None of this touches the dirt, changes the exit code, or feeds the wedge.
+
+# stale_dirt_send <skip-record> <first-seen> <streak> <newest> <count> <sig>
+# Prints the delivered message name. Non-zero (with send-mail's words on
+# stderr) when the send failed.
+stale_dirt_send() {
+  local record="$1" first="$2" streak="$3" newest="$4" count="$5" sig="$6"
+  local repo send_mail body out rc name
+  repo="$(cd -- "${__wrapper_dir}/.." && pwd -P)"
+  send_mail="${repo}/ai/skills/athena:inbox/bin/send-mail"
+  if [ ! -x "${send_mail}" ]; then
+    echo "send-mail is missing: ${send_mail}" >&2
+    return 4
+  fi
+  body="$(mktemp "${TMPDIR:-/tmp}/shipwright-stale-dirt.XXXXXX")" || { echo "cannot create a temporary body file" >&2; return 4; }
+  chmod 600 "${body}"
+  {
+    printf 'The shipwright cron has skipped %s consecutive hourly ticks on the same STALE dirt in its main checkout, so the self-improvement loop is dark (DND-692).\n' "${streak}"
+    printf 'This is a report. The skip record named in re: is the authority.\n\n'
+    printf 'checkout: %s\n' "${MAIN_CHECKOUT}"
+    printf 'first_seen: %s\n' "${first}"
+    printf 'consecutive_stale_skips: %s\n' "${streak}"
+    printf 'newest_change: %s (%sh ago)\n' "$(date -u -d "@${newest}" +%Y-%m-%dT%H:%M:%SZ)" "$(( ( $(date +%s) - newest ) / 3600 ))"
+    printf 'dirty_files: %s\n' "${count}"
+    printf 'signature: %s\n' "${sig}"
+    printf 'paths:\n'
+    sd_display_paths "${MAIN_CHECKOUT}" 20 | sed 's/^/  /'
+    printf '\nFix: these paths are not the shipwright'"'"'s, and it will never touch them. For each one, the owner picks: commit it, add it to .gitignore, or remove it. Until then every hourly tick yields and no retrospective runs. If the dirt is known inert and one run should proceed anyway, run scripts/athena-shipwright-run.sh with SHIPWRIGHT_ALLOW_DIRTY=1. This alert is not repeated until the dirty paths or their newest mtime change.\n'
+  } >"${body}"
+  out="$(cd -- "${repo}" && timeout 20 "${send_mail}" --local harness-alerts-detector shipwright-stale-dirt \
+          --to custom --re "${record}" --body-file "${body}" 2>&1)"; rc=$?
+  rm -f "${body}"
+  if [ "${rc}" -ne 0 ]; then
+    printf '%s\n' "${out}" | head -n 3 >&2
+    return "${rc}"
+  fi
+  name="$(printf '%s\n' "${out}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
+  printf '%s\n' "${name:-?}"
+}
+
+# stale_dirt_track <tick> <skip-record> — classify this skip's dirt, advance the
+# streak, send the one alert when due, and say what happened on stderr and in
+# the record. Always returns 0: it reports on the yield, it never decides it.
+stale_dirt_track() {
+  local tick="$1" record="$2" m sig newest count now age stale=0 label
+  local prev_sig prev_streak first alerted streak name err tmp
+  if ! m="$(sd_measure "${MAIN_CHECKOUT}")"; then
+    printf 'dirt: UNMEASURED (git status or stat failed mid-scan)\n' >>"${record}"
+    echo "athena-shipwright: could not measure the age of the dirt in ${MAIN_CHECKOUT}; this skip is not counted toward the stale-dirt streak." >&2
+    echo "  Fix: usually a path changed during the scan, which is a live editor and needs nothing. If every skip says UNMEASURED, run 'git -C ${MAIN_CHECKOUT} status --porcelain -z -uall' by hand: while it fails, stale dirt cannot escalate." >&2
+    return 0
+  fi
+  sig="$(sed -n 1p <<<"${m}")"; newest="$(sed -n 2p <<<"${m}")"; count="$(sed -n 3p <<<"${m}")"
+  now="$(date +%s)"; age=$(( now - newest ))
+  if [ "${age}" -ge "${STALE_DIRT_AGE_S}" ]; then stale=1; label=STALE; else label=LIVE; fi
+
+  prev_sig="$(sd_state_get "${STALE_DIRT_STATE}" signature)"
+  prev_streak="$(sd_state_get "${STALE_DIRT_STATE}" streak)"
+  first="$(sd_state_get "${STALE_DIRT_STATE}" first_seen)"
+  alerted="$(sd_state_get "${STALE_DIRT_STATE}" alerted)"
+  if [ "${prev_sig}" != "${sig}" ] || [ -z "${first}" ]; then first="${tick}"; alerted=""; fi
+  streak="$(sd_next_streak "${prev_sig}" "${prev_streak}" "${sig}" "${stale}")"
+
+  # The classification lands in the record BEFORE any send: the record is what
+  # the alert's re: names and what its reader verifies, so it must already
+  # carry the STALE verdict when the doorbell rings.
+  printf 'dirt: %s newest_change=%s age_s=%s stale_streak=%s/%s first_seen=%s signature=%s\n' \
+    "${label}" "$(date -u -d "@${newest}" +%Y-%m-%dT%H:%M:%SZ)" "${age}" "${streak}" "${STALE_DIRT_ESCALATE}" \
+    "${first}" "${sig}" >>"${record}"
+
+  name=""
+  if [ "${stale}" -eq 1 ] && [ "${streak}" -ge "${STALE_DIRT_ESCALATE}" ] && [ -z "${alerted}" ]; then
+    err="$(mktemp)"
+    if name="$(stale_dirt_send "${record}" "${first}" "${streak}" "${newest}" "${count}" "${sig}" 2>"${err}")"; then
+      alerted="${name}"
+    else
+      name=""
+      printf 'alert: FAILED to send\n' >>"${record}"
+      echo "athena-shipwright: the stale-dirt harness-alert could NOT be sent: $(tr '\n' ' ' <"${err}")" >&2
+      echo "  Fix: run inbox-doctor from ${__wrapper_dir%/scripts} (is the custom registry entry installed with its harness-alerts channels? scripts/setup-inbox-registry --install). Nothing was recorded as sent, so the next tick retries on its own." >&2
+    fi
+    rm -f "${err}"
+  fi
+
+  tmp="$(mktemp "${STALE_DIRT_STATE}.XXXXXX")" && {
+    printf 'signature=%s\nfirst_seen=%s\nstreak=%s\nalerted=%s\n' "${sig}" "${first}" "${streak}" "${alerted}" >"${tmp}"
+    mv -f "${tmp}" "${STALE_DIRT_STATE}"
+  }
+
+  [ -z "${name}" ] || printf 'alert: harness-alerts %s\n' "${name}" >>"${record}"
+
+  echo "athena-shipwright: the dirt is ${label} (newest change $(( age / 3600 ))h ago; STALE after $(( STALE_DIRT_AGE_S / 3600 ))h); stale streak ${streak}/${STALE_DIRT_ESCALATE} on this signature since ${first}." >&2
+  if [ -n "${name}" ]; then
+    echo "athena-shipwright: stale dirt ALERTED on harness-alerts (${name}); no repeat until the dirt changes." >&2
+  elif [ -n "${alerted}" ]; then
+    echo "athena-shipwright: this stale dirt was already alerted (${alerted}); no repeat until the dirt changes." >&2
+  fi
+  return 0
+}
+
 if [ "${SHIPWRIGHT_ALLOW_DIRTY:-0}" != "1" ]; then
   dirty="$(
     git -C "${MAIN_CHECKOUT}" -c core.quotePath=false status --porcelain -uall \
@@ -499,9 +651,12 @@ if [ "${SHIPWRIGHT_ALLOW_DIRTY:-0}" != "1" ]; then
     } >"${skipped}"
     echo "athena-shipwright: skipping run ${ts}; the main checkout ${MAIN_CHECKOUT} is dirty." >&2
     printf '%s\n' "${dirty}" >&2
-    echo "  Fix: this is a yield to a live editor, not a failure — commit, stash, or remove the paths above (they are not the shipwright's; its own state under ai-artifacts/ is excluded) and the next tick proceeds. The end-of-run fast-forward would refuse to overwrite them anyway. This skip does NOT count toward the wedge escalation. To run regardless when you know the dirt is inert, re-run with SHIPWRIGHT_ALLOW_DIRTY=1. Record: ${skipped}" >&2
+    echo "  Fix: this is a yield to a live editor, not a failure — commit, gitignore, or remove the paths above (they are not the shipwright's; its own state under ai-artifacts/ is excluded) and the next tick proceeds. The end-of-run fast-forward would refuse to overwrite them anyway. This skip does NOT count toward the wedge escalation; dirt left STALE escalates once, to harness-alerts, instead. To run regardless when you know the dirt is inert, re-run with SHIPWRIGHT_ALLOW_DIRTY=1. Record: ${skipped}" >&2
+    stale_dirt_track "${ts}" "${skipped}"
     exit 0
   fi
+  # A clean main checkout ends any stale-dirt streak.
+  rm -f "${STALE_DIRT_STATE}"
 fi
 
 # --- 5. provision this run's lane -------------------------------------------
