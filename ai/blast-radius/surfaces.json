@@ -165,6 +165,14 @@
           "A `drop table` on a table created earlier in the SAME migration is a hit, though it destroys nothing. Rare; fails closed by design."
         ]
       }
+    },
+    {
+      "class": "owner-approval-policy",
+      "why": "merging changes which actions an owner's Slack click may approve (the owner approval grant allowlist); a button can never approve a widening of what buttons can approve, so no grant class covers this surface",
+      "patterns": [
+        "**/athena/owner_approvals/action_class.ex",
+        "**/athena/owner_approvals/action_class_test.exs"
+      ]
     }
   ]
 }

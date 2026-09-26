@@ -68,7 +68,17 @@
 # Usage:
 #   blast-radius --base <ref> --head <ref> [--repo <dir>]
 #                [--owner-approval <authorization>] [--gate-ran <label>]
+#   blast-radius --grant-eligible merge.pr_only_workflow --base <ref> --head <ref>
+#                [--repo <dir>]
 #   blast-radius --self-test
+#
+#   --grant-eligible <class>  a different question (DND-596): may an owner
+#                       approval grant of <class> cover this head? Prints
+#                       GRANT-ELIGIBLE (exit 0) or NOT ELIGIBLE with a reason
+#                       per file (exit 4); an unknown class is exit 2. Only 0
+#                       is eligible. The rules: ai/contracts/athena-events.md
+#                       -> Owner approval grants -> Eligibility for
+#                       `merge.pr_only_workflow`, and grant_eligible below.
 #
 #   --gate-ran <label>  display only: the gate command that verified <head>,
 #                       appended to the HOT-OWNER-APPROVED line so the owner-
@@ -80,7 +90,7 @@
 #      authorized the action)
 #   2  usage / unresolvable ref / empty diff / manifest error
 #   4  HOT -- merging performs an irreversible, billable or one-way action.
-#      NOT the fleet's call.
+#      NOT the fleet's call. Under --grant-eligible: NOT ELIGIBLE.
 
 require "json"
 require "yaml"
@@ -1066,6 +1076,403 @@ HOT_FIX = <<~FIX.freeze
   The full bar still applies, and a non-security change cannot borrow it.
 FIX
 
+# --- owner approval grant eligibility (DND-596) -----------------------------
+#
+# `--grant-eligible merge.pr_only_workflow` answers a DIFFERENT question from
+# the HOT verdict: may an owner's Slack click (an owner approval grant,
+# ai/contracts/athena-events.md -> Owner approval grants) stand in for the
+# owner's own words on this exit-4 head? Only when merging is reversible: every
+# hit is a GitHub workflow that runs solely on `pull_request`, at base and at
+# head, and no other workflow calls it. GitHub has then already run the
+# branch's own version before the merge, and merging starts no new run with
+# default-branch privileges.
+#
+# It is an ALLOW-list, deliberately NOT trigger_hit. trigger_hit is the DENY-list
+# of pre-merge events (DND-590) that decides what is merge-time automation; a
+# grant needs the opposite proof, and pull_request_review, merge_group or a
+# push to a non-default branch -- nil to trigger_hit -- are not proof.
+#
+# Every doubt answers NOT ELIGIBLE: a shape this code does not model, a blob it
+# cannot read, a YAML feature two parsers may resolve differently. The cost is
+# asymmetric: a false NOT ELIGIBLE holds one MR for the owner's own words (the
+# path every exit 4 takes today); a false ELIGIBLE lets a button approve a
+# deploy. Exit 0 is the ONLY eligible answer; 4 is NOT ELIGIBLE, 2 a usage or
+# git error. A caller must read anything but 0 as not eligible.
+GRANT_CLASSES = %w[merge.pr_only_workflow].freeze
+# Classes the contract declares that no diff decides: the server executes a
+# priority.transition itself, and the gate never redeems one.
+NON_DIFF_GRANT_CLASSES = %w[priority.transition].freeze
+GRANT_WORKFLOW_FILE = %r{\A\.github/workflows/[^/]+\.ya?ml\z}.freeze
+# The workflows rule 3 scans for a caller. Case-insensitive on purpose: a caller
+# this check fails to list is a caller it fails to see, so the listing widens.
+GRANT_CALLER_FILE = %r{\A\.github/workflows/[^/]+\.ya?ml\z}i.freeze
+PR_FILTER_KEYS = %w[types branches branches-ignore paths paths-ignore].freeze
+# The pull_request activity types that never fire BECAUSE of a merge. `closed`
+# is left out: it fires on the merge itself and runs the PR's code with its
+# secrets -- a new run started by merging, the one thing a grant must exclude.
+# A type not listed (a new one GitHub adds) is UNDETERMINED, never allowed.
+PR_TYPES_ALLOWED = %w[
+  assigned unassigned labeled unlabeled opened edited reopened synchronize
+  converted_to_draft ready_for_review locked unlocked review_requested
+  review_request_removed auto_merge_enabled auto_merge_disabled milestoned
+  demilestoned enqueued dequeued
+].freeze
+REGULAR_BLOB_MODES = %w[100644 100755].freeze
+
+# verdict: :pr_only (proven exactly {pull_request}), :other (a trigger that is
+# not pull_request, determined) or :undetermined (not modelled; fails closed).
+TriggerRead = Struct.new(:verdict, :detail)
+
+def undetermined_read(what)
+  TriggerRead.new(:undetermined, "UNDETERMINED: #{what}")
+end
+
+# The key a YAML parser resolves: a quoted scalar is its text; a plain one is
+# YAML 1.1-resolved, so `on`, `On`, `yes` and `true` are all the boolean true.
+def yaml_key_identity(node, scanner)
+  node.quoted ? node.value : scanner.tokenize(node.value)
+end
+
+# A reason string when the document uses a YAML feature that two parsers can
+# read differently, else nil. GitHub's parser is not Psych: a duplicate key, a
+# merge key, an explicit tag or a non-scalar key each has at least two readings,
+# and this check would be choosing one of them for GitHub.
+def yaml_ambiguity(node, scanner)
+  return "an explicit YAML tag (#{node.tag})" if node.respond_to?(:tag) && node.tag && !node.is_a?(Psych::Nodes::Document)
+
+  if node.is_a?(Psych::Nodes::Mapping)
+    seen = {}
+    node.children.each_slice(2) do |key, _|
+      return "a non-scalar mapping key (#{key.class.name.split('::').last})" unless key.is_a?(Psych::Nodes::Scalar)
+      return "a YAML merge key `<<`" if !key.quoted && key.value == "<<"
+
+      id = yaml_key_identity(key, scanner)
+      return "a duplicate key #{key.value.inspect} (parsers disagree on which one wins)" if seen.key?(id)
+
+      seen[id] = true
+    end
+  end
+  (node.children || []).each do |c|
+    r = yaml_ambiguity(c, scanner)
+    return r if r
+  end
+  nil
+end
+
+# The trigger read for one workflow blob's TEXT.
+def grant_trigger_read(text)
+  return undetermined_read("binary or over #{REF_SCAN_LIMIT} bytes") if text.bytesize > REF_SCAN_LIMIT || text.include?("\0")
+
+  begin
+    docs = Psych.parse_stream(text).children
+  rescue Psych::Exception => e
+    return undetermined_read("unparseable YAML (#{e.class}: #{e.message.lines.first.to_s.strip})")
+  end
+  return undetermined_read("#{docs.size} YAML documents in one file (exactly one is modelled)") unless docs.size == 1
+
+  scanner = Psych::ScalarScanner.new(Psych::ClassLoader::Restricted.new([], []))
+  root = docs[0].root
+  return undetermined_read("the workflow is not a YAML mapping") unless root.is_a?(Psych::Nodes::Mapping)
+
+  if (why = yaml_ambiguity(root, scanner))
+    return undetermined_read(why)
+  end
+
+  on_keys = root.children.each_slice(2).map(&:first).select { |k| [true, "on"].include?(yaml_key_identity(k, scanner)) }
+  return undetermined_read("no `on:` key") if on_keys.empty?
+  if on_keys.size > 1
+    return undetermined_read("#{on_keys.size} keys a parser can read as the trigger key " \
+                             "(#{on_keys.map { |k| k.value.inspect }.join(', ')})")
+  end
+  return undetermined_read("the trigger key is spelled #{on_keys[0].value.inspect}, not `on`") unless on_keys[0].value == "on"
+
+  begin
+    doc = YAML.safe_load(text, aliases: true)
+  rescue Psych::Exception => e
+    return undetermined_read("YAML the safe loader refuses (#{e.class})")
+  end
+  pr_only_on(doc.key?("on") ? doc["on"] : doc[true])
+end
+
+def pr_only_on(on)
+  case on
+  when String
+    events = [on]
+    cfg = nil
+  when Array
+    return undetermined_read("on: #{on.inspect} (a list entry is not an event name)") unless !on.empty? && on.all?(String)
+
+    events = on.uniq
+    cfg = nil
+  when Hash
+    return undetermined_read("on: #{on.keys.inspect} (a key is not an event name)") unless !on.empty? && on.keys.all?(String)
+
+    events = on.keys
+    cfg = on["pull_request"]
+  when nil
+    return undetermined_read("an empty `on:`")
+  else
+    return undetermined_read("on: #{on.inspect} (#{on.class})")
+  end
+
+  others = events - ["pull_request"]
+  unless others.empty?
+    return TriggerRead.new(:other, "on: #{events.join(', ')} -- #{others.join(', ')} is not pull_request")
+  end
+
+  pr_filter_read(cfg)
+end
+
+def pr_filter_read(cfg)
+  return TriggerRead.new(:pr_only, "on: pull_request") if cfg.nil?
+  return undetermined_read("on.pull_request is #{cfg.inspect} (#{cfg.class}), not a mapping of filters") unless cfg.is_a?(Hash)
+
+  unknown = cfg.keys - PR_FILTER_KEYS
+  unless unknown.empty?
+    return undetermined_read("on.pull_request.#{unknown.map(&:to_s).join(', ')}: a filter this check does not model " \
+                             "(it models #{PR_FILTER_KEYS.join(', ')})")
+  end
+
+  shown = []
+  cfg.each do |k, v|
+    list = v.is_a?(String) ? [v] : v
+    unless list.is_a?(Array) && !list.empty? && list.all?(String)
+      return undetermined_read("on.pull_request.#{k}: #{v.inspect} is not a string or a non-empty list of strings")
+    end
+
+    shown << "#{k}: [#{list.join(', ')}]"
+    next unless k == "types"
+
+    return TriggerRead.new(:other, "on.pull_request.types includes closed -- it fires on the merge itself") if list.include?("closed")
+
+    unknown_types = list - PR_TYPES_ALLOWED
+    unless unknown_types.empty?
+      return undetermined_read("on.pull_request.types: #{unknown_types.join(', ')} is an activity type this check does not model")
+    end
+  end
+  TriggerRead.new(:pr_only, "on: pull_request (#{shown.join('; ')})")
+end
+
+# [mode, text] of `path` at `rev`, or nil when absent there. A git failure other
+# than absence dies (exit 2): the answer is unknown, never "absent".
+def blob_at(repo, rev, path)
+  out, err, ok = git(repo, "ls-tree", "-z", rev, "--", path)
+  unless ok
+    die("`git ls-tree #{short(rev)} -- #{path}` failed in #{repo}: #{err.strip}",
+        "the tree at #{short(rev)} could not be read, so eligibility is UNKNOWN, not ELIGIBLE. " \
+        "Resolve the git error and re-run.")
+  end
+  entry = out.split("\0").find { |e| e.split("\t", 2)[1] == path }
+  return nil unless entry
+
+  mode = entry.split(" ", 2)[0]
+  [mode, REGULAR_BLOB_MODES.include?(mode) ? show_at(repo, rev, path) : nil]
+end
+
+def top_level_workflows(repo, rev)
+  out, err, ok = git(repo, "ls-tree", "-z", "--name-only", rev, "--", ".github/workflows/")
+  unless ok
+    die("`git ls-tree #{short(rev)} -- .github/workflows/` failed in #{repo}: #{err.strip}",
+        "the workflows at #{short(rev)} could not be listed, so eligibility is UNKNOWN, not ELIGIBLE. " \
+        "Resolve the git error and re-run.")
+  end
+  out.split("\0").select { |p| p.match?(GRANT_CALLER_FILE) }.sort
+end
+
+# Every string in a parsed YAML document, keys included: a parsed string has its
+# escapes decoded (`c\x69.yml` is `ci.yml` there), which the raw text hides.
+def yaml_all_strings(node, out = [])
+  case node
+  when Hash then node.each { |k, v| yaml_all_strings(k, out); yaml_all_strings(v, out) }
+  when Array then node.each { |v| yaml_all_strings(v, out) }
+  when String then out << node
+  end
+  out
+end
+
+# Does this workflow text name `target`? Matched on the basename, ignoring case,
+# over the raw text and over the parsed strings. Each widens: a name that merely
+# contains the basename is a reference here, which can only make a head NOT
+# ELIGIBLE.
+def names_file?(text, target)
+  needle = File.basename(target).downcase
+  corpora = [text]
+  begin
+    strings = yaml_all_strings(YAML.safe_load(text, aliases: true))
+    corpora << strings.join("\n")
+  rescue Psych::Exception
+    nil # the raw text is still scanned
+  end
+  corpora.any? { |c| c.downcase.include?(needle) }
+end
+
+def side_read(repo, rev, path, side, reads)
+  entry = blob_at(repo, rev, path)
+  return [nil, "#{side}: absent (#{side == 'base' ? 'added' : 'deleted'})"] if entry.nil?
+
+  mode, text = entry
+  read = if text.nil?
+           undetermined_read("mode #{mode} is not a regular file (a symlink or submodule is not modelled)")
+         else
+           grant_trigger_read(text)
+         end
+  reads << [side, read]
+  [read, "#{side}: #{read.detail}"]
+end
+
+def grant_eligible(repo, base, head, surfaces)
+  base_sha, head_sha = [base, head].map do |ref|
+    out, _, ok = git(repo, "rev-parse", "--verify", "#{ref}^{commit}")
+    unless ok
+      die("cannot resolve '#{ref}' in #{repo}.",
+          "pass the SHA pair integration-gate printed. An unresolvable ref is an ERROR, never ELIGIBLE.")
+    end
+    out.strip
+  end
+
+  # --no-renames: a rename is its delete PLUS its add. Rename detection lists only
+  # the new path, and a renamed push workflow's deleted side would go unread.
+  out, err, ok = git(repo, "diff", "--name-only", "--no-renames", "-z", "#{base_sha}..#{head_sha}")
+  unless ok
+    die("`git diff --no-renames #{short(base_sha)}..#{short(head_sha)}` failed in #{repo}: #{err.strip}",
+        "the changed-file set is UNKNOWN, not empty. Resolve the git error and re-run.")
+  end
+  files = out.split("\0").reject(&:empty?)
+  if files.empty?
+    die("the diff #{short(base_sha)}..#{short(head_sha)} is EMPTY -- refusing to decide eligibility.",
+        "re-check the SHA pair integration-gate printed. An empty diff is an ERROR, never ELIGIBLE.")
+  end
+
+  # Rule 1. Each surface is matched on its OWN, so a file two classes claim
+  # reports both: hits_for stops at the first, and the first may be the
+  # eligible one.
+  hits = []
+  head_refs = {}
+  surfaces.each do |s|
+    found, = hits_for(files, [s], repo, head_sha, head_refs)
+    hits.concat(found)
+  end
+  reasons = []
+  reads_by_file = {}
+  reasons << ["(diff)", "no declared surface is touched, so there is nothing for a grant to approve"] if hits.empty?
+
+  workflow_hits = []
+  hits.each do |h|
+    if h[:class] != "deploy-automation"
+      reasons << [h[:path], "[#{h[:class]}] -- no grant class covers this surface"]
+    elsif h[:via]
+      reasons << [h[:path], "[deploy-automation] executed by #{h[:via]} -- not a top-level workflow file"]
+    elsif !h[:path].match?(GRANT_WORKFLOW_FILE)
+      reasons << [h[:path], "[deploy-automation] not a top-level workflow file (.github/workflows/<name>.yml)"]
+    else
+      workflow_hits << h[:path]
+    end
+  end
+  workflow_hits.uniq!
+
+  # Rule 2 (and rule 4 for the hit files): the trigger ALLOW-list at base AND head.
+  proven = { "base" => Set.new, "head" => Set.new }
+  workflow_hits.each do |f|
+    reads = []
+    lines = [["base", base_sha], ["head", head_sha]].map { |side, rev| side_read(repo, rev, f, side, reads)[1] }
+    reads_by_file[f] = lines
+    reasons << [f, "absent at both base and head -- UNDETERMINED"] if reads.empty?
+    reads.each do |side, read|
+      if read.verdict == :pr_only
+        proven[side] << f
+      else
+        reasons << [f, "#{side}: #{read.detail}"]
+      end
+    end
+  end
+
+  # Rule 3: no workflow whose triggers are not exactly {pull_request} names a
+  # hit file, at base or at head. A workflow this code cannot read is not
+  # proven, so it is scanned as raw text.
+  scanned = { "base" => [], "head" => [] }
+  [["base", base_sha], ["head", head_sha]].each do |side, rev|
+    top_level_workflows(repo, rev).each do |w|
+      next if proven[side].include?(w)
+
+      mode, text = blob_at(repo, rev, w)
+      next if mode.nil?
+
+      if text.nil?
+        workflow_hits.each do |f|
+          reasons << [f, "#{w} at #{side} has mode #{mode}, not a regular file, so whether it names this " \
+                         "file is UNDETERMINED"]
+        end
+        next
+      end
+      next if grant_trigger_read(text).verdict == :pr_only
+
+      scanned[side] << w
+      workflow_hits.each do |f|
+        next if f == w
+
+        reasons << [f, "referenced by #{w} at #{side}, whose triggers are not exactly {pull_request}"] if names_file?(text, f)
+      end
+    end
+  end
+
+  # The DND-589 walk, at both sides: a merge-time CI config, or a script it
+  # runs, that names a hit file. It reaches files rule 3's workflow scan does not.
+  refs = { "head" => head_refs[:result] }
+  [["base", base_sha], ["head", head_sha]].each do |side, rev|
+    refs[side] ||= ci_references(repo, rev)
+    workflow_hits.each do |f|
+      via = refs[side][:files][f]
+      reasons << [f, "executed by #{via} at #{side} (a merge-time CI config names it, directly or through a file it runs)"] if via
+    end
+  end
+
+  { base: base_sha, head: head_sha, files: files, hits: hits, reasons: reasons.uniq,
+    reads: reads_by_file, scanned: scanned, refs: refs }
+end
+
+GRANT_NOT_ELIGIBLE_FIX = <<~FIX.freeze
+  no owner approval grant can cover this head. Hold the MR for the owner's own words, as for
+  any exit 4 (the HOT procedure, --owner-approval). Or split the change: a diff whose only
+  hits are top-level workflows triggered solely by `pull_request` at base and head, and named
+  by no other workflow, is eligible. Never edit a workflow's triggers just to pass this check:
+  the triggers are what makes a merge reversible (ai/blocks/ops/safety-checks.md).
+FIX
+
+def print_grant_report(klass, r)
+  eligible = r[:reasons].empty?
+  puts "#{eligible ? 'GRANT-ELIGIBLE' : 'NOT ELIGIBLE'} #{klass} base=#{r[:base]} head=#{r[:head]}"
+  puts "  compared: #{r[:files].size} changed file(s), renames split into delete + add -> #{r[:hits].size} hit"
+  r[:hits].each { |h| puts "    #{h[:path]}  [#{h[:class]}]" }
+  puts "  read:" unless r[:reads].empty?
+  r[:reads].each do |f, lines|
+    puts "    #{f}"
+    lines.each { |l| puts "      #{l}" }
+  end
+  # A zero names its key: which workflows were scanned for a reference.
+  r[:scanned].each do |side, names|
+    puts "  references at #{side}: scanned #{names.size} workflow(s) whose triggers are not exactly " \
+         "{pull_request}#{names.empty? ? '' : " (#{names.join(', ')})"}"
+  end
+  r[:refs].each do |side, refs|
+    puts "  ci-references at #{side}: #{refs[:files].size} file(s) executed by #{refs[:roots].size} merge-time CI config(s)"
+  end
+  return if eligible
+
+  puts "  reasons:"
+  r[:reasons].each { |path, why| puts "    #{path}: #{why}" }
+end
+
+def run_grant(klass, repo, base, head, manifest)
+  surfaces, = load_manifest(manifest)
+  r = grant_eligible(repo, base, head, surfaces)
+  print_grant_report(klass, r)
+  return 0 if r[:reasons].empty?
+
+  warn "#{PROG}: NOT ELIGIBLE for #{klass}: #{r[:reasons].size} reason(s), each named on stdout."
+  warn "Fix: #{GRANT_NOT_ELIGIBLE_FIX}"
+  4
+end
+
 # --- main -------------------------------------------------------------------
 
 def run(argv)
@@ -1073,6 +1480,7 @@ def run(argv)
   repo = Dir.pwd
   owner_approval = nil
   gate_ran = nil
+  grant_class = nil
   manifest = DEFAULT_MANIFEST
 
   until argv.empty?
@@ -1098,12 +1506,18 @@ def run(argv)
         die("--gate-ran needs the gate command that ran.",
             "pass the command, e.g. --gate-ran 'ai/bin/harness-gate', or drop the flag.")
       end
+    when "--grant-eligible"
+      grant_class = argv.shift
+      if grant_class.nil? || grant_class.start_with?("-")
+        die("--grant-eligible needs an owner approval grant class.",
+            "pass the class, e.g. --grant-eligible merge.pr_only_workflow. The class is never implied.")
+      end
     when "-h", "--help"
-      puts File.read(__FILE__).lines[3..80].map { |l| l.sub(/\A# ?/, "") }.join
+      puts File.read(__FILE__).lines.drop(3).take_while { |l| l.start_with?("#") }.map { |l| l.sub(/\A# ?/, "") }.join
       exit 0
     else
       die("unknown argument '#{a}'.",
-          "valid flags are --base, --head, --repo, --owner-approval, --gate-ran, --self-test.")
+          "valid flags are --base, --head, --repo, --owner-approval, --gate-ran, --grant-eligible, --self-test.")
     end
   end
 
@@ -1114,6 +1528,25 @@ def run(argv)
                                                        out: File::NULL, err: File::NULL)
     die("--repo '#{repo}' is not a git repository.",
         "pass the worktree whose merge you are classifying.")
+  end
+
+  if grant_class
+    if owner_approval || gate_ran
+      die("--grant-eligible cannot be combined with --owner-approval or --gate-ran.",
+          "eligibility asks whether a grant MAY cover this head; an approval records that the owner " \
+          "DID authorize it. Run them as two separate calls.")
+    end
+    if NON_DIFF_GRANT_CLASSES.include?(grant_class)
+      die("grant class '#{grant_class}' is not decided over a diff.",
+          "the server executes a #{grant_class} grant itself and integration-gate never redeems one. " \
+          "The only class this check decides is: #{GRANT_CLASSES.join(', ')}.")
+    end
+    unless GRANT_CLASSES.include?(grant_class)
+      die("unknown owner approval grant class '#{grant_class}'.",
+          "the classes this check decides are: #{GRANT_CLASSES.join(', ')}. A class is added only by an " \
+          "owner ratification (ai/contracts/athena-events.md -> Owner approval grants -> Action classes).")
+    end
+    return run_grant(grant_class, repo, base, head, manifest)
   end
 
   surfaces, pattern_count = load_manifest(manifest)
@@ -2221,6 +2654,9 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
    ["a trigger key spelled `On:` (not the key GitHub reads)", on_wf.call("On: pull_request\n"), "UNDETERMINED"],
    ["TWO YAML documents in one file", "#{on_wf.call("on: pull_request\n")}---\n#{on_wf.call("on: push\n")}", "documents"],
    ["an explicit YAML tag", on_wf.call("on: !!str pull_request\n"), "tag"],
+   ["a workflow that is not a YAML mapping", "- pull_request\n", "not a YAML mapping"],
+   ["a value the safe loader refuses (a date)", on_wf.call("on: pull_request\nsince: 2024-01-01\n"), "safe loader"],
+   ["a workflow over the scan limit", on_wf.call("on: pull_request\n") + "# #{'x' * REF_SCAN_LIMIT}\n", "over"],
    ["a merge key `<<` (parsers disagree on precedence)",
     "x: &x\n  push:\n#{on_wf.call("on:\n  <<: *x\n  pull_request:\n")}", "<<"]].each do |label, body, word|
     not_eligible.call("#{label} fails CLOSED", [".github/workflows/ci.yml", word],
@@ -2258,6 +2694,22 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
                       pr_change.call(r)
                       put.call(r, ".github/workflows/deploy.yml", "name: d\non: schedule\njobs:\n  c:\n    uses: ./.github/workflows/ci.yml\n")
                     })
+  not_eligible.call("the same, spelled in another case (`./.github/workflows/CI.YML`)",
+                    ["referenced by .github/workflows/post-merge.yml"],
+                    seed: ref_seed.call("name: pm\non: workflow_dispatch\njobs:\n  c:\n    uses: ./.github/workflows/CI.YML\n"))
+  not_eligible.call("the same, from a caller whose extension is upper case (`deploy.YML`)",
+                    ["referenced by .github/workflows/deploy.YML"],
+                    seed: lambda { |r|
+                      pr_seed.call(r)
+                      put.call(r, ".github/workflows/deploy.YML", "name: d\non: pull_request_target\njobs:\n  c:\n    uses: ./.github/workflows/ci.yml\n")
+                    })
+  not_eligible.call("a workflow that is a SYMLINK anywhere in the repo (whether it names the hit is unknown)",
+                    [".github/workflows/linked.yml", "UNDETERMINED"],
+                    seed: lambda { |r|
+                      pr_seed.call(r)
+                      put.call(r, "other.yml", "name: o\non: push\njobs:\n  c:\n    uses: ./.github/workflows/ci.yml\n")
+                      File.symlink("../../other.yml", File.join(r, ".github/workflows/linked.yml"))
+                    })
   # A push workflow's SCRIPT that names the hit file: the DND-589 walk sees it.
   not_eligible.call("a script a push workflow runs names the hit file (the ci-references walk)",
                     ["executed by", "scripts/ship.sh"],
@@ -2266,6 +2718,21 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
                       put.call(r, "scripts/ship.sh", "#!/bin/sh\ncp .github/workflows/ci.yml /tmp/x.yml\n")
                       wf.call(r, "post-merge.yml", deploy_wf.sub("terraform apply -auto-approve", "scripts/ship.sh"))
                     })
+
+  # Rule 1 matches every surface on its own. hits_for stops at a file's FIRST
+  # class, so with a manifest where deploy-automation comes first, a workflow
+  # another surface also claims must still name that other class.
+  overlap = File.join(tmp, "grant-overlap.json")
+  File.write(overlap, JSON.dump({ "schema" => MANIFEST_SCHEMA, "surfaces" => [
+    { "class" => "deploy-automation", "why" => "w", "patterns" => [".github/workflows/**"] },
+    { "class" => "some-later-class", "why" => "w", "patterns" => ["**/ci.yml"] }
+  ] }))
+  d = File.join(tmp, "grant-overlap")
+  b, h = mkrepo.call(d, seed: pr_seed) { |r| pr_change.call(r) }
+  out, err, code = run_br.call(["--grant-eligible", "merge.pr_only_workflow", "--base", b, "--head", h,
+                                "--repo", d, "--manifest", overlap])
+  check.call("grant NOT ELIGIBLE: a workflow a LATER surface also claims names that class (every surface is matched)",
+             code == 4 && out.include?("[some-later-class]"), "exit=#{code} out=#{out} err=#{err}")
 
   # --- Q-G9 and argument handling -------------------------------------------
   d = File.join(tmp, "grant1")
