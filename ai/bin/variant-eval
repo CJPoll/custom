@@ -1584,6 +1584,16 @@ def self_test
     fail.("`variant-eval #{args.join(' ')}` must name #{named} on stderr: #{err.inspect}") unless err.include?(named)
     fail.("`variant-eval #{args.join(' ')}` must carry a Fix: line") unless err.include?("Fix:")
   end
+  # -- DND-820: a bad --variant/--baseline ref carries exactly one Fix: -----
+  # resolve_commit's raise already carries its own actionable Fix:; the
+  # top-level `rescue StandardError` must not append a second, generic one on
+  # top of it.
+  _out, err, st = capture([RbConfig.ruby, File.expand_path(__FILE__), "--variant", "does-not-exist-ref-dnd820"])
+  fail.("a nonexistent --variant ref must exit 1 (got #{st.exitstatus})") unless st.exitstatus == 1
+  fail.("a nonexistent --variant ref must carry a Fix: line: #{err.inspect}") unless err.include?("Fix:")
+  fail.("a nonexistent --variant ref must carry exactly ONE Fix: line, got #{err.scan('Fix:').size}: #{err.inspect}") \
+    unless err.scan("Fix:").size == 1
+
   out, _err, st = capture([RbConfig.ruby, File.expand_path(__FILE__), "--help", "--bogus"])
   fail.("--help must still win over any other argument (stdout Usage, exit 0)") \
     unless st.exitstatus.zero? && out.include?("Usage:")
@@ -1835,8 +1845,12 @@ rescue MutationAttempt => e
   1
 rescue StandardError => e
   warn "variant-eval: FAILED — #{e.message}"
+  # DND-820: e.message may already carry its own actionable Fix: (e.g.
+  # resolve_commit's "does not name a commit" raise) — never stack a second,
+  # generic one on top of it. One Fix: per failure.
   warn "  Fix: check that --variant and --baseline are valid git refs and that `git worktree add` can " \
-       "create scratch trees for them."
+       "create scratch trees for them." \
+    unless e.message.include?("Fix:")
   1
 end
 
