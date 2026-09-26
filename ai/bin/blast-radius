@@ -1360,11 +1360,11 @@ def grant_eligible(repo, base, head, surfaces)
         "Eligibility over any other pair says nothing about what merging does.")
   end
 
-  # --no-renames: a rename is its delete PLUS its add. Rename detection lists only
-  # the new path, and a renamed push workflow's deleted side would go unread.
-  out, err, ok = git(repo, "diff", "--name-only", "--no-renames", "-z", "#{base_sha}..#{head_sha}")
+  # The same listing as the HOT verdict (CHANGED_PATHS_ARGS, DND-770): a rename
+  # is its delete PLUS its add, so a renamed push workflow's old side is read.
+  out, err, ok = git(repo, *CHANGED_PATHS_ARGS, "#{base_sha}..#{head_sha}")
   unless ok
-    die("`git diff --no-renames #{short(base_sha)}..#{short(head_sha)}` failed in #{repo}: #{err.strip}",
+    die("`git #{CHANGED_PATHS_ARGS.join(' ')} #{short(base_sha)}..#{short(head_sha)}` failed in #{repo}: #{err.strip}",
         "the changed-file set is UNKNOWN, not empty. Resolve the git error and re-run.")
   end
   files = out.split("\0").reject(&:empty?)
