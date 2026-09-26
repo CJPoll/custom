@@ -1307,24 +1307,31 @@ def yaml_all_strings(node, out = [])
   out
 end
 
-# Does this workflow text name `target`? Matched on the basename, ignoring case,
-# over the raw text and over the parsed strings. Each widens: a name that merely
-# contains the basename is a reference here, which can only make a head NOT
-# ELIGIBLE.
-def names_file?(text, target)
-  needle = File.basename(target).downcase
+# The texts a word search over a workflow must cover, lowercased: the raw text,
+# and every parsed string, keys included. A double-quoted YAML escape
+# (`c\x69.yml`, `"workflow\x5frun":`) is decoded only in the parsed strings, so
+# a search of the raw text alone misses it. EVERY word search in rule 3 goes
+# through here. Unparseable text is still searched raw.
+def workflow_corpora(text)
   corpora = [text]
   begin
-    strings = yaml_all_strings(YAML.safe_load(text, aliases: true))
-    corpora << strings.join("\n")
+    corpora << yaml_all_strings(YAML.safe_load(text, aliases: true)).join("\n")
   rescue Psych::Exception
-    nil # the raw text is still scanned
+    nil
   end
-  corpora.any? { |c| c.downcase.include?(needle) }
+  corpora.map(&:downcase)
+end
+
+# Does this workflow text name `target`? Matched on the basename, ignoring case.
+# A name that merely contains the basename counts, which can only make a head
+# NOT ELIGIBLE.
+def names_file?(text, target)
+  needle = File.basename(target).downcase
+  workflow_corpora(text).any? { |c| c.include?(needle) }
 end
 
 def mentions_workflow_run?(text)
-  text.downcase.include?("workflow_run")
+  workflow_corpora(text).any? { |c| c.include?("workflow_run") }
 end
 
 def side_read(repo, rev, path, side, reads)
@@ -2790,6 +2797,13 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
                     seed: lambda { |r|
                       pr_seed.call(r)
                       wf.call(r, "deploy.yml", "name: d\non:\n  workflow_run:\n    workflows: [ci]\n    types: [completed]\n" \
+                                               "jobs:\n  d:\n    runs-on: x\n    steps: [{run: sh out/deploy.sh}]\n")
+                    })
+  not_eligible.call("a workflow_run consumer whose key is spelled with a YAML escape (`\"workflow\\x5frun\":`)",
+                    [".github/workflows/ci.yml", "workflow_run"],
+                    seed: lambda { |r|
+                      pr_seed.call(r)
+                      wf.call(r, "deploy.yml", "name: d\non:\n  \"workflow\\x5frun\":\n    workflows: [ci]\n" \
                                                "jobs:\n  d:\n    runs-on: x\n    steps: [{run: sh out/deploy.sh}]\n")
                     })
   not_eligible.call("a hit file with a NEL/U+2028 line break (YAML 1.1 and 1.2 split it differently)",
