@@ -2698,6 +2698,27 @@ def self_test
                      "via = nil")
     rm_sabotage.call("base-at-head", "refs[:base] ||= ci_references(repo, base)", "refs[:base] ||= ci_references(repo, refs[:result][:rev])")
 
+    # DND-750 regression evidence (round 3, critic BLOCK on round 2 -- the
+    # `hits_for` dedup cases had only a prose paraphrase, not a captured run).
+    # Real, captured output of ALL SIX DND-750 self-test cases below, run
+    # against the TRUE pre-fix baseline (`git show f9f9676:ai/bin/blast-radius`
+    # -- the commit immediately before DND-750's first commit, with plain
+    # `files.each` in hits_for and no print_report guards at all), via a
+    # hybrid file that spliced this exact test block onto that baseline:
+    #
+    #   FAIL  DND-750: hits_for collapses a duplicated PATTERN-hit path to one hit, not two
+    #         [{:path=>".github/workflows/post-merge.yml", :class=>"deploy-automation", :why=>"x"}, {:path=>".github/workflows/post-merge.yml", :class=>"deploy-automation", :why=>"x"}]
+    #   FAIL  DND-750: hits_for collapses a duplicated REFERENCE-hit path to one via, not two
+    #         [{:path=>".pkg/prod/bin/deploy-guard.sh", :class=>"deploy-automation", :why=>"merging changes what EVERY future merge does -- the machinery that performs the action", :via=>".github/workflows/post-merge.yml"}, {:path=>".pkg/prod/bin/deploy-guard.sh", :class=>"deploy-automation", :why=>"merging changes what EVERY future merge does -- the machinery that performs the action", :via=>".github/workflows/post-merge.yml"}]
+    #   FAIL  DND-750: print_report prints exactly one `via: executed by` line for a/b.sh despite a duplicated hit
+    #   FAIL  DND-750: print_report MARKS the collapsed duplicate for a/b.sh, it does not drop it silently
+    #   FAIL  DND-750: print_report never prints a PLAIN self-referencing via line (c/d.sh via c/d.sh)
+    #   FAIL  DND-750: print_report MARKS a self-edge loudly instead of dropping it (c/d.sh)
+    #   VERDICT: FAIL (6 of 258 cases)
+    #
+    # After every fix below (files.uniq.each in hits_for, the group_by +
+    # marked-note/self-edge rewrite in print_report): VERDICT: PASS (258 cases).
+    #
     # 12x. DND-750: the coordinator's DND-589 live verify on gen_saas commit
     # 1aa2a73 saw .pkg/prod/bin/deploy-guard.sh's `via:` line print 4 times as
     # 2 duplicated pairs, two of them naming deploy-guard.sh as its OWN
