@@ -525,10 +525,12 @@ def usage
     lead-time — derive a fleet ticket's lead time from git + the forge's CI.
 
       lead-time --repo DIR --pr N [--json]     # --mr is a synonym for --pr
-      lead-time --repo DIR --since ISO8601 [--json]
+      lead-time --repo DIR --since ISO8601 [--slow MIN] [--json]
       lead-time --self-test
 
-    Fix: pass --self-test, or --repo with either --pr/--mr or --since.
+    Fix: pass --self-test, or --repo with either --pr/--mr or --since, each
+    value flag followed by its value (--slow takes whole minutes). Only the
+    flags `ai/bin/lead-time --help` lists are accepted.
   USAGE
   1
 end
@@ -540,28 +542,44 @@ def print_row(r)
          (r[:title] || "")[0, 46])
 end
 
-def main(argv)
-  return self_test if argv.include?("--self-test")
+require_relative "../lib/strict_argv"
 
-  repo = nil
-  id = nil
-  since = nil
-  slow_min = nil
-  as_json = argv.include?("--json")
-  i = 0
-  while i < argv.length
-    case argv[i]
-    when "--repo"        then repo = argv[i += 1]
-    when "--pr", "--mr"  then id = argv[i += 1]
-    when "--since"       then since = argv[i += 1]
-    when "--slow"        then slow_min = Integer(argv[i += 1], exception: false)
-    when "--json"        then nil
-    else
-      warn "lead-time: unknown argument #{argv[i].inspect}"
-      return usage
-    end
-    i += 1
+# Every argument must be a declared flag, and a value flag must have a value
+# (DND-526). The old loop read a valueless or non-integer `--slow` as nil and
+# silently dropped the outlier filter.
+CLI_SPEC = { "--self-test" => :switch, "--json" => :switch, "--repo" => :value,
+             "--pr" => :value, "--mr" => :value, "--since" => :value,
+             "--slow" => :integer }.freeze
+
+# -> [opts, nil] on success, [nil, reason] on a usage error.
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  if opts["--self-test"] && opts.size > 1
+    return [nil, "--self-test takes no other flag (got #{(opts.keys - ['--self-test']).join(', ')})"]
   end
+  return [nil, "--pr and --mr are synonyms; pass one"] if opts.key?("--pr") && opts.key?("--mr")
+  if (opts.key?("--pr") || opts.key?("--mr")) && opts.key?("--since")
+    return [nil, "--since scans a window and --pr/--mr reads one request; pass one"]
+  end
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+def main(argv)
+  opts, reason = parse_cli(argv)
+  if reason
+    warn "lead-time: usage error — #{reason}."
+    return usage
+  end
+  return self_test if opts["--self-test"]
+
+  repo = opts["--repo"]
+  id = opts["--pr"] || opts["--mr"]
+  since = opts["--since"]
+  slow_min = opts["--slow"]
+  as_json = opts.fetch("--json", false)
 
   return usage unless repo && (id || since)
   unless File.exist?(File.join(repo, ".git"))
