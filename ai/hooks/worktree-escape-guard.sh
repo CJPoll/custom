@@ -34,7 +34,9 @@
 #
 # WHAT IS DENIED, target inside a guarded main checkout:
 #   * Edit/Write/MultiEdit/NotebookEdit of a path git does not ignore.
-#   * Bash: a working-tree/index/HEAD-mutating git subcommand run there (cwd,
+#   * Bash: a git subcommand in GIT_MUTATING (those that rewrite the working
+#     tree or index, or switch or reset HEAD; `update-ref` / `symbolic-ref`
+#     are not listed) run there (cwd,
 #     -C, --work-tree, or a `cd` earlier in the same command); a redirection,
 #     tee, sed -i, cp/mv/install/ln destination, mv source, rm, touch or
 #     truncate on a path git does not ignore.
@@ -481,7 +483,11 @@ def git_is_write(sub, sargs):
         return False
     if sub == "apply" and s & {"--check", "--stat", "--numstat", "--summary"} and not s & {"--apply", "--index", "--cached"}:
         return False
-    if sub in ("clean", "add", "commit", "rm", "mv") and s & {"-n", "--dry-run"}:
+    # Dry-run flags are per subcommand: `-n` is --dry-run for add/rm/mv/clean,
+    # but for commit it is --no-verify, a real commit. commit has only --dry-run.
+    if sub in ("clean", "add", "rm", "mv") and s & {"-n", "--dry-run"}:
+        return False
+    if sub == "commit" and "--dry-run" in s:
         return False
     if sub == "bisect" and sargs[:1] and sargs[0] in ("log", "view", "visualize", "terms", "help"):
         return False
@@ -584,6 +590,11 @@ def check_bash(cmd, data, act):
                     writes.append(nxt[0])
                 i += 2
                 continue
+            if is_op and t == ">&" and nxt is not None and not nxt[1] \
+                    and not nxt[0].isdigit() and nxt[0] != "-":
+                writes.append(nxt[0])  # `cmd >& file` redirects both streams to file
+                i += 2
+                continue
             if is_op:
                 i += 2 if t in REDIR_SKIP else 1
                 continue
@@ -615,7 +626,10 @@ def check_bash(cmd, data, act):
         if base in ("cd", "pushd"):
             if base == "pushd":
                 dirstack.append(cwd)
-            dest = words[1] if len(words) > 1 else "~"
+            cargs = words[1:]
+            while cargs and cargs[0] in ("-P", "-L", "-e", "-@", "--"):
+                cargs = cargs[1:]
+            dest = cargs[0] if cargs else "~"
             if dest == "-":
                 cwd = UNKNOWN
                 continue

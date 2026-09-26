@@ -883,11 +883,13 @@ checkout's working tree, with a `Fix:` naming the worktree to use:
   top-level session, and the attended session. Also `fetch`, `worktree`, `.git`
   internals, and every read-only command. Quoted text, comments and heredoc
   bodies are data, never commands.
-- **How it fails.** An input it cannot evaluate is allowed with a visible
-  warning and a log line in `$XDG_STATE_HOME/athena/worktree-escape-guard.log`,
-  because it is hot-loaded into every session on the machine. Writes through an
+- **How it fails.** It fails open, because it is hot-loaded into every session
+  on the machine. Unreadable stdin or a git error is allowed with a visible
+  warning and a log line in `$XDG_STATE_HOME/athena/worktree-escape-guard.log`.
+  A command it cannot parse is logged as `unparsed`, and a target it cannot
+  resolve as `unresolved`; both are allowed with no warning. Writes through an
   interpreter, `xargs`, or a variable not set in the same command are not
-  detected, and an unresolvable target is logged as `unresolved`.
+  detected.
 
 **Later (2026-09-26, DND-840):** this paragraph said "It is currently doctrine,
 not enforcement": nothing denied a write to a main checkout, and the
