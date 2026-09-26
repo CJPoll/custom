@@ -76,10 +76,14 @@
 #   75  EX_TEMPFAIL: refused to spawn because the lane is WEDGED — this was the
 #       SKIP_ESCALATE'th consecutive UNSUCCESSFUL outcome (a failing session, a
 #       stranded push, or reaped dead cron corpses)
-#   69  EX_UNAVAILABLE: the session exited 0 but did NO work — it never left its
-#       liveness receipt, so it never reached the model (usually a provider
-#       usage limit, credits, or auth). Reported every tick and never silent,
-#       but the lane is NOT gated and self-heals; nothing to re-arm.
+#   69  EX_UNAVAILABLE: the session did NO work — it never left its liveness
+#       receipt, so it never reached the model (usually a provider usage limit,
+#       credits, or auth). That is any receipt-less, commit-less session that
+#       exited 0, or that exited non-zero with a known block signature in its
+#       own output (DND-833: `claude -p` exits non-zero on a usage limit).
+#       Reported every tick and never silent, but the lane is NOT gated and
+#       self-heals; nothing to re-arm. A receipt-less non-zero exit with NO
+#       signature is a failure (below) and leaves a <ts>.failed record.
 #       Every tick that DID reach the model leaves <ts>.receipt in the state
 #       dir's runs/ and it is kept, so `ls runs/*.receipt` answers "which past
 #       ticks reported for duty?" directly — do not infer it from a log's size.
@@ -267,10 +271,21 @@ esac
 # detector is the missing receipt in section 8. A signature the vendor reworded
 # away therefore CANNOT make a blocked tick read as healthy; it can only
 # downgrade it to "blocked, UNCLASSIFIED", which prints MORE, not less.
-BLOCK_PATTERNS='usage limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|429|authentication|unauthorized|invalid api key'
-classify_block() { # <log> -> the matched signature, or nothing
+#
+# Later (2026-09-26, DND-833): on a NON-ZERO exit this list does decide. A
+# receipt-less, commit-less tick that exits non-zero is BLOCKED when a signature
+# matches and a wedge FAILURE when none does (section 8). So a false match now
+# costs more than a label: it turns a real failure into a lane that never
+# wedges. Two rules keep that surface narrow (DND-739):
+#   * `429` is anchored to the words that make it an HTTP status ("API Error:
+#     429", "HTTP 429", "status 429", "code=429"). A bare 429 matched pids,
+#     temp paths and SHAs.
+#   * classify_block reads the SESSION's output only, measured before teardown
+#     appends git's own chatter to the same log (see section 6).
+BLOCK_PATTERNS='usage limit|weekly limit|daily limit|rate limit|rate_limit|quota|out of credits|credit balance|insufficient_quota|billing|overloaded|Too Many Requests|(http|status|error|code)[^a-z0-9]{0,3}429\b|authentication|unauthorized|invalid api key'
+classify_block() { # <log> <bytes> -> the matched signature in the first <bytes> of <log>, or nothing
   [ -r "$1" ] || return 0
-  grep -m1 -i -E -o "${BLOCK_PATTERNS}" -- "$1" 2>/dev/null || true
+  head -c "${2:-0}" -- "$1" 2>/dev/null | grep -m1 -i -E -o "${BLOCK_PATTERNS}" 2>/dev/null || true
 }
 
 mkdir -p "${LOG_DIR}"
@@ -773,6 +788,14 @@ else
   status=$?
 fi
 
+# Measure the SESSION's output now, before anything else writes to ${log}.
+# Teardown below appends git's output ("Deleted branch shipwright/<run-id> (was
+# <sha>)") to the same file, and that text must never classify the tick: the run
+# id and SHA are arbitrary, and after DND-833 a signature decides wedge-vs-
+# blocked on a non-zero exit. Everything past these bytes is the runner's own.
+session_bytes="$(wc -c <"${log}" 2>/dev/null | tr -d ' ')"
+case "${session_bytes}" in ''|*[!0-9]*) session_bytes=0 ;; esac
+
 # --- 7. teardown: publish on success, then always remove the lane ------------
 #
 # On a successful session, publish: refresh origin/main and fast-forward the
@@ -824,9 +847,22 @@ rm -f "${LANE_LOCK}" "${LANE_META}"
 # must never look like an empty one", reproduced inside the counter whose stated
 # job is "A WEDGED LANE MUST NOT LOOK LIKE A QUIET ONE".
 #
-# SCOPE: only status==0 can be blocked. A non-zero exit already fails loudly and
-# already feeds the wedge, so there is no silence there to fix; confining the new
-# class to the exit-0 path leaves every existing guarantee byte-identical.
+# SCOPE: a tick is blocked when its session left NO receipt and made NO commits,
+# and then EITHER it exited 0 (the receipt alone detects it; the signature only
+# labels it) OR it exited non-zero AND its own output matches a known block
+# signature. A receipt-less non-zero tick with no signature stays a wedge
+# failure — a missing binary or a crash must still wedge — but it is reported
+# as one that never reported for duty, with a .failed record (below).
+#
+# Later (2026-09-26, DND-833): this paragraph said "only status==0 can be
+# blocked", on the belief that a usage limit exits 0. Superseded: `claude -p`
+# also exits NON-ZERO on a usage limit. Measured on the laptop 2026-09-23
+# 02:00..07:00: six ticks each logged "You've hit your weekly limit", left no
+# receipt, and each counted as a wedge failure; the sixth wedged the lane and
+# every later tick exited 75 without spawning. A provider outage that cleared
+# the next morning became a human-gated wedge, the exact outcome the paragraph
+# below forbids. A session that DID leave its receipt reached the model, so its
+# non-zero exit is still a failure whatever its log says.
 #
 # BLOCKED NEVER GATES THE NEXT SPAWN. The wedge exists to stop a broken lane
 # burning tokens; a blocked tick burns none and the cause is transient and
@@ -836,10 +872,14 @@ rm -f "${LANE_LOCK}" "${LANE_META}"
 # counter: the old reset_fail on this path silently erased a real accumulating
 # failure streak, which is strictly weaker than leaving it alone.
 blocked=0
+unreported=0
 block_sig=""
-if [ "${status}" -eq 0 ] && [ ! -e "${RECEIPT}" ] && [ "${tip}" = "${BASE_COMMIT}" ]; then
-  blocked=1
-  block_sig="$(classify_block "${log}")"
+if [ ! -e "${RECEIPT}" ] && [ "${tip}" = "${BASE_COMMIT}" ]; then
+  unreported=1
+  block_sig="$(classify_block "${log}" "${session_bytes}")"
+  if [ "${status}" -eq 0 ] || [ -n "${block_sig}" ]; then
+    blocked=1
+  fi
 fi
 
 if [ "${blocked}" -eq 1 ]; then
@@ -893,7 +933,37 @@ fi
 # Growth is one empty file per tick, beside the one log file per tick that
 # `runs/` already accumulates. Do not "tidy" these away while keeping the logs:
 # that re-creates precisely the blind spot described above.
-reset_count "${BLOCK_COUNT}"   # the session reached the model; the streak ends
+# A receipt-less, commit-less tick that exited non-zero with NO known signature
+# (DND-833). It is a wedge failure, but it is not an ordinary one: the session
+# never reached the model, and whether it printed nothing, printed a reworded
+# limit message, or crashed are three different faults. Say which, in a record
+# that survives when cron mail does not.
+if [ "${unreported}" -eq 1 ]; then
+  if [ ! -r "${log}" ]; then
+    session_output="unreadable"
+  elif [ "${session_bytes}" -eq 0 ]; then
+    session_output="empty"
+  else
+    session_output="${session_bytes} bytes"
+  fi
+  failed="${LOG_DIR}/${ts}.failed"
+  {
+    echo "athena-shipwright: run ${ts} exited ${status} and never reported for duty (no receipt, no commits)."
+    echo "receipt=${RECEIPT} (absent)"
+    echo "session_exit=${status}"
+    echo "session_output=${session_output}"
+    echo "classification=failure (no known block signature in the session's output)"
+    echo "log=${log}"
+  } >"${failed}"
+  if [ "${session_output}" = "empty" ]; then
+    echo "athena-shipwright: run ${ts} session exited ${status}, printed NOTHING, and never reported for duty. Counted as an unsuccessful outcome. Record: ${failed}" >&2
+  else
+    echo "athena-shipwright: run ${ts} session exited ${status} and never reported for duty; its output (${session_output}) matched NO known block signature. Counted as an unsuccessful outcome. Record: ${failed}" >&2
+  fi
+  echo "  Fix: read ${log} and ${failed}. The session died before its first instruction, so this is not a harness change gone wrong. If the log shows a provider limit, credits, or auth message, the vendor reworded it: add the wording to BLOCK_PATTERNS in $0 and a case to scripts/test/athena-shipwright/self-test.sh, and the tick becomes BLOCKED (never wedging). If the log is empty or shows a crash, check that ${CLAUDE} runs by hand ('${CLAUDE} --version'). This outcome feeds the wedge counter ${FAIL_COUNT}." >&2
+else
+  reset_count "${BLOCK_COUNT}"   # the session reached the model; the streak ends
+fi
 # A clean landing (session exited 0 AND its commits reached main/origin/main, or
 # it made no commits at all) resets the counter. Anything else — a failing/timed
 # out session, or a stranded push — is an unsuccessful outcome and increments it.
