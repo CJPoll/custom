@@ -449,6 +449,39 @@ check "B6. a harmless command longer than 128 KiB" allow
 runin "$BIG/multi" "$GIT_CONFIG_GLOBAL" "$(printf 'gzz' | jsonstdin "$WT")"
 check "B7. an alias name with a stash value in any snapshot" deny
 
+echo "== C: a config source the hook cannot read =="
+# The command points git at a config the hook never reads (another git dir, a
+# different global config or HOME, an include, a cd/-C target that is
+# expanded or holds whitespace). An alias defined there is unknowable, so a
+# subcommand that is not a git builtin is denied; builtins stay allowed.
+# Decided from / so the cwd resolves no repo config.
+printf '[alias]\n\tap = stash pop\n' > "$TMP/altcfg"
+mkdir -p "$TMP/h" "$TMP/xdg/git"
+cp "$TMP/altcfg" "$TMP/h/.gitconfig"; cp "$TMP/altcfg" "$TMP/xdg/git/config"
+# case_root <label> <deny|allow> <command> : decided with cwd /.
+case_root() {
+  run "$(json / "$3")"
+  check "$1" "$2"
+}
+case_root "C1. --git-dir to a repo with a local stash alias" deny "git --git-dir=$OWNER/.git lp"
+case_root "C2. --git-dir as two words" deny "git --git-dir $OWNER/.git lp"
+case_root "C3. GIT_DIR to a repo with a local stash alias" deny "GIT_DIR=$OWNER/.git git lp"
+case_root "C4. exported GIT_DIR" deny "export GIT_DIR=$OWNER/.git; git lp"
+case_root "C5. GIT_CONFIG_GLOBAL set by the command" deny "GIT_CONFIG_GLOBAL=$TMP/altcfg git ap"
+case_root "C6. HOME set by the command" deny "HOME=$TMP/h git ap"
+case_root "C7. XDG_CONFIG_HOME set by the command" deny "XDG_CONFIG_HOME=$TMP/xdg git ap"
+case_root "C8. -c include.path" deny "git -c include.path=$TMP/altcfg ap"
+case_root "C9. cd to an expanded dir" deny 'cd "$D" && git lp'
+case_root "C10. -C with an expanded dir" deny 'git -C "$D" lp'
+case_root "C11. cd to a dir holding whitespace" deny 'cd "/tmp/a b" && git lp'
+case_root "C12. GIT_CONFIG_SYSTEM set by the command" deny "GIT_CONFIG_SYSTEM=$TMP/altcfg git ap"
+case_root "C13. --git-dir with a builtin" allow "git --git-dir=$OWNER/.git status"
+case_root "C14. GIT_DIR with a builtin" allow "GIT_DIR=$OWNER/.git git log --oneline"
+case_root "C15. HOME with a builtin" allow 'HOME=/tmp git status'
+case_root "C16. cd to an expanded dir, then a builtin" allow 'cd "$D" && git status'
+case_root "C17. --git-dir with a stash read" allow "git --git-dir=$OWNER/.git stash list"
+case_root "C18. --git-dir with a global alias that is not a stash write" allow "git --git-dir=$OWNER/.git st"
+
 echo "== F: fail-open =="
 run ''
 check "F1. empty stdin" allow

@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 202 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c, R7-R41, I66-I77 and Z1-Z8).
+- **Baseline:** `RESULT: 233 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; fix round 2 added B1-B7, C1-C18 and F8-F13; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c, R7-R41, I66-I77 and Z1-Z8).
 
 ### Fail-first (no guard)
 
@@ -623,3 +623,49 @@ or `$WRITES` is a `printf '%s'` builtin into a pipe, or a `[ -n ]` test.
 Swept ai/hooks/ for the same hand-off: only `main-session-policy.sh`
 (`INPUT="$input" python3`) passes hook stdin through the environment;
 proposed separately, not fixed here.
+
+### Fix round 2, critic round 16 (c46fc29): an alias in a config the hook does not read
+
+The critic found `git --git-dir=/other/.git lp` allowed when `lp = stash pop`
+is a local alias of `/other`. The hook reads aliases from the global config,
+the cwd repo and each literal `-C`/`cd`/`pushd` dir, so git read a config the
+hook never did. Same for `GIT_DIR=`, and a command-set `GIT_CONFIG_GLOBAL=` or
+`HOME=`. Class (pre-existing, kind 1): the command points git at a config
+source the hook does not read. Swept at its root rather than by reading each
+source (computing the path is the failed-lookup class): when the command names
+any such source, a subcommand that is not a git builtin (per `git
+--list-cmds=builtins,main,others,nohelpers`) is denied as an unknown alias.
+Sources: `--git-dir`, GIT_DIR, GIT_COMMON_DIR, GIT_CONFIG*, HOME,
+XDG_CONFIG_HOME, `include.path` / `includeIf.*.path`, bare `cd` / `cd -` /
+`popd`, and a `cd`/`pushd`/`-C` target that is expanded or holds whitespace.
+The last two close residuals the header used to list ("a dir reached through
+a variable", "a dir whose path contains whitespace", `-c include.path`).
+
+New cases against c46fc29's hook:
+
+```
+FAIL  C1. --git-dir to a repo with a local stash alias (expected deny) status=0 out=[]
+FAIL  C2. --git-dir as two words (expected deny) status=0 out=[]
+FAIL  C3. GIT_DIR to a repo with a local stash alias (expected deny) status=0 out=[]
+FAIL  C4. exported GIT_DIR (expected deny) status=0 out=[]
+FAIL  C5. GIT_CONFIG_GLOBAL set by the command (expected deny) status=0 out=[]
+FAIL  C6. HOME set by the command (expected deny) status=0 out=[]
+FAIL  C7. XDG_CONFIG_HOME set by the command (expected deny) status=0 out=[]
+FAIL  C8. -c include.path (expected deny) status=0 out=[]
+FAIL  C9. cd to an expanded dir (expected deny) status=0 out=[]
+FAIL  C10. -C with an expanded dir (expected deny) status=0 out=[]
+FAIL  C11. cd to a dir holding whitespace (expected deny) status=0 out=[]
+FAIL  C12. GIT_CONFIG_SYSTEM set by the command (expected deny) status=0 out=[]
+RESULT: 221 passed, 12 failed
+```
+
+After the fix: `RESULT: 233 passed, 0 failed`. C13-C18 (builtins, a stash read,
+a non-stash alias under an override) pass both before and after.
+
+| Mutation | Caught by |
+| --- | --- |
+| `decide` returns "" for an unread alias (the rule removed) | C1-C12 (`221 passed, 12 failed`) |
+| the builtin lookup dropped (every subcommand denied under an override) | C13-C16, C18 |
+
+The critic's per-call note (the snapshot read runs before the prefilter) is
+latency, not correctness: ~45 ms for `ls` on the laptop. Not changed here.

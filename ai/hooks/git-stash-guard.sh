@@ -72,7 +72,14 @@
 #     from the global config and the repo config of the cwd and every `-C` /
 #     `cd` dir), a shell alias (`!...`) whose body mentions stash or runs a
 #     stash write read as a command (`!git sp`), and DEFINING an alias whose
-#     value names stash (`git -c alias.p=stash p`, `git config alias.p ...`).
+#     value names stash (`git -c alias.p=stash p`, `git config alias.p ...`);
+#   * a subcommand that is not a git builtin (nor a git-* command on PATH, per
+#     `git --list-cmds`) when the command points git at a config the hook
+#     does not read: `--git-dir`, GIT_DIR, GIT_COMMON_DIR, GIT_CONFIG*,
+#     HOME, XDG_CONFIG_HOME, `include.path` / `includeIf.*.path`, a bare `cd`
+#     / `cd -` / `popd`, or a `cd` / `pushd` / `-C` target that is expanded
+#     (`cd "$D"`) or holds whitespace. An alias defined there cannot be read,
+#     so it is treated as unknown rather than absent. Builtins stay allowed.
 #
 # ACCEPTED FALSE POSITIVE (the class forge-auth-guard documents): matching is
 # lexical, so a command that only MENTIONS a mutating stash (a heredoc, a
@@ -98,10 +105,11 @@
 # expiry config (default 90 days; any git command can trigger auto-gc);
 # `fetch --mirror` into this same repo; a ref-rewriting
 # tool other than git (a script writing .git/ files by a computed path); git arguments supplied through a pipe
-# (`printf 'stash pop' | xargs git`); an alias defined in a file the command
-# only names (`git -c include.path=<file>`, a `.gitconfig` written with the
-# Write tool in an earlier call is caught when the alias is USED, since
-# aliases are read at decision time).
+# (`printf 'stash pop' | xargs git`). An alias in a config the command only
+# names (`-c include.path=<file>`, `--git-dir`, HOME=...) is not read; its
+# non-builtin subcommand is denied instead (see above). A `.gitconfig` written
+# with the Write tool in an earlier call is caught when the alias is USED,
+# since aliases are read at decision time.
 #
 # Design guarantees:
 #   * NOT A STASH COMMAND, ALLOW — unparseable input, missing jq (nothing can
@@ -310,8 +318,9 @@ fi
 # From the global config plus the repo config of the cwd and of every `-C <dir>`
 # or `cd`/`pushd <dir>` in the command. A dir that is not a repo still yields
 # the global aliases; a dir that does not exist falls back to a plain read.
-# Not resolved: a dir whose path contains whitespace (it is split into words),
-# or one reached through a variable (`cd "$D"`). Global aliases still apply.
+# A dir whose path holds whitespace, or one reached through a variable
+# (`cd "$D"`), is not read: it sets UNREAD_CONFIG below instead.
+UNREAD_CONFIG=0
 prefilter "$GIT_OR_EXP"
 case $? in
   0)
@@ -322,11 +331,43 @@ case $? in
     _rc=$?
     [ "$_rc" -le 1 ] || { FAULT="the global git config could not be read (git config exited $_rc)"; fault_verdict; }
     alias_read "$CWD"
+    # No pathname expansion of the dirs in the hook's own shell.
+    set -f
     for _d in $(printf '%s' "$FLAT" | grep -Eo '(^|[[:space:];&|(])(-C|cd|pushd)[[:space:]]+[^[:space:];&|()]+' | sed -E 's#.*(-C|cd|pushd)[[:space:]]+##'); do
       case "$_d" in "~"|"~/"*) _d="$HOME${_d#\~}" ;; esac
       case "$_d" in /*) ;; *) [ -n "$CWD" ] && _d="$CWD/$_d" ;; esac
       alias_read "$_d"
     done
+    set +f
+    # UNREAD_CONFIG: the command points git at a config this hook does not
+    # read (see the header), so a non-builtin subcommand is an unknown alias.
+    printf '%s' "$FLAT" | grep -Eq \
+      -e '--git-dir' \
+      -e '(^|[^[:alnum:]_])(GIT_DIR|GIT_COMMON_DIR|GIT_CONFIG[A-Z_]*|HOME|XDG_CONFIG_HOME)=' \
+      -e '(^|[[:space:];&|(])(-C|cd|pushd)[[:space:]]+[^[:space:];&|()]*[$`]' \
+      -e '(^|[[:space:];&|(])(cd|pushd|popd)([[:space:]]+-)?[[:space:]]*($|[;&|)])' 2>/dev/null
+    _rc=$?
+    if [ "$_rc" -eq 1 ]; then
+      printf '%s' "$FLAT" | grep -Eiq 'include(if[^[:space:]]*)?\.path' 2>/dev/null
+      _rc=$?
+    fi
+    if [ "$_rc" -eq 1 ]; then
+      # Whitespace inside a quoted or backslash-escaped cd/pushd/-C target
+      # (read from the raw command: FLAT has its quotes removed).
+      printf '%s' "$CMD" | grep -Eq \
+        -e "(^|[[:space:];&|(])(-C|cd|pushd)[[:space:]]+(\"[^\"]*[[:space:]][^\"]*\"|'[^']*[[:space:]][^']*')" \
+        -e '(^|[[:space:];&|(])(-C|cd|pushd)[[:space:]]+[^[:space:];&|()]*\\[[:space:]]' 2>/dev/null
+      _rc=$?
+    fi
+    case $_rc in
+      0)
+        UNREAD_CONFIG=1
+        (cd / && git --list-cmds=builtins,main,others,nohelpers) > "$GSG_TMP/builtins" 2>/dev/null \
+          || { FAULT="git --list-cmds could not list the builtins"; fault_verdict; }
+        ;;
+      1) ;;
+      *) FAULT="the config-source grep failed"; fault_verdict ;;
+    esac
     ;;
   1) ;;
   *) FAULT="the prefilter grep failed"; fault_verdict ;;
@@ -334,7 +375,8 @@ esac
 
 # ---- git stash, through every head the header lists -------------------------
 # Its inputs are files (BOUNDED HAND-OFF): argv carries only their paths.
-VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/shaliases" '
+VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/shaliases" \
+  -v cfgov="$UNREAD_CONFIG" -v bif="$GSG_TMP/builtins" '
   # slurp(f): the whole file, lines joined by newlines. An unreadable file
   # exits 3, which the caller reads as a fault.
   function slurp(f,   s, l, n, rc) {
@@ -476,7 +518,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     # Alias names are config keys, so git matches them case-insensitively
     # (`git SP` runs alias.sp); --get-regexp prints them lower-cased.
     sc = tolower(sc)
-    if (!(sc in nal)) return ""
+    # Not an alias we read: absent, unless the command points git at a
+    # config we did not read and sc is no builtin (then it is unknown).
+    if (!(sc in nal)) return (cfgov && !(sc in builtin)) ? "unread-config" : ""
     # Past the bound, a chain still resolving is treated as a stash write.
     if (depth > 10) return "alias"
     for (i = 1; i <= nal[sc]; i++) {
@@ -526,7 +570,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       r = decide(w[j], w, n, j, depth)
       maybe_value = (j > 1 && w[j - 1] ~ /^-/ && w[j - 1] !~ /=/ && !two_word(w[j - 1]) && !one_word(w[j - 1]))
       if (unknown) {
-        if (r == "stash" || r == "alias" || r == "refwrite") return (expanded_head ? "expanded-git" : r)
+        if (r == "stash" || r == "alias" || r == "refwrite" || r == "unread-config") return (expanded_head ? "expanded-git" : r)
       } else if (r != "") return r
       if (maybe_value) { j++; continue }
       break
@@ -602,6 +646,10 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (sp > 0) { val = substr(name, sp + 1); name = substr(name, 1, sp - 1) }
       nal[name]++; aval[name, nal[name]] = val
     }
+    if (cfgov) {
+      nb = split(slurp(bif), bl, "\n")
+      for (k = 1; k <= nb; k++) if (bl[k] != "") builtin[bl[k]] = 1
+    }
     ns = split(slurp(shf), slines, "\n")
     for (k = 1; k <= ns; k++) {
       l = slines[k]
@@ -664,6 +712,7 @@ case "$VERDICT" in
   alias) deny 'this runs a git alias that resolves to a stash write (or a shell alias that mentions stash).' ;;
   expanded) deny 'this runs git with a subcommand built by expansion (`git $X`, a glob `git st?sh`, a brace `git {stash,pop}`), which may be a stash write and cannot be read here. Spell the subcommand (and a stash verb) out literally, quoting any glob or brace characters.' ;;
   glob-head) deny 'this runs a command word the shell rewrites by glob or brace expansion (`/usr/bin/g?t`, `git-st*sh`), which may be git or git-stash writing the stash list. Spell the command word literally.' ;;
+  unread-config) deny 'this points git at a config this guard does not read (`--git-dir`, GIT_DIR, GIT_CONFIG_GLOBAL/SYSTEM, HOME, XDG_CONFIG_HOME, `include.path`, or a `cd`/`-C` target that is expanded or holds whitespace) and runs a subcommand that is not a git builtin, so it may be an alias from that config that writes the stash list. Run a builtin subcommand spelled out, or drop the override.' ;;
   expanded-git) deny 'this runs `stash` through a command word built by expansion (`$GIT stash`, `$(command -v git) stash`), which may be git writing the stash list.' ;;
 esac
 exit 0
