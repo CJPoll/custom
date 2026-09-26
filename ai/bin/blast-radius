@@ -535,21 +535,18 @@ def detect_automation(repo)
                   "#{rel}: unparseable YAML (#{e.class}) -- cannot prove it does " \
                   "NOT deploy on merge"]
         end
-        next unless doc.is_a?(Hash)
-
-        # YAML 1.1 parses a bare `on:` key as the BOOLEAN true, so the GitHub
-        # Actions trigger block lands under `true`, not `"on"`. Checking only
-        # "on" would silently find nothing on every real workflow file -- the
+        # workflow_trigger reads `on:` under both "on" and `true`: YAML 1.1
+        # parses a bare `on:` key as the BOOLEAN true, and checking only "on"
+        # would silently find nothing on every real workflow file -- the
         # failed-lookup class, inside the detector.
-        on = doc.key?("on") ? doc["on"] : doc[true]
-        next if on.nil?
+        trig = workflow_trigger(doc)
+        next if trig.nil?
 
-        trig = trigger_hit(on)
-        return ["CONFIRMED", "#{rel}: #{trig}"] if trig
+        return [trig.determined ? "CONFIRMED" : "UNDETERMINED", "#{rel}: #{trig.detail}"]
       end
       return ["CONFIRMED-ABSENT",
-              "#{files.size} GitHub workflow(s) parsed, none triggers on a " \
-              "default-branch push or workflow_run"]
+              "#{files.size} GitHub workflow(s) parsed, every trigger is pre-merge " \
+              "(#{PRE_MERGE_EVENTS.to_a.join(', ')}, or a push to a non-default branch)"]
     end
   end
 
@@ -579,32 +576,111 @@ def detect_automation(repo)
   ["CONFIRMED-ABSENT", "no CI configuration of any recognised kind in the repo"]
 end
 
+# --- which GitHub triggers are merge-time automation (DND-590) --------------
+#
+# The question: does MERGING change what a later run executes with the default
+# branch's secrets? For nearly every GitHub event the answer is yes, because
+# the run uses the workflow file and the checkout of the DEFAULT BRANCH (or of
+# a ref cut from it, such as a release tag): push to the default branch,
+# workflow_run, schedule, workflow_dispatch, repository_dispatch, release,
+# pull_request_target (base-branch code, with secrets, on every PR), issues,
+# issue_comment, and the rest. workflow_call counts too: its callers can live in
+# other repos (`uses: org/repo/.github/workflows/x.yml@main`) that this check
+# cannot read, so "no caller runs it" is an unproven negative.
+#
+# So the model is a DENY-list of the triggers that do NOT, never an allow-list
+# of the ones that do: an event name this code has never seen is a hit (it
+# widens, never narrows). PRE_MERGE_EVENTS run the PULL REQUEST'S OWN head, or
+# the merge-queue candidate, BEFORE it lands: the proposed code already ran
+# under review, and merging changes nothing those runs execute.
+#   pull_request, pull_request_review, pull_request_review_comment -- the PR's
+#     merge ref (refs/pull/N/merge), i.e. the PR's own code.
+#   merge_group -- the merge-queue candidate commit, before it reaches the
+#     default branch.
+# A push is a hit only when it can fire on the default branch; a branch
+# pattern this code does not evaluate (a glob or a `!` negation) counts as
+# matching it.
+#
+# An `on:` shape this code does not model (a number, a list holding a mapping,
+# a missing or empty `on:`, a non-list branch filter) is NOT "no trigger": it is
+# returned as an UNDETERMINED hit, which detect_automation reports as
+# UNDETERMINED (exit 4) and ci_references scans as a root. Reading an
+# unrecognised shape as absent would be the failed-lookup class: a wrong key
+# and a key that matches nothing would both exit 0.
+PRE_MERGE_EVENTS = %w[pull_request pull_request_review pull_request_review_comment merge_group].to_set.freeze
+BRANCH_PATTERN_CHARS = /[*?\[+!]/
+
+# detail: what fired, for the report. determined: false when the shape was not
+# understood, so the caller fails closed as UNDETERMINED instead of CONFIRMED.
+TriggerHit = Struct.new(:detail, :determined)
+
+def undetermined_trigger(what)
+  TriggerHit.new("#{what} -- an `on:` shape this check does not model, so its " \
+                 "triggers are UNKNOWN and it cannot prove merging does not run it", false)
+end
+
+# The trigger verdict for one parsed workflow document: a TriggerHit, or nil
+# when every trigger is pre-merge.
+def workflow_trigger(doc)
+  return undetermined_trigger("workflow is not a YAML mapping (#{doc.class})") unless doc.is_a?(Hash)
+  return undetermined_trigger("no `on:` key") unless doc.key?("on") || doc.key?(true)
+
+  trigger_hit(doc.key?("on") ? doc["on"] : doc[true])
+end
+
 def trigger_hit(on)
   case on
   when String
-    return "on: #{on}" if on == "push"
+    event_hit(on, nil, "on: #{on}")
   when Array
-    return "on: [#{on.join(', ')}] includes push" if on.include?("push")
-    return "on: [#{on.join(', ')}] includes workflow_run" if on.include?("workflow_run")
+    return undetermined_trigger("on: #{on.inspect} (a list entry is not an event name)") unless on.all?(String)
+
+    first_hit(on.map { |e| event_hit(e, nil, "on: [#{on.join(', ')}] includes #{e}") })
   when Hash
-    return "on.workflow_run" if on.key?("workflow_run")
+    return undetermined_trigger("on: #{on.keys.inspect} (a key is not an event name)") unless on.keys.all?(String)
 
-    if on.key?("push")
-      push = on["push"]
-      return "on.push (no branch filter -- fires on the default branch)" if push.nil?
-
-      if push.is_a?(Hash)
-        branches = push["branches"]
-        return "on.push (no branch filter -- fires on the default branch)" if branches.nil?
-
-        b = Array(branches).map(&:to_s)
-        hit = b & DEFAULT_BRANCHES
-        return "on.push.branches=[#{b.join(', ')}]" unless hit.empty?
-      else
-        return "on.push"
-      end
-    end
+    first_hit(on.map { |e, cfg| event_hit(e, cfg, "on.#{e}") })
+  when nil
+    undetermined_trigger("an empty `on:`")
+  else
+    undetermined_trigger("on: #{on.inspect} (#{on.class})")
   end
+end
+
+# A determined hit wins over an undetermined one; nil only when every entry is nil.
+def first_hit(hits)
+  hits.compact.min_by { |h| h.determined ? 0 : 1 }
+end
+
+def event_hit(event, cfg, label)
+  return nil if PRE_MERGE_EVENTS.include?(event)
+  return push_hit(cfg, label) if event == "push"
+
+  TriggerHit.new(label, true)
+end
+
+def push_hit(push, label)
+  unfiltered = TriggerHit.new("#{label} (no branch filter -- fires on the default branch)", true)
+  return unfiltered unless push.is_a?(Hash)
+  return unfiltered unless push.key?("branches")
+
+  branches = push["branches"]
+  branches = [branches] if branches.is_a?(String)
+  unless branches.is_a?(Array) && branches.all?(String)
+    return undetermined_trigger("#{label}.branches: #{branches.inspect}")
+  end
+
+  shown = "on.push.branches=[#{branches.join(', ')}]"
+  return TriggerHit.new(shown, true) unless (branches & DEFAULT_BRANCHES).empty?
+
+  if branches.any? { |b| b.match?(BRANCH_PATTERN_CHARS) }
+    return TriggerHit.new("#{shown} (a branch pattern this check does not evaluate -- " \
+                          "counted as matching the default branch)", true)
+  end
+  # `tags:` alongside a branch filter still fires on every matching tag push,
+  # which runs the tagged commit -- in practice a merged one -- with secrets.
+  return TriggerHit.new("#{label}.tags (a tag push runs the tagged commit)", true) if push.key?("tags")
+
   nil
 end
 
@@ -619,12 +695,14 @@ end
 # Everything is read AT HEAD (git ls-tree / git show), never from the working
 # tree: the question is what the commit being merged will execute.
 #
-# The roots are the configs whose jobs run on a default-branch merge: a GitHub
-# workflow whose triggers pass trigger_hit (so this widens with it, DND-590),
+# The roots are the configs whose later runs execute the merged code: a GitHub
+# workflow with any trigger workflow_trigger counts (push to the default branch,
+# schedule, workflow_dispatch, pull_request_target, ... -- see PRE_MERGE_EVENTS),
 # every GitLab CI file (GitLab absence is not provable, as in detect_automation),
-# and a workflow whose YAML does not parse (its triggers are unknown, so it
-# fails WIDE). A pull_request workflow is not a root: it runs the PR's own head
-# before merge, and merging does not change what it executes.
+# and a workflow whose YAML does not parse or whose `on:` shape is unmodelled
+# (its triggers are unknown, so it fails WIDE). A workflow whose every trigger
+# is pre-merge (pull_request, merge_group, ...) is not a root: it runs the PR's
+# own head before merge, and merging does not change what it executes.
 #
 # A reference is a path-shaped token that NAMES A FILE AT HEAD, resolved
 # against the repo root, the referring file's directory and every
@@ -723,9 +801,9 @@ def ci_references(repo, head)
   roots = tree.select do |p|
     if p.match?(%r{\A\.github/workflows/[^/]+\.ya?ml\z})
       begin
-        doc = YAML.safe_load(show_at(repo, head, p), aliases: true)
-        on = doc.is_a?(Hash) ? (doc.key?("on") ? doc["on"] : doc[true]) : nil
-        !on.nil? && !trigger_hit(on).nil?
+        trig = workflow_trigger(YAML.safe_load(show_at(repo, head, p), aliases: true))
+        notes << "#{p}: #{trig.detail} -- scanned as a root" if trig && !trig.determined
+        !trig.nil?
       rescue Psych::Exception => e
         notes << "#{p}: unparseable YAML (#{e.class}) -- triggers unknown, scanned as a root"
         true
@@ -831,7 +909,8 @@ def norm_dir(dir)
 end
 
 # Returns { applies: [{dir:, where:}], scanned: n_workflows, steps: n_apply_steps }.
-# Only workflows that run on a default-branch merge count (trigger_hit).
+# Only workflows whose later runs execute the merged code count (workflow_trigger);
+# each apply names the trigger, so a cron apply never reads as the merge push.
 def terraform_apply_roots(repo)
   applies = []
   scanned = 0
@@ -844,8 +923,8 @@ def terraform_apply_roots(repo)
     end
     next unless doc.is_a?(Hash)
 
-    on = doc.key?("on") ? doc["on"] : doc[true]
-    next if on.nil? || trigger_hit(on).nil?
+    trig = workflow_trigger(doc)
+    next if trig.nil?
 
     scanned += 1
     wf_dir = doc.dig("defaults", "run", "working-directory")
@@ -859,7 +938,7 @@ def terraform_apply_roots(repo)
         chdir = step["run"][/-chdir=("[^"]+"|'[^']+'|\S+)/, 1]&.delete("\"'")
         base = step["working-directory"] || job_dir || "."
         dir = chdir ? File.join(base, chdir) : base
-        applies << { dir: norm_dir(dir), where: "#{rel} job #{job_id}" }
+        applies << { dir: norm_dir(dir), where: "#{rel} (#{trig.detail}) job #{job_id}" }
       end
     end
   end
@@ -1246,6 +1325,20 @@ def self_test
                code == 4 && out.match?(%r{\.pkg/prod/tf/vpc/main\.tf.*\n\s+apply: AUTO-APPLIED on merge: \.pkg/prod/tf/vpc is a module sourced by root \.pkg/prod/tf}),
                "exit=#{code} out=#{out}")
 
+    # 6g. DND-590: a SCHEDULED apply applies the merged root too. The note
+    # names the trigger, so "AUTO-APPLIED" never reads as "on the merge push"
+    # when it is a cron.
+    sched_apply = apply_wf.sub("on:\n  push:\n    branches: [main]\n", "on:\n  schedule:\n    - cron: '0 3 * * *'\n")
+    d = File.join(tmp, "apply-schedule")
+    b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "drift.yml", sched_apply) }) do |r|
+      FileUtils.mkdir_p(File.join(r, ".pkg/prod/tf"))
+      File.write(File.join(r, ".pkg/prod/tf/main.tf"), "resource\n")
+    end
+    out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+    check.call("apply roots: a SCHEDULED apply is AUTO-APPLIED and the note names the trigger (DND-590)",
+               code == 4 && out.match?(%r{\.pkg/prod/tf/main\.tf.*\n\s+apply: AUTO-APPLIED on merge: .*drift\.yml \(on\.schedule\) job terraform}),
+               "exit=#{code} out=#{out}")
+
     # 7. WARM: .tf but no CI at all
     d = File.join(tmp, "warm")
     b, h = mkrepo.call(d) { |r| File.write(File.join(r, "main.tf"), "resource\n") }
@@ -1283,6 +1376,67 @@ def self_test
     out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
     check.call("WARM: a pull_request-only workflow is not a deploy (trigger parse discriminates)",
                code.zero? && out.include?("BLAST-RADIUS WARM"), "exit=#{code} out=#{out}")
+
+    # 11b. DND-590: every trigger that later runs the MERGED workflow with the
+    # default branch's secrets is merge-time automation, not only push and
+    # workflow_run. Each fixture's ONLY workflow uses one such trigger; before
+    # DND-590 each read CONFIRMED-ABSENT (WARM, exit 0).
+    trig_n = 0
+    trig_case = lambda do |on_yaml|
+      trig_n += 1
+      d = File.join(tmp, "trig#{trig_n}")
+      body = "name: t\n#{on_yaml}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps: [{run: echo}]\n"
+      b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "t.yml", body) }) { |r| File.write(File.join(r, "main.tf"), "x\n") }
+      run_br.call(["--base", b, "--head", h, "--repo", d])
+    end
+    [["schedule",            "on:\n  schedule:\n    - cron: '0 0 * * *'\n", "schedule"],
+     ["workflow_dispatch",   "on:\n  workflow_dispatch:\n", "workflow_dispatch"],
+     ["release",             "on:\n  release:\n    types: [published]\n", "release"],
+     ["pull_request_target", "on:\n  pull_request_target:\n", "pull_request_target"],
+     ["repository_dispatch", "on: repository_dispatch\n", "repository_dispatch"],
+     ["issues (any non-PR event runs default-branch code)", "on: [issues]\n", "issues"],
+     ["workflow_call (callers outside this repo are invisible)", "on:\n  workflow_call:\n", "workflow_call"],
+     ["an UNKNOWN event name (fails wide, never absent)", "on: [some_future_event]\n", "some_future_event"],
+     ["push with a GLOB branch filter (`**`)", "on:\n  push:\n    branches: ['**']\n", "**"],
+     ["push with a NEGATED branch filter", "on:\n  push:\n    branches: ['*', '!wip/**']\n", "!wip/**"],
+     ["push to a non-default branch OR a tag", "on:\n  push:\n    branches: [staging]\n    tags: ['v*']\n", "tags"]].each do |label, on_yaml, word|
+      out, _, code = trig_case.call(on_yaml)
+      check.call("HOT: a sole workflow triggered by #{label} is merge-time automation, never CONFIRMED-ABSENT (DND-590)",
+                 code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?("CONFIRMED") &&
+                   !out.include?("CONFIRMED-ABSENT") && out.include?(word),
+                 "exit=#{code} out=#{out}")
+    end
+    # An `on:` shape the parser does not model is UNDETERMINED (exit 4), never
+    # read as "no trigger" -- the failed-lookup class.
+    [["a scalar that is not an event name (`on: 42`)", "on: 42\n"],
+     ["a list holding a non-string (`on: [{push: x}]`)", "on:\n  - push: x\n"],
+     ["a MISSING `on:` key", ""],
+     ["an EMPTY `on:`", "on:\n"],
+     ["a push.branches filter that is not a list of strings", "on:\n  push:\n    branches: {main: true}\n"]].each do |label, on_yaml|
+      out, _, code = trig_case.call(on_yaml)
+      check.call("UNDETERMINED: #{label} fails CLOSED, never CONFIRMED-ABSENT (DND-590)",
+                 code == 4 && out.include?("UNDETERMINED") && out.include?("t.yml") &&
+                   !out.include?("CONFIRMED-ABSENT"),
+                 "exit=#{code} out=#{out}")
+    end
+    # A determined trigger beside an unmodelled one reads CONFIRMED, not
+    # UNDETERMINED: the known hit is the stronger, more useful statement.
+    out, _, code = trig_case.call("on:\n  push:\n    branches: {main: true}\n  schedule:\n    - cron: '0 0 * * *'\n")
+    check.call("CONFIRMED: a known trigger wins over an unmodelled sibling in one `on:` (DND-590)",
+               code == 4 && out.include?("CONFIRMED") && !out.include?("UNDETERMINED") && out.include?("on.schedule"),
+               "exit=#{code} out=#{out}")
+    # Pre-merge triggers stay excluded: they run the PR's OWN head (or the
+    # merge-queue candidate) before it lands, so merging changes nothing they
+    # execute. Pinned so the widening above cannot swallow them.
+    [["merge_group", "on:\n  merge_group:\n"],
+     ["pull_request_review", "on: [pull_request_review]\n"],
+     ["pull_request + pull_request_review_comment + merge_group", "on: [pull_request, pull_request_review_comment, merge_group]\n"],
+     ["push to a NON-default branch only", "on:\n  push:\n    branches: [staging]\n"]].each do |label, on_yaml|
+      out, _, code = trig_case.call(on_yaml)
+      check.call("WARM: a sole workflow triggered by #{label} is NOT merge-time automation (DND-590)",
+                 code.zero? && out.include?("BLAST-RADIUS WARM") && out.include?("CONFIRMED-ABSENT"),
+                 "exit=#{code} out=#{out}")
+    end
 
     # 12. deploy-automation class: touching the workflow itself
     d = File.join(tmp, "wfchange")
@@ -1420,6 +1574,25 @@ def self_test
                    wf.call(r, "ci.yml", "name: ci\non:\n  pull_request:\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: scripts/lint.sh\n")
                  },
                  "scripts/lint.sh")
+    # DND-590: the reference ROOTS widen with trigger_hit. A script a schedule,
+    # workflow_dispatch or pull_request_target workflow runs executes the MERGED
+    # copy with the default branch's secrets, so it is deploy-automation too.
+    trig_root = lambda do |on_yaml|
+      lambda do |r|
+        put.call(r, "scripts/job.sh")
+        wf.call(r, "t.yml", "name: t\n#{on_yaml}jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: scripts/job.sh\n")
+      end
+    end
+    hot_ci.call("HOT: a script a SCHEDULE workflow runs is deploy-automation (DND-590)",
+                trig_root.call("on:\n  schedule:\n    - cron: '0 0 * * *'\n"), "scripts/job.sh", ".github/workflows/t.yml")
+    hot_ci.call("HOT: a script a workflow_dispatch workflow runs is deploy-automation (DND-590)",
+                trig_root.call("on: [pull_request, workflow_dispatch]\n"), "scripts/job.sh", ".github/workflows/t.yml")
+    hot_ci.call("HOT: a script a pull_request_target workflow runs is deploy-automation (DND-590)",
+                trig_root.call("on:\n  pull_request_target:\n"), "scripts/job.sh", ".github/workflows/t.yml")
+    hot_ci.call("HOT: a script a workflow with an UNMODELLED `on:` shape runs fails WIDE (DND-590)",
+                trig_root.call("on: 42\n"), "scripts/job.sh", ".github/workflows/t.yml")
+    cold_ci.call("COLD: a script referenced ONLY by a merge_group workflow (pre-merge, DND-590)",
+                 trig_root.call("on:\n  merge_group:\n"), "scripts/job.sh")
     # Each precision bound is pinned from BOTH sides, so neither a bound that
     # stops firing nor one that starts swallowing real references goes unseen.
     gl_anchor = lambda do |r|

@@ -76,8 +76,9 @@
           "`.github/actions/**` and `**/action.y{a,}ml` are static: a local action is",
           "deploy-automation wherever it lives. This key adds the DYNAMIC part: every",
           "file named by path, at head, in a merge-time CI config -- a GitHub workflow",
-          "whose triggers fire on a default-branch merge (the same trigger_hit the",
-          "automation term uses) and every GitLab CI file (GitLab absence is not",
+          "with any trigger whose later runs execute the merged code (the same",
+          "workflow_trigger the automation term uses: every event except the",
+          "pre-merge ones, see PRE_MERGE_EVENTS) and every GitLab CI file (GitLab absence is not",
           "provable) -- is a hit, and so is every file named by one of THOSE,",
           "transitively. A `uses: ./dir` naming a local action pulls in its whole",
           "directory (Dockerfile, entry point). Only paths that exist at head count,",
@@ -90,14 +91,17 @@
           "that select or cache files (`changes:`, `paths:`, `cache:` ...); script",
           "comment lines are dropped; a bare name in a script resolves beside the",
           "script, not at the repo root; `.md` is never a hit (documentation is not",
-          "executed). With them, gen_saas reads 12 files and walt_ui 61."
+          "executed). With them, gen_saas reads 45 files and walt_ui 61. (gen_saas read",
+          "12 until DND-590 made its workflow_dispatch ci.yml a root: that adds its CI",
+          "check scripts and, through paths those scripts name as data, mix.exs,",
+          "mix.lock and Dockerfile.)"
         ],
         "known_gaps": [
           "Implicit build entry points are NOT followed: `make` reads Makefile, `mix`/`npm run` read mix.exs/package.json, `docker build .` reads Dockerfile, and none is named by path. They are the application's build definition, touched by every feature merge; gating them would gate every deploy. The captain's `Blast radius: IRREVERSIBLE` channel is their only cover.",
           "A plain DIRECTORY named in CI (`cp -r .pkg/prod dest`, `cd apps/web`) is not expanded unless it holds an action.yml/action.yaml: expanding every named directory would gate every app change in a repo whose deploy `cd`s into the app.",
           "A path an executed script names as DATA -- a grep pattern, an echo -- is a hit, since no lexical rule separates it from a path the script runs. This fails WIDE. Measured: walt_ui's backend/mix.lock is a hit because backend/bin/checks/self-test.sh greps CI for the string 'backend/mix.lock'.",
           "A path built at runtime (a loop variable, string concatenation, an absolute runner path such as /home/runner/work/...) is not resolved.",
-          "pull_request_target, schedule and workflow_dispatch roots are exactly as covered as trigger_hit makes them (DND-590); this key widens with trigger_hit and never narrows it."
+          "The roots are a DENY-list of pre-merge triggers (pull_request, pull_request_review, pull_request_review_comment, merge_group), so a trigger that runs merged code (schedule, workflow_dispatch, release, pull_request_target, ...) or an unknown one is a root (DND-590). A workflow_dispatch run may be pointed at an unmerged ref by whoever dispatches it; that does not narrow the root, because the routine dispatch runs the default branch."
         ]
       }
     },
