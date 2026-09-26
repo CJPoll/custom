@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 233 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; fix round 2 added B1-B7, C1-C18 and F8-F13; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c, R7-R41, I66-I77 and Z1-Z8).
+- **Baseline:** `RESULT: 250 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; fix round 2 added B1-B7, C1-C18 and F8-F13; fix round 3 V1-V17; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c, R7-R41, I66-I77 and Z1-Z8).
 
 ### Fail-first (no guard)
 
@@ -669,3 +669,44 @@ a non-stash alias under an override) pass both before and after.
 
 The critic's per-call note (the snapshot read runs before the prefilter) is
 latency, not correctness: ~45 ms for `ls` on the laptop. Not changed here.
+
+### Fix round 3 (486f7db; desktop critic round 18): an alias value built by expansion
+
+`V=stash; git -c alias.p="$V" p` was allowed and, in a scratch repo, created a
+stash entry (reproduced by the harness session). The alias-definition check
+read `$V`, not `stash`; the env-alias check matched only `--config-env` /
+`GIT_CONFIG_KEY_n`; the unread-config rule did not watch arbitrary variables.
+
+Convergence check: kind 1 (pre-existing, not caused by an earlier fix, no
+contradiction). It is the fourth spelling of one class, an alias definition
+the hook cannot read literally (rounds 2, 4, 16, 18). Swept at the root:
+- an alias definition whose value holds an expansion, or a `-c` /
+  `--config-env` argument that holds one, is an unread config source, so a
+  non-builtin subcommand is denied (UNREAD_CONFIG);
+- a value built by COMMAND SUBSTITUTION (backtick or `$(...)`) is denied
+  outright, because the substitution also splits the command, so its use
+  is not read as git.
+The residual (lexical indirection) is now named in the hook header.
+
+New cases against 486f7db's hook:
+
+```
+FAIL  V1. -c alias value from a variable (expected deny) status=0 out=[]
+FAIL  V2. -c alias value from a backtick (expected deny) status=0 out=[]
+FAIL  V3. -c alias value from $(...) (expected deny) status=0 out=[]
+FAIL  V4. -c alias value from ${V} (expected deny) status=0 out=[]
+FAIL  V5. -c alias value with an expansion after a space (expected deny) status=0 out=[]
+FAIL  V6. whole -c key=value from a variable (expected deny) status=0 out=[]
+FAIL  V7. --config-env key from a variable (expected deny) status=0 out=[]
+FAIL  V8. git config alias from a variable, then used (expected deny) status=0 out=[]
+FAIL  V11. -c alias value from $(...) as its own word (expected deny) status=0 out=[]
+RESULT: 238 passed, 9 failed
+```
+
+(V9, V10 and V12-V14 passed before the fix too; V15-V17 were added after it,
+as over-deny boundaries.) After the fix: `RESULT: 250 passed, 0 failed`.
+
+| Mutation | Caught by |
+| --- | --- |
+| drop the command-substitution outright deny | V2, V11 |
+| drop the two UNREAD_CONFIG expansion triggers | V1, V4-V8 |

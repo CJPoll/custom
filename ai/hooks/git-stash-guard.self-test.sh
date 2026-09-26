@@ -482,6 +482,27 @@ case_root "C16. cd to an expanded dir, then a builtin" allow 'cd "$D" && git sta
 case_root "C17. --git-dir with a stash read" allow "git --git-dir=$OWNER/.git stash list"
 case_root "C18. --git-dir with a global alias that is not a stash write" allow "git --git-dir=$OWNER/.git st"
 
+echo "== V: an alias defined in the command from an expansion =="
+# The alias value (or the whole -c key=value) is built by the shell, so the
+# hook cannot read it. Invoking a non-builtin under such a definition is denied.
+case_root "V1. -c alias value from a variable" deny 'V=stash; git -c alias.p="$V" p'
+case_root "V2. -c alias value from a backtick" deny 'git -c alias.p=`printf %s%s st ash` p'
+case_root "V3. -c alias value from \$(...)" deny 'git -c alias.p="$(printf %s%s st ash)" p'
+case_root "V4. -c alias value from \${V}" deny 'git -c alias.p=${V} p'
+case_root "V5. -c alias value with an expansion after a space" deny 'git -c alias.p="x $V" p'
+case_root "V6. whole -c key=value from a variable" deny 'git -c "$KV" p'
+case_root "V7. --config-env key from a variable" deny 'git --config-env="$E" p'
+case_root "V8. git config alias from a variable, then used" deny 'git config alias.p "$V" && git p'
+case_root "V9. GIT_CONFIG_VALUE_n from a variable" deny 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0="$V" git p'
+case_root "V10. GIT_CONFIG_PARAMETERS from a variable" deny 'GIT_CONFIG_PARAMETERS="$P" git p'
+case_root "V11. -c alias value from \$(...) as its own word" deny 'git -c alias.p=$(printf %s%s st ash) p'
+case_root "V12. expanded alias definition, builtin run" allow 'git -c alias.p="$V" status'
+case_root "V13. -c with a literal non-alias key and an expanded value" allow 'git -c user.name="$N" commit -F msg'
+case_root "V14. sh -c with an expansion, git builtin inside" allow 'sh -c "git status $X"'
+case_root "V15. git log -c with a literal revision" allow 'git log -c HEAD'
+case_root "V16. a commit message from a substitution" allow 'git commit -m "$(cat msg)"'
+case_root "V17. sh -c from a substitution" allow 'sh -c "$(cat script.sh)"'
+
 echo "== F: fail-open =="
 run ''
 check "F1. empty stdin" allow

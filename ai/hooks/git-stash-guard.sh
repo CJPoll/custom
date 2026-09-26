@@ -77,9 +77,19 @@
 #     `git --list-cmds`) when the command points git at a config the hook
 #     does not read: `--git-dir`, GIT_DIR, GIT_COMMON_DIR, GIT_CONFIG*,
 #     HOME, XDG_CONFIG_HOME, `include.path` / `includeIf.*.path`, a bare `cd`
-#     / `cd -` / `popd`, or a `cd` / `pushd` / `-C` target that is expanded
-#     (`cd "$D"`) or holds whitespace. An alias defined there cannot be read,
-#     so it is treated as unknown rather than absent. Builtins stay allowed.
+#     / `cd -` / `popd`, a `cd` / `pushd` / `-C` target that is expanded
+#     (`cd "$D"`) or holds whitespace, an alias definition whose value holds
+#     an expansion (`-c alias.p="$V"`, `git config alias.p "$V"`), or a
+#     `-c` / `--config-env` argument that holds one (`-c "$KV"`). An alias
+#     defined there cannot be read, so it is treated as unknown rather than
+#     absent. Builtins stay allowed. A value built by COMMAND SUBSTITUTION
+#     (`-c alias.p=$(...)`, a backtick) is denied outright, used or not.
+#   * RESIDUAL — LEXICAL INDIRECTION: this is a text guard. Every rule above
+#     reads the command's text; a stash write whose spelling is assembled at
+#     run time from pieces the text does not show is out of its reach (see
+#     NOT CATCHABLE). The expansion rules are a backstop for the alias forms,
+#     not a proof: an alias definition or config source the hook cannot read
+#     literally makes every non-builtin subcommand unknown.
 #
 # ACCEPTED FALSE POSITIVE (the class forge-auth-guard documents): matching is
 # lexical, so a command that only MENTIONS a mutating stash (a heredoc, a
@@ -307,6 +317,18 @@ fi
 if printf '%s' "$FLAT" | grep -Eq 'alias\.[^[:space:]=;&|]+[=[:space:]]([^;&|]*[^[:alnum:]_.-])?stash([^[:alnum:]_.-]|$)'; then
   deny 'this command defines a git alias whose value names `stash` (via `-c alias.<x>=...` or `git config alias.<x> ...`), a way to run a stash write under another name.'
 fi
+# An alias defined in the command whose value (or whose whole -c /
+# --config-env argument, after git) is a COMMAND SUBSTITUTION (`...` or
+# $(...)): the value is unreadable, and a substitution also splits the
+# command into words the evaluator reads as a separate command, so its use
+# (`git -c alias.p=$(...) p`) is not seen as git. Denied outright, used or
+# not. A plain variable (`alias.p="$V"`) is handled by UNREAD_CONFIG below,
+# which denies only a non-builtin subcommand.
+if printf '%s' "$FLAT" | grep -Eq \
+  -e 'alias\.[^[:space:]=;&|]+[=[:space:]][^;&|]*(`|\$\()' \
+  -e '(^|[^[:alnum:]_.-])git[[:space:]]+([^;&|]*[[:space:]])?(-c|--config-env)([[:space:]]+|=)[^[:space:];&|]*(`|\$\()'; then
+  deny 'this command defines git config inline (`-c alias.<x>=...`, `-c <key=value>`, `--config-env`, or `git config alias.<x> ...`) from a command substitution (`...` or `$(...)`), whose value this guard cannot read and which may define an alias that writes the stash list. Spell the value out literally, or put it in your git config.'
+fi
 # An alias whose value arrives through an environment variable
 # (`--config-env=alias.<x>=<VAR>`, `GIT_CONFIG_KEY_<n>=alias.<x>`): the value
 # is not in the command text, so any such alias definition is denied.
@@ -345,7 +367,9 @@ case $? in
       -e '--git-dir' \
       -e '(^|[^[:alnum:]_])(GIT_DIR|GIT_COMMON_DIR|GIT_CONFIG[A-Z_]*|HOME|XDG_CONFIG_HOME)=' \
       -e '(^|[[:space:];&|(])(-C|cd|pushd)[[:space:]]+[^[:space:];&|()]*[$`]' \
-      -e '(^|[[:space:];&|(])(cd|pushd|popd)([[:space:]]+-)?[[:space:]]*($|[;&|)])' 2>/dev/null
+      -e '(^|[[:space:];&|(])(cd|pushd|popd)([[:space:]]+-)?[[:space:]]*($|[;&|)])' \
+      -e 'alias\.[^[:space:]=;&|]+[=[:space:]][^;&|]*[$`]' \
+      -e '(^|[[:space:];&|(])(-c|--config-env)([[:space:]]+|=)[^[:space:];&|]*[$`]' 2>/dev/null
     _rc=$?
     if [ "$_rc" -eq 1 ]; then
       printf '%s' "$FLAT" | grep -Eiq 'include(if[^[:space:]]*)?\.path' 2>/dev/null
