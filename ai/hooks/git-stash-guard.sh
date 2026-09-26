@@ -103,11 +103,33 @@
 # Write tool in an earlier call is caught when the alias is USED, since
 # aliases are read at decision time).
 #
-# Design guarantees (mirror forge-identity-guard):
-#   * FAIL-OPEN — any error (missing jq, unparseable input, non-Bash tool, no
-#     match) exits 0 and ALLOWS. A deny is only emitted on a positive match.
-#     A crash of the evaluator itself is not silent: it allows with an
-#     additionalContext saying the guard did not run.
+# Design guarantees:
+#   * NOT A STASH COMMAND, ALLOW — unparseable input, missing jq (nothing can
+#     be emitted without it), a non-Bash tool, or no match exits 0 and allows.
+#   * BOUNDED HAND-OFF — no data of unbounded size reaches another process
+#     through argv or the environment. The kernel refuses (E2BIG) any single
+#     argv or environment string over MAX_ARG_STRLEN (128 KiB), and the tool
+#     then never runs. Measured 2026-09-26: the desktop's shell snapshots held
+#     ~172 KB of aliases, handed to the evaluator in one env var; awk exited
+#     126 and every command was allowed. So the command, the aliases and the
+#     alias-name patterns go into files under a private mktemp dir (removed on
+#     exit by trap) and are read from there; argv carries only those paths.
+#     Snapshot aliases are deduplicated (every snapshot on disk repeats them).
+#   * AN EVALUATION FAULT IS NOT "NOTHING FOUND" — a helper that fails (the
+#     evaluator or the snapshot reader exits non-zero, a grep errors, the
+#     global git config cannot be read, a work file cannot be written or
+#     read) is a FAULT. On a fault the hook falls back to a lexical verdict:
+#     it DENIES when the command text names `stash` as a word, or names a
+#     shell or git alias whose value names stash; otherwise it ALLOWS with an
+#     additionalContext saying the guard did not run. Why not deny every
+#     command on a fault: most faults are persistent (a missing tool, an
+#     oversize input, a corrupt config) and hit every command the prefilter
+#     passes, which is every `git` or `$` command in every agent session on
+#     the machine, the self-test and the fix included. Why not allow: that is
+#     the defect this replaced, a guard that switched itself off on exactly
+#     the unusual input nobody tested. The fallback keeps the incident class
+#     (a literal stash write, or an alias spelling one) closed during a fault,
+#     at the cost of also denying stash READS until the fault is fixed.
 #   * NO ESCAPE HATCH — there is no env var or marker that switches it off. A
 #     session that must write the stash list is the owner, in a terminal.
 #
@@ -125,6 +147,19 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) |
 [ -n "$CMD" ] || exit 0
 
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+
+# Work files (see BOUNDED HAND-OFF). FAULT names the first evaluation fault.
+FAULT=""
+GSG_TMP=$(mktemp -d 2>/dev/null) || GSG_TMP=""
+if [ -n "$GSG_TMP" ] && [ -d "$GSG_TMP" ]; then
+  trap 'rm -rf "$GSG_TMP"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  : > "$GSG_TMP/shaliases"; : > "$GSG_TMP/shalias.re"; : > "$GSG_TMP/aliases"
+  printf '%s' "$CMD" > "$GSG_TMP/cmd" || FAULT="the command could not be written to a work file"
+else
+  GSG_TMP=""; FAULT="mktemp could not create a work dir"
+fi
 
 # FLAT feeds only the LEXICAL checks below (the prefilter, refs/stash writes,
 # alias definitions, the dirs aliases are read from): flattened (a newline ends
@@ -147,12 +182,17 @@ GIT_OR_EXP='(^|[^[:alnum:]_.-])git([^[:alnum:]_.-]|$)|[$`]'
 # or a chain to such an alias).
 # No snapshot dir means the Bash tool loads no aliases either.
 SNAPDIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/shell-snapshots"
-SHALIASES=""
-if [ -d "$SNAPDIR" ]; then
+if [ -z "$FAULT" ] && [ -d "$SNAPDIR" ]; then
+  # Deduplicated: every snapshot on disk repeats the owner's alias set. One
+  # name may still carry several values (snapshots of different profiles),
+  # and each value counts.
+  find "$SNAPDIR" -maxdepth 1 -type f -name 'snapshot-*.sh' -exec grep -hE '^alias (-[gs] )?(-- )?[^=[:space:]]+=' {} + \
+    > "$GSG_TMP/shaliases.raw" 2>/dev/null
+  sort -u "$GSG_TMP/shaliases.raw" > "$GSG_TMP/shaliases.uniq" 2>/dev/null \
+    || FAULT="the shell snapshot aliases could not be sorted"
   # Relevant: a value naming git, stash, an expansion or a glob, or one whose
   # first word is itself a relevant alias (a chain), to a fixpoint.
-  SHALIASES=$(find "$SNAPDIR" -maxdepth 1 -type f -name 'snapshot-*.sh' -exec grep -hE '^alias (-[gs] )?(-- )?[^=[:space:]]+=' {} + 2>/dev/null \
-    | awk '
+  [ -n "$FAULT" ] || awk '
       { l = $0; sub(/^alias (-[gs] )?(-- )?/, "", l); eq = index(l, "=")
         name[NR] = substr(l, 1, eq - 1); v = substr(l, eq + 1); gsub(/\047|"/, "", v)
         split(v, w, /[ \t]+/); first[NR] = w[1]; line[NR] = $0
@@ -162,18 +202,37 @@ if [ -d "$SNAPDIR" ]; then
           for (i = 1; i <= NR; i++) if (!(name[i] in rel) && (first[i] in rel)) { rel[name[i]] = 1; grew = 1 }
         } while (grew)
         for (i = 1; i <= NR; i++) if (name[i] in rel) print line[i]
-      }')
+      }' "$GSG_TMP/shaliases.uniq" > "$GSG_TMP/shaliases" 2>/dev/null \
+    || FAULT="${FAULT:-the shell snapshot aliases could not be read (awk failed)}"
 fi
-# A word naming one of those aliases also lets the command past the prefilter.
-SHALIAS_RE=""
-if [ -n "$SHALIASES" ]; then
-  # A suffix alias (`alias -s ext=...`) is matched as `.ext` at a word's end.
-  SHALIAS_RE=$(printf '%s\n' "$SHALIASES" | sed -E 's/^alias (-[gs] )?(-- )?([^=]+)=.*/\3/' \
-    | sed -e 's/[][\.*^$+?(){}|/]/\\&/g' | paste -sd'|' -)
-  SHALIAS_RE="|(^|[^[:alnum:]_.-]|[.])($SHALIAS_RE)([^[:alnum:]_.-]|\$)"
+# A word naming one of those aliases also lets the command past the prefilter:
+# one pattern per line, in a file (a name list can pass 128 KiB). A suffix
+# alias (`alias -s ext=...`) is matched as `.ext` at a word's end.
+if [ -z "$FAULT" ] && [ -s "$GSG_TMP/shaliases" ]; then
+  sed -E 's/^alias (-[gs] )?(-- )?([^=]+)=.*/\3/' "$GSG_TMP/shaliases" \
+    | sed -e 's/[][\.*^$+?(){}|/]/\\&/g' -e 's/.*/(^|[^[:alnum:]_.-]|[.])(&)([^[:alnum:]_.-]|$)/' \
+    | sort -u > "$GSG_TMP/shalias.re" 2>/dev/null \
+    || FAULT="the shell alias patterns could not be written"
 fi
-# A glob or brace can also build a command word (`/usr/bin/g?t`).
-printf '%s' "$FLAT" | grep -Eq "stash|$GIT_OR_EXP|[*?[{]$SHALIAS_RE" || exit 0
+# prefilter <extra ERE> : does FLAT match the extra pattern, a glob/brace
+# character, or a relevant shell alias name? 0 yes, 1 no, 2 grep failed.
+prefilter() {
+  if [ -n "$GSG_TMP" ]; then
+    printf '%s' "$FLAT" | grep -Eq -e "$1" -e '[*?[{]' -f "$GSG_TMP/shalias.re" 2>/dev/null
+  else
+    printf '%s' "$FLAT" | grep -Eq -e "$1" -e '[*?[{]' 2>/dev/null
+  fi
+}
+
+# Appended to the aliases work file. `git config --get-regexp` exits 1 when
+# nothing matches; any other non-zero exit is an error.
+alias_read() {
+  if [ -n "$1" ] && [ -d "$1" ]; then
+    git -C "$1" config --get-regexp '^alias\.' >> "$GSG_TMP/aliases" 2>/dev/null
+  else
+    (cd / && git config --get-regexp '^alias\.' >> "$GSG_TMP/aliases" 2>/dev/null)
+  fi
+}
 
 deny() {
   jq -cn --arg r "git-stash-guard: $1 Every linked worktree shares ONE stash list with the main checkout (refs/stash lives in the common git dir), so a stash push/pop/apply/drop from a fleet worktree can apply, drop or clobber the OWNER's saved work with no error (DND-670: a captain's \`git stash pop\` popped the owner's PT-822 entry). Agent sessions never write the stash list. Fix: to park WIP, commit it on your worktree branch (\`git add -A && git commit -m \"WIP: <what>\"\`; squash or amend it later); for a clean tree to experiment in, add a scratch tree with \`git worktree add <path> -b <scratch-branch>\` and remove it after. Read-only \`git stash list\`, \`git stash show\` and \`git stash create\` stay allowed. If this command only MENTIONS stash text (a heredoc, a commit message, a grep) and writes no stash, move the text into a file with the Write tool and pass the file (\`git commit -F <file>\`), or use the Grep tool; never rephrase a real stash command to slip past this guard." \
@@ -181,6 +240,42 @@ deny() {
     2>/dev/null
   exit 0
 }
+
+# fault_verdict : the lexical fallback on an evaluation fault (see the header).
+# Denies when the command names `stash` as a word, or names (as a whole word)
+# a shell or git alias whose value names stash, from whatever alias files were
+# read before the fault. Otherwise allows, saying the guard did not run.
+fault_verdict() {
+  if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_.-])stash([^[:alnum:]_.-]|$)'; then
+    deny "this command names \`stash\`, and the guard could not evaluate it ($FAULT), so it fails CLOSED: a read (\`git stash list\`) is denied too until the fault is fixed. Run \`sh ~/dev/custom/ai/hooks/git-stash-guard.self-test.sh\` and report the failure to your admiral."
+  fi
+  if [ -n "$GSG_TMP" ]; then
+    # A fault before the alias reads leaves those files empty: read the git
+    # aliases now (a failing read adds nothing), and the snapshot aliases from
+    # the deduplicated list, which exists before relevance filtering.
+    [ -s "$GSG_TMP/aliases" ] || { alias_read ""; alias_read "$CWD"; }
+    { sed -nE '/stash/s/^alias (-[gs] )?(-- )?([^=]+)=.*/\3/p' "$GSG_TMP/shaliases" "$GSG_TMP/shaliases.uniq"
+      sed -nE '/^alias\.[^ ]+ .*stash/s/^alias\.([^ ]+) .*/\1/p' "$GSG_TMP/aliases"
+    } > "$GSG_TMP/stashnames" 2>/dev/null
+    if [ -s "$GSG_TMP/stashnames" ] \
+      && printf '%s' "$FLAT" | tr -s '[:space:];&|()<>`' '[\n*]' | grep -Fxiq -f "$GSG_TMP/stashnames" 2>/dev/null; then
+      deny "this command names a shell or git alias whose value names stash, and the guard could not evaluate it ($FAULT), so it fails CLOSED. Run \`sh ~/dev/custom/ai/hooks/git-stash-guard.self-test.sh\` and report the failure to your admiral."
+    fi
+  fi
+  jq -cn --arg c "git-stash-guard: could not evaluate this command ($FAULT). It names no stash and no stash alias, so it was ALLOWED unchecked. Fix: run \`sh ~/dev/custom/ai/hooks/git-stash-guard.self-test.sh\` and report the failure to your admiral; do not run a stash write meanwhile." \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",additionalContext:$c}}' 2>/dev/null
+  exit 0
+}
+
+[ -z "$FAULT" ] || fault_verdict
+# A glob or brace can also build a command word (`/usr/bin/g?t`).
+prefilter "stash|$GIT_OR_EXP"
+case $? in
+  0) ;;
+  1) exit 0 ;;
+  *) FAULT="the prefilter grep failed"; fault_verdict ;;
+esac
+
 
 # ---- refs/stash rewritten without the stash subcommand ----------------------
 # A redirect to /dev/null or an fd duplication writes nothing, so strip both
@@ -217,29 +312,38 @@ fi
 # the global aliases; a dir that does not exist falls back to a plain read.
 # Not resolved: a dir whose path contains whitespace (it is split into words),
 # or one reached through a variable (`cd "$D"`). Global aliases still apply.
-alias_read() {
-  if [ -n "$1" ] && [ -d "$1" ]; then
-    git -C "$1" config --get-regexp '^alias\.' 2>/dev/null
-  else
-    (cd / && git config --get-regexp '^alias\.' 2>/dev/null)
-  fi
-}
-ALIASES=""
-if printf '%s' "$FLAT" | grep -Eq "$GIT_OR_EXP|[*?[{]$SHALIAS_RE"; then
-  # The global read stands alone, so a repo git refuses to read (dubious
-  # ownership, a corrupt config) still leaves the global aliases in scope.
-  ALIASES="$(alias_read "")
-$(alias_read "$CWD")"
-  for _d in $(printf '%s' "$FLAT" | grep -Eo '(^|[[:space:];&|(])(-C|cd|pushd)[[:space:]]+[^[:space:];&|()]+' | sed -E 's#.*(-C|cd|pushd)[[:space:]]+##'); do
-    case "$_d" in "~"|"~/"*) _d="$HOME${_d#\~}" ;; esac
-    case "$_d" in /*) ;; *) [ -n "$CWD" ] && _d="$CWD/$_d" ;; esac
-    ALIASES="$ALIASES
-$(alias_read "$_d")"
-  done
-fi
+prefilter "$GIT_OR_EXP"
+case $? in
+  0)
+    # The global read stands alone, so a repo git refuses to read (dubious
+    # ownership, a corrupt repo config) still leaves the global aliases in
+    # scope. The GLOBAL read failing is a fault: every git alias is unknown.
+    alias_read ""
+    _rc=$?
+    [ "$_rc" -le 1 ] || { FAULT="the global git config could not be read (git config exited $_rc)"; fault_verdict; }
+    alias_read "$CWD"
+    for _d in $(printf '%s' "$FLAT" | grep -Eo '(^|[[:space:];&|(])(-C|cd|pushd)[[:space:]]+[^[:space:];&|()]+' | sed -E 's#.*(-C|cd|pushd)[[:space:]]+##'); do
+      case "$_d" in "~"|"~/"*) _d="$HOME${_d#\~}" ;; esac
+      case "$_d" in /*) ;; *) [ -n "$CWD" ] && _d="$CWD/$_d" ;; esac
+      alias_read "$_d"
+    done
+    ;;
+  1) ;;
+  *) FAULT="the prefilter grep failed"; fault_verdict ;;
+esac
 
 # ---- git stash, through every head the header lists -------------------------
-VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
+# Its inputs are files (BOUNDED HAND-OFF): argv carries only their paths.
+VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/shaliases" '
+  # slurp(f): the whole file, lines joined by newlines. An unreadable file
+  # exits 3, which the caller reads as a fault.
+  function slurp(f,   s, l, n, rc) {
+    s = ""; n = 0
+    while ((rc = (getline l < f)) > 0) s = (n++ ? s "\n" : "") l
+    if (rc < 0) exit 3
+    close(f)
+    return s
+  }
   function is_read(v) { sub(/[<>].*/, "", v); return v ~ /^(list|show|create)$/ }
   function mentions_stash(v) { return v ~ /(^|[^[:alnum:]_.-])stash([^[:alnum:]_.-]|$)/ }
   function is_sep(c) { return c ~ /[ \t\n;&|()`]/ }
@@ -435,7 +539,7 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
   }
   # squote(w): w as one single-quoted shell word.
   function squote(w) { gsub(/\047/, "\047\\\047\047", w); return "\047" w "\047" }
-  function analyze(text, depth,    W, QF, SB, n, k, e, r, sw, m, i, cp, t) {
+  function analyze(text, depth,    W, QF, SB, n, k, e, r, sw, m, i, cp, t, j, x) {
     # Past the nesting bound, text that still names stash is a deny.
     if (depth > 8) return mentions_stash(text) ? "stash" : ""
     n = tokenize(text, W, QF, SB)
@@ -449,16 +553,20 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
       # A shell alias in command position: read its value, followed by the
       # rest of this simple command, as a command of its own.
       if (cp && (W[k] in shal)) {
-        t = shal[W[k]]
-        for (i = k + 1; i <= e; i++) t = t " " squote(W[i])
-        if (analyze(t, depth + 1) != "") return "shell-alias"
+        for (j = 1; j <= shal[W[k]]; j++) {
+          t = shv[W[k], j]
+          for (i = k + 1; i <= e; i++) t = t " " squote(W[i])
+          if (analyze(t, depth + 1) != "") return "shell-alias"
+        }
       }
       # A zsh SUFFIX alias (`alias -s ext=cmd`): a command word `x.ext` runs
       # `cmd x.ext ...`.
-      if (cp && match(W[k], /\.[^.\/]+$/) && ((t = substr(W[k], RSTART + 1)) in sal)) {
-        t = sal[t]
-        for (i = k; i <= e; i++) t = t " " squote(W[i])
-        if (analyze(t, depth + 1) != "") return "shell-alias"
+      if (cp && match(W[k], /\.[^.\/]+$/) && ((x = substr(W[k], RSTART + 1)) in sal)) {
+        for (j = 1; j <= sal[x]; j++) {
+          t = sv[x, j]
+          for (i = k; i <= e; i++) t = t " " squote(W[i])
+          if (analyze(t, depth + 1) != "") return "shell-alias"
+        }
       }
       # the words of this simple command from k on, as their own array
       delete sw; m = 0
@@ -485,7 +593,7 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
     return ""
   }
   BEGIN {
-    na = split(ENVIRON["GSG_ALIASES"], lines, "\n")
+    na = split(slurp(alf), lines, "\n")
     for (k = 1; k <= na; k++) {
       l = lines[k]
       if (l !~ /^alias\./) continue
@@ -494,7 +602,7 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
       if (sp > 0) { val = substr(name, sp + 1); name = substr(name, 1, sp - 1) }
       nal[name]++; aval[name, nal[name]] = val
     }
-    ns = split(ENVIRON["GSG_SHALIASES"], slines, "\n")
+    ns = split(slurp(shf), slines, "\n")
     for (k = 1; k <= ns; k++) {
       l = slines[k]
       kind = (l ~ /^alias -g /) ? "g" : ((l ~ /^alias -s /) ? "s" : "")
@@ -506,25 +614,34 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
       nv = tokenize(substr(l, eq + 1), vw, vq, vs)
       val = ""
       for (i = 1; i <= nv; i++) val = val (i > 1 ? " " : "") vw[i]
-      if (kind == "g") gal[name] = val
-      else if (kind == "s") sal[name] = val
-      else shal[name] = val
+      # One name may carry several values (one per snapshot profile): keep
+      # every distinct value. gal/sal/shal count them; *v holds each.
+      if ((kind, name, val) in seenv) continue
+      seenv[kind, name, val] = 1
+      if (kind == "g") gv[name, ++gal[name]] = val
+      else if (kind == "s") sv[name, ++sal[name]] = val
+      else shv[name, ++shal[name]] = val
     }
-    cmd = ENVIRON["GSG_CMD"]
+    cmd = slurp(cmdf)
     r = analyze(cmd, 0)
     # zsh GLOBAL aliases (`alias -g`) expand in any word position, not only
     # command position: also read the command with each one substituted
     # wherever it stands as a whole word (a quoted occurrence is substituted
     # too, which can only over-deny).
-    if (r == "") {
+    # A name with several values is read once per value: pass p substitutes
+    # the p-th value of each name (its last, once p passes its count).
+    maxg = 0
+    for (name in gal) if (gal[name] > maxg) maxg = gal[name]
+    for (p = 1; r == "" && p <= maxg; p++) {
       g = cmd; hit = 0
       for (name in gal) {
+        gval = gv[name, (p <= gal[name]) ? p : gal[name]]
         re = name; gsub(/[][\\.^$*+?(){}|\/]/, "\\\\&", re)
         while (match(g, "(^|[ \t\n;&|()`])" re "([ \t\n;&|()`]|$)")) {
           pre = substr(g, 1, RSTART - 1); m0 = substr(g, RSTART, RLENGTH)
           lead = substr(m0, 1, 1); if (lead !~ /[ \t\n;&|()`]/) lead = ""
           tail = substr(m0, RLENGTH, 1); if (tail !~ /[ \t\n;&|()`]/) tail = ""
-          g = pre lead gal[name] tail substr(g, RSTART + RLENGTH); hit = 1
+          g = pre lead gval tail substr(g, RSTART + RLENGTH); hit = 1
         }
       }
       if (hit) { r = analyze(g, 1); if (r != "") r = "shell-alias" }
@@ -533,12 +650,11 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
   }' 2>/dev/null)
 AWK_RC=$?
 
-# An evaluator that crashed must not read as "nothing found". The command is
-# still allowed (fail-open), but the session is told the guard did not run.
+# An evaluator that crashed must not read as "nothing found" (see AN
+# EVALUATION FAULT IS NOT "NOTHING FOUND" in the header).
 if [ "$AWK_RC" -ne 0 ]; then
-  jq -cn --arg c "git-stash-guard: could not evaluate this command (its awk evaluator exited $AWK_RC), so it was ALLOWED unchecked. Fix: run \`sh ~/dev/custom/ai/hooks/git-stash-guard.self-test.sh\` and report the failure to your admiral; do not run a stash write meanwhile." \
-    '{hookSpecificOutput:{hookEventName:"PreToolUse",additionalContext:$c}}' 2>/dev/null
-  exit 0
+  FAULT="its awk evaluator exited $AWK_RC"
+  fault_verdict
 fi
 
 case "$VERDICT" in

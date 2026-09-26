@@ -563,3 +563,63 @@ RESULT: 196 passed, 6 failed
 ```
 
 After the fix: `RESULT: 202 passed, 0 failed`.
+
+### Fix round 2 (d86fa3e; desktop critic BLOCK): data past one exec argument's limit
+
+The desktop critic found that the hook handed the command, the git aliases and
+the snapshot shell aliases to awk through environment variables
+(`GSG_CMD`, `GSG_ALIASES`, `GSG_SHALIASES`). The kernel refuses any single argv
+or environment string over MAX_ARG_STRLEN (128 KiB) with E2BIG. The desktop's
+snapshots held ~172 KB of aliases, so awk never ran (exit 126) and the hook
+allowed every command. The shell-alias name list also went to the prefilter
+`grep` as one argv pattern; past 128 KiB that grep failed (exit 2), which
+`|| exit 0` read as "no match", a silent allow.
+
+Class: an unbounded value handed to another process through argv or the
+environment, plus an internal fault that reads as "nothing found". Fixed at the
+root: the command, both alias sets and the alias-name patterns now go into files
+in a private `mktemp -d` dir (removed by an EXIT trap); awk gets only their
+paths (`-v cmdf=... alf=... shf=...`) and reads them with getline; grep reads
+patterns with `-f`. Snapshot aliases are deduplicated with `sort -u`. A name
+with different values in two snapshots now keeps every value (it was last-wins,
+B7). An evaluation fault (the evaluator or snapshot reader failing, a grep error,
+an unreadable global git config, an unwritable work file) is a FAULT with a
+lexical fallback: deny when the text names `stash` or a stash-valued alias,
+otherwise allow with a notice. The header records why it is neither
+deny-everything nor allow.
+
+New cases (B1-B7, F7-F13; F7's expectation changed from "allow with notice" to
+"deny") run against d86fa3e's hook:
+
+```
+FAIL  B1. shell alias among >128 KiB of distinct snapshot aliases (expected deny) status=0 out=[]
+FAIL  B2. shell alias among >128 KiB of duplicated snapshots (desktop shape) (expected deny)  [awk exited 126]
+FAIL  B3. unrelated alias among >128 KiB of snapshots (expected allow)  [awk exited 126]
+FAIL  B4. git alias among >128 KiB of global git aliases (expected deny)  [awk exited 126]
+FAIL  B5. a command longer than 128 KiB (expected deny)  [awk exited 126]
+FAIL  B6. a harmless command longer than 128 KiB (expected allow)  [awk exited 126]
+FAIL  B7. an alias name with a stash value in any snapshot (expected deny) status=0 out=[]
+FAIL  F7. a crashed evaluator fails closed on a literal stash write (expected fault deny)
+FAIL  F9. a crashed evaluator fails closed on a shell alias spelling a stash write (expected fault deny)
+FAIL  F10. a crashed evaluator fails closed on a git alias spelling a stash write (expected fault deny)
+FAIL  F11. an unreadable global git config is a fault, not zero aliases status=0 out=[]
+FAIL  F12. an unreadable global git config fails closed on a stash write (expected fault deny)
+RESULT: 203 passed, 12 failed
+```
+
+After the fix: `RESULT: 215 passed, 0 failed`.
+
+Sabotage rows (fixed hook, one mutation each, restored with `cp` from a backup):
+
+| Mutation | Caught by |
+| --- | --- |
+| drop the `trap 'rm -rf "$GSG_TMP"' EXIT` | F13 (work dir left in `$TMPDIR`) |
+| shell-alias loop reads only the LAST value of a name | B7 |
+
+Class-closed assertions over the hook, each required to print nothing:
+`grep -n 'ENVIRON' ai/hooks/git-stash-guard.sh`, and an env-prefixed exec
+(`VAR="$x" cmd`) grep. Every remaining expansion of `$CMD`, `$FLAT`, `$INPUT`
+or `$WRITES` is a `printf '%s'` builtin into a pipe, or a `[ -n ]` test.
+Swept ai/hooks/ for the same hand-off: only `main-session-policy.sh`
+(`INPUT="$input" python3`) passes hook stdin through the environment;
+proposed separately, not fixed here.

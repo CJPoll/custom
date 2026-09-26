@@ -396,6 +396,59 @@ else
   record "T1. Fix: names a WIP commit and git worktree add" FAIL
 fi
 
+echo "== B: inputs past one exec argument's limit (MAX_ARG_STRLEN, 128 KiB) =="
+# The kernel refuses (E2BIG) any single argv or environment string over 128
+# KiB, so data handed to the evaluator that way fails to exec and the hook
+# used to allow. Measured 2026-09-26: the desktop's snapshots held ~172 KB of
+# relevant aliases. Every case here is over that limit and must still decide.
+# jsonstdin <cwd> : a Bash-tool JSON whose command is read from stdin (the
+# command itself may be past the argument limit, so it never goes through argv).
+jsonstdin() {
+  jq -cRs --arg d "$1" '{tool_name:"Bash",cwd:$d,tool_input:{command:.}}'
+}
+# runin <claude-config-dir> <git-global-config> <json> : run the hook with
+# those config roots.
+runin() {
+  OUT=$(printf '%s' "$3" | CLAUDE_CONFIG_DIR="$1" GIT_CONFIG_GLOBAL="$2" sh "$HOOK" 2>/dev/null)
+  STATUS=$?
+}
+BIG="$TMP/big"
+mkdir -p "$BIG/distinct/shell-snapshots" "$BIG/dup/shell-snapshots" "$BIG/multi/shell-snapshots"
+# 4000 DISTINCT git-valued aliases with long names (~290 KB, and a name list
+# past 128 KiB too), so no amount of deduplication brings them under the limit.
+awk 'BEGIN { for (i = 1; i <= 4000; i++) printf "alias -- galias_padding_padding_padding_padding_%d=\047git log --oneline -n %d\047\n", i, i
+  print "alias -- gstp=\047git stash pop\047" }' > "$BIG/distinct/shell-snapshots/snapshot-zsh-1-big.sh"
+# The desktop's shape: the same alias set in 30 snapshots (~180 KB in total,
+# small once deduplicated).
+awk 'BEGIN { for (i = 1; i <= 120; i++) printf "alias -- gl%d=\047git log --oneline -n %d\047\n", i, i
+  print "alias -- gstp=\047git stash pop\047" }' > "$BIG/dup/one.sh"
+for _k in $(seq 1 30); do cp "$BIG/dup/one.sh" "$BIG/dup/shell-snapshots/snapshot-zsh-$_k-dup.sh"; done
+rm -f "$BIG/dup/one.sh"
+# One alias name with a different value in two snapshots: the Bash tool loads
+# whichever snapshot its session has, so every value counts.
+printf "alias -- gzz='git stash pop'\n" > "$BIG/multi/shell-snapshots/snapshot-zsh-1-a.sh"
+printf "alias -- gzz='git status'\n" > "$BIG/multi/shell-snapshots/snapshot-zsh-2-b.sh"
+# 4000 git aliases in the global config (~150 KB), with a stash alias last.
+{ printf '[alias]\n'
+  awk 'BEGIN { for (i = 1; i <= 4000; i++) printf "\tpadding-padding-padding-%d = log --oneline -n %d\n", i, i }'
+  printf '\tsp = stash pop\n'; } > "$BIG/gitconfig"
+_pad=$(awk 'BEGIN { s = "x"; while (length(s) < 140000) s = s s; print s }')
+
+runin "$BIG/distinct" "$GIT_CONFIG_GLOBAL" "$(printf 'gstp' | jsonstdin "$WT")"
+check "B1. shell alias among >128 KiB of distinct snapshot aliases" deny
+runin "$BIG/dup" "$GIT_CONFIG_GLOBAL" "$(printf 'gstp' | jsonstdin "$WT")"
+check "B2. shell alias among >128 KiB of duplicated snapshots (desktop shape)" deny
+runin "$BIG/dup" "$GIT_CONFIG_GLOBAL" "$(printf 'gl7' | jsonstdin "$WT")"
+check "B3. unrelated alias among >128 KiB of snapshots" allow
+runin "$CLAUDE_CONFIG_DIR" "$BIG/gitconfig" "$(printf 'git sp' | jsonstdin "$WT")"
+check "B4. git alias among >128 KiB of global git aliases" deny
+runin "$CLAUDE_CONFIG_DIR" "$GIT_CONFIG_GLOBAL" "$(printf 'git stash pop; echo %s' "$_pad" | jsonstdin "$WT")"
+check "B5. a command longer than 128 KiB" deny
+runin "$CLAUDE_CONFIG_DIR" "$GIT_CONFIG_GLOBAL" "$(printf 'git status; echo %s' "$_pad" | jsonstdin "$WT")"
+check "B6. a harmless command longer than 128 KiB" allow
+runin "$BIG/multi" "$GIT_CONFIG_GLOBAL" "$(printf 'gzz' | jsonstdin "$WT")"
+check "B7. an alias name with a stash value in any snapshot" deny
+
 echo "== F: fail-open =="
 run ''
 check "F1. empty stdin" allow
@@ -409,15 +462,56 @@ run "$(jq -cn --arg c 'git stash pop' '{tool_name:"Bash",tool_input:{command:$c}
 check "F5. no cwd in the input still denies the pop" deny
 run "$(json /nonexistent/dir 'git sp')"
 check "F6. cwd outside any repo still resolves global aliases" deny
-# F7: a crashed evaluator allows, but says so (a failed evaluation must not
-# read as "nothing found"). A fake awk that fails comes first on PATH.
+# F7-F12: an evaluation fault must not read as "nothing found". The hook
+# falls back to a lexical verdict: deny when the text names stash or a stash
+# alias, else allow with a notice that the guard did not run.
+# A fake awk that fails comes first on PATH.
 mkdir -p "$TMP/badbin"
 printf '#!/bin/sh\nexit 2\n' > "$TMP/badbin/awk"; chmod +x "$TMP/badbin/awk"
-OUT=$(json "$WT" 'git stash pop' | PATH="$TMP/badbin:$PATH" sh "$HOOK" 2>/dev/null); STATUS=$?
-if [ "$STATUS" -eq 0 ] && printf '%s' "$OUT" | grep -q 'could not evaluate' && ! printf '%s' "$OUT" | grep -q '"deny"'; then
-  record "F7. a crashed evaluator allows with a notice, not silently" PASS
+# runbad <command> : run the hook with the failing awk.
+runbad() {
+  OUT=$(json "$WT" "$1" | PATH="$TMP/badbin:$PATH" sh "$HOOK" 2>/dev/null); STATUS=$?
+}
+# is_fault_deny / is_fault_allow : the fallback verdicts, each naming the fault.
+is_fault_deny() { is_deny && printf '%s' "$OUT" | grep -q 'could not evaluate'; }
+is_fault_allow() {
+  [ "$STATUS" -eq 0 ] && printf '%s' "$OUT" | grep -q 'could not evaluate' && ! printf '%s' "$OUT" | grep -q '"deny"'
+}
+fault_check() {
+  if [ "$2" = deny ]; then
+    if is_fault_deny; then record "$1 (expected fault deny)" PASS; else record "$1 (expected fault deny)" FAIL; fi
+  else
+    if is_fault_allow; then record "$1 (expected fault allow + notice)" PASS; else record "$1 (expected fault allow + notice)" FAIL; fi
+  fi
+}
+runbad 'git stash pop'
+fault_check "F7. a crashed evaluator fails closed on a literal stash write" deny
+runbad 'git status'
+fault_check "F8. a crashed evaluator allows a command naming no stash, with a notice" allow
+runbad 'gstp'
+fault_check "F9. a crashed evaluator fails closed on a shell alias spelling a stash write" deny
+runbad 'git sp'
+fault_check "F10. a crashed evaluator fails closed on a git alias spelling a stash write" deny
+printf '[alias\n\tsp = stash pop\n' > "$TMP/badconfig"
+OUT=$(json "$WT" 'git status' | GIT_CONFIG_GLOBAL="$TMP/badconfig" sh "$HOOK" 2>/dev/null); STATUS=$?
+if is_fault_allow && printf '%s' "$OUT" | grep -q 'global git config could not be read'; then
+  record "F11. an unreadable global git config is a fault, not zero aliases" PASS
 else
-  record "F7. a crashed evaluator allows with a notice, not silently" FAIL
+  record "F11. an unreadable global git config is a fault, not zero aliases" FAIL
+fi
+OUT=$(json "$WT" 'git stash pop' | GIT_CONFIG_GLOBAL="$TMP/badconfig" sh "$HOOK" 2>/dev/null); STATUS=$?
+fault_check "F12. an unreadable global git config fails closed on a stash write" deny
+# F13: the hook work dir is removed on every exit path (deny, allow, fault).
+mkdir -p "$TMP/hooktmp"
+for _c in 'git stash pop' 'git status' 'ls'; do
+  json "$WT" "$_c" | TMPDIR="$TMP/hooktmp" sh "$HOOK" >/dev/null 2>&1
+done
+json "$WT" 'git stash pop' | TMPDIR="$TMP/hooktmp" PATH="$TMP/badbin:$PATH" sh "$HOOK" >/dev/null 2>&1
+if [ -z "$(find "$TMP/hooktmp" -mindepth 1 -print -quit)" ]; then
+  record "F13. the work dir is removed on deny, allow and fault exits" PASS
+else
+  STATUS=0; OUT=$(find "$TMP/hooktmp" -mindepth 1 | head -5)
+  record "F13. the work dir is removed on deny, allow and fault exits" FAIL
 fi
 
 echo
