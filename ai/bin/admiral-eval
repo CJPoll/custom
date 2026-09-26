@@ -623,30 +623,94 @@ rescue SubjectError => e
   [nil, e.message]
 end
 
+# DND-524: --output-format json is what makes the usage/cost fields exist on
+# stdout at all — plain `-p` prints only the final assistant text. Spliced in
+# BEFORE EvalSubject::CONTAINMENT_ARGV's --strict-mcp-config, never appended
+# after it (--disallowedTools is variadic and would swallow it). This stays
+# LOCAL to admiral-eval, never inside EvalSubject.argv: critic-eval builds its
+# own argv straight from EvalSubject.argv and its run_model expects plain
+# text, not a JSON envelope.
 def model_argv(agent_file, agent = eval_agent)
-  EvalSubject.argv(agent_file, agent)
+  argv = EvalSubject.argv(agent_file, agent)
+  at = argv.index("--strict-mcp-config") || argv.size
+  argv[0...at] + ["--output-format", "json"] + argv[at..]
+end
+
+# DND-524: pull the usage/cost fields out of a `claude -p --output-format
+# json` result, or nil when the run reported none. nil (not a zero-filled
+# hash) is what lets usage_summary_line tell "nothing measured" from "measured
+# a zero-token call" apart.
+def extract_usage(parsed)
+  usage = parsed["usage"]
+  return nil unless usage.is_a?(Hash)
+
+  {
+    "input_tokens" => usage["input_tokens"].to_i,
+    "output_tokens" => usage["output_tokens"].to_i,
+    "cache_read_input_tokens" => usage["cache_read_input_tokens"].to_i,
+    "cache_creation_input_tokens" => usage["cache_creation_input_tokens"].to_i,
+    "cost_usd" => parsed["total_cost_usd"].to_f
+  }
 end
 
 # Invoke the subject once for a T2 fixture, return its raw output (or nil on
 # failure). The scenario body + the mode's trailer instructions form the
-# prompt. The stderr line keeps its `! <key> invocation failed` shape: for the
-# admiral that is byte-identical to what variant-eval's T2_INVOCATION_FAILED
-# parses.
-def invoke_subject(scenario, mode, bin, argv, agent = eval_agent)
+# prompt. usage_log is mutated with one entry per call: the extracted usage
+# hash, or nil when the call failed, could not be parsed, or reported no usage
+# (DND-524) — never a zero, so run_model's aggregate can tell "no calls
+# measured" from "measured zero tokens". The stderr line keeps its
+# `! <key> invocation failed` shape: for the admiral that is byte-identical to
+# what variant-eval's T2_INVOCATION_FAILED parses.
+def invoke_subject(scenario, mode, bin, argv, agent = eval_agent, usage_log = [])
   prompt = "#{scenario}\n\n#{trailer_instructions(mode, vocabulary(agent))}"
   out, err, st = Open3.capture3(model_env(bin), *argv, stdin_data: prompt)
-  return out if st&.success?
-  warn "  ! #{agent.key} invocation failed (exit #{st ? st.exitstatus : '?'}): #{err.to_s.lines.last(2).join.strip}"
+  unless st&.success?
+    warn "  ! #{agent.key} invocation failed (exit #{st ? st.exitstatus : '?'}): #{err.to_s.lines.last(2).join.strip}"
+    usage_log << nil
+    return nil
+  end
+
+  parsed = JSON.parse(out)
+  usage_log << extract_usage(parsed)
+  text = parsed["result"]
+  warn "  ! #{agent.key} invocation succeeded but its --output-format json result had no `result` text " \
+       "(raw, first 200 bytes): #{out.to_s[0, 200]}" if text.nil?
+  text
+rescue JSON::ParserError => e
+  warn "  ! #{agent.key} invocation failed: could not parse --output-format json stdout (#{e.message}); " \
+       "raw (first 200 bytes): #{out.to_s[0, 200]}"
+  usage_log << nil
   nil
 rescue StandardError => e
   warn "  ! #{agent.key} invocation failed: #{e.message} (is `claude` on PATH?)"
+  usage_log << nil
   nil
+end
+
+# DND-524: one aggregate line over every T2 model call this run made, printed
+# to STDERR ONLY (never stdout — variant-eval's collect_t2_counts,
+# block-optimize, and `--json` parse admiral-eval's stdout byte-for-byte: the
+# `subject:` line, the `PASS|FAIL ... [<mode>]` rows, and the closing
+# `admiral-eval: P/T cases pass` summary; see the note at run_model's per-case
+# progress line). Absence must never read as zero: "n/a" when nothing in the
+# log carried usage (every call failed, or ran against a `claude` too old to
+# emit `usage` under --output-format json), not a spend of $0.00.
+def usage_summary_line(log)
+  measured = log.compact
+  return "admiral-eval: usage — n/a (no model call in this run reported usage tokens)" if measured.empty?
+
+  sum = ->(key) { measured.sum { |u| u[key] } }
+  cost = measured.sum { |u| u["cost_usd"] }
+  "admiral-eval: usage — #{measured.size}/#{log.size} model call(s) reported usage; tokens: " \
+    "input #{sum.('input_tokens')}, output #{sum.('output_tokens')}, " \
+    "cache_read #{sum.('cache_read_input_tokens')}, cache_creation #{sum.('cache_creation_input_tokens')}; " \
+    "cost $#{format('%.4f', cost)} USD"
 end
 # ---------------------------------------------------------------------------
 # Evaluate one fixture directory. T1 runs once (deterministic); T2 samples K
 # times and scores by majority. Returns {name, mode, pass, rate, detail}.
 # ---------------------------------------------------------------------------
-def evaluate(dir, runs:, argv:, agent: eval_agent)
+def evaluate(dir, runs:, argv:, agent: eval_agent, usage_log: [])
   meta = parse_meta(File.join(dir, "meta"))
   name = File.basename(dir)
   mode = meta["mode"]
@@ -677,7 +741,7 @@ def evaluate(dir, runs:, argv:, agent: eval_agent)
       bin = build_sandbox(sb)
       last_reasons = nil
       samples = Array.new(runs) do
-        out = invoke_subject(scenario, mode, bin, argv, agent)
+        out = invoke_subject(scenario, mode, bin, argv, agent, usage_log)
         if out.nil?
           last_reasons ||= ["#{agent.key} produced no output (invocation failed)"]
           next false
@@ -1130,11 +1194,13 @@ def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agen
   # PASS/FAIL rows, and the closing `admiral-eval: P/T cases pass` summary) and
   # must see it byte-identical; these lines never touch STDOUT.
   total = dirs.size
+  usage_log = [] # DND-524: one entry per T2 model call this run makes (nil = no usage reported)
   results = dirs.each_with_index.map do |d, i|
-    r = evaluate(d, runs: runs, argv: argv, agent: agent).merge(fixture: fixture_fingerprint(d))
+    r = evaluate(d, runs: runs, argv: argv, agent: agent, usage_log: usage_log).merge(fixture: fixture_fingerprint(d))
     warn "  [#{i + 1}/#{total}] #{r[:name]}: #{r[:pass] ? 'PASS' : 'FAIL'} (#{r[:rate]})"
     r
   end
+  warn usage_summary_line(usage_log)
   results.each do |r|
     printf("%-4s %-34s %-6s [%s] %s\n", r[:pass] ? "PASS" : "FAIL", r[:name], r[:rate], r[:mode], r[:detail])
   end
@@ -1939,6 +2005,88 @@ def self_test
   o1, r1 = parse_cli(%w[--run --agent captain --runs 2])
   o2, r2 = parse_cli(%w[--runs 2 --agent captain --run])
   fail.("--agent must parse with --run in any order") unless r1.nil? && r2.nil? && o1 == o2 && o1["--agent"] == "captain"
+  # -- DND-524: usage/cost capture — a call reporting usage aggregates; a call
+  # reporting none reads n/a, never a spend of 0 (the failed-lookup-must-not-
+  # look-like-an-empty-one rule). Unit-level first (extract_usage /
+  # usage_summary_line, no subprocess), then one CLI-level probe with a
+  # stubbed `claude` on PATH so the whole model_argv -> invoke_subject ->
+  # run_model wiring is proven end to end without a real model call in the
+  # gate.
+  fail.("extract_usage must read the --output-format json usage/cost fields") \
+    unless extract_usage({ "usage" => { "input_tokens" => 5, "output_tokens" => 7,
+                                         "cache_read_input_tokens" => 9, "cache_creation_input_tokens" => 11 },
+                            "total_cost_usd" => 0.25 }) ==
+           { "input_tokens" => 5, "output_tokens" => 7, "cache_read_input_tokens" => 9,
+             "cache_creation_input_tokens" => 11, "cost_usd" => 0.25 }
+  fail.("extract_usage must be nil when `usage` is absent (never a zero-filled hash)") \
+    unless extract_usage({ "result" => "ok" }).nil?
+  fail.("extract_usage must be nil when `usage` is not a Hash") \
+    unless extract_usage({ "usage" => nil }).nil?
+
+  fail.("usage_summary_line must aggregate measured calls") \
+    unless usage_summary_line([
+      { "input_tokens" => 1, "output_tokens" => 2, "cache_read_input_tokens" => 3,
+        "cache_creation_input_tokens" => 4, "cost_usd" => 0.1 },
+      { "input_tokens" => 10, "output_tokens" => 20, "cache_read_input_tokens" => 30,
+        "cache_creation_input_tokens" => 40, "cost_usd" => 0.2 }
+    ]).match?(/2\/2 model call\(s\).*input 11.*output 22.*cache_read 33.*cache_creation 44.*cost \$0\.3000 USD/)
+  fail.("usage_summary_line must read n/a when NOTHING was measured, never 0 (DND-524)") \
+    unless usage_summary_line([nil, nil]) == "admiral-eval: usage — n/a (no model call in this run reported usage tokens)"
+  fail.("usage_summary_line must read n/a on an empty log too") \
+    unless usage_summary_line([]).include?("n/a")
+  fail.("usage_summary_line's n/a line must never contain a bare '0' spend/token reading") \
+    if usage_summary_line([nil]) =~ /\$0\.00|tokens: input 0/
+
+  # CLI-level: a stubbed `claude` ahead of the real one on PATH, run through the
+  # real entry point (model_argv -> invoke_subject -> run_model), against a T2
+  # (next-action) fixture so invoke_subject's JSON parse path actually runs.
+  Dir.mktmpdir("admiral-eval-usage-cli-") do |d|
+    stub_bin = File.join(d, "bin")
+    FileUtils.mkdir_p(stub_bin)
+    agent_file = File.join(d, "athena-admiral.md")
+    File.write(agent_file, "---\nname: athena-admiral\ndescription: eval subject\nmodel: opus\ncolor: red\n---\n\n" \
+                            "You are a stub admiral.\n")
+    env = { "PATH" => "#{stub_bin}:#{ENV['PATH']}" }
+
+    # (a) usage present -> aggregated, not n/a.
+    File.write(File.join(stub_bin, "claude"), <<~SH)
+      #!/bin/sh
+      cat <<'JSON'
+      {"result":"NEXT_ACTIONS: wait","usage":{"input_tokens":11,"output_tokens":22,"cache_read_input_tokens":33,"cache_creation_input_tokens":44},"total_cost_usd":0.0123}
+      JSON
+    SH
+    FileUtils.chmod(0o755, File.join(stub_bin, "claude"))
+    out_a, err_a, = Open3.capture3(env, RbConfig.ruby, File.expand_path(__FILE__),
+                                    "--run", "--only", "AE-01-confirm-before-done", "--runs", "1",
+                                    "--agent-file", agent_file)
+    fail.("stdout must be unaffected by --output-format json / usage capture") \
+      unless out_a.match?(/^subject: /) && out_a.match?(/^admiral-eval: \d+\/\d+ cases pass/)
+    fail.("the usage line must never appear on stdout (byte-parity for variant-eval)") \
+      if out_a.include?("usage —")
+    expected_a = usage_summary_line([{ "input_tokens" => 11, "output_tokens" => 22,
+                                        "cache_read_input_tokens" => 33, "cache_creation_input_tokens" => 44,
+                                        "cost_usd" => 0.0123 }])
+    fail.("a measured call must report its usage on stderr, got:\n#{err_a}") \
+      unless err_a.include?(expected_a)
+
+    # (b) usage absent from an otherwise-successful call -> n/a, never 0. This
+    # is the DND-524 regression case: the OLD invoke_subject never asked for
+    # --output-format json at all, so this is what every call looked like
+    # before the fix (and would still look like against a `claude` too old to
+    # emit `usage`).
+    File.write(File.join(stub_bin, "claude"), <<~SH)
+      #!/bin/sh
+      cat <<'JSON'
+      {"result":"NEXT_ACTIONS: wait"}
+      JSON
+    SH
+    FileUtils.chmod(0o755, File.join(stub_bin, "claude"))
+    _out_b, err_b, = Open3.capture3(env, RbConfig.ruby, File.expand_path(__FILE__),
+                                     "--run", "--only", "AE-01-confirm-before-done", "--runs", "1",
+                                     "--agent-file", agent_file)
+    fail.("a call with no `usage` field must read n/a, not 0, got:\n#{err_b}") \
+      unless err_b.include?("admiral-eval: usage — n/a (no model call in this run reported usage tokens)")
+  end
 
   if ok
     puts "admiral-eval: self-test OK"
