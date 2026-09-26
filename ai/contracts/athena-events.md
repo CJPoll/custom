@@ -3005,7 +3005,8 @@ inbox exists. The delivered `value` has the stamp stripped.
 
 ### Owner approval grants
 
-**Status.** Nothing in this section is built. gen_saas `origin/main` `7451d8ff`
+**Status.** Only T6 is built: `blast-radius --grant-eligible` and the
+`owner-approval-policy` surface (DND-596). gen_saas `origin/main` `7451d8ff`
 (read 2026-09-26) has no grant table, no approval tool and no redeem API, and
 `integration-gate` has no grant flag. Every sentence here is an obligation on
 the implementing tickets of DND-563, cited by their design names: T2 (the
@@ -3124,6 +3125,36 @@ Why this is the reversible boundary: for a same-repo PR, GitHub has already run
 the branch's own version of a `pull_request` workflow before the merge. Merging
 starts no new run with default-branch privileges, and a revert is an ordinary
 PR.
+
+**Later (2026-09-26, DND-596):** rules 1, 2 and 4 read "a path under
+`.github/workflows/`", "exactly `{pull_request}`" and "an `on:` shape it does not
+know", and left open what the check does at their edges. The shipped check
+reads each edge as NOT ELIGIBLE:
+
+- **Changed files are listed with renames split** into a delete and an add, so a
+  renamed workflow's old side is read at BASE. Rename detection lists only the
+  new path.
+- **Rule 1 matches every surface on its own.** A file two classes claim is named
+  under both. A hit passes only as a top-level workflow file,
+  `.github/workflows/<name>.yml` or `.yaml`. A file deeper under
+  `.github/workflows/`, and a file named by a merge-time CI config
+  (`ci-local-references-v1`), is NOT ELIGIBLE.
+- **Rule 2 admits only these `pull_request` filters:** `types`, `branches`,
+  `branches-ignore`, `paths` and `paths-ignore`, each a string or a list of
+  strings. Filters only narrow when the workflow runs. `types: closed` is NOT
+  ELIGIBLE: it fires on the merge itself, a new run started by merging. An
+  activity type the check does not list is UNDETERMINED.
+- **Rule 4 also covers YAML that two parsers can read differently.** A
+  duplicate key, a merge key `<<`, an explicit tag, a non-scalar key, more than
+  one document, a trigger key other than a single `on`, and a blob that is not a
+  regular file are each UNDETERMINED.
+- **Rule 3 matches the hit file's name** in the raw text and in the parsed
+  strings of every other workflow at BASE and HEAD, ignoring case. It also
+  counts a hit file that the `ci-local-references-v1` walk reaches from a
+  merge-time CI config.
+
+Exit 0 is the only eligible answer. A caller reads every other exit as not
+eligible.
 
 #### The approval message
 

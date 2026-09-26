@@ -78,7 +78,8 @@
 #                       per file (exit 4); an unknown class is exit 2. Only 0
 #                       is eligible. The rules: ai/contracts/athena-events.md
 #                       -> Owner approval grants -> Eligibility for
-#                       `merge.pr_only_workflow`, and grant_eligible below.
+#                       `merge.pr_only_workflow`, and grant_eligible in this
+#                       file.
 #
 #   --gate-ran <label>  display only: the gate command that verified <head>,
 #                       appended to the HOT-OWNER-APPROVED line so the owner-
@@ -87,7 +88,7 @@
 #
 # Exit codes:
 #   0  COLD / WARM / HOT-OWNER-APPROVED -- merging publishes code (or the owner
-#      authorized the action)
+#      authorized the action). Under --grant-eligible: GRANT-ELIGIBLE.
 #   2  usage / unresolvable ref / empty diff / manifest error
 #   4  HOT -- merging performs an irreversible, billable or one-way action.
 #      NOT the fleet's call. Under --grant-eligible: NOT ELIGIBLE.
@@ -2636,7 +2637,7 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
                     })
   # `closed` fires on the merge itself, running the PR's code with its secrets:
   # a new run started BY merging, the one thing the reversible boundary excludes.
-  not_eligible.call("`pull_request: types: [closed]` (fires on the merge itself)", ["closed"],
+  not_eligible.call("`pull_request: types: [closed]` (fires on the merge itself)", ["closed", "fires on the merge itself"],
                     change: ->(r) { wf.call(r, "ci.yml", on_wf.call("on:\n  pull_request:\n    types: [opened, closed]\n")) })
   # --- rule 4: every shape this check does not model fails CLOSED (Q-G2e) ----
   [["unparseable YAML (Q-G2e)", "name: t\non: [\n  unclosed\n", "unparseable"],
@@ -2688,6 +2689,12 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
   not_eligible.call("the same, from an UNPARSEABLE workflow (scanned as raw text)",
                     ["referenced by .github/workflows/post-merge.yml"],
                     seed: ref_seed.call("name: pm\non: [\n  uses: ./.github/workflows/ci.yml\n"))
+  # A caller present only at base is also a hit (deleted), so rule 2 already
+  # decides it; the base-side scan still names the reference, pinned here.
+  not_eligible.call("a caller DELETED at head is named as a base-side reference",
+                    ["referenced by .github/workflows/post-merge.yml at base"],
+                    seed: ref_seed.call("name: pm\non: push\njobs:\n  c:\n    uses: ./.github/workflows/ci.yml\n"),
+                    change: ->(r) { pr_change.call(r); FileUtils.rm_f(File.join(r, ".github/workflows/post-merge.yml")) })
   not_eligible.call("the reference appears only at HEAD (a head-side caller is read)",
                     ["referenced by .github/workflows/deploy.yml"],
                     change: lambda { |r|
@@ -2738,15 +2745,19 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
   d = File.join(tmp, "grant1")
   b = `git -C #{d} rev-parse HEAD~1`.strip
   h = `git -C #{d} rev-parse HEAD`.strip
-  [["an unknown class (Q-G9)", %w[--grant-eligible foo]],
-   ["priority.transition (a grant class no diff decides)", %w[--grant-eligible priority.transition]],
-   ["--grant-eligible with no class", %w[--base] + [b, "--head", h, "--repo", d, "--grant-eligible"]],
+  [["an unknown class (Q-G9)", %w[--grant-eligible foo], "unknown owner approval grant class"],
+   ["priority.transition (a grant class no diff decides)", %w[--grant-eligible priority.transition],
+    "not decided over a diff"],
+   ["--grant-eligible with no class", %w[--base] + [b, "--head", h, "--repo", d, "--grant-eligible"],
+    "needs an owner approval grant class"],
+   ["--grant-eligible followed by another flag", ["--grant-eligible", "--base", b, "--head", h, "--repo", d],
+    "needs an owner approval grant class"],
    ["--grant-eligible with --owner-approval (the two answer different questions)",
-    %w[--grant-eligible merge.pr_only_workflow --owner-approval yes]]].each do |label, args|
+    %w[--grant-eligible merge.pr_only_workflow --owner-approval yes], "cannot be combined"]].each do |label, args, word|
     full = args.include?("--base") ? args : args + ["--base", b, "--head", h, "--repo", d]
     _, err, code = run_br.call(full)
     check.call("grant usage: #{label} is exit 2 with a Fix:",
-               code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+               code == 2 && err.include?("Fix:") && err.include?(word), "exit=#{code} err=#{err}")
   end
   _, err, code = run_br.call(["--grant-eligible", "foo", "--base", b, "--head", h, "--repo", d])
   check.call("grant usage: an unknown class's Fix names the known class",
