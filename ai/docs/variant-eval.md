@@ -40,6 +40,11 @@ eval harness (`ai/bin/harness-eval`, `ai/bin/admiral-eval`,
   a **human re-run**. The committed `admiral-baseline.json` already carries a
   case at rate `2/3` — one flip from a majority-fail.
 
+  **Later (2026-09-26):** DND-523 set `admiral-eval`'s `DEFAULT_RUNS` to 10
+  and moved its baseline diff onto `EvalScore.classify` (DND-225's noise band).
+  Only its T1 half is still an exact pass-set diff. See
+  `ai/docs/eval-noise-band.md`.
+
 So a fully-automatic "measured improvement" verdict over the **model** signal is
 not yet trustworthy: the harness itself defers sampling-noise disambiguation to a
 human. Per epic Decision 5, the speculative measured-adoption core is **deferred**
