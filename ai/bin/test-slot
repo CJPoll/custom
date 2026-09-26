@@ -811,15 +811,29 @@ main() {
   JSON=0
   CMD=()
   local wait_raw=""
+  # DND-813: a flag given twice (in either spelling) is refused rather than
+  # silently keeping the second, and a value flag's value may not be the next
+  # flag (`--label --exclusive -- CMD` used to label the run "--exclusive" and
+  # run it shared).
+  local seen=" " flag
   while (($#)); do
+    flag=${1%%=*}
+    case $1 in
+      --*)
+        case $seen in *" $flag "*) die_usage "$flag given more than once." "pass $flag once, before \`--\`." ;; esac
+        [ "$1" = "--" ] || seen="$seen$flag "
+        ;;
+    esac
     case $1 in
       -h | --help) usage; exit 0 ;;
-      --self-test) mode=selftest ;;
-      --status) mode=status ;;
+      --self-test | --status)
+        [ "$mode" = run ] || die_usage "--self-test and --status are two modes." "pass one of them."
+        [ "$1" = --self-test ] && mode=selftest || mode=status
+        ;;
       --json) JSON=1 ;;
       --exclusive) EXCLUSIVE=1 ;;
       --label | --wait-timeout | --outcome-file)
-        (($# >= 2)) || die_usage "$1 needs a value." "pass $1 VALUE before \`--\`."
+        { (($# >= 2)) && [ -n "$2" ] && [ "${2#-}" = "$2" ]; } || die_usage "$1 needs a value." "pass $1 VALUE before \`--\`."
         case $1 in
           --label) LABEL=$2 ;;
           --wait-timeout) wait_raw=$2 ;;
@@ -827,9 +841,14 @@ main() {
         esac
         shift
         ;;
-      --label=*) LABEL=${1#*=} ;;
-      --wait-timeout=*) wait_raw=${1#*=} ;;
-      --outcome-file=*) OUTCOME_FILE=${1#*=} ;;
+      --label=* | --wait-timeout=* | --outcome-file=*)
+        [ -n "${1#*=}" ] || die_usage "$flag needs a value." "pass $flag=VALUE (non-empty) before \`--\`."
+        case $1 in
+          --label=*) LABEL=${1#*=} ;;
+          --wait-timeout=*) wait_raw=${1#*=} ;;
+          --outcome-file=*) OUTCOME_FILE=${1#*=} ;;
+        esac
+        ;;
       --) shift; have_dd=1; CMD=("$@"); break ;;
       *) die_usage "unknown argument '$1'." \
         "put test-slot's own flags first, then \`--\`, then the command: test-slot [--label L] -- CMD ARGS (see --help)." ;;

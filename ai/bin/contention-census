@@ -227,15 +227,25 @@ STUB
   return 1
 }
 
-case "${1:-}" in
-  --self-test) self_test ;;
-  -h | --help)
-    sed -n '2,20p' "$0"
-    ;;
-  '') run_census ;;
-  *)
-    printf 'contention-census: unknown argument: %s\n' "$1" >&2
-    printf 'Fix: run `contention-census` with no arguments, or `--self-test`.\n' >&2
-    exit 2
-    ;;
-esac
+for a in "$@"; do
+  case "$a" in
+    -h | --help)
+      sed -n '2,20p' "$0"
+      exit 0
+      ;;
+  esac
+done
+
+# Every argument is checked, not only the first (DND-813): `--self-test --x`
+# used to run the self-test, and an empty argument read as "no argument".
+if [ "$#" -eq 0 ]; then
+  run_census
+elif [ "$#" -eq 1 ] && [ "$1" = "--self-test" ]; then
+  self_test
+else
+  bad=$1
+  [ "$1" = "--self-test" ] && bad=$2
+  printf "contention-census: unknown argument '%s' (it takes no argument, or --self-test alone)\n" "$bad" >&2
+  printf 'Fix: run `contention-census` with no arguments, or `--self-test` on its own.\n' >&2
+  exit 2
+fi

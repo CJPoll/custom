@@ -37,23 +37,35 @@ set -euo pipefail
 # action reaches the network and MINTS a GitHub App installation token, so a
 # fall-through here is a credential operation nobody asked for. Help must cost
 # nothing.
-case "${1:-}" in
-  -h|--help)
-    cat <<'EOF'
+for a in "$@"; do
+  case "$a" in
+    -h|--help)
+      cat <<'EOF'
 Usage:
   ai/bin/forge-preflight   assert the Athena forge wrapper for THIS repo's
                            remote host can authenticate, BEFORE any PR/MR is
                            created; exit 0 healthy (or not a managed forge),
-                           1 refused with a `Fix:` line
+                           1 refused with a `Fix:` line, 2 usage error (it
+                           takes no arguments)
   ai/bin/forge-preflight --help   this text
 
 Run once at the start of a run, before opening a PR/MR, so a broken wrapper
 fails loudly here instead of silently falling back to the machine owner's
 identity.
 EOF
-    exit 0
-    ;;
-esac
+      exit 0
+      ;;
+  esac
+done
+
+# The tool takes no arguments (DND-813). Any argument is refused before the
+# default runs: `forge-preflight --chek` used to fall through to the default,
+# which is the token mint above -- a credential operation for a typo.
+if [ "$#" -gt 0 ]; then
+  echo "forge-preflight: usage error — unexpected argument '$1' (this tool takes no arguments)." >&2
+  echo "Fix: run \`ai/bin/forge-preflight\` with no arguments from inside the repo to check, or --help. An unrecognised argument is refused, not ignored: ignoring it would run the default, which mints a forge token." >&2
+  exit 2
+fi
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 GH_ATHENA="${GH_ATHENA_BIN:-$SELF_DIR/gh-athena}"

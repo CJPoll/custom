@@ -285,10 +285,41 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   TXT
   exit 0
 end
-if (i = ARGV.index("--norm"))
-  puts norm(ARGV[i + 1].to_s)
+require_relative "../lib/strict_argv"
+
+# Parsed BEFORE anything runs (DND-813). An argument this tool does not
+# recognise must never fall through: `--self-tset` ran the live check and exited
+# 0, and a valueless `--norm` printed the normalised form of "" -- an answer to
+# a question nobody asked, which setup-hooks' agreement probe would compare as
+# if it were real. Every argument must be a declared flag; the modes exclude
+# each other.
+CLI_SPEC = { "--self-test" => :switch, "--norm" => :value }.freeze
+
+# -> [opts, nil] on success, [nil, reason] on a usage error.
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  if opts["--self-test"] && opts["--norm"]
+    return [nil, "--norm PATH and --self-test are two modes; pass one"]
+  end
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+cli, reason = parse_cli(ARGV)
+if reason
+  warn "check-hooks-registered: usage error — #{reason}."
+  warn "  Fix: re-run with only the flags `ai/bin/check-hooks-registered --help` " \
+       "lists: no argument (the live check), --norm PATH, or --self-test. An " \
+       "unrecognised argument is refused, not ignored: ignoring it would run " \
+       "the live check and report its verdict as the answer to what you asked."
+  exit 2
+end
+if cli.key?("--norm")
+  puts norm(cli["--norm"])
   exit 0
-elsif ARGV.include?("--self-test")
+elsif cli["--self-test"]
   exit self_test
 else
   exit run

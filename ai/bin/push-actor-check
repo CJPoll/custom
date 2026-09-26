@@ -91,14 +91,26 @@ EOF
 die_usage() { printf 'push-actor-check: %s\nFix: %s\n' "$1" "$2" >&2; exit 2; }
 
 REMOTE=origin SHA="" WINDOW=20 INTERVAL=4 BRANCH="" REPO="."
+# take_value FLAG HINT [NEXT...] -- refuse a value flag with no value, or whose
+# "value" is the next flag (`--repo --sha X` read "--sha" as the repo), and a
+# value flag given twice (the second silently won). DND-813.
+seen=" "
+take_value() {
+  local flag=$1 hint=$2; shift 2
+  case "${seen}" in *" ${flag} "*) die_usage "${flag} given more than once" "pass ${flag} once" ;; esac
+  seen="${seen}${flag} "
+  [ "$#" -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ] || die_usage "${flag} needs a value" "${hint}"
+}
+for a in "$@"; do
+  case "$a" in -h|--help) usage; exit 0 ;; esac
+done
 while [ $# -gt 0 ]; do
   case "$1" in
-    -h|--help) usage; exit 0 ;;
-    --repo) REPO=${2:-}; shift 2 || die_usage "--repo needs a value" "pass --repo <path to the repo you pushed from>" ;;
-    --remote) REMOTE=${2:-}; shift 2 || die_usage "--remote needs a value" "pass --remote <name>" ;;
-    --sha) SHA=${2:-}; shift 2 || die_usage "--sha needs a value" "pass --sha <40-hex sha>" ;;
-    --window) WINDOW=${2:-}; shift 2 || die_usage "--window needs a value" "pass --window <seconds>" ;;
-    --interval) INTERVAL=${2:-}; shift 2 || die_usage "--interval needs a value" "pass --interval <seconds>" ;;
+    --repo) take_value "$1" "pass --repo <path to the repo you pushed from>" "$@"; REPO=$2; shift 2 ;;
+    --remote) take_value "$1" "pass --remote <name>" "$@"; REMOTE=$2; shift 2 ;;
+    --sha) take_value "$1" "pass --sha <40-hex sha>" "$@"; SHA=$2; shift 2 ;;
+    --window) take_value "$1" "pass --window <seconds>" "$@"; WINDOW=$2; shift 2 ;;
+    --interval) take_value "$1" "pass --interval <seconds>" "$@"; INTERVAL=$2; shift 2 ;;
     -*) die_usage "unknown option '$1'" "see push-actor-check --help" ;;
     *) [ -z "${BRANCH}" ] || die_usage "more than one branch given" "pass exactly one <branch>"; BRANCH=$1; shift ;;
   esac

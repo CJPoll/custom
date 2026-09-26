@@ -60,14 +60,24 @@ die() {
 }
 
 run_id="" session_id="${CLAUDE_CODE_SESSION_ID:-}" reports_dir="" poll_s=20 control_s=60 max_loops=0
+# take_value FLAG [NEXT...] -- refuse a value flag with no value, or whose
+# "value" is the next flag (`--session-id --max-loops 1` read "--max-loops" as
+# the session id), and a value flag given twice (the second silently won).
+# DND-813.
+seen=" "
+take_value() {
+  case "${seen}" in *" $1 "*) die "$1 given more than once; pass it once." ;; esac
+  seen="${seen}$1 "
+  [ "$#" -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ] || die "$1 needs a value."
+}
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --session-id)  [ "$#" -ge 2 ] || die "--session-id needs a value."; session_id="$2"; shift 2 ;;
-    --reports-dir) [ "$#" -ge 2 ] || die "--reports-dir needs a value."; reports_dir="$2"; shift 2 ;;
-    --poll-s)      [ "$#" -ge 2 ] || die "--poll-s needs a value."; poll_s="$2"; shift 2 ;;
-    --control-s)   [ "$#" -ge 2 ] || die "--control-s needs a value."; control_s="$2"; shift 2 ;;
-    --max-loops)   [ "$#" -ge 2 ] || die "--max-loops needs a value."; max_loops="$2"; shift 2 ;;
+    --session-id)  take_value "$@"; session_id="$2"; shift 2 ;;
+    --reports-dir) take_value "$@"; reports_dir="$2"; shift 2 ;;
+    --poll-s)      take_value "$@"; poll_s="$2"; shift 2 ;;
+    --control-s)   take_value "$@"; control_s="$2"; shift 2 ;;
+    --max-loops)   take_value "$@"; max_loops="$2"; shift 2 ;;
     -*) die "unknown flag $1; see --help." ;;
     *) [ -z "${run_id}" ] || die "one run-id only (got ${run_id} and $1)."; run_id="$1"; shift ;;
   esac
