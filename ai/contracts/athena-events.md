@@ -3298,7 +3298,15 @@ A grant is in exactly one state:
 | `pending` → `approved` | the click handler | a verified owner click on Approve, inside the click window |
 | `pending` → `declined` | the click handler | a verified owner click on Decline, inside the click window |
 | `pending` → `expired` | the click handler | a verified owner click after the click window closed |
-| `approved` → `redeemed` | the redeem API, for `merge.pr_only_workflow`; the server at click time, for `priority.transition` | the first successful redeem, or a successful priority transition |
+| `approved` → `redeemed` | the redeem API, for `merge.pr_only_workflow`; the server at click time, for `priority.transition` | the first redeem that passes every check of *Redeem*, or a successful priority transition |
+
+- **A grant goes `redeemed` before its redeem answers 200.** The receipt DM
+  comes after the transition (*Redeem* → *Success*), so a redeem whose receipt
+  fails leaves the grant `redeemed` and answers 500 `receipt_not_sent`.
+  **Later (2026-09-26, DND-814):** the table's `approved` → `redeemed` row
+  read "the first successful redeem", when success and the transition were one
+  event. Superseded by T5's code (DND-595), where the 200 waits for the
+  receipt and the transition does not.
 
 - **The click window** is 12 hours from the post. It is checked on the server's
   clock against the row's `click_expires_at` AND against the token's `x`. Both
@@ -3641,7 +3649,14 @@ structural:
 Stated, not hidden:
 
 - **Production shell access can insert a grant row.** That access is already
-  owner-gated. The receipt DM makes a forged redeem visible.
+  owner-gated. The receipt DM makes a forged redeem visible only when the row
+  was inserted with `receipt_sent_at` unset. A row inserted with it set is
+  redeemed with no DM (*Redeem* → *Success*), and whoever can insert the row
+  can set that column.
+  **Later (2026-09-26, DND-814):** this bullet said "The receipt DM makes a
+  forged redeem visible", with no condition. Superseded by T5's code
+  (DND-595): the receipt is keyed on the row's `receipt_sent_at`, so a row that
+  already records a sent receipt answers 200 without one.
 - **The local gate can be bypassed.** An agent can run a modified
   `integration-gate`, or skip it and merge directly; that is true of every gate
   today. What this removes is the agent's ability to invent the approval record.
