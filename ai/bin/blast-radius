@@ -27,6 +27,11 @@
 # "Touches" counts BOTH paths of a rename or copy (see CHANGED_PATHS_ARGS):
 # moving a surface file out of its pattern changes that surface.
 #
+# "Triggers automation" is read at BASE and at head (merge_time_automation,
+# DND-774): a merge that REMOVES the automation base runs -- deleting the last
+# deploy workflow, moving it out, or cutting its trigger to pull_request --
+# changes what every later merge does, so it is judged from the base side.
+#
 # Both terms are load-bearing, and the ORDER is what preserves throughput:
 #
 #   * Path first, and it is the cheap common case. A routine app-code merge hits
@@ -536,25 +541,102 @@ def workflow_files(repo)
   Dir.glob(File.join(repo, ".github", "workflows", "*.{yml,yaml}"), File::FNM_DOTMATCH).sort
 end
 
+# The two trees detect_automation reads (DND-774). Both answer the same four
+# questions over repo-relative paths:
+#   workflows  the top-level .github/workflows/*.{yml,yaml} files, sorted
+#   read(p)    the file's text; raises when it cannot be read as a file, which
+#              detect_automation reports as UNDETERMINED
+#   file?(p) / dir?(p)
+#
+# WorktreeTree is the checkout the gate runs in -- the head side, read exactly
+# as before DND-774. RevTree is a commit, read through git: the base side.
+WorktreeTree = Struct.new(:repo, :label) do
+  def workflows
+    workflow_files(repo).map { |f| f.delete_prefix("#{repo}/") }
+  end
+
+  def read(path)
+    File.read(File.join(repo, path))
+  end
+
+  def file?(path)
+    File.exist?(File.join(repo, path))
+  end
+
+  def dir?(path)
+    Dir.exist?(File.join(repo, path))
+  end
+end
+
+# The Dir.glob in workflow_files, as a path test: top level only, dot-prefixed
+# names included, `*` matching the empty name as the glob does.
+WORKFLOW_FILE = %r{\A\.github/workflows/[^/]*\.ya?ml\z}.freeze
+
+class RevTree
+  attr_reader :label
+
+  def initialize(repo, rev)
+    @repo = repo
+    sha, err, ok = git(repo, "rev-parse", "--verify", "#{rev}^{commit}")
+    unless ok
+      die("cannot resolve '#{rev}' in #{repo} (#{err.strip}).",
+          "pass the SHA pair integration-gate printed. An unresolvable base is an ERROR -- the " \
+          "automation it ran is UNKNOWN, never absent.")
+    end
+    @rev = sha.strip
+    @label = "base #{short(@rev)}"
+    out, err, ok = git(repo, "ls-tree", "-r", "-z", "--full-tree", @rev)
+    unless ok
+      die("`git ls-tree -r #{@rev}` failed in #{repo}: #{err.strip}",
+          "the tree at #{@rev} could not be listed, so the merge-time automation it ran is " \
+          "UNKNOWN, not absent. Resolve the git error and re-run.")
+    end
+    # "<mode> <type> <sha>\t<path>" per entry.
+    @modes = out.split("\0").to_h { |e| meta, path = e.split("\t", 2); [path, meta.split(" ", 2)[0]] }
+  end
+
+  def workflows
+    @modes.keys.select { |p| p.match?(WORKFLOW_FILE) }.sort
+  end
+
+  # A symlink's blob is its target path and a submodule has no blob: neither
+  # is the workflow GitHub would load, so neither is read as one.
+  def read(path)
+    mode = @modes[path]
+    raise IOError, "mode #{mode} is not a regular file (a symlink or submodule is not modelled)" unless REGULAR_BLOB_MODES.include?(mode)
+
+    show_at(@repo, @rev, path)
+  end
+
+  # Any entry, as File.exist? answers for a directory too.
+  def file?(path)
+    @modes.key?(path) || dir?(path)
+  end
+
+  def dir?(path)
+    @modes.each_key.any? { |p| p.start_with?("#{path}/") }
+  end
+end
+
 # Returns [state, detail] where state is one of
-# "CONFIRMED" / "UNDETERMINED" / "CONFIRMED-ABSENT".
+# "CONFIRMED" / "UNDETERMINED" / "CONFIRMED-ABSENT", for ONE tree.
 #
 # NOTE: this parses TRIGGERS. It deliberately does NOT grep for the filename
 # `post-merge.yml` the way ai/bin/lead-time does -- lead-time answers a
 # different question (WHICH completed run was the deploy) and coupling them
 # would make one brittle filename load-bearing for two unrelated guarantees.
-def detect_automation(repo)
-  wf_dir = File.join(repo, ".github", "workflows")
-  if Dir.exist?(wf_dir)
-    files = workflow_files(repo)
+def detect_automation(tree)
+  if tree.dir?(".github/workflows")
+    files = tree.workflows
     if files.empty?
       # The directory exists but holds no workflow: fall through to the other
       # forge shapes rather than claiming provable absence.
     else
-      files.each do |f|
-        rel = f.sub("#{repo}/", "")
+      files.each do |rel|
         begin
-          doc = YAML.safe_load(File.read(f), aliases: true)
+          doc = YAML.safe_load(tree.read(rel), aliases: true)
+        rescue IOError => e
+          return ["UNDETERMINED", "#{rel}: #{e.message} -- cannot prove it does NOT deploy on merge"]
         rescue StandardError => e
           return ["UNDETERMINED",
                   "#{rel}: unparseable YAML (#{e.class}) -- cannot prove it does " \
@@ -575,7 +657,7 @@ def detect_automation(repo)
     end
   end
 
-  if File.exist?(File.join(repo, ".gitlab-ci.yml")) || Dir.exist?(File.join(repo, ".gitlab", "ci"))
+  if tree.file?(".gitlab-ci.yml") || tree.dir?(".gitlab/ci")
     return ["CONFIRMED",
             ".gitlab-ci.yml present (GitLab: pipeline ABSENCE is not provable by " \
             "this check -- proving a pipeline will NOT deploy needs rules:/only: " \
@@ -584,14 +666,14 @@ def detect_automation(repo)
   end
 
   %w[Jenkinsfile azure-pipelines.yml azure-pipelines.yaml].each do |n|
-    if File.exist?(File.join(repo, n))
+    if tree.file?(n)
       return ["UNDETERMINED",
               "#{n} present -- a forge shape this check does not model, so it " \
               "cannot prove merging does not deploy"]
     end
   end
   %w[.circleci .buildkite].each do |d|
-    if Dir.exist?(File.join(repo, d))
+    if tree.dir?(d)
       return ["UNDETERMINED",
               "#{d}/ present -- a forge shape this check does not model, so it " \
               "cannot prove merging does not deploy"]
@@ -599,6 +681,37 @@ def detect_automation(repo)
   end
 
   ["CONFIRMED-ABSENT", "no CI configuration of any recognised kind in the repo"]
+end
+
+# The automation term over BOTH sides of the merge (DND-774). Returns
+# [state, detail, sides], sides being [[label, [state, detail]], ...] for the
+# report.
+#
+# Read at head alone, a diff that REMOVES the last merge-time automation found
+# none there and read WARM: `git rm` of the only deploy workflow, moving it out
+# of .github/workflows, or cutting its trigger to pull_request. Each switches
+# off what every later merge does -- the deploy, and any deploy guard it runs
+# (gen_saas's deploy-guard.sh). That is a one-way change of merge behaviour,
+# the class this check exists to hold.
+#
+# So: head's state when head runs anything (exactly the pre-DND-774 answer, so
+# nothing that was HOT narrows), else base's state. Head CONFIRMED-ABSENT with
+# base CONFIRMED or UNDETERMINED is a REMOVAL, and it takes base's state:
+# UNDETERMINED at base (a removed workflow this check cannot read) fails
+# closed. Only a merge that runs nothing at base AND at head is
+# CONFIRMED-ABSENT, e.g. a pull_request-only repo deleting its only workflow:
+# nothing ran on merge before or after, so merging lands code only.
+def merge_time_automation(head_tree, base_tree)
+  head = detect_automation(head_tree)
+  base = detect_automation(base_tree)
+  sides = [[head_tree.label, head], [base_tree.label, base]]
+  return [head[0], head[1], sides] unless head[0] == "CONFIRMED-ABSENT"
+  return [head[0], head[1], sides] if base[0] == "CONFIRMED-ABSENT"
+
+  [base[0],
+   "REMOVED by this merge: #{base_tree.label} runs merge-time automation (#{base[1]}) and head runs " \
+   "none -- merging switches it off, with any deploy guard it runs",
+   sides]
 end
 
 # --- which GitHub triggers are merge-time automation (DND-590) --------------
@@ -1047,6 +1160,9 @@ def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, 
   end
   if automation
     puts "  merge-time automation: #{automation[0]} (#{automation[1]})"
+    # Both sides, every time: "base ran nothing" and "base was never read"
+    # must never read the same (DND-774).
+    automation[2].to_a.each { |label, (state, detail)| puts "    at #{label}: #{state} (#{detail})" }
   else
     puts "  merge-time automation: not consulted (no declared surface touched)"
   end
@@ -1622,7 +1738,7 @@ def run(argv)
     return 0
   end
 
-  automation = detect_automation(repo)
+  automation = merge_time_automation(WorktreeTree.new(repo, "head (working tree)"), RevTree.new(repo, base))
 
   if automation[0] == "CONFIRMED-ABSENT"
     print_report("WARM", head, manifest, surfaces, pattern_count, files, hits, automation, examined, {}, refs)
@@ -2025,12 +2141,13 @@ def self_test
                out.include?("compared: 2 changed file(s)"), out)
 
     # The ticket's exact fixture: the SOLE deploy workflow renamed out. It must
-    # read as the plain `git rm` of that file does -- WARM, naming the path
-    # (no workflow is left at head, so merging triggers nothing) -- never COLD.
+    # read as the plain `git rm` of that file does, naming the path, never
+    # COLD. DND-770 pinned both as WARM (no workflow is left at head); DND-774
+    # made both HOT, because merging either one switches the deploy off.
     out, _, code, = listing_case.call("rn-sole", seed: deploy_seed) { |r| git_mv.call(r, ".github/workflows/post-merge.yml", "docs.txt") }
     out_rm, _, code_rm, = listing_case.call("rm-sole", seed: deploy_seed) { |r| system("git", "-C", r, "rm", "-q", ".github/workflows/post-merge.yml") }
-    check.call("the SOLE deploy workflow renamed out reads as its deletion does (WARM, named), never COLD (DND-770)",
-               code.zero? && code_rm.zero? && out.include?("BLAST-RADIUS WARM") && out_rm.include?("BLAST-RADIUS WARM") &&
+    check.call("the SOLE deploy workflow renamed out reads as its deletion does (HOT, named), never COLD (DND-770, DND-774)",
+               code == 4 && code_rm == 4 && out.include?("BLAST-RADIUS HOT") && out_rm.include?("BLAST-RADIUS HOT") &&
                  out.include?(".github/workflows/post-merge.yml"),
                "rename: exit=#{code} out=#{out}\n        delete: exit=#{code_rm} out=#{out_rm}")
 
@@ -2090,6 +2207,109 @@ def self_test
     check.call("sabotage: without --no-renames the rename-out case reads COLD (the cases discriminate)",
                mutant_src != src && mst.exitstatus.zero? && mout.include?("BLAST-RADIUS COLD"),
                "mutated=#{mutant_src != src} exit=#{mst.exitstatus} out=#{mout}")
+
+    # 12x. REMOVING merge-time automation (DND-774). The automation term was
+    # read at head only, so a diff that took the last merge-time workflow away
+    # found none there and read WARM: `git rm` of gen_saas's post-merge.yml --
+    # the deploy and the deploy-guard.sh it runs -- merged with no owner stop.
+    # The term is now read at base AND head; automation base runs that head
+    # does not is a removal, and a removal is judged from the base side.
+    removal = lambda do |name, seed:, &change|
+      ro, re, rc, = listing_case.call("rm774-#{name}", seed: seed) { |r| change.call(r) }
+      [ro, re, rc]
+    end
+    hot_removal = lambda do |desc, name, seed:, words: [], &change|
+      ro, re, rc = removal.call(name, seed: seed, &change)
+      check.call("HOT: #{desc} (DND-774)",
+                 rc == 4 && ro.include?("BLAST-RADIUS HOT") && ro.include?("REMOVED") &&
+                   re.include?("Fix:") && words.all? { |w| ro.include?(w) },
+                 "exit=#{rc} out=#{ro} err=#{re}")
+    end
+    wf_rm = ->(r, name) { system("git", "-C", r, "rm", "-q", ".github/workflows/#{name}") }
+    hot_removal.call("deleting the SOLE deploy workflow removes merge-time automation", "del",
+                     seed: deploy_seed, words: [".github/workflows/post-merge.yml", "on.push.branches=[main]", "at base"]) do |r|
+      wf_rm.call(r, "post-merge.yml")
+    end
+    hot_removal.call("renaming the SOLE deploy workflow OUT of .github/workflows removes it", "mv-out",
+                     seed: deploy_seed, words: ["post-merge.yml"]) { |r| git_mv.call(r, ".github/workflows/post-merge.yml", "ci/post-merge.yml") }
+    hot_removal.call("renaming the SOLE deploy workflow to a name GitHub does not load (`.yml.disabled`) removes it",
+                     "disable", seed: deploy_seed, words: ["post-merge.yml"]) do |r|
+      git_mv.call(r, ".github/workflows/post-merge.yml", ".github/workflows/post-merge.yml.disabled")
+    end
+    hot_removal.call("downgrading the SOLE deploy workflow push -> pull_request (it stops running on merge)", "downgrade",
+                     seed: deploy_seed, words: ["on.push.branches=[main]"]) do |r|
+      wf.call(r, "post-merge.yml", deploy_wf.sub("push:\n    branches: [main]", "pull_request:"))
+    end
+    hot_removal.call("narrowing the SOLE deploy workflow's push to a non-default branch removes it", "narrow",
+                     seed: deploy_seed) { |r| wf.call(r, "post-merge.yml", deploy_wf.sub("[main]", "[staging]")) }
+    hot_removal.call("deleting the SOLE .gitlab-ci.yml removes GitLab merge-time automation", "gitlab",
+                     seed: ->(r) { put.call(r, ".gitlab-ci.yml", "stages: [deploy]\n") }, words: [".gitlab-ci.yml"]) do |r|
+      system("git", "-C", r, "rm", "-q", ".gitlab-ci.yml")
+    end
+
+    # Unknown shapes at base fail CLOSED: a removed workflow whose triggers
+    # this check cannot read may have been the deploy.
+    [["a sole workflow with an unmodelled `on:` (`on: 42`)", "t.yml", "name: t\non: 42\njobs: {}\n"],
+     ["a sole workflow whose YAML does not parse", "broken.yml", "on: [\n  unclosed\n"]].each_with_index do |(label, name, body), i|
+      ro, re, rc = removal.call("undet#{i}", seed: ->(r) { wf.call(r, name, body) }) { |r| wf_rm.call(r, name) }
+      check.call("UNDETERMINED: deleting #{label} fails CLOSED at base (DND-774)",
+                 rc == 4 && ro.include?("BLAST-RADIUS HOT") && ro.include?("UNDETERMINED") && ro.include?(name) &&
+                   ro.include?("REMOVED"),
+                 "exit=#{rc} out=#{ro} err=#{re}")
+    end
+    ro, re, rc = removal.call("jenkins", seed: ->(r) { put.call(r, "Jenkinsfile", "pipeline{}\n") }) do |r|
+      system("git", "-C", r, "rm", "-q", "Jenkinsfile")
+      put.call(r, "main.tf", "resource\n")
+    end
+    check.call("UNDETERMINED: deleting an unmodelled forge's config (Jenkinsfile) fails CLOSED at base (DND-774)",
+               rc == 4 && ro.include?("UNDETERMINED") && ro.include?("Jenkinsfile") && ro.include?("REMOVED"),
+               "exit=#{rc} out=#{ro} err=#{re}")
+    ro, re, rc = removal.call("symlink", seed: lambda { |r|
+      put.call(r, "deploy/post-merge.yml", deploy_wf)
+      FileUtils.mkdir_p(File.join(r, ".github", "workflows"))
+      File.symlink("../../deploy/post-merge.yml", File.join(r, ".github", "workflows", "post-merge.yml"))
+    }) { |r| wf_rm.call(r, "post-merge.yml") }
+    check.call("UNDETERMINED: deleting a SYMLINKED workflow fails CLOSED at base (its blob is a link, not the YAML) (DND-774)",
+               rc == 4 && ro.include?("UNDETERMINED") && ro.include?("REMOVED"),
+               "exit=#{rc} out=#{ro} err=#{re}")
+
+    # Non-narrowing: deleting one of two workflows while a deploy stays was
+    # HOT before DND-774 and stays HOT, and it is judged at HEAD (the deploy
+    # still runs), not by the deleted file's own base triggers.
+    ro, re, rc = removal.call("one-of-two", seed: ->(r) { deploy_seed.call(r); wf.call(r, "a-ci.yml", pr_wf) }) { |r| wf_rm.call(r, "a-ci.yml") }
+    check.call("HOT: deleting a pull_request-only workflow beside a deploy stays HOT, judged at head (DND-774)",
+               rc == 4 && ro.include?("BLAST-RADIUS HOT") && ro.include?("post-merge.yml") && !ro.include?("REMOVED"),
+               "exit=#{rc} out=#{ro} err=#{re}")
+
+    # A pull_request-only repo deleting its only workflow ran nothing on merge
+    # before or after: merging lands code only, so WARM. Deleting a pre-merge
+    # check is reversible and is the grant class the owner already ratified
+    # as reversible (merge.pr_only_workflow, DND-596).
+    ro, re, rc = removal.call("pr-only", seed: ->(r) { wf.call(r, "ci.yml", pr_wf) }) { |r| wf_rm.call(r, "ci.yml") }
+    check.call("WARM: a pull_request-only repo deleting its only workflow ran nothing on merge before or after (DND-774)",
+               rc.zero? && ro.include?("BLAST-RADIUS WARM") && !ro.include?("REMOVED"),
+               "exit=#{rc} out=#{ro} err=#{re}")
+
+    # Observability: both sides are printed whenever the term is consulted, so
+    # "base ran nothing" and "base was never read" never read the same.
+    ro, = removal.call("both-sides", seed: deploy_seed) { |r| put.call(r, "main.tf", "resource\n") }
+    check.call("the automation term prints BOTH sides it read, head and base (DND-774)",
+               ro.include?("at head (working tree): CONFIRMED") && ro =~ /at base [0-9a-f]{7}: CONFIRMED/,
+               ro)
+
+    # Sabotage: a copy of this script that reads the "base" side at HEAD must
+    # read the sole-workflow deletion WARM, or the cases above prove nothing
+    # about the base read.
+    base_site = "RevTree.new(repo, base)"
+    base_ok = src.index(base_site) && src.index(base_site) < src.index("def self_test")
+    base_mutant_src = base_ok ? src.sub(base_site, "RevTree.new(repo, head)") : src
+    base_mutant = File.join(tmp, "blast-radius-head-only-mutant")
+    File.write(base_mutant, base_mutant_src)
+    _, _, _, bd, bb, bh = listing_case.call("rm774-sabotage", seed: deploy_seed) { |r| wf_rm.call(r, "post-merge.yml") }
+    bout, _, bst = Open3.capture3(RbConfig.ruby, base_mutant, "--base", bb, "--head", bh, "--repo", bd, "--manifest", DEFAULT_MANIFEST)
+    check.call("sabotage: reading the base side at head reads the sole-workflow deletion WARM (the cases discriminate)",
+               base_mutant_src != src && bst.exitstatus.zero? && bout.include?("BLAST-RADIUS WARM"),
+               "mutated=#{base_mutant_src != src} exit=#{bst.exitstatus} out=#{bout}")
 
     # The ticket's own case: a composite action under .github/actions, which the
     # workflow does not even have to name -- the conventional location is enough.
@@ -2696,6 +2916,21 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
                     change: lambda { |r|
                       File.rename(File.join(r, ".github/workflows/post-merge.yml"), File.join(r, ".github/workflows/ci.yml"))
                       File.write(File.join(r, ".github/workflows/ci.yml"), deploy_wf.sub("push:\n    branches: [main]", "pull_request:"))
+                    })
+  # DND-774: the removal shapes the HOT verdict now holds are NOT ELIGIBLE too,
+  # so no grant can approve switching a deploy off.
+  not_eligible.call("a push workflow RENAMED OUT of .github/workflows (DND-774)",
+                    [".github/workflows/post-merge.yml", "base:", "push"],
+                    seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) },
+                    change: lambda { |r|
+                      File.rename(File.join(r, ".github/workflows/post-merge.yml"), File.join(r, "post-merge.yml"))
+                    })
+  not_eligible.call("a push workflow renamed to `.yml.disabled` (DND-774)",
+                    [".github/workflows/post-merge.yml", "base:", "push"],
+                    seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) },
+                    change: lambda { |r|
+                      File.rename(File.join(r, ".github/workflows/post-merge.yml"),
+                                  File.join(r, ".github/workflows/post-merge.yml.disabled"))
                     })
   # `closed` fires on the merge itself, running the PR's code with its secrets:
   # a new run started BY merging, the one thing the reversible boundary excludes.
