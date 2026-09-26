@@ -314,9 +314,42 @@ fi
 # rename detection (diff.renames) lists only the new path, so a branch that
 # renamed a file the target had just edited read an empty intersection.
 # -z keeps a non-ASCII path verbatim; core.quotePath would C-quote it.
-changed_paths() { git diff --no-renames -z --name-only "$1" "$2" 2>/dev/null | tr '\0' '\n' | sort -u; }
-INCOMING="$(changed_paths "$ANCHOR" "$TARGET_SHA")"
-MINE="$(changed_paths "$BASE_SHA" HEAD)"
+#
+# A `git diff` failure here (a corrupt object, a missing merge base) must
+# never be swallowed by `2>/dev/null`: that would report an empty file set,
+# indistinguishable from "these two refs really touch nothing in common" --
+# the exact failed-lookup class this script exists to refuse elsewhere
+# (~/dev/custom/ai/CLAUDE.md -> "A failed lookup must never look like an
+# empty one"). Both refs were already validated as resolvable commits before
+# this point (TARGET/SINCE above), so a failure here is an ERROR -- the repo
+# itself, not a bad argument -- and it exits loudly rather than returning "".
+changed_paths() {
+  # The raw -z output is NUL-delimited and MUST stay in a pipeline, never in
+  # a bash variable: `$(...)` capture cannot hold a NUL byte, so a capture-
+  # then-check rewrite silently drops every delimiter and runs all the
+  # filenames together (caught by this change's own self-test, case 22, on
+  # the first attempt). So stdout goes straight to `tr`/`sort` as before;
+  # only stderr and the exit status are captured, to a file (a second
+  # variable capture of raw diff output would reintroduce the same defect).
+  local errfile rc
+  errfile="$(mktemp 2>/dev/null)" || { echo "${PROG}: mktemp failed; cannot safely check git diff's exit status." >&2; echo "Fix: ensure \$TMPDIR (or /tmp) is writable and re-run." >&2; return 2; }
+  git diff --no-renames -z --name-only "$1" "$2" 2>"$errfile" | tr '\0' '\n' | sort -u
+  rc="${PIPESTATUS[0]}"
+  if [ "$rc" -ne 0 ]; then
+    echo "${PROG}: git diff failed measuring changed paths between '$1' and '$2':" >&2
+    sed 's/^/    /' "$errfile" >&2
+    rm -f "$errfile"
+    echo "Fix: this is a repository fault (a corrupt object, an unreachable commit), not an empty result -- inspect '$1' and '$2' directly (git diff --stat '$1' '$2') and repair the object database (git fsck) before re-running; this run does not proceed on an unmeasurable file set." >&2
+    return 2
+  fi
+  rm -f "$errfile"
+}
+if ! INCOMING="$(changed_paths "$ANCHOR" "$TARGET_SHA")"; then
+  exit 2
+fi
+if ! MINE="$(changed_paths "$BASE_SHA" HEAD)"; then
+  exit 2
+fi
 OVERLAP="$(comm -12 <(printf '%s\n' "$INCOMING" | sed '/^$/d') <(printf '%s\n' "$MINE" | sed '/^$/d'))"
 
 INTERSECTION_AVAILABLE=1
