@@ -270,9 +270,7 @@ def measure_landed(landed, root)
 rescue Landed::Unreadable => e
   [nil, Landed.unreadable_lines("hook registry", e.probes)]
 rescue Landed::Mismatch => e
-  args = [e.local, e.remote]
-  args << e.source if e.respond_to?(:source)
-  [nil, Landed.mismatch_lines(*args)]
+  [nil, Landed.mismatch_lines(e.local, e.remote, e.source)]
 end
 
 # The check. Keyword arguments exist for the inline self-test; the CLI passes
