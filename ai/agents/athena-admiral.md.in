@@ -158,6 +158,10 @@ choice + its one-line reason in the state log next to the dispatch).
 other exit is an error, never a dispatch. A spawn refused with `is draining` is
 **PAUSE**: mark it `PARKED`, never retry it, never do its work in-line. Then run the
 drain protocol, which never ends your turn while a captain runs: **[[athena:fleet-drain]]**.
+While one runs, your next action is to wait for its return, with nothing queued after
+it. Only once none runs, finish the drain in order: report `drained`, write the final report,
+**release the run** with `fleet-resume drained --run-id <run-id>` as your last act on
+it (unreleased, the run can never be resumed), and only then end your turn.
 
 ### 4a. Verify before you brief; re-read before you fix
 
