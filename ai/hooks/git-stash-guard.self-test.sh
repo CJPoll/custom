@@ -391,19 +391,16 @@ case_cmd "OK11. -C a dir named stash, then a read-only subcommand" allow 'git -C
 echo "== O: over-match of the expansion rules (DND-780, narrow cut) =="
 # The narrow cut carries only rules that do not depend on proving a glob
 # cannot be git: `[`, `[[` and a lone `{` are not glob heads; `$?` is not a
-# glob; assignment words are not command words; a quoted `$NAME/`-prefixed
-# path with a plain basename is that name; the most specific reason wins
-# and names what matched. Every other glob command word is judged as at
-# cbac851, so the deny cases below (many written against a broader matcher)
-# must all still deny.
-# Commands with no git and no stash in them, each denied at cbac851 by the
-# glob-head or expanded-head rule. The class rules: a glob whose basename
-# pattern cannot match git or git-stash is not git; $? $* $# $@ are
-# parameters, not globs; an assignment word is never a command word; a quoted
-# expansion followed by a literal basename is that basename. A heredoc body is
-# still read as commands (critic rounds 1-2: a body can become a hook or a
-# script the same command runs), so only its prose brackets and globs stop
-# denying.
+# glob; an assignment-shaped word gives the next word command position; a
+# quoted `$NAME/`-prefixed path with a plain basename is that name; the most
+# specific reason wins and names what matched. Every other glob or brace
+# command word is judged exactly as at cbac851, and heredoc bodies and
+# quoted payloads are still read as commands.
+# The deny cases below were written against a broader matcher (branch
+# dnd-780-stash-guard-overmatch, deferred to an architect ticket). Here they
+# deny because every non-exempt glob head is judged as at cbac851; they are
+# regression guards for that follow-up, not evidence of a mechanism in this
+# hook. Their "critic round N" comments name where each shape came from.
 case_cmd "O1. leading test bracket" allow '[ -n "$n" ] && echo y'
 case_cmd "O2. leading [[ keyword" allow '[[ -n "$n" ]] && echo y'
 case_cmd "O3. test bracket with \$HOME operand" allow '[ -n "$HOME" ] && echo y'
@@ -524,8 +521,9 @@ case_cmd "O74. heredoc holding {:ok, _}" allow "cat > t.exs <<'EOF'
 EOF"
 case_cmd "O75. a \$(python3 ...) substitution" allow "x=\$(python3 -c 'import re; print(re.sub(r\"[a-z]+\", \"\", \"x1\"))') && echo \"\$x\""
 case_cmd "O76. --include=*.ex" allow 'grep -rn defmodule --include=*.ex lib/'
-# Critic round 6: the matcher is exact only for default glob options. A
-# command that changes them gets the pre-DND-780 behaviour.
+# Critic round 6 (broader matcher): shapes that are git only under a
+# non-default glob option. This hook has no glob-option logic; they deny
+# because the glob head is judged as at cbac851.
 case_cmd "O85. extendedglob negation" deny 'setopt extendedglob; /usr/bin/^x* stash pop'
 case_cmd "O86. extendedglob repetition" deny 'setopt extended_glob && /usr/bin/g?#t stash pop'
 case_cmd "O87. nocaseglob" deny 'setopt nocaseglob; /usr/bin/G?T stash pop'
@@ -583,12 +581,16 @@ reason_names "O60. a glob head names the matched words and position" '/usr/bin/g
 reason_names "O61. a literal stash names its position" 'echo hi; git stash pop' 'Matched: `git stash pop` at word 3 of the command.'
 reason_names "O62. a shell alias names the alias word" 'gstp' 'Matched: `gstp` at word 1 of the command.'
 reason_names "O63. a quoted payload names the nested position" "sh -c 'cd /tmp && git stash pop'" 'Matched: `git stash pop` at word 3 of a nested command'
+# Narrow-cut critic round 1: a quoted name makes `"A"=...` a command word.
+case_cmd "O125. a quoted assignment-shaped glob command word" deny '"A"=/usr/bin/g?t stash pop'
+case_cmd "O126. an indexed assignment then a glob git word" deny 'a[1]=x /usr/bin/g?t stash pop'
 # The brace-group keyword keeps its body in command position.
 case_cmd "O119. a brace group around a test bracket" allow '{ [ -n "$x" ] && echo y; }'
 case_cmd "O120. a brace group around a glob git word" deny '{ /usr/bin/g?t stash pop; }'
 case_cmd "O121. a brace group around a literal stash write" deny '{ git stash pop; }'
 case_cmd "O122. a closed brace word stays a brace expansion" deny '{g,x}it stash pop'
-# DND-786 (coordinator): does the narrow cut close it?
+# DND-786 (coordinator) case a: allowed by the narrow cut. Case b (a jq
+# object `{a,b,...}` re-read from quotes) still denies; see the report.
 case_cmd "O123. DND-786 a: fetch, log, sleep, gh run list | jq" allow "cd /tmp && git fetch -q origin && git log --oneline -2 origin/main; sleep 10; gh run list --workflow post-merge.yml --limit 2 --json databaseId,status,headSha | jq -c '.[]'"
 # LOW (DND-780): a literal stash write must name the literal-stash reason even
 # after an unrelated expansion that also triggers a rule.
