@@ -550,6 +550,41 @@ module BlockOptimize
   end
 
   # -------------------------------------------------------------------------
+  # Proposer prompt (the model's output is untrusted data; this is only input)
+  # -------------------------------------------------------------------------
+  module Prompt
+    module_function
+
+    # files: { path => text } for exactly the allowlisted paths.
+    def build(case_name:, meta:, scenario:, evidence:, files:, render_lines:)
+      observed = if evidence
+                   "The admiral passed #{evidence[:k]}/#{evidence[:n]} samples of this case. Failure detail from " \
+                     "the scorer: #{evidence[:detail].to_s.empty? ? '(none)' : evidence[:detail]}"
+                 else
+                   "No evidence run was supplied."
+                 end
+      parts = []
+      parts << "You are improving the PROSE of an AI agent definition, the athena-admiral, so that it handles one " \
+               "failing evaluation case correctly without changing how it handles any other case."
+      parts << "## The failing case: #{case_name}\n\nThe case's meta (its mode, the actions it forbids and expects):\n" \
+               "```\n#{meta}```\n\nThe scenario the admiral is given:\n```\n#{scenario}```\n\n#{observed}"
+      parts << "## The files you may edit (ONLY these, in place)\n\n" +
+               files.map { |path, text| "### #{path}\n```\n#{text}```" }.join("\n\n")
+      parts << "## Constraints\n\n" \
+               "- The rendered admiral is #{render_lines} lines and a size check caps it; the budget will not be " \
+               "raised. Make the change NET-ZERO lines: pay for every added line by removing or merging one in " \
+               "the files above.\n" \
+               "- Edit only the files above, in place. No new, deleted, renamed, binary or mode-changed files.\n" \
+               "- Some of these blocks are shared with other agents. Keep every edit correct for them too.\n" \
+               "- Never weaken a safety rule, a check, or a gate. Make the admiral's instruction clearer; do not " \
+               "special-case the scenario's names or ids."
+      parts << "## Output\n\nOutput exactly ONE fenced unified diff (```diff ... ```) in git style: a/ and b/ path " \
+               "prefixes, correct @@ line counts, enough context lines to apply. Output nothing else."
+      "#{parts.join("\n\n")}\n"
+    end
+  end
+
+  # -------------------------------------------------------------------------
   # Proposal text
   # -------------------------------------------------------------------------
   module Proposal

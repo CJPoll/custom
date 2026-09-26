@@ -464,6 +464,22 @@ check("render: the no-regression gate is described as a tripwire, not a proof") 
   renders["unproven"].include?("tripwire")
 end
 
+# ---------------------------------------------------------------------------
+# Prompt
+# ---------------------------------------------------------------------------
+prompt = BO::Prompt.build(case_name: CASE, meta: "mode = next-action\n", scenario: "Decide.\n", evidence: e1,
+                          files: { TEMPLATE => "body\n" }, render_lines: 470)
+check("prompt carries the case, meta, scenario, evidence, each allowed file and the line count") do
+  [CASE, "mode = next-action", "Decide.", "8/10", "### #{TEMPLATE}", "470 lines", "NET-ZERO"].all? { |s| prompt.include?(s) }
+end
+check("prompt asks for exactly one fenced diff and nothing else") do
+  prompt.include?("exactly ONE fenced unified diff") && prompt.include?("Output nothing else")
+end
+check("prompt without evidence (--diff never builds one, but it must not crash)") do
+  BO::Prompt.build(case_name: CASE, meta: "", scenario: "", evidence: nil, files: {}, render_lines: 1)
+    .include?("No evidence run")
+end
+
 if $failures.empty?
   puts "block-optimize domain: #{$checks} checks OK"
   exit 0
