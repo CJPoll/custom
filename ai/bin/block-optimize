@@ -272,7 +272,7 @@ class Adapters
 
     sha, err, st = run(["git", "-C", @scratch, "commit-tree", tree.strip, "-p", base, "-m", CANDIDATE_MESSAGE],
                        chdir: @scratch, env: CANDIDATE_IDENTITY)
-    raise BO::Error, "git commit-tree failed: #{err.strip}" unless st.success?
+    raise BO::Error, "commit-tree failed in the scratch tree:#{err.strip}" unless st.success?
 
     sha.strip
   end

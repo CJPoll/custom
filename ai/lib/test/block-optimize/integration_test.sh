@@ -52,6 +52,7 @@ if [ "${1:-}" = "--check" ]; then
   exit 0
 fi
 render > ai/agents/athena-admiral.md
+if [ "${STUB_BUILD_IGNORED:-0}" = 1 ]; then mkdir -p ai/cache && printf 'planted\n' > ai/cache/planted; fi
 cat ai/agents/athena-captain.md.in ai/blocks/ops/fleet-coordination.md > ai/agents/athena-captain.md
 EOF
 # Stub check-agent-size: fails when told to.
@@ -84,6 +85,7 @@ JSON
 exit 0
 EOF
 chmod +x "${repo}"/ai/bin/*
+printf 'ai/cache/\n' > "${repo}/.gitignore"
 
 git -C "${repo}" init -q -b main
 (cd "${repo}" && ai/bin/build-agents)
@@ -218,6 +220,14 @@ STUB_CAS_EXIT=1 run_bo out4 --case AE-18 --diff "${tmp}/good.diff"
 expect "I-size exits 1 (rc=${rc})" '[ "${rc}" = 1 ]'
 expect "I-size names check-agent-size" 'grep -q "ai/bin/check-agent-size failed" "${tmp}/out4/proposal.md"'
 expect "I-size never called variant-eval" '[ ! -e "${STUB_VE_MARK}" ]'
+
+# --- a gitignored file planted by the build is still an effect (critic, 64ebc3a).
+rm -f "${STUB_VE_MARK}"
+STUB_BUILD_IGNORED=1 run_bo out4b --case AE-18 --diff "${tmp}/good.diff"
+expect "I-ignored exits 1 (rc=${rc})" '[ "${rc}" = 1 ]'
+expect "I-ignored names the planted ignored path" \
+  'grep -q "REJECTED: scope violation after build: ai/cache/" "${tmp}/out4b/proposal.md"'
+expect "I-ignored never called variant-eval" '[ ! -e "${STUB_VE_MARK}" ]'
 
 # --- stale evidence. -----------------------------------------------------------
 run_bo out5 --case AE-18 --evidence "${tmp}/stale.txt" --diff "${tmp}/good.diff"
