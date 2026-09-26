@@ -4277,11 +4277,12 @@ or a digest can render them:
 - **Judged reasons are advisory** (`ai/contracts/athena-judgments.md` → *Trust
   posture*). When a judgment is not accepted, `judged_urgency` and
   `judged_importance` are absent and the item ranks exactly as it would without
-  them. The weights live in code as `Rules` defaults. The default `vip_asker`
-  weight is strictly greater than the largest combined judged delta, so a VIP
-  ask outranks an otherwise-equal ask. A weight change rescores with no new
-  judgment.
-
+  them. In `round(weight × score)`, `score` is the accepted level's position on
+  the question set's scale, 1 to 4 in `priority_scoring` v1, so a judged delta
+  is at most `4 × weight`. The weights live in code as `Rules` defaults. The
+  default `vip_asker` weight is strictly greater than the largest combined
+  judged delta, so a VIP ask outranks an otherwise-equal ask. A weight change
+  rescores with no new judgment.
 - **An override always wins.** `pin_top` ranks the item above every item
   without it, `pin_bottom` below every item without it, and `score` replaces
   the computed score. `owner_override` then leads the reasons. The computed

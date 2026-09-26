@@ -37,10 +37,11 @@ implementation that violates a MUST is non-conformant.
 **Every refusal, hard error and fault-class fallback specified here MUST carry
 a greppable `Fix:` clause** in its log line or structured field, naming the
 corrective action (*Fallback: every error equals today's behaviour, loudly*
-says which fallbacks are faults), per `~/dev/custom/CLAUDE.md` → *Guard/error messages are written for the
-LLM*. This contract quotes no exact `Fix:` text. When an implementation pins
-exact text, the ticket that ships it adds the quote and its pin together
-(`ai/contracts/test/check-quoted-fix.rb`, DND-411).
+says which fallbacks are faults), per `~/dev/custom/CLAUDE.md` →
+*Guard/error messages are written for the LLM*. This contract quotes no exact
+`Fix:` text. When an implementation pins exact text, the ticket that ships it
+adds the quote and its pin together (`ai/contracts/test/check-quoted-fix.rb`,
+DND-411).
 
 ---
 
@@ -184,9 +185,9 @@ accepted threshold. There is nothing to fix, so it logs at debug level with no
 means something is wrong: a missing key, a rejected credential, a spent budget,
 a service error, our own bug. A fault is loud: it also logs a warning (an error
 for our own bugs) naming the use case, the reason, the owner and the
-`subject_ref`, with a `Fix:` clause, and it moves health to `unavailable`
-(*Owner alerts track health, not calls*). So a real fault is never buried under
-routine fallbacks.
+`subject_ref`, with a `Fix:` clause, and it moves health to `unavailable`.
+Which alert it raises is *Owner alerts: one rule per reason*. So a real fault
+is never buried under routine fallbacks.
 
 A fallback whose reason is a missing key also names **the key it searched for**,
 `(owner_id, :typesafe_api_key)`, so a key looked up wrongly never reads as a key
@@ -201,8 +202,8 @@ reason of the first check that fails:
 3. mode (skipped for `eval:*`);
 4. price, budget and local rate;
 5. the key is stored;
-6. the credential latch (a 401 recorded after the key was stored);
-7. the call, under the deadline;
+6. the credential latch (an `unauthorized` recorded after the key was stored);
+7. reading the key from custody and making the call, under the deadline;
 8. parsing the answer strictly against the request;
 9. the answering model equals the pinned model.
 
@@ -238,17 +239,27 @@ one is an amendment to this table.
 
 A successful call records outcome `answered` with no reason.
 
-**The credential latch.** A 401 sets a latch keyed on the key's stored-at time.
-While it holds, every call falls back as `credential_rejected` with **no** call
-to TypeSafe, so a revoked key makes one call, not one per event. Storing a new
-key (a newer stored-at time) clears the latch by construction.
+**The credential latch.** An `unauthorized` port error (HTTP 401 or 403) sets a
+latch keyed on the key's stored-at time. While it holds, every call falls back
+as `credential_rejected` with **no** call to TypeSafe, so a revoked key makes
+one call, not one per event. Storing a new key (a newer stored-at time) clears
+the latch by construction.
 
-**Owner alerts track health, not calls.** A use case's health is
+**Owner alerts: one rule per reason.** A use case's health is
 `unavailable(<reason>)` after a fault-class outcome and `ok` after an answered
-call; a state-class outcome leaves it unchanged. When health moves between `ok`
-and `unavailable(<reason>)`, one owner alert goes out through the existing
-owner-alert path. N faults in a row are N records and one alert. The budget has
-its own alert rule (*Budget*).
+call; a state-class outcome leaves it unchanged. Health is what the owner's
+health view shows. Alerts go through the existing owner-alert path, and each
+reason feeds exactly one alert rule:
+
+- **A state-class reason never alerts.**
+- **`budget_exhausted` alerts only by the budget rule**: the first of a UTC
+  calendar month sends one alert (*Budget*). A change of health into or out of
+  `unavailable(budget_exhausted)` sends none, so a daily cap that exhausts and
+  resets each day does not alert each day.
+- **Every other fault-class reason alerts on a health transition.** When a use
+  case's health changes to `unavailable(<reason>)` from any other value, one
+  alert goes out; when it leaves that value for `ok`, one recovery alert goes
+  out. N faults in a row with one reason are N records and one alert.
 
 ## Modes
 
@@ -263,8 +274,8 @@ Each (owner, use case) has one mode:
 **`on` is refused** unless a threshold row exists for (owner, use case,
 question-set version, pinned model) that an eval run produced. A use case MAY
 add a refusal of its own; Slack routing refuses `on` while the p95 of
-`latency_ms` over its shadow-mode `judgment_calls` rows exceeds 1,000 ms. `eval:*` ignores the mode, but not the key, the domain
-or the budget.
+`latency_ms` over its shadow-mode `judgment_calls` rows exceeds 1,000 ms.
+`eval:*` ignores the mode, but not the key, the domain or the budget.
 
 ## Threshold provenance, n/a and the pinned model
 
@@ -319,8 +330,9 @@ $10 / month cap".
   call with no cost in the window makes the window unmeasurable in the same way.
 - **At a cap, every call falls back loudly** as `budget_exhausted`. The first
   `budget_exhausted` of a UTC calendar month sends **one** owner alert; later
-  ones that month are recorded and logged, never re-alerted. A budget refusal is
-  not retried.
+  ones that month are recorded and logged, never re-alerted. It raises no
+  health-transition alert (*Owner alerts: one rule per reason*). A budget
+  refusal is not retried.
 - **Local rate limit: 60 requests per minute per owner**, derived from the call
   records, not process state. Over it, the call falls back as
   `rate_limited_local`.
@@ -335,8 +347,8 @@ with it.
   per DND-711. It is stored out of band by the owner. No API or UI path writes
   it.
 - **Loss of access is a designed state.** A revoked key or a gone account falls
-  back exactly like a missing key: loud, one alert, and no retry loop or crash
-  loop.
+  back exactly like a missing key: loud, one health-transition alert, and no
+  retry loop or crash loop.
 - **Decommissioning is deleting the secret.** Every use case then falls back as
   `key_missing` and behaves as it did before judgments existed. Nothing else
   needs to change.
@@ -355,8 +367,8 @@ with it.
       a reason from the closed list and a telemetry event; a fault-class reason
       also logs a warning with `Fix:` and moves health; a state-class reason
       does neither; `key_missing` names the searched key.
-- [ ] Every check before the call makes no call to TypeSafe; a latched 401 makes
-      no call.
+- [ ] Every check before the call makes no call to TypeSafe; a latched
+      `unauthorized` makes no call.
 - [ ] Mode defaults to `off`; `on` is refused without an eval-produced threshold.
 - [ ] `threshold_unset` and `n/a` never accept; unscored eval cases are never
       scored as wrong.
@@ -364,5 +376,7 @@ with it.
 - [ ] The monthly $10 and daily pacing caps are enforced in dollars from config
       prices; a missing price fails closed as `price_unknown`; one budget alert
       per UTC month.
-- [ ] Health transitions alert once each, not per call.
+- [ ] Each reason feeds exactly one alert rule: state reasons none,
+      `budget_exhausted` the monthly budget alert only, every other fault a
+      health-transition alert, once per transition, not per call.
 - [ ] Deleting the secret returns every consumer to today's behaviour.
