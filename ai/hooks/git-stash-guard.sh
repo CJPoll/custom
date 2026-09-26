@@ -102,6 +102,19 @@
 # into a file with the Write tool and pass the file (`git commit -F`), or use
 # the Grep tool. A miss costs the owner's saved work.
 #
+# PRECISION (DND-780, narrow cut): the leading test bracket `[` / `[[` and
+# the lone brace-group word `{` are not glob command words (as globs they
+# match only themselves; the word after `{` keeps command position); the
+# `?` of `$?` is not a glob; an assignment word
+# (`rc=$?`, `a[1]=x`, `a+=x`) is never a command word and keeps the next
+# word in command position; a word whose expansions are all inside double
+# quotes, each a bare `$NAME` or `${NAME}` directly followed by `/`, and
+# whose last path component is plain (`"$W/t"`), is that literal name. When
+# several rules fire, the most specific finding is reported (a literal
+# `git stash pop` is named as such after an unrelated `$(...)`), and every
+# reason ends with `Matched: <words> at word N of the command`. Every other
+# glob or brace command word is judged as at cbac851.
+#
 # ZSH: the Bash tool runs zsh, so zsh-only word rewrites count too: EQUALS
 # (`=git` is git's path), global aliases (`alias -g`, any word position),
 # suffix aliases (`alias -s`), and the noglob/nocorrect/- precommand modifiers.
@@ -452,9 +465,13 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # An unquoted glob
   # or brace character is followed by a \001 mark. QF[k] is 1 when a
   # quoted part of word k held whitespace or a separator: its content may be a
-  # command (`sh -c "git stash"`), so analyze re-reads it.
-  function tokenize(text, W, QF, SB,    n, i, L, c, st, cur, has, q, ns, skip) {
-    n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; skip = 0; L = length(text)
+  # command (`sh -c "git stash"`), so analyze re-reads it. UX[k] is 1 when
+  # word k holds an UNQUOTED `$` (its value may be split into several words).
+  # The `?` of `$?` (an exit status, a number) is not a glob and is not
+  # marked (DND-780); every other glob character is marked as before.
+  # PQ is accepted for call compatibility and left empty.
+  function tokenize(text, W, QF, SB, UX, PQ,    n, i, L, c, st, cur, has, q, ns, skip, ux) {
+    n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; skip = 0; ux = 0; L = length(text)
     for (i = 1; i <= L; i++) {
       c = substr(text, i, 1)
       if (st == 1) {
@@ -484,9 +501,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (c ~ /[<>]/ || (c == "&" && substr(text, i + 1, 1) == ">")) {
         if (c == "&") i++
         if (has && cur !~ /^[0-9]+$/) {
-          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; ns = 0 }
+          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; ns = 0 }
         }
-        cur = ""; has = 0; q = 0
+        cur = ""; has = 0; q = 0; ux = 0
         if (substr(text, i + 1, 1) == "(") continue
         while (i < L && substr(text, i + 1, 1) ~ /[<>&|-]/) i++
         skip = 1
@@ -494,24 +511,63 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       }
       if (is_sep(c)) {
         if (has) {
-          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; ns = 0 }
+          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; ns = 0 }
         }
-        cur = ""; has = 0; q = 0
+        cur = ""; has = 0; q = 0; ux = 0
         if (c !~ /[ \t]/) { ns = 1; skip = 0 }
         continue
       }
       # An unquoted glob or brace character means the shell rewrites the word
       # before the command sees it (`git {stash,pop}`, `git st?sh`). Mark it
       # with \001 so the word counts as built by expansion.
+      if (c == "$") {
+        ux = 1; has = 1
+        if (substr(text, i + 1, 1) == "?") { cur = cur "$?"; i++; continue }
+        cur = cur c; continue
+      }
       if (c ~ /[*?[{]/) { cur = cur c "\001"; has = 1; continue }
       cur = cur c; has = 1
     }
-    if (has && !skip) { n++; W[n] = cur; QF[n] = q; SB[n] = ns }
+    if (has && !skip) { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux }
     return n
   }
   # refpart(t): the ref a revision/refspec word names: glob marks, a leading
   # `+` and any `@{...}` reflog selector removed (`stash@{0}` -> stash).
   function refpart(t) { gsub(/\001/, "", t); sub(/^\+/, "", t); sub(/@\{.*$/, "", t); return t }
+  # is_assign(t): t is an assignment word (NAME=..., NAME[i]=..., NAME+=...).
+  # In command position the shell performs it and runs the NEXT word; a
+  # program literally named `NAME=...` would need a directory of that name.
+  # So its value never makes it a command word.
+  function is_assign(t) { return t ~ /^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=/ }
+  # literal_non_git(t, ux): word t holds an expansion only inside double
+  # quotes (ux == 0, so it is never split into several words or globbed) and
+  # ends in a literal path component that is not git or git-stash
+  # (`"$W/t"`). The word is exactly that path, so it is not git.
+  # Proven by FORM, not by finding the last `/` (critic rounds 4 and 7: a
+  # `/` can sit inside `$(...)`, `${G%/}` or a zsh colon modifier
+  # `$G:s/q/t`). Every expansion must be a bare `$NAME` or `${NAME}`
+  # directly followed by a literal `/`, whose value can only fill a
+  # directory part; after removing those, no `$`, backtick, brace, paren,
+  # glob mark or literal-dollar may remain, and the final component must be
+  # plain filename characters.
+  function literal_non_git(t, ux,    s, b) {
+    if (ux) return 0
+    s = t
+    gsub(/\$[A-Za-z_][A-Za-z0-9_]*\//, "/", s)
+    gsub(/\$\{[A-Za-z_][A-Za-z0-9_]*\}\//, "/", s)
+    if (s ~ /[$`{}()\001\002]/ || s !~ /\//) return 0
+    b = s; sub(/^.*\//, "", b)
+    return b ~ /^[A-Za-z0-9._+@%,=-]+$/ && b != "git" && b != "git-stash"
+  }
+  # rank(r): how specific a finding is (lower is more specific). analyze
+  # reports the most specific finding in the command, so a literal
+  # `git stash pop` is named as such even when an earlier, unrelated
+  # expansion also trips a rule (DND-780).
+  function rank(r) {
+    return r == "stash" ? 1 : r == "refwrite" ? 2 : r == "alias" ? 3 : r == "shell-alias" ? 4 \
+      : r == "unread-config" ? 5 : r == "expanded" ? 6 : r == "expanded-git" ? 7 : r == "glob-head" ? 8 : 9
+  }
+  function better(a, b) { return (b != "" && (a == "" || rank(b) < rank(a))) ? b : a }
   # is_stash_ref(t): t names the stash ref in either spelling git accepts.
   function is_stash_ref(t) { t = refpart(t); return t == "stash" || t == "refs/stash" }
   # plumb(sc, w, n, j): "refwrite" when git plumbing sc (= w[j]) with
@@ -633,15 +689,39 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   }
   # cmd_prefix(t): a word after which the next word is still a command word.
   function cmd_prefix(t) {
-    return t ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || t ~ /^(env|command|sudo|exec|nohup|xargs|time|eval|builtin|nice|setsid|noglob|nocorrect|-|then|do|else|if|while|until|!)$/
+    # `{\001` is the brace-group keyword as the tokenizer marks it (DND-780).
+    return is_assign(t) || t ~ /^(env|command|sudo|exec|nohup|xargs|time|eval|builtin|nice|setsid|noglob|nocorrect|-|then|do|else|if|while|until|!|\{\001)$/
   }
   # squote(w): w as one single-quoted shell word.
   function squote(w) { gsub(/\047/, "\047\\\047\047", w); return "\047" w "\047" }
-  function analyze(text, depth,    W, QF, SB, n, k, e, r, sw, m, i, cp, t, j, x) {
+  # note(c, W, k, e, depth, force): remember WHAT matched finding c, so the
+  # deny reason can name it (DND-780): the words k..e of the simple command
+  # (at most 6, marks removed, newlines flattened, cut at 120 chars), their
+  # word position k, and the nesting depth (0 = the command as typed). The
+  # first match of a category is kept; force replaces it (an outer shell
+  # alias names itself, not the text its expansion matched).
+  function note(c, W, k, e, depth, force,    t, i) {
+    if (c == "" || ((c in NT) && !force)) return
+    t = ""
+    for (i = k; i <= e && i < k + 6; i++) t = t (i > k ? " " : "") W[i]
+    if (e >= k + 6) t = t " ..."
+    NT[c] = clip(t); NP[c] = k; ND[c] = depth
+  }
+  function clip(t) {
+    gsub(/\001/, "", t); gsub(/\002/, "$", t); gsub(/[\n\r\t]+/, " ", t)
+    return length(t) > 120 ? substr(t, 1, 117) "..." : t
+  }
+  # analyze(text, depth): the most specific finding in text (see rank), or
+  # "" when it runs no stash write. It stops early only on a literal stash.
+  function analyze(text, depth,    W, QF, SB, UX, PQ, n, k, e, r, sw, m, i, cp, t, j, x, best) {
     # Past the nesting bound, text that still names stash is a deny.
-    if (depth > 8) return mentions_stash(text) ? "stash" : ""
-    n = tokenize(text, W, QF, SB)
-    for (k = 1; k <= n; k++) if (QF[k]) { r = analyze(W[k], depth + 1); if (r != "") return r }
+    if (depth > 8) {
+      if (!mentions_stash(text)) return ""
+      if (!("stash" in NT)) { NT["stash"] = clip(text); NP["stash"] = 0; ND["stash"] = depth }
+      return "stash"
+    }
+    n = tokenize(text, W, QF, SB, UX, PQ); best = ""
+    for (k = 1; k <= n; k++) if (QF[k]) { best = better(best, analyze(W[k], depth + 1)); if (best == "stash") return best }
     cp = 0
     for (k = 1; k <= n; k++) {
       # cp: word k is in command position (starts a simple command, or
@@ -649,12 +729,15 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       cp = SB[k] || (cp && k > 1 && cmd_prefix(W[k - 1]))
       for (e = k; e < n && !SB[e + 1]; e++) ;
       # A shell alias in command position: read its value, followed by the
-      # rest of this simple command, as a command of its own.
-      if (cp && (W[k] in shal)) {
-        for (j = 1; j <= shal[W[k]]; j++) {
-          t = shv[W[k], j]
+      # rest of this simple command, as a command of its own. The name is
+      # looked up without glob marks: an alias named `gs?` expands before
+      # globbing, so the matcher must not judge it as a glob (DND-780).
+      x = W[k]; gsub(/\001/, "", x)
+      if (cp && (x in shal)) {
+        for (j = 1; j <= shal[x]; j++) {
+          t = shv[x, j]
           for (i = k + 1; i <= e; i++) t = t " " squote(W[i])
-          if (analyze(t, depth + 1) != "") return "shell-alias"
+          if (analyze(t, depth + 1) != "") { best = better(best, "shell-alias"); note("shell-alias", W, k, e, depth, 1) }
         }
       }
       # A zsh SUFFIX alias (`alias -s ext=cmd`): a command word `x.ext` runs
@@ -663,7 +746,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         for (j = 1; j <= sal[x]; j++) {
           t = sv[x, j]
           for (i = k; i <= e; i++) t = t " " squote(W[i])
-          if (analyze(t, depth + 1) != "") return "shell-alias"
+          if (analyze(t, depth + 1) != "") { best = better(best, "shell-alias"); note("shell-alias", W, k, e, depth, 1) }
         }
       }
       # the words of this simple command from k on, as their own array
@@ -671,24 +754,36 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       for (i = k + 1; i <= e; i++) sw[++m] = W[i]
       # A simple command that starts at `stash` followed a `)` or backtick:
       # the tail of `$(command -v git) stash`.
-      if (SB[k] && W[k] == "stash" && !is_read(m >= 1 ? sw[1] : "")) return "stash"
-      if (W[k] ~ /(^|\/)git-stash$/ && !is_read(m >= 1 ? sw[1] : "")) return "stash"
+      if (SB[k] && W[k] == "stash" && !is_read(m >= 1 ? sw[1] : "")) { note("stash", W, k, e, depth, 0); return "stash" }
+      if (W[k] ~ /(^|\/)git-stash$/ && !is_read(m >= 1 ? sw[1] : "")) { note("stash", W, k, e, depth, 0); return "stash" }
+      # An assignment word is never a command word (see is_assign): the
+      # expansion rules below do not read it. The literal git rule still does.
+      x = is_assign(W[k])
       # A command word the shell rewrites by glob or brace (`/usr/bin/g?t`,
       # `git-st*sh`) may be git or may be git-stash, so it is judged as both:
       # as git-stash, no verb (a bare or option-first push), a writing verb,
       # or a verb built by expansion is denied; as git, the usual verdict.
-      if (cp && W[k] ~ /\001/) {
+      # Exactly `[` and `[[` are exempt: the test builtin and keyword, which
+      # never run their arguments, and as globs they match only themselves
+      # (an unclosed `[` is literal) (DND-780). So is a lone `{`: brace
+      # expansion needs a closing `}` in the same word, so it is the brace
+      # group keyword, and the word after it keeps command position (see
+      # cmd_prefix).
+      if (cp && !x && W[k] ~ /\001/ && W[k] != "[\001" && W[k] != "[\001[\001" && W[k] != "{\001") {
         for (i = 1; i <= m && sw[i] ~ /^-/; i++) ;
-        if (i > m || sw[i] ~ /^(push|save|pop|apply|drop|clear|store|branch)$/ || sw[i] ~ /[$`\001]/) return "glob-head"
-        if (git_verdict(sw, m, 1, 0, 0) != "") return "glob-head"
+        if (i > m || sw[i] ~ /^(push|save|pop|apply|drop|clear|store|branch)$/ || sw[i] ~ /[$`\001]/ || git_verdict(sw, m, 1, 0, 0) != "") {
+          best = better(best, "glob-head"); note("glob-head", W, k, e, depth, 0)
+        }
         continue
       }
       if (W[k] ~ /(^|\/)git$/) r = git_verdict(sw, m, 1, 0, 0)
-      else if (W[k] ~ /[$`]/) r = git_verdict(sw, m, 1, 1, 0)
+      else if (!x && W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k])) r = git_verdict(sw, m, 1, 1, 0)
       else r = ""
-      if (r != "") return r
+      note(r, W, k, e, depth, 0)
+      if (r == "stash") return r
+      best = better(best, r)
     }
-    return ""
+    return best
   }
   BEGIN {
     na = split(slurp(alf), lines, "\n")
@@ -735,7 +830,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     maxg = 0
     for (name in gal) if (gal[name] > maxg) maxg = gal[name]
     for (p = 1; r == "" && p <= maxg; p++) {
-      g = cmd; hit = 0
+      g = cmd; hit = 0; hitn = ""
       for (name in gal) {
         gval = gv[name, (p <= gal[name]) ? p : gal[name]]
         re = name; gsub(/[][\\.^$*+?(){}|\/]/, "\\\\&", re)
@@ -743,12 +838,15 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
           pre = substr(g, 1, RSTART - 1); m0 = substr(g, RSTART, RLENGTH)
           lead = substr(m0, 1, 1); if (lead !~ /[ \t\n;&|()`]/) lead = ""
           tail = substr(m0, RLENGTH, 1); if (tail !~ /[ \t\n;&|()`]/) tail = ""
-          g = pre lead gval tail substr(g, RSTART + RLENGTH); hit = 1
+          g = pre lead gval tail substr(g, RSTART + RLENGTH); hit = 1; hitn = hitn (hitn == "" ? "" : " ") name
         }
       }
-      if (hit) { r = analyze(g, 1); if (r != "") r = "shell-alias" }
+      if (hit) {
+        r = analyze(g, 1)
+        if (r != "") { r = "shell-alias"; NT[r] = clip("zsh global alias " hitn); NP[r] = 0; ND[r] = 0 }
+      }
     }
-    if (r != "") print r
+    if (r != "") print r "\t" ((r in NT) ? NT[r] : "") "\t" ((r in NP) ? NP[r] : 0) "\t" ((r in ND) ? ND[r] : 0)
   }' 2>/dev/null)
 AWK_RC=$?
 
@@ -759,14 +857,31 @@ if [ "$AWK_RC" -ne 0 ]; then
   fault_verdict
 fi
 
-case "$VERDICT" in
-  refwrite) deny 'this runs git plumbing that rewrites or expires the stash ref or its reflog without the stash subcommand: `reflog delete|expire|drop` naming `stash`/`stash@{N}`/`refs/stash` or given `--all`, `update-ref`/`symbolic-ref` on the stash ref (or with `--stdin`, or with refs supplied from elsewhere), a fetch/push refspec whose destination is the stash ref (either spelling) or refs/*, a push naming the stash ref (`push . --delete stash`) or `--mirror`, or filter-branch/filter-repo `--all`.' ;;
-  stash) deny 'this runs `git stash` with a verb that writes the stash list (bare `git stash`, push/save, pop, apply, drop, clear, store, branch, or an option-first implicit push).' ;;
-  shell-alias) deny 'this runs a shell alias loaded into the Bash tool from the owner profile (oh-my-zsh defines `gstp` = `git stash pop`) that expands to a stash write.' ;;
-  alias) deny 'this runs a git alias that resolves to a stash write (or a shell alias that mentions stash).' ;;
-  expanded) deny 'this runs git with a subcommand built by expansion (`git $X`, a glob `git st?sh`, a brace `git {stash,pop}`), which may be a stash write and cannot be read here. Spell the subcommand (and a stash verb) out literally, quoting any glob or brace characters.' ;;
-  glob-head) deny 'this runs a command word the shell rewrites by glob or brace expansion (`/usr/bin/g?t`, `git-st*sh`), which may be git or git-stash writing the stash list. Spell the command word literally.' ;;
-  unread-config) deny 'this runs a git subcommand that is neither a builtin nor an alias this guard read, where git may resolve it to a stash write: the command points git at a config this guard does not read (`--git-dir`, GIT_DIR, GIT_CONFIG_GLOBAL/SYSTEM, HOME, XDG_CONFIG_HOME, `include.path`, a `cd`/`-C` target that is expanded or holds whitespace, or an alias defined from an expansion), or help.autocorrect is on and git would run the closest command for a typo. Spell a builtin subcommand out, or drop the override.' ;;
-  expanded-git) deny 'this runs `stash` through a command word built by expansion (`$GIT stash`, `$(command -v git) stash`), which may be git writing the stash list.' ;;
+# The verdict line is: category TAB matched words TAB word position TAB depth.
+# MATCHED names what the evaluator matched (DND-780), so an agent can tell a
+# real hit from a false positive before it retries.
+V_CAT=$(printf '%s' "$VERDICT" | cut -f1)
+V_TOK=$(printf '%s' "$VERDICT" | cut -f2)
+V_POS=$(printf '%s' "$VERDICT" | cut -f3)
+V_DEP=$(printf '%s' "$VERDICT" | cut -f4)
+MATCHED=""
+if [ -n "$V_TOK" ]; then
+  MATCHED=" Matched: \`$V_TOK\`"
+  if [ -n "$V_POS" ] && [ "$V_POS" != 0 ]; then
+    if [ "$V_DEP" = 0 ]; then MATCHED="$MATCHED at word $V_POS of the command"
+    else MATCHED="$MATCHED at word $V_POS of a nested command (a quoted payload or an alias expansion)"; fi
+  fi
+  MATCHED="$MATCHED."
+fi
+
+case "$V_CAT" in
+  refwrite) deny 'this runs git plumbing that rewrites or expires the stash ref or its reflog without the stash subcommand: `reflog delete|expire|drop` naming `stash`/`stash@{N}`/`refs/stash` or given `--all`, `update-ref`/`symbolic-ref` on the stash ref (or with `--stdin`, or with refs supplied from elsewhere), a fetch/push refspec whose destination is the stash ref (either spelling) or refs/*, a push naming the stash ref (`push . --delete stash`) or `--mirror`, or filter-branch/filter-repo `--all`.'"$MATCHED" ;;
+  stash) deny 'this runs `git stash` with a verb that writes the stash list (bare `git stash`, push/save, pop, apply, drop, clear, store, branch, or an option-first implicit push).'"$MATCHED" ;;
+  shell-alias) deny 'this runs a shell alias loaded into the Bash tool from the owner profile (oh-my-zsh defines `gstp` = `git stash pop`) that expands to a stash write.'"$MATCHED" ;;
+  alias) deny 'this runs a git alias that resolves to a stash write (or a shell alias that mentions stash).'"$MATCHED" ;;
+  expanded) deny 'this runs git with a subcommand built by expansion (`git $X`, a glob `git st?sh`, a brace `git {stash,pop}`), which may be a stash write and cannot be read here. Spell the subcommand (and a stash verb) out literally, quoting any glob or brace characters.'"$MATCHED" ;;
+  glob-head) deny 'this runs a command word the shell rewrites by glob or brace expansion (`/usr/bin/g?t`, `git-st*sh`), which may be git or git-stash writing the stash list. Spell the command word literally.'"$MATCHED" ;;
+  unread-config) deny 'this runs a git subcommand that is neither a builtin nor an alias this guard read, where git may resolve it to a stash write: the command points git at a config this guard does not read (`--git-dir`, GIT_DIR, GIT_CONFIG_GLOBAL/SYSTEM, HOME, XDG_CONFIG_HOME, `include.path`, a `cd`/`-C` target that is expanded or holds whitespace, or an alias defined from an expansion), or help.autocorrect is on and git would run the closest command for a typo. Spell a builtin subcommand out, or drop the override.'"$MATCHED" ;;
+  expanded-git) deny 'this runs `stash` through a command word built by expansion (`$GIT stash`, `$(command -v git) stash`), which may be git writing the stash list.'"$MATCHED" ;;
 esac
 exit 0

@@ -388,6 +388,217 @@ case_cmd "OK9. git log --grep=stash" allow 'git log --grep=stash'
 case_cmd "OK10. rebase --autostash (out of scope, see header)" allow 'git rebase --autostash origin/main'
 case_cmd "OK11. -C a dir named stash, then a read-only subcommand" allow 'git -C stash status'
 
+echo "== O: over-match of the expansion rules (DND-780, narrow cut) =="
+# The narrow cut carries only rules that do not depend on proving a glob
+# cannot be git: `[`, `[[` and a lone `{` are not glob heads; `$?` is not a
+# glob; assignment words are not command words; a quoted `$NAME/`-prefixed
+# path with a plain basename is that name; the most specific reason wins
+# and names what matched. Every other glob command word is judged as at
+# cbac851, so the deny cases below (many written against a broader matcher)
+# must all still deny.
+# Commands with no git and no stash in them, each denied at cbac851 by the
+# glob-head or expanded-head rule. The class rules: a glob whose basename
+# pattern cannot match git or git-stash is not git; $? $* $# $@ are
+# parameters, not globs; an assignment word is never a command word; a quoted
+# expansion followed by a literal basename is that basename. A heredoc body is
+# still read as commands (critic rounds 1-2: a body can become a hook or a
+# script the same command runs), so only its prose brackets and globs stop
+# denying.
+case_cmd "O1. leading test bracket" allow '[ -n "$n" ] && echo y'
+case_cmd "O2. leading [[ keyword" allow '[[ -n "$n" ]] && echo y'
+case_cmd "O3. test bracket with \$HOME operand" allow '[ -n "$HOME" ] && echo y'
+case_cmd "O4. test bracket -f" allow '[ -f "$x" ]'
+case_cmd "O5. [[ with an unquoted variable" allow '[[ -z $v ]]'
+case_cmd "O6. \$? inside a quoted string" allow 'echo "R=$HOME rc=$?"'
+case_cmd "O8. an expanded path with a literal basename, cd'd into" allow 'W=$(mktemp -d -p /tmp a.XXXX) && git worktree add -q -b z "$W/t" HEAD && echo "$W/t" > /tmp/p && cd "$W/t" && git fetch -q origin && git rebase -q origin/main || { echo REBASE-FAILED; exit 1; }'
+case_cmd "O9. zsh brace range with a length expansion" allow 'for i in {1..${#segs}}; do echo $i; done'
+case_cmd "O10. quoted ? in an API path" allow "gh api 'repos/CJPoll/custom/activity?per_page=10'"
+case_cmd "O11. glob in a for list" allow 'for p in /proc/[0-9]*; do echo $p; done'
+case_cmd "O12. bounded wait loop with test" allow "R=~/x; for i in \$(seq 1 19); do n=\$(find \$R -maxdepth 1 -type f -mmin -1 \\( -name 'DND-437*' -o -name 'DND-761*' \\)); test -n \"\$n\" && { echo \"changed: \$n\"; break; }; sleep 30; done"
+case_cmd "O13. bounded wait loop with [" allow "R=~/x; for i in \$(seq 1 19); do n=\$(find \$R -maxdepth 1 -type f -mmin -1 \\( -name 'DND-437*' -o -name 'DND-761*' \\)); [ -n \"\$n\" ] && { echo \"changed: \$n\"; break; }; sleep 30; done"
+case_cmd "O14. quoted heredoc body with brackets and globs in prose" allow "cat >> file <<'EOF'
+[ -n \"\$x\" ] is a test, [[ -f y ]] too.
+* a bullet, and a glob like /usr/bin/g?t | head
+EOF"
+case_cmd "O16. \$* and \$# are parameters" allow 'echo "args: $* count: $#"; [ $# -gt 0 ]'
+case_cmd "O18. quoted heredoc into git commit -F -" allow "git commit -F - <<'EOF'
+Fix: [ -n x ] and [[ -f y ]] no longer deny; *.md and ? are prose.
+EOF"
+case_cmd "O19. <<- quoted heredoc, tab-indented terminator" allow "cat <<-'EOF'
+	[ -n x ]
+	EOF
+echo done"
+# The guarantee stays: every one of these still denies.
+case_cmd "O20. glob basename that can match git" deny '/usr/bin/[g]it stash pop'
+case_cmd "O21. POSIX class in a glob command word" deny '/usr/bin/[[:alpha:]]it stash pop'
+case_cmd "O22. negated class that can match git" deny '/usr/bin/[!x]it stash'
+case_cmd "O23. glob with a range that can match git" deny '/usr/bin/[f-h]it stash pop'
+case_cmd "O24. glob that can match git-stash" deny '/usr/libexec/git-core/git-?tash pop'
+case_cmd "O25. quoted expansion with a literal git basename" deny '"$D"/git stash pop'
+case_cmd "O26. unquoted expansion before a literal basename" deny '$W/t stash pop'
+case_cmd "O27. quoted heredoc fed to bash" deny "bash <<'EOF'
+git stash pop
+EOF"
+case_cmd "O28. quoted heredoc piped to sh" deny "cat <<'EOF' | sh
+git stash pop
+EOF"
+case_cmd "O29. quoted heredoc written to a script, then run" deny "cat > /tmp/x.sh <<'EOF'
+git stash pop
+EOF
+sh /tmp/x.sh"
+case_cmd "O30. quoted heredoc to a script run by path" deny "cat > ./x.sh <<'EOF'
+git stash pop
+EOF
+./x.sh"
+case_cmd "O31. unquoted heredoc body with a substitution" deny 'cat <<EOF
+$(git stash pop)
+EOF'
+case_cmd "O32. quoted heredoc to xargs git" deny "xargs git <<'EOF'
+stash pop
+EOF"
+case_cmd "O33. heredoc body read by a loop that runs it" deny "while read -r l; do \$l; done <<'EOF'
+git stash pop
+EOF"
+case_cmd "O34. a stash write after a quoted heredoc" deny "cat <<'EOF'
+data
+EOF
+git stash pop"
+case_cmd "O35. << in a comment does not hide the next line" deny "# see <<'X'
+git stash pop
+X"
+case_cmd "O36. << in arithmetic does not hide the next line" deny "echo \$((1<<'X'))
+git stash pop
+X"
+case_cmd "O37. a stash write inside \${...:-\$(...)}" deny 'echo ${X:-$(git stash pop)}'
+case_cmd "O38. an assignment then an expanded git with stash" deny 'A=$B $GIT stash pop'
+case_cmd "O39. a glob git command word in a quoted sh -c payload" deny "sh -c '/usr/bin/g?t stash pop'"
+case_cmd "O40. literal git in a quoted watch payload" deny "watch 'git stash pop'"
+# A heredoc body stays a command (critic rounds 1-2): each of these runs
+# the body, and a lexical reader list cannot see that.
+case_cmd "O42. quoted heredoc to a git shell alias defined inline" deny "git -c alias.zq='!sh' zq <<'EOF'
+git stash pop
+EOF"
+case_cmd "O43. quoted heredoc to an interpreter on no list" deny "pwsh <<'EOF'
+git stash pop
+EOF"
+case_cmd "O44. quoted heredoc written to a script run by bare name" deny "cat > ~/bin/f <<'EOF'
+git stash pop
+EOF
+f"
+case_cmd "O45. quoted heredoc to a gh alias" deny "gh x <<'EOF'
+git stash pop
+EOF"
+case_cmd "O46. quoted heredoc to find -exec sh" deny "cat > f <<'EOF'
+git stash pop
+EOF
+find . -name f -exec sh {} \\;"
+case_cmd "O47. quoted heredoc written to a git hook, then commit" deny "cp /usr/bin/true .git/hooks/pre-commit && cat > .git/hooks/pre-commit <<'EOF'
+#!/bin/sh
+git stash pop
+EOF
+git commit -m x"
+case_cmd "O48. quoted heredoc commit message naming a stash write (accepted false positive)" deny "git commit -F - <<'EOF'
+Mentions git stash pop.
+EOF"
+# Admiral cases 13, 15, 16 (DND-787 folded in): jq filters, python heredoc
+# bodies, ERE anchors.
+case_cmd "O53. a trailing literal dollar sign" allow 'echo cost$ now'
+case_cmd "O54. brace alternatives that can be git" deny '{g,x}it stash pop'
+case_cmd "O55. brace alternatives in a path that can be git" deny '/usr/bin/{g,x}it stash pop'
+case_cmd "O56. letter sequence brace (conservative)" deny '/usr/bin/{f..h}it stash pop'
+case_cmd "O57. nested brace alternatives that can be git" deny '/usr/bin/{x,{g,y}}it stash pop'
+case_cmd "O59. zsh \$=var is an expansion" deny '$=G stash pop'
+# Critic round 4: the last `/` inside a quoted expansion is not a literal
+# basename.
+case_cmd "O64. slash inside a quoted command substitution" deny '"$(printf /usr/bin/git)" stash pop'
+case_cmd "O65. slash inside a quoted \${G%/}" deny '"${G%/}" stash pop'
+case_cmd "O66. slash inside a quoted \${G#*/}" deny '"${G#*/}" stash pop'
+case_cmd "O67. slash inside a quoted backtick substitution" deny '"`printf /usr/bin/git`" stash pop'
+case_cmd "O68. inner quotes inside a quoted substitution" deny '"$(printf "/usr/bin/git")" stash pop'
+# The seven Slack-reported shapes (admiral, 2026-09-26).
+case_cmd "O72. grep -E with [)]" allow "grep -E '[)]' f"
+case_cmd "O73. python3 -c string with braces" allow "python3 -c \"d = {'a': 1, 'b': [2]}; print(d)\""
+case_cmd "O74. heredoc holding {:ok, _}" allow "cat > t.exs <<'EOF'
+{:ok, _} = File.read(\"x\")
+{:error, reason} -> IO.inspect(reason)
+EOF"
+case_cmd "O75. a \$(python3 ...) substitution" allow "x=\$(python3 -c 'import re; print(re.sub(r\"[a-z]+\", \"\", \"x1\"))') && echo \"\$x\""
+case_cmd "O76. --include=*.ex" allow 'grep -rn defmodule --include=*.ex lib/'
+# Critic round 6: the matcher is exact only for default glob options. A
+# command that changes them gets the pre-DND-780 behaviour.
+case_cmd "O85. extendedglob negation" deny 'setopt extendedglob; /usr/bin/^x* stash pop'
+case_cmd "O86. extendedglob repetition" deny 'setopt extended_glob && /usr/bin/g?#t stash pop'
+case_cmd "O87. nocaseglob" deny 'setopt nocaseglob; /usr/bin/G?T stash pop'
+case_cmd "O88. nocaseglob class" deny 'setopt NO_CASE_GLOB; /usr/bin/[G]IT stash pop'
+case_cmd "O89. braceccl" deny 'setopt braceccl; /usr/bin/{fgh}it stash pop'
+case_cmd "O90. bash shopt nocaseglob" deny "bash -c 'shopt -s nocaseglob; /usr/bin/G?T stash pop'"
+case_cmd "O91. zsh options[] assignment" deny 'options[extendedglob]=on; /usr/bin/^x* stash pop'
+case_cmd "O92. emulate ksh" deny 'emulate ksh; /usr/bin/G?T stash pop'
+# A shell alias whose name holds a glob character expands before globbing.
+mkdir -p "$TMP/globalias/shell-snapshots"
+printf "alias -- 'gs?'='git stash pop'\n" > "$TMP/globalias/shell-snapshots/snapshot-zsh-1-ga.sh"
+OUT=$(json "$WT" 'gs?' | CLAUDE_CONFIG_DIR="$TMP/globalias" sh "$HOOK" 2>/dev/null); STATUS=$?
+check "O95. a shell alias named with a glob character" deny
+# Critic round 7 and its cluster audit: every one of these denies at cbac851.
+case_cmd "O96. zsh colon modifier with a slash in a quoted word" deny '"$G:s/q/t" stash pop'
+case_cmd "O97. zsh global substitution modifier" deny '"$G:gs/q/t" stash pop'
+case_cmd "O98. a glob inside \${...:-...} with an option-only push" deny '${X:-/usr/libexec/git-core/git-st?sh} -u'
+case_cmd "O99. \$* in a payload given a glob git word" deny "sh -c '\$*' sh /usr/bin/g?t"
+case_cmd "O100. a non-ASCII parameter name is an expansion" deny '$é stash pop'
+case_cmd "O101. an indexed assignment prefix keeps command position" deny 'a[1]=x /usr/bin/g?t stash pop'
+case_cmd "O102. an append assignment prefix keeps command position" deny 'a+=x /usr/bin/g?t stash pop'
+case_cmd "O103a. \${G} with an option-only push (G=git-stash) stays denied" deny '${G} -u'
+case_cmd "O103b. \${G} with a write verb stays denied" deny '${G} pop'
+case_cmd "O103c. residual: \${p#...} then \$(...) in a re-read quoted string (as at base)" deny 'for p in /proc/1; do echo "${p#/proc/} $(cat $p/comm)"; done'
+case_cmd "O103. \${NAME}/literal basename stays allowed" allow 'git worktree add -q "${W}/t" HEAD && cd "${W}/t" && git status'
+# Critic round 8: a zsh glob qualifier (on by default) can rewrite a match,
+# and zshenv can set glob options for every zsh -c.
+case_cmd "O112. a glob qualifier rewriting xargs to git" deny '/usr/bin/[x]args(:s/xargs/git/) -C . stash pop'
+case_cmd "O113. a glob qualifier rewriting git-add to git-stash" deny '/usr/libexec/git-core/git-[a]dd(:s/add/stash/) pop'
+case_cmd "O113a. a test bracket followed by a subshell still allows" allow '[ -n "$x" ] && (echo y)'
+# Critic round 9: `$` + backslash-newline is a line continuation, not a
+# literal dollar sign.
+case_cmd "O117. \$ then a line continuation, unquoted" deny '$\
+GIT stash pop'
+case_cmd "O118. \$ then a line continuation, double-quoted" deny '"$\
+GIT" stash pop'
+# Case 19, the DND-777 captain batch (admiral, 2026-09-26).
+case_cmd "O109. git -C with a variable path, builtin verbs" allow 'W=/tmp/w; git -C "$W" status --short && git -C "$W" log --oneline -3 && git -C "$W" rev-parse HEAD'
+case_cmd "O110. git -C with a variable path, stash pop" deny 'W=/tmp/w; git -C "$W" stash pop'
+case_cmd "O111. git -C with a variable path, stash list" allow 'git -C "$W" stash list'
+# Case 17, the laptop batch (admiral, 2026-09-26).
+case_cmd "O79. ruby -e with [ and sub(" allow "ruby -e 'puts ARGV[0].sub(/x/, \"y\")' ax"
+case_cmd "O83. for loop over quoted worktree paths" allow 'for w in "$wt1" "$wt2"; do git -C "$w" status --short; [ -d "$w/.git" ] && echo "$w"; done'
+# Quotes and backslashes the tokenizer removed must not fool the matcher.
+case_cmd "O69. escaped ! in a class is a member, not negation" deny '/usr/bin/[\!g]it stash pop'
+case_cmd "O70. escaped ] inside a class" deny '/usr/bin/[g\]i]it stash pop'
+case_cmd "O71. quoted } inside brace alternatives" deny '/usr/bin/{x"}",g}it stash pop'
+# Case 14: the deny reason names what matched.
+# reason_names <label> <command> <text> : denied, and the reason holds <text>.
+reason_names() {
+  run "$(json "$WT" "$2")"
+  if is_deny && printf '%s' "$OUT" | grep -qF -- "$3"; then record "$1" PASS; else record "$1" FAIL; fi
+}
+reason_names "O60. a glob head names the matched words and position" '/usr/bin/g?t stash pop' 'Matched: `/usr/bin/g?t stash pop` at word 1 of the command.'
+reason_names "O61. a literal stash names its position" 'echo hi; git stash pop' 'Matched: `git stash pop` at word 3 of the command.'
+reason_names "O62. a shell alias names the alias word" 'gstp' 'Matched: `gstp` at word 1 of the command.'
+reason_names "O63. a quoted payload names the nested position" "sh -c 'cd /tmp && git stash pop'" 'Matched: `git stash pop` at word 3 of a nested command'
+# The brace-group keyword keeps its body in command position.
+case_cmd "O119. a brace group around a test bracket" allow '{ [ -n "$x" ] && echo y; }'
+case_cmd "O120. a brace group around a glob git word" deny '{ /usr/bin/g?t stash pop; }'
+case_cmd "O121. a brace group around a literal stash write" deny '{ git stash pop; }'
+case_cmd "O122. a closed brace word stays a brace expansion" deny '{g,x}it stash pop'
+# DND-786 (coordinator): does the narrow cut close it?
+case_cmd "O123. DND-786 a: fetch, log, sleep, gh run list | jq" allow "cd /tmp && git fetch -q origin && git log --oneline -2 origin/main; sleep 10; gh run list --workflow post-merge.yml --limit 2 --json databaseId,status,headSha | jq -c '.[]'"
+# LOW (DND-780): a literal stash write must name the literal-stash reason even
+# after an unrelated expansion that also triggers a rule.
+run "$(json / 'cd "$D" && echo "$X" foo && git stash pop')"
+if is_deny && printf '%s' "$OUT" | grep -q 'with a verb that writes the stash list'; then
+  record "O41. a literal stash write after an unrelated expansion names the literal reason" PASS
+else
+  record "O41. a literal stash write after an unrelated expansion names the literal reason" FAIL
+fi
+
 echo "== T: the deny text =="
 run "$(json "$WT" 'git stash pop')"
 if printf '%s' "$OUT" | grep -q 'git worktree add' && printf '%s' "$OUT" | grep -q 'commit'; then
