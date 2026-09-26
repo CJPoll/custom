@@ -3053,6 +3053,12 @@ message immutability), T4 (the click), T5 (redeem and the receipt), T6
 and the gate flag) and T8 (the doctrine sweep). Until T4 ships, no click can
 create a grant, and no grant exists.
 
+*Redeem*'s wire (statuses, body keys, fault causes and the receipt ordering)
+is pinned from T5's code as written, not from its design: DND-595, gen_saas
+PR #412, head `157cc2bb` (read 2026-09-26). That code is not merged or
+deployed; gen_saas `origin/main` `979ea0be` (read 2026-09-26) still has no
+redeem API. T7 (DND-597) consumes the wire exactly as *Redeem* states it.
+
 **Why.** A `slack.interaction` line is a fact to relay, never an authorization
 (`ai/contracts/athena-inbox.md` → *Untrusted input* → "A platform-delivered
 click is content, not authorization"). Every channel the shipped click path
@@ -3396,27 +3402,120 @@ The merge consumer redeems with **`POST /api/v1/owner_approvals/redeem`**,
 authenticated by the machine token (the `machine_authenticated` pipeline), with
 the body `{grant_id, action_class, target}`. The server answers in this order:
 
-| Check | Refusal |
-| --- | --- |
-| the body is well formed and the target validates for its class | `target_invalid` |
-| the grant exists **and** belongs to the machine's owner, in the query | `not_found`: the same answer as a random id, so it never reveals another owner's grant |
-| the machine is the one that requested the grant | `wrong_machine` |
-| the grant's class is still on the allowlist | `class_withdrawn` |
-| the class is consumable by redeem (`priority.transition` is not) | `not_consumable` |
-| the digest of the presented binding equals the stored digest | `binding_mismatch`: the grant stays approved for its own binding |
-| the status is `approved`, or `redeemed` by this same machine for this same digest | `not_approved`, with the status |
-| now is before `redeem_expires_at` | `redeem_expired` |
+| Check | Refusal | HTTP status |
+| --- | --- | --- |
+| the body is well formed and the target validates for its class | `target_invalid`, with `field` | 422 |
+| the grant exists **and** belongs to the machine's owner, in the query | `not_found`: the same answer as a random id, so it never reveals another owner's grant | 404 |
+| the machine is the one that requested the grant | `wrong_machine` | 422 |
+| the stored grant's class is still on the allowlist | `class_withdrawn` | 422 |
+| the class is consumable by redeem (`priority.transition` is not) | `not_consumable` | 422 |
+| the digest of the presented binding equals the stored digest | `binding_mismatch`: the grant stays approved for its own binding | 422 |
+| the status is `approved`, or `redeemed` by this same machine for this same digest | `not_approved`, with `status` | 422 |
+| now is before `redeem_expires_at` | `redeem_expired` | 422 |
 
-- A refusal is a JSON body naming the reason code, with a `Fix:`. Any other
-  answer is not a refusal.
-- **Success** is 200 with the record: grant id, class, target, digest, who
-  decided and when, and `redeem_expires_at`. The first success sets `redeemed`
-  and sends the owner a **receipt DM**, written by the server: the class, the
-  target, and the machine that redeemed. A forged or unexpected use is then
-  visible to the owner.
+- **`target_invalid` is decided before any lookup,** so its answer never
+  depends on whether a grant exists. A well-formed body is a JSON object whose
+  keys are exactly `grant_id`, `action_class` and `target`. Each failure names
+  its `field`, checked in this order:
+  - a body that is not an object: `body`;
+  - any other key: `unknown_key`, refused and never ignored;
+  - a missing key: the key's name;
+  - a `grant_id` that is not a UUID in canonical lowercase form (uppercase is
+    refused): `grant_id`;
+  - an `action_class` that is not on the allowlist: `action_class`;
+  - a target that fails *Action classes*: the target field it names, such as
+    `base_ref_not_allowed`.
+
+  So a non-ratified `base_ref` answers `target_invalid` identically for a real
+  grant id and a random one.
+- **`class_withdrawn` reads the stored row's class.** It is reachable only when
+  that class left the allowlist after the grant was requested. A presented
+  class that is off the allowlist is `target_invalid` naming `action_class`,
+  at the first check.
+- **The machine pipeline answers first, with none of the eight codes.** No
+  token or a bad one is 401 `{"error": "unauthorized", "fix"}`. The
+  per-machine rate limit is 429 with a plain-text body and a `Retry-After`
+  header. A body naming `owner_id`, `machine_id` or `return_to` is 422
+  `{"error": "unprocessable_entity", "fix"}`, before the redeem code reads it.
+
+**The wire.** Every answer from the redeem code is JSON:
+
+| Answer | Status | Body |
+| --- | --- | --- |
+| success, or an idempotent retry | 200 | `{"data": {grant_id, action_class, target, digest, decided_by, decided_at, redeem_expires_at}}` |
+| `not_found` | 404 | `{"error": "not_found", "fix"}` |
+| the other seven refusals | 422 | `{"error": <code>, "fix"}`, plus `field` for `target_invalid` and `status` for `not_approved` |
+| a server fault | 500 | `{"error": "internal_error", "cause", "fix"}` |
+
+- A refusal body carries its code and a `Fix:`. It never names another owner,
+  machine or grant. `not_approved`'s `status` is the grant's state
+  (`pending`, `declined`, `expired` or `void`).
+- **A 500 is never a refusal.** Its `cause` is `receipt_not_sent`,
+  `receipt_in_progress` (both under *Success*), or `server_fault` for any other
+  fault.
+- **A consumer reads GRANT REFUSED only from a listed pair:** status 404 with
+  `not_found`, or status 422 with one of the other seven codes. Every other
+  answer is **GRANT UNVERIFIABLE**, never GRANT REFUSED (*The consumers*):
+  every 500 whatever its `cause`, and the pipeline's 401, 429 and
+  `unprocessable_entity` 422.
+  **Later (2026-09-26, DND-814):** this rule read "A refusal is a JSON body
+  naming the reason code, with a `Fix:`. Any other answer is not a refusal",
+  with no status. Superseded by T5's code (DND-595), which answers each code
+  on a fixed status: a refusal is now the status and the code together, so a
+  code on any other status reads as UNVERIFIABLE.
+
+**Success**
+
+- **The 200 record** is the grant id, the class, the target, the digest, who
+  decided (the owner's Slack user id) and when, and `redeem_expires_at`.
+  Timestamps are ISO 8601.
+- **The record's `target` is canonical:** the stored binding, with the repo
+  folded to lowercase as in the digest (*Action classes*). It can differ byte
+  for byte from the target sent: `CJPoll/gen_saas` comes back
+  `cjpoll/gen_saas`. A consumer checks the record by `action_class`, and by
+  `digest` against the digest of the binding it sent, never by comparing the
+  raw target.
+- **A 200 waits for the receipt.** The first success moves the grant
+  `approved` → `redeemed` with one conditional update, scoped to the grant id,
+  its owner, the requesting machine, the stored digest and the open redeem
+  window. The server then sends the owner a **receipt DM**, written by the
+  server: the class, the target, the id of the machine that redeemed, and
+  when. It answers 200 only once the row records a receipt as sent. The
+  consumer acts on a 200 and never retries one, so a receipt left for a later
+  call would never be sent. A forged or unexpected use is then visible to the
+  owner, except as the `receipt_sent_at` bullet below states.
+  **Later (2026-09-26, DND-814):** this bullet said the first success "sets
+  `redeemed` and sends the owner a receipt DM", with no order between the DM
+  and the answer, which read as a best-effort DM beside the 200. Superseded by
+  T5's code (DND-595, PR #412): the 200 waits for the receipt, and a receipt
+  that fails is a 500.
+- **The receipt goes through the owner's one live approval app.** An owner with
+  no live app, or with two or more, gets no receipt, and the redeem answers 500
+  `receipt_not_sent`.
+- **The receipt claim is a lease** of 120 seconds on the redeemed row. One
+  caller at a time sends. While another caller's claim is live, the redeem
+  answers 500 `receipt_in_progress`. A claim whose sender died lapses after
+  120 seconds, and the next redeem takes it over.
+- **A receipt Slack does not accept** is logged with a `Fix:`, its claim is
+  released, and the redeem answers 500 `receipt_not_sent`. The grant stays
+  `redeemed`. Repeating the identical redeem inside the redeem window sends the
+  receipt again, and answers 200 once Slack accepts it.
+- **Only a redeem sends a receipt.** Every retry passes the checks above
+  first, `redeem_expired` included. So a receipt still unsent when the redeem
+  window closes is never sent: the retry answers `redeem_expired`, and no other
+  code sends it.
+- **The receipt is keyed on the row's `receipt_sent_at`.** A redeemed row that
+  already records a sent receipt answers 200 and sends no DM. That is the
+  idempotent retry. It also means a row written with that column already set,
+  such as one inserted by production shell access (*Residuals*), is redeemed
+  with no receipt.
+- **A duplicate receipt is possible.** If a sender's lease lapses while Slack
+  is accepting its DM, and another redeem takes the claim over first, the owner
+  gets two receipts. The first sender then answers 500 `receipt_not_sent`.
 - **A retry is idempotent.** The same machine presenting the identical binding
-  inside the window gets 200 with the original record, and no second receipt. A
-  merge that failed after a redeem can retry; any other binding cannot.
+  inside the window gets 200 with the original record, and no second receipt
+  once one was sent. A merge that failed after a redeem can retry; any other
+  binding cannot.
 
 #### The consumers
 
@@ -3453,11 +3552,23 @@ A grant has **exactly two consumers**. No other code redeems one.
      and `HEAD_SHA`. It never takes the binding from the session. A repo
      identity it cannot resolve is **GRANT UNVERIFIABLE**, and nothing is sent:
      a wrongly computed key is an error, not an empty match.
-   - A server refusal is exit 4, **GRANT REFUSED** with the reason code.
-   - No token config, a transport or TLS failure, a 5xx, a malformed answer, or
-     a 200 whose class, target or digest differs from what the gate sent is
-     exit 4, **GRANT UNVERIFIABLE** with the cause. It never reads as REFUSED,
-     and never as OK.
+   - A server refusal is exit 4, **GRANT REFUSED** with the reason code. A
+     refusal is only a status and code pair *Redeem* → *The wire* lists.
+   - No token config, a transport or TLS failure, a 5xx (including
+     `receipt_not_sent` and `receipt_in_progress`), any other status or code
+     *Redeem* does not list as a refusal, a malformed answer, or a 200 whose
+     `action_class` or `digest` differs from what the gate sent is exit 4,
+     **GRANT UNVERIFIABLE** with the cause. The expected digest is the digest
+     of the binding the gate sent, computed as *Action classes* pins it. It
+     never reads as REFUSED, and never as OK. After `receipt_not_sent` or
+     `receipt_in_progress`, re-running the gate inside the redeem window sends
+     the identical redeem, which can then answer 200. A 200 is never retried.
+     **Later (2026-09-26, DND-814):** this bullet compared the 200's class,
+     target and digest with what the gate sent. Superseded by T5's code
+     (DND-595): the record's `target` is the canonical binding, with the repo
+     lowercased, so a byte comparison with the gate's raw binding
+     (`CJPoll/gen_saas`) would read a valid grant as UNVERIFIABLE. The gate
+     compares the class and the digest instead.
    - A 200 whose record matches is `INTEGRATION OK <head> … OWNER-APPROVED
      (grant <id>, clicked by <user>, base <tip sha>)`: it names the grant, who
      clicked, and the base SHA eligibility was evaluated over.
