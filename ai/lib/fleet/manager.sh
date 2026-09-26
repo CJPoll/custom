@@ -148,9 +148,31 @@ fleet_announce_failures() {
   fleet_write_surfaced_marker "${latest%%$'\t'*}"
 }
 
+# fleet_started_due <session_id>
+# Status 0 = this session has no recorded session_started, so a self-heal send
+# is due (DND-497). Status 1 = it has one; its stamp's mtime is refreshed, so
+# an active session's stamp is never pruned as stale.
+fleet_started_due() {
+  fleet_started_recorded "$1" || return 0
+  fleet_refresh_started "$1"
+  return 1
+}
+
+# fleet_record_started <session_id>
+# Called after a successful session_started send. A stamp that cannot be
+# written is LOGGED: the session would re-send session_started on every due
+# PostToolUse (a harmless idempotent refresh), and that must not go unseen.
+fleet_record_started() {
+  fleet_mark_started "$1" 2>/dev/null && return 0
+  fleet_record_failure "$1" session_started "fleet-report hook: session_started was sent but its stamp in $(fleet_started_dir 2>/dev/null || printf '(unresolvable)') could not be written, so it will be re-sent on each due PostToolUse. Fix: make that directory writable, or set XDG_STATE_HOME to an absolute, writable path." 2>/dev/null
+  return 2
+}
+
 # fleet_prune_stamps -- opportunistic housekeeping: a stamp silent for a day
-# belongs to a dead session.
+# belongs to a dead session. That holds for the started-stamps too, because an
+# active session refreshes its own (fleet_started_due).
 fleet_prune_stamps() {
   fleet_delete_stale_stamps 1440
+  fleet_delete_stale_started 1440
   return 0
 }

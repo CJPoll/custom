@@ -165,6 +165,93 @@ done
 eq "no temp file or dir survives the killed report (traps ran)" "$(find "${TMP}/tmpd" -mindepth 1 | head -n 3)" ""
 fleet_respond '{"status":202,"body":{"ok":true}}'
 
+echo "== hook: PostToolUse self-heals a missing session_started (DND-497)"
+# A session that predates the hook install: SessionStart never fired for it,
+# so it has no "started" stamp. The FIRST PostToolUse from such a session
+# must self-heal by sending session_started (project + repo_key resolved
+# from the event's cwd, same as session-start) before/alongside session_seen.
+HEAL_SID="99999999-8888-4777-8666-555555555555"
+: > "${PIDS}"; before="$(fleet_log_count)"
+post_cwd() { jq -n -c --arg s "${1}" --arg cwd "${2}" \
+  '{hook_event_name: "PostToolUse", session_id: $s, cwd: $cwd, tool_name: "Bash"}'; }
+hook "$(post_cwd "${HEAL_SID}" "${TMP}/repo")"
+settle 2; fleet_wait_count "$((before + 2))"
+# The two detached sends race independently (both `setsid -f`), so their
+# arrival order at the server is not guaranteed -- compare as a set.
+kinds="$(tail -n 2 "${TMP}/server.log" | jq -r '.body.kind' | sort)"
+eq "[ticket] a session with no started-stamp: first PostToolUse sends session_started and session_seen" \
+  "${kinds}" "$(printf 'session_seen\nsession_started')"
+started_req="$(tail -n 2 "${TMP}/server.log" | jq -c 'select(.body.kind == "session_started") | .body | [.claude_session_id, .project]' | head -n 1)"
+eq "the self-healed session_started carries project+repo_key resolved from the event cwd (DND-183 rule)" \
+  "${started_req}" "[\"${HEAL_SID}\",\"demo\"]"
+
+touch -d "@$(( $(date +%s) - 61 ))" "${SEEN}/${HEAL_SID}.main.stamp"
+: > "${PIDS}"; before="$(fleet_log_count)"
+hook "$(post_cwd "${HEAL_SID}" "${TMP}/repo")"
+settle 1; fleet_wait_count "$((before + 1))"
+eq "a second PostToolUse for the same session sends only session_seen (stamp written)" \
+  "$(fleet_last_request | jq -c '.body.kind')" '"session_seen"'
+eq "no repeat session_started was logged for this session" \
+  "$(jq -s -c --arg s "${HEAL_SID}" '[.[] | select(.body.claude_session_id == $s and .body.kind == "session_started")] | length' "${TMP}/server.log")" "1"
+
+touch -d "@$(( $(date +%s) - 61 ))" "${SEEN}/${SID}.main.stamp"
+: > "${PIDS}"; before="$(fleet_log_count)"
+hook "$(jq -n -c --arg s "${SID}" --arg cwd "${TMP}/repo" '{hook_event_name: "PostToolUse", session_id: $s, cwd: $cwd, tool_name: "Bash"}')"
+settle 1; fleet_wait_count "$((before + 1))"
+eq "a normally-started session (SessionStart already marked it) sends no self-heal session_started" \
+  "$(fleet_last_request | jq -c '.body.kind')" '"session_seen"'
+
+echo "== hook: a failed self-heal session_started leaves no stamp and retries (DND-497)"
+RETRY_SID="77777777-6666-4555-8444-333333333333"
+fleet_point_at "http://127.0.0.1:$(fleet_closed_port)/mcp"
+: > "${PIDS}"
+before_log="$(logn)"
+hook "$(post_cwd "${RETRY_SID}" "${TMP}/repo")"
+settle 2
+eq "the unreachable self-heal attempt (and the session_seen alongside it) are both logged as failures" "$(logn)" "$((before_log + 2))"
+case "$(cat "${LOG}")" in *"${RETRY_SID}"*"session_started"*"could not reach"*"Fix: "*) ok "one failure line names session_started" ;; *) bad "one failure line names session_started" "$(cat "${LOG}")" ;; esac
+eq "no started-stamp was written for the failed session_started (would silence the retry)" \
+  "$([ -e "${XDG_STATE_HOME}/athena/fleet/started/${RETRY_SID}.marked" ] && echo present || echo absent)" "absent"
+fleet_point_at "http://127.0.0.1:${SERVER_PORT}/mcp"
+# advance past the fleet_claim_seen throttle so the next PostToolUse is due
+touch -d "@$(( $(date +%s) - 61 ))" "${SEEN}/${RETRY_SID}.main.stamp"
+: > "${PIDS}"; before="$(fleet_log_count)"
+hook "$(post_cwd "${RETRY_SID}" "${TMP}/repo")"
+settle 2; fleet_wait_count "$((before + 2))"
+kinds="$(tail -n 2 "${TMP}/server.log" | jq -r '.body.kind' | sort)"
+eq "[ticket] a failed session_started send is retried on the next due PostToolUse" \
+  "${kinds}" "$(printf 'session_seen\nsession_started')"
+eq "and this time it is marked started" "$([ -e "${XDG_STATE_HOME}/athena/fleet/started/${RETRY_SID}.marked" ] && echo present || echo absent)" "present"
+
+echo "== hook: started-stamps are pruned like the seen-stamps, but not while the session is active (DND-497)"
+STARTED="${XDG_STATE_HOME}/athena/fleet/started"
+DEAD_SID="66666666-5555-4444-8333-222222222222"
+: > "${STARTED}/${DEAD_SID}.marked"
+touch -d "@$(( $(date +%s) - 86400 - 120 ))" "${STARTED}/${DEAD_SID}.marked"
+# RETRY_SID stays active: its stamp is old, but a due PostToolUse refreshes it.
+touch -d "@$(( $(date +%s) - 86400 - 120 ))" "${STARTED}/${RETRY_SID}.marked"
+touch -d "@$(( $(date +%s) - 61 ))" "${SEEN}/${RETRY_SID}.main.stamp"
+: > "${PIDS}"; before="$(fleet_log_count)"
+hook "$(post_cwd "${RETRY_SID}" "${TMP}/repo")"
+settle 1; fleet_wait_count "$((before + 1))"
+eq "a started-stamp silent for a day (dead session) is pruned" \
+  "$([ -e "${STARTED}/${DEAD_SID}.marked" ] && echo present || echo absent)" "absent"
+eq "an active session's started-stamp is refreshed by its due PostToolUse, not pruned" \
+  "$([ -e "${STARTED}/${RETRY_SID}.marked" ] && echo present || echo absent)" "present"
+eq "and that PostToolUse re-sent no session_started" \
+  "$(fleet_last_request | jq -c '.body.kind')" '"session_seen"'
+
+echo "== hook: a started-stamp that cannot be written is logged, not silent (DND-497)"
+RO_SID="55555555-4444-4333-8222-111111111111"
+chmod 500 "${STARTED}"
+: > "${PIDS}"; before="$(fleet_log_count)"; before_log="$(logn)"
+hook "$(jq -n -c --arg s "${RO_SID}" --arg c "${TMP}/repo" '{hook_event_name: "SessionStart", session_id: $s, cwd: $c}')"
+settle 1; fleet_wait_count "$((before + 1))"
+chmod 700 "${STARTED}"
+eq "the session_started itself was sent" "$(fleet_last_request | jq -c '[.body.kind, .body.claude_session_id]')" "[\"session_started\",\"${RO_SID}\"]"
+eq "one failure line was logged" "$(logn)" "$((before_log + 1))"
+case "$(tail -n 1 "${LOG}")" in *"${RO_SID}"*"session_started"*"could not be written"*"Fix: "*) ok "it names the session, the stamp and a Fix:" ;; *) bad "it names the session, the stamp and a Fix:" "$(tail -n 1 "${LOG}")" ;; esac
+
 echo "== hook: the token"
 leaks="$(jq -s -c '[.[] | (.argv_leak + .environ_leak)[]]' "${TMP}/server.log")"
 eq "no hook-sent request ever had the token in any process's argv or environ" "${leaks}" "[]"

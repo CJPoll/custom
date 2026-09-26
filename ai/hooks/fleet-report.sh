@@ -11,7 +11,16 @@
 #   PostToolUse  -> admiral_seen when stdin's agent_type is athena-admiral,
 #                   session_seen otherwise; at most once per 60 s per
 #                   (session_id, agent_id), under an flock'd stamp in
-#                   $XDG_STATE_HOME/athena/fleet/seen/
+#                   $XDG_STATE_HOME/athena/fleet/seen/. Self-heal (DND-497):
+#                   on the first such call for a session with no recorded
+#                   session_started (a session that predates this hook's
+#                   install, or whose SessionStart send never succeeded),
+#                   also sends session_started first, from the same event's
+#                   cwd. Recorded in $XDG_STATE_HOME/athena/fleet/started/
+#                   only once the send succeeds, so a failed attempt retries
+#                   on the next due PostToolUse rather than being silenced.
+#                   A due PostToolUse refreshes the stamp's mtime; a stamp
+#                   silent for a day is pruned with the seen-stamps.
 #
 # NEVER ADDS LATENCY, NEVER BLOCKS. The network call runs detached (setsid -f,
 # re-entering this script as `--detached`) under `timeout`, with stdin and
@@ -62,7 +71,15 @@ run_detached() {
   [ -n "${FLEET_HOOK_PIDFILE:-}" ] && printf '%s\n' "$$" >> "${FLEET_HOOK_PIDFILE}"
   timeout "${limit}" "$@" </dev/null >/dev/null 2>"${tmp}"
   rc=$?
-  [ "${rc}" -eq 0 ] && return 0
+  if [ "${rc}" -eq 0 ]; then
+    # A successful session_started -- whether from the normal SessionStart
+    # detach or a PostToolUse self-heal (DND-497) -- marks the session so
+    # neither path resends it. A stamp that cannot be written is logged; the
+    # worst case is a resend, never a lost report. What a resend does server-
+    # side: the contract, "Who sends what" -> the self-heal bullet.
+    [ "${kind}" = "session_started" ] && fleet_record_started "${sid}"
+    return 0
+  fi
   if [ "${rc}" -eq 124 ]; then
     msg="fleet-report: ${kind} did not finish within ${limit}s and was killed. Fix: check the network and the server; the next report retries on its own."
   else
@@ -146,6 +163,13 @@ case "${event}" in
     fi ;;
   PostToolUse)
     fleet_claim_seen "${sid}" "${agent_id}" || exit 0
+    # Self-heal (DND-497): a session that predates this hook's install (or
+    # whose SessionStart send never succeeded) has no started-stamp, so
+    # `project` stays NULL server-side forever. Gated by the seen-claim
+    # above, so a missing/failed send is retried at most once per 60 s per
+    # (session, agent) -- "the existing throttle" -- never on every tool call.
+    fleet_started_due "${sid}" && \
+      detach session_started session-start --session-id "${sid}" --cwd "${cwd:-${PWD}}"
     kind="$(fleet_seen_kind "${agent_type}" "${agent_id}")"
     if [ "${kind}" = "admiral_seen" ]; then
       detach admiral_seen admiral-seen --session-id "${sid}" --agent-id "${agent_id}" --agent-type "${agent_type}"
