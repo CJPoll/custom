@@ -1119,6 +1119,16 @@ PR_TYPES_ALLOWED = %w[
   demilestoned enqueued dequeued
 ].freeze
 REGULAR_BLOB_MODES = %w[100644 100755].freeze
+# The deploy-automation pattern a grant may cover. A hit that ALSO matches any
+# other deploy-automation pattern (`**/action.yml` ...) is something more than a
+# workflow: `.github/workflows/action.yml` is a composite action that a push
+# workflow, or another repo, loads as `owner/repo/.github/workflows@main`.
+GRANT_WORKFLOW_PATTERN = ".github/workflows/**"
+ACTION_METADATA = /\Aaction\.ya?ml\z/.freeze
+# Code points Psych (YAML 1.1) reads as line breaks and YAML 1.2 does not: NEL,
+# LINE SEPARATOR, PARAGRAPH SEPARATOR. Two parsers would split such a file into
+# different keys.
+YAML11_ONLY_BREAKS = /[\u0085\u2028\u2029]/.freeze
 
 # verdict: :pr_only (proven exactly {pull_request}), :other (a trigger that is
 # not pull_request, determined) or :undetermined (not modelled; fails closed).
@@ -1163,6 +1173,12 @@ end
 # The trigger read for one workflow blob's TEXT.
 def grant_trigger_read(text)
   return undetermined_read("binary or over #{REF_SCAN_LIMIT} bytes") if text.bytesize > REF_SCAN_LIMIT || text.include?("\0")
+
+  utf8 = text.dup.force_encoding(Encoding::UTF_8)
+  return undetermined_read("not valid UTF-8") unless utf8.valid_encoding?
+  if utf8.match?(YAML11_ONLY_BREAKS)
+    return undetermined_read("a NEL, U+2028 or U+2029 character, which YAML 1.1 reads as a line break and YAML 1.2 does not")
+  end
 
   begin
     docs = Psych.parse_stream(text).children
@@ -1307,6 +1323,10 @@ def names_file?(text, target)
   corpora.any? { |c| c.downcase.include?(needle) }
 end
 
+def mentions_workflow_run?(text)
+  text.downcase.include?("workflow_run")
+end
+
 def side_read(repo, rev, path, side, reads)
   entry = blob_at(repo, rev, path)
   return [nil, "#{side}: absent (#{side == 'base' ? 'added' : 'deleted'})"] if entry.nil?
@@ -1329,6 +1349,15 @@ def grant_eligible(repo, base, head, surfaces)
           "pass the SHA pair integration-gate printed. An unresolvable ref is an ERROR, never ELIGIBLE.")
     end
     out.strip
+  end
+
+  # The argument assumes merging makes the tree the head's tree, which holds only
+  # when base is an ancestor of head (integration-gate checks the same).
+  _, _, anc = git(repo, "merge-base", "--is-ancestor", base_sha, head_sha)
+  unless anc
+    die("--base #{short(base_sha)} is not an ancestor of --head #{short(head_sha)}.",
+        "pass the SHA pair integration-gate printed (the base it merged onto, then the head). " \
+        "Eligibility over any other pair says nothing about what merging does.")
   end
 
   # --no-renames: a rename is its delete PLUS its add. Rename detection lists only
@@ -1357,6 +1386,7 @@ def grant_eligible(repo, base, head, surfaces)
   reads_by_file = {}
   reasons << ["(diff)", "no declared surface is touched, so there is nothing for a grant to approve"] if hits.empty?
 
+  deploy_patterns = surfaces.select { |s| s["class"] == "deploy-automation" }.flat_map { |s| s["patterns"] || [] }
   workflow_hits = []
   hits.each do |h|
     if h[:class] != "deploy-automation"
@@ -1365,11 +1395,26 @@ def grant_eligible(repo, base, head, surfaces)
       reasons << [h[:path], "[deploy-automation] executed by #{h[:via]} -- not a top-level workflow file"]
     elsif !h[:path].match?(GRANT_WORKFLOW_FILE)
       reasons << [h[:path], "[deploy-automation] not a top-level workflow file (.github/workflows/<name>.yml)"]
+    elsif (also = deploy_patterns.reject { |p| p == GRANT_WORKFLOW_PATTERN }.select { |p| match?(p, h[:path]) }).any?
+      reasons << [h[:path], "[deploy-automation] also matches #{also.join(', ')} -- a local action, not only a workflow"]
     else
       workflow_hits << h[:path]
     end
   end
   workflow_hits.uniq!
+
+  # `.github/workflows/action.yml` at either side makes the whole directory a
+  # composite action, loadable from the default branch by a push workflow or by
+  # another repo (`owner/repo/.github/workflows@main`), which no scan here sees.
+  unless workflow_hits.empty?
+    [["base", base_sha], ["head", head_sha]].each do |side, rev|
+      top_level_workflows(repo, rev).select { |w| File.basename(w).match?(/\Aaction\.ya?ml\z/i) }.each do |a|
+        workflow_hits.each do |f|
+          reasons << [f, "#{a} at #{side} makes .github/workflows/ an action that default-branch runs can load"]
+        end
+      end
+    end
+  end
 
   # Rule 2 (and rule 4 for the hit files): the trigger ALLOW-list at base AND head.
   proven = { "base" => Set.new, "head" => Set.new }
@@ -1412,6 +1457,13 @@ def grant_eligible(repo, base, head, surfaces)
         next if f == w
 
         reasons << [f, "referenced by #{w} at #{side}, whose triggers are not exactly {pull_request}"] if names_file?(text, f)
+        # workflow_run selects the workflows it follows by `name:`, not by path,
+        # and runs with default-branch privileges on what they produced. The
+        # name is not the file, so any workflow_run consumer counts.
+        if mentions_workflow_run?(text)
+          reasons << [f, "#{w} at #{side} mentions workflow_run, which follows workflows by name -- " \
+                         "it may consume this one"]
+        end
       end
     end
   end
@@ -2502,7 +2554,8 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
     n += 1
     d = File.join(tmp, "grant#{n}")
     b, h = mkrepo.call(d, seed: seed) { |r| change.call(r) }
-    run_br.call(args || ["--grant-eligible", "merge.pr_only_workflow", "--base", b, "--head", h, "--repo", d])
+    b, h = h, b if args == :swap
+    run_br.call(args.is_a?(Array) ? args : ["--grant-eligible", "merge.pr_only_workflow", "--base", b, "--head", h, "--repo", d])
   end
   # A pull_request-only ci.yml at base, and the head edits it: the eligible core
   # every NOT ELIGIBLE case adds exactly one thing to.
@@ -2717,6 +2770,36 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
                       put.call(r, "other.yml", "name: o\non: push\njobs:\n  c:\n    uses: ./.github/workflows/ci.yml\n")
                       File.symlink("../../other.yml", File.join(r, ".github/workflows/linked.yml"))
                     })
+  # Review round 1 (DND-596), each reproduced as an exit-0 bypass or gap first.
+  # `.github/workflows/action.yml` is also a composite action a push workflow
+  # loads from main as `owner/repo/.github/workflows@main`: no name to match.
+  action_caller = "name: d\non:\n  push:\n    branches: [main]\njobs:\n  d:\n    runs-on: x\n" \
+                  "    steps:\n      - uses: cjpoll/x/.github/workflows@main\n"
+  composite = "on: pull_request\nruns:\n  using: composite\n  steps:\n    - run: echo %s\n      shell: bash\n"
+  not_eligible.call("a top-level `.github/workflows/action.yml` (a composite action loaded from @main)",
+                    [".github/workflows/action.yml", "a local action"],
+                    seed: ->(r) { wf.call(r, "deploy.yml", action_caller); wf.call(r, "action.yml", format(composite, "a")) },
+                    change: ->(r) { wf.call(r, "action.yml", format(composite, "b")) })
+  not_eligible.call("any workflow edit while `.github/workflows/action.yml` exists (the directory is an action)",
+                    [".github/workflows/ci.yml", "action.yml at base"],
+                    seed: ->(r) { pr_seed.call(r); wf.call(r, "deploy.yml", action_caller); wf.call(r, "action.yml", format(composite, "a")) })
+  # workflow_run follows workflows by NAME and runs with default-branch
+  # privileges on their artifacts; a file-name match cannot see it.
+  not_eligible.call("a workflow_run consumer in the repo (it follows workflows by name, not path)",
+                    [".github/workflows/ci.yml", "workflow_run"],
+                    seed: lambda { |r|
+                      pr_seed.call(r)
+                      wf.call(r, "deploy.yml", "name: d\non:\n  workflow_run:\n    workflows: [ci]\n    types: [completed]\n" \
+                                               "jobs:\n  d:\n    runs-on: x\n    steps: [{run: sh out/deploy.sh}]\n")
+                    })
+  not_eligible.call("a hit file with a NEL/U+2028 line break (YAML 1.1 and 1.2 split it differently)",
+                    [".github/workflows/ci.yml", "U+2028"],
+                    change: ->(r) { wf.call(r, "ci.yml", on_wf.call("on: pull_request\u2028x: 1\n")) })
+  not_eligible.call("a hit file that is not valid UTF-8", [".github/workflows/ci.yml", "UTF-8"],
+                    change: ->(r) { wf.call(r, "ci.yml", on_wf.call("on: pull_request\n# \xFF\n")) })
+  out, err, code = grant.call(seed: pr_seed, change: pr_change, args: :swap)
+  check.call("grant usage: a --base that is not an ancestor of --head is exit 2 with a Fix:",
+             code == 2 && err.include?("not an ancestor") && err.include?("Fix:"), "exit=#{code} out=#{out} err=#{err}")
   # A push workflow's SCRIPT that names the hit file: the DND-589 walk sees it.
   not_eligible.call("a script a push workflow runs names the hit file (the ci-references walk)",
                     ["executed by", "scripts/ship.sh"],

@@ -3134,11 +3134,18 @@ reads each edge as NOT ELIGIBLE:
 - **Changed files are listed with renames split** into a delete and an add, so a
   renamed workflow's old side is read at BASE. Rename detection lists only the
   new path.
+- **`--base` must be an ancestor of `--head`** (exit 2 otherwise), so the head's
+  tree is the tree merging produces.
 - **Rule 1 matches every surface on its own.** A file two classes claim is named
   under both. A hit passes only as a top-level workflow file,
-  `.github/workflows/<name>.yml` or `.yaml`. A file deeper under
-  `.github/workflows/`, and a file named by a merge-time CI config
-  (`ci-local-references-v1`), is NOT ELIGIBLE.
+  `.github/workflows/<name>.yml` or `.yaml`, that matches no other
+  deploy-automation pattern. A file deeper under `.github/workflows/`, a file
+  named by a merge-time CI config (`ci-local-references-v1`), and
+  `.github/workflows/action.yml` are NOT ELIGIBLE. While an `action.yml` or
+  `action.yaml` sits in `.github/workflows/` at BASE or HEAD, every hit is NOT
+  ELIGIBLE: the directory is then a composite action that a default-branch run
+  can load as `<owner>/<repo>/.github/workflows@main`, a reference no name
+  match can see.
 - **Rule 2 admits only these `pull_request` filters:** `types`, `branches`,
   `branches-ignore`, `paths` and `paths-ignore`, each a string or a list of
   strings. Filters only narrow when the workflow runs. `types: closed` is NOT
@@ -3146,12 +3153,15 @@ reads each edge as NOT ELIGIBLE:
   activity type the check does not list is UNDETERMINED.
 - **Rule 4 also covers YAML that two parsers can read differently.** A
   duplicate key, a merge key `<<`, an explicit tag, a non-scalar key, more than
-  one document, a trigger key other than a single `on`, and a blob that is not a
-  regular file are each UNDETERMINED.
+  one document, a trigger key other than a single `on`, a NEL, U+2028 or U+2029
+  character (a line break in YAML 1.1 only), text that is not UTF-8, and a blob
+  that is not a regular file are each UNDETERMINED.
 - **Rule 3 matches the hit file's name** in the raw text and in the parsed
   strings of every other workflow at BASE and HEAD, ignoring case. It also
   counts a hit file that the `ci-local-references-v1` walk reaches from a
-  merge-time CI config.
+  merge-time CI config. A workflow that mentions `workflow_run` counts as
+  naming every hit: it follows workflows by `name:`, not by path, and runs with
+  default-branch privileges on what they produced.
 
 Exit 0 is the only eligible answer. A caller reads every other exit as not
 eligible.
