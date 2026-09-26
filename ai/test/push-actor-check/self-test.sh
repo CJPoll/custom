@@ -275,6 +275,34 @@ expect "R5. --repo overrides cwd and resolves correctly -> 0" 0 'athena-harness[
 run_at "${TMP}/elsewhere" --sha "${SHA}" --window 5 --interval 1 feat
 expect "R6. no --repo from an unrelated (non-git) cwd -> 2 (not a git repo)" 2 'Fix:'
 
+# ---- Default --sha resolves refs/heads/<branch>, not --repo's HEAD (DND-514) --
+# The bug this pins: refs are shared across worktrees of one repo, but HEAD is
+# not. A branch pushed from a worktree, checked with --repo <main checkout> and
+# no --sha, must resolve refs/heads/<branch> (shared), never the main
+# checkout's own HEAD (whatever it happens to have checked out).
+git -C "${TMP}/repo_gh" config user.email t@t.example
+git -C "${TMP}/repo_gh" config user.name test
+git -C "${TMP}/repo_gh" commit -q --allow-empty -m "main tip"
+MAIN_SHA=$(git -C "${TMP}/repo_gh" rev-parse HEAD)
+git -C "${TMP}/repo_gh" checkout -q -b feat2
+git -C "${TMP}/repo_gh" commit -q --allow-empty -m "feat2 tip"
+FEAT2_SHA=$(git -C "${TMP}/repo_gh" rev-parse HEAD)
+git -C "${TMP}/repo_gh" checkout -q -   # back to the main branch: HEAD != feat2
+[ "$(git -C "${TMP}/repo_gh" rev-parse HEAD)" = "${MAIN_SHA}" ] || { echo "D-setup: HEAD did not return to main tip"; exit 1; }
+
+reset_stub gh; gh_event feat2 "${FEAT2_SHA}" 'athena-harness[bot]' > "${TMP}/gh/responses/default"
+set_git_mode "hit:${FEAT2_SHA}"   # feat2's remote head is FEAT2_SHA, NOT the repo's HEAD (MAIN_SHA)
+run_in repo_gh --window 5 --interval 1 feat2
+expect "D1. no --sha resolves refs/heads/<branch>'s local sha, not --repo's HEAD" 0 'athena-harness[bot]'
+
+reset_stub gh
+run_in repo_gh --window 5 --interval 1 no-such-local-branch
+expect "D2. no --sha and <branch> is not a local ref -> 2, fails loudly (never silently falls back to HEAD)" 2 "refs/heads/no-such-local-branch"
+expect "D2a. carries Fix:" 2 'Fix:'
+[ "$(reads gh)" = 0 ] && ok "D2b. never reads the events API" || bad "D2b. events API touched" "reads=$(reads gh)"
+
+set_git_mode "hit:${SHA}"   # restore the default for the tests below
+
 # Usage errors.
 run_in repo_other --sha "${SHA}" feat
 expect "10. a remote on neither forge -> 2" 2 'Fix:'
