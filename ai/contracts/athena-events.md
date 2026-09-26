@@ -3129,12 +3129,37 @@ canonicalisation MUST be applied on both sides of every comparison: the digest
 the server stored at request time, the digest in the token, and the digest of a
 binding presented at redeem.
 
-**The allowlist is a blast-radius surface.** The module that declares it
-(gen_saas `apps/athena/lib/athena/owner_approvals/action_class.ex`, and its
-test) is the `owner-approval-policy` surface in `ai/blast-radius/surfaces.json`
-(T6). A change that widens it is HOT wherever deploy-on-merge automation is
-confirmed, and **no class is eligible to cover that surface**. A button can
-never approve a widening of what buttons can approve.
+**All grant code is a blast-radius surface.** The `owner-approval-policy`
+surface in `ai/blast-radius/surfaces.json` is every gen_saas file that decides
+what a grant is or does:
+
+1. the manager `apps/athena/lib/athena/owner_approvals.ex` and everything under
+   `owner_approvals/` (the allowlist `ActionClass`, `Grant`, `ApprovalRender`,
+   the grant record and store, the token builder, and the adapters);
+2. their tests: `owner_approvals_test.exs`, `owner_approvals_integration_test.exs`,
+   and everything under `test/athena/owner_approvals/`;
+3. every path under an `apps/` tree whose basename, or any directory name,
+   contains `owner_approval`: the MCP tools `owner_approval_{request,status}.ex`,
+   `owner_approval_controller.ex`, the grant migrations, the click adapters
+   named `owner_approvals_adapter.ex`, and their tests;
+4. `apps/athena/lib/athena/slack/return_address.ex` and its test. The version-3
+   verifier is what keeps a Decline token from approving.
+
+A change to any of it is HOT wherever deploy-on-merge automation is confirmed,
+and **no class is eligible to cover that surface**. A button can never approve
+a change to what buttons can approve, or to how a grant is requested, decided,
+stored, verified or redeemed. What is deliberately outside the surface is named
+in *Residuals*.
+
+**Later (2026-09-26):** this paragraph read "**The allowlist is a blast-radius
+surface.**" and named only the module that declares the allowlist
+(`apps/athena/lib/athena/owner_approvals/action_class.ex`) and its test.
+Superseded by epic decision D28 (DND-790): the surface is all grant code, the
+four groups above. The narrow surface left a bypass. Eligibility rule 1 judges
+only hits, so a non-surface file rides along with an eligible workflow: a head
+that adds a `pull_request`-only workflow and edits `owner_approvals/grant.ex`
+answered `GRANT-ELIGIBLE` rc 0 (measured 2026-09-26). A button would then have
+approved a weakening of redeem, without touching `action_class.ex`.
 
 #### Eligibility for `merge.pr_only_workflow`
 
@@ -3523,7 +3548,9 @@ structural:
 - The gate reads the **actual diff**: any `infrastructure-as-code`,
   `destructive-migration` or `owner-approval-policy` hit, and any workflow that
   is not `pull_request`-only, is NOT ELIGIBLE.
-- The allowlist itself is a surface no class covers (*Action classes*).
+- All grant code, the allowlist included, is a surface no class covers
+  (*Action classes*), so grant code riding along with an eligible workflow is
+  NOT ELIGIBLE too.
 
 #### Residuals
 
@@ -3537,7 +3564,30 @@ Stated, not hidden:
   gen_saas has no branch protection.
 - **The `owner-approval-policy` surface lives in custom.** custom has no merge
   automation, so a custom edit that removes the surface reads WARM. custom's
-  `main` lands only by the coordinator's fast-forward.
+  `main` lands only by the coordinator's fast-forward. The same holds for
+  custom's `integration-gate`, `owner-grant` and `blast-radius` themselves: no
+  surface covers them, and none needs to for a grant's sake, because the
+  class's ratified repo list is `cjpoll/gen_saas` only. No grant can approve a
+  custom change.
+- **Some code a grant relies on is outside the surface (D28).** A change that
+  weakens it is ordinary COLD app code, like every auth path in gen_saas today,
+  so it can ride along with an eligible workflow:
+  - `apps/athena/lib/athena/slack.ex`, which holds the
+    `approval_message_immutable` check;
+  - the upstream click path: `slack_interactions.ex`, the envelope, and Slack
+    signature verification;
+  - the wiring that reaches grant code: the router lines for the redeem and
+    status routes, the machine-token authentication pipeline, and the MCP tool
+    registry.
+
+  Surfacing them would owner-hold every Slack, routing and authentication
+  change. T4 narrows the click side: `decide_by_click/3` re-checks, inside the
+  surface, that the clicking user is the app's owner. The approval message's
+  diff link shows the owner every file in the head, surfaced or not.
+- **The surface is matched by path.** A grant file named outside the naming
+  rule (an `apps/` path with no `owner_approval` in its basename or a directory
+  name, and not under `owner_approvals/`) reads COLD. New grant code follows
+  the rule so that it is surfaced with no manifest edit.
 - **The owner's Slack account is the trust root.** A compromised Slack session
   could approve an allowlisted class. The allowlist being low-risk is the
   mitigation.

@@ -174,10 +174,29 @@
     },
     {
       "class": "owner-approval-policy",
-      "why": "merging changes which actions an owner's Slack click may approve (the owner approval grant allowlist); a button can never approve a widening of what buttons can approve, so no grant class covers this surface",
+      "why": "merging changes owner approval grant code: which actions an owner's Slack click may approve, or how a grant is requested, decided, stored, verified or redeemed; a button can never approve a change to what buttons can approve, so no grant class covers this surface",
+      "comment": [
+        "DND-790 (epic D28): the surface is ALL grant code, not the allowlist module alone.",
+        "Before it, grant.ex beside a pull_request-only workflow answered GRANT-ELIGIBLE rc 0:",
+        "a non-surface file rides along under eligibility rule 1.",
+        "1-2: the manager, its directory and their tests (lib and test trees alike);",
+        "3: any path under an apps/ tree whose basename, or any directory name, contains",
+        "owner_approval (MCP tools, controller, migrations, click adapters, and later renames);",
+        "4: the version-3 return-address verifier, which keeps a Decline token from approving.",
+        "Deliberately NOT here (named residuals, ai/contracts/athena-events.md -> Residuals):",
+        "slack.ex and the upstream click and signature path, and custom's own gate scripts."
+      ],
       "patterns": [
         "**/athena/owner_approvals/action_class.ex",
-        "**/athena/owner_approvals/action_class_test.exs"
+        "**/athena/owner_approvals/action_class_test.exs",
+        "**/athena/owner_approvals.ex",
+        "**/athena/owner_approvals/**",
+        "**/athena/owner_approvals_test.exs",
+        "**/athena/owner_approvals_integration_test.exs",
+        "**/apps/**/*owner_approval*",
+        "**/apps/**/*owner_approval*/**",
+        "**/athena/slack/return_address.ex",
+        "**/athena/slack/return_address_test.exs"
       ]
     }
   ]

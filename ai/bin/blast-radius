@@ -3093,6 +3093,20 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
   not_eligible.call("the allowlist module's TEST changes (Q-G8)",
                     ["apps/athena/test/athena/owner_approvals/action_class_test.exs", "[owner-approval-policy]"],
                     change: ->(r) { pr_change.call(r); put.call(r, "apps/athena/test/athena/owner_approvals/action_class_test.exs", "x\n") })
+  # Q-G22 (DND-790, epic D28): grant code riding along with an eligible
+  # workflow. Before D28 the surface was action_class.ex alone, so grant.ex was
+  # no hit at all, rule 1 never saw it, and both heads answered GRANT-ELIGIBLE
+  # rc 0 -- a button approving a change to what buttons approve.
+  not_eligible.call("grant code rides along with an ADDED pull_request-only workflow (Q-G22)",
+                    ["apps/athena/lib/athena/owner_approvals/grant.ex", "[owner-approval-policy]"],
+                    seed: nil,
+                    change: ->(r) { pr_change.call(r); put.call(r, "apps/athena/lib/athena/owner_approvals/grant.ex", "x\n") })
+  not_eligible.call("grant code rides along with an EDITED pull_request-only workflow (Q-G22)",
+                    ["apps/athena/lib/athena/owner_approvals/grant.ex", "[owner-approval-policy]"],
+                    change: ->(r) { pr_change.call(r); put.call(r, "apps/athena/lib/athena/owner_approvals/grant.ex", "x\n") })
+  not_eligible.call("the version-3 token verifier rides along with a pull_request-only workflow (Q-G22)",
+                    ["apps/athena/lib/athena/slack/return_address.ex", "[owner-approval-policy]"],
+                    change: ->(r) { pr_change.call(r); put.call(r, "apps/athena/lib/athena/slack/return_address.ex", "x\n") })
   not_eligible.call("a deploy-automation hit OUTSIDE .github/workflows/ (a local action)",
                     [".github/actions/deploy/action.yml", "not a top-level workflow file"],
                     change: ->(r) { pr_change.call(r); put.call(r, ".github/actions/deploy/action.yml", "runs:\n  using: composite\n") })
@@ -3373,6 +3387,121 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
   check.call("HOT: the allowlist module is the owner-approval-policy surface (Q-G8)",
              code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?("[owner-approval-policy]"),
              "exit=#{code} out=#{out}")
+
+  # --- Q-G23 / Q-G24 (DND-790, epic D28): the surface is ALL grant code -----
+  #
+  # One case per real path. The list is the union of every grant path on the
+  # gen_saas DND-563 branches as read 2026-09-26: T3 dnd-593 2ec40a85, T4
+  # dnd-594 425df00f, T5 dnd-595 157cc2bb (main 979ea0be carries only
+  # return_address.ex). Each must read HOT [owner-approval-policy] in a repo
+  # whose merge automation is CONFIRMED. The migrations carry benign bodies so
+  # the destructive-migration content rule examines them and passes them on.
+  create_mig = "defmodule R.M do\n  use Ecto.Migration\n\n  def change do\n    " \
+               "create table(:owner_approval_grants) do\n      add :status, :string\n    end\n  end\nend\n"
+  alter_mig = "defmodule R.M do\n  use Ecto.Migration\n\n  def change do\n    " \
+              "alter table(:owner_approval_grants) do\n      add :receipt_claimed_at, :utc_datetime_usec\n    end\n  end\nend\n"
+  real = %w[
+    apps/athena/lib/athena/owner_approvals.ex
+    apps/athena/lib/athena/owner_approvals/action_class.ex
+    apps/athena/lib/athena/owner_approvals/approval_render.ex
+    apps/athena/lib/athena/owner_approvals/events_adapter.ex
+    apps/athena/lib/athena/owner_approvals/grant.ex
+    apps/athena/lib/athena/owner_approvals/grant_record.ex
+    apps/athena/lib/athena/owner_approvals/grant_store.ex
+    apps/athena/lib/athena/owner_approvals/grant_tokens.ex
+    apps/athena/lib/athena/owner_approvals/machines_adapter.ex
+    apps/athena/lib/athena/owner_approvals/priorities_adapter.ex
+    apps/athena/lib/athena/owner_approvals/redeem_request.ex
+    apps/athena/lib/athena/owner_approvals/refusal.ex
+    apps/athena/lib/athena/owner_approvals/request_args.ex
+    apps/athena/lib/athena/owner_approvals/slack_adapter.ex
+    apps/athena/lib/athena/owner_approvals/slack_apps_adapter.ex
+    apps/athena/lib/athena/mcp/tools/owner_approval_request.ex
+    apps/athena/lib/athena/mcp/tools/owner_approval_status.ex
+    apps/athena/lib/athena/ui/api/owner_approval_controller.ex
+    apps/athena/lib/athena/slack/owner_approvals_adapter.ex
+    apps/athena/lib/athena/slack_interactions/owner_approvals_adapter.ex
+    apps/athena/lib/athena/slack/return_address.ex
+    apps/athena/priv/repo/migrations/20260926141753_create_owner_approval_grants.exs
+    apps/athena/priv/repo/migrations/20260926160000_add_receipt_claimed_at_to_owner_approval_grants.exs
+    apps/athena/test/athena/owner_approvals_test.exs
+    apps/athena/test/athena/owner_approvals_integration_test.exs
+    apps/athena/test/athena/owner_approvals_click_test.exs
+    apps/athena/test/athena/owner_approvals_redeem_test.exs
+    apps/athena/test/athena/slack_owner_approval_receipt_test.exs
+    apps/athena/test/athena/owner_approvals/action_class_test.exs
+    apps/athena/test/athena/owner_approvals/approval_render_test.exs
+    apps/athena/test/athena/owner_approvals/grant_store_redeem_test.exs
+    apps/athena/test/athena/owner_approvals/grant_store_test.exs
+    apps/athena/test/athena/owner_approvals/grant_test.exs
+    apps/athena/test/athena/owner_approvals/grant_tokens_test.exs
+    apps/athena/test/athena/owner_approvals/priorities_adapter_test.exs
+    apps/athena/test/athena/owner_approvals/redeem_request_test.exs
+    apps/athena/test/athena/owner_approvals/refusal_test.exs
+    apps/athena/test/athena/owner_approvals/request_args_test.exs
+    apps/athena/test/athena/owner_approvals/slack_apps_adapter_test.exs
+    apps/athena/test/athena/ui/api/owner_approval_controller_test.exs
+    apps/athena/test/athena/slack/return_address_test.exs
+  ]
+  # Renames the D28 naming rule still covers (a basename or a directory name
+  # containing owner_approval, anywhere under an apps/ tree, at any depth,
+  # through a dot-directory), so a later ticket's new file is surfaced without
+  # a manifest edit.
+  renamed = %w[
+    apps/athena/lib/athena/mcp/tools/owner_approval_revoke.ex
+    apps/athena/lib/athena/owner_approvals/nested/deep/policy.ex
+    apps/athena/lib/athena/slack_interactions/owner_approvals/handler.ex
+    apps/athena/lib/athena/.generated/owner_approval_schema.ex
+    .pkg/apps/athena/lib/athena/owner_approval_bundle.ex
+  ]
+  d = File.join(tmp, "policy-all")
+  b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) do |r|
+    (real + renamed).each do |p|
+      body = if p.include?("/migrations/")
+               p.include?("receipt_claimed_at") ? alter_mig : create_mig
+             else
+               "x\n"
+             end
+      put.call(r, p, body)
+    end
+  end
+  out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+  check.call("HOT: a diff of every grant path is BLAST-RADIUS HOT exit 4 (Q-G23)",
+             code == 4 && out.include?("BLAST-RADIUS HOT"), "exit=#{code} out=#{out}")
+  (real + renamed).each do |p|
+    kind = real.include?(p) ? "real" : "renamed"
+    check.call("HOT [owner-approval-policy]: #{kind} grant path #{p} (Q-G23)",
+               out.match?(/^\s+#{Regexp.escape(p)}\s+\[owner-approval-policy\]/), "exit=#{code} out=#{out}")
+  end
+
+  # Q-G24: the named residuals and the upstream click path stay OUT of the
+  # surface. Surfacing them would owner-hold every Slack change (D28).
+  unrelated = %w[
+    apps/athena/lib/athena/slack_interactions/click.ex
+    apps/athena/lib/athena/slack.ex
+    apps/athena/lib/athena/slack_interactions.ex
+    apps/athena/lib/athena/slack_interactions/envelope.ex
+    apps/athena/lib/athena/slack/blocks.ex
+    apps/athena/test/athena/slack_interactions_test.exs
+  ]
+  d = File.join(tmp, "policy-none")
+  b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) do |r|
+    unrelated.each { |p| put.call(r, p, "x\n") }
+  end
+  out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+  check.call("COLD: paths outside the grant surface are no owner-approval-policy hit (Q-G24)",
+             code.zero? && !out.include?("[owner-approval-policy]"), "exit=#{code} out=#{out}")
+  # Per path, against the committed manifest's own patterns: a COLD run lists no
+  # paths at all, so the run above alone cannot say WHICH path stayed out.
+  policy = load_manifest(DEFAULT_MANIFEST)[0].find { |s| s["class"] == "owner-approval-policy" }
+  pats = policy ? policy["patterns"] : []
+  check.call("the committed manifest declares owner-approval-policy with >=10 patterns (Q-G24 precondition)",
+             pats.size >= 10, "patterns=#{pats.inspect}")
+  unrelated.each do |p|
+    matched = pats.select { |pat| match?(pat, p) }
+    check.call("no owner-approval-policy pattern matches #{p} (Q-G24)", pats.any? && matched.empty?,
+               "matched by #{matched.inspect}")
+  end
 end
 
 if ARGV.include?("--self-test")
