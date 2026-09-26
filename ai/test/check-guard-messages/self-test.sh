@@ -616,9 +616,11 @@ R="$(new_fixture pinned-moved)"; track "${R}"
 P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"; pin "${R}" "${P}"
 Q="$(move_origin "${R}")"; run_pinned "${R}"
 if [ "${RC}" -eq 0 ] && printf '%s' "${OUT}" | grep -F "${P:0:12}" >/dev/null \
-   && printf '%s' "${OUT}" | grep -F 'pinned' >/dev/null && [ "${P}" != "${Q}" ]; then
-  ok "36 origin moving mid-gate does not redden a check pinned at gate start"
-else bad "36 origin moving mid-gate does not redden a check pinned at gate start" "rc=${RC} P=${P} Q=${Q} out=${OUT}"; fi
+   && printf '%s' "${OUT}" | grep -F 'pinned' >/dev/null && [ "${P}" != "${Q}" ] \
+   && [ "$(git -C "${R}" rev-parse refs/remotes/origin/main)" = "${P}" ] \
+   && [ ! -e "${R}/.git/FETCH_HEAD" ]; then
+  ok "36 origin moving mid-gate does not redden a check pinned at gate start (no ref, no FETCH_HEAD written)"
+else bad "36 origin moving mid-gate does not redden a check pinned at gate start (no ref, no FETCH_HEAD written)" "rc=${RC} P=${P} Q=${Q} out=${OUT}"; fi
 
 # 36b. The same move, with no pin (the check run by hand): the live cross-check
 #      still fails, exactly as before DND-735.
@@ -670,6 +672,25 @@ if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${REAL}" >/dev/null \
    && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
   ok "37a a hand-set pin at a commit origin never landed fails, both SHAs named"
 else bad "37a a hand-set pin at a commit origin never landed fails, both SHAs named" "rc=${RC} out=${OUT}"; fi
+
+# 37a2. The same forged pin, but origin has MOVED and nothing here fetched it:
+#       origin's tip is not here to prove the pin against. It is fetched
+#       (objects only) and the pin still fails to descend -> FAIL, never taken
+#       on trust.
+R="$(new_fixture pinned-forged-pin-moved)"
+add_exec "${R}" scripts/some-gate "${GUARDED}"
+classify "${R}" scripts/some-gate guard ""; land "${R}"
+Q="$(move_origin "${R}")"
+reclassify "${R}" scripts/some-gate tool "${TOOL_REASON}"
+add_exec "${R}" scripts/some-gate "${BARE}"; track "${R}"
+git -C "${R}" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m relabel >/dev/null 2>&1
+git -C "${R}" update-ref refs/remotes/origin/main HEAD
+FORGED="$(git -C "${R}" rev-parse HEAD)"; pin "${R}" "${FORGED}"; run_pinned "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${FORGED}" >/dev/null \
+   && printf '%s' "${OUT}" | grep -F "${Q}" >/dev/null && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null \
+   && [ "$(git -C "${R}" rev-parse refs/remotes/origin/main)" = "${FORGED}" ]; then
+  ok "37a2 a hand-set pin never landed fails even when origin moved and was not fetched"
+else bad "37a2 a hand-set pin never landed fails even when origin moved and was not fetched" "rc=${RC} out=${OUT}"; fi
 
 # 37b. The local ref is BEHIND the pin (origin moved before the gate started and
 #      nobody fetched) -> FAIL, both SHAs named, with Fix:.
