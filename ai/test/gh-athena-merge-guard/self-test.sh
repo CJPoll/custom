@@ -13,6 +13,10 @@
 #   * REFUSES a non-auto `pr merge` unless it names the exact head with
 #     --match-head-commit <sha> and every check reported on that head concluded
 #     green. Zero reported checks is not green.
+#   * REFUSES every `gh api` call that merges (DND-728): REST …/pulls/<n>/merge,
+#     …/merges, …/merge-upstream, and the GraphQL merge mutations, however the
+#     method, endpoint or query is spelled or supplied. Old-vs-new evidence and
+#     mutation results: SABOTAGE_RECORDS.md next to this file.
 #
 # NO NETWORK, EVER. `gh` is a stub on PATH that answers from fixture files and
 # logs every call; the App token comes from a fixture cache (no mint). The only
@@ -324,6 +328,141 @@ else bad "28. --disable-auto untouched" "$(detail)"; fi
 if [[ "$(cat "${STUB_LOG}")${OUT}${ERR}" != *"${FAKE_TOKEN}"* ]]; then
   ok "29. the token never appears in argv or output"
 else bad "29. token leak" "$(detail)"; fi
+
+echo
+echo "--- DND-728: a \`gh api\` call that merges is REFUSED before gh runs ---"
+# The DND-609 guard judged only `pr merge`, so every form below reached gh (the
+# stub logged it and answered "passthrough"). Each is now refused with exit 3
+# and a Fix: naming the guarded path, and gh is never called at all: the stub
+# log stays EMPTY (`api` is a gh builtin, so not even `alias list` runs).
+PR_PATH="repos/CJPoll/gen_saas/pulls/388/merge"
+MUT_MERGE='mutation { mergePullRequest(input: {pullRequestId: "PR_x", mergeMethod: SQUASH}) { clientMutationId } }'
+printf '%s\n' "${MUT_MERGE}" > "${TMP}/merge.graphql"
+jq -cn --arg q "${MUT_MERGE}" '{query: $q}' > "${TMP}/merge-body.json"
+# The same mutation with its name spelled in JSON unicode escapes: jq decodes
+# it, a text grep of the file would not.
+printf '{"query":"mutation { \\u006dergePullRequest(input: {pullRequestId: \\"PR_x\\"}) { clientMutationId } }"}\n' > "${TMP}/merge-body-escaped.json"
+printf 'mutation { mergePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } \n' > "${TMP}/not-json.json"
+
+# api_refused <label> <needle> <args...> : exit 3, REFUSING, a Fix: naming the
+# guarded path, <needle> in the reason, and NO gh call.
+api_refused() {
+  local label="$1" needle="$2"; shift 2
+  reset_fx; run "$@"
+  if [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+    && [[ "${ERR}" == *"pr merge <n> --squash --match-head-commit <sha>"* ]] \
+    && [[ "${ERR}" == *"${needle}"* ]] && [ ! -s "${STUB_LOG}" ]; then
+    ok "${label}"
+  else bad "${label}" "$(detail)"; fi
+}
+# api_passes <label> <args...> : reaches gh unchanged, exit 0.
+api_passes() {
+  local label="$1"; shift
+  reset_fx; run "$@"
+  if [ "${RC}" = 0 ] && [[ "${OUT}" == *"stub: passthrough api"* ]] && [ "$(cat "${STUB_LOG}")" = "$*" ]; then
+    ok "${label}"
+  else bad "${label}" "$(detail)"; fi
+}
+
+api_refused "A1. REST: api -X PUT repos/<o>/<r>/pulls/<n>/merge" "pulls/388/merge" api -X PUT "${PR_PATH}"
+api_refused "A2. REST: --method PUT with a leading slash" "merge" api --method PUT "/${PR_PATH}"
+api_refused "A3. REST: --method=PUT on a full https://api.github.com URL" "merge" api --method=PUT "https://api.github.com/${PR_PATH}"
+api_refused "A4. REST: -XPUT (value attached) with a body field" "merge" api -XPUT "${PR_PATH}" -f merge_method=squash
+api_refused "A5. REST: -X=PUT" "merge" api -X=PUT "${PR_PATH}"
+api_refused "A6. REST: combined short flags -iXPUT" "merge" api -iXPUT "${PR_PATH}"
+api_refused "A7. REST: lowercase method (-X put)" "merge" api -X put "${PR_PATH}"
+api_refused "A8. REST: no -X but a field (gh defaults to POST)" "merge" api "${PR_PATH}" -f sha="${HEAD_SHA}"
+api_refused "A9. REST: --input body (gh defaults to POST)" "merge" api "${PR_PATH}" --input "${TMP}/merge-body.json"
+api_refused "A10. REST: trailing slash" "merge" api -X PUT "${PR_PATH}/"
+api_refused "A11. REST: dot segments (pulls/388/x/../merge, ./)" "merge" api -X PUT "repos/CJPoll/gen_saas/pulls/388/x/.././merge"
+api_refused "A12. REST: percent-encoded (%6Derge, %2F)" "merge" api -X PUT "repos/CJPoll/gen_saas/pulls%2F388/%6Derge"
+api_refused "A13. REST: upper case path" "merge" api -X PUT "REPOS/CJPoll/gen_saas/PULLS/388/MERGE"
+api_refused "A14. REST: query string and double slash" "merge" api -X PUT "repos/CJPoll//gen_saas/pulls/388/merge?x=1"
+api_refused "A15. REST: GHES host prefix api/v3" "merge" api -X PUT "https://ghe.example.com/api/v3/${PR_PATH}"
+api_refused "A16. REST: repositories/<id> route" "merge" api -X PUT "repositories/123456/pulls/388/merge"
+api_refused "A17. REST: GET + X-HTTP-Method-Override: PUT" "method" api -H 'X-HTTP-Method-Override: PUT' "${PR_PATH}"
+api_refused "A18. REST: POST repos/<o>/<r>/merges (branch merge, no PR)" "merges" api -X POST repos/CJPoll/gen_saas/merges -f base=main -f head=feat
+api_refused "A19. REST: POST repos/<o>/<r>/merge-upstream" "merge-upstream" api -X POST repos/CJPoll/gen_saas/merge-upstream -f branch=main
+api_refused "A20. REST: endpoint after --" "merge" api -X PUT -- "${PR_PATH}"
+api_refused "A21. REST: a flag the guard does not know -> refused (gh would reject it too)" "--frobnicate" api --frobnicate -X PUT repos/CJPoll/gen_saas/issues/5/labels
+
+api_refused "G1. GraphQL: mergePullRequest via -f query=" "mergePullRequest" api graphql -f query="${MUT_MERGE}"
+api_refused "G2. GraphQL: enablePullRequestAutoMerge" "enablePullRequestAutoMerge" api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: "PR_x"}) { clientMutationId } }'
+api_refused "G3. GraphQL: enqueuePullRequest (merge queue)" "enqueuePullRequest" api graphql -f query='mutation { enqueuePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }'
+api_refused "G4. GraphQL: mergeBranch" "mergeBranch" api graphql -f query='mutation { mergeBranch(input: {repositoryId: "R", base: "main", head: "f"}) { clientMutationId } }'
+api_refused "G5. GraphQL: aliased field (m: mergePullRequest) via -F query=" "mergePullRequest" api graphql -F query='mutation { m: mergePullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }'
+api_refused "G6. GraphQL: -F query=@file" "mergePullRequest" api graphql -F query=@"${TMP}/merge.graphql"
+api_refused "G7. GraphQL: --input file (JSON body)" "mergePullRequest" api graphql --input "${TMP}/merge-body.json"
+api_refused "G8. GraphQL: --input with the name in \\u escapes" "mergePullRequest" api graphql --input "${TMP}/merge-body-escaped.json"
+api_refused "G9. GraphQL: combined -fquery=..." "mergePullRequest" api graphql -fquery="${MUT_MERGE}"
+api_refused "G10. GraphQL: /graphql on a full URL" "mergePullRequest" api https://api.github.com/graphql -f query="${MUT_MERGE}"
+api_refused "G11. GraphQL: the mutation in a non-query field (variables)" "mergePullRequest" api graphql -f query='mutation($q: String) { x }' -f extra="${MUT_MERGE}"
+api_refused "U1. unreadable: --input - (stdin)" "stdin" api graphql --input -
+api_refused "U2. unreadable: -F query=@- (stdin)" "stdin" api graphql -F query=@-
+api_refused "U3. unreadable: -F query=@<missing file>" "cannot read" api graphql -F query=@"${TMP}/does-not-exist.graphql"
+api_refused "U4. unreadable: --input <missing file>" "cannot read" api graphql --input "${TMP}/does-not-exist.json"
+api_refused "U5. unparseable: --input body that is not JSON" "not JSON" api graphql --input "${TMP}/not-json.json"
+api_refused "U6. unreadable: --input - on a REST merge path is still a merge" "merge" api -X PUT "${PR_PATH}" --input -
+
+api_refused "A22. REST: {owner}/{repo} placeholders" "merge" api -X PUT 'repos/{owner}/{repo}/pulls/388/merge'
+api_refused "G12. GraphQL: a .json suffix on the graphql endpoint" "mergePullRequest" api graphql.json -f query="${MUT_MERGE}"
+
+# The guard's own failure must never read as "no merge found" (fail closed).
+# F1: mktemp fails for the scan file only (the isolation dir, mktemp -d, still
+# works, so the refusal is the guard's). F2: grep errors (exit 2) on the scan.
+mkdir -p "${TMP}/brokenbin"
+REAL_MKTEMP="$(command -v mktemp)"; REAL_GREP="$(command -v grep)"
+cat > "${TMP}/brokenbin/mktemp" <<STUB
+#!/usr/bin/env bash
+case " \$* " in *" -d "*) exec "${REAL_MKTEMP}" "\$@" ;; esac
+exit 1
+STUB
+chmod +x "${TMP}/brokenbin/mktemp"
+reset_fx; PATH="${TMP}/brokenbin:${PATH}" run api graphql -f query='{ viewer { login } }'
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"scratch file"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [ ! -s "${STUB_LOG}" ]; then
+  ok "F1. the scan's scratch file cannot be made -> refused, not read as 'no merge', no gh call"
+else bad "F1. mktemp failure fails closed" "$(detail)"; fi
+rm -f "${TMP}/brokenbin/mktemp"
+cat > "${TMP}/brokenbin/grep" <<STUB
+#!/usr/bin/env bash
+case " \$* " in *" -aEiq "*) echo "grep: simulated I/O error" >&2; exit 2 ;; esac
+exec "${REAL_GREP}" "\$@"
+STUB
+chmod +x "${TMP}/brokenbin/grep"
+reset_fx; PATH="${TMP}/brokenbin:${PATH}" run api graphql -f query='{ viewer { login } }'
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"grep exit 2"* ]] && [[ "${ERR}" == *"Fix:"* ]] && [ ! -s "${STUB_LOG}" ]; then
+  ok "F2. the scan's grep errors (exit 2) -> refused, not read as 'no merge', no gh call"
+else bad "F2. grep error fails closed" "$(detail)"; fi
+rm -rf "${TMP}/brokenbin"
+
+reset_fx; printf 'am: api -X PUT %s\n' "${PR_PATH}" > "${FX}/aliases.out"
+run am
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"--match-head-commit"* ]] \
+  && [ "$(cat "${STUB_LOG}")" = "alias list" ]; then
+  ok "L1. a gh alias expanding to an api merge -> expanded, refused; only \`alias list\` ran"
+else bad "L1. alias to api merge refused" "$(detail)"; fi
+
+reset_fx
+OUT="$(GH_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" api -X PUT "${PR_PATH}" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && [ ! -s "${STUB_LOG}" ]; then
+  ok "D1. dry-run seam on an api merge -> the same refusal, no gh call"
+else bad "D1. dry-run api merge refused" "$(detail)"; fi
+
+echo
+echo "--- DND-728 NEGATIVE: api calls that do not merge pass through unchanged ---"
+api_passes "N1. GET of the merge endpoint (is it merged?)" api "${PR_PATH}"
+api_passes "N2. -X HEAD of the merge endpoint" api -X HEAD "${PR_PATH}"
+api_passes "N3. PUT to another endpoint (pulls/<n>/update-branch)" api -X PUT repos/CJPoll/gen_saas/pulls/388/update-branch
+api_passes "N4. PUT to labels with a field" api -X PUT repos/CJPoll/gen_saas/issues/5/labels -f 'labels[]=bug'
+api_passes "N5. PATCH a ref whose branch is named merge-x (not a merge endpoint)" api -X PATCH repos/CJPoll/gen_saas/git/refs/heads/merge-x -f sha="${HEAD_SHA}"
+api_passes "N6. GraphQL read" api graphql -f query='{ viewer { login } }'
+api_passes "N7. GraphQL disablePullRequestAutoMerge (merges nothing)" api graphql -f query='mutation { disablePullRequestAutoMerge(input: {pullRequestId: "PR_x"}) { clientMutationId } }'
+api_passes "N8. GraphQL with jq and paginate flags" api graphql --paginate -q '.data' -f query='{ viewer { login } }'
+api_passes "N9. REST read with -H accept header and --jq" api -H 'Accept: application/vnd.github+json' repos/CJPoll/gen_saas/pulls/388 --jq .merged
+api_passes "N10. a REST read whose ref names contain mergePullRequest text is not scanned" api repos/CJPoll/gen_saas/contents/mergePullRequest.md
+api_passes "N11. GraphQL: an inline -F value that only CONTAINS =@ is not a file read" api graphql -F note='a=@b' -f query='{ viewer { login } }'
+api_passes "N12. -X get (lower case) of the merge endpoint is still a read" api -X get "${PR_PATH}"
+api_passes "N13. a benign %-escaped path is decoded, not refused" api -X PUT 'repos/CJPoll/gen_saas/contents/a%20b.md' -f message=x
 
 echo
 echo "==================================================="

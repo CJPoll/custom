@@ -116,6 +116,18 @@ if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])gh[[:space:]]+([^;|&]* )?pr
   deny 'forge-identity: this is a bare `gh pr merge`, which stamps the merge to the machine owner, not Athena — the silent mis-attribution DND-203 exists to prevent. Fix: merge through the wrapper — `~/dev/custom/ai/bin/gh-athena pr merge …` — after verifying the wrapper is healthy with `~/dev/custom/ai/bin/forge-preflight`. Reads may stay on plain `gh`; writes (create/comment/review/merge) go through gh-athena. If the wrapper itself fails, do not work around this; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
 fi
 
+# Bare `gh api` that merges (DND-728): the REST merge routes (…/pulls/<n>/merge,
+# …/merges, …/merge-upstream) or a GraphQL merge mutation, in the same command
+# segment as `gh … api`. It runs as the owner AND skips the wrapper's merge
+# guard. `gh-athena api …` does NOT match (after `gh` comes `-`); the wrapper
+# judges those itself, with the full argv and any query file. Lexical, so a
+# query read from a file (`-F query=@f`, `--input f`) or a %-encoded route is
+# not seen here (the named residual); a plain-gh READ of a merge route is denied
+# too, and its Fix names the read that does not need it.
+if printf '%s' "$FLAT" | grep -Eiq '(^|[^[:alnum:]_-])gh[[:space:]]+([^;|&]* )?api[[:space:]][^;|&]*(pulls/[^[:space:];|&]+/merge([^[:alnum:]_-]|$)|/merges([^[:alnum:]_-]|$)|/merge-upstream|(^|[^[:alnum:]_])(mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch)([^[:alnum:]_]|$))'; then
+  deny 'forge-identity: this is a bare `gh api` call on a merge route or with a merge mutation (REST …/pulls/<n>/merge, …/merges, …/merge-upstream; GraphQL mergePullRequest / enablePullRequestAutoMerge / enqueuePullRequest / mergeBranch). It merges as the machine owner AND skips the pinned-head, all-green merge guard (DND-609, DND-728). Fix: merge through the one guarded path — `~/dev/custom/ai/bin/gh-athena pr merge <n> --squash --match-head-commit <sha>` after every check on that head is green. To only READ merge state, use `gh pr view <n> --json mergedAt,state`. If the wrapper refuses, do not work around it; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
+fi
+
 # Bare `glab mr create`: same shape, same tolerance for flags before the
 # subcommand (`glab -R x mr create`); `glab-athena mr create` does NOT match.
 if printf '%s' "$FLAT" | grep -Eq '(^|[^[:alnum:]_-])glab[[:space:]]+([^;|&]* )?mr[[:space:]]+create'; then

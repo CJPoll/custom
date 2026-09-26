@@ -118,6 +118,47 @@ check "2b. gh pr merge with flags before subcommand" deny
 run "$(bash_json 'glab mr merge 42')"
 check "2c. bare glab mr merge" deny
 
+# DND-728: a bare `gh api` merge runs as the owner and skips gh-athena's guard.
+run "$(bash_json 'gh api -X PUT repos/o/r/pulls/5/merge -f merge_method=squash')"
+check "2d. bare gh api PUT …/pulls/<n>/merge" deny
+
+run "$(bash_json 'gh api --method PUT /repos/o/r/pulls/5/merge/')"
+check "2e. bare gh api merge route, leading and trailing slash" deny
+
+run "$(bash_json 'gh api -X POST repos/o/r/merges -f base=main -f head=f')"
+check "2f. bare gh api POST …/merges" deny
+
+run "$(bash_json 'gh api -X POST repos/o/r/merge-upstream -f branch=main')"
+check "2g. bare gh api POST …/merge-upstream" deny
+
+run "$(bash_json "gh api graphql -f query='mutation { m: mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'")"
+check "2h. bare gh api graphql mergePullRequest" deny
+
+run "$(bash_json "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"x\"}) { clientMutationId } }'")"
+check "2i. bare gh api graphql enablePullRequestAutoMerge" deny
+
+run "$(bash_json "gh api graphql -f query='mutation { enqueuePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'")"
+check "2j. bare gh api graphql enqueuePullRequest" deny
+
+run "$(bash_json "gh api graphql -f query='mutation { mergeBranch(input: {repositoryId: \"R\", base: \"main\", head: \"f\"}) { clientMutationId } }'")"
+check "2k. bare gh api graphql mergeBranch" deny
+check_text "2k2. the deny names the guarded path" 'gh-athena pr merge <n> --squash --match-head-commit <sha>'
+
+run "$(bash_json 'cd /tmp && /usr/bin/gh api -X PUT repos/o/r/pulls/5/merge')"
+check "2l. path-qualified gh after a separator" deny
+
+run "$(bash_json '~/dev/custom/ai/bin/gh-athena api -X PUT repos/o/r/pulls/5/merge')"
+check "2m. gh-athena api merge (the wrapper judges it)" allow
+
+run "$(bash_json 'gh api -X PUT repos/o/r/pulls/5/update-branch')"
+check "2n. bare gh api PUT to a non-merge route" allow
+
+run "$(bash_json "gh api graphql -f query='mutation { disablePullRequestAutoMerge(input: {pullRequestId: \"x\"}) { clientMutationId } }'")"
+check "2o. bare gh api graphql disablePullRequestAutoMerge" allow
+
+run "$(bash_json 'gh api repos/o/r/git/refs/heads/merge-x')"
+check "2p. bare gh api read of a branch named merge-x" allow
+
 run "$(bash_json_cwd "$TMP/gh_scp" 'git push origin HEAD')"
 check "3a. plain git push, origin git@github.com: (cwd)" deny
 

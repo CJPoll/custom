@@ -30,19 +30,30 @@
 #     `p merge 5 --auto` is refused like `pr merge 5 --auto`. A gh shell alias
 #     (`!…`), an alias with quoting, and a failed alias lookup are refused.
 #
+# `gh api` merges are REFUSED outright (DND-728), before gh runs and with no
+# reads: REST PUT …/pulls/<n>/merge, POST …/merges and …/merge-upstream (every
+# method/flag/endpoint spelling gh accepts, normalized), and the GraphQL
+# mutations mergePullRequest, enablePullRequestAutoMerge, enqueuePullRequest and
+# mergeBranch, wherever the query comes from: -f/-F fields, -F k=@file, or an
+# --input JSON body. What the guard cannot read (stdin, an unreadable file, a
+# body that is not JSON, an unknown flag, an endpoint it cannot normalize, its
+# own scratch file failing) is refused too. See gmg_api_guard.
+#
 # `pr merge --disable-auto` (without --auto) merges nothing and passes as-is.
 # Every other command passes as-is with no extra reads, except that a first
 # word gh does not ship as a command is looked up in `gh alias list`.
 # The branch name goes into the API path unencoded (a `/` in it is accepted by
 # GitHub's branch routes); if a lookup fails on it, that fails CLOSED.
 #
-# Residual (NOT checked; each still runs): `gh api` writes that merge directly
-# (PUT …/pulls/<n>/merge, the GraphQL mergePullRequest /
-# enablePullRequestAutoMerge mutations); gh extensions (`gh <ext>`); a check
-# that has not REPORTED yet on the head (a workflow that never queued a run is
-# invisible to the rollup — the reason zero checks is refused, but one green
-# check among several unstarted workflows passes); `--admin` is not refused on
-# its own (with it, a non-auto merge still needs a green pinned head).
+# Residual (NOT checked; each still runs): API writes that MOVE a branch
+# without merging — REST PATCH/POST …/git/refs/…, GraphQL updateRef,
+# updateRefs, createCommitOnBranch, createRef (DND-741); gh extensions
+# (`gh <ext>`); a check that has not REPORTED yet on the head (a workflow that
+# never queued a run is invisible to the rollup — the reason zero checks is
+# refused, but one green check among several unstarted workflows passes);
+# `--admin` is not refused on its own (with it, a non-auto merge still needs a
+# green pinned head); a merge mutation name GitHub adds after 2026-09-26 (the
+# list below is from that day's schema introspection).
 #
 # The App token cannot read classic protection (it has no Administration
 # permission: 403 "Resource not accessible by integration", measured
@@ -201,10 +212,234 @@ gmg_probe_count() {
   echo "$n"
 }
 
+# ---- `gh api` merges (DND-728) ---------------------------------------------
+# `gh api` can merge without `pr merge`: REST PUT …/pulls/<n>/merge, POST
+# …/merges and …/merge-upstream, and the GraphQL mutations below. Every one is
+# REFUSED, never routed through the pinned-head check: `pr merge` is the one
+# guarded merge path, and a second one would mean proving the REST body's `sha`
+# field the way gh builds it. The judgment is local (no reads), so a refusal
+# sends nothing. What the guard cannot read (a body on stdin, a file it cannot
+# open, a body that is not JSON, a flag it does not know, an endpoint it cannot
+# normalize) is refused too: an unseen merge must read as "refuse".
+
+# The mutations that merge or schedule a merge, from live schema introspection
+# (2026-09-26). disablePullRequestAutoMerge / dequeuePullRequest /
+# updatePullRequestBranch merge nothing into the base and pass.
+GMG_MERGE_MUTATIONS="mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch"
+GMG_API_FIX="merge only through the one guarded path: open a PR if there is none, then $GMG_SAFE_PATH"
+
+# gmg_api_path <endpoint> : echoes the endpoint's path as gh + GitHub would
+# route it: no scheme/host, no ?query or #fragment, %-escapes decoded, lower
+# case, empty and `.` segments dropped, `..` applied, a leading api/ and api/v3/
+# (GHES) dropped. Returns 1 when it cannot: a backslash, a malformed escape, a
+# control character, or escapes still left after three decodes.
+gmg_api_path() {
+  local p="${1%%[?#]*}" n seg
+  local -a segs=() res=()
+  if [[ "$p" =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/]*(.*)$ ]]; then p="${BASH_REMATCH[1]}"; fi
+  for n in 1 2 3; do
+    [[ "$p" == *\\* ]] && return 1
+    [[ "$p" == *%* ]] || break
+    [[ "$p" =~ %([^0-9A-Fa-f]|[0-9A-Fa-f][^0-9A-Fa-f]|[0-9A-Fa-f]?$) ]] && return 1
+    [[ "$p" =~ %([01][0-9A-Fa-f]|7[Ff]) ]] && return 1
+    p="$(printf '%b' "${p//%/\\x}")"
+  done
+  [[ "$p" == *[%\\]* ]] && return 1
+  [[ "$p" == *[[:cntrl:]]* ]] && return 1
+  p="${p,,}"
+  IFS=/ read -ra segs <<<"$p"
+  for seg in "${segs[@]}"; do
+    case "$seg" in
+      ''|.) ;;
+      ..) if [ "${#res[@]}" -gt 0 ]; then unset 'res[-1]'; fi ;;
+      *) res+=("$seg") ;;
+    esac
+  done
+  if [ "${res[0]:-}" = api ]; then res=("${res[@]:1}"); fi
+  if [ "${res[0]:-}" = v3 ]; then res=("${res[@]:1}"); fi
+  local IFS=/
+  printf '%s' "${res[*]}"
+}
+
+# gmg_api_merge_route <normalized path> : true when the path is a REST route
+# that merges: repos/<o>/<r>/ or repositories/<id>/ followed by
+# pulls/<n>/merge, merges, or merge-upstream (a `.json`/`;x` suffix on the last
+# segment is ignored).
+gmg_api_merge_route() {
+  local -a s rest
+  local last
+  IFS=/ read -ra s <<<"$1"
+  case "${s[0]:-}" in
+    repos) rest=("${s[@]:3}") ;;
+    repositories) rest=("${s[@]:2}") ;;
+    *) return 1 ;;
+  esac
+  [ "${#rest[@]}" -gt 0 ] || return 1
+  last="${rest[-1]%%[.;]*}"
+  case "${#rest[@]}:${rest[0]}:$last" in
+    3:pulls:merge|1:merges:merges|1:merge-upstream:merge-upstream) return 0 ;;
+  esac
+  return 1
+}
+
+# gmg_api_guard <shown> <gh api args (after the word api)...> : returns 0 when
+# the call does not merge; exits 3 otherwise. Flags per gh 2.83 `gh api`.
+gmg_api_guard() {
+  local shown="$1" a v i c rest method="" nfields=0 input="" override=0 ep path scan name last grc
+  shift
+  local -a pos=() raw=() files=()
+  # gmg_api_opt <long flag> <value>
+  gmg_api_opt() {
+    case "$1" in
+      --method) method="${2^^}" ;;
+      --raw-field) nfields=$((nfields+1)); raw+=("${2#*=}") ;;
+      --field)
+        nfields=$((nfields+1))
+        v="${2#*=}"
+        # gh reads a file only when the VALUE starts with @ (key=@path).
+        if [[ "$v" == @* ]]; then files+=("${v#@}"); else raw+=("$v"); fi ;;
+      --header)
+        if [[ "${2,,}" =~ ^[[:space:]]*x-(http-)?method(-override)?[[:space:]]*: ]]; then override=1; fi ;;
+      --input) input="$2" ;;
+    esac
+  }
+  while [ $# -gt 0 ]; do
+    a="$1"; shift
+    case "$a" in
+      --) pos+=("$@"); break ;;
+      --method|--raw-field|--field|--header|--input|--jq|--template|--preview|--hostname|--cache)
+        v="${1:-}"; [ $# -gt 0 ] && shift
+        gmg_api_opt "$a" "$v" ;;
+      --method=*|--raw-field=*|--field=*|--header=*|--input=*|--jq=*|--template=*|--preview=*|--hostname=*|--cache=*)
+        gmg_api_opt "${a%%=*}" "${a#*=}" ;;
+      --include|--paginate|--slurp|--silent|--verbose|--help|--include=*|--paginate=*|--slurp=*|--silent=*|--verbose=*|--help=*) ;;
+      --*)
+        gmg_refuse "$shown" "'${a%%=*}' is not a \`gh api\` flag $GMG_TOOL knows (gh 2.83), so it cannot tell how the rest of the call parses or whether it merges" \
+          "drop the flag (gh rejects an unknown flag anyway); to merge, $GMG_SAFE_PATH" ;;
+      -?*)
+        rest="${a#-}"; i=0
+        while [ "$i" -lt "${#rest}" ]; do
+          c="${rest:$i:1}"
+          case "$c" in
+            i|h) ;;
+            X|F|f|H|q|t|p)
+              v="${rest:$((i+1))}"; v="${v#=}"
+              if [ -z "$v" ]; then v="${1:-}"; [ $# -gt 0 ] && shift; fi
+              case "$c" in
+                X) gmg_api_opt --method "$v" ;;
+                F) gmg_api_opt --field "$v" ;;
+                f) gmg_api_opt --raw-field "$v" ;;
+                H) gmg_api_opt --header "$v" ;;
+              esac
+              break ;;
+            *)
+              gmg_refuse "$shown" "'-$c' (in '$a') is not a \`gh api\` flag $GMG_TOOL knows (gh 2.83), so it cannot tell how the rest of the call parses or whether it merges" \
+                "drop the flag (gh rejects an unknown flag anyway); to merge, $GMG_SAFE_PATH" ;;
+          esac
+          i=$((i+1))
+        done ;;
+      *) pos+=("$a") ;;
+    esac
+  done
+  if [ -z "$method" ]; then
+    if [ "$nfields" -gt 0 ] || [ -n "$input" ]; then method=POST; else method=GET; fi
+  fi
+  [ "$override" = 1 ] && method="$method with a method-override header"
+
+  for ep in "${pos[@]}"; do
+    if ! path="$(gmg_api_path "$ep")"; then
+      gmg_refuse "$shown" "the endpoint '$ep' cannot be normalized (a backslash, a control character, or a malformed or nested %-escape), so $GMG_TOOL cannot tell whether it is a merge route" \
+        "spell the endpoint plainly (e.g. repos/<owner>/<repo>/pulls/<n>); to merge, $GMG_SAFE_PATH"
+    fi
+    last="${path##*/}"; last="${last%%[.;]*}"
+    if [ "$last" = graphql ]; then
+      # The scratch file holds every string the query could come from. A
+      # failure to make or fill it is refused: it must never read as "no
+      # merge mutation found".
+      if ! scan="$(mktemp 2>/dev/null)" || [ -z "$scan" ]; then
+        gmg_refuse "$shown" "$GMG_TOOL could not create a scratch file to scan the GraphQL query, so it cannot tell whether the call merges" \
+          "check that \$TMPDIR (or /tmp) is writable, then re-run; to merge, $GMG_SAFE_PATH"
+      fi
+      if [ "${#raw[@]}" -gt 0 ] && ! printf '%s\n' "${raw[@]}" >>"$scan" 2>/dev/null; then
+        rm -f "$scan"
+        gmg_refuse "$shown" "$GMG_TOOL could not write the GraphQL fields to its scratch file '$scan', so it cannot tell whether the call merges" \
+          "check that \$TMPDIR (or /tmp) is writable and not full, then re-run; to merge, $GMG_SAFE_PATH"
+      fi
+      for v in "${files[@]}"; do
+        if [ "$v" = - ]; then
+          rm -f "$scan"
+          gmg_refuse "$shown" "a GraphQL field is read from stdin ('@-'), which $GMG_TOOL cannot inspect without consuming it, so it cannot tell whether the query merges" \
+            "pass the query inline (-f query='…') or from a readable file (-F query=@<file>); to merge, $GMG_SAFE_PATH"
+        fi
+        if ! cat -- "$v" >>"$scan" 2>/dev/null; then
+          rm -f "$scan"
+          gmg_refuse "$shown" "$GMG_TOOL cannot read the GraphQL field file '$v', so it cannot tell whether the query merges" \
+            "make the file readable, or pass the query inline (-f query='…'); to merge, $GMG_SAFE_PATH"
+        fi
+      done
+      if [ -n "$input" ]; then
+        if [ "$input" = - ]; then
+          rm -f "$scan"
+          gmg_refuse "$shown" "the GraphQL body is read from stdin ('--input -'), which $GMG_TOOL cannot inspect without consuming it, so it cannot tell whether the query merges" \
+            "write the body to a file and pass --input <file>, or pass the query inline (-f query='…'); to merge, $GMG_SAFE_PATH"
+        fi
+        if ! [ -f "$input" ] || ! [ -r "$input" ]; then
+          rm -f "$scan"
+          gmg_refuse "$shown" "$GMG_TOOL cannot read the --input body '$input', so it cannot tell whether the query merges" \
+            "make the file readable, or pass the query inline (-f query='…'); to merge, $GMG_SAFE_PATH"
+        fi
+        # Every string in the body, JSON escapes decoded (a \u escape cannot
+        # hide a name).
+        if ! jq -r '.. | strings' "$input" >>"$scan" 2>/dev/null; then
+          rm -f "$scan"
+          gmg_refuse "$shown" "the --input body '$input' is not JSON, so $GMG_TOOL cannot read the query out of it or tell whether it merges" \
+            "send a JSON body ({\"query\": \"…\"}) or pass the query inline (-f query='…'); to merge, $GMG_SAFE_PATH"
+        fi
+      fi
+      # GraphQL names cannot be escaped or split, so a word match on the raw
+      # text finds the field whatever alias or fragment wraps it. A merge
+      # name inside a string argument is refused too (accepted false positive).
+      # grep: 0 = a merge name found, 1 = none, anything else = the scan
+      # itself failed, which is refused, never read as "none".
+      if grep -aEiq "(^|[^A-Za-z0-9_])($GMG_MERGE_MUTATIONS)([^A-Za-z0-9_]|$)" "$scan"; then grc=0; else grc=$?; fi
+      if [ "$grc" != 0 ] && [ "$grc" != 1 ]; then
+        rm -f "$scan"
+        gmg_refuse "$shown" "scanning the GraphQL query for merge mutations failed (grep exit $grc), so $GMG_TOOL cannot tell whether the call merges" \
+          "re-run; if it repeats, pass the query inline (-f query='…'); to merge, $GMG_SAFE_PATH"
+      fi
+      if [ "$grc" = 0 ]; then
+        name="$(grep -aEio "(^|[^A-Za-z0-9_])($GMG_MERGE_MUTATIONS)([^A-Za-z0-9_]|$)" "$scan" | grep -Eio "$GMG_MERGE_MUTATIONS" | head -n1 || true)"
+        rm -f "$scan"
+        gmg_refuse "$shown" "this GraphQL call carries the merge mutation '$name', which merges (or schedules a merge) without the pinned-head, all-green check (DND-728)" \
+          "$GMG_API_FIX"
+      fi
+      rm -f "$scan"
+      continue
+    fi
+    case "$method" in GET|HEAD) continue ;; esac
+    if gmg_api_merge_route "$path"; then
+      gmg_refuse "$shown" "this is a REST merge ($method $path), which merges without the pinned-head, all-green check (DND-728)" \
+        "$GMG_API_FIX"
+    fi
+  done
+  GMG_IS_MERGE=0
+  return 0
+}
+
 # gmg_guard <gh args...> : the entry point. Returns 0 or exits 3.
 gmg_guard() {
-  local shown="gh $*" pr_json err rc url owner repo base head n_prot n_rules bad total
+  local shown="gh $*" pr_json err rc url owner repo base head n_prot n_rules bad total w
   gmg_expand_alias "$@"
+  # The first non-flag word of the EXPANDED argv picks the command; `api` is
+  # judged by gmg_api_guard (DND-728), everything else by the pr merge rules.
+  local -a before=()
+  for w in "${GMG_ARGV[@]}"; do
+    case "$w" in
+      -*) before+=("$w") ;;
+      api) gmg_api_guard "$shown" "${before[@]}" "${GMG_ARGV[@]:$(( ${#before[@]} + 1 ))}"; return 0 ;;
+      *) break ;;
+    esac
+  done
   gmg_parse "${GMG_ARGV[@]}"
   [ "$GMG_IS_MERGE" = 1 ] || return 0
   if [ "$GMG_AUTO" = 0 ] && [ "$GMG_DISABLE_AUTO" = 1 ]; then return 0; fi

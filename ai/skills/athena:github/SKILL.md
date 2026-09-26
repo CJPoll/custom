@@ -263,7 +263,11 @@ gh pr view <n> --json headRefOid -q .headRefOid  # the exact head you checked
   check reported on it concluded green (CheckRun `SUCCESS`/`NEUTRAL`/`SKIPPED`,
   commit status `SUCCESS`). Zero reported checks is refused: no evidence is not
   green. The pin also makes GitHub refuse the merge if the head moves after the
-  read. The mechanism and its named residuals (`gh api` merge calls, gh
+  read. A `gh api` merge (REST `PUT …/pulls/<n>/merge`, `…/merges`,
+  `…/merge-upstream`, or a GraphQL merge / auto-merge / merge-queue mutation) is
+  refused outright by `gh-athena` (DND-728); a bare `gh api` merge is denied by
+  the forge-identity hook. `pr merge` is the one merge path. The mechanism and
+  its named residuals (API ref writes that move a branch without merging, gh
   extensions, a workflow that never reported) are in `ai/lib/gh-merge-guard.sh`.
 - **`--auto` is refused wherever no required checks gate it.** `--auto` waits
   only on the base branch's **required** checks. The wrapper asks branch
