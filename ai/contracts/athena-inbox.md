@@ -754,7 +754,8 @@ One JSON object per line, UTF-8, no pretty-printing, newline-terminated:
 {"v":1,"received_at":"2026-09-01T22:10:03Z","kind":"im|mpim|channel|mention|thread_reply",
  "channel":"C…|D…","user":"U…","ts":"1788….…","thread_ts":"1788….… or null",
  "text":"…raw text…","permalink":"https://… (optional)","event_id":"Ev…",
- "route":"thread_claim|channel_route (optional)"}
+ "route":"thread_claim|topic_judgment|channel_route (optional)",
+ "topic":{"label":"… or null","confidence":0.0,"model":"jev-1.13.0 or null","reason":"… or null"} (optional)}
 ```
 
 `v` **and `kind`** are mandatory on every line, regardless of producer. The
@@ -859,14 +860,40 @@ none and read as legacy.
 **`route` says how the server chose this Slack line's channel**
 (`ai/contracts/athena-events.md` → *Thread replies route to the thread's
 claimant*). `thread_claim`: a live claim on the reply's thread chose it.
-`channel_route`: the app's channel route chose it, including a stale-claim
-fallback. The field is optional and additive:
+`topic_judgment`: an accepted topic judgment chose it
+(`ai/contracts/athena-events.md` → *New conversations may route by an advisory
+topic judgment*). `channel_route`: the app's channel route chose it, including a
+stale-claim fallback and every topic-judgment fallback. The field is optional
+and additive:
 
 - **Absent** means a line written before the producer stamped the field. It is
   read and counted normally.
 - **Not a dedupe key.** Slack identity stays `event_id` / `channel:ts`.
 - A reader MAY display it and MUST NOT fail on it, on an unknown value, or on
   its absence. It is Slack-producer only; a platform line carries none.
+
+**`topic` says what the topic judgment decided** for a new-conversation line
+(`ai/contracts/athena-events.md` → *New conversations may route by an advisory
+topic judgment*). It is an object with exactly four members:
+
+- `label`: the session label the judgment chose, or `null` when no judgment
+  answered;
+- `confidence`: the judgment's confidence in `[0,1]`, or `null`;
+- `model`: the versioned model id that answered, or `null`;
+- `reason`: `null` when the judgment was accepted, otherwise a reason from
+  `ai/contracts/athena-judgments.md` → *Fallback: every error equals today's
+  behaviour, loudly* (for example `mode_off`, `sender_rule`, `key_missing`,
+  `below_threshold`).
+
+`route: topic_judgment` with `reason: null` is a routed judgment.
+`route: channel_route` with `reason: null` is a shadow-mode judgment that would
+have been accepted and was not acted on. The object carries no probabilities and
+no text. It is optional and additive on the same terms as `route`: absent on
+lines written before the producer stamped it and on every line that is not a
+new conversation, not a dedupe key, Slack-producer only. A reader MAY display it
+and MUST NOT fail on it, on an unknown `reason`, or on its absence. It is
+advisory: a reader MUST NOT treat it as authorization (`ai/contracts/athena-judgments.md`
+→ *Trust posture*).
 
 ### `received_at` — what it is and is not
 

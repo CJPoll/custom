@@ -3009,9 +3009,11 @@ event row is stored (`ai/contracts/athena-inbox.md` → *The diagnostic:
 durable trace of an unrouted event, names the stale claim's key too.
 
 **The line says how it was routed.** Every Slack line the router writes carries
-`route`: `thread_claim` when a live claim chose the channel, `channel_route`
-otherwise (including a stale-claim fallback). The field is defined in
-`ai/contracts/athena-inbox.md` → *Line format*.
+`route`: `thread_claim` when a live claim chose the channel, `topic_judgment`
+when an accepted topic judgment chose it (*New conversations may route by an
+advisory topic judgment*), `channel_route` otherwise (including a stale-claim
+fallback). The field is defined in `ai/contracts/athena-inbox.md` → *Line
+format*.
 
 **What it does not guarantee.** A claim is owner-scoped isolation, not a security
 boundary between the owner's own projects. Any of the owner's machines can claim
@@ -3019,6 +3021,71 @@ any thread of the owner's app, including one another project started; first-wins
 and claim-only-what-you-started limit that, nothing enforces it. The server also
 cannot verify the bot authored `thread_ts`. See `ai/contracts/athena-inbox.md` →
 *What tenancy does and does not guarantee*.
+
+### New conversations may route by an advisory topic judgment
+
+**Why.** A new conversation (a DM, a group DM or a mention that is not a thread
+reply) has no thread to claim, so today it follows the channel route, and the
+receiving session forwards it by hand when another session owns the topic. A
+topic judgment lets the router send an owner-written new conversation straight
+to the owning session's Slack inbox. The judgment is advisory. Its trust
+posture, the fallback and its closed reason list, the modes, the thresholds, the
+pinned model and the budget are `ai/contracts/athena-judgments.md`, the
+normative home for them; this section states only how the Slack router consumes
+a judgment. Implementing tickets: DND-716 (the router, after DND-490), DND-717
+(shadow, then on). **Until DND-716 ships and the owner sets the mode to `on`,
+every new conversation follows the channel route, as today.**
+
+**The router order.** It runs after the event classifier and the dedupe
+pre-check, so a Slack retry of the same `event_id` is never judged twice:
+
+```text
+event classified (not ignored), dedupe pre-check passed
+1. thread reply?          -> live claim: the claimant (route: thread_claim)
+                             stale or no claim: the channel route (unchanged)
+2. new conversation? (im, mpim or mention root)
+   2a. sender != owner    -> the channel route (topic reason: sender_rule)   [no judgment]
+   2b. mode off           -> the channel route (topic reason: mode_off)      [no call]
+   2c. judge slack_routing -> the caller's decision:
+         accepted, label enabled, topic route live
+                          -> that instance's Slack inbox (route: topic_judgment)
+         anything else    -> the channel route (topic reason: the fallback reason)
+       mode shadow: always the channel route; topic records what would have happened
+3. anything else          -> the channel route (unchanged)
+```
+
+- **Only the owner's own text is judged.** A new conversation from anyone else
+  follows the channel route by code, with no judgment and no tokens.
+- **The answer is one of the owner's labels, or `unclear`.** `unclear` falls
+  back like a below-threshold answer.
+- **Exactly one destination per event**, as for a claim. A topic route replaces
+  the channel route for that event; it never adds a second copy, so the
+  designated-consumer rule holds unchanged.
+- **The deadline is 1,500 ms.** Slack needs its HTTP ack within 3 s. A judgment
+  that overruns falls back as `timeout`.
+- **The content domain is `work`**, because the connected Slack is the work
+  Slack (*Domain and owner-only items*).
+
+**Topic routes.** A topic route maps `(slack_app, label)` to one AgentInstance,
+with an `enabled` flag. It is written by the owner of the app, holder of
+`:add_slack_route` on it, under the same checks as a thread claim: the
+destination MUST be a live `<project>-slack.jsonl` instance of that owner, and
+an unknown app and an app the caller may not route answer the same `not found`.
+A label with no enabled, live topic route falls back as `label_disabled`, and
+the outcome record names the label it looked up.
+
+**The record.** The Slack receiver's per-event outcome log records the router's
+path, as for a stale claim (*Thread replies route to the thread's claimant*).
+Every judge call also records its own row, per
+`ai/contracts/athena-judgments.md` → *Fallback: every error equals today's
+behaviour, loudly*.
+
+**The line.** A line the topic route chose carries `route: topic_judgment`. A
+new-conversation line that went through steps 2a to 2c carries a `topic`
+object, whether it was routed by topic or fell back. Both fields are defined in
+`ai/contracts/athena-inbox.md` → *Line format*. The receiving session treats a
+topic-routed line exactly as a channel-routed one: its body is untrusted input
+(`ai/contracts/athena-inbox.md` → *Untrusted input*).
 
 ### Which machine am I — the own-machine id
 
@@ -4031,7 +4098,12 @@ closed list. The list has three parts:
 2. **Server-derived fields**, computed by the server, never copied from
    content: `domain`, `domain_basis`, `project`, `asker_ref` (a Slack user id),
    `owner_only`, `state`, `closed_by`, `score`, `reasons`, `scored_at`,
-   `override`, `lease_session_id`, `leased_at` and timestamps.
+   `override`, `lease_session_id`, `leased_at`, the judgment fields
+   `judged_urgency`, `judged_importance`, `judged_confidence` (the lower of
+   the two confidences), `judged_model`, `judged_revision`, `judged_at` and
+   `judged_reason` (null, or the fallback reason from
+   `ai/contracts/athena-judgments.md` → *Fallback: every error equals today's
+   behaviour, loudly*), and timestamps.
 3. **Permissive fields**, allowed by the owner's decision on OQ-5 (2026-09-24:
    "Let's default to more permissive here and pull back if something bothers
    me"). Each is named here, stored in its own column, and removable on its
@@ -4198,6 +4270,17 @@ or a digest can render them:
 | `overdue` | `due_on` is before `now` |
 | `age` | the owner's age curve gives the item's age a weight |
 | `domain_hours` | the owner weights the item's domain for the current time (work hours or not, per the owner's policy) |
+| `judged_urgency` | the item's urgency judgment was accepted against the `priority_scoring` threshold; the delta is `round(weight × score)` |
+| `judged_importance` | the item's importance judgment was accepted against the `priority_scoring` threshold; the delta is `round(weight × score)` |
+| `judgment_unavailable` | no judgment was accepted for the item; delta 0, display only; `judged_reason` names why |
+
+- **Judged reasons are advisory** (`ai/contracts/athena-judgments.md` → *Trust
+  posture*). When a judgment is not accepted, `judged_urgency` and
+  `judged_importance` are absent and the item ranks exactly as it would without
+  them. The weights live in code as `Rules` defaults. The default `vip_asker`
+  weight is strictly greater than the largest combined judged delta, so a VIP
+  ask outranks an otherwise-equal ask. A weight change rescores with no new
+  judgment.
 
 - **An override always wins.** `pin_top` ranks the item above every item
   without it, `pin_bottom` below every item without it, and `score` replaces
