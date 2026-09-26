@@ -578,6 +578,130 @@ if [ "${RC}" -eq 0 ] && printf '%s' "${OUT}" | grep -F 'ls-remote' >/dev/null \
   ok "35 a local origin/main that matches origin passes, the cross-check named"
 else bad "35 a local origin/main that matches origin passes, the cross-check named" "rc=${RC} out=${OUT}"; fi
 
+echo "== check-guard-messages: the landed ref pinned at gate start (DND-735) =="
+
+# DND-735: harness-gate runs for 11-15 minutes, and custom main moved about as
+# often. Each check ran its own `git ls-remote` at its own moment, so a push to
+# origin mid-run turned every landed-ref check red with "the local landed ref
+# disagrees with origin", for a reason unrelated to the change. harness-gate
+# now reads origin's main ONCE at start and hands every check that pin
+# (ATHENA_LANDED_PIN_SHA, keyed to the repository by ATHENA_LANDED_PIN_REPO).
+# The bar is still origin's main, as of the gate start; a local ref that is not
+# that commit (or a later one fetched from origin) still fails.
+
+# pin <root> <sha>: set PIN to the env harness-gate hands a check for <root>.
+pin() { PIN=(env "ATHENA_LANDED_PIN_SHA=$2" "ATHENA_LANDED_PIN_REPO=$(realpath "$1/.git")"); }
+
+# run_pinned <root>: run the fixture's checker under PIN.
+run_pinned() {
+  OUT="$(cd "$1" && "${PIN[@]}" ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
+}
+
+# move_origin <root>: another machine lands a commit on origin's main (the
+# fixture's own refs are untouched). Prints the new origin tip.
+move_origin() {
+  local mover="$1.mover.$RANDOM"
+  git clone -q -b main "$1.origin.git" "${mover}" >/dev/null 2>&1
+  git -C "${mover}" -c user.name=other -c user.email=other@example.invalid \
+    commit -q --allow-empty -m "landed elsewhere" >/dev/null 2>&1
+  git -C "${mover}" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+  git -C "${mover}" rev-parse HEAD
+}
+
+# 36. THE DEFECT: the gate pinned origin's main at P; origin moved to Q while
+#     the gate ran; nothing was fetched. Before the fix the check ignored the
+#     pin, read Q live, and failed with a mismatch. Now it measures P -> PASS,
+#     and the OK line names P as the pinned tip.
+R="$(new_fixture pinned-moved)"; track "${R}"
+P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"; pin "${R}" "${P}"
+Q="$(move_origin "${R}")"; run_pinned "${R}"
+if [ "${RC}" -eq 0 ] && printf '%s' "${OUT}" | grep -F "${P:0:12}" >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'pinned' >/dev/null && [ "${P}" != "${Q}" ]; then
+  ok "36 origin moving mid-gate does not redden a check pinned at gate start"
+else bad "36 origin moving mid-gate does not redden a check pinned at gate start" "rc=${RC} P=${P} Q=${Q} out=${OUT}"; fi
+
+# 36b. The same move, with no pin (the check run by hand): the live cross-check
+#      still fails, exactly as before DND-735.
+run "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${Q}" >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null; then
+  ok "36b unpinned, a moved origin still fails the live cross-check"
+else bad "36b unpinned, a moved origin still fails the live cross-check" "rc=${RC} out=${OUT}"; fi
+
+# 36c. A sibling session fetched mid-gate: the shared local ref moved to Q, a
+#      descendant of the pin. The bar stays P -> PASS naming P.
+git -C "${R}" fetch -q origin >/dev/null 2>&1; run_pinned "${R}"
+if [ "${RC}" -eq 0 ] && printf '%s' "${OUT}" | grep -F "${P:0:12}" >/dev/null \
+   && [ "$(git -C "${R}" rev-parse refs/remotes/origin/main)" = "${Q}" ]; then
+  ok "36c a fetch mid-gate (local ref now ahead of the pin) still measures the pin"
+else bad "36c a fetch mid-gate (local ref now ahead of the pin) still measures the pin" "rc=${RC} out=${OUT}"; fi
+
+# 37. A forged local ref with a pin: the relabel is committed and the local ref
+#     moved onto it by hand. The bar is the pin, not the local ref -> FAIL, the
+#     weakened guard named.
+R="$(new_fixture pinned-forged)"
+add_exec "${R}" scripts/some-gate "${GUARDED}"
+classify "${R}" scripts/some-gate guard ""; land "${R}"
+REAL="$(git -C "${R}" rev-parse HEAD)"; pin "${R}" "${REAL}"
+reclassify "${R}" scripts/some-gate tool "${TOOL_REASON}"
+add_exec "${R}" scripts/some-gate "${BARE}"; track "${R}"
+git -C "${R}" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m relabel >/dev/null 2>&1
+git -C "${R}" update-ref refs/remotes/origin/main HEAD; run_pinned "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/some-gate' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+  ok "37 a forged local ref cannot move a pinned bar: the relabel still fails"
+else bad "37 a forged local ref cannot move a pinned bar: the relabel still fails" "rc=${RC} out=${OUT}"; fi
+
+# 37b. The local ref is BEHIND the pin (origin moved before the gate started and
+#      nobody fetched) -> FAIL, both SHAs named, with Fix:.
+R="$(new_fixture pinned-behind)"; track "${R}"
+P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"; Q="$(move_origin "${R}")"
+pin "${R}" "${Q}"; run_pinned "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${P}" >/dev/null \
+   && printf '%s' "${OUT}" | grep -F "${Q}" >/dev/null && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null \
+   && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+  ok "37b a local ref behind the pinned landed ref fails, both SHAs named"
+else bad "37b a local ref behind the pinned landed ref fails, both SHAs named" "rc=${RC} out=${OUT}"; fi
+
+# 37c. The local ref DIVERGED from the pin (a commit that does not descend from
+#      it, moved there by hand) -> FAIL, both SHAs named.
+R="$(new_fixture pinned-diverged)"; track "${R}"
+P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"; pin "${R}" "${P}"
+D="$(git -C "${R}" -c user.name=f -c user.email=f@example.invalid commit-tree -m diverged "${P}^{tree}")"
+git -C "${R}" update-ref refs/remotes/origin/main "${D}"; run_pinned "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${P}" >/dev/null \
+   && printf '%s' "${OUT}" | grep -F "${D}" >/dev/null && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+  ok "37c a local ref diverged from the pin fails, both SHAs named"
+else bad "37c a local ref diverged from the pin fails, both SHAs named" "rc=${RC} out=${OUT}"; fi
+
+# 38. A malformed pin is a missing measurement, never a fallback -> FAIL as
+#     could-not-measure, naming the variable, with Fix:.
+R="$(new_fixture pinned-malformed)"; track "${R}"
+pin "${R}" "abc123"; run_pinned "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'could not measure' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'ATHENA_LANDED_PIN_SHA' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null; then
+  ok "38 a malformed pin fails as could-not-measure, the variable named"
+else bad "38 a malformed pin fails as could-not-measure, the variable named" "rc=${RC} out=${OUT}"; fi
+
+# 38b. Half a pin (the SHA without its repository key) -> could-not-measure.
+P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"
+OUT="$(cd "${R}" && env -u ATHENA_LANDED_PIN_REPO ATHENA_LANDED_PIN_SHA="${P}" ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'could not measure' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F 'ATHENA_LANDED_PIN_REPO' >/dev/null; then
+  ok "38b a pin SHA without its repository key fails as could-not-measure"
+else bad "38b a pin SHA without its repository key fails as could-not-measure" "rc=${RC} out=${OUT}"; fi
+
+# 39. A pin for ANOTHER repository is not this repository's bar: the check reads
+#     origin live, so a moved origin still fails here (what a fixture repo under
+#     a pinned gate gets).
+R="$(new_fixture pinned-other-repo)"; track "${R}"
+P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"; Q="$(move_origin "${R}")"
+PIN=(env "ATHENA_LANDED_PIN_SHA=${P}" "ATHENA_LANDED_PIN_REPO=${TMP}/some-other-repo/.git"); run_pinned "${R}"
+if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${Q}" >/dev/null; then
+  ok "39 a pin keyed to another repository is not applied; origin is read live"
+else bad "39 a pin keyed to another repository is not applied; origin is read live" "rc=${RC} out=${OUT}"; fi
+
 echo "== check-guard-messages: live tree =="
 
 # 12. The live tree: every first-party executable is classified and compliant.

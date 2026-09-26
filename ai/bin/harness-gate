@@ -33,6 +33,7 @@ require "fileutils"
 require "tmpdir"
 require "stringio"
 require_relative "../lib/first_party"
+require_relative "../lib/landed"
 
 CUSTOM_DIR = File.expand_path("../..", __dir__)
 
@@ -654,13 +655,86 @@ def failure_lines(out)
 end
 
 # Run one check with stdin CLOSED (a check that reads stdin must never inherit
-# the caller's terminal or a pipe — that is the false-green path).
+# the caller's terminal or a pipe — that is the false-green path). env is
+# merged into the check's environment (a nil value unsets the variable).
 # Returns [ok?, combined_output].
-def run_one(argv, chdir: CUSTOM_DIR)
-  out, status = Open3.capture2e(*argv, chdir: chdir, stdin_data: "")
+def run_one(argv, chdir: CUSTOM_DIR, env: {})
+  out, status = Open3.capture2e(env, *argv, chdir: chdir, stdin_data: "")
   [status.success?, out]
 rescue Errno::ENOENT, Errno::EACCES => e
   [false, "harness-gate: cannot execute #{argv.first}: #{e.class}: #{e.message}"]
+end
+
+# ---------------------------------------------------------------------------
+# THE LANDED REF, READ ONCE PER RUN (DND-735)
+#
+# check-guard-messages, check-tool-risk and check-bin-help read their bar from
+# origin's main (ai/lib/landed.rb), and so do the suites that run them live
+# (forge-preflight, harness-eval case 07, athena-inbox-poll F-12, each check's
+# own live-tree case). Each used to run its own `git ls-remote` at its own
+# moment. The gate takes 11-15 minutes; on 2026-09-26 main moved about every
+# 15, so most runs straddled a push and went red on every one of those checks
+# at once, with "the local landed ref disagrees with origin", for a reason
+# unrelated to the change.
+#
+# So the gate reads origin's main ONCE, here, and hands the answer to every
+# check (Landed::PIN_SHA_ENV, keyed to this repository by
+# Landed::PIN_REPO_ENV). Every check then measures the same commit: origin's
+# main as of the gate start. The guarantee is unchanged: a local ref that is
+# not that commit (or a later one fetched from origin) still fails, and the
+# pin comes from origin, never from the branch. A move during the run is
+# reported once, as a NOTE naming both SHAs.
+#
+# The gate never passes on a pin it inherited: it always sets both variables,
+# or clears both when origin cannot be read (each check then reads origin
+# itself and fails as could-not-measure, as before).
+
+# [env, probes]: env holds both pin variables (both nil when origin could not
+# be read); probes is nil on success, else what was asked and what each gave.
+def landed_pin_env(root = CUSTOM_DIR)
+  [Landed.pin(root), nil]
+rescue Landed::Unreadable => e
+  [{ Landed::PIN_SHA_ENV => nil, Landed::PIN_REPO_ENV => nil }, e.probes]
+end
+
+# The line the gate prints about its pin.
+def landed_pin_line(env, probes)
+  sha = env[Landed::PIN_SHA_ENV]
+  return "harness-gate: landed ref pinned: origin main @ #{sha[0, 12]} (`#{Landed::LS_REMOTE_PROBE}`, " \
+         "read once); every landed-ref check measures against it" if sha
+
+  "harness-gate: NOTE — could not pin the landed ref; each landed-ref check reads origin " \
+    "itself and fails as could-not-measure. Probed: " +
+    probes.to_a.map { |ref, outcome| "#{ref} -> #{outcome}" }.join("; ")
+end
+
+# nil when origin's main is still the pin; else a NOTE naming the move. Read
+# at the end of the run, for the reader: it never changes the verdict.
+def landed_moved_note(root, env)
+  sha = env[Landed::PIN_SHA_ENV]
+  return nil unless sha
+
+  now = Landed.remote_tip(root, [])
+  return nil if now == sha
+
+  "harness-gate: NOTE — origin main moved during this run: #{sha[0, 12]} -> #{now[0, 12]}. " \
+    "Every landed-ref check measured against #{sha[0, 12]}, origin's main at gate start. " \
+    "Fix: to gate against the current main, `git fetch origin`, rebase onto #{now[0, 12]}, " \
+    "and re-run."
+rescue Landed::Unreadable => e
+  "harness-gate: NOTE — could not re-read origin main after the run " \
+    "(#{e.probes.last&.join(' -> ')}); every landed-ref check measured against #{sha[0, 12]}, " \
+    "origin's main at gate start."
+end
+
+# Runs the block with ENV temporarily merged with env (nil unsets); restores
+# every key afterwards.
+def with_env(env)
+  saved = env.keys.to_h { |k| [k, ENV[k]] }
+  env.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+  yield
+ensure
+  saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
 
 def missing_executables
@@ -773,12 +847,18 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
     return 1
   end
 
+  pin_env, pin_probes = landed_pin_env(CUSTOM_DIR)
+  puts landed_pin_line(pin_env, pin_probes)
+
   failures = []
   CHECKS.each do |(label, argv)|
-    ok, out = run_one(argv)
+    ok, out = run_one(argv, env: pin_env)
     printf("%-28s %s\n", label, ok ? "PASS" : "FAIL")
     failures << [label, argv, out] unless ok
   end
+
+  moved = landed_moved_note(CUSTOM_DIR, pin_env)
+  puts moved if moved
 
   if failures.empty?
     puts "harness-gate: OK — #{CHECKS.size}/#{CHECKS.size} checks PASS; safe to commit."
@@ -1618,6 +1698,77 @@ def run_self_test
   rescue FirstParty::MeasureError => e
     warn "self-test: FAIL — could not measure inline --self-test coverage of the live repo: #{e.message}"
     ok = false
+  end
+
+  # 12 (DND-735). The landed ref is read ONCE per gate run and handed to every
+  #    check. Before this, each landed-ref check ran its own `git ls-remote`,
+  #    so a push to origin mid-run reddened all of them. Driven against a
+  #    fixture repo with a bare origin: the pin names origin's main and this
+  #    repository, run_one hands it to the check, a pinned run survives origin
+  #    moving, and the move is reported as its own named NOTE.
+  Dir.mktmpdir("harness-gate-selftest-pin") do |dir|
+    expect = lambda do |cond, msg|
+      unless cond
+        warn "self-test: FAIL — landed-ref pin (DND-735): #{msg}"
+        ok = false
+      end
+    end
+    git = lambda do |*args, chdir: dir|
+      out, _e, st = Open3.capture3({ "GIT_AUTHOR_NAME" => "t", "GIT_AUTHOR_EMAIL" => "t@t",
+                                     "GIT_COMMITTER_NAME" => "t", "GIT_COMMITTER_EMAIL" => "t@t" },
+                                   "git", *args, chdir: chdir)
+      [out.strip, st.success?]
+    end
+    origin = File.join(dir, "origin.git")
+    root = File.join(dir, "repo")
+    other = File.join(dir, "other")
+    git.call("-c", "init.defaultBranch=main", "init", "-q", "--bare", origin)
+    git.call("-c", "init.defaultBranch=main", "init", "-q", root)
+    git.call("-C", root, "commit", "-q", "--allow-empty", "-m", "landed")
+    git.call("-C", root, "remote", "add", "origin", origin)
+    git.call("-C", root, "push", "-q", "origin", "HEAD:refs/heads/main")
+    git.call("-C", root, "fetch", "-q", "origin")
+    p_sha, = git.call("-C", root, "rev-parse", "HEAD")
+
+    env, probes = landed_pin_env(root)
+    expect.call(env[Landed::PIN_SHA_ENV] == p_sha && probes.nil?,
+                "the pin is not origin's main (#{env.inspect}, probes #{probes.inspect})")
+    expect.call(env[Landed::PIN_REPO_ENV] == File.realpath(File.join(root, ".git")),
+                "the pin is not keyed to the repository's git common dir (#{env.inspect})")
+    expect.call(landed_moved_note(root, env).nil?, "a NOTE was printed although origin did not move")
+
+    # run_one hands the pin to the check.
+    echo = File.join(dir, "echo-pin.sh")
+    File.write(echo, "#!/bin/sh\necho \"pin=${#{Landed::PIN_SHA_ENV}}\"\n")
+    FileUtils.chmod(0o755, echo)
+    _ok, out = run_one([echo], chdir: dir, env: env)
+    expect.call(out.include?("pin=#{p_sha}"), "run_one did not hand the pin to the check (#{out.inspect})")
+
+    # THE DEFECT: origin moves after the pin. A pinned check still measures P;
+    # the gate names the move once.
+    git.call("clone", "-q", "-b", "main", origin, other)
+    git.call("-C", other, "commit", "-q", "--allow-empty", "-m", "elsewhere")
+    git.call("-C", other, "push", "-q", "origin", "HEAD:refs/heads/main")
+    q_sha, = git.call("-C", other, "rev-parse", "HEAD")
+    pts_ok = begin
+      with_env(env) { Landed.points(root) }
+      true
+    rescue Landed::Mismatch, Landed::Unreadable => e
+      warn "  (pinned Landed.points raised #{e.class}: #{e.message})"
+      false
+    end
+    expect.call(pts_ok, "a pinned landed-ref read failed after origin moved mid-run")
+    note = landed_moved_note(root, env).to_s
+    expect.call(note.include?(p_sha[0, 12]) && note.include?(q_sha[0, 12]) && note.include?("moved"),
+                "the mid-run move was not named with both SHAs (#{note.inspect})")
+
+    # An unreadable origin at gate start: the pin is CLEARED (never inherited),
+    # and the probes say why.
+    git.call("-C", root, "remote", "set-url", "origin", File.join(dir, "no-such.git"))
+    env2, probes2 = with_env(env) { landed_pin_env(root) }
+    expect.call(env2.key?(Landed::PIN_SHA_ENV) && env2[Landed::PIN_SHA_ENV].nil? &&
+                env2.key?(Landed::PIN_REPO_ENV) && env2[Landed::PIN_REPO_ENV].nil? && probes2&.any?,
+                "an unreadable origin did not clear the pin with probes (#{env2.inspect}, #{probes2.inspect})")
   end
 
   # 10 (DND-404). check-inbox-mock-orphans's REAP invocation (FINAL_CHECKS)
