@@ -254,12 +254,29 @@ reason feeds exactly one alert rule:
 - **A state-class reason never alerts.**
 - **`budget_exhausted` alerts only by the budget rule**: the first of a UTC
   calendar month sends one alert (*Budget*). A change of health into or out of
-  `unavailable(budget_exhausted)` sends none, so a daily cap that exhausts and
-  resets each day does not alert each day.
+  `unavailable(budget_exhausted)` sends no alert about `budget_exhausted`, so a
+  daily cap that exhausts and resets each day does not alert each day. (A
+  change out of it to `ok` can still send the recovery of an earlier alerted
+  fault, per *Recovery follows the last alerted state*.)
 - **Every other fault-class reason alerts on a health transition.** When a use
   case's health changes to `unavailable(<reason>)` from any other value, one
-  alert goes out; when it leaves that value for `ok`, one recovery alert goes
-  out. N faults in a row with one reason are N records and one alert.
+  alert goes out. N faults in a row with one reason are N records and one
+  alert.
+- **Recovery follows the last alerted state.** The **last alerted state** is
+  the `unavailable(<reason>)` of the most recent transition alert raised
+  (queued for the owner-alert path), until a recovery alert is raised. When health changes to `ok` and the last alerted
+  state is a fault-class reason other than `budget_exhausted`, one recovery
+  alert goes out, naming that reason, whatever transitions came between. So
+  `timeout` → `budget_exhausted` → `ok` sends the `timeout` recovery, and
+  `budget_exhausted` → `ok` with no earlier alert sends none.
+
+**Later (2026-09-26):** the recovery rule was "when it leaves that value for
+`ok`, one recovery alert goes out", keyed on the health just left. Replaced by
+*Recovery follows the last alerted state* above (ruling E8, DND-782). Why:
+under the old rule, `timeout` → `budget_exhausted` → `ok` left the owner with
+an `unavailable(timeout)` alert and no recovery, because leaving
+`unavailable(budget_exhausted)` sends none. The owner saw the outage start and
+must see it end.
 
 ## Modes
 
@@ -378,5 +395,7 @@ with it.
       per UTC month.
 - [ ] Each reason feeds exactly one alert rule: state reasons none,
       `budget_exhausted` the monthly budget alert only, every other fault a
-      health-transition alert, once per transition, not per call.
+      health-transition alert, once per transition, not per call; a change
+      to `ok` recovers the last alerted fault, even across
+      `budget_exhausted`.
 - [ ] Deleting the secret returns every consumer to today's behaviour.
