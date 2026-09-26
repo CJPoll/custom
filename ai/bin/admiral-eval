@@ -1270,6 +1270,27 @@ def self_test
     fail.("`admiral-eval #{args.join(' ')}` must parse, got #{reason.inspect}") unless reason.nil?
   end
 
+  # DND-521: the REAL AE-19c meta must keep its teeth. The wrong behaviour the
+  # admiral showed (0/40 on 623d9db8, 0/7 on fdfbffb: drain ended with no
+  # release) and a release before the final report must both FAIL; the
+  # athena:fleet-drain step-5 order must PASS. Deleting or loosening either
+  # expect_order turns this red.
+  ae19c_meta = File.join(FIXTURES_DIR, "AE-19c-drained-after-last-return", "meta")
+  if File.file?(ae19c_meta)
+    m19c = parse_meta(ae19c_meta)
+    s19c = ->(line) { score_decision(m19c, parse_trailer("NEXT_ACTIONS: #{line}"))[0] }
+    fail.("AE-19c must FAIL a drain that ends without `fleet-resume.drained` (the DND-521 behaviour)") \
+      if s19c.("invoke:admiral-final-report, fleet-report.admiral-state:drained, end-turn")
+    fail.("AE-19c must FAIL a release before the final report") \
+      if s19c.("fleet-report.admiral-state:drained, fleet-resume.drained:r, invoke:admiral-final-report, end-turn")
+    fail.("AE-19c must FAIL an end-turn before the release") \
+      if s19c.("fleet-report.admiral-state:drained, invoke:admiral-final-report, end-turn, fleet-resume.drained:r")
+    fail.("AE-19c must PASS the athena:fleet-drain step-5 order") \
+      unless s19c.("fleet-report.admiral-state:drained, invoke:admiral-final-report, fleet-resume.drained:r, end-turn")
+  else
+    fail.("AE-19c fixture meta missing at #{ae19c_meta}")
+  end
+
   if ok
     puts "admiral-eval: self-test OK"
     0
@@ -1283,7 +1304,9 @@ def self_test
          "forge/comms/container stubs AND block `git push`. The model argv must carry the --agent-file " \
          "subject's prose inline (--agents under #{SUBJECT_KEY}, never a bare --agent #{AGENT}), with " \
          "--disallowedTools Bash Task last, and an unloadable subject must raise SubjectError with a Fix:. An " \
-         "unknown flag, a stray argument, or a value flag with no value must exit 2 naming it (DND-505)."
+         "unknown flag, a stray argument, or a value flag with no value must exit 2 naming it (DND-505). The " \
+         "AE-19c meta must fail a drain with no/late `fleet-resume.drained` and pass the fleet-drain step-5 " \
+         "order: restore its two expect_order lines rather than loosening them (DND-521)."
     1
   end
 end
