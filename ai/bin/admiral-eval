@@ -101,6 +101,11 @@ HOOKS_DIR    = File.join(AI_DIR, "hooks")
 AGENT        = "athena-admiral"
 AGENT_FILE   = File.join(AI_DIR, "agents", "#{AGENT}.md")
 DEFAULT_RUNS = 3
+# DND-537: the one range --runs must fall in, shared by the parser's
+# validation and USAGE's rendered "1-99" so the two can never drift. Out of
+# range is a usage error (exit 2), never a silent clamp — a clamped N would
+# sample a different depth than requested with no sign anything changed.
+RUNS_RANGE = (1..99).freeze
 
 # The fixed action vocabulary shown to the admiral in next-action scenarios. It
 # is deliberately BROAD so its mere presence never reveals which invariant is
@@ -1229,7 +1234,12 @@ def self_test
     [%w[--rnus 5], "--rnus"],        # typo'd flag
     [%w[--corpus-full], "--corpus-full"], # a flag this tool never had
     [%w[--only], "--only"],          # value flag with no value
-    [%w[stray], "stray"]             # positional argument
+    [%w[stray], "stray"],            # positional argument
+    # DND-537: an out-of-range --runs must be REFUSED, not silently clamped
+    # into 1-99. --only names a fixture that matches nothing, so this can
+    # never start a model run even on the old clamp-and-continue behavior.
+    [%w[--run --runs 0 --only dnd-537-no-such-fixture], "--runs"],
+    [%w[--run --runs 100 --only dnd-537-no-such-fixture], "--runs"]
   ].each do |args, named|
     out, err, st = cli.(*args)
     fail.("`admiral-eval #{args.join(' ')}` must exit 2 (usage), got #{st.exitstatus}") unless st.exitstatus == 2
@@ -1359,7 +1369,7 @@ USAGE = <<~TXT
     ai/bin/admiral-eval --help             this text
 
   Options (with --run):
-    --runs N            majority-sampling runs per case (1-99)
+    --runs N            majority-sampling runs per case (#{RUNS_RANGE.first}-#{RUNS_RANGE.last})
     --only NAME         restrict to one case
     --update-baseline   rewrite the baseline from this run's results
     --agent-file PATH   the rendered athena-admiral definition to evaluate
@@ -1389,13 +1399,22 @@ def main(argv)
   return self_test if opts["--self-test"]
   return list unless opts["--run"]
 
+  runs = opts.fetch("--runs", DEFAULT_RUNS)
+  unless RUNS_RANGE.cover?(runs)
+    warn "admiral-eval: usage error — --runs #{runs} is out of range."
+    warn "  Fix: pass --runs N where N is #{RUNS_RANGE.first}-#{RUNS_RANGE.last} (default: #{DEFAULT_RUNS}); " \
+         "an out-of-range value is refused, never clamped (DND-537) — clamping would sample a different " \
+         "depth than requested with no sign anything changed."
+    return 2
+  end
+
   agent_file, subject_err = resolve_agent_file(argv)
   if subject_err
     warn "admiral-eval: FAILED — #{subject_err}"
     return 2
   end
   run_model(
-    runs: opts.fetch("--runs", DEFAULT_RUNS).clamp(1, 99),
+    runs: runs,
     only: opts["--only"],
     update: opts.fetch("--update-baseline", false),
     agent_file: agent_file

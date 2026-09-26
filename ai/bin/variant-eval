@@ -101,6 +101,13 @@ ADMIRAL_AGENT_REL   = File.join("ai", "agents", "athena-admiral.md")
 
 DEFAULT_BASELINE    = "origin/main"
 DEFAULT_RUNS        = 10        # T2 characterization depth for the pilot
+# DND-537: the one range --runs must fall in, shared by the parser's
+# validation and help_text's rendered "1-99" so the two can never drift
+# (DND-506's drift self-test covers it). Out of range is a usage error
+# (exit 2), never a silent clamp — a clamped N would run a different sample
+# depth than requested and the scorecard would credit the noise band
+# (DND-225) for an N the operator never asked for.
+RUNS_RANGE          = (1..99).freeze
 # The pilot envelope and its float tolerance live in ai/lib/eval_score.rb
 # (DND-225), the one home of the noise-threshold rule; these names are kept so
 # the proposal text and the self-test read unchanged.
@@ -1563,7 +1570,14 @@ def self_test
     [%w[--corpus-full], "--corpus-full"], # a flag this tool never had
     [%w[--baseline], "--baseline"],       # value flag with no value
     [%w[--rnus 5], "--rnus"],             # typo'd flag
-    [%w[--json], "--json"]                # J7 (DND-527): --json with no value
+    [%w[--json], "--json"],               # J7 (DND-527): --json with no value
+    # DND-537: an out-of-range --runs must be REFUSED, not silently clamped
+    # into 1-99. --variant names an unresolvable ref, so if this regresses to
+    # the old clamp-and-measure behavior it fails on the bad ref (exit 1, no
+    # "--runs" in the message) rather than exit 2 naming --runs — never a
+    # real measurement.
+    [%w[--variant does-not-exist-ref --runs 0], "--runs"],
+    [%w[--variant does-not-exist-ref --runs 100], "--runs"]
   ].each do |args, named|
     _out, err, st = capture([RbConfig.ruby, File.expand_path(__FILE__), *args])
     fail.("`variant-eval #{args.join(' ')}` must exit 2 (usage), got #{st.exitstatus}") unless st.exitstatus == 2
@@ -1729,7 +1743,8 @@ def help_text
       --corpus deterministic|full   which eval corpus to run (default: deterministic;
                                      full adds model-in-loop T2 characterization,
                                      which stays OUT of harness-gate)
-      --runs N                      samples per case, 1-99 (default: #{DEFAULT_RUNS})
+      --runs N                      samples per case, #{RUNS_RANGE.first}-#{RUNS_RANGE.last} \
+(default: #{DEFAULT_RUNS})
       --out PATH                    write the scorecard here
       --json PATH                   also write the proposal as JSON (schema
                                      #{JSON_SCHEMA_ID}), atomically; a stale
@@ -1787,6 +1802,15 @@ def run_measurement(opts)
     return 2
   end
 
+  runs = opts.fetch("--runs", DEFAULT_RUNS)
+  unless RUNS_RANGE.cover?(runs)
+    warn "variant-eval: FAILED — --runs #{runs} is out of range."
+    warn "  Fix: pass --runs N where N is #{RUNS_RANGE.first}-#{RUNS_RANGE.last} (default: #{DEFAULT_RUNS}); " \
+         "an out-of-range value is refused, never clamped (DND-537) — clamping would measure a different N " \
+         "than requested and credit its noise band to a sample depth you never asked for."
+    return 2
+  end
+
   json_file = opts["--json"]
   why = opts["--out"] && output_path_problem("--out", opts["--out"])
   why ||= json_file && prepare_json_path(json_file, opts["--out"])
@@ -1802,7 +1826,7 @@ def run_measurement(opts)
     variant: variant,
     baseline: opts.fetch("--baseline", DEFAULT_BASELINE),
     corpus: corpus,
-    runs: opts.fetch("--runs", DEFAULT_RUNS).clamp(1, 99),
+    runs: runs,
     out_file: opts["--out"],
     json_file: json_file
   )
