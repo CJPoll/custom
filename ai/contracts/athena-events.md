@@ -3178,7 +3178,9 @@ reads each edge as NOT ELIGIBLE:
   `.github/workflows/<name>.yml` or `.yaml`, that matches no other
   deploy-automation pattern. A file deeper under `.github/workflows/`, a file
   named by a merge-time CI config (`ci-local-references-v1`), and
-  `.github/workflows/action.yml` are NOT ELIGIBLE. While an `action.yml` or
+  `.github/workflows/action.yml` are NOT ELIGIBLE. A file the diff removes
+  (deleted, or renamed away) is looked up in that walk at BASE, since head
+  cannot name it (DND-793). While an `action.yml` or
   `action.yaml` sits in `.github/workflows/` at BASE or HEAD, every hit is NOT
   ELIGIBLE: the directory is then a composite action that a default-branch run
   can load as `<owner>/<repo>/.github/workflows@main`, a reference no name

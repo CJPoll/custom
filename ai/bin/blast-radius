@@ -25,7 +25,9 @@
 #         AND (merging triggers automation on the default branch)
 #
 # "Touches" counts BOTH paths of a rename or copy (see CHANGED_PATHS_ARGS):
-# moving a surface file out of its pattern changes that surface.
+# moving a surface file out of its pattern changes that surface. A file
+# merge-time CI executes counts too (DND-589), and when the diff removes it, it
+# is looked up in the walk over BASE, where it still exists (DND-793).
 #
 # "Triggers automation" is read at BASE and at head (merge_time_automation,
 # DND-774): a merge that REMOVES the automation base runs -- deleting the last
@@ -442,10 +444,29 @@ def content_hit?(repo, head, path, rule)
   [:miss, nil]
 end
 
-# `refs` is a lazily-computed ci_references result, shared with the caller so
-# the report can print it. It is computed only when a changed file matched no
-# pattern of a surface that declares `references`.
-def hits_for(files, surfaces, repo = nil, head = nil, refs = {})
+# `refs` caches the ci_references walks, shared with the caller so the report
+# can print them: refs[:result] at head, computed only when a changed file
+# matched no pattern of a surface that declares `references`; refs[:base] at
+# base, computed only when such a file is also ABSENT at head (DND-793), with
+# refs[:absent] the set of those paths.
+#
+# A changed path is a reference hit when a merge-time config at head OR at base
+# executes it. Read at head alone, a removal hid itself: `git rm` of a script a
+# deploy workflow runs (gen_saas's .pkg/prod/bin/deploy-guard.sh), renaming it
+# away, or deleting a file inside a `uses: ./dir` action left a path absent
+# from head's tree, so nothing at head could name it and the diff read COLD --
+# while the next deploy ran without it. It is the removal class DND-770 closed
+# for the path listing and DND-774 for the automation term.
+#
+# The base walk runs only for a path absent at head. That bound is a cost bound,
+# never a verdict one: a path PRESENT at head that base's walk reaches and
+# head's does not can only have lost its reference through another change in
+# this diff -- its referrer's text, the referrer's own reach (a changed file
+# further up, or a root workflow, which `.github/workflows/**` / `.gitlab-ci.yml`
+# / `.gitlab/ci/**` match by pattern), or an action.yml that is now absent (and
+# base-walked itself). Following that chain up always ends at a hit, so the
+# diff is never COLD on that path's account.
+def hits_for(files, surfaces, repo = nil, head = nil, refs = {}, base = nil)
   hits = []
   examined = []
   files.each do |f|
@@ -455,6 +476,7 @@ def hits_for(files, surfaces, repo = nil, head = nil, refs = {})
 
         refs[:result] ||= ci_references(repo, head)
         via = refs[:result][:files][f]
+        via = base_via(f, refs, repo, base) unless via || refs[:result][:present].include?(f)
         next unless via
 
         hits << { path: f, class: s["class"], why: s["why"], via: via }
@@ -477,6 +499,22 @@ def hits_for(files, surfaces, repo = nil, head = nil, refs = {})
     end
   end
   [hits, examined]
+end
+
+# The referrer at base of a changed path absent at head, labelled with the side,
+# or nil when base's merge-time CI does not execute it. A caller with no base
+# (none of today's) cannot look, and must not read that as "not executed", so
+# it dies rather than returning nil.
+def base_via(path, refs, repo, base)
+  unless base
+    die("#{path} is absent at head, and no base was given to walk for what merge-time CI ran there.",
+        "pass --base: a removed path is judged by base's merge-time CI (DND-793). This is a caller " \
+        "defect in blast-radius itself, never a COLD.")
+  end
+  (refs[:absent] ||= Set.new) << path
+  refs[:base] ||= ci_references(repo, base)
+  referrer = refs[:base][:files][path]
+  referrer && "#{referrer} at base #{short(refs[:base][:rev])} (absent at head: deleted or renamed away)"
 end
 
 # --- git --------------------------------------------------------------------
@@ -831,7 +869,11 @@ end
 # THOSE name in turn. Each read COLD before DND-589.
 #
 # Everything is read AT HEAD (git ls-tree / git show), never from the working
-# tree: the question is what the commit being merged will execute.
+# tree: the question is what the commit being merged will execute. The one
+# exception is a changed path ABSENT at head (deleted, or renamed away): head
+# cannot name it, so the same walk runs over BASE and asks whether merge-time CI
+# executed it there (DND-793, see hits_for). The bounds below are identical on
+# both sides -- it is one function, over a different tree.
 #
 # The roots are the configs whose later runs execute the merged code: a GitHub
 # workflow with any trigger workflow_trigger counts (push to the default branch,
@@ -922,12 +964,21 @@ def show_at(repo, head, path)
       "empty -- resolve the git error and re-run.")
 end
 
-# Returns { files: {path => referrer}, roots: [path], notes: [String] }.
+# Returns { files: {path => referrer}, roots: [path], notes: [String],
+# present: Set of every path in the tree, rev: the resolved commit }. `head` is
+# whichever side is walked: the head, or base for a path absent at head (DND-793).
 def ci_references(repo, head)
+  rev, err, ok = git(repo, "rev-parse", "--verify", "#{head}^{commit}")
+  unless ok
+    die("cannot resolve '#{head}' in #{repo} (#{err.strip}).",
+        "pass the SHA pair integration-gate printed. An unresolvable side means the files CI " \
+        "executes there are UNKNOWN, never none.")
+  end
+  head = rev.strip
   out, err, ok = git(repo, "ls-tree", "-r", "-z", "--name-only", head)
   unless ok
     die("`git ls-tree -r #{head}` failed in #{repo}: #{err.strip}",
-        "the file list at head is UNKNOWN, not empty, so the files CI executes " \
+        "the file list at #{short(head)} is UNKNOWN, not empty, so the files CI executes " \
         "cannot be computed. Resolve the git error and re-run.")
   end
   tree = out.split("\0")
@@ -971,7 +1022,7 @@ def ci_references(repo, head)
       queue << r
     end
   end
-  { files: files, roots: roots, notes: notes }
+  { files: files, roots: roots, notes: notes, present: tree_set, rev: head }
 end
 
 def references_in(text, referrer, tree, tree_set, action_dirs, notes = [])
@@ -1157,6 +1208,16 @@ def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, 
     puts "  ci-references: #{refs[:files].size} file(s) executed by #{refs[:roots].size} " \
          "merge-time CI config(s)#{refs[:roots].empty? ? '' : " (#{refs[:roots].join(', ')})"}"
     refs[:notes].each { |n| puts "    #{n}" }
+    # DND-793: the base walk names its key too, and "not needed" never reads
+    # like "walked and found nothing".
+    if (b = refs[:base])
+      puts "  ci-references at base #{short(b[:rev])}: #{b[:files].size} file(s) executed by #{b[:roots].size} " \
+           "merge-time CI config(s)#{b[:roots].empty? ? '' : " (#{b[:roots].join(', ')})"} -- walked for " \
+           "#{refs[:absent].size} changed path(s) absent at head"
+      b[:notes].each { |n| puts "    #{n}" }
+    else
+      puts "  ci-references at base: not walked (no changed path is absent at head)"
+    end
   end
   if automation
     puts "  merge-time automation: #{automation[0]} (#{automation[1]})"
@@ -1499,7 +1560,7 @@ def grant_eligible(repo, base, head, surfaces)
   hits = []
   head_refs = {}
   surfaces.each do |s|
-    found, = hits_for(files, [s], repo, head_sha, head_refs)
+    found, = hits_for(files, [s], repo, head_sha, head_refs, base_sha)
     hits.concat(found)
   end
   reasons = []
@@ -1595,7 +1656,8 @@ def grant_eligible(repo, base, head, surfaces)
 
   # The DND-589 walk, at both sides: a merge-time CI config, or a script it
   # runs, that names a hit file. It reaches files rule 3's workflow scan does not.
-  refs = { "head" => head_refs[:result] }
+  # The base walk hits_for ran for a path absent at head (DND-793) is reused.
+  refs = { "head" => head_refs[:result], "base" => head_refs[:base] }
   [["base", base_sha], ["head", head_sha]].each do |side, rev|
     refs[side] ||= ci_references(repo, rev)
     workflow_hits.each do |f|
@@ -1730,8 +1792,8 @@ def run(argv)
   surfaces, pattern_count = load_manifest(manifest)
   files = changed_files(repo, base, head)
   refs = {}
-  hits, examined = hits_for(files, surfaces, repo, head, refs)
-  refs = refs[:result]
+  hits, examined = hits_for(files, surfaces, repo, head, refs, base)
+  refs = refs[:result] && refs[:result].merge(base: refs[:base], absent: refs[:absent])
 
   if hits.empty?
     print_report("COLD", head, manifest, surfaces, pattern_count, files, hits, nil, examined, {}, refs)
@@ -2459,6 +2521,104 @@ def self_test
     check.call("COLD: prints the ci-references count and the merge-time CI configs it read",
                code.zero? && out.match?(/ci-references: \d+ file\(s\) executed by 1 merge-time CI config\(s\)/),
                "exit=#{code} out=#{out}")
+    check.call("COLD: a diff with no path absent at head says the base walk was not needed (a zero names its key, DND-793)",
+               out.include?("ci-references at base: not walked (no changed path is absent at head)"),
+               "exit=#{code} out=#{out}")
+
+    # 12q-12z. REMOVING a file merge-time CI executes (DND-793, the DND-422
+    # class; the removal class of DND-770/DND-774). The references walk read
+    # head's tree only, and a deleted path is absent there, so nothing
+    # referenced it: `git rm .pkg/prod/bin/deploy-guard.sh` read COLD and the
+    # next deploy ran without its guard. A changed path absent at head is now
+    # also looked up in the walk over BASE's merge-time configs. Each diff
+    # REMOVES only the executed file, so nothing else can rescue the verdict.
+    # diff.renames=copies is pinned so a rename is measured under git's widest
+    # rename detection, not this machine's config.
+    rm_ci = lambda do |desc, seed, path, via: nil, hot: true, &change|
+      ci_n += 1
+      d = File.join(tmp, "ci-rm#{ci_n}")
+      b2, h2 = mkrepo.call(d, seed: seed, config: { "diff.renames" => "copies" }) { |r| change.call(r) }
+      out, _, code = run_br.call(["--base", b2, "--head", h2, "--repo", d])
+      if hot
+        check.call(desc,
+                   code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?(path) &&
+                     out.include?("deploy-automation") && out.include?("at base #{b2[0, 7]}") &&
+                     (via.nil? || out.include?("executed by #{via} at base")),
+                   "exit=#{code} out=#{out}")
+      else
+        check.call(desc, code.zero? && out.include?("BLAST-RADIUS COLD"), "exit=#{code} out=#{out}")
+      end
+      out
+    end
+    rm = ->(r, path) { FileUtils.rm_f(File.join(r, path)) }
+    guard_seed = lambda do |r|
+      put.call(r, ".pkg/prod/bin/deploy-guard.sh", "#!/bin/sh\n")
+      wf.call(r, "post-merge.yml", deploy_run.call("      - run: .pkg/prod/bin/deploy-guard.sh --require-tip main\n"))
+    end
+    rm_out = rm_ci.call("HOT: DELETING a script a deploy workflow runs is deploy-automation, judged at base (DND-793)",
+                        guard_seed, ".pkg/prod/bin/deploy-guard.sh", via: ".github/workflows/post-merge.yml") do |r|
+      rm.call(r, ".pkg/prod/bin/deploy-guard.sh")
+    end
+    check.call("the base walk names its key: how many files, from which configs, for how many absent paths (DND-793)",
+               rm_out.match?(%r{ci-references at base [0-9a-f]{7}: 1 file\(s\) executed by 1 merge-time CI config\(s\) \(\.github/workflows/post-merge\.yml\) -- walked for 1 changed path\(s\) absent at head}),
+               rm_out)
+    rm_ci.call("HOT: RENAMING a script a deploy workflow runs away is deploy-automation (its old path, DND-793)",
+               guard_seed, ".pkg/prod/bin/deploy-guard.sh", via: ".github/workflows/post-merge.yml") do |r|
+      FileUtils.mv(File.join(r, ".pkg/prod/bin/deploy-guard.sh"), File.join(r, ".pkg/prod/bin/deploy-guard.sh.off"))
+    end
+    rm_ci.call("HOT: deleting a script called only BY a referenced script is deploy-automation (transitive, DND-793)",
+               lambda { |r|
+                 put.call(r, "bin/deploy.sh", "#!/bin/sh\n. bin/lib/push.sh\n")
+                 put.call(r, "bin/lib/push.sh")
+                 wf.call(r, "post-merge.yml", deploy_run.call("      - run: bin/deploy.sh\n"))
+               },
+               "bin/lib/push.sh", via: "bin/deploy.sh") { |r| rm.call(r, "bin/lib/push.sh") }
+    rm_ci.call("HOT: deleting a file INSIDE a local action a deploy workflow `uses: ./` is deploy-automation (DND-793)",
+               lambda { |r|
+                 put.call(r, "tools/release/action.yml", "runs:\n  using: docker\n  image: Dockerfile\n")
+                 put.call(r, "tools/release/Dockerfile", "FROM x\n")
+                 wf.call(r, "post-merge.yml", deploy_run.call("      - uses: ./tools/release\n"))
+               },
+               "tools/release/Dockerfile", via: ".github/workflows/post-merge.yml") { |r| rm.call(r, "tools/release/Dockerfile") }
+    rm_ci.call("HOT: deleting a file an INCLUDED GitLab file runs is deploy-automation (DND-793)",
+               gl_seed, "scripts/release.sh", via: "ci/deploy.yml") { |r| rm.call(r, "scripts/release.sh") }
+    # The precision bounds hold on the base side exactly as at head: the walk
+    # is the same function, over base's tree.
+    rm_ci.call("COLD: deleting a script nothing merge-time references stays COLD (DND-793)",
+               ref_seed, "scripts/other.sh", hot: false) { |r| rm.call(r, "scripts/other.sh") }
+    rm_ci.call("COLD: deleting a script referenced ONLY by a pull_request workflow at base stays COLD (DND-793)",
+               lambda { |r|
+                 put.call(r, "scripts/lint.sh")
+                 wf.call(r, "ci.yml", "name: ci\non:\n  pull_request:\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: scripts/lint.sh\n")
+               },
+               "scripts/lint.sh", hot: false) { |r| rm.call(r, "scripts/lint.sh") }
+    rm_ci.call("COLD: deleting a path named only in a base script's COMMENT line stays COLD (DND-793)",
+               script_seed, "lib/notes.sh", hot: false) { |r| rm.call(r, "lib/notes.sh") }
+    rm_ci.call("COLD: deleting documentation a base script names stays COLD (DND-793)",
+               script_seed, "docs/runbook.md", hot: false) { |r| rm.call(r, "docs/runbook.md") }
+    rm_ci.call("COLD: deleting a path named only INSIDE a base data file stays COLD (DND-793)",
+               data_seed, "lib/other.sh", hot: false) { |r| rm.call(r, "lib/other.sh") }
+
+    # Sabotage: each mutant below must read the plain deletion COLD, or the
+    # cases above prove nothing about the part it removes.
+    #   base-walk-off   the base walk is never consulted (the pre-DND-793 code)
+    #   base-at-head    the "base" walk reads head's tree
+    rm_sabotage = lambda do |label, from, to|
+      site_ok = src.index(from) && src.index(from) < src.index("def self_test")
+      msrc = site_ok ? src.sub(from, to) : src
+      mpath = File.join(tmp, "blast-radius-#{label}-mutant")
+      File.write(mpath, msrc)
+      ci_n += 1
+      d = File.join(tmp, "ci-rm#{ci_n}")
+      b2, h2 = mkrepo.call(d, seed: guard_seed) { |r| rm.call(r, ".pkg/prod/bin/deploy-guard.sh") }
+      mo, _, ms = Open3.capture3(RbConfig.ruby, mpath, "--base", b2, "--head", h2, "--repo", d, "--manifest", DEFAULT_MANIFEST)
+      check.call("sabotage (#{label}): the deleted-guard case reads COLD (the cases discriminate, DND-793)",
+                 msrc != src && ms.exitstatus.zero? && mo.include?("BLAST-RADIUS COLD"),
+                 "mutated=#{msrc != src} exit=#{ms.exitstatus} out=#{mo}")
+    end
+    rm_sabotage.call("base-walk-off", "via = base_via(f, refs, repo, base) unless via || refs[:result][:present].include?(f)",
+                     "via = nil")
+    rm_sabotage.call("base-at-head", "refs[:base] ||= ci_references(repo, base)", "refs[:base] ||= ci_references(repo, refs[:result][:rev])")
 
     # 13. --owner-approval records without hiding
     d = File.join(tmp, "approved")
@@ -2872,6 +3032,17 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
                       wf.call(r, "post-merge.yml", deploy_wf.sub("terraform apply -auto-approve", "scripts/ship.sh"))
                     },
                     change: ->(r) { pr_change.call(r); put.call(r, "scripts/ship.sh", "#!/bin/sh\necho changed\n") })
+  # DND-793: the same script DELETED. It is absent at head, so only the base
+  # walk sees it; without it the pull_request-only edit beside it read
+  # ELIGIBLE, and a Slack click approved removing what merge-time CI runs.
+  not_eligible.call("a script a push workflow runs, DELETED beside a pull_request-only edit (DND-793)",
+                    ["scripts/ship.sh", "executed by .github/workflows/post-merge.yml at base"],
+                    seed: lambda { |r|
+                      pr_seed.call(r)
+                      put.call(r, "scripts/ship.sh", "#!/bin/sh\n")
+                      wf.call(r, "post-merge.yml", deploy_wf.sub("terraform apply -auto-approve", "scripts/ship.sh"))
+                    },
+                    change: ->(r) { pr_change.call(r); FileUtils.rm_f(File.join(r, "scripts/ship.sh")) })
   not_eligible.call("a diff that hits NO declared surface (nothing for a grant to approve)",
                     ["no declared surface"],
                     change: ->(r) { put.call(r, "lib/a.ex", "x\n") })
