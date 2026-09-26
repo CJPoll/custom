@@ -922,6 +922,9 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `ticket_number` | string | scalar |
 | | `revision` — OPTIONAL source-supplied provenance / ordering hint (Notion: `last_edited_time`, or finer); not a dedupe key | string | scalar |
 | | `changed_properties` (`notion.ticket.updated` only) | string | **collection** |
+| | `project_resolution` — how the ticket's project was resolved: `resolved`, `no-epic`, `no-epic-property`, `no-project` or `failed` (*A ticket's project*, below) | string | scalar |
+| | `project` — only when `project_resolution` is `resolved`: the project page's title | string | scalar |
+| | `project_id` — only when `project_resolution` is `resolved`: the project page's id, dashed and lower case | string | scalar |
 | `notion.ticket.deleted` (the **un-enriched** delete type — the entity may already be unfetchable, so it carries identity only) | `entity_id` — stable source entity handle | string | scalar |
 | | `revision` — OPTIONAL provenance from the deletion event (not an enrichment fetch); not a dedupe key | string | scalar |
 | `notion.comment.created`, `notion.comment.updated` (the **enriched** comment types) | `entity_id` — stable source entity handle | string | scalar |
@@ -960,6 +963,40 @@ clicked. It is not the grant's state and never an approval: whether a grant was
 approved, and whether it may be used, is read only from the server
 (*Owner approval grants* → *Redeem*). The grant token itself is stripped like
 every stamp.
+
+**A ticket's project** (DND-761). A Notion ticket database has no Project
+property. The project is two relation hops from the ticket: the ticket's
+`Epic` relation names one epic page, that epic's `Project` relation names one
+project page, and the project's name is that page's title. The ingress walks
+those hops when it enriches the ticket, under the same read-only enrichment
+token and the same bounded retry as the ticket's own fetch, and writes the
+outcome into the payload:
+
+- `resolved`: `project` (the title) and `project_id` (the page id, dashed and
+  lower case) are present.
+- `no-epic`: the `Epic` relation is empty. `no-epic-property`: the ticket's
+  database has no `Epic` property at all. `no-project`: the epic's `Project`
+  relation is empty or absent. Each is a legitimate absence, and neither
+  project field is present.
+- `failed`: the project could not be known. A read of the epic or the project
+  failed for any cause after the retry budget (a 404 here is the epic or
+  project being unreadable, never a deletion of the ticket), a relation names
+  more than one page or is truncated, an id is malformed, or the project page
+  is untitled. The ingress logs the ticket's `entity_id`, the reason and a
+  `Fix:`, and still emits the ticket: its own fields were enriched, only its
+  project is unknown. Neither project field is present.
+
+The relations are read **by property name** (`Epic`, `Project`), never by
+type: a ticket database has other relations (`Depends On`, `Blocks`) that are
+not its epic. Only relation ids and the project's title are read, never page
+content. The reconciliation re-emit (*Poller (fallback only)*) and the
+priority index's one-shot backfill (DND-436) resolve a page exactly this way,
+so every
+`notion.ticket.created`, `.updated` and `.undeleted` event carries
+`project_resolution`. `notion.ticket.deleted` and the comment types carry none
+of the three fields. The Epics and Projects databases must be readable by the
+enrichment integration; if they are not, every ticket with an epic reads
+`failed`, which the priority index reports (*Domain and owner-only items*).
 
 **`entity_id` is the declared, bindable entity handle carried by every
 source-emitted type that names a persistent ENTITY** — the Notion ticket types
@@ -4462,7 +4499,8 @@ app the event arrived on, never from the payload.
     item never indexed);
   - `failed:<cause>`: the event should have been an item and is not. The
     causes are `no-source-ref` (*Item identity and `source_ref`*),
-    `forbidden-field` (*The storage boundary*), `malformed-payload` and
+    `forbidden-field` (*The storage boundary*), `malformed-payload`,
+    `project-unresolved` (*Domain and owner-only items*) and
     `retries-exhausted`. The re-sync adds `resync-failed` (*Re-sync*).
 - **A skip is counted, and a failure is recorded and reported**
   (`~/.claude/CLAUDE.md` → *A failed lookup must never look like an empty
@@ -4700,16 +4738,30 @@ desired state* uses. It is derived per source, and `domain_basis` records how:
 - `notion_work`, `action_item`, `slack_ask` (the connected Slack is the work
   Slack, owner decision OQ-6), `forge_review` and `meeting` are `work`, with
   basis `source`.
-- `notion_personal` takes its domain from the ticket's project (an `Athena -`
-  project is `blend`), with basis `project:<name>`. When the event carries no
-  project, the domain is `personal` and the basis is `source-default`, and
-  the page shows that basis. The declared ticket payload has no project field
-  today (*Payload fields and their types per event type*). So until DND-436
-  adds one, every personal ticket is `personal` by `source-default`.
+- `notion_personal` takes its domain from the ticket's project, resolved
+  through its Epic (*Payload fields and their types per event type* → *A
+  ticket's project*). The owner's fleet policy maps the project's page id to a
+  domain (`notion_project_domains`, the map *Fleet report kinds and their
+  closed schema* classifies a run's `notion_project_id` through, seeded with
+  each `Athena —` project as `blend`). A project the policy does not map is
+  `personal`. Either way the basis is `project:<name>`. The project's name
+  never decides the domain. When the ticket has no project (`no-epic`,
+  `no-epic-property`, `no-project`), the domain is `personal` and the basis is
+  `source-default`, and the page shows that basis. When `project_resolution`
+  is `failed` or absent, the event fails `project-unresolved` and is not
+  indexed: an unknown domain is never read as `personal`.
+
+  **Later (2026-09-26):** this bullet read "an `Athena -` project is `blend`",
+  decided by the project's name, and said the ticket payload had no project
+  field, so every personal ticket was `personal` by `source-default`.
+  Superseded by DND-761. The real projects are named `Athena —` (an em dash),
+  so the hyphen rule never matched. The payload now carries the project
+  resolved through the Epic, and the domain comes from the owner's policy by
+  project id.
 - `manual` takes the domain the owner gives it, with basis `owner`.
 
-`project` is the ticket's project name when the event carries it, and `null`
-otherwise.
+`project` is the ticket's project name when its resolution is `resolved`, and
+`null` otherwise.
 
 **`owner_only`** marks an item only the owner can act on. It is never
 leasable. It is true for:
