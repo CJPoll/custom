@@ -42,6 +42,8 @@ SYSTEM_FILES="$(cd "$(dirname "${BASH_SOURCE[0]}")/../system-files" && pwd)" \
   || die "cannot locate system-files/ — run from the custom repo checkout"
 [ -f "$SYSTEM_FILES/$SERVICE_NAME.initd" ] \
   || die "missing $SYSTEM_FILES/$SERVICE_NAME.initd — run from the custom repo checkout"
+[ -f "$SYSTEM_FILES/lib/initd-proc-tree.sh" ] \
+  || die "missing $SYSTEM_FILES/lib/initd-proc-tree.sh — run from the custom repo checkout"
 
 [ "$(id -u)" -eq 0 ] || die "must run as root (use sudo)"
 getent passwd "$USER_NAME" >/dev/null \
@@ -63,6 +65,8 @@ fi
 
 # --- 2. install the OpenRC service (do NOT start until registered) -----------
 log "installing /etc/init.d/$SERVICE_NAME"
+# The initd sources this to end its whole process tree on stop (DND-812).
+run install -D -m 644 "$SYSTEM_FILES/lib/initd-proc-tree.sh" "/usr/local/lib/athena/initd-proc-tree.sh"
 run install -m 755 "$SYSTEM_FILES/$SERVICE_NAME.initd" "/etc/init.d/$SERVICE_NAME"
 if [ -e "/etc/conf.d/$SERVICE_NAME" ]; then
   log "keeping existing /etc/conf.d/$SERVICE_NAME"

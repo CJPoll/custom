@@ -96,13 +96,15 @@ run_as_owner_of() {
 
 cmd_service() {
     local f
-    for f in bt-hci-capture btmon.initd btmon.confd; do
+    for f in bt-hci-capture btmon.initd btmon.confd lib/initd-proc-tree.sh; do
         [ -e "$SYSTEM_FILES/$f" ] || die "missing $SYSTEM_FILES/$f"
     done
     command -v btmon > /dev/null 2>&1 || die "btmon not found (net-wireless/bluez)"
 
     echo "Installing the $SERVICE_NAME capture service"
     run_as_owner_of /usr/local/sbin install -m 755 "$SYSTEM_FILES/bt-hci-capture" "$CAPTURE_BIN"
+    # The initd sources this to end its whole process tree on stop (DND-812).
+    run_as_owner_of /usr/local/lib install -D -m 644 "$SYSTEM_FILES/lib/initd-proc-tree.sh" "/usr/local/lib/athena/initd-proc-tree.sh"
     run_as_owner_of /etc/init.d install -m 755 "$SYSTEM_FILES/btmon.initd" "/etc/init.d/$SERVICE_NAME"
     if [ -e "/etc/conf.d/$SERVICE_NAME" ]; then
         echo "  keeping existing /etc/conf.d/$SERVICE_NAME"
