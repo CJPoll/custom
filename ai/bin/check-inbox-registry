@@ -2,8 +2,8 @@
 # frozen_string_literal: true
 
 # check-inbox-registry — assert this machine's Athena Inbox tenancy registry
-# matches the committed source of truth, and say which entry drifted when it
-# does not.
+# matches the committed source of truth AS IT LANDED, and say which entry
+# drifted when it does not.
 #
 # Why it exists: the registry (`$ATHENA_INBOX_ROOT/projects/<project>.json`) is
 # untracked machine-local state, and the contract defines a missing entry as
@@ -19,12 +19,40 @@
 # Read-only, always. It never creates, repairs, or touches anything, including
 # on the failure path; repair is the installer's job.
 #
-# Environment-safe by design, like check-hooks-registered: if the inbox root
-# does not exist, this machine does not run the facility (a fresh checkout, a CI
-# or agent environment with a different HOME, a container), there is nothing to
-# assert, and it PASSES with a note. It fails only when the root exists AND a
-# declared entry is missing, malformed, mis-permissioned, or edited away from
-# the committed text.
+# THE BAR IS THE REGISTRY THAT LANDED, NOT THE BRANCH'S (DND-792, folded into
+# DND-743 with the same fix for check-hooks-registered). The entries the live
+# registry MUST hold are ai/inbox/registry.json as it landed on origin's main
+# (ai/lib/landed.rb, which also honours harness-gate's pin). It used to be the
+# branch's own copy, which broke both ways:
+#   - a branch that ADDED an entry or a channel failed until the live registry
+#     was provisioned with it: machine state became a precondition of reviewing
+#     code, and the only route to green was installing what had not landed;
+#   - a branch that REMOVED or edited a landed entry lowered its own bar, so real
+#     drift on main passed. See ~/dev/custom/CLAUDE.md -> "A check's own bar
+#     must not live in the diff it is checking".
+# The bar is origin/main's TIP, not the union with merge-base(HEAD, origin/main)
+# that the other Landed callers take. An entry is matched byte for byte, so a
+# live file can match only one version of it: the one the main checkout's
+# installer writes, which is the tip's. The merge-base adds no protection here:
+# the tip is already proven on origin, and no branch can move it.
+#
+# So the check reports, in order:
+#   1. MALFORMED BRANCH REGISTRY (exit 2): this checkout's registry.json fails
+#      the rules the installer applies. A code error in the diff.
+#   2. COULD NOT MEASURE (exit 3): origin unreachable, a local origin/main that
+#      disagrees with origin, or a malformed LANDED registry. Never a pass.
+#   3. DRIFT (exit 1): a landed entry that is missing, malformed,
+#      mis-permissioned, or edited away from the landed text; or a lost root on
+#      a machine where a landed entry's repo is checked out.
+#   4. PENDING: what this branch adds, retires or edits in registry.json. Named,
+#      never a failure: it is provisioned after it lands, from the main checkout.
+#
+# Environment-safe, like check-hooks-registered: if the inbox root does not
+# exist and no LANDED entry's repo is checked out here, this machine does not
+# run the facility (a fresh checkout, a CI or agent environment with a different
+# HOME, a container), there is nothing to assert, and it PASSES with a note. It
+# still needs origin to say which entries landed: a machine that cannot reach
+# origin gets exit 3, the same as every other landed-bar check in the gate.
 #
 # What it never does: read, name, or otherwise surface an entry the committed
 # list does not declare. An unrelated tenant's file in projects/ is left
@@ -38,63 +66,172 @@
 #   ai/bin/check-inbox-registry --self-test  verify the checker's own logic
 #
 # Environment: ATHENA_INBOX_ROOT (default ~/.local/share/athena) selects the
-# root; ATHENA_INBOX_REGISTRY overrides the committed source of truth (tests).
+# root. ATHENA_INBOX_REGISTRY is a TEST SEAM that replaces only the BRANCH
+# registry (validation and pending); the landed bar is always read from origin,
+# so no environment variable can lower it.
 #
-# Exit codes: 0 ok / not-this-environment · 1 drift · 2 the committed source of
-# truth itself is missing or malformed
+# Exit codes: 0 ok / not-this-environment · 1 drift · 2 this branch's
+# registry.json is missing or malformed · 3 could not measure the landed bar
 
 require_relative "../inbox/lib/registry"
+require_relative "../lib/landed"
 
-def run
-  entries = InboxRegistry.declared
+REGISTRY_REL    = "ai/inbox/registry.json"
+EXIT_OK         = 0
+EXIT_FAIL       = 1
+EXIT_MALFORMED  = 2
+EXIT_UNMEASURED = 3
+
+# The entries that LANDED: ai/inbox/registry.json at origin/main's tip (see
+# "THE BAR IS THE REGISTRY THAT LANDED" above for why the tip alone). Returns
+# [description, entries]. Raises Landed::Unreadable (a malformed landed
+# registry included, carrying every probe) or Landed::Mismatch. Empty entries
+# when the tip has no registry file at all.
+def landed_entries(root = InboxRegistry.repo_dir)
+  pts, probes = Landed.points(root)
+  label, sha = pts.first
+  begin
+    text = Landed.file_at(root, sha, REGISTRY_REL, label)
+    entries = text ? InboxRegistry.parse(text, "#{REGISTRY_REL} @ #{label} #{sha[0, 12]}") : []
+  rescue InboxRegistry::Error => e
+    raise Landed::Unreadable.new(probes + [[label, e.message]])
+  rescue Landed::Unreadable => e
+    raise Landed::Unreadable.new(probes + e.probes)
+  end
+  ["landed #{REGISTRY_REL} (#{label} @ #{sha[0, 12]})", entries]
+end
+
+# The landed bar as [description, entries], or [nil, lines] when it could not
+# be measured (lines explain why).
+def measure_landed(landed)
+  landed.call
+rescue Landed::Unreadable => e
+  [nil, Landed.unreadable_lines("inbox registry", e.probes)]
+rescue Landed::Mismatch => e
+  [nil, Landed.mismatch_lines(e.local, e.remote, e.source)]
+end
+
+# What this branch's registry changes relative to the landed one, one line per
+# entry file. None of it is required of the live registry until it lands.
+def pending_changes(branch, landed)
+  have = landed.to_h { |p| [p["file"], p["entry"]] }
+  want = branch.to_h { |p| [p["file"], p["entry"]] }
+  lines = (want.keys - have.keys).map do |file|
+    names = channel_names(want[file])
+    "#{file}: a new entry (channels: #{names.empty? ? 'none' : names.join(', ')})"
+  end
+  (have.keys - want.keys).each do |file|
+    lines << "#{file}: retired on this branch (the landed entry is still required until this lands)"
+  end
+  (want.keys & have.keys).each do |file|
+    lines << "#{file}: #{entry_change(have[file], want[file])}" unless want[file] == have[file]
+  end
+  lines
+end
+
+def channels_of(entry)
+  entry["channels"].is_a?(Hash) ? entry["channels"] : {}
+end
+
+def channel_names(entry)
+  channels_of(entry).keys
+end
+
+# "channel(s) added: x; other key(s) changed: repo" for one entry's edit.
+def entry_change(before, after)
+  was = channels_of(before)
+  now = channels_of(after)
+  changed = (now.keys & was.keys).reject { |k| now[k] == was[k] }
+  others = ((before.keys | after.keys) - ["channels"]).sort.reject { |k| before[k] == after[k] }
+  others << "channels (not an object)" if before["channels"] != after["channels"] && was == now
+  [["channel(s) added", now.keys - was.keys], ["channel(s) removed", was.keys - now.keys],
+   ["channel(s) changed", changed], ["other key(s) changed", others]]
+    .reject { |_, names| names.empty? }
+    .map { |what, names| "#{what}: #{names.join(', ')}" }
+    .join("; ")
+end
+
+def report_pending(pending, out = $stdout)
+  return if pending.empty?
+
+  out.puts "  #{pending.size} change(s) this branch makes to #{REGISTRY_REL} (pending, not a failure):"
+  pending.each { |m| out.puts "  ~ #{m}" }
+  out.puts "  After the branch lands, provision them with `scripts/setup-inbox-registry --install` " \
+           "from the MAIN checkout. Not before: the live registry is judged against what landed."
+end
+
+def unmeasured(lines)
+  warn "check-inbox-registry: COULD NOT MEASURE — this is not a pass."
+  lines.each { |l| warn l }
+  EXIT_UNMEASURED
+end
+
+# The check. `landed` is how the landed registry is read (origin, via Landed);
+# the inline self-test injects it so that suite stays hermetic.
+def run(landed: -> { landed_entries })
+  begin
+    branch = InboxRegistry.declared
+  rescue InboxRegistry::Error => e
+    warn "check-inbox-registry: FAIL — this branch's registry cannot be used: #{e.message}"
+    warn "Fix: repair #{REGISTRY_REL} on this branch (`git restore #{REGISTRY_REL}` to start over): " \
+         "it is an object with a \"projects\" array of " \
+         "{\"file\": \"<name>.json\", \"entry\": {\"v\":1,\"repo\":\"~/dev/<p>/.git\",\"channels\":{}}}."
+    return EXIT_MALFORMED
+  end
   note = InboxRegistry.validation_note
+
+  bar, entries = measure_landed(landed)
+  return unmeasured(entries) if bar.nil?
+
+  pending = pending_changes(branch, entries)
 
   unless File.directory?(InboxRegistry.root)
     # "No root" means one of two very different things, and conflating them is
-    # how the whole registry disappears quietly. If a declared repo is checked
-    # out here, this IS the machine the committed list describes and the root
-    # should exist — so its absence is drift. Otherwise there is genuinely
-    # nothing to assert.
+    # how the whole registry disappears quietly. If a LANDED entry's repo is
+    # checked out here, this IS the machine the committed list describes and the
+    # root should exist — so its absence is drift. Otherwise there is genuinely
+    # nothing to assert. The landed list, never the branch's: a branch that
+    # deleted the entry proving this is the machine would otherwise pass.
     if InboxRegistry.declared_repo_present?(entries)
       warn "check-inbox-registry: FAIL — the inbox root #{InboxRegistry.root} does not exist, " \
-           "but this machine has a checkout of a repo the committed list declares, so it is " \
+           "but this machine has a checkout of a repo the #{bar} declares, so it is " \
            "the machine that list describes."
-      warn "Fix: run `scripts/setup-inbox-registry --install` to recreate the root and the " \
-           "declared entries. If this machine should no longer be a tenant, remove its " \
-           "entry from ai/inbox/registry.json instead."
-      return 1
+      warn "Fix: run `scripts/setup-inbox-registry --install` from the MAIN checkout to recreate " \
+           "the root and the declared entries. If this machine should no longer be a tenant, " \
+           "remove its entry from #{REGISTRY_REL} and land that."
+      report_pending(pending, $stderr)
+      return EXIT_FAIL
     end
-    puts "check-inbox-registry: no inbox root at #{InboxRegistry.root} and no declared repo " \
-         "checked out here — nothing to assert (not this environment). OK."
-    return 0
+    puts "check-inbox-registry: no inbox root at #{InboxRegistry.root} and no repo the #{bar} " \
+         "declares is checked out here — nothing to assert (not this environment). OK."
+    report_pending(pending)
+    return EXIT_OK
   end
 
   problems = InboxRegistry.drift(entries)
   if problems.empty?
-    puts "check-inbox-registry: all #{entries.size} declared registry " \
+    puts "check-inbox-registry: all #{entries.size} landed registry " \
          "entr#{entries.size == 1 ? 'y' : 'ies'} #{entries.size == 1 ? 'is' : 'are'} installed and " \
-         "#{entries.size == 1 ? 'matches' : 'match'} #{InboxRegistry.registry_path}. OK." +
+         "#{entries.size == 1 ? 'matches' : 'match'} the #{bar}. OK." +
          (note ? " (#{note})" : "")
-    return 0
+    report_pending(pending)
+    return EXIT_OK
   end
 
-  warn "check-inbox-registry: FAIL — #{problems.size} registry problem(s) under #{InboxRegistry.projects_dir}:"
+  warn "check-inbox-registry: FAIL — #{problems.size} registry problem(s) under #{InboxRegistry.projects_dir} " \
+       "(bar: #{bar}):"
   problems.each { |p| warn "  - #{p}" }
   warn "  note: #{note}" if note
-  warn "Fix: run `scripts/setup-inbox-registry --install` to re-materialise the " \
-       "declared entries from ai/inbox/registry.json (it writes only the entries it " \
+  warn "Fix: run `scripts/setup-inbox-registry --install` from the MAIN checkout, up to date with " \
+       "origin/main, to re-materialise the landed entries (it writes only the entries it " \
        "declares, backs up anything it replaces, and never touches another entry " \
        "in projects/). If an entry was intentionally retired or its channels " \
-       "changed, edit ai/inbox/registry.json to match and re-run the installer — " \
+       "changed, edit #{REGISTRY_REL}, land it, and re-run the installer — " \
        "the committed file is the source of truth, and a live entry that exists " \
-       "nowhere in git is exactly the state this check exists to prevent."
-  1
-rescue InboxRegistry::Error => e
-  warn "check-inbox-registry: FAIL — #{e.message}"
-  warn "Fix: restore ai/inbox/registry.json from git (`git restore ai/inbox/registry.json`) " \
-       "or repair its JSON: it is an object with a \"projects\" array of " \
-       "{\"file\": \"<name>.json\", \"entry\": {\"v\":1,\"repo\":\"~/dev/<p>/.git\",\"channels\":{}}}."
-  2
+       "nowhere in git is exactly the state this check exists to prevent. A change " \
+       "only this branch makes is listed as pending below and is never the cause."
+  report_pending(pending, $stderr)
+  EXIT_FAIL
 end
 
 # ---------------------------------------------------------------------------
@@ -132,15 +269,22 @@ def self_test
     root = File.join(dir, "root")
     ENV["ATHENA_INBOX_ROOT"] = root
 
+    # The landed bar is injected so this suite stays hermetic: by default the
+    # branch copy (src) stands in for what landed. The origin-backed read is
+    # proven end to end, on fixture repos with a bare origin, by
+    # ai/test/check-inbox-registry/self-test.sh.
+    as_landed = ->(file) { -> { ["fixture landed #{File.basename(file)}", InboxRegistry.parse(File.read(file), file)] } }
+    go = ->(landed = as_landed.call(src)) { quiet.call { run(landed: landed) } }
+
     # 1. Absent root -> not this environment, exit 0. (Env-safety: the check
     #    must never false-fail a machine that does not run the facility.)
-    check.call("absent root -> exit 0", quiet.call { run } == 0)
+    check.call("absent root -> exit 0", go.call == 0)
 
     # 2. Root present, projects/ absent -> drift, exit 1. (The opposite of the
     #    case above: the facility IS here, so a missing registry is real.)
     FileUtils.mkdir_p(root)
     File.chmod(0o700, root)
-    check.call("root without projects/ -> exit 1", quiet.call { run } == 1)
+    check.call("root without projects/ -> exit 1", go.call == 1)
 
     # 3. A correctly installed entry -> clean.
     projects = File.join(root, "projects")
@@ -206,7 +350,7 @@ def self_test
     dupe = { "projects" => [{ "file" => "a.json", "entry" => entry },
                             { "file" => "b.json", "entry" => entry }] }
     File.write(src, JSON.pretty_generate(dupe))
-    check.call("two entries claiming one repo -> exit 2", quiet.call { run } == 2)
+    check.call("two entries claiming one repo -> exit 2", go.call == 2)
 
     # 12. An absent root is NOT "not this environment" when a declared repo is
     #     checked out here: that proves this is the machine the committed list
@@ -215,11 +359,43 @@ def self_test
     here = { "v" => 1, "repo" => InboxRegistry.git_common_dir(InboxRegistry.repo_dir), "channels" => {} }
     File.write(src, JSON.pretty_generate({ "projects" => [{ "file" => "here.json", "entry" => here }] }))
     FileUtils.rm_rf(root)
-    check.call("absent root + a declared repo checked out here -> exit 1", quiet.call { run } == 1)
+    check.call("absent root + a declared repo checked out here -> exit 1", go.call == 1)
 
     # 13. A malformed source of truth exits 2 (a code error, not machine state).
     File.write(src, "{ not json")
-    check.call("malformed source of truth -> exit 2", quiet.call { run } == 2)
+    check.call("malformed source of truth -> exit 2", go.call == 2)
+
+    # 14-19. THE BAR IS WHAT LANDED (DND-792). The live registry holds exactly
+    #        the landed entry; the branch copy (src) differs from it.
+    landed_src = File.join(dir, "landed.json")
+    File.write(landed_src, JSON.pretty_generate({ "projects" => [{ "file" => "demo.json", "entry" => entry }] }))
+    landed = as_landed.call(landed_src)
+    FileUtils.mkdir_p(projects)
+    File.chmod(0o700, root)
+    File.chmod(0o700, projects)
+    File.write(path, InboxRegistry.render(entry))
+    File.chmod(0o600, path)
+    peer = entry.merge("repo" => File.join(dir, "nowhere-peer", ".git"))
+    File.write(src, JSON.pretty_generate({ "projects" => [{ "file" => "demo.json", "entry" => entry },
+                                                          { "file" => "peer.json", "entry" => peer }] }))
+    check.call("a branch-added entry, not installed, is pending -> exit 0", go.call(landed) == 0)
+    pend = pending_changes(InboxRegistry.declared, InboxRegistry.parse(File.read(landed_src), landed_src))
+    check.call("...and is named as pending", pend.size == 1 && pend.first.start_with?("peer.json: a new entry"))
+
+    wider = entry.merge("channels" => entry["channels"].merge("extra" => { "kind" => "log", "path" => "extra.jsonl" }))
+    File.write(src, JSON.pretty_generate({ "projects" => [{ "file" => "demo.json", "entry" => wider }] }))
+    pend = pending_changes(InboxRegistry.declared, InboxRegistry.parse(File.read(landed_src), landed_src))
+    check.call("a branch-added channel is pending, named -> exit 0",
+               go.call(landed) == 0 && pend == ["demo.json: channel(s) added: extra"])
+
+    File.write(src, JSON.pretty_generate({ "projects" => [] }))
+    FileUtils.rm_f(path)
+    check.call("a landed entry the branch retires, deleted live -> still drift, exit 1", go.call(landed) == 1)
+
+    unreadable = -> { raise Landed::Unreadable.new([["fixture probe", "unreachable"]]) }
+    check.call("landed bar unreadable -> exit 3", go.call(unreadable) == 3)
+    mismatch = -> { raise Landed::Mismatch.new("a" * 40, "b" * 40) }
+    check.call("local origin/main disagrees with origin -> exit 3", go.call(mismatch) == 3)
   end
 
   # 10. Repo identity resolves at the point of capture: this repo's common dir
@@ -252,12 +428,18 @@ if ARGV.include?("--help") || ARGV.include?("-h")
       ai/bin/check-inbox-registry              assert this machine's Athena Inbox
                                                tenancy entries under
                                                $ATHENA_INBOX_ROOT/projects/ match
-                                               the committed ai/inbox/registry.json
+                                               ai/inbox/registry.json AS LANDED on
+                                               origin/main; what only this branch
+                                               changes there is named as pending
+                                               (not a failure). Exit 0 ok, 1 drift,
+                                               2 malformed branch registry, 3 could
+                                               not measure the landed registry
       ai/bin/check-inbox-registry --self-test  deterministic suite (no model)
       ai/bin/check-inbox-registry --help       this text
 
-    Environment-safe: passes with a note when there is no inbox root (CI/agent
-    env). Recover drift with `scripts/setup-inbox-registry --install`.
+    Environment-safe: passes with a note when there is no inbox root and no
+    landed entry's repo is checked out here (CI/agent env). Recover drift with
+    `scripts/setup-inbox-registry --install` from the main checkout.
   TXT
   exit 0
 end
