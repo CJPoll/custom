@@ -112,6 +112,16 @@ On a `PARK:` message from your admiral, stop where you are:
    you could not save. Parking never removes the obligation to report.
 4. End your turn. Kill nothing but your own children, by PID.
 
+**A resume point must survive a reboot.** A pause often ends in a machine
+restart, and `/tmp` (the session scratchpad included) does not survive one.
+Before a captain writes its PARKED report, or a draining admiral writes its
+final report, copy every helper the resume plan names (a send script, a landing
+or merge-wait script, a fixture) into the run's coordination dir,
+`~/dev/custom/ai-artifacts/coordination/<run>/`, and cite that path. Never cite
+a `/tmp` path as a resume step. Measured 2026-09-26, two runs after one reboot:
+slack-interactive's `slackiv-*.sh` landing scripts and DND-558's live-verify
+`dnd-558-send.sh` were both gone and had to be rebuilt.
+
 ## Run ownership: the invariant every resume path keeps
 
 **At most one admiral owns a run at any time.** Ownership changes hands only
