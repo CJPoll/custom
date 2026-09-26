@@ -54,43 +54,9 @@ BIN="${AI}/bin/fleet-report"
 # shellcheck source=../lib/fleet/manager.sh
 . "${AI}/lib/fleet/manager.sh"
 
-# run_detached <session_id> <kind> <limit-s> <command...>
-# The body of one background report. Its stderr goes to a private temp file
-# (removed by the trap); on failure its first line -- fleet-report's own
-# one-line `Fix:` -- is appended to the failure log.
-run_detached() {
-  local sid="$1" kind="$2" limit="$3" tmp rc msg
-  shift 3
-  if tmp="$(mktemp 2>/dev/null)"; then
-    # shellcheck disable=SC2064
-    trap "rm -f -- '${tmp}'" EXIT
-  else
-    tmp="/dev/null"   # no message capture; never a trap that removes it
-  fi
-  trap 'exit 143' TERM INT HUP
-  [ -n "${FLEET_HOOK_PIDFILE:-}" ] && printf '%s\n' "$$" >> "${FLEET_HOOK_PIDFILE}"
-  timeout "${limit}" "$@" </dev/null >/dev/null 2>"${tmp}"
-  rc=$?
-  if [ "${rc}" -eq 0 ]; then
-    # A successful session_started -- whether from the normal SessionStart
-    # detach or a PostToolUse self-heal (DND-497) -- marks the session so
-    # neither path resends it. A stamp that cannot be written is logged; the
-    # worst case is a resend, never a lost report. What a resend does server-
-    # side: the contract, "Who sends what" -> the self-heal bullet.
-    [ "${kind}" = "session_started" ] && fleet_record_started "${sid}"
-    return 0
-  fi
-  if [ "${rc}" -eq 124 ]; then
-    msg="fleet-report: ${kind} did not finish within ${limit}s and was killed. Fix: check the network and the server; the next report retries on its own."
-  else
-    msg="$(grep -m 1 'Fix:' "${tmp}" 2>/dev/null)"
-    [ -n "${msg}" ] || msg="fleet-report: ${kind} failed (exit ${rc}) with no message. Fix: run ai/bin/fleet-report by hand for this kind to see why."
-  fi
-  fleet_log_failure "${sid}" "${kind}" "${msg}"
-}
-
 case "${1:-}" in
-  --detached) shift; run_detached "$@"; exit 0 ;;
+  # The body of one background report: manager.sh -> fleet_run_detached.
+  --detached) shift; fleet_run_detached "$@"; exit 0 ;;
   --self-test) exec "${HOOK_DIR}/fleet-report.self-test.sh" ;;
   -h|--help)
     cat <<'EOF'

@@ -12,8 +12,9 @@
 #
 # Source order: domain.sh, then this file. Requires jq and GNU date.
 
-# The fleet workers the drain guard gates. Every other spawn passes.
-FLEET_WORKER_TYPES="athena-admiral athena-captain"
+# The fleet workers the drain guard gates are FLEET_WORKER_TYPES, and
+# fleet_is_fleet_worker decides membership. Both live in domain.sh, because the
+# lifecycle kinds (DND-560) use the same set. Every other spawn passes.
 
 # A cache older than this is `expired-cache` (its snapshot is still used).
 FLEET_CACHE_STALE_S=86400
@@ -30,11 +31,6 @@ FLEET_LOCAL_TZ="America/Denver"
 FLEET_LOCAL_DAYS="[1,2,3,4,5]"
 FLEET_LOCAL_START="08:00"
 FLEET_LOCAL_END="18:00"
-
-# fleet_is_fleet_worker <subagent_type> -- status 0 for a fleet worker.
-fleet_is_fleet_worker() {
-  case " ${FLEET_WORKER_TYPES} " in *" ${1:-} "*) [ -n "${1:-}" ] ;; *) return 1 ;; esac
-}
 
 # fleet_control_url <origin> <claude_session_id>
 # The REST read (contract, *Reading control state and the control cache*):

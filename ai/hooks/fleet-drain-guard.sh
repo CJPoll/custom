@@ -31,6 +31,11 @@
 # Every fleet-worker decision is appended to
 # $XDG_STATE_HOME/athena/fleet/drain-guard.log (evidence for a live verify).
 #
+# Every DENY of a fleet worker is also reported to the fleet registry as
+# `agent_end` by tool_use_id, outcome `spawn_denied` (DND-560; contract, "Who
+# sends what"), detached through ai/bin/fleet-report so it never delays or
+# changes the decision. A failed report lands in report-failures.log with Fix:.
+#
 # --self-test runs ai/hooks/fleet-drain-guard.self-test.sh.
 
 set -u
@@ -74,6 +79,39 @@ command -v jq >/dev/null 2>&1 || deny_raw "fleet-drain-guard: jq is not on PATH,
 . "${AI}/lib/fleet/control-effects.sh"
 # shellcheck source=../lib/fleet/control-manager.sh
 . "${AI}/lib/fleet/control-manager.sh"
+# shellcheck source=../lib/fleet/manager.sh
+. "${AI}/lib/fleet/manager.sh"
+
+# The body of the detached spawn_denied report (report_denied below).
+if [ "${1:-}" = "--detached" ]; then
+  shift
+  fleet_run_detached "$@"
+  exit 0
+fi
+
+sid="" subagent_type="" cwd="" tool_use_id=""
+
+# report_denied -- DND-560: a fleet-worker spawn this guard denies is reported
+# as agent_end spawn_denied by its tool_use_id, detached and bounded, so a
+# refused spawn never reads as a pending captain on the fleet page (contract,
+# "Who sends what"). It never changes the decision and never delays it. A deny
+# with no usable session_id or tool_use_id cannot be joined to its spawn; that
+# is logged, not sent.
+report_denied() {
+  fleet_is_fleet_worker "${subagent_type}" || return 0
+  fleet_valid_id "${sid}" || return 0   # the no-session_id deny is already logged by fleet_guard_record
+  if ! fleet_valid_id "${tool_use_id}"; then
+    fleet_log_failure "${sid}" agent_end "fleet-drain-guard: denied a ${subagent_type} spawn whose stdin carries no usable tool_use_id (${tool_use_id@Q}), so its spawn_denied was not reported. Fix: report this; DND-541 measured tool_use_id on every PreToolUse(Agent)." 2>/dev/null
+    return 0
+  fi
+  (
+    case "${cwd}" in /*) [ -d "${cwd}" ] && cd -- "${cwd}" 2>/dev/null ;; esac
+    setsid -f "${SELF}" --detached "${sid}" agent_end "$(fleet_seconds "${FLEET_HOOK_TIMEOUT_S:-}" 30)" \
+      "${AI}/bin/fleet-report" agent-end --session-id "${sid}" --tool-use-id "${tool_use_id}" \
+      --agent-type "${subagent_type}" --outcome spawn_denied </dev/null >/dev/null 2>&1
+  )
+  return 0
+}
 
 # emit <reason-or-empty> <warning-or-empty>
 # A deny when <reason> is set; otherwise a pass that carries the warning. A
@@ -81,6 +119,7 @@ command -v jq >/dev/null 2>&1 || deny_raw "fleet-drain-guard: jq is not on PATH,
 emit() {
   local reason="$1" warning="$2"
   if [ -n "${reason}" ]; then
+    report_denied
     jq -n -c --arg r "${reason}" --arg w "${warning}" \
       '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}
        + (if $w == "" then {} else {systemMessage: $w} end)'
@@ -94,13 +133,13 @@ emit() {
 INPUT="$(cat 2>/dev/null)"
 fields="$(printf '%s' "${INPUT}" | jq -r '
   if type != "object" then error("not an object") else
-  [ (.session_id // ""), (.tool_input.subagent_type // ""), (.cwd // "") ]
+  [ (.session_id // ""), (.tool_input.subagent_type // ""), (.cwd // ""), (.tool_use_id // "") ]
   | map(if type == "string" then . else tostring end | gsub("[\u001f\n]"; " "))
   | join("\u001f") end' 2>/dev/null)" || fields=""
 if [ -z "${fields}" ]; then
   emit "fleet-drain-guard: the hook JSON on stdin could not be parsed, so this spawn could not be classified and was refused. Fix: report this (Claude Code's hook payload shape may have changed; DND-428 measured it), and do not retry the spawn in a loop." ""
 fi
-IFS=$'\x1f' read -r sid subagent_type cwd <<<"${fields}"
+IFS=$'\x1f' read -r sid subagent_type cwd tool_use_id <<<"${fields}"
 
 # Not a fleet worker: pass untouched, no server call, no log line.
 fleet_is_fleet_worker "${subagent_type}" || exit 0
