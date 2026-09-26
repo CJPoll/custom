@@ -48,8 +48,36 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   exit 0
 end
 
-install = ARGV.include?("--install")
-check   = ARGV.include?("--check")
+require_relative "../lib/strict_argv"
+
+# Parsed BEFORE any read or write, for the same reason --help is: an argument
+# this tool does not recognise must never fall through to the rewriting
+# default (DND-526). Every argument must be a declared flag.
+CLI_SPEC = { "--install" => :switch, "--check" => :switch }.freeze
+
+# -> [opts, nil] on success, [nil, reason] on a usage error.
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  if opts["--check"] && opts["--install"]
+    return [nil, "--check writes nothing and --install writes ~/.claude/agents; pass one"]
+  end
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+cli, reason = parse_cli(ARGV)
+if reason
+  warn "build-agents: usage error — #{reason}."
+  warn "  Fix: re-run with only the flags `ai/bin/build-agents --help` lists: no " \
+       "argument (build), --check (verify, writes nothing), or --install. An " \
+       "unrecognised argument is refused, not ignored: ignoring it would run " \
+       "the default, which REWRITES ai/agents/*.md."
+  exit 2
+end
+install = cli.fetch("--install", false)
+check   = cli.fetch("--check", false)
 
 errors = []
 def die(errors)
