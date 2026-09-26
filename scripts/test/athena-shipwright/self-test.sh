@@ -1519,20 +1519,67 @@ fi
 # The detector side has a second writer (the inbox-client watchdog) on the
 # same identity. send-mail REFUSES while the other holds .sender.lock; the
 # runner retries that refusal briefly instead of losing the tick's alert.
+# The holder releases only once the runner has recorded a refused attempt, so
+# the case always exercises the retry; it gives up after 30s, which fails the
+# case rather than passing it.
 clear_alerts
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
 old_file "$r" erl_crash.dump
 mkdir -p "${ALERTS}"; lockf="${ALERTS}/.sender.lock"; : >"${lockf}"
 rm -f "${TMP}/lock-held"
-( exec 7<>"${lockf}"; flock 7; : >"${TMP}/lock-held"; sleep 3 ) &
+runs="$(sd "$r")/runs"
+( exec 7<>"${lockf}"; flock 7; : >"${TMP}/lock-held"
+  for _ in $(seq 1 300); do
+    grep -qs '^alert: sender lock busy' "${runs}"/*.skipped && break
+    sleep 0.1
+  done ) &
 HOLDER_PID=$!
 for _ in $(seq 1 100); do [ -e "${TMP}/lock-held" ] && break; sleep 0.1; done
 rc="$(run_runner "$r" SHIPWRIGHT_STALE_DIRT_ESCALATE=1)"
 wait "$HOLDER_PID" 2>/dev/null; HOLDER_PID=""
-if [ -e "${TMP}/lock-held" ] && [ "$rc" -eq 0 ] && [ "$(alert_count)" = "1" ]; then
-  ok "a send refused because the other detector-side writer holds the lock is retried and delivered"
+rec="$(find "${runs}" -maxdepth 1 -name '*.skipped' | sort | tail -n1)"
+if [ -e "${TMP}/lock-held" ] && [ "$rc" -eq 0 ] && [ "$(alert_count)" = "1" ] \
+   && grep -q '^alert: sender lock busy (attempt 1/3); retrying$' "$rec" \
+   && grep -q '^alert: harness-alerts ' "$rec"; then
+  ok "a send refused because the other detector-side writer holds the lock is retried (the record shows the refusal) and delivered"
 else
-  bad "lock contention retried" "held=$([ -e "${TMP}/lock-held" ] && echo yes) rc=$rc alerts=$(alert_count) err=$(cat "$a/runner.err")"
+  bad "lock contention retried" "held=$([ -e "${TMP}/lock-held" ] && echo yes) rc=$rc alerts=$(alert_count) record=$(cat "$rec" 2>&1) err=$(cat "$a/runner.err")"
+fi
+
+# The attendant relays the RECORD's paths to the owner, never the message's.
+# The raw list in the record is `status -uall`: an abandoned node_modules is
+# every file in it (30k measured). So the record also carries a relay_paths
+# block: untracked directories collapsed, at most 20 lines plus an "... and N
+# more" tail, indented so no line of it can pass for the runner's dirt: line.
+# The message's paths are that same block.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+mkdir -p "$r/node_modules/pkg"
+for i in $(seq 1 40); do printf 'x\n' >"$r/node_modules/pkg/f$i.js"; done
+for i in $(seq 1 24); do printf 'x\n' >"$r/stray-$i.log"; done
+find "$r/node_modules" "$r"/stray-*.log -exec touch -h -d '2 days ago' {} +
+run_runner "$r" SHIPWRIGHT_STALE_DIRT_ESCALATE=1 >/dev/null
+rec="$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.skipped' | sort | tail -n1)"
+block="$(sed -n '/^relay_paths:/,$p' "$rec" | sed '1d' | sed -n '/^  /!q;p')"
+lines="$(printf '%s\n' "$block" | grep -c .)"
+if [ "$lines" = "21" ] && grep -qx '  node_modules/' <<<"$block" \
+   && ! grep -q 'node_modules/pkg' <<<"$block" \
+   && grep -qx '  \.\.\. and 5 more' <<<"$block"; then
+  ok "the skip record carries a collapsed, capped relay_paths block (node_modules/ as one line; 20 + '... and 5 more')"
+else
+  bad "record relay_paths" "lines=$lines record=$(cat "$rec" 2>&1)"
+fi
+m="$(alert_msgs | head -n1)"
+mblock="$( [ -n "$m" ] && sed -n '/^paths:/,$p' "$m" | sed '1d' | sed -n '/^  /!q;p')"
+if [ -n "$block" ] && [ "$mblock" = "$block" ]; then
+  ok "the message names exactly the record's relay_paths block"
+else
+  bad "message paths = record relay_paths" "record=$block message=$mblock"
+fi
+if [ "$(grep -c '^dirt: ' "$rec")" = "1" ] && grep '^dirt: ' "$rec" | grep -q '^dirt: STALE '; then
+  ok "the runner's dirt: line is the record's last line starting 'dirt: ' (the relay block is indented)"
+else
+  bad "last dirt: line" "record=$(cat "$rec" 2>&1)"
 fi
 
 # The runner's own state under ai-artifacts/ is never dirt, so it can never
