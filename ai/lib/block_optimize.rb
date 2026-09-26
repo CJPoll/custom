@@ -567,9 +567,10 @@ module BlockOptimize
       parts << "You are improving the PROSE of an AI agent definition, the athena-admiral, so that it handles one " \
                "failing evaluation case correctly without changing how it handles any other case."
       parts << "## The failing case: #{case_name}\n\nThe case's meta (its mode, the actions it forbids and expects):\n" \
-               "```\n#{meta}```\n\nThe scenario the admiral is given:\n```\n#{scenario}```\n\n#{observed}"
+               "~~~~\n#{meta}~~~~\n\nThe scenario the admiral is given:\n~~~~\n#{scenario}~~~~\n\n#{observed}"
       parts << "## The files you may edit (ONLY these, in place)\n\n" +
-               files.map { |path, text| "### #{path}\n```\n#{text}```" }.join("\n\n")
+               # A tilde fence, so a block's own ``` fences cannot close it early.
+               files.map { |path, text| "### #{path}\n~~~~\n#{text}~~~~" }.join("\n\n")
       parts << "## Constraints\n\n" \
                "- The rendered admiral is #{render_lines} lines and a size check caps it; the budget will not be " \
                "raised. Make the change NET-ZERO lines: pay for every added line by removing or merging one in " \
