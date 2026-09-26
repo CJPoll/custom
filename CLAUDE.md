@@ -860,7 +860,39 @@ as a default with named exceptions rather than an absolute: an absolute that
 everyone knows is violated hourly by the publish step teaches people to ignore
 the rule, while four named exceptions can be checked.
 
-**It is currently doctrine, not enforcement.** Nothing denies a write to a main
-checkout — the honest choke point is a `PreToolUse` hook, which is separately
-ticketed alongside the repository-scoped lock. Until that exists this holds
-because agents follow it, so treat it as if it were enforced.
+**It is enforced by `ai/hooks/worktree-escape-guard.sh`** (`PreToolUse`, on
+`Bash` and `Edit|Write|MultiEdit|NotebookEdit`). It denies a write to a main
+checkout's working tree, with a `Fix:` naming the worktree to use:
+
+- **Who is guarded.** Every subagent: stdin carries `agent_id`, and the rule
+  binds every spawned agent. Also an unattended top-level session whose project
+  dir is a linked worktree, such as a shipwright cron lane. The attended
+  top-level session is never guarded; that is the human-present exception. An
+  unattended top-level session rooted in a main checkout is not guarded either;
+  it was not dispatched into a worktree, and it is where a repair happens.
+- **What is a main checkout.** A non-bare tree whose git dir is its common dir,
+  that has a linked worktree or lives under `~/dev/`. Paths are realpath'd, so
+  a write through `~/.claude/skills` counts.
+- **What is denied.** A file edit of a path git does not ignore. A mutating git
+  subcommand run there (`add`, `commit`, `checkout`, `restore`, `reset`,
+  `merge` or `pull` without `--ff-only`, …). A redirection, `tee`, `sed -i`,
+  `cp`/`mv`/`ln`/`install` destination, `mv` source, `rm`, `touch` or
+  `truncate` on an unignored path.
+- **What passes.** The four exceptions above as they apply to it:
+  `--ff-only` publishing, gitignored runtime state, a repair from the
+  top-level session, and the attended session. Also `fetch`, `worktree`, `.git`
+  internals, and every read-only command. Quoted text, comments and heredoc
+  bodies are data, never commands.
+- **How it fails.** An input it cannot evaluate is allowed with a visible
+  warning and a log line in `$XDG_STATE_HOME/athena/worktree-escape-guard.log`,
+  because it is hot-loaded into every session on the machine. Writes through an
+  interpreter, `xargs`, or a variable not set in the same command are not
+  detected, and an unresolvable target is logged as `unresolved`.
+
+**Later (2026-09-26, DND-840):** this paragraph said "It is currently doctrine,
+not enforcement": nothing denied a write to a main checkout, and the
+`PreToolUse` hook was a ticketed follow-up. Superseded by the hook above. On
+2026-09-26 a captain edited `ai/agents/athena-captain.md.in` and a skill in the
+main checkout. Every session loaded the half-edited skill until it reverted
+them with `git checkout --`, which could have destroyed someone else's
+uncommitted edits. The repository-scoped lock is still unbuilt.
