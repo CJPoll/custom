@@ -3,19 +3,25 @@
 # reading where the `athena` MCP server is registered, and calling one of its
 # tools over Streamable HTTP.
 #
-# THE BEARER NEVER TOUCHES ARGV OR A FILE. It is `${ATHENA_MCP_BEARER}` -- the
-# machine token the launcher (`scripts/athena`) exports for the session, and the
-# same variable the registered MCP header expands (`scripts/add-athena-mcp`). It
-# reaches curl only inside a config fed on curl's STDIN (`--config -`), so it is
-# not in `ps` output and is written nowhere. Request and response BODIES do go to
-# a private 0700 temp dir; they are message content, not credentials, and are
+# THE MACHINE TOKEN NEVER TOUCHES ARGV, THE ENVIRONMENT, OR A FILE WE WRITE.
+# It is read at call time by jq from the inbox client's 0600 config (jq's argv
+# holds only the path), held in a non-exported shell variable, and written by
+# the `printf` builtin into a curl config that curl reads on STDIN
+# (`--config -`), so it is not in `ps` output and is written nowhere. It is the
+# same token the athena MCP headersHelper (`scripts/athena-mcp-headers`) sends
+# for the session's own MCP connection. Request and response BODIES do go to a
+# private 0700 temp dir; they are message content, not credentials, and are
 # removed on return.
 #
+# DND-839 retired the previous source, `${ATHENA_MCP_BEARER}` exported by the
+# launcher: Claude Code passes its environment to every Bash tool child, so the
+# token reached every command an agent ran. That variable is no longer read.
+#
 # `lib/doctor.sh` has its own MCP client for `machine_reachable`. It is not
-# reused here on purpose: it reads the token from the client config into a 0600
-# file, and the routed send must use the launcher-scoped bearer and keep it out
-# of every file. The protocol steps (initialize -> initialized -> tools/call, a
-# body that may be plain JSON or an SSE stream) are the same.
+# reused here on purpose: it stages the token in a 0600 file, and the routed
+# send keeps it out of every file. The protocol steps (initialize ->
+# initialized -> tools/call, a body that may be plain JSON or an SSE stream)
+# are the same.
 #
 # Source order: err.sh, names.sh (names_safe_curl_config_value), then this
 # file. Requires jq and curl.
@@ -53,6 +59,47 @@ mcp_registered_url() {
   printf '%s\n' "${url}"
 }
 
+# mcp_client_config_path -- the inbox client's config, which holds the machine
+# token. The same resolution as lib/doctor.sh, ai/lib/fleet/effects.sh and
+# scripts/athena-mcp-headers.
+mcp_client_config_path() {
+  printf '%s\n' "${ATHENA_INBOX_CLIENT_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/athena-inbox-client/config.json}"
+}
+
+# mcp_token_state -- present | absent | broken, printing no token.
+#   absent  the config does not exist (this machine has no inbox client);
+#   broken  it exists but is unreadable, not JSON, or has no non-empty string
+#           `token` -- a broken required input, never read as "absent".
+mcp_token_state() {
+  local cfg; cfg="$(mcp_client_config_path)"
+  [ -e "${cfg}" ] || { printf 'absent\n'; return 0; }
+  if jq -e 'type == "object" and (.token | type) == "string" and (.token | length) > 0' "${cfg}" >/dev/null 2>&1; then
+    printf 'present\n'
+  else
+    printf 'broken\n'
+  fi
+}
+
+# mcp_token_unusable_reason <state> -- one line for a state other than present.
+mcp_token_unusable_reason() {
+  case "$1" in
+    absent) printf 'no inbox client config at %s, so this machine has no machine token to authenticate the athena MCP with\n' "$(mcp_client_config_path)" ;;
+    *)      printf 'the inbox client config at %s has no usable machine token (unreadable, not JSON, or no non-empty .token)\n' "$(mcp_client_config_path)" ;;
+  esac
+}
+
+# _mcp_read_token -- prints the machine token, for a caller that captures it
+# into a NON-exported local. Statuses (ai/lib/fleet's fleet_read_token's):
+#   1 -- the config does not exist; 3 -- unreadable, not JSON, or no token.
+_mcp_read_token() {
+  local cfg tok
+  cfg="$(mcp_client_config_path)"
+  [ -e "${cfg}" ] || return 1
+  tok="$(jq -r 'if type == "object" and (.token | type) == "string" then .token else empty end' "${cfg}" 2>/dev/null)" || return 3
+  [ -n "${tok}" ] || return 3
+  printf '%s\n' "${tok}"
+}
+
 # mcp_toplevel [cwd] -- the realpath of this checkout's toplevel.
 mcp_toplevel() {
   local out
@@ -73,13 +120,15 @@ _mcp_timeout() {
 
 # _mcp_post <workdir> <url> <session-id-or-empty> <json-body>
 # One POST; writes <workdir>/hdr and <workdir>/body, prints the HTTP status.
+# The token is the caller's (mcp_call_tool's) local `mcp_bearer`, reached by
+# bash's dynamic scope, so it is not even a function argument.
 _mcp_post() {
   local w="$1" url="$2" sid="$3" body="$4"
   printf '%s' "${body}" >"${w}/req.json" || return 1
   {
     printf 'url = "%s"\n' "${url}"
     printf 'request = "POST"\n'
-    printf 'header = "Authorization: Bearer %s"\n' "${ATHENA_MCP_BEARER:-}"
+    printf 'header = "Authorization: Bearer %s"\n' "${mcp_bearer:-}"
     printf 'header = "Content-Type: application/json"\n'
     printf 'header = "Accept: application/json, text/event-stream"\n'
     [ -n "${sid}" ] && printf 'header = "mcp-session-id: %s"\n' "${sid}"
@@ -114,21 +163,27 @@ _mcp_json() {
 # Prints the tools/call JSON-RPC message on success (status 0). Failure
 # statuses carry a one-line reason on stdout, and they are DIFFERENT because
 # they mean different things to a sender:
-#   3  -- refused BEFORE the tool call was sent (no curl, bad bearer shape,
-#         endpoint unreachable, initialize refused): nothing was sent;
+#   3  -- refused BEFORE the tool call was sent (no curl, no usable machine
+#         token, bad token shape, endpoint unreachable, initialize refused):
+#         nothing was sent;
 #   4  -- the tools/call itself failed in transport or answered non-2xx: the
 #         outcome is UNKNOWN (the server may have recorded the message).
 mcp_call_tool() {
-  local url="$1" tool="$2" args="$3" w http sid req
+  local url="$1" tool="$2" args="$3" w http sid req mcp_bearer trc
   command -v curl >/dev/null 2>&1 || { printf 'curl is not on PATH\n'; return 3; }
   case "${url}" in
     https://*) names_safe_curl_config_value "${url}" || { printf 'the registered athena MCP URL contains a quote, backslash, whitespace or control character\n'; return 3; } ;;
     *) printf 'the registered athena MCP URL is not https, and the machine token is not sent in clear text\n'; return 3 ;;
   esac
-  # The bearer is written into a double-quoted curl config value: a quote,
+  # The machine token, read now from the client config into this function's
+  # non-exported local. It is never printed.
+  mcp_bearer="$(_mcp_read_token)" || { trc=$?
+    if [ "${trc}" -eq 1 ]; then mcp_token_unusable_reason absent; else mcp_token_unusable_reason broken; fi
+    return 3; }
+  # The token is written into a double-quoted curl config value: a quote,
   # backslash or whitespace in it would corrupt the header (or inject a config
   # line). Refused, never sent malformed; the value is never printed.
-  names_safe_curl_config_value "${ATHENA_MCP_BEARER:-}" || { printf 'ATHENA_MCP_BEARER contains a quote, backslash, whitespace or control character and cannot be sent safely\n'; return 3; }
+  names_safe_curl_config_value "${mcp_bearer}" || { printf 'the machine token contains a quote, backslash, whitespace or control character and cannot be sent safely\n'; return 3; }
 
   w="$(mktemp -d 2>/dev/null)" || { printf 'could not create a private temp dir\n'; return 3; }
   chmod 700 "${w}"

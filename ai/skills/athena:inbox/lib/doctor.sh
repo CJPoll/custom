@@ -1486,15 +1486,16 @@ DOCTOR_SELF_ID="not-asked"
 # doctor_state_send_paths <registration> <session> <reachable> <bearer> <maildir-count>
 #   registration  registered | unregistered | broken | error
 #   session       declared | missing | invalid
-#   bearer        set | unset  (ATHENA_MCP_BEARER in THIS shell)
+#   bearer        set | unset  (the client config holds a usable machine token;
+#                              send-mail reads it there, DND-839)
 # Pure. It grades exactly what routed_default_path would decide for a
 # server-addressed no-flag send, so the doctor can never say "routes" where
 # send-mail refuses:
 #   ok   the routed path is ready (registered, session inbox declared, bearer
 #        set, this machine reachable true OR unknown -- an idle machine with no
 #        recent signal, DND-378) -- the no-flag default routes;
-#   warn the routed path is configured but not usable right now (no bearer in
-#        this shell, no valid session inbox, this machine reported
+#   warn the routed path is configured but not usable right now (no usable
+#        machine token in the client config, no valid session inbox, this machine reported
 #        unreachable, or the reachability lookup FAILED), or its registration
 #        cannot be read or looked up: a no-flag server-addressed send will be
 #        REFUSED (on `false`, only one to this machine or an unproven one);
@@ -1530,13 +1531,14 @@ doctor_state_send_paths() {
 
 # doctor_check_send_paths <entry> [cwd]
 doctor_check_send_paths() {
-  local entry="$1" cwd="${2:-.}" rc reg session maildirs names state facts dflt bearer lookup_err selfid reach_for_grade
+  local entry="$1" cwd="${2:-.}" rc reg session maildirs names state facts dflt bearer tokstate lookup_err selfid reach_for_grade
   [ -n "${entry}" ] || return 0
   # A lookup that could not be MADE (status 2: a key computed wrongly, no
   # repository) is its own state with its own words -- never "not registered".
   lookup_err="$(inbox_mcp_registration "${cwd}" 2>&1 >/dev/null)"; rc=$?
   case "${rc}" in 0) reg=registered ;; 1) reg=unregistered ;; 3) reg=broken ;; *) reg=error ;; esac
-  if [ -n "${ATHENA_MCP_BEARER:-}" ]; then bearer=set; else bearer=unset; fi
+  tokstate="$(mcp_token_state)"
+  if [ "${tokstate}" = "present" ]; then bearer=set; else bearer=unset; fi
   session="$(inbox_session_state_of_entry "${entry}")"
   names="$(printf '%s' "${entry}" | jq -r '[.channels // {} | to_entries[] | select(.value.kind == "maildir") | .key] | join(", ")' 2>/dev/null)"
   maildirs="$(printf '%s' "${entry}" | jq -r '[.channels // {} | to_entries[] | select(.value.kind == "maildir")] | length' 2>/dev/null)"
@@ -1570,13 +1572,13 @@ doctor_check_send_paths() {
     unavailable) selfid="unavailable (the lookup failed)" ;;
     *)         selfid="${DOCTOR_SELF_ID}" ;;
   esac
-  facts="routed: athena MCP ${reg}$( [ "${reg}" = "error" ] && printf ' (the registration lookup itself failed: %s)' "$(printf '%s' "${lookup_err}" | head -n 1)") for this project, session inbox ${session}, ATHENA_MCP_BEARER ${bearer} in this shell, this machine reachable: ${DOCTOR_REACHABLE}, this machine's server id: ${selfid} (asked with the client config's machine token; send-mail asks with ATHENA_MCP_BEARER, the same token when the session was launched through scripts/athena); local: $(case "${maildirs}" in ''|*[!0-9]*) printf 'maildir channel count UNREADABLE (the registry entry could not be counted)' ;; *) printf '%s maildir channel(s)%s' "${maildirs}" "${names:+ (${names})}" ;; esac); no-flag default: a maildir-addressed send goes LOCAL, ${dflt}. Neither path carries authority."
+  facts="routed: athena MCP ${reg}$( [ "${reg}" = "error" ] && printf ' (the registration lookup itself failed: %s)' "$(printf '%s' "${lookup_err}" | head -n 1)") for this project, session inbox ${session}, machine token in the client config ${tokstate}, this machine reachable: ${DOCTOR_REACHABLE}, this machine's server id: ${selfid} (asked with the client config's machine token, the one send-mail uses); local: $(case "${maildirs}" in ''|*[!0-9]*) printf 'maildir channel count UNREADABLE (the registry entry could not be counted)' ;; *) printf '%s maildir channel(s)%s' "${maildirs}" "${names:+ (${names})}" ;; esac); no-flag default: a maildir-addressed send goes LOCAL, ${dflt}. Neither path carries authority."
   case "${state}" in
     ok)   doctor_finding ok "send-paths" "${facts}" ;;
     warn) doctor_finding warn "send-paths" "${facts}" \
-            "if the maildir channel count is UNREADABLE, run inbox-status and check this project's registry entry parses; if ATHENA_MCP_BEARER is unset, launch the session through scripts/athena (it exports it for that launch only); if the registration cannot be read, inspect ~/.claude.json's athena entry for this project by hand; if the session inbox is missing or invalid, declare the \"session\" log channel (ai/inbox/registry.json, scripts/setup-inbox-registry --install); if this machine is not reachable, read client-liveness and server-reachability above. Until then send cross-machine mail with --routed (the server holds it pending) and same-machine mail with --local." ;;
+            "if the maildir channel count is UNREADABLE, run inbox-status and check this project's registry entry parses; if the machine token is absent or broken, set up the inbox client (scripts/setup-athena-inbox-client) or chmod 0600 its config and check it carries .token -- send-mail reads the token from that file, never from the environment (DND-839); if the registration cannot be read, inspect ~/.claude.json's athena entry for this project by hand; if the session inbox is missing or invalid, declare the \"session\" log channel (ai/inbox/registry.json, scripts/setup-inbox-registry --install); if this machine is not reachable, read client-liveness and server-reachability above. Until then send cross-machine mail with --routed (the server holds it pending) and same-machine mail with --local." ;;
     *)    doctor_finding na "send-paths" "${facts}" \
-            "routed sending is not configured or not checked here. To enable it: scripts/add-athena-mcp from the main checkout, launch through scripts/athena, declare the \"session\" channel. If reachability was not asked: run inbox-doctor without --no-server (not-asked), or install the inbox client's machine token (skipped-no-token) -- send-mail itself asks at send time with ATHENA_MCP_BEARER. The local maildir path does not depend on any of this." ;;
+            "routed sending is not configured or not checked here. To enable it: scripts/add-athena-mcp from the main checkout, declare the \"session\" channel. If reachability was not asked: run inbox-doctor without --no-server (not-asked), or install the inbox client's machine token (skipped-no-token) -- send-mail itself asks at send time with that same token. The local maildir path does not depend on any of this." ;;
   esac
 }
 

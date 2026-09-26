@@ -137,29 +137,44 @@ Registers the hosted **Athena MCP server** (gen_saas `apps/athena`, mounted at
 server-hosted, not a stdio shim) and authenticates with the **machine token the
 inbox client already holds** — there is NEVER a second copy of the token.
 
-**Token handling (one source of truth, never in `~/.claude.json`).** The
-registered header is the literal `Authorization: Bearer ${ATHENA_MCP_BEARER}`;
-Claude Code expands the env var at MCP-connect time, so the token is not written
-into config. The claude launcher `scripts/athena` exports `ATHENA_MCP_BEARER`
-from `~/.config/athena-inbox-client/config.json` (via `jq -r .token`), scoped to
-the launch rather than a shell profile. That export is **environment-safe but
-hard-fails on a broken required input**: an *absent* inbox config skips silently
-(not the Athena environment, so an unrelated `claude` launch is never broken); a
+**Token handling (one source of truth, never in `~/.claude.json`, never in the
+session's environment).** The registered entry is
+`{"type":"http","url":<url>,"headersHelper":<main checkout>/scripts/athena-mcp-headers}`.
+Claude Code runs the helper on each MCP connect and reconnect (10 s timeout);
+it reads the token from `~/.config/athena-inbox-client/config.json` (0600,
+`jq` reads the file, so the token is never in argv) and prints
+`{"Authorization":"Bearer <token>"}`. The token is never written into config
+and never exported. A local-scope `headersHelper` runs only once the project's
+workspace trust dialog has been accepted; `add-athena-mcp` warns when it has
+not. The helper path is the MAIN checkout's, never a worktree's (a worktree
+path vanishes on cleanup). `ATHENA_MCP_HEADERS_HELPER` overrides it.
+
+The claude launcher `scripts/athena` **scrubs** `ATHENA_MCP_BEARER` (so a
+caller's stale export never reaches the session) and runs a preflight that
+reads no token: an *absent* inbox config skips silently (not the Athena
+environment, so an unrelated `claude` launch is never broken); a
 *present-but-tokenless/unreadable* config, or a missing `jq`, is a loud `exit 1`
-with a `Fix:` rather than a silent 401 (owner: hard-fail-on-required-inputs). An
-explicit `export ATHENA_MCP_BEARER=…` always wins and skips the read.
+with a `Fix:` (owner: hard-fail-on-required-inputs). A registration still using
+the retired `${ATHENA_MCP_BEARER}` header gets a `Fix:` telling you to re-run
+`add-athena-mcp`.
 
-Idempotent (`claude mcp add --transport http athena <url> …`, safe to re-run);
-`--dry-run` prints the command + the export line without running anything;
-`--url` overrides the `/mcp` URL (default derived from the inbox config's
-`server_url` host). `--help` is stdout-only, exit 0. Same **launch-dir rule** as
-`add-notion` (run from the main checkout; a worktree warning fires). Self-test:
-`scripts/test/add-athena-mcp/self-test.sh`.
+**Later (2026-09-26, DND-839):** the registered header was the literal
+`Authorization: Bearer ${ATHENA_MCP_BEARER}`, and `scripts/athena` exported
+`ATHENA_MCP_BEARER` from the client config for the launch; an explicit export
+won. Superseded because Claude Code passes its environment to every Bash tool
+child, so the machine token reached every command an agent ran, and an env dump
+put it in a transcript. `headersHelper` support was confirmed against Claude
+Code 2.1.283 with a local listener: the connect request carried the helper's
+header with the variable absent from the environment.
 
-**Verification caveat.** The `${VAR}`-in-header expansion is reported (not yet
-independently verified against live Claude Code MCP-connect behavior; HG-4
-confirms). If it does not apply, the header reaches the server literally and is
-answered 401 — a loud failure, never a silent-dark channel.
+Idempotent (`claude mcp remove` + `claude mcp add-json -s local athena <entry>`,
+safe to re-run); it runs the helper once first, so a missing or broken token
+fails at registration, not at connect time. `--dry-run` prints the commands
+without running anything; `--url` overrides the `/mcp` URL (default derived
+from the inbox config's `server_url` host). `--help` is stdout-only, exit 0.
+Same **launch-dir rule** as `add-notion` (run from the main checkout; a worktree
+warning fires). Self-tests: `scripts/test/add-athena-mcp/self-test.sh`,
+`scripts/test/athena-mcp-headers/self-test.sh`.
 
 ### Shipwright commit discipline (`athena-shipwright-commit.sh`)
 

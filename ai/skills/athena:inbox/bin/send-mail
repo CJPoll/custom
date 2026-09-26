@@ -33,7 +33,7 @@
 #     * a server address (--to <machine_id>/<inbox>, --to-project) -> asks
 #       machine_reachable {} once, for this machine's reachability AND its own
 #       server id (compared with --to's machine). With the MCP registered, the
-#       bearer set and the session inbox valid: another machine -> routed;
+#       machine token readable and the session inbox valid: another machine -> routed;
 #       this machine or not proven -> routed on true or unknown (idle, no
 #       recent signal: the server holds it until acked), REFUSED on false. A
 #       failed lookup is REFUSED, never read as unknown. A recipient that may
@@ -46,8 +46,9 @@
 # line -- {path:"routed", event_id, delivery_id, status:"pending", to,
 # from_inbox} -- and NEVER writes a local maildir. --subject and at least one of --re / --thread are required. It
 # refuses (never falls back) when the MCP is not registered for this project
-# (Fix: scripts/add-athena-mcp), when ${ATHENA_MCP_BEARER} is unset (launch via
-# scripts/athena), or when this project declares no <project>-session.jsonl
+# (Fix: scripts/add-athena-mcp), when the inbox client config holds no usable
+# machine token (it is read from that 0600 file at send time, never from the
+# environment -- DND-839), or when this project declares no <project>-session.jsonl
 # channel. In this mode --thread is the event_id of the message you answer.
 #
 # ============================ WHAT A SEND IS ===============================

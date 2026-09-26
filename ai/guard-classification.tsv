@@ -99,7 +99,8 @@ ai/skills/athena:slack/bin/whoami	tool	Slack Web API action wrapper; fails only 
 ai/skills/athena:standup/scripts/standup-window.sh	tool	computes the standup time window; fails only on an unknown argument
 
 # --- scripts/: guards (deny, check, gate, or preflight).
-scripts/athena	guard	
+scripts/athena	guard
+scripts/athena-mcp-headers	guard
 scripts/athena-inbox-client-run.sh	guard	
 scripts/athena-shipwright-commit.sh	guard	
 scripts/athena-shipwright-run.sh	guard	

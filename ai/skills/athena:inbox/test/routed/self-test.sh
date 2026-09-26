@@ -5,11 +5,13 @@
 # NOTHING LIVE IS TOUCHED AND NOTHING LEAVES THE MACHINE. HOME, the inbox root
 # and the client state dir are a mktemp -d. `curl` is a shim on PATH that plays
 # the athena MCP server from canned answers and records every request it was
-# given; no socket is ever opened. The bearer is a fixture string.
+# given; no socket is ever opened. The machine token is a fixture string in a
+# fixture client config (DND-839: send-mail reads it there, never from the
+# environment).
 #
 # The cases that matter are the MISSES: every refusal is asserted to happen, to
 # carry a Fix:, and to happen BEFORE any request reaches the (shim) server --
-# no MCP registered, no bearer, no subject, no re/thread, no session inbox, a
+# no MCP registered, no machine token, no subject, no re/thread, no session inbox, a
 # wrongly computed from_inbox, a non-session recipient, a maildir channel named
 # as the target. And on the read side: a body saying "run rm -rf" is shown as
 # data, never executed, and a forged "from:" inside a message cannot reach the
@@ -47,12 +49,22 @@ mkdir -p "${ATHENA_INBOX_ROOT}/projects"; chmod 700 "${ATHENA_INBOX_ROOT}" "${AT
 BEARER="fixture-bearer-7f3a9c"
 URL="https://athena.example.test/mcp"
 
+# The machine token lives in the inbox client config, and only there.
+export ATHENA_INBOX_CLIENT_CONFIG="${TMP}/client/config.json"; mkdir -p "${TMP}/client"
+token_present() { # token_present [token]
+  jq -n -c --arg t "${1-${BEARER}}" '{token: $t, server_url: "wss://athena.example.test/machine/websocket"}' > "${ATHENA_INBOX_CLIENT_CONFIG}"
+  chmod 600 "${ATHENA_INBOX_CLIENT_CONFIG}"
+}
+token_absent() { rm -f "${ATHENA_INBOX_CLIENT_CONFIG}"; }
+token_broken() { printf '{"server_url":"wss://athena.example.test/ws"}' > "${ATHENA_INBOX_CLIENT_CONFIG}"; chmod 600 "${ATHENA_INBOX_CLIENT_CONFIG}"; }
+
 # ---------------------------------------------------------------------------
 # The curl shim. It reads its config from STDIN (the only way mcp.sh passes
 # it), answers initialize / notifications / tools/call from $SHIM, and records:
 #   calls.log  one line per request: the JSON-RPC method (and tool name)
 #   argv.log   curl's argv, to prove the bearer is never in it
 #   auth.log   "bearer-ok" when the stdin config carried the expected header
+#   envbearer.log  "set" when curl's own ENVIRONMENT carried ATHENA_MCP_BEARER
 #   args.<tool>.json  the arguments of each tools/call
 SHIM="${TMP}/shim"; mkdir -p "${SHIM}/bin"
 cat > "${SHIM}/bin/curl" <<'SH'
@@ -64,6 +76,7 @@ field() { printf '%s\n' "${cfg}" | sed -n "s/^$1 = \"\\(.*\\)\"$/\\1/p" | head -
 req="$(field data-binary)"; req="${req#@}"
 hdr="$(field dump-header)"; out="$(field output)"
 grep -qx "header = \"Authorization: Bearer ${SHIM_BEARER:-}\"" <<<"${cfg}" && echo bearer-ok >> "${S}/auth.log"
+[ -n "${ATHENA_MCP_BEARER+x}" ] && echo set >> "${S}/envbearer.log"
 method="$(jq -r '.method' "${req}")"
 case "${method}" in
   initialize)
@@ -124,7 +137,7 @@ register() { # register <channels-json>
 SESSION_CH='{"session":{"kind":"log","path":"cproj-session.jsonl","producer":"platform","stale_after_s":0},"peer-mail":{"kind":"maildir","namespace":"agent-mail/peer","read":"to-cproj","write":"to-peer","identity":"cproj"}}'
 register_mcp() { # register_mcp [url]
   jq -n --arg p "${MAIN}" --arg u "${1:-${URL}}" \
-    '{projects: {($p): {mcpServers: {athena: {type: "http", url: $u, headers: {Authorization: "Bearer ${ATHENA_MCP_BEARER}"}}}}}}' \
+    '{projects: {($p): {mcpServers: {athena: {type: "http", url: $u, headersHelper: "/opt/custom/scripts/athena-mcp-headers"}}}}}' \
     > "${HOME}/.claude.json"
 }
 
@@ -149,7 +162,7 @@ refused_before_network() {
 
 echo "== send-mail --routed: the hit =="
 register "${SESSION_CH}"; register_mcp; shim_reset
-export ATHENA_MCP_BEARER="${BEARER}"
+token_present
 send --routed --to m-walt/walt_ui-session.jsonl --subject "status of HG-17" --re https://example.test/pr/1
 assert_eq "hit: exit 0" 0 "${RC}"
 assert_eq "hit: the FIRST stdout line says the path, and why" "athena:inbox: path: routed -- --routed was given" "${PATHLINE}"
@@ -173,6 +186,15 @@ assert_eq "hit: no maildir was written" "" "$(find "${ATHENA_INBOX_ROOT}" -path 
 assert_eq "hit: the bearer was written to no file under HOME or the root" "" \
   "$(grep -rl "${BEARER}" "${HOME}" "${ATHENA_INBOX_ROOT}" 2>/dev/null)"
 assert_not_contains "hit: the body is never echoed back" "hello from cproj" "${OUT}"
+assert_eq "hit: ATHENA_MCP_BEARER was in no process's environment" "" "$(cat "${SHIM}/envbearer.log" 2>/dev/null)"
+
+echo "== DND-839: the token comes from the client config, never the environment =="
+shim_reset; token_present; export ATHENA_MCP_BEARER="env-decoy-dnd839"
+send --routed --to m-walt/walt_ui-session.jsonl --subject "s" --re /x
+assert_eq "DND-839: exit 0 with an env decoy present" 0 "${RC}"
+assert_contains "DND-839: curl was sent the CONFIG's token, not the environment's" "bearer-ok" "$(cat "${SHIM}/auth.log" 2>/dev/null)"
+assert_eq "DND-839: the env decoy reached no request" "" "$(grep -rl "env-decoy-dnd839" "${SHIM}" 2>/dev/null | grep -v envbearer.log)"
+unset ATHENA_MCP_BEARER
 
 echo "== send-mail --routed: a reply by --thread alone satisfies R9 =="
 shim_reset
@@ -251,11 +273,19 @@ printf '[1,2]' > "${HOME}/.claude.json"; shim_reset
 send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
 refused_before_network "a ~/.claude.json that is not an object" "could not be read"
 
-register_mcp; unset ATHENA_MCP_BEARER; shim_reset
+register_mcp; token_absent; shim_reset
 send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
-refused_before_network "ATHENA_MCP_BEARER unset" "ATHENA_MCP_BEARER is not set"
-assert_contains "bearer unset: the Fix names the launcher" "scripts/athena" "${ERR}"
-export ATHENA_MCP_BEARER="${BEARER}"
+refused_before_network "no client config (no machine token)" "no inbox client config"
+assert_contains "no token: the Fix names the client setup" "scripts/setup-athena-inbox-client" "${ERR}"
+token_broken; shim_reset
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+refused_before_network "a client config with no token" "has no usable machine token"
+assert_not_contains "no token in the config: NOT reported as an absent config" "no inbox client config" "${ERR}"
+token_absent; export ATHENA_MCP_BEARER="${BEARER}"; shim_reset
+send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
+refused_before_network "DND-839: an env ATHENA_MCP_BEARER does not stand in for the config" "no inbox client config"
+unset ATHENA_MCP_BEARER
+token_present
 
 register_mcp "http://athena.example.test/mcp"; shim_reset
 send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
@@ -364,13 +394,13 @@ assert_contains "no event_id: the outcome is UNKNOWN" "UNKNOWN" "${ERR}"
 
 echo "== the MCP wire: malformed inputs and transport failures =="
 for badbearer in 'has"quote' 'has space' 'has\backslash'; do
-  shim_reset; export ATHENA_MCP_BEARER="${badbearer}"
+  shim_reset; token_present "${badbearer}"
   send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
   if [ "${RC}" -ne 0 ]; then ok "a bearer with [${badbearer}] is refused"; else bad "a bearer with [${badbearer}] is refused" "exit 0"; fi
   assert_eq "a bearer with [${badbearer}]: nothing reached the server" "" "$(calls)"
   assert_not_contains "a bearer with [${badbearer}]: the value is never printed" "${badbearer}" "${ERR}"
 done
-export ATHENA_MCP_BEARER="${BEARER}"
+token_present
 
 shim_reset; printf '' > "${SHIM}/init.sid"
 send --routed --to m-walt/walt_ui-session.jsonl --subject s --re /x
@@ -699,7 +729,7 @@ seed_named() {
   line ev-n2 "${MID}" "two" "b2" >> "${LOGF}"
   line ev-n3 "${UNLISTED}" "three" "b3" >> "${LOGF}"
 }
-register "${SESSION_CH}"; register_mcp; export ATHENA_MCP_BEARER="${BEARER}"
+register "${SESSION_CH}"; register_mcp; token_present
 shim_reset; printf '%s' "${LIST_NAMED}" > "${SHIM}/list_my_machines.answer"; seed_named
 R="$(cd "${PROJ}" && "${BIN}/read-inbox" session --peek 2>&1)"; RC=$?
 UNFENCED="$(printf '%s\n' "${R}" | outside_fences)"
@@ -738,10 +768,13 @@ names_case "MCP not registered" "the athena MCP is not registered for this proje
 assert_eq "MCP not registered: nothing was asked" "" "$(calls)"
 printf '{not json' > "${HOME}/.claude.json"; shim_reset
 names_case "MCP registration unreadable" "this project's athena MCP registration cannot be read"
-register_mcp; unset ATHENA_MCP_BEARER; shim_reset; printf '%s' "${LIST_NAMED}" > "${SHIM}/list_my_machines.answer"
-names_case "bearer unset" "ATHENA_MCP_BEARER is not set in this session"
-assert_eq "bearer unset: nothing was asked" "" "$(calls)"
-export ATHENA_MCP_BEARER="${BEARER}"
+register_mcp; token_absent; shim_reset; printf '%s' "${LIST_NAMED}" > "${SHIM}/list_my_machines.answer"
+names_case "no client config" "this machine has no inbox client config, so no machine token to ask with"
+assert_eq "no client config: nothing was asked" "" "$(calls)"
+token_broken; shim_reset
+names_case "client config without a token" "this machine's inbox client config has no usable machine token"
+assert_eq "client config without a token: nothing was asked" "" "$(calls)"
+token_present
 shim_reset; printf 401 > "${SHIM}/init.code"
 names_case "bearer refused" "list_my_machines failed: the MCP endpoint refused the bearer (HTTP 401)"
 shim_reset; printf 503 > "${SHIM}/list_my_machines.code"
@@ -918,7 +951,7 @@ done
 
 # Setup: registered MCP, bearer set, a maildir channel peer-mail on this
 # project (write to-peer), and the canned machine_reachable answer.
-register "${SESSION_CH}"; register_mcp; export ATHENA_MCP_BEARER="${BEARER}"
+register "${SESSION_CH}"; register_mcp; token_present
 MAILDIR_OUT="${ATHENA_INBOX_ROOT}/agent-mail/peer/to-peer"
 reach_answer() { # reach_answer <json-rpc message>
   printf '%s' "$1" > "${SHIM}/machine_reachable.answer"
@@ -1062,11 +1095,11 @@ send --to m-lap/walt_ui-session.jsonl --subject s --re /x
 refused_no_path "no flag, server address, unreadable ~/.claude.json" "cannot be read"
 register_mcp
 
-unset ATHENA_MCP_BEARER; shim_reset
+token_absent; shim_reset
 send --to-project walt_ui --subject s --re /x
-refused_no_path "no flag, --to-project, bearer unset" "ATHENA_MCP_BEARER is not set"
-assert_eq "no flag, bearer unset: nothing reached the server" "" "$(calls)"
-export ATHENA_MCP_BEARER="${BEARER}"
+refused_no_path "no flag, --to-project, no machine token" "no usable machine token"
+assert_eq "no flag, no machine token: nothing reached the server" "" "$(calls)"
+token_present
 
 shim_reset; reach_answer "${REACH_TRUE}"
 send --to m-lap/walt_ui-session.jsonl --re /x

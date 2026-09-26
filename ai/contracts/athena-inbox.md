@@ -164,6 +164,16 @@ producer (Slack receiver, peer agent, anything)
   token shape" would be unimplementable without an enumerated pattern list, and
   a redactor that silently mangles message text is its own bug. A tool MAY
   redact patterns it can name precisely; nothing depends on it doing so.
+- **The machine token is never placed in a session's environment.** "Nowhere
+  else" includes the environment of a Claude Code session: Claude Code passes
+  its environment to every Bash tool child, so a token there reaches every
+  command an agent runs, and any environment dump (a debug print, a crash
+  report, a transcript) discloses it. Every consumer reads the token from the
+  config file at the point of use, into a non-exported variable, never argv:
+  the athena MCP connection through its `headersHelper`
+  (`scripts/athena-mcp-headers`), `send-mail --routed` and the name lookup
+  (`lib/mcp.sh`), and `inbox-doctor`'s server checks. A launcher MUST NOT
+  export it, and SHOULD unset an inherited copy (DND-839).
 
 **The layout is not migrated.** Existing flat paths (`slack-inbox.jsonl`,
 `walt_ui-slack.jsonl`, `agent-mail/gen_saas/`) stay exactly where they are. The
