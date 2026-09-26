@@ -3121,7 +3121,10 @@ class; ratified 2026-09-25:
 
 **The binding digest** is `hex(sha256(canonical_json({class, target})))`, over
 the canonical target (sorted keys, the repo folded to lowercase). The class is
-inside the digest, so a digest for one class can never match another. The same
+inside the digest, so a digest for one class can never match another. The
+canonical JSON is exactly `{"class":<class>,"target":{<target keys sorted>}}`:
+object keys sorted at every level, each string JSON-encoded, and no whitespace
+anywhere. The hex is lowercase. The same
 canonicalisation MUST be applied on both sides of every comparison: the digest
 the server stored at request time, the digest in the token, and the digest of a
 binding presented at redeem.
@@ -3187,9 +3190,11 @@ reads each edge as NOT ELIGIBLE:
   match can see.
 - **Rule 2 admits only these `pull_request` filters:** `types`, `branches`,
   `branches-ignore`, `paths` and `paths-ignore`, each a string or a list of
-  strings. Filters only narrow when the workflow runs. `types: closed` is NOT
-  ELIGIBLE: it fires on the merge itself, a new run started by merging. An
-  activity type the check does not list is UNDETERMINED.
+  strings. Filters only narrow when the workflow runs. A `types` value that
+  names `closed`, as the string itself or as any one member of a list, is NOT
+  ELIGIBLE: it fires on the merge itself, a new run started by merging, with
+  the merge commit's version of the workflow. An activity type the check does
+  not list is UNDETERMINED.
 - **Rule 4 also covers YAML that two parsers can read differently.** A
   duplicate key, a merge key `<<`, an explicit tag, a non-scalar key, more than
   one document, a trigger key other than a single `on`, a NEL, U+2028 or U+2029
@@ -3207,6 +3212,11 @@ reads each edge as NOT ELIGIBLE:
 
 Exit 0 is the only eligible answer. A caller reads every other exit as not
 eligible.
+
+**What cjpoll/gen_saas can make eligible today** (measured 2026-09-26 with
+custom `fbe61d0` at gen_saas `c33cde19`): adding or deleting a
+`pull_request`-only workflow is GRANT-ELIGIBLE, while an edit to `ci.yml` is
+NOT ELIGIBLE until DND-788 removes its `workflow_dispatch` trigger.
 
 #### The approval message
 
@@ -3266,6 +3276,10 @@ message carries the same nonce. Version 3 is the version-1 fields plus these:
   re-tagged without the account's key.
 - **The server never takes a token field from a caller.** It builds every field
   from the grant row.
+- **Two encodings are pinned.** `x` is the click expiry in whole Unix seconds, a
+  JSON integer, truncated down from the row's `click_expires_at`, so the
+  token's window never outlasts the row's. `h` is the binding digest over the
+  canonical JSON that *Action classes* pins.
 
 #### Grant states
 
@@ -3364,6 +3378,18 @@ grant stays `pending`. Then, for a version-3 token:
    buttons: Approved or Declined, by whom, when, and for an approved merge grant
    how long it is valid for that head. The update needs no session.
 
+**A verified token whose version the click handler does not handle is refused,
+never run down the shipped path.** The handler dispatches on the verified
+version with a closed match: versions 1 and 2 take the shipped path, and any
+version it has no arm for is refused. Until T4 ships the steps above, that
+includes version 3. T3 (DND-593) builds this guard in the same change that
+first mints version-3 tokens. A version-3 click is then refused as
+`grant_click_unhandled`, whoever clicks: no claim, no route, no message update,
+and the grant stays `pending`. The clicker gets an ephemeral "this approval
+cannot be processed yet", and the refusal is logged with a `Fix:` naming
+DND-594. So until T4, a grant button's click is not relayed as a fact either.
+T4 replaces the version-3 refusal with the steps above.
+
 #### Redeem
 
 The merge consumer redeems with **`POST /api/v1/owner_approvals/redeem`**,
@@ -3400,9 +3426,26 @@ A grant has **exactly two consumers**. No other code redeems one.
    `ai/bin/owner-grant`.
    - The flag is refused together with `--owner-approval` (exit 2). The
      free-text `--owner-approval` stays, for the owner's own in-session words.
+   - **The base is fetched fresh.** Under the flag the fetch of the target's
+     remote is mandatory. `--no-fetch` with the flag is exit 2. A failed fetch
+     is exit 4, `GRANT UNVERIFIABLE (base not fetched)`, and nothing is sent.
+     Without the flag a failed fetch only warns and compares against the ref as
+     it stands locally (`integration-gate`'s fetch step). Under the flag that
+     would evaluate a base that may not be the remote's tip.
+   - **The target is remote-tracking,** `<remote>/<base_ref>`. A local ref with
+     the flag is exit 2. The binding's `base_ref` is the part after the remote.
+   - **The head must contain the fetched tip.** When the fetched tip is not an
+     ancestor of `HEAD_SHA`, the answer under the flag is exit 4, `NOT ELIGIBLE
+     base_not_ancestor`, with `Fix: rebase onto <remote>/<base_ref>, re-run the
+     gate, and request a new grant (the head SHA changes)`, and nothing is
+     redeemed. Two shipped steps refuse that state today with exit 2, and the
+     flag maps both: `integration-gate`'s HEAD-must-contain-the-target step,
+     which runs first, and `blast-radius`'s ancestor check (*Eligibility for
+     `merge.pr_only_workflow`*).
    - When `blast-radius` answers 0, the gate is OK as today and says the grant
      was not used.
-   - On `blast-radius` exit 4 it runs the eligibility check. NOT ELIGIBLE is
+   - On `blast-radius` exit 4 it runs the eligibility check over the fetched
+     tip: `--base` is that tip and `--head` is `HEAD_SHA`. NOT ELIGIBLE is
      exit 4, naming the offending hits, and nothing is redeemed.
    - A class other than `merge.pr_only_workflow` is refused as not consumable by
      `integration-gate`, **before** any redeem.
@@ -3415,8 +3458,18 @@ A grant has **exactly two consumers**. No other code redeems one.
      a 200 whose class, target or digest differs from what the gate sent is
      exit 4, **GRANT UNVERIFIABLE** with the cause. It never reads as REFUSED,
      and never as OK.
-   - A 200 whose record matches is `INTEGRATION OK … OWNER-APPROVED`, naming the
-     grant and who clicked.
+   - A 200 whose record matches is `INTEGRATION OK <head> … OWNER-APPROVED
+     (grant <id>, clicked by <user>, base <tip sha>)`: it names the grant, who
+     clicked, and the base SHA eligibility was evaluated over.
+     **Later (2026-09-26, DND-789):** this line named only the grant and who
+     clicked. Superseded by D27 (epic decision, security design): it also names
+     the evaluated base, because the merge re-check below compares against it.
+   - **The merge re-checks the base.** Immediately before `gh-athena pr merge
+     --squash --match-head-commit <head>`, the merging admiral re-fetches and
+     requires `<remote>/<base_ref>` to still equal the base SHA on the
+     OWNER-APPROVED line. Otherwise it does not merge, and it re-runs the gate.
+     This is an obligation on T8 (DND-598), which amends `athena:merge-boarding`
+     with the mechanics. Until T8 lands, merge-boarding has no such re-check.
    - Without the flag, an exit 4 prints either the exact
      `GRANT-ELIGIBLE merge.pr_only_workflow <repo> <base_ref> <head_sha>` line to
      request with, or the NOT ELIGIBLE reasons. A session never composes a
@@ -3428,6 +3481,15 @@ A grant has **exactly two consumers**. No other code redeems one.
 2. **`Athena.Priorities`**, called by the server at click time (*The click*),
    for `priority.transition`. There is no redeem call for this class, and the
    gate refuses it.
+
+**Why the merge consumer pins the base, and the binding does not.** The merge
+class needs the merged tree to equal the tree at `head_sha`. That holds exactly
+when the head contains the base's tip at merge time. Rule 3 reads every
+workflow at HEAD, and a head that contains the tip carries every privileged
+caller already on the base, so none is outside the tree it checks. The binding stays `{repo, base_ref, head_sha}`: the server cannot observe
+the tip, so a base SHA in the digest would add nothing the consumer's fetch,
+ancestry check and merge re-check do not already give. The finding is DND-596's
+Pass-2 gap 3; the decision is D27.
 
 #### Access control for grants
 
@@ -3482,6 +3544,22 @@ Stated, not hidden:
 - **The finest binding is the machine.** Machine tokens are per machine, not
   per session, so a sibling session on the requesting machine could redeem the
   identical binding. That is the same action on the same SHA.
+- **The merge window.** A few seconds pass between the merging admiral's base
+  re-check (*The consumers*) and GitHub's merge. Another actor could move the
+  base in that window: a human, or another machine's admiral. GitHub would then
+  squash the head onto a base the gate never read. `--match-head-commit` pins
+  the head only, and gen_saas has no branch protection; "require branches to be
+  up to date before merging" would close it. The per-repo merge lock
+  (`athena:merge-boarding`'s `locked-merge`) bounds it on this machine only.
+- **Merged workflows run on other open PRs.** A `pull_request` run uses the
+  workflow file from the PR's merge ref. So after a grant-approved change lands,
+  the next run of every other open same-repo PR executes the merged version,
+  with the `GITHUB_TOKEN` permissions and repo secrets a same-repo PR run
+  already gets. Fork PRs get neither. That is no privilege the approved PR's own
+  pre-merge run lacked, but the effect is not confined to one run: it persists
+  across open PRs until a revert lands. The reversibility argument
+  (*Eligibility for `merge.pr_only_workflow`*) accepts this, and it is named
+  here rather than hidden.
 
 #### Retention
 
