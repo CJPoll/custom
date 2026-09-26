@@ -388,6 +388,94 @@ case_cmd "OK9. git log --grep=stash" allow 'git log --grep=stash'
 case_cmd "OK10. rebase --autostash (out of scope, see header)" allow 'git rebase --autostash origin/main'
 case_cmd "OK11. -C a dir named stash, then a read-only subcommand" allow 'git -C stash status'
 
+echo "== O: over-match of the expansion rules (DND-780) =="
+# Commands with no git and no stash in them, each denied at cbac851 by the
+# glob-head or expanded-head rule. The class rules: a glob whose basename
+# pattern cannot match git or git-stash is not git; $? $* $# $@ are
+# parameters, not globs; an assignment word is never a command word; a quoted
+# expansion followed by a literal basename is that basename; a quoted heredoc
+# body is data unless the command can execute it.
+case_cmd "O1. leading test bracket" allow '[ -n "$n" ] && echo y'
+case_cmd "O2. leading [[ keyword" allow '[[ -n "$n" ]] && echo y'
+case_cmd "O3. test bracket with \$HOME operand" allow '[ -n "$HOME" ] && echo y'
+case_cmd "O4. test bracket -f" allow '[ -f "$x" ]'
+case_cmd "O5. [[ with an unquoted variable" allow '[[ -z $v ]]'
+case_cmd "O6. \$? inside a quoted string" allow 'echo "R=$HOME rc=$?"'
+case_cmd "O7. quoted grep alternation with a glob character" allow 'grep -n "g?t\|glob" file'
+case_cmd "O8. an expanded path with a literal basename, cd'd into" allow 'W=$(mktemp -d -p /tmp a.XXXX) && git worktree add -q -b z "$W/t" HEAD && echo "$W/t" > /tmp/p && cd "$W/t" && git fetch -q origin && git rebase -q origin/main || { echo REBASE-FAILED; exit 1; }'
+case_cmd "O9. zsh brace range with a length expansion" allow 'for i in {1..${#segs}}; do echo $i; done'
+case_cmd "O10. quoted ? in an API path" allow "gh api 'repos/CJPoll/custom/activity?per_page=10'"
+case_cmd "O11. glob in a for list" allow 'for p in /proc/[0-9]*; do echo $p; done'
+case_cmd "O12. bounded wait loop with test" allow "R=~/x; for i in \$(seq 1 19); do n=\$(find \$R -maxdepth 1 -type f -mmin -1 \\( -name 'DND-437*' -o -name 'DND-761*' \\)); test -n \"\$n\" && { echo \"changed: \$n\"; break; }; sleep 30; done"
+case_cmd "O13. bounded wait loop with [" allow "R=~/x; for i in \$(seq 1 19); do n=\$(find \$R -maxdepth 1 -type f -mmin -1 \\( -name 'DND-437*' -o -name 'DND-761*' \\)); [ -n \"\$n\" ] && { echo \"changed: \$n\"; break; }; sleep 30; done"
+case_cmd "O14. quoted heredoc body with brackets and globs in prose" allow "cat >> file <<'EOF'
+[ -n \"\$x\" ] is a test, [[ -f y ]] too.
+* a bullet, and a glob like /usr/bin/g?t | head
+EOF"
+case_cmd "O15. gh --jq filter with brackets and pipes" allow "gh run list --branch dnd-437 --limit 5 --json databaseId,headSha,status --jq '.[] | select(.headSha==\"abc123\") | .databaseId'"
+case_cmd "O16. \$* and \$# are parameters" allow 'echo "args: $* count: $#"; [ $# -gt 0 ]'
+case_cmd "O17. arithmetic with *" allow 'echo $((2*3))'
+case_cmd "O18. quoted heredoc into git commit -F -" allow "git commit -F - <<'EOF'
+Fix: [ -n x ] no longer denied; git stash pop is mentioned only.
+EOF"
+case_cmd "O19. <<- quoted heredoc, tab-indented terminator" allow "cat <<-'EOF'
+	[ -n x ]
+	EOF
+echo done"
+# The guarantee stays: every one of these still denies.
+case_cmd "O20. glob basename that can match git" deny '/usr/bin/[g]it stash pop'
+case_cmd "O21. POSIX class in a glob command word" deny '/usr/bin/[[:alpha:]]it stash pop'
+case_cmd "O22. negated class that can match git" deny '/usr/bin/[!x]it stash'
+case_cmd "O23. glob with a range that can match git" deny '/usr/bin/[f-h]it stash pop'
+case_cmd "O24. glob that can match git-stash" deny '/usr/libexec/git-core/git-?tash pop'
+case_cmd "O25. quoted expansion with a literal git basename" deny '"$D"/git stash pop'
+case_cmd "O26. unquoted expansion before a literal basename" deny '$W/t stash pop'
+case_cmd "O27. quoted heredoc fed to bash" deny "bash <<'EOF'
+git stash pop
+EOF"
+case_cmd "O28. quoted heredoc piped to sh" deny "cat <<'EOF' | sh
+git stash pop
+EOF"
+case_cmd "O29. quoted heredoc written to a script, then run" deny "cat > /tmp/x.sh <<'EOF'
+git stash pop
+EOF
+sh /tmp/x.sh"
+case_cmd "O30. quoted heredoc to a script run by path" deny "cat > ./x.sh <<'EOF'
+git stash pop
+EOF
+./x.sh"
+case_cmd "O31. unquoted heredoc body with a substitution" deny 'cat <<EOF
+$(git stash pop)
+EOF'
+case_cmd "O32. quoted heredoc to xargs git" deny "xargs git <<'EOF'
+stash pop
+EOF"
+case_cmd "O33. heredoc body read by a loop that runs it" deny "while read -r l; do \$l; done <<'EOF'
+git stash pop
+EOF"
+case_cmd "O34. a stash write after a quoted heredoc" deny "cat <<'EOF'
+data
+EOF
+git stash pop"
+case_cmd "O35. << in a comment does not hide the next line" deny "# see <<'X'
+git stash pop
+X"
+case_cmd "O36. << in arithmetic does not hide the next line" deny "echo \$((1<<'X'))
+git stash pop
+X"
+case_cmd "O37. a stash write inside \${...:-\$(...)}" deny 'echo ${X:-$(git stash pop)}'
+case_cmd "O38. an assignment then an expanded git with stash" deny 'A=$B $GIT stash pop'
+case_cmd "O39. a glob git command word in a quoted sh -c payload" deny "sh -c '/usr/bin/g?t stash pop'"
+case_cmd "O40. literal git in a quoted watch payload" deny "watch 'git stash pop'"
+# LOW (DND-780): a literal stash write must name the literal-stash reason even
+# after an unrelated expansion that also triggers a rule.
+run "$(json / 'cd "$D" && echo "$X" foo && git stash pop')"
+if is_deny && printf '%s' "$OUT" | grep -q 'with a verb that writes the stash list'; then
+  record "O41. a literal stash write after an unrelated expansion names the literal reason" PASS
+else
+  record "O41. a literal stash write after an unrelated expansion names the literal reason" FAIL
+fi
+
 echo "== T: the deny text =="
 run "$(json "$WT" 'git stash pop')"
 if printf '%s' "$OUT" | grep -q 'git worktree add' && printf '%s' "$OUT" | grep -q 'commit'; then
