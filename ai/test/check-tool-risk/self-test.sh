@@ -241,6 +241,34 @@ if [ "${RC}" -eq 0 ] && has "ratchet" && has "ls-remote" && has "${TIP:0:12}"; t
   ok "14 the OK output names the ratchet and the cross-checked tip"
 else bad "14 the OK output names the ratchet and the cross-checked tip" "rc=${RC} out=${OUT}"; fi
 
+# DND-735: harness-gate reads origin's main once and pins it for every check.
+# move_origin <root>: another machine lands a commit on origin's main; prints it.
+move_origin() {
+  local mover="$1.mover.$RANDOM"
+  git clone -q -b main "$1.origin.git" "${mover}" >/dev/null 2>&1
+  git -C "${mover}" -c user.name=o -c user.email=o@example.invalid commit -q --allow-empty -m elsewhere >/dev/null 2>&1
+  git -C "${mover}" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+  git -C "${mover}" rev-parse HEAD
+}
+run_pinned() { # <root> <pinned sha>
+  OUT="$(cd "$1" && ATHENA_LANDED_PIN_SHA="$2" ATHENA_LANDED_PIN_REPO="$(realpath "$1/.git")" \
+    ruby ai/bin/check-tool-risk 2>&1)"; RC=$?
+}
+
+# 14b. Origin moves mid-gate: the pinned check still measures the pin -> PASS.
+R="$(new_fixture pinned-moved)"; P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"
+move_origin "${R}" >/dev/null; run_pinned "${R}" "${P}"
+if [ "${RC}" -eq 0 ] && has "${P:0:12}" && has "pinned"; then
+  ok "14b origin moving mid-gate does not redden a check pinned at gate start"
+else bad "14b origin moving mid-gate does not redden a check pinned at gate start" "rc=${RC} out=${OUT}"; fi
+
+# 14c. The local ref is behind the pin -> mismatch, both SHAs named, no OK.
+R="$(new_fixture pinned-behind)"; P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"
+Q="$(move_origin "${R}")"; run_pinned "${R}" "${Q}"
+if [ "${RC}" -ne 0 ] && has "${P}" && has "${Q}" && has "ATHENA_LANDED_PIN_SHA" && has "Fix:" && ! has "OK"; then
+  ok "14c a local ref behind the pinned landed ref fails, both SHAs named"
+else bad "14c a local ref behind the pinned landed ref fails, both SHAs named" "rc=${RC} out=${OUT}"; fi
+
 echo "== check-tool-risk: a tool moved to a new path keeps its landed class (DND-551) =="
 
 # The ratchet keys on the registry key, i.e. the tool's PATH. Before DND-551 a

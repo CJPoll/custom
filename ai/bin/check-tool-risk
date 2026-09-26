@@ -387,7 +387,7 @@ end
 # [[key, landed, now]] (a moved key's landed names its source), :risk_moved
 # [[old_key, new_key, score]], :risk_new [[key, class]], :scope_weakened
 # [[prefix, now]], :scope_new [[prefix, verdict]], :scope_introduced; or
-# :unreadable (probes) / :mismatch ([local, remote]).
+# :unreadable (probes) / :mismatch ([local, remote, source]).
 def ratchet(root, current_classes, scope)
   points, registries, scopes = landed_bars(root)
   landed = merge_registries(registries)
@@ -410,7 +410,7 @@ def ratchet(root, current_classes, scope)
 rescue Landed::Unreadable => e
   { unreadable: e.probes }
 rescue Landed::Mismatch => e
-  { mismatch: [e.local, e.remote] }
+  { mismatch: [e.local, e.remote, e.source] }
 end
 
 def ratchet_failed?(r)

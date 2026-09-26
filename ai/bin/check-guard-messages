@@ -347,7 +347,6 @@ end
 # the other ratchets (DND-543).
 LANDED_REF = Landed::REF
 LANDED_REMOTE = Landed::REMOTE
-LANDED_REMOTE_REF = Landed::REMOTE_REF
 LS_REMOTE_PROBE = Landed::LS_REMOTE_PROBE
 LandedUnreadable = Landed::Unreadable
 LandedMismatch = Landed::Mismatch
@@ -505,7 +504,7 @@ def ratchet!(root, result)
 rescue LandedUnreadable => e
   result[:landed_probes] = e.probes
 rescue LandedMismatch => e
-  result[:landed_mismatch] = [e.local, e.remote]
+  result[:landed_mismatch] = [e.local, e.remote, e.source]
 ensure
   result[:weakened] ||= []
 end
@@ -559,16 +558,7 @@ def report_failure(result)
 end
 
 def report_ratchet_failure(result)
-  if result.key?(:landed_mismatch)
-    local, remote = result[:landed_mismatch]
-    warn "  the local landed ref disagrees with origin, so it is not the landed bar and no " \
-         "weakening was measured:"
-    warn "    #{LANDED_REF} (local) -> #{local}"
-    warn "    #{LS_REMOTE_PROBE} -> #{remote}"
-    warn "  Fix: `git fetch #{LANDED_REMOTE}` so #{LANDED_REF} matches what landed, rebase onto " \
-         "it, and re-run. A local ref moved by hand (git update-ref) does not move the bar: " \
-         "the check compares against origin's #{LANDED_REMOTE_REF}."
-  end
+  Landed.mismatch_lines(*result[:landed_mismatch]).each { |line| warn line } if result.key?(:landed_mismatch)
   if result.key?(:landed_probes)
     warn "  could not measure the landed classification, so no weakening could be detected."
     warn "  This is a missing MEASUREMENT, not a clean result. Probed, and what each gave:"

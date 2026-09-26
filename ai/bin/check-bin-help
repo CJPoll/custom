@@ -180,7 +180,7 @@ def parse_exempt(text)
 end
 
 # {points:, weakened: [key], new_introduced: [key], introduced: bool} or
-# {unreadable: probes} / {mismatch: [local, remote]}.
+# {unreadable: probes} / {mismatch: [local, remote, source]}.
 def exempt_ratchet(repo, exempt)
   begin
     parsed = parse_exempt(File.read(File.join(repo, SELF_REL)))
@@ -207,7 +207,7 @@ def exempt_ratchet(repo, exempt)
 rescue Landed::Unreadable => e
   { unreadable: e.probes }
 rescue Landed::Mismatch => e
-  { mismatch: [e.local, e.remote] }
+  { mismatch: [e.local, e.remote, e.source] }
 end
 
 # [[key, detail]] for each landed exemption whose working-tree file no longer
