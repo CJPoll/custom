@@ -2039,6 +2039,8 @@ def self_test
     check.call("the `on:`-parses-as-boolean-true YAML trap is handled",
                (doc.key?("on") ? doc["on"] : doc[true]) && !trigger_hit(doc.key?("on") ? doc["on"] : doc[true]).nil?,
                "parsed keys=#{doc.keys.inspect}")
+
+    grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
   end
 
   puts
@@ -2051,6 +2053,247 @@ def self_test
          "merge safety check and a broken classifier silently reads as COLD."
     1
   end
+end
+
+# --- self-test: --grant-eligible (DND-596, QA Q-G1, Q-G2, Q-G8, Q-G9) -------
+#
+# Each NOT ELIGIBLE case below is built so that ONE rule decides it: the rest of
+# its diff is an eligible pull_request-only workflow edit, so a rule that stops
+# firing turns that case ELIGIBLE and fails it. The ELIGIBLE cases pin the other
+# side, so a bound that starts swallowing legitimate edits fails too.
+def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
+  n = 0
+  pr_edit = pr_wf.sub("run: test", "run: test --cover")
+  grant = lambda do |seed:, change:, args: nil|
+    n += 1
+    d = File.join(tmp, "grant#{n}")
+    b, h = mkrepo.call(d, seed: seed) { |r| change.call(r) }
+    run_br.call(args || ["--grant-eligible", "merge.pr_only_workflow", "--base", b, "--head", h, "--repo", d])
+  end
+  # A pull_request-only ci.yml at base, and the head edits it: the eligible core
+  # every NOT ELIGIBLE case adds exactly one thing to.
+  pr_seed = ->(r) { wf.call(r, "ci.yml", pr_wf) }
+  pr_change = ->(r) { wf.call(r, "ci.yml", pr_edit) }
+  eligible = lambda do |desc, seed: pr_seed, change: pr_change, also: []|
+    out, err, code = grant.call(seed: seed, change: change)
+    check.call("grant ELIGIBLE: #{desc}",
+               code.zero? && out.include?("GRANT-ELIGIBLE merge.pr_only_workflow") &&
+                 !out.include?("NOT ELIGIBLE") && also.all? { |w| out.include?(w) },
+               "exit=#{code} out=#{out} err=#{err}")
+  end
+  not_eligible = lambda do |desc, words, seed: pr_seed, change: pr_change|
+    out, err, code = grant.call(seed: seed, change: change)
+    check.call("grant NOT ELIGIBLE: #{desc}",
+               code == 4 && out.include?("NOT ELIGIBLE merge.pr_only_workflow") &&
+                 !out.include?("GRANT-ELIGIBLE") && err.include?("Fix:") && words.all? { |w| out.include?(w) },
+               "exit=#{code} out=#{out} err=#{err}")
+  end
+  on_wf = ->(on_yaml) { "name: t\n#{on_yaml}jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps: [{run: test}]\n" }
+
+  # --- Q-G2f: the eligible case, and the shapes of `on:` it accepts ----------
+  eligible.call("an edit to a workflow that is `on: pull_request` at base AND head (Q-G2f)",
+                also: [".github/workflows/ci.yml", "base: on: pull_request", "head: on: pull_request"])
+  [["`on: pull_request` (scalar)", "on: pull_request\n"],
+   ["`on: [pull_request]` (list)", "on: [pull_request]\n"],
+   ["`on: {pull_request: {types, branches, paths, ...}}` (filters only narrow when it runs)",
+    "on:\n  pull_request:\n    types: [opened, synchronize, reopened, labeled]\n    branches: [main]\n    " \
+    "branches-ignore: [wip]\n    paths: ['lib/**']\n    paths-ignore: ['docs/**']\n"],
+   ["`on: {pull_request: {types: opened}}` (a scalar filter)", "on:\n  pull_request:\n    types: opened\n"],
+   ["a quoted `\"on\":` key", "\"on\": pull_request\n"]].each do |label, on_yaml|
+    eligible.call("#{label} at base and head",
+                  seed: ->(r) { wf.call(r, "ci.yml", on_wf.call(on_yaml)) },
+                  change: ->(r) { wf.call(r, "ci.yml", on_wf.call(on_yaml).sub("run: test", "run: test2")) })
+  end
+  # An added file has only a head; a deleted one only a base.
+  eligible.call("an ADDED pull_request-only workflow is read at head only",
+                seed: nil, change: pr_change, also: ["base: absent (added)"])
+  eligible.call("a DELETED pull_request-only workflow is read at base only",
+                change: ->(r) { FileUtils.rm_f(File.join(r, ".github/workflows/ci.yml")) },
+                also: ["head: absent (deleted)"])
+  # A pull_request-only workflow may call another: both run the PR's own code.
+  eligible.call("a hit file named only by another pull_request-only workflow",
+                seed: lambda { |r|
+                  pr_seed.call(r)
+                  wf.call(r, "lint.yml", "name: lint\non: pull_request\njobs:\n  l:\n    uses: ./.github/workflows/ci.yml\n")
+                })
+  # A push workflow that names some OTHER file does not taint this one.
+  eligible.call("a push workflow in the repo that does not name the hit file",
+                seed: ->(r) { pr_seed.call(r); wf.call(r, "post-merge.yml", deploy_wf) },
+                also: ["post-merge.yml"])
+
+  # --- rule 1: every hit is a top-level workflow file (Q-G1, Q-G8) -----------
+  not_eligible.call("an IaC hit beside a pull_request-only workflow edit (Q-G1)",
+                    [".pkg/prod/tf/main.tf", "[infrastructure-as-code]"],
+                    change: ->(r) { pr_change.call(r); put.call(r, ".pkg/prod/tf/main.tf", "resource\n") })
+  not_eligible.call("a destructive-migration hit beside a pull_request-only workflow edit (Q-G1b)",
+                    ["[destructive-migration]"],
+                    change: lambda { |r|
+                      pr_change.call(r)
+                      put.call(r, "priv/repo/migrations/20240101000000_m.exs",
+                               "defmodule R.M do\n  use Ecto.Migration\n\n  def change do\n    drop table(:widgets)\n  end\nend\n")
+                    })
+  not_eligible.call("the allowlist module changes (Q-G8)",
+                    ["apps/athena/lib/athena/owner_approvals/action_class.ex", "[owner-approval-policy]"],
+                    change: ->(r) { pr_change.call(r); put.call(r, "apps/athena/lib/athena/owner_approvals/action_class.ex", "x\n") })
+  not_eligible.call("the allowlist module's TEST changes (Q-G8)",
+                    ["apps/athena/test/athena/owner_approvals/action_class_test.exs", "[owner-approval-policy]"],
+                    change: ->(r) { pr_change.call(r); put.call(r, "apps/athena/test/athena/owner_approvals/action_class_test.exs", "x\n") })
+  not_eligible.call("a deploy-automation hit OUTSIDE .github/workflows/ (a local action)",
+                    [".github/actions/deploy/action.yml", "not a top-level workflow file"],
+                    change: ->(r) { pr_change.call(r); put.call(r, ".github/actions/deploy/action.yml", "runs:\n  using: composite\n") })
+  not_eligible.call("a file UNDER .github/workflows/ that is not a top-level workflow YAML (a script)",
+                    [".github/workflows/scripts/ship.sh", "not a top-level workflow file"],
+                    change: ->(r) { pr_change.call(r); put.call(r, ".github/workflows/scripts/ship.sh", "#!/bin/sh\n") })
+  not_eligible.call("a workflow YAML in a SUBDIRECTORY of .github/workflows/ (GitHub never runs it; not modelled)",
+                    [".github/workflows/sub/x.yml", "not a top-level workflow file"],
+                    change: ->(r) { pr_change.call(r); put.call(r, ".github/workflows/sub/x.yml", pr_wf) })
+  # DND-589: a file merge-time CI executes is deploy-automation by reference.
+  not_eligible.call("a script a push workflow runs (a DND-589 `via` hit)",
+                    ["scripts/ship.sh", "executed by .github/workflows/post-merge.yml"],
+                    seed: lambda { |r|
+                      pr_seed.call(r)
+                      put.call(r, "scripts/ship.sh", "#!/bin/sh\n")
+                      wf.call(r, "post-merge.yml", deploy_wf.sub("terraform apply -auto-approve", "scripts/ship.sh"))
+                    },
+                    change: ->(r) { pr_change.call(r); put.call(r, "scripts/ship.sh", "#!/bin/sh\necho changed\n") })
+  not_eligible.call("a diff that hits NO declared surface (nothing for a grant to approve)",
+                    ["no declared surface"],
+                    change: ->(r) { put.call(r, "lib/a.ex", "x\n") })
+
+  # --- rule 2: the trigger ALLOWLIST at base AND head (Q-G2, Q-G2b, Q-G2d) ---
+  not_eligible.call("an edited push-to-main workflow (Q-G2)", ["post-merge.yml", "push"],
+                    seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) },
+                    change: ->(r) { wf.call(r, "post-merge.yml", deploy_wf.sub("-auto-approve", "")) })
+  [%w[schedule] + ["on:\n  schedule:\n    - cron: '0 0 * * *'\n"],
+   %w[workflow_dispatch] + ["on:\n  pull_request:\n  workflow_dispatch:\n"],
+   %w[pull_request_target] + ["on: pull_request_target\n"],
+   %w[release] + ["on:\n  release:\n    types: [published]\n"]].each do |word, on_yaml|
+    not_eligible.call("a workflow triggered by #{word} (Q-G2b)", [".github/workflows/ci.yml", word],
+                      change: ->(r) { wf.call(r, "ci.yml", on_wf.call(on_yaml)) })
+  end
+  # The regression the ticket names: trigger_hit is the DENY-list DND-590 made
+  # of pre-merge events, so it reads each of these as "not merge-time" -- and
+  # each must still be NOT ELIGIBLE, because its trigger set is not exactly
+  # {pull_request}. Asserting trigger_hit's nil answer pins WHY it is not reused.
+  [["pull_request_review", "on: [pull_request_review]\n"],
+   ["merge_group", "on:\n  pull_request:\n  merge_group:\n"],
+   ["pull_request_review_comment", "on: [pull_request, pull_request_review_comment]\n"],
+   ["push", "on:\n  push:\n    branches: [staging]\n"]].each do |word, on_yaml|
+    denylist_nil = trigger_hit(YAML.safe_load(on_wf.call(on_yaml))[true]).nil?
+    out, err, code = grant.call(seed: pr_seed, change: ->(r) { wf.call(r, "ci.yml", on_wf.call(on_yaml)) })
+    check.call("grant NOT ELIGIBLE: #{word}, which the trigger_hit DENY-list reads as pre-merge (DND-590 regression)",
+               denylist_nil && code == 4 && out.include?("NOT ELIGIBLE") && out.include?(word),
+               "trigger_hit nil=#{denylist_nil} exit=#{code} out=#{out} err=#{err}")
+  end
+  not_eligible.call("base pull_request-only, head ADDS push (Q-G2d)", ["head:", "push"],
+                    change: ->(r) { wf.call(r, "ci.yml", on_wf.call("on: [pull_request, push]\n")) })
+  not_eligible.call("base push, head pull_request-only (the base is read too)", ["base:", "push"],
+                    seed: ->(r) { wf.call(r, "ci.yml", on_wf.call("on: [pull_request, push]\n")) })
+  not_eligible.call("a DELETED push workflow (read at base)", ["post-merge.yml", "push"],
+                    seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) },
+                    change: ->(r) { FileUtils.rm_f(File.join(r, ".github/workflows/post-merge.yml")) })
+  # `git diff --name-only` detects renames and lists only the NEW path, so a
+  # renamed push workflow's deleted side would never be read. --no-renames.
+  not_eligible.call("a push workflow RENAMED and rewritten pull_request-only (the deleted side is read)",
+                    [".github/workflows/post-merge.yml", "push"],
+                    seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) },
+                    change: lambda { |r|
+                      File.rename(File.join(r, ".github/workflows/post-merge.yml"), File.join(r, ".github/workflows/ci.yml"))
+                      File.write(File.join(r, ".github/workflows/ci.yml"), deploy_wf.sub("push:\n    branches: [main]", "pull_request:"))
+                    })
+  # `closed` fires on the merge itself, running the PR's code with its secrets:
+  # a new run started BY merging, the one thing the reversible boundary excludes.
+  not_eligible.call("`pull_request: types: [closed]` (fires on the merge itself)", ["closed"],
+                    change: ->(r) { wf.call(r, "ci.yml", on_wf.call("on:\n  pull_request:\n    types: [opened, closed]\n")) })
+  # --- rule 4: every shape this check does not model fails CLOSED (Q-G2e) ----
+  [["unparseable YAML (Q-G2e)", "name: t\non: [\n  unclosed\n", "unparseable"],
+   ["a MISSING `on:`", on_wf.call(""), "no `on:`"],
+   ["an EMPTY `on:`", on_wf.call("on:\n"), "UNDETERMINED"],
+   ["`on: 42`", on_wf.call("on: 42\n"), "UNDETERMINED"],
+   ["a list holding a mapping", on_wf.call("on:\n  - pull_request: x\n"), "UNDETERMINED"],
+   ["an unknown pull_request filter key", on_wf.call("on:\n  pull_request:\n    tags: [v1]\n"), "tags"],
+   ["a pull_request filter that is not a list of strings", on_wf.call("on:\n  pull_request:\n    branches: {main: true}\n"), "branches"],
+   ["pull_request with a scalar config", on_wf.call("on:\n  pull_request: yes\n"), "UNDETERMINED"],
+   ["an unknown pull_request activity type", on_wf.call("on:\n  pull_request:\n    types: [some_future_type]\n"), "some_future_type"],
+   ["a DUPLICATE `on:` key (parsers disagree on which wins)", on_wf.call("on: push\non: pull_request\n"), "duplicate"],
+   ["both `on:` and `\"on\":` (two keys a parser can read as the trigger)", on_wf.call("\"on\": push\non: pull_request\n"), "UNDETERMINED"],
+   ["a `yes:` key YAML 1.1 reads as the same boolean as `on`", on_wf.call("yes: push\non: pull_request\n"), "UNDETERMINED"],
+   ["a trigger key spelled `On:` (not the key GitHub reads)", on_wf.call("On: pull_request\n"), "UNDETERMINED"],
+   ["TWO YAML documents in one file", "#{on_wf.call("on: pull_request\n")}---\n#{on_wf.call("on: push\n")}", "documents"],
+   ["an explicit YAML tag", on_wf.call("on: !!str pull_request\n"), "tag"],
+   ["a merge key `<<` (parsers disagree on precedence)",
+    "x: &x\n  push:\n#{on_wf.call("on:\n  <<: *x\n  pull_request:\n")}", "<<"]].each do |label, body, word|
+    not_eligible.call("#{label} fails CLOSED", [".github/workflows/ci.yml", word],
+                      change: ->(r) { wf.call(r, "ci.yml", body) })
+  end
+  not_eligible.call("a workflow that is a SYMLINK (not a regular blob) fails CLOSED", ["symlink"],
+                    change: lambda { |r|
+                      put.call(r, "other.yml", pr_wf)
+                      FileUtils.rm_f(File.join(r, ".github/workflows/ci.yml"))
+                      File.symlink("../../other.yml", File.join(r, ".github/workflows/ci.yml"))
+                    })
+
+  # --- rule 3: a non-PR-only workflow names a hit file (Q-G2c) ---------------
+  ref_seed = lambda do |caller_wf|
+    ->(r) { pr_seed.call(r); wf.call(r, "post-merge.yml", caller_wf) }
+  end
+  not_eligible.call("a pull_request-only file a PUSH workflow calls with `uses: ./` (Q-G2c)",
+                    ["referenced by .github/workflows/post-merge.yml"],
+                    seed: ref_seed.call("name: pm\non:\n  push:\n    branches: [main]\njobs:\n  c:\n    uses: ./.github/workflows/ci.yml\n"))
+  not_eligible.call("the same, through the repo-qualified form `owner/repo/.github/workflows/ci.yml@main`",
+                    ["referenced by .github/workflows/post-merge.yml"],
+                    seed: ref_seed.call("name: pm\non: workflow_dispatch\njobs:\n  c:\n    uses: cjpoll/x/.github/workflows/ci.yml@main\n"))
+  not_eligible.call("the same, spelled with a YAML escape (`c\\x69.yml`) the raw text does not show",
+                    ["referenced by .github/workflows/post-merge.yml"],
+                    seed: ref_seed.call("name: pm\non: schedule\njobs:\n  c:\n    uses: \"./.github/workflows/c\\x69.yml\"\n"))
+  not_eligible.call("the same, from a pull_request_review workflow (not exactly {pull_request})",
+                    ["referenced by .github/workflows/post-merge.yml"],
+                    seed: ref_seed.call("name: pm\non: pull_request_review\njobs:\n  c:\n    uses: ./.github/workflows/ci.yml\n"))
+  not_eligible.call("the same, from an UNPARSEABLE workflow (scanned as raw text)",
+                    ["referenced by .github/workflows/post-merge.yml"],
+                    seed: ref_seed.call("name: pm\non: [\n  uses: ./.github/workflows/ci.yml\n"))
+  not_eligible.call("the reference appears only at HEAD (a head-side caller is read)",
+                    ["referenced by .github/workflows/deploy.yml"],
+                    change: lambda { |r|
+                      pr_change.call(r)
+                      put.call(r, ".github/workflows/deploy.yml", "name: d\non: schedule\njobs:\n  c:\n    uses: ./.github/workflows/ci.yml\n")
+                    })
+  # A push workflow's SCRIPT that names the hit file: the DND-589 walk sees it.
+  not_eligible.call("a script a push workflow runs names the hit file (the ci-references walk)",
+                    ["executed by", "scripts/ship.sh"],
+                    seed: lambda { |r|
+                      pr_seed.call(r)
+                      put.call(r, "scripts/ship.sh", "#!/bin/sh\ncp .github/workflows/ci.yml /tmp/x.yml\n")
+                      wf.call(r, "post-merge.yml", deploy_wf.sub("terraform apply -auto-approve", "scripts/ship.sh"))
+                    })
+
+  # --- Q-G9 and argument handling -------------------------------------------
+  d = File.join(tmp, "grant1")
+  b = `git -C #{d} rev-parse HEAD~1`.strip
+  h = `git -C #{d} rev-parse HEAD`.strip
+  [["an unknown class (Q-G9)", %w[--grant-eligible foo]],
+   ["priority.transition (a grant class no diff decides)", %w[--grant-eligible priority.transition]],
+   ["--grant-eligible with no class", %w[--base] + [b, "--head", h, "--repo", d, "--grant-eligible"]],
+   ["--grant-eligible with --owner-approval (the two answer different questions)",
+    %w[--grant-eligible merge.pr_only_workflow --owner-approval yes]]].each do |label, args|
+    full = args.include?("--base") ? args : args + ["--base", b, "--head", h, "--repo", d]
+    _, err, code = run_br.call(full)
+    check.call("grant usage: #{label} is exit 2 with a Fix:",
+               code == 2 && err.include?("Fix:"), "exit=#{code} err=#{err}")
+  end
+  _, err, code = run_br.call(["--grant-eligible", "foo", "--base", b, "--head", h, "--repo", d])
+  check.call("grant usage: an unknown class's Fix names the known class",
+             code == 2 && err.include?("merge.pr_only_workflow"), "exit=#{code} err=#{err}")
+
+  # --- the new surface in the EXISTING verdict (Q-G8) ------------------------
+  d = File.join(tmp, "policy-hot")
+  b, h = mkrepo.call(d, seed: ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }) do |r|
+    put.call(r, "apps/athena/lib/athena/owner_approvals/action_class.ex", "x\n")
+  end
+  out, _, code = run_br.call(["--base", b, "--head", h, "--repo", d])
+  check.call("HOT: the allowlist module is the owner-approval-policy surface (Q-G8)",
+             code == 4 && out.include?("BLAST-RADIUS HOT") && out.include?("[owner-approval-policy]"),
+             "exit=#{code} out=#{out}")
 end
 
 if ARGV.include?("--self-test")
