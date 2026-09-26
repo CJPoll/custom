@@ -358,6 +358,26 @@ Block Kit extends the rules above; it does not replace any of them.
 - **Thread by default.** Reply in the thread; start a new top-level message only
   for something genuinely new. `--broadcast` notifies the entire channel — it is
   a decision, not formatting.
+  - **DMs too.** Answer a DM message with `reply <dm-channel> <thread_ts>`, where
+    `thread_ts` is the message's own `thread_ts` if set, else its `ts`. A
+    top-level `dm` or `post` is only for a new, unprompted topic: a milestone
+    report nobody asked for, or a new escalation.
+  - **Follow-ups stay in the topic's thread.** A status, "posted" or "done" on
+    work goes where that work's conversation started, not in a new top-level DM.
+  - Owner request (Cody, 2026-09-25 18:19Z): "responses to slack messages should
+    favor responding in-thread". Measured the same day: the walt_ui session sent
+    C1/C2 results and a draft as top-level DMs, and Cody kept answering in
+    threads under them.
+- **Read the whole thread, fresh, right before you reply.** Run `read-thread`
+  on the conversation immediately before composing. Do it even for a single
+  shared message or permalink, and even if you read that thread earlier: an
+  earlier read is a snapshot. Read the root and every reply to now. Then check
+  your draft against the newest replies. If what you were about to say has
+  already happened, been answered, or been decided, change the reply, or react
+  instead. Owner request (Cody, 2026-09-25): "check the thread for the message,
+  not just the singular shared message." Measured: a reply in C07A6E3CBFH built
+  on a ~20-minute-old read said "Cody's on it" after Cody had already set the
+  icon and been thanked, and had to be corrected with `update`.
 - **Say who you are when it matters.** In a thread Athena already owns, the bot
   name is enough. When acting on Cody's behalf somewhere the context does not
   make that obvious, say so: *"Athena here, on Cody's behalf — …"*.

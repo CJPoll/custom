@@ -167,6 +167,25 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
   `git log`, reading files, `read-thread` for the thread's context) is in
   policy. If the message threads onto earlier context, read that thread before
   answering.
+
+  **Later (2026-09-26):** three owner requests (Cody, 2026-09-25) tighten
+  Tier 0 for a Slack line. They supersede "`dm <user_id>` for a DM" above and
+  make the conditional thread read unconditional.
+  - **Check threadedness first.** A line whose `thread_ts` is set and differs
+    from its `ts` is a reply inside a thread, even when its `kind` is `im` or
+    `mpim`: the classifier stamps DM thread replies `im` by design
+    (`ai/contracts/athena-inbox.md` → *Line format* → *Precedence*). Read the
+    thread root before deciding what the message means, whose it is, or where
+    to answer. If the root was posted by another session (its session-name
+    prefix), the reply is that session's: forward it there rather than
+    answering it yourself. Measured: Cody's "OK, done. Let's test that
+    here" under the harness session's DND-299 post read as a plain walt_ui DM.
+  - **Read the whole thread fresh, right before composing.** `read-thread` the
+    conversation immediately before you write the reply, not only on the wake.
+    Check the draft against the newest replies (`athena:slack` → *Etiquette*).
+  - **Reply in the thread, DMs included.** `athena:slack/bin/reply <channel>
+    <thread_ts>`, with the line's `thread_ts` when set, else its `ts`. A
+    top-level `dm` is only for a new, unprompted topic.
 - **Tier 0 for a session message:** reply into the same conversation, which is
   a new routed message back to its sender: `athena:inbox/bin/send-mail --routed
   --to <from.machine_id>/<from.inbox_name> --thread <event_id> --subject <line>`
