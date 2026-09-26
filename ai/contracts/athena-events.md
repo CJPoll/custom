@@ -3094,8 +3094,13 @@ Only the server renders an approval message, from the grant's binding.
 #### The grant token
 
 A grant button carries a return-address token (*Machine↔owner API binding and
-the outbound return-address dual*) of **version 3**. Version 3 is the version-1
-fields, plus these, all inside the integrity-tagged segment:
+the outbound return-address dual*) of **version 3**. The shipped token (DND-241)
+is `base64url(JSON) . base64url(HMAC-SHA256(key, <first segment>))`, and its
+JSON is the **version-1 fields**: `v` (the version), `acct`, `machine`, `inbox`
+and `nonce`, a random value the server mints for each post it stamps. The
+version, like every field, is inside the tagged segment. For a grant token the `nonce` is the one
+minted for the grant and stored on its row, so every button of one approval
+message carries the same nonce. Version 3 is the version-1 fields plus these:
 
 | Field | Meaning |
 | --- | --- |
@@ -3145,6 +3150,9 @@ A grant is in exactly one state:
   won: that click gets an ephemeral "already decided", and nothing else happens.
 - `declined`, `expired`, `void` and `redeemed` are final. A declined or expired
   grant never becomes approved; the requester asks again.
+- **A grant nobody clicks stays `pending`.** Nothing expires it without a click.
+  That is harmless: only `approved` can be redeemed, a click after the window
+  expires it, and the row is pruned with the rest (*Retention*).
 
 #### Request: `owner_approval_request`
 
@@ -3336,8 +3344,8 @@ Stated, not hidden:
 #### Retention
 
 A grant row holds metadata only: ids, the class, the binding and its digest,
-statuses and timestamps, the deciding Slack user. It never holds message text,
-the note, or a button value. Rows are kept 90 days, then pruned.
+its nonce, statuses and timestamps, the deciding Slack user. It never holds
+message text, the note, or a button value. Rows are kept 90 days, then pruned.
 
 ### Thread replies route to the thread's claimant
 
