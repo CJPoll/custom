@@ -315,6 +315,14 @@ Three scorer primitives cover the whole corpus:
 
 A single sample of a model decision is noisy. The runner therefore:
 
+**Later (2026-09-26):** DND-523 changed the default to `K=10`, and the baseline
+diff no longer compares majority booleans. It classifies each T2 case's counts
+with `EvalScore.classify`. That is the DND-225 noise rule: a regression is a
+Newcombe 95% interval below 0 or a drop above 0.3, and a missing case counts as
+one. T1 cases still diff exactly. The majority below still sets each row's
+PASS/FAIL. The confirmation re-run and the "fragile 2/3" handling below are
+superseded by the rule's interval. See `ai/docs/eval-noise-band.md`.
+
 - **Samples each T2 case K times** (default `K=3`, `--runs K` to override) and
   scores the case **pass iff a strict majority of samples pass** (≥2 of 3). T1
   cases are deterministic and sampled once.

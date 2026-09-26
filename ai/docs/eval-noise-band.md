@@ -35,6 +35,15 @@ code of the rule is `ai/lib/eval_score.rb`; the raw numbers are
   default) it is 0.30, from AE-18 alone. A K=3 REVERT is therefore expected
   noise about one comparison in three.
 
+**Later (2026-09-26):** admiral-eval's default is no longer K=3. DND-523 set its
+`DEFAULT_RUNS` to 10 (variant-eval's N, and the self-test asserts the two stay
+equal) and replaced its majority-boolean baseline diff with
+`EvalScore.classify` on the counts. A missing case is a regression and T1 cases
+diff exactly. Computed with this module, for AE-18 (p = 0.78) with a baseline
+that passed: the K=3 majority diff false-flagged 12.4% of runs. The new diff
+false-flags 8.7% against a legacy K=3 baseline and 2.9% at N=10 per side. A diff with a side below
+N=10 prints an advisory note, and re-capturing the baseline at N=10 is DND-522.
+
 ## Why the rule is asymmetric
 
 `variant-eval` is not a gate, but its REVERT verdict is a safety signal: never
