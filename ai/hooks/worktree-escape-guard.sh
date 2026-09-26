@@ -45,9 +45,12 @@
 # commands, so text that only MENTIONS a write is not a write.
 #
 # NOT DETECTED (documented false negatives, never false denies): writes through
-# an interpreter (`python -c`, `perl -i`), `xargs rm`, `find -delete`,
-# command substitution, and a target built from a variable not assigned in the
-# same command. An unresolvable target is logged as `unresolved`.
+# an interpreter (`python -c`, `perl -i`), `xargs rm`, `find -delete`, any
+# writer outside the list above (`patch`, `tar -x`, `unzip`, `rsync`, `chmod`,
+# `dd`), a command substitution inside double quotes, and a target built from a
+# variable not assigned in the same command. An unresolvable target is logged
+# as `unresolved`. By design, a scratch repo that has a linked worktree IS
+# guarded wherever it lives: a subagent works in its worktree there too.
 #
 # FAILURE MODE: this hook runs on every tool call of every session on the
 # machine, hot-loaded. A fail-closed hook would wedge them all on a broken git
@@ -311,19 +314,7 @@ def check_path(path, what, data, act, honour_ignore=True):
 SEPS = {";", "&&", "||", "|", "&", "\n", "(", ")", "|&", ";;"}
 REDIR_OUT = {">", ">>", ">|", "&>", "&>>"}
 REDIR_SKIP = {"<", "<<", "<<<", ">&", "<&", "<>"}
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 UNKNOWN = object()
-
-def strip_heredocs(text):
-    out, pending = [], []
-    for line in text.split("\n"):
-        if pending:
-            if line.strip() == pending[0] or line == pending[0]:
-                pending.pop(0)
-            continue
-        out.append(line)
-        pending.extend(m.group(2) for m in HEREDOC.finditer(line) if "<<<" not in line[m.start():m.start() + 3])
-    return "\n".join(out)
 
 OPS = sorted(["&>>", "<<<", "<<-", ">>", "&>", ">|", ">&", "<&", "<<", "<>", "&&", "||", "|&",
               ";;", ";", "&", "|", "(", ")", "<", ">"], key=len, reverse=True)
@@ -331,12 +322,22 @@ OPS = sorted(["&>>", "<<<", "<<-", ">>", "&>", ">|", ">&", "<&", "<<", "<>", "&&
 def tokenize(text):
     """[(value, is_operator)]. An operator is recognised ONLY unquoted, so
     `grep '>' f` or a commit message containing `&&` is data, never syntax.
-    Raises ValueError on an unterminated quote."""
-    text = strip_heredocs(text)
+    Raises ValueError on an unterminated quote.
+
+    A heredoc is recognised the same way: only an UNQUOTED `<<` / `<<-`
+    operator (never `<<<`, a here-string, which OPS matches first) opens
+    one, its next word is the delimiter, and the body -- data, not
+    commands -- is skipped from the next newline to the delimiter line. A
+    `<<EOF` inside a quoted argument is therefore just text."""
     toks, cur, have, i, n = [], [], False, 0, len(text)
+    pending, want = [], [False]
     def flush():
         if have:
-            toks.append(("".join(cur), False))
+            word = "".join(cur)
+            toks.append((word, False))
+            if want[0]:
+                pending.append(word)
+                want[0] = False
         del cur[:]
         return False
     while i < n:
@@ -345,6 +346,12 @@ def tokenize(text):
             have = flush(); i += 1
         elif c == "\n":
             have = flush(); toks.append(("\n", True)); i += 1
+            while pending and i < n:
+                j = text.find("\n", i)
+                line = text[i:j] if j >= 0 else text[i:]
+                i = j + 1 if j >= 0 else n
+                if line.strip() == pending[0]:
+                    pending.pop(0)
         elif c == "#" and not have:
             while i < n and text[i] != "\n":
                 i += 1
@@ -371,6 +378,8 @@ def tokenize(text):
             have = flush()
             op = next(o for o in OPS if text.startswith(o, i))
             toks.append((op, True)); i += len(op)
+            if op in ("<<", "<<-"):
+                want[0] = True
         else:
             cur.append(c); have = True; i += 1
     flush()
@@ -555,7 +564,7 @@ def check_bash(cmd, data, act):
             cur.append(t)
     if cur:
         segs.append(cur)
-    stack = []
+    stack, dirstack = [], []
     for seg in segs:
         if seg == "(":
             stack.append((cwd, dict(env)))
@@ -600,7 +609,12 @@ def check_bash(cmd, data, act):
                 log("unresolved", "redirect target %s in: %s" % (w, cmd[:300]))
                 continue
             check_path(p, "the shell redirection `> %s`" % w, data, act)
+        if base == "popd":
+            cwd = dirstack.pop() if dirstack else UNKNOWN
+            continue
         if base in ("cd", "pushd"):
+            if base == "pushd":
+                dirstack.append(cwd)
             dest = words[1] if len(words) > 1 else "~"
             if dest == "-":
                 cwd = UNKNOWN
