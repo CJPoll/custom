@@ -860,8 +860,8 @@ as a default with named exceptions rather than an absolute: an absolute that
 everyone knows is violated hourly by the publish step teaches people to ignore
 the rule, while four named exceptions can be checked.
 
-**It is enforced by `ai/hooks/worktree-escape-guard.sh`** (`PreToolUse`, on
-`Bash` and `Edit|Write|MultiEdit|NotebookEdit`). It denies a write to a main
+**It is enforced by `ai/hooks/worktree-escape-guard.sh`** (`PreToolUse`,
+matcher `Bash|Edit|Write|MultiEdit|NotebookEdit`). It denies a write to a main
 checkout's working tree, with a `Fix:` naming the worktree to use:
 
 - **Who is guarded.** Every subagent: stdin carries `agent_id`, and the rule

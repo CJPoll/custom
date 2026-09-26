@@ -261,6 +261,26 @@ expect "empty stdin -> allow" allow
 bash_sub "a deny after the log was truncated -> deny" deny "rm -f ${MAIN}/a.txt"
 grep -q 'deny' "${LOG}" && ok "denials are logged" || bad "denials are logged" "$(cat "${LOG}")"
 
+echo "== registration: the installer wires this hook for BOTH tool families =="
+# Critic round 6: two registry entries for one script on one event collapsed
+# to the first in scripts/setup-hooks (it dedupes on event + command), so the
+# Edit/Write family was never wired. Install the real registry into a scratch
+# settings file and ask which tool names reach the hook.
+REPO="$(cd -- "${HERE}/../.." && pwd -P)"
+SETTINGS="${TMP}/settings.json"
+printf '{}\n' > "${SETTINGS}"
+if HOOKS_SETTINGS_FILE="${SETTINGS}" "${REPO}/scripts/setup-hooks" --install >/dev/null 2>&1; then
+  for tool in Bash Edit Write MultiEdit NotebookEdit; do
+    hit="$(jq -r --arg t "${tool}" '[.hooks.PreToolUse[]?
+        | select(any(.hooks[]?; .command | endswith("/worktree-escape-guard.sh")))
+        | .matcher | select(. as $m | $t | test("^(" + $m + ")$"))] | length' "${SETTINGS}")"
+    if [ "${hit}" -ge 1 ] 2>/dev/null; then ok "installed settings route ${tool} to worktree-escape-guard"
+    else bad "installed settings route ${tool} to worktree-escape-guard" "$(jq -c '.hooks.PreToolUse' "${SETTINGS}")"; fi
+  done
+else
+  bad "scripts/setup-hooks --install into a scratch settings file" "$(HOOKS_SETTINGS_FILE="${SETTINGS}" "${REPO}/scripts/setup-hooks" --install 2>&1 | tail -3)"
+fi
+
 echo "== --help =="
 HELP="$("${HOOK}" --help </dev/null)"; HRC=$?
 [ "${HRC}" -eq 0 ] && case "${HELP}" in *worktree-escape-guard*) true ;; *) false ;; esac && ok "--help prints usage on stdout, exit 0" || bad "--help" "rc=${HRC} ${HELP}"

@@ -1,7 +1,9 @@
 #!/bin/sh
-# worktree-escape-guard.sh -- PreToolUse hook (matchers Bash and
-# Edit|Write|MultiEdit|NotebookEdit): an agent dispatched into a worktree may
-# not write the MAIN checkout (DND-840).
+# worktree-escape-guard.sh -- PreToolUse hook (ONE registry entry, matcher
+# Bash|Edit|Write|MultiEdit|NotebookEdit; the hook branches on tool_name): an
+# agent dispatched into a worktree may not write the MAIN checkout (DND-840).
+# One entry, not two: scripts/setup-hooks dedupes on event + command, so a
+# second entry for this script on PreToolUse would never be installed.
 #
 # ~/dev/custom/CLAUDE.md -> *Agents work in worktrees, not the main checkout*
 # made this doctrine and named this hook as its honest choke point. Motivating
@@ -109,6 +111,9 @@ if command -v jq >/dev/null 2>&1; then
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
+  WEG_LOG="${XDG_STATE_HOME:-${HOME}/.local/state}/athena/worktree-escape-guard.log"
+  mkdir -p "$(dirname -- "${WEG_LOG}")" 2>/dev/null && \
+    printf '%s\tunchecked\tno python3 on PATH\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${WEG_LOG}" 2>/dev/null
   printf '%s\n' '{"systemMessage":"worktree-escape-guard: python3 is not on PATH, so this tool call was NOT checked for a main-checkout write. Fix: install python3.","hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"worktree-escape-guard could not run (no python3); this call was not checked. Fix: install python3."}}'
   exit 0
 fi
