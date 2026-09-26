@@ -3,7 +3,8 @@
 # account (athena-amby, amby_ai group). Token read at call time from a 600
 # file; never in argv or config. Use for writes that should be attributed to
 # Athena (MR create/comment/approve, merge-train boarding, merges). Reads may
-# keep using the owner's OAuth glab.
+# keep using the owner's OAuth glab. Every merge path is judged by the merge
+# guard first (DND-742, "The merge guard" below).
 #
 # Owner-run repair: `glab-athena refresh` mints a fresh PAT for the athena-amby
 # service account and writes it to the token file. It uses the OWNER's plain
@@ -166,6 +167,8 @@ FCI_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/forge-cli-isolat
 . "$FCI_LIB"
 TOKEN=""
 [ -r "$TOKEN_FILE" ] && TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+# Read before the scrub below, which removes every GLAB_* variable.
+MERGE_DRY_RUN="${GLAB_ATHENA_MERGE_DRY_RUN:-}"
 fci_require_token 1 glab-athena athena-amby "token file $TOKEN_FILE" "$TOKEN"
 # Every GITLAB_*/GLAB_*/GL_* variable (token sources, GITLAB_URI/GITLAB_API_HOST
 # host overrides, GLAB_CONFIG_DIR, CI autologin), plus OAUTH_TOKEN and
@@ -174,6 +177,34 @@ fci_scrub_env '^(GITLAB_|GLAB_|GL_)|^(OAUTH_TOKEN|CI_JOB_TOKEN)$'
 fci_isolate glab-athena GLAB_CONFIG_DIR
 export GITLAB_TOKEN="$TOKEN" GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 GLAB_CHECK_UPDATE=false
 unset TOKEN
+
+# ---- The merge guard (DND-742) ---------------------------------------------
+# Every merge path must pin the MR's exact head SHA, and the MR's head pipeline
+# must have PASSED on that head: `mr merge`/`mr accept` need --sha <head>;
+# merge-train boarding (`api -X POST projects/<p>/merge_trains/merge_requests/
+# <iid>`) needs -f sha=<head>. A REST PUT …/merge_requests/<iid>/merge and the
+# GraphQL mergeRequestAccept are REFUSED outright, and so is `mcp serve`. The
+# mechanism, its measurements and its named residuals live in
+# ai/lib/glab-merge-guard.sh. The GitHub counterpart is gh-athena's (DND-609).
+#
+# Test seam: GLAB_ATHENA_MERGE_DRY_RUN=1 runs the guard (reads only) and then
+# prints the command instead of running glab, for ANY command.
+#
+# After isolation, so the guard's own glab reads run as athena-amby.
+GLMG_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/glab-merge-guard.sh"
+[ -r "$GLMG_LIB" ] || {
+	echo "glab-athena: REFUSING: cannot load $GLMG_LIB, so no merge can be judged." >&2
+	echo "  Fix: run glab-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+	exit 3
+}
+# shellcheck source=../lib/glab-merge-guard.sh
+. "$GLMG_LIB"
+glmg_guard "$@"
+if [ -n "$MERGE_DRY_RUN" ]; then
+	printf 'glab-athena: dry-run: would exec glab %s\n' "$*"
+	exit 0
+fi
+
 # A child, not exec: fci_isolate's trap removes the config dir when glab exits.
 rc=0
 glab "$@" || rc=$?

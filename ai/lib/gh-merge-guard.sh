@@ -99,6 +99,15 @@
 # `gh` for its reads, so the caller exports GH_TOKEN/GH_HOST first. After it
 # returns, GMG_IS_MERGE is 1 when the command is a merge.
 
+# The endpoint normaliser, the `api` argv parser and the GraphQL scan are
+# shared with glab-athena's guard (DND-742).
+# shellcheck source=forge-api-scan.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/forge-api-scan.sh" || {
+  echo "gh-athena: REFUSING: cannot load ai/lib/forge-api-scan.sh, so no merge can be judged." >&2
+  echo "  Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+  exit 3
+}
+
 GMG_TOOL="${GMG_TOOL:-gh-athena}"
 GMG_IS_MERGE=0
 GMG_ESCALATE='Never merge or move a branch around this (a bare `gh pr merge`, a `gh api` merge or ref write, or the owner'"'"'s token); if the checks cannot go green, escalate to your admiral with the PR number and this output.'
@@ -270,36 +279,16 @@ GMG_REF_MUTATIONS="createCommitOnBranch|createRef|updateRefs|updateRef|createLin
 GMG_REF_FIX="commit locally and move a branch only with \`~/dev/custom/ai/bin/$GMG_TOOL git push origin <feature-branch>\` (athena:github -> Pushing as Athena); land on the default branch only through a PR: $GMG_SAFE_PATH"
 
 # gmg_api_path <endpoint> : echoes the endpoint's path as gh + GitHub would
-# route it: no scheme/host, no ?query or #fragment, %-escapes decoded, lower
-# case, empty and `.` segments dropped, `..` applied, a leading api/ and api/v3/
-# (GHES) dropped. Returns 1 when it cannot: a backslash, a malformed escape, a
-# control character, or escapes still left after three decodes.
+# route it, lower-cased, with a leading api/ and api/v3/ (GHES) dropped. The
+# normalisation itself (scheme/host, ?query and #fragment stripped, %-escapes
+# decoded, `.`/`..`/empty segments applied) is fas_path in
+# ai/lib/forge-api-scan.sh, shared with glab-athena's guard (DND-742). Returns 1
+# when it cannot: a backslash, a malformed escape, a control character, or
+# escapes still left after three decodes.
 gmg_api_path() {
-  local p="${1%%[?#]*}" n seg
-  local -a segs=() res=()
-  if [[ "$p" =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/]*(.*)$ ]]; then p="${BASH_REMATCH[1]}"; fi
-  for n in 1 2 3; do
-    [[ "$p" == *\\* ]] && return 1
-    [[ "$p" == *%* ]] || break
-    [[ "$p" =~ %([^0-9A-Fa-f]|[0-9A-Fa-f][^0-9A-Fa-f]|[0-9A-Fa-f]?$) ]] && return 1
-    [[ "$p" =~ %([01][0-9A-Fa-f]|7[Ff]) ]] && return 1
-    p="$(printf '%b' "${p//%/\\x}")"
-  done
-  [[ "$p" == *[%\\]* ]] && return 1
-  [[ "$p" == *[[:cntrl:]]* ]] && return 1
-  p="${p,,}"
-  IFS=/ read -ra segs <<<"$p"
-  for seg in "${segs[@]}"; do
-    case "$seg" in
-      ''|.) ;;
-      ..) if [ "${#res[@]}" -gt 0 ]; then unset 'res[-1]'; fi ;;
-      *) res+=("$seg") ;;
-    esac
-  done
-  if [ "${res[0]:-}" = api ]; then res=("${res[@]:1}"); fi
-  if [ "${res[0]:-}" = v3 ]; then res=("${res[@]:1}"); fi
-  local IFS=/
-  printf '%s' "${res[*]}"
+  local p
+  p="$(fas_path "$1" api v3)" || return 1
+  printf '%s' "${p,,}"
 }
 
 # gmg_api_merge_route <normalized path> : true when the path is a REST route
@@ -354,134 +343,49 @@ gmg_api_ref_route() {
   return 1
 }
 
-# gmg_api_guard <shown> <gh api args (after the word api)...> : returns 0 when
-# the call does not merge; exits 3 otherwise. Flags per gh 2.83 `gh api`.
-gmg_api_guard() {
-  local shown="$1" a v i c rest method="" nfields=0 input="" override=0 ep path scan name last grc what
-  shift
-  local -a pos=() raw=() files=()
-  # gmg_api_opt <long flag> <value>
-  gmg_api_opt() {
-    case "$1" in
-      --method) method="${2^^}" ;;
-      --raw-field) nfields=$((nfields+1)); raw+=("${2#*=}") ;;
-      --field)
-        nfields=$((nfields+1))
-        v="${2#*=}"
-        # gh reads a file only when the VALUE starts with @ (key=@path).
-        if [[ "$v" == @* ]]; then files+=("${v#@}"); else raw+=("$v"); fi ;;
-      --header)
-        if [[ "${2,,}" =~ ^[[:space:]]*x-(http-)?method(-override)?[[:space:]]*: ]]; then override=1; fi ;;
-      --input) input="$2" ;;
-    esac
-  }
-  while [ $# -gt 0 ]; do
-    a="$1"; shift
-    case "$a" in
-      --) pos+=("$@"); break ;;
-      --method|--raw-field|--field|--header|--input|--jq|--template|--preview|--hostname|--cache)
-        v="${1:-}"; [ $# -gt 0 ] && shift
-        gmg_api_opt "$a" "$v" ;;
-      --method=*|--raw-field=*|--field=*|--header=*|--input=*|--jq=*|--template=*|--preview=*|--hostname=*|--cache=*)
-        gmg_api_opt "${a%%=*}" "${a#*=}" ;;
-      --include|--paginate|--slurp|--silent|--verbose|--help|--include=*|--paginate=*|--slurp=*|--silent=*|--verbose=*|--help=*) ;;
-      --*)
-        gmg_refuse "$shown" "'${a%%=*}' is not a \`gh api\` flag $GMG_TOOL knows (gh 2.83), so it cannot tell how the rest of the call parses or whether it merges" \
-          "drop the flag (gh rejects an unknown flag anyway); to merge, $GMG_SAFE_PATH" ;;
-      -?*)
-        rest="${a#-}"; i=0
-        while [ "$i" -lt "${#rest}" ]; do
-          c="${rest:$i:1}"
-          case "$c" in
-            i|h) ;;
-            X|F|f|H|q|t|p)
-              v="${rest:$((i+1))}"; v="${v#=}"
-              if [ -z "$v" ]; then v="${1:-}"; [ $# -gt 0 ] && shift; fi
-              case "$c" in
-                X) gmg_api_opt --method "$v" ;;
-                F) gmg_api_opt --field "$v" ;;
-                f) gmg_api_opt --raw-field "$v" ;;
-                H) gmg_api_opt --header "$v" ;;
-              esac
-              break ;;
-            *)
-              gmg_refuse "$shown" "'-$c' (in '$a') is not a \`gh api\` flag $GMG_TOOL knows (gh 2.83), so it cannot tell how the rest of the call parses or whether it merges" \
-                "drop the flag (gh rejects an unknown flag anyway); to merge, $GMG_SAFE_PATH" ;;
-          esac
-          i=$((i+1))
-        done ;;
-      *) pos+=("$a") ;;
-    esac
-  done
-  if [ -z "$method" ]; then
-    if [ "$nfields" -gt 0 ] || [ -n "$input" ]; then method=POST; else method=GET; fi
-  fi
-  [ "$override" = 1 ] && method="$method with a method-override header"
+# `gh api` flags (gh 2.83), the table for fas_parse_api (ai/lib/forge-api-scan.sh,
+# the argv parser shared with glab-athena's guard since DND-742).
+GMG_API_VALUED=" --method --raw-field --field --header --input --jq --template --preview --hostname --cache "
+GMG_API_BOOL=" --include --paginate --slurp --silent --verbose --help "
+GMG_API_SVALUED="XFfHqtp"
+GMG_API_SBOOL="ih"
 
-  for ep in "${pos[@]}"; do
+# gmg_api_guard <shown> <gh api args (after the word api)...> : returns 0 when
+# the call neither merges nor writes a ref; exits 3 otherwise. The argv parser
+# and the GraphQL scan are fas_parse_api / fas_graphql_scan, shared with
+# glab-athena's guard (DND-742); the routes and mutation names are GitHub's.
+gmg_api_guard() {
+  local shown="$1" ep path last what method sc name
+  shift
+  FAS_API_VALUED="$GMG_API_VALUED" FAS_API_BOOL="$GMG_API_BOOL"
+  FAS_API_SVALUED="$GMG_API_SVALUED" FAS_API_SBOOL="$GMG_API_SBOOL"
+  if ! fas_parse_api "$@"; then
+    gmg_refuse "$shown" "'$FAS_UNKNOWN' is not a \`gh api\` flag $GMG_TOOL knows (gh 2.83), so it cannot tell how the rest of the call parses or whether it merges" \
+      "drop the flag (gh rejects an unknown flag anyway); to merge, $GMG_SAFE_PATH"
+  fi
+  method="$FAS_METHOD"
+  if [ -z "$method" ]; then
+    if [ "$FAS_NPARAMS" -gt 0 ] || [ -n "$FAS_INPUT" ]; then method=POST; else method=GET; fi
+  fi
+  [ "$FAS_OVERRIDE" = 1 ] && method="$method with a method-override header"
+
+  for ep in "${FAS_POS[@]}"; do
     if ! path="$(gmg_api_path "$ep")"; then
       gmg_refuse "$shown" "the endpoint '$ep' cannot be normalized (a backslash, a control character, or a malformed or nested %-escape), so $GMG_TOOL cannot tell whether it is a merge route" \
         "spell the endpoint plainly (e.g. repos/<owner>/<repo>/pulls/<n>); to merge, $GMG_SAFE_PATH"
     fi
     last="${path##*/}"; last="${last%%[.;]*}"
     if [ "$last" = graphql ]; then
-      # The scratch file holds every string the query could come from. A
-      # failure to make or fill it is refused: it must never read as "no
-      # merge mutation found".
-      if ! scan="$(mktemp 2>/dev/null)" || [ -z "$scan" ]; then
-        gmg_refuse "$shown" "$GMG_TOOL could not create a scratch file to scan the GraphQL query, so it cannot tell whether the call merges" \
-          "check that \$TMPDIR (or /tmp) is writable, then re-run; to merge, $GMG_SAFE_PATH"
+      # 0 = a merge or ref-write name found, 1 = none, 2 = the guard cannot
+      # tell (stdin, an unreadable file, a non-JSON body, its own scratch file
+      # or grep failing), which is refused, never read as "none".
+      if fas_graphql_scan "$GMG_MERGE_MUTATIONS|$GMG_REF_MUTATIONS"; then sc=0; else sc=$?; fi
+      if [ "$sc" = 2 ]; then
+        gmg_refuse "$shown" "$GMG_TOOL cannot tell whether this GraphQL call merges or moves a branch: $FAS_WHY" \
+          "$FAS_HOW; to merge, $GMG_SAFE_PATH"
       fi
-      if [ "${#raw[@]}" -gt 0 ] && ! printf '%s\n' "${raw[@]}" >>"$scan" 2>/dev/null; then
-        rm -f "$scan"
-        gmg_refuse "$shown" "$GMG_TOOL could not write the GraphQL fields to its scratch file '$scan', so it cannot tell whether the call merges" \
-          "check that \$TMPDIR (or /tmp) is writable and not full, then re-run; to merge, $GMG_SAFE_PATH"
-      fi
-      for v in "${files[@]}"; do
-        if [ "$v" = - ]; then
-          rm -f "$scan"
-          gmg_refuse "$shown" "a GraphQL field is read from stdin ('@-'), which $GMG_TOOL cannot inspect without consuming it, so it cannot tell whether the query merges" \
-            "pass the query inline (-f query='…') or from a readable file (-F query=@<file>); to merge, $GMG_SAFE_PATH"
-        fi
-        if ! cat -- "$v" >>"$scan" 2>/dev/null; then
-          rm -f "$scan"
-          gmg_refuse "$shown" "$GMG_TOOL cannot read the GraphQL field file '$v', so it cannot tell whether the query merges" \
-            "make the file readable, or pass the query inline (-f query='…'); to merge, $GMG_SAFE_PATH"
-        fi
-      done
-      if [ -n "$input" ]; then
-        if [ "$input" = - ]; then
-          rm -f "$scan"
-          gmg_refuse "$shown" "the GraphQL body is read from stdin ('--input -'), which $GMG_TOOL cannot inspect without consuming it, so it cannot tell whether the query merges" \
-            "write the body to a file and pass --input <file>, or pass the query inline (-f query='…'); to merge, $GMG_SAFE_PATH"
-        fi
-        if ! [ -f "$input" ] || ! [ -r "$input" ]; then
-          rm -f "$scan"
-          gmg_refuse "$shown" "$GMG_TOOL cannot read the --input body '$input', so it cannot tell whether the query merges" \
-            "make the file readable, or pass the query inline (-f query='…'); to merge, $GMG_SAFE_PATH"
-        fi
-        # Every string in the body, JSON escapes decoded (a \u escape cannot
-        # hide a name).
-        if ! jq -r '.. | strings' "$input" >>"$scan" 2>/dev/null; then
-          rm -f "$scan"
-          gmg_refuse "$shown" "the --input body '$input' is not JSON, so $GMG_TOOL cannot read the query out of it or tell whether it merges" \
-            "send a JSON body ({\"query\": \"…\"}) or pass the query inline (-f query='…'); to merge, $GMG_SAFE_PATH"
-        fi
-      fi
-      # GraphQL names cannot be escaped or split, so a word match on the raw
-      # text finds the field whatever alias or fragment wraps it. A merge
-      # name inside a string argument is refused too (accepted false positive).
-      # grep: 0 = a merge name found, 1 = none, anything else = the scan
-      # itself failed, which is refused, never read as "none".
-      if grep -aEiq "(^|[^A-Za-z0-9_])($GMG_MERGE_MUTATIONS|$GMG_REF_MUTATIONS)([^A-Za-z0-9_]|$)" "$scan"; then grc=0; else grc=$?; fi
-      if [ "$grc" != 0 ] && [ "$grc" != 1 ]; then
-        rm -f "$scan"
-        gmg_refuse "$shown" "scanning the GraphQL query for merge and ref-write mutations failed (grep exit $grc), so $GMG_TOOL cannot tell whether the call merges or moves a branch" \
-          "re-run; if it repeats, pass the query inline (-f query='…'); to merge, $GMG_SAFE_PATH"
-      fi
-      if [ "$grc" = 0 ]; then
-        name="$(grep -aEio "(^|[^A-Za-z0-9_])($GMG_MERGE_MUTATIONS|$GMG_REF_MUTATIONS)([^A-Za-z0-9_]|$)" "$scan" | grep -Eio "$GMG_MERGE_MUTATIONS|$GMG_REF_MUTATIONS" | head -n1 || true)"
-        rm -f "$scan"
+      if [ "$sc" = 0 ]; then
+        name="$FAS_FOUND"
         # A merge name is reported as a merge; anything else that matched
         # (including a name that could not be re-extracted) as a ref write.
         if [[ "${name,,}" =~ ^(${GMG_MERGE_MUTATIONS,,})$ ]]; then
@@ -491,7 +395,6 @@ gmg_api_guard() {
         gmg_refuse "$shown" "this GraphQL call carries the ref-write mutation '${name:-?}', which creates or moves a branch (it can put commits on the default branch) with no pinned head and no green check (DND-741)" \
           "$GMG_REF_FIX"
       fi
-      rm -f "$scan"
       continue
     fi
     case "$method" in GET|HEAD) continue ;; esac
