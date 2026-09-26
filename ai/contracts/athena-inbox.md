@@ -2617,7 +2617,9 @@ also reports:
   `SHIPWRIGHT_STALE_DIRT_ESCALATE` consecutive skips. Its `re:` is the tick's
   `.skipped` record in the shipwright `runs/` directory, which is that
   message's authority; it names no capture, so retention ignores it. The
-  reader relays it to the owner (`athena:inbox-attend` → *harness-alerts*).
+  reader relays it to the owner (`athena:inbox-attend` → *harness-alerts*),
+  quoting the record's `relay_paths:` block (collapsed, control characters
+  stripped, at most 20 lines), never its raw uncapped path list.
 - **`watchdog`** — the watchdog's three tools (the liveness library,
   `scripts/inbox-client-capture` and `scripts/inbox-client-alert`) are present.
   Missing any, the supervisor keeps the client running, but a wedge is then
