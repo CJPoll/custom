@@ -795,7 +795,18 @@ def run_model(runs:, only:, update:, agent_file: AGENT_FILE)
   # keep its `subject: ... sha <12 hex> (loaded inline via --agents` shape.
   puts "subject: #{subject['file']} #{subject['lines']} lines sha #{subject['sha256'][0, 12]} " \
        "(loaded inline via --agents as #{SUBJECT_KEY})"
-  results = dirs.map { |d| evaluate(d, runs: runs, argv: argv) }
+  # DND-525: a ~60min --run prints nothing until every case finishes, so a hung
+  # run looks the same as a slow one from outside. Print a per-case completion
+  # line as each case finishes, to STDERR only — variant-eval's collect_t2_counts
+  # (ai/bin/variant-eval) parses admiral-eval's STDOUT (the subject line, the
+  # PASS/FAIL rows, and the closing `admiral-eval: P/T cases pass` summary) and
+  # must see it byte-identical; these lines never touch STDOUT.
+  total = dirs.size
+  results = dirs.each_with_index.map do |d, i|
+    r = evaluate(d, runs: runs, argv: argv)
+    warn "  [#{i + 1}/#{total}] #{r[:name]}: #{r[:pass] ? 'PASS' : 'FAIL'} (#{r[:rate]})"
+    r
+  end
   results.each do |r|
     printf("%-4s %-34s %-6s [%s] %s\n", r[:pass] ? "PASS" : "FAIL", r[:name], r[:rate], r[:mode], r[:detail])
   end
@@ -1300,6 +1311,34 @@ def self_test
   else
     fail.("AE-19c fixture meta missing at #{ae19c_meta}")
   end
+
+  # -- DND-525: --run prints a per-case progress line as each case finishes ---
+  # Before this fix a ~60min --run printed nothing until every case finished,
+  # so a hung run looked the same as a slow one from outside. Real CLI
+  # subprocess (not an in-process call), using the T1 AE-13a-forge-auth-deny
+  # fixture so this exercises NO model call. Byte-for-byte stdout parity is the
+  # part that matters most: variant-eval's collect_t2_counts (ai/bin/variant-eval)
+  # parses admiral-eval's stdout (the `subject: ...` line via confirm_t2_subject!,
+  # the `PASS|FAIL <name> <k>/<n> [<mode>] ...` rows via parse_t2_rows, and the
+  # closing `admiral-eval: P/T cases pass` summary via T2_SUMMARY_LINE) and must
+  # see it unchanged; the progress line must never appear there.
+  out525, err525, = cli.("--run", "--only", "AE-13a", "--runs", "1")
+  fail.("--run --only AE-13a must still print the subject line on stdout") \
+    unless out525.include?("subject: ")
+  fail.("--run --only AE-13a must still print the PASS/FAIL row on stdout") \
+    unless out525.match?(/\A(?:.*\n)*PASS\s+AE-13a-forge-auth-deny\s+1\/1\s+\[hook-stdin\]/)
+  fail.("--run --only AE-13a must still print the closing summary on stdout") \
+    unless out525.match?(/^admiral-eval: 1\/1 cases pass/)
+  fail.("the progress line must go to STDERR, never STDOUT (variant-eval only reads stdout)") \
+    if out525.match?(/\[1\/1\]\s+AE-13a-forge-auth-deny/)
+  fail.("--run must print a `[done/total] <case>: PASS|FAIL (<rate>)` progress line to stderr as the " \
+        "case finishes, got stderr:\n#{err525}") \
+    unless err525.match?(/^\s*\[1\/1\]\s+AE-13a-forge-auth-deny:\s+PASS\s+\(1\/1\)\s*$/)
+  # T2_INVOCATION_FAILED in variant-eval matches `/^\s*! admiral invocation failed/` —
+  # the progress line must never collide with it (would misattribute a healthy
+  # run's progress line as a failed model invocation).
+  fail.("the progress line must not collide with variant-eval's T2_INVOCATION_FAILED pattern") \
+    if err525.match?(/^\s*! admiral invocation failed/)
 
   if ok
     puts "admiral-eval: self-test OK"
