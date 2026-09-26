@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 182 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c and R7-R41).
+- **Baseline:** `RESULT: 194 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c, R7-R41 and I66-I77).
 
 ### Fail-first (no guard)
 
@@ -511,3 +511,31 @@ RESULT: 175 passed, 7 failed
 ```
 
 After the fix: `RESULT: 182 passed, 0 failed`.
+
+### Fix round, critic round 3 (33d8cfb): a redirect hides the subcommand
+
+The critic found `git stash>/dev/null pop` and `git 2>/dev/null stash pop`
+allowed. sh removes a redirection (operator, fd number and target) from argv
+before git runs, but the tokenizer kept it in a word, so the scan read
+`stash>/dev/null` or `2>/dev/null` as the subcommand. Same class as rounds 1-3
+(a token sh strips ends the scan early). Fixed at the root: the tokenizer
+drops redirections, `&>` included, and reads a process substitution body as a
+command. Swept against the class "tokens sh removes from argv": assignments
+(already cmd_prefix), backslash-newline (already dropped), an unquoted empty
+expansion (`git $EMPTY stash`, already denied as expanded), brace `{,}` forms
+(already glob-marked). A `#` comment can only hide words, so it over-denies
+at worst. The new cases against 33d8cfb's hook:
+
+```
+FAIL  I66. redirect joined to the subcommand: git stash>/dev/null (expected deny)
+FAIL  I67. redirect joined to the subcommand, then pop (expected deny)
+FAIL  I68. redirect before the subcommand (expected deny)
+FAIL  I69. fd redirect before the subcommand (expected deny)
+FAIL  I70. git-stash binary with a joined redirect (expected deny)
+FAIL  I71. &> redirect before the subcommand (expected deny)
+FAIL  I72. fd duplication before the subcommand (expected deny)
+FAIL  I73. input redirect before the subcommand (expected deny)
+RESULT: 186 passed, 8 failed
+```
+
+After the fix: `RESULT: 194 passed, 0 failed`.

@@ -242,12 +242,14 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
   # and backslashes the way sh does, so a quoted value stays ONE word
   # (`git -C "/a b" stash` is git, -C, /a b, stash). Quotes and backslashes are
   # removed from the word. SB[k] is 1 when word k starts a simple command
-  # (after ; & | ( ) backtick or a newline, outside quotes). An unquoted glob
+  # (after ; & | ( ) backtick or a newline, outside quotes). Redirections
+  # (operator, fd number and target) are dropped, as sh drops them from argv.
+  # An unquoted glob
   # or brace character is followed by a \001 mark. QF[k] is 1 when a
   # quoted part of word k held whitespace or a separator: its content may be a
   # command (`sh -c "git stash"`), so analyze re-reads it.
-  function tokenize(text, W, QF, SB,    n, i, L, c, st, cur, has, q, ns) {
-    n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; L = length(text)
+  function tokenize(text, W, QF, SB,    n, i, L, c, st, cur, has, q, ns, skip) {
+    n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; skip = 0; L = length(text)
     for (i = 1; i <= L; i++) {
       c = substr(text, i, 1)
       if (st == 1) {
@@ -263,10 +265,30 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
       if (c == "\\") { if (i < L) { i++; c = substr(text, i, 1); if (c != "\n") { cur = cur c; has = 1 } } continue }
       if (c == "\047") { st = 1; has = 1; continue }
       if (c == "\"") { st = 2; has = 1; continue }
-      if (is_sep(c)) {
-        if (has) { n++; W[n] = cur; QF[n] = q; SB[n] = ns; ns = 0 }
+      # A redirection is removed by the shell before the command sees its
+      # argv, so neither the operator nor its target is a word: `git
+      # stash>/dev/null pop` and `git 2>/dev/null stash pop` are `git stash
+      # pop`. An fd number joined to the operator (`2>`) goes with it, and the
+      # next word (the target) is dropped. `&>` / `&>>` are redirections, not
+      # a `&` separator. A process substitution (`<(...)`, `>(...)`) is not a
+      # redirection: its body is read as a command.
+      if (c ~ /[<>]/ || (c == "&" && substr(text, i + 1, 1) == ">")) {
+        if (c == "&") i++
+        if (has && cur !~ /^[0-9]+$/) {
+          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; ns = 0 }
+        }
         cur = ""; has = 0; q = 0
-        if (c !~ /[ \t]/) ns = 1
+        if (substr(text, i + 1, 1) == "(") continue
+        while (i < L && substr(text, i + 1, 1) ~ /[<>&|-]/) i++
+        skip = 1
+        continue
+      }
+      if (is_sep(c)) {
+        if (has) {
+          if (skip) skip = 0; else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; ns = 0 }
+        }
+        cur = ""; has = 0; q = 0
+        if (c !~ /[ \t]/) { ns = 1; skip = 0 }
         continue
       }
       # An unquoted glob or brace character means the shell rewrites the word
@@ -275,7 +297,7 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
       if (c ~ /[*?[{]/) { cur = cur c "\001"; has = 1; continue }
       cur = cur c; has = 1
     }
-    if (has) { n++; W[n] = cur; QF[n] = q; SB[n] = ns }
+    if (has && !skip) { n++; W[n] = cur; QF[n] = q; SB[n] = ns }
     return n
   }
   # refpart(t): the ref a revision/refspec word names: glob marks, a leading

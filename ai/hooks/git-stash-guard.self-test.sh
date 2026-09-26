@@ -260,6 +260,20 @@ case_cmd "I62. -P log with an expanded argument" allow 'git -P log $SHA'
 case_cmd "I63. --no-pager with an expanded subcommand" deny 'git --no-pager $SUB'
 case_cmd "I64. unknown option, then diff with an expanded argument" allow 'git --some-future-opt diff $X'
 case_cmd "I65. unknown option, then a stash alias" deny 'git --some-future-opt v sp'
+case_cmd "I66. redirect joined to the subcommand: git stash>/dev/null" deny 'git stash>/dev/null'
+case_cmd "I67. redirect joined to the subcommand, then pop" deny 'git stash>/dev/null pop'
+case_cmd "I68. redirect before the subcommand" deny 'git >/dev/null stash pop'
+case_cmd "I69. fd redirect before the subcommand" deny 'git 2>/dev/null stash pop'
+case_cmd "I70. git-stash binary with a joined redirect" deny '/usr/libexec/git-core/git-stash>/dev/null pop'
+case_cmd "I71. &> redirect before the subcommand" deny 'git &>/dev/null stash pop'
+case_cmd "I72. fd duplication before the subcommand" deny 'git 2>&1 stash pop'
+case_cmd "I73. input redirect before the subcommand" deny 'git </dev/null stash drop'
+case_cmd "I74. a stash write inside a process substitution" deny 'cat <(git stash pop)'
+case_cmd "I75. redirect after a read" allow 'git stash list >/tmp/out 2>&1'
+case_cmd "I76. redirect before a read" allow 'git 2>/dev/null stash list'
+case_cmd "I77. heredoc into an unrelated command" allow 'cat <<EOF
+hello
+EOF'
 
 echo "== S: shell aliases from the Bash tool snapshot =="
 case_cmd "S1. shell alias gstp = git stash pop" deny 'gstp'
