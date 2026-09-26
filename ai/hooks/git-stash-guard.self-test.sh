@@ -803,6 +803,21 @@ case_ga "QA41. grep for a count pattern under the grep alias" allow 'grep "[1-9]
 
 case_cmd "QX55. a runner after a known tool (docker exec sh -c)" deny "docker exec c sh -c '/usr/bin/g?t stash pop'"
 case_cmd "QX56. data piped into a runner after a known tool" deny "echo '/usr/bin/g?t stash pop' | docker run -i img sh"
+# QX57+: critic round 2. sed runs a string (GNU `e`), and the class sweep of
+# safe_word(): ack/ag pagers, declare/typeset arithmetic.
+case_cmd "QX57. sed e command" deny "sed '1e/usr/bin/g?t stash pop' f"
+case_cmd "QX58. sed s///e flag" deny "sed 's/.*/\\/usr\\/bin\\/g?t stash pop/e' f"
+case_cmd "QX59. sed --expression= with an e command" deny "sed --expression='1e/usr/bin/g?t stash pop' f"
+case_cmd "QX60. sed -e with an e command" deny "sed -n -e '1e/usr/bin/g?t stash pop' f"
+case_cmd "QX61. sed -f script written in the same call" deny "cat > x.sed <<'EOF'
+1e/usr/bin/g?t stash pop
+EOF
+sed -f x.sed f"
+case_cmd "QX62. ag --pager payload" deny "ag --pager='/usr/bin/g?t stash pop' x"
+case_cmd "QX63. ack --pager payload" deny "ack --pager='/usr/bin/g?t stash pop' x"
+case_cmd "QX64. typeset with a data pipe" deny "typeset -i n='/usr/bin/g?t stash pop'"
+case_cmd "QA42. sed substitution with no e command stays allowed" allow "sed -E 's/[a-z]+ ([0-9]+)/\\1/g; /^\$/d' f"
+
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
 case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"

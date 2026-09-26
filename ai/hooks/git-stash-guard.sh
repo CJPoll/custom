@@ -126,7 +126,8 @@
 #   RESIDUAL (data mode), a deliberate reduction from cbac851/d8cf63e,
 #   which read every payload in full: a stash write spelled ONLY by glob or
 #   expansion inside an INTERPRETER string (`python3 -c`, `ruby -e`, `perl
-#   -e`, `node -e`, `awk system()`) was caught before and is not now; the
+#   -e`, `node -e`, and awk: `system()`, `print | "cmd"`, `"cmd" | getline`)
+#   was caught before and is not now; the
 #   literal spelling still is. It is the class NOT CATCHABLE already names
 #   (another interpreter building argv), whose glob-spelled form the old
 #   re-read caught only incidentally.
@@ -830,9 +831,14 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # this guard (see RESIDUAL in the header). Anything else, a script by path
   # or bare name included, is unknown and makes the text EXEC (fail closed:
   # critic round 1 named at, batch, sg -c, tar --to-command, sched,
-  # watchexec, entr, npx -c, nodemon --exec).
+  # watchexec, entr, npx -c, nodemon --exec). Left out on purpose because
+  # each can run a string (critic round 2 class sweep): sed (the GNU `e`
+  # command and `s///e` flag; judged by sed_runs() instead), ack and ag
+  # (--pager), and local, declare, typeset and readonly (an integer
+  # attribute evaluates arithmetic, which in bash runs a `$(...)` inside
+  # an array subscript).
   function safe_word(t) {
-    return t ~ /^(jq|yq|gojq|awk|gawk|mawk|nawk|sed|gsed|grep|egrep|fgrep|rg|ag|ack|curl|wget|echo|printf|cat|tac|head|tail|sort|uniq|wc|cut|tr|tee|column|paste|join|comm|diff|cmp|ls|stat|file|date|basename|dirname|realpath|readlink|test|true|false|cd|pushd|popd|export|local|declare|typeset|readonly|unset|set|shift|sleep|mkdir|rmdir|touch|cp|mv|rm|ln|chmod|python|python3|ruby|perl|node|xxd|od|base64|sha1sum|sha256sum|md5sum|bc|expr|seq|nl|fold|fmt|rev|iconv|uname|hostname|whoami|id|pwd|which|type|command|builtin|nohup|time|noglob|nocorrect|mktemp|du|df|ps|pgrep|printenv|read|wait|return|exit|break|continue|docker|if|then|else|elif|fi|for|while|until|do|done|case|esac|!|-|:)$/ \
+    return t ~ /^(jq|yq|gojq|awk|gawk|mawk|nawk|grep|egrep|fgrep|rg|curl|wget|echo|printf|cat|tac|head|tail|sort|uniq|wc|cut|tr|tee|column|paste|join|comm|diff|cmp|ls|stat|file|date|basename|dirname|realpath|readlink|test|true|false|cd|pushd|popd|export|unset|set|shift|sleep|mkdir|rmdir|touch|cp|mv|rm|ln|chmod|python|python3|ruby|perl|node|xxd|od|base64|sha1sum|sha256sum|md5sum|bc|expr|seq|nl|fold|fmt|rev|iconv|uname|hostname|whoami|id|pwd|which|type|command|builtin|nohup|time|noglob|nocorrect|mktemp|du|df|ps|pgrep|printenv|read|wait|return|exit|break|continue|docker|if|then|else|elif|fi|for|while|until|do|done|case|esac|!|-|:)$/ \
       || t == "[\001" || t == "[\001[\001" || t == "{\001" || t == "}"
   }
   # sub_safe(W, n, k, re): the subcommand after tool word k (git or gh),
@@ -845,6 +851,21 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       return W[j] ~ re
     }
     return 1
+  }
+  # sed_runs(W, SB, n, k): the sed at word k may run a command: a script
+  # file (-f, --file), or a script word holding `e` where GNU sed reads a
+  # command or an s/// flag (after an address, a separator, a brace, a
+  # slash or another flag letter). Over-matches on purpose: a false exec
+  # only reads the script in full, as before DND-799.
+  function sed_runs(W, SB, n, k,    j, t) {
+    for (j = k + 1; j <= n && !SB[j]; j++) {
+      t = W[j]
+      if (t ~ /^(-[a-zA-Z]*f|--file)/) return 1
+      if (t ~ /^--expression=/) sub(/^--expression=/, "", t)
+      else if (t ~ /^-/) continue
+      if (t ~ /(^|[;{}\n0-9$\/!,[:space:]gpIiMmw])e/) return 1
+    }
+    return 0
   }
   # exec_text(W, SB, UX, n): 1 when the text may run a string it holds: a
   # runner word anywhere, `.` in command position, a command word built by
@@ -859,6 +880,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (W[k] == "." || (W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k]))) return 1
       t = W[k]; sub(/^.*\//, "", t)
       if (t == "git") { if (!sub_safe(W, SB, n, k, "^(log|status|diff|show|rev-parse|ls-files|ls-tree|ls-remote|grep|blame|for-each-ref|describe|shortlog|cat-file|merge-base|rev-list|name-rev|show-ref|count-objects|var|help|version|whatchanged|range-diff|cherry|diff-tree|diff-files|diff-index)$")) return 1; continue }
+      if (t == "sed" || t == "gsed") { if (sed_runs(W, SB, n, k)) return 1; continue }
       if (t == "gh" || t == "glab") { if (!sub_safe(W, SB, n, k, "^(pr|mr|issue|run|ci|api|repo|release|search|workflow|label|browse|status|cache|secret|variable|ruleset|project|auth)$")) return 1; continue }
       if (!safe_word(t)) return 1
     }

@@ -786,8 +786,10 @@ After the fix: `RESULT: 258 passed, 0 failed`.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`, new section Q
   (QA allow, QB alias recursion, QX exec contexts, QL literal-in-data).
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (critic round 1 fixed):** `RESULT: 475 passed, 0 failed` /
-  `VERDICT: PASS`.
+- **After (critic rounds 1 and 2 fixed):** `RESULT: 484 passed, 0 failed` /
+  `VERDICT: PASS`. Fail-first on base after round 2: `451 passed, 33
+  failed`, every failure a QA/QB allow case (QA42 added); no QX or QL case
+  fails on base.
 
 ### Fail-first (the new self-test against origin/main 81ba7c2's hook)
 
@@ -859,3 +861,22 @@ command word to be a KNOWN non-runner, so an unlisted program fails closed.
 QX36-QX52 are that class (row S-DND799-10). The same inversion closes the
 round-0 residual for a heredoc script run by path or bare name and a git
 hook written then triggered (QX46-QX48).
+
+### Critic round 2 (72c9304): sed runs a string
+
+Convergence check: kind 1 (a pre-existing wrong entry in round 1's
+`safe_word()` list, not a follow-on contradiction). The critic named GNU
+sed (`e` command, `s///e` flag). The class is "a listed word that can run
+a string", swept over every entry: sed/gsed now go through `sed_runs()`
+(exec on a script file or an `e` in command or flag position); ack and ag
+(`--pager`), and local/declare/typeset/readonly (integer attribute
+arithmetic) are out of the list. Class-closed assertion: rows
+S-DND799-13/14 below, and every remaining `safe_word()` entry was reviewed
+for a string- or program-running option (none found;
+rg `--pre` and sort `--compress-program` exec a program path, not a shell
+string, and take no quoted payload here).
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-DND799-13 | `sed_runs()` never true | QX57-QX61 — `479 passed, 5 failed` |
+| S-DND799-14 | The round-2 sweep reverted (sed, ag, ack, local, declare, typeset, readonly back in `safe_word()`) | QX57-QX64 — `476 passed, 8 failed` |
