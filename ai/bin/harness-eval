@@ -192,6 +192,30 @@ def update_baseline(fixtures_dir)
 end
 
 require "time"
+require_relative "../lib/strict_argv"
+
+# Every argument must be a declared flag (DND-526): a typo of --update-baseline
+# used to fall through to the default corpus run, which writes the scorecard.
+CLI_SPEC = { "--self-test" => :switch, "--update-baseline" => :switch }.freeze
+
+# -> [opts, nil] on success, [nil, reason] on a usage error.
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  if opts["--self-test"] && opts["--update-baseline"]
+    return [nil, "--self-test and --update-baseline are separate modes; pass one"]
+  end
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+def mode_for(opts)
+  return :self_test if opts["--self-test"]
+  return :update_baseline if opts["--update-baseline"]
+
+  :corpus
+end
 
 def run_self_test
   dir = File.join(Dir.tmpdir, "harness-eval-selftest-#{Process.pid}")
@@ -222,6 +246,27 @@ def run_self_test
     unless code == 1
       warn "self-test: FAIL — a bogus guard case should fail the corpus (got #{code})"; ok = false
     end
+    # argv (DND-526): every argument must be a declared flag. In-process only —
+    # a black-box typo on the old parser would run the corpus and WRITE the
+    # scorecard (or the baseline) into this checkout.
+    { %w[--update-baselin] => "--update-baselin", %w[--self-tset] => "--self-tset",
+      %w[stray] => "stray", %w[--update-baseline=1] => "--update-baseline=",
+      %w[--update-baseline --update-baseline] => "--update-baseline",
+      %w[--self-test --update-baseline] => "--update-baseline",
+      %w[--update-baseline --self-test] => "--update-baseline" }.each do |args, named|
+      _o, reason = parse_cli(args)
+      next if reason.to_s.include?(named)
+
+      warn "self-test: FAIL — parse_cli(#{args.inspect}) must be a usage error naming #{named}, got #{reason.inspect}"
+      ok = false
+    end
+    { [] => :corpus, %w[--update-baseline] => :update_baseline, %w[--self-test] => :self_test }.each do |args, want|
+      o, reason = parse_cli(args)
+      next if reason.nil? && mode_for(o) == want
+
+      warn "self-test: FAIL — parse_cli(#{args.inspect}) must accept and select #{want}, got #{reason.inspect}"
+      ok = false
+    end
   ensure
     FileUtils.rm_rf(dir)
   end
@@ -248,12 +293,19 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   TXT
   exit 0
 end
+opts, reason = parse_cli(ARGV)
+if reason
+  warn "harness-eval: usage error — #{reason}."
+  warn "  Fix: re-run with only the flags `ai/bin/harness-eval --help` lists: no " \
+       "argument (run the corpus), --update-baseline, or --self-test. An " \
+       "unrecognised argument is refused, not ignored: ignoring it would run " \
+       "the corpus and write ai/eval/scorecard.json."
+  exit 2
+end
 exit(
-  if ARGV.include?("--self-test")
-    run_self_test
-  elsif ARGV.include?("--update-baseline")
-    update_baseline(FIXTURES_DIR)
-  else
-    run_corpus(FIXTURES_DIR, write_scorecard: true)
+  case mode_for(opts)
+  when :self_test then run_self_test
+  when :update_baseline then update_baseline(FIXTURES_DIR)
+  else run_corpus(FIXTURES_DIR, write_scorecard: true)
   end
 )
