@@ -229,6 +229,21 @@ else
   ok "setup-hooks --install from a worktree wires a.sh, skips and names b.sh (not on main yet)"
 fi
 
+# 14. The gate's pin (DND-735): origin main moves after the pin is taken. The
+#     pinned run measures the pin; the unpinned run sees a stale local ref.
+D="$(new_fixture pinned)"
+wire "${D}/settings.json" "SessionStart=${D}/main/ai/hooks/a.sh"
+PIN="$(git -C "${D}/main" rev-parse HEAD)"
+KEY="$(cd "$(git -C "${D}/main" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)"
+git clone -q -b main "${D}/origin.git" "${D}/other" >/dev/null 2>&1
+commit "${D}/other" moved; git -C "${D}/other" push -q origin HEAD:refs/heads/main >/dev/null 2>&1
+OUT="$(ATHENA_LANDED_PIN_SHA="${PIN}" ATHENA_LANDED_PIN_REPO="${KEY}" HOOKS_SETTINGS_FILE="${D}/settings.json" \
+  "${D}/wt/ai/bin/check-hooks-registered" 2>&1)"; RC=$?
+expect "origin moved after the gate pinned it -> pass against the pin" 0 "pinned at harness-gate start"
+OUT="$(env -u ATHENA_LANDED_PIN_SHA -u ATHENA_LANDED_PIN_REPO HOOKS_SETTINGS_FILE="${D}/settings.json" \
+  "${D}/wt/ai/bin/check-hooks-registered" 2>&1)"; RC=$?
+expect "...and unpinned, the stale local origin/main -> could not measure, exit 3" 3 "disagrees with origin"
+
 echo "check-hooks-registered landed-bar suite: ${PASS} passed, ${FAIL} failed"
 if [ "${FAIL}" -eq 0 ]; then echo "ALL CASES PASS"; exit 0; fi
 echo "SELF-TEST FAILED"; exit 1
