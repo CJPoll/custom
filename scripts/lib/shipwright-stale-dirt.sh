@@ -126,12 +126,27 @@ sd_next_streak() {
 # sd_display_paths <checkout> [max] — the dirty paths with untracked
 # directories collapsed (e.g. node_modules/; -unormal pins that against the
 # user's status.showUntrackedFiles), control
-# characters stripped, capped at max lines with an "and N more" tail.
+# characters stripped, capped at max lines with an "and N more" tail. Exit
+# non-zero when git cannot list them: a failed listing must not read as an
+# empty one. A list that is legitimately empty (the tree went clean after the
+# caller's scan) says so in words rather than printing nothing.
 sd_display_paths() {
-  local checkout="$1" max="${2:-20}" all n
-  all="$(git -C "${checkout}" -c core.quotePath=false status --porcelain -unormal 2>/dev/null \
-    | cut -c4- | grep -v '^ai-artifacts/' | LC_ALL=C tr -d '\000-\010\013-\037\177' || true)"
+  local checkout="$1" max="${2:-20}" raw all n
+  raw="$(mktemp)" || return 1
+  # To a file first, so git's own exit status is observed (a pipeline would
+  # report the last reader's).
+  if ! git -C "${checkout}" -c core.quotePath=false status --porcelain -unormal >"${raw}" 2>/dev/null; then
+    rm -f "${raw}"; return 1
+  fi
+  # `|| true` covers only grep -v selecting no line; git's status is above.
+  all="$(cut -c4- "${raw}" | grep -v '^ai-artifacts/' | LC_ALL=C tr -d '\000-\010\013-\037\177' || true)"
+  rm -f "${raw}"
   n="$(printf '%s\n' "${all}" | grep -c . || true)"
-  printf '%s\n' "${all}" | head -n "${max}"
+  if [ "${n}" -eq 0 ]; then
+    printf '(none: the tree has no dirty paths outside ai-artifacts/ now)\n'
+    return 0
+  fi
+  printf '%s\n' "${all}" | head -n "${max}" || true
   if [ "${n}" -gt "${max}" ]; then printf '... and %s more\n' "$(( n - max ))"; fi
+  return 0
 }
