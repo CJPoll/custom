@@ -245,7 +245,8 @@ esac
 #     installed by npm keep their packaged mtimes (npm writes 1985), so a
 #     brand-new node_modules reads as ancient. Three unchanged hourly ticks
 #     prove nobody is working on the tree. Earliest alert: about 8h after the
-#     last change.
+#     last change for files with honest mtimes; for packaged mtimes the age
+#     test passes at once, so about 2h (the third unchanged tick).
 STALE_DIRT_STATE="${STATE_DIR}/stale-dirt"
 STALE_DIRT_AGE_S="${SHIPWRIGHT_STALE_DIRT_AGE_S:-21600}"
 case "${STALE_DIRT_AGE_S}" in
