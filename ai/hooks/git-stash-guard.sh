@@ -110,21 +110,26 @@
 # the expansion rules (a glob or brace command word, an expanded command
 # word or subcommand, an unread config) do not fire on it. So jq/awk/sed/
 # grep/curl/docker/gh payloads and python/ruby heredocs with brackets and
-# braces are allowed. EXEC contexts stay read in full: a runner anywhere in
-# the text (sh/bash/zsh -c, eval, source, xargs, watch, ssh, su, sudo, env
-# -S, trap, alias, tmux, vim -c, `... | sh`, a heredoc fed to a shell, an
-# expanded command word such as `$SHELL -c` or `$l`), a git alias value or a
-# heredoc in a git command, a double-quoted payload with a command
+# braces are allowed. Data mode FAILS CLOSED: a payload is data only when
+# every command word in its text is a known non-runner (a data tool, a
+# text or file utility, a keyword, an interpreter; git and gh only with a
+# read-only subcommand). Any other command word, a script by path or bare
+# name included, makes it EXEC and read in full, as are: a runner anywhere
+# in the text (sh/bash/zsh -c, eval, source, xargs, watch, ssh, su, sudo,
+# env -S, trap, alias, tmux, vim -c, `... | sh`, a heredoc fed to a shell),
+# an expanded command word (`$SHELL -c`, `$l`), a quoted word in a git
+# command (a `-c core.pager=...` or alias value git runs), a double-quoted
+# payload with a command
 # substitution, and an unquoted or unterminated heredoc. The arguments of a
-# test (`[`, `[[`, `test`) are data too. The exec list is in the awk block
-# (runner(), exec_text()).
-#   RESIDUAL (data mode): a stash write spelled ONLY by glob or expansion
-#   inside data that a later command in the same call runs anyway (a script
-#   written then run by path or bare name, a git hook written then
-#   triggered, an interpreter string such as `python3 -c` / `awk
-#   system()` / `perl -e`) is not caught. The literal spelling is. This is
-#   the same class as NOT CATCHABLE below (a script defined in one call and
-#   run in a later one; another interpreter building argv).
+# test (`[`, `[[`, `test`) are data too. The lists are in the awk block
+# (safe_word(), runner(), exec_text()).
+#   RESIDUAL (data mode), a deliberate reduction from cbac851/d8cf63e,
+#   which read every payload in full: a stash write spelled ONLY by glob or
+#   expansion inside an INTERPRETER string (`python3 -c`, `ruby -e`, `perl
+#   -e`, `node -e`, `awk system()`) was caught before and is not now; the
+#   literal spelling still is. It is the class NOT CATCHABLE already names
+#   (another interpreter building argv), whose glob-spelled form the old
+#   re-read caught only incidentally.
 #
 # PRECISION (DND-780, narrow cut): the leading test bracket `[` / `[[` and
 # the lone brace-group word `{` are not glob command words (as globs they
@@ -502,15 +507,14 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # tokenized with the command. It is cut out whole: HB[h] is the body of
   # heredoc h (HB[0] is the count), HQ[h] is 1 when the delimiter was quoted
   # (`<<\047EOF\047`, `<<"EOF"`, `<<\EOF`: the body is not expanded) AND the
-  # body was terminated, and HG[h] is 1 when the heredoc line holds a git
-  # word from the start of its simple command on. analyze reads each body as
-  # a command text of its own. A `<<` after an unquoted word-leading `#` on
+  # body was terminated. analyze reads each body as a command text of its
+  # own. A `<<` after an unquoted word-leading `#` on
   # its line (a comment, or a literal `#` word) or inside `((`/`$[`
   # arithmetic (a shift) is not taken as a heredoc: the lines after it are
   # tokenized with the command, as before.
-  function tokenize(text, W, QF, SB, UX, PQ, XQ, HB, HQ, HG,    n, i, L, c, st, cur, has, q, ns, skip, ux, xq, wq, hdp, hds, nohd, cm, ar, cs, np, pd, pq, ps, pc, nh, h, pos, nx, line, t, body, bl, term, j, op) {
+  function tokenize(text, W, QF, SB, UX, PQ, XQ, HB, HQ,    n, i, L, c, st, cur, has, q, ns, skip, ux, xq, wq, hdp, hds, nohd, cm, ar, np, pd, pq, ps, nh, h, pos, nx, line, t, body, bl, term, op) {
     n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; skip = 0; ux = 0; L = length(text)
-    xq = 0; wq = 0; hdp = 0; cm = 0; ar = 0; cs = 1; np = 0; nh = 0; HB[0] = 0
+    xq = 0; wq = 0; hdp = 0; cm = 0; ar = 0; np = 0; nh = 0; HB[0] = 0
     for (i = 1; i <= L; i++) {
       c = substr(text, i, 1)
       if (st == 1) {
@@ -546,7 +550,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         # `$[1<<...` (zsh arithmetic) is a shift, not a heredoc.
         nohd = (cur ~ /\$\[/)
         if (has && cur !~ /^[0-9]+$/) {
-          if (skip) { skip = 0; if (hdp) { np++; pd[np] = cur; pq[np] = wq; ps[np] = hds; pc[np] = cs; hdp = 0 } }
+          if (skip) { skip = 0; if (hdp) { np++; pd[np] = cur; pq[np] = wq; ps[np] = hds; hdp = 0 } }
           else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; XQ[n] = xq; ns = 0 }
         }
         cur = ""; has = 0; q = 0; ux = 0; xq = 0; wq = 0; hdp = 0
@@ -559,14 +563,14 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       }
       if (is_sep(c)) {
         if (has) {
-          if (skip) { skip = 0; if (hdp) { np++; pd[np] = cur; pq[np] = wq; ps[np] = hds; pc[np] = cs; hdp = 0 } }
+          if (skip) { skip = 0; if (hdp) { np++; pd[np] = cur; pq[np] = wq; ps[np] = hds; hdp = 0 } }
           else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; XQ[n] = xq; ns = 0 }
         }
         cur = ""; has = 0; q = 0; ux = 0; xq = 0; wq = 0
         # `((` opens arithmetic (a `<<` inside it is a shift); `))` closes it.
         if (c == "(" && substr(text, i + 1, 1) == "(") ar++
         else if (c == ")" && substr(text, i + 1, 1) == ")" && ar > 0) { ar--; i++ }
-        if (c !~ /[ \t]/) { ns = 1; skip = 0; hdp = 0; cs = n + 1 }
+        if (c !~ /[ \t]/) { ns = 1; skip = 0; hdp = 0 }
         if (c == "\n") {
           cm = 0
           # The bodies of the heredocs opened on the line just ended, in
@@ -581,9 +585,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
               if (t == pd[h]) { term = 1; break }
               body = (bl++ ? body "\n" : "") line
             }
-            HG[++nh] = 0
-            for (j = pc[h]; j <= n; j++) { t = W[j]; gsub(/\001/, "", t); if (t ~ /(^|\/)git(-[^\/]*)?$/) HG[nh] = 1 }
-            HB[nh] = body; HQ[nh] = (pq[h] && term)
+            HB[++nh] = body; HQ[nh] = (pq[h] && term)
           }
           if (np) { np = 0; i = pos - 1 }
         }
@@ -797,6 +799,10 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # with brackets are data, while `grep \047git stash pop\047` still denies
   # (the accepted false positive in the header).
   # A payload is EXEC (read in full, as before) when any of these holds:
+  #   * the text it sits in has a command word safe_word() does not know
+  #     (FAIL CLOSED: an unknown program may run the string, as at, sg -c,
+  #     tar --to-command or a script written in the same call would), or a
+  #     git / gh command word whose subcommand is not a known read-only one;
   #   * the text it sits in holds a RUNNER word (runner(), below) anywhere:
   #     a shell (`sh -c`, `bash -lc`, `cat f | sh`, `find -exec sh -c`,
   #     `bash <<\047EOF\047`), eval, source, `.`, exec, xargs, parallel,
@@ -804,29 +810,57 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   #     tmux, screen, trap, alias, fc, an editor that runs `!cmd` (vi, vim,
   #     nvim, ex), a terminal emulator; or a command word built by expansion
   #     (`$SHELL -c`, `while read l; do $l; done <<\047EOF\047`);
-  #   * its simple command holds a git word: a git alias value
-  #     (`git -c \047alias.x=!...\047`, `git config alias.x \047...\047`), and a
-  #     heredoc fed to git (`git -c alias.zq=\047!sh\047 zq <<\047EOF\047`);
+  #   * a quoted word whose simple command holds a git word: a -c value git
+  #     runs (`git -c core.pager=\047...\047 log`, an alias value);
   #   * a double-quoted part of it holds a command substitution (`$(`, a
   #     backtick, `${(`), which the shell runs while expanding the word;
   #   * a heredoc whose delimiter is unquoted (its body is expanded) or that
   #     has no terminating line.
-  # Data mode is decided for the words of the payload itself; a payload nested in
-  # it is decided again from its own text.
+  # A payload nested in a data payload is data too. A payload nested in an
+  # exec payload is decided again from the text it sits in.
   function weak(r) { return r ~ /^(glob-head|expanded|expanded-git|unread-config)$/ }
   function runner(t) {
     gsub(/\001/, "", t); sub(/^.*\//, "", t)
     return t ~ /^(sh|bash|zsh|dash|ksh|ksh93|mksh|ash|yash|posh|busybox|fish|tcsh|csh|rc|pwsh|powershell)[0-9.-]*$/ \
       || t ~ /^(eval|source|exec|xargs|parallel|watch|ssh|su|runuser|sudo|doas|env|script|flock|tmux|screen|byobu|dtach|abduco|trap|alias|fc|vi|vim|nvim|ex|xterm|kitty|alacritty|foot|wezterm|konsole|gnome-terminal|nsenter|chroot|systemd-run|unbuffer|expect)$/
   }
-  # exec_text(W, SB, UX, n): 1 when the words hold a runner, `.` in command
-  # position, or a command word built by expansion.
-  function exec_text(W, SB, UX, n,    k, cp) {
+  # safe_word(t): a command word known NOT to run a string it is given (a
+  # data consumer, a file or text utility, a shell keyword or builtin that
+  # runs nothing). An interpreter is here on purpose: its string is data to
+  # this guard (see RESIDUAL in the header). Anything else, a script by path
+  # or bare name included, is unknown and makes the text EXEC (fail closed:
+  # critic round 1 named at, batch, sg -c, tar --to-command, sched,
+  # watchexec, entr, npx -c, nodemon --exec).
+  function safe_word(t) {
+    return t ~ /^(jq|yq|gojq|awk|gawk|mawk|nawk|sed|gsed|grep|egrep|fgrep|rg|ag|ack|curl|wget|echo|printf|cat|tac|head|tail|sort|uniq|wc|cut|tr|tee|column|paste|join|comm|diff|cmp|ls|stat|file|date|basename|dirname|realpath|readlink|test|true|false|cd|pushd|popd|export|local|declare|typeset|readonly|unset|set|shift|sleep|mkdir|rmdir|touch|cp|mv|rm|ln|chmod|python|python3|ruby|perl|node|xxd|od|base64|sha1sum|sha256sum|md5sum|bc|expr|seq|nl|fold|fmt|rev|iconv|uname|hostname|whoami|id|pwd|which|type|command|builtin|nohup|time|noglob|nocorrect|mktemp|du|df|ps|pgrep|printenv|read|wait|return|exit|break|continue|docker|if|then|else|elif|fi|for|while|until|do|done|case|esac|!|-|:)$/ \
+      || t == "[\001" || t == "[\001[\001" || t == "{\001" || t == "}"
+  }
+  # sub_safe(W, n, k, re): the subcommand after tool word k (git or gh),
+  # past its options, matches re (a read-only subcommand that runs no
+  # hook, alias or extension). No subcommand is safe.
+  function sub_safe(W, SB, n, k, re,    j) {
+    for (j = k + 1; j <= n && !SB[j]; ) {
+      if (two_word(W[j])) { j += 2; continue }
+      if (W[j] ~ /^-/) { j++; continue }
+      return W[j] ~ re
+    }
+    return 1
+  }
+  # exec_text(W, SB, UX, n): 1 when the text may run a string it holds: a
+  # runner word anywhere, `.` in command position, a command word built by
+  # expansion, or any command word that safe_word() does not know (git and
+  # gh only with a read-only subcommand).
+  function exec_text(W, SB, UX, n,    k, cp, t) {
     cp = 0
     for (k = 1; k <= n; k++) {
       cp = SB[k] || (cp && k > 1 && cmd_prefix(W[k - 1]))
       if (runner(W[k])) return 1
-      if (cp && (W[k] == "." || (W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k])))) return 1
+      if (!cp || is_assign(W[k])) continue
+      if (W[k] == "." || (W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k]))) return 1
+      t = W[k]; sub(/^.*\//, "", t)
+      if (t == "git") { if (!sub_safe(W, SB, n, k, "^(log|status|diff|show|rev-parse|ls-files|ls-tree|ls-remote|grep|blame|for-each-ref|describe|shortlog|cat-file|merge-base|rev-list|name-rev|show-ref|count-objects|var|help|version|whatchanged|range-diff|cherry|diff-tree|diff-files|diff-index)$")) return 1; continue }
+      if (t == "gh" || t == "glab") { if (!sub_safe(W, SB, n, k, "^(pr|mr|issue|run|ci|api|repo|release|search|workflow|label|browse|status|cache|secret|variable|ruleset|project|auth)$")) return 1; continue }
+      if (!safe_word(t)) return 1
     }
     return 0
   }
@@ -844,21 +878,23 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # or "" when it runs no stash write. It stops early only on a literal
   # stash. data is 1 when text is a DATA payload (see above): its expansion
   # findings are dropped.
-  function analyze(text, depth, data,    W, QF, SB, UX, PQ, XQ, HB, HQ, HG, n, k, e, r, sw, m, i, cp, t, j, x, best, ex, h, tst, dm) {
+  function analyze(text, depth, data,    W, QF, SB, UX, PQ, XQ, HB, HQ, n, k, e, r, sw, m, i, cp, t, j, x, best, ex, h, tst, dm) {
     # Past the nesting bound, text that still names stash is a deny.
     if (depth > 8) {
       if (!mentions_stash(text)) return ""
       if (!("stash" in NT)) { NT["stash"] = clip(text); NP["stash"] = 0; ND["stash"] = depth }
       return "stash"
     }
-    n = tokenize(text, W, QF, SB, UX, PQ, XQ, HB, HQ, HG); best = ""
-    ex = exec_text(W, SB, UX, n)
+    n = tokenize(text, W, QF, SB, UX, PQ, XQ, HB, HQ); best = ""
+    # Inside DATA every nested payload is data too: nothing in this text
+    # is run, so neither is a quoted word or heredoc within it.
+    ex = data ? 0 : exec_text(W, SB, UX, n)
     for (k = 1; k <= n; k++) if (QF[k]) {
-      best = better(best, analyze(W[k], depth + 1, !(ex || XQ[k] || git_in_cmd(W, SB, n, k))))
+      best = better(best, analyze(W[k], depth + 1, data || !(ex || XQ[k] || git_in_cmd(W, SB, n, k))))
       if (best == "stash") return best
     }
     for (h = 1; h <= HB[0]; h++) {
-      best = better(best, analyze(HB[h], depth + 1, HQ[h] && !ex && !HG[h]))
+      best = better(best, analyze(HB[h], depth + 1, data || (HQ[h] && !ex)))
       if (best == "stash") return best
     }
     cp = 0; tst = 0

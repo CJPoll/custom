@@ -778,12 +778,16 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   heredoc body that the shell will not run is read in DATA mode: literal
   findings (a literal stash write, stash-ref plumbing, a stash alias) still
   deny; expansion findings (glob-head, expanded, expanded-git,
-  unread-config) do not. EXEC contexts are read in full. Test arguments are
-  data. A shell alias is not re-expanded inside its own expansion.
+  unread-config) do not. Data mode fails closed: a text is data only when
+  every command word in it is a known non-runner (`safe_word()`; git, gh
+  and glab only with a read-only subcommand) and no runner word appears
+  anywhere. Test arguments are data. A shell alias is not re-expanded inside
+  its own expansion.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`, new section Q
   (QA allow, QB alias recursion, QX exec contexts, QL literal-in-data).
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After:** `RESULT: 442 passed, 0 failed` / `VERDICT: PASS`.
+- **After (critic round 1 fixed):** `RESULT: 475 passed, 0 failed` /
+  `VERDICT: PASS`.
 
 ### Fail-first (the new self-test against origin/main 81ba7c2's hook)
 
@@ -815,22 +819,43 @@ FAIL  QB1. grep -i stash under a self-referential grep alias (expected allow)
 FAIL  QB2. grep -rnE bracket pattern under the grep alias (expected allow)
 FAIL  QB3. grep -E alternation under the grep alias (expected allow)
 FAIL  QB5. grep -oE with an expansion under the grep alias (expected allow)
-RESULT: 415 passed, 27 failed
+FAIL  QA32. sh -c text written as data that nothing runs (expected allow)
+FAIL  QA30. git read subcommand with a data pipe stays allowed (expected allow)
+FAIL  QA31. gh pr view piped to jq stays allowed (expected allow)
+FAIL  QA33. python heredoc with list brackets (expected allow)
+FAIL  QA36. curl -w timing template (expected allow)
+RESULT: 441 passed, 32 failed
 ```
 
 Every QX (exec context) and QL (literal in data) case passes on the base
-hook too: each was already denied, and the change keeps it denied.
+hook too: each was already denied, and the change keeps it denied. The QA
+cases not listed above were already allowed on base and are regression
+guards.
 
-### Sabotage rows (measured 2026-09-26 on the DND-799 hook, one mutant copy each)
+### Sabotage rows (measured 2026-09-26 on the round-1 hook, one mutant copy each)
 
 | id | Mutation | Observed failure |
 |---|---|---|
-| S-DND799-1 | Every quoted payload and heredoc read as data (exec detection removed) | O39, O90, O103c, QX1-QX18, QX20-QX31, QX35 — `408 passed, 34 failed` |
-| S-DND799-2 | Runner context removed (`ex` dropped from both mode tests) | O39, O90, QX1-QX18, QX21-QX25, QX31 — `416 passed, 26 failed` |
-| S-DND799-3 | Git-scoped exec removed (`git_in_cmd` / `HG`) | QX20 `git -c 'alias.p=!/usr/bin/g?t sp' p`, QX26 heredoc to a git shell alias — `440 passed, 2 failed`. QX19 (`git config alias.p '!...stash pop'`) stays denied by the lexical alias-definition check |
-| S-DND799-4 | Double-quoted command substitution no longer forces exec (`XQ`) | O103c, QX29, QX30, QX35 — `438 passed, 4 failed` |
-| S-DND799-5 | An unquoted or unterminated heredoc read as data | QX27, QX28 — `440 passed, 2 failed` |
-| S-DND799-6 | `<<` after a word-leading `#` or inside `((` taken as a heredoc | QX32, QX33 — `440 passed, 2 failed` |
-| S-DND799-7 | Alias self-expansion guard (`AEXP`) removed | QB1 `grep -i stash` — `441 passed, 1 failed` |
-| S-DND799-8 | Test arguments no longer data (`dm = data`) | QA24, QA25 — `440 passed, 2 failed` |
-| S-DND799-9 | Data mode drops LITERAL findings too (`weak()` true for all) | O30, O44, O45, O47, QL1-QL6 — `432 passed, 10 failed` |
+| S-DND799-1 | Every quoted payload and heredoc read as data | O39, O90, O103c, QX1-QX18, QX20-QX31, QX35-QX50, QX52-QX56 — `421 passed, 54 failed` |
+| S-DND799-2 | `exec_text` off (no runner, no unknown-word, no expanded-word context) | O39, O90, QX1-QX18, QX21-QX26, QX31, QX36-QX50, QX52, QX55, QX56 — `430 passed, 45 failed` |
+| S-DND799-3 | A quoted word in a git command no longer exec (`git_in_cmd`) | QX53 `git -c core.pager='...' log -1` — `474 passed, 1 failed` |
+| S-DND799-4 | Double-quoted command substitution no longer forces exec (`XQ`) | O103c, QX29, QX30, QX35 — `471 passed, 4 failed` |
+| S-DND799-5 | An unquoted or unterminated heredoc read as data | QX27, QX28 — `473 passed, 2 failed` |
+| S-DND799-6 | `<<` after a word-leading `#` or inside `((` taken as a heredoc | QX32, QX33 — `473 passed, 2 failed` |
+| S-DND799-7 | Alias self-expansion guard (`AEXP`) removed | QB1 `grep -i stash` — `474 passed, 1 failed` |
+| S-DND799-8 | Test arguments no longer data (`dm = data`) | QA24, QA25 — `473 passed, 2 failed` |
+| S-DND799-9 | Data mode drops LITERAL findings too (`weak()` true for all) | QL1, QL2, QL3, QL5, QL6 — `470 passed, 5 failed` |
+| S-DND799-10 | Unknown command words treated as safe (fail open, the round-1 finding) | QX26, QX36-QX50, QX52 — `458 passed, 17 failed` |
+| S-DND799-11 | A payload nested in data no longer data | QA2, QA20 — `473 passed, 2 failed` |
+| S-DND799-12 | Runner list emptied | QX55 `docker exec c sh -c '...'`, QX56 `... \| docker run -i img sh` — `473 passed, 2 failed` |
+
+### Critic round 1 (e214145): a closed runner list
+
+The critic found exec detection was a closed list of runner names, so a
+program that runs a string but was not listed (`at`, `batch`, `sg -c`, `tar
+--to-command`, `sched`, `watchexec`, `entr -s`, `npx -c`, `nodemon --exec`)
+had its payload read as data. Fixed at the class: data now requires every
+command word to be a KNOWN non-runner, so an unlisted program fails closed.
+QX36-QX52 are that class (row S-DND799-10). The same inversion closes the
+round-0 residual for a heredoc script run by path or bare name and a git
+hook written then triggered (QX46-QX48).

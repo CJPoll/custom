@@ -669,6 +669,7 @@ alias -- egrep='grep -E'
 alias -- gstp='git stash pop'
 alias -- gg='gg2'
 alias -- gg2='gstp'
+alias -- xb='bash'
 EOF
 # case_ga <label> <deny|allow> <command> : with the grep-alias snapshot.
 case_ga() {
@@ -731,8 +732,12 @@ case_cmd "QX28. unterminated quoted heredoc" deny "cat <<'EOF'
 /usr/bin/g?t stash pop"
 case_cmd "QX29. a double-quoted payload with a command substitution" deny "echo \"x \$(/usr/bin/g?t stash pop)\""
 case_cmd "QX30. a double-quoted payload with a backtick" deny "echo \"x \`/usr/bin/g?t stash pop\`\""
-case_cmd "QX31. an exec payload nested in a data heredoc" deny "cat > x.txt <<'EOF'
+case_cmd "QX31. a heredoc script holding sh -c, then run" deny "cat > x.sh <<'EOF'
 sh -c '/usr/bin/g?t stash pop'
+EOF
+sh x.sh"
+case_cmd "QA32. sh -c text written as data that nothing runs" allow "cat > notes.txt <<'EOF'
+Run sh -c 'jq \".[] | .x\" f' to see it.
 EOF"
 case_cmd "QX32. << in a comment is not a heredoc" deny "true # <<'X'
 /usr/bin/g?t stash pop
@@ -742,6 +747,62 @@ case_cmd "QX33. << in arithmetic is not a heredoc" deny "echo \$((1<<'X'))
 X"
 case_cmd "QX34. an expanded command in a test's own simple command after it" deny '[ -n "$x" ]; $GIT stash pop'
 case_cmd "QX35. a substitution inside a test" deny '[ -n "$(/usr/bin/g?t stash pop)" ]'
+# QX36+: critic round 1. Data mode fails closed: an unknown command word
+# may run the string it is given, so its text stays EXEC.
+case_cmd "QX36. data piped to at" deny "echo '/usr/bin/g?t stash pop' | at now"
+case_cmd "QX37. quoted heredoc to at" deny "at now <<'EOF'
+/usr/bin/g?t stash pop
+EOF"
+case_cmd "QX38. quoted heredoc to batch" deny "batch <<'EOF'
+/usr/bin/g?t stash pop
+EOF"
+case_cmd "QX39. sg -c payload" deny "sg wheel -c '/usr/bin/g?t stash pop'"
+case_cmd "QX40. tar --to-command payload" deny "tar -xf a.tar --to-command='/usr/bin/g?t stash pop'"
+case_cmd "QX41. zsh sched payload" deny "sched +1 '/usr/bin/g?t stash pop'"
+case_cmd "QX42. watchexec payload" deny "watchexec '/usr/bin/g?t stash pop'"
+case_cmd "QX43. entr -s payload" deny "ls | entr -s '/usr/bin/g?t stash pop'"
+case_cmd "QX44. npx -c payload" deny "npx -c '/usr/bin/g?t stash pop'"
+case_cmd "QX45. nodemon --exec payload" deny "nodemon --exec '/usr/bin/g?t stash pop'"
+case_cmd "QX46. quoted heredoc script run by path" deny "cat > x.sh <<'EOF'
+/usr/bin/g?t stash pop
+EOF
+./x.sh"
+case_cmd "QX47. quoted heredoc script run by bare name" deny "cat > ~/bin/f <<'EOF'
+/usr/bin/g?t stash pop
+EOF
+f"
+case_cmd "QX48. quoted heredoc git hook, then a commit" deny "cat > .git/hooks/pre-commit <<'EOF'
+/usr/bin/g?t stash pop
+EOF
+git commit -m x"
+case_cmd "QX49. timeout prefix hides the next command word" deny "echo '/usr/bin/g?t stash pop' | timeout 5 at now"
+case_cmd "QX50. gh with a non-read subcommand (an alias or extension)" deny "echo '/usr/bin/g?t stash pop' | gh x"
+case_cmd "QX51. git with a non-read subcommand (an alias)" deny "echo '/usr/bin/g?t stash pop' | git x"
+case_ga "QX52. an owner alias to a shell (not a known word)" deny "echo '/usr/bin/g?t stash pop' | xb"
+case_cmd "QA30. git read subcommand with a data pipe stays allowed" allow "git log --oneline -5 | awk '{print \$1}' | sort -u"
+case_cmd "QA31. gh pr view piped to jq stays allowed" allow "gh pr view 3 --json checks | jq '.checks[] | {n: .name}'"
+
+case_cmd "QX53. a -c pager value git runs, under a read subcommand" deny "git -c core.pager='/usr/bin/g?t stash pop' log -1"
+case_cmd "QX54. a -c editor value git runs" deny "git -c core.editor='true; /usr/bin/g?t stash pop' commit"
+# QA33+: the harness batch of 2026-09-26 20:34Z (admiral).
+case_cmd "QA33. python heredoc with list brackets" allow "python3 - <<'EOF'
+xs = [1, 2]
+print(xs[0], {\"a\": xs[1:]})
+EOF"
+case_cmd "QA34. awk {print}" allow "awk '{print}' f"
+case_ga "QA35. grep for check marks under the grep alias" allow "grep -E '^(✓|✗)' log.txt"
+case_cmd "QA36. curl -w timing template" allow "curl -s -w '{\"t\": %{time_total}}' -o /dev/null https://example.com"
+case_cmd "QA37. Elixir heredoc with [:pool_size] and waiting?" allow "cat > t.exs <<'EOF'
+config :app, Repo, [:pool_size]
+if waiting?, do: [x] = y
+EOF"
+case_cmd "QA38. docker --format {{.ID}}" allow "docker ps --format '{{.ID}}'"
+case_cmd "QA39. \${p#/proc/} inside a printf argument" allow "for p in /proc/1; do printf '%s %s\\n' \"\${p#/proc/}\" end; done"
+case_cmd "QA40. an expanded script path with a literal basename" allow '"$S/x.sh" --flag'
+case_ga "QA41. grep for a count pattern under the grep alias" allow 'grep "[1-9] failure" log.txt'
+
+case_cmd "QX55. a runner after a known tool (docker exec sh -c)" deny "docker exec c sh -c '/usr/bin/g?t stash pop'"
+case_cmd "QX56. data piped into a runner after a known tool" deny "echo '/usr/bin/g?t stash pop' | docker run -i img sh"
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
 case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"
