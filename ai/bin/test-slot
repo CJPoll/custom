@@ -26,9 +26,11 @@
 # WAITING IS A KERNEL BLOCK. Every acquirer passes through queue.lock. Waiters
 # behind the head block in flock(2) on it. Only the head of the queue polls the
 # N slots, at a 2 s sleep cadence, bounded by --wait-timeout (Hard Rule
-# safe-wait item 3). No spin. Each timed wait (the queue flock, the poll
-# sleep) runs as a child the script `wait`s on, so INT/TERM/HUP exit a waiter
-# at once and kill that child with it (DND-815). A waiter prints WAITING with
+# safe-wait item 3). No spin. The two long waits (the queue flock and the
+# head's poll sleep) run as a child the script `wait`s on, so INT/TERM/HUP
+# exit a waiter at once and kill that child with it (DND-815); only the
+# events.lock append (flock -w 5) still defers a signal, by at most 5 s. A
+# waiter prints WAITING with
 # the pool, N, and every holder before it waits, and a heartbeat at least every
 # 60 s, so a queued gate never looks like a stall.
 #
@@ -99,8 +101,9 @@
 #     by someone". A process that started inside an earlier slot, outlived
 #     it, and runs test-slot after another run re-took that same slot would
 #     skip the pool. It needs a descendant that survives its slot; rare.
-#   * An absent --outcome-file means test-slot refused (exit 2) OR the
-#     wrapper itself was SIGKILLed before writing it; either way no outcome
+#   * An absent --outcome-file means test-slot refused (exit 2), a signal
+#     ended it while WAITING (exit 128+n), OR the wrapper itself was
+#     SIGKILLed before writing it; in every case no outcome
 #     was recorded, so a caller must not read absence as "CMD never ran".
 #   * A terminal ^C already reaches CMD (same process group), so INT is
 #     forwarded only when test-slot is NOT in its terminal's foreground
@@ -568,13 +571,15 @@ interruptible() {
 }
 
 # abandon_wait CODE — the waiting phase's INT/TERM/HUP handler: kill every
-# helper child still running (jobs -p also covers one started an instant
-# before its pid was read), drop the waiter file, exit CODE. It releases only
+# helper child still running (bash's `jobs -pr` inside $(...) reports this
+# shell's job table, so it also covers one started an instant before its pid
+# was read; -r skips a finished job whose pid may already be recycled), drop
+# the waiter file, exit CODE. It releases only
 # what this process holds: any slot fds it took (a partial --exclusive) close
 # with it. No outcome file is written, since no outcome was reached.
 abandon_wait() {
   local pids
-  pids=$(jobs -p)
+  pids=$(jobs -pr)
   if [ -n "$pids" ]; then
     # shellcheck disable=SC2086 # word-split pid list
     kill -KILL $pids 2>/dev/null
