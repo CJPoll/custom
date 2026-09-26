@@ -187,6 +187,65 @@ fleet_seen_dir() {
   printf '%s/seen\n' "${d}"
 }
 
+# --- session_started self-heal stamps (DND-497) -----------------------------
+# One stamp per session_id, separate from the seen/-throttle stamps above (a
+# session, not a session+agent, either has sent session_started or has not).
+# Written ONLY after a successful send (fleet-report.sh's run_detached), never
+# speculatively: a failed send must leave no stamp, so the next PostToolUse
+# that clears the existing seen-throttle retries it.
+
+# fleet_started_dir -- $XDG_STATE_HOME/athena/fleet/started
+fleet_started_dir() {
+  local d
+  d="$(fleet_state_dir)" || return 2
+  printf '%s/started\n' "${d}"
+}
+
+# fleet_started_stamp_path <session_id>
+fleet_started_stamp_path() {
+  local d
+  d="$(fleet_started_dir)" || return 2
+  printf '%s/%s.marked\n' "${d}" "$1"
+}
+
+# fleet_started_recorded <session_id>
+# Status 0 = this machine has already recorded a successful session_started
+# for this session (from SessionStart, or an earlier self-heal). Status 1
+# otherwise, including when the state dir itself is unusable -- in that case
+# the caller falls through to attempting the send, which will fail loudly on
+# its own (this function never silences a real report by guessing "done").
+fleet_started_recorded() {
+  local p
+  p="$(fleet_started_stamp_path "$1")" || return 1
+  [ -e "${p}" ]
+}
+
+# fleet_mark_started <session_id>
+# Records a successful session_started. Atomic replace; idempotent. Status 2
+# when the state dir cannot be created/written.
+fleet_mark_started() {
+  local d p
+  d="$(fleet_started_dir)" || return 2
+  mkdir -p -- "${d}" 2>/dev/null || return 2
+  p="${d}/$1.marked"
+  : > "${p}.tmp" && mv -f -- "${p}.tmp" "${p}"
+}
+
+# fleet_refresh_started <session_id> -- bump an existing stamp's mtime, so an
+# active session's stamp is never pruned as stale. Never creates one.
+fleet_refresh_started() {
+  local p
+  p="$(fleet_started_stamp_path "$1")" || return 2
+  touch -c -- "${p}" 2>/dev/null
+}
+
+# fleet_delete_stale_started <minutes> -- remove started-stamps older than that.
+fleet_delete_stale_started() {
+  local d
+  d="$(fleet_started_dir)" || return 2
+  find "${d}" -maxdepth 1 -name '*.marked' -mmin "+$1" -delete 2>/dev/null
+}
+
 # --- the failure log ----------------------------------------------------------
 # A report the hook sends in the background has nobody to print to: hook stderr
 # on exit 0 reaches neither the model nor, outside verbose mode, the human. So
