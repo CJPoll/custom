@@ -230,11 +230,14 @@ class GitHubForge
   # Returns [deploy_completed_at, pipeline_completed_at] for the merge sha.
   # A completed run whose workflow name matches the deploy regex and concluded
   # success -> deploy end; any other successful completed run -> pipeline end.
+  # The query is scoped to the merge sha (`--commit`). A repo-wide recent-runs
+  # list is both slow per PR and bounded in time, so an older merge's deploy
+  # would silently read as "no deploy".
   def ci_ends(merge_sha)
     return [nil, nil] unless merge_sha
 
-    runs = run_json(["gh", "run", "list", "--limit", "300", "--json",
-                     "headSha,updatedAt,conclusion,status,name"], @dir) || []
+    runs = run_json(["gh", "run", "list", "--commit", merge_sha, "--limit", "100",
+                     "--json", "headSha,updatedAt,conclusion,status,name"], @dir) || []
     mine = runs.select { |r| r["headSha"] == merge_sha && r["status"] == "completed" && r["conclusion"] == "success" }
     deploy = mine.select { |r| r["name"].to_s.match?(DEPLOY_NAME_RE) }
     other  = mine.reject { |r| r["name"].to_s.match?(DEPLOY_NAME_RE) }
@@ -414,6 +417,30 @@ def self_test
   check.call("probes accumulate", ProbeFailures.list.size, 2)
   ProbeFailures.reset!
   check.call("reset clears", ProbeFailures.any?, false)
+
+  # GitHubForge#ci_ends must ask for the runs OF THE MERGE SHA, not scan a
+  # repo-wide `gh run list --limit 300` once per PR. The repo-wide list (a) cost
+  # ~7.8s per PR on gen_saas, so a 100-PR window took ~840s and the shipwright's
+  # bounded scan timed out three runs running; and (b) reached back only to
+  # 2026-09-23T18:23Z, so an older merge's deploy silently read as "no deploy"
+  # and its tail as 0s. The stub serves the merge sha's run ONLY to a query
+  # scoped to that sha, the way the forge does.
+  gh = GitHubForge.new(".")
+  seen = []
+  gh.define_singleton_method(:run_json) do |cmd, _dir|
+    seen << cmd
+    i = cmd.index("--commit")
+    next [] unless i && cmd[i + 1] == "old1"
+
+    [{ "headSha" => "old1", "status" => "completed", "conclusion" => "success",
+       "name" => "Post-Merge Deploy", "updatedAt" => "2026-09-22T02:00:00Z" },
+     { "headSha" => "old1", "status" => "completed", "conclusion" => "success",
+       "name" => "CI", "updatedAt" => "2026-09-22T01:50:00Z" }]
+  end
+  check.call("deploy of a merge outside any recent-runs window resolves",
+             gh.ci_ends("old1"), ["2026-09-22T02:00:00Z", "2026-09-22T01:50:00Z"])
+  check.call("run query is scoped to the merge sha",
+             seen.all? { |c| c.include?("--commit") }, true)
 
   if failures.empty?
     puts "lead-time --self-test: PASS (pure-logic assertions)"
