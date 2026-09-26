@@ -1585,6 +1585,26 @@ else
   bad "last dirt: line" "record=$(cat "$rec" 2>&1)"
 fi
 
+# A listing git cannot produce must fail, not print an empty list the
+# attendant would relay as "no paths". Every git-reading function in the
+# classifier is held to that.
+nongit="${TMP}/not-a-repo"; mkdir -p "$nongit"
+lib_rc() { ( . "${SCRIPTS}/lib/shipwright-stale-dirt.sh"; "$@" >/dev/null 2>&1 ); echo $?; }
+if [ "$(lib_rc sd_display_paths "$nongit" 20)" != "0" ] \
+   && [ "$(lib_rc sd_measure "$nongit")" != "0" ] \
+   && [ "$(lib_rc sd_dirty_paths "$nongit")" != "0" ]; then
+  ok "sd_display_paths, sd_measure and sd_dirty_paths each exit non-zero when git cannot read the checkout"
+else
+  bad "git failure is loud in the lib" "display=$(lib_rc sd_display_paths "$nongit" 20) measure=$(lib_rc sd_measure "$nongit") dirty=$(lib_rc sd_dirty_paths "$nongit")"
+fi
+r="$(new_repo)"
+o="$( . "${SCRIPTS}/lib/shipwright-stale-dirt.sh"; sd_display_paths "$r" 20 )"
+if [ -n "$o" ] && grep -q '^(none' <<<"$o"; then
+  ok "a clean tree's relay list says (none ...) in words, never an empty block"
+else
+  bad "empty relay list is explicit" "out=$o"
+fi
+
 # The runner's own state under ai-artifacts/ is never dirt, so it can never
 # alert on itself.
 clear_alerts

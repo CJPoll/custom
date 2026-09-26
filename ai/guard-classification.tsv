@@ -63,7 +63,7 @@ ai/skills/athena:inbox/lib/wedge.sh	library	sourced by the athena:inbox bins; re
 ai/skills/athena:slack/lib/inbox.sh	library	sourced by the athena:slack action bins; its slack_die reports a Slack API error for an action, not a guard denial
 ai/skills/athena:slack/lib/slack.sh	library	sourced by the athena:slack action bins; its slack_die reports a Slack API error for an action, not a guard denial
 scripts/lib/dbus-env.sh	library	sourced by the cron wrappers; always exports a bus address (real or sentinel) and never fails
-scripts/lib/shipwright-stale-dirt.sh	library	sourced by athena-shipwright-run.sh; each function returns non-zero on a failed measurement and the runner prints the Fix: for it
+scripts/lib/shipwright-stale-dirt.sh	library	sourced by athena-shipwright-run.sh; each function that reads git (sd_dirty_paths, sd_measure, sd_display_paths) returns non-zero when git fails, and the runner prints the Fix: for it
 scripts/wt-lib/close.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
 scripts/wt-lib/common.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
 scripts/wt-lib/create.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
