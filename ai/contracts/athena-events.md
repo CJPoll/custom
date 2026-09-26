@@ -3905,6 +3905,28 @@ at every agent depth). The kinds and the other fields each may carry:
     stdin's `agent_type` is `athena-admiral`, and `session_seen` otherwise, at
     most once per 60 s per (session, `agent_id`), in the background under a
     timeout.
+  - The PostToolUse hook path also self-heals a missing `session_started`
+    (DND-497). Hooks hot-load, so a session whose SessionStart fired before
+    the hook was installed never sent one, and its `project` would stay
+    `null` forever. The machine records a per-session stamp once any
+    `session_started` for that session succeeds, from either hook. A due
+    PostToolUse for a session with no stamp sends `session_started` first,
+    resolved from that event's cwd by the same rule as SessionStart, then its
+    `session_seen` or `admiral_seen`. A failed send writes no stamp, so the
+    next due PostToolUse retries it; the 60 s throttle above bounds the
+    retries. A due PostToolUse refreshes the stamp, and a stamp silent for a
+    day is pruned. The rule is the stamp, not the session's history: any due
+    PostToolUse that finds no stamp sends `session_started`, even for a
+    session SessionStart already reported. Examples, not a closed list: the
+    session was live when this self-heal was deployed (its SessionStart
+    predates the stamp); SessionStart's own send was still in flight (the
+    stamp is written only after it succeeds, up to its 30 s timeout); the
+    session was silent for more than a day; two of its agents claimed their
+    first due PostToolUse at once; or its stamp could not be written (that
+    failure is logged). The repeat is an ordinary `session_started`. The
+    server keeps the session's `started_at` (set when any first report
+    created it) and replaces its `project` and `repo_key` with the values
+    resolved from that PostToolUse event's cwd.
   - The lifecycle hook, `ai/hooks/fleet-lifecycle.sh`, sends the four
     lifecycle kinds for fleet workers only. PreToolUse on the Agent tool sends
     `agent_spawn`. PostToolUse on it, when `tool_response.agentId` is present,
