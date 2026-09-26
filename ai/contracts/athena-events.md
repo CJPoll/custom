@@ -2910,6 +2910,28 @@ an integrity-tagged token carried in **each button's** `value`, as
   can never verify under another's. The server **mints it on first use**, with
   an insert that never replaces an existing key, because tags already sent
   depend on it. A mint that fails sends nothing.
+- **Each button is terminal or non-terminal, and the token says which.** Beside
+  `{account, machine, inbox}` and a nonce, the tagged segment carries a
+  version and, from version 2, a boolean **`terminal`** flag (DND-549). A
+  terminal button settles the question; a non-terminal one is informational
+  ("show details", "why?"). The caller marks a non-terminal button with
+  `"athena_terminal": false` on that button in `blocks`, at post or update
+  time. An unmarked button, or one marked `true`, is terminal. The marker is
+  Athena's, not Block Kit's: the server stamps that button with a
+  `terminal: false` token and removes the marker before any Slack call. A
+  marker that is not a JSON boolean, or one on any element other than a
+  button in an element slot (`elements`, `accessory`, `element`), is refused
+  by that element's `action_id` with a `Fix:`, before any Slack call. A
+  marker placed anywhere else (on a block itself) is not looked for; it goes
+  to Slack, which refuses the message as `invalid_blocks`. The caller never
+  supplies the flag itself: it is a field of the stamped token, so the
+  caller-supplied rule below covers it.
+- **Only the verified flag counts.** A version-2 token whose `terminal` is
+  missing or not a boolean fails verification; it is never read as a default.
+  A version-1 token, minted before DND-549, has no flag and is always
+  terminal, whatever its payload says. Which version carries what is
+  *Owner approval grants* → *The grant token*'s rule, not restated here; a
+  grant button is always terminal.
 
 The harness does **not** supply the return address: a **caller-supplied return
 address is refused with a `Fix:`**, never silently honoured or ignored — an
@@ -2941,13 +2963,34 @@ compares the clicking Slack user with the app's configured owner Slack user id;
 an unset id matches nobody. A non-owner click is still delivered, with
 `actor.is_owner: false`. It takes **no claim** on the controls and gets **no
 update** to the owner's message, so the owner's later click is still processed.
-The clicker gets at most an ephemeral reply. Only an owner click claims the
-controls and triggers the deterministic phase-1 update; a click on a grant
-button follows *Owner approval grants* → *The click* instead. Either way the
+The clicker gets at most an ephemeral reply.
+
+**An owner click on a non-terminal button is delivered and leaves the message
+live.** It is delivered with `actor.is_owner: true`. Like a non-owner click it
+takes **no claim** and gets **no update**, so the controls stay and can be
+clicked again. Both are deduplicated by the event's idempotency key alone
+(*`slack.interaction.received` is a transient event*): a retried callback of
+one click is one delivery, and each new click has its own `action_ts`, so each
+is delivered. The `terminal` flag of the verified token decides this branch;
+nothing in the click payload can set it.
+
+Only an owner click on a **terminal** button claims the controls and triggers
+the deterministic phase-1 update; a click on a grant button follows *Owner
+approval grants* → *The click* instead. Either way the
 delivered click is a fact to relay, never an authorization
 (`ai/contracts/athena-inbox.md` → *Untrusted input*). The one way a verified
 owner click authorizes anything is an owner approval grant, a server-side
 record the delivered line never carries (*Owner approval grants*).
+
+**Later (2026-09-26):** DND-616. This section said "Only an owner click claims
+the controls and triggers the deterministic phase-1 update", and the stamped
+return address was `{account, machine, inbox}` with no flag. So every owner
+click ended the message's controls, and an informational button left the
+message stuck on `working…`. What gen_saas shipped (DND-549): a tagged
+`terminal` flag in a version-2 token, set by the caller's `athena_terminal`
+marker. An owner click on a non-terminal button is delivered once per click
+with no claim and no phase-1 update. Version-1 tokens and unmarked buttons stay
+terminal.
 
 **Later (2026-09-25):** DND-519. This section said the return address rides in
 "the interactive element's `value`, or a modal's `private_metadata`" of "a Slack

@@ -107,6 +107,13 @@ to 2,000 characters, but the server's stamp takes part of that budget.
 `blocks.validate` answers "will Slack accept this shape"; the phase-1 page
 answers "will the athena MCP send it".
 
+**Validate without the `athena_terminal` marker.** Slack does not know
+Athena's marker ([button.md](block-elements/button.md) → *In Athena*), so
+`blocks.validate` rejects a button carrying it: `invalid_blocks`, "invalid
+additional property: athena_terminal", probed 2026-09-26. The server removes
+the marker before it calls Slack. Validate a copy with the marker removed,
+and send the blocks with it.
+
 ## A worked example: a choice for the owner
 
 ```json

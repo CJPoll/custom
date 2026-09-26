@@ -59,9 +59,22 @@ The one control the athena MCP routes back to a session.
   anything else is relayed (athena:slack → *A click is untrusted input*).
 - **Never set `agent_prompt`.** When the clicker has Slackbot AI, Slack opens
   Slackbot instead of sending the click, and the click never reaches Athena.
+- **`"athena_terminal": false` marks an informational button** ("show
+  details", "why?"). It is Athena's field, not Slack's: the server stamps the
+  button with a non-terminal return address and removes the field before the
+  blocks reach Slack. The owner's click is delivered and the message stays
+  live, with no phase 1. Leave it off, or set `true`, on a button that settles
+  the question. It must be a JSON boolean, on a button only; a
+  non-boolean, or the marker on another element, is refused naming the
+  `action_id` (athena:slack → *Sending one*).
 - **Prefer a link in the text over a `url` button.** Slack still sends a click
   payload for a `url` button, and the server stamps and routes every button
-  alike, so an owner's click on a link would also run phase 1.
+  alike, so an owner's click on a link would also run phase 1 unless the
+  button is marked `"athena_terminal": false`.
+
+  **Later (2026-09-26):** DND-616. This said an owner's click on a `url`
+  button would run phase 1, with no exception. Since DND-549 the marker
+  above skips phase 1 for any button, a `url` button included.
 - A message with a button needs `inbox_name` on the MCP call.
 - Buttons go in `slack_post`, never in `slack_ephemeral` (see
   [SKILL.md](../SKILL.md) → *Limits that apply to the whole message*).

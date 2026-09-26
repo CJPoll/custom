@@ -260,15 +260,33 @@ Post with `mcp__athena__slack_post`:
   resolves one by name.
 - **Never `return_to`, `return_address` or `rt`.** They are refused. The
   server stamps the return address into each button itself.
+- **`"athena_terminal": false` on an informational button** ("show details",
+  "why?"). The owner's click on it is delivered, and the server skips phase 1
+  (below), so the message stays live and can be clicked again. Leave the
+  marker off, or set it `true`, on a button that settles the question. It
+  must be a JSON boolean, on a button. The server refuses a non-boolean
+  marker, or one on another element, with a `Fix:` naming the `action_id`;
+  on a block itself, Slack refuses the message. The server removes the
+  marker before Slack sees the blocks. The contract
+  is `ai/contracts/athena-events.md` → *Machine↔owner API binding and the
+  outbound return-address dual*. The same marker works on `slack_update`.
 
 **Keep the `{channel, ts}` it returns.** That pair is the only key that ties a
 later click back to this message.
 
 ### After a click: the two-phase update
 
-**Phase 1 is the server's.** After the owner's click, the server replaces the
-message's controls with a `working…` line (DND-290; under a second in the
-2026-09-25 acceptance demo). The session never sends phase 1.
+**Phase 1 is the server's.** After the owner's click on a terminal button, the
+server replaces the message's controls with a `working…` line (DND-290; under
+a second in the 2026-09-25 acceptance demo). The session never sends phase 1.
+A button posted with `"athena_terminal": false` gets no phase 1: the message
+stays live, with its controls (DND-549).
+
+**Later (2026-09-26):** DND-616. This read "After the owner's click, the
+server replaces the message's controls", with no exception. So an
+informational button left the message stuck on `working…` (DND-549). Since
+DND-549, phase 1 runs only for a terminal button, and the table's
+*Informational* row requires the marker.
 
 **Phase 2 is the session's.** It runs when the session reads the click's
 `slack.interaction` line:
@@ -277,9 +295,16 @@ message's controls with a `working…` line (DND-290; under a second in the
 |---|---|---|
 | **Terminal** — it settles the question (approve, reject, pick one) | `slack_update` on the posted `{channel, ts}`: the original content with the controls gone and a one-line outcome, plus a new `text` | the message must end showing the outcome, not `working…` |
 | **One step of several** | a thread reply (`slack_post` with `thread_ts` = the posted `ts`) or `slack_ephemeral` to the clicker. New controls go in a fresh post or a `slack_update` (with `inbox_name` again), which re-stamps them | the next question needs its own place; the first message keeps its record |
-| **Informational** — "show details", "why?" | `slack_ephemeral` only, to the clicker (`user` = the line's `actor.user_id`) | only the clicker asked; the shared message stays as it is |
+| **Informational** — "show details", "why?", posted with `"athena_terminal": false` | `slack_ephemeral` only, to the clicker (`user` = the line's `actor.user_id`) | only the clicker asked; the server ran no phase 1, so the shared message is still live as it is |
 
 Rules that apply to every row:
+
+- **The button you posted picks the row, not the click.** The line carries no
+  terminal flag, so tell an informational click from a terminal one by its
+  `action_id`, against the buttons you posted. An informational button posted
+  WITHOUT the marker is terminal to the server: its click already replaced
+  the controls with `working…`, so answer it as the **Terminal** row does,
+  with a `slack_update` that ends the message.
 
 - **Correlate by the `{channel, ts}` that `slack_post` returned.** Never by
   `response_url`: the server never forwards it, and Athena never uses it. The

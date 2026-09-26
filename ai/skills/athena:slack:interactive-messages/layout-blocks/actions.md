@@ -40,6 +40,11 @@ go.
 - Two to four buttons is the useful range. Past that, the question is
   probably free-form, and plain text serves better (athena:slack → *Block Kit
   is the default for asking a person*).
-- After the owner clicks, the server removes the whole `actions` block and
-  puts a `working…` line where it was (phase 1). The phase-2 `slack_update`
-  replaces that with the outcome.
+- After the owner clicks a terminal button, the server removes the whole
+  `actions` block and puts a `working…` line where it was (phase 1). The
+  phase-2 `slack_update` replaces that with the outcome. A click on a button
+  marked `"athena_terminal": false` leaves the block as it is (see
+  [button.md](../block-elements/button.md) → *In Athena*).
+
+  **Later (2026-09-26):** DND-616. This said the block is removed after any
+  owner click. Since DND-549 a non-terminal button's click leaves it.
