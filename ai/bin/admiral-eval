@@ -81,9 +81,16 @@
 # baseline written before fingerprinting). Without it, a baseline captured
 # against a rewritten agent still prints "0 regressed" and reads exactly like a
 # verified one — see report_provenance for the measured PR #32/#33 instance.
-# The verdict is ADVISORY (it never changes the exit code), because --run is not
-# gate-wired and a legitimate re-baseline must still be able to run; the point is
-# that staleness can no longer be silent.
+#
+# Baseline CERTIFICATION (DND-522): the baseline also records the full corpus
+# fingerprint, the runs it sampled, and each case's fixture fingerprint. Every
+# diff ends in ONE `baseline verdict:` line — CERTIFIED only when the subject,
+# the corpus and every case match; UNCERTIFIED (exit 0, each gap named, Fix:)
+# on a subject or corpus mismatch, a case the baseline never measured, a
+# changed fixture, or an --only run; FAILED (exit 1) on a regression, a
+# baseline case the run lacks, or a failing case no baseline measurement
+# covers. A present-but-unreadable baseline is an error, never "no baseline".
+# --update-baseline refuses --only and --runs below the default N.
 #
 # Adding a case: create ai/eval/admiral-fixtures/<AE-NN-name>/meta plus scenario.md
 # (T2) or an input.json (T1 hook-stdin). Keep the scorer deterministic — assert a
@@ -706,32 +713,97 @@ end
 # (variant-eval's N) per side. T1 (hook-stdin) cases are deterministic and
 # always record rate 1/1, so they diff EXACTLY on pass, never through classify.
 # ---------------------------------------------------------------------------
-BaselineCase = Struct.new(:pass, :counts, :rate_error)
+# fixture: the case's fixture fingerprint when the baseline was captured (nil in
+# a baseline written before DND-522).
+BaselineCase = Struct.new(:pass, :counts, :rate_error, :fixture)
+
+# A baseline file that EXISTS but cannot be read is an error, never "no baseline
+# committed yet" (DND-522): the old loader turned it into a Note and ran as if
+# there were no baseline, so a corrupt committed baseline read like a clean
+# first run.
+class BaselineUnreadable < StandardError; end
+
+# The parsed baseline document, nil when no baseline file exists, or raises
+# BaselineUnreadable (with a Fix:) when one exists and cannot be used.
+def load_baseline_doc(path = baseline_path)
+  return nil unless path && File.exist?(path)
+
+  data = JSON.parse(File.read(path))
+  return data if data.is_a?(Hash) && data["cases"].is_a?(Array)
+
+  raise BaselineUnreadable, baseline_unreadable_message(path, "it has no \"cases\" array")
+rescue JSON::ParserError, SystemCallError => e
+  raise BaselineUnreadable, baseline_unreadable_message(path, e.message)
+end
+
+def baseline_unreadable_message(path, why)
+  "baseline #{relpath(path)} is present but unreadable (#{why}). Fix: restore it from git " \
+    "(`git checkout origin/main -- #{relpath(path)}`) or re-capture it with `--run --update-baseline`; an " \
+    "unreadable baseline is never treated as no baseline, because that would certify nothing and exit 0."
+end
 
 def load_baseline(path = baseline_path)
-  return nil unless path && File.file?(path)
-  data = JSON.parse(File.read(path))
-  data["cases"].each_with_object({}) { |c, h| h[c["name"]] = baseline_case(c) }
-rescue StandardError => e
-  warn "admiral-eval: Note: baseline unreadable (#{e.message}); running without baseline diff."
-  nil
+  doc = load_baseline_doc(path)
+  doc && load_baseline_cases(doc)
+end
+
+def load_baseline_cases(doc)
+  doc["cases"].each_with_object({}) { |c, h| h[c["name"]] = baseline_case(c) }
 end
 
 # One baseline entry. A rate that does not parse is kept as an ERROR on the
 # case (diff_baseline refuses it), never dropped: a case the diff cannot score
 # must not read as a case with nothing to compare.
 def baseline_case(entry)
-  BaselineCase.new(entry["pass"], EvalScore.parse_rate(entry["rate"]), nil)
+  BaselineCase.new(entry["pass"], EvalScore.parse_rate(entry["rate"]), nil, entry["fixture"])
 rescue EvalScore::InvalidCounts => e
-  BaselineCase.new(entry["pass"], nil, e.message)
+  BaselineCase.new(entry["pass"], nil, e.message, entry["fixture"])
+end
+
+# The baseline document --update-baseline writes (DND-522): the subject render,
+# the FULL corpus fingerprint, the N it sampled, and each case's fixture
+# fingerprint, so a later diff can tell a comparable case from one whose test
+# changed under it.
+def baseline_doc(results, subject:, corpus:, runs:, agent: eval_agent)
+  {
+    "generated" => Time.now.utc.iso8601,
+    "agent" => agent.name,
+    "subject" => subject,
+    "corpus" => corpus,
+    "runs" => runs,
+    "cases" => results.map do |r|
+      { "name" => r[:name], "pass" => r[:pass], "rate" => r[:rate], "fixture" => r[:fixture] }
+    end
+  }
+end
+
+# Why --update-baseline must not run with these options, or nil. A baseline
+# describes the WHOLE corpus at the N the diff is calibrated at (DND-225/523):
+# an --only capture overwrote every other case, and a small N made every later
+# diff print the under-sampled Note.
+def update_baseline_error(only:, runs:)
+  if only
+    return "--update-baseline with --only #{only.inspect} would rewrite the baseline with only the selected " \
+           "case(s), dropping every other case's measurement. Fix: re-baseline the full corpus: drop --only."
+  end
+  return nil if runs >= DEFAULT_RUNS
+
+  "--update-baseline at --runs #{runs} would record a baseline sampled below N=#{DEFAULT_RUNS}, the N the " \
+    "diff's rule (EvalScore.classify) is calibrated at. Fix: re-baseline at the default --runs (#{DEFAULT_RUNS}) " \
+    "or higher."
 end
 
 # How one baseline case compares with this run's result for it (nil = absent).
-# Returns [flip, detail]; flip is an EvalScore.classify flip, :unusable, or
-# :same (a T1 case whose pass did not change).
+# Returns [flip, detail]; flip is an EvalScore.classify flip, :unusable,
+# :changed (the case's fixture changed since the baseline, so its baseline rate
+# scored a different test), or :same (a T1 case whose pass did not change).
 def baseline_flip(base, result)
   return [:unusable, "baseline rate unusable: #{base.rate_error}"] if base.rate_error
   return [:missing, "missing from this run (baseline #{rate_text(base.counts)})"] if result.nil?
+  if base.fixture && result[:fixture] && base.fixture != result[:fixture]
+    return [:changed, "fixture changed since the baseline (#{base.fixture} -> #{result[:fixture]}); " \
+                      "baseline #{rate_text(base.counts)} scored a different test"]
+  end
 
   if result[:mode] == "hook-stdin"
     return [:regressed, "T1 baseline pass -> now fail"] if base.pass && !result[:pass]
@@ -754,22 +826,44 @@ def rate_text(counts)
   counts ? "#{counts.k}/#{counts.n}" : "n/a"
 end
 
-def diff_baseline(results, baseline, agent: eval_agent, only: nil)
+# The comparison diff_baseline prints and compare_to_baseline certifies, as
+# data. Pure: no output. `unmeasured` is every case this run scored that no
+# comparable baseline measurement covers (new to the corpus, or its fixture
+# changed); `compared` counts the cases both sides measured on the same fixture.
+def baseline_comparison(results, baseline, only: nil)
   now = results.to_h { |r| [r[:name], r] }
   # --only compares only what it selected; every other baseline case is out of
   # scope, not missing.
   scoped = baseline.select { |name, _| only.nil? || name.start_with?(only) }
   flips = scoped.to_h { |name, base| [name, baseline_flip(base, now[name])] }
-  unusable  = flips.select { |_, (f, _)| f == :unusable }
-  regressed = flips.select { |_, (f, _)| EvalScore.regression?(f) }
-  improved  = flips.select { |_, (f, _)| f == :improved }
-  new_cases = (now.keys - baseline.keys) + flips.select { |_, (f, _)| f == :new }.keys
+  with_flip = ->(*kinds) { flips.select { |_, (f, _)| kinds.include?(f) } }
+  new_cases = (now.keys - baseline.keys) + with_flip.call(:new).keys
+  changed = with_flip.call(:changed)
+  unmeasured = new_cases + changed.keys
+  {
+    now: now, scoped: scoped,
+    unusable: with_flip.call(:unusable),
+    regressed: flips.select { |_, (f, _)| EvalScore.regression?(f) },
+    improved: with_flip.call(:improved),
+    new_cases: new_cases, changed: changed,
+    unmeasured_failing: unmeasured.reject { |n| now[n] && now[n][:pass] },
+    compared: flips.count { |_, (f, _)| !%i[unusable missing changed new].include?(f) }
+  }
+end
+
+def diff_baseline(results, baseline, agent: eval_agent, only: nil)
+  cmp = baseline_comparison(results, baseline, only: only)
+  now = cmp[:now]
+  unusable = cmp[:unusable]
+  regressed = cmp[:regressed]
   puts ""
-  puts "baseline diff: #{regressed.size} regressed, #{improved.size} improved, #{new_cases.size} new case(s) " \
+  puts "baseline diff: #{regressed.size} regressed, #{cmp[:improved].size} improved, " \
+       "#{cmp[:new_cases].size} new case(s), #{cmp[:changed].size} changed fixture(s) " \
        "(T2: EvalScore.classify on counts; T1: exact)"
-  improved.each { |n, (_, why)| puts "  + improved: #{n} #{why}" }
-  new_cases.each { |n| puts "  · new:   #{n} (#{now[n] && now[n][:pass] ? 'pass' : 'fail'}; no baseline measurement)" }
-  report_undersampled(scoped, now)
+  cmp[:improved].each { |n, (_, why)| puts "  + improved: #{n} #{why}" }
+  cmp[:new_cases].each { |n| puts "  · new:   #{n} (#{now[n] && now[n][:pass] ? 'pass' : 'fail'}; no baseline measurement)" }
+  cmp[:changed].each { |n, (_, why)| puts "  · changed: #{n} (#{now[n][:pass] ? 'pass' : 'fail'}; #{why})" }
+  report_undersampled(cmp[:scoped].reject { |n, _| cmp[:changed].key?(n) }, now)
 
   unless unusable.empty?
     warn "admiral-eval: FAILED — #{unusable.size} baseline case(s) cannot be scored:"
@@ -788,7 +882,90 @@ def diff_baseline(results, baseline, agent: eval_agent, only: nil)
          "its samples disappeared: restore them. If either side was sampled below #{DEFAULT_RUNS} (see the " \
          "Note above), re-run `--run --only <case>` at the default --runs to confirm."
   end
-  unusable.empty? && regressed.empty? ? 0 : 1
+  report_unmeasured_failing(cmp[:unmeasured_failing], now, agent)
+  unusable.empty? && regressed.empty? && cmp[:unmeasured_failing].empty? ? 0 : 1
+end
+
+# DND-522: a case no comparable baseline measurement covers is judged like a
+# run with no baseline at all: its majority must pass. Before, a failing new
+# case printed "0 regressed" and exited 0.
+def report_unmeasured_failing(names, now, agent)
+  return if names.empty?
+
+  warn "admiral-eval: FAILED — #{names.size} case(s) FAIL that no baseline measurement covers:"
+  names.each { |n| warn "  - #{n}: #{now[n] ? "#{now[n][:rate]} #{now[n][:detail]}" : 'not run'}" }
+  warn "  Fix: nothing certifies these cases, so the failure is not noise against a baseline. Make the " \
+       "#{agent.name} pass them (restore the invariant's trigger), or fix the fixture if it is wrong; then " \
+       "re-capture with `#{rerun_hint(agent)} --run --update-baseline` so the baseline measures them."
+end
+
+# The ONE certification line for a diff (DND-522). "0 regressed" alone read the
+# same whether the baseline measured this render, this corpus and every case,
+# or none of them. So every diff ends in exactly one `baseline verdict:` line:
+#   FAILED       — the diff exits 1 (regression, missing, unscorable, or an
+#                  uncovered failing case);
+#   CERTIFIED    — same subject sha, same corpus fingerprint, every case
+#                  compared on its baseline fixture, no --only;
+#   UNCERTIFIED  — exit 0, but at least one gap, each named, with a Fix:.
+# A subject or corpus mismatch is a LOUD FLAG, not a refusal: a before/after
+# check of a deliberate agent change runs a different render by design (and
+# variant-eval runs a variant render against this baseline), so refusing it
+# would make that exit code meaningless. The flag says what "0 regressed" then
+# covers, and what it does not.
+def compare_to_baseline(results, doc, subject:, corpus:, only: nil, agent: eval_agent)
+  cases = load_baseline_cases(doc)
+  code = diff_baseline(results, cases, agent: agent, only: only)
+  subject_state = report_provenance(doc["subject"], subject, agent: agent)
+  corpus_state = report_corpus(doc["corpus"], corpus)
+  cmp = baseline_comparison(results, cases, only: only)
+  report_verdict(code, cmp, subject_state: subject_state, corpus_state: corpus_state, only: only, agent: agent)
+  code
+end
+
+def report_corpus(recorded, current)
+  if recorded.nil?
+    puts "baseline corpus: UNKNOWN — this baseline predates corpus fingerprinting."
+    return :unknown
+  end
+  if recorded == current
+    puts "baseline corpus: #{current} (matches this corpus)"
+    return :match
+  end
+  puts "baseline corpus: CHANGED — captured against corpus #{recorded}, this corpus is #{current}."
+  :changed
+end
+
+def certification_gaps(cmp, subject_state:, corpus_state:, only:)
+  names = ->(list) { list.first(5).join(", ") + (list.size > 5 ? ", ..." : "") }
+  gaps = []
+  gaps << "subject #{subject_state.to_s.upcase}" unless subject_state == :match
+  gaps << "corpus #{corpus_state.to_s.upcase}" unless corpus_state == :match
+  unless cmp[:new_cases].empty?
+    gaps << "#{cmp[:new_cases].size} case(s) the baseline never measured (#{names.(cmp[:new_cases])})"
+  end
+  unless cmp[:changed].empty?
+    gaps << "#{cmp[:changed].size} case(s) whose fixture changed since the baseline (#{names.(cmp[:changed].keys)})"
+  end
+  gaps << "--only #{only}: a partial run, not the corpus" if only
+  gaps
+end
+
+def report_verdict(code, cmp, subject_state:, corpus_state:, only:, agent:)
+  gaps = certification_gaps(cmp, subject_state: subject_state, corpus_state: corpus_state, only: only)
+  if code != 0
+    puts "baseline verdict: FAILED — see the FAILED list above#{gaps.empty? ? '' : "; also: #{gaps.join('; ')}"}."
+  elsif gaps.empty?
+    puts "baseline verdict: CERTIFIED — #{cmp[:compared]} case(s) compared against the baseline's own subject " \
+         "and corpus; 0 regressed."
+  else
+    puts "baseline verdict: UNCERTIFIED — #{gaps.join('; ')}. '0 regressed' covers only the #{cmp[:compared]} " \
+         "case(s) both sides measured on the same fixture, against the RECORDED subject; it certifies nothing else."
+    warn "admiral-eval: Note: the baseline diff is UNCERTIFIED (#{gaps.join('; ')}). " \
+         "Fix: once a full run is green, re-capture with `#{rerun_hint(agent)} --run --update-baseline` (full " \
+         "corpus, --runs >= #{DEFAULT_RUNS}) at the render that lands. If you changed the #{agent.name} on purpose, " \
+         "a STALE subject is the before/after shape: confirm the baseline's sha is the render on origin/main " \
+         "before reading '0 regressed' as no regression."
+  end
 end
 
 # Advisory (never an exit-code change): EvalScore.classify is calibrated at
@@ -828,10 +1005,10 @@ end
 # converse of harness-IA #8 (measure the win, don't assert it).
 #
 # So the baseline now fingerprints its subject, and a run says which of the
-# three states it is in. This is ADVISORY, never a new failure: --run is
-# model-in-loop and not gate-wired, and a legitimate re-baseline would otherwise
-# be unable to run. The point is that a stale baseline can no longer be SILENT,
-# not that it should block.
+# three states it is in. A mismatch never changes the exit code by itself (a
+# before/after check of a deliberate agent change runs a different render by
+# design); since DND-522 it makes compare_to_baseline's one `baseline verdict:`
+# line read UNCERTIFIED, so a stale baseline can no longer read as a clean one.
 def subject_fingerprint(path = default_agent_file)
   return { "file" => relpath(path), "status" => "missing" } unless File.file?(path)
   body = File.read(path)
@@ -845,13 +1022,6 @@ end
 def relpath(path)
   root = File.expand_path("..", AI_DIR)
   path.start_with?(root + "/") ? path[(root.size + 1)..] : path
-end
-
-def load_baseline_subject(path = baseline_path)
-  return nil unless path && File.file?(path)
-  JSON.parse(File.read(path))["subject"]
-rescue StandardError
-  nil
 end
 
 # Prints the provenance verdict. Returns the verdict symbol so the self-test can
@@ -907,6 +1077,13 @@ def score_lines(results, corpus_id)
   lines
 end
 
+# One case's fixture fingerprint (DND-522): the same digest over just its dir.
+# The baseline records it per case, so a diff can tell a case whose test
+# changed under it from one it can compare.
+def fixture_fingerprint(dir)
+  corpus_fingerprint([dir])
+end
+
 # sha256 over every fixture file under the selected fixture dirs (path + bytes),
 # first 12 hex. Two aggregates are comparable only when this matches.
 def corpus_fingerprint(dirs)
@@ -933,6 +1110,14 @@ def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agen
   # load fails here, loudly, instead of per case.
   argv = model_argv(agent_file, agent)
   subject = subject_fingerprint(agent_file)
+  # DND-522: read the baseline BEFORE any model call. A present-but-unreadable
+  # baseline is an error, never "no baseline committed yet".
+  begin
+    baseline = update ? nil : load_baseline_doc(baseline_path(agent))
+  rescue BaselineUnreadable => e
+    warn "admiral-eval: FAILED — #{e.message}"
+    return 1
+  end
   # variant-eval parses this line (confirm_t2_subject!) to prove which render ran;
   # keep its `subject: ... sha <12 hex> (loaded inline via --agents` shape.
   puts "agent: #{agent.key} (#{agent.name}), corpus #{agent.fixtures_rel}"
@@ -946,7 +1131,7 @@ def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agen
   # must see it byte-identical; these lines never touch STDOUT.
   total = dirs.size
   results = dirs.each_with_index.map do |d, i|
-    r = evaluate(d, runs: runs, argv: argv, agent: agent)
+    r = evaluate(d, runs: runs, argv: argv, agent: agent).merge(fixture: fixture_fingerprint(d))
     warn "  [#{i + 1}/#{total}] #{r[:name]}: #{r[:pass] ? 'PASS' : 'FAIL'} (#{r[:rate]})"
     r
   end
@@ -959,21 +1144,16 @@ def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agen
   if update
     FileUtils.mkdir_p(File.dirname(baseline_path(agent)))
     File.write(baseline_path(agent), JSON.pretty_generate(
-      "generated" => Time.now.utc.iso8601,
-      "agent" => agent.name,
-      "subject" => subject,
-      "cases" => results.map { |r| { "name" => r[:name], "pass" => r[:pass], "rate" => r[:rate] } }
-    ))
+      baseline_doc(results, subject: subject, corpus: corpus_fingerprint(fixtures(agent)), runs: runs, agent: agent)
+    ) + "\n")
     puts "admiral-eval: baseline written to #{agent.baseline_rel} " \
          "(subject: #{subject['file']} #{subject['lines']} lines sha #{(subject['sha256'] || '?')[0, 12]})"
     return 0
   end
 
-  baseline = load_baseline(baseline_path(agent))
   if baseline
-    code = diff_baseline(results, baseline, agent: agent, only: only)
-    report_provenance(load_baseline_subject(baseline_path(agent)), subject, agent: agent)
-    return code
+    return compare_to_baseline(results, baseline, subject: subject, corpus: corpus_fingerprint(fixtures(agent)),
+                                                  only: only, agent: agent)
   end
 
   failures = results.reject { |r| r[:pass] }
@@ -1241,6 +1421,128 @@ def self_test
     fail.("a baseline with no subject must verdict :unknown (got #{ucode.inspect})") unless ucode == :unknown
     fail.("an unknown provenance must say UNKNOWN") unless uout.include?("UNKNOWN")
     fail.("an unknown provenance must carry a Fix: line") unless uerr.include?("Fix:")
+  end
+
+  # -- 7d. baseline CERTIFICATION: every coverage gap reads distinct from a
+  #        clean "0 regressed" (DND-522) -------------------------------------
+  # The defect: admiral-baseline.json was captured against render 76505fe5 over
+  # 19 cases; the corpus grew (AE-18..AE-20) and the render moved on, yet a diff
+  # printed "0 regressed" — for cases the baseline never measured, and a
+  # failing unmeasured case still exited 0. The four states the ticket names
+  # (subject mismatch, corpus mismatch, a case the baseline lacks, a case the
+  # run lacks) must each produce a verdict line that is NOT "CERTIFIED", with a
+  # Fix:; a failing case nothing certifies must fail; only the fully-covered,
+  # same-subject, same-corpus state certifies. Counts only — no model.
+  Dir.mktmpdir("admiral-eval-certify-") do |d|
+    fx = lambda do |name, body|
+      dir = File.join(d, "fixtures", name)
+      FileUtils.mkdir_p(dir)
+      File.write(File.join(dir, "meta"), body)
+      dir
+    end
+    f1 = fx.("AE-01", "mode: next-action\n")
+    f2 = fx.("AE-02", "mode: next-action\n")
+    f3 = fx.("AE-03", "mode: next-action\n")
+    fp1 = fixture_fingerprint(f1)
+    fp1b = fixture_fingerprint(fx.("AE-01b", "mode: next-action\nchanged: yes\n"))
+    fail.("fixture_fingerprint must differ for different fixture bytes") if fp1 == fp1b
+    subj = { "file" => "ai/agents/athena-admiral.md", "lines" => 3, "sha256" => "a" * 64 }
+    other = { "file" => "ai/agents/athena-admiral.md", "lines" => 9, "sha256" => "b" * 64 }
+    row = ->(n, pass, rate, fp) { { name: n, mode: "next-action", pass: pass, rate: rate, fixture: fp } }
+    run2 = [row.("AE-01", true, "10/10", fp1), row.("AE-02", true, "10/10", fixture_fingerprint(f2))]
+    doc = baseline_doc(run2, subject: subj, corpus: "c0rpus", runs: 10, agent: adm)
+    fail.("baseline_doc must record the corpus fingerprint: #{doc.inspect}") unless doc["corpus"] == "c0rpus"
+    fail.("baseline_doc must record each case's fixture fingerprint: #{doc['cases'].inspect}") \
+      unless doc["cases"].all? { |c| c["fixture"].is_a?(String) && !c["fixture"].empty? }
+    fail.("baseline_doc must record the runs it sampled: #{doc.inspect}") unless doc["runs"] == 10
+    cmp = lambda do |results, bdoc, subject: subj, corpus: "c0rpus", only: nil|
+      capture_io { compare_to_baseline(results, bdoc, subject: subject, corpus: corpus, only: only, agent: adm) }
+    rescue StandardError => e
+      [:raised, "", "#{e.class}: #{e.message}"]
+    end
+    certified = ->(o) { o.match?(/^baseline verdict: CERTIFIED\b/) }
+    uncertified = ->(o) { o.match?(/^baseline verdict: UNCERTIFIED\b/) }
+
+    # (a) same subject, same corpus, every case measured -> CERTIFIED, exit 0.
+    c, o, e = cmp.(run2, doc)
+    fail.("a fully covered same-subject same-corpus run must CERTIFY, exit 0 (got #{c.inspect}): #{o}#{e}") \
+      unless c == 0 && certified.(o)
+
+    # (b) subject mismatch -> UNCERTIFIED naming the subject, with a Fix:.
+    c, o, e = cmp.(run2, doc, subject: other)
+    fail.("a subject mismatch must read UNCERTIFIED, never CERTIFIED (got #{c.inspect}): #{o}#{e}") \
+      unless uncertified.(o) && !certified.(o)
+    fail.("a subject-mismatch verdict must name the subject and carry a Fix: #{o}#{e}") \
+      unless o.include?("subject") && e.include?("Fix:")
+
+    # (c) corpus fingerprint mismatch -> UNCERTIFIED naming the corpus.
+    c, o, e = cmp.(run2, doc, corpus: "0therc0rpus")
+    fail.("a corpus mismatch must read UNCERTIFIED (got #{c.inspect}): #{o}#{e}") unless uncertified.(o)
+    fail.("a corpus-mismatch verdict must name the corpus and carry a Fix: #{o}#{e}") \
+      unless o.include?("corpus") && e.include?("Fix:")
+
+    # (d) a case in the corpus the baseline never measured: passing ->
+    #     UNCERTIFIED naming it; FAILING -> exit 1 (nothing certifies it).
+    run3 = run2 + [row.("AE-03", true, "10/10", fixture_fingerprint(f3))]
+    c, o, e = cmp.(run3, doc)
+    fail.("a case the baseline never measured must read UNCERTIFIED, exit 0 (got #{c.inspect}): #{o}#{e}") \
+      unless c == 0 && uncertified.(o) && o.include?("AE-03")
+    run3f = run2 + [row.("AE-03", false, "2/10", fixture_fingerprint(f3))]
+    c, o, e = cmp.(run3f, doc)
+    fail.("a FAILING case the baseline never measured must exit 1 (got #{c.inspect}): #{o}#{e}") \
+      unless c == 1 && e.include?("AE-03") && e.include?("Fix:")
+    # the pre-DND-522 signature shows the same hole: diff_baseline alone exited 0
+    c, = capture_io { diff_baseline(run3f, load_baseline_cases(doc)) }
+    fail.("diff_baseline must fail a failing case the baseline never measured (got #{c.inspect})") unless c == 1
+
+    # (e) a case in the baseline the run lacks -> a regression, never "0 regressed".
+    c, o, e = cmp.(run2.take(1), doc)
+    fail.("a baseline case missing from a full run must exit 1 (got #{c.inspect}): #{o}#{e}") \
+      unless c == 1 && e.include?("AE-02") && !certified.(o)
+
+    # (f) a case whose FIXTURE changed since the baseline is not comparable:
+    #     its baseline rate scored a different test.
+    c, o, e = cmp.([row.("AE-01", true, "10/10", fp1b), run2[1]], doc)
+    fail.("a changed fixture must read UNCERTIFIED naming the case (got #{c.inspect}): #{o}#{e}") \
+      unless uncertified.(o) && o.include?("AE-01")
+    c, _o, e = cmp.([row.("AE-01", false, "0/10", fp1b), run2[1]], doc)
+    fail.("a FAILING case on a changed fixture must exit 1 (got #{c.inspect}): #{e}") unless c == 1
+
+    # (g) a legacy baseline (no subject, no corpus, no per-case fixture) is
+    #     UNKNOWN on both, never CERTIFIED.
+    legacy = { "cases" => doc["cases"].map { |x| x.reject { |k, _| k == "fixture" } } }
+    c, o, e = cmp.(run2, legacy)
+    fail.("a legacy baseline must read UNCERTIFIED with subject+corpus UNKNOWN (got #{c.inspect}): #{o}#{e}") \
+      unless uncertified.(o) && o.include?("subject UNKNOWN") && o.include?("corpus UNKNOWN")
+
+    # (h) --only scopes the comparison: an unselected case is out of scope, and
+    #     a scoped run over a matching subset still names itself as partial.
+    c, o, e = cmp.(run2.take(1), doc, only: "AE-01")
+    fail.("--only must not report unselected baseline cases as missing (got #{c.inspect}): #{o}#{e}") \
+      unless c == 0
+    fail.("an --only run must not read as a CERTIFIED full corpus: #{o}") if certified.(o)
+
+    # (i) a PRESENT but unreadable baseline is an error, never "no baseline".
+    bad = File.join(d, "bad.json")
+    File.write(bad, "{not json")
+    raised = begin
+      load_baseline_doc(bad)
+      nil
+    rescue BaselineUnreadable => e
+      e.message
+    end
+    fail.("an unparseable baseline must raise BaselineUnreadable with a Fix:, not read as absent") \
+      unless raised&.include?("Fix:")
+    fail.("an absent baseline must load as nil (no baseline committed yet)") \
+      unless load_baseline_doc(File.join(d, "absent.json")).nil?
+
+    # (j) --update-baseline must describe the WHOLE corpus at the calibrated N.
+    fail.("--update-baseline with --only must be refused with a Fix:") \
+      unless update_baseline_error(only: "AE-01", runs: DEFAULT_RUNS).to_s.include?("Fix:")
+    fail.("--update-baseline below N=#{DEFAULT_RUNS} must be refused with a Fix:") \
+      unless update_baseline_error(only: nil, runs: 3).to_s.include?("Fix:")
+    fail.("--update-baseline over the full corpus at the default N must be allowed") \
+      unless update_baseline_error(only: nil, runs: DEFAULT_RUNS).nil?
   end
 
   # -- 8. T1 hook-stdin primitive: three states, and :error is NEVER a pass ---
@@ -1727,7 +2029,9 @@ USAGE = <<~TXT
                         diff classifies the counts (EvalScore.classify),
                         calibrated at the default N.
     --only NAME         restrict to one case
-    --update-baseline   rewrite the baseline from this run's results
+    --update-baseline   rewrite the baseline from this run's results (the
+                        full corpus at --runs >= #{DEFAULT_RUNS}: --only or a
+                        smaller --runs is refused, exit 2)
     --agent-file PATH   the rendered agent definition to evaluate
                         (default: this checkout's ai/agents/athena-<agent>.md).
                         Its prose is passed inline, so the run never falls back
@@ -1771,6 +2075,12 @@ def main(argv)
     return 2
   end
 
+  update = opts.fetch("--update-baseline", false)
+  if update && (why = update_baseline_error(only: opts["--only"], runs: runs))
+    warn "admiral-eval: usage error — #{why}"
+    return 2
+  end
+
   agent_file, subject_err = resolve_agent_file(argv, agent)
   if subject_err
     warn "admiral-eval: FAILED — #{subject_err}"
@@ -1779,7 +2089,7 @@ def main(argv)
   run_model(
     runs: runs,
     only: opts["--only"],
-    update: opts.fetch("--update-baseline", false),
+    update: update,
     agent: agent,
     agent_file: agent_file
   )
