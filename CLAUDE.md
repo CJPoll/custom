@@ -534,6 +534,11 @@ and pronoun-guard; nothing detected it. The durable fix:
   fails, naming each hook, if a registry entry is not live. Environment-safe: it
   passes with a note when no settings file exists (CI/agent env), so it never
   false-fails a harness commit; it only fails on a real drift in a real config.
+  The required set is the registry **as landed on origin/main** (DND-743), never
+  the branch's copy: a hook a branch adds is reported as *pending* and passes
+  unwired, and a branch cannot remove a landed hook from its own bar. A wired
+  hook whose script is missing or not executable fails as *dangling*. A bar it
+  cannot read is exit 3, could not measure.
 - **Recover:** `scripts/setup-hooks --install` MERGES the registry into
   `settings.json` (backing it up first, idempotent) — it never rewrites the whole
   block, because a full rewrite is exactly what caused the outage. `--check`
@@ -544,9 +549,13 @@ and pronoun-guard; nothing detected it. The durable fix:
   guard. Both tools resolve the main checkout through `git rev-parse
   --git-common-dir`, so `check-hooks-registered` passes from a worktree and
   `setup-hooks --install` wires main-checkout paths wherever it is run from.
-- **Editing hooks:** change `registry.json` and run `scripts/setup-hooks
-  --install`; do not hand-write the `settings.json` hooks block (that is the
-  clobber path). Hooks load at session start, so reload a session to activate.
+- **Editing hooks:** change `registry.json` on the branch. Wire it only **after
+  it lands**, with `scripts/setup-hooks --install` in the main checkout. Wiring
+  before landing points settings at a main-checkout script that does not exist
+  yet, so every matching event fails with exit 127 (DND-670); `--install` now
+  skips such an entry and names it. Do not hand-write the `settings.json` hooks
+  block (that is the clobber path). Hooks load at session start, so reload a
+  session to activate.
 
 ## Inbox tenancy registry (`$ATHENA_INBOX_ROOT/projects/` is not in git)
 
