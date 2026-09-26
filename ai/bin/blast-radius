@@ -1048,12 +1048,16 @@ def ci_references(repo, head)
       next
     end
     references_in(text, f, tree, tree_set, action_dirs, notes).each do |r|
+      # DND-750 (round 2): a `next if r == f` guard was added here as
+      # belt-and-suspenders, then removed on critic review -- it can never
+      # fire. `f` is always already in `seen` by the time its own text is
+      # scanned (added as a root, line above, or at discovery two lines
+      # below), so `r == f` is caught by the `seen.include?(r)` check ALONE,
+      # one line up. `references_in` also independently deletes a file's own
+      # name from its own scan (`found.delete(referrer)`). Both of those are
+      # real and tested; a third guard that cannot execute adds weight
+      # without adding coverage, so it does not stay.
       next if seen.include?(r)
-      # DND-750: a file never executes itself. references_in already deletes a
-      # file's OWN name from its own scan (found.delete(referrer)); this is
-      # belt-and-suspenders at the STORAGE site, so a self-edge can never reach
-      # `files` even if some future normalisation gap let one past that filter.
-      next if r == f
 
       seen << r
       files[r] = f
@@ -1269,17 +1273,42 @@ def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, 
 
   puts "  hits:"
   width = hits.map { |h| h[:path].length }.max
-  # DND-750: dedupe (one line per (file, referrer)) and drop a self-edge (a
-  # file cannot execute itself) at the PRINT site too -- belt-and-suspenders
-  # alongside hits_for's own dedup, so a duplicated or self-referencing via
-  # can never reach the owner-facing report even if some future caller
-  # assembles `hits` a different way.
-  hits.uniq { |h| [h[:path], h[:class], h[:via]] }.each do |h|
-    puts format("    %-#{width}s  [%s] %s", h[:path], h[:class], h[:why])
-    if h[:via] && h[:via] != h[:path]
-      puts "      via: executed by #{h[:via]} (a merge-time CI config names it, directly or through a file it runs)"
+  # DND-750 (round 2, critic BLOCK): the PRINT site is the last line of
+  # defense against `hits` arriving duplicated or self-referencing (from
+  # hits_for today, or a future caller assembling `hits` a different way).
+  # Round 1 of this fix silently dropped a self-edge and silently collapsed a
+  # duplicate -- which is exactly the class this repo forbids ("A failed
+  # lookup must never look like an empty one" -> "Make every miss
+  # observable"; "An anomaly is a finding"): the ticket was opened BECAUSE the
+  # owner-facing report showed a self-edge, so a fix that makes the report
+  # stop showing it, without saying it did, would hide the very thing a
+  # recurrence needs to be caught by. So: group hits by path, print each
+  # DISTINCT non-self referrer once, and NEVER drop a self-edge or a
+  # duplicate silently -- each gets its own marked line instead.
+  hits.group_by { |h| h[:path] }.each do |path, group|
+    h = group.first
+    puts format("    %-#{width}s  [%s] %s", path, h[:class], h[:why])
+    # Collapse EXACT duplicate (class, via) entries first, and say so if it
+    # did anything -- a group of one (the only shape hits_for produces today)
+    # never triggers this, so a plain pattern hit or a plain reference hit
+    # never gets a spurious note.
+    deduped = group.uniq { |g| [g[:class], g[:via]] }
+    if deduped.size < group.size
+      puts "      note: #{group.size} duplicate hit(s) for this path collapsed to " \
+           "#{deduped.size} distinct referrer(s) -- internal inconsistency, file a ticket"
     end
-    puts "      apply: #{notes[h[:path]]}" if notes[h[:path]]
+    vias = deduped.map { |g| g[:via] }.compact
+    self_vias = vias.select { |v| v == path }
+    other_vias = (vias - self_vias).uniq
+    other_vias.each do |v|
+      puts "      via: executed by #{v} (a merge-time CI config names it, directly or through a file it runs)"
+    end
+    unless self_vias.empty?
+      puts "      via: <SELF-EDGE -- #{path} names itself as its own referrer; this should be " \
+           "impossible (ci_references' seen-set BFS structurally prevents it) -- internal " \
+           "inconsistency, file a ticket, do not treat this hit as COLD>"
+    end
+    puts "      apply: #{notes[path]}" if notes[path]
   end
 end
 
@@ -2704,7 +2733,14 @@ def self_test
 
     # 12y. print_report is the LAST line of defense: even handed a `hits`
     # array that is already duplicated, or a hit whose via names itself, it
-    # prints ONE via line per (path, via) and never a self-referencing one.
+    # collapses to ONE via line per distinct (path, referrer) -- but round 1
+    # of this fix did that by silently DROPPING the duplicate/self-edge,
+    # which a critic round caught: the ticket was opened BECAUSE the report
+    # showed a self-edge, so a fix that stops showing it, without saying so,
+    # would hide a recurrence instead of catching it ("A failed lookup must
+    # never look like an empty one" -> "Make every miss observable"). So the
+    # correct behaviour is neither "print it twice" nor "print it once
+    # silently" -- it is "collapse it, and say that you did."
     manufactured_hits = [
       { path: "a/b.sh", class: "deploy-automation", why: "w", via: "wf.yml" },
       { path: "a/b.sh", class: "deploy-automation", why: "w", via: "wf.yml" },
@@ -2720,10 +2756,15 @@ def self_test
     end
     printed = captured.string
     via_lines = printed.lines.select { |l| l.include?("via:") }
-    check.call("DND-750: print_report prints exactly one via: line for a/b.sh despite a duplicated hit",
-               via_lines.count { |l| l.include?("wf.yml") } == 1, printed)
-    check.call("DND-750: print_report never prints a self-referencing via: line (c/d.sh via c/d.sh)",
-               via_lines.none? { |l| l.include?("c/d.sh") }, printed)
+    check.call("DND-750: print_report prints exactly one `via: executed by` line for a/b.sh despite a duplicated hit",
+               via_lines.count { |l| l.include?("executed by wf.yml") } == 1, printed)
+    check.call("DND-750: print_report MARKS the collapsed duplicate for a/b.sh, it does not drop it silently",
+               printed.include?("note: 2 duplicate hit(s) for this path collapsed to 1 distinct referrer(s)"),
+               printed)
+    check.call("DND-750: print_report never prints a PLAIN self-referencing via line (c/d.sh via c/d.sh)",
+               via_lines.none? { |l| l.include?("executed by c/d.sh") }, printed)
+    check.call("DND-750: print_report MARKS a self-edge loudly instead of dropping it (c/d.sh)",
+               printed.include?("SELF-EDGE -- c/d.sh names itself"), printed)
 
     # 13. --owner-approval records without hiding
     d = File.join(tmp, "approved")
