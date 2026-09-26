@@ -483,6 +483,30 @@ out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-
 [ "$rc" -eq 3 ] && ok "c21 a BLOCK in another checkout refuses the override" || bad "c21 expected exit 3, got $rc" "$out"
 grep -q 'CRITIC OVERRIDE REFUSED' <<<"$out" && ok "c21 names the refusal" || bad "c21 refusal not named" "$out"
 
+# ---------------------------------------------------------------- case 22
+# The file sets list BOTH sides of a rename (DND-770). Rename detection (git's
+# default, diff.renames) listed only a rename's new path, so a branch that
+# renamed a file the target had just edited read an EMPTY intersection --
+# "the incoming delta missed your files" -- and no replay was triggered for
+# the file whose incoming edit now rides the reviewed rename. The fixture
+# pins diff.renames=true and core.quotePath=true in the repo, so neither the
+# neutralised global config nor a user config decides the result.
+R="${TMP}/c22"; new_repo "$R"
+NA="$(printf 't\303\251.txt')"   # a non-ASCII name, which core.quotePath C-quotes
+( cd "$R" && git config diff.renames true && git config core.quotePath true \
+  && seq 1 40 > moved.txt && git add . && git commit -qm base )
+base="$( cd "$R" && git rev-parse HEAD )"
+( cd "$R" && seq 1 41 > moved.txt && printf 'x\n' > "$NA" && git add . && git commit -qm advance \
+  && git checkout -qb feature && git mv moved.txt renamed.txt && printf 'y\n' >> "$NA" \
+  && git add . && git commit -qm mine )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --since "$base" --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c22 exit 0" || bad "c22 expected exit 0, got $rc" "$out"
+sect="$( sed -n '/^--- intersection/,$p' <<<"$out" )"
+grep -qx '    moved.txt' <<<"$sect" && ok "c22 intersection names the OLD path of a rename (DND-770)" || bad "c22 intersection missed the renamed-away path" "$sect"
+grep -qxF "    ${NA}" <<<"$sect" && ok "c22 intersection names a non-ASCII path verbatim, not C-quoted" || bad "c22 non-ASCII path missing or quoted" "$sect"
+
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

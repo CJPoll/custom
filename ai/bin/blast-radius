@@ -24,6 +24,9 @@
 #   HOT = (the diff touches a declared irreversible/billable surface)
 #         AND (merging triggers automation on the default branch)
 #
+# "Touches" counts BOTH paths of a rename or copy (see CHANGED_PATHS_ARGS):
+# moving a surface file out of its pattern changes that surface.
+#
 # Both terms are load-bearing, and the ORDER is what preserves throughput:
 #
 #   * Path first, and it is the cheap common case. A routine app-code merge hits
@@ -467,6 +470,17 @@ def git(repo, *args)
   [out, err, st.success?]
 end
 
+# The changed-path listing (DND-770). Every flag is load-bearing, and each
+# pins a git default a user config could otherwise change:
+#   --no-renames  rename/copy detection (on by default, diff.renames) lists
+#                 only a rename's NEW path, so a surface file moved out of its
+#                 pattern vanished from the set and read COLD. Both sides of a
+#                 rename or copy are changes. It overrides diff.renames.
+#   -z            NUL-terminated and verbatim. Without it core.quotePath
+#                 (default true) prints a non-ASCII path C-quoted, and a
+#                 quoted string matches no pattern.
+CHANGED_PATHS_ARGS = %w[diff --no-renames -z --name-only].freeze
+
 def changed_files(repo, base, head)
   _, _, ok = git(repo, "rev-parse", "--verify", "#{base}^{commit}")
   unless ok
@@ -484,14 +498,14 @@ def changed_files(repo, base, head)
         "never be treated as 'no files changed', which would read as COLD.")
   end
 
-  out, err, ok = git(repo, "diff", "--name-only", "#{base}..#{head}")
+  out, err, ok = git(repo, *CHANGED_PATHS_ARGS, "#{base}..#{head}")
   unless ok
-    die("`git diff --name-only #{base}..#{head}` failed in #{repo}: #{err.strip}",
+    die("`git #{CHANGED_PATHS_ARGS.join(' ')} #{base}..#{head}` failed in #{repo}: #{err.strip}",
         "the diff could not be computed, so the changed-file set is UNKNOWN, " \
         "not empty. Resolve the git error and re-run.")
   end
 
-  files = out.split("\n").map(&:strip).reject(&:empty?)
+  files = out.split("\0").reject(&:empty?)
   if files.empty?
     die("the diff #{base}..#{head} is EMPTY -- refusing to classify.",
         "a merge with no changed files is either a wrong ref pair or nothing to " \
@@ -1164,11 +1178,15 @@ def self_test
   # The distinction is load-bearing: a workflow created inside the diff is itself
   # a deploy-automation hit, so a COLD fixture must have its workflow already
   # present at base. (That mistake made three cases fail on the first run here.)
-  mkrepo = lambda do |dir, seed: nil, &blk|
+  # `config:` pins repo-local git config (it overrides the user's global), so a
+  # case that depends on a git default -- rename detection, path quoting -- is
+  # measured against that default and not against this machine's ~/.gitconfig.
+  mkrepo = lambda do |dir, seed: nil, config: {}, &blk|
     FileUtils.mkdir_p(dir)
     system("git", "-C", dir, "init", "-q", "-b", "main", out: File::NULL, err: File::NULL)
     system("git", "-C", dir, "config", "user.email", "t@t")
     system("git", "-C", dir, "config", "user.name", "t")
+    config.each { |k, v| system("git", "-C", dir, "config", k, v) }
     # A global core.excludesFile can otherwise silently exclude fixture files.
     system("git", "-C", dir, "config", "core.excludesFile", "/dev/null")
     File.write(File.join(dir, "README.md"), "seed\n")
@@ -1478,6 +1496,105 @@ def self_test
       check.call(desc, code.zero? && out.include?("BLAST-RADIUS COLD"), "exit=#{code} out=#{out}")
     end
     deploy_seed = ->(r) { wf.call(r, "post-merge.yml", deploy_wf) }
+
+    # 12r-12w. the changed-path LISTING itself (DND-770, the DND-422 class).
+    # `git diff --name-only` applies rename detection by default, so a rename
+    # listed only its NEW path: `git mv .github/workflows/post-merge.yml
+    # docs.txt` read COLD, and any surface file could be moved out of its
+    # pattern with no owner stop. Both sides of a rename or copy are changes.
+    # Each case pins the git default it depends on in the fixture repo, so a
+    # user config (diff.renames=false, core.quotePath=false) can neither mask
+    # the defect here nor rescue the fix.
+    renames_on = { "diff.renames" => "true" }
+    tf_body = (1..20).map { |i| "resource \"null_resource\" \"r#{i}\" {}\n" }.join
+    # Block-local names only: assigning `out`/`code`/`d` in here would rebind
+    # the enclosing scope's, and a later call would overwrite an earlier case's
+    # result before it is checked.
+    listing_case = lambda do |name, seed:, config: renames_on, &change|
+      dir = File.join(tmp, name)
+      lb, lh = mkrepo.call(dir, seed: seed, config: config) { |r| change.call(r) }
+      lo, le, lc = run_br.call(["--base", lb, "--head", lh, "--repo", dir])
+      [lo, le, lc, dir, lb, lh]
+    end
+    git_mv = ->(r, from, to) { FileUtils.mkdir_p(File.dirname(File.join(r, to))); system("git", "-C", r, "mv", from, to) }
+    two_wf_seed = lambda do |r|
+      wf.call(r, "post-merge.yml", deploy_wf)
+      wf.call(r, "guard.yml", deploy_wf)
+    end
+
+    out, _, code, = listing_case.call("rn-out", seed: two_wf_seed) { |r| git_mv.call(r, ".github/workflows/guard.yml", "docs.txt") }
+    check.call("HOT: a workflow RENAMED OUT of .github/workflows is deploy-automation (DND-770)",
+               code == 4 && out.include?(".github/workflows/guard.yml") && out.include?("deploy-automation"),
+               "exit=#{code} out=#{out}")
+    check.call("rename: BOTH paths are listed as changed (compared: 2)",
+               out.include?("compared: 2 changed file(s)"), out)
+
+    # The ticket's exact fixture: the SOLE deploy workflow renamed out. It must
+    # read as the plain `git rm` of that file does -- WARM, naming the path
+    # (no workflow is left at head, so merging triggers nothing) -- never COLD.
+    out, _, code, = listing_case.call("rn-sole", seed: deploy_seed) { |r| git_mv.call(r, ".github/workflows/post-merge.yml", "docs.txt") }
+    out_rm, _, code_rm, = listing_case.call("rm-sole", seed: deploy_seed) { |r| system("git", "-C", r, "rm", "-q", ".github/workflows/post-merge.yml") }
+    check.call("the SOLE deploy workflow renamed out reads as its deletion does (WARM, named), never COLD (DND-770)",
+               code.zero? && code_rm.zero? && out.include?("BLAST-RADIUS WARM") && out_rm.include?("BLAST-RADIUS WARM") &&
+                 out.include?(".github/workflows/post-merge.yml"),
+               "rename: exit=#{code} out=#{out}\n        delete: exit=#{code_rm} out=#{out_rm}")
+
+    out, _, code, = listing_case.call("rn-tf-out", seed: ->(r) { deploy_seed.call(r); put.call(r, "infra/kms.tf", tf_body) }) { |r| git_mv.call(r, "infra/kms.tf", "notes.txt") }
+    check.call("HOT: an IaC file RENAMED OUT of its pattern is infrastructure-as-code (DND-770)",
+               code == 4 && out.include?("infra/kms.tf") && out.include?("infrastructure-as-code"),
+               "exit=#{code} out=#{out}")
+
+    out, _, code, = listing_case.call("rn-into", seed: ->(r) { deploy_seed.call(r); put.call(r, "docs.yml", pr_wf) }) { |r| git_mv.call(r, "docs.yml", ".github/workflows/ci.yml") }
+    check.call("HOT: a file renamed INTO .github/workflows lists both paths (DND-770)",
+               code == 4 && out.include?(".github/workflows/ci.yml") && out.include?("compared: 2 changed file(s)"),
+               "exit=#{code} out=#{out}")
+
+    copies_on = { "diff.renames" => "copies" }
+    out, _, code, = listing_case.call("cp-out", seed: ->(r) { deploy_seed.call(r); put.call(r, "infra/kms.tf", tf_body) }, config: copies_on) do |r|
+      put.call(r, "notes.txt", tf_body)
+      FileUtils.rm_f(File.join(r, "infra", "kms.tf"))
+    end
+    check.call("HOT: an IaC file COPIED out and removed, under diff.renames=copies, names its old path (DND-770)",
+               code == 4 && out.include?("infra/kms.tf"), "exit=#{code} out=#{out}")
+    # A copy whose source stays is a regression guard, not a fail-first case:
+    # copy detection only pairs a source that is itself modified, so the
+    # source is listed either way. It pins that the fix does not drop it.
+    out, _, code, = listing_case.call("cp-keep", seed: ->(r) { deploy_seed.call(r); put.call(r, "infra/kms.tf", tf_body) }, config: copies_on) do |r|
+      put.call(r, "notes.txt", tf_body)
+      put.call(r, "infra/kms.tf", tf_body + "resource \"null_resource\" \"extra\" {}\n")
+    end
+    check.call("HOT: a COPIED IaC file whose source is edited lists both paths",
+               code == 4 && out.include?("infra/kms.tf") && out.include?("compared: 2 changed file(s)"),
+               "exit=#{code} out=#{out}")
+
+    out, _, code, = listing_case.call("rn-edit", seed: two_wf_seed) do |r|
+      git_mv.call(r, ".github/workflows/guard.yml", "docs.txt")
+      File.write(File.join(r, "docs.txt"), "#{deploy_wf}# retired\n")
+    end
+    check.call("HOT: a workflow renamed out AND edited (R<100) is deploy-automation (DND-770)",
+               code == 4 && out.include?(".github/workflows/guard.yml"), "exit=#{code} out=#{out}")
+
+    # core.quotePath (default true) prints a non-ASCII path as a C-quoted
+    # string, `"infra/km\305\233.tf"`, which no pattern matches.
+    quoted = { "core.quotePath" => "true" }
+    out, _, code, = listing_case.call("quoted", seed: deploy_seed, config: quoted) { |r| put.call(r, "infra/km\u015b.tf", "resource\n") }
+    check.call("HOT: a non-ASCII IaC path is matched verbatim, never as a quoted string (DND-770)",
+               code == 4 && out.include?("infra/km\u015b.tf"), "exit=#{code} out=#{out}")
+
+    # Sabotage: the rename cases above must discriminate. A copy of this
+    # script without --no-renames must read the rename-out case COLD; if it
+    # does not, the cases prove nothing about the flag.
+    src = File.read(script)
+    site = "%w[diff --no-renames -z --name-only]"
+    site_ok = src.index(site) && src.index(site) < src.index("def self_test")
+    mutant_src = site_ok ? src.sub(site, "%w[diff -z --name-only]") : src
+    mutant = File.join(tmp, "blast-radius-no-renames-mutant")
+    File.write(mutant, mutant_src)
+    _, _, _, rd, rb, rh = listing_case.call("rn-sabotage", seed: two_wf_seed) { |r| git_mv.call(r, ".github/workflows/guard.yml", "docs.txt") }
+    mout, _, mst = Open3.capture3(RbConfig.ruby, mutant, "--base", rb, "--head", rh, "--repo", rd, "--manifest", DEFAULT_MANIFEST)
+    check.call("sabotage: without --no-renames the rename-out case reads COLD (the cases discriminate)",
+               mutant_src != src && mst.exitstatus.zero? && mout.include?("BLAST-RADIUS COLD"),
+               "mutated=#{mutant_src != src} exit=#{mst.exitstatus} out=#{mout}")
 
     # The ticket's own case: a composite action under .github/actions, which the
     # workflow does not even have to name -- the conventional location is enough.

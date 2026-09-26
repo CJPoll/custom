@@ -310,8 +310,13 @@ fi
 # anchor: from the anchor, "my" set would also contain every file the branch
 # merely INHERITED by rebasing over the target, which then shows up in the
 # intersection as a fake overlap and forces a replay nobody needed.
-INCOMING="$(git diff --name-only "$ANCHOR" "$TARGET_SHA" 2>/dev/null | sort -u)"
-MINE="$(git diff --name-only "$BASE_SHA" HEAD 2>/dev/null | sort -u)"
+# Both lists name BOTH sides of a rename or copy (DND-770): git's default
+# rename detection (diff.renames) lists only the new path, so a branch that
+# renamed a file the target had just edited read an empty intersection.
+# -z keeps a non-ASCII path verbatim; core.quotePath would C-quote it.
+changed_paths() { git diff --no-renames -z --name-only "$1" "$2" 2>/dev/null | tr '\0' '\n' | sort -u; }
+INCOMING="$(changed_paths "$ANCHOR" "$TARGET_SHA")"
+MINE="$(changed_paths "$BASE_SHA" HEAD)"
 OVERLAP="$(comm -12 <(printf '%s\n' "$INCOMING" | sed '/^$/d') <(printf '%s\n' "$MINE" | sed '/^$/d'))"
 
 INTERSECTION_AVAILABLE=1
