@@ -3573,12 +3573,13 @@ Stated, not hidden:
   weakens it is ordinary COLD app code, like every auth path in gen_saas today,
   so it can ride along with an eligible workflow:
   - `apps/athena/lib/athena/slack.ex`, which holds the
-    `approval_message_immutable` check;
+    `approval_message_immutable` check, and `slack/blocks.ex`, which holds the
+    `reserved_block_key` refusal and the per-button stamping;
   - the upstream click path: `slack_interactions.ex`, the envelope, and Slack
     signature verification;
-  - the wiring that reaches grant code: the router lines for the redeem and
-    status routes, the machine-token authentication pipeline, and the MCP tool
-    registry.
+  - the wiring that reaches grant code: the redeem route's line in the router
+    (`Athena.UI`), the machine-token authentication plug, and the MCP tool
+    registry (`Athena.MCP.Server`).
 
   Surfacing them would owner-hold every Slack, routing and authentication
   change. T4 narrows the click side: `decide_by_click/3` re-checks, inside the
