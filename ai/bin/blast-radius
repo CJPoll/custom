@@ -106,6 +106,7 @@ require "open3"
 require "tmpdir"
 require "fileutils"
 require "set"
+require "stringio"
 
 PROG = "blast-radius"
 
@@ -469,7 +470,13 @@ end
 def hits_for(files, surfaces, repo = nil, head = nil, refs = {}, base = nil)
   hits = []
   examined = []
-  files.each do |f|
+  # DND-750: dedupe the INPUT path list before classifying. Each path gets at
+  # most one hit -- and so at most one `via:` line -- regardless of whether the
+  # caller's list names it more than once. `changed_files` never has today (git
+  # lists each path once even across a delete+re-add of the same path), but
+  # `hits_for` is a general classifier other callers feed too (grant_eligible
+  # calls it once per surface), so it must not depend on that.
+  files.uniq.each do |f|
     surfaces.each do |s|
       unless (s["patterns"] || []).any? { |p| match?(p, f) }
         next unless s["references"] && repo && head
@@ -1042,6 +1049,11 @@ def ci_references(repo, head)
     end
     references_in(text, f, tree, tree_set, action_dirs, notes).each do |r|
       next if seen.include?(r)
+      # DND-750: a file never executes itself. references_in already deletes a
+      # file's OWN name from its own scan (found.delete(referrer)); this is
+      # belt-and-suspenders at the STORAGE site, so a self-edge can never reach
+      # `files` even if some future normalisation gap let one past that filter.
+      next if r == f
 
       seen << r
       files[r] = f
@@ -1257,9 +1269,16 @@ def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, 
 
   puts "  hits:"
   width = hits.map { |h| h[:path].length }.max
-  hits.each do |h|
+  # DND-750: dedupe (one line per (file, referrer)) and drop a self-edge (a
+  # file cannot execute itself) at the PRINT site too -- belt-and-suspenders
+  # alongside hits_for's own dedup, so a duplicated or self-referencing via
+  # can never reach the owner-facing report even if some future caller
+  # assembles `hits` a different way.
+  hits.uniq { |h| [h[:path], h[:class], h[:via]] }.each do |h|
     puts format("    %-#{width}s  [%s] %s", h[:path], h[:class], h[:why])
-    puts "      via: executed by #{h[:via]} (a merge-time CI config names it, directly or through a file it runs)" if h[:via]
+    if h[:via] && h[:via] != h[:path]
+      puts "      via: executed by #{h[:via]} (a merge-time CI config names it, directly or through a file it runs)"
+    end
     puts "      apply: #{notes[h[:path]]}" if notes[h[:path]]
   end
 end
@@ -2649,6 +2668,62 @@ def self_test
     rm_sabotage.call("base-walk-off", "via = base_via(f, refs, repo, base) unless via || refs[:result][:present].include?(f)",
                      "via = nil")
     rm_sabotage.call("base-at-head", "refs[:base] ||= ci_references(repo, base)", "refs[:base] ||= ci_references(repo, refs[:result][:rev])")
+
+    # 12x. DND-750: the coordinator's DND-589 live verify on gen_saas commit
+    # 1aa2a73 saw .pkg/prod/bin/deploy-guard.sh's `via:` line print 4 times as
+    # 2 duplicated pairs, two of them naming deploy-guard.sh as its OWN
+    # referrer. `--base 1aa2a73^ --head 1aa2a73` against this checkout's
+    # blast-radius does not reproduce that shape (ci_references' seen-set BFS
+    # marks a path `seen` at DISCOVERY time, before its own text is ever
+    # scanned, so a file can never end up in its own `files` hash as its own
+    # referrer -- proven for every real and fixture repo probed for this
+    # ticket). What IS real and reproducible: hits_for's own INPUT CONTRACT
+    # has no such guarantee -- fed the same path twice (any caller could, and
+    # grant_eligible already calls it once per surface), it emits one hit --
+    # and so one via: line -- PER OCCURRENCE, not per path. That is the
+    # `dedupe the via set per hit (one line per (file, referrer))` half of
+    # the fix, and it is real: reverting hits_for's `files.uniq` back to
+    # `files` reproduces exactly the "printed more than once for one file"
+    # shape the ticket describes, on a duplicated input.
+    dup_pattern_hits, = hits_for(
+      [".github/workflows/post-merge.yml", ".github/workflows/post-merge.yml"],
+      [{ "class" => "deploy-automation", "why" => "x", "patterns" => [".github/workflows/**"] }]
+    )
+    check.call("DND-750: hits_for collapses a duplicated PATTERN-hit path to one hit, not two",
+               dup_pattern_hits.size == 1, dup_pattern_hits.inspect)
+
+    d = File.join(tmp, "dnd750-via-dup")
+    b, h = mkrepo.call(d, seed: guard_seed) { |r| put.call(r, "README.md", "unrelated\n") }
+    dup_via_hits, = hits_for(
+      [".pkg/prod/bin/deploy-guard.sh", ".pkg/prod/bin/deploy-guard.sh"],
+      load_manifest(DEFAULT_MANIFEST)[0], d, h, {}, b
+    )
+    check.call("DND-750: hits_for collapses a duplicated REFERENCE-hit path to one via, not two",
+               dup_via_hits.size == 1 && dup_via_hits.first[:via] == ".github/workflows/post-merge.yml",
+               dup_via_hits.inspect)
+
+    # 12y. print_report is the LAST line of defense: even handed a `hits`
+    # array that is already duplicated, or a hit whose via names itself, it
+    # prints ONE via line per (path, via) and never a self-referencing one.
+    manufactured_hits = [
+      { path: "a/b.sh", class: "deploy-automation", why: "w", via: "wf.yml" },
+      { path: "a/b.sh", class: "deploy-automation", why: "w", via: "wf.yml" },
+      { path: "c/d.sh", class: "deploy-automation", why: "w", via: "c/d.sh" },
+    ]
+    captured = StringIO.new
+    orig_stdout = $stdout
+    begin
+      $stdout = captured
+      print_report("HOT", "deadbee", DEFAULT_MANIFEST, [], 1, ["a/b.sh", "c/d.sh"], manufactured_hits, nil)
+    ensure
+      $stdout = orig_stdout
+    end
+    printed = captured.string
+    via_lines = printed.lines.select { |l| l.include?("via:") }
+    check.call("DND-750: print_report prints exactly one via: line for a/b.sh despite a duplicated hit",
+               via_lines.count { |l| l.include?("wf.yml") } == 1, printed)
+    check.call("DND-750: print_report never prints a self-referencing via: line (c/d.sh via c/d.sh)",
+               via_lines.none? { |l| l.include?("c/d.sh") }, printed)
 
     # 13. --owner-approval records without hiding
     d = File.join(tmp, "approved")
