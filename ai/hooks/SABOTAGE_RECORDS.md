@@ -790,13 +790,13 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (critic rounds 1-3 and admiral batch 7):** `RESULT: 508 passed,
+- **After (critic rounds 1-4 and admiral batch 7):** `RESULT: 515 passed,
   0 failed` / `VERDICT: PASS`.
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
-`RESULT: 464 passed, 44 failed`. The 44 failures, every one an allow case
-or the deny-text check:
+`RESULT: 468 passed, 47 failed`. The 47 failures, every one an allow case
+or the deny-text check (QA54-QA56 added in round 4 fail on base too):
 
 ```
 QA2 QA3 QA4 QA5 QA6 QA7 QA8 QA10 QA11 QA12 QA13 QA14 QA15 QA16 QA17 QA18
@@ -826,7 +826,7 @@ are regression guards.
 | S-DND799-7 | Alias self-expansion guard (`AEXP`) removed | QB1 `grep -i stash` — `507 passed, 1 failed` |
 | S-DND799-8 | Test arguments no longer data (`dm = data`) | QA24, QA25 — `506 passed, 2 failed` |
 | S-DND799-9 | Data drops every finding (`weak()` true for all, glob-head off in data) | QD1, QD2, QD4-QD9, QL1-QL3, QL5, QL6 — `495 passed, 13 failed` |
-| S-DND799-10 | Unknown command words treated as safe (critic round 1) | QX26, QX36-QX50, QX52, QX62-QX67 — `485 passed, 23 failed` |
+| S-DND799-10 | Unknown command words treated as safe (critic round 1) | QX26, QX36-QX50, QX52, QX62-QX71 — `488 passed, 27 failed` (round-4 hook) |
 | S-DND799-11 | A payload nested in data no longer data | QA2, QA20 — `506 passed, 2 failed` |
 | S-DND799-12 | Runner list emptied | QX55 `docker exec c sh -c '...'`, QX56 `... \| docker run -i img sh` — `506 passed, 2 failed` |
 | S-DND799-13 | `sed_runs()` never true (critic round 2) | QX57-QX61 — `503 passed, 5 failed` |
@@ -834,6 +834,8 @@ are regression guards.
 | S-DND799-15 | Data drops named writes again (the round-2 data mode; critic round 3) | QD1, QD2, QD4-QD9 — `500 passed, 8 failed` |
 | S-DND799-16 | Data mode judges a glob command word as exec does (no FP relief) | QA2-QA8, QA10-QA18, QA20-QA23, QA29-QA33, QA36, QA42-QA45, QA47-QA53, QB2, QB3, QB5 — `468 passed, 40 failed` |
 | S-DND799-17 | `git_read()` always true (every git subcommand read-only) | QX26, QX48, QX65-QX67 — `503 passed, 5 failed` |
+| S-DND799-18 | `gh_read()` always true (any gh/glab command read-only) | QX50, QX68 `gh pr checkout`, QX71 `gh pr merge` — `512 passed, 3 failed` |
+| S-DND799-19 | `git tag` judged by the branch listing flags again | QX69 `git tag -a` (editor), QX70 `git tag -v` (gpg) — `513 passed, 2 failed` |
 
 ### Critic rounds
 
@@ -855,3 +857,9 @@ are regression guards.
   (rows 9, 15; QD1-QD9). The QX cases were respelled to hide the verb
   (`true; .../git-st*sh`, an implicit push) so the exec mechanisms stay
   load-bearing.
+- **Round 4 (fe719f0), list entries too coarse.** `gh pr` admitted `gh pr
+  checkout` (runs git and its hooks), and `git tag -a`/`-v` scored as
+  listing flags (they open the editor or run gpg.program). Kind 1, the same
+  list class as rounds 1-2. Swept both lists at the root: gh/glab are
+  judged by a read-only (command, subcommand) pair (`gh_read()`), and
+  `git tag` lists only bare or with `-l`/`--list` (rows 18, 19).

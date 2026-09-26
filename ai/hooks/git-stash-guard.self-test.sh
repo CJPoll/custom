@@ -853,6 +853,19 @@ case_cmd "QX65. git branch -m after writing a payload" deny "echo 'true; /usr/li
 case_cmd "QX66. git config set after writing a payload" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > h.sh; git config core.hooksPath ."
 case_cmd "QX67. a git worktree add (runs a checkout hook) after writing a payload" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > h.sh; git stash show -p; git worktree add x"
 
+# QX68+: critic round 4. A read-only list is judged by (command,
+# subcommand), and by the options that make a git listing mutate.
+case_cmd "QX68. a heredoc hook, then gh pr checkout (runs git hooks)" deny "cat > .git/hooks/post-checkout <<'EOF'
+true; /usr/libexec/git-core/git-st*sh
+EOF
+gh pr checkout 3"
+case_cmd "QX69. GIT_EDITOR exported, then git tag -a (opens the editor)" deny "export GIT_EDITOR='true; /usr/libexec/git-core/git-st*sh'; git tag -a v1"
+case_cmd "QX70. a payload beside git tag -v (runs gpg.program)" deny "export GPG='true; /usr/libexec/git-core/git-st*sh'; git tag -v v1"
+case_cmd "QX71. a payload beside gh pr merge" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > h; gh pr merge 3"
+case_cmd "QA54. gh pr view with a jq filter stays allowed" allow "gh pr view 3 --json checks -q '.checks[] | {n: .name, s: .state}'"
+case_cmd "QA55. git tag --list piped to sort stays allowed" allow "git tag --list 'v*' | awk '{print \$1}' | sort -V"
+case_cmd "QA56. gh run view piped to a grep alternation stays allowed" allow "gh run view 5 --log | grep -E 'FAIL|(error|panic)[:]'"
+
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
 case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"

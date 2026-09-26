@@ -850,21 +850,31 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     return t ~ /^(jq|yq|gojq|awk|gawk|mawk|nawk|grep|egrep|fgrep|rg|curl|wget|echo|printf|cat|tac|head|tail|sort|uniq|wc|cut|tr|tee|column|paste|join|comm|diff|cmp|ls|stat|file|date|basename|dirname|realpath|readlink|test|true|false|cd|pushd|popd|export|unset|set|shift|sleep|mkdir|rmdir|touch|cp|mv|rm|ln|chmod|python|python3|ruby|perl|node|xxd|od|base64|sha1sum|sha256sum|md5sum|bc|expr|seq|nl|fold|fmt|rev|iconv|uname|hostname|whoami|id|pwd|which|type|command|builtin|nohup|time|noglob|nocorrect|mktemp|du|df|ps|pgrep|printenv|read|wait|return|exit|break|continue|docker|if|then|else|elif|fi|for|while|until|do|done|case|esac|!|-|:)$/ \
       || t == "[\001" || t == "[\001[\001" || t == "{\001" || t == "}"
   }
-  # sub_safe(W, n, k, re): the subcommand after tool word k (git or gh),
-  # past its options, matches re (a read-only subcommand that runs no
-  # hook, alias or extension). No subcommand is safe.
-  function sub_safe(W, SB, n, k, re,    j) {
-    for (j = k + 1; j <= n && !SB[j]; ) {
-      if (two_word(W[j])) { j += 2; continue }
-      if (W[j] ~ /^-/) { j++; continue }
-      return W[j] ~ re
+  # gh_read(W, SB, n, k): the gh or glab at word k runs a read-only
+  # (command, subcommand) pair that runs no local git, alias or extension:
+  # `pr view`, `run list`, `api`, `search ...`. A group is not enough:
+  # `gh pr checkout` runs git and its hooks (critic round 4).
+  function gh_read(W, SB, n, k,    j, c1, c2) {
+    c1 = ""; c2 = ""
+    for (j = k + 1; j <= n && !SB[j]; j++) {
+      if (W[j] ~ /^-/) continue
+      if (c1 == "") c1 = W[j]; else { c2 = W[j]; break }
     }
-    return 1
+    if (c1 == "api" || c1 == "search" || c1 == "status") return 1
+    if (c1 == "auth") return c2 == "status"
+    if (c1 ~ /^(pr|mr)$/) return c2 ~ /^(view|list|diff|checks|status)$/
+    if (c1 == "issue") return c2 ~ /^(view|list|status)$/
+    if (c1 ~ /^(run|ci)$/) return c2 ~ /^(list|view|watch|status|get)$/
+    if (c1 ~ /^(repo|release|workflow|ruleset|project)$/) return c2 ~ /^(view|list)$/
+    if (c1 ~ /^(label|cache|secret|variable)$/) return c2 ~ /^(list|get)$/
+    return 0
   }
   # git_read(W, SB, n, k): the git at word k runs a read-only subcommand
   # that runs no alias, hook or configured command from the text: a
   # builtin reader, or a listing form of branch, tag, stash, worktree,
   # remote or config (DND-799 batch 7: `git branch -a | grep -E ...`).
+  # A command git runs from argv (`-c core.pager=...`, `--upload-pack=`)
+  # is a quoted word in the git command, read as exec by git_in_cmd.
   function git_read(W, SB, n, k,    j, sc, a, lst, mut, nonopt) {
     for (j = k + 1; j <= n && !SB[j]; ) {
       if (two_word(W[j])) { j += 2; continue }
@@ -880,7 +890,13 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       else if (W[a] ~ /^-/) { if (W[a] !~ /^(--format|--sort|--color|--no-color|--column|--no-column|--abbrev)(=|$)/) mut = 1 }
       else if (W[a - 1] !~ /^(--contains|--no-contains|--merged|--no-merged|--points-at|--sort|--format|--get|--get-all|--get-regexp)$/) nonopt++
     }
-    if (sc ~ /^(branch|tag)$/) return !mut && (nonopt == 0 || lst)
+    if (sc == "branch") return !mut && (nonopt == 0 || lst)
+    # tag: -a annotates (opens core.editor), -s/-v run gpg.program; only
+    # `tag`, `tag -l` and `tag --list` list (critic round 4).
+    if (sc == "tag") {
+      for (a = j + 1; a <= n && !SB[a]; a++) if (W[a] ~ /^-/ && W[a] !~ /^(-l|--list|--sort=.*|--format=.*|--contains|--merged|--points-at|--column|--no-column)$/) return 0
+      return nonopt == 0 || W[j + 1] ~ /^(-l|--list)$/
+    }
     if (sc == "stash") return j + 1 <= n && !SB[j + 1] && W[j + 1] ~ /^(list|show)$/
     if (sc == "worktree") return j + 1 <= n && !SB[j + 1] && W[j + 1] == "list"
     if (sc == "remote") return !mut && (nonopt == 0 || (W[j + 1] ~ /^(show|get-url)$/))
@@ -916,7 +932,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       t = W[k]; sub(/^.*\//, "", t)
       if (t == "git") { if (!git_read(W, SB, n, k)) return 1; continue }
       if (t == "sed" || t == "gsed") { if (sed_runs(W, SB, n, k)) return 1; continue }
-      if (t == "gh" || t == "glab") { if (!sub_safe(W, SB, n, k, "^(pr|mr|issue|run|ci|api|repo|release|search|workflow|label|browse|status|cache|secret|variable|ruleset|project|auth)$")) return 1; continue }
+      if (t == "gh" || t == "glab") { if (!gh_read(W, SB, n, k)) return 1; continue }
       if (!safe_word(t)) return 1
     }
     return 0
