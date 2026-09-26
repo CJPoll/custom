@@ -45,8 +45,9 @@
 # ALLOWED there: `merge --ff-only` / `pull --ff-only` (publishing, the first
 # exception), gitignored runtime state such as ai-artifacts/ (the second),
 # fetch / worktree / branch / config, .git internals, and every read-only
-# command. Quoted payloads, comments and heredoc bodies are never parsed as
-# commands, so text that only MENTIONS a write is not a write.
+# command. Quoted payloads, comments, arithmetic and heredoc bodies are read
+# as data, so text that only MENTIONS a write is not a write. The one quoted
+# thing parsed as commands is the SCRIPT of `sh|bash|zsh|dash -c`.
 #
 # PARSED: `;` `&&` `||` `|` `&` newlines, subshells, `$( )` and backticks,
 # reserved words (`if/then/do/{/!`), heredocs, `sh|bash|zsh|dash -c SCRIPT`
@@ -55,7 +56,8 @@
 #
 # NOT A SANDBOX. The guard models the forms agents actually type; a write
 # shape it does not model passes WITHOUT a log line, and the list here is
-# examples, not an inventory: interpreters (`python -c`, `perl -i`), `xargs`,
+# examples, not an inventory: interpreters (`python -c`, `perl -i`), a heredoc
+# fed to a shell (`bash <<EOF`, whose body is read as data), `xargs`,
 # `find -delete`, `eval`, writers outside the list above (`patch`, `tar -x`,
 # `unzip`, `rsync`, `chmod`, `dd`), a substitution inside double quotes, and a
 # target built from a variable not assigned in the same command. What IS
@@ -339,7 +341,21 @@ UNKNOWN = object()
 OPS = sorted(["&>>", "<<<", "<<-", ">>", "&>", ">|", ">&", "<&", "<<", "<>", "&&", "||", "|&",
               ";;", ";", "&", "|", "(", ")", "<", ">"], key=len, reverse=True)
 
-def tokenize(text):
+def arith_end(text, i):
+    """Index just past the `))` closing an arithmetic `((` / `$((` that
+    starts at i (pointing at the first `(`), or -1 if it never closes."""
+    depth, j, n = 0, i, len(text)
+    while j < n:
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return -1
+
+def tokenize(text, heredocs=True):
     """[(value, is_operator)]. An operator is recognised ONLY unquoted, so
     `grep '>' f` or a commit message containing `&&` is data, never syntax.
     Raises ValueError on an unterminated quote.
@@ -394,6 +410,14 @@ def tokenize(text):
             if j >= n:
                 raise ValueError("unterminated double quote")
             have = True; i = j + 1
+        elif (c == "$" and text.startswith("$((", i)) or (c == "(" and not have and text.startswith("((", i)):
+            # Arithmetic context: `<<` there is a shift, never a heredoc, and
+            # `(`/`)` are not subshells. The whole expression is one word.
+            start = i + 1 if c == "$" else i
+            end = arith_end(text, start)
+            if end < 0:
+                raise ValueError("unterminated arithmetic expression")
+            cur.append(text[i:end]); have = True; i = end
         elif c == "`":
             # An unquoted backtick substitution runs its content as a command.
             have = flush(); toks.append((";", True)); i += 1
@@ -401,11 +425,18 @@ def tokenize(text):
             have = flush()
             op = next(o for o in OPS if text.startswith(o, i))
             toks.append((op, True)); i += len(op)
-            if op in ("<<", "<<-"):
+            if op in ("<<", "<<-") and heredocs:
                 want[0] = True
         else:
             cur.append(c); have = True; i += 1
     flush()
+    if pending or want[0]:
+        # A heredoc whose delimiter line never came was probably not a
+        # heredoc at all. Never let it hide the rest of the command: say so
+        # and tokenize again with every line treated as commands.
+        log("unparsed", "heredoc never closed (%s); re-read with no heredocs: %s"
+            % (",".join(pending) or "no delimiter", text[:300]))
+        return tokenize(text, heredocs=False)
     return toks
 
 VAR = re.compile(r"\$(\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
@@ -435,7 +466,7 @@ def expand(tok, env, cwd):
         return UNKNOWN
     return os.path.normpath(os.path.join(cwd, tok))
 
-WRAPPERS = {"command", "exec", "nohup", "time", "builtin", "nice", "stdbuf"}
+WRAPPERS = {"command", "exec", "nohup", "time", "builtin", "stdbuf"}
 RESERVED = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}"}
 SHELLS = {"sh", "bash", "zsh", "dash"}
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -458,6 +489,10 @@ def command_words(seg):
             words = words[1:]
             while words and (words[0].startswith("-") or ASSIGN.match(words[0])):
                 words = words[1:]
+        elif base == "nice":
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[2:] if words[0] in ("-n", "--adjustment") else words[1:]
         elif base == "timeout":
             words = words[1:]
             while words and words[0].startswith("-"):

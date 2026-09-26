@@ -214,6 +214,10 @@ bash_sub "here-string then a write on the next line -> deny (critic round 2)" de
 bash_sub "quoted <<EOF in a commit message then a write -> deny (critic round 2)" deny "$(printf 'cd %s && git commit -m "see <<EOF"\ncd %s && git add .' "${WT}" "${MAIN}")"
 bash_sub "<<- heredoc with a tab-indented delimiter, write after it -> deny" deny "$(printf 'cat <<-EOF\n\trm -rf %s\n\tEOF\necho x > %s/a.txt' "${MAIN}" "${MAIN}")"
 bash_sub "<<- heredoc body only MENTIONS a write -> allow" allow "$(printf 'cat <<-EOF\n\trm -rf %s\n\tEOF\necho done' "${MAIN}")"
+bash_sub "arithmetic \$((1<<2)) is not a heredoc: write on the next line -> deny (critic round 11)" deny "$(printf 'x=$((1<<2))\nrm -f %s/a.txt' "${MAIN}")"
+bash_sub "(( a << 1 )) is not a heredoc: write on the next line -> deny (critic round 11)" deny "$(printf '(( a << 1 ))\ncd %s && git add .' "${MAIN}")"
+bash_sub "a heredoc never closed -> its 'body' is still checked -> deny (critic round 11)" deny "$(printf 'cat <<NEVERCLOSED\nrm -f %s/a.txt' "${MAIN}")"
+bash_sub "nice -n 10 git ... -> deny" deny "nice -n 10 git -C ${MAIN} add ."
 bash_sub "pushd WT; popd; git add . (cwd back to main) -> deny" deny "pushd ${WT}; popd; git add ."
 bash_sub "comment MENTIONING a write -> allow" allow "git status # then git -C ${MAIN} reset --hard"
 

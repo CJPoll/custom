@@ -881,17 +881,19 @@ checkout's working tree, with a `Fix:` naming the worktree to use:
 - **What passes.** The four exceptions above as they apply to it:
   `--ff-only` publishing, gitignored runtime state, a repair from the
   top-level session, and the attended session. Also `fetch`, `worktree`, `.git`
-  internals, and every read-only command. Quoted text, comments and heredoc
-  bodies are data, never commands.
+  internals, and every read-only command. Quoted text, comments, arithmetic
+  and heredoc bodies are data. The one exception is the script of
+  `sh|bash|zsh|dash -c`, which is parsed as commands.
 - **How it fails.** It fails open, because it is hot-loaded into every session
-  on the machine. Unreadable stdin, a git error, or a crash of the checker
+  on the machine. Non-JSON stdin, a git error, or a crash of the checker
   itself is allowed with a visible warning and a log line in
-  `$XDG_STATE_HOME/athena/worktree-escape-guard.log`.
-  A command it cannot parse is logged as `unparsed`, and a target it cannot
-  resolve as `unresolved`; both are allowed with no warning.
+  `$XDG_STATE_HOME/athena/worktree-escape-guard.log`. Empty stdin, a command
+  it cannot parse (`unparsed`), and a target it cannot resolve
+  (`unresolved`) are allowed with a log line and no warning.
 - **It is not a sandbox.** It models the forms agents type. A write shape it
   does not model passes with no log line; the hook's header gives examples
-  (an interpreter, `xargs`, `eval`, a variable not set in the same command).
+  (an interpreter, a heredoc fed to a shell, `xargs`, `eval`, a variable not
+  set in the same command).
 
 **Later (2026-09-26, DND-840):** this paragraph said "It is currently doctrine,
 not enforcement": nothing denied a write to a main checkout, and the
