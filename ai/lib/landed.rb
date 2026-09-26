@@ -27,6 +27,24 @@
 # Nothing here fetches: a fetch writes objects and refs, and a check must stay
 # read-only (live verifies run it against the owner's main checkout).
 #
+# ONE READ PER GATE RUN (DND-735). harness-gate runs for 11-15 minutes, and
+# main can move in that time. When each check ran its own ls-remote, a push to
+# origin mid-run turned every landed-ref check red at once, for a reason that
+# had nothing to do with the change. So harness-gate reads origin's main ONCE
+# at start (Landed.pin) and hands every check the answer in PIN_SHA_ENV, keyed
+# to the repository by PIN_REPO_ENV (the realpath of its git common dir). A
+# check given a pin for ITS repository takes the pin as origin's tip:
+#   - the local REF is the pin: the ratchet runs against it;
+#   - the local REF descends from the pin (a session sharing this repository
+#     fetched mid-run): the ratchet still runs against the PIN, never the
+#     local ref;
+#   - anything else (behind the pin, diverged from it): Mismatch, as before.
+# The bar is still origin's main, as of the gate start. A pin that is set but
+# malformed, or half set, is Unreadable, never a fallback. A pin keyed to
+# another repository (a fixture repo a self-test builds under the gate) does
+# not apply there: that repository reads its own origin live. Run by hand,
+# with no pin, a check reads origin itself exactly as before.
+#
 # NOT BEING ABLE TO READ THE BAR IS A FAILURE, never a pass. Every miss raises
 # Unreadable carrying each probe and what it gave, so the caller prints "could
 # not measure" as a list of places looked, distinct from "0 weakening(s)".
@@ -66,6 +84,11 @@ module Landed
   # git's own default rename threshold. See "CONTENT THAT MOVED" above.
   RENAME_SIMILARITY = 50
   RENAME_PROBE = "git diff --no-index -M#{RENAME_SIMILARITY}% (rename detection)".freeze
+  # The pinned landed ref harness-gate hands its checks. See "ONE READ PER GATE
+  # RUN" above.
+  PIN_SHA_ENV = "ATHENA_LANDED_PIN_SHA"
+  PIN_REPO_ENV = "ATHENA_LANDED_PIN_REPO"
+  PIN_PROBE = "#{LS_REMOTE_PROBE}, read once at harness-gate start (#{PIN_SHA_ENV})".freeze
 
   # The landed bar could not be read. Carries every probe and what it gave.
   class Unreadable < StandardError
@@ -78,13 +101,15 @@ module Landed
   end
 
   # The local REF disagrees with origin's REMOTE_REF: the bar this checkout
-  # would compare against is not the one that landed.
+  # would compare against is not the one that landed. source names where the
+  # remote SHA came from: a live ls-remote, or the gate's pin.
   class Mismatch < StandardError
-    attr_reader :local, :remote
+    attr_reader :local, :remote, :source
 
-    def initialize(local, remote)
+    def initialize(local, remote, source = LS_REMOTE_PROBE)
       @local = local
       @remote = remote
+      @source = source
       super("#{REF} disagrees with #{REMOTE} #{REMOTE_REF}")
     end
   end
@@ -145,10 +170,72 @@ module Landed
     raise Unreadable.new(probes)
   end
 
+  # The repository key a pin is scoped to: the realpath of root's git common
+  # dir, the same for a main checkout and every worktree of it. Raises
+  # Unreadable when it cannot be computed: a key that cannot be resolved is an
+  # error, never "no pin applies".
+  def repo_key(root, probes)
+    dir, ok = git_read(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    dir = dir.strip
+    unless ok && dir.start_with?("/")
+      probes << ["git rev-parse --git-common-dir", "failed or not absolute: #{dir.inspect}"]
+      raise Unreadable.new(probes)
+    end
+    File.realpath(dir)
+  rescue SystemCallError => e
+    probes << ["git rev-parse --git-common-dir", "#{dir.inspect} cannot be resolved: #{e.message}"]
+    raise Unreadable.new(probes)
+  end
+
+  # The gate's pinned landed ref for root's repository, or nil when there is
+  # none for it. Raises Unreadable when the pin is set but malformed or half
+  # set. A pin for another repository is recorded as a probe and not applied.
+  def pinned_tip(root, probes, env = ENV)
+    sha = env[PIN_SHA_ENV]
+    repo = env[PIN_REPO_ENV]
+    return nil if sha.nil? && repo.nil?
+
+    problem = if sha.nil? || repo.nil?
+                "half a pin: #{PIN_SHA_ENV}=#{sha.inspect} #{PIN_REPO_ENV}=#{repo.inspect} (set both or neither)"
+              elsif !sha.match?(/\A\h{40}\z/)
+                "#{PIN_SHA_ENV}=#{sha.inspect} is not a 40-hex SHA"
+              elsif !repo.start_with?("/")
+                "#{PIN_REPO_ENV}=#{repo.inspect} is not an absolute path"
+              end
+    if problem
+      probes << [PIN_PROBE, problem]
+      raise Unreadable.new(probes)
+    end
+
+    key = repo_key(root, probes)
+    if key != repo
+      probes << [PIN_PROBE, "pinned for #{repo}, not this repository (#{key}); origin read live"]
+      return nil
+    end
+    probes << [PIN_PROBE, sha[0, 12]]
+    sha
+  end
+
+  # Is ancestor an ancestor of (or equal to) descendant? false when either
+  # commit is missing locally.
+  def ancestor?(root, ancestor, descendant)
+    _out, ok = git_read(root, "merge-base", "--is-ancestor", ancestor, descendant)
+    ok
+  end
+
+  # What harness-gate hands its checks: origin's main for root's repository,
+  # read once. Returns { PIN_SHA_ENV => sha, PIN_REPO_ENV => key }. Raises
+  # Unreadable, with its probes, when origin or the key cannot be read.
+  def pin(root)
+    probes = []
+    key = repo_key(root, probes)
+    { PIN_SHA_ENV => remote_tip(root, probes), PIN_REPO_ENV => key }
+  end
+
   # Resolves the landed points. Returns [points, probes]: points is
   # [[label, sha], ...] (one entry when the tip IS the merge-base), probes the
   # list of what was asked. Raises Unreadable on any miss, Mismatch when the
-  # local tip is not origin's.
+  # local tip is not origin's (or, pinned, neither the pin nor a descendant).
   def points(root)
     probes = []
     unreadable = lambda do |ref, outcome|
@@ -167,18 +254,27 @@ module Landed
       unreadable.call("history depth", "shallow clone: the merge-base with origin/main cannot be proven")
     end
 
-    remote = remote_tip(root, probes)
-    raise Mismatch.new(tip, remote) unless remote == tip
+    pinned = pinned_tip(root, probes)
+    if pinned
+      raise Mismatch.new(tip, pinned, PIN_PROBE) unless tip == pinned || ancestor?(root, pinned, tip)
+
+      # The bar is the pin, never a local ref that moved past it.
+      tip = pinned
+    else
+      remote = remote_tip(root, probes)
+      raise Mismatch.new(tip, remote) unless remote == tip
+    end
 
     mb, ok = git_read(root, "merge-base", "HEAD", tip)
     mb = mb.strip
     unreadable.call("merge-base(HEAD, origin/main)", "no common ancestor (or no HEAD commit)") if !ok || mb.empty?
     probes << ["merge-base(HEAD, origin/main)", mb[0, 12]]
 
+    pinned_note = pinned ? " (pinned at harness-gate start)" : ""
     pts = if mb == tip
-            [["origin/main tip = merge-base(HEAD, origin/main)", tip]]
+            [["origin/main tip#{pinned_note} = merge-base(HEAD, origin/main)", tip]]
           else
-            [["origin/main (tip)", tip], ["merge-base(HEAD, origin/main)", mb]]
+            [["origin/main (tip)#{pinned_note}", tip], ["merge-base(HEAD, origin/main)", mb]]
           end
     [pts, probes]
   end
@@ -247,12 +343,13 @@ module Landed
      "repaired on main, then this branch rebases onto it."]
   end
 
-  # The failure lines for a local tip that is not origin's.
-  def mismatch_lines(local, remote)
+  # The failure lines for a local tip that is not origin's. source is where
+  # the remote SHA came from (Mismatch#source).
+  def mismatch_lines(local, remote, source = LS_REMOTE_PROBE)
     ["  the local landed ref disagrees with origin, so it is not the landed bar and no " \
      "weakening was measured:",
      "    #{REF} (local) -> #{local}",
-     "    #{LS_REMOTE_PROBE} -> #{remote}",
+     "    #{source} -> #{remote}",
      "  Fix: `git fetch #{REMOTE}` so #{REF} matches what landed, rebase onto " \
      "it, and re-run. A local ref moved by hand (git update-ref) does not move the bar: " \
      "the check compares against origin's #{REMOTE_REF}."]
