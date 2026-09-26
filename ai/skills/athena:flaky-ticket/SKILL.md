@@ -30,6 +30,12 @@ things:
    rather than letting it sit — a Backlog Flaky ticket nobody is assigned is an
    unworked flake, which is exactly what this rule exists to prevent.
 
+**Never merge past a flake by re-running until green and moving on:** an
+unticketed flake is a lost finding, and a masked one is worse than a visible one.
+The one non-fix disposition is "genuinely unfixable in code we control" (a true
+external-vendor issue with no race on our side), reached only after root-causing
+and recorded with that analysis — never "add a retry".
+
 ## Filing mechanics (for whoever files the ticket — usually the captain)
 
 First resolve THIS repo's flaky-lane target from
@@ -59,12 +65,6 @@ its `database_id` via its `connector`, with:
      `Cody Poll` → `358d872b-594c-8171-abad-0002238e7b12`.)
 
 Name the created ticket id in your report either way.
-
-**Never merge past a flake by re-running until green and moving on:** an
-unticketed flake is a lost finding, and a masked one is worse than a visible one.
-The one non-fix disposition is "genuinely unfixable in code we control" (a true
-external-vendor issue with no race on our side), reached only after root-causing
-and recorded with that analysis — never "add a retry".
 
 ---
 
