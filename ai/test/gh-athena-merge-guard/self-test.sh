@@ -15,8 +15,13 @@
 #     green. Zero reported checks is not green.
 #   * REFUSES every `gh api` call that merges (DND-728): REST …/pulls/<n>/merge,
 #     …/merges, …/merge-upstream, and the GraphQL merge mutations, however the
-#     method, endpoint or query is spelled or supplied. Old-vs-new evidence and
-#     mutation results: SABOTAGE_RECORDS.md next to this file.
+#     method, endpoint or query is spelled or supplied.
+#   * REFUSES every `gh api` write that creates or moves a ref (DND-741): REST
+#     …/git/refs (not a plain DELETE), …/contents/…, …/branches/<b>/rename,
+#     …/pulls/<n>/update-branch, and the GraphQL ref-write mutations, on ANY
+#     branch, by the same parser. A ref DELETE and deleteRef pass.
+#   Old-vs-new evidence and mutation results: SABOTAGE_RECORDS.md next to this
+#   file.
 #
 # NO NETWORK, EVER. `gh` is a stub on PATH that answers from fixture files and
 # logs every call; the App token comes from a fixture cache (no mint). The only
@@ -452,9 +457,9 @@ echo
 echo "--- DND-728 NEGATIVE: api calls that do not merge pass through unchanged ---"
 api_passes "N1. GET of the merge endpoint (is it merged?)" api "${PR_PATH}"
 api_passes "N2. -X HEAD of the merge endpoint" api -X HEAD "${PR_PATH}"
-api_passes "N3. PUT to another endpoint (pulls/<n>/update-branch)" api -X PUT repos/CJPoll/gen_saas/pulls/388/update-branch
+api_passes "N3. POST to another pulls endpoint (requested_reviewers)" api -X POST repos/CJPoll/gen_saas/pulls/388/requested_reviewers -f 'reviewers[]=x'
 api_passes "N4. PUT to labels with a field" api -X PUT repos/CJPoll/gen_saas/issues/5/labels -f 'labels[]=bug'
-api_passes "N5. PATCH a ref whose branch is named merge-x (not a merge endpoint)" api -X PATCH repos/CJPoll/gen_saas/git/refs/heads/merge-x -f sha="${HEAD_SHA}"
+api_passes "N5. GET a ref whose branch is named merge-x (not a merge endpoint)" api repos/CJPoll/gen_saas/git/refs/heads/merge-x
 api_passes "N6. GraphQL read" api graphql -f query='{ viewer { login } }'
 api_passes "N7. GraphQL disablePullRequestAutoMerge (merges nothing)" api graphql -f query='mutation { disablePullRequestAutoMerge(input: {pullRequestId: "PR_x"}) { clientMutationId } }'
 api_passes "N8. GraphQL with jq and paginate flags" api graphql --paginate -q '.data' -f query='{ viewer { login } }'
@@ -462,7 +467,97 @@ api_passes "N9. REST read with -H accept header and --jq" api -H 'Accept: applic
 api_passes "N10. a REST read whose ref names contain mergePullRequest text is not scanned" api repos/CJPoll/gen_saas/contents/mergePullRequest.md
 api_passes "N11. GraphQL: an inline -F value that only CONTAINS =@ is not a file read" api graphql -F note='a=@b' -f query='{ viewer { login } }'
 api_passes "N12. -X get (lower case) of the merge endpoint is still a read" api -X get "${PR_PATH}"
-api_passes "N13. a benign %-escaped path is decoded, not refused" api -X PUT 'repos/CJPoll/gen_saas/contents/a%20b.md' -f message=x
+api_passes "N13. a benign %-escaped path is decoded, not refused" api -X PUT 'repos/CJPoll/gen%5Fsaas/issues/5/labels' -f 'labels[]=x'
+
+echo
+echo "--- DND-741: a \`gh api\` write that moves or creates a ref is REFUSED before gh runs ---"
+# DND-609/728 guarded merges only. A direct ref write puts commits on a branch
+# (the default branch included) with no pinned head and no green check, and a
+# free private repo has no branch protection to stop it. Every ref write is
+# refused, whatever branch it names (the scope decision is in
+# ai/lib/gh-merge-guard.sh): branches move only by `gh-athena git push`, and the
+# default branch only by the guarded `pr merge`. Each refusal names both paths,
+# and gh is never called (the stub log stays EMPTY).
+REF_MAIN="repos/CJPoll/gen_saas/git/refs/heads/main"
+MUT_COMMIT='mutation { createCommitOnBranch(input: {branch: {repositoryNameWithOwner: "CJPoll/gen_saas", branchName: "main"}, expectedHeadOid: "abc", message: {headline: "x"}, fileChanges: {additions: []}}) { commit { oid } } }'
+printf '%s\n' "${MUT_COMMIT}" > "${TMP}/commit.graphql"
+printf '{"query":"mutation { \\u0075pdateRef(input: {refId: \\"REF_x\\", oid: \\"abc\\", force: true}) { clientMutationId } }"}\n' > "${TMP}/ref-body-escaped.json"
+jq -cn '{sha: "abc", force: true}' > "${TMP}/ref-patch.json"
+
+# ref_refused <label> <needle> <args...> : exit 3, REFUSING, a Fix: naming the
+# branch-push path and the guarded merge path, <needle> in the reason, NO gh call.
+ref_refused() {
+  local label="$1" needle="$2"; shift 2
+  reset_fx; run "$@"
+  if [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"Fix:"* ]] \
+    && [[ "${ERR}" == *"gh-athena git push"* ]] \
+    && [[ "${ERR}" == *"pr merge <n> --squash --match-head-commit <sha>"* ]] \
+    && [[ "${ERR}" == *"${needle}"* ]] && [ ! -s "${STUB_LOG}" ]; then
+    ok "${label}"
+  else bad "${label}" "$(detail)"; fi
+}
+
+ref_refused "R1. REST: PATCH git/refs/heads/main (move the default branch)" "git/refs/heads/main" api -X PATCH "${REF_MAIN}" -f sha="${HEAD_SHA}" -F force=true
+ref_refused "R2. REST: PATCH git/refs/heads/<feature> (any branch; the scope is every ref)" "git/refs/heads/feat" api -X PATCH repos/CJPoll/gen_saas/git/refs/heads/feat -f sha="${HEAD_SHA}"
+ref_refused "R3. REST: POST git/refs (create a ref)" "git/refs" api -X POST repos/CJPoll/gen_saas/git/refs -f ref=refs/heads/x -f sha="${HEAD_SHA}"
+ref_refused "R4. REST: git/refs with fields and no -X (gh defaults to POST)" "git/refs" api repos/CJPoll/gen_saas/git/refs -f ref=refs/tags/v1 -f sha="${HEAD_SHA}"
+ref_refused "R5. REST: -XPATCH with an --input body" "git/refs" api -XPATCH "${REF_MAIN}" --input "${TMP}/ref-patch.json"
+ref_refused "R6. REST: %-encoded route (git%2Frefs%2Fheads%2Fmain)" "git/refs" api -X PATCH 'repos/CJPoll/gen_saas/git%2Frefs%2Fheads%2Fmain' -f sha=x
+ref_refused "R7. REST: upper case GIT/REFS, lower case method" "git/refs" api -X patch 'REPOS/CJPoll/gen_saas/GIT/REFS/HEADS/MAIN' -f sha=x
+ref_refused "R8. REST: repositories/<id> route on a full URL" "git/refs" api -X PATCH https://api.github.com/repositories/123456/git/refs/heads/main -f sha=x
+ref_refused "R9. REST: GET + X-HTTP-Method-Override: PATCH" "method-override" api -H 'X-HTTP-Method-Override: PATCH' "${REF_MAIN}"
+ref_refused "R10. REST: DELETE + a method-override header is not a plain DELETE" "method-override" api -X DELETE -H 'X-HTTP-Method-Override: PATCH' "${REF_MAIN}"
+ref_refused "R11. REST: git/ref (singular) written to" "git/ref" api -X PATCH repos/CJPoll/gen_saas/git/ref/heads/main -f sha=x
+ref_refused "R12. REST: a .json suffix on git/refs" "git/refs" api -X POST repos/CJPoll/gen_saas/git/refs.json -f ref=refs/heads/x -f sha=x
+ref_refused "R13. REST: {owner}/{repo} placeholders, dot segments" "git/refs" api -X PATCH 'repos/{owner}/{repo}/git/x/../refs/heads/main' -f sha=x
+ref_refused "R14. REST: PUT contents/<path> (a commit on a branch)" "contents" api -X PUT repos/CJPoll/gen_saas/contents/lib/a.ex -f message=x -f content=eA== -f branch=main
+ref_refused "R15. REST: DELETE contents/<path> (a commit on a branch)" "contents" api -X DELETE repos/CJPoll/gen_saas/contents/lib/a.ex -f message=x -f sha=abc
+ref_refused "R16. REST: POST branches/<b>/rename" "rename" api -X POST repos/CJPoll/gen_saas/branches/feat/x/rename -f new_name=main
+ref_refused "R17. REST: PUT pulls/<n>/update-branch (merges the base into the PR's head branch)" "update-branch" api -X PUT repos/CJPoll/gen_saas/pulls/388/update-branch
+ref_refused "R18. REST: an endpoint after --" "git/refs" api -X PATCH -- "${REF_MAIN}" -f sha=x
+
+ref_refused "RG1. GraphQL: createCommitOnBranch via -f query=" "createCommitOnBranch" api graphql -f query="${MUT_COMMIT}"
+ref_refused "RG2. GraphQL: updateRef" "updateRef" api graphql -f query='mutation { updateRef(input: {refId: "REF_x", oid: "abc", force: true}) { clientMutationId } }'
+ref_refused "RG3. GraphQL: updateRefs" "updateRefs" api graphql -f query='mutation { updateRefs(input: {repositoryId: "R", refUpdates: [{name: "refs/heads/main", afterOid: "abc", force: true}]}) { clientMutationId } }'
+ref_refused "RG4. GraphQL: createRef" "createRef" api graphql -f query='mutation { createRef(input: {repositoryId: "R", name: "refs/heads/x", oid: "abc"}) { clientMutationId } }'
+ref_refused "RG5. GraphQL: createLinkedBranch" "createLinkedBranch" api graphql -f query='mutation { createLinkedBranch(input: {issueId: "I", oid: "abc", name: "x"}) { clientMutationId } }'
+ref_refused "RG6. GraphQL: revertPullRequest" "revertPullRequest" api graphql -f query='mutation { revertPullRequest(input: {pullRequestId: "PR_x"}) { clientMutationId } }'
+ref_refused "RG7. GraphQL: updatePullRequestBranch" "updatePullRequestBranch" api graphql -f query='mutation { updatePullRequestBranch(input: {pullRequestId: "PR_x"}) { clientMutationId } }'
+ref_refused "RG8. GraphQL: aliased field (c: createCommitOnBranch) via -F query=@file" "createCommitOnBranch" api graphql -F query=@"${TMP}/commit.graphql"
+ref_refused "RG9. GraphQL: --input with the name in \\u escapes" "updateRef" api graphql --input "${TMP}/ref-body-escaped.json"
+ref_refused "RG10. GraphQL: the mutation in a variables field" "createRef" api graphql -f query='mutation($x: String) { x }' -f extra='createRef(input: {})'
+
+reset_fx; printf 'mv: api -X PATCH %s -f sha=x\n' "${REF_MAIN}" > "${FX}/aliases.out"
+run mv
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && [[ "${ERR}" == *"gh-athena git push"* ]] \
+  && [ "$(cat "${STUB_LOG}")" = "alias list" ]; then
+  ok "RL1. a gh alias expanding to an api ref write -> expanded, refused; only \`alias list\` ran"
+else bad "RL1. alias to api ref write refused" "$(detail)"; fi
+
+reset_fx
+OUT="$(GH_ATHENA_MERGE_DRY_RUN=1 "${WRAPPER}" api -X PATCH "${REF_MAIN}" -f sha=x 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && [ ! -s "${STUB_LOG}" ]; then
+  ok "RD1. dry-run seam on an api ref write -> the same refusal, no gh call"
+else bad "RD1. dry-run api ref write refused" "$(detail)"; fi
+
+reset_fx; run api graphql -f query="${MUT_COMMIT} mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }"
+if [ "${RC}" = 3 ] && [[ "${ERR}" == *"REFUSING"* ]] && [ ! -s "${STUB_LOG}" ]; then
+  ok "RG11. a query carrying BOTH a ref write and a merge -> refused"
+else bad "RG11. mixed ref+merge query refused" "$(detail)"; fi
+
+echo
+echo "--- DND-741 NEGATIVE: api calls that move no ref pass through unchanged ---"
+api_passes "NR1. GET git/refs/heads/main (read the branch head)" api "${REF_MAIN}"
+api_passes "NR2. GET git/matching-refs with --jq" api repos/CJPoll/gen_saas/git/matching-refs/heads/dnd- --jq '.[].ref'
+api_passes "NR3. -X GET contents with a ref field (fields become the query string)" api -X GET repos/CJPoll/gen_saas/contents/README.md -f ref=main
+api_passes "NR4. -X DELETE git/refs/heads/<feature> (a branch delete moves nothing onto it)" api -X DELETE repos/CJPoll/gen_saas/git/refs/heads/dnd-1-done
+api_passes "NR5. POST git/commits (an object only; no ref moves)" api -X POST repos/CJPoll/gen_saas/git/commits -f message=x -f tree=abc
+api_passes "NR6. GET branches/<b>" api repos/CJPoll/gen_saas/branches/main
+api_passes "NR7. GraphQL deleteRef (moves nothing onto a ref)" api graphql -f query='mutation { deleteRef(input: {refId: "REF_x"}) { clientMutationId } }'
+api_passes "NR8. GraphQL read of a ref's target" api graphql -f query='{ repository(owner: "CJPoll", name: "gen_saas") { ref(qualifiedName: "main") { target { oid } } } }'
+api_passes "NR9. a REST write whose field VALUE names a ref mutation is not scanned" api -X POST repos/CJPoll/gen_saas/issues/5/comments -f body='why not updateRef or createCommitOnBranch?'
+api_passes "NR10. a REST read of a file under a contents/ path" api repos/CJPoll/gen_saas/contents/git/refs/heads/main
+api_passes "NR11. a word that only CONTAINS a mutation name (createRefund)" api graphql -f query='mutation { createRefund(input: {}) { id } }'
 
 echo
 echo "==================================================="

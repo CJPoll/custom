@@ -64,3 +64,64 @@ file cannot be made), F2 (the scan's grep exits 2, read as "no merge"), N11.
 | M8 no default POST when fields/`--input` are given | A8, A9 |
 | M9 an unknown `--flag` ignored | A21 |
 | H1 hook rule removed (the d2fb1c9 hook) | 2d–2l, 2k2 |
+
+---
+
+## 2026-09-26 — DND-741: `gh api` ref writes put commits on a branch with no check
+
+- **Code under test:** `ai/lib/gh-merge-guard.sh` (`gmg_api_guard`,
+  `gmg_api_ref_route`, `GMG_REF_MUTATIONS`), `ai/hooks/forge-identity-guard.sh`
+  (`api_ref_write`)
+- **Suites:** as above.
+- **Baseline (fixed code):** wrapper `RESULT: 136 passed, 0 failed`; hook
+  `RESULT: 162 passed, 0 failed`.
+
+### Fail-first: the suites against the unfixed sources (a4b8c68)
+
+The current tests, with the worktree's sources still at a4b8c68 (tests edited,
+no source edited yet).
+
+Wrapper: `RESULT: 106 passed, 30 failed`. Every ref-write case failed; every
+negative case (N*, NR*) passed. Verbatim:
+
+```
+FAIL  R1. REST: PATCH git/refs/heads/main (move the default branch)
+      rc=0 out=stub:\ passthrough\ api\ -X\ PATCH\ repos/CJPoll/gen_saas/git/refs/heads/main\ -f\ sha=b712de1d0000000000000000000000000000beef\ -F\ force=true err='' ...
+FAIL  R14. REST: PUT contents/<path> (a commit on a branch)
+      rc=0 out=stub:\ passthrough\ api\ -X\ PUT\ repos/CJPoll/gen_saas/contents/lib/a.ex\ -f\ message=x\ -f\ content=eA==\ -f\ branch=main err='' ...
+FAIL  RG1. GraphQL: createCommitOnBranch via -f query=
+      rc=0 out=stub:\ passthrough\ api\ graphql\ -f\ query=mutation\ \{\ createCommitOnBranch\(...
+FAIL  RG9. GraphQL: --input with the name in \u escapes
+      rc=0 out=stub:\ passthrough\ api\ graphql\ --input\ /tmp/tmp.p5YiXJ7Ydv/ref-body-escaped.json err='' ...
+```
+
+Failed set: R1–R18, RG1–RG10, RL1, RD1. (RG11 carries a merge mutation too, so
+DND-728 already refused it.)
+
+Hook: `RESULT: 146 passed, 16 failed` — 4a–4n (4a2, 4a3 included), each
+`(expected deny) status=0 out=[]`.
+
+Three DND-728 negatives moved, because the ref-write scope now covers them:
+N3 (`PUT pulls/<n>/update-branch`, now R17), N5 (`PATCH git/refs/heads/merge-x`,
+now a GET) and N13 (a `%`-escaped `PUT contents/…`, now a `%`-escaped labels
+PUT; M3 still turns it red). Hook 2n (`PUT …/update-branch`, now 4h) moved to a
+labels PUT the same way.
+
+### Mutations on the fixed code
+
+| Mutation | Cases that fail |
+| --- | --- |
+| M10 ref mutations dropped from the GraphQL scan | RG1–RG10 |
+| M11 a plain DELETE of a ref refused too | NR4 |
+| M12 the DELETE exception matches `DELETE with a method-override header` | R10 |
+| M13 the contents rule removed | R14, R15 |
+| M14 the update-branch rule removed | R17 |
+| M15 the rename rule removed | R16 |
+| M16 every scanned name reported as a merge (ref Fix lost) | RG1–RG10 |
+| M17 `git/ref` (singular) not matched | R11 |
+| M18 no `.json`/`;x` suffix strip on the ref route | R12 |
+| H2 hook ref-write deny removed | 4a–4n |
+| H3 hook refuses a plain DELETE of a ref | 4p |
+| H4 hook treats an explicit `-X GET` as a write | 4q |
+| H5 hook ignores fields (no default POST) | 4b |
+| H6 hook ignores the method-override header | 4d |

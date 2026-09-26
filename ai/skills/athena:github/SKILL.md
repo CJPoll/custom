@@ -272,9 +272,20 @@ moving main*).
   read. A `gh api` merge (REST `PUT …/pulls/<n>/merge`, `…/merges`,
   `…/merge-upstream`, or a GraphQL merge / auto-merge / merge-queue mutation) is
   refused outright by `gh-athena` (DND-728); a bare `gh api` merge is denied by
-  the forge-identity hook. `pr merge` is the one merge path. The mechanism and
-  its named residuals (API ref writes that move a branch without merging, gh
-  extensions, a workflow that never reported) are in `ai/lib/gh-merge-guard.sh`.
+  the forge-identity hook. `pr merge` is the one merge path.
+- **No branch moves by API (DND-741).** `gh-athena` refuses every `gh api`
+  write that creates or moves a ref, on ANY branch, not only the default one:
+  REST writes to `…/git/refs`, any write to `…/contents/…`,
+  `…/branches/<b>/rename`, `…/pulls/<n>/update-branch`, and the GraphQL
+  mutations `createCommitOnBranch`, `createRef`, `updateRef`, `updateRefs`,
+  `createLinkedBranch`, `revertPullRequest` and `updatePullRequestBranch`. The
+  forge-identity hook denies the bare `gh api` forms. Each one could put commits
+  on the default branch with no green check. Move a branch with `gh-athena git
+  push` (*Pushing as Athena*); reach the default branch only through the pinned
+  merge above. A branch delete (`DELETE …/git/refs/…`, `deleteRef`) still
+  passes. The mechanism, the scope decision and the named residuals (`gh pr
+  update-branch`, a default-branch change, gh extensions, a workflow that never
+  reported) are in `ai/lib/gh-merge-guard.sh`.
 - **`--auto` is refused wherever no required checks gate it.** `--auto` waits
   only on the base branch's **required** checks. The wrapper asks branch
   protection and rulesets for that set, and refuses `--auto` unless it can READ

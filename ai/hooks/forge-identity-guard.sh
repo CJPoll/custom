@@ -32,7 +32,9 @@
 # captain's wrapper discipline and the forge-preflight assertion. This is
 # deliberate, not full write coverage — broadening the subcommand alternation
 # further is a follow-up if a bare non-create/merge write is ever observed
-# mis-attributing.
+# mis-attributing. Two `gh api` shapes ARE matched, because they also skip a
+# safety check, not only attribution: a merge (DND-728) and a ref write
+# (DND-741). Each has its own block below.
 #
 # DENY, WITH A Fix: — DND-577 (2026-09-24). This guard used to WARN and always
 # allow (DND-206 scope 2). A PreToolUse `additionalContext` reaches the model
@@ -126,6 +128,47 @@ fi
 # too, and its Fix names the read that does not need it.
 if printf '%s' "$FLAT" | grep -Eiq '(^|[^[:alnum:]_-])gh[[:space:]]+([^;|&]* )?api[[:space:]][^;|&]*(pulls/[^[:space:];|&]+/merge([^[:alnum:]_-]|$)|/merges([^[:alnum:]_-]|$)|/merge-upstream|(^|[^[:alnum:]_])(mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch)([^[:alnum:]_]|$))'; then
   deny 'forge-identity: this is a bare `gh api` call on a merge route or with a merge mutation (REST …/pulls/<n>/merge, …/merges, …/merge-upstream; GraphQL mergePullRequest / enablePullRequestAutoMerge / enqueuePullRequest / mergeBranch). It merges as the machine owner AND skips the pinned-head, all-green merge guard (DND-609, DND-728). Fix: merge through the one guarded path — `~/dev/custom/ai/bin/gh-athena pr merge <n> --squash --match-head-commit <sha>` after every check on that head is green. To only READ merge state, use `gh pr view <n> --json mergedAt,state`. If the wrapper refuses, do not work around it; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
+fi
+
+# Bare `gh api` that creates or moves a ref (DND-741): a REST write to
+# …/git/refs[/…] or …/git/ref/… (not a plain DELETE), any write to
+# …/contents/…, …/branches/<b>/rename, …/pulls/<n>/update-branch, or a GraphQL
+# ref-write mutation, in one command segment of `gh … api`. It runs as the
+# owner AND puts commits on a branch with no pinned head and no green check.
+# The wrapper refuses the same set (ai/lib/gh-merge-guard.sh, which also records
+# why EVERY ref write is refused, not only one aimed at the default branch).
+# Lexical and best-effort, like the merge rule above: a REST call is a write
+# when it names -X/--method other than GET/HEAD, carries a method-override
+# header, or has no method but a field or --input (gh then POSTs). A query read
+# from a file, a %-encoded route and an aliased flag are not seen here; the
+# wrapper sees them. `gh-athena api …` does NOT match (after `gh` comes `-`).
+REF_MUT_RE='(^|[^[:alnum:]_])(createCommitOnBranch|createRef|updateRefs?|createLinkedBranch|revertPullRequest|updatePullRequestBranch)([^[:alnum:]_]|$)'
+REF_ROUTE_RE='(repos/[^/[:space:]]+/[^/[:space:]]+|repositories/[^/[:space:]]+)/(git/refs?([/.?[:space:]'"'"'"]|$)|contents/|branches/[^[:space:]]+/rename([^[:alnum:]_-]|$)|pulls/[^/[:space:]]+/update-branch([^[:alnum:]_-]|$))'
+GIT_REF_RE='(repos/[^/[:space:]]+/[^/[:space:]]+|repositories/[^/[:space:]]+)/git/refs?([/.?[:space:]'"'"'"]|$)'
+REF_DENY='forge-identity: this is a bare `gh api` call that creates or moves a ref (REST …/git/refs, …/contents/…, …/branches/<b>/rename or …/pulls/<n>/update-branch; GraphQL createCommitOnBranch / createRef / updateRef / updateRefs / createLinkedBranch / revertPullRequest / updatePullRequestBranch). It runs as the machine owner AND can put commits on the default branch with no pinned head and no green check (DND-741). Fix: commit locally and move a branch only with `~/dev/custom/ai/bin/gh-athena git push origin <feature-branch>` (athena:github -> "Pushing as Athena"); land on the default branch only through a PR, with `~/dev/custom/ai/bin/gh-athena pr merge <n> --squash --match-head-commit <sha>` after every check on that head is green. To delete a branch, `gh-athena git push origin --delete <branch>`. If the wrapper refuses, do not work around it; escalate to your admiral with the command + error and wait (athena:github -> "When a forge write can'\''t be done as Athena").'
+
+# api_ref_write <segment> : true when one `gh … api` command segment writes a ref.
+api_ref_write() {
+  _s=$1
+  printf '%s' "$_s" | grep -Eq "$REF_MUT_RE" && return 0
+  printf '%s' "$_s" | grep -Eiq "$REF_ROUTE_RE" || return 1
+  printf '%s' "$_s" | grep -Eiq 'x-(http-)?method(-override)?[[:space:]]*:' && return 0
+  _m=$(printf '%s' "$_s" | sed -nE "s/(^|.*[[:space:]])(-[[:alpha:]]*X|--method)(=|[[:space:]]+)?[\"']?([[:alpha:]]+).*/\4/p" | tr '[:lower:]' '[:upper:]')
+  case "$_m" in
+    GET|HEAD) return 1 ;;
+    DELETE) printf '%s' "$_s" | grep -Eiq "$GIT_REF_RE" && return 1; return 0 ;;
+    ?*) return 0 ;;
+  esac
+  printf '%s' "$_s" | grep -Eq '(^|[[:space:]])(-[[:alpha:]]*[fF]|--(raw-)?field|--input)' && return 0
+  return 1
+}
+
+API_SEGS=$(printf '%s' "$FLAT" | tr ';&|' '\n\n\n' | grep -E '(^|[^[:alnum:]_-])gh[[:space:]]+(.* )?api[[:space:]]')
+if [ -n "$API_SEGS" ]; then
+  _hit=$(printf '%s\n' "$API_SEGS" | while IFS= read -r _seg; do
+    if api_ref_write "$_seg"; then echo hit; break; fi
+  done)
+  [ -z "$_hit" ] || deny "$REF_DENY"
 fi
 
 # Bare `glab mr create`: same shape, same tolerance for flags before the

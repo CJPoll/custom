@@ -150,7 +150,7 @@ check "2l. path-qualified gh after a separator" deny
 run "$(bash_json '~/dev/custom/ai/bin/gh-athena api -X PUT repos/o/r/pulls/5/merge')"
 check "2m. gh-athena api merge (the wrapper judges it)" allow
 
-run "$(bash_json 'gh api -X PUT repos/o/r/pulls/5/update-branch')"
+run "$(bash_json 'gh api -X PUT repos/o/r/issues/5/labels -f labels[]=bug')"
 check "2n. bare gh api PUT to a non-merge route" allow
 
 run "$(bash_json "gh api graphql -f query='mutation { disablePullRequestAutoMerge(input: {pullRequestId: \"x\"}) { clientMutationId } }'")"
@@ -158,6 +158,73 @@ check "2o. bare gh api graphql disablePullRequestAutoMerge" allow
 
 run "$(bash_json 'gh api repos/o/r/git/refs/heads/merge-x')"
 check "2p. bare gh api read of a branch named merge-x" allow
+
+# DND-741: a bare `gh api` write that moves or creates a ref runs as the owner
+# AND puts commits on a branch with no pinned head and no green check.
+run "$(bash_json 'gh api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc -F force=true')"
+check "4a. bare gh api PATCH git/refs/heads/main" deny
+check_text "4a2. the deny names the branch-push path" 'gh-athena git push'
+check_text "4a3. ...and the guarded merge path" 'gh-athena pr merge <n> --squash --match-head-commit <sha>'
+
+run "$(bash_json 'gh api repos/o/r/git/refs -f ref=refs/heads/x -f sha=abc')"
+check "4b. bare gh api git/refs with fields, no -X (POST)" deny
+
+run "$(bash_json 'gh api -XPATCH /repos/o/r/git/refs/heads/feat --input body.json')"
+check "4c. -XPATCH with --input on any branch" deny
+
+run "$(bash_json "gh api -H 'X-HTTP-Method-Override: PATCH' repos/o/r/git/refs/heads/main")"
+check "4d. GET + method-override header on git/refs" deny
+
+run "$(bash_json 'gh api --method=PUT repos/o/r/contents/lib/a.ex -f message=x -f content=eA==')"
+check "4e. bare gh api PUT contents/<path>" deny
+
+run "$(bash_json 'gh api -X DELETE repos/o/r/contents/lib/a.ex -f message=x -f sha=abc')"
+check "4f. bare gh api DELETE contents/<path>" deny
+
+run "$(bash_json 'gh api -X POST repos/o/r/branches/feat/rename -f new_name=main')"
+check "4g. bare gh api POST branches/<b>/rename" deny
+
+run "$(bash_json 'gh api -X PUT repos/o/r/pulls/5/update-branch')"
+check "4h. bare gh api PUT pulls/<n>/update-branch" deny
+
+run "$(bash_json "gh api graphql -f query='mutation { createCommitOnBranch(input: {branch: {branchName: \"main\"}}) { commit { oid } } }'")"
+check "4i. bare gh api graphql createCommitOnBranch" deny
+
+run "$(bash_json "gh api graphql -f query='mutation { updateRef(input: {refId: \"x\", oid: \"y\"}) { clientMutationId } }'")"
+check "4j. bare gh api graphql updateRef" deny
+
+run "$(bash_json "gh api graphql -f query='mutation { updateRefs(input: {repositoryId: \"x\", refUpdates: []}) { clientMutationId } }'")"
+check "4k. bare gh api graphql updateRefs" deny
+
+run "$(bash_json "gh api graphql -f query='mutation { createRef(input: {repositoryId: \"x\", name: \"refs/heads/y\", oid: \"z\"}) { clientMutationId } }'")"
+check "4l. bare gh api graphql createRef" deny
+
+run "$(bash_json "gh api graphql -f query='mutation { updatePullRequestBranch(input: {pullRequestId: \"x\"}) { clientMutationId } }'")"
+check "4m. bare gh api graphql updatePullRequestBranch" deny
+
+run "$(bash_json 'cd /tmp && /usr/bin/gh -R o/r api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc')"
+check "4n. path-qualified gh, flags before api, after a separator" deny
+
+run "$(bash_json 'gh api repos/o/r/git/refs/heads/main --jq .object.sha')"
+check "4o. bare gh api READ of git/refs/heads/main" allow
+
+run "$(bash_json 'gh api -X DELETE repos/o/r/git/refs/heads/dnd-1-done')"
+check "4p. bare gh api DELETE of a branch ref (moves nothing onto it)" allow
+
+run "$(bash_json 'gh api -X GET repos/o/r/contents/README.md -f ref=main')"
+check "4q. -X GET contents with a ref field (a read)" allow
+
+run "$(bash_json "gh api graphql -f query='mutation { deleteRef(input: {refId: \"x\"}) { clientMutationId } }'")"
+check "4r. bare gh api graphql deleteRef" allow
+
+run "$(bash_json '~/dev/custom/ai/bin/gh-athena api -X PATCH repos/o/r/git/refs/heads/main -f sha=abc')"
+check "4s. gh-athena api ref write (the wrapper judges it)" allow
+
+run "$(bash_json 'gh api -X POST repos/o/r/git/commits -f message=x -f tree=abc')"
+check "4t. bare gh api POST git/commits (an object only)" allow
+
+run "$(bash_json 'gh api repos/o/r/git/refs/heads/main; echo -f x')"
+check "4u. a field flag in a LATER command does not make a read a write" allow
 
 run "$(bash_json_cwd "$TMP/gh_scp" 'git push origin HEAD')"
 check "3a. plain git push, origin git@github.com: (cwd)" deny

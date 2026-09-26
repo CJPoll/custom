@@ -39,15 +39,49 @@
 # body that is not JSON, an unknown flag, an endpoint it cannot normalize, its
 # own scratch file failing) is refused too. See gmg_api_guard.
 #
+# `gh api` writes that CREATE OR MOVE A REF are REFUSED outright too (DND-741),
+# by the same parser, endpoint normalisation and GraphQL scan: REST writes to
+# …/git/refs[/…] and …/git/ref/… (every method but a plain DELETE), any write
+# to …/contents/… (each one is a commit on a branch), POST
+# …/branches/<b>/rename, PUT …/pulls/<n>/update-branch (it merges the base into
+# the PR's HEAD branch, which may itself be the default branch), and the GraphQL
+# mutations createCommitOnBranch, createRef, updateRef, updateRefs,
+# createLinkedBranch, revertPullRequest and updatePullRequestBranch. Each one
+# puts commits on a branch (the default branch included) with no pinned head
+# and no green check, and a free private repo has no branch protection to stop
+# it. A ref DELETE (REST DELETE …/git/refs/…, GraphQL deleteRef) moves nothing
+# onto a ref and passes; GitHub itself refuses to delete the default branch.
+#
+# SCOPE DECISION (DND-741, 2026-09-26): EVERY API ref write is refused, not
+# only one aimed at the default branch. Reasons:
+#   * Nothing legitimate uses them. Branches move by `gh-athena git push` (the
+#     harness session fast-forwards custom main that way; shipwright pushes
+#     main that way); a grep of ai/, scripts/, gen_saas and walt_ui found no
+#     `gh api` ref write.
+#   * The target is often not in the call. updateRef takes an opaque ref node
+#     id, createCommitOnBranch may take a branch node id, and a query can carry
+#     its target in variables or a file. Resolving it needs reads; an
+#     unresolvable target would have to be refused anyway.
+#   * "The default branch" is a read that can fail or change under the call
+#     (PATCH repos/<o>/<r> default_branch), and "protected" cannot be read at
+#     all on a free private repo (403). A refusal that needs no read has no
+#     lookup to get wrong (~/.claude/CLAUDE.md -> *A failed lookup must never
+#     look like an empty one*).
+# The cost: a feature-branch ref write by API is refused too; its Fix is the
+# `gh-athena git push` the fleet already uses.
+#
 # `pr merge --disable-auto` (without --auto) merges nothing and passes as-is.
 # Every other command passes as-is with no extra reads, except that a first
 # word gh does not ship as a command is looked up in `gh alias list`.
 # The branch name goes into the API path unencoded (a `/` in it is accepted by
 # GitHub's branch routes); if a lookup fails on it, that fails CLOSED.
 #
-# Residual (NOT checked; each still runs): API writes that MOVE a branch
-# without merging — REST PATCH/POST …/git/refs/…, GraphQL updateRef,
-# updateRefs, createCommitOnBranch, createRef (DND-741); gh extensions
+# Residual (NOT checked; each still runs): a CLI command that moves a ref
+# without `api` — `gh pr update-branch` (on a PR whose head is the default
+# branch it merges the base into it) and `gh repo edit --default-branch` / a
+# PATCH repos/<o>/<r> default_branch (it re-points which branch is the default;
+# it moves no ref); a push by a GitHub Actions workflow with its own token; a
+# ref-writing mutation GitHub adds after 2026-09-26; gh extensions
 # (`gh <ext>`); a check that has not REPORTED yet on the head (a workflow that
 # never queued a run is invisible to the rollup — the reason zero checks is
 # refused, but one green check among several unstarted workflows passes);
@@ -67,7 +101,7 @@
 
 GMG_TOOL="${GMG_TOOL:-gh-athena}"
 GMG_IS_MERGE=0
-GMG_ESCALATE='Never merge around this (a bare `gh pr merge`, a `gh api` merge call, or the owner'"'"'s token); if the checks cannot go green, escalate to your admiral with the PR number and this output.'
+GMG_ESCALATE='Never merge or move a branch around this (a bare `gh pr merge`, a `gh api` merge or ref write, or the owner'"'"'s token); if the checks cannot go green, escalate to your admiral with the PR number and this output.'
 GMG_SAFE_PATH="assert every check green on the PR's exact head SHA (\`gh pr checks <n>\`, \`gh pr view <n> --json headRefOid,statusCheckRollup\`), then \`~/dev/custom/ai/bin/$GMG_TOOL pr merge <n> --squash --match-head-commit <sha>\` WITHOUT --auto"
 
 # gh's own top-level commands (gh 2.83). A first word outside this list may be
@@ -223,10 +257,17 @@ gmg_probe_count() {
 # normalize) is refused too: an unseen merge must read as "refuse".
 
 # The mutations that merge or schedule a merge, from live schema introspection
-# (2026-09-26). disablePullRequestAutoMerge / dequeuePullRequest /
-# updatePullRequestBranch merge nothing into the base and pass.
+# (2026-09-26). disablePullRequestAutoMerge / dequeuePullRequest merge nothing
+# into the base and pass. updatePullRequestBranch merges nothing into the base
+# either, but it moves the PR's head branch, so it is a ref write (below).
 GMG_MERGE_MUTATIONS="mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch"
 GMG_API_FIX="merge only through the one guarded path: open a PR if there is none, then $GMG_SAFE_PATH"
+
+# The mutations that create or move a ref (DND-741), from the same day's
+# introspection. deleteRef moves nothing onto a ref and passes. updateRefs is
+# listed before updateRef so a match names the longer one.
+GMG_REF_MUTATIONS="createCommitOnBranch|createRef|updateRefs|updateRef|createLinkedBranch|revertPullRequest|updatePullRequestBranch"
+GMG_REF_FIX="commit locally and move a branch only with \`~/dev/custom/ai/bin/$GMG_TOOL git push origin <feature-branch>\` (athena:github -> Pushing as Athena); land on the default branch only through a PR: $GMG_SAFE_PATH"
 
 # gmg_api_path <endpoint> : echoes the endpoint's path as gh + GitHub would
 # route it: no scheme/host, no ?query or #fragment, %-escapes decoded, lower
@@ -282,10 +323,41 @@ gmg_api_merge_route() {
   return 1
 }
 
+# gmg_api_ref_route <normalized path> <method> : true when a REST write to the
+# path creates or moves a ref (DND-741); echoes what it does. Same prefix and
+# suffix rules as gmg_api_merge_route. <method> is never GET/HEAD here; a plain
+# DELETE of a ref moves nothing onto it and is not a match, but a DELETE with a
+# method-override header is (it is not a plain DELETE).
+gmg_api_ref_route() {
+  local method="$2" first second last
+  local -a s rest
+  IFS=/ read -ra s <<<"$1"
+  case "${s[0]:-}" in
+    repos) rest=("${s[@]:3}") ;;
+    repositories) rest=("${s[@]:2}") ;;
+    *) return 1 ;;
+  esac
+  [ "${#rest[@]}" -gt 0 ] || return 1
+  first="${rest[0]%%[.;]*}"; second="${rest[1]:-}"; second="${second%%[.;]*}"; last="${rest[-1]%%[.;]*}"
+  case "$first:$second" in
+    git:ref|git:refs)
+      [ "$method" = DELETE ] && return 1
+      echo "a write to git/$second"; return 0 ;;
+    contents:*) echo "a commit through the contents API"; return 0 ;;
+  esac
+  if [ "$first" = branches ] && [ "${#rest[@]}" -ge 3 ] && [ "$last" = rename ]; then
+    echo "a branch rename"; return 0
+  fi
+  if [ "$first" = pulls ] && [ "${#rest[@]}" = 3 ] && [ "$last" = update-branch ]; then
+    echo "a merge of the base into the PR's head branch"; return 0
+  fi
+  return 1
+}
+
 # gmg_api_guard <shown> <gh api args (after the word api)...> : returns 0 when
 # the call does not merge; exits 3 otherwise. Flags per gh 2.83 `gh api`.
 gmg_api_guard() {
-  local shown="$1" a v i c rest method="" nfields=0 input="" override=0 ep path scan name last grc
+  local shown="$1" a v i c rest method="" nfields=0 input="" override=0 ep path scan name last grc what
   shift
   local -a pos=() raw=() files=()
   # gmg_api_opt <long flag> <value>
@@ -401,17 +473,23 @@ gmg_api_guard() {
       # name inside a string argument is refused too (accepted false positive).
       # grep: 0 = a merge name found, 1 = none, anything else = the scan
       # itself failed, which is refused, never read as "none".
-      if grep -aEiq "(^|[^A-Za-z0-9_])($GMG_MERGE_MUTATIONS)([^A-Za-z0-9_]|$)" "$scan"; then grc=0; else grc=$?; fi
+      if grep -aEiq "(^|[^A-Za-z0-9_])($GMG_MERGE_MUTATIONS|$GMG_REF_MUTATIONS)([^A-Za-z0-9_]|$)" "$scan"; then grc=0; else grc=$?; fi
       if [ "$grc" != 0 ] && [ "$grc" != 1 ]; then
         rm -f "$scan"
-        gmg_refuse "$shown" "scanning the GraphQL query for merge mutations failed (grep exit $grc), so $GMG_TOOL cannot tell whether the call merges" \
+        gmg_refuse "$shown" "scanning the GraphQL query for merge and ref-write mutations failed (grep exit $grc), so $GMG_TOOL cannot tell whether the call merges or moves a branch" \
           "re-run; if it repeats, pass the query inline (-f query='…'); to merge, $GMG_SAFE_PATH"
       fi
       if [ "$grc" = 0 ]; then
-        name="$(grep -aEio "(^|[^A-Za-z0-9_])($GMG_MERGE_MUTATIONS)([^A-Za-z0-9_]|$)" "$scan" | grep -Eio "$GMG_MERGE_MUTATIONS" | head -n1 || true)"
+        name="$(grep -aEio "(^|[^A-Za-z0-9_])($GMG_MERGE_MUTATIONS|$GMG_REF_MUTATIONS)([^A-Za-z0-9_]|$)" "$scan" | grep -Eio "$GMG_MERGE_MUTATIONS|$GMG_REF_MUTATIONS" | head -n1 || true)"
         rm -f "$scan"
-        gmg_refuse "$shown" "this GraphQL call carries the merge mutation '$name', which merges (or schedules a merge) without the pinned-head, all-green check (DND-728)" \
-          "$GMG_API_FIX"
+        # A merge name is reported as a merge; anything else that matched
+        # (including a name that could not be re-extracted) as a ref write.
+        if [[ "${name,,}" =~ ^(${GMG_MERGE_MUTATIONS,,})$ ]]; then
+          gmg_refuse "$shown" "this GraphQL call carries the merge mutation '$name', which merges (or schedules a merge) without the pinned-head, all-green check (DND-728)" \
+            "$GMG_API_FIX"
+        fi
+        gmg_refuse "$shown" "this GraphQL call carries the ref-write mutation '${name:-?}', which creates or moves a branch (it can put commits on the default branch) with no pinned head and no green check (DND-741)" \
+          "$GMG_REF_FIX"
       fi
       rm -f "$scan"
       continue
@@ -420,6 +498,10 @@ gmg_api_guard() {
     if gmg_api_merge_route "$path"; then
       gmg_refuse "$shown" "this is a REST merge ($method $path), which merges without the pinned-head, all-green check (DND-728)" \
         "$GMG_API_FIX"
+    fi
+    if what="$(gmg_api_ref_route "$path" "$method")"; then
+      gmg_refuse "$shown" "this is $what ($method $path), which creates or moves a branch (it can put commits on the default branch) with no pinned head and no green check (DND-741)" \
+        "$GMG_REF_FIX"
     fi
   done
   GMG_IS_MERGE=0

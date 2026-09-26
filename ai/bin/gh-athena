@@ -148,8 +148,12 @@ fi
 # with --match-head-commit <sha> and every check on that head is green. A
 # `gh api` call that merges (REST …/pulls/<n>/merge, …/merges, …/merge-upstream;
 # GraphQL mergePullRequest / enablePullRequestAutoMerge / enqueuePullRequest /
-# mergeBranch) is REFUSED outright, with no reads (DND-728). The mechanism, its
-# coverage and its named residuals live in ai/lib/gh-merge-guard.sh.
+# mergeBranch) is REFUSED outright, with no reads (DND-728). So is a `gh api`
+# write that creates or moves a ref on any branch (REST …/git/refs, …/contents/…,
+# …/branches/<b>/rename, …/pulls/<n>/update-branch; GraphQL createCommitOnBranch,
+# createRef, updateRef, updateRefs and siblings), DND-741: branches move only by
+# `gh-athena git push`. The mechanism, its coverage, the scope decision and the
+# named residuals live in ai/lib/gh-merge-guard.sh.
 #
 # Test seam: GH_ATHENA_MERGE_DRY_RUN=1 runs the guard (reads only) and then
 # prints the command instead of exec'ing gh, for ANY command.
