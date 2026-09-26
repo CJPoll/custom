@@ -48,14 +48,18 @@
 # ANYONE CAN SET AN ENVIRONMENT VARIABLE, so a pin is not trusted on its own
 # (no side channel would help: whatever the gate can hand a child, any caller
 # can hand it too; only origin cannot be forged). A pinned check still runs
-# its ls-remote and requires the pin to be ON origin's main: origin's tip is
-# the pin, or is present here and descends from it. A pin at a commit origin
-# never landed (the relabel commit itself) is a Mismatch. Said out loud, the
-# residual: a hand-set pin can name an OLDER landed commit, which lowers the
-# tip point to that commit's bar; and when origin's current tip has not been
-# fetched here, the pin cannot be checked against it and is taken as given.
+# its ls-remote and requires the pin to be PROVEN on origin's main: origin's
+# tip is the pin, or descends from it. When origin's tip has not been fetched
+# here, the check fetches its objects first (Landed.fetch_objects: objects
+# only, no ref, no FETCH_HEAD); if that fails, the bar is Unreadable, never
+# taken on trust. A pin at a commit origin never landed (the relabel commit
+# itself) is a Mismatch. Said out loud, the residual: a hand-set pin can name
+# an OLDER landed commit, which lowers the tip point to that commit's bar.
 # harness-gate itself never inherits a pin: it sets both variables from its
 # own ls-remote, or clears both.
+#
+# So "nothing here fetches" (above) has one exception, and it writes objects
+# only: the pinned check whose origin tip is not here yet.
 #
 # NOT BEING ABLE TO READ THE BAR IS A FAILURE, never a pass. Every miss raises
 # Unreadable carrying each probe and what it gave, so the caller prints "could
@@ -101,6 +105,7 @@ module Landed
   PIN_SHA_ENV = "ATHENA_LANDED_PIN_SHA"
   PIN_REPO_ENV = "ATHENA_LANDED_PIN_REPO"
   PIN_PROBE = "#{LS_REMOTE_PROBE}, read once at harness-gate start (#{PIN_SHA_ENV})".freeze
+  FETCH_PROBE = "git fetch --refmap= --no-write-fetch-head #{REMOTE} #{REMOTE_REF} (objects only)".freeze
 
   # The landed bar could not be read. Carries every probe and what it gave.
   class Unreadable < StandardError
@@ -235,20 +240,46 @@ module Landed
     ok
   end
 
-  # Is the pin on origin's main as origin reports it now (remote)? Proven when
-  # remote IS the pin, or remote is present here and descends from it. When
-  # remote is not present here (origin moved and nothing here fetched it),
-  # there is nothing to prove against: the pin is taken as read at gate start,
-  # and a probe says so. See "ONE READ PER GATE RUN" for that residual.
+  # Is the pin on origin's main as origin reports it now (remote)? Proven only
+  # when remote IS the pin, or remote descends from it. When remote's objects
+  # are not here (origin moved and nothing here fetched it), they are fetched
+  # first, objects only (fetch_objects). Anything that cannot be proven raises;
+  # it is never taken on trust.
   def pin_on_origin?(root, pinned, remote, probes)
     return true if remote == pinned
 
-    _out, present = git_read(root, "cat-file", "-e", "#{remote}^{commit}")
-    return ancestor?(root, pinned, remote) if present
+    fetch_objects(root, remote, probes) unless commit_present?(root, remote)
+    ancestor?(root, pinned, remote)
+  end
 
-    probes << [PIN_PROBE, "origin moved to #{remote[0, 12]}, not fetched here; " \
-                          "pin #{pinned[0, 12]} taken as read at gate start"]
-    true
+  def commit_present?(root, sha)
+    _out, ok = git_read(root, "cat-file", "-e", "#{sha}^{commit}")
+    ok
+  end
+
+  # Brings origin's main's OBJECTS here so a pin can be proven against it.
+  # Writes no ref: an empty --refmap drops the configured refspec, the
+  # command-line refspec has no destination, and --no-write-fetch-head skips
+  # FETCH_HEAD. No auto-maintenance. Objects are content-addressed and
+  # immutable, so neither the working tree nor any ref changes. Raises
+  # Unreadable when the fetch fails or still leaves remote missing.
+  def fetch_objects(root, remote, probes)
+    env = { "GIT_TERMINAL_PROMPT" => "0" }
+    cmd = ["git", "-C", root, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
+           "--no-auto-maintenance", "--no-write-fetch-head", "--refmap=", REMOTE, REMOTE_REF]
+    _out, err, status = capture_with_timeout(env, cmd, LS_REMOTE_TIMEOUT)
+    outcome = if status.nil?
+                "timed out after #{LS_REMOTE_TIMEOUT}s (origin unreachable)"
+              elsif !status.success?
+                "failed (exit #{status.exitstatus}): #{err.strip.lines.first.to_s.strip}"
+              elsif !commit_present?(root, remote)
+                "fetched, but #{remote[0, 12]} is still not here (origin rewrote #{REMOTE_REF}?)"
+              end
+    probes << [FETCH_PROBE, outcome || "#{remote[0, 12]} fetched, objects only"]
+    raise Unreadable.new(probes) if outcome
+  rescue Errno::ENOENT
+    probes << [FETCH_PROBE, "git executable not found on PATH"]
+    raise Unreadable.new(probes)
   end
 
   # What harness-gate hands its checks: origin's main for root's repository,
@@ -383,8 +414,8 @@ module Landed
      "  Fix: `git fetch #{REMOTE}` so #{REF} matches what landed, rebase onto " \
      "it, and re-run. A local ref moved by hand (git update-ref) does not move the bar, " \
      "and neither does a hand-set #{PIN_SHA_ENV}: the check compares against origin's " \
-     "#{REMOTE_REF} (under harness-gate, as read once at gate start, and still required " \
-     "to be on origin's #{REMOTE_REF})."]
+     "#{REMOTE_REF} (under harness-gate, as read once at gate start, and still proven " \
+     "on origin's #{REMOTE_REF} at check time)."]
   end
 
   # [[tag, rel, score]] for every (landed blob -> working-tree file) pair git's
