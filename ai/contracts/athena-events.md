@@ -3057,7 +3057,7 @@ event classified (not ignored), dedupe pre-check passed
 - **Only the owner's own text is judged.** A new conversation from anyone else
   follows the channel route by code, with no judgment and no tokens.
 - **The answer is one of the owner's labels, or `unclear`.** `unclear` falls
-  back like a below-threshold answer.
+  back and is recorded as `below_threshold`.
 - **Exactly one destination per event**, as for a claim. A topic route replaces
   the channel route for that event; it never adds a second copy, so the
   designated-consumer rule holds unchanged.

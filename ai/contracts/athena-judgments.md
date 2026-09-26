@@ -34,9 +34,10 @@ the versioned code that turns a use case's input into the request. A **caller**
 is the consumer that asked for a judgment and acts on the result. An
 implementation that violates a MUST is non-conformant.
 
-**Every refusal, fallback and hard error specified here MUST carry a greppable
-`Fix:` clause** in its log line or structured field, naming the corrective
-action, per `~/dev/custom/CLAUDE.md` → *Guard/error messages are written for the
+**Every refusal, hard error and fault-class fallback specified here MUST carry
+a greppable `Fix:` clause** in its log line or structured field, naming the
+corrective action (*Fallback: every error equals today's behaviour, loudly*
+says which fallbacks are faults), per `~/dev/custom/CLAUDE.md` → *Guard/error messages are written for the
 LLM*. This contract quotes no exact `Fix:` text. When an implementation pins
 exact text, the ticket that ships it adds the quote and its pin together
 (`ai/contracts/test/check-quoted-fix.rb`, DND-411).
@@ -169,14 +170,23 @@ in tests.
 
 **The rule.** When a judgment is not accepted, for any reason, the caller does
 exactly what it did before judgments existed. Nothing is dropped, queued for a
-retry storm, or silently succeeded. And the fallback is loud: every non-accepted
-outcome leaves all three of
+retry storm, or silently succeeded. Every non-accepted outcome leaves
 
 1. a `judgment_calls` row, or a caller-side record, with the exact reason from
    the list below;
-2. a warning log naming the use case, the reason, the owner and the
-   `subject_ref`, with a `Fix:` clause;
-3. a `[:athena, :judgments, :fallback]` telemetry event.
+2. a `[:athena, :judgments, :fallback]` telemetry event carrying the reason and
+   its class.
+
+**Each reason has a class.** A **`state`** reason is the system working as
+configured: the mode is off, the sender is not the owner, a label has no
+accepted threshold. There is nothing to fix, so it logs at debug level with no
+`Fix:` clause, and it never changes a use case's health. A **`fault`** reason
+means something is wrong: a missing key, a rejected credential, a spent budget,
+a service error, our own bug. A fault is loud: it also logs a warning (an error
+for our own bugs) naming the use case, the reason, the owner and the
+`subject_ref`, with a `Fix:` clause, and it moves health to `unavailable`
+(*Owner alerts track health, not calls*). So a real fault is never buried under
+routine fallbacks.
 
 A fallback whose reason is a missing key also names **the key it searched for**,
 `(owner_id, :typesafe_api_key)`, so a key looked up wrongly never reads as a key
@@ -201,30 +211,30 @@ Every check that fails before step 7 makes **no** call to TypeSafe.
 **The closed reason list.** A reason not on this list is non-conformant. Adding
 one is an amendment to this table.
 
-| Reason | Where | Means |
-| --- | --- | --- |
-| `mode_off` | judge | the use case's mode is `off`; the manager returns `not_configured` |
-| `key_missing` | judge | no key stored for the owner; the manager returns `not_configured`; the record names the searched key |
-| `domain_not_permitted` | judge | the content domain is absent or not `work`, `blend` or `personal` |
-| `invalid_request` | judge | our question set built an invalid request (our bug: error-level log) |
-| `price_unknown` | judge | no configured price for the pinned model, or a call in the budget window has no cost, so spend could not be measured |
-| `budget_exhausted` | judge | a dollar cap would be exceeded; the record names which cap (`monthly` or `daily`) and whose (the total or the use case) |
-| `rate_limited_local` | judge | the owner's local rate limit is reached |
-| `credential_rejected` | judge | the port returned `unauthorized`, or the latch holds from an earlier one |
-| `custody_fault` | judge | reading the key from custody raised |
-| `timeout` | judge | the deadline passed |
-| `rate_limited` | judge | TypeSafe returned 429 |
-| `overloaded` | judge | TypeSafe returned 529 |
-| `request_rejected` | judge | TypeSafe returned 422 (our bug: error-level log) |
-| `http_status` | judge | TypeSafe returned another non-2xx status; the record carries it |
-| `transport_error` | judge | the connection failed |
-| `undecodable_body` | judge | the response body was not JSON |
-| `malformed_answer` | judge | the answer does not match the request; recorded as `malformed_answer:<detail>` |
-| `model_mismatch` | judge | the answering model is not the pinned model |
-| `below_threshold` | caller | the confidence is under the accepted threshold |
-| `threshold_unset` | caller | no threshold exists for the key; never accepts, whatever the confidence |
-| `label_disabled` | caller | the answer's label is disabled, or has no live destination |
-| `sender_rule` | Slack router | the conversation is not the owner's own, so no judgment is asked |
+| Reason | Class | Where | Means |
+| --- | --- | --- | --- |
+| `mode_off` | state | judge | the use case's mode is `off`; the manager returns `not_configured` |
+| `key_missing` | fault | judge | no key stored for the owner; the manager returns `not_configured`; the record names the searched key |
+| `domain_not_permitted` | fault | judge | the content domain is absent or not `work`, `blend` or `personal` |
+| `invalid_request` | fault | judge | our question set built an invalid request (our bug: error-level log) |
+| `price_unknown` | fault | judge | no configured price for the pinned model, or a call in the budget window has no cost, so spend could not be measured |
+| `budget_exhausted` | fault | judge | a dollar cap would be exceeded; the record names which cap (`monthly` or `daily`) and whose (the total or the use case) |
+| `rate_limited_local` | fault | judge | the owner's local rate limit is reached |
+| `credential_rejected` | fault | judge | the port returned `unauthorized`, or the latch holds from an earlier one |
+| `custody_fault` | fault | judge | reading the key from custody raised |
+| `timeout` | fault | judge | the deadline passed |
+| `rate_limited` | fault | judge | TypeSafe returned 429 |
+| `overloaded` | fault | judge | TypeSafe returned 529 |
+| `request_rejected` | fault | judge | TypeSafe returned 422 (our bug: error-level log) |
+| `http_status` | fault | judge | TypeSafe returned another non-2xx status; the record carries it |
+| `transport_error` | fault | judge | the connection failed |
+| `undecodable_body` | fault | judge | the response body was not JSON |
+| `malformed_answer` | fault | judge | the answer does not match the request; recorded as `malformed_answer:<detail>` |
+| `model_mismatch` | fault | judge | the answering model is not the pinned model |
+| `below_threshold` | state | caller | the confidence is under the accepted threshold, or the answer is `unclear` |
+| `threshold_unset` | state | caller | no threshold exists for the key; never accepts, whatever the confidence |
+| `label_disabled` | state | caller | the answer's label is disabled, or has no live destination |
+| `sender_rule` | state | Slack router | the conversation is not the owner's own, so no judgment is asked |
 
 A successful call records outcome `answered` with no reason.
 
@@ -233,10 +243,12 @@ While it holds, every call falls back as `credential_rejected` with **no** call
 to TypeSafe, so a revoked key makes one call, not one per event. Storing a new
 key (a newer stored-at time) clears the latch by construction.
 
-**Owner alerts track state, not calls.** When a use case's health moves between
-`ok` and `unavailable(<reason>)`, one owner alert goes out through the existing
-owner-alert path. N fallbacks in a row are N records and one alert. The budget
-has its own alert rule (*Budget*).
+**Owner alerts track health, not calls.** A use case's health is
+`unavailable(<reason>)` after a fault-class outcome and `ok` after an answered
+call; a state-class outcome leaves it unchanged. When health moves between `ok`
+and `unavailable(<reason>)`, one owner alert goes out through the existing
+owner-alert path. N faults in a row are N records and one alert. The budget has
+its own alert rule (*Budget*).
 
 ## Modes
 
@@ -250,8 +262,8 @@ Each (owner, use case) has one mode:
 
 **`on` is refused** unless a threshold row exists for (owner, use case,
 question-set version, pinned model) that an eval run produced. A use case MAY
-add a refusal of its own; Slack routing refuses `on` while its measured p95
-latency exceeds 1,000 ms. `eval:*` ignores the mode, but not the key, the domain
+add a refusal of its own; Slack routing refuses `on` while the p95 of
+`latency_ms` over its shadow-mode `judgment_calls` rows exceeds 1,000 ms. `eval:*` ignores the mode, but not the key, the domain
 or the budget.
 
 ## Threshold provenance, n/a and the pinned model
@@ -272,7 +284,9 @@ cannot be written.
 
 **How a threshold is chosen.** For each label, the eval tries thresholds 0.00,
 0.05, …, 0.95. The chosen threshold is the smallest whose Wilson 95% lower bound
-on precision is at least 0.90, with at least 10 routed cases.
+on precision is at least 0.90, with at least 10 routed cases. The bound is the
+binding rule: even with every case correct, it reaches 0.90 only at 35 routed
+cases, so a label needs at least that many before it can be enabled.
 
 **n/a.** A label with no qualifying threshold is **`n/a`**: disabled, and it
 falls back. `n/a` is not 0 and not a failure. No threshold row reads as
@@ -338,8 +352,9 @@ with it.
 - [ ] The key is an argument to the port only, never logged or in an error term;
       the port never retries.
 - [ ] Every non-accepted outcome does today's behaviour and leaves a record with
-      a reason from the closed list, a warning log with `Fix:`, and a telemetry
-      event; `key_missing` names the searched key.
+      a reason from the closed list and a telemetry event; a fault-class reason
+      also logs a warning with `Fix:` and moves health; a state-class reason
+      does neither; `key_missing` names the searched key.
 - [ ] Every check before the call makes no call to TypeSafe; a latched 401 makes
       no call.
 - [ ] Mode defaults to `off`; `on` is refused without an eval-produced threshold.
