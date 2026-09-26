@@ -541,11 +541,13 @@ fi
 # A failed send is loud and is NOT recorded as sent, so the next tick retries.
 # None of this touches the dirt, changes the exit code, or feeds the wedge.
 
-# stale_dirt_send <skip-record> <first-seen> <streak> <newest> <count> <sig>
-# Prints the delivered message name. Non-zero (with send-mail's words on
+# stale_dirt_send <skip-record> <first-seen> <streak> <newest> <count> <sig> <paths>
+# <paths> is the relay list stale_dirt_track already wrote into the record, so
+# the message and its authority name the same paths. Prints the delivered
+# message name. Non-zero (with send-mail's words on
 # stderr) when the send failed.
 stale_dirt_send() {
-  local record="$1" first="$2" streak="$3" newest="$4" count="$5" sig="$6"
+  local record="$1" first="$2" streak="$3" newest="$4" count="$5" sig="$6" paths="$7"
   local repo send_mail body out rc name
   repo="$(cd -- "${__wrapper_dir}/.." && pwd -P)"
   send_mail="${repo}/ai/skills/athena:inbox/bin/send-mail"
@@ -565,19 +567,23 @@ stale_dirt_send() {
     printf 'dirty_files: %s\n' "${count}"
     printf 'signature: %s\n' "${sig}"
     printf 'paths:\n'
-    sd_display_paths "${MAIN_CHECKOUT}" 20 | sed 's/^/  /'
+    printf '%s\n' "${paths}" | sed 's/^/  /'
     printf '\nFix: these paths are not the shipwright'"'"'s, and it will never touch them. For each one, the owner picks: commit it, add it to .gitignore, or remove it. Until then every hourly tick yields and no retrospective runs. If the dirt is known inert and one run should proceed anyway, run scripts/athena-shipwright-run.sh with SHIPWRIGHT_ALLOW_DIRTY=1. This alert is not repeated until the dirty paths or their newest mtime change.\n'
   } >"${body}"
   # This channel's detector side has a second writer, the inbox-client
   # watchdog, under the same identity. send-mail serialises the two with the
   # channel's .sender.lock and REFUSES (never collides) when the other holds
-  # it, so a refusal is retried briefly here; any other failure is not.
+  # it, so a refusal is retried briefly here; any other failure is not. Each
+  # refusal is noted in the record, so a reader can see the retry happened.
   local attempt=0
   while :; do
     attempt=$(( attempt + 1 ))
     out="$(cd -- "${repo}" && timeout 20 "${send_mail}" --local harness-alerts-detector shipwright-stale-dirt \
             --to custom --re "${record}" --body-file "${body}" 2>&1)"; rc=$?
-    [ "${rc}" -ne 0 ] && [ "${attempt}" -lt 3 ] && grep -q 'already sending on' <<<"${out}" || break
+    if [ "${rc}" -eq 0 ] || [ "${attempt}" -ge 3 ] || ! grep -q 'already sending on' <<<"${out}"; then
+      break
+    fi
+    printf 'alert: sender lock busy (attempt %s/3); retrying\n' "${attempt}" >>"${record}"
     sleep 2
   done
   rm -f "${body}"
@@ -593,7 +599,7 @@ stale_dirt_send() {
 # streak, send the one alert when due, and say what happened on stderr and in
 # the record. Always returns 0: it reports on the yield, it never decides it.
 stale_dirt_track() {
-  local tick="$1" record="$2" m sig newest count now age stale=0 label
+  local tick="$1" record="$2" m sig newest count now age stale=0 label paths
   local prev_sig prev_streak first alerted streak name err tmp
   if ! m="$(sd_measure "${MAIN_CHECKOUT}")"; then
     printf 'dirt: UNMEASURED (git status or stat failed mid-scan)\n' >>"${record}"
@@ -614,15 +620,23 @@ stale_dirt_track() {
 
   # The classification lands in the record BEFORE any send: the record is what
   # the alert's re: names and what its reader verifies, so it must already
-  # carry the STALE verdict when the doorbell rings.
-  printf 'dirt: %s newest_change=%s age_s=%s stale_streak=%s/%s first_seen=%s signature=%s\n' \
-    "${label}" "$(date -u -d "@${newest}" +%Y-%m-%dT%H:%M:%SZ)" "${age}" "${streak}" "${STALE_DIRT_ESCALATE}" \
-    "${first}" "${sig}" >>"${record}"
+  # carry the STALE verdict when the doorbell rings. The relay_paths block is
+  # what the reader relays to the owner: the raw list above it is uncapped (an
+  # untracked node_modules is every file in it, 30k measured) and unstripped.
+  # The block is indented, so no line of it can start "dirt: ".
+  paths="$(sd_display_paths "${MAIN_CHECKOUT}" 20)" || paths="(the paths could not be listed)"
+  {
+    printf 'dirt: %s newest_change=%s age_s=%s stale_streak=%s/%s first_seen=%s signature=%s\n' \
+      "${label}" "$(date -u -d "@${newest}" +%Y-%m-%dT%H:%M:%SZ)" "${age}" "${streak}" "${STALE_DIRT_ESCALATE}" \
+      "${first}" "${sig}"
+    printf 'relay_paths: (untracked directories collapsed, control characters stripped, at most 20)\n'
+    printf '%s\n' "${paths}" | sed 's/^/  /'
+  } >>"${record}"
 
   name=""
   if [ "${stale}" -eq 1 ] && [ "${streak}" -ge "${STALE_DIRT_ESCALATE}" ] && [ -z "${alerted}" ]; then
     err="$(mktemp)"
-    if name="$(stale_dirt_send "${record}" "${first}" "${streak}" "${newest}" "${count}" "${sig}" 2>"${err}")"; then
+    if name="$(stale_dirt_send "${record}" "${first}" "${streak}" "${newest}" "${count}" "${sig}" "${paths}" 2>"${err}")"; then
       alerted="${name}"
     else
       name=""
