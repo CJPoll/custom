@@ -924,6 +924,30 @@ def hook_self_tests_on_disk(root = CUSTOM_DIR)
      .map { |p| p.sub("#{root}/", "") }.sort
 end
 
+require "rbconfig"
+require_relative "../lib/strict_argv"
+
+# Every argument must be a declared flag (DND-526). A typo of --list or
+# --self-test used to fall through to the full gate run.
+CLI_SPEC = { "--self-test" => :switch, "--list" => :switch }.freeze
+
+# -> [opts, nil] on success, [nil, reason] on a usage error.
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  return [nil, "--self-test and --list are separate modes; pass one"] if opts["--self-test"] && opts["--list"]
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+def gate_mode(opts)
+  return :self_test if opts["--self-test"]
+  return :list if opts["--list"]
+
+  :gate
+end
+
 def run_self_test
   ok = true
 
@@ -1834,6 +1858,36 @@ def run_self_test
     ok = false
   end
 
+  # 12 (DND-526). Every argument must be a declared flag. A typo of --list or
+  #    --self-test used to fall through to the full gate run. Black-box only
+  #    beside --list (read-only and fast even on the old parser, which ran the
+  #    listing); every other shape in-process, because the old parser would
+  #    run the whole gate — or this self-test, recursively.
+  [[%w[--list --bogus], "--bogus"], [%w[--list stray], "stray"]].each do |args, named|
+    out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path(__FILE__), *args, stdin_data: "")
+    next if st.exitstatus == 2 && err.include?(named) && err.include?("Fix:") && out.empty?
+
+    warn "self-test: FAIL — `harness-gate #{args.join(' ')}` must exit 2 naming #{named} with a Fix: " \
+         "and print nothing on stdout (got exit #{st.exitstatus}, stderr #{err[0, 120].inspect})"
+    ok = false
+  end
+  { %w[--lsit] => "--lsit", %w[--self-tset] => "--self-tset", %w[--list=1] => "--list=",
+    %w[--list --list] => "--list", %w[--self-test --list] => "--list",
+    %w[--list --self-test] => "--list" }.each do |args, named|
+    _o, reason = parse_cli(args)
+    next if reason.to_s.include?(named)
+
+    warn "self-test: FAIL — parse_cli(#{args.inspect}) must be a usage error naming #{named}, got #{reason.inspect}"
+    ok = false
+  end
+  { [] => :gate, %w[--list] => :list, %w[--self-test] => :self_test }.each do |args, want|
+    o, reason = parse_cli(args)
+    next if reason.nil? && gate_mode(o) == want
+
+    warn "self-test: FAIL — parse_cli(#{args.inspect}) must accept and select #{want}, got #{reason.inspect}"
+    ok = false
+  end
+
   if ok
     puts "harness-gate: self-test OK (#{CHECKS.size} checks declared, " \
          "#{discover_self_tests.size} of them discovered self-test suites)"
@@ -1852,7 +1906,9 @@ def run_self_test
          "stdin closed; and keep inline_self_test_coverage naming every " \
          "first-party tool whose inline --self-test the gate never runs (case " \
          "11: declare it in STATIC_CHECKS, map it in " \
-         "INLINE_SELF_TEST_COVERED_BY, or except it with a real reason)."
+         "INLINE_SELF_TEST_COVERED_BY, or except it with a real reason); and " \
+         "keep parse_cli refusing every undeclared argument with exit 2 " \
+         "(case 12, ai/lib/strict_argv.rb)."
     1
   end
 end
@@ -1877,10 +1933,21 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   exit 0
 end
 
+cli, reason = parse_cli(ARGV)
+if reason
+  warn "harness-gate: usage error — #{reason}."
+  warn "  Fix: re-run with only the flags `ai/bin/harness-gate --help` lists: no " \
+       "argument (run the gate), --list, or --self-test. An unrecognised " \
+       "argument is refused, not ignored: ignoring it would run a different " \
+       "mode than the one you asked for."
+  exit 2
+end
+
 begin
   exit(
-    if ARGV.include?("--self-test") then run_self_test
-    elsif ARGV.include?("--list") then run_list
+    case gate_mode(cli)
+    when :self_test then run_self_test
+    when :list then run_list
     else run_gate
     end
   )
