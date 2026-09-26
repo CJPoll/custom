@@ -64,7 +64,8 @@
 #   ai/bin/admiral-eval --self-test     verify the scorer/parser/sampling/baseline/sandbox (no model; GATE-WIRED)
 #   ai/bin/admiral-eval --run           execute cases (T1 deterministic; T2 model-in-loop), score, diff
 #                                       vs baseline, exit 1 on regression  (MODEL IN LOOP; NOT in the gate)
-#   ai/bin/admiral-eval --run --runs K          samples-per-T2-case (default 3; majority scores the case)
+#   ai/bin/admiral-eval --run --runs K          samples-per-T2-case (default 10; the row's PASS/FAIL is the
+#                                       majority, the baseline diff is EvalScore.classify on the counts)
 #   ai/bin/admiral-eval --run --update-baseline  rewrite ai/eval/admiral-baseline.json (deliberate only)
 #   ai/bin/admiral-eval --run --only AE-05       run one case (local iteration)
 #   ai/bin/admiral-eval --run --agent-file PATH  evaluate that rendered admiral
@@ -102,7 +103,11 @@ REPO_ROOT    = File.expand_path("..", AI_DIR)
 require File.join(AI_DIR, "lib", "eval_score")
 require File.join(AI_DIR, "lib", "eval_subject")
 HOOKS_DIR    = File.join(AI_DIR, "hooks")
-DEFAULT_RUNS = 3
+# DND-523: the N the baseline diff's rule (EvalScore.classify) is calibrated at
+# — variant-eval's DEFAULT_RUNS, adopted by DND-225. The self-test asserts the
+# two stay equal. At K=3 a stochastic case like AE-18 (p≈0.78) majority-failed
+# ~13% of runs with nothing changed.
+DEFAULT_RUNS = 10
 
 # DND-529: the subject is one of the agents EvalSubject::AGENTS assigns to this
 # runner (admiral, captain, architect), chosen by --agent (default admiral).
@@ -686,17 +691,126 @@ def evaluate(dir, runs:, argv:, agent: eval_agent)
 end
 
 # ---------------------------------------------------------------------------
-# baseline load / diff — byte-for-byte the harness-eval semantics: a case the
-# baseline passed but this run fails is the FAIL signal; a newly-fixed case is
-# reported, not failed. --update-baseline is never used to hide a regression.
+# baseline load / diff. A case the baseline measured that this run measures
+# significantly WORSE is the FAIL signal; an improvement is reported, never
+# failed. --update-baseline is never used to hide a regression.
+#
+# DND-523: a T2 case is compared on its COUNTS with EvalScore.classify, the
+# rule variant-eval uses (DND-225): regression = the Newcombe 95% interval of
+# p_now - p_base lies below 0 OR the drop exceeds the 0.3 pilot envelope; a
+# case the baseline measured but this run did not is :missing, a regression.
+# It replaced a diff of K-sample majority booleans, which read a stochastic
+# case (AE-18, p≈0.78) baselined as a pass as "pass -> fail" on ~13% of K=3
+# runs with nothing changed, and which MISSED a real 10/10 -> 6/10 drop because
+# 6/10 is still a majority pass. The rule is calibrated at N = DEFAULT_RUNS
+# (variant-eval's N) per side. T1 (hook-stdin) cases are deterministic and
+# always record rate 1/1, so they diff EXACTLY on pass, never through classify.
 # ---------------------------------------------------------------------------
+BaselineCase = Struct.new(:pass, :counts, :rate_error)
+
 def load_baseline(path = baseline_path)
   return nil unless path && File.file?(path)
   data = JSON.parse(File.read(path))
-  data["cases"].each_with_object({}) { |c, h| h[c["name"]] = c["pass"] }
+  data["cases"].each_with_object({}) { |c, h| h[c["name"]] = baseline_case(c) }
 rescue StandardError => e
   warn "admiral-eval: Note: baseline unreadable (#{e.message}); running without baseline diff."
   nil
+end
+
+# One baseline entry. A rate that does not parse is kept as an ERROR on the
+# case (diff_baseline refuses it), never dropped: a case the diff cannot score
+# must not read as a case with nothing to compare.
+def baseline_case(entry)
+  BaselineCase.new(entry["pass"], EvalScore.parse_rate(entry["rate"]), nil)
+rescue EvalScore::InvalidCounts => e
+  BaselineCase.new(entry["pass"], nil, e.message)
+end
+
+# How one baseline case compares with this run's result for it (nil = absent).
+# Returns [flip, detail]; flip is an EvalScore.classify flip, :unusable, or
+# :same (a T1 case whose pass did not change).
+def baseline_flip(base, result)
+  return [:unusable, "baseline rate unusable: #{base.rate_error}"] if base.rate_error
+  return [:missing, "missing from this run (baseline #{rate_text(base.counts)})"] if result.nil?
+
+  if result[:mode] == "hook-stdin"
+    return [:regressed, "T1 baseline pass -> now fail"] if base.pass && !result[:pass]
+    return [:improved, "T1 baseline fail -> now pass"] if !base.pass && result[:pass]
+
+    return [:same, nil]
+  end
+
+  now = EvalScore.parse_rate(result[:rate])
+  flip = EvalScore.classify(base.counts, now)
+  return [flip, "never sampled this run (0/0; baseline #{rate_text(base.counts)})"] if flip == :missing
+  return [flip, nil] if base.counts.nil? || now.nil?
+
+  d, lo, hi = EvalScore.newcombe(base.counts, now)
+  [flip, format("baseline %s -> now %s (delta %+.2f, 95%% [%+.2f, %+.2f])", rate_text(base.counts),
+                rate_text(now), d, lo, hi)]
+end
+
+def rate_text(counts)
+  counts ? "#{counts.k}/#{counts.n}" : "n/a"
+end
+
+def diff_baseline(results, baseline, agent: eval_agent, only: nil)
+  now = results.to_h { |r| [r[:name], r] }
+  # --only compares only what it selected; every other baseline case is out of
+  # scope, not missing.
+  scoped = baseline.select { |name, _| only.nil? || name.start_with?(only) }
+  flips = scoped.to_h { |name, base| [name, baseline_flip(base, now[name])] }
+  unusable  = flips.select { |_, (f, _)| f == :unusable }
+  regressed = flips.select { |_, (f, _)| EvalScore.regression?(f) }
+  improved  = flips.select { |_, (f, _)| f == :improved }
+  new_cases = (now.keys - baseline.keys) + flips.select { |_, (f, _)| f == :new }.keys
+  puts ""
+  puts "baseline diff: #{regressed.size} regressed, #{improved.size} improved, #{new_cases.size} new case(s) " \
+       "(T2: EvalScore.classify on counts; T1: exact)"
+  improved.each { |n, (_, why)| puts "  + improved: #{n} #{why}" }
+  new_cases.each { |n| puts "  · new:   #{n} (#{now[n] && now[n][:pass] ? 'pass' : 'fail'}; no baseline measurement)" }
+  report_undersampled(scoped, now)
+
+  unless unusable.empty?
+    warn "admiral-eval: FAILED — #{unusable.size} baseline case(s) cannot be scored:"
+    unusable.each { |n, (_, why)| warn "  - #{n}: #{why}" }
+    warn "  Fix: every baseline case needs a \"rate\" of \"<passes>/<samples>\". Re-capture the baseline " \
+         "against the current #{agent.name} with `#{rerun_hint(agent)} --run --update-baseline` once this run is " \
+         "green; do not hand-edit a rate to make the diff pass."
+  end
+  unless regressed.empty?
+    warn "admiral-eval: FAILED — regression vs baseline:"
+    regressed.each { |n, (_, why)| warn "  - #{n}: #{why}" }
+    warn "  Fix: a change (likely a #{agent.name} trim or block edit) broke a behavioral case the baseline caught. The rule " \
+         "already discounts sampling noise (EvalScore.classify: the drop is outside the 95% band or exceeds " \
+         "0.3), so restore the invariant's TRIGGER (the resident one-liner / JIT-skill pointer that fires it), " \
+         "not just its words; do NOT run --update-baseline to hide it. A missing case means its fixture or " \
+         "its samples disappeared: restore them. If either side was sampled below #{DEFAULT_RUNS} (see the " \
+         "Note above), re-run `--run --only <case>` at the default --runs to confirm."
+  end
+  unusable.empty? && regressed.empty? ? 0 : 1
+end
+
+# Advisory (never an exit-code change): EvalScore.classify is calibrated at
+# N = DEFAULT_RUNS per side. A smaller side (a legacy K=3 baseline, or --runs 3)
+# is still classified, but its interval is wider and so is its false-flag rate.
+# Say so rather than let the diff read as calibrated.
+def report_undersampled(scoped, now)
+  small = scoped.select do |name, base|
+    r = now[name]
+    next false if base.counts.nil? || r.nil? || r[:mode] == "hook-stdin"
+
+    var = EvalScore.parse_rate(r[:rate])
+    base.counts.n < DEFAULT_RUNS || (var && var.n < DEFAULT_RUNS)
+  end
+  return if small.empty?
+
+  ex_name, ex_base = small.first
+  warn "admiral-eval: Note: #{small.size} T2 case(s) compared with a side sampled below N=#{DEFAULT_RUNS} " \
+       "(e.g. #{ex_name}: baseline #{rate_text(ex_base.counts)}, now #{now[ex_name][:rate]}). EvalScore.classify " \
+       "is calibrated at N=#{DEFAULT_RUNS} per side (DND-225); a smaller side widens the false-flag rate. " \
+       "Fix: run at the default --runs, and re-capture the baseline at N=#{DEFAULT_RUNS} with " \
+       "`--run --update-baseline` once a run is green."
 end
 
 # --- baseline PROVENANCE ----------------------------------------------------
@@ -768,27 +882,6 @@ def report_provenance(recorded, current = subject_fingerprint, agent: eval_agent
        "current agent; if it is NOT green, treat the failures as caused by the agent change and restore the " \
        "invariant's trigger rather than re-baselining over it."
   :stale
-end
-
-def diff_baseline(results, baseline, agent: eval_agent)
-  now = results.each_with_object({}) { |r, h| h[r[:name]] = r[:pass] }
-  regressed = baseline.select { |name, was| was && now[name] == false }.keys
-  fixed     = baseline.select { |name, was| !was && now[name] == true }.keys
-  new_cases = now.keys - baseline.keys
-  puts ""
-  puts "baseline diff: #{regressed.size} regressed, #{fixed.size} fixed, #{new_cases.size} new case(s)"
-  fixed.each { |n| puts "  + fixed: #{n}" }
-  new_cases.each { |n| puts "  · new:   #{n} (#{now[n] ? 'pass' : 'fail'})" }
-  unless regressed.empty?
-    warn "admiral-eval: FAILED — regression vs baseline:"
-    regressed.each { |n| warn "  - #{n}: baseline pass -> now fail" }
-    warn "  Fix: a change (likely a #{agent.name} trim or block edit) broke a behavioral case the baseline caught. " \
-         "Restore the invariant's TRIGGER (the resident one-liner / JIT-skill pointer that fires it), " \
-         "not just its words; do NOT run --update-baseline to hide it. If a 2/3->1/3 case looks like " \
-         "sampling noise, re-run --run --only <case> to confirm before attributing it to the trim."
-    return 1
-  end
-  0
 end
 
 # ---------------------------------------------------------------------------
@@ -878,7 +971,7 @@ def run_model(runs:, only:, update:, agent: eval_agent, agent_file: default_agen
 
   baseline = load_baseline(baseline_path(agent))
   if baseline
-    code = diff_baseline(results, baseline, agent: agent)
+    code = diff_baseline(results, baseline, agent: agent, only: only)
     report_provenance(load_baseline_subject(baseline_path(agent)), subject, agent: agent)
     return code
   end
@@ -1010,18 +1103,106 @@ def self_test
   end
 
   # -- 7. baseline diff ----------------------------------------------------
-  base = { "AE-01" => true, "AE-02" => true }
-  regressed_run = [{ name: "AE-01", pass: true }, { name: "AE-02", pass: false }]
+  one = EvalScore.counts(1, 1)
+  base = { "AE-01" => BaselineCase.new(true, one), "AE-02" => BaselineCase.new(true, one) }
+  regressed_run = [{ name: "AE-01", mode: "hook-stdin", pass: true, rate: "1/1" },
+                   { name: "AE-02", mode: "hook-stdin", pass: false, rate: "1/1" }]
   code, out, err = capture_io { diff_baseline(regressed_run, base) }
   fail.("a baseline pass->fail must exit 1") unless code == 1
   fail.("regression must name the regressed case") unless err.include?("AE-02")
   fail.("regression Fix: line missing") unless err.include?("Fix:")
-  # a case the baseline FAILED that now passes is a fix (reported, exit 0)
-  base_fixed = { "AE-01" => true, "AE-02" => false }
-  fixed_run = [{ name: "AE-01", pass: true }, { name: "AE-02", pass: true }]
+  # a case the baseline FAILED that now passes is an improvement (reported, exit 0)
+  base_fixed = { "AE-01" => BaselineCase.new(true, one), "AE-02" => BaselineCase.new(false, one) }
+  fixed_run = [{ name: "AE-01", mode: "hook-stdin", pass: true, rate: "1/1" },
+               { name: "AE-02", mode: "hook-stdin", pass: true, rate: "1/1" }]
   code2, out2, = capture_io { diff_baseline(fixed_run, base_fixed) }
   fail.("a newly-fixed case must exit 0") unless code2 == 0
-  fail.("fixed case must be reported") unless out2.include?("+ fixed: AE-02")
+  fail.("fixed case must be reported") unless out2.include?("+ improved: AE-02")
+
+  # -- 7c. baseline diff is EvalScore.classify on counts (DND-523) ----------
+  # The defect: the diff compared K-sample MAJORITY booleans, so a stochastic
+  # case (AE-18, p≈0.78) baselined as a pass read "pass -> fail" on ~13% of
+  # K=3 runs with nothing changed. The fix scores each T2 case with
+  # EvalScore.classify (Newcombe 95% interval below 0 OR a drop > 0.3; a missing
+  # case is a regression) at N = variant-eval's DEFAULT_RUNS. The same fixtures
+  # prove the rule is not weakened: a real drop is still flagged, including one
+  # the majority rule MISSED. Counts only — no model.
+  Dir.mktmpdir("admiral-eval-classify-") do |d|
+    load_base = lambda do |cases|
+      path = File.join(d, "baseline-#{cases.hash.abs}.json")
+      File.write(path, JSON.generate("cases" => cases.map { |n, pass, rate| { "name" => n, "pass" => pass, "rate" => rate } }))
+      load_baseline(path)
+    end
+    row = ->(n, pass, rate, mode = "next-action") { { name: n, mode: mode, pass: pass, rate: rate } }
+    diff = lambda do |results, base, **kw|
+      capture_io { diff_baseline(results, base, **kw) }
+    rescue StandardError => e
+      [:raised, "", "#{e.class}: #{e.message}"]
+    end
+
+    # (a) AE-18 shape, N=10 baseline: baselined pass 8/10, now 5/10 (a majority
+    #     FAIL). Inside the noise band (Δ=-0.3, interval spans 0) -> no flag.
+    c, _o, e = diff.([row.("AE-18", false, "5/10")], load_base.([["AE-18", true, "8/10"]]))
+    fail.("AE-18-shape 8/10 -> 5/10 is sampling noise and must NOT flag (exit #{c.inspect}): #{e}") unless c == 0
+    c, _o, e = diff.([row.("AE-18", true, "7/10")], load_base.([["AE-18", true, "10/10"]]))
+    fail.("AE-18-shape 10/10 -> 7/10 must NOT flag (exit #{c.inspect}): #{e}") unless c == 0
+
+    # (b) legacy K=3 baseline (today's admiral-baseline.json format): the AE-02
+    #     2/3 shape against a default run of 4/10 is noise -> no flag.
+    c, _o, e = diff.([row.("AE-02", false, "4/10")], load_base.([["AE-02", true, "2/3"]]))
+    fail.("legacy 2/3 -> 4/10 is inside the band and must NOT flag (exit #{c.inspect}): #{e}") unless c == 0
+
+    # (c) a REAL drop is still caught: 10/10 -> 5/10, and 10/10 -> 6/10, which
+    #     the majority rule missed (6/10 is a majority pass).
+    c, _o, e = diff.([row.("AE-01", false, "5/10")], load_base.([["AE-01", true, "10/10"]]))
+    fail.("a real drop 10/10 -> 5/10 must exit 1 (got #{c.inspect})") unless c == 1
+    fail.("a flagged drop must name the case and both counts: #{e}") \
+      unless e.include?("AE-01") && e.include?("10/10") && e.include?("5/10")
+    fail.("a flagged drop must carry a Fix: line") unless e.include?("Fix:")
+    c, _o, = diff.([row.("AE-01", true, "6/10")], load_base.([["AE-01", true, "10/10"]]))
+    fail.("a real drop 10/10 -> 6/10 (a majority pass) must still exit 1 (got #{c.inspect})") unless c == 1
+    c, _o, = diff.([row.("AE-01", true, "6/10")], load_base.([["AE-01", true, "3/3"]]))
+    fail.("legacy 3/3 -> 6/10 is a drop of 0.4 and must exit 1 (got #{c.inspect})") unless c == 1
+
+    # (d) a MISSING case is a regression: never sampled (0/0), or absent from
+    #     a full run although the baseline has it.
+    c, _o, e = diff.([row.("AE-01", false, "0/0")], load_base.([["AE-01", true, "10/10"]]))
+    fail.("an unsampled (0/0) case must exit 1 as missing (got #{c.inspect}): #{e}") unless c == 1
+    c, _o, e = diff.([row.("AE-01", true, "10/10")],
+                     load_base.([["AE-01", true, "10/10"], ["AE-02", true, "10/10"]]))
+    fail.("a baseline case absent from a full run must exit 1 as missing (got #{c.inspect})") unless c == 1
+    fail.("a missing case must be named: #{e}") unless e.include?("AE-02")
+    # ...but --only scopes the comparison: cases it did not select are not missing.
+    c, _o, e = diff.([row.("AE-01", true, "10/10")],
+                     load_base.([["AE-01", true, "10/10"], ["AE-02", true, "10/10"]]), only: "AE-01")
+    fail.("--only must not report unselected baseline cases as missing (got #{c.inspect}): #{e}") unless c == 0
+
+    # (e) T1 (hook-stdin) is deterministic and its rate is always 1/1, so it
+    #     must diff EXACTLY on pass, never through classify (1/1 vs 1/1).
+    c, _o, = diff.([row.("AE-13a", false, "1/1", "hook-stdin")], load_base.([["AE-13a", true, "1/1"]]))
+    fail.("a T1 baseline pass -> fail must exit 1 even though both rates read 1/1 (got #{c.inspect})") \
+      unless c == 1
+
+    # (f) an improvement is reported only when classify says so; a new case is n/a.
+    c, o, = diff.([row.("AE-19c", true, "10/10"), row.("AE-99", true, "10/10")],
+                  load_base.([["AE-19c", false, "0/10"]]))
+    fail.("0/10 -> 10/10 must be reported improved, exit 0 (got #{c.inspect}): #{o}") \
+      unless c == 0 && o.include?("+ improved: AE-19c")
+    fail.("a case with no baseline must be reported new: #{o}") unless o.include?("new:   AE-99")
+
+    # (g) a baseline case with no usable rate cannot be classified: refuse loudly,
+    #     never fall back to "no baseline" (a failed lookup must not read empty).
+    c, _o, e = diff.([row.("AE-01", true, "10/10")], load_base.([["AE-01", true, nil]]))
+    fail.("a rate-less baseline case must exit 1 with a Fix:, not pass (got #{c.inspect}): #{e}") \
+      unless c == 1 && e.include?("Fix:")
+  end
+
+  # The rule is calibrated at variant-eval's N (DND-225); the two defaults must
+  # not drift apart silently.
+  ve = File.read(File.join(AI_DIR, "bin", "variant-eval"))[/^DEFAULT_RUNS\s*=\s*(\d+)/, 1]
+  fail.("could not read variant-eval's DEFAULT_RUNS — the calibration cross-check cannot run") if ve.nil?
+  fail.("admiral-eval DEFAULT_RUNS (#{DEFAULT_RUNS}) must equal variant-eval's (#{ve}), the N EvalScore.classify " \
+        "is calibrated at (DND-225)") unless ve.nil? || DEFAULT_RUNS == ve.to_i
 
   # -- 7b. baseline PROVENANCE: a stale baseline must not read as a clean one --
   # The defect this guards: a baseline captured against a DIFFERENT admiral
@@ -1541,7 +1722,10 @@ USAGE = <<~TXT
                         agent exits 2, never zero cases.
 
   Options (with --run):
-    --runs N            majority-sampling runs per case (#{RUNS_RANGE.first}-#{RUNS_RANGE.last})
+    --runs N            samples per T2 case (#{RUNS_RANGE.first}-#{RUNS_RANGE.last}, default #{DEFAULT_RUNS}).
+                        The row's PASS/FAIL is the majority; the baseline
+                        diff classifies the counts (EvalScore.classify),
+                        calibrated at the default N.
     --only NAME         restrict to one case
     --update-baseline   rewrite the baseline from this run's results
     --agent-file PATH   the rendered agent definition to evaluate
