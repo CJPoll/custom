@@ -682,10 +682,12 @@ end
 # Landed::PIN_REPO_ENV). Every check then measures the same commit: origin's
 # main as of the gate start. The guarantee is unchanged: a local ref that is
 # not that commit (or a later one fetched from origin) still fails, and each
-# check still asks origin and requires the pin to be on origin's main, so a
-# hand-set pin cannot name a commit that never landed (residual in
-# ai/lib/landed.rb -> "ANYONE CAN SET AN ENVIRONMENT VARIABLE"). A move during
-# the run is reported once, as a NOTE naming both SHAs.
+# check still asks origin and requires the pin to be proven on origin's main
+# (fetching origin's objects, never a ref, when they are not here yet), so a
+# hand-set pin cannot name a commit that never landed. It can name an older
+# landed one: that residual is in ai/lib/landed.rb -> "ANYONE CAN SET AN
+# ENVIRONMENT VARIABLE". A move during the run is reported once, as a NOTE
+# naming both SHAs.
 #
 # The gate never passes on a pin it inherited: it always sets both variables,
 # or clears both when origin cannot be read (each check then reads origin
