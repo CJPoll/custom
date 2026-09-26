@@ -17,6 +17,9 @@
 #   stop:  source the initd in a NEW process, SIGTERM only the supervised pid
 #          (exactly what supervise-daemon --stop does), wait for it, then run
 #          stop_post if the initd defines one.
+# DND-838 adds the respawn path: SIGKILL only the supervised pid (a crash),
+# then start the command again WITHOUT start_pre, as supervise-daemon does,
+# and assert the crashed command's children are gone (one Runner.Listener).
 # Every process it starts is a stub under a private temp dir, and cleanup kills
 # only pids it recorded, by PID, after checking they still live under that dir.
 set -uo pipefail
@@ -24,9 +27,10 @@ set -uo pipefail
 here="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 sysfiles="$(cd -- "${here}/../.." && pwd -P)"
 lib="${sysfiles}/lib/initd-proc-tree.sh"
+reap_exec="${sysfiles}/lib/initd-reap-exec"
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 fi
 
@@ -98,7 +102,10 @@ EOF
 driver="${tmp}/openrc-run-emu.sh"
 cat > "${driver}" <<'EOF'
 #!/bin/sh
-# usage: openrc-run-emu.sh start|stop INITD NAME STATE [COMMAND_OVERRIDE]
+# usage: openrc-run-emu.sh start|respawn|crash|stop INITD NAME STATE [COMMAND_OVERRIDE]
+#   respawn: what supervise-daemon does after its command dies: start the
+#            command again, with the same --env args, and NO start_pre.
+#   crash:   SIGKILL only the supervised pid (the command dies on its own).
 phase="$1"; initd="$2"; name="$3"; state="$4"; override="${5:-}"
 ebegin() { :; }
 eend() { return "${1:-0}"; }
@@ -109,16 +116,42 @@ yesno() { case "$1" in [Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee]|[Oo][Nn]) return 0 ;; esa
 service_set_value() { :; }
 service_get_value() { :; }
 . "${initd}"
-[ -n "${override}" ] && command="${override}"
+# COMMAND_OVERRIDE replaces the service's real program with a stub. When the
+# initd runs it through the respawn-safe wrapper (DND-838), the real program is
+# the first word after `--` in command_args, and that is what is replaced.
+if [ -n "${override}" ]; then
+  if [ -n "${ATHENA_REAP_EXEC:-}" ] && [ "${command}" = "${ATHENA_REAP_EXEC}" ]; then
+    new_args=""; after=0; replaced=0
+    for w in ${command_args:-}; do
+      if [ "${after}" = 1 ] && [ "${replaced}" = 0 ]; then w="${override}"; replaced=1; fi
+      [ "${w}" = "--" ] && after=1
+      new_args="${new_args:+${new_args} }${w}"
+    done
+    [ "${replaced}" = 1 ] || { echo "emu: no program after -- in: ${command_args:-}" >&2; exit 3; }
+    command_args="${new_args}"
+  else
+    command="${override}"
+  fi
+fi
 case "${phase}" in
-start)
+crash)
+  pid="$(cat "${state}/${name}.supervised")"
+  kill -KILL "${pid}" 2>/dev/null
+  n=0
+  while [ $n -lt 100 ]; do
+    st="$(awk '/^State:/ {print $2; exit}' "/proc/${pid}/status" 2>/dev/null)"
+    { [ -z "${st}" ] || [ "${st}" = "Z" ]; } && break
+    sleep 0.05; n=$((n + 1))
+  done
+  ;;
+start|respawn)
   # openrc-run runs start_pre first and aborts the start on failure. Its log
   # pre-create (`: > /var/log/<name>.log`) cannot succeed for a normal user,
   # and every name here is a selftest-* name no real service has. Under /bin/sh
   # (POSIX mode) a failed redirection on `:` exits the shell, so run_driver
   # runs the START phase under bash, where it is a harmless error. The stop
   # phase, and the lib cases below, run under /bin/sh as openrc-run does.
-  if command -v start_pre >/dev/null 2>&1; then
+  if [ "${phase}" = start ] && command -v start_pre >/dev/null 2>&1; then
     start_pre || exit $?
   fi
   envs=""
@@ -169,6 +202,7 @@ wait_ready() { # name
 run_driver() { # phase initd name override env...
   local phase="$1" initd="$2" name="$3" override="$4"; shift 4
   env RC_SVCNAME="selftest-${name}" ATHENA_PROC_TREE_LIB="${ATHENA_PROC_TREE_LIB_OVERRIDE:-${lib}}" \
+    ATHENA_REAP_EXEC="${ATHENA_REAP_EXEC_OVERRIDE:-${reap_exec}}" \
     ATHENA_PROC_TREE_TIMEOUT=3 "$@" \
     "$([ "${phase}" = start ] && echo bash || echo sh)" "${driver}" "${phase}" "${initd}" "${name}" "${state}" "${override}"
 }
@@ -286,6 +320,143 @@ sweep docker-rootless-athena.initd docker-rootless-athena DOCKER_ROOTLESS_USER="
 sweep btmon.initd btmon
 
 # ---------------------------------------------------------------------------
+# 2b. Respawn (DND-838). When its command dies, supervise-daemon starts it
+#     again with the same --env args and runs NO start_pre. So the start-side
+#     reap never runs, and whatever the dead command forked (run.sh's
+#     Runner.Listener) would live on next to the new copy: two listeners for
+#     one registration. Every initd run under supervise-daemon needs a case
+#     here; the discovery check below fails on one that has none.
+exe_count() { # PATH: how many live processes run exactly PATH
+  local d n=0
+  for d in /proc/[0-9]*; do
+    [ "$(readlink "${d}/exe" 2>/dev/null)" = "$1" ] || continue
+    alive "${d#/proc/}" && n=$((n + 1))
+  done
+  echo "${n}"
+}
+respawn_covered=" "
+respawn_listener=""
+respawn_case() { # initd name stub|"" env...
+  local initd="$1" name="$2" override=""; shift 2
+  if [ "$1" = stub ]; then
+    override="${tmp}/bin/${name}-stub"
+    mk_stub "${override}" "${name}" "$(command -v sleep) 300"
+  fi
+  shift
+  respawn_covered="${respawn_covered}${initd} "
+  run_driver start "${sysfiles}/${initd}" "${name}" "${override}" "$@"
+  if ! wait_ready "${name}" || ! alive "$(child_of "${name}")"; then
+    fail "${initd}: respawn: the command never started, so its respawn cannot be judged"; return
+  fi
+  local old_child old_helper out rc
+  old_child="$(child_of "${name}")"; old_helper="$(helper_of "${name}")"
+  run_driver crash "${sysfiles}/${initd}" "${name}" "${override}" "$@"
+  if ! alive "${old_child}"; then
+    fail "${initd}: respawn: the crash also ended the child, so this case proves nothing"; return
+  fi
+  rm -f "${state}/${name}.ready" "${state}/${name}.child" "${state}/${name}.helper"
+  out="$(run_driver respawn "${sysfiles}/${initd}" "${name}" "${override}" "$@" 2>&1)"; rc=$?
+  if [ "${rc}" -ne 0 ] || ! wait_ready "${name}" || ! alive "$(child_of "${name}")"; then
+    fail "${initd}: respawn: the respawned command never came up (rc=${rc}): ${out}"
+  elif alive "${old_child}" || alive "${old_helper}"; then
+    fail "${initd}: respawn: the crashed command's children run next to the respawned copy"
+  else
+    pass "${initd}: respawn ends the crashed command's children before the new copy runs"
+  fi
+  if [ -n "${respawn_listener}" ]; then
+    local count
+    count="$(exe_count "${respawn_listener}")"
+    [ "${count}" -eq 1 ] && pass "${initd}: exactly one listener after a respawn" \
+      || fail "${initd}: ${count} listeners after a respawn (want 1)"
+  fi
+  run_driver stop "${sysfiles}/${initd}" "${name}" "${override}" "$@" >/dev/null 2>&1
+  alive "$(child_of "${name}")" && fail "${initd}: respawn: the respawned tree survived stop" \
+    || pass "${initd}: the respawned tree stops cleanly"
+}
+
+r3="${tmp}/home/actions-runner-3"
+mk_sleeper "${r3}/bin/Runner.Listener"
+mk_stub "${r3}/run.sh" gh3 "${r3}/bin/Runner.Listener 300"
+: > "${r3}/.runner"
+respawn_listener="${r3}/bin/Runner.Listener"
+respawn_case github-runner.initd gh3 "" RUNNER_USER="${me}" RUNNER_DIR="${r3}"
+respawn_listener=""
+respawn_case gitlab-runner.initd glr-respawn stub RUNNER_USER="${me}" RUNNER_HOME="${tmp}" \
+  RUNNER_BIN="${tmp}/bin/glr-respawn-stub" RUNNER_CONFIG="${tmp}/gitlab-config.toml"
+respawn_case docker-rootless-github-runner.initd dgh-respawn stub DOCKER_ROOTLESS_USER="${me}"
+respawn_case docker-rootless-gitlab-runner.initd dgl-respawn stub DOCKER_ROOTLESS_USER="${me}"
+
+supervised=""
+for f in "${sysfiles}"/*.initd; do
+  grep -q '^supervisor="supervise-daemon"' "${f}" || continue
+  b="$(basename "${f}")"
+  supervised="${supervised}${b} "
+  case "${respawn_covered}" in
+    *" ${b} "*) ;;
+    *) fail "${b}: runs under supervise-daemon (so it respawns) but has no respawn_case in this test" ;;
+  esac
+done
+if [ -n "${supervised}" ]; then
+  pass "respawn: every supervise-daemon initd has a respawn case (${supervised% })"
+else
+  fail "respawn: found no supervise-daemon initd under ${sysfiles}; the discovery grep is wrong"
+fi
+
+# 2c. The respawn wrapper refuses to run without its inputs, loudly, and
+#     never execs the command then (a missing tag must not read as "nothing
+#     to reap").
+wrap_case() { # desc env-assignments... -- wrapper-args...
+  local desc="$1"; shift
+  local envs=()
+  while [ "$1" != "--" ]; do envs+=("$1"); shift; done
+  shift
+  local out rc
+  rm -f "${tmp}/wrap-ran"
+  out="$(env -u ATHENA_SVC_TREE "${envs[@]}" sh "${reap_exec}" "$@" 2>&1)"; rc=$?
+  if [ "${rc}" -eq 2 ] && [ ! -e "${tmp}/wrap-ran" ]; then pass "reap-exec: ${desc} -> 2, command not run"
+  else fail "reap-exec: ${desc} -> rc ${rc}, command ran: $([ -e "${tmp}/wrap-ran" ] && echo yes || echo no): ${out}"; fi
+  case "${out}" in *Fix:*) : ;; *) fail "reap-exec: ${desc}: no Fix: line in: ${out}" ;; esac
+}
+if [ -r "${reap_exec}" ]; then
+  help_out="$(sh "${reap_exec}" --help 2>/dev/null)"; help_rc=$?
+  if [ "${help_rc}" -eq 0 ] && [ -n "${help_out}" ]; then pass "reap-exec: --help prints usage on stdout, exit 0"
+  else fail "reap-exec: --help -> rc ${help_rc}, stdout '${help_out}'"; fi
+  wrap_case "no ATHENA_SVC_TREE" -- --lib "${lib}" -- touch "${tmp}/wrap-ran"
+  wrap_case "empty ATHENA_SVC_TREE" ATHENA_SVC_TREE= -- --lib "${lib}" -- touch "${tmp}/wrap-ran"
+  wrap_case "unknown option" ATHENA_SVC_TREE=selftest-wrap -- --lib "${lib}" --bogus -- touch "${tmp}/wrap-ran"
+  wrap_case "no command after --" ATHENA_SVC_TREE=selftest-wrap -- --lib "${lib}" --
+  wrap_case "missing lib" ATHENA_SVC_TREE=selftest-wrap -- --lib "${tmp}/no-such-lib.sh" -- touch "${tmp}/wrap-ran"
+  wrap_case "relative anchor" ATHENA_SVC_TREE=selftest-wrap -- --lib "${lib}" --anchor rel/dir -- touch "${tmp}/wrap-ran"
+  # The happy path execs the command with the tag restored and its cwd kept.
+  mkdir -p "${tmp}/wrapdir"
+  ok_out="$(cd "${tmp}/wrapdir" && env ATHENA_SVC_TREE=selftest-wrap-ok sh "${reap_exec}" --lib "${lib}" --timeout 1 \
+    -- sh -c 'printf "%s|%s" "${ATHENA_SVC_TREE}" "$(pwd -P)"' 2>/dev/null)"; ok_rc=$?
+  if [ "${ok_rc}" -eq 0 ] && [ "${ok_out}" = "selftest-wrap-ok|$(cd "${tmp}/wrapdir" && pwd -P)" ]; then
+    pass "reap-exec: execs the command with the tag and the original cwd"
+  else
+    fail "reap-exec: happy path rc ${ok_rc}, got '${ok_out}'"
+  fi
+else
+  fail "reap-exec: ${reap_exec} does not exist"
+fi
+
+# 2d. A supervised initd whose respawn wrapper is not installed refuses to
+#     start, with a Fix:, instead of starting a command that can double.
+nowrap_out="$(ATHENA_REAP_EXEC_OVERRIDE="${tmp}/no-such-reap-exec" \
+  run_driver start "${sysfiles}/docker-rootless-github-runner.initd" nowrap "${tmp}/bin/dgh-respawn-stub" \
+  DOCKER_ROOTLESS_USER="${me}" 2>&1)"
+nowrap_rc=$?
+if [ "${nowrap_rc}" -ne 0 ] && [ ! -e "${state}/nowrap.supervised" ]; then
+  pass "missing reap-exec: start fails and starts nothing"
+else
+  fail "missing reap-exec: start exited ${nowrap_rc} (supervised pid file: $([ -e "${state}/nowrap.supervised" ] && echo yes || echo no))"
+fi
+case "${nowrap_out}" in
+  *Fix:*) pass "missing reap-exec: start failure carries a Fix: line" ;;
+  *) fail "missing reap-exec: start failure has no Fix: line: ${nowrap_out}" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 3. A missing library is a loud stop failure with a Fix:, never a silent
 #    "nothing to reap".
 mk_stub "${tmp}/bin/nolib-stub" nolib "$(command -v sleep) 300"
@@ -379,6 +550,17 @@ if [ -r "${lib}" ]; then
     *scanned*) pass "lib: a clean miss reports what it scanned" ;;
     *) fail "lib: a clean miss is silent: ${miss_out}" ;;
   esac
+  # A caller running under `set -f` must still scan /proc, not the literal
+  # '/proc/[0-9]*' (DND-838: the reap wrapper splits its anchors that way, and
+  # its first cut scanned 0 processes and reported "no leftover processes").
+  noglob_tag="initd-proc-tree-selftest-noglob-$$"
+  env ATHENA_SVC_TREE="${noglob_tag}" "$(command -v sleep)" 300 </dev/null >/dev/null 2>&1 &
+  noglob=$!; disown "${noglob}"
+  n=0; while ! grep -zqFx -- "ATHENA_SVC_TREE=${noglob_tag}" "/proc/${noglob}/environ" 2>/dev/null \
+    && [ "${n}" -lt 100 ]; do sleep 0.05; n=$((n + 1)); done
+  noglob_out="$(sh -c 'set -f; . "$0" && proc_tree_reap "$1" "$2" 1' "${lib}" "${noglob_tag}" "${uid}" 2>&1)"
+  if alive "${noglob}"; then fail "lib: under set -f the tagged process survived: ${noglob_out}"
+  else pass "lib: a caller under set -f still finds and ends the tree"; fi
 else
   fail "lib: ${lib} does not exist"
 fi

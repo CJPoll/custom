@@ -35,6 +35,15 @@ pidfile="/run/${RC_SVCNAME}.pid"
 # is a root-owned copy of system-files/lib/initd-proc-tree.sh.
 : "${ATHENA_PROC_TREE_LIB:=/usr/local/lib/athena/initd-proc-tree.sh}"
 supervise_daemon_args="${supervise_daemon_args:+${supervise_daemon_args} }--env ATHENA_SVC_TREE=${RC_SVCNAME}"
+# DND-838: when the command dies, supervise-daemon starts it again itself and
+# runs NO start_pre, so the reap there never runs on that path. The command is
+# therefore initd-reap-exec, which ends this instance's leftover tree on EVERY
+# start (first or respawn) and then execs the real program: the word after
+# `--`. It runs as command_user, next to the lib, root-owned.
+: "${ATHENA_REAP_EXEC:=/usr/local/lib/athena/initd-reap-exec}"
+_svc_program="${command}"
+command_args="--lib ${ATHENA_PROC_TREE_LIB} --timeout ${ATHENA_PROC_TREE_TIMEOUT:-10} --anchor ${RUNNER_BIN} -- ${_svc_program}${command_args:+ ${command_args}}"
+command="${ATHENA_REAP_EXEC}"
 output_log="/var/log/${RC_SVCNAME}.log"
 error_log="/var/log/${RC_SVCNAME}.log"
 
@@ -66,13 +75,13 @@ start_pre() {
 		eerror "user ${RUNNER_USER} does not exist — run setup-gitlab-runner-user"
 		return 1
 	fi
-	if [ ! -x "${command}" ]; then
-		eerror "${command} not found — run scripts/setup-gitlab-runner first"
+	if [ ! -x "${_svc_program}" ]; then
+		eerror "${_svc_program} not found — run scripts/setup-gitlab-runner first"
 		return 1
 	fi
 	if [ ! -f "${RUNNER_CONFIG}" ] || ! grep -q '\[\[runners\]\]' "${RUNNER_CONFIG}" 2>/dev/null; then
 		eerror "runner not registered (${RUNNER_CONFIG} has no [[runners]]). As ${RUNNER_USER}, run:"
-		eerror "  ${command} register --non-interactive --url https://gitlab.com \\"
+		eerror "  ${_svc_program} register --non-interactive --url https://gitlab.com \\"
 		eerror "    --token glrt-<TOKEN> --executor docker --docker-image alpine:3.20 \\"
 		eerror "    --docker-security-opt seccomp:unconfined --docker-security-opt apparmor:unconfined \\"
 		eerror "    --docker-volumes /cache --config ${RUNNER_CONFIG}"
@@ -80,6 +89,11 @@ start_pre() {
 	fi
 	if [ ! -d "${XDG_RUNTIME_DIR}" ]; then
 		eerror "${XDG_RUNTIME_DIR} missing — enable linger: loginctl enable-linger ${RUNNER_USER}"
+		return 1
+	fi
+	if [ ! -x "${ATHENA_REAP_EXEC}" ]; then
+		eerror "${ATHENA_REAP_EXEC} is missing, so a respawn of ${RC_SVCNAME} could start next to a crashed copy's children."
+		eerror "Fix: sudo install -D -m 755 <custom checkout>/system-files/lib/initd-reap-exec ${ATHENA_REAP_EXEC}"
 		return 1
 	fi
 	_proc_tree_reap || return 1

@@ -31,6 +31,15 @@ pidfile="/run/${RC_SVCNAME}.pid"
 # is a root-owned copy of system-files/lib/initd-proc-tree.sh.
 : "${ATHENA_PROC_TREE_LIB:=/usr/local/lib/athena/initd-proc-tree.sh}"
 supervise_daemon_args="${supervise_daemon_args:+${supervise_daemon_args} }--env ATHENA_SVC_TREE=${RC_SVCNAME}"
+# DND-838: when the command dies, supervise-daemon starts it again itself and
+# runs NO start_pre, so the reap there never runs on that path. The command is
+# therefore initd-reap-exec, which ends this instance's leftover tree on EVERY
+# start (first or respawn) and then execs the real program: the word after
+# `--`. It runs as command_user, next to the lib, root-owned.
+: "${ATHENA_REAP_EXEC:=/usr/local/lib/athena/initd-reap-exec}"
+_svc_program="${command}"
+command_args="--lib ${ATHENA_PROC_TREE_LIB} --timeout ${ATHENA_PROC_TREE_TIMEOUT:-10} -- ${_svc_program}${command_args:+ ${command_args}}"
+command="${ATHENA_REAP_EXEC}"
 output_log="/var/log/${RC_SVCNAME}.log"
 error_log="/var/log/${RC_SVCNAME}.log"
 
@@ -63,6 +72,11 @@ start_pre() {
 	if [ ! -d "${XDG_RUNTIME_DIR}" ]; then
 		eerror "${XDG_RUNTIME_DIR} is missing — enable lingering so it"
 		eerror "persists at boot:  loginctl enable-linger ${DOCKER_ROOTLESS_USER}"
+		return 1
+	fi
+	if [ ! -x "${ATHENA_REAP_EXEC}" ]; then
+		eerror "${ATHENA_REAP_EXEC} is missing, so a respawn of ${RC_SVCNAME} could start next to a crashed copy's children."
+		eerror "Fix: sudo install -D -m 755 <custom checkout>/system-files/lib/initd-reap-exec ${ATHENA_REAP_EXEC}"
 		return 1
 	fi
 	_proc_tree_reap || return 1
