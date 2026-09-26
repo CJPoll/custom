@@ -544,7 +544,13 @@ def collect_t2_counts(wt, runs, subject, side)
   problem = t2_run_problem(out, err, rows)
   raise_t2_unmeasured(side, "#{problem} (admiral-eval #{exit_phrase(st)})") if problem
 
-  rows.to_h { |r| [r[:name], r[:counts]] }
+  # DND-513: positive classification — a row counts as T2 only when it carries
+  # a recognized, non-T1 mode. This excludes admiral-eval's [hook-stdin] (T1)
+  # rows, which are already scored by the `ae:` deterministic corpus; folding
+  # them in here double-counted a T1 flip as a T2 regression/improvement. A row
+  # matching neither shape (no mode captured at all) never reaches this line —
+  # t2_run_problem raises on it above, so it is surfaced, not silently dropped.
+  rows.select { |r| r[:mode] && r[:mode] != T1_MODE }.to_h { |r| [r[:name], r[:counts]] }
 end
 
 # Every "PASS|FAIL <name> <passes>/<samples> [<mode>] ..." row. A row with 0
@@ -571,6 +577,13 @@ def t2_run_problem(out, err, rows)
 
   unsampled = rows.select { |r| r[:fraction].nil? }.map { |r| r[:name] }
   return "#{unsampled.size} case(s) scored 0/0, never sampled: #{unsampled.join(', ')}" if unsampled.any?
+
+  # DND-513: a row with no [mode] tag matches neither the T1 (hook-stdin) nor
+  # the T2 (model-in-loop) shape. Surface it rather than let it silently fall
+  # out of both the T1 count and collect_t2_counts' T2 hash.
+  unmoded = rows.reject { |r| r[:mode] }.map { |r| r[:name] }
+  return "#{unmoded.size} case(s) had no [mode] tag, matching neither T1 nor T2: #{unmoded.join(', ')}" \
+    if unmoded.any?
 
   failed = err.to_s.each_line.select { |l| l.match?(T2_INVOCATION_FAILED) }
   if failed.any?
@@ -902,7 +915,13 @@ def self_test
       "model invocations failed (auth)" =>
         [["echo \"$SUBJECT\"", "echo '  ! admiral invocation failed (exit 1): not logged in' >&2",
           "echo 'FAIL AE-01-confirm-before-done 0/3 [next-action] no output'", "echo '#{row_t1}'",
-          "echo 'admiral-eval: 1/2 cases pass (runs/T2 case = 3)'", "exit 1"], /invocation/]
+          "echo 'admiral-eval: 1/2 cases pass (runs/T2 case = 3)'", "exit 1"], /invocation/],
+      # DND-513: a row with NO [mode] tag matches neither the T1 (hook-stdin)
+      # nor the T2 (model-in-loop) shape. It must be surfaced, never silently
+      # folded into either bucket or dropped from the row count.
+      "a row with no [mode] tag (matches neither T1 nor T2 shape)" =>
+        [["echo \"$SUBJECT\"", "echo 'PASS AE-99-no-mode 1/1 ok'",
+          "echo 'admiral-eval: 1/1 cases pass (runs/T2 case = 3)'", "exit 0"], /no \[mode\]/]
     }
     stubs.each_with_index do |(label, (body, want)), i|
       wt = File.join(d, "wt#{i}")
@@ -946,6 +965,11 @@ def self_test
       got = collect_t2_counts(wt, 3, subj, "baseline")
       fail.("a completed run must yield its T2 counts (got #{got.inspect})") \
         unless got["AE-01-confirm-before-done"] == EvalScore::Counts.new(3, 3)
+      # DND-513: a T1 [hook-stdin] row (already scored by the `ae:` deterministic
+      # set) must never ALSO land in the T2 counts hash — that double-counts a T1
+      # flip as a T2 regression/improvement.
+      fail.("a T1 [hook-stdin] row must not be counted as a T2 case (got #{got.inspect})") \
+        if got.key?("AE-13a-forge-auth-deny")
     rescue StandardError => e
       fail.("a completed admiral-eval run (exit 1 = its regression verdict) must be a measurement, not " \
             "raise #{e.class}: #{e.message[0, 200]}")
