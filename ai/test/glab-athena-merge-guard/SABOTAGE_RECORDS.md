@@ -24,8 +24,30 @@ code), with the final tests:
   `RESULT: 168 passed, 9 failed`. Red: 2c2, 2q, 2r, 2s, 2t, 2u, 2u2, 2v and 2w
   (`expected deny … status=0 out=[]`).
 
-On the fixed code (rebased on DND-741): wrapper `RESULT: 99 passed, 0 failed`,
-hook `RESULT: 177 passed, 0 failed`. The gh-athena merge-guard suite
+On the fixed code (rebased on DND-741): wrapper `RESULT: 108 passed, 0 failed`,
+hook `RESULT: 177 passed, 0 failed`.
+
+## Critic round (2cf200c): argv the guard read differently from glab
+
+The critic found `mr merge 1473 --help --help=false --yes` went to glab
+unjudged. The guard short-circuited on `--help`, and pflag lets the later
+`--help=false` switch help off, so glab merges. This is kind 1 under
+athena:critic-convergence: the defect was present from the first commit. Its
+class is "the guard's argv reading differs from glab's". A sweep of that class
+found a second site. glab dispatches `glab -R g/r api …` to api (measured on
+glab 1.112), but the guard read the command only when `api` came before any
+non-flag word. So `-R g/r api <merge route> -f sha=…` passed unjudged.
+
+Fix: drop the help short-circuit, read the command from the flag-aware
+positional parse, and refuse any word before `api`. Evidence, from the final
+tests on 2cf200c's code: `RESULT: 99 passed, 9 failed` (M17, M23, M24, A15,
+A16, A18–A21). A20 shows the real pass-through:
+`rc=0 out=stub: ran -R amby_ai/walt_ui api projects/1/merge_requests/2/merge -f
+sha=…`. Fixed: 108/0. Class-closed assertion: `grep -c HELP
+ai/lib/glab-merge-guard.sh` gives 0. The only early `return 0` in `glmg_guard`
+comes after `glmg_api_guard` has judged the call. gh does not share the second
+site: `gh -R o/r api …` fails with "unknown shorthand flag", and `gh -- api …`
+fails with "unknown command" (measured). The gh-athena merge-guard suite
 (`RESULT: 136 passed, 0 failed`) exercises the shared code too.
 `gmg_api_guard` now parses with `fas_parse_api` and scans with
 `fas_graphql_scan` from `ai/lib/forge-api-scan.sh`.

@@ -172,8 +172,12 @@ reset_fx; green_fx
 expect_refused M15 "an unknown mr merge flag is refused" "--bogus" mr merge 1473 --sha "${HEAD_SHA}" --bogus
 reset_fx; green_fx
 expect_refused M16 "--sha given twice is refused" "2 times" mr merge 1473 --sha "${OTHER_SHA}" --sha "${HEAD_SHA}"
-reset_fx
-expect_ran M17 "mr merge --help runs with no reads" none mr merge --help
+reset_fx; green_fx
+expect_refused M17 "mr merge --help gets no short-circuit (judged, refused with no pin)" "no sha was given" mr merge --help
+reset_fx; green_fx
+expect_refused M23 "--help then --help=false (pflag: last wins, so it merges) is refused" "no sha was given" mr merge 1473 --help --help=false --yes
+reset_fx; green_fx
+expect_refused M24 "-h then --help=0 is refused" "no sha was given" mr merge 1473 -h --help=0 --yes
 reset_fx; green_fx
 expect_refused M18 "an unknown flag before the subcommand is refused" "comes before the subcommand" --bogus x mr merge 1473 --sha "${HEAD_SHA}"
 reset_fx; green_fx; printf '{"iid":1473,"sha":"%s","head_pipeline":{"status":"success"}}\n' "${HEAD_SHA}" > "${FX}/mrview.out"
@@ -217,6 +221,22 @@ reset_fx
 expect_refused A13 "api/v4 prefix without host" "REST merge" api -X PUT "api/v4/projects/1/merge_requests/2/merge"
 reset_fx
 expect_refused A14 "GET with a _method field" "REST merge" api -X GET -f "_method=PUT" "projects/1/merge_requests/2/merge"
+# glab dispatches `glab -R g/r api …` to api (measured, glab 1.112), so a word
+# before `api` must not hide the call from the api judgment.
+reset_fx
+expect_refused A15 "-R <repo> before api" "is not the first word" -R amby_ai/walt_ui api -X PUT "projects/1/merge_requests/2/merge"
+reset_fx
+expect_refused A16 "--repo=<repo> before api" "is not the first word" --repo=amby_ai/walt_ui api -X PUT "projects/1/merge_requests/2/merge"
+reset_fx
+expect_refused A17 "-X PUT before api" "PUT" -X PUT api "projects/1/merge_requests/2/merge"
+reset_fx
+expect_refused A18 "-- before api" "is not the first word" -- api -X PUT "projects/1/merge_requests/2/merge"
+reset_fx
+expect_refused A19 "-R <repo> before api, train boarding with no pin" "is not the first word" -R amby_ai/walt_ui api -X POST "projects/:id/merge_trains/merge_requests/1473"
+reset_fx
+expect_refused A20 "-R <repo> before api, REST merge by a field (default POST)" "is not the first word" -R amby_ai/walt_ui api "projects/1/merge_requests/2/merge" -f "sha=${HEAD_SHA}"
+reset_fx; green_fx
+expect_refused A21 "-R <repo> before api, train boarding with a wrong pin (default POST)" "is not the first word" -R amby_ai/walt_ui api "projects/:id/merge_trains/merge_requests/1473" -f "sha=${OTHER_SHA}"
 
 echo
 echo "--- api: merge-train boarding is the guarded path ---"

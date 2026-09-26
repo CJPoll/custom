@@ -64,6 +64,9 @@
 # dies with its call. So, unlike gh-merge-guard, there is no alias expansion.
 # Cobra accepts flags before the subcommand (`glab --repo g/r mr merge 5`,
 # measured), so the command is read from the positional words, not argv[0].
+# glab also dispatches `glab -R g/r api …` to api (measured), so `api` must be
+# the first word; anything before it is refused. `mr merge --help` gets no
+# short-circuit: pflag lets a later `--help=false` turn help off again.
 #
 # Residual (NOT checked; each still runs):
 #   * API writes that move a ref without merging: REST POST
@@ -117,16 +120,21 @@ glmg_refuse() {
 
 # glmg_parse_cli <args...> : the positional words of a non-api glab command,
 # with the mr-merge flag table. Sets GLMG_POS, GLMG_REPO, GLMG_SHA (and
-# GLMG_SHA_N, how many --sha), GLMG_HELP, GLMG_UNKNOWN (the first flag outside
-# the table, or "") and GLMG_UNKNOWN_AT (how many positional words preceded it).
+# GLMG_SHA_N, how many --sha), GLMG_UNKNOWN (the first flag outside the table,
+# or ""), GLMG_UNKNOWN_AT (how many positional words preceded it) and
+# GLMG_POS0_AT (the 0-based argv index of the first positional word, or "").
+# There is deliberately no --help short-circuit: pflag lets a later
+# `--help=false` switch help off again, so a merge carrying --help is judged
+# like any other (DND-742 critic finding).
 glmg_parse_cli() {
-  local a v i c rest
-  GLMG_POS=() GLMG_REPO="" GLMG_SHA="" GLMG_SHA_N=0 GLMG_HELP=0 GLMG_UNKNOWN="" GLMG_UNKNOWN_AT=""
+  local a v i c rest n="$#"
+  GLMG_POS=() GLMG_REPO="" GLMG_SHA="" GLMG_SHA_N=0 GLMG_UNKNOWN="" GLMG_UNKNOWN_AT="" GLMG_POS0_AT=""
   while [ $# -gt 0 ]; do
     a="$1"; shift
     case "$a" in
-      --) GLMG_POS+=("$@"); break ;;
-      --help|-h) GLMG_HELP=1 ;;
+      --)
+        [ $# -gt 0 ] && [ -z "$GLMG_POS0_AT" ] && GLMG_POS0_AT=$((n - $#))
+        GLMG_POS+=("$@"); break ;;
       --*=*)
         if [[ "$GLMG_MR_VALUED" == *" ${a%%=*} "* ]]; then glmg_cli_opt "${a%%=*}" "${a#*=}"
         elif [[ "$GLMG_MR_BOOL" == *" ${a%%=*} "* ]]; then :
@@ -141,7 +149,7 @@ glmg_parse_cli() {
         rest="${a#-}"; i=0
         while [ "$i" -lt "${#rest}" ]; do
           c="${rest:$i:1}"
-          if [[ "$GLMG_MR_SBOOL" == *"$c"* ]]; then [ "$c" = h ] && GLMG_HELP=1
+          if [[ "$GLMG_MR_SBOOL" == *"$c"* ]]; then :
           elif [[ "$GLMG_MR_SVALUED" == *"$c"* ]]; then
             v="${rest:$((i+1))}"; v="${v#=}"
             if [ -z "$v" ]; then v="${1:-}"; [ $# -gt 0 ] && shift; fi
@@ -150,7 +158,9 @@ glmg_parse_cli() {
           else [ -n "$GLMG_UNKNOWN" ] || GLMG_UNKNOWN="-$c (in '$a')"; fi
           i=$((i+1))
         done ;;
-      *) GLMG_POS+=("$a") ;;
+      *)
+        [ -z "$GLMG_POS0_AT" ] && GLMG_POS0_AT=$((n - $# - 1))
+        GLMG_POS+=("$a") ;;
     esac
     [ -n "$GLMG_UNKNOWN" ] && [ -z "$GLMG_UNKNOWN_AT" ] && GLMG_UNKNOWN_AT="${#GLMG_POS[@]}"
   done
@@ -373,28 +383,27 @@ glmg_api_guard() {
 
 # glmg_guard <glab args...> : the entry point. Returns 0 or exits 3.
 glmg_guard() {
-  local shown="glab $*" w i=0
-  # The command is the first positional word. `api` is parsed with the api flag
-  # table: its first positional is the endpoint.
-  local -a before=()
-  for w in "$@"; do
-    case "$w" in
-      api) glmg_api_guard "$shown" "${before[@]}" "${@:$((i + 2))}"; return 0 ;;
-      -*) before+=("$w") ;;
-      *) break ;;
-    esac
-    i=$((i+1))
-  done
+  local shown="glab $*" w
+  # The command is the first positional word, read with the flag table (so
+  # `-R g/r` before it is skipped with its value).
   glmg_parse_cli "$@"
   case "${GLMG_POS[0]:-}" in
+    api)
+      # `api` must come first. Anything before it is refused: glab dispatches
+      # `glab -R g/r api …` to api (measured, glab 1.112), and the api flag
+      # table cannot tell what a flag placed before the word means.
+      if [ "$GLMG_POS0_AT" != 0 ]; then
+        glmg_refuse "$shown" "\`api\` is not the first word; flags before it ('${*:1:$GLMG_POS0_AT}') are passed to glab api in a way $GLMG_TOOL does not parse, so it cannot tell whether the call merges" \
+          "put \`api\` first: \`~/dev/custom/ai/bin/$GLMG_TOOL api <endpoint> [flags]\`; to merge, $GLMG_SAFE_PATH"
+      fi
+      glmg_api_guard "$shown" "${@:2}"
+      return 0 ;;
     mcp)
       glmg_refuse "$shown" "\`glab mcp\` serves GitLab as MCP tools, merging an MR among them, as athena-amby and with no merge guard in the way" \
         "call the glab command you need through the wrapper directly; to merge, $GLMG_SAFE_PATH" ;;
     mr)
       case "${GLMG_POS[1]:-}" in
-        merge|accept)
-          [ "$GLMG_HELP" = 1 ] && [ -z "$GLMG_UNKNOWN" ] && return 0
-          glmg_mr_merge "$shown" "$@" ;;
+        merge|accept) glmg_mr_merge "$shown" "$@" ;;
       esac ;;
   esac
   # A flag outside the table BEFORE the subcommand is fixed (cobra assumes an
