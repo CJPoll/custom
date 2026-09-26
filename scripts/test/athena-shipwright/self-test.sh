@@ -1833,6 +1833,152 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — a WEDGED tick leaves a record and alerts ONCE per episode (DND-834)'
+
+# The measured defect (laptop, 2026-09-23..26): the lane wedged, and every
+# hourly tick since exited 75 with an empty .log and nothing else in runs/. The
+# only signal was the WEDGED line on stderr, which goes to cron mail, and that
+# machine's mail spool has been empty since 2025. Nobody saw it for three days.
+# So a wedged tick must leave a .wedged record in runs/, and the first tick of a
+# wedge EPISODE sends ONE harness-alert. The episode ends when the counter is
+# cleared; a later wedge is a new episode and alerts again.
+
+wedge_msgs() { find "${ALERTS}" -maxdepth 1 -type f -name '*-shipwright-wedged.md' 2>/dev/null | sort; }
+wedge_count() { wedge_msgs | grep -c . || true; }
+newest_wedged() { find "$(sd "$1")/runs" -maxdepth 1 -name '*.wedged' 2>/dev/null | sort | tail -n1; }
+# The runner keys records on a second-resolution ts. Two ticks in one second
+# share a record path, so wait for the next second where a case compares records.
+next_second() { local s; s="$(date +%s)"; for _ in $(seq 1 30); do [ "$(date +%s)" != "$s" ] && return 0; sleep 0.1; done; }
+arm_wedge() { mkdir -p "$(sd "$1")"; printf '%s\n' "$2" >"$(sd "$1")/consecutive-failures"; }
+
+# Headline (fail-first): a counter at the threshold. The tick exits 75, spawns
+# nothing, and leaves a record naming why, the counter, the first-wedged time
+# and the one-command re-arm. One alert, re: that record.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 7
+arm_wedge "$r" 2
+rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
+rec="$(newest_wedged "$r")"
+counter="$(real "$(sd "$r")")/consecutive-failures"
+if [ "$rc" -eq 75 ] && [ ! -e "$a/claude-was-invoked" ] && [ -n "$rec" ]; then
+  ok "a wedged tick still exits 75 and spawns nothing, and leaves a .wedged record in runs/"
+else
+  bad "wedged tick leaves a record" "rc=$rc spawned=$([ -e "$a/claude-was-invoked" ] && echo yes) runs=$(find "$(sd "$r")/runs" -maxdepth 1 -printf '%f ' 2>&1)"
+fi
+if [ -n "$rec" ] && grep -q '^wedged: consecutive_failures=2 threshold=2 first_wedged=[0-9TZ:-]* episode=[0-9T-]*$' "$rec" \
+   && grep -qF "rearm: rm ${counter}" "$rec" && grep -q '^Fix: .*rm ' "$rec"; then
+  ok "the record names the counter, the threshold, the first-wedged time, the episode and the re-arm command (Fix:)"
+else
+  bad "wedged record content" "counter=$counter record=$( [ -n "$rec" ] && cat "$rec")"
+fi
+if grep -qF "${rec:-<none>}" "$a/runner.err"; then
+  ok "the WEDGED stderr names the record"
+else
+  bad "stderr names the record" "$(cat "$a/runner.err")"
+fi
+m="$(wedge_msgs | head -n1)"
+ep="$( [ -n "$rec" ] && sed -n 's/^wedged: .* episode=//p' "$rec" | tail -n1)"
+if [ "$(wedge_count)" = "1" ] && grep -q '^from: inbox-client-detector' "$m" && grep -q '^to: custom' "$m" \
+   && [ "$(sed -n 's/^re: //p' "$m" | head -n1)" = "$rec" ] \
+   && [ -n "$ep" ] && grep -qx "episode: ${ep}" "$m" && grep -qF "rm ${counter}" "$m" && grep -q '^Fix:' "$m"; then
+  ok "ONE harness-alert, re: the record, carrying the record's episode and the re-arm command"
+else
+  bad "wedge alert" "alerts=$(wedge_count) ep=$ep msg=$( [ -n "$m" ] && cat "$m") err=$(cat "$a/runner.err")"
+fi
+if [ -n "$rec" ] && grep -qx "alert: harness-alerts $(basename -- "${m:-none}")" "$rec"; then
+  ok "the record says which message the alert went out as"
+else
+  bad "record names the alert" "record=$( [ -n "$rec" ] && cat "$rec")"
+fi
+
+# Later ticks of the same episode: a record each, no second alert.
+codes=""
+for _ in 1 2; do next_second; codes="${codes}$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2) "; done
+rec2="$(newest_wedged "$r")"
+if [ "$codes" = "75 75 " ] && [ "$(wedge_count)" = "1" ] \
+   && [ "$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.wedged' | grep -c .)" = "3" ] \
+   && grep -q '^alert: already sent for this episode' "$rec2" \
+   && grep -q "episode=${ep}\$" "$rec2" && grep -q 'already alerted' "$a/runner.err"; then
+  ok "every tick of one episode leaves its own record, and no tick after the first alerts again"
+else
+  bad "one alert per episode" "codes='${codes% }' alerts=$(wedge_count) records=$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.wedged' | grep -c .) last=$(cat "$rec2" 2>&1)"
+fi
+
+# Re-arming ends the episode. The next wedge is a new episode and alerts again.
+rm -f "$(sd "$r")/consecutive-failures"
+next_second; rc1="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
+if [ ! -e "$(sd "$r")/wedged" ]; then
+  ok "the first tick after the re-arm ends the episode (its state is gone)"
+else
+  bad "re-arm ends the episode" "rc=$rc1 state=$(cat "$(sd "$r")/wedged" 2>&1)"
+fi
+next_second; run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2 >/dev/null
+next_second; rc3="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
+rec3="$(newest_wedged "$r")"
+ep3="$(sed -n 's/^wedged: .* episode=//p' "$rec3" 2>/dev/null | tail -n1)"
+if [ "$rc1" = "7" ] && [ "$rc3" = "75" ] && [ "$(wedge_count)" = "2" ] && [ -n "$ep3" ] && [ "$ep3" != "$ep" ]; then
+  ok "a later wedge is a new episode: a new episode id and a second alert"
+else
+  bad "new episode alerts" "rc1=$rc1 rc3=$rc3 alerts=$(wedge_count) ep=$ep ep3=$ep3"
+fi
+
+# A re-arm followed, in one tick, by enough reaped dead cron corpses to wedge
+# again is still a NEW episode: the episode check reads the counter before the
+# reaper bumps it.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 7
+arm_wedge "$r" 2
+run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2 >/dev/null
+rm -f "$(sd "$r")/consecutive-failures"
+make_corpse "$r" run-dead-1 cron; make_corpse "$r" run-dead-2 cron
+next_second; rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
+if [ "$rc" -eq 75 ] && [ "$(wedge_count)" = "2" ]; then
+  ok "a re-arm then corpses reaped into a wedge in the same tick is a new episode (second alert)"
+else
+  bad "re-arm then corpse wedge" "rc=$rc alerts=$(wedge_count) err=$(cat "$a/runner.err")"
+fi
+
+# A failed send is loud, keeps exit 75, is never recorded as sent, and the
+# next tick of the same episode retries it.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 7
+arm_wedge "$r" 2
+empty_root="${TMP}/empty-inbox-root-834"; mkdir -p "$empty_root"
+rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2 ATHENA_INBOX_ROOT="$empty_root")"
+rec="$(newest_wedged "$r")"
+if [ "$rc" -eq 75 ] && [ "$(wedge_count)" = "0" ] && grep -q 'could NOT be sent' "$a/runner.err" \
+   && grep -q 'Fix:' "$a/runner.err" && grep -q '^alert: FAILED to send' "$rec" 2>/dev/null; then
+  ok "a failed wedge alert is loud with a Fix:, recorded as FAILED, and the tick still exits 75"
+else
+  bad "failed wedge send is loud" "rc=$rc alerts=$(wedge_count) record=$(cat "$rec" 2>&1) err=$(cat "$a/runner.err")"
+fi
+next_second; rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
+if [ "$rc" -eq 75 ] && [ "$(wedge_count)" = "1" ]; then
+  ok "and the next tick of the episode sends it (a failed send is never recorded as sent)"
+else
+  bad "retry after failed wedge send" "rc=$rc alerts=$(wedge_count) err=$(cat "$a/runner.err")"
+fi
+
+# A record that cannot be written is loud, sends nothing (the record is the
+# alert's authority), and the tick still exits 75.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude_probe "$a/stub-claude" 7
+arm_wedge "$r" 2
+mkdir -p "$(sd "$r")/runs"; chmod 555 "$(sd "$r")/runs"
+if [ -w "$(sd "$r")/runs" ]; then
+  ok "(skipped: running as a user who can write a 0555 directory)"
+else
+  rc="$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=2)"
+  if [ "$rc" -eq 75 ] && [ "$(wedge_count)" = "0" ] \
+     && grep -q 'could not write the wedge record' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+    ok "an unwritable wedge record is loud with a Fix:, sends nothing, and the tick still exits 75"
+  else
+    bad "unwritable wedge record" "rc=$rc alerts=$(wedge_count) err=$(cat "$a/runner.err")"
+  fi
+fi
+chmod 755 "$(sd "$r")/runs"
+
+# ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || {
   printf 'Fix: read each FAIL line above — it names the guarantee that broke. Re-run with: bash scripts/test/athena-shipwright/self-test.sh\n' >&2

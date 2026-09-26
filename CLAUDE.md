@@ -465,6 +465,16 @@ across sessions — it is not a one-shot queue drain.
   The runner never touches the dirt. The thresholds and their reasons are in
   `scripts/athena-shipwright-run.sh`; the classifier is
   `scripts/lib/shipwright-stale-dirt.sh`.
+- **A WEDGED lane leaves a record and alerts once per episode (DND-834).**
+  Past `SHIPWRIGHT_FAIL_ESCALATE` consecutive failures a tick exits 75 and
+  spawns no session. That used to reach only cron mail, and the laptop's mail
+  spool has been empty since 2025, so its lane sat wedged for three days
+  unseen. Every wedged tick now writes `<ts>.wedged` in `runs/` (why, the
+  counter, when it wedged, the re-arm command), and the first wedged tick of an
+  episode sends ONE `harness-alerts` message naming that record. The episode
+  ends when the counter is cleared (`rm ai-artifacts/shipwright/consecutive-failures`,
+  the re-arm); a later wedge alerts again. The exit stays 75 whatever the
+  record or the send does.
 - **Lead-time feedback loop.** The same cron also drives fleet **lead time**
   (earliest branch commit → fully deployed) down over time. `ai/bin/lead-time`
   derives it per ticket from git + the forge's CI (GitHub `gh` / GitLab `glab`,
