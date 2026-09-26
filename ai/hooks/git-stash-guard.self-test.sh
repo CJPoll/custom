@@ -496,6 +496,34 @@ git commit -m x"
 case_cmd "O48. quoted heredoc commit message naming a stash write (accepted false positive)" deny "git commit -F - <<'EOF'
 Mentions git stash pop.
 EOF"
+# Admiral cases 13, 15, 16 (DND-787 folded in): jq filters, python heredoc
+# bodies, ERE anchors.
+case_cmd "O49. DND-787 gh/jq/while-read pipeline" allow "cd /tmp && git fetch -q; gh run list -R CJPoll/gen_saas --workflow \"Post-Merge Deploy\" --limit 5 --json databaseId,headSha,status,conclusion -q '.[]|\"\\(.databaseId) \\(.headSha) \\(.status) \\(.conclusion)\"' | while read id sha st c; do anc=\$(git merge-base --is-ancestor cc2e0b5c \$sha 2>/dev/null && echo contains-549 || echo no); echo \"\$id \${sha:0:8} \$st \$c \$anc\"; done"
+case_cmd "O50. jq slice .[0:8] in single quotes" allow "gh pr list --json number -q '.[0:8] | .[] | .number'"
+case_cmd "O51. python heredoc body with [ci] and {run: ...}" allow "python3 - <<'EOF'
+labels = [ci]
+{run: 1}
+{a,b}
+print({'run': [ci]})
+EOF"
+case_cmd "O52. ERE alternation with anchors in single quotes" allow "tail -n 5 f | grep -vE '^\\s*\$|NOTE'"
+case_cmd "O53. a trailing literal dollar sign" allow 'echo cost$ now'
+case_cmd "O54. brace alternatives that can be git" deny '{g,x}it stash pop'
+case_cmd "O55. brace alternatives in a path that can be git" deny '/usr/bin/{g,x}it stash pop'
+case_cmd "O56. letter sequence brace (conservative)" deny '/usr/bin/{f..h}it stash pop'
+case_cmd "O57. nested brace alternatives that can be git" deny '/usr/bin/{x,{g,y}}it stash pop'
+case_cmd "O58. brace alternatives that cannot be git" allow '{a,b}x --flag'
+case_cmd "O59. zsh \$=var is an expansion" deny '$=G stash pop'
+# Case 14: the deny reason names what matched.
+# reason_names <label> <command> <text> : denied, and the reason holds <text>.
+reason_names() {
+  run "$(json "$WT" "$2")"
+  if is_deny && printf '%s' "$OUT" | grep -qF -- "$3"; then record "$1" PASS; else record "$1" FAIL; fi
+}
+reason_names "O60. a glob head names the matched words and position" '/usr/bin/g?t stash pop' 'Matched: `/usr/bin/g?t stash pop` at word 1 of the command.'
+reason_names "O61. a literal stash names its position" 'echo hi; git stash pop' 'Matched: `git stash pop` at word 3 of the command.'
+reason_names "O62. a shell alias names the alias word" 'gstp' 'Matched: `gstp` at word 1 of the command.'
+reason_names "O63. a quoted payload names the nested position" "sh -c 'cd /tmp && git stash pop'" 'Matched: `git stash pop` at word 3 of a nested command'
 # LOW (DND-780): a literal stash write must name the literal-stash reason even
 # after an unrelated expansion that also triggers a rule.
 run "$(json / 'cd "$D" && echo "$X" foo && git stash pop')"
