@@ -366,6 +366,26 @@ The cost of losing differs: in `~/dev/custom` (no CI) it is one local re-gate;
 in gen_saas (~50 min CI on one runner) it is a CI cycle and can reorder
 deploys. The lock is required in both.
 
+**Later (2026-09-26):** when you are queued behind another PR, whether for the
+merge token or for the lock, **do not merge main forward until you are next.**
+Main moves again when the PR ahead of you lands, so a forward made at position
+2 or 3 always gets redone. On a single-runner repo it also queues a full CI run
+ahead of every deploy. Keep your place on your last green head. Merge forward,
+re-gate and re-run CI only when you hold the token, or when you are next and
+the holder is merging. The bar is unchanged: the head you merge still needs a
+critic PASS, `INTEGRATION OK` and all-green CI, and it must contain current
+main. If the coordinator's protocol asks for something else (for example a
+head that contains main at request time), the protocol wins. Tell the
+coordinator what the extra forward costs. Measured 2026-09-26 on gen_saas:
+- DND-549 (#365) was merged forward 4 times in about 2h (slack-interactive
+  state log, 09:10Z–09:46Z). Main moved about every 40 min and CI took about
+  50 min.
+- #396 was at position 3 and "will need another forward".
+- The DND-437 admiral held #400's rebase until the holder landed, "to avoid a
+  wasted CI run on the single runner" (harness-epics-ab state log, 10:43Z).
+- Deploy tails of 1h14m and 1h20m (#363, #395) were mostly queue wait behind
+  those runs (DND-608).
+
 ## Boarding (GitLab merge train — walt_ui, the default)
 
 - **Trigger on DONE, not on sweeps.** Every dispatch brief carries your agentId
