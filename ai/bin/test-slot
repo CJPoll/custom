@@ -26,7 +26,9 @@
 # WAITING IS A KERNEL BLOCK. Every acquirer passes through queue.lock. Waiters
 # behind the head block in flock(2) on it. Only the head of the queue polls the
 # N slots, at a 2 s sleep cadence, bounded by --wait-timeout (Hard Rule
-# safe-wait item 3). No spin, no background child. A waiter prints WAITING with
+# safe-wait item 3). No spin. Each timed wait (the queue flock, the poll
+# sleep) runs as a child the script `wait`s on, so INT/TERM/HUP exit a waiter
+# at once and kill that child with it (DND-815). A waiter prints WAITING with
 # the pool, N, and every holder before it waits, and a heartbeat at least every
 # 60 s, so a queued gate never looks like a stall.
 #
@@ -46,13 +48,15 @@
 #   Exit codes:
 #     <CMD's own code>  CMD ran (including 128+n when a signal killed it)
 #     75                the wait timed out; CMD NEVER ran (`test-slot: TIMEOUT`)
+#     130/143/129       INT/TERM/HUP arrived while WAITING; CMD NEVER ran
 #     2                 usage/misuse; CMD never ran (bad flag, no `--`/CMD,
 #                       invalid N seam, pool dir unusable)
 #   --outcome-file PATH: removed at start, then written with exactly one line:
 #     `timeout`         the wait timed out; CMD never ran
 #     `ran exit=<n>`    CMD ran and exited <n>
-#     (file absent)     no outcome recorded: test-slot refused (exit 2), or
-#                       the wrapper was SIGKILLed (see RESIDUALS)
+#     (file absent)     no outcome recorded: test-slot refused (exit 2), a
+#                       signal ended it while WAITING (exit 128+n; CMD never
+#                       ran), or the wrapper was SIGKILLed (see RESIDUALS)
 #   This is how a caller tells "CMD exited 75" from "the wait timed out".
 #
 #   Environment set for CMD: ATHENA_TEST_SLOT_HELD=<pool dir>:<slot>. A nested
@@ -552,12 +556,40 @@ timeout_exit() {
   exit "$EXIT_TIMEOUT"
 }
 
+# interruptible CMD... — run CMD as a background child and `wait` for it.
+# bash runs a trap only after its FOREGROUND child returns, so a waiter parked
+# in a foreground `flock -w 60` answered TERM/INT/HUP up to a minute late
+# (DND-815); the `wait` builtin instead returns at once on a trapped signal.
+# The child holds nothing of its own: a flock it takes lands on the parent's
+# shared open file description. abandon_wait kills it before exiting.
+interruptible() {
+  "$@" &
+  wait "$!"
+}
+
+# abandon_wait CODE — the waiting phase's INT/TERM/HUP handler: kill every
+# helper child still running (jobs -p also covers one started an instant
+# before its pid was read), drop the waiter file, exit CODE. It releases only
+# what this process holds: any slot fds it took (a partial --exclusive) close
+# with it. No outcome file is written, since no outcome was reached.
+abandon_wait() {
+  local pids
+  pids=$(jobs -p)
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086 # word-split pid list
+    kill -KILL $pids 2>/dev/null
+    wait $pids 2>/dev/null
+  fi
+  unregister_waiter
+  exit "$1"
+}
+
 # acquire — take a slot (or all N with --exclusive), waiting in the queue.
 acquire() {
   local qfd rem chunk last_hb nap next_hb
   exec {qfd}>>"$POOL/queue.lock" || die_usage "cannot open $POOL/queue.lock." \
     "check $POOL is yours with mode 0700 and writable."
-  if ! flock -n "$qfd" && ! flock -w "$QUEUE_GRACE_S" "$qfd"; then
+  if ! flock -n "$qfd" && ! interruptible flock -w "$QUEUE_GRACE_S" "$qfd"; then
     # Others are queued ahead: block in the kernel on queue.lock.
     announce_waiting
     last_hb=$(now_ms)
@@ -566,7 +598,7 @@ acquire() {
       ((rem > 0)) || timeout_exit
       chunk=$(((rem + 999) / 1000))
       ((chunk > HEARTBEAT_S)) && chunk=$HEARTBEAT_S
-      flock -w "$chunk" "$qfd" && break
+      interruptible flock -w "$chunk" "$qfd" && break
       if (($(now_ms) - last_hb >= HEARTBEAT_S * 1000)); then
         heartbeat
         last_hb=$(now_ms)
@@ -591,7 +623,7 @@ acquire() {
       ((next_hb < nap)) && nap=$next_hb
       ((rem < nap)) && nap=$rem
       ((nap < 1)) && nap=1
-      sleep "$(fmt_ms "$nap")"
+      interruptible sleep "$(fmt_ms "$nap")"
     done
   fi
   exec {qfd}>&-
@@ -889,9 +921,9 @@ main() {
     exit "$rc"
   fi
 
-  trap 'unregister_waiter; exit 130' INT
-  trap 'unregister_waiter; exit 143' TERM
-  trap 'unregister_waiter; exit 129' HUP
+  trap 'abandon_wait 130' INT
+  trap 'abandon_wait 143' TERM
+  trap 'abandon_wait 129' HUP
   acquire
   trap - INT TERM HUP
 
