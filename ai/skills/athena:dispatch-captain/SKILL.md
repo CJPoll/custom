@@ -120,10 +120,17 @@ Give the captain, in the brief:
   the captain the denied call.
 - **The test-slot rule.** Every brief carries this line: *"Run every heavy gate
   — a full suite, `bin/prep-commit.sh`, `harness-gate`, `integration-gate` — as
-  `~/dev/custom/ai/bin/test-slot -- <cmd>`. Exit 75 with `test-slot: TIMEOUT`
-  means it never ran: run it again; never count it as a pass."* Nothing in the
-  harness wraps a captain's gates yet (DND-486 is unlanded), so this line is
-  the only thing that does.
+  `~/dev/custom/ai/bin/test-slot -- <cmd>`. To bound the command, put `timeout`
+  INSIDE the slot: `test-slot -- timeout 1500 <cmd>`. Exit 75 with `test-slot:
+  TIMEOUT` means it never ran: run it again; never count it as a pass."*
+  Nothing in the harness wraps a captain's gates yet (DND-486 is unlanded), so
+  this line is the only thing that does.
+- **Never put `timeout` outside `test-slot`.** `timeout 1500 test-slot -- <cmd>`
+  counts the queue wait against the command's budget, so a deep queue kills a
+  gate that never started (rc 124). Measured 2026-09-26: DND-814's harness-gate
+  timed out after 900 s of its 1500 s spent queued, and DND-790's timed out with
+  3/3 slots held and the gate never run. Bound the wait with
+  `--wait-timeout` instead.
 
 **In fleet mode, also point it at the design in Notion** — its ticket page's
 three sub-docs (**Product Requirements / Architecture & Engineering / QA Plan**)
@@ -186,6 +193,15 @@ below it, these rules decide.
   under load, or a kill, with a census reading taken at the failure. One
   lowering per report or failure. The cap only moves down; a new brief from the
   launching session is how it comes back up.
+- **A gate that never left the `test-slot` queue is not a load-based failure.**
+  Exit 75, or an rc 124 from a `timeout` wrapped around `test-slot`, means the
+  command never ran, so it measured the pool, not the machine. It does not
+  lower the cap and is not reported as a load failure. Tell them apart with
+  `~/dev/custom/ai/bin/test-slot --status`: all N slots held with 1-min load
+  under 12 means the pool is the limiter. Measured 2026-09-26 ~16:30Z: two
+  fleets froze dispatch on "load-based failures" that were DND-814's queued
+  gate timing out; one then read load 7.5 on 16 cores with 9 waiters. Pool
+  size and FIFO order are DND-827 and DND-823.
 - **The pool is per machine.** Another machine may have its own pool (a captain
   count its admirals share) or its own threshold. The launching session
   apportions it, and the share your brief names is your cap, as a lane brief's
