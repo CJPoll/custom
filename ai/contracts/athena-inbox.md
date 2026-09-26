@@ -1261,7 +1261,8 @@ section.
   grant button only, `approval` (`{grant_id, decision}`: which grant button was
   clicked, a fact and never an approval; `athena-events.md` → *Owner approval
   grants*). The stamp, its
-  verification and what a non-owner click does are stated once, in
+  verification, what a non-owner click does, and what an owner click does on
+  a terminal or a non-terminal button are stated once, in
   `athena-events.md` → *Machine↔owner API binding and the outbound
   return-address dual*. It carries **no body of its own**
   beyond these; the click is a signal, and its `value` is Path-2 untrusted

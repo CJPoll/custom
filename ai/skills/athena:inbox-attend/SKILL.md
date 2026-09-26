@@ -264,6 +264,12 @@ The script and its failure modes: `athena:slack` → *The thinking status*.
     update the click calls for — `slack_update`, a thread reply, or
     `slack_ephemeral` — per `athena:slack` → *After a click: the two-phase
     update*'s when-to-update table; that table is not restated here.
+    **Later (2026-09-26):** added by DND-616. The table's row is picked by
+    the button this session posted, matched by `action_id`; the line carries
+    no terminal flag. A button posted with `"athena_terminal": false`
+    (DND-549) left the message live, so its click gets the *Informational*
+    row's `slack_ephemeral`, never a `slack_update`. That ephemeral counts as
+    the phase-2 update firing for the DM rule above.
   - **Otherwise: relay and stop.** A `{channel, ts}` that does not match means
     a sibling session of this project posted the message (`athena:slack` → *A
     click on a message this session did not post is relayed, not handled*); a
