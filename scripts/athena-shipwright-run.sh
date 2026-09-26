@@ -541,6 +541,16 @@ fi
 # A failed send is loud and is NOT recorded as sent, so the next tick retries.
 # None of this touches the dirt, changes the exit code, or feeds the wedge.
 
+# stale_dirt_note <skip-record> <line> — append one line to the skip record.
+# The only way this section writes the record: a failed append is loud and
+# returns 0, so it can never turn a yield into a non-zero exit under errexit.
+stale_dirt_note() {
+  printf '%s\n' "$2" >>"$1" && return 0
+  echo "athena-shipwright: could not append to the skip record $1: $2" >&2
+  echo "  Fix: check that $(dirname -- "$1") is writable and the disk is not full." >&2
+  return 0
+}
+
 # stale_dirt_send <skip-record> <first-seen> <streak> <newest> <count> <sig> <paths>
 # <paths> is the relay list stale_dirt_track already wrote into the record, so
 # the message and its authority name the same paths. Prints the delivered
@@ -583,7 +593,7 @@ stale_dirt_send() {
     if [ "${rc}" -eq 0 ] || [ "${attempt}" -ge 3 ] || ! grep -q 'already sending on' <<<"${out}"; then
       break
     fi
-    printf 'alert: sender lock busy (attempt %s/3); retrying\n' "${attempt}" >>"${record}"
+    stale_dirt_note "${record}" "alert: sender lock busy (attempt ${attempt}/3); retrying"
     sleep 2
   done
   rm -f "${body}"
@@ -602,7 +612,7 @@ stale_dirt_track() {
   local tick="$1" record="$2" m sig newest count now age stale=0 label paths
   local prev_sig prev_streak first alerted streak name err tmp
   if ! m="$(sd_measure "${MAIN_CHECKOUT}")"; then
-    printf 'dirt: UNMEASURED (git status or stat failed mid-scan)\n' >>"${record}"
+    stale_dirt_note "${record}" 'dirt: UNMEASURED (git status or stat failed mid-scan)'
     echo "athena-shipwright: could not measure the age of the dirt in ${MAIN_CHECKOUT}; this skip is not counted toward the stale-dirt streak." >&2
     echo "  Fix: usually a path changed during the scan, which is a live editor and needs nothing. If every skip says UNMEASURED, run 'git -C ${MAIN_CHECKOUT} status --porcelain -z -uall' by hand: while it fails, stale dirt cannot escalate." >&2
     return 0
@@ -623,28 +633,39 @@ stale_dirt_track() {
   # carry the STALE verdict when the doorbell rings. The relay_paths block is
   # what the reader relays to the owner: the raw list above it is uncapped (an
   # untracked node_modules is every file in it, 30k measured) and unstripped.
-  # The block is indented, so no line of it can start "dirt: ".
-  paths="$(sd_display_paths "${MAIN_CHECKOUT}" 20)" || paths="(the paths could not be listed)"
-  {
+  # The block is indented, so no line of it can start "dirt: ". A failed
+  # listing is recorded as a failure in words, never as an empty block.
+  if ! paths="$(sd_display_paths "${MAIN_CHECKOUT}" 20)"; then
+    paths="(could not list the paths: git status failed; the raw list above this block is complete but uncapped)"
+    echo "athena-shipwright: could not list the dirty paths for the relay block; the record says so instead." >&2
+    echo "  Fix: run 'git -C ${MAIN_CHECKOUT} status --porcelain -unormal' by hand to see git's reason." >&2
+  fi
+  # The record is the alert's authority: if its classification cannot be
+  # written, no alert goes out this tick and the streak does not advance.
+  if ! {
     printf 'dirt: %s newest_change=%s age_s=%s stale_streak=%s/%s first_seen=%s signature=%s\n' \
       "${label}" "$(date -u -d "@${newest}" +%Y-%m-%dT%H:%M:%SZ)" "${age}" "${streak}" "${STALE_DIRT_ESCALATE}" \
       "${first}" "${sig}"
     printf 'relay_paths: (untracked directories collapsed, control characters stripped, at most 20)\n'
     printf '%s\n' "${paths}" | sed 's/^/  /'
-  } >>"${record}"
+  } >>"${record}"; then
+    echo "athena-shipwright: could not write the dirt classification to ${record}; no stale-dirt alert this tick and the streak is unchanged." >&2
+    echo "  Fix: check that $(dirname -- "${record}") is writable and the disk is not full." >&2
+    return 0
+  fi
 
   name=""
   if [ "${stale}" -eq 1 ] && [ "${streak}" -ge "${STALE_DIRT_ESCALATE}" ] && [ -z "${alerted}" ]; then
-    err="$(mktemp)"
-    if name="$(stale_dirt_send "${record}" "${first}" "${streak}" "${newest}" "${count}" "${sig}" "${paths}" 2>"${err}")"; then
+    err="$(mktemp)" || err=""
+    if name="$(stale_dirt_send "${record}" "${first}" "${streak}" "${newest}" "${count}" "${sig}" "${paths}" 2>"${err:-/dev/null}")"; then
       alerted="${name}"
     else
       name=""
-      printf 'alert: FAILED to send\n' >>"${record}"
-      echo "athena-shipwright: the stale-dirt harness-alert could NOT be sent: $(tr '\n' ' ' <"${err}")" >&2
+      stale_dirt_note "${record}" 'alert: FAILED to send'
+      echo "athena-shipwright: the stale-dirt harness-alert could NOT be sent: $( [ -n "${err}" ] && tr '\n' ' ' <"${err}" || echo '(send-mail output lost: no temporary file)')" >&2
       echo "  Fix: run inbox-doctor from ${__wrapper_dir%/scripts} (is the custom registry entry installed with its harness-alerts channels? scripts/setup-inbox-registry --install). Nothing was recorded as sent, so the next tick retries on its own." >&2
     fi
-    rm -f "${err}"
+    [ -z "${err}" ] || rm -f "${err}"
   fi
 
   # A failed state write must stay a yield (exit 0), so it is loud instead of
@@ -657,7 +678,7 @@ stale_dirt_track() {
     echo "  Fix: check that $(dirname -- "${STALE_DIRT_STATE}") is writable and the disk is not full." >&2
   fi
 
-  [ -z "${name}" ] || printf 'alert: harness-alerts %s\n' "${name}" >>"${record}"
+  [ -z "${name}" ] || stale_dirt_note "${record}" "alert: harness-alerts ${name}"
 
   echo "athena-shipwright: the dirt is ${label} (newest change $(( age / 3600 ))h ago; STALE after $(( STALE_DIRT_AGE_S / 3600 ))h); stale streak ${streak}/${STALE_DIRT_ESCALATE} on this signature since ${first}." >&2
   if [ -n "${name}" ]; then
