@@ -75,9 +75,12 @@
 #     are not globs; an assignment word (`rc=$?`) is never a command word; a
 #     word whose expansions are all inside double quotes and whose last path
 #     component is literal (`"$W/t"`) is that literal name; the BODY of a
-#     heredoc with a quoted delimiter (`<<"EOF"`, or single quotes) is data,
-#     unless the command also runs a shell, an interpreter, xargs, a wrapper
-#     or a path/expanded command word that could execute it. When several
+#     heredoc with a quoted delimiter (`<<"EOF"`, or single quotes) is data
+#     only when EVERY command word in the command is a known data reader
+#     (cat, tee, grep, `git commit`, `gh pr`, ... see hd_readers_safe) and no
+#     shell, interpreter or wrapper appears anywhere (see hd_runs); an alias,
+#     an unlisted interpreter or a script run by name keeps the body a
+#     command. When several
 #     rules fire, the most specific finding is reported (a literal
 #     `git stash pop` is named as such after an unrelated `$(...)`).
 #     Kept deliberately: a quoted word holding whitespace or a separator is
@@ -844,11 +847,41 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     }
     return 0
   }
+  # hd_readers_safe(text): 1 when EVERY command word in text (heredoc bodies
+  # removed) is a known data reader that never executes its input: a fixed
+  # list of text tools and shell keywords, `git` with a subcommand that
+  # takes a message or data (builtins, which a git alias cannot shadow), or
+  # `gh` with a builtin command group (a gh alias cannot shadow one either).
+  # An assignment word is skipped. Anything else (an interpreter off any
+  # list, a git or gh alias, a script run by name, a path or an expanded
+  # command word) is not known safe, so the bodies stay commands.
+  function hd_readers_safe(text,    W, QF, SB, UX, n, k, cp, w, j) {
+    n = tokenize(text, W, QF, SB, UX); cp = 0
+    for (k = 1; k <= n; k++) {
+      cp = SB[k] || (cp && k > 1 && cmd_prefix(W[k - 1]))
+      if (!cp || is_assign(W[k])) continue
+      w = W[k]
+      # `[`, `[[` and `{` carry a glob mark; they are the test command and
+      # keywords (see glob_may_be_git).
+      if (w ~ /^(\[\001|\[\001\[\001|\{\001)$/) continue
+      if (w ~ /^(then|do|else|elif|fi|done|esac|if|while|until|for|case|in|\{|\}|!|\[|\[\[|\]\]|:|true|false|test|echo|printf|cat|tee|wc|head|tail|sort|uniq|cut|tr|diff|cmp|grep|egrep|fgrep|rg|jq|yq|column|fold|fmt|nl|rev|paste|comm|join|base64|md5sum|sha1sum|sha256sum|cksum|mkdir|touch|rm|rmdir|mv|cp|ln|cd|pushd|popd|pwd|ls|date|sleep|seq|mktemp|basename|dirname|realpath|readlink|stat|exit|return|break|continue|export|local|unset|wait)$/ && (!(w in shal))) continue
+      if (w == "git" || w == "gh") {
+        for (j = k + 1; j <= n && !SB[j] && W[j] ~ /^-/; j++) if (two_word(W[j])) j++
+        if (j > n || SB[j]) return 0
+        if (w == "git" && W[j] ~ /^(commit|tag|notes|apply|hash-object|interpret-trailers|stripspace|check-ignore|check-attr|cat-file|log|show|diff|status)$/) continue
+        if (w == "gh" && W[j] ~ /^(pr|issue|api|release|gist|label|search)$/) continue
+      }
+      return 0
+    }
+    return 1
+  }
   # hd_data(text): text with quoted heredoc bodies removed, unless it could
-  # run them (then text unchanged).
+  # run them (then text unchanged): every command word must be a known data
+  # reader, and no runner may appear anywhere (a runner as an argument, e.g.
+  # `find ... -exec sh`, is not a command word).
   function hd_data(text,    s) {
     s = hd_strip(text)
-    return (s != text && !hd_runs(s)) ? s : text
+    return (s != text && hd_readers_safe(s) && !hd_runs(s)) ? s : text
   }
   # squote(w): w as one single-quoted shell word.
   function squote(w) { gsub(/\047/, "\047\\\047\047", w); return "\047" w "\047" }

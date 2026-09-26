@@ -467,6 +467,29 @@ case_cmd "O37. a stash write inside \${...:-\$(...)}" deny 'echo ${X:-$(git stas
 case_cmd "O38. an assignment then an expanded git with stash" deny 'A=$B $GIT stash pop'
 case_cmd "O39. a glob git command word in a quoted sh -c payload" deny "sh -c '/usr/bin/g?t stash pop'"
 case_cmd "O40. literal git in a quoted watch payload" deny "watch 'git stash pop'"
+# A quoted heredoc body stays a command unless every reader is known safe
+# (critic round 1): a git ! alias, an interpreter on no list, a script run by
+# name, a gh alias.
+case_cmd "O42. quoted heredoc to a git shell alias defined inline" deny "git -c alias.zq='!sh' zq <<'EOF'
+git stash pop
+EOF"
+case_cmd "O43. quoted heredoc to an interpreter on no list" deny "pwsh <<'EOF'
+git stash pop
+EOF"
+case_cmd "O44. quoted heredoc written to a script run by bare name" deny "cat > ~/bin/f <<'EOF'
+git stash pop
+EOF
+f"
+case_cmd "O45. quoted heredoc to a gh alias" deny "gh x <<'EOF'
+git stash pop
+EOF"
+case_cmd "O46. quoted heredoc to find -exec sh" deny "cat > f <<'EOF'
+git stash pop
+EOF
+find . -name f -exec sh {} \\;"
+case_cmd "O47. quoted heredoc to git commit under a -C option" allow "git -C /tmp commit -F - <<'EOF'
+subject mentions git stash pop and [ -n x ]
+EOF"
 # LOW (DND-780): a literal stash write must name the literal-stash reason even
 # after an unrelated expansion that also triggers a rule.
 run "$(json / 'cd "$D" && echo "$X" foo && git stash pop')"
