@@ -93,6 +93,8 @@ PROPOSER_ARGV = [
 def command_allowed?(argv, scratch: nil, chdir: nil)
   return false unless argv.is_a?(Array) && !argv.empty? && argv.all?(String)
   return false if argv.include?("--update-baseline")
+  # git diff/show --output=<file> writes anywhere; nothing here needs it.
+  return false if argv.any? { |a| a.start_with?("--output") }
 
   prog = argv[0]
   return false if FORGE_CLIS.include?(File.basename(prog))
@@ -135,7 +137,7 @@ def worktree_allowed?(args, scratch, cpath)
   return false if scratch.nil? || !cpath.nil?
 
   case args[0]
-  when "add" then args == ["add", "--detach", scratch, args[3]].compact && args.size == 4
+  when "add" then args.size == 4 && args[0, 3] == ["add", "--detach", scratch] && !args[3].start_with?("-")
   when "remove" then args == ["remove", "--force", scratch]
   else false
   end
@@ -321,6 +323,9 @@ module Manager
     rescue Reject, BO::Error => e
       ctx[:label] = :rejected
       ctx[:reason] = e.message
+    rescue SystemCallError, IOError, EncodingError => e
+      ctx[:label] = :rejected
+      ctx[:reason] = "#{e.class}: #{e.message}. Fix: check the input files and the scratch directory, then re-run"
     end
     text = BO::Proposal.render(ctx, band: ctx[:band])
     io.write_out("proposal.md", text)
@@ -554,6 +559,11 @@ def main(argv)
 rescue MutationAttempt => e
   warn "block-optimize: FAILED — #{e.message}"
   1
+rescue StandardError => e
+  warn "block-optimize: FAILED — #{e.class}: #{e.message}"
+  warn "  Fix: this is a defect or an environment fault, not a label; nothing was proposed. Check that origin/main " \
+       "is fetched and `git worktree add` works, then re-run."
+  1
 end
 
 # ---------------------------------------------------------------------------
@@ -594,7 +604,7 @@ class FakeAdapters
   end
 
   def read_input(path)
-    @cfg[:input].fetch(path)
+    @cfg[:input].fetch(path) { raise Errno::ENOENT, path }
   end
 
   def write_out(name, text)
@@ -787,6 +797,10 @@ def self_test
     nil
   end
   check.("M6 an exception inside the scratch still removes it", fk.calls.include?(:scratch_remove) && !fk.scratch_open)
+  fk = FakeAdapters.new(input: {})
+  code = st_run(fk, evidence: "missing-file")
+  check.("M6 an IO error still writes a REJECTED proposal.md (exit #{code})",
+         code == 1 && fk.out["proposal.md"].to_s.include?("REJECTED"))
 
   containment_checks(check)
 
@@ -819,6 +833,9 @@ def containment_checks(check)
     %w[git stash], %w[git cherry-pick x], %w[git revert x], %w[git am x], %w[git fetch], %w[git pull],
     ["git", "worktree", "add", s, "HEAD"], ["git", "worktree", "add", "-b", "x", s, "HEAD"],
     ["git", "worktree", "remove", "--force", "/elsewhere"], %w[git worktree prune],
+    ["git", "worktree", "add", "--detach", s, "--orphan"], ["git", "worktree", "add", "--detach", s, "b", "extra"],
+    ["git", "worktree", "add", "--detach", "/elsewhere", "b"],
+    %w[git diff --output=/tmp/x HEAD], ["git", "-C", s, "show", "--output", "/tmp/x", "HEAD"],
     %w[git apply x.patch], %w[git add -A], %w[git write-tree], %w[git commit-tree t -p b -m m],
     ["git", "-C", "/elsewhere", "apply"], ["git", "-C", "/elsewhere", "commit-tree", "t"],
     ["git", "-C", s, "commit", "-m", "x"], ["git", "-C", s, "push"], ["git", "-c", "alias.x=!sh", "x"],
@@ -863,7 +880,7 @@ def containment_checks(check)
   idents = toks.select { |t| t[1] == :on_ident }.map { |t| t[2] }
   check.("C2 exactly one Open3.capture3 call (got #{idents.count('capture3')})", idents.count("capture3") == 1)
   check.("C2 no backtick or %x literal", toks.none? { |t| t[1] == :on_backtick })
-  %w[system spawn exec popen capture2 capture2e popen3 pipeline].each do |prim|
+  %w[system spawn exec popen capture2 capture2e popen3 pipeline open].each do |prim|
     check.("C2 no #{prim} call", idents.count(prim).zero?)
   end
   lib_dir = File.join(ai_dir, "lib") + File::SEPARATOR
