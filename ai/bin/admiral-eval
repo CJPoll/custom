@@ -1472,7 +1472,12 @@ def self_test
          "--disallowedTools Bash Task last, and an unloadable subject must raise SubjectError with a Fix:. An " \
          "unknown flag, a stray argument, or a value flag with no value must exit 2 naming it (DND-505). The " \
          "AE-19c meta must fail a drain with no/late `fleet-resume.drained` and pass the fleet-drain step-5 " \
-         "order: restore its two expect_order lines rather than loosening them (DND-521)."
+         "order: restore its two expect_order lines rather than loosening them (DND-521). Per agent (DND-529): " \
+         "VOCABULARIES must cover exactly the agents EvalSubject::AGENTS assigns to #{RUNNER}; every case in " \
+         "every agent's corpus needs an `invariant =` line, only tokens its agent's vocabulary offers, and " \
+         "(for every agent but the admiral) an `examples` file whose pass/fail lines the scorer agrees with — " \
+         "fix the case, never the example, when they disagree; each agent must default to its own render " \
+         "and corpus; and `--agent` with an unknown agent, or one another runner measures, must exit 2 with a Fix:."
     1
   end
 end

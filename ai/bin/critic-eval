@@ -336,38 +336,51 @@ def run_self_test
   ok = false unless parse_cli([])[1].nil? && parse_cli(%w[--self-test])[1].nil?
 
   # DND-529: the critic under test is the NAMED render, inline, contained.
-  argv, why = critic_argv(DEFAULT_AGENT_FILE)
-  if argv.nil?
-    warn "self-test: FAIL — this checkout's critic render does not load: #{why}"
+  # Each check names itself and its fix, so a subject or containment
+  # regression is never reported under the scorer's closing Fix: alone.
+  subject_fix = "Fix: build the critic argv only with EvalSubject.argv(<render>, SUBJECT) in critic_argv, " \
+                "and invoke the model only through that argv in run_model (ai/lib/eval_subject.rb owns the " \
+                "subject and containment rules; never `claude -p --agent #{CRITIC}`)."
+  check = lambda do |cond, what|
+    next if cond
+
+    warn "self-test: FAIL — #{what}. #{subject_fix}"
     ok = false
-  else
-    di = argv.index("--disallowedTools")
-    ok = false unless argv[0, 4] == ["claude", "-p", "--agent", SUBJECT.subject_key]
-    ok = false unless di && argv[(di + 1)..] == %w[Bash Task] && argv.include?("--strict-mcp-config")
-    ok = false if argv.each_cons(2).include?(["--agent", CRITIC])
   end
-  _argv, why = critic_argv(File.join(Dir.tmpdir, "critic-eval-no-such-render.md"))
-  ok = false unless why.to_s.include?("Fix:")
+  missing_render = File.join(Dir.tmpdir, "critic-eval-no-such-render.md")
+  argv, why = critic_argv(DEFAULT_AGENT_FILE)
+  check.(argv, "this checkout's critic render does not load: #{why}")
+  if argv
+    di = argv.index("--disallowedTools")
+    check.(argv[0, 4] == ["claude", "-p", "--agent", SUBJECT.subject_key],
+           "the critic argv must start `claude -p --agent #{SUBJECT.subject_key}` (got #{argv[0, 4].inspect})")
+    check.(di && argv[(di + 1)..] == %w[Bash Task], "--disallowedTools must be last, carrying exactly Bash Task")
+    check.(argv.include?("--strict-mcp-config"), "the critic argv must pass --strict-mcp-config (no MCP server loads)")
+    check.(!argv.each_cons(2).include?(["--agent", CRITIC]),
+           "the critic argv must never pass the bare --agent #{CRITIC} (it resolves from ~/.claude/agents)")
+  end
+  _argv, why = critic_argv(missing_render)
+  check.(why.to_s.include?("Fix:"), "an unloadable --agent-file must be an error carrying a Fix: (got #{why.inspect})")
   # The model call must go through that argv: a correct critic_argv the run
   # ignores would still evaluate main's copy.
   runner = File.read(__FILE__)[/^def run_model.*?^end$/m].to_s
-  unless runner.include?("Open3.capture3(*argv") && !runner.include?('"--agent", CRITIC')
-    warn "self-test: FAIL — run_model must invoke the critic via critic_argv's argv, never `--agent #{CRITIC}`"
-    ok = false
-  end
+  check.(runner.include?("Open3.capture3(*argv") && !runner.include?('"--agent", CRITIC'),
+         "run_model must invoke the critic via critic_argv's argv, never `--agent #{CRITIC}`")
   # A bad --agent-file is refused before any model call (exit 2, Fix:).
-  _out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path(__FILE__), "--run", "--agent-file",
-                                 File.join(Dir.tmpdir, "critic-eval-no-such-render.md"))
-  ok = false unless st.exitstatus == 2 && err.include?("Fix:")
+  _out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path(__FILE__), "--run", "--agent-file", missing_render)
+  check.(st.exitstatus == 2 && err.include?("Fix:"),
+         "`critic-eval --run --agent-file <missing>` must exit 2 with a Fix: before any model call " \
+         "(got exit #{st.exitstatus})")
   _o, reason = parse_cli(%w[--agent-file x.md])
-  ok = false unless reason.to_s.include?("--agent-file")
+  check.(reason.to_s.include?("--agent-file"), "--agent-file without --run must be a usage error naming it")
   _o, reason = parse_cli(%w[--run --agent-file x.md])
-  ok = false unless reason.nil?
+  check.(reason.nil?, "--run --agent-file PATH must parse (got #{reason.inspect})")
   # Every fixture names the rule it protects.
   fixtures.each do |d|
     next unless parse_meta(File.join(d, "meta"))["invariant"].to_s.strip.empty?
 
-    warn "self-test: FAIL — #{File.basename(d)} has no `invariant=` line naming the rule it protects"
+    warn "self-test: FAIL — #{File.basename(d)} has no `invariant=` line naming the rule it protects. " \
+         "Fix: add `invariant=<the rule this case protects>` to its meta."
     ok = false
   end
 
@@ -376,10 +389,12 @@ def run_self_test
     0
   else
     warn "critic-eval: self-test FAILED"
-    warn "  Fix: the precision/recall scorer, the FINDINGS parser, or the fixture-input declaration is wrong."
+    warn "  Fix: the precision/recall scorer, the FINDINGS parser, the fixture-input declaration, or the"
+    warn "  critic subject/containment is wrong (a FAIL line above names which, with its own Fix:)."
     warn "  A miss must lower recall; a good-case finding must lower precision; a fixture naming an input"
     warn "  absent from CriticPrompt::INPUTS (or missing its input file) must be UNSCOREABLE, never a zero;"
-    warn "  and an --only value matching no fixture must be an error, never an empty perfect score."
+    warn "  an --only value matching no fixture must be an error, never an empty perfect score; and the"
+    warn "  critic must be the --agent-file render passed inline via EvalSubject.argv, never `--agent #{CRITIC}`."
     1
   end
 end
