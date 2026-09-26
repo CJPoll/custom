@@ -17,9 +17,11 @@
 # loop here): the existing eval "scorecard" (ai/bin/harness-eval,
 # ai/bin/admiral-eval) is a set of per-case BINARY pass/fail verdicts, NOT a
 # numeric score, and a "delta" is a pass-set diff (true->false = regressed,
-# false->true = fixed). There is NO noise band in code — admiral-eval uses
-# K-sample majority and hands 2/3->1/3 sampling-noise to a human re-run, and the
-# committed baseline already carries a 2/3 case. So a fully-automatic
+# false->true = fixed). There was NO noise band in code — admiral-eval used
+# K-sample majority and handed 2/3->1/3 sampling-noise to a human re-run, and the
+# committed baseline already carries a 2/3 case. (As of 2026-09: DND-225 added
+# EvalScore's noise band, and DND-523 moved admiral-eval's own baseline diff
+# onto EvalScore.classify at N=10; the rationale is kept as written.) So a fully-automatic
 # measured-improvement verdict over the model signal is not yet trustworthy. Per
 # epic Decision 5 the speculative measured-adoption core is DEFERRED; this builds
 # the deterministic + inconclusive-by-default reduced scope. See
@@ -226,8 +228,10 @@ end
 # PURE SCORING (all exercised synthetically by --self-test; no model, no git).
 # ---------------------------------------------------------------------------
 
-# EXACT pass-set diff — identical semantics to harness-eval/admiral-eval
-# diff_baseline. Sets are { case_name => bool }.
+# EXACT pass-set diff — identical semantics to harness-eval's baseline diff.
+# Sets are { case_name => bool }. admiral-eval's diff_baseline no longer matches
+# this: since DND-523 it classifies T2 counts with EvalScore.classify and counts
+# a baseline case absent from the run as a regression; only its T1 half is exact.
 def deterministic_diff(base_set, var_set)
   regressed = base_set.select { |name, was| was && var_set[name] == false }.keys
   fixed     = base_set.select { |name, was| !was && var_set[name] == true }.keys
