@@ -43,6 +43,7 @@
 require "time"
 require "json"
 require "open3"
+require "uri"
 
 # Which workflow/stage counts as "the deploy" (overridable, not hardcoded to a
 # repo). GitHub: workflow name matches this regex. GitLab: job stage equals the
@@ -181,6 +182,20 @@ rescue JSON::ParserError => e
   ProbeFailures.record(printable, "unparseable output: #{e.message}")
 end
 
+# The merged-PR/MR list is capped. A window holding more merges than the cap
+# comes back as exactly the cap, and the overflow is dropped with exit 0, so a
+# full page is recorded as a failed probe (the scan reports INCOMPLETE), never
+# read as the whole window. GitLab's API caps a page at 100.
+MERGED_PAGE_CAP = 1000
+GITLAB_PAGE_CAP = 100
+
+def note_saturated(printable, count, cap = MERGED_PAGE_CAP)
+  return if count < cap
+
+  ProbeFailures.record(printable, "window saturated: #{count} merges returned at a " \
+                                  "cap of #{cap}; merges beyond it would be silently dropped")
+end
+
 def origin_url(dir)
   out, _err, st = Open3.capture3("git", "-C", dir, "remote", "get-url", "origin")
   st.success? ? out.strip : ""
@@ -207,7 +222,9 @@ class GitHubForge
 
   def merged_since(since_iso)
     since = Time.iso8601(since_iso)
-    prs = run_json(%w[gh pr list --state merged --limit 100 --json number,mergedAt], @dir) || []
+    prs = run_json(["gh", "pr", "list", "--state", "merged", "--search", "merged:>=#{since_iso}",
+                    "--limit", MERGED_PAGE_CAP.to_s, "--json", "number,mergedAt"], @dir) || []
+    note_saturated("gh pr list --search merged:>=#{since_iso}", prs.size)
     prs.select { |p| p["mergedAt"] && Time.iso8601(p["mergedAt"]) >= since }
        .sort_by { |p| p["mergedAt"] }.map { |p| p["number"] }
   end
@@ -260,7 +277,6 @@ class GitLabForge
 
   def project_path(dir)
     # git@gitlab.com:group/sub/repo.git  OR  https://gitlab.com/group/repo.git
-    require "uri"
     url = origin_url(dir)
     path = url.sub(%r{^git@[^:]+:}, "").sub(%r{^https?://[^/]+/}, "").sub(/\.git$/, "")
     path.split("/").map { |seg| URI.encode_www_form_component(seg) }.join("%2F")
@@ -272,7 +288,12 @@ class GitLabForge
 
   def merged_since(since_iso)
     since = Time.iso8601(since_iso)
-    mrs = api("projects/#{@proj}/merge_requests?state=merged&order_by=updated_at&per_page=100") || []
+    # A merge at or after `since` was updated at or after it, so updated_after
+    # is a server-side superset of the window; saturation then means truncation.
+    after = URI.encode_www_form_component(since_iso)
+    mrs = api("projects/#{@proj}/merge_requests?state=merged&order_by=updated_at" \
+              "&updated_after=#{after}&per_page=#{GITLAB_PAGE_CAP}") || []
+    note_saturated("glab api merge_requests?updated_after=#{since_iso}", mrs.size, GITLAB_PAGE_CAP)
     mrs.select { |m| m["merged_at"] && Time.iso8601(m["merged_at"]) >= since }
        .sort_by { |m| m["merged_at"] }.map { |m| m["iid"] }
   end
@@ -442,6 +463,48 @@ def self_test
   check.call("run query is scoped to the merge sha",
              seen.all? { |c| c.include?("--commit") }, true)
 
+  # merged_since must never silently drop merges. The merged-PR list is capped
+  # (--limit / per_page); a window holding more merges than the cap returned
+  # exactly the cap, and the rest vanished with exit 0. Measured 2026-09-26 on
+  # gen_saas: 122 merges since the held cursor, `--limit 100` returned 100.
+  # A saturated page must mark the scan INCOMPLETE, and the query must filter
+  # by the window server-side so saturation means truncation.
+  ProbeFailures.reset!
+  since = "2026-09-22T00:00:00Z"
+  gh_sat = GitHubForge.new(".")
+  gh_cmds = []
+  gh_sat.define_singleton_method(:run_json) do |cmd, _dir|
+    gh_cmds << cmd
+    lim = cmd[cmd.index("--limit") + 1].to_i
+    Array.new(lim) { |n| { "number" => n + 1, "mergedAt" => "2026-09-25T00:00:00Z" } }
+  end
+  gh_sat.merged_since(since)
+  check.call("gh merged list filters the window server-side",
+             gh_cmds.first.include?("merged:>=#{since}"), true)
+  check.call("gh saturated merged list marks the scan incomplete", ProbeFailures.any?, true)
+
+  ProbeFailures.reset!
+  gh_ok = GitHubForge.new(".")
+  gh_ok.define_singleton_method(:run_json) do |_cmd, _dir|
+    [{ "number" => 7, "mergedAt" => "2026-09-25T00:00:00Z" }]
+  end
+  check.call("gh unsaturated merged list returns its merges", gh_ok.merged_since(since), [7])
+  check.call("gh unsaturated merged list is a clean probe", ProbeFailures.any?, false)
+
+  gl_sat = GitLabForge.allocate
+  gl_sat.instance_variable_set(:@proj, "g%2Fr")
+  gl_paths = []
+  gl_sat.define_singleton_method(:api) do |path|
+    gl_paths << path
+    per = path[/per_page=(\d+)/, 1].to_i
+    Array.new(per) { |n| { "iid" => n + 1, "merged_at" => "2026-09-25T00:00:00Z" } }
+  end
+  gl_sat.merged_since(since)
+  check.call("gitlab merged list filters the window server-side",
+             gl_paths.first.include?("updated_after="), true)
+  check.call("gitlab saturated merged list marks the scan incomplete", ProbeFailures.any?, true)
+  ProbeFailures.reset!
+
   if failures.empty?
     puts "lead-time --self-test: PASS (pure-logic assertions)"
     0
@@ -541,8 +604,9 @@ def main(argv)
     ProbeFailures.list.each { |f| warn "  - #{f[:cmd]}: #{f[:detail].lines.first.to_s.strip}" }
     warn "Fix: restore forge auth for this repo and re-run (`gh auth status` / " \
          "`glab auth status`; a cron or other headless session often has no token " \
-         "even though an interactive one does). Until it re-runs clean, report the " \
-         "scan as UNAVAILABLE, not as zero outliers."
+         "even though an interactive one does). For a \"window saturated\" probe, " \
+         "re-run with a later --since and scan the window in slices. Until it " \
+         "re-runs clean, report the scan as UNAVAILABLE, not as zero outliers."
     return 3
   end
 
