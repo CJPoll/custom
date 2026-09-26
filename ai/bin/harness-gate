@@ -671,19 +671,21 @@ end
 # check-guard-messages, check-tool-risk and check-bin-help read their bar from
 # origin's main (ai/lib/landed.rb), and so do the suites that run them live
 # (forge-preflight, harness-eval case 07, athena-inbox-poll F-12, each check's
-# own live-tree case). Each used to run its own `git ls-remote` at its own
-# moment. The gate takes 11-15 minutes; on 2026-09-26 main moved about every
-# 15, so most runs straddled a push and went red on every one of those checks
-# at once, with "the local landed ref disagrees with origin", for a reason
-# unrelated to the change.
+# own live-tree case). Each compared the local ref with its own
+# `git ls-remote` at its own moment. The gate takes 11-15 minutes; on
+# 2026-09-26 main moved about every 15, so most runs straddled a push and went
+# red on every one of those checks at once, with "the local landed ref
+# disagrees with origin", for a reason unrelated to the change.
 #
 # So the gate reads origin's main ONCE, here, and hands the answer to every
 # check (Landed::PIN_SHA_ENV, keyed to this repository by
 # Landed::PIN_REPO_ENV). Every check then measures the same commit: origin's
 # main as of the gate start. The guarantee is unchanged: a local ref that is
-# not that commit (or a later one fetched from origin) still fails, and the
-# pin comes from origin, never from the branch. A move during the run is
-# reported once, as a NOTE naming both SHAs.
+# not that commit (or a later one fetched from origin) still fails, and each
+# check still asks origin and requires the pin to be on origin's main, so a
+# hand-set pin cannot name a commit that never landed (residual in
+# ai/lib/landed.rb -> "ANYONE CAN SET AN ENVIRONMENT VARIABLE"). A move during
+# the run is reported once, as a NOTE naming both SHAs.
 #
 # The gate never passes on a pin it inherited: it always sets both variables,
 # or clears both when origin cannot be read (each check then reads origin
