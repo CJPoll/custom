@@ -188,6 +188,20 @@ expect "I-proposer prompt carries the scenario and allowed files" \
   'grep -q "Decide." "${tmp}/claude-prompt" && grep -q "### ai/blocks/ops/fleet-coordination.md" "${tmp}/claude-prompt"'
 expect "I-proposer prompt never carries safety-checks" '! grep -q "### ai/blocks/ops/safety-checks.md" "${tmp}/claude-prompt"'
 
+# --- an unfenced patch outside the fence is never applied (critic, cca15bb). --
+cat > "${stubbin}/claude" <<EOF
+#!/usr/bin/env bash
+cat > /dev/null
+printf 'Here it is.\n\`\`\`diff\n'
+cat "${tmp}/good.diff"
+printf '\`\`\`\nAnd one more, outside the fence:\n'
+cat "${tmp}/shared.diff"
+EOF
+PATH="${stubbin}:${PATH}" run_bo out2b --case AE-18 --evidence "${tmp}/evidence.txt"
+expect "I-smuggle exits 0 (rc=${rc})" '[ "${rc}" = 0 ]'
+expect "I-smuggle applied only the fenced patch (fleet-coordination untouched)" \
+  '! grep -q "fleet-coordination" "${tmp}/out2b/proposal.diff" && grep -q "blast radius: none" "${tmp}/out2b/proposal.md"'
+
 # --- scope violation: rejected before any worktree or variant-eval. ------------
 rm -f "${STUB_VE_MARK}"
 snapshot "${tmp}/before"
