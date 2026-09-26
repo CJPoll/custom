@@ -18,6 +18,13 @@ command_args="${DOCKERD_ROOTLESS_OPTS}"
 command_user="${DOCKER_ROOTLESS_USER}:${DOCKER_ROOTLESS_USER}"
 command_background=1
 pidfile="/run/${RC_SVCNAME}.pid"
+# DND-812: the supervisor signals ONLY the command's pid on stop. Anything the
+# command forked would re-parent to PID 1 and keep running (a "stopped" GitHub
+# runner kept taking jobs that way). Tag the command's whole tree, for THIS
+# instance only, so stop_post can end it and assert nothing is left. The lib
+# is a root-owned copy of system-files/lib/initd-proc-tree.sh.
+: "${ATHENA_PROC_TREE_LIB:=/usr/local/lib/athena/initd-proc-tree.sh}"
+start_stop_daemon_args="${start_stop_daemon_args:+${start_stop_daemon_args} }--env ATHENA_SVC_TREE=${RC_SVCNAME}"
 output_log="/var/log/${RC_SVCNAME}.log"
 error_log="/var/log/${RC_SVCNAME}.log"
 
@@ -42,4 +49,23 @@ start_pre() {
 		eerror "persists at boot:  loginctl enable-linger ${DOCKER_ROOTLESS_USER}"
 		return 1
 	fi
+	_proc_tree_reap || return 1
+}
+
+# End every process of this instance's tree and assert none is left; stop
+# fails loudly otherwise. The tree: rootlesskit, dockerd, containerd and
+# shims: all tagged. Also runs before start, so a leftover from an unclean
+# stop never becomes a second copy of the service.
+_proc_tree_reap() {
+	if [ ! -r "${ATHENA_PROC_TREE_LIB}" ]; then
+		eerror "${ATHENA_PROC_TREE_LIB} is missing, so ${RC_SVCNAME} cannot end its process tree."
+		eerror "Fix: sudo install -D -m 644 <custom checkout>/system-files/lib/initd-proc-tree.sh ${ATHENA_PROC_TREE_LIB}"
+		return 1
+	fi
+	. "${ATHENA_PROC_TREE_LIB}" || return 1
+	proc_tree_reap "${RC_SVCNAME}" "${_uid}" "${ATHENA_PROC_TREE_TIMEOUT:-10}"
+}
+
+stop_post() {
+	_proc_tree_reap
 }

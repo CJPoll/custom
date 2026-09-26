@@ -14,6 +14,8 @@ This directory contains system-level configuration files that require root privi
 - `gitlab-runner.initd` / `.confd` - supervise-daemon OpenRC service running `gitlab-runner run` as that user
 - `gitlab-runner-config.toml.example` - non-secret reference shape for the registered `config.toml` (the live token-bearing one is never committed)
 - `gitlab-runner-runbook.md` - the Cody-runs enable steps + the walt_ui `.gitlab-ci.yml` `buildctl` rewrite spec (DND-177)
+- `lib/initd-proc-tree.sh` - sourced by every `*.initd` here: ends a service instance's whole process tree on stop and asserts nothing is left (DND-812)
+- `test/initd-proc-tree/self-test.sh` - hermetic test of that stop path for every initd (discovered by the harness gate)
 
 ## Symlink Integration
 
@@ -96,3 +98,46 @@ register steps, the `keep-stopped-until-the-walt_ui-MR-merges` ordering, the
 `.gitlab-ci.yml` `buildctl` rewrite spec, and enable-time validation — is in
 **`gitlab-runner-runbook.md`**. The live `config.toml` holds the `glrt-` token and
 is never committed; `gitlab-runner-config.toml.example` is the non-secret shape.
+
+### Stopping a service ends its whole process tree (lib/initd-proc-tree.sh)
+
+`supervise-daemon` and `start-stop-daemon` signal ONE pid on stop. A command
+that forks long-lived children leaves them running, re-parented to PID 1:
+`run.sh` -> `run-helper.sh` -> `Runner.Listener`, or `dockerd-rootless.sh` ->
+`rootlesskit` -> `dockerd`. Measured on the laptop (DND-812): two listeners
+per GitHub runner registration, and a "stopped" runner kept taking jobs.
+
+So every `.initd` file here:
+
+- passes `--env ATHENA_SVC_TREE=${RC_SVCNAME}` to its command only
+  (`supervise_daemon_args` / `start_stop_daemon_args`). Every descendant
+  inherits it; the `openrc-run` doing the stop never carries it. `RC_SVCNAME`
+  is not the tag, because `openrc-run` carries that too.
+- runs `proc_tree_reap` in `stop_post` AND at the end of `start_pre`. It
+  SIGTERMs every process of the service's uid that carries the tag, or whose
+  exe or cwd is under the instance's anchor (`RUNNER_DIR` for github-runner,
+  `RUNNER_BIN` for gitlab-runner). It waits, SIGKILLs survivors, then asserts
+  none remain; otherwise stop fails with a `Fix:` line.
+- matches by `/proc/<pid>/environ`, `exe`, and `cwd` only, never argv text, and
+  compares anchors as whole path components (`actions-runner` never matches
+  `actions-runner-2`). Instances never touch each other.
+
+The lib is installed as a root-owned copy at
+`/usr/local/lib/athena/initd-proc-tree.sh` (override: `ATHENA_PROC_TREE_LIB` in
+`/etc/conf.d/<svc>`; SIGTERM grace: `ATHENA_PROC_TREE_TIMEOUT`, default 10s).
+Every `scripts/setup-*` installer and `bt-setup service` install it. A missing
+lib fails start and stop loudly, with the install command as its `Fix:`.
+
+Consequences to know:
+
+- The anchor match is by design broader than the tree. Start and stop also end
+  a shell or `config.sh` run as `github-runner` inside `RUNNER_DIR`, or a
+  manual `gitlab-runner register` as `gitlab-runner`. These are dedicated
+  service users; do such work with the service stopped.
+- The docker-rootless services and btmon match by tag only. A process started
+  before the tag existed (any orphan from before this fix) is not found by
+  them; clean those by PID once, by hand, when installing.
+
+Not covered: supervise-daemon's own respawn after the command crashes. It runs
+no `start_pre`, so a child that outlives a crashed `run.sh` can still meet a
+respawned one.
