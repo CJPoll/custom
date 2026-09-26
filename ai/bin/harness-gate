@@ -741,6 +741,26 @@ ensure
   saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
 
+# The gate's check loop (DND-735). Reads the landed-ref pin ONCE from root's
+# origin, prints it, then runs every check in chdir with that pin in its
+# environment, printing PASS/FAIL as each finishes. The pin always replaces
+# whatever the caller exported (landed_pin_env sets both variables, or clears
+# both), so a check never measures an inherited pin. root/chdir exist for
+# --self-test case 12b: a fixture repo drives this exact loop. Returns
+# [pin_env, failures], failures being [label, argv, output] per failed check.
+def run_checks(checks, root: CUSTOM_DIR, chdir: CUSTOM_DIR, io: $stdout)
+  pin_env, pin_probes = landed_pin_env(root)
+  io.puts landed_pin_line(pin_env, pin_probes)
+
+  failures = []
+  checks.each do |(label, argv)|
+    ok, out = run_one(argv, chdir: chdir, env: pin_env)
+    io.printf("%-28s %s\n", label, ok ? "PASS" : "FAIL")
+    failures << [label, argv, out] unless ok
+  end
+  [pin_env, failures]
+end
+
 def missing_executables
   CHECKS.reject { |(_, argv)| File.executable?(File.join(CUSTOM_DIR, argv.first)) }
 end
@@ -851,15 +871,7 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
     return 1
   end
 
-  pin_env, pin_probes = landed_pin_env(CUSTOM_DIR)
-  puts landed_pin_line(pin_env, pin_probes)
-
-  failures = []
-  CHECKS.each do |(label, argv)|
-    ok, out = run_one(argv, env: pin_env)
-    printf("%-28s %s\n", label, ok ? "PASS" : "FAIL")
-    failures << [label, argv, out] unless ok
-  end
+  pin_env, failures = run_checks(CHECKS)
 
   moved = landed_moved_note(CUSTOM_DIR, pin_env)
   puts moved if moved
@@ -1748,6 +1760,30 @@ def run_self_test
     _ok, out = run_one([echo], chdir: dir, env: env)
     expect.call(out.include?("pin=#{p_sha}"), "run_one did not hand the pin to the check (#{out.inspect})")
 
+    # 12b. The gate's OWN check loop (run_checks, the loop run_gate runs) hands
+    #      every check the pin the gate read itself, never one it inherited.
+    #      The caller exports a well-formed but wrong pin; the check records
+    #      what it sees. Dropping `env: pin_env` from run_checks, or replacing
+    #      its landed_pin_env read, leaves the check seeing the bogus pin.
+    seen = File.join(dir, "seen-pin")
+    record = File.join(dir, "record-pin.sh")
+    File.write(record, "#!/bin/sh\nprintf 'sha=%s repo=%s\\n' " \
+                       "\"${#{Landed::PIN_SHA_ENV}}\" \"${#{Landed::PIN_REPO_ENV}}\" > \"#{seen}\"\n")
+    FileUtils.chmod(0o755, record)
+    bogus = { Landed::PIN_SHA_ENV => "b" * 40, Landed::PIN_REPO_ENV => File.join(dir, "inherited.git") }
+    loop_io = StringIO.new
+    loop_env, loop_failures = with_env(bogus) do
+      run_checks([["record-pin", [record]]], root: root, chdir: dir, io: loop_io)
+    end
+    saw = File.exist?(seen) ? File.read(seen).strip : "(the check never ran)"
+    want = "sha=#{p_sha} repo=#{File.realpath(File.join(root, '.git'))}"
+    expect.call(saw == want,
+                "a check run by the gate's loop saw #{saw.inspect}, not the gate's own pin #{want.inspect} " \
+                "(the caller exported #{bogus.inspect})")
+    expect.call(loop_env == env && loop_failures.empty? && loop_io.string.include?(p_sha[0, 12]),
+                "run_checks did not return and print its own pin (#{loop_env.inspect}, " \
+                "#{loop_failures.inspect}, #{loop_io.string.inspect})")
+
     # THE DEFECT: origin moves after the pin. A pinned check still measures P;
     # the gate names the move once.
     git.call("clone", "-q", "-b", "main", origin, other)
@@ -1773,6 +1809,15 @@ def run_self_test
     expect.call(env2.key?(Landed::PIN_SHA_ENV) && env2[Landed::PIN_SHA_ENV].nil? &&
                 env2.key?(Landed::PIN_REPO_ENV) && env2[Landed::PIN_REPO_ENV].nil? && probes2&.any?,
                 "an unreadable origin did not clear the pin with probes (#{env2.inspect}, #{probes2.inspect})")
+
+    # 12c. The same loop with origin unreadable: the inherited pin is CLEARED
+    #      for the check, not passed through.
+    File.delete(seen) if File.exist?(seen)
+    with_env(bogus) { run_checks([["record-pin", [record]]], root: root, chdir: dir, io: StringIO.new) }
+    saw = File.exist?(seen) ? File.read(seen).strip : "(the check never ran)"
+    expect.call(saw == "sha= repo=",
+                "with origin unreadable, a check run by the gate's loop saw #{saw.inspect}; " \
+                "the inherited pin must be cleared, not passed through")
   end
 
   # 10 (DND-404). check-inbox-mock-orphans's REAP invocation (FINAL_CHECKS)
