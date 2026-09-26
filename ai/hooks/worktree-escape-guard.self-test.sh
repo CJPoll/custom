@@ -251,6 +251,23 @@ echo "== fail loud, not silent =="
 : > "${LOG}" 2>/dev/null || { mkdir -p "$(dirname "${LOG}")"; : > "${LOG}"; }
 bash_sub "unresolvable cd target then git add -> allow" allow "cd \"\$SOMEWHERE_UNSET\" && git add ."
 grep -q 'unresolved' "${LOG}" && ok "unresolvable target is logged as unresolved" || bad "unresolvable target is logged" "$(cat "${LOG}")"
+bash_sub "unknown cwd, then an ABSOLUTE rm target in main -> deny (critic round 7)" deny "cd \"\$SOMEWHERE_UNSET\" && rm -f ${MAIN}/a.txt"
+bash_sub "cd -, then an absolute redirect into main -> deny (critic round 7)" deny "cd - && echo x > ${MAIN}/a.txt"
+bash_sub "popd on an empty stack, then an absolute write -> deny (critic round 7)" deny "popd; touch ${MAIN}/a.txt"
+bash_sub "git with an unknown -C, absolute --output into main -> deny (critic round 7)" deny "git -C \"\$UNSET_DIR\" diff --output=${MAIN}/d.diff"
+# A checker crash must never be a SILENT allow. A subagent transcript whose
+# first line is a JSON array (not an object) drives dispatch_prompt off its
+# expected shape; whatever happens, the hook exits 0 and says so loudly.
+jq -n -c '[1,2,3]' > "${TDIR}/${SID}/subagents/agent-a-odd.jsonl"
+: > "${LOG}"
+run 0 "${MAIN}" "$(payload a-odd Write "$(w "${MAIN}/a.txt")")"
+expect "odd transcript shape -> still decides (deny), never crashes to a silent allow" deny
+PYCRASH="$(mktemp -d)"; printf '#!/bin/sh\ncat >/dev/null\necho "Traceback (most recent call last): boom" >&2\nexit 1\n' > "${PYCRASH}/python3"; chmod +x "${PYCRASH}/python3"
+OUT="$(printf '%s' "$(payload a1 Write "$(w "${MAIN}/a.txt")")" | PATH="${PYCRASH}:${PATH}" CLAUDE_CODE_SESSION_ATTENDED=0 "${HOOK}" 2>/dev/null)"; RC=$?
+expect "the checker crashing -> allow, exit 0" allow
+case "${OUT}" in *systemMessage*"worktree-escape-guard"*) ok "a checker crash carries a visible warning" ;; *) bad "a checker crash carries a visible warning" "${OUT}" ;; esac
+grep -q 'crashed' "${LOG}" && ok "a checker crash is logged" || bad "a checker crash is logged" "$(cat "${LOG}")"
+rm -rf "${PYCRASH}"
 bash_sub "unparseable command (unclosed quote) with a write -> allow" allow "echo 'oops > ${MAIN}/a.txt"
 grep -q 'unparsed' "${LOG}" && ok "unparseable command is logged" || bad "unparseable command is logged" "$(cat "${LOG}")"
 run 0 "${MAIN}" "not json at all"

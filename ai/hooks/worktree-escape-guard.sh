@@ -67,7 +67,8 @@
 # FAILURE MODE: this hook runs on every tool call of every session on the
 # machine, hot-loaded. A fail-closed hook would wedge them all on a broken git
 # or python. So an input it cannot evaluate (unparseable stdin, no python3, a
-# git error that is not "not a git repository") is ALLOWED with a visible
+# git error that is not "not a git repository", or the checker itself
+# crashing -- logged `crashed`) is ALLOWED with a visible
 # systemMessage + additionalContext and a log line -- loud, never silent.
 # Every deny and every unresolved/unparsed case is appended to
 # ${XDG_STATE_HOME:-~/.local/state}/athena/worktree-escape-guard.log.
@@ -142,8 +143,8 @@ def emit(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.exit(0)
 
-def allow_warn(msg):
-    log("unchecked", msg)
+def allow_warn(msg, kind="unchecked"):
+    log(kind, msg)
     emit({"systemMessage": "worktree-escape-guard: " + msg,
           "hookSpecificOutput": {"hookEventName": "PreToolUse",
                                  "additionalContext": "worktree-escape-guard could not check this call: " + msg}})
@@ -251,6 +252,9 @@ def dispatch_prompt(data):
             first = json.loads(f.readline())
     except (OSError, ValueError):
         log("no-transcript", path)
+        return None
+    if not isinstance(first, dict) or not isinstance(first.get("message"), dict):
+        log("no-transcript", "unexpected first-line shape in " + path)
         return None
     content = (first.get("message") or {}).get("content")
     if isinstance(content, list):
@@ -425,7 +429,9 @@ def expand(tok, env, cwd):
         return UNKNOWN
     if "$" in tok:
         return UNKNOWN
-    if cwd is UNKNOWN and not tok.startswith("/"):
+    if tok.startswith("/"):
+        return os.path.normpath(tok)  # an absolute path never depends on cwd
+    if cwd is UNKNOWN:
         return UNKNOWN
     return os.path.normpath(os.path.join(cwd, tok))
 
@@ -485,8 +491,7 @@ def git_target(args, cwd, env):
     while i < len(args):
         a = args[i]
         if a == "-C" and i + 1 < len(args):
-            nxt = expand(args[i + 1], env, tgt if tgt is not UNKNOWN else "/")
-            tgt = UNKNOWN if (nxt is UNKNOWN or tgt is UNKNOWN and not args[i + 1].startswith(("/", "~", "$HOME", "${HOME}"))) else nxt
+            tgt = expand(args[i + 1], env, tgt)  # UNKNOWN-safe
             i += 2
         elif a in ("--work-tree", "--git-dir") and i + 1 < len(args):
             if a == "--work-tree":
@@ -684,8 +689,8 @@ def check_bash(cmd, data, act, cwd=None, depth=0):
             if dest == "-":
                 cwd = UNKNOWN
                 continue
-            nd = expand(dest, env, cwd if cwd is not UNKNOWN else "/")
-            cwd = UNKNOWN if (nd is UNKNOWN or (cwd is UNKNOWN and not nd.startswith("/"))) else os.path.realpath(nd)
+            nd = expand(dest, env, cwd)  # UNKNOWN-safe
+            cwd = UNKNOWN if nd is UNKNOWN else os.path.realpath(nd)
             continue
         if base in SHELLS:
             script = shell_c_script(words[1:])
@@ -695,7 +700,7 @@ def check_bash(cmd, data, act, cwd=None, depth=0):
         if base == "git":
             sub, sargs, tgt = git_target(words[1:], cwd, env)
             for w in git_output_targets(sub, sargs):
-                p = expand(w, env, tgt) if tgt is not UNKNOWN or w.startswith("/") else UNKNOWN
+                p = expand(w, env, tgt)  # UNKNOWN-safe
                 if p is UNKNOWN:
                     log("unresolved", "git %s output %s in: %s" % (sub, w, cmd[:300]))
                     continue
@@ -734,11 +739,26 @@ def main():
     except Unresolved as e:
         allow_warn("%s -- so this call was NOT checked for a main-checkout write. "
                    "Fix: repair git in this environment (the hook needs `git rev-parse` to classify the target)." % e)
+    except Exception as e:  # a checker bug must never read as a silent allow
+        allow_warn("the checker crashed (%s: %s), so this call was NOT checked for a main-checkout write. "
+                   "Fix: reproduce with this call's stdin and fix ai/hooks/worktree-escape-guard.sh."
+                   % (type(e).__name__, str(e)[:200]), kind="crashed")
     emit({})
 
 main()
 PYEOF
 )
 
-printf '%s' "${INPUT}" | python3 -c "${PY}"
+# A non-zero python3 exit (a crash before or outside main's own catch) must
+# never read as a silent allow: log it and warn, still exit 0.
+OUT=$(printf '%s' "${INPUT}" | python3 -c "${PY}" 2>/dev/null)
+RC=$?
+if [ "${RC}" -ne 0 ]; then
+  WEG_LOG="${XDG_STATE_HOME:-${HOME}/.local/state}/athena/worktree-escape-guard.log"
+  mkdir -p "$(dirname -- "${WEG_LOG}")" 2>/dev/null && \
+    printf '%s\tcrashed\tpython3 exited %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${RC}" >> "${WEG_LOG}" 2>/dev/null
+  printf '%s\n' '{"systemMessage":"worktree-escape-guard: the checker crashed, so this tool call was NOT checked for a main-checkout write. Fix: reproduce with this call and fix ai/hooks/worktree-escape-guard.sh.","hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"worktree-escape-guard crashed; this call was not checked. Fix: fix ai/hooks/worktree-escape-guard.sh."}}'
+  exit 0
+fi
+printf '%s\n' "${OUT}"
 exit 0

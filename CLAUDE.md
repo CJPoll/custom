@@ -884,8 +884,9 @@ checkout's working tree, with a `Fix:` naming the worktree to use:
   internals, and every read-only command. Quoted text, comments and heredoc
   bodies are data, never commands.
 - **How it fails.** It fails open, because it is hot-loaded into every session
-  on the machine. Unreadable stdin or a git error is allowed with a visible
-  warning and a log line in `$XDG_STATE_HOME/athena/worktree-escape-guard.log`.
+  on the machine. Unreadable stdin, a git error, or a crash of the checker
+  itself is allowed with a visible warning and a log line in
+  `$XDG_STATE_HOME/athena/worktree-escape-guard.log`.
   A command it cannot parse is logged as `unparsed`, and a target it cannot
   resolve as `unresolved`; both are allowed with no warning.
 - **It is not a sandbox.** It models the forms agents type. A write shape it
