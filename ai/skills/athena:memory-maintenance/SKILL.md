@@ -1,6 +1,6 @@
 ---
 name: athena:memory-maintenance
-description: Maintain the memory substrate (Knowledge Graph + auto-memory) — consolidate and dedup near-duplicate facts, archive stale ones, keep it indexed and retrievable — as a reviewed PROPOSAL, never a silent mutation. Use on a cadence (e.g. a shipwright pass) or when memory has grown noisy, duplicated, or stale.
+description: Maintain the memory substrate (Knowledge Graph + auto-memory) — consolidate and dedup near-duplicate facts, archive stale ones, keep it indexed and retrievable — as a reviewed PROPOSAL, never a silent mutation. Use on a cadence (e.g. a shipwright pass), when memory has grown noisy, duplicated, or stale, or when MEMORY.md nears its load limit.
 ---
 
 # athena:memory-maintenance
@@ -86,6 +86,35 @@ Emit a proposal, not a mutation:
 
 Apply only after review. Prefer `kg:*` write skills for KG changes and ordinary
 edits for auto-memory; keep the archive recoverable.
+
+## Index budget (auto-memory `MEMORY.md`)
+
+`MEMORY.md` is loaded into every session, but only up to a size limit. Past it
+the TAIL is cut, and the tail holds the NEWEST lessons. Nothing errors: the
+entries just stop loading. Captains report the loader's numbers as a 24.4KB
+read limit, with compaction requested below 17.1KB.
+
+The file is shared by every session, so no one captain rewrites it, and it
+fills. Measured: DND-241 saw it truncated at 25.8KB; DND-774 and DND-761
+(2026-09-26) each flagged it near the limit; it was 25366 bytes when the
+shipwright compacted it that day.
+
+**Who compacts it:** the shipwright, on its cadence, when the file passes
+~22KB. It is the reviewer this skill names, so it proposes and applies in one
+pass. Any other session that finds the file over the limit reports it rather
+than rewriting a shared file.
+
+**How, losslessly:**
+- Change index LINES only. The linked note files hold the facts; never edit or
+  delete one here.
+- Back up the whole file first (the shipwright keeps copies in
+  `ai-artifacts/shipwright/memory-index-backups/`).
+- Merge a duplicate pair into ONE line that links BOTH files.
+- Trim long descriptions at a word boundary, ending with `…`. Keep the title
+  and link intact.
+- Assert afterwards that the set of linked files is unchanged.
+- Write via a temp file and rename, and refuse if the file's mtime moved
+  since you read it (another session appended).
 
 ## Guardrails
 
