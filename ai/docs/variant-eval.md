@@ -157,14 +157,21 @@ every verdict path. The text proposal is unchanged and still printed.
   on every fixture and every verdict.
 - **Atomic write.** A temp file in the same directory is fsynced, then renamed
   over PATH. A partial file never exists at PATH.
-- **Checked before measuring.** PATH's directory must exist and be writable, and
-  PATH must not be a directory or the `--out` path; otherwise exit 2 with a
-  `Fix:`. A stale file at PATH is removed first. A run that later dies (a bad
-  ref, a missing render) leaves **no** JSON, and a consumer must read an absent
-  file as not measured, never as an earlier verdict.
+- **Invalid UTF-8 is replaced, never fatal.** `gate_detail` and the
+  unmeasured reason carry raw tool output. Every string is re-read as UTF-8 with
+  invalid bytes replaced by U+FFFD, so the proposal always serializes.
+- **Checked before measuring.** The `--out` and `--json` directories must exist
+  and be writable. PATH must not be a directory, a symlink, or the `--out` file
+  (compared after following symlinks). Otherwise exit 2 with a `Fix:`.
+- **Only an earlier proposal is replaced.** An existing file at PATH is removed
+  first only when it parses as a `variant-eval/proposal@…` document; any other
+  file is refused and left untouched. So a run that later dies (a bad ref, a
+  missing render) leaves **no** JSON, and a consumer must read an absent file as
+  not measured, never as an earlier verdict.
 - **Exit codes.** Unchanged for the verdicts (0 KEEP/INCONCLUSIVE, 1
-  REVERT/BLOCKED/UNMEASURED, 2 usage). A failed JSON write exits **3** with a
-  `Fix:`; the text proposal is still printed.
+  REVERT/BLOCKED/UNMEASURED, 2 usage). A failed `--out` or `--json` write exits
+  **3** with a `Fix:`; the text proposal is still printed, and a failed `--out`
+  does not stop the JSON write.
 
 ## Safety (structural, self-test-asserted)
 

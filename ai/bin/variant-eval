@@ -353,6 +353,24 @@ JSON_SCHEMA_ID = "variant-eval/proposal@1"
 UNSCORED_VERDICTS = %i[blocked unmeasured].freeze
 
 def proposal_json(res)
+  json_safe(proposal_hash(res))
+end
+
+# gate_detail and the unmeasured reason carry raw tool output, which may not be
+# valid UTF-8; JSON generation raises on that. Every string is re-read as UTF-8
+# with invalid bytes replaced (U+FFFD), so the proposal always serializes.
+REPLACEMENT_CHAR = [0xFFFD].pack("U")
+
+def json_safe(obj)
+  case obj
+  when Hash then obj.to_h { |k, v| [json_safe(k), json_safe(v)] }
+  when Array then obj.map { |v| json_safe(v) }
+  when String then obj.dup.force_encoding(Encoding::UTF_8).scrub(REPLACEMENT_CHAR)
+  else obj
+  end
+end
+
+def proposal_hash(res)
   verdict = res.fetch(:verdict)
   scored = !UNSCORED_VERDICTS.include?(verdict)
   full = res[:corpus] == "full"
@@ -393,16 +411,17 @@ end
 # whole new file, never a partial one. -> nil on success, else a reason; the
 # temp file is removed on failure.
 def write_json_atomic(path, data)
+  body = JSON.pretty_generate(data) + "\n" # before any file exists: a generation error leaves nothing
   dir = File.dirname(File.expand_path(path))
   tmp = File.join(dir, ".#{File.basename(path)}.tmp-#{Process.pid}-#{format('%08x', rand(2**32))}")
   File.open(tmp, File::WRONLY | File::CREAT | File::EXCL, 0o644) do |f|
-    f.write(JSON.pretty_generate(data) + "\n")
+    f.write(body)
     f.flush
     f.fsync
   end
   File.rename(tmp, path)
   nil
-rescue SystemCallError, IOError => e
+rescue SystemCallError, IOError, JSON::JSONError, EncodingError => e
   begin
     File.delete(tmp) if tmp && File.exist?(tmp)
   rescue SystemCallError
@@ -411,20 +430,55 @@ rescue SystemCallError, IOError => e
   "#{e.class}: #{e.message}"
 end
 
-# Checked BEFORE measuring, so a full run (~50 model calls) cannot end at an
-# unwritable path. Removes a stale file at path: a run that later dies without
-# a proposal then leaves NO JSON, which a consumer reads as not measured, never
-# an earlier run's verdict. -> nil when usable, else a reason.
-def prepare_json_path(path, out_file)
+# Why an output file path (--out or --json) cannot be written, or nil. Checked
+# BEFORE measuring, so a full run (~50 model calls) cannot end with nowhere to
+# write.
+def output_path_problem(flag, path)
   full = File.expand_path(path)
-  return "--json #{path} is the same file as --out" if out_file && File.expand_path(out_file) == full
-  return "--json #{path} is a directory" if File.directory?(full)
+  return "#{flag} #{path} is a directory" if File.directory?(full)
 
   dir = File.dirname(full)
-  return "--json #{path}: directory #{dir} does not exist" unless File.directory?(dir)
-  return "--json #{path}: directory #{dir} is not writable" unless File.writable?(dir)
+  return "#{flag} #{path}: directory #{dir} does not exist" unless File.directory?(dir)
+  return "#{flag} #{path}: directory #{dir} is not writable" unless File.writable?(dir)
 
-  File.delete(full) if File.exist?(full) || File.symlink?(full)
+  nil
+end
+
+# The file a path names once every symlink is followed (the directory's, and
+# the file's own when it exists). Used to tell whether two paths are one file.
+def canonical_path(path)
+  full = File.join(File.realpath(File.dirname(File.expand_path(path))), File.basename(path))
+  File.exist?(full) ? File.realpath(full) : full
+end
+
+def variant_eval_proposal?(path)
+  data = JSON.parse(File.read(path))
+  data.is_a?(Hash) && data["schema"].to_s.start_with?("variant-eval/proposal@")
+rescue JSON::ParserError, SystemCallError, EncodingError
+  false
+end
+
+# The --json pre-flight. Beyond output_path_problem it refuses the --out file
+# (even through a symlink), a symlink, and any existing file that is not an
+# earlier variant-eval proposal (a typo must never delete a real file). An
+# earlier proposal is removed: a run that later dies without a proposal then
+# leaves NO JSON, which a consumer reads as not measured, never as that
+# earlier run's verdict. -> nil when usable, else a reason.
+def prepare_json_path(path, out_file)
+  why = output_path_problem("--json", path)
+  return why if why
+
+  full = File.expand_path(path)
+  return "--json #{path} is a symlink; name the real file" if File.symlink?(full)
+  if out_file && output_path_problem("--out", out_file).nil? && canonical_path(out_file) == canonical_path(full)
+    return "--json #{path} is the same file as --out #{out_file}"
+  end
+  return nil unless File.exist?(full)
+  unless variant_eval_proposal?(full)
+    return "--json #{path} already exists and is not a variant-eval proposal; refusing to replace it"
+  end
+
+  File.delete(full)
   nil
 rescue SystemCallError => e
   "--json #{path}: #{e.class}: #{e.message}"
@@ -737,7 +791,8 @@ def resolve_commit(ref)
   return sha if st.success? && sha.match?(/\A[0-9a-f]{40,64}\z/)
 
   raise "#{ref.inspect} does not name a commit#{stderr_tail(err)}. Fix: pass a branch, tag or sha that " \
-        "`git rev-parse --verify #{ref}^{commit}` resolves (fetch it first if it is a remote ref)."
+        "`git rev-parse --verify --end-of-options '#{ref}^{commit}'` resolves (fetch it first if it is a " \
+        "remote ref)."
 end
 
 # Fill res with the gate result, the deterministic diff and (for --corpus full)
@@ -781,17 +836,24 @@ def measure_sides(res, variant:, baseline:, corpus:, runs:)
   end
 end
 
-# Exit code when the proposal was computed but the --json write failed. The
-# proposal is still printed; a consumer finds no JSON and must treat the run
-# as not measured.
-JSON_WRITE_FAILED_EXIT = 3
+# Exit code when the proposal was computed but an output file (--out or
+# --json) could not be written. The proposal is still printed; a consumer that
+# finds no JSON must treat the run as not measured.
+OUTPUT_WRITE_FAILED_EXIT = 3
 
 def emit(res, out_file, json_file = nil)
   text = render_proposal(res)
   puts text
+  failed = false
   if out_file
-    File.write(out_file, text)
-    puts "variant-eval: proposal written to #{out_file}"
+    begin
+      File.write(out_file, text)
+      puts "variant-eval: proposal written to #{out_file}"
+    rescue SystemCallError, IOError => e
+      warn "variant-eval: FAILED — could not write the proposal to --out #{out_file}: #{e.class}: #{e.message}."
+      warn "  Fix: pass --out a path in an existing, writable directory, then re-run. The proposal is printed above."
+      failed = true
+    end
   end
   if json_file
     why = write_json_atomic(json_file, proposal_json(res))
@@ -799,11 +861,12 @@ def emit(res, out_file, json_file = nil)
       warn "variant-eval: FAILED — could not write the JSON proposal to #{json_file}: #{why}."
       warn "  Fix: pass --json a path in an existing, writable directory, then re-run. No JSON was left at " \
            "#{json_file}; a consumer must read that as not measured."
-      return JSON_WRITE_FAILED_EXIT
+      failed = true
+    else
+      puts "variant-eval: JSON proposal (#{JSON_SCHEMA_ID}) written to #{json_file}"
     end
-    puts "variant-eval: JSON proposal (#{JSON_SCHEMA_ID}) written to #{json_file}"
   end
-  verdict_exit_code(res[:verdict])
+  failed ? OUTPUT_WRITE_FAILED_EXIT : verdict_exit_code(res[:verdict])
 end
 
 # A "do not adopt" or "not measured" verdict exits non-zero for CLI callers; the
@@ -1357,6 +1420,29 @@ def self_test
     fail.("J6: an atomic write must leave no temp file behind (#{Dir.children(d).inspect})") \
       unless Dir.children(d) == ["proposal.json"]
 
+    # Review round 1: gate_detail and the unmeasured reason are raw tool output
+    # and may hold invalid UTF-8. JSON generation must not raise on it (it did:
+    # JSON::GeneratorError escaped emit, left a temp file, and exited 1 with a
+    # wrong-ref Fix:). proposal_json scrubs every string; write_json_atomic
+    # turns any generation error into a returned reason with no temp file.
+    bad_bytes = "gate \xFF line".dup.force_encoding("UTF-8")
+    bad_res = blocked_res.merge(gate_detail: [bad_bytes])
+    begin
+      JSON.generate(proposal_json(bad_res))
+    rescue StandardError => e
+      fail.("J6: invalid UTF-8 in gate_detail must still generate JSON (raised #{e.class})")
+    end
+    bad_dir = File.join(d, "bad")
+    FileUtils.mkdir_p(bad_dir)
+    begin
+      why = write_json_atomic(File.join(bad_dir, "p.json"), { "x" => bad_bytes })
+      fail.("J6: an ungeneratable payload must be a returned failure") if why.nil?
+    rescue StandardError => e
+      fail.("J6: write_json_atomic must return a reason, not raise #{e.class}")
+    end
+    fail.("J6: a failed generation must leave nothing in the dir (#{Dir.children(bad_dir).inspect})") \
+      unless Dir.children(bad_dir).empty?
+
     missing = File.join(d, "no-such-dir", "proposal.json")
     fail.("J6: a write into a missing dir must fail") if write_json_atomic(missing, {}).nil?
     fail.("J6: a failed write must leave no file at PATH") if File.exist?(missing)
@@ -1396,11 +1482,41 @@ def self_test
     File.write(stale, JSON.generate("schema" => JSON_SCHEMA_ID, "verdict" => "keep"))
     fail.("J6: a writable --json path must be accepted") unless prepare_json_path(stale, nil).nil?
     fail.("J6: a stale --json file must be removed before measuring") if File.exist?(stale)
+    # Review round 1: only an earlier PROPOSAL is removed. Any other file at
+    # the path (a typo naming a real file) is refused and left untouched.
+    precious = File.join(d, "precious.txt")
+    File.write(precious, "not a proposal\n")
+    fail.("J6: a --json path holding a non-proposal file must be refused") if prepare_json_path(precious, nil).nil?
+    fail.("J6: a non-proposal file at --json must never be deleted") unless File.file?(precious)
+    # Review round 1: --out and --json must not name one file through a symlink.
+    real = File.join(d, "real")
+    FileUtils.mkdir_p(real)
+    File.symlink(real, File.join(d, "link"))
     { "a missing dir" => [missing, nil], "a directory" => [d, nil],
-      "the --out path" => [File.join(d, "same"), File.join(d, "same")] }.each do |what, (jp, op)|
+      "the --out path" => [File.join(d, "same"), File.join(d, "same")],
+      "the --out path via a symlinked dir" => [File.join(d, "link", "x"), File.join(real, "x")] }
+      .each do |what, (jp, op)|
       why = prepare_json_path(jp, op)
       fail.("J6: a --json path that is #{what} must be refused before measuring") if why.nil?
     end
+    # Review round 1: --out is checked before measuring too, and a failed
+    # --out write is reported with a Fix: and exit 3, not the wrong-ref rescue.
+    fail.("J6: an --out path in a missing dir must be refused before measuring") \
+      if output_path_problem("--out", missing).nil?
+    code, _o, err = begin
+      saved = [$stdout, $stderr]
+      $stdout = StringIO.new
+      $stderr = StringIO.new
+      [emit(keep_res, missing, File.join(d, "with-bad-out.json")), $stdout.string, $stderr.string]
+    rescue StandardError => e
+      [nil, "", "raised #{e.class}"]
+    ensure
+      $stdout, $stderr = saved
+    end
+    fail.("J6: a failed --out write must exit #{OUTPUT_WRITE_FAILED_EXIT} (got #{code.inspect}; #{err[0, 120]})") \
+      unless code == OUTPUT_WRITE_FAILED_EXIT
+    fail.("J6: a failed --out write must carry a Fix:") unless err.include?("Fix:")
+    fail.("J6: a failed --out write must not stop the JSON write") unless File.file?(File.join(d, "with-bad-out.json"))
     runner_src = File.read(__FILE__)[/^def run_measurement.*?^end$/m].to_s
     prep_at = runner_src.index("prepare_json_path(")
     measure_at = runner_src.index("measure(")
@@ -1618,7 +1734,7 @@ def help_text
       --json PATH                   also write the proposal as JSON (schema
                                      #{JSON_SCHEMA_ID}), atomically; a stale
                                      file at PATH is removed before measuring,
-                                     and a failed write exits #{JSON_WRITE_FAILED_EXIT}
+                                     and a failed write exits #{OUTPUT_WRITE_FAILED_EXIT}
 
     An unrecognised argument, a flag given twice, or a value flag with no value
     (or `--flag=value`) exits 2 and names the offending flag on stderr — it is
@@ -1672,10 +1788,13 @@ def run_measurement(opts)
   end
 
   json_file = opts["--json"]
-  if json_file && (why = prepare_json_path(json_file, opts["--out"]))
+  why = opts["--out"] && output_path_problem("--out", opts["--out"])
+  why ||= json_file && prepare_json_path(json_file, opts["--out"])
+  if why
     warn "variant-eval: FAILED — #{why}."
-    warn "  Fix: pass --json a file path (not a directory, not the --out path) in an existing, writable " \
-         "directory. It is checked before measuring so a long run cannot end with nowhere to write."
+    warn "  Fix: pass --out/--json file paths in an existing, writable directory; --json must be a new file or " \
+         "an earlier variant-eval proposal, and not the --out file. Both are checked before measuring so a " \
+         "long run cannot end with nowhere to write."
     return 2
   end
 
