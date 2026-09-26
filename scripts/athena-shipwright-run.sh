@@ -55,8 +55,8 @@
 #   SHIPWRIGHT_STALE_DIRT_ESCALATE  consecutive STALE skips on one unchanged
 #                             dirt signature before ONE harness-alert is sent
 #                             (default 3). No repeat until the signature changes.
-#   ATHENA_INBOX_ROOT         the inbox root the stale-dirt alert is delivered
-#                             under (default ~/.local/share/athena)
+#   ATHENA_INBOX_ROOT         the inbox root the stale-dirt and wedge alerts are
+#                             delivered under (default ~/.local/share/athena)
 #   SHIPWRIGHT_REPO           repo to operate on   (default ~/dev/custom)
 #   SHIPWRIGHT_CLAUDE         claude binary to run (default ~/.local/bin/claude)
 #   SHIPWRIGHT_LANES_DIR      dir the per-run lanes live in
@@ -76,6 +76,11 @@
 #   75  EX_TEMPFAIL: refused to spawn because the lane is WEDGED — this was the
 #       SKIP_ESCALATE'th consecutive UNSUCCESSFUL outcome (a failing session, a
 #       stranded push, or reaped dead cron corpses)
+#       Every wedged tick leaves <ts>.wedged in runs/ (why, the counter, when
+#       it wedged, the re-arm command), and the first wedged tick of an episode
+#       sends ONE harness-alert naming it (DND-834). Cron mail is not delivered
+#       on every machine, so neither depends on it. The exit stays 75 even when
+#       the record or the alert fails; each failure is loud with a Fix: line.
 #   69  EX_UNAVAILABLE: the session did NO work — it never left its liveness
 #       receipt, so it never reached the model (usually a provider usage limit,
 #       credits, or auth). That is any receipt-less, commit-less session that
@@ -510,6 +515,196 @@ reap_dead_lanes() {
   git -C "${MAIN_CHECKOUT}" worktree prune >>"${log}" 2>&1 || true
 }
 
+# --- the harness-alerts send path (DND-692; shared with DND-834) --------------
+#
+# Two reports leave this runner as ONE local maildir message each on the custom
+# entry's harness-alerts-detector channel: stale dirt (section 4) and a wedge
+# (section 3). Each names a record in runs/ in its re:, and that record, never
+# the message, is what the reader (athena:inbox-attend) verifies. So a record
+# is always written BEFORE its send, and a send is never attempted for a record
+# that could not be written.
+
+# record_note <record> <line> — append one line to a record. A failed append is
+# loud and returns 0, so it can never change a tick's exit code under errexit.
+record_note() {
+  printf '%s\n' "$2" >>"$1" && return 0
+  echo "athena-shipwright: could not append to the record $1: $2" >&2
+  echo "  Fix: check that $(dirname -- "$1") is writable and the disk is not full." >&2
+  return 0
+}
+
+# harness_alert_send <record> <slug> <body-file> — deliver one message, re:
+# <record>. Prints the delivered message name. Non-zero (with send-mail's words
+# on stderr) when the send failed.
+harness_alert_send() {
+  local record="$1" slug="$2" body="$3" repo send_mail out rc name attempt=0
+  repo="$(cd -- "${__wrapper_dir}/.." && pwd -P)"
+  send_mail="${repo}/ai/skills/athena:inbox/bin/send-mail"
+  if [ ! -x "${send_mail}" ]; then
+    echo "send-mail is missing: ${send_mail}" >&2
+    return 4
+  fi
+  # This channel's detector side has a second writer, the inbox-client
+  # watchdog, under the same identity. send-mail serialises the two with the
+  # channel's .sender.lock and REFUSES (never collides) when the other holds
+  # it, so a refusal is retried briefly here; any other failure is not. Each
+  # refusal is noted in the record, so a reader can see the retry happened.
+  while :; do
+    attempt=$(( attempt + 1 ))
+    out="$(cd -- "${repo}" && timeout 20 "${send_mail}" --local harness-alerts-detector "${slug}" \
+            --to custom --re "${record}" --body-file "${body}" 2>&1)"; rc=$?
+    if [ "${rc}" -eq 0 ] || [ "${attempt}" -ge 3 ] || ! grep -q 'already sending on' <<<"${out}"; then
+      break
+    fi
+    record_note "${record}" "alert: sender lock busy (attempt ${attempt}/3); retrying"
+    sleep 2
+  done
+  if [ "${rc}" -ne 0 ]; then
+    printf '%s\n' "${out}" | head -n 3 >&2
+    return "${rc}"
+  fi
+  name="$(printf '%s\n' "${out}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
+  printf '%s\n' "${name:-?}"
+}
+
+# --- the wedge record and its one alert per episode (DND-834) -----------------
+#
+# Measured on the laptop, 2026-09-23..26: the lane wedged, and every tick after
+# that exited 75 leaving only an empty .log. The WEDGED line went to cron mail,
+# and that machine's mail spool has been empty since 2025, so the wedge was dark
+# for three days. A wedged tick now writes <ts>.wedged in runs/ (why, the
+# counter, when it wedged, the re-arm command), and the FIRST wedged tick of an
+# EPISODE sends ONE harness-alert naming that record. An episode begins at the
+# first wedged tick and ends when the counter drops below the threshold (the
+# owner's re-arm, `rm ${FAIL_COUNT}`, or a raised threshold). A later wedge is a
+# new episode and alerts again. A record or send that fails is loud and never
+# changes the exit code: a wedged tick exits 75 whatever happens here.
+#
+# The episode state (key=value): episode = the tick that opened it,
+# first_wedged = the counter file's mtime at that moment (the counter only
+# changes on a failure, so its mtime is when the lane reached the threshold;
+# for a lane already wedged when this code landed that predates the episode),
+# alerted = the message name once one was delivered.
+WEDGE_STATE="${STATE_DIR}/wedged"
+
+# wedge_last_log — the newest run log with output, other than this tick's. On a
+# wedged lane that is usually the last session that printed why it failed.
+wedge_last_log() {
+  local f
+  f="$(find "${LOG_DIR}" -maxdepth 1 -type f -name '*.log' -size +0 ! -name "${ts}.log" -printf '%f\n' 2>/dev/null | sort | tail -n 1)" || f=""
+  if [ -n "${f}" ]; then printf '%s\n' "${LOG_DIR}/${f}"; else printf '(none)\n'; fi
+}
+
+# wedge_send <record> <episode> <first-wedged> <failures> <last-log>
+wedge_send() {
+  local record="$1" episode="$2" first="$3" failures="$4" last_log="$5" body rc=0
+  body="$(mktemp "${TMPDIR:-/tmp}/shipwright-wedged.XXXXXX")" || { echo "cannot create a temporary body file" >&2; return 4; }
+  chmod 600 "${body}"
+  {
+    printf 'The shipwright cron on this machine is WEDGED: every hourly tick exits 75 and spawns no session, so the self-improvement loop is dark (DND-834).\n'
+    printf 'This is a report. The wedge record named in re: is the authority.\n\n'
+    printf 'checkout: %s\n' "${MAIN_CHECKOUT}"
+    printf 'episode: %s\n' "${episode}"
+    printf 'first_wedged: %s\n' "${first}"
+    printf 'consecutive_failures: %s\n' "${failures}"
+    printf 'threshold: %s\n' "${FAIL_ESCALATE}"
+    printf 'counter: %s\n' "${FAIL_COUNT}"
+    printf 'last_output_log: %s\n' "${last_log}"
+    printf '\nFix: read why the runs failed (the .failed and .blocked records and the last_output_log under %s), fix the cause, then re-arm the lane with: rm %s. The next tick then runs. This alert is sent once per wedge episode; the episode ends when the counter is cleared.\n' "${LOG_DIR}" "${FAIL_COUNT}"
+  } >"${body}"
+  harness_alert_send "${record}" shipwright-wedged "${body}" || rc=$?
+  rm -f "${body}"
+  return "${rc}"
+}
+
+# wedge_track <tick> <failures> — write this tick's wedge record, open or
+# continue the episode, and send the episode's one alert when it is due. Always
+# returns 0: it reports on the wedge, it never decides it.
+wedge_track() {
+  local tick="$1" failures="$2" record episode first alerted mt last_log name="" err tmp
+  record="${LOG_DIR}/${tick}.wedged"
+  episode="$(sd_state_get "${WEDGE_STATE}" episode)"
+  first="$(sd_state_get "${WEDGE_STATE}" first_wedged)"
+  alerted="$(sd_state_get "${WEDGE_STATE}" alerted)"
+  if [ -z "${episode}" ]; then
+    episode="${tick}"; alerted=""
+    first="unknown"
+    if mt="$(stat -c %Y -- "${FAIL_COUNT}" 2>/dev/null)"; then
+      first="$(date -u -d "@${mt}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || first="unknown"
+    fi
+  fi
+  [ -n "${first}" ] || first="unknown"
+  last_log="$(wedge_last_log)"
+
+  # The record is the alert's authority: if it cannot be written, no alert goes
+  # out this tick, and the episode state is left alone so the next tick retries.
+  # The positive `if { } >file; then :; else` form is deliberate: bash (5.3
+  # measured) does not apply `!` to a compound command whose redirection
+  # fails, so `if ! { ... } >file` reads an unwritable record as written.
+  if {
+    printf 'athena-shipwright: tick %s refused to spawn a session: the lane is WEDGED (exit 75).\n' "${tick}"
+    printf 'why: %s consecutive unsuccessful outcomes (failing sessions, stranded pushes, or reaped dead cron corpses) reached the threshold %s. No session runs until the counter is cleared.\n' "${failures}" "${FAIL_ESCALATE}"
+    printf 'counter=%s\n' "${FAIL_COUNT}"
+    printf 'last_output_log=%s\n' "${last_log}"
+    printf 'rearm: rm %s\n' "${FAIL_COUNT}"
+    printf 'Fix: read why the runs failed (the .failed and .blocked records and last_output_log above), fix the cause, then re-arm with: rm %s\n' "${FAIL_COUNT}"
+    printf 'wedged: consecutive_failures=%s threshold=%s first_wedged=%s episode=%s\n' \
+      "${failures}" "${FAIL_ESCALATE}" "${first}" "${episode}"
+  } >"${record}" 2>/dev/null; then
+    :
+  else
+    echo "athena-shipwright: could not write the wedge record ${record}; no wedge alert this tick, and the next tick retries." >&2
+    echo "  Fix: check that ${LOG_DIR} is writable and the disk is not full. The lane is still WEDGED: re-arm it with 'rm ${FAIL_COUNT}' once the cause is fixed." >&2
+    return 0
+  fi
+
+  if [ -z "${alerted}" ]; then
+    err="$(mktemp)" || err=""
+    if name="$(wedge_send "${record}" "${episode}" "${first}" "${failures}" "${last_log}" 2>"${err:-/dev/null}")"; then
+      alerted="${name}"
+      record_note "${record}" "alert: harness-alerts ${name}"
+    else
+      name=""
+      record_note "${record}" 'alert: FAILED to send'
+      echo "athena-shipwright: the wedge harness-alert could NOT be sent: $( [ -n "${err}" ] && tr '\n' ' ' <"${err}" || echo '(send-mail output lost: no temporary file)')" >&2
+      echo "  Fix: run inbox-doctor from ${__wrapper_dir%/scripts} (is the custom registry entry installed with its harness-alerts channels? scripts/setup-inbox-registry --install). Nothing was recorded as sent, so the next wedged tick retries on its own." >&2
+    fi
+    [ -z "${err}" ] || rm -f "${err}"
+  else
+    record_note "${record}" "alert: already sent for this episode (${alerted})"
+  fi
+
+  # A failed state write must not change the exit code, so it is loud instead
+  # of tripping errexit. Losing it repeats the alert next tick; it never hides one.
+  tmp=""
+  if ! { tmp="$(mktemp "${WEDGE_STATE}.XXXXXX" 2>/dev/null)" \
+         && printf 'episode=%s\nfirst_wedged=%s\nalerted=%s\n' "${episode}" "${first}" "${alerted}" >"${tmp}" \
+         && mv -f "${tmp}" "${WEDGE_STATE}"; }; then
+    [ -z "${tmp}" ] || rm -f "${tmp}"
+    echo "athena-shipwright: could not save the wedge episode state ${WEDGE_STATE}; the next wedged tick treats this as a new episode and alerts again." >&2
+    echo "  Fix: check that ${STATE_DIR} is writable and the disk is not full." >&2
+  fi
+
+  if [ -n "${name}" ]; then
+    echo "athena-shipwright: wedge ALERTED on harness-alerts (${name}); no repeat until the counter is cleared. Record: ${record}" >&2
+  elif [ -n "${alerted}" ]; then
+    echo "athena-shipwright: this wedge episode (since ${episode}) was already alerted (${alerted}); no repeat until the counter is cleared. Record: ${record}" >&2
+  else
+    echo "athena-shipwright: wedge record: ${record}" >&2
+  fi
+  return 0
+}
+
+# An episode ends when the counter is below the threshold. Checked BEFORE the
+# reaper runs, so a re-arm followed by enough reaped dead cron corpses to wedge
+# again in the same tick opens a NEW episode instead of continuing the old one.
+if [ "$(read_fail)" -lt "${FAIL_ESCALATE}" ] && [ -e "${WEDGE_STATE}" ]; then
+  if ! rm -f "${WEDGE_STATE}" 2>/dev/null; then
+    echo "athena-shipwright: could not remove the ended wedge episode state ${WEDGE_STATE}; a later wedge would not be alerted." >&2
+    echo "  Fix: check that ${STATE_DIR} is writable, then 'rm ${WEDGE_STATE}'." >&2
+  fi
+fi
+
 # --- 2. reap dead predecessors ----------------------------------------------
 reap_dead_lanes
 
@@ -525,6 +720,9 @@ failures="$(read_fail)"
 if [ "${failures}" -ge "${FAIL_ESCALATE}" ]; then
   echo "athena-shipwright: WEDGED — ${failures} consecutive unsuccessful outcomes (failing sessions, stranded pushes, or reaped dead cron corpses). Refusing to spawn another session." >&2
   echo "  Fix: read the recent logs under ${LOG_DIR} to see WHY the runs failed — this is a real fault, not a passing editor. Once the cause is fixed, re-arm the lane by deleting the counter ('rm ${FAIL_COUNT}'); the next tick then runs. Raise SHIPWRIGHT_FAIL_ESCALATE to tolerate more consecutive failures before this fires." >&2
+  # Cron mail is not delivered everywhere, so the wedge also leaves a record in
+  # runs/ and alerts once per episode (DND-834; see "the wedge record" above).
+  wedge_track "${ts}" "${failures}"
   exit 75
 fi
 
@@ -556,16 +754,6 @@ fi
 # A failed send is loud and is NOT recorded as sent, so the next tick retries.
 # None of this touches the dirt, changes the exit code, or feeds the wedge.
 
-# stale_dirt_note <skip-record> <line> — append one line to the skip record.
-# The only way this section writes the record: a failed append is loud and
-# returns 0, so it can never turn a yield into a non-zero exit under errexit.
-stale_dirt_note() {
-  printf '%s\n' "$2" >>"$1" && return 0
-  echo "athena-shipwright: could not append to the skip record $1: $2" >&2
-  echo "  Fix: check that $(dirname -- "$1") is writable and the disk is not full." >&2
-  return 0
-}
-
 # stale_dirt_send <skip-record> <first-seen> <streak> <newest> <count> <sig> <paths>
 # <paths> is the relay list stale_dirt_track already wrote into the record, so
 # the message and its authority name the same paths. Prints the delivered
@@ -573,13 +761,7 @@ stale_dirt_note() {
 # stderr) when the send failed.
 stale_dirt_send() {
   local record="$1" first="$2" streak="$3" newest="$4" count="$5" sig="$6" paths="$7"
-  local repo send_mail body out rc name
-  repo="$(cd -- "${__wrapper_dir}/.." && pwd -P)"
-  send_mail="${repo}/ai/skills/athena:inbox/bin/send-mail"
-  if [ ! -x "${send_mail}" ]; then
-    echo "send-mail is missing: ${send_mail}" >&2
-    return 4
-  fi
+  local body rc=0
   body="$(mktemp "${TMPDIR:-/tmp}/shipwright-stale-dirt.XXXXXX")" || { echo "cannot create a temporary body file" >&2; return 4; }
   chmod 600 "${body}"
   {
@@ -595,29 +777,9 @@ stale_dirt_send() {
     printf '%s\n' "${paths}" | sed 's/^/  /'
     printf '\nFix: these paths are not the shipwright'"'"'s, and it will never touch them. For each one, the owner picks: commit it, add it to .gitignore, or remove it. Until then every hourly tick yields and no retrospective runs. If the dirt is known inert and one run should proceed anyway, run scripts/athena-shipwright-run.sh with SHIPWRIGHT_ALLOW_DIRTY=1. This alert is not repeated until the dirty paths or their newest mtime change.\n'
   } >"${body}"
-  # This channel's detector side has a second writer, the inbox-client
-  # watchdog, under the same identity. send-mail serialises the two with the
-  # channel's .sender.lock and REFUSES (never collides) when the other holds
-  # it, so a refusal is retried briefly here; any other failure is not. Each
-  # refusal is noted in the record, so a reader can see the retry happened.
-  local attempt=0
-  while :; do
-    attempt=$(( attempt + 1 ))
-    out="$(cd -- "${repo}" && timeout 20 "${send_mail}" --local harness-alerts-detector shipwright-stale-dirt \
-            --to custom --re "${record}" --body-file "${body}" 2>&1)"; rc=$?
-    if [ "${rc}" -eq 0 ] || [ "${attempt}" -ge 3 ] || ! grep -q 'already sending on' <<<"${out}"; then
-      break
-    fi
-    stale_dirt_note "${record}" "alert: sender lock busy (attempt ${attempt}/3); retrying"
-    sleep 2
-  done
+  harness_alert_send "${record}" shipwright-stale-dirt "${body}" || rc=$?
   rm -f "${body}"
-  if [ "${rc}" -ne 0 ]; then
-    printf '%s\n' "${out}" | head -n 3 >&2
-    return "${rc}"
-  fi
-  name="$(printf '%s\n' "${out}" | sed -n 's/^athena:inbox: delivered //p' | tail -n 1)"
-  printf '%s\n' "${name:-?}"
+  return "${rc}"
 }
 
 # stale_dirt_track <tick> <skip-record> — classify this skip's dirt, advance the
@@ -627,7 +789,7 @@ stale_dirt_track() {
   local tick="$1" record="$2" m sig newest count now age stale=0 label paths
   local prev_sig prev_streak first alerted streak name err tmp
   if ! m="$(sd_measure "${MAIN_CHECKOUT}")"; then
-    stale_dirt_note "${record}" 'dirt: UNMEASURED (git status or stat failed mid-scan)'
+    record_note "${record}" 'dirt: UNMEASURED (git status or stat failed mid-scan)'
     echo "athena-shipwright: could not measure the age of the dirt in ${MAIN_CHECKOUT}; this skip is not counted toward the stale-dirt streak." >&2
     echo "  Fix: usually a path changed during the scan, which is a live editor and needs nothing. If every skip says UNMEASURED, run 'git -C ${MAIN_CHECKOUT} status --porcelain -z -uall' by hand: while it fails, stale dirt cannot escalate." >&2
     return 0
@@ -676,7 +838,7 @@ stale_dirt_track() {
       alerted="${name}"
     else
       name=""
-      stale_dirt_note "${record}" 'alert: FAILED to send'
+      record_note "${record}" 'alert: FAILED to send'
       echo "athena-shipwright: the stale-dirt harness-alert could NOT be sent: $( [ -n "${err}" ] && tr '\n' ' ' <"${err}" || echo '(send-mail output lost: no temporary file)')" >&2
       echo "  Fix: run inbox-doctor from ${__wrapper_dir%/scripts} (is the custom registry entry installed with its harness-alerts channels? scripts/setup-inbox-registry --install). Nothing was recorded as sent, so the next tick retries on its own." >&2
     fi
@@ -693,7 +855,7 @@ stale_dirt_track() {
     echo "  Fix: check that $(dirname -- "${STALE_DIRT_STATE}") is writable and the disk is not full." >&2
   fi
 
-  [ -z "${name}" ] || stale_dirt_note "${record}" "alert: harness-alerts ${name}"
+  [ -z "${name}" ] || record_note "${record}" "alert: harness-alerts ${name}"
 
   echo "athena-shipwright: the dirt is ${label} (newest change $(( age / 3600 ))h ago; STALE after $(( STALE_DIRT_AGE_S / 3600 ))h); stale streak ${streak}/${STALE_DIRT_ESCALATE} on this signature since ${first}." >&2
   if [ -n "${name}" ]; then

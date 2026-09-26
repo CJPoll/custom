@@ -572,7 +572,8 @@ checks now answer the question a pid cannot:
   `[wedge:<sig8>]` ticket (`athena:inbox-attend` → *harness-alerts*). The
   mirror channel `harness-alerts-detector` is the detector's sending side:
   never read or send on it. The shipwright runner sends its one-per-signature
-  stale-dirt report on it too (DND-692).
+  stale-dirt report on it too (DND-692), and its one-per-episode wedge report
+  (DND-834).
 - `watchdog` fails when any of the supervisor's watchdog tools is missing: the
   liveness library, `scripts/inbox-client-capture` or `scripts/inbox-client-alert`
   (the supervisor keeps the client running, but a wedge is then restarted

@@ -1822,7 +1822,8 @@ lenient about what I receive.
   PROGRAMS may share an identity provided each sends through `send-mail` (which
   takes the lock) and treats a refused lock as a failed send, never as sent.
   Today that is the `harness-alerts-detector` side: the inbox-client watchdog
-  and the shipwright runner's stale-dirt report (DND-692).
+  and the shipwright runner, which sends its stale-dirt report (DND-692) and
+  its wedge report (DND-834) through the same `send-mail` path.
 
   **Later (2026-09-26):** this item read "Exactly one writer per `write`
   directory per identity". Superseded by DND-692, which added the shipwright
@@ -2630,6 +2631,13 @@ also reports:
   reader relays it to the owner (`athena:inbox-attend` → *harness-alerts*),
   quoting the record's `relay_paths:` block (collapsed, control characters
   stripped, at most 20 lines), never its raw uncapped path list.
+  The same runner also sends ONE `shipwright-wedged` message per wedge
+  episode (DND-834): its failure counter reached the threshold, so every tick
+  exits 75 and spawns no session. Its `re:` is the tick's `.wedged` record in
+  the same `runs/` directory, which is that message's authority; it names no
+  capture, so retention ignores it. The reader relays it to the owner with a
+  re-arm command it composes itself, never one copied from the record or the
+  message.
 - **`watchdog`** — the watchdog's three tools (the liveness library,
   `scripts/inbox-client-capture` and `scripts/inbox-client-alert`) are present.
   Missing any, the supervisor keeps the client running, but a wedge is then
