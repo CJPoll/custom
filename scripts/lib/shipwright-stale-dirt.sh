@@ -80,8 +80,8 @@ sd_measure() {
   raw="$(mktemp)" && list="$(mktemp)" && present="$(mktemp)" || return 1
   sd_dirty_paths "${checkout}" >"${raw}" && sort -z "${raw}" >"${list}" || rc=1
   if [ "${rc}" -eq 0 ]; then
-    # Existing paths are aged in ONE stat call (a stray node_modules is
-    # thousands of files); a gone path walks up to its nearest ancestor.
+    # Existing paths are aged by one xargs-batched stat (a stray node_modules
+    # is thousands of files); a gone path walks up to its nearest ancestor.
     while IFS= read -r -d '' p; do
       count=$(( count + 1 ))
       if [ -e "${checkout}/${p}" ] || [ -L "${checkout}/${p}" ]; then
@@ -123,12 +123,13 @@ sd_next_streak() {
   if [ "${stale}" -eq 1 ]; then printf '%s\n' "$(( prev + 1 ))"; else printf '%s\n' "${prev}"; fi
 }
 
-# sd_display_paths <checkout> [max] — the dirty paths as git shows them by
-# default (untracked directories collapsed, e.g. node_modules/), control
+# sd_display_paths <checkout> [max] — the dirty paths with untracked
+# directories collapsed (e.g. node_modules/; -unormal pins that against the
+# user's status.showUntrackedFiles), control
 # characters stripped, capped at max lines with an "and N more" tail.
 sd_display_paths() {
   local checkout="$1" max="${2:-20}" all n
-  all="$(git -C "${checkout}" -c core.quotePath=false status --porcelain 2>/dev/null \
+  all="$(git -C "${checkout}" -c core.quotePath=false status --porcelain -unormal 2>/dev/null \
     | cut -c4- | grep -v '^ai-artifacts/' | LC_ALL=C tr -d '\000-\010\013-\037\177' || true)"
   n="$(printf '%s\n' "${all}" | grep -c . || true)"
   printf '%s\n' "${all}" | head -n "${max}"
