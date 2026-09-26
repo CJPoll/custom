@@ -769,3 +769,68 @@ After the fix: `RESULT: 258 passed, 0 failed`.
 | S-DND560-6 | The unmapped failure-log line not written | `unmapped: one failure-log line`, `... carries Fix:`, `... names the spawn` |
 | S-DND560-7 | `--caller-agent-id` dropped from a nested spawn | the b1.3 replay: `sends exactly the contract body` |
 | S-DND560-8 | The drain guard's `report_denied` call removed | `the two denies above each sent one report`, `the deny sent exactly one fleet report`, `that report is agent_end spawn_denied …` (6 FAIL) |
+
+---
+
+## 2026-09-26 — DND-799, git-stash-guard: quoted payloads are data
+
+- **Domain:** `ai/hooks/git-stash-guard.sh`. A quoted argument or quoted
+  heredoc body that the shell will not run is read in DATA mode: literal
+  findings (a literal stash write, stash-ref plumbing, a stash alias) still
+  deny; expansion findings (glob-head, expanded, expanded-git,
+  unread-config) do not. EXEC contexts are read in full. Test arguments are
+  data. A shell alias is not re-expanded inside its own expansion.
+- **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`, new section Q
+  (QA allow, QB alias recursion, QX exec contexts, QL literal-in-data).
+- **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
+- **After:** `RESULT: 442 passed, 0 failed` / `VERDICT: PASS`.
+
+### Fail-first (the new self-test against origin/main 81ba7c2's hook)
+
+```
+FAIL  QA2. gh -q string interpolation with a slice (expected allow)
+FAIL  QA3. python3 -c list comprehension (expected allow)
+FAIL  QA4. python3 -c subscript with quoted keys (expected allow)
+FAIL  QA5. python3 heredoc with an assignment holding brackets (expected allow)
+FAIL  QA6. gh --jq object (expected allow)
+FAIL  QA7. docker --format with two templates (expected allow)
+FAIL  QA8. awk print field (expected allow)
+FAIL  QA10. jq .[] with an object (expected allow)
+FAIL  QA11. gh api --jq .[] (expected allow)
+FAIL  QA12. curl -w with a JSON template (expected allow)
+FAIL  QA13. sed with a bracket class and a group (expected allow)
+FAIL  QA14. docker inspect -f range template (expected allow)
+FAIL  QA15. jq select with a regex alternation (expected allow)
+FAIL  QA16. grep -E alternation in single quotes (expected allow)
+FAIL  QA17. grep -rnE bracket pattern (expected allow)
+FAIL  QA18. quoted heredoc to a file with Python brackets (expected allow)
+FAIL  QA20. quoted heredoc whose prose quotes a grep (expected allow)
+FAIL  QA21. a double-quoted payload with no substitution (expected allow)
+FAIL  QA22. a double-quoted payload with a parameter expansion (expected allow)
+FAIL  QA23. a double-quoted printf-built script line (expected allow)
+FAIL  QA24. DND-853: a test after a cd to an expanded dir (expected allow)
+FAIL  QA25. DND-853: a test after git -C with an expanded dir (expected allow)
+FAIL  QA29. two quoted heredocs on one line (expected allow)
+FAIL  QB1. grep -i stash under a self-referential grep alias (expected allow)
+FAIL  QB2. grep -rnE bracket pattern under the grep alias (expected allow)
+FAIL  QB3. grep -E alternation under the grep alias (expected allow)
+FAIL  QB5. grep -oE with an expansion under the grep alias (expected allow)
+RESULT: 415 passed, 27 failed
+```
+
+Every QX (exec context) and QL (literal in data) case passes on the base
+hook too: each was already denied, and the change keeps it denied.
+
+### Sabotage rows (measured 2026-09-26 on the DND-799 hook, one mutant copy each)
+
+| id | Mutation | Observed failure |
+|---|---|---|
+| S-DND799-1 | Every quoted payload and heredoc read as data (exec detection removed) | O39, O90, O103c, QX1-QX18, QX20-QX31, QX35 — `408 passed, 34 failed` |
+| S-DND799-2 | Runner context removed (`ex` dropped from both mode tests) | O39, O90, QX1-QX18, QX21-QX25, QX31 — `416 passed, 26 failed` |
+| S-DND799-3 | Git-scoped exec removed (`git_in_cmd` / `HG`) | QX20 `git -c 'alias.p=!/usr/bin/g?t sp' p`, QX26 heredoc to a git shell alias — `440 passed, 2 failed`. QX19 (`git config alias.p '!...stash pop'`) stays denied by the lexical alias-definition check |
+| S-DND799-4 | Double-quoted command substitution no longer forces exec (`XQ`) | O103c, QX29, QX30, QX35 — `438 passed, 4 failed` |
+| S-DND799-5 | An unquoted or unterminated heredoc read as data | QX27, QX28 — `440 passed, 2 failed` |
+| S-DND799-6 | `<<` after a word-leading `#` or inside `((` taken as a heredoc | QX32, QX33 — `440 passed, 2 failed` |
+| S-DND799-7 | Alias self-expansion guard (`AEXP`) removed | QB1 `grep -i stash` — `441 passed, 1 failed` |
+| S-DND799-8 | Test arguments no longer data (`dm = data`) | QA24, QA25 — `440 passed, 2 failed` |
+| S-DND799-9 | Data mode drops LITERAL findings too (`weak()` true for all) | O30, O44, O45, O47, QL1-QL6 — `432 passed, 10 failed` |

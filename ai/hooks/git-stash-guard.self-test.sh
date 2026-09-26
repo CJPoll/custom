@@ -394,8 +394,9 @@ echo "== O: over-match of the expansion rules (DND-780, narrow cut) =="
 # glob; an assignment-shaped word gives the next word command position; a
 # quoted `$NAME/`-prefixed path with a plain basename is that name; the most
 # specific reason wins and names what matched. Every other glob or brace
-# command word is judged exactly as at cbac851, and heredoc bodies and
-# quoted payloads are still read as commands.
+# command word is judged exactly as at cbac851. Heredoc bodies and quoted
+# payloads are read as commands; since DND-799 a payload the shell does not
+# run is read in data mode (section Q).
 # The deny cases below were written against a broader matcher (branch
 # dnd-780-stash-guard-overmatch, deferred to an architect ticket). Here they
 # deny because every non-exempt glob head is judged as at cbac851; they are
@@ -600,6 +601,163 @@ if is_deny && printf '%s' "$OUT" | grep -q 'with a verb that writes the stash li
 else
   record "O41. a literal stash write after an unrelated expansion names the literal reason" FAIL
 fi
+
+echo "== Q: quoted payloads and quoted heredoc bodies are data (DND-799) =="
+# A quoted word holding whitespace or a separator, and a heredoc body, is
+# re-read as a command text. Unless the shell may EXECUTE it, it is DATA:
+# only literal findings count there (a literal stash write, stash-ref
+# plumbing, a stash alias), never the expansion findings (a glob or brace
+# command word, an expanded command word or subcommand, an unread config).
+# QA: the false positives the fleet recorded on DND-799 (batches 2-5) and
+# DND-853, each denied before this change.
+case_cmd "QA1. gh -q object filter with [] and |" allow "gh pr view 12 -q '{number: .number, checks: [.statusCheckRollup[] | {name: .name, state: .conclusion}]}'"
+case_cmd "QA2. gh -q string interpolation with a slice" allow "gh run list --json headSha -q '.[] | \"\\(.headSha[0:8])\"'"
+case_cmd "QA3. python3 -c list comprehension" allow "python3 -c 'import sys; [print(p) for p in sys.path]'"
+case_cmd "QA4. python3 -c subscript with quoted keys" allow "python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0][\"text\"])' < f.json"
+case_cmd "QA5. python3 heredoc with an assignment holding brackets" allow "python3 - <<'EOF'
+import sys
+p=sys.argv[1]
+print(p[0:3], {\"a\": [1, 2]})
+EOF"
+case_cmd "QA6. gh --jq object" allow "gh pr view 3 --jq '{reviews: [.reviews[] | .state]}'"
+case_cmd "QA7. docker --format with two templates" allow "docker ps --format '{{.Names}} {{.Status}}'"
+case_cmd "QA8. awk print field" allow "awk '{print \$1}' f"
+case_cmd "QA9. awk array assignment" allow "awk -F, '{a[\$1]++} END {for (k in a) print k, a[k]}' f"
+case_cmd "QA10. jq .[] with an object" allow "jq -c '.[] | {a: .b}' f.json"
+case_cmd "QA11. gh api --jq .[]" allow "gh api repos/x/y/pulls --jq '.[] | .number'"
+case_cmd "QA12. curl -w with a JSON template" allow "curl -s -w '{\"code\": %{http_code}}' https://example.com"
+case_cmd "QA13. sed with a bracket class and a group" allow "sed -E 's/[a-z]+ ([0-9]+)/\\1/' f"
+case_cmd "QA14. docker inspect -f range template" allow "docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' c"
+case_cmd "QA15. jq select with a regex alternation" allow "jq '.[] | select(.name | test(\"^a|b\$\"))' f"
+case_cmd "QA16. grep -E alternation in single quotes" allow "grep -E 'dnd-(513|514|52[1-9]|537)' f"
+case_cmd "QA17. grep -rnE bracket pattern" allow "grep -rnE 'timeout [0-9]+ +(\\S*/)?test-slot' ai/"
+case_cmd "QA18. quoted heredoc to a file with Python brackets" allow "cat <<'EOF' > x.py
+d = {\"a\": [1, 2]}
+print(d[\"a\"][0])
+EOF"
+case_cmd "QA19. quoted heredoc holding Ruby interpolation" allow "cat > x.rb <<'EOF'
+fix = 1
+puts \"x #{fix} [y]\"
+EOF"
+case_cmd "QA20. quoted heredoc whose prose quotes a grep" allow "cat > notes.md <<'EOF'
+Run grep -rnE 'timeout [0-9]+ +(\\S*/)?test-slot' ai/ to find them.
+{a,b} and *.md are prose here.
+EOF"
+case_cmd "QA21. a double-quoted payload with no substitution" allow "grep -E \"(x|y)[0-9]+\" f"
+case_cmd "QA22. a double-quoted payload with a parameter expansion" allow "grep -oE \"\$t[^ ]*\" f"
+case_cmd "QA23. a double-quoted printf-built script line" allow "printf '%s\\n' \"grep -rnE 'timeout [0-9]+ +(\\\\S*/)?test-slot' ai/\" > s.txt"
+case_cmd "QA24. DND-853: a test after a cd to an expanded dir" allow 'cd "$W" && [ -n "$s" ] && echo y'
+case_cmd "QA25. DND-853: a test after git -C with an expanded dir" allow 'git -C "$W" status; [ -n "$s" ] && echo ok'
+case_cmd "QA26. DND-853: test builtin after git -C with an expanded dir" allow 'git -C "$W" log -1 && test -n "$s"'
+case_cmd "QA27. ruby -e with a hash and sub" allow "ruby -e 'h = {a: [1]}; puts h[:a].map { |x| x.to_s.sub(/1/, \"y\") }'"
+case_cmd "QA28. <<- quoted heredoc with brackets" allow "cat <<-'EOF'
+	x = y[0]
+	EOF
+echo done"
+case_cmd "QA29. two quoted heredocs on one line" allow "paste /dev/fd/3 3<<'A' - <<'B'
+a[1]
+A
+{b,c}
+B"
+# QB: a shell alias does not re-expand inside its own expansion (DND-800).
+# The owner's snapshot aliases grep to itself; that recursed to the nesting
+# bound and denied `grep ... stash` as naming stash.
+mkdir -p "$TMP/grepalias/shell-snapshots"
+cat > "$TMP/grepalias/shell-snapshots/snapshot-zsh-1-grep.sh" <<'EOF'
+alias -- grep='grep --color=auto --exclude-dir={.bzr,CVS,.git,.hg,.svn}'
+alias -- egrep='grep -E'
+alias -- gstp='git stash pop'
+alias -- gg='gg2'
+alias -- gg2='gstp'
+EOF
+# case_ga <label> <deny|allow> <command> : with the grep-alias snapshot.
+case_ga() {
+  OUT=$(json "$WT" "$3" | CLAUDE_CONFIG_DIR="$TMP/grepalias" sh "$HOOK" 2>/dev/null); STATUS=$?
+  check "$1" "$2"
+}
+case_ga "QB1. grep -i stash under a self-referential grep alias" allow 'grep -i stash f'
+case_ga "QB2. grep -rnE bracket pattern under the grep alias" allow "grep -rnE 'timeout [0-9]+ +(\\S*/)?test-slot' ai/"
+case_ga "QB3. grep -E alternation under the grep alias" allow "grep -E 'dnd-(513|514|52[1-9]|537)' f"
+case_ga "QB4. egrep -> grep -> grep" allow "egrep -o 'x|y' f"
+case_ga "QB5. grep -oE with an expansion under the grep alias" allow 'grep -oE "$t[^ ]*" f'
+case_ga "QB6. gstp still denies beside the grep alias" deny 'gstp'
+case_ga "QB7. an alias chain to gstp still denies" deny 'gg'
+case_ga "QB8. grep then gstp in one command still denies" deny 'grep -i x f; gstp'
+# QX: EXEC contexts. The shell runs each of these payloads, so it is read in
+# full: a stash write spelled by glob or expansion (which data mode drops)
+# still denies. Each would be allowed if the payload were read as data.
+case_cmd "QX1. bash -lc payload" deny "bash -lc 'cd /tmp && /usr/bin/g?t stash pop'"
+case_cmd "QX2. zsh -c payload" deny "zsh -c '/usr/bin/g?t stash pop'"
+case_cmd "QX3. eval payload" deny "eval '/usr/bin/g?t stash pop'"
+case_cmd "QX4. su -c payload" deny "su -c '/usr/bin/g?t stash pop' me"
+case_cmd "QX5. watch payload" deny "watch '/usr/bin/g?t stash pop'"
+case_cmd "QX6. ssh payload" deny "ssh host '/usr/bin/g?t stash pop'"
+case_cmd "QX7. find -exec sh -c payload" deny "find . -exec sh -c '/usr/bin/g?t stash pop' \\;"
+case_cmd "QX8. xargs sh -c payload" deny "echo x | xargs -I{} sh -c '/usr/bin/g?t stash pop {}'"
+case_cmd "QX9. env -S payload" deny "env -S '/usr/bin/g?t stash pop'"
+case_cmd "QX10. trap payload" deny "trap '/usr/bin/g?t stash pop' EXIT"
+case_cmd "QX11. alias defined then used" deny "alias gp='/usr/bin/g?t stash pop'; gp"
+case_cmd "QX12. data piped to sh" deny "echo '/usr/bin/g?t stash pop' | sh"
+case_cmd "QX13. data piped to bash" deny "printf '%s\\n' 'x; /usr/bin/g?t stash pop' | bash"
+case_cmd "QX14. an expanded shell running -c" deny "\$SHELL -c '/usr/bin/g?t stash pop'"
+case_cmd "QX15. sudo sh -c payload" deny "sudo sh -c 'true; /usr/bin/g?t stash pop'"
+case_cmd "QX16. timeout then bash -c payload" deny "timeout 5 bash -c 'true; /usr/bin/g?t stash pop'"
+case_cmd "QX17. tmux payload" deny "tmux new-window '/usr/bin/g?t stash pop'"
+case_cmd "QX18. vim -c ! payload" deny "vim -c '!/usr/bin/g?t stash pop' f"
+case_cmd "QX19. git config alias value" deny "git config alias.p '!/usr/bin/g?t stash pop'"
+case_cmd "QX20. git -c alias value" deny "git -c 'alias.p=!/usr/bin/g?t sp' p"
+case_cmd "QX21. quoted heredoc to bash" deny "bash <<'EOF'
+/usr/bin/g?t stash pop
+EOF"
+case_cmd "QX22. quoted heredoc piped to sh" deny "cat <<'EOF' | sh
+/usr/bin/g?t stash pop
+EOF"
+case_cmd "QX23. quoted heredoc to source /dev/stdin" deny "source /dev/stdin <<'EOF'
+/usr/bin/g?t stash pop
+EOF"
+case_cmd "QX24. quoted heredoc read by a loop running each line" deny "while read -r l; do \$l; done <<'EOF'
+/usr/bin/g?t stash pop
+EOF"
+case_cmd "QX25. quoted heredoc to xargs" deny "xargs -L1 <<'EOF'
+/usr/bin/g?t stash pop
+EOF"
+case_cmd "QX26. quoted heredoc to a git shell alias" deny "git -c alias.zq='!sh' zq <<'EOF'
+/usr/bin/g?t stash pop
+EOF"
+case_cmd "QX27. unquoted heredoc (its body is expanded)" deny "cat <<EOF
+\$(/usr/bin/g?t stash pop)
+EOF"
+case_cmd "QX28. unterminated quoted heredoc" deny "cat <<'EOF'
+/usr/bin/g?t stash pop"
+case_cmd "QX29. a double-quoted payload with a command substitution" deny "echo \"x \$(/usr/bin/g?t stash pop)\""
+case_cmd "QX30. a double-quoted payload with a backtick" deny "echo \"x \`/usr/bin/g?t stash pop\`\""
+case_cmd "QX31. an exec payload nested in a data heredoc" deny "cat > x.txt <<'EOF'
+sh -c '/usr/bin/g?t stash pop'
+EOF"
+case_cmd "QX32. << in a comment is not a heredoc" deny "true # <<'X'
+/usr/bin/g?t stash pop
+X"
+case_cmd "QX33. << in arithmetic is not a heredoc" deny "echo \$((1<<'X'))
+/usr/bin/g?t stash pop
+X"
+case_cmd "QX34. an expanded command in a test's own simple command after it" deny '[ -n "$x" ]; $GIT stash pop'
+case_cmd "QX35. a substitution inside a test" deny '[ -n "$(/usr/bin/g?t stash pop)" ]'
+# QL: a LITERAL stash write in data still denies (the accepted false positive
+# in the header, and interpreters that run a string).
+case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"
+case_cmd "QL2. python3 os.system with a literal stash write" deny "python3 -c 'import os; os.system(\"git stash pop\")'"
+case_cmd "QL3. awk system with a literal stash write" deny "awk 'BEGIN { system(\"git stash pop\") }'"
+case_cmd "QL4. quoted heredoc script with a literal stash write" deny "cat > x.sh <<'EOF'
+cd /tmp && git stash pop
+EOF
+./x.sh"
+case_cmd "QL5. quoted heredoc with stash-ref plumbing" deny "cat > x.sh <<'EOF'
+git reflog expire --expire=now stash
+EOF"
+case_cmd "QL6. quoted heredoc with a stash git alias" deny "cat > x.sh <<'EOF'
+git sp
+EOF"
+case_cmd "QL7. a literal stash write inside a test" deny '[ -n x ] && git stash pop'
 
 echo "== T: the deny text =="
 run "$(json "$WT" 'git stash pop')"
