@@ -81,6 +81,7 @@ ai/skills/athena:inbox/bin/inbox-wait	guard
 ai/skills/athena:inbox/bin/read-inbox	guard	
 ai/skills/athena:inbox/bin/send-mail	guard	
 ai/skills/athena:merge-boarding/scripts/integration-gate	guard	
+ai/skills/athena:merge-boarding/scripts/locked-merge	guard	
 ai/skills/athena:slack/bin/read-inbox	guard	
 ai/skills/athena:slack/bin/channels	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:slack/bin/delete	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action

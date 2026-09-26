@@ -141,6 +141,7 @@ tools:
   skills/athena:inbox/bin/inbox-wait:                 { class: idempotent, reason: doorbell }
   skills/athena:slack/bin/read-inbox:                 { class: idempotent, reason: state }
   skills/athena:merge-boarding/scripts/integration-gate: { class: idempotent, reason: gate }
+  skills/athena:merge-boarding/scripts/locked-merge: { class: destructive, reason: forge }
   # destructive: Slack writes, routed mail through the Athena server, and the
   # inbox ack, which consumes messages from a view other sessions share (see the
   # "WHO MAY ACK" note in the bin).

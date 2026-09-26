@@ -317,7 +317,8 @@ log's "baseline main =="). The intersection it then prints is the input to the
 integration gate, board it; non-empty, treat the delta as outside the reviewed
 set and replay.
 
-**Do not negotiate with the other fleet.** No messaging, no lock, no deferring,
+(Qualified: see **Later (2026-09-26)** below. This holds for the WORK phase;
+the merge itself is a critical section.) **Do not negotiate with the other fleet.** No messaging, no lock, no deferring,
 no reserving a budget line or a registry slot. Two peers deferring to each
 other is a race with no arbiter, and it would serialize the *work* phase to
 protect a number an existing check already validates at integration.
@@ -326,6 +327,44 @@ accepted, named cost: losing the race is discovered late, so a second fleet
 that also spent resident admiral lines may redo one ticket's work at merge
 time — rare, bounded at one ticket, and the `check-agent-size` failure names
 the budget, so the redo is mechanical.
+
+**Later (2026-09-26):** the paragraph above holds for the *work* phase, and only
+there: never reserve a budget line or a registry slot, never defer work to
+another fleet. It was wrong about the *merge*. "Rebase is how you lose the race
+safely" assumed the forge refuses a merge onto a moved base. GitHub does not: a
+squash-merge onto a base that moved after `integration-gate` ran, with no
+textual conflict, lands a tree nobody gated (gen_saas 2026-09-23: AM-2's squash
+landed on DND-347's merge a minute later, integrated head ungated). Check-then-
+merge is a TOCTOU. `origin/main` is still the arbiter of *what is true*; it does
+not serialize *who merges*. Six fleets then hand-rolled the same flock recipe
+from prose (2026-09-22..26 state logs).
+
+So the merge step is a critical section on every GitHub-merged repo:
+
+- **Same machine:** merge through
+  `ai/skills/athena:merge-boarding/scripts/locked-merge --pr <n> --head <sha>`,
+  never a bare `gh-athena pr merge`. `<sha>` is the one `INTEGRATION OK` names.
+  It takes the repo's merge lock (`~/.local/state/athena/<repo>-merge.lock`,
+  the path fleets already share), re-checks under it that `origin/<base>` is
+  contained in the gated head, merges pinned to that head, runs
+  `confirm-merged`, and asserts the landed commit's parent is the checked base
+  and its tree is the gated tree. Its exit code names the next step (`--help`).
+  It adds checks under the lock and replaces none: still run `integration-gate`
+  first, still merge one at a time. On gen_saas pass
+  `--require-idle-workflow post-merge.yml` until that workflow has a
+  `concurrency` group (two interleaved deploys: the last one wins).
+- **Across machines:** a local lock cannot span machines. When admirals on more
+  than one machine merge to one repo, follow the coordinator session's current
+  cross-machine protocol (today: the FIFO merge token,
+  `ai-artifacts/coordination/<repo>-merge-token.md` on the coordinating
+  machine; ask the coordinator if you cannot read it). Hold the token AND use
+  `locked-merge`. They compose, and the tree assertion catches what both miss.
+- **GitLab merge trains need none of this.** The train re-tests the integrated
+  result and is its own arbiter; board per *Boarding* below.
+
+The cost of losing differs: in `~/dev/custom` (no CI) it is one local re-gate;
+in gen_saas (~50 min CI on one runner) it is a CI cycle and can reorder
+deploys. The lock is required in both.
 
 ## Boarding (GitLab merge train — walt_ui, the default)
 
@@ -413,6 +452,10 @@ protection is NOT the gate. A refusal is expected, not an auth error: follow its
 `Fix:`. The deploy is the repo's own post-merge Actions workflow — no `Auto-Deploy`
 label; watch it with `gh run watch <run-id>`. See [[athena:github]]; GitLab
 forge mechanics are in [[athena:gitlab]].
+
+**Later (2026-09-26):** the merge command above now runs inside
+`scripts/locked-merge` (*Landing onto a moving main*), which calls the same
+pinned `gh-athena pr merge`. Do not call it bare.
 
 ## Ride a boarded train to landed (do not end your turn on it)
 

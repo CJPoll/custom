@@ -218,6 +218,8 @@ INLINE_SELF_TEST_COVERED_BY = {
     "ai/skills/athena:inbox-attend/test/self-test.sh",
   "ai/skills/athena:merge-boarding/scripts/integration-gate" =>
     "ai/skills/athena:merge-boarding/test/self-test.sh",
+  "ai/skills/athena:merge-boarding/scripts/locked-merge" =>
+    "ai/skills/athena:merge-boarding/test/locked-merge/self-test.sh",
   "scripts/athena-shipwright-commit.sh" => "scripts/test/athena-shipwright/self-test.sh",
   "scripts/inbox-client-alert"          => "scripts/test/inbox-client-alert/self-test.sh",
   "scripts/inbox-client-capture"        => "scripts/test/inbox-client-capture/self-test.sh",

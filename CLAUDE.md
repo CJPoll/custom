@@ -684,9 +684,11 @@ guarantee hold whichever way an agent was started, rather than depending on one
 reserved name a hand-spawned run had to remember to avoid.
 
 **Two fleets in one repo is normal, and it resolves at `origin/main`, not
-between them.** Concurrent admirals never coordinate with each other — each
+between them.** Concurrent admirals never coordinate their *work* — each
 rebases onto current `origin/main`, re-runs the gate on the **integrated** head,
-and merges one MR at a time. Detecting the other fleet is the wrong question
+and merges one MR at a time. The merge itself runs under a lock
+(`athena:merge-boarding` → *Landing onto a moving main*), because a GitHub
+squash onto a moved base lands an ungated tree. Detecting the other fleet is the wrong question
 (a liveness marker is indistinguishable from a corpse, as above); "did
 `origin/main` move since my branch point" is two SHAs, and it covers the
 shipwright cron and the human too. Gate-green-alone is not gate-green-merged:
@@ -695,6 +697,12 @@ shared globals — the `check-agent-size` budgets, `ai/hooks/registry.json`,
 disjoint file sets can each pass alone and fail together, which git cannot see
 and (with no CI here) nothing else re-checks. Mechanics and the tool:
 `athena:merge-boarding` → *Landing onto a moving main*.
+
+**Later (2026-09-26):** this said concurrent admirals "never coordinate with
+each other". Superseded for the merge step: a GitHub squash-merge does not
+refuse a moved base, so check-then-merge is a TOCTOU (gen_saas 2026-09-23).
+Merges go through `locked-merge`, plus the coordinator's cross-machine protocol
+where fleets span machines.
 
 **This is a rule about writes, and specifically about git work.** Reading the
 main checkout is normal and often necessary. Four things are genuine exceptions,

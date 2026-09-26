@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# locked-merge -- merge one GitHub PR inside the repo's merge critical section.
+#
+# Why this exists: a GitHub squash-merge does NOT refuse when the base moved
+# after integration-gate ran. With no textual conflict it lands a tree nobody
+# gated. Check-then-merge is a TOCTOU (gen_saas 2026-09-23: AM-2's squash
+# landed on DND-347's merge a minute later, integrated head ungated). Six fleets
+# then hand-rolled the same flock recipe from prose. This is that recipe.
+#
+# It ADDS refusals in front of an existing pinned merge and replaces none:
+# integration-gate still runs first, merges stay one at a time, gh-athena's
+# all-green refusal stays the green check, confirm-merged still runs.
+#
+# Doctrine: ai/skills/athena:merge-boarding/SKILL.md -> Landing onto a moving main.
+# Self-test: ai/skills/athena:merge-boarding/test/locked-merge/self-test.sh
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_DIR="$(dirname "${HERE}")"
+
+usage() {
+  cat <<'EOF'
+locked-merge -- merge one GitHub PR under the repo's merge lock.
+
+Usage:
+  locked-merge --pr <n> --head <sha> [--repo DIR] [--lock PATH] [--wait SECS]
+               [--require-idle-workflow <workflow-file>]
+  locked-merge --help | --self-test
+
+Run integration-gate first; pass the SHA its INTEGRATION OK line names as
+--head. Under an flock (default ~/.local/state/athena/<repo>-merge.lock, the
+path fleets already share) it:
+  1. fetches origin and reads the PR (must be OPEN, head == --head);
+  2. asserts origin/<base> is an ancestor of --head (else: re-gate);
+  3. optionally refuses while <workflow-file> has a queued/running run on <base>;
+  4. merges via gh-athena pr merge --squash --match-head-commit <head> (no --auto);
+  5. confirm-merged --pr <n> --fetch (bounded retry);
+  6. asserts the merge commit's parent == the checked base and its tree ==
+     the gated head's tree.
+
+Exit (every non-zero prints a Fix: line):
+  0 merged, confirmed, tree matches          (landed)
+  2 usage / prerequisite / non-GitHub remote (nothing landed)
+  3 stale: PR not open, head moved, or base not contained -- re-gate (nothing landed)
+  4 forge refused the merge                  (nothing landed)
+  5 required-idle workflow busy -- retry later (nothing landed)
+  6 lock wait timed out; the lock is never broken (nothing landed)
+  7 LANDED UNGATED: parent or tree mismatch -- re-gate origin/main now, report it
+  8 merge ran but landing not confirmed -- investigate, do not retry blind
+EOF
+}
+
+die() { # <exit> <message> <fix>
+  printf 'locked-merge: %s\nFix: %s\n' "$2" "$3" >&2
+  exit "$1"
+}
+
+PR=""; HEAD_SHA=""; REPO="."; LOCK=""; WAIT=900; IDLE_WF=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pr)   [ $# -ge 2 ] || die 2 "--pr needs a value" "pass --pr <number>."; PR="$2"; shift 2 ;;
+    --head) [ $# -ge 2 ] || die 2 "--head needs a value" "pass --head <full sha from INTEGRATION OK>."; HEAD_SHA="$2"; shift 2 ;;
+    --repo) [ $# -ge 2 ] || die 2 "--repo needs a value" "pass --repo <worktree dir>."; REPO="$2"; shift 2 ;;
+    --lock) [ $# -ge 2 ] || die 2 "--lock needs a value" "pass --lock <absolute path>, or omit it for the default."; LOCK="$2"; shift 2 ;;
+    --wait) [ $# -ge 2 ] || die 2 "--wait needs a value" "pass --wait <seconds>."; WAIT="$2"; shift 2 ;;
+    --require-idle-workflow)
+            [ $# -ge 2 ] || die 2 "--require-idle-workflow needs a value" "pass the workflow file name, e.g. post-merge.yml."
+            IDLE_WF="$2"; shift 2 ;;
+    --self-test) exec bash "${SKILL_DIR}/test/locked-merge/self-test.sh" ;;
+    -h|--help) usage; exit 0 ;;
+    *) die 2 "unknown argument: $1" "see --help; valid flags are --pr, --head, --repo, --lock, --wait, --require-idle-workflow, --self-test." ;;
+  esac
+done
+
+# ---- resolve every key first; a key that cannot be computed is an error ----
+case "${PR}" in ''|*[!0-9]*) die 2 "--pr must be a PR number (got '${PR}')" "pass --pr <number>." ;; esac
+case "${HEAD_SHA}" in
+  *[!0-9a-f]*|'') die 2 "--head must be a full lowercase hex SHA (got '${HEAD_SHA}')" "copy the SHA from integration-gate's INTEGRATION OK line." ;;
+esac
+[ "${#HEAD_SHA}" -eq 40 ] || die 2 "--head must be a full 40-char SHA (got ${#HEAD_SHA} chars)" "copy the full SHA from integration-gate's INTEGRATION OK line."
+case "${WAIT}" in ''|*[!0-9]*) die 2 "--wait must be whole seconds (got '${WAIT}')" "pass --wait <seconds>." ;; esac
+
+REPO="$(cd "${REPO}" 2>/dev/null && pwd)" || die 2 "--repo is not a directory" "pass --repo <the Mission's worktree>."
+COMMON="$(git -C "${REPO}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+  || die 2 "${REPO} is not inside a git repository" "pass --repo <the Mission's worktree>."
+case "${COMMON}" in
+  /*/.git) ;;
+  *) die 2 "git common dir '${COMMON}' is not an absolute <repo>/.git path" "run from a normal checkout or worktree of the repo (not a bare clone)." ;;
+esac
+REPO_NAME="$(basename "$(dirname "${COMMON}")")"
+
+ORIGIN_URL="$(git -C "${REPO}" config --get remote.origin.url 2>/dev/null)" \
+  || die 2 "no remote 'origin' in ${REPO}" "run from a checkout whose origin is the GitHub repo."
+case "${ORIGIN_URL}" in
+  *github.com[:/]*) ;;
+  *) die 2 "origin '${ORIGIN_URL}' is not github.com" "GitLab repos merge through the merge train (athena:merge-boarding -> Boarding); this tool is for GitHub squash merges only." ;;
+esac
+
+if [ -z "${LOCK}" ]; then
+  # Deliberately NOT $XDG_STATE_HOME: a second derivation would split the lock
+  # silently (two admirals, two files, no exclusion).
+  [ -n "${HOME:-}" ] || die 2 "HOME is unset, so the default lock path cannot be computed" "set HOME or pass --lock <absolute path>."
+  LOCK="${HOME}/.local/state/athena/${REPO_NAME}-merge.lock"
+fi
+case "${LOCK}" in /*) ;; *) die 2 "--lock must be absolute (got '${LOCK}')" "pass an absolute --lock path." ;; esac
+mkdir -p "$(dirname "${LOCK}")" || die 2 "cannot create $(dirname "${LOCK}")" "check permissions on the lock directory."
+echo "LOCK ${LOCK}"
+
+AI_BIN="${LOCKED_MERGE_AI_BIN:-$(cd "${SKILL_DIR}/../../bin" 2>/dev/null && pwd)}"
+for t in gh-athena confirm-merged; do
+  [ -x "${AI_BIN}/${t}" ] || die 2 "${AI_BIN}/${t} not found" "run this script from its home in ~/dev/custom/ai/skills/athena:merge-boarding/scripts/."
+done
+command -v gh >/dev/null 2>&1 || die 2 "gh (read-only forge CLI) not on PATH" "install gh; reads use plain gh."
+command -v flock >/dev/null 2>&1 || die 2 "flock not on PATH" "install util-linux flock."
+
+# ---- the critical section ----
+exec 9>>"${LOCK}"
+if ! flock -w "${WAIT}" 9; then
+  held="$(date -u -r "${LOCK}" +%FT%TZ 2>/dev/null || echo unknown)"
+  die 6 "timed out after ${WAIT}s waiting for ${LOCK} (last touched ${held})" \
+    "another merge holds the lock; retry later. Never delete the lock file -- a held flock is a live merge."
+fi
+touch "${LOCK}" 2>/dev/null || true
+
+git -C "${REPO}" fetch -q origin \
+  || die 3 "git fetch origin failed" "check the network/credentials, then re-run; nothing was merged."
+
+pr_json="$(cd "${REPO}" && gh pr view "${PR}" --json state,headRefOid,baseRefName 2>/dev/null)" \
+  || die 2 "gh pr view ${PR} failed" "check gh auth and that PR ${PR} exists in this repo; nothing was merged."
+state="$(jq -r '.state // empty' <<<"${pr_json}")"
+pr_head="$(jq -r '.headRefOid // empty' <<<"${pr_json}")"
+base="$(jq -r '.baseRefName // empty' <<<"${pr_json}")"
+[ -n "${state}" ] && [ -n "${pr_head}" ] && [ -n "${base}" ] \
+  || die 2 "gh pr view ${PR} returned no state/head/base" "check gh auth; an empty answer is not a PR."
+
+[ "${state}" = "OPEN" ] || die 3 "PR ${PR} is ${state}, not OPEN" "if it merged, run confirm-merged; otherwise reopen it before merging."
+[ "${pr_head}" = "${HEAD_SHA}" ] \
+  || die 3 "PR ${PR} head is ${pr_head}, not the gated ${HEAD_SHA}" "re-run integration-gate on the new head and pass its SHA."
+
+B="$(git -C "${REPO}" rev-parse --verify -q "refs/remotes/origin/${base}^{commit}")" \
+  || die 2 "origin/${base} does not resolve after fetch" "check the PR's base branch exists on origin."
+git -C "${REPO}" cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null \
+  || die 3 "gated head ${HEAD_SHA} is not in the local object store" "fetch the PR branch in this worktree and re-run integration-gate."
+git -C "${REPO}" merge-base --is-ancestor "${B}" "${HEAD_SHA}" \
+  || die 3 "origin/${base} moved to ${B}, which the gated head ${HEAD_SHA} does not contain" \
+       "merge origin/${base} forward, push, re-run integration-gate --since <old base>, wait for CI green on the new head, then re-run locked-merge."
+echo "BASE origin/${base} ${B} contained in ${HEAD_SHA}"
+
+if [ -n "${IDLE_WF}" ]; then
+  busy="$(cd "${REPO}" && gh run list --workflow "${IDLE_WF}" --branch "${base}" --json status \
+           -q '[.[] | select(.status != "completed")] | length' 2>/dev/null)" \
+    || die 2 "gh run list --workflow ${IDLE_WF} failed" "check the workflow file name and gh auth; nothing was merged."
+  case "${busy}" in ''|*[!0-9]*) die 2 "gh run list returned '${busy}', not a count" "check gh auth; nothing was merged." ;; esac
+  [ "${busy}" -eq 0 ] || die 5 "${IDLE_WF} has ${busy} queued/in-progress run(s) on ${base}" \
+    "wait for that deploy to finish (athena:merge-boarding -> GitHub path), then re-run; nothing was merged."
+fi
+
+( cd "${REPO}" && "${AI_BIN}/gh-athena" pr merge "${PR}" --squash --match-head-commit "${HEAD_SHA}" ) \
+  || die 4 "gh-athena pr merge ${PR} refused or failed" "read the wrapper's own Fix: above (checks not green, conflict); nothing was merged."
+
+confirmed=""
+for _ in 1 2 3 4 5 6; do
+  if "${AI_BIN}/confirm-merged" --pr "${PR}" --repo "${REPO}" --fetch >/dev/null 2>&1; then confirmed=1; break; fi
+  sleep "${LOCKED_MERGE_CONFIRM_SLEEP:-20}"
+done
+[ -n "${confirmed}" ] || die 8 "merge of PR ${PR} ran but confirm-merged did not confirm it" \
+  "check the PR on the forge by hand; do not retry the merge blind."
+
+M="$(cd "${REPO}" && gh pr view "${PR}" --json mergeCommit -q '.mergeCommit.oid // empty' 2>/dev/null)"
+[ -n "${M}" ] || die 8 "PR ${PR} reports no merge commit" "check the PR on the forge by hand; do not retry the merge blind."
+git -C "${REPO}" fetch -q origin 2>/dev/null
+git -C "${REPO}" cat-file -e "${M}^{commit}" 2>/dev/null \
+  || die 8 "merge commit ${M} not fetchable" "fetch origin and compare ${M}^{tree} with ${HEAD_SHA}^{tree} by hand."
+parent="$(git -C "${REPO}" rev-parse "${M}^1")"
+[ "${parent}" = "${B}" ] || die 7 "LANDED UNGATED: merge ${M} sits on ${parent}, not the checked base ${B}" \
+  "re-run the gate on origin/${base} now and report the ungated landing to the coordinator."
+[ "$(git -C "${REPO}" rev-parse "${M}^{tree}")" = "$(git -C "${REPO}" rev-parse "${HEAD_SHA}^{tree}")" ] \
+  || die 7 "LANDED UNGATED: merge ${M}'s tree differs from the gated head ${HEAD_SHA}" \
+       "re-run the gate on origin/${base} now and report the ungated landing to the coordinator."
+
+echo "MERGED ${PR} ${M} ON ${B} TREE-MATCH"
+exit 0

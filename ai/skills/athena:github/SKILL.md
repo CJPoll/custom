@@ -254,6 +254,12 @@ gh pr view <n> --json headRefOid -q .headRefOid  # the exact head you checked
 ~/dev/custom/ai/bin/gh-athena pr merge <n> --squash --match-head-commit <sha>
 ```
 
+**Later (2026-09-26):** an admiral runs that last line through
+`athena:merge-boarding`'s `scripts/locked-merge --pr <n> --head <sha>`. A GitHub
+squash onto a base that moved after the gate lands an ungated tree, so the
+merge takes the repo's merge lock (`athena:merge-boarding` → *Landing onto a
+moving main*).
+
 - **`--squash` is the default merge method.** The real method is a per-repo
   fact — resolve it from the consumer repo's CLAUDE.md if it states one, and
   default to `--squash` otherwise.
