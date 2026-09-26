@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 144 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7).
+- **Baseline:** `RESULT: 175 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c and R7-R34).
 
 ### Fail-first (no guard)
 
@@ -256,6 +256,9 @@ RESULT: 21 passed, 58 failed
 | S-DND670-8 | Shell-alias expansion in command position removed | S1, S3, S4, S5 — `132 passed, 4 failed` (measured on the round-6 code) |
 | S-DND670-9 | `one_word` emptied (no global option is known to take no value) | I63 `git --no-pager $SUB` allowed — `143 passed, 1 failed` (round-7 code) |
 | S-DND670-10 | A POSSIBLE subcommand decided in full (an expanded one denies too) | I64 `git --some-future-opt diff $X`, A26 `$EDITOR $FILE` over-denied — `142 passed, 2 failed` (round-7 code) |
+| S-DND670-11 | `plumb()` no longer called from `decide` | R7-R11, R13-R19, R22-R25 — `156 passed, 16 failed` (fix-round code) |
+| S-DND670-12 | `is_stash_ref` accepts only `refs/stash` (short name `stash` not recognised) | R7, R8, R10, R11, R13, R23, R25 — `165 passed, 7 failed` |
+| S-DND670-13 | A plumbing verb with no literal ref argument is allowed | R15 (xargs-fed `update-ref -d`) — `171 passed, 1 failed` |
 
 ### Critic round 1 regression (the `--attr-source` miss)
 
@@ -451,3 +454,34 @@ RESULT: 138 passed, 6 failed
 ```
 
 After the fix: `RESULT: 144 passed, 0 failed`.
+
+### 2026-09-26 fix round (admiral; desktop critic BLOCK on e3d8803): the stash reflog by its short name
+
+The desktop critic, reproduced by the harness session, found three forms that
+empty or trim the stash list with no `refs/stash` text: `git reflog delete
+'stash@{0}'`, `git reflog expire --expire=now stash`, `git reflog expire
+--expire=now --all`. The old check was lexical on the literal `refs/stash`.
+Fixed at the class level: `plumb()` reads the arguments of ref-rewriting git
+plumbing and denies any that names the stash ref in any spelling, `--all`,
+`--stdin`, an expanded ref, or no literal ref. The sweep (each verified
+against git 2.55 in a scratch repo) added `reflog drop`, `update-ref -d stash`,
+`symbolic-ref refs/stash`, fetch/push into refs/stash or refs/*,
+filter-branch/filter-repo `--all`, and setting gc.reflogExpire*. `decide` now
+passes ALL remaining words, so a git alias with arguments (`rx = reflog
+expire`) is judged with them. Residuals are named in the hook header: gc,
+maintenance and auto-gc under the existing expiry config, `--mirror` into the
+same repo, and non-git writers by computed path.
+
+The new cases against e3d8803's hook (W3: the owner's entry is actually
+expired through the worktree):
+
+```
+FAIL  W2a. reflog delete stash@{0} from the linked worktree (expected deny) status=0 out=[]
+FAIL  W2b. reflog expire stash from the linked worktree (expected deny) status=0 out=[]
+FAIL  W2c. reflog expire --all from the linked worktree (expected deny) status=0 out=[]
+FAIL  W3. owner stash list byte-identical after the guarded attempts status=0 out=[before=[stash@{0}: On main: OWNER-ENTRY
+FAIL  R7-R11, R13-R25 (18 cases)
+RESULT: 153 passed, 22 failed
+```
+
+After the fix: `RESULT: 175 passed, 0 failed`.

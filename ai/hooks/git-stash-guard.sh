@@ -22,9 +22,14 @@
 #
 # WHAT IS DENIED: `git stash` with any verb other than the three read-only ones
 # below, including bare `git stash` and option-first forms (`git stash -u`,
-# `git stash -- f`), which are an implicit push. Also: `update-ref` / `reflog
-# delete|expire` / a file write (rm, mv, cp, a redirect, ...) naming
-# refs/stash, since each rewrites the same list without the stash subcommand.
+# `git stash -- f`), which are an implicit push. Also the plumbing that
+# rewrites the same list without the stash subcommand (see plumb() in the awk
+# block): `reflog delete|expire|drop` naming the stash ref in ANY spelling
+# (`stash`, `stash@{N}`, `refs/stash`, `refs/stash@{N}`) or given `--all`;
+# `update-ref` / `symbolic-ref` on the stash ref, with `--stdin`, or with no
+# literal ref (xargs-fed); a fetch/push refspec into refs/stash or refs/*;
+# filter-branch/filter-repo `--all`; setting gc.reflogExpire*; and a file
+# write (rm, mv, cp, a redirect, ...) naming refs/stash.
 #
 # DESIGN DECISION — READS ARE ALLOWED: `git stash list`, `git stash show` and
 # `git stash create`. list/show only read. `create` writes a dangling commit
@@ -84,7 +89,10 @@
 # call and run in a later one; another interpreter building argv (`python -c`);
 # `--autostash` on rebase/pull/merge, which stores into the list only on a
 # conflict and is used by the shipwright (out of scope, proposed separately);
-# reflog expiry by `git gc`; git arguments supplied through a pipe
+# reflog expiry by `git gc` / `git maintenance` / auto-gc under the EXISTING
+# expiry config (default 90 days; any git command can trigger auto-gc);
+# `git push --mirror` / `fetch --mirror` into this same repo; a ref-rewriting
+# tool other than git (a script writing .git/ files by a computed path); git arguments supplied through a pipe
 # (`printf 'stash pop' | xargs git`); an alias defined in a file the command
 # only names (`git -c include.path=<file>`, a `.gitconfig` written with the
 # Write tool in an earlier call is caught when the alias is USED, since
@@ -177,6 +185,15 @@ if printf '%s' "$WRITES" | grep -Eq 'refs/stash' \
   deny 'this command rewrites refs/stash (update-ref, reflog delete/expire, or a file write), which is the shared stash list.'
 fi
 
+# ---- setting reflog expiry ---------------------------------------------------
+# gc.reflogExpire / gc.reflogExpireUnreachable (also the per-pattern
+# gc.<pattern>.reflogExpire forms) decide when `git gc`, `git maintenance` and
+# auto-gc expire reflog entries, the stash list's included. Setting one, inline
+# (`-c gc.reflogExpire=now gc`) or in config, is denied.
+if printf '%s' "$FLAT" | grep -Eiq 'gc\.([^[:space:]=]+\.)?reflogexpire'; then
+  deny 'this command sets gc reflog expiry (gc.reflogExpire / gc.reflogExpireUnreachable), which makes `git gc` or `git maintenance` expire stash list entries. Leave reflog expiry at its configured value.'
+fi
+
 # ---- defining an alias whose value names stash ------------------------------
 if printf '%s' "$FLAT" | grep -Eq 'alias\.[^[:space:]=;&|]+[=[:space:]]([^;&|]*[^[:alnum:]_.-])?stash([^[:alnum:]_.-]|$)'; then
   deny 'this command defines a git alias whose value names `stash` (via `-c alias.<x>=...` or `git config alias.<x> ...`), a way to run a stash write under another name.'
@@ -260,13 +277,56 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
     if (has) { n++; W[n] = cur; QF[n] = q; SB[n] = ns }
     return n
   }
-  # decide(sc, nxt, depth): "" when allowed, else what was found.
+  # refpart(t): the ref a revision/refspec word names: glob marks, a leading
+  # `+` and any `@{...}` reflog selector removed (`stash@{0}` -> stash).
+  function refpart(t) { gsub(/\001/, "", t); sub(/^\+/, "", t); sub(/@\{.*$/, "", t); return t }
+  # is_stash_ref(t): t names the stash ref in either spelling git accepts.
+  function is_stash_ref(t) { t = refpart(t); return t == "stash" || t == "refs/stash" }
+  # plumb(sc, w, n, j): "refwrite" when git plumbing sc (= w[j]) with
+  # arguments w[j+1..n] rewrites or expires the stash ref or its reflog
+  # without the stash subcommand. A ref argument that is the stash ref in any
+  # spelling (`stash`, `stash@{N}`, `refs/stash`, `refs/stash@{N}`), `--all`,
+  # `update-ref --stdin` (a batch this hook cannot read), an argument built by
+  # expansion, or NO ref argument at all (refs supplied by xargs or a pipe)
+  # all count. fetch/push: a refspec whose destination is refs/stash or a
+  # `refs/*` glob. filter-branch/filter-repo: `--all` (it rewrites every ref).
+  function plumb(sc, w, n, j,    k, t, start, nargs, dst) {
+    if (sc == "reflog") {
+      if (j + 1 > n || w[j + 1] !~ /^(delete|expire|drop)$/) return ""
+      start = j + 2
+    } else if (sc == "update-ref" || sc == "symbolic-ref") {
+      start = j + 1
+    } else if (sc == "fetch" || sc == "push") {
+      for (k = j + 1; k <= n; k++) {
+        if (w[k] !~ /:/) continue
+        dst = w[k]; sub(/^.*:/, "", dst); dst = refpart(dst)
+        if (dst == "refs/stash" || dst ~ /^refs\/\*$/) return "refwrite"
+      }
+      return ""
+    } else if (sc ~ /^filter-(branch|repo)$/) {
+      for (k = j + 1; k <= n; k++) if (w[k] == "--all") return "refwrite"
+      return ""
+    } else return ""
+    nargs = 0
+    for (k = start; k <= n; k++) {
+      t = w[k]
+      if (t == "--all" || t == "--stdin") return "refwrite"
+      if (t ~ /^-/) continue
+      nargs++
+      if (t ~ /[$`]/ || is_stash_ref(t)) return "refwrite"
+    }
+    return nargs == 0 ? "refwrite" : ""
+  }
+  # decide(sc, w, n, j, depth): "" when allowed, else what was found, for the
+  # git subcommand sc (= w[j]) with arguments w[j+1..n].
   # A non-`!` alias value is parsed exactly as a command line is: git splits
   # it like a shell and runs it through its own option parser, so
-  # `-c k=v stash pop` in an alias pops. The user'"'"'s next word follows it.
-  function decide(sc, nxt, depth,    i, v, a, aq, as, n, r) {
-    if (sc == "stash") return is_read(nxt) ? "" : "stash"
+  # `-c k=v stash pop` in an alias pops. The user'"'"'s remaining words follow it.
+  function decide(sc, w, n, j, depth,    i, k, v, a, aq, as, na, r) {
+    if (sc == "stash") return is_read(j + 1 <= n ? w[j + 1] : "") ? "" : "stash"
     if (sc ~ /[$`\001]/) return "expanded"
+    r = plumb(sc, w, n, j)
+    if (r != "") return r
     # Alias names are config keys, so git matches them case-insensitively
     # (`git SP` runs alias.sp); --get-regexp prints them lower-cased.
     sc = tolower(sc)
@@ -281,9 +341,9 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
         if (mentions_stash(v) || analyze(substr(v, 2), depth + 1) != "") return "alias"
         continue
       }
-      n = tokenize(v, a, aq, as)
-      if (nxt != "") a[++n] = nxt
-      r = git_verdict(a, n, 1, 0, depth + 1)
+      na = tokenize(v, a, aq, as)
+      for (k = j + 1; k <= n; k++) a[++na] = w[k]
+      r = git_verdict(a, na, 1, 0, depth + 1)
       if (r != "") return "alias"
     }
     return ""
@@ -305,7 +365,8 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
   #   * a word that is the subcommand only if an UNKNOWN option (a newer git
   #     adds such options: --attr-source did) takes no value, or that follows
   #     one as a possible value, is a POSSIBLE subcommand: it denies only when
-  #     it is stash or a stash alias. The scan continues past a possible value.
+  #     it is stash, a stash alias, or plumbing that rewrites the stash ref.
+  #     The scan continues past a possible value.
   # So a new two-word option cannot hide `stash`, and `git --no-pager diff $X`
   # is not denied. An expanded head (`$GIT`) makes every candidate possible.
   function git_verdict(w, n, j, expanded_head, depth,    r, unknown, maybe_value) {
@@ -316,10 +377,10 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
         if (w[j] !~ /=/ && !one_word(w[j])) unknown = 1
         j++; continue
       }
-      r = decide(w[j], (j + 1 <= n ? w[j + 1] : ""), depth)
+      r = decide(w[j], w, n, j, depth)
       maybe_value = (j > 1 && w[j - 1] ~ /^-/ && w[j - 1] !~ /=/ && !two_word(w[j - 1]) && !one_word(w[j - 1]))
       if (unknown) {
-        if (r == "stash" || r == "alias") return (expanded_head ? "expanded-git" : r)
+        if (r == "stash" || r == "alias" || r == "refwrite") return (expanded_head ? "expanded-git" : r)
       } else if (r != "") return r
       if (maybe_value) { j++; continue }
       break
@@ -411,6 +472,7 @@ if [ "$AWK_RC" -ne 0 ]; then
 fi
 
 case "$VERDICT" in
+  refwrite) deny 'this runs git plumbing that rewrites or expires the stash ref or its reflog without the stash subcommand: `reflog delete|expire|drop` naming `stash`/`stash@{N}`/`refs/stash` or given `--all`, `update-ref`/`symbolic-ref` on the stash ref (or with `--stdin`, or with refs supplied from elsewhere), a fetch/push refspec whose destination is refs/stash or refs/*, or filter-branch/filter-repo `--all`.' ;;
   stash) deny 'this runs `git stash` with a verb that writes the stash list (bare `git stash`, push/save, pop, apply, drop, clear, store, branch, or an option-first implicit push).' ;;
   shell-alias) deny 'this runs a shell alias loaded into the Bash tool from the owner profile (oh-my-zsh defines `gstp` = `git stash pop`) that expands to a stash write.' ;;
   alias) deny 'this runs a git alias that resolves to a stash write (or a shell alias that mentions stash).' ;;

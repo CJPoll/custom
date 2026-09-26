@@ -58,6 +58,7 @@ cat > "$GIT_CONFIG_GLOBAL" <<'EOF'
 	x2 = !git sp
 	x3 = !git st"a"sh pop
 	x4 = !git status
+	rx = reflog expire --expire=now
 	c1 = c2
 	c2 = c3
 	c3 = c4
@@ -164,6 +165,12 @@ guarded 'git stash pop'
 check "W1. git stash pop from the linked worktree" deny
 guarded 'git stash'
 check "W2. bare git stash from the linked worktree" deny
+guarded "git reflog delete 'stash@{0}'"
+check "W2a. reflog delete stash@{0} from the linked worktree" deny
+guarded 'git reflog expire --expire=now stash'
+check "W2b. reflog expire stash from the linked worktree" deny
+guarded 'git reflog expire --expire=now --all'
+check "W2c. reflog expire --all from the linked worktree" deny
 AFTER=$(git -C "$OWNER" stash list; git -C "$OWNER" rev-parse refs/stash)
 if [ "$BEFORE" = "$AFTER" ] && printf '%s' "$AFTER" | grep -q OWNER-ENTRY; then
   record "W3. owner stash list byte-identical after the guarded attempts" PASS
@@ -308,6 +315,34 @@ case_cmd "R3. git reflog expire on refs/stash" deny 'git reflog expire --expire=
 case_cmd "R4. rm the stash reflog file" deny "rm $OWNER/.git/logs/refs/stash"
 case_cmd "R5. redirect into refs/stash" deny "echo x > $OWNER/.git/refs/stash"
 case_cmd "R6. read the stash path (no write)" allow 'git rev-parse --git-path refs/stash'
+case_cmd "R7. reflog delete stash@{0} (short name, quoted)" deny "git reflog delete 'stash@{0}'"
+case_cmd "R8. reflog expire --expire=now stash (short name)" deny 'git reflog expire --expire=now stash'
+case_cmd "R9. reflog expire --expire=now --all" deny 'git reflog expire --expire=now --all'
+case_cmd "R10. reflog drop stash" deny 'git reflog drop stash'
+case_cmd "R11. reflog delete stash@{0} (unquoted brace)" deny 'git reflog delete stash@{0}'
+case_cmd "R12. reflog delete refs/stash@{1}" deny "git reflog delete 'refs/stash@{1}'"
+case_cmd "R13. update-ref -d stash (short name)" deny 'git update-ref -d stash'
+case_cmd "R14. update-ref --stdin (unreadable batch)" deny 'printf "delete refs/x\n" | git update-ref --stdin'
+case_cmd "R15. xargs-fed update-ref -d (no literal ref)" deny 'git for-each-ref --format="%(refname)" | xargs git update-ref -d'
+case_cmd "R16. symbolic-ref refs/stash <ref>" deny 'git symbolic-ref refs/stash refs/heads/main'
+case_cmd "R17. fetch into refs/stash" deny 'git fetch . +HEAD:refs/stash'
+case_cmd "R18. push into refs/stash" deny 'git push . HEAD:refs/stash'
+case_cmd "R19. fetch with a refs/* mirror refspec" deny "git fetch --prune origin '+refs/*:refs/*'"
+case_cmd "R20. inline gc.reflogExpire then gc" deny 'git -c gc.reflogExpire=now gc'
+case_cmd "R21. config gc.reflogExpireUnreachable" deny 'git config gc.reflogExpireUnreachable now'
+case_cmd "R22. filter-branch -- --all" deny 'git filter-branch --tree-filter true -- --all'
+case_cmd "R23. reflog expire via a git alias with args" deny 'git rx stash'
+case_cmd "R24. reflog expire with an expanded ref" deny 'git reflog expire --expire=now $REF'
+case_cmd "R25. reflog delete through an unknown global option" deny "git --some-future-opt v reflog delete 'stash@{0}'"
+case_cmd "R26. reflog show stash (read)" allow 'git reflog show stash'
+case_cmd "R27. reflog (bare, read)" allow 'git reflog -5'
+case_cmd "R28. reflog expire a branch" allow 'git reflog expire --expire=now refs/heads/tmp'
+case_cmd "R29. update-ref a branch" allow 'git update-ref refs/heads/tmp HEAD'
+case_cmd "R30. update-ref -d a branch" allow 'git update-ref -d refs/heads/tmp'
+case_cmd "R31. push a branch named stash to a remote" allow 'git push origin HEAD:stash-fix'
+case_cmd "R32. fetch a normal refspec" allow 'git fetch origin main:refs/remotes/origin/main'
+case_cmd "R33. symbolic-ref read HEAD" allow 'git symbolic-ref --short HEAD'
+case_cmd "R34. plain gc" allow 'git gc'
 
 echo "== OK: reads and unrelated commands are allowed =="
 case_cmd "OK1. git stash list" allow 'git stash list'
