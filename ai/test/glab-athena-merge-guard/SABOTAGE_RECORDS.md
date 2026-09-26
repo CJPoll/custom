@@ -52,6 +52,43 @@ fails with "unknown command" (measured). The gh-athena merge-guard suite
 `gmg_api_guard` now parses with `fas_parse_api` and scans with
 `fas_graphql_scan` from `ai/lib/forge-api-scan.sh`.
 
+## Critic round (fb0baa7): a flag cluster before the subcommand
+
+The critic found `glab-athena mr -ym merge 1473` went to glab unjudged. The
+guard read the words before the subcommand with the `mr merge` flag table, so
+`-m` took `merge` and the command read as `mr 1473`. Cobra finds the command
+with its own walk (`stripFlags`), where a flag word longer than two characters
+is dropped alone. Measured on glab 1.112: `glab mr -ym merge x --help` prints
+`mr merge`'s help, and so do `-dm`, `-h`, `-Rg/r` and `--repo=g/r` in that
+spot. `mr merge` then reads `-y` as yes and `-m 1473` as the message, and merges
+the current branch's MR with no pin.
+
+Kind 1 under athena:critic-convergence: the pre-subcommand parse has used the
+merge table since the first commit. Class: "the guard's reading of WHICH
+command runs differs from cobra's". Root fix: before the command path (the
+first word, or the first two after `mr`), only `-R`/`--repo` forms may appear,
+the one flag that parses the same both ways; any other flag word there, `--`
+included, is refused when raw argv holds `merge`, `accept`, `api` or `mcp`. Raw
+argv, because the table parse can swallow the merge word itself. This replaces
+the round-2 "unknown flag before the subcommand" check.
+
+Class-closed assertion: M32 places every short flag, every two-letter cluster
+of them, and every long flag in the tables before `merge` and before `mr` (95
+spellings x 2 shapes), and requires a refusal for all 190. Only the `-R`/`--repo`
+forms run (M29-M31).
+
+The critic's "not assessed" item, other subcommands that merge: a `--help` walk
+of glab 1.112's command tree, three levels deep, found one. `mr create
+--auto-merge` ("Set the merge request to merge when all merge checks pass")
+schedules a merge on an unpinned head. `mr update` has no such flag. So
+`--auto-merge` is now refused on any command but `mr merge` (C2-C5).
+
+Evidence on the unfixed code (e9d9247's guard, with the new cases):
+`RESULT: 111 passed, 12 failed`. M25-ym shows the pass-through:
+`rc=0 out=stub:\ ran\ mr\ -ym\ merge\ 1473 … execs=mr\ -ym\ merge\ 1473`, and
+C2 `rc=0 … execs=mr\ create\ --fill\ --auto-merge\ --yes`. Fixed: `RESULT: 124
+passed, 0 failed`. Mutation S15 below turns the new cases red.
+
 ## Mutations of the glab guard
 
 Each row applies ONE change to the fixed code and runs the wrapper suite. Every
@@ -66,13 +103,14 @@ mutation turns at least one named case red.
 | S5 | a sha field read from a file is accepted | T5 |
 | S6 | a method-override header does not make a call a write | A5 |
 | S7 | a GraphQL body the guard cannot read passes | G4 G5 G6 G7 F1 F2 |
-| S8 | an unknown flag before the subcommand is ignored | M18 |
+| S8 | an unknown flag before the subcommand is ignored (the round-2 check; replaced in round 3, see S15) | M18 |
 | S9 | `mcp serve` passes | C1 |
 | S10 | routes are matched case-sensitively | A8 |
 | S11 | a query string on the train endpoint is accepted | T6 |
 | S12 | the dry-run value is read after the `GLAB_*` scrub | D1 |
 | S13 | the MR read for boarding is not checked to be the same iid | T14 |
 | S14 | the train route's DELETE pass ignores a method override | T16 |
+| S15 | a flag before the command path is never reported | M18 M25-* M26 M27 M28 M32 A17 |
 
 S12 is a real defect the suite caught during development.
 `fci_scrub_env` removes every `GLAB_*` variable, so the first cut read

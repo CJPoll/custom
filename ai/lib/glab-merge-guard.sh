@@ -41,6 +41,8 @@
 #     mergeTrainsDeleteCar removes a car and passes.
 #   * `glab mcp serve` is REFUSED: it runs an MCP server whose tools include
 #     merging an MR, with no guard in the way.
+#   * `--auto-merge` on any command but `mr merge` (e.g. `mr create
+#     --auto-merge`) is REFUSED: it schedules a merge with no pin.
 #
 # How "the head pipeline passed on the head" is decided (glmg_check_head). The
 # MR's head_pipeline must have status `success`, and be tied to the head one of
@@ -64,9 +66,21 @@
 # dies with its call. So, unlike gh-merge-guard, there is no alias expansion.
 # Cobra accepts flags before the subcommand (`glab --repo g/r mr merge 5`,
 # measured), so the command is read from the positional words, not argv[0].
-# glab also dispatches `glab -R g/r api …` to api (measured), so `api` must be
-# the first word; anything before it is refused. `mr merge --help` gets no
-# short-circuit: pflag lets a later `--help=false` turn help off again.
+# But cobra finds those words with its own walk, not any command's flag table:
+# `glab mr -ym merge 1473` routes to merge (measured, glab 1.112) and then
+# merges the current branch's MR with -m 1473 as the message. So before the
+# command path, only -R/--repo is allowed when any word could be a merge (see
+# glmg_prepath_flag). glab also dispatches `glab -R g/r api …` to api
+# (measured), so `api` must be the first word; anything before it is refused.
+# `mr merge --help` gets no short-circuit: pflag lets a later `--help=false`
+# turn help off again.
+#
+# `--auto-merge` anywhere outside `mr merge` is refused: `glab mr create
+# --auto-merge` (glab 1.112) sets the new MR to merge when its checks pass, on a
+# head nobody pinned. A full `--help` walk of glab 1.112's command tree (three
+# levels) found no other subcommand flag that merges or schedules a merge;
+# `mr update` has none. `mr create --recover` reloads options from a file in
+# glab's config dir, which glab-athena makes fresh and empty on every call.
 #
 # Residual (NOT checked; each still runs):
 #   * API writes that move a ref without merging: REST POST
@@ -121,14 +135,13 @@ glmg_refuse() {
 # glmg_parse_cli <args...> : the positional words of a non-api glab command,
 # with the mr-merge flag table. Sets GLMG_POS, GLMG_REPO, GLMG_SHA (and
 # GLMG_SHA_N, how many --sha), GLMG_UNKNOWN (the first flag outside the table,
-# or ""), GLMG_UNKNOWN_AT (how many positional words preceded it) and
-# GLMG_POS0_AT (the 0-based argv index of the first positional word, or "").
+# or "") and GLMG_POS0_AT (the 0-based argv index of the first positional word, or "").
 # There is deliberately no --help short-circuit: pflag lets a later
 # `--help=false` switch help off again, so a merge carrying --help is judged
 # like any other (DND-742 critic finding).
 glmg_parse_cli() {
   local a v i c rest n="$#"
-  GLMG_POS=() GLMG_REPO="" GLMG_SHA="" GLMG_SHA_N=0 GLMG_UNKNOWN="" GLMG_UNKNOWN_AT="" GLMG_POS0_AT=""
+  GLMG_POS=() GLMG_REPO="" GLMG_SHA="" GLMG_SHA_N=0 GLMG_UNKNOWN="" GLMG_POS0_AT=""
   while [ $# -gt 0 ]; do
     a="$1"; shift
     case "$a" in
@@ -162,7 +175,6 @@ glmg_parse_cli() {
         [ -z "$GLMG_POS0_AT" ] && GLMG_POS0_AT=$((n - $# - 1))
         GLMG_POS+=("$a") ;;
     esac
-    [ -n "$GLMG_UNKNOWN" ] && [ -z "$GLMG_UNKNOWN_AT" ] && GLMG_UNKNOWN_AT="${#GLMG_POS[@]}"
   done
   # An explicit status: glab-athena runs under `set -e`, and a loop whose last
   # test was false would otherwise return 1.
@@ -174,6 +186,37 @@ glmg_cli_opt() {
     --repo) GLMG_REPO="$2" ;;
     --sha) GLMG_SHA="$2"; GLMG_SHA_N=$((GLMG_SHA_N+1)) ;;
   esac
+}
+
+# glmg_prepath_flag <args...> : sets GLMG_PREPATH_FLAG to the first flag that
+# comes before the command path is fixed and is not -R/--repo, or "".
+#
+# The path is the first positional word, or the first two when the first is
+# `mr`. Cobra finds it by its own walk (stripFlags), which is not any command's
+# flag table: a two-character `-x` or a `--flag` with no `=` that the level
+# does not know as a boolean takes the next word; every other flag word is
+# dropped alone; `--` ends the walk. So `mr -ym merge 1473` routes to merge
+# (measured, glab 1.112), while the mr-merge table reads `-m` as taking
+# `merge`. Before the path, only -R/--repo parse the same both ways (a value
+# flag at every level, measured): `-R v`, `--repo v`, `-Rv`, `-R=v`,
+# `--repo=v`. Any other flag word there, `--` included, is reported, and
+# glmg_guard refuses it when argv could be a merge.
+glmg_prepath_flag() {
+  local a seen=0 need=1
+  GLMG_PREPATH_FLAG=""
+  while [ $# -gt 0 ]; do
+    a="$1"; shift
+    case "$a" in
+      -R|--repo) [ $# -gt 0 ] && shift ;;
+      -R?*|--repo=*) ;;
+      -*) GLMG_PREPATH_FLAG="$a"; return 0 ;;
+      *)
+        seen=$((seen+1))
+        [ "$seen" = 1 ] && [ "$a" = mr ] && need=2
+        [ "$seen" -ge "$need" ] && return 0 ;;
+    esac
+  done
+  return 0
 }
 
 # glmg_check_head <shown> <mr json> <pinned sha> <fix> : returns 0 when <pinned
@@ -384,8 +427,22 @@ glmg_api_guard() {
 # glmg_guard <glab args...> : the entry point. Returns 0 or exits 3.
 glmg_guard() {
   local shown="glab $*" w
-  # The command is the first positional word, read with the flag table (so
-  # `-R g/r` before it is skipped with its value).
+  # First, the words before the command path. Only -R/--repo may sit there when
+  # any word could make this a merge: every other flag can make cobra route to
+  # a different command than the flag-table parse below reads (see
+  # glmg_prepath_flag). Raw argv is scanned for the merge words, because the
+  # table parse can itself swallow one (`mr -ym merge`).
+  glmg_prepath_flag "$@"
+  if [ -n "$GLMG_PREPATH_FLAG" ]; then
+    for w in "$@"; do
+      case "$w" in
+        merge|accept|api|mcp)
+          glmg_refuse "$shown" "'$GLMG_PREPATH_FLAG' comes before the subcommand and is not -R/--repo, and a word after it ('$w') could make this a merge; glab's command walk can read that flag differently from $GLMG_TOOL (\`mr -ym merge\` routes to merge), so it cannot tell which command runs" \
+            "put the command first and every flag after it (\`glab-athena mr merge <iid> …\`, \`glab-athena api <endpoint> …\`); to merge, $GLMG_SAFE_PATH" ;;
+      esac
+    done
+  fi
+  # With the path words clear, the flag table reads the same path glab does.
   glmg_parse_cli "$@"
   case "${GLMG_POS[0]:-}" in
     api)
@@ -403,21 +460,20 @@ glmg_guard() {
         "call the glab command you need through the wrapper directly; to merge, $GLMG_SAFE_PATH" ;;
     mr)
       case "${GLMG_POS[1]:-}" in
-        merge|accept) glmg_mr_merge "$shown" "$@" ;;
+        merge|accept) glmg_mr_merge "$shown" "$@"; return 0 ;;
       esac ;;
   esac
-  # A flag outside the table BEFORE the subcommand is fixed (cobra assumes an
-  # unknown flag takes a value, so it may swallow the next word) can make glab
-  # read the command differently than this parse did. If any word could then
-  # be a merge, refuse. A flag after the subcommand cannot change it.
-  if [ -n "$GLMG_UNKNOWN" ] && [ "${GLMG_UNKNOWN_AT:-0}" -lt 2 ]; then
-    for w in "${GLMG_POS[@]}"; do
-      case "$w" in
-        merge|accept|api|mcp)
-          glmg_refuse "$shown" "'$GLMG_UNKNOWN' comes before the subcommand, is a flag $GLMG_TOOL does not know, and a word after it ('$w') could make this a merge; it cannot tell how glab parses them" \
-            "put the command first (\`glab-athena mr merge <iid> …\`, \`glab-athena api <endpoint> …\`) and drop unknown flags; to merge, $GLMG_SAFE_PATH" ;;
-      esac
-    done
-  fi
+  # `--auto-merge` outside `mr merge` schedules a merge nobody pinned: glab
+  # 1.112's `mr create --auto-merge` sets the new MR to merge when its checks
+  # pass. Any word spelling the flag is refused, whatever the subcommand (an
+  # over-read of, say, a note whose text is exactly `--auto-merge` is refused
+  # too, and says why).
+  for w in "$@"; do
+    case "$w" in
+      --auto-merge|--auto-merge=*)
+        glmg_refuse "$shown" "'$w' outside \`mr merge\` sets the MR to merge when its checks pass, on a head nobody pinned or checked (\`glab mr create --auto-merge\`, glab 1.112)" \
+          "drop '$w'; create or update the MR without it, and merge through the guarded path once its pipeline passes: $GLMG_SAFE_PATH" ;;
+    esac
+  done
   return 0
 }

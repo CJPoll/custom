@@ -190,6 +190,49 @@ expect_ran M21 "no selector: the current branch's MR, pinned and green, runs" an
 if [[ "$(reads)" == *"mr view -F json"* ]]; then ok "M21b. the current-branch MR was read"; else bad "M21b. current-branch read" "$(detail)"; fi
 reset_fx; green_fx
 expect_refused M22 "mr merge -R<repo> attached, no --sha, is refused" "no sha was given" mr merge -Ramby_ai/walt_ui 1473
+# A flag cluster before the subcommand whose meaning differs between the
+# guard's flag table and cobra's command walk (critic round 3). Measured, glab
+# 1.112: `glab mr -ym merge x --help` prints mr merge's help, so cobra routes
+# `mr -ym merge 1473` to merge (-ym is dropped from the walk), and merge's pflag
+# parse then reads -y as yes and -m as the message 1473: the current branch's MR
+# merges with no pin. The mr-merge table instead reads `m` as taking `merge`.
+for cl in -ym -sm -dm -rm -hm; do
+  reset_fx; green_fx
+  expect_refused "M25${cl}" "mr ${cl} merge 1473 (a cluster before the subcommand) is refused" "before the subcommand" mr "${cl}" merge 1473
+done
+reset_fx; green_fx
+expect_refused M26 "mr -h merge 1473 --sha <head> (help before the subcommand) is refused" "before the subcommand" mr -h merge 1473 --sha "${HEAD_SHA}" --yes
+reset_fx; green_fx
+expect_refused M27 "-y before mr, then merge, is refused" "before the subcommand" -y mr merge 1473 --sha "${HEAD_SHA}"
+reset_fx; green_fx
+expect_refused M28 "a cluster before mr merge, with a pin, is still refused" "before the subcommand" mr -ym merge 1473 --sha "${HEAD_SHA}"
+# The class, not the listed sites: EVERY short flag, every two-letter cluster of
+# them, and every long flag in the tables, placed before `merge` and before
+# `mr`, must be refused. Only -R/--repo forms may sit there (M29-M31).
+M32_BAD=""
+M32_SHORT="m d s y h r X x"
+M32_WORDS=""
+for a in ${M32_SHORT}; do
+  M32_WORDS+=" -${a}"
+  for b in ${M32_SHORT} R; do M32_WORDS+=" -${a}${b}"; done
+done
+M32_WORDS+=" --message --sha --squash-message --auto-merge --when-pipeline-succeeds --rebase --remove-source-branch --squash --yes --help --help=false --sha=x --bogus -- -"
+for w in ${M32_WORDS}; do
+  for shape in pre-merge pre-mr; do
+    reset_fx; green_fx
+    if [ "${shape}" = pre-merge ]; then run mr "${w}" merge 1473 --sha "${HEAD_SHA}" --yes
+    else run "${w}" mr merge 1473 --sha "${HEAD_SHA}" --yes; fi
+    refused || M32_BAD+=" ${shape}:${w}"
+  done
+done
+if [ -z "${M32_BAD}" ]; then ok "M32. every non-repo flag spelling before the subcommand is refused ($(wc -w <<<"${M32_WORDS}") spellings x 2 shapes)"
+else bad "M32. flag spellings before the subcommand that were not refused" "${M32_BAD}"; fi
+reset_fx; green_fx
+expect_ran M29 "--repo <repo> before the subcommand, pinned and green, runs" any --repo amby_ai/walt_ui mr merge 1473 --sha "${HEAD_SHA}" --yes
+reset_fx; green_fx
+expect_ran M30 "mr --repo=<repo> merge, pinned and green, runs" any mr --repo=amby_ai/walt_ui merge 1473 --sha "${HEAD_SHA}" --yes
+reset_fx; green_fx
+expect_ran M31 "mr -R<repo> merge (attached), pinned and green, runs" any mr -Ramby_ai/walt_ui merge 1473 --sha "${HEAD_SHA}" --yes
 
 echo
 echo "--- api: the REST merge route is refused outright ---"
@@ -230,7 +273,7 @@ expect_refused A16 "--repo=<repo> before api" "is not the first word" --repo=amb
 reset_fx
 expect_refused A17 "-X PUT before api" "PUT" -X PUT api "projects/1/merge_requests/2/merge"
 reset_fx
-expect_refused A18 "-- before api" "is not the first word" -- api -X PUT "projects/1/merge_requests/2/merge"
+expect_refused A18 "-- before api" "REFUSING" -- api -X PUT "projects/1/merge_requests/2/merge"
 reset_fx
 expect_refused A19 "-R <repo> before api, train boarding with no pin" "is not the first word" -R amby_ai/walt_ui api -X POST "projects/:id/merge_trains/merge_requests/1473"
 reset_fx
@@ -338,6 +381,16 @@ echo
 echo "--- other merge paths ---"
 reset_fx
 expect_refused C1 "mcp serve (its tools can merge) is refused" "mcp" mcp serve
+# `glab mr create --auto-merge` (glab 1.112: "Set the merge request to merge when
+# all merge checks pass") schedules a merge of a head nobody pinned or checked.
+reset_fx
+expect_refused C2 "mr create --auto-merge is refused" "--auto-merge" mr create --fill --auto-merge --yes
+reset_fx
+expect_refused C3 "mr new (create's alias) --auto-merge=true is refused" "--auto-merge" mr new --fill --auto-merge=true --yes
+reset_fx
+expect_refused C4 "mr -R <repo> create --auto-merge is refused" "--auto-merge" mr -R amby_ai/walt_ui create --fill --auto-merge
+reset_fx
+expect_refused C5 "--auto-merge on another subcommand is refused" "--auto-merge" mr update 1473 --auto-merge
 
 echo
 echo "--- negatives: reads and non-merge writes pass as-is, with no extra reads ---"
