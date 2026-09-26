@@ -334,6 +334,13 @@ case_cmd "R22. filter-branch -- --all" deny 'git filter-branch --tree-filter tru
 case_cmd "R23. reflog expire via a git alias with args" deny 'git rx stash'
 case_cmd "R24. reflog expire with an expanded ref" deny 'git reflog expire --expire=now $REF'
 case_cmd "R25. reflog delete through an unknown global option" deny "git --some-future-opt v reflog delete 'stash@{0}'"
+case_cmd "R35. push . --delete stash (short name)" deny 'git push . --delete stash'
+case_cmd "R36. push . --delete refs/stash" deny 'git push . --delete refs/stash'
+case_cmd "R37. push . :stash (delete refspec)" deny 'git push . :stash'
+case_cmd "R38. push . +HEAD:stash (overwrite refspec)" deny 'git push . +HEAD:stash'
+case_cmd "R39. push --mirror" deny 'git push --mirror .'
+case_cmd "R40. fetch into the short stash name" deny 'git fetch . +HEAD:stash'
+case_cmd "R41. fetch with a bare * glob refspec" deny "git fetch . '+*:*'"
 case_cmd "R26. reflog show stash (read)" allow 'git reflog show stash'
 case_cmd "R27. reflog (bare, read)" allow 'git reflog -5'
 case_cmd "R28. reflog expire a branch" allow 'git reflog expire --expire=now refs/heads/tmp'

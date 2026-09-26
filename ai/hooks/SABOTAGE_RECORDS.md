@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 175 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c and R7-R34).
+- **Baseline:** `RESULT: 182 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c and R7-R41).
 
 ### Fail-first (no guard)
 
@@ -485,3 +485,29 @@ RESULT: 153 passed, 22 failed
 ```
 
 After the fix: `RESULT: 175 passed, 0 failed`.
+
+### Fix round, critic round 2 (0fdfca3): a push that deletes the stash ref
+
+The critic found `git push . --delete stash`, `git push . :stash` and
+`git push . --delete refs/stash` allowed. The fetch/push branch of `plumb()`
+read only words containing `:`, and compared the destination literally with
+`refs/stash` instead of using `is_stash_ref`. Verified in a scratch repo (git
+2.55): a push to the repo itself with `--delete stash` or `:stash` empties the
+stash list; `+HEAD:stash` is refused by git as a "funny ref". Fixed: every
+refspec destination goes through `is_stash_ref` (or a `refs/*` / `*` glob),
+and for push a bare stash ref word or `--mirror` also counts. Class-closed
+assertion: `grep -n '"refs/stash"' ai/hooks/git-stash-guard.sh` hits only
+inside `is_stash_ref`. The new cases against 0fdfca3's hook:
+
+```
+FAIL  R35. push . --delete stash (short name) (expected deny)
+FAIL  R36. push . --delete refs/stash (expected deny)
+FAIL  R37. push . :stash (delete refspec) (expected deny)
+FAIL  R38. push . +HEAD:stash (overwrite refspec) (expected deny)
+FAIL  R39. push --mirror (expected deny)
+FAIL  R40. fetch into the short stash name (expected deny)
+FAIL  R41. fetch with a bare * glob refspec (expected deny)
+RESULT: 175 passed, 7 failed
+```
+
+After the fix: `RESULT: 182 passed, 0 failed`.

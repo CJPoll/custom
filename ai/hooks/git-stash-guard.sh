@@ -27,7 +27,8 @@
 # block): `reflog delete|expire|drop` naming the stash ref in ANY spelling
 # (`stash`, `stash@{N}`, `refs/stash`, `refs/stash@{N}`) or given `--all`;
 # `update-ref` / `symbolic-ref` on the stash ref, with `--stdin`, or with no
-# literal ref (xargs-fed); a fetch/push refspec into refs/stash or refs/*;
+# literal ref (xargs-fed); a fetch/push refspec into the stash ref (either
+# spelling) or refs/*; a push naming the stash ref or --mirror;
 # filter-branch/filter-repo `--all`; setting gc.reflogExpire*; and a file
 # write (rm, mv, cp, a redirect, ...) naming refs/stash.
 #
@@ -91,7 +92,7 @@
 # conflict and is used by the shipwright (out of scope, proposed separately);
 # reflog expiry by `git gc` / `git maintenance` / auto-gc under the EXISTING
 # expiry config (default 90 days; any git command can trigger auto-gc);
-# `git push --mirror` / `fetch --mirror` into this same repo; a ref-rewriting
+# `fetch --mirror` into this same repo; a ref-rewriting
 # tool other than git (a script writing .git/ files by a computed path); git arguments supplied through a pipe
 # (`printf 'stash pop' | xargs git`); an alias defined in a file the command
 # only names (`git -c include.path=<file>`, a `.gitconfig` written with the
@@ -288,8 +289,10 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
   # spelling (`stash`, `stash@{N}`, `refs/stash`, `refs/stash@{N}`), `--all`,
   # `update-ref --stdin` (a batch this hook cannot read), an argument built by
   # expansion, or NO ref argument at all (refs supplied by xargs or a pipe)
-  # all count. fetch/push: a refspec whose destination is refs/stash or a
-  # `refs/*` glob. filter-branch/filter-repo: `--all` (it rewrites every ref).
+  # all count. fetch/push: a refspec whose destination is the stash ref in
+  # either spelling or a `refs/*` / `*` glob; for push also a bare stash ref
+  # word (`--delete stash`) and `--mirror`. filter-branch/filter-repo:
+  # `--all` (it rewrites every ref).
   function plumb(sc, w, n, j,    k, t, start, nargs, dst) {
     if (sc == "reflog") {
       if (j + 1 > n || w[j + 1] !~ /^(delete|expire|drop)$/) return ""
@@ -297,10 +300,18 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
     } else if (sc == "update-ref" || sc == "symbolic-ref") {
       start = j + 1
     } else if (sc == "fetch" || sc == "push") {
+      # A refspec destination (after the last `:`) that is the stash ref in
+      # either spelling, or a whole-namespace glob. A push also resolves a
+      # bare ref word against the target repo (`push . --delete stash`,
+      # `push . stash` both reach refs/stash), and `--mirror` rewrites every
+      # ref, so for push any stash word or --mirror counts.
       for (k = j + 1; k <= n; k++) {
-        if (w[k] !~ /:/) continue
-        dst = w[k]; sub(/^.*:/, "", dst); dst = refpart(dst)
-        if (dst == "refs/stash" || dst ~ /^refs\/\*$/) return "refwrite"
+        if (sc == "push" && w[k] == "--mirror") return "refwrite"
+        if (w[k] ~ /^-/) continue
+        if (w[k] ~ /:/) {
+          dst = w[k]; sub(/^.*:/, "", dst)
+          if (is_stash_ref(dst) || refpart(dst) ~ /^(refs\/)?\*$/) return "refwrite"
+        } else if (sc == "push" && is_stash_ref(w[k])) return "refwrite"
       }
       return ""
     } else if (sc ~ /^filter-(branch|repo)$/) {
@@ -472,7 +483,7 @@ if [ "$AWK_RC" -ne 0 ]; then
 fi
 
 case "$VERDICT" in
-  refwrite) deny 'this runs git plumbing that rewrites or expires the stash ref or its reflog without the stash subcommand: `reflog delete|expire|drop` naming `stash`/`stash@{N}`/`refs/stash` or given `--all`, `update-ref`/`symbolic-ref` on the stash ref (or with `--stdin`, or with refs supplied from elsewhere), a fetch/push refspec whose destination is refs/stash or refs/*, or filter-branch/filter-repo `--all`.' ;;
+  refwrite) deny 'this runs git plumbing that rewrites or expires the stash ref or its reflog without the stash subcommand: `reflog delete|expire|drop` naming `stash`/`stash@{N}`/`refs/stash` or given `--all`, `update-ref`/`symbolic-ref` on the stash ref (or with `--stdin`, or with refs supplied from elsewhere), a fetch/push refspec whose destination is the stash ref (either spelling) or refs/*, a push naming the stash ref (`push . --delete stash`) or `--mirror`, or filter-branch/filter-repo `--all`.' ;;
   stash) deny 'this runs `git stash` with a verb that writes the stash list (bare `git stash`, push/save, pop, apply, drop, clear, store, branch, or an option-first implicit push).' ;;
   shell-alias) deny 'this runs a shell alias loaded into the Bash tool from the owner profile (oh-my-zsh defines `gstp` = `git stash pop`) that expands to a stash write.' ;;
   alias) deny 'this runs a git alias that resolves to a stash write (or a shell alias that mentions stash).' ;;
