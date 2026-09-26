@@ -39,7 +39,10 @@ Always refer to a ticket as `<PREFIX>-<number>`, never by raw page id.
    **DM Cody** as Athena that the ticket needs him (see the Notes "Needs Attention
    DM" rule). This is one of the three owner-notification events; it fires on the
    transition itself and applies to ANY ticket, epic or not.
-4. **→ `Done`** — set `Assignee` = **Cody**.
+4. **→ `Done`** — set `Assignee` = **Cody**. Only after the merge is CONFIRMED
+   (`ai/bin/confirm-merged`) **and** the change is verified live where it runs.
+   If only Cody can do the live check (his login, his machine), move the ticket
+   to `Needs Attention` instead, with the exact check on the body.
 5. **→ `Ready for Release`** (work workspace only) — set `Assignee` = **Cody**.
 6. **`Attention Given` → `In Progress`** — a ticket in `Attention Given` is still
    assigned to **Cody** (search for tickets Cody has answered by that status). Once the
@@ -49,6 +52,31 @@ A scoped ticket is Athena's from the moment it enters scope (`Backlog`→`Todo`�
 `In Progress` are all Athena). It flips to **Cody** only when it moves to a
 waiting-on-Cody state (`Needs Attention`, `Attention Given`, `Done`,
 `Ready for Release`).
+
+## Keep tickets, epics and projects current (owner rule)
+
+Owner, Cody, 2026-09-26: "Yes, please keep projects, epics, and tickets up to
+date." The owner reads Notion to see what is happening. A stale status misleads
+him and raises nothing, so drift is a defect.
+
+- **Tickets** follow the transitions above at the moment they happen. Moving a
+  ticket to `In Progress` is part of dispatching its captain.
+- **Epics.** Set `In Progress` when the first ticket starts. Set `Done` only
+  when every linked ticket, follow-ups included, is `Done` or `Cancelled`. A
+  follow-up filed under a `Done` epic moves the epic back to `In Progress`.
+  On the DND Epics DB, `Status` is a `select`, not a `status`:
+  `{"Status": {"select": {"name": "In Progress"}}}`.
+- **Projects** move with their epics.
+- **Sweep the epic** against its tickets at each epic transition and when you
+  resume. Before you trust an empty filter result, confirm the filter with a
+  query that should match something.
+- **Warn before a burst.** Each edit notifies Cody. Before changing more than
+  about 5 tickets at once, tell him a burst is coming and roughly how many.
+
+Measured 2026-09-26: five epics disagreed with reality. Three read `Todo` while
+being worked, one read `Done` while its follow-ups were built, one read
+`In Progress` with every ticket `Done`. A 45-ticket sweep then surprised the
+owner with a couple dozen notifications.
 
 ## When the tracker lacks a status this skill names
 
