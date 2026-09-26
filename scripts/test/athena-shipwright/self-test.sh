@@ -1212,9 +1212,11 @@ else
   bad "healthy no-op not misread as blocked" "rc=$rc err=$(cat "$a/runner.err")"
 fi
 
-# A signature must never be able to DOWNGRADE a real failure: only status==0
-# can be blocked, so a failing session that happens to mention a rate limit
-# still fails and still feeds the wedge.
+# A signature must never be able to DOWNGRADE a real failure: a session that
+# left its receipt reached the model, so a failing one that happens to mention a
+# rate limit still fails and still feeds the wedge. (Later, DND-833: this used
+# to say "only status==0 can be blocked". A receipt-less non-zero tick with a
+# signature is now BLOCKED; see the DND-833 cases below.)
 r="$(new_repo)"; a="$(aux "$r")"
 stub_claude_probe "$a/stub-claude" 7 'printf "hit the rate limit\n"'
 rc="$(run_runner "$r")"
@@ -1224,6 +1226,153 @@ if [ "$rc" -eq 7 ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" =
 else
   bad "signature cannot downgrade a failure" "rc=$rc counter=$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)"
 fi
+
+# --- a usage limit that exits NON-ZERO (DND-833) ----------------------------
+#
+# `claude -p` exits NON-ZERO on a provider usage limit. Measured on the laptop,
+# 2026-09-23 02:00..07:00: six ticks each logged "You've hit your weekly limit",
+# left no receipt, and were each counted as a wedge FAILURE because the BLOCKED
+# class applied to exit 0 only. The sixth wedged the lane, and every tick since
+# has exited 75 without spawning a session: the loop went dark on a provider
+# outage that cleared by itself the next morning.
+stub_claude_blocked_rc() { # $1 = path, $2 = message, $3 = exit code
+  cat >"$1" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >>"\$(dirname "\$0")/claude-was-invoked"
+printf '%s\n' "$2"
+exit $3
+EOF
+  chmod +x "$1"
+}
+
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked_rc "$a/stub-claude" "You've hit your weekly limit · resets Sep 24, 8am (America/Denver)" 1
+rc="$(run_runner "$r")"
+m="$(cat "$(sd "$r")/runs/"*.blocked 2>/dev/null || true)"
+if [ "$rc" -eq 69 ] && grep -q 'session_exit=1' <<<"$m" \
+   && grep -q 'signature: weekly limit' <<<"$m"; then
+  ok "a receipt-less weekly-limit tick that exits 1 is BLOCKED (exit 69, marker records session_exit=1)"
+else
+  bad "non-zero usage-limit tick is blocked" "rc=$rc marker=$m err=$(cat "$a/runner.err")"
+fi
+if [ ! -e "$(sd "$r")/consecutive-failures" ] \
+   && [ "$(cat "$(sd "$r")/consecutive-blocked" 2>/dev/null)" = "1" ]; then
+  ok "and it feeds the blocked streak, never the wedge counter"
+else
+  bad "non-zero usage limit does not feed the wedge" \
+      "failures='$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)' blocked='$(cat "$(sd "$r")/consecutive-blocked" 2>/dev/null)'"
+fi
+
+# The laptop's exact shape, end to end: six non-zero usage-limit ticks against a
+# threshold of 3 must never wedge, and must spawn a session every tick.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked_rc "$a/stub-claude" "You've hit your weekly limit · resets Sep 24, 8am (America/Denver)" 1
+codes=""
+for _ in 1 2 3 4 5 6; do codes="${codes}$(run_runner "$r" SHIPWRIGHT_FAIL_ESCALATE=3) "; done
+n="$(wc -l <"$a/claude-was-invoked" 2>/dev/null | tr -d ' ')"
+if [ "$codes" = "69 69 69 69 69 69 " ] && [ "$n" = "6" ] \
+   && [ ! -e "$(sd "$r")/consecutive-failures" ]; then
+  ok "six non-zero usage-limit ticks: all 69, six sessions, lane never wedged (the 2026-09-23 shape)"
+else
+  bad "non-zero usage limit never wedges" "codes='${codes% }' spawns=$n counter='$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)'"
+fi
+
+# The signature must not downgrade a failure that REACHED the model: a receipt
+# is present, so the session ran and failed. (The receipt, not the signature, is
+# still the detector.) Covered above for exit 7; this pins the usage-limit text.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_probe "$a/stub-claude" 1 "printf \"You've hit your weekly limit\\n\""
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 1 ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "1" ] \
+   && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1; then
+  ok "a session that left its receipt and then hit a limit stays a FAILURE (it reached the model)"
+else
+  bad "receipt + limit text stays a failure" "rc=$rc counter=$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)"
+fi
+
+# A receipt-less non-zero tick with NO known signature is still a failure (a
+# missing binary or a crash must still wedge), but it must say so: it never
+# reported for duty, nothing matched, and here is the record.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked_rc "$a/stub-claude" "Segmentation fault (core dumped)" 139
+rc="$(run_runner "$r")"
+f="$(cat "$(sd "$r")/runs/"*.failed 2>/dev/null || true)"
+if [ "$rc" -eq 139 ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "1" ] \
+   && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1 \
+   && grep -q 'never reported for duty' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err" \
+   && grep -q 'classification=failure' <<<"$f" && grep -q 'session_exit=139' <<<"$f"; then
+  ok "a receipt-less non-zero tick with no signature stays a failure, loudly, with a .failed record"
+else
+  bad "unsigned receipt-less failure is loud" "rc=$rc record=$f err=$(cat "$a/runner.err")"
+fi
+
+# An EMPTY log is its own case: the session printed nothing at all. It must not
+# read like a crash that printed something, nor like a usage limit.
+r="$(new_repo)"; a="$(aux "$r")"
+cat >"$a/stub-claude" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >>"$(dirname "$0")/claude-was-invoked"
+exit 1
+EOF
+chmod +x "$a/stub-claude"
+rc="$(run_runner "$r")"
+f="$(cat "$(sd "$r")/runs/"*.failed 2>/dev/null || true)"
+if [ "$rc" -eq 1 ] && grep -q 'session_output=empty' <<<"$f" \
+   && grep -q 'printed NOTHING' "$a/runner.err"; then
+  ok "a receipt-less failure with an EMPTY log says the session printed nothing (distinct from a limit)"
+else
+  bad "empty-log failure is named" "rc=$rc record=$f err=$(cat "$a/runner.err")"
+fi
+
+# --- only the SESSION's output is classified (DND-739, required by DND-833) -
+#
+# Teardown appends git's output to the same log after the session ends
+# ("Deleted branch shipwright/<run-id> (was <sha>)"). Classifying the whole log
+# let teardown text decide the class. After DND-833 the signature decides
+# wedge-vs-blocked on a non-zero exit, so a false match there would turn a real
+# failure into a lane that never wedges. The run id is chosen so teardown prints
+# a block signature ("quota") the session never said.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked_rc "$a/stub-claude" "Segmentation fault (core dumped)" 139
+rc="$(run_runner "$r" SHIPWRIGHT_RUN_ID=run-quota-4290)"
+if [ "$rc" -eq 139 ] && [ "$(cat "$(sd "$r")/consecutive-failures" 2>/dev/null)" = "1" ] \
+   && ! ls "$(sd "$r")/runs/"*.blocked >/dev/null 2>&1; then
+  ok "a signature that appears only in TEARDOWN output cannot turn a failure into BLOCKED"
+else
+  bad "teardown text does not classify" "rc=$rc runs=$(ls "$(sd "$r")/runs/" 2>&1) err=$(cat "$a/runner.err")"
+fi
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked "$a/stub-claude" "Zorptastic overcapacity glorp"
+rc="$(run_runner "$r" SHIPWRIGHT_RUN_ID=run-quota-4291)"
+m="$(cat "$(sd "$r")/runs/"*.blocked 2>/dev/null || true)"
+if [ "$rc" -eq 69 ] && grep -q 'classification=UNCLASSIFIED' <<<"$m"; then
+  ok "and teardown text cannot CLASSIFY an exit-0 blocked tick either (stays UNCLASSIFIED)"
+else
+  bad "teardown text does not classify exit-0" "rc=$rc marker=$m"
+fi
+
+# `429` means an HTTP status. As a bare substring it matches pids, paths and
+# SHAs the session prints. Fail-first case from DND-739.
+r="$(new_repo)"; a="$(aux "$r")"
+stub_claude_blocked "$a/stub-claude" "worker pid 14290 exited; see /tmp/cache.429/a429bc"
+rc="$(run_runner "$r")"
+m="$(cat "$(sd "$r")/runs/"*.blocked 2>/dev/null || true)"
+if [ "$rc" -eq 69 ] && grep -q 'classification=UNCLASSIFIED' <<<"$m"; then
+  ok "a 429 inside a pid, path or SHA is NOT a rate-limit signature"
+else
+  bad "429 is anchored" "rc=$rc marker=$m"
+fi
+for msg in 'API Error: 429 {"type":"error"}' 'HTTP 429' 'upstream returned status 429'; do
+  r="$(new_repo)"; a="$(aux "$r")"
+  stub_claude_blocked_rc "$a/stub-claude" "$msg" 1
+  rc="$(run_runner "$r")"
+  m="$(cat "$(sd "$r")/runs/"*.blocked 2>/dev/null || true)"
+  if [ "$rc" -eq 69 ] && grep -q 'classification=blocked' <<<"$m"; then
+    ok "a real HTTP 429 is still a block signature ('$msg')"
+  else
+    bad "HTTP 429 still matches ('$msg')" "rc=$rc marker=$m"
+  fi
+done
 
 # --- receipt RETENTION ------------------------------------------------------
 #
