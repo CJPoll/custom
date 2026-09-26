@@ -168,6 +168,16 @@ if mode == "install":
         cmd = absscript(e["script"])
         if has(e["event"], cmd):
             continue
+        # Never wire a script the MAIN checkout does not have. Run from a
+        # worktree whose branch adds a hook, the registry names a script that
+        # exists only on the branch; wiring it at the main checkout's path
+        # makes every event it matches fail with exit 127 until the branch
+        # lands, and forever if it never does (DND-670, DND-743). Wire it after
+        # it lands. check-hooks-registered treats such a hook as pending.
+        if not os.path.isfile(cmd):
+            print(f'~ {e["event"]:13} {e["matcher"]!r} -> {e["script"]}: skipped, not in the main '
+                  f'checkout ({repo}) yet. Land it, then re-run setup-hooks --install there.')
+            continue
         changes.append(f'+ {e["event"]:13} {e["matcher"]!r} -> {e["script"]}')
         hooks.setdefault(e["event"], []).append(
             {"matcher": e["matcher"], "hooks": [{"type": "command", "command": cmd}]}
@@ -289,9 +299,17 @@ PY2
     grep -q "MARKER:nochange" <<<"$rg" \
       && echo "  ok   a symlink-spelled hook whose file is absent is still seen as wired" \
       || { echo "  FAIL an absent hook file must not make install duplicate the wiring"; ok=0; }
-    HOOKS_REGISTRY_FILE="$ghostreg" HOOKS_SETTINGS_FILE="$ghost" "$CHECKER" >/dev/null 2>&1 \
-      && echo "  ok   the checker agrees on an absent hook file" \
-      || { echo "  FAIL setup-hooks and check-hooks-registered must agree on an absent file"; ok=0; }
+    # The checker resolves the same symlink spelling to the main checkout's
+    # ai/hooks/ and, since DND-743, names a wired hook whose file is absent as
+    # DANGLING (it fails with exit 127 on every event), so it must fail and say
+    # so. Seeing it as "not ours" would let the dangling wiring pass silently.
+    ghost_out="$(HOOKS_REGISTRY_FILE="$ghostreg" HOOKS_SETTINGS_FILE="$ghost" "$CHECKER" 2>&1)" \
+      && { echo "  FAIL the checker must fail a wired hook whose file is absent (dangling)"; ok=0; } \
+      || if grep -q "definitely-not-on-disk.sh: does not exist" <<<"$ghost_out"; then
+           echo "  ok   the checker resolves the symlink spelling and flags the absent hook as dangling"
+         else
+           echo "  FAIL the checker did not name the absent wired hook as dangling: $ghost_out"; ok=0
+         fi
     # The two norm()s must agree on the input class that SEPARATES them, not
     # only on the absolute paths the installer happens to write. A `.`-headed
     # relative command is that class: one implementation returned the literal
