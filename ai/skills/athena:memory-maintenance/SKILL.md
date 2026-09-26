@@ -99,6 +99,15 @@ fills. Measured: DND-241 saw it truncated at 25.8KB; DND-774 and DND-761
 (2026-09-26) each flagged it near the limit; it was 25366 bytes when the
 shipwright compacted it that day.
 
+**Later (2026-09-26):** this section named one limit, bytes. Superseded: the
+loader also cuts at **200 lines**, whichever comes first, and says so only in
+the session's own context ("MEMORY.md is 203 lines (limit: 200). Only part of
+it was loaded: 3 of 203 lines were cut off"). Measured at the 18:00Z shipwright
+run: 203 lines at only 23168 bytes, under the byte limit and still truncated.
+So compact when EITHER passes its threshold: ~22KB or ~190 lines. Line count is
+cut by merging related lines (same rule as below: one line, every file linked);
+trimming descriptions only cuts bytes.
+
 **Who compacts it:** the shipwright, on its cadence, when the file passes
 ~22KB. It is the reviewer this skill names, so it proposes and applies in one
 pass. Any other session that finds the file over the limit reports it rather
