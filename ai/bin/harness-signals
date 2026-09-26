@@ -27,6 +27,9 @@
 
 require "json"
 require "time"
+require "tmpdir"
+require "open3"
+require "rbconfig"
 
 AI_DIR       = File.expand_path("..", __dir__)
 DEFAULT_FILE = File.join(AI_DIR, "telemetry", "metrics.json")
@@ -129,9 +132,29 @@ rescue StandardError
   nil
 end
 
-def run(argv)
-  json = argv.include?("--json")
-  path = (i = argv.index("--file")) ? argv[i + 1] : DEFAULT_FILE
+require_relative "../lib/strict_argv"
+
+# Every argument must be a declared flag (DND-526). The old lookup read only
+# the flags it knew, so `--fiel x` silently read the default telemetry and a
+# valueless `--file` read the path "" (reported as "no telemetry", exit 0).
+CLI_SPEC = { "--self-test" => :switch, "--json" => :switch, "--file" => :value }.freeze
+
+# -> [opts, nil] on success, [nil, reason] on a usage error.
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  if opts["--self-test"] && opts.size > 1
+    return [nil, "--self-test takes no other flag (got #{(opts.keys - ['--self-test']).join(', ')})"]
+  end
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+# opts: the Hash parse_cli returned.
+def run(opts)
+  json = opts.fetch("--json", false)
+  path = opts.fetch("--file", DEFAULT_FILE)
   m = load_metrics(path)
   if m.nil?
     warn "harness-signals: no telemetry at #{path}"
@@ -210,6 +233,32 @@ def run_self_test
       kinds.call(cold).none? { |k| k == "telemetry_stale" },
   }
   checks.each { |n, pass| (warn "self-test: FAIL — #{n}"; ok = false) unless pass }
+
+  # argv (DND-526): every argument must be a declared flag. Black-box through
+  # the real CLI: without --self-test the old parser only READ a file, so these
+  # are side-effect-free either way. A missing --file target keeps them off the
+  # real telemetry.
+  absent = File.join(Dir.tmpdir, "harness-signals-selftest-absent-#{Process.pid}.json")
+  [[["--fiel", absent], "--fiel"], [["--file", absent, "--jsn"], "--jsn"],
+   [["--json", "--file"], "--file"], [["--file", absent, "--file", absent], "--file"],
+   [["--file", absent, "stray"], "stray"], [["--file=#{absent}"], "--file="]].each do |args, named|
+    out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path(__FILE__), *args, stdin_data: "")
+    next if st.exitstatus == 2 && err.include?(named) && err.include?("Fix:") && out.empty?
+
+    warn "self-test: FAIL — `harness-signals #{args.join(' ')}` must exit 2 naming #{named} with a Fix: " \
+         "and print nothing on stdout (got exit #{st.exitstatus}, stderr #{err[0, 120].inspect})"
+    ok = false
+  end
+  _o, reason = parse_cli(%w[--self-test --json])
+  unless reason.to_s.include?("--self-test")
+    warn "self-test: FAIL — --self-test with another flag must be a usage error, got #{reason.inspect}"
+    ok = false
+  end
+  o, reason = parse_cli(["--json", "--file", absent])
+  unless reason.nil? && o["--json"] && o["--file"] == absent
+    warn "self-test: FAIL — `--json --file PATH` must parse, got #{reason.inspect}"
+    ok = false
+  end
   if ok
     puts "harness-signals: self-test OK"
     0
@@ -235,4 +284,12 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   TXT
   exit 0
 end
-exit(ARGV.include?("--self-test") ? run_self_test : run(ARGV))
+cli, reason = parse_cli(ARGV)
+if reason
+  warn "harness-signals: usage error — #{reason}."
+  warn "  Fix: re-run with only the flags `ai/bin/harness-signals --help` lists " \
+       "(--file PATH, --json, or --self-test alone). An unrecognised argument is " \
+       "refused, not ignored: ignoring it would read a different metrics file."
+  exit 2
+end
+exit(cli["--self-test"] ? run_self_test : run(cli))

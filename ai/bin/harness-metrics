@@ -367,18 +367,42 @@ def print_human(r)
   puts "  top tools: #{top.map { |k, v| "#{k}=#{v}" }.join(', ')}" unless top.empty?
 end
 
-def run(argv)
-  json_out = argv.include?("--json")
-  dir = (i = argv.index("--dir")) ? argv[i + 1] : DEFAULT_DIR
-  session = (i = argv.index("--session")) ? argv[i + 1] : nil
+require_relative "../lib/strict_argv"
+
+# Every argument must be a declared flag (DND-526). The old lookup read only
+# the flags it knew, so `--sessoin x` reported on EVERY session under the
+# default root and wrote ai/telemetry/metrics.json from it.
+CLI_SPEC = { "--self-test" => :switch, "--json" => :switch, "--dir" => :value,
+             "--session" => :value, "--since" => :value }.freeze
+
+# -> [opts, nil] on success, [nil, reason] on a usage error.
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  if opts["--self-test"] && opts.size > 1
+    return [nil, "--self-test takes no other flag (got #{(opts.keys - ['--self-test']).join(', ')})"]
+  end
+  if opts.key?("--session") && opts.key?("--dir")
+    return [nil, "--session reads one file, so --dir would be ignored; pass one"]
+  end
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+# opts: the Hash parse_cli returned.
+def run(opts)
+  json_out = opts.fetch("--json", false)
+  dir = opts.fetch("--dir", DEFAULT_DIR)
+  session = opts["--session"]
   # Resolving the window is its own step with its own outcome: an unparseable
   # --since is an ERROR, never a silently-default window (which would report a
   # recency the caller did not ask for).
   cutoff = Time.now.utc - RECENT_WINDOW_S
-  if (i = argv.index("--since"))
-    cutoff = parse_ts(argv[i + 1])
+  if (since = opts["--since"])
+    cutoff = parse_ts(since)
     if cutoff.nil?
-      warn "harness-metrics: --since #{argv[i + 1].inspect} is not an ISO8601 timestamp"
+      warn "harness-metrics: --since #{since.inspect} is not an ISO8601 timestamp"
       warn "  Fix: pass e.g. --since 2026-09-20T08:00:00Z, or omit --since for the " \
            "default #{RECENT_WINDOW_S / 3600}h window."
       return 1
@@ -601,6 +625,26 @@ def run_self_test
       ok = false
     end
   end
+
+  # argv (DND-526): every argument must be a declared flag. In-process only:
+  # on the old parser any of these ran the default, which WRITES
+  # ai/telemetry/metrics.json.
+  { %w[--sessoin x] => "--sessoin", %w[--jsn] => "--jsn", %w[stray] => "stray",
+    %w[--dir] => "--dir", %w[--session] => "--session", %w[--since] => "--since",
+    %w[--dir --json] => "--dir", %w[--session=x] => "--session=",
+    %w[--dir a --dir b] => "--dir", %w[--session s --dir d] => "--dir",
+    %w[--self-test --json] => "--self-test" }.each do |args, named|
+    _o, reason = parse_cli(args)
+    next if reason.to_s.include?(named)
+
+    warn "self-test: FAIL — parse_cli(#{args.inspect}) must be a usage error naming #{named}, got #{reason.inspect}"
+    ok = false
+  end
+  o, reason = parse_cli(%w[--json --since 2026-09-20T08:00:00Z --dir d])
+  unless reason.nil? && o["--json"] && o["--since"] == "2026-09-20T08:00:00Z" && o["--dir"] == "d"
+    warn "self-test: FAIL — `--json --since WHEN --dir PATH` must parse, got #{reason.inspect}"
+    ok = false
+  end
   if ok
     puts "harness-metrics: self-test OK"
     0
@@ -628,4 +672,13 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   TXT
   exit 0
 end
-exit(ARGV.include?("--self-test") ? run_self_test : run(ARGV))
+cli, reason = parse_cli(ARGV)
+if reason
+  warn "harness-metrics: usage error — #{reason}."
+  warn "  Fix: re-run with only the flags `ai/bin/harness-metrics --help` lists, each " \
+       "value flag followed by its value (e.g. `--since 2026-09-20T08:00:00Z`). An " \
+       "unrecognised argument is refused, not ignored: ignoring it would report on a " \
+       "different set of sessions and write ai/telemetry/metrics.json from it."
+  exit 2
+end
+exit(cli["--self-test"] ? run_self_test : run(cli))
