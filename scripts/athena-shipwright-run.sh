@@ -793,8 +793,30 @@ fi
 # <sha>)") to the same file, and that text must never classify the tick: the run
 # id and SHA are arbitrary, and after DND-833 a signature decides wedge-vs-
 # blocked on a non-zero exit. Everything past these bytes is the runner's own.
-session_bytes="$(wc -c <"${log}" 2>/dev/null | tr -d ' ')"
+#
+# The log's STATE is taken here too, not in section 8: teardown's `>>"${log}"`
+# re-creates a log the session deleted, so a later look would read git's
+# chatter as the session's output. Every command below must survive a missing
+# log under `set -euo pipefail`. A bare `x="$(wc -c <"${log}" | ...)"` does not:
+# the failed redirect fails the pipeline, errexit kills the runner on the spot,
+# and the tick ends with no teardown, no counter and no record (DND-833 critic
+# round 1). Hence the `|| true` inside the substitution.
+if [ ! -e "${log}" ]; then
+  session_output="missing"
+elif [ ! -r "${log}" ]; then
+  session_output="unreadable"
+else
+  session_output=""
+fi
+session_bytes="$( { wc -c <"${log}"; } 2>/dev/null | tr -d ' ' || true)"
 case "${session_bytes}" in ''|*[!0-9]*) session_bytes=0 ;; esac
+if [ -z "${session_output}" ]; then
+  if [ "${session_bytes}" -eq 0 ]; then
+    session_output="empty"
+  else
+    session_output="${session_bytes} bytes"
+  fi
+fi
 
 # --- 7. teardown: publish on success, then always remove the lane ------------
 #
@@ -890,6 +912,7 @@ if [ "${blocked}" -eq 1 ]; then
     echo "athena-shipwright: run ${ts} did NO retrospective work — the session never reported for duty."
     echo "receipt=${RECEIPT} (absent)"
     echo "session_exit=${status}"
+    echo "session_output=${session_output}"
     echo "consecutive_blocked=${streak}"
     if [ -n "${block_sig}" ]; then
       echo "classification=blocked (signature: ${block_sig})"
@@ -933,19 +956,13 @@ fi
 # Growth is one empty file per tick, beside the one log file per tick that
 # `runs/` already accumulates. Do not "tidy" these away while keeping the logs:
 # that re-creates precisely the blind spot described above.
+
 # A receipt-less, commit-less tick that exited non-zero with NO known signature
 # (DND-833). It is a wedge failure, but it is not an ordinary one: the session
 # never reached the model, and whether it printed nothing, printed a reworded
 # limit message, or crashed are three different faults. Say which, in a record
 # that survives when cron mail does not.
 if [ "${unreported}" -eq 1 ]; then
-  if [ ! -r "${log}" ]; then
-    session_output="unreadable"
-  elif [ "${session_bytes}" -eq 0 ]; then
-    session_output="empty"
-  else
-    session_output="${session_bytes} bytes"
-  fi
   failed="${LOG_DIR}/${ts}.failed"
   {
     echo "athena-shipwright: run ${ts} exited ${status} and never reported for duty (no receipt, no commits)."
@@ -957,6 +974,8 @@ if [ "${unreported}" -eq 1 ]; then
   } >"${failed}"
   if [ "${session_output}" = "empty" ]; then
     echo "athena-shipwright: run ${ts} session exited ${status}, printed NOTHING, and never reported for duty. Counted as an unsuccessful outcome. Record: ${failed}" >&2
+  elif [ "${session_output}" = "missing" ] || [ "${session_output}" = "unreadable" ]; then
+    echo "athena-shipwright: run ${ts} session exited ${status} and never reported for duty; its log was ${session_output} when it exited, so there was nothing to classify (anything now in ${log} is teardown's). Counted as an unsuccessful outcome. Record: ${failed}" >&2
   else
     echo "athena-shipwright: run ${ts} session exited ${status} and never reported for duty; its output (${session_output}) matched NO known block signature. Counted as an unsuccessful outcome. Record: ${failed}" >&2
   fi
