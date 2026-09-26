@@ -269,8 +269,9 @@ ROUTED_REACHABLE_JQ='.reachable as $r | if $r == true then "true" elif $r == fal
 # routed_default_path <address> <registration> <bearer> <session> <reachable> <locality>
 #   address       maildir | server
 #   registration  registered | unregistered | broken
-#   bearer        set | unset
-#   session       declared | missing | invalid  (this project's session inbox)
+#   bearer        set | unset  (the inbox client's machine token is usable on
+#                              this machine, or not; DND-839: never an env var)
+#   session      declared | missing | invalid  (this project's session inbox)
 #   reachable     unasked | true | false | unknown | unavailable
 #   locality      unasked | same | other | unproven
 # Prints "<path>\t<reason>" and returns 0, where <path> is one of:
@@ -306,7 +307,7 @@ routed_default_path() {
       return 0 ;;
   esac
   if [ "${bearer}" = "unset" ]; then
-    printf 'refuse\tthe recipient was addressed on the server, but ATHENA_MCP_BEARER is not set in this session, so the athena MCP cannot be asked or used\n'
+    printf 'refuse\tthe recipient was addressed on the server, but this machine has no usable machine token in its inbox client config, so the athena MCP cannot be asked or used\n'
     return 0
   fi
   if [ "${session}" != "declared" ]; then
@@ -337,7 +338,7 @@ routed_default_path() {
 # two explicit choices, because the sender knows where the recipient is and
 # this client cannot.
 routed_default_refusal_fix() {
-  printf '%s\n' "choose the path yourself. If the recipient is on ANOTHER machine: send-mail --routed ... (the server holds the delivery pending until the recipient acks; register the MCP with scripts/add-athena-mcp and launch through scripts/athena if either is missing). If it is on THIS machine: send-mail --local <maildir-channel> <slug> --to <identity>. Run inbox-doctor to see both paths' health."
+  printf '%s\n' "choose the path yourself. If the recipient is on ANOTHER machine: send-mail --routed ... (the server holds the delivery pending until the recipient acks; register the MCP with scripts/add-athena-mcp and set up the inbox client's machine token if either is missing). If it is on THIS machine: send-mail --local <maildir-channel> <slug> --to <identity>. Run inbox-doctor to see both paths' health."
 }
 
 # routed_path_line <path> <reason> -- the one stdout line that says which path

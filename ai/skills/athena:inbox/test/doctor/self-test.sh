@@ -889,8 +889,12 @@ SPCOMMON="$(cd "${SPROJ_D}" && realpath "$(git rev-parse --git-common-dir)")"; S
 SPENTRY="$(jq -n -c --arg r "${SPCOMMON}" '{v:1, repo:$r, channels:{
   session:{kind:"log", path:"proj-session.jsonl", producer:"platform", stale_after_s:0},
   "peer-mail":{kind:"maildir", namespace:"agent-mail/peer", read:"to-proj", write:"to-peer", identity:"proj"}}}')"
-sp_run() { # sp_run <reachable> [bearer]  -> the send-paths finding(s); bearer defaults to a fixture
-  ( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE="$1" ATHENA_MCP_BEARER="${2-fixture-bearer}" doctor_check_send_paths "${SPENTRY}" "." )
+# The machine token send-paths grades lives in the inbox client config (DND-839):
+# a fixture with a token, one without, and an absent path.
+SP_TOK="${SP}/client-token.json"; printf '{"token":"fixture-bearer"}' > "${SP_TOK}"; chmod 600 "${SP_TOK}"
+SP_NOTOK="${SP}/client-notoken.json"; printf '{"server_url":"wss://x.test/ws"}' > "${SP_NOTOK}"; chmod 600 "${SP_NOTOK}"
+sp_run() { # sp_run <reachable> [client-config]  -> the send-paths finding(s); config defaults to the token fixture
+  ( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE="$1" ATHENA_INBOX_CLIENT_CONFIG="${2-${SP_TOK}}" doctor_check_send_paths "${SPENTRY}" "." )
 }
 rm -f "${SP}/home/.claude.json"
 RO="$(sp_run true)"
@@ -905,12 +909,20 @@ RO="$(sp_run true)"
 assert_eq "send-paths: registered + session + reachable -> ok" ok "$(state_of "${RO}" send-paths)"
 assert_contains "... says a server-addressed send ROUTES" "server-addressed send ROUTES" "${RO}"
 assert_contains "... names the registration it found" "athena MCP registered for this project" "${RO}"
-RO="$(sp_run true "")"
-assert_eq "send-paths: ready but ATHENA_MCP_BEARER unset -> warn, never ok (send-mail would refuse)" warn "$(state_of "${RO}" send-paths)"
-assert_contains "... names the missing bearer" "ATHENA_MCP_BEARER unset in this shell" "${RO}"
+RO="$(sp_run true "${SP}/no-client.json")"
+assert_eq "send-paths: ready but no client config (no machine token) -> warn, never ok (send-mail would refuse)" warn "$(state_of "${RO}" send-paths)"
+assert_contains "... names the absent token" "machine token in the client config absent" "${RO}"
 assert_contains "... says the server-addressed send is REFUSED" "server-addressed send is REFUSED" "${RO}"
-assert_contains "... its Fix names the launcher" "scripts/athena" "${RO}"
-RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true ATHENA_MCP_BEARER=fixture-bearer doctor_check_send_paths "${SPENTRY}" "${TMP}" )"
+assert_contains "... its Fix names the client setup" "scripts/setup-athena-inbox-client" "${RO}"
+RO="$(sp_run true "${SP_NOTOK}")"
+assert_eq "send-paths: a client config with no token -> warn" warn "$(state_of "${RO}" send-paths)"
+assert_contains "... names it broken, never absent" "machine token in the client config broken" "${RO}"
+# DND-839: the environment is never read. A session variable does not stand in
+# for a missing config, and a present config needs none.
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true ATHENA_MCP_BEARER=fixture-env ATHENA_INBOX_CLIENT_CONFIG="${SP}/no-client.json" doctor_check_send_paths "${SPENTRY}" "." )"
+assert_eq "send-paths (DND-839): ATHENA_MCP_BEARER in the env does not stand in for the config -> warn" warn "$(state_of "${RO}" send-paths)"
+assert_not_contains "send-paths (DND-839): the facts never name the retired variable" "ATHENA_MCP_BEARER" "$(sp_run true)"
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true ATHENA_INBOX_CLIENT_CONFIG="${SP_TOK}" doctor_check_send_paths "${SPENTRY}" "${TMP}" )"
 assert_eq "send-paths: a registration lookup that cannot be made (not a repo) -> warn, never 'not configured'" warn "$(state_of "${RO}" send-paths)"
 assert_contains "... says the lookup itself failed, with its words" "the registration lookup itself failed: athena:inbox: the athena MCP registration cannot be looked up" "${RO}"
 RO="$(sp_run false)"
@@ -921,24 +933,25 @@ assert_contains "... warn carries a Fix naming both explicit flags" "with --rout
 RO="$(sp_run not-asked)"
 assert_eq "send-paths: --no-server -> na, never ok" na "$(state_of "${RO}" send-paths)"
 assert_contains "... says the answer depends on machine_reachable at send time" "routes if machine_reachable answers true or unknown when it is sent" "${RO}"
-RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" ATHENA_MCP_BEARER=fixture-bearer ATHENA_INBOX_CLIENT_CONFIG="${SP}/no-client.json" DOCTOR_NO_SERVER=0 \
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" ATHENA_MCP_BEARER=fixture-env-ignored ATHENA_INBOX_CLIENT_CONFIG="${SP}/no-client.json" DOCTOR_NO_SERVER=0 \
   bash -c 'for f in err names descriptor logchan maildir fence session fs lock inbox doctor; do . "$0/${f}.sh"; done
            doctor_check_server_reachability >/dev/null; doctor_check_send_paths "$1" "."' "${LIB}" "${SPENTRY}" )"
-assert_eq "send-paths: no client token (reachability SKIPPED) -> na" na "$(state_of "${RO}" send-paths)"
+assert_eq "send-paths: no client config (reachability SKIPPED, and send-mail has no token) -> warn" warn "$(state_of "${RO}" send-paths)"
 assert_contains "... names skipped-no-token, not the --no-server case" "this machine reachable: skipped-no-token" "${RO}"
+assert_contains "... and names the absent machine token" "machine token in the client config absent" "${RO}"
 printf '{"projects": {broken' > "${SP}/home/.claude.json"
 RO="$(sp_run true)"
 assert_eq "send-paths: an unreadable ~/.claude.json -> warn, never 'not registered'" warn "$(state_of "${RO}" send-paths)"
 assert_contains "... says the registration is broken" "athena MCP broken for this project" "${RO}"
 jq -n --arg p "${SPMAIN}" '{projects: {($p): {mcpServers: {athena: {type: "http", url: "https://x.test/mcp"}}}}}' > "${SP}/home/.claude.json"
 SPENTRY_NOSESS="$(printf '%s' "${SPENTRY}" | jq -c 'del(.channels.session)')"
-RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true ATHENA_MCP_BEARER=fixture-bearer doctor_check_send_paths "${SPENTRY_NOSESS}" "." )"
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true ATHENA_INBOX_CLIENT_CONFIG="${SP_TOK}" doctor_check_send_paths "${SPENTRY_NOSESS}" "." )"
 assert_eq "send-paths: registered but no session inbox -> warn" warn "$(state_of "${RO}" send-paths)"
 assert_contains "... says the session inbox is missing" "session inbox missing" "${RO}"
 # THE MISS: a channels map the count cannot read. The finding must say the
 # count is UNREADABLE -- never "0 maildir channel(s)", never na.
 SPENTRY_BADCH="$(printf '%s' "${SPENTRY}" | jq -c '.channels = "not-an-object"')"
-RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true ATHENA_MCP_BEARER=fixture-bearer doctor_check_send_paths "${SPENTRY_BADCH}" "." )"
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_REACHABLE=true ATHENA_INBOX_CLIENT_CONFIG="${SP_TOK}" doctor_check_send_paths "${SPENTRY_BADCH}" "." )"
 assert_eq "send-paths: an uncountable channels map -> warn" warn "$(state_of "${RO}" send-paths)"
 assert_contains "... says the count is UNREADABLE" "maildir channel count UNREADABLE" "${RO}"
 assert_not_contains "... never prints it as 0 channels" "0 maildir channel(s)" "${RO}"
@@ -949,7 +962,7 @@ assert_eq "send-paths: no matched entry -> no finding at all (the entry check re
 # recorded in the SAME shell (collect_findings runs them in one subshell). A
 # canned false must reach send-paths as false, not as the not-asked default.
 printf '{"reachable":false,"basis":"ack_silence","pending_deliveries":1,"unreachable_since":"2026-09-22T15:40:00Z"}' > "${SP}/reach.json"
-RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_MCP_BEARER=fixture-bearer ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_INBOX_CLIENT_CONFIG="${SP_TOK}" ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
   bash -c 'for f in err names descriptor logchan maildir fence session fs lock inbox doctor; do . "$0/${f}.sh"; done
            doctor_check_server_reachability >/dev/null; doctor_check_send_paths "$1" "."' "${LIB}" "${SPENTRY}" )"
 assert_eq "handoff: server-reachability's recorded false reaches send-paths (warn)" warn "$(state_of "${RO}" send-paths)"
@@ -957,7 +970,7 @@ assert_contains "handoff: ... and is named in the facts" "this machine reachable
 # DND-378 through the handoff: an IDLE machine (unknown) is routable, with the
 # note; the #307 self id reaches the facts; absent and malformed stay distinct.
 sp_handoff() { # sp_handoff -> send-paths finding(s) after server-reachability read ${SP}/reach.json
-  ( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_MCP_BEARER=fixture-bearer ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
+  ( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_INBOX_CLIENT_CONFIG="${SP_TOK}" ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
     bash -c 'for f in err names descriptor logchan maildir fence session fs lock inbox doctor; do . "$0/${f}.sh"; done
              doctor_check_server_reachability >/dev/null; doctor_check_send_paths "$1" "."' "${LIB}" "${SPENTRY}" )
 }
@@ -992,7 +1005,7 @@ RO="$(sp_handoff)"
 assert_eq "handoff: a STRING \"true\" is not a verdict -> never ok" warn "$(state_of "${RO}" send-paths)"
 assert_contains "handoff: ... it reaches send-paths as unavailable" "this machine reachable: unavailable" "${RO}"
 printf 'UNAVAILABLE:tool machine_reachable not found' > "${SP}/reach.json"
-RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_MCP_BEARER=fixture-bearer ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
+RO="$( cd "${SPROJ_D}" && HOME="${SP}/home" DOCTOR_NO_SERVER=0 ATHENA_INBOX_CLIENT_CONFIG="${SP_TOK}" ATHENA_INBOX_DOCTOR_REACHABLE_FILE="${SP}/reach.json" \
   bash -c 'for f in err names descriptor logchan maildir fence session fs lock inbox doctor; do . "$0/${f}.sh"; done
            doctor_check_server_reachability >/dev/null; doctor_check_send_paths "$1" "."' "${LIB}" "${SPENTRY}" )"
 assert_contains "handoff: an UNAVAILABLE reachability reaches send-paths as unavailable, never as reachable" "this machine reachable: unavailable" "${RO}"

@@ -586,13 +586,14 @@ checks now answer the question a pid cannot:
   the same. The token reaches `curl` only through a 0600 config file.
 - `send-paths` (DND-314) reports both of `send-mail`'s paths for this project:
   routed (the `athena` MCP registration in `~/.claude.json`, the `session`
-  inbox, `ATHENA_MCP_BEARER` in this shell, this machine's reachability from
+  inbox, whether the inbox client config holds a usable machine token
+  (`present` / `absent` / `broken`), this machine's reachability from
   the check above) and local (the maildir channels), and what the no-flag
   default would pick, with this machine's server id from the same answer
   (or "not provided" from a server that predates #307). It grades the same
   way `send-mail` decides: `ok` when the routed path is ready (reachable
   `true` or `unknown`); `warn` when it is configured but unusable now (no
-  bearer, no valid session inbox, reachable `false`, or a failed or malformed
+  usable machine token, no valid session inbox, reachable `false`, or a failed or malformed
   lookup; on `false`, a `--to` proven to be on another machine still routes,
   and the finding says which) or the registration cannot be read;
   `n-a` when routed is not configured or reachability was not asked. The
@@ -784,9 +785,22 @@ send-mail --routed --to-project <project>[@<machine-id-or-name>] --subject <line
   `list_my_machines` and refuses when zero or several of your machines declare
   the inbox.
 - It refuses when the MCP is not registered for this project (Fix:
-  `scripts/add-athena-mcp`) and when `${ATHENA_MCP_BEARER}` is unset (Fix:
-  launch through `scripts/athena`). The bearer reaches `curl` only on its stdin
-  config; it is never in argv or in a file.
+  `scripts/add-athena-mcp`) and when the inbox client config
+  (`~/.config/athena-inbox-client/config.json`, or
+  `$ATHENA_INBOX_CLIENT_CONFIG`) holds no usable machine token. An absent
+  config and a config without a token are refused with different words and
+  Fixes. The token is read from that 0600 file at send time and reaches `curl`
+  only on its stdin config. It is never in argv, the environment, or a file
+  `send-mail` writes.
+
+  **Later (2026-09-26, DND-839):** this refused when `${ATHENA_MCP_BEARER}` was
+  unset (Fix: launch through `scripts/athena`), a variable the launcher
+  exported into the session. Superseded: Claude Code passes its environment to
+  every Bash tool child, so the exported token reached every command an agent
+  ran, and an env dump put it in a transcript. The launcher now scrubs the
+  variable; the session's own athena MCP connection gets its header from the
+  `headersHelper` `scripts/athena-mcp-headers`; and `send-mail` reads the
+  client config itself. Never export the token into a session.
 - A routed send pointed at one of this project's **maildir** channels by name
   (`send-mail --routed walt_ui-mail …`, or `--to-project walt_ui-mail`) is
   refused. Use `--local` to send on the maildir.
@@ -855,7 +869,8 @@ same:
 | `the athena MCP is not registered for this project` | no `athena` entry in `$HOME/.claude.json` |
 | `this project's athena MCP registration cannot be read` | the config or its entry is broken |
 | `internal error computing the athena MCP lookup key (...)` | a wrongly computed key; `send-mail --routed` shows the detail |
-| `ATHENA_MCP_BEARER is not set in this session` | not launched through `scripts/athena` |
+| `this machine has no inbox client config, so no machine token to ask with` | no client config on this machine |
+| `this machine's inbox client config has no usable machine token` | the config is unreadable, not JSON, or has no `.token` |
 | `timeout (coreutils) is not on PATH, ...` / `could not create a private temp dir for the lookup` | the lookup could not be run safely |
 | `list_my_machines failed: <client reason>` | transport, HTTP, or bearer refusal |
 | `list_my_machines did not answer within <N>s` | the total deadline cut the call |
@@ -945,8 +960,8 @@ the rule cannot route is refused, never sent locally.
   compared with `--to`'s machine, case-insensitively, to fix the recipient's
   **locality**: `same`, `other`, or `unproven` (the server's answer names no
   `machine_id` because it predates #307, or the recipient is `--to-project`,
-  whose machine is resolved only at send time). With the MCP registered, the
-  bearer set and this project's `session` inbox valid (the reply address a
+  whose machine is resolved only at send time). With the MCP registered, a
+  usable machine token in the client config, and this project's `session` inbox valid (the reply address a
   routed send needs):
 
   | `machine_reachable` | other machine | this machine / unproven |
@@ -1025,7 +1040,7 @@ agents on the live channel did by hand for fifty-one messages.
 | Bucket | Files |
 |---|---|
 | Domain (no I/O; the one effect is a refusal on stderr, via `err.sh`) | `lib/err.sh` · `lib/names.sh` · `lib/descriptor.sh` · `lib/logchan.sh` · `lib/maildir.sh` · `lib/fence.sh` · `lib/budget.sh` (the waiter's mode-dependent budget; `bin/inbox-wait` reads the env and passes it in) · `lib/routed.sh` (the routed send's refusals and arguments; the `session.message` render) · `lib/doctor.sh`'s `doctor_state_*` decisions · `lib/liveness.sh`'s `liveness_classify_line` / `liveness_judge` |
-| Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the read, count, ack and maildir-send paths**) · `lib/mcp.sh` (the routed send's own, a declared deviation: reading the `athena` MCP registration from `~/.claude.json`, one `git rev-parse --show-toplevel`, and the MCP call, whose request and response bodies sit in a private temp dir) · `lib/lock.sh` · `lib/session.sh` · `lib/liveness.sh`'s log and mtime readers (the client log and doorbell ages; shared with `scripts/athena-inbox-client-run.sh`) |
+| Side effects | `lib/fs.sh` (the only file I/O and the only `git` call **on the read, count, ack and maildir-send paths**) · `lib/mcp.sh` (the routed send's own, a declared deviation: reading the `athena` MCP registration from `~/.claude.json`, reading the machine token from the inbox client config, one `git rev-parse --show-toplevel`, and the MCP call, whose request and response bodies sit in a private temp dir) · `lib/lock.sh` · `lib/session.sh` · `lib/liveness.sh`'s log and mtime readers (the client log and doorbell ages; shared with `scripts/athena-inbox-client-run.sh`) |
 | Manager | `lib/inbox.sh` — the use cases, and the one path every caller takes · `lib/doctor.sh`'s `doctor_check_*` — the diagnostic orchestration (a **declared deviation** — see below) |
 | Framework | `bin/inbox-status` · `bin/read-inbox` · `bin/send-mail` · `bin/inbox-wait` · `bin/inbox-doctor` |
 

@@ -1596,11 +1596,11 @@ inbox_doorbell_channel() {
 #
 #   subject, re/thread, the address grammar, the body   (pure, no I/O)
 #   -> this project's own session inbox (tenancy by git common dir)
-#   -> the MCP registration, then the launcher's bearer
+#   -> the MCP registration, then the machine token (the client config)
 #   -> [--to-project: list_my_machines, pick the one machine]
 #   -> session_send -> the receipt
 #
-# There is NO fallback. A missing registration, a missing bearer, a refused
+# There is NO fallback. A missing registration, a missing token, a refused
 # send and an unreachable server are each a refusal with its own Fix; none of
 # them writes a maildir. The maildir fallback is HG-19's no-flag rule
 # (inbox_default_path), which never applies once --routed was given.
@@ -1657,12 +1657,12 @@ inbox_mcp_registration() {
 
 # inbox_machine_names [cwd]
 #
-# read-inbox's ONE machine-name lookup (DND-376): `list_my_machines` through the
-# launcher bearer, as a names-state (lib/routed.sh -> "the sender's machine
+# read-inbox's ONE machine-name lookup (DND-376): `list_my_machines` with the
+# machine token from the client config, as a names-state (lib/routed.sh -> "the sender's machine
 # NAME"). Always prints a state and returns 0: a name is display, so no failure
 # here may fail a read or stop an ack. Every way the lookup cannot happen is an
 # unresolved state with its OWN reason -- not registered, registration
-# unreadable, bearer unset, the call failed, it ran out of time, the server
+# unreadable, no usable machine token, the call failed, it ran out of time, the server
 # answered an error, no answer -- so the render says which, never a blank or a
 # guess.
 #
@@ -1687,17 +1687,19 @@ inbox_machine_names() {
     3) routed_names_unresolved "this project's athena MCP registration cannot be read"; return 0 ;;
     *) routed_names_unresolved "internal error computing the athena MCP lookup key (send-mail --routed shows the detail)"; return 0 ;;
   esac
-  if [ -z "${ATHENA_MCP_BEARER:-}" ]; then
-    routed_names_unresolved "ATHENA_MCP_BEARER is not set in this session"; return 0
-  fi
+  case "$(mcp_token_state)" in
+    present) ;;
+    absent) routed_names_unresolved "this machine has no inbox client config, so no machine token to ask with"; return 0 ;;
+    *) routed_names_unresolved "this machine's inbox client config has no usable machine token"; return 0 ;;
+  esac
   type -P timeout >/dev/null 2>&1 || { routed_names_unresolved "timeout (coreutils) is not on PATH, so the lookup cannot be bounded"; return 0; }
   lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   secs="$(inbox_names_deadline)"
   tmp="$(mktemp -d 2>/dev/null)" || { routed_names_unresolved "could not create a private temp dir for the lookup"; return 0; }
   chmod 700 "${tmp}"
-  # ATHENA_MCP_BEARER is exported for the child: it reaches curl on stdin only,
-  # exactly as in the parent (lib/mcp.sh), never argv or a file.
-  out="$(ATHENA_MCP_BEARER="${ATHENA_MCP_BEARER}" TMPDIR="${tmp}" timeout "${secs}" bash -c \
+  # The child reads the machine token from the client config itself
+  # (lib/mcp.sh); it is never passed in the environment, argv or a file.
+  out="$(TMPDIR="${tmp}" timeout "${secs}" bash -c \
     '. "$1/err.sh"; . "$1/names.sh"; . "$1/mcp.sh"; mcp_call_tool "$2" list_my_machines "{}"' \
     _ "${lib}" "${url}")"; rc=$?
   rm -rf "${tmp}"
@@ -1728,7 +1730,7 @@ inbox_names_deadline() {
 
 # inbox_self_reachable <url>
 # `machine_reachable {}` -- THIS machine (no machine_id = self; gen_saas HG-20),
-# through the launcher bearer. Prints "<verdict>\t<self_id>\t<detail>":
+# with the machine token from the client config. Prints "<verdict>\t<self_id>\t<detail>":
 #   verdict  the server's own three-valued answer (true | false | unknown), or
 #            `unavailable` when anything stood between the question and an
 #            answer -- transport, HTTP, an MCP error, the tool missing, an
@@ -1810,8 +1812,8 @@ inbox_session_state_of_entry() {
 # The no-flag `send-mail` decision (HG-19): "<path>\t<reason>" on stdout,
 # status 0, with <path> local | routed | refuse. Status 2 on an internal error
 # (already refused on stderr). The rule is routed_default_path's; this only
-# gathers its inputs, cheapest first: the registration and the bearer are
-# local reads, and machine_reachable is asked ONLY when the rule says the
+# gathers its inputs, cheapest first: the registration and the machine token's
+# presence are local reads, and machine_reachable is asked ONLY when the rule says the
 # answer decides it (a maildir address never makes a network call).
 inbox_default_path() {
   local address="$1" cwd="${2:-.}" to_spec="${3:-}" url rc reg bearer session decision probe reach self_id detail
@@ -1827,7 +1829,7 @@ inbox_default_path() {
     3) reg=broken ;;
     *) return 2 ;;
   esac
-  if [ -n "${ATHENA_MCP_BEARER:-}" ]; then bearer=set; else bearer=unset; fi
+  if [ "$(mcp_token_state)" = "present" ]; then bearer=set; else bearer=unset; fi
   session="$(inbox_session_inbox_state "${cwd}")"
   decision="$(routed_default_path server "${reg}" "${bearer}" "${session}" unasked unasked)" || return 2
   if [ "${decision%%$'\t'*}" = "ask" ]; then
@@ -1898,20 +1900,26 @@ inbox_send_routed() {
   fi
   if [ "${rc}" -ne 0 ]; then
     inbox_fail "the athena MCP server is not registered for this project, so a routed message cannot be sent (nothing was sent, and no maildir was written)" \
-      "run scripts/add-athena-mcp from this project's main checkout (${main}), then restart the session through scripts/athena. There is no silent fallback to a maildir channel; send-mail --local <channel> <slug> --to <identity> is the explicit maildir path."
+      "run scripts/add-athena-mcp from this project's main checkout (${main}), then restart the session. There is no silent fallback to a maildir channel; send-mail --local <channel> <slug> --to <identity> is the explicit maildir path."
     return 1
   fi
-  if [ -z "${ATHENA_MCP_BEARER:-}" ]; then
-    inbox_fail "ATHENA_MCP_BEARER is not set in this session, so the athena MCP cannot be authenticated (nothing was sent)" \
-      "launch the session through scripts/athena, which exports ATHENA_MCP_BEARER from the inbox client's config for that launch only. Do not write the token into ~/.claude.json or any other file."
-    return 1
-  fi
+  case "$(mcp_token_state)" in
+    present) ;;
+    absent)
+      inbox_fail "$(mcp_token_unusable_reason absent) (nothing was sent)" \
+        "set the inbox client up on this machine (scripts/setup-athena-inbox-client); send-mail reads the machine token from its 0600 config at send time. Never export the token into a session or write it into ~/.claude.json (DND-839)."
+      return 1 ;;
+    *)
+      inbox_fail "$(mcp_token_unusable_reason broken) (nothing was sent)" \
+        "chmod 0600 $(mcp_client_config_path) (owned by you) and check it carries the machine token under .token; re-run scripts/setup-athena-inbox-client if it does not."
+      return 1 ;;
+  esac
 
   if [ -n "${project}" ]; then
     out="$(mcp_call_tool "${url}" list_my_machines '{}')"; rc=$?
     if [ "${rc}" -ne 0 ]; then
       inbox_fail "could not resolve --to-project ${project_spec}: ${out} (nothing was sent)" \
-        "check the athena MCP is reachable (inbox-doctor) and the session was launched through scripts/athena, or address the recipient directly with --to <machine_id>/${to_inbox}."
+        "check the athena MCP is reachable and this machine's inbox client token is current (inbox-doctor), or address the recipient directly with --to <machine_id>/${to_inbox}."
       return 1
     fi
     machines="$(routed_tool_result "${out}")"; rc=$?
@@ -1932,7 +1940,7 @@ inbox_send_routed() {
   case "${rc}" in
     0) ;;
     3) inbox_fail "the routed send was refused before it reached session_send: ${out} (nothing was sent)" \
-         "check the athena MCP registration (claude mcp get athena), that the session was launched through scripts/athena, and inbox-doctor's server-reachability."
+         "fix the reason named above: check the athena MCP registration (claude mcp get athena), that the inbox client config holds a current machine token, and inbox-doctor's server-reachability."
        return 1 ;;
     *) inbox_fail "the session_send call failed and its outcome is UNKNOWN: ${out}" \
          "the server may have recorded the message. Do not blindly re-send (session_send has no idempotency key yet, DND-354): ask the recipient, or check the server's delivery status, before sending again."
