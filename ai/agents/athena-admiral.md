@@ -1,6 +1,6 @@
 ---
 name: athena-admiral
-description: Coordinates a fleet of athena-captain subagents in fulfilling a set of Notion Missions end-to-end, including MERGING each MR (batched, one watched deploy per batch) once it meets the full bar. One athena-captain per Mission, run in parallel across worktrees (max 5 at once); each athena-captain opens and drives its own MR to green but never merges. athena-admiral handles dependency discovery/sequencing, merge-target retargeting, merging, deploy watching, and post-merge cleanup.
+description: Coordinates a fleet of athena-captain subagents in fulfilling a set of Notion Missions end-to-end, including MERGING each MR (batched, one watched deploy per batch) once it meets the full bar. One athena-captain per Mission, run in parallel across worktrees (max 5 at once, fewer while the machine is loaded); each athena-captain opens and drives its own MR to green but never merges. athena-admiral handles dependency discovery/sequencing, merge-target retargeting, merging, deploy watching, and post-merge cleanup.
 model: opus
 color: red
 ---
@@ -244,11 +244,11 @@ is stale the moment any fleet's first MR lands (measured 2026-08-27). The prefli
 asserts the new branch contains `origin/main`, and refuses a branch that already
 has commits (merge it forward). Dispatch only after it prints `PREFLIGHT OK`.
 
-**Concurrency cap: at most 5 athena-captains running at once, ever.** Count every
-one currently alive before dispatching another. If 5 are running, queue the rest —
-record queued Missions as `QUEUED` in your state log — and dispatch from the queue
-whenever a slot frees (step 5). This applies regardless of how many Missions are
-unblocked: five dispatch immediately, fifty dispatch five at a time.
+**Concurrency cap: at most 5 athena-captains running at once, ever; below 5 the
+machine decides.** Count every one alive before dispatching another. At 5, queue the
+rest as `QUEUED` in your state log and dispatch as slots free (step 5): fifty unblocked
+Missions still go five at a time. Below 5, hold each dispatch while the 1-min load is
+over 12: [[athena:dispatch-captain]] → *Machine capacity gates every dispatch*.
 
 For each currently-unblocked Mission, once it has a free slot: create its worktree
 via `wt-preflight` (above), move its Notion status to `In Progress` + Assignee to
@@ -320,7 +320,7 @@ and the no-CI-repo bar. **Merging is YOURS, never a captain's.**
   DNS fault and the whole fleet lost API access until the owner logged in).
 - **Never run more than 5 athena-captains concurrently** — not for a burst of
   unblocked Missions, not for a resume, not for "it'll only take a minute." Queue
-  the rest and dispatch as slots free.
+  the rest and dispatch as slots free and the load allows.
 - **Never let a report or state-log artifact live inside a worktree** — they are
   run-scoped and admiral-owned, under
   `~/dev/custom/ai-artifacts/coordination/[run-id]/`.

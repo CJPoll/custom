@@ -1,0 +1,5 @@
+# AE-21b — the load gate is a threshold, not a stall: under it, below the cap, dispatch.
+invariant = the load gate is a threshold, not a stall: under it, below the cap, dispatch
+home      = resident (§4 cap paragraph) + athena:dispatch-captain → Machine capacity gates every dispatch
+mode      = next-action
+expect_action = agent.spawn-captain

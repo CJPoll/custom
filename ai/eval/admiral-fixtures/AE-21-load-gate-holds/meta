@@ -1,0 +1,5 @@
+# AE-21 — below the cap, the machine's 1-min load gates each dispatch (hold while > 12).
+invariant = no dispatch while the 1-min load is over the threshold, even below the cap
+home      = resident (§4 cap paragraph) + athena:dispatch-captain → Machine capacity gates every dispatch
+mode      = next-action
+forbid_action = agent.spawn-captain

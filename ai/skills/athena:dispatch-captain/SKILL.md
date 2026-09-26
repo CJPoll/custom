@@ -1,6 +1,6 @@
 ---
 name: athena:dispatch-captain
-description: The checklist for building an athena-captain's dispatch brief — everything the brief must carry so a captain never has to ask (worktree path, Mission, domain context, reports-dir path, MR target branch, the admiral's own agentId as reply-to, the Notion status values, and the fleet-mode design sub-docs). Use each time you dispatch a captain into a prepared worktree. Model choice: [[athena:model-tiering]]; worktree creation and the ≤5 cap stay resident on the admiral.
+description: The checklist for building an athena-captain's dispatch brief — everything the brief must carry so a captain never has to ask (worktree path, Mission, domain context, reports-dir path, MR target branch, the admiral's own agentId as reply-to, the Notion status values, and the fleet-mode design sub-docs). Use each time you dispatch a captain into a prepared worktree. Model choice: [[athena:model-tiering]]; worktree creation and the ≤5 cap stay resident on the admiral. Also the machine-capacity gate every dispatch passes (1-min load threshold, test-slot, lowering the cap on a load-based failure).
 ---
 
 # athena:dispatch-captain
@@ -16,6 +16,8 @@ a Mission is unblocked and has a free slot (worktree already created via
    that is **PAUSE**: mark the Mission `PARKED`, never retry the spawn, and never
    do the captain's work in-line. Then run the drain protocol:
    [[athena:fleet-drain]].
+   Exit 0 then passes the **machine-capacity gate** (*Machine capacity gates
+   every dispatch*, below) before the spawn.
 1. **Move the Mission's Notion status to `In Progress`** and set its `Assignee`
    to **Athena** (the active connection's bot — see [[athena:ticket-management]]).
 2. **Dispatch an athena-captain, named uniquely and Mission-qualified** (e.g.
@@ -116,6 +118,12 @@ Give the captain, in the brief:
   2026-09-25 on walt_ui: the PT-1709 captain popped the owner's PT-822 entry
   (DND-670). The `git-stash-guard` hook denies every stash write; the line saves
   the captain the denied call.
+- **The test-slot rule.** Every brief carries this line: *"Run every heavy gate
+  — a full suite, `bin/prep-commit.sh`, `harness-gate`, `integration-gate` — as
+  `~/dev/custom/ai/bin/test-slot -- <cmd>`. Exit 75 with `test-slot: TIMEOUT`
+  means it never ran: run it again; never count it as a pass."* Nothing in the
+  harness wraps a captain's gates yet (DND-486 is unlanded), so this line is
+  the only thing that does.
 
 **In fleet mode, also point it at the design in Notion** — its ticket page's
 three sub-docs (**Product Requirements / Architecture & Engineering / QA Plan**)
@@ -138,33 +146,58 @@ one-line reason into the state log** next to the dispatch.
 Every environment fact you put in the brief must be VERIFIED, not inferred —
 see [[athena:brief-verification]].
 
-## A `CONTENTION:` line lowers the cap for the rest of the run
+## Machine capacity gates every dispatch
 
-Captains run heavyweight per-worktree stacks, and several full suites at once
-can starve the box, so a Mission's verification fails for a reason that is the
-FLEET's doing and no single captain's to avoid. A captain that suspects this is
-required to attach a `~/dev/custom/ai/bin/contention-census` reading from the
-failure and from the re-run, as a `CONTENTION:` line in its report.
+**Later (2026-09-26):** this section was *A `CONTENTION:` line lowers the cap
+for the rest of the run*. Its *Not a probe* bullet forbade sampling load at
+dispatch time, and a `CONTENTION:` line lowered one repo's cap. Superseded by
+owner directive (Cody, 2026-09-26 ~14:15Z): "You have as many captain slots as
+are enabled by the hardware (if you see load-based failures, lower the number of
+captains)." The same directive gave a second machine its own pool. A load
+reading now gates each dispatch but never picks a count, and a load-based
+failure lowers the whole cap, because load is the machine's.
 
-**Treat that line as the feedback signal on your own concurrency:** the first
-`CONTENTION:` line from a Mission in a given repo lowers your effective cap for
-that repo **by one** for the remainder of the run — once per report, never more
-than once for the same report. It only ever moves DOWN, and the resident `≤5,
-ever` invariant is untouched; this can only tighten it.
+Captain capacity belongs to the machine. The resident cap of 5 is your ceiling;
+below it, these rules decide.
 
-Two things this deliberately is **not**:
-
-- **Not a probe.** Do not sample the box's load at dispatch time and pick a cap
-  from it. Load now says nothing about load forty minutes later when three
-  suites collide — that is a guess wearing a measurement's clothes. React to a
-  measurement a captain actually took, or to a number the repo declares.
+- **Hold while the machine is loaded.** Immediately before each spawn (initial,
+  refill, resume re-dispatch), after `fleet-control check` exits 0, read the
+  1-min load: `cut -d' ' -f1 /proc/loadavg`. Over **12** (owner, 2026-09-26):
+  do not dispatch. Keep the Mission `QUEUED`, log `Load <value> -> holding`, and
+  re-read on your next sweep. At or under 12, dispatch and log `Load <value>` on
+  the dispatch line. A load you cannot read is not load 0: hold, and tell the
+  session that launched you.
+- **A gate, not a count.** A reading clears ONE dispatch. Never turn it into a
+  number of slots ("load 3, so dispatch four"). Load now says nothing about load
+  forty minutes later, when several captains reach their suites at once. The
+  reading does not cover that gap. Three things do: the cap of 5 bounds any
+  burst, heavy runs queue through `test-slot` instead of colliding, and a
+  load-based failure lowers the cap.
+- **Heavy gates go through `test-slot`.** Wrap your own (`integration-gate`,
+  `harness-gate`, a full suite) as `~/dev/custom/ai/bin/test-slot -- <cmd>`,
+  always the main checkout's copy, so every fleet shares one pool. Give every
+  captain the test-slot brief line. Exit 75 with `test-slot: TIMEOUT` means the
+  command never ran.
+- **A load-based failure lowers your cap by one** for the rest of the run, and
+  you tell the session that launched you (it apportions the machine across
+  admirals). Load-based failures: a captain's `CONTENTION:` line (captains
+  attach a `~/dev/custom/ai/bin/contention-census` reading from the failure and
+  the re-run), or a gate of yours that fails with Postgres `57014`, a timeout
+  under load, or a kill, with a census reading taken at the failure. One
+  lowering per report or failure. The cap only moves down; a new brief from the
+  launching session is how it comes back up.
+- **The pool is per machine.** Another machine may have its own pool (a captain
+  count its admirals share) or its own threshold. The launching session
+  apportions it, and the share your brief names is your cap, as a lane brief's
+  `{{MAX_CAPTAINS}}` is. With no share in your brief, 5 and 12 apply.
 - **Not a tolerance.** The red still blocks, the finding is still reported, and
   nothing is retried, skipped, or loosened — the standing rule is that a safety
   check gets FASTER, never weaker, and you carry it resident. The census
   makes contention *attributable*; it never makes a failure acceptable.
 
-**Record the cap and where it came from** in the state log — `cap 3 — default`,
-or `cap 2 — lowered by DND-213 CONTENTION`. Without the provenance, a cap you
+**Record the cap and where it came from** in the state log — `cap 5 — default`,
+`cap 4 — brief share`, or `cap 3 — lowered by DND-213 CONTENTION` — with the
+load reading on every dispatch line. Without the provenance, a cap you
 chose and a cap that was forced on you read identically on resume, which is the
 same failed-lookup trap one level up.
 

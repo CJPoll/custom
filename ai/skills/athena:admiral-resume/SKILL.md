@@ -77,8 +77,10 @@ is the reading that loses nothing if you are wrong.
 - **Sweep every in-flight Mission**, not just the one that happened to page you
   — a partial resume is the same failure mode as no resume. (See
   [[athena:fleet-liveness]] for the sweep + staleness discipline.)
-- The **concurrency cap still applies** during a resume: resume 5, queue the
-  rest.
+- The **concurrency cap still applies** during a resume: resume up to 5, each
+  through the load gate ([[athena:dispatch-captain]] → *Machine capacity gates
+  every dispatch*), and queue the rest. A fleet-wide resume after a usage-limit
+  kill is exactly the burst that gate exists for.
 - **A drain resume re-dispatches `PARKED` Missions.** The top-level session
   started you with a run-id after the owner resumed the session
   ([[athena:fleet-drain]] → *Resume*), after it CLAIMED the run. First confirm
