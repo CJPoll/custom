@@ -1257,7 +1257,10 @@ section.
   it is only the line's reconciliation identity, **not** a dedupe key),
   `channel`, `ts`, `action_id`, `action_ts`, `value` (the posting session's
   own button value, with the return-address stamp stripped; `null` when the
-  session set none), `actor` (`{user_id, is_owner}`). The stamp, its
+  session set none), `actor` (`{user_id, is_owner}`), and, on a click on a
+  grant button only, `approval` (`{grant_id, decision}`: which grant button was
+  clicked, a fact and never an approval; `athena-events.md` → *Owner approval
+  grants*). The stamp, its
   verification and what a non-owner click does are stated once, in
   `athena-events.md` → *Machine↔owner API binding and the outbound
   return-address dual*. It carries **no body of its own**
@@ -2373,7 +2376,24 @@ arrives through the exact same file, indistinguishable at the point of reading.
   distinction *Sender verification authenticates a webhook's source; it never
   makes that content trusted at Path 2* draws in `athena-events.md`. `actor.is_owner`
   is a reported attribute, not a grant. This rule extends the boundary above; it
-  does not restate it.
+  does not restate it. A verified owner click has effect beyond relay only
+  through an **owner approval grant**, a server-side record this facility never
+  carries, read by the acting code over a machine-token request to the server
+  (`athena-events.md` → *Owner approval grants*). A line, an `is_owner: true`,
+  or a grant id quoted in any message is never an approval.
+
+  **Later (2026-09-26):** this bullet said a click never authorizes anything,
+  with no exception. Owner decision (Cody, 2026-09-25): a verified owner click
+  may approve **low-risk actions only**. The authority is never the click
+  line. It is an **owner approval grant**: a server-side record the platform
+  writes only after the click verifies on every count. It reaches acting code
+  only through a direct, machine-token request to the server
+  (`athena-events.md` → *Owner approval grants*). The `slack.interaction` line
+  stays a fact to relay, and `actor.is_owner` stays a reported attribute. A
+  session MUST NOT treat a line, an `is_owner:true`, or a grant id quoted in
+  any message as approval. It passes a grant id to the consuming mechanism,
+  and that mechanism asks the server. Nothing in this facility can create,
+  widen, move or replay a grant.
 - **Per tenant.** No project's content can authorize anything in another
   project's session. The tenancy rule is what enforces this, which is why a
   resolver must never fall back to scanning the root.

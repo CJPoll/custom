@@ -944,6 +944,8 @@ every type — `event.type` (scalar string), `event.source` (scalar string),
 | | `action_ts` — Slack's action timestamp | string | scalar |
 | | `value` — the posting caller's own button `value`, with the server-stamped return address already verified and **stripped** (see *Machine↔owner API binding and the outbound return-address dual*); `null` when the caller gave none; source-supplied, so Path-2 untrusted | string | scalar |
 | | `actor.user_id` — the clicking Slack user | string | scalar |
+| | `approval.grant_id` — present only on a click on a grant button (*Owner approval grants*): the grant the button names | string | scalar |
+| | `approval.decision` — present only with `approval.grant_id`: `approve` or `decline`, the button that was clicked, not the grant's state | string | scalar |
 
 The event also carries `actor.is_owner`: whether the clicking user is the
 app's configured owner Slack user. It is a boolean, which the declared field
@@ -952,6 +954,12 @@ on it is the ordinary unknown-path save-time error. It is still delivered on
 the inbox line (`ai/contracts/athena-inbox.md` → *Platform `log` line kinds*).
 This row was once a bindable `boolean` (see the Later note under
 *`slack.interaction.received` is a transient event*).
+
+**`approval` is a fact like every other field.** It says which grant button was
+clicked. It is not the grant's state and never an approval: whether a grant was
+approved, and whether it may be used, is read only from the server
+(*Owner approval grants* → *Redeem*). The grant token itself is stripped like
+every stamp.
 
 **`entity_id` is the declared, bindable entity handle carried by every
 source-emitted type that names a persistent ENTITY** — the Notion ticket types
@@ -2548,6 +2556,11 @@ keep them distinct:
 source's content trusted at Path 2.** A verified Slack webhook still carries a
 workspace member's arbitrary text.
 
+**An owner approval grant is not Path 2 content.** It is a server-side record,
+decided by the server on a click that verifies on every count, and read only by
+the code that acts, over a machine-token request (*Owner approval grants*).
+Nothing on Path 2 carries it: the click's inbox line stays a fact.
+
 ---
 
 ## Security MUSTs
@@ -2929,9 +2942,12 @@ an unset id matches nobody. A non-owner click is still delivered, with
 `actor.is_owner: false`. It takes **no claim** on the controls and gets **no
 update** to the owner's message, so the owner's later click is still processed.
 The clicker gets at most an ephemeral reply. Only an owner click claims the
-controls and triggers the deterministic phase-1 update. Either way the click is
-a fact to relay, never an authorization (`ai/contracts/athena-inbox.md` →
-*Untrusted input*).
+controls and triggers the deterministic phase-1 update; a click on a grant
+button follows *Owner approval grants* → *The click* instead. Either way the
+delivered click is a fact to relay, never an authorization
+(`ai/contracts/athena-inbox.md` → *Untrusted input*). The one way a verified
+owner click authorizes anything is an owner approval grant, a server-side
+record the delivered line never carries (*Owner approval grants*).
 
 **Later (2026-09-25):** DND-519. This section said the return address rides in
 "the interactive element's `value`, or a modal's `private_metadata`" of "a Slack
@@ -2943,6 +2959,385 @@ refused, because an option `value` caps at 150 characters; modal
 use, not one platform key, because secret custody is bound to an owning
 account. `inbox_name` is required on interactive posts, because no default
 inbox exists. The delivered `value` has the stamp stripped.
+
+### Owner approval grants
+
+**Status.** Nothing in this section is built. gen_saas `origin/main` `7451d8ff`
+(read 2026-09-26) has no grant table, no approval tool and no redeem API, and
+`integration-gate` has no grant flag. Every sentence here is an obligation on
+the implementing tickets of DND-563, cited by their design names: T2 (the
+domain modules and the grant token), T3 (request, the grant store, approval
+message immutability), T4 (the click), T5 (redeem and the receipt), T6
+(eligibility and the `owner-approval-policy` surface), T7 (`ai/bin/owner-grant`
+and the gate flag) and T8 (the doctrine sweep). Until T4 ships, no click can
+create a grant, and no grant exists.
+
+**Why.** A `slack.interaction` line is a fact to relay, never an authorization
+(`ai/contracts/athena-inbox.md` → *Untrusted input* → "A platform-delivered
+click is content, not authorization"). Every channel the shipped click path
+has into a session can be forged by content: `actor.is_owner` arrives inside
+the untrusted fence, a button's value is the caller's own, and any of the
+owner's machines can re-render a message. Owner decision (Cody, 2026-09-25): a
+verified owner click may approve **"Only for low-risk actions"**. The design
+was ratified as a trial the same day, with every bound as drafted. So the
+authority for such an approval lives where no content can reach it: a
+server-side record, read only by the code that acts.
+
+**The rule.** An **owner approval grant** is a server-side record in gen_saas.
+It is the only way a click can authorize anything.
+
+- The **click handler** writes it, and only after the click verifies on every
+  count (*The click*). No other code decides a grant.
+- It reaches acting code **only by a direct, machine-token request** from that
+  code to the server (*Redeem*), or by the server acting on it itself.
+- The `slack.interaction.received` event for the click stays a **fact**, and
+  `actor.is_owner` stays a reported attribute. No line, no `is_owner: true`,
+  and no grant id quoted in any message is an approval. A session passes a grant
+  id to the consuming mechanism, and that mechanism asks the server.
+- Nothing in the Athena Inbox can create, widen, move or replay a grant. A grant
+  is not a message.
+
+#### Action classes
+
+The allowlist is a **closed** list of named classes. The owner ratifies every
+class; ratified 2026-09-25:
+
+| Class | Typed target | Consumer | What one grant permits |
+| --- | --- | --- | --- |
+| `merge.pr_only_workflow` | `{repo, base_ref, head_sha}` | `integration-gate --owner-approval-grant`, the requesting machine | `integration-gate` passes its exit 4 for that one head SHA, and only when the diff is eligible (*Eligibility for `merge.pr_only_workflow`*) |
+| `priority.transition` | `{item_id, transition}` | the gen_saas server, at click time | one `promote`, `restore` or `dismiss` of one priority item (*Priority index*) |
+
+**The target is typed, and validated per class before anything is written.**
+
+- `repo` is `<owner>/<name>`, lowercased, matching `\A[a-z0-9._-]+/[a-z0-9._-]+\z`
+  after the fold, and a member of the class's ratified repo list. The list for
+  `merge.pr_only_workflow` is `cjpoll/gen_saas` only; adding a repo is a new
+  owner ratification. A repo off the list is `target_invalid` naming
+  `repo_not_allowed`.
+- `base_ref` matches `\A[A-Za-z0-9._/-]{1,100}\z`.
+- `head_sha` is exactly 40 lowercase hex characters. A short SHA is refused.
+- `item_id` is a UUID. `transition` is one of `promote`, `restore`, `dismiss`.
+- A missing field, an unknown key, or a malformed value is `target_invalid`
+  naming the field. It is **never coerced**.
+- No class declares a free-form field: no command, path, SQL, secret name or
+  machine target.
+
+**The binding digest** is `hex(sha256(canonical_json({class, target})))`, over
+the canonical target (sorted keys, the repo folded to lowercase). The class is
+inside the digest, so a digest for one class can never match another. The same
+canonicalisation MUST be applied on both sides of every comparison: the digest
+the server stored at request time, the digest in the token, and the digest of a
+binding presented at redeem.
+
+**The allowlist is a blast-radius surface.** The module that declares it
+(gen_saas `apps/athena/lib/athena/owner_approvals/action_class.ex`, and its
+test) is the `owner-approval-policy` surface in `ai/blast-radius/surfaces.json`
+(T6). A change that widens it is HOT wherever deploy-on-merge automation is
+confirmed, and **no class is eligible to cover that surface**. A button can
+never approve a widening of what buttons can approve.
+
+#### Eligibility for `merge.pr_only_workflow`
+
+`ai/bin/blast-radius --grant-eligible merge.pr_only_workflow` decides it, over
+the gate's `TARGET_SHA..HEAD_SHA`. It answers `GRANT-ELIGIBLE` (exit 0) or `NOT
+ELIGIBLE` with a reason per file (exit 4). An unknown class argument is exit 2.
+A head is eligible only when **all four** hold:
+
+1. There is at least one hit, and every hit is class `deploy-automation` with a
+   path under `.github/workflows/`. Any other hit makes it NOT ELIGIBLE, naming
+   the hit: `infrastructure-as-code`, `destructive-migration`,
+   `owner-approval-policy`, and a `deploy-automation` hit outside
+   `.github/workflows/` (a local action under `.github/actions/`, or a file a
+   workflow executes).
+2. For every hit file, at BASE and at HEAD, the parsed `on:` trigger set is
+   exactly `{pull_request}`. An added file is read at HEAD only, a deleted one at
+   BASE only. This is an **allowlist of triggers**, not the denylist
+   `blast-radius` uses to judge merge-time automation: `schedule`,
+   `workflow_dispatch`, `pull_request_target` and `release` each run the
+   default-branch version with its secrets, so each makes the head NOT ELIGIBLE.
+3. No workflow at BASE or at HEAD whose trigger set is not exactly
+   `{pull_request}` references a hit file (`uses: ./.github/workflows/<file>`).
+4. A YAML parse failure, an `on:` shape it does not know, or an unreadable blob
+   makes the head NOT ELIGIBLE (undetermined fails closed). The output names
+   each file and what it read.
+
+Why this is the reversible boundary: for a same-repo PR, GitHub has already run
+the branch's own version of a `pull_request` workflow before the merge. Merging
+starts no new run with default-branch privileges, and a revert is an ordinary
+PR.
+
+#### The approval message
+
+Only the server renders an approval message, from the grant's binding.
+
+- It goes **only to the bot's DM with the app's `owner_slack_user_id`**, opened
+  server-side. The caller never names a channel. An app with no owner Slack user
+  id is `owner_slack_user_id_unset`, and nothing is posted: an approval nobody
+  can click is never sent.
+- It shows the class and the full target. For a merge grant that is the repo,
+  the base ref, the full head SHA, and a diff link built from the binding,
+  `https://github.com/<repo>/compare/<base_ref>...<head_sha>`. It shows the
+  click expiry in Mountain Time.
+- The caller may add one note, at most 300 characters. It is rendered as
+  `plain_text` (never mrkdwn) under the label "Requester's note (not verified)".
+  A longer note is refused.
+- It has two buttons, **Approve** (`style: primary`, with a confirm dialog) and
+  **Decline**. Each carries its own grant token (*The grant token*). Decline is
+  terminal and records the decline.
+- **An approval message is immutable to callers.** `slack_update` and
+  `slack_delete` on the `{channel, ts}` of any grant are refused with
+  `approval_message_immutable`. Only the server updates it.
+- **A caller cannot smuggle grant fields.** Blocks that carry an
+  `athena_grant`, `athena_decision` or `athena_class` key are refused by name
+  (`reserved_block_key`) before any Slack call, on every post and update.
+
+#### The grant token
+
+A grant button carries a return-address token (*Machine↔owner API binding and
+the outbound return-address dual*) of **version 3**. Version 3 is the version-1
+fields, plus these, all inside the integrity-tagged segment:
+
+| Field | Meaning |
+| --- | --- |
+| `g` | the grant id |
+| `d` | the decision this button makes: `approve` or `decline` |
+| `c` | the action class |
+| `h` | the binding digest |
+| `x` | the click expiry |
+
+- **Version 2 is reserved for the non-terminal button flag (DND-549).** A grant
+  button is always terminal, so a version-3 token carries no terminal flag and
+  has no non-terminal form.
+- **`g` is present if and only if the version is 3.** A version-3 token missing
+  any of `g`, `d`, `c`, `h`, `x`, and a token of any other version carrying any
+  of them, is `invalid`. So a verifier MUST refuse a version it does not know,
+  and MUST refuse a grant field on a version that does not define it, rather
+  than decode the fields it knows and ignore the rest: an ignored field is how a
+  version-3 token would pass as an ordinary one.
+- **Each button gets its own token.** The tag covers `d`, so a Decline token can
+  only decline. Editing any field breaks the tag, and a token cannot be
+  re-tagged without the account's key.
+- **The server never takes a token field from a caller.** It builds every field
+  from the grant row.
+
+#### Grant states
+
+A grant is in exactly one state:
+
+| Transition | Who | When |
+| --- | --- | --- |
+| created `pending` | the server, in `owner_approval_request` | before the post |
+| `pending` → `void` | the server | the post failed |
+| `pending` → `approved` | the click handler | a verified owner click on Approve, inside the click window |
+| `pending` → `declined` | the click handler | a verified owner click on Decline, inside the click window |
+| `pending` → `expired` | the click handler | a verified owner click after the click window closed |
+| `approved` → `redeemed` | the redeem API, for `merge.pr_only_workflow`; the server at click time, for `priority.transition` | the first successful redeem, or a successful priority transition |
+
+- **The click window** is 12 hours from the post. It is checked on the server's
+  clock against the row's `click_expires_at` AND against the token's `x`. Both
+  must hold. At the boundary instant the grant is expired.
+- **The redeem window** is 2 hours from the approving click
+  (`redeem_expires_at`). A closed redeem window leaves the status as it is; a
+  redeem answers `redeem_expired`.
+- **A grant leaves `pending` exactly once.** The decision is one atomic
+  conditional update, `pending` to its new status, scoped to the grant id, its
+  owner and the open click window. Zero rows updated means another decision
+  won: that click gets an ephemeral "already decided", and nothing else happens.
+- `declined`, `expired`, `void` and `redeemed` are final. A declined or expired
+  grant never becomes approved; the requester asks again.
+
+#### Request: `owner_approval_request`
+
+A session asks for an approval with the `athena` MCP tool
+**`owner_approval_request`**, arguments `action_class`, `target`, `note` and
+`inbox_name`.
+
+- **Who.** An authenticated machine. The owner is the machine token's owner
+  (*Fleet identity: owner and machine are stamped from the token*), and the app
+  is that owner's Slack app. A machine whose owner has no configured app is
+  `slack_not_configured`; it never reaches another owner's app.
+- **`inbox_name`** names the requesting session's inbox, where the click's fact
+  is routed. It follows the interactive-post rule: required, and one of the
+  calling machine's own live instances.
+- **Derived identity is refused, never ignored.** `return_to`,
+  `return_address`, `rt`, `machine_id`, `owner` and `channel` are declared in
+  the tool's schema and always refused with a `Fix:`, as for
+  `slack_thread_claim`: an undeclared argument would be stripped before the tool
+  saw it, and a stripped argument is one silently ignored.
+- **Checks, all before any write:** the class is on the allowlist
+  (`unknown_action_class`, whose `Fix:` lists the classes); the target
+  validates (`target_invalid`); the app exists (`slack_not_configured`); the
+  owner Slack user id is set (`owner_slack_user_id_unset`); the machine is
+  under 10 requests in the past hour (`rate_limited`, with the seconds to wait).
+- **Order.** The grant row is inserted `pending`, then the message is posted,
+  then the row gets its `{channel, ts}`. A failed post sets the row `void` and
+  returns the Slack error with a `Fix:`.
+- It answers `{grant_id, channel, ts, click_expires_at}`.
+
+**`owner_approval_status`** reads one grant's state for the requesting machine,
+under the same scoping as *Redeem*. A read is never a redeem.
+
+#### The click
+
+A click on a grant button runs the shipped checks first: the Slack signature
+and timestamp window, the token's tag under the app owner's account key, and
+the account-equality check (*Machine↔owner API binding and the outbound
+return-address dual*). A token that fails is rejected and recorded, and no grant
+is touched. A key fault is a server fault, never read as a forgery, and the
+grant stays `pending`. Then, for a version-3 token:
+
+1. **Owner.** The clicking Slack user must equal the app's
+   `owner_slack_user_id`. A nil id matches nobody. A non-owner click is relayed
+   as a fact with `actor.is_owner: false`, the grant is unchanged, and the
+   clicker gets an ephemeral "only the owner can answer".
+2. **Binding.** The grant is loaded by the token's `g` **and** the app owner's
+   id, in the query. The row's nonce, digest and class must equal the token's.
+   A missing row, a row of another owner, and any mismatch are the same
+   `grant_binding_invalid`: logged with a `Fix:`, nothing changed, nothing
+   routed.
+3. **Window.** Outside the click window the grant goes `expired`, and the
+   server updates the message to say so and to ask again.
+4. **Decide.** The atomic update of *Grant states*. It replaces the shipped path's
+   claim and phase-1 `working…` update for a grant button.
+5. **Route the fact.** In the same transaction as the decision, the server
+   routes one `slack.interaction.received` to the requester's `{machine,
+   inbox}`, with `actor.is_owner: true` and `approval: {grant_id, decision}`
+   (*Payload fields and their types per event type*).
+6. **Priority dispatch.** For an approved `priority.transition`, after the
+   commit, the server calls the shipped `Athena.Priorities` `promote`,
+   `restore` or `dismiss` as the owner's own user, loaded by the grant's owner.
+   The Priorities owner filter and RBAC `update` apply unchanged. On success the
+   grant goes `redeemed`. On a refusal (`not_found`, say) the grant stays
+   `approved`, the failure is logged, and the final update says the transition
+   failed.
+7. **Final update.** The server replaces the message with its outcome and no
+   buttons: Approved or Declined, by whom, when, and for an approved merge grant
+   how long it is valid for that head. The update needs no session.
+
+#### Redeem
+
+The merge consumer redeems with **`POST /api/v1/owner_approvals/redeem`**,
+authenticated by the machine token (the `machine_authenticated` pipeline), with
+the body `{grant_id, action_class, target}`. The server answers in this order:
+
+| Check | Refusal |
+| --- | --- |
+| the body is well formed and the target validates for its class | `target_invalid` |
+| the grant exists **and** belongs to the machine's owner, in the query | `not_found`: the same answer as a random id, so it never reveals another owner's grant |
+| the machine is the one that requested the grant | `wrong_machine` |
+| the grant's class is still on the allowlist | `class_withdrawn` |
+| the class is consumable by redeem (`priority.transition` is not) | `not_consumable` |
+| the digest of the presented binding equals the stored digest | `binding_mismatch`: the grant stays approved for its own binding |
+| the status is `approved`, or `redeemed` by this same machine for this same digest | `not_approved`, with the status |
+| now is before `redeem_expires_at` | `redeem_expired` |
+
+- A refusal is a JSON body naming the reason code, with a `Fix:`. Any other
+  answer is not a refusal.
+- **Success** is 200 with the record: grant id, class, target, digest, who
+  decided and when, and `redeem_expires_at`. The first success sets `redeemed`
+  and sends the owner a **receipt DM**, written by the server: the class, the
+  target, and the machine that redeemed. A forged or unexpected use is then
+  visible to the owner.
+- **A retry is idempotent.** The same machine presenting the identical binding
+  inside the window gets 200 with the original record, and no second receipt. A
+  merge that failed after a redeem can retry; any other binding cannot.
+
+#### The consumers
+
+A grant has **exactly two consumers**. No other code redeems one.
+
+1. **`integration-gate --owner-approval-grant <id>`**, through
+   `ai/bin/owner-grant`.
+   - The flag is refused together with `--owner-approval` (exit 2). The
+     free-text `--owner-approval` stays, for the owner's own in-session words.
+   - When `blast-radius` answers 0, the gate is OK as today and says the grant
+     was not used.
+   - On `blast-radius` exit 4 it runs the eligibility check. NOT ELIGIBLE is
+     exit 4, naming the offending hits, and nothing is redeemed.
+   - A class other than `merge.pr_only_workflow` is refused as not consumable by
+     `integration-gate`, **before** any redeem.
+   - It resolves the binding itself: the repo slug from `origin`, the base ref,
+     and `HEAD_SHA`. It never takes the binding from the session. A repo
+     identity it cannot resolve is **GRANT UNVERIFIABLE**, and nothing is sent:
+     a wrongly computed key is an error, not an empty match.
+   - A server refusal is exit 4, **GRANT REFUSED** with the reason code.
+   - No token config, a transport or TLS failure, a 5xx, a malformed answer, or
+     a 200 whose class, target or digest differs from what the gate sent is
+     exit 4, **GRANT UNVERIFIABLE** with the cause. It never reads as REFUSED,
+     and never as OK.
+   - A 200 whose record matches is `INTEGRATION OK … OWNER-APPROVED`, naming the
+     grant and who clicked.
+   - Without the flag, an exit 4 prints either the exact
+     `GRANT-ELIGIBLE merge.pr_only_workflow <repo> <base_ref> <head_sha>` line to
+     request with, or the NOT ELIGIBLE reasons. A session never composes a
+     binding itself.
+   - `owner-grant` reads the machine token from its config file and gives it to
+     the HTTP client on stdin, never in argv. Its exits are 0 (ok), 3 (refused,
+     reason printed) and 5 (unverifiable, cause printed), each failure with a
+     `Fix:`.
+2. **`Athena.Priorities`**, called by the server at click time (*The click*),
+   for `priority.transition`. There is no redeem call for this class, and the
+   gate refuses it.
+
+#### Access control for grants
+
+| Operation | Who | Resource | Where checked | On denial |
+| --- | --- | --- | --- | --- |
+| Request an approval | an authenticated machine | the machine owner's own Slack app and owner DM; one allowlisted class and target | `Athena.OwnerApprovals.request/3`, before any write | `unknown_action_class`, `target_invalid`, `owner_slack_user_id_unset`, `slack_not_configured`, `rate_limited`, a refused derived-identity argument; each with a `Fix:` |
+| Decide (click) | the Slack user equal to `owner_slack_user_id`, proven by Slack's signature | the grant named in the verified token, loaded with the app owner's id in the query | `Athena.SlackInteractions.handle_click/3`, then `Athena.OwnerApprovals.decide_by_click/3` | a non-owner is relayed and changes nothing; a bad binding is logged; an expired grant is marked expired; a decided grant answers "already decided" |
+| Redeem | the requesting machine only | the grant, loaded with the machine owner's id in the query | `Athena.OwnerApprovals.redeem/3` | the refusals of *Redeem* |
+| Read status | as redeem | as redeem | `Athena.OwnerApprovals.status/3` | `not_found` |
+| Update or delete an approval message | nobody but the server | the `{channel, ts}` of any grant | `Athena.Slack`, before any Slack call | `approval_message_immutable` |
+| Priority transition by grant | the server, after an approve | one item, loaded owner-scoped | the shipped `Athena.Priorities` owner functions | `not_found`; the grant stays `approved`, and the final update says so |
+
+- **Deny by default.** An unknown class, target key, status or reason is
+  refused, never mapped to a permissive default.
+- **Every read and write of a grant is scoped by `owner_id` in the query.**
+- **Each protected operation has an authorized, an unauthorized and a
+  cross-owner test** (T3, T4, T5).
+
+#### What a grant can never reach
+
+The owner's never-list: credentials or secrets, production data, infrastructure
+applies, deploy automation that is not reversible, and anything on the owner's
+machine. No listing can move one of these onto the allowlist. The closure is
+structural:
+
+- The allowlist is a closed list of typed classes, and no class carries a
+  free-form command, path, SQL, secret name or machine.
+- A grant has exactly two consumers. The gate maps a class to its evaluator with
+  a closed match, and refuses every other class before any redeem. The server's
+  consumer writes one owner-scoped priority row.
+- The gate reads the **actual diff**: any `infrastructure-as-code`,
+  `destructive-migration` or `owner-approval-policy` hit, and any workflow that
+  is not `pull_request`-only, is NOT ELIGIBLE.
+- The allowlist itself is a surface no class covers (*Action classes*).
+
+#### Residuals
+
+Stated, not hidden:
+
+- **Production shell access can insert a grant row.** That access is already
+  owner-gated. The receipt DM makes a forged redeem visible.
+- **The local gate can be bypassed.** An agent can run a modified
+  `integration-gate`, or skip it and merge directly; that is true of every gate
+  today. What this removes is the agent's ability to invent the approval record.
+  gen_saas has no branch protection.
+- **The `owner-approval-policy` surface lives in custom.** custom has no merge
+  automation, so a custom edit that removes the surface reads WARM. custom's
+  `main` lands only by the coordinator's fast-forward.
+- **The owner's Slack account is the trust root.** A compromised Slack session
+  could approve an allowlisted class. The allowlist being low-risk is the
+  mitigation.
+- **The finest binding is the machine.** Machine tokens are per machine, not
+  per session, so a sibling session on the requesting machine could redeem the
+  identical binding. That is the same action on the same SHA.
+
+#### Retention
+
+A grant row holds metadata only: ids, the class, the binding and its digest,
+statuses and timestamps, the deciding Slack user. It never holds message text,
+the note, or a button value. Rows are kept 90 days, then pruned.
 
 ### Thread replies route to the thread's claimant
 
@@ -3916,7 +4311,8 @@ build by name:
 - DND-445: pull and leases;
 - DND-438: work Notion;
 - DND-439: forge review requests;
-- DND-440: Slack outbound and interactivity;
+- DND-440: the surface that requests `priority.transition` grants (*Owner
+  approval grants*);
 - DND-446, DND-447 and DND-449: the digest, meetings and meeting catch-up.
 
 None of the server homes named below exists yet (gen_saas `origin/main`
@@ -4209,12 +4605,22 @@ An item is in exactly one state: `proposed`, `active`, `done` or `dismissed`.
   non-terminal. The priorities page flags it as undeclared. It is never
   silently read as open.
 - **Only an owner path promotes, restores or dismisses:** the owner's web
-  session, or a verified Slack click by the owner (*Machine↔owner API binding
-  and the outbound return-address dual*; `slack.interaction.received`, whose
-  verification DND-290 built and whose action dispatch DND-440 builds). No
-  machine token can do these. No message
-  content can either: a Slack ask, an inbox line or a fleet report
-  informs, and never authorizes (*Trust posture — two paths*).
+  session, or an owner approval grant of class `priority.transition`, executed
+  by the server at click time (*Owner approval grants*). No machine token can
+  do these: a machine may only request the grant, and the owner's click decides
+  it. No message content can either: a Slack ask, an inbox line or a fleet
+  report informs, and never authorizes (*Trust posture — two paths*).
+
+  **Later (2026-09-26):** DND-563 T1. This bullet named "a verified Slack click
+  by the owner" as the second owner path, "whose action dispatch DND-440
+  builds", and the *Access control* row below said "a verified owner Slack
+  click where that path exists". DND-440's plan carried the transition and the
+  item in the caller's own button value, which the caller chooses, so a
+  machine could label one transition as another. Superseded by the owner
+  decision of 2026-09-25 (ratified as a trial): the path is an owner approval
+  grant of class `priority.transition`, bound to one item and one transition
+  and executed by the server through the shipped owner functions. DND-440 keeps
+  only the surface that requests those grants.
 - **A `proposed` item is inert.** No machine-token call returns it, counts it
   or leases it. Only the owner sees it, on the priorities page and in the
   digest.
@@ -4389,7 +4795,7 @@ in Notion per `athena:ticket-management`.
 | Operation | Who | Resource | Where checked | On denial |
 | --- | --- | --- | --- | --- |
 | View the priorities page | the logged-in owner | only the owner's items, failures and skip counts | `Athena.Priorities` list functions: an `owner_id` = viewer filter in the query, plus aggregate RBAC `read` | another owner's data lists as empty; a foreign item id answers `not_found` |
-| Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or a verified owner Slack click where that path exists | the owner's items and rules | `Athena.Priorities` manager functions: the target is loaded with an `owner_id` = actor filter in the query, plus RBAC `update`, both before any write | `not_found`; the Slack path rejects and records |
+| Promote, restore, dismiss, override, complete as owner, create `manual`, bind a subscription, edit rules | the owner: web session, or, for promote, restore and dismiss only, an owner approval grant of class `priority.transition`, executed by the server at click time | the owner's items and rules | `Athena.Priorities` manager functions: the target is loaded with an `owner_id` = actor filter in the query, plus RBAC `update`, both before any write | `not_found`; the grant path logs the refusal, the grant stays `approved`, and the approval message says so |
 | `priority_next`, `priority_release`, `priority_complete` | a machine token | the machine owner's `active`, non-`owner_only` items, through a session bound to that machine; release and complete by the lease holder only | `Athena.Priorities` lease functions, in one transaction: an `owner_id` = the machine's owner filter in the query, and the session's machine binding | `not_found`, `session_ended`, `session_draining`, `none` with counts, `not_lease_holder`, `not_leased` |
 
 - **Deny by default.** A machine token reaches the index only through the three
