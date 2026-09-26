@@ -487,7 +487,7 @@ def hits_for(files, surfaces, repo = nil, head = nil, refs = {}, base = nil)
         via = base_via(f, refs, repo, base) unless via || refs[:result][:present].include?(f)
         next unless via
 
-        hits << { path: f, class: s["class"], why: s["why"], via: via }
+        hits << { path: f, class: s["class"], why: s["why"], via: via, root: root_label(refs, f) }
         break
       end
 
@@ -507,6 +507,22 @@ def hits_for(files, surfaces, repo = nil, head = nil, refs = {}, base = nil)
     end
   end
   [hits, examined]
+end
+
+# The root a reference hit rests on, with the trigger that makes it merge-time
+# (DND-865): "<root> (<trigger>)", plus " at base <sha>" for a base-walk hit.
+# The via line names the file that NAMES the path; this names why that file
+# counts as merge-time at all. nil only if no walk holds the path, which
+# print_report renders as an explicit UNKNOWN, never as nothing.
+def root_label(refs, path)
+  [refs[:result], refs[:base]].compact.each do |r|
+    next unless r[:files].key?(path)
+
+    root = r[:root_of][path]
+    at = r.equal?(refs[:base]) ? " at base #{short(r[:rev])}" : ""
+    return "#{root} (#{r[:root_why][root] || 'trigger not recorded'})#{at}"
+  end
+  nil
 end
 
 # The referrer at base of a changed path absent at head, labelled with the side,
@@ -999,7 +1015,9 @@ def show_at(repo, head, path)
 end
 
 # Returns { files: {path => referrer}, roots: [path], notes: [String],
-# present: Set of every path in the tree, rev: the resolved commit }. `head` is
+# present: Set of every path in the tree, rev: the resolved commit,
+# root_of: {path => the root its chain starts at}, root_why: {root => its
+# trigger} }. `head` is
 # whichever side is walked: the head, or base for a path absent at head (DND-793).
 def ci_references(repo, head)
   rev, err, ok = git(repo, "rev-parse", "--verify", "#{head}^{commit}")
@@ -1021,20 +1039,30 @@ def ci_references(repo, head)
                     .map { |p| norm_dir(File.dirname(p)) }.to_set
 
   notes = []
+  # root_why: why each root is merge-time (its trigger), printed with every hit
+  # that rests on it (DND-865), so the owner reads WHICH trigger makes a
+  # name-only reference HOT, not only the file that names it.
+  root_why = {}
   roots = tree.select do |p|
     if p.match?(%r{\A\.github/workflows/[^/]+\.ya?ml\z})
       begin
         trig = workflow_trigger(YAML.safe_load(show_at(repo, head, p), aliases: true))
         notes << "#{p}: #{trig.detail} -- scanned as a root" if trig && !trig.determined
+        root_why[p] = trig.detail if trig
         !trig.nil?
       rescue Psych::Exception => e
         notes << "#{p}: unparseable YAML (#{e.class}) -- triggers unknown, scanned as a root"
+        root_why[p] = "unparseable YAML -- triggers unknown"
         true
       end
+    elsif p == ".gitlab-ci.yml" || p.start_with?(".gitlab/ci/")
+      root_why[p] = "a GitLab CI file -- GitLab absence is not provable"
+      true
     else
-      p == ".gitlab-ci.yml" || p.start_with?(".gitlab/ci/")
+      false
     end
   end
+  root_of = roots.to_h { |r| [r, r] }
 
   files = {}
   queue = roots.dup
@@ -1062,10 +1090,12 @@ def ci_references(repo, head)
 
       seen << r
       files[r] = f
+      root_of[r] = root_of[f]
       queue << r
     end
   end
-  { files: files, roots: roots, notes: notes, present: tree_set, rev: head }
+  { files: files, roots: roots, notes: notes, present: tree_set, rev: head,
+    root_of: root_of, root_why: root_why }
 end
 
 def references_in(text, referrer, tree, tree_set, action_dirs, notes = [])
@@ -1303,6 +1333,10 @@ def print_report(verdict, head, manifest, surfaces, pattern_count, files, hits, 
     other_vias = (vias - self_vias).uniq
     other_vias.each do |v|
       puts "      via: executed by #{v} (a merge-time CI config names it, directly or through a file it runs)"
+    end
+    deduped.select { |g| g[:via] }.map { |g| g[:root] }.uniq.each do |root|
+      puts "      root: #{root || '<UNKNOWN -- a reference hit with no recorded root; internal ' \
+                                'inconsistency, file a ticket, do not treat this hit as COLD>'}"
     end
     unless self_vias.empty?
       puts "      via: <SELF-EDGE -- #{path} names itself as its own referrer; this should be " \
@@ -2608,6 +2642,61 @@ def self_test
                 trig_root.call("on: 42\n"), "scripts/job.sh", ".github/workflows/t.yml")
     cold_ci.call("COLD: a script referenced ONLY by a merge_group workflow (pre-merge, DND-590)",
                  trig_root.call("on:\n  merge_group:\n"), "scripts/job.sh")
+    # DND-865/DND-822: gen_saas's shape. A PR-CI workflow that ALSO takes
+    # workflow_dispatch runs a check script that names config/config.exs. The
+    # workflow is least-privilege (read-only token, no secrets, no environment,
+    # no id-token), and it stays a root anyway: a dispatch runs on the default
+    # branch's ref, whose GitHub Actions cache scope a pull_request run cannot
+    # write and a push workflow's `type=gha` build restores (gen_saas
+    # post-merge.yml does). Nothing in the workflow file bounds that, so the
+    # refinement "dispatch + unfiltered pull_request + no privilege" is not
+    # exact, and was rejected (surfaces.json known_gaps). The name-vs-execute
+    # split inside a shell script is not exact either, so a script that only
+    # GREPS the path and one that sources, runs or `mix run`s it read alike.
+    # What the hit prints is the part fixed here: the root it rests on and that
+    # root's trigger, so the owner reads WHY it is merge-time.
+    gs_shape = lambda do |on_yaml, script_line|
+      lambda do |r|
+        put.call(r, "config/config.exs", "import Config\n")
+        put.call(r, "bin/checks/adv.sh", "#!/usr/bin/env bash\n# reads config/config.exs as text\n#{script_line}\n")
+        wf.call(r, "ci.yml",
+                "name: CI\n#{on_yaml}jobs:\n  a:\n    runs-on: [self-hosted, linux, x64]\n" \
+                "    permissions:\n      contents: read\n    steps:\n" \
+                "      - uses: actions/checkout@v4\n      - run: bash bin/checks/adv.sh\n")
+      end
+    end
+    gs_on = "on:\n  pull_request:\n  workflow_dispatch:\n"
+    gs_root = "root: .github/workflows/ci.yml (on.workflow_dispatch)"
+    hot_ci.call("HOT: a read-only PR-CI workflow that also takes workflow_dispatch is still a root (DND-822)",
+                gs_shape.call(gs_on, 'grep -qxF config/config.exs "$paths"'), "config/config.exs")
+    hot_ci.call("HOT: a reference hit prints the root workflow and the trigger it rests on (DND-865)",
+                gs_shape.call(gs_on, 'grep -qxF config/config.exs "$paths"'), "config/config.exs", gs_root)
+    hot_ci.call("HOT: the root line names the ROOT, not the direct referrer, for a transitive hit (DND-865)",
+                gs_shape.call(gs_on, 'grep -qxF config/config.exs "$paths"'), "config/config.exs",
+                "via: executed by bin/checks/adv.sh")
+    # Sabotage pins: whatever a later read-vs-execute rule does, a script that
+    # sources, runs or evaluates the named path must never read COLD.
+    [["source config/config.exs", "sources"], ["bash config/config.exs", "runs `bash <path>`"],
+     ["mix run config/config.exs", "`mix run`s"], ['eval "$(cat config/config.exs)"', "evals the contents of"]]
+      .each do |line, what|
+        hot_ci.call("HOT: a check script that #{what} the named path (DND-865 sabotage pin)",
+                    gs_shape.call(gs_on, line), "config/config.exs", gs_root)
+      end
+    # The counterfactual the owner call rests on: the SAME workflow without
+    # workflow_dispatch is pre-merge only, and the name-only hit goes COLD.
+    cold_ci.call("COLD: the same check script under a pull_request-only workflow (DND-822 counterfactual)",
+                 gs_shape.call("on:\n  pull_request:\n", 'grep -qxF config/config.exs "$paths"'), "config/config.exs")
+    # The root of a BASE-side hit (DND-793) is base's root, labelled so.
+    out, _, code = ci_case.call(
+      seed: lambda { |r|
+        put.call(r, ".pkg/prod/bin/deploy-guard.sh", "#!/bin/sh\n")
+        wf.call(r, "post-merge.yml", deploy_run.call("      - run: .pkg/prod/bin/deploy-guard.sh\n"))
+      },
+      change: ->(r) { File.delete(File.join(r, ".pkg/prod/bin/deploy-guard.sh")) }
+    )
+    check.call("HOT: a base-walk hit prints base's root and trigger, labelled `at base` (DND-865)",
+               code == 4 && out.match?(%r{root: \.github/workflows/post-merge\.yml \(on\.push\.branches=\[main\]\) at base [0-9a-f]{7}}),
+               "exit=#{code} out=#{out}")
     # Each precision bound is pinned from BOTH sides, so neither a bound that
     # stops firing nor one that starts swallowing real references goes unseen.
     gl_anchor = lambda do |r|
