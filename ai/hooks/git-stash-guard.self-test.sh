@@ -886,6 +886,20 @@ xs = {'a': [1]}
 print(f\"{xs['a'][0]} #{1}\", [x for x in xs])
 EOF"
 
+# QX77+: critic round 6. Listed tools with a program-naming option, and
+# builtins that re-evaluate a quoted subscript (measured on zsh 2026-09-26:
+# read, shift, return and [[ -eq ]] run a $(...) inside 'a[...]').
+case_cmd "QX77. rg --pre <script>" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; chmod +x p.sh; rg --pre ./p.sh x ."
+case_cmd "QX78. sort --compress-program=<script>" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; sort --compress-program=./p.sh -S 1K big.txt"
+case_cmd "QX79. wget --use-askpass=<script>" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; wget --use-askpass=./p.sh https://h/x"
+case_cmd "QX80. wget -e with a wgetrc command" deny "echo 'true; /usr/libexec/git-core/git-st*sh' > p.sh; wget -e use_askpass=./p.sh https://h/x"
+case_cmd "QX81. a quoted subscript [[ -eq ]] re-evaluates" deny "[[ 1 -eq 'a[\$(true; /usr/libexec/git-core/git-st*sh)1]' ]]"
+case_cmd "QX82. a quoted subscript shift re-evaluates" deny "shift 'a[\$(true; /usr/libexec/git-core/git-st*sh)1]'"
+case_cmd "QX83. a quoted subscript read re-evaluates" deny "read 'a[\$(true; /usr/libexec/git-core/git-st*sh)1]' < /dev/null"
+case_cmd "QX84. a backtick in a single-quoted payload of a listed tool" deny "echo 'a[\`true; /usr/libexec/git-core/git-st*sh\`]' | grep x"
+case_cmd "QA63. rg with a regex alternation stays allowed" allow "rg -n 'foo\\(|bar[0-9]+' lib/"
+case_cmd "QA64. sort -k with a quoted separator stays allowed" allow "sort -t '|' -k2,2 f | awk -F'|' '{print \$2}'"
+
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
 case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"

@@ -121,15 +121,19 @@
 # file utility, a keyword, an interpreter; git, gh, glab and docker only
 # with a read-only subcommand and, for git, no option that names or turns
 # on a program; sed only without an `e` command). Any other command
-# word, a script by path or bare name included, makes it EXEC and read in
-# full, as are: a runner anywhere in the text (sh/bash/zsh -c, eval,
-# source, xargs, watch, ssh, su, sudo, env -S, trap, alias, tmux, vim -c,
-# `... | sh`, a heredoc fed to a shell), an expanded command word
-# (`$SHELL -c`, `$l`), a quoted word in a git command (a `-c
-# core.pager=...` or alias value git runs), a double-quoted payload with a
-# command substitution, and an unquoted or unterminated heredoc. The
+# word makes it EXEC and read in full: a shell or other runner (sh/bash/zsh
+# -c, eval, source, xargs, watch, ssh, su, sudo, env -S, trap, alias, `...
+# | sh`, a heredoc fed to a shell), a script by path or bare name, an
+# expanded command word (`$SHELL -c`, `$l`), and any program not on the
+# list. So are a git command with an option that names a program (`-c
+# core.pager=...`, an alias value), a listed tool given a program option
+# (rg --pre, sort --compress-program, wget -e), a payload holding a command
+# substitution (double-quoted, or single-quoted where zsh re-evaluates it:
+# `read`, `shift`, `return`, `[[ -eq ]]` run `$(...)` inside a quoted
+# subscript), and an unquoted or unterminated heredoc. The
 # arguments of a test (`[`, `[[`, `test`) are data too. The lists are in
-# the awk block (safe_word(), sed_runs(), runner(), exec_text()).
+# the awk block (safe_word(), git_read(), gh_read(), docker_read(),
+# sed_runs(), prog_opt(), exec_text()).
 #   RESIDUAL (data mode), a deliberate reduction from cbac851/d8cf63e,
 #   which read every payload in full: a stash write that names NO stash
 #   verb (a glob git-stash word bare or with options only, `git-st*sh -u`;
@@ -511,10 +515,6 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # The `?` of `$?` (an exit status, a number) is not a glob and is not
   # marked (DND-780); every other glob character is marked as before.
   # PQ is accepted for call compatibility and left empty.
-  # XQ[k] is 1 when a double-quoted part of word k holds a command
-  # substitution (`$(`, a backtick, or a zsh `${(` flag that can evaluate):
-  # such a payload runs when the shell expands it, so it is never data
-  # (DND-799).
   # HEREDOCS (DND-799): the body of a `<<` / `<<-` here-document is not
   # tokenized with the command. It is cut out whole: HB[h] is the body of
   # heredoc h (HB[0] is the count), HQ[h] is 1 when the delimiter was quoted
@@ -524,9 +524,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # its line (a comment, or a literal `#` word) or inside `((`/`$[`
   # arithmetic (a shift) is not taken as a heredoc: the lines after it are
   # tokenized with the command, as before.
-  function tokenize(text, W, QF, SB, UX, PQ, XQ, HB, HQ,    n, i, L, c, st, cur, has, q, ns, skip, ux, xq, wq, hdp, hds, nohd, cm, ar, np, pd, pq, ps, nh, h, pos, nx, line, t, body, bl, term, op) {
+  function tokenize(text, W, QF, SB, UX, PQ, HB, HQ,    n, i, L, c, st, cur, has, q, ns, skip, ux, wq, hdp, hds, nohd, cm, ar, np, pd, pq, ps, nh, h, pos, nx, line, t, body, bl, term, op) {
     n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; skip = 0; ux = 0; L = length(text)
-    xq = 0; wq = 0; hdp = 0; cm = 0; ar = 0; np = 0; nh = 0; HB[0] = 0
+    wq = 0; hdp = 0; cm = 0; ar = 0; np = 0; nh = 0; HB[0] = 0
     for (i = 1; i <= L; i++) {
       c = substr(text, i, 1)
       if (st == 1) {
@@ -536,10 +536,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (st == 2) {
         if (c == "\"") st = 0
         else if (c == "\\" && i < L && substr(text, i + 1, 1) ~ /["\\$`]/) { i++; cur = cur substr(text, i, 1) }
-        else {
-          if (c == "`" || (c == "$" && (substr(text, i + 1, 1) == "(" || substr(text, i + 1, 2) == "{("))) xq = 1
-          cur = cur c; if (is_sep(c)) q = 1
-        }
+        else { cur = cur c; if (is_sep(c)) q = 1 }
         continue
       }
       if (c == "\\") { wq = 1; if (i < L) { i++; c = substr(text, i, 1); if (c != "\n") { cur = cur c; has = 1 } } continue }
@@ -563,9 +560,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         nohd = (cur ~ /\$\[/)
         if (has && cur !~ /^[0-9]+$/) {
           if (skip) { skip = 0; if (hdp) { np++; pd[np] = cur; pq[np] = wq; ps[np] = hds; hdp = 0 } }
-          else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; XQ[n] = xq; ns = 0 }
+          else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; ns = 0 }
         }
-        cur = ""; has = 0; q = 0; ux = 0; xq = 0; wq = 0; hdp = 0
+        cur = ""; has = 0; q = 0; ux = 0; wq = 0; hdp = 0
         if (substr(text, i + 1, 1) == "(") continue
         op = c
         while (i < L && substr(text, i + 1, 1) ~ /[<>&|-]/) { i++; op = op substr(text, i, 1) }
@@ -576,9 +573,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (is_sep(c)) {
         if (has) {
           if (skip) { skip = 0; if (hdp) { np++; pd[np] = cur; pq[np] = wq; ps[np] = hds; hdp = 0 } }
-          else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; XQ[n] = xq; ns = 0 }
+          else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; ns = 0 }
         }
-        cur = ""; has = 0; q = 0; ux = 0; xq = 0; wq = 0
+        cur = ""; has = 0; q = 0; ux = 0; wq = 0
         # `((` opens arithmetic (a `<<` inside it is a shift); `))` closes it.
         if (c == "(" && substr(text, i + 1, 1) == "(") ar++
         else if (c == ")" && substr(text, i + 1, 1) == ")" && ar > 0) { ar--; i++ }
@@ -614,7 +611,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (c ~ /[*?[{]/) { cur = cur c "\001"; has = 1; continue }
       cur = cur c; has = 1
     }
-    if (has && !skip) { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; XQ[n] = xq }
+    if (has && !skip) { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux }
     HB[0] = nh
     return n
   }
@@ -813,30 +810,23 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # (the accepted false positive in the header).
   # A payload is EXEC (read in full, as before) when any of these holds:
   #   * the text it sits in has a command word safe_word() does not know
-  #     (FAIL CLOSED: an unknown program may run the string, as at, sg -c,
-  #     tar --to-command or a script written in the same call would), or a
-  #     git / gh command word whose subcommand is not a known read-only one;
-  #   * the text it sits in holds a RUNNER word (runner(), below) anywhere:
-  #     a shell (`sh -c`, `bash -lc`, `cat f | sh`, `find -exec sh -c`,
-  #     `bash <<\047EOF\047`), eval, source, `.`, exec, xargs, parallel,
-  #     watch, ssh, su, runuser, sudo, doas, env (`env -S`), script, flock,
-  #     tmux, screen, trap, alias, fc, an editor that runs `!cmd` (vi, vim,
-  #     nvim, ex), a terminal emulator; or a command word built by expansion
-  #     (`$SHELL -c`, `while read l; do $l; done <<\047EOF\047`);
-  #   * a quoted word whose simple command holds a git word: a -c value git
-  #     runs (`git -c core.pager=\047...\047 log`, an alias value);
-  #   * a double-quoted part of it holds a command substitution (`$(`, a
-  #     backtick, `${(`), which the shell runs while expanding the word;
+  #     (FAIL CLOSED): a shell or other runner (`sh -c`, `cat f | sh`,
+  #     `bash <<\047EOF\047`, eval, source, `.`, xargs, sudo, env -S, trap,
+  #     alias), a script by path or bare name, a command word built by
+  #     expansion (`$SHELL -c`, `while read l; do $l; done`), or any program
+  #     not listed (at, sg, tar, watchexec, ...);
+  #   * a git, gh, glab or docker command that is not a known read
+  #     (git_read(), gh_read(), docker_read(): `git -c core.pager=...`,
+  #     `gh pr checkout`, `docker exec`), a sed with an `e` command, or a
+  #     listed tool given a program option (prog_opt());
+  #   * it holds a command substitution (`$(`, a backtick, `${(`): the
+  #     shell runs it while expanding a double-quoted word, and a builtin
+  #     may re-evaluate a single-quoted one;
   #   * a heredoc whose delimiter is unquoted (its body is expanded) or that
   #     has no terminating line.
   # A payload nested in a data payload is data too. A payload nested in an
   # exec payload is decided again from the text it sits in.
   function weak(r) { return r ~ /^(expanded|unread-config)$/ }
-  function runner(t) {
-    gsub(/\001/, "", t); sub(/^.*\//, "", t)
-    return t ~ /^(sh|bash|zsh|dash|ksh|ksh93|mksh|ash|yash|posh|busybox|fish|tcsh|csh|rc|pwsh|powershell)[0-9.-]*$/ \
-      || t ~ /^(eval|source|exec|xargs|parallel|watch|ssh|su|runuser|sudo|doas|env|script|flock|tmux|screen|byobu|dtach|abduco|trap|alias|fc|vi|vim|nvim|ex|xterm|kitty|alacritty|foot|wezterm|konsole|gnome-terminal|nsenter|chroot|systemd-run|unbuffer|expect)$/
-  }
   # safe_word(t): a command word known NOT to run a string it is given (a
   # data consumer, a file or text utility, a shell keyword or builtin that
   # runs nothing). An interpreter is here on purpose: its string is data to
@@ -850,7 +840,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # attribute evaluates arithmetic, which in bash runs a `$(...)` inside
   # an array subscript).
   function safe_word(t) {
-    return t ~ /^(jq|yq|gojq|awk|gawk|mawk|nawk|grep|egrep|fgrep|rg|curl|wget|echo|printf|cat|tac|head|tail|sort|uniq|wc|cut|tr|tee|column|paste|join|comm|diff|cmp|ls|stat|file|date|basename|dirname|realpath|readlink|test|true|false|cd|pushd|popd|export|unset|set|shift|sleep|mkdir|rmdir|touch|cp|mv|rm|ln|chmod|python|python3|ruby|perl|node|xxd|od|base64|sha1sum|sha256sum|md5sum|bc|expr|seq|nl|fold|fmt|rev|iconv|uname|hostname|whoami|id|pwd|which|type|command|builtin|nohup|time|noglob|nocorrect|mktemp|du|df|ps|pgrep|printenv|read|wait|return|exit|break|continue|if|then|else|elif|fi|for|while|until|do|done|case|esac|!|-|:)$/ \
+    return t ~ /^(jq|yq|gojq|awk|gawk|mawk|nawk|grep|egrep|fgrep|rg|curl|wget|echo|printf|cat|tac|head|tail|sort|uniq|wc|cut|tr|tee|column|paste|join|comm|diff|cmp|ls|stat|file|date|basename|dirname|realpath|readlink|test|true|false|cd|pushd|popd|export|unset|set|sleep|mkdir|rmdir|touch|cp|mv|rm|ln|chmod|python|python3|ruby|perl|node|xxd|od|base64|sha1sum|sha256sum|md5sum|bc|expr|seq|nl|fold|fmt|rev|iconv|uname|hostname|whoami|id|pwd|which|type|command|builtin|nohup|time|noglob|nocorrect|mktemp|du|df|ps|pgrep|printenv|wait|if|then|else|elif|fi|for|while|until|do|done|case|esac|!|-|:)$/ \
       || t == "[\001" || t == "[\001[\001" || t == "{\001" || t == "}"
   }
   # gh_read(W, SB, n, k): the gh or glab at word k runs a read-only
@@ -928,6 +918,19 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     if (sc == "config") return lst && !mut && nonopt <= 1
     return 0
   }
+  # prog_opt(t, W, SB, n, k): listed tool t at word k is given an option
+  # that names a program for it to run (critic round 6; the sweep read
+  # the --help and man page of each listed tool for such options): rg --pre,
+  # sort --compress-program, wget -e/--execute/--use-askpass/--config (a
+  # wgetrc command can set use_askpass).
+  function prog_opt(t, W, SB, n, k,    j) {
+    for (j = k + 1; j <= n && !SB[j]; j++) {
+      if (t == "rg" && W[j] ~ /^--pre(=|$)/) return 1
+      if (t == "sort" && W[j] ~ /^--compress-program/) return 1
+      if (t == "wget" && W[j] ~ /^(-e|--execute|--use-askpass|--config)/) return 1
+    }
+    return 0
+  }
   # sed_runs(W, SB, n, k): the sed at word k may run a command: a script
   # file (-f, --file), or a script word holding `e` where GNU sed reads a
   # command or an s/// flag (after an address, a separator, a brace, a
@@ -943,35 +946,24 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
     }
     return 0
   }
-  # exec_text(W, SB, UX, n): 1 when the text may run a string it holds: a
-  # runner word anywhere, `.` in command position, a command word built by
-  # expansion, or any command word that safe_word() does not know (git and
-  # gh only with a read-only subcommand).
+  # exec_text(W, SB, UX, n): 1 when the text may run a string it holds:
+  # any command word safe_word() does not know (a runner, a script, a word
+  # built by expansion or glob, `.`), or a git/gh/glab/docker/sed/listed
+  # tool used in a form that runs a program. An earlier list of runner
+  # words anywhere in the text (critic round 1) was deleted in round 6:
+  # the fail-closed command-word check reaches every case it did.
   function exec_text(W, SB, UX, n,    k, cp, t) {
     cp = 0
     for (k = 1; k <= n; k++) {
       cp = SB[k] || (cp && k > 1 && cmd_prefix(W[k - 1]))
-      if (runner(W[k])) return 1
       if (!cp || is_assign(W[k])) continue
-      if (W[k] == "." || (W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k]))) return 1
       t = W[k]; sub(/^.*\//, "", t)
       if (t == "git") { if (!git_read(W, SB, n, k)) return 1; continue }
       if (t == "sed" || t == "gsed") { if (sed_runs(W, SB, n, k)) return 1; continue }
+      if (prog_opt(t, W, SB, n, k)) return 1
       if (t == "gh" || t == "glab") { if (!gh_read(W, SB, n, k)) return 1; continue }
       if (t == "docker") { if (!docker_read(W, SB, n, k)) return 1; continue }
       if (!safe_word(t)) return 1
-    }
-    return 0
-  }
-  # git_in_cmd(W, SB, n, k): 1 when the simple command holding word k has a
-  # git word.
-  function git_in_cmd(W, SB, QF, n, k,    s, i, t) {
-    for (s = k; s > 1 && !SB[s]; s--) ;
-    for (i = s; i <= n && (i == s || !SB[i]); i++) {
-      # A quoted payload is not the command git word (it may end in one).
-      if (QF[i]) continue
-      t = W[i]; gsub(/\001/, "", t)
-      if (t ~ /(^|\/)git(-[^\/]*)?$/) return 1
     }
     return 0
   }
@@ -979,19 +971,24 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # or "" when it runs no stash write. It stops early only on a literal
   # stash. data is 1 when text is a DATA payload (see above): its expansion
   # findings are dropped.
-  function analyze(text, depth, data,    W, QF, SB, UX, PQ, XQ, HB, HQ, n, k, e, r, sw, m, i, cp, t, j, x, best, ex, h, tst, dm, sc, hit) {
+  function analyze(text, depth, data,    W, QF, SB, UX, PQ, HB, HQ, n, k, e, r, sw, m, i, cp, t, j, x, best, ex, h, tst, dm, sc, hit) {
     # Past the nesting bound, text that still names stash is a deny.
     if (depth > 8) {
       if (!mentions_stash(text)) return ""
       if (!("stash" in NT)) { NT["stash"] = clip(text); NP["stash"] = 0; ND["stash"] = depth }
       return "stash"
     }
-    n = tokenize(text, W, QF, SB, UX, PQ, XQ, HB, HQ); best = ""
+    n = tokenize(text, W, QF, SB, UX, PQ, HB, HQ); best = ""
     # Inside DATA every nested payload is data too: nothing in this text
     # is run, so neither is a quoted word or heredoc within it.
     ex = data ? 0 : exec_text(W, SB, UX, n)
     for (k = 1; k <= n; k++) if (QF[k]) {
-      best = better(best, analyze(W[k], depth + 1, data || !(ex || XQ[k] || git_in_cmd(W, SB, QF, n, k))))
+      # A payload holding a command substitution (`$(`, a backtick, a zsh
+      # `${(` flag) is exec: double-quoted, the shell runs it while
+      # expanding the word; single-quoted, zsh runs it when a builtin
+      # evaluates the string as a subscript (read, shift, return,
+      # [[ -eq ]]; measured, critic rounds 3 and 6).
+      best = better(best, analyze(W[k], depth + 1, data || !(ex || W[k] ~ /\$\(|`|\$\{\(/)))
       if (best == "stash") return best
     }
     for (h = 1; h <= HB[0]; h++) {

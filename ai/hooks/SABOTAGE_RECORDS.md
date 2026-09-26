@@ -782,100 +782,95 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   expansion findings (a glob command word with no or expanded arguments,
   an expanded subcommand, an unread config). Data mode fails closed: a text
   is data only when every command word in it is a known non-runner
-  (`safe_word()`; git, gh and glab only with a read-only subcommand; sed
-  only without an `e` command) and no runner word appears anywhere. Test
-  arguments are data. A shell alias is not re-expanded inside its own
-  expansion. The deny text names no tool a captain lacks.
+  (`safe_word()`; git, gh, glab and docker only in a read form; sed only
+  without an `e` command; no program-naming option) and no payload holds a
+  command substitution. Test arguments are data. A shell alias is not
+  re-expanded inside its own expansion. The deny text names no tool a
+  captain lacks.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`, new section Q
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (critic rounds 1-5 and admiral batches 7-8):** `RESULT: 526
-  passed, 0 failed` / `VERDICT: PASS`.
+- **After (critic rounds 1-6, admiral batches 7-8):** `RESULT: 536 passed,
+  0 failed` / `VERDICT: PASS`.
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
-`RESULT: 475 passed, 51 failed`. The 51 failures, every one an allow case
-or the deny-text check (QA54-QA58 and QA61-QA62, added in rounds 4-5 and
-batch 8, fail on base too):
+`RESULT: 483 passed, 53 failed`. Every failure is an allow case (QA/QB) or
+the deny-text check T2, e.g.:
 
 ```
-QA2 QA3 QA4 QA5 QA6 QA7 QA8 QA10 QA11 QA12 QA13 QA14 QA15 QA16 QA17 QA18
-QA20 QA21 QA22 QA23 QA24 QA25 QA29 QB1 QB2 QB3 QB5 QA32 QA30 QA31 QA33
-QA36 QA42 QA43 QA44 QA45 QA47 QA48 QA49 QA50 QA51 QA52 QA53 T2
-e.g.  FAIL  QA8. awk print field (expected allow)
-      FAIL  QB1. grep -i stash under a self-referential grep alias (expected allow)
-      FAIL  QA44. git branch -a piped to a grep -E alternation (expected allow)
-      FAIL  T2. no deny reason names the Grep tool; the Fix names a script file run with bash
+FAIL  QA8. awk print field (expected allow)
+FAIL  QB1. grep -i stash under a self-referential grep alias (expected allow)
+FAIL  QA24. DND-853: a test after a cd to an expanded dir (expected allow)
+FAIL  QA44. git branch -a piped to a grep -E alternation (expected allow)
+FAIL  T2. no deny reason names the Grep tool; the Fix names a script file run with bash
 ```
 
 Every QX (exec context), QD (named write in data) and QL (literal in data)
 case passes on the base hook: each was already denied, and the change
-keeps it denied. The QA cases not listed were already allowed on base and
-are regression guards.
+keeps it denied. The QA cases that pass on base are regression guards.
 
 ### Sabotage rows (measured 2026-09-26 on the final hook, one mutant copy each)
 
+Rows 3 and 12 are retired: the mechanisms they sabotaged (`git_in_cmd`,
+a runner-word list) were deleted in round 6 once the fail-closed checks
+reached every case they did (their mutants stayed green).
+
 | id | Mutation | Observed failure |
 |---|---|---|
-| S-DND799-1 | Every quoted payload and heredoc read as data | O103c, QX1, QX2, QX3, QX4, QX5, QX6, QX7, QX8, QX9, QX10, QX11, QX12, QX13, QX14, QX15, QX16, QX17, QX18, QX19, QX20, QX21, QX22, QX23, QX24, QX25, QX26, QX27, QX28, QX29, QX30, QX31, QX35, QX36, QX37, QX38, QX39, QX40, QX41, QX42, QX43, QX44, QX45, QX46, QX47, QX48, QX49, QX50, QX52, QX53, QX54, QX55, QX56, QX57, QX58, QX59, QX60, QX61, QX62, QX63, QX64, QX65, QX66, QX67 — `444 passed, 64 failed` |
-| S-DND799-2 | `exec_text` off (no runner, unknown-word or expanded-word context) | QX1, QX2, QX3, QX4, QX5, QX6, QX7, QX8, QX9, QX10, QX11, QX12, QX13, QX14, QX15, QX16, QX17, QX18, QX21, QX22, QX23, QX24, QX25, QX26, QX31, QX36, QX37, QX38, QX39, QX40, QX41, QX42, QX43, QX44, QX45, QX46, QX47, QX48, QX49, QX50, QX52, QX55, QX56, QX57, QX58, QX59, QX60, QX61, QX62, QX63, QX64, QX65, QX66, QX67 — `454 passed, 54 failed` |
-| S-DND799-3 | A quoted word in a git command no longer exec (`git_in_cmd`) | QX53 `git -c core.pager='...' log -1` — `507 passed, 1 failed` |
-| S-DND799-4 | Double-quoted command substitution no longer forces exec (`XQ`) | O103c, QX29, QX30, QX35 — `504 passed, 4 failed` |
-| S-DND799-5 | An unquoted or unterminated heredoc read as data | QX27, QX28 — `506 passed, 2 failed` |
-| S-DND799-6 | `<<` after a word-leading `#` or inside `((` taken as a heredoc | QX32, QX33 — `506 passed, 2 failed` |
-| S-DND799-7 | Alias self-expansion guard (`AEXP`) removed | QB1 `grep -i stash` — `507 passed, 1 failed` |
-| S-DND799-8 | Test arguments no longer data (`dm = data`) | QA24, QA25 — `506 passed, 2 failed` |
-| S-DND799-9 | Data drops every finding (`weak()` true for all, glob-head off in data) | QD1, QD2, QD4-QD9, QL1-QL3, QL5, QL6 — `495 passed, 13 failed` |
-| S-DND799-10 | Unknown command words treated as safe (critic round 1) | QX26, QX36-QX50, QX52, QX62-QX71 — `488 passed, 27 failed` (round-4 hook) |
-| S-DND799-11 | A payload nested in data no longer data | QA2, QA20 — `506 passed, 2 failed` |
-| S-DND799-12 | Runner list emptied | QX55 `docker exec c sh -c '...'`, QX56 `... \| docker run -i img sh` — `506 passed, 2 failed` |
-| S-DND799-13 | `sed_runs()` never true (critic round 2) | QX57-QX61 — `503 passed, 5 failed` |
-| S-DND799-14 | The round-2 sweep reverted (sed, ag, ack, local, declare, typeset, readonly back in `safe_word()`) | QX57-QX64 — `500 passed, 8 failed` |
-| S-DND799-15 | Data drops named writes again (the round-2 data mode; critic round 3) | QD1, QD2, QD4-QD9 — `500 passed, 8 failed` |
-| S-DND799-16 | Data mode judges a glob command word as exec does (no FP relief) | QA2-QA8, QA10-QA18, QA20-QA23, QA29-QA33, QA36, QA42-QA45, QA47-QA53, QB2, QB3, QB5 — `468 passed, 40 failed` |
-| S-DND799-17 | `git_read()` always true (every git subcommand read-only) | QX26, QX48, QX65-QX67 — `503 passed, 5 failed` |
-| S-DND799-18 | `gh_read()` always true (any gh/glab command read-only) | QX50, QX68 `gh pr checkout`, QX71 `gh pr merge` — `512 passed, 3 failed` |
-| S-DND799-19 | `git tag` judged by the branch listing flags again | QX69 `git tag -a` (editor), QX70 `git tag -v` (gpg) — `513 passed, 2 failed` |
-| S-DND799-20 | git options skipped unchecked again (round-4 `git_read()`) | QX72 `-c core.fsmonitor=./p.sh status`, QX73 `-c diff.external`, QX74 `--upload-pack=`, QX75 `--exec-path` — `518 passed, 4 failed` |
-| S-DND799-21 | `docker_read()` always true (docker any subcommand read-only) | QX76 `... \| docker run -i img at now` — `521 passed, 1 failed` |
+| S-DND799-1 | Every quoted payload and heredoc read as data | O103c, QX1, QX2, QX3, QX4, QX5, QX6, QX7, QX8, QX9, QX10, QX11, QX12, QX13, QX14, QX15, QX16, QX17, QX18, QX19, QX20, QX21, QX22, QX23, QX24, QX25, QX26, QX27, QX28, QX29, QX30, QX31, QX35, QX36, QX37, QX38, QX39, QX40, QX41, QX42, QX43, QX44, QX45, QX46, QX47, QX48, QX49, QX50, QX52, QX53, QX54, QX55, QX56, QX57, QX58, QX59, QX60, QX61, QX62, QX63, QX64, QX65, QX66, QX67, QX68, QX69, QX70, QX71, QX72, QX73, QX74, QX75, QX76, QX77, QX78, QX79, QX80, QX81, QX82, QX83, QX84 — `455 passed, 81 failed` |
+| S-DND799-2 | `exec_text()` off (every text data) | QX1, QX2, QX3, QX4, QX5, QX6, QX7, QX8, QX9, QX10, QX11, QX12, QX13, QX14, QX15, QX16, QX17, QX18, QX19, QX20, QX21, QX22, QX23, QX24, QX25, QX26, QX31, QX36, QX37, QX38, QX39, QX40, QX41, QX42, QX43, QX44, QX45, QX46, QX47, QX48, QX49, QX50, QX52, QX53, QX54, QX55, QX56, QX57, QX58, QX59, QX60, QX61, QX62, QX63, QX64, QX65, QX66, QX67, QX68, QX69, QX70, QX71, QX72, QX73, QX74, QX75, QX76, QX77, QX78, QX79, QX80 — `465 passed, 71 failed` |
+| S-DND799-4 | A payload holding `$(`, a backtick or `${(` no longer exec | O103c, QX29, QX30, QX35, QX81, QX84 — `530 passed, 6 failed` |
+| S-DND799-5 | An unquoted or unterminated heredoc read as data | QX27, QX28 — `534 passed, 2 failed` |
+| S-DND799-6 | `<<` after a word-leading `#` or inside `((` taken as a heredoc | QX32, QX33 — `534 passed, 2 failed` |
+| S-DND799-7 | Alias self-expansion guard (`AEXP`) removed | QB1 — `535 passed, 1 failed` |
+| S-DND799-8 | Test arguments no longer data (`dm = data`) | QA24, QA25 — `534 passed, 2 failed` |
+| S-DND799-9 | Data drops every finding (`weak()` true for all, glob-head off in data) | QD1, QD2, QD3, QD6, QD7, QD8, QD9, QL1, QL2, QL3, QL5, QL6 — `524 passed, 12 failed` |
+| S-DND799-10 | Unknown command words, git, gh, glab and docker all treated as safe (critic round 1) | QX1, QX2, QX3, QX4, QX5, QX6, QX7, QX8, QX9, QX10, QX11, QX12, QX13, QX14, QX15, QX16, QX17, QX18, QX19, QX20, QX21, QX22, QX23, QX24, QX25, QX26, QX31, QX36, QX37, QX38, QX39, QX40, QX41, QX42, QX43, QX44, QX45, QX46, QX47, QX48, QX49, QX50, QX52, QX53, QX54, QX55, QX56, QX62, QX63, QX64, QX65, QX66, QX67, QX68, QX69, QX70, QX71, QX72, QX73, QX74, QX75, QX76 — `474 passed, 62 failed` |
+| S-DND799-11 | A payload nested in data no longer data | QA2, QA20, QA60, QA62 — `532 passed, 4 failed` |
+| S-DND799-13 | `sed_runs()` never true (critic round 2) | QX57, QX58, QX59, QX60, QX61 — `531 passed, 5 failed` |
+| S-DND799-14 | The round-2 sweep reverted (sed, ag, ack, local, declare, typeset, readonly, shift back in `safe_word()`) | QX57, QX58, QX59, QX60, QX61, QX62, QX63, QX64 — `528 passed, 8 failed` |
+| S-DND799-15 | Data drops named writes again (the round-2 data mode; critic round 3) | QD1, QD2, QD3, QD6, QD7, QD8, QD9 — `529 passed, 7 failed` |
+| S-DND799-16 | Data mode judges a glob command word as exec does (no false-positive relief) | QA2, QA3, QA4, QA5, QA6, QA7, QA8, QA10, QA11, QA12, QA13, QA14, QA15, QA16, QA17, QA18, QA20, QA21, QA22, QA23, QA29, QB2, QB3, QB5, QA32, QA30, QA31, QA33, QA36, QA42, QA43, QA44, QA45, QA47, QA48, QA49, QA50, QA51, QA52, QA53, QA54, QA55, QA56, QA57, QA58, QA60, QA62, QA63, QA64 — `487 passed, 49 failed` |
+| S-DND799-17 | `git_read()` always true | QX19, QX20, QX26, QX48, QX53, QX54, QX65, QX66, QX67, QX69, QX70, QX72, QX73, QX74, QX75 — `521 passed, 15 failed` |
+| S-DND799-18 | `gh_read()` always true (critic round 4) | QX50, QX68, QX71 — `533 passed, 3 failed` |
+| S-DND799-19 | `git tag` judged by the branch listing flags again (critic round 4) | QX69, QX70 — `534 passed, 2 failed` |
+| S-DND799-20 | git options skipped unchecked again (critic round 5) | QX53, QX72, QX73, QX74, QX75 — `531 passed, 5 failed` |
+| S-DND799-21 | `docker_read()` always true (critic round 5) | QX76 — `535 passed, 1 failed` |
+| S-DND799-22 | `prog_opt()` off: rg --pre, sort --compress-program, wget -e (critic round 6) | QX77, QX78, QX79, QX80 — `532 passed, 4 failed` |
 
-### Critic rounds
+### Critic rounds (each a kind-1 finding; convergence check run from round 2)
 
 - **Round 1 (e214145), closed runner list.** A program that runs a string
-  but was not listed (`at`, `batch`, `sg -c`, `tar --to-command`, `sched`,
-  `watchexec`, `entr -s`, `npx -c`, `nodemon --exec`) had its payload read
-  as data. Fixed at the class: data requires every command word to be a
+  but was not listed (at, batch, sg -c, tar --to-command, sched,
+  watchexec, entr -s, npx -c, nodemon --exec) had its payload read as
+  data. Fixed at the class: data requires every command word to be a
   KNOWN non-runner (row 10).
-- **Round 2 (72c9304), sed runs a string.** Kind 1: a wrong entry in round
-  1's list. Swept the class "a listed word that can run a string": sed goes
-  through `sed_runs()`; ack, ag, local, declare, typeset and readonly left
-  the list (rows 13, 14).
-- **Round 3 (2fc1d83), evaluators outside every list.** A command string
-  in an exported variable git runs (GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF), a
-  subscript a builtin re-evaluates. Kind 1, third instance of one class:
-  "data mode trusts the lists to prove nothing evaluates the string".
-  Fixed at the root: data mode keeps every spelling that names the write,
-  so an evaluator the lists miss can only run a verb-hiding spelling
-  (rows 9, 15; QD1-QD9). The QX cases were respelled to hide the verb
-  (`true; .../git-st*sh`, an implicit push) so the exec mechanisms stay
+- **Round 2 (72c9304), sed runs a string.** Swept the list for words that
+  can run a string: sed goes through `sed_runs()`; ack, ag, local,
+  declare, typeset and readonly left it (rows 13, 14).
+- **Round 3 (2fc1d83), evaluators outside every list** (a GIT_SSH_COMMAND
+  export, a subscript a builtin re-evaluates). The third instance of one
+  class: "data mode trusts the lists to prove nothing evaluates the
+  string". Fixed at the root: data keeps every spelling that names the
+  write (rows 9, 15). QX payloads were respelled to hide the verb
+  (`true; .../git-st*sh`, an implicit push) so the exec checks stay
   load-bearing.
-- **Round 4 (fe719f0), list entries too coarse.** `gh pr` admitted `gh pr
-  checkout` (runs git and its hooks), and `git tag -a`/`-v` scored as
-  listing flags (they open the editor or run gpg.program). Kind 1, the same
-  list class as rounds 1-2. Swept both lists at the root: gh/glab are
-  judged by a read-only (command, subcommand) pair (`gh_read()`), and
-  `git tag` lists only bare or with `-l`/`--list` (rows 18, 19).
-- **Round 5 (5b8edbe), git options unchecked.** `git_read()` skipped every
-  option before the subcommand, so `git -c core.fsmonitor=./p.sh status`
-  (an unquoted program path, so not a quoted word `git_in_cmd` sees) was a
-  read. Kind 1, same list class. Swept at the root: git options are
-  allowlisted before the subcommand (-C, --no-pager, -P, pathspec
-  switches), and program-naming options after it make the text exec; the
-  critic's docker note went the same way (`docker_read()`). The
-  `git_in_cmd` comment that credited it with argv programs was removed.
-  Deleting the git/gh/docker read lists was priced and rejected: it
-  would put back the batch-7 false positives (`git branch -a | grep -E`,
-  `gh pr view -q`, `docker ps --format`), the main friction this ticket
-  exists to remove. What stays out of reach is the header RESIDUAL
-  (rows 20, 21).
+- **Round 4 (fe719f0), list entries too coarse.** `gh pr checkout`, `git
+  tag -a`/`-v`. gh/glab are judged by a read (command, subcommand) pair;
+  tag lists only bare or with -l/--list (rows 18, 19).
+- **Round 5 (5b8edbe), git options unchecked.** `git -c
+  core.fsmonitor=./p.sh status`. git options are allowlisted; docker is
+  judged by subcommand (rows 20, 21). Deleting the git/gh/docker read
+  lists was priced and rejected: it puts back the batch-7 false positives
+  (`git branch -a | grep -E`, `gh pr view -q`, `docker ps --format`).
+- **Round 6 (a1b4a41), program options on listed tools** (rg --pre, sort
+  --compress-program, wget -e). Swept the list against each tool's --help
+  and man page for program-running options: `prog_opt()` (row 22). Also
+  measured on zsh: `read`, `shift`, `return` and `[[ -eq ]]` run a `$(...)`
+  inside a quoted subscript, so a payload holding `$(`, a backtick or `${(`
+  is exec (row 4; replaces the double-quote-only XQ flag), and read and
+  shift left the list. The mutation sweep then showed `git_in_cmd` and the
+  runner-word list could no longer fire on their own, so both were
+  deleted rather than patched.
