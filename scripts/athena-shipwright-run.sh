@@ -568,8 +568,18 @@ stale_dirt_send() {
     sd_display_paths "${MAIN_CHECKOUT}" 20 | sed 's/^/  /'
     printf '\nFix: these paths are not the shipwright'"'"'s, and it will never touch them. For each one, the owner picks: commit it, add it to .gitignore, or remove it. Until then every hourly tick yields and no retrospective runs. If the dirt is known inert and one run should proceed anyway, run scripts/athena-shipwright-run.sh with SHIPWRIGHT_ALLOW_DIRTY=1. This alert is not repeated until the dirty paths or their newest mtime change.\n'
   } >"${body}"
-  out="$(cd -- "${repo}" && timeout 20 "${send_mail}" --local harness-alerts-detector shipwright-stale-dirt \
-          --to custom --re "${record}" --body-file "${body}" 2>&1)"; rc=$?
+  # This channel's detector side has a second writer, the inbox-client
+  # watchdog, under the same identity. send-mail serialises the two with the
+  # channel's .sender.lock and REFUSES (never collides) when the other holds
+  # it, so a refusal is retried briefly here; any other failure is not.
+  local attempt=0
+  while :; do
+    attempt=$(( attempt + 1 ))
+    out="$(cd -- "${repo}" && timeout 20 "${send_mail}" --local harness-alerts-detector shipwright-stale-dirt \
+            --to custom --re "${record}" --body-file "${body}" 2>&1)"; rc=$?
+    [ "${rc}" -ne 0 ] && [ "${attempt}" -lt 3 ] && grep -q 'already sending on' <<<"${out}" || break
+    sleep 2
+  done
   rm -f "${body}"
   if [ "${rc}" -ne 0 ]; then
     printf '%s\n' "${out}" | head -n 3 >&2

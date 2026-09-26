@@ -1516,6 +1516,25 @@ else
   bad "retry after failed send" "alerts=$(alert_count) err=$(cat "$a/runner.err")"
 fi
 
+# The detector side has a second writer (the inbox-client watchdog) on the
+# same identity. send-mail REFUSES while the other holds .sender.lock; the
+# runner retries that refusal briefly instead of losing the tick's alert.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+old_file "$r" erl_crash.dump
+mkdir -p "${ALERTS}"; lockf="${ALERTS}/.sender.lock"; : >"${lockf}"
+rm -f "${TMP}/lock-held"
+( exec 7<>"${lockf}"; flock 7; : >"${TMP}/lock-held"; sleep 3 ) &
+HOLDER_PID=$!
+for _ in $(seq 1 100); do [ -e "${TMP}/lock-held" ] && break; sleep 0.1; done
+rc="$(run_runner "$r" SHIPWRIGHT_STALE_DIRT_ESCALATE=1)"
+wait "$HOLDER_PID" 2>/dev/null; HOLDER_PID=""
+if [ -e "${TMP}/lock-held" ] && [ "$rc" -eq 0 ] && [ "$(alert_count)" = "1" ]; then
+  ok "a send refused because the other detector-side writer holds the lock is retried and delivered"
+else
+  bad "lock contention retried" "held=$([ -e "${TMP}/lock-held" ] && echo yes) rc=$rc alerts=$(alert_count) err=$(cat "$a/runner.err")"
+fi
+
 # The runner's own state under ai-artifacts/ is never dirt, so it can never
 # alert on itself.
 clear_alerts
