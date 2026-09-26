@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 136 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8).
+- **Baseline:** `RESULT: 144 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7).
 
 ### Fail-first (no guard)
 
@@ -254,6 +254,8 @@ RESULT: 21 passed, 58 failed
 | S-DND670-6 | Quoted words no longer re-read as commands | I7 `sh -c 'git stash'`, I8 `bash -c "cd x && git stash pop"`, I35 — `94 passed, 3 failed` |
 | S-DND670-7 | Tokenizer no longer marks unquoted glob/brace characters | I40-I45, I47, I53, I54, I56, I57 — `125 passed, 11 failed` (measured on the round-6 code) |
 | S-DND670-8 | Shell-alias expansion in command position removed | S1, S3, S4, S5 — `132 passed, 4 failed` (measured on the round-6 code) |
+| S-DND670-9 | `one_word` emptied (no global option is known to take no value) | I63 `git --no-pager $SUB` allowed — `143 passed, 1 failed` (round-7 code) |
+| S-DND670-10 | A POSSIBLE subcommand decided in full (an expanded one denies too) | I64 `git --some-future-opt diff $X`, A26 `$EDITOR $FILE` over-denied — `142 passed, 2 failed` (round-7 code) |
 
 ### Critic round 1 regression (the `--attr-source` miss)
 
@@ -410,3 +412,42 @@ RESULT: 121 passed, 15 failed
 After the fix: `RESULT: 136 passed, 0 failed`. Live, against the real
 snapshots: `gstp`, `gstd`, `gstc`, `gsta`, `gstaa`, `gstall` deny; `gstl`,
 `gsts` allow.
+
+### Critic round 7 — cluster round (over-denial from rounds 1 + 6 together)
+
+The critic found `git --no-pager diff $BASE` denied: round 1's unknown-option
+continuation treated `diff` as a possible option value and judged `$BASE` as
+the subcommand, and round 6 made that word "expanded", a deny. A semantic
+follow-on of two earlier edits, so a cluster round per athena:critic-convergence.
+
+- **Cluster:** `git_verdict` candidate selection (the continuation), the
+  `expanded` verdict in `decide`, the expanded-head branch, and the option
+  tables.
+- **Joint invariant:** a word is the DEFINITE subcommand only when every word
+  before it is a known option or a known option's value; it is decided in
+  full. A word reachable only by assuming an unknown option takes (or does not
+  take) a value is a POSSIBLE subcommand and denies only when it is stash or a
+  stash alias. An expanded head makes every candidate possible.
+- **One edit:** `one_word` table (git 2.55 usage), `unknown` state in
+  `git_verdict`, and the expanded-head branch folded into it.
+- **Previously resolved findings still resolved:** every earlier case (I27-I29
+  unknown options, A15-A17 alias options, I31-I37 quoting, A22/A25 shell
+  alias and `$GIT sp`, I40-I58 globs) passes in the same run.
+
+The same edit dropped `cmd_prefix` by accident; the awk program then failed to
+parse and the hook allowed everything, silently. The suite caught it (21
+cases red). Fixed, and made observable: an evaluator crash now allows WITH an
+additionalContext saying the guard did not run (F7). The new cases against the
+round-6 hook:
+
+```
+FAIL  I59. --no-pager diff with an expanded argument (expected allow) ... deny
+FAIL  I60. --no-pager show with an unquoted brace ref (expected allow) ... deny
+FAIL  I61. --no-pager log with a glob pathspec (expected allow) ... deny
+FAIL  I62. -P log with an expanded argument (expected allow) ... deny
+FAIL  I64. unknown option, then diff with an expanded argument (expected allow) ... deny
+FAIL  F7. a crashed evaluator allows with a notice, not silently status=0 out=[]
+RESULT: 138 passed, 6 failed
+```
+
+After the fix: `RESULT: 144 passed, 0 failed`.

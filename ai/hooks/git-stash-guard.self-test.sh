@@ -246,6 +246,13 @@ case_cmd "I55. glob git-stash word with a read verb" allow '/usr/libexec/git-cor
 case_cmd "I56. glob git-stash word, option-first (implicit push)" deny '/usr/libexec/git-core/git-st*sh -u'
 case_cmd "I57. glob command word running a stash alias" deny '/usr/bin/g?t sp'
 case_cmd "I58. glob command word, unrelated subcommand" allow '/usr/bin/g?t status'
+case_cmd "I59. --no-pager diff with an expanded argument" allow 'git --no-pager diff $BASE'
+case_cmd "I60. --no-pager show with an unquoted brace ref" allow 'git --no-pager show HEAD@{1}'
+case_cmd "I61. --no-pager log with a glob pathspec" allow 'git --no-pager log -- ai/hooks/*.sh'
+case_cmd "I62. -P log with an expanded argument" allow 'git -P log $SHA'
+case_cmd "I63. --no-pager with an expanded subcommand" deny 'git --no-pager $SUB'
+case_cmd "I64. unknown option, then diff with an expanded argument" allow 'git --some-future-opt diff $X'
+case_cmd "I65. unknown option, then a stash alias" deny 'git --some-future-opt v sp'
 
 echo "== S: shell aliases from the Bash tool snapshot =="
 case_cmd "S1. shell alias gstp = git stash pop" deny 'gstp'
@@ -336,6 +343,16 @@ run "$(jq -cn --arg c 'git stash pop' '{tool_name:"Bash",tool_input:{command:$c}
 check "F5. no cwd in the input still denies the pop" deny
 run "$(json /nonexistent/dir 'git sp')"
 check "F6. cwd outside any repo still resolves global aliases" deny
+# F7: a crashed evaluator allows, but says so (a failed evaluation must not
+# read as "nothing found"). A fake awk that fails comes first on PATH.
+mkdir -p "$TMP/badbin"
+printf '#!/bin/sh\nexit 2\n' > "$TMP/badbin/awk"; chmod +x "$TMP/badbin/awk"
+OUT=$(json "$WT" 'git stash pop' | PATH="$TMP/badbin:$PATH" sh "$HOOK" 2>/dev/null); STATUS=$?
+if [ "$STATUS" -eq 0 ] && printf '%s' "$OUT" | grep -q 'could not evaluate' && ! printf '%s' "$OUT" | grep -q '"deny"'; then
+  record "F7. a crashed evaluator allows with a notice, not silently" PASS
+else
+  record "F7. a crashed evaluator allows with a notice, not silently" FAIL
+fi
 
 echo
 echo "==================================================="

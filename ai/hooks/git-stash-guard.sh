@@ -42,8 +42,11 @@
 # `bash -c`, `env`, `command`, `sudo`, `xargs`, `nohup`, in a subshell, after a
 # `cd`. Git global options are skipped (`-C <dir>`, `-c k=v`, `--git-dir[=]`,
 # `--work-tree`, `--attr-source`, `--no-pager`, ...). A word after an option
-# the hook does not know may be that option's value, so it is decided AND the
-# scan continues past it: a new two-word option cannot hide `stash`. Also denied:
+# the hook does not know may be that option's value, so the scan continues past
+# it, and every word reachable only that way denies only when it is stash or a
+# stash alias (see git_verdict): a new two-word option cannot hide `stash`, and
+# `git --no-pager diff $X` stays allowed. Not caught: a subcommand built by
+# expansion after an unknown option (`git --new-opt v $X`). Also denied:
 #   * a command word built by expansion followed by `stash` or a stash alias
 #     (`$GIT stash`, `$GIT sp`, `${GIT:-git} stash`, `$(command -v git) stash`,
 #     a backtick form);
@@ -89,8 +92,9 @@
 #
 # Design guarantees (mirror forge-identity-guard):
 #   * FAIL-OPEN — any error (missing jq, unparseable input, non-Bash tool, no
-#     match) exits 0 and ALLOWS silently. A deny is only emitted on a positive
-#     match.
+#     match) exits 0 and ALLOWS. A deny is only emitted on a positive match.
+#     A crash of the evaluator itself is not silent: it allows with an
+#     additionalContext saying the guard did not run.
 #   * NO ESCAPE HATCH — there is no env var or marker that switches it off. A
 #     session that must write the stash list is the owner, in a terminal.
 #
@@ -288,33 +292,40 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
   function two_word(t) {
     return t ~ /^-[Cc]$/ || t ~ /^--(git-dir|work-tree|namespace|config-env|super-prefix|attr-source)$/
   }
+  # one_word(t): a git global option known to take NO value (git 2.55 usage,
+  # plus the pathspec switches from git(1)).
+  function one_word(t) {
+    return t ~ /^(-[pPvh]|--(paginate|no-pager|bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs|html-path|man-path|info-path|exec-path|version|help))$/
+  }
   # git_verdict(w, n, j, expanded_head, depth): decide the git invocation
-  # whose words are w[j..n]. Known two-word options skip their value. A word
-  # right after an UNKNOWN dash option may be that option'"'"'s value (a newer
-  # git adds such options: --attr-source did), so it is decided as a candidate
-  # AND the scan continues past it. That over-denies `git --flag word stash`,
-  # never misses. After an expanded head (`$GIT`) a candidate counts when it
-  # is stash or a stash alias.
-  function git_verdict(w, n, j, expanded_head, depth,    r) {
+  # whose words are w[j..n]. The joint rule (DND-670 critic rounds 1 and 7):
+  #   * a word is the DEFINITE subcommand when every word before it is a known
+  #     option or a known option'"'"'s value; it is decided in full (stash, a
+  #     stash alias, or a subcommand built by expansion all deny);
+  #   * a word that is the subcommand only if an UNKNOWN option (a newer git
+  #     adds such options: --attr-source did) takes no value, or that follows
+  #     one as a possible value, is a POSSIBLE subcommand: it denies only when
+  #     it is stash or a stash alias. The scan continues past a possible value.
+  # So a new two-word option cannot hide `stash`, and `git --no-pager diff $X`
+  # is not denied. An expanded head (`$GIT`) makes every candidate possible.
+  function git_verdict(w, n, j, expanded_head, depth,    r, unknown, maybe_value) {
+    unknown = expanded_head
     while (j <= n) {
       if (two_word(w[j])) { j += 2; continue }
-      if (w[j] ~ /^-/) { j++; continue }
-      if (expanded_head) {
-        # A word built by expansion may be git: `stash` or a stash alias after
-        # it counts. An expanded candidate after it does not (`$EDITOR $FILE`).
-        r = decide(w[j], (j + 1 <= n ? w[j + 1] : ""), depth)
-        if (r == "stash" || r == "alias") return "expanded-git"
-      } else {
-        r = decide(w[j], (j + 1 <= n ? w[j + 1] : ""), depth)
-        if (r != "") return r
+      if (w[j] ~ /^-/) {
+        if (w[j] !~ /=/ && !one_word(w[j])) unknown = 1
+        j++; continue
       }
-      if (j > 1 && w[j - 1] ~ /^-/ && w[j - 1] !~ /=/ && !two_word(w[j - 1])) { j++; continue }
+      r = decide(w[j], (j + 1 <= n ? w[j + 1] : ""), depth)
+      maybe_value = (j > 1 && w[j - 1] ~ /^-/ && w[j - 1] !~ /=/ && !two_word(w[j - 1]) && !one_word(w[j - 1]))
+      if (unknown) {
+        if (r == "stash" || r == "alias") return (expanded_head ? "expanded-git" : r)
+      } else if (r != "") return r
+      if (maybe_value) { j++; continue }
       break
     }
     return ""
   }
-  # analyze(text, depth): the verdict for one command text, and for every
-  # quoted word in it that may itself be a command.
   # cmd_prefix(t): a word after which the next word is still a command word.
   function cmd_prefix(t) {
     return t ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || t ~ /^(env|command|sudo|exec|nohup|xargs|time|eval|builtin|nice|setsid|then|do|else|if|while|until|!)$/
@@ -389,12 +400,21 @@ VERDICT=$(GSG_CMD="$CMD" GSG_ALIASES="$ALIASES" GSG_SHALIASES="$SHALIASES" awk '
     r = analyze(ENVIRON["GSG_CMD"], 0)
     if (r != "") print r
   }' 2>/dev/null)
+AWK_RC=$?
+
+# An evaluator that crashed must not read as "nothing found". The command is
+# still allowed (fail-open), but the session is told the guard did not run.
+if [ "$AWK_RC" -ne 0 ]; then
+  jq -cn --arg c "git-stash-guard: could not evaluate this command (its awk evaluator exited $AWK_RC), so it was ALLOWED unchecked. Fix: run \`sh ~/dev/custom/ai/hooks/git-stash-guard.self-test.sh\` and report the failure to your admiral; do not run a stash write meanwhile." \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",additionalContext:$c}}' 2>/dev/null
+  exit 0
+fi
 
 case "$VERDICT" in
   stash) deny 'this runs `git stash` with a verb that writes the stash list (bare `git stash`, push/save, pop, apply, drop, clear, store, branch, or an option-first implicit push).' ;;
   shell-alias) deny 'this runs a shell alias loaded into the Bash tool from the owner profile (oh-my-zsh defines `gstp` = `git stash pop`) that expands to a stash write.' ;;
   alias) deny 'this runs a git alias that resolves to a stash write (or a shell alias that mentions stash).' ;;
-  expanded) deny 'this runs git with a subcommand built by expansion (`git $X`, a glob `git st?sh`, a brace `git {stash,pop}`), which may be a stash write and cannot be read here. Write the subcommand literally.' ;;
+  expanded) deny 'this runs git with a subcommand built by expansion (`git $X`, a glob `git st?sh`, a brace `git {stash,pop}`), which may be a stash write and cannot be read here. Spell the subcommand (and a stash verb) out literally, quoting any glob or brace characters.' ;;
   glob-head) deny 'this runs a command word the shell rewrites by glob or brace expansion (`/usr/bin/g?t`, `git-st*sh`), which may be git or git-stash writing the stash list. Spell the command word literally.' ;;
   expanded-git) deny 'this runs `stash` through a command word built by expansion (`$GIT stash`, `$(command -v git) stash`), which may be git writing the stash list.' ;;
 esac
