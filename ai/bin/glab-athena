@@ -149,11 +149,32 @@ if [ "${1:-}" = git ]; then
 fi
 
 # --- normal path: run glab as the Athena service account -------------------
-[ -r "$TOKEN_FILE" ] || {
-	echo "glab-athena: the athena-amby token file $TOKEN_FILE is missing or unreadable, so this cannot run as Athena." >&2
-	echo "  Fix: do not run \`glab-athena refresh\` or any \`glab auth\` yourself (owner-gated), and do not fall back to plain \`glab\`; escalate to your admiral with the command + error and wait (athena:github -> \"When a forge write can't be done as Athena\")." >&2
-	exit 1
+# DND-725: a readable file is not enough. An empty or whitespace-only token file
+# (or GITLAB_ATHENA_TOKEN_FILE pointing at one) used to export GITLAB_TOKEN="",
+# and glab then answered as the OWNER from its own config and keyring. Now the
+# token must be a real token, and glab runs with a fresh empty config dir and no
+# inherited identity/host variables, so the owner's login is unreachable even if
+# a token check were ever wrong. Mechanism and measurements:
+# ai/lib/forge-cli-isolation.sh.
+FCI_LIB="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/forge-cli-isolation.sh"
+[ -r "$FCI_LIB" ] || {
+	echo "glab-athena: REFUSING: cannot load $FCI_LIB, so glab cannot be isolated from the owner's login." >&2
+	echo "  Fix: run glab-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)." >&2
+	exit 3
 }
-GITLAB_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
-export GITLAB_TOKEN GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 GLAB_SKIP_UPDATE_CHECK=1
-exec glab "$@"
+# shellcheck source=../lib/forge-cli-isolation.sh
+. "$FCI_LIB"
+TOKEN=""
+[ -r "$TOKEN_FILE" ] && TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+fci_require_token 1 glab-athena athena-amby "token file $TOKEN_FILE" "$TOKEN"
+# Every GITLAB_*/GLAB_*/GL_* variable (token sources, GITLAB_URI/GITLAB_API_HOST
+# host overrides, GLAB_CONFIG_DIR, CI autologin), plus OAUTH_TOKEN and
+# CI_JOB_TOKEN. Only the values set below reach glab.
+fci_scrub_env '^(GITLAB_|GLAB_|GL_)|^(OAUTH_TOKEN|CI_JOB_TOKEN)$'
+fci_isolate glab-athena GLAB_CONFIG_DIR
+export GITLAB_TOKEN="$TOKEN" GITLAB_HOST=gitlab.com GLAB_NO_PROMPT=1 GLAB_CHECK_UPDATE=false
+unset TOKEN
+# A child, not exec: fci_isolate's trap removes the config dir when glab exits.
+rc=0
+glab "$@" || rc=$?
+exit "$rc"

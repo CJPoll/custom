@@ -39,6 +39,11 @@ command -v jq      >/dev/null 2>&1 || die "jq not found. Fix: install jq."
 [ -r "$APP_ID_FILE" ] || die "missing App ID at $APP_ID_FILE. Fix: echo <app-id> > $APP_ID_FILE"
 [ -r "$KEY" ]         || die "missing private key at $KEY. Fix: place the GitHub App private key there and \`chmod 600\` it."
 
+# DND-725: token checks and CLI isolation shared with glab-athena.
+# shellcheck source=../lib/forge-cli-isolation.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/forge-cli-isolation.sh" \
+  || die "cannot load ai/lib/forge-cli-isolation.sh. Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
+
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
 mint_token() {
@@ -61,7 +66,7 @@ mint_token() {
     https://api.github.com/app/installations/"$inst_id"/access_tokens)"
   tok="$(printf '%s' "$resp" | jq -r '.token')"
   exp_at="$(printf '%s' "$resp" | jq -r '.expires_at')"
-  [ -n "$tok" ] && [ "$tok" != "null" ] \
+  [ "$tok" != "null" ] && fci_token_ok "$tok" \
     || die "installation token mint failed: $(printf '%s' "$resp" | jq -r '.message // "unknown error"')"
 
   exp_epoch="$(date -d "$exp_at" +%s 2>/dev/null || echo $((now + 3000)))"
@@ -73,7 +78,9 @@ get_token() {
   if [ -r "$CACHE" ]; then
     local line tok exp
     line="$(cat "$CACHE")"; tok="${line%%$'\t'*}"; exp="${line##*$'\t'}"
-    if [ -n "$tok" ] && [ "$tok" != "$exp" ] \
+    # A cached value that is not one token (empty, whitespace, a control
+    # character) is ignored and re-minted, never handed to gh (DND-725).
+    if fci_token_ok "$tok" && [ "$tok" != "$exp" ] \
        && grep -Eq '^[0-9]+$' <<<"$exp" \
        && [ "$exp" -gt "$(( $(date +%s) + 300 ))" ]; then
       printf '%s' "$tok"; return
@@ -82,12 +89,27 @@ get_token() {
   mint_token
 }
 
+# use_app_token : mint/read the App token, refuse one that is not a token, and
+# set up gh so the owner's login is unreachable: every inherited GITHUB_* and
+# GH_ENTERPRISE_TOKEN is scrubbed (GH_REPO and other non-identity GH_* are
+# kept), GH_CONFIG_DIR is a fresh empty dir removed on exit, and GH_TOKEN /
+# GH_HOST are ours. An empty GH_TOKEN would otherwise fall through to
+# GITHUB_TOKEN and then to the owner's hosts.yml (measured; DND-725). gh must
+# then run as a child, never exec, so the config dir is cleaned up.
+use_app_token() {
+  local tok
+  tok="$(get_token)" || exit $?
+  fci_require_token 3 gh-athena 'athena-harness[bot]' "the App token (cache $CACHE)" "$tok"
+  fci_scrub_env '^GITHUB_|^(GH_TOKEN|GH_ENTERPRISE_TOKEN|GH_HOST|GH_CONFIG_DIR)$'
+  fci_isolate gh-athena GH_CONFIG_DIR
+  export GH_TOKEN="$tok" GH_HOST=github.com
+}
+
 if [ "${1:-}" = "--check" ]; then
-  tok="$(get_token)"
-  slug="$(GH_TOKEN="$tok" gh api /app -q .slug 2>/dev/null || true)"
+  use_app_token
   # /app requires the JWT, not the installation token; confirm identity via the
   # installation instead (the token acting on a repo is the real proof).
-  who="$(GH_TOKEN="$tok" gh api /installation/repositories -q '.repositories[0].full_name' 2>/dev/null || true)"
+  who="$(gh api /installation/repositories -q '.repositories[0].full_name' 2>/dev/null || true)"
   [ -n "$who" ] || die "token minted but could not reach installation repositories."
   echo "gh-athena: OK — authenticated as the App; installation reaches e.g. $who."
   exit 0
@@ -115,6 +137,7 @@ if [ "${1:-}" = "git" ]; then
   FG_DRY_RUN="${GH_ATHENA_GIT_DRY_RUN:-}"
   fg_refuse_non_https "$@"
   TOKEN="$(get_token)"   # an assignment, so a mint failure stops here (set -e)
+  fci_require_token 3 gh-athena 'athena-harness[bot]' "the App token (cache $CACHE)" "$TOKEN"
   fg_git_exec x-access-token "$TOKEN" "$@"
 fi
 
@@ -128,8 +151,9 @@ fi
 # Test seam: GH_ATHENA_MERGE_DRY_RUN=1 runs the guard (reads only) and then
 # prints the command instead of exec'ing gh, for ANY command.
 
-TOKEN="$(get_token)"
-export GH_TOKEN="$TOKEN" GH_HOST=github.com
+# Isolation comes first so the guard's own gh reads run as the App, with the
+# same (empty) alias set the final gh sees.
+use_app_token
 # shellcheck source=../lib/gh-merge-guard.sh
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/gh-merge-guard.sh" \
   || die "cannot load ai/lib/gh-merge-guard.sh. Fix: run gh-athena from a full ~/dev/custom checkout (ai/bin and ai/lib side by side)."
@@ -139,4 +163,7 @@ if [ -n "${GH_ATHENA_MERGE_DRY_RUN:-}" ]; then
   printf 'gh-athena: dry-run: would exec gh %s\n' "$*"
   exit 0
 fi
-exec gh "$@"
+# A child, not exec: fci_isolate's trap removes the config dir when gh exits.
+rc=0
+gh "$@" || rc=$?
+exit "$rc"

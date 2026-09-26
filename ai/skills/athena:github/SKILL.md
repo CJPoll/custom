@@ -51,7 +51,10 @@ It is **not on `PATH`** — invoke it by that full path. It takes the same
 arguments as `gh`, plus a `git` passthrough for authenticated pushes. Auth uses
 **no PAT**: it signs a short-lived JWT with the App's private key
 (`~/.claude/github-athena-key.pem`), mints a ~1h installation token, and runs
-`gh` with `GH_TOKEN` set — the key is never in argv. Examples:
+`gh` with `GH_TOKEN` set — the key is never in argv. `gh` runs with a fresh,
+empty `GH_CONFIG_DIR` and with inherited `GITHUB_*` / `GH_ENTERPRISE_TOKEN`
+removed, so the owner's `gh` login is unreachable (DND-725). The owner's `gh`
+aliases do not apply; use the real command name. Examples:
 
 ```sh
 ~/dev/custom/ai/bin/gh-athena pr create --fill --base main

@@ -42,10 +42,15 @@ for raw API calls. Examples:
 - Token: `~/.claude/gitlab-athena-token`, mode `600`, one token line.
   `$GITLAB_ATHENA_TOKEN_FILE` overrides the path. The wrapper reads it at call
   time and exports it as `GITLAB_TOKEN`; it **never** puts the token in argv, a
-  URL, or a config file. If the file is missing/unreadable the wrapper exits
-  non-zero and does nothing.
+  URL, or a config file. If the file is missing, unreadable, empty or
+  whitespace-only, the wrapper refuses with a `Fix:` and does nothing (DND-725:
+  an empty token used to make glab answer as the owner).
+- glab runs with a fresh, empty config dir (`GLAB_CONFIG_DIR`) and with every
+  inherited `GITLAB_*`/`GLAB_*`/`GL_*`, `OAUTH_TOKEN` and `CI_JOB_TOKEN`
+  removed, so the owner's glab login and keyring entry are unreachable. The
+  owner's glab aliases do not apply; use the real command name.
 - It pins `GITLAB_HOST=gitlab.com` and sets `GLAB_NO_PROMPT=1` /
-  `GLAB_SKIP_UPDATE_CHECK=1`, so it never blocks on a prompt.
+  `GLAB_CHECK_UPDATE=false`, so it never blocks on a prompt.
 - Requires `glab` on `PATH` (it is — via asdf).
 
 ## Which identity am I?
