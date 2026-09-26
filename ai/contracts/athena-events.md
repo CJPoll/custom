@@ -3156,8 +3156,11 @@ reads each edge as NOT ELIGIBLE:
   one document, a trigger key other than a single `on`, a NEL, U+2028 or U+2029
   character (a line break in YAML 1.1 only), text that is not UTF-8, and a blob
   that is not a regular file are each UNDETERMINED.
-- **Rule 3 matches the hit file's name** in the raw text and in the parsed
-  strings of every other workflow at BASE and HEAD, ignoring case. It also
+- **Rule 3 matches the hit file's name** in the raw text and in every scalar
+  the YAML parser decodes, keys included, of every other workflow at BASE and
+  HEAD, ignoring case. The scalars come from the parse tree, never a loader, so
+  a value a loader refuses (a date) cannot hide an escaped name. A workflow that
+  does not parse counts as naming every hit. It also
   counts a hit file that the `ci-local-references-v1` walk reaches from a
   merge-time CI config. A workflow that mentions `workflow_run` counts as
   naming every hit: it follows workflows by `name:`, not by path, and runs with

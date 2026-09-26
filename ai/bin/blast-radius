@@ -1124,7 +1124,7 @@ REGULAR_BLOB_MODES = %w[100644 100755].freeze
 # workflow: `.github/workflows/action.yml` is a composite action that a push
 # workflow, or another repo, loads as `owner/repo/.github/workflows@main`.
 GRANT_WORKFLOW_PATTERN = ".github/workflows/**"
-ACTION_METADATA = /\Aaction\.ya?ml\z/.freeze
+ACTION_METADATA = /\Aaction\.ya?ml\z/i.freeze
 # Code points Psych (YAML 1.1) reads as line breaks and YAML 1.2 does not: NEL,
 # LINE SEPARATOR, PARAGRAPH SEPARATOR. Two parsers would split such a file into
 # different keys.
@@ -1296,42 +1296,39 @@ def top_level_workflows(repo, rev)
   out.split("\0").select { |p| p.match?(GRANT_CALLER_FILE) }.sort
 end
 
-# Every string in a parsed YAML document, keys included: a parsed string has its
-# escapes decoded (`c\x69.yml` is `ci.yml` there), which the raw text hides.
-def yaml_all_strings(node, out = [])
-  case node
-  when Hash then node.each { |k, v| yaml_all_strings(k, out); yaml_all_strings(v, out) }
-  when Array then node.each { |v| yaml_all_strings(v, out) }
-  when String then out << node
-  end
+# Every scalar in a YAML parse tree, keys included, as the parser decoded it.
+# Read from the tree, never through a loader: a loader refuses a document for a
+# value type (a date) that GitHub reads as a plain string, and a refusal must
+# not leave the escapes undecoded. Every document of a stream is covered.
+def yaml_scalar_values(node, out = [])
+  out << node.value if node.is_a?(Psych::Nodes::Scalar)
+  (node.children || []).each { |c| yaml_scalar_values(c, out) }
   out
 end
 
 # The texts a word search over a workflow must cover, lowercased: the raw text,
-# and every parsed string, keys included. A double-quoted YAML escape
-# (`c\x69.yml`, `"workflow\x5frun":`) is decoded only in the parsed strings, so
-# a search of the raw text alone misses it. EVERY word search in rule 3 goes
-# through here. Unparseable text is still searched raw.
+# and every decoded scalar. A double-quoted YAML escape (`c\x69.yml`,
+# `"workflow\x5frun":`) is decoded only in the scalars, so a search of the raw
+# text alone misses it. EVERY word search in rule 3 goes through here. nil when
+# the text does not parse: what it names is then UNKNOWN, and the caller fails
+# closed rather than searching the raw text and calling a miss clean.
 def workflow_corpora(text)
-  corpora = [text]
-  begin
-    corpora << yaml_all_strings(YAML.safe_load(text, aliases: true)).join("\n")
-  rescue Psych::Exception
-    nil
-  end
-  corpora.map(&:downcase)
+  stream = Psych.parse_stream(text)
+  [text, yaml_scalar_values(stream).join("\n")].map(&:downcase)
+rescue Psych::Exception
+  nil
 end
 
-# Does this workflow text name `target`? Matched on the basename, ignoring case.
-# A name that merely contains the basename counts, which can only make a head
+# Does this workflow name `target`? Matched on the basename, ignoring case. A
+# name that merely contains the basename counts, which can only make a head
 # NOT ELIGIBLE.
-def names_file?(text, target)
+def names_file?(corpora, target)
   needle = File.basename(target).downcase
-  workflow_corpora(text).any? { |c| c.include?(needle) }
+  corpora.any? { |c| c.include?(needle) }
 end
 
-def mentions_workflow_run?(text)
-  workflow_corpora(text).any? { |c| c.include?("workflow_run") }
+def mentions_workflow_run?(corpora)
+  corpora.any? { |c| c.include?("workflow_run") }
 end
 
 def side_read(repo, rev, path, side, reads)
@@ -1415,7 +1412,7 @@ def grant_eligible(repo, base, head, surfaces)
   # another repo (`owner/repo/.github/workflows@main`), which no scan here sees.
   unless workflow_hits.empty?
     [["base", base_sha], ["head", head_sha]].each do |side, rev|
-      top_level_workflows(repo, rev).select { |w| File.basename(w).match?(/\Aaction\.ya?ml\z/i) }.each do |a|
+      top_level_workflows(repo, rev).select { |w| File.basename(w).match?(ACTION_METADATA) }.each do |a|
         workflow_hits.each do |f|
           reasons << [f, "#{a} at #{side} makes .github/workflows/ an action that default-branch runs can load"]
         end
@@ -1460,14 +1457,19 @@ def grant_eligible(repo, base, head, surfaces)
       next if grant_trigger_read(text).verdict == :pr_only
 
       scanned[side] << w
+      corpora = workflow_corpora(text)
       workflow_hits.each do |f|
         next if f == w
 
-        reasons << [f, "referenced by #{w} at #{side}, whose triggers are not exactly {pull_request}"] if names_file?(text, f)
+        if corpora.nil?
+          reasons << [f, "#{w} at #{side} is not parseable YAML, so whether it names this file is UNDETERMINED"]
+          next
+        end
+        reasons << [f, "referenced by #{w} at #{side}, whose triggers are not exactly {pull_request}"] if names_file?(corpora, f)
         # workflow_run selects the workflows it follows by `name:`, not by path,
         # and runs with default-branch privileges on what they produced. The
         # name is not the file, so any workflow_run consumer counts.
-        if mentions_workflow_run?(text)
+        if mentions_workflow_run?(corpora)
           reasons << [f, "#{w} at #{side} mentions workflow_run, which follows workflows by name -- " \
                          "it may consume this one"]
         end
@@ -2746,8 +2748,8 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
   not_eligible.call("the same, from a pull_request_review workflow (not exactly {pull_request})",
                     ["referenced by .github/workflows/post-merge.yml"],
                     seed: ref_seed.call("name: pm\non: pull_request_review\njobs:\n  c:\n    uses: ./.github/workflows/ci.yml\n"))
-  not_eligible.call("the same, from an UNPARSEABLE workflow (scanned as raw text)",
-                    ["referenced by .github/workflows/post-merge.yml"],
+  not_eligible.call("the same, from an UNPARSEABLE workflow (what it names is unknown)",
+                    [".github/workflows/post-merge.yml at base is not parseable YAML"],
                     seed: ref_seed.call("name: pm\non: [\n  uses: ./.github/workflows/ci.yml\n"))
   # A caller present only at base is also a hit (deleted), so rule 2 already
   # decides it; the base-side scan still names the reference, pinned here.
@@ -2806,6 +2808,23 @@ def grant_self_test(tmp, check, run_br, mkrepo, wf, put, deploy_wf, pr_wf)
                       wf.call(r, "deploy.yml", "name: d\non:\n  \"workflow\\x5frun\":\n    workflows: [ci]\n" \
                                                "jobs:\n  d:\n    runs-on: x\n    steps: [{run: sh out/deploy.sh}]\n")
                     })
+  # A loader refuses a date that GitHub reads as a string; the escape must
+  # still be decoded (critic round 6).
+  not_eligible.call("an escaped workflow_run key in a workflow the safe loader refuses (a date)",
+                    [".github/workflows/ci.yml", "workflow_run"],
+                    seed: lambda { |r|
+                      pr_seed.call(r)
+                      wf.call(r, "deploy.yml", "name: d\non:\n  \"workflow\\x5frun\":\n    workflows: [ci]\n" \
+                                               "env:\n  D: 2024-01-01\njobs:\n  d:\n    runs-on: x\n    steps: [{run: echo}]\n")
+                    })
+  not_eligible.call("an escaped hit file name in a push workflow the safe loader refuses (a date)",
+                    ["referenced by .github/workflows/post-merge.yml"],
+                    seed: ref_seed.call("name: pm\non: push\nenv:\n  D: 2024-01-01\njobs:\n  c:\n" \
+                                        "    runs-on: x\n    steps: [{run: \"cat .github/workflows/c\\x69.yml\"}]\n"))
+  not_eligible.call("a hit file name escaped in a SECOND YAML document of a push workflow",
+                    ["referenced by .github/workflows/post-merge.yml"],
+                    seed: ref_seed.call("name: pm\non: push\njobs:\n  c:\n    runs-on: x\n    steps: [{run: echo}]\n" \
+                                        "---\nx: \"c\\x69.yml\"\n"))
   not_eligible.call("a hit file with a NEL/U+2028 line break (YAML 1.1 and 1.2 split it differently)",
                     [".github/workflows/ci.yml", "U+2028"],
                     change: ->(r) { wf.call(r, "ci.yml", on_wf.call("on: pull_request\u2028x: 1\n")) })
