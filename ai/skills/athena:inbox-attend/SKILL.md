@@ -337,7 +337,8 @@ whose filename ends `-shipwright-stale-dirt.md` is NOT a wedge. The hourly
 shipwright cron sends it, once per dirt signature, when its main checkout has
 held the same days-old dirt for several ticks and every tick is yielding. It
 arrives through the same detector channel, so its `from:` reads
-`inbox-client-detector`. Never pass it to `wedge-ticket-decide`. Instead:
+`inbox-client-detector`. Never pass it to `wedge-ticket-decide`, and the
+per-message wedge steps further down do not apply to it. Instead:
 
 1. **Verify.** Its `re:` must be a regular file named `<tick>.skipped`
    directly in the shipwright's `runs/` directory
@@ -363,7 +364,7 @@ arrives through the same detector channel, so its `from:` reads
    `<utc> harness-alerts stale-dirt-dm` when you sent the DM), or `declined
    stale-dirt-unverifiable`.
 
-When the wake names `harness-alerts`, for each wedge message `read-inbox
+When the wake names `harness-alerts`, for each message `read-inbox
 harness-alerts` returned (it is now in
 `${ATHENA_INBOX_ROOT:-$HOME/.local/share/athena}/harness-alerts/to-custom/.acked/<name>`):
 

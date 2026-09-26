@@ -1554,6 +1554,9 @@ fi
 # The message's paths are that same block.
 clear_alerts
 r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+# The owner's git config must not undo the collapse: showUntrackedFiles=all
+# would list every file under node_modules/.
+git -C "$r" config status.showUntrackedFiles all
 mkdir -p "$r/node_modules/pkg"
 for i in $(seq 1 40); do printf 'x\n' >"$r/node_modules/pkg/f$i.js"; done
 for i in $(seq 1 24); do printf 'x\n' >"$r/stray-$i.log"; done
