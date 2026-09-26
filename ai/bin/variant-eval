@@ -75,7 +75,7 @@
 #
 # Usage:
 #   ai/bin/variant-eval --variant <ref> [--baseline <ref>] [--corpus deterministic|full]
-#                       [--runs N] [--out <file>]
+#                       [--runs N] [--out <file>] [--json <file>]
 #   ai/bin/variant-eval --self-test    verify the runner's own logic (NO model, NO git)
 #
 # The model-in-loop `variant-eval --variant … --corpus full` stays OUT of the
@@ -338,6 +338,96 @@ def render_proposal(res)
   end
 
   lines.join("\n") + "\n"
+end
+
+# ---------------------------------------------------------------------------
+# MACHINE-READABLE PROPOSAL (DND-527) — schema v1, for block-optimize (DND-528).
+# Built from the SAME res hash render_proposal reads, so text and JSON cannot
+# disagree; the self-test reads the text back and checks that on every fixture.
+# "Not measured" is null; "measured and found nothing" is []. A consumer must
+# never be able to read a missing measurement as an empty one.
+# ---------------------------------------------------------------------------
+JSON_SCHEMA_ID = "variant-eval/proposal@1"
+
+# Verdicts under which no complete regressions/improvements set exists.
+UNSCORED_VERDICTS = %i[blocked unmeasured].freeze
+
+def proposal_json(res)
+  verdict = res.fetch(:verdict)
+  scored = !UNSCORED_VERDICTS.include?(verdict)
+  full = res[:corpus] == "full"
+  un = res[:unmeasured]
+  det = res[:deterministic]
+  subj = res[:t2_subjects]
+  {
+    "schema" => JSON_SCHEMA_ID,
+    "variant" => res[:variant],
+    "variant_sha" => res[:variant_sha],
+    "baseline" => res[:baseline],
+    "baseline_sha" => res[:baseline_sha],
+    "corpus" => res[:corpus],
+    "runs" => full ? res[:runs] : nil,
+    "gate_ok" => res.fetch(:gate_ok),
+    "gate_detail" => verdict == :blocked ? Array(res[:gate_detail]) : nil,
+    "verdict" => verdict.to_s,
+    "unmeasured" => un && { "side" => un[:side].to_s, "part" => un[:part].to_s, "reason" => un[:reason].to_s },
+    "deterministic" => det && { "regressed" => det[:regressed], "fixed" => det[:fixed], "new" => det[:new] },
+    "t2_subjects" => full && subj ? { "base" => subject_json(subj[:base]), "var" => subject_json(subj[:var]) } : nil,
+    "t2" => full && res[:t2] ? res[:t2].map { |row| t2_row_json(row) } : nil,
+    "regressions" => scored ? res.fetch(:regressions) : nil,
+    "improvements" => scored ? res.fetch(:improvements) : nil
+  }
+end
+
+def subject_json(subject)
+  { "lines" => subject["lines"], "sha256" => subject["sha256"] }
+end
+
+def t2_row_json(row)
+  side = ->(score) { score && { "k" => score[:k], "n" => score[:n] } }
+  { "name" => row[:name], "base" => side.(row[:base]), "var" => side.(row[:var]), "flip" => row[:flip].to_s }
+end
+
+# Write data as JSON to path atomically: a temp file in the SAME directory,
+# fsynced, then renamed over path. A reader sees the old path state or the
+# whole new file, never a partial one. -> nil on success, else a reason; the
+# temp file is removed on failure.
+def write_json_atomic(path, data)
+  dir = File.dirname(File.expand_path(path))
+  tmp = File.join(dir, ".#{File.basename(path)}.tmp-#{Process.pid}-#{format('%08x', rand(2**32))}")
+  File.open(tmp, File::WRONLY | File::CREAT | File::EXCL, 0o644) do |f|
+    f.write(JSON.pretty_generate(data) + "\n")
+    f.flush
+    f.fsync
+  end
+  File.rename(tmp, path)
+  nil
+rescue SystemCallError, IOError => e
+  begin
+    File.delete(tmp) if tmp && File.exist?(tmp)
+  rescue SystemCallError
+    nil
+  end
+  "#{e.class}: #{e.message}"
+end
+
+# Checked BEFORE measuring, so a full run (~50 model calls) cannot end at an
+# unwritable path. Removes a stale file at path: a run that later dies without
+# a proposal then leaves NO JSON, which a consumer reads as not measured, never
+# an earlier run's verdict. -> nil when usable, else a reason.
+def prepare_json_path(path, out_file)
+  full = File.expand_path(path)
+  return "--json #{path} is the same file as --out" if out_file && File.expand_path(out_file) == full
+  return "--json #{path} is a directory" if File.directory?(full)
+
+  dir = File.dirname(full)
+  return "--json #{path}: directory #{dir} does not exist" unless File.directory?(dir)
+  return "--json #{path}: directory #{dir} is not writable" unless File.writable?(dir)
+
+  File.delete(full) if File.exist?(full) || File.symlink?(full)
+  nil
+rescue SystemCallError => e
+  "--json #{path}: #{e.class}: #{e.message}"
 end
 
 # ---------------------------------------------------------------------------
@@ -623,17 +713,31 @@ def t2_rows(base_counts, var_counts)
   { rows: rows, regressions: regressions, improvements: improvements }
 end
 
-def measure(variant:, baseline:, corpus:, runs:, out_file:)
-  res = { variant: variant, baseline: baseline, corpus: corpus }
-  measure_sides(res, variant: variant, baseline: baseline, corpus: corpus, runs: runs)
-  emit(res, out_file)
+def measure(variant:, baseline:, corpus:, runs:, out_file:, json_file: nil)
+  # DND-527: each ref is resolved to a commit ONCE, and that sha is what gets
+  # checked out and recorded, so the proposal names exactly what was measured.
+  res = { variant: variant, variant_sha: resolve_commit(variant), baseline: baseline,
+          baseline_sha: resolve_commit(baseline), corpus: corpus, runs: runs }
+  measure_sides(res, variant: res[:variant_sha], baseline: res[:baseline_sha], corpus: corpus, runs: runs)
+  emit(res, out_file, json_file)
 rescue Unmeasured => e
   # A side ran but did not measure. What WAS measured stays in res and is
   # rendered; the verdict is UNMEASURED, never KEEP/REVERT (DND-504).
   res[:unmeasured] = { side: e.side, part: e.part, reason: e.message }
   res[:verdict] = verdict(gate_ok: res.fetch(:gate_ok, true), regressions: [], improvements: [],
                           unmeasured: res[:unmeasured])
-  emit(res, out_file)
+  emit(res, out_file, json_file)
+end
+
+# The full commit sha a ref names, via the guarded capture (rev-parse is
+# read-only). A ref that names no commit raises with a Fix:, before any worktree.
+def resolve_commit(ref)
+  out, err, st = capture(["git", "rev-parse", "--verify", "--quiet", "--end-of-options", "#{ref}^{commit}"])
+  sha = out.to_s.strip
+  return sha if st.success? && sha.match?(/\A[0-9a-f]{40,64}\z/)
+
+  raise "#{ref.inspect} does not name a commit#{stderr_tail(err)}. Fix: pass a branch, tag or sha that " \
+        "`git rev-parse --verify #{ref}^{commit}` resolves (fetch it first if it is a remote ref)."
 end
 
 # Fill res with the gate result, the deterministic diff and (for --corpus full)
@@ -677,12 +781,27 @@ def measure_sides(res, variant:, baseline:, corpus:, runs:)
   end
 end
 
-def emit(res, out_file)
+# Exit code when the proposal was computed but the --json write failed. The
+# proposal is still printed; a consumer finds no JSON and must treat the run
+# as not measured.
+JSON_WRITE_FAILED_EXIT = 3
+
+def emit(res, out_file, json_file = nil)
   text = render_proposal(res)
   puts text
   if out_file
     File.write(out_file, text)
     puts "variant-eval: proposal written to #{out_file}"
+  end
+  if json_file
+    why = write_json_atomic(json_file, proposal_json(res))
+    if why
+      warn "variant-eval: FAILED — could not write the JSON proposal to #{json_file}: #{why}."
+      warn "  Fix: pass --json a path in an existing, writable directory, then re-run. No JSON was left at " \
+           "#{json_file}; a consumer must read that as not measured."
+      return JSON_WRITE_FAILED_EXIT
+    end
+    puts "variant-eval: JSON proposal (#{JSON_SCHEMA_ID}) written to #{json_file}"
   end
   verdict_exit_code(res[:verdict])
 end
@@ -699,6 +818,9 @@ end
 def self_test
   ok = true
   fail = ->(msg) { warn "self-test: FAIL — #{msg}"; ok = false }
+  # DND-527: every res fixture below that render_proposal reads is also fed to
+  # proposal_json, so text and JSON are checked against the SAME hash.
+  json_fixtures = {}
 
   # (a) a true->false deterministic flip -> REVERT
   diff_a = deterministic_diff({ "c1" => true }, { "c1" => false })
@@ -760,11 +882,13 @@ def self_test
   fail.("5/10 -> 9/10 must NOT be an improvement (interval includes 0)") unless hard_keep[:improvements].empty?
   # (j) the full-corpus proposal renders an unmeasured side as n/a (never 0.00)
   # and states that A/B comparability is blocked on DND-503.
-  full_out = render_proposal({
-    variant: "cand", baseline: "origin/main", corpus: "full", gate_ok: true, verdict: :inconclusive,
+  full_res = {
+    variant: "cand", baseline: "origin/main", corpus: "full", runs: 10, gate_ok: true, verdict: :inconclusive,
     deterministic: { regressed: [], fixed: [], new: [] }, t2: new_only[:rows],
     regressions: [], improvements: []
-  })
+  }
+  json_fixtures[:full_new_only] = full_res
+  full_out = render_proposal(full_res)
   fail.("a variant-only T2 row must render base=n/a") unless full_out.include?("base=n/a")
   fail.("a variant-only T2 row must not render a 0.00 base") if full_out.include?("base=0.00")
   fail.("the full proposal must state when an A/B delta is comparable (DND-503, 35be30f)") \
@@ -776,6 +900,7 @@ def self_test
     verdict: :keep, deterministic: { regressed: [], fixed: ["c1"], new: [] },
     regressions: [], improvements: ["c1"]
   }
+  json_fixtures[:keep] = keep_res
   keep_out = render_proposal(keep_res)
   fail.("a KEEP proposal must carry the human-gate label") \
     unless keep_out.include?("requires gate-green + explicit human adoption")
@@ -786,19 +911,23 @@ def self_test
   # (e) a variant whose gate fails -> BLOCKED before scoring
   ve = verdict(gate_ok: false, regressions: ["anything"], improvements: ["anything"])
   fail.("a red gate must verdict BLOCKED regardless of delta (got #{ve})") unless ve == :blocked
-  blocked_out = render_proposal({
+  blocked_res = {
     variant: "cand", baseline: "origin/main", corpus: "deterministic",
     gate_ok: false, verdict: :blocked, gate_detail: ["some check FAILED"]
-  })
+  }
+  json_fixtures[:blocked] = blocked_res
+  blocked_out = render_proposal(blocked_res)
   fail.("a BLOCKED proposal must say it was not scored") unless blocked_out.include?("not scored")
 
   # (f) every failure/deny path carries Fix:
   fail.("BLOCKED proposal must carry a Fix: line") unless blocked_out.include?("Fix:")
-  revert_out = render_proposal({
+  revert_res = {
     variant: "cand", baseline: "origin/main", corpus: "deterministic", gate_ok: true,
     verdict: :revert, deterministic: { regressed: ["c1"], fixed: [], new: [] },
     regressions: ["c1"], improvements: []
-  })
+  }
+  json_fixtures[:revert] = revert_res
+  revert_out = render_proposal(revert_res)
   fail.("REVERT proposal must carry a Fix: line") unless revert_out.include?("Fix:")
 
   # (g) DND-503: each side's T2 run evaluates ITS OWN worktree's rendered
@@ -849,7 +978,17 @@ def self_test
     same_out = render_proposal(t2_res)
     fail.("a full proposal must name the T2 subjects") unless same_out.include?(sb["sha256"][0, 12])
     fail.("identical T2 subjects must be called out") unless same_out.include?("IDENTICAL")
+    json_fixtures[:full_same_subject] = t2_res
     diff_out = render_proposal(t2_res.merge(t2_subjects: { base: sb, var: sv }))
+    # A full-corpus REVERT with T2 rows on both sides and differing subjects:
+    # regressions and improvements drawn from both corpora.
+    t2_mixed = t2_rows({ "AE-01" => c.new(10, 10), "AE-02" => c.new(0, 10), "AE-03" => c.new(5, 10) },
+                       { "AE-01" => c.new(2, 10), "AE-02" => c.new(10, 10), "AE-03" => c.new(6, 10) })
+    json_fixtures[:full_revert_mixed] = t2_res.merge(
+      runs: 10, verdict: :revert, t2_subjects: { base: sb, var: sv }, t2: t2_mixed[:rows],
+      deterministic: { regressed: ["he:x"], fixed: ["ae:y"], new: ["he:z"] },
+      regressions: ["he:x"] + t2_mixed[:regressions], improvements: ["ae:y"] + t2_mixed[:improvements]
+    )
     fail.("differing T2 subjects must not be called identical") if diff_out.include?("IDENTICAL")
 
     # The side's admiral-eval must CONFIRM it evaluated that render. A ref from
@@ -970,6 +1109,17 @@ def self_test
       # flip as a T2 regression/improvement.
       fail.("a T1 [hook-stdin] row must not be counted as a T2 case (got #{got.inspect})") \
         if got.key?("AE-13a-forge-auth-deny")
+      # DND-527 J5: nor may it reach the JSON proposal's t2 rows.
+      t2_json = proposal_json({
+        variant: "cand", baseline: "origin/main", corpus: "full", runs: 3, gate_ok: true,
+        verdict: :inconclusive, deterministic: { regressed: [], fixed: [], new: [] },
+        t2: t2_rows(got, got)[:rows], regressions: [], improvements: []
+      })["t2"]
+      t2_names = Array(t2_json).map { |r| r["name"] }
+      fail.("J5: the JSON t2 rows must carry the T2 case (got #{t2_names.inspect})") \
+        unless t2_names.include?("AE-01-confirm-before-done")
+      fail.("J5: a T1 [hook-stdin] row must never reach the JSON t2 rows (got #{t2_names.inspect})") \
+        if t2_names.include?("AE-13a-forge-auth-deny")
     rescue StandardError => e
       fail.("a completed admiral-eval run (exit 1 = its regression verdict) must be a measurement, not " \
             "raise #{e.class}: #{e.message[0, 200]}")
@@ -989,11 +1139,13 @@ def self_test
   rescue ArgumentError => e
     fail.("verdict must accept unmeasured: (#{e.message})")
   end
-  un_out = render_proposal({
-    variant: "cand", baseline: "origin/main", corpus: "full", gate_ok: true, verdict: :unmeasured,
+  un_res = {
+    variant: "cand", baseline: "origin/main", corpus: "full", runs: 10, gate_ok: true, verdict: :unmeasured,
     deterministic: { regressed: [], fixed: ["c1"], new: [] }, regressions: [], improvements: ["c1"],
     unmeasured: { side: "variant", part: "T2", reason: "admiral-eval exited 2. Fix: run it" }
-  })
+  }
+  json_fixtures[:unmeasured_t2] = un_res
+  un_out = render_proposal(un_res)
   fail.("an UNMEASURED proposal must say UNMEASURED") unless un_out.include?("VERDICT: UNMEASURED")
   fail.("an UNMEASURED proposal must name the side") unless un_out.include?("variant")
   fail.("an UNMEASURED proposal must carry a Fix:") unless un_out.include?("Fix:")
@@ -1001,10 +1153,12 @@ def self_test
     if un_out.include?("no T2 cases evaluated")
   fail.("an UNMEASURED proposal must not carry KEEP") if un_out.include?("KEEP")
   begin
-    det_un_out = render_proposal({
-    variant: "cand", baseline: "origin/main", corpus: "full", gate_ok: true, verdict: :unmeasured,
-    unmeasured: { side: "baseline", part: "deterministic", reason: "harness-eval exited 2. Fix: run it" }
-  })
+    det_un_res = {
+      variant: "cand", baseline: "origin/main", corpus: "full", runs: 10, gate_ok: true, verdict: :unmeasured,
+      unmeasured: { side: "baseline", part: "deterministic", reason: "harness-eval exited 2. Fix: run it" }
+    }
+    json_fixtures[:unmeasured_deterministic] = det_un_res
+    det_un_out = render_proposal(det_un_res)
   fail.("an unmeasured deterministic side must render NOT MEASURED, never 'regressed: none'") \
     if det_un_out.include?("none") || !det_un_out.include?("NOT MEASURED")
   fail.("an UNMEASURED verdict must exit non-zero") if verdict_exit_code(:unmeasured).zero?
@@ -1073,6 +1227,190 @@ def self_test
     end
   end
 
+  # -- DND-527: the machine-readable proposal (--json) ---------------------
+  json_fixtures[:deterministic_inconclusive] = {
+    variant: "cand", baseline: "origin/main", corpus: "deterministic", gate_ok: true, verdict: :inconclusive,
+    deterministic: { regressed: [], fixed: [], new: [] }, t2: [], regressions: [], improvements: []
+  }
+  # What the TEXT proposal claims, read back out of the rendered text: the
+  # verdict, the deterministic lines, and each T2 row's flip. J4 compares these
+  # with the JSON so the two outputs cannot disagree.
+  text_claims = lambda do |text|
+    det = {}
+    { "regressed" => /^  regressed \(pass->fail\): (.*)$/, "fixed" => /^  fixed \(fail->pass\): +(.*)$/,
+      "new" => /^  new cases: +(.*)$/ }.each do |key, re|
+      m = text.match(re)
+      det[key] = m && (m[1] == "none" ? [] : m[1].split(", "))
+    end
+    t2 = text.scan(/^  (\S+)\s+base=.* -> (\w+)$/).map { |name, flip| [name, flip.downcase] }
+    { verdict: text[/^VERDICT: (\w+)/, 1], det: det, t2: t2,
+      regressions: text[/^  regressions: (.*)$/, 1]&.split(", "),
+      improvements: text[/^  improvements: (.*)$/, 1]&.split(", ") }
+  end
+  schema_keys = %w[schema variant variant_sha baseline baseline_sha corpus runs gate_ok gate_detail verdict
+                   unmeasured deterministic t2_subjects t2 regressions improvements]
+  flips = %w[regressed improved inconclusive new missing n_a]
+  seen_verdicts = []
+  json_fixtures.each do |label, res|
+    j = JSON.parse(JSON.generate(proposal_json(res)))
+    text = render_proposal(res)
+    claims = text_claims.(text)
+    seen_verdicts << j["verdict"]
+    # J1: every verdict path emits schema v1 with the verdict res carries.
+    fail.("J1 #{label}: keys must be exactly schema v1 #{schema_keys.inspect} (got #{j.keys.inspect})") \
+      unless j.keys == schema_keys
+    fail.("J1 #{label}: schema must be #{JSON_SCHEMA_ID}") unless j["schema"] == JSON_SCHEMA_ID
+    fail.("J1 #{label}: verdict must be #{res[:verdict]} (got #{j['verdict'].inspect})") \
+      unless j["verdict"] == res[:verdict].to_s
+    fail.("J4 #{label}: text VERDICT #{claims[:verdict].inspect} must equal the JSON verdict #{j['verdict']}") \
+      unless claims[:verdict] == VERDICT_LABELS[j["verdict"].to_sym]
+    measured = !%w[blocked unmeasured].include?(j["verdict"])
+    # J2: not measured is null, measured-and-empty is [] — never confused.
+    if measured
+      fail.("J2 #{label}: a measured verdict must carry regressions/improvements arrays") \
+        unless j["regressions"].is_a?(Array) && j["improvements"].is_a?(Array)
+      fail.("J2 #{label}: a measured verdict must carry the deterministic diff") unless j["deterministic"].is_a?(Hash)
+      fail.("J2 #{label}: a measured verdict must carry unmeasured: null") unless j["unmeasured"].nil?
+    else
+      fail.("J2 #{label}: a #{j['verdict']} verdict must carry regressions: null, never [] " \
+            "(got #{j['regressions'].inspect})") unless j["regressions"].nil?
+      fail.("J2 #{label}: a #{j['verdict']} verdict must carry improvements: null, never [] " \
+            "(got #{j['improvements'].inspect})") unless j["improvements"].nil?
+    end
+    if j["verdict"] == "unmeasured"
+      un = j["unmeasured"]
+      fail.("J2 #{label}: unmeasured must name side, part and reason (got #{un.inspect})") \
+        unless un.is_a?(Hash) && un.keys == %w[side part reason] && un.values.all? { |v| v.is_a?(String) }
+      fail.("J2 #{label}: an unmeasured T2 must be t2: null, never [] (got #{j['t2'].inspect})") \
+        if un["part"] == "T2" && !j["t2"].nil?
+      fail.("J2 #{label}: an unmeasured deterministic side must be deterministic: null") \
+        if un["part"] == "deterministic" && !j["deterministic"].nil?
+    end
+    if j["verdict"] == "blocked"
+      fail.("J1 #{label}: BLOCKED must carry gate_ok false and its gate_detail lines") \
+        unless j["gate_ok"] == false && j["gate_detail"] == res[:gate_detail]
+    else
+      fail.("J1 #{label}: gate_detail must be null unless BLOCKED") unless j["gate_detail"].nil?
+    end
+    # J3: the deterministic corpus claims no T2 at all.
+    if j["corpus"] == "deterministic"
+      fail.("J3 #{label}: --corpus deterministic must be t2: null (got #{j['t2'].inspect})") unless j["t2"].nil?
+      fail.("J3 #{label}: --corpus deterministic must be t2_subjects: null") unless j["t2_subjects"].nil?
+      fail.("J3 #{label}: --corpus deterministic must be runs: null") unless j["runs"].nil?
+    else
+      fail.("J1 #{label}: --corpus full must carry runs") unless j["runs"] == res[:runs]
+      fail.("J2 #{label}: a measured full corpus must carry a t2 array") if measured && !j["t2"].is_a?(Array)
+    end
+    Array(j["t2"]).each do |row|
+      fail.("J1 #{label}: a t2 row must be {name, base, var, flip} (got #{row.inspect})") \
+        unless row.keys == %w[name base var flip]
+      fail.("J1 #{label}: t2 flip #{row['flip'].inspect} is not an EvalScore.classify symbol") \
+        unless flips.include?(row["flip"])
+      %w[base var].each do |side|
+        s = row[side]
+        next if s.nil?
+
+        fail.("J1 #{label}: a t2 #{side} must be null or {k, n} integers (got #{s.inspect})") \
+          unless s.keys == %w[k n] && s.values.all? { |v| v.is_a?(Integer) }
+      end
+    end
+    if (subj = j["t2_subjects"])
+      %w[base var].each do |side|
+        fail.("J1 #{label}: t2_subjects.#{side} must be {lines, sha256} (got #{subj[side].inspect})") \
+          unless subj[side].is_a?(Hash) && subj[side].keys == %w[lines sha256]
+      end
+    end
+    # J4: text and JSON agree on the verdict, the regressions and the improvements.
+    if claims[:det].values.all?
+      fail.("J4 #{label}: the JSON deterministic diff must equal the text's (#{claims[:det].inspect} vs " \
+            "#{j['deterministic'].inspect})") unless j["deterministic"] == claims[:det]
+    elsif !j["deterministic"].nil?
+      fail.("J4 #{label}: the text says NOT MEASURED but the JSON carries a deterministic diff")
+    end
+    fail.("J4 #{label}: the JSON t2 flips must equal the text's T2 rows") \
+      unless Array(j["t2"]).map { |r| [r["name"], r["flip"]] } == claims[:t2]
+    next unless measured
+
+    text_regs = claims[:det]["regressed"] +
+                claims[:t2].select { |_n, f| %w[regressed missing].include?(f) }.map { |n, _f| "t2:#{n}" }
+    text_imps = claims[:det]["fixed"] + claims[:t2].select { |_n, f| f == "improved" }.map { |n, _f| "t2:#{n}" }
+    fail.("J4 #{label}: regressions differ (text #{text_regs.sort.inspect}, JSON #{j['regressions'].sort.inspect})") \
+      unless text_regs.sort == j["regressions"].sort
+    fail.("J4 #{label}: improvements differ (text #{text_imps.sort.inspect}, JSON " \
+          "#{j['improvements'].sort.inspect})") unless text_imps.sort == j["improvements"].sort
+    fail.("J4 #{label}: the text's REVERT regressions line must equal the JSON's") \
+      if claims[:regressions] && claims[:regressions].sort != j["regressions"].sort
+    fail.("J4 #{label}: the text's KEEP improvements line must equal the JSON's") \
+      if claims[:improvements] && claims[:improvements].sort != j["improvements"].sort
+  end
+  fail.("J1: the JSON fixtures must cover every verdict (#{VERDICT_LABELS.keys.inspect}); covered " \
+        "#{seen_verdicts.uniq.sort.inspect}") unless seen_verdicts.uniq.sort == VERDICT_LABELS.keys.map(&:to_s).sort
+
+  # J6: the write is atomic, a failed write leaves nothing at PATH, and emit
+  # turns a failed write into a non-zero exit with a Fix:.
+  Dir.mktmpdir("variant-eval-json-") do |d|
+    good = File.join(d, "proposal.json")
+    werr = write_json_atomic(good, proposal_json(keep_res))
+    fail.("J6: a write to a writable dir must succeed (got #{werr.inspect})") unless werr.nil?
+    fail.("J6: the written file must parse to proposal_json(res)") \
+      unless File.file?(good) && JSON.parse(File.read(good)) == JSON.parse(JSON.generate(proposal_json(keep_res)))
+    fail.("J6: an atomic write must leave no temp file behind (#{Dir.children(d).inspect})") \
+      unless Dir.children(d) == ["proposal.json"]
+
+    missing = File.join(d, "no-such-dir", "proposal.json")
+    fail.("J6: a write into a missing dir must fail") if write_json_atomic(missing, {}).nil?
+    fail.("J6: a failed write must leave no file at PATH") if File.exist?(missing)
+    if Process.uid != 0
+      ro = File.join(d, "ro")
+      FileUtils.mkdir_p(ro)
+      File.chmod(0o555, ro)
+      fail.("J6: a write into an unwritable dir must fail") if write_json_atomic(File.join(ro, "p.json"), {}).nil?
+      fail.("J6: a failed write must leave nothing in the dir (#{Dir.children(ro).inspect})") \
+        unless Dir.children(ro).empty?
+      File.chmod(0o755, ro)
+    end
+
+    require "stringio"
+    run_emit = lambda do |res, json_path|
+      saved = [$stdout, $stderr]
+      $stdout = StringIO.new
+      $stderr = StringIO.new
+      code = emit(res, nil, json_path)
+      [code, $stdout.string, $stderr.string]
+    ensure
+      $stdout, $stderr = saved
+    end
+    code, _o, err = run_emit.(keep_res, missing)
+    fail.("J6: emit must exit non-zero when the JSON write fails (got #{code})") if code.to_i.zero?
+    fail.("J6: a failed JSON write must carry a Fix: on stderr (#{err.inspect})") unless err.include?("Fix:")
+    fail.("J6: a failed JSON write must name the path") unless err.include?(missing)
+    code, = run_emit.(revert_res, File.join(d, "revert.json"))
+    fail.("J6: a written REVERT must keep its exit 1 (got #{code})") unless code == 1
+    fail.("J6: emit must write the REVERT JSON") \
+      unless JSON.parse(File.read(File.join(d, "revert.json")))["verdict"] == "revert"
+
+    # The --json target is checked BEFORE any measurement (a ~50-model-call run
+    # must not end in an unwritable path), and a stale file from an earlier run
+    # is removed, so a run that dies later leaves NO proposal rather than an old one.
+    stale = File.join(d, "stale.json")
+    File.write(stale, JSON.generate("schema" => JSON_SCHEMA_ID, "verdict" => "keep"))
+    fail.("J6: a writable --json path must be accepted") unless prepare_json_path(stale, nil).nil?
+    fail.("J6: a stale --json file must be removed before measuring") if File.exist?(stale)
+    { "a missing dir" => [missing, nil], "a directory" => [d, nil],
+      "the --out path" => [File.join(d, "same"), File.join(d, "same")] }.each do |what, (jp, op)|
+      why = prepare_json_path(jp, op)
+      fail.("J6: a --json path that is #{what} must be refused before measuring") if why.nil?
+    end
+    runner_src = File.read(__FILE__)[/^def run_measurement.*?^end$/m].to_s
+    prep_at = runner_src.index("prepare_json_path(")
+    measure_at = runner_src.index("measure(")
+    fail.("J6: run_measurement must check the --json path before measure(...)") \
+      unless prep_at && measure_at && prep_at < measure_at
+  end
+
+  # J8: --help documents --json (the CLI_SPEC loop below also requires it).
+  fail.("J8: --help must document --json") unless help_text.include?("--json")
+
   # -- STRUCTURAL CONTAINMENT: command_allowed? rejects every mutation family --
   fail.("worktree add must be allowed") unless command_allowed?(%w[git worktree add --detach /tmp/x origin/main])
   fail.("worktree remove must be allowed") unless command_allowed?(%w[git worktree remove --force /tmp/x])
@@ -1108,7 +1446,8 @@ def self_test
   [
     [%w[--corpus-full], "--corpus-full"], # a flag this tool never had
     [%w[--baseline], "--baseline"],       # value flag with no value
-    [%w[--rnus 5], "--rnus"]              # typo'd flag
+    [%w[--rnus 5], "--rnus"],             # typo'd flag
+    [%w[--json], "--json"]                # J7 (DND-527): --json with no value
   ].each do |args, named|
     _out, err, st = capture([RbConfig.ruby, File.expand_path(__FILE__), *args])
     fail.("`variant-eval #{args.join(' ')}` must exit 2 (usage), got #{st.exitstatus}") unless st.exitstatus == 2
@@ -1250,7 +1589,8 @@ CLI_SPEC = {
   "--baseline" => :value,
   "--corpus" => :value,
   "--runs" => :integer,
-  "--out" => :value
+  "--out" => :value,
+  "--json" => :value
 }.freeze
 
 # DND-506: built from CLI_SPEC/DEFAULT_BASELINE/DEFAULT_RUNS/VERDICT_LABELS —
@@ -1275,6 +1615,10 @@ def help_text
                                      which stays OUT of harness-gate)
       --runs N                      samples per case, 1-99 (default: #{DEFAULT_RUNS})
       --out PATH                    write the scorecard here
+      --json PATH                   also write the proposal as JSON (schema
+                                     #{JSON_SCHEMA_ID}), atomically; a stale
+                                     file at PATH is removed before measuring,
+                                     and a failed write exits #{JSON_WRITE_FAILED_EXIT}
 
     An unrecognised argument, a flag given twice, or a value flag with no value
     (or `--flag=value`) exits 2 and names the offending flag on stderr — it is
@@ -1327,12 +1671,21 @@ def run_measurement(opts)
     return 2
   end
 
+  json_file = opts["--json"]
+  if json_file && (why = prepare_json_path(json_file, opts["--out"]))
+    warn "variant-eval: FAILED — #{why}."
+    warn "  Fix: pass --json a file path (not a directory, not the --out path) in an existing, writable " \
+         "directory. It is checked before measuring so a long run cannot end with nowhere to write."
+    return 2
+  end
+
   measure(
     variant: variant,
     baseline: opts.fetch("--baseline", DEFAULT_BASELINE),
     corpus: corpus,
     runs: opts.fetch("--runs", DEFAULT_RUNS).clamp(1, 99),
-    out_file: opts["--out"]
+    out_file: opts["--out"],
+    json_file: json_file
   )
 rescue MutationAttempt => e
   warn "variant-eval: FAILED — #{e.message}"

@@ -117,6 +117,55 @@ is no longer scored against a coerced `0.0`. A T2 A/B delta is comparable only
 when both refs are at or after `35be30f` (DND-503, each side evaluates its own
 render), with each side's subject sha recorded in the proposal.
 
+## Machine-readable proposal (`--json`, DND-527)
+
+**Later (2026-09-26):** added for `ai/bin/block-optimize` (DND-528), which must
+read the verdict without parsing prose. A renamed heading in the text would read
+as "no regressions"; a versioned JSON contract cannot fail that way.
+
+`--json PATH` writes the proposal as JSON, schema `variant-eval/proposal@1`, on
+every verdict path. The text proposal is unchanged and still printed.
+
+```
+{ "schema": "variant-eval/proposal@1",
+  "variant": "<ref as given>", "variant_sha": "<resolved>",
+  "baseline": "<ref>", "baseline_sha": "<resolved>",
+  "corpus": "deterministic|full", "runs": N | null,
+  "gate_ok": bool, "gate_detail": [..] | null,
+  "verdict": "keep|revert|inconclusive|blocked|unmeasured",
+  "unmeasured": null | {"side","part","reason"},
+  "deterministic": null | {"regressed":[],"fixed":[],"new":[]},
+  "t2_subjects": null | {"base":{"lines","sha256"},"var":{"lines","sha256"}},
+  "t2": null | [{"name","base":{"k","n"}|null,"var":{"k","n"}|null,
+                 "flip":"regressed|improved|inconclusive|new|missing|n_a"}],
+  "regressions": [..] | null, "improvements": [..] | null }
+```
+
+- **Not measured is `null`; measured and empty is `[]`.**
+  - `regressions` and `improvements` are `null` under BLOCKED and UNMEASURED.
+    No complete set exists there. A partial deterministic diff stays in
+    `deterministic`.
+  - `t2` is `null` for `--corpus deterministic` and when T2 was UNMEASURED.
+  - `runs` is `null` for `--corpus deterministic`; no sample was drawn.
+  - `gate_detail` is `null` unless BLOCKED.
+- `flip` is exactly `EvalScore.classify`'s symbol.
+- `variant_sha` / `baseline_sha` are resolved once, before any worktree. That
+  sha is what each worktree checks out, so the JSON names what was measured.
+- **One source.** `proposal_json(res)` and `render_proposal(res)` read the same
+  hash. The self-test reads the text back and asserts that the verdict,
+  deterministic diff, T2 flips, regressions and improvements equal the JSON's,
+  on every fixture and every verdict.
+- **Atomic write.** A temp file in the same directory is fsynced, then renamed
+  over PATH. A partial file never exists at PATH.
+- **Checked before measuring.** PATH's directory must exist and be writable, and
+  PATH must not be a directory or the `--out` path; otherwise exit 2 with a
+  `Fix:`. A stale file at PATH is removed first. A run that later dies (a bad
+  ref, a missing render) leaves **no** JSON, and a consumer must read an absent
+  file as not measured, never as an earlier verdict.
+- **Exit codes.** Unchanged for the verdicts (0 KEEP/INCONCLUSIVE, 1
+  REVERT/BLOCKED/UNMEASURED, 2 usage). A failed JSON write exits **3** with a
+  `Fix:`; the text proposal is still printed.
+
 ## Safety (structural, self-test-asserted)
 
 variant-eval is security-relevant (a self-modifying-harness-adjacent tool), so
