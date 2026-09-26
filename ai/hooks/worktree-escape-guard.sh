@@ -436,7 +436,7 @@ def command_words(seg):
     return words, assigns
 
 GIT_MUTATING = {"add", "rm", "mv", "commit", "restore", "reset", "checkout", "switch", "clean",
-                "rebase", "cherry-pick", "revert", "am", "apply", "merge", "pull",
+                "rebase", "cherry-pick", "revert", "am", "apply", "merge", "pull", "bisect",
                 "update-index", "checkout-index", "read-tree"}
 GIT_OPT_WITH_ARG = {"-c", "--namespace", "--exec-path", "--config-env", "--super-prefix", "--list-cmds"}
 
@@ -473,6 +473,8 @@ def git_is_write(sub, sargs):
     if sub == "apply" and s & {"--check", "--stat", "--numstat", "--summary"} and not s & {"--apply", "--index", "--cached"}:
         return False
     if sub in ("clean", "add", "commit", "rm", "mv") and s & {"-n", "--dry-run"}:
+        return False
+    if sub == "bisect" and sargs[:1] and sargs[0] in ("log", "view", "visualize", "terms", "help"):
         return False
     return True
 
@@ -524,7 +526,9 @@ def shell_targets(words):
         t = target_dir_opt(args, "-t", "--target-directory")
         files = nonopts(args, with_arg=("-S", "--suffix", "-t"))
         return files + ([t] if t else [])
-    if base in ("rm", "touch"):
+    if base == "rm":
+        return nonopts(args)  # no rm flag takes a value: -r and -d are switches
+    if base == "touch":
         return nonopts(args, with_arg=("-d", "-r", "-t", "--reference", "--date"))
     if base == "truncate":
         return nonopts(args, with_arg=("-s", "-r", "--size", "--reference"))
@@ -539,16 +543,27 @@ def check_bash(cmd, data, act):
     cwd = os.path.realpath(data.get("cwd") or os.getcwd())
     env = {}
     segs, cur = [], []
+    # A subshell's `cd` does not outlive it: `(` saves cwd, `)` restores it.
     for t in toks:
         if t[1] and t[0] in SEPS:
             if cur:
                 segs.append(cur)
             cur = []
+            if t[0] in ("(", ")"):
+                segs.append(t[0])
         else:
             cur.append(t)
     if cur:
         segs.append(cur)
+    stack = []
     for seg in segs:
+        if seg == "(":
+            stack.append((cwd, dict(env)))
+            continue
+        if seg == ")":
+            if stack:
+                cwd, env = stack.pop()
+            continue
         # Redirections first: pull them out of the word list. Only an
         # UNQUOTED operator token is a redirection.
         words, writes, i = [], [], 0
