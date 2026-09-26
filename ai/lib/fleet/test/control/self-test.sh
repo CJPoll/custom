@@ -430,7 +430,9 @@ eq "watch: a check error prints CONTROL: unknown once" "$(grep -c '^CONTROL: unk
 has "watch: ... never as run" "${out}" "never read an error as run"
 mkdir -p "${WREP}"
 touch -d '+1 hour' "${WREP}/DND-1-report.md"   # newer than the watcher's start stamp
-out="$(watch --session-id "${SID}" --control-s 999 --max-loops 1)"
+# Not through watch(): it already passes --control-s, and the watcher refuses a
+# flag given twice (DND-813) rather than silently keeping the second.
+out="$(timeout 60 "${WATCH}" "${WRUN}" --reports-dir "${WREP}" --poll-s 0 --control-s 999 --session-id "${SID}" --max-loops 1 2>&1)"
 has "watch: a new report is still printed" "${out}" "${WREP}/DND-1-report.md"
 out="$("${WATCH}" --help)"; eq "watch: --help exits 0" "$?" 0
 "${WATCH}" >/dev/null 2>&1; eq "watch: no run-id is exit 2" "$?" 2
