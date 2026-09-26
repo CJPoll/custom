@@ -482,6 +482,101 @@ for sig in INT TERM; do
   check "28-$sig-event" eq "$(events | jq -s --argjson w "$want" '[.[] | select(.event=="released" and .exit==$w)] | length')" 1
 done
 
+# 30/31 (DND-815; 29 is unused): a signal to a WAITING wrapper exits it promptly. Before the
+# fix a waiter sat in a foreground `flock -w <=60s` (queue) or `sleep 2`
+# (head), and bash runs a trap only after its foreground child returns, so
+# TERM went unanswered for up to a minute. The bound is a blocking wait on the
+# pid (tail --pid), never a sleep. After exit: rc 128+sig, no outcome file,
+# the waiter file is gone, no helper child of the waiter survives, the holder
+# is untouched, and the queue still serves the next run.
+# pid_of_bg NAME — the test-slot pid under a bg run's timeout(1).
+pid_of_bg() { pgrep -P "$(cat "$W/$1.bg")" | head -n 1; }
+# exits_within PID SECONDS — 0 when PID is gone within SECONDS (blocking).
+exits_within() { timeout "$2" tail --pid="$1" -f /dev/null; }
+# await_kids PID — bounded poll until PID has a child (its wait helper);
+# prints the child pids. Never empty on success, so a no-orphan check below
+# can not pass vacuously.
+await_kids() {
+  local i k
+  for ((i = 0; i < 200; i++)); do
+    k="$(pgrep -P "$1" | tr '\n' ' ')"
+    [ -n "$k" ] && { printf '%s\n' "$k"; return 0; }
+    sleep 0.05
+  done
+  return 1
+}
+# no_orphans PIDS... — 0 when none of PIDS is still alive.
+no_orphans() { local k; for k in "$@"; do kill -0 "$k" 2>/dev/null && return 1; done; return 0; }
+# await_waiters N — bounded poll until --status --json reports N waiters.
+await_waiters() {
+  local i
+  for ((i = 0; i < 400; i++)); do
+    [ "$("$BIN" --status --json 2>/dev/null | jq .waiting)" = "$1" ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+for sig in TERM INT HUP; do
+  case $sig in INT) want=130 ;; TERM) want=143 ;; HUP) want=129 ;; esac
+  newpool "p30$sig" 1
+  hold "A30$sig" "holder-A30$sig"
+  # B: the queue head, polling the slots. C: behind B, blocked on queue.lock.
+  bg "B30$sig" --label "B30$sig" -- sh -c ': > "$1"' _ "$W/B30$sig.ran"
+  await_grep "$W/B30$sig.err" "WAITING" 20 || bad "30-$sig-B-wait" "B never waited"
+  BG_PRE=(env --default-signal=INT,QUIT)
+  bg "C30$sig" --label "C30$sig" --outcome-file "$W/30$sig.outcome" -- sh -c ': > "$1"' _ "$W/C30$sig.ran"
+  BG_PRE=()
+  await_grep "$W/C30$sig.err" "WAITING" 20 || bad "30-$sig-C-wait" "C never waited"
+  check "30-$sig-two-waiting" await_waiters 2
+  cpid="$(pid_of_bg "C30$sig")"
+  kids="$(await_kids "$cpid")"
+  check "30-$sig-has-helper" eval '[ -n "$kids" ]'
+  kill -s "$sig" "$cpid"
+  check "30-$sig-exits-promptly" exits_within "$cpid" 10
+  reap "C30$sig"
+  check "30-$sig-rc" eq "$RC" "$want"
+  check "30-$sig-C-not-run" absent "$W/C30$sig.ran"
+  check "30-$sig-no-outcome" absent "$W/30$sig.outcome"
+  # shellcheck disable=SC2086 # word-split pid list
+  check "30-$sig-no-orphan-helper" no_orphans $kids
+  st="$("$BIN" --status --json 2>/dev/null)"
+  check "30-$sig-waiting-1" eq "$(jq .waiting <<<"$st")" 1
+  check "30-$sig-held-1" eq "$(jq .held <<<"$st")" 1
+  check "30-$sig-waiter-is-B" eq "$(jq -r '.waiters[0].label' <<<"$st")" "B30$sig"
+  release "A30$sig"
+  reap "B30$sig"; check "30-$sig-B-rc" eq "$RC" 0
+  check "30-$sig-B-ran" present "$W/B30$sig.ran"
+  reap "A30$sig"
+  timeout 10 "$BIN" --label "E30$sig" -- true 2>"$W/E30$sig.err"; rc=$?
+  check "30-$sig-queue-free" eq "$rc" 0
+  check "30-$sig-no-wait" lacks "$W/E30$sig.err" "WAITING"
+done
+
+# 31: the queue HEAD, --exclusive, holding the one free slot of N=2 while it
+# waits for the other: TERM exits it promptly and frees exactly what it held
+# (its partial slot), never the holder's. Its poll-sleep helper dies with it.
+# (Not a failing-first case for promptness: the old head delay was <= 2 s.)
+newpool p31 2
+hold A31 holder-A31
+bg X31 --label X31 --exclusive -- sh -c ': > "$1"' _ "$W/X31.ran"
+await_grep "$W/X31.err" "WAITING" 20 || bad "31-X-wait" "X never waited"
+st="$("$BIN" --status --json 2>/dev/null)"
+check 31-X-holds-partial eq "$(jq '[.holders[] | select(.label == "X31")] | length' <<<"$st")" 1
+xpid="$(pid_of_bg X31)"
+xkids="$(await_kids "$xpid")"
+check 31-has-helper eval '[ -n "$xkids" ]'
+kill -TERM "$xpid"
+check 31-exits-promptly exits_within "$xpid" 10
+reap X31; check 31-rc eq "$RC" 143
+# shellcheck disable=SC2086 # word-split pid list
+check 31-no-orphan-helper no_orphans $xkids
+check 31-X-not-run absent "$W/X31.ran"
+st="$("$BIN" --status --json 2>/dev/null)"
+check 31-held-1 eq "$(jq .held <<<"$st")" 1
+check 31-holder-kept eq "$(jq -r '.holders[0].label' <<<"$st")" holder-A31
+check 31-waiting-0 eq "$(jq .waiting <<<"$st")" 0
+release A31; reap A31; check 31-A-rc eq "$RC" 0
+
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then
   echo "test-slot: self-test OK ($PASS checks)"
