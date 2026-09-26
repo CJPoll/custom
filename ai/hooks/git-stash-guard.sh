@@ -74,19 +74,18 @@
 #     special parameter (`$?`, `$*`, `$#`, `$@`) and the inside of `${...}`
 #     are not globs; an assignment word (`rc=$?`) is never a command word; a
 #     word whose expansions are all inside double quotes and whose last path
-#     component is literal (`"$W/t"`) is that literal name; the BODY of a
-#     heredoc with a quoted delimiter (`<<"EOF"`, or single quotes) is data
-#     only when EVERY command word in the command is a known data reader
-#     (cat, tee, grep, `git commit`, `gh pr`, ... see hd_readers_safe) and no
-#     shell, interpreter or wrapper appears anywhere (see hd_runs); an alias,
-#     an unlisted interpreter or a script run by name keeps the body a
-#     command. When several
+#     component is literal (`"$W/t"`) is that literal name. When several
 #     rules fire, the most specific finding is reported (a literal
 #     `git stash pop` is named as such after an unrelated `$(...)`).
 #     Kept deliberately: a quoted word holding whitespace or a separator is
 #     still re-read as a command (`watch 'git stash pop'`, `trap ... EXIT`,
 #     `git submodule foreach '...'` are real runners), so a quoted glob that
-#     CAN match git (`grep "g?t|x"`) still denies;
+#     CAN match git (`grep "g?t|x"`) still denies. A heredoc body, quoted
+#     delimiter or not, is still read as commands: the same command can
+#     make it run (piped to a shell, written to a git hook, a script, an rc
+#     file, a textconv), and no lexical test decides that. The rules above
+#     already stop brackets and globs in its prose from denying; a body that
+#     names a literal stash write stays an accepted false positive;
 #   * a git ALIAS that resolves to a mutating stash (its value parsed like a
 #     command line, global options included, and resolved through chains,
 #     from the global config and the repo config of the cwd and every `-C` /
@@ -117,9 +116,8 @@
 #     literally makes every non-builtin subcommand unknown.
 #
 # ACCEPTED FALSE POSITIVE (the class forge-auth-guard documents): matching is
-# lexical, so a command that only MENTIONS a mutating stash (a heredoc with
-# an unquoted delimiter or one the command may execute, a `git commit -m`, a
-# `grep`) is denied too. That costs one retry: move the text
+# lexical, so a command that only MENTIONS a mutating stash (a heredoc, a
+# `git commit -m`, a `grep`) is denied too. That costs one retry: move the text
 # into a file with the Write tool and pass the file (`git commit -F`), or use
 # the Grep tool. A miss costs the owner's saved work.
 #
@@ -765,124 +763,6 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   function cmd_prefix(t) {
     return t ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || t ~ /^(env|command|sudo|exec|nohup|xargs|time|eval|builtin|nice|setsid|noglob|nocorrect|-|then|do|else|if|while|until|!)$/
   }
-  # hd_strip(text): text with the BODY of every heredoc whose delimiter is
-  # quoted (`<<"EOF"`, `<<\EOF`, `<<-"EOF"`, or in single quotes) removed, with its
-  # terminator line; each keeps its newline. Such a body is not expanded by
-  # the shell, so it is data to the command that reads it (DND-780). An
-  # body under an unquoted delimiter is kept: its `$(...)` and backticks run. A `<<`
-  # inside quotes, a comment or `((...))` is not a heredoc here (its lines
-  # stay, so a mis-read can only over-deny).
-  function hd_strip(text,    out, L, i, c, st, np, ar, prev, j, ch, s2, d, dq, dash, k, e, adv, line, cmp, body, term, found, HD, HQ, HX) {
-    out = ""; L = length(text); st = 0; np = 0; ar = 0; prev = "\n"; i = 1
-    while (i <= L) {
-      c = substr(text, i, 1)
-      if (st == 1) { out = out c; if (c == "\047") st = 0; i++; prev = c; continue }
-      if (st == 2) {
-        if (c == "\\" && i < L) { out = out c substr(text, i + 1, 1); i += 2; prev = "x"; continue }
-        out = out c; if (c == "\"") st = 0; i++; prev = c; continue
-      }
-      if (c == "\\" && i < L) { out = out c substr(text, i + 1, 1); i += 2; prev = "x"; continue }
-      if (c == "\047") { st = 1; out = out c; i++; prev = c; continue }
-      if (c == "\"") { st = 2; out = out c; i++; prev = c; continue }
-      if (c == "#" && prev ~ /[ \t\n;&|()]/) {
-        e = index(substr(text, i), "\n")
-        if (e == 0) { out = out substr(text, i); break }
-        out = out substr(text, i, e - 1); i += e - 1; prev = "#"; continue
-      }
-      if (c == "(" && substr(text, i + 1, 1) == "(") { ar++; out = out "(("; i += 2; prev = "("; continue }
-      if (c == ")" && substr(text, i + 1, 1) == ")" && ar > 0) { ar--; out = out "))"; i += 2; prev = ")"; continue }
-      if (c == "<" && substr(text, i + 1, 1) == "<" && substr(text, i + 2, 1) != "<" && ar == 0) {
-        j = i + 2; dash = 0
-        if (substr(text, j, 1) == "-") { dash = 1; j++ }
-        while (substr(text, j, 1) ~ /[ \t]/) j++
-        d = ""; dq = 0; s2 = 0
-        while (j <= L) {
-          ch = substr(text, j, 1)
-          if (s2 == 1) { if (ch == "\047") s2 = 0; else d = d ch; j++; continue }
-          if (s2 == 2) { if (ch == "\"") s2 = 0; else d = d ch; j++; continue }
-          if (ch == "\047") { s2 = 1; dq = 1; j++; continue }
-          if (ch == "\"") { s2 = 2; dq = 1; j++; continue }
-          if (ch == "\\") { dq = 1; if (j < L) d = d substr(text, j + 1, 1); j += 2; continue }
-          if (ch ~ /[ \t\n;&|()<>]/) break
-          d = d ch; j++
-        }
-        out = out substr(text, i, j - i); i = j; prev = "x"
-        if (d != "") { np++; HD[np] = d; HQ[np] = dq; HX[np] = dash }
-        continue
-      }
-      if (c == "\n" && np > 0) {
-        out = out c; i++
-        for (k = 1; k <= np; k++) {
-          body = ""; term = ""; found = 0
-          while (i <= L) {
-            e = index(substr(text, i), "\n")
-            adv = e ? e : L - i + 1
-            line = substr(text, i, e ? e - 1 : adv)
-            cmp = line; if (HX[k]) sub(/^\t+/, "", cmp)
-            if (cmp == HD[k]) { term = substr(text, i, adv); i += adv; found = 1; break }
-            body = body substr(text, i, adv); i += adv
-          }
-          if (HQ[k]) { gsub(/[^\n]/, "", body); gsub(/[^\n]/, "", term); out = out body term }
-          else out = out body term
-        }
-        np = 0; prev = "\n"; continue
-      }
-      out = out c; prev = c; i++
-    }
-    return out
-  }
-  # hd_runs(text): 1 when the command (heredoc bodies removed) could EXECUTE
-  # what a heredoc feeds it or writes: a shell, interpreter, stdin-to-argv or
-  # command-running wrapper anywhere in it, or a command word that is a path,
-  # built by expansion, or a relevant shell alias (a script the command itself
-  # just wrote, `./x.sh`, `"$SH"`). Then the bodies are read as commands.
-  function hd_runs(text,    W, QF, SB, UX, n, k, cp, b) {
-    n = tokenize(text, W, QF, SB, UX); cp = 0
-    for (k = 1; k <= n; k++) {
-      cp = SB[k] || (cp && k > 1 && cmd_prefix(W[k - 1]))
-      b = W[k]; gsub(/\001/, "", b); sub(/^.*\//, "", b)
-      if (b ~ /^(sh|bash|zsh|dash|ksh|mksh|yash|fish|csh|tcsh|rc|busybox|eval|source|\.|exec|xargs|parallel|ssh|su|sudo|doas|runuser|script|env|nohup|timeout|nice|ionice|setsid|flock|time|command|builtin|stdbuf|unbuffer|chronic|taskset|chroot|watch|tmux|screen|expect|osascript|python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby|irb|node|nodejs|deno|bun|php|lua|luajit|tclsh|wish|awk|gawk|mawk|nawk|sed|gsed|make|gmake|just|at|batch|crontab)$/) return 1
-      if (cp && (W[k] ~ /[\/$`]/ || (W[k] in shal))) return 1
-      if (cp && match(W[k], /\.[^.\/]+$/) && (substr(W[k], RSTART + 1) in sal)) return 1
-    }
-    return 0
-  }
-  # hd_readers_safe(text): 1 when EVERY command word in text (heredoc bodies
-  # removed) is a known data reader that never executes its input: a fixed
-  # list of text tools and shell keywords, `git` with a subcommand that
-  # takes a message or data (builtins, which a git alias cannot shadow), or
-  # `gh` with a builtin command group (a gh alias cannot shadow one either).
-  # An assignment word is skipped. Anything else (an interpreter off any
-  # list, a git or gh alias, a script run by name, a path or an expanded
-  # command word) is not known safe, so the bodies stay commands.
-  function hd_readers_safe(text,    W, QF, SB, UX, n, k, cp, w, j) {
-    n = tokenize(text, W, QF, SB, UX); cp = 0
-    for (k = 1; k <= n; k++) {
-      cp = SB[k] || (cp && k > 1 && cmd_prefix(W[k - 1]))
-      if (!cp || is_assign(W[k])) continue
-      w = W[k]
-      # `[`, `[[` and `{` carry a glob mark; they are the test command and
-      # keywords (see glob_may_be_git).
-      if (w ~ /^(\[\001|\[\001\[\001|\{\001)$/) continue
-      if (w ~ /^(then|do|else|elif|fi|done|esac|if|while|until|for|case|in|\{|\}|!|\[|\[\[|\]\]|:|true|false|test|echo|printf|cat|tee|wc|head|tail|sort|uniq|cut|tr|diff|cmp|grep|egrep|fgrep|rg|jq|yq|column|fold|fmt|nl|rev|paste|comm|join|base64|md5sum|sha1sum|sha256sum|cksum|mkdir|touch|rm|rmdir|mv|cp|ln|cd|pushd|popd|pwd|ls|date|sleep|seq|mktemp|basename|dirname|realpath|readlink|stat|exit|return|break|continue|export|local|unset|wait)$/ && (!(w in shal))) continue
-      if (w == "git" || w == "gh") {
-        for (j = k + 1; j <= n && !SB[j] && W[j] ~ /^-/; j++) if (two_word(W[j])) j++
-        if (j > n || SB[j]) return 0
-        if (w == "git" && W[j] ~ /^(commit|tag|notes|apply|hash-object|interpret-trailers|stripspace|check-ignore|check-attr|cat-file|log|show|diff|status)$/) continue
-        if (w == "gh" && W[j] ~ /^(pr|issue|api|release|gist|label|search)$/) continue
-      }
-      return 0
-    }
-    return 1
-  }
-  # hd_data(text): text with quoted heredoc bodies removed, unless it could
-  # run them (then text unchanged): every command word must be a known data
-  # reader, and no runner may appear anywhere (a runner as an argument, e.g.
-  # `find ... -exec sh`, is not a command word).
-  function hd_data(text,    s) {
-    s = hd_strip(text)
-    return (s != text && hd_readers_safe(s) && !hd_runs(s)) ? s : text
-  }
   # squote(w): w as one single-quoted shell word.
   function squote(w) { gsub(/\047/, "\047\\\047\047", w); return "\047" w "\047" }
   # analyze(text, depth): the most specific finding in text (see rank), or
@@ -980,8 +860,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       else if (kind == "s") sv[name, ++sal[name]] = val
       else shv[name, ++shal[name]] = val
     }
-    # A quoted heredoc body is data (see hd_data).
-    cmd = hd_data(slurp(cmdf))
+    cmd = slurp(cmdf)
     r = analyze(cmd, 0)
     # zsh GLOBAL aliases (`alias -g`) expand in any word position, not only
     # command position: also read the command with each one substituted

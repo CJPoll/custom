@@ -393,8 +393,10 @@ echo "== O: over-match of the expansion rules (DND-780) =="
 # glob-head or expanded-head rule. The class rules: a glob whose basename
 # pattern cannot match git or git-stash is not git; $? $* $# $@ are
 # parameters, not globs; an assignment word is never a command word; a quoted
-# expansion followed by a literal basename is that basename; a quoted heredoc
-# body is data unless the command can execute it.
+# expansion followed by a literal basename is that basename. A heredoc body is
+# still read as commands (critic rounds 1-2: a body can become a hook or a
+# script the same command runs), so only its prose brackets and globs stop
+# denying.
 case_cmd "O1. leading test bracket" allow '[ -n "$n" ] && echo y'
 case_cmd "O2. leading [[ keyword" allow '[[ -n "$n" ]] && echo y'
 case_cmd "O3. test bracket with \$HOME operand" allow '[ -n "$HOME" ] && echo y'
@@ -416,7 +418,7 @@ case_cmd "O15. gh --jq filter with brackets and pipes" allow "gh run list --bran
 case_cmd "O16. \$* and \$# are parameters" allow 'echo "args: $* count: $#"; [ $# -gt 0 ]'
 case_cmd "O17. arithmetic with *" allow 'echo $((2*3))'
 case_cmd "O18. quoted heredoc into git commit -F -" allow "git commit -F - <<'EOF'
-Fix: [ -n x ] no longer denied; git stash pop is mentioned only.
+Fix: [ -n x ] and [[ -f y ]] no longer deny; *.md and ? are prose.
 EOF"
 case_cmd "O19. <<- quoted heredoc, tab-indented terminator" allow "cat <<-'EOF'
 	[ -n x ]
@@ -467,9 +469,8 @@ case_cmd "O37. a stash write inside \${...:-\$(...)}" deny 'echo ${X:-$(git stas
 case_cmd "O38. an assignment then an expanded git with stash" deny 'A=$B $GIT stash pop'
 case_cmd "O39. a glob git command word in a quoted sh -c payload" deny "sh -c '/usr/bin/g?t stash pop'"
 case_cmd "O40. literal git in a quoted watch payload" deny "watch 'git stash pop'"
-# A quoted heredoc body stays a command unless every reader is known safe
-# (critic round 1): a git ! alias, an interpreter on no list, a script run by
-# name, a gh alias.
+# A heredoc body stays a command (critic rounds 1-2): each of these runs
+# the body, and a lexical reader list cannot see that.
 case_cmd "O42. quoted heredoc to a git shell alias defined inline" deny "git -c alias.zq='!sh' zq <<'EOF'
 git stash pop
 EOF"
@@ -487,8 +488,13 @@ case_cmd "O46. quoted heredoc to find -exec sh" deny "cat > f <<'EOF'
 git stash pop
 EOF
 find . -name f -exec sh {} \\;"
-case_cmd "O47. quoted heredoc to git commit under a -C option" allow "git -C /tmp commit -F - <<'EOF'
-subject mentions git stash pop and [ -n x ]
+case_cmd "O47. quoted heredoc written to a git hook, then commit" deny "cp /usr/bin/true .git/hooks/pre-commit && cat > .git/hooks/pre-commit <<'EOF'
+#!/bin/sh
+git stash pop
+EOF
+git commit -m x"
+case_cmd "O48. quoted heredoc commit message naming a stash write (accepted false positive)" deny "git commit -F - <<'EOF'
+Mentions git stash pop.
 EOF"
 # LOW (DND-780): a literal stash write must name the literal-stash reason even
 # after an unrelated expansion that also triggers a rule.
