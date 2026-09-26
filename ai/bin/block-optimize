@@ -240,10 +240,11 @@ class Adapters
     [st.success?, err]
   end
 
-  # Every path `git status` reports (untracked included), both sides of a rename.
+  # Every path `git status` reports, untracked AND ignored included, both sides
+  # of a rename: a gitignored file a patch or a build planted is still an effect.
   def changed_paths
-    out, err, st = run(["git", "-C", @scratch, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-                       chdir: @scratch)
+    out, err, st = run(["git", "-C", @scratch, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                        "--ignored=matching"], chdir: @scratch)
     raise BO::Error, "git status failed in the scratch tree: #{err.strip}. Fix: check the repository." unless st.success?
 
     paths = []
@@ -356,7 +357,11 @@ module Manager
     problems = parsed[:violations] + BO::Scope.violations(parsed[:files], allowed)
     reject!(io, candidate, "scope violation (before any git write): #{fmt(problems)}") unless problems.empty?
 
-    io.with_scratch(base) { |_tmp| measure(io, base, candidate, allowed, ctx) }
+    # git apply gets exactly the bytes the scope check read: the fenced body,
+    # never the raw proposer text (git apply would also pick up an unfenced
+    # patch in the prose around the fence).
+    patch = BO::Diff.extract(candidate, fenced: fenced)
+    io.with_scratch(base) { |_tmp| measure(io, base, patch, allowed, ctx) }
   end
 
   def measure(io, base, patch, allowed, ctx)
@@ -631,7 +636,12 @@ class FakeAdapters
     end
   end
 
-  def apply(_patch, check:)
+  def applied
+    @applied ||= []
+  end
+
+  def apply(patch, check:)
+    applied << patch
     @calls << (check ? :apply_check : :apply)
     [@cfg[:apply_ok], @cfg[:apply_ok] ? "" : "error: patch failed"]
   end
@@ -731,6 +741,16 @@ def self_test
          st_run(f) == 1 && f.out["proposal.md"].include?("no proposal") && !f.calls.include?(:scratch_add))
   f = FakeAdapters.new(proposal: GOOD_DIFF, stray: ["X"])
   check.("M2 a proposer that leaves a file is REJECTED", st_run(f) == 1 && f.out["proposal.md"].include?("containment"))
+
+  # M2 (critic cca15bb): git apply must get exactly the bytes the scope check
+  # read, never the raw proposer text with its prose and any unfenced patch.
+  smuggled = "Prose first.\n#{GOOD_DIFF}\n--- a/ai/bin/check-agent-size\n+++ b/ai/bin/check-agent-size\n" \
+             "@@ -1 +1 @@\n-a\n+b\n"
+  f = FakeAdapters.new(proposal: smuggled)
+  st_run(f)
+  body = BO::Diff.extract(GOOD_DIFF)
+  check.("M2 git apply gets only the scope-checked fenced body (got #{f.applied.map { |p| p[0, 40] }.inspect})",
+         !f.applied.empty? && f.applied.all? { |p| p == body })
 
   # M3 cheap gates fail: variant-eval never called.
   ["ai/bin/build-agents", "ai/bin/build-agents --check", "ai/bin/check-agent-size"].each do |t|
