@@ -106,6 +106,77 @@ check "5d. standalone HIM (uppercase) -> deny" deny
 run '{"tool_name":"SendMessage","tool_input":{"message":"I think he. wrote it."}}'
 check "5e. he. at a punctuation boundary -> deny" deny
 
+# --- Case 7: code tokens are not prose (DND-738) ---
+# The pronoun letters glued to a code joiner -- a flag dash, a path slash, a
+# variable sigil, a dotted name, an assignment or a call -- are not a word a
+# reader sees. `\b` treated them as standalone, so a python edit script that
+# carried `grep -hE` was denied (measured: 5 denials, laptop run
+# 2026-09-25-laptop-harness, DND-670 captain).
+# jq builds these so they may carry quotes, backslashes and newlines.
+jbash() { jq -cn --arg c "$1" '{tool_name:"Bash",tool_input:{command:$c}}'; }
+jmsg()  { jq -cn --arg m "$1" '{tool_name:"SendMessage",tool_input:{message:$m}}'; }
+NL='
+'
+
+# The measured command shape: a python heredoc edit carrying `grep -hE`.
+run "$(jbash "cd /tmp/wt && python3 - <<'EOF'${NL}p='ai/hooks/x.sh'${NL}s=open(p).read()${NL}o='''  A=\$(find \"\$D\" -name 'snapshot-*.sh' -exec grep -hE '^alias ' {} + 2>/dev/null)'''${NL}s=s.replace(o,o+'# note',1)${NL}open(p,'w').write(s)${NL}EOF")"
+check "7a. python edit script with grep -hE -> allow" allow
+
+run "$(jbash "find ~/.claude/shell-snapshots -name 'snapshot-*.sh' -exec grep -hE '^alias ' {} + | wc -c")"
+check "7b. grep -hE flag -> allow" allow
+
+run "$(jbash 'ls -He /tmp; tar --his x; cmd -HIM')"
+check "7c. -He / --his / -HIM flags -> allow" allow
+
+run "$(jbash 'cat /srv/he/notes /home/him/x ./his')"
+check "7d. path segments /he/ /him/ ./his -> allow" allow
+
+run "$(jbash 'echo "$he ${his} $HIM" \he')"
+check "7e. variables and escapes \$he \${his} \\he -> allow" allow
+
+run "$(jbash 'python3 -c "he=1; his(x); print(obj.he, he.txt, x.his)"')"
+check "7f. identifiers he= his( obj.he he.txt -> allow" allow
+
+run "$(jbash "grep -n -w -i -E 'he|him|his' *.md; python3 -c 's=t[:hs]+b+t[he:]; k=\"he:#{n}\"'")"
+check "7g. regex alternation he|him|his, slice [he:], key he:#{n} -> allow" allow
+
+# --- Case 8: prose inside Bash and messages is still caught (DND-738) ---
+run "$(jbash 'git commit -m "Cody said he wants this merged"')"
+check "8a. commit message with he (double-quoted in JSON) -> deny" deny
+
+run "$(jbash "gh pr create --title x --body 'Ask Cody; his call.'")"
+check "8b. PR body with his -> deny" deny
+
+run "$(jbash "gh pr create --body-file - <<'EOF'${NL}Summary${NL}${NL}He approved the plan.${NL}EOF")"
+check "8c. heredoc PR body, He at line start -> deny" deny
+
+run "$(jmsg "Cody invoked run-autonomously again. He's away, possibly overnight.")"
+check "8d. He's (apostrophe) -> deny" deny
+
+run "$(jmsg "Status:${NL}he approved it")"
+check "8e. he at the start of a new line (JSON \\n before it) -> deny" deny
+
+run "$(jmsg "Status:	his review is done")"
+check "8f. his after a tab (JSON \\t before it) -> deny" deny
+
+run "$(jmsg 'Ask (him) or *him* or "him", then go.')"
+check "8g. him in parens / markdown / quotes -> deny" deny
+
+run "$(jmsg 'Waiting on him: the key is his.')"
+check "8h. him: / his. at punctuation -> deny" deny
+
+run "$(jmsg "Waiting on him:${NL}the key")"
+check "8h2. him: at the end of a line -> deny" deny
+
+run "$(jmsg 'Cody uses they/them, never he/him')"
+check "8i. he/him mention -> deny (conservative: a pronoun list is still prose)" deny
+
+run "$(jmsg 'Cody -- he said -- ok')"
+check "8j. he between spaced dashes -> deny" deny
+
+run '{"tool_name":"mcp__notion-personal__API-patch-page","tool_input":{"properties":{"Notes":{"rich_text":[{"text":{"content":"He will review."}}]}}}}'
+check "8k. nested Notion write value -> deny" deny
+
 # --- Case 6: FAIL-OPEN on malformed / empty stdin ---
 run ''
 check "6a. empty stdin -> allow (fail-open)" allow
