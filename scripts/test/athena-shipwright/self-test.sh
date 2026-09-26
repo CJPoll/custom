@@ -52,6 +52,34 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# THE INBOX IS PINNED FOR THE WHOLE SUITE (DND-692). A stale-dirt streak makes
+# the runner send ONE harness-alert through send-mail, which delivers under
+# $ATHENA_INBOX_ROOT. Left unset, a case would write into the machine's LIVE
+# harness-alerts channel and wake the real attendant. So the root is a temp dir
+# for every case, set before the first runner call, and it carries the
+# COMMITTED custom registry entry re-keyed to this checkout's git common dir
+# (send-mail resolves a channel from the entry of its cwd's repo). The suite
+# refuses to go on if the pin did not take.
+export ATHENA_INBOX_ROOT="${TMP}/inbox-root"
+unset CLAUDE_AGENT_ID CLAUDE_AGENT_TYPE
+REPO_ROOT="$(cd -- "${SCRIPTS}/.." && pwd -P)"
+INBOX_REGISTRY="${REPO_ROOT}/ai/inbox/registry.json"
+install_inbox_registry() { # <root>
+  local common
+  common="$(cd -- "${REPO_ROOT}" && realpath -- "$(git rev-parse --git-common-dir)")"
+  mkdir -p "$1/projects"; chmod 700 "$1" "$1/projects"
+  jq --arg r "${common}" '.projects[] | select(.file == "custom.json") | .entry | .repo = $r' \
+    "${INBOX_REGISTRY}" >"$1/projects/custom.json"
+  chmod 600 "$1/projects/custom.json"
+}
+install_inbox_registry "${ATHENA_INBOX_ROOT}"
+case "${ATHENA_INBOX_ROOT}" in
+  "${TMP}"/*) ;;
+  *) echo "self-test: ATHENA_INBOX_ROOT is not under ${TMP}; refusing to run cases that could alert the live channel." >&2
+     echo "  Fix: this is a bug in the suite's setup; the pin above must run before any case." >&2
+     exit 2 ;;
+esac
+
 ok()   { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad()  { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "${2:-}"; FAIL=$((FAIL+1)); }
 case_() { printf '\n%s\n' "$1"; }
@@ -1322,6 +1350,205 @@ if [ "$rc" -eq 0 ] && grep -q 'SHIPWRIGHT_RECEIPT' <<<"$o" \
   ok "the brief carries the receipt instruction unexpanded and still names no checkout path"
 else
   bad "brief receipt instruction" "rc=$rc out=$o"
+fi
+
+# ---------------------------------------------------------------------------
+case_ 'athena-shipwright-run.sh — stale dirt escalates ONCE to harness-alerts (DND-692)'
+
+# The measured defect (2026-09-22..25): 84 consecutive hourly skips on inert
+# leftovers in the main checkout (an abandoned node_modules and an
+# erl_crash.dump, both days old). Each skip exited 0 and, by design, never
+# counted toward the wedge, so three days of a dark loop produced no alert at
+# all. "Yielded to a live editor" and "blocked forever by inert leftovers" read
+# the same. These cases pin the difference.
+
+ALERTS="${ATHENA_INBOX_ROOT}/harness-alerts/to-custom"
+alert_msgs() { find "${ALERTS}" -maxdepth 1 -type f -name '*-shipwright-stale-dirt.md' 2>/dev/null | sort; }
+alert_count() { alert_msgs | grep -c . || true; }
+clear_alerts() { find "${ALERTS}" -maxdepth 1 -type f -name '*.md' -delete 2>/dev/null || true; }
+old_file() { printf '%s\n' "${3:-leftover}" >"$1/$2"; touch -d '2 days ago' "$1/$2"; }
+
+# Headline (fail-first): one untracked file older than the age threshold, the
+# dirty branch run N times (default thresholds). Exactly one alert, naming the
+# path, the first-seen tick and the owner's options.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+old_file "$r" erl_crash.dump
+codes=""
+for _ in 1 2 3; do codes="${codes}$(run_runner "$r") "; done
+n="$(alert_count)"
+if [ "$codes" = "0 0 0 " ] && [ "$n" = "1" ]; then
+  ok "3 consecutive skips on one unchanged STALE signature write exactly one harness-alert (exit codes: ${codes% })"
+else
+  bad "stale dirt escalates" "codes='${codes% }' alerts=$n err=$(cat "$a/runner.err")"
+fi
+m="$(alert_msgs | head -n1)"
+first="$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.skipped' -printf '%f\n' 2>/dev/null | sort | head -n1)"
+first="${first%.skipped}"
+if [ -n "$m" ] && grep -q 'erl_crash.dump' "$m" && grep -q '^Fix:' "$m" \
+   && grep -qi 'commit' "$m" && grep -qi 'gitignore' "$m" && grep -qi 'remove' "$m" \
+   && [ -n "$first" ] && grep -q "first_seen: ${first}" "$m"; then
+  ok "the alert names the path, the first-seen tick (${first}) and a Fix: with commit / gitignore / remove"
+else
+  bad "alert content" "first=$first msg=$( [ -n "$m" ] && cat "$m")"
+fi
+if [ -n "$m" ] && grep -q '^from: inbox-client-detector' "$m" && grep -q '^to: custom' "$m" \
+   && re="$(sed -n 's/^re: //p' "$m" | head -n1)" && [ -f "$re" ] \
+   && case "$re" in "$(sd "$r")"/runs/*.skipped) true ;; *) false ;; esac; then
+  ok "it is delivered on the harness-alerts maildir, re: the skip record of the alerting tick"
+else
+  bad "alert channel + re:" "msg=$( [ -n "$m" ] && cat "$m")"
+fi
+if grep -q 'dirt: STALE' "$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.skipped' | sort | tail -n1)"; then
+  ok "every skip record now says whether the dirt was STALE or LIVE"
+else
+  bad "skip record classifies" "$(cat "$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.skipped' | sort | tail -n1)")"
+fi
+
+# The record the alert's re: names is its reader's authority, so it must carry
+# the STALE verdict for the very signature the message states.
+re="$( [ -n "$m" ] && sed -n 's/^re: //p' "$m" | head -n1)"
+msig="$( [ -n "$m" ] && sed -n 's/^signature: //p' "$m" | head -n1)"
+if [ -n "$msig" ] && [ -f "$re" ] && grep -q "^dirt: STALE .*signature=${msig}\$" "$re"; then
+  ok "the re: record carries dirt: STALE with the message's own signature"
+else
+  bad "record authority" "sig=$msig re=$re record=$( [ -f "$re" ] && cat "$re")"
+fi
+
+# No repeat while the signature is unchanged.
+codes=""
+for _ in 1 2 3; do codes="${codes}$(run_runner "$r") "; done
+if [ "$(alert_count)" = "1" ] && grep -q 'no repeat' "$a/runner.err"; then
+  ok "no repeat alert while the signature is unchanged (the stderr says so)"
+else
+  bad "no repeat" "alerts=$(alert_count) err=$(cat "$a/runner.err")"
+fi
+
+# The signature changes (a second inert leftover appears) -> a new streak, and
+# after N more skips a second alert naming both paths.
+old_file "$r" stray.bak
+run_runner "$r" >/dev/null; run_runner "$r" >/dev/null
+if [ "$(alert_count)" = "1" ]; then
+  ok "a changed signature starts a new streak (no alert before N skips on it)"
+else
+  bad "new streak waits for N" "alerts=$(alert_count)"
+fi
+run_runner "$r" >/dev/null
+m2="$(alert_msgs | tail -n1)"
+if [ "$(alert_count)" = "2" ] && grep -q 'erl_crash.dump' "$m2" && grep -q 'stray.bak' "$m2"; then
+  ok "and the changed signature alerts once more after N skips, naming both paths"
+else
+  bad "changed signature re-alerts" "alerts=$(alert_count) msg=$( [ -n "$m2" ] && cat "$m2")"
+fi
+
+# A clean tree ends the streak and drops the state.
+rm -f "$r/erl_crash.dump" "$r/stray.bak"
+rc="$(run_runner "$r")"
+if [ "$rc" -eq 0 ] && [ ! -e "$(sd "$r")/stale-dirt" ]; then
+  ok "a clean main checkout clears the stale-dirt state"
+else
+  bad "clean tree clears state" "rc=$rc state=$(cat "$(sd "$r")/stale-dirt" 2>&1)"
+fi
+
+# A LIVE editor never alerts: a fresh-mtime untracked file and a fresh tracked
+# edit, skipped many times over.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+printf 'mid-edit\n' >"$r/new-draft.md"
+printf 'AGENT MID-EDIT\n' >"$r/bystander.conf"
+codes=""
+for _ in 1 2 3 4 5 6; do codes="${codes}$(run_runner "$r") "; done
+if [ "$codes" = "0 0 0 0 0 0 " ] && [ "$(alert_count)" = "0" ] \
+   && grep -q 'dirt: LIVE' "$(find "$(sd "$r")/runs" -maxdepth 1 -name '*.skipped' | sort | tail -n1)"; then
+  ok "a fresh-mtime (live) edit never alerts, however many ticks it yields (records say LIVE)"
+else
+  bad "live edit never alerts" "codes='${codes% }' alerts=$(alert_count)"
+fi
+
+# One fresh path among old ones makes the whole tree LIVE: the NEWEST mtime
+# decides, because a human touching any dirty path is a live editor.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+old_file "$r" erl_crash.dump
+printf 'mid-edit\n' >"$r/new-draft.md"
+for _ in 1 2 3 4; do run_runner "$r" >/dev/null; done
+if [ "$(alert_count)" = "0" ]; then
+  ok "old leftovers beside one fresh edit do not alert (the newest mtime decides)"
+else
+  bad "newest mtime decides" "alerts=$(alert_count)"
+fi
+
+# A deleted tracked file has no mtime of its own. Its age is read from the
+# nearest existing ancestor directory (a deletion updates it), never skipped: a
+# path whose age cannot be read must not make the tree look fresh or empty.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+rm -f "$r/ai/agents/ours.md"
+touch -d '2 days ago' "$r/ai/agents"
+for _ in 1 2 3; do run_runner "$r" >/dev/null; done
+m="$(alert_msgs | head -n1)"
+if [ "$(alert_count)" = "1" ] && grep -q 'ai/agents/ours.md' "$m"; then
+  ok "a deletion-only dirty tree is aged by its nearest existing ancestor and still escalates"
+else
+  bad "deleted path aged" "alerts=$(alert_count) err=$(cat "$a/runner.err")"
+fi
+
+# A failed send is LOUD, never marks the signature alerted, and the next tick
+# retries. The tick itself still yields with exit 0 (the send is a report; it
+# must never turn a yield into a failure or feed the wedge).
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+old_file "$r" erl_crash.dump
+empty_root="${TMP}/empty-inbox-root"; mkdir -p "$empty_root"
+codes=""
+for _ in 1 2 3; do codes="${codes}$(run_runner "$r" ATHENA_INBOX_ROOT="$empty_root") "; done
+if [ "$codes" = "0 0 0 " ] && [ "$(alert_count)" = "0" ] \
+   && grep -q 'could NOT be sent' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err" \
+   && [ ! -e "$(sd "$r")/consecutive-failures" ]; then
+  ok "a failed harness-alert send is loud with a Fix:, still exits 0 and never feeds the wedge"
+else
+  bad "failed send is loud" "codes='${codes% }' alerts=$(alert_count) err=$(cat "$a/runner.err")"
+fi
+run_runner "$r" >/dev/null
+if [ "$(alert_count)" = "1" ]; then
+  ok "and the next tick with a working channel sends the alert (a failed send is never recorded as sent)"
+else
+  bad "retry after failed send" "alerts=$(alert_count) err=$(cat "$a/runner.err")"
+fi
+
+# The runner's own state under ai-artifacts/ is never dirt, so it can never
+# alert on itself.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+mkdir -p "$(sd "$r")"; old_file "$(sd "$r")" leftover.log
+for _ in 1 2 3; do run_runner "$r" >/dev/null; done
+if [ "$(alert_count)" = "0" ] && [ -e "$a/claude-was-invoked" ]; then
+  ok "old files under ai-artifacts/ are the runner's own state: no yield, no alert"
+else
+  bad "ai-artifacts excluded" "alerts=$(alert_count)"
+fi
+
+# Bad thresholds fall back loudly (a typo must never disable the escalation).
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+old_file "$r" erl_crash.dump
+for _ in 1 2 3; do run_runner "$r" SHIPWRIGHT_STALE_DIRT_ESCALATE=x SHIPWRIGHT_STALE_DIRT_AGE_S=0 >/dev/null; done
+if [ "$(alert_count)" = "1" ] && grep -q 'SHIPWRIGHT_STALE_DIRT_ESCALATE' "$a/runner.err" \
+   && grep -q 'SHIPWRIGHT_STALE_DIRT_AGE_S' "$a/runner.err" && grep -q 'Fix:' "$a/runner.err"; then
+  ok "non-numeric/zero stale-dirt thresholds fall back to the defaults loudly and still escalate"
+else
+  bad "bad stale thresholds" "alerts=$(alert_count) err=$(cat "$a/runner.err")"
+fi
+
+# The thresholds are knobs: N=1 alerts on the first stale skip.
+clear_alerts
+r="$(new_repo)"; a="$(aux "$r")"; stub_claude "$a/stub-claude" 0
+old_file "$r" erl_crash.dump
+run_runner "$r" SHIPWRIGHT_STALE_DIRT_ESCALATE=1 >/dev/null
+if [ "$(alert_count)" = "1" ]; then
+  ok "SHIPWRIGHT_STALE_DIRT_ESCALATE=1 alerts on the first stale skip"
+else
+  bad "escalate knob" "alerts=$(alert_count) err=$(cat "$a/runner.err")"
 fi
 
 # ---------------------------------------------------------------------------
