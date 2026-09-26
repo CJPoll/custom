@@ -887,9 +887,10 @@ checkout's working tree, with a `Fix:` naming the worktree to use:
   on the machine. Unreadable stdin or a git error is allowed with a visible
   warning and a log line in `$XDG_STATE_HOME/athena/worktree-escape-guard.log`.
   A command it cannot parse is logged as `unparsed`, and a target it cannot
-  resolve as `unresolved`; both are allowed with no warning. Writes through an
-  interpreter, `xargs`, or a variable not set in the same command are not
-  detected.
+  resolve as `unresolved`; both are allowed with no warning.
+- **It is not a sandbox.** It models the forms agents type. A write shape it
+  does not model passes with no log line; the hook's header gives examples
+  (an interpreter, `xargs`, `eval`, a variable not set in the same command).
 
 **Later (2026-09-26, DND-840):** this paragraph said "It is currently doctrine,
 not enforcement": nothing denied a write to a main checkout, and the

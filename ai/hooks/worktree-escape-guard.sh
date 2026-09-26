@@ -46,13 +46,21 @@
 # command. Quoted payloads, comments and heredoc bodies are never parsed as
 # commands, so text that only MENTIONS a write is not a write.
 #
-# NOT DETECTED (documented false negatives, never false denies): writes through
-# an interpreter (`python -c`, `perl -i`), `xargs rm`, `find -delete`, any
-# writer outside the list above (`patch`, `tar -x`, `unzip`, `rsync`, `chmod`,
-# `dd`), a command substitution inside double quotes, and a target built from a
-# variable not assigned in the same command. An unresolvable target is logged
-# as `unresolved`. By design, a scratch repo that has a linked worktree IS
-# guarded wherever it lives: a subagent works in its worktree there too.
+# PARSED: `;` `&&` `||` `|` `&` newlines, subshells, `$( )` and backticks,
+# reserved words (`if/then/do/{/!`), heredocs, `sh|bash|zsh|dash -c SCRIPT`
+# (recursively), env/timeout/command-style wrappers, cd/pushd/popd, and git
+# `--output`/`-o` files.
+#
+# NOT A SANDBOX. The guard models the forms agents actually type; a write
+# shape it does not model passes WITHOUT a log line, and the list here is
+# examples, not an inventory: interpreters (`python -c`, `perl -i`), `xargs`,
+# `find -delete`, `eval`, writers outside the list above (`patch`, `tar -x`,
+# `unzip`, `rsync`, `chmod`, `dd`), a substitution inside double quotes, and a
+# target built from a variable not assigned in the same command. What IS
+# logged: a target it cannot resolve (`unresolved`), a command it cannot
+# tokenize (`unparsed`), and an input it cannot check (`unchecked`). By
+# design, a scratch repo that has a linked worktree IS guarded wherever it
+# lives: a subagent works in its worktree there too.
 #
 # FAILURE MODE: this hook runs on every tool call of every session on the
 # machine, hot-loaded. A fail-closed hook would wedge them all on a broken git
@@ -216,6 +224,7 @@ def in_git_dir(info, path):
 def read_input():
     raw = sys.stdin.read()
     if not raw.strip():
+        log("unchecked", "empty stdin")
         emit({})
     try:
         data = json.loads(raw)
@@ -376,6 +385,9 @@ def tokenize(text):
             if j >= n:
                 raise ValueError("unterminated double quote")
             have = True; i = j + 1
+        elif c == "`":
+            # An unquoted backtick substitution runs its content as a command.
+            have = flush(); toks.append((";", True)); i += 1
         elif c in ";&|()<>":
             have = flush()
             op = next(o for o in OPS if text.startswith(o, i))
@@ -413,6 +425,8 @@ def expand(tok, env, cwd):
     return os.path.normpath(os.path.join(cwd, tok))
 
 WRAPPERS = {"command", "exec", "nohup", "time", "builtin", "nice", "stdbuf"}
+RESERVED = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}"}
+SHELLS = {"sh", "bash", "zsh", "dash"}
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 def command_words(seg):
@@ -424,6 +438,10 @@ def command_words(seg):
         i += 1
     words = seg[i:]
     while words:
+        if words[0] in RESERVED:
+            # `if cond; then git add`, `do rm x; done`, `{ git reset; }`, `! cmd`
+            words = words[1:]
+            continue
         base = os.path.basename(words[0])
         if base == "env":
             words = words[1:]
@@ -448,7 +466,12 @@ def command_words(seg):
 
 GIT_MUTATING = {"add", "rm", "mv", "commit", "restore", "reset", "checkout", "switch", "clean",
                 "rebase", "cherry-pick", "revert", "am", "apply", "merge", "pull", "bisect",
-                "update-index", "checkout-index", "read-tree"}
+                "update-index", "checkout-index", "read-tree", "sparse-checkout", "submodule",
+                "merge-file"}
+# The read-only verbs of the multi-verb subcommands above.
+GIT_READONLY_VERBS = {"bisect": ("log", "view", "visualize", "terms", "help"),
+                      "submodule": ("status", "summary"),
+                      "sparse-checkout": ("list",)}
 GIT_OPT_WITH_ARG = {"-c", "--namespace", "--exec-path", "--config-env", "--super-prefix", "--list-cmds"}
 
 def git_target(args, cwd, env):
@@ -489,7 +512,7 @@ def git_is_write(sub, sargs):
         return False
     if sub == "commit" and "--dry-run" in s:
         return False
-    if sub == "bisect" and sargs[:1] and sargs[0] in ("log", "view", "visualize", "terms", "help"):
+    if sub in GIT_READONLY_VERBS and sargs[:1] and sargs[0] in GIT_READONLY_VERBS[sub]:
         return False
     return True
 
@@ -549,13 +572,36 @@ def shell_targets(words):
         return nonopts(args, with_arg=("-s", "-r", "--size", "--reference"))
     return []
 
-def check_bash(cmd, data, act):
+def shell_c_script(args):
+    """The script of `sh -c SCRIPT` (also `bash -lc`, `-ec`), else None."""
+    for i, a in enumerate(args):
+        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
+            return args[i + 1] if i + 1 < len(args) else None
+        if not a.startswith("-"):
+            return None
+    return None
+
+def git_output_targets(sub, sargs):
+    """Files a git subcommand writes through an output option."""
+    out = []
+    for i, a in enumerate(sargs):
+        nxt = sargs[i + 1] if i + 1 < len(sargs) else None
+        if a.startswith(("--output=", "--output-directory=")):
+            out.append(a.split("=", 1)[1])
+        elif a in ("--output", "--output-directory") and nxt:
+            out.append(nxt)
+        elif a == "-o" and nxt and sub in ("archive", "format-patch"):
+            out.append(nxt)
+    return out
+
+def check_bash(cmd, data, act, cwd=None, depth=0):
     try:
         toks = tokenize(cmd)
     except ValueError as e:
         log("unparsed", "%s: %s" % (e, cmd[:300]))
         return
-    cwd = os.path.realpath(data.get("cwd") or os.getcwd())
+    if cwd is None:
+        cwd = os.path.realpath(data.get("cwd") or os.getcwd())
     env = {}
     segs, cur = [], []
     # A subshell's `cd` does not outlive it: `(` saves cwd, `)` restores it.
@@ -636,8 +682,19 @@ def check_bash(cmd, data, act):
             nd = expand(dest, env, cwd if cwd is not UNKNOWN else "/")
             cwd = UNKNOWN if (nd is UNKNOWN or (cwd is UNKNOWN and not nd.startswith("/"))) else os.path.realpath(nd)
             continue
+        if base in SHELLS:
+            script = shell_c_script(words[1:])
+            if script is not None and depth < 3:
+                check_bash(script, data, act, cwd, depth + 1)
+            continue
         if base == "git":
             sub, sargs, tgt = git_target(words[1:], cwd, env)
+            for w in git_output_targets(sub, sargs):
+                p = expand(w, env, tgt) if tgt is not UNKNOWN or w.startswith("/") else UNKNOWN
+                if p is UNKNOWN:
+                    log("unresolved", "git %s output %s in: %s" % (sub, w, cmd[:300]))
+                    continue
+                check_path(p, "`git %s` output %s" % (sub, w), data, act)
             if sub and git_is_write(sub, sargs):
                 if tgt is UNKNOWN:
                     log("unresolved", "git %s target in: %s" % (sub, cmd[:300]))
