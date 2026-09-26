@@ -105,9 +105,9 @@
 # PRECISION (DND-780, narrow cut): the leading test bracket `[` / `[[` and
 # the lone brace-group word `{` are not glob command words (as globs they
 # match only themselves; the word after `{` keeps command position); the
-# `?` of `$?` is not a glob; an assignment word
-# (`rc=$?`, `a[1]=x`, `a+=x`) is never a command word and keeps the next
-# word in command position; a word whose expansions are all inside double
+# `?` of `$?` is not a glob; a word shaped like an assignment (`rc=$?`,
+# `a[1]=x`, `a+=x`) gives the next word command position (it is still
+# judged itself); a word whose expansions are all inside double
 # quotes, each a bare `$NAME` or `${NAME}` directly followed by `/`, and
 # whose last path component is plain (`"$W/t"`), is that literal name. When
 # several rules fire, the most specific finding is reported (a literal
@@ -534,10 +534,12 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # refpart(t): the ref a revision/refspec word names: glob marks, a leading
   # `+` and any `@{...}` reflog selector removed (`stash@{0}` -> stash).
   function refpart(t) { gsub(/\001/, "", t); sub(/^\+/, "", t); sub(/@\{.*$/, "", t); return t }
-  # is_assign(t): t is an assignment word (NAME=..., NAME[i]=..., NAME+=...).
-  # In command position the shell performs it and runs the NEXT word; a
-  # program literally named `NAME=...` would need a directory of that name.
-  # So its value never makes it a command word.
+  # is_assign(t): t has the shape of an assignment word (NAME=...,
+  # NAME[i]=..., NAME+=...). Used ONLY to give the next word command
+  # position (cmd_prefix), which can only add checks. The glob and
+  # expansion rules still judge the word itself: the tokenizer removes
+  # quotes, so `"A"=/usr/bin/g?t` (a command word, not an assignment) has
+  # the same shape (DND-780 narrow cut, critic round 1).
   function is_assign(t) { return t ~ /^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=/ }
   # literal_non_git(t, ux): word t holds an expansion only inside double
   # quotes (ux == 0, so it is never split into several words or globbed) and
@@ -756,9 +758,6 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       # the tail of `$(command -v git) stash`.
       if (SB[k] && W[k] == "stash" && !is_read(m >= 1 ? sw[1] : "")) { note("stash", W, k, e, depth, 0); return "stash" }
       if (W[k] ~ /(^|\/)git-stash$/ && !is_read(m >= 1 ? sw[1] : "")) { note("stash", W, k, e, depth, 0); return "stash" }
-      # An assignment word is never a command word (see is_assign): the
-      # expansion rules below do not read it. The literal git rule still does.
-      x = is_assign(W[k])
       # A command word the shell rewrites by glob or brace (`/usr/bin/g?t`,
       # `git-st*sh`) may be git or may be git-stash, so it is judged as both:
       # as git-stash, no verb (a bare or option-first push), a writing verb,
@@ -769,7 +768,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       # expansion needs a closing `}` in the same word, so it is the brace
       # group keyword, and the word after it keeps command position (see
       # cmd_prefix).
-      if (cp && !x && W[k] ~ /\001/ && W[k] != "[\001" && W[k] != "[\001[\001" && W[k] != "{\001") {
+      if (cp && W[k] ~ /\001/ && W[k] != "[\001" && W[k] != "[\001[\001" && W[k] != "{\001") {
         for (i = 1; i <= m && sw[i] ~ /^-/; i++) ;
         if (i > m || sw[i] ~ /^(push|save|pop|apply|drop|clear|store|branch)$/ || sw[i] ~ /[$`\001]/ || git_verdict(sw, m, 1, 0, 0) != "") {
           best = better(best, "glob-head"); note("glob-head", W, k, e, depth, 0)
@@ -777,7 +776,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         continue
       }
       if (W[k] ~ /(^|\/)git$/) r = git_verdict(sw, m, 1, 0, 0)
-      else if (!x && W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k])) r = git_verdict(sw, m, 1, 1, 0)
+      else if (W[k] ~ /[$`]/ && !literal_non_git(W[k], UX[k])) r = git_verdict(sw, m, 1, 1, 0)
       else r = ""
       note(r, W, k, e, depth, 0)
       if (r == "stash") return r
