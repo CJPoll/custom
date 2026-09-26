@@ -18,6 +18,32 @@
 # harness commit. It only fails when a settings file exists AND a registry hook
 # is absent from it.
 #
+# THE BAR IS THE REGISTRY THAT LANDED, NOT THE BRANCH'S (DND-743, folding in
+# DND-478). The hooks the live settings MUST wire are the ones in
+# ai/hooks/registry.json as it landed on origin's main (ai/lib/landed.rb: the
+# union over origin/main's tip and merge-base(HEAD, origin/main), the strictest).
+# It used to be the branch's own copy, which broke both ways:
+#   - a branch that ADDED a hook failed until the live settings wired it. The
+#     only way to green was `setup-hooks --install` from the worktree, which
+#     wires the MAIN checkout's path, where the script does not exist until the
+#     branch lands: exit 127 on every tool call (DND-670). Machine config became
+#     a precondition of reviewing code;
+#   - a branch that REMOVED or re-evented a landed hook lowered its own bar, so
+#     real drift on main passed. See ~/dev/custom/CLAUDE.md -> "A check's own
+#     bar must not live in the diff it is checking".
+# So the check now reports, in order:
+#   1. BRANCH CONSISTENCY: every entry in this checkout's registry names a script
+#      that exists here and is executable (fails, exit 1). Needs no settings.
+#   2. DANGLING: a wired command under a checkout's ai/hooks/ whose script is
+#      missing or not executable, the exit-127 state (fails, exit 1).
+#   3. DRIFT: a LANDED (event, script) pair the live settings do not wire
+#      (fails, exit 1) -- exactly the pre-DND-743 failure, keyed on what landed.
+#   4. PENDING: a pair only this branch adds, not wired yet. Named, never a
+#      failure: it is wired after it lands, from the main checkout.
+# A bar that cannot be read (origin unreachable, local origin/main disagreeing
+# with origin, a malformed registry or settings file) is COULD NOT MEASURE,
+# exit 3, never a pass.
+#
 # Deliberately gem-free (stdlib only); run with bare `ruby`.
 #
 # Usage:
@@ -27,17 +53,29 @@
 # Override the target settings file with HOOKS_SETTINGS_FILE (used by the
 # self-test and by scripts/setup-hooks --check; defaults to ~/.claude/settings.json).
 #
-# Exit codes: 0 ok / not-this-env · 1 drift (a registry hook is not registered)
+# Exit codes: 0 ok / not-this-env · 1 drift, dangling, or an inconsistent
+# branch registry · 3 could not measure (the landed bar, the branch registry, or
+# the settings file could not be read)
 
 require "json"
 require "shellwords"
+require_relative "../lib/landed"
 
 AI_DIR       = File.expand_path("..", __dir__)          # .../ai
 REPO_DIR     = File.expand_path("..", AI_DIR)           # repo root (may be a worktree)
+REGISTRY_REL = "ai/hooks/registry.json"
 # HOOKS_REGISTRY_FILE is a TEST SEAM, matching setup-hooks': the two tools must
 # be checkable against the same synthetic registry, or "they agree" is asserted
-# only where both happen to read the real one.
-REGISTRY     = ENV.fetch("HOOKS_REGISTRY_FILE") { File.join(AI_DIR, "hooks", "registry.json") }
+# only where both happen to read the real one. It replaces only the BRANCH
+# registry (consistency and pending). The required set is always read from
+# origin, so no environment variable can lower the bar.
+REGISTRY     = ENV.fetch("HOOKS_REGISTRY_FILE") { File.join(REPO_DIR, REGISTRY_REL) }
+EXIT_OK         = 0
+EXIT_FAIL       = 1
+EXIT_UNMEASURED = 3
+
+# A registry (or settings) document that cannot be read or has the wrong shape.
+class RegistryError < StandardError; end
 
 # The MAIN checkout for this repo. Hooks are always wired at the main checkout's
 # path, because a worktree path vanishes when the worktree is cleaned up. But
@@ -107,8 +145,82 @@ rescue StandardError
   cmd
 end
 
-def load_registry
-  JSON.parse(File.read(REGISTRY)).fetch("hooks")
+# The entries of a registry document. Raises RegistryError, naming where, when
+# the text is not JSON or an entry is not {event, matcher, script} strings: a
+# malformed registry is a measurement that failed, never an empty one.
+def parse_registry(text, where)
+  data = JSON.parse(text)
+  hooks = data.is_a?(Hash) ? data["hooks"] : nil
+  raise RegistryError, "#{where}: no \"hooks\" array" unless hooks.is_a?(Array)
+
+  hooks.each_with_index do |e, i|
+    good = e.is_a?(Hash) && %w[event script].all? { |k| e[k].is_a?(String) && !e[k].empty? } &&
+           e.fetch("matcher", "").is_a?(String)
+    raise RegistryError, "#{where}: entry #{i} is not {event, matcher, script} strings: #{e.inspect}" unless good
+  end
+  hooks
+rescue JSON::ParserError => e
+  raise RegistryError, "#{where}: not valid JSON (#{e.message.lines.first.to_s.strip})"
+end
+
+# This checkout's registry (the branch's copy). Raises RegistryError.
+def load_registry(file = REGISTRY)
+  parse_registry(File.read(file), file)
+rescue SystemCallError => e
+  raise RegistryError, "#{file}: cannot be read (#{e.message})"
+end
+
+# The registry entries that LANDED: the union over every landed point (the
+# strictest bar). Returns [points, entries]. Raises Landed::Unreadable (a
+# malformed landed registry included) or Landed::Mismatch. Empty entries when
+# no landed point has the file (the registry is being introduced by this diff).
+def landed_registry(root = REPO_DIR)
+  pts, bars = Landed.read_bar(root, REGISTRY_REL) do |text, label, sha|
+    parse_registry(text, "#{REGISTRY_REL} @ #{label} #{sha[0, 12]}")
+  rescue RegistryError => e
+    raise Landed::Unreadable.new([[label, e.message]])
+  end
+  [pts, bars.flatten(1).uniq { |e| [e["event"], e["script"]] }]
+end
+
+def pair_key(entry)
+  [entry["event"], entry["script"]]
+end
+
+# Entries of this checkout's registry whose script is missing or not
+# executable in this checkout. Returns human-readable strings.
+def inconsistent(registry, root = REPO_DIR)
+  registry.filter_map do |e|
+    path = File.join(root, e["script"])
+    if !File.file?(path)
+      "#{e['event']} -> #{e['script']}: no such file in #{root}"
+    elsif !File.executable?(path)
+      "#{e['event']} -> #{e['script']}: not executable"
+    end
+  end
+end
+
+# Wired commands that point into a checkout's ai/hooks/ at a script that is
+# missing or not executable: the hook fails (exit 127/126) on every event it
+# matches. The first shell word of the command is the path. Returns strings.
+def dangling(settings, dirs = checkout_dirs)
+  hook_dirs = dirs.map { |d| norm(File.join(d, "ai", "hooks")) }
+  commands = []
+  (settings["hooks"] || {}).each do |event, matchers|
+    Array(matchers).each { |m| Array(m["hooks"]).each { |h| commands << [event, h["command"].to_s] } }
+  end
+  commands.uniq.filter_map do |event, cmd|
+    word = begin
+      Shellwords.split(cmd).first.to_s
+    rescue ArgumentError
+      cmd
+    end
+    path = norm(word)
+    next unless hook_dirs.any? { |h| path.start_with?("#{h}/") }
+    next if File.file?(path) && File.executable?(path)
+
+    "#{event} -> #{cmd}: #{File.exist?(path) ? 'not executable' : 'does not exist'}"
+  end
 end
 
 # All {event, command} pairs registered in a parsed settings hash.
@@ -131,27 +243,122 @@ def drift_for(settings, registry, dirs = checkout_dirs)
   end.map { |e| "#{e['event']} -> #{e['script']}" }
 end
 
-def run
-  registry = load_registry
-  path = settings_path
+def unmeasured(lines)
+  warn "check-hooks-registered: COULD NOT MEASURE — this is not a pass."
+  lines.each { |l| warn l }
+  EXIT_UNMEASURED
+end
+
+# The settings hash at path. Raises RegistryError when it is not a JSON object.
+def load_settings(path)
+  data = JSON.parse(File.read(path))
+  raise RegistryError, "#{path}: not a JSON object" unless data.is_a?(Hash)
+  raise RegistryError, "#{path}: \"hooks\" is not an object" unless data.fetch("hooks", {}).is_a?(Hash)
+
+  data
+rescue JSON::ParserError => e
+  raise RegistryError, "#{path}: not valid JSON (#{e.message.lines.first.to_s.strip})"
+rescue SystemCallError => e
+  raise RegistryError, "#{path}: cannot be read (#{e.message})"
+end
+
+# The landed bar as [description, entries], or [nil, lines] when it could not
+# be measured (lines explain why).
+def measure_landed(landed, root)
+  pts, entries = landed.call(root)
+  ["landed #{REGISTRY_REL} (#{Landed.describe(pts)})", entries]
+rescue Landed::Unreadable => e
+  [nil, Landed.unreadable_lines("hook registry", e.probes)]
+rescue Landed::Mismatch => e
+  args = [e.local, e.remote]
+  args << e.source if e.respond_to?(:source)
+  [nil, Landed.mismatch_lines(*args)]
+end
+
+# The check. Keyword arguments exist for the inline self-test; the CLI passes
+# none. `landed` is how the landed registry is read (Landed, from origin).
+def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
+        landed: ->(r) { landed_registry(r) }, dirs: checkout_dirs)
+  begin
+    registry = load_registry(registry_file)
+  rescue RegistryError => e
+    return unmeasured(["  this checkout's hook registry cannot be read: #{e.message}",
+                       "  Fix: repair #{REGISTRY_REL} on this branch (a JSON object whose \"hooks\" is an " \
+                       "array of {event, matcher, script} strings) and re-run."])
+  end
+
+  broken = inconsistent(registry, root)
   unless File.exist?(path)
-    puts "check-hooks-registered: no settings file at #{path} — nothing to assert (not this environment). OK."
-    return 0
+    if broken.empty?
+      puts "check-hooks-registered: no settings file at #{path} — nothing to assert (not this environment). OK."
+      return EXIT_OK
+    end
+    report_failures(path, broken, [], [], [])
+    return EXIT_FAIL
   end
 
-  settings = JSON.parse(File.read(path))
-  missing  = drift_for(settings, registry)
-  if missing.empty?
-    puts "check-hooks-registered: all #{registry.size} registry hooks are wired in #{path}. OK."
-    return 0
+  begin
+    settings = load_settings(path)
+  rescue RegistryError => e
+    return unmeasured(["  the live settings cannot be read: #{e.message}",
+                       "  Fix: this is the owner's machine state; report it to the owner. Do not " \
+                       "rewrite the file (the clobber path of the 2026-09-17 outage)."])
   end
 
-  warn "check-hooks-registered: FAIL — #{missing.size} registered hook(s) are NOT wired in #{path}:"
-  missing.each { |m| warn "  - #{m}" }
-  warn "Fix: re-wire them by running `scripts/setup-hooks --install` (it MERGES into " \
-       "settings.json, backing it up first — it never clobbers the existing block). " \
-       "If a hook was intentionally retired, remove it from ai/hooks/registry.json instead."
-  1
+  dangle = dangling(settings, dirs)
+  bar, landed_entries = measure_landed(landed, root)
+  if bar.nil?
+    report_failures(path, broken, dangle, [], []) unless broken.empty? && dangle.empty?
+    return unmeasured(landed_entries)
+  end
+
+  drift   = drift_for(settings, landed_entries, dirs)
+  keys    = landed_entries.map { |e| pair_key(e) }
+  pending = drift_for(settings, registry.reject { |e| keys.include?(pair_key(e)) }, dirs)
+  if broken.empty? && dangle.empty? && drift.empty?
+    puts "check-hooks-registered: all #{landed_entries.size} landed registry hooks are wired in #{path} " \
+         "(bar: #{bar}). OK."
+    report_pending(pending)
+    return EXIT_OK
+  end
+
+  report_failures(path, broken, dangle, drift, pending)
+  EXIT_FAIL
+end
+
+def report_pending(pending, out = $stdout)
+  return if pending.empty?
+
+  out.puts "  #{pending.size} hook(s) this branch adds are not wired yet (pending, not a failure):"
+  pending.each { |m| out.puts "  ~ #{m}" }
+  out.puts "  After the branch lands, wire them with `scripts/setup-hooks --install` in the MAIN " \
+           "checkout. Do not wire them before: the main checkout has no such script yet, so every " \
+           "event it matches would fail with exit 127."
+end
+
+def report_failures(path, broken, dangle, drift, pending)
+  warn "check-hooks-registered: FAIL"
+  unless broken.empty?
+    warn "  #{broken.size} registry entr(ies) on this branch name a script that cannot run:"
+    broken.each { |m| warn "  - #{m}" }
+    warn "  Fix: add the script (chmod +x) or correct its path in #{REGISTRY_REL}."
+  end
+  unless dangle.empty?
+    warn "  #{dangle.size} wired hook(s) in #{path} point at a script that cannot run (dangling):"
+    dangle.each { |m| warn "  - #{m}" }
+    warn "  Fix: this usually means a hook was wired before its branch landed. Land that branch " \
+         "(the main checkout then has the script), or have the owner remove that one entry from " \
+         "#{path}. Live settings are the owner's machine state: an agent reports this, it does not edit it."
+  end
+  unless drift.empty?
+    warn "  #{drift.size} landed registry hook(s) are NOT wired in #{path}:"
+    drift.each { |m| warn "  - #{m}" }
+    warn "  Fix: re-wire them by running `scripts/setup-hooks --install` from the MAIN checkout " \
+         "(it MERGES into settings.json, backing it up first — it never clobbers the existing block). " \
+         "If a hook was intentionally retired, remove it from #{REGISTRY_REL} and land that; if main " \
+         "already retired it after your merge-base, rebase onto origin/main."
+  end
+  report_pending(pending, $stderr)
 end
 
 # ---------------------------------------------------------------------------
@@ -248,17 +455,70 @@ def self_test
     $stdout = $stderr = File.open(File::NULL, "w")
     begin; blk.call; ensure; $stdout.close; $stdout, $stderr = o, e; end
   end
-  # Absent settings file -> run returns 0 (not this environment).
+  # The run paths, with the landed bar injected so this suite stays hermetic.
+  # The origin-backed read is proven end to end, on fixture repos with a bare
+  # origin, by ai/test/check-hooks-registered/self-test.sh. Settings here are
+  # wired at THIS checkout, where every branch script exists, so a hook this
+  # branch adds (absent from the main checkout until it lands) is not dangling.
+  as_landed = ->(entries) { ->(_root) { [[["fixture landed", "0" * 40]], entries] } }
+  never = ->(_root) { raise "the landed bar must not be read here" }
+  here = [REPO_DIR]
+  wire_here = lambda do |entries|
+    s = { "hooks" => {} }
+    entries.each do |e|
+      (s["hooks"][e["event"]] ||= []) << {
+        "matcher" => e["matcher"], "hooks" => [{ "type" => "command", "command" => abs_script(e["script"], REPO_DIR) }]
+      }
+    end
+    JSON.generate(s)
+  end
+  go = ->(f, landed, **kw) { quiet.call { run(path: f, landed: landed, dirs: here, **kw) } }
   Dir.mktmpdir do |dir|
-    ENV["HOOKS_SETTINGS_FILE"] = File.join(dir, "nope.json")
-    check.call("absent settings file -> exit 0", quiet.call { run } == 0)
-    # Present-but-drifted file -> run returns 1.
+    check.call("absent settings file -> exit 0, landed bar not read",
+               go.call(File.join(dir, "nope.json"), never) == EXIT_OK)
     f = File.join(dir, "settings.json")
     File.write(f, JSON.generate({ "hooks" => {} }))
-    ENV["HOOKS_SETTINGS_FILE"] = f
-    check.call("present drifted file -> exit 1", quiet.call { run } == 1)
+    check.call("present drifted file -> exit 1", go.call(f, as_landed.call(registry)) == EXIT_FAIL)
+    File.write(f, wire_here.call(registry))
+    check.call("complete file -> exit 0", go.call(f, as_landed.call(registry)) == EXIT_OK)
+    extra = { "event" => "SessionStart", "matcher" => "", "script" => "ai/hooks/landed-elsewhere.sh" }
+    check.call("a landed hook the branch registry lacks is still required -> exit 1",
+               go.call(f, as_landed.call(registry + [extra])) == EXIT_FAIL)
+    File.write(f, wire_here.call(registry.drop(1)))
+    check.call("a branch-only hook (not landed), unwired, is pending, not a failure -> exit 0",
+               go.call(f, as_landed.call(registry.drop(1))) == EXIT_OK)
+    check.call("...and the same hook once landed and unwired is drift -> exit 1",
+               go.call(f, as_landed.call(registry)) == EXIT_FAIL)
+    unreadable = ->(_root) { raise Landed::Unreadable.new([["fixture probe", "unreachable"]]) }
+    check.call("landed bar unreadable -> exit 3", go.call(f, unreadable) == EXIT_UNMEASURED)
+    mismatch = ->(_root) { raise Landed::Mismatch.new("a" * 40, "b" * 40) }
+    check.call("local origin/main disagrees with origin -> exit 3", go.call(f, mismatch) == EXIT_UNMEASURED)
+    File.write(f, "{ not json")
+    check.call("malformed settings -> exit 3", go.call(f, never) == EXIT_UNMEASURED)
+    bad_reg = File.join(dir, "registry.json")
+    File.write(bad_reg, JSON.generate({ "hooks" => 7 }))
+    check.call("malformed branch registry -> exit 3", go.call(f, never, registry_file: bad_reg) == EXIT_UNMEASURED)
   end
-  ENV.delete("HOOKS_SETTINGS_FILE")
+
+  # dangling: a wired command under a checkout's ai/hooks/ that cannot run.
+  Dir.mktmpdir do |d|
+    FileUtils.mkdir_p(File.join(d, "ai", "hooks"))
+    live = File.join(d, "ai", "hooks", "live.sh")
+    File.write(live, "#!/bin/sh\n")
+    File.chmod(0o755, live)
+    noexec = File.join(d, "ai", "hooks", "noexec.sh")
+    File.write(noexec, "#!/bin/sh\n")
+    File.chmod(0o644, noexec)
+    ghost = File.join(d, "ai", "hooks", "ghost.sh")
+    s = { "hooks" => { "Stop" => [{ "matcher" => "", "hooks" => [
+      { "command" => live }, { "command" => "#{ghost} --flag" }, { "command" => noexec },
+      { "command" => "/usr/bin/true" }
+    ] }] } }
+    got = dangling(s, [d])
+    check.call("dangling: a missing script is flagged", got.any? { |m| m.include?("ghost.sh") && m.include?("does not exist") })
+    check.call("dangling: a non-executable script is flagged", got.any? { |m| m.include?("noexec.sh") })
+    check.call("dangling: a runnable hook and a command outside ai/hooks/ are not", got.size == 2)
+  end
 
   puts(ok ? "ALL CASES PASS" : "SELF-TEST FAILED")
   ok ? 0 : 1
@@ -272,8 +532,13 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   puts <<~TXT
     Usage:
       ai/bin/check-hooks-registered              assert every hook in
-                                                 ai/hooks/registry.json is wired
-                                                 into the live Claude Code settings
+                                                 ai/hooks/registry.json AS LANDED on
+                                                 origin/main is wired into the live
+                                                 Claude Code settings; a hook only
+                                                 this branch adds is named as pending
+                                                 (not a failure); a wired hook whose
+                                                 script cannot run fails (dangling).
+                                                 Exit 0 ok, 1 fail, 3 could not measure
       ai/bin/check-hooks-registered --norm PATH  print this tool's normalized form
                                                  of PATH (used by setup-hooks'
                                                  self-test)
