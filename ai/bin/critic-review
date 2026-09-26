@@ -495,14 +495,30 @@ def commit_log(base)
   nil
 end
 
+# The patch fed to the judge, HERMETIC against the caller's own git config.
+# Left unpinned, a user's `diff.external` silently swaps in an external diff
+# tool (a different, possibly non-unified format the judge was never designed
+# to read), `color.diff=always` forces ANSI escape codes into the patch even
+# with no terminal attached (`always` means always, unlike the default
+# `auto`), and `diff.noprefix` drops the `a/`/`b/` path prefixes CriticPrompt's
+# fencing and any path-based reasoning assume. None of these raise -- the diff
+# still "succeeds", just as a different diff -- so pin every one of them
+# explicitly rather than trusting git's ambient config. Kept apart from
+# `critic_output` so self-test can exercise it directly, under a hermetic
+# config that FORCES the failure mode, without invoking `claude`.
+def diff_for(base)
+  diff_flags = ["--no-ext-diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/"]
+  diff, _e, dst = Open3.capture3("git", "diff", *diff_flags, "#{base}...HEAD")
+  diff = Open3.capture3("git", "diff", *diff_flags, base)[0] if !dst.success? || diff.strip.empty?
+  diff
+end
+
 def critic_output(base)
   stub = ENV["CRITIC_REVIEW_STUB"]
   return [File.read(stub), true] if stub && File.file?(stub)
 
   return ["", false] unless system("command -v claude >/dev/null 2>&1")
-  diff, _e, dst = Open3.capture3("git", "diff", "#{base}...HEAD")
-  diff = Open3.capture3("git", "diff", base)[0] if !dst.success? || diff.strip.empty?
-  prompt = CriticPrompt.build(diff: diff, commit_messages: commit_log(base))
+  prompt = CriticPrompt.build(diff: diff_for(base), commit_messages: commit_log(base))
   out, _err, st = Open3.capture3("claude", "-p", "--agent", CRITIC, stdin_data: prompt)
   [out, st.success?]
 rescue StandardError => e
@@ -1266,6 +1282,26 @@ def run_self_test
         ok &&= (commit_log("HEAD") == "")
         rc_nil, said = capture_err { commit_log("no-such-ref-dnd400").inspect }
         ok &&= (rc_nil == "nil") && said.include?("Fix:") && said.include?("no-such-ref-dnd400")
+
+        # DIFF HERMETICITY (DND-773b) -- the patch fed to the judge must not
+        # vary with the caller's OWN git config: diff.external can swap in a
+        # different tool entirely, color.diff=always forces ANSI escapes into
+        # the patch with no terminal attached (unlike the default `auto`), and
+        # diff.noprefix drops the a//b/ prefixes. None of these raise -- the
+        # diff still "succeeds", just as a different diff.
+        sh.call("git", "config", "color.diff", "always")
+        sh.call("git", "config", "diff.noprefix", "true")
+        ext = File.join(repo, "fake-ext-diff.sh")
+        File.write(ext, "#!/bin/sh\necho EXTERNAL-DIFF-RAN\n")
+        File.chmod(0o755, ext)
+        sh.call("git", "config", "diff.external", ext)
+        out = diff_for(first)
+        ok &&= !out.include?("EXTERNAL-DIFF-RAN")   # diff.external is not invoked
+        ok &&= !out.include?("\e[")                 # no ANSI color codes
+        ok &&= out.include?("--- a/a.txt") && out.include?("+++ b/a.txt") # prefixes pinned despite noprefix
+        sh.call("git", "config", "--unset", "diff.external")
+        sh.call("git", "config", "--unset", "diff.noprefix")
+        sh.call("git", "config", "--unset", "color.diff")
       end
     end
   end
