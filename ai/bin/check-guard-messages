@@ -737,12 +737,41 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   TXT
   exit 0
 end
-exit(run_self_test) if ARGV.include?("--self-test")
+require_relative "../lib/strict_argv"
 
-root_at = ARGV.index("--root")
-if root_at
-  root = ARGV[root_at + 1]
-  if root.nil? || root.empty? || !File.directory?(root)
+# Parsed BEFORE any check runs (DND-813). An argument this tool does not
+# recognise must never fall through to the live check: `--self-tset` ran it and
+# exited 0, and `--root --self-test` read no root and ran the self-test. Every
+# argument must be a declared flag; --self-test and --root are two modes.
+CLI_SPEC = { "--self-test" => :switch, "--root" => :value }.freeze
+
+# -> [opts, nil] on success, [nil, reason] on a usage error.
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  if opts["--self-test"] && opts["--root"]
+    return [nil, "--self-test runs fixtures and never reads --root; pass one"]
+  end
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+cli, reason = parse_cli(ARGV)
+if reason
+  warn "check-guard-messages: usage error — #{reason}."
+  warn "  Fix: re-run with only the flags `ai/bin/check-guard-messages --help` " \
+       "lists: no argument (check this checkout), --root DIR (check DIR), or " \
+       "--self-test. An unrecognised argument is refused, not ignored: ignoring " \
+       "it would run the live check and report its verdict as the answer to " \
+       "what you asked."
+  exit 2
+end
+exit(run_self_test) if cli["--self-test"]
+
+if cli.key?("--root")
+  root = cli["--root"]
+  unless File.directory?(root)
     warn "check-guard-messages: FAILED — --root needs an existing directory, got #{root.inspect}"
     warn "  Fix: pass --root <path to a git checkout>, e.g. --root ~/dev/custom."
     exit 1

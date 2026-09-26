@@ -120,7 +120,18 @@ trap 'exit 143' TERM INT HUP
 sub="" session_id="${CLAUDE_CODE_SESSION_ID:-}" cwd="${PWD}" now=""
 interval="${FLEET_WAIT_INTERVAL_S:-60}" interval_given="" budget="" line_sid="" line_given=""
 
-need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die_usage "$1 needs a value"; }
+# need_value FLAG [NEXT...] -- a value flag needs a value that is not the next
+# flag (`--session-id --cwd /x` used to read "--cwd" as the session id), and no
+# value flag may be given twice (the second silently won). DND-813.
+seen_flags=" "
+once() {
+  case "${seen_flags}" in *" $1 "*) die_usage "$1 given more than once" "pass $1 once." ;; esac
+  seen_flags="${seen_flags}$1 "
+}
+need_value() {
+  once "$1"
+  [ "$#" -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ] || die_usage "$1 needs a value"
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -130,7 +141,8 @@ while [ "$#" -gt 0 ]; do
     --interval)   need_value "$@"; interval="$2"; interval_given=1; shift 2 ;;
     --budget)     need_value "$@"; budget="$2"; shift 2 ;;
     # A line's id may be empty or absent: both read as foreign, never an error.
-    --line-session-id) [ "$#" -ge 2 ] || die_usage "$1 needs a value"; line_sid="$2"; line_given=1; shift 2 ;;
+    # It is read verbatim, so an id that starts with "-" is still an id.
+    --line-session-id) once "$1"; [ "$#" -ge 2 ] || die_usage "$1 needs a value"; line_sid="$2"; line_given=1; shift 2 ;;
     -*)           die_usage "unknown flag $1" ;;
     *)
       [ -z "${sub}" ] || die_usage "unexpected argument $1 (subcommand already ${sub})"

@@ -91,7 +91,18 @@ trap 'exit 143' TERM INT HUP
 sub="" session_id="${CLAUDE_CODE_SESSION_ID:-}" cwd="${PWD}" agent_id="" agent_type="" run_id=""
 missions_file="" state="" scope_label="" reason="" notion_project_id="" dry_run="" given=" "
 
-need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die_usage "$1 needs a value"; }
+# need_value FLAG [NEXT...] -- a value flag needs a value that is not the next
+# flag (`--session-id --cwd /x` used to read "--cwd" as the session id), and no
+# value flag may be given twice (the second silently won). DND-813.
+seen_flags=" "
+once() {
+  case "${seen_flags}" in *" $1 "*) die_usage "$1 given more than once" "pass $1 once." ;; esac
+  seen_flags="${seen_flags}$1 "
+}
+need_value() {
+  once "$1"
+  [ "$#" -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ] || die_usage "$1 needs a value"
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -108,7 +119,7 @@ while [ "$#" -gt 0 ]; do
     --scope-label) need_value "$@"; scope_label="$2"; given="${given}scope-label "; shift 2 ;;
     --reason)      need_value "$@"; reason="$2"; given="${given}reason "; shift 2 ;;
     --notion-project-id) need_value "$@"; notion_project_id="$2"; given="${given}notion-project-id "; shift 2 ;;
-    --dry-run)     dry_run=1; shift ;;
+    --dry-run)     once "$1"; dry_run=1; shift ;;
     -*)            die_usage "unknown flag $1" ;;
     *)
       [ -z "${sub}" ] || die_usage "unexpected argument $1 (subcommand already ${sub})"

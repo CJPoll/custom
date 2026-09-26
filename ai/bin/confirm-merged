@@ -147,7 +147,7 @@ SH
   return 0
 }
 
-if [ "${1:-}" = "--self-test" ]; then
+if [ "${1:-}" = "--self-test" ] && [ "$#" -eq 1 ]; then
   run_self_test; exit $?
 fi
 
@@ -170,17 +170,40 @@ EOF
 }
 
 PR_ID=""; MR_ID=""; SHA=""; TARGET=""; REPO="."; FETCH=0; JSON=0
+
+# Usage refusals (exit 2), each with a Fix: (DND-813). A value flag must have a
+# value that is not the next flag (`--pr --json` used to read the PR id
+# "--json" and ask the forge about it), and no flag may be given twice (the
+# second silently won).
+argv_usage() {
+  echo "confirm-merged: usage error — $1" >&2
+  echo "  Fix: $2" >&2
+  exit 2
+}
+seen=" "
+once() {
+  case "${seen}" in *" $1 "*) argv_usage "$1 given more than once" "pass $1 once." ;; esac
+  seen="${seen}$1 "
+}
+take_value() {
+  once "$1"
+  [ "$#" -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ] \
+    || argv_usage "$1 needs a value" "pass $1 VALUE; see confirm-merged --help for each flag's value."
+}
+for a in "$@"; do
+  case "$a" in -h|--help) usage; exit 0 ;; esac
+done
 while [ $# -gt 0 ]; do
   case "$1" in
-    --pr)     PR_ID="${2:-}"; shift 2 || { echo "error: --pr needs an id" >&2; exit 2; } ;;
-    --mr)     MR_ID="${2:-}"; shift 2 || { echo "error: --mr needs an id" >&2; exit 2; } ;;
-    --sha)    SHA="${2:-}"; shift 2 || { echo "error: --sha needs a value" >&2; exit 2; } ;;
-    --target) TARGET="${2:-}"; shift 2 || { echo "error: --target needs a ref" >&2; exit 2; } ;;
-    --repo)   REPO="${2:-}"; shift 2 || { echo "error: --repo needs a dir" >&2; exit 2; } ;;
-    --fetch)  FETCH=1; shift ;;
-    --json)   JSON=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    --pr)     take_value "$@"; PR_ID="$2"; shift 2 ;;
+    --mr)     take_value "$@"; MR_ID="$2"; shift 2 ;;
+    --sha)    take_value "$@"; SHA="$2"; shift 2 ;;
+    --target) take_value "$@"; TARGET="$2"; shift 2 ;;
+    --repo)   take_value "$@"; REPO="$2"; shift 2 ;;
+    --fetch)  once "$1"; FETCH=1; shift ;;
+    --json)   once "$1"; JSON=1; shift ;;
+    *) argv_usage "unknown argument: $1" \
+         "use only the flags confirm-merged --help lists (--pr/--mr ID, --sha SHA --target REF, --repo DIR, --fetch, --json). An unrecognised argument is refused, not ignored." ;;
   esac
 done
 

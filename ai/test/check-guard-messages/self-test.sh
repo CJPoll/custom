@@ -22,6 +22,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AI_DIR="$(cd "${HERE}/../.." && pwd)"
 BIN="${CHECK_GUARD_MESSAGES_UNDER_TEST:-${AI_DIR}/bin/check-guard-messages}"
 BIN_LIB="$(dirname "${BIN}")/../lib/landed.rb"
+BIN_ARGV_LIB="$(dirname "${BIN}")/../lib/strict_argv.rb"
 
 if [ ! -f "${BIN}" ]; then
   echo "check-guard-messages self-test: FAIL -- ${BIN} does not exist" >&2
@@ -77,6 +78,13 @@ new_fixture() {
     mkdir -p "${root}/ai/lib"
     cp "${BIN_LIB}" "${root}/ai/lib/landed.rb"
     printf 'ai/lib/landed.rb\tlibrary\tshared landed-bar library required by the checker; the caller prints the Fix:\n' \
+      >> "${root}/ai/guard-classification.tsv"
+  fi
+  # Since DND-813 the checker parses argv with the shared StrictArgv library.
+  if [ -f "${BIN_ARGV_LIB}" ]; then
+    mkdir -p "${root}/ai/lib"
+    cp "${BIN_ARGV_LIB}" "${root}/ai/lib/strict_argv.rb"
+    printf 'ai/lib/strict_argv.rb\tlibrary\tshared argv parser required by the checker; the caller prints the Fix:\n' \
       >> "${root}/ai/guard-classification.tsv"
   fi
   git -C "${root}" init -q

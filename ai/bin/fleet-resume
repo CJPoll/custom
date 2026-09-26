@@ -78,7 +78,18 @@ done
 . "${AI}/lib/fleet/resume-manager.sh"
 
 sub="" session_id="${CLAUDE_CODE_SESSION_ID:-}" run_id="" root=""
-need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die_usage "$1 needs a value"; }
+# need_value FLAG [NEXT...] -- a value flag needs a value that is not the next
+# flag (`--session-id --cwd /x` used to read "--cwd" as the session id), and no
+# value flag may be given twice (the second silently won). DND-813.
+seen_flags=" "
+once() {
+  case "${seen_flags}" in *" $1 "*) die_usage "$1 given more than once" "pass $1 once." ;; esac
+  seen_flags="${seen_flags}$1 "
+}
+need_value() {
+  once "$1"
+  [ "$#" -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ] || die_usage "$1 needs a value"
+}
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --session-id) need_value "$@"; session_id="$2"; shift 2 ;;

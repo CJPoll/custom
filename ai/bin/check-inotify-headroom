@@ -113,17 +113,32 @@ run_live() {
 }
 
 # --- args ---------------------------------------------------------------------
+# Every argument is parsed BEFORE anything runs (DND-813): `--self-test --x`
+# used to run the self-test and never see --x, and a second --threshold
+# silently replaced the first.
+for a in "$@"; do
+  case "$a" in -h|--help) usage; exit 0 ;; esac
+done
+mode=live threshold_given=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --threshold) shift
+    --threshold) [ -z "$threshold_given" ] || {
+                   echo "error: --threshold given more than once" >&2
+                   echo "  Fix: pass --threshold once, e.g. 'check-inotify-headroom --threshold 80'." >&2
+                   exit 2; }
+                 threshold_given=1
+                 shift
                  case "${1:-}" in
                    ''|*[!0-9]*) echo "error: --threshold needs an integer percent" >&2
                                 echo "  Fix: run 'check-inotify-headroom --threshold 80'." >&2
                                 exit 2 ;;
                    *) THRESHOLD="$1" ;;
                  esac ;;
-    --self-test) run_self_test; exit $? ;;
-    -h|--help)   usage; exit 0 ;;
+    --self-test) [ "$mode" = live ] || {
+                   echo "error: --self-test given more than once" >&2
+                   echo "  Fix: pass --self-test once." >&2
+                   exit 2; }
+                 mode=selftest ;;
     *) echo "error: unknown argument: $1" >&2
        echo "  Fix: use --threshold N, --self-test, or --help." >&2
        exit 2 ;;
@@ -131,4 +146,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+if [ "$mode" = selftest ]; then
+  run_self_test; exit $?
+fi
 run_live

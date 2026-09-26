@@ -170,4 +170,28 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   TXT
   exit 0
 end
-exit(ARGV.include?("--self-test") ? run_self_test : run_check)
+require_relative "../lib/strict_argv"
+
+# Parsed BEFORE any check runs (DND-813). An argument this tool does not
+# recognise must never fall through to the live check: its verdict would answer
+# a question nobody asked (`check-generic-skills --self-tset` ran the live check and exited
+# 0). Every argument must be a declared flag.
+CLI_SPEC = { "--self-test" => :switch }.freeze
+
+# -> [opts, nil] on success, [nil, reason] on a usage error.
+def parse_cli(argv)
+  [StrictArgv.parse(argv, CLI_SPEC), nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+cli, reason = parse_cli(ARGV)
+if reason
+  warn "check-generic-skills: usage error — #{reason}."
+  warn "  Fix: re-run with only the flags `ai/bin/check-generic-skills --help` lists: no " \
+       "argument (the live check) or --self-test. An unrecognised argument is " \
+       "refused, not ignored: ignoring it would run the live check and report " \
+       "its verdict as the answer to what you asked."
+  exit 2
+end
+exit(cli["--self-test"] ? run_self_test : run_check)

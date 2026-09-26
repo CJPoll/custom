@@ -854,27 +854,57 @@ if ARGV.include?("--help") || ARGV.include?("-h")
   TXT
   exit 0
 end
-if ARGV.include?("--self-test")
-  exit run_self_test
-elsif (i = ARGV.index("--class-of"))
-  name = ARGV[i + 1]
-  if name.nil? || name.empty?
-    warn "check-tool-risk: --class-of needs a tool name."
-    warn "  Fix: invoke as `ai/bin/check-tool-risk --class-of <tool-name>`."
-    exit 2
+require_relative "../lib/strict_argv"
+
+# Parsed BEFORE anything runs (DND-813). An argument this tool does not
+# recognise must never fall through to another mode: `--jsn` ran the text
+# check, `--class-of --json` printed the class of a tool named "--json"
+# (destructive, the unknown-tool default), and `--json --root DIR` measured
+# THIS checkout, not DIR. Every argument must be a declared flag, and the four
+# modes exclude each other (--root only qualifies the default check).
+CLI_SPEC = {
+  "--self-test" => :switch, "--json" => :switch,
+  "--class-of" => :value, "--root" => :value
+}.freeze
+
+# -> [opts, nil] on success, [nil, reason] on a usage error.
+def parse_cli(argv)
+  opts = StrictArgv.parse(argv, CLI_SPEC)
+  modes = opts.keys
+  if modes.size > 1
+    return [nil, "#{modes.join(' and ')} are separate modes (--root only qualifies the default check); pass one"]
   end
-  puts class_of(name, REGISTRY_PATH)
+
+  [opts, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+cli, reason = parse_cli(ARGV)
+if reason
+  warn "check-tool-risk: usage error — #{reason}."
+  warn "  Fix: re-run with only the flags `ai/bin/check-tool-risk --help` lists, " \
+       "one mode at a time: no argument (the check), --root DIR, --json, " \
+       "--class-of TOOL, or --self-test. An unrecognised argument is refused, " \
+       "not ignored: ignoring it would run a different mode and report its " \
+       "answer as the answer to what you asked."
+  exit 2
+end
+if cli["--self-test"]
+  exit run_self_test
+elsif cli.key?("--class-of")
+  puts class_of(cli["--class-of"], REGISTRY_PATH)
   exit 0
-elsif ARGV.include?("--json")
+elsif cli["--json"]
   code, lines = run_json
   out = code.zero? ? $stdout : $stderr
   lines.each { |l| out.puts l }
   exit code
 else
   root = REPO_ROOT
-  if (r = ARGV.index("--root"))
-    root = ARGV[r + 1]
-    if root.nil? || root.empty? || !File.directory?(root)
+  if cli.key?("--root")
+    root = cli["--root"]
+    unless File.directory?(root)
       warn "check-tool-risk: FAILED — --root needs an existing directory, got #{root.inspect}"
       warn "  Fix: pass --root <path to a git checkout>, e.g. --root ~/dev/custom."
       exit 1
