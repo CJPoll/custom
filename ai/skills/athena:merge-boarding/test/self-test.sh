@@ -507,6 +507,32 @@ sect="$( sed -n '/^--- intersection/,$p' <<<"$out" )"
 grep -qx '    moved.txt' <<<"$sect" && ok "c22 intersection names the OLD path of a rename (DND-770)" || bad "c22 intersection missed the renamed-away path" "$sect"
 grep -qxF "    ${NA}" <<<"$sect" && ok "c22 intersection names a non-ASCII path verbatim, not C-quoted" || bad "c22 non-ASCII path missing or quoted" "$sect"
 
+# ---------------------------------------------------------------- case 23
+# A `git diff` that FAILS (not "no changes") must be an ERROR, not an empty
+# file set -- the failed-lookup class (~/dev/custom/ai/CLAUDE.md -> "A failed
+# lookup must never look like an empty one"), one level down from case 6/7:
+# those cover an unresolvable REF; this covers a resolvable ref pair whose
+# diff itself cannot be computed (a corrupt object in an otherwise-valid
+# repo). Reproduced by corrupting HEAD's tree object so `git diff --name-only`
+# fails with a real git error while `git rev-parse` on the commits still
+# succeeds.
+R="${TMP}/c23"; new_repo "$R"
+( cd "$R" && echo a > a.txt && git add a.txt && git commit -qm a )
+base="$( cd "$R" && git rev-parse HEAD~1 )"
+head="$( cd "$R" && git rev-parse HEAD )"
+tree="$( cd "$R" && git rev-parse HEAD^{tree} )"
+objfile="${R}/.git/objects/${tree:0:2}/${tree:2}"
+chmod +w "$objfile"; echo garbage > "$objfile"
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_verdict "$R" pass "$head"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --since "$base" --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "c23 exit 2 on a git-diff failure (corrupt object)" || bad "c23 expected exit 2, got $rc" "$out"
+grep -q 'git diff failed measuring changed paths' <<<"$out" && ok "c23 names the failure, not an empty result" || bad "c23 did not surface the git-diff failure" "$out"
+grep -q 'is corrupt' <<<"$out" && ok "c23 includes git's own error text" || bad "c23 swallowed git's stderr" "$out"
+grep -q 'Fix:' <<<"$out" && ok "c23 carries a Fix: line" || bad "c23 missing Fix: line" "$out"
+grep -q '(empty -- incoming delta is outside your reviewed file set)' <<<"$out" && bad "c23 misreported the failure as an empty intersection" "$out" || ok "c23 does not misreport the failure as empty"
+[ ! -f "${R}/GATE_RAN" ] && ok "c23 does not run the gate past an unmeasurable file set" || bad "c23 ran the gate despite the git-diff failure"
+
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
