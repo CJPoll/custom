@@ -84,6 +84,11 @@
 #     defined there cannot be read, so it is treated as unknown rather than
 #     absent. Builtins stay allowed. A value built by COMMAND SUBSTITUTION
 #     (`-c alias.p=$(...)`, a backtick) is denied outright, used or not.
+#   * git's own rewrite of a subcommand: help.autocorrect makes git RUN the
+#     closest command for a typo (`git stsh pop` runs `git stash pop`).
+#     Setting it in the command is denied; when a config the hook reads has
+#     it on, a subcommand that is neither a builtin nor a known alias is
+#     denied like the unread-config case above.
 #   * RESIDUAL — LEXICAL INDIRECTION: this is a text guard. Every rule above
 #     reads the command's text; a stash write whose spelling is assembled at
 #     run time from pieces the text does not show is out of its reach (see
@@ -174,6 +179,7 @@ if [ -n "$GSG_TMP" ] && [ -d "$GSG_TMP" ]; then
   trap 'exit 130' INT
   trap 'exit 143' TERM
   : > "$GSG_TMP/shaliases"; : > "$GSG_TMP/shalias.re"; : > "$GSG_TMP/aliases"
+  : > "$GSG_TMP/autocorrect"
   printf '%s' "$CMD" > "$GSG_TMP/cmd" || FAULT="the command could not be written to a work file"
 else
   GSG_TMP=""; FAULT="mktemp could not create a work dir"
@@ -244,11 +250,19 @@ prefilter() {
 
 # Appended to the aliases work file. `git config --get-regexp` exits 1 when
 # nothing matches; any other non-zero exit is an error.
+# The same reads collect help.autocorrect into its own work file (see the
+# header); the function's status is the alias read's.
 alias_read() {
   if [ -n "$1" ] && [ -d "$1" ]; then
     git -C "$1" config --get-regexp '^alias\.' >> "$GSG_TMP/aliases" 2>/dev/null
+    _ar=$?
+    git -C "$1" config --get-regexp '^help\.autocorrect$' >> "$GSG_TMP/autocorrect" 2>/dev/null
+    return $_ar
   else
-    (cd / && git config --get-regexp '^alias\.' >> "$GSG_TMP/aliases" 2>/dev/null)
+    (cd / && { git config --get-regexp '^alias\.' >> "$GSG_TMP/aliases" 2>/dev/null
+      _ar=$?
+      git config --get-regexp '^help\.autocorrect$' >> "$GSG_TMP/autocorrect" 2>/dev/null
+      exit $_ar; })
   fi
 }
 
@@ -302,6 +316,15 @@ WRITES=$(printf '%s' "$FLAT" | sed -E 's#[0-9]*>>?[[:space:]]*/dev/null##g; s#[0
 if printf '%s' "$WRITES" | grep -Eq 'refs/stash' \
   && printf '%s' "$WRITES" | grep -Eq '(update-ref|reflog[[:space:]]+(delete|expire)|>|(^|[[:space:];&|(/])(rm|mv|cp|tee|truncate|unlink|shred|ln|dd|install)[[:space:]])'; then
   deny 'this command rewrites refs/stash (update-ref, reflog delete/expire, or a file write), which is the shared stash list.'
+fi
+
+# ---- setting help.autocorrect -----------------------------------------------
+# help.autocorrect makes git RUN the closest command for a typo, so with it
+# on `git stsh pop` runs `git stash pop`. Setting it (inline `-c`, `git config
+# ... help.autocorrect <v>`, `--config-env`) is denied; reading or unsetting
+# it is not. When it is already on in config, see UNREAD_CONFIG below.
+if printf '%s' "$FLAT" | grep -Eiq 'help\.autocorrect(=|[[:space:]]+[^-[:space:];&|])'; then
+  deny 'this command sets git help.autocorrect, which makes git run the closest command for a mistyped subcommand (`git stsh pop` runs `git stash pop`). Leave help.autocorrect at its configured value and spell subcommands out.'
 fi
 
 # ---- setting reflog expiry ---------------------------------------------------
@@ -382,6 +405,13 @@ case $? in
         -e "(^|[[:space:];&|(])(-C|cd|pushd)[[:space:]]+(\"[^\"]*[[:space:]][^\"]*\"|'[^']*[[:space:]][^']*')" \
         -e '(^|[[:space:];&|(])(-C|cd|pushd)[[:space:]]+[^[:space:];&|()]*\\[[:space:]]' 2>/dev/null
       _rc=$?
+    fi
+    # help.autocorrect on in a config the hook read (any value but an off
+    # one; a valueless key is true): a typo may run stash, so a subcommand
+    # that is neither a builtin nor a known alias is treated as unknown.
+    if [ "$_rc" -eq 1 ] && [ -s "$GSG_TMP/autocorrect" ] \
+      && grep -Eiqv '^help\.autocorrect[[:space:]]+(0|false|no|off|never|show)$' "$GSG_TMP/autocorrect" 2>/dev/null; then
+      _rc=0
     fi
     case $_rc in
       0)
@@ -736,7 +766,7 @@ case "$VERDICT" in
   alias) deny 'this runs a git alias that resolves to a stash write (or a shell alias that mentions stash).' ;;
   expanded) deny 'this runs git with a subcommand built by expansion (`git $X`, a glob `git st?sh`, a brace `git {stash,pop}`), which may be a stash write and cannot be read here. Spell the subcommand (and a stash verb) out literally, quoting any glob or brace characters.' ;;
   glob-head) deny 'this runs a command word the shell rewrites by glob or brace expansion (`/usr/bin/g?t`, `git-st*sh`), which may be git or git-stash writing the stash list. Spell the command word literally.' ;;
-  unread-config) deny 'this points git at a config this guard does not read (`--git-dir`, GIT_DIR, GIT_CONFIG_GLOBAL/SYSTEM, HOME, XDG_CONFIG_HOME, `include.path`, or a `cd`/`-C` target that is expanded or holds whitespace) and runs a subcommand that is not a git builtin, so it may be an alias from that config that writes the stash list. Run a builtin subcommand spelled out, or drop the override.' ;;
+  unread-config) deny 'this runs a git subcommand that is neither a builtin nor an alias this guard read, where git may resolve it to a stash write: the command points git at a config this guard does not read (`--git-dir`, GIT_DIR, GIT_CONFIG_GLOBAL/SYSTEM, HOME, XDG_CONFIG_HOME, `include.path`, a `cd`/`-C` target that is expanded or holds whitespace, or an alias defined from an expansion), or help.autocorrect is on and git would run the closest command for a typo. Spell a builtin subcommand out, or drop the override.' ;;
   expanded-git) deny 'this runs `stash` through a command word built by expansion (`$GIT stash`, `$(command -v git) stash`), which may be git writing the stash list.' ;;
 esac
 exit 0

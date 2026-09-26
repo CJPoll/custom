@@ -226,7 +226,7 @@ behind.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh` (hermetic: fixture
   repos under `mktemp -d`, `GIT_CONFIG_GLOBAL` a fixture file,
   `GIT_CONFIG_NOSYSTEM=1`).
-- **Baseline:** `RESULT: 250 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; fix round 2 added B1-B7, C1-C18 and F8-F13; fix round 3 V1-V17; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c, R7-R41, I66-I77 and Z1-Z8).
+- **Baseline:** `RESULT: 258 passed, 0 failed` / `VERDICT: PASS` (79 at the first commit; fix round 2 added B1-B7, C1-C18 and F8-F13; fix round 3 V1-V17 and AC1-AC8; critic round 1 added I27-I30 and A14; round 2 A15-A18; round 3 I31-I39 and OK11; self-review A19-A21; round 4 A22-A27; bounds A28, N1; round 6 I40-I58 and S1-S8; round 7 I59-I65 and F7; fix round W2a-W2c, R7-R41, I66-I77 and Z1-Z8).
 
 ### Fail-first (no guard)
 
@@ -710,3 +710,37 @@ as over-deny boundaries.) After the fix: `RESULT: 250 passed, 0 failed`.
 | --- | --- |
 | drop the command-substitution outright deny | V2, V11 |
 | drop the two UNREAD_CONFIG expansion triggers | V1, V4-V8 |
+
+### Fix round 3, critic round 21 (224f726): git help.autocorrect
+
+`git -c help.autocorrect=immediate stsh pop` runs `git stash pop`: with
+help.autocorrect on, git RUNS the closest command for a typo. `stsh` is not
+stash, not an alias the hook read, and not plumbing, so the hook allowed it.
+Kind 1 (pre-existing), same class as the shell's and zsh's rewrites: a word
+rewritten by something other than the hook, here git itself. Fixed:
+- setting help.autocorrect in the command is denied (inline `-c`,
+  `git config ... help.autocorrect <v>`, `--config-env`); reading or
+  unsetting it is not;
+- help.autocorrect on in a config the hook reads (global, cwd repo, `-C`/`cd`
+  dirs; any value but 0/false/no/off/never/show) makes a subcommand that is
+  neither a builtin nor a known alias unknown, and it is denied.
+The laptop's config does not set help.autocorrect (`git config --get-all
+help.autocorrect` exits 1).
+
+New cases against 224f726's hook:
+
+```
+FAIL  AC1. inline -c help.autocorrect=immediate with a typo (expected deny) status=0 out=[]
+FAIL  AC2. inline -c help.autocorrect=1 (expected deny) status=0 out=[]
+FAIL  AC3. setting help.autocorrect in config (expected deny) status=0 out=[]
+FAIL  AC5. autocorrect on in the global config, a typo of stash (expected deny) status=0 out=[]
+FAIL  AC8. autocorrect on in the repo config, a typo of stash (expected deny) status=0 out=[]
+RESULT: 253 passed, 5 failed
+```
+
+After the fix: `RESULT: 258 passed, 0 failed`.
+
+| Mutation | Caught by |
+| --- | --- |
+| drop the inline-setting deny | AC1-AC3 |
+| ignore help.autocorrect read from config | AC5, AC8 |

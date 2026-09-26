@@ -503,6 +503,26 @@ case_root "V15. git log -c with a literal revision" allow 'git log -c HEAD'
 case_root "V16. a commit message from a substitution" allow 'git commit -m "$(cat msg)"'
 case_root "V17. sh -c from a substitution" allow 'sh -c "$(cat script.sh)"'
 
+echo "== T: git help.autocorrect runs a corrected typo =="
+# With help.autocorrect on, git runs the closest command for a typo:
+# `git stsh pop` runs `git stash pop`.
+case_root "AC1. inline -c help.autocorrect=immediate with a typo" deny 'git -c help.autocorrect=immediate stsh pop'
+case_root "AC2. inline -c help.autocorrect=1" deny 'git -c help.autocorrect=1 stahs pop'
+case_root "AC3. setting help.autocorrect in config" deny 'git config --global help.autocorrect immediate'
+case_root "AC4. reading help.autocorrect" allow 'git config --get help.autocorrect'
+printf '[help]\n\tautocorrect = immediate\n' > "$TMP/accfg"
+runin "$CLAUDE_CONFIG_DIR" "$TMP/accfg" "$(printf 'git stahs pop' | jsonstdin /)"
+check "AC5. autocorrect on in the global config, a typo of stash" deny
+runin "$CLAUDE_CONFIG_DIR" "$TMP/accfg" "$(printf 'git status' | jsonstdin /)"
+check "AC6. autocorrect on in the global config, a builtin" allow
+printf '[help]\n\tautocorrect = 0\n' > "$TMP/acoff"
+runin "$CLAUDE_CONFIG_DIR" "$TMP/acoff" "$(printf 'git stahs pop' | jsonstdin /)"
+check "AC7. autocorrect off (0) in the global config, a typo" allow
+git -C "$OWNER" config help.autocorrect immediate
+run "$(json "$OWNER" 'git stsh pop')"
+check "AC8. autocorrect on in the repo config, a typo of stash" deny
+git -C "$OWNER" config --unset help.autocorrect
+
 echo "== F: fail-open =="
 run ''
 check "F1. empty stdin" allow
