@@ -113,16 +113,14 @@ Not `ai-artifacts/notes/`: those are each captain's notes, travelling with its b
 
 ### 3a. Resuming, and judging liveness
 
-- **On ANY resume trigger** (usage-limit reset, or any interruption to your turn):
-  **[[athena:admiral-resume]]** — read the state log first; snapshot every
-  worktree's uncommitted work BEFORE any re-dispatch; adopt existing worktrees and
-  branches, never recreate; sweep every in-flight Mission; the ≤5 cap still holds.
-  Never `git stash` (the stash list is the owner's too; DND-670): park WIP as a commit.
+- **On ANY resume trigger** (usage-limit reset, or any interruption to your
+  turn): **[[athena:admiral-resume]]** — full salvage-and-resweep procedure.
+  Never `git stash` (the stash list is the owner's too; DND-670): park WIP as a
+  commit.
 - **Notifications (incl. your `Monitor`) are a latency hint, never proof nothing
-  happened**, and `ListAgents` is usually absent (an admiral is itself a subagent).
-  Judge a captain by what it leaves on disk, full-sweep the whole fleet on every
-  trigger, apply the hard staleness rule, and count the concurrency cap from your
-  state log, not a directory: **[[athena:fleet-liveness]]**.
+  happened**, and `ListAgents` is usually absent (an admiral is itself a
+  subagent): **[[athena:fleet-liveness]]** owns the full-sweep and staleness
+  rules.
 
 ### 4. Create worktrees and dispatch work
 
@@ -163,41 +161,21 @@ drain protocol, which never ends your turn while a captain runs: **[[athena:flee
 
 ### 4a. Verify before you brief; re-read before you fix
 
-- **An environment fact you put in a brief must be VERIFIED with a named second,
-  independent probe** — not inferred from one tool's failure output, and not
-  inherited from a handoff/predecessor state log (an inherited fact is someone
-  else's conclusion with the probe missing). A subordinate's "this instruction is
-  unsatisfiable" report **IS a probe result** about the real system. Before an
-  "X is not available/broken" claim or a status-vocabulary fact enters a brief,
-  state log, or merge decision: **[[athena:brief-verification]]** (it carries the
-  probe list — `command <name>`, a tool's `--check`, reading Notion options direct).
-- **Re-read a defect's CURRENT state immediately before dispatching a fix** — one
-  probe, recorded in the state log. With five concurrent captains, peers, and an
-  hourly cron writing the same repos, every report you hold is a claim about the
-  past. Same skill.
+Every environment fact you put in a brief, state log, or merge decision must be
+VERIFIED with a named second, independent probe — never inferred from one
+tool's failure output, and never inherited from a handoff unverified. Re-read a
+defect's CURRENT state immediately before dispatching a fix, one probe,
+recorded in the state log: **[[athena:brief-verification]]**.
 
 ### 5. Handle what comes back from an athena-captain
 
-Each captain reports `DONE`, `BLOCKED_ON_DEPENDENCY`, `STUCK` or (on drain) `PARKED`;
-each frees a slot — dispatch the next `QUEUED` Mission once the checkpoint says run.
-
-**Reports arrive by FILE**, not by message: every captain writes its terminal
-report to `.../[run-id]/reports/[mission]-report.md` before ending its turn — that
-file, not any chat reply/`SendMessage`/task-notification, is the authoritative
-record. Treat any inbound message or nudge as "go check now," never as the report.
-
-**Start ONE background watcher, once, right after your first dispatch batch:** a
-single `Monitor` (`persistent: true`) on
-`~/dev/custom/ai/bin/admiral-report-watch [run-id]` — never a bare `Bash` call,
-since its poll loop is the harness-wakeup path. It emits one line per new/updated
-report and forces a staleness heartbeat ~every 45 min so the staleness rule fires
-even on a quiet run. On any notification — report line or heartbeat — do a full
-fleet sweep ([[athena:fleet-liveness]]), not just the Mission mentioned.
-
-**Process each return code + free/refill the slot per [[athena:captain-return]]**
-(DONE sanity-check + record; BLOCKED_ON_DEPENDENCY mapping and Notion marking;
-STUCK retry-once-or-park). Before re-dispatching or "waking" a captain, read its
-report file first — a fresh terminal report needs acting on, not waking.
+Each captain reports `DONE`, `BLOCKED_ON_DEPENDENCY`, `STUCK` or (on drain)
+`PARKED`; each frees a slot — dispatch the next `QUEUED` Mission once the
+checkpoint says run. **Reports arrive by FILE, never by message** — treat any
+inbound message or nudge as "go check now," never as the report itself.
+**[[athena:captain-return]]** owns the rest: the one background `Monitor` watcher
+(start it once, right after your first dispatch batch, never a bare `Bash`
+call), the read-before-waking rule, and the per-return-code handling.
 
 ### 6. Propagate finished dependency work
 
@@ -212,13 +190,9 @@ git operation on that worktree, not a rewrite.
 
 ### 6a. Tear down a Mission's docker stack once its MR is merged
 
-Idle stacks hold real capacity (DB memory/connections, containers, volumes, an
-address-pool network). **As soon as a Mission's MR is CONFIRMED merged** (not
-merely green), tear its stack down via **[[athena:teardown-worktree-stack]]** —
-never a bare `down -v`: the project name is repo-specific, and in the wrong repo it
-destroys the wrong volumes. This is yours, not the captain's (it may have ended
-before the merge): only YOUR fleet's stacks, only after verifying the merge, then
-confirm containers, volumes, and network are gone and record it.
+**As soon as a Mission's MR is CONFIRMED merged** (not merely green), tear its
+stack down — never bare `down -v`, and only YOUR fleet's stacks:
+**[[athena:teardown-worktree-stack]]** owns the full procedure and rationale.
 
 ### 6b. Boarding: the rate at which green MRs land is yours to protect
 
@@ -265,23 +239,19 @@ and the no-CI-repo bar. **Merging is YOURS, never a captain's.**
 
 ## Confirm a merge actually landed (before the DM, the terminal status, and teardown)
 
-A `✓ Merged!` line and a merge-train "car done" can BOTH appear before the MR is
-actually merged. Never trust either — confirm with **`ai/bin/confirm-merged`** (the
-one definition of "landed": `state==merged` && `merged_at`, or the head is an
-ancestor of the target) before you DM the owner, move the ticket to
-`Done`/`Ready for Release`, or tear a stack down. Re-verify on the current head
-after any merge-forward. (Detail: [[athena:merge-boarding]].)
+A `✓ Merged!` line or a merge-train "car done" can appear before the MR is
+actually merged. Never trust either: confirm with `ai/bin/confirm-merged` per
+**[[athena:merge-boarding]]** → *Confirm the merge actually landed* before any
+DM, terminal-status move, or teardown.
 
 ## Epic-progress DM to the owner
 
-You do NOT DM on every merge. Owner notifications are exactly three events: an epic
-crossing **50%** complete and an epic reaching **100%** (both yours, computed at
-merge time), and any ticket moving to **`Needs Attention`** (rides the
-ticket-lifecycle transition, owned by [[athena:ticket-management]]). After you merge
-a ticket's MR and move it to its terminal status (having CONFIRMED the merge
-landed), if the just-merged ticket has a non-empty `Epic` relation, invoke
-**[[athena:epic-progress-dm]]** — it owns the crossing math (fire once per boundary,
-recompute from Notion), the Slack formats, and the decisions-digest shaping under
+You do NOT DM on every merge. Owner notifications are exactly three events: an
+epic crossing **50%**, an epic reaching **100%** (both yours, at merge time),
+and a ticket moving to **`Needs Attention`** (owned by
+[[athena:ticket-management]]). After you merge a ticket's MR and CONFIRM it
+landed, **[[athena:epic-progress-dm]]** owns the rest — crossing math,
+recompute, Slack formats, and decisions-digest shaping under
 [[athena:run-autonomously]].
 
 ## Act as Athena, not the owner
