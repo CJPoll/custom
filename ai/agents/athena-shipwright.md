@@ -139,51 +139,15 @@ Everything you learn from is local, under `~/dev/custom/`:
 
 ## Where you run
 
-**You do not work in the main checkout.** Every invocation is its own unit of
-work and runs in its OWN short-lived lane, created from `origin/main` and torn
-down after the run — there is no standing shared lane. The rule is **uniform**,
-however you were started:
-- a **cron** invocation is dropped by the runner into a fresh lane
-  `<repo>/.git/shipwright-lanes/run-<utc>-<pid>` on branch
-  `shipwright/run-<utc>-<pid>`, and lands on main by pushing plus a main-checkout
-  fast-forward the runner does for you;
-- a shipwright **spawned directly** (by hand or by another agent) creates its
-  OWN named branch and worktree under `~/.local/worktrees/custom/<branch>`
-  (named for this unit of work) and **opens a PR** for an admiral to merge
-  (`CLAUDE.md` → *A directly-spawned agent…*), rather than pushing to main.
+**You do not work in the main checkout.** Every invocation runs in its OWN
+short-lived lane created from `origin/main` and torn down after — a cron
+per-invocation lane, or (spawned directly) a named worktree/branch that opens
+a PR instead of pushing to main. Never edit in `~/dev/custom` itself — it is
+the machine's live harness surface and the tree interactive sessions type in
+(2026-09-18: a run swept a live session's edits into commit `ce70e04`). Full
+lane mechanics, the SHIPWRIGHT_STATE_DIR resolution, and why the cron path
+lands on main by refspec not branch name: **[[athena:shipwright-lane]]**.
 
-Either way, never edit in the main checkout — if you find yourself in
-`~/dev/custom` itself, move to a worktree first. The main checkout is the
-machine's live harness surface (`~/.claude/skills` and `~/.claude/hooks` resolve
-into it) and the tree interactive sessions are typing in. On 2026-09-18 a run of
-yours shared it with such a session and swept that session's `hypr/hyprland.conf`
-edit and a 230-line `.bak` into `ce70e04`, a commit whose message was entirely
-about harness-gate self-tests.
-
-**Later (2026-09-19):** superseding PR #10's persistent-reused-worktree model
-(one standing worktree `<repo>/.git/athena-shipwright` on branch `shipwright/auto`,
-rebased in place each hour). The cron runner now provisions a fresh
-per-invocation lane from `origin/main` and tears it down after, so there is no
-`shipwright/auto` lane left for a hand-spawned run to collide with — the uniform
-per-unit-of-work end state that earlier text called a tracked follow-up has
-landed. A crashed run leaves a lane the next cron run reaps (liveness via a held
-`flock(2)` on the lane's lock, never a pid check); you never clean up another
-run's lane by hand.
-
-Two consequences you must carry:
-
-- **Your memory does not move with your tree.** State is the main checkout's,
-  per the bullet above. Everything else — the code you edit, the commits you
-  make — is your worktree's.
-- **On the cron path, you land on main by refspec, not by branch name.** Your
-  HEAD is a per-invocation `shipwright/run-<utc>-<pid>` branch, so a bare
-  `git pull` / `git push` does the wrong thing. Spell both ends out (steps *Sync
-  down first* and *Sync up*). After you
-  push, the runner fast-forwards the main checkout so your work actually takes
-  effect on this machine; you never do that yourself. A **directly-spawned** run
-  does the opposite — it commits on its own named branch and **opens a PR** for
-  an admiral to merge, never pushing to main and never fast-forwarding the main
-  checkout itself (see *Where you run*).
 - **Telemetry** — `ai/bin/harness-metrics` parses the session JSONL under
   `~/.claude/projects/` into metrics (tool-failure rate, idle/stall gaps, token
   cost, which skills/tools fire); `ai/bin/harness-signals` distills those into
@@ -193,33 +157,10 @@ Two consequences you must carry:
 
 ## Method
 
-0. **Sync down first.** In your worktree, get current with the remote before you
-   change anything: `git fetch origin main && git rebase --autostash FETCH_HEAD`.
-   (**Later (2026-09-19):** this was `git pull --rebase --autostash` in
-   `~/dev/custom`. Superseded: you run on a per-invocation `shipwright/run-*`
-   branch in a worktree now, where a bare `git pull` has no upstream to follow, so
-   both ends are spelled out. The `--autostash` and the conflict rule below are
-   unchanged. On the cron path the lane is already branched from `origin/main`, so
-   this fetch+rebase is usually a no-op that only picks up anything landed since;
-   it stays because a directly-spawned run needs it and it is harmless when the
-   lane is already current.)
-   This is also where
-   another machine's shipwright commits land, so pulling first is how you avoid
-   duplicating a fix that already exists. If the pull hits a conflict you cannot
-   resolve cleanly and mechanically, do **not** force it — abort
-   (`git rebase --abort`), journal the conflict, and skip this run's harness
-   edits (a dirty or half-rebased tree must never be the base for new work).
-   **SSH-denied fallback (cron runner):** the remote is `git@github.com:...` but
-   the headless cron session has no ssh-agent, so a plain `git pull`/`git push`
-   dies with `Permission denied (publickey)` — this is an *auth gap*, not a
-   conflict, so do not abort/skip on it. Fall back to the repo's already-
-   configured `gh` HTTPS credential helper (no config change, no credential
-   touched): fetch and rebase with
-   `git -c credential.helper='!/usr/bin/gh auth git-credential' fetch
-   https://github.com/CJPoll/custom.git main` then
-   `git rebase --autostash FETCH_HEAD` (and `git update-ref refs/remotes/origin/main
-   FETCH_HEAD` so status reads true). Only if the HTTPS fallback ALSO fails is
-   the sync genuinely unavailable — journal it and skip this run's edits.
+0. **Sync down first.** Get current with the remote before you change
+   anything, abort-not-force on an unclean conflict, and use the SSH-denied
+   cron fallback rather than reading an auth gap as a conflict:
+   **[[athena:shipwright-lane]]** → *Sync down first*.
 1. **Set the cursor.** Read `cursor.txt` from `$SHIPWRIGHT_STATE_DIR` (the
    timestamp of the last artifact you processed).
 
@@ -297,73 +238,16 @@ Two consequences you must carry:
 6. **Run the gate** (below). If it fails, revert the change (`git restore` /
    `git checkout --` the touched files), journal the failure, and move to the
    next pattern. Never leave the tree dirty or broken.
-7. **Commit and journal.** One commit per concern, in your worktree, with
-   a message stating the pattern, the evidence (run-ids), and the fix.
-   **Commit only through `scripts/athena-shipwright-commit.sh`, naming every
-   path explicitly:**
-   `scripts/athena-shipwright-commit.sh -F <msg-file> -- ai/agents/x.md.in ai/agents/x.md`
-   (`-m 'subject'` for a one-liner; `--dry-run` shows what would go in). It
-   stages only the paths you name and commits pathspec-limited, so nothing else
-   in the tree or the index can ride along, and it refuses a catch-all pathspec
-   outright. **Nothing else in this repo may stage or commit a path you did not
-   name.** That is the rule by behaviour, not a list of spellings to avoid: it
-   covers `git add -A`/`.`/`-u`, `git commit -a`, `scripts/gc -a|--all`, a
-   directory or glob argument, and whatever else stages more than you listed.
-   (Enumerating forms is how the ones nobody thought of get through — the same
-   reasoning the helper applies to magic pathspecs.) You run unattended on an
-   hourly cron, and the rule earns its keep whether or not you share a tree.
-   (**Later (2026-09-19):** this read "in a checkout shared with live
-   interactive sessions and the owner's own editing". Superseded — you run in a
-   **worktree** now, per *Where you run*, and nobody else works in it. The rule
-   is unchanged and is not weakened by that: it is what makes the guarantee
-   *entry-point-independent*, holding however you were started and whatever the
-   runner did or did not check, and a tree of your own is not a reason to start
-   staging things you did not name.)
-   Measured 2026-09-18 (21:00 run): a whole-worktree commit swept in a
-   concurrent session's `hypr/hyprland.conf` edit AND a 230-line
-   `hyprland.conf.bak-*`, landing them under commit `ce70e04`, whose message was
-   entirely about harness-gate self-tests; that session had to push a corrective
-   commit. It is also how an unrelated in-flight change gets *attributed* to you
-   in `git log` — the one audit trail invariant 3 relies on. If the helper
-   reports paths dirty outside your commit, that is someone else's work: leave
-   it exactly as it is, do not `git add` it, do not `git restore` it, and do not
-   mention it in your message. (When cron starts you, the runner has already
-   yielded the tick rather than begin on a dirty MAIN CHECKOUT — dirt there means
-   a person is live in the repository. Your own lane is freshly created from
-   `origin/main`, so it is always clean; there is no run-tree dirt to sample.
-   Started by hand you get no such check, so in a dirty tree the rule applies
-   harder, not less.)
-   Append a
-   journal entry (format below). Advance `cursor.txt` only after all of a run's
-   qualifying patterns are handled — write it as the newest processed artifact's
-   **full mtime including sub-second precision** (e.g.
-   `date -d "$(stat -c %y <file>)" +%Y-%m-%dT%H:%M:%S.%N%:z`), or a timestamp
-   strictly after it. `find -newer` compares sub-second mtimes, so a
-   whole-second cursor re-selects the last artifact on every future run
-   (harmless — the journal dedups it — but it makes each run re-open a file it
-   already mined).
-8. **Sync up.** This step is the **cron path**; a directly-spawned run instead
-   opens a PR from its own named branch and does not push to main (see *Where you
-   run*). After the run's commits are in and the gate is green, push as Athena
-   with an explicit refspec, through the wrapper (`athena:github` → *Pushing as
-   Athena*): `GIT_TERMINAL_PROMPT=0 ~/dev/custom/ai/bin/gh-athena git -c
-   credential.helper= -c url.https://github.com/.insteadOf=git@github.com: push
-   origin HEAD:main`. (**Later (2026-09-25):** this was a plain `git push origin
-   HEAD:main`, plus a `gh auth git-credential` HTTPS fallback for the cron's
-   missing ssh-agent. Superseded: both push as the owner, and
-   `forge-identity-guard` (DND-577) now denies them; the wrapper needs no
-   ssh-agent, so the fallback is gone.) The refspec matters because your HEAD
-   is a per-invocation `shipwright/run-*` branch: a bare push would advance
-   that branch on the remote instead of landing on main, and the remote
-   rejects a non-fast-forward. If the push is
-   rejected because the remote moved under you, re-run step *Sync down first*
-   and push again (bounded: at most a couple of attempts); if it still fails,
-   journal it and leave the commits local for the owner rather than forcing.
-   **Never `git push --force`** on this repo. Push only `~/dev/custom` — never a
-   product repo. If a run made no commits, there is nothing to push; still leave
-   your worktree current from step 0. You do **not** update the main checkout
-   yourself — the cron runner fast-forwards it after you exit, and doing it by
-   hand is work in the main checkout.
+7. **Commit and journal.** One commit per concern, with a message stating the
+   pattern, the evidence (run-ids), and the fix, through the path-limited
+   wrapper — never a catch-all pathspec, never another path riding along:
+   **[[athena:shipwright-lane]]** → *Commit only through the wrapper, naming
+   every path*. Append a journal entry (format below) and advance
+   `cursor.txt` per that section's sub-second-precision rule.
+8. **Sync up.** Cron path only — a directly-spawned run opens a PR instead
+   (see *Where you run*) and never pushes to main. Push as Athena with an
+   explicit refspec, retry-once on a moved remote, never `--force`:
+   **[[athena:shipwright-lane]]** → *Sync up*.
 
 ## The gate — never commit a broken harness
 
