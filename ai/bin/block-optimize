@@ -1,0 +1,898 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# block-optimize — turn ONE labeled admiral failure into ONE human-reviewable
+# prose diff, measured by the landed noise rule (DND-528, C4-2; umbrella
+# DND-175). PROPOSE-ONLY: it never adopts anything.
+#
+#   ai/bin/block-optimize --case AE-NN --evidence FILE --out-dir DIR
+#   ai/bin/block-optimize --case AE-NN --diff PATCH [--evidence FILE] --out-dir DIR
+#
+# Flow (every input exists at its step; see ai/docs/block-optimize.md):
+#   1. strict argv; --out-dir must be new or empty.
+#   2. base = origin/main, resolved to a commit ONCE.
+#   3. From base (never the working tree): routing.yml -> the allowlist, the
+#      rendered admiral's sha, the fixture, the allowlisted files, noise-band.
+#   4. Evidence: the case's row in an `admiral-eval --run` output; refused unless
+#      it is a T2 failure (0 < n, k < n) measured on base's render.
+#   5. The candidate: --diff PATCH, or ONE fenced diff from the contained
+#      proposer (claude -p with no tools and no MCP, cwd an empty tmpdir).
+#   6. Parse the headers, check scope. Reject before any git write.
+#   7. A detached scratch worktree at base: apply --check, apply, check the
+#      ACTUAL changed set (status, untracked included) against the allowlist.
+#   8. build-agents, build-agents --check, check-agent-size; the post-build set
+#      must be allowlist + renders; the admiral render must have changed.
+#   9. add -A, write-tree, commit-tree: an UNREACHABLE candidate commit. No ref.
+#  10. variant-eval --variant SHA --baseline base --corpus full --runs 10 --json.
+#  11. Label.decide on the JSON only; write proposal.diff and proposal.md.
+#  12. ensure: the scratch worktree is removed.
+# Steps 6-8 exist so a doomed candidate spends none of step 10's ~500 model calls.
+#
+# Exit: 0 a PROPOSED label; 1 REJECTED (or refused evidence); 2 usage error.
+#
+# 5-bucket layout of this file: Framework (CLI_SPEC, main), Manager
+# (Manager.run), Side-effect adapters (Adapters, all execution through the ONE
+# guarded `capture`), Domain in ai/lib/block_optimize.rb. --self-test drives
+# the Manager with fake adapters (no git, no model) and proves the containment.
+# The end-to-end suite (real git, stub tools) is
+# ai/lib/test/block-optimize/integration_test.sh.
+#
+# CONTAINMENT (security-relevant, self-modification-adjacent): every command
+# goes through `capture`, which refuses anything `command_allowed?` does not
+# explicitly permit (deny by default): no forge CLI, no ref-moving git, no
+# `worktree add` without --detach, no --update-baseline, no direct admiral-eval,
+# git writes (apply/add/write-tree/commit-tree) only with -C <the scratch tree>,
+# the ai/bin tools only inside the scratch tree, and `claude` only with the
+# exact proposer argv. No sandbox is needed because the allowlist admits only
+# prose: the code any gate runs is origin/main's, never model-written.
+#
+# Stdlib only; run with bare `ruby`.
+
+require "digest"
+require "fileutils"
+require "json"
+require "open3"
+require "tmpdir"
+require_relative "../lib/strict_argv"
+require_relative "../lib/block_optimize"
+
+BO = BlockOptimize
+ROUTING_REL = "ai/blocks/routing.yml"
+FIXTURES_REL = "ai/eval/admiral-fixtures"
+NOISE_BAND_REL = "ai/eval/noise-band.json"
+OUT_FILES = %w[proposal.diff scorecard.json scorecard.txt proposal.md].freeze
+CANDIDATE_MESSAGE = "block-optimize candidate (propose-only; on no ref)"
+CANDIDATE_IDENTITY = {
+  "GIT_AUTHOR_NAME" => "block-optimize", "GIT_AUTHOR_EMAIL" => "block-optimize@localhost",
+  "GIT_COMMITTER_NAME" => "block-optimize", "GIT_COMMITTER_EMAIL" => "block-optimize@localhost"
+}.freeze
+
+# ---------------------------------------------------------------------------
+# CONTAINMENT
+# ---------------------------------------------------------------------------
+class MutationAttempt < StandardError; end
+
+FORGE_CLIS = %w[gh glab gh-athena glab-athena].freeze
+GIT_READ_SUBCMDS = %w[rev-parse show cat-file diff status ls-files ls-tree for-each-ref].freeze
+GIT_SCRATCH_SUBCMDS = %w[apply add write-tree commit-tree].freeze
+EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
+PROPOSER_DISALLOWED = %w[Bash Task Write Edit NotebookEdit WebFetch WebSearch].freeze
+# `--tools ""` removes every built-in tool (an allowlist of none); the
+# --disallowedTools list stays as a second, named belt. --strict-mcp-config with
+# an empty config loads no MCP server. The variadic --disallowedTools is LAST so
+# it cannot swallow a later flag.
+PROPOSER_ARGV = [
+  "claude", "-p", "--model", "opus", "--tools", "",
+  "--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG,
+  "--disallowedTools", *PROPOSER_DISALLOWED
+].freeze
+
+# The one policy. Deny by default: anything not matched below is refused.
+# scratch is the current scratch worktree path (nil when none exists); chdir is
+# where the command would run.
+def command_allowed?(argv, scratch: nil, chdir: nil)
+  return false unless argv.is_a?(Array) && !argv.empty? && argv.all?(String)
+  return false if argv.include?("--update-baseline")
+
+  prog = argv[0]
+  return false if FORGE_CLIS.include?(File.basename(prog))
+
+  case prog
+  when "git" then git_allowed?(argv.drop(1), scratch)
+  when "ai/bin/build-agents"
+    in_scratch?(scratch, chdir) && (argv.drop(1) == [] || argv.drop(1) == ["--check"])
+  when "ai/bin/check-agent-size" then in_scratch?(scratch, chdir) && argv.size == 1
+  when "ai/bin/variant-eval" then in_scratch?(scratch, chdir) && argv.include?("--json")
+  when "claude" then argv == PROPOSER_ARGV
+  else false
+  end
+end
+
+def in_scratch?(scratch, chdir)
+  !scratch.nil? && chdir == scratch
+end
+
+# git with at most one global option, `-C <scratch>`; the subcommand token is
+# matched exactly (so `commit-tree` never matches `commit`).
+def git_allowed?(rest, scratch)
+  cpath = nil
+  if rest[0] == "-C"
+    cpath = rest[1]
+    return false if scratch.nil? || cpath != scratch
+
+    rest = rest.drop(2)
+  end
+  sub = rest[0]
+  return false if sub.nil? || sub.start_with?("-")
+  return true if GIT_READ_SUBCMDS.include?(sub)
+  return !cpath.nil? if GIT_SCRATCH_SUBCMDS.include?(sub)
+  return worktree_allowed?(rest.drop(1), scratch, cpath) if sub == "worktree"
+
+  false
+end
+
+def worktree_allowed?(args, scratch, cpath)
+  return false if scratch.nil? || !cpath.nil?
+
+  case args[0]
+  when "add" then args == ["add", "--detach", scratch, args[3]].compact && args.size == 4
+  when "remove" then args == ["remove", "--force", scratch]
+  else false
+  end
+end
+
+# The ONE guarded execution primitive. Returns [stdout, stderr, Process::Status].
+def capture(argv, scratch: nil, chdir: nil, stdin_data: "", env: nil)
+  unless command_allowed?(argv, scratch: scratch, chdir: chdir)
+    raise MutationAttempt,
+          "block-optimize refused a command outside its allowlist: #{argv.inspect} (cwd #{chdir.inspect}). " \
+          "Fix: block-optimize is propose-only; it must never move a ref, push, touch a forge, re-baseline, or " \
+          "write outside its scratch worktree. Route only allowlisted commands through `capture`."
+  end
+  opts = { stdin_data: stdin_data }
+  opts[:chdir] = chdir if chdir
+  Open3.capture3(*(env ? [env, *argv] : argv), **opts)
+end
+
+# ---------------------------------------------------------------------------
+# SIDE-EFFECT ADAPTERS (real git / tools / model / files)
+# ---------------------------------------------------------------------------
+class Adapters
+  attr_reader :scratch
+
+  def initialize(repo:, out_dir:)
+    @repo = repo
+    @out_dir = out_dir
+    @scratch = nil
+  end
+
+  def run(argv, chdir: @repo, stdin_data: "", env: nil)
+    capture(argv, scratch: @scratch, chdir: chdir, stdin_data: stdin_data, env: env)
+  end
+
+  def resolve_base
+    out, err, st = run(["git", "rev-parse", "--verify", "--quiet", "--end-of-options", "origin/main^{commit}"])
+    sha = out.strip
+    return sha if st.success? && sha.match?(/\A[0-9a-f]{40,64}\z/)
+
+    raise BO::Error, "origin/main does not resolve to a commit (#{err.strip}). Fix: fetch origin first " \
+                     "(`git fetch origin`); block-optimize measures against origin/main only."
+  end
+
+  # base:path's bytes, or nil when base has no such file.
+  def show(base, path)
+    _o, _e, st = run(["git", "cat-file", "-e", "#{base}:#{path}"])
+    return nil unless st.success?
+
+    out, err, st = run(["git", "show", "#{base}:#{path}"])
+    raise BO::Error, "git show #{base}:#{path} failed: #{err.strip}. Fix: check the repository." unless st.success?
+
+    out
+  end
+
+  # Directory names directly under base:dir.
+  def list_dirs(base, dir)
+    out, err, st = run(["git", "ls-tree", "--name-only", "-d", "#{base}:#{dir}"])
+    raise BO::Error, "cannot list #{dir} at #{base}: #{err.strip}. Fix: check the repository." unless st.success?
+
+    out.lines.map(&:strip).reject(&:empty?)
+  end
+
+  def read_input(path)
+    File.read(path)
+  end
+
+  # -> [ok, stdout, stderr, stray_files]. cwd is an empty tmpdir, re-checked
+  # afterwards: any file there means a tool ran that must not exist.
+  def propose(prompt)
+    Dir.mktmpdir("block-optimize-proposer-") do |cwd|
+      out, err, st = capture(PROPOSER_ARGV, chdir: cwd, stdin_data: prompt)
+      stray = Dir.children(cwd)
+      [st.success?, out, err, stray]
+    end
+  end
+
+  def with_scratch(base)
+    Dir.mktmpdir("block-optimize-wt-") do |parent|
+      @scratch = File.join(parent, "tree")
+      _o, err, st = run(["git", "worktree", "add", "--detach", @scratch, base])
+      raise BO::Error, "git worktree add failed: #{err.strip}. Fix: check `git worktree list`." unless st.success?
+
+      begin
+        yield @scratch
+      ensure
+        _ro, rerr, rst = run(["git", "worktree", "remove", "--force", @scratch])
+        unless rst.success?
+          warn "block-optimize: could not remove the scratch worktree #{@scratch}: #{rerr.strip}. " \
+               "Fix: run `git worktree prune` once the path is gone."
+        end
+        @scratch = nil
+      end
+    end
+  end
+
+  def apply(patch, check:)
+    argv = ["git", "-C", @scratch, "apply"]
+    argv << "--check" if check
+    _o, err, st = run(argv, chdir: @scratch, stdin_data: patch)
+    [st.success?, err]
+  end
+
+  # Every path `git status` reports (untracked included), both sides of a rename.
+  def changed_paths
+    out, err, st = run(["git", "-C", @scratch, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                       chdir: @scratch)
+    raise BO::Error, "git status failed in the scratch tree: #{err.strip}. Fix: check the repository." unless st.success?
+
+    paths = []
+    fields = out.split("\0")
+    until fields.empty?
+      entry = fields.shift
+      paths << entry[3..]
+      paths << fields.shift if entry[0] == "R" || entry[0] == "C"
+    end
+    paths.compact.uniq.sort
+  end
+
+  # -> [ok, tail of output]
+  def tool(argv)
+    out, err, st = run(argv, chdir: @scratch)
+    [st.success?, (out + err).lines.last(12).join]
+  end
+
+  def commit_candidate(base)
+    _o, err, st = run(["git", "-C", @scratch, "add", "-A"], chdir: @scratch)
+    raise BO::Error, "git add failed in the scratch tree: #{err.strip}" unless st.success?
+
+    tree, err, st = run(["git", "-C", @scratch, "write-tree"], chdir: @scratch)
+    raise BO::Error, "git write-tree failed: #{err.strip}" unless st.success?
+
+    sha, err, st = run(["git", "-C", @scratch, "commit-tree", tree.strip, "-p", base, "-m", CANDIDATE_MESSAGE],
+                       chdir: @scratch, env: CANDIDATE_IDENTITY)
+    raise BO::Error, "git commit-tree failed: #{err.strip}" unless st.success?
+
+    sha.strip
+  end
+
+  def source_diff(base, paths)
+    out, err, st = run(["git", "-C", @scratch, "diff", "--cached", base, "--", *paths], chdir: @scratch)
+    raise BO::Error, "git diff failed in the scratch tree: #{err.strip}" unless st.success?
+
+    out
+  end
+
+  # -> exit status (Integer, or nil when signaled)
+  def variant_eval(sha, base)
+    argv = ["ai/bin/variant-eval", "--variant", sha, "--baseline", base, "--corpus", "full",
+            "--runs", BO::RUNS.to_s, "--json", out_path("scorecard.json"), "--out", out_path("scorecard.txt")]
+    _o, err, st = run(argv, chdir: @scratch)
+    warn err.lines.last(6).join unless err.to_s.empty?
+    st.exitstatus
+  end
+
+  # nil when absent; the raw text otherwise.
+  def read_out(name)
+    path = out_path(name)
+    File.file?(path) ? File.read(path) : nil
+  end
+
+  def write_out(name, text)
+    File.write(out_path(name), text)
+  end
+
+  def out_path(name)
+    File.join(@out_dir, name)
+  end
+end
+
+# ---------------------------------------------------------------------------
+# MANAGER — orchestrates adapters and the domain; returns an exit code.
+# ---------------------------------------------------------------------------
+module Manager
+  class Reject < StandardError; end
+
+  module_function
+
+  # opts: case:, evidence: (path or nil), diff: (path or nil), out_dir:
+  def run(opts, io)
+    ctx = { case_name: opts[:case], out_dir: opts[:out_dir], label: :rejected }
+    begin
+      decide(opts, io, ctx)
+    rescue Reject, BO::Error => e
+      ctx[:label] = :rejected
+      ctx[:reason] = e.message
+    end
+    text = BO::Proposal.render(ctx, band: ctx[:band])
+    io.write_out("proposal.md", text)
+    puts text
+    ctx[:label] == :rejected ? 1 : 0
+  end
+
+  def decide(opts, io, ctx)
+    base = io.resolve_base
+    ctx[:base_sha] = base
+    allowed = BO::Scope.allowed_paths(required(io, base, ROUTING_REL))
+    render = required(io, base, BO::ADMIRAL_RENDER)
+    render_sha = Digest::SHA256.hexdigest(render)
+
+    evidence = nil
+    if opts[:evidence]
+      evidence = BO::Evidence.parse(io.read_input(opts[:evidence]), opts[:case])
+      BO::Evidence.check_subject!(evidence, render_sha)
+      ctx[:evidence] = evidence
+    end
+    name = fixture_name(io, base, evidence ? evidence[:case_name] : opts[:case])
+    ctx[:case_name] = name
+    ctx[:band] = reference_band(io, base, name, render_sha)
+
+    candidate, fenced = candidate_text(opts, io, base, name, evidence, allowed, render)
+    parsed = BO::Diff.headers(candidate, fenced: fenced)
+    reject!(io, candidate, "no proposal: the candidate held no fenced diff") if parsed == :no_proposal
+    problems = parsed[:violations] + BO::Scope.violations(parsed[:files], allowed)
+    reject!(io, candidate, "scope violation (before any git write): #{fmt(problems)}") unless problems.empty?
+
+    io.with_scratch(base) { |_tmp| measure(io, base, candidate, allowed, ctx) }
+  end
+
+  def measure(io, base, patch, allowed, ctx)
+    ok, err = io.apply(patch, check: true)
+    reject!(io, patch, "the patch does not apply to origin/main: #{err.strip}") unless ok
+    ok, err = io.apply(patch, check: false)
+    reject!(io, patch, "git apply failed: #{err.strip}") unless ok
+
+    changed = io.changed_paths
+    reject!(io, patch, "the patch changed nothing") if changed.empty?
+    bad = BO::Scope.violations(changed, allowed)
+    reject!(io, patch, "scope violation after apply (the actual effect): #{fmt(bad)}") unless bad.empty?
+
+    [["ai/bin/build-agents"], ["ai/bin/build-agents", "--check"], ["ai/bin/check-agent-size"]].each do |argv|
+      ok, tail = io.tool(argv)
+      reject!(io, patch, "#{argv.join(' ')} failed (no model spend): #{tail.strip}") unless ok
+    end
+
+    built = io.changed_paths
+    renders = built.select { |p| BO::Scope.render?(p) }
+    bad = BO::Scope.violations(built - renders, allowed)
+    reject!(io, patch, "scope violation after build: #{fmt(bad)}") unless bad.empty?
+    unless renders.include?(BO::ADMIRAL_RENDER)
+      reject!(io, patch, "the admiral render is unchanged: nothing the corpus can measure")
+    end
+
+    sha = io.commit_candidate(base)
+    ctx[:variant_sha] = sha
+    io.write_out("proposal.diff", io.source_diff(base, built - renders))
+
+    code = io.variant_eval(sha, base)
+    raise Reject, "UNMEASURED: variant-eval exited #{code.inspect} (accepted: 0 or 1)" unless [0, 1].include?(code)
+
+    raw = io.read_out("scorecard.json")
+    raise Reject, "UNMEASURED: variant-eval wrote no scorecard.json" if raw.nil?
+
+    json = begin
+      JSON.parse(raw)
+    rescue JSON::ParserError => e
+      raise Reject, "UNMEASURED: scorecard.json does not parse (#{e.message.lines.first.to_s.strip[0, 120]})"
+    end
+    ctx.merge!(BO::Label.decide(json, target: ctx[:case_name], variant_sha: sha, baseline_sha: base,
+                                      renders_changed: renders))
+  end
+
+  def candidate_text(opts, io, base, name, evidence, allowed, render)
+    return [io.read_input(opts[:diff]), false] if opts[:diff]
+
+    files = allowed.to_h { |p| [p, required(io, base, p)] }
+    prompt = BO::Prompt.build(case_name: name, meta: required(io, base, "#{FIXTURES_REL}/#{name}/meta"),
+                              scenario: io.show(base, "#{FIXTURES_REL}/#{name}/scenario.md").to_s,
+                              evidence: evidence, files: files, render_lines: render.lines.size)
+    ok, out, err, stray = io.propose(prompt)
+    unless stray.empty?
+      raise Reject, "the proposer left file(s) #{stray.join(', ')} in its empty cwd: containment failed. Fix: " \
+                    "do not use this candidate; check PROPOSER_ARGV against `claude --help`."
+    end
+    raise Reject, "the proposer failed: #{err.to_s.lines.last(3).join.strip}" unless ok
+
+    [out, true]
+  end
+
+  def fixture_name(io, base, want)
+    names = io.list_dirs(base, FIXTURES_REL)
+    return want if names.include?(want)
+
+    hits = names.select { |n| n.start_with?("#{want}-") }
+    return hits.first if hits.size == 1
+
+    raise Reject, "case #{want} matches #{hits.empty? ? 'no fixture' : "several fixtures (#{hits.join(', ')})"} " \
+                  "under #{FIXTURES_REL} at origin/main. Fix: pass the full fixture name."
+  end
+
+  def reference_band(io, base, name, render_sha)
+    raw = io.show(base, NOISE_BAND_REL)
+    band = raw && JSON.parse(raw)
+    BO::Reference.band(band, name, render_sha)
+  rescue JSON::ParserError
+    [:n_a, "noise-band.json does not parse"]
+  end
+
+  def required(io, base, path)
+    io.show(base, path) || raise(Reject, "origin/main has no #{path}. Fix: block-optimize reads its inputs from " \
+                                         "origin/main; check that the path exists there.")
+  end
+
+  def reject!(io, candidate, reason)
+    io.write_out("rejected-candidate.txt", candidate.to_s)
+    raise Reject, reason
+  end
+
+  def fmt(problems)
+    problems.map { |(path, why)| "#{path} (#{why})" }.join("; ")
+  end
+end
+
+# ---------------------------------------------------------------------------
+# FRAMEWORK — argv, --help, dispatch.
+# ---------------------------------------------------------------------------
+CLI_SPEC = {
+  "--self-test" => :switch,
+  "--case" => :value,
+  "--evidence" => :value,
+  "--diff" => :value,
+  "--out-dir" => :value
+}.freeze
+
+def help_text
+  <<~TXT
+    Usage:
+      ai/bin/block-optimize --case AE-NN --evidence FILE --out-dir DIR
+      ai/bin/block-optimize --case AE-NN --diff PATCH [--evidence FILE] --out-dir DIR
+      ai/bin/block-optimize --self-test    manager + containment suite (no model, no git)
+      ai/bin/block-optimize --help         this text
+
+    Turns ONE labeled admiral failure into ONE prose diff and measures it with
+    variant-eval --corpus full --runs #{BO::RUNS} (about 500 model calls, about 65 min).
+
+    Options:
+      --case AE-NN     the failing admiral-eval case (full name, or a unique prefix)
+      --evidence FILE  saved stdout of `ai/bin/admiral-eval --run --runs 10 --only <case>`
+                       at origin/main; the case must be a T2 failure (0 < n, k < n)
+                       measured on origin/main's rendered admiral. Required unless --diff.
+      --diff PATCH     a human-authored candidate (a raw unified diff) instead of the
+                       model proposer; it takes the identical checks and measurement
+      --out-dir DIR    new or empty directory for proposal.diff, scorecard.json,
+                       scorecard.txt and proposal.md (rejected-candidate.txt on a
+                       rejection before measurement)
+
+    Labels (exactly one):
+      PROPOSED — MEASURED IMPROVEMENT                          exit 0
+      PROPOSED — NO MEASURED REGRESSION; IMPROVEMENT UNPROVEN  exit 0 (the usual label)
+      REJECTED: <reason>                                       exit 1
+    A usage error exits 2 and names the flag.
+
+    The candidate may edit only #{BO::ADMIRAL_TEMPLATE} and the blocks
+    origin/main's #{ROUTING_REL} routes to the admiral, minus #{BO::SAFETY_BLOCK};
+    the denylist (ai/bin, ai/hooks, ai/eval, ai/lib, renders, registries, ...) wins.
+    Do not target AE-19c until DND-521 decides whether its fixture or the admiral is wrong.
+
+    PROPOSE-ONLY: no ref moves, no push, no forge, no --update-baseline. The
+    candidate is an unreachable commit object. A human takes a proposal by
+    applying proposal.diff in their own worktree and opening a normal PR.
+  TXT
+end
+
+# -> [opts, nil] or [nil, reason]
+def parse_cli(argv)
+  o = StrictArgv.parse(argv, CLI_SPEC)
+  if o["--self-test"]
+    other = o.keys.find { |f| f != "--self-test" }
+    return [nil, "#{other} does not apply to --self-test"] if other
+
+    return [{ self_test: true }, nil]
+  end
+  return [nil, "--case is required"] unless o["--case"]
+  return [nil, "--out-dir is required"] unless o["--out-dir"]
+  return [nil, "--evidence is required unless --diff is given"] unless o["--evidence"] || o["--diff"]
+
+  [{ case: o["--case"], evidence: o["--evidence"], diff: o["--diff"], out_dir: File.expand_path(o["--out-dir"]) }, nil]
+rescue StrictArgv::UsageError => e
+  [nil, e.message]
+end
+
+# Why the inputs cannot be used, or nil. --out-dir must be new or empty, so a
+# stale scorecard from an earlier run can never be read as this run's.
+def input_problem(opts)
+  %i[evidence diff].each do |k|
+    path = opts[k]
+    return "--#{k} #{path} is not a readable file" if path && !(File.file?(path) && File.readable?(path))
+  end
+  dir = opts[:out_dir]
+  return "--out-dir #{dir} exists and is not an empty directory" if File.exist?(dir) && !(File.directory?(dir) && Dir.empty?(dir))
+  return "--out-dir #{dir}: parent #{File.dirname(dir)} does not exist" unless File.directory?(File.dirname(dir))
+
+  nil
+end
+
+def usage_error(reason)
+  warn "block-optimize: usage error — #{reason}."
+  warn "  Fix: re-run with the flags `ai/bin/block-optimize --help` lists: --case, --out-dir (new or empty), and " \
+       "--evidence (a readable admiral-eval --run output) unless --diff PATCH is given. An unrecognised argument " \
+       "is refused, never ignored."
+  2
+end
+
+def main(argv)
+  opts, reason = parse_cli(argv)
+  return usage_error(reason) if reason
+  return self_test if opts[:self_test]
+
+  why = input_problem(opts)
+  return usage_error(why) if why
+
+  repo, err, st = capture(["git", "rev-parse", "--show-toplevel"])
+  return usage_error("not inside a git repository (#{err.strip})") unless st.success?
+
+  FileUtils.mkdir_p(opts[:out_dir])
+  Manager.run(opts, Adapters.new(repo: repo.strip, out_dir: opts[:out_dir]))
+rescue MutationAttempt => e
+  warn "block-optimize: FAILED — #{e.message}"
+  1
+end
+
+# ---------------------------------------------------------------------------
+# --self-test — Manager with fake adapters (no git, no model) + containment.
+# ---------------------------------------------------------------------------
+class FakeAdapters
+  attr_reader :calls, :out, :scratch_open
+
+  TEMPLATE_TEXT = "admiral template\n"
+  def initialize(**over)
+    @cfg = {
+      files: {
+        ROUTING_REL => "blocks:\n  ops/fleet-coordination: [admiral]\n  ops/safety-checks: [admiral]\n",
+        BO::ADMIRAL_RENDER => "render\n", BO::ADMIRAL_TEMPLATE => TEMPLATE_TEXT,
+        "ai/blocks/ops/fleet-coordination.md" => "block\n",
+        "#{FIXTURES_REL}/AE-18-x/meta" => "mode = next-action\n", "#{FIXTURES_REL}/AE-18-x/scenario.md" => "s\n"
+      },
+      fixtures: ["AE-18-x"], input: nil, proposal: nil, proposer_ok: true, stray: [], apply_ok: true,
+      after_apply: [BO::ADMIRAL_TEMPLATE], tools: {}, after_build: [BO::ADMIRAL_TEMPLATE, BO::ADMIRAL_RENDER],
+      ve_exit: 0, ve_json: :default, ve_raise: false
+    }.merge(over)
+    @calls = []
+    @out = {}
+    @scratch_open = false
+  end
+
+  def resolve_base
+    @calls << :resolve_base
+    "b" * 40
+  end
+
+  def show(_base, path)
+    @cfg[:files][path]
+  end
+
+  def list_dirs(_base, _dir)
+    @cfg[:fixtures]
+  end
+
+  def read_input(path)
+    @cfg[:input].fetch(path)
+  end
+
+  def write_out(name, text)
+    @out[name] = text
+  end
+
+  def read_out(name)
+    @out[name]
+  end
+
+  def propose(_prompt)
+    @calls << :propose
+    [@cfg[:proposer_ok], @cfg[:proposal], "", @cfg[:stray]]
+  end
+
+  def with_scratch(_base)
+    @calls << :scratch_add
+    @scratch_open = true
+    yield "/tmp/scratch"
+  ensure
+    if @calls.include?(:scratch_add)
+      @calls << :scratch_remove
+      @scratch_open = false
+    end
+  end
+
+  def apply(_patch, check:)
+    @calls << (check ? :apply_check : :apply)
+    [@cfg[:apply_ok], @cfg[:apply_ok] ? "" : "error: patch failed"]
+  end
+
+  def changed_paths
+    @calls << :status
+    @calls.include?(:build) ? @cfg[:after_build] : @cfg[:after_apply]
+  end
+
+  def tool(argv)
+    @calls << :build
+    ok = @cfg[:tools].fetch(argv.join(" "), true)
+    [ok, ok ? "" : "FAIL #{argv.join(' ')}"]
+  end
+
+  def commit_candidate(_base)
+    @calls << :commit_tree
+    "c" * 40
+  end
+
+  def source_diff(_base, _paths)
+    "diff\n"
+  end
+
+  def variant_eval(sha, base)
+    @calls << :variant_eval
+    raise "boom" if @cfg[:ve_raise]
+
+    @out["scorecard.txt"] = "text\n"
+    json = @cfg[:ve_json]
+    json = FakeAdapters.json_for(sha, base) if json == :default
+    @out["scorecard.json"] = json if json
+    @cfg[:ve_exit]
+  end
+
+  def self.json_for(sha, base, verdict: "keep", flip: "improved")
+    JSON.generate(
+      "schema" => BO::SCHEMA_ID, "variant" => sha, "variant_sha" => sha, "baseline" => base, "baseline_sha" => base,
+      "corpus" => "full", "runs" => BO::RUNS, "gate_ok" => true, "gate_detail" => nil, "verdict" => verdict,
+      "unmeasured" => nil, "deterministic" => { "regressed" => [], "fixed" => [], "new" => [] },
+      "t2_subjects" => { "base" => { "lines" => 1, "sha256" => "1" * 64 }, "var" => { "lines" => 1, "sha256" => "2" * 64 } },
+      "t2" => [{ "name" => "AE-18-x", "base" => { "k" => 3, "n" => 10 }, "var" => { "k" => 10, "n" => 10 }, "flip" => flip }],
+      "regressions" => [], "improvements" => verdict == "keep" ? ["t2:AE-18-x"] : []
+    )
+  end
+end
+
+GOOD_DIFF = "```diff\ndiff --git a/#{BO::ADMIRAL_TEMPLATE} b/#{BO::ADMIRAL_TEMPLATE}\nindex 1111111..2222222 100644\n" \
+            "--- a/#{BO::ADMIRAL_TEMPLATE}\n+++ b/#{BO::ADMIRAL_TEMPLATE}\n@@ -1 +1 @@\n-admiral template\n" \
+            "+admiral template, clearer\n```\n"
+
+def st_run(fake, opts = {})
+  opts = { case: "AE-18", evidence: nil, diff: nil, out_dir: "/tmp/out" }.merge(opts)
+  code = nil
+  $stdout = StringIO.new
+  begin
+    code = Manager.run(opts, fake)
+  ensure
+    $stdout = STDOUT
+  end
+  code
+end
+
+def self_test
+  require "stringio"
+  require "ripper"
+  failures = []
+  check = ->(desc, cond) { failures << desc unless cond }
+
+  # M1 happy path (proposer): 4 files, exit 0, MEASURED IMPROVEMENT.
+  f = FakeAdapters.new(proposal: GOOD_DIFF)
+  code = st_run(f)
+  check.("M1 happy path exits 0 (got #{code})", code.zero?)
+  check.("M1 writes the four out-dir files (got #{f.out.keys.sort})", f.out.keys.sort == OUT_FILES.sort)
+  check.("M1 labels MEASURED IMPROVEMENT", f.out["proposal.md"].to_s.include?("PROPOSED — MEASURED IMPROVEMENT"))
+  check.("M1 runs the cheap gates before variant-eval",
+         f.calls.index(:build) && f.calls.index(:variant_eval) && f.calls.index(:build) < f.calls.index(:variant_eval))
+  check.("M1 --diff takes the identical path without the proposer",
+         (g = FakeAdapters.new(input: { "p" => GOOD_DIFF.lines[1..-2].join })) && st_run(g, diff: "p").zero? &&
+           !g.calls.include?(:propose) && g.calls.include?(:variant_eval))
+
+  # M2 scope violation: no worktree, no variant-eval, exit 1.
+  bad = GOOD_DIFF.gsub(BO::ADMIRAL_TEMPLATE, "ai/bin/check-agent-size")
+  f = FakeAdapters.new(proposal: bad)
+  code = st_run(f)
+  check.("M2 a scope violation exits 1", code == 1)
+  check.("M2 a scope violation creates no worktree", !f.calls.include?(:scratch_add))
+  check.("M2 a scope violation never calls variant-eval", !f.calls.include?(:variant_eval))
+  check.("M2 the reason names the path", f.out["proposal.md"].to_s.include?("ai/bin/check-agent-size"))
+  f = FakeAdapters.new(proposal: GOOD_DIFF, after_apply: [BO::ADMIRAL_TEMPLATE, "ai/lib/eval_score.rb"])
+  check.("M2 the post-apply effect is checked too (exit 1, no variant-eval)",
+         st_run(f) == 1 && !f.calls.include?(:variant_eval))
+  f = FakeAdapters.new(proposal: GOOD_DIFF, after_build: [BO::ADMIRAL_TEMPLATE, BO::ADMIRAL_RENDER, "ai/tools/risk.yml"])
+  check.("M2 the post-build set is checked too", st_run(f) == 1 && !f.calls.include?(:variant_eval))
+  f = FakeAdapters.new(proposal: "I would rather not.\n")
+  check.("M2 no fenced diff is REJECTED no proposal",
+         st_run(f) == 1 && f.out["proposal.md"].include?("no proposal") && !f.calls.include?(:scratch_add))
+  f = FakeAdapters.new(proposal: GOOD_DIFF, stray: ["X"])
+  check.("M2 a proposer that leaves a file is REJECTED", st_run(f) == 1 && f.out["proposal.md"].include?("containment"))
+
+  # M3 cheap gates fail: variant-eval never called.
+  ["ai/bin/build-agents", "ai/bin/build-agents --check", "ai/bin/check-agent-size"].each do |t|
+    f = FakeAdapters.new(proposal: GOOD_DIFF, tools: { t => false })
+    check.("M3 #{t} failing exits 1 with no variant-eval", st_run(f) == 1 && !f.calls.include?(:variant_eval))
+  end
+  f = FakeAdapters.new(proposal: GOOD_DIFF, after_build: [BO::ADMIRAL_TEMPLATE])
+  check.("M3 an unchanged admiral render is REJECTED before model spend",
+         st_run(f) == 1 && !f.calls.include?(:variant_eval) && f.out["proposal.md"].include?("unchanged"))
+  f = FakeAdapters.new(proposal: GOOD_DIFF, apply_ok: false)
+  check.("M3 a patch that does not apply is REJECTED", st_run(f) == 1 && !f.calls.include?(:variant_eval))
+
+  # M4 unmeasured: exit 2 / no JSON / bad JSON.
+  { "exit 2" => { ve_exit: 2 }, "exit 3" => { ve_exit: 3 }, "signaled" => { ve_exit: nil },
+    "no JSON" => { ve_json: nil }, "bad JSON" => { ve_json: "{not json" } }.each do |label, cfg|
+    f = FakeAdapters.new(proposal: GOOD_DIFF, **cfg)
+    check.("M4 variant-eval #{label} is REJECTED UNMEASURED",
+           st_run(f) == 1 && f.out["proposal.md"].to_s.include?("REJECTED: UNMEASURED"))
+  end
+  f = FakeAdapters.new(proposal: GOOD_DIFF, ve_exit: 1,
+                       ve_json: FakeAdapters.json_for("c" * 40, "b" * 40, verdict: "inconclusive", flip: "inconclusive"))
+  check.("M4 exit 1 with a valid JSON is a measurement (UNPROVEN, exit 0)",
+         st_run(f).zero? && f.out["proposal.md"].include?("IMPROVEMENT UNPROVEN"))
+  f = FakeAdapters.new(proposal: GOOD_DIFF, ve_json: FakeAdapters.json_for("d" * 40, "b" * 40))
+  check.("M4 a JSON for another candidate is REJECTED malformed",
+         st_run(f) == 1 && f.out["proposal.md"].include?("malformed"))
+
+  # M5 argv.
+  _o, r = parse_cli(%w[--case AE-18 --evidence e])
+  check.("M5 missing --out-dir is a usage error", r.to_s.include?("--out-dir"))
+  _o, r = parse_cli(%w[--evidence e --out-dir d])
+  check.("M5 missing --case is a usage error", r.to_s.include?("--case"))
+  _o, r = parse_cli(%w[--case AE-18 --out-dir d])
+  check.("M5 neither --evidence nor --diff is a usage error", r.to_s.include?("--evidence"))
+  _o, r = parse_cli(%w[--case AE-18 --out-dir d --evidence e --runs 3])
+  check.("M5 an unknown flag is refused", r.to_s.include?("--runs"))
+  _o, r = parse_cli(%w[--self-test --case x])
+  check.("M5 --self-test takes no other flag", r.to_s.include?("--case"))
+  o1, = parse_cli(%w[--case A --out-dir d --evidence e])
+  o2, = parse_cli(%w[--evidence e --out-dir d --case A])
+  check.("M5 flag order does not matter", o1 && o1 == o2)
+  check.("M5 main returns 2 on a usage error", (with_stderr_silenced { main(%w[--case A]) }) == 2)
+  Dir.mktmpdir("bo-st-") do |d|
+    File.write(File.join(d, "stale"), "x")
+    check.("M5 a non-empty --out-dir is refused", input_problem(case: "A", evidence: nil, diff: nil, out_dir: d).to_s
+                                                   .include?("not an empty directory"))
+    check.("M5 an unreadable --evidence is refused",
+           input_problem(case: "A", evidence: File.join(d, "nope"), diff: nil, out_dir: File.join(d, "o")).to_s
+             .include?("--evidence"))
+  end
+
+  # M6 the scratch worktree is removed on every path that opened one.
+  [FakeAdapters.new(proposal: GOOD_DIFF), FakeAdapters.new(proposal: GOOD_DIFF, ve_exit: 2),
+   FakeAdapters.new(proposal: GOOD_DIFF, tools: { "ai/bin/check-agent-size" => false }),
+   FakeAdapters.new(proposal: GOOD_DIFF, apply_ok: false)].each_with_index do |fk, i|
+    st_run(fk)
+    check.("M6 path #{i}: scratch removed", fk.calls.include?(:scratch_add) && fk.calls.include?(:scratch_remove) &&
+                                            !fk.scratch_open)
+  end
+  fk = FakeAdapters.new(proposal: GOOD_DIFF, ve_raise: true)
+  begin
+    st_run(fk)
+  rescue StandardError
+    nil
+  end
+  check.("M6 an exception inside the scratch still removes it", fk.calls.include?(:scratch_remove) && !fk.scratch_open)
+
+  containment_checks(check)
+
+  if failures.empty?
+    puts "block-optimize: self-test OK"
+    0
+  else
+    failures.each { |m| warn "block-optimize: self-test FAIL — #{m}" }
+    warn "  Fix: the Manager must reject before any git write on a scope violation, before variant-eval on a " \
+         "failed cheap gate, read only variant-eval's JSON, and always remove its scratch worktree; `capture` " \
+         "must be the one exec site and command_allowed? must deny every mutation family."
+    1
+  end
+end
+
+def with_stderr_silenced
+  old = $stderr
+  $stderr = StringIO.new
+  yield
+ensure
+  $stderr = old
+end
+
+def containment_checks(check)
+  s = "/tmp/bo-scratch/tree"
+  denied = [
+    %w[gh pr merge 1], %w[glab mr merge 1], ["/usr/bin/gh", "api"], %w[gh-athena pr create], %w[glab-athena mr create],
+    %w[git commit -m x], %w[git merge x], %w[git push origin x], %w[git rebase x], %w[git reset --hard],
+    %w[git update-ref refs/heads/x HEAD], %w[git branch x], %w[git tag x], %w[git checkout x], %w[git switch x],
+    %w[git stash], %w[git cherry-pick x], %w[git revert x], %w[git am x], %w[git fetch], %w[git pull],
+    ["git", "worktree", "add", s, "HEAD"], ["git", "worktree", "add", "-b", "x", s, "HEAD"],
+    ["git", "worktree", "remove", "--force", "/elsewhere"], %w[git worktree prune],
+    %w[git apply x.patch], %w[git add -A], %w[git write-tree], %w[git commit-tree t -p b -m m],
+    ["git", "-C", "/elsewhere", "apply"], ["git", "-C", "/elsewhere", "commit-tree", "t"],
+    ["git", "-C", s, "commit", "-m", "x"], ["git", "-C", s, "push"], ["git", "-c", "alias.x=!sh", "x"],
+    %w[git --git-dir=/x show HEAD], ["git"], ["ai/bin/variant-eval", "--variant", "x", "--update-baseline", "--json", "j"],
+    ["ai/bin/admiral-eval", "--run"], ["ai/bin/admiral-eval", "--run", "--update-baseline"],
+    %w[ai/bin/build-agents --install], %w[ai/bin/harness-gate], %w[sh -c x], %w[bash], %w[ruby -e x], [],
+    ["claude", "-p"], ["claude", "-p", "--dangerously-skip-permissions"], PROPOSER_ARGV + ["--tools", "Bash"]
+  ]
+  denied.each do |argv|
+    check.("C1 denies #{argv.inspect}", !command_allowed?(argv, scratch: s, chdir: s))
+  end
+  check.("C1 ai/bin tools are denied outside the scratch tree",
+         !command_allowed?(["ai/bin/check-agent-size"], scratch: s, chdir: "/repo") &&
+           !command_allowed?(["ai/bin/build-agents"], scratch: nil, chdir: nil))
+  check.("C1 variant-eval without --json is denied", !command_allowed?(["ai/bin/variant-eval", "--variant", "x"],
+                                                                       scratch: s, chdir: s))
+  check.("C1 no scratch -> no scratch-only git", !command_allowed?(["git", "-C", s, "apply"], scratch: nil))
+  allowed = [
+    ["git", "-C", s, "apply", "--check"], ["git", "-C", s, "apply"], ["git", "-C", s, "add", "-A"],
+    ["git", "-C", s, "write-tree"], ["git", "-C", s, "commit-tree", "t", "-p", "b", "-m", "m"],
+    ["git", "worktree", "add", "--detach", s, "b" * 40], ["git", "worktree", "remove", "--force", s],
+    %w[git rev-parse HEAD], %w[git show x:y], %w[git cat-file -e x:y], %w[git ls-tree --name-only -d x:y],
+    ["git", "-C", s, "status", "--porcelain=v1"], ["git", "-C", s, "diff", "--cached", "b"],
+    ["ai/bin/build-agents"], ["ai/bin/build-agents", "--check"], ["ai/bin/check-agent-size"],
+    ["ai/bin/variant-eval", "--variant", "x", "--json", "j"], PROPOSER_ARGV
+  ]
+  allowed.each do |argv|
+    check.("C1 allows #{argv.inspect}", command_allowed?(argv, scratch: s, chdir: s))
+  end
+  check.("C1 capture raises MutationAttempt on a denied argv",
+         begin
+           capture(%w[git push])
+           false
+         rescue MutationAttempt => e
+           e.message.include?("Fix:")
+         end)
+
+  # C2 source scan: exactly one exec call site, no other exec form, here or in
+  # any first-party lib this process loaded.
+  ai_dir = File.expand_path("..", __dir__)
+  toks = Ripper.lex(File.read(__FILE__))
+  idents = toks.select { |t| t[1] == :on_ident }.map { |t| t[2] }
+  check.("C2 exactly one Open3.capture3 call (got #{idents.count('capture3')})", idents.count("capture3") == 1)
+  check.("C2 no backtick or %x literal", toks.none? { |t| t[1] == :on_backtick })
+  %w[system spawn exec popen capture2 capture2e popen3 pipeline].each do |prim|
+    check.("C2 no #{prim} call", idents.count(prim).zero?)
+  end
+  lib_dir = File.join(ai_dir, "lib") + File::SEPARATOR
+  libs = $LOADED_FEATURES.select { |p| p.start_with?(lib_dir) }
+  %w[block_optimize.rb eval_score.rb strict_argv.rb].each do |want|
+    check.("C2 the lib scan covers #{want}", libs.include?(File.join(ai_dir, "lib", want)))
+  end
+  libs.each do |lib|
+    ltoks = Ripper.lex(File.read(lib))
+    lids = ltoks.select { |t| t[1] == :on_ident }.map { |t| t[2] }
+    check.("C2 #{File.basename(lib)} has no exec form",
+           ltoks.none? { |t| t[1] == :on_backtick } &&
+             (%w[system spawn exec popen capture3 capture2 capture2e popen3] & lids).empty?)
+  end
+
+  # C3 the proposer argv.
+  check.("C3 proposer argv loads no MCP server",
+         PROPOSER_ARGV.include?("--strict-mcp-config") &&
+           PROPOSER_ARGV[PROPOSER_ARGV.index("--mcp-config") + 1] == EMPTY_MCP_CONFIG)
+  check.("C3 proposer argv removes every built-in tool (--tools \"\")",
+         PROPOSER_ARGV[PROPOSER_ARGV.index("--tools") + 1] == "")
+  i = PROPOSER_ARGV.index("--disallowedTools")
+  check.("C3 --disallowedTools is last and carries the full list",
+         i && PROPOSER_ARGV[(i + 1)..] == %w[Bash Task Write Edit NotebookEdit WebFetch WebSearch])
+  check.("C3 the proposer runs headless (-p)", PROPOSER_ARGV[0, 2] == ["claude", "-p"])
+end
+
+if ARGV.include?("--help") || ARGV.include?("-h")
+  puts help_text
+  exit 0
+end
+exit main(ARGV)
