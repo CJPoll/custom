@@ -35,10 +35,6 @@ ai/bin/block-optimize --case AE-18 --evidence /tmp/ae18.txt --out-dir /tmp/bo-ae
 `~/dev/custom/ai/bin/test-slot -- timeout <secs> ...`. A doomed candidate
 spends none of that: every scope and size check runs first.
 
-**Targets.** Do not target AE-19c until DND-521 decides whether its fixture or
-the admiral is wrong. Optimizing toward a wrong fixture teaches a wrong
-behavior.
-
 ## What it writes
 
 | File | When | What |

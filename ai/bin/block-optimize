@@ -500,7 +500,6 @@ def help_text
     The candidate may edit only #{BO::ADMIRAL_TEMPLATE} and the blocks
     origin/main's #{ROUTING_REL} routes to the admiral, minus #{BO::SAFETY_BLOCK};
     the denylist (ai/bin, ai/hooks, ai/eval, ai/lib, renders, registries, ...) wins.
-    Do not target AE-19c until DND-521 decides whether its fixture or the admiral is wrong.
 
     PROPOSE-ONLY: no ref moves, no push, no forge, no --update-baseline. The
     candidate is an unreachable commit object. A human takes a proposal by
