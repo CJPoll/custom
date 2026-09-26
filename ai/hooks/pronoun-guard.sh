@@ -28,8 +28,28 @@ INPUT=$(cat 2>/dev/null) || exit 0
 TI=$(printf '%s' "$INPUT" | jq -cS '.tool_input' 2>/dev/null) || exit 0
 [ -n "$TI" ] && [ "$TI" != "null" ] || exit 0
 
-# No standalone he/him/his anywhere in the tool input -> allow (no opinion).
-printf '%s' "$TI" | grep -iEq '\b(he|him|his)\b' || exit 0
+# Match against the DECODED string values, never the JSON encoding. In the
+# encoding a line-initial "he" reads `\nhe` and a tab-led "his" reads `\this`:
+# the escape letter is a word character, so those prose pronouns were missed
+# (DND-738).
+TEXT=$(printf '%s' "$TI" | jq -r '[.. | strings] | join("\n")' 2>/dev/null) || exit 0
+
+# A pronoun counts only as a PROSE word. `\b` also split code tokens, so a
+# python edit script carrying `grep -hE` was denied (DND-738). Not prose:
+#   left  joined to  - / \ $ { . @ % = |  (flag, path, escape, variable,
+#                                            name, regex alternation)
+#   right joined to  - \ ( = |            (compound, escape, call,
+#                                            assignment, regex alternation)
+#   right .  followed by a word char        (he.txt)
+#   right :  followed by anything but whitespace (t[he:], "he:#{n}", he:x)
+# A right-hand "/" stays a boundary so a pronoun list ("he/him") is still
+# caught. The guard does not parse shell to find prose arguments: a misparse
+# there would drop real prose silently, while a code token that slips this
+# shape test costs one confirm-and-resend.
+PRONOUN='(^|[^[:alnum:]_/\\$.{@%=|-])(he|him|his)([^[:alnum:]_\\(=.:|-]|[.]([^[:alnum:]_]|$)|:([[:space:]]|$)|$)'
+
+# No prose he/him/his anywhere in the tool input -> allow (no opinion).
+printf '%s\n' "$TEXT" | grep -iEq "$PRONOUN" || exit 0
 
 # Drop stale markers (abandoned sends) older than 15 minutes.
 find "$MARKDIR" -type f -mmin +15 -delete 2>/dev/null
