@@ -3010,11 +3010,27 @@ class; ratified 2026-09-25:
 **The target is typed, and validated per class before anything is written.**
 
 - `repo` is `<owner>/<name>`, lowercased, matching `\A[a-z0-9._-]+/[a-z0-9._-]+\z`
-  after the fold, and a member of the class's ratified repo list. The list for
-  `merge.pr_only_workflow` is `cjpoll/gen_saas` only; adding a repo is a new
-  owner ratification. A repo off the list is `target_invalid` naming
+  after the fold, and a member of the class's ratified `{repo, base_ref}`
+  pairs. The list for `merge.pr_only_workflow` is `cjpoll/gen_saas` paired with
+  `main`; adding a pair, or changing a base, is a new owner ratification, the
+  same as adding a repo. A repo off the list is `target_invalid` naming
   `repo_not_allowed`.
-- `base_ref` matches `\A[A-Za-z0-9._/-]{1,100}\z`.
+- `base_ref` matches `\A[A-Za-z0-9._/-]{1,100}\z` (malformed is `target_invalid`
+  naming `base_ref`). **Later (2026-09-26):** this bullet previously stopped at
+  the regex, so any well-formed ref — including a look-alike like `mainn` or a
+  genuinely different branch — validated. Superseded by D20 (epic decision,
+  2026-09-26): the ref MUST also equal the ratified base for the repo (the
+  pair above); a well-formed ref that is not that base is `target_invalid`
+  naming `base_ref_not_allowed`. Never coerced, and never looked up from
+  GitHub — the ratified pair is the only source, so no Domain code makes a
+  network call trusting mutable remote state. Reasoning: the class's
+  eligibility argument (a same-repo PR's `pull_request` workflow already ran
+  the branch's own version; merging starts no new default-branch run) holds
+  only for the default branch — a non-default base can deploy on push with no
+  workflow file `blast-radius` sees, can be unprotected, and can carry
+  push-triggered workflows the diff never touches. Pinning the base also keeps
+  the approval message to one familiar target, so a look-alike ref never
+  reaches the owner's click undetected.
 - `head_sha` is exactly 40 lowercase hex characters. A short SHA is refused.
 - `item_id` is a UUID. `transition` is one of `promote`, `restore`, `dismiss`.
 - A missing field, an unknown key, or a malformed value is `target_invalid`
