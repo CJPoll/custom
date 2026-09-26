@@ -557,6 +557,15 @@ and pronoun-guard; nothing detected it. The durable fix:
   block (that is the clobber path). Hooks load at session start, so reload a
   session to activate.
 
+  **Later (2026-09-26):** this bullet read "change `registry.json` and run
+  `scripts/setup-hooks --install`", and *Detect drift* compared the live
+  settings against the branch's own `registry.json`. Superseded by DND-743. A
+  branch that added a hook could not pass the gate until it was wired, so the
+  DND-670 captain ran `--install` from its worktree. That wired a main-checkout
+  path with no script behind it, and every Bash call failed with exit 127 until
+  the branch landed. The bar is now what landed on origin, and wiring waits for
+  the landing.
+
 ## Inbox tenancy registry (`$ATHENA_INBOX_ROOT/projects/` is not in git)
 
 **`ai/contracts/athena-inbox.md` is the normative home; this section is the
