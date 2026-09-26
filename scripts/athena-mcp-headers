@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# athena-mcp-headers - Claude Code `headersHelper` for the hosted Athena MCP.
+#
+# Prints {"Authorization":"Bearer <machine token>"} on stdout, read from the
+# inbox client's 0600 config. `scripts/add-athena-mcp` registers this script as
+# the athena MCP entry's `headersHelper`; Claude Code runs it on each MCP
+# connect and reconnect and sends what it prints as request headers.
+#
+# WHY (DND-839). The token used to reach the MCP header through an environment
+# variable the launcher exported into the Claude Code process. Claude Code
+# passes its environment to every Bash tool child, so the machine token reached
+# every command an agent ran, and an env dump put it in a transcript. With this
+# helper the token lives only in the config file and in this short-lived
+# process's stdout pipe to Claude Code. It is never in argv (jq reads the file;
+# its argv holds only the path), never in the environment, and never written.
+#
+# The config path resolves exactly as athena:inbox's does:
+#   ${ATHENA_INBOX_CLIENT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/athena-inbox-client/config.json}
+#
+# Exit codes: 0 header printed · 1 no usable token (nothing on stdout, a Fix: on
+# stderr; Claude Code then reports the server as failed to connect) · 2 usage.
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+athena-mcp-headers - print the Athena MCP Authorization header for Claude Code
+
+Usage:
+  athena-mcp-headers          print {"Authorization":"Bearer <token>"} on stdout
+  athena-mcp-headers --help   show this help
+
+Registered by scripts/add-athena-mcp as the athena MCP server's headersHelper.
+Claude Code runs it on each MCP connect. The machine token is read from the
+inbox client's config and never enters argv, the environment, or a file:
+  ${ATHENA_INBOX_CLIENT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/athena-inbox-client/config.json}
+
+The config must be a regular file readable only by you (0600 or 0400).
+
+Exit codes:
+  0  header printed   1  no usable token (Fix: on stderr)   2  usage error
+EOF
+}
+
+die() { # <exit> <what> <fix>
+  printf 'athena-mcp-headers: %s\nFix: %s\n' "$2" "$3" >&2
+  exit "$1"
+}
+
+case "${1:-}" in
+  "") ;;
+  -h|--help) usage; exit 0 ;;
+  *) die 2 "unknown argument: $1" "run it with no arguments (Claude Code does), or --help." ;;
+esac
+
+cfg="${ATHENA_INBOX_CLIENT_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/athena-inbox-client/config.json}"
+
+command -v jq >/dev/null 2>&1 \
+  || die 1 "jq is required to read the machine token but is not on PATH" "install jq."
+[ -e "${cfg}" ] \
+  || die 1 "no inbox client config at ${cfg}, so there is no machine token to send" \
+       "set the inbox client up on this machine (scripts/setup-athena-inbox-client), or unregister the athena MCP for this project (claude mcp remove athena -s local)."
+[ -f "${cfg}" ] && [ ! -L "${cfg}" ] \
+  || die 1 "${cfg} is not a regular file" "replace it with a regular 0600 file holding the machine token."
+[ -r "${cfg}" ] \
+  || die 1 "${cfg} exists but is not readable" "chmod 0600 ${cfg} (owned by you)."
+mode="$(stat -c '%a' "${cfg}" 2>/dev/null || stat -f '%Lp' "${cfg}" 2>/dev/null || true)"
+case "${mode}" in
+  600|400) ;;
+  "") die 1 "could not read the mode of ${cfg}" "check stat(1) works here; the token is not sent from a file whose mode is unknown." ;;
+  *) die 1 "${cfg} has mode ${mode}; it holds the machine token and must be readable only by you" "chmod 0600 ${cfg}." ;;
+esac
+
+# One jq over the file: validate and build the header together. The token is
+# never in argv and never echoed; a refusal names only the reason.
+if ! jq -e -c '
+    if type == "object" and (.token | type) == "string" and (.token | test("^[!-~]+$"))
+    then {Authorization: ("Bearer " + .token)}
+    else error("no usable token") end' "${cfg}" 2>/dev/null; then
+  die 1 "${cfg} has no usable .token (missing, empty, not a string, or holding whitespace or control characters), or is not JSON" \
+    "the inbox client config must carry the machine token under .token; re-run scripts/setup-athena-inbox-client."
+fi
