@@ -9,56 +9,62 @@
 export CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL="${CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL:-1h}"
 
 # The Athena MCP server (/mcp, DND-295) authenticates with the machine token the
-# inbox client already holds. Export the bearer HERE rather than in a shell
-# profile: it then lives only in the launched `claude` process env (and, like
-# any env var, is inherited by claude's own subprocesses/subagents) — narrower
-# than a login shell where every interactive command would see it, and the
-# standard trade-off of env-var MCP auth versus writing the secret into
-# ~/.claude.json. `add-athena-mcp` registers the MCP header as
-# `Authorization: Bearer ${ATHENA_MCP_BEARER}` and Claude Code expands it from
-# this process env at connect time; the token is never written into
-# ~/.claude.json.
+# inbox client holds in ~/.config/athena-inbox-client/config.json (0600). The
+# token NEVER enters this process's environment (DND-839): Claude Code passes
+# its environment to every Bash tool child, so an exported token reached every
+# command an agent ran, and an env dump put it in a transcript. Instead
+# `add-athena-mcp` registers `scripts/athena-mcp-headers` as the MCP entry's
+# `headersHelper`; Claude Code runs it on each MCP connect and it reads the
+# token from the config file itself.
 #
-# Only set it when the caller has not already (an explicit export wins and skips
-# the read below). A MISSING inbox config means the inbox client is not
-# provisioned here — this is not an Athena-MCP environment, so the bearer is not
-# a required input for this launch: skip silently rather than break an unrelated
-# `claude` launch (environment-safe, like the harness's registry checks). A
-# PRESENT config IS the Athena environment, so a broken/tokenless one is a loud
-# HARD FAIL — never a silent launch that would 401 every /mcp call
-# (owner: hard-fail-on-required-inputs).
-if [ -z "${ATHENA_MCP_BEARER:-}" ]; then
-  athena_inbox_config="${HOME}/.config/athena-inbox-client/config.json"
+# So the launcher only SCRUBS: a caller that exported ATHENA_MCP_BEARER (the
+# pre-DND-839 recipe) does not get it into the session.
+unset ATHENA_MCP_BEARER
 
-  # Detect the environment by EXISTENCE (-e), not readability: a present-but-
-  # unreadable config (wrong perms) is the Athena environment with a broken
-  # required input, NOT "some other machine" — it must hard-fail, never take the
-  # silent skip (a present-but-wrong config must not read as a missing one).
-  if [ -e "${athena_inbox_config}" ]; then
-    if ! command -v jq >/dev/null 2>&1; then
-      echo "athena: jq is required to read the machine token from ${athena_inbox_config}" \
-           "but is not on PATH." >&2
-      echo "Fix: install jq, or export ATHENA_MCP_BEARER yourself before launching." >&2
-      exit 1
-    fi
+# Preflight, reading no token. A MISSING inbox config means the inbox client is
+# not provisioned here: not an Athena-MCP environment, so skip silently rather
+# than break an unrelated `claude` launch (environment-safe). A PRESENT config
+# IS the Athena environment, so a broken/tokenless one is a loud HARD FAIL,
+# never a silent launch whose MCP connect then fails (owner:
+# hard-fail-on-required-inputs). Detect by EXISTENCE (-e), not readability: a
+# present-but-unreadable config is a broken required input, not "some other
+# machine".
+athena_inbox_config="${ATHENA_INBOX_CLIENT_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/athena-inbox-client/config.json}"
+if [ -e "${athena_inbox_config}" ]; then
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "athena: jq is required to check the machine token in ${athena_inbox_config}" \
+         "but is not on PATH." >&2
+    echo "Fix: install jq (the athena MCP headersHelper needs it too)." >&2
+    exit 1
+  fi
 
-    if [ ! -r "${athena_inbox_config}" ]; then
-      echo "athena: inbox-client config exists but is not readable: ${athena_inbox_config}" >&2
-      echo "Fix: fix its permissions (0600, owned by you), or export ATHENA_MCP_BEARER" \
-           "yourself before launching." >&2
-      exit 1
-    fi
+  if [ ! -r "${athena_inbox_config}" ]; then
+    echo "athena: inbox-client config exists but is not readable: ${athena_inbox_config}" >&2
+    echo "Fix: fix its permissions (0600, owned by you)." >&2
+    exit 1
+  fi
 
-    ATHENA_MCP_BEARER="$(jq -r '.token // empty' "${athena_inbox_config}")"
+  # A boolean test only: the token is never read into this shell.
+  if ! jq -e '(.token | type) == "string" and (.token | length) > 0' \
+       "${athena_inbox_config}" >/dev/null 2>&1; then
+    echo "athena: no .token in ${athena_inbox_config} (the Athena MCP server would 401)." >&2
+    echo "Fix: the inbox-client config must carry the machine token under .token;" \
+         "re-run scripts/setup-athena-inbox-client." >&2
+    exit 1
+  fi
 
-    if [ -z "${ATHENA_MCP_BEARER}" ]; then
-      echo "athena: no .token in ${athena_inbox_config} (the Athena MCP server would 401)." >&2
-      echo "Fix: the inbox-client config must carry the machine token under .token;" \
-           "re-run scripts/setup-athena-inbox-client, or export ATHENA_MCP_BEARER yourself." >&2
-      exit 1
-    fi
-
-    export ATHENA_MCP_BEARER
+  # A registration made before DND-839 names ${ATHENA_MCP_BEARER} in a static
+  # header. With the variable scrubbed above that header can no longer
+  # authenticate, so say so here rather than let /mcp show a bare 401. The
+  # launch still proceeds: everything but the athena MCP works.
+  if [ -r "${HOME}/.claude.json" ] && jq -e --arg a "${PWD}" --arg b "$(pwd -P)" '
+        [(.projects[$a]?.mcpServers?.athena?), (.projects[$b]?.mcpServers?.athena?), (.mcpServers?.athena?)]
+        | map(select(type == "object" and (.headers? | tostring | contains("ATHENA_MCP_BEARER"))))
+        | length > 0' "${HOME}/.claude.json" >/dev/null 2>&1; then
+    echo "athena: the athena MCP registered for this directory still uses the retired" \
+         "\${ATHENA_MCP_BEARER} header (DND-839), so it will fail to authenticate." >&2
+    echo "Fix: re-run scripts/add-athena-mcp from this directory, which registers the" \
+         "headersHelper instead; then relaunch." >&2
   fi
 fi
 

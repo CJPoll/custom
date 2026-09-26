@@ -5,31 +5,27 @@
 # The server is HTTP (Streamable HTTP), mounted at /mcp on the Athena endpoint
 # (decision D5: server-hosted, not a local stdio shim). Authentication is the
 # machine token the inbox client already holds — there is NEVER a second copy of
-# the token. The registered config references the token through the environment
-# variable ${ATHENA_MCP_BEARER}, expanded by Claude Code at MCP-connect time, so
-# the literal token is not written into ~/.claude.json. The one source of truth
-# for the token stays ~/.config/athena-inbox-client/config.json; the claude
-# launcher `scripts/athena` exports ${ATHENA_MCP_BEARER} from that file, scoped
-# to the launch (not a shell profile), so the token is not in every shell's env.
+# the token. The registered entry names a `headersHelper`,
+# scripts/athena-mcp-headers, which Claude Code runs on each MCP connect; it
+# reads the token from ~/.config/athena-inbox-client/config.json (0600) and
+# prints the Authorization header. The token is never written into
+# ~/.claude.json and never enters the session's environment.
+#
+# DND-839 retired the previous design, a static header expanding an environment
+# variable the launcher exported: Claude Code passes its environment to every
+# Bash tool child, so the token reached every command an agent ran.
 #
 # Local scope keys off the current directory, so run this from the project's
-# MAIN checkout (where you start `claude`), not from a worktree.
+# MAIN checkout (where you start `claude`), not from a worktree. A local-scope
+# headersHelper runs only in a workspace whose trust dialog was accepted;
+# this script warns when the directory is not trusted yet.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # The single source of truth for the machine token: the inbox client's config.
-INBOX_CONFIG="$HOME/.config/athena-inbox-client/config.json"
-
-# The env var the registered header references. Named generically (no
-# TOKEN/KEY/SECRET/API): Claude Code is REPORTED to refuse expanding
-# credential-shaped variable names into MCP config (per the claude-code-guide,
-# DND-295 — NOT independently verified against live MCP-connect behavior; HG-4
-# is to confirm). If that refusal turns out not to apply, this naming is moot
-# but harmless; either way an UNexpanded header reaches the server as a literal
-# and is answered 401 (a loud failure, never a silent-dark channel).
-ENV_VAR="ATHENA_MCP_BEARER"
+INBOX_CONFIG="${ATHENA_INBOX_CLIENT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/athena-inbox-client/config.json}"
 
 SERVER="athena"
 DEFAULT_URL="https://athena.cjpoll.me/mcp"
@@ -37,7 +33,11 @@ DEFAULT_URL="https://athena.cjpoll.me/mcp"
 MCP_URL=""
 DRY_RUN=false
 
-die() { echo "add-athena-mcp: $*" >&2; exit 1; }
+die() { # <what> [fix]
+    echo "add-athena-mcp: $1" >&2
+    [ -z "${2:-}" ] || echo "Fix: $2" >&2
+    exit 1
+}
 
 usage() {
     cat <<'EOF'
@@ -49,31 +49,33 @@ Usage:
 Options:
   --url URL   Override the /mcp URL. Default is derived from the inbox client's
               server_url, else https://athena.cjpoll.me/mcp.
-  --dry-run   Print the claude mcp command that would run, without running it.
+  --dry-run   Print the claude mcp commands that would run, without running them.
   -h, --help  Show this help.
 
-How the token is handled (never a second copy):
+How the token is handled (never a second copy, never in the environment):
   * The server authenticates with the machine token in
     ~/.config/athena-inbox-client/config.json (the SAME token the inbox client
     uses). This script does NOT copy it into ~/.claude.json.
-  * The registered header is:  Authorization: Bearer ${ATHENA_MCP_BEARER}
-    Claude Code expands ${ATHENA_MCP_BEARER} from the environment at connect
-    time. The claude launcher `scripts/athena` already exports it from the config
-    file, scoped to the launch (NOT a shell profile), so the token stays out of
-    every interactive shell's environment. If you launch claude another way,
-    export it yourself from that one source of truth:
-
-      export ATHENA_MCP_BEARER="$(jq -r .token "$HOME/.config/athena-inbox-client/config.json")"
+  * The registered entry is {"type":"http","url":<url>,"headersHelper":<path>}
+    where <path> is scripts/athena-mcp-headers in the MAIN checkout of the repo
+    holding this script. Claude Code runs it on each MCP connect; it reads the
+    token from the config and prints the Authorization header.
+  * The token is NOT exported into the session (DND-839): anything in Claude
+    Code's environment reaches every Bash tool command an agent runs.
+  * ATHENA_MCP_HEADERS_HELPER=<absolute path> overrides the helper path (the
+    self-test uses it). The path must contain no whitespace or shell
+    metacharacters, because Claude Code runs it through a shell.
 
 Notes:
   * Adds the server at LOCAL scope (this project only), keyed by current dir.
     Run it from the project's MAIN checkout, not a worktree.
+  * A local-scope headersHelper runs only once this directory's workspace trust
+    dialog has been accepted (start `claude` here interactively once). The
+    script warns if it has not.
+  * The helper is run once before registering, so a missing or broken token
+    fails here, loudly, instead of at connect time.
   * Re-running replaces the existing local entry (safe to run again to update).
   * A running Claude session must be restarted to pick up the new server.
-  * Launch claude via `scripts/athena`, which exports ${ATHENA_MCP_BEARER} from
-    the inbox config (and hard-fails loudly if the token is missing). If it is
-    unset at connect time the server answers 401 (a loud failure, not a
-    silent-dark channel).
 
 Exit codes:
   0  success        1  usage / missing config / setup error
@@ -85,12 +87,14 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help)  usage; exit 0 ;;
         --dry-run)  DRY_RUN=true ;;
-        --url)      shift; [ $# -gt 0 ] || die "--url needs a value"; MCP_URL="$1" ;;
+        --url)      shift; [ $# -gt 0 ] || die "--url needs a value" "pass --url <https URL>."; MCP_URL="$1" ;;
         --url=*)    MCP_URL="${1#--url=}" ;;
-        *)          die "unknown argument: $1 (see --help)" ;;
+        *)          die "unknown argument: $1" "see --help." ;;
     esac
     shift
 done
+
+command -v jq >/dev/null 2>&1 || die "jq is required but is not on PATH" "install jq."
 
 # ---- resolve the /mcp URL: --url wins, else derive from the inbox config, else default ----
 derive_url_from_config() {
@@ -98,13 +102,8 @@ derive_url_from_config() {
     # -> https://<host>/mcp
     [ -r "$INBOX_CONFIG" ] || return 1
     local host
-    if command -v jq >/dev/null 2>&1; then
-        host="$(jq -r '.server_url // empty' "$INBOX_CONFIG" 2>/dev/null \
-            | sed -E 's#^[a-z]+://##; s#[/?].*$##')"
-    else
-        host="$(grep -oE '"server_url"[[:space:]]*:[[:space:]]*"[^"]+"' "$INBOX_CONFIG" \
-            | sed -E 's#.*://##; s#[/?"].*$##')"
-    fi
+    host="$(jq -r '.server_url // empty' "$INBOX_CONFIG" 2>/dev/null \
+        | sed -E 's#^[a-z]+://##; s#[/?].*$##')"
     [ -n "$host" ] || return 1
     printf 'https://%s/mcp' "$host"
 }
@@ -114,32 +113,58 @@ if [ -z "$MCP_URL" ]; then
     [ -n "$MCP_URL" ] || MCP_URL="$DEFAULT_URL"
 fi
 
-HEADER="Authorization: Bearer \${${ENV_VAR}}"
+# ---- resolve the helper: the MAIN checkout's copy, never a worktree's ----
+# A worktree path vanishes on cleanup and would silently break the MCP (the
+# same reason hooks are wired at the main checkout's path).
+main_checkout_helper() {
+    local common
+    common="$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+    case "$common" in
+        */.git) printf '%s/scripts/athena-mcp-headers\n' "${common%/.git}" ;;
+        *) return 1 ;;
+    esac
+}
+if [ -n "${ATHENA_MCP_HEADERS_HELPER:-}" ]; then
+    HELPER="$ATHENA_MCP_HEADERS_HELPER"
+else
+    HELPER="$(main_checkout_helper)" || HELPER="$SCRIPT_DIR/athena-mcp-headers"
+fi
+case "$HELPER" in
+    /*) ;;
+    *) die "the headersHelper path is not absolute: $HELPER" "set ATHENA_MCP_HEADERS_HELPER to an absolute path, or run this script from a git checkout of ~/dev/custom." ;;
+esac
+# Claude Code runs the helper through a shell, so the path must be one word.
+case "$HELPER" in
+    *[!A-Za-z0-9/._:@+-]*) die "the headersHelper path contains whitespace or a shell metacharacter: $HELPER" \
+        "move the checkout (or point ATHENA_MCP_HEADERS_HELPER) to a path of letters, digits and / . _ : @ + - only." ;;
+esac
+
+ENTRY="$(jq -n -c --arg u "$MCP_URL" --arg h "$HELPER" '{type:"http", url:$u, headersHelper:$h}')"
 
 # ---- dry run: print exactly what would be written, resolve nothing secret ----
 if $DRY_RUN; then
     echo "# would run (in $(pwd)):"
     echo "claude mcp remove $SERVER -s local        # ignore error if not present"
-    echo "claude mcp add --transport http $SERVER $MCP_URL --header '$HEADER'"
+    echo "claude mcp add-json -s local $SERVER '$ENTRY'"
     echo
-    echo "# token is referenced via \${${ENV_VAR}} (never written to config)."
-    echo "# The claude launcher scripts/athena exports it from the inbox config, scoped"
-    echo "# to the launch. To launch claude another way, export it yourself:"
-    echo "export ${ENV_VAR}=\"\$(jq -r .token \"$INBOX_CONFIG\")\""
+    echo "# The token is read by the headersHelper from $INBOX_CONFIG on each"
+    echo "# MCP connect; it is never written to config or exported."
     exit 0
 fi
 
 # ---- sanity checks (only for a real apply) ----
-command -v claude >/dev/null 2>&1 || die "'claude' CLI not found on PATH"
-[ -r "$INBOX_CONFIG" ] || die "inbox client config missing/unreadable: $INBOX_CONFIG
-  The Athena MCP reuses the machine token the inbox client holds. Set the inbox
-  client up first (scripts/setup-athena-inbox-client)."
+command -v claude >/dev/null 2>&1 || die "'claude' CLI not found on PATH" "install Claude Code, or put it on PATH."
+[ -r "$INBOX_CONFIG" ] || die "inbox client config missing/unreadable: $INBOX_CONFIG" \
+    "the Athena MCP reuses the machine token the inbox client holds; set the inbox client up first (scripts/setup-athena-inbox-client)."
+[ -x "$HELPER" ] || die "the headersHelper is missing or not executable: $HELPER" \
+    "land DND-839 in the main checkout (git merge --ff-only), or set ATHENA_MCP_HEADERS_HELPER to an executable copy."
 
-# Verify a token is actually present so we fail loudly now, not at connect time.
-if command -v jq >/dev/null 2>&1; then
-    tok="$(jq -r '.token // empty' "$INBOX_CONFIG" 2>/dev/null || true)"
-    [ -n "$tok" ] || die "no .token in $INBOX_CONFIG (cannot authenticate the MCP server)"
-    unset tok
+# Run the helper once now so a broken token fails here, not at connect time.
+# Its stdout (the header) is checked and discarded, never printed.
+if ! "$HELPER" 2>/dev/null | jq -e '(.Authorization | type) == "string" and (.Authorization | startswith("Bearer "))' >/dev/null 2>&1; then
+    "$HELPER" >/dev/null || true   # re-run for its stderr reason (stdout discarded)
+    die "the headersHelper could not mint an Authorization header from $INBOX_CONFIG" \
+        "fix the reason printed above, then re-run add-athena-mcp."
 fi
 
 if [ -f .git ]; then
@@ -150,19 +175,26 @@ fi
 
 # ---- apply (idempotent: drop any existing local entry, then add fresh) ----
 claude mcp remove "$SERVER" -s local >/dev/null 2>&1 || true
-claude mcp add --transport http "$SERVER" "$MCP_URL" --header "$HEADER"
+claude mcp add-json -s local "$SERVER" "$ENTRY"
 
 echo
 echo "Added '$SERVER' -> $MCP_URL"
 echo "  project: $(pwd)"
-echo "  auth:    Authorization: Bearer \${${ENV_VAR}}  (token NOT stored in config)"
-echo
-echo "The launcher scripts/athena exports ${ENV_VAR} from the inbox config (scoped"
-echo "to the launch). To launch claude another way, export it yourself:"
-echo "  export ${ENV_VAR}=\"\$(jq -r .token \"$INBOX_CONFIG\")\""
+echo "  auth:    headersHelper $HELPER  (token read from $INBOX_CONFIG; NOT stored in config, NOT exported)"
+
+# A local-scope headersHelper runs only in a trusted workspace. Warn, loudly.
+if ! jq -e --arg a "$(pwd)" --arg b "$(pwd -P)" \
+        '(.projects[$a]?.hasTrustDialogAccepted == true) or (.projects[$b]?.hasTrustDialogAccepted == true)' \
+        "$HOME/.claude.json" >/dev/null 2>&1; then
+    echo >&2
+    echo "add-athena-mcp: warning: this directory's workspace trust has not been accepted," >&2
+    echo "            so Claude Code will not run the headersHelper and the athena MCP" >&2
+    echo "            will not authenticate." >&2
+    echo "Fix: start claude here interactively once and accept the trust dialog." >&2
+fi
+
 echo
 echo "Status:"
 claude mcp get "$SERVER" 2>&1 | sed 's/^/  /' || true
 echo
-echo "Note: restart a running Claude session (via scripts/athena) to load the new"
-echo "      server, so ${ENV_VAR} is present in that session's environment."
+echo "Note: restart a running Claude session (via scripts/athena) to load the new server."
