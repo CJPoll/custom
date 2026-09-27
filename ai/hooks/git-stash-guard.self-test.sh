@@ -992,6 +992,28 @@ case_cmd "QA77. printf quoting that feeds awk" allow "printf '%s\\n' \"a b c\" |
 # `gsub(...)` payload where the real env does not.
 case_cmd "QA78. jq select with an optional array iterator" allow "jq -r '.items[] | select(.tags[]? == \"x\") | .name' f.json"
 
+# QX101-103: critic round 17. Depth is tracked by bracket TYPE (a `]` cannot
+# close a `${`, a `}` cannot close a `$[`) and carried ACROSS lines (a `${`
+# may span a newline). Each hides `<<` inside an open ${...}/$[...].
+case_cmd "QX101. a ] inside \${x:- ...} does not close it" deny "echo \${x:-] <<'E' }
+/usr/libexec/git-core/git-st*sh -u
+E"
+case_cmd "QX102. a glob class ] inside \${x:- ...}" deny "echo \${x:-[a] <<'E' }
+/usr/libexec/git-core/git-st*sh -u
+E"
+case_cmd "QX103. \${x:- left open across a newline before <<" deny "echo \${x:-
+<<'E' }
+/usr/libexec/git-core/git-st*sh -u
+E"
+case_cmd "QX104. a } inside \$[ ... ] does not close it" deny "echo \$[ 1} <<'E' 2 ]
+/usr/libexec/git-core/git-st*sh -u
+E"
+# A real heredoc after a genuinely closed ${x} on a PRIOR line still parses.
+case_cmd "QA80. a closed \${x} then a real data heredoc on the next line" allow "echo \${x}
+jq -c '.[]' <<'E'
+{}
+E"
+
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
 case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"

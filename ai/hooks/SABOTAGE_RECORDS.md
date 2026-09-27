@@ -791,11 +791,11 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (final, critic rounds 1-16, admiral batches 7-9):** `RESULT: 566
+- **After (final, critic rounds 1-17, admiral batches 7-9):** `RESULT: 571
   passed, 0 failed` / `VERDICT: PASS`. The per-round tables in this and the
   next few subsections are HISTORICAL, measured on the hook of the round
   they name; the authoritative final table is "Sabotage rows on the
-  option-A hook" below (566, on the round-16 hook).
+  option-A hook" below (571, on the round-17 hook).
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
@@ -927,10 +927,10 @@ reached every case they did (their mutants stayed green).
 ### Sabotage rows on the option-A hook (final, measured on the round-16
 hook; supersede every table above)
 
-Self-test `RESULT: 566 passed, 0 failed`. One mutant copy each. A-1..A-31
+Self-test `RESULT: 571 passed, 0 failed`. One mutant copy each. A-1..A-31
 were measured on 9e114a6 + the round-12 edits; A-32 on 110ea27; A-33 on the
-round-16 hook. Rows whose mechanisms option A deleted (the old
-A-3/10/12-14/17-25) are retired with that code.
+round-16 hook; A-34/A-35 on the round-17 hook. Rows whose mechanisms option
+A deleted (the old A-3/10/12-14/17-25) are retired with that code.
 
 | id | Mutation | Observed failure |
 |---|---|---|
@@ -953,6 +953,8 @@ A-3/10/12-14/17-25) are retired with that code.
 | A-31 | `elif` dropped from cmd_prefix, so a runner after it is not in command position (critic round 12) | QX97 — `555 passed, 1 failed` |
 | A-32 | The `${...}` heredoc guard reverted, so `<<` inside a parameter expansion is taken as a heredoc (critic round 14) | QX98 — `556 passed, 1 failed` |
 | A-33 | `nohd` no longer set from the `${`/`$[` depth, so `<<` inside a parameter expansion is a heredoc (critic rounds 14, 16) | QX98, QX99, QX100 — `563 passed, 3 failed` |
+| A-34 | Depth counts ignore bracket type, so a `]` closes a `${` and a `}` closes a `$[` (critic round 17) | QX100, QX101, QX102, QX104 — `567 passed, 4 failed` |
+| A-35 | The `${`/`$[` depth is reset at each newline, so a `${` open across a line is missed (critic round 17) | QX103 — `570 passed, 1 failed` |
 
 - **Round 11, path-qualified word + stale text.** The critic found that
   `exec_text()` stripped a command word to its basename before the
@@ -995,3 +997,11 @@ A-3/10/12-14/17-25) are retired with that code.
   allowed in the real agent env (probed) and covered by QA60; no QA79
   assertion, because the self-test's artificial alias fixture denies it
   where the real env does not.
+- **Round 17, typed and cross-line `${`/`$[` depth.** The round-16 depth
+  was type-blind (a `]` closed a `${`) and reset per line (a `${` open
+  across a newline was missed). Fix: bo/bc count `${`...`}` and ao/ac count
+  `$[`...`]` separately, each capped at its open count, carried across
+  lines (no per-line reset). `<<` is a heredoc only when neither depth is
+  open. QX101-QX104 add the shapes; QA80 confirms a genuinely-closed `${x}`
+  on a prior line still allows a real data heredoc. Mutations A-34
+  (type-blind close) and A-35 (per-line reset).

@@ -533,9 +533,9 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # its line (a comment, or a literal `#` word) or inside `((`/`$[`
   # arithmetic (a shift) is not taken as a heredoc: the lines after it are
   # tokenized with the command, as before.
-  function tokenize(text, W, QF, SB, UX, PQ, HB, HQ,    n, i, L, c, st, cur, has, q, ns, skip, ux, wq, hdp, hds, nohd, cm, ar, np, pd, pq, ps, nh, h, pos, nx, line, t, body, bl, term, op, pxo, pxc) {
+  function tokenize(text, W, QF, SB, UX, PQ, HB, HQ,    n, i, L, c, st, cur, has, q, ns, skip, ux, wq, hdp, hds, nohd, cm, ar, np, pd, pq, ps, nh, h, pos, nx, line, t, body, bl, term, op, bo, bc, ao, ac) {
     n = 0; st = 0; cur = ""; has = 0; q = 0; ns = 1; skip = 0; ux = 0; L = length(text)
-    wq = 0; hdp = 0; cm = 0; ar = 0; np = 0; nh = 0; HB[0] = 0; pxo = 0; pxc = 0
+    wq = 0; hdp = 0; cm = 0; ar = 0; np = 0; nh = 0; HB[0] = 0; bo = 0; bc = 0; ao = 0; ac = 0
     for (i = 1; i <= L; i++) {
       c = substr(text, i, 1)
       if (st == 1) {
@@ -566,12 +566,14 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (c ~ /[<>]/ || (c == "&" && substr(text, i + 1, 1) == ">")) {
         if (c == "&") i++
         # `<<` inside an open `${...}` parameter expansion or `$[...]`
-        # arithmetic is literal text of that word, not a heredoc, even with
-        # a space before it (`echo ${x:- <<'E' }`; critic rounds 14, 16).
-        # pxo/pxc count `${`/`$[` opens and their closes across words on the
-        # line, like `ar` counts `((`. `$((...))` stays handled by `ar`.
-        # Over-setting nohd only reads the following lines as commands.
-        nohd = (pxo > pxc)
+        # arithmetic is literal text, not a heredoc, even with a space
+        # before it or on a later line (`echo ${x:- <<'E' }`; critic rounds
+        # 14, 16, 17). bo/bc count `${`...`}` and ao/ac count `$[`...`]`,
+        # by bracket TYPE (a `]` cannot close a `${`) and carried ACROSS
+        # lines (a `${` may span a newline), like `ar` counts `((`.
+        # `$((...))` stays handled by `ar`. Over-setting nohd only reads the
+        # following lines as commands.
+        nohd = (bo > bc) || (ao > ac)
         if (has && cur !~ /^[0-9]+$/) {
           if (skip) { skip = 0; if (hdp) { np++; pd[np] = cur; pq[np] = wq; ps[np] = hds; hdp = 0 } }
           else { n++; W[n] = cur; QF[n] = q; SB[n] = ns; UX[n] = ux; ns = 0 }
@@ -595,7 +597,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
         else if (c == ")" && substr(text, i + 1, 1) == ")" && ar > 0) { ar--; i++ }
         if (c !~ /[ \t]/) { ns = 1; skip = 0; hdp = 0 }
         if (c == "\n") {
-          cm = 0; pxo = 0; pxc = 0
+          cm = 0
           # The bodies of the heredocs opened on the line just ended, in
           # order, each up to its delimiter line (tabs stripped for `<<-`).
           pos = i + 1
@@ -620,10 +622,12 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       if (c == "$") {
         ux = 1; has = 1
         if (substr(text, i + 1, 1) == "?") { cur = cur "$?"; i++; continue }
-        if (substr(text, i + 1, 1) == "{" || substr(text, i + 1, 1) == "[") pxo++
+        if (substr(text, i + 1, 1) == "{") bo++
+        else if (substr(text, i + 1, 1) == "[") ao++
         cur = cur c; continue
       }
-      if ((c == "}" || c == "]") && pxc < pxo) pxc++
+      if (c == "}") { if (bc < bo) bc++ }
+      else if (c == "]") { if (ac < ao) ac++ }
       if (c ~ /[*?[{]/) { cur = cur c "\001"; has = 1; continue }
       cur = cur c; has = 1
     }
