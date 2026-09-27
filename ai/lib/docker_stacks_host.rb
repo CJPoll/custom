@@ -149,8 +149,12 @@ module DockerStacks
         key = "iid"
       end
       raise Unreadable, "forge list for #{branch} is not a list" unless list.is_a?(Array)
+      return nil if list.empty?
 
-      list.first && list.first[key]
+      number = list.first.is_a?(Hash) ? list.first[key] : nil
+      raise Unreadable, "forge list for #{branch} has an entry without an integer #{key}" unless number.is_a?(Integer)
+
+      number
     end
 
     private

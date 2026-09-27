@@ -41,9 +41,17 @@ echo "$*" >> "${ST}/gh.log"
 [ -f "${ST}/gh_fail" ] && { echo "gh: HTTP 502" >&2; exit 1; }
 b=""; prev=""
 for a in "$@"; do [ "${prev}" = "--head" ] && b="${a}"; prev="${a}"; done
+[ -f "${ST}/wrong_key" ] && { echo '[{"id":99}]'; exit 0; }
 if [ -f "${ST}/merged_${b}" ]; then printf '[{"number":%s}]\n' "$(cat "${ST}/merged_${b}")"; else echo '[]'; fi
 EOF
-cp "${STUBS}/gh" "${STUBS}/glab"
+cat > "${STUBS}/glab" <<'EOF'
+#!/usr/bin/env bash
+# glab stub: only `mr list --source-branch B --merged -F json`, answering iid.
+echo "$*" >> "${ST}/glab.log"
+case "$*" in "mr list --source-branch "*" --merged -F json") ;; *) echo "glab stub: unexpected $*" >&2; exit 99 ;; esac
+b="$4"
+if [ -f "${ST}/merged_${b}" ]; then printf '[{"iid":%s,"state":"merged"}]\n' "$(cat "${ST}/merged_${b}")"; else echo '[]'; fi
+EOF
 chmod +x "${STUBS}"/*
 export ATHENA_DOCKER_BIN="${STUBS}/docker" ATHENA_GH_BIN="${STUBS}/gh" ATHENA_GLAB_BIN="${STUBS}/glab"
 
@@ -53,6 +61,11 @@ git -C "${REPO}" config remote.origin.url git@github.com:t/t.git
 git -C "${REPO}" commit -q --allow-empty -m seed
 git -C "${REPO}" worktree add -q -b feat-merged "${TMP}/wt/feat-merged"
 git -C "${REPO}" worktree add -q -b feat-live "${TMP}/wt/feat-live"
+# A gitlab-remote repo with one linked worktree.
+GLREPO="${TMP}/glrepo"; git init -q -b main "${GLREPO}"
+git -C "${GLREPO}" config remote.origin.url git@gitlab.com:t/t.git
+git -C "${GLREPO}" commit -q --allow-empty -m seed
+git -C "${GLREPO}" worktree add -q -b gl-merged "${TMP}/wt/gl-merged"
 
 # fixture <name> <n-filler-networks>: builtin pools, bridge + two compose
 # stacks (merged, live) + one orphan + N filler networks, all in the pool.
@@ -101,6 +114,20 @@ grep -q "teardown-stack --pr .* feat-live" <<<"${out}" && bad "h2 offered to tea
 fixture h3 16; touch "${ST}/gh_fail"; run --min-free 12; expect h3 1
 has "h3 unknown merge state" "merge state UNKNOWN"
 grep -q "LIVE project feat-merged" <<<"${out}" && bad "h3 read a forge failure as not-merged" "${out}" || ok "h3 forge failure not read as live"
+
+# h4 GitLab: glab's argv and its iid key produce an --mr teardown line.
+fixture h4 16; echo 12 > "${ST}/merged_gl-merged"
+ruby -rjson -e 'f = ARGV[0]; c = JSON.parse(File.read(f))
+  c[1]["Config"]["Labels"]["com.docker.compose.project.working_dir"] = ARGV[1]; File.write(f, JSON.dump(c))' \
+  "${ST}/containers.json" "${TMP}/wt/gl-merged"
+run --min-free 12; expect h4 1
+has "h4 gitlab teardown line" "teardown: ~/dev/custom/ai/bin/teardown-stack --mr 12 --repo ${TMP}/wt/gl-merged"
+grep -qxF "mr list --source-branch gl-merged --merged -F json" "${ST}/glab.log" && ok "h4 glab argv" || bad "h4 glab argv" "$(cat "${ST}/glab.log" 2>/dev/null)"
+
+# h5 a merged-list entry without its key is UNKNOWN, never "nothing merged".
+fixture h5 16; touch "${ST}/wrong_key"; run --min-free 12; expect h5 1
+has "h5 unknown merge state" "merge state UNKNOWN"
+grep -q "LIVE project feat-merged" <<<"${out}" && bad "h5 read a keyless entry as not merged" "${out}" || ok "h5 keyless entry not read as live"
 
 # THE MISSES: docker cannot be read -> 3, never 0.
 fixture m1 0; touch "${ST}/down"; run; expect "m1 docker down" 3
