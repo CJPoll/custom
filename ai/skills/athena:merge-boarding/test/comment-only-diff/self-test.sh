@@ -99,7 +99,11 @@ run_case tf-code-changed       1         'printf "resource \"x\" \"y\" {\n  life
 run_case tf-trailing-comment   1         'sed -i "s/{}/{} # note/" tf/main.tf'
 run_case tf-block-comment      1         'printf "/* c */\n" >> tf/main.tf'
 run_case tf-heredoc            1         'printf "locals {\n  s = <<EOT\n# x\nEOT\n}\n" >> tf/main.tf; git add -A; git commit -q -m h; git tag -f base >/dev/null; printf "# y\n" >> tf/main.tf'
-run_case tf-lockfile           1         'printf "# lock\n" > tf/.terraform.lock.hcl; git add -A; git commit -q -m l; git tag -f base >/dev/null; printf "# comment\n" >> tf/.terraform.lock.hcl'
+# Inside a /* */ block a `#` means nothing, so a `#` line can close the block:
+# editing it moves the block's end and comments out code with every
+# non-comment line unchanged. Any block-comment marker on either side: refused.
+run_case tf-hash-in-block      1         'printf "/* a\n# */\nlocals { p = true }\n/* b */\n" >> tf/main.tf; git add -A; git commit -q -m b; git tag -f base >/dev/null; sed -i "s|^# \*/$|#|" tf/main.tf'
+run_case tf-lockfile          1         'printf "# lock\n" > tf/.terraform.lock.hcl; git add -A; git commit -q -m l; git tag -f base >/dev/null; printf "# comment\n" >> tf/.terraform.lock.hcl'
 # A comment a tool reads as a suppression directive weakens a check: it is
 # not "only a comment". Adding one is NOT covered; removing one is.
 run_case yaml-suppress-added   1         'sed -i "s/^jobs:/# zizmor: ignore[unpinned-uses]\njobs:/" .github/workflows/ci.yml'

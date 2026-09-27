@@ -43,8 +43,9 @@ def usage
                       SKILL.md, *.md.in, anything under .claude/ or ai/
       .tf .tfvars .hcl  non-comment lines equal (whole-line `#`/`//` comments
                       and blank lines dropped), THEN a no-change terraform
-                      plan; a trailing or block comment, a heredoc, or
-                      .terraform.lock.hcl is NOT covered
+                      plan; a trailing comment, .terraform.lock.hcl, or a
+                      file with a heredoc or a /* */ marker on either side
+                      is NOT covered
       anything else   NOT covered (no comment-stripping parser)
     A comment that adds a check-suppression directive (credo:disable,
     sobelow_skip, tfsec:ignore, checkov:skip, zizmor: ignore, nosemgrep,
@@ -157,11 +158,13 @@ end
 
 # Terraform/HCL, conservatively. Drop blank lines and WHOLE-LINE `#` / `//`
 # comments; everything else must be byte-identical. HCL quoted strings cannot
-# span lines, so outside a heredoc such a line is always a comment. A heredoc
-# (`<<`) could hold a `#` line that is content, so a file with one is not
-# judged. A trailing comment or a `/* */` block counts as a changed line.
+# span lines, so outside a heredoc or a block comment such a line is always a
+# comment. The line test cannot see either context: a heredoc (`<<`) could
+# hold a `#` line that is content, and inside `/* */` a `#` means nothing, so
+# a `#` line can hold the `*/` that ends the block. A file with either marker,
+# on either side, is not judged. A trailing comment counts as a changed line.
 def hcl_code_lines(text)
-  return nil if text.include?("<<")
+  return nil if text.include?("<<") || text.include?("/*") || text.include?("*/")
 
   text.lines.map(&:rstrip).reject { |l| l.strip.empty? || l.lstrip.start_with?("#", "//") }
 end
@@ -257,7 +260,7 @@ entries.each do |e|
     results << if File.basename(path) == ".terraform.lock.hcl"
                  ["NOT-COVERED", path, "provider lock file: a change pins providers, which no plan shows"]
                elsif a.nil? || b.nil?
-                 ["NOT-COVERED", path, "terraform heredoc: no safe comment check"]
+                 ["NOT-COVERED", path, "terraform heredoc or /* */ block comment: no safe comment check"]
                elsif a != b
                  ["NOT-COVERED", path, "terraform non-comment lines changed (a no-change plan cannot prove a comment-only edit)"]
                else

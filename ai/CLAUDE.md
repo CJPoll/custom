@@ -320,8 +320,9 @@ by name.
   change is whole-line `#` or `//` comments. Then `terraform plan
   -detailed-exitcode` must exit 0 (no changes) in every affected root: a
   no-change plan alone does not prove a comment-only edit, since removing
-  `prevent_destroy` or a `moved` block plans nothing. A trailing or block
-  comment, a heredoc, or `.terraform.lock.hcl` is not covered. Exit
+  `prevent_destroy` or a `moved` block plans nothing. A trailing comment,
+  `.terraform.lock.hcl`, or a file with a heredoc or a `/* */` block comment
+  on either side is not covered: the line test cannot see inside them. Exit
   1, 2 or 3 means not covered. It refuses a diff that edits the verifier itself.
 - **What does not count.** Any non-comment line. A file type the check has no
   parser for (shell, Dockerfile, Ruby, and so on). A new or deleted code file. A
