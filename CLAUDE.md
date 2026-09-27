@@ -889,7 +889,10 @@ checkout's working tree, with a `Fix:` naming the worktree to use:
   itself is allowed with a visible warning and a log line in
   `$XDG_STATE_HOME/athena/worktree-escape-guard.log`. Empty stdin, a command
   it cannot parse (`unparsed`), and a target it cannot resolve
-  (`unresolved`) are allowed with a log line and no warning.
+  (`unresolved`) are allowed with a log line and no warning. A wrapper
+  (`env`, `timeout`, `sudo`, …; the header lists them) is parsed from its full
+  option table. An option missing from that table, or an `env -S` string that
+  does not split, is logged `unparsed` and also warned about visibly.
 - **It is not a sandbox.** It models the forms agents type. A write shape it
   does not model passes with no log line; the hook's header gives examples
   (an interpreter, a heredoc fed to a shell, `xargs`, `eval`, a variable not

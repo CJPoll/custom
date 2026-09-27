@@ -39,7 +39,9 @@
 #   * Edit/Write/MultiEdit/NotebookEdit of a path git does not ignore.
 #   * Bash: a git subcommand in GIT_MUTATING (those that rewrite the working
 #     tree or index, or switch or reset HEAD; `update-ref` / `symbolic-ref`
-#     are not listed) run there (cwd,
+#     are not listed; nor is `stash`, which does rewrite the working tree:
+#     ai/hooks/git-stash-guard.sh denies every agent stash write, anywhere)
+#     run there (cwd,
 #     -C, --work-tree, or a `cd` earlier in the same command); a redirection,
 #     tee, sed -i, cp/mv/install/ln destination, mv source, rm, touch or
 #     truncate on a path git does not ignore.
@@ -52,8 +54,16 @@
 #
 # PARSED: `;` `&&` `||` `|` `&` newlines, subshells, `$( )` and backticks,
 # reserved words (`if/then/do/{/!`), heredocs, `sh|bash|zsh|dash -c SCRIPT`
-# (recursively), env/timeout/command-style wrappers, cd/pushd/popd, and git
-# `--output`/`-o` files.
+# (recursively), cd/pushd/popd, git `--output`/`-o` files, and these
+# wrappers, each with its whole option table in WRAPPER_OPTS: env, timeout,
+# nice, stdbuf, time, command, exec, builtin, nohup, sudo, sudoedit, doas,
+# test-slot. Their value-taking options (short, clustered, attached, long,
+# `--long=v`, unique long prefixes) are skipped with their values; `env -C` /
+# `sudo -D` move the COMMAND's directory (not the shell's); `env -S STRING`
+# is split and its words parsed as env's own; `time -o`, `test-slot
+# --outcome-file` and `sudo -e`/`sudoedit` files are writes. An option not in
+# the table is read as a switch and warned about loudly (logged `unparsed`,
+# with Fix:), as is an `env -S` string that does not split.
 #
 # NOT A SANDBOX. The guard models the forms agents actually type; a write
 # shape it does not model passes WITHOUT a log line, and the list here is
@@ -108,7 +118,7 @@ if command -v jq >/dev/null 2>&1; then
   if [ "${TOOL}" = "Bash" ]; then
     CMD=$(printf '%s' "${INPUT}" | jq -r '.tool_input.command // empty' 2>/dev/null)
     case "${CMD}" in
-      *git*|*'>'*|*tee*|*sed*|*cp*|*mv*|*rm*|*touch*|*ln*|*install*|*truncate*) ;;
+      *git*|*'>'*|*tee*|*sed*|*cp*|*mv*|*rm*|*touch*|*ln*|*install*|*truncate*|*time*|*test-slot*|*sudo*) ;;
       *) exit 0 ;;
     esac
   fi
@@ -123,7 +133,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 PY=$(cat <<'PYEOF'
-import json, os, re, subprocess, sys, time
+import json, os, re, shlex, subprocess, sys, time
 
 HOME = os.environ.get("HOME", "")
 STATE = os.environ.get("XDG_STATE_HOME") or os.path.join(HOME, ".local", "state")
@@ -467,14 +477,149 @@ def expand(tok, env, cwd):
         return UNKNOWN
     return os.path.normpath(os.path.join(cwd, tok))
 
-WRAPPERS = {"command", "exec", "nohup", "time", "builtin", "stdbuf"}
 RESERVED = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}"}
 SHELLS = {"sh", "bash", "zsh", "dash"}
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
-def command_words(seg):
-    """Strip assignments and wrappers; return (words, assignments)."""
-    assigns, i = {}, 0
+# Every wrapper command_words strips, with its WHOLE option table. An option
+# that takes a value must be listed as one, or its value is read as the
+# command word (critic round 13: `env -u X git ...` ran "X"). Each spec:
+#   short: {letter: True if it takes a value}
+#   long:  {--name: (key, True value | False switch | "opt" only as --name=v)}
+#   stop:  keys after which option parsing stops (env -S splices its value)
+#   numeric: `-N` is a switch (nice's legacy adjustment)
+# Keys are the short letter where one exists. GNU long options may be
+# abbreviated to any unique prefix, so an abbreviation resolves too.
+# Sources: GNU coreutils 9 env/timeout/nice/stdbuf, GNU time, bash builtins
+# (command/exec/builtin/time), sudo 1.9, OpenBSD doas, ai/bin/test-slot.
+WRAPPER_OPTS = {
+    "env": {"short": {"i": False, "0": False, "v": False, "u": True, "C": True, "S": True},
+            "long": {"--ignore-environment": ("i", False), "--null": ("0", False), "--debug": ("v", False),
+                     "--unset": ("u", True), "--chdir": ("C", True), "--split-string": ("S", True),
+                     "--block-signal": ("block-signal", "opt"), "--default-signal": ("default-signal", "opt"),
+                     "--ignore-signal": ("ignore-signal", "opt"),
+                     "--list-signal-handling": ("list-signal-handling", False),
+                     "--help": ("help", False), "--version": ("version", False)},
+            "stop": {"S"}},
+    "timeout": {"short": {"s": True, "k": True, "v": False, "p": False},
+                "long": {"--signal": ("s", True), "--kill-after": ("k", True), "--verbose": ("v", False),
+                         "--preserve-status": ("p", False), "--foreground": ("foreground", False),
+                         "--help": ("help", False), "--version": ("version", False)}},
+    "nice": {"short": {"n": True},
+             "long": {"--adjustment": ("n", True), "--help": ("help", False), "--version": ("version", False)},
+             "numeric": True},
+    "stdbuf": {"short": {"i": True, "o": True, "e": True},
+               "long": {"--input": ("i", True), "--output": ("o", True), "--error": ("e", True),
+                        "--help": ("help", False), "--version": ("version", False)}},
+    "time": {"short": {"p": False, "a": False, "v": False, "q": False, "o": True, "f": True},
+             "long": {"--portability": ("p", False), "--append": ("a", False), "--verbose": ("v", False),
+                      "--quiet": ("q", False), "--output": ("o", True), "--format": ("f", True),
+                      "--help": ("help", False), "--version": ("version", False)}},
+    "command": {"short": {"p": False, "v": False, "V": False}, "long": {}},
+    "exec": {"short": {"c": False, "l": False, "a": True}, "long": {}},
+    "builtin": {"short": {}, "long": {}},
+    "nohup": {"short": {}, "long": {"--help": ("help", False), "--version": ("version", False)}},
+    "sudo": {"short": {"A": False, "b": False, "B": False, "E": False, "e": False, "H": False, "i": False,
+                       "K": False, "k": False, "l": False, "n": False, "N": False, "P": False, "S": False,
+                       "s": False, "V": False, "v": False, "h": "opt",
+                       "C": True, "D": True, "g": True, "p": True, "R": True, "r": True, "T": True,
+                       "t": True, "U": True, "u": True},
+             "long": {"--askpass": ("A", False), "--background": ("b", False), "--bell": ("B", False),
+                      "--preserve-env": ("E", "opt"), "--edit": ("e", False), "--set-home": ("H", False),
+                      "--login": ("i", False), "--remove-timestamp": ("K", False),
+                      "--reset-timestamp": ("k", False), "--list": ("l", False),
+                      "--non-interactive": ("n", False), "--no-update": ("N", False),
+                      "--preserve-groups": ("P", False), "--stdin": ("S", False), "--shell": ("s", False),
+                      "--version": ("V", False), "--validate": ("v", False), "--help": ("help", False),
+                      "--host": ("h", True), "--close-from": ("C", True), "--chdir": ("D", True),
+                      "--group": ("g", True), "--prompt": ("p", True), "--chroot": ("R", True),
+                      "--role": ("r", True), "--command-timeout": ("T", True), "--type": ("t", True),
+                      "--other-user": ("U", True), "--user": ("u", True)}},
+    "doas": {"short": {"n": False, "s": False, "L": False, "u": True, "C": True}, "long": {}},
+    "test-slot": {"short": {},
+                  "long": {"--label": ("label", True), "--wait-timeout": ("wait-timeout", True),
+                           "--outcome-file": ("outcome-file", True), "--exclusive": ("exclusive", False),
+                           "--status": ("status", False), "--json": ("json", False),
+                           "--help": ("help", False), "--self-test": ("self-test", False)}},
+}
+WRAPPER_OPTS["sudoedit"] = WRAPPER_OPTS["sudo"]
+
+def unknown_option(base, opt, cmd):
+    msg = ("`%s` option %s is not in its option table, so it was read as a switch; if it takes "
+           "a value, the command word after it was misread and this call may NOT have been checked "
+           "for a main-checkout write. Fix: add %s to WRAPPER_OPTS[%r] in "
+           "ai/hooks/worktree-escape-guard.sh, or drop it from the command" % (base, opt, opt, base))
+    log("unparsed", "%s in: %s" % (msg, cmd[:300]))
+    WARNINGS.append(msg)
+
+def parse_opts(base, words, cmd):
+    """Consume `base`'s options from words. Returns ([(key, value)], rest)."""
+    spec, opts = WRAPPER_OPTS[base], []
+    longs = spec["long"]
+    while words:
+        w = words[0]
+        if w == "--":
+            return opts, words[1:]
+        if not w.startswith("-") or w == "-":
+            return opts, words
+        if spec.get("numeric") and re.match(r"^--?[0-9]+$", w):
+            opts.append(("adjustment", w))
+            words = words[1:]
+            continue
+        if w.startswith("--"):
+            name, eq, val = w.partition("=")
+            hits = [name] if name in longs else [n for n in longs if n.startswith(name)]
+            if len(hits) != 1:
+                unknown_option(base, name, cmd)
+                words = words[1:]
+                continue
+            key, takes = longs[hits[0]]
+            if takes is True and not eq:
+                opts.append((key, words[1] if len(words) > 1 else None))
+                words = words[2:]
+            else:
+                opts.append((key, val if eq else None))
+                words = words[1:]
+            if key in spec.get("stop", ()):
+                return opts, words
+            continue
+        cluster, words, j = w[1:], words[1:], 0
+        while j < len(cluster):
+            c = cluster[j]
+            takes = spec["short"].get(c)
+            if takes is None:
+                unknown_option(base, "-" + c, cmd)
+                j += 1
+                continue
+            if takes is False:
+                opts.append((c, None))
+                j += 1
+                continue
+            rest = cluster[j + 1:]
+            if rest or takes == "opt":
+                opts.append((c, rest or None))
+            else:
+                opts.append((c, words[0] if words else None))
+                words = words[1:]
+            if c in spec.get("stop", ()):
+                return opts, words
+            break
+    return opts, words
+
+def chdir(value, env, cwd):
+    """A wrapper's change of directory (env -C, sudo -D): the command's cwd."""
+    nd = expand(value, env, cwd) if value is not None else UNKNOWN
+    return UNKNOWN if nd is UNKNOWN else os.path.realpath(nd)
+
+def command_words(seg, env=None, cwd=UNKNOWN, cmd=""):
+    """Strip assignments, reserved words and wrappers.
+
+    Returns (words, assignments, command_cwd, writes). command_cwd is the
+    directory the command runs in (a wrapper may change it: env -C DIR, sudo
+    -D DIR); writes are (path token, cwd) pairs a wrapper itself writes
+    (time -o FILE, test-slot --outcome-file FILE, sudo -e FILE...)."""
+    env = env if env is not None else {}
+    assigns, writes, i = {}, [], 0
     while i < len(seg) and ASSIGN.match(seg[i]):
         k, v = seg[i].split("=", 1)
         assigns[k] = v
@@ -486,30 +631,55 @@ def command_words(seg):
             words = words[1:]
             continue
         base = os.path.basename(words[0])
-        if base == "env":
-            words = words[1:]
-            while words and (words[0].startswith("-") or ASSIGN.match(words[0])):
-                words = words[1:]
-        elif base == "nice":
-            words = words[1:]
-            while words and words[0].startswith("-"):
-                words = words[2:] if words[0] in ("-n", "--adjustment") else words[1:]
-        elif base == "timeout":
-            words = words[1:]
-            while words and words[0].startswith("-"):
-                words = words[2:] if words[0] in ("-s", "-k", "--signal", "--kill-after") else words[1:]
-            words = words[1:]
-        elif base == "test-slot":
-            words = words[words.index("--") + 1:] if "--" in words else []
-        elif base in WRAPPERS:
-            words = words[1:]
-            while words and words[0].startswith("-"):
-                words = words[1:]
-        elif base == "sudo":
-            return [], assigns
-        else:
+        if base not in WRAPPER_OPTS:
             break
-    return words, assigns
+        words = words[1:]
+        if base == "env":
+            while True:
+                if words[:1] == ["-"]:  # `env -` is `env -i`
+                    words = words[1:]
+                    continue
+                opts, words = parse_opts("env", words, cmd)
+                split = None
+                for key, val in opts:
+                    if key == "C":
+                        cwd = chdir(val, env, cwd)
+                    elif key == "S":
+                        split = val
+                if split is None:
+                    break
+                try:
+                    words = shlex.split(split, comments=True) + words
+                except ValueError as e:
+                    msg = ("could not split the `env -S` string (%s), so the command it runs was NOT "
+                           "checked for a main-checkout write. Fix: pass the command to env as separate "
+                           "words instead of one -S string" % e)
+                    log("unparsed", "%s in: %s" % (msg, cmd[:300]))
+                    WARNINGS.append(msg)
+                    return [], assigns, cwd, writes
+            while words and ASSIGN.match(words[0]):
+                words = words[1:]
+            continue
+        opts, words = parse_opts(base, words, cmd)
+        keys = dict(opts)
+        if base == "timeout":
+            words = words[1:]  # the DURATION
+        elif base == "time" and "o" in keys:
+            writes.append((keys["o"], cwd))
+        elif base == "test-slot" and "outcome-file" in keys:
+            writes.append((keys["outcome-file"], cwd))
+        elif base in ("sudo", "sudoedit"):
+            if "R" in keys:
+                log("unresolved", "sudo --chroot %s: every path is relative to it, in: %s" % (keys["R"], cmd[:300]))
+                return [], assigns, UNKNOWN, writes
+            if "D" in keys:
+                cwd = chdir(keys["D"], env, cwd)
+            while words and ASSIGN.match(words[0]):
+                words = words[1:]
+            if base == "sudoedit" or "e" in keys:
+                writes.extend((w, cwd) for w in words)
+                return [], assigns, cwd, writes
+    return words, assigns, cwd, writes
 
 GIT_MUTATING = {"add", "rm", "mv", "commit", "restore", "reset", "checkout", "switch", "clean",
                 "rebase", "cherry-pick", "revert", "am", "apply", "merge", "pull", "bisect",
@@ -695,7 +865,15 @@ def check_bash(cmd, data, act, cwd=None, depth=0):
                 continue
             words.append(t)
             i += 1
-        words, assigns = command_words(words)
+        # ccwd: where THIS command runs. A wrapper may move it (env -C DIR);
+        # the shell's own cwd, which redirections use, does not move.
+        words, assigns, ccwd, wwrites = command_words(words, env, cwd, cmd)
+        for w, wcwd in wwrites:
+            p = expand(w, env, wcwd)
+            if p is UNKNOWN:
+                log("unresolved", "wrapper output %s in: %s" % (w, cmd[:300]))
+                continue
+            check_path(p, "the wrapper output `%s`" % w, data, act)
         if not words:
             env.update(assigns)
         elif words[0] == "export":
@@ -731,10 +909,10 @@ def check_bash(cmd, data, act, cwd=None, depth=0):
         if base in SHELLS:
             script = shell_c_script(words[1:])
             if script is not None and depth < 3:
-                check_bash(script, data, act, cwd, depth + 1)
+                check_bash(script, data, act, ccwd, depth + 1)
             continue
         if base == "git":
-            sub, sargs, tgt = git_target(words[1:], cwd, env)
+            sub, sargs, tgt = git_target(words[1:], ccwd, env)
             for w in git_output_targets(sub, sargs):
                 p = expand(w, env, tgt)  # UNKNOWN-safe
                 if p is UNKNOWN:
@@ -749,7 +927,7 @@ def check_bash(cmd, data, act, cwd=None, depth=0):
             continue
         if base:
             for w in shell_targets(words):
-                p = expand(w, env, cwd)
+                p = expand(w, env, ccwd)
                 if p is UNKNOWN:
                     log("unresolved", "%s target %s in: %s" % (base, w, cmd[:300]))
                     continue
@@ -779,6 +957,11 @@ def main():
         allow_warn("the checker crashed (%s: %s), so this call was NOT checked for a main-checkout write. "
                    "Fix: reproduce with this call's stdin and fix ai/hooks/worktree-escape-guard.sh."
                    % (type(e).__name__, str(e)[:200]), kind="crashed")
+    if WARNINGS:  # no deny fired, but part of the command was not modelled: say so
+        msg = "; ".join(dict.fromkeys(WARNINGS))
+        emit({"systemMessage": "worktree-escape-guard: " + msg,
+              "hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                     "additionalContext": "worktree-escape-guard: " + msg}})
     emit({})
 
 main()
