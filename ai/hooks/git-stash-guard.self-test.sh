@@ -909,22 +909,22 @@ case_cmd "QA7. docker --format with two templates" deny "docker ps --format '{{.
 case_cmd "QA11. gh api --jq .[]" deny "gh api repos/x/y/pulls --jq '.[] | .number'"
 case_cmd "QA13. sed with a bracket class and a group" deny "sed -E 's/[a-z]+ ([0-9]+)/\\1/' f"
 case_cmd "QA14. docker inspect -f range template" deny "docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' c"
-case_cmd "QA30. git read subcommand with a data pipe stays allowed" deny "git log --oneline -5 | awk '{print \$1}' | sort -u"
-case_cmd "QA31. gh pr view piped to jq stays allowed" deny "gh pr view 3 --json checks | jq '.checks[] | {n: .name}'"
-case_cmd "QA42. sed substitution with no e command stays allowed" deny "sed -E 's/[a-z]+ ([0-9]+)/\\1/g; /^\$/d' f"
+case_cmd "QA30. git read subcommand with a data pipe" deny "git log --oneline -5 | awk '{print \$1}' | sort -u"
+case_cmd "QA31. gh pr view piped to jq" deny "gh pr view 3 --json checks | jq '.checks[] | {n: .name}'"
+case_cmd "QA42. sed substitution with no e command" deny "sed -E 's/[a-z]+ ([0-9]+)/\\1/g; /^\$/d' f"
 case_ga "QA44. git branch -a piped to a grep -E alternation" deny "git branch -a | grep -E 'dnd-(52[0-9]|53[0-9]|813|820)'"
 case_ga "QA45. git branch --list with a pattern, then grep" deny "git branch --list 'dnd-*' | grep -E '[0-9]+ (a|b)'"
 case_ga "QA47. git worktree list piped to awk" deny "git worktree list | awk '{print \$1, \$3}'"
 case_ga "QA51. git log piped to grep with a class" deny "git log --oneline -20 | grep -E '[A-Z]+-[0-9]+: (fix|feat)'"
 case_ga "QA52. git remote -v piped to awk" deny "git remote -v | awk '{print \$2}' | sort -u"
 case_ga "QA53. git config --get-regexp piped to awk" deny "git config --get-regexp '^alias\\.' | awk '{print \$1}'"
-case_cmd "QA54. gh pr view with a jq filter stays allowed" deny "gh pr view 3 --json checks -q '.checks[] | {n: .name, s: .state}'"
-case_cmd "QA55. git tag --list piped to sort stays allowed" deny "git tag --list 'v*' | awk '{print \$1}' | sort -V"
-case_cmd "QA56. gh run view piped to a grep alternation stays allowed" deny "gh run view 5 --log | grep -E 'FAIL|(error|panic)[:]'"
-case_cmd "QA57. git -C <dir> log piped to awk stays allowed" deny "git -C /tmp/w log --oneline -5 | awk '{print \$1}'"
-case_cmd "QA58. git --no-pager log piped to a grep alternation stays allowed" deny "git --no-pager log --oneline | grep -E 'DND-(7[0-9]{2}|8[0-9]{2})'"
-case_cmd "QA63. rg with a regex alternation stays allowed" deny "rg -n 'foo\\(|bar[0-9]+' lib/"
-case_cmd "QA64. sort -k with a quoted separator stays allowed" deny "sort -t '|' -k2,2 f | awk -F'|' '{print \$2}'"
+case_cmd "QA54. gh pr view with a jq filter" deny "gh pr view 3 --json checks -q '.checks[] | {n: .name, s: .state}'"
+case_cmd "QA55. git tag --list piped to sort" deny "git tag --list 'v*' | awk '{print \$1}' | sort -V"
+case_cmd "QA56. gh run view piped to a grep alternation" deny "gh run view 5 --log | grep -E 'FAIL|(error|panic)[:]'"
+case_cmd "QA57. git -C <dir> log piped to awk" deny "git -C /tmp/w log --oneline -5 | awk '{print \$1}'"
+case_cmd "QA58. git --no-pager log piped to a grep alternation" deny "git --no-pager log --oneline | grep -E 'DND-(7[0-9]{2}|8[0-9]{2})'"
+case_cmd "QA63. rg with a regex alternation" deny "rg -n 'foo\\(|bar[0-9]+' lib/"
+case_cmd "QA64. sort -k with a quoted separator" deny "sort -t '|' -k2,2 f | awk -F'|' '{print \$2}'"
 case_cmd "QA67. git log --exclude= piped to awk" deny "git log --exclude=refs/tags/x --oneline | awk '{print \$1}'"
 case_cmd "QA69. wget -q -O report (no e in the bundle) beside a data payload" deny "wget -q -O report.html https://h/x && jq '.[] | .n' report.html"
 case_cmd "QA70. sort -t | -k with an awk payload" deny "sort -t '|' -k2 f | awk '{print \$2}'"
@@ -938,6 +938,16 @@ chmod +x .git/hooks/post-index-change; git status"
 # QL8: an interpreter string with a verb-hiding spelling is the documented
 # residual (allowed); the verb-naming spelling is QD6 (denied).
 case_cmd "QL8. residual: interpreter string hiding the verb (documented, allowed)" allow "python3 -c 'import os; os.system(\"true; /usr/libexec/git-core/git-st*sh\")'"
+
+# QX95-96: critic round 11. A path-qualified command word is a script or a
+# binary the guard will not vouch for, so the text is exec even when the
+# basename matches a pure-data tool.
+case_cmd "QX95. a planted ./jq runs a data payload" deny "printf x > ./jq; chmod +x ./jq; ./jq 'true; /usr/libexec/git-core/git-st*sh'"
+case_cmd "QX96. a path-qualified d/cat with a heredoc payload" deny "cat > d/cat <<'EOF'
+true; /usr/libexec/git-core/git-st*sh
+EOF
+chmod +x d/cat; d/cat x"
+case_cmd "QA71. an absolute-path data tool with a benign payload beside it" allow "/usr/bin/jq --version && echo done"
 
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).

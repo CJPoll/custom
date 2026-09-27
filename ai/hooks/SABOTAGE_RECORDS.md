@@ -782,9 +782,9 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   expansion findings (a glob command word with no or expanded arguments,
   an expanded subcommand, an unread config). Data mode fails closed: a text
   is data only when every command word in it is a known non-runner
-  (`safe_word()`; git, gh, glab and docker only in a read form; sed only
-  without an `e` command; no program-naming option) and no payload holds a
-  command substitution. Test arguments are data. A shell alias is not
+  (`safe_word()`: a tool that runs no program in any form; git, gh, glab,
+  docker, sed, rg, sort and wget are NOT on it — option A, critic round 10)
+  and no payload holds a command substitution. Test arguments are data. A shell alias is not
   re-expanded inside its own expansion. The deny text names no tool a
   captain lacks.
 - **Suite run:** `sh ai/hooks/git-stash-guard.self-test.sh`, new section Q
@@ -941,3 +941,17 @@ Self-test `RESULT: 551 passed, 0 failed`. One mutant copy each.
 | A-27 | Pure-data list gains git, gh, docker | 40 cases (QX19-QX76 git/gh/docker forms, QX90-QX93) — `511 passed, 40 failed` |
 | A-28 | Pure-data list gains sed, rg, sort, wget | QX57-QX61, QX77-QX80, QX85-QX89, QX92 and six flipped QA-A cases — `530 passed, 21 failed` |
 | A-29 | Pure-data list gains at, sg, tar, watchexec | QX36, QX37, QX39, QX40, QX42 — `546 passed, 5 failed` |
+| A-30 | The basename-strip is restored, so a path-qualified word reduces to its basename (critic round 11) | QX95 `./jq`, QX96 `d/cat` — `554 passed, 2 failed` |
+
+- **Round 11, path-qualified word + stale text.** The critic found that
+  `exec_text()` stripped a command word to its basename before the
+  pure-data check, so a planted `./jq` or `d/cat` read as a data tool.
+  Fix: a word holding `/` is a path (a script or a binary the guard will
+  not vouch for), so it is exec whatever its basename; the basename strip
+  is gone (row A-30, QX95/QX96). The critic also named three stale-text
+  spots left by option A (the SABOTAGE Domain bullet, the exec_text
+  comment, and the QA-A labels that still said "stays allowed" while
+  expecting deny); all are corrected. Its guardrail note -- that the
+  interpreter-string residual weakens vs base and needs a recorded OWNER
+  decision, not a session ruling -- is escalated to the owner (the residual
+  predates DND-799; option A only narrowed it).

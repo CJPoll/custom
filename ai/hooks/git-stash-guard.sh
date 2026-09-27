@@ -831,18 +831,20 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
       || t == "[\001" || t == "[\001[\001" || t == "{\001" || t == "}"
   }
   # exec_text(W, SB, UX, n): 1 when the text may run a string it holds:
-  # any command word safe_word() does not know (a runner, a script, a word
-  # built by expansion or glob, `.`), or a git/gh/glab/docker/sed/listed
-  # tool used in a form that runs a program. An earlier list of runner
-  # words anywhere in the text (critic round 1) was deleted in round 6:
-  # the fail-closed command-word check reaches every case it did.
+  # any command word that is not a bare pure-data tool. A word that holds a
+  # `/` is a path -- a script or a binary this guard will not vouch for, so
+  # it is exec even if its basename matches a data tool (`./cat`, `d/jq`;
+  # critic round 11). A bare word not on safe_word() is exec too (a runner,
+  # a script by name, a word built by expansion or glob, `.`, and every
+  # program-running tool: git, gh, docker, sed, rg, sort, wget). An earlier
+  # runner-word list (round 1) and per-tool read lists (rounds 4-8) were
+  # deleted (rounds 6 and 10): this fail-closed check reaches every case.
   function exec_text(W, SB, UX, n,    k, cp, t) {
     cp = 0
     for (k = 1; k <= n; k++) {
       cp = SB[k] || (cp && k > 1 && cmd_prefix(W[k - 1]))
       if (!cp || is_assign(W[k])) continue
-      t = W[k]; sub(/^.*\//, "", t)
-      if (!safe_word(t)) return 1
+      if (W[k] ~ /\// || !safe_word(W[k])) return 1
     }
     return 0
   }
