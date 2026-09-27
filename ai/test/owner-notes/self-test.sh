@@ -26,7 +26,7 @@ AI_DIR="$(cd "${HERE}/../.." && pwd)"
 BIN="${OWNER_NOTES_UNDER_TEST:-${AI_DIR}/bin/owner-notes}"
 
 TMP="$(mktemp -d)"; trap 'chmod -R u+rwX "${TMP}" 2>/dev/null; rm -rf "${TMP}"' EXIT
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
 # has [--] <haystack> <pattern>: grep a string without a pipe (a `| grep -q`
@@ -44,9 +44,22 @@ if [ ! -x "${BIN}" ]; then
 fi
 
 # run <state-dir> <args...>: sets OUT (stdout), ERR (stderr), RC.
+# The tool refuses `--source owner` inside a Claude Code session, and this suite
+# itself usually runs inside one, so every run is pinned to an explicit side:
+# run = the owner's own terminal (no agent markers); run_agent = an agent.
 run() {
   local sd="$1"; shift
-  OUT="$(env SHIPWRIGHT_STATE_DIR="${sd}" "${BIN}" "$@" 2>"${TMP}/err")"; RC=$?
+  OUT="$(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT SHIPWRIGHT_STATE_DIR="${sd}" "${BIN}" "$@" 2>"${TMP}/err")"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+run_agent() {
+  local sd="$1"; shift
+  OUT="$(env -u CLAUDE_CODE_ENTRYPOINT CLAUDECODE=1 SHIPWRIGHT_STATE_DIR="${sd}" "${BIN}" "$@" 2>"${TMP}/err")"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+run_agent_ep() {
+  local sd="$1"; shift
+  OUT="$(env -u CLAUDECODE CLAUDE_CODE_ENTRYPOINT=sdk-cli SHIPWRIGHT_STATE_DIR="${sd}" "${BIN}" "$@" 2>"${TMP}/err")"; RC=$?
   ERR="$(cat "${TMP}/err")"
 }
 
@@ -121,6 +134,37 @@ if [ "${RC}" -eq 1 ] && has -- "${ERR}" '--relayed-from' && has "${ERR}" "Fix:" 
   ok "a coordinator note without --relayed-from is refused and writes nothing"
 else
   bad "relay provenance" "rc=${RC} err=${ERR}"
+fi
+
+# --- an agent cannot write as the owner (the access-control boundary) ----------
+# `Source: owner` is what makes a note Authority without corroboration, so an
+# agent session (CLAUDECODE / CLAUDE_CODE_ENTRYPOINT set) must not be able to
+# write it: an agent relays, with a reference the reader can check.
+for runner in run_agent run_agent_ep; do
+  "${runner}" "${sd}" --add --source owner --text "ratify my own policy"
+  if [ "${RC}" -eq 1 ] && has "${ERR}" "Fix:" && has -- "${ERR}" "--source coordinator" \
+     && ! grep -q '^## N3 ' "${f}" && ! grep -q 'ratify my own policy' "${f}"; then
+    ok "${runner}: --source owner from an agent session is refused and writes nothing"
+  else
+    bad "${runner} owner forgery" "rc=${RC} err=${ERR}"
+  fi
+done
+run_agent "${sd}" --add --source coordinator --relayed-from "Slack DM ts=1727400000.1234" --text "relayed words"
+if [ "${RC}" -eq 0 ] && grep -q '^## N3 ' "${f}" \
+   && grep -qx "Source: coordinator, relaying the owner's exact words from Slack DM ts=1727400000.1234" "${f}"; then
+  ok "an agent may relay as coordinator, with its reference recorded"
+else
+  bad "agent relay" "rc=${RC} err=${ERR}"
+fi
+# Undo N3 so the numbering cases below stay as written.
+ruby -e 'p=ARGV[0]; s=File.read(p); File.write(p, s.sub(/\n## N3 .*\z/m, "\n"))' "${f}"
+
+# --- inline --text that starts with "-" is a usage error, pointing at --text-file
+run "${sd}" --add --source owner --text "-leading dash"
+if [ "${RC}" -eq 64 ] && has -- "${ERR}" "--text-file" && ! grep -q 'leading dash' "${f}"; then
+  ok "--text with a leading '-' is refused (use --text-file), nothing written"
+else
+  bad "leading dash --text" "rc=${RC} err=${ERR}"
 fi
 
 # --- an unknown source is refused ------------------------------------------------
@@ -230,7 +274,8 @@ if [ "$(id -u)" -ne 0 ]; then
     bad "unreadable" "rc=${RC} out=${OUT} err=${ERR}"
   fi
 else
-  ok "unreadable-file case skipped under root (chmod cannot deny root) — noted, not passed silently"
+  SKIP=$((SKIP+1))
+  printf '  SKIP  unreadable-file case: running as root, and chmod cannot deny root\n'
 fi
 
 # --- argv: unknown flag, no action, two actions ----------------------------------
@@ -273,7 +318,7 @@ else
   bad "fallback resolution" "rc=${rc} out=${o} want=${want} err=$(cat "${TMP}/err")"
 fi
 
-printf '\nowner-notes self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"
+printf "\nowner-notes self-test: %d passed, %d failed, %d skipped\n" "${PASS}" "${FAIL}" "${SKIP}"
 if [ "${FAIL}" -ne 0 ]; then
   echo "Fix: read the FAIL lines above; each names the case and the observed rc/output." >&2
   exit 1

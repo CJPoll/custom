@@ -450,9 +450,12 @@ across sessions — it is not a one-shot queue drain.
   owner's message channel to the cron ("When we find poor prioritization causes
   issues, we can leave messages for the shipwright cron to address it." — Cody,
   2026-09-27). Append with `ai/bin/owner-notes --add --source owner --text
-  "…"` (the coordinator relays the owner's exact words with `--source
-  coordinator --relayed-from <ref>`). The shipwright reads open notes first,
-  every run, treats one as `Authority:`, and flips it to `addressed: <commit>`.
+  "…"` from the owner's own terminal; the tool refuses `--source owner` inside
+  a Claude Code session, so an agent (the coordinator) relays the owner's exact
+  words with `--source coordinator --relayed-from <ref>`. The shipwright reads
+  open notes first, every run. An owner note is `Authority:`; a relay is, once
+  its words are found at the reference. A landed note flips to `addressed:
+  <commit>`.
   Rules and format: `ai/bin/owner-notes --help` and the shipwright template's
   *Where the evidence lives*.
 - **Install / restore / verify:** `scripts/setup-shipwright-cron` is the
