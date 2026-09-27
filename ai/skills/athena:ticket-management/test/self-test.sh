@@ -315,7 +315,12 @@ eq "the body sent is at most 2,000 characters" "$(jq -r 'select(.service == "ath
 spec triage.json '{"status":401,"body":{"error":"unauthorized"}}'
 run "${FINDING[@]}" --project harness --candidates-file "${TMP}/cands.json"
 eq "a rejected machine token exits 3" "${RC}" "3"
-has "it names the 401" "${OUT}" "COULD NOT REACH SERVER: the Athena server rejected the machine token (HTTP 401"
+has "a 401 is SERVER REFUSED, naming the owner-issued token" "${OUT}" "SERVER REFUSED THE REQUEST: HTTP 401 unauthorized: the machine token was rejected; it is owner-issued"
+lacks "a 401 is never could-not-reach" "${OUT}" "COULD NOT REACH SERVER"
+spec triage.json '{"status":200,"body":{"status":"maybe"}}'
+run "${FINDING[@]}" --project harness --candidates-file "${TMP}/cands.json"
+eq "a 200 outside the contract's shape exits 3" "${RC}" "3"
+has "it is its own line, not unreachable" "${OUT}" "UNREADABLE SERVER ANSWER: HTTP 200"
 
 # The server was reached and refused: its own line, with the server's Fix:.
 spec triage.json '{"status":422,"body":{"error":"unprocessable_entity","fix":"candidates[0].title is missing, blank or over 300 characters. Fix: send a short title."}}'

@@ -90,7 +90,6 @@ ai/skills/athena:merge-boarding/scripts/integration-gate	guard
 ai/skills/athena:merge-boarding/scripts/locked-merge	guard	
 ai/skills/athena:memory-maintenance/scripts/index-budget	guard	
 ai/skills/athena:slack/bin/read-inbox	guard	
-ai/skills/athena:ticket-management/scripts/finding-triage	guard	
 ai/skills/athena:slack/bin/channels	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:slack/bin/delete	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:slack/bin/dm	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
@@ -105,6 +104,7 @@ ai/skills/athena:slack/bin/update	tool	Slack Web API action wrapper; fails only 
 ai/skills/athena:slack/bin/upload	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:slack/bin/whoami	tool	Slack Web API action wrapper; fails only on a usage error that prints the expected argv, or on a Slack API error for the action
 ai/skills/athena:standup/scripts/standup-window.sh	tool	computes the standup time window; fails only on an unknown argument
+ai/skills/athena:ticket-management/scripts/finding-triage	guard	
 
 # --- scripts/: guards (deny, check, gate, or preflight).
 scripts/athena	guard

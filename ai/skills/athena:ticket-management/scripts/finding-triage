@@ -70,6 +70,7 @@ USAGE = <<~EOF
       "CANDIDATES UNAVAILABLE: <why>. #{UNAVAILABLE_FIX}"
       "COULD NOT REACH SERVER: <why>. #{UNAVAILABLE_FIX}"
       "SERVER REFUSED THE REQUEST: HTTP <status> <error>: <server fix>. #{UNAVAILABLE_FIX}"
+      "UNREADABLE SERVER ANSWER: ... #{UNAVAILABLE_FIX}"
 
   Exit codes:
     0  judged (including 0 candidates, and no duplicate found)
@@ -535,15 +536,18 @@ module Manager
       nil
     end
     status = reply[:status]
-    if status == 200 && doc.is_a?(Hash)
-      return doc if doc["status"] == "judged"
+    if status == 200
+      return doc if doc.is_a?(Hash) && doc["status"] == "judged"
 
-      judgments_unavailable!(safe_reason(doc["reason"])) if doc["status"] == "unavailable"
+      judgments_unavailable!(safe_reason(doc["reason"])) if doc.is_a?(Hash) && doc["status"] == "unavailable"
+      # Reached, answered 200, but not in the contract's shape: its own line.
+      raise Failure.new(3, "UNREADABLE SERVER ANSWER: HTTP 200 with no judged or unavailable status. #{UNAVAILABLE_FIX}")
     end
-    server_unreachable!("the Athena server rejected the machine token (HTTP 401; the token is owner-issued)") if status == 401
     error = doc.is_a?(Hash) && doc["error"].is_a?(String) ? safe_reason(doc["error"]) : nil
     # A 4xx means the server was reached and refused: never "could not reach".
-    # Its fix names a field and position, never the caller's text.
+    # Its fix names a field and position, never the caller's text. A 401 is
+    # the machine token (owner-issued; never mint one).
+    server_refused!(status, error, "the machine token was rejected; it is owner-issued, never mint one") if status == 401
     server_refused!(status, error, safe_fix(doc)) if (400..499).cover?(status)
     server_unreachable!("the Athena server answered HTTP #{status}#{error ? " #{error}" : ''}")
   end

@@ -390,8 +390,10 @@ athena:ticket-management → *Before filing a finding*.
   eval-produced threshold for that label accepts. In mode `on` the severity is
   printed as an uncalibrated suggestion. Shadow mode prints no advice at all,
   severity included.
-- **A server that answered and refused** (a 4xx) prints its own line with the
-  server's `Fix:`, distinct from a server that could not be reached.
+- **A server that answered and refused** (any 4xx, a rejected machine token
+  included) prints its own line with the server's `Fix:`, distinct from a
+  server that could not be reached. A 200 outside this shape is its own
+  unreadable-answer line.
 - **Unavailable is an answer, not an error.** The server answers 200 with
   `status` `unavailable` and a reason from *The closed reason list*
   (`not_configured` for `mode_off` and `key_missing`). The script then exits 3
