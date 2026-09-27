@@ -605,7 +605,7 @@ recover after the file path has been down.
 
 ## Tests
 
-`bash test/self-test.sh` — 173 cases, no network (curl is a PATH shim). Covers
+`bash test/self-test.sh` — 180 cases, no network (curl is a PATH shim). Covers
 the ok:false convention, the token never reaching argv or a URL, request shapes,
 pagination, 429 backoff, the users cache, unreadable conversations, every branch
 of the hook and the inbox scan, the cross-source `seen_keys` dedupe (drop + add),
@@ -615,7 +615,12 @@ kind vocabulary, and `status`'s request shape, flag order and miss paths, and
 the thread claim (DND-491): the result parser, the per-reason `Fix:` texts, the
 inbox resolution (worktree, subdirectory, platform channel skipped, ambiguity),
 `claim-thread`'s request and failure lines, the machine token staying off argv
-and disk, and `post`/`dm`/`reply` claiming only the threads they start. Seven
+and disk, and `post`/`dm`/`reply` claiming only the threads they start, plus
+four negative tests added in a fix round: a registry with an unparseable OTHER
+entry (`registry-error`, never folded into `no-registry-entry`),
+`mcp_registered_url`'s internal-error status for a computed-wrong key, a
+cached identity missing `team_id` (not just `bot_id`), and claim-thread
+crashing or exiting a code it never documents. Seven
 text-presence cases keep the owner's decision-question rules in this file and
 the "your call" button in the worked example; they cannot check a sent message. `SABOTAGE_RECORDS.md` records the mutation that was watched to redden
 each of them.

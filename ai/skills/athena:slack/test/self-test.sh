@@ -1270,9 +1270,6 @@ for bin_path in "${BIN}"/*; do
   done
 done
 
-# 84. The owner's decision-question rules (2026-09-25) stay in the doctrine,
-#     and the worked example obeys them. A text-presence check only: it
-#     proves the rules were not dropped, not that a sent message follows them.
 echo
 echo "-- DND-491: claim the thread a post/dm starts ------------------------------"
 
@@ -1675,6 +1672,9 @@ if [[ "${RC}" == 3 ]] && [[ "$(head -n1 <<<"${OUT}")" == "ts=1.1 channel=${ENG_C
 else bad "post: claim-thread exiting an undocumented code (1) -> claim=FAILED reason=mcp-error:claim-thread-exit-1, Fix:, exit 3" \
   "rc=${RC} out='${OUT}' err='${ERR}'"; fi
 
+# 84. The owner's decision-question rules (2026-09-25) stay in the doctrine,
+#     and the worked example obeys them. A text-presence check only: it
+#     proves the rules were not dropped, not that a sent message follows them.
 DOCTRINE="${ROOT}/SKILL.md"
 EXAMPLE="$(dirname "${ROOT}")/athena:slack:interactive-messages/SKILL.md"
 for needle in "### Asking the owner for a decision" "5–15 words" \
