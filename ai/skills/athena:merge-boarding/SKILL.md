@@ -292,8 +292,20 @@ is green on that integrated head. It prints `INTEGRATION OK <sha> (GATE: <cmd>
 -- <source>)` — merge *that* SHA, and copy the line whole so the record says
 which gate ran (the same SHA-match discipline as the merge bar's "confirm the head
 you are landing is the one the report names"). Any other exit tells you what to
-do next. It never rebases or writes anything; a rebase can conflict and is your
-judgement call.
+do next. It never rebases or touches the working tree or a ref; a rebase can
+conflict and is your judgement call. Its one write is its **receipt**: on exit 0,
+and only then, it records the pass at
+`<git common dir>/integration-receipts/<head-sha>.json` (head, the target SHA it
+contained, gate and source, any override or owner approval, blast radius, the OK
+line, UTC time). Every other exit removes the receipt for that head, and a
+receipt it cannot write is exit 5 with no OK line. `locked-merge` requires the
+receipt (*Landing onto a moving main*).
+
+**Later (2026-09-27, DND-965):** this paragraph said the gate "never rebases or
+writes anything". Superseded: it now writes the receipt above. Without it, "the
+gate passed on this SHA" rested on the caller's word, and gen_saas #468 merged
+past a RED gate because a prep script printed READY without reading the exit
+code.
 
 **Green-alone is not green-merged.** Two MRs with entirely disjoint file sets
 can each pass the gate and fail together: the admiral's rendered-line budget is
@@ -353,7 +365,14 @@ So the merge step is a critical section on every GitHub-merged repo:
   `confirm-merged`, and asserts the landed commit's parent is the checked base
   and its tree is the gated tree. Its exit code names the next step (`--help`).
   It adds checks under the lock and replaces none: still run `integration-gate`
-  first, still merge one at a time. On gen_saas pass
+  first, still merge one at a time. Under the lock it also requires
+  `integration-gate`'s receipt for exactly `--head`, recorded against exactly
+  the base it re-checked (DND-965). With none it refuses before merging, exit 9,
+  and says which: `NO RECEIPT`, `RECEIPT UNREADABLE (COULD NOT LOOK)`,
+  `RECEIPT INVALID`, or `RECEIPT FOR ANOTHER BASE`. The fix is always to run
+  `integration-gate` on that head and merge the SHA its `INTEGRATION OK` names.
+  No flag or env var skips the receipt; an owner-approved HOT merge goes through
+  `integration-gate --owner-approval`, which the receipt records. On gen_saas pass
   `--require-idle-workflow post-merge.yml` until that workflow has a
   `concurrency` group (two interleaved deploys: the last one wins).
 - **Across machines:** a local lock cannot span machines. When admirals on more

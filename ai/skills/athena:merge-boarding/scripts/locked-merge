@@ -11,6 +11,15 @@
 # integration-gate still runs first, merges stay one at a time, gh-athena's
 # all-green refusal stays the green check, confirm-merged still runs.
 #
+# "integration-gate runs first" is ENFORCED, not trusted (DND-965). gen_saas
+# #468 merged past a RED gate because a prep script printed READY without
+# reading the exit code, and nothing here asked. Now the merge requires the
+# gate's own receipt for exactly --head, recorded against exactly the base
+# re-checked under the lock. There is deliberately no flag or env var that
+# skips it (~/dev/custom/CLAUDE.md -> "A check's own bar must not live in the
+# diff it is checking"); the only owner override is integration-gate's own
+# --owner-approval, which the receipt records.
+#
 # Doctrine: ai/skills/athena:merge-boarding/SKILL.md -> Landing onto a moving main.
 # Self-test: ai/skills/athena:merge-boarding/test/locked-merge/self-test.sh
 set -uo pipefail
@@ -32,10 +41,14 @@ Run integration-gate first; pass the SHA its INTEGRATION OK line names as
 path fleets already share) it:
   1. fetches origin and reads the PR (must be OPEN, head == --head);
   2. asserts origin/<base> is an ancestor of --head (else: re-gate);
-  3. optionally refuses while <workflow-file> has a queued/running run on <base>;
-  4. merges via gh-athena pr merge --squash --match-head-commit <head> (no --auto);
-  5. confirm-merged --pr <n> --fetch (bounded retry);
-  6. asserts the merge commit's parent == the checked base and its tree ==
+  3. requires integration-gate's RECEIPT for --head, at
+     <git common dir>/integration-receipts/<head>.json: verdict pass, head ==
+     --head, and recorded base == the origin/<base> SHA checked in step 2.
+     No flag skips this; integration-gate writes it only on INTEGRATION OK;
+  4. optionally refuses while <workflow-file> has a queued/running run on <base>;
+  5. merges via gh-athena pr merge --squash --match-head-commit <head> (no --auto);
+  6. confirm-merged --pr <n> --fetch (bounded retry);
+  7. asserts the merge commit's parent == the checked base and its tree ==
      the gated head's tree.
 
 Exit (every non-zero prints a Fix: line):
@@ -47,6 +60,9 @@ Exit (every non-zero prints a Fix: line):
   6 lock wait timed out; the lock is never broken (nothing landed)
   7 LANDED UNGATED: parent or tree mismatch -- re-gate origin/main now, report it
   8 merge ran but landing not confirmed -- investigate, do not retry blind
+  9 no usable integration-gate receipt for --head: NO RECEIPT, RECEIPT
+    UNREADABLE (COULD NOT LOOK), RECEIPT INVALID, or RECEIPT FOR ANOTHER
+    BASE -- run integration-gate on this head (nothing landed)
 EOF
 }
 
@@ -112,6 +128,7 @@ for t in gh-athena confirm-merged; do
 done
 command -v gh >/dev/null 2>&1 || die 2 "gh (read-only forge CLI) not on PATH" "install gh; reads use plain gh."
 command -v flock >/dev/null 2>&1 || die 2 "flock not on PATH" "install util-linux flock."
+command -v jq >/dev/null 2>&1 || die 2 "jq not on PATH" "install jq; the PR state and the integration-gate receipt are read with it."
 
 # ---- the critical section ----
 exec 9>>"${LOCK}"
@@ -145,6 +162,35 @@ git -C "${REPO}" merge-base --is-ancestor "${B}" "${HEAD_SHA}" \
   || die 3 "origin/${base} moved to ${B}, which the gated head ${HEAD_SHA} does not contain" \
        "merge origin/${base} forward, push, re-run integration-gate --since <old base>, wait for CI green on the new head, then re-run locked-merge."
 echo "BASE origin/${base} ${B} contained in ${HEAD_SHA}"
+
+# ---- the gate's receipt for exactly this head and base (DND-965) ----
+# Four outcomes, kept textually distinct, because "the gate never passed" and
+# "I could not read whether it did" call for different next steps and must
+# never read the same (~/dev/custom/ai/CLAUDE.md -> "A failed lookup must never
+# look like an empty one"). All four refuse before the merge call.
+R_STORE="${COMMON}/integration-receipts"
+RECEIPT="${R_STORE}/${HEAD_SHA}.json"
+REGATE="run integration-gate on this head (from any checkout of this repo, with origin/${base} at ${B}); merge the SHA its INTEGRATION OK line names."
+if [ -e "${R_STORE}" ] && { [ ! -d "${R_STORE}" ] || [ ! -r "${R_STORE}" ] || [ ! -x "${R_STORE}" ]; }; then
+  die 9 "RECEIPT UNREADABLE (COULD NOT LOOK): the receipt store ${R_STORE} exists but cannot be searched, so whether integration-gate passed ${HEAD_SHA} is unknown -- not the same as no receipt" \
+    "repair the permissions on ${R_STORE} (ls -ld '${R_STORE}'), then re-run; if the receipt is still missing, ${REGATE}"
+fi
+if [ ! -e "${RECEIPT}" ]; then
+  if [ -d "${R_STORE}" ]; then where="the store exists; it holds no receipt for this head"; else where="the store does not exist yet"; fi
+  die 9 "NO RECEIPT: integration-gate has recorded no pass for ${HEAD_SHA} (looked for ${RECEIPT}; ${where}). A RED, refused, or never-run gate leaves none" \
+    "${REGATE}"
+fi
+r_fields="$(jq -er '[.schema, .verdict, .head, .base, (.target_ref // ""), (.recorded_at // "")] | map(tostring) | @tsv' "${RECEIPT}" 2>/dev/null)" \
+  || die 9 "RECEIPT UNREADABLE (COULD NOT LOOK): ${RECEIPT} exists but is not a readable receipt (unreadable file or malformed JSON)" \
+       "inspect it (cat '${RECEIPT}'); then ${REGATE}"
+IFS=$'\t' read -r r_schema r_verdict r_head r_base r_target r_at <<<"${r_fields}"
+[ "${r_schema}" = "integration-receipt/1" ] && [ "${r_verdict}" = "pass" ] && [ "${r_head}" = "${HEAD_SHA}" ] \
+  || die 9 "RECEIPT INVALID: ${RECEIPT} is not a pass for ${HEAD_SHA} (schema '${r_schema}', verdict '${r_verdict}', head '${r_head}')" \
+       "${REGATE}"
+[ "${r_base}" = "${B}" ] \
+  || die 9 "RECEIPT FOR ANOTHER BASE: integration-gate passed ${HEAD_SHA} against ${r_base} (${r_target}, ${r_at}), but origin/${base} is ${B} under the lock" \
+       "${REGATE}"
+echo "RECEIPT ${RECEIPT} base ${B} recorded ${r_at}"
 
 if [ -n "${IDLE_WF}" ]; then
   busy="$(cd "${REPO}" && gh run list --workflow "${IDLE_WF}" --branch "${base}" --json status \

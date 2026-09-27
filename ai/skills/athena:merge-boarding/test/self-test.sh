@@ -533,6 +533,102 @@ grep -q 'Fix:' <<<"$out" && ok "c23 carries a Fix: line" || bad "c23 missing Fix
 grep -q '(empty -- incoming delta is outside your reviewed file set)' <<<"$out" && bad "c23 misreported the failure as an empty intersection" "$out" || ok "c23 does not misreport the failure as empty"
 [ ! -f "${R}/GATE_RAN" ] && ok "c23 does not run the gate past an unmeasurable file set" || bad "c23 ran the gate despite the git-diff failure"
 
+# ---------------------------------------------------------------- case 24
+# DND-965: a pass leaves a per-SHA RECEIPT in the repo's git COMMON dir, the
+# record locked-merge requires before it merges. Before this, INTEGRATION OK
+# was stdout only, so "the gate passed on this SHA" rested on the caller's word
+# (gen_saas #468 merged past a RED gate). The receipt records what locked-merge
+# re-checks (head, base) and what the state log needs (gate, source, overrides,
+# blast radius, time). Run from a LINKED worktree: the receipt must land in the
+# common dir, where every checkout of the repo finds it.
+receipt_of() { printf '%s/integration-receipts/%s.json' "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir)" "$2"; }
+R="${TMP}/c24"; new_repo "$R"
+( cd "$R" && echo m > m.txt && git add m.txt && git commit -qm m && git worktree add -q -b feature "${TMP}/c24-wt" )
+W="${TMP}/c24-wt"
+( cd "$W" && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${TMP}/c24-GATE_RAN" "${TMP}/c24-g.sh"
+record_pass "$W"
+head_sha="$( cd "$W" && git rev-parse HEAD )"; main_sha="$( cd "$R" && git rev-parse main )"
+out="$( cd "$W" && "$GATE" --target main --no-fetch --gate "${TMP}/c24-g.sh" 2>&1 )"; rc=$?
+rf="${R}/.git/integration-receipts/${head_sha}.json"
+[ "$rc" -eq 0 ] && ok "c24 exit 0" || bad "c24 expected exit 0, got $rc" "$out"
+[ "$(receipt_of "$W" "$head_sha")" = "$rf" ] && ok "c24 a linked worktree resolves the MAIN common dir" || bad "c24 common dir mismatch" "$(receipt_of "$W" "$head_sha")"
+if [ -f "$rf" ]; then
+  ok "c24 receipt written at <common>/integration-receipts/<head>.json"
+  [ "$(jq -r '.schema' "$rf")" = "integration-receipt/1" ] && ok "c24 schema integration-receipt/1" || bad "c24 schema" "$(cat "$rf")"
+  [ "$(jq -r '.verdict' "$rf")" = "pass" ] && ok "c24 verdict pass" || bad "c24 verdict" "$(cat "$rf")"
+  [ "$(jq -r '.head' "$rf")" = "$head_sha" ] && ok "c24 head is the gated SHA" || bad "c24 head" "$(cat "$rf")"
+  [ "$(jq -r '.base' "$rf")" = "$main_sha" ] && ok "c24 base is the target SHA contained" || bad "c24 base" "$(cat "$rf")"
+  [ "$(jq -r '.target_ref' "$rf")" = "main" ] && ok "c24 target_ref recorded" || bad "c24 target_ref" "$(cat "$rf")"
+  [ "$(jq -r '.gate' "$rf")" = "${TMP}/c24-g.sh" ] && ok "c24 gate command recorded" || bad "c24 gate" "$(cat "$rf")"
+  jq -e '.gate_source | test("caller-supplied")' "$rf" >/dev/null && ok "c24 gate source recorded" || bad "c24 gate_source" "$(cat "$rf")"
+  jq -e '.blast_radius | startswith("BLAST-RADIUS ")' "$rf" >/dev/null && ok "c24 blast-radius verdict recorded" || bad "c24 blast_radius" "$(cat "$rf")"
+  jq -e '.recorded_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")' "$rf" >/dev/null && ok "c24 UTC timestamp recorded" || bad "c24 recorded_at" "$(cat "$rf")"
+  jq -e '.critic_override == null and .owner_approval == null' "$rf" >/dev/null && ok "c24 no override recorded when none passed" || bad "c24 overrides" "$(cat "$rf")"
+  jq -e --arg l "$(grep '^INTEGRATION OK' <<<"$out")" '.integration_ok_line == $l' "$rf" >/dev/null && ok "c24 receipt carries the INTEGRATION OK line verbatim" || bad "c24 integration_ok_line" "$(cat "$rf")"
+  [ -z "$(find "${R}/.git/integration-receipts" -name '*.tmp*' 2>/dev/null)" ] && ok "c24 no temp file left behind (atomic write)" || bad "c24 temp file left"
+else
+  bad "c24 no receipt at ${rf}" "$out"
+fi
+[ -z "$(cd "$W" && git status --porcelain)" ] && ok "c24 receipt is outside the working tree" || bad "c24 receipt dirtied the tree" "$(cd "$W" && git status --porcelain)"
+
+# ---------------------------------------------------------------- case 25
+# A RED gate leaves NO passing receipt -- and a pass recorded by an earlier run
+# on the same SHA does not survive it (the reported #468 shape).
+R="${TMP}/c25"; new_repo "$R"
+stub_gate_pair "${R}/g.sh"
+( cd "$R" && echo a > a.txt && git add a.txt && git commit -qm a \
+  && git checkout -qb feature && echo b > b.txt && git add b.txt && git commit -qm b )
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+mkdir -p "$(dirname "$rf")"; printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s"}\n' "$head_sha" > "$rf"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 1 ] && ok "c25 exit 1 (gate RED)" || bad "c25 expected exit 1, got $rc" "$out"
+[ -e "$rf" ] && bad "c25 a passing receipt survived a RED gate" "$(cat "$rf")" || ok "c25 RED gate removed the stale receipt"
+
+# ---------------------------------------------------------------- case 26
+# A REFUSED run (branch behind the target, exit 2) also removes a stale pass.
+R="${TMP}/c26"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f \
+  && git checkout -q main && echo m > m.txt && git add m.txt && git commit -qm m && git checkout -q feature )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+mkdir -p "$(dirname "$rf")"; printf '{"schema":"integration-receipt/1","verdict":"pass","head":"%s"}\n' "$head_sha" > "$rf"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+[ "$rc" -eq 2 ] && ok "c26 exit 2 (behind target)" || bad "c26 expected exit 2, got $rc" "$out"
+if [ -e "$rf" ]; then bad "c26 a passing receipt survived a refused run"; else ok "c26 refused run removed the stale receipt"; fi
+
+# ---------------------------------------------------------------- case 27
+# A --critic-override is recorded in the receipt, with the state it overrode.
+R="${TMP}/c27"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+head_sha="$( cd "$R" && git rev-parse HEAD )"; rf="$(receipt_of "$R" "$head_sha")"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" --critic-override 'model down 3x' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "c27 exit 0 under --critic-override" || bad "c27 expected exit 0, got $rc" "$out"
+jq -e '.critic_override == "model down 3x" and (.critic_override_state | test("NO RECEIPT"))' "$rf" >/dev/null 2>&1 \
+  && ok "c27 override reason and state recorded" || bad "c27 override not recorded" "$(cat "$rf" 2>&1)"
+
+# ---------------------------------------------------------------- case 28
+# A receipt that cannot be written is a FAILURE, never INTEGRATION OK: a pass
+# locked-merge cannot find is a merge it will refuse, so success must not be
+# announced ahead of the side effect it promises.
+R="${TMP}/c28"; new_repo "$R"
+( cd "$R" && git checkout -qb feature && echo f > f.txt && git add f.txt && git commit -qm f )
+stub_gate_green "${R}/GATE_RAN" "${R}/g.sh"
+record_pass "$R"
+mkdir -p "${R}/.git/integration-receipts"; chmod 555 "${R}/.git/integration-receipts"
+out="$( cd "$R" && "$GATE" --target main --no-fetch --gate "${R}/g.sh" 2>&1 )"; rc=$?
+chmod 755 "${R}/.git/integration-receipts"
+[ "$rc" -eq 5 ] && ok "c28 exit 5 when the receipt cannot be written" || bad "c28 expected exit 5, got $rc" "$out"
+grep -q '^INTEGRATION OK' <<<"$out" && bad "c28 printed INTEGRATION OK with no receipt" "$out" || ok "c28 no INTEGRATION OK without a receipt"
+grep -q '^Fix:' <<<"$out" && ok "c28 carries a Fix: line" || bad "c28 missing Fix:" "$out"
+
+# ---------------------------------------------------------------- case 29
+# --help documents the receipt and exit 5.
+hout="$("$GATE" --help 2>/dev/null)"
+grep -q 'integration-receipts' <<<"$hout" && ok "c29 --help names the receipt store" || bad "c29 --help lacks the receipt" "$hout"
+grep -q '5 gate green but the receipt' <<<"$hout" && ok "c29 --help documents exit 5" || bad "c29 --help lacks exit 5" "$hout"
+
 # ---------------------------------------------------------------- summary
 printf '\nintegration-gate self-test: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

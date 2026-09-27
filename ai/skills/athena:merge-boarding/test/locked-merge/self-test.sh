@@ -7,6 +7,13 @@
 # lock (c2: exit 3, NO merge call) and a landing on a different base or tree
 # (c8/c9: exit 7) -- because each of those reads as a clean merge otherwise.
 #
+# DND-965: the second defect is a merge of a head integration-gate never
+# passed. locked-merge used to take the caller's word that the gate ran (gen_saas
+# #468 merged past a RED gate). The r* cases are those misses: no receipt, a RED
+# run, a receipt for another base, an unreadable store -- each must refuse with
+# exit 9 and NO merge call. r7 is the end-to-end path through the real
+# integration-gate.
+#
 # Hermetic: a local bare "origin" reached through a github.com URL via
 # url.insteadOf, and PATH/AI_BIN stubs for gh, gh-athena and confirm-merged.
 #
@@ -82,6 +89,22 @@ fixture() {
   printf '{"state":"OPEN","headRefOid":"%s","baseRefName":"main"}\n' "${H}" > "${ST}/pr.json"
   echo '[]' > "${ST}/runs.json"; echo good > "${ST}/merge_mode"; echo 0 > "${ST}/confirm_rc"
   : > "${ST}/merge.log"
+  plant_receipt "${H}" "$(git --git-dir="${BARE}" rev-parse main)"
+}
+
+# receipt_path <head> -- where integration-gate records its pass (DND-965):
+# the repo's git COMMON dir, shared by every checkout of the repo.
+receipt_path() { printf '%s/integration-receipts/%s.json' "$(git -C "${WT}" rev-parse --path-format=absolute --git-common-dir)" "$1"; }
+
+# plant_receipt <head> <base> [verdict] [recorded-head] -- a receipt in the
+# on-disk shape integration-gate writes (its self-test asserts that shape).
+plant_receipt() {
+  local f; f="$(receipt_path "$1")"; mkdir -p "$(dirname "${f}")"
+  jq -n --arg h "${4:-$1}" --arg b "$2" --arg v "${3:-pass}" \
+    '{schema:"integration-receipt/1", verdict:$v, head:$h, target_ref:"origin/main", base:$b,
+      gate:"g.sh", gate_source:"caller-supplied", gate_edited_by_branch:false,
+      critic_override:null, critic_override_state:null, owner_approval:null,
+      blast_radius:"BLAST-RADIUS COLD", recorded_at:"2026-09-27T00:00:00Z"}' > "${f}"
 }
 advance_main() { local G="git --git-dir=${BARE}"
   ${G} update-ref refs/heads/main "$(${G} commit-tree "$(${G} rev-parse main^{tree})" -p "$(${G} rev-parse main)" -m ahead)"; }
@@ -151,9 +174,71 @@ run --pr 7 --head "${H}" --repo "${WT}" --lock rel.lock; expect c12-relative-loc
 run --pr 7 --head "${H}" --repo "${WT}" --bogus; expect c13 2
 no_merge c12-c13
 
+# ---- DND-965: the gate's receipt is required, under the lock ----
+expect_receipt_refusal() { # <label> <text the refusal must name>
+  expect "$1" 9; no_merge "$1"
+  grep -qF -- "$2" <<<"${out}" && ok "$1 names '$2'" || bad "$1 does not name '$2'" "${out}"
+}
+set_main() { git --git-dir="${BARE}" update-ref refs/heads/main "$1"; }
+
+# r1 THE MISS: no receipt at all -- the gate never passed on this head.
+fixture r1; rm -f "$(receipt_path "${H}")"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r1.lock"; expect_receipt_refusal r1 "NO RECEIPT"
+grep -qF "$(receipt_path "${H}")" <<<"${out}" && ok "r1 names the path it searched" || bad "r1 does not name the searched path" "${out}"
+
+# r2 THE REPORTED INSTANCE (gen_saas #468): integration-gate ran RED on this
+# head. The real gate, not a planted file -- and a pass left over from an
+# earlier run must not survive the RED one.
+fixture r2; printf '#!/bin/sh\necho red; exit 1\n' > "${TMP}/r2/red.sh"; chmod +x "${TMP}/r2/red.sh"
+igate="$(cd "${HERE}/../.." && pwd)/scripts/integration-gate"
+( cd "${WT}" && "${igate}" --gate "${TMP}/r2/red.sh" >"${TMP}/r2/igate.out" 2>&1 ); irc=$?
+[ "${irc}" -eq 1 ] && ok "r2 integration-gate is RED (exit 1)" || bad "r2 integration-gate expected exit 1, got ${irc}" "$(cat "${TMP}/r2/igate.out")"
+if [ -e "$(receipt_path "${H}")" ]; then bad "r2 a passing receipt survived a RED gate"; else ok "r2 RED gate left no receipt"; fi
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r2.lock"; expect_receipt_refusal r2 "NO RECEIPT"
+
+# r3 receipt recorded against an OLDER base: origin/main fast-forwarded into
+# the branch after the gate ran, so the base is still contained but is not the
+# base the gate judged.
+fixture r3; old_base="$(git --git-dir="${BARE}" rev-parse main)"
+( cd "${WT}" && echo g > g.txt && git add g.txt && git commit -qm g && git push -q origin feature )
+H1="${H}"; H="$(git -C "${WT}" rev-parse HEAD)"
+set_main "${H1}"
+jq --arg h "${H}" '.headRefOid=$h' "${ST}/pr.json" > "${ST}/x" && mv "${ST}/x" "${ST}/pr.json"
+plant_receipt "${H}" "${old_base}"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r3.lock"; expect_receipt_refusal r3 "RECEIPT FOR ANOTHER BASE"
+
+# r4 unreadable receipt (malformed JSON) is not "no receipt".
+fixture r4; echo '{not json' > "$(receipt_path "${H}")"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r4.lock"; expect_receipt_refusal r4 "RECEIPT UNREADABLE"
+grep -qF "NO RECEIPT" <<<"${out}" && bad "r4 misread an unreadable receipt as absent" "${out}" || ok "r4 not reported as NO RECEIPT"
+
+# r5 a receipt whose recorded head is another SHA, or whose verdict is not
+# pass, is not a pass for this head.
+fixture r5; plant_receipt "${H}" "$(git --git-dir="${BARE}" rev-parse main)" pass "$(printf 'b%.0s' {1..40})"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r5.lock"; expect_receipt_refusal r5-head "RECEIPT INVALID"
+plant_receipt "${H}" "$(git --git-dir="${BARE}" rev-parse main)" red
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r5.lock"; expect_receipt_refusal r5-verdict "RECEIPT INVALID"
+
+# r6 a store that cannot be read: COULD NOT LOOK, never "no receipt".
+fixture r6; store="$(dirname "$(receipt_path "${H}")")"; chmod 000 "${store}"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r6.lock"; chmod 755 "${store}"
+expect_receipt_refusal r6 "COULD NOT LOOK"
+grep -qF "NO RECEIPT" <<<"${out}" && bad "r6 misread an unreadable store as absent" "${out}" || ok "r6 not reported as NO RECEIPT"
+
+# r7 end to end: the real integration-gate passes, locked-merge merges.
+fixture r7; rm -f "$(receipt_path "${H}")"
+printf '#!/bin/sh\nexit 0\n' > "${TMP}/r7/green.sh"; chmod +x "${TMP}/r7/green.sh"
+( cd "${WT}" && d="$(git rev-parse --git-path critic-verdicts)" && mkdir -p "$d" \
+  && printf '{"schema":1,"tool":"critic-review","sha":"%s","base":"main","verdict":"pass","findings":[],"dirty":false,"at":"2026-09-27T00:00:00Z"}\n' "${H}" > "${d}/${H}.json" )
+( cd "${WT}" && "${igate}" --gate "${TMP}/r7/green.sh" >"${TMP}/r7/igate.out" 2>&1 ); irc=$?
+[ "${irc}" -eq 0 ] && ok "r7 integration-gate passes" || bad "r7 integration-gate expected exit 0, got ${irc}" "$(cat "${TMP}/r7/igate.out")"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/r7.lock"; expect r7 0
+grep -q "^RECEIPT " <<<"${out}" && ok "r7 prints the RECEIPT it merged on" || bad "r7 no RECEIPT line" "${out}"
+
 # c14 --help: stdout, exit 0, no side effects.
 hout="$("${TOOL}" --help 2>/dev/null)"; rc=$?
 [ "${rc}" -eq 0 ] && grep -q '^Usage:' <<<"${hout}" && ok "c14 --help on stdout, exit 0" || bad "c14 --help" "${hout}"
+grep -q '^  9 ' <<<"${hout}" && ok "c14 --help documents exit 9" || bad "c14 --help lacks exit 9" "${hout}"
 
 echo "locked-merge self-test: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]
