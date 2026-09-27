@@ -214,6 +214,15 @@ authoritative.
   and carry `Depends On`↔`Blocks` edges for sequencing.
 - Put the *why* on the ticket, not just in chat — a `Needs Attention` ticket must carry
   the context Cody needs to decide, in its body.
+- **Put a finding's evidence IN the ticket body, not only a path to it.** Copy the
+  reproducer (probe bytes, command, failing output) onto the page. `ai-artifacts/` is
+  gitignored and machine-local, and fleets run on more than one machine, so a cited
+  `ai-artifacts/coordination/...` report is unreadable to whoever picks the ticket up
+  elsewhere. A path is fine as a pointer beside the evidence, never instead of it.
+  Measured 2026-09-27: HIGH security DND-926 cited a desktop-only report; the laptop
+  captain could not read the probe, spent an Opus run reconstructing it, and the
+  ticket was cancelled "reopen if the desktop's exact probe bytes differ". Same class:
+  dnd-708's sweep over a desktop-only `ai-artifacts/session-agreements/` covered zero files.
 - **Needs Attention DM to Cody (owner rule).** When a ticket moves to `Needs Attention`,
   DM Cody as Athena via the `athena:slack` skill (`~/.claude/skills/athena:slack/bin/dm`,
   Cody = `U0AHNV4RJGP`) on that same transition — the one that already assigns Cody and
