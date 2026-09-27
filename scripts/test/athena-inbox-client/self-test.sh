@@ -1095,7 +1095,12 @@ stop_wd_supervisor() {
   timeout 15 tail --pid="${SUPERVISOR_PID}" -f /dev/null 2>/dev/null
   # Children first (a stub's `sleep` would be orphaned to PID 1), then the pids.
   for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && pkill -9 -P "${p}" 2>/dev/null; done
-  for p in ${kids} "${WD_PIDS[@]}"; do [ -n "${p}" ] && kill -9 "${p}" 2>/dev/null; done
+  # A read-before-stop child may have exited since, and its pid been reused:
+  # kill it only while it still carries this run's reap tag.
+  for p in ${kids}; do
+    grep -qsFz -- "${ATHENA_SUITE_REAPER_TAG}" "/proc/${p}/environ" && kill -9 "${p}" 2>/dev/null
+  done
+  for p in "${WD_PIDS[@]}"; do [ -n "${p}" ] && kill -9 "${p}" 2>/dev/null; done
   SUPERVISOR_PID=""
 }
 # install_alert_registry — the COMMITTED custom registry entry (both

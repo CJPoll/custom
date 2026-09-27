@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # repro-real-suites.sh -- DND-818's deterministic reproduction against the REAL
-# mock-bearing suites. Not a self-test (harness-gate discovers only
-# **/self-test.sh): it runs two whole suites, so it costs about 80s. Run it by
-# hand to re-prove the incident class:
+# mock-bearing suites. scripts/test/suite-reaper/self-test.sh runs it as case
+# S10, so every harness-gate run runs it (about 75s: most of both suites, up to
+# the chosen spawn). It also runs standalone:
 #
 #   scripts/test/suite-reaper/repro-real-suites.sh
 #
