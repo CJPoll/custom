@@ -130,18 +130,23 @@
 #   which read every payload in full: a stash write that names NO stash
 #   verb (a glob git-stash word bare or with options only, `git-st*sh -u`;
 #   a glob or expanded git word with an expanded subcommand, `g?t $S`,
-#   `git $S`) inside an INTERPRETER string that runs it (`python3 -c`,
-#   `ruby -e`, `perl -e`, `node -e`, awk `system()`) was caught before and
-#   is not now. The literal and verb-naming spellings still deny.
-#   Narrowed by the option-A decision (after critic round 10): git, gh,
-#   docker and the other program-running tools are no longer on the
-#   pure-data list, so a text holding git is always read in full. A file
-#   written in this call and later executed by git (a config-named program
-#   or a repo hook) and a variable git reads as a command are therefore
-#   caught again, and leave this residual. Accepted by the harness session
-#   (2026-09-27). DND-775 (the git-level guard on refs/stash) is the
-#   enforcement that closes the class below the text; DND-905 is the
-#   text-layer fallback.
+#   `git $S`) inside DATA that some OTHER program in the same call runs was
+#   caught before and is not now. The evaluators the text cannot model are
+#   the general class "a file or string written in this call and then
+#   executed": an interpreter that runs its argument or its stdin
+#   (`python3 -c`, `ruby -e`, `perl -e`, `node -e`, `awk system()`, or a
+#   heredoc/script fed to one), and a file written to disk and then run --
+#   by git (a config-named program, a repo hook that even a read-only git
+#   fires), by the shell through PATH (a script written to a bin dir and
+#   run by its bare name), or by any later command. The literal and
+#   verb-naming spellings still deny, and a command word holding `/` is
+#   exec. This is the same class NOT CATCHABLE names (a script defined in
+#   one call and run in another; another interpreter building argv).
+#   Accepted by the harness session (2026-09-27, option A after critic
+#   round 10), PENDING a recorded owner decision (it reduces what the guard
+#   catches; critic round 12). DND-775 (the git-level guard on refs/stash,
+#   injected into agent sessions) is the enforcement that closes the whole
+#   class below the text; DND-905 is the text-layer fallback.
 #
 # PRECISION (DND-780, narrow cut): the leading test bracket `[` / `[[` and
 # the lone brace-group word `{` are not glob command words (as globs they
@@ -772,7 +777,7 @@ VERDICT=$(awk -v cmdf="$GSG_TMP/cmd" -v alf="$GSG_TMP/aliases" -v shf="$GSG_TMP/
   # cmd_prefix(t): a word after which the next word is still a command word.
   function cmd_prefix(t) {
     # `{\001` is the brace-group keyword as the tokenizer marks it (DND-780).
-    return is_assign(t) || t ~ /^(env|command|sudo|exec|nohup|xargs|time|eval|builtin|nice|setsid|noglob|nocorrect|-|then|do|else|if|while|until|!|\{\001)$/
+    return is_assign(t) || t ~ /^(env|command|sudo|exec|nohup|xargs|time|eval|builtin|nice|setsid|noglob|nocorrect|-|then|do|else|elif|if|while|until|case|coproc|!|\{\001)$/
   }
   # squote(w): w as one single-quoted shell word.
   function squote(w) { gsub(/\047/, "\047\\\047\047", w); return "\047" w "\047" }

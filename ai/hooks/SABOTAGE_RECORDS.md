@@ -791,13 +791,17 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (critic rounds 1-8, admiral batches 7-8):** `RESULT: 551 passed,
-  0 failed` / `VERDICT: PASS`.
+- **After (final, critic rounds 1-12, admiral batches 7-8):** `RESULT: 556
+  passed, 0 failed` / `VERDICT: PASS`. The per-round tables in this and the
+  next few subsections are HISTORICAL, measured on the hook of the round
+  they name; the authoritative final table is "Sabotage rows on the
+  option-A hook" below (556, on 9e114a6 + the round-12 edits).
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
-`RESULT: 495 passed, 56 failed`. Every failure is an allow case (QA/QB) or
-the deny-text check T2, e.g.:
+`RESULT: 525 passed, 31 failed` (on the final suite; the count here was 495
+at round 8, before later rounds added cases). Every failure is an allow
+case (QA/QB) or the deny-text check T2, e.g.:
 
 ```
 FAIL  QA8. awk print field (expected allow)
@@ -920,28 +924,32 @@ reached every case they did (their mutants stayed green).
   via DND-775" block. Every deny stays green. Rows 10, 13, 14, 17-22, 24
   and 25 above sabotaged deleted code and are retired.
 
-### Sabotage rows on the option-A hook (final; supersede the table above)
+### Sabotage rows on the option-A hook (final, measured on 9e114a6 + the
+round-12 edits; supersede every table above)
 
-Self-test `RESULT: 551 passed, 0 failed`. One mutant copy each.
+Self-test `RESULT: 556 passed, 0 failed`. One mutant copy each. Rows whose
+mechanisms option A deleted (the old A-3/10/12-14/17-25) are retired with
+that code.
 
 | id | Mutation | Observed failure |
 |---|---|---|
-| A-1 | Every quoted payload and heredoc read as data | 115 cases (O103c, QX1-QX93 exec cases) — `436 passed, 115 failed` |
-| A-2 | `exec_text()` off | 105 QX cases — `446 passed, 105 failed` |
-| A-4 | A payload holding a command substitution no longer exec | O103c, QX29, QX30, QX35, QX81, QX84 — `545 passed, 6 failed` |
-| A-5 | Unquoted or unterminated heredoc read as data | QX27, QX28 — `549 passed, 2 failed` |
-| A-6 | `<<` after `#` or in `((` taken as a heredoc | QX32, QX33 — `549 passed, 2 failed` |
-| A-7 | Alias self-expansion guard removed | QB1 — `550 passed, 1 failed` |
-| A-8 | Test arguments no longer data | QA24, QA25 — `549 passed, 2 failed` |
-| A-9 | Data drops every finding | QD6-QD9, QL1-QL3, QL5, QL6 — `542 passed, 9 failed` |
-| A-11 | A payload nested in data no longer data | QA20, QA60, QA62 — `548 passed, 3 failed` |
-| A-15 | Data drops named writes again | QD6-QD9 — `547 passed, 4 failed` |
-| A-16 | Data judges a glob command word as exec does (no relief) | 27 QA/QB allow cases — `524 passed, 27 failed` |
-| A-26 | Pure-data list gains sh, bash, zsh | QX1, QX2, QX12, QX13, QX21, QX22, QX31 — `544 passed, 7 failed` |
-| A-27 | Pure-data list gains git, gh, docker | 40 cases (QX19-QX76 git/gh/docker forms, QX90-QX93) — `511 passed, 40 failed` |
-| A-28 | Pure-data list gains sed, rg, sort, wget | QX57-QX61, QX77-QX80, QX85-QX89, QX92 and six flipped QA-A cases — `530 passed, 21 failed` |
-| A-29 | Pure-data list gains at, sg, tar, watchexec | QX36, QX37, QX39, QX40, QX42 — `546 passed, 5 failed` |
-| A-30 | The basename-strip is restored, so a path-qualified word reduces to its basename (critic round 11) | QX95 `./jq`, QX96 `d/cat` — `554 passed, 2 failed` |
+| A-1 | Every quoted payload and heredoc read as data | O103c, QX1, QX2, QX3, QX4, QX5, QX6, QX7, QX8, QX9, QX10, QX11, QX12, QX13, QX14, QX15,... — `437 passed, 119 failed` |
+| A-2 | `exec_text()` off | QX1, QX2, QX3, QX4, QX5, QX6, QX7, QX8, QX9, QX10, QX11, QX12, QX13, QX14, QX15, QX16, ... — `447 passed, 109 failed` |
+| A-4 | A payload holding a command substitution no longer exec | O103c, QX29, QX30, QX35, QX81, QX84 — `550 passed, 6 failed` |
+| A-5 | An unquoted or unterminated heredoc read as data | QX27, QX28 — `554 passed, 2 failed` |
+| A-6 | `<<` after a word-leading `#` or inside `((` taken as a heredoc | QX32, QX33 — `554 passed, 2 failed` |
+| A-7 | Alias self-expansion guard (`AEXP`) removed | QB1 — `555 passed, 1 failed` |
+| A-8 | Test arguments no longer data | QA24, QA25 — `554 passed, 2 failed` |
+| A-9 | Data drops every finding (`weak()` true for all, glob-head off in data) | QD6, QD7, QD8, QD9, QL1, QL2, QL3, QL5, QL6 — `547 passed, 9 failed` |
+| A-11 | A payload nested in data no longer data | QA20, QA60, QA62 — `553 passed, 3 failed` |
+| A-15 | Data drops named writes again | QD6, QD7, QD8, QD9 — `552 passed, 4 failed` |
+| A-16 | Data judges a glob command word as exec does (no false-positive relief) | QA3, QA4, QA5, QA8, QA10, QA12, QA15, QA16, QA17, QA18, QA20, QA21, QA22, QA23, QA29, Q... — `529 passed, 27 failed` |
+| A-26 | Pure-data list gains sh, bash, zsh | QX1, QX2, QX12, QX13, QX21, QX22, QX31, QX97 — `548 passed, 8 failed` |
+| A-27 | Pure-data list gains git, gh, docker | QX19, QX20, QX26, QX48, QX50, QX53, QX54, QX55, QX56, QX65, QX66, QX67, QX68, QX69, QX7... — `515 passed, 41 failed` |
+| A-28 | Pure-data list gains sed, rg, sort, wget | QX57, QX58, QX59, QX60, QX61, QX77, QX78, QX79, QX80, QX85, QX86, QX87, QX88, QX89, QX9... — `535 passed, 21 failed` |
+| A-29 | Pure-data list gains at, sg, tar, watchexec | QX36, QX37, QX39, QX40, QX42 — `551 passed, 5 failed` |
+| A-30 | The basename-strip is restored, so a path-qualified word reduces to its basename (critic round 11) | QX95, QX96 — `554 passed, 2 failed` |
+| A-31 | `elif` dropped from cmd_prefix, so a runner after it is not in command position (critic round 12) | QX97 — `555 passed, 1 failed` |
 
 - **Round 11, path-qualified word + stale text.** The critic found that
   `exec_text()` stripped a command word to its basename before the

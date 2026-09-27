@@ -935,9 +935,13 @@ case_cmd "QX94. a repo hook written in the call, then a git read" deny "cat > .g
 true; /usr/libexec/git-core/git-st*sh
 EOF
 chmod +x .git/hooks/post-index-change; git status"
-# QL8: an interpreter string with a verb-hiding spelling is the documented
-# residual (allowed); the verb-naming spelling is QD6 (denied).
-case_cmd "QL8. residual: interpreter string hiding the verb (documented, allowed)" allow "python3 -c 'import os; os.system(\"true; /usr/libexec/git-core/git-st*sh\")'"
+# The interpreter-string residual (a verb-hiding stash write inside
+# `python3 -c` etc.) is documented in the header, not asserted here: a
+# passing "allow" test for a base-denied write would read as an
+# endorsement, and the residual acceptance is owner-gated (critic round 12).
+# The verb-NAMING spelling in an interpreter string still denies (QD6).
+# QX97: a runner after `elif` is in command position (critic round 12).
+case_cmd "QX97. a runner after elif" deny "if false; then :; elif sh -c 'true; /usr/libexec/git-core/git-st*sh'; then :; fi"
 
 # QX95-96: critic round 11. A path-qualified command word is a script or a
 # binary the guard will not vouch for, so the text is exec even when the
