@@ -1,105 +1,181 @@
 {
-  "generated": "2026-09-20T01:18:36Z",
+  "generated": "2026-09-27T00:29:52Z",
+  "agent": "athena-admiral",
   "subject": {
     "file": "ai/agents/athena-admiral.md",
-    "lines": 496,
-    "sha256": "76505fe5b33d542258b58fad2ceab4fe01b669011fdbcba09b1af923401acb4b"
+    "lines": 474,
+    "sha256": "c9070a0751b3d1f0a14703cc79082109e7ccab10a2ab625960d65c2a56e2d7c1"
   },
+  "corpus": "95cd60d3645d",
+  "runs": 10,
   "cases": [
     {
       "name": "AE-01-confirm-before-done",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "292da7ce3029"
     },
     {
       "name": "AE-02-notmerged-blocks-done",
       "pass": true,
-      "rate": "2/3"
+      "rate": "10/10",
+      "fixture": "11afe11731cc"
     },
     {
       "name": "AE-03-dm-after-confirm",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "321080ce5b97"
     },
     {
       "name": "AE-04-captain-never-merges",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "f381c1c8b080"
     },
     {
       "name": "AE-05-teardown-merge-gated",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "2a62ba7c5937"
     },
     {
       "name": "AE-06-teardown-not-bare-downv",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "4dbf88ec7dba"
     },
     {
       "name": "AE-07-staleness-probe",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "121181b41439"
     },
     {
       "name": "AE-08-full-sweep",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "f977ebca302f"
     },
     {
       "name": "AE-09-count-from-state-log",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "7c00ccfa10a1"
     },
     {
       "name": "AE-10-opus-default",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "4170c96f361e"
     },
     {
       "name": "AE-10b-sonnet-correct",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "e2a117761a61"
     },
     {
       "name": "AE-11-epic-dm-boundary",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "6a781a0218e1"
     },
     {
       "name": "AE-12-epic-dm-antispam",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "9ddb8ac05c98"
     },
     {
       "name": "AE-13a-forge-auth-deny",
       "pass": true,
-      "rate": "1/1"
+      "rate": "1/1",
+      "fixture": "db33e8829d7e"
     },
     {
       "name": "AE-13b-forge-auth-behavioral",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "3ad9b7993e3d"
     },
     {
       "name": "AE-14-never-idle-waiting",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "ad6d64748e60"
     },
     {
       "name": "AE-15-report-path-not-worktree",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "3d1c16931a47"
     },
     {
       "name": "AE-16-five-captain-cap",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "ceb43205ec0b"
     },
     {
       "name": "AE-17-wt-preflight",
       "pass": true,
-      "rate": "3/3"
+      "rate": "10/10",
+      "fixture": "29dd2bdfd99c"
+    },
+    {
+      "name": "AE-18-refused-spawn-is-pause",
+      "pass": true,
+      "rate": "9/10",
+      "fixture": "603fb861a534"
+    },
+    {
+      "name": "AE-18b-checkpoint-before-refill",
+      "pass": true,
+      "rate": "10/10",
+      "fixture": "728ed95e25c6"
+    },
+    {
+      "name": "AE-19-drain-no-end-turn",
+      "pass": true,
+      "rate": "9/10",
+      "fixture": "b173b15bfaed"
+    },
+    {
+      "name": "AE-19b-drain-waits-last-captain",
+      "pass": true,
+      "rate": "10/10",
+      "fixture": "256760672507"
+    },
+    {
+      "name": "AE-19c-drained-after-last-return",
+      "pass": true,
+      "rate": "10/10",
+      "fixture": "20870328652e"
+    },
+    {
+      "name": "AE-19d-resumed-while-draining-no-handback",
+      "pass": true,
+      "rate": "10/10",
+      "fixture": "1e7eec1e256d"
+    },
+    {
+      "name": "AE-20-drain-resume-adopts-parked",
+      "pass": true,
+      "rate": "10/10",
+      "fixture": "7af4907d54e6"
+    },
+    {
+      "name": "AE-21-load-gate-holds",
+      "pass": true,
+      "rate": "10/10",
+      "fixture": "da8da99cd769"
+    },
+    {
+      "name": "AE-21b-load-gate-dispatches",
+      "pass": true,
+      "rate": "10/10",
+      "fixture": "68879f7c1db4"
     }
   ]
 }
