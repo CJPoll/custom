@@ -736,6 +736,10 @@ merges stay gated: an `integration-gate` exit 4 is held for the owner unless a
 standing approval covers it (`~/.claude/CLAUDE.md` → *Standing owner
 approvals*).
 
+**Later (2026-09-27):** this read "unless it is a security fix". Superseded:
+the exception is any change a standing owner approval covers, which the hub
+section lists.
+
 **Later (2026-09-24):** this rule said a hand-spawned agent "opens a PR for the
 owner to merge rather than pushing to main", so its green PRs sat until the
 owner merged them by hand. Superseded by owner decision (Cody, 2026-09-24,
