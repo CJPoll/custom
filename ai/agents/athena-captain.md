@@ -181,15 +181,17 @@ bare role name reaches you specifically.
    A worktree created by `git worktree add` does NOT carry gitignored
    build/dependency artifacts — `vendor/bundle` and `.bundle/config` for
    Ruby/Bundler, `node_modules` for JS, `_build`/`deps` for Elixir — so the
-   suite fails with errors like `Bundler::GemNotFound` until they exist. When
-   the worktree's lockfile is byte-identical to the main checkout's
-   (`~/dev/<project>`), restore them from there rather than re-resolving and
-   recompiling native extensions for an unchanged lockfile: either copy the
-   dirs across, or point the tool at the main checkout (e.g.
-   `BUNDLE_PATH=~/dev/<project>/vendor/bundle bundle exec …`). Re-resolve from
-   scratch only when the lockfile actually differs. (browser runs,
-   2026-09-14/15: three captains each hit this and each improvised a different
-   workaround.)
+   suite fails with errors like `Bundler::GemNotFound` until they exist.
+   **A setup command in the project's CLAUDE.md wins** (gen_saas:
+   `./bin/dev-setup`). Its deps/`_build` live in per-compose-project docker
+   volumes, so copying them from the main checkout does nothing. Otherwise,
+   when the lockfile is byte-identical to `~/dev/<project>`'s, restore from
+   there: copy the dirs, or point the tool at them (e.g.
+   `BUNDLE_PATH=~/dev/<project>/vendor/bundle bundle exec …`). Re-resolve
+   only when the lockfile differs. **Create and migrate the TEST database
+   too** before the first gate. A missing one fails the gate with an error
+   that reads as real (Postgres `3D000`, a boot `ConnectionReset`). Measured
+   2026-09-24/25: ~10 captains across 3 runs hit a red first gate this way.
 2. **Plan briefly.** Work out the approach before writing code: the flow,
    which modules it touches and the bucket each belongs in (Framework / UI /
    Side Effects / Domain / Managers, per this project's architecture rules),
