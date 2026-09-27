@@ -30,7 +30,15 @@ if [ ! -f "${BIN}" ] || [ ! -f "${LIB_DIR}/harness_tools.rb" ]; then
   exit 1
 fi
 
-TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+# The fixture root deliberately carries the status words "OK" and "PASS"
+# (DND-872). A checker's failure output quotes fixture paths (the unreachable
+# origin's URL, in git's own error line), so an assertion that matches a status
+# word as a bare substring reads the PATH as the verdict. With a plain
+# `mktemp -d` that happened only when the random suffix spelled "OK" (about
+# 1 run in 430), which is how the unreachable-origin case flaked. Carrying the
+# words in every run turns that class into a deterministic failure. Assert on
+# the checker's own status line (said_ok), never on a bare word.
+TMP="$(mktemp -d -t 'check-bin-help-OK-PASS.XXXXXXXXXX')"; trap 'rm -rf "${TMP}"' EXIT
 PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
@@ -86,6 +94,10 @@ new_fixture() {
 
 run() { OUT="$(cd "$1" && ruby ai/bin/check-bin-help 2>&1)"; RC=$?; }
 has() { printf '%s' "${OUT}" | grep -F -- "$1" >/dev/null; }
+# said_ok: the checker printed its OK status line. Anchored to the line start
+# and the program name, so a fixture path in the output never satisfies it
+# (see the TMP comment above, DND-872).
+said_ok() { printf '%s\n' "${OUT}" | grep -E '^check-bin-help: OK' >/dev/null; }
 
 echo "== check-bin-help: EXEMPT is ratcheted against what landed =="
 
@@ -146,7 +158,7 @@ echo "== check-bin-help: the landed bar must be measurable =="
 # 7. origin unreachable -> could not measure, never OK.
 R="$(new_fixture unreachable)"
 git -C "${R}" remote set-url origin "${TMP}/no-such-remote.git"; run "${R}"
-if [ "${RC}" -ne 0 ] && has "could not measure" && has "ls-remote" && has "Fix:" && ! has "OK"; then
+if [ "${RC}" -ne 0 ] && has "could not measure" && has "ls-remote" && has "Fix:" && ! said_ok; then
   ok "7 an unreachable origin fails as could-not-measure, with Fix:"
 else bad "7 an unreachable origin fails as could-not-measure, with Fix:" "rc=${RC} out=${OUT}"; fi
 
@@ -156,14 +168,16 @@ add_exec "${R}" ai/bin/nohelp "${HELPLESS}"; exempt "${R}" ai/bin/wrap ai/bin/no
 git -C "${R}" add -A >/dev/null 2>&1
 git -C "${R}" -c user.name=f -c user.email=f@example.invalid commit -qm exempt >/dev/null 2>&1
 git -C "${R}" update-ref refs/remotes/origin/main HEAD; run "${R}"
-if [ "${RC}" -ne 0 ] && has "${REAL}" && has "Fix:" && ! has "OK"; then
+if [ "${RC}" -ne 0 ] && has "${REAL}" && has "Fix:" && ! said_ok; then
   ok "8 a forged local origin/main fails, naming the remote SHA, with Fix:"
 else bad "8 a forged local origin/main fails, naming the remote SHA, with Fix:" "rc=${RC} out=${OUT}"; fi
 
-# 9. The OK line names the ratchet and the cross-checked tip.
+# 9. The OK line names the ratchet and the cross-checked tip. said_ok here
+#    proves the helper matches the real OK line, so every `! said_ok` is a real
+#    negative (DND-872).
 R="$(new_fixture ok-line)"; run "${R}"
 TIP="$(git -C "${R}" rev-parse refs/remotes/origin/main)"
-if [ "${RC}" -eq 0 ] && has "EXEMPT ratchet" && has "ls-remote" && has "${TIP:0:12}"; then
+if [ "${RC}" -eq 0 ] && said_ok && has "EXEMPT ratchet" && has "ls-remote" && has "${TIP:0:12}"; then
   ok "9 the OK output names the EXEMPT ratchet and the cross-checked tip"
 else bad "9 the OK output names the EXEMPT ratchet and the cross-checked tip" "rc=${RC} out=${OUT}"; fi
 
@@ -191,7 +205,7 @@ else bad "9b origin moving mid-gate does not redden a check pinned at gate start
 # 9c. The local ref is behind the pin -> mismatch, both SHAs named, no OK.
 R="$(new_fixture pinned-behind)"; P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"
 Q="$(move_origin "${R}")"; run_pinned "${R}" "${Q}"
-if [ "${RC}" -ne 0 ] && has "${P}" && has "${Q}" && has "ATHENA_LANDED_PIN_SHA" && has "Fix:" && ! has "OK"; then
+if [ "${RC}" -ne 0 ] && has "${P}" && has "${Q}" && has "ATHENA_LANDED_PIN_SHA" && has "Fix:" && ! said_ok; then
   ok "9c a local ref behind the pinned landed ref fails, both SHAs named"
 else bad "9c a local ref behind the pinned landed ref fails, both SHAs named" "rc=${RC} out=${OUT}"; fi
 

@@ -31,7 +31,15 @@ if [ ! -f "${BIN}" ] || [ ! -f "${LIB_DIR}/harness_tools.rb" ]; then
   exit 1
 fi
 
-TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+# The fixture root deliberately carries the status words "OK" and "PASS"
+# (DND-872). A checker's failure output quotes fixture paths (the unreachable
+# origin's URL, in git's own error line), so an assertion that matches a status
+# word as a bare substring reads the PATH as the verdict. With a plain
+# `mktemp -d` that happened only when the random suffix spelled "OK" (about
+# 1 run in 430), which is how the unreachable-origin case flaked. Carrying the
+# words in every run turns that class into a deterministic failure. Assert on
+# the checker's own status line (said_ok), never on a bare word.
+TMP="$(mktemp -d -t 'check-tool-risk-OK-PASS.XXXXXXXXXX')"; trap 'rm -rf "${TMP}"' EXIT
 PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
@@ -93,6 +101,10 @@ new_fixture() {
 # run <root>: run the fixture's checker; sets RC and OUT (stdout+stderr).
 run() { OUT="$(cd "$1" && ruby ai/bin/check-tool-risk 2>&1)"; RC=$?; }
 has() { printf '%s' "${OUT}" | grep -F -- "$1" >/dev/null; }
+# said_ok: the checker printed its OK status line. Anchored to the line start
+# and the program name, so a fixture path in the output never satisfies it
+# (see the TMP comment above, DND-872).
+said_ok() { printf '%s\n' "${OUT}" | grep -E '^check-tool-risk: OK' >/dev/null; }
 
 # scope_carve <root> <prefix>: insert an OUT entry for prefix ahead of ai/.
 scope_carve() {
@@ -211,7 +223,7 @@ echo "== check-tool-risk: the landed bar must be measurable =="
 # 11. origin unreachable -> could not measure, never OK.
 R="$(new_fixture unreachable)"
 git -C "${R}" remote set-url origin "${TMP}/no-such-remote.git"; run "${R}"
-if [ "${RC}" -ne 0 ] && has "could not measure" && has "ls-remote" && has "Fix:" && ! has "OK"; then
+if [ "${RC}" -ne 0 ] && has "could not measure" && has "ls-remote" && has "Fix:" && ! said_ok; then
   ok "11 an unreachable origin fails as could-not-measure, with Fix:"
 else bad "11 an unreachable origin fails as could-not-measure, with Fix:" "rc=${RC} out=${OUT}"; fi
 
@@ -221,7 +233,7 @@ registry "${R}" check-tool-risk=readOnly "${POST}=readOnly" "${PEEK}=readOnly"
 git -C "${R}" -c user.name=f -c user.email=f@example.invalid commit -qam relabel >/dev/null 2>&1
 git -C "${R}" update-ref refs/remotes/origin/main HEAD
 FORGED="$(git -C "${R}" rev-parse HEAD)"; run "${R}"
-if [ "${RC}" -ne 0 ] && has "${REAL}" && has "${FORGED}" && has "Fix:" && ! has "OK"; then
+if [ "${RC}" -ne 0 ] && has "${REAL}" && has "${FORGED}" && has "Fix:" && ! said_ok; then
   ok "12 a forged local origin/main fails, naming both SHAs, with Fix:"
 else bad "12 a forged local origin/main fails, naming both SHAs, with Fix:" "rc=${RC} out=${OUT}"; fi
 
@@ -234,10 +246,11 @@ if [ "${RC}" -ne 0 ] && has "could not measure" && has "Fix:"; then
 else bad "13 a malformed landed registry fails as could-not-measure" "rc=${RC} out=${OUT}"; fi
 
 # 14. The OK line says the ratchet ran against the cross-checked tip, so a
-#     pass that skipped it cannot read the same.
+#     pass that skipped it cannot read the same. said_ok here proves the helper
+#     matches the real OK line, so every `! said_ok` is a real negative (DND-872).
 R="$(new_fixture ok-line)"; run "${R}"
 TIP="$(git -C "${R}" rev-parse refs/remotes/origin/main)"
-if [ "${RC}" -eq 0 ] && has "ratchet" && has "ls-remote" && has "${TIP:0:12}"; then
+if [ "${RC}" -eq 0 ] && said_ok && has "ratchet" && has "ls-remote" && has "${TIP:0:12}"; then
   ok "14 the OK output names the ratchet and the cross-checked tip"
 else bad "14 the OK output names the ratchet and the cross-checked tip" "rc=${RC} out=${OUT}"; fi
 
@@ -265,7 +278,7 @@ else bad "14b origin moving mid-gate does not redden a check pinned at gate star
 # 14c. The local ref is behind the pin -> mismatch, both SHAs named, no OK.
 R="$(new_fixture pinned-behind)"; P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"
 Q="$(move_origin "${R}")"; run_pinned "${R}" "${Q}"
-if [ "${RC}" -ne 0 ] && has "${P}" && has "${Q}" && has "ATHENA_LANDED_PIN_SHA" && has "Fix:" && ! has "OK"; then
+if [ "${RC}" -ne 0 ] && has "${P}" && has "${Q}" && has "ATHENA_LANDED_PIN_SHA" && has "Fix:" && ! said_ok; then
   ok "14c a local ref behind the pinned landed ref fails, both SHAs named"
 else bad "14c a local ref behind the pinned landed ref fails, both SHAs named" "rc=${RC} out=${OUT}"; fi
 

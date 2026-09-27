@@ -30,7 +30,15 @@ if [ ! -f "${BIN}" ]; then
   exit 1
 fi
 
-TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+# The fixture root deliberately carries the status words "OK" and "PASS"
+# (DND-872). A checker's failure output quotes fixture paths (the unreachable
+# origin's URL, in git's own error line), so an assertion that matches a status
+# word as a bare substring reads the PATH as the verdict. With a plain
+# `mktemp -d` that happened only when the random suffix spelled "OK" (about
+# 1 run in 430), which is how the unreachable-origin case flaked. Carrying the
+# words in every run turns that class into a deterministic failure. Assert on
+# the checker's own status line (said_ok), never on a bare word.
+TMP="$(mktemp -d -t 'check-guard-messages-OK-PASS.XXXXXXXXXX')"; trap 'rm -rf "${TMP}"' EXIT
 PASS=0; FAIL=0
 ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
@@ -117,15 +125,22 @@ run() {
   OUT="$(cd "$1" && ruby ai/bin/check-guard-messages 2>&1)"; RC=$?
 }
 
+# said_ok: the checker printed its OK status line. Anchored to the line start
+# and the program name, so a fixture path in the output never satisfies it
+# (see the TMP comment above, DND-872).
+said_ok() { printf '%s\n' "${OUT}" | grep -E '^check-guard-messages: OK' >/dev/null; }
+
 BARE='#!/bin/sh
 echo "FAIL: something is wrong" >&2
 exit 1'
 
 echo "== check-guard-messages: coverage beyond ai/hooks and GUARD_BINS =="
 
-# 1. Positive control: everything classified and compliant -> exit 0.
+# 1. Positive control: everything classified and compliant -> exit 0. It also
+#    proves said_ok matches the checker's real OK line, so every `! said_ok`
+#    below is a real negative, not a vacuous one (DND-872).
 R="$(new_fixture control)"; track "${R}"; run "${R}"
-if [ "${RC}" -eq 0 ]; then ok "1 a fully classified, compliant tree passes"
+if [ "${RC}" -eq 0 ] && said_ok; then ok "1 a fully classified, compliant tree passes"
 else bad "1 a fully classified, compliant tree passes" "rc=${RC} out=${OUT}"; fi
 
 # 2. THE DEFECT: a new script under scripts/, classified nowhere, with a bare
@@ -548,7 +563,7 @@ git -C "${R}" update-ref refs/remotes/origin/main HEAD
 FORGED="$(git -C "${R}" rev-parse HEAD)"; run "${R}"
 if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${REAL}" >/dev/null \
    && printf '%s' "${OUT}" | grep -F "${FORGED}" >/dev/null && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null \
-   && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+   && ! said_ok; then
   ok "33 a forged local origin/main fails, naming the local and the remote SHA, with Fix:"
 else bad "33 a forged local origin/main fails, naming the local and the remote SHA, with Fix:" "rc=${RC} out=${OUT}"; fi
 
@@ -558,7 +573,7 @@ R="$(new_fixture unreachable)"; track "${R}"
 git -C "${R}" remote set-url origin "${TMP}/no-such-remote.git"; run "${R}"
 if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'could not measure' >/dev/null \
    && printf '%s' "${OUT}" | grep -F 'ls-remote' >/dev/null && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null \
-   && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+   && ! said_ok; then
   ok "34 an unreachable origin fails as could-not-measure, with Fix:"
 else bad "34 an unreachable origin fails as could-not-measure, with Fix:" "rc=${RC} out=${OUT}"; fi
 
@@ -658,7 +673,7 @@ add_exec "${R}" scripts/some-gate "${BARE}"; track "${R}"
 git -C "${R}" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m relabel >/dev/null 2>&1
 git -C "${R}" update-ref refs/remotes/origin/main HEAD; run_pinned "${R}"
 if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F 'scripts/some-gate' >/dev/null \
-   && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+   && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null && ! said_ok; then
   ok "37 a forged local ref cannot move a pinned bar: the relabel still fails"
 else bad "37 a forged local ref cannot move a pinned bar: the relabel still fails" "rc=${RC} out=${OUT}"; fi
 
@@ -677,7 +692,7 @@ git -C "${R}" update-ref refs/remotes/origin/main HEAD
 FORGED="$(git -C "${R}" rev-parse HEAD)"; pin "${R}" "${FORGED}"; run_pinned "${R}"
 if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${REAL}" >/dev/null \
    && printf '%s' "${OUT}" | grep -F "${FORGED}" >/dev/null && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null \
-   && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+   && ! said_ok; then
   ok "37a a hand-set pin at a commit origin never landed fails, both SHAs named"
 else bad "37a a hand-set pin at a commit origin never landed fails, both SHAs named" "rc=${RC} out=${OUT}"; fi
 
@@ -695,7 +710,7 @@ git -C "${R}" -c user.name=fixture -c user.email=fixture@example.invalid commit 
 git -C "${R}" update-ref refs/remotes/origin/main HEAD
 FORGED="$(git -C "${R}" rev-parse HEAD)"; pin "${R}" "${FORGED}"; run_pinned "${R}"
 if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${FORGED}" >/dev/null \
-   && printf '%s' "${OUT}" | grep -F "${Q}" >/dev/null && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null \
+   && printf '%s' "${OUT}" | grep -F "${Q}" >/dev/null && ! said_ok \
    && [ "$(git -C "${R}" rev-parse refs/remotes/origin/main)" = "${FORGED}" ]; then
   ok "37a2 a hand-set pin never landed fails even when origin moved and was not fetched"
 else bad "37a2 a hand-set pin never landed fails even when origin moved and was not fetched" "rc=${RC} out=${OUT}"; fi
@@ -707,7 +722,7 @@ P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"; Q="$(move_origin "${R}"
 pin "${R}" "${Q}"; run_pinned "${R}"
 if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${P}" >/dev/null \
    && printf '%s' "${OUT}" | grep -F "${Q}" >/dev/null && printf '%s' "${OUT}" | grep -F 'Fix:' >/dev/null \
-   && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+   && ! said_ok; then
   ok "37b a local ref behind the pinned landed ref fails, both SHAs named"
 else bad "37b a local ref behind the pinned landed ref fails, both SHAs named" "rc=${RC} out=${OUT}"; fi
 
@@ -718,7 +733,7 @@ P="$(git -C "${R}" rev-parse refs/remotes/origin/main)"; pin "${R}" "${P}"
 D="$(git -C "${R}" -c user.name=f -c user.email=f@example.invalid commit-tree -m diverged "${P}^{tree}")"
 git -C "${R}" update-ref refs/remotes/origin/main "${D}"; run_pinned "${R}"
 if [ "${RC}" -ne 0 ] && printf '%s' "${OUT}" | grep -F "${P}" >/dev/null \
-   && printf '%s' "${OUT}" | grep -F "${D}" >/dev/null && ! printf '%s' "${OUT}" | grep -F 'OK' >/dev/null; then
+   && printf '%s' "${OUT}" | grep -F "${D}" >/dev/null && ! said_ok; then
   ok "37c a local ref diverged from the pin fails, both SHAs named"
 else bad "37c a local ref diverged from the pin fails, both SHAs named" "rc=${RC} out=${OUT}"; fi
 
