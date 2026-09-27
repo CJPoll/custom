@@ -562,9 +562,19 @@ and pronoun-guard; nothing detected it. The durable fix:
   unwired, and a branch cannot remove a landed hook from its own bar. A wired
   hook whose script is missing or not executable fails as *dangling*. A bar it
   cannot read is exit 3, could not measure.
+  A wiring is identified by **(event, matcher, script)**, so one script may
+  have several rows on one event, each checked on its own (DND-887: keyed on
+  (event, script), a second-matcher row was never installed and read as
+  wired). An omitted matcher, `""` and `"*"` compare equal. The landed bar and
+  *pending* apply per row: a matcher row only the branch declares is pending.
+  A declared script wired under a matcher that neither the landed nor the
+  branch registry declares for it fails as *stale*. A branch that changes a
+  landed row's matcher cannot lower its own bar: the landed matcher stays
+  required until the change lands, and the new one is pending.
 - **Recover:** `scripts/setup-hooks --install` MERGES the registry into
   `settings.json` (backing it up first, idempotent) — it never rewrites the whole
-  block, because a full rewrite is exactly what caused the outage. `--check`
+  block, because a full rewrite is exactly what caused the outage. It replaces
+  a stale matcher, touching only that registry script's wiring. `--check`
   delegates to the gate check, `--dry-run` previews, `--remove` unwires,
   `--self-test` verifies install/idempotency/merge-safety on a temp file.
 - **Worktrees:** hooks are always wired at the MAIN checkout's path, never a

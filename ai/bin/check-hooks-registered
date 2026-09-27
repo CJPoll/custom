@@ -183,11 +183,16 @@ def landed_registry(root = REPO_DIR)
   rescue RegistryError => e
     raise Landed::Unreadable.new([[label, e.message]])
   end
-  [pts, bars.flatten(1).uniq { |e| [e["event"], e["script"]] }]
+  [pts, bars.flatten(1).uniq { |e| row_key(e) }]
 end
 
 def pair_key(entry)
   [entry["event"], entry["script"]]
+end
+
+# A registry row's identity (DND-887): (event, normalized matcher, script).
+def row_key(entry)
+  [entry["event"], mnorm(entry["matcher"]), entry["script"]]
 end
 
 # Entries of this checkout's registry whose script is missing or not
@@ -226,24 +231,60 @@ def dangling(settings, dirs = checkout_dirs)
   end
 end
 
-# All {event, command} pairs registered in a parsed settings hash.
-def registered_pairs(settings)
+# A wiring is identified by (event, matcher, command) -- DND-887. Keyed on
+# (event, command) alone, a second registry row for the same script on the same
+# event with a different matcher collapsed into the first: setup-hooks never
+# installed it and this check reported it wired. Claude Code treats an omitted
+# matcher, "" and "*" alike (match everything), so they compare equal.
+# setup-hooks' `mnorm` makes the same choice; the two must agree.
+def mnorm(matcher)
+  matcher.nil? || matcher == "" || matcher == "*" ? "" : matcher
+end
+
+# All [event, matcher, command] wirings in a parsed settings hash, each with the
+# matcher as written (for naming it) alongside its normalized form.
+def registered_wirings(settings)
   out = []
-  (settings["hooks"] || {}).each do |event, matchers|
-    Array(matchers).each do |m|
-      Array(m["hooks"]).each { |h| out << [event, norm(h["command"])] }
+  (settings["hooks"] || {}).each do |event, groups|
+    Array(groups).each do |m|
+      Array(m["hooks"]).each do |h|
+        out << { event: event, matcher: m["matcher"], key: [event, mnorm(m["matcher"]), norm(h["command"])] }
+      end
     end
   end
   out
 end
 
-# Compare registry against a parsed settings hash. Returns a list of
-# human-readable drift strings (empty == all registered).
+def describe(event, matcher, script)
+  "#{event} #{(matcher || '').inspect} -> #{script}"
+end
+
+# Registry rows with no wiring on their (event, matcher, script). Returns a
+# list of human-readable drift strings (empty == all registered).
 def drift_for(settings, registry, dirs = checkout_dirs)
-  have = registered_pairs(settings)
+  have = registered_wirings(settings).map { |w| w[:key] }
   registry.reject do |e|
-    dirs.any? { |d| have.include?([e["event"], norm(abs_script(e["script"], d))]) }
-  end.map { |e| "#{e['event']} -> #{e['script']}" }
+    dirs.any? { |d| have.include?([e["event"], mnorm(e["matcher"]), norm(abs_script(e["script"], d))]) }
+  end.map { |e| describe(e["event"], e["matcher"], e["script"]) }
+end
+
+# Wirings of a registry script, on an event the registry wires it on, under a
+# matcher the registry does not declare for that pair: a row whose matcher
+# changed, or two rows that were once one combined matcher. The declared rows
+# may all be present too, so drift_for alone reports these as healthy.
+def stale_for(settings, registry, dirs = checkout_dirs)
+  declared = Hash.new { |h, k| h[k] = [] }
+  registry.each { |e| declared[[e["event"], e["script"]]] << mnorm(e["matcher"]) }
+  registered_wirings(settings).filter_map do |w|
+    event, matcher, cmd = w[:key]
+    script = declared.keys.find do |ev, s|
+      ev == event && dirs.any? { |d| norm(abs_script(s, d)) == cmd }
+    end&.last
+    next unless script
+    next if declared[[event, script]].include?(matcher)
+
+    "#{describe(event, w[:matcher], script)} (stale: that matcher is not declared for this script)"
+  end
 end
 
 def unmeasured(lines)
@@ -325,17 +366,25 @@ def run(path: settings_path, registry_file: REGISTRY, root: REPO_DIR,
     return EXIT_FAIL
   end
 
+  # Rows, not pairs (DND-887): every landed row is required on its own
+  # matcher, a row only this branch declares is pending, and a wiring of a
+  # declared script under a matcher NEITHER side declares is stale. A branch
+  # that changes a landed row's matcher cannot lower its own bar: the landed
+  # matcher stays required until the change lands (a machine wired from main
+  # has it), and the new one is pending. Declarations on both sides count for
+  # stale, so neither half of that install window reads as stale.
   drift   = drift_for(settings, landed_entries, dirs)
-  keys    = landed_entries.map { |e| pair_key(e) }
-  pending = drift_for(settings, registry.reject { |e| keys.include?(pair_key(e)) }, dirs)
-  if broken.empty? && dangle.empty? && drift.empty?
-    puts "check-hooks-registered: all #{landed_entries.size} landed registry hooks are wired in #{path} " \
-         "(bar: #{bar}). OK."
+  keys    = landed_entries.map { |e| row_key(e) }
+  pending = drift_for(settings, registry.reject { |e| keys.include?(row_key(e)) }, dirs)
+  stale   = stale_for(settings, landed_entries + registry, dirs)
+  if broken.empty? && dangle.empty? && drift.empty? && stale.empty?
+    puts "check-hooks-registered: all #{landed_entries.size} landed registry rows are wired in #{path}, " \
+         "each on its declared (event, matcher) (bar: #{bar}). OK."
     report_pending(pending)
     return EXIT_OK
   end
 
-  report_failures(path, broken, dangle, drift, pending)
+  report_failures(path, broken, dangle, drift, pending, stale)
   EXIT_FAIL
 end
 
@@ -349,7 +398,7 @@ def report_pending(pending, out = $stdout)
            "event it matches would fail with exit 127."
 end
 
-def report_failures(path, broken, dangle, drift, pending)
+def report_failures(path, broken, dangle, drift, pending, stale = [])
   warn "check-hooks-registered: FAIL"
   unless broken.empty?
     warn "  #{broken.size} registry entr(ies) on this branch name a script that cannot run:"
@@ -364,17 +413,152 @@ def report_failures(path, broken, dangle, drift, pending)
          "#{path}. Live settings are the owner's machine state: an agent reports this, it does not edit it."
   end
   unless drift.empty?
-    warn "  #{drift.size} landed registry hook(s) are NOT wired in #{path}:"
+    warn "  #{drift.size} landed registry row(s) are NOT wired on their (event, matcher) in #{path}:"
     drift.each { |m| warn "  - #{m}" }
     warn "  Fix: re-wire them by running `scripts/setup-hooks --install` from the MAIN checkout " \
-         "(it MERGES into settings.json, backing it up first — it never clobbers the existing block). " \
-         "If a hook was intentionally retired, remove it from #{REGISTRY_REL} and land that; if main " \
-         "already retired it after your merge-base, rebase onto origin/main."
+         "(it MERGES into settings.json, backing it up first — it never clobbers the existing block; " \
+         "it adds each missing (event, matcher, script) row). If a hook was intentionally retired or " \
+         "its matcher changed, change #{REGISTRY_REL} and land that; if main already did so after " \
+         "your merge-base, rebase onto origin/main."
+  end
+  unless stale.empty?
+    warn "  #{stale.size} wiring(s) in #{path} use a matcher neither the landed nor this branch's " \
+         "registry declares for that script:"
+    stale.each { |m| warn "  - #{m}" }
+    warn "  Fix: run `scripts/setup-hooks --install` from the MAIN checkout; it replaces a stale " \
+         "matcher, touching only that registry script's wiring on that event. If the matcher is " \
+         "intended, declare it in #{REGISTRY_REL} and land that."
   end
   report_pending(pending, $stderr)
 end
 
 # ---------------------------------------------------------------------------
+# DND-887: a hook is identified by (event, matcher, script), not (event,
+# script). Two registry rows for one script on one event with different
+# matchers are two wirings; keyed without the matcher, the second collapsed
+# into the first, was never installed, and this check could not see it.
+#
+# Composed with DND-743's landed bar, per ROW: every landed (event, matcher,
+# script) row is required, a row only this branch declares is pending, and a
+# matcher neither side declares is stale. A branch that CHANGES a landed row's
+# matcher cannot lower its own bar with it: the landed matcher stays required
+# until the change lands.
+#
+# Driven through `run`, the entry point the CLI calls, with the landed bar
+# injected and a throwaway checkout whose hook script exists, so the cases
+# assert exit codes and the named lines without reading any origin.
+def matcher_key_cases(check)
+  require "tmpdir"
+  require "stringio"
+  Dir.mktmpdir do |dir|
+    script = "ai/hooks/dnd-887-two-matchers.sh"
+    FileUtils.mkdir_p(File.join(dir, "ai", "hooks"))
+    File.write(File.join(dir, script), "#!/bin/sh\nexit 0\n")
+    File.chmod(0o755, File.join(dir, script))
+    cmd = File.join(dir, script)
+    row = ->(matcher, event = "PreToolUse") { { "event" => event, "matcher" => matcher, "script" => script } }
+    # probe(landed rows, branch rows, wired matchers[, event]) -> [exit, all output]
+    probe = lambda do |landed, branch, wired, event = "PreToolUse"|
+      reg = File.join(dir, "registry.json")
+      File.write(reg, JSON.generate({ "hooks" => branch }))
+      groups = wired.map do |m|
+        g = { "hooks" => [{ "type" => "command", "command" => cmd }] }
+        g["matcher"] = m unless m.equal?(:omitted)
+        g
+      end
+      f = File.join(dir, "settings.json")
+      File.write(f, JSON.generate({ "hooks" => { event => groups } }))
+      o, e = $stdout, $stderr
+      buf = StringIO.new
+      $stdout = $stderr = buf
+      begin
+        rc = run(path: f, registry_file: reg, root: dir, dirs: [dir],
+                 landed: ->(_r) { [[["fixture landed", "0" * 40]], landed] })
+      ensure
+        $stdout, $stderr = o, e
+      end
+      [rc, buf.string]
+    end
+    two = [row.call("Bash"), row.call("Edit|Write")]
+
+    rc, = probe.call(two, two, ["Bash", "Edit|Write"])
+    check.call("two same-script rows, different matchers, both wired -> no drift", rc == EXIT_OK)
+
+    # Sabotage: remove one of the two. The OLD keying's install produced exactly
+    # this file (the second row collapsed into the first), so this is also the
+    # migration case: it must read as drift, naming the missing matcher.
+    rc, out = probe.call(two, two, ["Bash"])
+    check.call("one of two same-script rows removed -> drift (exit 1)", rc == EXIT_FAIL)
+    check.call("the drift line names the missing matcher and script",
+               out.include?('"Edit|Write"') && out.include?(script))
+
+    rc, out = probe.call(two, two, ["Edit|Write"])
+    check.call("the other row removed -> drift naming it",
+               rc == EXIT_FAIL && out.include?('"Bash" ->') && !out.include?('"Edit|Write" ->'))
+
+    # A registry script wired under a matcher neither the landed nor the branch
+    # registry declares for it is stale wiring -- the signature a live file
+    # keeps when two rows were once one combined matcher (DND-840).
+    rc, out = probe.call(two, two, ["Bash|Edit|Write"])
+    check.call("combined matcher where the registry has two rows -> drift, named stale",
+               rc == EXIT_FAIL && out.include?('"Bash|Edit|Write"') && out.include?("stale"))
+    rc, out = probe.call(two, two, ["Bash", "Edit|Write", "Other"])
+    check.call("declared rows wired plus an undeclared matcher -> stale (exit 1)",
+               rc == EXIT_FAIL && out.include?('"Other"') && out.include?("stale"))
+
+    # Claude Code treats an omitted matcher, "" and "*" alike (match all), so a
+    # registry "" is satisfied by any of the three and none of them is stale.
+    all_row = [row.call("", "SessionStart")]
+    all_ok = [:omitted, "", "*"].all? { |m| probe.call(all_row, all_row, [m], "SessionStart").first == EXIT_OK }
+    check.call("omitted / \"\" / \"*\" matcher all satisfy a registry \"\" row", all_ok)
+
+    # --- composed with the landed bar (DND-743) ---
+    # A second matcher row only this branch adds, for a landed (event, script):
+    # pending, like any branch-added hook, and named.
+    rc, out = probe.call([row.call("Bash")], two, ["Bash"])
+    check.call("a branch-added matcher row for a landed script, unwired -> pending, exit 0",
+               rc == EXIT_OK && out.include?("pending") && out.include?('"Edit|Write"'))
+
+    # A landed row the branch still declares cannot be rescued by the branch.
+    rc, = probe.call(two, [row.call("Bash")], ["Bash"])
+    check.call("a landed matcher row the branch drops, unwired -> still drift (exit 1)", rc == EXIT_FAIL)
+
+    # A landed script the branch removes entirely stays required (DND-743).
+    rc, = probe.call([row.call("Bash")], [], [])
+    check.call("a landed script the branch removes, unwired -> still drift (exit 1)", rc == EXIT_FAIL)
+
+    # A matcher change on the branch. Wired from main (the landed matcher) it
+    # passes with the new row pending; wired only the new way, the landed row is
+    # drift: a branch that narrows a matcher cannot pass on its own say-so.
+    broad  = [row.call("Bash|mcp__notion.*")]
+    narrow = [row.call("Bash|mcp__notion-work__API-post-page")]
+    rc, out = probe.call(broad, narrow, ["Bash|mcp__notion-work__API-post-page"])
+    check.call("matcher change, wired only the NEW way -> drift on the landed row (exit 1)",
+               rc == EXIT_FAIL && out.include?('"Bash|mcp__notion.*"'))
+    rc, out = probe.call(broad, narrow, ["Bash|mcp__notion.*"])
+    check.call("matcher change, wired the LANDED way -> exit 0, new row pending",
+               rc == EXIT_OK && out.include?("pending") && out.include?('"Bash|mcp__notion-work__API-post-page"'))
+    rc, out = probe.call(broad, narrow, ["Other"])
+    check.call("matcher change, wired neither way -> drift on the landed row, and stale",
+               rc == EXIT_FAIL && out.include?('"Bash|mcp__notion.*"') && out.include?("stale"))
+
+    # A split: until it lands, the combined landed row is still required.
+    split = [row.call("Bash"), row.call("Edit")]
+    rc, = probe.call([row.call("Bash|Edit")], split, ["Bash", "Edit"])
+    check.call("a landed matcher split in two, only the halves wired -> drift (exit 1)", rc == EXIT_FAIL)
+    rc, out = probe.call([row.call("Bash|Edit")], split, ["Bash|Edit"])
+    check.call("a landed matcher split in two, landed row wired -> exit 0, halves pending",
+               rc == EXIT_OK && out.include?("pending") && out.include?('"Edit"'))
+
+    # Landed is the union over origin/main's tip and the merge-base. A branch
+    # cut before main changed a matcher sees both as landed; wired the new way,
+    # the old row is drift until the branch rebases (as for a retired hook).
+    rc, out = probe.call(broad + narrow, narrow, ["Bash|mcp__notion-work__API-post-page"])
+    check.call("landed union holds old + new matcher, branch and live new -> drift naming rebase",
+               rc == EXIT_FAIL && out.include?('"Bash|mcp__notion.*"') && out.include?("rebase onto origin/main"))
+  end
+end
+
 def self_test
   require "tmpdir"
   registry = load_registry
@@ -540,6 +724,9 @@ def self_test
     check.call("dangling: a non-executable script is flagged", got.any? { |m| m.include?("noexec.sh") })
     check.call("dangling: a runnable hook and a command outside ai/hooks/ are not", got.size == 2)
   end
+
+  # `check` closes over `ok`, so a failing case here reddens the suite.
+  matcher_key_cases(check)
 
   puts(ok ? "ALL CASES PASS" : "SELF-TEST FAILED")
   ok ? 0 : 1
