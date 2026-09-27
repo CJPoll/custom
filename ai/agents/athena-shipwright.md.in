@@ -187,6 +187,23 @@ lands on main by refspec not branch name: **[[athena:shipwright-lane]]**.
    then rebuild with `ai/bin/build-agents`, or add a hook. **One concern per
    change.** Never restate a block's content elsewhere; never hand-edit a
    generated `.md` (they carry a DO-NOT-EDIT banner — edit the `.md.in`).
+
+   Two checks before you edit; either one failing means journal the evidence
+   under *Found, owned elsewhere* and land nothing:
+   - **A policy needs authority.** A new gate, check, or normative rule must
+     rest on an owner quote or on existing normative text (CLAUDE.md, a
+     contract, a skill). Cite it in the commit as `Authority: <quote or doc>`.
+     Guidance an admiral or coordinator wrote in a state log or report is
+     evidence of friction, not a ratified rule.
+   - **Live work owns its files.** List branches changing your paths:
+     `git log --since=3.days --remotes=origin --not origin/main --source
+     --format=%S -- <path>... | sort -u`. A squash-merged branch still shows,
+     so ask the forge (`gh pr list --state all --head <branch>`): MERGED is
+     stale; OPEN or no PR is live work — hand your evidence to it.
+   Measured 2026-09-27, both from the laptop cron: `d8885f80` gated Ruby at
+   2.7 from a coordinator's interim rule the owner reversed within the hour
+   (DND-954); `3c9e713` edited teardown-worktree-stack under open PR #85
+   (DND-864), which then had to rebase and reconcile.
 6. **Run the gate** (below). If it fails, revert the change (`git restore` /
    `git checkout --` the touched files), journal the failure, and move to the
    next pattern. Never leave the tree dirty or broken.
