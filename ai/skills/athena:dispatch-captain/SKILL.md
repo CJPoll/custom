@@ -131,6 +131,20 @@ Give the captain, in the brief:
   timed out after 900 s of its 1500 s spent queued, and DND-790's timed out with
   3/3 slots held and the gate never run. Bound the wait with
   `--wait-timeout` instead.
+- **The don't-chase-main rule.** Every brief carries this line: *"Your gate bar
+  is ONE green gate on a head that contained `origin/main` when the gate
+  started. If main moves after that, do not rebase and re-gate to catch it:
+  report the gated SHA and the main it contained. I forward and re-gate the
+  integrated head when it lands. If the gate refuses because main moved while
+  you queued, rebase once and run it once more; if it refuses again, stop and
+  report. Rebase earlier only on a real conflict or when I ask."* This is the
+  captain half of `athena:merge-boarding` → *Landing onto a moving main*; the
+  merge bar is unchanged, since you still re-gate the integrated head under
+  the lock. Measured 2026-09-26/27 (harness-epics-ab): DND-838 re-gated three
+  times ("Main moved under each of them"), DND-785 ran `integration-gate`
+  three times and never got a clean run, and DND-887 hit the same cycle. Two
+  admirals then issued this rule by hand, mid-run (15:23Z to DND-497, 02:32Z
+  to DND-785).
 
 **In fleet mode, also point it at the design in Notion** — its ticket page's
 three sub-docs (**Product Requirements / Architecture & Engineering / QA Plan**)
