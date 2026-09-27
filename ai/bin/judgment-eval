@@ -1,0 +1,471 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# judgment-eval -- evaluate a judgments question set against owner labels, and
+# apply the thresholds a run chose (DND-710). Normative home:
+# ~/dev/custom/ai/contracts/athena-judgments.md -> *Threshold provenance, n/a
+# and the pinned model*. The server is gen_saas Athena.Judgments.Evals
+# (POST /api/v1/judgments/eval, PUT /api/v1/judgments/thresholds).
+#
+# Buckets: the pure DOMAIN is ai/lib/judgment_eval.rb; below are the EFFECTS
+# (files, the athena MCP URL, the machine token, curl), the MANAGER (one eval
+# run; one apply) and the FRAMEWORK (argv).
+#
+# THE TOKEN NEVER TOUCHES ARGV OR THE ENVIRONMENT. It is parsed from the 0600
+# inbox-client config in this process and written into a curl config that
+# curl reads on STDIN (`--config -`), exactly as fleet-report does. The
+# self-test proves it by scanning /proc while a request is in flight.
+#
+# Label and corpus files are machine-local and never committed: they may
+# reference work content. The run file holds ids, labels and outcomes, never a
+# case's input.
+#
+# Deliberately gem-free (stdlib only).
+
+require "digest"
+require "fileutils"
+require "json"
+require "open3"
+require "time"
+require "tmpdir"
+require_relative "../lib/judgment_eval"
+require_relative "../lib/strict_argv"
+
+PROG = "judgment-eval"
+HARNESS = File.expand_path("../..", __dir__)
+
+USAGE = <<~EOF
+  Usage: judgment-eval --use-case U --labels FILE --corpus FILE [--content-domain D]
+                       [--batch-size N] [--pause S] [--dry-run]
+         judgment-eval --apply RUN_ID [--dry-run]
+         judgment-eval --help
+
+  Evaluate a judgments question set against owner labels (DND-710). Each
+  labelled case runs on the Athena server through the SAME question set and
+  judge path the product uses, under use case eval:<U>. The server computes the
+  metrics; this prints them and writes a run file.
+
+  Eval run:
+    --use-case U        finding_triage | slack_routing | priority_scoring
+    --labels FILE       JSONL, one per line: {"id", "label", "provenance",
+                        "labeler", "labeled_at"}; provenance is forward_record,
+                        owner_confirmed or proposed. proposed rows are excluded
+                        from the run (they never select a threshold) and counted.
+    --corpus FILE       JSONL the labels were made from. A row joins on "id"
+                        ("event_id" for slack_routing); its "input" member is
+                        sent, or the whole row if it has none. A row's
+                        "content_domain" (work|blend|personal) wins over
+                        --content-domain.
+    --content-domain D  the domain of cases whose row names none. Required if
+                        any case lacks one (deny by default: never guessed).
+    --batch-size N      cases per request, 1..50 (default 50)
+    --pause S           seconds between batches (default 60: the server allows
+                        60 judged calls per minute)
+    --dry-run           validate the files and the join, print the counts, and
+                        stop. Reads no token and makes no network call.
+
+  Apply:
+    --apply RUN_ID      PUT the run to /api/v1/judgments/thresholds. The server
+                        computes each label's threshold from the stored run
+                        (smallest t with Wilson lower bound >= 0.90 and n >= 10;
+                        otherwise the label is written disabled, n/a).
+                        With --dry-run, prints the body and sends nothing.
+
+  Output: "scored S / unscored U (reasons)", then per label either
+  "threshold T (precision, lb, coverage, n)" or "n/a (n=K, needs 10)". With
+  nothing scored no label line is printed: a run with no key never shows a
+  precision. The run file is ${XDG_DATA_HOME:-~/.local/share}/athena/evals/
+  runs/<utc>-<U>.json (0600): ids, labels, outcomes and the report, never an
+  input. A label whose id the corpus lacks is reported by count and id.
+
+  Exit codes:
+    0  scored at least one case (or applied / dry run ok)
+    1  local input or configuration (a missing or empty file, a bad row, no
+       join, no token config, no athena MCP entry)
+    2  usage
+    3  nothing scored: no key ("no key; see DND-711"), every case unscored, or
+       the use case's question set is not on the server yet
+    4  the server was unreachable
+    5  the server refused (4xx) or faulted (5xx); its Fix: is printed
+
+  Every failure prints one stderr line carrying Fix:. The server URL is the
+  origin of the `athena` MCP entry in ~/.claude.json; the token is read from
+  ~/.config/athena-inbox-client/config.json and fed to curl on stdin, never
+  argv. Environment (optional): ATHENA_INBOX_CLIENT_CONFIG, FLEET_CLAUDE_JSON,
+  XDG_DATA_HOME, JUDGMENT_EVAL_MAX_TIME_S (per request, default 600).
+EOF
+
+class Failure < StandardError
+  attr_reader :code
+
+  def initialize(code, message)
+    super(message)
+    @code = code
+  end
+end
+
+def fail!(code, what, fix)
+  raise Failure.new(code, "#{PROG}: #{what}. Fix: #{fix}")
+end
+
+# ── EFFECTS ──────────────────────────────────────────────────────────────────
+
+module Effects
+  module_function
+
+  # read_input(path, what) -> text. Missing and unreadable are distinct.
+  def read_input(path, what)
+    fail!(1, "#{what} file #{path} does not exist", "pass the path of the #{what} file (they are machine-local, never committed)") unless File.exist?(path)
+    fail!(1, "#{what} file #{path} is not a readable file", "check its permissions") unless File.file?(path) && File.readable?(path)
+    File.read(path, encoding: "UTF-8")
+  end
+
+  def sha256(text) = Digest::SHA256.hexdigest(text)
+
+  def client_config_path
+    ENV["ATHENA_INBOX_CLIENT_CONFIG"] || File.join(ENV["XDG_CONFIG_HOME"] || File.join(Dir.home, ".config"), "athena-inbox-client", "config.json")
+  end
+
+  def claude_json_path = ENV["FLEET_CLAUDE_JSON"] || File.join(Dir.home, ".claude.json")
+
+  # read_token -> the machine token. Never printed, never in argv.
+  def read_token
+    path = client_config_path
+    fail!(1, "no machine token config at #{path}", "this machine has no Athena inbox client; set it up with scripts/setup-athena-inbox-client (the token is owner-issued; never mint one yourself)") unless File.exist?(path)
+    token = begin
+      JSON.parse(File.read(path))["token"]
+    rescue JSON::ParserError, SystemCallError, TypeError, NoMethodError
+      nil
+    end
+    fail!(1, "#{path} is unreadable or has no token", "repair the inbox client config (owner-gated credential); judgment-eval only reads it") unless token.is_a?(String) && !token.empty?
+    token
+  end
+
+  # main_checkout(dir) -> the main checkout owning dir's git common dir, or nil.
+  def main_checkout(dir)
+    out, status = Open3.capture2e("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return nil unless status.success?
+
+    common = out.strip
+    common.start_with?("/") ? common.delete_suffix("/.git") : nil
+  rescue SystemCallError
+    nil
+  end
+
+  # mcp_url -> the registered athena MCP URL: local scope for this session's
+  # repo, then the harness repo, then user scope (fleet-report's lookup).
+  def mcp_url
+    path = claude_json_path
+    fail!(1, "no athena MCP server is registered in #{path}", "register it with scripts/add-athena-mcp (run in ~/dev/custom); the server URL comes from that entry") unless File.exist?(path)
+    doc = begin
+      JSON.parse(File.read(path))
+    rescue JSON::ParserError, SystemCallError
+      fail!(1, "#{path} cannot be parsed", "repair the athena MCP entry (scripts/add-athena-mcp) after reading it")
+    end
+    keys = [main_checkout(Dir.pwd), main_checkout(HARNESS)].compact.uniq
+    entry = keys.lazy.map { |k| doc.dig("projects", k, "mcpServers", "athena") }.find(&:itself) || doc.dig("mcpServers", "athena")
+    fail!(1, "no athena MCP server is registered in #{path}", "register it with scripts/add-athena-mcp (run in ~/dev/custom)") if entry.nil?
+    url = entry.is_a?(Hash) ? entry["url"] : nil
+    fail!(1, "the athena MCP entry in #{path} has no url", "repair that entry (scripts/add-athena-mcp)") unless url.is_a?(String)
+    url
+  end
+
+  # api_origin(url) -> scheme://authority. https only, or http to loopback: the
+  # token must never cross the wire in clear text, and a userinfo part would
+  # send it to the host after the @.
+  def api_origin(url)
+    m = %r{\A(https?)://([^/?#]*)}.match(url)
+    fail!(1, "the athena MCP URL is not http(s)", "register the athena MCP server with its https URL (scripts/add-athena-mcp)") unless m
+    scheme, authority = m[1], m[2]
+    fail!(1, "the athena MCP URL carries a user/password part", "register the plain https URL (scripts/add-athena-mcp)") if authority.include?("@")
+    if scheme == "http" && !/\A(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?\z/.match?(authority)
+      fail!(1, "the athena MCP URL is not https (and not loopback), so the token would be sent in clear text", "register the https URL (scripts/add-athena-mcp)")
+    end
+    "#{scheme}://#{authority}"
+  end
+
+  # request(method, url, token, body) -> {curl_rc:, status:, body:}
+  def request(method, url, token, body)
+    [url, token].each do |value|
+      fail!(1, "a request value contains a quote, backslash, whitespace or control character", "repair the athena MCP URL or the token config") if /["\\\s[:cntrl:]]/.match?(value)
+    end
+    Dir.mktmpdir("judgment-eval-") do |dir|
+      File.chmod(0o700, dir)
+      fail!(1, "the temp dir path (from $TMPDIR) is not safe to put in a curl config", "set TMPDIR to a plain absolute path") if /["\\\s[:cntrl:]]/.match?(dir)
+      req = File.join(dir, "req.json")
+      resp = File.join(dir, "resp")
+      File.write(req, JSON.generate(body), perm: 0o600)
+      config = +""
+      config << %(url = "#{url}"\n)
+      config << %(request = "#{method}"\n)
+      config << %(header = "Authorization: Bearer #{token}"\n)
+      config << %(header = "Accept: application/json"\n)
+      config << %(header = "Content-Type: application/json"\n)
+      config << %(data-binary = "@#{req}"\n)
+      config << %(output = "#{resp}"\n)
+      config << %(write-out = "%{http_code}"\n)
+      config << "connect-timeout = 10\n"
+      config << "max-time = #{max_time}\n"
+      config << "silent\n"
+      out, _err, status = Open3.capture3("curl", "--config", "-", stdin_data: config)
+      config.clear
+      text = File.exist?(resp) ? File.read(resp) : ""
+      { curl_rc: status.exitstatus, status: out.strip.to_i, body: text }
+    end
+  rescue Errno::ENOENT
+    fail!(1, "curl is not on PATH", "install curl")
+  end
+
+  def max_time
+    value = ENV["JUDGMENT_EVAL_MAX_TIME_S"].to_s
+    /\A[1-9]\d{0,4}\z/.match?(value) ? value : "600"
+  end
+
+  def runs_dir
+    base = ENV["XDG_DATA_HOME"] || File.join(Dir.home, ".local", "share")
+    fail!(1, "XDG_DATA_HOME is not absolute", "set it to an absolute path or unset it") unless base.start_with?("/")
+    File.join(base, "athena", "evals", "runs")
+  end
+
+  def write_run_file(name, doc)
+    dir = runs_dir
+    FileUtils.mkdir_p(dir, mode: 0o700)
+    path = File.join(dir, name)
+    File.write("#{path}.tmp", JSON.pretty_generate(doc) + "\n", perm: 0o600)
+    File.rename("#{path}.tmp", path)
+    path
+  rescue SystemCallError => e
+    fail!(1, "could not write the run file under #{dir}: #{e.class}", "check that directory is writable")
+  end
+
+  def pause(seconds) = sleep(seconds)
+end
+
+# ── MANAGER ──────────────────────────────────────────────────────────────────
+
+module Manager
+  module_function
+
+  def load_cases(opts)
+    labels_text = Effects.read_input(opts[:labels], "labels")
+    corpus_text = Effects.read_input(opts[:corpus], "corpus")
+    labels = JudgmentEval.parse_labels(labels_text, opts[:labels])
+    corpus = JudgmentEval.parse_corpus(corpus_text, opts[:corpus], opts[:use_case])
+    joined = JudgmentEval.join(labels, corpus)
+    cases, lacking = JudgmentEval.with_domain(joined[:cases], opts[:content_domain])
+    {
+      labels: labels, corpus: corpus, joined: joined, cases: cases, lacking_domain: lacking,
+      labels_sha256: Effects.sha256(labels_text), corpus_sha256: Effects.sha256(corpus_text)
+    }
+  rescue JudgmentEval::InputError => e
+    fail!(1, e.message, e.fix)
+  end
+
+  def report_join(loaded, out, err)
+    joined = loaded[:joined]
+    corpus = loaded[:corpus]
+    out.puts "labels: #{loaded[:labels].size} (#{JudgmentEval.provenance_counts(loaded[:labels]).map { |k, v| "#{k} #{v}" }.join(', ')}); " \
+             "proposed excluded: #{joined[:proposed]}"
+    out.puts "corpus: #{corpus[:rows].size} rows with #{corpus[:id_key]}" + (corpus[:without_id].positive? ? ", #{corpus[:without_id]} without #{corpus[:id_key]} (ignored)" : "")
+    unless joined[:missing].empty?
+      usable = loaded[:labels].size - joined[:proposed]
+      err.puts "#{PROG}: join: #{joined[:missing].size} of #{usable} labels have no corpus row with that #{corpus[:id_key]}: " \
+               "#{joined[:missing].join(', ')}. Fix: point --corpus at the file these labels were made from, or drop the stale labels; they are not in this run."
+    end
+    fail!(1, "no label joined the corpus (0 of #{loaded[:labels].size - joined[:proposed]})", "check --corpus and --use-case (the join key is #{corpus[:id_key]})") if loaded[:cases].empty?
+    if loaded[:lacking_domain].positive?
+      fail!(2, "#{loaded[:lacking_domain]} of #{loaded[:cases].size} cases carry no content domain", "pass --content-domain work|blend|personal (a domain is never guessed)")
+    end
+    out.puts "cases: #{loaded[:cases].size} (#{JudgmentEval.label_counts(loaded[:cases]).map { |k, v| "#{k} #{v}" }.join(', ')})"
+  end
+
+  def run_eval(opts, out, err)
+    loaded = load_cases(opts)
+    report_join(loaded, out, err)
+    batches = JudgmentEval.batches(loaded[:cases], opts[:batch_size])
+    if opts[:dry_run]
+      out.puts "dry run: #{batches.size} batch(es) of at most #{opts[:batch_size]}; nothing sent"
+      return 0
+    end
+
+    origin = Effects.api_origin(Effects.mcp_url)
+    token = Effects.read_token
+    started = Time.now.utc
+    state = { run_id: nil, results: [], response: nil, sent: 0, stopped: nil }
+    batches.each_with_index do |batch, i|
+      Effects.pause(opts[:pause]) if i.positive? && opts[:pause].positive?
+      body = { "use_case" => opts[:use_case], "cases" => batch }
+      body["eval_run_id"] = state[:run_id] if state[:run_id]
+      reply = Effects.request("POST", "#{origin}/api/v1/judgments/eval", token, body)
+      outcome = classify(reply)
+      if outcome[:kind] != :ok
+        state[:stopped] = outcome
+        break
+      end
+      data = outcome[:data]
+      state[:run_id] ||= data["eval_run_id"]
+      state[:results].concat(data["results"])
+      state[:response] = data
+      state[:sent] += 1
+    end
+    token = nil
+    finish_eval(opts, loaded, batches.size, started, state, out, err)
+  ensure
+    token = nil
+  end
+
+  def finish_eval(opts, loaded, batch_count, started, state, out, err)
+    data = state[:response]
+    run_path = nil
+    if data
+      doc = run_doc(opts, loaded, batch_count, started, state)
+      run_path = Effects.write_run_file("#{started.strftime('%Y%m%dT%H%M%SZ')}-#{opts[:use_case]}.json", doc)
+      out.puts "#{PROG}: #{opts[:use_case]} run #{data['eval_run_id']} (question set #{data['question_set_version']}, model #{data['model']}): " \
+               "#{state[:results].size} cases in #{state[:sent]} of #{batch_count} batch(es)"
+      JudgmentEval.summary_lines(data["report"]).each { |line| out.puts line }
+      out.puts "run file: #{run_path}"
+    end
+    return stopped(state[:stopped], state[:sent], batch_count, err) if state[:stopped]
+
+    report = data["report"]
+    if JudgmentEval.only_not_configured?(report)
+      err.puts "#{PROG}: no key; see DND-711. Fix: the owner stores the TypeSafe key (DND-711); every case was unscored not_configured, so nothing can be chosen."
+      return 3
+    end
+    if report["scored"].zero?
+      err.puts "#{PROG}: nothing was scored (every case fell back; reasons above). Fix: resolve the named reasons, then re-run; no threshold can be chosen from this run."
+      return 3
+    end
+    out.puts "apply with: #{PROG} --apply #{data['eval_run_id']}"
+    0
+  end
+
+  def run_doc(opts, loaded, batch_count, started, state)
+    data = state[:response]
+    {
+      "eval_run_id" => data["eval_run_id"], "use_case" => opts[:use_case],
+      "question_set_version" => data["question_set_version"], "model" => data["model"],
+      "started_at" => started.iso8601, "finished_at" => Time.now.utc.iso8601,
+      "labels_file" => File.expand_path(opts[:labels]), "labels_sha256" => loaded[:labels_sha256],
+      "corpus_file" => File.expand_path(opts[:corpus]), "corpus_sha256" => loaded[:corpus_sha256],
+      "proposed_excluded" => loaded[:joined][:proposed], "join_missing" => loaded[:joined][:missing],
+      "batches" => { "planned" => batch_count, "sent" => state[:sent], "stopped" => state[:stopped] && state[:stopped][:line] },
+      "labels" => loaded[:cases].to_h { |c| [c["case_id"], c["label"]] },
+      "results" => state[:results], "report" => data["report"]
+    }
+  end
+
+  def stopped(outcome, sent, planned, err)
+    err.puts outcome[:line]
+    err.puts "#{PROG}: stopped after #{sent} of #{planned} batch(es); the run file (if any) holds what was answered." if sent.positive?
+    outcome[:code]
+  end
+
+  def run_apply(opts, out, _err)
+    run_id = opts[:apply]
+    fail!(2, "--apply needs an eval run id (a UUID)", "pass the eval_run_id a judgment-eval run printed") unless JudgmentEval.uuid?(run_id)
+    body = { "eval_run_id" => run_id }
+    if opts[:dry_run]
+      out.puts JSON.generate(body)
+      return 0
+    end
+
+    origin = Effects.api_origin(Effects.mcp_url)
+    reply = Effects.request("PUT", "#{origin}/api/v1/judgments/thresholds", Effects.read_token, body)
+    outcome = classify(reply)
+    raise Failure.new(outcome[:code], outcome[:line]) unless outcome[:kind] == :ok
+
+    data = outcome[:data]
+    out.puts "#{PROG}: applied run #{data['eval_run_id']} to #{data['use_case']} (question set #{data['question_set_version']}, model #{data['model']})"
+    data["thresholds"].each do |t|
+      out.puts(t["enabled"] ? format("  %s: enabled at %.2f (lb %.3f, coverage %.3f, n %d)", t["label"], t["threshold"], t["precision_lb"], t["coverage"], t["n"]) : "  #{t['label']}: disabled (n/a, n #{t['n']})")
+    end
+    0
+  end
+
+  # classify(reply) -> {kind: :ok, data:} | {kind: :fail, code:, line:}
+  def classify(reply)
+    return fail_outcome(4, "could not reach the Athena server (curl exit #{reply[:curl_rc]})", "check the network and that the server is up; nothing was judged by this request") if reply[:curl_rc] != 0
+
+    doc = begin
+      JSON.parse(reply[:body])
+    rescue JSON::ParserError
+      nil
+    end
+    status = reply[:status]
+    return { kind: :ok, data: doc["data"] } if status == 200 && doc.is_a?(Hash) && doc["data"].is_a?(Hash)
+
+    server_fix = doc.is_a?(Hash) && doc["fix"].is_a?(String) ? doc["fix"] : nil
+    error = doc.is_a?(Hash) && doc["error"].is_a?(String) ? doc["error"] : nil
+    case status
+    when 409
+      if error == "question_set_unavailable"
+        { kind: :fail, code: 3, line: "#{PROG}: JUDGMENTS UNAVAILABLE: question_set_unavailable: #{server_fix || 'no fix given'}" }
+      else
+        { kind: :fail, code: 5, line: "#{PROG}: the server refused (HTTP 409 #{error}): #{server_fix || 'Fix: none given'}" }
+      end
+    when 401 then fail_outcome(1, "the server rejected the machine token (HTTP 401)", "the inbox client token is owner-issued; ask the owner to re-issue it, never mint one yourself")
+    when 404 then fail_outcome(5, "the server answered not_found (HTTP 404): an unknown use case, or an eval run that is absent or not this machine owner's", "check --use-case, or the run id you passed")
+    when 400..499 then { kind: :fail, code: 5, line: "#{PROG}: the server refused the request (HTTP #{status}#{error ? " #{error}" : ''}): #{server_fix || 'Fix: none given; read the server log'}" }
+    else fail_outcome(5, "the server faulted (HTTP #{status})", "the server failed, not the request; check its health, then re-run")
+    end
+  end
+
+  def fail_outcome(code, what, fix)
+    { kind: :fail, code: code, line: "#{PROG}: #{what}. Fix: #{fix}" }
+  end
+end
+
+# ── FRAMEWORK ────────────────────────────────────────────────────────────────
+
+SPEC = {
+  "--help" => :switch, "-h" => :switch, "--use-case" => :value, "--labels" => :value, "--corpus" => :value,
+  "--content-domain" => :value, "--batch-size" => :integer, "--pause" => :integer, "--dry-run" => :switch,
+  "--apply" => :value
+}.freeze
+
+def parse_options(argv)
+  raw = StrictArgv.parse(argv, SPEC)
+  {
+    help: raw["--help"] || raw["-h"], use_case: raw["--use-case"], labels: raw["--labels"], corpus: raw["--corpus"],
+    content_domain: raw["--content-domain"], batch_size: raw.fetch("--batch-size", JudgmentEval::MAX_BATCH),
+    pause: raw.fetch("--pause", 60), dry_run: raw["--dry-run"] || false, apply: raw["--apply"], given: raw.keys
+  }
+rescue StrictArgv::UsageError => e
+  fail!(2, e.message, "run #{PROG} --help for the flags")
+end
+
+def validate_eval!(opts)
+  %i[use_case labels corpus].each do |key|
+    fail!(2, "--#{key.to_s.tr('_', '-')} is required", "run #{PROG} --help") if opts[key].nil?
+  end
+  fail!(2, "--use-case #{JudgmentEval.safe(opts[:use_case])} is not a use case", "use one of #{JudgmentEval::USE_CASES.join(', ')}") unless JudgmentEval::USE_CASES.include?(opts[:use_case])
+  if opts[:content_domain] && !JudgmentEval::DOMAINS.include?(opts[:content_domain])
+    fail!(2, "--content-domain #{JudgmentEval.safe(opts[:content_domain])} is not a domain", "use one of #{JudgmentEval::DOMAINS.join(', ')}")
+  end
+  fail!(2, "--batch-size must be 1..#{JudgmentEval::MAX_BATCH}", "the server takes at most #{JudgmentEval::MAX_BATCH} cases per call") unless (1..JudgmentEval::MAX_BATCH).cover?(opts[:batch_size])
+  fail!(2, "--pause must be 0..3600", "pass seconds between batches") unless (0..3600).cover?(opts[:pause])
+end
+
+def main(argv)
+  # --help anywhere wins, before anything else runs (check-bin-help).
+  if argv.include?("--help") || argv.include?("-h")
+    $stdout.puts USAGE
+    return 0
+  end
+
+  opts = parse_options(argv)
+  if opts[:apply]
+    extra = opts[:given] - %w[--apply --dry-run]
+    fail!(2, "--apply takes only --dry-run (got #{extra.join(', ')})", "run --apply RUN_ID on its own") unless extra.empty?
+    return Manager.run_apply(opts, $stdout, $stderr)
+  end
+
+  validate_eval!(opts)
+  Manager.run_eval(opts, $stdout, $stderr)
+rescue Failure => e
+  $stderr.puts e.message
+  e.code
+end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

@@ -324,6 +324,34 @@ falls back. `n/a` is not 0 and not a failure. No threshold row reads as
 missing key) is excluded from precision and counted as `unscored`, by reason. A
 run where every case fell back reports `scored: 0`, never a precision of 0.
 
+**Eval runs** (DND-710: gen_saas `Athena.Judgments.Evals`, harness
+`ai/bin/judgment-eval`).
+
+- **The same path as the product.** Each labelled case runs through the
+  product use case's question set and the same judge path, recorded under
+  `eval:<use_case>`. A question set is evaluable only if it names which answer
+  is the label (its eval reading). A use case whose question set has not
+  shipped is refused as such, never read as an empty run.
+- **The owner is the machine token's**, never the body's. An eval run belongs
+  to one owner; another owner's run id reads exactly as an absent one.
+- **What a run stores**: the caller's opaque case id, the owner's label, and
+  the chosen label with its confidence, or the unscored reason. Never the
+  input.
+- **The curve.** For label L at threshold t, the routed cases are those the
+  judgment labelled L with confidence at least t. Precision is correct over
+  routed; coverage is correct over the scored cases the owner labelled L (the
+  recall half of the PR curve). No routed case means no precision and no
+  bound, never 0.
+- **The server computes the thresholds** from the stored run; a caller cannot
+  supply one. Applying a run replaces every threshold row for its (owner, use
+  case, question-set version, model), each stamped with the run. An n/a label
+  is written disabled, so an earlier run's enabled label cannot survive. A run
+  that scored nothing cannot be applied, and an applied run takes no more
+  cases.
+- **Proposed labels** (not yet confirmed by the owner) never enter a run, so
+  they never select a threshold. A label whose id the corpus lacks is
+  reported by count and id.
+
 ## Budget
 
 **D3 (owner, 2026-09-25, RESOLVED): a dollar cap.** Cody, verbatim: "Let's put a
@@ -389,6 +417,8 @@ with it.
 - [ ] Mode defaults to `off`; `on` is refused without an eval-produced threshold.
 - [ ] `threshold_unset` and `n/a` never accept; unscored eval cases are never
       scored as wrong.
+- [ ] A threshold is computed by the server from the owner's own stored eval
+      run, never supplied by a caller; a run stores no input.
 - [ ] Requests pin `jev-1.13.0`; a different answering model is `model_mismatch`.
 - [ ] The monthly $10 and daily pacing caps are enforced in dollars from config
       prices; a missing price fails closed as `price_unknown`; one budget alert
