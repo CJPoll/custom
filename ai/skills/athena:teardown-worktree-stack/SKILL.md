@@ -38,6 +38,15 @@ deliberately gone.
 
 ## Removing the WORKTREE: never over uncommitted work
 
+**Remove a merged Mission's worktree in the same step as its stack**, once the
+merge is confirmed and the tree is clean. A merged worktree has no work left to
+serve, and each one holds real disk (a gen_saas tree with `deps`/`_build` is
+~3G). Measured 2026-09-27: one admiral kept 33 merged lane worktrees, `/home`
+hit 100% (ENOSPC), and two fleets' gates and a state-log append failed until a
+cleanup freed 90G (`2026-09-25-dnd-671-650-644/state.md`, "08:3xZ RESOURCE
+FAILURE"). The stack-only rule above is about PARKED, unmerged work; merged
+work keeps neither.
+
 Cleaning up the worktree itself is a different act from tearing down its stack,
 and it is destructive in a way the stack is not: a stack re-ups, a deleted
 uncommitted edit does not. **Before `git worktree remove` / `wt remove`, read

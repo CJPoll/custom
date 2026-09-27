@@ -197,7 +197,8 @@ git operation on that worktree, not a rewrite.
 ### 6a. Tear down a Mission's docker stack once its MR is merged
 
 **As soon as a Mission's MR is CONFIRMED merged** (not merely green), tear its
-stack down — never bare `down -v`, and only YOUR fleet's stacks:
+stack down — never bare `down -v`, and only YOUR fleet's stacks — then remove its
+worktree (clean trees only; 33 merged ones filled `/home`, 2026-09-27):
 **[[athena:teardown-worktree-stack]]** owns the full procedure and rationale.
 
 ### 6b. Boarding: the rate at which green MRs land is yours to protect
