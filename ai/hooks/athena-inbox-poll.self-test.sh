@@ -286,8 +286,8 @@ LOG_CHANNEL='{"slack":{"kind":"log","path":"p-slack.jsonl","dedupe":["event_id",
 # state-change schema. It carries NO dedupe key (keyless change stream), so it
 # declares none. Never delivered to (no p-lane.jsonl planted), it is a real
 # never-delivered fault whose Fix must point at an athena-events routing rule,
-# NOT at the slack client-side registration -- the misdirection DND-260 exists
-# to prevent.
+# NOT at the slack server-side agent-instance registration (asked via
+# inbox-doctor) -- the misdirection DND-260 exists to prevent.
 PLATFORM_CHANNEL='{"lane":{"kind":"log","path":"p-lane.jsonl","producer":"platform","schema_v":[1]}}'
 # Both kinds dark at once: a slack channel AND a platform lane, neither ever
 # delivered to. NEVER_SLACK>0 AND NEVER_PLATFORM>0, so the hook cannot know
@@ -943,7 +943,7 @@ assert_contains "DND-260 ...and points at the athena-events contract" \
 # lane, "server-side agent instance" would appear -- the operator sent to
 # inbox-doctor for the wrong channel kind. This assertion is what makes
 # the test fail on the exact bug the NEVER_PLATFORM/NEVER_SLACK split prevents.
-assert_not_contains "DND-260 a dark platform lane does NOT prescribe the slack client-side registration" \
+assert_not_contains "DND-260 a dark platform lane does NOT prescribe the slack agent-instance registration" \
   "server-side agent instance" "${CTX}"
 
 # BOTH KINDS DARK (NEVER_PLATFORM>0 && NEVER_SLACK>0). This is the third
@@ -958,7 +958,7 @@ register "${BOTH_DARK_CHANNELS}"
 run_hook
 CTX="$(context_of "${OUT}")"
 assert_contains "DND-260 both-dark is a fault" "never received anything" "${CTX}"
-assert_contains "DND-260 both-dark names the slack client-side registration path" \
+assert_contains "DND-260 both-dark names the slack agent-instance registration path" \
   "server-side agent instance" "${CTX}"
 assert_contains "DND-260 both-dark names inbox-doctor as the corrected mechanism (DND-944)" \
   "inbox-doctor" "${CTX}"

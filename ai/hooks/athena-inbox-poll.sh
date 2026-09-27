@@ -488,7 +488,8 @@ if [ "${POLL_OK}" -eq 1 ]; then
   # Which PRODUCER kinds are among the never-delivered channels. This hook is
   # counts-only for tenant privacy, so it cannot name the channel -- but the
   # registration a reader must do differs by producer (a platform lane wants an
-  # athena-events routing rule; a slack channel wants a client-side instance),
+  # athena-events routing rule; a slack channel wants a server-side agent
+  # instance, asked for via inbox-doctor, never a client-side config mapping),
   # and a Fix that names only the slack path sends a platform-lane operator to
   # the wrong file. It cannot say WHICH channel, so when both kinds are dark it
   # names BOTH paths rather than guessing one. `.producer` rides the count doc
