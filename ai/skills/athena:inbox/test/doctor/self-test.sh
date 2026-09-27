@@ -300,6 +300,19 @@ PENTRY='{"v":1,"repo":"'"${C2}"'","channels":{"flaky":{"kind":"log","path":"ch-f
 PCH="$(cd "${R2}" && doctor_check_channels "${PENTRY}" ".")"
 assert_finding "platform never-delivered -> warn naming NO SERVER PRODUCER REGISTERED" "${PCH}" warn "never-delivered" "NO SERVER PRODUCER REGISTERED"
 assert_contains "platform never-delivered Fix names the athena-events handling rule" "athena-events" "${PCH}"
+# DND-937: a never-delivered channel whose doorbell exists (inbox-wait
+# provisions it before anything is delivered) must never grade freshness ok.
+# Measured 2026-09-26: `ok freshness:slack ... last delivery 257090s ago
+# (doorbell mtime)` while custom-slack.jsonl did not exist.
+: > "${ATHENA_INBOX_ROOT}/ch-slack.event"; chmod 600 "${ATHENA_INBOX_ROOT}/ch-slack.event"
+CH="$(cd "${R2}" && DOCTOR_NO_SERVER=1 doctor_check_channels "${ENTRY}" ".")"
+assert_no_finding "never delivered + a provisioned doorbell -> no ok freshness" "${CH}" ok "freshness:slack" ""
+assert_finding "never delivered + a provisioned doorbell -> freshness na" "${CH}" na "freshness:slack" "no delivery to age"
+: > "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"; chmod 600 "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"
+CH="$(cd "${R2}" && DOCTOR_NO_SERVER=1 doctor_check_channels "${ENTRY}" ".")"
+assert_no_finding "an EMPTY channel file + a provisioned doorbell -> no ok freshness" "${CH}" ok "freshness:slack" ""
+rm -f "${ATHENA_INBOX_ROOT}/ch-slack.jsonl" "${ATHENA_INBOX_ROOT}/ch-slack.event"
+
 # deliver, good mode, fresh
 printf '{"v":1,"ts":"1","channel":"c","event_id":"e"}\n' > "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"; chmod 600 "${ATHENA_INBOX_ROOT}/ch-slack.jsonl"
 CH="$(cd "${R2}" && doctor_check_channels "${ENTRY}" ".")"

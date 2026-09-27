@@ -343,10 +343,35 @@ channel is normal — so the misconfiguration is invisible. Therefore:
   with the age, even when nothing is new, and a diagnostic MUST grade it a
   fault. "Quiet" and "dark" look identical by count and must not look identical
   in output (DND-316; the 2026-09-22 96-minute outage was read as "nothing new"
-  for its whole length). The age is the channel's doorbell mtime — the writer
-  bumps it on every delivery and it survives rotation — or the inbox file's
-  mtime when that is newer. Staleness is the reader's own fact about its own
-  files, never message content, so reporting it is within the counts-only rule.
+  for its whole length). **The age comes from the channel's own delivered
+  content, never from its doorbell:**
+  - `log`: the live inbox file's mtime when the file is **non-empty** (only the
+    writer changes it, so its mtime is its last append). When the live file is
+    empty or absent and the rotated generation is non-empty, nothing arrived
+    since the rotation, so the last delivery predates `rotated_at`: the age is
+    `now - rotated_at`, reported as a **lower bound** ("at least"). STALE past
+    the threshold is then certain; under it, STALE may fire up to one threshold
+    late. `.1`'s mtime is not used, because rotation restamps it.
+  - `maildir`: the mtime of the newest message file in the `read` directory or
+    its `.acked/` (neither `link(2)` nor the ack's `rename(2)` changes it).
+  - Nothing delivered on disk (no such file) is **no age at all**: a
+    never-delivered channel never reads as fresh, and a diagnostic grades its
+    freshness `na`. Delivered content that exists but cannot be aged (an
+    unreadable mtime, a missing `rotated_at`, a directory that cannot be
+    searched) is a **failed measurement**, reported as such, never as "never
+    delivered".
+
+  Staleness is the reader's own fact about its own files, never message
+  content, so reporting it is within the counts-only rule.
+
+  **Later (2026-09-27):** the age was the channel's doorbell mtime ("the writer
+  bumps it on every delivery and it survives rotation"), or the inbox file's
+  mtime when that was newer. Superseded by DND-937. A doorbell is created by
+  `inbox-wait`'s provisioning before anything is delivered, and re-created if it
+  goes missing, so its mtime can be a creation, not a delivery. Measured
+  2026-09-26: `inbox-doctor` graded `ok freshness:slack … last delivery 257090s
+  ago (doorbell mtime)` while `custom-slack.jsonl` did not exist, and a
+  re-provisioned doorbell could equally hide a stale channel.
   STALE is a backstop, not the wedge detector: a threshold must sit above the
   channel's healthy quiet gaps or it is noise, so a short outage can pass under
   it. The client's connect cycle (*The diagnostic: `inbox-doctor`* →
@@ -607,7 +632,7 @@ values the reader still has no schema for.
 | `read` | yes | string | Subdirectory this identity reads from and acks into. |
 | `write` | yes | string | Subdirectory this identity writes into. |
 | `identity` | yes | string | This side's name, as it appears in a message's `from`/`to`. MUST match `^[a-z0-9][a-z0-9_-]*$` and be ≤ 64 bytes. |
-| `stale_after_s` | no | integer ≥ 0, or null | Staleness threshold in seconds for the `read` side (its doorbell age). Absent → **none**: a conversation may be quiet for days. `0` or `null` also means none. |
+| `stale_after_s` | no | integer ≥ 0, or null | Staleness threshold in seconds for the `read` side (the age of its newest message file; see *Tenancy: the registry*). Absent → **none**: a conversation may be quiet for days. `0` or `null` also means none. |
 
 `read` and `write` MUST differ. Each MUST be a single path segment matching
 `^[a-z0-9][a-z0-9_-]*$`.
@@ -805,11 +830,13 @@ producer-specific — the Slack enum above, the platform kinds of *Platform `log
 line kinds*, a lane line's routed event `type` — so interpreting a specific value
 is still producer-aware.) **Freshness is a separate concern, not part of
 `{v, kind}`**: distinguishing *quiet* from *dark* (R2) needs a freshness signal,
-and whether that is a per-line **`received_at`** on platform lines or comes from
-the delivery/doorbell timestamps (D26 default: the doorbell mtime cross-checked
-with the server's `acked_at`, i.e. **not** a per-line field) is **decided in
-DND-315/DND-316** and pending — so the R2 quiet/dark distinction rests on that
-pending freshness source, **not** on `{v, kind}`. R4 also says **nothing about
+and that signal is **not** a per-line field: it is the local mtime of the
+channel's own delivered files, never the doorbell's, cross-checked with the
+server's `acked_at` (the STALE rule under *Tenancy: the registry*) — so the R2
+quiet/dark distinction rests on that freshness source, **not** on `{v, kind}`.
+(**Later (2026-09-27):** this read "the D26 default: the doorbell mtime",
+decided in DND-315/DND-316 and then pending. Superseded by DND-937; the reason
+is at the STALE rule.) R4 also says **nothing about
 dedupe** for platform lines: platform-producer lines still carry **no** dedupe
 key, and the validator's refusal of `dedupe` on a `producer:"platform"` channel
 **stands unchanged** (*Schema*) — the earlier "registry `dedupe` names the id

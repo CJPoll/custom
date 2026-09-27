@@ -7,8 +7,8 @@
 # asks the two questions that DO tell them apart:
 #
 #   1. Where is the client in its connect cycle, and for how long? (client log)
-#   2. How long since each channel last received a delivery? (the `.event`
-#      doorbell mtime)
+#   2. How long since each channel last received a delivery? (the channel's
+#      own delivered content -- never the `.event` doorbell, DND-937)
 #
 # THE WEDGE SIGNATURE. The only verified one (shipwright note, corrections of
 # 2026-09-22 20:45Z / 21:57Z / 22:33Z) is a reconnect that never finishes: a
@@ -261,60 +261,125 @@ liveness_stale_after() {
 
 # liveness_channel_freshness <entry-json> <chan> <resolved-paths> [now]
 # One JSON object for one channel:
-#   last_delivery_age_s  seconds since the last delivery, or null (never)
-#   age_basis            "doorbell" | "inbox" | "none" -- which file said so
+#   last_delivery_age_s  seconds since the last delivery, or null (nothing was
+#                        ever delivered that is still on disk)
+#   age_basis            "inbox" | "rotation" | "message" | "none" -- what said so
+#   age_is_lower_bound   true when the age is a floor, not a measurement
+#                        (basis "rotation"; see below)
 #   stale_after_s        the threshold, or null (none)
 #   stale                true only when both are known and age > threshold
 #   last_join_age_s      seconds since the CLIENT last joined (machine-wide;
 #                        log channels only, null when there is no client log)
+# Status 1 (nothing printed) when a channel's content EXISTS but its age cannot
+# be read -- "could not look" is never "found nothing".
 #
-# AGE SOURCE (decided with DND-315): the channel's `.event` doorbell mtime -- the
-# client bumps it on every append, it survives rotation (the live .jsonl does
-# not), and it is producer-agnostic. When the inbox file is NEWER than the
-# doorbell (a doorbell provisioned late) the newer one wins: the age is of the
-# LAST delivery, and the older file cannot be it. The server's last `acked_at`
-# is the cross-check, reported by inbox-doctor's server check.
+# AGE SOURCE: THE CHANNEL'S OWN DELIVERED CONTENT, NEVER THE DOORBELL (DND-937).
+# This used the `.event` doorbell mtime (DND-315/316). A doorbell is provisioned
+# by inbox-wait before anything is delivered, and re-created if it goes missing,
+# so its mtime can be a creation, not a delivery. Measured 2026-09-26: the doctor
+# graded `ok freshness:slack ... last delivery 257090s ago (doorbell mtime)` while
+# custom-slack.jsonl did not exist. A never-delivered channel read as delivered,
+# and a re-provisioned doorbell could hide a stale one. So:
+#
+#   log      the live inbox file, when NON-EMPTY: its mtime is its last append,
+#            since only the writer changes it (readers keep offsets in the state
+#            file). An empty or absent live file with a NON-EMPTY `.1` means
+#            nothing arrived since the rotation, so the last delivery predates
+#            `rotated_at`: the age is `now - rotated_at`, a LOWER BOUND (STALE
+#            past the threshold is certain; under it, it may fire up to one
+#            threshold late). `.1`'s mtime is not used: rotation restamps it.
+#            Neither holds -> no delivery (null).
+#   maildir  the newest message file (`*.md`) in the read directory or its
+#            `.acked/`: a message's mtime is its write, and neither link(2)
+#            nor the ack's rename(2) changes it. None -> no delivery (null).
+#
+# All clocks are this machine's (file mtimes, and `rotated_at`, which this
+# machine's reader stamps), never a server `received_at` (contract -> "Delivery
+# timestamps"). The server's last `acked_at` is the cross-check, reported by
+# inbox-doctor's server check.
 #
 # STALENESS IS THIS MACHINE'S OWN FACT (file mtimes, a threshold it configured),
 # never message content, so reporting it keeps the counts-only rule.
 liveness_channel_freshness() {
   local entry="$1" chan="$2" resolved="$3" now="${4:-$(date -u +%s)}"
-  local kind bell inbox mt_b="" mt_i="" newest="" basis="none" age="null" thr join join_age="null" stale="false"
+  local kind newest="" basis="none" lower="false" age="null" thr join join_age="null" stale="false"
   kind="$(printf '%s\n' "${resolved}" | awk -F'\t' '$1=="kind"{print $2; exit}')"
   case "${kind}" in
-    log)
-      bell="$(printf '%s\n' "${resolved}" | awk -F'\t' '$1=="doorbell"{print $2; exit}')"
-      inbox="$(printf '%s\n' "${resolved}" | awk -F'\t' '$1=="inbox"{print $2; exit}')"
-      ;;
-    maildir)
-      bell="$(printf '%s\n' "${resolved}" | awk -F'\t' '$1=="read_doorbell"{print $2; exit}')"
-      inbox=""
-      ;;
-    *) printf '{"last_delivery_age_s":null,"age_basis":"none","stale_after_s":null,"stale":false,"last_join_age_s":null}\n'; return 0 ;;
+    log)     newest="$(_liveness_log_last_delivery "${resolved}")" || return 1 ;;
+    maildir) newest="$(_liveness_maildir_last_delivery "${resolved}")" || return 1 ;;
+    *) printf '{"last_delivery_age_s":null,"age_basis":"none","age_is_lower_bound":false,"stale_after_s":null,"stale":false,"last_join_age_s":null}\n'; return 0 ;;
   esac
-  # A file that EXISTS but whose mtime cannot be read is a failed measurement
-  # (status 1), never "no delivery": an unmeasured channel must not read as a
-  # quiet, fresh one.
-  if [ -n "${bell}" ] && [ -e "${bell}" ]; then
-    mt_b="$(stat -c %Y -- "${bell}" 2>/dev/null)" || return 1
-    case "${mt_b}" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -n "${newest}" ]; then
+    IFS=$'\t' read -r basis newest <<<"${newest}"
+    [ "${basis}" = "rotation" ] && lower="true"
+    age=$(( now - newest )); [ "${age}" -ge 0 ] || age=0
   fi
-  if [ -n "${inbox}" ] && [ -e "${inbox}" ]; then
-    mt_i="$(stat -c %Y -- "${inbox}" 2>/dev/null)" || return 1
-    case "${mt_i}" in ''|*[!0-9]*) return 1 ;; esac
-  fi
-  if [ -n "${mt_b}" ]; then newest="${mt_b}"; basis="doorbell"; fi
-  if [ -n "${mt_i}" ] && { [ -z "${newest}" ] || [ "${mt_i}" -gt "${newest}" ]; }; then newest="${mt_i}"; basis="inbox"; fi
-  if [ -n "${newest}" ]; then age=$(( now - newest )); [ "${age}" -ge 0 ] || age=0; fi
   thr="$(liveness_stale_after "${entry}" "${chan}" "${kind}")" || return 1
   if [ "${thr}" != "null" ] && [ "${age}" != "null" ] && [ "${age}" -gt "${thr}" ]; then stale="true"; fi
   if [ "${kind}" = "log" ]; then
     join="$(liveness_last_join_epoch)"
     if [ -n "${join}" ]; then join_age=$(( now - join )); [ "${join_age}" -ge 0 ] || join_age=0; fi
   fi
-  jq -n -c --argjson age "${age}" --arg basis "${basis}" --argjson thr "${thr}" \
+  jq -n -c --argjson age "${age}" --arg basis "${basis}" --argjson lower "${lower}" --argjson thr "${thr}" \
     --argjson stale "${stale}" --argjson join "${join_age}" \
-    '{last_delivery_age_s: $age, age_basis: $basis, stale_after_s: $thr, stale: $stale, last_join_age_s: $join}'
+    '{last_delivery_age_s: $age, age_basis: $basis, age_is_lower_bound: $lower, stale_after_s: $thr, stale: $stale, last_join_age_s: $join}'
+}
+
+# _liveness_mtime <path>  -- the mtime epoch, or status 1. An existing file whose
+# mtime cannot be read is a failed measurement, never "no delivery".
+_liveness_mtime() {
+  local mt
+  mt="$(stat -c %Y -- "$1" 2>/dev/null)" || return 1
+  case "${mt}" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "${mt}"
+}
+
+# _liveness_searchable_dir <dir>  -- status 1 unless <dir> is a directory this
+# process can search. Past a directory it cannot search, every file reads as
+# absent, and "absent" here means "never delivered": that is could-not-look
+# dressed as found-nothing.
+_liveness_searchable_dir() { [ -d "$1" ] && [ -x "$1" ]; }
+
+# _liveness_log_last_delivery <resolved>
+# "<basis>\t<epoch>" for a log channel's last delivery, nothing when none, and
+# status 1 when content exists but cannot be aged.
+_liveness_log_last_delivery() {
+  local resolved="$1" inbox state one rot epoch
+  inbox="$(printf '%s\n' "${resolved}" | awk -F'\t' '$1=="inbox"{print $2; exit}')"
+  state="$(printf '%s\n' "${resolved}" | awk -F'\t' '$1=="state"{print $2; exit}')"
+  [ -n "${inbox}" ] || return 1
+  _liveness_searchable_dir "$(dirname -- "${inbox}")" || return 1
+  one="${inbox}.1"
+  if [ -s "${inbox}" ]; then
+    epoch="$(_liveness_mtime "${inbox}")" || return 1
+    printf 'inbox\t%s\n' "${epoch}"
+    return 0
+  fi
+  [ -s "${one}" ] || return 0
+  # Rotated and nothing since. The state file is the only record of when; a
+  # missing or unparseable `rotated_at` leaves content we cannot age.
+  [ -n "${state}" ] && [ -r "${state}" ] || return 1
+  rot="$(jq -r '.rotated_at // empty' <"${state}" 2>/dev/null)" || return 1
+  epoch="$(liveness_epoch_of "${rot}")" || return 1
+  printf 'rotation\t%s\n' "${epoch}"
+}
+
+# _liveness_maildir_last_delivery <resolved>
+# "message\t<epoch>" for the newest message file in the read directory or its
+# `.acked/`, nothing when none (or no read directory yet: the peer creates it
+# on first send), status 1 when a directory that exists cannot be listed.
+_liveness_maildir_last_delivery() {
+  local resolved="$1" dir d newest="" mt out
+  for d in read_dir ack_dir; do
+    dir="$(printf '%s\n' "${resolved}" | awk -F'\t' -v k="${d}" '$1==k{print $2; exit}')"
+    [ -n "${dir}" ] || { [ "${d}" = "read_dir" ] && return 1; continue; }
+    [ -e "${dir}" ] || continue
+    [ -r "${dir}" ] && _liveness_searchable_dir "${dir}" || return 1
+    out="$(find "${dir}" -mindepth 1 -maxdepth 1 -type f -name '*.md' -printf '%T@\n' 2>/dev/null)" || return 1
+    mt="$(printf '%s\n' "${out}" | awk -F. 'NF && $1 ~ /^[0-9]+$/ && $1 > m {m = $1} END {if (m != "") print m}')"
+    if [ -n "${mt}" ] && { [ -z "${newest}" ] || [ "${mt}" -gt "${newest}" ]; }; then newest="${mt}"; fi
+  done
+  [ -z "${newest}" ] || printf 'message\t%s\n' "${newest}"
 }
 
 # liveness_human_age <seconds>  ->  "94m", "3h12m", "45s" (for one-line reports)

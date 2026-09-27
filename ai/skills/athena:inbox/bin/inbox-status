@@ -26,7 +26,7 @@
 # new, because "quiet" and "dark" must not read the same. Every line printed
 # for a channel carries its last-delivery age and the client's last-join age;
 # --json always carries them (`last_delivery_age_s`, `age_basis`,
-# `stale_after_s`, `stale`, `last_join_age_s`). A healthy quiet channel still
+# `age_is_lower_bound`, `stale_after_s`, `stale`, `last_join_age_s`). A healthy quiet channel still
 # prints nothing: an age on every channel every session would be the noise the
 # rule above forbids.
 #
@@ -172,7 +172,9 @@ printf '%s' "${STATUS}" | jq -r --argjson have_read "${HAVE_READ}" '
   # Freshness suffix (DND-316 R2): the last-delivery age and the client last-join
   # age, on every line this renderer prints for a channel. These are facts this
   # machine owns (file mtimes, its own client log), never message content.
-  def ages: (if .last_delivery_age_s == null then "" else " Last delivery \(.last_delivery_age_s | hage) ago" end)
+  # A rotated channel with nothing since has only a FLOOR on its age (DND-937).
+  def dage: (if (.age_is_lower_bound // false) then "at least " else "" end) + (.last_delivery_age_s | hage);
+  def ages: (if .last_delivery_age_s == null then "" else " Last delivery \(dage) ago" end)
             + (if .last_join_age_s == null then "" else "; client last joined \(.last_join_age_s | hage) ago" end)
             + (if .last_delivery_age_s == null and .last_join_age_s == null then "" else "." end);
   .channels[]
@@ -193,13 +195,13 @@ printf '%s' "${STATUS}" | jq -r --argjson have_read "${HAVE_READ}" '
       # The freshness MEASUREMENT failed. Printed even at zero new: a channel
       # nobody could age must not read as a healthy quiet one (the failed
       # lookup that looks empty).
-      "athena:inbox: \($c.name) — \(if $n > 0 then "\($n) new\($u), " else "" end)freshness could NOT be determined, so quiet and dark cannot be told apart.\(if $n > 0 then " \($read_hint)" else "" end)\($sbad)\n  Fix: run inbox-doctor (freshness:\($c.name)) to see why this channel could not be aged -- an unreadable doorbell or inbox file, or a malformed stale_after_s."
+      "athena:inbox: \($c.name) — \(if $n > 0 then "\($n) new\($u), " else "" end)freshness could NOT be determined, so quiet and dark cannot be told apart.\(if $n > 0 then " \($read_hint)" else "" end)\($sbad)\n  Fix: run inbox-doctor (freshness:\($c.name)) to see why this channel could not be aged -- an unreadable inbox file, state file (rotated_at) or maildir directory, or a malformed stale_after_s."
     elif (.stale // false) then
       # STALE is a FAULT LINE and prints even at zero new: "quiet" and "dark"
       # must not read the same (DND-316 R2). The all-zero-prints-nothing rule
       # above is about healthy quiet; a channel past its own threshold is not
       # known to be healthy.
-      "athena:inbox: \($c.name) — \(if $n > 0 then "\($n) new\($u), " else "" end)STALE: last delivery \(.last_delivery_age_s | hage) ago (threshold \(.stale_after_s | hage))\(if .last_join_age_s == null then "" else "; client last joined \(.last_join_age_s | hage) ago" end).\(if $n > 0 then " \($read_hint)" else "" end)\($sbad)\n  Fix: quiet and dark look the same from here. Run inbox-doctor to check the relay (client-liveness, server-reachability); if the relay is healthy and this channel is simply quiet, raise its \"stale_after_s\" in the registry entry. A wedged client is captured then restarted by the */5 supervisor watchdog."
+      "athena:inbox: \($c.name) — \(if $n > 0 then "\($n) new\($u), " else "" end)STALE: last delivery \(dage) ago (threshold \(.stale_after_s | hage))\(if .last_join_age_s == null then "" else "; client last joined \(.last_join_age_s | hage) ago" end).\(if $n > 0 then " \($read_hint)" else "" end)\($sbad)\n  Fix: quiet and dark look the same from here. Run inbox-doctor to check the relay (client-liveness, server-reachability); if the relay is healthy and this channel is simply quiet, raise its \"stale_after_s\" in the registry entry. A wedged client is captured then restarted by the */5 supervisor watchdog."
     elif $n > 0 then
       "athena:inbox: \($c.name) — \($n) new\($u). \($read_hint)\(ages)\($sbad)"
     elif .kind == "log" and (.never_delivered // false) then

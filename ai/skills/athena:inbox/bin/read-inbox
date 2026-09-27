@@ -236,13 +236,14 @@ else
       fi
     else
       # "Nothing new" and "dark" must not read the same (DND-316 R2). The
-      # freshness is this machine's own fact (the doorbell mtime, the client
-      # log), so it is safe beside a count. A freshness lookup that FAILS says
+      # freshness is this machine's own fact (its delivered files' mtimes, never
+      # the doorbell -- DND-937 -- and the client log), so it is safe beside a count. A freshness lookup that FAILS says
       # so, rather than printing a bare "nothing new" that reads as healthy.
       if ! FRESH="$(inbox_channel_freshness_json "${CHANNEL}" "." 2>/dev/null)" || [ -z "${FRESH}" ]; then
         printf 'athena:inbox: %s — nothing new (freshness could not be determined; run inbox-doctor).\n' "${CHANNEL}"
       elif [ "$(printf '%s' "${FRESH}" | jq -r '.stale')" = "true" ]; then
-        printf 'athena:inbox: %s — nothing new; STALE: last delivery %s ago (threshold %s)%s.\n' "${CHANNEL}" \
+        printf 'athena:inbox: %s — nothing new; STALE: last delivery %s%s ago (threshold %s)%s.\n' "${CHANNEL}" \
+          "$([ "$(printf '%s' "${FRESH}" | jq -r '.age_is_lower_bound')" = "true" ] && printf 'at least ')" \
           "$(liveness_human_age "$(printf '%s' "${FRESH}" | jq -r '.last_delivery_age_s')")" \
           "$(liveness_human_age "$(printf '%s' "${FRESH}" | jq -r '.stale_after_s')")" \
           "$(J="$(printf '%s' "${FRESH}" | jq -r '.last_join_age_s')"; [ "${J}" = "null" ] || printf '; client last joined %s ago' "$(liveness_human_age "${J}")")"
@@ -250,9 +251,16 @@ else
       else
         D="$(printf '%s' "${FRESH}" | jq -r '.last_delivery_age_s')"
         J="$(printf '%s' "${FRESH}" | jq -r '.last_join_age_s')"
+        FLOOR=""
+        [ "$(printf '%s' "${FRESH}" | jq -r '.age_is_lower_bound')" = "true" ] && FLOOR="at least "
+        # Each clause stands alone: a channel with no delivery on disk (null age)
+        # but a client join must not render as "nothing new.; client ...".
         SUFFIX=""
-        [ "${D}" = "null" ] || SUFFIX=" Last delivery $(liveness_human_age "${D}") ago"
-        [ "${J}" = "null" ] || SUFFIX="${SUFFIX}; client last joined $(liveness_human_age "${J}") ago"
+        [ "${D}" = "null" ] || SUFFIX=" Last delivery ${FLOOR}$(liveness_human_age "${D}") ago"
+        if [ "${J}" != "null" ]; then
+          if [ -n "${SUFFIX}" ]; then SUFFIX="${SUFFIX}; client last joined $(liveness_human_age "${J}") ago"
+          else SUFFIX=" Client last joined $(liveness_human_age "${J}") ago"; fi
+        fi
         [ -z "${SUFFIX}" ] || SUFFIX="${SUFFIX}."
         printf 'athena:inbox: %s — nothing new.%s\n' "${CHANNEL}" "${SUFFIX}"
       fi

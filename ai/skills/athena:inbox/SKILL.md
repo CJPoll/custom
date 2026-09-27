@@ -553,9 +553,12 @@ checks now answer the question a pid cannot:
   naming the step it is stuck in. A connected client that is merely quiet logs
   nothing and stays `ok`. Sockets are never read: a CLOSE-WAIT socket appears
   on healthy clients too.
-- `freshness:<channel>` **fails** a channel whose last delivery (its `.event`
-  doorbell mtime) is older than `stale_after_s` (default 1800 s for a `log`
-  channel, none for a `maildir`; 0 or null disables).
+- `freshness:<channel>` **fails** a channel whose last delivery is older than
+  `stale_after_s` (default 1800 s for a `log` channel, none for a `maildir`; 0
+  or null disables). The age comes from the channel's delivered content, never
+  its `.event` doorbell (DND-937): a non-empty inbox file's mtime; for a rotated
+  channel with nothing since, a floor from `rotated_at`; for a maildir, the
+  newest message file. Nothing delivered on disk is `na`, never `ok`.
 - `dump-dir` asserts the client's SIGQUIT dump directory resolves and is
   writable (the client creates it lazily; the supervisor now creates it at
   start).
