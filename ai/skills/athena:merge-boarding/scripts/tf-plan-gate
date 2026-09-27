@@ -1,11 +1,11 @@
 #!/usr/bin/ruby
 # frozen_string_literal: true
 
-# tf-plan-gate -- does this terraform plan destroy stateful infra or add cost?
+# tf-plan-gate -- does this terraform plan destroy infrastructure or add cost?
 #
 # The objective check behind ~/.claude/CLAUDE.md -> "Standing owner approvals"
-# -> "What no standing approval covers": a plan that DESTROYS or REPLACES a
-# stateful resource, or ADDS COST, holds for the owner under every standing
+# -> "What no standing approval covers": a plan that DELETES infrastructure,
+# REPLACES a stateful resource, or ADDS COST, holds for the owner under every standing
 # approval. A secrets update (a new value or config on an existing secret) is
 # not held by itself.
 #
@@ -48,8 +48,13 @@ VALUE_HOLDING_TYPES = %w[
 ].freeze
 
 # An expiration policy deletes stored objects or images when it runs, so a
-# create or update holds as DESTROY. Removing one deletes nothing.
+# create or update holds as DESTROY. Removing one is a plain delete, which
+# holds like any other (it also lets storage grow, which adds cost).
 EXPIRY_POLICY_TYPES = %w[aws_ecr_lifecycle_policy aws_s3_bucket_lifecycle_configuration].freeze
+
+# The only types whose plain DELETE passes: terraform-internal bookkeeping
+# with nothing behind it. Any other delete removes infrastructure.
+DELETE_SAFE_TYPES = %w[null_resource terraform_data time_sleep].freeze
 
 # Named for the output only; the rule is "not free-stateless".
 STATEFUL_TYPES = %w[
@@ -70,7 +75,7 @@ COST_ATTRS = %w[
 
 def usage
   <<~EOF
-    #{PROG} -- does a terraform plan destroy stateful infra or add cost?
+    #{PROG} -- does a terraform plan destroy infrastructure or add cost?
 
     Usage:
       #{PROG} --plan PLAN.json [--control CONTROL.json]
@@ -91,8 +96,11 @@ def usage
     offline plan, having no state, cannot show as a delete.
 
     HOLD when any managed resource change:
-      DESTROY   deletes or replaces (delete+create) a type that is not
-                known free-and-stateless (stateful types fail wide), or one
+      DESTROY   deletes any type but #{DELETE_SAFE_TYPES.join(', ')}
+                (a removed VPC, gateway, role or policy is removed
+                infrastructure), or removes its block offline; or replaces
+                (delete+create) a type that is not known
+                free-and-stateless (stateful types fail wide), or one
                 that holds a stored value (#{VALUE_HOLDING_TYPES.first(3).join(', ')}, ...),
                 or updates such a type beyond its value, tags or description;
                 or creates or updates an expiration policy (#{EXPIRY_POLICY_TYPES.join(', ')});
@@ -108,7 +116,7 @@ def usage
     Output: one line per held change, VERDICT<TAB>address<TAB>reason.
 
     Exit codes:
-      0  CLEAR: nothing destroys stateful infra or adds cost
+      0  CLEAR: nothing destroys infrastructure or adds cost
       4  HOLD: the owner's go is needed (listed)
       2  usage / unreadable file / --control on a plan with state (nothing measured)
       3  COULD NOT MEASURE: not a plan JSON, or an errored/incomplete plan
@@ -179,9 +187,22 @@ def free_stateless?(type)
   FREE_STATELESS_TYPES.include?(type) || FREE_STATELESS_PREFIXES.any? { |p| type.start_with?(p) }
 end
 
-# Free to create is not the same as safe to destroy.
-def safe_destroy?(type)
+# Free to create is not the same as safe to destroy. A REPLACE of a free,
+# stateless type recreates it, so it passes. A plain DELETE removes
+# infrastructure (a VPC, an internet gateway, an IAM role, a security group),
+# which the owner reserved ("destroy production infrastructure"), whether or
+# not it holds data; only DELETE_SAFE_TYPES (terraform-internal bookkeeping)
+# pass.
+def safe_replace?(type)
   free_stateless?(type) && !VALUE_HOLDING_TYPES.include?(type)
+end
+
+def safe_delete?(type)
+  DELETE_SAFE_TYPES.include?(type)
+end
+
+def safe_destroy?(actions, type)
+  actions.include?("create") ? safe_replace?(type) : safe_delete?(type)
 end
 
 # Attributes a value-holding type changes IN PLACE: the value itself, tags and
@@ -357,6 +378,8 @@ class Stability
 
     if eh.is_a?(Hash) && (eh.key?("constant_value") || eh.key?("references"))
       refs_same?(mods, Array(eh["references"]), depth)
+    elsif eh.is_a?(Hash) && eh.empty?
+      false # `{}`: an expression terraform could not summarise (a function call)
     elsif eh.is_a?(Hash)
       eh.keys.all? { |k| same_tree?(mods, ec[k], eh[k], depth + 1) }
     elsif eh.is_a?(Array)
@@ -421,7 +444,9 @@ end
 def destroy_label(type)
   return "holds a stored value" if VALUE_HOLDING_TYPES.include?(type)
 
-  STATEFUL_TYPES.include?(type) ? "stateful" : "not known stateless"
+  return "stateful" if STATEFUL_TYPES.include?(type)
+
+  free_stateless?(type) ? "infrastructure removed" : "not known stateless"
 end
 
 # Tag maps are labels, not sizing: a tag named `tier` bills nothing.
@@ -532,7 +557,7 @@ changes.each do |rc|
   considered += 1
   addr = rc["address"]
   type = rc["type"].to_s
-  if actions.include?("delete") && !safe_destroy?(type)
+  if actions.include?("delete") && !safe_destroy?(actions, type)
     verb = actions.include?("create") ? "replace" : "destroy"
     held << ["DESTROY", addr, "#{verb} of #{type} (#{destroy_label(type)})"]
   end
@@ -594,7 +619,7 @@ control.each do |rc|
 
   control_only += 1
   type = rc["type"].to_s
-  next if safe_destroy?(type)
+  next if safe_delete?(type) # a removed block is a plain delete
 
   held << ["DESTROY", rc["address"], "#{type} (#{destroy_label(type)}) is in the control plan but absent from the change plan: its block was removed"]
 end
@@ -603,7 +628,7 @@ held.each { |h| puts h.join("\t") }
 summary = "#{PROG}: #{considered} resource change(s) considered" +
           (control_path ? ", #{skipped_control} also in the control, skipped, #{control_only} only in the control" : "")
 if held.empty?
-  puts "#{summary}; CLEAR: nothing destroys stateful infra or adds cost."
+  puts "#{summary}; CLEAR: nothing destroys infrastructure or adds cost."
   exit 0
 end
 puts "#{summary}; HOLD: #{held.size} change(s) need the owner's go."

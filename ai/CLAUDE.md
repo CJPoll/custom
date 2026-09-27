@@ -372,13 +372,17 @@ as "direct, verified".
 
 The holds:
 
-- **Terraform that destroys stateful infrastructure or adds cost.** Before
+- **Terraform that destroys infrastructure or adds cost.** Before
   merging any change whose merge applies terraform, run the main checkout's
   `~/dev/custom/ai/skills/athena:merge-boarding/scripts/tf-plan-gate --plan
   <terraform show -json output>` on the plan for the merged head. It holds
   (exit 4) on:
-  - **Destroy:** a `delete` or replace (`delete`+`create`) of any type not on
-    its free-and-stateless list. RDS, DynamoDB, S3 buckets, KMS keys, EC2
+  - **Destroy:** a plain `delete` of any type, or an offline removed block,
+    since removing a VPC, gateway, role or policy destroys production
+    infrastructure whether or not it holds data. Only terraform bookkeeping
+    (`null_resource`, `terraform_data`, `time_sleep`) is exempt. A replace
+    (`delete`+`create`) holds for any type not on the tool's
+    free-and-stateless list, since a stateless one is recreated. RDS, DynamoDB, S3 buckets, KMS keys, EC2
     instances, EBS/EFS volumes, ECR repositories, EIPs and Secrets Manager
     secrets are stateful. An unknown type fails wide. Deleting or replacing
     a type that holds a stored value (an SSM parameter, a secret version, a
@@ -408,7 +412,7 @@ The holds:
     reference to a resource that is itself unchanged, checked recursively.
     It sets aside an attribute unknown in both plans on the same test. A
     re-pointed reference, a `local.*`, or a plan with no configuration
-    holds. A stateful resource in the control but absent from the change
+    holds. A resource (other than terraform bookkeeping) in the control but absent from the change
     plan holds as a destroy, because an offline plan shows a removed block
     only by its absence. Offline, an update and a replace both read as
     `create`; the same value, tags or description test applies.

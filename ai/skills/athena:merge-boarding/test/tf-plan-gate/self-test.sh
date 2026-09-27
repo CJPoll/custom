@@ -74,7 +74,13 @@ check control-only-ssm     4 --plan "$(plan bf)" --control "$(plan bg "$(rc aws_
 # An expiration policy deletes stored objects or images when it runs.
 check s3-lifecycle-create  4 --plan "$(plan bh "$(rc aws_s3_bucket_lifecycle_configuration '["create"]' null '{}')")"
 check ecr-lifecycle-update 4 --plan "$(plan bi "$(rc aws_ecr_lifecycle_policy '["update"]' '{"policy":"a"}' '{"policy":"b"}')")"
-check ecr-lifecycle-delete 0 --plan "$(plan bj "$(rc aws_ecr_lifecycle_policy '["delete"]' '{}' null)")"
+# A plain delete is removed infrastructure whatever the type (the owner:
+# "destroy production infrastructure"); a replace of a stateless type is not.
+check vpc-delete           4 --plan "$(plan ca1 "$(rc aws_vpc '["delete"]' '{}' null)")"
+check igw-delete           4 --plan "$(plan ca2 "$(rc aws_internet_gateway '["delete"]' '{}' null)")"
+check iam-role-delete      4 --plan "$(plan ca3 "$(rc aws_iam_role '["delete"]' '{}' null)")"
+check terraform-data-delete 0 --plan "$(plan ca4 "$(rc terraform_data '["delete"]' '{}' null)")"
+check ecr-lifecycle-delete 4 --plan "$(plan bj "$(rc aws_ecr_lifecycle_policy '["delete"]' '{}' null)")"
 check random-pw-replace    0 --plan "$(plan p "$(rc random_password '["delete","create"]' '{}' '{}')")"
 check tag-update-clear     0 --plan "$(plan q "$(rc aws_instance '["update"]' '{"tags":{"a":"1"}}' '{"tags":{"a":"2"}}')")"
 check no-op-and-read       0 --plan "$(plan r "$(rc aws_db_instance '["no-op"]' '{}' '{}')" "$(rc aws_db_instance '["read"]' '{}' '{}')")"
@@ -104,7 +110,14 @@ check control-online-in-control 2 --plan "$(plan uc "$inst")" --control "$(plan 
 # that deletes the resource block leaves it only in the control: a destroy.
 rds_new="$(rc aws_db_instance '["create"]' null '{}')"
 check control-only-destroy 4 --plan "$(plan aa)" --control "$(plan ab "$rds_new")"
-check control-only-free    0 --plan "$(plan ac)" --control "$(plan ad "$(rc aws_iam_role '["create"]' null '{}')")"
+check control-only-free    4 --plan "$(plan ac)" --control "$(plan ad "$(rc aws_iam_role '["create"]' null '{}')")"
+check control-only-vpc     4 --plan "$(plan ac2)" --control "$(plan ad2 "$(rc aws_vpc '["create"]' null '{}')")"
+check control-only-bookkeeping 0 --plan "$(plan ac3)" --control "$(plan ad3 "$(rc null_resource '["create"]' null '{}')")"
+# `{}` is an expression terraform could not summarise (uuid(), timestamp()):
+# never provably the same.
+fncfg='"configuration":{"root_module":{"resources":[{"address":"aws_ssm_parameter.x","type":"aws_ssm_parameter","expressions":{"name":{}}}]}}'
+check offline-fn-expr      4 --plan "$(planc ae2 "$fncfg" "$(rc aws_ssm_parameter '["create"]' null '{"value":"b"}' '{"id":true,"name":true}')")" \
+                             --control "$(planc af2 "$fncfg" "$(rc aws_ssm_parameter '["create"]' null '{"value":"a"}' '{"id":true,"name":true}')")"
 # Offline, a resize reads as create-vs-create: compare the sizing attributes
 # against the control's create at the same address.
 check offline-ssm-tier     4 --plan "$(plan af "$(rc aws_ssm_parameter '["create"]' null '{"tier":"Advanced"}')")" \

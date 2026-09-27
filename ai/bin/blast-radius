@@ -1411,7 +1411,7 @@ HOT_FIX = <<~FIX.freeze
   approvals" -- is not held; pass --owner-approval with the record that
   rule's own subsection gives, and merge. The full bar still applies, and an approval
   covers only the files its subsection names. No approval covers what "What no standing
-  approval covers" names: a terraform plan that destroys stateful infra or adds cost
+  approval covers" names: a terraform plan that destroys infrastructure or adds cost
   (run tf-plan-gate), or a captain's IRREVERSIBLE -- those hold and are requested as above.
 FIX
 
