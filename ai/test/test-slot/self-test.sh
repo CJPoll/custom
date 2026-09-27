@@ -83,6 +83,15 @@ newpool() { # newpool NAME N — fresh (not yet created) pool for one case
 # BG_PRE (array) is put before test-slot, e.g. to launch it with INT/QUIT at
 # default (a background job of this non-job-control suite starts them ignored).
 BG_PRE=()
+# SIG_DEFAULT — the BG_PRE for every case that SIGNALS a wrapper. A signal
+# ignored when a process starts cannot be trapped by bash, and an ignore is
+# inherited across fork and exec, so a case that sends INT, QUIT, TERM or HUP
+# must reset each to default itself. Otherwise it measures its caller's
+# environment instead of test-slot. Measured (DND-815b): a gate launched under
+# nohup starts this suite with HUP ignored, so the case-30 waiter ignored HUP,
+# kept waiting, and ran its command (7 FAILs, 2 of 2 gate runs, reported as a
+# load flake).
+SIG_DEFAULT=(env --default-signal=INT,QUIT,TERM,HUP)
 bg() {
   local name=$1; shift
   timeout 60 "${BG_PRE[@]}" "$BIN" "$@" >"$W/$name.out" 2>"$W/$name.err" &
@@ -470,7 +479,7 @@ for sig in INT TERM; do
   case $sig in INT) want=130 ;; TERM) want=143 ;; esac
   newpool "p28$sig" 1
   mkfifo "$W/S28$sig.fifo"
-  BG_PRE=(env --default-signal=INT,QUIT)
+  BG_PRE=("${SIG_DEFAULT[@]}")
   bg "S28$sig" --label "S28$sig" --outcome-file "$W/28$sig.outcome" -- bash -c "$HOLD_CMD" _ "$W/S28$sig"
   BG_PRE=()
   await_file "$W/S28$sig.started" 20 || bad "28-$sig-start" "holder never started"
@@ -516,6 +525,13 @@ await_waiters() {
   done
   return 1
 }
+# The fixture itself: launched the way bg launches, from a caller that
+# ignores INT, QUIT, TERM and HUP (nohup ignores HUP), SIG_DEFAULT leaves none
+# of them ignored. SigIgn bits: HUP 0x1, INT 0x2, QUIT 0x4, TERM 0x4000.
+(trap '' INT QUIT TERM HUP; exec timeout 60 "${SIG_DEFAULT[@]}" cat /proc/self/status) >"$W/30fix.status" 2>&1
+fix_hex=$(sed -n 's/^SigIgn:[[:space:]]*//p' "$W/30fix.status")
+check 30-fixture-read eval '[ -n "$fix_hex" ]'
+check 30-fixture-signals-default eq "$(( 16#${fix_hex:-0} & 0x4007 ))" 0
 for sig in TERM INT HUP; do
   case $sig in INT) want=130 ;; TERM) want=143 ;; HUP) want=129 ;; esac
   newpool "p30$sig" 1
@@ -523,7 +539,7 @@ for sig in TERM INT HUP; do
   # B: the queue head, polling the slots. C: behind B, blocked on queue.lock.
   bg "B30$sig" --label "B30$sig" -- sh -c ': > "$1"' _ "$W/B30$sig.ran"
   await_grep "$W/B30$sig.err" "WAITING" 20 || bad "30-$sig-B-wait" "B never waited"
-  BG_PRE=(env --default-signal=INT,QUIT)
+  BG_PRE=("${SIG_DEFAULT[@]}")
   bg "C30$sig" --label "C30$sig" --outcome-file "$W/30$sig.outcome" -- sh -c ': > "$1"' _ "$W/C30$sig.ran"
   BG_PRE=()
   await_grep "$W/C30$sig.err" "WAITING" 20 || bad "30-$sig-C-wait" "C never waited"
@@ -558,7 +574,9 @@ done
 # (Not a failing-first case for promptness: the old head delay was <= 2 s.)
 newpool p31 2
 hold A31 holder-A31
+BG_PRE=("${SIG_DEFAULT[@]}")
 bg X31 --label X31 --exclusive -- sh -c ': > "$1"' _ "$W/X31.ran"
+BG_PRE=()
 await_grep "$W/X31.err" "WAITING" 20 || bad "31-X-wait" "X never waited"
 st="$("$BIN" --status --json 2>/dev/null)"
 check 31-X-holds-partial eq "$(jq '[.holders[] | select(.label == "X31")] | length' <<<"$st")" 1
