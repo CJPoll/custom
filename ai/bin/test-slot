@@ -118,7 +118,9 @@
 #     events.jsonl       one JSON line per event {ts,event,slot,label,cwd,pid,
 #                        exclusive,waited_s,ran_s,exit}; event is one of
 #                        waiting|acquired|released|timeout|reentrant|orphaned
-#                        (orphaned: DND-925, the caller died); rotated to
+#                        (orphaned: DND-925, the caller died; it can follow
+#                        an `acquired` whose CMD then never started, and no
+#                        `released` follows it); rotated to
 #                        events.jsonl.1 past 1 MiB (one generation kept)
 #   --exclusive: holds ALL N slots before CMD runs (DND-489's bench quiesces
 #     the fleet with it). Holder lines say EXCLUSIVE.
