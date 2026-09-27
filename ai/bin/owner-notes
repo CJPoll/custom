@@ -77,6 +77,12 @@ module OwnerNotes
   STATUS_OPEN = "Status: open"
   STATUS_ADDRESSED_RE = /\AStatus: addressed: [0-9a-f]{7,40}\z/.freeze
   SHA_RE = /\A[0-9a-f]{7,40}\z/.freeze
+  # Control characters that can make a stored line DISPLAY as another (a CR
+  # before "Source: owner", a Unicode line separator). Newline and tab are
+  # allowed in the owner's words; a one-line field allows neither.
+  CONTROL_IN_TEXT = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F  ]/.freeze
+  CONTROL_IN_LINE = /[\u0000-\u001F\u007F-\u009F  ]/.freeze
+  ONE_LINE_FLAGS = %w[--relayed-from --context --source --address --commit --text-file].freeze
   PREAMBLE = <<~MD
     # Owner notes for the athena-shipwright cron
 
@@ -197,6 +203,11 @@ module OwnerNotes
     fix = "Fix: repair that entry by hand to the format in `owner-notes --help`; append new notes only with `owner-notes --add`."
     lines = n[:lines]
     lines = lines[0...-1] while !lines.empty? && lines.last.strip.empty?
+    bad_line = lines.find { |l| l.match?(CONTROL_IN_TEXT) }
+    if bad_line || n[:heading].match?(CONTROL_IN_TEXT)
+      raise Fault, "#{where} carries a control character (e.g. a carriage return), which can make one line " \
+                   "display as another.\n#{fix}"
+    end
     sources = lines.each_index.select { |i| lines[i].start_with?("Source:") }
     statuses = lines.each_index.select { |i| lines[i].start_with?("Status:") }
     quotes = lines.select { |l| l == ">" || l.start_with?("> ") }
@@ -236,10 +247,24 @@ module OwnerNotes
   end
 
   def with_lock(dir)
-    File.open(File.join(dir, "#{FILE_NAME}.lock"), File::RDWR | File::CREAT, 0o600) do |f|
+    lock = File.join(dir, "#{FILE_NAME}.lock")
+    begin
+      f = File.open(lock, File::RDWR | File::CREAT, 0o600)
+    rescue SystemCallError => e
+      raise Fault, "cannot open the lock #{lock}: #{e.message}\n" \
+                   "Fix: make #{dir} writable by you (`chmod u+w #{dir}`), then re-run."
+    end
+    begin
       f.flock(File::LOCK_EX)
       yield
+    ensure
+      f.close
     end
+  end
+
+  def write_fault(path, err)
+    Fault.new("cannot write #{path}: #{err.message}\n" \
+              "Fix: make #{path} and its directory writable by you (`chmod u+w`), then re-run; nothing was changed.")
   end
 
   def read_text(opts)
@@ -264,6 +289,10 @@ module OwnerNotes
       raise Refused, "the note is not valid UTF-8.\nFix: pass the words as UTF-8 text."
     end
     text = text.sub(/\n+\z/, "")
+    if text.match?(CONTROL_IN_TEXT)
+      raise Refused, "the note contains a control character other than newline or tab (e.g. a carriage return).\n" \
+                     "Fix: pass the words as plain text; convert CRLF files with `tr -d '\r'`."
+    end
     if text.strip.empty?
       raise Refused, "the note is empty.\nFix: pass the owner's exact words; an empty note carries no authority."
     end
@@ -337,9 +366,12 @@ module OwnerNotes
       quoted = text.split("\n", -1).map { |l| l.empty? ? ">" : "> #{l}" }
       ctx = ctx_line ? [ctx_line] : []
       entry = ["## #{id} — #{Time.now.utc.iso8601}", src, STATUS_OPEN, *ctx, "", *quoted].join("\n")
-      File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o600) do |f|
-        f.write(PREAMBLE) unless existed
-        f.write("\n#{entry}\n")
+      begin
+        File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o600) do |f|
+          f.write("#{existed ? '' : PREAMBLE}\n#{entry}\n")
+        end
+      rescue SystemCallError => e
+        raise write_fault(path, e)
       end
     end
     out.puts "owner-notes: added #{id} to #{path}"
@@ -371,8 +403,14 @@ module OwnerNotes
       rel = raw[(start + 1)..].index(STATUS_OPEN)
       raw[start + 1 + rel] = "Status: addressed: #{sha}"
       tmp = "#{path}.tmp.#{Process.pid}"
-      File.write(tmp, raw.join("\n"), perm: 0o600)
-      File.rename(tmp, path)
+      begin
+        File.write(tmp, raw.join("\n"), perm: 0o600)
+        File.rename(tmp, path)
+      rescue SystemCallError => e
+        raise write_fault(path, e)
+      ensure
+        File.unlink(tmp) if File.exist?(tmp)
+      end
     end
     out.puts "owner-notes: #{id} addressed: #{sha}"
   end
@@ -412,6 +450,16 @@ module OwnerNotes
       return 64
     end
     opts = opts.transform_values { |v| v.is_a?(String) ? v.dup.force_encoding(Encoding::UTF_8) : v }
+    opts.each do |flag, value|
+      next unless value.is_a?(String)
+
+      re = ONE_LINE_FLAGS.include?(flag) ? CONTROL_IN_LINE : CONTROL_IN_TEXT
+      next unless value.match?(re)
+
+      warn "owner-notes: the #{flag} value contains a control character (e.g. a carriage return or line break)."
+      warn "Fix: pass #{flag} as one line of plain text#{flag == '--text' ? ' (newlines and tabs are fine in --text)' : ''}."
+      return 64
+    end
     if opts["--help"] || opts["-h"]
       $stdout.write(usage)
       return 0
