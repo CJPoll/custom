@@ -74,7 +74,9 @@
 #
 # Exit: 0 measured (see decision.txt) | 2 usage or refused input | 75 the
 # exclusive slot wait timed out (nothing ran) | 1 --decide refused (no
-# baseline) | 128+n interrupted.
+# baseline) | 3 ABORTED: every run of the first level failed, so the bench
+# stopped there (decision.txt names each run's failing stage) | 128+n
+# interrupted.
 #
 # Test seams (self-test only; honored ONLY while ATHENA_TEST_SLOT_DIR points at
 # a non-default pool, the same rule test-slot uses): TEST_SLOT_BENCH_TEST_SLOT
@@ -90,6 +92,7 @@ set -u -o pipefail
 PROG=test-slot-bench
 EXIT_USAGE=2
 EXIT_TIMEOUT=75
+EXIT_ABORTED=3
 PROBE_EVERY=6
 
 usage() {
@@ -429,6 +432,7 @@ RUN_PIDS=()
 RUN_TPIDS=()
 SLOT_FDS=()
 BG_LOAD1=unknown
+LEVEL_PASSED=0
 
 # find_slot_fds — record in SLOT_FDS the fds this (inner) process holds open on
 # the pool's slot locks, inherited from the test-slot wrapper. The bench's own
@@ -623,6 +627,7 @@ run_level() { # run_level K REP
   local med mx
   med=$(printf '%s\n' "${walls[@]}" | grep -v '^$' | median)
   mx=$(printf '%s\n' "${walls[@]}" | grep -v '^$' | sort -n | tail -1)
+  LEVEL_PASSED=$passed
   read -r pk mn pr <<<"$stats"
   printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$k" "$rep" "$k" "$passed" "${med:-n/a}" "${mx:-n/a}" \
     "$pk" "$mn" "$pr" "$bg" "$u" "$f" "$contaminated" "$reason" "$CLASS" >>"$OUT_DIR/levels.csv"
@@ -637,13 +642,53 @@ inner() {
   find_slot_fds
   printf 'level,rep,run,worktree,wall_s,exit,passed,bg_load1,unslotted,foreign_holders,contaminated,reason,class\n' >"$OUT_DIR/runs.csv"
   printf 'level,rep,runs,passed,median_wall_s,max_wall_s,peak_load1,mean_load1,peak_runnable,bg_load1,unslotted,foreign_holders,contaminated,reason,class\n' >"$OUT_DIR/levels.csv"
-  local rep k
+  local rep k first=1
   for ((rep = 1; rep <= REPS; rep++)); do
-    for k in $LEVELS; do run_level "$k" "$rep"; done
+    for k in $LEVELS; do
+      run_level "$k" "$rep"
+      if ((first)); then
+        first=0
+        if ((LEVEL_PASSED == 0)); then
+          abort_first_level "$k" "$rep"
+          return "$EXIT_ABORTED"
+        fi
+      fi
+    done
   done
   decide "$CEILING" "$MIN_REPS" <"$OUT_DIR/levels.csv" >"$OUT_DIR/decision.txt"
   write_summary
   return 0
+}
+
+# abort_first_level K REP — every run of the first level failed, so no level
+# can be scored (k=1 is the baseline, and a higher level cannot rescue it).
+# Name each run's failing stage (prep-commit's "FAILED: <stage>" line, else its
+# exit code), write an ABORTED decision and the summary, and stop measuring:
+# the caller returns, the EXIT trap tidies up, and test-slot frees the pool.
+abort_first_level() {
+  local k=$1 rep=$2 i log stage rc _s _e lines="" stages=""
+  for ((i = 1; i <= k; i++)); do
+    log="$OUT_DIR/run-$k-$rep-$i.log"
+    rc=unknown
+    read -r _s _e rc <"$OUT_DIR/.res-$k-$rep-$i" 2>/dev/null || rc=unknown
+    stage=$(sed -nE 's/.*FAILED: ([A-Za-z0-9_.-]+).*/\1/p' "$log" 2>/dev/null | tail -1)
+    if [ -n "$stage" ]; then
+      lines+="  run $i: stage $stage (exit $rc)"$'\n'
+      case " $stages " in *" $stage "*) ;; *) stages+="${stages:+ }$stage" ;; esac
+    else
+      lines+="  run $i: exit $rc (no FAILED stage line)"$'\n'
+    fi
+  done
+  {
+    printf 'class: %s\n' "$CLASS"
+    printf 'DECISION: ABORTED at level %s rep %s: every run failed%s. No level was scored, and no later level ran.\n' \
+      "$k" "$rep" "${stages:+ (stage $stages)}"
+    printf '%s' "$lines"
+  } >"$OUT_DIR/decision.txt"
+  write_summary
+  say "ABORTED: every run of level $k rep $rep failed${stages:+ in stage $stages}; stopped before the next level (see $OUT_DIR/decision.txt and run-$k-$rep-*.log)."
+  printf 'Fix: make one CMD pass alone in worktree 1 (e.g. `cd %s && %s`), then re-run the bench. A stale pin fails live checks such as advisories: re-pin every worktree to one current SHA.\n' \
+    "${WTS[0]}" "${CMD_ARGV[*]}" >&2
 }
 
 write_summary() {
@@ -683,7 +728,7 @@ main() {
   validate_worktrees
   if ((INNER)); then
     inner
-    exit 0
+    exit $?
   fi
   if ((DRY_RUN)); then
     print_plan

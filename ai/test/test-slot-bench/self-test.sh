@@ -72,6 +72,8 @@ gone() { ! kill -0 "$1" 2>/dev/null; }
 #   ok       record start, exit 0
 #   solo     exit 0 alone; exit 1 when another shim run is alive at once
 #   block    record pid, block on $SHIM_DIR/go.fifo (bounded), exit 0
+#   fail     print prep-commit's "✗ FAILED: advisories" line, exit 1
+#   fail-bare exit 7 with no stage line
 mkdir -p "$W/repo/bin" "$W/shim"
 cat >"$W/repo/bin/prep-commit.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -91,6 +93,8 @@ case ${SHIM_MODE:-ok} in
       sleep 0.05
     done ;;
   block) exec 3<>"$d/go.fifo"; read -t 30 -u 3 _x ;;
+  fail) printf '=== advisories ===\n✗ FAILED: advisories — check failed\n'; rc=1 ;;
+  fail-bare) rc=7 ;;
 esac
 # peak concurrency
 exec 8>>"$d/lock"; flock 8
@@ -446,6 +450,29 @@ check b12-slots-released await 5 pool_free
 # shellcheck disable=SC2086
 finish_bench b12 $kids "${TSW:-0}" "${O:-0}"
 setload 0.50
+
+# ------------------------------------------------------------ b13-b14: a failed first level aborts
+# Measured 2026-09-27 (window 2): a stale pin failed prep-commit's advisories
+# stage in every run, and the bench still ran every level of both reps (9 min
+# of an exclusive window, nothing scorable). When every run of the first level
+# fails, the bench stops there: ABORTED, the failing stage named, the pool
+# released, exit 3.
+export SHIM_MODE=fail
+"$BIN" --worktrees "$WTS" --levels 1,3 --reps 2 --min-reps 1 --out-dir "$W/b13" "${FAST[@]}" >"$W/b13.out" 2>"$W/b13.err"; rc=$?
+check b13-rc eq "$rc" 3
+check b13-one-level-only eq "$(tail -n +2 "$W/b13/levels.csv" | wc -l)" 1
+check b13-no-level-3-runs eq "$(find "$W/b13" -maxdepth 1 -name 'run-3-*.log' | wc -l)" 0
+check b13-decision-aborted has "$W/b13/decision.txt" "DECISION: ABORTED"
+check b13-names-stage has "$W/b13/decision.txt" "stage advisories"
+check b13-summary-aborted has "$W/b13.out" "ABORTED"
+check b13-stderr-fix has "$W/b13.err" "Fix:"
+check b13-slots-free eq "$("$TS_BIN" --status --json | jq .held)" 0
+# b14: no stage line in the log -> the exit code is named instead.
+export SHIM_MODE=fail-bare
+"$BIN" --worktrees "$WTS" --levels 1,3 --reps 1 --min-reps 1 --out-dir "$W/b14" "${FAST[@]}" >/dev/null 2>"$W/b14.err"; rc=$?
+check b14-rc eq "$rc" 3
+check b14-names-exit has "$W/b14/decision.txt" "exit 7 (no FAILED stage line)"
+export SHIM_MODE=ok
 
 # ------------------------------------------------------------ summary
 if [ "$FAIL" -eq 0 ]; then
