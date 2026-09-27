@@ -91,6 +91,15 @@ run_case md-claude-rule-prose  1         'printf "More.\n" >> CLAUDE.md'
 run_case md-dot-claude         1         'printf "More.\n" >> .claude/SKILL.md'
 run_case md-mode-change        1         'chmod +x docs/adr/0001.md'
 run_case tf-needs-plan         5         'printf "# comment\n" >> tf/main.tf'
+run_case tf-slash-comment      5         'printf "\n// comment\n" >> tf/main.tf'
+# A no-change plan does not prove a comment-only edit: removing
+# prevent_destroy, a moved/removed block, or a provider constraint plans
+# nothing. Non-comment lines must be identical before a plan is asked for.
+run_case tf-code-changed       1         'printf "resource \"x\" \"y\" {\n  lifecycle {\n    prevent_destroy = true\n  }\n}\n" > tf/main.tf'
+run_case tf-trailing-comment   1         'sed -i "s/{}/{} # note/" tf/main.tf'
+run_case tf-block-comment      1         'printf "/* c */\n" >> tf/main.tf'
+run_case tf-heredoc            1         'printf "locals {\n  s = <<EOT\n# x\nEOT\n}\n" >> tf/main.tf; git add -A; git commit -q -m h; git tag -f base >/dev/null; printf "# y\n" >> tf/main.tf'
+run_case tf-lockfile           1         'printf "# lock\n" > tf/.terraform.lock.hcl; git add -A; git commit -q -m l; git tag -f base >/dev/null; printf "# comment\n" >> tf/.terraform.lock.hcl'
 run_case shell-unsupported     1         'printf "# comment\n" >> run.sh'
 run_case new-code-file         1         'printf "defmodule B do\nend\n" > lib/b.ex'
 run_case deleted-code-file     1         'rm lib/a.ex'
