@@ -392,11 +392,17 @@ The holds:
     instances, EBS/EFS volumes, ECR repositories, EIPs and Secrets Manager
     secrets are stateful. An unknown type fails wide. Deleting or replacing
     a type that holds a stored value (an SSM parameter, a secret version, a
-    GitHub Actions secret or variable, S3 versioning) holds too. So does an
-    update of such a type that changes anything but its value, tags or
-    description (suspending versioning, say), and creating or updating an S3
-    or ECR lifecycle (expiration) policy. An attribute the provider computes
-    (`id`, `arn`, `version`, `updated_at`) going unknown is not a change.
+    GitHub Actions secret or variable, S3 versioning) holds too, and so
+    does creating or updating an S3 or ECR lifecycle (expiration) policy.
+  - **Any other update:** an `update` of any type holds unless every
+    attribute it changes is on the tool's short harmless list: `tags`,
+    `tags_all`, `description`, and on a value-holding type its stored value.
+    It fails wide on purpose. An update can destroy data without deleting
+    anything (`backup_retention_period` 7 → 0 deletes RDS automated backups;
+    DynamoDB point-in-time recovery off; S3 versioning suspended). It can
+    also add cost through an attribute no list names. An attribute the
+    provider computes (`id`, `arn`, `version`, `updated_at`) going unknown
+    is not a change.
   - **Cost:** a `create` of any type not on that list, a new resource of a
     listed type that explicitly sets a billed size (an Advanced-tier SSM
     parameter; an unset size takes the default and does not hold), or an `update` that
@@ -421,13 +427,15 @@ The holds:
     holds. A resource (other than terraform bookkeeping) in the control but absent from the change
     plan holds as a destroy, because an offline plan shows a removed block
     only by its absence. Offline, an update and a replace both read as
-    `create`; the same value, tags or description test applies.
+    `create`, so a create that is not provably unchanged gets the same
+    harmless-list test as an update.
 
   A secrets update is not held by itself. Creating a secret version or
-  an SSM parameter, updating an SSM parameter's value in place, or a
-  `random_password`, ships under its approval. Deleting one is not an
-  update and holds, and so is a value change the provider plans as a
-  replace (`delete`+`create`). Only a destroy or a cost change holds.
+  an SSM parameter, updating only an SSM parameter's value (or its tags or
+  description) in place, or a `random_password`, ships under its approval.
+  Deleting one is not an update and holds. So is a value change the
+  provider plans as a replace (`delete`+`create`), and an update that
+  changes anything beyond the harmless list.
 - **A captain's `Blast radius: IRREVERSIBLE`** holds any change, security fixes
   included (`athena:merge-boarding`).
 - **A HOT path the approval does not own.** A comment/docs-only change covers

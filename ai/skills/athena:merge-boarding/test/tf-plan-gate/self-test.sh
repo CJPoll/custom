@@ -76,6 +76,16 @@ check s3-lifecycle-create  4 --plan "$(plan bh "$(rc aws_s3_bucket_lifecycle_con
 check ecr-lifecycle-update 4 --plan "$(plan bi "$(rc aws_ecr_lifecycle_policy '["update"]' '{"policy":"a"}' '{"policy":"b"}')")"
 # A plain delete is removed infrastructure whatever the type (the owner:
 # "destroy production infrastructure"); a replace of a stateless type is not.
+# An UPDATE fails wide: it clears only when every changed attribute is on the
+# harmless list (tags, tags_all, description; the stored value on a
+# value-holding type). Data can be destroyed without a delete, and cost can
+# rise through an attribute no list names.
+check rds-retention-to-zero 4 --plan "$(plan fa "$(rc aws_db_instance '["update"]' '{"backup_retention_period":7,"instance_class":"db.t4g.micro"}' '{"backup_retention_period":0,"instance_class":"db.t4g.micro"}')")"
+check ddb-pitr-off         4 --plan "$(plan fb "$(rc aws_dynamodb_table '["update"]' '{"point_in_time_recovery":[{"enabled":true}]}' '{"point_in_time_recovery":[{"enabled":false}]}')")"
+check rds-unlisted-cost    4 --plan "$(plan fc "$(rc aws_db_instance '["update"]' '{"performance_insights_enabled":false}' '{"performance_insights_enabled":true}')")"
+check rds-tags-only        0 --plan "$(plan fd "$(rc aws_db_instance '["update"]' '{"tags":{"a":"1"},"tags_all":{"a":"1"},"instance_class":"db.t4g.micro"}' '{"tags":{"a":"2"},"tags_all":{"a":"2"},"instance_class":"db.t4g.micro"}')")"
+check sg-rule-update       4 --plan "$(plan fe "$(rc aws_security_group '["update"]' '{"ingress":[]}' '{"ingress":[{"from_port":22}]}')")"
+check ssm-description-only 0 --plan "$(plan ff "$(rc aws_ssm_parameter '["update"]' '{"description":"a","value":"x"}' '{"description":"b","value":"x"}')")"
 check vpc-delete           4 --plan "$(plan ca1 "$(rc aws_vpc '["delete"]' '{}' null)")"
 check igw-delete           4 --plan "$(plan ca2 "$(rc aws_internet_gateway '["delete"]' '{}' null)")"
 check iam-role-delete      4 --plan "$(plan ca3 "$(rc aws_iam_role '["delete"]' '{}' null)")"

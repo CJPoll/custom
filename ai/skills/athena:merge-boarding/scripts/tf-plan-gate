@@ -5,8 +5,9 @@
 #
 # The objective check behind ~/.claude/CLAUDE.md -> "Standing owner approvals"
 # -> "What no standing approval covers": a plan that DELETES infrastructure,
-# REPLACES a stateful resource, or ADDS COST, holds for the owner under every standing
-# approval. A secrets update (a new value or config on an existing secret) is
+# REPLACES a stateful resource, UPDATES anything beyond a short harmless list,
+# or ADDS COST, holds for the owner under every standing approval. A secrets
+# update (a new stored value, tags or description on an existing secret) is
 # not held by itself.
 #
 # Input is `terraform show -json <planfile>`. It never runs terraform, never
@@ -101,14 +102,21 @@ def usage
                 infrastructure), or removes its block offline; or replaces
                 (delete+create) a type that is not known
                 free-and-stateless (stateful types fail wide), or one
-                that holds a stored value (#{VALUE_HOLDING_TYPES.first(3).join(', ')}, ...),
-                or updates such a type beyond its value, tags or description;
+                that holds a stored value (#{VALUE_HOLDING_TYPES.first(3).join(', ')}, ...);
                 or creates or updates an expiration policy (#{EXPIRY_POLICY_TYPES.join(', ')});
+      UPDATE    updates any type and changes an attribute not on the
+                harmless-update list (description, tags, tags_all; plus the
+                stored value on a value-holding type). Fails wide: an update
+                can destroy data (backup retention to 0, PITR off) or add cost
+                through an attribute no list names. Offline, a
+                create-vs-create that is not provably unchanged is judged the
+                same way.
       COST      creates a type that is not known free-and-stateless, or
                 creates a free one at an explicitly set billed size (an
                 Advanced-tier SSM parameter), or updates a sizing attribute (#{COST_ATTRS.first(4).join(', ')}, ...)
                 or leaves one unknown until apply.
-    A create or update of a secret's value or config is not held by itself.
+    A create of a secret, or an update of only its value, tags or
+    description, is not held by itself.
     prevent_destroy makes terraform refuse to plan. It still writes a plan
     file, marked errored and missing the refused resource; an errored or
     incomplete plan is exit 3, never CLEAR.
@@ -205,14 +213,22 @@ def safe_destroy?(actions, type)
   actions.include?("create") ? safe_replace?(type) : safe_delete?(type)
 end
 
-# Attributes a value-holding type changes IN PLACE: the value itself, tags and
-# description. Any other top-level attribute that differs (or is unknown until
-# apply, bar ignorable_unknown? below) may force a replace, which loses the
-# stored value.
-IN_PLACE_VALUE_ATTRS = %w[
-  description encrypted_value insecure_value plaintext_value secret_binary
-  secret_string tags tags_all value
+# An UPDATE fails WIDE: it clears only when every attribute it changes is on
+# an explicit harmless allowlist. Any other changed attribute holds, on any
+# type, because an update can destroy data without deleting the resource
+# (backup_retention_period 7 -> 0 deletes RDS automated backups; DynamoDB
+# point-in-time recovery off; S3 versioning suspended) or add cost through an
+# attribute no list names. Labels are harmless on every type.
+HARMLESS_UPDATE_ATTRS = %w[description tags tags_all].freeze
+# On a value-holding type the stored value itself is the "secrets update"
+# the owner said ships ("Ship for secrets updates"). Nothing else is.
+VALUE_ATTRS = %w[
+  encrypted_value insecure_value plaintext_value secret_binary secret_string value
 ].freeze
+
+def harmless_update_attrs(type)
+  VALUE_HOLDING_TYPES.include?(type) ? HARMLESS_UPDATE_ATTRS + VALUE_ATTRS : HARMLESS_UPDATE_ATTRS
+end
 
 # Attributes the provider computes, never config. A real plan marks them
 # unknown on a create (id, arn, version) and on a value update (a new version,
@@ -432,12 +448,14 @@ def ignorable_unknown?(key, unknown, base_unknown, stable)
   base_unknown == true && !stable.nil? && stable.call([key])
 end
 
-def replace_risk_attrs(before, after, unknown, base_unknown = nil, stable = nil)
+# Top-level attributes an update (or, offline, a create-vs-create) changes
+# beyond HARMLESS: differing, or unknown until apply (bar ignorable_unknown?).
+def unlisted_changes(harmless, before, after, unknown, base_unknown = nil, stable = nil)
   b = before.is_a?(Hash) ? before : {}
   a = after.is_a?(Hash) ? after : {}
   u = unknown.is_a?(Hash) ? unknown : {}
   bu = base_unknown.is_a?(Hash) ? base_unknown : {}
-  (b.keys | a.keys | u.keys).reject { |k| IN_PLACE_VALUE_ATTRS.include?(k) || ignorable_unknown?(k, u[k], bu[k], stable) }
+  (b.keys | a.keys | u.keys).reject { |k| harmless.include?(k) || ignorable_unknown?(k, u[k], bu[k], stable) }
                             .select { |k| u[k] == true || b[k] != a[k] }.sort
 end
 
@@ -589,14 +607,13 @@ changes.each do |rc|
                [], base_unknown, stable).each do |d|
       held << ["COST", addr, "sizing change vs the control: #{d}"]
     end
-    # Offline, an update and a force-new replace look the same. For a type
-    # whose replace loses a value, only a known in-place change is let through.
-    if VALUE_HOLDING_TYPES.include?(type)
-      moved = replace_risk_attrs(base_create.dig("change", "after"), rc.dig("change", "after"),
-                                 rc.dig("change", "after_unknown"), base_unknown, stable)
-      unless moved.empty?
-        held << ["DESTROY", addr, "#{type} (holds a stored value): offline, #{moved.join(', ')} changed and may force a replace"]
-      end
+    # Offline, an update and a force-new replace both read create-vs-create:
+    # the same allowlist test as an online update applies.
+    moved = unlisted_changes(harmless_update_attrs(type), base_create.dig("change", "after"), rc.dig("change", "after"),
+                             rc.dig("change", "after_unknown"), base_unknown, stable)
+    unless moved.empty?
+      held << ["UPDATE", addr, "#{type}: offline, #{moved.join(', ')} changed (not on the harmless-update list); " \
+                               "it may destroy data, add cost, or force a replace"]
     end
   end
   if actions.include?("update")
@@ -604,14 +621,11 @@ changes.each do |rc|
     cost_diffs(ch["before"], ch["after"], ch["after_unknown"]).each do |d|
       held << ["COST", addr, "sizing change: #{d}"]
     end
-    # Online as offline: a value-holding type passes only a value, tags or
-    # description change. Any other attribute can do what its delete does
-    # (suspending versioning, moving a secret to another repository).
-    if VALUE_HOLDING_TYPES.include?(type)
-      moved = replace_risk_attrs(ch["before"], ch["after"], ch["after_unknown"])
-      unless moved.empty?
-        held << ["DESTROY", addr, "#{type} (holds a stored value): update changes #{moved.join(', ')}, not only its value"]
-      end
+    # Fail wide: an update clears only if every changed attribute is harmless.
+    moved = unlisted_changes(harmless_update_attrs(type), ch["before"], ch["after"], ch["after_unknown"])
+    unless moved.empty?
+      held << ["UPDATE", addr, "#{type}: update changes #{moved.join(', ')} (not on the harmless-update list); " \
+                               "it may destroy data or add cost"]
     end
   end
 end
