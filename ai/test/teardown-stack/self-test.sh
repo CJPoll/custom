@@ -164,7 +164,7 @@ grep -qxF "SCRIPT ${WT}/old-branch" "${ST}/script.log" && ok "t10c main-checkout
 
 # t11 compose files only below the root and no script declare no stack
 # (~/dev/custom's templates/docker-compose.yml): 0, and docker is never asked,
-# so a down daemon cannot turn a custom merge into locked-merge's exit 9.
+# so a down daemon cannot turn a custom merge into locked-merge's exit 10.
 fixture t11 sub-only; touch "${ST}/down"; run --pr 5; expect "t11 templates only, docker down" 0
 has "t11 says no stack declared" "declares no per-worktree stack"; no_down t11
 [ -s "${ST}/docker.log" ] && bad "t11 called docker" "$(cat "${ST}/docker.log")" || ok "t11 docker not called"

@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # teardown-stack — tear down ONE fleet worktree's docker-compose stack, driven

@@ -15,8 +15,11 @@ PASS=0; FAIL=0
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
-# HOME stays real: a fake HOME breaks the asdf ruby shim (exit 126). No case
-# reaches step 2, the only step that writes under HOME.
+# The fixture Ruby resolves BEFORE HOME moves: asdf's `ruby` shim needs the real
+# HOME. pool-headroom runs on #!/usr/bin/ruby (DND-931), so the fake HOME no
+# longer breaks the tool, and no case can write under the real HOME.
+RUBY="$(ruby -e 'print RbConfig.ruby')" || { echo "wt-preflight self-test: no ruby on PATH"; echo "Fix: install the harness Ruby (/usr/bin/ruby, 3.4+)"; exit 2; }
+export HOME="${TMP}/home"; mkdir -p "${HOME}"
 
 ok()  { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; [ -n "${2-}" ] && printf '%s\n' "$2" | sed 's/^/       /'; }
@@ -38,7 +41,7 @@ export ATHENA_DOCKER_BIN="${TMP}/docker" TMP_LOG="${TMP}/docker.log" DOWN="${TMP
 export IDS="${TMP}/ids" NETS="${TMP}/nets.json"
 
 # A pool with 30 of 31 subnets held (1 free, below the default bar of 2).
-ruby -rjson -e '
+"${RUBY}" -rjson -e '
   nets = (17..31).map { |o| { "Name" => "a#{o}", "IPAM" => { "Config" => [{ "Subnet" => "172.#{o}.0.0/16" }] }, "Labels" => {}, "Containers" => {} } } +
          (0..14).map { |i| { "Name" => "b#{i}", "IPAM" => { "Config" => [{ "Subnet" => "192.168.#{i * 16}.0/20" }] }, "Labels" => {}, "Containers" => {} } }
   File.write(ARGV[0], JSON.dump(nets)); File.write(ARGV[1], nets.map { |n| n["Name"] }.join("\n"))
@@ -70,7 +73,7 @@ grep -q "== 1\." <<<"${out}" && ok "p3 compose-less repo reaches step 1" || bad 
 
 # p4 room in the pool: the gate passes.
 rm -f "${DOWN}"; head -n 20 "${IDS}" > "${IDS}.20"; mv "${IDS}.20" "${IDS}"
-ruby -rjson -e 'n = JSON.parse(File.read(ARGV[0])).first(20); File.write(ARGV[0], JSON.dump(n))' "${NETS}"
+"${RUBY}" -rjson -e 'n = JSON.parse(File.read(ARGV[0])).first(20); File.write(ARGV[0], JSON.dump(n))' "${NETS}"
 run --repo "${TMP}/stacky" p4-branch
 grep -q "pool-headroom OK" <<<"${out}" && grep -q "== 1\." <<<"${out}" && ok "p4 headroom passes the gate" || bad "p4 gate" "${out}"
 

@@ -265,6 +265,7 @@ grep -q "^RECEIPT " <<<"${out}" && ok "r7 prints the RECEIPT it merged on" || ba
 hout="$("${TOOL}" --help 2>/dev/null)"; rc=$?
 [ "${rc}" -eq 0 ] && grep -q '^Usage:' <<<"${hout}" && ok "c14 --help on stdout, exit 0" || bad "c14 --help" "${hout}"
 grep -q '^  9 ' <<<"${hout}" && ok "c14 --help documents exit 9" || bad "c14 --help lacks exit 9" "${hout}"
+grep -q '^  10 ' <<<"${hout}" && ok "c14 --help documents exit 10 (DND-864 teardown)" || bad "c14 --help lacks exit 10" "${hout}"
 
 echo "locked-merge self-test: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]
