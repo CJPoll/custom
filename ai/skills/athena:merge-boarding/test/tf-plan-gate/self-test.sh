@@ -19,6 +19,8 @@ rc() {
     "$1" "$1" "$2" "$3" "$4" "${5-{\}}"
 }
 plan() { local f="${TMP}/$1.json"; shift; local IFS=,; printf '{"format_version":"1.2","resource_changes":[%s]}' "$*" > "$f"; echo "$f"; }
+# planc NAME CONFIG_FIELD ONE_RC [EXTRA_TOP_LEVEL_FIELDS]: a plan with a configuration block
+planc() { local f="${TMP}/$1.json"; printf '{"format_version":"1.2",%s,"resource_changes":[%s]%s}' "$2" "$3" "${4-}" > "$f"; echo "$f"; }
 
 # case NAME WANT_RC PLANFILE [extra args]
 check() {
@@ -112,19 +114,55 @@ check offline-value-clear  0 --plan "$(plan ah "$(rc aws_ssm_parameter '["create
 SSM_CREATE_UNK='{"id":true,"arn":true,"version":true}'
 check offline-value-computed 0 --plan "$(plan da "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"b"}' "$SSM_CREATE_UNK")")" \
                              --control "$(plan db "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"a"}' "$SSM_CREATE_UNK")")"
-check offline-secretver-computed 0 --plan "$(plan dc "$(rc aws_secretsmanager_secret_version '["create"]' null '{"secret_id":"s","secret_string":"b"}' '{"id":true,"arn":true,"version_id":true,"version_stages":true}')")" \
-                             --control "$(plan dd "$(rc aws_secretsmanager_secret_version '["create"]' null '{"secret_id":"s","secret_string":"a"}' '{"id":true,"arn":true,"version_id":true,"version_stages":true}')")"
-check offline-both-unknown-config 0 --plan "$(plan de "$(rc aws_ssm_parameter '["create"]' null '{"value":"b"}' '{"id":true,"name":true}')")" \
+# version_stages is optional+computed: unset in config, unknown in both.
+SVC='"configuration":{"root_module":{"resources":[{"address":"aws_secretsmanager_secret_version.x","expressions":{"secret_id":{"constant_value":"s"},"secret_string":{"constant_value":"v"}}}]}}'
+check offline-secretver-computed 0 --plan "$(planc dc "$SVC" "$(rc aws_secretsmanager_secret_version '["create"]' null '{"secret_id":"s","secret_string":"b"}' '{"id":true,"arn":true,"version_id":true,"version_stages":true}')")" \
+                             --control "$(planc dd "$SVC" "$(rc aws_secretsmanager_secret_version '["create"]' null '{"secret_id":"s","secret_string":"a"}' '{"id":true,"arn":true,"version_id":true,"version_stages":true}')")"
+# Offline, "unknown in both plans" is not "unchanged": every reference to
+# another resource is unknown in both. Set aside only when the configuration
+# expression is provably the same (shapes as in a real `terraform show -json`,
+# AWS provider 5.100.0, 2026-09-27). With no configuration: holds (fail wide).
+check offline-both-unknown-noconfig 4 --plan "$(plan de "$(rc aws_ssm_parameter '["create"]' null '{"value":"b"}' '{"id":true,"name":true}')")" \
                              --control "$(plan df "$(rc aws_ssm_parameter '["create"]' null '{"value":"a"}' '{"id":true,"name":true}')")"
+SV_UNK='{"arn":true,"has_secret_string_wo":true,"id":true,"secret_id":true,"version_id":true,"version_stages":true}'
+sv() { rc aws_secretsmanager_secret_version '["create"]' null "{\"secret_string\":\"$1\"}" "$SV_UNK"; }
+# cfg REF: root-module config for aws_secretsmanager_secret_version.x with secret_id = REF
+cfg() { printf '"configuration":{"root_module":{"resources":[{"address":"aws_secretsmanager_secret_version.x","expressions":{"secret_id":{"references":["%s"]},"secret_string":{"constant_value":"v"}}}]}}' "$1"; }
+check offline-ref-same     0 --plan "$(planc ea "$(cfg aws_secretsmanager_secret.a.id)" "$(sv b)")" \
+                             --control "$(planc eb "$(cfg aws_secretsmanager_secret.a.id)" "$(sv a)")"
+check offline-ref-repointed 4 --plan "$(planc ec "$(cfg aws_secretsmanager_secret.b.id)" "$(sv b)")" \
+                             --control "$(planc ed "$(cfg aws_secretsmanager_secret.a.id)" "$(sv a)")"
+check offline-ref-local    4 --plan "$(planc ee "$(cfg local.sid)" "$(sv b)")" \
+                             --control "$(planc ef "$(cfg local.sid)" "$(sv a)")"
+check offline-ref-rootvar-same 0 --plan "$(planc eg "$(cfg var.sid)" "$(sv b)" ',"variables":{"sid":{"value":"s1"}}')" \
+                             --control "$(planc eh "$(cfg var.sid)" "$(sv a)" ',"variables":{"sid":{"value":"s1"}}')"
+check offline-ref-rootvar-changed 4 --plan "$(planc ei "$(cfg var.sid)" "$(sv b)" ',"variables":{"sid":{"value":"s2"}}')" \
+                             --control "$(planc ej "$(cfg var.sid)" "$(sv a)" ',"variables":{"sid":{"value":"s1"}}')"
+# Inside a module, var.sid resolves through the module call's expression.
+mcfg() { printf '"configuration":{"root_module":{"module_calls":{"m":{"expressions":{"sid":{"references":["%s"]}},"module":{"resources":[{"address":"aws_secretsmanager_secret_version.x","expressions":{"secret_id":{"references":["var.sid"]}}}]}}}}}' "$1"; }
+msv() { printf '{"address":"module.m.aws_secretsmanager_secret_version.x[0]","mode":"managed","type":"aws_secretsmanager_secret_version","name":"x","index":0,"change":{"actions":["create"],"before":null,"after":{"secret_string":"%s"},"after_unknown":%s}}' "$1" "$SV_UNK"; }
+check offline-module-var-same 0 --plan "$(planc ek "$(mcfg aws_secretsmanager_secret.a.id)" "$(msv b)")" \
+                             --control "$(planc el "$(mcfg aws_secretsmanager_secret.a.id)" "$(msv a)")"
+check offline-module-var-repointed 4 --plan "$(planc em "$(mcfg aws_secretsmanager_secret.b.id)" "$(msv b)")" \
+                             --control "$(planc en "$(mcfg aws_secretsmanager_secret.a.id)" "$(msv a)")"
 check offline-name-unknown-realistic 4 --plan "$(plan dg "$(rc aws_ssm_parameter '["create"]' null '{"value":"x"}' '{"id":true,"arn":true,"version":true,"name":true}')")" \
                              --control "$(plan dh "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"x"}' "$SSM_CREATE_UNK")")"
 check online-ssm-value-computed 0 --plan "$(plan di "$(rc aws_ssm_parameter '["update"]' '{"id":"/a","name":"/a","value":"a","version":3,"tier":"Standard"}' '{"id":"/a","name":"/a","value":"b","tier":"Standard"}' '{"version":true}')")"
 check online-ghsecret-value-computed 0 --plan "$(plan dj "$(rc github_actions_secret '["update"]' '{"repository":"r","plaintext_value":"a","updated_at":"t1"}' '{"repository":"r","plaintext_value":"b"}' '{"updated_at":true}')")"
 check online-ssm-name-unknown 4 --plan "$(plan dk "$(rc aws_ssm_parameter '["update"]' '{"name":"/a","value":"a"}' '{"value":"a"}' '{"name":true}')")"
-# Offline sizing: an attribute unknown in BOTH creates (a provider default,
-# e.g. a root volume size) is not the diff's; one unknown only in the change is.
-check offline-size-unknown-both 0 --plan "$(plan dl "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"b"}' '{"id":true,"tier":true}')")" \
-                             --control "$(plan dm "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"a"}' '{"id":true,"tier":true}')")"
+# Offline sizing: an attribute unknown in BOTH creates is not the diff's only
+# when its config is provably the same: unset in both (a provider default), or
+# the same expression. One unknown only in the change always holds.
+pcfg() { printf '"configuration":{"root_module":{"resources":[{"address":"aws_ssm_parameter.x","expressions":{"name":{"constant_value":"/a"}%s}}]}}' "${1-}"; }
+check offline-size-unset-both 0 --plan "$(planc dl "$(pcfg)" "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"b"}' '{"id":true,"tier":true}')")" \
+                             --control "$(planc dm "$(pcfg)" "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"a"}' '{"id":true,"tier":true}')")"
+check offline-size-repointed 4 --plan "$(planc dp "$(pcfg ',"tier":{"references":["local.big"]}')" "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"b"}' '{"id":true,"tier":true}')")" \
+                             --control "$(planc dq "$(pcfg)" "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"a"}' '{"id":true,"tier":true}')")"
+check offline-size-unknown-noconfig 4 --plan "$(plan dr "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"b"}' '{"id":true,"tier":true}')")" \
+                             --control "$(plan ds "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"a"}' '{"id":true,"tier":true}')")"
+# A tag map is a label: a tag named `tier` is not a billed size.
+check new-sg-tier-tag      0 --plan "$(plan dt "$(rc aws_security_group '["create"]' null '{"tags":{"tier":"web"}}')")"
+check malformed-rc-element 3 --plan "$(printf '{"format_version":"1.2","resource_changes":["x"]}' > "${TMP}/mal.json"; echo "${TMP}/mal.json")"
 check offline-size-unknown-change 4 --plan "$(plan dn "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"b"}' '{"id":true,"tier":true}')")" \
                              --control "$(plan do "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"a","tier":"Standard"}' '{"id":true}')")"
 # Offline, a value-holding type's update and its force-new replace both read

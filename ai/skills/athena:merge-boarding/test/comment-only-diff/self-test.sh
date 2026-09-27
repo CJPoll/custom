@@ -105,12 +105,21 @@ run_case tf-heredoc            1         'printf "locals {\n  s = <<EOT\n# x\nEO
 run_case tf-hash-in-block      1         'printf "/* a\n# */\nlocals { p = true }\n/* b */\n" >> tf/main.tf; git add -A; git commit -q -m b; git tag -f base >/dev/null; sed -i "s|^# \*/$|#|" tf/main.tf'
 run_case tf-lockfile          1         'printf "# lock\n" > tf/.terraform.lock.hcl; git add -A; git commit -q -m l; git tag -f base >/dev/null; printf "# comment\n" >> tf/.terraform.lock.hcl'
 # A comment a tool reads as a suppression directive weakens a check: it is
-# not "only a comment". Adding one is NOT covered; removing one is.
+# not "only a comment". A directive acts on where it sits, so adding, moving
+# or removing one is NOT covered. An untouched directive does not taint an
+# otherwise comment-only change.
+EX_TWO='defmodule A do\n  # credo:disable-for-next-line X\n  def f(x), do: x + 1\n  def g(x), do: x\nend\n'
+EX_MOVED='defmodule A do\n  def f(x), do: x + 1\n  # credo:disable-for-next-line X\n  def g(x), do: x\nend\n'
+EX_NOTE='defmodule A do\n  # credo:disable-for-next-line X\n  def f(x), do: x + 1\n  # a note\n  def g(x), do: x\nend\n'
+run_case ex-suppress-moved     "$ex_bad" "printf '${EX_TWO}' > lib/a.ex; git add -A; git commit -q -m m; git tag -f base >/dev/null; printf '${EX_MOVED}' > lib/a.ex"
+run_case ex-suppress-untouched "$ex_ok"  "printf '${EX_TWO}' > lib/a.ex; git add -A; git commit -q -m m; git tag -f base >/dev/null; printf '${EX_NOTE}' > lib/a.ex"
+run_case ex-region-stop-removed 1        'printf "defmodule A do\n  # coveralls-ignore-start\n  def f(x), do: x\n  # coveralls-ignore-stop\n  def g(x), do: x\nend\n" > lib/a.ex; git add -A; git commit -q -m r; git tag -f base >/dev/null; sed -i "/coveralls-ignore-stop/d" lib/a.ex'
+run_case tf-suppress-moved     1         'printf "# tfsec:ignore:x\nresource \"a\" \"b\" {}\nresource \"c\" \"d\" {}\n" > tf/main.tf; git add -A; git commit -q -m t; git tag -f base >/dev/null; printf "resource \"a\" \"b\" {}\n# tfsec:ignore:x\nresource \"c\" \"d\" {}\n" > tf/main.tf'
 run_case yaml-suppress-added   1         'sed -i "s/^jobs:/# zizmor: ignore[unpinned-uses]\njobs:/" .github/workflows/ci.yml'
 run_case tf-suppress-added     1         'printf "# tfsec:ignore:aws-s3-enable-versioning\n" >> tf/main.tf'
 run_case ex-suppress-added     1         'sed -i "s/^  def f/  # credo:disable-for-this-file\n  def f/" lib/a.ex'
 run_case md-suppress-added     1         'printf "<!-- markdownlint-disable -->\n" >> docs/adr/0001.md'
-run_case yaml-suppress-removed 0         'sed -i "s/^jobs:/# nosemgrep\njobs:/" .github/workflows/ci.yml; git add -A; git commit -q -m d; git tag -f base >/dev/null; sed -i "/nosemgrep/d" .github/workflows/ci.yml'
+run_case yaml-suppress-removed 1        'sed -i "s/^jobs:/# nosemgrep\njobs:/" .github/workflows/ci.yml; git add -A; git commit -q -m d; git tag -f base >/dev/null; sed -i "/nosemgrep/d" .github/workflows/ci.yml'
 run_case shell-unsupported     1         'printf "# comment\n" >> run.sh'
 run_case new-code-file         1         'printf "defmodule B do\nend\n" > lib/b.ex'
 run_case deleted-code-file     1         'rm lib/a.ex'

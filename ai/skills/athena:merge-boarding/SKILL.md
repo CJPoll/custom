@@ -251,7 +251,8 @@ exit 4 (`~/.claude/CLAUDE.md` → *What no standing approval covers*).
 
 **A merge that applies terraform runs `scripts/tf-plan-gate` first**, on the
 plan for the merged head. Exit 4 or 3 holds under every standing approval, and
-you request the go the same way. The rule and the plan's sources live in
+you request the go the same way. Exit 2 measured nothing (bad arguments, or
+`--control` on a plan with state): fix the call per its `Fix:` and re-run. The rule and the plan's sources live in
 *What no standing approval covers*.
 
 **A destructive migration is PLANNED, so its authorization is too.** The

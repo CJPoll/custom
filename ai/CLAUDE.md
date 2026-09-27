@@ -321,15 +321,17 @@ by name.
   -detailed-exitcode` must exit 0 (no changes) in every affected root: a
   no-change plan alone does not prove a comment-only edit, since removing
   `prevent_destroy` or a `moved` block plans nothing. A trailing comment,
-  `.terraform.lock.hcl`, or a file with a heredoc or a `/* */` block comment
-  on either side is not covered: the line test cannot see inside them. Exit
+  `.terraform.lock.hcl`, or a file with a heredoc (`<<`) or a `/*` or `*/`
+  anywhere on either side (a string such as an S3 ARN `".../*"` included) is
+  not covered: the line test cannot see inside them. Exit
   1, 2 or 3 means not covered. It refuses a diff that edits the verifier itself.
 - **What does not count.** Any non-comment line. A file type the check has no
   parser for (shell, Dockerfile, Ruby, and so on). A new or deleted code file. A
   mode change. A comment a tool reads as a check-suppression directive
   (`credo:disable`, `sobelow_skip`, `tfsec:ignore`, `checkov:skip`,
-  `zizmor: ignore`, `nosemgrep`, and the like): it weakens a check, so the
-  verifier marks a file that adds one NOT-COVERED. Removing one is fine. Docs
+  `zizmor: ignore`, `nosemgrep`, and the like): a directive acts on where it
+  sits, so the verifier marks a file NOT-COVERED when it adds, moves or
+  removes one (a removed `-stop` or `enable` widens its region). Docs
   the harness executes or reads as rules: `CLAUDE.md`,
   `AGENTS.md`, `SKILL.md`, `*.md.in`, and anything under `.claude/` or
   `~/dev/custom/ai/`. Those land through their normal path. This approval covers
@@ -402,13 +404,17 @@ The holds:
     control but absent from the change plan holds as a destroy, because an
     offline plan has no state and shows a removed block only by its absence.
     Offline, an update and a replace both read as `create`; the same
-    value, tags or description test applies, and an attribute unknown in
-    both plans is not the change's.
+    value, tags or description test applies. An attribute unknown in both
+    offline plans is set aside only when its configuration expression is
+    provably the same in both (unset in both, or the same constant, resource
+    reference or variable value); a re-pointed reference, a `local.*`, or a
+    plan with no configuration holds.
 
-  A secrets update is not held by itself. Creating or updating an SSM
-  parameter's or a secret version's value, or a `random_password`, ships
-  under its approval. Deleting one is not an update and holds. Only a destroy or a cost
-  change holds.
+  A secrets update is not held by itself. Creating a secret version or
+  an SSM parameter, updating an SSM parameter's value in place, or a
+  `random_password`, ships under its approval. Deleting one is not an
+  update and holds, and so is a value change the provider plans as a
+  replace (`delete`+`create`). Only a destroy or a cost change holds.
 - **A captain's `Blast radius: IRREVERSIBLE`** holds any change, security fixes
   included (`athena:merge-boarding`).
 - **A HOT path the approval does not own.** A comment/docs-only change covers
