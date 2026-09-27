@@ -34,8 +34,9 @@ properties* say. This skill does not restate them.
 
 ## The helper
 
-`scripts/epic-clustering` is read-only. It never writes Notion, never posts to
-Slack, and never moves a ticket. Every write below is yours, made with the
+`scripts/epic-clustering` reads Notion and never writes it. It never posts to
+Slack and never moves a ticket; it writes only the files you name. Every
+tracker write below is yours, made with the
 notion-personal tools. `--help` lists every flag. Exit codes: 0 done, 2 usage,
 3 could not read or measure, 4 proof mismatch. An exit 3 is never an empty
 result: stop and do not write on it.
@@ -82,9 +83,14 @@ admiral working them.
    - Otherwise move a cohesive cluster of 3 or more to a new or existing epic
      **in the same project**, with a one-paragraph outcome and its own
      `Critical path`.
-   - An `Area` = `Harness` cluster goes to a Harness-area epic. That is the
-     queue the harness-reliability lane drains (plan row W10).
-   - Leftovers stay put.
+   - **Harness tickets all go to the lane.** Every movable `Area` = `Harness`,
+     `Path` = `Off` ticket goes to an epic named exactly `Harness lane:
+     <subsystem>`, singletons included: join the lane epic for its subsystem,
+     or start one. That name prefix is what the harness-reliability lane
+     reads (plan row W10, DND-987). `read` lists these as "harness-lane
+     bound". The admiral recorded why on the epic: a harness leftover that
+     stays on a feature epic is worked by nobody.
+   - Other leftovers stay put.
 5. **C3: merge near-duplicates.** `read` lists candidate pairs by title. A
    candidate is not a duplicate until you confirm one root cause. Then keep
    the older ticket, copy the other's evidence into it, and cancel the newer
@@ -103,13 +109,19 @@ admiral working them.
    Cody first with the count, per [[athena:ticket-management]] → *Keep
    tickets, epics and projects current*.
 9. **Make the moves:** set each ticket's `Epic` relation, and nothing else.
-10. **Prove.** `proof --against <file>`. Exit 4 means a never-movable ticket
-    left an epic, or the set changed. Move it back, undo any `Path` or `Kind`
-    edit made during the pass, and re-run until it holds. Report the mismatch.
-    Never skip this step, and never read "not read" as a pass.
+10. **Prove.** `proof --against <file>`. It prints each epic's never-movable
+    count and ids before and after. Every before id must still be in its
+    epic: the before count, re-counted after, must be equal. Exit 4 names each
+    ticket that left; move it back and re-run until it holds. An epic the
+    helper could not read again is a mismatch, never a pass. An id that
+    *joined* a set is reported, not failed: a ticket moved into the epic that
+    holds its dependency is pinned there, which removes nothing. Never skip
+    this step. Report any mismatch in the summary.
 11. **Then shape the targets.** Write each new or receiving epic's outcome
-    paragraph, and set its `Critical path` (`Path` = `Critical` on the chosen
-    tickets, listed in the epic body). This comes after the proof, so the
+    paragraph. Give a product epic its `Critical path` (`Path` = `Critical` on
+    the chosen tickets, listed in the epic body). A `Harness lane:` epic gets
+    none: its tickets keep `Path` = `Off`, and a `Critical` ticket or a
+    Feature there holds the whole lane. This comes after the proof, so the
     proof compares like with like.
 12. **Sweep each touched epic's status** ([[athena:ticket-management]] →
     *Keep tickets, epics and projects current*).
@@ -123,9 +135,10 @@ Owner note N1, verbatim: "If the ticket can't answer that question, it's a
 poorly filed ticket. We should leave a note for the shipwright cron to address
 poor ticket hygiene". The digest lists open tickets whose body lacks the
 problem, the repro or exploit path, or the affected code. A repro is owed by a
-Bug, a Vulnerability, a Flake, or any ticket with `Security` set; Features are
-exempt. The pass flags these tickets and does not rewrite them. The helper's check is a heuristic. The class fix
-is DND-993 (`ai/bin/ticket-lint`); once that lands, the digest uses it.
+Bug, a Vulnerability, a Flake, or any ticket whose `Security` is not `none`.
+Features are exempt. The pass flags these tickets and does not rewrite them.
+The helper's check is a heuristic. The class fix is DND-993
+(`ai/bin/ticket-lint`); once that lands, the digest uses it.
 
 ## The daily digest
 

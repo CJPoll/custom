@@ -4,12 +4,13 @@
 # epic-clustering -- the READ helper behind athena:epic-clustering (DND-982,
 # epic "Harness: scope-growth rules", plan row W5).
 #
-# Read-only. It reads the DND Tickets and DND Epics data sources through the
-# Notion REST API with the notion-personal integration token
+# It reads the DND Tickets and DND Epics data sources through the Notion REST
+# API with the notion-personal integration token
 # (~/.claude/notion-personal-token, read in-process, never on argv), or an
 # offline JSON fixture. It never writes Notion, never posts to Slack, and never
 # moves a ticket: every write in a clustering pass is the architect's, made per
-# SKILL.md. The rules live in lib/epic_clustering.rb; tiers and the tier-4
+# SKILL.md. Its only writes are the local files its caller names (--save,
+# --blocks-out), so risk.yml classes it idempotent. The rules live in lib/epic_clustering.rb; tiers and the tier-4
 # order are next-mission's (ai/lib/next_mission.rb).
 #
 # Exit codes -- a failed lookup must never look like an empty one:
@@ -17,7 +18,8 @@
 #   2  usage error
 #   3  could not read or could not measure (Notion/HTTP failure, missing
 #      token, unreadable fixture or snapshot, data outside the vocabulary)
-#   4  proof MISMATCH: a touched epic's never-movable set changed
+#   4  proof MISMATCH: a never-movable ticket left its epic, or an epic in the
+#      snapshot could not be read again
 require "json"
 require "time"
 require_relative "../../../lib/strict_argv"
@@ -32,14 +34,16 @@ EC = EpicClustering
 USAGE = <<~TXT
   Usage: epic-clustering COMMAND [options]
 
-  The read helper for athena:epic-clustering. Read-only: it never writes
-  Notion, never posts to Slack, never moves a ticket.
+  The read helper for athena:epic-clustering. It never writes Notion, never
+  posts to Slack, never moves a ticket. It writes only the files you name
+  (--save, --blocks-out).
 
   Commands:
     read      per epic: the clustering trigger, the never-movable set, the
               movable tickets grouped by Area / Kind; then C3 candidates
     proof     print each epic's never-movable count and ids; --save a
-              snapshot before the moves, --against it after (exit 4 on change)
+              snapshot before the moves, --against it after (exit 4 when a
+              never-movable ticket left its epic)
     digest    draft the daily digest (text, and Block Kit with --blocks-out)
     request   draft one promote / won't-fix approval request as Block Kit
 
@@ -195,7 +199,8 @@ def cmd_read(opts)
     tr = EC.trigger(ts)
     nm = EC.never_movable(ts)
     mv = EC.movable(ts)
-    puts "== #{e.name} (#{e.page_id}) [#{e.status || 'Status unset'}, project #{e.project || 'none'}]"
+    lane = EC.lane_epic?(e) ? ", harness lane epic" : ""
+    puts "== #{e.name} (#{e.page_id}) [#{e.status || 'Status unset'}, project #{e.project || 'none'}#{lane}]"
     puts "tickets linked: #{ts.size} (#{ts.count { |t| EC.open?(t) }} open)"
     cmp = tr[:trips] ? ">" : "<="
     puts "trigger: open Path=Off #{tr[:open_off]} #{cmp} on-path #{tr[:open_on_path]}: #{tr[:trips] ? 'TRIPS' : 'no trip'}"
@@ -213,6 +218,9 @@ def cmd_read(opts)
   puts "C3 candidates (same Area, similar titles; confirm one root cause before merging): #{dups.empty? ? 'none' : dups.size}"
   dups.each { |d| puts "  keep #{d[:keep]}, duplicate? #{d[:duplicate]} (score #{d[:score]}; shared: #{d[:shared].join(' ')})" }
   puts "movable across the read epics: #{all_movable.size}"
+  lane = EC.lane_bound(pairs)
+  puts "harness-lane bound (movable Area=Harness, Path=Off, not already in a #{EC::LANE_EPIC_PREFIX.inspect} epic): " \
+       "#{lane.empty? ? 'none' : "#{lane.size}: #{lane.join(', ')}"}"
 end
 
 def load_snapshot(path)
@@ -236,18 +244,28 @@ def cmd_proof(opts)
     before = load_snapshot(opts["--against"])
     after = EC.proof_snapshot(load_epics(src, before.keys))
     result = EC.compare_proof(before, after)
-    puts(opts["--json"] ? JSON.pretty_generate(before: before, after: after, mismatches: result.mismatches) : EC.proof_lines(after))
+    if opts["--json"]
+      puts JSON.pretty_generate(before: before, after: after, mismatches: result.mismatches, joined: result.joined)
+    else
+      puts "before:"
+      EC.proof_lines(before).each { |l| puts "  #{l}" }
+      puts "after:"
+      EC.proof_lines(after).each { |l| puts "  #{l}" }
+      result.joined.each do |id, ids|
+        puts "joined (reported, not a failure): #{after.dig(id, 'name')} (#{id}) gained #{ids.join(', ')}"
+      end
+    end
     if result.ok?
-      puts "proof holds: #{before.size} epic(s), every never-movable set unchanged"
+      puts "proof holds: #{before.size} epic(s); every before id is still in its epic " \
+           "(#{before.sum { |_, s| s['count'] }} before = #{before.sum { |_, s| s['count'] }} still there)"
       return
     end
     result.mismatches.each do |m|
       warn "#{PROG}: PROOF MISMATCH #{m[:name]} (#{m[:epic]}): #{m[:reason]}; before #{m[:before_count]}, " \
-           "after #{m[:after_count].nil? ? 'not read' : m[:after_count]}; missing: #{m[:missing].join(', ').then { |s| s.empty? ? 'none' : s }}; " \
-           "added: #{m[:added].join(', ').then { |s| s.empty? ? 'none' : s }}"
+           "still there #{m[:still_there]}; missing: #{m[:missing].join(', ')}"
     end
-    warn "Fix: move each missing ticket back to its epic (a never-movable ticket must not leave), " \
-         "undo any Path/Kind edit made during the pass, then re-run proof --against. Report the mismatch in the batched summary."
+    warn "Fix: move each missing ticket back to the epic named above (a never-movable ticket must not leave), " \
+         "then re-run proof --against. Report the mismatch in the batched summary."
     exit 4
   end
   snap = EC.proof_snapshot(load_epics(src, epic_keys(opts, src)))

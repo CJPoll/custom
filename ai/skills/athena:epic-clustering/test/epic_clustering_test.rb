@@ -96,14 +96,31 @@ check("proof mismatch: a never-movable ticket that left its epic fails, naming t
   after = EC.proof_snapshot([[epic("E1", "Fleet"), [t("DND-1", kind: "Feature")]]])
   r = EC.compare_proof(before, after)
   !r.ok? && r.mismatches.size == 1 && r.mismatches.first[:missing] == ["DND-2"] &&
-    r.mismatches.first[:before_count] == 2 && r.mismatches.first[:after_count] == 1
+    r.mismatches.first[:before_count] == 2 && r.mismatches.first[:still_there] == 1
 end
 
-check("proof mismatch: an added never-movable id fails too (the counts must be equal)") do
-  before = EC.proof_snapshot([[epic("E1"), [t("DND-1", kind: "Feature")]]])
-  after = EC.proof_snapshot([[epic("E1"), [t("DND-1", kind: "Feature"), t("DND-9", path: "Critical")]]])
+check("proof: a ticket moved into the epic that holds its dependency joins that set; reported, not failed") do
+  # DND-5 depends on E2's Feature DND-2, so it is movable out of E1 and pinned once in E2.
+  before = EC.proof_snapshot([[epic("E1"), [t("DND-1", kind: "Feature"), t("DND-5", deps: ["DND-2"])]],
+                              [epic("E2"), [t("DND-2", kind: "Feature", epics: ["E2"])]]])
+  after = EC.proof_snapshot([[epic("E1"), [t("DND-1", kind: "Feature")]],
+                             [epic("E2"), [t("DND-2", kind: "Feature", epics: ["E2"]), t("DND-5", deps: ["DND-2"], epics: ["E2"])]]])
   r = EC.compare_proof(before, after)
-  !r.ok? && r.mismatches.first[:added] == ["DND-9"]
+  before["E1"]["ids"] == ["DND-1"] && r.ok? && r.joined == { "E2" => ["DND-5"] }
+end
+
+check("proof mismatch: a ticket pinned by an edge that leaves its epic fails like a core ticket") do
+  before = EC.proof_snapshot([[epic("E1"), [t("DND-1", kind: "Feature"), t("DND-5", deps: ["DND-1"])]]])
+  after = EC.proof_snapshot([[epic("E1"), [t("DND-1", kind: "Feature")]]])
+  r = EC.compare_proof(before, after)
+  !r.ok? && r.mismatches.first[:missing] == ["DND-5"] && r.mismatches.first[:still_there] == 1
+end
+
+check("lane: every movable Area=Harness, Path=Off ticket outside a 'Harness lane: ' epic is lane-bound, singletons too") do
+  pairs = [[epic("E1", "Fleet"), [t("DND-1", kind: "Feature"), t("DND-2"), t("DND-3", area: "Product"),
+                                  t("DND-4", path: "Blocking")]],
+           [epic("E9", "Harness lane: evals"), [t("DND-7", epics: ["E9"])]]]
+  EC.lane_bound(pairs) == ["DND-2"]
 end
 
 check("proof miss: an epic in the before snapshot that the after read did not return is a mismatch, never a pass") do
@@ -379,6 +396,16 @@ check("adapter: open epics resolve their project names; an epic query HTTP failu
   fail_tr = FakeTransport.new([:post, "/v1/data_sources/#{EDS}/query"] => NextMissionNotion::ReadError.new("HTTP 500"))
   eps.map { |x| [x.name, x.project] } == [["A", "Athena"]] &&
     raises?(NextMissionNotion::ReadError, /500/) { EpicClusteringNotion.new(fail_tr).open_epics }
+end
+
+check("adapter: the epic query pages through has_more/next_cursor; a has_more with no cursor is an error") do
+  tr = FakeTransport.new(
+    [:post, "/v1/data_sources/#{EDS}/query", nil] => { "results" => [epage("e1", "A")], "has_more" => true, "next_cursor" => "c2" },
+    [:post, "/v1/data_sources/#{EDS}/query", "c2"] => { "results" => [epage("e2", "B")], "has_more" => false }
+  )
+  bad = FakeTransport.new([:post, "/v1/data_sources/#{EDS}/query"] => { "results" => [], "has_more" => true })
+  EpicClusteringNotion.new(tr).all_epics.map(&:name) == %w[A B] &&
+    raises?(NextMissionNotion::ReadError, /next_cursor/) { EpicClusteringNotion.new(bad).all_epics }
 end
 
 check("adapter: a body read that comes back truncated is an error, never a short body") do

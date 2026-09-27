@@ -49,7 +49,7 @@ module EpicClustering
   STOPWORDS = %w[the and for with from into onto that this when after before not are was its of on in to a an
                  is it be by or as at no dnd].to_set.freeze
 
-  ProofResult = Struct.new(:mismatches, keyword_init: true) do
+  ProofResult = Struct.new(:mismatches, :joined, keyword_init: true) do
     def ok? = mismatches.empty?
   end
 
@@ -95,6 +95,22 @@ module EpicClustering
            .sort_by { |(area, kind), _| [area, NextMission::KIND_ORDER.index(kind) || 99, kind] }
   end
 
+  # The name prefix of a harness-lane epic, the one next-mission's harness
+  # lane reads (DND-987, W10). Every movable Area=Harness, Path=Off ticket
+  # goes to such an epic, singletons included: a harness leftover that stays
+  # on a feature epic is worked by nobody.
+  LANE_EPIC_PREFIX = "Harness lane: "
+
+  def lane_epic?(epic) = epic.name.to_s.start_with?(LANE_EPIC_PREFIX)
+
+  # pairs: [[Epic, [Ticket, ...]], ...] -> ids still to route to a lane epic.
+  def lane_bound(pairs)
+    ids = pairs.reject { |e, _| lane_epic?(e) }.flat_map do |_, ts|
+      movable(ts).select { |t| t.area == "Harness" && (t.path.nil? || t.path == "Off") }.map(&:id)
+    end
+    sort_ids(ids.uniq)
+  end
+
   def trigger(epic_tickets)
     open = epic_tickets.select { |t| open?(t) }
     on = open.count { |t| ON_PATH.include?(t.path) }
@@ -119,22 +135,34 @@ module EpicClustering
     end
   end
 
-  # Every epic in `before` must be read again, and its set must be equal.
+  # Every epic in `before` must be read again, and every id in its before set
+  # must still be in its after set: the count of the before set, re-counted
+  # after the moves, must be equal. That is the owner's constraint (nothing
+  # never-movable LEAVES an epic).
+  #
+  # An id that JOINS a set is reported, not failed: a ticket moved into the
+  # epic that holds its dependency becomes pinned there, which breaks
+  # nothing. -> ProofResult (mismatches) plus `joined` per epic.
   def compare_proof(before, after)
     raise DataError, "the before snapshot names no epics, so nothing was proven" if before.empty?
 
+    joined = {}
     mismatches = before.filter_map do |id, b|
       a = after[id]
       if a.nil?
-        { epic: id, name: b["name"], before_count: b["count"], after_count: nil,
-          missing: b["ids"], added: [], reason: "epic was not read after the move" }
-      elsif a["ids"].sort != b["ids"].sort || a["count"] != b["count"]
-        { epic: id, name: b["name"], before_count: b["count"], after_count: a["count"],
-          missing: sort_ids(b["ids"] - a["ids"]), added: sort_ids(a["ids"] - b["ids"]),
-          reason: "never-movable set changed" }
+        { epic: id, name: b["name"], before_count: b["count"], still_there: 0,
+          missing: b["ids"], reason: "epic was not read after the move" }
+      else
+        extra = sort_ids(a["ids"] - b["ids"])
+        joined[id] = extra unless extra.empty?
+        missing = sort_ids(b["ids"] - a["ids"])
+        unless missing.empty?
+          { epic: id, name: b["name"], before_count: b["count"], still_there: b["count"] - missing.size,
+            missing: missing, reason: "never-movable ticket(s) left the epic" }
+        end
       end
     end
-    ProofResult.new(mismatches: mismatches)
+    ProofResult.new(mismatches: mismatches, joined: joined)
   end
 
   # ---------------------------------------------------------------- C3
