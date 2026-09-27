@@ -34,6 +34,10 @@
 # deploy workflow, moving it out, or cutting its trigger to pull_request --
 # changes what every later merge does, so it is judged from the base side.
 #
+# EVERY term is read from the two commits' git objects, never from the working
+# tree --repo names (DND-794): the verdict is a function of (base, head) only,
+# so a checkout that differs from --head cannot change it (see RevTree).
+#
 # Both terms are load-bearing, and the ORDER is what preserves throughput:
 #
 #   * Path first, and it is the cheap common case. A routine app-code merge hits
@@ -622,64 +626,54 @@ end
 
 # --- automation detection ---------------------------------------------------
 
-# Every workflow file, dot-prefixed ones included (DND-422): a glob without
-# FNM_DOTMATCH skips `.deploy.yml`, and a skipped deploy workflow reads as
-# CONFIRMED-ABSENT -- a WARM pass for a repo that deploys on merge.
-def workflow_files(repo)
-  Dir.glob(File.join(repo, ".github", "workflows", "*.{yml,yaml}"), File::FNM_DOTMATCH).sort
-end
-
-# The two trees detect_automation reads (DND-774). Both answer the same four
-# questions over repo-relative paths:
-#   workflows  the top-level .github/workflows/*.{yml,yaml} files, sorted
-#   read(p)    the file's text; raises when it cannot be read as a file, which
-#              detect_automation reports as UNDETERMINED
+# The tree detect_automation and terraform_apply_roots read: one commit,
+# through git, on BOTH sides of the merge (DND-774 base, DND-794 head). It
+# answers four questions over repo-relative paths:
+#   workflows  the top-level .github/workflows/*.{yml,yaml} entries, sorted
+#   read(p)    the file's text; raises IOError when the entry is not a regular
+#              file, which detect_automation reports as UNDETERMINED
 #   file?(p) / dir?(p)
 #
-# WorktreeTree is the checkout the gate runs in -- the head side, read exactly
-# as before DND-774. RevTree is a commit, read through git: the base side.
-WorktreeTree = Struct.new(:repo, :label) do
-  def workflows
-    workflow_files(repo).map { |f| f.delete_prefix("#{repo}/") }
-  end
-
-  def read(path)
-    File.read(File.join(repo, path))
-  end
-
-  def file?(path)
-    File.exist?(File.join(repo, path))
-  end
-
-  def dir?(path)
-    Dir.exist?(File.join(repo, path))
-  end
-end
-
-# The Dir.glob in workflow_files, as a path test: top level only, dot-prefixed
-# names included, `*` matching the empty name as the glob does.
+# DND-794: the head side used to be the WORKING TREE the gate ran in, while
+# every other term read git objects. A checkout that differed from --head (an
+# untracked workflow, one deleted locally, another branch checked out) gave a
+# verdict about a tree nobody was merging -- measured: a head commit ADDING a
+# deploy workflow and a .tf read WARM, exit 0, when that workflow was absent
+# from the checkout. The verdict is now a function of (base, head) only.
+#
+# Non-narrowing against the old head read. The working tree FOLLOWED symlinks
+# and listed directories; a commit holds the link, and `ls-tree -r` alone lists
+# blobs only. So every shape where the working tree could have seen automation
+# the commit does not spell out as regular files reads as automation here:
+#   * a symlink or submodule on a probed CI path, or on a parent of one
+#     (`.github` -> x), is present to file?/dir? (link_on), and
+#     detect_automation fails a linked .github/workflows CLOSED;
+#   * trees are listed too (`-t`), so a DIRECTORY named like a workflow is a
+#     workflow entry whose read raises -- UNDETERMINED, as the old
+#     File.read (EISDIR) was.
 WORKFLOW_FILE = %r{\A\.github/workflows/[^/]*\.ya?ml\z}.freeze
+LINK_MODES = %w[120000 160000].freeze
 
 class RevTree
   attr_reader :label
 
-  def initialize(repo, rev)
+  def initialize(repo, rev, side = "base")
     @repo = repo
     sha, err, ok = git(repo, "rev-parse", "--verify", "#{rev}^{commit}")
     unless ok
       die("cannot resolve '#{rev}' in #{repo} (#{err.strip}).",
-          "pass the SHA pair integration-gate printed. An unresolvable base is an ERROR -- the " \
-          "automation it ran is UNKNOWN, never absent.")
+          "pass the SHA pair integration-gate printed. An unresolvable #{side} is an ERROR -- the " \
+          "automation it runs is UNKNOWN, never absent.")
     end
     @rev = sha.strip
-    @label = "base #{short(@rev)}"
-    out, err, ok = git(repo, "ls-tree", "-r", "-z", "--full-tree", @rev)
+    @label = "#{side} #{short(@rev)}"
+    out, err, ok = git(repo, "ls-tree", "-r", "-t", "-z", "--full-tree", @rev)
     unless ok
-      die("`git ls-tree -r #{@rev}` failed in #{repo}: #{err.strip}",
-          "the tree at #{@rev} could not be listed, so the merge-time automation it ran is " \
+      die("`git ls-tree -r -t #{@rev}` failed in #{repo}: #{err.strip}",
+          "the tree at #{@rev} could not be listed, so the merge-time automation it runs is " \
           "UNKNOWN, not absent. Resolve the git error and re-run.")
     end
-    # "<mode> <type> <sha>\t<path>" per entry.
+    # "<mode> <type> <sha>\t<path>" per entry, trees included.
     @modes = out.split("\0").to_h { |e| meta, path = e.split("\t", 2); [path, meta.split(" ", 2)[0]] }
   end
 
@@ -687,22 +681,32 @@ class RevTree
     @modes.keys.select { |p| p.match?(WORKFLOW_FILE) }.sort
   end
 
-  # A symlink's blob is its target path and a submodule has no blob: neither
-  # is the workflow GitHub would load, so neither is read as one.
+  # A symlink's blob is its target path, a submodule has no blob, and a tree is
+  # not a file: none is the workflow GitHub would load, so none is read as one.
   def read(path)
     mode = @modes[path]
-    raise IOError, "mode #{mode} is not a regular file (a symlink or submodule is not modelled)" unless REGULAR_BLOB_MODES.include?(mode)
+    unless REGULAR_BLOB_MODES.include?(mode)
+      raise IOError, "mode #{mode} is not a regular file (a symlink, submodule or directory is not modelled)"
+    end
 
     show_at(@repo, @rev, path)
   end
 
-  # Any entry, as File.exist? answers for a directory too.
+  # Any entry, as File.exist? answered for a directory or a followed link.
   def file?(path)
     @modes.key?(path) || dir?(path)
   end
 
   def dir?(path)
-    @modes.each_key.any? { |p| p.start_with?("#{path}/") }
+    @modes[path] == TREE_MODE || !link_on(path).nil? ||
+      @modes.each_key.any? { |p| p.start_with?("#{path}/") }
+  end
+
+  # The path itself or its nearest ancestor that is a symlink or submodule, or
+  # nil. The working tree looked THROUGH such an entry; a commit cannot.
+  def link_on(path)
+    parts = path.split("/")
+    (1..parts.size).map { |i| parts.take(i).join("/") }.find { |p| LINK_MODES.include?(@modes[p]) }
   end
 end
 
@@ -714,6 +718,11 @@ end
 # different question (WHICH completed run was the deploy) and coupling them
 # would make one brittle filename load-bearing for two unrelated guarantees.
 def detect_automation(tree)
+  if (link = tree.link_on(".github/workflows"))
+    return ["UNDETERMINED",
+            "#{link} is a symlink or submodule in the commit -- the workflows behind it cannot be read " \
+            "from git, so it cannot prove merging does not deploy"]
+  end
   if tree.dir?(".github/workflows")
     files = tree.workflows
     if files.empty?
@@ -1173,15 +1182,16 @@ end
 # Returns { applies: [{dir:, where:}], scanned: n_workflows, steps: n_apply_steps }.
 # Only workflows whose later runs execute the merged code count (workflow_trigger);
 # each apply names the trigger, so a cron apply never reads as the merge push.
-def terraform_apply_roots(repo)
+#
+# Read from the head COMMIT (a RevTree), never the working tree (DND-794).
+def terraform_apply_roots(tree)
   applies = []
   scanned = 0
-  workflow_files(repo).each do |f|
-    rel = f.sub("#{repo}/", "")
+  tree.workflows.each do |rel|
     doc = begin
-      YAML.safe_load(File.read(f), aliases: true)
+      YAML.safe_load(tree.read(rel), aliases: true)
     rescue StandardError
-      nil # detect_automation already reports an unparseable workflow as UNDETERMINED
+      nil # detect_automation already reports an unreadable or unparseable workflow as UNDETERMINED
     end
     next unless doc.is_a?(Hash)
 
@@ -1405,6 +1415,7 @@ PR_TYPES_ALLOWED = %w[
   demilestoned enqueued dequeued
 ].freeze
 REGULAR_BLOB_MODES = %w[100644 100755].freeze
+TREE_MODE = "040000"
 # The deploy-automation pattern a grant may cover. A hit that ALSO matches any
 # other deploy-automation pattern (`**/action.yml` ...) is something more than a
 # workflow: `.github/workflows/action.yml` is a composite action that a push
@@ -1945,7 +1956,9 @@ def run(argv)
     return 0
   end
 
-  automation = merge_time_automation(WorktreeTree.new(repo, "head (working tree)"), RevTree.new(repo, base))
+  # Both sides from their commits (DND-794), never the checkout --repo names.
+  head_tree = RevTree.new(repo, head, "head")
+  automation = merge_time_automation(head_tree, RevTree.new(repo, base))
 
   if automation[0] == "CONFIRMED-ABSENT"
     print_report("WARM", head, manifest, surfaces, pattern_count, files, hits, automation, examined, {}, refs)
@@ -1955,7 +1968,7 @@ def run(argv)
 
   # Which terraform root merging APPLIES, per hit -- a note for the owner, never
   # a verdict input (see terraform_apply_roots).
-  roots = terraform_apply_roots(repo)
+  roots = terraform_apply_roots(head_tree)
   notes = hits.to_h { |hh| [hh[:path], apply_note(hh[:path], roots, repo, head)] }.compact
 
   # HOT. The full block prints in every case -- including under
@@ -2511,7 +2524,7 @@ def self_test
     # "base ran nothing" and "base was never read" never read the same.
     ro, = removal.call("both-sides", seed: deploy_seed) { |r| put.call(r, "main.tf", "resource\n") }
     check.call("the automation term prints BOTH sides it read, head and base (DND-774)",
-               ro.include?("at head (working tree): CONFIRMED") && ro =~ /at base [0-9a-f]{7}: CONFIRMED/,
+               ro =~ /at head [0-9a-f]{7}: CONFIRMED/ && ro =~ /at base [0-9a-f]{7}: CONFIRMED/,
                ro)
 
     # Sabotage: a copy of this script that reads the "base" side at HEAD must
@@ -2527,6 +2540,94 @@ def self_test
     check.call("sabotage: reading the base side at head reads the sole-workflow deletion WARM (the cases discriminate)",
                base_mutant_src != src && bst.exitstatus.zero? && bout.include?("BLAST-RADIUS WARM"),
                "mutated=#{base_mutant_src != src} exit=#{bst.exitstatus} out=#{bout}")
+
+    # DND-794: the verdict is a function of (base, head) ONLY. The head side of
+    # the automation term and the terraform apply roots used to read the
+    # working tree, so a checkout that differed from --head -- an untracked
+    # workflow, a locally deleted one, a different branch checked out -- gave
+    # a verdict about a tree nobody was merging. Each case runs the committed
+    # pair on a clean checkout, dirties the working tree, runs it again, and
+    # requires byte-identical stdout and the same exit.
+    wt_n = 0
+    wt_same = lambda do |desc, want, seed:, change:, words: [], absent: [], &dirty|
+      wt_n += 1
+      dir = File.join(tmp, "wt794-#{wt_n}")
+      wb, wh = mkrepo.call(dir, seed: seed) { |r| change.call(r) }
+      co, _, cc = run_br.call(["--base", wb, "--head", wh, "--repo", dir])
+      dirty.call(dir)
+      dout, de, dc = run_br.call(["--base", wb, "--head", wh, "--repo", dir])
+      check.call("#{desc} (DND-794)",
+                 co == dout && cc == dc && co.include?("BLAST-RADIUS #{want}") &&
+                   words.all? { |w| co.include?(w) } && absent.none? { |w| co.include?(w) },
+                 "clean: exit=#{cc} out=#{co}\n        dirty: exit=#{dc} out=#{dout} err=#{de}")
+    end
+    extra_apply_wf = apply_wf.gsub(".pkg/prod/tf", "extra")
+    wt_same.call("an UNTRACKED deploy workflow in the working tree does not make a pull_request-only repo's merge HOT",
+                 "WARM", seed: ->(r) { wf.call(r, "ci.yml", pr_wf) }, change: ->(r) { put.call(r, "main.tf", "resource\n") }) do |r|
+      wf.call(r, "deploy.yml", deploy_wf)
+    end
+    wt_same.call("an UNTRACKED apply workflow (an extra terraform root) does not mark the changed root AUTO-APPLIED",
+                 "HOT", seed: ->(r) { wf.call(r, "post-merge.yml", apply_wf) },
+                 change: ->(r) { put.call(r, "extra/main.tf", "resource\n") },
+                 words: ["no merge-time `terraform apply` runs in extra"], absent: ["AUTO-APPLIED"]) do |r|
+      wf.call(r, "extra-apply.yml", extra_apply_wf)
+      put.call(r, "other/main.tf", "resource\n")
+    end
+    wt_same.call("a deploy workflow the head COMMIT adds is seen when the working tree lacks it (deleted locally)",
+                 "HOT", seed: nil, change: lambda { |r|
+                   wf.call(r, "post-merge.yml", deploy_wf)
+                   put.call(r, "main.tf", "resource\n")
+                 }, words: ["post-merge.yml"], absent: ["REMOVED"]) do |r|
+      File.delete(File.join(r, ".github/workflows/post-merge.yml"))
+    end
+    wt_same.call("the head commit's apply workflow still names the root AUTO-APPLIED when deleted locally",
+                 "HOT", seed: ->(r) { wf.call(r, "post-merge.yml", apply_wf) },
+                 change: ->(r) { put.call(r, ".pkg/prod/tf/main.tf", "resource\n") },
+                 words: ["AUTO-APPLIED on merge"], absent: ["REMOVED"]) do |r|
+      File.delete(File.join(r, ".github/workflows/post-merge.yml"))
+    end
+    wt_same.call("an EMPTIED working tree (only .git left) changes nothing: every term reads the commits",
+                 "HOT", seed: ->(r) { wf.call(r, "post-merge.yml", apply_wf) },
+                 change: lambda { |r|
+                   put.call(r, ".pkg/prod/tf/main.tf", "resource\n")
+                   put.call(r, ".pkg/prod/tf/kms/main.tf", "resource\n")
+                 }, words: ["AUTO-APPLIED on merge", "no merge-time `terraform apply` runs in .pkg/prod/tf/kms"]) do |r|
+      Dir.children(r).reject { |c| c == ".git" }.each { |c| FileUtils.rm_rf(File.join(r, c)) }
+    end
+
+    # Non-narrowing (DND-794): the working tree FOLLOWED a symlink and saw a
+    # directory entry; a commit holds the link itself. Each shape the working
+    # tree read as automation is still HOT when read from the commit.
+    shape_n = 0
+    shape_hot = lambda do |desc, seed|
+      shape_n += 1
+      dir = File.join(tmp, "shape794-#{shape_n}")
+      sb, sh = mkrepo.call(dir, seed: seed) { |r| put.call(r, "main.tf", "resource\n") }
+      so, se, sc = run_br.call(["--base", sb, "--head", sh, "--repo", dir])
+      check.call("HOT: #{desc} (DND-794 non-narrowing)",
+                 sc == 4 && so.include?("BLAST-RADIUS HOT"), "exit=#{sc} out=#{so} err=#{se}")
+    end
+    shape_hot.call("a SYMLINKED .github/workflows directory holding a deploy workflow", lambda { |r|
+      put.call(r, "deploy/post-merge.yml", deploy_wf)
+      FileUtils.mkdir_p(File.join(r, ".github"))
+      File.symlink("../deploy", File.join(r, ".github", "workflows"))
+    })
+    shape_hot.call("a SYMLINKED .github directory holding a deploy workflow", lambda { |r|
+      put.call(r, "gh/workflows/post-merge.yml", deploy_wf)
+      File.symlink("gh", File.join(r, ".github"))
+    })
+    shape_hot.call("a SYMLINKED .circleci directory (an unmodelled forge)", lambda { |r|
+      put.call(r, "circle/config.yml", "version: 2\n")
+      File.symlink("circle", File.join(r, ".circleci"))
+    })
+    shape_hot.call("a SYMLINKED .gitlab/ci directory", lambda { |r|
+      put.call(r, "glci/deploy.yml", "deploy: {}\n")
+      FileUtils.mkdir_p(File.join(r, ".gitlab"))
+      File.symlink("../glci", File.join(r, ".gitlab", "ci"))
+    })
+    shape_hot.call("a DIRECTORY named like a workflow (.github/workflows/x.yml/)", lambda { |r|
+      put.call(r, ".github/workflows/x.yml/inner.txt", "x\n")
+    })
 
     # The ticket's own case: a composite action under .github/actions, which the
     # workflow does not even have to name -- the conventional location is enough.
