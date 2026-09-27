@@ -725,10 +725,9 @@ it per `athena:merge-boarding`:
 4. fast-forward the main checkout (`git merge --ff-only`).
 
 The author still never pushes to main and never merges its own PR. Owner-gated
-merges stay gated: an `integration-gate` exit 4 is held for the owner unless it
-is a security fix (`~/.claude/CLAUDE.md` → *Security fixes ship without owner
-approval*) or a library upgrade (*Library upgrades ship without owner
-approval*).
+merges stay gated: an `integration-gate` exit 4 is held for the owner unless a
+standing approval covers it (`~/.claude/CLAUDE.md` → *Standing owner
+approvals*).
 
 **Later (2026-09-24):** this rule said a hand-spawned agent "opens a PR for the
 owner to merge rather than pushing to main", so its green PRs sat until the

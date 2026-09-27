@@ -1404,14 +1404,11 @@ HOT_FIX = <<~FIX.freeze
   Attention/Cody in Notion with the PR URL, head SHA and what merging would cause, and
   surface it in your final report. Merge only after the OWNER'S OWN authorization, replayed
   verbatim via --owner-approval '<the owner's words + where recorded>'. EXCEPTION: a
-  SECURITY FIX carries the owner's standing approval (~/.claude/CLAUDE.md -> "Security
-  fixes ship without owner approval") -- do not hold it; pass --owner-approval citing that
-  rule by name, the owner's quote and date, the security class and the ticket, and merge.
-  Likewise a LIBRARY UPGRADE (an existing package's version increase, when every HOT path
-  above is a lockfile or deps-list line) carries the owner's standing approval
-  (~/.claude/CLAUDE.md -> "Library upgrades ship without owner approval"), whose record and
-  scope are defined there. The full bar still applies, and no other change can borrow
-  either approval.
+  change a STANDING OWNER APPROVAL covers -- a security fix, a library upgrade, or a
+  comment/docs-only change, each as defined in ~/.claude/CLAUDE.md -> "Standing owner
+  approvals" -- is not held; pass --owner-approval with the record that
+  rule's own subsection gives, and merge. The full bar still applies, and an approval
+  covers only the files its subsection names.
 FIX
 
 # --- owner approval grant eligibility (DND-596) -----------------------------
