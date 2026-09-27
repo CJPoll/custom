@@ -55,8 +55,12 @@
 #                 pinned SHA; refused otherwise), at least max(--levels) of
 #                 them. Level k runs in the first k. Bootstrap (deps, compile,
 #                 test DB, one warm-up run) is the caller's and is not timed.
-#   --cmd         run in each worktree with `bash -c`; a relative first word
-#                 must be executable in every worktree.
+#   --cmd         the gate as words (split on whitespace, no shell, no
+#                 quoting), run in each worktree exactly as a caller hands it
+#                 to `test-slot -- CMD...`. A relative first word must be
+#                 executable in every worktree. Its gate class comes from the
+#                 sibling `test-slot --class`, is the same in every worktree,
+#                 and is recorded on every row: data for one class only.
 #   --out-dir     default ${XDG_STATE_HOME:-~/.local/state}/athena/test-slots/bench/<utc>
 #   --dry-run     print the pinned SHA, nproc, worktrees, and plan; create
 #                 nothing, run nothing.
@@ -154,10 +158,12 @@ load_stats() {
 # decide CEILING MIN_REPS < levels.csv rows (header lines skipped). Prints one
 # line per level, then `DECISION: N=<n>` (exit 0) or `DECISION: none` (exit 1),
 # then an optional `REQUEST: measure k=<k>`.
-# Columns used: 1 level, 3 runs, 4 passed, 7 peak_load1, 13 contaminated.
+# Columns used: 1 level, 3 runs, 4 passed, 7 peak_load1, 13 contaminated,
+# 15 class. A decision is about ONE gate class: rows of two classes refuse.
 decide() {
   awk -F, -v ceil="$1" -v minr="$2" '
-    $1 == "level" || NF < 13 { next }
+    $1 == "level" || NF < 15 { next }
+    { if (!($15 in classes)) { classes[$15] = 1; ncls++; clist = clist (clist == "" ? "" : ", ") $15 } }
     { k = $1 + 0; seen[k] = 1
       if ($13 == "yes") { dirty[k]++; next }
       clean[k]++
@@ -165,6 +171,8 @@ decide() {
       if ($7 == "n/a" || $7 + 0 > ceil + 0) failload[k] = 1
       if ($7 != "n/a" && $7 + 0 > peak[k] + 0) peak[k] = $7 + 0 }
     END {
+      if (ncls > 1) { printf "DECISION: none (rows mix gate classes: %s; decide one class at a time)\n", clist; exit 1 }
+      if (ncls == 1) printf "class: %s\n", clist
       n = 0; for (k in seen) ks[++n] = k + 0
       for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) if (ks[j] < ks[i]) { t = ks[i]; ks[i] = ks[j]; ks[j] = t }
       N = 0; stop = 0; failk = 0; base = 0
@@ -208,6 +216,9 @@ resolve_seams() {
   local here
   here=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")
   TS="$HOME/dev/custom/ai/bin/test-slot"
+  # The pool is the main checkout's test-slot (every caller agrees on N); the
+  # class comes from the test-slot shipped beside this bench, the same commit.
+  CLASS_TS="$here/test-slot"
   LOADAVG=/proc/loadavg
   CENSUS="$here/contention-census"
   FAKE_UNSLOTTED=""
@@ -334,11 +345,16 @@ parse_args() {
   num_le "$SAMPLE_S" 0 && die_usage "--sample-s must be above 0." "pass e.g. --sample-s 5."
   LEVELS=$(parse_levels "$LEVELS_RAW") || die_usage "--levels '$LEVELS_RAW' is not a list of positive integers." \
     "pass e.g. --levels 1,3,5."
+  # --cmd is an argv split on whitespace and run with no shell, exactly as a
+  # caller would hand it to `test-slot -- CMD...`, so its class is the class
+  # test-slot derives for that caller.
+  read -r -a CMD_ARGV <<<"$CMD_STR"
+  ((${#CMD_ARGV[@]})) || die_usage "--cmd is empty." "pass the gate as words, e.g. --cmd 'bin/prep-commit.sh'."
 }
 
 # validate_worktrees — sets WTS (array) and SHA; refuses bad input with Fix.
 validate_worktrees() {
-  local IFS=, w first max top sha rel
+  local IFS=, w first max top sha rel cls
   [ -n "$WORKTREES_RAW" ] || die_usage "--worktrees is required." \
     "pass the pre-bootstrapped checkouts, comma separated: --worktrees /path/a,/path/b,..."
   WTS=()
@@ -348,14 +364,18 @@ validate_worktrees() {
     "pass at least $max worktrees (one per concurrent run), or lower --levels."
   [ "$(printf '%s\n' "${WTS[@]}" | sort -u | wc -l)" -eq "${#WTS[@]}" ] || die_usage \
     "--worktrees names one checkout twice." "pass distinct worktrees: two runs sharing a tree share its build and compose stack."
-  first=${CMD_STR%% *}
+  first=${CMD_ARGV[0]}
   SHA=""
+  CLASS=""
   for w in "${WTS[@]}"; do
     [ -d "$w" ] || die_usage "worktree $w does not exist." "create it (e.g. ~/dev/custom/scripts/wt-preflight <branch> gen_saas) and bootstrap it."
-    if [[ $first != /* ]]; then
+    if [[ $first == */* && $first != /* ]]; then
       rel="$w/$first"
       [ -x "$rel" ] || die_usage "$w has no executable $first (--cmd '$CMD_STR')." \
         "pass gen_saas checkouts (they carry bin/prep-commit.sh), or a --cmd whose first word exists in each."
+    elif [[ $first != */* ]]; then
+      command -v "$first" >/dev/null 2>&1 || die_usage "--cmd's first word '$first' is not on PATH." \
+        "name the gate by a path (e.g. bin/prep-commit.sh) or a command on PATH."
     fi
     sha=$(git -C "$w" rev-parse HEAD 2>/dev/null) || die_usage "$w is not a git checkout." \
       "pass git worktrees of the repo under test."
@@ -367,6 +387,16 @@ validate_worktrees() {
       die_usage "worktrees are at different commits ($SHA vs $sha in $w)." \
         "pin one SHA: \`git -C <wt> checkout --detach $SHA\` in every worktree, then re-bootstrap if deps changed."
     fi
+    # The gate class, derived by test-slot itself (the copy shipped with this
+    # bench), so the data maps one-to-one onto test-slot's classes.
+    cls=$(cd "$w" && "$CLASS_TS" --class -- "${CMD_ARGV[@]}" 2>/dev/null) || die_usage \
+      "$CLASS_TS --class could not classify --cmd '$CMD_STR' in $w." \
+      "use a test-slot with --class (DND-489) beside this bench; a run with no class cannot feed a per-class weight."
+    if [ -z "$CLASS" ]; then CLASS=$cls
+    elif [ "$cls" != "$CLASS" ]; then
+      die_usage "worktrees give different gate classes ($CLASS vs $cls in $w)." \
+        "pass worktrees of ONE repo: a measurement is about one gate class."
+    fi
   done
 }
 
@@ -375,6 +405,7 @@ print_plan() {
   printf 'pinned SHA: %s\n' "$SHA"
   printf 'host: %s  nproc: %s\n' "${HOSTNAME:-unknown}" "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
   printf 'cmd: %s\n' "$CMD_STR"
+  printf 'class: %s  (by %s --class)\n' "$CLASS" "$CLASS_TS"
   printf 'levels: %s  reps: %s  (rep-major: every level once, then again)\n' "$LEVELS" "$REPS"
   printf 'bg-threshold: %s  ceiling: %s  min-reps: %s  settle: %s x %ss  sample: %ss  tail: %ss  run-timeout: %ss\n' \
     "$BG_THRESHOLD" "$CEILING" "$MIN_REPS" "$SETTLE_MAX" "$SETTLE_S" "$SAMPLE_S" "$TAIL_S" "$RUN_TIMEOUT"
@@ -473,7 +504,7 @@ run_level() { # run_level K REP
     bash -c '
       cd "$1" || exit 97
       s=$EPOCHREALTIME
-      timeout --kill-after=60 "$5" bash -c "$2" >"$3" 2>&1 </dev/null &
+      timeout --kill-after=60 "$5" "${@:6}" >"$3" 2>&1 </dev/null &
       tp=$!
       printf "%s\n" "$tp" >"$4.tpid"
       trap "kill -TERM $tp 2>/dev/null" TERM INT HUP
@@ -483,7 +514,7 @@ run_level() { # run_level K REP
         kill -0 "$tp" 2>/dev/null || break
       done
       printf "%s %s %s\n" "$s" "$EPOCHREALTIME" "$rc" >"$4"' \
-      _ "${WTS[i - 1]}" "$CMD_STR" "$OUT_DIR/run-$tag-$i.log" "$OUT_DIR/.res-$tag-$i" "$RUN_TIMEOUT" &
+      _ "${WTS[i - 1]}" unused "$OUT_DIR/run-$tag-$i.log" "$OUT_DIR/.res-$tag-$i" "$RUN_TIMEOUT" "${CMD_ARGV[@]}" &
     RUN_PIDS+=("$!")
     RUN_TPIDS+=("$OUT_DIR/.res-$tag-$i.tpid")
   done
@@ -521,16 +552,16 @@ run_level() { # run_level K REP
     fi
     [ "$rc" = 0 ] && passed=$((passed + 1))
     [ "$wall" != n/a ] && walls+=("$wall")
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$k" "$rep" "$i" "${WTS[i - 1]}" "$wall" "$rc" \
-      "$([ "$rc" = 0 ] && echo yes || echo no)" "$bg" "$u" "$f" "$contaminated" "$reason" >>"$OUT_DIR/runs.csv"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$k" "$rep" "$i" "${WTS[i - 1]}" "$wall" "$rc" \
+      "$([ "$rc" = 0 ] && echo yes || echo no)" "$bg" "$u" "$f" "$contaminated" "$reason" "$CLASS" >>"$OUT_DIR/runs.csv"
   done
   stats=$(load_stats "$lf" "$t_start" "$t_end")
   local med mx
   med=$(printf '%s\n' "${walls[@]}" | grep -v '^$' | median)
   mx=$(printf '%s\n' "${walls[@]}" | grep -v '^$' | sort -n | tail -1)
   read -r pk mn pr <<<"$stats"
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$k" "$rep" "$k" "$passed" "${med:-n/a}" "${mx:-n/a}" \
-    "$pk" "$mn" "$pr" "$bg" "$u" "$f" "$contaminated" "$reason" >>"$OUT_DIR/levels.csv"
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$k" "$rep" "$k" "$passed" "${med:-n/a}" "${mx:-n/a}" \
+    "$pk" "$mn" "$pr" "$bg" "$u" "$f" "$contaminated" "$reason" "$CLASS" >>"$OUT_DIR/levels.csv"
   say "level $k rep $rep: passed $passed/$k, max wall ${mx:-n/a}s, peak load1 $pk, mean load1 $mn${reason:+, CONTAMINATED: $reason}"
 }
 
@@ -539,8 +570,8 @@ inner() {
   trap 'exit 143' TERM
   trap 'exit 130' INT
   trap 'exit 129' HUP
-  printf 'level,rep,run,worktree,wall_s,exit,passed,bg_load1,unslotted,foreign_holders,contaminated,reason\n' >"$OUT_DIR/runs.csv"
-  printf 'level,rep,runs,passed,median_wall_s,max_wall_s,peak_load1,mean_load1,peak_runnable,bg_load1,unslotted,foreign_holders,contaminated,reason\n' >"$OUT_DIR/levels.csv"
+  printf 'level,rep,run,worktree,wall_s,exit,passed,bg_load1,unslotted,foreign_holders,contaminated,reason,class\n' >"$OUT_DIR/runs.csv"
+  printf 'level,rep,runs,passed,median_wall_s,max_wall_s,peak_load1,mean_load1,peak_runnable,bg_load1,unslotted,foreign_holders,contaminated,reason,class\n' >"$OUT_DIR/levels.csv"
   local rep k
   for ((rep = 1; rep <= REPS; rep++)); do
     for k in $LEVELS; do run_level "$k" "$rep"; done

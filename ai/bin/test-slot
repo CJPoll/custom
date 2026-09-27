@@ -59,7 +59,17 @@
 #   test-slot [--label TEXT] [--wait-timeout SECONDS] [--outcome-file PATH]
 #             [--exclusive] -- CMD [ARGS...]
 #   test-slot --status [--json]
+#   test-slot --class -- CMD [ARGS...]
 #   test-slot --help | --self-test
+#
+#   --class: print CMD's gate class and exit 0; nothing runs, no pool is
+#     touched. The class is "<repo>:<tool>" (DND-489), derived ONLY from CMD's
+#     argv and the cwd, never from a caller label: repo is the project named by
+#     cwd's git common dir ("norepo" outside a repo); tool is the basename of
+#     the first argv word left after skipping wrappers (timeout, env, nice,
+#     ionice, setsid, stdbuf, and a shell running a script file). A shell
+#     running a string (`bash -c ...`) or nothing left is "opaque". Holders
+#     and events carry the same class.
 #
 #   Always invoke the MAIN checkout's copy by absolute path
 #   (~/dev/custom/ai/bin/test-slot), so every caller agrees on N.
@@ -85,7 +95,8 @@
 #
 #   Pool: ${XDG_STATE_HOME:-$HOME/.local/state}/athena/test-slots/ (0700):
 #     slot-<i>.lock      flock = liveness; never deleted
-#     slot-<i>.holder    JSON {label,cwd,pid,started_at,exclusive}; diagnostic
+#     slot-<i>.holder    JSON {label,cwd,pid,started_at,exclusive,class};
+#                        diagnostic
 #     seq.lock           guards ticket issue and the reaping of dead waiters
 #     queue.lock         the queue head (and any pre-DND-823 waiter) blocks here
 #     waiters/q-<ticket>.w  one per live waiter, flock-held by it; ticket
@@ -93,7 +104,7 @@
 #                        since,ticket}. waiters/<pid>-<epoch>.w is a
 #                        pre-DND-823 waiter (unordered)
 #     events.jsonl       one JSON line per event {ts,event,slot,label,cwd,pid,
-#                        exclusive,waited_s,ran_s,exit}; event is one of
+#                        exclusive,waited_s,ran_s,exit,class}; event is one of
 #                        waiting|acquired|released|timeout|reentrant; rotated to
 #                        events.jsonl.1 past 1 MiB (one generation kept)
 #   --exclusive: holds ALL N slots before CMD runs (DND-489's bench quiesces
@@ -169,6 +180,7 @@ Usage:
   test-slot [--label TEXT] [--wait-timeout SECONDS] [--outcome-file PATH]
             [--exclusive] -- CMD [ARGS...]
   test-slot --status [--json]
+  test-slot --class -- CMD [ARGS...]
   test-slot --help | --self-test
 
 Run CMD once a machine-wide test slot is free (at most N heavy runs at once).
@@ -180,6 +192,7 @@ CMD's argv, stdin, stdout, stderr, and exit code pass through unchanged.
   --outcome-file PATH   write `timeout` or `ran exit=<n>` (removed at start)
   --exclusive           hold ALL N slots while CMD runs
   --status [--json]     show N, holders, waiters, and UNSLOTTED heavy runs
+  --class -- CMD        print CMD's gate class ("<repo>:<tool>"); runs nothing
   --self-test           run the hermetic self-test suite
 
 Exit: CMD's code if it ran | 75 wait timed out, CMD never ran | 2 usage.
@@ -268,6 +281,64 @@ is_heavy_argv() {
   return 1
 }
 
+# gate_tool ARGV... — the tool a command runs, for its gate class (DND-489):
+# the basename of the first argv word left after skipping wrappers, or
+# "opaque" when a shell runs a string (-c) or nothing is left. Reads argv
+# only; a caller label never enters it.
+gate_tool() {
+  local -a v=("$@")
+  local n=${#v[@]} i=0 b
+  while ((i < n)); do
+    b=${v[i]##*/}
+    case $b in
+      timeout)
+        i=$((i + 1))
+        while ((i < n)) && [[ ${v[i]} == -* ]]; do
+          case ${v[i]} in -s | -k | --signal | --kill-after) i=$((i + 2)) ;; *) i=$((i + 1)) ;; esac
+        done
+        i=$((i + 1)) # the duration
+        ;;
+      env)
+        i=$((i + 1))
+        while ((i < n)) && [[ ${v[i]} == -* || ${v[i]} == *=* ]]; do
+          case ${v[i]} in -u | -C | -S | --unset | --chdir | --split-string) i=$((i + 2)) ;; *) i=$((i + 1)) ;; esac
+        done
+        ;;
+      nice | ionice | setsid | stdbuf)
+        i=$((i + 1))
+        while ((i < n)) && [[ ${v[i]} == -* ]]; do
+          case ${v[i]} in -n | -c | -p | -P | -u | -i | -o | -e) i=$((i + 2)) ;; *) i=$((i + 1)) ;; esac
+        done
+        ;;
+      bash | sh | dash | zsh)
+        i=$((i + 1))
+        while ((i < n)) && [[ ${v[i]} == [-+]* ]]; do
+          case ${v[i]} in
+            --) i=$((i + 1)); break ;;
+            -o | +o | -O | +O | --rcfile | --init-file) i=$((i + 2)) ;;
+            --*) i=$((i + 1)) ;;
+            -*c*) printf 'opaque\n'; return ;; # a string, not a file: opaque
+            *) i=$((i + 1)) ;;
+          esac
+        done
+        ((i < n)) || { printf 'opaque\n'; return; } # interactive/stdin shell
+        printf '%s\n' "${v[i]##*/}"
+        return
+        ;;
+      '') printf 'opaque\n'; return ;;
+      *) printf '%s\n' "$b"; return ;;
+    esac
+  done
+  printf 'opaque\n'
+}
+
+# gate_class REPO ARGV... — "<repo>:<tool>"; an empty REPO is "norepo".
+gate_class() {
+  local repo=${1:-norepo}
+  shift
+  printf '%s:%s\n' "$repo" "$(gate_tool "$@")"
+}
+
 # unslotted_state NS_SELF NS_PID ENV_RC — classify a heavy run for --status:
 #   container  it lives in another pid namespace (docker does not pass our env
 #              in, so its slot cannot be read; never counted as unslotted)
@@ -324,6 +395,20 @@ die_usage() { # die_usage MESSAGE FIX
 }
 
 canon() { realpath -m -- "$1" 2>/dev/null || printf '%s\n' "$1"; }
+
+# repo_of DIR — the project DIR belongs to: the name of the directory holding
+# its git common dir (identical for a main checkout and all its worktrees), or
+# "norepo" when DIR is in no repo. Never empty.
+repo_of() {
+  local common name
+  common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || {
+    printf 'norepo\n'
+    return
+  }
+  common=$(canon "$common")
+  if [ "${common##*/}" = .git ]; then name=${common%/.git}; name=${name##*/}; else name=${common##*/}; name=${name%.git}; fi
+  printf '%s\n' "${name:-norepo}"
+}
 
 default_pool_dir() {
   local base=${XDG_STATE_HOME:-}
@@ -446,8 +531,8 @@ try_acquire() {
 write_holder() {
   local i=$1 f="$POOL/slot-$1.holder" excl=false
   ((EXCLUSIVE)) && excl=true
-  if printf '{"label":%s,"cwd":%s,"pid":%s,"started_at":"%s","exclusive":%s}\n' \
-    "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$(iso_now)" "$excl" >"$f.$$.tmp" 2>/dev/null; then
+  if printf '{"label":%s,"cwd":%s,"pid":%s,"started_at":"%s","exclusive":%s,"class":%s}\n' \
+    "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$(iso_now)" "$excl" "$(json_str "$CLASS")" >"$f.$$.tmp" 2>/dev/null; then
     mv -f -- "$f.$$.tmp" "$f" 2>/dev/null || rm -f -- "$f.$$.tmp"
   fi
 }
@@ -458,9 +543,9 @@ write_holder() {
 append_event() {
   local fd size line excl=false
   ((EXCLUSIVE)) && excl=true
-  line=$(printf '{"ts":"%s","event":"%s","slot":%s,"label":%s,"cwd":%s,"pid":%s,"exclusive":%s,"waited_s":%s,"ran_s":%s,"exit":%s}' \
+  line=$(printf '{"ts":"%s","event":"%s","slot":%s,"label":%s,"cwd":%s,"pid":%s,"exclusive":%s,"waited_s":%s,"ran_s":%s,"exit":%s,"class":%s}' \
     "$(iso_now)" "$1" "${2:-null}" "$(json_str "$LABEL")" "$(json_str "$PWD")" "$$" "$excl" \
-    "${3:+$(fmt_ms "$3")}" "${4:+$(fmt_ms "$4")}" "${5:-null}")
+    "${3:+$(fmt_ms "$3")}" "${4:+$(fmt_ms "$4")}" "${5:-null}" "$(json_str "$CLASS")")
   line=${line//\"waited_s\":,/\"waited_s\":null,}
   line=${line//\"ran_s\":,/\"ran_s\":null,}
   if ! { exec {fd}>>"$POOL/events.lock"; } 2>/dev/null; then
@@ -1037,9 +1122,9 @@ main() {
     esac
     case $1 in
       -h | --help) usage; exit 0 ;;
-      --self-test | --status)
-        [ "$mode" = run ] || die_usage "--self-test and --status are two modes." "pass one of them."
-        [ "$1" = --self-test ] && mode=selftest || mode=status
+      --self-test | --status | --class)
+        [ "$mode" = run ] || die_usage "--self-test, --status and --class are separate modes." "pass one of them."
+        case $1 in --self-test) mode=selftest ;; --status) mode=status ;; --class) mode=class ;; esac
         ;;
       --json) JSON=1 ;;
       --exclusive) EXCLUSIVE=1 ;;
@@ -1087,6 +1172,12 @@ main() {
       status
       exit 0
       ;;
+    class)
+      ((have_dd && ${#CMD[@]})) || die_usage "--class needs \`--\` and a command." \
+        "write: test-slot --class -- CMD ARGS (the command is only read, never run)."
+      gate_class "$(repo_of "$PWD")" "${CMD[@]}"
+      exit 0
+      ;;
   esac
 
   if [ -n "$wait_raw" ]; then
@@ -1097,6 +1188,7 @@ main() {
   ((have_dd)) || die_usage "no \`--\` before the command." \
     "write: test-slot [flags] -- CMD ARGS (the \`--\` is required)."
   ((${#CMD[@]})) || die_usage "no command after \`--\`." "write: test-slot [flags] -- CMD ARGS."
+  CLASS=$(gate_class "$(repo_of "$PWD")" "${CMD[@]}")
   if [ -z "$LABEL" ]; then
     local top
     top=$(git rev-parse --show-toplevel 2>/dev/null) || top=$PWD

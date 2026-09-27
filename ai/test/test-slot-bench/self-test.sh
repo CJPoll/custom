@@ -146,11 +146,12 @@ FAST=("${FAST0[@]}" --wait-timeout 30)
 if [ $? -eq 0 ]; then ok; else bad helpers "pure helper cases failed (see above)"; fi
 
 # ------------------------------------------------------------ decision helper
-HDR='level,rep,runs,passed,median_wall_s,max_wall_s,peak_load1,mean_load1,peak_runnable,bg_load1,unslotted,foreign_holders,contaminated,reason'
-row() { # row K REP PEAK PASSED_ALL(yes|no) CONTAMINATED(yes|no)
+HDR='level,rep,runs,passed,median_wall_s,max_wall_s,peak_load1,mean_load1,peak_runnable,bg_load1,unslotted,foreign_holders,contaminated,reason,class'
+ROW_CLASS=gen_saas:prep-commit.sh
+row() { # row K REP PEAK PASSED_ALL(yes|no) CONTAMINATED(yes|no)   (class: ROW_CLASS)
   local passed=$1
   [ "$4" = yes ] || passed=0
-  printf '%s,%s,%s,%s,100,120,%s,%s,5,0.5,0,0,%s,%s\n' "$1" "$2" "$1" "$passed" "$3" "$3" "$5" "$([ "$5" = yes ] && echo 'bg_load1=3.0>2.0')"
+  printf '%s,%s,%s,%s,100,120,%s,%s,5,0.5,0,0,%s,%s,%s\n' "$1" "$2" "$1" "$passed" "$3" "$3" "$5" "$([ "$5" = yes ] && echo 'bg_load1=3.0>2.0')" "$ROW_CLASS"
 }
 decide_on() { # decide_on NAME CEILING ROWS... -> $W/NAME.dec, rc in DRC
   local name=$1 ceil=$2; shift 2
@@ -192,6 +193,13 @@ check h6-excluded has "$W/h6.dec" "contaminated reps 1 excluded"
 "$BIN" --decide "$W/h7.csv" >"$W/h7.dec" 2>&1
 check h7-default-ceiling has "$W/h7.dec" "DECISION: N=1"
 
+# h8: a decision is about ONE gate class; rows of two classes refuse.
+{ echo "$HDR"; row 1 1 6 yes no; row 1 2 6 yes no; ROW_CLASS=custom:harness-gate row 3 1 5 yes no; ROW_CLASS=custom:harness-gate row 3 2 5 yes no; } >"$W/h8.csv"
+"$BIN" --decide "$W/h8.csv" --min-reps 2 >"$W/h8.dec" 2>&1; rc=$?
+check h8-rc eq "$rc" 1
+check h8-mixed has "$W/h8.dec" "rows mix gate classes"
+check h8-names-class has "$W/h1.dec" "class: gen_saas:prep-commit.sh"
+
 # ------------------------------------------------------------ b1: --help
 out="$(XDG_STATE_HOME="$W/xdg1" "$BIN" --help 2>"$W/b1.err")"; rc=$?
 check b1-rc eq "$rc" 0
@@ -231,6 +239,12 @@ check b8-wt eval '[[ "$out" == *"$W/wt3"* ]]'
 check b8-plan eval '[[ "$out" == *"step: rep 1 level 3 -> worktrees 1..3"* ]]'
 check b8-created-nothing absent "$W/b8"
 check b8-no-slot-taken absent "$W/pool"
+check b8-class eval '[[ "$out" == *"class: repo:prep-commit.sh"* ]]'
+# b8b: a shell running a string is its own class (opaque), never a known tool.
+out="$("$BIN" --worktrees "$WTS" --levels 1 --cmd 'bash -c bin/prep-commit.sh' --dry-run 2>&1)"
+check b8b-opaque eval '[[ "$out" == *"class: repo:opaque"* ]]'
+out="$("$BIN" --worktrees "$WTS" --levels 1 --cmd 'timeout 60 bin/prep-commit.sh' --dry-run 2>&1)"
+check b8c-wrapper eval '[[ "$out" == *"class: repo:prep-commit.sh"* ]]'
 
 # ------------------------------------------------------------ b3: 1,3 all pass
 export SHIM_MODE=ok
@@ -248,6 +262,13 @@ check b3-decision has "$W/b3/decision.txt" "DECISION: N=3"
 check b3-summary has "$W/b3.out" "| 3 | 1 | 3/3 |"
 check b3-exclusive eq "$(jq -s '[.[] | select(.event == "acquired" and .exclusive == true and .label == "DND-489 bench")] | length' "$W/pool/events.jsonl")" 1
 check b3-sha-in-meta has "$W/b3/meta.txt" "pinned SHA: $SHA"
+# The class is test-slot's own derivation for this argv in these worktrees.
+want_class="$(cd "$W/wt1" && "$TS_BIN" --class -- bin/prep-commit.sh)"
+check b3-class-derivation eq "$want_class" "repo:prep-commit.sh"
+check b3-class-meta has "$W/b3/meta.txt" "class: $want_class"
+check b3-class-runs eq "$(awk -F, 'NR > 1 { print $13 }' "$W/b3/runs.csv" | sort -u)" "$want_class"
+check b3-class-levels eq "$(awk -F, 'NR > 1 { print $15 }' "$W/b3/levels.csv" | sort -u)" "$want_class"
+check b3-decision-class has "$W/b3/decision.txt" "class: $want_class"
 check b3-load-samples eval '[ "$(wc -l <"$W/b3/load-3-1.csv")" -ge 2 ]'
 
 # ------------------------------------------------------------ b4: contention fails

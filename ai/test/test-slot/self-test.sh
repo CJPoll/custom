@@ -182,6 +182,23 @@ d	e"
   t eval '! ticket_of /p/waiters/123-1790000000.w >/dev/null'
   t eval '! ticket_of /p/waiters/.q-5.99.tmp >/dev/null'
   t eval '! ticket_of /p/waiters/q-.w >/dev/null'
+  # DND-489: gate class = "<repo>:<tool>", from argv only. Wrappers are
+  # skipped; a shell running a string, or nothing left, is "opaque" -- its own
+  # class, never a known tool's.
+  t eq "$(gate_tool bin/prep-commit.sh)" prep-commit.sh
+  t eq "$(gate_tool timeout 1500 ./ai/bin/harness-gate)" harness-gate
+  t eq "$(gate_tool timeout -k 60 --signal=TERM 1500 bin/prep-commit.sh --base-branch main)" prep-commit.sh
+  t eq "$(gate_tool env -u X A=1 B=2 nice -n 5 ionice -c 3 setsid stdbuf -oL mix test)" mix
+  t eq "$(gate_tool bash bin/prep-commit.sh)" prep-commit.sh
+  t eq "$(gate_tool bash -e -o pipefail -- scripts/x.sh arg)" x.sh
+  t eq "$(gate_tool bash -c 'bin/prep-commit.sh')" opaque
+  t eq "$(gate_tool sh -ec 'bin/prep-commit.sh')" opaque
+  t eq "$(gate_tool zsh)" opaque
+  t eq "$(gate_tool timeout 10)" opaque
+  t eq "$(gate_tool '')" opaque
+  t eq "$(gate_class gen_saas timeout 1500 bin/prep-commit.sh)" gen_saas:prep-commit.sh
+  t eq "$(gate_class custom bash -c 'ai/bin/harness-gate')" custom:opaque
+  t eq "$(gate_class '' mix test)" norepo:mix
   # DND-489: N is per machine. A host with no measured entry gets the
   # provisional default, and the basis names the host that missed.
   t eq "$(n_for_host no-such-host-dnd489)" "$TEST_SLOT_N	provisional, unmeasured on host no-such-host-dnd489"
@@ -746,6 +763,32 @@ if git -C "$here" show "$OLD_REV:ai/bin/test-slot" >"$OLD" 2>"$W/34.git.err" && 
 else
   bad 34-old-copy "could not extract the pre-fix test-slot at $OLD_REV: $(cat "$W/34.git.err" 2>/dev/null). Fix: run the suite from a git checkout of ~/dev/custom that contains $OLD_REV (git fetch origin)."
 fi
+# ------------------------------------------------------------------- class
+# 40 (DND-489): --class reads cwd's repo and CMD's argv; it runs nothing and
+# touches no pool. A main checkout and its worktree are the same repo; a dir
+# outside any repo is "norepo".
+mkdir -p "$W/c40/proj"
+git -C "$W/c40/proj" init -q
+git -C "$W/c40/proj" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+git -C "$W/c40/proj" worktree add -q --detach "$W/c40/wt" HEAD
+mkdir -p "$W/c40/plain"
+newpool p40 1
+out="$(cd "$W/c40/proj" && "$BIN" --class -- timeout 1500 bin/prep-commit.sh 2>&1)"; rc=$?
+check 40-rc eq "$rc" 0
+check 40-main eq "$out" "proj:prep-commit.sh"
+check 40-worktree eq "$(cd "$W/c40/wt" && "$BIN" --class -- timeout 1500 bin/prep-commit.sh 2>&1)" "proj:prep-commit.sh"
+check 40-subdir eq "$(mkdir -p "$W/c40/wt/sub" && cd "$W/c40/wt/sub" && "$BIN" --class -- ./ai/bin/harness-gate 2>&1)" "proj:harness-gate"
+check 40-norepo eq "$(cd "$W/c40/plain" && "$BIN" --class -- mix test 2>&1)" "norepo:mix"
+check 40-opaque eq "$(cd "$W/c40/proj" && "$BIN" --class -- bash -c 'bin/prep-commit.sh' 2>&1)" "proj:opaque"
+check 40-ran-nothing absent "$POOL"
+(cd "$W/c40/proj" && "$BIN" --class 2>"$W/40b.err"); rc=$?
+check 40-no-cmd eq "$rc" 2
+check 40-no-cmd-fix has "$W/40b.err" "Fix:"
+# 41: a held slot's holder JSON and every event carry the class.
+newpool p41 1
+(cd "$W/c40/wt" && "$BIN" -- bash -c 'jq -r .class "$1"/slot-1.holder > "$2"' _ "$POOL" "$W/41.class")
+check 41-holder-class eq "$(cat "$W/41.class" 2>/dev/null)" "proj:opaque"
+check 41-event-class eq "$(events | jq -r 'select(.event == "released") | .class')" "proj:opaque"
 
 # ------------------------------------------------------------------- summary
 if [ "$FAIL" -eq 0 ]; then
