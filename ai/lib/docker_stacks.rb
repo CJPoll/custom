@@ -26,6 +26,8 @@ module DockerStacks
                    [{ base: "192.168.0.0/16", size: 20 }]).freeze
 
   COMPOSE_FILES = %w[docker-compose.yml docker-compose.yaml compose.yml compose.yaml].freeze
+  # A repo's own teardown script (athena:teardown-worktree-stack, tier 1).
+  REPO_SCRIPTS = %w[bin/teardown-worktree-stack.sh .claude/teardown-worktree-stack.sh].freeze
   PROJECT_LABEL = "com.docker.compose.project"
   WORKDIR_LABEL = "com.docker.compose.project.working_dir"
 
@@ -82,13 +84,21 @@ module DockerStacks
 
   # -> { capacity:, used:, free:, holders: [networks holding a pool subnet] }
   def headroom(pools, networks)
-    ranges = pools.map { |p| ip(p[:base]) }.select(&:ipv4?)
-    holders = networks.select do |n|
-      n[:subnets].any? { |s| ranges.any? { |r| r.include?(ip(s)) && ip(s).prefix >= r.prefix } }
-    end
-    used = holders.sum { |n| n[:subnets].count { |s| ranges.any? { |r| r.include?(ip(s)) } } }
+    slots = ->(n) { n[:subnets].sum { |s| pool_slots(pools, s) } }
+    holders = networks.select { |n| slots.call(n).positive? }
+    used = holders.sum { |n| slots.call(n) }
     capacity = pool_capacity(pools)
     { capacity: capacity, used: used, free: capacity - used, holders: holders }
+  end
+
+  # Pool slots one subnet occupies: 0 outside every pool; 1 at the pool's
+  # size or narrower; 2^(size - prefix) when wider (a /16 in a /20 pool is 16).
+  def pool_slots(pools, subnet)
+    net = ip(subnet)
+    pool = pools.find { |p| (r = ip(p[:base])).ipv4? && r.include?(net) }
+    return 0 if pool.nil?
+
+    net.prefix >= pool[:size] ? 1 : 2**(pool[:size] - net.prefix)
   end
 
   def low?(headroom, min_free)

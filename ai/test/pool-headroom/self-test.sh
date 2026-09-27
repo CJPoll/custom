@@ -116,11 +116,22 @@ expect "c1 configured 16-subnet pool" 0; has "c1 configured capacity" "free 12/1
 
 # --repo: a repo with no compose file needs no subnet (docker not consulted).
 fixture r1 0; touch "${ST}/down"; mkdir -p "${TMP}/nocompose/sub"; run --repo "${TMP}/nocompose"
-expect "r1 no compose file" 0; has "r1 note" "has no compose file"
+expect "r1 no compose file" 0; has "r1 note" "run no stack"
 [ -s "${ST}/docker.log" ] && bad "r1 called docker for a compose-less repo" || ok "r1 docker not called"
-# ...but a compose file one level down does (walt_ui keeps it in backend/).
-fixture r2 0; touch "${ST}/down"; mkdir -p "${TMP}/withcompose/backend"; : > "${TMP}/withcompose/backend/docker-compose.yml"
-run --repo "${TMP}/withcompose"; expect "r2 compose in a subdir is probed" 3
+# A root compose file is a stack repo (gen_saas).
+fixture r2 0; touch "${ST}/down"; mkdir -p "${TMP}/rootcompose"; : > "${TMP}/rootcompose/docker-compose.yml"
+run --repo "${TMP}/rootcompose"; expect "r2 root compose is probed" 3
+# So is a repo with a teardown script and compose below the root (walt_ui).
+mkdir -p "${TMP}/scripted/backend" "${TMP}/scripted/bin"; : > "${TMP}/scripted/backend/docker-compose.yml"
+printf '#!/bin/sh\n' > "${TMP}/scripted/bin/teardown-worktree-stack.sh"; chmod +x "${TMP}/scripted/bin/teardown-worktree-stack.sh"
+run --repo "${TMP}/scripted"; expect "r2b teardown-script repo is probed" 3
+# Compose files only below the root, no script: templates (~/dev/custom), not a stack.
+: > "${ST}/docker.log"; mkdir -p "${TMP}/templates/templates"; : > "${TMP}/templates/templates/docker-compose.yml"
+run --repo "${TMP}/templates"; expect "r2c templates-only repo is not gated" 0
+[ -s "${ST}/docker.log" ] && bad "r2c called docker" || ok "r2c docker not called"
+# An unreadable --repo: 3 (cannot measure), never Ruby's default 1 ("LOW").
+mkdir -p "${TMP}/locked"; chmod 000 "${TMP}/locked"
+run --repo "${TMP}/locked"; expect "r4 unreadable repo" 3; chmod 755 "${TMP}/locked"
 run --repo "${TMP}/does-not-exist"; expect "r3 missing --repo" 2
 
 # Usage.

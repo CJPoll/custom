@@ -100,6 +100,16 @@ module DockerStacks
       [root, subdirs.any? { |d| compose_in?(d) }]
     end
 
+    # Do this repo's worktrees run a per-worktree stack? A compose file at the
+    # root (docker's default project), or a repo teardown script (a repo that
+    # names its stacks its own way, like walt_ui's backend/). Compose files
+    # only below the root with no script (~/dev/custom's templates/) are not
+    # a stack.
+    def stack_repo?(repo)
+      compose_layout(repo).first ||
+        REPO_SCRIPTS.any? { |s| File.file?(File.join(repo, s)) && File.executable?(File.join(repo, s)) }
+    end
+
     # ---- git ------------------------------------------------------------------
     def worktrees(repo)
       run!(["git", "-C", repo, "worktree", "list", "--porcelain"])

@@ -16,8 +16,9 @@
 #   pool-headroom [--repo DIR] [--min-free N] [--list]
 #   pool-headroom --help
 #
-#   --repo DIR    the repo the next worktree is for. A repo with no compose
-#                 file (root or one level down) needs no subnet: exit 0, noted.
+#   --repo DIR    the repo the next worktree is for. A repo whose worktrees
+#                 run no stack (no root compose file and no
+#                 teardown-worktree-stack.sh) needs no subnet: exit 0, noted.
 #   --min-free N  free subnets required (default 2: one more stack of the
 #                 largest shape on this machine, walt_ui's backend).
 #   --list        name the holders even when headroom is fine.
@@ -91,33 +92,38 @@ def describe(host, net, workdirs)
 end
 
 def main(argv)
-  opts = StrictArgv.parse(argv, SPEC)
-rescue StrictArgv::UsageError => e
-  fail_with(2, "usage error: #{e.message}", "use only --repo DIR, --min-free N, --list (see pool-headroom --help).")
-else
+  begin
+    opts = StrictArgv.parse(argv, SPEC)
+  rescue StrictArgv::UsageError => e
+    fail_with(2, "usage error: #{e.message}", "use only --repo DIR, --min-free N, --list (see pool-headroom --help).")
+  end
   if opts["--help"] || opts["-h"]
     puts usage
     return 0
   end
-  min_free = opts.fetch("--min-free", DEFAULT_MIN_FREE)
+  probe(opts, DockerStacks::Host.new)
+rescue SystemExit
+  raise
+rescue StandardError => e
+  # Unreadable docker, or anything unexpected (EACCES on --repo, a malformed
+  # answer). Never Ruby's default exit 1, which here means "LOW".
+  fail_with(3, "cannot measure the address pool: #{e.class}: #{e.message}",
+            "start the docker daemon (or fix what the message names), then re-run. An unmeasured pool is not headroom: do not dispatch a stack-running captain until this passes.")
+end
 
-  host = DockerStacks::Host.new
+def probe(opts, host)
+  min_free = opts.fetch("--min-free", DEFAULT_MIN_FREE)
   if (repo = opts["--repo"])
     fail_with(2, "--repo #{repo} is not a directory", "pass the repo's absolute path, e.g. --repo ~/dev/gen_saas.") unless File.directory?(repo)
-    unless host.compose_layout(File.expand_path(repo)).any?
-      puts "pool-headroom: #{repo} has no compose file at its root or one level down; its worktrees need no subnet"
+    unless host.stack_repo?(File.expand_path(repo))
+      puts "pool-headroom: #{repo} has no root compose file and no teardown-worktree-stack.sh; its worktrees run no stack, so they need no subnet"
       return 0
     end
   end
 
-  begin
-    pools, source = DockerStacks.pools_from_info(host.address_pools_raw)
-    networks = DockerStacks.networks_from_inspect(host.networks_raw)
-    room = DockerStacks.headroom(pools, networks)
-  rescue DockerStacks::Unreadable => e
-    fail_with(3, "cannot measure the address pool: #{e.message}",
-              "start the docker daemon (or fix `docker info`), then re-run. An unmeasured pool is not headroom: do not dispatch a stack-running captain until this passes.")
-  end
+  pools, source = DockerStacks.pools_from_info(host.address_pools_raw)
+  networks = DockerStacks.networks_from_inspect(host.networks_raw)
+  room = DockerStacks.headroom(pools, networks)
 
   low = DockerStacks.low?(room, min_free)
   summary = "free #{room[:free]}/#{room[:capacity]} subnets, #{room[:used]} held, min-free #{min_free}, pools #{source}"
@@ -141,9 +147,10 @@ else
 
   cmds = lines.map(&:last).compact
   cmds.each { |c| warn "  teardown: #{c}" }
-  warn "Fix: tear down each MERGED-BUT-UP stack with the teardown line above (#{cmds.size} found); " \
-       "reclaim ORPHAN or idle networks with `docker network prune -f`, which docker refuses for any network a container still references " \
-       "(athena:teardown-worktree-stack -> Reclaiming the address pool). A LIVE stack is its fleet's; leave it. " \
+  warn "Fix: for each MERGED-BUT-UP stack of YOUR fleet, run its teardown line above (#{cmds.size} found); " \
+       "another fleet's stack is its admiral's to tear down, so tell that admiral or the session that launched you. " \
+       "Anyone may reclaim ORPHAN or idle networks with `docker network prune -f`, which docker refuses for any network a container still references " \
+       "(athena:teardown-worktree-stack -> Reclaiming the address pool). Leave LIVE stacks alone. " \
        "Re-run pool-headroom until it passes, then create the worktree and dispatch."
   1
 end

@@ -73,6 +73,10 @@ full = (17..31).map { |o| { name: "n#{o}", subnets: ["172.#{o}.0.0/16"], project
 h = DS.headroom(DS::BUILTIN_POOLS, full)
 check("a full built-in pool has zero free") { h[:free].zero? && h[:used] == 31 }
 
+wide = [{ name: "wide", subnets: ["192.168.0.0/16"], project: nil, containers: 0 }]
+check("a /16 inside the /20 pool holds 16 slots, not 1") { DS.headroom(DS::BUILTIN_POOLS, wide)[:used] == 16 }
+check("pool_slots outside every pool is 0") { DS.pool_slots(DS::BUILTIN_POOLS, "10.1.0.0/24").zero? }
+
 check("low? below the bar") { DS.low?({ free: 1 }, 2) }
 check("not low? at the bar") { !DS.low?({ free: 2 }, 2) }
 

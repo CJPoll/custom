@@ -29,6 +29,8 @@ cat > "${STUBS}/docker" <<'EOF'
 # (one id per line). `compose down` empties them unless $ST/linger exists.
 echo "$*" >> "${ST}/docker.log"
 [ -f "${ST}/down" ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
+# fail_after_down: the daemon dies once `compose down` has run.
+[ -f "${ST}/fail_after_down" ] && [ -s "${ST}/compose.log" ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
 proj_of() { for a in "$@"; do case "$a" in label=com.docker.compose.project=*) echo "${a#label=com.docker.compose.project=}";; esac; done; }
 list() { local f="${ST}/res/$1/$2"; [ -f "$f" ] && cat "$f"; return 0; }
 case "$1" in
@@ -53,7 +55,9 @@ case "$*" in
   *"--json state,mergedAt"*)
     if [ -f "${ST}/merged" ]; then echo '{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z"}'
     else echo '{"state":"OPEN","mergedAt":null}'; fi ;;
-  *"--json headRefName"*) printf '{"headRefName":"%s"}\n' "$(cat "${ST}/branch")" ;;
+  *"--json headRefName"*)
+    if [ -f "${ST}/wrong_shape" ]; then echo '["not","an","object"]'
+    else printf '{"headRefName":"%s"}\n' "$(cat "${ST}/branch")"; fi ;;
   *) echo "gh stub: unexpected $*" >&2; exit 99 ;;
 esac
 EOF
@@ -156,13 +160,36 @@ fixture t10c old-branch; out="$(cd "${REPO2}" && "${TOOL}" --pr 5 2>&1)"; rc=$?;
 grep -qxF "SCRIPT ${WT}/old-branch" "${ST}/script.log" && ok "t10c main-checkout script ran with the worktree" \
   || bad "t10c script" "$(cat "${ST}/script.log" 2>/dev/null)"
 
-# t11 compose only below the root and no script: refuse (tier 3).
-fixture t11 sub-only; run --pr 5; expect "t11 compose in subdir" 2; no_down t11
+# t11 compose only below the root, no script, and a stack RUNS there: refuse (tier 3).
+fixture t11 sub-only; containers "dnd-1-x=${WT}/dnd-1-x" "odd-name=${WT}/sub-only/backend"
+run --pr 5; expect "t11 stack below the root" 2; no_down t11
+# t11b compose files only below the root (templates) and nothing runs there: 0.
+# This is ~/dev/custom's shape (templates/docker-compose.yml).
+fixture t11b sub-only; run --pr 5; expect "t11b templates only" 0
+has "t11b says nothing runs" "no compose container runs under ${WT}/sub-only"; no_down t11b
+fixture t11c sub-only; touch "${ST}/down"; run --pr 5; expect "t11c templates only, docker down" 3
+
+# t4b docker dies after `down` ran: 4 (ran, unverified), never 3 ("nothing touched").
+fixture t4b dnd-1-x; touch "${ST}/fail_after_down"; run --pr 5; expect "t4b unverifiable after down" 4
+grep -q "Nothing was torn down" <<<"${out}" && bad "t4b claims nothing was torn down" "${out}" || ok "t4b no false 'nothing touched'"
+
+# t10d tier-1 script exits 0 but a compose container still runs under the worktree: 4.
+fixture t10d scripted; containers "dnd-1-x=${WT}/dnd-1-x" "left=${WT}/scripted"
+run --pr 5; expect "t10d script left a container" 4
+
+# t18 a forge answer of the wrong shape: 3, never Ruby's default 1 ("not merged").
+fixture t18 dnd-1-x; touch "${ST}/wrong_shape"; run --pr 5; expect "t18 wrong-shape forge answer" 3; no_down t18
+
+# t19 worktree registered but its directory is gone, no script: refuse with a Fix.
+git -C "${REPO}" worktree add -q -b vanished "${WT}/vanished"; rm -rf "${WT}/vanished"
+fixture t19 vanished; run --pr 5; expect "t19 worktree dir gone" 2; no_down t19
+has "t19 names the gone directory" "its directory is gone"
+git -C "${REPO}" worktree prune
 # t12 no compose file: 0 and docker never consulted.
 fixture t12 no-compose; touch "${ST}/down"; run --pr 5; expect t12 0
 has "t12 says no compose file" "no compose file"; [ -s "${ST}/docker.log" ] && bad "t12 called docker" || ok "t12 docker not called"
 # t13 no worktree has the branch: 0, and the miss is named.
-fixture t13 gone-branch; run --pr 5; expect t13 0; has "t13 names the branch and count" "no worktree of ${REPO} has gone-branch checked out (5 scanned)"
+fixture t13 gone-branch; run --pr 5; expect t13 0; has "t13 names the branch and count" "no worktree of ${REPO} has gone-branch checked out ("
 # t14 branch checked out in the MAIN checkout: refuse.
 fixture t14 main; run --pr 5; expect "t14 main checkout" 2; no_down t14
 

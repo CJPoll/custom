@@ -51,7 +51,7 @@ SPEC = {
   "--pr" => :integer, "--mr" => :integer, "--repo" => :value, "--worktree" => :value,
   "--parked" => :value, "--dry-run" => :switch, "--help" => :switch, "-h" => :switch,
 }.freeze
-REPO_SCRIPTS = %w[bin/teardown-worktree-stack.sh .claude/teardown-worktree-stack.sh].freeze
+REPO_SCRIPTS = DockerStacks::REPO_SCRIPTS
 
 class Stop < StandardError
   attr_reader :code, :fix
@@ -118,42 +118,84 @@ def linked_worktree!(host, dir)
 end
 
 # ---- the teardown ------------------------------------------------------------
+# Set once a destructive step has started: from then on a failure is exit 4
+# ("ran, but failed or unverified"), never 3 ("nothing was touched").
+$destroying = false
+
 # The repo's teardown script: the main checkout's copy first (current, and the
 # path athena:teardown-worktree-stack names), then the worktree's own (a
-# worktree branched before the script landed has none).
-def repo_script(host, wt)
-  common = host.git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")
-  roots = [common && File.dirname(common), wt].compact.uniq
+# worktree branched before the script landed has none). <anchor> is any path
+# inside the repo that still exists.
+def repo_script(host, anchor, wt)
+  common = host.git(anchor, "rev-parse", "--path-format=absolute", "--git-common-dir")
+  raise DockerStacks::Unreadable, "git rev-parse --git-common-dir failed in #{anchor}" if common.nil? || common.empty?
+
+  roots = [File.dirname(common), wt].uniq
   roots.product(REPO_SCRIPTS).map { |r, s| File.join(r, s) }.find { |p| File.file?(p) && File.executable?(p) }
 end
 
-def teardown(host, wt, dry_run)
-  if (script = repo_script(host, wt))
-    return puts("teardown-stack: DRY RUN would run #{script} #{wt}") if dry_run
+# Compose containers on the host, working dirs canonicalised where they exist.
+def compose_containers(host)
+  host.compose_containers.map do |c|
+    dir = c[:working_dir]
+    dir = File.realpath(dir) if dir && File.directory?(dir)
+    { project: c[:project], working_dir: dir }
+  end
+end
 
-    out, err, ok = host.run([script, wt], chdir: wt)
-    $stdout.print out
-    $stderr.print err
-    stop(4, "#{script} failed for #{wt}", "read the script's own error above, remove what lingers, then re-run teardown-stack.") unless ok
-    return puts("teardown-stack: TORN DOWN #{wt} via #{script}")
+def under_wt(containers, wt)
+  containers.select { |c| c[:working_dir] && DockerStacks.under?(c[:working_dir], wt) }
+end
+
+# Tier 1. The script's own contract removes and checks its projects; this
+# adds the check it can make without knowing their names: no compose
+# container is left with its working dir inside the worktree.
+def teardown_by_script(host, script, wt, dry_run)
+  return puts("teardown-stack: DRY RUN would run #{script} #{wt}") if dry_run
+
+  $destroying = true
+  out, err, ok = host.run([script, wt], chdir: File.directory?(wt) ? wt : File.dirname(script))
+  $stdout.print out
+  $stderr.print err
+  stop(4, "#{script} failed for #{wt}", "read the script's own error above, remove what lingers, then re-run teardown-stack.") unless ok
+  host.docker_reachable!
+  left = under_wt(compose_containers(host), wt)
+  unless left.empty?
+    stop(4, "#{script} exited 0 but #{left.size} compose container(s) remain under #{wt} (#{left.map { |c| c[:project] }.uniq.join(', ')})",
+         "remove them (docker ps -a filtered by label com.docker.compose.project), then re-run teardown-stack.")
+  end
+  puts "teardown-stack: TORN DOWN #{wt} via #{script} (no compose container left under it)"
+end
+
+def teardown(host, wt, anchor, dry_run)
+  if (script = repo_script(host, anchor, wt))
+    return teardown_by_script(host, script, wt, dry_run)
+  end
+  unless File.directory?(wt)
+    stop(2, "worktree #{wt} is registered but its directory is gone, and the repo ships no teardown script",
+         "run `git worktree prune`; if its stack is still up, pool-headroom names it as an ORPHAN for its fleet to reclaim.")
   end
 
   root, sub = host.compose_layout(wt)
   unless root || sub
     return puts("teardown-stack: #{wt} has no compose file at its root or one level down; no stack to tear down")
   end
+
+  host.docker_reachable!
+  containers = compose_containers(host)
   unless root
-    stop(2, "#{wt} keeps its compose files below the root and ships no teardown script",
+    # Compose files only below the root (templates, fixtures, or a stack the
+    # repo names its own way). Judge by what actually runs there.
+    mine = under_wt(containers, wt)
+    if mine.empty?
+      return puts("teardown-stack: no compose container runs under #{wt} (#{containers.size} scanned); its compose files are below the root; nothing to tear down")
+    end
+
+    stop(2, "#{wt} runs compose project(s) #{mine.map { |c| c[:project] }.uniq.join(', ')} from below its root and ships no teardown script",
          "follow the repo's documented teardown by hand (athena:teardown-worktree-stack, tier 3), and file a ticket to give it a bin/teardown-worktree-stack.sh.")
   end
 
   project = DockerStacks.normalize_project(File.basename(wt))
-  host.docker_reachable!
-  containers = host.compose_containers.map do |c|
-    dir = c[:working_dir]
-    dir = File.realpath(dir) if dir && File.directory?(dir)
-    { project: c[:project], working_dir: dir }
-  end
   verdict = DockerStacks.attribute(wt, project, containers)
   case verdict[:verdict]
   when :foreign
@@ -175,6 +217,7 @@ def teardown(host, wt, dry_run)
   before = host.project_resources(project)
   return puts("teardown-stack: DRY RUN would run `docker compose -p #{project} down -v --remove-orphans` in #{wt} (#{fmt(before)})") if dry_run
 
+  $destroying = true
   out, err, ok = host.compose_down(project, wt)
   $stdout.print out
   $stderr.print err unless ok
@@ -214,11 +257,11 @@ def main(argv)
            "If its stack is still up, pool-headroom names it."
       return 0
     end
-    teardown(host, File.realpath(wt), dry)
+    teardown(host, File.directory?(wt) ? File.realpath(wt) : wt, repo, dry)
   elsif merged.empty? && opts.key?("--parked") && opts.key?("--worktree") && !opts.key?("--repo")
     wt = linked_worktree!(host, realdir(opts["--worktree"], "--worktree"))
     puts "teardown-stack: parked (#{opts['--parked']}): #{wt}"
-    teardown(host, wt, dry)
+    teardown(host, wt, wt, dry)
   else
     stop(2, "pass exactly one of: --pr N | --mr N (with optional --repo), or --worktree DIR --parked REASON",
          "see teardown-stack --help.")
@@ -226,12 +269,20 @@ def main(argv)
   0
 rescue StrictArgv::UsageError => e
   report(Stop.new(2, "usage error: #{e.message}", "see teardown-stack --help for the flags."))
-rescue DockerStacks::Unreadable => e
-  report(Stop.new(3, "could not determine: #{e.message}", "fix the unreachable forge, git or docker, then re-run. Nothing was torn down."))
-rescue DockerStacks::Refused => e
-  report(Stop.new(2, e.message, "tear this stack down by hand after checking whose it is (athena:teardown-worktree-stack)."))
 rescue Stop => e
   report(e)
+rescue DockerStacks::Refused => e
+  report(Stop.new(2, e.message, "tear this stack down by hand after checking whose it is (athena:teardown-worktree-stack)."))
+rescue StandardError => e
+  # DockerStacks::Unreadable, and anything unexpected (EACCES, a forge answer of
+  # the wrong shape). Never Ruby's default exit 1, which means "not merged".
+  if $destroying
+    report(Stop.new(4, "teardown ran but could not be verified: #{e.class}: #{e.message}",
+                    "inspect the stack's containers, volumes and networks by hand (docker ps -a / volume ls / network ls), remove what lingers, then re-run."))
+  else
+    report(Stop.new(3, "could not determine: #{e.class}: #{e.message}",
+                    "fix the unreachable or unreadable forge, git or docker, then re-run. Nothing was torn down."))
+  end
 end
 
 def report(err)

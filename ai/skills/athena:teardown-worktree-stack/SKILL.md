@@ -5,6 +5,9 @@ description: How the athena-admiral resolves and runs the per-repo teardown of a
 
 # athena:teardown-worktree-stack
 
+**Kind: living normative document.** Amended in place, per
+`~/dev/custom/CLAUDE.md` → *Documentation conventions*.
+
 Every worktree gets its own isolated docker-compose stack(s), and idle stacks
 hold real capacity: database memory/connections, service containers, volumes, and
 an address-pool network. Leaving them up after the Mission lands is how the box
@@ -20,9 +23,15 @@ per-worktree stack the repo runs, including volumes, orphans, and the network.
 The procedure below is executable. `~/dev/custom/ai/bin/teardown-stack` runs
 it for ONE merged change. It confirms the merge with `confirm-merged`, reads
 the PR/MR's head branch from the forge, and picks the one worktree with that
-branch checked out. It then resolves the teardown tier, runs it, and verifies
-nothing carries the project label. Anything it cannot attribute is refused
-with a `Fix:`, and nothing is touched (`--help` has the exit codes).
+branch checked out. It then resolves the teardown tier and runs it. Tier 2
+verifies afterwards that no container, volume or network carries the project
+label. Tier 1 relies on the repo script's own contract, plus one check the
+tool can make without knowing the script's project names: no compose
+container is left with its working dir in the worktree. Anything it cannot
+attribute is refused with a `Fix:`, and nothing is touched (`--help` has the
+exit codes). A worktree with compose files only below its root and no script
+(`~/dev/custom`'s `templates/`) is judged by what runs there: nothing running
+is "nothing to tear down".
 
 - **GitHub:** `locked-merge` runs it after every confirmed landing, per PR. A
   multi-part Mission reclaims each part's stack as that part lands, not at the
@@ -31,9 +40,11 @@ with a `Fix:`, and nothing is touched (`--help` has the exit codes).
 - **GitLab:** no wrapper runs the merge. Right after `confirm-merged --mr <n>`
   exits 0, run `teardown-stack --mr <n> --repo <repo>`.
 - **Parked Missions:** `teardown-stack --worktree <wt> --parked <reason>`.
-- **What still leaks** (the worktree was removed first, another fleet's stack,
-  a GitLab merge nobody followed up) is named at the next dispatch by
-  `pool-headroom` (*Reclaiming the address pool*, below).
+- **What still leaks** is named at the next dispatch by `pool-headroom`
+  (*Reclaiming the address pool*, below). That covers another fleet's stack,
+  a GitLab merge nobody followed up, and a worktree removed before its merge
+  landed: `teardown-stack` refuses a registered worktree whose directory is
+  gone unless the repo ships a script that handles that case (walt_ui's does).
 
 **Later (2026-09-27, DND-864):** teardown was a step the admiral ran by hand
 at merge time. On 2026-09-26 ~20:33Z the address pool ran out under two new
@@ -173,9 +184,14 @@ stop with no actor permitted to clear it.
 configured pools (the built-in pools hold 31). It exits 1 below `--min-free`
 (default 2) and names each holder: `MERGED-BUT-UP` with its `teardown-stack`
 line, `ORPHAN` (worktree gone), or `LIVE`. A docker it cannot read is exit 3,
-never headroom. `scripts/wt-preflight` runs it first for any repo with a
-compose file, so no stack-running worktree is created while the pool is out.
-Run it by hand with `--list` to see every holder.
+never headroom. `scripts/wt-preflight` runs it first for any repo whose
+worktrees run a stack (a root compose file, or a repo teardown script), so no
+stack-running worktree is created while the pool is out. Run it by hand with
+`--list` to see every holder. Tear down only YOUR fleet's `MERGED-BUT-UP`
+stacks; another fleet's is its admiral's, so tell that admiral or the session
+that launched you. Residual: two admirals preflighting at the same moment can
+both see the last free subnet (check-then-act); the default `--min-free 2`
+narrows that window without closing it.
 
 **Later (2026-09-27, DND-864):** this paragraph was a two-command shell probe
 to run "before a dispatch wave". Nothing ran it. The probe is now
