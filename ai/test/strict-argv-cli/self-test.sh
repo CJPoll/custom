@@ -118,7 +118,7 @@ accepted() {
 echo "strict-argv CLI suite (tools under ${BIN})"
 
 # --- Ruby checks: unknown / stray / repeated ------------------------------------
-for t in check-agent-size check-bin-help check-generic-skills check-pipefail-grep check-guard-messages check-hooks-registered check-tool-risk; do
+for t in check-agent-size check-bin-help check-generic-skills check-pipefail-grep check-ruby-floor check-guard-messages check-hooks-registered check-tool-risk; do
   refused "${t}: a typo of --self-test is refused, not run as the live check" "--self-tset" "${t}" --self-tset
   refused "${t}: a stray word is refused" "stray" "${t}" stray
   refused "${t}: --self-test twice is refused" "--self-test given more than once" "${t}" --self-test --self-test

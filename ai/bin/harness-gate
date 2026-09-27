@@ -93,6 +93,12 @@ STATIC_CHECKS = [
   # green when negated. Hermetic (fixtures + a live 141 reproduction).
   ["check-pipefail-grep",       %w[ai/bin/check-pipefail-grep]],
   ["check-pipefail-grep self-test", %w[ai/bin/check-pipefail-grep --self-test]],
+  # The harness Ruby floor (2.7, the desktop's pinned Ruby). A laptop on 3.4
+  # passed Ruby-3-only syntax through this gate 96/96 and it bounced from the
+  # desktop train as a SyntaxError (DND-710, 2026-09-27). Exact on a 2.7 host,
+  # a Prism AST search on a newer one; no measuring mode is exit 3, not a pass.
+  ["check-ruby-floor",          %w[ai/bin/check-ruby-floor]],
+  ["check-ruby-floor self-test", %w[ai/bin/check-ruby-floor --self-test]],
   ["check-tool-risk",           %w[ai/bin/check-tool-risk]],
   ["check-tool-risk self-test", %w[ai/bin/check-tool-risk --self-test]],
   # Live per-user inotify INSTANCE headroom. When orphaned autolaunched
