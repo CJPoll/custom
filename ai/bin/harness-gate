@@ -610,6 +610,42 @@ def gate_failed_header(count, total, root: CUSTOM_DIR)
   "harness-gate: FAILED — #{count} of #{total} check(s) did not pass:#{gate_attribution(root)}"
 end
 
+# Prints the OK line, unless attribution itself fails — in which case a bare
+# GateAttributionError would otherwise kill the process with a Ruby backtrace
+# in place of the summary (critic-review round 1, DND-896): every check
+# passed, but WHICH tree they passed for could not be established, so this
+# degrades to a loud FAILED line with a Fix:, never a silent/blank OK and
+# never an uncaught crash. Fails closed: exit 1.
+def report_gate_ok(total, root: CUSTOM_DIR)
+  puts gate_ok_message(total, total, root: root)
+  0
+rescue GateAttributionError => e
+  warn ""
+  warn "harness-gate: FAILED — could not attribute the gated tree/HEAD, so the " \
+       "#{total}/#{total} checks PASS result cannot be trusted: #{e.message}"
+  warn "  Fix: run `git -C #{root} rev-parse HEAD` and `git -C #{root} status " \
+       "--porcelain` by hand — one of them is failing, or #{root} is not inside a " \
+       "resolvable git worktree. Every check already ran and passed; this failure " \
+       "is only about attributing the result, not about re-running anything."
+  1
+end
+
+# Same idea for the FAILED header: prints it, or, if attribution ALSO fails,
+# a header that says so and still carries a Fix: — critically, this must
+# never raise past the caller, because the per-check failure report (label,
+# argv, failure lines, output tail) is printed by the caller right after this
+# returns, and losing that to an uncaught exception is strictly worse than
+# losing only the attribution suffix.
+def report_gate_failed_header(count, total, root: CUSTOM_DIR)
+  warn gate_failed_header(count, total, root: root)
+rescue GateAttributionError => e
+  warn "harness-gate: FAILED — #{count} of #{total} check(s) did not pass (tree/HEAD " \
+       "attribution also unavailable: #{e.message}):"
+  warn "  Fix: run `git -C #{root} rev-parse HEAD` and `git -C #{root} status " \
+       "--porcelain` by hand to see why attribution failed; the per-check failures " \
+       "below are unaffected and still follow."
+end
+
 # DND-209: this repo has real self-tests (e.g. scripts/test/athena-inbox-client/
 # self-test.sh, 42 cases; ai/skills/athena:inbox/test/self-test.sh;
 # ai/skills/athena:slack/test/self-test.sh) that nothing ran automatically —
@@ -1200,13 +1236,10 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
   moved = landed_moved_note(CUSTOM_DIR, pin_env)
   puts moved if moved
 
-  if failures.empty?
-    puts gate_ok_message(CHECKS.size, CHECKS.size)
-    return 0
-  end
+  return report_gate_ok(CHECKS.size) if failures.empty?
 
   warn ""
-  warn gate_failed_header(failures.size, CHECKS.size)
+  report_gate_failed_header(failures.size, CHECKS.size)
   failures.each do |(label, argv, out)|
     warn ""
     warn "--- #{label} (#{argv.join(' ')}) ---"
@@ -1929,6 +1962,65 @@ def run_self_test
       ok = false
     rescue GateAttributionError
       nil
+    end
+
+    # (critic-review round 1, DND-896): an attribution failure must not kill
+    # run_gate's summary with a bare backtrace, and must not swallow the
+    # per-check failure report either — report_gate_ok/report_gate_failed_header
+    # degrade to a loud FAILED line with a Fix: instead, and never raise past
+    # the caller.
+    code, out, err = capture.call { report_gate_ok(3, root: not_a_repo) }
+    if code != 1
+      warn "self-test: FAIL — report_gate_ok with an unattributable root " \
+           "returned #{code.inspect}, expected 1 (fail closed)"
+      ok = false
+    end
+    unless out.empty?
+      warn "self-test: FAIL — report_gate_ok printed an OK line to stdout " \
+           "despite attribution failing: #{out.inspect}"
+      ok = false
+    end
+    unless err.include?("FAILED") && err.include?("Fix:")
+      warn "self-test: FAIL — report_gate_ok's attribution-failure path " \
+           "carried no FAILED/Fix: message (stderr: #{err.inspect})"
+      ok = false
+    end
+
+    _code2, _out2, err2 = capture.call { report_gate_failed_header(2, 5, root: not_a_repo) }
+    unless err2.include?("2 of 5 check(s) did not pass") && err2.include?("Fix:")
+      warn "self-test: FAIL — report_gate_failed_header's attribution-failure " \
+           "path lost the per-check-count header or its Fix: line (stderr: " \
+           "#{err2.inspect})"
+      ok = false
+    end
+  end
+
+  # THE DIRTY FLAG: gate_attribution must say so when the tree has
+  # uncommitted changes, and must NOT say so when it doesn't. NOTE: the
+  # fixture's mktmpdir PREFIX must not itself contain the substring "dirty" —
+  # it would appear inside the `[tree <path> @ <sha>]` attribution and produce
+  # a false-positive match on the very check this test exists to make real.
+  Dir.mktmpdir("harness-gate-attribution-fixture") do |work_repo|
+    Open3.capture3("git", "-c", "init.defaultBranch=main", "init", "-q", work_repo)
+    File.write(File.join(work_repo, "f"), "x")
+    Open3.capture3("git", "-C", work_repo, "add", "f")
+    Open3.capture3({ "GIT_AUTHOR_NAME" => "t", "GIT_AUTHOR_EMAIL" => "t@t",
+                     "GIT_COMMITTER_NAME" => "t", "GIT_COMMITTER_EMAIL" => "t@t" },
+                   "git", "-C", work_repo, "commit", "-qm", "init")
+
+    clean_attr = gate_attribution(work_repo)
+    if clean_attr.include?(", dirty")
+      warn "self-test: FAIL — gate_attribution flagged a clean tree as dirty: " \
+           "#{clean_attr.inspect}"
+      ok = false
+    end
+
+    File.write(File.join(work_repo, "untracked"), "y")
+    dirty_attr = gate_attribution(work_repo)
+    unless dirty_attr.include?(", dirty")
+      warn "self-test: FAIL — gate_attribution did not flag an untracked file as " \
+           "dirty: #{dirty_attr.inspect}"
+      ok = false
     end
   end
 
