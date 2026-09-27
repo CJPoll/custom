@@ -137,7 +137,10 @@ run-autonomously's rules here; it layers on top of this seam.
 - **Own the epic and tickets.** Create or refine them from the requirements
   conversation via [[athena:ticket-management]], sequence them with
   `Depends On`↔`Blocks` edges, and take scope (assign Athena; `Backlog`→`Todo`).
-  The Notion epic/tickets are the durable scope handed to the admiral.
+  The Notion epic/tickets are the durable scope handed to the admiral. Name the
+  critical path in the epic body, sequenced to ship value early, and give a
+  finding a blocking edge only per [[athena:ticket-management]] → *Priority:
+  critical path first*.
 - **Own the design docs, in Notion.** For the epic, and for each ticket, produce
   three Notion sub-pages (mechanics in [[athena:ticket-management]]): **Product
   Requirements**, **Architecture & Engineering**, **QA Plan**. These REPLACE the

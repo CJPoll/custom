@@ -269,6 +269,20 @@ is no such pre-authorization, hold the MR exactly as for any other exit 4 —
 that the migration is obviously intended. The gate does not bend; the latency is
 designed out upstream.
 
+## A finished security fix merges first
+
+Among the MRs you have ready to merge, a finished security fix goes first. On
+a GitLab merge train, board it first. Owner, Cody, 2026-09-27 (~10:45Z,
+coordinator terminal), asked whether a finished security fix still goes to the
+front of the merge queue under the critical-path rule: "1. 'A finished fix'
+sure - that's fine. I'm not talking about the merge queue; I'm talking about
+the order in which an admiral assigns tickets to captains."
+
+It orders only your own ready set. The fix still meets *The merge bar*, and it
+still waits for the merge lock like any other merge (*Landing onto a moving
+main*). Which ticket a captain works next is [[athena:ticket-management]] →
+*Priority: critical path first*.
+
 ## Landing onto a moving main (you are never the only actor in the repo)
 
 `origin/main` moves under you mid-run — another fleet, the shipwright cron, the
