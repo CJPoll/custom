@@ -791,15 +791,15 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (final, critic rounds 1-12, admiral batches 7-8):** `RESULT: 556
+- **After (final, critic rounds 1-14, admiral batches 7-8):** `RESULT: 557
   passed, 0 failed` / `VERDICT: PASS`. The per-round tables in this and the
   next few subsections are HISTORICAL, measured on the hook of the round
   they name; the authoritative final table is "Sabotage rows on the
-  option-A hook" below (556, on 9e114a6 + the round-12 edits).
+  option-A hook" below (557, on the round-14 hook 110ea27).
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
-`RESULT: 525 passed, 31 failed` (on the final suite; the count here was 495
+`RESULT: 526 passed, 31 failed` (on the final suite; the count here was 495
 at round 8, before later rounds added cases). Every failure is an allow
 case (QA/QB) or the deny-text check T2, e.g.:
 
@@ -924,10 +924,11 @@ reached every case they did (their mutants stayed green).
   via DND-775" block. Every deny stays green. Rows 10, 13, 14, 17-22, 24
   and 25 above sabotaged deleted code and are retired.
 
-### Sabotage rows on the option-A hook (final, measured on 9e114a6 + the
-round-12 edits; supersede every table above)
+### Sabotage rows on the option-A hook (final, measured on the round-14
+hook 110ea27; supersede every table above)
 
-Self-test `RESULT: 556 passed, 0 failed`. One mutant copy each. Rows whose
+Self-test `RESULT: 557 passed, 0 failed`. One mutant copy each. A-1..A-31
+were measured on 9e114a6 + the round-12 edits; A-32 on 110ea27. Rows whose
 mechanisms option A deleted (the old A-3/10/12-14/17-25) are retired with
 that code.
 
@@ -950,6 +951,7 @@ that code.
 | A-29 | Pure-data list gains at, sg, tar, watchexec | QX36, QX37, QX39, QX40, QX42 — `551 passed, 5 failed` |
 | A-30 | The basename-strip is restored, so a path-qualified word reduces to its basename (critic round 11) | QX95, QX96 — `554 passed, 2 failed` |
 | A-31 | `elif` dropped from cmd_prefix, so a runner after it is not in command position (critic round 12) | QX97 — `555 passed, 1 failed` |
+| A-32 | The `${...}` heredoc guard reverted, so `<<` inside a parameter expansion is taken as a heredoc (critic round 14) | QX98 — `556 passed, 1 failed` |
 
 - **Round 11, path-qualified word + stale text.** The critic found that
   `exec_text()` stripped a command word to its basename before the
@@ -970,8 +972,6 @@ that code.
   from the laptop coordinator session), quoted verbatim in the header
   RESIDUAL. DND-775 closes the class below the text; DND-905 is the
   fallback if its activation slips past 2026-10-04. No code or test change.
-| A-32 | The `${...}` heredoc guard reverted, so `<<` inside a parameter expansion is taken as a heredoc (critic round 14) | QX98 — `556 passed, 1 failed` |
-
 - **Round 14, `<<` inside `${...}`.** The critic found the tokenizer took
   `<<` inside an unclosed `${...}` parameter expansion as a heredoc, so the
   next line was read as data and a verb-hiding stash write in it was
