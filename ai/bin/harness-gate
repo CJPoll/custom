@@ -558,6 +558,58 @@ def foreign_gate_tree(gate_root: CUSTOM_DIR, cwd: Dir.pwd)
   [here[0], gate[0]]
 end
 
+# ATTRIBUTION FOR THE OK/FAILED SUMMARY LINES. DND-896: the wrong-tree guard
+# above stops a MISMATCHED gate from running at all, but even a matched run's
+# final "OK -- N/N checks PASS; safe to commit." line named neither the tree
+# nor the HEAD it measured -- a report that quotes only that line (as captains
+# do) cannot be attributed to a commit. Deliberately reuses git_tree_identity,
+# the SAME resolution foreign_gate_tree already trusts, rather than
+# recomputing the root a second way: a second implementation could name a
+# DIFFERENT tree than the one that was actually gated, which is exactly the
+# failed-lookup-reads-as-success class this ticket exists to close.
+GateAttributionError = Class.new(StandardError)
+
+# " [tree <root> @ <sha>]", with ", dirty" inside the brackets when the
+# worktree has uncommitted changes (staged, unstaged, or untracked). Raises
+# rather than silently omitting/blanking when the tree or its HEAD cannot be
+# resolved -- a MISSING attribution must never look like "nothing to report".
+def gate_attribution(root = CUSTOM_DIR)
+  identity = git_tree_identity(root)
+  raise GateAttributionError,
+        "git_tree_identity(#{root}) could not resolve a worktree/common-dir " \
+        "for the tree that was just gated" if identity.nil?
+
+  worktree_root, = identity
+
+  sha, _e, st = Open3.capture3("git", "-C", worktree_root, "rev-parse", "HEAD")
+  raise GateAttributionError, "git -C #{worktree_root} rev-parse HEAD failed" unless st.success?
+
+  sha = sha.strip
+  raise GateAttributionError,
+        "git -C #{worktree_root} rev-parse HEAD returned an empty SHA" if sha.empty?
+
+  status_out, _e2, st2 = Open3.capture3("git", "-C", worktree_root, "status", "--porcelain")
+  raise GateAttributionError, "git -C #{worktree_root} status --porcelain failed" unless st2.success?
+
+  dirty = !status_out.strip.empty?
+
+  " [tree #{worktree_root} @ #{sha}#{dirty ? ', dirty' : ''}]"
+rescue Errno::ENOENT
+  raise GateAttributionError, "git executable not found on PATH"
+end
+
+# Byte-identical prefix `harness-gate: OK -- N/N checks PASS; safe to
+# commit.` (consumers may match this prefix) with the tree/HEAD attribution
+# appended.
+def gate_ok_message(passed, total, root: CUSTOM_DIR)
+  "harness-gate: OK — #{passed}/#{total} checks PASS; safe to commit.#{gate_attribution(root)}"
+end
+
+# Same idea for the FAILED header line.
+def gate_failed_header(count, total, root: CUSTOM_DIR)
+  "harness-gate: FAILED — #{count} of #{total} check(s) did not pass:#{gate_attribution(root)}"
+end
+
 # DND-209: this repo has real self-tests (e.g. scripts/test/athena-inbox-client/
 # self-test.sh, 42 cases; ai/skills/athena:inbox/test/self-test.sh;
 # ai/skills/athena:slack/test/self-test.sh) that nothing ran automatically —
@@ -1149,12 +1201,12 @@ def run_gate(root: CUSTOM_DIR, dry_run: false)
   puts moved if moved
 
   if failures.empty?
-    puts "harness-gate: OK — #{CHECKS.size}/#{CHECKS.size} checks PASS; safe to commit."
+    puts gate_ok_message(CHECKS.size, CHECKS.size)
     return 0
   end
 
   warn ""
-  warn "harness-gate: FAILED — #{failures.size} of #{CHECKS.size} check(s) did not pass:"
+  warn gate_failed_header(failures.size, CHECKS.size)
   failures.each do |(label, argv, out)|
     warn ""
     warn "--- #{label} (#{argv.join(' ')}) ---"
@@ -1828,6 +1880,55 @@ def run_self_test
       ensure
         ENV["PATH"] = old_path
       end
+    end
+  end
+
+  # 7c (DND-896). The OK/FAILED summary lines name the gated tree and HEAD, so
+  #    a report that quotes only that line can be attributed to a commit.
+  real_attribution = gate_attribution(CUSTOM_DIR)
+  real_head, _e, real_st = Open3.capture3("git", "-C", CUSTOM_DIR, "rev-parse", "HEAD")
+  unless real_st.success?
+    warn "self-test: FAIL — could not read the real repo's HEAD to compare " \
+         "against gate_attribution"
+    ok = false
+  end
+  real_head = real_head.strip
+  unless real_attribution.include?(CUSTOM_DIR) && real_attribution.include?(real_head)
+    warn "self-test: FAIL — gate_attribution(CUSTOM_DIR) is #{real_attribution.inspect}, " \
+         "which does not name #{CUSTOM_DIR.inspect} and its real HEAD " \
+         "#{real_head.inspect} (`git -C #{CUSTOM_DIR} rev-parse HEAD`)"
+    ok = false
+  end
+  ok_line = gate_ok_message(3, 3, root: CUSTOM_DIR)
+  unless ok_line.start_with?("harness-gate: OK — 3/3 checks PASS; safe to commit.")
+    warn "self-test: FAIL — gate_ok_message changed the byte-identical prefix " \
+         "consumers may match on: #{ok_line.inspect}"
+    ok = false
+  end
+  unless ok_line.include?(real_attribution)
+    warn "self-test: FAIL — gate_ok_message did not append gate_attribution's " \
+         "suffix: #{ok_line.inspect}"
+    ok = false
+  end
+  failed_line = gate_failed_header(2, 5, root: CUSTOM_DIR)
+  unless failed_line.start_with?("harness-gate: FAILED — 2 of 5 check(s) did not pass:") &&
+         failed_line.include?(real_attribution)
+    warn "self-test: FAIL — gate_failed_header did not carry the prefix + " \
+         "attribution: #{failed_line.inspect}"
+    ok = false
+  end
+
+  # THE MISS CASE: a root that resolves to no git tree at all must raise, not
+  # silently produce a blank or wrong attribution — a wrongly computed root
+  # must be impossible to pass off as a real one.
+  Dir.mktmpdir("harness-gate-attribution-miss") do |not_a_repo|
+    begin
+      bogus = gate_attribution(not_a_repo)
+      warn "self-test: FAIL — gate_attribution(<non-git dir>) returned " \
+           "#{bogus.inspect} instead of raising GateAttributionError"
+      ok = false
+    rescue GateAttributionError
+      nil
     end
   end
 
