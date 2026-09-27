@@ -1123,7 +1123,7 @@ main() {
     case $1 in
       -h | --help) usage; exit 0 ;;
       --self-test | --status | --class)
-        [ "$mode" = run ] || die_usage "--self-test, --status and --class are separate modes." "pass one of them."
+        [ "$mode" = run ] || die_usage "two modes were given: --self-test, --status and --class are separate modes." "pass one of them."
         case $1 in --self-test) mode=selftest ;; --status) mode=status ;; --class) mode=class ;; esac
         ;;
       --json) JSON=1 ;;
