@@ -165,6 +165,37 @@ assert_file()         { if [ -e "$2" ]; then ok "$1"; else bad "$1" "no such fil
 assert_no_file()      { if [ -e "$2" ]; then bad "$1" "file exists: $2"; else ok "$1"; fi; }
 
 # ---------------------------------------------------------------------------
+# DND-944: the retired "client config" producer-registration advice must not
+# come back. DND-923 replaced it with "run inbox-doctor: it asks the server",
+# but DND-923's own sweep missed this hook (found by DND-942) -- this file's
+# Fix: clauses told the reader to "map this inbox filename to a server-side
+# agent instance in ~/.config/athena-inbox-client/config.json", advice that was
+# never true (the client needs no config mapping) and is now also wrong about
+# the mechanism (the doctor asks the server, not a config file). Discovery is
+# via `git ls-files`, per DND-218: a filesystem walk over this checkout would
+# also count untracked third-party trees (node_modules, vendor/bundle) that are
+# not first-party text to sweep.
+if ! command -v git >/dev/null 2>&1; then
+  bad "DND-944: retired 'map ... config.json' producer advice is gone from every first-party file" \
+    "git is not on PATH, so first-party files could not be discovered -- this check cannot evaluate and must not print ok"
+else
+  RETIRED_HITS="$(cd "${REPO_DIR}" && git ls-files -z \
+    | xargs -0 grep -lE 'map (this|it) (this )?inbox filename to a server-side agent instance|instance mapped (to|in) .*inbox-client/config\.json' -- 2>/dev/null)"
+  if [ -z "${RETIRED_HITS}" ]; then
+    ok "DND-944: retired 'map ... config.json' producer advice is gone from every first-party file"
+  else
+    bad "DND-944: retired 'map ... config.json' producer advice is gone from every first-party file" \
+"still present in: $(printf '%s' "${RETIRED_HITS}" | tr '\n' ' ')
+        DND-923 corrected inbox-status, read-inbox and lib/inbox.sh's Fix: clauses to
+        point at inbox-doctor / the server, but its own sweep missed at least one other
+        restatement (the amendment-sweep class, ~/dev/custom/CLAUDE.md -> Documentation
+        conventions). Fix: replace the listed file's wording with the corrected advice
+        (run inbox-doctor; it asks the server whether a matching agent instance exists),
+        the way ai/hooks/athena-inbox-poll.sh's WARN_TEXT does."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Per-case isolation.
 # ---------------------------------------------------------------------------
 CASE_N=0
@@ -840,9 +871,10 @@ echo "== DND-260: a dark PLATFORM lane points at athena-events, never at the sla
 
 # The whole reason DND-260 splits NEVER_PLATFORM from NEVER_SLACK: a never-
 # delivered PLATFORM lane needs an athena-events routing rule, while a slack
-# channel needs a client-side instance in the inbox-client config. Pointing a
-# platform-lane operator at the slack file is the exact misdirection the split
-# exists to prevent -- and until this case existed, `grep -n platform` in this
+# channel needs a server-side agent instance whose inbox_name is this file
+# (DND-923: asked with inbox-doctor, never a client-side config mapping).
+# Pointing a platform-lane operator at the slack path is the exact misdirection
+# the split exists to prevent -- and until this case existed, `grep -n platform` in this
 # suite returned ZERO hits, so the platform branch (NEVER_PLATFORM>0 &&
 # NEVER_SLACK==0) was structurally 0 in every fixture and nothing proved it.
 #
@@ -860,8 +892,8 @@ assert_contains "DND-260 the Fix names the athena-events routing rule for a plat
 assert_contains "DND-260 ...and points at the athena-events contract" \
   "ai/contracts/athena-events.md" "${CTX}"
 # THE MISDIRECTION GUARD. If the hook selected the SLACK Fix for a dark platform
-# lane, "server-side agent instance in ~/.config/athena-inbox-client" would
-# appear -- the operator sent to the wrong file. This assertion is what makes
+# lane, "server-side agent instance" would appear -- the operator sent to
+# inbox-doctor for the wrong channel kind. This assertion is what makes
 # the test fail on the exact bug the NEVER_PLATFORM/NEVER_SLACK split prevents.
 assert_not_contains "DND-260 a dark platform lane does NOT prescribe the slack client-side registration" \
   "server-side agent instance" "${CTX}"

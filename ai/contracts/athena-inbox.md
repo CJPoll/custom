@@ -1547,7 +1547,9 @@ failure mode by a different second end:
 - A `log` channel fed by the inbox adapter is "registered" by an **owner handling
   rule whose delivery target is that channel** — server-side config in
   `athena-events.md` — the way a Slack channel is registered by a server-side
-  agent instance mapped in `~/.config/athena-inbox-client/config.json`. Declaring
+  agent instance whose `inbox_name` is that channel's file — asked with
+  `list_my_machines`, never a client-side config mapping (see below in this
+  section, "the doctor **asks the server**"). Declaring
   the channel in the registry entry alone gets a permanently empty channel, and
   *First run, missing files, and a stale offset* says an empty channel is normal,
   so the misconfiguration is invisible unless a tool makes it observable.
