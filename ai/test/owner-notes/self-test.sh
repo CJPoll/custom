@@ -156,6 +156,28 @@ if [ "${RC}" -eq 0 ] && grep -q '^## N3 ' "${f}" \
 else
   bad "agent relay" "rc=${RC} err=${ERR}"
 fi
+# --context: the relayer's own framing, kept on a Context: line apart from the quote
+sdc="${TMP}/sctx"; mkdir -p "${sdc}"
+run_agent "${sdc}" --add --source coordinator --relayed-from "ref" --text "owner words" --context "relayer framing: why this matters"
+if [ "${RC}" -eq 0 ] && grep -qx 'Context: relayer framing: why this matters' "${sdc}/owner-notes.md" \
+   && grep -qx '> owner words' "${sdc}/owner-notes.md" && ! grep -q '^> relayer framing' "${sdc}/owner-notes.md"; then
+  run "${sdc}" --list --open
+  if [ "${RC}" -eq 0 ] && has "${OUT}" "1 open of 1 notes" && has "${OUT}" "Context: relayer framing"; then
+    ok "--context writes a separate Context: line that parses back"
+  else
+    bad "context parse" "rc=${RC} out=${OUT} err=${ERR}"
+  fi
+else
+  bad "context add" "rc=${RC} err=${ERR} file=$(cat "${sdc}/owner-notes.md" 2>/dev/null)"
+fi
+printf '## N1 — 2026-09-27T00:00:00Z\nSource: owner\nStatus: open\nContext: a\nContext: b\n\n> x\n' > "${sdc}/owner-notes.md"
+run "${sdc}" --list
+if [ "${RC}" -eq 2 ] && has "${ERR}" "Context:" && has "${ERR}" "Fix:"; then
+  ok "two Context: lines in one note is exit 2"
+else
+  bad "double context" "rc=${RC} err=${ERR}"
+fi
+
 # Undo N3 so the numbering cases below stay as written.
 ruby -e 'p=ARGV[0]; s=File.read(p); File.write(p, s.sub(/\n## N3 .*\z/m, "\n"))' "${f}"
 

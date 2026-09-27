@@ -31,6 +31,7 @@
 #   Source: owner
 #     (or) Source: coordinator, relaying the owner's exact words from <ref>
 #   Status: open            (flipped to)  Status: addressed: <commit sha>
+#   Context: <optional; the relayer's own framing, one line, never a quote>
 #
 #   > the owner's words, verbatim, one "> " per line (">" for a blank line)
 #
@@ -51,7 +52,7 @@
 #                                    a count line; exit 0
 #   owner-notes --add --source owner (--text TEXT | --text-file PATH)
 #   owner-notes --add --source coordinator --relayed-from REF
-#                     (--text TEXT | --text-file PATH)
+#                     (--text TEXT | --text-file PATH) [--context LINE]
 #                                    append a new dated note; prints its id
 #   owner-notes --address ID --commit SHA
 #                                    flip note ID's Status to addressed: SHA
@@ -199,6 +200,8 @@ module OwnerNotes
     sources = lines.each_index.select { |i| lines[i].start_with?("Source:") }
     statuses = lines.each_index.select { |i| lines[i].start_with?("Status:") }
     quotes = lines.select { |l| l == ">" || l.start_with?("> ") }
+    contexts = lines.each_index.select { |i| lines[i].start_with?("Context: ") }
+    raise Fault, "#{where} has #{contexts.size} Context: lines, expected at most 1.\n#{fix}" if contexts.size > 1
     raise Fault, "#{where} has #{sources.size} Source: lines, expected 1.\n#{fix}" unless sources.size == 1
     raise Fault, "#{where} has #{statuses.size} Status: lines, expected 1.\n#{fix}" unless statuses.size == 1
 
@@ -213,7 +216,8 @@ module OwnerNotes
     raise Fault, "#{where} quotes no words (no `> ` line).\n#{fix}" if quotes.empty?
 
     stray = lines.reject.with_index do |l, i|
-      l.strip.empty? || i == sources.first || i == statuses.first || l == ">" || l.start_with?("> ")
+      l.strip.empty? || i == sources.first || i == statuses.first || contexts.include?(i) ||
+        l == ">" || l.start_with?("> ")
     end
     raise Fault, "#{where} has an unrecognised line #{stray.first.inspect}.\n#{fix}" unless stray.empty?
 
@@ -305,9 +309,22 @@ module OwnerNotes
     end
   end
 
+  # The relayer's own framing, never the owner's words: one line, apart from the quote.
+  def context_line(opts)
+    return nil unless opts.key?("--context")
+
+    ctx = opts["--context"].to_s
+    if ctx.strip.empty? || ctx.include?("\n")
+      raise Refused, "--context must be one non-empty line.\n" \
+                     "Fix: put the relayer's framing on one line; the owner's words go in --text/--text-file."
+    end
+    "Context: #{ctx}"
+  end
+
   def add(opts, out = $stdout)
     src = source_line(opts)
     text = read_text(opts)
+    ctx_line = context_line(opts)
     path = notes_file
     dir = File.dirname(path)
     require_state_dir!(dir)
@@ -316,7 +333,8 @@ module OwnerNotes
       notes, existed = load(path)
       id = "N#{(notes.map { |n| n.id[1..].to_i }.max || 0) + 1}"
       quoted = text.split("\n", -1).map { |l| l.empty? ? ">" : "> #{l}" }
-      entry = ["## #{id} — #{Time.now.utc.iso8601}", src, STATUS_OPEN, "", *quoted].join("\n")
+      ctx = ctx_line ? [ctx_line] : []
+      entry = ["## #{id} — #{Time.now.utc.iso8601}", src, STATUS_OPEN, *ctx, "", *quoted].join("\n")
       File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o600) do |f|
         f.write(PREAMBLE) unless existed
         f.write("\n#{entry}\n")
@@ -360,12 +378,12 @@ module OwnerNotes
   CLI_SPEC = {
     "--help" => :switch, "-h" => :switch, "--list" => :switch, "--open" => :switch,
     "--add" => :switch, "--source" => :value, "--relayed-from" => :value,
-    "--text" => :value, "--text-file" => :value,
+    "--text" => :value, "--text-file" => :value, "--context" => :value,
     "--address" => :value, "--commit" => :value, "--path" => :switch
   }.freeze
   ACTIONS = %w[--list --add --address --path].freeze
   ALLOWED = {
-    "--list" => %w[--open], "--add" => %w[--source --relayed-from --text --text-file],
+    "--list" => %w[--open], "--add" => %w[--source --relayed-from --text --text-file --context],
     "--address" => %w[--commit], "--path" => []
   }.freeze
 
