@@ -411,6 +411,9 @@ The holds:
     plan also has; it never skips a delete. A stateful resource in the
     control but absent from the change plan holds as a destroy, because an
     offline plan has no state and shows a removed block only by its absence.
+    Offline, an update and a replace both read as `create`, so a
+    value-holding type holds unless only its value, tags or description
+    changed.
 
   A secrets update is not held by itself. Creating or updating an SSM
   parameter, a secret version, or a `random_password` ships under its

@@ -80,6 +80,17 @@ check offline-ssm-tier     4 --plan "$(plan af "$(rc aws_ssm_parameter '["create
                              --control "$(plan ag "$(rc aws_ssm_parameter '["create"]' null '{"tier":"Standard"}')")"
 check offline-value-clear  0 --plan "$(plan ah "$(rc aws_ssm_parameter '["create"]' null '{"value":"b","tier":"Standard"}')")" \
                              --control "$(plan ai "$(rc aws_ssm_parameter '["create"]' null '{"value":"a","tier":"Standard"}')")"
+# Offline, a value-holding type's update and its force-new replace both read
+# create-vs-create. Only a value/tags/description change is known in place;
+# any other differing attribute may force a replace, so it holds.
+check offline-ssm-rename   4 --plan "$(plan aj "$(rc aws_ssm_parameter '["create"]' null '{"name":"/b","value":"x"}')")" \
+                             --control "$(plan ak "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"x"}')")"
+check offline-ghsecret-repo 4 --plan "$(plan al "$(rc github_actions_secret '["create"]' null '{"repository":"b"}')")" \
+                             --control "$(plan am "$(rc github_actions_secret '["create"]' null '{"repository":"a"}')")"
+check offline-ssm-name-unknown 4 --plan "$(plan an "$(rc aws_ssm_parameter '["create"]' null '{"value":"x"}' '{"name":true}')")" \
+                             --control "$(plan ao "$(rc aws_ssm_parameter '["create"]' null '{"name":"/a","value":"x"}')")"
+check offline-secret-tags  0 --plan "$(plan ap "$(rc aws_secretsmanager_secret_version '["create"]' null '{"secret_id":"s","secret_string":"b","tags":{"a":"2"}}')")" \
+                             --control "$(plan aq "$(rc aws_secretsmanager_secret_version '["create"]' null '{"secret_id":"s","secret_string":"a","tags":{"a":"1"}}')")"
 # A `moved` block renames the address; the old one is not a destroy.
 printf '{"format_version":"1.2","resource_changes":[{"address":"aws_db_instance.y","previous_address":"aws_db_instance.x","mode":"managed","type":"aws_db_instance","name":"y","change":{"actions":["no-op"],"before":{},"after":{},"after_unknown":{}}}]}' > "${TMP}/moved.json"
 check control-moved-clear  0 --plan "${TMP}/moved.json" --control "$(plan ae "$(rc aws_db_instance '["no-op"]' '{}' '{}')")"
