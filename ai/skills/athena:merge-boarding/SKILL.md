@@ -197,7 +197,10 @@ and no amount of your own care substitutes for it. So on exit 4:
    `Needs Attention` assigned to Cody per [[athena:ticket-management]], writing
    onto the Mission body: the PR URL, the head SHA, **what merging would cause**
    (copy the `BLAST-RADIUS HOT` block verbatim), and the exact decision you need.
-3. List it in your final report per [[athena:admiral-final-report]].
+3. **Request the go**: send Cody a Block Kit decision DM (`~/.claude/CLAUDE.md`
+   → *What no standing approval covers* → *How to hold*). Do not wait
+   silently.
+4. List it in your final report per [[athena:admiral-final-report]].
 
 **Later (2026-09-24):** this section held EVERY exit 4 for the owner. A
 security fix is now the exception: it carries the owner's standing approval
@@ -210,7 +213,8 @@ approval covers (`~/.claude/CLAUDE.md` → *Standing owner approvals*): a
 security fix, a library upgrade, or a comment/docs-only change. Scope and
 record live in each rule's subsection. For comment/docs-only, the objective
 check is this skill's `scripts/comment-only-diff`, run from the main checkout.
-A part of the PR no approval covers holds as before.
+A part of the PR no approval covers holds as before, and so does anything
+*What no standing approval covers* names.
 
 **`athena:run-autonomously` does not relax this.** A no-human-present run lets
 you decide ambiguities with best judgement; it never transfers the owner's spend
@@ -241,7 +245,14 @@ when `integration-gate` exits 0. The declared surface list cannot be complete �
 a pure-code change that charges a card, emails real users, or calls a
 provisioning API on boot hits no path pattern. The two channels **union**;
 neither cancels the other. A captain's `ROUTINE` never overrides an exit 4, and
-an exit 0 never overrides a captain's `IRREVERSIBLE`.
+an exit 0 never overrides a captain's `IRREVERSIBLE`. No standing approval
+overrides it either, a security fix included; hold it and request the go as for
+exit 4 (`~/.claude/CLAUDE.md` → *What no standing approval covers*).
+
+**A merge that applies terraform runs `scripts/tf-plan-gate` first**, on the
+plan for the merged head. Exit 4 or 3 holds under every standing approval, and
+you request the go the same way. The rule and the plan's sources live in
+*What no standing approval covers*.
 
 **A destructive migration is PLANNED, so its authorization is too.** The
 `destructive-migration` surface gates a merge whose deploy drops a table or a
