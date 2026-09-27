@@ -406,19 +406,28 @@ module Manager
     case status
     when 409
       if error == "question_set_unavailable"
-        { kind: :fail, code: 3, line: "#{PROG}: JUDGMENTS UNAVAILABLE: question_set_unavailable: #{server_fix || 'no fix given'}" }
+        { kind: :fail, code: 3, line: "#{PROG}: JUDGMENTS UNAVAILABLE: question_set_unavailable: #{with_fix(server_fix)}" }
       else
-        { kind: :fail, code: 5, line: "#{PROG}: the server refused (HTTP 409 #{error}): #{server_fix || 'Fix: none given'}" }
+        { kind: :fail, code: 5, line: "#{PROG}: the server refused (HTTP 409 #{error}): #{with_fix(server_fix)}" }
       end
     when 401 then fail_outcome(1, "the server rejected the machine token (HTTP 401)", "the inbox client token is owner-issued; ask the owner to re-issue it, never mint one yourself")
     when 404 then fail_outcome(5, "the server answered not_found (HTTP 404): an unknown use case, or an eval run that is absent or not this machine owner's", "check --use-case, or the run id you passed")
-    when 400..499 then { kind: :fail, code: 5, line: "#{PROG}: the server refused the request (HTTP #{status}#{error ? " #{error}" : ''}): #{server_fix || 'Fix: none given; read the server log'}" }
+    when 400..499 then { kind: :fail, code: 5, line: "#{PROG}: the server refused the request (HTTP #{status}#{error ? " #{error}" : ''}): #{with_fix(server_fix)}" }
     else fail_outcome(5, "the server faulted (HTTP #{status})", "the server failed, not the request; check its health, then re-run")
     end
   end
 
   def fail_outcome(code, what, fix)
     { kind: :fail, code: code, line: "#{PROG}: #{what}. Fix: #{fix}" }
+  end
+
+  # with_fix(server_fix) -> the server's fix text, guaranteed to carry Fix:.
+  # Every failure line carries the marker, whatever the server sent.
+  def with_fix(server_fix)
+    return "Fix: none given; read the server log" if server_fix.nil?
+    return server_fix if server_fix.include?("Fix:")
+
+    "#{server_fix}. Fix: act on the server's message above, or read the server log"
   end
 end
 

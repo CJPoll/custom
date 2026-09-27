@@ -242,6 +242,21 @@ run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/co
 eq "a refusal exits 5" "${RC}" "5"
 has "a refusal prints the server's fix" "${ERR}" "cases[0].label is missing. Fix: send it."
 
+# Every failure line carries Fix:, even when the server's own fix does not.
+respond '{"status":409,"body":{"error":"question_set_unavailable"}}'
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0
+eq "question_set_unavailable with no server fix still exits 3" "${RC}" "3"
+has "question_set_unavailable with no server fix still carries Fix:" "${ERR}" "JUDGMENTS UNAVAILABLE: question_set_unavailable: Fix: "
+respond '{"status":409,"body":{"error":"conflict","fix":"the run is already applied"}}'
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0
+eq "a 409 whose server fix lacks the marker exits 5" "${RC}" "5"
+has "a 409 whose server fix lacks the marker keeps the server's text" "${ERR}" "the run is already applied"
+has "a 409 whose server fix lacks the marker still carries Fix:" "${ERR}" "Fix: "
+respond '{"status":422,"body":{"error":"unprocessable_entity","fix":"cases[0].label is missing"}}'
+run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0
+eq "a 4xx whose server fix lacks the marker exits 5" "${RC}" "5"
+has "a 4xx whose server fix lacks the marker still carries Fix:" "${ERR}" "Fix: "
+
 respond '{"status":500,"body":{"error":"internal_error"}}'
 run --use-case finding_triage --labels "${TMP}/labels.jsonl" --corpus "${TMP}/corpus.jsonl" --content-domain blend --pause 0
 eq "a server fault exits 5" "${RC}" "5"
