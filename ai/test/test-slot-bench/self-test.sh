@@ -117,6 +117,11 @@ export SHIM_DIR="$W/shim"
 # Throwaway pool (N=3) and fake load.
 export ATHENA_TEST_SLOT_DIR="$W/pool" ATHENA_TEST_SLOTS=3
 export TEST_SLOT_BENCH_TEST_SLOT="$TS_BIN" TEST_SLOT_BENCH_LOADAVG="$W/loadavg" TEST_SLOT_BENCH_CENSUS=true
+# The probe's unslotted count otherwise scans the REAL host's processes, so a
+# sibling's unslotted `mix`/prep-commit run contaminated a level mid-suite and
+# flipped an expected decision (b4 read no "N=1" once, 2026-09-27, with the
+# fleet busy). Pin it to 0; c3 overrides it to exercise the contaminated path.
+export TEST_SLOT_BENCH_FAKE_UNSLOTTED=0
 setload() { printf '%s %s 0.10 2/300 999\n' "$1" "$1" >"$W/loadavg"; }
 setload 0.50
 FAST0=(--settle-s 0.05 --settle-max 2 --sample-s 0.05 --tail-s 0 --run-timeout 60)
