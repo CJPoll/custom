@@ -1045,6 +1045,23 @@ E"
 # term is word.*word was read as a glob command word.
 case_cmd "QA82. grep -E alternation with a word.*word middle term" allow "grep -E 'receipt|write.*verdict|INTEGRATION OK' gate.log"
 
+# QX109-110: critic round 21. A `<<` inside a substitution that closes on
+# the same line is not a heredoc for the next line: zsh (the Bash tool)
+# runs that line as a command (probed 2026-09-27).
+case_cmd "QX109. <<'E' inside backticks closed on the same line" deny "echo \`cat <<'E'\`
+/usr/libexec/git-core/git-st*sh -u
+E"
+case_cmd "QX110. <<'E' inside \$(...) closed on the same line" deny "echo \$(cat <<'E')
+/usr/libexec/git-core/git-st*sh -u
+E"
+# The substitution still open at the newline is a real heredoc in every
+# shell: its body stays data. The body line is QX109's, which denies as a
+# command, so this allows only if the body is read as data.
+case_cmd "QA83. multi-line \$(cat <<'E' ...) keeps its body as data" allow "msg=\$(cat <<'E'
+/usr/libexec/git-core/git-st*sh -u
+E
+)"
+
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
 case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"

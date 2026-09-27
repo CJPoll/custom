@@ -791,15 +791,15 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (final, critic rounds 1-20, admiral batches 7-9 + the harness
-  relay):** `RESULT: 577 passed, 0 failed` / `VERDICT: PASS`. The per-round
+- **After (final, critic rounds 1-21, admiral batches 7-9 + the harness
+  relay):** `RESULT: 580 passed, 0 failed` / `VERDICT: PASS`. The per-round
   tables in this and the next few subsections are HISTORICAL, measured on
   the hook of the round they name; the authoritative final table is
-  "Sabotage rows on the option-A hook" below (577, on the round-20 hook).
+  "Sabotage rows on the option-A hook" below (580, on the round-21 hook).
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
-`RESULT: 539 passed, 38 failed` (the final 577-case suite against the base
+`RESULT: 541 passed, 39 failed` (the final 580-case suite against the base
 hook; the count here was 495 at round 8 and grew as rounds added cases). Every failure is an allow
 case (QA/QB) or the deny-text check T2, e.g.:
 
@@ -924,12 +924,12 @@ reached every case they did (their mutants stayed green).
   via DND-775" block. Every deny stays green. Rows 10, 13, 14, 17-22, 24
   and 25 above sabotaged deleted code and are retired.
 
-### Sabotage rows on the option-A hook (final, measured on the round-20
+### Sabotage rows on the option-A hook (final, measured on the round-21
 hook; supersede every table above)
 
-Self-test `RESULT: 577 passed, 0 failed`. One mutant copy each. A-1..A-31
+Self-test `RESULT: 580 passed, 0 failed`. One mutant copy each. A-1..A-31
 were measured on 9e114a6 + the round-12 edits; A-32 on 110ea27; A-33 on the
-round-16 hook; A-34/A-35 on the round-17 hook; A-36 on the round-18 hook; A-37 on the round-20 hook.
+round-16 hook; A-34/A-35 on the round-17 hook; A-36 on the round-18 hook; A-37 on the round-20 hook; A-38/A-39 on the round-21 hook.
 Rows whose mechanisms option A deleted (the old A-3/10/12-14/17-25) are
 retired with that code.
 
@@ -958,6 +958,8 @@ retired with that code.
 | A-35 | The `${`/`$[` depth is reset at each newline, so a `${` open across a line is missed (critic round 17) | QX103 — `570 passed, 1 failed` |
 | A-36 | The fail-safe on a substitution inside an open expansion is dropped, so a `}` inside `$(...)`/backticks closes the `${` (critic round 18) | QX105, QX106 — `572 passed, 2 failed` |
 | A-37 | The substitution fail-safe is cleared at each newline again, so a newline inside the nested `$(...)`/backticks reopens it (critic round 20) | QX107, QX108 — `575 passed, 2 failed` |
+| A-38 | The same-line-close drop (hcx) removed, so a `<<` inside a `$(...)`/backticks closed on its own line is a heredoc again (critic round 21) | QX109, QX110 — `578 passed, 2 failed` |
+| A-39 | Over-drop: every pending heredoc is discarded at the newline, so no real heredoc body is data (guards against a fail-safe that over-reaches) | QA5, QA18, QA20, QA29, QA33, QA62, QA72, QA80, QA81, QA83 — `570 passed, 10 failed` |
 
 - **Round 11, path-qualified word + stale text.** The critic found that
   `exec_text()` stripped a command word to its basename before the
@@ -1027,4 +1029,17 @@ retired with that code.
   mutation A-37. Also this round: QA82 (harness relay), a `grep -E`
   alternation `receipt|write.*verdict|INTEGRATION OK`, is allowed (denied
   on base as a glob command word). The evidence counts above are
-  reconciled to the final suite (577 cases; base 539/38).
+  reconciled to the final suite (577 cases; base 539/38) at that round.
+- **Round 21, a heredoc inside a substitution closed on the same line.**
+  ``echo `cat <<'E'` `` and `echo $(cat <<'E')` were taken as heredocs, so
+  the next line was read as data. Probed 2026-09-27: zsh (the Bash tool)
+  runs that line as a command; bash differs; a substitution still open at
+  the newline (`x=$(cat <<'E'`, body, `E`, `)`) is a real heredoc in every
+  shell. Fix: an unquoted `)` or backtick after a pending heredoc delimiter
+  on the same line sets hcx, and at the newline hcx drops that line's
+  pending heredocs, so their lines read as commands. Fail-first: the
+  round-20 hook on the final suite gives `578 passed, 2 failed` (QX109,
+  QX110, status=0, allowed). QA83 keeps the multi-line `$(cat <<'E'` form
+  as data; its body is QX109's line, which denies as a command, so it
+  allows only if the body is read as data (base 81ba7c2 denies it).
+  Mutations A-38/A-39. Final counts: 580 cases, base 541/39.
