@@ -393,8 +393,10 @@ The holds:
     `prevent_destroy` makes terraform refuse to plan, so a change that
     destroys a protected resource lands here. An agent without prod
     credentials may use the offline control-vs-change plan, passing the base
-    plan as `--control`. `--control` skips only a create or update the base
-    plan also has; it never skips a delete. A stateful resource in the
+    plan as `--control`. `--control` is for that method only: it skips a
+    create the base plan has identically, and the tool refuses it (exit 2)
+    when either plan has an update or a delete. A plan with state is judged
+    whole, drift included, since merging applies all of it. A stateful resource in the
     control but absent from the change plan holds as a destroy, because an
     offline plan has no state and shows a removed block only by its absence.
     Offline, an update and a replace both read as `create`; the same

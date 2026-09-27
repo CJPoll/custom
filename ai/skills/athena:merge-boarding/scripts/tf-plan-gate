@@ -76,11 +76,13 @@ def usage
       #{PROG} --plan PLAN.json [--control CONTROL.json]
       #{PROG} --help | --self-test
 
-    PLAN.json is `terraform show -json <planfile>` for the change. With
-    --control (the same plan for the base commit, e.g. the offline
-    control-vs-change method), a create or update present identically in
-    the control is not the diff's and is skipped. A delete is never
-    skipped: merging applies the whole plan. A managed resource in the
+    PLAN.json is `terraform show -json <planfile>` for the change.
+    --control is the offline control-vs-change method only: the same plan
+    for the base commit, both made without state, so every action is
+    create. A create present identically in the control is an existing
+    resource and is skipped. If either plan has an update or a delete it
+    has state, and --control is refused (exit 2): merging applies the
+    whole plan, drift included, so it is judged whole. A managed resource in the
     control but absent from the change plan (by address and by
     previous_address) is a DESTROY: the change removed its block, which an
     offline plan, having no state, cannot show as a delete.
@@ -246,6 +248,22 @@ changes = load_plan(plan_path)
 control = control_path ? load_plan(control_path) : []
 control_keys = control.map { |rc| [rc["address"], rc.dig("change", "actions"), rc.dig("change", "after")] }
 
+# --control is the offline method only: a plan with no state reads every
+# resource as `create`. An update or delete means a plan with state, and
+# merging applies all of it, drift included, so nothing in it may be
+# subtracted. Refuse rather than judge part of it.
+if control_path
+  stateful = [[plan_path, changes], [control_path, control]].flat_map do |path, rcs|
+    rcs.reject { |rc| (Array(rc.dig("change", "actions")) - %w[create no-op read]).empty? }
+       .map { |rc| "#{path}: #{rc['address']} #{Array(rc.dig('change', 'actions')).join('+')}" }
+  end
+  unless stateful.empty?
+    die(2, "--control is for offline (stateless) plans, but these actions show state: #{stateful.first(3).join('; ')}",
+        "run without --control: a plan with state is judged whole, drift included, because merging applies the " \
+        "whole plan. Use --control only with the offline control-vs-change method, where every action is create.")
+  end
+end
+
 held = []
 considered = 0
 skipped_control = 0
@@ -253,7 +271,7 @@ changes.each do |rc|
   actions = Array(rc.dig("change", "actions"))
   next if actions.empty? || actions == ["no-op"] || actions == ["read"]
 
-  if !actions.include?("delete") && control_keys.include?([rc["address"], actions, rc.dig("change", "after")])
+  if actions == ["create"] && control_keys.include?([rc["address"], actions, rc.dig("change", "after")])
     skipped_control += 1
     next
   end

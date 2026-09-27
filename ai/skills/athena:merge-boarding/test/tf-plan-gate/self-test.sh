@@ -67,14 +67,21 @@ check no-op-and-read       0 --plan "$(plan r "$(rc aws_db_instance '["no-op"]' 
 check empty-plan-clear     0 --plan "$(plan s)"
 check data-mode-ignored    0 --plan "$(printf '{"format_version":"1.2","resource_changes":[{"address":"data.x.y","mode":"data","type":"aws_db_instance","change":{"actions":["delete"]}}]}' > "${TMP}/t.json"; echo "${TMP}/t.json")"
 
-# --control subtracts a change the base plan has identically.
+# --control is the offline method only. An offline plan has no state, so every
+# action is `create`, and a create the base plan has identically is an
+# existing resource, not the diff's. A plan with state (any update or delete,
+# in either plan) is judged whole, drift included: merging applies the whole
+# plan. --control on one is refused (exit 2), never read as CLEAR.
+inst="$(rc aws_instance '["create"]' null '{"instance_type":"t"}')"
+check control-subtracts-create 0 --plan "$(plan u "$inst")" --control "$(plan v "$inst")"
+check control-keeps-new    4 --plan "$(plan w "$inst" "$(rc aws_db_instance '["create"]' null '{}')")" --control "$(plan x "$inst")"
 drift="$(rc aws_instance '["update"]' '{"instance_type":"a"}' '{"instance_type":"b"}')"
-check control-subtracts    0 --plan "$(plan u "$drift")" --control "$(plan v "$drift")"
-check control-keeps-new    4 --plan "$(plan w "$drift" "$(rc aws_db_instance '["delete"]' '{}' null)")" --control "$(plan x "$drift")"
-# --control never subtracts a destroy: merging applies the whole plan, so a
-# delete the base plan also has (drift) still happens.
+check control-online-sizing-drift 2 --plan "$(plan ua "$drift")" --control "$(plan va "$drift")"
+susp="$(rc aws_s3_bucket_versioning '["update"]' '{"versioning_configuration":[{"status":"Enabled"}]}' '{"versioning_configuration":[{"status":"Suspended"}]}')"
+check control-online-versioning-drift 2 --plan "$(plan ub "$susp")" --control "$(plan vb "$susp")"
 gone="$(rc aws_db_instance '["delete"]' '{}' null)"
-check control-keeps-destroy 4 --plan "$(plan y "$gone")" --control "$(plan z "$gone")"
+check control-online-destroy 2 --plan "$(plan y "$gone")" --control "$(plan z "$gone")"
+check control-online-in-control 2 --plan "$(plan uc "$inst")" --control "$(plan vc "$drift")"
 # Offline plans have no state, so every resource reads `create`. A change
 # that deletes the resource block leaves it only in the control: a destroy.
 rds_new="$(rc aws_db_instance '["create"]' null '{}')"
