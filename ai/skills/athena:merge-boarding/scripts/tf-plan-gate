@@ -204,6 +204,14 @@ changes.each do |rc|
   if actions == ["create"] && !free_stateless?(type)
     held << ["COST", addr, "new #{type} (not known free)"]
   end
+  # Offline (no state) a resize reads as create-vs-create at one address:
+  # compare its sizing attributes with the control's create.
+  base_create = control.find { |c| c["address"] == addr && c.dig("change", "actions") == ["create"] }
+  if actions == ["create"] && base_create
+    cost_diffs(base_create.dig("change", "after"), rc.dig("change", "after"), rc.dig("change", "after_unknown")).each do |d|
+      held << ["COST", addr, "sizing change vs the control: #{d}"]
+    end
+  end
   if actions.include?("update")
     ch = rc["change"]
     cost_diffs(ch["before"], ch["after"], ch["after_unknown"]).each do |d|
