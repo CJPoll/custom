@@ -88,9 +88,19 @@ mk_stub() { # path name child-cmd
   cat > "$1" <<EOF
 #!/bin/sh
 echo \$\$ >> "${state}/all.pids"
+# A slow start on purpose (SELFTEST_STUB_DELAY seconds): what a loaded host
+# does to the reap-then-exec path. Readiness must be waited on as an event.
+[ -n "\${SELFTEST_STUB_DELAY:-}" ] && sleep "\${SELFTEST_STUB_DELAY}"
 sh -c 'echo \$\$ >> "${state}/all.pids"; echo \$\$ > "${state}/$2.helper"; $3 & echo \$! >> "${state}/all.pids"; echo \$! > "${state}/$2.child"; wait' &
-wait_n=0
-while [ ! -s "${state}/$2.child" ] && [ \$wait_n -lt 100 ]; do sleep 0.05; wait_n=\$((wait_n + 1)); done
+helper=\$!
+# Wait for the EVENT (the child's pid file), for as long as the helper that
+# writes it lives. A fixed count here made a loaded host signal ready with no
+# child recorded.
+while [ ! -s "${state}/$2.child" ]; do
+  st="\$(awk '/^State:/ {print \$2; exit}' "/proc/\$helper/status" 2>/dev/null)"
+  { [ -z "\$st" ] || [ "\$st" = Z ]; } && break
+  sleep 0.05
+done
 : > "${state}/$2.ready"
 wait
 EOF
@@ -108,6 +118,19 @@ cat > "${driver}" <<'EOF'
 #   crash:   SIGKILL only the supervised pid (the command dies on its own).
 phase="$1"; initd="$2"; name="$3"; state="$4"; override="${5:-}"
 ebegin() { :; }
+# wait_dead PID: wait for the EVENT (PID gone or a zombie). HANG_DEADLINE
+# seconds of wall clock only catches a hang; it is never a timing budget.
+wait_dead() {
+  end=$(( $(date +%s) + ${HANG_DEADLINE:-120} ))
+  while :; do
+    st="$(awk '/^State:/ {print $2; exit}' "/proc/$1/status" 2>/dev/null)"
+    { [ -z "${st}" ] || [ "${st}" = "Z" ]; } && return 0
+    if [ "$(date +%s)" -ge "${end}" ]; then
+      echo "emu: pid $1 still alive after ${HANG_DEADLINE:-120}s (a hang)" >&2; return 1
+    fi
+    sleep 0.05
+  done
+}
 eend() { return "${1:-0}"; }
 einfo() { echo "einfo: $*" >&2; }
 ewarn() { echo "ewarn: $*" >&2; }
@@ -137,12 +160,7 @@ case "${phase}" in
 crash)
   pid="$(cat "${state}/${name}.supervised")"
   kill -KILL "${pid}" 2>/dev/null
-  n=0
-  while [ $n -lt 100 ]; do
-    st="$(awk '/^State:/ {print $2; exit}' "/proc/${pid}/status" 2>/dev/null)"
-    { [ -z "${st}" ] || [ "${st}" = "Z" ]; } && break
-    sleep 0.05; n=$((n + 1))
-  done
+  wait_dead "${pid}"
   ;;
 start|respawn)
   # openrc-run runs start_pre first and aborts the start on failure. Its log
@@ -175,12 +193,7 @@ start|respawn)
 stop)
   pid="$(cat "${state}/${name}.supervised")"
   kill -TERM "${pid}" 2>/dev/null
-  n=0
-  while [ $n -lt 100 ]; do
-    st="$(awk '/^State:/ {print $2; exit}' "/proc/${pid}/status" 2>/dev/null)"
-    { [ -z "${st}" ] || [ "${st}" = "Z" ]; } && break
-    sleep 0.05; n=$((n + 1))
-  done
+  wait_dead "${pid}"
   if command -v stop_post >/dev/null 2>&1; then
     stop_post; exit $?
   fi
@@ -190,11 +203,29 @@ esac
 EOF
 chmod 755 "${driver}"
 
-wait_ready() { # name
-  local n=0
-  while [ ! -e "${state}/$1.ready" ] && [ "${n}" -lt 100 ]; do sleep 0.05; n=$((n + 1)); done
-  [ -e "${state}/$1.ready" ]
+# Every wait here is on an EVENT, never a fixed poll count. A fixed budget
+# (100 x 0.05s) flaked the respawn cases on a loaded host (DND-838 reopen):
+# the respawned command runs a full /proc reap before it execs, and at load
+# ~19 that took longer than 5s. A wait ends when the event happens, or at once
+# when the process that would cause it is gone. HANG_DEADLINE (wall clock)
+# only catches a hang and says so; a slow host never reaches it.
+export HANG_DEADLINE=120
+wait_for() { # PID CMD...: poll CMD until it succeeds while PID lives
+  local pid="$1"; shift
+  local end=$((SECONDS + HANG_DEADLINE))
+  until "$@"; do
+    if [ -z "${pid}" ] || ! alive "${pid}"; then "$@"; return; fi
+    if [ "${SECONDS}" -ge "${end}" ]; then
+      echo "wait_for: pid ${pid} alive but still waiting after ${HANG_DEADLINE}s (a hang): $*" >&2
+      return 1
+    fi
+    sleep 0.05
+  done
 }
+wait_ready() { # name: the stub's ready file, while the supervised pid lives
+  wait_for "$(cat "${state}/$1.supervised" 2>/dev/null)" test -e "${state}/$1.ready"
+}
+exe_is() { [ "$(readlink "/proc/$1/exe" 2>/dev/null)" = "$2" ]; }
 
 # run_driver: one emulated openrc-run. RC_SVCNAME (always selftest-NAME) is
 # set in its env exactly as in the real openrc-run, so the reaper must NOT
@@ -385,6 +416,9 @@ respawn_case gitlab-runner.initd glr-respawn stub RUNNER_USER="${me}" RUNNER_HOM
   RUNNER_BIN="${tmp}/bin/glr-respawn-stub" RUNNER_CONFIG="${tmp}/gitlab-config.toml"
 respawn_case docker-rootless-github-runner.initd dgh-respawn stub DOCKER_ROOTLESS_USER="${me}"
 respawn_case docker-rootless-gitlab-runner.initd dgl-respawn stub DOCKER_ROOTLESS_USER="${me}"
+# The same path with a start slower than any fixed poll budget: the test must
+# wait on the start EVENT, bounded by the process being alive, not by a clock.
+respawn_case docker-rootless-github-runner.initd dgh-slow stub DOCKER_ROOTLESS_USER="${me}" SELFTEST_STUB_DELAY=6
 
 supervised=""
 for f in "${sysfiles}"/*.initd; do
@@ -518,9 +552,10 @@ if [ -r "${lib}" ]; then
   glr=$!; disown "${glr}"
   ( cd / && exec "${tmp}/usr/bin/gitlab-runner-helper" 300 ) </dev/null >/dev/null 2>&1 &
   glh=$!; disown "${glh}"
-  n=0; while { [ "$(readlink "/proc/${glr}/exe" 2>/dev/null)" != "${tmp}/usr/bin/gitlab-runner" ] \
-    || [ "$(readlink "/proc/${glh}/exe" 2>/dev/null)" != "${tmp}/usr/bin/gitlab-runner-helper" ]; } \
-    && [ "${n}" -lt 100 ]; do sleep 0.05; n=$((n + 1)); done
+  wait_for "${glr}" exe_is "${glr}" "${tmp}/usr/bin/gitlab-runner" \
+    || fail "lib: the anchor-binary stub never exec'd"
+  wait_for "${glh}" exe_is "${glh}" "${tmp}/usr/bin/gitlab-runner-helper" \
+    || fail "lib: the sibling-binary stub never exec'd"
   exe_out="$(. "${lib}" && proc_tree_reap "initd-proc-tree-selftest-exe-$$" "${uid}" 1 "${tmp}/usr/bin/gitlab-runner" 2>&1)"
   if ! alive "${glr}"; then pass "lib: an untagged process running exactly the anchor binary is reaped"
   else fail "lib: exe-equals-anchor process survived: ${exe_out}"; fi
@@ -532,8 +567,8 @@ if [ -r "${lib}" ]; then
   stubborn_tag="initd-proc-tree-selftest-stubborn-$$"
   env ATHENA_SVC_TREE="${stubborn_tag}" sh -c 'trap "" TERM; sleep 300' </dev/null >/dev/null 2>&1 &
   stubborn=$!; disown "${stubborn}"
-  n=0; while ! grep -zqFx -- "ATHENA_SVC_TREE=${stubborn_tag}" "/proc/${stubborn}/environ" 2>/dev/null \
-    && [ "${n}" -lt 100 ]; do sleep 0.05; n=$((n + 1)); done
+  wait_for "${stubborn}" grep -zqFx -- "ATHENA_SVC_TREE=${stubborn_tag}" "/proc/${stubborn}/environ" \
+    || fail "lib: the SIGTERM-ignoring stub never exec'd"
   stubborn_out="$(. "${lib}" && proc_tree_reap "${stubborn_tag}" "${uid}" 1 2>&1)"; stubborn_rc=$?
   if [ "${stubborn_rc}" -eq 0 ] && ! alive "${stubborn}"; then
     pass "lib: a SIGTERM-ignoring tree member is SIGKILLed"
@@ -556,8 +591,8 @@ if [ -r "${lib}" ]; then
   noglob_tag="initd-proc-tree-selftest-noglob-$$"
   env ATHENA_SVC_TREE="${noglob_tag}" "$(command -v sleep)" 300 </dev/null >/dev/null 2>&1 &
   noglob=$!; disown "${noglob}"
-  n=0; while ! grep -zqFx -- "ATHENA_SVC_TREE=${noglob_tag}" "/proc/${noglob}/environ" 2>/dev/null \
-    && [ "${n}" -lt 100 ]; do sleep 0.05; n=$((n + 1)); done
+  wait_for "${noglob}" grep -zqFx -- "ATHENA_SVC_TREE=${noglob_tag}" "/proc/${noglob}/environ" \
+    || fail "lib: the set -f stub never exec'd"
   noglob_out="$(sh -c 'set -f; . "$0" && proc_tree_reap "$1" "$2" 1' "${lib}" "${noglob_tag}" "${uid}" 2>&1)"
   if alive "${noglob}"; then fail "lib: under set -f the tagged process survived: ${noglob_out}"
   else pass "lib: a caller under set -f still finds and ends the tree"; fi
