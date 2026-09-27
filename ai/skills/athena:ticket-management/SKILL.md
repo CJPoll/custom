@@ -1,6 +1,6 @@
 ---
 name: athena:ticket-management
-description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work).
+description: The status ↔ assignee lifecycle for Notion tickets (Epics/Tickets DBs, DND-/PT-style IDs). Use whenever an orchestrator/athena-admiral takes scope of a ticket, or any status transition happens (In Progress / Needs Attention / Attention Given / Done / Ready for Release / Cancelled). Defines who the ticket is assigned to at each status and how to resolve the Athena and Cody accounts for the ACTIVE Notion connection (notion-personal vs notion-work). Also the owner's priority rule: critical path first, and when a finding may block a planned ticket — use when choosing which ticket to assign a captain next, or filing a finding.
 ---
 
 # athena:ticket-management
@@ -77,6 +77,84 @@ Measured 2026-09-26: five epics disagreed with reality. Three read `Todo` while
 being worked, one read `Done` while its follow-ups were built, one read
 `In Progress` with every ticket `Done`. A 45-ticket sweep then surprised the
 owner with a couple dozen notifications.
+
+## Priority: critical path first (owner rule)
+
+Owner, Cody, 2026-09-27 (~10:30Z, coordinator terminal): "we prioritize the
+critical path over side quests in a project, completing the findings and other
+issues that have been raised after the critical path. Findings should only
+block previous tickets if they truly prevent the work from completing the
+intended requirements." Clarified ~10:40Z: "No, the rule does not intend to
+consider an epic closed when critical path is done; but we should at least be
+getting value out of an epic even while we're doing follow-ups and addressing
+discoveries. And yes, I would argue that we should block a ticket that
+introduces security issues, but should address discovered pre-existing security
+issues after the critical path is complete." This section is its one home;
+other documents cite it by name.
+
+- **The critical path** is the planned tickets whose completion delivers the
+  epic's intended requirements, in dependency order. The architect names them
+  in the epic body under a `Critical path` heading, in that order. A ticket not
+  on that list is off the path: a finding, a follow-up, a flake, or any other
+  raised issue.
+- **Deliver value early.** Sequence the path so it ships usable value early:
+  shipped, live-verified increments. Follow-ups and discoveries continue after
+  that and never hold the value back.
+- **Functional requirements first, for now.** Owner, 2026-09-27: "For the
+  moment, I want to have the admiral focus on fulfilling the functional
+  requirements of this system and do less reliability work. Focus on the
+  critical path to have all the functionality, and then we can address the
+  work that is brought up in the process. We'll take a TDD approach to these
+  features." "This system" is the epic *Athena: unified priorities, fleet
+  visibility & session control*. Until the owner lifts it, reliability work
+  raised along the way in that epic is off the path, filed and worked after
+  the functionality ships, unless it blocks by the test below. Features follow `~/.claude/CLAUDE.md` → *TDD
+  Workflow*.
+- **Order.** Within a project or epic, the critical path goes first. Off-path
+  tickets are worked after it, except as below. This decides which unblocked
+  ticket an admiral assigns to a captain next. It does not order merges: a
+  finished PR boards per `athena:merge-boarding`, where a finished security
+  fix goes first (*A finished security fix merges first*). Owner, ~10:45Z:
+  "I'm not talking about the merge queue; I'm talking about the order in which
+  an admiral assigns tickets to captains."
+- **A finding blocks only if it truly prevents the work.** The test: does the
+  planned ticket fail its acceptance criteria or intended requirements without
+  this fix? If yes, wire `Depends On`↔`Blocks` onto that ticket; the finding is
+  then on the critical path and goes first. If no, file it as a normal ticket in
+  the project with **no** `Depends On` / `Blocks` edge onto a critical-path
+  ticket, and work it after the path. Severity alone does not make a finding
+  block. Edges between off-path tickets are fine.
+- **Security, split by origin.**
+  - **A security issue the ticket's own change introduces blocks that ticket.**
+    It is fixed before the ticket ships: a change that introduces a
+    vulnerability does not meet its requirements, so it fails the test above.
+  - **A pre-existing security issue found during the work** is filed and fixed
+    after the critical path by default, like any other finding, whatever its
+    severity.
+  - **An important one may be promoted, only by the owner.** For a
+    high-severity or actively exploitable pre-existing issue, the admiral asks
+    Cody in Slack to prioritize it, by the Block Kit decision request of
+    `~/.claude/CLAUDE.md` → *What no standing approval covers* → *How to hold*,
+    with an Approve button. Keep working the critical path meanwhile: no wait,
+    no silent hold. If Cody approves (by the button once a click is a ratified
+    grant, else by reply), dispatch that ticket ahead of the path. With no
+    answer, the default stands. Owner, ~10:50Z: "Depends on the severity.
+    Assume no, but ask in slack for approval to prioritize an important fix and
+    I can push the 'approve' button if I want to."
+  - `~/.claude/CLAUDE.md` → *Standing owner approvals* → *Security fixes ship
+    without owner approval* governs **approval**, not **scheduling**. Both hold:
+    when a security fix is worked, it ships without waiting for the owner; when
+    it is worked is decided here.
+- **What else keeps its priority:**
+  - **A fleet-wide flake or outage that stops the critical path itself**, such
+    as a gate flake that reddens every merge. It blocks by the test above.
+  - **An owner-directed priority.** The owner's order wins.
+- **A lane whose scope is raised issues** (the flaky lane) has no planned path
+  to defer to. Its queue is its path, and it drains per its brief.
+- **Epic status is unchanged.** The epic still goes `Done` only per *Keep
+  tickets, epics and projects current* above: every linked ticket, follow-ups
+  included, `Done` or `Cancelled`. A finished critical path does not close the
+  epic.
 
 ## When the tracker lacks a status this skill names
 
@@ -211,7 +289,8 @@ authoritative.
 
 - The Epics DB holds one epic per athena-admiral scope; the architect creates the
   epic and its design sub-docs, and tickets link to it via the `Epic` relation
-  and carry `Depends On`↔`Blocks` edges for sequencing.
+  and carry `Depends On`↔`Blocks` edges for sequencing. A finding gets such an
+  edge onto a planned ticket only per *Priority: critical path first*.
 - Put the *why* on the ticket, not just in chat — a `Needs Attention` ticket must carry
   the context Cody needs to decide, in its body.
 - **Put a finding's evidence IN the ticket body, not only a path to it.** Copy the
