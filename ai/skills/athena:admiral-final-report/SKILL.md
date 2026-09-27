@@ -118,8 +118,9 @@ goes nowhere unless the owner acts. Per Mission:
 
 A change a standing owner approval covers (`~/.claude/CLAUDE.md` → *Standing
 owner approvals*) is here only for a step only the owner can perform (their
-credentials, a console action). An exit 4 alone does not hold it: it merges
-under that approval. List it among the merged work with its `BLAST-RADIUS HOT`
+credentials, a console action), or for a hold under *What no standing approval
+covers* (with the Block Kit request you sent). An exit 4 alone does not hold
+it: it merges under that approval. List it among the merged work with its `BLAST-RADIUS HOT`
 block and the approval line it merged under.
 
 A held Mission reported only as a status string leaves the owner to reconstruct
