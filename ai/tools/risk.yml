@@ -118,6 +118,10 @@ tools:
   # Athena server. Each report is an idempotent upsert, but it mutates EXTERNAL
   # state, which is this file's definition of destructive.
   fleet-report:            { class: destructive, reason: registry }
+  # judgment-eval (DND-710) sends labelled cases to the Athena server, which
+  # records judgment_calls and eval-run rows (and, with a key, spends TypeSafe
+  # budget); --apply writes the owner's judgment_thresholds. External state.
+  judgment-eval:           { class: destructive, reason: judgments }
   # notion-athena-mcp launches an MCP server that EXPOSES Notion writes. It does
   # not itself write, but its worst-case capability is a tracker mutation, so it
   # is classified destructive. FLAGGED for owner ratification (DND-172); shipped
