@@ -189,7 +189,8 @@ runner on the owner's laptop is the owner's call because it is the owner's
 machine — a system change under the Hard Rule below — not because of who owns
 the CI/CD lane. "Ownership isn't a gate" never licenses an agent to do an
 owner-gated thing. A security fix's merge and deploy are not on this list; see
-*Security fixes ship without owner approval* below.
+*Security fixes ship without owner approval* below. Nor is a library upgrade's;
+see *Library upgrades ship without owner approval*.
 
 ## Security fixes ship without owner approval
 
@@ -236,6 +237,51 @@ by name.
   diff could set. It stays a quoted owner record, per `~/dev/custom/CLAUDE.md` →
   *A check's own bar must not live in the diff it is checking*.
 
+## Library upgrades ship without owner approval
+
+**The rule, owner Cody, 2026-09-27 (~06:37Z, Slack DM D0BU75FE0BB, thread
+1790478928.278559, reply ts 1790491006.113669):** "If they are upgrades of
+current libraries, don't require my approval." It answered the hold on gen_saas
+PR #457 (DND-462, mint 1.10.1 + hpax 1.0.4). CI scripts name `mix.lock`, so the
+lock reads HOT (DND-590) and `integration-gate` exits 4. It is a standing
+approval. This section is its one home; other documents cite it by name.
+
+- **What it waives: the wait for the owner's go** at an `integration-gate` exit
+  4 caused only by the upgrade's lockfile diff and its deps-list requirement
+  lines. Do not hold it, and do not DM for a go-ahead.
+- **What it does not waive: the bar.** Green CI, a critic PASS, a
+  `dep-advisories` PASS where the repo has one, and a live verify where the
+  upgraded library runs in a deployed path. The approval removes the wait,
+  never a check.
+- **What it cannot waive: steps only the owner can perform.** Their
+  credentials, console or account actions, anything on their own machine, and
+  landing a baseline or allowlist line on main that a check reserves for the
+  owner. Escalate that one step with its exact command (*Security fixes ship
+  without owner approval* → *What it cannot waive* works the same way).
+- **What counts as an upgrade.** A version increase of a package already in
+  the lock on `origin/main`. For Hex: the package's `mix.lock` version and hash
+  change, plus its requirement line in a `mix.exs` deps list. Transitive bumps
+  the upgrade pulls in are covered when each is also an existing package moving
+  up.
+- **What does not count.** Adding a package, including a new transitive one.
+  Removing one. A downgrade. A git, path, or `in_umbrella` dep. Any source,
+  repo, or URL change. A `mix.exs` change outside the deps list. Anything else
+  riding in the same PR. The approval covers only the upgrade lines; a mixed PR
+  gets no coverage for the rest, which holds as any other exit 4 would. Other
+  ecosystems (npm, yarn, and so on) follow the same rule: existing package,
+  version increase only.
+- **The record.** For an upgrade that hits exit 4, pass `integration-gate
+  --owner-approval 'library-upgrade standing approval (~/.claude/CLAUDE.md →
+  Library upgrades ship without owner approval): "If they are upgrades of
+  current libraries, don't require my approval" — Cody, 2026-09-27; <deps
+  old→new>, <ticket>'`. Cite the same rule in the PR body and the state log,
+  and copy the `BLAST-RADIUS HOT` block into the PR body and the final report.
+  Before passing it, confirm the HOT block names only lockfile or deps-list
+  paths; any other HOT path is out of scope.
+- **No in-repo switch carries this approval** — no flag, env var, or marker a
+  diff could set. It stays a quoted owner record, per `~/dev/custom/CLAUDE.md` →
+  *A check's own bar must not live in the diff it is checking*.
+
 ## Find it, ticket it, fix it, verify it live
 
 **The rule, owner Cody, 2026-09-24:** "I love the fact that you have been
@@ -264,8 +310,9 @@ the issues." This section is its one home; other documents cite it by name.
 - **Owner-gated steps are not covered.** Credentials, console or account
   actions, and anything on the owner's own machine go to the owner with the
   exact step (*Ownership tells you whom to ask, not whether you may*; *Hard
-  Rule*). So does a non-security `integration-gate` exit 4, which needs the
+  Rule*). So does any other `integration-gate` exit 4, which needs the
   owner's go. A security fix follows *Security fixes ship without owner
+  approval*; a library upgrade follows *Library upgrades ship without owner
   approval*. A forge write that cannot run as Athena follows `athena:github` →
   *When a forge write can't be done as Athena*. The rest of the fix still ships.
 - **Proportionate.** A LOW finding is filed and queued. It does not interrupt
