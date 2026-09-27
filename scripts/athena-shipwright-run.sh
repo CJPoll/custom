@@ -109,8 +109,11 @@ set -euo pipefail
 # cron runs died with "asdf: not found" while the gate/telemetry fail-opened
 # and ran blind. The ruby gate tools (build-agents, harness-metrics/signals/eval,
 # check-generic-skills, check-guard-messages) are all deliberately gem-free
-# `#!/usr/bin/env ruby` stdlib scripts, so the system ruby at /usr/bin/ruby
-# (the eselect default, currently ruby34 / 3.4.10) satisfies them completely.
+# stdlib scripts, so the system ruby at /usr/bin/ruby (the eselect default,
+# currently ruby34 / 3.4.10) satisfies them completely. Since DND-931 they name
+# it directly (`#!/usr/bin/ruby`, enforced by ai/bin/check-ruby-floor), so PATH
+# no longer picks their Ruby. A `ruby` called by name (in a spawned session or
+# test suite) still uses PATH, which here is /usr/bin/ruby.
 # We therefore deliberately EXCLUDE the asdf shims from PATH so `ruby` resolves
 # to /usr/bin/ruby. ${HOME}/bin held only the asdf launcher, so it is dropped too.
 export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin${PATH:+:${PATH}}"

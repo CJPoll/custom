@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # harness-gate — run the whole shipwright gate in one shot, in the verified-
@@ -93,10 +93,13 @@ STATIC_CHECKS = [
   # green when negated. Hermetic (fixtures + a live 141 reproduction).
   ["check-pipefail-grep",       %w[ai/bin/check-pipefail-grep]],
   ["check-pipefail-grep self-test", %w[ai/bin/check-pipefail-grep --self-test]],
-  # The harness Ruby floor (2.7, the desktop's pinned Ruby). A laptop on 3.4
-  # passed Ruby-3-only syntax through this gate 96/96 and it bounced from the
-  # desktop train as a SyntaxError (DND-710, 2026-09-27). Exact on a 2.7 host,
-  # a Prism AST search on a newer one; no measuring mode is exit 3, not a pass.
+  # The harness Ruby floor, 3.4 (owner decision 2026-09-27, DND-931; it was a
+  # 2.7 floor from d8885f80 until then). Every harness Ruby executable carries
+  # the absolute `#!/usr/bin/ruby` shebang, so asdf's per-directory pin in
+  # another project (~/dev/shenron: 2.7.0) cannot pick its Ruby; that shebang,
+  # run from a 2.7.8-pinned dir, must report 3.4+; every Ruby file must parse
+  # under 3.4. The floor is ratcheted against what landed; a bar it cannot
+  # read is exit 3, not a pass.
   ["check-ruby-floor",          %w[ai/bin/check-ruby-floor]],
   ["check-ruby-floor self-test", %w[ai/bin/check-ruby-floor --self-test]],
   ["check-tool-risk",           %w[ai/bin/check-tool-risk]],

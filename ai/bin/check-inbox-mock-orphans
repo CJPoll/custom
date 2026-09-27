@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 
 # check-inbox-mock-orphans — DND-404: PT-919-class backstop for
