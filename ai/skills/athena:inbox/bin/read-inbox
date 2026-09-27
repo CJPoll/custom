@@ -232,7 +232,7 @@ else
       if [ "${PRODUCER}" = "platform" ]; then
         printf '  Fix: no server-side producer is registered for this platform lane — add an athena-events routing rule that writes state-change events to its inbox file (see ai/contracts/athena-events.md). An unregistered producer and an empty lane look identical on disk.\n'
       else
-        printf '  Fix: register this channel'"'"'s producer — a server-side agent instance mapped to its inbox filename in ~/.config/athena-inbox-client/config.json — then re-check. An unregistered producer and an empty channel look identical on disk.\n'
+        printf '  Fix: register this channel'"'"'s producer — a server-side agent instance on this machine whose inbox_name is this file. Run inbox-doctor: it asks the server whether that instance exists, and tells a missing producer from one nothing has been routed to yet (a claim-only channel stays empty until a claimed thread gets a reply) — then re-check. An unregistered producer and an empty channel look identical on disk.\n'
       fi
     else
       # "Nothing new" and "dark" must not read the same (DND-316 R2). The

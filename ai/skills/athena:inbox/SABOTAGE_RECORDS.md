@@ -1567,3 +1567,28 @@ the fingerprint excludes); the exclusion of the two globals from the fingerprint
 is therefore not a coverage loss -- see the rationale block above
 `real_markers_fingerprint`. S10 restored from an in-memory byte copy; doctor
 returned to green (94).
+
+## DND-923 (2026-09-27): the doctor asks the server before naming a Slack producer missing
+
+A bug fix, so the evidence is the unfixed code going red, not a mutation.
+
+- **Code under test:** `lib/doctor.sh` (`doctor_state_producer`,
+  `doctor_check_slack_producer`), and the never-delivered Fix text in
+  `bin/inbox-status`, `bin/read-inbox`, `lib/inbox.sh`.
+- **Suite run:** `bash test/doctor/self-test.sh`.
+- **Before the fix:** `VERDICT: FAIL (18 failed, 355 passed)`. The defining
+  failure, on a canned server answer where THIS machine holds an agent
+  instance for the inbox:
+  `FAIL a registered producer is never reported as NOT registered` --
+  `expected NOT [NO SERVER PRODUCER REGISTERED], got [warn never-delivered log
+  channel "slack" has never received anything (ch-slack.jsonl does not exist):
+  NO SERVER PRODUCER REGISTERED ...]`. That is the live 2026-09-26 misdiagnosis
+  of `custom-slack.jsonl`.
+- **After:** `VERDICT: PASS (373 cases)`; `bash test/self-test.sh` `VERDICT:
+  PASS (878 cases)`.
+- **One case failed after the fix and was re-scoped, not deleted:** `the Fix:
+  does not send the reader to a command that does not exist` asserted
+  `inbox-status`'s whole output never names `inbox-doctor`, from when that
+  command did not exist. The new never-delivered text names it on purpose, so
+  the assertion now reads only the failed-candidate block it was written for,
+  with a companion case proving that block was found (not vacuous).

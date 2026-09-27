@@ -1506,8 +1506,12 @@ assert_not_contains "the count names no file" "other-tenant" "${out}"
 # is the whole thing this repo's guard-message convention exists to prevent.
 # Asserting only the presence of "Fix:" lets that regress silently, and this
 # suite pins message text tightly everywhere else.
-assert_not_contains "the Fix: does not send the reader to a command that does not exist" \
-  "inbox-doctor" "${out}"
+# Later (DND-923): inbox-doctor exists now, and the never-delivered notice for
+# this fixture's own channel names it on purpose. The assertion is scoped to the
+# failed-candidate block, which is the line whose Fix this case pins.
+fcblock="$(printf '%s\n' "${out}" | awk '/registry entry\(s\) unreadable/{f=1; print; next} f && /^  Fix:/{print; f=0}')"
+assert_contains "the failed-candidate block was found (the next check is not vacuous)" "Fix: one of them may be THIS project" "${fcblock}"
+assert_not_contains "the failed-candidate Fix: does not send the reader to inbox-doctor" "inbox-doctor" "${fcblock}"
 assert_contains "the Fix: names the key check the session can actually run" \
   "git rev-parse --git-common-dir" "${out}"
 assert_contains "and it repeats the tenant-privacy rule where the reader will act on it" \
