@@ -239,6 +239,8 @@ INLINE_SELF_TEST_COVERED_BY = {
   "ai/hooks/fleet-report.sh"          => "ai/hooks/fleet-report.self-test.sh",
   "ai/hooks/inbox-untrusted-guard.sh" => "ai/hooks/inbox-untrusted-guard.self-test.sh",
   "ai/hooks/workflow-phase-guard.sh"  => "ai/hooks/workflow-phase-guard.self-test.sh",
+  "ai/skills/athena:epic-clustering/scripts/epic-clustering" =>
+    "ai/skills/athena:epic-clustering/test/self-test.sh",
   "ai/skills/athena:inbox-attend/bin/wedge-ticket-decide" =>
     "ai/skills/athena:inbox-attend/test/self-test.sh",
   "ai/skills/athena:merge-boarding/scripts/integration-gate" =>

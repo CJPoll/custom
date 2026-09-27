@@ -60,6 +60,8 @@ ai/lib/fleet/resume-domain.sh	library	sourced by ai/bin/fleet-control / fleet-re
 ai/lib/fleet/resume-effects.sh	library	sourced by ai/bin/fleet-control / fleet-resume; returns status codes, and the managers that compose the refusal carry Fix:
 ai/lib/next_mission.rb	library	pure selection rule required by ai/bin/next-mission (DND-985); raises NextMission::DataError naming the bad value, and the bin prints the exit-3 refusal that carries Fix:
 ai/lib/next_mission_notion.rb	library	Notion read adapter required by ai/bin/next-mission (DND-985); raises NextMissionNotion::ReadError naming the miss, and the bin prints the exit-3 refusal that carries Fix:
+ai/skills/athena:epic-clustering/lib/epic_clustering.rb	library	pure clustering rules required by scripts/epic-clustering (DND-982); raises EpicClustering::DataError naming the bad value, and the script prints the exit-3 refusal that carries Fix:
+ai/skills/athena:epic-clustering/lib/epic_clustering_notion.rb	library	Notion read adapter required by scripts/epic-clustering (DND-982); raises NextMissionNotion::ReadError naming the miss, and the script prints the exit-3 refusal that carries Fix:
 ai/skills/athena:inbox/lib/fence.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
 ai/skills/athena:inbox/lib/fs.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
 ai/skills/athena:inbox/lib/liveness.sh	library	sourced by the athena:inbox bins; returns status codes, and refusals are composed through lib/err.sh, which carries Fix:
@@ -83,6 +85,7 @@ scripts/wt-lib/tmux.sh	library	sourced by scripts/wt; worktree/stack operations 
 scripts/wt-lib/worktree.sh	library	sourced by scripts/wt; worktree/stack operations whose failures are git/tool errors for the action requested, not guard denials
 
 # --- Skill executables.
+ai/skills/athena:epic-clustering/scripts/epic-clustering	guard	
 ai/skills/athena:inbox-attend/bin/wedge-ticket-decide	guard	
 ai/skills/athena:inbox/bin/inbox-doctor	guard	
 ai/skills/athena:inbox/bin/inbox-status	guard	

@@ -141,6 +141,7 @@ run-autonomously's rules here; it layers on top of this seam.
   ticket's properties (`Path` = `Critical` marks the path; the epic body lists it
   in order, sequenced to ship value early) per [[athena:ticket-management]] →
   *Priority: critical path first*.
+- **Run the epic clustering pass** when an admiral or the 12h cron asks: [[athena:epic-clustering]].
 - **Own the design docs, in Notion.** For the epic, and for each ticket, produce
   three Notion sub-pages (mechanics in [[athena:ticket-management]]): **Product
   Requirements**, **Architecture & Engineering**, **QA Plan**. These REPLACE the

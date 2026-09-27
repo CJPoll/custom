@@ -94,10 +94,14 @@ home; other documents cite it by name.
 - **An admiral that stops or drains reconciles** every `In Progress` ticket in
   its scope by these rules before it ends ([[athena:fleet-drain]],
   [[athena:admiral-final-report]]).
-- **The detector** (an `In Progress` ticket with no live captain in the fleet
-  registry) belongs to `athena:epic-clustering`'s pass. That skill is planned
-  (plan row W5) and not built yet, so until it lands only the admiral's own
-  reconcile enforces this.
+- **The detector** (an `In Progress` ticket with no live captain) belongs to
+  [[athena:epic-clustering]] → *The pass*. Its live-captain source is the
+  state logs, passed as `--started`.
+
+  **Later (2026-09-27):** this said the skill was planned and not built yet,
+  and named the fleet registry as the source. DND-982 built it. The fleet
+  registry has no read path from harness tooling, so the source is the state
+  logs.
 
 Measured 2026-09-27: at the owner's pause, 73 tickets read `In Progress`. 17
 had already landed and 29 were parked with no captain. `In Progress` was set
