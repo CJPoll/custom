@@ -74,8 +74,8 @@
 #       skip on STALE dirt (see section 4) is still exit 0; it escalates by
 #       ONE harness-alert instead, never through the exit code or the wedge
 #   75  EX_TEMPFAIL: refused to spawn because the lane is WEDGED — this was the
-#       SKIP_ESCALATE'th consecutive UNSUCCESSFUL outcome (a failing session, a
-#       stranded push, or reaped dead cron corpses)
+#       SHIPWRIGHT_FAIL_ESCALATE'th consecutive UNSUCCESSFUL outcome (a
+#       failing session, a stranded push, or reaped dead cron corpses)
 #       Every wedged tick leaves <ts>.wedged in runs/ (why, the counter, when
 #       it wedged, the re-arm command), and the first wedged tick of an episode
 #       sends ONE harness-alert naming it (DND-834). Cron mail is not delivered
