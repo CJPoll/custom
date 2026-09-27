@@ -1,6 +1,6 @@
 ---
 name: athena:teardown-worktree-stack
-description: How the athena-admiral resolves and runs the per-repo teardown of a merged Mission's docker-compose stack(s). Use once a Mission's MR is CONFIRMED merged, to reclaim database memory/connections, containers, volumes, and the address-pool network. Encodes the 3-tier resolution (repo teardown script → generic default only when the compose project name is docker's default → documented prose fallback) and the confirm-it-is-gone check. The merge-gating and only-your-fleet's-stacks rules stay resident in the admiral definition.
+description: How the athena-admiral resolves and runs the per-repo teardown of a merged Mission's docker-compose stack(s) — executable as ai/bin/teardown-stack, which locked-merge runs per merged PR — and how ai/bin/pool-headroom gates dispatch on docker address-pool headroom. Use once a Mission's MR is CONFIRMED merged, to reclaim database memory/connections, containers, volumes, and the address-pool network. Encodes the 3-tier resolution (repo teardown script → generic default only when the compose project name is docker's default → documented prose fallback) and the confirm-it-is-gone check. The merge-gating and only-your-fleet's-stacks rules stay resident in the admiral definition.
 ---
 
 # athena:teardown-worktree-stack
@@ -14,6 +14,31 @@ subnetted".
 Tear a Mission's stack down as soon as its MR is **merged** (not merely green — a
 green-but-open MR may still need its stack for review follow-ups) — every
 per-worktree stack the repo runs, including volumes, orphans, and the network.
+
+## The merge drives it: `ai/bin/teardown-stack`
+
+The procedure below is executable. `~/dev/custom/ai/bin/teardown-stack` runs
+it for ONE merged change. It confirms the merge with `confirm-merged`, reads
+the PR/MR's head branch from the forge, and picks the one worktree with that
+branch checked out. It then resolves the teardown tier, runs it, and verifies
+nothing carries the project label. Anything it cannot attribute is refused
+with a `Fix:`, and nothing is touched (`--help` has the exit codes).
+
+- **GitHub:** `locked-merge` runs it after every confirmed landing, per PR. A
+  multi-part Mission reclaims each part's stack as that part lands, not at the
+  last merge. Its exit 10 means the PR LANDED and the teardown failed: do not
+  re-merge, follow the printed `Fix:`.
+- **GitLab:** no wrapper runs the merge. Right after `confirm-merged --mr <n>`
+  exits 0, run `teardown-stack --mr <n> --repo <repo>`.
+- **Parked Missions:** `teardown-stack --worktree <wt> --parked <reason>`.
+- **What still leaks** (the worktree was removed first, another fleet's stack,
+  a GitLab merge nobody followed up) is named at the next dispatch by
+  `pool-headroom` (*Reclaiming the address pool*, below).
+
+**Later (2026-09-27, DND-864):** teardown was a step the admiral ran by hand
+at merge time. On 2026-09-26 ~20:33Z the address pool ran out under two new
+gen_saas captains, with 21 gen_saas stacks up. DND-520's four PRs (#417-#420)
+had kept all four stacks up across two hours of merges.
 
 **Merged is not the only exit.** A Mission that terminates **non-DONE** — `STUCK`
 and parked, `BLOCKED_ON_DEPENDENCY` with no near-term unblock, or cancelled —
@@ -143,14 +168,20 @@ them and every fleet's next dispatch wedges on
 `all predefined address pools have been fully subnetted`. That is a machine-wide
 stop with no actor permitted to clear it.
 
-**Probe the pool before a dispatch wave, not after the wedge:**
+**The pool is probed before every dispatch, not after the wedge.**
+`~/dev/custom/ai/bin/pool-headroom` counts free subnets against docker's
+configured pools (the built-in pools hold 31). It exits 1 below `--min-free`
+(default 2) and names each holder: `MERGED-BUT-UP` with its `teardown-stack`
+line, `ORPHAN` (worktree gone), or `LIVE`. A docker it cannot read is exit 3,
+never headroom. `scripts/wt-preflight` runs it first for any repo with a
+compose file, so no stack-running worktree is created while the pool is out.
+Run it by hand with `--list` to see every holder.
 
-```sh
-docker network ls --format '{{.Name}}' | wc -l
-docker network inspect -f '{{.Name}} {{len .Containers}}' $(docker network ls -q)
-```
+**Later (2026-09-27, DND-864):** this paragraph was a two-command shell probe
+to run "before a dispatch wave". Nothing ran it. The probe is now
+`pool-headroom`, and `wt-preflight` runs it.
 
-An idle network (`0` containers) from an ended run is a corpse holding a subnet.
+An idle network (no container attached) from an ended run is a corpse holding a subnet.
 When free subnets are running out, **`docker network prune -f` is sanctioned,
 whoever created the networks** — and it is a genuinely different act from a
 destructive teardown:
@@ -165,7 +196,7 @@ destructive teardown:
 - It is not a system-level change: no daemon, no service, no `/etc`, no `sudo`.
 
 Verify afterwards that every network you still need survived with its containers
-still attached (re-run the inspect above), and record the count before and after
+still attached (re-run `pool-headroom --list`), and record the count before and after
 in the state log.
 
 Residual, accepted: an agent holding a **stopped** stack it meant to

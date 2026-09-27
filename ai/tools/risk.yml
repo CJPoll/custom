@@ -65,6 +65,9 @@ tools:
   critic-review:           { class: readOnly, reason: review }
   contention-census:       { class: readOnly, reason: census }
   forge-preflight:         { class: readOnly, reason: probe }
+  # pool-headroom (DND-864) reads docker info/network/ps, git, and gh/glab
+  # merged-PR lists. It removes nothing, even when it names what to reclaim.
+  pool-headroom:           { class: readOnly, reason: probe }
   harness-signals:         { class: readOnly, reason: signals }
   lead-time:               { class: readOnly, reason: analysis }
   push-actor-check:        { class: readOnly, reason: query }
@@ -136,6 +139,9 @@ tools:
   # wrapped CMD; DND-486 (wiring into integration-gate / captain Verify) must
   # account for this.
   test-slot:               { class: destructive, reason: wrapper }
+  # teardown-stack (DND-864) runs `docker compose down -v` or the repo's
+  # teardown script: containers, networks and volumes (data) are destroyed.
+  teardown-stack:          { class: destructive, reason: docker }
 
   # --- skill executables (DND-508), keyed by their path under ai/ ---
   # readOnly

@@ -1,0 +1,151 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# pool-headroom — refuse a dispatch when docker's address pool is nearly
+# exhausted, and name the stacks holding it (DND-864).
+#
+# Why: every per-worktree compose stack takes one subnet from docker's address
+# pools (walt_ui's backend takes two). The built-in pools hold 31. When they
+# run out, the next captain's `docker compose up` dies with "all predefined
+# address pools have been fully subnetted". Measured 2026-09-26 ~20:33Z: two
+# gen_saas captains (DND-858/859) could not start, with 21 gen_saas stacks up,
+# many for Missions merged hours earlier. The pre-dispatch probe was prose in
+# athena:teardown-worktree-stack, and nothing ran it.
+#
+# Usage:
+#   pool-headroom [--repo DIR] [--min-free N] [--list]
+#   pool-headroom --help
+#
+#   --repo DIR    the repo the next worktree is for. A repo with no compose
+#                 file (root or one level down) needs no subnet: exit 0, noted.
+#   --min-free N  free subnets required (default 2: one more stack of the
+#                 largest shape on this machine, walt_ui's backend).
+#   --list        name the holders even when headroom is fine.
+#
+# When headroom is low it names every network holding a pool subnet, and for a
+# compose stack whether its worktree's branch has a MERGED PR/MR (gh/glab, read
+# only), is an orphan (worktree gone), or is live.
+#
+# Exit (every non-zero prints a Fix: line):
+#   0 headroom at or above --min-free (or the repo runs no compose stack)
+#   1 headroom LOW: do not dispatch a stack-running captain
+#   2 usage error
+#   3 cannot measure (docker unreachable or unreadable). Never read as headroom.
+#
+# Reads only: docker info / network ls / inspect / ps, git, gh/glab list.
+# Wired into scripts/wt-preflight, which every dispatch passes.
+# Suite: ai/test/pool-headroom/self-test.sh (stub docker/gh/glab).
+
+require_relative "../lib/strict_argv"
+require_relative "../lib/docker_stacks"
+require_relative "../lib/docker_stacks_host"
+
+DEFAULT_MIN_FREE = 2
+SPEC = { "--repo" => :value, "--min-free" => :integer, "--list" => :switch, "--help" => :switch, "-h" => :switch }.freeze
+
+def usage
+  File.readlines(__FILE__).drop(3).take_while { |l| l.start_with?("#") }.map { |l| l.sub(/^# ?/, "") }.join
+end
+
+def fail_with(code, message, fix)
+  warn "pool-headroom: #{message}"
+  warn "Fix: #{fix}"
+  exit code
+end
+
+
+# One line describing who holds a network, and the teardown command if merged.
+def describe(host, net, workdirs)
+  base = "#{net[:name]} #{net[:subnets].join(',')} running=#{net[:containers]}"
+  return ["#{base}  not a compose network", nil] if net[:project].nil?
+
+  dirs = workdirs[net[:project]] || []
+  return ["#{base}  project #{net[:project]}: no container, working dir unknown", nil] if dirs.empty?
+
+  dir = dirs.first
+  return ["#{base}  ORPHAN project #{net[:project]}: #{dir} is gone", nil] unless File.directory?(dir)
+
+  top = host.git(dir, "rev-parse", "--show-toplevel")
+  return ["#{base}  project #{net[:project]}: #{dir} is not a git checkout", nil] if top.nil? || top.empty?
+
+  git_dir = host.git(top, "rev-parse", "--path-format=absolute", "--git-dir")
+  common = host.git(top, "rev-parse", "--path-format=absolute", "--git-common-dir")
+  return ["#{base}  project #{net[:project]}: main checkout #{top} (not a fleet stack)", nil] if git_dir == common
+
+  branch = host.git(top, "symbolic-ref", "--short", "HEAD")
+  return ["#{base}  project #{net[:project]}: #{top} has a detached HEAD", nil] if branch.nil? || branch.empty?
+
+  forge = DockerStacks.forge_of(host.git(top, "config", "--get", "remote.origin.url"))
+  return ["#{base}  project #{net[:project]}: #{top} (#{branch}), forge unknown", nil] if forge.nil?
+
+  begin
+    num = host.merged_change_for(branch, top, forge)
+  rescue DockerStacks::Unreadable => e
+    return ["#{base}  project #{net[:project]}: #{top} (#{branch}), merge state UNKNOWN: #{e.message}", nil]
+  end
+  return ["#{base}  LIVE project #{net[:project]}: #{top} (#{branch}), nothing merged", nil] if num.nil?
+
+  flag = forge == :github ? "--pr" : "--mr"
+  cmd = "~/dev/custom/ai/bin/teardown-stack #{flag} #{num} --repo #{top}"
+  ["#{base}  MERGED-BUT-UP project #{net[:project]}: #{top} (#{branch}, #{flag.delete('-')} #{num} merged)", cmd]
+end
+
+def main(argv)
+  opts = StrictArgv.parse(argv, SPEC)
+rescue StrictArgv::UsageError => e
+  fail_with(2, "usage error: #{e.message}", "use only --repo DIR, --min-free N, --list (see pool-headroom --help).")
+else
+  if opts["--help"] || opts["-h"]
+    puts usage
+    return 0
+  end
+  min_free = opts.fetch("--min-free", DEFAULT_MIN_FREE)
+
+  host = DockerStacks::Host.new
+  if (repo = opts["--repo"])
+    fail_with(2, "--repo #{repo} is not a directory", "pass the repo's absolute path, e.g. --repo ~/dev/gen_saas.") unless File.directory?(repo)
+    unless host.compose_layout(File.expand_path(repo)).any?
+      puts "pool-headroom: #{repo} has no compose file at its root or one level down; its worktrees need no subnet"
+      return 0
+    end
+  end
+
+  begin
+    pools, source = DockerStacks.pools_from_info(host.address_pools_raw)
+    networks = DockerStacks.networks_from_inspect(host.networks_raw)
+    room = DockerStacks.headroom(pools, networks)
+  rescue DockerStacks::Unreadable => e
+    fail_with(3, "cannot measure the address pool: #{e.message}",
+              "start the docker daemon (or fix `docker info`), then re-run. An unmeasured pool is not headroom: do not dispatch a stack-running captain until this passes.")
+  end
+
+  low = DockerStacks.low?(room, min_free)
+  summary = "free #{room[:free]}/#{room[:capacity]} subnets, #{room[:used]} held, min-free #{min_free}, pools #{source}"
+  if !low && !opts["--list"]
+    puts "pool-headroom OK: #{summary}"
+    return 0
+  end
+
+  begin
+    workdirs = host.compose_containers.group_by { |c| c[:project] }
+                   .transform_values { |cs| cs.map { |c| c[:working_dir] }.compact.uniq }
+  rescue DockerStacks::Unreadable => e
+    workdirs = {}
+    warn "pool-headroom: could not read compose containers (#{e.message}); holders shown without owners"
+  end
+  lines = room[:holders].map { |n| describe(host, n, workdirs) }
+  out = low ? $stderr : $stdout
+  out.puts(low ? "pool-headroom LOW: #{summary}" : "pool-headroom OK: #{summary}")
+  lines.each { |text, _| out.puts "  #{text}" }
+  return 0 unless low
+
+  cmds = lines.map(&:last).compact
+  cmds.each { |c| warn "  teardown: #{c}" }
+  warn "Fix: tear down each MERGED-BUT-UP stack with the teardown line above (#{cmds.size} found); " \
+       "reclaim ORPHAN or idle networks with `docker network prune -f`, which docker refuses for any network a container still references " \
+       "(athena:teardown-worktree-stack -> Reclaiming the address pool). A LIVE stack is its fleet's; leave it. " \
+       "Re-run pool-headroom until it passes, then create the worktree and dispatch."
+  1
+end
+
+exit main(ARGV)

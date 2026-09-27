@@ -70,6 +70,16 @@ cat > "${STUBS}/confirm-merged" <<'EOF'
 #!/usr/bin/env bash
 exit "$(cat "${ST}/confirm_rc")"
 EOF
+cat > "${STUBS}/teardown-stack" <<'EOF'
+#!/usr/bin/env bash
+# teardown-stack stub (DND-864): logs argv and whether the merge lock is free,
+# then exits per $ST/teardown_rc.
+echo "$*" >> "${ST}/teardown.log"
+if flock -n 7 7>>"${LOCK_PATH}"; then echo "lock free" >> "${ST}/teardown.log"; else echo "lock held" >> "${ST}/teardown.log"; fi
+rc="$(cat "${ST}/teardown_rc")"
+[ "${rc}" -eq 0 ] || { echo "teardown-stack: stub failure" >&2; echo "Fix: stub" >&2; }
+exit "${rc}"
+EOF
 chmod +x "${STUBS}"/*
 export PATH="${STUBS}:${PATH}" LOCKED_MERGE_AI_BIN="${STUBS}"
 
@@ -88,6 +98,7 @@ fixture() {
   H="$(git -C "${WT}" rev-parse HEAD)"
   printf '{"state":"OPEN","headRefOid":"%s","baseRefName":"main"}\n' "${H}" > "${ST}/pr.json"
   echo '[]' > "${ST}/runs.json"; echo good > "${ST}/merge_mode"; echo 0 > "${ST}/confirm_rc"
+  echo 0 > "${ST}/teardown_rc"; : > "${ST}/teardown.log"; export LOCK_PATH="${TMP}/$1.lock"
   : > "${ST}/merge.log"
   plant_receipt "${H}" "$(git --git-dir="${BARE}" rev-parse main)"
 }
@@ -113,7 +124,8 @@ expect() { # <label> <rc>
   [ "${rc}" -eq "$2" ] && ok "$1 exit $2" || bad "$1 expected exit $2, got ${rc}" "${out}"
   if [ "$2" -ne 0 ]; then grep -q '^Fix: ' <<<"${out}" && ok "$1 prints Fix:" || bad "$1 missing Fix:" "${out}"; fi
 }
-no_merge() { [ -s "${ST}/merge.log" ] && bad "$1 merge was CALLED" "$(cat "${ST}/merge.log")" || ok "$1 no merge call"; }
+no_merge() { [ -s "${ST}/merge.log" ] && bad "$1 merge was CALLED" "$(cat "${ST}/merge.log")" || ok "$1 no merge call"; no_teardown "$1"; }
+no_teardown() { [ -s "${ST}/teardown.log" ] && bad "$1 teardown ran without a confirmed landing" "$(cat "${ST}/teardown.log")" || ok "$1 no teardown"; }
 
 # c1 happy path; default lock derives from the repo name under HOME.
 fixture c1
@@ -123,6 +135,8 @@ grep -q "^LOCK ${TMP}/home/.local/state/athena/wt-merge.lock$" <<<"${out}" && ok
 grep -q '^MERGED 7 [0-9a-f]\{40\} ON [0-9a-f]\{40\} TREE-MATCH$' <<<"${out}" && ok "c1 MERGED line" || bad "c1 MERGED line" "${out}"
 grep -q -- "--squash --match-head-commit ${H}" "${ST}/merge.log" && ok "c1 merge pinned to head" || bad "c1 merge not pinned" "$(cat "${ST}/merge.log")"
 grep -q -- '--auto' "${ST}/merge.log" && bad "c1 merge used --auto" || ok "c1 no --auto"
+grep -qxF -- "--pr 7 --repo ${WT}" "${ST}/teardown.log" && ok "c1 the merge drove teardown-stack for PR 7" \
+  || bad "c1 teardown-stack not run for the landed PR" "$(cat "${ST}/teardown.log")"
 
 # c2 THE MISS: base moved after the gate -> refuse before merging.
 fixture c2; advance_main
@@ -153,16 +167,28 @@ exec 8>&-
 
 # c8 THE OTHER MISS: forge lands on a base that moved under the merge.
 fixture c8; echo moved > "${ST}/merge_mode"
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c8.lock"; expect c8 7
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c8.lock"; expect c8 7; no_teardown c8
 grep -q 'LANDED UNGATED' <<<"${out}" && ok "c8 says LANDED UNGATED" || bad "c8 message" "${out}"
 
 # c9 landed tree differs from the gated tree.
 fixture c9; echo badtree > "${ST}/merge_mode"
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c9.lock"; expect c9 7
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c9.lock"; expect c9 7; no_teardown c9
 
 # c10 merge ran, landing unconfirmed.
 fixture c10; echo 1 > "${ST}/confirm_rc"
-run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c10.lock"; expect c10 8
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c10.lock"; expect c10 8; no_teardown c10
+
+# c15 (DND-864): landed, teardown failed -> exit 10 (9 is DND-965's NO RECEIPT,
+# which lands nothing), the landing still reported.
+fixture c15; echo 4 > "${ST}/teardown_rc"
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c15.lock"; expect c15 10
+grep -q '^MERGED 7 ' <<<"${out}" && ok "c15 still reports the landing" || bad "c15 MERGED line" "${out}"
+grep -q 'LANDED, but teardown-stack' <<<"${out}" && ok "c15 says it LANDED" || bad "c15 message" "${out}"
+# c16 (DND-864): the merge lock is released before the teardown runs.
+fixture c16
+run --pr 7 --head "${H}" --repo "${WT}" --lock "${TMP}/c16.lock"; expect c16 0
+grep -qx "lock free" "${ST}/teardown.log" && ok "c16 lock released before teardown" \
+  || bad "c16 lock still held during teardown" "$(cat "${ST}/teardown.log")"
 
 # c11 non-GitHub origin; c12 malformed keys; c13 unknown flag.
 fixture c11; git -C "${WT}" config remote.origin.url "git@gitlab.com:t/t.git"

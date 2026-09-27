@@ -63,6 +63,13 @@ fi
 
 [ -d "$REPO/.git" ] || [ -f "$REPO/.git" ] || { echo "FAIL: $REPO is not a git repo"; echo "Fix: pass --repo <name under ~/dev or an absolute repo path>; run with --dry-run to see what resolved"; exit 1; }
 
+# Every fleet dispatch passes here, so the address-pool gate lives here
+# (DND-864): a repo that runs compose stacks gets no new worktree while
+# docker's pool is nearly out. pool-headroom names the stacks to reclaim.
+echo "== 0. docker address-pool headroom ($PROJECT) =="
+POOL_HEADROOM="$(cd "$(dirname "$0")/.." && pwd)/ai/bin/pool-headroom"
+"$POOL_HEADROOM" --repo "$REPO" || { echo "FAIL: pool-headroom refused (exit $?) — a new $PROJECT stack may not get a subnet"; echo "Fix: follow pool-headroom's Fix: above (tear down the MERGED-BUT-UP stacks it names, prune idle networks), then re-run wt-preflight"; exit 1; }
+
 echo "== 1. refresh local main ($PROJECT) =="
 git -C "$REPO" pull --ff-only || { echo "FAIL: pull --ff-only refused (local main diverged?) — resolve before dispatching"; echo "Fix: inspect git -C $REPO log origin/main..main; reconcile local main with origin/main (never force), then re-run"; exit 1; }
 git -C "$REPO" fetch origin --quiet

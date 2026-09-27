@@ -230,6 +230,12 @@ below it, these rules decide.
   count its admirals share) or its own threshold. The launching session
   apportions it, and the share your brief names is your cap, as a lane brief's
   `{{MAX_CAPTAINS}}` is. With no share in your brief, 5 and 12 apply.
+- **The docker address pool gates a stack-running dispatch.** `wt-preflight`
+  runs `ai/bin/pool-headroom` before it creates a worktree for any repo with a
+  compose file, so `PREFLIGHT OK` already means there is a subnet free. A
+  refusal names the `MERGED-BUT-UP` stacks with their `teardown-stack` line.
+  Reclaim per its `Fix:` ([[athena:teardown-worktree-stack]]), re-run
+  `wt-preflight`, and never create the worktree some other way to get past it.
 - **Not a tolerance.** The red still blocks, the finding is still reported, and
   nothing is retried, skipped, or loosened — the standing rule is that a safety
   check gets FASTER, never weaker, and you carry it resident. The census

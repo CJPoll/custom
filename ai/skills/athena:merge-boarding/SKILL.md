@@ -363,7 +363,9 @@ So the merge step is a critical section on every GitHub-merged repo:
   the path fleets already share), re-checks under it that `origin/<base>` is
   contained in the gated head, merges pinned to that head, runs
   `confirm-merged`, and asserts the landed commit's parent is the checked base
-  and its tree is the gated tree. Its exit code names the next step (`--help`).
+  and its tree is the gated tree. Then it releases the lock and runs
+  `ai/bin/teardown-stack` for the PR's worktree stack (DND-864). Its exit code
+  names the next step (`--help`).
   It adds checks under the lock and replaces none: still run `integration-gate`
   first, still merge one at a time. Under the lock it also requires
   `integration-gate`'s receipt for exactly `--head`, recorded against exactly
@@ -556,7 +558,11 @@ ui-phase1/2/5, aggregate-alignment, mobile-parity, and pt1280.*
 
 Owner DMs fire on merge for an epic-boundary crossing — see
 [[athena:epic-progress-dm]]. Tear the stack down per
-[[athena:teardown-worktree-stack]] only after this confirmation.
+[[athena:teardown-worktree-stack]] only after this confirmation. On GitHub,
+`locked-merge` already ran `teardown-stack` for the PR (exit 10: landed,
+teardown failed). On GitLab, run `ai/bin/teardown-stack --mr <n> --repo
+<repo>` as soon as `confirm-merged` exits 0, for every part of a multi-MR
+Mission as it lands.
 
 Landed is not working. A post-deploy live verify that disagrees with
 expectation is a finding: ticket it and route it to the fleet

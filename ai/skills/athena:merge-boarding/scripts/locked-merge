@@ -49,7 +49,9 @@ path fleets already share) it:
   5. merges via gh-athena pr merge --squash --match-head-commit <head> (no --auto);
   6. confirm-merged --pr <n> --fetch (bounded retry);
   7. asserts the merge commit's parent == the checked base and its tree ==
-     the gated head's tree.
+     the gated head's tree;
+  8. releases the lock and runs teardown-stack --pr <n> --repo DIR, which
+     tears down the PR's worktree stack (DND-864).
 
 Exit (every non-zero prints a Fix: line):
   0 merged, confirmed, tree matches          (landed)
@@ -63,6 +65,7 @@ Exit (every non-zero prints a Fix: line):
   9 no usable integration-gate receipt for --head: NO RECEIPT, RECEIPT
     UNREADABLE (COULD NOT LOOK), RECEIPT INVALID, or RECEIPT FOR ANOTHER
     BASE -- run integration-gate on this head (nothing landed)
+  10 LANDED and confirmed, but the worktree stack teardown failed -- do not re-merge
 EOF
 }
 
@@ -123,7 +126,7 @@ mkdir -p "$(dirname "${LOCK}")" || die 2 "cannot create $(dirname "${LOCK}")" "c
 echo "LOCK ${LOCK}"
 
 AI_BIN="${LOCKED_MERGE_AI_BIN:-$(cd "${SKILL_DIR}/../../bin" 2>/dev/null && pwd)}"
-for t in gh-athena confirm-merged; do
+for t in gh-athena confirm-merged teardown-stack; do
   [ -x "${AI_BIN}/${t}" ] || die 2 "${AI_BIN}/${t} not found" "run this script from its home in ~/dev/custom/ai/skills/athena:merge-boarding/scripts/."
 done
 command -v gh >/dev/null 2>&1 || die 2 "gh (read-only forge CLI) not on PATH" "install gh; reads use plain gh."
@@ -225,4 +228,16 @@ parent="$(git -C "${REPO}" rev-parse "${M}^1")"
        "re-run the gate on origin/${base} now and report the ungated landing to the coordinator."
 
 echo "MERGED ${PR} ${M} ON ${B} TREE-MATCH"
+
+# ---- merge-driven teardown (DND-864) ----
+# The landing is confirmed, so the merged branch's worktree stack goes now,
+# per PR: a multi-part Mission reclaims each part's stack as that part lands.
+# teardown-stack re-confirms the merge, finds the ONE worktree with the PR's
+# head branch, and refuses anything it cannot attribute. Release the merge
+# lock first: a teardown is not part of the critical section.
+exec 9>&-
+if ! "${AI_BIN}/teardown-stack" --pr "${PR}" --repo "${REPO}"; then
+  die 10 "PR ${PR} LANDED, but teardown-stack could not tear down its worktree stack" \
+    "the merge is done; do not re-merge. Read teardown-stack's Fix: above, then re-run ${AI_BIN}/teardown-stack --pr ${PR} --repo ${REPO}."
+fi
 exit 0

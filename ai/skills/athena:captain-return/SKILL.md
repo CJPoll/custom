@@ -110,7 +110,8 @@ after round 26.
 **Whenever you PARK a Mission rather than retrying it** — `STUCK` and left
 stuck, `BLOCKED_ON_DEPENDENCY` with no near-term unblock, or cancelled — tear
 its docker-compose stack down at that moment per
-[[athena:teardown-worktree-stack]], keeping its worktree and branch untouched. A
+[[athena:teardown-worktree-stack]] (`ai/bin/teardown-stack --worktree <wt>
+--parked <reason>`), keeping its worktree and branch untouched. A
 parked Mission never reaches the merge that the usual teardown gate waits for,
 so skipping this leaks a stack for the rest of the run.
 
