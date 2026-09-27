@@ -36,6 +36,12 @@ fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/initd-proc-tree.XXXXXX")"
 state="${tmp}/state"
+# Every service name (RC_SVCNAME, and so the ATHENA_SVC_TREE tag) carries this
+# run's id. The reap matches the tag across the whole uid, so two runs of this
+# suite at once (two harness-gates in parallel test slots) with a shared name
+# like selftest-gh2 reaped each other's stubs (DND-838 reopen: 0 of 6 runs
+# passed in concurrent pairs). mktemp's suffix is alphanumeric, a valid tag.
+run_id="${tmp##*.}"
 mkdir -p "${state}"
 : > "${state}/all.pids"
 
@@ -227,12 +233,12 @@ wait_ready() { # name: the stub's ready file, while the supervised pid lives
 }
 exe_is() { [ "$(readlink "/proc/$1/exe" 2>/dev/null)" = "$2" ]; }
 
-# run_driver: one emulated openrc-run. RC_SVCNAME (always selftest-NAME) is
+# run_driver: one emulated openrc-run. RC_SVCNAME (always selftest-RUNID-NAME) is
 # set in its env exactly as in the real openrc-run, so the reaper must NOT
 # match on it, or the stop side would match itself.
 run_driver() { # phase initd name override env...
   local phase="$1" initd="$2" name="$3" override="$4"; shift 4
-  env RC_SVCNAME="selftest-${name}" ATHENA_PROC_TREE_LIB="${ATHENA_PROC_TREE_LIB_OVERRIDE:-${lib}}" \
+  env RC_SVCNAME="selftest-${run_id}-${name}" ATHENA_PROC_TREE_LIB="${ATHENA_PROC_TREE_LIB_OVERRIDE:-${lib}}" \
     ATHENA_REAP_EXEC="${ATHENA_REAP_EXEC_OVERRIDE:-${reap_exec}}" \
     ATHENA_PROC_TREE_TIMEOUT=3 "$@" \
     "$([ "${phase}" = start ] && echo bash || echo sh)" "${driver}" "${phase}" "${initd}" "${name}" "${state}" "${override}"
@@ -272,9 +278,9 @@ legacy1=$!; disown "${legacy1}"; echo "${legacy1}" >> "${state}/all.pids"
 ( cd "${r2}" && exec "$(command -v sleep)" 300 ) </dev/null >/dev/null 2>&1 &
 legacy2=$!; disown "${legacy2}"; echo "${legacy2}" >> "${state}/all.pids"
 
-# A bystander that carries RC_SVCNAME=selftest-gh1 but is not in the tree, as a
-# concurrent `rc-service selftest-gh1 status` would. RC_SVCNAME is NOT the tag.
-( cd "${tmp}" && exec env RC_SVCNAME=selftest-gh1 "$(command -v sleep)" 300 ) </dev/null >/dev/null 2>&1 &
+# A bystander that carries gh1's RC_SVCNAME but is not in the tree, as a
+# concurrent `rc-service <gh1> status` would. RC_SVCNAME is NOT the tag.
+( cd "${tmp}" && exec env RC_SVCNAME="selftest-${run_id}-gh1" "$(command -v sleep)" 300 ) </dev/null >/dev/null 2>&1 &
 bystander=$!; disown "${bystander}"; echo "${bystander}" >> "${state}/all.pids"
 
 
@@ -295,7 +301,7 @@ alive "$(child_of gh2)" && pass "github-runner: the OTHER instance's Listener is
 alive "${legacy2}" && pass "github-runner: a process with cwd in the sibling-prefix dir is untouched" \
   || fail "github-runner: stopping instance 1 killed a process under actions-runner-2"
 
-alive "${bystander}" && pass "github-runner: a non-tree process carrying RC_SVCNAME=selftest-gh1 is untouched" \
+alive "${bystander}" && pass "github-runner: a non-tree process carrying gh1's RC_SVCNAME is untouched" \
   || fail "github-runner: stop killed a process only because it carried RC_SVCNAME"
 
 stop2_out="$(run_driver stop "${sysfiles}/github-runner.initd" gh2 "" "${gh_env2[@]}" 2>&1)"
@@ -457,15 +463,15 @@ if [ -r "${reap_exec}" ]; then
   else fail "reap-exec: --help -> rc ${help_rc}, stdout '${help_out}'"; fi
   wrap_case "no ATHENA_SVC_TREE" -- --lib "${lib}" -- touch "${tmp}/wrap-ran"
   wrap_case "empty ATHENA_SVC_TREE" ATHENA_SVC_TREE= -- --lib "${lib}" -- touch "${tmp}/wrap-ran"
-  wrap_case "unknown option" ATHENA_SVC_TREE=selftest-wrap -- --lib "${lib}" --bogus -- touch "${tmp}/wrap-ran"
-  wrap_case "no command after --" ATHENA_SVC_TREE=selftest-wrap -- --lib "${lib}" --
-  wrap_case "missing lib" ATHENA_SVC_TREE=selftest-wrap -- --lib "${tmp}/no-such-lib.sh" -- touch "${tmp}/wrap-ran"
-  wrap_case "relative anchor" ATHENA_SVC_TREE=selftest-wrap -- --lib "${lib}" --anchor rel/dir -- touch "${tmp}/wrap-ran"
+  wrap_case "unknown option" ATHENA_SVC_TREE="selftest-${run_id}-wrap" -- --lib "${lib}" --bogus -- touch "${tmp}/wrap-ran"
+  wrap_case "no command after --" ATHENA_SVC_TREE="selftest-${run_id}-wrap" -- --lib "${lib}" --
+  wrap_case "missing lib" ATHENA_SVC_TREE="selftest-${run_id}-wrap" -- --lib "${tmp}/no-such-lib.sh" -- touch "${tmp}/wrap-ran"
+  wrap_case "relative anchor" ATHENA_SVC_TREE="selftest-${run_id}-wrap" -- --lib "${lib}" --anchor rel/dir -- touch "${tmp}/wrap-ran"
   # The happy path execs the command with the tag restored and its cwd kept.
   mkdir -p "${tmp}/wrapdir"
-  ok_out="$(cd "${tmp}/wrapdir" && env ATHENA_SVC_TREE=selftest-wrap-ok sh "${reap_exec}" --lib "${lib}" --timeout 1 \
+  ok_out="$(cd "${tmp}/wrapdir" && env ATHENA_SVC_TREE="selftest-${run_id}-wrap-ok" sh "${reap_exec}" --lib "${lib}" --timeout 1 \
     -- sh -c 'printf "%s|%s" "${ATHENA_SVC_TREE}" "$(pwd -P)"' 2>/dev/null)"; ok_rc=$?
-  if [ "${ok_rc}" -eq 0 ] && [ "${ok_out}" = "selftest-wrap-ok|$(cd "${tmp}/wrapdir" && pwd -P)" ]; then
+  if [ "${ok_rc}" -eq 0 ] && [ "${ok_out}" = "selftest-${run_id}-wrap-ok|$(cd "${tmp}/wrapdir" && pwd -P)" ]; then
     pass "reap-exec: execs the command with the tag and the original cwd"
   else
     fail "reap-exec: happy path rc ${ok_rc}, got '${ok_out}'"
