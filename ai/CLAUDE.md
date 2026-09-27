@@ -339,8 +339,12 @@ by name.
   metadata stripped; `@doc`/`@moduledoc` text is AST, so it is not covered.
   YAML: Psych node trees equal (tag, value, quoting, anchors), so a comment
   passes and a key or trigger change fails. Markdown: documentation. Exit 0
-  means covered. Exit 5 means comment-only except terraform. Then `terraform
-  plan -detailed-exitcode` must exit 0 (no changes) in every affected root. Exit
+  means covered. Exit 5 means comment-only except terraform files whose only
+  change is whole-line `#` or `//` comments. Then `terraform plan
+  -detailed-exitcode` must exit 0 (no changes) in every affected root: a
+  no-change plan alone does not prove a comment-only edit, since removing
+  `prevent_destroy` or a `moved` block plans nothing. A trailing or block
+  comment, a heredoc, or `.terraform.lock.hcl` is not covered. Exit
   1, 2 or 3 means not covered. It refuses a diff that edits the verifier itself.
 - **What does not count.** Any non-comment line. A file type the check has no
   parser for (shell, Dockerfile, Ruby, and so on). A new or deleted code file. A
@@ -371,8 +375,9 @@ The three standing approvals waive only the wait for the owner's go at a
 merge gate. These hold for the owner under all three, security fixes included.
 
 **The owner's answers, 2026-09-27 (~08:15Z, desktop coordinator session,
-terminal).** Relayed by that session, which witnessed them and lands this rule.
-This shipwright could not read that transcript; the lander verifies it.
+terminal).** Checked verbatim by that coordinator session, which witnessed them
+in its own terminal, and recorded in its owner-rules memory note of 2026-09-27
+as "direct, verified".
 
 - On a security fix that auto-applies terraform over prod secrets: "Ship for
   secrets updates. The main thing I want to approve is if a terraform change
