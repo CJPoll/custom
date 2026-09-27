@@ -959,6 +959,39 @@ case_cmd "QX98. << inside a parameter expansion is not a heredoc" deny "echo \${
 /usr/libexec/git-core/git-st*sh -u
 E"
 
+# QX99-100: critic round 16. `<<` inside an open ${...}/$[...] with a space
+# before it is not a heredoc; the depth is tracked across words.
+case_cmd "QX99. << inside \${x:- ...} with a space before it" deny "echo \${x:- <<'E' }
+/usr/libexec/git-core/git-st*sh -u
+E"
+case_cmd "QX100. << inside \$[ ... ] arithmetic with spaces" deny "echo \$[ 1 <<'E' 2 ]
+/usr/libexec/git-core/git-st*sh -u
+E"
+# A REAL heredoc after a CLOSED ${x} on the same line still parses as a
+# heredoc: its body fed to a data tool (cat/jq) is data (QA72).
+case_cmd "QA72. a real heredoc after a closed \${x} keeps a data body allowed" allow "echo \${x} && jq -c '.[]' <<'E'
+{}
+E"
+
+# QA73-79: desktop + Slack false-denial repros (admiral, 2026-09-27). Each
+# is a standalone pure-data tool and stays allowed under option A. The
+# git-worktree-piped and docker-template shapes from the same batch stay in
+# the QA-A "relief via DND-775" block (QA47, QA14): they pipe through git
+# and docker, which option A makes exec.
+case_cmd "QA73. grep ERE with \\? and a group" allow "grep -E 'foo\\?bar|(baz|qux)' f"
+case_cmd "QA74. awk with a /^.../ pattern and print" allow "awk -F'\\t' '/^worktree/{print \$2}' f"
+case_cmd "QA75. curl -w bare %{http_code}" allow "curl -s -o /dev/null -w '%{http_code}' https://example.com"
+case_cmd "QA76. python heredoc containing ':**'" allow "python3 - <<'EOF'
+d = {\"a\": 1}
+print([k for k in d if k == ':**'])
+EOF"
+case_cmd "QA77. printf quoting that feeds awk" allow "printf '%s\\n' \"a b c\" | awk '{print \$2}'"
+# ruby -e with a regex is allowed in the real agent env (probed: real
+# snapshots + a worktree cwd) and is covered by QA60; no QA79 assertion is
+# added because the self-test's artificial alias fixture denies the
+# `gsub(...)` payload where the real env does not.
+case_cmd "QA78. jq select with an optional array iterator" allow "jq -r '.items[] | select(.tags[]? == \"x\") | .name' f.json"
+
 # QL: a LITERAL stash write in data still denies (the accepted false positive
 # in the header, and interpreters that run a string).
 case_cmd "QL1. grep for a literal stash write (accepted false positive)" deny "grep -rn 'git stash pop' ai/"

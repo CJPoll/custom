@@ -791,11 +791,11 @@ After the fix: `RESULT: 258 passed, 0 failed`.
   (QA allow, QB alias recursion, QX exec contexts, QD named writes in data,
   QL literal-in-data) and T2.
 - **Baseline before the change:** `RESULT: 363 passed, 0 failed`.
-- **After (final, critic rounds 1-14, admiral batches 7-8):** `RESULT: 557
+- **After (final, critic rounds 1-16, admiral batches 7-9):** `RESULT: 566
   passed, 0 failed` / `VERDICT: PASS`. The per-round tables in this and the
   next few subsections are HISTORICAL, measured on the hook of the round
   they name; the authoritative final table is "Sabotage rows on the
-  option-A hook" below (557, on the round-14 hook 110ea27).
+  option-A hook" below (566, on the round-16 hook).
 
 ### Fail-first (the final self-test against origin/main 81ba7c2's hook)
 
@@ -924,13 +924,13 @@ reached every case they did (their mutants stayed green).
   via DND-775" block. Every deny stays green. Rows 10, 13, 14, 17-22, 24
   and 25 above sabotaged deleted code and are retired.
 
-### Sabotage rows on the option-A hook (final, measured on the round-14
-hook 110ea27; supersede every table above)
+### Sabotage rows on the option-A hook (final, measured on the round-16
+hook; supersede every table above)
 
-Self-test `RESULT: 557 passed, 0 failed`. One mutant copy each. A-1..A-31
-were measured on 9e114a6 + the round-12 edits; A-32 on 110ea27. Rows whose
-mechanisms option A deleted (the old A-3/10/12-14/17-25) are retired with
-that code.
+Self-test `RESULT: 566 passed, 0 failed`. One mutant copy each. A-1..A-31
+were measured on 9e114a6 + the round-12 edits; A-32 on 110ea27; A-33 on the
+round-16 hook. Rows whose mechanisms option A deleted (the old
+A-3/10/12-14/17-25) are retired with that code.
 
 | id | Mutation | Observed failure |
 |---|---|---|
@@ -952,6 +952,7 @@ that code.
 | A-30 | The basename-strip is restored, so a path-qualified word reduces to its basename (critic round 11) | QX95, QX96 — `554 passed, 2 failed` |
 | A-31 | `elif` dropped from cmd_prefix, so a runner after it is not in command position (critic round 12) | QX97 — `555 passed, 1 failed` |
 | A-32 | The `${...}` heredoc guard reverted, so `<<` inside a parameter expansion is taken as a heredoc (critic round 14) | QX98 — `556 passed, 1 failed` |
+| A-33 | `nohd` no longer set from the `${`/`$[` depth, so `<<` inside a parameter expansion is a heredoc (critic rounds 14, 16) | QX98, QX99, QX100 — `563 passed, 3 failed` |
 
 - **Round 11, path-qualified word + stale text.** The critic found that
   `exec_text()` stripped a command word to its basename before the
@@ -979,3 +980,18 @@ that code.
   residual, which is a string another program executes). Fix: `nohd` is set
   when the word so far holds `$[` or an unclosed `${`, so those lines are
   read as commands. QX98; mutation A-32.
+
+- **Round 16, `<<` inside `${...}` with a space.** The round-14 fix was
+  per-word, so `echo ${x:- <<'E' }` (a space before `<<`) still parsed as a
+  heredoc. Fix: pxo/pxc count `${`/`$[` opens and their closes across words
+  on the line (reset per line), the way `ar` counts `((`, and `<<` is a
+  heredoc only when pxo == pxc. A stray `}`/`]` never counts past the open
+  count, so it cannot cancel a real open (biased toward reading a line as
+  commands). QX99/QX100; mutation A-33. Also, batch-9 (desktop + Slack,
+  2026-09-27): QA73-QA78 add standalone pure-data shapes (grep ERE with a
+  group, awk /pattern/, curl -w, a python heredoc with ':**', printf | awk,
+  jq select). The git-worktree-piped and docker-template shapes from that
+  batch stay in the QA-A relief-via-DND-775 block. A ruby -e regex is
+  allowed in the real agent env (probed) and covered by QA60; no QA79
+  assertion, because the self-test's artificial alias fixture denies it
+  where the real env does not.
