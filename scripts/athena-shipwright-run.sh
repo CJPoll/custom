@@ -65,8 +65,9 @@
 #
 # Exported to the session:
 #   SHIPWRIGHT_STATE_DIR      the ONE canonical state directory (cursor.txt,
-#                             journal.md, runs/), always in the MAIN checkout,
-#                             never in whichever tree this run happens to use
+#                             journal.md, runs/, owner-notes.md), always in the
+#                             MAIN checkout, never in whichever tree this run
+#                             happens to use. ai/bin/owner-notes reads it.
 #
 # Exit codes:
 #   0   the session ran and exited 0, OR this tick was skipped (a run already in

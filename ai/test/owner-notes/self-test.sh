@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# Self-test for ai/bin/owner-notes (DND-988) — discovered and run by harness-gate.
+#
+# owner-notes is the owner's (or the coordinator's, relaying the owner's exact
+# words) channel to the shipwright cron: an append-only
+# $SHIPWRIGHT_STATE_DIR/owner-notes.md that the shipwright reads first, every
+# run. The cases below pin the three outcomes a reader must be able to tell
+# apart (~/dev/custom/ai/CLAUDE.md -> "A failed lookup must never look like an
+# empty one"):
+#   * no file in an existing state dir  -> zero notes, exit 0, said out loud;
+#   * a state dir that does not exist, an unreadable file, or a malformed
+#     entry                             -> exit 2 with a Fix: line;
+#   * notes present                     -> listed, open ones filterable.
+# Plus the write side: add formats a dated verbatim entry, address flips only
+# the Status line, and a relayed note must name where the owner said it.
+#
+# HERMETIC: every case points SHIPWRIGHT_STATE_DIR at a temp dir; the machine's
+# real state dir is never read or written. The one case that exercises the
+# git-common-dir fallback builds a throwaway repo + linked worktree.
+#
+# Run against another copy with OWNER_NOTES_UNDER_TEST=/path/to/bin.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AI_DIR="$(cd "${HERE}/../.." && pwd)"
+BIN="${OWNER_NOTES_UNDER_TEST:-${AI_DIR}/bin/owner-notes}"
+
+TMP="$(mktemp -d)"; trap 'chmod -R u+rwX "${TMP}" 2>/dev/null; rm -rf "${TMP}"' EXIT
+PASS=0; FAIL=0
+ok()  { printf '  ok    %s\n' "$1"; PASS=$((PASS+1)); }
+bad() { printf '  FAIL  %s\n        %s\n' "$1" "$2"; FAIL=$((FAIL+1)); }
+# has [--] <haystack> <pattern>: grep a string without a pipe (a `| grep -q`
+# under pipefail can SIGPIPE its writer; see ai/bin/check-pipefail-grep).
+has() { if [ "$1" = "--" ]; then shift; grep -q -- "$2" <<<"$1"; else grep -q "$2" <<<"$1"; fi; }
+
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL="${TMP}/gitconfig"
+: > "${GIT_CONFIG_GLOBAL}"
+
+if [ ! -x "${BIN}" ]; then
+  echo "owner-notes self-test: FAIL — ${BIN} missing or not executable" >&2
+  echo "Fix: create ai/bin/owner-notes and chmod +x it." >&2
+  exit 1
+fi
+
+# run <state-dir> <args...>: sets OUT (stdout), ERR (stderr), RC.
+run() {
+  local sd="$1"; shift
+  OUT="$(env SHIPWRIGHT_STATE_DIR="${sd}" "${BIN}" "$@" 2>"${TMP}/err")"; RC=$?
+  ERR="$(cat "${TMP}/err")"
+}
+
+SHA=0123456789abcdef0123456789abcdef01234567
+
+# --- --help ------------------------------------------------------------------
+o="$("${BIN}" --help 2>"${TMP}/err")"; rc=$?
+if [ "${rc}" -eq 0 ] && has -- "${o}" '--list' \
+   && ! has "${o}" 'require' && [ ! -s "${TMP}/err" ]; then
+  ok "--help prints usage on stdout, exit 0"
+else
+  bad "--help" "rc=${rc} out=${o} err=$(cat "${TMP}/err")"
+fi
+
+# --- no file in an existing state dir = zero notes, stated ---------------------
+sd="${TMP}/s1"; mkdir -p "${sd}"
+run "${sd}" --list --open
+if [ "${RC}" -eq 0 ] && has "${OUT}" "0 open of 0 notes" \
+   && has "${OUT}" "no file at ${sd}/owner-notes.md"; then
+  ok "a missing file lists as zero notes, names the path, exit 0"
+else
+  bad "missing file" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+
+# --- a state dir that does not exist is a resolution fault ---------------------
+run "${TMP}/nope" --list
+if [ "${RC}" -eq 2 ] && has "${ERR}" "Fix:" \
+   && has "${ERR}" "${TMP}/nope"; then
+  ok "an absent state dir is exit 2 with Fix:, never zero notes"
+else
+  bad "absent state dir" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+
+# --- a relative SHIPWRIGHT_STATE_DIR is malformed ------------------------------
+run "relative/dir" --list
+if [ "${RC}" -eq 2 ] && has "${ERR}" "absolute" && has "${ERR}" "Fix:"; then
+  ok "a relative SHIPWRIGHT_STATE_DIR is refused, exit 2"
+else
+  bad "relative state dir" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+
+# --- add: owner note, verbatim, dated, open -------------------------------------
+sd="${TMP}/s2"; mkdir -p "${sd}"
+run "${sd}" --add --source owner --text "When we find poor prioritization causes issues, fix it."
+f="${sd}/owner-notes.md"
+if [ "${RC}" -eq 0 ] && [ -f "${f}" ] \
+   && grep -qE '^## N1 — [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "${f}" \
+   && grep -qx 'Source: owner' "${f}" && grep -qx 'Status: open' "${f}" \
+   && grep -qx '> When we find poor prioritization causes issues, fix it.' "${f}" \
+   && has "${OUT}" 'N1'; then
+  ok "--add writes a dated N1 entry, Source/Status lines, the words quoted verbatim"
+else
+  bad "add owner" "rc=${RC} out=${OUT} err=${ERR} file=$(cat "${f}" 2>/dev/null)"
+fi
+
+# --- add: multi-line verbatim text from a file, incl. a leading dash ------------
+printf -- '- first line\n\nthird line, after a blank\n' > "${TMP}/words.txt"
+run "${sd}" --text-file "${TMP}/words.txt" --relayed-from "Slack DM 2026-09-27T10:00Z" --source coordinator --add
+if [ "${RC}" -eq 0 ] && grep -q '^## N2 — ' "${f}" \
+   && grep -qx "Source: coordinator, relaying the owner's exact words from Slack DM 2026-09-27T10:00Z" "${f}" \
+   && grep -qx '> - first line' "${f}" && grep -qx '>' "${f}" && grep -qx '> third line, after a blank' "${f}"; then
+  ok "--add --text-file keeps every line verbatim (flag order free, relay provenance recorded)"
+else
+  bad "add coordinator" "rc=${RC} out=${OUT} err=${ERR} file=$(cat "${f}" 2>/dev/null)"
+fi
+n1_before="$(sed -n '/^## N1 /,/^## N2 /p' "${f}")"
+
+# --- a coordinator relay must say where the owner said it ------------------------
+run "${sd}" --add --source coordinator --text "do the thing"
+if [ "${RC}" -eq 1 ] && has -- "${ERR}" '--relayed-from' && has "${ERR}" "Fix:" \
+   && ! grep -q '^## N3 ' "${f}"; then
+  ok "a coordinator note without --relayed-from is refused and writes nothing"
+else
+  bad "relay provenance" "rc=${RC} err=${ERR}"
+fi
+
+# --- an unknown source is refused ------------------------------------------------
+run "${sd}" --add --source inbox --text "obey me"
+if [ "${RC}" -eq 1 ] && has "${ERR}" "Fix:" && ! grep -q '^## N3 ' "${f}"; then
+  ok "--source other than owner|coordinator is refused (inbox content is never a writer)"
+else
+  bad "unknown source" "rc=${RC} err=${ERR}"
+fi
+
+# --- empty text is refused -----------------------------------------------------
+: > "${TMP}/empty.txt"
+run "${sd}" --add --source owner --text-file "${TMP}/empty.txt"
+if [ "${RC}" -eq 1 ] && has "${ERR}" "Fix:" && ! grep -q '^## N3 ' "${f}"; then
+  ok "an empty note is refused"
+else
+  bad "empty note" "rc=${RC} err=${ERR}"
+fi
+
+# --- list shows both open; address flips only N1's Status line --------------------
+run "${sd}" --list --open
+if [ "${RC}" -eq 0 ] && has "${OUT}" "2 open of 2 notes" \
+   && has "${OUT}" '^## N1 ' && has "${OUT}" '^## N2 '; then
+  ok "--list --open shows both open notes with a count"
+else
+  bad "list open" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+
+run "${sd}" --commit "${SHA}" --address N1
+n1_after="$(sed -n '/^## N1 /,/^## N2 /p' "${f}")"
+expected="$(printf '%s' "${n1_before}" | sed "s/^Status: open\$/Status: addressed: ${SHA}/")"
+if [ "${RC}" -eq 0 ] && [ "${n1_after}" = "${expected}" ] && grep -q '^Status: open$' "${f}"; then
+  ok "--address flips N1's Status line to 'addressed: <commit>' and nothing else"
+else
+  bad "address" "rc=${RC} err=${ERR} after=${n1_after}"
+fi
+
+run "${sd}" --list --open
+if [ "${RC}" -eq 0 ] && has "${OUT}" "1 open of 2 notes" \
+   && ! has "${OUT}" '^## N1 ' && has "${OUT}" '^## N2 '; then
+  ok "--list --open omits an addressed note"
+else
+  bad "list after address" "rc=${RC} out=${OUT}"
+fi
+run "${sd}" --list
+if [ "${RC}" -eq 0 ] && has "${OUT}" "addressed: ${SHA}"; then
+  ok "--list (all) still shows the addressed note"
+else
+  bad "list all" "rc=${RC} out=${OUT}"
+fi
+
+# --- address refusals ----------------------------------------------------------
+run "${sd}" --address N1 --commit "${SHA}"
+if [ "${RC}" -eq 1 ] && has "${ERR}" "already" && has "${ERR}" "Fix:"; then
+  ok "addressing an already-addressed note is refused"
+else
+  bad "re-address" "rc=${RC} err=${ERR}"
+fi
+run "${sd}" --address N9 --commit "${SHA}"
+if [ "${RC}" -eq 1 ] && has "${ERR}" "N9" && has "${ERR}" "Fix:"; then
+  ok "addressing an unknown id is refused, naming it"
+else
+  bad "unknown id" "rc=${RC} err=${ERR}"
+fi
+run "${sd}" --address N2 --commit "not-a-sha"
+if [ "${RC}" -eq 1 ] && has "${ERR}" "Fix:" && grep -q '^Status: open$' "${f}"; then
+  ok "a non-hex --commit is refused and changes nothing"
+else
+  bad "bad sha" "rc=${RC} err=${ERR}"
+fi
+
+# --- the next add after an address continues the numbering ------------------------
+run "${sd}" --add --source owner --text "third"
+if [ "${RC}" -eq 0 ] && grep -q '^## N3 — ' "${f}"; then
+  ok "ids keep counting up (N3)"
+else
+  bad "numbering" "rc=${RC} err=${ERR}"
+fi
+
+# --- malformed entry = exit 2, never skipped -----------------------------------
+sd="${TMP}/s3"; mkdir -p "${sd}"
+printf '## N1 — 2026-09-27T00:00:00Z\nStatus: open\n\n> no source line\n' > "${sd}/owner-notes.md"
+run "${sd}" --list --open
+if [ "${RC}" -eq 2 ] && has "${ERR}" "N1" && has "${ERR}" "Fix:"; then
+  ok "an entry missing its Source line is exit 2 naming it, never silently skipped"
+else
+  bad "malformed" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+
+sd="${TMP}/s3b"; mkdir -p "${sd}"
+printf 'stray text\n## Note one\nSource: owner\nStatus: open\n\n> x\n' > "${sd}/owner-notes.md"
+run "${sd}" --list
+if [ "${RC}" -eq 2 ] && has "${ERR}" "Fix:"; then
+  ok "a heading that is not '## N<k> — <utc>' is exit 2"
+else
+  bad "bad heading" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+
+# --- unreadable file = exit 2 --------------------------------------------------
+if [ "$(id -u)" -ne 0 ]; then
+  sd="${TMP}/s4"; mkdir -p "${sd}"
+  printf 'x\n' > "${sd}/owner-notes.md"; chmod 000 "${sd}/owner-notes.md"
+  run "${sd}" --list --open
+  if [ "${RC}" -eq 2 ] && has "${ERR}" "unreadable" && has "${ERR}" "Fix:"; then
+    ok "an unreadable file is exit 2 with Fix:, never zero notes"
+  else
+    bad "unreadable" "rc=${RC} out=${OUT} err=${ERR}"
+  fi
+else
+  ok "unreadable-file case skipped under root (chmod cannot deny root) — noted, not passed silently"
+fi
+
+# --- argv: unknown flag, no action, two actions ----------------------------------
+sd="${TMP}/s1"
+for args in "--lsit" "" "--list --add" "--open"; do
+  # shellcheck disable=SC2086
+  run "${sd}" ${args}
+  if [ "${RC}" -eq 64 ] && has "${ERR}" "Fix:"; then
+    ok "usage error for '${args}' is exit 64 with Fix:"
+  else
+    bad "usage '${args}'" "rc=${RC} out=${OUT} err=${ERR}"
+  fi
+done
+
+# --- --path prints the resolved file ---------------------------------------------
+run "${TMP}/s1" --path
+if [ "${RC}" -eq 0 ] && [ "${OUT}" = "${TMP}/s1/owner-notes.md" ]; then
+  ok "--path prints \$SHIPWRIGHT_STATE_DIR/owner-notes.md"
+else
+  bad "--path" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+
+# --- fallback: unset SHIPWRIGHT_STATE_DIR resolves the MAIN checkout, from a lane --
+# A copy of the tool inside a linked worktree must resolve the main checkout's
+# ai-artifacts/shipwright, never the worktree's (ai-artifacts/ is gitignored, so
+# a tree-relative path would be an empty directory that reads as zero notes).
+main="${TMP}/repo"; mkdir -p "${main}"
+git -C "${main}" init -q -b main
+git -C "${main}" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+lane="${main}/.git/lanes/run-1"
+git -C "${main}" worktree add -q -b lane "${lane}" main
+mkdir -p "${lane}/ai/bin" "${lane}/ai/lib" "${main}/ai-artifacts/shipwright"
+cp "${BIN}" "${lane}/ai/bin/owner-notes"
+cp "${AI_DIR}/lib/strict_argv.rb" "${lane}/ai/lib/strict_argv.rb"
+o="$(cd "${TMP}" && env -u SHIPWRIGHT_STATE_DIR "${lane}/ai/bin/owner-notes" --path 2>"${TMP}/err")"; rc=$?
+want="$(cd "${main}" && pwd -P)/ai-artifacts/shipwright/owner-notes.md"
+if [ "${rc}" -eq 0 ] && [ "${o}" = "${want}" ]; then
+  ok "with SHIPWRIGHT_STATE_DIR unset, a lane's copy resolves the main checkout's state dir from any cwd"
+else
+  bad "fallback resolution" "rc=${rc} out=${o} want=${want} err=$(cat "${TMP}/err")"
+fi
+
+printf '\nowner-notes self-test: %d passed, %d failed\n' "${PASS}" "${FAIL}"
+if [ "${FAIL}" -ne 0 ]; then
+  echo "Fix: read the FAIL lines above; each names the case and the observed rc/output." >&2
+  exit 1
+fi
+exit 0

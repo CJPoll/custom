@@ -446,6 +446,15 @@ across sessions — it is not a one-shot queue drain.
   record + Decisions/Won't-change), `runs/` (per-run logs). The cursor makes it
   incremental; it mines `ai-artifacts/coordination/*/reports/*` newer than the
   cursor and clusters a pattern only when it recurs in ≥2 independent runs.
+- **Owner notes** (DND-988): `owner-notes.md` in the same state dir is the
+  owner's message channel to the cron ("When we find poor prioritization causes
+  issues, we can leave messages for the shipwright cron to address it." — Cody,
+  2026-09-27). Append with `ai/bin/owner-notes --add --source owner --text
+  "…"` (the coordinator relays the owner's exact words with `--source
+  coordinator --relayed-from <ref>`). The shipwright reads open notes first,
+  every run, treats one as `Authority:`, and flips it to `addressed: <commit>`.
+  Rules and format: `ai/bin/owner-notes --help` and the shipwright template's
+  *Where the evidence lives*.
 - **Install / restore / verify:** `scripts/setup-shipwright-cron` is the
   committed, idempotent source of the entry — re-run it to reinstall after a
   reset (`--dry-run` to preview, `--remove` to uninstall). `--check` asserts the

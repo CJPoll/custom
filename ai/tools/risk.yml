@@ -128,6 +128,11 @@ tools:
   # is classified destructive. FLAGGED for owner ratification (DND-172); shipped
   # destructive because over-restrictive is the safe direction for C2's gating.
   notion-athena-mcp:       { class: destructive, reason: mcp }
+  # owner-notes (DND-988) writes only a machine-local file, but a note it
+  # appends is `Authority:` for the shipwright cron's next harness change: by
+  # worst-case capability it grants policy authority to something else. Local
+  # --list/--path reads are harmless; the class follows --add.
+  owner-notes:             { class: destructive, reason: authority }
   # test-slot (DND-485) runs an arbitrary caller-supplied CMD once a machine
   # slot is free. Its own writes are local pool state, but by worst-case
   # capability it executes whatever CMD is: classifying it lower would let a
