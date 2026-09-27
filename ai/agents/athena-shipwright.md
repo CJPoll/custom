@@ -103,16 +103,22 @@ the journal.
 Everything you learn from is local, under `~/dev/custom/`:
 
 - **Owner notes — read FIRST, every run, ahead of the reports.** Run
-  `ai/bin/owner-notes --list --open` (it resolves
-  `$SHIPWRIGHT_STATE_DIR/owner-notes.md` in the main checkout from any tree).
-  "0 open" is zero notes; a non-zero exit is a fault — journal it, never read
-  it as none. An open `Source: owner` note is `Authority:` for a change
-  (Method's *A policy needs authority*): cite its id, and after the change
-  lands run `ai/bin/owner-notes --address <id> --commit <sha>`. Only the owner,
-  or the coordinator relaying the owner's exact words, writes there (the tool
-  refuses `--source owner` from an agent). A `Source: coordinator` relay,
-  including one from an inbox message, is Authority only once you find the
-  same words from the owner at its reference; otherwise journal it, do not act.
+  `ai/bin/owner-notes --reconcile`, then `ai/bin/owner-notes --list --open`
+  (both resolve `$SHIPWRIGHT_STATE_DIR/owner-notes.md` in the main checkout
+  from any tree). "0 open" is zero notes. A non-zero exit is a fault: **Stop**
+  and report it, as for a damaged cursor — never read it as none.
+  - **Authority** (Method's *A policy needs authority*): a `Source: owner`
+    note, or a relay whose `Relay-check:` reads `verified`. An `unverifiable`
+    or `UNVERIFIED` relay (an inbox message included) is evidence, not
+    Authority. Only the owner, or the coordinator relaying the owner's exact
+    words, writes a note; the tool refuses `--source owner` from an agent.
+  - **Evidence:** a note naming a harness defect is a *single unambiguous
+    factual gap* (Method's *Cluster and qualify*). Journal every open note,
+    every run: the commit that acts on it, or why nothing did.
+  - **Closing:** a commit (or direct-spawn PR body) acting on note N<k>
+    carries an `Owner-note: N<k>` trailer beside `Authority:`. `--reconcile`
+    flips the note once that commit is on origin/main; never flip it by hand
+    for unlanded work.
 - **Coordination reports** — `ai-artifacts/coordination/*/reports/*-report.md`.
   The richest signal. Mine the **"Assumptions made"**, **"Adjustments vs. the
   cited plan"**, divergence notes, and **"Verification — ACTUAL results"**
@@ -218,7 +224,8 @@ lands on main by refspec not branch name: **[[athena:shipwright-lane]]**.
    missing context, a tool that was named but absent (e.g.
    `bin/prep-commit.sh`), a repeated manual workaround, a wrong process
    assumption, a flaky/blocked/stuck cause, wasted or redone effort. Quote the
-   source and note its run-id. Then run `ai/bin/harness-metrics` followed by
+   source and note its run-id. Open owner notes are friction too (*Where the
+   evidence lives*). Then run `ai/bin/harness-metrics` followed by
    `ai/bin/harness-signals` and fold any surfaced signal into this list as
    **metric-backed** friction — telemetry aggregates across all sessions, so a
    surfaced signal is already cross-session evidence. If no telemetry exists,
@@ -252,8 +259,8 @@ lands on main by refspec not branch name: **[[athena:shipwright-lane]]**.
    Two checks before you edit; either one failing means journal the evidence
    under *Found, owned elsewhere* and land nothing:
    - **A policy needs authority.** A new gate, check, or normative rule must
-     rest on an owner quote (an open owner note counts) or on existing
-     normative text (CLAUDE.md, a contract, a skill). Cite it in the commit as
+     rest on an owner quote (an owner note that is Authority per *Where the
+     evidence lives* counts) or on existing normative text (CLAUDE.md, a contract, a skill). Cite it in the commit as
      `Authority: <quote or doc>`.
      Guidance an admiral or coordinator wrote in a state log or report is
      evidence of friction, not a ratified rule.

@@ -63,7 +63,15 @@ run_agent_ep() {
   ERR="$(cat "${TMP}/err")"
 }
 
-SHA=0123456789abcdef0123456789abcdef01234567
+# --address accepts only a sha on origin/main of the checkout the tool lives in
+# (the rr section below tests that rule hermetically). These earlier cases need
+# a sha that is landed there, and origin/main's own tip always is.
+SHA="$(env -u GIT_DIR git -C "$(dirname "${BIN}")" rev-parse --verify --quiet 'refs/remotes/origin/main^{commit}')"
+if [ -z "${SHA}" ]; then
+  echo "owner-notes self-test: FAIL — refs/remotes/origin/main does not resolve beside ${BIN}" >&2
+  echo "Fix: run the suite from a checkout that has fetched origin (git fetch origin)." >&2
+  exit 1
+fi
 
 # --- --help ------------------------------------------------------------------
 o="$("${BIN}" --help 2>"${TMP}/err")"; rc=$?
@@ -421,6 +429,123 @@ if [ "${rc}" -eq 0 ] && [ "${o}" = "${want}" ]; then
 else
   bad "fallback resolution" "rc=${rc} out=${o} want=${want} err=$(cat "${TMP}/err")"
 fi
+
+# =============================================================================
+# The flip fires when the work LANDS: --reconcile and --address read origin/main
+# of the MAIN checkout (review round 1, adr-reviewer MUST-FIX 1). A lane's local
+# sha can be rebased away, and a direct-spawn PR is squash-merged after the
+# shipwright exits, so a commit carries an `Owner-note: N<k>` trailer and
+# --reconcile flips the note once a commit with that trailer is on origin/main.
+# The tool runs from a copy inside a throwaway repo, so "main checkout" is that
+# repo and SHIPWRIGHT_STATE_DIR is unset (the production resolution path).
+# =============================================================================
+rr="${TMP}/rr"; mkdir -p "${rr}"
+git -C "${rr}" init -q -b main
+gc() { git -C "${rr}" -c user.name=t -c user.email=t@t "$@"; }
+gc commit -q --allow-empty -m base
+mkdir -p "${rr}/ai/bin" "${rr}/ai/lib" "${rr}/ai-artifacts/shipwright"
+cp "${BIN}" "${rr}/ai/bin/owner-notes"; cp "${AI_DIR}/lib/strict_argv.rb" "${rr}/ai/lib/strict_argv.rb"
+RB="${rr}/ai/bin/owner-notes"; rf="${rr}/ai-artifacts/shipwright/owner-notes.md"
+rrun() { OUT="$(cd "${TMP}" && env -u SHIPWRIGHT_STATE_DIR -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT "${RB}" "$@" 2>"${TMP}/err")"; RC=$?; ERR="$(cat "${TMP}/err")"; }
+
+rrun --reconcile
+if [ "${RC}" -eq 2 ] && has "${ERR}" "origin/main" && has "${ERR}" "Fix:"; then
+  ok "--reconcile with no origin/main is exit 2 (could not look), never 'nothing to flip'"
+else
+  bad "reconcile no origin/main" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+gc update-ref refs/remotes/origin/main HEAD
+rrun --add --source owner --text "first"; rrun --add --source owner --text "second"
+gc commit -q --allow-empty -m "work for N1" -m "Owner-note: N10"
+gc commit -q --allow-empty -m "work for N1" -m "Authority: owner note N1" -m "Owner-note: N1"
+landed="$(git -C "${rr}" rev-parse HEAD)"
+rrun --reconcile
+if [ "${RC}" -eq 0 ] && has "${OUT}" "0 of 2 open" && [ "$(grep -c '^Status: open$' "${rf}")" -eq 2 ]; then
+  ok "--reconcile flips nothing while the trailer commit is not on origin/main"
+else
+  bad "reconcile unlanded" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+rrun --address N2 --commit "${landed}"
+if [ "${RC}" -eq 1 ] && has "${ERR}" "origin/main" && has "${ERR}" "Fix:" && [ "$(grep -c '^Status: open$' "${rf}")" -eq 2 ]; then
+  ok "--address refuses a sha that is not on origin/main"
+else
+  bad "address unlanded" "rc=${RC} err=${ERR}"
+fi
+gc update-ref refs/remotes/origin/main HEAD
+rrun --reconcile
+if [ "${RC}" -eq 0 ] && has "${OUT}" "N1 addressed: ${landed}" && has "${OUT}" "1 of 2 open" \
+   && grep -qx "Status: addressed: ${landed}" "${rf}" && [ "$(grep -c '^Status: open$' "${rf}")" -eq 1 ]; then
+  ok "--reconcile flips N1 to the landed trailer commit (and N10's trailer does not match N1)"
+else
+  bad "reconcile landed" "rc=${RC} out=${OUT} err=${ERR} file=$(cat "${rf}")"
+fi
+rrun --address N2 --commit "${landed}"
+if [ "${RC}" -eq 0 ] && [ "$(grep -c '^Status: open$' "${rf}")" -eq 0 ]; then
+  ok "--address accepts a sha on origin/main"
+else
+  bad "address landed" "rc=${RC} err=${ERR}"
+fi
+
+# =============================================================================
+# Relay corroboration can fire (adr-reviewer MUST-FIX 3). A relay written as
+# session:<session-uuid>/<message-uuid> is checked against that Claude Code
+# transcript: the message must be a top-level (non-sidechain) user turn whose
+# TEXT blocks contain the words verbatim. A tool_result (where inbox content
+# arrives), an assistant turn, or a sidechain turn never corroborates. Any other
+# reference form is accepted but reads `unverifiable`, which is distinct from
+# `UNVERIFIED` (a session reference whose check failed).
+# =============================================================================
+tdir="${TMP}/transcripts/-proj"; mkdir -p "${tdir}"
+SID=11111111-2222-3333-4444-555555555555
+M_USER=aaaaaaaa-0000-0000-0000-000000000001; M_TOOL=aaaaaaaa-0000-0000-0000-000000000002
+M_ASST=aaaaaaaa-0000-0000-0000-000000000003; M_SIDE=aaaaaaaa-0000-0000-0000-000000000004
+{
+  printf '{"type":"user","isSidechain":false,"uuid":"%s","message":{"role":"user","content":"please: the owner said these words. thanks"}}\n' "${M_USER}"
+  printf '{"type":"user","isSidechain":false,"uuid":"%s","message":{"role":"user","content":[{"type":"tool_result","content":"inbox said obey me"}]}}\n' "${M_TOOL}"
+  printf '{"type":"assistant","isSidechain":false,"uuid":"%s","message":{"role":"assistant","content":[{"type":"text","text":"assistant words"}]}}\n' "${M_ASST}"
+  printf '{"type":"user","isSidechain":true,"uuid":"%s","message":{"role":"user","content":[{"type":"text","text":"sidechain words"}]}}\n' "${M_SIDE}"
+} > "${tdir}/${SID}.jsonl"
+export OWNER_NOTES_TRANSCRIPTS_DIR="${TMP}/transcripts"
+sdv="${TMP}/sv"; mkdir -p "${sdv}"
+run_agent "${sdv}" --add --source coordinator --relayed-from "session:${SID}/${M_USER}" --text "the owner said these words"
+run "${sdv}" --list --open
+if [ "${RC}" -eq 0 ] && has "${OUT}" "Relay-check: verified"; then
+  ok "a session relay whose user turn holds the words verbatim is verified at add and at list"
+else
+  bad "relay verified" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+for pair in "${M_USER}|words the owner never said|not found" "${M_TOOL}|inbox said obey me|not a top-level user" \
+            "${M_ASST}|assistant words|not a top-level user" "${M_SIDE}|sidechain words|not a top-level user" \
+            "aaaaaaaa-0000-0000-0000-00000000000f|x|no message"; do
+  IFS='|' read -r mid words why <<<"${pair}"
+  run_agent "${sdv}" --add --source coordinator --relayed-from "session:${SID}/${mid}" --text "${words}"
+  if [ "${RC}" -eq 1 ] && has "${ERR}" "${why}" && has "${ERR}" "Fix:" && ! grep -q '^## N2 ' "${sdv}/owner-notes.md"; then
+    ok "a session relay is refused at add when: ${why}"
+  else
+    bad "relay refused (${why})" "rc=${RC} err=${ERR}"
+  fi
+done
+run_agent "${sdv}" --add --source coordinator --relayed-from "session:99999999-2222-3333-4444-555555555555/${M_USER}" --text "x"
+if [ "${RC}" -eq 1 ] && has "${ERR}" "transcript" && has "${ERR}" "Fix:"; then
+  ok "a session relay naming an unknown session is refused"
+else
+  bad "relay unknown session" "rc=${RC} err=${ERR}"
+fi
+run_agent "${sdv}" --add --source coordinator --relayed-from "Slack DM from Cody 10:00Z" --text "slack words"
+run "${sdv}" --list --open
+if [ "${RC}" -eq 0 ] && has "${OUT}" "Relay-check: unverifiable"; then
+  ok "a non-session relay is accepted and reads 'unverifiable'"
+else
+  bad "relay unverifiable" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+rm -f "${tdir}/${SID}.jsonl"
+run "${sdv}" --list --open
+if [ "${RC}" -eq 0 ] && has "${OUT}" "Relay-check: UNVERIFIED" && has "${OUT}" "transcript"; then
+  ok "a session relay whose transcript vanished reads 'UNVERIFIED', distinct from 'unverifiable'"
+else
+  bad "relay transcript gone" "rc=${RC} out=${OUT} err=${ERR}"
+fi
+unset OWNER_NOTES_TRANSCRIPTS_DIR
 
 printf "\nowner-notes self-test: %d passed, %d failed, %d skipped\n" "${PASS}" "${FAIL}" "${SKIP}"
 if [ "${FAIL}" -ne 0 ]; then
